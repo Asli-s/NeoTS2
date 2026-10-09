@@ -134,6 +134,49 @@ else()
 
     add_executable(fuzzseeds tools/fuzzseeds/main.cpp)
     target_link_libraries(fuzzseeds PRIVATE ts2formats project_warnings)
+
+    # The renderer and the game app need SDL3 (set SDL3_DIR to its cmake folder) and a shader
+    # compiler for HLSL (dxc, from the Windows SDK on Windows).
+    find_package(SDL3 CONFIG QUIET)
+    find_program(NEOTS2_DXC dxc)
+    if(NOT NEOTS2_DXC AND WIN32)
+        file(GLOB sdk_dxc "C:/Program Files (x86)/Windows Kits/10/bin/10.*/x64/dxc.exe")
+        list(SORT sdk_dxc ORDER DESCENDING)
+        list(GET sdk_dxc 0 NEOTS2_DXC)
+    endif()
+    if(SDL3_FOUND AND NEOTS2_DXC)
+        set(shader_dir ${CMAKE_CURRENT_BINARY_DIR}/shaders)
+        set(shader_outputs)
+        foreach(shader scene.vert scene.frag)
+            if(shader MATCHES "vert$")
+                set(profile vs_6_0)
+            else()
+                set(profile ps_6_0)
+            endif()
+            set(source ${CMAKE_CURRENT_SOURCE_DIR}/src/render/shaders/${shader}.hlsl)
+            set(output ${shader_dir}/${shader}.dxil)
+            add_custom_command(OUTPUT ${output}
+                COMMAND ${CMAKE_COMMAND} -E make_directory ${shader_dir}
+                COMMAND ${NEOTS2_DXC} -nologo -T ${profile} -E main -Fo ${output} ${source}
+                DEPENDS ${source}
+                COMMENT "Compiling ${shader}.hlsl")
+            list(APPEND shader_outputs ${output})
+        endforeach()
+        add_custom_target(neots2_shaders DEPENDS ${shader_outputs})
+
+        add_library(ts2render src/render/renderer.cpp)
+        target_link_libraries(ts2render PUBLIC ts2scene SDL3::SDL3 PRIVATE project_warnings)
+
+        add_executable(neots2 app/main.cpp)
+        target_link_libraries(neots2 PRIVATE ts2render project_warnings)
+        add_dependencies(neots2 neots2_shaders)
+        # The app loads its shaders and SDL from beside itself.
+        add_custom_command(TARGET neots2 POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_directory ${shader_dir} $<TARGET_FILE_DIR:neots2>/shaders
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:neots2>)
+    else()
+        message(STATUS "SDL3 or dxc not found: the renderer and the neots2 app are not built")
+    endif()
 endif()
 
 # Machine-specific additions, if any.
