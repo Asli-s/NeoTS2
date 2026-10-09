@@ -1,0 +1,19 @@
+# Build output
+build/
+build-*/
+out/
+CMakeSettings.json
+*.user
+
+# Fuzzing
+fuzz/corpus/
+fuzz/findings/
+crash-*
+leak-*
+timeout-*
+oom-*
+
+# Editors
+.vs/
+.vscode/
+.idea/
