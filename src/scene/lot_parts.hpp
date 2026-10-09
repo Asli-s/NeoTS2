@@ -1,0 +1,91 @@
+#pragma once
+
+// Pieces of a lot's scene shared by lot_scene.cpp, walls.cpp and roofs.cpp.
+
+#include "content/lot.hpp"
+#include "formats/roofs.hpp"
+#include "scene/builder.hpp"
+
+#include <array>
+#include <cstdint>
+#include <map>
+#include <string>
+#include <vector>
+
+namespace ts2::scene {
+
+constexpr float kPi = 3.14159265358979f;
+constexpr float kLevelHeight = 3.0f;      // storey height, used where a lot has no height grid
+constexpr float kWallThickness = 0.15f;   // walls with thickness
+constexpr float kFloorThickness = 0.15f;  // the slab under floors above the ground
+
+// The lot's corner heights per level (grid 1): the terrain on level 0, each floor above.
+class Heights {
+public:
+    explicit Heights(const content::Lot& lot);
+
+    // The height at the grid corner nearest (x, y).
+    float corner(int level, float x, float y) const;
+    // The average height of the four corners of the tile containing (x, y).
+    float tile(int level, float x, float y) const;
+
+    const array3d::Array3D* grid() const { return grid_; }
+
+private:
+    float at(int level, int x, int y, bool& found) const;
+
+    const array3d::Array3D* grid_ = nullptr;
+};
+
+// A wall segment: its two ends and, at each, the heights of its bottom and top.
+struct WallQuad {
+    float x0, y0, x1, y1, bottom0, top0, bottom1, top1;
+};
+
+// A wall segment drawn with thickness: the material of each side by name (empty: not drawn) and
+// where each side's edge ends at both ends of the segment.
+struct ThickWall {
+    WallQuad q;
+    std::array<std::int32_t, 2> points{};  // wall graph point ids at (x0, y0) and (x1, y1)
+    int level = 0;
+    bool thick = true;  // wall styles without thickness (deck skirts) are a single plane
+    std::string left, right;
+    std::string leftMask, rightMask;  // wall masks of doors and windows in this wall
+    bool leftMaskMirrored = false, rightMaskMirrored = false;
+    std::array<float, 2> leftA{}, leftB{}, rightA{}, rightB{};
+    bool openA = false, openB = false;  // nothing else meets the wall there
+};
+
+// The top of the space where three or more walls meet, which no wall's own top covers: the point
+// and the side corners around it, at the walls' top height there.
+struct WallHub {
+    float x = 0, y = 0, top = 0;
+    std::vector<std::array<float, 2>> corners;
+};
+
+// A door or window's wall mask: the wall tile it cuts, as a tile offset from the object's own
+// (east, south) and level, and the face it cuts by the direction it faces (n: the object's front).
+struct WallMask {
+    int east = 0, south = 0, level = 0;
+    std::string face, material;
+};
+
+// Wall masks by lowercase model name, from material names "<model>_<east>_<south>_<level>_<face>_wallmask".
+std::map<std::string, std::vector<WallMask>> wallMasks(const std::vector<std::string>& materialNames);
+
+// Joins the walls meeting at each wall graph point: going around the point, each wall's side line
+// ends where it meets the facing side line of the next wall (mitred corners, T and cross joins).
+std::vector<WallHub> joinWalls(std::vector<ThickWall>& walls);
+
+// A wall's faces: each side's covering, its top and its ends where nothing meets it.
+void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w, int edge);
+
+// The materials a roof is drawn with.
+struct RoofLook {
+    int top = -1, under = -1, trim = -1, gable = -1, cap = -1;
+};
+
+// A roof over its rectangle, eaves at height `eave`; `slope` is rise over run.
+void addRoof(Surfaces& surfaces, const roofs::Roof& roof, float eave, float slope, const RoofLook& look);
+
+} // namespace ts2::scene

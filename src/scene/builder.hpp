@@ -1,0 +1,80 @@
+#pragma once
+
+#include "formats/scenegraph.hpp"
+#include "scene/assets.hpp"
+#include "scene/scene.hpp"
+
+#include <array>
+#include <cstddef>
+#include <map>
+#include <string>
+#include <vector>
+
+namespace ts2::scene {
+
+// Triangles being collected for one mesh, by material index.
+using Surfaces = std::map<int, Primitive>;
+
+// Adds a vertex to a primitive, indexed in order.
+void addVertex(Primitive& p, const std::array<float, 3>& position, const std::array<float, 3>& normal,
+               const std::array<float, 2>& uv);
+// Adds a flat quad (corners in order around it) facing along `facing`, wound so that it does.
+void addQuad(Primitive& p, const std::array<std::array<float, 3>, 4>& corners, const std::array<float, 3>& facing,
+             const std::array<std::array<float, 2>, 4>& uv);
+
+// Builds a Scene from the game's assets: models, materials and textures are loaded once and shared
+// by everything that uses them. Materials can be looked up by name, whether they come from the game
+// (TXMT) or were made here (plain colors, texture cells, wall cutouts).
+class SceneBuilder {
+public:
+    explicit SceneBuilder(Assets& assets) : assets_(assets) {}
+
+    // The mesh of a model with these material overrides, built on first use; -1 when it has nothing
+    // to draw. Each shape is placed where its reference sits in the model's transform tree.
+    int model(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides);
+
+    // Where a named node of a model sits in it, once the model has been built.
+    const Transform* bone(const std::string& model, const std::string& node) const;
+
+    // A material by name; -1 when there is no such material.
+    int material(const std::string& name);
+
+    // A plain colored material.
+    int colorMaterial(const std::string& name, const std::array<float, 3>& color, bool doubleSided = false);
+    // A texture shown as it is, tinted by `shade`.
+    int textureMaterial(const std::string& texture, float shade = 1.0f, bool doubleSided = false);
+    // One cell of a texture laid out as a grid (counted from the top left), resampled to 128 pixels
+    // square so that the cell repeats on its own.
+    int textureCellMaterial(const std::string& texture, int columns, int rows, int column, int row,
+                            const std::array<float, 3>& color);
+    // The part of a texture between fractions (u0, v0) and (u1, v1) of its size, resampled.
+    int textureRegionMaterial(const std::string& texture, double u0, double v0, double u1, double v1, std::uint32_t width,
+                              std::uint32_t height, const std::array<float, 3>& color);
+    // A wall covering with a door or window's wall mask cut out of it: alpha below half in the mask
+    // is a hole. `mirrored` when the mask runs right to left across the face. -1 when either is missing.
+    int maskedMaterial(const std::string& covering, const std::string& mask, bool mirrored);
+
+    // Adds the collected surfaces as a mesh; -1 when there is nothing in them.
+    int addMesh(const std::string& name, Surfaces surfaces);
+
+    void place(int mesh, const std::string& name, const Transform& transform);
+
+    std::size_t missingModels = 0, missingMaterials = 0;
+
+    // The scene built so far.
+    Scene& scene() { return scene_; }
+    Assets& assets() { return assets_; }
+
+private:
+    int buildModel(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides);
+    int image(const std::string& texture);
+    int addImage(Image image);
+    int addMaterial(const std::string& key, Material m);
+
+    Assets& assets_;
+    Scene scene_;
+    std::map<std::string, int> models_, materials_, images_;
+    std::map<std::string, std::map<std::string, Transform>> bones_;
+};
+
+} // namespace ts2::scene
