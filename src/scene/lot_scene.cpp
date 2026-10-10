@@ -251,9 +251,10 @@ private:
             // objects stand on their storey's floor, raised by value 3 (the pieces of a stacked chimney).
             const float floorZ = heights_.tile(h.value1 - 1, x, y);
             float z = h.value4 >= 0 ? (h.value3 != 0 ? h.value3 : floorZ) : floorZ + h.value3;
-            // Another piece reaching down into the ground (a chimney's base) has its top at the floor above.
+            // Another piece reaching down into the ground (a chimney's base) ends its full width at the
+            // floor above, so that its tapered top tucks into the piece standing there.
             if (const auto range = heightRange(mesh); h.value4 < 0 && range[0] < -kLevelHeight) {
-                z = heights_.tile(h.value1, x, y) - range[1];
+                z = heights_.tile(h.value1, x, y) - range[2];
             }
             // Direction d faces 180 - 45d degrees (0 along -X, 6 along -Y); models face +Y.
             const float angle = kPi / 2 - static_cast<float>(object.state.data[1]) * kPi / 4;
@@ -299,13 +300,27 @@ private:
         }
     }
 
-    // The lowest and highest points of a mesh, below and above its origin.
-    std::array<float, 2> heightRange(int mesh) const {
-        std::array<float, 2> r{1e9f, -1e9f};
-        for (const auto& p : b_.scene().meshes[static_cast<std::size_t>(mesh)].primitives) {
-            for (std::size_t i = 2; i < p.positions.size(); i += 3) {
-                r[0] = std::min(r[0], p.positions[i]);
-                r[1] = std::max(r[1], p.positions[i]);
+    // The lowest and highest points of a mesh, below and above its origin, and the highest point still
+    // at the mesh's full width (on the edge of its footprint).
+    std::array<float, 3> heightRange(int mesh) const {
+        const auto& primitives = b_.scene().meshes[static_cast<std::size_t>(mesh)].primitives;
+        std::array<float, 4> box{1e9f, 1e9f, -1e9f, -1e9f};
+        std::array<float, 3> r{1e9f, -1e9f, -1e9f};
+        for (const auto& p : primitives) {
+            for (std::size_t i = 0; i + 2 < p.positions.size(); i += 3) {
+                box = {std::min(box[0], p.positions[i]), std::min(box[1], p.positions[i + 1]), std::max(box[2], p.positions[i]),
+                       std::max(box[3], p.positions[i + 1])};
+                r[0] = std::min(r[0], p.positions[i + 2]);
+                r[1] = std::max(r[1], p.positions[i + 2]);
+            }
+        }
+        constexpr float eps = 1e-3f;
+        for (const auto& p : primitives) {
+            for (std::size_t i = 0; i + 2 < p.positions.size(); i += 3) {
+                const float x = p.positions[i], y = p.positions[i + 1];
+                if (std::abs(x - box[0]) < eps || std::abs(x - box[2]) < eps || std::abs(y - box[1]) < eps || std::abs(y - box[3]) < eps) {
+                    r[2] = std::max(r[2], p.positions[i + 2]);
+                }
             }
         }
         return r;
