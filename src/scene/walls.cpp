@@ -22,7 +22,7 @@ std::array<float, 2> meet(float px, float py, float dx, float dy, float nx, floa
     return {px + h * nx + s * dx, py + h * ny + s * dy};
 }
 
-// The spans of a face (as fractions of a tile across its texture) where its material's texture is a
+// The spans of a face (as fractions of the segment across its texture) where its material's texture is a
 // hole all the way from texture row v0 down to v1: a doorway through a cut-down wall.
 std::vector<std::array<float, 2>> holes(SceneBuilder& builder, const std::string& material, float v0, float v1) {
     std::vector<std::array<float, 2>> spans;
@@ -141,8 +141,9 @@ std::vector<WallHub> joinWalls(std::vector<ThickWall>& walls) {
     return hubs;
 }
 
-// Coverings run left to right as seen from their side, once per tile along the wall and once over
-// a full storey down from the wall's top, so short walls such as a deck's skirt show the top of it.
+// Coverings run left to right as seen from their side, once along each segment (a tile, or a tile's
+// diagonal) and once over a full storey down from the wall's top, so short walls such as a deck's
+// skirt show the top of it.
 // A cut-down wall keeps the texture where the full wall has it, so door and window holes line up.
 void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w, int edge, float cutHeight) {
     WallQuad q = w.q;
@@ -163,14 +164,19 @@ void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w,
     auto along = [&](const std::array<float, 2>& c) { return (c[0] - q.x0) * ux + (c[1] - q.y0) * uy; };
     // The wall graph's left side faces (dy, -dx).
     const std::array<float, 3> leftNormal{uy, -ux, 0}, rightNormal{-uy, ux, 0};
+    // Past a segment's ends (where corners are mitred) a mask would wrap around to its other edge
+    // and could open a slit there; masked sides keep to the segment's own part of the texture.
+    auto u = [](float v, bool masked) { return masked ? std::clamp(v, 0.0f, 1.0f) : v; };
     if (const int m = w.left.empty() ? -1 : builder.material(w.left); m >= 0) {
-        const float u0 = along(w.leftA), u1 = along(w.leftB);
+        const bool masked = !w.leftMask.empty();
+        const float u0 = u(along(w.leftA) / len, masked), u1 = u(along(w.leftB) / len, masked);
         addQuad(surfaces[m], {{{w.leftA[0], w.leftA[1], q.bottom0}, {w.leftB[0], w.leftB[1], q.bottom1},
                                {w.leftB[0], w.leftB[1], q.top1}, {w.leftA[0], w.leftA[1], q.top0}}},
                 leftNormal, {{{u0, v0}, {u1, v1}, {u1, t1}, {u0, t0}}});
     }
     if (const int m = w.right.empty() ? -1 : builder.material(w.right); m >= 0) {
-        const float u0 = len - along(w.rightA), u1 = len - along(w.rightB);
+        const bool masked = !w.rightMask.empty();
+        const float u0 = u(1 - along(w.rightA) / len, masked), u1 = u(1 - along(w.rightB) / len, masked);
         addQuad(surfaces[m], {{{w.rightA[0], w.rightA[1], q.bottom0}, {w.rightB[0], w.rightB[1], q.bottom1},
                                {w.rightB[0], w.rightB[1], q.top1}, {w.rightA[0], w.rightA[1], q.top0}}},
                 rightNormal, {{{u0, v0}, {u1, v1}, {u1, t1}, {u0, t0}}});
@@ -184,10 +190,10 @@ void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w,
     if (cutHeight > 0) {
         const float top = (t0 + t1) / 2, bottom = (v0 + v1) / 2;
         for (const auto& g : holes(builder, w.left, top, bottom)) {
-            gaps.push_back(g);
+            gaps.push_back({g[0] * len, g[1] * len});
         }
         for (const auto& g : holes(builder, w.right, top, bottom)) {
-            gaps.push_back({len - g[1], len - g[0]});
+            gaps.push_back({(1 - g[1]) * len, (1 - g[0]) * len});
         }
         std::sort(gaps.begin(), gaps.end());
     }

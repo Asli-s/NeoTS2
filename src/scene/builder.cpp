@@ -278,8 +278,23 @@ int SceneBuilder::cutMaterial(const std::string& name, const std::string& coveri
         } catch (const std::exception&) {
         }
     }
-    if (!base || !cut || cut->width == 0 || cut->height == 0) {
+    if (!base || !cut || cut->width == 0 || cut->height == 0 || base->width == 0 || base->height == 0) {
         return -1;
+    }
+    // At least as fine as the mask, so that small textures (a painted wall's is 4 pixels square)
+    // keep the hole's shape.
+    if (base->width < cut->width || base->height < cut->height) {
+        const std::uint32_t w = std::max(base->width, cut->width), h = std::max(base->height, cut->height);
+        Image finer{w, h, std::vector<std::uint8_t>(static_cast<std::size_t>(w) * h * 4)};
+        for (std::uint32_t y = 0; y < h; ++y) {
+            for (std::uint32_t x = 0; x < w; ++x) {
+                const auto c = sampleRepeating(*base, (x + 0.5) / w, (y + 0.5) / h);
+                for (std::size_t k = 0; k < 4; ++k) {
+                    finer.rgba[(static_cast<std::size_t>(y) * w + x) * 4 + k] = static_cast<std::uint8_t>(std::clamp(c[k] + 0.5f, 0.0f, 255.0f));
+                }
+            }
+        }
+        base = std::move(finer);
     }
     for (std::uint32_t y = 0; y < base->height; ++y) {
         for (std::uint32_t x = 0; x < base->width; ++x) {
