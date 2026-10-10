@@ -5,6 +5,7 @@
 #include "formats/resource_types.hpp"
 #include "formats/sdsc.hpp"
 #include "formats/srel.hpp"
+#include "formats/str.hpp"
 #include "formats/swaf.hpp"
 
 #include <exception>
@@ -118,6 +119,42 @@ Neighborhood loadNeighborhood(const fs::path& neighborhoodPackage) {
         }
     }
     return hood;
+}
+
+std::vector<NeighborhoodEntry> listNeighborhoods(const fs::path& neighborhoods) {
+    std::vector<NeighborhoodEntry> out;
+    if (!fs::is_directory(neighborhoods)) {
+        return out;
+    }
+    for (const auto& item : fs::directory_iterator(neighborhoods)) {
+        const fs::path package = neighborhoodPackage(item.path());
+        if (!item.is_directory() || item.path().filename() == "Tutorial" || !fs::exists(package)) {
+            continue;
+        }
+        NeighborhoodEntry n;
+        n.folder = item.path();
+        n.thumbnail = item.path() / (item.path().filename().u8string() + u8"_Neighborhood.png");
+        try {
+            dbpf::Package p{package};
+            for (const auto& e : p.entries()) {
+                if (e.key.type == 0x43545353) {  // catalog string set: the name first
+                    const auto table = str::parse(p.read(e));
+                    const auto names = table.forLanguage(1);
+                    if (!names.empty()) {
+                        n.name = names.front()->value;
+                    }
+                    if (names.size() > 1) {
+                        n.description = names[1]->value;
+                    }
+                    break;
+                }
+            }
+        } catch (const std::exception&) {
+        }
+        out.push_back(std::move(n));
+    }
+    std::sort(out.begin(), out.end(), [](const NeighborhoodEntry& a, const NeighborhoodEntry& b) { return a.folder.filename() < b.folder.filename(); });
+    return out;
 }
 
 } // namespace ts2::content

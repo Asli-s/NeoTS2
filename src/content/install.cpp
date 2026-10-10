@@ -185,4 +185,23 @@ std::vector<fs::path> objectLoadOrder(const std::vector<Product>& products) {
     return order;
 }
 
+std::optional<fs::path> newestDataFile(const std::vector<Product>& products, const fs::path& relative) {
+    std::optional<fs::path> found;
+    int order = -1;
+    for (const auto& product : products) {
+        for (const auto& objects : product.objectPackages) {
+            fs::path data = objects.parent_path();
+            while (data.has_relative_path() && lower(utf8(data.filename())) != "tsdata") {
+                data = data.parent_path();
+            }
+            const fs::path file = data / relative;
+            if (product.releaseOrder > order && fs::is_regular_file(file)) {
+                found = file;
+                order = product.releaseOrder;
+            }
+        }
+    }
+    return found;
+}
+
 } // namespace ts2::content

@@ -66,18 +66,31 @@ add_library(ts2formats
     src/formats/walllayer.cpp
     src/formats/wallgraph.cpp
     src/formats/xobj.cpp
+    src/formats/tga.cpp
+    src/formats/reia.cpp
+    src/formats/nhood_terrain.cpp
+    src/formats/camera_config.cpp
+    src/formats/nhood_paint_rules.cpp
+    src/formats/ui_script.cpp
 )
 target_include_directories(ts2formats PUBLIC src)
+# stb_image (third-party, public domain / MIT) decodes the UI's PNG, JPEG and bitmap images.
+add_library(stb_image STATIC src/formats/image.cpp)
+target_include_directories(stb_image PRIVATE src third_party/stb)
+target_link_libraries(ts2formats PUBLIC stb_image)
 target_link_libraries(ts2formats PRIVATE project_warnings)
 
 add_library(ts2content
     src/content/install.cpp
+    src/content/cameras.cpp
+    src/content/lighting.cpp
     src/content/build_scripts.cpp
     src/content/lot.cpp
     src/content/neighborhood.cpp
     src/content/wants.cpp
     src/content/scripts.cpp
     src/content/resource_index.cpp
+    src/content/ui_data.cpp
 )
 target_link_libraries(ts2content PUBLIC ts2formats PRIVATE project_warnings)
 
@@ -101,6 +114,9 @@ add_library(ts2scene
     src/scene/roofs.cpp
     src/scene/roof_grid.cpp
     src/scene/round_roofs.cpp
+    src/scene/neighborhood_scene.cpp
+    src/scene/neighborhood_paint.cpp
+    src/scene/neighborhood_lighting.cpp
     src/scene/view.cpp
 )
 target_link_libraries(ts2scene PUBLIC ts2content PRIVATE project_warnings)
@@ -124,6 +140,9 @@ else()
 
     add_executable(bhavdump tools/bhavdump/main.cpp)
     target_link_libraries(bhavdump PRIVATE ts2content project_warnings)
+
+    add_executable(uidump tools/uidump/main.cpp)
+    target_link_libraries(uidump PRIVATE ts2content project_warnings)
 
     add_executable(ts2index tools/ts2index/main.cpp)
     target_link_libraries(ts2index PRIVATE ts2content project_warnings)
@@ -151,7 +170,7 @@ else()
     if(SDL3_FOUND AND NEOTS2_DXC)
         set(shader_dir ${CMAKE_CURRENT_BINARY_DIR}/shaders)
         set(shader_outputs)
-        foreach(shader scene.vert scene.frag)
+        foreach(shader scene.vert scene.frag ui.vert ui.frag terrain.vert terrain.frag sky.vert sky.frag water.vert water.frag)
             if(shader MATCHES "vert$")
                 set(profile vs_6_0)
             else()
@@ -171,8 +190,13 @@ else()
         add_library(ts2render src/render/renderer.cpp)
         target_link_libraries(ts2render PUBLIC ts2scene SDL3::SDL3 PRIVATE project_warnings)
 
-        add_executable(neots2 app/main.cpp)
-        target_link_libraries(neots2 PRIVATE ts2render project_warnings)
+        # The game's UI: its fonts are drawn with FreeType (set freetype_DIR to its cmake folder).
+        find_package(freetype CONFIG REQUIRED)
+        add_library(ts2ui src/ui/fonts.cpp src/ui/screen.cpp)
+        target_link_libraries(ts2ui PUBLIC ts2content PRIVATE freetype project_warnings)
+
+        add_executable(neots2 app/main.cpp app/menu.cpp)
+        target_link_libraries(neots2 PRIVATE ts2render ts2ui project_warnings)
         add_dependencies(neots2 neots2_shaders)
         # The app loads its shaders and SDL from beside itself.
         add_custom_command(TARGET neots2 POST_BUILD

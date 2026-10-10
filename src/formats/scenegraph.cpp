@@ -400,21 +400,29 @@ Image parseImage(std::span<const std::uint8_t> data) {
     if (textures == 0) {
         return img;
     }
-    // Only the first texture is kept; textures normally have one.
-    const std::size_t mips = count(r, 1);
-    for (std::size_t i = 0; i < mips; ++i) {
-        MipLevel level;
-        const std::uint8_t kind = r.u8();
-        if (kind == 0) {
-            const auto bytes = r.bytes(count(r, 1));
-            level.data.assign(bytes.begin(), bytes.end());
-        } else if (kind == 1) {
-            level.largeMipName = string(r);
-        } else {
-            fail("unknown mip level kind " + std::to_string(kind));
+    // Each texture: its mip levels, then a colour and a float (8 bytes) before the next one.
+    for (std::size_t t = 0; t < textures; ++t) {
+        std::vector<MipLevel> levels;
+        const std::size_t mips = count(r, 1);
+        for (std::size_t i = 0; i < mips; ++i) {
+            MipLevel level;
+            const std::uint8_t kind = r.u8();
+            if (kind == 0) {
+                const auto bytes = r.bytes(count(r, 1));
+                level.data.assign(bytes.begin(), bytes.end());
+            } else if (kind == 1) {
+                level.largeMipName = string(r);
+            } else {
+                fail("unknown mip level kind " + std::to_string(kind));
+            }
+            levels.push_back(std::move(level));
         }
-        img.mips.push_back(std::move(level));
+        img.faces.push_back(std::move(levels));
+        if (t + 1 < textures) {
+            r.skip(8);
+        }
     }
+    img.mips = img.faces.front();
     return img;
 }
 

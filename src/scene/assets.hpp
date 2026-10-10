@@ -28,6 +28,8 @@ public:
 
     // The largest mip level of a texture, decoded; empty when it is missing or unreadable.
     std::optional<Image> texture(const std::string& name);
+    // Every face of a texture (six for a cube map, in the file's order), the largest mip level each.
+    std::vector<Image> textureFaces(const std::string& name);
 
     // Names of every material in the Sims3D packages (for finding doors' and windows' wall masks).
     const std::vector<std::string>& materialNames() const { return materialNames_; }

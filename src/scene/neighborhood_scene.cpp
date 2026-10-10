@@ -1,0 +1,181 @@
+#include "scene/neighborhood_scene.hpp"
+
+#include "content/neighborhood.hpp"
+#include "formats/dbpf.hpp"
+#include "formats/nhood_terrain.hpp"
+#include "scene/neighborhood_paint.hpp"
+
+#include <algorithm>
+#include <cstdio>
+#include <map>
+#include <optional>
+#include <random>
+#include <stdexcept>
+
+namespace ts2::scene {
+
+namespace {
+
+// A tile is 10 world units (the game's terrain keeps it at 10).
+constexpr float kTile = 10.0f;
+
+// The smallest power of two above n, as the game sizes its alpha maps (256 for 128 tiles).
+std::uint32_t powerAbove(std::uint32_t n) {
+    std::uint32_t v = n;
+    v |= v >> 16;
+    v |= v >> 8;
+    v |= v >> 4;
+    v |= v >> 2;
+    return (v >> 1 | v) + 1;
+}
+
+// The game's random numbers: state * 0x41C64E6D + 12345, each draw bits 16 to 47 of that sum.
+struct GameRandom {
+    std::uint32_t state;
+    std::uint32_t next() {
+        const std::uint64_t sum = static_cast<std::uint64_t>(state) * 0x41C64E6Du + 12345u;
+        state = static_cast<std::uint32_t>(sum);
+        return static_cast<std::uint32_t>(sum >> 16);
+    }
+    std::uint32_t below(std::uint32_t n) { return static_cast<std::uint32_t>((static_cast<std::uint64_t>(next()) * n) >> 32); }
+};
+
+// A copy of an image at another size, nearest texel.
+Image resized(const Image& image, std::uint32_t width, std::uint32_t height) {
+    Image out{width, height, std::vector<std::uint8_t>(static_cast<std::size_t>(width) * height * 4)};
+    for (std::uint32_t y = 0; y < height; ++y) {
+        for (std::uint32_t x = 0; x < width; ++x) {
+            const std::size_t from = (static_cast<std::size_t>(y * image.height / height) * image.width + x * image.width / width) * 4;
+            std::copy_n(&image.rgba[from], 4, &out.rgba[(static_cast<std::size_t>(y) * width + x) * 4]);
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+NeighborhoodSceneStats addNeighborhood(SceneBuilder& builder, const std::filesystem::path& neighborhood,
+                                       const nhood::PaintRules& rules, const NeighborhoodLight& light) {
+    dbpf::Package package{content::neighborhoodPackage(neighborhood)};
+    std::optional<nhood::Terrain> terrain;
+    std::optional<nhood::SavedCamera> camera;
+    for (const auto& e : package.entries()) {
+        if (e.key.type == nhood::kTerrainType && !terrain) {
+            terrain = nhood::parseTerrain(package.read(e));
+        } else if (e.key.type == nhood::kSavedCameraType && !camera) {
+            camera = nhood::parseSavedCamera(package.read(e));
+        }
+    }
+    if (!terrain || terrain->columns < 2 || terrain->rows < 2) {
+        throw std::runtime_error("the neighborhood has no terrain");
+    }
+    const auto& t = *terrain;
+    NeighborhoodSceneStats stats{t.width, t.height, t.seaLevel, t.type, camera};
+
+    // The paints (no roads yet), then one alpha map per paint the terrain uses.
+    const auto painted = paintTerrain(t, rules, kTile, {});
+    PaintedTerrain out;
+    out.columns = t.columns;
+    out.rows = t.rows;
+    out.tileSize = kTile;
+    out.heights = t.heights;
+    out.normals = painted.normals;
+    out.alphaSize = powerAbove(t.columns - 1);
+    std::map<std::uint8_t, std::size_t> layerOf;
+    for (const auto& v : painted.vertices) {
+        for (int i = 0; i < 3 && v.id[i] != 0; ++i) {
+            layerOf.emplace(v.id[i], 0);
+        }
+    }
+    std::size_t layer = 0;
+    for (auto& [id, index] : layerOf) {
+        index = layer++;
+    }
+    const std::size_t mapBytes = static_cast<std::size_t>(out.alphaSize) * out.alphaSize;
+    out.alphas.assign(layerOf.size() * mapBytes, 0);
+    for (std::uint32_t y = 0; y < t.rows; ++y) {
+        for (std::uint32_t x = 0; x < t.columns; ++x) {
+            const auto& v = painted.vertices[static_cast<std::size_t>(y) * t.columns + x];
+            for (int i = 0; i < 3 && v.id[i] != 0; ++i) {
+                out.alphas[layerOf[v.id[i]] * mapBytes + static_cast<std::size_t>(y) * out.alphaSize + x] =
+                    static_cast<std::uint8_t>(v.weight[i]);
+            }
+        }
+    }
+
+    // The paint textures: a paint with two or more variants names them "<texture>-NN".
+    std::vector<std::vector<std::uint8_t>> variantTextures(layerOf.size());
+    for (const auto& [id, index] : layerOf) {
+        const auto info = rules.paints.find(id);
+        if (info == rules.paints.end()) {
+            continue;
+        }
+        const int variants = std::max(1, info->second.variants);
+        for (int v = 0; v < variants; ++v) {
+            std::string name = info->second.texture;
+            if (variants >= 2) {
+                char suffix[8];
+                std::snprintf(suffix, sizeof suffix, "-%02d", v);
+                name += suffix;
+            }
+            auto image = builder.assets().texture(name);
+            if (!image) {
+                builder.assets().warnings.push_back("neighborhood paint texture missing: " + name);
+                continue;
+            }
+            if (!out.textures.empty() && (image->width != out.textures[0].width || image->height != out.textures[0].height)) {
+                *image = resized(*image, out.textures[0].width, out.textures[0].height);
+            }
+            variantTextures[index].push_back(static_cast<std::uint8_t>(out.textures.size()));
+            out.textures.push_back(std::move(*image));
+        }
+    }
+
+    // The variant grid: a random byte per cell, new on every load as in the game; each paint shows
+    // the variant that byte picks.
+    out.cellTiles = static_cast<std::uint32_t>(std::max(1, rules.textureVariantGridSize));
+    out.cellsX = (t.columns - 1 + out.cellTiles - 1) / out.cellTiles;
+    out.cellsY = (t.rows - 1 + out.cellTiles - 1) / out.cellTiles;
+    GameRandom random{std::random_device{}()};
+    std::vector<std::uint8_t> cellBytes(static_cast<std::size_t>(out.cellsX) * out.cellsY);
+    for (auto& b : cellBytes) {
+        b = static_cast<std::uint8_t>(random.below(256));
+    }
+    out.cellTextures.assign(layerOf.size() * cellBytes.size(), 0);
+    for (std::size_t l = 0; l < layerOf.size(); ++l) {
+        const auto& choices = variantTextures[l];
+        for (std::size_t c = 0; c < cellBytes.size(); ++c) {
+            out.cellTextures[l * cellBytes.size() + c] = choices.empty() ? 0 : choices[cellBytes[c] % choices.size()];
+        }
+    }
+    // The light map (no trees or lots yet to shade it).
+    out.lightMap = neighborhoodLightMap(t.columns, t.rows, t.heights, painted.normals, kTile, light);
+
+    // The water: a tile gets the water sheet when a corner of it is under the water level.
+    out.waterLevel = t.seaLevel;
+    out.waterTiles.assign(static_cast<std::size_t>(t.columns - 1) * (t.rows - 1), 0);
+    for (std::uint32_t y = 0; y + 1 < t.rows; ++y) {
+        for (std::uint32_t x = 0; x + 1 < t.columns; ++x) {
+            bool wet = false;
+            for (std::uint32_t dy = 0; dy < 2; ++dy) {
+                for (std::uint32_t dx = 0; dx < 2; ++dx) {
+                    wet = wet || t.heights[static_cast<std::size_t>(y + dy) * t.columns + x + dx] < t.seaLevel;
+                }
+            }
+            out.waterTiles[static_cast<std::size_t>(y) * (t.columns - 1) + x] = wet ? 1 : 0;
+        }
+    }
+    auto& assets = builder.assets();
+    if (auto ripples = assets.texture("neighborhood-water-1")) {
+        out.ripples = std::move(*ripples);
+    }
+    if (auto gradient = assets.texture("neighborhood-underwater-gradient")) {
+        out.underwaterGradient = std::move(*gradient);
+    }
+    out.sky = assets.textureFaces("neighborhood-sky2-envcube");
+    builder.scene().terrain = std::move(out);
+
+    return stats;
+}
+
+} // namespace ts2::scene

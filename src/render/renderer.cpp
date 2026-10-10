@@ -13,6 +13,7 @@ namespace ts2::render {
 namespace {
 
 constexpr std::uint32_t kVertexFloats = 9;  // position, normal, texture coordinates, alpha
+constexpr std::uint32_t kSpriteFloats = 8;  // position, texture coordinates, color
 
 struct VertexUniforms {
     float viewProjection[16];
@@ -50,7 +51,7 @@ Renderer::Renderer(SDL_Window* window, const std::filesystem::path& shaderFolder
         throw sdlError("can't draw to the window");
     }
 
-    auto shader = [&](const char* file, SDL_GPUShaderStage stage, Uint32 samplers) {
+    auto shader = [&](const char* file, SDL_GPUShaderStage stage, Uint32 samplers, Uint32 uniforms = 1) {
         const auto code = readFile(shaderFolder / file);
         SDL_GPUShaderCreateInfo info{};
         info.code_size = code.size();
@@ -59,7 +60,7 @@ Renderer::Renderer(SDL_Window* window, const std::filesystem::path& shaderFolder
         info.format = SDL_GPU_SHADERFORMAT_DXIL;
         info.stage = stage;
         info.num_samplers = samplers;
-        info.num_uniform_buffers = 1;
+        info.num_uniform_buffers = uniforms;
         SDL_GPUShader* s = SDL_CreateGPUShader(device_, &info);
         if (s == nullptr) {
             throw sdlError(file);
@@ -120,6 +121,57 @@ Renderer::Renderer(SDL_Window* window, const std::filesystem::path& shaderFolder
     SDL_ReleaseGPUShader(device_, vertex);
     SDL_ReleaseGPUShader(device_, fragment);
 
+    // Sprites: blended over everything, without depth.
+    {
+        SDL_GPUShader* spriteVertex = shader("ui.vert.dxil", SDL_GPU_SHADERSTAGE_VERTEX, 0);
+        SDL_GPUShader* spriteFragment = shader("ui.frag.dxil", SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 0);
+        SDL_GPUVertexBufferDescription buffer{};
+        buffer.slot = 0;
+        buffer.pitch = kSpriteFloats * sizeof(float);
+        buffer.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+        SDL_GPUVertexAttribute attributes[3]{};
+        attributes[0] = {0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, 0};
+        attributes[1] = {1, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, 2 * sizeof(float)};
+        attributes[2] = {2, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, 4 * sizeof(float)};
+        SDL_GPUColorTargetDescription color{};
+        color.format = SDL_GetGPUSwapchainTextureFormat(device_, window_);
+        color.blend_state.enable_blend = true;
+        color.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+        color.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+        color.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+        color.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        color.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+        color.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+        SDL_GPUGraphicsPipelineCreateInfo info{};
+        info.vertex_shader = spriteVertex;
+        info.fragment_shader = spriteFragment;
+        info.vertex_input_state.vertex_buffer_descriptions = &buffer;
+        info.vertex_input_state.num_vertex_buffers = 1;
+        info.vertex_input_state.vertex_attributes = attributes;
+        info.vertex_input_state.num_vertex_attributes = 3;
+        info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+        info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+        info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+        info.target_info.color_target_descriptions = &color;
+        info.target_info.num_color_targets = 1;
+        info.target_info.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+        info.target_info.has_depth_stencil_target = true;
+        spritePipeline_ = SDL_CreateGPUGraphicsPipeline(device_, &info);
+        SDL_ReleaseGPUShader(device_, spriteVertex);
+        SDL_ReleaseGPUShader(device_, spriteFragment);
+        if (spritePipeline_ == nullptr) {
+            throw sdlError("sprite pipeline");
+        }
+        SDL_GPUSamplerCreateInfo clamped{};
+        clamped.min_filter = SDL_GPU_FILTER_LINEAR;
+        clamped.mag_filter = SDL_GPU_FILTER_LINEAR;
+        clamped.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+        clamped.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        clamped.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        clamped.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        spriteSampler_ = SDL_CreateGPUSampler(device_, &clamped);
+    }
+
     SDL_GPUSamplerCreateInfo sampler{};
     sampler.min_filter = SDL_GPU_FILTER_LINEAR;
     sampler.mag_filter = SDL_GPU_FILTER_LINEAR;
@@ -131,6 +183,114 @@ Renderer::Renderer(SDL_Window* window, const std::filesystem::path& shaderFolder
     sampler.enable_anisotropy = true;
     sampler.max_anisotropy = 8;
     sampler_ = SDL_CreateGPUSampler(device_, &sampler);
+
+    // Neighborhood terrain: opaque, both sides (as the game draws it).
+    {
+        SDL_GPUShader* terrainVertex = shader("terrain.vert.dxil", SDL_GPU_SHADERSTAGE_VERTEX, 0);
+        SDL_GPUShader* terrainFragment = shader("terrain.frag.dxil", SDL_GPU_SHADERSTAGE_FRAGMENT, 5);
+        SDL_GPUVertexBufferDescription buffer{};
+        buffer.slot = 0;
+        buffer.pitch = 8 * sizeof(float);
+        buffer.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+        SDL_GPUVertexAttribute attributes[3]{};
+        attributes[0] = {0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 0};
+        attributes[1] = {1, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 3 * sizeof(float)};
+        attributes[2] = {2, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, 6 * sizeof(float)};
+        SDL_GPUColorTargetDescription color{};
+        color.format = SDL_GetGPUSwapchainTextureFormat(device_, window_);
+        SDL_GPUGraphicsPipelineCreateInfo info{};
+        info.vertex_shader = terrainVertex;
+        info.fragment_shader = terrainFragment;
+        info.vertex_input_state.vertex_buffer_descriptions = &buffer;
+        info.vertex_input_state.num_vertex_buffers = 1;
+        info.vertex_input_state.vertex_attributes = attributes;
+        info.vertex_input_state.num_vertex_attributes = 3;
+        info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+        info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+        info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+        info.depth_stencil_state.enable_depth_test = true;
+        info.depth_stencil_state.enable_depth_write = true;
+        info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
+        info.target_info.color_target_descriptions = &color;
+        info.target_info.num_color_targets = 1;
+        info.target_info.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+        info.target_info.has_depth_stencil_target = true;
+        terrainPipeline_ = SDL_CreateGPUGraphicsPipeline(device_, &info);
+        SDL_ReleaseGPUShader(device_, terrainVertex);
+        SDL_ReleaseGPUShader(device_, terrainFragment);
+        if (terrainPipeline_ == nullptr) {
+            throw sdlError("terrain pipeline");
+        }
+    }
+
+    // The sky seen in the neighborhood water: behind everything, no depth.
+    {
+        SDL_GPUShader* skyVertex = shader("sky.vert.dxil", SDL_GPU_SHADERSTAGE_VERTEX, 0, 0);
+        SDL_GPUShader* skyFragment = shader("sky.frag.dxil", SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
+        SDL_GPUColorTargetDescription color{};
+        color.format = SDL_GetGPUSwapchainTextureFormat(device_, window_);
+        SDL_GPUGraphicsPipelineCreateInfo info{};
+        info.vertex_shader = skyVertex;
+        info.fragment_shader = skyFragment;
+        info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+        info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+        info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+        info.target_info.color_target_descriptions = &color;
+        info.target_info.num_color_targets = 1;
+        info.target_info.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+        info.target_info.has_depth_stencil_target = true;
+        skyPipeline_ = SDL_CreateGPUGraphicsPipeline(device_, &info);
+        SDL_ReleaseGPUShader(device_, skyVertex);
+        SDL_ReleaseGPUShader(device_, skyFragment);
+        if (skyPipeline_ == nullptr) {
+            throw sdlError("sky pipeline");
+        }
+    }
+
+    // The neighborhood water sheet: blended over what is below, testing depth without writing it.
+    {
+        SDL_GPUShader* waterVertex = shader("water.vert.dxil", SDL_GPU_SHADERSTAGE_VERTEX, 0);
+        SDL_GPUShader* waterFragment = shader("water.frag.dxil", SDL_GPU_SHADERSTAGE_FRAGMENT, 2);
+        SDL_GPUVertexBufferDescription buffer{};
+        buffer.slot = 0;
+        buffer.pitch = 5 * sizeof(float);
+        buffer.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+        SDL_GPUVertexAttribute attributes[2]{};
+        attributes[0] = {0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 0};
+        attributes[1] = {1, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, 3 * sizeof(float)};
+        SDL_GPUColorTargetDescription color{};
+        color.format = SDL_GetGPUSwapchainTextureFormat(device_, window_);
+        color.blend_state.enable_blend = true;
+        color.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+        color.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+        color.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+        color.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        color.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+        color.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+        SDL_GPUGraphicsPipelineCreateInfo info{};
+        info.vertex_shader = waterVertex;
+        info.fragment_shader = waterFragment;
+        info.vertex_input_state.vertex_buffer_descriptions = &buffer;
+        info.vertex_input_state.num_vertex_buffers = 1;
+        info.vertex_input_state.vertex_attributes = attributes;
+        info.vertex_input_state.num_vertex_attributes = 2;
+        info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+        info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+        info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+        info.depth_stencil_state.enable_depth_test = true;
+        info.depth_stencil_state.enable_depth_write = false;
+        info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
+        info.target_info.color_target_descriptions = &color;
+        info.target_info.num_color_targets = 1;
+        info.target_info.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+        info.target_info.has_depth_stencil_target = true;
+        waterPipeline_ = SDL_CreateGPUGraphicsPipeline(device_, &info);
+        SDL_ReleaseGPUShader(device_, waterVertex);
+        SDL_ReleaseGPUShader(device_, waterFragment);
+        if (waterPipeline_ == nullptr) {
+            throw sdlError("water pipeline");
+        }
+    }
 }
 
 Renderer::~Renderer() {
@@ -138,6 +298,26 @@ Renderer::~Renderer() {
         return;
     }
     release();
+    releaseSprites();
+    if (spriteVertices_) {
+        SDL_ReleaseGPUBuffer(device_, spriteVertices_);
+    }
+    if (spritePipeline_) {
+        SDL_ReleaseGPUGraphicsPipeline(device_, spritePipeline_);
+    }
+    for (auto* p : {terrainPipeline_, skyPipeline_, waterPipeline_}) {
+        if (p) {
+            SDL_ReleaseGPUGraphicsPipeline(device_, p);
+        }
+    }
+    for (auto* t : {reflection_, reflectionDepth_}) {
+        if (t) {
+            SDL_ReleaseGPUTexture(device_, t);
+        }
+    }
+    if (spriteSampler_) {
+        SDL_ReleaseGPUSampler(device_, spriteSampler_);
+    }
     for (auto& row : pipelines_) {
         for (auto* p : row) {
             if (p) {
@@ -178,6 +358,179 @@ void Renderer::release() {
         SDL_ReleaseGPUTexture(device_, white_);
         white_ = nullptr;
     }
+    for (auto** b : {&terrainVertices_, &terrainIndices_, &waterVertices_, &waterIndices_}) {
+        if (*b) {
+            SDL_ReleaseGPUBuffer(device_, *b);
+            *b = nullptr;
+        }
+    }
+    for (auto** t : {&terrainPaints_, &terrainAlphas_, &terrainCells_, &terrainLight_, &terrainGradient_, &skyCube_, &ripples_}) {
+        if (*t) {
+            SDL_ReleaseGPUTexture(device_, *t);
+            *t = nullptr;
+        }
+    }
+    terrainIndexCount_ = 0;
+    waterIndexCount_ = 0;
+}
+
+void Renderer::releaseSprites() {
+    for (auto* t : spriteTextures_) {
+        if (t) {
+            SDL_ReleaseGPUTexture(device_, t);
+        }
+    }
+    spriteTextures_.clear();
+    spriteSizes_.clear();
+}
+
+void Renderer::uploadSprites(const std::vector<scene::Image>& images) {
+    releaseSprites();
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+    SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
+    std::vector<SDL_GPUTransferBuffer*> transfers;
+    for (const auto& image : images) {
+        if (image.width == 0 || image.height == 0 || image.rgba.size() != static_cast<std::size_t>(image.width) * image.height * 4) {
+            spriteTextures_.push_back(nullptr);
+            spriteSizes_.push_back({0, 0});
+            continue;
+        }
+        SDL_GPUTextureCreateInfo info{};
+        info.type = SDL_GPU_TEXTURETYPE_2D;
+        info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+        info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+        info.width = image.width;
+        info.height = image.height;
+        info.layer_count_or_depth = 1;
+        info.num_levels = 1;
+        SDL_GPUTexture* t = SDL_CreateGPUTexture(device_, &info);
+        SDL_GPUTransferBufferCreateInfo tinfo{};
+        tinfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+        tinfo.size = static_cast<Uint32>(image.rgba.size());
+        SDL_GPUTransferBuffer* tb = SDL_CreateGPUTransferBuffer(device_, &tinfo);
+        std::memcpy(SDL_MapGPUTransferBuffer(device_, tb, false), image.rgba.data(), image.rgba.size());
+        SDL_UnmapGPUTransferBuffer(device_, tb);
+        transfers.push_back(tb);
+        SDL_GPUTextureTransferInfo from{};
+        from.transfer_buffer = tb;
+        from.pixels_per_row = image.width;
+        from.rows_per_layer = image.height;
+        SDL_GPUTextureRegion to{};
+        to.texture = t;
+        to.w = image.width;
+        to.h = image.height;
+        to.d = 1;
+        SDL_UploadToGPUTexture(copy, &from, &to, false);
+        spriteTextures_.push_back(t);
+        spriteSizes_.push_back({image.width, image.height});
+    }
+    SDL_EndGPUCopyPass(copy);
+    SDL_SubmitGPUCommandBuffer(cmd);
+    for (auto* t : transfers) {
+        SDL_ReleaseGPUTransferBuffer(device_, t);
+    }
+}
+
+void Renderer::setSprites(const std::vector<std::pair<int, const scene::Image*>>& images) {
+    if (images.empty()) {
+        return;
+    }
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+    SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
+    std::vector<SDL_GPUTransferBuffer*> transfers;
+    for (const auto& [index, image] : images) {
+        if (index < 0 || image->width == 0 || image->height == 0 ||
+            image->rgba.size() != static_cast<std::size_t>(image->width) * image->height * 4) {
+            continue;
+        }
+        const auto i = static_cast<std::size_t>(index);
+        if (i >= spriteTextures_.size()) {
+            spriteTextures_.resize(i + 1, nullptr);
+            spriteSizes_.resize(i + 1, {0, 0});
+        }
+        // A new texture when the slot has none yet or the picture changed size.
+        if (!spriteTextures_[i] || spriteSizes_[i][0] != image->width || spriteSizes_[i][1] != image->height) {
+            if (spriteTextures_[i]) {
+                SDL_ReleaseGPUTexture(device_, spriteTextures_[i]);
+            }
+            SDL_GPUTextureCreateInfo info{};
+            info.type = SDL_GPU_TEXTURETYPE_2D;
+            info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+            info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+            info.width = image->width;
+            info.height = image->height;
+            info.layer_count_or_depth = 1;
+            info.num_levels = 1;
+            spriteTextures_[i] = SDL_CreateGPUTexture(device_, &info);
+            spriteSizes_[i] = {image->width, image->height};
+        }
+        SDL_GPUTransferBufferCreateInfo tinfo{};
+        tinfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+        tinfo.size = static_cast<Uint32>(image->rgba.size());
+        SDL_GPUTransferBuffer* tb = SDL_CreateGPUTransferBuffer(device_, &tinfo);
+        std::memcpy(SDL_MapGPUTransferBuffer(device_, tb, false), image->rgba.data(), image->rgba.size());
+        SDL_UnmapGPUTransferBuffer(device_, tb);
+        transfers.push_back(tb);
+        SDL_GPUTextureTransferInfo from{};
+        from.transfer_buffer = tb;
+        from.pixels_per_row = image->width;
+        from.rows_per_layer = image->height;
+        SDL_GPUTextureRegion to{};
+        to.texture = spriteTextures_[i];
+        to.w = image->width;
+        to.h = image->height;
+        to.d = 1;
+        SDL_UploadToGPUTexture(copy, &from, &to, true);
+    }
+    SDL_EndGPUCopyPass(copy);
+    SDL_SubmitGPUCommandBuffer(cmd);
+    for (auto* t : transfers) {
+        SDL_ReleaseGPUTransferBuffer(device_, t);
+    }
+}
+
+void Renderer::showSprites(std::vector<Sprite> sprites, bool scene) {
+    sprites_ = std::move(sprites);
+    drawScene_ = scene;
+}
+
+void Renderer::uploadSpriteVertices(SDL_GPUCommandBuffer* cmd, unsigned, unsigned) {
+    if (sprites_.empty()) {
+        return;
+    }
+    std::vector<float> v;
+    v.reserve(sprites_.size() * 6 * kSpriteFloats);
+    for (const auto& s : sprites_) {
+        const float corners[6][4] = {{s.x0, s.y0, s.u0, s.v0}, {s.x1, s.y0, s.u1, s.v0}, {s.x1, s.y1, s.u1, s.v1},
+                                     {s.x0, s.y0, s.u0, s.v0}, {s.x1, s.y1, s.u1, s.v1}, {s.x0, s.y1, s.u0, s.v1}};
+        for (const auto& c : corners) {
+            v.insert(v.end(), {c[0], c[1], c[2], c[3], s.color[0], s.color[1], s.color[2], s.color[3]});
+        }
+    }
+    const auto count = static_cast<unsigned>(v.size() / kSpriteFloats);
+    if (count > spriteCapacity_) {
+        if (spriteVertices_) {
+            SDL_ReleaseGPUBuffer(device_, spriteVertices_);
+        }
+        spriteCapacity_ = std::max(count, spriteCapacity_ * 2);
+        SDL_GPUBufferCreateInfo info{};
+        info.usage = SDL_GPU_BUFFERUSAGE_VERTEX;
+        info.size = spriteCapacity_ * kSpriteFloats * static_cast<Uint32>(sizeof(float));
+        spriteVertices_ = SDL_CreateGPUBuffer(device_, &info);
+    }
+    const auto bytes = static_cast<Uint32>(v.size() * sizeof(float));
+    SDL_GPUTransferBufferCreateInfo tinfo{};
+    tinfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+    tinfo.size = bytes;
+    SDL_GPUTransferBuffer* tb = SDL_CreateGPUTransferBuffer(device_, &tinfo);
+    std::memcpy(SDL_MapGPUTransferBuffer(device_, tb, false), v.data(), bytes);
+    SDL_UnmapGPUTransferBuffer(device_, tb);
+    SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
+    SDL_GPUTransferBufferLocation from{tb, 0};
+    SDL_GPUBufferRegion to{spriteVertices_, 0, bytes};
+    SDL_UploadToGPUBuffer(copy, &from, &to, false);
+    SDL_EndGPUCopyPass(copy);
+    SDL_ReleaseGPUTransferBuffer(device_, tb);
 }
 
 void Renderer::upload(const scene::Scene& scene) {
@@ -276,6 +629,165 @@ void Renderer::upload(const scene::Scene& scene) {
         }
         meshes_.push_back(std::move(gm));
     }
+    if (scene.terrain && scene.terrain->paints() > 0 && !scene.terrain->textures.empty()) {
+        const auto& t = *scene.terrain;
+        // Vertices: position, normal, grid position.
+        std::vector<float> v(static_cast<std::size_t>(t.columns) * t.rows * 8);
+        for (std::uint32_t y = 0; y < t.rows; ++y) {
+            for (std::uint32_t x = 0; x < t.columns; ++x) {
+                const std::size_t i = static_cast<std::size_t>(y) * t.columns + x;
+                float* p = &v[i * 8];
+                p[0] = static_cast<float>(x) * t.tileSize;
+                p[1] = static_cast<float>(y) * t.tileSize;
+                p[2] = t.heights[i];
+                std::copy_n(&t.normals[i * 3], 3, p + 3);
+                p[6] = static_cast<float>(x);
+                p[7] = static_cast<float>(y);
+            }
+        }
+        // Two triangles per tile, split from its (x, y) corner to its (x + 1, y + 1) corner.
+        std::vector<std::uint32_t> idx;
+        idx.reserve(static_cast<std::size_t>(t.columns - 1) * (t.rows - 1) * 6);
+        for (std::uint32_t y = 0; y + 1 < t.rows; ++y) {
+            for (std::uint32_t x = 0; x + 1 < t.columns; ++x) {
+                const std::uint32_t a = y * t.columns + x, b = a + 1, d = a + t.columns, e = d + 1;
+                idx.insert(idx.end(), {a, b, e, a, e, d});
+            }
+        }
+        terrainVertices_ = buffer(SDL_GPU_BUFFERUSAGE_VERTEX, v.data(), static_cast<Uint32>(v.size() * sizeof(float)));
+        terrainIndices_ = buffer(SDL_GPU_BUFFERUSAGE_INDEX, idx.data(), static_cast<Uint32>(idx.size() * sizeof(std::uint32_t)));
+        terrainIndexCount_ = static_cast<unsigned>(idx.size());
+
+        auto array = [&](SDL_GPUTextureFormat format, Uint32 w, Uint32 h, Uint32 layers, Uint32 levels, Uint32 bytesPerTexel,
+                         auto layerData) {
+            SDL_GPUTextureCreateInfo info{};
+            info.type = SDL_GPU_TEXTURETYPE_2D_ARRAY;
+            info.format = format;
+            info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | (levels > 1 ? SDL_GPU_TEXTUREUSAGE_COLOR_TARGET : 0);
+            info.width = w;
+            info.height = h;
+            info.layer_count_or_depth = layers;
+            info.num_levels = levels;
+            SDL_GPUTexture* tex = SDL_CreateGPUTexture(device_, &info);
+            for (Uint32 l = 0; l < layers; ++l) {
+                SDL_GPUTextureTransferInfo from{};
+                from.transfer_buffer = stage(layerData(l), w * h * bytesPerTexel);
+                from.pixels_per_row = w;
+                from.rows_per_layer = h;
+                SDL_GPUTextureRegion to{};
+                to.texture = tex;
+                to.layer = l;
+                to.w = w;
+                to.h = h;
+                to.d = 1;
+                SDL_UploadToGPUTexture(copy, &from, &to, false);
+            }
+            return tex;
+        };
+        const auto& first = t.textures.front();
+        const Uint32 levels = static_cast<Uint32>(std::floor(std::log2(std::max(first.width, first.height)))) + 1;
+        terrainPaints_ = array(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, first.width, first.height, static_cast<Uint32>(t.textures.size()),
+                               levels, 4, [&](Uint32 l) { return t.textures[l].rgba.data(); });
+        if (levels > 1) {
+            withMips.push_back(terrainPaints_);
+        }
+        const Uint32 paints = static_cast<Uint32>(t.paints());
+        const std::size_t map = static_cast<std::size_t>(t.alphaSize) * t.alphaSize;
+        terrainAlphas_ = array(SDL_GPU_TEXTUREFORMAT_R8_UNORM, t.alphaSize, t.alphaSize, paints, 1, 1,
+                               [&](Uint32 l) { return t.alphas.data() + l * map; });
+        const std::size_t cells = static_cast<std::size_t>(t.cellsX) * t.cellsY;
+        terrainCells_ = array(SDL_GPU_TEXTUREFORMAT_R8_UNORM, t.cellsX, t.cellsY, paints, 1, 1,
+                              [&](Uint32 l) { return t.cellTextures.data() + l * cells; });
+        // The light map; white (no change) when there is none.
+        const scene::Image white{1, 1, {255, 255, 255, 255}};
+        const scene::Image& light = t.lightMap.width ? t.lightMap : white;
+        terrainLight_ = array(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, light.width, light.height, 1, 1, 4,
+                              [&](Uint32) { return light.rgba.data(); });
+        terrainUniforms_ = {static_cast<float>(t.alphaSize), t.textureRepeat, static_cast<float>(t.cellTiles), static_cast<float>(paints),
+                            static_cast<float>(t.cellsX), static_cast<float>(t.cellsY), t.lightMap.width ? t.lightMapScale : 1.0f, t.litFrom,
+                            t.gradientDepth, 0, {0, 0}};
+
+        // A plain 2D texture, with or without mip levels.
+        auto plain = [&](const scene::Image& image, bool mips) {
+            const Uint32 levels = mips ? static_cast<Uint32>(std::floor(std::log2(std::max(image.width, image.height)))) + 1 : 1;
+            SDL_GPUTextureCreateInfo info{};
+            info.type = SDL_GPU_TEXTURETYPE_2D;
+            info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+            info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | (levels > 1 ? SDL_GPU_TEXTUREUSAGE_COLOR_TARGET : 0);
+            info.width = image.width;
+            info.height = image.height;
+            info.layer_count_or_depth = 1;
+            info.num_levels = levels;
+            SDL_GPUTexture* tex = SDL_CreateGPUTexture(device_, &info);
+            SDL_GPUTextureTransferInfo from{};
+            from.transfer_buffer = stage(image.rgba.data(), static_cast<Uint32>(image.rgba.size()));
+            from.pixels_per_row = image.width;
+            from.rows_per_layer = image.height;
+            SDL_GPUTextureRegion to{};
+            to.texture = tex;
+            to.w = image.width;
+            to.h = image.height;
+            to.d = 1;
+            SDL_UploadToGPUTexture(copy, &from, &to, false);
+            if (levels > 1) {
+                withMips.push_back(tex);
+            }
+            return tex;
+        };
+        terrainGradient_ = plain(t.underwaterGradient.width ? t.underwaterGradient : white, false);
+
+        // The water sheet: a quad per wet tile at the water level, texture coordinates in tiles.
+        std::vector<float> wv;
+        std::vector<std::uint32_t> wi;
+        const std::uint32_t tilesX = t.columns - 1;
+        for (std::size_t i = 0; i < t.waterTiles.size(); ++i) {
+            if (!t.waterTiles[i]) {
+                continue;
+            }
+            const auto x = static_cast<float>(i % tilesX), y = static_cast<float>(i / tilesX);
+            const auto base = static_cast<std::uint32_t>(wv.size() / 5);
+            for (const auto [cx, cy] : {std::pair{x, y}, std::pair{x + 1, y}, std::pair{x + 1, y + 1}, std::pair{x, y + 1}}) {
+                wv.insert(wv.end(), {cx * t.tileSize, cy * t.tileSize, t.waterLevel, cx, cy});
+            }
+            wi.insert(wi.end(), {base, base + 1, base + 2, base, base + 2, base + 3});
+        }
+        if (!wi.empty() && t.sky.size() == 6 && t.ripples.width) {
+            waterVertices_ = buffer(SDL_GPU_BUFFERUSAGE_VERTEX, wv.data(), static_cast<Uint32>(wv.size() * sizeof(float)));
+            waterIndices_ = buffer(SDL_GPU_BUFFERUSAGE_INDEX, wi.data(), static_cast<Uint32>(wi.size() * sizeof(std::uint32_t)));
+            waterIndexCount_ = static_cast<unsigned>(wi.size());
+            waterLevel_ = t.waterLevel;
+            ripples_ = plain(t.ripples, true);
+            // The sky cube map: six faces of one size.
+            const auto& face = t.sky.front();
+            const Uint32 skyLevels = static_cast<Uint32>(std::floor(std::log2(std::max(face.width, face.height)))) + 1;
+            SDL_GPUTextureCreateInfo info{};
+            info.type = SDL_GPU_TEXTURETYPE_CUBE;
+            info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+            info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+            info.width = face.width;
+            info.height = face.height;
+            info.layer_count_or_depth = 6;
+            info.num_levels = skyLevels;
+            skyCube_ = SDL_CreateGPUTexture(device_, &info);
+            for (Uint32 l = 0; l < 6; ++l) {
+                SDL_GPUTextureTransferInfo from{};
+                from.transfer_buffer = stage(t.sky[l].rgba.data(), static_cast<Uint32>(t.sky[l].rgba.size()));
+                from.pixels_per_row = face.width;
+                from.rows_per_layer = face.height;
+                SDL_GPUTextureRegion to{};
+                to.texture = skyCube_;
+                to.layer = l;
+                to.w = face.width;
+                to.h = face.height;
+                to.d = 1;
+                SDL_UploadToGPUTexture(copy, &from, &to, false);
+            }
+            withMips.push_back(skyCube_);
+            waterUniforms_ = {{t.reflectionTint[0], t.reflectionTint[1], t.reflectionTint[2], t.reflectionStrength}, {0, 0},
+                              t.reflectionOffset, t.rippleScale, t.rippleSpeed, 0, {0, 0}};
+        }
+    }
+
     SDL_EndGPUCopyPass(copy);
     for (auto* t : withMips) {
         SDL_GenerateMipmapsForGPUTexture(cmd, t);
@@ -369,9 +881,88 @@ void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigne
         depthHeight_ = height;
     }
 
+    uploadSpriteVertices(cmd, width, height);
+
+    const float aspect = height ? static_cast<float>(width) / static_cast<float>(height) : 1.0f;
+    const float fovY = camera.fovX > 0 ? 2 * std::atan(std::tan(camera.fovX / 2) / aspect) : camera.fovY;
+    const Mat4 viewProjection = Mat4::perspective(fovY, aspect, camera.nearPlane > 0 ? camera.nearPlane : camera.farPlane / 10000, camera.farPlane) *
+                                Mat4::lookAt(camera.eye, camera.target, {0, 0, 1});
+
+    auto drawTerrain = [&](SDL_GPURenderPass* on, const Mat4& vp, bool reflected) {
+        SDL_BindGPUGraphicsPipeline(on, terrainPipeline_);
+        SDL_PushGPUVertexUniformData(cmd, 0, vp.m.data(), 16 * sizeof(float));
+        TerrainUniforms u = terrainUniforms_;
+        u.reflected = reflected ? 1.0f : 0.0f;
+        SDL_PushGPUFragmentUniformData(cmd, 0, &u, sizeof(u));
+        // The light map wraps: the game's lighting stage sets no addressing, leaving D3D's default.
+        SDL_GPUTextureSamplerBinding bindings[5] = {{terrainPaints_, sampler_},      {terrainAlphas_, spriteSampler_},
+                                                    {terrainCells_, spriteSampler_}, {terrainLight_, sampler_},
+                                                    {terrainGradient_, spriteSampler_}};
+        SDL_BindGPUFragmentSamplers(on, 0, bindings, 5);
+        SDL_GPUBufferBinding vertices{terrainVertices_, 0};
+        SDL_BindGPUVertexBuffers(on, 0, &vertices, 1);
+        SDL_GPUBufferBinding indices{terrainIndices_, 0};
+        SDL_BindGPUIndexBuffer(on, &indices, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+        SDL_DrawGPUIndexedPrimitives(on, terrainIndexCount_, 1, 0, 0, 0);
+    };
+
+    // The neighborhood water's reflection: the sky and the terrain above the water, mirrored in it.
+    const bool water = drawScene_ && terrainIndexCount_ > 0 && waterIndexCount_ > 0;
+    if (water) {
+        if (reflection_ == nullptr || reflectionWidth_ != width || reflectionHeight_ != height) {
+            for (auto** t : {&reflection_, &reflectionDepth_}) {
+                if (*t) {
+                    SDL_ReleaseGPUTexture(device_, *t);
+                }
+            }
+            SDL_GPUTextureCreateInfo info{};
+            info.type = SDL_GPU_TEXTURETYPE_2D;
+            info.format = SDL_GetGPUSwapchainTextureFormat(device_, window_);
+            info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+            info.width = width;
+            info.height = height;
+            info.layer_count_or_depth = 1;
+            info.num_levels = 1;
+            reflection_ = SDL_CreateGPUTexture(device_, &info);
+            info.format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+            info.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
+            reflectionDepth_ = SDL_CreateGPUTexture(device_, &info);
+            reflectionWidth_ = width;
+            reflectionHeight_ = height;
+        }
+        SDL_GPUColorTargetInfo rc{};
+        rc.texture = reflection_;
+        rc.load_op = SDL_GPU_LOADOP_CLEAR;
+        rc.store_op = SDL_GPU_STOREOP_STORE;
+        SDL_GPUDepthStencilTargetInfo rd{};
+        rd.texture = reflectionDepth_;
+        rd.clear_depth = 1;
+        rd.load_op = SDL_GPU_LOADOP_CLEAR;
+        rd.store_op = SDL_GPU_STOREOP_DONT_CARE;
+        rd.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
+        rd.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+        SDL_GPURenderPass* mirror = SDL_BeginGPURenderPass(cmd, &rc, 1, &rd);
+        // The sky, by each pixel's ray mirrored in the water.
+        const Vec3 f = normalize(sub(camera.target, camera.eye));
+        const Vec3 s = normalize(cross(f, {0, 0, 1}));
+        const Vec3 u = cross(s, f);
+        const float ty = std::tan(fovY / 2), tx = ty * aspect;
+        const float skyCamera[12] = {s[0] * tx, s[1] * tx, s[2] * tx, 0, u[0] * ty, u[1] * ty, u[2] * ty, 0, f[0], f[1], f[2], 0};
+        SDL_BindGPUGraphicsPipeline(mirror, skyPipeline_);
+        SDL_PushGPUFragmentUniformData(cmd, 0, skyCamera, sizeof(skyCamera));
+        SDL_GPUTextureSamplerBinding skyBinding{skyCube_, sampler_};
+        SDL_BindGPUFragmentSamplers(mirror, 0, &skyBinding, 1);
+        SDL_DrawGPUPrimitives(mirror, 3, 1, 0, 0);
+        // The terrain, mirrored about the water's surface.
+        Mat4 flip;
+        flip.m = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 2 * waterLevel_, 0, 0, 0, 1};
+        drawTerrain(mirror, viewProjection * flip, true);
+        SDL_EndGPURenderPass(mirror);
+    }
+
     SDL_GPUColorTargetInfo color{};
     color.texture = target;
-    color.clear_color = {0.17f, 0.18f, 0.19f, 1.0f};
+    color.clear_color = {clear_[0], clear_[1], clear_[2], 1.0f};
     color.load_op = SDL_GPU_LOADOP_CLEAR;
     color.store_op = SDL_GPU_STOREOP_STORE;
     SDL_GPUDepthStencilTargetInfo depth{};
@@ -383,8 +974,6 @@ void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigne
     depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
     SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(cmd, &color, 1, &depth);
 
-    const float aspect = height ? static_cast<float>(width) / static_cast<float>(height) : 1.0f;
-    const Mat4 viewProjection = Mat4::perspective(camera.fovY, aspect, 0.05f, 500.0f) * Mat4::lookAt(camera.eye, camera.target, {0, 0, 1});
     const Vec3 sun = normalize({0.4f, -0.5f, 0.75f});
 
     struct Draw {
@@ -393,7 +982,7 @@ void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigne
         float distance;
     };
     std::vector<Draw> opaque, layers, blended;
-    for (std::size_t i = 0; i < instances_.size(); ++i) {
+    for (std::size_t i = 0; drawScene_ && i < instances_.size(); ++i) {
         const auto& instance = instances_[i];
         if (instance.mesh < 0 || static_cast<std::size_t>(instance.mesh) >= meshes_.size() || (i < visible_.size() && !visible_[i])) {
             continue;
@@ -453,8 +1042,52 @@ void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigne
         }
     };
     drawList(opaque, 0);
+    if (drawScene_ && terrainIndexCount_ > 0) {
+        drawTerrain(pass, viewProjection, false);
+    }
     drawList(layers, 1);
+    if (water) {
+        SDL_BindGPUGraphicsPipeline(pass, waterPipeline_);
+        SDL_PushGPUVertexUniformData(cmd, 0, viewProjection.m.data(), 16 * sizeof(float));
+        WaterUniforms w = waterUniforms_;
+        w.screen[0] = static_cast<float>(width);
+        w.screen[1] = static_cast<float>(height);
+        w.time = time_;
+        SDL_PushGPUFragmentUniformData(cmd, 0, &w, sizeof(w));
+        SDL_GPUTextureSamplerBinding bindings[2] = {{reflection_, spriteSampler_}, {ripples_, sampler_}};
+        SDL_BindGPUFragmentSamplers(pass, 0, bindings, 2);
+        SDL_GPUBufferBinding vertices{waterVertices_, 0};
+        SDL_BindGPUVertexBuffers(pass, 0, &vertices, 1);
+        SDL_GPUBufferBinding indices{waterIndices_, 0};
+        SDL_BindGPUIndexBuffer(pass, &indices, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+        SDL_DrawGPUIndexedPrimitives(pass, waterIndexCount_, 1, 0, 0, 0);
+    }
     drawList(blended, 1);
+
+    // Sprites in order, one draw per run of the same texture.
+    if (!sprites_.empty() && spriteVertices_) {
+        SDL_BindGPUGraphicsPipeline(pass, spritePipeline_);
+        const float screen[4] = {static_cast<float>(width), static_cast<float>(height), 0, 0};
+        SDL_PushGPUVertexUniformData(cmd, 0, screen, sizeof(screen));
+        SDL_GPUBufferBinding vertices{spriteVertices_, 0};
+        SDL_BindGPUVertexBuffers(pass, 0, &vertices, 1);
+        for (std::size_t i = 0; i < sprites_.size();) {
+            const int t = sprites_[i].texture;
+            std::size_t j = i;
+            while (j < sprites_.size() && sprites_[j].texture == t) {
+                ++j;
+            }
+            const bool has = t >= 0 && static_cast<std::size_t>(t) < spriteTextures_.size() && spriteTextures_[static_cast<std::size_t>(t)];
+            if (!has && !white_) {
+                i = j;
+                continue;
+            }
+            SDL_GPUTextureSamplerBinding binding{has ? spriteTextures_[static_cast<std::size_t>(t)] : white_, spriteSampler_};
+            SDL_BindGPUFragmentSamplers(pass, 0, &binding, 1);
+            SDL_DrawGPUPrimitives(pass, static_cast<Uint32>((j - i) * 6), 1, static_cast<Uint32>(i * 6), 0);
+            i = j;
+        }
+    }
     SDL_EndGPURenderPass(pass);
 }
 

@@ -114,6 +114,29 @@ std::optional<Image> Assets::texture(const std::string& name) {
     }
 }
 
+std::vector<Image> Assets::textureFaces(const std::string& name) {
+    std::vector<Image> out;
+    try {
+        const auto data = byName(kTxtr, name + "_txtr");
+        if (!data) {
+            warnings.push_back("texture " + name + " not found");
+            return out;
+        }
+        const sg::Image img = sg::parseImage(*data);
+        for (const auto& face : img.faces) {
+            if (face.empty() || !face.back().largeMipName.empty()) {
+                warnings.push_back("texture " + name + ": a face without its largest level inline");
+                return {};
+            }
+            out.push_back(Image{img.width, img.height, sg::decodeRgba(face.back().data, img.width, img.height, img.format)});
+        }
+    } catch (const std::exception& ex) {
+        warnings.push_back("texture " + name + ": " + ex.what());
+        out.clear();
+    }
+    return out;
+}
+
 std::string Assets::slotBone(std::uint32_t guid, std::size_t slot) {
     if (!objectTypesRead_) {
         objectTypesRead_ = true;

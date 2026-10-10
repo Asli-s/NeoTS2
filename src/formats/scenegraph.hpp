@@ -138,7 +138,8 @@ struct Image {
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     std::uint32_t format = 0;  // 4 DXT1, 5 DXT3, 8 DXT5, 1 raw 32-bit, 2 raw 24-bit
-    std::vector<MipLevel> mips;
+    std::vector<MipLevel> mips;               // the first texture's
+    std::vector<std::vector<MipLevel>> faces;  // every texture's: one normally, six for a cube map
 };
 Image parseImage(std::span<const std::uint8_t> data);
 

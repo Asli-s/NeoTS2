@@ -32,6 +32,18 @@ std::size_t addCharacters(ResourceIndex& index, const std::filesystem::path& nei
 // The neighborhood's own package: Neighborhoods/<hood>/<hood>_Neighborhood.package.
 std::filesystem::path neighborhoodPackage(const std::filesystem::path& neighborhood);
 
+// A neighborhood as the main menu shows it: its folder, its name and description (the package's
+// catalog string set) and its picture (<hood>_Neighborhood.png beside the package).
+struct NeighborhoodEntry {
+    std::filesystem::path folder;
+    std::string name, description;
+    std::filesystem::path thumbnail;
+};
+
+// The neighborhoods in a Neighborhoods folder, in the order of their folders' names (as the game's
+// main menu lists them: not traced), leaving out the tutorial.
+std::vector<NeighborhoodEntry> listNeighborhoods(const std::filesystem::path& neighborhoods);
+
 struct Neighbor {
     std::uint32_t guid = 0;                  // the Sim's object type
     std::vector<std::int16_t> personData;    // the neighbor's copy, indexed like a Sim's

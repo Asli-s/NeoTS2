@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -80,6 +81,43 @@ struct WallInfo {
     bool cuttable = true;
 };
 
+// A neighborhood's painted terrain, drawn as the game draws it: each paint's texture times its
+// alpha map, added up. A vertex per tile corner, row by row; its texture coordinates are its
+// column and row.
+struct PaintedTerrain {
+    std::uint32_t columns = 0, rows = 0;
+    float tileSize = 10;
+    std::vector<float> heights;          // per vertex
+    std::vector<float> normals;          // x, y, z per vertex
+    std::uint32_t alphaSize = 0;         // alpha maps are alphaSize square, a byte per texel
+    std::vector<std::uint8_t> alphas;    // one map per paint, in paint order
+    std::vector<Image> textures;         // every paint's every variant, all the same size
+    float textureRepeat = 13;            // tiles a paint texture covers
+    std::uint32_t cellTiles = 13, cellsX = 0, cellsY = 0;  // the variant grid
+    std::vector<std::uint8_t> cellTextures;  // per paint, per cell (row by row): index into textures
+    // The light map the painted terrain is multiplied by (a texel per tile), where the terrain is at
+    // or above `litFrom` (the game's waterHeight); sampled at grid / lightMapScale.
+    Image lightMap;
+    float lightMapScale = 128;
+    float litFrom = 312.45f;
+
+    // The water (values from the game's "Shaders for neighborhood" script): a sheet at waterLevel
+    // over the tiles with a corner under water, showing the reflection (sky and terrain mirrored in
+    // it) twice, a little apart, mixed by the ripple map's alpha, tinted and see-through. Terrain under
+    // the water is darkened by depth through the gradient.
+    float waterLevel = 0;
+    std::vector<std::uint8_t> waterTiles;  // per tile, row by row: 1 where the water sheet is
+    Image ripples;                         // neighborhood-water-1
+    Image underwaterGradient;              // neighborhood-underwater-gradient, top row at the surface
+    std::vector<Image> sky;                // neighborhood-sky2-envcube's six faces, z up
+    std::array<float, 3> reflectionTint{0.55f, 0.6f, 0.65f};  // nhoodWaterReflColour
+    float reflectionStrength = 0.75f;      // nhoodWaterReflStrength (the sheet's opacity)
+    float reflectionOffset = 0.002f;       // nhoodWaterReflOffset (the second sample's shift)
+    float rippleScale = 7, rippleSpeed = 0.5f;  // nhoodWaterMap1Scale, nhoodWaterMap1Speed
+    float gradientDepth = 40;              // waterGradientZoneSize
+    std::size_t paints() const { return alphaSize ? alphas.size() / (static_cast<std::size_t>(alphaSize) * alphaSize) : 0; }
+};
+
 // Everything needed to draw a scene, independent of any graphics API.
 struct Scene {
     std::vector<Image> images;
@@ -87,6 +125,7 @@ struct Scene {
     std::vector<Mesh> meshes;
     std::vector<Instance> instances;
     std::vector<WallInfo> walls;
+    std::optional<PaintedTerrain> terrain;
 };
 
 } // namespace ts2::scene
