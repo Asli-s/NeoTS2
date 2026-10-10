@@ -223,6 +223,126 @@ Renderer::Renderer(SDL_Window* window, const std::filesystem::path& shaderFolder
         }
     }
 
+    // Neighborhood roads: blended over the terrain they lie on.
+    {
+        SDL_GPUShader* roadVertex = shader("road.vert.dxil", SDL_GPU_SHADERSTAGE_VERTEX, 0);
+        SDL_GPUShader* roadFragment = shader("road.frag.dxil", SDL_GPU_SHADERSTAGE_FRAGMENT, 2);
+        SDL_GPUVertexBufferDescription buffer{};
+        buffer.slot = 0;
+        buffer.pitch = 6 * sizeof(float);
+        buffer.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+        SDL_GPUVertexAttribute attributes[3]{};
+        attributes[0] = {0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 0};
+        attributes[1] = {1, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, 3 * sizeof(float)};
+        attributes[2] = {2, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT, 5 * sizeof(float)};
+        SDL_GPUColorTargetDescription color{};
+        color.format = SDL_GetGPUSwapchainTextureFormat(device_, window_);
+        color.blend_state.enable_blend = true;
+        color.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+        color.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+        color.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+        color.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        color.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+        color.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+        SDL_GPUGraphicsPipelineCreateInfo info{};
+        info.vertex_shader = roadVertex;
+        info.fragment_shader = roadFragment;
+        info.vertex_input_state.vertex_buffer_descriptions = &buffer;
+        info.vertex_input_state.num_vertex_buffers = 1;
+        info.vertex_input_state.vertex_attributes = attributes;
+        info.vertex_input_state.num_vertex_attributes = 3;
+        info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+        info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+        info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+        info.depth_stencil_state.enable_depth_test = true;
+        info.depth_stencil_state.enable_depth_write = true;
+        info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
+        info.target_info.color_target_descriptions = &color;
+        info.target_info.num_color_targets = 1;
+        info.target_info.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+        info.target_info.has_depth_stencil_target = true;
+        roadPipeline_ = SDL_CreateGPUGraphicsPipeline(device_, &info);
+        SDL_ReleaseGPUShader(device_, roadVertex);
+        SDL_ReleaseGPUShader(device_, roadFragment);
+        if (roadPipeline_ == nullptr) {
+            throw sdlError("road pipeline");
+        }
+        SDL_GPUSamplerCreateInfo clamped{};
+        clamped.min_filter = SDL_GPU_FILTER_LINEAR;
+        clamped.mag_filter = SDL_GPU_FILTER_LINEAR;
+        clamped.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_LINEAR;
+        clamped.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        clamped.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        clamped.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        clamped.max_lod = 1000;
+        clampedMips_ = SDL_CreateGPUSampler(device_, &clamped);
+    }
+
+    // Neighborhood lot imposters: one vertex layout, four ways of blending.
+    {
+        SDL_GPUShader* imposterVertex = shader("imposter.vert.dxil", SDL_GPU_SHADERSTAGE_VERTEX, 0);
+        SDL_GPUShader* imposterFragment = shader("imposter.frag.dxil", SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
+        SDL_GPUVertexBufferDescription buffer{};
+        buffer.slot = 0;
+        buffer.pitch = 7 * sizeof(float);
+        buffer.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+        SDL_GPUVertexAttribute attributes[3]{};
+        attributes[0] = {0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 0};
+        attributes[1] = {1, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, 3 * sizeof(float)};
+        attributes[2] = {2, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, 5 * sizeof(float)};
+        auto make = [&](bool blend, SDL_GPUBlendFactor source, bool depthWrite, bool cull) {
+            SDL_GPUColorTargetDescription color{};
+            color.format = SDL_GetGPUSwapchainTextureFormat(device_, window_);
+            color.blend_state.enable_blend = blend;
+            color.blend_state.src_color_blendfactor = source;
+            color.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+            color.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+            color.blend_state.src_alpha_blendfactor = source;
+            color.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+            color.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+            SDL_GPUGraphicsPipelineCreateInfo info{};
+            info.vertex_shader = imposterVertex;
+            info.fragment_shader = imposterFragment;
+            info.vertex_input_state.vertex_buffer_descriptions = &buffer;
+            info.vertex_input_state.num_vertex_buffers = 1;
+            info.vertex_input_state.vertex_attributes = attributes;
+            info.vertex_input_state.num_vertex_attributes = 3;
+            info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+            info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+            info.rasterizer_state.cull_mode = cull ? SDL_GPU_CULLMODE_BACK : SDL_GPU_CULLMODE_NONE;
+            info.rasterizer_state.front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
+            info.depth_stencil_state.enable_depth_test = true;
+            info.depth_stencil_state.enable_depth_write = depthWrite;
+            info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
+            info.target_info.color_target_descriptions = &color;
+            info.target_info.num_color_targets = 1;
+            info.target_info.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+            info.target_info.has_depth_stencil_target = true;
+            SDL_GPUGraphicsPipeline* p = SDL_CreateGPUGraphicsPipeline(device_, &info);
+            if (p == nullptr) {
+                throw sdlError("imposter pipeline");
+            }
+            return p;
+        };
+        // Terrain: its light map multiplies what is under it, then its texture (alpha premultiplied)
+        // goes over; neither writes depth. Walls and slices: premultiplied, writing depth. Roofs:
+        // opaque and two-sided.
+        imposterLightPipeline_ = make(true, SDL_GPU_BLENDFACTOR_DST_COLOR, false, true);
+        imposterTerrainPipeline_ = make(true, SDL_GPU_BLENDFACTOR_ONE, false, true);
+        imposterWallPipeline_ = make(true, SDL_GPU_BLENDFACTOR_ONE, true, true);
+        imposterRoofPipeline_ = make(false, SDL_GPU_BLENDFACTOR_ONE, true, false);
+        SDL_ReleaseGPUShader(device_, imposterVertex);
+        SDL_ReleaseGPUShader(device_, imposterFragment);
+        SDL_GPUSamplerCreateInfo point{};
+        point.min_filter = SDL_GPU_FILTER_NEAREST;
+        point.mag_filter = SDL_GPU_FILTER_NEAREST;
+        point.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+        point.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
+        point.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
+        point.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
+        pointSampler_ = SDL_CreateGPUSampler(device_, &point);
+    }
+
     // The sky seen in the neighborhood water: behind everything, no depth.
     {
         SDL_GPUShader* skyVertex = shader("sky.vert.dxil", SDL_GPU_SHADERSTAGE_VERTEX, 0, 0);
@@ -305,7 +425,13 @@ Renderer::~Renderer() {
     if (spritePipeline_) {
         SDL_ReleaseGPUGraphicsPipeline(device_, spritePipeline_);
     }
-    for (auto* p : {terrainPipeline_, skyPipeline_, waterPipeline_}) {
+    for (auto* s : {clampedMips_, pointSampler_}) {
+        if (s) {
+            SDL_ReleaseGPUSampler(device_, s);
+        }
+    }
+    for (auto* p : {terrainPipeline_, skyPipeline_, waterPipeline_, roadPipeline_, imposterLightPipeline_, imposterTerrainPipeline_,
+                    imposterWallPipeline_, imposterRoofPipeline_}) {
         if (p) {
             SDL_ReleaseGPUGraphicsPipeline(device_, p);
         }
@@ -358,20 +484,27 @@ void Renderer::release() {
         SDL_ReleaseGPUTexture(device_, white_);
         white_ = nullptr;
     }
-    for (auto** b : {&terrainVertices_, &terrainIndices_, &waterVertices_, &waterIndices_}) {
+    for (auto** b : {&terrainVertices_, &terrainIndices_, &waterVertices_, &waterIndices_, &roadVertices_, &roadIndices_,
+                     &imposterVertices_, &imposterIndices_}) {
         if (*b) {
             SDL_ReleaseGPUBuffer(device_, *b);
             *b = nullptr;
         }
     }
-    for (auto** t : {&terrainPaints_, &terrainAlphas_, &terrainCells_, &terrainLight_, &terrainGradient_, &skyCube_, &ripples_}) {
+    for (auto** t : {&terrainPaints_, &terrainAlphas_, &terrainCells_, &terrainLight_, &terrainGradient_, &skyCube_, &ripples_, &roadTextures_}) {
         if (*t) {
             SDL_ReleaseGPUTexture(device_, *t);
             *t = nullptr;
         }
     }
+    for (auto* t : imposterTextures_) {
+        SDL_ReleaseGPUTexture(device_, t);
+    }
+    imposterTextures_.clear();
+    imposterDraws_.clear();
     terrainIndexCount_ = 0;
     waterIndexCount_ = 0;
+    roadIndexCount_ = 0;
 }
 
 void Renderer::releaseSprites() {
@@ -786,6 +919,55 @@ void Renderer::upload(const scene::Scene& scene) {
             waterUniforms_ = {{t.reflectionTint[0], t.reflectionTint[1], t.reflectionTint[2], t.reflectionStrength}, {0, 0},
                               t.reflectionOffset, t.rippleScale, t.rippleSpeed, 0, {0, 0}};
         }
+
+        // The roads: a quad per tile, split like the terrain's tiles.
+        if (!t.roads.empty() && !t.roadTextures.empty()) {
+            std::vector<float> rv;
+            std::vector<std::uint32_t> ri;
+            rv.reserve(t.roads.size() * 24);
+            ri.reserve(t.roads.size() * 6);
+            for (const auto& road : t.roads) {
+                const auto base = static_cast<std::uint32_t>(rv.size() / 6);
+                for (const auto& c : road.corners) {
+                    rv.insert(rv.end(), {c[0], c[1], c[2], c[3], c[4], static_cast<float>(road.texture)});
+                }
+                ri.insert(ri.end(), {base, base + 2, base + 1, base, base + 3, base + 2});
+            }
+            roadVertices_ = buffer(SDL_GPU_BUFFERUSAGE_VERTEX, rv.data(), static_cast<Uint32>(rv.size() * sizeof(float)));
+            roadIndices_ = buffer(SDL_GPU_BUFFERUSAGE_INDEX, ri.data(), static_cast<Uint32>(ri.size() * sizeof(std::uint32_t)));
+            roadIndexCount_ = static_cast<unsigned>(ri.size());
+            const auto& road = t.roadTextures.front();
+            const Uint32 roadLevels = static_cast<Uint32>(std::floor(std::log2(std::max(road.width, road.height)))) + 1;
+            roadTextures_ = array(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, road.width, road.height, static_cast<Uint32>(t.roadTextures.size()),
+                                  roadLevels, 4, [&](Uint32 l) { return t.roadTextures[l].rgba.data(); });
+            if (roadLevels > 1) {
+                withMips.push_back(roadTextures_);
+            }
+            lightMapSize_ = t.lightMapScale * t.tileSize;
+        }
+
+        // The lot imposters: all parts in one buffer, each drawn with its own texture.
+        if (!t.imposters.empty()) {
+            for (const auto& image : t.imposterTextures) {
+                imposterTextures_.push_back(plain(image, false));
+            }
+            std::vector<float> iv;
+            std::vector<std::uint32_t> ii;
+            for (const auto& part : t.imposters) {
+                ImposterDraw draw{part.kind};
+                draw.texture = imposterTextures_[part.texture];
+                draw.lightMap = part.lightMap >= 0 ? imposterTextures_[static_cast<std::size_t>(part.lightMap)] : nullptr;
+                std::copy_n(part.lightMapTint.data(), 3, draw.tint);
+                draw.firstIndex = static_cast<std::uint32_t>(ii.size());
+                draw.indexCount = static_cast<std::uint32_t>(part.indices.size());
+                draw.vertexOffset = static_cast<std::int32_t>(iv.size() / 7);
+                iv.insert(iv.end(), part.vertices.begin(), part.vertices.end());
+                ii.insert(ii.end(), part.indices.begin(), part.indices.end());
+                imposterDraws_.push_back(draw);
+            }
+            imposterVertices_ = buffer(SDL_GPU_BUFFERUSAGE_VERTEX, iv.data(), static_cast<Uint32>(iv.size() * sizeof(float)));
+            imposterIndices_ = buffer(SDL_GPU_BUFFERUSAGE_INDEX, ii.data(), static_cast<Uint32>(ii.size() * sizeof(std::uint32_t)));
+        }
     }
 
     SDL_EndGPUCopyPass(copy);
@@ -795,6 +977,56 @@ void Renderer::upload(const scene::Scene& scene) {
     SDL_SubmitGPUCommandBuffer(cmd);
     for (auto* t : transfers) {
         SDL_ReleaseGPUTransferBuffer(device_, t);
+    }
+}
+
+void Renderer::drawImposters(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass, const Mat4& viewProjection) {
+    if (imposterDraws_.empty()) {
+        return;
+    }
+    using Kind = scene::PaintedTerrain::ImposterPart::Kind;
+    SDL_GPUBufferBinding vertices{imposterVertices_, 0};
+    SDL_GPUBufferBinding indices{imposterIndices_, 0};
+    struct PartUniforms {
+        float tint[3];
+        float cutoff, mode, padding[3];
+    };
+    auto draw = [&](SDL_GPUGraphicsPipeline* pipeline, const ImposterDraw& d, SDL_GPUTexture* texture, SDL_GPUSampler* sampler,
+                    float cutoff, float mode) {
+        SDL_BindGPUGraphicsPipeline(pass, pipeline);
+        SDL_PushGPUVertexUniformData(cmd, 0, viewProjection.m.data(), 16 * sizeof(float));
+        const PartUniforms u{{d.tint[0], d.tint[1], d.tint[2]}, cutoff, mode, {0, 0, 0}};
+        SDL_PushGPUFragmentUniformData(cmd, 0, &u, sizeof(u));
+        SDL_GPUTextureSamplerBinding binding{texture, sampler};
+        SDL_BindGPUFragmentSamplers(pass, 0, &binding, 1);
+        SDL_BindGPUVertexBuffers(pass, 0, &vertices, 1);
+        SDL_BindGPUIndexBuffer(pass, &indices, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+        SDL_DrawGPUIndexedPrimitives(pass, d.indexCount, 1, d.firstIndex, d.vertexOffset, 0);
+    };
+    // The terrain first (its shader layer comes before the others'): light map, then texture.
+    for (const auto& d : imposterDraws_) {
+        if (d.kind != Kind::Terrain) {
+            continue;
+        }
+        if (d.lightMap) {
+            draw(imposterLightPipeline_, d, d.lightMap, sampler_, 0, 0);
+        }
+        draw(imposterTerrainPipeline_, d, d.texture, clampedMips_, 0, 1);
+    }
+    for (const auto& d : imposterDraws_) {
+        switch (d.kind) {
+        case Kind::Wall:
+            draw(imposterWallPipeline_, d, d.texture, pointSampler_, 64.0f / 255, 1);
+            break;
+        case Kind::Slice:
+            draw(imposterWallPipeline_, d, d.texture, pointSampler_, 127.0f / 255, 1);
+            break;
+        case Kind::Roof:
+            draw(imposterRoofPipeline_, d, d.texture, clampedMips_, -1, 2);
+            break;
+        case Kind::Terrain:
+            break;
+        }
     }
 }
 
@@ -1044,6 +1276,20 @@ void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigne
     drawList(opaque, 0);
     if (drawScene_ && terrainIndexCount_ > 0) {
         drawTerrain(pass, viewProjection, false);
+        if (roadIndexCount_ > 0) {
+            SDL_BindGPUGraphicsPipeline(pass, roadPipeline_);
+            SDL_PushGPUVertexUniformData(cmd, 0, viewProjection.m.data(), 16 * sizeof(float));
+            const float road[4] = {lightMapSize_, 0, 0, 0};
+            SDL_PushGPUFragmentUniformData(cmd, 0, road, sizeof(road));
+            SDL_GPUTextureSamplerBinding bindings[2] = {{roadTextures_, clampedMips_}, {terrainLight_, sampler_}};
+            SDL_BindGPUFragmentSamplers(pass, 0, bindings, 2);
+            SDL_GPUBufferBinding vertices{roadVertices_, 0};
+            SDL_BindGPUVertexBuffers(pass, 0, &vertices, 1);
+            SDL_GPUBufferBinding indices{roadIndices_, 0};
+            SDL_BindGPUIndexBuffer(pass, &indices, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+            SDL_DrawGPUIndexedPrimitives(pass, roadIndexCount_, 1, 0, 0, 0);
+        }
+        drawImposters(cmd, pass, viewProjection);
     }
     drawList(layers, 1);
     if (water) {

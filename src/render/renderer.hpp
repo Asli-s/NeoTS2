@@ -17,6 +17,7 @@ struct SDL_GPUTexture;
 struct SDL_GPUSampler;
 struct SDL_GPUGraphicsPipeline;
 struct SDL_GPUCommandBuffer;
+struct SDL_GPURenderPass;
 
 namespace ts2::render {
 
@@ -90,6 +91,7 @@ private:
     void releaseSprites();
     void uploadSpriteVertices(SDL_GPUCommandBuffer* cmd, unsigned width, unsigned height);
     void render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigned width, unsigned height, const Camera& camera);
+    void drawImposters(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass, const Mat4& viewProjection);
 
     SDL_Window* window_ = nullptr;
     SDL_GPUDevice* device_ = nullptr;
@@ -149,6 +151,35 @@ private:
     unsigned reflectionWidth_ = 0, reflectionHeight_ = 0;
     float waterLevel_ = 0;
     WaterUniforms waterUniforms_{};
+
+    // Its roads.
+    SDL_GPUGraphicsPipeline* roadPipeline_ = nullptr;
+    SDL_GPUSampler* clampedMips_ = nullptr;  // clamped, with mip levels (road textures)
+    SDL_GPUBuffer* roadVertices_ = nullptr;
+    SDL_GPUBuffer* roadIndices_ = nullptr;
+    unsigned roadIndexCount_ = 0;
+    SDL_GPUTexture* roadTextures_ = nullptr;
+    float lightMapSize_ = 1280;
+
+    // Its lots' imposters (see scene::PaintedTerrain::ImposterPart): pipelines for the terrain's
+    // light map, the terrain's texture, walls and slices, and roofs.
+    struct ImposterDraw {
+        scene::PaintedTerrain::ImposterPart::Kind kind;
+        SDL_GPUTexture* texture = nullptr;
+        SDL_GPUTexture* lightMap = nullptr;
+        float tint[3] = {1, 1, 1};
+        std::uint32_t firstIndex = 0, indexCount = 0;
+        std::int32_t vertexOffset = 0;
+    };
+    SDL_GPUGraphicsPipeline* imposterLightPipeline_ = nullptr;
+    SDL_GPUGraphicsPipeline* imposterTerrainPipeline_ = nullptr;
+    SDL_GPUGraphicsPipeline* imposterWallPipeline_ = nullptr;
+    SDL_GPUGraphicsPipeline* imposterRoofPipeline_ = nullptr;
+    SDL_GPUSampler* pointSampler_ = nullptr;  // nearest texel, no mip levels (imposter walls and slices)
+    SDL_GPUBuffer* imposterVertices_ = nullptr;
+    SDL_GPUBuffer* imposterIndices_ = nullptr;
+    std::vector<SDL_GPUTexture*> imposterTextures_;
+    std::vector<ImposterDraw> imposterDraws_;
     float time_ = 0;
 };
 

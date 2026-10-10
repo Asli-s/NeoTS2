@@ -71,6 +71,8 @@ add_library(ts2formats
     src/formats/nhood_terrain.cpp
     src/formats/camera_config.cpp
     src/formats/nhood_paint_rules.cpp
+    src/formats/lot_description.cpp
+    src/formats/nhood_objects.cpp
     src/formats/ui_script.cpp
 )
 target_include_directories(ts2formats PUBLIC src)
@@ -84,6 +86,7 @@ add_library(ts2content
     src/content/install.cpp
     src/content/cameras.cpp
     src/content/lighting.cpp
+    src/content/material_scripts.cpp
     src/content/build_scripts.cpp
     src/content/lot.cpp
     src/content/neighborhood.cpp
@@ -114,6 +117,7 @@ add_library(ts2scene
     src/scene/roofs.cpp
     src/scene/roof_grid.cpp
     src/scene/round_roofs.cpp
+    src/scene/imposters.cpp
     src/scene/neighborhood_scene.cpp
     src/scene/neighborhood_paint.cpp
     src/scene/neighborhood_lighting.cpp
@@ -170,7 +174,7 @@ else()
     if(SDL3_FOUND AND NEOTS2_DXC)
         set(shader_dir ${CMAKE_CURRENT_BINARY_DIR}/shaders)
         set(shader_outputs)
-        foreach(shader scene.vert scene.frag ui.vert ui.frag terrain.vert terrain.frag sky.vert sky.frag water.vert water.frag)
+        foreach(shader scene.vert scene.frag ui.vert ui.frag terrain.vert terrain.frag sky.vert sky.frag water.vert water.frag road.vert road.frag imposter.vert imposter.frag)
             if(shader MATCHES "vert$")
                 set(profile vs_6_0)
             else()

@@ -47,7 +47,8 @@ constexpr std::uint32_t kBlendWeights = 0x3BD70105;
 struct ElementLink {
     std::vector<std::uint16_t> elements;  // indices into Mesh::elements
     std::uint32_t vertexCount = 0;
-    // When set, vertex i takes item aliases[k][i] of the link's k-th element.
+    // By kind (positions, normals, texture coordinates): when set, vertex i takes item aliases[k][i]
+    // of the link's elements of that kind.
     std::array<std::vector<std::uint16_t>, 3> aliases;
 };
 
@@ -77,8 +78,9 @@ Mesh parseMesh(std::span<const std::uint8_t> data);
 std::vector<float> floats(const Element& element);
 
 // Floats of the link's element with this identity, one item per vertex of the link (aliases
-// applied); empty when the link has no such element or an alias points past its items.
-std::vector<float> vertexFloats(const Mesh& mesh, const ElementLink& link, std::uint32_t identity);
+// applied); empty when the link has no such element or an alias points past its items. `nth` picks
+// among elements of the same identity (a second set of texture coordinates).
+std::vector<float> vertexFloats(const Mesh& mesh, const ElementLink& link, std::uint32_t identity, std::size_t nth = 0);
 
 // Shape (SHPE, cShape): the geometry nodes it draws and the material of each mesh group.
 struct ShapePart {

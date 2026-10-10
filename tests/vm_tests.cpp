@@ -22,6 +22,8 @@
 #include "formats/tga.hpp"
 #include "formats/reia.hpp"
 #include "formats/camera_config.hpp"
+#include "formats/lot_description.hpp"
+#include "formats/nhood_objects.hpp"
 #include "formats/nhood_paint_rules.hpp"
 #include "formats/nhood_terrain.hpp"
 #include "formats/ui_script.hpp"
@@ -3656,6 +3658,123 @@ void neighborhoodLightMapLooksUpNormals() {
     CHECK(map.rgba[(0 * 4 + 3) * 4] != 90);
 }
 
+void neighborhoodRoadsParse() {
+    std::vector<std::uint8_t> d;
+    auto u8 = [&](std::uint8_t v) { d.push_back(v); };
+    auto u16 = [&](std::uint16_t v) { d.insert(d.end(), {static_cast<std::uint8_t>(v), static_cast<std::uint8_t>(v >> 8)}); };
+    auto u32 = [&](std::uint32_t v) {
+        for (int i = 0; i < 4; ++i) {
+            d.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
+        }
+    };
+    auto f32 = [&](float v) { u32(std::bit_cast<std::uint32_t>(v)); };
+    u32(0xCB);
+    // One tree record (skipped), then one road tile.
+    u16(8);
+    u32(1);
+    d.insert(d.end(), 38, 0);
+    u16(3);
+    u32(1);
+    u8(2);
+    for (float v : {15.0f, 1025.0f, 365.0f, 10.0f, 1020.0f, 20.0f, 1030.0f}) {
+        f32(v);
+    }
+    u8(3);
+    const float corners[4][5] = {{10, 1020, 361.5f, 1, 0}, {10, 1030, 361.5f, 0, 0}, {20, 1030, 368.5f, 0, 1}, {20, 1020, 368.5f, 1, 1}};
+    for (const auto& c : corners) {
+        for (float v : c) {
+            f32(v);
+        }
+    }
+    u32(0x4b00);
+    d.insert(d.end(), {0, 0, 0, 0, 1, 5, 0, 0, 0, 0});
+    const auto objects = ts2::nhood::parseObjects(d);
+    CHECK(objects.version == 0xCB && objects.roads.size() == 1);
+    const auto& road = objects.roads[0];
+    CHECK(road.piece == 0x4b00 && road.bounds[0] == 10 && road.bounds[3] == 1030);
+    CHECK(road.corners[2][0] == 20 && road.corners[2][1] == 1030 && road.corners[2][2] == 368.5f && road.corners[3][3] == 1);
+}
+
+void lotDescriptionParse() {
+    auto make = [](std::uint16_t version, std::uint16_t own) {
+        std::vector<std::uint8_t> d;
+        auto u8 = [&](std::uint8_t v) { d.push_back(v); };
+        auto u16 = [&](std::uint16_t v) { d.insert(d.end(), {static_cast<std::uint8_t>(v), static_cast<std::uint8_t>(v >> 8)}); };
+        auto u32 = [&](std::uint32_t v) {
+            for (int i = 0; i < 4; ++i) {
+                d.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
+            }
+        };
+        auto text = [&](const std::string& s) {
+            u32(static_cast<std::uint32_t>(s.size()));
+            d.insert(d.end(), s.begin(), s.end());
+        };
+        u16(version);
+        u16(own);
+        u32(2);
+        u32(3);
+        u8(0);
+        u8(8);
+        u8(3);
+        u32(3);
+        text("Lot");
+        text("");
+        u32(2);
+        u32(0);
+        u32(0);
+        if (own >= 11) {
+            d.insert(d.end(), 22, 0);
+        }
+        u32(98);
+        u32(80);
+        u32(std::bit_cast<std::uint32_t>(324.1875f));
+        u32(32);
+        u8(1);
+        text("lottexture");
+        u8(0);
+        return d;
+    };
+    const std::uint16_t versions[2][2] = {{13, 6}, {18, 11}};
+    for (const auto& [version, own] : versions) {
+        const auto lot = ts2::nhood::parseLotDescription(make(version, own));
+        CHECK(lot.width == 2 && lot.depth == 3 && lot.roadSides == 8 && lot.ownFacing == 3 && lot.name == "Lot");
+        CHECK(lot.x == 98 && lot.y == 80 && lot.elevation == 324.1875f && lot.id == 32 && lot.facing == 1);
+        CHECK(lot.texture == "lottexture");
+    }
+}
+
+void vertexAliasesFollowKind() {
+    namespace sg = ts2::scenegraph;
+    auto element = [](std::uint32_t identity, std::uint32_t format, const std::vector<float>& values) {
+        sg::Element e;
+        e.identity = identity;
+        e.blockFormat = format;
+        e.count = static_cast<std::uint32_t>(values.size() / (format + 1));
+        for (float v : values) {
+            const auto bits = std::bit_cast<std::uint32_t>(v);
+            for (int i = 0; i < 4; ++i) {
+                e.data.push_back(static_cast<std::uint8_t>(bits >> (8 * i)));
+            }
+        }
+        return e;
+    };
+    sg::Mesh mesh;
+    mesh.elements.push_back(element(sg::kPositions, 2, {0, 0, 0, 1, 1, 1, 2, 2, 2}));
+    mesh.elements.push_back(element(sg::kTextureCoordinates, 1, {0, 0, 0.25f, 0.25f, 0.5f, 0.5f, 0.75f, 0.75f}));
+    mesh.elements.push_back(element(sg::kTextureCoordinates, 1, {1, 1, 2, 2, 3, 3, 4, 4}));
+    // Positions and texture coordinates only: the coordinates take the third alias list, not the second.
+    sg::ElementLink link;
+    link.elements = {0, 1, 2};
+    link.vertexCount = 2;
+    link.aliases = {std::vector<std::uint16_t>{2, 0}, std::vector<std::uint16_t>{}, std::vector<std::uint16_t>{3, 1}};
+    const auto positions = sg::vertexFloats(mesh, link, sg::kPositions);
+    const auto uvs = sg::vertexFloats(mesh, link, sg::kTextureCoordinates);
+    const auto second = sg::vertexFloats(mesh, link, sg::kTextureCoordinates, 1);
+    CHECK(positions == std::vector<float>({2, 2, 2, 0, 0, 0}));
+    CHECK(uvs == std::vector<float>({0.75f, 0.75f, 0.25f, 0.25f}));
+    CHECK(second == std::vector<float>({4, 4, 2, 2}));
+}
+
 int main(int argc, char** argv) {
     const std::string_view filter = argc > 1 ? argv[1] : "";
     const std::pair<const char*, void (*)()> tests[] = {
@@ -3733,6 +3852,9 @@ int main(int argc, char** argv) {
         {"neighborhood camera reads", neighborhoodCameraReads},
         {"neighborhood paint rules read", neighborhoodPaintRulesRead},
         {"neighborhood light map looks up normals", neighborhoodLightMapLooksUpNormals},
+        {"neighborhood roads parse", neighborhoodRoadsParse},
+        {"lot description parse", lotDescriptionParse},
+        {"vertex aliases follow kind", vertexAliasesFollowKind},
         {"fence post layer reads posts", fencePostLayerReadsPosts},
         {"build scripts read patterns and wall styles", buildScriptsReadPatternsAndWallStyles},
         {"wall layer reads coverings per side", wallLayerReadsCoveringsPerSide},

@@ -307,20 +307,24 @@ std::vector<float> floats(const Element& element) {
     return out;
 }
 
-std::vector<float> vertexFloats(const Mesh& mesh, const ElementLink& link, std::uint32_t identity) {
-    for (std::size_t k = 0; k < link.elements.size(); ++k) {
-        const std::uint16_t e = link.elements[k];
+std::vector<float> vertexFloats(const Mesh& mesh, const ElementLink& link, std::uint32_t identity, std::size_t nth) {
+    const int kind = identity == kPositions ? 0 : identity == kNormals ? 1 : identity == kTextureCoordinates ? 2 : -1;
+    for (const std::uint16_t e : link.elements) {
         if (e >= mesh.elements.size() || mesh.elements[e].identity != identity) {
             continue;
         }
+        if (nth-- > 0) {
+            continue;
+        }
         std::vector<float> items = floats(mesh.elements[e]);
-        if (k >= link.aliases.size() || link.aliases[k].empty()) {
+        if (kind < 0 || link.aliases[static_cast<std::size_t>(kind)].empty()) {
             return items;
         }
+        const auto& aliases = link.aliases[static_cast<std::size_t>(kind)];
         const std::uint32_t f = mesh.elements[e].blockFormat + 1;
         std::vector<float> out;
-        out.reserve(link.aliases[k].size() * f);
-        for (const std::uint16_t a : link.aliases[k]) {
+        out.reserve(aliases.size() * f);
+        for (const std::uint16_t a : aliases) {
             if ((a + 1u) * f > items.size()) {
                 return {};
             }

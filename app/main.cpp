@@ -8,6 +8,7 @@
 #include "content/cameras.hpp"
 #include "content/install.hpp"
 #include "content/lighting.hpp"
+#include "content/material_scripts.hpp"
 #include "formats/nhood_paint_rules.hpp"
 #include "menu.hpp"
 #include "render/renderer.hpp"
@@ -269,9 +270,21 @@ int main(int argc, char** argv) {
             if (light.lookup.width == 0) {
                 throw std::runtime_error("the neighborhood light map image was not found");
             }
-            hoodStats = ts2::scene::addNeighborhood(builder, utf8Path(argv[2]), ts2::nhood::parsePaintRules(text), light);
-            std::printf("neighborhood %u x %u tiles, %s, sea level %.2f\n", hoodStats.width, hoodStats.height,
-                        hoodStats.terrainType.c_str(), hoodStats.seaLevel);
+            // How far lot imposters are lifted above the terrain, from the newest Neighborhood.ini.
+            float imposterZOffset = 0;
+            if (const auto tunables = ts2::content::newestDataFile(products, "Sys/Neighborhood.ini")) {
+                std::ifstream file(*tunables);
+                for (std::string line; std::getline(file, line);) {
+                    constexpr std::string_view kKey = "ImposterZOffset=";
+                    if (line.starts_with(kKey)) {
+                        imposterZOffset = std::stof(line.substr(kKey.size()));
+                    }
+                }
+            }
+            hoodStats = ts2::scene::addNeighborhood(builder, utf8Path(argv[2]), ts2::nhood::parsePaintRules(text), light,
+                                                    ts2::content::neighborhoodRoadTextures(products), imposterZOffset);
+            std::printf("neighborhood %u x %u tiles, %s, sea level %.2f, %zu lots (%zu imposters)\n", hoodStats.width,
+                        hoodStats.height, hoodStats.terrainType.c_str(), hoodStats.seaLevel, hoodStats.lots, hoodStats.imposters);
         } else {
             const auto stats = ts2::scene::addLot(builder, utf8Path(argv[2]));
             std::printf("%zu objects, %zu walls, %zu roofs, %zu terrain paints\n", stats.objects, stats.walls, stats.roofs,

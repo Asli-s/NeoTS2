@@ -115,6 +115,32 @@ struct PaintedTerrain {
     float reflectionOffset = 0.002f;       // nhoodWaterReflOffset (the second sample's shift)
     float rippleScale = 7, rippleSpeed = 0.5f;  // nhoodWaterMap1Scale, nhoodWaterMap1Speed
     float gradientDepth = 40;              // waterGradientZoneSize
+
+    // Roads: a quad per road tile, a little above the terrain, its texture blended over it and
+    // multiplied by the light map. Corners (x0,y0) (x0,y1) (x1,y1) (x1,y0), split like the terrain.
+    struct RoadQuad {
+        std::array<std::array<float, 5>, 4> corners{};  // x, y, z, u, v
+        std::uint32_t texture = 0;                      // index into roadTextures
+    };
+    std::vector<RoadQuad> roads;
+    std::vector<Image> roadTextures;  // all the same size
+
+    // The lots, each drawn as its imposter: flat models of its terrain, walls, object slices and
+    // roofs, with textures rendered from the lot (so with alpha already multiplied in). As the
+    // game's "Shaders for imposters" script draws them: terrain (its light map multiplied over the
+    // neighborhood, then its texture over that) before the rest; walls and slices point-sampled and
+    // alpha-tested (above 64 and 127); roofs opaque and two-sided.
+    struct ImposterPart {
+        enum class Kind : std::uint8_t { Terrain, Wall, Slice, Roof };
+        Kind kind = Kind::Wall;
+        std::uint32_t texture = 0;  // index into imposterTextures
+        int lightMap = -1;          // terrain: its light map, index into imposterTextures; -1 for none
+        std::array<float, 3> lightMapTint{1, 1, 1};
+        std::vector<float> vertices;  // x, y, z in the world, u, v, then u, v of the second set
+        std::vector<std::uint32_t> indices;
+    };
+    std::vector<ImposterPart> imposters;
+    std::vector<Image> imposterTextures;
     std::size_t paints() const { return alphaSize ? alphas.size() / (static_cast<std::size_t>(alphaSize) * alphaSize) : 0; }
 };
 

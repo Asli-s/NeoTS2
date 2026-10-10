@@ -2,10 +2,15 @@
 
 #include "content/neighborhood.hpp"
 #include "formats/dbpf.hpp"
+#include "formats/lot_description.hpp"
+#include "formats/nhood_objects.hpp"
 #include "formats/nhood_terrain.hpp"
+#include "scene/imposters.hpp"
 #include "scene/neighborhood_paint.hpp"
 
 #include <algorithm>
+#include <climits>
+#include <cmath>
 #include <cstdio>
 #include <map>
 #include <optional>
@@ -55,15 +60,26 @@ Image resized(const Image& image, std::uint32_t width, std::uint32_t height) {
 } // namespace
 
 NeighborhoodSceneStats addNeighborhood(SceneBuilder& builder, const std::filesystem::path& neighborhood,
-                                       const nhood::PaintRules& rules, const NeighborhoodLight& light) {
+                                       const nhood::PaintRules& rules, const NeighborhoodLight& light,
+                                       const std::map<std::string, std::string>& roadTextures, float imposterZOffset) {
     dbpf::Package package{content::neighborhoodPackage(neighborhood)};
     std::optional<nhood::Terrain> terrain;
     std::optional<nhood::SavedCamera> camera;
+    nhood::Objects objects;
+    std::vector<nhood::LotDescription> lots;
     for (const auto& e : package.entries()) {
         if (e.key.type == nhood::kTerrainType && !terrain) {
             terrain = nhood::parseTerrain(package.read(e));
         } else if (e.key.type == nhood::kSavedCameraType && !camera) {
             camera = nhood::parseSavedCamera(package.read(e));
+        } else if (e.key.type == nhood::kObjectsType) {
+            objects = nhood::parseObjects(package.read(e));
+        } else if (e.key.type == nhood::kLotDescriptionType) {
+            try {
+                lots.push_back(nhood::parseLotDescription(package.read(e)));
+            } catch (const std::exception& ex) {
+                builder.assets().warnings.push_back("lot description: " + std::string(ex.what()));
+            }
         }
     }
     if (!terrain || terrain->columns < 2 || terrain->rows < 2) {
@@ -72,8 +88,19 @@ NeighborhoodSceneStats addNeighborhood(SceneBuilder& builder, const std::filesys
     const auto& t = *terrain;
     NeighborhoodSceneStats stats{t.width, t.height, t.seaLevel, t.type, camera};
 
-    // The paints (no roads yet), then one alpha map per paint the terrain uses.
-    const auto painted = paintTerrain(t, rules, kTile, {});
+    // The tiles under roads, which the paints keep their distance from.
+    const std::uint32_t tilesX = t.columns - 1, tilesY = t.rows - 1;
+    std::vector<std::uint8_t> roadTiles(static_cast<std::size_t>(tilesX) * tilesY, 0);
+    for (const auto& road : objects.roads) {
+        const auto x = static_cast<std::int64_t>(std::lround(road.bounds[0] / kTile));
+        const auto y = static_cast<std::int64_t>(std::lround(road.bounds[1] / kTile));
+        if (x >= 0 && y >= 0 && x < tilesX && y < tilesY) {
+            roadTiles[static_cast<std::size_t>(y) * tilesX + static_cast<std::size_t>(x)] = 1;
+        }
+    }
+
+    // The paints, then one alpha map per paint the terrain uses.
+    const auto painted = paintTerrain(t, rules, kTile, roadTiles);
     PaintedTerrain out;
     out.columns = t.columns;
     out.rows = t.rows;
@@ -173,6 +200,46 @@ NeighborhoodSceneStats addNeighborhood(SceneBuilder& builder, const std::filesys
         out.underwaterGradient = std::move(*gradient);
     }
     out.sky = assets.textureFaces("neighborhood-sky2-envcube");
+
+    // The roads, each piece showing the texture its material names.
+    std::map<std::uint32_t, std::uint32_t> textureOf;  // by piece
+    for (const auto& road : objects.roads) {
+        auto known = textureOf.find(road.piece);
+        if (known == textureOf.end()) {
+            char name[96];
+            std::snprintf(name, sizeof name, "neighborhood-roads-%s-%08x", t.type.c_str(), road.piece);
+            const auto texture = roadTextures.find(name);
+            auto image = texture == roadTextures.end() ? std::nullopt : assets.texture(texture->second);
+            if (!image) {
+                assets.warnings.push_back(std::string("neighborhood road texture missing for ") + name);
+                textureOf[road.piece] = UINT32_MAX;
+                continue;
+            }
+            if (!out.roadTextures.empty() && (image->width != out.roadTextures[0].width || image->height != out.roadTextures[0].height)) {
+                *image = resized(*image, out.roadTextures[0].width, out.roadTextures[0].height);
+            }
+            known = textureOf.emplace(road.piece, static_cast<std::uint32_t>(out.roadTextures.size())).first;
+            out.roadTextures.push_back(std::move(*image));
+        }
+        if (known->second != UINT32_MAX) {
+            out.roads.push_back({road.corners, known->second});
+        }
+    }
+
+    // The lots, as their imposters.
+    const std::string hood = neighborhood.filename().string();
+    stats.lots = lots.size();
+    for (const auto& lot : lots) {
+        const auto file = neighborhood / "Lots" / (hood + "_Lot" + std::to_string(lot.id) + ".package");
+        if (!std::filesystem::is_regular_file(file)) {
+            continue;
+        }
+        try {
+            stats.imposters += addImposter(out, file, lot, imposterZOffset, assets.warnings) ? 1 : 0;
+        } catch (const std::exception& ex) {
+            assets.warnings.push_back(file.filename().string() + ": " + ex.what());
+        }
+    }
     builder.scene().terrain = std::move(out);
 
     return stats;
