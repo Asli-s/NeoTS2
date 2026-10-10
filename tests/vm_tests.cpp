@@ -827,6 +827,21 @@ void sceneGridRoofsMatchTheGame() {
            std::map<int, int>{{0, 10}, {2, 32}, {4, 12}, {20, 16}, {22, 8}, {26, 4}, {42, 2}, {60, 72}, {66, 4}, {82, 10}}));
     CHECK((pieces(*shed2, {&*hip, &*shed1}) ==
            std::map<int, int>{{0, 10}, {2, 16}, {4, 2}, {22, 8}, {60, 24}, {62, 16}, {64, 4}, {82, 10}}));
+
+    // One roof of each kind on the ground (Cape Cod, rebuilt): a single slope, a gable across its
+    // length, and a flat-topped hip meeting a small hip.
+    const auto slope = RoofGrid::of(ofType(10, 1, 8, 3, 0, 1), 0);
+    const auto across = RoofGrid::of(ofType(10, 5, 8, 7, 0, 3), 0);
+    const auto flat = RoofGrid::of(ofType(10, 19, 1, 12, 0, 6), 0);
+    const auto small = RoofGrid::of(ofType(9, 9, 7, 11, 0, 5), 0);
+    CHECK(slope && across && flat && small);
+    CHECK(slope->nx == 7 && slope->ny == 6 && slope->high == 3 && std::abs(slope->z(0, 0, 0) + 0.38f) < 1e-4f);
+    CHECK(!across->ridgeAlongX && flat->cap == 7 && flat->peak == 7);
+    CHECK((pieces(*slope, {}) == std::map<int, int>{{4, 12}, {60, 48}}));
+    CHECK((pieces(*across, {}) == std::map<int, int>{{4, 24}, {60, 48}}));
+    CHECK((pieces(*flat, {&*small}) ==
+           std::map<int, int>{{0, 28}, {2, 94}, {4, 16}, {20, 2}, {46, 12}, {60, 418}, {62, 2}, {66, 16}, {82, 28}}));
+    CHECK((pieces(*small, {&*flat}) == std::map<int, int>{{0, 10}, {2, 28}, {8, 2}, {24, 4}, {44, 2}, {46, 4}, {60, 12}, {82, 10}}));
 }
 
 // A lot's terrain textures (canvas, then the paints) and a c2DArray of paint strengths, row by row.

@@ -47,7 +47,8 @@ struct WallQuad {
 // A roof as the game builds it: heights in grid steps on points half a tile apart over the roof's
 // rectangle and overhang (see roof_grid.cpp). Only roof types whose building is traced have one.
 struct RoofGrid {
-    enum class Kind { gable, hip, shed };
+    // gable (types 3, 4), hip (5), hipped shed (2), single slope (1), hip with a flat top (6)
+    enum class Kind { gable, hip, shed, slope, flatHip };
     int type = 0;
     Kind kind = Kind::gable;
     float minX = 0, minY = 0;  // the first grid point
@@ -57,9 +58,10 @@ struct RoofGrid {
     int level = 0;             // the level the roof is saved on
     bool ridgeAlongX = true;
     // Which way the roof lies, as the game keeps it: for gables and hips the ridge runs along x, for
-    // sheds the roof is longer along y. It sets which faces the ridge stands between (see ridgeMask).
+    // sheds and slopes the roof is longer along y. It sets which faces the ridge stands between.
     bool lengthwise = true;
-    int high = -1;             // a shed's high side: 0 low x, 1 high x, 2 low y, 3 high y
+    int high = -1;             // a shed's or slope's high side: 0 low x, 1 high x, 2 low y, 3 high y
+    int cap = 0;               // a flat-topped hip's height, in grid steps
     std::vector<float> steps;  // per point (row by row), in grid steps
     float peak = 0;
 

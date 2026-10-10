@@ -9,7 +9,8 @@
 // alternating like a checkerboard, and each top triangle shows one cell of the roof texture's
 // 5 x 5 grid of pieces, chosen from what its corners touch: the ridge (the roof's highest points),
 // the hips (the diagonals rising from a hipped roof's corners) and other roofs meeting it at the
-// same height. Gables, hips and hipped sheds differ only in their heights and where the hips run.
+// same height. Roof types 1 to 6 differ only in their heights and where the ridge and hips run
+// (and type 6 leaves its flat top open).
 
 namespace ts2::scene {
 
@@ -21,9 +22,10 @@ constexpr std::array<float, 3> kLayerDrop{0.42f, 0.5075f, 0.67f};  // below the 
 constexpr float kSlope = 0.1f;                                     // facing threshold on a cell's slope
 
 // The texture is addressed through a table of 10 x 10 points: u and v each run over the cell edges
-// 0, .2, .2, .4, ... 1 (two per edge), entry 10 v + u.
+// 0, 51, 51, 102, ... 255 (in 256ths, two per edge), entry 10 v + u.
 std::array<float, 2> texturePoint(int entry) {
-    static constexpr std::array<float, 10> edge{0, .2f, .2f, .4f, .4f, .6f, .6f, .8f, .8f, 1};
+    static constexpr std::array<float, 10> edge{0, 51 / 256.f, 51 / 256.f, 102 / 256.f, 102 / 256.f, 153 / 256.f,
+                                                153 / 256.f, 204 / 256.f, 204 / 256.f, 255 / 256.f};
     return {edge[static_cast<std::size_t>(entry % 10)], edge[static_cast<std::size_t>(entry / 10)]};
 }
 
@@ -315,14 +317,31 @@ int facing(const std::array<float, 2>& g) {
     return -1;
 }
 
+// The face bit other roofs' ridge and hip masks are tested against, from the same slope.
+int facingBits(const std::array<float, 2>& g) {
+    if (g[0] < -kSlope) {
+        return 2;
+    }
+    if (g[1] < -kSlope) {
+        return 8;
+    }
+    if (g[0] > kSlope) {
+        return 1;
+    }
+    return g[1] > kSlope ? 4 : 0;
+}
+
 }  // namespace
 
 std::optional<RoofGrid> RoofGrid::of(const roofs::Roof& roof, float eave) {
     RoofGrid g;
     switch (roof.type) {
+    case 1: g.kind = Kind::slope; break;
     case 2: g.kind = Kind::shed; break;
+    case 3:
     case 4: g.kind = Kind::gable; break;
     case 5: g.kind = Kind::hip; break;
+    case 6: g.kind = Kind::flatHip; break;
     default: return std::nullopt;  // not built this way yet
     }
     g.type = static_cast<int>(roof.type);
@@ -330,19 +349,23 @@ std::optional<RoofGrid> RoofGrid::of(const roofs::Roof& roof, float eave) {
     const float lx = std::min(roof.x0, roof.x1), hx = std::max(roof.x0, roof.x1);
     const float ly = std::min(roof.y0, roof.y1), hy = std::max(roof.y0, roof.y1);
     const float dx = std::abs(roof.x1 - roof.x0), dy = std::abs(roof.y1 - roof.y0);
-    g.ridgeAlongX = dy <= dx;
-    g.lengthwise = g.kind == Kind::shed ? dx < dy : g.ridgeAlongX;
-    if (g.kind == Kind::shed) {
+    // A gable's ridge runs along the longer side (type 3: across it).
+    g.ridgeAlongX = g.type == 3 ? dx < dy : dy <= dx;
+    const bool sloped = g.kind == Kind::shed || g.kind == Kind::slope;
+    g.lengthwise = sloped ? dx < dy : g.ridgeAlongX;
+    if (sloped) {
         // High along the second corner's side, across the roof's length.
         g.high = g.lengthwise ? (roof.x1 >= roof.x0 ? 1 : 0) : (roof.y1 >= roof.y0 ? 3 : 2);
     }
-    // The grid covers the rectangle and its overhang, except on a shed's high side.
+    // The grid covers the rectangle and its overhang, except on the high side.
     const float x0 = lx - (g.high == 0 ? 0 : kOverhang), x1 = hx + (g.high == 1 ? 0 : kOverhang);
     const float y0 = ly - (g.high == 2 ? 0 : kOverhang), y1 = hy + (g.high == 3 ? 0 : kOverhang);
     g.minX = x0;
     g.minY = y0;
     g.nx = static_cast<int>(std::lround(2 * (x1 - x0))) + 1;
     g.ny = static_cast<int>(std::lround(2 * (y1 - y0))) + 1;
+    // A flat-topped hip rises one step less than a hip would, at most 7 steps (at least 1).
+    g.cap = std::max(1, std::min(std::min(g.nx >> 1, g.ny >> 1) - 1, 7));
     // The saved slope is half the tangent of the roof's angle: the rise per grid step.
     g.scale = roof.slope > 0 ? roof.slope : 0.5f;
     g.eave = eave;
@@ -350,12 +373,22 @@ std::optional<RoofGrid> RoofGrid::of(const roofs::Roof& roof, float eave) {
     for (int r = 0; r < g.ny; ++r) {
         for (int c = 0; c < g.nx; ++c) {
             // Steps up from the sloped edges: the nearer of the two along the slope for a gable,
-            // the nearest of all four for a hip, of all but the high side for a shed.
+            // the nearest of all four for a hip, of all but the high side for a shed; a slope rises
+            // from its low side alone, a little above it.
             const int fromX = std::min(g.high == 0 ? g.nx : c, g.high == 1 ? g.nx : g.nx - 1 - c);
             const int fromY = std::min(g.high == 2 ? g.ny : r, g.high == 3 ? g.ny : g.ny - 1 - r);
-            const int s = g.kind == Kind::gable ? (g.ridgeAlongX ? fromY : fromX) : std::min(fromX, fromY);
-            g.steps[static_cast<std::size_t>(r * g.nx + c)] = static_cast<float>(s);
-            g.peak = std::max(g.peak, static_cast<float>(s));
+            float s = 0;
+            switch (g.kind) {
+            case Kind::gable: s = static_cast<float>(g.ridgeAlongX ? fromY : fromX); break;
+            case Kind::hip:
+            case Kind::shed: s = static_cast<float>(std::min(fromX, fromY)); break;
+            case Kind::flatHip: s = static_cast<float>(std::min({fromX, fromY, g.cap})); break;
+            case Kind::slope:
+                s = static_cast<float>(g.high <= 1 ? (g.high == 1 ? c : g.nx - 1 - c) : (g.high == 3 ? r : g.ny - 1 - r)) + 0.08f;
+                break;
+            }
+            g.steps[static_cast<std::size_t>(r * g.nx + c)] = s;
+            g.peak = std::max(g.peak, s);
         }
     }
     return g;
@@ -370,20 +403,26 @@ int RoofGrid::ridgeMask(int row, int col) const {
     if (!(s > 0 && s == peak)) {
         return 0;
     }
-    return lengthwise ? 12 : 3;
+    switch (kind) {
+    case Kind::slope: return nx < ny ? 3 : 12;
+    case Kind::flatHip:
+        // The whole flat top, and on its edges the face rising to it.
+        return 0x10 | (col == cap ? 2 : 0) | (row == cap ? 8 : 0) | (col == nx - cap - 1 ? 1 : 0) | (row == ny - cap - 1 ? 4 : 0);
+    default: return lengthwise ? 12 : 3;
+    }
 }
 
 namespace {
 
 // Whether a point of a hip roof's grid (w x h points) lies on a hip, as the four faces it parts:
-// from the corner at the low x, low y end 10, high x 9, high y 6, both high 5.
-int hipFrom(int i, int j, int w, int h) {
-    const int m = std::min(w >> 1, h >> 1);
+// from the corner at the low x, low y end 10, high x 9, high y 6, both high 5. The hips run m steps
+// in (half the shorter side); from the far corner only under `far` steps.
+int hipFrom(int i, int j, int w, int h, int m, int far) {
     if (m < i) {
         if (j <= m) {
             return j == w - i - 1 ? 9 : 0;
         }
-        return w - i - 1 == h - j - 1 ? 5 : 0;
+        return w - i - 1 == h - j - 1 && w - i - 1 < far ? 5 : 0;
     }
     if (m < j) {
         return i == h - j - 1 ? 6 : 0;
@@ -391,12 +430,18 @@ int hipFrom(int i, int j, int w, int h) {
     return i == j ? 10 : 0;
 }
 
+int hipFrom(int i, int j, int w, int h) {
+    return hipFrom(i, j, w, h, std::min(w >> 1, h >> 1), w);
+}
+
 }  // namespace
 
 int RoofGrid::hipMask(int row, int col) const {
     switch (kind) {
-    case Kind::gable: return 0;
+    case Kind::gable:
+    case Kind::slope: return 0;
     case Kind::hip: return hipFrom(col, row, nx, ny);
+    case Kind::flatHip: return hipFrom(col, row, nx, ny, cap, 8);
     case Kind::shed:
         // A shed is the half of a hip twice as deep that lies on its high side's side.
         if (high <= 1) {
@@ -472,17 +517,13 @@ void addRoofGrid(Surfaces& surfaces, const RoofGrid& roof, const std::vector<con
     // at a corner where it is at the same height there, unless that point is on its ridge or a hip
     // bordering the way the triangle faces; such a roof joins none of the triangle's corners. When
     // all three corners meet other roofs, those meeting all three do not join.
-    auto cornerFlags = [&](const std::array<std::array<int, 2>, 3>& pts) {
+    auto cornerFlags = [&](const std::array<std::array<int, 2>, 3>& pts, const std::array<float, 2>& g) {
         std::array<std::array<float, 3>, 3> w{};
         for (std::size_t i = 0; i < 3; ++i) {
             const auto p = at(pts[i][0], pts[i][1]);
             w[i] = {p[0], p[1], roof.z(pts[i][0], pts[i][1], 0)};
         }
-        const float ax = w[1][0] - w[0][0], ay = w[1][1] - w[0][1], az = w[1][2] - w[0][2];
-        const float bx = w[2][0] - w[0][0], by = w[2][1] - w[0][1], bz = w[2][2] - w[0][2];
-        const float det = ax * by - bx * ay;
-        const float gx = (az * by - bz * ay) / det, gy = (ax * bz - bx * az) / det;  // uphill
-        const int face = std::abs(gx) >= std::abs(gy) ? (gx > 0 ? 2 : 1) : (gy > 0 ? 8 : 4);
+        const int face = facingBits(g);
         struct Touch {
             const RoofGrid* roof;
             int masks;  // its ridge and hip masks at the point
@@ -543,6 +584,7 @@ void addRoofGrid(Surfaces& surfaces, const RoofGrid& roof, const std::vector<con
             const int first = roof.parity(r, c) == 0 ? 0 : 2;
             struct Tri {
                 int kind;
+                std::array<float, 2> slope;  // downhill, in grid steps, as the kind measures it
                 std::array<int, 3> flags;
                 int joins;
                 bool keep;
@@ -560,11 +602,19 @@ void addRoofGrid(Surfaces& surfaces, const RoofGrid& roof, const std::vector<con
                     cx += p[0] / 3;
                     cy += p[1] / 3;
                 }
-                tri.flags = cornerFlags(pts);
+                auto h = [&](int dr, int dc) { return roof.steps[static_cast<std::size_t>((r + dr) * nx + c + dc)]; };
+                switch (tri.kind) {
+                case 0: tri.slope = {(h(1, 0) - h(0, 0)) - (h(1, 1) - h(0, 0)), -(h(1, 0) - h(0, 0))}; break;
+                case 1: tri.slope = {-(h(0, 1) - h(0, 0)), (h(0, 1) - h(0, 0)) - (h(1, 1) - h(0, 0))}; break;
+                case 2: tri.slope = {-(h(0, 1) - h(0, 0)), -(h(1, 0) - h(0, 0))}; break;
+                default: tri.slope = {-(h(1, 1) - h(1, 0)), (h(0, 1) - h(1, 0)) - (h(1, 1) - h(1, 0))}; break;
+                }
+                tri.flags = cornerFlags(pts, tri.slope);
                 for (const int f : tri.flags) {
                     tri.joins += (f & kJunction) ? 1 : 0;
                 }
-                tri.keep = !covered(cx, cy);
+                // A flat-topped hip leaves its flat top open.
+                tri.keep = !covered(cx, cy) && !(roof.kind == RoofGrid::Kind::flatHip && facing(tri.slope) < 0);
             }
             for (int t = 0; t < 2; ++t) {
                 const Tri& tri = tris[static_cast<std::size_t>(t)];
@@ -572,15 +622,7 @@ void addRoofGrid(Surfaces& surfaces, const RoofGrid& roof, const std::vector<con
                     continue;
                 }
                 const Kind& k = kKinds[static_cast<std::size_t>(tri.kind)];
-                // The cell's slope (downhill, in grid steps) as the kind measures it.
-                auto s = [&](int dr, int dc) { return roof.steps[static_cast<std::size_t>((r + dr) * nx + c + dc)]; };
-                std::array<float, 2> g{};
-                switch (tri.kind) {
-                case 0: g = {(s(1, 0) - s(0, 0)) - (s(1, 1) - s(0, 0)), -(s(1, 0) - s(0, 0))}; break;
-                case 1: g = {-(s(0, 1) - s(0, 0)), (s(0, 1) - s(0, 0)) - (s(1, 1) - s(0, 0))}; break;
-                case 2: g = {-(s(0, 1) - s(0, 0)), -(s(1, 0) - s(0, 0))}; break;
-                default: g = {-(s(1, 1) - s(1, 0)), (s(0, 1) - s(1, 0)) - (s(1, 1) - s(1, 0))}; break;
-                }
+                const std::array<float, 2>& g = tri.slope;
                 int ridges = 0, hips = 0;
                 for (const int f : tri.flags) {
                     ridges += (f & kRidge) ? 1 : 0;
@@ -634,27 +676,45 @@ void addRoofGrid(Surfaces& surfaces, const RoofGrid& roof, const std::vector<con
 
     // The edge board: a quad per grid step along the four sides, between layers 0 and 1 (the edges
     // material) and 1 and 2 (the trim), unless another roof covers the step's middle. Its texture is
-    // the top row of the material's texture.
-    auto strip = [&](int r0, int c0, int r1, int c1, const std::array<float, 3>& out) {
+    // the top row of the material's texture. Each quad's corners go in the game's order for its side,
+    // a and b being the step's ends (upper layer u, lower l): a u, b u, b l, a l on the low x and high
+    // y sides, a u, a l, b l, b u on the others; it is split from its first corner.
+    auto strip = [&](int r0, int c0, int r1, int c1, bool down) {
         const auto a = at(r0, c0), b = at(r1, c1);
         if (covered((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)) {
             return;
         }
-        for (const auto& [upper, material] : {std::pair{0, look.edges}, std::pair{1, look.trim}}) {
+        static const std::array<std::array<float, 2>, 4> uv{texturePoint(0), texturePoint(1), texturePoint(9), texturePoint(8)};
+        for (const auto& [u, material] : {std::pair{0, look.edges}, std::pair{1, look.trim}}) {
             if (material < 0) {
                 continue;
             }
-            addQuad(surfaces[material], {{position(r0, c0, upper), position(r1, c1, upper), position(r1, c1, upper + 1), position(r0, c0, upper + 1)}},
-                    out, {{texturePoint(0), texturePoint(1), texturePoint(9), texturePoint(8)}});
+            std::array<std::array<float, 3>, 4> q{position(r0, c0, u), position(r1, c1, u), position(r1, c1, u + 1), position(r0, c0, u + 1)};
+            if (down) {
+                q = {position(r0, c0, u), position(r0, c0, u + 1), position(r1, c1, u + 1), position(r1, c1, u)};
+            }
+            triangle(surfaces[material], {q[0], q[1], q[2]}, {uv[0], uv[1], uv[2]});
+            triangle(surfaces[material], {q[0], q[2], q[3]}, {uv[0], uv[2], uv[3]});
         }
     };
     for (int r = 0; r + 1 < ny; ++r) {
-        strip(r, 0, r + 1, 0, {-1, 0, 0});
-        strip(r, nx - 1, r + 1, nx - 1, {1, 0, 0});
+        strip(r, 0, r + 1, 0, false);
+        strip(r, nx - 1, r + 1, nx - 1, true);
     }
     for (int c = 0; c + 1 < nx; ++c) {
-        strip(0, c, 0, c + 1, {0, -1, 0});
-        strip(ny - 1, c, ny - 1, c + 1, {0, 1, 0});
+        strip(0, c, 0, c + 1, true);
+        strip(ny - 1, c, ny - 1, c + 1, false);
+    }
+    // A flat-topped hip big enough to rise 7 steps is edged around its top too.
+    if (roof.kind == RoofGrid::Kind::flatHip) {
+        for (int r = 7; r < ny - 8; ++r) {
+            strip(r, nx - 8, r + 1, nx - 8, false);
+            strip(r, 7, r + 1, 7, true);
+        }
+        for (int c = 7; c < nx - 8; ++c) {
+            strip(ny - 8, c, ny - 8, c + 1, true);
+            strip(7, c, 7, c + 1, false);
+        }
     }
 }
 
