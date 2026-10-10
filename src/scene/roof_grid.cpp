@@ -7,8 +7,9 @@
 // rectangle and its overhang; three layers of that grid make a slab (the shingled top, the edge
 // board's two bands and the underside). Each grid cell is split into two triangles, its diagonal
 // alternating like a checkerboard, and each top triangle shows one cell of the roof texture's
-// 5 x 5 grid of pieces, chosen from what its corners touch: the ridge (the roof's highest points)
-// and other roofs meeting it at the same height.
+// 5 x 5 grid of pieces, chosen from what its corners touch: the ridge (the roof's highest points),
+// the hips (the diagonals rising from a hipped roof's corners) and other roofs meeting it at the
+// same height. Gables, hips and hipped sheds differ only in their heights and where the hips run.
 
 namespace ts2::scene {
 
@@ -117,6 +118,185 @@ void handle(int kind, int facing, Piece& p, int ridges, int joins, bool pair, in
     }
 }
 
+// Triangles with corners on a hip have their own pieces. These are the game's rules as they stand,
+// per kind; flags as above (kHip marks a corner on a hip), the rest as for handle().
+constexpr int kHip = 2;
+
+void oneOnHip(int kind, const std::array<float, 2>& g, Piece& p, int ridges, int joins, bool pair, int other,
+              const std::array<int, 3>& flags) {
+    auto j = [&](int k) { return (flags[static_cast<std::size_t>(k)] & kJunction) != 0; };
+    auto d = [&](int k) { return (flags[static_cast<std::size_t>(k)] & kHip) != 0; };
+    const bool xd = g[0] < -kSlope, xu = g[0] > kSlope, yd = g[1] < -kSlope, yu = g[1] > kSlope;
+    const int a = ridges ? 0x56 : 0x18, b = ridges ? 0x40 : 0x3e, c = ridges ? 0x2a : 0x28;
+    p.cell = ridges ? 0x42 : 2;
+    auto set = [&](int cell, int mirror) {
+        if (cell >= 0) {
+            p.cell = cell;
+        }
+        if (mirror >= 0) {
+            p.mirror = mirror != 0;
+        }
+    };
+    switch (kind) {
+    case 0:
+        if (yd) {
+            if (!d(1)) return set(-1, 0);
+            if (pair) return set(c, 1);
+            if (joins == 1 && other == 2 && j(0)) return set(a, 1);
+            if (joins == 1 && other == 1 && j(0)) return set(b, 1);
+            return set(-1, 1);
+        }
+        if (xd) {
+            if (joins == 2) return set(j(0) && j(2) ? a : -1, 0);
+            if (joins != 1 || other != 1) return set(-1, 0);
+            return set(j(0) ? b : -1, 0);
+        }
+        if (xu) {
+            if (!d(0)) return set(-1, 1);
+            if (pair) return set(c, 0);
+            if (joins != 1) return set(-1, 0);
+            if (j(1) && other == 2) return set(a, 0);
+            if (other != 1) return set(-1, 0);
+            return set(j(1) ? b : -1, 0);
+        }
+        if (yu) {
+            if (joins == 2 && j(1) && j(2)) return set(a, 1);
+            if (joins == 1 && other == 1 && j(1)) set(b, -1);
+            return set(-1, 1);
+        }
+        return;
+    case 1:
+        if (yd) {
+            if (joins == 2 && j(0) && j(1)) return set(a, 1);
+            if (joins == 1 && other == 1 && j(0)) set(b, -1);
+            return set(-1, 1);
+        }
+        if (xd) {
+            if (pair) return set(c, 0);
+            if (joins != 1) return set(-1, 0);
+            if (j(0) && other == 2) return set(a, 0);
+            if (other == 1 && j(0)) return set(b, 0);
+            return set(-1, 0);
+        }
+        if (xu) {
+            if (joins != 2) return set(joins == 1 && other == 1 && j(2) ? b : -1, 0);
+            return set(j(1) && j(2) ? a : -1, 0);
+        }
+        if (!yu) return;
+        if (d(0)) {
+            if (pair) return set(c, 1);
+            if (joins == 1 && other == 2 && j(2)) return set(a, 1);
+            if (joins == 1 && other == 1 && j(2)) set(b, -1);
+            return set(-1, 1);
+        }
+        return set(-1, 0);
+    case 2:
+        if (yd) {
+            if (joins == 2) return set(j(0) && j(1) ? a : -1, 0);
+            if (joins != 1 || other != 1) return set(-1, 0);
+            return set(j(1) ? b : -1, 0);
+        }
+        if (xd) {
+            if (joins == 2 && j(0) && j(2)) return set(a, 1);
+            if (joins == 1 && other == 1 && j(2)) set(b, -1);
+            return set(-1, 1);
+        }
+        if (xu) {
+            if (!d(2)) {
+                if (joins == 1 && other == 1 && (j(1) || j(2))) return set(b, -1);  // keeps its mirroring
+                return set(-1, 0);
+            }
+            if (pair) return set(c, 1);
+            if (joins == 1 && other == 2 && j(1)) return set(a, 1);
+            if (joins == 1 && other == 1 && j(1)) return set(b, 1);
+            return set(-1, 1);
+        }
+        if (!yu) return;
+        if (!d(1)) return set(-1, 1);
+        if (pair) return set(c, 0);
+        if (joins != 1) return set(-1, 0);
+        if (j(2) && other == 2) return set(a, 0);
+        if (other != 1) return set(-1, 0);
+        return set(j(2) ? b : -1, 0);
+    default:
+        if (yd) {
+            if (pair) return set(c, 0);
+            if (joins == 1 && j(0) && other == 2) return set(a, 0);
+            if (joins == 1 && other == 1 && j(0)) return set(b, 0);
+            return set(-1, 0);
+        }
+        if (xd) {
+            if (!d(0)) return set(-1, 0);
+            if (pair) return set(c, 1);
+            if (joins == 1 && other == 2 && j(2)) return set(a, 1);
+            if (joins == 1 && other == 1 && j(2)) set(b, -1);
+            return set(-1, 1);
+        }
+        if (xu) {
+            if (joins == 2 && j(0) && j(1)) return set(a, 1);
+            if (joins == 1 && other == 1 && j(0)) set(b, -1);
+            return set(-1, 1);
+        }
+        if (!yu) return;
+        if (joins == 2 && j(1) && j(2)) return set(a, 0);
+        if (joins == 1 && other == 1 && j(2)) set(b, -1);
+        return set(-1, 0);
+    }
+}
+
+void twoOnHip(int kind, const std::array<float, 2>& g, Piece& p, int joins, const std::array<int, 3>& flags) {
+    auto j = [&](int k) { return (flags[static_cast<std::size_t>(k)] & kJunction) != 0; };
+    const bool xd = g[0] < -kSlope, xu = g[0] > kSlope, yd = g[1] < -kSlope, yu = g[1] > kSlope;
+    p.cell = 0;
+    auto set = [&](int cell, bool mirror) {
+        p.cell = cell;
+        p.mirror = mirror;
+    };
+    switch (kind) {
+    case 0:
+        if (xd) {
+            if (joins == 1 && j(0)) return set(8, false);
+            if (joins == 2 && j(0) && j(2)) return set(0x2c, true);
+            return set(0x52, false);
+        } else if (yu) {
+            if (joins == 2 && j(1) && j(2)) set(0x2c, false);
+            else if (joins == 1 && j(1)) set(8, true);
+        }
+        return;
+    case 1:
+        if (yd) {
+            if (joins == 2 && j(0) && j(1)) set(0x2c, false);
+            else if (joins == 1 && j(0)) set(8, true);
+        } else if (xu) {
+            if (joins == 1 && j(2)) return set(8, false);
+            if (joins == 2 && j(1) && j(2)) return set(0x2c, true);
+            set(0x52, false);
+        }
+        return;
+    case 2:
+        if (yd) {
+            if (joins == 1 && j(1)) return set(8, false);
+            if (joins == 2 && j(0) && j(1)) return set(0x2c, true);
+            return set(0x52, false);
+        }
+        if (xd) {
+            if (joins == 2 && j(0) && j(2)) set(0x2c, false);
+            else if (joins == 1 && j(2)) set(8, true);
+        }
+        return;
+    default:
+        if (xu) {
+            if (joins == 2 && j(0) && j(1)) set(0x2c, false);
+            else if (joins == 1 && j(0)) set(8, true);
+        } else if (yu) {
+            if (joins == 1 && j(2)) return set(8, false);
+            if (joins == 2 && j(1) && j(2)) return set(0x2c, true);
+            set(0x52, false);
+        }
+        return;
+    }
+}
+
 // Which way a cell's triangle faces, from its slope (the downhill direction in grid steps):
 // 0 x down, 1 x up, 2 y down, 3 y up, -1 flat.
 int facing(const std::array<float, 2>& g) {
@@ -138,30 +318,93 @@ int facing(const std::array<float, 2>& g) {
 }  // namespace
 
 std::optional<RoofGrid> RoofGrid::of(const roofs::Roof& roof, float eave) {
-    if (roof.type != 4) {
-        return std::nullopt;  // only gables are built this way yet
-    }
     RoofGrid g;
+    switch (roof.type) {
+    case 2: g.kind = Kind::shed; break;
+    case 4: g.kind = Kind::gable; break;
+    case 5: g.kind = Kind::hip; break;
+    default: return std::nullopt;  // not built this way yet
+    }
     g.type = static_cast<int>(roof.type);
+    g.level = roof.level0;
     const float lx = std::min(roof.x0, roof.x1), hx = std::max(roof.x0, roof.x1);
     const float ly = std::min(roof.y0, roof.y1), hy = std::max(roof.y0, roof.y1);
-    g.minX = lx - kOverhang;
-    g.minY = ly - kOverhang;
-    g.nx = static_cast<int>(std::lround(2 * (hx - lx + 2 * kOverhang))) + 1;
-    g.ny = static_cast<int>(std::lround(2 * (hy - ly + 2 * kOverhang))) + 1;
+    const float dx = std::abs(roof.x1 - roof.x0), dy = std::abs(roof.y1 - roof.y0);
+    g.ridgeAlongX = dy <= dx;
+    g.lengthwise = g.kind == Kind::shed ? dx < dy : g.ridgeAlongX;
+    if (g.kind == Kind::shed) {
+        // High along the second corner's side, across the roof's length.
+        g.high = g.lengthwise ? (roof.x1 >= roof.x0 ? 1 : 0) : (roof.y1 >= roof.y0 ? 3 : 2);
+    }
+    // The grid covers the rectangle and its overhang, except on a shed's high side.
+    const float x0 = lx - (g.high == 0 ? 0 : kOverhang), x1 = hx + (g.high == 1 ? 0 : kOverhang);
+    const float y0 = ly - (g.high == 2 ? 0 : kOverhang), y1 = hy + (g.high == 3 ? 0 : kOverhang);
+    g.minX = x0;
+    g.minY = y0;
+    g.nx = static_cast<int>(std::lround(2 * (x1 - x0))) + 1;
+    g.ny = static_cast<int>(std::lround(2 * (y1 - y0))) + 1;
     // The saved slope is half the tangent of the roof's angle: the rise per grid step.
     g.scale = roof.slope > 0 ? roof.slope : 0.5f;
     g.eave = eave;
-    g.ridgeAlongX = std::abs(roof.y1 - roof.y0) <= std::abs(roof.x1 - roof.x0);
     g.steps.resize(static_cast<std::size_t>(g.nx * g.ny));
     for (int r = 0; r < g.ny; ++r) {
         for (int c = 0; c < g.nx; ++c) {
-            const int s = g.ridgeAlongX ? std::min(r, g.ny - 1 - r) : std::min(c, g.nx - 1 - c);
+            // Steps up from the sloped edges: the nearer of the two along the slope for a gable,
+            // the nearest of all four for a hip, of all but the high side for a shed.
+            const int fromX = std::min(g.high == 0 ? g.nx : c, g.high == 1 ? g.nx : g.nx - 1 - c);
+            const int fromY = std::min(g.high == 2 ? g.ny : r, g.high == 3 ? g.ny : g.ny - 1 - r);
+            const int s = g.kind == Kind::gable ? (g.ridgeAlongX ? fromY : fromX) : std::min(fromX, fromY);
             g.steps[static_cast<std::size_t>(r * g.nx + c)] = static_cast<float>(s);
             g.peak = std::max(g.peak, static_cast<float>(s));
         }
     }
     return g;
+}
+
+int RoofGrid::parity(int row, int col) const {
+    return (row + col + static_cast<int>(std::lround(2 * minX)) + static_cast<int>(std::lround(2 * minY))) & 1;
+}
+
+int RoofGrid::ridgeMask(int row, int col) const {
+    const float s = steps[static_cast<std::size_t>(row * nx + col)];
+    if (!(s > 0 && s == peak)) {
+        return 0;
+    }
+    return lengthwise ? 12 : 3;
+}
+
+namespace {
+
+// Whether a point of a hip roof's grid (w x h points) lies on a hip, as the four faces it parts:
+// from the corner at the low x, low y end 10, high x 9, high y 6, both high 5.
+int hipFrom(int i, int j, int w, int h) {
+    const int m = std::min(w >> 1, h >> 1);
+    if (m < i) {
+        if (j <= m) {
+            return j == w - i - 1 ? 9 : 0;
+        }
+        return w - i - 1 == h - j - 1 ? 5 : 0;
+    }
+    if (m < j) {
+        return i == h - j - 1 ? 6 : 0;
+    }
+    return i == j ? 10 : 0;
+}
+
+}  // namespace
+
+int RoofGrid::hipMask(int row, int col) const {
+    switch (kind) {
+    case Kind::gable: return 0;
+    case Kind::hip: return hipFrom(col, row, nx, ny);
+    case Kind::shed:
+        // A shed is the half of a hip twice as deep that lies on its high side's side.
+        if (high <= 1) {
+            return hipFrom(col + (high == 0 ? nx - 1 : 0), row, 2 * nx - 1, ny);
+        }
+        return hipFrom(col, row + (high == 2 ? ny - 1 : 0), nx, 2 * ny - 1);
+    }
+    return 0;
 }
 
 float RoofGrid::z(int row, int col, int layer) const {
@@ -174,7 +417,7 @@ float RoofGrid::surface(float x, float y) const {
     const int ci = std::clamp(static_cast<int>(std::floor(c)), 0, nx - 2), ri = std::clamp(static_cast<int>(std::floor(r)), 0, ny - 2);
     const float fc = c - static_cast<float>(ci), fr = r - static_cast<float>(ri);
     auto h = [&](int dr, int dc) { return z(ri + dr, ci + dc, 0); };
-    if ((ri + ci) % 2 == 0) {  // split along (0,0)-(1,1)
+    if (parity(ri, ci) == 0) {  // split along (0,0)-(1,1)
         if (fr >= fc) {
             return h(0, 0) + (h(1, 0) - h(0, 0)) * fr + (h(1, 1) - h(1, 0)) * fc;
         }
@@ -198,8 +441,9 @@ std::optional<float> RoofGrid::pointHeight(float x, float y) const {
     return z(static_cast<int>(ri), static_cast<int>(ci), 0);
 }
 
-std::optional<float> RoofGrid::coveringHeight(float x, float y) const {
-    const float lo = kOverhang;
+std::optional<float> RoofGrid::coveringHeight(float x, float y, int fromLevel) const {
+    // Over a roof on a lower level its overhang does not count; over one on its own level it does.
+    const float lo = fromLevel < level ? kOverhang : 0.0f;
     if (!(minX + lo < x && x <= minX + static_cast<float>(nx - 1) * kStep - lo && minY + lo < y &&
           y <= minY + static_cast<float>(ny - 1) * kStep - lo)) {
         return std::nullopt;
@@ -218,26 +462,68 @@ void addRoofGrid(Surfaces& surfaces, const RoofGrid& roof, const std::vector<con
     auto covered = [&](float x, float y) {
         const float own = roof.surface(x, y);
         for (const auto* o : others) {
-            if (const auto h = o->coveringHeight(x, y); h && *h > own + 1e-4f) {
+            if (const auto h = o->coveringHeight(x, y, roof.level); h && *h > own + 1e-4f) {
                 return true;
             }
         }
         return false;
     };
-    auto cornerFlags = [&](int r, int c) {
-        int f = 0;
-        const float s = roof.steps[static_cast<std::size_t>(r * nx + c)];
-        if (s > 0 && s == roof.peak) {
-            f |= kRidge;
+    // A triangle's corner flags: on the ridge, on a hip, and joining another roof. Another roof joins
+    // at a corner where it is at the same height there, unless that point is on its ridge or a hip
+    // bordering the way the triangle faces; such a roof joins none of the triangle's corners. When
+    // all three corners meet other roofs, those meeting all three do not join.
+    auto cornerFlags = [&](const std::array<std::array<int, 2>, 3>& pts) {
+        std::array<std::array<float, 3>, 3> w{};
+        for (std::size_t i = 0; i < 3; ++i) {
+            const auto p = at(pts[i][0], pts[i][1]);
+            w[i] = {p[0], p[1], roof.z(pts[i][0], pts[i][1], 0)};
         }
-        const auto p = at(r, c);
-        const float own = roof.z(r, c, 0);
-        for (const auto* o : others) {
-            if (const auto h = o->pointHeight(p[0], p[1]); h && std::abs(*h - own) < 1e-4f) {
-                f |= kJunction;
+        const float ax = w[1][0] - w[0][0], ay = w[1][1] - w[0][1], az = w[1][2] - w[0][2];
+        const float bx = w[2][0] - w[0][0], by = w[2][1] - w[0][1], bz = w[2][2] - w[0][2];
+        const float det = ax * by - bx * ay;
+        const float gx = (az * by - bz * ay) / det, gy = (ax * bz - bx * az) / det;  // uphill
+        const int face = std::abs(gx) >= std::abs(gy) ? (gx > 0 ? 2 : 1) : (gy > 0 ? 8 : 4);
+        struct Touch {
+            const RoofGrid* roof;
+            int masks;  // its ridge and hip masks at the point
+        };
+        std::array<std::vector<Touch>, 3> touches;
+        std::array<int, 3> flags{};
+        int touched = 0;
+        for (std::size_t i = 0; i < 3; ++i) {
+            const int r = pts[i][0], c = pts[i][1];
+            flags[i] = (roof.ridgeMask(r, c) ? kRidge : 0) | (roof.hipMask(r, c) ? kHip : 0);
+            for (const auto* o : others) {
+                const auto h = o->pointHeight(w[i][0], w[i][1]);
+                if (h && std::abs(*h - w[i][2]) < 1e-4f) {
+                    const int oc = static_cast<int>(std::lround((w[i][0] - o->minX) / kStep));
+                    const int orow = static_cast<int>(std::lround((w[i][1] - o->minY) / kStep));
+                    touches[i].push_back({o, o->ridgeMask(orow, oc) | o->hipMask(orow, oc)});
+                }
+            }
+            touched += touches[i].empty() ? 0 : 1;
+        }
+        auto touchesAll = [&](const RoofGrid* o) {
+            return std::all_of(touches.begin(), touches.end(), [&](const auto& t) {
+                return std::any_of(t.begin(), t.end(), [&](const Touch& x) { return x.roof == o; });
+            });
+        };
+        auto excluded = [&](const RoofGrid* o) {
+            if (touched == 3) {
+                return touchesAll(o);
+            }
+            return std::any_of(touches.begin(), touches.end(), [&](const auto& t) {
+                return std::any_of(t.begin(), t.end(), [&](const Touch& x) { return x.roof == o && (x.masks & face); });
+            });
+        };
+        for (std::size_t i = 0; i < 3; ++i) {
+            for (const Touch& t : touches[i]) {
+                if (!(t.masks & face) && !excluded(t.roof)) {
+                    flags[i] |= kJunction;
+                }
             }
         }
-        return f;
+        return flags;
     };
     auto triangle = [&](Primitive& prim, const std::array<std::array<float, 3>, 3>& v, const std::array<std::array<float, 2>, 3>& uv) {
         const std::array<float, 3> a{v[1][0] - v[0][0], v[1][1] - v[0][1], v[1][2] - v[0][2]};
@@ -254,7 +540,7 @@ void addRoofGrid(Surfaces& surfaces, const RoofGrid& roof, const std::vector<con
 
     for (int r = 0; r + 1 < ny; ++r) {
         for (int c = 0; c + 1 < nx; ++c) {
-            const int first = (r + c) % 2 == 0 ? 0 : 2;
+            const int first = roof.parity(r, c) == 0 ? 0 : 2;
             struct Tri {
                 int kind;
                 std::array<int, 3> flags;
@@ -266,14 +552,17 @@ void addRoofGrid(Surfaces& surfaces, const RoofGrid& roof, const std::vector<con
                 const Kind& k = kKinds[static_cast<std::size_t>(first + t)];
                 Tri& tri = tris[static_cast<std::size_t>(t)];
                 tri.kind = first + t;
+                std::array<std::array<int, 2>, 3> pts{};
                 float cx = 0, cy = 0;
                 for (std::size_t i = 0; i < 3; ++i) {
-                    const int rr = r + k.corners[i][0], cc = c + k.corners[i][1];
-                    tri.flags[i] = cornerFlags(rr, cc);
-                    tri.joins += (tri.flags[i] & kJunction) ? 1 : 0;
-                    const auto p = at(rr, cc);
+                    pts[i] = {r + k.corners[i][0], c + k.corners[i][1]};
+                    const auto p = at(pts[i][0], pts[i][1]);
                     cx += p[0] / 3;
                     cy += p[1] / 3;
+                }
+                tri.flags = cornerFlags(pts);
+                for (const int f : tri.flags) {
+                    tri.joins += (f & kJunction) ? 1 : 0;
                 }
                 tri.keep = !covered(cx, cy);
             }
@@ -292,17 +581,25 @@ void addRoofGrid(Surfaces& surfaces, const RoofGrid& roof, const std::vector<con
                 case 2: g = {-(s(0, 1) - s(0, 0)), -(s(1, 0) - s(0, 0))}; break;
                 default: g = {-(s(1, 1) - s(1, 0)), (s(0, 1) - s(1, 0)) - (s(1, 1) - s(1, 0))}; break;
                 }
-                int ridges = 0;
+                int ridges = 0, hips = 0;
                 for (const int f : tri.flags) {
                     ridges += (f & kRidge) ? 1 : 0;
+                    hips += (f & kHip) ? 1 : 0;
                 }
                 const bool pair = (tri.flags[static_cast<std::size_t>(k.pair[0])] & kJunction) &&
                                   (tri.flags[static_cast<std::size_t>(k.pair[1])] & kJunction);
+                const int other = tris[static_cast<std::size_t>(1 - t)].joins;
                 Piece piece;
-                piece.cell = ridges ? 4 : 60;
                 const int face = facing(g);
-                if (tri.joins >= 1 && tri.joins <= 2 && face >= 0) {
-                    handle(tri.kind, face, piece, ridges, tri.joins, pair, tris[static_cast<std::size_t>(1 - t)].joins, tri.flags);
+                if (hips == 2) {
+                    twoOnHip(tri.kind, g, piece, tri.joins, tri.flags);
+                } else if (hips == 1) {
+                    oneOnHip(tri.kind, g, piece, ridges, tri.joins, pair, other, tri.flags);
+                } else {
+                    piece.cell = ridges ? 4 : 60;
+                    if (tri.joins >= 1 && tri.joins <= 2 && face >= 0) {
+                        handle(tri.kind, face, piece, ridges, tri.joins, pair, other, tri.flags);
+                    }
                 }
                 std::array<int, 3> entries{};
                 if (face < 0) {

@@ -769,12 +769,13 @@ void sceneHipRoofRisesToItsRidge() {
     CHECK(top.indices.size() % 3 == 0 && !top.indices.empty());
 }
 
-// The Cape Cod's gable roof and two dormers (Pleasantview, user-built): the pieces each roof's top
-// shows, counted by texture cell, are those the game shows.
+// Roofs on two lots: the pieces each roof's top shows, counted by texture cell, are those the game
+// shows.
 void sceneGridRoofsMatchTheGame() {
     using namespace ts2::scene;
-    auto roof = [](float x0, float y0, float x1, float y1) {
+    auto roof = [](float x0, float y0, float x1, float y1, std::int32_t level) {
         ts2::roofs::Roof r;
+        r.level0 = r.level1 = level;
         r.x0 = x0;
         r.y0 = y0;
         r.x1 = x1;
@@ -782,9 +783,9 @@ void sceneGridRoofsMatchTheGame() {
         r.type = 4;
         return r;
     };
-    const auto main = RoofGrid::of(roof(23, 14, 11, 4), 3.75f);
-    const auto left = RoofGrid::of(roof(13, 10, 15, 14), 6.75f);
-    const auto right = RoofGrid::of(roof(19, 10, 21, 14), 6.75f);
+    const auto main = RoofGrid::of(roof(23, 14, 11, 4, 2), 3.75f);
+    const auto left = RoofGrid::of(roof(13, 10, 15, 14, 3), 6.75f);
+    const auto right = RoofGrid::of(roof(19, 10, 21, 14, 3), 6.75f);
     CHECK(main && left && right);
     CHECK(main->nx == 27 && main->ny == 23 && main->minX == 10.5f && main->minY == 3.5f);
     CHECK(std::abs(main->z(0, 0, 0) - 3.33f) < 1e-4f && std::abs(main->z(1, 0, 0) - 3.83f) < 1e-4f);
@@ -807,6 +808,25 @@ void sceneGridRoofsMatchTheGame() {
     };
     CHECK((pieces(*main, {&*left, &*right}) == std::map<int, int>{{4, 104}, {20, 32}, {22, 12}, {60, 884}}));
     CHECK((pieces(*right, {&*main, &*left}) == std::map<int, int>{{4, 28}, {20, 8}, {22, 4}, {26, 4}, {42, 2}, {60, 44}}));
+
+    // The Dreamers' house (Pleasantview): a hipped roof over two hipped sheds that meet each other.
+    auto ofType = [&](float x0, float y0, float x1, float y1, std::int32_t level, std::uint32_t type) {
+        auto r = roof(x0, y0, x1, y1, level);
+        r.type = type;
+        return r;
+    };
+    const auto hip = RoofGrid::of(ofType(23, 18, 16, 5, 3, 5), 6.75f);
+    const auto shed1 = RoofGrid::of(ofType(25, 5, 23, 15, 2, 2), 3.75f);
+    const auto shed2 = RoofGrid::of(ofType(26, 8, 23, 12, 2, 2), 3.75f);
+    CHECK(hip && shed1 && shed2);
+    CHECK(hip->nx == 17 && hip->ny == 29 && hip->minX == 15.5f && hip->minY == 4.5f);
+    CHECK(shed1->nx == 6 && shed1->ny == 23 && shed1->minX == 23 && shed1->minY == 4.5f);
+    CHECK(shed2->nx == 8 && shed2->ny == 11 && shed2->minX == 23 && shed2->minY == 7.5f);
+    CHECK((pieces(*hip, {&*shed1, &*shed2}) == std::map<int, int>{{0, 32}, {2, 112}, {4, 40}, {60, 672}, {66, 8}, {82, 32}}));
+    CHECK((pieces(*shed1, {&*hip, &*shed2}) ==
+           std::map<int, int>{{0, 10}, {2, 32}, {4, 12}, {20, 16}, {22, 8}, {26, 4}, {42, 2}, {60, 72}, {66, 4}, {82, 10}}));
+    CHECK((pieces(*shed2, {&*hip, &*shed1}) ==
+           std::map<int, int>{{0, 10}, {2, 16}, {4, 2}, {22, 8}, {60, 24}, {62, 16}, {64, 4}, {82, 10}}));
 }
 
 // A lot's terrain textures (canvas, then the paints) and a c2DArray of paint strengths, row by row.

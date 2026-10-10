@@ -47,24 +47,37 @@ struct WallQuad {
 // A roof as the game builds it: heights in grid steps on points half a tile apart over the roof's
 // rectangle and overhang (see roof_grid.cpp). Only roof types whose building is traced have one.
 struct RoofGrid {
+    enum class Kind { gable, hip, shed };
     int type = 0;
+    Kind kind = Kind::gable;
     float minX = 0, minY = 0;  // the first grid point
     int nx = 0, ny = 0;        // grid points along x and y
     float scale = 0.5f;        // rise per grid step (the saved slope)
     float eave = 0;            // the height of the eaves' storey
+    int level = 0;             // the level the roof is saved on
     bool ridgeAlongX = true;
+    // Which way the roof lies, as the game keeps it: for gables and hips the ridge runs along x, for
+    // sheds the roof is longer along y. It sets which faces the ridge stands between (see ridgeMask).
+    bool lengthwise = true;
+    int high = -1;             // a shed's high side: 0 low x, 1 high x, 2 low y, 3 high y
     std::vector<float> steps;  // per point (row by row), in grid steps
     float peak = 0;
 
     static std::optional<RoofGrid> of(const roofs::Roof& roof, float eave);
+    // Which way the triangles at a cell point (row + col even: split along (0,0)-(1,1)).
+    int parity(int row, int col) const;
+    // Facing bits, by a triangle's uphill direction: 1 -x, 2 +x, 4 -y, 8 +y. Another roof touching
+    // this one at a ridge or hip point does not join a triangle facing one of the point's bits.
+    int ridgeMask(int row, int col) const;  // on the ridge (the highest points); 0 elsewhere
+    int hipMask(int row, int col) const;    // on a hip (a diagonal from a corner); 0 elsewhere
     // A grid point's height in a layer (0 the top, 1 between the edge board's bands, 2 the underside).
     float z(int row, int col, int layer) const;
     // The top's height anywhere over the grid.
     float surface(float x, float y) const;
     // The top's height at a grid point (none elsewhere or outside the grid).
     std::optional<float> pointHeight(float x, float y) const;
-    // The top's height where it covers what is under it: within the walls (not the overhang).
-    std::optional<float> coveringHeight(float x, float y) const;
+    // The top's height where it covers a roof on fromLevel (for a lower level, only within the walls).
+    std::optional<float> coveringHeight(float x, float y, int fromLevel) const;
 };
 
 // A roof's shape: its height anywhere is the lowest of the planes rising from its sloped edges; its

@@ -784,7 +784,9 @@ private:
         s.thickness = grid.z(0, 0, 0) - grid.z(0, 0, 2);
         const float lx = std::min(roof.x0, roof.x1), hx = std::max(roof.x0, roof.x1);
         const float ly = std::min(roof.y0, roof.y1), hy = std::max(roof.y0, roof.y1);
-        if (grid.ridgeAlongX) {
+        if (grid.kind != RoofGrid::Kind::gable) {
+            // Hips slope on every side; a shed's high side is left as it is.
+        } else if (grid.ridgeAlongX) {
             s.gables.push_back({{lx, ly}, {lx, hy}, {-1, 0}});
             s.gables.push_back({{hx, ly}, {hx, hy}, {1, 0}});
         } else {
