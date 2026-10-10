@@ -90,9 +90,12 @@ int SceneBuilder::material(const std::string& name) {
     }
     const auto data = assets_.byName(kTxmt, name + "_txmt");
     if (!data) {
-        // Counters with a sink get a cut-out copy of their top made while playing; use the uncut top.
-        if (const auto cut = key.find("-cutout"); cut != std::string::npos) {
-            return materials_[key] = material(name.substr(0, cut));
+        // A counter's top is named "<top>-cutout-<mask texture>" while something such as a sink sits
+        // in it ("-cutout-0" for nothing): the top with the mask's hole cut out, made while playing.
+        if (const auto cut = key.find("-cutout-"); cut != std::string::npos) {
+            const std::string top = name.substr(0, cut), mask = name.substr(cut + 8);
+            const int m = mask == "0" ? -1 : cutMaterial(name, top, assets_.texture(mask), false);
+            return materials_[key] = m >= 0 ? m : material(top);
         }
         ++missingMaterials;
         return materials_[key] = -1;
@@ -247,27 +250,36 @@ int SceneBuilder::maskedMaterial(const std::string& covering, const std::string&
     if (const auto it = materials_.find(key); it != materials_.end()) {
         return it->second;
     }
-    std::array<float, 3> color{1, 1, 1};
-    auto textureOf = [&](const std::string& txmt, bool takeColor) -> std::optional<Image> {
-        const auto data = assets_.byName(kTxmt, txmt + "_txmt");
-        if (!data) {
-            return std::nullopt;
+    std::optional<Image> cut;
+    if (const auto data = assets_.byName(kTxmt, mask + "_txmt")) {
+        try {
+            const std::string texture = property(sg::parseMaterial(*data), "stdMatBaseTextureName");
+            if (!texture.empty()) {
+                cut = assets_.texture(texture);
+            }
+        } catch (const std::exception&) {
         }
+    }
+    return materials_[key] = cutMaterial(name, covering, cut, mirrored);
+}
+
+int SceneBuilder::cutMaterial(const std::string& name, const std::string& covering, const std::optional<Image>& cut,
+                              bool mirrored) {
+    std::array<float, 3> color{1, 1, 1};
+    std::optional<Image> base;
+    if (const auto data = assets_.byName(kTxmt, covering + "_txmt")) {
         try {
             const auto m = sg::parseMaterial(*data);
-            if (takeColor) {
-                color = diffuse(m);
-            }
+            color = diffuse(m);
             const std::string texture = property(m, "stdMatBaseTextureName");
-            return texture.empty() ? std::nullopt : assets_.texture(texture);
+            if (!texture.empty()) {
+                base = assets_.texture(texture);
+            }
         } catch (const std::exception&) {
-            return std::nullopt;
         }
-    };
-    auto base = textureOf(covering, true);
-    const auto cut = textureOf(mask, false);
+    }
     if (!base || !cut || cut->width == 0 || cut->height == 0) {
-        return materials_[key] = -1;
+        return -1;
     }
     for (std::uint32_t y = 0; y < base->height; ++y) {
         for (std::uint32_t x = 0; x < base->width; ++x) {
@@ -282,7 +294,7 @@ int SceneBuilder::maskedMaterial(const std::string& covering, const std::string&
     m.color = {color[0], color[1], color[2], 1};
     m.image = addImage(std::move(*base));
     m.alpha = AlphaMode::Mask;
-    return addMaterial(key, std::move(m));
+    return addMaterial(lower(name), std::move(m));
 }
 
 int SceneBuilder::addMesh(const std::string& name, Surfaces surfaces) {

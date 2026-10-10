@@ -1,6 +1,6 @@
 // NeoTS2: opens a saved lot in a window.
 //   neots2 <install folder> <lot.package> [--shot <out.png> [yaw pitch distance]]
-//          [--walls up|cutaway|down] [--level n (1: the ground floor)]
+//          [--walls up|cutaway|down] [--level n (1: the ground floor)] [--target x y z]
 // Mouse: left-drag orbits, right-drag pans, the wheel zooms. Keys: WASD or arrows pan, Q/E or
 // comma/period turn a quarter, Z/X or +/- zoom, Page Up/Down change storey, 1/2/3 or Tab walls
 // up/cutaway/down. --shot draws one frame to a file and exits.
@@ -95,6 +95,8 @@ struct Options {
     bool camera = false;
     float yaw = 0, pitch = 0, distance = 0;
     WallView walls = WallView::Up;
+    bool target = false;
+    Vec3 at{0, 0, 0};  // what the camera looks at, instead of the lot's middle
     int level = 0;  // counted from 1 for the ground floor; 0: the top storey
 };
 
@@ -121,6 +123,10 @@ bool parseOptions(int argc, char** argv, Options& o) {
             } else {
                 return false;
             }
+        } else if (arg == "--target" && i + 3 < argc) {
+            o.target = true;
+            o.at = {std::stof(argv[i + 1]), std::stof(argv[i + 2]), std::stof(argv[i + 3])};
+            i += 3;
         } else if (arg == "--level" && i + 1 < argc) {
             o.level = std::stoi(argv[++i]);
         } else {
@@ -136,7 +142,7 @@ int main(int argc, char** argv) {
     Options options;
     if (argc < 3 || !parseOptions(argc, argv, options)) {
         std::fprintf(stderr, "Usage: neots2 <install folder> <lot.package> [--shot <out.png> [yaw pitch distance]]\n"
-                             "              [--walls up|cutaway|down] [--level n]\n");
+                             "              [--walls up|cutaway|down] [--level n] [--target x y z]\n");
         return 1;
     }
     const bool shot = options.shot != nullptr;
@@ -173,6 +179,9 @@ int main(int argc, char** argv) {
             const int ground = ts2::scene::groundLevel(scene);
             view.level = options.level < 1 ? top : std::clamp(ground + options.level - 1, ground, top);
             orbit.target[2] -= static_cast<float>(top - view.level) * kStorey;
+            if (options.target) {
+                orbit.target = options.at;
+            }
 
             if (shot) {
                 if (options.camera) {

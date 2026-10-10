@@ -72,6 +72,9 @@ public:
 private:
     int buildModel(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides);
     int image(const std::string& texture);
+    // A material's texture with alpha below half in `cut` as holes (see maskedMaterial); -1 when
+    // either is missing.
+    int cutMaterial(const std::string& name, const std::string& covering, const std::optional<Image>& cut, bool mirrored);
     int addImage(Image image);
     int addMaterial(const std::string& key, Material m);
 
