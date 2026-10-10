@@ -247,8 +247,14 @@ private:
                 log(object, "model not found", so.model);
                 continue;
             }
-            // Stair pieces carry their own height (header value 3); other objects stand on the floor.
-            const float z = h.value3 != 0 ? h.value3 : heights_.tile(h.value1 - 1, x, y);
+            // Stair pieces (header value 4 names their staircase) keep their own height in value 3; other
+            // objects stand on their storey's floor, raised by value 3 (the pieces of a stacked chimney).
+            const float floorZ = heights_.tile(h.value1 - 1, x, y);
+            float z = h.value4 >= 0 ? (h.value3 != 0 ? h.value3 : floorZ) : floorZ + h.value3;
+            // Another piece reaching down into the ground (a chimney's base) has its top at the floor above.
+            if (const auto range = heightRange(mesh); h.value4 < 0 && range[0] < -kLevelHeight) {
+                z = heights_.tile(h.value1, x, y) - range[1];
+            }
             // Direction d faces 180 - 45d degrees (0 along -X, 6 along -Y); models face +Y.
             const float angle = kPi / 2 - static_cast<float>(object.state.data[1]) * kPi / 4;
             shown_.push_back({&object, mesh, so.model, Transform::at(x, y, z, angle), angle});
@@ -291,6 +297,18 @@ private:
                      shown_[i].object->state.header.value1 - 1);
             ++stats_.objects;
         }
+    }
+
+    // The lowest and highest points of a mesh, below and above its origin.
+    std::array<float, 2> heightRange(int mesh) const {
+        std::array<float, 2> r{1e9f, -1e9f};
+        for (const auto& p : b_.scene().meshes[static_cast<std::size_t>(mesh)].primitives) {
+            for (std::size_t i = 2; i < p.positions.size(); i += 3) {
+                r[0] = std::min(r[0], p.positions[i]);
+                r[1] = std::max(r[1], p.positions[i]);
+            }
+        }
+        return r;
     }
 
     // Doors and windows cut their wall masks out of the wall faces they sit in.
@@ -531,7 +549,8 @@ private:
         stats_.floorPatterns = patterns.size();
 
         // The slab under each floored tile above the ground: a ceiling underneath and a band down each
-        // edge where the floor stops, unless a wall runs along it (the slab ends inside the wall).
+        // edge where the floor stops, unless a wall below runs along it (the slab ends inside the wall;
+        // a wall standing on the edge with none under it, as over a porch, still shows the slab).
         const int ceiling = b_.colorMaterial("ceiling", {0.92f, 0.91f, 0.88f});
         std::set<EdgeKey> wallEdges;
         for (const auto& w : walls_) {
@@ -575,8 +594,7 @@ private:
                         }
                         const auto& a = c[e];
                         const auto& b = c[(e + 1) % 4];
-                        if (wallEdges.contains(edgeKey(a[0], a[1], b[0], b[1], level)) ||
-                            wallEdges.contains(edgeKey(a[0], a[1], b[0], b[1], level - 1))) {
+                        if (wallEdges.contains(edgeKey(a[0], a[1], b[0], b[1], level - 1))) {
                             continue;
                         }
                         const float ta = top[e], tb = top[(e + 1) % 4];
