@@ -12,9 +12,9 @@ neighborhoods in 3D, and the game's screens.
 
 ## Why
 
-The Sims 2 engine is twenty years old: a 32-bit, fixed-function program
-tied to old hardware and closed to deeper modding. NeoTS2 aims to keep everything that makes the
-game what it is while giving it:
+The Sims 2 engine is twenty years old: a 32-bit, fixed-function program tied to old hardware and
+closed to deeper modding. NeoTS2 aims to keep everything that makes the game what it is while
+giving it:
 
 - **a native 64-bit (x64) engine** that uses modern graphics APIs (Direct3D 12 today) and the
   memory a modern PC has;
@@ -41,7 +41,6 @@ NeoTS2 is in early development. It isn't playable yet, but you can already look 
   behavior scripts, 3D models and textures, saved neighborhoods, families, lots and Sims.
 - **Simulation:** object behavior (SimAntics, and the Lua scripts the expansions use) running
   against a saved lot, with a growing set of the game's primitives.
-
 
 ## Tools and libraries
 
