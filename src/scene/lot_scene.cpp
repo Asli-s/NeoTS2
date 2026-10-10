@@ -652,8 +652,14 @@ private:
             r.level = roof.level0 - 1;  // a roof belongs to the storey under its eaves
             const float eave = heights_.corner(roof.level0, roof.x0, roof.y0);
             r.look = look;
+            RoofLook round = look;
+            round.top = look.atlas >= 0 ? look.atlas : look.top;
+            const auto* g = heights_.grid();
+            const float lotWidth = g ? static_cast<float>(g->width - 1) : 1e9f, lotHeight = g ? static_cast<float>(g->height - 1) : 1e9f;
             if (auto grid = RoofGrid::of(roof, eave)) {
                 r.shape = gridShape(roof, eave, std::move(*grid));
+            } else if (addRoundRoof(r.surfaces, roof, eave, round, lotWidth, lotHeight)) {
+                r.shape.eave = eave;
             } else {
                 r.shape = addRoof(r.surfaces, roof, eave, slope, look);
             }

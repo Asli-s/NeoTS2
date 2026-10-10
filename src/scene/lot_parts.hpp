@@ -170,6 +170,10 @@ struct RoofLook {
 // this one where they are above it and change the pieces where they meet it.
 void addRoofGrid(Surfaces& surfaces, const RoofGrid& roof, const std::vector<const RoofGrid*>& others, const RoofLook& look);
 
+// A cone, dome or octagonal spire (types 7 to 9) as the game builds it; false for other types. A
+// spire reaches a tile past its rectangle, within the lot (lotWidth x lotHeight tiles).
+bool addRoundRoof(Surfaces& surfaces, const roofs::Roof& roof, float eave, const RoofLook& look, float lotWidth, float lotHeight);
+
 // A roof over its rectangle, eaves at height `eave`; `slope` is rise over run.
 RoofShape addRoof(Surfaces& surfaces, const roofs::Roof& roof, float eave, float slope, const RoofLook& look);
 

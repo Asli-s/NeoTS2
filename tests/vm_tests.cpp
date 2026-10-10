@@ -842,6 +842,34 @@ void sceneGridRoofsMatchTheGame() {
     CHECK((pieces(*flat, {&*small}) ==
            std::map<int, int>{{0, 28}, {2, 94}, {4, 16}, {20, 2}, {46, 12}, {60, 418}, {62, 2}, {66, 16}, {82, 28}}));
     CHECK((pieces(*small, {&*flat}) == std::map<int, int>{{0, 10}, {2, 28}, {8, 2}, {24, 4}, {44, 2}, {46, 4}, {60, 12}, {82, 10}}));
+
+    // A cone, a dome and an octagonal spire beside it: triangles per part (top, underside, edge
+    // board bands) and how high each rises, as in the game.
+    auto round = [&](ts2::roofs::Roof r, float slope) {
+        r.slope = slope;
+        Surfaces s;
+        RoofLook look;
+        look.top = look.atlas = 0;
+        look.under = 1;
+        look.edges = 2;
+        look.trim = 3;
+        CHECK(addRoundRoof(s, r, 0, look, 40, 40));
+        std::vector<std::size_t> count;
+        float top = -1e9f;
+        for (int m = 0; m < 4; ++m) {
+            count.push_back(s[m].indices.size() / 3);
+            for (std::size_t i = 2; i < s[m].positions.size(); i += 3) {
+                top = std::max(top, s[m].positions[i]);
+            }
+        }
+        return std::pair{count, top};
+    };
+    const auto [cone, coneTop] = round(ofType(6, 11, 3, 9, 0, 7), 1);
+    const auto [dome, domeTop] = round(ofType(25, 19, 24, 18, 0, 8), 0.5f);
+    const auto [spire, spireTop] = round(ofType(28, 16, 29, 17, 0, 9), 1);
+    CHECK((cone == std::vector<std::size_t>{1248, 48, 96, 96}) && std::abs(coneTop - 2.08f) < 1e-4f);
+    CHECK((dome == std::vector<std::size_t>{768, 48, 96, 96}) && std::abs(domeTop - (std::sqrt(2.0f) - 0.42f)) < 1e-4f);
+    CHECK((spire == std::vector<std::size_t>{528, 8, 32, 32}) && std::abs(spireTop - (2 * std::sqrt(2.0f) - 0.42f)) < 1e-4f);
 }
 
 // A lot's terrain textures (canvas, then the paints) and a c2DArray of paint strengths, row by row.
