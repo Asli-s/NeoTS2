@@ -92,8 +92,8 @@ struct RoofShape {
 };
 
 
-// The topmost walls along a roof's gable end follow the roof's slopes instead of their own top, cut
-// down near the eaves and raised up to the ridge (other walls under a roof keep their own top).
+// The topmost walls along a roof's gable end are raised to the roof's underside where that is above
+// their own top (other walls under a roof keep their own top).
 struct WallCeiling {
     std::vector<const RoofShape*> gables;
 

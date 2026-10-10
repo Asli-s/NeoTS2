@@ -149,7 +149,8 @@ float WallCeiling::at(float x, float y, float top) const {
     for (const auto* g : gables) {
         z = std::min(z, g->height(x, y) - g->thickness);  // up to the roof's underside
     }
-    return z;
+    // Near the eaves the underside is below the wall's own top, which then stays inside the slab.
+    return std::max(top, z);
 }
 
 std::vector<float> WallCeiling::bends(const std::array<float, 2>& p, const std::array<float, 2>& q) const {

@@ -53,9 +53,16 @@ void addVertex(Primitive& p, const std::array<float, 3>& position, const std::ar
 
 void addQuad(Primitive& p, const std::array<std::array<float, 3>, 4>& c, const std::array<float, 3>& facing,
              const std::array<std::array<float, 2>, 4>& uv) {
-    const float ux = c[1][0] - c[0][0], uy = c[1][1] - c[0][1], uz = c[1][2] - c[0][2];
-    const float vx = c[2][0] - c[0][0], vy = c[2][1] - c[0][1], vz = c[2][2] - c[0][2];
-    const float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    // The quad's normal from all its corners (Newell), so that a quad with two corners in one place
+    // (a triangle) is still wound the right way.
+    float nx = 0, ny = 0, nz = 0;
+    for (std::size_t i = 0; i < 4; ++i) {
+        const auto& a = c[i];
+        const auto& b = c[(i + 1) % 4];
+        nx += (a[1] - b[1]) * (a[2] + b[2]);
+        ny += (a[2] - b[2]) * (a[0] + b[0]);
+        nz += (a[0] - b[0]) * (a[1] + b[1]);
+    }
     const bool flip = nx * facing[0] + ny * facing[1] + nz * facing[2] < 0;
     const int order[2][6] = {{0, 1, 2, 0, 2, 3}, {0, 2, 1, 0, 3, 2}};
     for (const int i : order[flip ? 1 : 0]) {
