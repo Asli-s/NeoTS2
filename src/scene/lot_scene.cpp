@@ -638,9 +638,8 @@ private:
                 look.under = b_.textureMaterial(pattern->under, 0.8f);
                 look.trim = b_.textureMaterial(pattern->trim, 0.8f);
                 look.cap = b_.textureRegionMaterial(pattern->top, 0.4, 0.0, 0.6, 37.0 / 512, 128, 48, slopeColor);
-                // Valleys where roofs meet: the cap piece, darker.
-                look.valley = b_.textureRegionMaterial(pattern->top, 0.4, 0.0, 0.6, 37.0 / 512, 128, 48,
-                                                       {slopeColor[0] * 0.5f, slopeColor[1] * 0.5f, slopeColor[2] * 0.5f});
+                // Valleys where roofs meet: the pattern's edges texture, in the game's dark brown (matched by eye).
+                look.valley = b_.textureRegionMaterial(pattern->edges, 0, 0, 1, 1, 64, 64, {0.5f, 0.41f, 0.34f});
             } else {
                 look.top = look.under = look.trim = b_.colorMaterial("roof plain", {0.35f, 0.27f, 0.22f});
             }
