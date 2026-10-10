@@ -641,7 +641,7 @@ private:
                 look.atlas = b_.textureRegionMaterial(pattern->top, 0, 0, 1, 1, 512, 512, slopeColor);
                 look.cap = b_.textureRegionMaterial(pattern->top, 0.4, 0.0, 0.6, 37.0 / 512, 128, 48, slopeColor);
                 // Valleys where roofs meet: the game's RoofEdges material (the edges texture at 0.8); which
-                // part of the texture the game shows there is not traced yet.
+                // part of the texture the game shows there is not known yet.
                 look.valley = b_.textureMaterial(pattern->edges, 0.8f);
             } else {
                 look.top = look.under = look.trim = b_.colorMaterial("roof plain", {0.35f, 0.27f, 0.22f});

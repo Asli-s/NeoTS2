@@ -8,8 +8,8 @@ namespace ts2::ui {
 
 namespace {
 
-// Which frame of a button's four-frame image strip each state shows (matched against captures of the
-// game's main menu: idle, hovered and pressed); disabled takes the one left, a bare outline.
+// Which frame of a button's four-frame image strip each state shows (as the game's main menu
+// shows them: idle, hovered and pressed); disabled takes the one left, a bare outline.
 constexpr int kButtonFrame[4] = {1, 3, 2, 0};  // normal, hover, pressed, disabled
 
 std::array<float, 4> color(const std::vector<std::int64_t>& rgb) {
@@ -332,8 +332,8 @@ std::optional<int> Screen::mouse(int x, int y, bool down, double seconds) {
     if (over != hover_) {
         hover_ = over;
         hoverSince_ = seconds;
-        // Tooltips are written in Helvetica Neue Medium at 12 (measured on the game's tooltips; which of
-        // the styles set so the game uses is not traced).
+        // Tooltips are written in Helvetica Neue Medium at 12 (as the game's tooltips are; which of
+        // the styles set so the game uses is not known yet).
         if (over >= 0) {
             Window& b = windows_[static_cast<std::size_t>(over)];
             if (!b.tip.empty() && b.tipImage < 0) {
@@ -387,7 +387,7 @@ void Screen::emit(int index, std::vector<Quad>& out) const {
             }
         } else if (w.imageRect[2] > w.imageRect[0]) {
             // Part of the image (one frame of the plumbob's animation strip), drawn at the window's size
-            // from the image's top left: not traced.
+            // from the image's top left: not known yet.
             out.push_back({x0, y0, x1, y1, 0, 0, static_cast<float>(w.w) / iw, static_cast<float>(w.h) / ih, w.image});
         } else {
             out.push_back({x0, y0, x1, y1, 0, 0, 1, 1, w.image});
@@ -425,10 +425,10 @@ std::vector<Quad> Screen::quads(double seconds) const {
     for (const int r : roots_) {
         emit(r, out);
     }
-    // The tooltip of the button the mouse rests on, as captured from the game: a box the tip's width
+    // The tooltip of the button the mouse rests on, as the game draws it: a box the tip's width
     // plus 22 and 21 high, centered on the button and its top 32 above the button's middle; a dark
     // blue border, a see-through beige inside and a soft shadow below and to the right. The time it
-    // takes to show is not measured.
+    // takes to show is not known yet.
     constexpr double kTipDelay = 0.5;
     if (hover_ < 0 || pressed_ >= 0 || seconds - hoverSince_ < kTipDelay) {
         return out;

@@ -41,7 +41,7 @@ struct NeighborhoodEntry {
 };
 
 // The neighborhoods in a Neighborhoods folder, in the order of their folders' names (as the game's
-// main menu lists them: not traced), leaving out the tutorial.
+// main menu lists them: not known yet), leaving out the tutorial.
 std::vector<NeighborhoodEntry> listNeighborhoods(const std::filesystem::path& neighborhoods);
 
 struct Neighbor {

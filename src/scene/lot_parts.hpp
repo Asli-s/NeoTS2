@@ -45,7 +45,7 @@ struct WallQuad {
 };
 
 // A roof as the game builds it: heights in grid steps on points half a tile apart over the roof's
-// rectangle and overhang (see roof_grid.cpp). Only roof types whose building is traced have one.
+// rectangle and overhang (see roof_grid.cpp). Only roof types built this way so far have one.
 struct RoofGrid {
     // gable (types 3, 4), hip (5), hipped shed (2), single slope (1), hip with a flat top (6)
     enum class Kind { gable, hip, shed, slope, flatHip };

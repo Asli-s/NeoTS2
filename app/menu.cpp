@@ -83,10 +83,10 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
     }
     {
         ts2::render::Renderer renderer(window, shaders);
-        // What shows around the menu: the game's dark blue (as captured from the game).
+        // What shows around the menu: the game's dark blue (as the game shows it).
         renderer.setClearColor(1 / 255.f, 35 / 255.f, 62 / 255.f);
         ts2::ui::Screen screen(data, fonts);
-        // Placed in the middle of the screen (as captured from the game at 1920 x 1080).
+        // Placed in the middle of the screen (as the game places it at 1920 x 1080).
         const int menu = screen.load(kScripts, kMainMenu, 0, 0);
         if (menu < 0) {
             throw std::runtime_error("the main menu's UI script is missing");
@@ -94,12 +94,12 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
         const int mx = (width - screen.width(menu)) / 2, my = (height - screen.height(menu)) / 2;
         screen.move(menu, mx, my);
         // At start the blurred neighborhood picture shows behind the menu, in the middle of the
-        // screen (as captured).
+        // screen (as the game shows it).
         const int backdrop = screen.find(menu, kBackdrop);
         screen.setVisible(backdrop, true);
         screen.move(backdrop, (width - screen.width(backdrop)) / 2 - mx, (height - screen.height(backdrop)) / 2 - my);
         // A Sim in the upper left and one in the lower right, each one of the pictures listed in the
-        // menu's table of constants (kUpperLeft, kLowerRight); which one the game picks is not traced.
+        // menu's table of constants (kUpperLeft, kLowerRight); which one the game picks is not known yet.
         std::mt19937 random(static_cast<unsigned>(SDL_GetTicksNS()));
         for (const auto& line : screen.childTexts(screen.find(menu, kConstants))) {
             const auto eq = line.find('=');
@@ -125,7 +125,7 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
             }
         }
         // A tile per neighborhood in the thumbnail strip, three to a page, 4 apart, the row centered in
-        // the strip both ways (as captured from the game).
+        // the strip both ways (as the game shows them).
         const auto hoods = ts2::content::listNeighborhoods(options.user / "Neighborhoods");
         std::printf("%zu neighborhoods\n", hoods.size());
         const int thumbs = screen.find(menu, kThumbs);
@@ -139,7 +139,7 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
             screen.move(tiles[static_cast<std::size_t>(i)], left + i * (tileWidth + kTileGap), (screen.height(thumbs) - tileHeight) / 2);
         }
         // Each tile plays its neighborhood's moving picture (<hood>_Neighborhood.reia) over and over,
-        // from its first frame when the page is shown (not traced).
+        // from its first frame when the page is shown (not known yet).
         // The videos are read in the background as the menu opens and kept, so a page shows at once.
         std::vector<std::shared_future<std::vector<std::uint8_t>>> videos;
         for (const auto& hood : hoods) {
