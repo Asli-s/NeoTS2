@@ -42,9 +42,11 @@ NeoTS2 is in early development. It isn't playable yet, but you can already look 
 - **Simulation:** object behavior (SimAntics, and the Lua scripts the expansions use) running
   against a saved lot, with a growing set of the game's primitives.
 
-| Main menu | Neighborhood | Lot |
-| --- | --- | --- |
-| ![The main menu](assets/screenshots/main-menu.jpg) | ![Pleasantview's coast](assets/screenshots/neighborhood.jpg) | ![A house in cutaway](assets/screenshots/lot.jpg) |
+| Main menu | Neighborhood |
+| --- | --- |
+| ![The main menu](assets/screenshots/main-menu.jpg) | ![Pleasantview with its panel](assets/screenshots/neighborhood.jpg) |
+| **Lot** | **Sims** |
+| ![The Dreamers' house in its neighborhood](assets/screenshots/lot.jpg) | ![Darren and Dirk Dreamer at home, walls cut away](assets/screenshots/sims.jpg) |
 
 *Screenshots of NeoTS2 running on the game's own files.*
 
@@ -81,13 +83,26 @@ neots2 "<The Sims 2 install folder>" "<user folder>/Neighborhoods/N001"
 neots2 "<The Sims 2 install folder>" "<user folder>/Neighborhoods/N001/Lots/N001_Lot1.package"
 ```
 
-The first opens the main menu, the second a neighborhood, the third a lot. In 3D views: drag
-with the left mouse button to turn, with the right to move, and use the wheel to zoom; on lots,
-Page Up/Down change storey, 1/2/3 show walls up, cutaway or down, and R turns roofs on and off.
+The first opens the main menu, the second a neighborhood, the third a lot. In 3D views: hold down 
+and drag with the middle mouse button to turn, with the right button or WASD to move, and use the 
+wheel to zoom; on lots, Page Up/Down change storey, 1/2/3 show walls up, cutaway or down, and R turns 
+roofs on and off.
+
+For example, with the Ultimate Collection installed through Origin or the EA app, open a Command
+Prompt in the folder you built into and run:
+
+```
+cd build\Release
+neots2.exe "C:\Program Files (x86)\Origin Games\The Sims 2 Ultimate Collection" --menu
+```
+
+`--user` can be left out when your user folder is the usual one, in Documents\EA Games\The Sims™ 2
+Ultimate Collection. If the game is installed elsewhere, use the folder that holds its "Double
+Deluxe", "Fun with Pets" and other pack folders.
 
 ## Contributing
 
-Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) first. In short:
+Please read [CONTRIBUTING.md](CONTRIBUTING.md) first. In short:
 
 - no game files, and nothing exported from them;
 - no code taken from the game or from projects whose license doesn't allow it.
