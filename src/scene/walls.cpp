@@ -22,6 +22,38 @@ std::array<float, 2> meet(float px, float py, float dx, float dy, float nx, floa
     return {px + h * nx + s * dx, py + h * ny + s * dy};
 }
 
+// The spans of a face (as fractions of a tile across its texture) where its material's texture is a
+// hole all the way from texture row v0 down to v1: a doorway through a cut-down wall.
+std::vector<std::array<float, 2>> holes(SceneBuilder& builder, const std::string& material, float v0, float v1) {
+    std::vector<std::array<float, 2>> spans;
+    const int m = material.empty() ? -1 : builder.material(material);
+    if (m < 0) {
+        return spans;
+    }
+    const auto& mat = builder.scene().materials[static_cast<std::size_t>(m)];
+    if (mat.alpha != AlphaMode::Mask || mat.image < 0) {
+        return spans;
+    }
+    const Image& image = builder.scene().images[static_cast<std::size_t>(mat.image)];
+    const auto w = static_cast<int>(image.width), h = static_cast<int>(image.height);
+    const int r0 = std::clamp(static_cast<int>(v0 * static_cast<float>(h)), 0, h - 1);
+    const int r1 = std::clamp(static_cast<int>(std::ceil(v1 * static_cast<float>(h))) - 1, r0, h - 1);
+    int start = -1;
+    for (int c = 0; c <= w; ++c) {
+        bool hole = c < w;
+        for (int r = r0; hole && r <= r1; ++r) {
+            hole = image.rgba[(static_cast<std::size_t>(r) * image.width + static_cast<std::size_t>(c)) * 4 + 3] < 128;
+        }
+        if (hole && start < 0) {
+            start = c;
+        } else if (!hole && start >= 0) {
+            spans.push_back({static_cast<float>(start) / static_cast<float>(w), static_cast<float>(c) / static_cast<float>(w)});
+            start = -1;
+        }
+    }
+    return spans;
+}
+
 } // namespace
 
 std::map<std::string, std::vector<WallMask>> wallMasks(const std::vector<std::string>& materialNames) {
@@ -147,9 +179,51 @@ void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w,
         return;
     }
     const std::array<std::array<float, 2>, 4> noUv{};
-    addQuad(surfaces[edge], {{{w.leftA[0], w.leftA[1], q.top0}, {w.leftB[0], w.leftB[1], q.top1},
-                              {w.rightB[0], w.rightB[1], q.top1}, {w.rightA[0], w.rightA[1], q.top0}}},
-            {0, 0, 1}, noUv);
+    // A cut-down wall stops at doorways: its top in pieces between them, closed at their edges.
+    std::vector<std::array<float, 2>> gaps;
+    if (cutHeight > 0) {
+        const float top = (t0 + t1) / 2, bottom = (v0 + v1) / 2;
+        for (const auto& g : holes(builder, w.left, top, bottom)) {
+            gaps.push_back(g);
+        }
+        for (const auto& g : holes(builder, w.right, top, bottom)) {
+            gaps.push_back({len - g[1], len - g[0]});
+        }
+        std::sort(gaps.begin(), gaps.end());
+    }
+    const float h = kWallThickness / 2;
+    auto heightAt = [&](float a, float z0, float z1) { return z0 + (z1 - z0) * a / len; };
+    auto across = [&](float a, float side) {
+        return std::array<float, 2>{q.x0 + ux * a + side * uy * h, q.y0 + uy * a - side * ux * h};
+    };
+    std::array<float, 2> left = w.leftA, right = w.rightA;
+    float from = 0;
+    for (std::size_t i = 0; i <= gaps.size(); ++i) {
+        const bool last = i == gaps.size();
+        if (!last && (gaps[i][0] <= from || gaps[i][1] >= len)) {
+            continue;
+        }
+        const float to = last ? len : gaps[i][0];
+        const std::array<float, 2> leftEnd = last ? w.leftB : across(to, 1), rightEnd = last ? w.rightB : across(to, -1);
+        const float z0 = heightAt(from, q.top0, q.top1), z1 = heightAt(to, q.top0, q.top1);
+        addQuad(surfaces[edge], {{{left[0], left[1], z0}, {leftEnd[0], leftEnd[1], z1}, {rightEnd[0], rightEnd[1], z1},
+                                  {right[0], right[1], z0}}},
+                {0, 0, 1}, noUv);
+        if (last) {
+            break;
+        }
+        // The doorway's sides.
+        const float b0 = heightAt(to, q.bottom0, q.bottom1), next = gaps[i][1];
+        addQuad(surfaces[edge], {{{leftEnd[0], leftEnd[1], b0}, {rightEnd[0], rightEnd[1], b0}, {rightEnd[0], rightEnd[1], z1},
+                                  {leftEnd[0], leftEnd[1], z1}}},
+                {ux, uy, 0}, noUv);
+        left = across(next, 1);
+        right = across(next, -1);
+        const float b1 = heightAt(next, q.bottom0, q.bottom1), z2 = heightAt(next, q.top0, q.top1);
+        addQuad(surfaces[edge], {{{left[0], left[1], b1}, {right[0], right[1], b1}, {right[0], right[1], z2}, {left[0], left[1], z2}}},
+                {-ux, -uy, 0}, noUv);
+        from = next;
+    }
     // Ends: where walls join they are inside the walls, and show when the neighbor is cut down.
     addQuad(surfaces[edge], {{{w.leftA[0], w.leftA[1], q.bottom0}, {w.rightA[0], w.rightA[1], q.bottom0},
                               {w.rightA[0], w.rightA[1], q.top0}, {w.leftA[0], w.leftA[1], q.top0}}},
