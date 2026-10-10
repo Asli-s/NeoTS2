@@ -9,6 +9,7 @@
 #include <array>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -43,6 +44,29 @@ struct WallQuad {
     float x0, y0, x1, y1, bottom0, top0, bottom1, top1;
 };
 
+// A roof as the game builds it: heights in grid steps on points half a tile apart over the roof's
+// rectangle and overhang (see roof_grid.cpp). Only roof types whose building is traced have one.
+struct RoofGrid {
+    int type = 0;
+    float minX = 0, minY = 0;  // the first grid point
+    int nx = 0, ny = 0;        // grid points along x and y
+    float scale = 0.5f;        // rise per grid step (the saved slope)
+    float eave = 0;            // the height of the eaves' storey
+    bool ridgeAlongX = true;
+    std::vector<float> steps;  // per point (row by row), in grid steps
+    float peak = 0;
+
+    static std::optional<RoofGrid> of(const roofs::Roof& roof, float eave);
+    // A grid point's height in a layer (0 the top, 1 between the edge board's bands, 2 the underside).
+    float z(int row, int col, int layer) const;
+    // The top's height anywhere over the grid.
+    float surface(float x, float y) const;
+    // The top's height at a grid point (none elsewhere or outside the grid).
+    std::optional<float> pointHeight(float x, float y) const;
+    // The top's height where it covers what is under it: within the walls (not the overhang).
+    std::optional<float> coveringHeight(float x, float y) const;
+};
+
 // A roof's shape: its height anywhere is the lowest of the planes rising from its sloped edges; its
 // gable ends are left open, to be closed by the walls under them.
 struct RoofShape {
@@ -60,6 +84,7 @@ struct RoofShape {
         std::array<float, 2> a, b, out;
     };
     std::vector<Gable> gables;
+    std::optional<RoofGrid> grid;  // when set, the roof's surface (the rest is not used)
 
     float height(float x, float y) const;
     // Where the roof's height bends on the way from p to q, as fractions of the way, with 0 and 1.
@@ -122,8 +147,13 @@ void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w,
 
 // The materials a roof is drawn with.
 struct RoofLook {
-    int top = -1, under = -1, trim = -1, cap = -1, valley = -1;
+    int top = -1, under = -1, trim = -1, edges = -1, cap = -1, valley = -1;
+    int atlas = -1;  // the whole top texture (grid roofs pick their pieces from it)
 };
+
+// A grid roof's top, underside and edge board; `others` are the lot's other grid roofs, which cut
+// this one where they are above it and change the pieces where they meet it.
+void addRoofGrid(Surfaces& surfaces, const RoofGrid& roof, const std::vector<const RoofGrid*>& others, const RoofLook& look);
 
 // A roof over its rectangle, eaves at height `eave`; `slope` is rise over run.
 RoofShape addRoof(Surfaces& surfaces, const roofs::Roof& roof, float eave, float slope, const RoofLook& look);

@@ -637,6 +637,8 @@ private:
                 look.top = b_.textureCellMaterial(pattern->top, 5, 5, 4, 3, slopeColor);
                 look.under = b_.textureMaterial(pattern->under, 0.8f);
                 look.trim = b_.textureMaterial(pattern->trim, 0.8f);
+                look.edges = b_.textureMaterial(pattern->edges, 0.8f);
+                look.atlas = b_.textureRegionMaterial(pattern->top, 0, 0, 1, 1, 512, 512, slopeColor);
                 look.cap = b_.textureRegionMaterial(pattern->top, 0.4, 0.0, 0.6, 37.0 / 512, 128, 48, slopeColor);
                 // Valleys where roofs meet: the game's RoofEdges material (the edges texture at 0.8); which
                 // part of the texture the game shows there is not traced yet.
@@ -648,12 +650,41 @@ private:
             const float slope = roof.slope > 0 ? 2 * roof.slope : 1.0f;
             ShapedRoof& r = roofs_.emplace_back();
             r.level = roof.level0 - 1;  // a roof belongs to the storey under its eaves
-            r.shape = addRoof(r.surfaces, roof, heights_.corner(roof.level0, roof.x0, roof.y0), slope, look);
+            const float eave = heights_.corner(roof.level0, roof.x0, roof.y0);
+            r.look = look;
+            if (auto grid = RoofGrid::of(roof, eave)) {
+                r.shape = gridShape(roof, eave, std::move(*grid));
+            } else {
+                r.shape = addRoof(r.surfaces, roof, eave, slope, look);
+            }
             r.valley = look.valley;
+        }
+        // Grid roofs are built once all are known, as each is cut by and meets the others.
+        std::vector<const RoofGrid*> grids;
+        for (const auto& r : roofs_) {
+            if (r.shape.grid) {
+                grids.push_back(&*r.shape.grid);
+            }
+        }
+        for (auto& r : roofs_) {
+            if (!r.shape.grid) {
+                continue;
+            }
+            std::vector<const RoofGrid*> others;
+            for (const auto* g : grids) {
+                if (g != &*r.shape.grid) {
+                    others.push_back(g);
+                }
+            }
+            RoofLook look = r.look;
+            look.top = look.atlas >= 0 ? look.atlas : look.top;
+            addRoofGrid(r.surfaces, *r.shape.grid, others, look);
         }
         for (std::size_t i = 0; i < roofs_.size(); ++i) {
             for (std::size_t j = i + 1; j < roofs_.size(); ++j) {
-                addValleys(roofs_[i].surfaces, roofs_[i].shape, roofs_[j].shape, roofs_[i].valley);
+                if (!roofs_[i].shape.grid && !roofs_[j].shape.grid) {
+                    addValleys(roofs_[i].surfaces, roofs_[i].shape, roofs_[j].shape, roofs_[i].valley);
+                }
             }
         }
         for (auto& r : roofs_) {
@@ -740,9 +771,29 @@ private:
     struct ShapedRoof {
         Surfaces surfaces;
         RoofShape shape;
+        RoofLook look;
         int level = 0;
         int valley = -1;
     };
+
+    // A grid roof's shape for the walls: its surface, slab depth and gable-end lines.
+    static RoofShape gridShape(const roofs::Roof& roof, float eave, RoofGrid grid) {
+        RoofShape s;
+        s.eave = eave;
+        s.slope = 2 * grid.scale;
+        s.thickness = grid.z(0, 0, 0) - grid.z(0, 0, 2);
+        const float lx = std::min(roof.x0, roof.x1), hx = std::max(roof.x0, roof.x1);
+        const float ly = std::min(roof.y0, roof.y1), hy = std::max(roof.y0, roof.y1);
+        if (grid.ridgeAlongX) {
+            s.gables.push_back({{lx, ly}, {lx, hy}, {-1, 0}});
+            s.gables.push_back({{hx, ly}, {hx, hy}, {1, 0}});
+        } else {
+            s.gables.push_back({{lx, ly}, {hx, ly}, {0, -1}});
+            s.gables.push_back({{lx, hy}, {hx, hy}, {0, 1}});
+        }
+        s.grid = std::move(grid);
+        return s;
+    }
     std::vector<ShapedRoof> roofs_;  // reserved up front: walls point at their shapes
     std::vector<Shown> shown_;
 };

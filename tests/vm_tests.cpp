@@ -769,6 +769,46 @@ void sceneHipRoofRisesToItsRidge() {
     CHECK(top.indices.size() % 3 == 0 && !top.indices.empty());
 }
 
+// The Cape Cod's gable roof and two dormers (Pleasantview, user-built): the pieces each roof's top
+// shows, counted by texture cell, are those the game shows.
+void sceneGridRoofsMatchTheGame() {
+    using namespace ts2::scene;
+    auto roof = [](float x0, float y0, float x1, float y1) {
+        ts2::roofs::Roof r;
+        r.x0 = x0;
+        r.y0 = y0;
+        r.x1 = x1;
+        r.y1 = y1;
+        r.type = 4;
+        return r;
+    };
+    const auto main = RoofGrid::of(roof(23, 14, 11, 4), 3.75f);
+    const auto left = RoofGrid::of(roof(13, 10, 15, 14), 6.75f);
+    const auto right = RoofGrid::of(roof(19, 10, 21, 14), 6.75f);
+    CHECK(main && left && right);
+    CHECK(main->nx == 27 && main->ny == 23 && main->minX == 10.5f && main->minY == 3.5f);
+    CHECK(std::abs(main->z(0, 0, 0) - 3.33f) < 1e-4f && std::abs(main->z(1, 0, 0) - 3.83f) < 1e-4f);
+    auto pieces = [](const RoofGrid& g, std::vector<const RoofGrid*> others) {
+        Surfaces s;
+        RoofLook look;
+        look.top = 0;
+        addRoofGrid(s, g, others, look);
+        std::map<int, int> count;
+        const auto& p = s[0];
+        for (std::size_t t = 0; t + 2 < p.uvs.size() / 2; t += 3) {
+            float u = 1, v = 1;
+            for (std::size_t k = 0; k < 3; ++k) {
+                u = std::min(u, p.uvs[(t + k) * 2]);
+                v = std::min(v, p.uvs[(t + k) * 2 + 1]);
+            }
+            ++count[static_cast<int>(std::lround(v / 0.2f)) * 20 + static_cast<int>(std::lround(u / 0.2f)) * 2];
+        }
+        return count;
+    };
+    CHECK((pieces(*main, {&*left, &*right}) == std::map<int, int>{{4, 104}, {20, 32}, {22, 12}, {60, 884}}));
+    CHECK((pieces(*right, {&*main, &*left}) == std::map<int, int>{{4, 28}, {20, 8}, {22, 4}, {26, 4}, {42, 2}, {60, 44}}));
+}
+
 // A lot's terrain textures (canvas, then the paints) and a c2DArray of paint strengths, row by row.
 void terrainResourcesParse() {
     std::vector<std::uint8_t> t(64, 0);
@@ -3368,6 +3408,7 @@ int main(int argc, char** argv) {
         {"scene transforms turn and move", sceneTransformsTurnAndMove},
         {"scene quads face their normal", sceneQuadsFaceTheirNormal},
         {"scene hip roof rises to its ridge", sceneHipRoofRisesToItsRidge},
+        {"scene grid roofs match the game", sceneGridRoofsMatchTheGame},
         {"terrain resources parse", terrainResourcesParse},
         {"scene cutaway cuts walls in front of rooms", sceneCutawayCutsWallsInFrontOfRooms},
         {"scene views show storeys, walls and roofs", sceneViewsShowStoreysWallsAndRoofs},

@@ -47,6 +47,9 @@ Polygon clip(const Polygon& poly, float a, float b, float c) {
 } // namespace
 
 float RoofShape::height(float x, float y) const {
+    if (grid) {
+        return grid->surface(x, y);
+    }
     float z = 1e9f;
     for (const auto& p : planes) {
         z = std::min(z, eave + slope * ((x - p[0]) * p[2] + (y - p[1]) * p[3]));
@@ -56,6 +59,24 @@ float RoofShape::height(float x, float y) const {
 
 std::vector<float> RoofShape::bends(const std::array<float, 2>& p, const std::array<float, 2>& q) const {
     std::vector<float> ts{0, 1};
+    if (grid) {
+        // A grid roof's surface bends where the way crosses its grid lines.
+        for (int axis = 0; axis < 2; ++axis) {
+            const float a = p[static_cast<std::size_t>(axis)], b = q[static_cast<std::size_t>(axis)];
+            const float origin = axis == 0 ? grid->minX : grid->minY;
+            if (std::abs(b - a) < 1e-6f) {
+                continue;
+            }
+            for (float k = std::ceil((std::min(a, b) - origin) * 2); origin + k / 2 < std::max(a, b); k += 1) {
+                const float t = (origin + k / 2 - a) / (b - a);
+                if (t > 1e-4f && t < 1 - 1e-4f) {
+                    ts.push_back(t);
+                }
+            }
+        }
+        std::sort(ts.begin(), ts.end());
+        return ts;
+    }
     // Each plane's height along the way is c + d t; two planes cross where those are equal.
     for (std::size_t i = 0; i < planes.size(); ++i) {
         for (std::size_t j = i + 1; j < planes.size(); ++j) {
