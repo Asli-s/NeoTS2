@@ -656,24 +656,52 @@ private:
                     const float t = ((x - gable.a[0]) * gx + (y - gable.a[1]) * gy) / glen;
                     return std::abs(off) < 1e-3f && t > -1e-3f && t < glen + 1e-3f;
                 };
-                bool closed = false;
+                if (glen <= 0) {
+                    continue;
+                }
+                const std::array<float, 2> u{gx / glen, gy / glen};
+                const auto tiles = static_cast<std::size_t>(std::lround(glen));
+                std::vector<const ThickWall*> raised(tiles, nullptr);  // the wall closing each tile along it
                 for (auto& w : walls_) {
                     // The topmost wall there (none stands on it), on the storey under the eaves or above.
-                    if (glen <= 0 || !w.thick || w.level < r.level || !onLine(w.q.x0, w.q.y0) || !onLine(w.q.x1, w.q.y1) ||
+                    if (!w.thick || w.level < r.level || !onLine(w.q.x0, w.q.y0) || !onLine(w.q.x1, w.q.y1) ||
                         wallAt_.contains(edgeKey(w.q.x0, w.q.y0, w.q.x1, w.q.y1, w.level + 1)) ||
                         std::min(w.q.bottom0, w.q.bottom1) >= shape.height((w.q.x0 + w.q.x1) / 2, (w.q.y0 + w.q.y1) / 2)) {
                         continue;
                     }
                     w.ceiling.gables.push_back(&shape);
-                    closed = true;
+                    const float mid = (((w.q.x0 + w.q.x1) / 2 - gable.a[0]) * u[0] + ((w.q.y0 + w.q.y1) / 2 - gable.a[1]) * u[1]);
+                    if (const auto i = static_cast<std::size_t>(std::max(0.0f, mid)); i < tiles) {
+                        raised[i] = &w;
+                    }
                 }
-                if (!closed && glen > 0) {
+                // Tiles with no wall to raise (over a porch, say) get one from the eaves up, covered like
+                // the nearest wall that is (plain when there is none).
+                for (std::size_t i = 0; i < tiles; ++i) {
+                    if (raised[i] != nullptr) {
+                        continue;
+                    }
+                    const ThickWall* like = nullptr;
+                    for (std::size_t d = 1; d < tiles && like == nullptr; ++d) {
+                        like = i >= d && raised[i - d] ? raised[i - d] : i + d < tiles && raised[i + d] ? raised[i + d] : nullptr;
+                    }
+                    const std::array<float, 2> p0{gable.a[0] + u[0] * static_cast<float>(i), gable.a[1] + u[1] * static_cast<float>(i)};
+                    const std::array<float, 2> p1{p0[0] + u[0], p0[1] + u[1]};
                     ThickWall w;
-                    w.q = {gable.a[0], gable.a[1], gable.b[0], gable.b[1], shape.eave, shape.eave, shape.eave, shape.eave};
-                    w.thick = false;
-                    w.left = w.right = plain_;
-                    w.leftA = w.rightA = gable.a;
-                    w.leftB = w.rightB = gable.b;
+                    w.q = {p0[0], p0[1], p1[0], p1[1], shape.eave, shape.eave, shape.eave, shape.eave};
+                    w.thick = like != nullptr;
+                    w.left = w.right = w.leftCovering = w.rightCovering = plain_;
+                    if (like != nullptr) {
+                        // Its sides as the like wall's, which may run the other way.
+                        const bool same = (like->q.x1 - like->q.x0) * u[0] + (like->q.y1 - like->q.y0) * u[1] > 0;
+                        w.left = w.leftCovering = same ? like->leftCovering : like->rightCovering;
+                        w.right = w.rightCovering = same ? like->rightCovering : like->leftCovering;
+                    }
+                    const float h = w.thick ? kWallThickness / 2 : 0;
+                    w.leftA = {p0[0] + u[1] * h, p0[1] - u[0] * h};
+                    w.rightA = {p0[0] - u[1] * h, p0[1] + u[0] * h};
+                    w.leftB = {p1[0] + u[1] * h, p1[1] - u[0] * h};
+                    w.rightB = {p1[0] - u[1] * h, p1[1] + u[0] * h};
                     w.ceiling.gables.push_back(&shape);
                     addThickWall(b_, r.surfaces, w, edge_);
                 }

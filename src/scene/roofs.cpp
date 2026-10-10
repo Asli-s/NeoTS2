@@ -225,17 +225,80 @@ RoofShape addRoof(Surfaces& surfaces, const roofs::Roof& roof, float eave, float
             }
         }
     }
-    // Fascias under the sloped edges.
+    // Fascias under the edges: level along the eaves, and following the slopes along gable ends (the
+    // rakes), so that the roof shows its thickness all round.
     for (int e = 0; e < 4; ++e) {
         const auto& E = edges[static_cast<std::size_t>(e)];
-        if (!sloped[static_cast<std::size_t>(e)] || look.trim < 0) {
+        if (look.trim < 0 || e == high) {
             continue;
         }
         const float len = e < 2 ? yb - ya : xb - xa;
         const std::array<float, 2> a = E.p, b{E.p[0] + E.d[0] * len, E.p[1] + E.d[1] * len};
-        addQuad(surfaces[look.trim],
-                {{{a[0], a[1], eave - kRoofFascia}, {b[0], b[1], eave - kRoofFascia}, {b[0], b[1], eave}, {a[0], a[1], eave}}},
-                {-E.n[0], -E.n[1], 0}, {{{0, 1}, {len, 1}, {len, 0}, {0, 0}}});
+        const std::array<float, 3> out{-E.n[0], -E.n[1], 0};
+        if (sloped[static_cast<std::size_t>(e)]) {
+            addQuad(surfaces[look.trim],
+                    {{{a[0], a[1], eave - kRoofFascia}, {b[0], b[1], eave - kRoofFascia}, {b[0], b[1], eave}, {a[0], a[1], eave}}}, out,
+                    {{{0, 1}, {len, 1}, {len, 0}, {0, 0}}});
+            continue;
+        }
+        const auto ts = shape.bends(a, b);
+        for (std::size_t k = 0; k + 1 < ts.size(); ++k) {
+            const std::array<float, 2> p{a[0] + (b[0] - a[0]) * ts[k], a[1] + (b[1] - a[1]) * ts[k]};
+            const std::array<float, 2> q{a[0] + (b[0] - a[0]) * ts[k + 1], a[1] + (b[1] - a[1]) * ts[k + 1]};
+            const float zp = shape.height(p[0], p[1]), zq = shape.height(q[0], q[1]);
+            addQuad(surfaces[look.trim],
+                    {{{p[0], p[1], zp - kRoofFascia}, {q[0], q[1], zq - kRoofFascia}, {q[0], q[1], zq}, {p[0], p[1], zp}}}, out,
+                    {{{ts[k] * len, 1}, {ts[k + 1] * len, 1}, {ts[k + 1] * len, 0}, {ts[k] * len, 0}}});
+        }
+    }
+    // Boxed eaves: under each eave, a level soffit at the fascia's foot back to the wall, closed where
+    // it meets a gable end by a triangle up to the rake's fascia (the rakes' own overhangs stay open).
+    if (look.trim >= 0) {
+        const float z = eave - kRoofFascia;
+        const bool sy = sloped[2] || sloped[3];
+        const std::array<std::array<float, 4>, 4> strips{{
+            {xa, sy ? ly : ya, lx, sy ? hy : yb},  // low x: between the eave and the wall
+            {hx, sy ? ly : ya, xb, sy ? hy : yb},
+            {xa, ya, xb, ly},
+            {xa, hy, xb, yb},
+        }};
+        for (int e = 0; e < 4; ++e) {
+            if (!sloped[static_cast<std::size_t>(e)]) {
+                continue;
+            }
+            const auto& r = strips[static_cast<std::size_t>(e)];
+            addQuad(surfaces[look.trim], {{{r[0], r[1], z}, {r[2], r[1], z}, {r[2], r[3], z}, {r[0], r[3], z}}}, {0, 0, -1},
+                    {{{r[0], r[1]}, {r[2], r[1]}, {r[2], r[3]}, {r[0], r[3]}}});
+        }
+        for (int g = 0; g < 4; ++g) {
+            if (sloped[static_cast<std::size_t>(g)] || g == high) {
+                continue;
+            }
+            const auto& G = edges[static_cast<std::size_t>(g)];
+            // The gable end's line runs across the sloped edges at its two ends.
+            for (const int e : g < 2 ? std::array<int, 2>{2, 3} : std::array<int, 2>{0, 1}) {
+                if (!sloped[static_cast<std::size_t>(e)]) {
+                    continue;
+                }
+                const auto& E = edges[static_cast<std::size_t>(e)];
+                // From the eave's corner on this line inward to the wall.
+                const float along = (g < 2 ? G.p[0] : G.p[1]);
+                const std::array<float, 2> corner = g < 2 ? std::array<float, 2>{along, E.p[1]} : std::array<float, 2>{E.p[0], along};
+                const std::array<float, 2> wall{corner[0] + E.n[0] * kRoofOverhang, corner[1] + E.n[1] * kRoofOverhang};
+                const float top = shape.height(wall[0], wall[1]) - kRoofFascia;
+                for (const auto& v : {std::array<float, 3>{corner[0], corner[1], z}, std::array<float, 3>{wall[0], wall[1], z},
+                                      std::array<float, 3>{wall[0], wall[1], top}}) {
+                    addVertex(surfaces[look.trim], v, {-G.n[0], -G.n[1], 0}, {0, 0});
+                }
+                // Wound to face out of the gable end: the triangle's normal is (dy, -dx) times its height
+                // for (dx, dy) from the corner to the wall.
+                auto& t = surfaces[look.trim].indices;
+                const float dx = wall[0] - corner[0], dy = wall[1] - corner[1];
+                if (dy * -G.n[0] - dx * -G.n[1] < 0) {
+                    std::swap(t[t.size() - 2], t[t.size() - 1]);
+                }
+            }
+        }
     }
     return shape;
 }
