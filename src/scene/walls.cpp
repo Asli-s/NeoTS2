@@ -141,45 +141,108 @@ std::vector<WallHub> joinWalls(std::vector<ThickWall>& walls) {
     return hubs;
 }
 
+float WallCeiling::at(float x, float y, float top) const {
+    if (gables.empty()) {
+        return top;
+    }
+    float z = 1e9f;
+    for (const auto* g : gables) {
+        z = std::min(z, g->height(x, y) - kRoofClearance);
+    }
+    return z;
+}
+
+std::vector<float> WallCeiling::bends(const std::array<float, 2>& p, const std::array<float, 2>& q) const {
+    std::vector<float> ts{0, 1};
+    for (const auto* r : gables) {
+        const auto more = r->bends(p, q);
+        ts.insert(ts.end(), more.begin(), more.end());
+    }
+    std::sort(ts.begin(), ts.end());
+    ts.erase(std::unique(ts.begin(), ts.end(), [](float a, float b) { return b - a < 1e-4f; }), ts.end());
+    return ts;
+}
+
 // Coverings run left to right as seen from their side, once along each segment (a tile, or a tile's
-// diagonal) and once over a full storey down from the wall's top, so short walls such as a deck's
-// skirt show the top of it.
-// A cut-down wall keeps the texture where the full wall has it, so door and window holes line up.
+// diagonal) and once over a full storey down from the wall's own top, so short walls such as a
+// deck's skirt show the top of it, and the covering carries on where the wall is cut down or raised.
 void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w, int edge, float cutHeight) {
-    WallQuad q = w.q;
+    const WallQuad& q = w.q;
     const float dx = q.x1 - q.x0, dy = q.y1 - q.y0, len = std::sqrt(dx * dx + dy * dy);
     if (len <= 0) {
         return;
     }
     const float ux = dx / len, uy = dy / len;
-    const float v0 = (q.top0 - q.bottom0) / kLevelHeight, v1 = (q.top1 - q.bottom1) / kLevelHeight;
-    float t0 = 0, t1 = 0;  // texture coordinates at the (cut) top
-    if (cutHeight > 0) {
-        const float top0 = std::min(q.top0, q.bottom0 + cutHeight), top1 = std::min(q.top1, q.bottom1 + cutHeight);
-        t0 = (q.top0 - top0) / kLevelHeight;
-        t1 = (q.top1 - top1) / kLevelHeight;
-        q.top0 = top0;
-        q.top1 = top1;
-    }
+    const float h = kWallThickness / 2;
     auto along = [&](const std::array<float, 2>& c) { return (c[0] - q.x0) * ux + (c[1] - q.y0) * uy; };
+    auto across = [&](float a, float side) {
+        return std::array<float, 2>{q.x0 + ux * a + side * uy * h, q.y0 + uy * a - side * ux * h};
+    };
+    auto lerp = [&](const std::array<float, 2>& c, float z0, float z1) { return z0 + (z1 - z0) * std::clamp(along(c) / len, 0.0f, 1.0f); };
+    auto bottomAt = [&](const std::array<float, 2>& c) { return lerp(c, q.bottom0, q.bottom1); };
+    auto ownTopAt = [&](const std::array<float, 2>& c) { return lerp(c, q.top0, q.top1); };
+    const bool cut = cutHeight > 0;
+    auto topAt = [&](const std::array<float, 2>& c) {
+        const float own = ownTopAt(c);
+        return cut ? std::min(own, bottomAt(c) + cutHeight) : std::max(bottomAt(c), w.ceiling.at(c[0], c[1], own));
+    };
+    auto v = [&](const std::array<float, 2>& c, float z) { return (ownTopAt(c) - z) / kLevelHeight; };
+    // Positions along the wall where its top bends (as distances along it).
+    std::vector<float> bends;
+    if (!cut) {
+        for (const float f : w.ceiling.bends({q.x0, q.y0}, {q.x1, q.y1})) {
+            bends.push_back(f * len);
+        }
+    }
+    // A line along the wall from a to b: there, and wherever the top bends in between.
+    auto points = [&](const std::array<float, 2>& a, const std::array<float, 2>& b) {
+        std::vector<std::array<float, 2>> pts{a};
+        const float ta = along(a), tb = along(b);
+        for (const float t : bends) {
+            if (t > ta + 1e-4f && t < tb - 1e-4f) {
+                const float k = (t - ta) / (tb - ta);
+                pts.push_back({a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k});
+            }
+        }
+        pts.push_back(b);
+        return pts;
+    };
+
     // The wall graph's left side faces (dy, -dx).
     const std::array<float, 3> leftNormal{uy, -ux, 0}, rightNormal{-uy, ux, 0};
-    // Past a segment's ends (where corners are mitred) a mask would wrap around to its other edge
-    // and could open a slit there; masked sides keep to the segment's own part of the texture.
-    auto u = [](float v, bool masked) { return masked ? std::clamp(v, 0.0f, 1.0f) : v; };
-    if (const int m = w.left.empty() ? -1 : builder.material(w.left); m >= 0) {
-        const bool masked = !w.leftMask.empty();
-        const float u0 = u(along(w.leftA) / len, masked), u1 = u(along(w.leftB) / len, masked);
-        addQuad(surfaces[m], {{{w.leftA[0], w.leftA[1], q.bottom0}, {w.leftB[0], w.leftB[1], q.bottom1},
-                               {w.leftB[0], w.leftB[1], q.top1}, {w.leftA[0], w.leftA[1], q.top0}}},
-                leftNormal, {{{u0, v0}, {u1, v1}, {u1, t1}, {u0, t0}}});
-    }
-    if (const int m = w.right.empty() ? -1 : builder.material(w.right); m >= 0) {
-        const bool masked = !w.rightMask.empty();
-        const float u0 = u(1 - along(w.rightA) / len, masked), u1 = u(1 - along(w.rightB) / len, masked);
-        addQuad(surfaces[m], {{{w.rightA[0], w.rightA[1], q.bottom0}, {w.rightB[0], w.rightB[1], q.bottom1},
-                               {w.rightB[0], w.rightB[1], q.top1}, {w.rightA[0], w.rightA[1], q.top0}}},
-                rightNormal, {{{u0, v0}, {u1, v1}, {u1, t1}, {u0, t0}}});
+    for (const bool left : {true, false}) {
+        const std::string& name = left ? w.left : w.right;
+        const int m = name.empty() ? -1 : builder.material(name);
+        if (m < 0) {
+            continue;
+        }
+        // Raised past its own top (closing a gable), a wall shows its covering without door and window holes.
+        const std::string& plain = left ? w.leftCovering : w.rightCovering;
+        const int above = plain.empty() ? m : builder.material(plain);
+        // Past a segment's ends (where corners are mitred) a mask would wrap around to its other
+        // edge and could open a slit there; masked sides keep to the segment's own part of the texture.
+        const bool masked = !(left ? w.leftMask : w.rightMask).empty();
+        auto u = [&](const std::array<float, 2>& c) {
+            const float t = left ? along(c) / len : 1 - along(c) / len;
+            return masked ? std::clamp(t, 0.0f, 1.0f) : t;
+        };
+        const auto pts = left ? points(w.leftA, w.leftB) : points(w.rightA, w.rightB);
+        for (std::size_t k = 0; k + 1 < pts.size(); ++k) {
+            const auto& p = pts[k];
+            const auto& n = pts[k + 1];
+            const float bp = bottomAt(p), bn = bottomAt(n), tp = topAt(p), tn = topAt(n);
+            const float op = ownTopAt(p), on = ownTopAt(n);
+            // Up to the wall's own top, then any part above it.
+            for (const auto& [z0p, z0n, z1p, z1n, material] :
+                 {std::tuple{bp, bn, std::min(tp, op), std::min(tn, on), m}, std::tuple{op, on, std::max(tp, op), std::max(tn, on), above}}) {
+                if (z1p <= z0p + 1e-4f && z1n <= z0n + 1e-4f) {
+                    continue;
+                }
+                addQuad(surfaces[material], {{{p[0], p[1], z0p}, {n[0], n[1], z0n}, {n[0], n[1], z1n}, {p[0], p[1], z1p}}},
+                        left ? leftNormal : rightNormal,
+                        {{{u(p), v(p, z0p)}, {u(n), v(n, z0n)}, {u(n), v(n, z1n)}, {u(p), v(p, z1p)}}});
+            }
+        }
     }
     if (!w.thick) {
         return;
@@ -187,8 +250,9 @@ void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w,
     const std::array<std::array<float, 2>, 4> noUv{};
     // A cut-down wall stops at doorways: its top in pieces between them, closed at their edges.
     std::vector<std::array<float, 2>> gaps;
-    if (cutHeight > 0) {
-        const float top = (t0 + t1) / 2, bottom = (v0 + v1) / 2;
+    if (cut) {
+        const std::array<float, 2> a{q.x0, q.y0}, b{q.x1, q.y1};
+        const float top = (v(a, topAt(a)) + v(b, topAt(b))) / 2, bottom = (v(a, q.bottom0) + v(b, q.bottom1)) / 2;
         for (const auto& g : holes(builder, w.left, top, bottom)) {
             gaps.push_back({g[0] * len, g[1] * len});
         }
@@ -210,22 +274,29 @@ void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w,
     if (from < len - kTouch) {
         pieces.push_back({from, len});
     }
-    const float h = kWallThickness / 2;
-    auto heightAt = [&](float a, float z0, float z1) { return z0 + (z1 - z0) * a / len; };
-    auto across = [&](float a, float side) {
-        return std::array<float, 2>{q.x0 + ux * a + side * uy * h, q.y0 + uy * a - side * ux * h};
-    };
     // Each piece's top and its ends: the wall's own ends (where walls join they are inside the
     // walls, and show when the neighbor is cut down) or a doorway's sides.
     for (const auto& [s, e] : pieces) {
         const bool atA = s <= kTouch, atB = e >= len - kTouch;
-        const auto l0 = atA ? w.leftA : across(s, 1), r0 = atA ? w.rightA : across(s, -1);
-        const auto l1 = atB ? w.leftB : across(e, 1), r1 = atB ? w.rightB : across(e, -1);
-        const float z0 = heightAt(s, q.top0, q.top1), z1 = heightAt(e, q.top0, q.top1);
-        const float b0 = heightAt(s, q.bottom0, q.bottom1), b1 = heightAt(e, q.bottom0, q.bottom1);
-        addQuad(surfaces[edge], {{{l0[0], l0[1], z0}, {l1[0], l1[1], z1}, {r1[0], r1[1], z1}, {r0[0], r0[1], z0}}}, {0, 0, 1}, noUv);
-        addQuad(surfaces[edge], {{{l0[0], l0[1], b0}, {r0[0], r0[1], b0}, {r0[0], r0[1], z0}, {l0[0], l0[1], z0}}}, {-ux, -uy, 0}, noUv);
-        addQuad(surfaces[edge], {{{l1[0], l1[1], b1}, {r1[0], r1[1], b1}, {r1[0], r1[1], z1}, {l1[0], l1[1], z1}}}, {ux, uy, 0}, noUv);
+        std::vector<std::array<float, 2>> l{atA ? w.leftA : across(s, 1)}, r{atA ? w.rightA : across(s, -1)};
+        for (const float t : bends) {
+            if (t > s + 1e-4f && t < e - 1e-4f) {
+                l.push_back(across(t, 1));
+                r.push_back(across(t, -1));
+            }
+        }
+        l.push_back(atB ? w.leftB : across(e, 1));
+        r.push_back(atB ? w.rightB : across(e, -1));
+        for (std::size_t k = 0; k + 1 < l.size(); ++k) {
+            addQuad(surfaces[edge], {{{l[k][0], l[k][1], topAt(l[k])}, {l[k + 1][0], l[k + 1][1], topAt(l[k + 1])},
+                                      {r[k + 1][0], r[k + 1][1], topAt(r[k + 1])}, {r[k][0], r[k][1], topAt(r[k])}}},
+                    {0, 0, 1}, noUv);
+        }
+        for (const auto& [lp, rp, out] : {std::tuple{l.front(), r.front(), -1.0f}, std::tuple{l.back(), r.back(), 1.0f}}) {
+            addQuad(surfaces[edge], {{{lp[0], lp[1], bottomAt(lp)}, {rp[0], rp[1], bottomAt(rp)}, {rp[0], rp[1], topAt(rp)},
+                                      {lp[0], lp[1], topAt(lp)}}},
+                    {out * ux, out * uy, 0}, noUv);
+        }
     }
 }
 

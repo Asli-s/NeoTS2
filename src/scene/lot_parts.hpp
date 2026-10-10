@@ -43,6 +43,35 @@ struct WallQuad {
     float x0, y0, x1, y1, bottom0, top0, bottom1, top1;
 };
 
+// A roof's shape: its height anywhere is the lowest of the planes rising from its sloped edges; its
+// gable ends are left open, to be closed by the walls under them.
+struct RoofShape {
+    float eave = 0, slope = 1;
+    std::vector<std::array<float, 4>> planes;  // a point on a sloped edge and its inward normal (x, y, nx, ny)
+    // The lines under the gable ends (the sides of the roof's rectangle) from a to b, and outward.
+    struct Gable {
+        std::array<float, 2> a, b, out;
+    };
+    std::vector<Gable> gables;
+
+    float height(float x, float y) const;
+    // Where the roof's height bends on the way from p to q, as fractions of the way, with 0 and 1.
+    std::vector<float> bends(const std::array<float, 2>& p, const std::array<float, 2>& q) const;
+};
+
+// How far walls under a roof stay below its surface, so that the two never show through each other.
+constexpr float kRoofClearance = 0.03f;
+
+// The topmost walls along a roof's gable end follow the roof's slopes instead of their own top, cut
+// down near the eaves and raised up to the ridge (other walls under a roof keep their own top).
+struct WallCeiling {
+    std::vector<const RoofShape*> gables;
+
+    float at(float x, float y, float top) const;
+    // Where the top bends on the way from p to q, as fractions of the way, with 0 and 1.
+    std::vector<float> bends(const std::array<float, 2>& p, const std::array<float, 2>& q) const;
+};
+
 // A wall segment drawn with thickness: the material of each side by name (empty: not drawn) and
 // where each side's edge ends at both ends of the segment.
 struct ThickWall {
@@ -53,6 +82,8 @@ struct ThickWall {
     bool cuttable = true;  // the wall style may be cut down in views (foundations and deck skirts not)
     bool roomLeft = false, roomRight = false;  // a room, not outdoors, on that side
     std::string left, right;
+    std::string leftCovering, rightCovering;  // each side's covering, without door and window holes
+    WallCeiling ceiling;
     std::string leftMask, rightMask;  // wall masks of doors and windows in this wall
     bool leftMaskMirrored = false, rightMaskMirrored = false;
     std::array<float, 2> leftA{}, leftB{}, rightA{}, rightB{};
@@ -81,15 +112,16 @@ std::map<std::string, std::vector<WallMask>> wallMasks(const std::vector<std::st
 std::vector<WallHub> joinWalls(std::vector<ThickWall>& walls);
 
 // A wall's faces: each side's covering, its top and its ends; with `cutHeight`, cut down to that
-// height above its bottom.
+// height above its bottom, otherwise up to its ceiling.
 void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w, int edge, float cutHeight = 0);
 
 // The materials a roof is drawn with.
 struct RoofLook {
-    int top = -1, under = -1, trim = -1, gable = -1, cap = -1;
+    int top = -1, under = -1, trim = -1, cap = -1;
 };
 
 // A roof over its rectangle, eaves at height `eave`; `slope` is rise over run.
-void addRoof(Surfaces& surfaces, const roofs::Roof& roof, float eave, float slope, const RoofLook& look);
+RoofShape addRoof(Surfaces& surfaces, const roofs::Roof& roof, float eave, float slope, const RoofLook& look);
+
 
 } // namespace ts2::scene

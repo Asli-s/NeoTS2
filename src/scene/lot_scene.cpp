@@ -84,10 +84,11 @@ public:
         placeFencePosts();
         placeObjects();
         cutWalls();
+        shapeRoofs();
         drawWalls();
         drawTerrain();
         drawFloors();
-        drawRoofs();
+        placeRoofs();
         return stats_;
     }
 
@@ -141,6 +142,7 @@ private:
             t.roomRight = w.rightRoom != 0;
             if (covering == coverings.end()) {
                 t.left = t.right = plain_;
+                t.leftCovering = t.rightCovering = plain_;
             } else {
                 if (const auto style = styles.find(covering->second->type); style != styles.end()) {
                     if (!style->second.rendered) {
@@ -163,8 +165,8 @@ private:
                     const std::string material = assets_.patternMaterial(pattern->second.name, true);
                     return b_.material(material) >= 0 ? material : std::string();
                 };
-                t.left = side(covering->second->left);
-                t.right = side(covering->second->right);
+                t.left = t.leftCovering = side(covering->second->left);
+                t.right = t.rightCovering = side(covering->second->right);
                 ++stats_.coveredWalls;
             }
             walls_.push_back(std::move(t));
@@ -588,9 +590,11 @@ private:
         }
     }
 
-    void drawRoofs() {
+    // Roofs are shaped before the walls, as the topmost walls along a gable end follow its slopes (a
+    // plain gable stands in where no wall does).
+    void shapeRoofs() {
+        roofs_.reserve(lot_.roofs.size());
         for (const auto& roof : lot_.roofs) {
-            Surfaces surfaces;
             RoofLook look;
             if (const auto* pattern = assets_.roofPattern(roof.pattern)) {
                 // The top texture is a 5 x 5 grid of roof pieces (plain courses, ridge and hip caps; each
@@ -604,12 +608,49 @@ private:
             } else {
                 look.top = look.under = look.trim = b_.colorMaterial("roof plain", {0.35f, 0.27f, 0.22f});
             }
-            look.gable = b_.material(plain_);
             // A roof may keep its own slope (half the tangent of its angle); otherwise 45 degrees.
             const float slope = roof.slope > 0 ? 2 * roof.slope : 1.0f;
-            addRoof(surfaces, roof, heights_.corner(roof.level0, roof.x0, roof.y0), slope, look);
-            // A roof belongs to the storey under its eaves.
-            b_.place(b_.addMesh("roof", std::move(surfaces)), "roof", Transform{}, Part::Roof, roof.level0 - 1);
+            ShapedRoof& r = roofs_.emplace_back();
+            r.level = roof.level0 - 1;  // a roof belongs to the storey under its eaves
+            r.shape = addRoof(r.surfaces, roof, heights_.corner(roof.level0, roof.x0, roof.y0), slope, look);
+        }
+        for (auto& r : roofs_) {
+            const RoofShape& shape = r.shape;
+            for (const auto& gable : shape.gables) {
+                const float gx = gable.b[0] - gable.a[0], gy = gable.b[1] - gable.a[1], glen = std::sqrt(gx * gx + gy * gy);
+                auto onLine = [&](float x, float y) {
+                    const float off = ((x - gable.a[0]) * gy - (y - gable.a[1]) * gx) / glen;
+                    const float t = ((x - gable.a[0]) * gx + (y - gable.a[1]) * gy) / glen;
+                    return std::abs(off) < 1e-3f && t > -1e-3f && t < glen + 1e-3f;
+                };
+                bool closed = false;
+                for (auto& w : walls_) {
+                    // The topmost wall there (none stands on it), on the storey under the eaves or above.
+                    if (glen <= 0 || !w.thick || w.level < r.level || !onLine(w.q.x0, w.q.y0) || !onLine(w.q.x1, w.q.y1) ||
+                        wallAt_.contains(edgeKey(w.q.x0, w.q.y0, w.q.x1, w.q.y1, w.level + 1)) ||
+                        std::min(w.q.bottom0, w.q.bottom1) >= shape.height((w.q.x0 + w.q.x1) / 2, (w.q.y0 + w.q.y1) / 2)) {
+                        continue;
+                    }
+                    w.ceiling.gables.push_back(&shape);
+                    closed = true;
+                }
+                if (!closed && glen > 0) {
+                    ThickWall w;
+                    w.q = {gable.a[0], gable.a[1], gable.b[0], gable.b[1], shape.eave, shape.eave, shape.eave, shape.eave};
+                    w.thick = false;
+                    w.left = w.right = plain_;
+                    w.leftA = w.rightA = gable.a;
+                    w.leftB = w.rightB = gable.b;
+                    w.ceiling.gables.push_back(&shape);
+                    addThickWall(b_, r.surfaces, w, edge_);
+                }
+            }
+        }
+    }
+
+    void placeRoofs() {
+        for (auto& r : roofs_) {
+            b_.place(b_.addMesh("roof", std::move(r.surfaces)), "roof", Transform{}, Part::Roof, r.level);
         }
         stats_.roofs = lot_.roofs.size();
     }
@@ -626,6 +667,12 @@ private:
     std::vector<ThickWall> walls_;
     int wallBase_ = 0;  // index of walls_[0] in the scene's walls
     std::map<EdgeKey, std::size_t> wallAt_;  // walls_ by their middle
+    struct ShapedRoof {
+        Surfaces surfaces;
+        RoofShape shape;
+        int level = 0;
+    };
+    std::vector<ShapedRoof> roofs_;  // reserved up front: walls point at their shapes
     std::vector<Shown> shown_;
 };
 

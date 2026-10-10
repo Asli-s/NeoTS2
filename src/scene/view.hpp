@@ -16,6 +16,7 @@ struct View {
     WallView walls = WallView::Up;
     int level = 0;                      // the storey looked at; everything above it is hidden
     std::array<float, 2> facing{0, 1};  // the way the camera looks, along the ground
+    bool roofs = true;                  // roofs shown (with walls up, on the top storey)
 };
 
 // The highest storey anything but a roof is on.

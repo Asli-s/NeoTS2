@@ -7,8 +7,8 @@
 // gable, 4 gable, 5 hipped, 6 mansard...). A roof's surface is the lowest of the planes rising from
 // its sloped edges, so each face is the part of the rectangle where its plane is lowest. Sloped
 // edges reach out by the overhang, with a fascia under them; a shed's high side (toward the second
-// corner, across the shorter span) has no eave and meets the wall there; gable ends are closed by
-// upright faces. Mansards and dormers are drawn as hipped.
+// corner, across the shorter span) has no eave and meets the wall there; gable ends are left to the
+// walls under them, which carry on up to the roof. Mansards and dormers are drawn as hipped.
 
 namespace ts2::scene {
 
@@ -46,7 +46,38 @@ Polygon clip(const Polygon& poly, float a, float b, float c) {
 
 } // namespace
 
-void addRoof(Surfaces& surfaces, const roofs::Roof& roof, float eave, float slope, const RoofLook& look) {
+float RoofShape::height(float x, float y) const {
+    float z = 1e9f;
+    for (const auto& p : planes) {
+        z = std::min(z, eave + slope * ((x - p[0]) * p[2] + (y - p[1]) * p[3]));
+    }
+    return z;
+}
+
+std::vector<float> RoofShape::bends(const std::array<float, 2>& p, const std::array<float, 2>& q) const {
+    std::vector<float> ts{0, 1};
+    // Each plane's height along the way is c + d t; two planes cross where those are equal.
+    for (std::size_t i = 0; i < planes.size(); ++i) {
+        for (std::size_t j = i + 1; j < planes.size(); ++j) {
+            auto line = [&](const std::array<float, 4>& e) {
+                const float c = (p[0] - e[0]) * e[2] + (p[1] - e[1]) * e[3];
+                const float d = (q[0] - p[0]) * e[2] + (q[1] - p[1]) * e[3];
+                return std::array<float, 2>{c, d};
+            };
+            const auto a = line(planes[i]), b = line(planes[j]);
+            if (std::abs(a[1] - b[1]) > 1e-6f) {
+                const float t = (b[0] - a[0]) / (a[1] - b[1]);
+                if (t > 1e-4f && t < 1 - 1e-4f) {
+                    ts.push_back(t);
+                }
+            }
+        }
+    }
+    std::sort(ts.begin(), ts.end());
+    return ts;
+}
+
+RoofShape addRoof(Surfaces& surfaces, const roofs::Roof& roof, float eave, float slope, const RoofLook& look) {
     const float lx = std::min(roof.x0, roof.x1), hx = std::max(roof.x0, roof.x1);
     const float ly = std::min(roof.y0, roof.y1), hy = std::max(roof.y0, roof.y1);
     const bool wideX = hx - lx >= hy - ly;
@@ -83,8 +114,22 @@ void addRoof(Surfaces& surfaces, const roofs::Roof& roof, float eave, float slop
         return eave + slope * ((v[0] - E.p[0]) * E.n[0] + (v[1] - E.p[1]) * E.n[1]);
     };
     const Polygon rect{{xa, ya}, {xb, ya}, {xb, yb}, {xa, yb}};
+    RoofShape shape;
+    shape.eave = eave;
+    shape.slope = slope;
+    for (int e = 0; e < 4; ++e) {
+        const auto& E = edges[static_cast<std::size_t>(e)];
+        if (sloped[static_cast<std::size_t>(e)]) {
+            shape.planes.push_back({E.p[0], E.p[1], E.n[0], E.n[1]});
+        } else if (e != high) {
+            // Along the rectangle's side, under the overhang.
+            const std::array<std::array<float, 2>, 4> ends{{{lx, ly}, {hx, ly}, {lx, hy}, {hx, hy}}};
+            const auto& a = e == 0 ? ends[0] : e == 1 ? ends[1] : e == 2 ? ends[0] : ends[2];
+            const auto& b = e == 0 ? ends[2] : e == 1 ? ends[3] : e == 2 ? ends[1] : ends[3];
+            shape.gables.push_back({a, b, {-E.n[0], -E.n[1]}});
+        }
+    }
     const float rise = std::sqrt(1 + slope * slope);
-    std::vector<Polygon> faces(4);
     for (int i = 0; i < 4; ++i) {
         if (!sloped[static_cast<std::size_t>(i)]) {
             continue;
@@ -105,7 +150,6 @@ void addRoof(Surfaces& surfaces, const roofs::Roof& roof, float eave, float slop
         if (poly.size() < 3) {
             continue;
         }
-        faces[static_cast<std::size_t>(i)] = poly;
         const std::array<float, 3> up{-Ei.n[0] * slope / rise, -Ei.n[1] * slope / rise, 1 / rise};
         // Caps along the edges this face shares with another (those not on the rectangle's border).
         if (look.cap >= 0) {
@@ -181,54 +225,19 @@ void addRoof(Surfaces& surfaces, const roofs::Roof& roof, float eave, float slop
             }
         }
     }
-    // Fascias under the sloped edges; upright faces closing gable ends (not a shed's high side).
-    auto roofHeight = [&](const std::array<float, 2>& v) {
-        float z = 1e9f;
-        for (int e = 0; e < 4; ++e) {
-            if (sloped[static_cast<std::size_t>(e)]) {
-                z = std::min(z, height(e, v));
-            }
-        }
-        return z;
-    };
+    // Fascias under the sloped edges.
     for (int e = 0; e < 4; ++e) {
         const auto& E = edges[static_cast<std::size_t>(e)];
+        if (!sloped[static_cast<std::size_t>(e)] || look.trim < 0) {
+            continue;
+        }
         const float len = e < 2 ? yb - ya : xb - xa;
         const std::array<float, 2> a = E.p, b{E.p[0] + E.d[0] * len, E.p[1] + E.d[1] * len};
-        const std::array<float, 3> out{-E.n[0], -E.n[1], 0};
-        if (sloped[static_cast<std::size_t>(e)]) {
-            if (look.trim >= 0) {
-                addQuad(surfaces[look.trim],
-                        {{{a[0], a[1], eave - kRoofFascia}, {b[0], b[1], eave - kRoofFascia}, {b[0], b[1], eave}, {a[0], a[1], eave}}},
-                        out, {{{0, 1}, {len, 1}, {len, 0}, {0, 0}}});
-            }
-            continue;
-        }
-        if (e == high || look.gable < 0) {
-            continue;
-        }
-        // The roof's profile along this edge: its ends and the face corners lying on it.
-        std::vector<float> ts{0, len};
-        for (const auto& f : faces) {
-            for (const auto& v : f) {
-                const float off = (v[0] - a[0]) * E.n[0] + (v[1] - a[1]) * E.n[1];
-                if (std::abs(off) < 1e-3f) {
-                    ts.push_back((v[0] - a[0]) * E.d[0] + (v[1] - a[1]) * E.d[1]);
-                }
-            }
-        }
-        std::sort(ts.begin(), ts.end());
-        for (std::size_t k = 0; k + 1 < ts.size(); ++k) {
-            const std::array<float, 2> p{a[0] + E.d[0] * ts[k], a[1] + E.d[1] * ts[k]};
-            const std::array<float, 2> q{a[0] + E.d[0] * ts[k + 1], a[1] + E.d[1] * ts[k + 1]};
-            const float zp = roofHeight(p), zq = roofHeight(q);
-            if (ts[k + 1] - ts[k] < 1e-4f || (zp <= eave + 1e-4f && zq <= eave + 1e-4f)) {
-                continue;
-            }
-            addQuad(surfaces[look.gable], {{{p[0], p[1], eave}, {q[0], q[1], eave}, {q[0], q[1], zq}, {p[0], p[1], zp}}}, out,
-                    {{{ts[k], 1}, {ts[k + 1], 1}, {ts[k + 1], 0}, {ts[k], 0}}});
-        }
+        addQuad(surfaces[look.trim],
+                {{{a[0], a[1], eave - kRoofFascia}, {b[0], b[1], eave - kRoofFascia}, {b[0], b[1], eave}, {a[0], a[1], eave}}},
+                {-E.n[0], -E.n[1], 0}, {{{0, 1}, {len, 1}, {len, 0}, {0, 0}}});
     }
+    return shape;
 }
 
 } // namespace ts2::scene

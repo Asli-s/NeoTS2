@@ -1,9 +1,9 @@
 // NeoTS2: opens a saved lot in a window.
 //   neots2 <install folder> <lot.package> [--shot <out.png> [yaw pitch distance]]
-//          [--walls up|cutaway|down] [--level n (1: the ground floor)] [--target x y z]
+//          [--walls up|cutaway|down] [--level n (1: the ground floor)] [--target x y z] [--roofs off]
 // Mouse: left-drag orbits, right-drag pans, the wheel zooms. Keys: WASD or arrows pan, Q/E or
 // comma/period turn a quarter, Z/X or +/- zoom, Page Up/Down change storey, 1/2/3 or Tab walls
-// up/cutaway/down. --shot draws one frame to a file and exits.
+// up/cutaway/down, R roofs on/off. --shot draws one frame to a file and exits.
 #include "render/renderer.hpp"
 #include "scene/assets.hpp"
 #include "scene/builder.hpp"
@@ -98,6 +98,7 @@ struct Options {
     bool target = false;
     Vec3 at{0, 0, 0};  // what the camera looks at, instead of the lot's middle
     int level = 0;  // counted from 1 for the ground floor; 0: the top storey
+    bool roofs = true;
 };
 
 bool parseOptions(int argc, char** argv, Options& o) {
@@ -127,6 +128,9 @@ bool parseOptions(int argc, char** argv, Options& o) {
             o.target = true;
             o.at = {std::stof(argv[i + 1]), std::stof(argv[i + 2]), std::stof(argv[i + 3])};
             i += 3;
+        } else if (arg == "--roofs" && i + 1 < argc && std::string_view(argv[i + 1]) == "off") {
+            o.roofs = false;
+            ++i;
         } else if (arg == "--level" && i + 1 < argc) {
             o.level = std::stoi(argv[++i]);
         } else {
@@ -142,7 +146,7 @@ int main(int argc, char** argv) {
     Options options;
     if (argc < 3 || !parseOptions(argc, argv, options)) {
         std::fprintf(stderr, "Usage: neots2 <install folder> <lot.package> [--shot <out.png> [yaw pitch distance]]\n"
-                             "              [--walls up|cutaway|down] [--level n] [--target x y z]\n");
+                             "              [--walls up|cutaway|down] [--level n] [--target x y z] [--roofs off]\n");
         return 1;
     }
     const bool shot = options.shot != nullptr;
@@ -175,6 +179,7 @@ int main(int argc, char** argv) {
             frame(scene, orbit);
             ts2::scene::View view;
             view.walls = options.walls;
+            view.roofs = options.roofs;
             // Storeys count from the ground floor, 1 up.
             const int ground = ts2::scene::groundLevel(scene);
             view.level = options.level < 1 ? top : std::clamp(ground + options.level - 1, ground, top);
@@ -199,7 +204,8 @@ int main(int argc, char** argv) {
 
             auto setTitle = [&] {
                 const std::string title = "NeoTS2 - walls " + std::string(wallViewName(view.walls)) + ", storey " +
-                                          std::to_string(view.level - ground + 1) + " of " + std::to_string(top - ground + 1);
+                                          std::to_string(view.level - ground + 1) + " of " + std::to_string(top - ground + 1) +
+                                          (view.roofs ? "" : ", roofs off");
                 SDL_SetWindowTitle(window, title.c_str());
             };
             setTitle();
@@ -241,6 +247,10 @@ int main(int argc, char** argv) {
                             break;
                         case SDLK_TAB:
                             view.walls = static_cast<WallView>((static_cast<int>(view.walls) + 1) % 3);
+                            setTitle();
+                            break;
+                        case SDLK_R:
+                            view.roofs = !view.roofs;
                             setTitle();
                             break;
                         default:

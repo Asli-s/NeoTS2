@@ -57,7 +57,7 @@ std::vector<std::uint8_t> visibleInstances(const Scene& scene, const View& view)
         bool show = instance.part == Part::Other || instance.level <= view.level;
         switch (instance.part) {
         case Part::Roof:
-            show = show && view.walls == WallView::Up && view.level >= top;
+            show = show && view.roofs && view.walls == WallView::Up && view.level >= top;
             break;
         case Part::Wall:
         case Part::WallHub: {
