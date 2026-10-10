@@ -147,7 +147,7 @@ float WallCeiling::at(float x, float y, float top) const {
     }
     float z = 1e9f;
     for (const auto* g : gables) {
-        z = std::min(z, g->height(x, y) - kRoofClearance);
+        z = std::min(z, g->height(x, y) - g->thickness);  // up to the roof's underside
     }
     return z;
 }

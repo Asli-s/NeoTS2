@@ -47,6 +47,13 @@ struct WallQuad {
 // gable ends are left open, to be closed by the walls under them.
 struct RoofShape {
     float eave = 0, slope = 1;
+    float thickness = 0;  // the slab's depth: its underside runs this far below its top
+    // Its sloped faces in plan, each with its plane: height = c + cx * x + cy * y.
+    struct Face {
+        std::vector<std::array<float, 2>> outline;
+        std::array<float, 3> plane;
+    };
+    std::vector<Face> faces;
     std::vector<std::array<float, 4>> planes;  // a point on a sloped edge and its inward normal (x, y, nx, ny)
     // The lines under the gable ends (the sides of the roof's rectangle) from a to b, and outward.
     struct Gable {
@@ -59,8 +66,6 @@ struct RoofShape {
     std::vector<float> bends(const std::array<float, 2>& p, const std::array<float, 2>& q) const;
 };
 
-// How far walls under a roof stay below its surface, so that the two never show through each other.
-constexpr float kRoofClearance = 0.03f;
 
 // The topmost walls along a roof's gable end follow the roof's slopes instead of their own top, cut
 // down near the eaves and raised up to the ridge (other walls under a roof keep their own top).
@@ -117,11 +122,15 @@ void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w,
 
 // The materials a roof is drawn with.
 struct RoofLook {
-    int top = -1, under = -1, trim = -1, cap = -1;
+    int top = -1, under = -1, trim = -1, cap = -1, valley = -1;
 };
 
 // A roof over its rectangle, eaves at height `eave`; `slope` is rise over run.
 RoofShape addRoof(Surfaces& surfaces, const roofs::Roof& roof, float eave, float slope, const RoofLook& look);
+
+// Where roof `a` runs into roof `b` (a dormer into the main roof): a strip of `material` along the
+// line where their surfaces meet.
+void addValleys(Surfaces& surfaces, const RoofShape& a, const RoofShape& b, int material);
 
 
 } // namespace ts2::scene

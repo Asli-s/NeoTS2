@@ -77,6 +77,73 @@ std::vector<float> RoofShape::bends(const std::array<float, 2>& p, const std::ar
     return ts;
 }
 
+void addValleys(Surfaces& surfaces, const RoofShape& a, const RoofShape& b, int material) {
+    if (material < 0) {
+        return;
+    }
+    constexpr float kValleyWidth = kRoofCapWidth;
+    auto z = [](const RoofShape::Face& f, float x, float y) { return f.plane[0] + f.plane[1] * x + f.plane[2] * y; };
+    for (const auto& fa : a.faces) {
+        for (const auto& fb : b.faces) {
+            // The planes meet where (cx, cy) . (x, y) + c = 0, from their difference.
+            const float cx = fa.plane[1] - fb.plane[1], cy = fa.plane[2] - fb.plane[2], c = fa.plane[0] - fb.plane[0];
+            const float len = std::sqrt(cx * cx + cy * cy);
+            if (len < 1e-4f) {
+                continue;
+            }
+            const std::array<float, 2> n{cx / len, cy / len}, d{-n[1], n[0]};
+            const std::array<float, 2> o{-c / len * n[0], -c / len * n[1]};  // a point on the line
+            // The part of the line inside both faces' outlines (both convex).
+            float t0 = -1e6f, t1 = 1e6f;
+            for (const auto* outline : {&fa.outline, &fb.outline}) {
+                // Which way round the outline runs, for its inside.
+                float area = 0;
+                for (std::size_t k = 0; k < outline->size(); ++k) {
+                    const auto& p = (*outline)[k];
+                    const auto& q = (*outline)[(k + 1) % outline->size()];
+                    area += p[0] * q[1] - q[0] * p[1];
+                }
+                const float sign = area > 0 ? 1.0f : -1.0f;
+                for (std::size_t k = 0; k < outline->size() && t0 < t1; ++k) {
+                    const auto& p = (*outline)[k];
+                    const auto& q = (*outline)[(k + 1) % outline->size()];
+                    // Inside: sign * cross(q - p, x - p) >= 0, linear in t along the line.
+                    const float ex = q[0] - p[0], ey = q[1] - p[1];
+                    const float at0 = sign * (ex * (o[1] - p[1]) - ey * (o[0] - p[0]));
+                    const float slopeT = sign * (ex * d[1] - ey * d[0]);
+                    if (std::abs(slopeT) < 1e-7f) {
+                        if (at0 < 0) {
+                            t1 = t0 - 1;
+                        }
+                    } else if (slopeT > 0) {
+                        t0 = std::max(t0, -at0 / slopeT);
+                    } else {
+                        t1 = std::min(t1, -at0 / slopeT);
+                    }
+                }
+            }
+            if (t1 - t0 < 1e-3f) {
+                continue;
+            }
+            // A strip across the line, lying on whichever surface is on top on each side.
+            auto top = [&](float x, float y) { return std::max(z(fa, x, y), z(fb, x, y)) + 0.015f; };
+            const float h = kValleyWidth / 2;
+            std::array<std::array<float, 3>, 4> corners{};
+            const std::array<std::array<float, 2>, 4> at{{{t0, -h}, {t1, -h}, {t1, h}, {t0, h}}};
+            for (std::size_t k = 0; k < 4; ++k) {
+                const float x = o[0] + d[0] * at[k][0] + n[0] * at[k][1], y = o[1] + d[1] * at[k][0] + n[1] * at[k][1];
+                corners[k] = {x, y, top(x, y)};
+            }
+            // Folded along the line: each half on its own surface.
+            const std::array<float, 3> mid0{o[0] + d[0] * t0, o[1] + d[1] * t0, top(o[0] + d[0] * t0, o[1] + d[1] * t0)};
+            const std::array<float, 3> mid1{o[0] + d[0] * t1, o[1] + d[1] * t1, top(o[0] + d[0] * t1, o[1] + d[1] * t1)};
+            const float u0 = t0 / kRoofTextureCell, u1 = t1 / kRoofTextureCell;
+            addQuad(surfaces[material], {{corners[0], corners[1], mid1, mid0}}, {0, 0, 1}, {{{u0, 0}, {u1, 0}, {u1, 0.5f}, {u0, 0.5f}}});
+            addQuad(surfaces[material], {{mid0, mid1, corners[2], corners[3]}}, {0, 0, 1}, {{{u0, 0.5f}, {u1, 0.5f}, {u1, 1}, {u0, 1}}});
+        }
+    }
+}
+
 RoofShape addRoof(Surfaces& surfaces, const roofs::Roof& roof, float eave, float slope, const RoofLook& look) {
     const float lx = std::min(roof.x0, roof.x1), hx = std::max(roof.x0, roof.x1);
     const float ly = std::min(roof.y0, roof.y1), hy = std::max(roof.y0, roof.y1);
@@ -117,6 +184,7 @@ RoofShape addRoof(Surfaces& surfaces, const roofs::Roof& roof, float eave, float
     RoofShape shape;
     shape.eave = eave;
     shape.slope = slope;
+    shape.thickness = kRoofFascia;
     for (int e = 0; e < 4; ++e) {
         const auto& E = edges[static_cast<std::size_t>(e)];
         if (sloped[static_cast<std::size_t>(e)]) {
@@ -150,6 +218,7 @@ RoofShape addRoof(Surfaces& surfaces, const roofs::Roof& roof, float eave, float
         if (poly.size() < 3) {
             continue;
         }
+        shape.faces.push_back({poly, {eave - slope * (Ei.p[0] * Ei.n[0] + Ei.p[1] * Ei.n[1]), slope * Ei.n[0], slope * Ei.n[1]}});
         const std::array<float, 3> up{-Ei.n[0] * slope / rise, -Ei.n[1] * slope / rise, 1 / rise};
         // Caps along the edges this face shares with another (those not on the rectangle's border).
         if (look.cap >= 0) {

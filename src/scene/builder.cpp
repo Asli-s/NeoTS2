@@ -160,7 +160,7 @@ int SceneBuilder::textureCellMaterial(const std::string& texture, int columns, i
 int SceneBuilder::textureRegionMaterial(const std::string& texture, double u0, double v0, double u1, double v1,
                                         std::uint32_t width, std::uint32_t height, const std::array<float, 3>& color) {
     std::ostringstream name;
-    name << texture << " region " << u0 << "," << v0 << "," << u1 << "," << v1;
+    name << texture << " region " << u0 << "," << v0 << "," << u1 << "," << v1 << " " << color[0] << "," << color[1] << "," << color[2];
     const std::string key = lower(name.str());
     if (const auto it = materials_.find(key); it != materials_.end()) {
         return it->second;

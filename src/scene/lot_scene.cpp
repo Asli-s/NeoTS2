@@ -638,6 +638,9 @@ private:
                 look.under = b_.textureMaterial(pattern->under, 0.8f);
                 look.trim = b_.textureMaterial(pattern->trim, 0.8f);
                 look.cap = b_.textureRegionMaterial(pattern->top, 0.4, 0.0, 0.6, 37.0 / 512, 128, 48, slopeColor);
+                // Valleys where roofs meet: the cap piece, darker.
+                look.valley = b_.textureRegionMaterial(pattern->top, 0.4, 0.0, 0.6, 37.0 / 512, 128, 48,
+                                                       {slopeColor[0] * 0.5f, slopeColor[1] * 0.5f, slopeColor[2] * 0.5f});
             } else {
                 look.top = look.under = look.trim = b_.colorMaterial("roof plain", {0.35f, 0.27f, 0.22f});
             }
@@ -646,6 +649,12 @@ private:
             ShapedRoof& r = roofs_.emplace_back();
             r.level = roof.level0 - 1;  // a roof belongs to the storey under its eaves
             r.shape = addRoof(r.surfaces, roof, heights_.corner(roof.level0, roof.x0, roof.y0), slope, look);
+            r.valley = look.valley;
+        }
+        for (std::size_t i = 0; i < roofs_.size(); ++i) {
+            for (std::size_t j = i + 1; j < roofs_.size(); ++j) {
+                addValleys(roofs_[i].surfaces, roofs_[i].shape, roofs_[j].shape, roofs_[i].valley);
+            }
         }
         for (auto& r : roofs_) {
             const RoofShape& shape = r.shape;
@@ -732,6 +741,7 @@ private:
         Surfaces surfaces;
         RoofShape shape;
         int level = 0;
+        int valley = -1;
     };
     std::vector<ShapedRoof> roofs_;  // reserved up front: walls point at their shapes
     std::vector<Shown> shown_;
