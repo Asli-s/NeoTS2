@@ -197,46 +197,36 @@ void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w,
         }
         std::sort(gaps.begin(), gaps.end());
     }
+    // The pieces of wall left between the doorways (the whole wall when there are none).
+    std::vector<std::array<float, 2>> pieces;
+    float from = 0;
+    constexpr float kTouch = 0.01f;  // a doorway this close to an end reaches it
+    for (const auto& g : gaps) {
+        if (g[0] > from + kTouch) {
+            pieces.push_back({from, g[0]});
+        }
+        from = std::max(from, g[1]);
+    }
+    if (from < len - kTouch) {
+        pieces.push_back({from, len});
+    }
     const float h = kWallThickness / 2;
     auto heightAt = [&](float a, float z0, float z1) { return z0 + (z1 - z0) * a / len; };
     auto across = [&](float a, float side) {
         return std::array<float, 2>{q.x0 + ux * a + side * uy * h, q.y0 + uy * a - side * ux * h};
     };
-    std::array<float, 2> left = w.leftA, right = w.rightA;
-    float from = 0;
-    for (std::size_t i = 0; i <= gaps.size(); ++i) {
-        const bool last = i == gaps.size();
-        if (!last && (gaps[i][0] <= from || gaps[i][1] >= len)) {
-            continue;
-        }
-        const float to = last ? len : gaps[i][0];
-        const std::array<float, 2> leftEnd = last ? w.leftB : across(to, 1), rightEnd = last ? w.rightB : across(to, -1);
-        const float z0 = heightAt(from, q.top0, q.top1), z1 = heightAt(to, q.top0, q.top1);
-        addQuad(surfaces[edge], {{{left[0], left[1], z0}, {leftEnd[0], leftEnd[1], z1}, {rightEnd[0], rightEnd[1], z1},
-                                  {right[0], right[1], z0}}},
-                {0, 0, 1}, noUv);
-        if (last) {
-            break;
-        }
-        // The doorway's sides.
-        const float b0 = heightAt(to, q.bottom0, q.bottom1), next = gaps[i][1];
-        addQuad(surfaces[edge], {{{leftEnd[0], leftEnd[1], b0}, {rightEnd[0], rightEnd[1], b0}, {rightEnd[0], rightEnd[1], z1},
-                                  {leftEnd[0], leftEnd[1], z1}}},
-                {ux, uy, 0}, noUv);
-        left = across(next, 1);
-        right = across(next, -1);
-        const float b1 = heightAt(next, q.bottom0, q.bottom1), z2 = heightAt(next, q.top0, q.top1);
-        addQuad(surfaces[edge], {{{left[0], left[1], b1}, {right[0], right[1], b1}, {right[0], right[1], z2}, {left[0], left[1], z2}}},
-                {-ux, -uy, 0}, noUv);
-        from = next;
+    // Each piece's top and its ends: the wall's own ends (where walls join they are inside the
+    // walls, and show when the neighbor is cut down) or a doorway's sides.
+    for (const auto& [s, e] : pieces) {
+        const bool atA = s <= kTouch, atB = e >= len - kTouch;
+        const auto l0 = atA ? w.leftA : across(s, 1), r0 = atA ? w.rightA : across(s, -1);
+        const auto l1 = atB ? w.leftB : across(e, 1), r1 = atB ? w.rightB : across(e, -1);
+        const float z0 = heightAt(s, q.top0, q.top1), z1 = heightAt(e, q.top0, q.top1);
+        const float b0 = heightAt(s, q.bottom0, q.bottom1), b1 = heightAt(e, q.bottom0, q.bottom1);
+        addQuad(surfaces[edge], {{{l0[0], l0[1], z0}, {l1[0], l1[1], z1}, {r1[0], r1[1], z1}, {r0[0], r0[1], z0}}}, {0, 0, 1}, noUv);
+        addQuad(surfaces[edge], {{{l0[0], l0[1], b0}, {r0[0], r0[1], b0}, {r0[0], r0[1], z0}, {l0[0], l0[1], z0}}}, {-ux, -uy, 0}, noUv);
+        addQuad(surfaces[edge], {{{l1[0], l1[1], b1}, {r1[0], r1[1], b1}, {r1[0], r1[1], z1}, {l1[0], l1[1], z1}}}, {ux, uy, 0}, noUv);
     }
-    // Ends: where walls join they are inside the walls, and show when the neighbor is cut down.
-    addQuad(surfaces[edge], {{{w.leftA[0], w.leftA[1], q.bottom0}, {w.rightA[0], w.rightA[1], q.bottom0},
-                              {w.rightA[0], w.rightA[1], q.top0}, {w.leftA[0], w.leftA[1], q.top0}}},
-            {-ux, -uy, 0}, noUv);
-    addQuad(surfaces[edge], {{{w.leftB[0], w.leftB[1], q.bottom1}, {w.rightB[0], w.rightB[1], q.bottom1},
-                              {w.rightB[0], w.rightB[1], q.top1}, {w.leftB[0], w.leftB[1], q.top1}}},
-            {ux, uy, 0}, noUv);
 }
 
 } // namespace ts2::scene
