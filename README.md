@@ -100,4 +100,11 @@ rights reserved.
 
 ## License
 
-[MIT](LICENSE)
+NeoTS2 is free to use, change, copy and share, and to build on: fork it, make mods and tools for
+it, use its code in your own projects. Mods, add-ons, content and tools made for NeoTS2 are yours,
+and you may sell them. The one thing you may not do is sell NeoTS2 itself, or a product or service
+that is essentially NeoTS2.
+
+In license terms: [MIT with the Commons Clause](LICENSE), plus a sentence making clear that mods
+and other work made for NeoTS2 are not covered by the clause. (Because of the clause, NeoTS2 is
+source-available rather than "open source" by the OSI's definition.)
