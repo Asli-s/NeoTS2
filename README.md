@@ -22,7 +22,7 @@ giving it:
 - **modern graphics as an option**: the classic look by default, with room for improved
   lighting, shadows and effects as mods;
 - **modding without limits**: new behavior, new rendering, new tools, built on code rather
-  than workarounds;
+  than workarounds.
 
 The classic look is rebuilt from how the original game works, not approximated: where the game
 computes something (terrain paint, lighting, camera framing), NeoTS2 does the same computation.
@@ -41,6 +41,12 @@ NeoTS2 is in early development. It isn't playable yet, but you can already look 
   behavior scripts, 3D models and textures, saved neighborhoods, families, lots and Sims.
 - **Simulation:** object behavior (SimAntics, and the Lua scripts the expansions use) running
   against a saved lot, with a growing set of the game's primitives.
+
+| Main menu | Neighborhood | Lot |
+| --- | --- | --- |
+| ![The main menu](assets/screenshots/main-menu.jpg) | ![Pleasantview's coast](assets/screenshots/neighborhood.jpg) | ![A house in cutaway](assets/screenshots/lot.jpg) |
+
+*Screenshots of NeoTS2 running on the game's own files.*
 
 ## Tools and libraries
 
