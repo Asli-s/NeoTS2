@@ -12,9 +12,9 @@ neighborhoods in 3D, and the game's screens.
 
 ## Why
 
-The Sims 2 is still loved, but its engine is twenty years old: a 32-bit, fixed-function program
+The Sims 2 engine is twenty years old: a 32-bit, fixed-function program
 tied to old hardware and closed to deeper modding. NeoTS2 aims to keep everything that makes the
-game what it is (its objects, its saves, its look and its behavior) while giving it:
+game what it is while giving it:
 
 - **a native 64-bit (x64) engine** that uses modern graphics APIs (Direct3D 12 today) and the
   memory a modern PC has;
@@ -23,11 +23,9 @@ game what it is (its objects, its saves, its look and its behavior) while giving
   lighting, shadows and effects as mods;
 - **modding without limits**: new behavior, new rendering, new tools, built on code rather
   than workarounds;
-- **speed**: no loading pauses where they can be avoided, with work done in the background.
 
 The classic look is rebuilt from how the original game works, not approximated: where the game
-computes something (terrain paint, lighting, camera framing), NeoTS2 does the same computation
-and is checked against the original's own results.
+computes something (terrain paint, lighting, camera framing), NeoTS2 does the same computation.
 
 ## What works today
 
@@ -38,13 +36,12 @@ NeoTS2 is in early development. It isn't playable yet, but you can already look 
 - **Neighborhoods:** the terrain with the game's paints, lighting and shadows, and its
   reflective water, seen through the game's neighborhood camera.
 - **Lots:** a saved lot in 3D: walls with doors and windows, floors, roofs, fences and objects,
-  with walls up, cutaway or down and storey by storey.
+  with walls up, cutaway or down.
 - **Game files:** the game's packages and most of its resource formats: objects, string tables,
   behavior scripts, 3D models and textures, saved neighborhoods, families, lots and Sims.
 - **Simulation:** object behavior (SimAntics, and the Lua scripts the expansions use) running
   against a saved lot, with a growing set of the game's primitives.
 
-Next up: roads, lots and trees in the neighborhood view, then entering a lot from it.
 
 ## Tools and libraries
 
@@ -105,6 +102,4 @@ it, use its code in your own projects. Mods, add-ons, content and tools made for
 and you may sell them. The one thing you may not do is sell NeoTS2 itself, or a product or service
 that is essentially NeoTS2.
 
-In license terms: [MIT with the Commons Clause](LICENSE), plus a sentence making clear that mods
-and other work made for NeoTS2 are not covered by the clause. (Because of the clause, NeoTS2 is
-source-available rather than "open source" by the OSI's definition.)
+[MIT with the Commons Clause](LICENSE)
