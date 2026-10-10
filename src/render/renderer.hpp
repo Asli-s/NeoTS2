@@ -98,6 +98,7 @@ private:
     SDL_GPUTexture* depth_ = nullptr;
     unsigned depthWidth_ = 0, depthHeight_ = 0;
     SDL_GPUSampler* sampler_ = nullptr;
+    SDL_GPUSampler* clampedSampler_ = nullptr;  // sampler_, clamped at the edges
     SDL_GPUTexture* white_ = nullptr;  // stands in for surfaces without a texture
     // Pipelines by [two-sided][blend]: opaque and alpha-tested surfaces write depth, blended ones don't.
     SDL_GPUGraphicsPipeline* pipelines_[2][2] = {};
@@ -145,6 +146,11 @@ private:
     SDL_GPUBuffer* waterIndices_ = nullptr;
     unsigned waterIndexCount_ = 0;
     SDL_GPUTexture* skyCube_ = nullptr;
+    SDL_GPUTexture* skybox_ = nullptr;  // a lot's sky
+    // A lot skirt's boundary curtain: four walls written into depth only.
+    SDL_GPUGraphicsPipeline* clipPipeline_ = nullptr;
+    SDL_GPUBuffer* clipVertices_ = nullptr;
+    SDL_GPUBuffer* clipIndices_ = nullptr;
     SDL_GPUTexture* ripples_ = nullptr;
     SDL_GPUTexture* reflection_ = nullptr;
     SDL_GPUTexture* reflectionDepth_ = nullptr;

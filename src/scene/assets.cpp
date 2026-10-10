@@ -1,6 +1,7 @@
 #include "scene/assets.hpp"
 
 #include "content/install.hpp"
+#include "content/neighborhood.hpp"
 #include "formats/dbpf.hpp"
 #include "formats/hash.hpp"
 #include "formats/namemap.hpp"
@@ -27,6 +28,7 @@ constexpr std::uint32_t kPatternProperties = 0xCCA8E925;
 constexpr std::uint32_t kFenceProperties = 0x2CB230B8;
 constexpr std::uint32_t kRoofProperties = 0xACA8EA06;
 constexpr std::uint32_t kBoneNames = 0x90;  // an object's "Model - Bones" string table
+constexpr std::uint32_t kLocalGroup = 0xFFFFFFFF;  // a package's own resources
 } // namespace
 
 std::string lower(std::string s) {
@@ -41,6 +43,7 @@ Assets::Assets(const fs::path& install) : scripts_(content::loadBuildScripts(con
         objects_.addPackage(objects);
         const fs::path res = objects.parent_path().parent_path();
         catalogFolders.insert(res / "Catalog" / "Patterns");
+        skinFolders_.push_back(res / "Catalog" / "Skins");
         std::error_code ec;
         std::vector<fs::path> packages;
         for (fs::directory_iterator it(res / "Sims3D", ec), end; it != end; it.increment(ec)) {
@@ -68,17 +71,73 @@ Assets::Assets(const fs::path& install) : scripts_(content::loadBuildScripts(con
 }
 
 std::optional<std::vector<std::uint8_t>> Assets::byName(std::uint32_t type, const std::string& name) {
+    if (name.size() > 12 && name.starts_with("#0x") && name[11] == '!') {
+        const auto key = hash::scenegraphKey(name.substr(12));
+        const auto group = static_cast<std::uint32_t>(std::stoul(name.substr(3, 8), nullptr, 16));
+        return byKey({type, group, key.instance, key.instanceHigh});
+    }
     const auto key = hash::scenegraphKey(name);
-    return byKey({type, sg::kScenegraphGroup, key.instance, key.instanceHigh});
+    if (auto found = byKey({type, sg::kScenegraphGroup, key.instance, key.instanceHigh}); found || !localGroup_) {
+        return found;
+    }
+    return byKey({type, *localGroup_, key.instance, key.instanceHigh});
+}
+
+void Assets::useCharacterFile(const fs::path& file) {
+    if (file.empty()) {
+        localGroup_.reset();
+        return;
+    }
+    localGroup_ = content::localGroupFor(file);
+    if (added_.insert(file).second) {
+        models_.addPackage(file, *localGroup_);
+    }
+}
+
+std::optional<std::vector<std::uint8_t>> Assets::skinResource(const sg::Link& link) {
+    if (link.group == kLocalGroup) {
+        return byKey(link);
+    }
+    if (!skinsRead_) {
+        skinsRead_ = true;
+        for (const auto& folder : skinFolders_) {
+            std::error_code ec;
+            std::vector<fs::path> packages;
+            for (fs::directory_iterator it(folder, ec), end; it != end; it.increment(ec)) {
+                if (it->path().extension() == ".package") {
+                    packages.push_back(it->path());
+                }
+            }
+            std::sort(packages.begin(), packages.end());
+            for (const auto& p : packages) {
+                skins_.addPackage(p);
+            }
+        }
+    }
+    const auto* r = skins_.find({link.type, link.group, link.instance, link.instanceHigh});
+    if (r == nullptr) {
+        return std::nullopt;
+    }
+    return skins_.read(*r);
 }
 
 std::optional<std::vector<std::uint8_t>> Assets::byKey(const sg::Link& link) {
     dbpf::ResourceKey key;
     key.type = link.type;
-    key.group = link.group;
+    key.group = link.group == kLocalGroup && localGroup_ ? *localGroup_ : link.group;
     key.instance = link.instance;
     key.instanceHigh = link.instanceHigh;
     const auto* r = models_.find(key);
+    if (r == nullptr && key.instanceHigh == 0) {
+        // Reference lists may leave out the high instance (a Sim's skeleton): any resource with the
+        // rest of the key.
+        for (const auto& candidate : models_.resources()) {
+            const auto& k = candidate.entry.key;
+            if (k.type == key.type && k.group == key.group && k.instance == key.instance) {
+                r = &candidate;
+            }
+        }
+    }
     if (r == nullptr) {
         return std::nullopt;
     }

@@ -26,6 +26,9 @@
 #include "formats/nhood_objects.hpp"
 #include "formats/nhood_paint_rules.hpp"
 #include "formats/nhood_terrain.hpp"
+#include "formats/anim.hpp"
+#include "formats/propset.hpp"
+#include "formats/reference_list.hpp"
 #include "formats/ui_script.hpp"
 #include "sim/lua_runtime.hpp"
 
@@ -3708,6 +3711,41 @@ void neighborhoodRoadsParse() {
     CHECK(road.corners[2][0] == 20 && road.corners[2][1] == 1030 && road.corners[2][2] == 368.5f && road.corners[3][3] == 1);
 }
 
+// Binary property sets (magic 0xCBE750E0) read like the XML ones; reference lists (3IDR) list keys,
+// version 2 with a high instance.
+void binaryPropertySetsAndReferenceLists() {
+    std::vector<std::uint8_t> d = {0xE0, 0x50, 0xE7, 0xCB, 2, 0, 3, 0, 0, 0};
+    auto u32 = [&](std::uint32_t v) {
+        for (int i = 0; i < 4; ++i) d.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
+    };
+    auto name = [&](const std::string& s) {
+        u32(static_cast<std::uint32_t>(s.size()));
+        d.insert(d.end(), s.begin(), s.end());
+    };
+    u32(0xEB61E4F7), name("lk0"), u32(0x10002);
+    u32(0x0B8BEA18), name("type"), name("skin");
+    u32(0xABC78708), name("stretch"), u32(0x3F800000);
+    const auto p = ts2::propset::parse(d);
+    CHECK(p.at("lk0") == "65538" && p.at("type") == "skin" && std::stof(p.at("stretch")) == 1.0f);
+
+    d = {0xEF, 0xBE, 0xAD, 0xDE, 2, 0, 0, 0, 1, 0, 0, 0};
+    u32(0xE519C933), u32(0x1C0532FA), u32(0xFF6B8A91), u32(0x12345678);
+    const auto refs = ts2::reflist::parse(d);
+    CHECK(refs.size() == 1 && refs[0].type == 0xE519C933 && refs[0].instance == 0xFF6B8A91 && refs[0].instanceHigh == 0x12345678);
+}
+
+// Animation curves run as cubic Hermite segments between keys, holding the end values outside.
+void animationCurvesSample() {
+    ts2::anim::Curve flat{{{0, 1, 0, 0}, {100, 1, 0, 0}}};
+    CHECK(flat.sample(-5) == 1 && flat.sample(50) == 1 && flat.sample(500) == 1);
+    // Slopes equal to the rise make the segment a straight line.
+    ts2::anim::Curve line{{{0, 0, 0, 2}, {100, 2, 2, 0}}};
+    CHECK(std::abs(line.sample(25) - 0.5f) < 1e-5f && std::abs(line.sample(50) - 1.0f) < 1e-5f);
+    // Without slopes it eases in and out.
+    ts2::anim::Curve eased{{{0, 0, 0, 0}, {100, 1, 0, 0}}};
+    CHECK(std::abs(eased.sample(50) - 0.5f) < 1e-5f && eased.sample(10) < 0.1f);
+}
+
 void lotDescriptionParse() {
     auto make = [](std::uint16_t version, std::uint16_t own) {
         std::vector<std::uint8_t> d;
@@ -3867,6 +3905,8 @@ int main(int argc, char** argv) {
         {"neighborhood light map looks up normals", neighborhoodLightMapLooksUpNormals},
         {"neighborhood roads parse", neighborhoodRoadsParse},
         {"lot description parse", lotDescriptionParse},
+        {"binary property sets and reference lists", binaryPropertySetsAndReferenceLists},
+        {"animation curves sample", animationCurvesSample},
         {"vertex aliases follow kind", vertexAliasesFollowKind},
         {"fence post layer reads posts", fencePostLayerReadsPosts},
         {"build scripts read patterns and wall styles", buildScriptsReadPatternsAndWallStyles},

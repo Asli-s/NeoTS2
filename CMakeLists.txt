@@ -40,6 +40,8 @@ add_library(ts2formats
     src/formats/famt.cpp
     src/formats/swaf.cpp
     src/formats/propset.cpp
+    src/formats/anim.cpp
+    src/formats/reference_list.cpp
     src/formats/ttab.cpp
     src/formats/luascript.cpp
     src/formats/sdsc.cpp
@@ -119,6 +121,8 @@ add_library(ts2scene
     src/scene/roof_grid.cpp
     src/scene/round_roofs.cpp
     src/scene/imposters.cpp
+    src/scene/lot_skirt.cpp
+    src/scene/sims.cpp
     src/scene/neighborhood_scene.cpp
     src/scene/neighborhood_paint.cpp
     src/scene/neighborhood_lighting.cpp
@@ -175,7 +179,7 @@ else()
     if(SDL3_FOUND AND NEOTS2_DXC)
         set(shader_dir ${CMAKE_CURRENT_BINARY_DIR}/shaders)
         set(shader_outputs)
-        foreach(shader scene.vert scene.frag ui.vert ui.frag terrain.vert terrain.frag sky.vert sky.frag water.vert water.frag road.vert road.frag imposter.vert imposter.frag)
+        foreach(shader scene.vert scene.frag ui.vert ui.frag terrain.vert terrain.frag sky.vert sky.frag water.vert water.frag road.vert road.frag imposter.vert imposter.frag clip.vert clip.frag)
             if(shader MATCHES "vert$")
                 set(profile vs_6_0)
             else()
@@ -200,7 +204,7 @@ else()
         add_library(ts2ui src/ui/fonts.cpp src/ui/screen.cpp)
         target_link_libraries(ts2ui PUBLIC ts2content PRIVATE freetype project_warnings)
 
-        add_executable(neots2 app/main.cpp app/menu.cpp)
+        add_executable(neots2 app/main.cpp app/menu.cpp app/neighborhood.cpp app/neighborhood_ui.cpp)
         target_link_libraries(neots2 PRIVATE ts2render ts2ui project_warnings)
         add_dependencies(neots2 neots2_shaders)
         # The app loads its shaders and SDL from beside itself.

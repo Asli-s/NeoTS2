@@ -13,4 +13,8 @@ namespace ts2::content {
 // later products overriding earlier ones.
 std::map<std::string, std::string> neighborhoodRoadTextures(const std::vector<Product>& products);
 
+// The same for the roads around a lot in lot view ("create LotSkirtRoadMaterialInstance(<material>
+// <texture>)"; materials named "lotSkirtRoad_<terrain type>_<piece, 8 hex digits>").
+std::map<std::string, std::string> lotSkirtRoadTextures(const std::vector<Product>& products);
+
 } // namespace ts2::content

@@ -223,20 +223,38 @@ NeighborhoodSceneStats addNeighborhood(SceneBuilder& builder, const std::filesys
             out.roadTextures.push_back(std::move(*image));
         }
         if (known->second != UINT32_MAX) {
-            out.roads.push_back({road.corners, known->second});
+            out.roads.push_back({road.corners, known->second, road.piece});
         }
     }
 
     // The lots, as their imposters.
+    out.imposterLift = imposterZOffset;
     const std::string hood = neighborhood.filename().string();
     stats.lots = lots.size();
     for (const auto& lot : lots) {
+        // The tiles it covers: its width along x unless placed a quarter turn from how it was built.
+        const bool turned = ((static_cast<unsigned>(lot.facing) - lot.ownFacing) & 1) != 0;
+        const float w = static_cast<float>(turned ? lot.depth : lot.width), d = static_cast<float>(turned ? lot.width : lot.depth);
+        // The lot itself goes where its imposter does (without the imposter's lift): turned by its
+        // placed facing less the one it was built with, then moved onto its tiles.
+        const unsigned k = (static_cast<unsigned>(lot.facing) - lot.ownFacing + 4) & 3;
+        const float lw = static_cast<float>(lot.width), ld = static_cast<float>(lot.depth);
+        const float offsets[4][2] = {{0, 0}, {0, lw}, {lw, ld}, {ld, 0}};
+        const Transform place = Transform::at((static_cast<float>(lot.x) + offsets[k][0]) * kTile, (static_cast<float>(lot.y) + offsets[k][1]) * kTile,
+                                              lot.elevation, -static_cast<float>(k) * 1.5707963267948966f);
+        stats.lotFootprints.push_back({lot.id, static_cast<float>(lot.x) * kTile, static_cast<float>(lot.y) * kTile,
+                                       (static_cast<float>(lot.x) + w) * kTile, (static_cast<float>(lot.y) + d) * kTile, lot.elevation,
+                                       lot.elevation, place, lot.texture});
         const auto file = neighborhood / "Lots" / (hood + "_Lot" + std::to_string(lot.id) + ".package");
         if (!std::filesystem::is_regular_file(file)) {
             continue;
         }
         try {
-            stats.imposters += addImposter(out, file, lot, imposterZOffset, assets.warnings) ? 1 : 0;
+            float top = -1e30f;
+            if (addImposter(out, file, lot, imposterZOffset, assets.warnings, &top)) {
+                ++stats.imposters;
+                stats.lotFootprints.back().top = top;
+            }
         } catch (const std::exception& ex) {
             assets.warnings.push_back(file.filename().string() + ": " + ex.what());
         }

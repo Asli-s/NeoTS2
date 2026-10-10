@@ -19,6 +19,7 @@ struct FontStyle {
     int size = 11;
     bool bold = false, italic = false;
     int lineSpacing = 0;  // pixels added between lines
+    float xScale = 1;     // glyphs narrowed or widened by this
     std::uint32_t guid = 0;
 };
 

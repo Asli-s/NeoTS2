@@ -1,9 +1,12 @@
 #include "scene/lot_scene.hpp"
 
 #include "content/lot.hpp"
+#include "content/neighborhood.hpp"
 #include "formats/dbpf.hpp"
+#include "formats/objd.hpp"
 #include "formats/resource_types.hpp"
 #include "scene/lot_parts.hpp"
+#include "scene/sims.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -83,12 +86,16 @@ public:
         collectWalls();
         placeFencePosts();
         placeObjects();
+        placeSims();
         cutWalls();
         shapeRoofs();
         drawWalls();
         drawTerrain();
         drawFloors();
         placeRoofs();
+        // The sky behind a lot by day, as the game's lot sky effect draws it (its plain-weather
+        // skybox; seasons and weather pick others).
+        b_.scene().skybox = assets_.textureFaces("skymap-generic-day-highres-envcube");
         return stats_;
     }
 
@@ -297,6 +304,108 @@ private:
             b_.place(shown_[i].mesh, std::to_string(shown_[i].object->id) + " " + shown_[i].model, shown_[i].world, Part::Object,
                      shown_[i].object->state.header.value1 - 1);
             ++stats_.objects;
+        }
+    }
+
+    // The Sims saved on the lot, each in what it wears: its parts from its character file, found by
+    // the Sim's object GUID. They stand on their storey's floor.
+    void placeSims() {
+        std::vector<const content::LotObject*> sims;
+        for (const auto& object : lot_.objects) {
+            if (object.type && object.type->kind == objt::kPersonKind) {
+                sims.push_back(&object);
+            }
+        }
+        if (sims.empty()) {
+            return;
+        }
+        std::map<std::uint32_t, std::filesystem::path> files;
+        for (const auto& file : content::characterFiles(content::neighborhoodOfLot(path_))) {
+            try {
+                dbpf::Package package{file};
+                for (const auto& e : package.entries()) {
+                    if (e.key.type == types::kObjectDefinition) {
+                        files.emplace(objd::parse(package.read(e)).guid(), file);
+                        break;
+                    }
+                }
+            } catch (const std::exception&) {
+            }
+        }
+        for (const auto* sim : sims) {
+            const auto& h = sim->state.header;
+            const float x = h.location[1], y = h.location[0];
+            const auto file = files.find(sim->type->guid);
+            if (x < 0 || y < 0 || x > 256 || y > 256 || file == files.end()) {
+                log(*sim, file == files.end() ? "no character file" : "off the lot", "");
+                continue;
+            }
+            const SimLook look = simLook(assets_, file->second);
+            const float angle = kPi / 2 - static_cast<float>(sim->state.data[1]) * kPi / 4;
+            const Transform at = Transform::at(x, y, heights_.tile(h.value1 - 1, x, y), angle);
+            // Standing, as the game shows an idle Sim: its age's idle loop (adults "a-", teens "t-").
+            const char* prefix = look.age == 8 ? "a" : look.age == 4 ? "t" : nullptr;
+            const std::string idle = prefix ? std::string(prefix) + "-idle-neutral-armsSide-wtC-breatheLoop" : std::string();
+            const auto animation = idle.empty() ? std::nullopt : loadAnimation(assets_, idle);
+            const Pose pose = animation ? posedSkeleton(assets_, look.skeleton, &*animation, 0) : Pose{};
+            for (const auto& part : look.parts) {
+                // A body outfit is drawn over the Sim's skin (its uncovered arms, hands, neck).
+                auto overrides = part.overrides;
+                if (part.part == 8) {
+                    for (auto& o : overrides) {
+                        o.material = clothesOverSkin(b_, assets_, look, o.material);
+                    }
+                }
+                const int mesh = pose.empty() ? b_.model(part.model, overrides) : b_.posedModel(part.model, overrides, pose, idle + "@0");
+                b_.place(mesh, std::to_string(sim->id) + " " + part.model, at, Part::Object, h.value1 - 1);
+            }
+            holdBySim(*sim, file->second, at, pose);
+            assets_.useCharacterFile({});
+            ++stats_.sims;
+            log(*sim, "placed", file->second.filename().string());
+        }
+    }
+
+    // Objects a Sim holds (a ring, the plumbob over the selected Sim) go to the bone of the Sim's slot
+    // they are in, as the Sim stands; through holders with no model of their own (the head slots
+    // holder), whose own slot offsets aren't known, at the holder's place.
+    void holdBySim(const content::LotObject& sim, const std::filesystem::path& characterFile, const Transform& at, const Pose& pose) {
+        std::map<std::uint32_t, const content::LotObject*> objects;
+        for (const auto& o : lot_.objects) {
+            objects[o.id] = &o;
+        }
+        std::map<std::uint32_t, std::optional<Transform>> held;  // object id -> where, once known
+        auto where = [&](auto&& self, std::uint32_t id, int depth) -> std::optional<Transform> {
+            if (id == sim.id) {
+                return at;
+            }
+            const auto o = objects.find(id);
+            if (o == objects.end() || depth > 8 || o->second->state.data[2] <= 0) {
+                return std::nullopt;
+            }
+            const auto container = static_cast<std::uint32_t>(o->second->state.data[2]);
+            if (const auto it = held.find(id); it != held.end()) {
+                return it->second;
+            }
+            std::optional<Transform> result;
+            if (container == sim.id) {
+                const std::string bone = simSlotBone(characterFile, static_cast<std::size_t>(o->second->state.data[3]));
+                const auto joint = pose.find(bone);
+                result = joint != pose.end() ? at * joint->second : at;
+            } else {
+                result = self(self, container, depth + 1);
+            }
+            held[id] = result;
+            return result;
+        };
+        for (auto& s : shown_) {
+            if (s.object->state.data[2] <= 0) {
+                continue;
+            }
+            if (const auto w = where(where, s.object->id, 0)) {
+                s.world = *w;
+                b_.scene().instances[s.instance].transform = *w;
+            }
         }
     }
 
@@ -517,7 +626,7 @@ private:
         }
         b_.scene().meshes.push_back(std::move(mesh));
         // Slightly under the floors standing on it.
-        b_.place(static_cast<int>(b_.scene().meshes.size() - 1), "terrain", Transform::at(0, 0, -0.01f, 0));
+        b_.place(static_cast<int>(b_.scene().meshes.size() - 1), "terrain", Transform::at(0, 0, -kGroundDrop, 0));
     }
 
     // Floors: a pattern per quarter tile, each quarter the triangle from one tile edge to the tile's

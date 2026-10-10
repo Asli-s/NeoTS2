@@ -25,6 +25,15 @@ std::size_t count(BinaryReader& r, std::size_t minBytes) {
     return n;
 }
 
+// A byte array's length: it only has to fit in what is left.
+std::size_t byteCount(BinaryReader& r) {
+    const std::uint32_t n = r.u32();
+    if (n > r.remaining()) {
+        fail("bad byte count " + std::to_string(n));
+    }
+    return n;
+}
+
 // Strings carry their length in 7-bit groups (one byte below 128).
 std::string string(BinaryReader& r) {
     std::uint32_t length = 0;
@@ -147,7 +156,7 @@ void transformNode(BinaryReader& r, SceneNode& node) {
     for (auto& v : node.rotation) {
         v = std::bit_cast<float>(r.u32());
     }
-    r.u32();  // joint index
+    node.joint = static_cast<std::int32_t>(r.u32());
 }
 
 // Where block `type` starts at or after `from`: its class name (a short string starting with
@@ -249,7 +258,7 @@ Mesh parseMesh(std::span<const std::uint8_t> data) {
         r.u32();  // repetition
         e.blockFormat = r.u32();
         e.setFormat = r.u32();
-        const auto bytes = r.bytes(count(r, 1));
+        const auto bytes = r.bytes(byteCount(r));
         e.data.assign(bytes.begin(), bytes.end());
         const std::size_t items = count(r, 2);
         for (std::size_t i = 0; i < items; ++i) {
@@ -281,12 +290,21 @@ Mesh parseMesh(std::span<const std::uint8_t> data) {
             i = r.u16();
         }
         g.opacity = r.u32();
-        const std::size_t subsets = count(r, 2);
-        for (std::size_t i = 0; i < subsets; ++i) {
-            r.u16();
+        g.bones.resize(count(r, 2));
+        for (auto& b : g.bones) {
+            b = r.u16();
         }
     }
-    // Bones, bounding shapes and morph data follow; they aren't read yet.
+    m.inverseBinds.resize(r.remaining() >= 4 ? count(r, 28) : 0);
+    for (auto& b : m.inverseBinds) {
+        for (auto& v : b.rotation) {
+            v = std::bit_cast<float>(r.u32());
+        }
+        for (auto& v : b.translation) {
+            v = std::bit_cast<float>(r.u32());
+        }
+    }
+    // Blend group names, a bounding mesh and per-joint bounding hulls follow; they aren't read yet.
     return m;
 }
 
@@ -412,7 +430,7 @@ Image parseImage(std::span<const std::uint8_t> data) {
             MipLevel level;
             const std::uint8_t kind = r.u8();
             if (kind == 0) {
-                const auto bytes = r.bytes(count(r, 1));
+                const auto bytes = r.bytes(byteCount(r));
                 level.data.assign(bytes.begin(), bytes.end());
             } else if (kind == 1) {
                 level.largeMipName = string(r);
@@ -439,7 +457,7 @@ LevelInfo parseLevelInfo(std::span<const std::uint8_t> data) {
     l.width = r.u32();
     l.height = r.u32();
     r.u32();  // z level
-    const auto bytes = r.bytes(count(r, 1));
+    const auto bytes = r.bytes(byteCount(r));
     l.data.assign(bytes.begin(), bytes.end());
     return l;
 }

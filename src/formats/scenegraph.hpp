@@ -58,6 +58,9 @@ struct Group {
     std::uint32_t link = 0;       // index into Mesh::links
     std::vector<std::uint16_t> indices;
     std::uint32_t opacity = 0;
+    // The joints its vertices are skinned to: a vertex's blend indices pick from this list, whose
+    // entries index Mesh::inverseBinds.
+    std::vector<std::uint16_t> bones;
 };
 constexpr std::uint32_t kTriangleList = 2;
 
@@ -68,6 +71,13 @@ struct Mesh {
     std::vector<Element> elements;
     std::vector<ElementLink> links;
     std::vector<Group> groups;
+    // Per joint (by the joint index the model's transform nodes carry): the transform from the model
+    // into the joint's own space in the bind pose, a rotation then a translation.
+    struct InverseBind {
+        std::array<float, 4> rotation{0, 0, 0, 1};  // quaternion x, y, z, w
+        std::array<float, 3> translation{};
+    };
+    std::vector<InverseBind> inverseBinds;
 
     // An element of the link with this identity, or null.
     const Element* find(const ElementLink& link, std::uint32_t identity) const;
@@ -110,6 +120,7 @@ struct SceneNode {
     std::vector<std::uint32_t> children;  // block indices
     std::array<float, 3> translation{};
     std::array<float, 4> rotation{0, 0, 0, 1};  // quaternion x, y, z, w
+    std::int32_t joint = -1;                    // a transform node's joint index; -1 for none
     std::vector<std::uint32_t> shapeLinks;     // indices into the container's links
 };
 struct ResourceNode {

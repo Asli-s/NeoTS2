@@ -51,12 +51,14 @@ struct Mat4 {
     }
 
     // Perspective projection to depth 0 (near) .. 1 (far), right-handed view space looking down -z.
+    // Depth runs from 1 at the near plane to 0 at the far one (reversed), which keeps a float depth
+    // buffer about as precise far away as close by.
     static Mat4 perspective(float fovY, float aspect, float nearZ, float farZ) {
         const float t = 1 / std::tan(fovY / 2);
         Mat4 r;
         r.m = {t / aspect, 0, 0, 0,
                0, t, 0, 0,
-               0, 0, farZ / (nearZ - farZ), nearZ * farZ / (nearZ - farZ),
+               0, 0, nearZ / (farZ - nearZ), nearZ * farZ / (farZ - nearZ),
                0, 0, -1, 0};
         return r;
     }

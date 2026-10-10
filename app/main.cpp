@@ -1,8 +1,10 @@
 // NeoTS2: opens a saved lot in a window, or shows the game's main menu.
-//   neots2 <install folder> --menu [--user <user folder>] [--size w h] [--preview n] [--hover x y] [--shot <out.png>]
+//   neots2 <install folder> --menu [--user <user folder>] [--size w h] [--preview n] [--play n [--bin families|lots] [--lot id] [--click x y]]
+//          [--hover x y]
+//          [--shot <out.png>]
 //   neots2 <install folder> <lot.package> [--shot <out.png> [yaw pitch distance]]
 //          [--walls up|cutaway|down] [--level n (1: the ground floor)] [--target x y z] [--roofs off]
-// Mouse: left-drag orbits, right-drag pans, the wheel zooms. Keys: WASD or arrows pan, Q/E or
+// Mouse: middle-drag turns, right-drag pans, the wheel zooms. Keys: WASD or arrows pan, Q/E or
 // comma/period turn a quarter, Z/X or +/- zoom, Page Up/Down change storey, 1/2/3 or Tab walls
 // up/cutaway/down, R roofs on/off. --shot draws one frame to a file and exits.
 #include "content/cameras.hpp"
@@ -11,6 +13,9 @@
 #include "content/material_scripts.hpp"
 #include "formats/nhood_paint_rules.hpp"
 #include "menu.hpp"
+#include "neighborhood.hpp"
+#include "lot_view.hpp"
+#include "orbit.hpp"
 #include "render/renderer.hpp"
 #include "scene/assets.hpp"
 #include "scene/builder.hpp"
@@ -34,85 +39,15 @@
 
 namespace {
 
+using app::kPi;
+using app::kStorey;
+using app::Orbit;
 using ts2::render::Vec3;
 using ts2::scene::WallView;
-
-constexpr float kPi = 3.14159265358979f;
-constexpr float kStorey = 3.0f;  // how far the camera rises per storey
 
 // SDL hands main its arguments in UTF-8.
 std::filesystem::path utf8Path(const char* text) {
     return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(text)));
-}
-
-// A camera circling a point: its distance, and its angles around and above the point. Quarter
-// turns ease toward `yawGoal`.
-struct Orbit {
-    Vec3 target{0, 0, 0};
-    float distance = 30, yaw = -kPi / 4, pitch = 0.7f;
-    float yawGoal = -kPi / 4;
-    float minDistance = 1, maxDistance = 300;  // how near and far the camera may zoom
-    // A camera from the game's camera files: when set, it gives the field of view and clipping,
-    // and the pitch follows the distance.
-    std::optional<ts2::camera::Config> rig;
-
-    void zoomTo(float d) {
-        distance = std::clamp(d, minDistance, maxDistance);
-        if (rig) {
-            pitch = ts2::camera::pitchAt(*rig, distance) * kPi / 180;
-        }
-    }
-
-    ts2::render::Camera camera() const {
-        ts2::render::Camera c;
-        c.target = target;
-        c.farPlane = std::max(500.0f, distance * 3);
-        if (rig && !rig->levels.empty()) {
-            const auto& level = rig->levels.front();
-            c.fovX = level.fov * kPi / 180;
-            c.nearPlane = level.nearClip;
-            c.farPlane = level.farClip;
-        }
-        c.eye = {target[0] + distance * std::cos(pitch) * std::cos(yaw), target[1] + distance * std::cos(pitch) * std::sin(yaw),
-                 target[2] + distance * std::sin(pitch)};
-        return c;
-    }
-
-    // The way the camera looks, along the ground.
-    std::array<float, 2> facing() const { return {-std::cos(yaw), -std::sin(yaw)}; }
-
-    // Moves the target along the ground: `right` and `forward` as seen on screen.
-    void pan(float right, float forward) {
-        const float c = std::cos(yaw), s = std::sin(yaw);
-        target[0] += -s * right - c * forward;
-        target[1] += c * right - s * forward;
-    }
-
-    // The nearest view at 45 degrees to the lot's grid, `quarters` turns on.
-    void turn(int quarters) {
-        yawGoal = std::round((yawGoal + kPi / 4) / (kPi / 2)) * (kPi / 2) - kPi / 4 + static_cast<float>(quarters) * kPi / 2;
-    }
-};
-
-// The middle and size of everything placed in the scene.
-void frame(const ts2::scene::Scene& scene, Orbit& orbit) {
-    Vec3 lo{1e9f, 1e9f, 1e9f}, hi{-1e9f, -1e9f, -1e9f};
-    for (const auto& instance : scene.instances) {
-        if (instance.mesh < 0 || scene.meshes[static_cast<std::size_t>(instance.mesh)].name == "terrain") {
-            continue;
-        }
-        const auto& t = instance.transform.m;
-        const Vec3 at{t[3], t[7], t[11]};
-        for (std::size_t k = 0; k < 3; ++k) {
-            lo[k] = std::min(lo[k], at[k]);
-            hi[k] = std::max(hi[k], at[k]);
-        }
-    }
-    if (lo[0] > hi[0]) {
-        return;
-    }
-    orbit.target = {(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2};
-    orbit.distance = std::max(10.0f, 1.2f * std::max(hi[0] - lo[0], hi[1] - lo[1]));
 }
 
 const char* wallViewName(WallView v) {
@@ -192,6 +127,19 @@ int main(int argc, char** argv) {
                 i += 2;
             } else if (arg == "--preview" && i + 1 < argc) {
                 menu.preview = std::stoi(argv[++i]);
+            } else if (arg == "--play" && i + 1 < argc) {
+                menu.play = std::stoi(argv[++i]);
+            } else if (arg == "--bin" && i + 1 < argc) {
+                menu.bin = argv[++i];
+            } else if (arg == "--lot" && i + 1 < argc) {
+                menu.lot = std::stoi(argv[++i]);
+            } else if (arg == "--view" && i + 3 < argc) {
+                menu.view = std::array<float, 3>{std::stof(argv[i + 1]), std::stof(argv[i + 2]), std::stof(argv[i + 3])};
+                i += 3;
+            } else if (arg == "--click" && i + 2 < argc) {
+                menu.clickX = std::stoi(argv[i + 1]);
+                menu.clickY = std::stoi(argv[i + 2]);
+                i += 2;
             } else if (arg == "--user" && i + 1 < argc) {
                 menu.user = utf8Path(argv[++i]);
             } else if (arg == "--size" && i + 2 < argc) {
@@ -240,50 +188,7 @@ int main(int argc, char** argv) {
         const bool hood = std::filesystem::is_directory(utf8Path(argv[2]));
         ts2::scene::NeighborhoodSceneStats hoodStats;
         if (hood) {
-            // The paint rules, from the newest product's NeighborhoodTerrain.ini.
-            const auto ini = ts2::content::newestDataFile(ts2::content::findProducts(utf8Path(argv[1])), "Sys/NeighborhoodTerrain.ini");
-            if (!ini) {
-                throw std::runtime_error("NeighborhoodTerrain.ini was not found");
-            }
-            std::ifstream in(*ini, std::ios::binary);
-            const std::string text{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
-            // The light map's settings: the "neighbourhood" lighting state and the height map shadow tunables.
-            const auto products = ts2::content::findProducts(utf8Path(argv[1]));
-            const auto lighting = ts2::content::readLighting(products);
-            ts2::scene::NeighborhoodLight light;
-            light.shadowStrength = lighting.number("hmNHoodShadowStrength", light.shadowStrength);
-            light.boxWidening = lighting.number("hmBlobWidthModifier", light.boxWidening);
-            light.boxHeightScale = lighting.number("hmBlobHeightModifier", light.boxHeightScale);
-            if (const auto state = lighting.states.find("neighbourhood"); state != lighting.states.end()) {
-                if (const auto sun = state->second.lights.find("sun"); sun != state->second.lights.end()) {
-                    const auto& d = sun->second.direction;
-                    const double len = std::sqrt(double(d[0]) * d[0] + double(d[1]) * d[1] + double(d[2]) * d[2]);
-                    light.sun = {float(d[0] / len), float(d[1] / len), float(d[2] / len)};
-                }
-                light.tint = state->second.lightMapTint;
-                if (state->second.lightMap) {
-                    if (auto image = ts2::content::lightingImage(products, *state->second.lightMap)) {
-                        light.lookup = {image->width, image->height, std::move(image->rgba)};
-                    }
-                }
-            }
-            if (light.lookup.width == 0) {
-                throw std::runtime_error("the neighborhood light map image was not found");
-            }
-            // How far lot imposters are lifted above the terrain, from the newest Neighborhood.ini.
-            float imposterZOffset = 0;
-            if (const auto tunables = ts2::content::newestDataFile(products, "Sys/Neighborhood.ini")) {
-                std::ifstream file(*tunables);
-                for (std::string line; std::getline(file, line);) {
-                    constexpr std::string_view kKey = "ImposterZOffset=";
-                    if (line.starts_with(kKey)) {
-                        imposterZOffset = std::stof(line.substr(kKey.size()));
-                    }
-                }
-            }
-            hoodStats = ts2::scene::addNeighborhood(builder, utf8Path(argv[2]), ts2::nhood::parsePaintRules(text), light,
-                                                    ts2::content::neighborhoodRoadTextures(products), imposterZOffset,
-                                                    ts2::content::neighborhoodObjectTypes(products));
+            hoodStats = app::buildNeighborhood(builder, utf8Path(argv[1]), utf8Path(argv[2]));
             std::printf("neighborhood %u x %u tiles, %s, sea level %.2f, %zu lots (%zu imposters), %zu plants (%zu shown)\n",
                         hoodStats.width, hoodStats.height, hoodStats.terrainType.c_str(), hoodStats.seaLevel, hoodStats.lots,
                         hoodStats.imposters, hoodStats.plants, hoodStats.plantsShown);
@@ -306,25 +211,9 @@ int main(int argc, char** argv) {
             std::printf("drawing with %s\n", renderer.backend().c_str());
             renderer.upload(scene);
             Orbit orbit;
-            frame(scene, orbit);
+            app::frameScene(scene, orbit);
             if (hood) {
-                // The game's neighborhood camera, starting where the neighborhood was saved.
-                orbit.rig = ts2::content::findCamera(utf8Path(argv[1]), "Neighborhood");
-                if (!orbit.rig || orbit.rig->levels.empty()) {
-                    throw std::runtime_error("the game's Neighborhood camera was not found");
-                }
-                const auto& levels = orbit.rig->levels;
-                orbit.maxDistance = levels.front().distance;
-                orbit.minDistance = levels.back().distance;
-                if (hoodStats.camera) {
-                    const auto& saved = *hoodStats.camera;
-                    orbit.target = {saved.target[0], saved.target[1], saved.target[2]};
-                    orbit.yaw = orbit.yawGoal = saved.yaw;
-                    orbit.zoomTo(saved.distance);
-                } else {
-                    orbit.target = {static_cast<float>(hoodStats.width) * 5, static_cast<float>(hoodStats.height) * 5, hoodStats.seaLevel};
-                    orbit.zoomTo(levels[static_cast<std::size_t>(std::clamp(orbit.rig->defaultZoom, 0, static_cast<int>(levels.size()) - 1))].distance);
-                }
+                app::neighborhoodCamera(orbit, utf8Path(argv[1]), hoodStats);
             }
             ts2::scene::View view;
             view.walls = options.walls;
@@ -413,36 +302,15 @@ int main(int argc, char** argv) {
                         default:
                             break;
                         }
-                    } else if (e.type == SDL_EVENT_MOUSE_MOTION) {
-                        if (e.motion.state & SDL_BUTTON_LMASK) {
-                            orbit.yaw -= e.motion.xrel * 0.005f;
-                            orbit.yawGoal = orbit.yaw;
-                            if (!orbit.rig) {
-                                orbit.pitch = std::clamp(orbit.pitch + e.motion.yrel * 0.005f, 0.05f, 1.55f);
-                            }
-                        } else if (e.motion.state & SDL_BUTTON_RMASK) {
-                            // Drag the ground along, scaled to how far away the camera is.
-                            const float s = orbit.distance * 0.0015f;
-                            orbit.pan(-e.motion.xrel * s, e.motion.yrel * s);
-                        }
-                    } else if (e.type == SDL_EVENT_MOUSE_WHEEL) {
-                        orbit.zoomTo(orbit.distance * std::pow(0.9f, e.wheel.y));
+                    } else {
+                        app::orbitEvent(orbit, e);
                     }
                 }
 
                 const Uint64 now = SDL_GetTicksNS();
                 const float dt = std::min(0.1f, static_cast<float>(now - last) / 1e9f);
                 last = now;
-                const bool* keys = SDL_GetKeyboardState(nullptr);
-                const float step = orbit.distance * 0.8f * dt;
-                orbit.pan(((keys[SDL_SCANCODE_D] || keys[SDL_SCANCODE_RIGHT]) - (keys[SDL_SCANCODE_A] || keys[SDL_SCANCODE_LEFT])) * step,
-                          ((keys[SDL_SCANCODE_W] || keys[SDL_SCANCODE_UP]) - (keys[SDL_SCANCODE_S] || keys[SDL_SCANCODE_DOWN])) * step);
-                const int zoom = (keys[SDL_SCANCODE_X] || keys[SDL_SCANCODE_MINUS] || keys[SDL_SCANCODE_KP_MINUS]) -
-                                 (keys[SDL_SCANCODE_Z] || keys[SDL_SCANCODE_EQUALS] || keys[SDL_SCANCODE_KP_PLUS]);
-                if (zoom != 0) {
-                    orbit.zoomTo(orbit.distance * std::exp(static_cast<float>(zoom) * 1.5f * dt));
-                }
-                orbit.yaw += (orbit.yawGoal - orbit.yaw) * (1 - std::exp(-12 * dt));
+                app::orbitStep(orbit, dt);
 
                 view.facing = orbit.facing();
                 renderer.show(ts2::scene::visibleInstances(scene, view));

@@ -78,7 +78,19 @@ int SceneBuilder::model(const std::string& name, const std::vector<sg::MaterialO
     if (const auto it = models_.find(key); it != models_.end()) {
         return it->second;
     }
-    return models_[key] = buildModel(name, overrides);
+    return models_[key] = buildModel(name, overrides, nullptr);
+}
+
+int SceneBuilder::posedModel(const std::string& name, const std::vector<sg::MaterialOverride>& overrides, const Pose& pose,
+                             const std::string& poseName) {
+    std::string key = lower(name) + "|pose=" + poseName;
+    for (const auto& o : overrides) {
+        key += "|" + lower(o.group) + "=" + lower(o.material);
+    }
+    if (const auto it = models_.find(key); it != models_.end()) {
+        return it->second;
+    }
+    return models_[key] = buildModel(name, overrides, &pose);
 }
 
 const Transform* SceneBuilder::bone(const std::string& model, const std::string& node) const {
@@ -122,6 +134,20 @@ int SceneBuilder::material(const std::string& name) {
     if (const std::string texture = property(m, "stdMatBaseTextureName");
         !texture.empty() && property(m, "stdMatBaseTextureEnabled") == "true") {
         out.image = image(texture);
+        baseTextures_[key] = texture;
+    }
+    // A Sim's face: its textures (skin, eyes, brows, beard...) drawn one over another, as the game
+    // composites them.
+    if (const int layers = std::atoi(property(m, "numTexturesToComposite").c_str()); layers > 0) {
+        std::vector<std::string> textures;
+        for (int i = 0; i < layers; ++i) {
+            if (std::string t = property(m, ("baseTexture" + std::to_string(i)).c_str()); !t.empty()) {
+                textures.push_back(std::move(t));
+            }
+        }
+        if (const int composite = layeredImage(textures); composite >= 0) {
+            out.image = composite;
+        }
     }
     auto enabled = [&](const char* key) {
         const std::string v = property(m, key);
@@ -373,6 +399,65 @@ int SceneBuilder::image(const std::string& texture) {
     return images_[key] = img ? addImage(std::move(*img)) : -1;
 }
 
+int SceneBuilder::layeredImage(const std::vector<std::string>& textures) {
+    std::string key = "layers";
+    for (const auto& t : textures) {
+        key += "|" + lower(t);
+    }
+    if (const auto it = images_.find(key); it != images_.end()) {
+        return it->second;
+    }
+    std::optional<Image> out;
+    for (const auto& t : textures) {
+        const auto layer = assets_.texture(t);
+        if (!layer || layer->width == 0 || layer->height == 0) {
+            continue;
+        }
+        if (!out) {
+            out = *layer;
+            for (std::size_t i = 3; i < out->rgba.size(); i += 4) {
+                out->rgba[i] = 255;
+            }
+            continue;
+        }
+        // Sampled at the bottom layer's size (nearest texel), drawn over it by its alpha.
+        for (std::uint32_t y = 0; y < out->height; ++y) {
+            const std::uint32_t ly = static_cast<std::uint32_t>((static_cast<std::uint64_t>(y) * layer->height) / out->height);
+            for (std::uint32_t x = 0; x < out->width; ++x) {
+                const std::uint32_t lx = static_cast<std::uint32_t>((static_cast<std::uint64_t>(x) * layer->width) / out->width);
+                const std::uint8_t* s = &layer->rgba[(static_cast<std::size_t>(ly) * layer->width + lx) * 4];
+                std::uint8_t* d = &out->rgba[(static_cast<std::size_t>(y) * out->width + x) * 4];
+                const int a = s[3];
+                for (int c = 0; c < 3; ++c) {
+                    d[c] = static_cast<std::uint8_t>((s[c] * a + d[c] * (255 - a) + 127) / 255);
+                }
+            }
+        }
+    }
+    return images_[key] = out ? addImage(std::move(*out)) : -1;
+}
+
+int SceneBuilder::layeredMaterial(const std::string& name, const std::string& material, const std::vector<std::string>& under) {
+    const std::string key = lower(name);
+    if (const auto it = materials_.find(key); it != materials_.end()) {
+        return it->second;
+    }
+    const int base = this->material(material);
+    if (base < 0) {
+        return -1;
+    }
+    Material m = scene_.materials[static_cast<std::size_t>(base)];
+    m.name = name;
+    if (const auto texture = baseTextures_.find(lower(material)); texture != baseTextures_.end()) {
+        std::vector<std::string> layers = under;
+        layers.push_back(texture->second);
+        if (const int composite = layeredImage(layers); composite >= 0) {
+            m.image = composite;
+        }
+    }
+    return addMaterial(key, std::move(m));
+}
+
 int SceneBuilder::addImage(Image image) {
     scene_.images.push_back(std::move(image));
     return static_cast<int>(scene_.images.size() - 1);
@@ -383,7 +468,80 @@ int SceneBuilder::addMaterial(const std::string& key, Material m) {
     return materials_[key] = static_cast<int>(scene_.materials.size() - 1);
 }
 
-int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::MaterialOverride>& overrides) {
+namespace {
+
+// Moves a mesh group's vertices (and normals, if any) from the bind pose to `pose`: each follows
+// up to four joints, weighted (three weights stored, the fourth what is left). Vertices of joints
+// the pose lacks stay where they are.
+void skin(const sg::Mesh& mesh, const sg::ElementLink& link, const sg::Group& group, const std::map<int, std::string>& joints,
+          const Pose& pose, std::vector<float>& positions, std::vector<float>& normals) {
+    const std::size_t vertices = positions.size() / 3;
+    const sg::Element* indices = mesh.find(link, sg::kBlendIndices);
+    const sg::Element* weightElement = mesh.find(link, sg::kBlendWeights);
+    if (indices == nullptr || weightElement == nullptr || group.bones.empty() || indices->data.size() < vertices * 4 ||
+        !link.aliases[0].empty()) {
+        return;
+    }
+    const std::vector<float> weights = sg::floats(*weightElement);
+    const std::size_t perVertex = weights.size() / std::max<std::size_t>(vertices, 1);
+    // Each of the group's joints: from the bind pose to the pose.
+    std::vector<std::optional<Transform>> moves(group.bones.size());
+    for (std::size_t b = 0; b < group.bones.size(); ++b) {
+        const std::uint16_t j = group.bones[b];
+        const auto name = joints.find(j);
+        if (j >= mesh.inverseBinds.size() || name == joints.end()) {
+            continue;
+        }
+        const auto at = pose.find(name->second);
+        if (at != pose.end()) {
+            const auto& inverse = mesh.inverseBinds[j];
+            moves[b] = at->second * Transform::of(inverse.translation, inverse.rotation);
+        }
+    }
+    const bool withNormals = normals.size() == positions.size();
+    for (std::size_t v = 0; v < vertices; ++v) {
+        float p[3] = {0, 0, 0}, n[3] = {0, 0, 0}, used = 0, left = 1;
+        for (std::size_t k = 0; k < 4; ++k) {
+            const std::uint8_t b = indices->data[v * 4 + k];
+            float w = k < perVertex ? weights[v * perVertex + k] : left;
+            left -= k < perVertex ? w : 0;
+            if (b == 0xFF || b >= moves.size() || !moves[b] || w <= 0) {
+                continue;
+            }
+            float q[3] = {positions[v * 3], positions[v * 3 + 1], positions[v * 3 + 2]};
+            moves[b]->apply(q, true);
+            for (int i = 0; i < 3; ++i) {
+                p[i] += w * q[i];
+            }
+            if (withNormals) {
+                float m[3] = {normals[v * 3], normals[v * 3 + 1], normals[v * 3 + 2]};
+                moves[b]->apply(m, false);
+                for (int i = 0; i < 3; ++i) {
+                    n[i] += w * m[i];
+                }
+            }
+            used += w;
+        }
+        if (used <= 0) {
+            continue;
+        }
+        for (int i = 0; i < 3; ++i) {
+            positions[v * 3 + i] = p[i] / used;
+        }
+        if (withNormals) {
+            const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+            if (len > 0) {
+                for (int i = 0; i < 3; ++i) {
+                    normals[v * 3 + i] = n[i] / len;
+                }
+            }
+        }
+    }
+}
+
+} // namespace
+
+int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::MaterialOverride>& overrides, const Pose* pose) {
     const auto cres = assets_.byName(kCres, name + "_cres");
     if (!cres) {
         ++missingModels;
@@ -397,6 +555,13 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
         assets_.warnings.push_back("model " + name + ": " + ex.what());
         ++missingModels;
         return -1;
+    }
+    // The model's joints by the index meshes skin to.
+    std::map<int, std::string> joints;
+    for (const auto& n : tree.nodes) {
+        if (n.kind == sg::SceneNode::Kind::Transform && n.joint >= 0 && n.joint < 0x7FFFFFFF) {
+            joints.emplace(n.joint, lower(n.name));
+        }
     }
     std::vector<Transform> world(tree.nodes.size());
     std::vector<bool> seen(tree.nodes.size(), false);
@@ -467,7 +632,17 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
     Mesh mesh;
     mesh.name = name;
     for (const auto& [shape, xf] : placements) {
-        for (const auto& nodeName : shape.geometryNodes) {
+        // With object detail on High the game draws level of detail 0, or the next one a shape has
+        // (LODConfig.txt, Graphics Rules "lodOverride 0").
+        std::uint32_t detail = UINT32_MAX;
+        for (std::size_t i = 0; i < shape.geometryNodes.size(); ++i) {
+            detail = std::min(detail, i < shape.detailLevels.size() ? shape.detailLevels[i] : 0u);
+        }
+        for (std::size_t item = 0; item < shape.geometryNodes.size(); ++item) {
+            const std::string& nodeName = shape.geometryNodes[item];
+            if ((item < shape.detailLevels.size() ? shape.detailLevels[item] : 0u) != detail) {
+                continue;
+            }
             // A mirror's bounding box only bounds its reflection and isn't drawn.
             if (lower(nodeName).find("boundingbox") != std::string::npos) {
                 continue;
@@ -516,10 +691,13 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
                 if (vertices == 0 || highest >= vertices) {
                     continue;
                 }
+                p.normals = sg::vertexFloats(*data, link, sg::kNormals);
+                if (pose != nullptr) {
+                    skin(*data, link, group, joints, *pose, p.positions, p.normals);
+                }
                 for (std::size_t i = 0; i + 2 < p.positions.size(); i += 3) {
                     xf.apply(&p.positions[i], true);
                 }
-                p.normals = sg::vertexFloats(*data, link, sg::kNormals);
                 if (p.normals.size() == p.positions.size()) {
                     for (std::size_t i = 0; i + 2 < p.normals.size(); i += 3) {
                         xf.apply(&p.normals[i], false);

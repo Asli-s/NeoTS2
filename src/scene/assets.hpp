@@ -23,8 +23,18 @@ public:
     explicit Assets(const std::filesystem::path& install);
 
     // A scenegraph resource by name (e.g. "fridgeCheap_cres") or by a link from another resource.
+    // A name may name its group ("#0x7f93b1db!age3_0_gmdc"). While a character file is in use, its
+    // own resources are found too: by name, and by links into the file (group 0xFFFFFFFF).
     std::optional<std::vector<std::uint8_t>> byName(std::uint32_t type, const std::string& name);
     std::optional<std::vector<std::uint8_t>> byKey(const scenegraph::Link& link);
+
+    // Makes a Sim's character file (Neighborhoods/<hood>/Characters/*.package) the one in use; its
+    // resources are indexed under the file's own group on first use. An empty path stops using one.
+    void useCharacterFile(const std::filesystem::path& file);
+
+    // A resource of the Sims' outfit catalog (Catalog/Skins: property sets and their reference
+    // lists), or of the character file in use.
+    std::optional<std::vector<std::uint8_t>> skinResource(const scenegraph::Link& link);
 
     // The largest mip level of a texture, decoded; empty when it is missing or unreadable.
     std::optional<Image> texture(const std::string& name);
@@ -65,6 +75,10 @@ private:
     content::ResourceIndex models_;    // Sims3D packages
     content::ResourceIndex objects_;   // objects packages
     content::ResourceIndex catalog_;   // Catalog/Patterns packages
+    content::ResourceIndex skins_;     // Catalog/Skins packages, read on first use
+    std::vector<std::filesystem::path> skinFolders_;
+    bool skinsRead_ = false;
+    std::optional<std::uint32_t> localGroup_;  // the character file in use
     std::set<std::filesystem::path> added_;
     std::vector<std::string> materialNames_;
     content::BuildScripts scripts_;

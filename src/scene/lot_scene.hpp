@@ -12,6 +12,7 @@ namespace ts2::scene {
 // What adding a lot to a scene found.
 struct LotSceneStats {
     std::size_t objects = 0;           // objects placed
+    std::size_t sims = 0;              // Sims placed
     std::size_t inSlots = 0;           // of those, held in another object's slot
     std::size_t withoutRecord = 0;     // objects with no scene record
     std::size_t withoutModel = 0;      // objects whose model wasn't found

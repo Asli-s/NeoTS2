@@ -32,9 +32,12 @@ public:
 
     // A window by its id within the windows added from `root` (the first match), or -1.
     int find(int root, std::uint32_t id) const;
+    // The same among the windows shown in `root` (as if `root` were shown).
+    int findShown(int root, std::uint32_t id) const;
     void setVisible(int window, bool visible);
     bool visible(int window) const;
     void setEnabled(int window, bool enabled);  // a disabled button shows its disabled frame and can't be pressed
+    void setChecked(int window, bool checked);  // a checked button shows its pressed frame
     // Only the buttons of this window and the windows inside it respond to the mouse (-1: all).
     void setModal(int window) { modal_ = window; }
     void setText(int window, const std::string& text);
@@ -43,6 +46,13 @@ public:
     // texture when it changes).
     std::vector<int> takeChangedTextures();
     void move(int window, int x, int y);  // its area's top left, relative to its parent
+    void resize(int window, int w, int h);
+    // Draws a top window (one a script was loaded as) over the others.
+    void raise(int window);
+    // How wide a window's text is in its font, in pixels.
+    int textWidth(int window);
+    int x(int window) const { return windows_[static_cast<std::size_t>(window)].x; }
+    int y(int window) const { return windows_[static_cast<std::size_t>(window)].y; }
     // The texts of a window's children (a script's table of constants, written as captions).
     std::vector<std::string> childTexts(int window) const;
     int width(int window) const;
@@ -51,10 +61,13 @@ public:
     // The mouse moved or a button changed (at `seconds`, for tooltips); returns the button released
     // over, if any.
     std::optional<int> mouse(int x, int y, bool down, double seconds = 0);
+    // Whether (x, y) is over a shown window that draws something.
+    bool over(int x, int y) const;
     // A button's tooltip text (empty: none).
     void setTip(int window, const std::string& text);
     std::uint32_t id(int window) const;
     int parent(int window) const;
+    const std::vector<int>& children(int window) const { return windows_[static_cast<std::size_t>(window)].children; }
 
     // What to draw; a tooltip shows once the mouse has rested on a button for a while (at `seconds`).
     std::vector<Quad> quads(double seconds = 0) const;
@@ -84,6 +97,7 @@ private:
         int tipImage = -1, tipBaseline = 0;
         int baseline = 0;
         ButtonState state = ButtonState::Normal;
+        bool checked = false;
     };
 
     int add(const ui::Window& w, int parent);

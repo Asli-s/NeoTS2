@@ -1,5 +1,8 @@
 #include "formats/propset.hpp"
 
+#include "formats/binary_reader.hpp"
+
+#include <bit>
 #include <string_view>
 #include <utility>
 
@@ -39,9 +42,45 @@ std::string decodeEntities(std::string_view s) {
     return out;
 }
 
+// The binary form (magic 0xCBE750E0): typed values, written out as the text form shows them.
+std::map<std::string, std::string> parseBinary(std::span<const std::uint8_t> data) {
+    constexpr std::uint32_t kUint = 0xEB61E4F7, kString = 0x0B8BEA18, kFloat = 0xABC78708, kBool = 0xCBA908E1,
+                            kInt = 0x0C264712;
+    BinaryReader r(data);
+    r.u32();
+    r.u16();  // version
+    std::map<std::string, std::string> properties;
+    const std::uint32_t count = r.u32();
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const std::uint32_t type = r.u32();
+        const auto nameBytes = r.bytes(r.u32());
+        std::string name(nameBytes.begin(), nameBytes.end());
+        std::string value;
+        if (type == kString) {
+            const auto bytes = r.bytes(r.u32());
+            value.assign(bytes.begin(), bytes.end());
+        } else if (type == kUint) {
+            value = std::to_string(r.u32());
+        } else if (type == kInt) {
+            value = std::to_string(static_cast<std::int32_t>(r.u32()));
+        } else if (type == kFloat) {
+            value = std::to_string(std::bit_cast<float>(r.u32()));
+        } else if (type == kBool) {
+            value = r.u8() != 0 ? "true" : "false";
+        } else {
+            break;  // an unknown type: its size isn't known either
+        }
+        properties[std::move(name)] = std::move(value);
+    }
+    return properties;
+}
+
 } // namespace
 
 std::map<std::string, std::string> parse(std::span<const std::uint8_t> data) {
+    if (data.size() >= 4 && data[0] == 0xE0 && data[1] == 0x50 && data[2] == 0xE7 && data[3] == 0xCB) {
+        return parseBinary(data);
+    }
     const std::string_view text(reinterpret_cast<const char*>(data.data()), data.size());
     std::map<std::string, std::string> properties;
     for (std::size_t pos = text.find("<Any"); pos != std::string_view::npos; pos = text.find("<Any", pos)) {

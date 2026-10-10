@@ -90,7 +90,7 @@ struct LotResources {
 } // namespace
 
 bool addImposter(PaintedTerrain& out, const std::filesystem::path& lotPackage, const nhood::LotDescription& lot,
-                 float zOffset, std::vector<std::string>& warnings) {
+                 float zOffset, std::vector<std::string>& warnings, float* top) {
     dbpf::Package package{lotPackage};
     LotResources res{package, {}, {}, warnings, {}};
     std::optional<sg::Mesh> mesh;
@@ -146,6 +146,7 @@ bool addImposter(PaintedTerrain& out, const std::filesystem::path& lotPackage, c
             return it == material.properties.end() ? std::string() : it->second;
         };
         PaintedTerrain::ImposterPart p;
+        p.lot = lot.id;
         std::optional<std::uint32_t> texture;
         if (material.type == "ImposterWallMaterial") {
             p.kind = PaintedTerrain::ImposterPart::Kind::Wall;
@@ -202,6 +203,9 @@ bool addImposter(PaintedTerrain& out, const std::filesystem::path& lotPackage, c
             const float u1 = uvs1.size() >= (v + 1) * 2 ? uvs1[v * 2] : u;
             const float v1 = uvs1.size() >= (v + 1) * 2 ? uvs1[v * 2 + 1] : vv;
             p.vertices.insert(p.vertices.end(), {x * c - y * s + tx, x * s + y * c + ty, z + tz, u, vv, u1, v1});
+            if (top) {
+                *top = std::max(*top, z + tz);
+            }
         }
         p.indices.reserve(group->indices.size());
         for (const auto i : group->indices) {

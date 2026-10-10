@@ -15,6 +15,9 @@ namespace ts2::scene {
 // Triangles being collected for one mesh, by material index.
 using Surfaces = std::map<int, Primitive>;
 
+// Where a skeleton's joints are in a pose, in the model's space, by lowercase joint name.
+using Pose = std::map<std::string, Transform>;
+
 // Adds a vertex to a primitive, indexed in order.
 void addVertex(Primitive& p, const std::array<float, 3>& position, const std::array<float, 3>& normal,
                const std::array<float, 2>& uv);
@@ -32,12 +35,20 @@ public:
     // The mesh of a model with these material overrides, built on first use; -1 when it has nothing
     // to draw. Each shape is placed where its reference sits in the model's transform tree.
     int model(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides);
+    // The same with its meshes skinned to a pose (named `poseName`, for sharing): each vertex follows
+    // its joints, from the bind pose to where `pose` has them.
+    int posedModel(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides, const Pose& pose,
+                   const std::string& poseName);
 
     // Where a named node of a model sits in it, once the model has been built.
     const Transform* bone(const std::string& model, const std::string& node) const;
 
     // A material by name; -1 when there is no such material.
     int material(const std::string& name);
+
+    // A game material (by name) whose texture is drawn over other textures (`under`, bottom first),
+    // as one image: a Sim's clothing over its skin. Known afterwards as `name`.
+    int layeredMaterial(const std::string& name, const std::string& material, const std::vector<std::string>& under);
 
     // A plain colored material.
     int colorMaterial(const std::string& name, const std::array<float, 3>& color, bool doubleSided = false);
@@ -73,8 +84,10 @@ public:
     Assets& assets() { return assets_; }
 
 private:
-    int buildModel(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides);
+    int buildModel(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides, const Pose* pose);
     int image(const std::string& texture);
+    // Textures drawn one over another by their alpha, bottom first, at the first one's size; opaque.
+    int layeredImage(const std::vector<std::string>& textures);
     // A material's texture with alpha below half in `cut` as holes (see maskedMaterial); -1 when
     // either is missing.
     int cutMaterial(const std::string& name, const std::string& covering, const std::optional<Image>& cut, bool mirrored);
@@ -86,6 +99,7 @@ private:
     bool drawShadows_ = false;
     std::map<std::string, int> models_, materials_, images_;
     std::map<std::string, std::map<std::string, Transform>> bones_;
+    std::map<std::string, std::string> baseTextures_;  // game materials' base textures, by material key
 };
 
 } // namespace ts2::scene

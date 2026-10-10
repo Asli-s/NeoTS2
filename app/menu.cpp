@@ -1,20 +1,34 @@
-// The game's main menu (the neighborhood chooser), built from its UI script.
+// The game's main menu (the neighborhood chooser), built from its UI script, and the neighborhood
+// it opens.
 #include "menu.hpp"
+#include "neighborhood.hpp"
+#include "lot_view.hpp"
+#include "neighborhood_ui.hpp"
+#include "orbit.hpp"
 
+#include "content/install.hpp"
+#include "content/material_scripts.hpp"
 #include "content/neighborhood.hpp"
 #include "content/ui_data.hpp"
 #include "formats/image.hpp"
 #include "formats/reia.hpp"
 #include "render/renderer.hpp"
+#include "scene/assets.hpp"
+#include "scene/builder.hpp"
+#include "scene/lot_scene.hpp"
 #include "ui/fonts.hpp"
 #include "ui/screen.hpp"
 
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <future>
+#include <map>
+#include <memory>
+#include <optional>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -44,6 +58,35 @@ std::optional<ts2::tga::Pixels> readImage(const std::filesystem::path& path) {
     std::ifstream in(path, std::ios::binary);
     const std::vector<std::uint8_t> bytes{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
     return bytes.empty() ? std::nullopt : ts2::image::decode(bytes);
+}
+
+// The lot under a point of the screen: of the lots whose ground the camera's ray through the point
+// crosses (at each lot's height), the nearest; 0 for none.
+std::uint32_t lotAt(const ts2::render::Camera& c, int width, int height, float mx, float my,
+                    const std::vector<ts2::scene::LotFootprint>& lots) {
+    using ts2::render::Vec3;
+    const float aspect = static_cast<float>(width) / static_cast<float>(height);
+    const float tx = c.fovX > 0 ? std::tan(c.fovX / 2) : std::tan(c.fovY / 2) * aspect;
+    const float ty = tx / aspect;
+    const Vec3 f = ts2::render::normalize(ts2::render::sub(c.target, c.eye));
+    const Vec3 s = ts2::render::normalize(ts2::render::cross(f, {0, 0, 1}));
+    const Vec3 u = ts2::render::cross(s, f);
+    const float nx = 2 * mx / static_cast<float>(width) - 1, ny = 1 - 2 * my / static_cast<float>(height);
+    const Vec3 d{f[0] + s[0] * nx * tx + u[0] * ny * ty, f[1] + s[1] * nx * tx + u[1] * ny * ty, f[2] + s[2] * nx * tx + u[2] * ny * ty};
+    std::uint32_t best = 0;
+    float nearest = 1e30f;
+    for (const auto& lot : lots) {
+        if (std::abs(d[2]) < 1e-6f) {
+            continue;
+        }
+        const float t = (lot.z - c.eye[2]) / d[2];
+        const float x = c.eye[0] + d[0] * t, y = c.eye[1] + d[1] * t;
+        if (t > 0 && t < nearest && x >= lot.x0 && x < lot.x1 && y >= lot.y0 && y < lot.y1) {
+            nearest = t;
+            best = lot.id;
+        }
+    }
+    return best;
 }
 
 std::vector<ts2::render::Sprite> sprites(const ts2::ui::Screen& screen, double seconds) {
@@ -185,6 +228,33 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
         };
         showPage();
 
+        // The game's 3D assets, read in the background from the start so a neighborhood opens quickly.
+        std::shared_future<std::shared_ptr<ts2::scene::Assets>> assets =
+            std::async(std::launch::async, [install] { return std::make_shared<ts2::scene::Assets>(install); }).share();
+        // A neighborhood being built in the background, then shown: its scene, camera and panel.
+        struct Built {
+            ts2::scene::Scene scene;
+            ts2::scene::NeighborhoodSceneStats stats;
+        };
+        std::future<Built> building;
+        bool inNeighborhood = false;
+        // The neighborhood kept while a lot is shown, to go back to it; the lot being built, then shown.
+        Built hood;
+        app::Orbit hoodOrbit;
+        struct LotBuilt {
+            ts2::scene::Scene lot, skirt;
+            ts2::scene::SkirtArea area;
+        };
+        std::future<LotBuilt> lotBuilding;
+        ts2::scene::Scene lot;
+        bool inLot = false;
+        app::LotView lotView;
+        float downX = 0, downY = 0;
+        app::Orbit orbit;
+        app::NeighborhoodUi hoodUi(screen, data, width, height);
+        std::string openName;
+        std::filesystem::path openFolder;
+
         // A neighborhood's preview, over the menu where the menu is: its name, description and
         // picture, and Play.
         const int preview = screen.load(kScripts, kPreview, mx, my);
@@ -238,8 +308,62 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
                 upload.emplace_back(changed[i], &staged[i]);
             }
             renderer.setSprites(upload);
-            renderer.showSprites(sprites(screen, static_cast<double>(SDL_GetTicksNS()) / 1e9), false);
+            renderer.showSprites(sprites(screen, static_cast<double>(SDL_GetTicksNS()) / 1e9), inNeighborhood || inLot);
         };
+        // Builds the chosen neighborhood in the background; it shows once built.
+        auto open = [&] {
+            if (building.valid()) {
+                return;
+            }
+            const auto folder = hoods[chosen].folder;
+            openName = hoods[chosen].name;
+            openFolder = folder;
+            std::printf("opening %s\n", folder.filename().string().c_str());
+            building = std::async(std::launch::async, [assets, install, folder] {
+                ts2::scene::SceneBuilder builder(*assets.get());
+                Built b;
+                b.stats = app::buildNeighborhood(builder, install, folder);
+                b.scene = std::move(builder.scene());
+                return b;
+            });
+        };
+        // Builds a lot of the open neighborhood in the background; it shows once built.
+        std::uint32_t enteredLot = 0;
+        auto enterLot = [&](std::uint32_t id) {
+            enteredLot = id;
+            const auto file = openFolder / "Lots" / (openFolder.filename().u8string() + u8"_Lot" + std::u8string(reinterpret_cast<const char8_t*>(std::to_string(id).c_str())) + u8".package");
+            std::printf("entering lot %u\n", id);
+            // The ground around it, as in the game's lot view.
+            const auto where = std::find_if(hood.stats.lotFootprints.begin(), hood.stats.lotFootprints.end(),
+                                            [&](const ts2::scene::LotFootprint& f) { return f.id == id; });
+            std::optional<ts2::scene::LotFootprint> footprint;
+            if (where != hood.stats.lotFootprints.end()) {
+                footprint = *where;
+            }
+            const ts2::scene::Scene* hoodScene = &hood.scene;
+            const std::string terrainType = hood.stats.terrainType;
+            lotBuilding = std::async(std::launch::async, [assets, file, install, footprint, hoodScene, terrainType] {
+                LotBuilt built;
+                {
+                    ts2::scene::SceneBuilder builder(*assets.get());
+                    ts2::scene::addLot(builder, file);
+                    built.lot = std::move(builder.scene());
+                }
+                if (footprint && hoodScene->terrain) {
+                    const int margin = app::lotSkirtMargin(install);
+                    built.area = ts2::scene::lotSkirtArea(*hoodScene->terrain, *footprint, margin);
+                    ts2::scene::SceneBuilder builder(*assets.get());
+                    ts2::scene::addLotSkirt(builder, *hoodScene->terrain, *footprint, margin, terrainType,
+                                            ts2::content::lotSkirtRoadTextures(ts2::content::findProducts(install)));
+                    built.skirt = std::move(builder.scene());
+                }
+                return built;
+            });
+        };
+        if (options.play >= 0 && static_cast<std::size_t>(options.play) < hoods.size()) {
+            chosen = static_cast<std::size_t>(options.play);
+            open();
+        }
         if (options.preview >= 0 && static_cast<std::size_t>(options.preview) < hoods.size()) {
             chosen = static_cast<std::size_t>(options.preview);
             showPreview();
@@ -247,7 +371,7 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
         if (options.hoverX >= 0) {
             screen.mouse(options.hoverX, options.hoverY, false, 0);
         }
-        if (!options.shot.empty()) {
+        if (!options.shot.empty() && !building.valid()) {
             frame();
             renderer.showSprites(sprites(screen, options.hoverX >= 0 ? 10.0 : 0.0), false);
             if (!renderer.drawToFile({}, static_cast<unsigned>(width), static_cast<unsigned>(height), options.shot)) {
@@ -255,31 +379,72 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
             }
             std::printf("wrote %s\n", options.shot.string().c_str());
         }
-        bool running = options.shot.empty();
+        bool running = options.shot.empty() || building.valid();
         bool down = false;
+        Uint64 lastFrame = SDL_GetTicksNS();
         while (running) {
             SDL_Event e;
             while (SDL_PollEvent(&e)) {
-                if (e.type == SDL_EVENT_QUIT || (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE)) {
+                if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE && inLot) {
+                    // Back to the neighborhood, as it was.
+                    inLot = false;
+                    lot = {};
+                    renderer.upload(hood.scene);
+                    orbit = hoodOrbit;
+                    screen.setVisible(hoodUi.root(), true);
+                    inNeighborhood = true;
+                } else if (e.type == SDL_EVENT_QUIT || (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE)) {
                     running = false;
+                } else if (e.type == SDL_EVENT_KEY_DOWN && inLot) {
+                    lotView.key(e.key.key, orbit);
+                } else if (e.type == SDL_EVENT_MOUSE_WHEEL && (inNeighborhood || inLot)) {
+                    app::orbitEvent(orbit, e);
                 } else if (e.type == SDL_EVENT_MOUSE_MOTION || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_UP) {
                     float x = 0, y = 0;
                     SDL_GetMouseState(&x, &y);
                     if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
                         down = true;
+                        downX = x;
+                        downY = y;
                     } else if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_LEFT) {
                         down = false;
+                        // A click (not a drag) on the neighborhood enters the lot under it.
+                        if (inNeighborhood && !lotBuilding.valid() && std::abs(x - downX) < 4 && std::abs(y - downY) < 4 &&
+                            !screen.over(static_cast<int>(x), static_cast<int>(y))) {
+                            // Only a lot a household lives on can be played.
+                            const auto id = lotAt(orbit.camera(), width, height, x, y, hood.stats.lotFootprints);
+                            const auto& lived = hoodUi.occupiedLots();
+                            if (id && std::find(lived.begin(), lived.end(), id) != lived.end()) {
+                                enterLot(id);
+                            }
+                        }
+                    }
+                    if (inLot) {
+                        app::orbitEvent(orbit, e);
+                        continue;
+                    }
+                    if (inNeighborhood && !screen.over(static_cast<int>(x), static_cast<int>(y))) {
+                        app::orbitEvent(orbit, e);
                     }
                     if (const auto clicked = screen.mouse(static_cast<int>(x), static_cast<int>(y), down, static_cast<double>(SDL_GetTicksNS()) / 1e9)) {
                         const std::uint32_t id = screen.id(*clicked);
                         std::printf("clicked 0x%08x\n", id);
                         const auto tile = std::find(tiles.begin(), tiles.end(), screen.parent(*clicked));
-                        if (screen.visible(preview)) {
+                        if (inNeighborhood) {
+                            if (hoodUi.clicked(*clicked)) {
+                                inNeighborhood = false;
+                                hoodUi.close();
+                                screen.setVisible(menu, true);
+                                screen.setVisible(preview, false);
+                                screen.setModal(-1);
+                                renderer.setClearColor(1 / 255.f, 35 / 255.f, 62 / 255.f);
+                            }
+                        } else if (screen.visible(preview)) {
                             if (id == kPreviewClose) {
                                 screen.setVisible(preview, false);
                                 screen.setModal(-1);
                             } else if (id == kPreviewPlay) {
-                                std::printf("play %s\n", hoods[chosen].folder.filename().string().c_str());
+                                open();
                             }
                         } else if (id == kQuit) {
                             running = false;
@@ -296,9 +461,82 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
                     }
                 }
             }
-            play();
+            // A neighborhood finished building: show it with its panel, the menu put away.
+            if (building.valid() && building.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                hood = building.get();
+                std::printf("neighborhood %u x %u tiles, %zu lots, %zu plants\n", hood.stats.width, hood.stats.height, hood.stats.imposters,
+                            hood.stats.plantsShown);
+                renderer.upload(hood.scene);
+                orbit = {};
+                app::neighborhoodCamera(orbit, install, hood.stats);
+                hoodUi.open(openFolder, openName, options.user);
+                if (options.bin == "families") {
+                    hoodUi.showBin(app::NeighborhoodUi::Bin::Families);
+                } else if (options.bin == "lots") {
+                    hoodUi.showBin(app::NeighborhoodUi::Bin::Lots);
+                }
+                screen.setVisible(menu, false);
+                screen.setVisible(preview, false);
+                screen.setModal(-1);
+                renderer.setClearColor(0, 0, 0);
+                inNeighborhood = true;
+                if (options.lot > 0) {
+                    enterLot(static_cast<std::uint32_t>(options.lot));
+                } else if (options.clickX >= 0) {
+                    const auto id = lotAt(orbit.camera(), width, height, static_cast<float>(options.clickX), static_cast<float>(options.clickY),
+                                          hood.stats.lotFootprints);
+                    std::printf("clicked lot %u\n", id);
+                    if (id) {
+                        enterLot(id);
+                    }
+                }
+            }
+            // A lot finished building: show it instead of the neighborhood.
+            if (lotBuilding.valid() && lotBuilding.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                LotBuilt built = lotBuilding.get();
+                lot = std::move(built.lot);
+                hoodOrbit = orbit;
+                lotView.start(lot, orbit);
+                // Shown in its neighborhood, where its imposter was.
+                const auto where = std::find_if(hood.stats.lotFootprints.begin(), hood.stats.lotFootprints.end(),
+                                                [&](const ts2::scene::LotFootprint& f) { return f.id == enteredLot; });
+                if (where != hood.stats.lotFootprints.end()) {
+                    lot = app::lotInNeighborhood(hood.scene, lot, built.skirt, *where, built.area);
+                    app::placeCamera(orbit, *where);
+                    orbit.minFar = 2000;
+                }
+                renderer.upload(lot);
+                screen.setVisible(hoodUi.root(), false);
+                hoodUi.showBin(app::NeighborhoodUi::Bin::None);
+                inNeighborhood = false;
+                inLot = true;
+            }
+            const Uint64 now = SDL_GetTicksNS();
+            if (inLot) {
+                app::orbitStep(orbit, std::min(0.1f, static_cast<float>(now - lastFrame) / 1e9f));
+                lotView.view.facing = orbit.facing();
+                renderer.show(ts2::scene::visibleInstances(lot, lotView.view));
+            } else if (inNeighborhood) {
+                app::orbitStep(orbit, std::min(0.1f, static_cast<float>(now - lastFrame) / 1e9f));
+                renderer.setTime(static_cast<float>(static_cast<double>(now) / 1e9));
+            } else {
+                play();
+            }
+            lastFrame = now;
             frame();
-            if (!renderer.draw({})) {
+            if (!options.shot.empty() && (options.lot > 0 || options.clickX >= 0 ? inLot : inNeighborhood)) {
+                // A picture of the neighborhood just opened.
+                if (options.view) {
+                    orbit.yaw = orbit.yawGoal = (*options.view)[0];
+                    orbit.pitch = (*options.view)[1];
+                    orbit.distance = (*options.view)[2];
+                }
+                if (!renderer.drawToFile(orbit.camera(), static_cast<unsigned>(width), static_cast<unsigned>(height), options.shot)) {
+                    throw std::runtime_error("couldn't save the picture");
+                }
+                std::printf("wrote %s\n", options.shot.string().c_str());
+                running = false;
+            } else if (!renderer.draw(inNeighborhood || inLot ? orbit.camera() : ts2::render::Camera{})) {
                 SDL_Delay(16);
             }
         }

@@ -204,6 +204,27 @@ int Screen::find(int root, std::uint32_t id) const {
     return -1;
 }
 
+int Screen::findShown(int root, std::uint32_t id) const {
+    if (root < 0 || !windows_[static_cast<std::size_t>(root)].visible) {
+        return -1;
+    }
+    if (windows_[static_cast<std::size_t>(root)].id == id) {
+        return root;
+    }
+    for (const int c : windows_[static_cast<std::size_t>(root)].children) {
+        if (const int f = findShown(c, id); f >= 0) {
+            return f;
+        }
+    }
+    return -1;
+}
+
+void Screen::setChecked(int window, bool checked) {
+    if (window >= 0) {
+        windows_[static_cast<std::size_t>(window)].checked = checked;
+    }
+}
+
 void Screen::setVisible(int window, bool visible) {
     if (window >= 0) {
         windows_[static_cast<std::size_t>(window)].visible = visible;
@@ -265,6 +286,26 @@ void Screen::move(int window, int x, int y) {
     }
 }
 
+void Screen::resize(int window, int w, int h) {
+    if (window >= 0) {
+        windows_[static_cast<std::size_t>(window)].w = w;
+        windows_[static_cast<std::size_t>(window)].h = h;
+    }
+}
+
+void Screen::raise(int window) {
+    const auto at = std::find(roots_.begin(), roots_.end(), window);
+    if (at != roots_.end()) {
+        roots_.erase(at);
+        roots_.push_back(window);
+    }
+}
+
+int Screen::textWidth(int window) {
+    const Window& w = windows_[static_cast<std::size_t>(window)];
+    return fonts_.width(fonts_.style(w.font), w.text);
+}
+
 std::vector<std::string> Screen::childTexts(int window) const {
     std::vector<std::string> out;
     if (window >= 0) {
@@ -314,6 +355,20 @@ void Screen::setTip(int window, const std::string& text) {
         windows_[static_cast<std::size_t>(window)].tip = text;
         windows_[static_cast<std::size_t>(window)].tipImage = -1;
     }
+}
+
+bool Screen::over(int x, int y) const {
+    for (int i = 0; i < static_cast<int>(windows_.size()); ++i) {
+        const Window& w = windows_[static_cast<std::size_t>(i)];
+        if ((w.kind != Kind::Button && w.image < 0) || !shown(i)) {
+            continue;
+        }
+        const auto at = origin(i);
+        if (x >= at[0] && y >= at[1] && x < at[0] + w.w && y < at[1] + w.h) {
+            return true;
+        }
+    }
+    return false;
 }
 
 std::optional<int> Screen::mouse(int x, int y, bool down, double seconds) {
@@ -373,7 +428,7 @@ void Screen::emit(int index, std::vector<Quad>& out) const {
         const auto& img = textures_[static_cast<std::size_t>(w.image)];
         const float iw = static_cast<float>(img.width), ih = static_cast<float>(img.height);
         if (w.kind == Kind::Button) {
-            const int frame = kButtonFrame[static_cast<int>(w.state)];
+            const int frame = kButtonFrame[static_cast<int>(w.checked && w.state != ButtonState::Disabled ? ButtonState::Pressed : w.state)];
             out.push_back({x0, y0, x1, y1, static_cast<float>(frame) / 4, 0, static_cast<float>(frame + 1) / 4, 1, w.image});
         } else if (w.edge) {
             // Corners kept, edges and middle stretched: the image in thirds.

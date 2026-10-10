@@ -23,7 +23,10 @@ std::string lower(std::string s) {
 
 } // namespace
 
-std::map<std::string, std::string> neighborhoodRoadTextures(const std::vector<Product>& products) {
+namespace {
+
+// Every "create <macro>(<material> <texture>)" of the material scripts: texture by material.
+std::map<std::string, std::string> scriptedTextures(const std::vector<Product>& products, std::string_view macro) {
     std::map<std::string, std::string> out;
     auto ordered = products;
     std::stable_sort(ordered.begin(), ordered.end(), [](const Product& a, const Product& b) { return a.releaseOrder < b.releaseOrder; });
@@ -45,7 +48,7 @@ std::map<std::string, std::string> neighborhoodRoadTextures(const std::vector<Pr
                 }
                 const auto bytes = package.read(e);
                 const std::string_view text(reinterpret_cast<const char*>(bytes.data()), bytes.size());
-                constexpr std::string_view kCreate = "create NHoodRoadMaterial(";
+                const std::string kCreate = "create " + std::string(macro) + "(";
                 for (std::size_t at = text.find(kCreate); at != std::string_view::npos; at = text.find(kCreate, at + 1)) {
                     const std::size_t from = at + kCreate.size();
                     const std::size_t end = text.find(')', from);
@@ -62,6 +65,16 @@ std::map<std::string, std::string> neighborhoodRoadTextures(const std::vector<Pr
         }
     }
     return out;
+}
+
+} // namespace
+
+std::map<std::string, std::string> neighborhoodRoadTextures(const std::vector<Product>& products) {
+    return scriptedTextures(products, "NHoodRoadMaterial");
+}
+
+std::map<std::string, std::string> lotSkirtRoadTextures(const std::vector<Product>& products) {
+    return scriptedTextures(products, "LotSkirtRoadMaterialInstance");
 }
 
 } // namespace ts2::content

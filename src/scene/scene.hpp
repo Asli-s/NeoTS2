@@ -24,6 +24,10 @@ struct Transform {
     void apply(float* v, bool point) const;
 };
 
+// How far a lot's ground (and the ground around it in lot view) is drawn below its true height, so
+// that floors lying on it are drawn over it.
+constexpr float kGroundDrop = 0.01f;
+
 // A decoded image, 8-bit RGBA, rows from the top.
 struct Image {
     std::uint32_t width = 0, height = 0;
@@ -43,6 +47,7 @@ struct Material {
     float alphaReference = 0.5f;  // Mask: drawn where alpha is at least this
     bool doubleSided = false;
     bool unlit = false;  // shown as its color and texture, without light
+    bool clamp = false;  // its texture is clamped at the edges instead of repeating
 };
 
 // Triangles sharing one material: per vertex a position, a normal, texture coordinates and,
@@ -123,6 +128,7 @@ struct PaintedTerrain {
     struct RoadQuad {
         std::array<std::array<float, 5>, 4> corners{};  // x, y, z, u, v
         std::uint32_t texture = 0;                      // index into roadTextures
+        std::uint32_t piece = 0;                        // the road piece it shows
     };
     std::vector<RoadQuad> roads;
     std::vector<Image> roadTextures;  // all the same size
@@ -135,6 +141,7 @@ struct PaintedTerrain {
     struct ImposterPart {
         enum class Kind : std::uint8_t { Terrain, Wall, Slice, Roof };
         Kind kind = Kind::Wall;
+        std::uint32_t lot = 0;      // the lot it shows
         std::uint32_t texture = 0;  // index into imposterTextures
         int lightMap = -1;          // terrain: its light map, index into imposterTextures; -1 for none
         std::array<float, 3> lightMapTint{1, 1, 1};
@@ -143,6 +150,9 @@ struct PaintedTerrain {
     };
     std::vector<ImposterPart> imposters;
     std::vector<Image> imposterTextures;
+    float imposterLift = 0;  // how far the imposters are raised above their lots (the neighborhood view's)
+    // Tiles left out of the terrain and water (under a lot shown in full), row by row; none when empty.
+    std::vector<std::uint8_t> hiddenTiles;
     std::size_t paints() const { return alphaSize ? alphas.size() / (static_cast<std::size_t>(alphaSize) * alphaSize) : 0; }
 };
 
@@ -154,6 +164,14 @@ struct Scene {
     std::vector<Instance> instances;
     std::vector<WallInfo> walls;
     std::optional<PaintedTerrain> terrain;
+    // A lot's sky: the six faces of its skybox cube map (z up), drawn behind everything.
+    std::vector<Image> skybox;
+    // Around a lot in lot view: four walls standing on the edges of the ground shown around it, from
+    // `bottom` to `top`, that hide what lies beyond them when seen from inside (drawn into depth only).
+    struct BoundaryClip {
+        float x0 = 0, y0 = 0, x1 = 0, y1 = 0, bottom = 0, top = 0;
+    };
+    std::optional<BoundaryClip> clip;
 };
 
 } // namespace ts2::scene

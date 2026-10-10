@@ -6,6 +6,7 @@
 #include FT_FREETYPE_H
 
 #include <algorithm>
+#include <cmath>
 #include <cctype>
 #include <fstream>
 #include <set>
@@ -119,7 +120,9 @@ struct Fonts::Impl {
             }
             if (best) {
                 size = style.size;
-                FT_Set_Pixel_Sizes(best->face, 0, static_cast<FT_UInt>(style.size));
+                // A narrowed style is drawn at a narrower width, hinted at that width.
+                FT_Set_Char_Size(best->face, static_cast<FT_F26Dot6>(std::lround(static_cast<float>(style.size) * style.xScale * 64)),
+                                 static_cast<FT_F26Dot6>(style.size) * 64, 72, 72);
                 return best->face;
             }
         }
@@ -160,6 +163,9 @@ struct Fonts::Impl {
                     s.italic = s.italic || o == "italic";
                     if (o.rfind("linespacing=", 0) == 0) {
                         s.lineSpacing = std::atoi(o.c_str() + 12);
+                    }
+                    if (o.rfind("xscale=", 0) == 0) {
+                        s.xScale = static_cast<float>(std::atof(o.c_str() + 7));
                     }
                 }
             }
@@ -251,10 +257,20 @@ int Fonts::width(const FontStyle& style, const std::string& utf8) {
     return static_cast<int>((w + 63) / 64);
 }
 
+namespace {
+
+// How far the baseline is below the top of a line: the face's ascender at the style's narrowed size,
+// rounded up.
+int ascentOf(FT_Face face, const FontStyle& style) {
+    return static_cast<int>(std::ceil(static_cast<double>(face->ascender) * style.size * style.xScale / face->units_per_EM));
+}
+
+} // namespace
+
 int Fonts::ascent(const FontStyle& style) {
     int size = 0;
     FT_Face face = impl_->pick(style, size);
-    return face ? static_cast<int>(face->size->metrics.ascender / 64) : style.size;
+    return face ? ascentOf(face, style) : style.size;
 }
 
 int Fonts::lineHeight(const FontStyle& style) {
@@ -268,7 +284,7 @@ TextImage Fonts::draw(const FontStyle& style, const std::string& utf8) {
     if (!face || utf8.empty()) {
         return out;
     }
-    const int ascent = static_cast<int>(face->size->metrics.ascender / 64);
+    const int ascent = ascentOf(face, style);
     const int descent = static_cast<int>(-face->size->metrics.descender / 64);
     const int w = width(style, utf8);
     if (w <= 0) {
