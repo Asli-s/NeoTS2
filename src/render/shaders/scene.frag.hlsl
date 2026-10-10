@@ -16,6 +16,7 @@ struct Input {
     float3 normal : TEXCOORD0;
     float2 uv : TEXCOORD1;
     float3 world : TEXCOORD2;
+    float alpha : TEXCOORD3;
     bool front : SV_IsFrontFace;
 };
 
@@ -24,6 +25,7 @@ float4 main(Input input) : SV_Target {
     if (hasTexture > 0.5) {
         albedo *= baseTexture.Sample(baseSampler, input.uv);
     }
+    albedo.a *= input.alpha;
     if (albedo.a < alphaCutoff) {
         discard;
     }

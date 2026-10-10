@@ -40,6 +40,8 @@ std::string typeName(std::uint32_t type) {
         {0xFA1C39F7, "cObject"}, // lot object placement
         {0x0A284D0B, "cWallGraph"}, // lot walls and rooms
         {0x2A51171B, "c3DArray"}, // lot grid per tile and level
+        {0x6B943B43, "c2DArray"}, // lot grid, e.g. terrain paint strengths
+        {0x4B58975B, "LotTexture"}, // a lot's terrain textures
     };
 
     if (auto it = names.find(type); it != names.end()) {

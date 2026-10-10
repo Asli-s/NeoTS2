@@ -12,6 +12,7 @@
 #include "scene/view.hpp"
 #include "formats/namemap.hpp"
 #include "formats/roofs.hpp"
+#include "formats/terrain.hpp"
 #include "formats/stringmap.hpp"
 #include "formats/walllayer.hpp"
 #include "formats/swaf.hpp"
@@ -766,6 +767,48 @@ void sceneHipRoofRisesToItsRidge() {
     // Grown by half a tile each way: 3 wide, so the ridge is 1.5 above the eaves.
     CHECK(std::abs(minX + 0.5f) < 1e-4f && std::abs(lowest - 3.0f) < 1e-4f && std::abs(highest - 4.5f) < 1e-4f);
     CHECK(top.indices.size() % 3 == 0 && !top.indices.empty());
+}
+
+// A lot's terrain textures (canvas, then the paints) and a c2DArray of paint strengths, row by row.
+void terrainResourcesParse() {
+    std::vector<std::uint8_t> t(64, 0);
+    auto u32 = [](std::vector<std::uint8_t>& d, std::uint32_t v) {
+        for (int i = 0; i < 4; ++i) d.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
+    };
+    auto text = [](std::vector<std::uint8_t>& d, std::string_view s) {
+        d.push_back(static_cast<std::uint8_t>(s.size()));
+        d.insert(d.end(), s.begin(), s.end());
+    };
+    u32(t, 0x4B58975B);
+    u32(t, 7);
+    u32(t, 40);
+    u32(t, 30);
+    text(t, "lottexture-test-01");
+    u32(t, 2);
+    text(t, "terrain-cliff");
+    text(t, "terrain-grass-a-paint");
+    const auto lot = ts2::terrain::parseLotTexture(t);
+    CHECK(lot.width == 40 && lot.height == 30 && lot.canvas == "lottexture-test-01");
+    CHECK((lot.paints == std::vector<std::string>{"terrain-cliff", "terrain-grass-a-paint"}));
+
+    std::vector<std::uint8_t> a(64, 0);
+    u32(a, 0x6B943B43);
+    u32(a, 1);
+    text(a, "c2DArray");
+    u32(a, 3);
+    u32(a, 2);
+    for (std::uint8_t v = 0; v < 6; ++v) a.push_back(v);
+    const auto grid = ts2::terrain::parseArray2D(a);
+    CHECK(grid.width == 3 && grid.height == 2 && grid.elementSize == 1);
+    CHECK(grid.byte(2, 0) == 2 && grid.byte(0, 1) == 3 && grid.byte(3, 0) == 0);
+    a.pop_back();
+    bool threw = false;
+    try {
+        ts2::terrain::parseArray2D(a);
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK(threw);
 }
 
 // Cutaway cuts a wall on the storey looked at when a room lies behind it as the camera looks; a
@@ -3325,6 +3368,7 @@ int main(int argc, char** argv) {
         {"scene transforms turn and move", sceneTransformsTurnAndMove},
         {"scene quads face their normal", sceneQuadsFaceTheirNormal},
         {"scene hip roof rises to its ridge", sceneHipRoofRisesToItsRidge},
+        {"terrain resources parse", terrainResourcesParse},
         {"scene cutaway cuts walls in front of rooms", sceneCutawayCutsWallsInFrontOfRooms},
         {"scene views show storeys, walls and roofs", sceneViewsShowStoreysWallsAndRoofs},
         {"roofs read both versions", roofsReadBothVersions},

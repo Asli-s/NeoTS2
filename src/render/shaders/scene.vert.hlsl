@@ -9,6 +9,7 @@ struct Input {
     float3 position : TEXCOORD0;
     float3 normal : TEXCOORD1;
     float2 uv : TEXCOORD2;
+    float alpha : TEXCOORD3;
 };
 
 struct Output {
@@ -16,6 +17,7 @@ struct Output {
     float3 normal : TEXCOORD0;
     float2 uv : TEXCOORD1;
     float3 world : TEXCOORD2;
+    float alpha : TEXCOORD3;
 };
 
 Output main(Input input) {
@@ -25,5 +27,6 @@ Output main(Input input) {
     output.normal = mul((float3x3)model, input.normal);
     output.uv = input.uv;
     output.world = world.xyz;
+    output.alpha = input.alpha;
     return output;
 }

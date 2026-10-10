@@ -150,7 +150,8 @@ int main(int argc, char** argv) {
         ts2::scene::Assets assets(utf8Path(argv[1]));
         ts2::scene::SceneBuilder builder(assets);
         const auto stats = ts2::scene::addLot(builder, utf8Path(argv[2]));
-        std::printf("%zu objects, %zu walls, %zu roofs\n", stats.objects, stats.walls, stats.roofs);
+        std::printf("%zu objects, %zu walls, %zu roofs, %zu terrain paints\n", stats.objects, stats.walls, stats.roofs,
+                    stats.terrainPaints);
         const auto& scene = builder.scene();
         const int top = ts2::scene::topLevel(scene);
 

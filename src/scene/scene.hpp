@@ -29,7 +29,9 @@ struct Image {
     std::vector<std::uint8_t> rgba;
 };
 
-enum class AlphaMode { Opaque, Mask, Blend };
+// Layer: blended onto the opaque surface it lies on (same vertices), right after opaque surfaces
+// and in the order placed, as terrain paint is.
+enum class AlphaMode { Opaque, Mask, Blend, Layer };
 
 // How a surface looks: a color, optionally times an image, and how its alpha is used.
 struct Material {
@@ -40,10 +42,11 @@ struct Material {
     bool doubleSided = false;
 };
 
-// Triangles sharing one material: per vertex a position, a normal and texture coordinates.
+// Triangles sharing one material: per vertex a position, a normal, texture coordinates and,
+// optionally, an alpha that multiplies the material's (1 when there are none).
 struct Primitive {
     int material = -1;  // index into Scene::materials, -1 for none
-    std::vector<float> positions, normals, uvs;
+    std::vector<float> positions, normals, uvs, alphas;
     std::vector<std::uint32_t> indices;
 };
 

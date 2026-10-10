@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("qfs", "dbpf", "bhav", "str", "bcon", "glob", "objd", "objt", "objm", "xobj", "wallgraph", "array3d", "srel", "sdsc", "fami", "famt", "slot", "swaf", "propset", "ttab", "luascript", "ngbh", "datatables", "scenegraph", "stringmap", "walllayer", "namemap", "fencepostlayer", "roofs")] [string]$Target = "dbpf",
+    [ValidateSet("qfs", "dbpf", "bhav", "str", "bcon", "glob", "objd", "objt", "objm", "xobj", "wallgraph", "array3d", "srel", "sdsc", "fami", "famt", "slot", "swaf", "propset", "ttab", "luascript", "ngbh", "datatables", "scenegraph", "stringmap", "walllayer", "namemap", "fencepostlayer", "roofs", "terrain")] [string]$Target = "dbpf",
     [int]$Minutes = 10
 )
 

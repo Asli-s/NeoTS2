@@ -50,6 +50,9 @@ public:
     // The part of a texture between fractions (u0, v0) and (u1, v1) of its size, resampled.
     int textureRegionMaterial(const std::string& texture, double u0, double v0, double u1, double v1, std::uint32_t width,
                               std::uint32_t height, const std::array<float, 3>& color);
+    // A terrain texture with its detail texture ("<name>_detail", `repeats` times across it) laid
+    // over by the detail's alpha, as one image; tinted by `shade`. Canvas (opaque) or paint (a layer).
+    int terrainMaterial(const std::string& texture, int repeats, float shade, bool paint);
     // A wall covering with a door or window's wall mask cut out of it: alpha below half in the mask
     // is a hole. `mirrored` when the mask runs right to left across the face. -1 when either is missing.
     int maskedMaterial(const std::string& covering, const std::string& mask, bool mirrored);

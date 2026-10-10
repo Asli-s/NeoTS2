@@ -18,6 +18,7 @@ struct LotSceneStats {
     std::size_t walls = 0, coveredWalls = 0, wallCuts = 0;
     std::size_t fenceRails = 0, fencePosts = 0;
     std::size_t floorPatterns = 0, roofs = 0;
+    std::size_t terrainPaints = 0;  // paints drawn over the terrain's canvas
     // One line per object (where it is, what it shows), when asked for.
     std::vector<std::string> objectLog;
 };

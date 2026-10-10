@@ -1,6 +1,7 @@
 #include "scene/builder.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -176,6 +177,67 @@ int SceneBuilder::textureRegionMaterial(const std::string& texture, double u0, d
         }
         m.image = addImage(std::move(region));
     }
+    return addMaterial(key, std::move(m));
+}
+
+namespace {
+
+// The color of an image at fractions (u, v) of its size, repeating, between its pixels.
+std::array<float, 4> sampleRepeating(const Image& image, double u, double v) {
+    const double x = (u - std::floor(u)) * image.width - 0.5, y = (v - std::floor(v)) * image.height - 0.5;
+    const double fx = x - std::floor(x), fy = y - std::floor(y);
+    auto wrap = [](double c, std::uint32_t n) {
+        const auto i = static_cast<std::int64_t>(std::floor(c)) % static_cast<std::int64_t>(n);
+        return static_cast<std::size_t>(i < 0 ? i + n : i);
+    };
+    const std::size_t x0 = wrap(x, image.width), x1 = wrap(x + 1, image.width);
+    const std::size_t y0 = wrap(y, image.height), y1 = wrap(y + 1, image.height);
+    std::array<float, 4> c{};
+    for (std::size_t k = 0; k < 4; ++k) {
+        auto at = [&](std::size_t px, std::size_t py) { return static_cast<double>(image.rgba[(py * image.width + px) * 4 + k]); };
+        const double top = at(x0, y0) * (1 - fx) + at(x1, y0) * fx, bottom = at(x0, y1) * (1 - fx) + at(x1, y1) * fx;
+        c[k] = static_cast<float>(top * (1 - fy) + bottom * fy);
+    }
+    return c;
+}
+
+} // namespace
+
+int SceneBuilder::terrainMaterial(const std::string& texture, int repeats, float shade, bool paint) {
+    const std::string key = lower(texture) + " terrain";
+    if (const auto it = materials_.find(key); it != materials_.end()) {
+        return it->second;
+    }
+    const auto base = assets_.texture(texture);
+    if (!base || base->width == 0 || base->height == 0) {
+        return -1;
+    }
+    const auto detail = assets_.texture(texture + "_detail");
+    constexpr std::uint32_t kSize = 1024;
+    Image baked{kSize, kSize, std::vector<std::uint8_t>(static_cast<std::size_t>(kSize) * kSize * 4)};
+    for (std::uint32_t y = 0; y < kSize; ++y) {
+        for (std::uint32_t x = 0; x < kSize; ++x) {
+            const double u = (x + 0.5) / kSize, v = (y + 0.5) / kSize;
+            auto c = sampleRepeating(*base, u, v);
+            if (detail && detail->width > 0 && detail->height > 0) {
+                const auto d = sampleRepeating(*detail, u * repeats, v * repeats);
+                const float a = d[3] / 255;
+                for (std::size_t k = 0; k < 3; ++k) {
+                    c[k] = d[k] * a + c[k] * (1 - a);
+                }
+            }
+            auto* out = &baked.rgba[(static_cast<std::size_t>(y) * kSize + x) * 4];
+            for (std::size_t k = 0; k < 3; ++k) {
+                out[k] = static_cast<std::uint8_t>(std::clamp(c[k] + 0.5f, 0.0f, 255.0f));
+            }
+            out[3] = 255;
+        }
+    }
+    Material m;
+    m.name = texture + " terrain";
+    m.color = {shade, shade, shade, 1};
+    m.image = addImage(std::move(baked));
+    m.alpha = paint ? AlphaMode::Layer : AlphaMode::Opaque;
     return addMaterial(key, std::move(m));
 }
 

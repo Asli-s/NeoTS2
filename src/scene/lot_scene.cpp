@@ -385,35 +385,98 @@ private:
         }
     }
 
+    // The terrain: a grid of four points to a tile (as the paint strengths are kept), between the
+    // height grid's corners. Like the game, the canvas texture repeats every 20 tiles and its detail
+    // every 4, and each paint is laid over the canvas the same way, as strong as its strength there.
     void drawTerrain() {
         const auto* g = heights_.grid();
-        if (g == nullptr) {
+        if (g == nullptr || g->width < 2 || g->height < 2) {
             return;
         }
-        const int material = b_.colorMaterial("terrain", {0.32f, 0.45f, 0.25f}, true);
-        Primitive p;
-        p.material = material;
-        auto h = [&](std::uint32_t x, std::uint32_t y) {
+        constexpr std::uint32_t kSteps = 4;
+        constexpr float kRepeat = 20, kShade = 0.9f;
+        constexpr int kDetailRepeats = 5;  // detail every 4 tiles
+        const std::uint32_t columns = (g->width - 1) * kSteps + 1, rows = (g->height - 1) * kSteps + 1;
+        auto corner = [&](std::uint32_t x, std::uint32_t y) {
             float v = 0;
-            std::memcpy(&v, g->at(0, static_cast<std::int32_t>(x), static_cast<std::int32_t>(y)).data(), 4);
+            std::memcpy(&v, g->at(0, static_cast<std::int32_t>(std::min(x, g->width - 1)), static_cast<std::int32_t>(std::min(y, g->height - 1))).data(), 4);
             return v;
         };
-        const std::uint32_t columns = g->width, rows = g->height;
-        for (std::uint32_t x = 0; x < columns; ++x) {
-            for (std::uint32_t y = 0; y < rows; ++y) {
-                const float dx = h(std::min(x + 1, columns - 1), y) - h(x > 0 ? x - 1 : 0, y);
-                const float dy = h(x, std::min(y + 1, rows - 1)) - h(x, y > 0 ? y - 1 : 0);
-                const float len = std::sqrt(dx * dx / 4 + dy * dy / 4 + 1);
-                p.positions.insert(p.positions.end(), {static_cast<float>(x), static_cast<float>(y), h(x, y)});
-                p.normals.insert(p.normals.end(), {-dx / 2 / len, -dy / 2 / len, 1 / len});
-                p.uvs.insert(p.uvs.end(), {static_cast<float>(x), static_cast<float>(y)});
-                if (x + 1 < columns && y + 1 < rows) {
-                    const std::uint32_t a = x * rows + y, b = (x + 1) * rows + y;
-                    p.indices.insert(p.indices.end(), {a, b, b + 1, a, b + 1, a + 1});
-                }
+        auto height = [&](std::int64_t i, std::int64_t j) {
+            const auto ci = static_cast<std::uint32_t>(std::clamp<std::int64_t>(i, 0, columns - 1));
+            const auto cj = static_cast<std::uint32_t>(std::clamp<std::int64_t>(j, 0, rows - 1));
+            const std::uint32_t x = ci / kSteps, y = cj / kSteps;
+            const float fx = static_cast<float>(ci % kSteps) / kSteps, fy = static_cast<float>(cj % kSteps) / kSteps;
+            const float top = corner(x, y) * (1 - fx) + corner(x + 1, y) * fx;
+            const float bottom = corner(x, y + 1) * (1 - fx) + corner(x + 1, y + 1) * fx;
+            return top * (1 - fy) + bottom * fy;
+        };
+
+        Primitive canvas;
+        constexpr float step = 1.0f / kSteps;
+        for (std::uint32_t i = 0; i < columns; ++i) {
+            for (std::uint32_t j = 0; j < rows; ++j) {
+                const float x = static_cast<float>(i) * step, y = static_cast<float>(j) * step;
+                const float sx = (height(i + 1, j) - height(static_cast<std::int64_t>(i) - 1, j)) / (2 * step);
+                const float sy = (height(i, j + 1) - height(i, static_cast<std::int64_t>(j) - 1)) / (2 * step);
+                const float len = std::sqrt(sx * sx + sy * sy + 1);
+                canvas.positions.insert(canvas.positions.end(), {x, y, height(i, j)});
+                canvas.normals.insert(canvas.normals.end(), {-sx / len, -sy / len, 1 / len});
+                canvas.uvs.insert(canvas.uvs.end(), {x / kRepeat, y / kRepeat});
             }
         }
-        b_.scene().meshes.push_back({"terrain", {std::move(p)}});
+        auto cell = [&](std::vector<std::uint32_t>& indices, std::uint32_t i, std::uint32_t j) {
+            const std::uint32_t a = i * rows + j, b = (i + 1) * rows + j;
+            indices.insert(indices.end(), {a, b, b + 1, a, b + 1, a + 1});
+        };
+        for (std::uint32_t i = 0; i + 1 < columns; ++i) {
+            for (std::uint32_t j = 0; j + 1 < rows; ++j) {
+                cell(canvas.indices, i, j);
+            }
+        }
+
+        Mesh mesh{"terrain", {}};
+        const auto* textures = lot_.terrainTextures ? &*lot_.terrainTextures : nullptr;
+        canvas.material = textures ? b_.terrainMaterial(textures->canvas, kDetailRepeats, kShade, false) : -1;
+        if (canvas.material < 0) {
+            canvas.material = b_.colorMaterial("terrain", {0.32f, 0.45f, 0.25f}, true);
+        }
+        mesh.primitives.push_back(canvas);
+        for (std::size_t n = 0; textures != nullptr && n < textures->paints.size(); ++n) {
+            const auto map = lot_.flatGrids.find(content::kFirstPaintMapInstance + static_cast<std::uint32_t>(n));
+            if (map == lot_.flatGrids.end() || map->second.width != columns || map->second.height != rows) {
+                continue;
+            }
+            const auto& strength = map->second;
+            Primitive paint;
+            for (std::uint32_t i = 0; i + 1 < columns; ++i) {
+                for (std::uint32_t j = 0; j + 1 < rows; ++j) {
+                    const auto x = static_cast<std::int32_t>(i), y = static_cast<std::int32_t>(j);
+                    // The game draws a paint where its strength is above 10 of 255.
+                    if (std::max({strength.byte(x, y), strength.byte(x + 1, y), strength.byte(x, y + 1), strength.byte(x + 1, y + 1)}) > 10) {
+                        cell(paint.indices, i, j);
+                    }
+                }
+            }
+            if (paint.indices.empty()) {
+                continue;
+            }
+            paint.material = b_.terrainMaterial(textures->paints[n], kDetailRepeats, kShade, true);
+            if (paint.material < 0) {
+                continue;
+            }
+            paint.positions = canvas.positions;
+            paint.normals = canvas.normals;
+            paint.uvs = canvas.uvs;
+            for (std::uint32_t i = 0; i < columns; ++i) {
+                for (std::uint32_t j = 0; j < rows; ++j) {
+                    paint.alphas.push_back(static_cast<float>(strength.byte(static_cast<std::int32_t>(i), static_cast<std::int32_t>(j))) / 255);
+                }
+            }
+            mesh.primitives.push_back(std::move(paint));
+            ++stats_.terrainPaints;
+        }
+        b_.scene().meshes.push_back(std::move(mesh));
         // Slightly under the floors standing on it.
         b_.place(static_cast<int>(b_.scene().meshes.size() - 1), "terrain", Transform::at(0, 0, -0.01f, 0));
     }

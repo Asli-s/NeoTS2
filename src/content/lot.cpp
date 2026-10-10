@@ -52,6 +52,18 @@ Lot loadLot(const std::filesystem::path& path) {
             } catch (const std::exception& ex) {
                 lot.problems.push_back({e.key.instance, std::string("grid: ") + ex.what()});
             }
+        } else if (e.key.type == types::kArray2D) {
+            try {
+                lot.flatGrids.emplace(e.key.instance, terrain::parseArray2D(package.read(e)));
+            } catch (const std::exception& ex) {
+                lot.problems.push_back({e.key.instance, std::string("flat grid: ") + ex.what()});
+            }
+        } else if (e.key.type == types::kLotTexture) {
+            try {
+                lot.terrainTextures = terrain::parseLotTexture(package.read(e));
+            } catch (const std::exception& ex) {
+                lot.problems.push_back({e.key.instance, std::string("terrain textures: ") + ex.what()});
+            }
         } else if (e.key.type == types::kPatternMap &&
                    (e.key.instance == kFloorPatternMapInstance || e.key.instance == kWallPatternMapInstance)) {
             try {

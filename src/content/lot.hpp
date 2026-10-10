@@ -7,6 +7,7 @@
 #include "formats/stringmap.hpp"
 #include "formats/fencepostlayer.hpp"
 #include "formats/roofs.hpp"
+#include "formats/terrain.hpp"
 #include "formats/walllayer.hpp"
 #include "formats/wallgraph.hpp"
 #include "formats/xobj.hpp"
@@ -52,11 +53,16 @@ struct Lot {
     // Fence posts (fence rails are wall segments whose wall layer type is the fence's GUID).
     std::vector<fencepostlayer::Post> fencePosts;
     std::vector<roofs::Roof> roofs;
+    // The terrain's canvas and paint textures, and c2DArray grids by instance (paint i's strength,
+    // 0-255 at four points per tile, is instance kFirstPaintMapInstance + i).
+    std::optional<terrain::LotTexture> terrainTextures;
+    std::map<std::uint32_t, terrain::Array2D> flatGrids;
     // Each object's script data tables (instance = object id).
     std::map<std::uint32_t, datatables::DataTables> dataTables;
 };
 
 constexpr std::uint32_t kRoomGridInstance = 9;
+constexpr std::uint32_t kFirstPaintMapInstance = 0x5CBC;
 // Wall graphs of room layers 0 and 1 (room fields 1 "outside" and 7 read them).
 constexpr std::uint32_t kLayerGraphInstances[2] = {7, 6};
 // Floor pattern ids, one per quarter tile per level (ids into Lot::floorPatterns; 0 for none).

@@ -12,7 +12,7 @@ namespace ts2::render {
 
 namespace {
 
-constexpr std::uint32_t kVertexFloats = 8;  // position, normal, texture coordinates
+constexpr std::uint32_t kVertexFloats = 9;  // position, normal, texture coordinates, alpha
 
 struct VertexUniforms {
     float viewProjection[16];
@@ -75,10 +75,11 @@ Renderer::Renderer(SDL_Window* window, const std::filesystem::path& shaderFolder
             buffer.slot = 0;
             buffer.pitch = kVertexFloats * sizeof(float);
             buffer.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
-            SDL_GPUVertexAttribute attributes[3]{};
+            SDL_GPUVertexAttribute attributes[4]{};
             attributes[0] = {0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 0};
             attributes[1] = {1, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 3 * sizeof(float)};
             attributes[2] = {2, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, 6 * sizeof(float)};
+            attributes[3] = {3, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT, 8 * sizeof(float)};
 
             SDL_GPUColorTargetDescription color{};
             color.format = SDL_GetGPUSwapchainTextureFormat(device_, window_);
@@ -98,7 +99,7 @@ Renderer::Renderer(SDL_Window* window, const std::filesystem::path& shaderFolder
             info.vertex_input_state.vertex_buffer_descriptions = &buffer;
             info.vertex_input_state.num_vertex_buffers = 1;
             info.vertex_input_state.vertex_attributes = attributes;
-            info.vertex_input_state.num_vertex_attributes = 3;
+            info.vertex_input_state.num_vertex_attributes = 4;
             info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
             info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
             info.rasterizer_state.cull_mode = twoSided ? SDL_GPU_CULLMODE_NONE : SDL_GPU_CULLMODE_BACK;
@@ -264,6 +265,7 @@ void Renderer::upload(const scene::Scene& scene) {
                 if (p.uvs.size() == n * 2) {
                     std::copy_n(&p.uvs[i * 2], 2, v + 6);
                 }
+                v[8] = p.alphas.size() == n ? p.alphas[i] : 1.0f;
             }
             GpuPrimitive g;
             g.vertices = buffer(SDL_GPU_BUFFERUSAGE_VERTEX, vertices.data(), static_cast<Uint32>(vertices.size() * sizeof(float)));
@@ -390,7 +392,7 @@ void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigne
         const scene::Instance* instance;
         float distance;
     };
-    std::vector<Draw> opaque, blended;
+    std::vector<Draw> opaque, layers, blended;
     for (std::size_t i = 0; i < instances_.size(); ++i) {
         const auto& instance = instances_[i];
         if (instance.mesh < 0 || static_cast<std::size_t>(instance.mesh) >= meshes_.size() || (i < visible_.size() && !visible_[i])) {
@@ -399,8 +401,9 @@ void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigne
         const Vec3 at{instance.transform.m[3], instance.transform.m[7], instance.transform.m[11]};
         const Vec3 d = sub(at, camera.eye);
         for (const auto& p : meshes_[static_cast<std::size_t>(instance.mesh)].primitives) {
-            const bool blend = p.material >= 0 && materials_[static_cast<std::size_t>(p.material)].alpha == scene::AlphaMode::Blend;
-            (blend ? blended : opaque).push_back({&p, &instance, dot(d, d)});
+            const auto alpha = p.material >= 0 ? materials_[static_cast<std::size_t>(p.material)].alpha : scene::AlphaMode::Opaque;
+            (alpha == scene::AlphaMode::Blend ? blended : alpha == scene::AlphaMode::Layer ? layers : opaque)
+                .push_back({&p, &instance, dot(d, d)});
         }
     }
     // Blended surfaces from the farthest to the nearest.
@@ -433,7 +436,11 @@ void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigne
                 texture = textures_[static_cast<std::size_t>(m->image)];
                 fu.hasTexture = 1;
             }
-            fu.alphaCutoff = m && m->alpha == scene::AlphaMode::Mask ? 0.5f : (blend ? 0.01f : 0.0f);
+            fu.alphaCutoff = !m                                     ? 0.0f
+                             : m->alpha == scene::AlphaMode::Mask  ? 0.5f
+                             : m->alpha == scene::AlphaMode::Layer ? 10.0f / 255  // as the game's terrain paint
+                             : blend                               ? 0.01f
+                                                                   : 0.0f;
             SDL_PushGPUFragmentUniformData(cmd, 0, &fu, sizeof(fu));
 
             SDL_GPUTextureSamplerBinding binding{texture, sampler_};
@@ -446,6 +453,7 @@ void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigne
         }
     };
     drawList(opaque, 0);
+    drawList(layers, 1);
     drawList(blended, 1);
     SDL_EndGPURenderPass(pass);
 }

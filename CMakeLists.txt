@@ -35,6 +35,7 @@ endif()
 
 add_library(ts2formats
     src/formats/array3d.cpp
+    src/formats/terrain.cpp
     src/formats/fami.cpp
     src/formats/famt.cpp
     src/formats/swaf.cpp
@@ -104,7 +105,7 @@ target_link_libraries(ts2scene PUBLIC ts2content PRIVATE project_warnings)
 
 if(NEOTS2_FUZZ)
     foreach(target qfs_fuzz dbpf_fuzz bhav_fuzz str_fuzz bcon_fuzz glob_fuzz objd_fuzz
-                   objt_fuzz objm_fuzz xobj_fuzz wallgraph_fuzz array3d_fuzz srel_fuzz sdsc_fuzz fami_fuzz famt_fuzz slot_fuzz swaf_fuzz propset_fuzz ttab_fuzz luascript_fuzz ngbh_fuzz datatables_fuzz scenegraph_fuzz stringmap_fuzz walllayer_fuzz namemap_fuzz fencepostlayer_fuzz roofs_fuzz)
+                   objt_fuzz objm_fuzz xobj_fuzz wallgraph_fuzz array3d_fuzz srel_fuzz sdsc_fuzz fami_fuzz famt_fuzz slot_fuzz swaf_fuzz propset_fuzz ttab_fuzz luascript_fuzz ngbh_fuzz datatables_fuzz scenegraph_fuzz stringmap_fuzz walllayer_fuzz namemap_fuzz fencepostlayer_fuzz roofs_fuzz terrain_fuzz)
         add_executable(${target} fuzz/${target}.cpp)
         target_link_libraries(${target} PRIVATE ts2formats project_warnings)
     endforeach()
