@@ -282,9 +282,11 @@ int main(int argc, char** argv) {
                 }
             }
             hoodStats = ts2::scene::addNeighborhood(builder, utf8Path(argv[2]), ts2::nhood::parsePaintRules(text), light,
-                                                    ts2::content::neighborhoodRoadTextures(products), imposterZOffset);
-            std::printf("neighborhood %u x %u tiles, %s, sea level %.2f, %zu lots (%zu imposters)\n", hoodStats.width,
-                        hoodStats.height, hoodStats.terrainType.c_str(), hoodStats.seaLevel, hoodStats.lots, hoodStats.imposters);
+                                                    ts2::content::neighborhoodRoadTextures(products), imposterZOffset,
+                                                    ts2::content::neighborhoodObjectTypes(products));
+            std::printf("neighborhood %u x %u tiles, %s, sea level %.2f, %zu lots (%zu imposters), %zu plants (%zu shown)\n",
+                        hoodStats.width, hoodStats.height, hoodStats.terrainType.c_str(), hoodStats.seaLevel, hoodStats.lots,
+                        hoodStats.imposters, hoodStats.plants, hoodStats.plantsShown);
         } else {
             const auto stats = ts2::scene::addLot(builder, utf8Path(argv[2]));
             std::printf("%zu objects, %zu walls, %zu roofs, %zu terrain paints\n", stats.objects, stats.walls, stats.roofs,

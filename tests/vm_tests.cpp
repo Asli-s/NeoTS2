@@ -2845,6 +2845,11 @@ void scenegraphHashesAndTextures() {
     CHECK((px(2) == std::array<int, 4>{170, 0, 85, 255}) && (px(3) == std::array<int, 4>{85, 0, 170, 255}));
     CHECK((px(4) == std::array<int, 4>{255, 0, 0, 255}));  // second row: index 0 again
 
+    // Format 3 is alpha only: black, with each byte as the alpha.
+    const std::vector<std::uint8_t> alphas = {0, 155, 255, 7};
+    const auto shadow = ts2::scenegraph::decodeRgba(alphas, 2, 2, 3);
+    CHECK(shadow[0] == 0 && shadow[3] == 0 && shadow[4] == 0 && shadow[7] == 155 && shadow[11] == 255 && shadow[15] == 7);
+
     // A lot's scene record names the object's model and its material overrides (group: material).
     std::vector<std::uint8_t> record(64, 0);
     auto str = [&](std::string_view t) {
@@ -3669,10 +3674,16 @@ void neighborhoodRoadsParse() {
     };
     auto f32 = [&](float v) { u32(std::bit_cast<std::uint32_t>(v)); };
     u32(0xCB);
-    // One tree record (skipped), then one road tile.
+    // One plant, then one road tile.
     u16(8);
     u32(1);
-    d.insert(d.end(), 38, 0);
+    u8(2);
+    for (float v : {700.0f, 560.0f, 324.0f, 695.0f, 555.0f, 705.0f, 565.0f}) {
+        f32(v);
+    }
+    u8(8);
+    f32(270.0f);
+    u32(65);
     u16(3);
     u32(1);
     u8(2);
@@ -3689,7 +3700,9 @@ void neighborhoodRoadsParse() {
     u32(0x4b00);
     d.insert(d.end(), {0, 0, 0, 0, 1, 5, 0, 0, 0, 0});
     const auto objects = ts2::nhood::parseObjects(d);
-    CHECK(objects.version == 0xCB && objects.roads.size() == 1);
+    CHECK(objects.version == 0xCB && objects.roads.size() == 1 && objects.flora.size() == 1);
+    CHECK(objects.flora[0].position[1] == 560 && objects.flora[0].bounds[2] == 705 && objects.flora[0].angle == 270 &&
+          objects.flora[0].type == 65);
     const auto& road = objects.roads[0];
     CHECK(road.piece == 0x4b00 && road.bounds[0] == 10 && road.bounds[3] == 1030);
     CHECK(road.corners[2][0] == 20 && road.corners[2][1] == 1030 && road.corners[2][2] == 368.5f && road.corners[3][3] == 1);

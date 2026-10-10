@@ -40,7 +40,9 @@ struct Material {
     std::array<float, 4> color{1, 1, 1, 1};
     int image = -1;  // index into Scene::images, -1 for none
     AlphaMode alpha = AlphaMode::Opaque;
+    float alphaReference = 0.5f;  // Mask: drawn where alpha is at least this
     bool doubleSided = false;
+    bool unlit = false;  // shown as its color and texture, without light
 };
 
 // Triangles sharing one material: per vertex a position, a normal, texture coordinates and,

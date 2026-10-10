@@ -123,10 +123,25 @@ int SceneBuilder::material(const std::string& name) {
         !texture.empty() && property(m, "stdMatBaseTextureEnabled") == "true") {
         out.image = image(texture);
     }
+    auto enabled = [&](const char* key) {
+        const std::string v = property(m, key);
+        return v == "true" || v == "1";
+    };
     if (const std::string blend = property(m, "stdMatAlphaBlendMode"); !blend.empty() && blend != "none") {
         out.alpha = AlphaMode::Blend;
-    } else if (property(m, "stdMatAlphaTestEnabled") == "true") {
+    } else if (enabled("stdMatAlphaTestEnabled")) {
         out.alpha = AlphaMode::Mask;
+        if (const auto ref = parseFloats(property(m, "stdMatAlphaRefValue")); !ref.empty()) {
+            out.alphaReference = ref[0] / 255.0f;
+        }
+    }
+    if (const auto multiplier = parseFloats(property(m, "stdMatAlphaMultiplier")); !multiplier.empty()) {
+        out.color[3] = multiplier[0];
+    }
+    // Without lighting the material's coefficients don't apply: the texture shows as it is.
+    if (const std::string lighting = property(m, "stdMatLightingEnabled"); lighting == "0" || lighting == "false") {
+        out.unlit = true;
+        out.color = {1, 1, 1, out.color[3]};
     }
     out.doubleSided = property(m, "stdMatCullMode") == "none";
     return addMaterial(key, std::move(out));
@@ -480,7 +495,7 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
                 const std::string lowGroup = lower(group.name);
                 const auto part = std::find_if(shape.parts.begin(), shape.parts.end(),
                                                [&](const sg::ShapePart& p) { return lower(p.group) == lowGroup; });
-                if (part == shape.parts.end() || lowGroup.find("shadow") != std::string::npos ||
+                if (part == shape.parts.end() || (!drawShadows_ && lowGroup.find("shadow") != std::string::npos) ||
                     group.primitive != sg::kTriangleList || group.link >= data->links.size() || group.indices.empty()) {
                     continue;
                 }

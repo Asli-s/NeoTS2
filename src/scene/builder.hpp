@@ -63,6 +63,9 @@ public:
     // Places a mesh; returns the instance, or nullptr when the mesh is -1.
     Instance* place(int mesh, const std::string& name, const Transform& transform, Part part = Part::Other, int level = 0);
 
+    // Whether models' shadow groups are drawn (the neighborhood draws its trees' ground shadows).
+    void setDrawShadows(bool draw) { drawShadows_ = draw; }
+
     std::size_t missingModels = 0, missingMaterials = 0;
 
     // The scene built so far.
@@ -80,6 +83,7 @@ private:
 
     Assets& assets_;
     Scene scene_;
+    bool drawShadows_ = false;
     std::map<std::string, int> models_, materials_, images_;
     std::map<std::string, std::map<std::string, Transform>> bones_;
 };

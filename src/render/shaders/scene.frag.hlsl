@@ -1,4 +1,4 @@
-// Scene surfaces: the material's color times its texture, lit by a sky and a sun.
+// Scene surfaces: the material's color times its texture, lit by a sky and a sun unless unlit.
 
 Texture2D<float4> baseTexture : register(t0, space2);
 SamplerState baseSampler : register(s0, space2);
@@ -8,7 +8,8 @@ cbuffer Material : register(b0, space3) {
     float4 sunDirection;  // toward the sun, xyz; w unused
     float hasTexture;
     float alphaCutoff;    // discard below this (0 for none)
-    float2 padding;
+    float unlit;          // 1: color and texture as they are, without light
+    float padding;
 };
 
 struct Input {
@@ -28,6 +29,9 @@ float4 main(Input input) : SV_Target {
     albedo.a *= input.alpha;
     if (albedo.a < alphaCutoff) {
         discard;
+    }
+    if (unlit > 0.5) {
+        return albedo;
     }
     float3 n = normalize(input.normal);
     if (!input.front) {

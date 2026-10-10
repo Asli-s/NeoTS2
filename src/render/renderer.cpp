@@ -25,7 +25,8 @@ struct FragmentUniforms {
     float sunDirection[4];
     float hasTexture;
     float alphaCutoff;
-    float padding[2];
+    float unlit;
+    float padding;
 };
 
 std::vector<std::uint8_t> readFile(const std::filesystem::path& path) {
@@ -1258,10 +1259,11 @@ void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigne
                 fu.hasTexture = 1;
             }
             fu.alphaCutoff = !m                                     ? 0.0f
-                             : m->alpha == scene::AlphaMode::Mask  ? 0.5f
+                             : m->alpha == scene::AlphaMode::Mask  ? m->alphaReference
                              : m->alpha == scene::AlphaMode::Layer ? 10.0f / 255  // as the game's terrain paint
                              : blend                               ? 0.01f
                                                                    : 0.0f;
+            fu.unlit = m && m->unlit ? 1.0f : 0.0f;
             SDL_PushGPUFragmentUniformData(cmd, 0, &fu, sizeof(fu));
 
             SDL_GPUTextureSamplerBinding binding{texture, sampler_};

@@ -17,10 +17,20 @@ struct RoadTile {
     std::uint32_t piece = 0;
 };
 
+// A tree or other plant of a neighborhood: where it stands, the ground it covers (x0, y0, x1, y1),
+// its turn in degrees and its type (the "guid" of its entry in the neighborhood object catalog).
+struct Flora {
+    std::array<float, 3> position{};
+    std::array<float, 4> bounds{};
+    float angle = 0;
+    std::uint32_t type = 0;
+};
+
 // What stands on a neighborhood's terrain (resource 0xABD0DC63 in <hood>_Neighborhood.package):
-// for now its roads; the trees, decorations and bridges in the same resource are skipped.
+// its plants and roads; the other lists in the same resource are skipped.
 struct Objects {
     std::uint32_t version = 0;
+    std::vector<Flora> flora;
     std::vector<RoadTile> roads;
 };
 

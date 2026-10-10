@@ -61,7 +61,8 @@ Image resized(const Image& image, std::uint32_t width, std::uint32_t height) {
 
 NeighborhoodSceneStats addNeighborhood(SceneBuilder& builder, const std::filesystem::path& neighborhood,
                                        const nhood::PaintRules& rules, const NeighborhoodLight& light,
-                                       const std::map<std::string, std::string>& roadTextures, float imposterZOffset) {
+                                       const std::map<std::string, std::string>& roadTextures, float imposterZOffset,
+                                       const std::map<std::uint32_t, content::NeighborhoodObjectType>& objectTypes) {
     dbpf::Package package{content::neighborhoodPackage(neighborhood)};
     std::optional<nhood::Terrain> terrain;
     std::optional<nhood::SavedCamera> camera;
@@ -241,6 +242,21 @@ NeighborhoodSceneStats addNeighborhood(SceneBuilder& builder, const std::filesys
         }
     }
     builder.scene().terrain = std::move(out);
+
+    // The plants: their catalog entry's model, standing at their position, turned by their angle.
+    stats.plants = objects.flora.size();
+    builder.setDrawShadows(true);
+    for (const auto& plant : objects.flora) {
+        const auto type = objectTypes.find(plant.type);
+        if (type == objectTypes.end() || type->second.model.empty()) {
+            continue;
+        }
+        const int mesh = builder.model(type->second.model, {});
+        const float angle = plant.angle * 3.14159265358979f / 180.0f;
+        if (builder.place(mesh, type->second.model, Transform::at(plant.position[0], plant.position[1], plant.position[2], angle))) {
+            ++stats.plantsShown;
+        }
+    }
 
     return stats;
 }

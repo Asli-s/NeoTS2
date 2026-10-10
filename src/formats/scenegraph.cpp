@@ -349,7 +349,7 @@ Shape parseShape(std::span<const std::uint8_t> data) {
     }
     const std::size_t items = count(r, 6);
     for (std::size_t i = 0; i < items; ++i) {
-        r.u32();  // level of detail
+        s.detailLevels.push_back(r.u32());
         r.u8();
         s.geometryNodes.push_back(string(r));
     }
@@ -568,6 +568,18 @@ std::vector<std::uint8_t> decodeRgba(std::span<const std::uint8_t> data, std::ui
             p[1] = s[1];
             p[2] = s[0];
             p[3] = bytesPerPixel == 4 ? s[3] : 255;
+        }
+        return out;
+    }
+    if (format == 3) {
+        // Alpha only: a byte per pixel, black where drawn.
+        if (data.size() < static_cast<std::size_t>(width) * height) {
+            fail("texture data too short");
+        }
+        for (std::size_t i = 0; i < static_cast<std::size_t>(width) * height; ++i) {
+            std::uint8_t* p = out.data() + i * 4;
+            p[0] = p[1] = p[2] = 0;
+            p[3] = data[i];
         }
         return out;
     }
