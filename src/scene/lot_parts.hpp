@@ -18,6 +18,7 @@ constexpr float kPi = 3.14159265358979f;
 constexpr float kLevelHeight = 3.0f;      // storey height, used where a lot has no height grid
 constexpr float kWallThickness = 0.15f;   // walls with thickness
 constexpr float kFloorThickness = 0.15f;  // the slab under floors above the ground
+constexpr float kCutWallHeight = 0.4f;    // walls cut down in views (estimated)
 
 // The lot's corner heights per level (grid 1): the terrain on level 0, each floor above.
 class Heights {
@@ -49,18 +50,20 @@ struct ThickWall {
     std::array<std::int32_t, 2> points{};  // wall graph point ids at (x0, y0) and (x1, y1)
     int level = 0;
     bool thick = true;  // wall styles without thickness (deck skirts) are a single plane
+    bool cuttable = true;  // the wall style may be cut down in views (foundations and deck skirts not)
+    bool roomLeft = false, roomRight = false;  // a room, not outdoors, on that side
     std::string left, right;
     std::string leftMask, rightMask;  // wall masks of doors and windows in this wall
     bool leftMaskMirrored = false, rightMaskMirrored = false;
     std::array<float, 2> leftA{}, leftB{}, rightA{}, rightB{};
-    bool openA = false, openB = false;  // nothing else meets the wall there
 };
 
 // The top of the space where three or more walls meet, which no wall's own top covers: the point
 // and the side corners around it, at the walls' top height there.
 struct WallHub {
-    float x = 0, y = 0, top = 0;
+    float x = 0, y = 0, top = 0, bottom = 0;
     std::vector<std::array<float, 2>> corners;
+    std::vector<std::size_t> walls;  // the walls meeting there
 };
 
 // A door or window's wall mask: the wall tile it cuts, as a tile offset from the object's own
@@ -77,8 +80,9 @@ std::map<std::string, std::vector<WallMask>> wallMasks(const std::vector<std::st
 // ends where it meets the facing side line of the next wall (mitred corners, T and cross joins).
 std::vector<WallHub> joinWalls(std::vector<ThickWall>& walls);
 
-// A wall's faces: each side's covering, its top and its ends where nothing meets it.
-void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w, int edge);
+// A wall's faces: each side's covering, its top and its ends; with `cutHeight`, cut down to that
+// height above its bottom.
+void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w, int edge, float cutHeight = 0);
 
 // The materials a roof is drawn with.
 struct RoofLook {

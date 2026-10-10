@@ -57,7 +57,8 @@ public:
     // Adds the collected surfaces as a mesh; -1 when there is nothing in them.
     int addMesh(const std::string& name, Surfaces surfaces);
 
-    void place(int mesh, const std::string& name, const Transform& transform);
+    // Places a mesh; returns the instance, or nullptr when the mesh is -1.
+    Instance* place(int mesh, const std::string& name, const Transform& transform, Part part = Part::Other, int level = 0);
 
     std::size_t missingModels = 0, missingMaterials = 0;
 

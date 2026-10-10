@@ -52,11 +52,29 @@ struct Mesh {
     std::vector<Primitive> primitives;
 };
 
+// What a placed mesh is, for choosing what a view shows.
+enum class Part : std::uint8_t { Other, Object, Floor, Roof, Wall, WallHub };
+
 // A mesh placed in the world.
 struct Instance {
     int mesh = -1;
     std::string name;
     Transform transform;
+    Part part = Part::Other;
+    int level = 0;  // the storey it is on, as the lot's height grid counts them
+    // Walls and hubs come in a full and a cut-down version (`cut`). `walls` (indexes into
+    // Scene::walls) are a wall's own, the walls meeting at a hub, or those a door or window sits in.
+    bool cut = false;
+    std::vector<int> walls;
+};
+
+// A wall as views need it: where it runs, whether there is a room (not outdoors) on each side
+// (the left side faces (dy, -dx)), and whether it is ever cut down.
+struct WallInfo {
+    float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    int level = 0;
+    bool roomLeft = false, roomRight = false;
+    bool cuttable = true;
 };
 
 // Everything needed to draw a scene, independent of any graphics API.
@@ -65,6 +83,7 @@ struct Scene {
     std::vector<Material> materials;
     std::vector<Mesh> meshes;
     std::vector<Instance> instances;
+    std::vector<WallInfo> walls;
 };
 
 } // namespace ts2::scene

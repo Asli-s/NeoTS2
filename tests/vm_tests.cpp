@@ -9,6 +9,7 @@
 #include "content/build_scripts.hpp"
 #include "formats/fencepostlayer.hpp"
 #include "scene/lot_parts.hpp"
+#include "scene/view.hpp"
 #include "formats/namemap.hpp"
 #include "formats/roofs.hpp"
 #include "formats/stringmap.hpp"
@@ -765,6 +766,75 @@ void sceneHipRoofRisesToItsRidge() {
     // Grown by half a tile each way: 3 wide, so the ridge is 1.5 above the eaves.
     CHECK(std::abs(minX + 0.5f) < 1e-4f && std::abs(lowest - 3.0f) < 1e-4f && std::abs(highest - 4.5f) < 1e-4f);
     CHECK(top.indices.size() % 3 == 0 && !top.indices.empty());
+}
+
+// Cutaway cuts a wall on the storey looked at when a room lies behind it as the camera looks; a
+// wall seen edge-on only between two rooms. Walls down cuts every wall that may be cut.
+void sceneCutawayCutsWallsInFrontOfRooms() {
+    using namespace ts2::scene;
+    WallInfo outer;  // along +x; its left side, toward -y, is the room
+    outer.x1 = 1;
+    outer.level = 1;
+    outer.roomLeft = true;
+    View view;
+    view.walls = WallView::Cutaway;
+    view.level = 1;
+    view.facing = {0, -1};  // looking from outside toward the room
+    CHECK(cutDown(outer, view));
+    view.facing = {0, 1};  // from inside toward the outdoors: the back wall stays up
+    CHECK(!cutDown(outer, view));
+    view.facing = {1, 0};  // edge-on
+    CHECK(!cutDown(outer, view));
+    WallInfo inner = outer;
+    inner.roomRight = true;
+    CHECK(cutDown(inner, view));
+    view.walls = WallView::Down;
+    CHECK(cutDown(outer, view));
+    view.level = 2;
+    CHECK(!cutDown(outer, view));
+    view.level = 1;
+    outer.cuttable = false;  // a foundation
+    CHECK(!cutDown(outer, view));
+    view.walls = WallView::Up;
+    CHECK(!cutDown(inner, view));
+}
+
+// What a view shows: nothing above its storey, roofs only with walls up on the top storey, a wall's
+// cut version in place of the full one, and a window gone with the wall it sits in.
+void sceneViewsShowStoreysWallsAndRoofs() {
+    using namespace ts2::scene;
+    Scene scene;
+    WallInfo wall;
+    wall.x1 = 1;
+    wall.level = 1;
+    wall.roomLeft = wall.roomRight = true;
+    scene.walls = {wall};
+    auto add = [&](Part part, int level, bool cut = false, std::vector<int> walls = {}) {
+        Instance i;
+        i.mesh = 0;
+        i.part = part;
+        i.level = level;
+        i.cut = cut;
+        i.walls = std::move(walls);
+        scene.instances.push_back(i);
+    };
+    add(Part::Other, 0);                   // 0 terrain
+    add(Part::Object, 0);                  // 1 in the yard
+    add(Part::Floor, 2);                   // 2 upstairs
+    add(Part::Roof, 2);                    // 3
+    add(Part::Wall, 1, false, {0});        // 4 full
+    add(Part::Wall, 1, true, {0});         // 5 cut
+    add(Part::Object, 1, false, {0});      // 6 a window in it
+    CHECK(topLevel(scene) == 2 && groundLevel(scene) == 1);
+    View view;
+    view.level = 2;
+    CHECK((visibleInstances(scene, view) == std::vector<std::uint8_t>{1, 1, 1, 1, 1, 0, 1}));
+    view.level = 1;
+    CHECK((visibleInstances(scene, view) == std::vector<std::uint8_t>{1, 1, 0, 0, 1, 0, 1}));
+    view.walls = WallView::Down;
+    CHECK((visibleInstances(scene, view) == std::vector<std::uint8_t>{1, 1, 0, 0, 0, 1, 0}));
+    view.level = 2;
+    CHECK((visibleInstances(scene, view) == std::vector<std::uint8_t>{1, 1, 1, 0, 1, 0, 1}));
 }
 
 // A version-0x47 SLOT resource: one container slot (type 0, bone 5) and two routing slots (type 3).
@@ -3255,6 +3325,8 @@ int main(int argc, char** argv) {
         {"scene transforms turn and move", sceneTransformsTurnAndMove},
         {"scene quads face their normal", sceneQuadsFaceTheirNormal},
         {"scene hip roof rises to its ridge", sceneHipRoofRisesToItsRidge},
+        {"scene cutaway cuts walls in front of rooms", sceneCutawayCutsWallsInFrontOfRooms},
+        {"scene views show storeys, walls and roofs", sceneViewsShowStoreysWallsAndRoofs},
         {"roofs read both versions", roofsReadBothVersions},
         {"fence post layer reads posts", fencePostLayerReadsPosts},
         {"build scripts read patterns and wall styles", buildScriptsReadPatternsAndWallStyles},

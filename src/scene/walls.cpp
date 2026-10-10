@@ -90,15 +90,15 @@ std::vector<WallHub> joinWalls(std::vector<ThickWall>& walls) {
             if (a.end == 0) {
                 w.rightA = ccw;
                 w.leftA = cw;
-                w.openA = arms.size() == 1;
             } else {
                 w.leftB = ccw;
                 w.rightB = cw;
-                w.openB = arms.size() == 1;
             }
             hub.x = px;
             hub.y = py;
             hub.top = a.end == 0 ? w.q.top0 : w.q.top1;
+            hub.bottom = a.end == 0 ? w.q.bottom0 : w.q.bottom1;
+            hub.walls.push_back(a.wall);
             hub.corners.push_back(cw);
             hub.corners.push_back(ccw);
         }
@@ -111,14 +111,23 @@ std::vector<WallHub> joinWalls(std::vector<ThickWall>& walls) {
 
 // Coverings run left to right as seen from their side, once per tile along the wall and once over
 // a full storey down from the wall's top, so short walls such as a deck's skirt show the top of it.
-void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w, int edge) {
-    const auto& q = w.q;
+// A cut-down wall keeps the texture where the full wall has it, so door and window holes line up.
+void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w, int edge, float cutHeight) {
+    WallQuad q = w.q;
     const float dx = q.x1 - q.x0, dy = q.y1 - q.y0, len = std::sqrt(dx * dx + dy * dy);
     if (len <= 0) {
         return;
     }
     const float ux = dx / len, uy = dy / len;
     const float v0 = (q.top0 - q.bottom0) / kLevelHeight, v1 = (q.top1 - q.bottom1) / kLevelHeight;
+    float t0 = 0, t1 = 0;  // texture coordinates at the (cut) top
+    if (cutHeight > 0) {
+        const float top0 = std::min(q.top0, q.bottom0 + cutHeight), top1 = std::min(q.top1, q.bottom1 + cutHeight);
+        t0 = (q.top0 - top0) / kLevelHeight;
+        t1 = (q.top1 - top1) / kLevelHeight;
+        q.top0 = top0;
+        q.top1 = top1;
+    }
     auto along = [&](const std::array<float, 2>& c) { return (c[0] - q.x0) * ux + (c[1] - q.y0) * uy; };
     // The wall graph's left side faces (dy, -dx).
     const std::array<float, 3> leftNormal{uy, -ux, 0}, rightNormal{-uy, ux, 0};
@@ -126,13 +135,13 @@ void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w,
         const float u0 = along(w.leftA), u1 = along(w.leftB);
         addQuad(surfaces[m], {{{w.leftA[0], w.leftA[1], q.bottom0}, {w.leftB[0], w.leftB[1], q.bottom1},
                                {w.leftB[0], w.leftB[1], q.top1}, {w.leftA[0], w.leftA[1], q.top0}}},
-                leftNormal, {{{u0, v0}, {u1, v1}, {u1, 0}, {u0, 0}}});
+                leftNormal, {{{u0, v0}, {u1, v1}, {u1, t1}, {u0, t0}}});
     }
     if (const int m = w.right.empty() ? -1 : builder.material(w.right); m >= 0) {
         const float u0 = len - along(w.rightA), u1 = len - along(w.rightB);
         addQuad(surfaces[m], {{{w.rightA[0], w.rightA[1], q.bottom0}, {w.rightB[0], w.rightB[1], q.bottom1},
                                {w.rightB[0], w.rightB[1], q.top1}, {w.rightA[0], w.rightA[1], q.top0}}},
-                rightNormal, {{{u0, v0}, {u1, v1}, {u1, 0}, {u0, 0}}});
+                rightNormal, {{{u0, v0}, {u1, v1}, {u1, t1}, {u0, t0}}});
     }
     if (!w.thick) {
         return;
@@ -141,16 +150,13 @@ void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w,
     addQuad(surfaces[edge], {{{w.leftA[0], w.leftA[1], q.top0}, {w.leftB[0], w.leftB[1], q.top1},
                               {w.rightB[0], w.rightB[1], q.top1}, {w.rightA[0], w.rightA[1], q.top0}}},
             {0, 0, 1}, noUv);
-    if (w.openA) {
-        addQuad(surfaces[edge], {{{w.leftA[0], w.leftA[1], q.bottom0}, {w.rightA[0], w.rightA[1], q.bottom0},
-                                  {w.rightA[0], w.rightA[1], q.top0}, {w.leftA[0], w.leftA[1], q.top0}}},
-                {-ux, -uy, 0}, noUv);
-    }
-    if (w.openB) {
-        addQuad(surfaces[edge], {{{w.leftB[0], w.leftB[1], q.bottom1}, {w.rightB[0], w.rightB[1], q.bottom1},
-                                  {w.rightB[0], w.rightB[1], q.top1}, {w.leftB[0], w.leftB[1], q.top1}}},
-                {ux, uy, 0}, noUv);
-    }
+    // Ends: where walls join they are inside the walls, and show when the neighbor is cut down.
+    addQuad(surfaces[edge], {{{w.leftA[0], w.leftA[1], q.bottom0}, {w.rightA[0], w.rightA[1], q.bottom0},
+                              {w.rightA[0], w.rightA[1], q.top0}, {w.leftA[0], w.leftA[1], q.top0}}},
+            {-ux, -uy, 0}, noUv);
+    addQuad(surfaces[edge], {{{w.leftB[0], w.leftB[1], q.bottom1}, {w.rightB[0], w.rightB[1], q.bottom1},
+                              {w.rightB[0], w.rightB[1], q.top1}, {w.leftB[0], w.leftB[1], q.top1}}},
+            {ux, uy, 0}, noUv);
 }
 
 } // namespace ts2::scene

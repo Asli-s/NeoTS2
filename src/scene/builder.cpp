@@ -240,10 +240,17 @@ int SceneBuilder::addMesh(const std::string& name, Surfaces surfaces) {
     return static_cast<int>(scene_.meshes.size() - 1);
 }
 
-void SceneBuilder::place(int mesh, const std::string& name, const Transform& transform) {
-    if (mesh >= 0) {
-        scene_.instances.push_back({mesh, name, transform});
+Instance* SceneBuilder::place(int mesh, const std::string& name, const Transform& transform, Part part, int level) {
+    if (mesh < 0) {
+        return nullptr;
     }
+    Instance& instance = scene_.instances.emplace_back();
+    instance.mesh = mesh;
+    instance.name = name;
+    instance.transform = transform;
+    instance.part = part;
+    instance.level = level;
+    return &instance;
 }
 
 int SceneBuilder::image(const std::string& texture) {

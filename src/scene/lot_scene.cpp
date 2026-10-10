@@ -5,6 +5,7 @@
 #include "formats/resource_types.hpp"
 #include "scene/lot_parts.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <set>
@@ -61,6 +62,7 @@ struct Shown {
     std::string model;
     Transform world;
     float yaw;
+    std::size_t instance = 0;  // index into the scene's instances once placed
 };
 
 // Middles of wall segments (doubled, so they are whole numbers) by level.
@@ -100,6 +102,10 @@ private:
         }
         const auto& rooms = *lot_.roomGraph;
         const auto& styles = assets_.buildScripts().wallStyles;
+        // The graph also traces the lot's border, where there is no wall.
+        auto onBorder = [&](const wallgraph::Point* p) {
+            return p->x <= 0 || p->y <= 0 || p->x >= static_cast<float>(rooms.width) || p->y >= static_cast<float>(rooms.height);
+        };
         for (const auto& w : rooms.walls) {
             const auto* a = rooms.point(w.from);
             const auto* b = rooms.point(w.to);
@@ -115,20 +121,14 @@ private:
                     const std::string& model = dx != 0 && dy != 0 ? fence->diagonalRail : fence->rail;
                     if (const int mesh = model.empty() ? -1 : b_.model(model, {}); mesh >= 0) {
                         b_.place(mesh, "rail " + model,
-                                 Transform::at(a->x, a->y, heights_.corner(level, a->x, a->y), std::atan2(dy, dx)));
+                                 Transform::at(a->x, a->y, heights_.corner(level, a->x, a->y), std::atan2(dy, dx)),
+                                 Part::Object, level);
                         ++stats_.fenceRails;
                     }
                     continue;
                 }
             }
-            if (w.leftRoom == w.rightRoom) {
-                continue;
-            }
-            // The graph also traces the lot's border, where there is no wall.
-            auto onBorder = [&](const wallgraph::Point* p) {
-                return p->x <= 0 || p->y <= 0 || p->x >= static_cast<float>(rooms.width) || p->y >= static_cast<float>(rooms.height);
-            };
-            if (onBorder(a) && onBorder(b)) {
+            if (w.leftRoom == w.rightRoom || (onBorder(a) && onBorder(b))) {
                 continue;
             }
             ThickWall t;
@@ -136,6 +136,9 @@ private:
                    heights_.corner(level, b->x, b->y), heights_.corner(level + 1, b->x, b->y)};
             t.points = {w.from, w.to};
             t.level = level;
+            // Room 0 is the outdoors, on every level.
+            t.roomLeft = w.leftRoom != 0;
+            t.roomRight = w.rightRoom != 0;
             if (covering == coverings.end()) {
                 t.left = t.right = plain_;
             } else {
@@ -144,6 +147,7 @@ private:
                         continue;
                     }
                     t.thick = style->second.thick;
+                    t.cuttable = style->second.cutAway;
                     if (style->second.belowFloor) {
                         t.q.top0 -= kFloorThickness;
                         t.q.top1 -= kFloorThickness;
@@ -166,6 +170,12 @@ private:
             walls_.push_back(std::move(t));
         }
         stats_.walls = walls_.size();
+        wallBase_ = static_cast<int>(b_.scene().walls.size());
+        for (std::size_t i = 0; i < walls_.size(); ++i) {
+            const auto& t = walls_[i];
+            b_.scene().walls.push_back({t.q.x0, t.q.y0, t.q.x1, t.q.y1, t.level, t.roomLeft, t.roomRight, t.cuttable});
+            wallAt_[edgeKey(t.q.x0, t.q.y0, t.q.x1, t.q.y1, t.level)] = i;
+        }
     }
 
     void placeFencePosts() {
@@ -175,7 +185,8 @@ private:
                 continue;
             }
             if (const int mesh = b_.model(fence->post, {}); mesh >= 0) {
-                b_.place(mesh, "post " + fence->post, Transform::at(post.x, post.y, heights_.corner(post.level, post.x, post.y), 0));
+                b_.place(mesh, "post " + fence->post, Transform::at(post.x, post.y, heights_.corner(post.level, post.x, post.y), 0),
+                         Part::Object, post.level);
                 ++stats_.fencePosts;
             }
         }
@@ -273,7 +284,9 @@ private:
         };
         for (std::size_t i = 0; i < shown_.size(); ++i) {
             resolve(resolve, i);
-            b_.place(shown_[i].mesh, std::to_string(shown_[i].object->id) + " " + shown_[i].model, shown_[i].world);
+            shown_[i].instance = b_.scene().instances.size();
+            b_.place(shown_[i].mesh, std::to_string(shown_[i].object->id) + " " + shown_[i].model, shown_[i].world, Part::Object,
+                     shown_[i].object->state.header.value1 - 1);
             ++stats_.objects;
         }
     }
@@ -284,11 +297,6 @@ private:
             return;
         }
         const auto masks = wallMasks(assets_.materialNames());
-        std::map<EdgeKey, std::size_t> byMiddle;
-        for (std::size_t i = 0; i < walls_.size(); ++i) {
-            const auto& q = walls_[i].q;
-            byMiddle[edgeKey(q.x0, q.y0, q.x1, q.y1, walls_[i].level)] = i;
-        }
         for (const auto& o : shown_) {
             const auto list = masks.find(lower(o.model));
             if (list == masks.end()) {
@@ -306,8 +314,8 @@ private:
                 o.world.apply(mid, true);
                 o.world.apply(facing, false);
                 const int level = o.object->state.header.value1 - 1 + m.level;
-                const auto wall = byMiddle.find(edgeKey(mid[0], mid[1], mid[0], mid[1], level));
-                if (wall == byMiddle.end()) {
+                const auto wall = wallAt_.find(edgeKey(mid[0], mid[1], mid[0], mid[1], level));
+                if (wall == wallAt_.end()) {
                     continue;
                 }
                 ThickWall& w = walls_[wall->second];
@@ -317,6 +325,7 @@ private:
                 const bool left = facing[0] * dy - facing[1] * dx > 0;
                 (left ? w.leftMask : w.rightMask) = m.material;
                 (left ? w.leftMaskMirrored : w.rightMaskMirrored) = m.face == "s" || m.face == "w";
+                b_.scene().instances[o.instance].walls.push_back(wallBase_ + static_cast<int>(wall->second));
                 ++stats_.wallCuts;
             }
         }
@@ -332,27 +341,48 @@ private:
         }
     }
 
+    // Each wall and each hub on its own, in full and cut down, so that views can choose.
     void drawWalls() {
         if (walls_.empty()) {
             return;
         }
         const auto hubs = joinWalls(walls_);
-        Surfaces surfaces;
-        for (const auto& w : walls_) {
-            addThickWall(b_, surfaces, w, edge_);
-        }
-        // Fan from each hub's point to each pair of neighboring corners (counterclockwise, so facing up).
-        for (const auto& hub : hubs) {
-            for (std::size_t i = 0; i < hub.corners.size(); ++i) {
-                const auto& c0 = hub.corners[i];
-                const auto& c1 = hub.corners[(i + 1) % hub.corners.size()];
-                for (const auto& p : {std::array<float, 3>{hub.x, hub.y, hub.top}, std::array<float, 3>{c0[0], c0[1], hub.top},
-                                      std::array<float, 3>{c1[0], c1[1], hub.top}}) {
-                    addVertex(surfaces[edge_], p, {0, 0, 1}, {0, 0});
+        for (std::size_t i = 0; i < walls_.size(); ++i) {
+            const auto& w = walls_[i];
+            for (const bool cut : {false, true}) {
+                if (cut && !w.cuttable) {
+                    continue;
+                }
+                Surfaces surfaces;
+                addThickWall(b_, surfaces, w, edge_, cut ? kCutWallHeight : 0);
+                if (auto* instance = b_.place(b_.addMesh("wall", std::move(surfaces)), "wall", Transform{}, Part::Wall, w.level)) {
+                    instance->cut = cut;
+                    instance->walls = {wallBase_ + static_cast<int>(i)};
                 }
             }
         }
-        b_.place(b_.addMesh("walls", std::move(surfaces)), "walls", Transform{});
+        // Fan from each hub's point to each pair of neighboring corners (counterclockwise, so facing up).
+        for (const auto& hub : hubs) {
+            for (const bool cut : {false, true}) {
+                const float top = cut ? std::min(hub.top, hub.bottom + kCutWallHeight) : hub.top;
+                Surfaces surfaces;
+                for (std::size_t i = 0; i < hub.corners.size(); ++i) {
+                    const auto& c0 = hub.corners[i];
+                    const auto& c1 = hub.corners[(i + 1) % hub.corners.size()];
+                    for (const auto& p : {std::array<float, 3>{hub.x, hub.y, top}, std::array<float, 3>{c0[0], c0[1], top},
+                                          std::array<float, 3>{c1[0], c1[1], top}}) {
+                        addVertex(surfaces[edge_], p, {0, 0, 1}, {0, 0});
+                    }
+                }
+                if (auto* instance = b_.place(b_.addMesh("wall hub", std::move(surfaces)), "wall hub", Transform{}, Part::WallHub,
+                                              walls_[hub.walls.front()].level)) {
+                    instance->cut = cut;
+                    for (const std::size_t i : hub.walls) {
+                        instance->walls.push_back(wallBase_ + static_cast<int>(i));
+                    }
+                }
+            }
+        }
     }
 
     void drawTerrain() {
@@ -397,9 +427,9 @@ private:
             return;
         }
         const auto& g = floors->second;
-        Surfaces surfaces;
         std::set<int> patterns;
         for (std::int32_t level = 0; level < static_cast<std::int32_t>(g.levels); ++level) {
+            Surfaces surfaces;
             for (std::int32_t x = 0; x < static_cast<std::int32_t>(g.width); ++x) {
                 for (std::int32_t y = 0; y < static_cast<std::int32_t>(g.height); ++y) {
                     const float fx = static_cast<float>(x), fy = static_cast<float>(y);
@@ -427,9 +457,9 @@ private:
                     }
                 }
             }
+            b_.place(b_.addMesh("floors", std::move(surfaces)), "floors", Transform{}, Part::Floor, level);
         }
         stats_.floorPatterns = patterns.size();
-        b_.place(b_.addMesh("floors", std::move(surfaces)), "floors", Transform{});
 
         // The slab under each floored tile above the ground: a ceiling underneath and a band down each
         // edge where the floor stops, unless a wall runs along it (the slab ends inside the wall).
@@ -451,9 +481,9 @@ private:
             }
             return false;
         };
-        Surfaces slabs;
         const std::array<std::array<float, 2>, 4> noUv{};
         for (std::int32_t level = 1; level < static_cast<std::int32_t>(g.levels); ++level) {
+            Surfaces slabs;
             for (std::int32_t x = 0; x < static_cast<std::int32_t>(g.width); ++x) {
                 for (std::int32_t y = 0; y < static_cast<std::int32_t>(g.height); ++y) {
                     if (!floored(level, x, y)) {
@@ -487,13 +517,13 @@ private:
                     }
                 }
             }
+            b_.place(b_.addMesh("floor slabs", std::move(slabs)), "floor slabs", Transform{}, Part::Floor, level);
         }
-        b_.place(b_.addMesh("floor slabs", std::move(slabs)), "floor slabs", Transform{});
     }
 
     void drawRoofs() {
-        Surfaces surfaces;
         for (const auto& roof : lot_.roofs) {
+            Surfaces surfaces;
             RoofLook look;
             if (const auto* pattern = assets_.roofPattern(roof.pattern)) {
                 // The top texture is a 5 x 5 grid of roof pieces (plain courses, ridge and hip caps; each
@@ -511,9 +541,10 @@ private:
             // A roof may keep its own slope (half the tangent of its angle); otherwise 45 degrees.
             const float slope = roof.slope > 0 ? 2 * roof.slope : 1.0f;
             addRoof(surfaces, roof, heights_.corner(roof.level0, roof.x0, roof.y0), slope, look);
+            // A roof belongs to the storey under its eaves.
+            b_.place(b_.addMesh("roof", std::move(surfaces)), "roof", Transform{}, Part::Roof, roof.level0 - 1);
         }
         stats_.roofs = lot_.roofs.size();
-        b_.place(b_.addMesh("roofs", std::move(surfaces)), "roofs", Transform{});
     }
 
     SceneBuilder& b_;
@@ -526,6 +557,8 @@ private:
     int edge_ = -1;
     std::string plain_;
     std::vector<ThickWall> walls_;
+    int wallBase_ = 0;  // index of walls_[0] in the scene's walls
+    std::map<EdgeKey, std::size_t> wallAt_;  // walls_ by their middle
     std::vector<Shown> shown_;
 };
 

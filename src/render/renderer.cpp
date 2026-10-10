@@ -183,6 +183,7 @@ void Renderer::upload(const scene::Scene& scene) {
     release();
     materials_ = scene.materials;
     instances_ = scene.instances;
+    visible_.clear();
 
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
     SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
@@ -281,6 +282,10 @@ void Renderer::upload(const scene::Scene& scene) {
     for (auto* t : transfers) {
         SDL_ReleaseGPUTransferBuffer(device_, t);
     }
+}
+
+void Renderer::show(std::vector<std::uint8_t> visible) {
+    visible_ = std::move(visible);
 }
 
 bool Renderer::draw(const Camera& camera) {
@@ -386,8 +391,9 @@ void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigne
         float distance;
     };
     std::vector<Draw> opaque, blended;
-    for (const auto& instance : instances_) {
-        if (instance.mesh < 0 || static_cast<std::size_t>(instance.mesh) >= meshes_.size()) {
+    for (std::size_t i = 0; i < instances_.size(); ++i) {
+        const auto& instance = instances_[i];
+        if (instance.mesh < 0 || static_cast<std::size_t>(instance.mesh) >= meshes_.size() || (i < visible_.size() && !visible_[i])) {
             continue;
         }
         const Vec3 at{instance.transform.m[3], instance.transform.m[7], instance.transform.m[11]};

@@ -98,6 +98,7 @@ add_library(ts2scene
     src/scene/lot_scene.cpp
     src/scene/walls.cpp
     src/scene/roofs.cpp
+    src/scene/view.cpp
 )
 target_link_libraries(ts2scene PUBLIC ts2content PRIVATE project_warnings)
 

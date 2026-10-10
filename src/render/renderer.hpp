@@ -3,6 +3,7 @@
 #include "render/math.hpp"
 #include "scene/scene.hpp"
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -35,6 +36,9 @@ public:
 
     // Uploads a scene's images and meshes; replaces what was uploaded before.
     void upload(const scene::Scene& scene);
+
+    // Which uploaded instances to draw, one flag each; all of them when empty (as after upload).
+    void show(std::vector<std::uint8_t> visible);
 
     // Draws one frame. Returns false when the window can't be drawn to right now (minimized).
     bool draw(const Camera& camera);
@@ -71,6 +75,7 @@ private:
     std::vector<GpuMesh> meshes_;
     std::vector<scene::Material> materials_;
     std::vector<scene::Instance> instances_;
+    std::vector<std::uint8_t> visible_;
 };
 
 } // namespace ts2::render
