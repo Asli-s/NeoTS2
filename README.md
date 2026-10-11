@@ -100,6 +100,18 @@ neots2.exe "C:\Program Files (x86)\Origin Games\The Sims 2 Ultimate Collection" 
 Ultimate Collection. If the game is installed elsewhere, use the folder that holds its "Double
 Deluxe", "Fun with Pets" and other pack folders.
 
+## How NeoTS2 is made
+
+Much of the code is written with AI (Claude). I direct the work and check each part against
+the real game. Since it's AI-assisted, don't treat it as a reference for the game's file
+formats or behavior without checking it yourself.
+
+## Credits
+
+Thanks to The Sims 2 community: [SimPE](https://sourceforge.net/projects/simpe/) was used as a
+reference (none of its code is used), and the AI has likely learned from public work such as
+[OpenTS2](https://github.com/LazyDuchess/OpenTS2).
+
 ## Contributing
 
 Please read [CONTRIBUTING.md](CONTRIBUTING.md) first. In short:
