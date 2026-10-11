@@ -208,8 +208,8 @@ private:
         }
         const auto& h = o.state.header;
         std::ostringstream line;
-        line << o.id << " (" << model << ") at " << h.location[1] << " " << h.location[0] << " level " << h.value1 << " dir "
-             << o.state.data[1] << ": " << what;
+        line << o.id << " " << (o.type ? o.type->name : std::string("?")) << " (" << model << ") at " << h.location[1] << " "
+             << h.location[0] << " level " << h.value1 << " dir " << o.state.data[1] << ": " << what;
         stats_.objectLog.push_back(line.str());
     }
 
@@ -228,6 +228,14 @@ private:
             const float x = h.location[1], y = h.location[0];
             if (x < 0 || y < 0 || x > 256 || y > 256) {
                 log(object, "off the lot", "");
+                continue;
+            }
+            // The extra tiles of a multi-tile object show nothing: its lead tile draws the whole model.
+            // A scene record filed under an extra tile's id is left over from an earlier object.
+            if (const auto* d = object.type ? assets_.objectDefinition(object.type->guid) : nullptr;
+                d && d->field(objd::field::kMultiTileMasterId) != 0 && d->field(objd::field::kMultiTileSubIndex) != 0xFFFF &&
+                object.state.data[0x13] > 0 && object.state.data[0x13] != static_cast<std::int32_t>(object.id)) {
+                log(object, "part of " + std::to_string(object.state.data[0x13]), "");
                 continue;
             }
             const auto record = sceneRecords.find(object.id);

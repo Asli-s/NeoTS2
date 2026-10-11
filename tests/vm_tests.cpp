@@ -763,9 +763,9 @@ void fencePostLayerReadsPosts() {
     CHECK(posts.size() == 1 && posts[0].level == 1 && posts[0].x == 13.0f && posts[0].y == 9.0f && posts[0].fence == 0xAD0DABD2);
 }
 
-// A lot's roofs: version 1 entries, and version 3 adding each roof's slope.
-void roofsReadBothVersions() {
-    for (const std::uint32_t version : {1u, 3u}) {
+// A lot's roofs: version 1 entries, version 2 adding each roof's slope, version 3 one more field.
+void roofsReadEveryVersion() {
+    for (const std::uint32_t version : {1u, 2u, 3u}) {
         std::vector<std::uint8_t> d(64, 0);
         auto u32 = [&d](std::uint32_t v) {
             for (int i = 0; i < 4; ++i) d.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
@@ -776,14 +776,16 @@ void roofsReadBothVersions() {
         for (const std::uint32_t v : {0x42u, 0x41C80000u, 0x40A00000u, 2u, 0x41B80000u, 0x41700000u, 2u, 2u, 0x8CDCBEF5u}) {
             u32(v);
         }
-        if (version == 3) {
+        if (version >= 2) {
             u32(0x3F000000);  // 0.5: 45 degrees
+        }
+        if (version == 3) {
             u32(4);
         }
         const auto roofs = ts2::roofs::parse(d);
         CHECK(roofs.size() == 1 && roofs[0].id == 0x42 && roofs[0].x0 == 25.0f && roofs[0].y1 == 15.0f &&
               roofs[0].level1 == 2 && roofs[0].type == 2 && roofs[0].pattern == 0x8CDCBEF5);
-        CHECK(roofs[0].slope == (version == 3 ? 0.5f : 0.0f));
+        CHECK(roofs[0].slope == (version >= 2 ? 0.5f : 0.0f) && roofs[0].extra == (version == 3 ? 4u : 0u));
     }
 }
 
@@ -4590,7 +4592,7 @@ int main(int argc, char** argv) {
         {"terrain resources parse", terrainResourcesParse},
         {"scene cutaway cuts walls in front of rooms", sceneCutawayCutsWallsInFrontOfRooms},
         {"scene views show storeys, walls and roofs", sceneViewsShowStoreysWallsAndRoofs},
-        {"roofs read both versions", roofsReadBothVersions},
+        {"roofs read every version", roofsReadEveryVersion},
         {"ui scripts parse", uiScriptsParse},
         {"targa images decode", targaImagesDecode},
         {"neighborhood videos decode", neighborhoodVideosDecode},
