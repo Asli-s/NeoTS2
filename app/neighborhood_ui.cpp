@@ -257,12 +257,13 @@ void NeighborhoodUi::open(const fs::path& folder, const std::string& name, const
 }
 
 void NeighborhoodUi::close() {
+    // Removed rather than hidden: the next neighborhood loads its own panel and bins.
     for (const int w : {panel_, families_, lots_}) {
-        if (w >= 0) {
-            screen_.setVisible(w, false);
-        }
+        screen_.remove(w);
     }
     panel_ = families_ = lots_ = puck_ = -1;
+    familyStrip_ = {};
+    lotStrip_ = {};
     bin_ = Bin::None;
 }
 

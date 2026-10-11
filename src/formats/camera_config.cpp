@@ -75,7 +75,9 @@ std::vector<Config> parse(std::string_view text) {
         }
         const std::string& key = it[0].word;
         if (key == "camera" && it.size() >= 3) {
-            configs.push_back({it[1].word, it[2].word});
+            Config& c = configs.emplace_back();
+            c.name = it[1].word;
+            c.controller = it[2].word;
             continue;
         }
         if (configs.empty()) {

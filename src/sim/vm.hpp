@@ -44,6 +44,8 @@ constexpr std::uint8_t kStackObjectMotiveByTemp = 0x11;
 constexpr std::uint8_t kMyPersonData = 0x12;
 constexpr std::uint8_t kStackObjectPersonData = 0x13;
 constexpr std::uint8_t kStackObjectDefinition = 0x15;
+// The stack object's attribute whose index is in a param of the frame (data = the param).
+constexpr std::uint8_t kStackObjectAttributeByParam = 0x16;
 constexpr std::uint8_t kLocal = 0x19;
 constexpr std::uint8_t kMyPersonDataByTemp = 0x1E;
 // Table from data >> 3; index from temp 0.
@@ -119,6 +121,10 @@ public:
 
     RunResult resume(ThreadState& thread, std::uint32_t objectGroup);
     RunResult resume(SimObject& me);
+
+    // Runs tree `tree` of `codeGroup` for `me` on a thread of its own until it ends, leaving `me`'s
+    // own thread alone: how the game runs an object's Load and Init functions while a lot loads.
+    RunResult runOnce(SimObject& me, std::uint32_t codeGroup, std::uint16_t tree, std::span<const std::int16_t> args = {});
 
     std::array<std::int16_t, kGlobalCount> globals{};
     std::function<void(const StepInfo&)> onStep;

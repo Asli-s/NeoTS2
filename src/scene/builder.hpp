@@ -40,6 +40,10 @@ public:
     int posedModel(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides, const Pose& pose,
                    const std::string& poseName);
 
+    // The same left in its bind pose, skinned to be posed when drawn (see Primitive and Mesh::skin);
+    // groups without skinning data are placed as model() places them.
+    int skinnedModel(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides);
+
     // Where a named node of a model sits in it, once the model has been built.
     const Transform* bone(const std::string& model, const std::string& node) const;
 
@@ -84,7 +88,8 @@ public:
     Assets& assets() { return assets_; }
 
 private:
-    int buildModel(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides, const Pose* pose);
+    int buildModel(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides, const Pose* pose,
+                   bool skinned = false);
     int image(const std::string& texture);
     // Textures drawn one over another by their alpha, bottom first, at the first one's size; opaque.
     int layeredImage(const std::vector<std::string>& textures);

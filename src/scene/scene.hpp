@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -51,16 +52,33 @@ struct Material {
 };
 
 // Triangles sharing one material: per vertex a position, a normal, texture coordinates and,
-// optionally, an alpha that multiplies the material's (1 when there are none).
+// optionally, an alpha that multiplies the material's (1 when there are none). A skinned
+// primitive also has four joints (indexes into its mesh's skin, 255 for none) and four weights per
+// vertex, and its positions and normals are those of the bind pose.
 struct Primitive {
     int material = -1;  // index into Scene::materials, -1 for none
     std::vector<float> positions, normals, uvs, alphas;
     std::vector<std::uint32_t> indices;
+    std::vector<std::uint8_t> joints;
+    std::vector<float> weights;
+};
+
+// A joint a skinned mesh follows: a vertex moves with it from the bind pose (`inverseBind` takes it
+// into the joint's space) to where the joint is posed, then by `placement` (where its shape sits in
+// the model). An empty joint name stands for vertices that follow no joint.
+struct SkinJoint {
+    std::string joint;
+    Transform inverseBind, placement;
+    // The joint's rest place in the model itself, relative to its parent joint. Where the animation
+    // doesn't move the joint, the model is posed with this rather than the skeleton's (long hair
+    // hangs its hair joints lower than the skeleton has them).
+    std::optional<Transform> rest;
 };
 
 struct Mesh {
     std::string name;
     std::vector<Primitive> primitives;
+    std::vector<SkinJoint> skin;
 };
 
 // What a placed mesh is, for choosing what a view shows.
@@ -156,6 +174,31 @@ struct PaintedTerrain {
     std::size_t paints() const { return alphaSize ? alphas.size() / (static_cast<std::size_t>(alphaSize) * alphaSize) : 0; }
 };
 
+struct Rig;
+struct RigAnimation;
+
+// Something animated in a scene (a Sim): a rig playing an animation, the skinned instances drawn
+// with it and the instances it holds at its joints.
+struct Actor {
+    std::uint32_t object = 0;  // the lot object it shows (its id); 0 for none
+    std::shared_ptr<const Rig> rig;
+    std::shared_ptr<const RigAnimation> animation;
+    double start = 0;  // seconds: when the animation started
+    float speed = 1;   // 1: as authored
+    bool loop = true;  // otherwise it holds its last pose once played
+    struct Skinned {
+        std::size_t instance = 0;
+        std::vector<int> nodes;  // per skin entry of its mesh, the rig node (see skinMatrices)
+    };
+    std::vector<Skinned> skinned;
+    struct Held {
+        std::size_t instance = 0;
+        int node = -1;  // the rig node it is held at
+    };
+    std::vector<Held> held;
+    Transform place;  // where the rig stands in the world
+};
+
 // Everything needed to draw a scene, independent of any graphics API.
 struct Scene {
     std::vector<Image> images;
@@ -172,6 +215,7 @@ struct Scene {
         float x0 = 0, y0 = 0, x1 = 0, y1 = 0, bottom = 0, top = 0;
     };
     std::optional<BoundaryClip> clip;
+    std::vector<Actor> actors;
 };
 
 } // namespace ts2::scene

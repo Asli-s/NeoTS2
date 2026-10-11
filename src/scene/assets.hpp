@@ -2,6 +2,7 @@
 
 #include "content/build_scripts.hpp"
 #include "content/resource_index.hpp"
+#include "formats/objd.hpp"
 #include "formats/scenegraph.hpp"
 #include "scene/scene.hpp"
 
@@ -44,6 +45,9 @@ public:
     // Names of every material in the Sims3D packages (for finding doors' and windows' wall masks).
     const std::vector<std::string>& materialNames() const { return materialNames_; }
 
+    // The object definition (OBJD) of the object type `guid`; null when no objects package has it.
+    const objd::ObjectDefinition* objectDefinition(std::uint32_t guid);
+
     // The model bone container slot `slot` of the object type `guid` sits at; empty for none.
     std::string slotBone(std::uint32_t guid, std::size_t slot);
 
@@ -51,9 +55,11 @@ public:
     // scripts, or a catalog pattern by its GUID in hex.
     std::string patternMaterial(const std::string& name, bool wall) const;
 
-    // A fence's models: one tile of rail along +x, the same diagonally (1.41 long), and a post.
+    // A fence's models: one tile of rail along +x, the same diagonally (1.41 long), and a post; and
+    // whether Sims may walk over it (flowerbed edging).
     struct Fence {
         std::string rail, diagonalRail, post;
+        bool mayWalkOver = false;
     };
     const Fence* fence(std::uint32_t guid) const;
 
@@ -86,7 +92,12 @@ private:
     std::map<std::uint32_t, Fence> fences_;
     std::map<std::uint32_t, RoofPattern> roofPatterns_;
     // Object types by GUID: their group and SLOT instance, read on first use.
-    std::map<std::uint32_t, std::pair<std::uint32_t, std::uint32_t>> objectTypes_;
+    struct ObjectType {
+        std::uint32_t group = 0;  // the objects package group it was found in
+        objd::ObjectDefinition definition;
+    };
+    std::map<std::uint32_t, ObjectType> objectTypes_;  // by GUID
+    void readObjectTypes();
     bool objectTypesRead_ = false;
 };
 

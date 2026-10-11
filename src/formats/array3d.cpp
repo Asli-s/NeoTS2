@@ -21,6 +21,10 @@ std::span<const std::uint8_t> Array3D::at(std::int32_t level, std::int32_t x, st
         return {};
     }
     const std::size_t index = (static_cast<std::size_t>(level) * width + x) * height + y;
+    // parse() makes the elements fill the grid; a grid built by hand might not.
+    if (elementSize == 0 || index >= elements.size() / elementSize) {
+        return {};
+    }
     return std::span<const std::uint8_t>(elements).subspan(index * elementSize, elementSize);
 }
 

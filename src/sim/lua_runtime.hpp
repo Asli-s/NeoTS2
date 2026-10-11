@@ -34,6 +34,7 @@ struct ScriptCall {
     std::size_t globalCount = 0;
 
     bool returnValue = false;  // set by SetScriptReturnValue
+    std::uint64_t instructions = 0;  // Lua instructions run so far, counted to stop endless loops
     // How the script ended when it didn't simply return.
     std::int16_t errorCode = 0;   // the game's error number for a bad index, 0 for none
     std::string unsupported;      // an API function the engine doesn't have yet

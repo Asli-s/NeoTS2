@@ -83,6 +83,22 @@ const std::vector<std::int16_t>* IndexCodeSource::constants(std::uint32_t group,
     return it->second ? &*it->second : nullptr;
 }
 
+const std::vector<objf::Function>* IndexCodeSource::objectFunctions(const ObjectType& type) {
+    const std::uint64_t key = groupInstance(type.group, type.instance);
+    auto it = objectFunctions_.find(key);
+    if (it == objectFunctions_.end()) {
+        std::optional<std::vector<objf::Function>> functions;
+        if (const auto* r = index_.find({objf::kType, type.group, type.instance, 0})) {
+            try {
+                functions = objf::parse(index_.read(*r));
+            } catch (const std::exception&) {
+            }
+        }
+        it = objectFunctions_.emplace(key, std::move(functions)).first;
+    }
+    return it->second ? &*it->second : nullptr;
+}
+
 const ObjectType* IndexCodeSource::objectType(std::uint32_t guid) {
     if (!objectTypesLoaded_) {
         objectTypesLoaded_ = true;
@@ -103,13 +119,29 @@ const ObjectType* IndexCodeSource::objectType(std::uint32_t guid) {
                         }
                     }
                 }
-                objectTypes_.try_emplace(id, ObjectType{r.entry.key.group, std::move(definition), containerSlots});
+                const std::uint16_t multiTileId = definition.field(objd::field::kMultiTileMasterId);
+                if (multiTileId != 0 && definition.field(objd::field::kMultiTileSubIndex) == 0xFFFF) {
+                    multiTileMasters_.try_emplace(static_cast<std::uint64_t>(r.entry.key.group) << 16 | multiTileId, id);
+                }
+                ObjectType type{r.entry.key.group, std::move(definition), static_cast<std::uint16_t>(r.entry.key.instance),
+                                containerSlots};
+                objectTypes_.try_emplace(id, std::move(type));
             } catch (const std::exception&) {
             }
         }
     }
     const auto it = objectTypes_.find(guid);
     return it != objectTypes_.end() ? &it->second : nullptr;
+}
+
+const ObjectType* IndexCodeSource::multiTileMaster(const ObjectType& part) {
+    const std::uint16_t multiTileId = part.definition.field(objd::field::kMultiTileMasterId);
+    if (multiTileId == 0) {
+        return nullptr;
+    }
+    objectType(0);  // loads the types (and masters) on first use
+    const auto it = multiTileMasters_.find(static_cast<std::uint64_t>(part.group) << 16 | multiTileId);
+    return it != multiTileMasters_.end() ? objectType(it->second) : nullptr;
 }
 
 std::optional<std::string> IndexCodeSource::string(std::uint32_t group, std::uint16_t instance,

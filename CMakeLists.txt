@@ -6,6 +6,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(NEOTS2_FUZZ "Build libFuzzer targets with AddressSanitizer instead of the tools" OFF)
+option(NEOTS2_ASAN "Build everything with AddressSanitizer, to catch memory errors while testing" OFF)
+option(NEOTS2_COVERAGE "Measure which lines the tests run (Clang only; see tools/coverage.ps1)" OFF)
+option(NEOTS2_STRICT "Treat compiler warnings as errors" OFF)
+option(NEOTS2_HARDEN "Build with Windows exploit protections (Control Flow Guard, CET shadow stacks)" ON)
 
 if(NEOTS2_FUZZ)
     if(MSVC)
@@ -17,20 +21,57 @@ if(NEOTS2_FUZZ)
     endif()
 endif()
 
+if(NEOTS2_COVERAGE)
+    if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        message(FATAL_ERROR "NEOTS2_COVERAGE needs Clang (clang-cl on Windows)")
+    endif()
+    add_compile_options(-fprofile-instr-generate -fcoverage-mapping)
+    if(MSVC)
+        # clang-cl doesn't link its profile runtime itself when the linker is run directly.
+        execute_process(COMMAND ${CMAKE_CXX_COMPILER} /clang:-print-resource-dir OUTPUT_VARIABLE clang_resources
+                        OUTPUT_STRIP_TRAILING_WHITESPACE)
+        link_libraries("${clang_resources}/lib/windows/clang_rt.profile-x86_64.lib")
+    else()
+        add_link_options(-fprofile-instr-generate)
+    endif()
+endif()
+
+if(NEOTS2_ASAN)
+    if(MSVC)
+        add_compile_options(/fsanitize=address /Zi)
+        add_link_options(/INCREMENTAL:NO /DEBUG)
+    else()
+        add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
+        add_link_options(-fsanitize=address,undefined)
+    endif()
+endif()
+
+# Exploit protections for the programs people run, so that a bug a crafted file reaches is much harder
+# to turn into running code. Test builds with sanitizers or coverage leave them out.
+if(NEOTS2_HARDEN AND MSVC AND NOT NEOTS2_FUZZ AND NOT NEOTS2_ASAN AND NOT NEOTS2_COVERAGE)
+    add_compile_options(/guard:cf)
+    add_link_options(/guard:cf /CETCOMPAT /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT)
+endif()
+
 add_library(project_warnings INTERFACE)
 if(MSVC)
-    target_compile_options(project_warnings INTERFACE /W4 /permissive- /utf-8)
+    # /sdl: extra security checks and warnings in our own code (third-party code is left as it is).
+    target_compile_options(project_warnings INTERFACE /W4 /permissive- /utf-8 $<$<CXX_COMPILER_ID:MSVC>:/sdl>
+                           $<$<BOOL:${NEOTS2_STRICT}>:/WX>)
 else()
-    target_compile_options(project_warnings INTERFACE -Wall -Wextra -Wpedantic)
+    target_compile_options(project_warnings INTERFACE -Wall -Wextra -Wpedantic $<$<BOOL:${NEOTS2_STRICT}>:-Werror>)
 endif()
 
 # The original Lua 5.0.3 interpreter, for the game's object scripts (third-party, MIT).
 file(GLOB LUA_SOURCES third_party/lua-5.0.3/src/*.c third_party/lua-5.0.3/src/lib/*.c)
-add_library(lua50 STATIC ${LUA_SOURCES})
+# Its memory goes through src/sim/lua_memory.c, which caps how much one script state may hold.
+add_library(lua50 STATIC ${LUA_SOURCES} src/sim/lua_memory.c)
 target_include_directories(lua50 PUBLIC third_party/lua-5.0.3/include PRIVATE third_party/lua-5.0.3/src)
 if(MSVC)
-    target_compile_options(lua50 PRIVATE /W0)
+    target_compile_options(lua50 PRIVATE /W0 /FI${CMAKE_CURRENT_SOURCE_DIR}/src/sim/lua_memory.h)
     target_compile_definitions(lua50 PRIVATE _CRT_SECURE_NO_WARNINGS)
+else()
+    target_compile_options(lua50 PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/src/sim/lua_memory.h)
 endif()
 
 add_library(ts2formats
@@ -46,6 +87,8 @@ add_library(ts2formats
     src/formats/luascript.cpp
     src/formats/sdsc.cpp
     src/formats/slot.cpp
+    src/formats/objf.cpp
+    src/formats/simi.cpp
     src/formats/srel.cpp
     src/formats/ngbh.cpp
     src/formats/datatables.cpp
@@ -103,9 +146,19 @@ target_link_libraries(ts2content PUBLIC ts2formats PRIVATE project_warnings)
 add_library(ts2sim
     src/sim/index_code_source.cpp
     src/sim/lot_world.cpp
+    src/sim/lot_simulation.cpp
     src/sim/lua_runtime.cpp
     src/sim/rooms.cpp
     src/sim/vm.cpp
+    src/sim/animation.cpp
+    src/sim/clock.cpp
+    src/sim/route_grid.cpp
+    src/sim/route_items.cpp
+    src/sim/object_footprint.cpp
+    src/sim/type_signature.cpp
+    src/sim/object_reset.cpp
+    src/sim/route_world.cpp
+    src/sim/find_best_object.cpp
     src/sim/world.cpp
 )
 target_link_libraries(ts2sim PUBLIC ts2content PRIVATE lua50 project_warnings)
@@ -123,6 +176,8 @@ add_library(ts2scene
     src/scene/imposters.cpp
     src/scene/lot_skirt.cpp
     src/scene/sims.cpp
+    src/scene/rig.cpp
+    src/scene/animation_library.cpp
     src/scene/neighborhood_scene.cpp
     src/scene/neighborhood_paint.cpp
     src/scene/neighborhood_lighting.cpp
@@ -132,11 +187,16 @@ target_link_libraries(ts2scene PUBLIC ts2content PRIVATE project_warnings)
 
 if(NEOTS2_FUZZ)
     foreach(target qfs_fuzz dbpf_fuzz bhav_fuzz str_fuzz bcon_fuzz glob_fuzz objd_fuzz
-                   objt_fuzz objm_fuzz xobj_fuzz wallgraph_fuzz array3d_fuzz srel_fuzz sdsc_fuzz fami_fuzz famt_fuzz slot_fuzz swaf_fuzz propset_fuzz ttab_fuzz luascript_fuzz ngbh_fuzz datatables_fuzz scenegraph_fuzz stringmap_fuzz walllayer_fuzz namemap_fuzz fencepostlayer_fuzz roofs_fuzz terrain_fuzz)
+                   objt_fuzz objm_fuzz xobj_fuzz wallgraph_fuzz array3d_fuzz srel_fuzz sdsc_fuzz fami_fuzz famt_fuzz slot_fuzz swaf_fuzz propset_fuzz ttab_fuzz luascript_fuzz ngbh_fuzz datatables_fuzz scenegraph_fuzz stringmap_fuzz walllayer_fuzz namemap_fuzz fencepostlayer_fuzz roofs_fuzz terrain_fuzz reia_fuzz
+                   anim_fuzz image_fuzz lot_description_fuzz nhood_objects_fuzz nhood_terrain_fuzz objf_fuzz reference_list_fuzz simi_fuzz camera_config_fuzz nhood_paint_rules_fuzz ui_script_fuzz)
         add_executable(${target} fuzz/${target}.cpp)
         target_link_libraries(${target} PRIVATE ts2formats project_warnings)
     endforeach()
 else()
+    # Reads every resource of an installation with the engine's readers and reports the result.
+    add_executable(gamecheck tools/gamecheck/main.cpp)
+    target_link_libraries(gamecheck PRIVATE ts2content lua50 project_warnings)
+
     add_executable(dbpfdump tools/dbpfdump/main.cpp)
     target_link_libraries(dbpfdump PRIVATE ts2formats lua50 project_warnings)
 
@@ -149,6 +209,7 @@ else()
 
     add_executable(bhavdump tools/bhavdump/main.cpp)
     target_link_libraries(bhavdump PRIVATE ts2content project_warnings)
+
 
     add_executable(uidump tools/uidump/main.cpp)
     target_link_libraries(uidump PRIVATE ts2content project_warnings)
@@ -179,7 +240,7 @@ else()
     if(SDL3_FOUND AND NEOTS2_DXC)
         set(shader_dir ${CMAKE_CURRENT_BINARY_DIR}/shaders)
         set(shader_outputs)
-        foreach(shader scene.vert scene.frag ui.vert ui.frag terrain.vert terrain.frag sky.vert sky.frag water.vert water.frag road.vert road.frag imposter.vert imposter.frag clip.vert clip.frag)
+        foreach(shader scene.vert skinned.vert scene.frag ui.vert ui.frag terrain.vert terrain.frag sky.vert sky.frag water.vert water.frag road.vert road.frag imposter.vert imposter.frag clip.vert clip.frag)
             if(shader MATCHES "vert$")
                 set(profile vs_6_0)
             else()
@@ -204,8 +265,8 @@ else()
         add_library(ts2ui src/ui/fonts.cpp src/ui/screen.cpp)
         target_link_libraries(ts2ui PUBLIC ts2content PRIVATE freetype project_warnings)
 
-        add_executable(neots2 app/main.cpp app/menu.cpp app/neighborhood.cpp app/neighborhood_ui.cpp)
-        target_link_libraries(neots2 PRIVATE ts2render ts2ui project_warnings)
+        add_executable(neots2 app/main.cpp app/menu.cpp app/neighborhood.cpp app/neighborhood_ui.cpp app/lot_life.cpp app/lot_ui.cpp app/live_panel.cpp)
+        target_link_libraries(neots2 PRIVATE ts2render ts2ui ts2sim project_warnings)
         add_dependencies(neots2 neots2_shaders)
         # The app loads its shaders and SDL from beside itself.
         add_custom_command(TARGET neots2 POST_BUILD

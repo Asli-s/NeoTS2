@@ -1,5 +1,7 @@
 #include "sim/lot_world.hpp"
 
+#include "sim/type_signature.hpp"
+
 #include <algorithm>
 #include <cstdio>
 #include <optional>
@@ -130,6 +132,11 @@ LotWorldReport buildWorld(const content::Lot& lot, CodeSource& code, World& worl
         }
         if (auto problem = restoreStack(lot, saved, object, code)) {
             report.problems.push_back({saved.id, *problem});
+        }
+        // An object whose type changed since the save (a patch, expansion or mod) will start over. Sims
+        // are left as saved for now (their reset also refills their person data).
+        if (!state.person && saved.type && typeChangedSinceSave(code, *type, *saved.type)) {
+            report.changedType.push_back(object.id);
         }
         ++report.objects;
         report.threads += object.thread.isRunning();

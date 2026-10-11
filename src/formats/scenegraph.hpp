@@ -7,6 +7,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // The game's 3D scenegraph resources. Each is an RCOL container: links to other resources, the
@@ -129,6 +130,22 @@ struct ResourceNode {
 };
 ResourceNode parseResourceNode(std::span<const std::uint8_t> data);
 
+// A value of a data list (cDataListExtension): a named number, vector, string, byte blob or list of
+// more values. Resource nodes carry such lists, e.g. "footprint" (where Sims can't walk).
+struct DataValue {
+    enum class Type : std::uint8_t { Int = 2, Float = 3, Vector = 5, String = 6, List = 7, Rotation = 8, Bytes = 9 };
+    Type type = Type::Int;
+    std::string name;
+    std::int32_t integer = 0;
+    std::vector<float> floats;  // Float: one, Vector: three, Rotation: four
+    std::string text;
+    std::vector<std::uint8_t> bytes;
+    std::vector<DataValue> items;  // a list's values
+    const DataValue* find(std::string_view itemName) const;
+};
+// The data lists of a resource node (CRES), each a List value named after it.
+std::vector<DataValue> parseDataLists(std::span<const std::uint8_t> data);
+
 // Material definition (TXMT, cMaterialDefinition): a type and name-value properties.
 struct Material {
     std::uint32_t version = 0;
@@ -167,7 +184,9 @@ LevelInfo parseLevelInfo(std::span<const std::uint8_t> data);
 
 // A placed object's scene record in its lot (cObject, instance = object id): the model it shows and
 // the materials replacing a mesh group's default one (recolors). Records may wrap cObject in a
-// cAnimatable block; the model name is empty for objects without one.
+// cAnimatable block; the model name is empty for objects without one. After the model comes a
+// list of entries (in practice none or one), each a name and a number and, from cObject version
+// 0x11 on, its material overrides; older records have no overrides.
 struct MaterialOverride {
     std::string material;
     std::string group;

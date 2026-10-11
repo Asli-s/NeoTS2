@@ -20,6 +20,9 @@ struct LotWorldProblem {
 struct LotWorldReport {
     std::size_t objects = 0;
     std::size_t threads = 0;
+    // Objects whose type changed since the lot was saved (Sims aside), by id: the game resets them
+    // when the lot loads instead of letting them resume (see LotSimulation).
+    std::vector<std::int16_t> changedType;
     // Data table records of objects the lot no longer has (the game leaves them in the package).
     std::size_t staleDataTables = 0;
     std::vector<LotWorldProblem> problems;

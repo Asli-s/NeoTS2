@@ -20,6 +20,14 @@ struct VertexUniforms {
     float model[16];
 };
 
+struct SkinnedUniforms {
+    VertexUniforms frame;
+    std::uint32_t jointBase;
+    std::uint32_t padding[3];
+};
+
+constexpr std::uint32_t kSkinBytes = 4 + 4 * sizeof(float);  // four joints, four weights
+
 struct FragmentUniforms {
     float color[4];
     float sunDirection[4];
@@ -37,8 +45,26 @@ std::vector<std::uint8_t> readFile(const std::filesystem::path& path) {
     return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
 }
 
+// Whether all of an image's pixels are there (a broken one is drawn plain white instead).
+bool complete(const scene::Image& image) {
+    return image.width > 0 && image.height > 0 && image.rgba.size() == static_cast<std::size_t>(image.width) * image.height * 4;
+}
+
 std::runtime_error sdlError(const char* what) {
     return std::runtime_error(std::string(what) + ": " + SDL_GetError());
+}
+
+// Copies bytes into an upload buffer. When the GPU is out of memory the buffer (or its mapping) is
+// missing, and this stops with an error rather than writing nowhere.
+void copyInto(SDL_GPUDevice* device, SDL_GPUTransferBuffer* buffer, const void* data, std::size_t size) {
+    void* mapped = buffer ? SDL_MapGPUTransferBuffer(device, buffer, false) : nullptr;
+    if (mapped == nullptr) {
+        const auto error = sdlError("GPU upload buffer");
+        SDL_ReleaseGPUTransferBuffer(device, buffer);
+        throw error;
+    }
+    std::memcpy(mapped, data, size);
+    SDL_UnmapGPUTransferBuffer(device, buffer);
 }
 
 } // namespace
@@ -52,7 +78,7 @@ Renderer::Renderer(SDL_Window* window, const std::filesystem::path& shaderFolder
         throw sdlError("can't draw to the window");
     }
 
-    auto shader = [&](const char* file, SDL_GPUShaderStage stage, Uint32 samplers, Uint32 uniforms = 1) {
+    auto shader = [&](const char* file, SDL_GPUShaderStage stage, Uint32 samplers, Uint32 uniforms = 1, Uint32 storageBuffers = 0) {
         const auto code = readFile(shaderFolder / file);
         SDL_GPUShaderCreateInfo info{};
         info.code_size = code.size();
@@ -62,6 +88,7 @@ Renderer::Renderer(SDL_Window* window, const std::filesystem::path& shaderFolder
         info.stage = stage;
         info.num_samplers = samplers;
         info.num_uniform_buffers = uniforms;
+        info.num_storage_buffers = storageBuffers;
         SDL_GPUShader* s = SDL_CreateGPUShader(device_, &info);
         if (s == nullptr) {
             throw sdlError(file);
@@ -69,19 +96,27 @@ Renderer::Renderer(SDL_Window* window, const std::filesystem::path& shaderFolder
         return s;
     };
     SDL_GPUShader* vertex = shader("scene.vert.dxil", SDL_GPU_SHADERSTAGE_VERTEX, 0);
+    SDL_GPUShader* skinnedVertex = shader("skinned.vert.dxil", SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, 1);
     SDL_GPUShader* fragment = shader("scene.frag.dxil", SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
 
+    for (int skinned = 0; skinned < 2; ++skinned)
     for (int twoSided = 0; twoSided < 2; ++twoSided) {
         for (int blend = 0; blend < 2; ++blend) {
-            SDL_GPUVertexBufferDescription buffer{};
-            buffer.slot = 0;
-            buffer.pitch = kVertexFloats * sizeof(float);
-            buffer.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
-            SDL_GPUVertexAttribute attributes[4]{};
+            // Skinned primitives take their joints and weights from a second buffer.
+            SDL_GPUVertexBufferDescription buffers[2]{};
+            buffers[0].slot = 0;
+            buffers[0].pitch = kVertexFloats * sizeof(float);
+            buffers[0].input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+            buffers[1].slot = 1;
+            buffers[1].pitch = kSkinBytes;
+            buffers[1].input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+            SDL_GPUVertexAttribute attributes[6]{};
             attributes[0] = {0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 0};
             attributes[1] = {1, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 3 * sizeof(float)};
             attributes[2] = {2, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, 6 * sizeof(float)};
             attributes[3] = {3, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT, 8 * sizeof(float)};
+            attributes[4] = {4, 1, SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4, 0};
+            attributes[5] = {5, 1, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, 4};
 
             SDL_GPUColorTargetDescription color{};
             color.format = SDL_GetGPUSwapchainTextureFormat(device_, window_);
@@ -96,12 +131,12 @@ Renderer::Renderer(SDL_Window* window, const std::filesystem::path& shaderFolder
             }
 
             SDL_GPUGraphicsPipelineCreateInfo info{};
-            info.vertex_shader = vertex;
+            info.vertex_shader = skinned ? skinnedVertex : vertex;
             info.fragment_shader = fragment;
-            info.vertex_input_state.vertex_buffer_descriptions = &buffer;
-            info.vertex_input_state.num_vertex_buffers = 1;
+            info.vertex_input_state.vertex_buffer_descriptions = buffers;
+            info.vertex_input_state.num_vertex_buffers = skinned ? 2 : 1;
             info.vertex_input_state.vertex_attributes = attributes;
-            info.vertex_input_state.num_vertex_attributes = 4;
+            info.vertex_input_state.num_vertex_attributes = skinned ? 6 : 4;
             info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
             info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
             info.rasterizer_state.cull_mode = twoSided ? SDL_GPU_CULLMODE_NONE : SDL_GPU_CULLMODE_BACK;
@@ -113,13 +148,15 @@ Renderer::Renderer(SDL_Window* window, const std::filesystem::path& shaderFolder
             info.target_info.num_color_targets = 1;
             info.target_info.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
             info.target_info.has_depth_stencil_target = true;
-            pipelines_[twoSided][blend] = SDL_CreateGPUGraphicsPipeline(device_, &info);
-            if (pipelines_[twoSided][blend] == nullptr) {
+            auto& pipeline = (skinned ? skinnedPipelines_ : pipelines_)[twoSided][blend];
+            pipeline = SDL_CreateGPUGraphicsPipeline(device_, &info);
+            if (pipeline == nullptr) {
                 throw sdlError("pipeline");
             }
         }
     }
     SDL_ReleaseGPUShader(device_, vertex);
+    SDL_ReleaseGPUShader(device_, skinnedVertex);
     SDL_ReleaseGPUShader(device_, fragment);
 
     // Sprites: blended over everything, without depth.
@@ -489,12 +526,17 @@ Renderer::~Renderer() {
     if (spriteSampler_) {
         SDL_ReleaseGPUSampler(device_, spriteSampler_);
     }
-    for (auto& row : pipelines_) {
-        for (auto* p : row) {
-            if (p) {
-                SDL_ReleaseGPUGraphicsPipeline(device_, p);
+    for (auto* set : {&pipelines_, &skinnedPipelines_}) {
+        for (auto& row : *set) {
+            for (auto* p : row) {
+                if (p) {
+                    SDL_ReleaseGPUGraphicsPipeline(device_, p);
+                }
             }
         }
+    }
+    if (jointBuffer_) {
+        SDL_ReleaseGPUBuffer(device_, jointBuffer_);
     }
     if (sampler_) {
         SDL_ReleaseGPUSampler(device_, sampler_);
@@ -516,6 +558,9 @@ void Renderer::release() {
         for (auto& p : mesh.primitives) {
             SDL_ReleaseGPUBuffer(device_, p.vertices);
             SDL_ReleaseGPUBuffer(device_, p.indices);
+            if (p.skin) {
+                SDL_ReleaseGPUBuffer(device_, p.skin);
+            }
         }
     }
     meshes_.clear();
@@ -586,8 +631,7 @@ void Renderer::uploadSprites(const std::vector<scene::Image>& images) {
         tinfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
         tinfo.size = static_cast<Uint32>(image.rgba.size());
         SDL_GPUTransferBuffer* tb = SDL_CreateGPUTransferBuffer(device_, &tinfo);
-        std::memcpy(SDL_MapGPUTransferBuffer(device_, tb, false), image.rgba.data(), image.rgba.size());
-        SDL_UnmapGPUTransferBuffer(device_, tb);
+        copyInto(device_, tb, image.rgba.data(), image.rgba.size());
         transfers.push_back(tb);
         SDL_GPUTextureTransferInfo from{};
         from.transfer_buffer = tb;
@@ -646,8 +690,7 @@ void Renderer::setSprites(const std::vector<std::pair<int, const scene::Image*>>
         tinfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
         tinfo.size = static_cast<Uint32>(image->rgba.size());
         SDL_GPUTransferBuffer* tb = SDL_CreateGPUTransferBuffer(device_, &tinfo);
-        std::memcpy(SDL_MapGPUTransferBuffer(device_, tb, false), image->rgba.data(), image->rgba.size());
-        SDL_UnmapGPUTransferBuffer(device_, tb);
+        copyInto(device_, tb, image->rgba.data(), image->rgba.size());
         transfers.push_back(tb);
         SDL_GPUTextureTransferInfo from{};
         from.transfer_buffer = tb;
@@ -670,6 +713,60 @@ void Renderer::setSprites(const std::vector<std::pair<int, const scene::Image*>>
 void Renderer::showSprites(std::vector<Sprite> sprites, bool scene) {
     sprites_ = std::move(sprites);
     drawScene_ = scene;
+}
+
+void Renderer::setJoints(std::size_t instance, const std::vector<scene::Transform>& joints) {
+    if (instance >= jointBase_.size() || joints.empty()) {
+        return;
+    }
+    // An instance keeps its place in the buffer while its joints fit there, so the buffer only grows
+    // when an instance needs more of them than before.
+    if (jointBase_[instance] < 0 || jointCount_[instance] < static_cast<int>(joints.size())) {
+        jointBase_[instance] = static_cast<int>(jointData_.size() / 12);
+        jointCount_[instance] = static_cast<int>(joints.size());
+        jointData_.resize(jointData_.size() + joints.size() * 12);
+    }
+    float* out = &jointData_[static_cast<std::size_t>(jointBase_[instance]) * 12];
+    for (const auto& j : joints) {
+        std::copy(j.m.begin(), j.m.end(), out);
+        out += 12;
+    }
+    jointsChanged_ = true;
+}
+
+void Renderer::setPlace(std::size_t instance, const scene::Transform& transform) {
+    if (instance < instances_.size()) {
+        instances_[instance].transform = transform;
+    }
+}
+
+void Renderer::uploadJoints(SDL_GPUCommandBuffer* cmd) {
+    if (!jointsChanged_ || jointData_.empty()) {
+        return;
+    }
+    jointsChanged_ = false;
+    if (jointData_.size() > jointCapacity_) {
+        if (jointBuffer_) {
+            SDL_ReleaseGPUBuffer(device_, jointBuffer_);
+        }
+        jointCapacity_ = std::max(jointData_.size(), jointCapacity_ * 2);
+        SDL_GPUBufferCreateInfo info{};
+        info.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ;
+        info.size = static_cast<Uint32>(jointCapacity_ * sizeof(float));
+        jointBuffer_ = SDL_CreateGPUBuffer(device_, &info);
+    }
+    const auto bytes = static_cast<Uint32>(jointData_.size() * sizeof(float));
+    SDL_GPUTransferBufferCreateInfo tinfo{};
+    tinfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+    tinfo.size = bytes;
+    SDL_GPUTransferBuffer* tb = SDL_CreateGPUTransferBuffer(device_, &tinfo);
+    copyInto(device_, tb, jointData_.data(), bytes);
+    SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
+    SDL_GPUTransferBufferLocation from{tb, 0};
+    SDL_GPUBufferRegion to{jointBuffer_, 0, bytes};
+    SDL_UploadToGPUBuffer(copy, &from, &to, true);
+    SDL_EndGPUCopyPass(copy);
+    SDL_ReleaseGPUTransferBuffer(device_, tb);
 }
 
 void Renderer::uploadSpriteVertices(SDL_GPUCommandBuffer* cmd, unsigned, unsigned) {
@@ -701,8 +798,7 @@ void Renderer::uploadSpriteVertices(SDL_GPUCommandBuffer* cmd, unsigned, unsigne
     tinfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
     tinfo.size = bytes;
     SDL_GPUTransferBuffer* tb = SDL_CreateGPUTransferBuffer(device_, &tinfo);
-    std::memcpy(SDL_MapGPUTransferBuffer(device_, tb, false), v.data(), bytes);
-    SDL_UnmapGPUTransferBuffer(device_, tb);
+    copyInto(device_, tb, v.data(), bytes);
     SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
     SDL_GPUTransferBufferLocation from{tb, 0};
     SDL_GPUBufferRegion to{spriteVertices_, 0, bytes};
@@ -716,6 +812,9 @@ void Renderer::upload(const scene::Scene& scene) {
     materials_ = scene.materials;
     instances_ = scene.instances;
     visible_.clear();
+    jointBase_.assign(instances_.size(), -1);
+    jointCount_.assign(instances_.size(), 0);
+    jointData_.clear();
 
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
     SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
@@ -725,9 +824,7 @@ void Renderer::upload(const scene::Scene& scene) {
         info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
         info.size = size;
         SDL_GPUTransferBuffer* t = SDL_CreateGPUTransferBuffer(device_, &info);
-        void* mapped = SDL_MapGPUTransferBuffer(device_, t, false);
-        std::memcpy(mapped, data, size);
-        SDL_UnmapGPUTransferBuffer(device_, t);
+        copyInto(device_, t, data, size);
         transfers.push_back(t);
         return t;
     };
@@ -770,9 +867,7 @@ void Renderer::upload(const scene::Scene& scene) {
     };
 
     for (const auto& image : scene.images) {
-        textures_.push_back(image.width && image.height && image.rgba.size() == static_cast<std::size_t>(image.width) * image.height * 4
-                                ? texture(image)
-                                : nullptr);
+        textures_.push_back(complete(image) ? texture(image) : nullptr);
     }
     white_ = texture({1, 1, {255, 255, 255, 255}});
 
@@ -782,6 +877,11 @@ void Renderer::upload(const scene::Scene& scene) {
         for (const auto& p : mesh.primitives) {
             const std::size_t n = p.positions.size() / 3;
             if (n == 0 || p.indices.empty()) {
+                continue;
+            }
+            // The scene builders check their indices; this keeps the GPU from ever reading past the
+            // vertices should one be missed.
+            if (std::any_of(p.indices.begin(), p.indices.end(), [n](std::uint32_t k) { return k >= n; })) {
                 continue;
             }
             vertices.assign(n * kVertexFloats, 0.0f);
@@ -803,6 +903,14 @@ void Renderer::upload(const scene::Scene& scene) {
             g.indices = buffer(SDL_GPU_BUFFERUSAGE_INDEX, p.indices.data(), static_cast<Uint32>(p.indices.size() * sizeof(std::uint32_t)));
             g.count = static_cast<unsigned>(p.indices.size());
             g.material = p.material;
+            if (p.joints.size() == n * 4 && p.weights.size() == n * 4) {
+                std::vector<std::uint8_t> skin(n * kSkinBytes);
+                for (std::size_t i = 0; i < n; ++i) {
+                    std::memcpy(&skin[i * kSkinBytes], &p.joints[i * 4], 4);
+                    std::memcpy(&skin[i * kSkinBytes + 4], &p.weights[i * 4], 4 * sizeof(float));
+                }
+                g.skin = buffer(SDL_GPU_BUFFERUSAGE_VERTEX, skin.data(), static_cast<Uint32>(skin.size()));
+            }
             gm.primitives.push_back(g);
         }
         meshes_.push_back(std::move(gm));
@@ -867,10 +975,21 @@ void Renderer::upload(const scene::Scene& scene) {
             }
             return tex;
         };
-        const auto& first = t.textures.front();
+        // The paint textures share one array, so each must be the first one's size; others are drawn white.
+        const scene::Image white{1, 1, {255, 255, 255, 255}};
+        const auto& first = complete(t.textures.front()) ? t.textures.front() : white;
+        std::vector<std::uint8_t> blank;
+        auto layer = [&](Uint32 l) {
+            const auto& image = t.textures[l];
+            if (complete(image) && image.width == first.width && image.height == first.height) {
+                return image.rgba.data();
+            }
+            blank.assign(static_cast<std::size_t>(first.width) * first.height * 4, 255);
+            return static_cast<const std::uint8_t*>(blank.data());
+        };
         const Uint32 levels = static_cast<Uint32>(std::floor(std::log2(std::max(first.width, first.height)))) + 1;
         terrainPaints_ = array(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, first.width, first.height, static_cast<Uint32>(t.textures.size()),
-                               levels, 4, [&](Uint32 l) { return t.textures[l].rgba.data(); });
+                               levels, 4, layer);
         if (levels > 1) {
             withMips.push_back(terrainPaints_);
         }
@@ -882,8 +1001,7 @@ void Renderer::upload(const scene::Scene& scene) {
         terrainCells_ = array(SDL_GPU_TEXTUREFORMAT_R8_UNORM, t.cellsX, t.cellsY, paints, 1, 1,
                               [&](Uint32 l) { return t.cellTextures.data() + l * cells; });
         // The light map; white (no change) when there is none.
-        const scene::Image white{1, 1, {255, 255, 255, 255}};
-        const scene::Image& light = t.lightMap.width ? t.lightMap : white;
+        const scene::Image& light = complete(t.lightMap) ? t.lightMap : white;
         terrainLight_ = array(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, light.width, light.height, 1, 1, 4,
                               [&](Uint32) { return light.rgba.data(); });
         terrainUniforms_ = {static_cast<float>(t.alphaSize), t.textureRepeat, static_cast<float>(t.cellTiles), static_cast<float>(paints),
@@ -891,7 +1009,8 @@ void Renderer::upload(const scene::Scene& scene) {
                             t.gradientDepth, 0, {0, 0}};
 
         // A plain 2D texture, with or without mip levels.
-        auto plain = [&](const scene::Image& image, bool mips) {
+        auto plain = [&](const scene::Image& given, bool mips) {
+            const scene::Image& image = complete(given) ? given : white;
             const Uint32 levels = mips ? static_cast<Uint32>(std::floor(std::log2(std::max(image.width, image.height)))) + 1 : 1;
             SDL_GPUTextureCreateInfo info{};
             info.type = SDL_GPU_TEXTURETYPE_2D;
@@ -1208,6 +1327,7 @@ void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigne
     }
 
     uploadSpriteVertices(cmd, width, height);
+    uploadJoints(cmd);
 
     const float aspect = height ? static_cast<float>(width) / static_cast<float>(height) : 1.0f;
     const float fovY = camera.fovX > 0 ? 2 * std::atan(std::tan(camera.fovX / 2) / aspect) : camera.fovY;
@@ -1338,30 +1458,46 @@ void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigne
         }
         const Vec3 at{instance.transform.m[3], instance.transform.m[7], instance.transform.m[11]};
         const Vec3 d = sub(at, camera.eye);
+        const std::size_t firstBlended = blended.size();
         for (const auto& p : meshes_[static_cast<std::size_t>(instance.mesh)].primitives) {
+            if (p.skin && (i >= jointBase_.size() || jointBase_[i] < 0 || !jointBuffer_)) {
+                continue;
+            }
             const auto alpha = p.material >= 0 ? materials_[static_cast<std::size_t>(p.material)].alpha : scene::AlphaMode::Opaque;
             (alpha == scene::AlphaMode::Blend ? blended : alpha == scene::AlphaMode::Layer ? layers : opaque)
                 .push_back({&p, &instance, dot(d, d)});
         }
+        // The game draws an object's blended surfaces from its model's last to its first: a Sim's
+        // hair underside first, the outer strands last.
+        std::reverse(blended.begin() + static_cast<std::ptrdiff_t>(firstBlended), blended.end());
     }
-    // Blended surfaces from the farthest to the nearest.
-    std::sort(blended.begin(), blended.end(), [](const Draw& a, const Draw& b) { return a.distance > b.distance; });
+    // Blended surfaces from the farthest object to the nearest, each object's in the order above.
+    std::stable_sort(blended.begin(), blended.end(), [](const Draw& a, const Draw& b) { return a.distance > b.distance; });
 
     auto drawList = [&](const std::vector<Draw>& list, int blend) {
         SDL_GPUGraphicsPipeline* bound = nullptr;
         for (const auto& d : list) {
             const scene::Material* m = d.primitive->material >= 0 ? &materials_[static_cast<std::size_t>(d.primitive->material)] : nullptr;
-            SDL_GPUGraphicsPipeline* pipeline = pipelines_[m && m->doubleSided ? 1 : 0][blend];
+            const bool skinned = d.primitive->skin != nullptr;
+            SDL_GPUGraphicsPipeline* pipeline = (skinned ? skinnedPipelines_ : pipelines_)[m && m->doubleSided ? 1 : 0][blend];
             if (pipeline != bound) {
                 SDL_BindGPUGraphicsPipeline(pass, pipeline);
                 bound = pipeline;
             }
-            VertexUniforms vu{};
-            std::copy(viewProjection.m.begin(), viewProjection.m.end(), vu.viewProjection);
+            if (skinned) {
+                SDL_BindGPUVertexStorageBuffers(pass, 0, &jointBuffer_, 1);
+            }
+            SkinnedUniforms vu{};
+            std::copy(viewProjection.m.begin(), viewProjection.m.end(), vu.frame.viewProjection);
             const auto& t = d.instance->transform.m;
             const float model[16] = {t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10], t[11], 0, 0, 0, 1};
-            std::copy(std::begin(model), std::end(model), vu.model);
-            SDL_PushGPUVertexUniformData(cmd, 0, &vu, sizeof(vu));
+            std::copy(std::begin(model), std::end(model), vu.frame.model);
+            if (skinned) {
+                vu.jointBase = static_cast<std::uint32_t>(jointBase_[static_cast<std::size_t>(d.instance - instances_.data())]);
+                SDL_PushGPUVertexUniformData(cmd, 0, &vu, sizeof(vu));
+            } else {
+                SDL_PushGPUVertexUniformData(cmd, 0, &vu.frame, sizeof(vu.frame));
+            }
 
             FragmentUniforms fu{};
             const auto c = m ? m->color : std::array<float, 4>{0.8f, 0.8f, 0.8f, 1};
@@ -1384,8 +1520,8 @@ void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigne
 
             SDL_GPUTextureSamplerBinding binding{texture, m && m->clamp ? clampedSampler_ : sampler_};
             SDL_BindGPUFragmentSamplers(pass, 0, &binding, 1);
-            SDL_GPUBufferBinding vertices{d.primitive->vertices, 0};
-            SDL_BindGPUVertexBuffers(pass, 0, &vertices, 1);
+            SDL_GPUBufferBinding vertices[2] = {{d.primitive->vertices, 0}, {d.primitive->skin, 0}};
+            SDL_BindGPUVertexBuffers(pass, 0, vertices, skinned ? 2 : 1);
             SDL_GPUBufferBinding indices{d.primitive->indices, 0};
             SDL_BindGPUIndexBuffer(pass, &indices, SDL_GPU_INDEXELEMENTSIZE_32BIT);
             SDL_DrawGPUIndexedPrimitives(pass, d.primitive->count, 1, 0, 0, 0);

@@ -49,10 +49,15 @@ public:
     void resize(int window, int w, int h);
     // Draws a top window (one a script was loaded as) over the others.
     void raise(int window);
+    // Takes a window and the windows inside it off the screen for good, freeing their pictures and
+    // text; their numbers are given to windows added later.
+    void remove(int window);
     // How wide a window's text is in its font, in pixels.
     int textWidth(int window);
     int x(int window) const { return windows_[static_cast<std::size_t>(window)].x; }
     int y(int window) const { return windows_[static_cast<std::size_t>(window)].y; }
+    // A window's caption (its text).
+    const std::string& text(int window) const { return windows_[static_cast<std::size_t>(window)].text; }
     // The texts of a window's children (a script's table of constants, written as captions).
     std::vector<std::string> childTexts(int window) const;
     int width(int window) const;
@@ -87,6 +92,7 @@ private:
         bool ownImage = false;           // the texture is this window's own (not a shared UI image)
         std::array<int, 4> imageRect{};  // part of the image shown (imagerect), when set
         bool edge = false;               // the image is stretched around its border (edgeimage)
+        bool toggle = false;             // a toggle button (style=toggle): pressed frame only while checked
         std::string text, font, align;
         std::array<float, 4> textColor{1, 1, 1, 1};
         std::array<int, 2> gutters{};
@@ -102,6 +108,7 @@ private:
 
     int add(const ui::Window& w, int parent);
     int texture(tga::Pixels pixels);
+    void release(int texture);
     void layoutText(int window);
     std::array<int, 2> origin(int window) const;
     bool shown(int window) const;
@@ -120,6 +127,7 @@ private:
     double hoverSince_ = 0;
     int white_ = -1;          // a white texture for plain colors
     std::vector<int> changed_;
+    std::vector<int> freeWindows_, freeTextures_;  // slots of removed windows and their pictures, for reuse
 };
 
 } // namespace ts2::ui

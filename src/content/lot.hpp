@@ -57,8 +57,13 @@ struct Lot {
     // 0-255 at four points per tile, is instance kFirstPaintMapInstance + i).
     std::optional<terrain::LotTexture> terrainTextures;
     std::map<std::uint32_t, terrain::Array2D> flatGrids;
+    // Each object's model (its scene object record's resource node name, without "_cres"), by object
+    // id; multi-tile parts other than the lead have none.
+    std::map<std::uint32_t, std::string> objectModels;
     // Each object's script data tables (instance = object id).
     std::map<std::uint32_t, datatables::DataTables> dataTables;
+    // The simulator's global variables as saved with the lot (SIMI); empty when it has none.
+    std::vector<std::int16_t> globals;
 };
 
 constexpr std::uint32_t kRoomGridInstance = 9;

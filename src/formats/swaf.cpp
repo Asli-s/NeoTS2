@@ -13,7 +13,6 @@ namespace {
 constexpr std::uint32_t kMaxVersion = 6;
 constexpr std::uint32_t kMaxWantVersion = 10;
 constexpr std::uint32_t kMaxHistoryVersion = 2;
-constexpr std::uint8_t kMaxType = 6;
 constexpr std::uint32_t kMaxCount = 0x10000;
 
 Want readWant(BinaryReader& r) {

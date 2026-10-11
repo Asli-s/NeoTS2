@@ -139,6 +139,7 @@ Animation parse(std::span<const std::uint8_t> data) {
     // components' keys, each list in turn.
     struct Target {
         std::uint16_t channels = 0, nameLength = 0;
+        std::uint8_t chains = 0;
     };
     std::vector<Target> ts(targets);
     for (auto& t : ts) {
@@ -146,7 +147,7 @@ Animation parse(std::span<const std::uint8_t> data) {
         pointer(r);
         r.u16();
         t.channels = r.u16();
-        r.u8();
+        t.chains = r.u8();
         r.u8();
         t.nameLength = r.u16();
         pointer(r);
@@ -201,8 +202,58 @@ Animation parse(std::span<const std::uint8_t> data) {
             }
         }
     }
+    // Then the targets' IK chains, and each chain's targets in turn.
+    std::vector<std::vector<IkChain>> chains(ts.size());
+    for (std::size_t t = 0; t < ts.size(); ++t) {
+        for (std::uint8_t i = 0; i < ts[t].chains; ++i) {
+            IkChain& c = chains[t].emplace_back();
+            pointer(r);
+            pointer(r);
+            r.u16();
+            c.targets.resize(r.u16());
+            auto name = [&r] {
+                const std::uint32_t v = r.u32();
+                r.u8();
+                return v;
+            };
+            c.name = name();
+            c.mirror = name();
+            c.strategy = r.u32();
+            c.begin = name();
+            c.beginMirror = name();
+            c.end = name();
+            c.endMirror = name();
+            c.pole = name();
+            c.poleFrame = name();
+            c.poleFrameMirror = name();
+            c.extra = name();
+            pointer(r);
+        }
+    }
+    for (auto& list : chains) {
+        for (auto& c : list) {
+            for (auto& target : c.targets) {
+                pointer(r);
+                pointer(r);
+                r.u16();
+                r.u16();
+                target.kind = r.u8();
+                std::uint32_t v[6];
+                for (auto& x : v) {
+                    x = r.u32();
+                    r.u8();
+                }
+                target.frame = v[0];
+                target.frameMirror = v[1];
+                target.node = v[2];
+                target.rotationNode = v[3];
+                target.weight = v[5];
+            }
+        }
+    }
     if (!channels.empty()) {
         a.channels = std::move(channels[0]);
+        a.chains = std::move(chains[0]);
     }
     for (const auto& c : a.channels) {
         for (const auto& curve : c.components) {

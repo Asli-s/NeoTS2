@@ -109,8 +109,10 @@ formats or behavior without checking it yourself.
 ## Credits
 
 Thanks to The Sims 2 community: [SimPE](https://sourceforge.net/projects/simpe/) was used as a
-reference (none of its code is used), and the AI has likely learned from public work such as
-[OpenTS2](https://github.com/LazyDuchess/OpenTS2).
+reference (none of its code is used). The AI has likely picked up general knowledge, like file
+formats and where things are stored, from public community work such as
+[OpenTS2](https://github.com/LazyDuchess/OpenTS2). No code was copied: NeoTS2 was compared with
+OpenTS2 side by side.
 
 ## Contributing
 

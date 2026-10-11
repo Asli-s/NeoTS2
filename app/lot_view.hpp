@@ -1,8 +1,10 @@
 #pragma once
 
 #include "orbit.hpp"
+#include "render/renderer.hpp"
 #include "scene/lot_skirt.hpp"
 #include "scene/neighborhood_scene.hpp"
+#include "scene/rig.hpp"
 #include "scene/scene.hpp"
 #include "scene/view.hpp"
 
@@ -38,8 +40,8 @@ inline void frameScene(const ts2::scene::Scene& scene, Orbit& orbit) {
 }
 
 // Looking at a lot: which storey, how walls show, roofs on or off, and the keys that change them
-// (Q/E or comma/period turn a quarter, Page Up/Down change storey, 1/2/3 or Tab walls
-// up/cutaway/down, R roofs).
+// (Q/E or comma/period turn a quarter, Page Up/Down change storey, Home/End (or Tab)
+// the next or previous wall mode, R roofs; 1/2/3 are the game's speed keys).
 struct LotView {
     ts2::scene::View view;
     int ground = 0, top = 0;  // the lowest storey worth showing on its own, and the highest
@@ -77,13 +79,12 @@ struct LotView {
         case SDLK_PAGEDOWN:
             changeLevel(-1, orbit);
             return true;
-        case SDLK_1:
-        case SDLK_2:
-        case SDLK_3:
-            view.walls = static_cast<ts2::scene::WallView>(key - SDLK_1);
-            return true;
+        case SDLK_HOME:
         case SDLK_TAB:
             view.walls = static_cast<ts2::scene::WallView>((static_cast<int>(view.walls) + 1) % 3);
+            return true;
+        case SDLK_END:
+            view.walls = static_cast<ts2::scene::WallView>((static_cast<int>(view.walls) + 2) % 3);
             return true;
         case SDLK_R:
             view.roofs = !view.roofs;
@@ -100,6 +101,7 @@ inline void appendScene(ts2::scene::Scene& out, const ts2::scene::Scene& add, co
     using namespace ts2::scene;
     const int images = static_cast<int>(out.images.size()), materials = static_cast<int>(out.materials.size());
     const int meshes = static_cast<int>(out.meshes.size()), walls = static_cast<int>(out.walls.size());
+    const std::size_t instances = out.instances.size();
     out.images.insert(out.images.end(), add.images.begin(), add.images.end());
     for (Material m : add.materials) {
         if (m.image >= 0) {
@@ -124,6 +126,16 @@ inline void appendScene(ts2::scene::Scene& out, const ts2::scene::Scene& add, co
             w += walls;
         }
         out.instances.push_back(std::move(i));
+    }
+    for (Actor a : add.actors) {
+        a.place = place * a.place;
+        for (auto& s : a.skinned) {
+            s.instance += instances;
+        }
+        for (auto& h : a.held) {
+            h.instance += instances;
+        }
+        out.actors.push_back(std::move(a));
     }
     for (WallInfo w : add.walls) {
         float a[3] = {w.x0, w.y0, 0}, b[3] = {w.x1, w.y1, 0};
@@ -184,6 +196,19 @@ inline ts2::scene::Scene lotInNeighborhood(const ts2::scene::Scene& hood, const 
         t.roadTextures.clear();
     }
     return out;
+}
+
+// Poses a scene's actors (its Sims) `seconds` after they started and hands their joints and the
+// places of what they hold to the renderer.
+inline void animateActors(const ts2::scene::Scene& scene, double seconds, ts2::render::Renderer& renderer,
+                          ts2::scene::ScenePose& pose) {
+    ts2::scene::poseActors(scene, seconds, pose);
+    for (const auto& [instance, joints] : pose.joints) {
+        renderer.setJoints(instance, joints);
+    }
+    for (const auto& [instance, place] : pose.places) {
+        renderer.setPlace(instance, place);
+    }
 }
 
 // Moves a camera set up in a lot's own coordinates to where the lot is in its neighborhood.

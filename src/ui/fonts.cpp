@@ -95,6 +95,8 @@ std::vector<std::uint8_t> decodeMxf(const std::vector<std::uint8_t>& file) {
     return out;
 }
 
+// FreeType's library and faces are closed by their owners' destructors, so nothing is left open
+// even when loading stops halfway with an error.
 struct Fonts::Impl {
     FT_Library library = nullptr;
     struct Face {
@@ -102,11 +104,26 @@ struct Fonts::Impl {
         FT_Face face = nullptr;
         std::string family, fullName;  // the full name: family and style ("HelveticaNeueLT Std Medium")
         bool bold = false;
+        ~Face() {
+            if (face) {
+                FT_Done_Face(face);
+            }
+        }
     };
     std::vector<std::unique_ptr<Face>> faces;
     std::map<std::string, FontStyle> styles;  // by lowercase name
     std::map<std::uint32_t, std::string> byGuid;
     FontStyle fallback;
+
+    Impl() = default;
+    Impl(const Impl&) = delete;
+    Impl& operator=(const Impl&) = delete;
+    ~Impl() {
+        faces.clear();  // faces close before the library
+        if (library) {
+            FT_Done_FreeType(library);
+        }
+    }
 
     // The face a style draws with, set to its size.
     FT_Face pick(const FontStyle& style, int& size) {
@@ -203,6 +220,7 @@ Fonts::Fonts(const fs::path& install) : impl_(std::make_unique<Impl>()) {
                 face->data = decodeMxf(readFile(item.path()));
                 if (face->data.empty() ||
                     FT_New_Memory_Face(impl_->library, face->data.data(), static_cast<FT_Long>(face->data.size()), 0, &face->face) != 0) {
+                    face->face = nullptr;
                     continue;
                 }
                 face->family = face->face->family_name ? face->face->family_name : "";
@@ -218,12 +236,7 @@ Fonts::Fonts(const fs::path& install) : impl_(std::make_unique<Impl>()) {
     }
 }
 
-Fonts::~Fonts() {
-    for (auto& f : impl_->faces) {
-        FT_Done_Face(f->face);
-    }
-    FT_Done_FreeType(impl_->library);
-}
+Fonts::~Fonts() = default;
 
 std::size_t Fonts::faceCount() const {
     return impl_->faces.size();
@@ -262,6 +275,9 @@ namespace {
 // How far the baseline is below the top of a line: the face's ascender at the style's narrowed size,
 // rounded up.
 int ascentOf(FT_Face face, const FontStyle& style) {
+    if (face->units_per_EM == 0) {  // a bitmap-only face has no outline units
+        return style.size;
+    }
     return static_cast<int>(std::ceil(static_cast<double>(face->ascender) * style.size * style.xScale / face->units_per_EM));
 }
 
@@ -274,7 +290,7 @@ int Fonts::ascent(const FontStyle& style) {
 }
 
 int Fonts::lineHeight(const FontStyle& style) {
-    return style.size + style.lineSpacing;
+    return std::max(1, style.size + style.lineSpacing);
 }
 
 TextImage Fonts::draw(const FontStyle& style, const std::string& utf8) {
@@ -303,6 +319,13 @@ TextImage Fonts::draw(const FontStyle& style, const std::string& utf8) {
             continue;
         }
         const FT_Bitmap& b = face->glyph->bitmap;
+        if (b.pixel_mode != FT_PIXEL_MODE_GRAY) {  // only 8-bit coverage is read below
+            pen += face->glyph->advance.x;
+            continue;
+        }
+        // Rows run upward in memory when the pitch is negative.
+        const std::size_t stride = static_cast<std::size_t>(b.pitch < 0 ? -b.pitch : b.pitch);
+        auto row = [&](unsigned y) { return b.pitch < 0 ? (b.rows - 1 - y) * stride : y * stride; };
         const int x0 = static_cast<int>(pen / 64) + face->glyph->bitmap_left;
         const int y0 = ascent - face->glyph->bitmap_top;
         for (unsigned y = 0; y < b.rows; ++y) {
@@ -312,7 +335,7 @@ TextImage Fonts::draw(const FontStyle& style, const std::string& utf8) {
                     continue;
                 }
                 auto& a = out.pixels.rgba[(static_cast<std::size_t>(py) * out.pixels.width + static_cast<std::size_t>(px)) * 4 + 3];
-                a = std::max<std::uint8_t>(a, b.buffer[static_cast<std::size_t>(y) * static_cast<std::size_t>(b.pitch) + x]);
+                a = std::max<std::uint8_t>(a, b.buffer[row(y) + x]);
             }
         }
         pen += face->glyph->advance.x;

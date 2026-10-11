@@ -4,6 +4,7 @@
 #include "formats/bhav.hpp"
 #include "formats/objd.hpp"
 #include "formats/swaf.hpp"
+#include "sim/animation.hpp"
 #include "sim/data_tables.hpp"
 #include "sim/inventory.hpp"
 #include "sim/rooms.hpp"
@@ -139,6 +140,8 @@ struct SimObject {
     std::int32_t y = kOffLot;
     std::int32_t level = 1;  // 1 = ground
     ThreadState thread;
+    // What Animate Sim or Animate Object last started on it, while it plays.
+    std::optional<PlayingAnimation> animation;
     bool removed = false;
 
     bool isPerson() const { return definition.field(objd::field::kType) == kPersonType; }
@@ -308,6 +311,15 @@ public:
         return 0;
     }
 
+    // The simulation's clock in milliseconds, moved on by whoever runs the world; animations are
+    // timed by it.
+    double clockMs() const { return clockMs_; }
+    void advanceClock(double ms) { clockMs_ += ms; }
+
+    // How long animations last; without it, animations end as soon as they start.
+    void setAnimationLengths(AnimationLengths lengths) { animationLengths_ = std::move(lengths); }
+    const AnimationLengths& animationLengths() const { return animationLengths_; }
+
     // The game's Lua state, shared by every world (the game has one).
     void setScripts(std::shared_ptr<LuaRuntime> scripts) { scripts_ = std::move(scripts); }
     LuaRuntime* scripts() const { return scripts_.get(); }
@@ -376,6 +388,8 @@ private:
     std::map<std::pair<InventoryKind, std::int32_t>, Inventory> inventories_;
     std::shared_ptr<const content::WantDefinitions> wantDefs_;
     std::shared_ptr<LuaRuntime> scripts_;
+    double clockMs_ = 0;
+    AnimationLengths animationLengths_;
     std::int16_t nextId_ = 1;
     std::size_t removedCount_ = 0;
 };

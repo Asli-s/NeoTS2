@@ -13,6 +13,10 @@ struct Pixels {
     std::vector<std::uint8_t> rgba;
 };
 
+// The widest or tallest image any decoder accepts: far larger than anything the game has, so a
+// broken file can't ask for huge amounts of memory.
+constexpr std::uint32_t kMaxSide = 16384;
+
 // A Targa image: true color (24 or 32 bits) or grayscale (8 bits), plain or run-length encoded.
 // Empty for other kinds or broken data.
 std::optional<Pixels> decode(std::span<const std::uint8_t> data);

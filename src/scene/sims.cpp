@@ -7,7 +7,9 @@
 #include "formats/resource_types.hpp"
 #include "formats/slot.hpp"
 #include "formats/str.hpp"
+#include "scene/rig.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <map>
 
@@ -20,7 +22,6 @@ namespace {
 constexpr std::uint32_t kAgeData = 0xAC598EAC;
 constexpr std::uint32_t kPartProperties = 0xEBCF3E27;
 constexpr std::uint32_t kLocalGroup = 0xFFFFFFFF;
-constexpr std::uint32_t kCres = 0xE519C933;
 constexpr std::uint32_t kTxmt = 0x49596978;
 
 std::uint32_t number(const std::map<std::string, std::string>& p, const std::string& key) {
@@ -63,14 +64,19 @@ SimLook simLook(Assets& assets, const std::filesystem::path& characterFile) {
             }
         }
     }
-    const std::uint32_t lists = number(age, "listcnt");
+    // Counts come from the file; each list and entry has its own properties, so a set can't have
+    // more than it has properties (a broken file could claim billions).
+    const auto atMost = [](std::uint32_t n, std::size_t properties) {
+        return static_cast<std::uint32_t>(std::min<std::size_t>(n, properties));
+    };
+    const std::uint32_t lists = atMost(number(age, "listcnt"), age.size());
     for (std::uint32_t i = 0; i < lists; ++i) {
         // Each list holds the parts of one kind for one category: key (category << 16) | part.
         const std::uint32_t key = number(age, "lk" + std::to_string(i));
         if ((key >> 16) != look.category) {
             continue;
         }
-        const std::uint32_t entries = number(age, "ls" + std::to_string(i));
+        const std::uint32_t entries = atMost(number(age, "ls" + std::to_string(i)), age.size());
         for (std::uint32_t j = 0; j < entries; ++j) {
             const std::uint32_t index = number(age, "le" + std::to_string(i) + "_" + std::to_string(j));
             if (index >= refs.size() || refs[index].type != kPartProperties) {
@@ -104,7 +110,7 @@ SimLook simLook(Assets& assets, const std::filesystem::path& characterFile) {
                 look.problems.push_back(ex.what());
                 continue;
             }
-            const std::uint32_t overrides = number(props, "numoverrides");
+            const std::uint32_t overrides = atMost(number(props, "numoverrides"), props.size());
             for (std::uint32_t k = 0; k < overrides; ++k) {
                 const std::string n = "override" + std::to_string(k);
                 const std::uint32_t m = number(props, n + "resourcekeyidx");
@@ -124,7 +130,7 @@ SimLook simLook(Assets& assets, const std::filesystem::path& characterFile) {
     return look;
 }
 
-std::string skinUnderClothes(const SimLook& look) {
+std::string skinUnderClothes(const SimLook& look, bool separates) {
     const char* age = look.age == 8 ? "a" : look.age == 4 ? "t" : nullptr;
     const char* gender = look.gender == 1 ? "f" : look.gender == 2 ? "m" : nullptr;
     // The game's own skin tones are 00000001-... to 00000005-...
@@ -133,31 +139,49 @@ std::string skinUnderClothes(const SimLook& look) {
         t.compare(8, 28, "-0000-0000-0000-000000000000") != 0) {
         return {};
     }
-    return std::string(age) + gender + "topnaked_nude_s" + t[7];
+    return std::string(age) + gender + (separates ? "bottomnaked_nude_s" : "topnaked_nude_s") + t[7];
 }
 
-std::string clothesOverSkin(SceneBuilder& builder, Assets& assets, const SimLook& look, const std::string& material) {
-    const std::string skin = skinUnderClothes(look);
-    if (skin.empty()) {
-        return material;
-    }
-    const auto data = assets.byName(kTxmt, skin + "_txmt");
+namespace {
+
+// A game material's base texture; empty when the material is missing or has none.
+std::string baseTexture(Assets& assets, const std::string& material) {
+    const auto data = assets.byName(kTxmt, material + "_txmt");
     if (!data) {
-        return material;
+        return {};
     }
-    std::string texture;
     try {
         const auto m = sg::parseMaterial(*data);
         if (const auto it = m.properties.find("stdMatBaseTextureName"); it != m.properties.end()) {
-            texture = it->second;
+            return it->second;
         }
     } catch (const std::exception&) {
     }
+    return {};
+}
+
+} // namespace
+
+std::string clothesOverSkin(SceneBuilder& builder, Assets& assets, const SimLook& look, const std::string& material) {
+    const std::string skin = skinUnderClothes(look);
+    const std::string texture = skin.empty() ? std::string() : baseTexture(assets, skin);
     if (texture.empty()) {
         return material;
     }
     const std::string name = "_" + skin + "_" + material;
     return builder.layeredMaterial(name, material, {texture}) >= 0 ? name : material;
+}
+
+std::string separatesOverSkin(SceneBuilder& builder, Assets& assets, const SimLook& look, const std::string& top,
+                              const std::string& bottom) {
+    const std::string skin = skinUnderClothes(look, true);
+    const std::string skinTexture = skin.empty() ? std::string() : baseTexture(assets, skin);
+    const std::string topTexture = baseTexture(assets, top);
+    if (skinTexture.empty() || topTexture.empty()) {
+        return {};
+    }
+    const std::string name = "_" + skin + "_" + top + "_" + bottom;
+    return builder.layeredMaterial(name, bottom, {skinTexture, topTexture}) >= 0 ? name : std::string();
 }
 
 std::string simSlotBone(const std::filesystem::path& characterFile, std::size_t slot) {
@@ -209,63 +233,15 @@ std::optional<anim::Animation> loadAnimation(Assets& assets, const std::string& 
 
 Pose posedSkeleton(Assets& assets, const std::string& skeleton, const anim::Animation* animation, float ms) {
     Pose pose;
-    const auto cres = assets.byName(kCres, skeleton + "_cres");
-    if (!cres) {
-        return pose;
-    }
-    sg::ResourceNode tree;
-    try {
-        tree = sg::parseResourceNode(*cres);
-    } catch (const std::exception&) {
-        return pose;
-    }
-    std::map<std::string, std::array<float, 4>> rotations;
-    std::map<std::string, std::array<float, 3>> translations;
-    if (animation != nullptr) {
-        constexpr float kRadians = 3.14159265358979f / 180.0f;
-        for (const auto& c : animation->channels) {
-            if (c.components.size() != 3) {
-                continue;
-            }
-            const float x = c.components[0].sample(ms), y = c.components[1].sample(ms), z = c.components[2].sample(ms);
-            if (c.kind() == anim::ChannelKind::Translation) {
-                translations[lower(c.name)] = {x, y, z};
-            } else if (c.kind() == anim::ChannelKind::Rotation) {
-                // x first, then y, then z: q = qz * qy * qx.
-                const float cx = std::cos(x * kRadians / 2), sx = std::sin(x * kRadians / 2);
-                const float cy = std::cos(y * kRadians / 2), sy = std::sin(y * kRadians / 2);
-                const float cz = std::cos(z * kRadians / 2), sz = std::sin(z * kRadians / 2);
-                rotations[lower(c.name)] = {sx * cy * cz - cx * sy * sz, cx * sy * cz + sx * cy * sz,
-                                            cx * cy * sz - sx * sy * cz, cx * cy * cz + sx * sy * sz};
-            }
+    const Rig rig = loadRig(assets, skeleton);
+    // Not owned: the animation outlives the binding.
+    const RigAnimation bound = bindAnimation(rig, std::shared_ptr<const anim::Animation>(std::shared_ptr<void>(), animation));
+    std::vector<Transform> world;
+    poseRig(rig, animation ? &bound : nullptr, ms, world);
+    for (std::size_t i = 0; i < rig.nodes.size(); ++i) {
+        if (!rig.nodes[i].name.empty()) {
+            pose.try_emplace(rig.nodes[i].name, world[i]);
         }
-    }
-    std::vector<bool> seen(tree.nodes.size(), false);
-    auto walk = [&](auto&& self, std::uint32_t index, const Transform& parent, int depth) -> void {
-        if (index >= tree.nodes.size() || seen[index] || depth > 64) {
-            return;
-        }
-        seen[index] = true;
-        const auto& node = tree.nodes[index];
-        const std::string name = lower(node.name);
-        auto t = node.translation;
-        auto q = node.rotation;
-        if (const auto it = translations.find(name); it != translations.end()) {
-            t = it->second;
-        }
-        if (const auto it = rotations.find(name); it != rotations.end()) {
-            q = it->second;
-        }
-        const Transform world = parent * Transform::of(t, q);
-        if (node.kind == sg::SceneNode::Kind::Transform && !name.empty()) {
-            pose.try_emplace(name, world);
-        }
-        for (const auto c : node.children) {
-            self(self, c, world, depth + 1);
-        }
-    };
-    if (!tree.nodes.empty()) {
-        walk(walk, 0, Transform{}, 0);
     }
     return pose;
 }

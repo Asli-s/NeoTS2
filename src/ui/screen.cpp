@@ -26,9 +26,23 @@ Screen::Screen(content::UiData& data, Fonts& fonts) : data_(data), fonts_(fonts)
 }
 
 int Screen::texture(tga::Pixels pixels) {
-    textures_.push_back(std::move(pixels));
-    changed_.push_back(static_cast<int>(textures_.size()) - 1);
-    return static_cast<int>(textures_.size()) - 1;
+    int index = static_cast<int>(textures_.size());
+    if (!freeTextures_.empty()) {
+        index = freeTextures_.back();
+        freeTextures_.pop_back();
+        textures_[static_cast<std::size_t>(index)] = std::move(pixels);
+    } else {
+        textures_.push_back(std::move(pixels));
+    }
+    changed_.push_back(index);
+    return index;
+}
+
+void Screen::release(int texture) {
+    if (texture >= 0 && texture != white_) {
+        textures_[static_cast<std::size_t>(texture)] = {};
+        freeTextures_.push_back(texture);
+    }
 }
 
 int Screen::add(const ui::Window& source, int parent) {
@@ -68,10 +82,12 @@ int Screen::add(const ui::Window& source, int parent) {
         w.imageRect = {static_cast<int>(rect[0]), static_cast<int>(rect[1]), static_cast<int>(rect[2]), static_cast<int>(rect[3])};
     }
     w.edge = source.flag("edgeimage");
+    w.toggle = source.text("style") == "toggle";
     const auto res = source.list("captionres");
     if (res.size() == 2 && res[0] != 0) {
         w.text = data_.text(static_cast<std::uint32_t>(res[0]), static_cast<std::uint32_t>(res[1]));
-    } else if (w.kind == Kind::Text) {
+    } else if (w.kind == Kind::Text || w.kind == Kind::Rect) {
+        // A flat rectangle's caption isn't drawn; some name the window their panel anchors to.
         w.text = source.text("caption");
     } else if (w.kind == Kind::TextEdit) {
         w.text = source.text("initvalue");
@@ -92,8 +108,14 @@ int Screen::add(const ui::Window& source, int parent) {
                                                     : source.text("tiptext");
     }
 
-    const int index = static_cast<int>(windows_.size());
-    windows_.push_back(std::move(w));
+    int index = static_cast<int>(windows_.size());
+    if (!freeWindows_.empty()) {
+        index = freeWindows_.back();
+        freeWindows_.pop_back();
+        windows_[static_cast<std::size_t>(index)] = std::move(w);
+    } else {
+        windows_.push_back(std::move(w));
+    }
     if (parent >= 0) {
         windows_[static_cast<std::size_t>(parent)].children.push_back(index);
     }
@@ -225,6 +247,32 @@ void Screen::setChecked(int window, bool checked) {
     }
 }
 
+void Screen::remove(int window) {
+    if (window < 0) {
+        return;
+    }
+    // The windows inside first (each takes itself out of this one's children).
+    for (const int child : std::vector<int>(windows_[static_cast<std::size_t>(window)].children)) {
+        remove(child);
+    }
+    Window& w = windows_[static_cast<std::size_t>(window)];
+    release(w.textImage);
+    release(w.tipImage);
+    if (w.ownImage) {
+        release(w.image);
+    }
+    std::vector<int>& siblings = w.parent >= 0 ? windows_[static_cast<std::size_t>(w.parent)].children : roots_;
+    siblings.erase(std::remove(siblings.begin(), siblings.end(), window), siblings.end());
+    for (int* held : {&pressed_, &modal_, &hover_}) {
+        if (*held == window) {
+            *held = -1;
+        }
+    }
+    w = Window{};
+    w.visible = false;
+    freeWindows_.push_back(window);
+}
+
 void Screen::setVisible(int window, bool visible) {
     if (window >= 0) {
         windows_[static_cast<std::size_t>(window)].visible = visible;
@@ -276,6 +324,8 @@ void Screen::setImage(int window, tga::Pixels pixels) {
 std::vector<int> Screen::takeChangedTextures() {
     std::vector<int> out;
     out.swap(changed_);
+    // Pictures freed since they changed have nothing left to draw.
+    out.erase(std::remove_if(out.begin(), out.end(), [&](int t) { return textures_[static_cast<std::size_t>(t)].width == 0; }), out.end());
     return out;
 }
 
@@ -353,6 +403,7 @@ int Screen::parent(int window) const {
 void Screen::setTip(int window, const std::string& text) {
     if (window >= 0 && windows_[static_cast<std::size_t>(window)].tip != text) {
         windows_[static_cast<std::size_t>(window)].tip = text;
+        release(windows_[static_cast<std::size_t>(window)].tipImage);  // drawn again with the new text
         windows_[static_cast<std::size_t>(window)].tipImage = -1;
     }
 }
@@ -428,7 +479,12 @@ void Screen::emit(int index, std::vector<Quad>& out) const {
         const auto& img = textures_[static_cast<std::size_t>(w.image)];
         const float iw = static_cast<float>(img.width), ih = static_cast<float>(img.height);
         if (w.kind == Kind::Button) {
-            const int frame = kButtonFrame[static_cast<int>(w.checked && w.state != ButtonState::Disabled ? ButtonState::Pressed : w.state)];
+            // Holding a toggle button down shows it hovered; it looks pressed only while checked.
+            ButtonState look = w.toggle && w.state == ButtonState::Pressed ? ButtonState::Hover : w.state;
+            if (w.checked && look != ButtonState::Disabled) {
+                look = ButtonState::Pressed;
+            }
+            const int frame = kButtonFrame[static_cast<int>(look)];
             out.push_back({x0, y0, x1, y1, static_cast<float>(frame) / 4, 0, static_cast<float>(frame + 1) / 4, 1, w.image});
         } else if (w.edge) {
             // Corners kept, edges and middle stretched: the image in thirds.
@@ -444,6 +500,9 @@ void Screen::emit(int index, std::vector<Quad>& out) const {
             // Part of the image (one frame of the plumbob's animation strip), drawn at the window's size
             // from the image's top left: not known yet.
             out.push_back({x0, y0, x1, y1, 0, 0, static_cast<float>(w.w) / iw, static_cast<float>(w.h) / ih, w.image});
+        } else if (w.kind == Kind::Bitmap && !w.ownImage) {
+            // A script's bitmap is drawn at its own size, whatever the window's size.
+            out.push_back({x0, y0, x0 + iw, y0 + ih, 0, 0, 1, 1, w.image});
         } else {
             out.push_back({x0, y0, x1, y1, 0, 0, 1, 1, w.image});
         }

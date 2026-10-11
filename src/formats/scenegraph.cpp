@@ -1,6 +1,7 @@
 #include "formats/scenegraph.hpp"
 
 #include "formats/binary_reader.hpp"
+#include "formats/tga.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -233,6 +234,88 @@ ResourceNode parseResourceNode(std::span<const std::uint8_t> data) {
     return rn;
 }
 
+namespace {
+
+// Limits for data lists, which files nest and size freely: how deep lists may nest (each level is a
+// call), and how many values one resource may hold in all (each costs far more memory than its bytes).
+constexpr int kMaxDataListDepth = 16;
+constexpr std::size_t kMaxDataValues = 1u << 16;
+
+DataValue dataValue(BinaryReader& r, int depth, std::size_t& budget) {
+    if (depth > kMaxDataListDepth) {
+        fail("data list too deep");
+    }
+    if (budget == 0) {
+        fail("too many data values");
+    }
+    --budget;
+    DataValue v;
+    v.type = static_cast<DataValue::Type>(r.u8());
+    v.name = string(r);
+    auto floats = [&](int n) {
+        for (int i = 0; i < n; ++i) {
+            v.floats.push_back(std::bit_cast<float>(r.u32()));
+        }
+    };
+    switch (v.type) {
+    case DataValue::Type::Int: v.integer = static_cast<std::int32_t>(r.u32()); break;
+    case DataValue::Type::Float: floats(1); break;
+    case DataValue::Type::Vector: floats(3); break;
+    case DataValue::Type::Rotation: floats(4); break;
+    case DataValue::Type::String: v.text = string(r); break;
+    case DataValue::Type::Bytes: {
+        const auto bytes = r.bytes(byteCount(r));
+        v.bytes.assign(bytes.begin(), bytes.end());
+        break;
+    }
+    case DataValue::Type::List: {
+        const std::size_t n = count(r, 3);  // the smallest value (an empty string) takes 3 bytes
+        v.items.reserve(std::min(n, budget));
+        for (std::size_t i = 0; i < n; ++i) {
+            v.items.push_back(dataValue(r, depth + 1, budget));
+        }
+        break;
+    }
+    default: fail("unknown data value type " + std::to_string(static_cast<int>(v.type)));
+    }
+    return v;
+}
+
+} // namespace
+
+const DataValue* DataValue::find(std::string_view itemName) const {
+    for (const auto& item : items) {
+        if (item.name == itemName) {
+            return &item;
+        }
+    }
+    return nullptr;
+}
+
+std::vector<DataValue> parseDataLists(std::span<const std::uint8_t> data) {
+    constexpr std::uint32_t kDataList = 0x6A836D56;
+    BinaryReader header(data);
+    const Container container = readContainer(header);
+    std::vector<DataValue> lists;
+    std::size_t budget = kMaxDataValues;
+    std::size_t at = data.size() - header.remaining();
+    for (const std::uint32_t type : container.blockTypes) {
+        if (type != kDataList) {
+            continue;
+        }
+        const auto start = findBlock(data, at, type);
+        if (!start) {
+            break;
+        }
+        BinaryReader r(data.subspan(*start));
+        blockHeader(r, "cDataListExtension");
+        blockHeader(r, "cExtension");
+        lists.push_back(dataValue(r, 0, budget));
+        at = *start + (data.subspan(*start).size() - r.remaining());
+    }
+    return lists;
+}
+
 const Element* Mesh::find(const ElementLink& link, std::uint32_t identity) const {
     for (const std::uint16_t i : link.elements) {
         if (i < elements.size() && elements[i].identity == identity) {
@@ -463,26 +546,42 @@ LevelInfo parseLevelInfo(std::span<const std::uint8_t> data) {
 }
 
 SceneObject parseSceneObject(std::span<const std::uint8_t> data) {
-    static constexpr std::string_view kClass = "" "cObject";
-    const auto at = std::search(data.begin(), data.end(), kClass.begin(), kClass.end());
-    if (at == data.end()) {
+    // The cObject block: its type id, version and class name, found wherever the record put it.
+    static constexpr std::uint8_t kHeader[] = {0xF7, 0x39, 0x1C, 0xFA};
+    static constexpr std::string_view kClass = "\x07" "cObject";
+    std::size_t block = data.size();
+    for (std::size_t i = 0; i + 8 + kClass.size() <= data.size(); ++i) {
+        if (std::equal(std::begin(kHeader), std::end(kHeader), data.begin() + static_cast<std::ptrdiff_t>(i)) &&
+            std::equal(kClass.begin(), kClass.end(), data.begin() + static_cast<std::ptrdiff_t>(i + 8))) {
+            block = i;
+            break;
+        }
+    }
+    if (block == data.size()) {
         fail("no cObject block");
     }
-    BinaryReader r(data.subspan(static_cast<std::size_t>(at - data.begin()) + kClass.size()));
+    BinaryReader r(data.subspan(block + 4));
+    const std::uint32_t version = r.u32();
+    r.skip(kClass.size());
     SceneObject o;
     o.model = string(r);
     if (o.model.empty()) {
         return o;
     }
-    r.u32();
-    string(r);
-    r.u32();
-    const std::size_t overrides = count(r, 2);
-    for (std::size_t i = 0; i < overrides; ++i) {
-        MaterialOverride m;
-        m.material = string(r);
-        m.group = string(r);
-        o.overrides.push_back(std::move(m));
+    const std::size_t entries = count(r, 5);
+    for (std::size_t e = 0; e < entries; ++e) {
+        string(r);
+        r.u32();
+        if (version < 0x11) {
+            continue;  // overrides came with version 0x11
+        }
+        const std::size_t overrides = count(r, 2);
+        for (std::size_t i = 0; i < overrides; ++i) {
+            MaterialOverride m;
+            m.material = string(r);
+            m.group = string(r);
+            o.overrides.push_back(std::move(m));
+        }
     }
     return o;
 }
@@ -522,6 +621,9 @@ std::array<std::array<std::uint8_t, 4>, 4> dxtColors(const std::uint8_t* block, 
 
 std::vector<std::uint8_t> decodeRgba(std::span<const std::uint8_t> data, std::uint32_t width, std::uint32_t height,
                                      std::uint32_t format) {
+    if (width > tga::kMaxSide || height > tga::kMaxSide) {
+        fail("texture size " + std::to_string(width) + " x " + std::to_string(height) + " too large");
+    }
     std::vector<std::uint8_t> out(static_cast<std::size_t>(width) * height * 4, 255);
     auto pixel = [&](std::uint32_t x, std::uint32_t y) { return out.data() + (static_cast<std::size_t>(y) * width + x) * 4; };
     if (format == 4 || format == 5 || format == 8) {

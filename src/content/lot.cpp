@@ -2,6 +2,8 @@
 
 #include "formats/dbpf.hpp"
 #include "formats/resource_types.hpp"
+#include "formats/scenegraph.hpp"
+#include "formats/simi.hpp"
 
 #include <algorithm>
 #include <exception>
@@ -40,6 +42,12 @@ Lot loadLot(const std::filesystem::path& path) {
         } else if (e.key.type == types::kWallGraph &&
                    std::ranges::find(kLayerGraphInstances, e.key.instance) != std::end(kLayerGraphInstances)) {
             lot.layerGraphs.insert_or_assign(e.key.instance, wallgraph::parse(package.read(e)));
+        } else if (e.key.type == types::kSceneObject) {
+            try {
+                lot.objectModels[e.key.instance] = scenegraph::parseSceneObject(package.read(e)).model;
+            } catch (const std::exception& ex) {
+                lot.problems.push_back({e.key.instance, std::string("scene object: ") + ex.what()});
+            }
         } else if (e.key.type == types::kDataTables) {
             try {
                 lot.dataTables.emplace(e.key.instance, datatables::parse(package.read(e)));
@@ -83,6 +91,12 @@ Lot loadLot(const std::filesystem::path& path) {
                 lot.fencePosts = fencepostlayer::parse(package.read(e));
             } catch (const std::exception& ex) {
                 lot.problems.push_back({e.key.instance, std::string("fence posts: ") + ex.what()});
+            }
+        } else if (e.key.type == simi::kType) {
+            try {
+                lot.globals = simi::parse(package.read(e)).globals;
+            } catch (const std::exception& ex) {
+                lot.problems.push_back({e.key.instance, std::string("simulator state: ") + ex.what()});
             }
         } else if (e.key.type == types::kRoofs) {
             try {

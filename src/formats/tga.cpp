@@ -12,7 +12,8 @@ std::optional<Pixels> decode(std::span<const std::uint8_t> data) {
     const std::uint8_t bits = data[16], descriptor = data[17];
     const bool rle = kind == 10 || kind == 11;
     const bool gray = kind == 3 || kind == 11;
-    if (mapType != 0 || !(kind == 2 || kind == 3 || rle) || width == 0 || height == 0) {
+    if (mapType != 0 || !(kind == 2 || kind == 3 || rle) || width == 0 || height == 0 || width > kMaxSide ||
+        height > kMaxSide) {
         return std::nullopt;
     }
     if (gray ? bits != 8 : (bits != 24 && bits != 32)) {
@@ -21,12 +22,19 @@ std::optional<Pixels> decode(std::span<const std::uint8_t> data) {
     const std::size_t bytes = bits / 8u;
     const std::size_t count = static_cast<std::size_t>(width) * height;
     std::size_t at = 18u + idLength;
+    if (at > data.size()) {
+        return std::nullopt;
+    }
+    // Memory is set aside only for as many pixels as the data can hold: run-length packets turn at
+    // least 1 + `bytes` bytes into at most 128 pixels.
+    const std::size_t left = data.size() - at;
+    const std::size_t room = rle ? (left / (1 + bytes) + 1) * 128 : left / bytes;
+    if (count > room) {
+        return std::nullopt;
+    }
     std::vector<std::uint8_t> raw;  // pixels in file order, `bytes` each
     raw.reserve(count * bytes);
     if (!rle) {
-        if (data.size() < at + count * bytes) {
-            return std::nullopt;
-        }
         raw.assign(data.begin() + static_cast<std::ptrdiff_t>(at), data.begin() + static_cast<std::ptrdiff_t>(at + count * bytes));
     } else {
         while (raw.size() < count * bytes) {

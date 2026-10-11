@@ -1,6 +1,7 @@
 #include "formats/image.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <vector>
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -8,6 +9,7 @@
 #define STBI_ONLY_JPEG
 #define STBI_ONLY_BMP
 #define STBI_NO_STDIO
+#define STBI_MAX_DIMENSIONS 16384  // tga::kMaxSide
 #include "stb_image.h"
 
 namespace ts2::image {
@@ -57,6 +59,9 @@ std::optional<tga::Pixels> decode(std::span<const std::uint8_t> data) {
                                             (data[0] == 'B' && data[1] == 'M'));
     if (!other) {
         return tga::decode(data);
+    }
+    if (data.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        return std::nullopt;
     }
     int w = 0, h = 0, n = 0;
     stbi_uc* pixels = stbi_load_from_memory(data.data(), static_cast<int>(data.size()), &w, &h, &n, 4);

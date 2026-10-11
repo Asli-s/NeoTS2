@@ -93,6 +93,17 @@ int SceneBuilder::posedModel(const std::string& name, const std::vector<sg::Mate
     return models_[key] = buildModel(name, overrides, &pose);
 }
 
+int SceneBuilder::skinnedModel(const std::string& name, const std::vector<sg::MaterialOverride>& overrides) {
+    std::string key = lower(name) + "|skinned";
+    for (const auto& o : overrides) {
+        key += "|" + lower(o.group) + "=" + lower(o.material);
+    }
+    if (const auto it = models_.find(key); it != models_.end()) {
+        return it->second;
+    }
+    return models_[key] = buildModel(name, overrides, nullptr, true);
+}
+
 const Transform* SceneBuilder::bone(const std::string& model, const std::string& node) const {
     const auto m = bones_.find(lower(model));
     if (m == bones_.end()) {
@@ -539,9 +550,77 @@ void skin(const sg::Mesh& mesh, const sg::ElementLink& link, const sg::Group& gr
     }
 }
 
+// Gives a mesh group's vertices their joints and weights for skinning when drawn: up to four joints
+// each (three weights stored, the fourth what is left), as entries of the mesh's skin (`skin`,
+// added to as needed; `placement` is where the group's shape sits). Weights of joints the model
+// doesn't name are dropped and the rest scaled up to one; a vertex left without any follows no
+// joint. Returns false (and adds nothing) when the group has no skinning data.
+bool skinData(const sg::Mesh& mesh, const sg::ElementLink& link, const sg::Group& group, const std::map<int, std::string>& joints,
+              const std::map<std::string, Transform>& rests, const Transform& placement, std::vector<SkinJoint>& skin,
+              Primitive& p) {
+    const std::size_t vertices = p.positions.size() / 3;
+    const sg::Element* indices = mesh.find(link, sg::kBlendIndices);
+    const sg::Element* weightElement = mesh.find(link, sg::kBlendWeights);
+    if (indices == nullptr || weightElement == nullptr || group.bones.empty() || indices->data.size() < vertices * 4 ||
+        !link.aliases[0].empty()) {
+        return false;
+    }
+    const std::vector<float> weights = sg::floats(*weightElement);
+    const std::size_t perVertex = weights.size() / std::max<std::size_t>(vertices, 1);
+    auto entry = [&](const std::string& joint, const Transform& inverseBind) {
+        for (std::size_t i = 0; i < skin.size(); ++i) {
+            if (skin[i].joint == joint && skin[i].inverseBind.m == inverseBind.m && skin[i].placement.m == placement.m) {
+                return static_cast<int>(i);
+            }
+        }
+        if (skin.size() >= 255) {
+            return -1;
+        }
+        const auto rest = rests.find(joint);
+        skin.push_back({joint, inverseBind, placement, rest != rests.end() ? std::optional(rest->second) : std::nullopt});
+        return static_cast<int>(skin.size() - 1);
+    };
+    // The group's joints as skin entries.
+    std::vector<int> entries(group.bones.size(), -1);
+    for (std::size_t b = 0; b < group.bones.size(); ++b) {
+        const std::uint16_t j = group.bones[b];
+        const auto name = joints.find(j);
+        if (j < mesh.inverseBinds.size() && name != joints.end()) {
+            const auto& inverse = mesh.inverseBinds[j];
+            entries[b] = entry(name->second, Transform::of(inverse.translation, inverse.rotation));
+        }
+    }
+    p.joints.assign(vertices * 4, 255);
+    p.weights.assign(vertices * 4, 0.0f);
+    for (std::size_t v = 0; v < vertices; ++v) {
+        float used = 0, left = 1;
+        for (std::size_t k = 0; k < 4; ++k) {
+            const std::uint8_t b = indices->data[v * 4 + k];
+            const float w = k < perVertex ? weights[v * perVertex + k] : left;
+            left -= k < perVertex ? w : 0;
+            if (b == 0xFF || b >= entries.size() || entries[b] < 0 || w <= 0) {
+                continue;
+            }
+            p.joints[v * 4 + k] = static_cast<std::uint8_t>(entries[b]);
+            p.weights[v * 4 + k] = w;
+            used += w;
+        }
+        if (used > 0) {
+            for (std::size_t k = 0; k < 4; ++k) {
+                p.weights[v * 4 + k] /= used;
+            }
+        } else if (const int none = entry("", Transform{}); none >= 0) {
+            p.joints[v * 4] = static_cast<std::uint8_t>(none);
+            p.weights[v * 4] = 1;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
-int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::MaterialOverride>& overrides, const Pose* pose) {
+int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::MaterialOverride>& overrides, const Pose* pose,
+                             bool skinned) {
     const auto cres = assets_.byName(kCres, name + "_cres");
     if (!cres) {
         ++missingModels;
@@ -556,11 +635,13 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
         ++missingModels;
         return -1;
     }
-    // The model's joints by the index meshes skin to.
+    // The model's joints by the index meshes skin to, and each joint's rest place in the model.
     std::map<int, std::string> joints;
+    std::map<std::string, Transform> rests;
     for (const auto& n : tree.nodes) {
         if (n.kind == sg::SceneNode::Kind::Transform && n.joint >= 0 && n.joint < 0x7FFFFFFF) {
             joints.emplace(n.joint, lower(n.name));
+            rests.try_emplace(lower(n.name), Transform::of(n.translation, n.rotation));
         }
     }
     std::vector<Transform> world(tree.nodes.size());
@@ -695,11 +776,15 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
                 if (pose != nullptr) {
                     skin(*data, link, group, joints, *pose, p.positions, p.normals);
                 }
-                for (std::size_t i = 0; i + 2 < p.positions.size(); i += 3) {
-                    xf.apply(&p.positions[i], true);
+                // A skinned group is placed by its joints' matrices when drawn.
+                const bool placed = skinned && skinData(*data, link, group, joints, rests, xf, mesh.skin, p);
+                if (!placed) {
+                    for (std::size_t i = 0; i + 2 < p.positions.size(); i += 3) {
+                        xf.apply(&p.positions[i], true);
+                    }
                 }
                 if (p.normals.size() == p.positions.size()) {
-                    for (std::size_t i = 0; i + 2 < p.normals.size(); i += 3) {
+                    for (std::size_t i = 0; !placed && i + 2 < p.normals.size(); i += 3) {
                         xf.apply(&p.normals[i], false);
                     }
                 } else {

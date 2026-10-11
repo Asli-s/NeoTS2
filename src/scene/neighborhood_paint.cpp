@@ -232,8 +232,9 @@ TerrainPaints paintTerrain(const nhood::Terrain& t, const nhood::PaintRules& rul
                     }
                     continue;
                 }
-                const float radius = p.spread.empty() ? 0 : p.spread.back().first;
-                const int cells = static_cast<int>(std::ceil(radius * 0.1f));
+                const float radius = p.spread.empty() || !std::isfinite(p.spread.back().first) ? 0 : p.spread.back().first;
+                // No further than across the whole terrain, whatever the rules say.
+                const int cells = static_cast<int>(std::min<double>(std::ceil(radius * 0.1), std::max(cols, rows)));
                 const int x0 = std::max(0, static_cast<int>(x) - cells), x1 = std::min(static_cast<int>(cols) - 1, static_cast<int>(x) + cells);
                 const int y0 = std::max(0, static_cast<int>(y) - cells), y1 = std::min(static_cast<int>(rows) - 1, static_cast<int>(y) + cells);
                 for (int yy = y0; yy <= y1; ++yy) {
@@ -265,6 +266,9 @@ TerrainPaints paintTerrain(const nhood::Terrain& t, const nhood::PaintRules& rul
             unsigned sum = 0;
             for (int i = 0; i < 3 && v.id[i] != 0; ++i) {
                 sum += v.weight[i];
+            }
+            if (sum == 0) {
+                continue;
             }
             for (int i = 0; i < 3 && v.id[i] != 0; ++i) {
                 v.weight[i] = static_cast<std::uint16_t>(v.weight[i] * 250u / sum);

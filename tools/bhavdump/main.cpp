@@ -759,6 +759,42 @@ int search(ResourceIndex& index, std::string_view text) {
     return 0;
 }
 
+// Lists every expression whose left side is object data `field` (the object's own or the stack
+// object's), to find which scripts set a flag.
+int writes(ResourceIndex& index, std::uint16_t field) {
+    const Catalog catalog = buildCatalog(index);
+    std::size_t hits = 0;
+    for (const auto& r : index.resources()) {
+        const auto& e = r.entry;
+        if (e.key.type != ts2::types::kBehavior) {
+            continue;
+        }
+        Behavior b;
+        try {
+            b = ts2::bhav::parse(index.read(r));
+        } catch (const std::exception&) {
+            continue;
+        }
+        const BehaviorContext ctx{catalog, e.key.group, e.key.instance >= 0x2000};
+        for (std::size_t i = 0; i < b.instructions.size(); ++i) {
+            const auto& in = b.instructions[i];
+            if (in.opcode != ts2::bhav::kExpressionOpcode) {
+                continue;
+            }
+            const auto x = ts2::bhav::decodeExpression(in);
+            if ((x.lhsOwner != 0x03 && x.lhsOwner != 0x04) || x.lhsData != field) {
+                continue;
+            }
+            const auto objIt = catalog.objectNames.find(e.key.group);
+            std::printf("0x%08X 0x%04X %3zu  %-36s [%s]  %s\n", e.key.group, e.key.instance, i, b.name.c_str(),
+                        objIt != catalog.objectNames.end() ? objIt->second.c_str() : "", expressionText(in, ctx).c_str());
+            ++hits;
+        }
+    }
+    std::printf("%zu expressions\n", hits);
+    return 0;
+}
+
 int show(ResourceIndex& index, std::uint32_t group, std::uint32_t instance) {
     const Catalog catalog = buildCatalog(index);
     for (const auto& r : index.resources()) {
@@ -842,6 +878,9 @@ int main(int argc, char** argv) {
         }
         if (mode == "--search" && argc >= 4) {
             return search(index, argv[3]);
+        }
+        if (mode == "--writes" && argc >= 4) {
+            return writes(index, static_cast<std::uint16_t>(std::stoul(argv[3], nullptr, 0)));
         }
         if (mode == "--show" && argc >= 5) {
             return show(index, static_cast<std::uint32_t>(std::stoul(argv[3], nullptr, 0)),

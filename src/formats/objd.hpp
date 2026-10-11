@@ -12,6 +12,7 @@ namespace field {
 constexpr std::size_t kInteractionTableId = 0x07;
 constexpr std::size_t kType = 0x09;
 constexpr std::size_t kMultiTileMasterId = 0x0A;
+constexpr std::size_t kMultiTileSubIndex = 0x0B;  // 0xFFFF for the master; parts: (x << 8) | y
 constexpr std::size_t kGuid1 = 0x0E;
 constexpr std::size_t kGuid2 = 0x0F;
 constexpr std::size_t kPrice = 0x12;

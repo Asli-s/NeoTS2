@@ -2,6 +2,8 @@
 // it opens.
 #include "menu.hpp"
 #include "neighborhood.hpp"
+#include "lot_life.hpp"
+#include "lot_ui.hpp"
 #include "lot_view.hpp"
 #include "neighborhood_ui.hpp"
 #include "orbit.hpp"
@@ -249,6 +251,15 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
         ts2::scene::Scene lot;
         bool inLot = false;
         app::LotView lotView;
+        // The lot's Sims, run by their own scripts and posed each frame (from when the lot was shown,
+        // without a simulation).
+        Uint64 lotShown = 0;
+        std::future<std::unique_ptr<ts2::sim::LotSimulation>> lotSimBuilding;  // built beside the lot's scene
+        std::unique_ptr<app::LotLife> lotLife;
+        ts2::scene::ScenePose lotPose;
+        // The live-mode panels over the lot; the options menu pauses the game while it's open.
+        app::LotUi lotUi(screen, width, height);
+        bool pausedBeforeOptions = false;
         float downX = 0, downY = 0;
         app::Orbit orbit;
         app::NeighborhoodUi hoodUi(screen, data, width, height);
@@ -310,6 +321,24 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
             renderer.setSprites(upload);
             renderer.showSprites(sprites(screen, static_cast<double>(SDL_GetTicksNS()) / 1e9), inNeighborhood || inLot);
         };
+        // Whether a background job is still running (a finished one can be replaced without waiting).
+        auto loading = [](const auto& job) { return job.valid() && job.wait_for(std::chrono::seconds(0)) != std::future_status::ready; };
+        // A background job's result once it's done. One that failed (a broken lot or neighborhood file)
+        // is reported and leaves everything as it was; taking a picture, it ends the program instead.
+        auto finished = [&]<typename T>(std::future<T>& job, const char* what) -> std::optional<T> {
+            if (!job.valid() || loading(job)) {
+                return std::nullopt;
+            }
+            try {
+                return job.get();
+            } catch (const std::exception& ex) {
+                std::fprintf(stderr, "couldn't load the %s: %s\n", what, ex.what());
+                if (!options.shot.empty()) {
+                    throw;
+                }
+                return std::nullopt;
+            }
+        };
         // Builds the chosen neighborhood in the background; it shows once built.
         auto open = [&] {
             if (building.valid()) {
@@ -342,6 +371,7 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
             }
             const ts2::scene::Scene* hoodScene = &hood.scene;
             const std::string terrainType = hood.stats.terrainType;
+            lotSimBuilding = std::async(std::launch::async, [install, file] { return app::loadSimulation(install, file); });
             lotBuilding = std::async(std::launch::async, [assets, file, install, footprint, hoodScene, terrainType] {
                 LotBuilt built;
                 {
@@ -379,6 +409,61 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
             }
             std::printf("wrote %s\n", options.shot.string().c_str());
         }
+        // Back to the neighborhood, as it was.
+        auto leaveLot = [&] {
+            inLot = false;
+            lot = {};
+            lotLife.reset();
+            lotUi.close();
+            renderer.upload(hood.scene);
+            orbit = hoodOrbit;
+            screen.setVisible(hoodUi.root(), true);
+            inNeighborhood = true;
+        };
+        // The game's live-mode keys: P, Pause, ` or 0 on the number pad pause; 1, 2 and 3 pick a
+        // speed; F5 opens the options.
+        auto lotKey = [&](SDL_Keycode key) {
+            using Action = app::LotUi::Action;
+            switch (key) {
+            case SDLK_P:
+            case SDLK_PAUSE:
+            case SDLK_GRAVE:
+            case SDLK_KP_0: return Action::Pause;
+            case SDLK_1:
+            case SDLK_KP_1: return Action::Normal;
+            case SDLK_2:
+            case SDLK_KP_2: return Action::High;
+            case SDLK_3:
+            case SDLK_KP_3: return Action::Ultra;
+            case SDLK_F5:
+                lotUi.showOptions(!lotUi.optionsShown());
+                return lotUi.optionsShown() ? Action::OptionsOpened : Action::OptionsClosed;
+            default: return Action::None;
+            }
+        };
+        auto lotAction = [&](app::LotUi::Action action) {
+            using Action = app::LotUi::Action;
+            if (action == Action::Neighborhood) {
+                leaveLot();
+                return;
+            }
+            if (!lotLife) {
+                return;
+            }
+            switch (action) {
+            case Action::Pause: lotLife->setPaused(!lotLife->paused()); break;
+            case Action::Normal: lotLife->setSpeed(ts2::sim::Speed::Normal); break;
+            case Action::High: lotLife->setSpeed(ts2::sim::Speed::High); break;
+            case Action::Ultra: lotLife->setSpeed(ts2::sim::Speed::Ultra); break;
+            case Action::OptionsOpened:
+                pausedBeforeOptions = lotLife->paused();
+                lotLife->setPaused(true);
+                break;
+            case Action::OptionsClosed: lotLife->setPaused(pausedBeforeOptions); break;
+            default: break;
+            }
+        };
+
         bool running = options.shot.empty() || building.valid();
         bool down = false;
         Uint64 lastFrame = SDL_GetTicksNS();
@@ -386,17 +471,15 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
             SDL_Event e;
             while (SDL_PollEvent(&e)) {
                 if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE && inLot) {
-                    // Back to the neighborhood, as it was.
-                    inLot = false;
-                    lot = {};
-                    renderer.upload(hood.scene);
-                    orbit = hoodOrbit;
-                    screen.setVisible(hoodUi.root(), true);
-                    inNeighborhood = true;
+                    leaveLot();
                 } else if (e.type == SDL_EVENT_QUIT || (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE)) {
                     running = false;
                 } else if (e.type == SDL_EVENT_KEY_DOWN && inLot) {
-                    lotView.key(e.key.key, orbit);
+                    if (const auto action = lotKey(e.key.key); action != app::LotUi::Action::None) {
+                        lotAction(action);
+                    } else {
+                        lotView.key(e.key.key, orbit);
+                    }
                 } else if (e.type == SDL_EVENT_MOUSE_WHEEL && (inNeighborhood || inLot)) {
                     app::orbitEvent(orbit, e);
                 } else if (e.type == SDL_EVENT_MOUSE_MOTION || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_UP) {
@@ -409,7 +492,9 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
                     } else if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_LEFT) {
                         down = false;
                         // A click (not a drag) on the neighborhood enters the lot under it.
-                        if (inNeighborhood && !lotBuilding.valid() && std::abs(x - downX) < 4 && std::abs(y - downY) < 4 &&
+                        // Not while a lot (or the last one's Sims) is still loading.
+                        if (inNeighborhood && !lotBuilding.valid() && !loading(lotSimBuilding) && std::abs(x - downX) < 4 &&
+                            std::abs(y - downY) < 4 &&
                             !screen.over(static_cast<int>(x), static_cast<int>(y))) {
                             // Only a lot a household lives on can be played.
                             const auto id = lotAt(orbit.camera(), width, height, x, y, hood.stats.lotFootprints);
@@ -420,7 +505,12 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
                         }
                     }
                     if (inLot) {
-                        app::orbitEvent(orbit, e);
+                        if (!screen.over(static_cast<int>(x), static_cast<int>(y))) {
+                            app::orbitEvent(orbit, e);
+                        }
+                        if (const auto clicked = screen.mouse(static_cast<int>(x), static_cast<int>(y), down, static_cast<double>(SDL_GetTicksNS()) / 1e9)) {
+                            lotAction(lotUi.clicked(*clicked));
+                        }
                         continue;
                     }
                     if (inNeighborhood && !screen.over(static_cast<int>(x), static_cast<int>(y))) {
@@ -431,7 +521,8 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
                         std::printf("clicked 0x%08x\n", id);
                         const auto tile = std::find(tiles.begin(), tiles.end(), screen.parent(*clicked));
                         if (inNeighborhood) {
-                            if (hoodUi.clicked(*clicked)) {
+                            // Back to the menu, but not while a lot is loading: it reads this neighborhood.
+                            if (hoodUi.clicked(*clicked) && !lotBuilding.valid()) {
                                 inNeighborhood = false;
                                 hoodUi.close();
                                 screen.setVisible(menu, true);
@@ -462,8 +553,11 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
                 }
             }
             // A neighborhood finished building: show it with its panel, the menu put away.
-            if (building.valid() && building.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-                hood = building.get();
+            if (auto opened = finished(building, "neighborhood")) {
+                hood = std::move(*opened);
+                // Nothing else uses the assets now (no lot loads while a neighborhood does), so the
+                // problems noted while loading the last neighborhood can go.
+                assets.get()->warnings.clear();
                 std::printf("neighborhood %u x %u tiles, %zu lots, %zu plants\n", hood.stats.width, hood.stats.height, hood.stats.imposters,
                             hood.stats.plantsShown);
                 renderer.upload(hood.scene);
@@ -492,8 +586,8 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
                 }
             }
             // A lot finished building: show it instead of the neighborhood.
-            if (lotBuilding.valid() && lotBuilding.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-                LotBuilt built = lotBuilding.get();
+            if (auto done = finished(lotBuilding, "lot")) {
+                LotBuilt& built = *done;
                 lot = std::move(built.lot);
                 hoodOrbit = orbit;
                 lotView.start(lot, orbit);
@@ -506,8 +600,11 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
                     orbit.minFar = 2000;
                 }
                 renderer.upload(lot);
+                lotShown = SDL_GetTicksNS();
+
                 screen.setVisible(hoodUi.root(), false);
                 hoodUi.showBin(app::NeighborhoodUi::Bin::None);
+                lotUi.open();
                 inNeighborhood = false;
                 inLot = true;
             }
@@ -516,6 +613,18 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
                 app::orbitStep(orbit, std::min(0.1f, static_cast<float>(now - lastFrame) / 1e9f));
                 lotView.view.facing = orbit.facing();
                 renderer.show(ts2::scene::visibleInstances(lot, lotView.view));
+                // The Sims come to life once their simulation is built.
+                if (!lotLife) {
+                    if (auto sim = finished(lotSimBuilding, "lot's simulation"); sim && *sim) {
+                        lotLife = std::make_unique<app::LotLife>(std::move(*sim), *assets.get());
+                    }
+                }
+                if (lotLife) {
+                    lotLife->update(std::min(100.0, static_cast<double>(now - lastFrame) / 1e6), lot);
+                    lotUi.show(lotLife->clockText(), lotLife->speed(), lotLife->paused(), lotLife->funds());
+                    lotUi.showSim(lotLife->aspiration());
+                }
+                app::animateActors(lot, lotLife ? lotLife->seconds() : static_cast<double>(now - lotShown) / 1e9, renderer, lotPose);
             } else if (inNeighborhood) {
                 app::orbitStep(orbit, std::min(0.1f, static_cast<float>(now - lastFrame) / 1e9f));
                 renderer.setTime(static_cast<float>(static_cast<double>(now) / 1e9));
@@ -540,6 +649,9 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
                 SDL_Delay(16);
             }
         }
+        // Loads still running are waited for as they go out of scope; the window goes first so that
+        // quitting doesn't look frozen meanwhile.
+        SDL_HideWindow(window);
     }
     SDL_DestroyWindow(window);
     return 0;

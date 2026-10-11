@@ -4,6 +4,7 @@
 //          [--shot <out.png>]
 //   neots2 <install folder> <lot.package> [--shot <out.png> [yaw pitch distance]]
 //          [--walls up|cutaway|down] [--level n (1: the ground floor)] [--target x y z] [--roofs off]
+//          [--time seconds (into the Sims' animations, for --shot)]
 // Mouse: middle-drag turns, right-drag pans, the wheel zooms. Keys: WASD or arrows pan, Q/E or
 // comma/period turn a quarter, Z/X or +/- zoom, Page Up/Down change storey, 1/2/3 or Tab walls
 // up/cutaway/down, R roofs on/off. --shot draws one frame to a file and exits.
@@ -14,6 +15,7 @@
 #include "formats/nhood_paint_rules.hpp"
 #include "menu.hpp"
 #include "neighborhood.hpp"
+#include "lot_life.hpp"
 #include "lot_view.hpp"
 #include "orbit.hpp"
 #include "render/renderer.hpp"
@@ -65,6 +67,7 @@ struct Options {
     bool roofs = true;
     float fov = 0;  // degrees, up and down; 0 keeps the default
     int shotWidth = 1280, shotHeight = 800;
+    double time = 0;  // seconds into the Sims' animations a shot shows
 };
 
 bool parseOptions(int argc, char** argv, Options& o) {
@@ -105,6 +108,8 @@ bool parseOptions(int argc, char** argv, Options& o) {
             ++i;
         } else if (arg == "--level" && i + 1 < argc) {
             o.level = std::stoi(argv[++i]);
+        } else if (arg == "--time" && i + 1 < argc) {
+            o.time = std::stod(argv[++i]);
         } else {
             return false;
         }
@@ -184,6 +189,8 @@ int main(int argc, char** argv) {
         std::printf("loading the game's assets...\n");
         ts2::scene::Assets assets(utf8Path(argv[1]));
         ts2::scene::SceneBuilder builder(assets);
+        // A lot's Sims, run by their own scripts.
+        std::unique_ptr<app::LotLife> life;
         // A neighborhood's folder shows the neighborhood; a lot package, the lot.
         const bool hood = std::filesystem::is_directory(utf8Path(argv[2]));
         ts2::scene::NeighborhoodSceneStats hoodStats;
@@ -196,8 +203,11 @@ int main(int argc, char** argv) {
             const auto stats = ts2::scene::addLot(builder, utf8Path(argv[2]));
             std::printf("%zu objects, %zu walls, %zu roofs, %zu terrain paints\n", stats.objects, stats.walls, stats.roofs,
                         stats.terrainPaints);
+            if (auto sim = app::loadSimulation(utf8Path(argv[1]), utf8Path(argv[2]))) {
+                life = std::make_unique<app::LotLife>(std::move(sim), assets);
+            }
         }
-        const auto& scene = builder.scene();
+        auto& scene = builder.scene();
         const int top = ts2::scene::topLevel(scene);
 
         SDL_Window* window = SDL_CreateWindow("NeoTS2", 1280, 800,
@@ -210,6 +220,18 @@ int main(int argc, char** argv) {
             ts2::render::Renderer renderer(window, shaders);
             std::printf("drawing with %s\n", renderer.backend().c_str());
             renderer.upload(scene);
+            ts2::scene::ScenePose pose;
+            // A shot shows the lot `--time` seconds after it came to life.
+            for (double t = 0; life && t < options.time * 1000; t += 100) {
+                life->update(100, scene);
+            }
+            app::animateActors(scene, life ? life->seconds() : options.time, renderer, pose);
+            for (const auto& actor : scene.actors) {
+                if (actor.animation && actor.animation->animation) {
+                    std::printf("Sim %u plays %s\n", actor.object, actor.animation->animation->name.c_str());
+                }
+            }
+            const Uint64 started = SDL_GetTicksNS();
             Orbit orbit;
             app::frameScene(scene, orbit);
             if (hood) {
@@ -314,6 +336,10 @@ int main(int argc, char** argv) {
 
                 view.facing = orbit.facing();
                 renderer.show(ts2::scene::visibleInstances(scene, view));
+                if (life) {
+                    life->update(static_cast<double>(dt) * 1000, scene);
+                }
+                app::animateActors(scene, life ? life->seconds() : static_cast<double>(now - started) / 1e9, renderer, pose);
                 renderer.setTime(static_cast<float>(static_cast<double>(now) / 1e9));
                 if (!renderer.draw(orbit.camera())) {
                     SDL_Delay(16);

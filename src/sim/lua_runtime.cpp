@@ -32,8 +32,10 @@ constexpr std::int16_t kErrorParamOutOfRange = 8;
 constexpr std::int16_t kErrorLocalOutOfRange = 0x33;
 constexpr std::int16_t kErrorScriptCheck = 0x9B;
 
-// The script functions below stop a script by throwing ScriptStop; guarded() catches it and only
-// then calls lua_error (a longjmp), once no C++ object is left alive to be skipped over.
+// The script functions below stop a script by throwing ScriptStop; guarded() catches it (and any
+// other C++ exception, such as running out of memory) and only then calls lua_error (a longjmp),
+// once no C++ object is left alive to be skipped over. An exception must never cross Lua's own
+// frames: it would leave Lua's error handling pointing at frames that are gone.
 struct ScriptStop {
     char message[256];
 };
@@ -51,6 +53,10 @@ int guarded(lua_State* L) {
         return function(L);
     } catch (const ScriptStop& stop) {
         std::memcpy(message, stop.message, sizeof message);
+    } catch (const std::exception& ex) {
+        std::snprintf(message, sizeof message, "%s", ex.what());
+    } catch (...) {
+        std::snprintf(message, sizeof message, "%s", "unknown error in a script function");
     }
     lua_pushstring(L, message);
     return lua_error(L);
@@ -61,12 +67,55 @@ void pushGuarded(lua_State* L, lua_CFunction function) {
     lua_pushcclosure(L, guarded, 1);
 }
 
-ScriptCall& call(lua_State* L) {
+// The call being run: set by load() and run() for as long as they run Lua code, null otherwise.
+ScriptCall* currentCall(lua_State* L) {
     lua_pushlightuserdata(L, &kCallKey);
     lua_rawget(L, LUA_REGISTRYINDEX);
     auto* c = static_cast<ScriptCall*>(lua_touserdata(L, -1));
     lua_pop(L, 1);
-    return *c;
+    return c;
+}
+
+void setCurrentCall(lua_State* L, ScriptCall* c) {
+    lua_pushlightuserdata(L, &kCallKey);
+    lua_pushlightuserdata(L, c);
+    lua_rawset(L, LUA_REGISTRYINDEX);
+}
+
+ScriptCall& call(lua_State* L) {
+    return *currentCall(L);
+}
+
+// Sets the current call for as long as it lives, then clears it, however the scope ends.
+struct CallScope {
+    lua_State* L;
+    CallScope(lua_State* state, ScriptCall* c) : L(state) { setCurrentCall(L, c); }
+    ~CallScope() { setCurrentCall(L, nullptr); }
+    CallScope(const CallScope&) = delete;
+    CallScope& operator=(const CallScope&) = delete;
+};
+
+// The message of the error on top of the stack; a script may raise one that isn't text.
+std::string errorText(lua_State* L) {
+    const char* text = lua_tostring(L, -1);
+    return text ? text : "(an error that isn't text)";
+}
+
+// A script is stopped once it has run this many Lua instructions in one call: an endless loop
+// (say, in a broken mod) would otherwise freeze the game. The count is checked every kCountEvery.
+constexpr std::uint64_t kMaxInstructions = 10'000'000;
+constexpr int kCountEvery = 1000;
+
+void countInstructions(lua_State* L, lua_Debug*) {
+    ScriptCall* c = currentCall(L);
+    if (c == nullptr) {
+        return;
+    }
+    c->instructions += kCountEvery;
+    if (c->instructions > kMaxInstructions) {
+        lua_pushstring(L, "script ran too long (an endless loop?)");
+        lua_error(L);
+    }
 }
 
 // Lua numbers as the game's script functions read them.
@@ -297,7 +346,10 @@ int getInstalledEps(lua_State* L) {
 // A function the game provides that the engine doesn't have yet: stops the script and says which.
 // Called by Lua directly (not guarded); it keeps nothing alive across lua_error.
 int unsupported(lua_State* L) {
-    call(L).unsupported = lua_tostring(L, lua_upvalueindex(1));
+    try {
+        call(L).unsupported = lua_tostring(L, lua_upvalueindex(1));
+    } catch (...) {  // no C++ exception may cross Lua's frames (see guarded)
+    }
     lua_pushstring(L, "unsupported script function");
     return lua_error(L);
 }
@@ -575,7 +627,11 @@ int objectManagerGetNeighborIds(lua_State* L) {
 template <typename... Args>
 int scriptCheckError(lua_State* L, const char* format, Args... args) {
     char message[256];
-    std::snprintf(message, sizeof message, format, args...);
+    if constexpr (sizeof...(args) == 0) {
+        std::snprintf(message, sizeof message, "%s", format);  // a message without values is used as it is
+    } else {
+        std::snprintf(message, sizeof message, format, args...);
+    }
     return gameError(L, kErrorScriptCheck, message);
 }
 
@@ -1613,7 +1669,7 @@ bool loadChunk(lua_State* L, const luascript::Script& script, std::string& error
     try {
         const auto chunk = luascript::nativeChunk(script.chunk);
         if (luaL_loadbuffer(L, reinterpret_cast<const char*>(chunk.data()), chunk.size(), script.name.c_str()) != 0) {
-            error = lua_tostring(L, -1);
+            error = errorText(L);
             lua_pop(L, 1);
             return false;
         }
@@ -1632,6 +1688,7 @@ LuaRuntime::LuaRuntime() : L_(lua_open()) {
     luaopen_string(L_);
     luaopen_math(L_);
     lua_settop(L_, 0);
+    lua_sethook(L_, countInstructions, LUA_MASKCOUNT, kCountEvery);
     for (const char* name : kRemovedGlobals) {
         lua_pushstring(L_, name);
         lua_pushnil(L_);
@@ -1708,9 +1765,7 @@ void LuaRuntime::load(const std::vector<luascript::Script>& modules, const std::
                       CodeSource* code) {
     ScriptCall setup;
     setup.code = code;
-    lua_pushlightuserdata(L_, &kCallKey);
-    lua_pushlightuserdata(L_, &setup);
-    lua_rawset(L_, LUA_REGISTRYINDEX);
+    const CallScope scope(L_, &setup);
     std::string error;
     for (const auto& m : modules) {
         if (!loadChunk(L_, m, error)) {
@@ -1719,7 +1774,7 @@ void LuaRuntime::load(const std::vector<luascript::Script>& modules, const std::
         }
         setup.unsupported.clear();
         if (lua_pcall(L_, 0, 0, 0) != 0) {
-            const std::string why = setup.unsupported.empty() ? lua_tostring(L_, -1) : "needs " + setup.unsupported;
+            const std::string why = setup.unsupported.empty() ? errorText(L_) : "needs " + setup.unsupported;
             problems.push_back("module " + m.name + ": " + why);
             lua_pop(L_, 1);
         }
@@ -1745,9 +1800,8 @@ bool LuaRuntime::hasScript(const std::string& name) {
 }
 
 bool LuaRuntime::run(const std::string& name, ScriptCall& c) {
-    lua_pushlightuserdata(L_, &kCallKey);
-    lua_pushlightuserdata(L_, &c);
-    lua_rawset(L_, LUA_REGISTRYINDEX);
+    c.instructions = 0;
+    const CallScope scope(L_, &c);
     lua_pushstring(L_, name.c_str());
     lua_gettable(L_, LUA_GLOBALSINDEX);
     if (!lua_isfunction(L_, -1)) {
@@ -1757,7 +1811,7 @@ bool LuaRuntime::run(const std::string& name, ScriptCall& c) {
     }
     if (lua_pcall(L_, 0, 0, 0) != 0) {
         if (c.unsupported.empty() && c.errorCode == 0) {
-            c.luaError = lua_tostring(L_, -1);
+            c.luaError = errorText(L_);
         }
         lua_pop(L_, 1);
         return false;

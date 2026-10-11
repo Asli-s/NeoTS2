@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("qfs", "dbpf", "bhav", "str", "bcon", "glob", "objd", "objt", "objm", "xobj", "wallgraph", "array3d", "srel", "sdsc", "fami", "famt", "slot", "swaf", "propset", "ttab", "luascript", "ngbh", "datatables", "scenegraph", "stringmap", "walllayer", "namemap", "fencepostlayer", "roofs", "terrain")] [string]$Target = "dbpf",
+    [ValidateSet("qfs", "dbpf", "bhav", "str", "bcon", "glob", "objd", "objt", "objm", "xobj", "wallgraph", "array3d", "srel", "sdsc", "fami", "famt", "slot", "swaf", "propset", "ttab", "luascript", "ngbh", "datatables", "scenegraph", "stringmap", "walllayer", "namemap", "fencepostlayer", "roofs", "terrain", "reia", "anim", "image", "lot_description", "nhood_objects", "nhood_terrain", "objf", "reference_list", "simi", "camera_config", "nhood_paint_rules", "ui_script")] [string]$Target = "dbpf",
     [int]$Minutes = 10
 )
 

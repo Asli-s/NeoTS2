@@ -8,6 +8,9 @@ namespace ts2::ui {
 
 namespace {
 
+// How deep windows may nest; the game's own scripts go 6 deep at most.
+constexpr std::size_t kMaxDepth = 64;
+
 bool space(char c) {
     return std::isspace(static_cast<unsigned char>(c)) != 0;
 }
@@ -132,6 +135,11 @@ std::vector<Window> parse(std::string_view script) {
         if (tag == "CHILDREN") {
             if (open.back()->empty()) {
                 throw std::runtime_error("ui script: children without a window");
+            }
+            // Windows are handled recursively everywhere, so a broken script nested thousands
+            // deep would run out of stack.
+            if (open.size() > kMaxDepth) {
+                throw std::runtime_error("ui script: windows nested too deeply");
             }
             open.push_back(&open.back()->back().children);
         } else if (tag == "/CHILDREN") {

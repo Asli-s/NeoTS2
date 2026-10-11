@@ -1,6 +1,8 @@
 #include "sim/vm.hpp"
 
+#include "sim/find_best_object.hpp"
 #include "sim/lua_runtime.hpp"
+#include "sim/object_functions.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -31,7 +33,13 @@ constexpr std::uint16_t kIdleForInputOpcode = 0x0011;
 constexpr std::uint16_t kActionStringOpcode = 0x0032;
 constexpr std::uint16_t kManageInventoryOpcode = 0x0033;
 constexpr std::uint16_t kLuaScriptOpcode = 0x007E;
-constexpr std::uint16_t kLuaScriptNames = 0x130;
+constexpr std::uint16_t kAnimateObjectOpcode = 0x0069;
+constexpr std::uint16_t kAnimateSimOpcode = 0x006A;
+constexpr std::uint16_t kAnimateOverlayOpcode = 0x006B;
+constexpr std::uint16_t kAnimateStopOpcode = 0x006C;
+constexpr std::uint16_t kEffectOpcode = 0x0070;
+constexpr std::uint16_t kFindBestObjectOpcode = 0x000E;
+constexpr std::uint16_t kRunFunctionalTreeOpcode = 0x0014;
 constexpr std::uint16_t kActionStringTable = 0x12E;
 // Object data whose bit 0x40 Idle for Input sets while interactions are waiting.
 constexpr std::size_t kIdleFlagsField = 0x08;
@@ -59,8 +67,10 @@ constexpr std::uint8_t kRemoveReturnImmediately = 0x01;
 constexpr std::uint32_t kProtectedGuids[] = {
     0xCC7B08F8, 0x6C7B0905, 0xCC203477, 0x865A6812, 0x81E6BEF9, 0xD20C0AEE, 0x39CCF441,
 };
-constexpr std::uint8_t kTestAlternateDefinition = 0x01;
+constexpr std::uint8_t kTestOriginalGuid = 0x01;
 constexpr std::uint8_t kTestNeighborId = 0x02;
+constexpr std::size_t kOriginalGuidLow = 0x46;
+constexpr std::size_t kOriginalGuidHigh = 0x47;
 constexpr std::uint8_t kTestGuidExists = 0x04;
 constexpr std::uint8_t kRelationshipFailIfMissing = 0x01;
 constexpr std::uint8_t kRelationshipNeighborIds = 0x02;
@@ -76,10 +86,10 @@ constexpr std::uint8_t kRunTypeTreeFromTemps = 0x03;
 constexpr std::uint16_t kTreeNameTable = 0x12F;
 
 constexpr std::uint8_t kPlaceOutOfWorld = 0x06;
-constexpr std::uint8_t kCreateDoNotDuplicate = 0x01;
+[[maybe_unused]] constexpr std::uint8_t kCreateDoNotDuplicate = 0x01;  // not acted on yet
 constexpr std::uint8_t kCreatePassObjectIds = 0x02;
 constexpr std::uint8_t kCreateFromNeighbor = 0x04;
-constexpr std::uint8_t kCreateFailIfTileOccupied = 0x08;
+[[maybe_unused]] constexpr std::uint8_t kCreateFailIfTileOccupied = 0x08;  // not acted on yet
 constexpr std::uint8_t kCreatePassTemp0 = 0x10;
 constexpr std::uint8_t kCreateFromInventoryToken = 0x40;
 constexpr std::uint8_t kCreateGuidFromTemps = 0x80;
@@ -110,9 +120,22 @@ constexpr std::uint8_t kNoOpGenericCalls[] = {
     0x01, 0x02, 0x03, 0x12, 0x18, 0x1D, 0x1E, 0x1F, 0x21, 0x28, 0x29, 0x2A, 0x2C, 0x33,
 };
 
-// Generic call 0x41 starts the global "Init - Object" tree; the game returns true here
-// (false would be an error exit).
+// Generic call 0x41 starts the global "Init - Object" tree. The game sets the object's default
+// data itself and returns true, skipping the tree's own (older) steps; see initObjectDefaults.
 constexpr std::uint8_t kInitObjectGenericCall = 0x41;
+
+// What generic call 0x41 sets on the object running it.
+void initObjectDefaults(SimObject& me) {
+    auto& d = me.data;
+    d[0x28] = static_cast<std::int16_t>(d[0x28] | 0x2020);  // flag field 2: flags 6 and 14
+    d[0x2A] = static_cast<std::int16_t>(d[0x2A] | 0x0003);  // placement flags 1 and 2
+    d[0x2B] = static_cast<std::int16_t>(d[0x2B] | 0x000A);  // movement flags 2 and 4
+    d[0x04] = static_cast<std::int16_t>(d[0x04] | 0x0001);  // allowed height flags
+    d[0x17] = 2;                                            // rotation notches
+    d[0x1E] = 0;                                            // room placement
+    d[0x31] = 1;                                            // trash units
+    d[0x4E] = 5;                                            // look at score
+}
 
 constexpr std::uint8_t kSearchObject = 0x00;
 constexpr std::uint8_t kSearchPerson = 0x01;
@@ -287,6 +310,8 @@ public:
         switch (owner) {
         case owner::kMyAttribute:              return slotAt(me().attributes, data, "attribute");
         case owner::kStackObjectAttribute:     return slotAt(stack().attributes, data, "attribute");
+        case owner::kStackObjectAttributeByParam:
+            return slotAt(stack().attributes, slotAt(f.params, data, "param"), "attribute");
         case owner::kMySemiAttribute:          return slotAt(me().semiAttributes, data, "semi-attribute");
         case owner::kStackObjectSemiAttribute: return slotAt(stack().semiAttributes, data, "semi-attribute");
         case owner::kMyData:                   return slotAt(me().data, data, "object data");
@@ -442,6 +467,9 @@ public:
         switch (owner) {
         case owner::kMyAttribute:              slotAt(me().attributes, data, "attribute") = value; return;
         case owner::kStackObjectAttribute:     slotAt(stack().attributes, data, "attribute") = value; return;
+        case owner::kStackObjectAttributeByParam:
+            slotAt(stack().attributes, slotAt(f.params, data, "param"), "attribute") = value;
+            return;
         case owner::kMySemiAttribute:          slotAt(me().semiAttributes, data, "semi-attribute") = value; return;
         case owner::kStackObjectSemiAttribute: slotAt(stack().semiAttributes, data, "semi-attribute") = value; return;
         case owner::kMyData:                   slotAt(me().data, data, "object data") = value; return;
@@ -555,6 +583,14 @@ public:
         case kRemoveObjectOpcode:     return removeObject(in);
         case kBreakPointOpcode:       return breakPoint(in, f);
         case kArrayOperationOpcode:   return arrayOperation(in, f);
+        case kFindBestObjectOpcode:   return findBestObject(in, f);
+        // These start or stop an animation or an effect and carry on at once; what they show isn't
+        // kept yet.
+        case kAnimateObjectOpcode:
+        case kAnimateOverlayOpcode:
+        case kAnimateStopOpcode:
+        case kEffectOpcode:
+            return true;
         default:
             throw Stop{Outcome::Unsupported, "primitive not implemented", hex(in.opcode, 4)};
         }
@@ -670,13 +706,14 @@ public:
         }
     }
 
-    static bool genericSimsCall(const bhav::Instruction& in) {
+    bool genericSimsCall(const bhav::Instruction& in) {
         const std::uint8_t call = in.operands[0];
         if (std::find(std::begin(kNoOpGenericCalls), std::end(kNoOpGenericCalls), call) !=
             std::end(kNoOpGenericCalls)) {
             return true;
         }
         if (call == kInitObjectGenericCall) {
+            initObjectDefaults(me());
             return true;
         }
         throw Stop{Outcome::Unsupported, "Generic Sims Call not implemented", hex(call, 2)};
@@ -1572,6 +1609,116 @@ public:
         return true;
     }
 
+    // Animate Sim (operands: see AnimateOperands). Starts the animation on me and waits, a tick at a
+    // time, until it has played (by the world's clock), then is true. The animation's name is entry
+    // [entry] of string table [list] of the frame's code owner, else of the global code.
+    // Not yet: event trees, blending, flipping, IK objects.
+    std::optional<bool> animateSim(const bhav::Instruction& in, Frame& f) {
+        SimObject& sim = me();
+        const std::size_t frame = thread_.frames.size() - 1;
+        const double now = world().clockMs();
+        if (sim.animation && sim.animation->frame == frame && sim.animation->group == f.group && sim.animation->tree == f.instance &&
+            sim.animation->pc == f.pc) {
+            if (!sim.animation->finished(now)) {
+                return std::nullopt;
+            }
+            sim.animation.reset();
+            return true;
+        }
+        const AnimateOperands a = animateOperands(in.operands);
+        const std::int16_t entry = a.entryFromParam ? slotAt(f.params, a.entry, "param") : static_cast<std::int16_t>(a.entry);
+        std::optional<std::string> name = code_.string(f.codeOwner, a.list, static_cast<std::uint16_t>(entry));
+        if (!name || name->empty()) {
+            name = code_.string(kGlobalGroup, a.list, static_cast<std::uint16_t>(entry));
+        }
+        if (!name || name->empty()) {
+            throw Stop{Outcome::Error, "Animation name is empty string.", hex(a.list, 2) + " " + std::to_string(entry)};
+        }
+        const std::int16_t speed = a.speedFromTemp ? thread_.temps[2] : a.speed;
+        if (speed == 0) {
+            throw Stop{Outcome::Error, "Animation speed cannot be zero", ""};
+        }
+        PlayingAnimation play;
+        play.name = *name;
+        play.startMs = now;
+        play.speed = static_cast<float>(speed) / 32.0f;
+        play.flipped = a.flipped;
+        play.frame = frame;
+        play.group = f.group;
+        play.tree = f.instance;
+        play.pc = f.pc;
+        if (const auto& lengths = world().animationLengths()) {
+            if (const auto ms = lengths(play.name)) {
+                play.lengthMs = *ms / std::abs(play.speed);
+            }
+        }
+        sim.animation = std::move(play);
+        return std::nullopt;
+    }
+
+    // Run Functional Tree: calls the stack object's tree for an object function (bytes 0-1, see
+    // objectFunctionEntry) from its OBJf: the action tree, or with byte 2 bit 2 the check tree. The
+    // call runs on my stack with the object as stack object; false when the object has no such tree.
+    std::optional<NamedCall> functionalTree(const bhav::Instruction& in) {
+        const auto& o = in.operands;
+        if (o[2] & 0x03) {
+            throw Stop{Outcome::Unsupported, "Run Functional Tree flags not implemented", hex(o[2], 2)};
+        }
+        SimObject& object = stack();
+        const auto entry = objectFunctionEntry(static_cast<std::uint16_t>(o[0] | o[1] << 8));
+        const ObjectType* type = code_.objectType(object.definition.guid());
+        const auto* functions = type ? code_.objectFunctions(*type) : nullptr;
+        if (!entry || functions == nullptr || *entry >= functions->size()) {
+            return std::nullopt;
+        }
+        const objf::Function& function = (*functions)[*entry];
+        const std::uint16_t tree = (o[2] & 0x04) ? function.check : function.action;
+        if (tree == 0) {
+            return std::nullopt;
+        }
+        NamedCall call;
+        call.group = groupFor(tree, object.group);
+        call.instance = tree;
+        call.code = code_.behavior(call.group, tree);
+        if (!call.code) {
+            throw Stop{Outcome::MissingCode, "BHAV not found", hex(call.group, 8) + " " + hex(tree, 4)};
+        }
+        call.codeOwner = object.group;
+        call.stackObject = object.id;
+        return call;
+    }
+
+    // Find Best Object for Function (see FunctionSearch): the best object becomes the stack object;
+    // false when there is none.
+    bool findBestObject(const bhav::Instruction& in, Frame& f) {
+        const auto& o = in.operands;
+        SimObject* origin = &me();
+        if (o[2] & 0x08) {
+            const std::int16_t id = read(o[3], static_cast<std::uint16_t>(o[4] | o[5] << 8), f);
+            origin = world().find(id);
+            if (origin == nullptr) {
+                throw Stop{Outcome::Error, "could not find object reference", std::to_string(id)};
+            }
+        }
+        if ((o[6] & 0x01) && world().find(thread_.temps[0]) == nullptr) {
+            throw Stop{Outcome::Error, "could not find object reference", std::to_string(thread_.temps[0])};
+        }
+        const FunctionSearch search{world(), code_, me(), in.operands, thread_.temps, *origin,
+                                    [&](SimObject& candidate, std::uint16_t tree) {
+                                        const RunResult r = runNow(me(), candidate.group, tree, candidate.id, {});
+                                        if (r.outcome != Outcome::True && r.outcome != Outcome::False) {
+                                            throw Stop{r.outcome, "function check tree: " + r.reason, r.detail};
+                                        }
+                                        return r.outcome == Outcome::True;
+                                    }};
+        const auto best = findBestObjectForFunction(search);
+        if (!best) {
+            return false;
+        }
+        stackObject() = *best;
+        return true;
+    }
+
     struct IdleResult {
         enum class Kind { True, Wait, Start } kind = Kind::True;
         QueuedInteraction interaction;
@@ -1993,7 +2140,8 @@ public:
     // Operands:
     //   bytes 0-3  GUID
     //   bytes 4-5  object id (data), byte 6 its owner
-    //   byte 7     flags: 0x04 "does this GUID exist", 0x02 neighbor id, 0x01 alternate definition
+    //   byte 7     flags: 0x04 "does this GUID exist", 0x02 neighbor id, 0x01 compare the GUID the
+    //              object's type was cloned from (OBJD fields 0x46-0x47) instead of its own
     // A missing object is false, not an error.
     bool testObjectType(const bhav::Instruction& in, Frame& f) {
         const auto& o = in.operands;
@@ -2013,12 +2161,17 @@ public:
         if (flags & kTestNeighborId) {
             throw Stop{Outcome::Unsupported, "Test Object Type with a neighbor id needs the neighborhood", ""};
         }
-        if (flags & kTestAlternateDefinition) {
-            throw Stop{Outcome::Unsupported, "Test Object Type flag 0x01 not implemented", ""};
-        }
         const auto data = static_cast<std::uint16_t>(o[4] | o[5] << 8);
         const SimObject* object = world().find(read(o[6], data, f));
-        return object != nullptr && object->definition.guid() == guid;
+        if (object == nullptr) {
+            return false;
+        }
+        if (flags & kTestOriginalGuid) {
+            const std::uint32_t original = object->definition.field(kOriginalGuidLow) |
+                                           static_cast<std::uint32_t>(object->definition.field(kOriginalGuidHigh)) << 16;
+            return original == guid && code_.objectType(original) != nullptr;
+        }
+        return object->definition.guid() == guid;
     }
 
     std::array<std::int16_t, 4> callArgs(const bhav::Instruction& in, Frame& f,
@@ -2181,6 +2334,12 @@ RunResult Vm::run(SimObject& me, std::uint32_t codeGroup, std::uint16_t entry,
     return execute(me.thread, codeGroup, &me, &entry, args);
 }
 
+RunResult Vm::runOnce(SimObject& me, std::uint32_t codeGroup, std::uint16_t tree, std::span<const std::int16_t> args) {
+    ThreadState scratch;
+    scratch.codeGroup = codeGroup;
+    return execute(scratch, codeGroup, &me, &tree, args);
+}
+
 RunResult Vm::resume(SimObject& me) {
     return execute(me.thread, me.thread.codeGroup, &me, nullptr, {});
 }
@@ -2204,10 +2363,13 @@ RunResult Vm::execute(ThreadState& thread, std::uint32_t objectGroup, SimObject*
         ThreadState scratch;
         scratch.stackObjectId = stackObject;
         scratch.codeGroup = codeGroup;
+        // Counted down again however the run ends, even by an exception.
         ++nestedRuns_;
-        RunResult r = execute(scratch, codeGroup, &who, &tree, callArgs);
-        --nestedRuns_;
-        return r;
+        struct Leave {
+            int& runs;
+            ~Leave() { --runs; }
+        } leave{nestedRuns_};
+        return execute(scratch, codeGroup, &who, &tree, callArgs);
     };
     std::vector<Frame>& frames = thread.frames;
     RunResult result;
@@ -2335,6 +2497,19 @@ RunResult Vm::execute(ThreadState& thread, std::uint32_t objectGroup, SimObject*
                 }
                 continue;
             }
+            if (in.opcode == kRunFunctionalTreeOpcode) {
+                auto call = ex.functionalTree(in);
+                if (!call) {
+                    if (followBranch(false)) {
+                        return result;
+                    }
+                    continue;
+                }
+                checkDepth();
+                push(call->group, std::move(call->code), call->instance, call->args, call->codeOwner);
+                frames.back().stackObjectId = *call->stackObject;
+                continue;
+            }
             if (in.opcode == kIdleForInputOpcode) {
                 const auto idle = ex.idleForInput(in, f);
                 if (idle.kind == Execution::IdleResult::Kind::Wait) {
@@ -2355,6 +2530,19 @@ RunResult Vm::execute(ThreadState& thread, std::uint32_t objectGroup, SimObject*
                 frames.back().stackObjectId = started.object;
                 frames.back().runningOnId = started.object;
                 frames.back().callerContinuesTrue = true;
+                continue;
+            }
+            if (in.opcode == kAnimateSimOpcode) {
+                const auto done = ex.animateSim(in, f);
+                if (!done) {
+                    // Still playing: the same instruction runs again when the thread resumes.
+                    thread.sleepTicks = 1;
+                    result.outcome = Outcome::Sleeping;
+                    break;
+                }
+                if (followBranch(*done)) {
+                    return result;
+                }
                 continue;
             }
             if (in.opcode == kSleepOpcode) {

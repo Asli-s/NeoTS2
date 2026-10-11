@@ -86,8 +86,18 @@ NeighborhoodSceneStats addNeighborhood(SceneBuilder& builder, const std::filesys
     if (!terrain || terrain->columns < 2 || terrain->rows < 2) {
         throw std::runtime_error("the neighborhood has no terrain");
     }
+    // The game's own neighborhoods are 128 tiles across; anything over 1024 is a broken file.
+    constexpr std::uint32_t kMaxCorners = 1025;
+    if (terrain->columns > kMaxCorners || terrain->rows > kMaxCorners) {
+        throw std::runtime_error("the neighborhood's terrain is too large");
+    }
     const auto& t = *terrain;
-    NeighborhoodSceneStats stats{t.width, t.height, t.seaLevel, t.type, camera};
+    NeighborhoodSceneStats stats;
+    stats.width = t.width;
+    stats.height = t.height;
+    stats.seaLevel = t.seaLevel;
+    stats.terrainType = t.type;
+    stats.camera = camera;
 
     // The tiles under roads, which the paints keep their distance from.
     const std::uint32_t tilesX = t.columns - 1, tilesY = t.rows - 1;
@@ -108,7 +118,8 @@ NeighborhoodSceneStats addNeighborhood(SceneBuilder& builder, const std::filesys
     out.tileSize = kTile;
     out.heights = t.heights;
     out.normals = painted.normals;
-    out.alphaSize = powerAbove(t.columns - 1);
+    // Square maps covering both sides (the game's terrains are square, a broken file needn't be).
+    out.alphaSize = powerAbove(std::max(t.columns, t.rows) - 1);
     std::map<std::uint8_t, std::size_t> layerOf;
     for (const auto& v : painted.vertices) {
         for (int i = 0; i < 3 && v.id[i] != 0; ++i) {

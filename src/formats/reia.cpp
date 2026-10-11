@@ -7,10 +7,55 @@ namespace ts2::reia {
 namespace {
 
 constexpr std::uint32_t kBlock = 32;
+constexpr std::uint32_t kBlockPixels = kBlock * kBlock;
+constexpr std::size_t kPixelBytes = 3;  // blue, green, red
+// Larger than any picture the game shows, so a broken file can't ask for huge amounts of memory.
+constexpr std::uint32_t kMaxSide = 4096;
 
 std::uint32_t u32(std::span<const std::uint8_t> d, std::size_t at) {
     return static_cast<std::uint32_t>(d[at]) | static_cast<std::uint32_t>(d[at + 1]) << 8 |
            static_cast<std::uint32_t>(d[at + 2]) << 16 | static_cast<std::uint32_t>(d[at + 3]) << 24;
+}
+
+// Where pixel n (0 to 1023, row by row) of block (bx, by) starts in the picture's RGBA bytes.
+std::size_t pixelOffset(const tga::Pixels& picture, std::uint32_t bx, std::uint32_t by, std::uint32_t n) {
+    const std::size_t x = bx * kBlock + n % kBlock;
+    const std::size_t y = by * kBlock + n / kBlock;
+    return (y * picture.width + x) * 4;
+}
+
+// Adds a coded pixel (blue, green, red) to the picture's pixel at `at`. Each pixel is coded as a
+// change from the last frame, so the sums wrap around at 256 on purpose.
+void addPixel(std::vector<std::uint8_t>& rgba, std::size_t at, std::span<const std::uint8_t> bgr) {
+    rgba[at + 0] = static_cast<std::uint8_t>(rgba[at + 0] + bgr[2]);  // red
+    rgba[at + 1] = static_cast<std::uint8_t>(rgba[at + 1] + bgr[1]);  // green
+    rgba[at + 2] = static_cast<std::uint8_t>(rgba[at + 2] + bgr[0]);  // blue
+}
+
+// Decodes one changed block from data[p], moving p past it: runs of pixels until all 1024 are
+// added. False when the data is broken.
+bool decodeBlock(std::span<const std::uint8_t> data, std::size_t& p, tga::Pixels& picture, std::uint32_t bx,
+                 std::uint32_t by) {
+    std::uint32_t n = 0;
+    while (n < kBlockPixels) {
+        if (p >= data.size()) {
+            return false;
+        }
+        const std::uint8_t c = data[p++];
+        // Below 0x80: c + 1 pixels written out one after another. Otherwise one pixel, 257 - c times.
+        const bool written = c < 0x80;
+        const std::uint32_t count = written ? c + 1u : 257u - c;
+        const std::size_t bytes = kPixelBytes * (written ? count : 1);
+        if (n + count > kBlockPixels || bytes > data.size() - p) {
+            return false;
+        }
+        for (std::uint32_t k = 0; k < count; ++k, ++n) {
+            const auto pixel = data.subspan(p + (written ? kPixelBytes * k : 0), kPixelBytes);
+            addPixel(picture.rgba, pixelOffset(picture, bx, by, n), pixel);
+        }
+        p += bytes;
+    }
+    return true;
 }
 
 } // namespace
@@ -40,14 +85,17 @@ Video parse(std::span<const std::uint8_t> file) {
 }
 
 bool decodeFrame(const Video& video, std::size_t frame, tga::Pixels& picture) {
-    if (frame >= video.frames.size() || video.width % kBlock || video.height % kBlock) {
+    if (frame >= video.frames.size() || video.width == 0 || video.height == 0 || video.width % kBlock ||
+        video.height % kBlock || video.width > kMaxSide || video.height > kMaxSide) {
         return false;
     }
-    if (picture.width != video.width || picture.height != video.height) {
+    // A picture of another size (or none yet) starts over as black.
+    const std::size_t bytes = static_cast<std::size_t>(video.width) * video.height * 4;
+    if (picture.width != video.width || picture.height != video.height || picture.rgba.size() != bytes) {
         picture.width = video.width;
         picture.height = video.height;
-        picture.rgba.assign(static_cast<std::size_t>(video.width) * video.height * 4, 0);
-        for (std::size_t i = 3; i < picture.rgba.size(); i += 4) {
+        picture.rgba.assign(bytes, 0);
+        for (std::size_t i = 3; i < bytes; i += 4) {
             picture.rgba[i] = 255;
         }
     }
@@ -58,31 +106,9 @@ bool decodeFrame(const Video& video, std::size_t frame, tga::Pixels& picture) {
             if (p >= data.size()) {
                 return false;
             }
-            if (data[p++] == 0) {
-                continue;
-            }
-            std::uint32_t n = 0;
-            auto put = [&](std::size_t from) {
-                const std::uint32_t x = bx * kBlock + n % kBlock, y = by * kBlock + n / kBlock;
-                std::uint8_t* q = &picture.rgba[(static_cast<std::size_t>(y) * video.width + x) * 4];
-                q[0] = static_cast<std::uint8_t>(q[0] + data[from + 2]);
-                q[1] = static_cast<std::uint8_t>(q[1] + data[from + 1]);
-                q[2] = static_cast<std::uint8_t>(q[2] + data[from]);
-                ++n;
-            };
-            while (n < kBlock * kBlock) {
-                if (p >= data.size()) {
-                    return false;
-                }
-                const std::uint8_t c = data[p++];
-                const std::uint32_t count = c < 0x80 ? c + 1u : 257u - c;
-                if (n + count > kBlock * kBlock || p + (c < 0x80 ? 3u * count : 3u) > data.size()) {
-                    return false;
-                }
-                for (std::uint32_t k = 0; k < count; ++k) {
-                    put(c < 0x80 ? p + 3 * k : p);
-                }
-                p += c < 0x80 ? 3 * count : 3;
+            const bool changed = data[p++] != 0;
+            if (changed && !decodeBlock(data, p, picture, bx, by)) {
+                return false;
             }
         }
     }

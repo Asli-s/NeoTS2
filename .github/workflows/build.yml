@@ -1,0 +1,77 @@
+# Checks every push and pull request: builds NeoTS2 with two compilers, treats warnings as errors,
+# runs the tests normally, with AddressSanitizer and in a debug build that fails any test leaking
+# memory, measures test coverage, and fuzzes every file reader briefly. The app itself (which needs SDL 3 and FreeType) is skipped here; the libraries,
+# tools and tests build without them. The game's own files are never available here.
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: MSVC, warnings as errors
+            config: Release
+            flags: "-DNEOTS2_STRICT=ON"
+          - name: MSVC with AddressSanitizer
+            config: RelWithDebInfo
+            flags: "-DNEOTS2_STRICT=ON -DNEOTS2_ASAN=ON"
+          - name: MSVC debug, leak check
+            config: Debug
+            flags: "-DNEOTS2_STRICT=ON"
+    name: ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -A x64 ${{ matrix.flags }}
+      - name: Build
+        run: cmake --build build --config ${{ matrix.config }} --parallel
+      - name: Test
+        shell: pwsh
+        run: |
+          # AddressSanitizer's runtime lives beside the compiler.
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $msvc = Get-ChildItem "$vs\VC\Tools\MSVC" -Directory | Sort-Object Name | Select-Object -Last 1
+          $env:PATH = "$($msvc.FullName)\bin\Hostx64\x64;$env:PATH"
+          ctest --test-dir build -C ${{ matrix.config }} --output-on-failure
+
+  coverage:
+    name: Clang, coverage
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build with Clang, run the tests and measure coverage
+        shell: pwsh
+        run: ./tools/coverage.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: build-coverage/report
+
+  fuzz:
+    name: Fuzz every file reader
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the fuzz targets
+        run: |
+          cmake -S . -B build-fuzz -A x64 -DNEOTS2_FUZZ=ON
+          cmake --build build-fuzz --config RelWithDebInfo --parallel
+      - name: Fuzz each reader for 15 seconds
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $msvc = Get-ChildItem "$vs\VC\Tools\MSVC" -Directory | Sort-Object Name | Select-Object -Last 1
+          $env:PATH = "$($msvc.FullName)\bin\Hostx64\x64;$env:PATH"
+          $failed = @()
+          foreach ($fuzzer in Get-ChildItem build-fuzz\RelWithDebInfo\*_fuzz.exe) {
+              New-Item -ItemType Directory -Force "corpus\$($fuzzer.BaseName)" | Out-Null
+              & $fuzzer.FullName "corpus\$($fuzzer.BaseName)" -max_total_time=15 -rss_limit_mb=2048 2>&1 | Select-Object -Last 1
+              if ($LASTEXITCODE -ne 0) { $failed += $fuzzer.BaseName }
+          }
+          if ($failed) { throw "fuzzing found problems in: $($failed -join ', ')" }

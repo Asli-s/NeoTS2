@@ -73,6 +73,12 @@ public:
     // The name of the GPU backend in use (e.g. "direct3d12").
     std::string backend() const;
 
+    // The joint matrices a skinned instance is drawn with from the next frame on (see
+    // scene::Mesh::skin); skinned instances without them aren't drawn.
+    void setJoints(std::size_t instance, const std::vector<scene::Transform>& joints);
+    // Moves an uploaded instance.
+    void setPlace(std::size_t instance, const scene::Transform& transform);
+
     // The time animated surfaces (the neighborhood water) are drawn at, in seconds.
     void setTime(float seconds) { time_ = seconds; }
 
@@ -80,6 +86,7 @@ private:
     struct GpuPrimitive {
         SDL_GPUBuffer* vertices = nullptr;
         SDL_GPUBuffer* indices = nullptr;
+        SDL_GPUBuffer* skin = nullptr;  // joints and weights per vertex, for skinned primitives
         unsigned count = 0;
         int material = -1;
     };
@@ -90,6 +97,7 @@ private:
     void release();
     void releaseSprites();
     void uploadSpriteVertices(SDL_GPUCommandBuffer* cmd, unsigned width, unsigned height);
+    void uploadJoints(SDL_GPUCommandBuffer* cmd);
     void render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigned width, unsigned height, const Camera& camera);
     void drawImposters(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass, const Mat4& viewProjection);
 
@@ -102,6 +110,14 @@ private:
     SDL_GPUTexture* white_ = nullptr;  // stands in for surfaces without a texture
     // Pipelines by [two-sided][blend]: opaque and alpha-tested surfaces write depth, blended ones don't.
     SDL_GPUGraphicsPipeline* pipelines_[2][2] = {};
+    SDL_GPUGraphicsPipeline* skinnedPipelines_[2][2] = {};  // the same for skinned primitives
+    // Skinned instances' joint matrices (3x4, by rows), all in one buffer: where each instance's
+    // start (in matrices; -1 for none) and how many it has.
+    std::vector<int> jointBase_, jointCount_;
+    std::vector<float> jointData_;
+    bool jointsChanged_ = false;
+    SDL_GPUBuffer* jointBuffer_ = nullptr;
+    std::size_t jointCapacity_ = 0;  // floats the buffer holds
     std::vector<SDL_GPUTexture*> textures_;
     std::vector<GpuMesh> meshes_;
     std::vector<scene::Material> materials_;

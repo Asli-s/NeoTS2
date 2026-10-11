@@ -1,3 +1,13 @@
+#if defined(_MSC_VER) && defined(_DEBUG)
+#include <crtdbg.h>
+#endif
+#include "sim/clock.hpp"
+#include "sim/object_footprint.hpp"
+#include "sim/object_reset.hpp"
+#include "sim/route_grid.hpp"
+#include "sim/route_items.hpp"
+#include "sim/route_world.hpp"
+#include "sim/type_signature.hpp"
 #include "sim/vm.hpp"
 #include "formats/datatables.hpp"
 #include "formats/fami.hpp"
@@ -7,6 +17,9 @@
 #include "formats/sdsc.hpp"
 #include "formats/slot.hpp"
 #include "content/build_scripts.hpp"
+#include "content/install.hpp"
+#include "scene/rig.hpp"
+#include "scene/sims.hpp"
 #include "formats/fencepostlayer.hpp"
 #include "scene/neighborhood_lighting.hpp"
 #include "scene/neighborhood_paint.hpp"
@@ -43,6 +56,8 @@ extern "C" {
 #include <functional>
 #include <array>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <optional>
 #include <string>
@@ -114,6 +129,13 @@ public:
         const auto it = objectTypes_.find(guid);
         return it != objectTypes_.end() ? &it->second : nullptr;
     }
+    void addFunctions(std::uint32_t group, std::vector<ts2::objf::Function> functions) {
+        functions_[group] = std::move(functions);
+    }
+    const std::vector<ts2::objf::Function>* objectFunctions(const ts2::sim::ObjectType& type) override {
+        const auto it = functions_.find(type.group);
+        return it != functions_.end() ? &it->second : nullptr;
+    }
     void addStrings(std::uint32_t group, std::uint16_t instance, std::vector<std::string> values) {
         strings_[{group, instance}] = std::move(values);
     }
@@ -135,6 +157,7 @@ public:
     }
 
 private:
+    std::map<std::uint32_t, std::vector<ts2::objf::Function>> functions_;
     std::map<std::pair<std::uint32_t, std::uint16_t>, std::vector<std::string>> strings_;
     std::map<std::uint32_t, ts2::sim::ObjectType> objectTypes_;
     std::map<std::pair<std::uint32_t, std::uint16_t>, std::shared_ptr<const ts2::ttab::InteractionTable>> tables_;
@@ -393,15 +416,15 @@ void missingCallTargetIsReported() {
 
 void unimplementedPrimitiveStopsWithItsOpcode() {
     MemoryCodeSource code;
-    Instruction animate;
-    animate.opcode = 0x006A;
-    animate.trueTarget = T;
-    animate.falseTarget = F;
-    code.add(kObjectGroup, 0x1000, bhav({animate}));
+    Instruction locomotion;
+    locomotion.opcode = 0x0072;
+    locomotion.trueTarget = T;
+    locomotion.falseTarget = F;
+    code.add(kObjectGroup, 0x1000, bhav({locomotion}));
     ThreadState t;
     const RunResult r = runPrivate(code, t, 0x1000);
     CHECK(r.outcome == Outcome::Unsupported);
-    CHECK(r.detail == "0x006A");
+    CHECK(r.detail == "0x0072");
 }
 
 void jumpPastTheEndIsAnError() {
@@ -433,6 +456,32 @@ void attributesBelongToEachObject() {
     CHECK(vm.run(other, 0x1000).outcome == Outcome::True);
     CHECK(fridge.attributes[0] == 10);
     CHECK(other.attributes[0] == 5);
+}
+
+void initObjectSetsDefaultsAndAttributesByParam() {
+    MemoryCodeSource code;
+    Instruction initObject = call(0x0001, 1, E);  // Generic Sims Call
+    initObject.operands = {};
+    initObject.operands[0] = 0x41;
+    code.add(kObjectGroup, 0x1000, bhav({
+        initObject,
+        // The stack object's attribute picked by param 1 (here 3).
+        expr(owner::kStackObjectId, 0, op::kAssign, owner::kParam, 0, 2, E),
+        expr(owner::kStackObjectAttributeByParam, 1, op::kAssign, owner::kLiteral, 7, T, E),
+    }, 2));
+    code.add(kObjectGroup, 0x1001, bhav({
+        expr(owner::kStackObjectAttributeByParam, 5, op::kAssign, owner::kLiteral, 7, T, E),  // no param 5
+    }, 2));
+    ts2::sim::World world;
+    auto& me = world.create(kObjectGroup, definition("Me", 0));
+    auto& other = world.create(kObjectGroup, definition("Other", 0));
+    Vm vm(code, {}, &world);
+    const std::int16_t args[] = {other.id, 3};
+    CHECK(vm.run(me, 0x1000, args).outcome == Outcome::True);
+    CHECK(me.data[0x04] == 1 && me.data[0x2A] == 3 && me.data[0x2B] == 0x0A && me.data[0x28] == 0x2020);
+    CHECK(me.data[0x17] == 2 && me.data[0x31] == 1 && me.data[0x4E] == 5);
+    CHECK(other.attributes[3] == 7);
+    CHECK(vm.run(me, 0x1001, args).outcome == Outcome::Error);
 }
 
 void objectIdFieldMatchesTheObject() {
@@ -1673,6 +1722,32 @@ void testObjectTypeComparesGuids() {
     CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::True);
 }
 
+// Flag 0x01 compares the GUID the object's type was cloned from (OBJD fields 0x46-0x47), when
+// that type exists, instead of its own.
+void testObjectTypeComparesTheOriginalGuid() {
+    constexpr std::uint32_t kRecolorGuid = 0x0D0D0D0D;
+    auto original = [](std::uint16_t t, std::uint16_t f) {
+        Instruction in = testObjectType(kFridgeGuid, owner::kStackObjectId, 0, t, f);
+        in.operands[7] = 0x01;
+        return in;
+    };
+    MemoryCodeSource code;
+    code.add(kObjectGroup, 0x1000, bhav({original(T, F)}));
+    code.add(kObjectGroup, 0x1001, bhav({testObjectType(kFridgeGuid, owner::kStackObjectId, 0, T, F)}));
+    code.addObjectType(kObjectGroup, typed(kFridgeGuid));
+    ts2::sim::World world;
+    auto& me = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    auto recolor = typed(kRecolorGuid);
+    recolor.fields[0x46] = static_cast<std::uint16_t>(kFridgeGuid);
+    recolor.fields[0x47] = static_cast<std::uint16_t>(kFridgeGuid >> 16);
+    auto& fridge = world.create(kObjectGroup, recolor);
+    Vm vm(code, {}, &world);
+    me.thread.stackObjectId = fridge.id;
+    CHECK(vm.run(me, kObjectGroup, 0x1000).outcome == Outcome::True);
+    me.thread.stackObjectId = fridge.id;
+    CHECK(vm.run(me, kObjectGroup, 0x1001).outcome == Outcome::False);
+}
+
 void testObjectTypeOnMissingObjectIsFalse() {
     MemoryCodeSource code;
     code.add(kObjectGroup, 0x1000, bhav({testObjectType(kFridgeGuid, owner::kLiteral, 99, T, F)}));
@@ -2466,6 +2541,445 @@ void idleForInputStartsQueuedInteractions() {
     CHECK(vm.run(sim, kObjectGroup, 0x1102, twoTicks).outcome == Outcome::True && sim.queue.size() == 1);
 }
 
+// Animate Sim: plays the named animation from the object's list (else the global one) and waits
+// until it has played by the world's clock, at its speed; Animate Object, Overlay and Stop go on at once.
+void animateSimWaitsForItsAnimation() {
+    auto animate = [](std::uint16_t entry, std::uint8_t list, std::uint8_t speed) {
+        Instruction in;
+        in.opcode = 0x006A;
+        in.trueTarget = T;
+        in.falseTarget = E;
+        in.operands[0] = static_cast<std::uint8_t>(entry);
+        in.operands[3] = speed;
+        in.operands[6] = list;
+        return in;
+    };
+    MemoryCodeSource code;
+    code.addStrings(kObjectGroup, 0x81, {"", "a2o-shower-getOut-E"});
+    code.addStrings(ts2::sim::kGlobalGroup, 0x81, {"a-noExpression", "a-blink", "a-idle-neutral-armsSide-wtC-breatheLoop"});
+    Instruction getOut = animate(1, 0x81, 32);
+    getOut.trueTarget = 1;
+    code.add(kObjectGroup, 0x1000, bhav({
+        getOut,
+        expr(owner::kTemp, 0, op::kAssign, owner::kLiteral, 1, T, E),
+    }));
+    code.add(kObjectGroup, 0x1001, bhav({animate(2, 0x81, 64)}));
+    Instruction overlay;
+    overlay.opcode = 0x006B;
+    overlay.trueTarget = T;
+    overlay.falseTarget = E;
+    code.add(kObjectGroup, 0x1002, bhav({overlay}));
+
+    ts2::sim::World world;
+    world.setAnimationLengths([](const std::string& name) -> std::optional<float> {
+        if (name == "a2o-shower-getOut-E") return 1966.0f;
+        if (name == "a-idle-neutral-armsSide-wtC-breatheLoop") return 3166.0f;
+        return std::nullopt;
+    });
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    Vm vm(code, {}, &world);
+
+    CHECK(vm.run(sim, kObjectGroup, 0x1000).outcome == Outcome::Sleeping);
+    CHECK(sim.animation && sim.animation->name == "a2o-shower-getOut-E");
+    world.advanceClock(1000);
+    CHECK(vm.resume(sim).outcome == Outcome::Sleeping && sim.thread.temps[0] == 0);
+    world.advanceClock(1000);
+    CHECK(vm.resume(sim).outcome == Outcome::True && sim.thread.temps[0] == 1 && !sim.animation);
+
+    // From the global list, at double speed: half as long.
+    CHECK(vm.run(sim, kObjectGroup, 0x1001).outcome == Outcome::Sleeping);
+    CHECK(sim.animation && sim.animation->name == "a-idle-neutral-armsSide-wtC-breatheLoop");
+    world.advanceClock(1600);
+    CHECK(vm.resume(sim).outcome == Outcome::True);
+
+    CHECK(vm.run(sim, kObjectGroup, 0x1002).outcome == Outcome::True);
+}
+
+// Find Best Object for Function: of the objects serving the function (their OBJf entry), the one
+// whose rating, halved every 5 tiles away, is highest and whose check tree passes becomes the stack
+// object; the room flags narrow the search.
+void findBestObjectPicksTheBestRatedNearest() {
+    constexpr std::uint32_t kPickyGroup = 0x7F000003;
+    constexpr std::uint16_t kSit = 0x1A;  // the OBJf entry for "sit", rated by object data 0x1A
+    auto find = [](std::uint8_t flags) {
+        Instruction in;
+        in.opcode = 0x000E;
+        in.trueTarget = T;
+        in.falseTarget = F;
+        in.operands[0] = 0x08;  // sit
+        in.operands[2] = flags;
+        return in;
+    };
+    std::vector<ts2::objf::Function> sits(0x1B);
+    sits[kSit].action = 0x1001;
+    std::vector<ts2::objf::Function> pickySits = sits;
+    pickySits[kSit].check = 0x1000;
+
+    MemoryCodeSource code;
+    code.add(kObjectGroup, 0x1000, bhav({find(0)}));
+    code.add(kObjectGroup, 0x1001, bhav({find(0x04)}));
+    code.add(kPickyGroup, 0x1000, bhav({expr(owner::kLiteral, 0, op::kEquals, owner::kLiteral, 1, T, F)}));  // fails
+    code.addObjectType(kObjectGroup, typed(kChairGuid));
+    code.addObjectType(kPickyGroup, typed(0x0C0C0C0C));
+    code.addFunctions(kObjectGroup, sits);
+    code.addFunctions(kPickyGroup, pickySits);
+
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    auto place = [](ts2::sim::SimObject& o, int x, int y, std::int16_t rating, std::int16_t room) {
+        o.x = x * 65536;
+        o.y = y * 65536;
+        o.data[0x1A] = rating;
+        o.data[0x1D] = room;
+    };
+    place(sim, 0, 0, 0, 1);
+    auto& farGood = world.create(kObjectGroup, typed(kChairGuid));
+    place(farGood, 10, 0, 100, 1);  // 100 / 3 = 33.3
+    auto& nearPlain = world.create(kObjectGroup, typed(kChairGuid));
+    place(nearPlain, 0, 0, 40, 2);  // 40, but in another room
+    auto& unrated = world.create(kObjectGroup, typed(kChairGuid));
+    place(unrated, 1, 0, 0, 1);
+    auto& picky = world.create(kPickyGroup, typed(0x0C0C0C0C));
+    place(picky, 1, 0, 100, 1);  // the best, but its check tree fails
+    Vm vm(code, {}, &world);
+
+    ThreadState& t = sim.thread;
+    CHECK(vm.run(sim, kObjectGroup, 0x1000).outcome == Outcome::True && t.stackObjectId == nearPlain.id);
+    CHECK(vm.run(sim, kObjectGroup, 0x1001).outcome == Outcome::True && t.stackObjectId == farGood.id);
+    CHECK(sim.data[0x42] == 100);  // the function score of the last object rated
+
+    // Nothing serves a function no object has.
+    sits[kSit] = {};
+    code.addFunctions(kObjectGroup, sits);
+    CHECK(vm.run(sim, kObjectGroup, 0x1000).outcome == Outcome::False);
+}
+
+// Run Functional Tree: calls the stack object's action tree for the function (its OBJf entry), with
+// the object as stack object and its group's code; false when it has none.
+void runFunctionalTreeCallsTheObjectsTree() {
+    auto run = [](std::uint16_t function) {
+        Instruction in;
+        in.opcode = 0x0014;
+        in.trueTarget = T;
+        in.falseTarget = F;
+        in.operands[0] = static_cast<std::uint8_t>(function);
+        return in;
+    };
+    std::vector<ts2::objf::Function> functions(0x1B);
+    functions[0x1A].action = 0x1001;  // sit
+    MemoryCodeSource code;
+    code.add(kObjectGroup, 0x1000, bhav({run(8)}));
+    code.add(kObjectGroup, 0x1002, bhav({run(0)}));  // prepare food: the chair has none
+    code.add(kObjectGroup, 0x1001, bhav({
+        expr(owner::kStackObjectAttribute, 0, op::kAssign, owner::kLiteral, 9, T, E),
+    }));
+    code.addObjectType(kObjectGroup, typed(kChairGuid));
+    code.addFunctions(kObjectGroup, functions);
+
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    auto& chair = world.create(kObjectGroup, typed(kChairGuid));
+    chair.attributes.fill(0);
+    Vm vm(code, {}, &world);
+    sim.thread.stackObjectId = chair.id;
+    CHECK(vm.run(sim, kObjectGroup, 0x1000).outcome == Outcome::True && chair.attributes[0] == 9);
+    sim.thread.stackObjectId = chair.id;
+    CHECK(vm.run(sim, kObjectGroup, 0x1002).outcome == Outcome::False);
+}
+
+// The Sim clock: two seconds a tick, carried into minutes, hours and the date; shown with the
+// date's weekday, as the game shows it.
+// The route grid splits leaves along an item's edges down to an eighth of a tile, and a leaf's passage
+// follows its items: floor walks, walls block, joints cost, a doorway's solid square overrides a wall.
+// Floor route items: one tile per floored tile with roads costing more, bare ground on the ground
+// level, a foundation under raised floors, and strips along floor edges.
+// A fence post routes as its post's footprint around the post's point (route axes swap the wall
+// graph's), padded by an eighth of a tile; fences that don't stop Sims give nothing.
+void postRouteItemsUseThePostFootprint() {
+    using namespace ts2::sim;
+    const std::vector<ts2::fencepostlayer::Post> posts{{1, 13, 9, 0xAD0DABD2}, {1, 5, 5, 0x0D0EACC7}, {2, 1, 1, 0xAD0DABD2}};
+    const auto items = postRouteItems(posts, 1, [](std::uint32_t guid) -> std::optional<RouteRect> {
+        if (guid != 0xAD0DABD2) return std::nullopt;
+        return RouteRect{-0.08f, -0.07f, 0.08f, 0.07f};
+    });
+    CHECK(items.size() == 2);
+    CHECK(items[0].rect.x0 == 9 - 0.08f && items[0].rect.y1 == 13 + 0.07f && items[0].type == 15);
+    CHECK(items[1].rect.x0 == 9 - 0.08f - 0.125f && items[1].type == 14);
+}
+
+void objectFootprintsFollowTheModel() {
+    using namespace ts2::sim;
+    namespace sg = ts2::scenegraph;
+    // A resource node with one data list: footprint / "0" / "(0,0)", a 16x16 mask with only the
+    // first row's first two bits set (one cell at the tile's -x, +y corner once halved).
+    std::vector<std::uint8_t> data;
+    auto u8 = [&](std::uint8_t v) { data.push_back(v); };
+    auto u32 = [&](std::uint32_t v) { for (int i = 0; i < 4; ++i) u8(static_cast<std::uint8_t>(v >> (8 * i))); };
+    auto str = [&](std::string_view s) { u8(static_cast<std::uint8_t>(s.size())); data.insert(data.end(), s.begin(), s.end()); };
+    u32(0);  // no links
+    u32(1);  // one block...
+    u32(0x6A836D56);  // ...a data list
+    str("cDataListExtension"); u32(0x6A836D56); u32(1);
+    str("cExtension"); u32(0); u32(3);
+    u8(7); str("footprint"); u32(1);
+    u8(7); str("0"); u32(2);
+    u8(2); str("minx"); u32(0);
+    u8(9); str("(0,0)"); u32(32); u8(0x03); for (int i = 1; i < 32; ++i) u8(0);
+    const auto lists = sg::parseDataLists(data);
+    CHECK(lists.size() == 1 && lists[0].name == "footprint");
+
+    FootprintShape shape;
+    shape.masks = &lists[0];
+    const auto local = footprintRects(shape);
+    CHECK(local.size() == 1);
+    CHECK(std::abs(local[0].x0 + 0.49f) < 1e-4f && std::abs(local[0].y1 - 0.49f) < 1e-4f && std::abs(local[0].x1 + 0.385f) < 1e-4f);
+    // Turned a quarter (direction 2), the corner moves to the tile's -x, -y corner.
+    const auto placed = placeFootprint(local, 3.5f, 4.5f, 2);
+    CHECK(std::abs(placed[0].x0 - 3.01f) < 1e-4f && std::abs(placed[0].y0 - 4.01f) < 1e-4f && std::abs(placed[0].x1 - 3.115f) < 1e-4f);
+
+    // A stair piece: a square tile, inset half a tile on one side and a quarter on the other.
+    FootprintShape stair;
+    stair.square = true;
+    stair.insets = 0x0408;
+    const auto step = placeFootprint(footprintRects(stair), 10.5f, 27.5f, 4);
+    CHECK(std::abs(step[0].x0 - 10.01f) < 1e-4f && std::abs(step[0].y0 - 27.26f) < 1e-4f && std::abs(step[0].x1 - 10.99f) < 1e-4f &&
+          std::abs(step[0].y1 - 27.49f) < 1e-4f);
+
+    // Types and costs, with the live flags seen in the game.
+    CHECK(footprintRouting(0x90, 300, 0x20a0, 4, false).passable && footprintRouting(0x90, 300, 0x20a0, 4, false).cost == 4);  // daisies
+    CHECK(footprintRouting(0x0, 0, 0x30a4, 4, false).type == 9);   // a table
+    CHECK(footprintRouting(0x8000, 0, 0x20a4, 4, false).type == 11);  // a fridge
+    CHECK(footprintRouting(0x400, 0, 0x24, 4, true).type == 5);   // a curtain
+    CHECK(!footprintRouting(0x4, 0, 0x2024, 4, false).added);     // a wall lamp-like object
+    CHECK(footprintRouting(0x4, 0, 0x2024, 4, true).cost == 1);   // a mirror
+
+    // A multi-tile part one tile along +x of a lead turned a quarter is the model's tile (0, -1).
+    int tx = 9, ty = 9;
+    CHECK(footprintTileOf(5.5f, 5.5f, 2, 6.5f, 5.5f, tx, ty));
+    CHECK(tx == 0 && ty == -1);
+
+    // Bad data: far or broken positions, lists nested too deep, rectangles that aren't numbers.
+    CHECK(!footprintTileOf(5.5f, 5.5f, 0, 1e9f, 5.5f, tx, ty) && tx == 0 && ty == 0);
+    CHECK(!footprintTileOf(5.5f, 5.5f, 0, std::nanf(""), 5.5f, tx, ty));
+    CHECK(footprintTile(lists[0], 0, 0, -2147483647 - 1).empty());
+    CHECK(placeFootprint({{std::nanf(""), 0, 1, 1}}, 3.5f, 4.5f, 0).empty());
+    std::vector<std::uint8_t> deep;
+    auto deepU32 = [&](std::uint32_t v) { for (int i = 0; i < 4; ++i) deep.push_back(static_cast<std::uint8_t>(v >> (8 * i))); };
+    auto deepStr = [&](std::string_view s) { deep.push_back(static_cast<std::uint8_t>(s.size())); deep.insert(deep.end(), s.begin(), s.end()); };
+    deepU32(0); deepU32(1); deepU32(0x6A836D56);
+    deepStr("cDataListExtension"); deepU32(0x6A836D56); deepU32(1);
+    deepStr("cExtension"); deepU32(0); deepU32(3);
+    for (int i = 0; i < 40; ++i) { deep.push_back(7); deepStr("x"); deepU32(1); }
+    bool threw = false;
+    try {
+        sg::parseDataLists(deep);
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK(threw);
+    RouteGrid huge(std::numeric_limits<float>::infinity(), 1e30f);
+    huge.add({{std::nanf(""), 0, 1, 1}});
+    huge.add({{0, 0, 1e30f, 0.5f}});
+    CHECK(huge.items().size() == 1 && huge.cells().size() < 100000);
+}
+
+void floorRouteItemsFollowTheFloors() {
+    using namespace ts2::sim;
+    // A 3 x 2 lot (route tiles) with two levels; the floor grid is indexed (level, y, x) in route terms.
+    ts2::array3d::Array3D floors;
+    floors.width = 2;   // route height
+    floors.height = 3;  // route width
+    floors.levels = 2;
+    floors.elementSize = 8;
+    floors.elements.assign(2 * 2 * 3 * 8, 0);
+    auto setFloor = [&](int level, int x, int y, std::int16_t pattern) {
+        const std::size_t at = ((static_cast<std::size_t>(level) * 2 + static_cast<std::size_t>(y)) * 3 + static_cast<std::size_t>(x)) * 8;
+        for (std::size_t q = 0; q < 4; ++q) floors.elements[at + q * 2] = static_cast<std::uint8_t>(pattern);
+    };
+    setFloor(0, 0, 0, 1);  // a road tile on the ground
+    setFloor(1, 2, 1, 2);  // one raised tile
+    std::map<std::uint16_t, ts2::stringmap::Entry> patterns{{1, {"road_asphalt", 1}}, {2, {"6cc25ec0", 1}}};
+
+    const auto ground = floorRouteItems(floors, patterns, 0, 3, 2);
+    auto has = [](const std::vector<RouteItem>& items, RouteRect r, int type, float cost) {
+        return std::any_of(items.begin(), items.end(), [&](const RouteItem& i) {
+            return i.rect.x0 == r.x0 && i.rect.y0 == r.y0 && i.rect.x1 == r.x1 && i.rect.y1 == r.y1 && i.type == type && i.cost == cost;
+        });
+    };
+    CHECK(has(ground, {0, 0, 1, 1}, 0, 4));          // the road
+    CHECK(has(ground, {1, 0, 2, 1}, 0, 1.3f));       // bare ground
+    CHECK(!has(ground, {2, 1, 3, 2}, 0, 1.3f));      // no ground under the raised floor...
+    CHECK(has(ground, {2, 1, 3, 2}, 7, kBlockedCost));  // ...but its foundation
+    CHECK(has(ground, {0, 0, 0.125f, 1}, 2, 1));     // the lot's edge
+
+    const auto upper = floorRouteItems(floors, patterns, 1, 3, 2);
+    CHECK(has(upper, {2, 1, 3, 2}, 0, 1));
+    CHECK(has(upper, {2, 1, 2.125f, 2}, 2, 1));      // edges all round the lone tile
+    CHECK(upper.size() == 5);
+}
+
+void typeSignaturesSumTheCallGraph() {
+    using namespace ts2::sim;
+    MemoryCodeSource code;
+    auto tree = [](std::uint32_t version, std::vector<std::uint16_t> calls) {
+        Behavior b;
+        b.treeVersion = version;
+        for (const std::uint16_t c : calls) {
+            Instruction in;
+            in.opcode = c;
+            b.instructions.push_back(in);
+        }
+        return b;
+    };
+    // Init (private 0x1000, version 5) calls a semi-global (version 3), a global (version 7), itself
+    // and a primitive; the semi-global calls Init back and a tree that doesn't exist.
+    code.add(kObjectGroup, 0x1000, tree(5, {0x2001, 0x0101, 0x1000, 0x0002}));
+    code.add(kSemiGroup, 0x2001, tree(3, {0x1000, 0x1005}));
+    code.add(kGlobalGroup, 0x0101, tree(7, {}));
+    CHECK(treeSignature(code, kObjectGroup, 0x1000) == ((5u << 16) + 5 + 3 + 7));
+    CHECK(treeSignature(code, kObjectGroup, 0) == 0);
+    CHECK(treeSignature(code, kObjectGroup, 0x1005) == 0);
+
+    ts2::objd::ObjectDefinition definition;
+    definition.fields.assign(0x40, 0);
+    definition.fields[0x3A] = 20;
+    code.addObjectType(kObjectGroup, definition);
+    code.addFunctions(kObjectGroup, {{0, 0x1000}, {0, 0x2001}});
+    const ObjectType& type = *code.objectType(definition.guid());
+    ts2::objt::Entry saved;
+    const std::uint32_t words[4] = {(5u << 16) + 15, (3u << 16) + 15, 20, 0};
+    for (std::size_t i = 0; i < 4; ++i) {
+        saved.unknown[2 * i] = static_cast<std::uint16_t>(words[i]);
+        saved.unknown[2 * i + 1] = static_cast<std::uint16_t>(words[i] >> 16);
+    }
+    CHECK(!typeChangedSinceSave(code, type, saved));
+    saved.unknown[0] ^= 1;  // a script changed since the save
+    CHECK(typeChangedSinceSave(code, type, saved));
+}
+
+void resetObjectsStartOver() {
+    using namespace ts2::sim;
+    MemoryCodeSource code;
+    Behavior mainTree;
+    mainTree.argCount = 4;
+    mainTree.localCount = 2;
+    mainTree.instructions.resize(1);
+    code.add(kObjectGroup, 0x1001, mainTree);
+    ts2::objd::ObjectDefinition definition;
+    definition.fields.assign(0x70, 0);
+    definition.fields[0x2D] = 77;  // becomes data 7
+    definition.fields[0x6A] = 5;   // single-tile: data 0x2A
+    code.addObjectType(kObjectGroup, definition);
+    code.addFunctions(kObjectGroup, {{0, 0}, {0, 0x1001}});
+    const ObjectType& type = *code.objectType(definition.guid());
+
+    SimObject object;
+    object.id = 42;
+    object.group = kObjectGroup;
+    object.data.fill(9);
+    object.data[0x7F] = 123;  // beyond the game's fields: left alone
+    object.thread.frames.resize(3);
+    resetObject(object, type, code);
+    CHECK(object.data[0x2A] == 0);  // set only once Init has run
+    CHECK(!isMultiTilePart(type));
+    finishSingleTileReset(object, type);
+    CHECK(object.data[0x01] == 9 && object.data[0x1D] == 9 && object.data[0x13] == 9);  // kept
+    CHECK(object.data[0x08] == 0 && object.data[0x28] == 0);                            // cleared
+    CHECK(object.data[0x0B] == 42 && object.data[0x17] == 2 && object.data[0x39] == 0xFF);
+    CHECK(object.data[0x07] == 77 && object.data[0x2A] == 5 && object.data[0x7F] == 123);
+    CHECK(object.thread.frames.size() == 1 && object.thread.frames[0].instance == 0x1001 &&
+          object.thread.frames[0].pc == 0 && object.thread.frames[0].params.size() == 4);
+}
+
+void objectRouteItemsFollowTheGameRules() {
+    using namespace ts2::sim;
+    MemoryCodeSource code;
+    ts2::objd::ObjectDefinition definition;
+    definition.fields.assign(0x70, 0);
+    definition.fields[ts2::objd::field::kType] = 4;
+    code.addObjectType(kObjectGroup, definition);
+    const ObjectType& type = *code.objectType(definition.guid());
+
+    // A square footprint (data 8 bit 0x80): a blocking core and a padded copy.
+    SimObject table;
+    table.id = 7;
+    table.x = 3 * 65536 + 32768;  // 3.5
+    table.y = 4 * 65536 + 32768;  // 4.5
+    table.data[8] = 0x80;
+    auto items = objectRouteItems(table, table, type, code, nullptr);
+    CHECK(items.size() == 2 && items[0].type == 11 && items[1].type == 10 && items[0].owner == 7);
+    CHECK(std::abs(items[0].rect.x0 - 3.01f) < 1e-4f && std::abs(items[1].rect.x0 - 2.885f) < 1e-4f);
+
+    // Held in a slot, off the lot, or a door: nothing.
+    SimObject held = table;
+    held.data[2] = 3;
+    CHECK(objectRouteItems(held, held, type, code, nullptr).empty());
+    SimObject offLot = table;
+    offLot.x = kOffLot;
+    CHECK(objectRouteItems(offLot, offLot, type, code, nullptr).empty());
+    ts2::objd::ObjectDefinition door = definition;
+    door.fields[ts2::objd::field::kType] = 8;
+    door.fields[ts2::objd::field::kGuid1] = 1;
+    code.addObjectType(kObjectGroup, door);
+    // A door (no model here): only the doorway square through its wall, half a tile in front of it.
+    const auto doorItems = objectRouteItems(table, table, *code.objectType(door.guid()), code, nullptr);
+    CHECK(doorItems.size() == 1 && doorItems[0].kind == RouteItemKind::Solid && doorItems[0].cost == 1);
+    CHECK(std::abs(doorItems[0].rect.y0 - 4.8f) < 1e-4f && std::abs(doorItems[0].rect.y1 - 5.2f) < 1e-4f);
+}
+
+void routeGridSplitsAndPasses() {
+    using namespace ts2::sim;
+    RouteGrid grid(2, 2);
+    CHECK(grid.cells().front().size == 2);
+    RouteItem floor{{0, 0, 2, 2}, 1, 0, RouteItemKind::Floor, true, 0};
+    grid.add(floor);
+    CHECK(grid.cells().size() == 1);  // covers the root whole: no split
+    RouteItem wall{{0.925f, 0, 1.075f, 1}, kBlockedCost, 15, RouteItemKind::Wall, false, 0};
+    grid.add(wall);
+    const auto& onWall = grid.cells()[static_cast<std::size_t>(grid.leafAt(1.0f, 0.5f))];
+    CHECK(onWall.size == RouteGrid::kFinestSize);
+    CHECK(onWall.items.size() == 2);
+    CHECK(!grid.passage(onWall).walkable());
+    const auto& open = grid.cells()[static_cast<std::size_t>(grid.leafAt(0.25f, 1.5f))];
+    CHECK(open.size == 1);  // far from the wall the leaves stay large
+    CHECK(grid.passage(open).walkable() && grid.passage(open).cost == 1);
+    CHECK(grid.leafAt(-1, 0) == -1);
+
+    RouteGrid bare(1, 1);
+    bare.add({{0, 0, 0.5f, 0.5f}, 12, 0, RouteItemKind::WallJoint, false, 0});
+    CHECK(bare.passage(bare.cells()[static_cast<std::size_t>(bare.leafAt(0.1f, 0.1f))]).type == kNoFloorType);
+    bare.add({{0, 0, 1, 1}, 1, 0, RouteItemKind::Floor, true, 0});
+    const auto joint = bare.passage(bare.cells()[static_cast<std::size_t>(bare.leafAt(0.1f, 0.1f))]);
+    CHECK(joint.walkable() && joint.cost == 12);
+    bare.add({{0, 0, 0.5f, 0.5f}, kBlockedCost, 15, RouteItemKind::Wall, false, 0});
+    CHECK(!bare.passage(bare.cells()[static_cast<std::size_t>(bare.leafAt(0.1f, 0.1f))]).walkable());
+    bare.add({{0, 0, 0.5f, 0.5f}, 1, 0, RouteItemKind::Solid, false, 0});
+    CHECK(bare.passage(bare.cells()[static_cast<std::size_t>(bare.leafAt(0.1f, 0.1f))]).walkable());
+}
+
+void clockAdvancesAndReads() {
+    std::array<std::int16_t, 60> g{};
+    namespace gl = ts2::sim::global;
+    g[gl::kHour] = 15;
+    g[gl::kMinute] = 22;
+    g[gl::kSecond] = 58;
+    g[gl::kDayOfMonth] = 16;
+    g[gl::kMonth] = 6;
+    g[gl::kYear] = 1997;
+    CHECK(ts2::sim::clockText(g) == "Mon 3:22 pm");
+    ts2::sim::advanceClock(g);
+    CHECK(g[gl::kSecond] == 0 && g[gl::kMinute] == 23 && ts2::sim::clockText(g) == "Mon 3:23 pm");
+    g[gl::kHour] = 23;
+    g[gl::kMinute] = 59;
+    g[gl::kSecond] = 58;
+    g[gl::kDayOfMonth] = 30;
+    ts2::sim::advanceClock(g);
+    CHECK(g[gl::kHour] == 0 && g[gl::kDayOfMonth] == 1 && g[gl::kMonth] == 7 && ts2::sim::clockText(g) == "Tue 12:00 am");
+    g[gl::kBudgetLow] = 968;
+    g[gl::kBudgetHigh] = 2;
+    CHECK(ts2::sim::funds(g) == 20968);
+}
+
 // Add/Change the Action String: the text from table 0x12E (own group, then semi-global, then
 // global), or an icon; a missing text is an error.
 void actionStringSetsTextAndIcon() {
@@ -2521,6 +3035,44 @@ ts2::luascript::Script compileScript(const std::string& name, const std::string&
     }
     lua_close(L);
     return script;
+}
+
+// A script stuck in an endless loop is stopped instead of freezing the game, and scripts run
+// normally afterwards.
+void luaEndlessLoopIsStopped() {
+    ts2::sim::LuaRuntime runtime;
+    runtime.load({}, {compileScript("Forever", "while true do end"), compileScript("Fine", "SetScriptReturnValue(true)")});
+    CHECK(runtime.problems.empty());
+    for (int round = 0; round < 2; ++round) {
+        ts2::sim::ScriptCall stuck;
+        CHECK(!runtime.run("Forever", stuck) && stuck.luaError.find("too long") != std::string::npos);
+        ts2::sim::ScriptCall fine;
+        CHECK(runtime.run("Fine", fine) && fine.returnValue);
+    }
+}
+
+// A script that raises an error that isn't text fails with a readable message.
+void luaErrorWithoutTextIsReported() {
+    ts2::sim::LuaRuntime runtime;
+    runtime.load({}, {compileScript("Table", "error({})")});
+    ts2::sim::ScriptCall c;
+    CHECK(!runtime.run("Table", c) && !c.luaError.empty());
+}
+
+// A script that asks for gigabytes of memory, at once or by growing a string, fails instead of
+// using up the computer's memory, and scripts run normally afterwards.
+void luaMemoryIsCapped() {
+    ts2::sim::LuaRuntime runtime;
+    runtime.load({}, {compileScript("Huge", "local s = string.rep('x', 1000000000)"),
+                      compileScript("Growing", "local s = 'x' while true do s = s .. s end"),
+                      compileScript("Fine", "SetScriptReturnValue(true)")});
+    CHECK(runtime.problems.empty());
+    for (const char* name : {"Huge", "Growing"}) {
+        ts2::sim::ScriptCall greedy;
+        CHECK(!runtime.run(name, greedy) && greedy.luaError.find("memory") != std::string::npos);
+        ts2::sim::ScriptCall fine;
+        CHECK(runtime.run("Fine", fine) && fine.returnValue);
+    }
 }
 
 // Primitive 0x7E runs a Lua script named in string table 0x130; the script reads the
@@ -2852,6 +3404,14 @@ void scenegraphHashesAndTextures() {
     const std::vector<std::uint8_t> alphas = {0, 155, 255, 7};
     const auto shadow = ts2::scenegraph::decodeRgba(alphas, 2, 2, 3);
     CHECK(shadow[0] == 0 && shadow[3] == 0 && shadow[4] == 0 && shadow[7] == 155 && shadow[11] == 255 && shadow[15] == 7);
+    // A size whose pixel count would wrap around to nothing is refused, not decoded into no memory.
+    bool refused = false;
+    try {
+        ts2::scenegraph::decodeRgba(alphas, 0x80000000u, 0x80000000u, 1);
+    } catch (const std::exception&) {
+        refused = true;
+    }
+    CHECK(refused);
 
     // A lot's scene record names the object's model and its material overrides (group: material).
     std::vector<std::uint8_t> record(64, 0);
@@ -2877,6 +3437,32 @@ void scenegraphHashesAndTextures() {
     const auto so = ts2::scenegraph::parseSceneObject(record);
     CHECK(so.model == "couchModern" && so.overrides.size() == 1 && so.overrides[0].material == "couchmodern_fabric_blue" &&
           so.overrides[0].group == "fabric");
+
+    // Older records (cObject version 0x10, often inside a cAnimatable block) have no overrides, and
+    // a record without entries has none either; the position that follows isn't read as a count.
+    record.assign(64, 0);
+    u32(0x7D4F2BB8);
+    u32(0x0F);
+    str("cAnimatable");
+    u32(0xFA1C39F7);
+    u32(0x10);
+    str("cObject");
+    str("windowtwotilewideloft");
+    u32(1);
+    str("windowtwotilewideloft");
+    u32(0);
+    u32(0x41780000);  // 15.5, the object's x
+    const auto older = ts2::scenegraph::parseSceneObject(record);
+    CHECK(older.model == "windowtwotilewideloft" && older.overrides.empty());
+    record.assign(64, 0);
+    u32(0xFA1C39F7);
+    u32(0x11);
+    str("cObject");
+    str("noModel");
+    u32(0);
+    u32(0x41A14138);  // a position, not an override count
+    const auto empty = ts2::scenegraph::parseSceneObject(record);
+    CHECK(empty.model == "noModel" && empty.overrides.empty());
 }
 
 // Inventories come from the saved neighborhood; scripts list, count, add and change tokens. Token
@@ -3442,6 +4028,19 @@ void uiScriptsParse() {
         "<LEGACY clsid=GZWinBMP iid=IGZWinBMP area=(0,0,1,1) >\r\n";
     const auto windows = ts2::ui::parse(script);
     CHECK(windows.size() == 2 && windows[0].children.size() == 1 && windows[0].children[0].children.size() == 1);
+    // Windows nested far deeper than any of the game's scripts are refused rather than overflowing
+    // the stack.
+    std::string deep;
+    for (int i = 0; i < 10000; ++i) {
+        deep += "<LEGACY clsid=GZWinGen >\r\n<CHILDREN>\r\n";
+    }
+    bool refused = false;
+    try {
+        ts2::ui::parse(deep);
+    } catch (const std::exception&) {
+        refused = true;
+    }
+    CHECK(refused);
     const auto& root = windows[0];
     CHECK(root.text("iid") == "IGZWinGen" && root.number("id") == 0xcda360ceu && root.flag("winflag_visible"));
     CHECK((root.list("area") == std::vector<std::int64_t>{137, 85, 839, 647}));
@@ -3480,6 +4079,15 @@ void targaImagesDecode() {
     CHECK(b && b->width == 3 && b->height == 1);
     CHECK((b->rgba == std::vector<std::uint8_t>{30, 20, 10, 40, 30, 20, 10, 40, 70, 60, 50, 80}));
     CHECK(!ts2::tga::decode(std::vector<std::uint8_t>(10, 0)));
+    // A header claiming far more pixels than the data can hold is refused before any memory is set
+    // aside for them, plain or run-length coded.
+    auto huge = packed;
+    huge[12] = huge[13] = huge[14] = huge[15] = 0xFF;  // 65535 x 65535
+    CHECK(!ts2::tga::decode(huge));
+    huge[13] = huge[15] = 0x30;  // 12543 x 12543: within the size limit, still far too few bytes
+    CHECK(!ts2::tga::decode(huge));
+    huge[2] = 2;  // plain
+    CHECK(!ts2::tga::decode(huge));
 }
 
 // A neighborhood's moving picture: one 32 x 32 block, a pixel written out then runs of one color,
@@ -3826,6 +4434,74 @@ void vertexAliasesFollowKind() {
     CHECK(second == std::vector<float>({4, 4, 2, 2}));
 }
 
+// The packs are found in both installation layouts: the Ultimate Collection's folders named after
+// their packs, and the Legacy Collection's EP1-EP9 and SP1-SP8 (where Mansion & Garden is EP9).
+// The skin drawn under clothes, as the running game names it: "topnaked" under a body outfit,
+// "bottomnaked" under a top and bottom; nothing for skin tones that aren't the game's own.
+void skinUnderClothesNames() {
+    ts2::scene::SimLook look;
+    look.age = 8;
+    look.gender = 1;
+    look.skinTone = "00000003-0000-0000-0000-000000000000";
+    CHECK(ts2::scene::skinUnderClothes(look) == "aftopnaked_nude_s3");
+    CHECK(ts2::scene::skinUnderClothes(look, true) == "afbottomnaked_nude_s3");
+    look.age = 4;
+    look.gender = 2;
+    CHECK(ts2::scene::skinUnderClothes(look, true) == "tmbottomnaked_nude_s3");
+    look.skinTone = "12345678-0000-0000-0000-000000000000";
+    CHECK(ts2::scene::skinUnderClothes(look).empty());
+}
+
+// A joint the animation doesn't move is posed with the mesh's own rest place for it, under its posed
+// parent; long hair turns its hair joints further than the skeleton does.
+void unanimatedJointsKeepTheMeshRest() {
+    using ts2::scene::Transform;
+    ts2::scene::Rig rig;
+    rig.nodes.push_back({"head", -1, {0, 0, 1}, {0, 0, 0, 1}});
+    rig.nodes.push_back({"f_hair", 0, {0, 0, 0}, {0.70710678f, 0, 0, 0.70710678f}});  // a quarter turn about x
+    std::vector<Transform> world;
+    ts2::scene::poseRig(rig, nullptr, 0, world);
+    ts2::scene::Mesh mesh;
+    mesh.skin.push_back({"f_hair", Transform{}, Transform{}, Transform::of({0, 0, 0}, {1, 0, 0, 0})});  // a half turn
+    mesh.skin.push_back({"f_hair", Transform{}, Transform{}, std::nullopt});
+    std::vector<Transform> out;
+    ts2::scene::skinMatrices(mesh, {1, 1}, rig, nullptr, world, out);
+    CHECK(out.size() == 2);
+    float own[3] = {0, 1, 0}, skeleton[3] = {0, 1, 0};
+    out[0].apply(own, true);
+    out[1].apply(skeleton, true);
+    CHECK(std::abs(own[1] + 1) < 1e-5f && std::abs(own[2] - 1) < 1e-5f);
+    CHECK(std::abs(skeleton[1]) < 1e-5f && std::abs(skeleton[2] - 2) < 1e-5f);
+}
+
+void installedPacksAreFound() {
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() / "neots2-install-test";
+    fs::remove_all(root);
+    auto pack = [&](const fs::path& folder) {
+        fs::create_directories(root / folder / "TSData" / "Res" / "Objects");
+        std::ofstream(root / folder / "TSData" / "Res" / "Objects" / "objects.package").put('\0');
+    };
+    auto codes = [&] {
+        std::string out;
+        for (const auto& product : ts2::content::findProducts(root)) {
+            out += product.code + " ";
+        }
+        return out;
+    };
+    for (const char* folder : {"Legacy/Base", "Legacy/EP4", "Legacy/SP8", "Legacy/EP9"}) {
+        pack(folder);
+    }
+    CHECK(codes() == "base ep4 sp8 sp9 ");
+    CHECK((ts2::content::installedPacksMask(ts2::content::findProducts(root)) & (1u << 16)) != 0);  // Mansion & Garden
+    fs::remove_all(root);
+    for (const char* folder : {"Double Deluxe/Base", "Fun with Pets/SP9", "Seasons"}) {
+        pack(folder);
+    }
+    CHECK(codes() == "base ep5 sp9 ");
+    fs::remove_all(root);
+}
+
 int main(int argc, char** argv) {
     const std::string_view filter = argc > 1 ? argv[1] : "";
     const std::pair<const char*, void (*)()> tests[] = {
@@ -3849,6 +4525,7 @@ int main(int argc, char** argv) {
         {"unimplemented primitive stops with its opcode", unimplementedPrimitiveStopsWithItsOpcode},
         {"jump past the end is an error", jumpPastTheEndIsAnError},
         {"attributes belong to each object", attributesBelongToEachObject},
+        {"Init - Object sets defaults; attributes by param", initObjectSetsDefaultsAndAttributesByParam},
         {"object id field matches the object", objectIdFieldMatchesTheObject},
         {"stack object is reached through its id", stackObjectIsReachedThroughItsId},
         {"each frame keeps its own stack object", eachFrameKeepsItsOwnStackObject},
@@ -3875,8 +4552,26 @@ int main(int argc, char** argv) {
         {"Get Distance To measures in tiles", getDistanceToMeasuresInTiles},
         {"Push Interaction queues for the Sim", pushInteractionQueuesForTheSim},
         {"Idle for Input starts queued interactions", idleForInputStartsQueuedInteractions},
+        {"Animate Sim waits for its animation", animateSimWaitsForItsAnimation},
+        {"the Sim clock advances and reads", clockAdvancesAndReads},
+        {"the route grid splits along items and passes by their types", routeGridSplitsAndPasses},
+        {"floor route items follow the floors", floorRouteItemsFollowTheFloors},
+        {"post route items use the post footprint", postRouteItemsUseThePostFootprint},
+        {"object footprints follow the model", objectFootprintsFollowTheModel},
+        {"type signatures sum the call graph", typeSignaturesSumTheCallGraph},
+        {"reset objects start over", resetObjectsStartOver},
+        {"object route items follow the game rules", objectRouteItemsFollowTheGameRules},
+        {"Test Object Type compares the original GUID", testObjectTypeComparesTheOriginalGuid},
+        {"Find Best Object picks the best rated nearest", findBestObjectPicksTheBestRatedNearest},
+        {"Run Functional Tree calls the object's tree", runFunctionalTreeCallsTheObjectsTree},
         {"Add/Change the Action String sets text and icon", actionStringSetsTextAndIcon},
         {"Lua script primitive runs scripts", luaScriptPrimitiveRunsScripts},
+        {"Lua endless loop is stopped", luaEndlessLoopIsStopped},
+        {"Lua memory is capped", luaMemoryIsCapped},
+        {"Lua error without text is reported", luaErrorWithoutTextIsReported},
+        {"Installed packs are found", installedPacksAreFound},
+        {"Skin under clothes is named as the game names it", skinUnderClothesNames},
+        {"Joints the animation leaves keep the mesh's own rest", unanimatedJointsKeepTheMeshRest},
         {"ObjectManager scripts find objects", objectManagerScriptsFindObjects},
         {"data table scripts keep values", dataTableScriptsKeepValues},
         {"object scripts read and write values", objectScriptsReadAndWriteValues},
@@ -3976,7 +4671,20 @@ int main(int argc, char** argv) {
             continue;
         }
         const int before = failures;
+#if defined(_MSC_VER) && defined(_DEBUG)
+        // In debug builds, memory a test leaves allocated is a failure.
+        _CrtMemState start, end, change;
+        _CrtMemCheckpoint(&start);
         test();
+        _CrtMemCheckpoint(&end);
+        if (_CrtMemDifference(&change, &start, &end) && change.lCounts[_NORMAL_BLOCK] > 0) {
+            std::printf("  leaked %zu blocks, %zu bytes\n", change.lCounts[_NORMAL_BLOCK], change.lSizes[_NORMAL_BLOCK]);
+            _CrtMemDumpAllObjectsSince(&start);
+            ++failures;
+        }
+#else
+        test();
+#endif
         std::printf("%s %s\n", failures == before ? "[pass]" : "[FAIL]", name);
     }
     std::printf("\n%zu tests, %d failed checks\n", std::size(tests), failures);

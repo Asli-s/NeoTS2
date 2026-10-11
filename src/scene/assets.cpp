@@ -196,26 +196,38 @@ std::vector<Image> Assets::textureFaces(const std::string& name) {
     return out;
 }
 
-std::string Assets::slotBone(std::uint32_t guid, std::size_t slot) {
-    if (!objectTypesRead_) {
-        objectTypesRead_ = true;
-        for (const auto& r : objects_.resources()) {
-            if (r.entry.key.type != types::kObjectDefinition) {
-                continue;
-            }
-            try {
-                const auto d = objd::parse(objects_.read(r));
-                objectTypes_[d.guid()] = {r.entry.key.group, d.field(objd::field::kSlotsId)};
-            } catch (const std::exception&) {
-            }
+void Assets::readObjectTypes() {
+    if (objectTypesRead_) {
+        return;
+    }
+    objectTypesRead_ = true;
+    for (const auto& r : objects_.resources()) {
+        if (r.entry.key.type != types::kObjectDefinition) {
+            continue;
+        }
+        try {
+            auto d = objd::parse(objects_.read(r));
+            const std::uint32_t guid = d.guid();
+            objectTypes_[guid] = {r.entry.key.group, std::move(d)};
+        } catch (const std::exception&) {
         }
     }
+}
+
+const objd::ObjectDefinition* Assets::objectDefinition(std::uint32_t guid) {
+    readObjectTypes();
     const auto type = objectTypes_.find(guid);
-    if (type == objectTypes_.end() || type->second.second == 0) {
+    return type == objectTypes_.end() ? nullptr : &type->second.definition;
+}
+
+std::string Assets::slotBone(std::uint32_t guid, std::size_t slot) {
+    readObjectTypes();
+    const auto type = objectTypes_.find(guid);
+    if (type == objectTypes_.end() || type->second.definition.field(objd::field::kSlotsId) == 0) {
         return {};
     }
     // The type's SLOT entries name bones through its "Model - Bones" string table.
-    const auto [group, slotsId] = type->second;
+    const std::uint32_t group = type->second.group, slotsId = type->second.definition.field(objd::field::kSlotsId);
     const auto* slots = objects_.find({types::kSlots, group, slotsId, 0});
     const auto* names = objects_.find({types::kStringTable, group, kBoneNames, 0});
     if (slots == nullptr || names == nullptr) {
@@ -285,7 +297,7 @@ void Assets::readCatalog() {
             }
             const auto id = static_cast<std::uint32_t>(std::stoul(guid->second));
             if (type == kFenceProperties) {
-                fences_[id] = {p["rail"], p["diagrail"], p["post"]};
+                fences_[id] = {p["rail"], p["diagrail"], p["post"], p["maywalkover"] == "1"};
             } else if (type == kRoofProperties) {
                 roofPatterns_[id] = {p["texturetop"], p["textureunder"], p["textureedges"], p["texturetrim"]};
             } else if (const auto material = p.find("material"); material != p.end()) {

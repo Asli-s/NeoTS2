@@ -6,6 +6,7 @@
 #include "formats/objd.hpp"
 #include "formats/resource_types.hpp"
 #include "scene/lot_parts.hpp"
+#include "scene/rig.hpp"
 #include "scene/sims.hpp"
 
 #include <algorithm>
@@ -270,36 +271,49 @@ private:
             log(object, "placed", so.model);
         }
         // Objects held in a container slot (object data 2: container id, 3: slot number) sit at that
-        // slot's bone in the container's model.
-        std::vector<int> resolved(shown_.size(), 0);  // 0 not yet, 1 in progress, 2 done
-        auto resolve = [&](auto&& self, std::size_t i) -> const Transform& {
-            Shown& s = shown_[i];
-            if (resolved[i] != 0) {
-                return s.world;
-            }
-            resolved[i] = 1;
+        // slot's bone in the container's model, so each is placed after its container.
+        auto containerOf = [&](std::size_t i) -> std::optional<std::size_t> {
+            const Shown& s = shown_[i];
             const auto container = byId.find(static_cast<std::uint32_t>(s.object->state.data[2]));
             if (s.object->state.data[2] > 0 && container != byId.end() && container->second != i) {
-                const Shown& c = shown_[container->second];
-                const Transform& base = self(self, container->second);
-                std::string name;
-                if (c.object->type) {
-                    name = assets_.slotBone(c.object->type->guid, static_cast<std::size_t>(s.object->state.data[3]));
-                }
-                const Transform* bone = name.empty() ? nullptr : b_.bone(c.model, name);
-                const Transform slot = bone ? base * *bone : base;
-                // The saved direction is the slot's rounded to 45 degrees unless the player turned the
-                // object on it: keep whole quarter turns of difference.
-                const float slotYaw = std::atan2(slot.m[4], slot.m[0]);
-                const float turn = std::round(std::remainder(s.yaw - slotYaw, 2 * kPi) / (kPi / 2)) * (kPi / 2);
-                s.world = slot * Transform::at(0, 0, 0, turn);
-                ++stats_.inSlots;
+                return container->second;
             }
-            resolved[i] = 2;
-            return s.world;
+            return std::nullopt;
         };
+        auto placeInSlot = [&](std::size_t i, std::size_t container) {
+            Shown& s = shown_[i];
+            const Shown& c = shown_[container];
+            const Transform& base = c.world;
+            std::string name;
+            if (c.object->type) {
+                name = assets_.slotBone(c.object->type->guid, static_cast<std::size_t>(s.object->state.data[3]));
+            }
+            const Transform* bone = name.empty() ? nullptr : b_.bone(c.model, name);
+            const Transform slot = bone ? base * *bone : base;
+            // The saved direction is the slot's rounded to 45 degrees unless the player turned the
+            // object on it: keep whole quarter turns of difference.
+            const float slotYaw = std::atan2(slot.m[4], slot.m[0]);
+            const float turn = std::round(std::remainder(s.yaw - slotYaw, 2 * kPi) / (kPi / 2)) * (kPi / 2);
+            s.world = slot * Transform::at(0, 0, 0, turn);
+            ++stats_.inSlots;
+        };
+        // A chain of containers is followed without recursion (a broken lot could chain thousands)
+        // and placed from its outermost container in; a loop of containers is cut where it closes.
+        std::vector<int> placed(shown_.size(), 0);  // 0 not yet, 1 in the chain being placed, 2 done
+        std::vector<std::size_t> chain;
         for (std::size_t i = 0; i < shown_.size(); ++i) {
-            resolve(resolve, i);
+            chain.clear();
+            for (std::optional<std::size_t> k = i; k && placed[*k] == 0; k = containerOf(*k)) {
+                placed[*k] = 1;
+                chain.push_back(*k);
+            }
+            for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+                const auto container = containerOf(*it);
+                if (container && placed[*container] == 2) {
+                    placeInSlot(*it, *container);
+                }
+                placed[*it] = 2;
+            }
             shown_[i].instance = b_.scene().instances.size();
             b_.place(shown_[i].mesh, std::to_string(shown_[i].object->id) + " " + shown_[i].model, shown_[i].world, Part::Object,
                      shown_[i].object->state.header.value1 - 1);
@@ -343,23 +357,54 @@ private:
             const SimLook look = simLook(assets_, file->second);
             const float angle = kPi / 2 - static_cast<float>(sim->state.data[1]) * kPi / 4;
             const Transform at = Transform::at(x, y, heights_.tile(h.value1 - 1, x, y), angle);
-            // Standing, as the game shows an idle Sim: its age's idle loop (adults "a-", teens "t-").
+            // Standing, as the game shows an idle Sim: its age's idle loop (adults "a-", teens "t-"),
+            // played from its start.
             const char* prefix = look.age == 8 ? "a" : look.age == 4 ? "t" : nullptr;
             const std::string idle = prefix ? std::string(prefix) + "-idle-neutral-armsSide-wtC-breatheLoop" : std::string();
-            const auto animation = idle.empty() ? std::nullopt : loadAnimation(assets_, idle);
-            const Pose pose = animation ? posedSkeleton(assets_, look.skeleton, &*animation, 0) : Pose{};
+            Actor actor;
+            actor.object = sim->id;
+            actor.place = at;
+            actor.rig = rig(look.skeleton);
+            actor.animation = animation(look.skeleton, idle);
+            std::vector<Transform> world;
+            if (actor.rig) {
+                poseRig(*actor.rig, actor.animation.get(), 0, world);
+            }
+            // A top and a bottom worn together share one texture: the skin, the top, then the bottom.
+            auto firstMaterial = [&](std::uint32_t kind) {
+                for (const auto& part : look.parts) {
+                    if (part.part == kind && !part.overrides.empty()) {
+                        return part.overrides.front().material;
+                    }
+                }
+                return std::string();
+            };
+            const std::string top = firstMaterial(kTopPart), bottom = firstMaterial(kBottomPart);
+            const std::string separates =
+                !top.empty() && !bottom.empty() ? separatesOverSkin(b_, assets_, look, top, bottom) : std::string();
             for (const auto& part : look.parts) {
-                // A body outfit is drawn over the Sim's skin (its uncovered arms, hands, neck).
+                // Clothes are drawn over the Sim's skin (its uncovered arms, hands, neck).
                 auto overrides = part.overrides;
-                if (part.part == 8) {
+                if (part.part == kBodyPart) {
                     for (auto& o : overrides) {
                         o.material = clothesOverSkin(b_, assets_, look, o.material);
                     }
+                } else if (!separates.empty() && (part.part == kTopPart || part.part == kBottomPart)) {
+                    for (auto& o : overrides) {
+                        if (o.material == top || o.material == bottom) {
+                            o.material = separates;
+                        }
+                    }
                 }
-                const int mesh = pose.empty() ? b_.model(part.model, overrides) : b_.posedModel(part.model, overrides, pose, idle + "@0");
-                b_.place(mesh, std::to_string(sim->id) + " " + part.model, at, Part::Object, h.value1 - 1);
+                const int mesh = actor.rig ? b_.skinnedModel(part.model, overrides) : b_.model(part.model, overrides);
+                const std::size_t instance = b_.scene().instances.size();
+                if (b_.place(mesh, std::to_string(sim->id) + " " + part.model, at, Part::Object, h.value1 - 1) && actor.rig &&
+                    !b_.scene().meshes[static_cast<std::size_t>(mesh)].skin.empty()) {
+                    actor.skinned.push_back({instance, skinNodes(b_.scene().meshes[static_cast<std::size_t>(mesh)], *actor.rig)});
+                }
             }
-            holdBySim(*sim, file->second, at, pose);
+            holdBySim(*sim, file->second, actor, world);
+            b_.scene().actors.push_back(std::move(actor));
             assets_.useCharacterFile({});
             ++stats_.sims;
             log(*sim, "placed", file->second.filename().string());
@@ -367,17 +412,21 @@ private:
     }
 
     // Objects a Sim holds (a ring, the plumbob over the selected Sim) go to the bone of the Sim's slot
-    // they are in, as the Sim stands; through holders with no model of their own (the head slots
-    // holder), whose own slot offsets aren't known, at the holder's place.
-    void holdBySim(const content::LotObject& sim, const std::filesystem::path& characterFile, const Transform& at, const Pose& pose) {
+    // they are in, and follow it as the Sim moves; through holders with no model of their own (the
+    // head slots holder), whose own slot offsets aren't known, at the holder's place. `world` is
+    // the Sim's rig as it stands now.
+    void holdBySim(const content::LotObject& sim, const std::filesystem::path& characterFile, Actor& actor,
+                   const std::vector<Transform>& world) {
         std::map<std::uint32_t, const content::LotObject*> objects;
         for (const auto& o : lot_.objects) {
             objects[o.id] = &o;
         }
-        std::map<std::uint32_t, std::optional<Transform>> held;  // object id -> where, once known
-        auto where = [&](auto&& self, std::uint32_t id, int depth) -> std::optional<Transform> {
+        // The rig node an object is held at, through its containers: -1 at the Sim's own place,
+        // nullopt when not held by the Sim.
+        std::map<std::uint32_t, std::optional<int>> held;
+        auto node = [&](auto&& self, std::uint32_t id, int depth) -> std::optional<int> {
             if (id == sim.id) {
-                return at;
+                return -1;
             }
             const auto o = objects.find(id);
             if (o == objects.end() || depth > 8 || o->second->state.data[2] <= 0) {
@@ -387,11 +436,10 @@ private:
             if (const auto it = held.find(id); it != held.end()) {
                 return it->second;
             }
-            std::optional<Transform> result;
+            std::optional<int> result;
             if (container == sim.id) {
                 const std::string bone = simSlotBone(characterFile, static_cast<std::size_t>(o->second->state.data[3]));
-                const auto joint = pose.find(bone);
-                result = joint != pose.end() ? at * joint->second : at;
+                result = actor.rig && !bone.empty() ? actor.rig->find(bone) : -1;
             } else {
                 result = self(self, container, depth + 1);
             }
@@ -402,11 +450,43 @@ private:
             if (s.object->state.data[2] <= 0) {
                 continue;
             }
-            if (const auto w = where(where, s.object->id, 0)) {
-                s.world = *w;
-                b_.scene().instances[s.instance].transform = *w;
+            if (const auto n = node(node, s.object->id, 0)) {
+                s.world = *n >= 0 && static_cast<std::size_t>(*n) < world.size() ? actor.place * world[static_cast<std::size_t>(*n)]
+                                                                                   : actor.place;
+                b_.scene().instances[s.instance].transform = s.world;
+                actor.held.push_back({s.instance, *n});
             }
         }
+    }
+
+    // A skeleton's rig, loaded once per lot.
+    std::shared_ptr<const Rig> rig(const std::string& skeleton) {
+        if (skeleton.empty()) {
+            return nullptr;
+        }
+        auto& r = rigs_[skeleton];
+        if (!r) {
+            auto loaded = std::make_shared<Rig>(loadRig(assets_, skeleton));
+            if (!loaded->nodes.empty()) {
+                r = std::move(loaded);
+            }
+        }
+        return r;
+    }
+
+    // An animation bound to a skeleton's rig, loaded once per lot; nullptr when missing.
+    std::shared_ptr<const RigAnimation> animation(const std::string& skeleton, const std::string& name) {
+        const auto r = rig(skeleton);
+        if (!r || name.empty()) {
+            return nullptr;
+        }
+        auto& a = animations_[skeleton + "|" + name];
+        if (!a) {
+            if (auto loaded = loadAnimation(assets_, name)) {
+                a = std::make_shared<RigAnimation>(bindAnimation(*r, std::make_shared<anim::Animation>(std::move(*loaded))));
+            }
+        }
+        return a;
     }
 
     // The lowest and highest points of a mesh, below and above its origin, and the highest point still
@@ -583,7 +663,8 @@ private:
             }
         }
 
-        Mesh mesh{"terrain", {}};
+        Mesh mesh;
+        mesh.name = "terrain";
         const auto* textures = lot_.terrainTextures ? &*lot_.terrainTextures : nullptr;
         canvas.material = textures ? b_.terrainMaterial(textures->canvas, kDetailRepeats, kShade, false) : -1;
         if (canvas.material < 0) {
@@ -734,9 +815,24 @@ private:
 
     // Roofs are shaped before the walls, as the topmost walls along a gable end follow its slopes (a
     // plain gable stands in where no wall does).
+    // Whether a saved roof's corners and slope are real numbers on a lot-sized area; a broken file's
+    // roof is left out rather than built huge.
+    static bool sensibleRoof(const roofs::Roof& roof) {
+        constexpr float kMaxSpan = 256;  // tiles; lots are far smaller
+        for (const float v : {roof.x0, roof.y0, roof.x1, roof.y1, roof.slope}) {
+            if (!std::isfinite(v) || std::abs(v) > kMaxSpan) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     void shapeRoofs() {
         roofs_.reserve(lot_.roofs.size());
         for (const auto& roof : lot_.roofs) {
+            if (!sensibleRoof(roof)) {
+                continue;
+            }
             RoofLook look;
             if (const auto* pattern = assets_.roofPattern(roof.pattern)) {
                 // The top texture is a 5 x 5 grid of roof pieces (plain courses, ridge and hip caps; each
@@ -922,6 +1018,8 @@ private:
     }
     std::vector<ShapedRoof> roofs_;  // reserved up front: walls point at their shapes
     std::vector<Shown> shown_;
+    std::map<std::string, std::shared_ptr<const Rig>> rigs_;
+    std::map<std::string, std::shared_ptr<const RigAnimation>> animations_;
 };
 
 } // namespace

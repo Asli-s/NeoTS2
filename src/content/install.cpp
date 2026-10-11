@@ -18,6 +18,7 @@ struct KnownProduct {
     std::string_view code;
     std::string_view name;
     std::string_view keyword;
+    std::string_view folder = {};  // another folder name some releases use for it
 };
 
 constexpr std::array<KnownProduct, 18> kReleaseOrder = {{
@@ -38,7 +39,7 @@ constexpr std::array<KnownProduct, 18> kReleaseOrder = {{
     {"sp7", "Kitchen & Bath Interior Design Stuff", "kitchen"},
     {"sp8", "IKEA Home Stuff",       "ikea"},
     {"ep8", "Apartment Life",        "apartment life"},
-    {"sp9", "Mansion & Garden Stuff", "mansion"},
+    {"sp9", "Mansion & Garden Stuff", "mansion", "ep9"},  // the Legacy Collection's EP9 folder
 }};
 
 std::string lower(std::string_view s) {
@@ -51,7 +52,7 @@ std::string lower(std::string_view s) {
 
 int matchComponent(const std::string& component) {
     for (std::size_t i = 0; i < kReleaseOrder.size(); ++i) {
-        if (component == kReleaseOrder[i].code) {
+        if (component == kReleaseOrder[i].code || component == kReleaseOrder[i].folder) {
             return static_cast<int>(i);
         }
     }

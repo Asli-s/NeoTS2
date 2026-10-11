@@ -9,7 +9,9 @@
 #include "formats/resource_types.hpp"
 #include "formats/str.hpp"
 #include "sim/index_code_source.hpp"
+#include "sim/lot_simulation.hpp"
 #include "sim/lot_world.hpp"
+#include "sim/type_signature.hpp"
 #include "sim/vm.hpp"
 
 #include <algorithm>
@@ -385,32 +387,56 @@ int runOne(ResourceIndex& index, std::uint32_t group, std::uint16_t instance,
     return 0;
 }
 
-// Builds a world from a saved lot and runs every saved thread for a number of ticks: a sleeping
-// thread waits out its ticks, any other thread is resumed until it sleeps, ends or stops.
-int runLot(ResourceIndex& index, const std::filesystem::path& lotPath, std::size_t ticks,
-           std::size_t maxSteps, const WantDefinitionsPtr& wants, const ScriptsPtr& scripts) {
-    const auto neighborhood = ts2::content::neighborhoodOfLot(lotPath);
-    const std::size_t characters = ts2::content::addCharacters(index, neighborhood);
+// Compares the object type table saved with a lot (its Init and Main signatures and two OBJD counts)
+// with the installed object types, one line per type: saved and installed values, and "changed".
+int typeChanges(ResourceIndex& index, const std::filesystem::path& lotPath) {
     ts2::sim::IndexCodeSource code(index);
+    const auto lot = ts2::content::loadLot(lotPath);
+    std::size_t changed = 0;
+    for (const auto& e : lot.types.entries) {
+        std::uint32_t saved[5];
+        for (std::size_t i = 0; i < 5; ++i) {
+            saved[i] = e.unknown[2 * i] | static_cast<std::uint32_t>(e.unknown[2 * i + 1]) << 16;
+        }
+        const auto* type = code.objectType(e.guid);
+        if (type == nullptr) {
+            std::printf("%08X  not installed  %s\n", e.guid, e.name.c_str());
+            continue;
+        }
+        const auto* functions = code.objectFunctions(*type);
+        auto signature = [&](std::size_t entry) -> std::uint32_t {
+            if (functions == nullptr || entry >= functions->size()) {
+                return 0;
+            }
+            return ts2::sim::treeSignature(code, type->group, (*functions)[entry].action);
+        };
+        const std::uint32_t init = signature(0), main = signature(1);
+        const std::uint32_t attributes = type->definition.field(0x3A), arrays = type->definition.field(0x3B);
+        const bool differs = ts2::sim::typeChangedSinceSave(code, *type, e);
+        changed += differs;
+        std::printf("%08X  saved %08X %08X %08X %08X %08X  installed %08X %08X  objd 3A %u 3B %u%s  %s\n", e.guid, saved[0],
+                    saved[1], saved[2], saved[3], saved[4], init, main, attributes, arrays, differs ? "  changed" : "",
+                    e.name.c_str());
+    }
+    std::printf("%zu types, %zu with changed code\n", lot.types.entries.size(), changed);
+    return 0;
+}
+
+// Brings a saved lot to life and runs it for a number of ticks, then says why scripts stopped.
+int runLot(ResourceIndex& index, const std::filesystem::path& install, const std::filesystem::path& lotPath,
+           std::size_t ticks) {
     const auto primitives = editorTable(index, kPrimitiveNames);
     const auto owners = editorTable(index, kDataOwners);
     const auto genericCalls = editorTable(index, kGenericSimsCalls);
     const auto searchTypes = editorTable(index, kSearchTypes);
 
-    const auto lot = ts2::content::loadLot(lotPath);
-    ts2::sim::World world;
-    const auto report = ts2::sim::buildWorld(lot, code, world);
-    if (const auto hood = ts2::content::neighborhoodPackage(neighborhood); std::filesystem::exists(hood)) {
-        world.setNeighborhood(ts2::sim::savedNeighborhood(ts2::content::loadNeighborhood(hood)));
-    }
-    if (wants) {
-        world.setWantDefinitions(wants);
-    }
-    world.setScripts(scripts);
-    std::printf("lot version 0x%X: %zu objects saved, %zu built (%zu with a saved thread), "
-                "%zu character files, %zu neighbors, %zu stale data table records\n",
-                lot.objectMap.version, lot.objects.size(), report.objects, report.threads, characters,
-                world.neighbors() ? world.neighbors()->size() : 0, report.staleDataTables);
+    ts2::sim::LotSimulation sim(install, lotPath);
+    auto& world = sim.world();
+    const auto& report = sim.report();
+    std::printf("%zu objects built (%zu with a saved thread, %zu reset: type changed since the save), %zu neighbors, "
+                "%zu stale data table records\n",
+                report.objects, report.threads, sim.resets(), world.neighbors() ? world.neighbors()->size() : 0,
+                report.staleDataTables);
     std::map<std::string, std::size_t> problems;
     for (const auto& p : report.problems) {
         ++problems[p.message];
@@ -419,43 +445,8 @@ int runLot(ResourceIndex& index, const std::filesystem::path& lotPath, std::size
         std::printf("  build problem: %s: %zu\n", message.c_str(), n);
     }
 
-    ts2::sim::Vm vm(code, {maxSteps, 64}, &world);
-    std::map<std::string, std::size_t> stops;
-    std::map<std::string, std::string> stopExamples;
-    std::size_t resumes = 0;
     for (std::size_t tick = 0; tick < ticks; ++tick) {
-        std::vector<std::int16_t> ids;
-        world.nextAfter(0, [&](const ts2::sim::SimObject& o) {
-            ids.push_back(o.id);
-            return false;
-        });
-        for (const std::int16_t id : ids) {
-            ts2::sim::SimObject* object = world.find(id);
-            if (!object || !object->thread.isRunning()) {
-                continue;
-            }
-            if (object->thread.sleepTicks > 0) {
-                --object->thread.sleepTicks;
-                continue;
-            }
-            ++resumes;
-            const RunResult r = vm.resume(*object);
-            if (r.outcome == Outcome::Sleeping) {
-                continue;
-            }
-            const std::string why = describe(r, primitives, owners, genericCalls, searchTypes);
-            if (++stops[why] == 1) {
-                const auto bhav = code.behavior(r.group, r.instance);
-                char where[200];
-                std::snprintf(where, sizeof(where), "tick %zu, object %d (%s), in %s (0x%08X 0x%04X) at %u%s%s",
-                              tick, id, object->definition.name.c_str(),
-                              bhav ? bhav->name.c_str() : "?", r.group, r.instance, r.pc,
-                              r.detail.empty() || why.find(r.detail) != std::string::npos ? "" : "; ",
-                              why.find(r.detail) != std::string::npos ? "" : r.detail.c_str());
-                stopExamples[why] = where;
-            }
-        }
-        world.purge();
+        sim.tick();
     }
 
     std::size_t running = 0;
@@ -463,14 +454,46 @@ int runLot(ResourceIndex& index, const std::filesystem::path& lotPath, std::size
         running += o.thread.isRunning();
         return false;
     });
-    std::printf("after %zu ticks: %zu resumes, %zu threads still running\n", ticks, resumes, running);
+    std::printf("after %zu ticks: %zu threads still running\n", ticks, running);
+    // Where each Sim's script is.
+    world.nextAfter(0, [&](const ts2::sim::SimObject& o) {
+        if (o.isPerson()) {
+            std::printf("  Sim %d (%s): ", o.id, o.definition.name.c_str());
+            if (o.thread.frames.empty()) {
+                std::printf("no script running");
+            } else {
+                const auto& f = o.thread.frames.back();
+                std::printf("in %s (0x%08X 0x%04X) at %u, %zu frames deep, %s", f.code ? f.code->name.c_str() : "?", f.group,
+                            f.instance, f.pc, o.thread.frames.size(), o.thread.sleepTicks > 0 ? "sleeping" : "running");
+            }
+            std::printf("%s%s, %zu queued\n", o.animation ? ", animating " : "", o.animation ? o.animation->name.c_str() : "",
+                        o.queue.size());
+        }
+        return false;
+    });
+    std::map<std::string, std::pair<std::size_t, std::string>> stops;  // described reason -> count, example
+    for (const auto& [key, stop] : sim.stops()) {
+        const RunResult& r = stop.first;
+        const std::string why = describe(r, primitives, owners, genericCalls, searchTypes);
+        const auto* object = world.find(stop.object);
+        const auto bhav = sim.code().behavior(r.group, r.instance);
+        char where[200];
+        std::snprintf(where, sizeof(where), "tick %zu, object %d (%s), in %s (0x%08X 0x%04X) at %u", stop.tick, stop.object,
+                      object ? object->definition.name.c_str() : "removed", bhav ? bhav->name.c_str() : "?", r.group,
+                      r.instance, r.pc);
+        auto& entry = stops[why];
+        if (entry.first == 0) {
+            entry.second = where;
+        }
+        entry.first += stop.count;
+    }
     std::vector<std::pair<std::size_t, std::string>> sorted;
-    for (const auto& [why, n] : stops) {
-        sorted.emplace_back(n, why);
+    for (const auto& [why, entry] : stops) {
+        sorted.emplace_back(entry.first, why);
     }
     std::sort(sorted.rbegin(), sorted.rend());
     for (const auto& [n, why] : sorted) {
-        std::printf("  %5zu  %s\n         e.g. %s\n", n, why.c_str(), stopExamples[why].c_str());
+        std::printf("  %5zu  %s\n         e.g. %s\n", n, why.c_str(), stops[why].second.c_str());
     }
     return 0;
 }
@@ -525,7 +548,10 @@ int main(int argc, char** argv) {
         }
         if (mode == "--lot" && argc >= 4) {
             const std::size_t ticks = argc >= 5 ? std::stoul(argv[4]) : 100;
-            return runLot(index, std::filesystem::path(argv[3]), ticks, 10000, wantDefinitionsFor(argv[1]), scriptsFor(argv[1], index));
+            return runLot(index, std::filesystem::path(argv[1]), std::filesystem::path(argv[3]), ticks);
+        }
+        if (mode == "--type-changes" && argc >= 4) {
+            return typeChanges(index, std::filesystem::path(argv[3]));
         }
         if (mode == "--strings" && argc >= 5) {
             const auto labels = editorTable(index, static_cast<std::uint32_t>(std::stoul(argv[4], nullptr, 0)),
