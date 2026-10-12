@@ -115,9 +115,10 @@ yourself (GitHub issues are public).
 
 ## How NeoTS2 is made
 
-Much of the code is written with AI (Claude). I direct the work and check each part against
-the real game. Since it's AI-assisted, don't treat it as a reference for the game's file
-formats or behavior without checking it yourself.
+Much of the code is written together with AI (Claude), and I direct the work. Formats and
+behavior come from studying the game itself, but only the cases we've tested are verified, and
+some details are still open. If you use NeoTS2 as a reference for the game's file formats, check
+anything important against the game yourself.
 
 ## Credits
 
