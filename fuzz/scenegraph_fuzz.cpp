@@ -22,6 +22,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     attempt([&] { sg::parseResourceNode(input); });
     attempt([&] { sg::parseDataLists(input); });
     attempt([&] { sg::parseSceneObject(input); });
+    attempt([&] { sg::parseLight(input); });
     attempt([&] {
         const auto image = sg::parseImage(input);
         for (const auto& mip : image.mips) {

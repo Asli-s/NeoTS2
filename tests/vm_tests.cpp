@@ -1,6 +1,8 @@
 #if defined(_MSC_VER) && defined(_DEBUG)
 #include <crtdbg.h>
 #endif
+#include <limits>
+#include <cmath>
 #include "sim/clock.hpp"
 #include "sim/object_footprint.hpp"
 #include "sim/object_reset.hpp"
@@ -18,12 +20,40 @@
 #include "formats/slot.hpp"
 #include "content/build_scripts.hpp"
 #include "content/install.hpp"
+#include "content/neighborhood.hpp"
+#include "content/ui_meters.hpp"
+#include "content/target_pictures.hpp"
+#include "diag/log.hpp"
+#include "diag/report.hpp"
+#include "diag/upload.hpp"
+#include "sim/motives.hpp"
 #include "scene/rig.hpp"
 #include "scene/sims.hpp"
+#include "scene/portrait.hpp"
 #include "formats/fencepostlayer.hpp"
+#include "content/lot.hpp"
+#include "scene/floor_light.hpp"
+#include "scene/light_grid.hpp"
+#include "scene/wall_runs.hpp"
+#include "scene/lamp_lights.hpp"
+#include "scene/portal_records.hpp"
+#include "scene/room_samples.hpp"
+#include "content/covering_colors.hpp"
+#include "content/lighting.hpp"
+#include "scene/portable_math.hpp"
+#include <cfenv>
+#include "scene/room_light.hpp"
+#include "scene/wall_light.hpp"
+#include "scene/light_corners.hpp"
+#include "scene/lot_lighting.hpp"
+#include "scene/light_map_texels.hpp"
+#include "scene/lot_light_maps.hpp"
+#include "scene/lot_shadow.hpp"
+#include "scene/window_light.hpp"
 #include "scene/neighborhood_lighting.hpp"
 #include "scene/neighborhood_paint.hpp"
 #include "scene/lot_parts.hpp"
+#include "scene/lot_scene.hpp"
 #include "scene/view.hpp"
 #include "formats/namemap.hpp"
 #include "formats/roofs.hpp"
@@ -33,6 +63,8 @@
 #include "formats/swaf.hpp"
 #include "formats/ttab.hpp"
 #include "formats/tga.hpp"
+#include "formats/image.hpp"
+#include "formats/jpeg.hpp"
 #include "formats/reia.hpp"
 #include "formats/camera_config.hpp"
 #include "formats/lot_description.hpp"
@@ -52,16 +84,23 @@ extern "C" {
 
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cstring>
 #include <functional>
+#include <future>
 #include <array>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <random>
+#include <iterator>
 #include <optional>
+#include <set>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -3391,6 +3430,61 @@ void savedDataTablesAreRead() {
 // Scenegraph resources are filed under name hashes: instance 0xFF000000 | crc24, high instance
 // CRC-32/MPEG-2 of the lowercase name.
 // DXT1 blocks hold two 5:6:5 colors and a 2-bit index per pixel.
+void lightResourcesAreRead() {
+    // A spot light as the game saves one (built by hand): container, the light's classes, its name,
+    // then intensity, specular, colour, falloff rate, cone angle, penumbra and range.
+    std::vector<std::uint8_t> b;
+    auto u32 = [&](std::uint32_t v) {
+        for (int i = 0; i < 4; ++i) b.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
+    };
+    auto f32 = [&](float v) { u32(std::bit_cast<std::uint32_t>(v)); };
+    auto str = [&](const std::string& s) {
+        b.push_back(static_cast<std::uint8_t>(s.size()));
+        b.insert(b.end(), s.begin(), s.end());
+    };
+    auto block = [&](const std::string& name, std::uint32_t version) {
+        str(name);
+        u32(0);
+        u32(version);
+    };
+    u32(0xFFFF0001);
+    u32(0);           // no links
+    u32(1);
+    u32(0xC9C81BAD);  // one block
+    block("cSpotLight", 5);
+    block("cStandardLightBase", 11);
+    block("cSGResource", 2);
+    str("window_light_lght");
+    block("cLightT", 1);
+    block("cSGResource", 2);
+    str("window_light_lght");
+    block("cReferentNode", 1);
+    block("cObjectGraphNode", 4);
+    u32(0);
+    b.push_back(0);
+    str("window_light");
+    for (float v : {1.0f, 1.0f, 1.0f, 0.99362f, 0.772f, 0.4f, 1.65807f, 0.17453f, 2.35293f}) f32(v);
+    const auto light = ts2::scenegraph::parseLight(b);
+    CHECK(light.kind == "cSpotLight" && light.name == "window_light");
+    CHECK((light.color == std::array<float, 3>{1.0f, 0.99362f, 0.772f}));
+    CHECK(light.intensity == 1 && light.falloffRate == 0.4f && light.coneAngle == 1.65807f && light.range == 2.35293f);
+    // Cut short or of another kind: refused.
+    auto cut = b;
+    cut.resize(cut.size() - 6);
+    auto refused = [](const std::vector<std::uint8_t>& data) {
+        try {
+            ts2::scenegraph::parseLight(data);
+        } catch (const std::exception&) {
+            return true;
+        }
+        return false;
+    };
+    CHECK(refused(cut));
+    auto other = b;
+    other[18] = 'X';  // "cXpotLight"
+    CHECK(refused(other));
+}
+
 void scenegraphHashesAndTextures() {
     const auto key = ts2::hash::scenegraphKey("fridgeCheap_cres");
     CHECK(key.instance == 0xFF4F7CA0 && key.instanceHigh == 0x128A6A6A);
@@ -3847,6 +3941,38 @@ Instruction removeObject(std::uint8_t who, std::uint8_t flags, std::uint16_t t, 
     return in;
 }
 
+Instruction changeLight(std::uint8_t flags, std::int16_t object, std::uint8_t percent, std::uint8_t light) {
+    Instruction in = primitiveCall(0x006F, T, F);
+    in.operands[1] = flags;
+    in.operands[2] = owner::kLiteral;
+    in.operands[3] = static_cast<std::uint8_t>(object);
+    in.operands[4] = static_cast<std::uint8_t>(object >> 8);
+    in.operands[7] = percent;
+    in.operands[8] = light;
+    return in;
+}
+
+void changeLightSetsLightStrength() {
+    auto run = [](const Instruction& in, std::int16_t temp0, Outcome& outcome) {
+        MemoryCodeSource code;
+        code.add(kObjectGroup, 0x1000, bhav({in}));
+        SmallWorld w;
+        w.controller->thread.temps[0] = temp0;
+        Vm vm(code, {}, &w.world);
+        outcome = vm.run(*w.controller, 0x1000).outcome;
+        return w.world.find(3) ? w.world.find(3)->lightStrength : -1.0f;
+    };
+    Outcome outcome{};
+    CHECK(run(changeLight(0, 3, 40, 0xFF), 0, outcome) == static_cast<float>(40 * 0.01) && outcome == Outcome::True);
+    CHECK(run(changeLight(0, 3, 150, 0xFF), 0, outcome) == 0.5f);        // out of range: half
+    CHECK(run(changeLight(0x02, 3, 0, 0xFF), 75, outcome) == 0.75f);     // from Temp 0
+    CHECK(run(changeLight(0x02, 3, 0, 0xFF), -3, outcome) == 0.5f);
+    run(changeLight(0, 3, 40, 0), 0, outcome);                            // a named light with no name table
+    CHECK(outcome == Outcome::Error);
+    run(changeLight(0, 99, 40, 0xFF), 0, outcome);                        // no such object
+    CHECK(outcome == Outcome::Error);
+}
+
 void removeObjectRemovesTheStackObject() {
     MemoryCodeSource code;
     code.add(kObjectGroup, 0x1000, bhav({
@@ -4066,6 +4192,7 @@ void targaImagesDecode() {
     plain.insert(plain.end(), std::begin(rows), std::end(rows));
     const auto a = ts2::tga::decode(plain);
     CHECK(a && a->width == 2 && a->height == 2);
+    CHECK(!ts2::tga::decode(plain, 1) && !ts2::image::decode(plain, 1) && ts2::image::decode(plain, 2));  // a caller's size limit
     CHECK((std::vector<std::uint8_t>(a->rgba.begin(), a->rgba.begin() + 4) == std::vector<std::uint8_t>{9, 8, 7, 255}));
     CHECK((std::vector<std::uint8_t>(a->rgba.begin() + 8, a->rgba.begin() + 12) == std::vector<std::uint8_t>{3, 2, 1, 255}));
 
@@ -4402,6 +4529,16 @@ void lotDescriptionParse() {
         CHECK(lot.x == 98 && lot.y == 80 && lot.elevation == 324.1875f && lot.id == 32 && lot.facing == 1);
         CHECK(lot.texture == "lottexture");
     }
+    // From version 0x12 the description ends with the rooms' light percents.
+    auto withRooms = make(18, 11);
+    withRooms.insert(withRooms.end(), 6, 0);
+    for (const std::uint16_t v : std::initializer_list<std::uint16_t>{3, 0, 2, 40, 6, 40, 9, 100}) {
+        withRooms.insert(withRooms.end(), {static_cast<std::uint8_t>(v), static_cast<std::uint8_t>(v >> 8)});
+    }
+    const auto lit = ts2::nhood::parseLotDescription(withRooms);
+    CHECK(lit.roomLightPercents.size() == 3 && lit.roomLightPercent(2) == 40 && lit.roomLightPercent(9) == 100);
+    CHECK(lit.roomLightPercent(5) == 100 && lit.roomLightPercent(0) == 100);
+    CHECK(ts2::nhood::parseLotDescription(make(18, 11)).roomLightPercents.empty());
 }
 
 void vertexAliasesFollowKind() {
@@ -4476,6 +4613,1295 @@ void unanimatedJointsKeepTheMeshRest() {
     CHECK(std::abs(skeleton[1]) < 1e-5f && std::abs(skeleton[2] - 2) < 1e-5f);
 }
 
+// Objects' daylight: the values the game's shaders received on a lot by day (captured), from the
+// "day" lighting state: each light as strength * (colour - 0.5), the skylight as the ambient.
+// A floor grid of one room, every cell linked to its neighbours, lit only by its ambient.
+ts2::scene::floorlight::Grid testFloor(int width, int height) {
+    ts2::scene::floorlight::Grid g;
+    g.width = width;
+    g.height = height;
+    g.insideAmbient = {0.05f, 0.05f, 0.05f};
+    g.cells.resize(static_cast<std::size_t>(4 * width * height));
+    g.tiles.assign(static_cast<std::size_t>(width * height), {true, 0});
+    for (auto& cell : g.cells) {
+        cell.halves[0].valid = true;
+        cell.halves[0].room = 1;
+        cell.halves[0].links = 0xFF;
+    }
+    return g;
+}
+
+float floorLight(ts2::scene::floorlight::Grid& g, int x, int y) {
+    return g.at(x, y)->halves[0].light[0];
+}
+
+void floorLightSpreadsAndFades() {
+    using namespace ts2::scene::floorlight;
+    ts2::scene::LightSource lamp;
+    lamp.color = {1, 1, 1};
+    lamp.room = 1;
+    lamp.x1 = lamp.y1 = 0.5f;  // the first half tile only
+
+    auto g = testFloor(1, 1);
+    light(g, {lamp}, nullptr);
+    CHECK(std::abs(floorLight(g, 0, 0) - 1) < 1e-6f);
+    CHECK(std::abs(floorLight(g, 1, 0) - (1 / 1.4f + 0.01f)) < 1e-6f);   // one step, falloff 1 x 0.4
+    CHECK(std::abs(floorLight(g, 0, 1) - (1 / 1.4f + 0.01f)) < 1e-6f);
+    CHECK(std::abs(floorLight(g, 1, 1) - (1 / 1.56f + 0.01f)) < 1e-6f);  // diagonal: 1.4 times the falloff
+
+    // A wall between the first and second tile: no links across it.
+    g = testFloor(2, 1);
+    for (int y = 0; y < 2; ++y) {
+        g.at(1, y)->halves[0].links &= static_cast<std::uint8_t>(~0xE0);  // directions 5, 6, 7 go right
+        g.at(2, y)->halves[0].links &= static_cast<std::uint8_t>(~0x0E);  // 1, 2, 3 go left
+    }
+    light(g, {lamp}, nullptr);
+    CHECK(floorLight(g, 1, 0) > 0.5f);
+    CHECK(floorLight(g, 2, 0) == 0.05f && floorLight(g, 3, 1) == 0.05f);
+
+    // A lamp in another room lights nothing.
+    g = testFloor(1, 1);
+    ts2::scene::LightSource other = lamp;
+    other.room = 2;
+    light(g, {other}, nullptr);
+    CHECK(floorLight(g, 0, 0) == 0.05f);
+
+    // From the level above: a floor between stops it, otherwise it loses half.
+    ts2::scene::LightSource above = lamp;
+    above.level = 1;
+    g = testFloor(1, 1);
+    light(g, {above}, [](int, int, int) { return true; });
+    CHECK(floorLight(g, 0, 0) == 0.05f);
+    light(g, {above}, [](int, int, int) { return false; });
+    CHECK(std::abs(floorLight(g, 0, 0) - 0.5f) < 1e-6f);
+
+    // A grid whose cells do not match its size is left alone.
+    g = testFloor(1, 1);
+    g.cells.pop_back();
+    light(g, {lamp}, nullptr);
+    CHECK(floorLight(g, 0, 0) == 0);
+}
+
+// One wall face two tiles long along x, looking toward -y, in room 1.
+ts2::scene::walllight::Walls testWall() {
+    ts2::scene::walllight::Walls w;
+    ts2::scene::walllight::Run run;
+    run.room = 1;
+    for (int i = 0; i < 2; ++i) {
+        ts2::scene::walllight::Segment s;
+        s.x0 = static_cast<float>(i);
+        s.x1 = static_cast<float>(i + 1);
+        run.segments.push_back(s);
+    }
+    w.runs.push_back(run);
+    return w;
+}
+
+// A level of plain floor for the grid builder, every tile floored and in room 1.
+ts2::scene::lightgrid::LevelInput gridInput(int width, int height) {
+    ts2::scene::lightgrid::LevelInput in;
+    in.width = width;
+    in.height = height;
+    in.floor.assign(static_cast<std::size_t>(width * height), 1);
+    in.walls.assign(static_cast<std::size_t>(width * height), 0);
+    in.roomAt = [](float, float) { return std::int16_t{1}; };
+    return in;
+}
+
+void lightGridIsBuiltAsTheGame() {
+    using namespace ts2::scene;
+    // Open floor: each half tile links to every neighbour inside the grid, nothing at the edge.
+    auto g = lightgrid::build(gridInput(2, 1));
+    CHECK(g.fits());
+    CHECK(g.at(0, 0)->halves[0].links == 0x70);  // down, down-right, right
+    CHECK(g.at(1, 0)->halves[0].links == 0x7C);
+    CHECK(g.at(1, 1)->halves[0].links == 0xC7);
+    CHECK(g.at(0, 0)->halves[0].valid && !g.at(0, 0)->halves[1].valid);
+    CHECK(g.at(0, 0)->halves[0].room == 1 && !g.at(0, 0)->halves[0].outside);
+
+    // A wall between the two tiles: nothing links across it, and lamp light stays on its side.
+    auto in = gridInput(2, 1);
+    in.walls[0] = lightgrid::kPlusX;
+    in.walls[1] = lightgrid::kMinusX;
+    g = lightgrid::build(in);
+    for (int y = 0; y < 2; ++y) {
+        CHECK((g.at(1, y)->halves[0].links & 0xE0) == 0);
+        CHECK((g.at(2, y)->halves[0].links & 0x0E) == 0);
+    }
+    LightSource lamp;
+    lamp.color = {1, 1, 1};
+    lamp.room = 1;
+    lamp.x1 = lamp.y1 = 0.5f;
+    CHECK(floorlight::light(g, {lamp}, nullptr));
+    CHECK(g.at(1, 0)->halves[0].light[0] > 0.5f);
+    CHECK(g.at(2, 0)->halves[0].light[0] == 0);
+
+    // A diagonal wall along x = y splits the tile: both halves of each quarter take part, each
+    // with the room on its side, and nothing links across the wall.
+    in = gridInput(1, 1);
+    in.walls[0] = lightgrid::kDiagonalXEqualsY;
+    in.roomAt = [](float x, float y) { return static_cast<std::int16_t>(y < x ? 2 : 0); };
+    g = lightgrid::build(in);
+    CHECK(g.tiles[0].diagonal == 2);
+    for (int y = 0; y < 2; ++y) {
+        for (int x = 0; x < 2; ++x) {
+            const auto& c = *g.at(x, y);
+            CHECK(c.halves[0].valid && c.halves[1].valid);
+            CHECK(c.halves[0].room == 2 && !c.halves[0].outside);
+            CHECK(c.halves[1].room == 0 && c.halves[1].outside);
+        }
+    }
+    lamp.x0 = 0.5f;
+    lamp.x1 = 1;
+    lamp.y1 = 0.5f;
+    lamp.room = 2;
+    g = lightgrid::build(in);
+    CHECK(floorlight::light(g, {lamp}, nullptr));
+    CHECK(g.at(1, 0)->halves[0].light[0] > 0.5f);
+    CHECK(g.at(0, 1)->halves[1].light[0] == 0);
+
+    // Sizes that don't match or are out of range give an empty grid.
+    in = gridInput(2, 2);
+    in.floor.pop_back();
+    CHECK(!lightgrid::build(in).fits());
+    CHECK(!lightgrid::build(gridInput(0, 3)).fits());
+    CHECK(!lightgrid::build(gridInput(257, 1)).fits());
+
+    // From a lot: an upper tile counts as floor when it or the tile above has floor; walls come
+    // from the room wall graph, fences and bad points left out.
+    ts2::content::Lot lot;
+    ts2::array3d::Array3D floors;
+    floors.width = 3;
+    floors.height = 1;
+    floors.levels = 3;
+    floors.elementSize = 8;
+    floors.elements.assign(3 * 3 * 8, 0);
+    floors.elements[(1 * 3 + 0) * 8] = 5;  // level 1, tile 0
+    floors.elements[(2 * 3 + 1) * 8 + 6] = 5;  // level 2, tile 1, one quarter
+    lot.grids[ts2::content::kFloorGridInstance] = floors;
+    ts2::wallgraph::WallGraph graph;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    graph.points = {{1, 1, 0, 1}, {2, 1, 1, 1}, {3, 2, 0, 1}, {4, 2, 1, 1}, {5, nan, 0, 1}, {6, 0.5f, 1, 1}};
+    graph.walls = {{1, 1, 0, 2, 0}, {2, 3, 0, 4, 0}, {3, 5, 0, 2, 0}, {4, 6, 0, 1, 0}};
+    lot.roomGraph = graph;
+    lot.wallCoverings = {{1, 1, 0, 0}, {2, 0x12345678, 0, 0}, {3, 1, 0, 0}, {4, 1, 0, 0}};
+    const auto blocks = [](std::uint32_t covering) { return covering < 0x10000; };
+    const auto walls = wallruns::wallsOf(lot, blocks);
+    const auto ground = lightgrid::fromLot(lot, 0, walls);
+    CHECK(ground.floor == std::vector<std::uint8_t>({1, 1, 1}));
+    const auto upper = lightgrid::fromLot(lot, 1, walls);
+    CHECK(upper.floor == std::vector<std::uint8_t>({1, 1, 0}));
+    CHECK(upper.walls == std::vector<std::uint8_t>({lightgrid::kPlusX, lightgrid::kMinusX, 0}));
+    CHECK(lightgrid::fromLot(lot, -1, walls).floor.empty());
+}
+
+void wallLightFadesAlongAndUp() {
+    using namespace ts2::scene::walllight;
+    const Pixel p = pack({0.25f, 0.5f, 1.0f});
+    CHECK(p.r == 64 && p.g == 128 && p.b == 255 && p.a == 255);
+
+    ts2::scene::LightSource lamp;
+    lamp.color = {1, 1, 1};
+    lamp.room = 1;
+    lamp.x0 = lamp.x1 = 0.25f;
+    lamp.y0 = lamp.y1 = -1;  // one tile in front of the first half
+
+    auto w = testWall();
+    std::set<int> changed;
+    resetToAmbient(w);
+    lightFromSources(w, {lamp}, nullptr, changed);
+    // 1 x (1 / 1.4)^2 at two half-tiles' distance; a step along fades by 1 / 1.4 in fixed point.
+    const auto& s0 = w.runs[0].segments[0];
+    CHECK(changed.count(0) == 1 && w.runs[0].lamplit);
+    CHECK(s0.halves[0][2].r == 131 && s0.halves[0][0].r == 93);
+    CHECK(s0.halves[1][2].r == 93 && s0.halves[1][5].r == 66);
+
+    // Behind the face, or in another room: nothing.
+    w = testWall();
+    changed.clear();
+    ts2::scene::LightSource behind = lamp;
+    behind.y0 = behind.y1 = 1;
+    ts2::scene::LightSource elsewhere = lamp;
+    elsewhere.room = 2;
+    resetToAmbient(w);
+    lightFromSources(w, {behind, elsewhere}, nullptr, changed);
+    CHECK(changed.empty() && w.runs[0].segments[0].halves[0][2].r == 0);
+
+    // The floor in front lights a dark wall at half its share.
+    w = testWall();
+    changed.clear();
+    resetToAmbient(w);
+    lightFromFloor(w, [](float, float, int) { return std::array<float, 3>{0.5f, 0.5f, 0.5f}; }, changed);
+    CHECK(changed.count(0) == 1 && w.runs[0].segments[1].halves[1][3].r == 32);  // 0.5 x 0.5 x 0.5
+
+    // A wall linked to itself above (bad data) still finishes.
+    w = testWall();
+    w.runs[0].segments[0].up = {0, 0};
+    changed.clear();
+    resetToAmbient(w);
+    lightFromSources(w, {lamp}, nullptr, changed);
+    spread(w, changed);
+    CHECK(w.runs[0].segments[1].halves[1][2].r > 0);
+}
+
+void roomLightMatchesTheGame() {
+    using namespace ts2::scene::roomlight;
+    // A room with no light gets the unlit colour on its sides and floor (a captured room).
+    std::array<std::array<float, 3>, 6> samples{};
+    addUnlitLight(samples, {0.45f, 0.425f, 0.4f}, 0.4f, false);
+    CHECK(samples[0][0] == 0.45f && samples[4][2] == 0.4f && samples[5][0] == 0);
+    // Without a threshold, only rooms no lamp or window lights get it, all of it.
+    std::array<std::array<float, 3>, 6> lit{}, unlit{};
+    addUnlitLight(lit, {0.45f, 0.425f, 0.4f}, 0, true);
+    addUnlitLight(unlit, {0.45f, 0.425f, 0.4f}, 0, false);
+    CHECK(lit[0][0] == 0 && unlit[0][0] == 0.45f);
+
+    Settings object;
+    object.overall = 0.5f;
+    object.directionalBoost = 4;
+    const auto l = lightsFor(samples, object);
+    CHECK(l && l->directionals.size() == 2);
+    CHECK(std::abs(l->ambient[0] - 0.444375f) < 1e-5f);
+    CHECK(std::abs(l->directionals[0].color[0] - 0.3825f) < 1e-5f);  // (0.54 - 0.444375) x 4
+    CHECK(l->directionals[0].direction == (std::array<float, 3>{1, 0, -0.75f}));
+    CHECK(l->directionals[1].direction == (std::array<float, 3>{-1, 0, -0.75f}));
+    CHECK(std::abs(average(samples)[0] - 0.375f) < 1e-6f);
+
+    Settings five = object;
+    five.type = 0;
+    CHECK(!lightsFor(samples, five));
+
+    // A window facing +x and a little +y feeds those two sides by how much it faces them.
+    Samples s;
+    s.addFacing(0.8f, 0.6f, {1, 1, 1});
+    const auto a = s.averages();
+    CHECK(a[kPlusX][0] == 1 && a[kPlusY][0] == 1 && a[kMinusX][0] == 0 && s.weight[kPlusX] == 0.8f);
+}
+
+void windowLightMatchesTheGame() {
+    using namespace ts2::scene::windowlight;
+    // The captured day state of a lot.
+    Daylight day;
+    day.sunColor = {0.97f, 0.94f, 0.83f};
+    day.sunStrength = 2;
+    day.sunDirection = {0.54091f, 0.43273f, 0.72122f};
+    day.sky = {0.5f, 0.5f, 0.5f};
+    day.insidePortals = {0.5f, 1.3f, 0.7f, 1};
+    day.insidePortalSpills = {0.9f, 0.4f, 0.8f, 0.9f};
+
+    // Two windows a tile apart on the same wall take 0.2 x (1 - 1/4) of each other's light.
+    Portal w;
+    w.otherRoom = 1;
+    w.nx = -1;
+    w.y1 = 1;
+    w.size = 1.5f;
+    w.tint = {1, 0.99362f, 0.772f};
+    w.source.color = {1.25f, 1.25f, 1.25f};
+    std::vector<Portal> pair{w, w};
+    pair[1].y0 = 1;
+    pair[1].y1 = 2;
+    suppress(pair, {});
+    CHECK(std::abs(pair[0].suppression - 0.85f) < 1e-6f && std::abs(pair[1].suppression - 0.85f) < 1e-6f);
+
+    // Looking out from the outdoors into room 1, against the sun's x.
+    const auto l = lightsFor(pair[0], true, true, day, {0, 0, 0});
+    CHECK(l && l->spill && l->sources.size() == 2);
+    const float sun = 0.54091f;  // how much the window faces the sun
+    CHECK(std::abs(l->beam.color[0] - 1.94f * 0.5f * 0.85f * 1.5f * sun) < 1e-5f && l->beam.falloff == 1.3f);
+    CHECK(std::abs(l->spill->color[2] - 0.5f * 0.772f * 0.9f * 0.85f * 1.5f) < 1e-5f && l->spill->falloff == 0.4f);
+    CHECK(std::abs(l->sources[0].color[0] - 1.25f * 1.94f * 0.7f * sun) < 1e-5f);  // the sun beam on floors and walls
+    CHECK(std::abs(l->sources[1].color[0] - 1.25f * 0.5f * 0.8f) < 1e-5f && std::abs(l->sources[1].falloff - 0.9f) < 1e-6f);
+
+    // A door lets no sun beam through (doorOrArchDirectMultiplier 0), and without sun nothing is supported.
+    Portal door = pair[0];
+    door.doorOrArch = true;
+    const auto d = lightsFor(door, true, true, day, {0, 0, 0});
+    CHECK(d && d->beam.color[0] == 0 && d->sources.size() == 1);
+    CHECK(!lightsFor(pair[0], true, false, day, {0, 0, 0}));
+}
+
+void wallRunsAreLaidOutAsTheGame() {
+    using namespace ts2::scene;
+    // A room two tiles by one, the same on two levels.
+    std::vector<wallruns::Wall> walls;
+    for (int level = 0; level < 2; ++level) {
+        walls.push_back({level, 0, 0, 2, 0});
+        walls.push_back({level, 2, 0, 2, 1});
+        walls.push_back({level, 2, 1, 0, 1});
+        walls.push_back({level, 0, 1, 0, 0});
+    }
+    const auto roomAt = [](int, float x, float y) { return static_cast<std::int16_t>(x > 0 && x < 2 && y > 0 && y < 1 ? 1 : 0); };
+    auto layout = wallruns::build(walls, roomAt, [](int, const wallruns::Key&) { return false; });
+    CHECK(layout.complete);
+    // Inside and outside of each level, one run per straight side.
+    CHECK(layout.runs.size() == 16);
+    int inside = 0, segments = 0, linked = 0;
+    for (std::size_t r = 0; r < layout.runs.size(); ++r) {
+        const auto& run = layout.runs[r];
+        inside += run.room == 1;
+        for (std::size_t s = 0; s < run.segments.size(); ++s) {
+            ++segments;
+            const auto& seg = run.segments[s];
+            const auto& link = run.level == 0 ? seg.up : seg.down;
+            CHECK((run.level == 0 ? seg.down : seg.up).run < 0);
+            if (link.run >= 0) {
+                ++linked;
+                const auto& other = layout.keys[static_cast<std::size_t>(link.run)][static_cast<std::size_t>(link.segment)];
+                auto same = layout.keys[r][s];
+                same.level = other.level;
+                CHECK(other == same && other.level != run.level);
+            }
+        }
+    }
+    CHECK(inside == 8 && segments == 24 && linked == 24);
+    // The face along y = 0 looking into the room names tile (0, 0) from its -y side, and is walked
+    // so that it looks to its right.
+    bool found = false;
+    for (std::size_t r = 0; r < layout.runs.size(); ++r) {
+        for (std::size_t s = 0; s < layout.keys[r].size(); ++s) {
+            if (layout.keys[r][s] == wallruns::Key{0, 0, 0, 1, 0}) {
+                found = true;
+                const auto& seg = layout.runs[r].segments[s];
+                CHECK(seg.y0 == 0 && seg.y1 == 0 && seg.x1 < seg.x0 && layout.runs[r].room == 1);
+            }
+        }
+    }
+    CHECK(found);
+    // Solid floor between the levels: no links.
+    layout = wallruns::build(walls, roomAt, [](int, const wallruns::Key&) { return true; });
+    for (const auto& run : layout.runs) {
+        for (const auto& seg : run.segments) {
+            CHECK(seg.up.run < 0 && seg.down.run < 0);
+        }
+    }
+
+    // A lone diagonal wall: its two faces, one run each, naming the halves of the tile.
+    layout = wallruns::build({{0, 0, 0, 1, 1}}, roomAt, nullptr);
+    CHECK(layout.runs.size() == 2 && layout.runs[0].diagonal && layout.runs[1].diagonal);
+    std::set<int> parts;
+    for (const auto& keys : layout.keys) {
+        CHECK(keys.size() == 1 && keys[0].side == 0x20);
+        parts.insert(keys[0].part);
+        CHECK(wallruns::quarters(keys[0]) == (keys[0].part == 1 ? 0xC : 3));
+    }
+    CHECK(parts == std::set<int>({1, 3}));
+
+    // Bad walls are left out; too many stop at the limit.
+    layout = wallruns::build({{0, -1, 0, 1, 0}, {0, 0, 0, 0, 0}, {0, 0, 0, 2, 1}, {0, 0, 0, 100000, 0}, {1000, 0, 0, 1, 0}}, roomAt, nullptr);
+    CHECK(layout.runs.empty());
+    std::vector<wallruns::Wall> many;
+    for (int y = 0; y < 200; ++y) {
+        many.push_back({0, 0, y, 20, y});
+    }
+    layout = wallruns::build(many, roomAt, nullptr);
+    std::size_t faces = 0;
+    for (const auto& run : layout.runs) {
+        faces += run.segments.size();
+    }
+    CHECK(!layout.complete && faces <= 4096);
+
+    // The wall light a portal reads: its face's texel in the second half, fourth row, over 255;
+    // outdoors with the outside ambient taken off; black where no face is.
+    layout = wallruns::build({{0, 0, 0, 1, 0}}, [](int, float, float y) { return static_cast<std::int16_t>(y > 0 ? 4 : 0); }, nullptr);
+    CHECK(layout.runs.size() == 2);
+    for (auto& run : layout.runs) {
+        run.segments[0].halves[1][3] = {10, 20, 64, 255};
+    }
+    const std::size_t roomFace = layout.runs[0].room == 4 ? 0 : 1;
+    const auto faceIn = layout.keys[roomFace][0], faceOut = layout.keys[1 - roomFace][0];
+    const std::array<float, 3> white{1, 1, 1};
+    auto in = wallruns::portalSample(layout.runs, layout, faceIn, true, white, 0.25f);
+    CHECK(in[0] == static_cast<float>(64 * static_cast<double>(std::bit_cast<float>(0x3B808081u))) && in[2] == static_cast<float>(10 * static_cast<double>(std::bit_cast<float>(0x3B808081u))));
+    auto out = wallruns::portalSample(layout.runs, layout, faceOut, true, white, 0.25f);
+    CHECK(std::abs(out[0] - (64.0f / 255 - 0.25f)) < 1e-6f);
+    CHECK(wallruns::portalSample(layout.runs, layout, faceOut, false, white, 0.25f) == in);
+    auto missing = faceIn;
+    missing.x = 40;
+    CHECK((wallruns::portalSample(layout.runs, layout, missing, true, white, 0.25f) == std::array<float, 3>{0, 0, 0}));
+}
+
+void wallTexelsAndCornersAreFinishedAsTheGame() {
+    using namespace ts2::scene;
+    using walllight::Pixel;
+    // A room two tiles by one on two levels: each loop's runs follow each other round it.
+    std::vector<wallruns::Wall> walls;
+    for (int level = 0; level < 2; ++level) {
+        walls.push_back({level, 0, 0, 2, 0});
+        walls.push_back({level, 2, 0, 2, 1});
+        walls.push_back({level, 2, 1, 0, 1});
+        walls.push_back({level, 0, 1, 0, 0});
+    }
+    const auto roomAt = [](int, float x, float y) { return static_cast<std::int16_t>(x > 0 && x < 2 && y > 0 && y < 1 ? 1 : 0); };
+    auto layout = wallruns::build(walls, roomAt, [](int, const wallruns::Key&) { return false; });
+    bool cycles = true;
+    for (std::size_t r = 0; r < layout.runs.size(); ++r) {
+        const auto& run = layout.runs[r];
+        const auto& s = run.segments.front();
+        cycles = cycles && run.next >= 0 && layout.runs[static_cast<std::size_t>(run.next)].previous == static_cast<int>(r) &&
+                 run.angle == static_cast<float>(std::atan2(static_cast<double>(s.y1) - s.y0, static_cast<double>(s.x1) - s.x0));
+    }
+    CHECK(cycles);
+    // Inside each room the loop turns right four times; the game misses the turn from -pi/2 to pi
+    // (its angle test does not wrap), so three corners per level, none outside.
+    std::vector<std::vector<lightcorners::Tile>> tiles;
+    for (const auto& keys : layout.keys) {
+        tiles.emplace_back();
+        for (const auto& k : keys) tiles.back().push_back({k.x, k.y, k.level});
+    }
+    walllight::Walls lit;
+    lit.runs = layout.runs;
+    CHECK(lightcorners::corners(lit, tiles).size() == 6);
+    for (auto& run : lit.runs) run.lamplit = true;
+    CHECK(lightcorners::corners(lit, tiles).empty());  // both runs lamp-lit: no corner
+
+    // Texels: each segment's halves with its neighbours' edges, the level above's bottom row on top.
+    for (std::size_t r = 0; r < lit.runs.size(); ++r) {
+        for (std::size_t s = 0; s < lit.runs[r].segments.size(); ++s) {
+            for (std::size_t h = 0; h < 2; ++h) {
+                for (std::size_t row = 0; row < 6; ++row) {
+                    lit.runs[r].segments[s].halves[h][row] = {static_cast<std::uint8_t>(row), static_cast<std::uint8_t>(h), static_cast<std::uint8_t>(s),
+                                                              static_cast<std::uint8_t>(r)};
+                }
+            }
+        }
+    }
+    walllight::pad(lit);
+    bool padded = true;
+    int seen = 0;
+    for (const auto& run : lit.runs) {
+        if (run.level != 0 || run.segments.size() != 2 || run.segments[0].up.run < 0) continue;
+        ++seen;
+        const auto& first = run.segments[0];
+        const auto& second = run.segments[1];
+        const auto& aboveRun = lit.runs[static_cast<std::size_t>(first.up.run)];
+        const auto at = static_cast<std::size_t>(first.up.segment);
+        const auto& above = aboveRun.segments[at];
+        const auto& corner = at > 0 ? aboveRun.segments[at - 1].halves[1][5] : above.halves[0][5];
+        padded = padded && first.texels[1][3] == first.halves[0][2] && first.texels[3][3] == second.halves[0][2] &&
+                 first.texels[0][3] == first.halves[0][2] &&            // no previous segment: its own edge
+                 first.texels[1][0] == above.halves[0][5] &&            // the level above's bottom row
+                 first.texels[1][7] == first.halves[0][5] &&            // nothing below: its own bottom row
+                 first.texels[0][0] == corner;
+    }
+    CHECK(seen > 0 && padded);
+
+    // A lamp-lit run turning a right angle into an unlit one: its last columns are pulled toward
+    // the ambient (texel values from the game's walls on the Caliente lot).
+    walllight::Walls corner;
+    corner.insideAmbient = {0.00085f, 0.00075f, 0.00075f};
+    corner.runs.resize(2);
+    corner.runs[0].room = corner.runs[1].room = 4;
+    corner.runs[0].lamplit = true;
+    corner.runs[0].angle = std::bit_cast<float>(0x40490FDBu);  // pi
+    corner.runs[1].angle = std::bit_cast<float>(0x3FC90FDBu);  // pi / 2
+    corner.runs[0].next = 1;
+    corner.runs[1].previous = 0;
+    corner.runs[0].segments.resize(2);
+    corner.runs[1].segments.resize(1);
+    for (auto& s : corner.runs[0].segments) {
+        for (auto& column : s.texels) column.fill({4, 4, 5, 255});
+    }
+    corner.runs[0].segments[1].texels[3].fill({3, 3, 4, 255});
+    const auto untouched = corner.runs[1].segments[0].texels;
+    lightcorners::blendWalls(corner);
+    const auto& end = corner.runs[0].segments[1].texels;
+    const auto& start = corner.runs[0].segments[0].texels;
+    CHECK((end[3][3] == Pixel{1, 1, 1, 255}));  // 80%
+    CHECK((end[1][3] == Pixel{3, 3, 4, 255}));  // 40%
+    CHECK((start[3][3] == Pixel{3, 3, 4, 255}) && (start[2][3] == Pixel{4, 4, 5, 255}) && (end[0][3] == Pixel{4, 4, 5, 255}));
+    CHECK(corner.runs[1].segments[0].texels == untouched);
+
+    // Floor cells inside a corner are pulled toward the ambient, the nearest most. The game skips
+    // the nearest seven cells without floor but blends the farther ones regardless.
+    floorlight::Grid grid;
+    grid.width = grid.height = 2;
+    grid.cells.resize(16);
+    grid.tiles.resize(4);
+    for (auto& c : grid.cells) {
+        for (auto& h : c.halves) {
+            h.valid = true;
+            h.light = {1, 1, 1};
+        }
+    }
+    grid.at(3, 3)->halves[0].valid = false;  // nearest cell, no floor: left alone
+    grid.at(0, 2)->halves[0].valid = false;  // eighth cell, no floor: blended anyway
+    lightcorners::blendFloor(grid, {{1, 1, 0, 1, false}});
+    const float w1 = std::bit_cast<float>(0x3F3DBDBEu), w7 = std::bit_cast<float>(0x3DA0A0A1u);
+    CHECK(grid.at(3, 3)->halves[0].light[0] == 1);
+    CHECK(grid.at(2, 3)->halves[0].light[0] == static_cast<float>(1.0 - w1));
+    CHECK(grid.at(0, 2)->halves[0].light[0] == static_cast<float>(1.0 - w7));
+    CHECK(grid.at(0, 0)->halves[0].light[0] == 1 && grid.at(2, 3)->halves[1].light[0] == 1);
+    // A short run: two by two cells, both halves; other levels and even directions are left alone.
+    lightcorners::blendFloor(grid, {{1, 1, 0, 1, true}, {1, 1, 1, 1, false}, {1, 1, 0, 2, false}});
+    CHECK(grid.at(2, 3)->halves[1].light[0] == static_cast<float>(1.0 - std::bit_cast<float>(0x3E909091u)));
+    // Far-off or broken corners do nothing.
+    const auto before = grid.cells;
+    lightcorners::blendFloor(grid, {{std::numeric_limits<int>::max(), 0, 0, 1, false}, {-5, -5, 0, 3, false}});
+    bool same = true;
+    for (std::size_t i = 0; i < grid.cells.size(); ++i) same = same && grid.cells[i].halves[0].light == before[i].halves[0].light;
+    CHECK(same);
+}
+
+void lightFilesAreReadAsTheGame() {
+    // Macros, overrides by light name in any case, conditions and state modifiers.
+    const auto l = ts2::content::readLightingText(
+        "seti lightsOff 0\n"
+        "define Four(lightName)\n"
+        "  lightAttribOverride &lightName diffusionSourceIntensity 1   # four\n"
+        "  lightAttribOverride &{lightName} diffusionSourceFloorIntensityScale .65\n"
+        "enddef\n"
+        "define Amber(lightName)\n"
+        "  lightAttribOverride &lightName diffusionSourceColor (1,0.85,0.7)\n"
+        "  lightAttribOverride &lightName color(.5,.6,.7)\n"
+        "enddef\n"
+        "create Four(MyLamp_light)\n"
+        "create Amber (MyLamp_light)\n"
+        "lightAttribOverride MyLamp_light diffusionSourceMin (0,.2)\n"
+        "lightAttribOverride MyLamp_light diffusionSourceIsDirectional 1\n"
+        "if ($lightsOff)\n"
+        "  create Four(Hidden_light)\n"
+        "else\n"
+        "  create Four(Shown_light)\n"
+        "endif\n"
+        "lightingState day\n"
+        "  modifiers insideObjects .8 .7 .35 .5\n"
+        "  diffParam insideAmbientColor (.85, .75, .75)\n"
+        "end\n"
+        "lightingState dusk : day\n"
+        "  modifiers insideObjects 2 3\n"
+        "end\n"
+        "include \"elsewhere.txt\"\n");
+    const auto* lamp = l.light("mylamp_LIGHT");
+    CHECK(lamp != nullptr);
+    if (lamp) {
+        CHECK(lamp->diffusionIntensity == 1.0f && lamp->diffusionFloorScale == 0.65f);
+        CHECK((lamp->diffusionColor == std::array<float, 3>{1, 0.85f, 0.7f}));
+        CHECK((lamp->color == std::array<float, 3>{0.5f, 0.6f, 0.7f}));
+        CHECK((lamp->diffusionMin == std::array<float, 2>{0, 0.2f} && lamp->diffusionDirectional == true));
+        CHECK(!lamp->diffusionFalloff);
+    }
+    CHECK(l.light("hidden_light") == nullptr && l.light("shown_light") != nullptr);
+    const auto& day = l.states.at("day").modifiers.at("insideObjects");
+    CHECK(day.practicalStrength == 0.8f && day.diffusionStrength == 0.7f && day.practicalFalloff == 0.35f && day.diffusionFalloff == 0.5f);
+    const auto& dusk = l.states.at("dusk").modifiers.at("insideObjects");
+    CHECK(dusk.practicalStrength == 2 && dusk.diffusionStrength == 3 && dusk.diffusionFalloff == 0.5f);
+    CHECK((l.states.at("day").diffParams.at("insideAmbientColor") == std::vector<float>{0.85f, 0.75f, 0.75f}));
+
+    // Macros that create themselves or multiply stop at the limits instead of running away.
+    const auto bomb = ts2::content::readLightingText(
+        "define A(x)\n create A(&x)\n create A(&x)\n lightAttribOverride &x intensity 1\nenddef\n"
+        "create A(boom_light)\n");
+    CHECK(bomb.light("boom_light") != nullptr);
+}
+
+void lampsGiveTheGamesRecords() {
+    using namespace ts2::scene;
+    // A ceiling lamp of macro Six in the day state: 1.5 x .7 and falloff 1 x .5, as captured.
+    ts2::content::Lighting::LightAttributes a;
+    a.diffusionIntensity = 1.5f;
+    a.diffusionColor = std::array<float, 3>{1, 0.86f, 0.75f};
+    a.diffusionFloorScale = 0.65f;
+    ts2::content::Lighting::Modifier inside{0.8f, 0.7f, 0.35f, 0.5f};
+    const auto settings = lamplights::scaled(lamplights::settingsFor(&a), inside, 1);
+    CHECK(settings.intensity == 1.05f && settings.falloff == 0.5f && settings.interFloorFalloff == 0.5f);
+    CHECK(lamplights::settingsFor(nullptr).intensity == 0);
+
+    lamplights::LotQueries lot;
+    lot.highestLevel = 1;
+    lot.floorHeight = [](int level, float, float) { return 3.0f * static_cast<float>(level); };
+    lot.tileOnLot = [](int x, int y, int level) { return x >= 0 && y >= 0 && x < 20 && y < 20 && level >= 0 && level <= 1; };
+    float roomX = -1, roomY = -1;
+    lot.roomAt = [&](float x, float y, int level) {
+        roomX = x;
+        roomY = y;
+        return static_cast<std::int16_t>(level + 2);
+    };
+    // Hanging from the ceiling of level 1, facing +x: its -z points down, so its +y gives the facing.
+    lamplights::Placement p;
+    p.position = {8.5f, 8.5f, 5.7f};
+    p.rotation = {0, 0, -0.70710678f, 0.70710678f};
+    const auto s = lamplights::sourceFor(settings, p, lot);
+    CHECK(s.has_value());
+    if (s) {
+        CHECK(s->level == 1 && s->room == 3);
+        CHECK(std::abs(s->angle) < 1e-6f);
+        CHECK(s->x0 == 8 && s->y0 == 8 && s->x1 == 9 && s->y1 == 9);
+        CHECK(std::abs(s->color[0] - 1.05f) < 1e-6f && s->floorIntensity == 0.65f && !s->directional);
+        CHECK(roomX == 8.5f && roomY == 8.5f);
+    }
+    // A window-style light (its area wholly ahead) takes its room in front of it.
+    auto ahead = settings;
+    ahead.min = {0, 0.2f};
+    ahead.max = {0, 2};
+    const auto w = lamplights::sourceFor(ahead, p, lot);
+    CHECK(w.has_value() && std::abs(roomX - 8.7f) < 1e-5f && std::abs(roomY - 8.5f) < 1e-5f);
+    if (w) {
+        CHECK(std::abs(w->x0 - 8.7f) < 1e-5f && std::abs(w->x1 - 10.5f) < 1e-5f && w->y0 == 8.5f && w->y1 == 8.5f);
+    }
+    // No colour, off the lot or nonsense positions: no record.
+    auto dark = settings;
+    dark.intensity = 0;
+    CHECK(!lamplights::sourceFor(dark, p, lot));
+    auto off = p;
+    off.position = {-3, 4, 1};
+    CHECK(!lamplights::sourceFor(settings, off, lot));
+    off.position = {std::numeric_limits<float>::quiet_NaN(), 4, 1};
+    CHECK(!lamplights::sourceFor(settings, off, lot));
+    off.position = {1e30f, 4, 1};
+    CHECK(!lamplights::sourceFor(settings, off, lot));
+
+    // The game's turn for each saved facing, to the bit (its sign form included).
+    const std::uint32_t turns[8][2] = {{0x3F3504F3, 0x3F3504F3}, {0x3EC3EF16, 0x3F6C835E}, {0, 0x3F800000}, {0x3EC3EF13, 0xBF6C835F},
+                                       {0x3F3504F2, 0xBF3504F4}, {0x3F6C835E, 0xBEC3EF18}, {0x3F800000, 0xB33BBD2E}, {0x3F6C835E, 0x3EC3EF15}};
+    for (int d = 0; d < 8; ++d) {
+        const auto q = lamplights::facingRotation(d);
+        CHECK(std::bit_cast<std::uint32_t>(q[2]) == turns[d][0] && std::bit_cast<std::uint32_t>(q[3]) == turns[d][1]);
+        CHECK(q[0] == 0 && q[1] == 0);
+    }
+
+    // A model's light nodes, placed through the nodes above them, then where the object stands.
+    ts2::scenegraph::ResourceNode model;
+    model.nodes.resize(3);
+    model.nodes[0].kind = ts2::scenegraph::SceneNode::Kind::Root;
+    model.nodes[0].children = {1};
+    model.nodes[1].kind = ts2::scenegraph::SceneNode::Kind::Transform;
+    model.nodes[1].translation = {0, 0, 2};
+    model.nodes[1].children = {2, 1, 7};  // itself again and a missing node are ignored
+    model.nodes[2].kind = ts2::scenegraph::SceneNode::Kind::LightRef;
+    model.nodes[2].name = "lamp_light";
+    model.nodes[2].translation = {0, 0.5f, 0};
+    const auto lights = lamplights::lightNodes(model, {{3, 4, 0}, lamplights::facingRotation(0)});  // turned a quarter
+    CHECK(lights.size() == 1 && lights[0].name == "lamp_light");
+    if (!lights.empty()) {
+        const auto& at = lights[0].place;
+        CHECK(std::abs(at.position[0] - 2.5f) < 1e-5f && std::abs(at.position[1] - 4) < 1e-5f && std::abs(at.position[2] - 2) < 1e-6f);
+    }
+}
+
+void portalsAreBuiltAsTheGame() {
+    using namespace ts2::scene;
+    // A wall along x = 2 on the ground floor; west of it room 1, east room 2.
+    portalrecords::LotQueries lot;
+    lot.lamps.highestLevel = 1;
+    lot.lamps.floorHeight = [](int level, float, float) { return 3.0f * static_cast<float>(level); };
+    lot.lamps.tileOnLot = [](int x, int y, int level) { return x >= 0 && y >= 0 && x < 8 && y < 8 && level >= 0 && level <= 1; };
+    lot.lamps.roomAt = [](float x, float, int) { return static_cast<std::int16_t>(x < 2 ? 1 : 2); };
+    lot.inLot = [](float x, float y) { return x >= 0 && y >= 0 && x < 8 && y < 8; };
+    lot.wallAt = [](const portalrecords::Edge& e) { return e.x0 == 2 && e.x1 == 2 && e.level == 0; };
+    lot.roomInFront = [](const portalrecords::Edge& e) { return static_cast<std::int16_t>(e.y1 > e.y0 ? 2 : 1); };  // normal (dy, -dx)
+    lot.roomLit = [](std::int16_t) { return true; };
+
+    // A window light just west of the wall shining east (its -z turned to +x), and one further
+    // along the wall, three tiles on.
+    portalrecords::PortalObject window;
+    window.edge = {2, 0, 0, 2, 1};
+    portalrecords::PortalLight light;
+    light.place.position = {1.9f, 0.5f, 1.5f};
+    light.place.rotation = {0, -0.70710678f, 0, 0.70710678f};
+    light.hasLight = true;
+    light.intensity = 1.5f;
+    light.color = {1, 0.99362f, 0.772f};
+    light.falloffRate = 1;
+    light.settings.intensity = 1.25f;
+    light.settings.min = {0, 0.2f};
+    light.settings.max = {0, 2};
+    window.lights.push_back(light);
+    light.place.position[1] = 3.5f;
+    window.lights.push_back(light);
+    const auto built = portalrecords::build(window, lot, 0.1f);
+    CHECK(built.size() == 2);
+    if (built.size() == 2) {
+        const auto& b = built[0];
+        CHECK(b.room == 1 && b.portal.otherRoom == 2);
+        CHECK(b.portal.nx == 1 && b.portal.ny == 0);
+        CHECK(b.portal.x0 == 2 && b.portal.x1 == 2 && b.portal.y1 - b.portal.y0 == -1);  // walked with its normal into room 1
+        CHECK(b.portal.height == 0 && b.portal.size == 1.5f && b.portal.tint[2] == 0.772f && b.portal.reach == 1);
+        CHECK(std::abs(b.spillPoint[0] - 2.1f) < 1e-6f && b.spillPoint[1] == 0.5f && b.spillPoint[2] == 1.5f);
+        CHECK(std::abs(b.portal.source.color[0] - 1.25f) < 1e-6f && std::abs(b.portal.source.x0 - 2.1f) < 1e-5f);
+        // The second light is moved onto its own tile of the wall.
+        CHECK(std::min(built[1].portal.y0, built[1].portal.y1) == 3 && built[1].spillPoint[1] == 3.5f);
+    }
+
+    // No light resource: no size, a white tint; a light facing along the wall: no portal.
+    window.lights.resize(1);
+    window.lights[0].hasLight = false;
+    auto plain = portalrecords::build(window, lot, 0.1f);
+    CHECK(plain.size() == 1 && plain[0].portal.size == 0 && plain[0].portal.tint[2] == 1);
+    window.lights[0].place.rotation = {0.70710678f, 0, 0, 0.70710678f};  // -z turned to +y
+    CHECK(portalrecords::build(window, lot, 0.1f).empty());
+
+    // Rooms not lit to 100, no wall at the light's tile, or broken positions: nothing.
+    window.lights[0].place.rotation = {0, -0.70710678f, 0, 0.70710678f};
+    lot.roomLit = [](std::int16_t room) { return room != 2; };
+    CHECK(portalrecords::build(window, lot, 0.1f).empty());
+    lot.roomLit = nullptr;
+    window.lights[0].place.position = {1.9f, 0.5f, -1};
+    CHECK(portalrecords::build(window, lot, 0.1f).empty());
+    window.lights[0].place.position = {std::numeric_limits<float>::quiet_NaN(), 0.5f, 1.5f};
+    CHECK(portalrecords::build(window, lot, 0.1f).empty());
+    window.lights[0].place.position = {1.9f, 1e30f, 1.5f};
+    CHECK(portalrecords::build(window, lot, 0.1f).empty());
+    lot.wallAt = [](const portalrecords::Edge&) { return false; };
+    window.lights[0].place.position = {1.9f, 0.5f, 1.5f};
+    CHECK(portalrecords::build(window, lot, 0.1f).empty());
+}
+
+void roomSamplesAreGatheredAsTheGame() {
+    using namespace ts2::scene;
+    // The game's name hashes and thumbnail average.
+    CHECK(ts2::content::nameHash32("TEST") == 0xCC743053u && ts2::content::nameHash24("test") == 0xF86ED0u);
+    const std::vector<std::uint8_t> pixels{255, 0, 0, 255, 0, 255, 0, 0, 0, 0, 255, 255};  // the green one is transparent
+    const auto avg = ts2::content::averageColor(pixels);
+    CHECK(std::abs(avg[0] - 0.5f) < 1e-6f && avg[1] == 0 && std::abs(avg[2] - 0.5f) < 1e-6f);
+    CHECK((ts2::content::averageColor({}) == std::array<float, 3>{0, 0, 0}));
+    ts2::content::CoveringColors none{std::filesystem::path{}};
+    CHECK(!none.color(ts2::content::CoveringKind::Floor, "abc"));
+
+    // A lot two tiles wide with one floor covering, a wall between the tiles, and a portal.
+    ts2::content::Lot lot;
+    ts2::array3d::Array3D floors;
+    floors.width = 2;
+    floors.height = 1;
+    floors.levels = 1;
+    floors.elementSize = 8;
+    floors.elements.assign(2 * 8, 0);
+    for (std::size_t q = 0; q < 4; ++q) floors.elements[q * 2] = 1;  // tile 0 floored, tile 1 bare
+    lot.grids[ts2::content::kFloorGridInstance] = floors;
+    lot.floorPatterns[1] = {"abc", 1};
+    lot.wallPatterns[2] = {"def", 1};
+    ts2::wallgraph::WallGraph graph;
+    graph.points = {{1, 1, 0, 0}, {2, 1, 1, 0}};
+    graph.walls = {{7, 1, 0, 2, 0}, {8, 2, 0, 1, 0}};  // the same wall twice: counted once
+    lot.roomGraph = graph;
+    lot.wallCoverings = {{7, 1, 2, 2}};
+    roomsamples::LotInputs in;
+    in.quarterRoom = [](int, int x, int, int) { return static_cast<std::int16_t>(x == 0 ? 1 : 2); };
+    in.faceRoom = [](const wallruns::Key& k) { return static_cast<std::int16_t>(k.side == 8 ? 1 : 2); };
+    in.covering = [](bool floor, const std::string&) -> std::optional<roomsamples::Color> {
+        if (floor) return roomsamples::Color{1, 1, 1};
+        return std::nullopt;  // the wall's covering has no thumbnail: grey
+    };
+    in.floorLight = [](int, float, float) { return roomsamples::Color{0.8f, 0.8f, 0.8f}; };
+    in.wallLight = [](const wallruns::Key&) { return roomsamples::Color{0.4f, 0.4f, 0.4f}; };
+    const auto rooms = roomsamples::gather(lot, in, {{2, 1, 0, {0.2f, 0.2f, 0.2f}}, {0, 1, 0, {9, 9, 9}}}, roomsamples::Settings{});
+    CHECK(rooms.count(1) && rooms.count(2));
+    if (rooms.count(1) && rooms.count(2)) {
+        const auto& one = rooms.at(1);
+        CHECK(one.weight[roomlight::kFromFloor] == 4 && one.weight[roomlight::kFromCeiling] == 4);
+        CHECK(std::abs(one.sum[roomlight::kFromFloor][0] - 4 * 0.2f) < 1e-6f);  // white floor x 0.25 x 0.8
+        // The wall face looking into room 1 (-x) shows its grey covering half lit: 0.2 x 0.75.
+        CHECK(one.weight[roomlight::kMinusX] == 1 && std::abs(one.sum[roomlight::kMinusX][0] - 0.15f) < 1e-6f);
+        const auto& two = rooms.at(2);
+        CHECK(two.weight[roomlight::kFromFloor] == 0);  // its tile is bare
+        CHECK(two.weight[roomlight::kPlusX] == 2);       // the wall face and the portal
+        CHECK(std::abs(two.sum[roomlight::kPlusX][0] - (0.15f + 0.15f)) < 1e-6f);
+    }
+    // Broken wall points and missing inputs are left out.
+    lot.roomGraph->points[0].x = std::numeric_limits<float>::quiet_NaN();
+    CHECK(roomsamples::gather(lot, in, {}, roomsamples::Settings{}).at(1).weight[roomlight::kMinusX] == 0);
+    CHECK(roomsamples::gather(lot, roomsamples::LotInputs{}, {}, roomsamples::Settings{}).empty());
+}
+
+void lotLightingIsWorkedOutAsTheGame() {
+    using namespace ts2::scene;
+    // Settings: inside ambients, colour and thresholds from the state, outside ones always from the
+    // global settings; room settings by group, else the plain name; the last unlit room line wins.
+    const auto lighting = ts2::content::readLightingText(
+        "set outsideFloorAmbient 0.25\n"
+        "set outsideDiffusionAmbientColor (1, 0.5, 1)\n"
+        "set insideFloorAmbient 0.5\n"
+        "set roomOverallStrength 0.4\n"
+        "set object:roomOverallStrength 0.5\n"
+        "set portalSuppressionRadius 3\n"
+        "lightingState day\n"
+        "  skylight (1,1,1) 0.5\n"
+        "  light sun (1.5, 1.2, 2) (1, .94, .875) 2\n"
+        "  diffParam insideFloorAmbient 0.001\n"
+        "  diffParam outsideFloorAmbient 0.9\n"
+        "  diffParam insideAmbientColor (.85, .75, .75)\n"
+        "  diffParam floorThreshold .3\n"
+        "  unlitRoomColor (.3, .3, .3) -threshold .3\n"
+        "  unlitRoomColor (.45, .425, .4) -threshold .4\n"
+        "  modifiers insidePortals 0.5 .7 1.3 1\n"
+        "end\n");
+    CHECK(!lotlighting::settingsFor(lighting, "night"));
+    const auto s = lotlighting::settingsFor(lighting, "day");
+    CHECK(s.has_value());
+    if (!s) return;
+    CHECK(s->insideFloorAmbient == 0.001f && s->outsideFloorAmbient == 0.25f && s->outsideColor[1] == 0.5f);
+    CHECK(s->insideColor[0] == 0.85f && s->floorThreshold == 0.3f && s->wallThreshold == 0.4f);
+    CHECK(s->sun && s->day.sky[0] == 0.5f && std::abs(s->day.sunDirection[2] - 2 / std::sqrt(1.5f * 1.5f + 1.2f * 1.2f + 4)) < 1e-6f);
+    CHECK(s->day.insidePortals.practical == 0.5f && s->day.insidePortals.diffusion == 0.7f && s->day.insidePortals.practicalFalloff == 1.3f);
+    CHECK(s->groups[lotlighting::kObjects].overall == 0.5f && s->groups[lotlighting::kSims].overall == 0.4f);
+    CHECK(s->unlit.color[0] == 0.45f && s->unlit.threshold == 0.4f && s->suppression.radius == 3);
+
+    // A lot two tiles wide, floored, with a lamp over the first tile in room 1; room 2 has no tiles.
+    ts2::content::Lot lot;
+    ts2::array3d::Array3D floors;
+    floors.width = 2;
+    floors.height = 1;
+    floors.levels = 1;
+    floors.elementSize = 8;
+    floors.elements.assign(2 * 8, 0);
+    for (std::size_t q = 0; q < 8; ++q) floors.elements[q * 2] = 1;
+    lot.grids[ts2::content::kFloorGridInstance] = floors;
+    lot.floorPatterns[1] = {"abc", 1};
+    lot.roomGraph = ts2::wallgraph::WallGraph{};
+    lotlighting::Inputs in;
+    in.lot = &lot;
+    LightSource lamp;
+    lamp.color = {1, 1, 1};
+    lamp.room = 1;
+    lamp.x0 = 0;
+    lamp.y0 = 0;
+    lamp.x1 = 1;
+    lamp.y1 = 1;
+    lamp.floorIntensity = 0.65f;
+    in.lamps = {lamp};
+    in.roomAt = [](int, float, float) { return std::int16_t{1}; };
+    in.quarterRoom = [](int, int, int, int) { return std::int16_t{1}; };
+    in.covering = [](bool, const std::string&) { return std::optional<roomsamples::Color>(roomsamples::Color{1, 1, 1}); };
+    in.roomCount = 3;
+    const auto r = lotlighting::compute(in, *s);
+    CHECK(r.complete && r.floors.size() == 1 && r.rooms.size() == 2);
+    if (r.floors.size() == 1) {
+        const auto& g = r.floors[0];
+        CHECK(g.at(0, 0) && g.at(3, 0) && g.at(0, 0)->halves[0].light[0] > g.at(3, 0)->halves[0].light[0]);  // brighter under the lamp
+        CHECK(g.at(3, 0) && g.at(3, 0)->halves[0].light[0] > s->insideFloorAmbient * s->insideColor[0]);    // and it spread
+    }
+    if (r.rooms.count(1) && r.rooms.count(2)) {
+        CHECK(r.rooms.at(1).groups[lotlighting::kObjects].has_value());
+        // Nothing reaches room 2: the whole unlit room light on its sides and floor, none from above.
+        const auto& two = r.rooms.at(2).samples;
+        CHECK(two[roomlight::kPlusX] == s->unlit.color && two[roomlight::kFromFloor] == s->unlit.color);
+        CHECK((two[roomlight::kFromCeiling] == std::array<float, 3>{0, 0, 0}));
+    }
+    // Filling a scene's light maps: the floor image gets the texels (the lamp's tile brighter), a
+    // map of the wrong size and a missing wall image are left alone.
+    Scene scene;
+    scene.images.resize(2);
+    for (auto& image : scene.images) {
+        image.width = 16;
+        image.height = 8;
+        image.rgba.assign(16 * 8 * 4, 128);
+    }
+    scene.images[1].width = 8;
+    scene.lightMaps.emplace();
+    scene.lightMaps->floors = {0, 1};
+    lotlightmaps::fill(scene, r, *s);
+    const auto& floorMap = scene.images[0].rgba;
+    CHECK(floorMap[(3 * 16 + 3) * 4] > floorMap[(3 * 16 + 12) * 4] && floorMap[3] == 255 && scene.images[1].rgba[0] == 128);
+    lotlightmaps::fill(scene, lotlighting::Result{}, *s);  // nothing worked out: nothing changes
+    CHECK(scene.images[0].rgba == floorMap);
+
+    // No lot, or no floors: nothing.
+    CHECK(lotlighting::compute(lotlighting::Inputs{}, *s).floors.empty());
+    ts2::content::Lot bare;
+    in.lot = &bare;
+    CHECK(lotlighting::compute(in, *s).rooms.empty());
+}
+
+void lotSunShadowIsCastAsTheGame() {
+    using namespace ts2::scene;
+    // A flat lot four tiles square with one wall along x = 2 (a storey high, to the floor above).
+    lotshadow::Inputs in;
+    in.width = in.height = 4;
+    in.levels = 2;
+    in.corner = [](int, int, int level) { return 3.0f * static_cast<float>(level); };
+    in.floorAt = [](int, int, int, int) { return false; };
+    in.walls = {{0, 2, 0, 2, 4}};
+    const float l = std::sqrt(1.5f * 1.5f + 1.2f * 1.2f + 4.0f);
+    const std::array<float, 3> sun{1.5f / l, 1.2f / l, 2 / l};
+    const auto g = lotshadow::build(in, sun);
+    CHECK(g.width == 32 && g.height == 32);
+    // The wall's top goes into the column on its side away from the sun (x < 2) ...
+    CHECK(g.heights[static_cast<std::size_t>(12 * 32 + 15)] == 3.0f && g.heights[static_cast<std::size_t>(12 * 32 + 16)] == 0.0f);
+    // ... and its shadow falls that way, sinking a sixth of a unit a sample (0.125 x 2 / 1.5).
+    CHECK(std::abs(g.shadowAt(1.5f, 1.6f) - (3.0f - 0.16667f * 3)) < 0.01f);
+    CHECK(g.shadowAt(2.6f, 1.6f) <= 0.0f && g.shadowAt(-1, 0) == -1000.0f);  // the sunny side: no higher than the ground
+    // Under the shadow the sun fades over a unit; above it, all of it.
+    CHECK(lotshadow::sunVisible(-1, 1) == 1 && lotshadow::sunVisible(0.25f, 1) == 0.75f && lotshadow::sunVisible(2, 1) == 0);
+    // The topmost floor over a quarter is its height; the ground stays below.
+    in.walls.clear();
+    in.floorAt = [](int x, int y, int level, int) { return level == 1 && x == 1 && y == 1; };
+    const auto upper = lotshadow::build(in, sun);
+    CHECK(upper.heights[static_cast<std::size_t>(12 * 32 + 12)] == 3.0f && upper.groundAt(12, 12) == 0.0f && upper.heights[0] == 0.0f);
+    // No sun from above, or nothing to shade: no shadow; a broken lot: nothing.
+    CHECK(lotshadow::build(in, {0, 0, -1}).shadow[0] == -1000.0f);
+    CHECK(lotshadow::build(lotshadow::Inputs{}, sun).width == 0);
+    in.width = 100000;
+    CHECK(lotshadow::build(in, sun).heights.empty());
+    // Elevation between corners, and a storey per level beyond the lot's.
+    in.width = 4;
+    CHECK(lotshadow::elevation(in, 0.5f, 0.5f, 1) == 3.0f && lotshadow::elevation(in, 0.5f, 0.5f, 3) == 9.0f &&
+          lotshadow::elevation(in, 0.5f, 0.5f, -1) == -3.0f);
+}
+
+void lightMapTexelsAreWrittenAsTheGame() {
+    using namespace ts2::scene;
+    using walllight::Pixel;
+    // One tile: its left quarters lit 0.25, its right ones 0.75, no links to anything around it.
+    auto tile = [](int level) {
+        floorlight::Grid g;
+        g.level = level;
+        g.width = g.height = 1;
+        g.cells.resize(4);
+        g.tiles.resize(1);
+        g.tiles[0].floor = true;
+        for (int i = 0; i < 4; ++i) {
+            auto& h = g.cells[static_cast<std::size_t>(i)].halves[0];
+            h.valid = true;
+            const float v = (i & 1) ? 0.75f : 0.25f;
+            h.light = {v, v, v};
+        }
+        return g;
+    };
+    const Pixel fill{9, 9, 9, 255};
+    // Ground level: texel centres at (i + 0.5) / 8, so the edges show each side's own light and the
+    // middle blends; a texel's byte is 256 x the light (the shader doubles it again).
+    const auto ground = lightmaptexels::floorTexels(tile(0), fill);
+    CHECK(ground.width == 8 && ground.height == 8);
+    CHECK(ground.at(0, 0) && ground.at(0, 0)->r == 64 && ground.at(7, 7)->r == 192 && ground.at(3, 4)->r == 112 && ground.at(4, 2)->r == 144);
+    CHECK(ground.at(7, 0)->a == 255 && ground.at(5, 5)->g == ground.at(5, 5)->b);
+    // Upper levels: texels from edge to edge (i / 7).
+    const auto upper = lightmaptexels::floorTexels(tile(1), fill);
+    CHECK(upper.at(0, 3)->r == 64 && upper.at(7, 3)->r == 192);
+    // A tile without floor keeps the fill.
+    auto bare = tile(0);
+    bare.tiles[0].floor = false;
+    CHECK((*lightmaptexels::floorTexels(bare, fill).at(4, 4) == fill));
+    CHECK(lightmaptexels::floorTexels(floorlight::Grid{}, fill).texels.empty());
+
+    // Rect sizes by face and height.
+    CHECK(lightmaptexels::panelSize(true, 1).width == 4 && lightmaptexels::panelSize(false, 1).height == 8);
+    CHECK(lightmaptexels::panelSize(true, 3).height == 24 && lightmaptexels::panelSize(false, 9).height == 32);
+    // Walls: a flat 128 grid comes out at half (the game's 0.5 scale) in every rect shape.
+    std::array<walllight::Column, 4> flat{};
+    for (auto& c : flat) c.fill({128, 128, 128, 255});
+    const auto normal = lightmaptexels::panelTexels(flat, {8, 24}, {0, 0, 0}, 0.5f, false, 0.137f);
+    const auto small = lightmaptexels::panelTexels(flat, {4, 8}, {0, 0, 0}, 0.5f, false, 0.137f);
+    CHECK(normal.size() == 8 * 24 && (normal.front() == Pixel{64, 64, 64, 255}) && (normal.back() == Pixel{64, 64, 64, 255}));
+    CHECK(small.size() == 4 * 8 && (small[13] == Pixel{64, 64, 64, 255}));
+    // A tall rect fades above the sampled rows (64 x 3883 / 4096); an attic's inside face clears them.
+    const auto tall = lightmaptexels::panelTexels(flat, {8, 32}, {0, 0, 0}, 0.5f, false, 0.137f);
+    const auto attic = lightmaptexels::panelTexels(flat, {8, 32}, {0, 0, 0}, 0.5f, true, 0.137f);
+    CHECK(tall.size() == 8 * 32 && tall[24 * 8].r == 60 && tall[25 * 8].r == 56 && (attic[24 * 8] == Pixel{0, 0, 0, 0}) && attic[23 * 8].r == 64);
+    // Faces looking outdoors have the outside ambient taken off first.
+    const auto out = lightmaptexels::panelTexels(flat, {8, 24}, {0.25f, 0.25f, 0.25f}, 0.5f, false, 0.137f);
+    CHECK(out[50].r == 32);
+    // Shapes the game has no rule for give nothing written; broken sizes nothing at all.
+    CHECK(lightmaptexels::panelTexels(flat, {8, 20}, {0, 0, 0}, 0.5f, false, 0.137f)[0].a == 0);
+    CHECK(lightmaptexels::panelTexels(flat, {0, 24}, {0, 0, 0}, 0.5f, false, 0.137f).empty());
+
+    // The unlit room light added to a room's texels: half the colour times its share, as bytes
+    // (the game's own add on the Caliente lot: room 7, share 0.63356, gave 36, 34, 32).
+    const std::array<float, 3> unlit{0.45f, 0.425f, 0.4f};
+    CHECK((lightmaptexels::roomAdd(unlit, 0.633562f) == Pixel{32, 34, 36, 0}));
+    CHECK((lightmaptexels::roomAdd(unlit, 0) == Pixel{0, 0, 0, 0}) && lightmaptexels::roomAdd({4, 4, 4}, 1).r == 255);
+    auto panel = normal;
+    lightmaptexels::addRoomLight(panel, {200, 1, 2, 0});
+    CHECK((panel[7] == Pixel{255, 65, 66, 255}));  // saturating, alpha kept
+    // On floors each tile takes its room's add; room 0 (outdoors) none.
+    auto lit = tile(0);
+    for (auto& c : lit.cells) c.halves[0].room = 3;
+    auto image = lightmaptexels::floorTexels(lit, fill);
+    lightmaptexels::addRoomLight(image, lit, [](std::int16_t room) { return room == 3 ? Pixel{10, 10, 10, 0} : Pixel{}; });
+    CHECK(image.at(0, 0)->r == 74 && image.at(7, 7)->r == 202);
+    for (auto& c : lit.cells) c.halves[0].room = 0;
+    auto outdoors = lightmaptexels::floorTexels(lit, fill);
+    lightmaptexels::addRoomLight(outdoors, lit, [](std::int16_t) { return Pixel{10, 10, 10, 0}; });
+    CHECK(outdoors.at(0, 0)->r == 64);
+
+    // Sunlight outdoors, with the day state's lights: the game's sunlit lot ground is 165, 159, 136.
+    auto normalized = [](float x, float y, float z) {
+        const float l = std::sqrt(x * x + y * y + z * z);
+        return std::array<float, 3>{x / l, y / l, z / l};
+    };
+    lightmaptexels::Outdoor day;
+    day.lights = {{{0.97f, 0.94f, 0.83f}, 2, normalized(1.5f, 1.2f, 2)}, {{0.8f, 0.8f, 0.73f}, 0.5f, normalized(-1.5f, -1.2f, 2)},
+                  {{1, 0.8f, 0.9f}, 0.5f, normalized(1, 1, -1)}};
+    day.skylight = {0.5f, 0.5f, 0.5f};
+    CHECK((lightmaptexels::outdoorAdd(day, {0, 0, 1}) == Pixel{136, 159, 165, 0}));
+    lightmaptexels::Outdoor none;
+    CHECK((lightmaptexels::outdoorAdd(none, {0, 0, 1}) == Pixel{0, 0, 0, 0}));
+    // Only tiles outdoors get it.
+    auto yard = tile(0);
+    for (auto& c : yard.cells) c.halves[0].outside = true;
+    yard.cells[0].halves[0].light = {0.25f, 0.25f, 0.25f};
+    auto ground2 = lightmaptexels::floorTexels(yard, fill);
+    const auto before = *ground2.at(0, 0);
+    lightmaptexels::addOutdoorLight(ground2, yard, day);
+    CHECK(ground2.at(0, 0)->r == std::min(255, before.r + 165));
+    auto indoors = lightmaptexels::floorTexels(tile(0), fill);
+    lightmaptexels::addOutdoorLight(indoors, tile(0), day);
+    CHECK(indoors.at(0, 0)->r == 64);
+}
+
+// A tiny baseline JPEG writer for the decoder tests: one quantizer for every coefficient, a DC
+// table whose code for size s is s in 4 bits, and an AC table whose code for symbol v is v in 8 bits.
+struct JpegWriter {
+    std::vector<std::uint8_t> scan;
+    int bits = 0, count = 0;
+    std::vector<int> predictors;
+
+    void put(int value, int n) {
+        for (int i = n - 1; i >= 0; --i) {
+            bits = (bits << 1) | ((value >> i) & 1);
+            if (++count == 8) {
+                scan.push_back(static_cast<std::uint8_t>(bits));
+                if (bits == 0xFF) scan.push_back(0);
+                bits = count = 0;
+            }
+        }
+    }
+    static int sizeOf(int v) {
+        int s = 0;
+        for (int a = std::abs(v); a; a >>= 1) ++s;
+        return s;
+    }
+    void putValue(int v, int s) {
+        if (s) put(v < 0 ? v + (1 << s) - 1 : v, s);
+    }
+    // One block of a component, its coefficients in natural order.
+    void block(std::size_t component, const std::map<int, int>& coefficients) {
+        static constexpr int kZigzag[64] = {0,  1,  8,  16, 9,  2,  3,  10, 17, 24, 32, 25, 18, 11, 4,  5,  12, 19, 26, 33, 40, 48,
+                                            41, 34, 27, 20, 13, 6,  7,  14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23,
+                                            30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63};
+        std::array<int, 64> c{};
+        for (const auto& [k, v] : coefficients) c[static_cast<std::size_t>(k)] = v;
+        predictors.resize(std::max(predictors.size(), component + 1));
+        const int diff = c[0] - predictors[component];
+        predictors[component] = c[0];
+        put(sizeOf(diff), 4);
+        putValue(diff, sizeOf(diff));
+        int run = 0;
+        for (int k = 1; k < 64; ++k) {
+            const int v = c[static_cast<std::size_t>(kZigzag[k])];
+            if (!v) {
+                ++run;
+                continue;
+            }
+            for (; run > 15; run -= 16) put(0xF0, 8);
+            put(run << 4 | sizeOf(v), 8);
+            putValue(v, sizeOf(v));
+            run = 0;
+        }
+        if (run) put(0, 8);
+    }
+    // The whole file; sampling holds each component's h << 4 | v. Its frame header starts at kFrame.
+    static constexpr std::size_t kFrame = 2 + 69 + 33 + 276;
+    std::vector<std::uint8_t> file(int width, int height, int quant, const std::vector<int>& sampling) {
+        while (count) put(1, 1);
+        std::vector<std::uint8_t> f{0xFF, 0xD8, 0xFF, 0xDB, 0, 67, 0};
+        f.insert(f.end(), 64, static_cast<std::uint8_t>(quant));
+        f.insert(f.end(), {0xFF, 0xC4, 0, 31, 0x00, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
+        for (int v = 0; v < 12; ++v) f.push_back(static_cast<std::uint8_t>(v));
+        f.insert(f.end(), {0xFF, 0xC4, 0x01, 0x12, 0x10, 0, 0, 0, 0, 0, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0});
+        for (int v = 0; v < 255; ++v) f.push_back(static_cast<std::uint8_t>(v));
+        const auto n = static_cast<std::uint8_t>(sampling.size());
+        f.insert(f.end(), {0xFF, 0xC0, 0, static_cast<std::uint8_t>(8 + 3 * n), 8, 0, static_cast<std::uint8_t>(height), 0,
+                           static_cast<std::uint8_t>(width), n});
+        for (std::uint8_t i = 0; i < n; ++i) f.insert(f.end(), {static_cast<std::uint8_t>(i + 1), static_cast<std::uint8_t>(sampling[i]), 0});
+        f.insert(f.end(), {0xFF, 0xDA, 0, static_cast<std::uint8_t>(6 + 2 * n), n});
+        for (std::uint8_t i = 0; i < n; ++i) f.insert(f.end(), {static_cast<std::uint8_t>(i + 1), 0x00});
+        f.insert(f.end(), {0, 63, 0});
+        f.insert(f.end(), scan.begin(), scan.end());
+        f.insert(f.end(), {0xFF, 0xD9});
+        return f;
+    }
+};
+
+void jpegDecodesAsTheGame() {
+    // Expected blocks come from running the game's JPEG library's own inverse DCT instructions.
+    auto grey = [](int quant, const std::map<int, int>& coefficients) {
+        JpegWriter w;
+        w.block(0, coefficients);
+        return ts2::jpeg::decode(w.file(8, 8, quant, {0x11}));
+    };
+    auto plane = [](const std::optional<ts2::tga::Pixels>& p) {
+        std::vector<int> v;
+        if (p) {
+            for (std::size_t i = 0; i < p->rgba.size(); i += 4) v.push_back(p->rgba[i]);
+        }
+        return v;
+    };
+    const std::vector<int> dc{129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129,
+                              128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128,
+                              128, 128, 128, 128, 128, 128, 128, 128, 129, 129, 129, 129, 129, 129, 129, 129,
+                              128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128};
+    CHECK(plane(grey(1, {{0, 4}})) == dc);
+    const std::vector<int> busy{144, 91,  64,  68,  56,  11, 0,   19, 114, 128, 113, 48,  35,  41,  43,  8,
+                                112, 139, 122, 68,  37,  55, 54,  32, 156, 113, 108, 102, 97,  42,  54,  83,
+                                160, 116, 93,  112, 101, 71, 64,  92, 135, 142, 131, 78,  92,  110, 115, 74,
+                                121, 141, 127, 86,  81,  112, 114, 86, 142, 109, 108, 118, 112, 73,  88,  126};
+    CHECK(plane(grey(1, {{0, -300}, {1, 200}, {8, -150}, {9, 90}, {2, 60}, {16, -45}, {27, 33}, {63, -20}, {7, 15}, {56, -10}, {36, 120}})) ==
+          busy);
+    // Coefficients times quantizers past 16 bits wrap as the game's do.
+    const std::vector<int> wrap{128, 128, 0,   0,   0,   0,   0,   0, 255, 255, 255, 0,   0,   0,   0,   0,
+                                255, 255, 255, 0,   0,   0,   0,   0, 255, 255, 255, 0,   0,   0,   0,   0,
+                                255, 255, 255, 12,  0,   0,   0,   0, 255, 255, 255, 166, 0,   0,   0,   0,
+                                255, 255, 255, 0,   0,   0,   0,   0, 255, 255, 255, 128, 128, 128, 255, 255};
+    CHECK(plane(grey(255, {{0, 200}, {1, -130}, {8, 129}, {18, 7}})) == wrap);
+
+    // Colour: four flat luma blocks and one chroma pair spread over them, in a picture smaller than
+    // its MCU, turned to RGB with the game's integer steps.
+    JpegWriter w;
+    for (int dcValue : {80, 160, -80, 0}) w.block(0, {{0, dcValue}});
+    w.block(1, {{0, -160}});
+    w.block(2, {{0, 240}});
+    const auto colourFile = w.file(13, 11, 1, {0x22, 0x11, 0x11});
+    const auto colour = ts2::jpeg::decode(colourFile);
+    CHECK(colour && colour->width == 13 && colour->height == 11);
+    if (colour) {
+        const std::array<std::array<int, 3>, 4> expected{{{180, 124, 102}, {190, 134, 112}, {160, 104, 82}, {170, 114, 92}}};
+        bool same = true;
+        for (std::size_t y = 0; y < 11; ++y) {
+            for (std::size_t x = 0; x < 13; ++x) {
+                const auto& e = expected[(y >= 8 ? 2u : 0u) + (x >= 8 ? 1u : 0u)];
+                const auto* p = &colour->rgba[(y * 13 + x) * 4];
+                same = same && p[0] == e[0] && p[1] == e[1] && p[2] == e[2] && p[3] == 255;
+            }
+        }
+        CHECK(same);
+        const auto viaImage = ts2::image::decode(colourFile);
+        CHECK(viaImage && viaImage->rgba == colour->rgba);
+        // Over a caller's size limit: refused by both the exact decoder and stb.
+        CHECK(!ts2::jpeg::decode(colourFile, 12) && !ts2::image::decode(colourFile, 12) && ts2::image::decode(colourFile, 13));
+    }
+
+    // Broken or unsupported files give nothing; cut-off data never reads past its end.
+    CHECK(!ts2::jpeg::decode({}));
+    CHECK(!ts2::jpeg::decode(std::vector<std::uint8_t>{0xFF, 0xD8, 0xFF}));
+    constexpr std::size_t frame = JpegWriter::kFrame;
+    CHECK(colourFile[frame] == 0xFF && colourFile[frame + 1] == 0xC0);
+    auto progressive = colourFile;
+    progressive[frame + 1] = 0xC2;
+    CHECK(!ts2::jpeg::decode(progressive));
+    auto huge = colourFile;
+    for (std::size_t i = frame + 5; i < frame + 9; ++i) huge[i] = 0xFF;
+    CHECK(!ts2::jpeg::decode(huge));
+    bool safe = true;
+    for (std::size_t n = 0; n < colourFile.size(); ++n) {
+        const std::vector<std::uint8_t> cut(colourFile.begin(), colourFile.begin() + static_cast<std::ptrdiff_t>(n));
+        const auto p = ts2::jpeg::decode(cut);
+        safe = safe && (!p || p->rgba.size() == std::size_t{13} * 11 * 4);
+    }
+    CHECK(safe);
+}
+
+void indoorLightStaysSafeOnBadData() {
+    using namespace ts2::scene;
+    // A grid with an absurd size gives no cells instead of overflowing.
+    floorlight::Grid huge;
+    huge.width = 0x7FFFFFFF;
+    huge.height = 1;
+    CHECK(!huge.at(0, 0) && !huge.at(-1, 5));
+
+    // Colours round the same whatever the processor's rounding mode (halves to even).
+    const int mode = std::fegetround();
+    std::fesetround(FE_UPWARD);
+    const auto up = walllight::pack({2.5f / 256, 0, 0.5f / 256});
+    std::fesetround(mode);
+    CHECK(up.r == 2 && up.b == 0);
+
+    // A negative falloff makes light grow as it spreads; bright colours must not wrap to dark.
+    auto w = testWall();
+    w.falloffScale = -0.3f;
+    LightSource lamp;
+    lamp.color = {4, 4, 4};
+    lamp.room = 1;
+    lamp.x0 = lamp.x1 = 0.25f;
+    lamp.y0 = lamp.y1 = -1;
+    std::set<int> changed;
+    walllight::resetToAmbient(w);
+    walllight::lightFromSources(w, {lamp}, nullptr, changed);
+    walllight::spread(w, changed);
+    for (const auto& s : w.runs[0].segments) {
+        for (const auto& half : s.halves) {
+            for (const auto& p : half) {
+                CHECK(p.r == 255);
+            }
+        }
+    }
+
+    // Walls stacked over 20 levels, each level two walls and every wall linking up to both
+    // walls above: visiting every path would take about 2^20 visits a step. It must finish
+    // quickly and still light the walls.
+    walllight::Walls stack;
+    for (int level = 0; level < 20; ++level) {
+        for (int k = 0; k < 2; ++k) {
+            walllight::Run run;
+            run.level = level;
+            run.room = 1;
+            for (int i = 0; i < 2; ++i) {
+                walllight::Segment s;
+                s.x0 = static_cast<float>(2 * k + i);
+                s.x1 = s.x0 + 1;
+                if (level < 19) {
+                    s.up = {2 * (level + 1) + i, 0};
+                }
+                if (level > 0) {
+                    s.down = {2 * (level - 1) + i, 0};
+                }
+                run.segments.push_back(s);
+            }
+            stack.runs.push_back(run);
+        }
+    }
+    stack.steps = 1000;
+    CHECK(!walllight::light(stack, {lamp}, nullptr, nullptr));  // stopped at its limit, and says so
+    CHECK(stack.runs[0].segments[0].halves[0][2].r > 0);
+    auto plain = testWall();
+    CHECK(walllight::light(plain, {lamp}, nullptr, nullptr));
+    auto floor = testFloor(4, 4);
+    CHECK(floorlight::light(floor, {lamp}, nullptr));
+}
+
+void portableMathMatchesTheLibrary() {
+    using namespace ts2::scene::portable;
+    // Within a few units in the last place of a double of the C library, over many values.
+    auto close = [](double a, double b) { return std::abs(a - b) <= 4e-16 * std::max(1.0, std::abs(b)); };
+    bool sinesOk = true, powersOk = true;
+    for (int i = -20000; i <= 20000; ++i) {
+        const double x = i * 0.000731;  // about -14.6 to 14.6
+        sinesOk = sinesOk && close(sine(x), std::sin(x)) && close(cosine(x), std::cos(x));
+    }
+    for (int i = 1; i <= 400; ++i) {
+        for (int j = 0; j <= 100; ++j) {
+            const double x = i / 400.0, y = 1 + j * 0.37;
+            const double want = std::pow(x, y);
+            // The error grows with |y log x| (here up to 600); what the lighting uses is the
+            // value rounded to float, which must be the same.
+            powersOk = powersOk && std::abs(power(x, y) - want) <= 1e-13 * want &&
+                       static_cast<float>(power(x, y)) == static_cast<float>(want);
+        }
+    }
+    CHECK(sinesOk && powersOk);
+    CHECK(sine(0) == 0 && cosine(0) == 1 && power(0.5, 2) == 0.25 && power(2, 0) == 1);
+    CHECK(std::isnan(sine(std::numeric_limits<double>::infinity())) && std::isnan(power(-1, 2)) && std::isnan(log(-1)));
+    CHECK(exp(1000) == std::numeric_limits<double>::infinity() && exp(-1000) == 0 && power(0, 2) == 0);
+}
+
+void objectDaylightMatchesTheGame() {
+    ts2::content::Lighting lighting;
+    auto& day = lighting.states["day"];
+    day.skylight = {0.5f, 0.5f, 0.5f};
+    day.lights["sun"] = {{1.5f, 1.2f, 2}, {0.97f, 0.94f, 0.83f}, 2};
+    day.lights["sky"] = {{-1.5f, -1.2f, 2}, {0.8f, 0.8f, 0.73f}, 0.5f};
+    day.lights["fill1"] = {{1, 1, -1}, {1, 0.8f, 0.9f}, 0.5f};
+    const auto l = ts2::scene::objectDaylight(lighting);
+    CHECK(l && l->lights.size() == 3);
+    auto near = [](const std::array<float, 3>& a, std::array<float, 3> b) {
+        return std::abs(a[0] - b[0]) < 1e-4f && std::abs(a[1] - b[1]) < 1e-4f && std::abs(a[2] - b[2]) < 1e-4f;
+    };
+    CHECK(near(l->ambient, {0.5f, 0.5f, 0.5f}));
+    CHECK(near(l->lights[0].color, {0.94f, 0.88f, 0.66f}));  // sun
+    CHECK(near(l->lights[1].color, {0.25f, 0.15f, 0.2f}));   // fill1
+    CHECK(near(l->lights[2].color, {0.15f, 0.15f, 0.115f})); // sky
+    CHECK(near(l->lights[0].direction, {0.5409f, 0.4327f, 0.7212f}));
+    CHECK(!ts2::scene::objectDaylight(ts2::content::Lighting{}));
+}
+
 void installedPacksAreFound() {
     namespace fs = std::filesystem;
     const fs::path root = fs::temp_directory_path() / "neots2-install-test";
@@ -4502,6 +5928,443 @@ void installedPacksAreFound() {
     }
     CHECK(codes() == "base ep5 sp9 ");
     fs::remove_all(root);
+}
+
+void lotNumberComesFromThePackageName() {
+    CHECK(ts2::content::lotNumber("Neighborhoods/N001/Lots/N001_Lot18.package") == 18);
+    CHECK(ts2::content::lotNumber("N002_Lot7.package") == 7);
+    CHECK(!ts2::content::lotNumber("N001_Lot.package"));
+    CHECK(!ts2::content::lotNumber("N001_Lot1x.package"));
+    CHECK(!ts2::content::lotNumber("N001_Neighborhood.package"));
+    CHECK(!ts2::content::lotNumber("N001_Lot12345678901.package"));  // too long to be a lot number
+}
+
+void portraitImageIsTheLifeStageFlag() {
+    CHECK(ts2::content::portraitImage(1) == 0x20u);   // baby
+    CHECK(ts2::content::portraitImage(2) == 0x01u);   // toddler
+    CHECK(ts2::content::portraitImage(3) == 0x02u);   // child
+    CHECK(ts2::content::portraitImage(16) == 0x04u);  // teen
+    CHECK(ts2::content::portraitImage(19) == 0x08u);  // adult
+    CHECK(ts2::content::portraitImage(51) == 0x10u);  // elder
+    CHECK(!ts2::content::portraitImage(0));
+    CHECK(!ts2::content::portraitImage(-1));
+}
+
+// Rows the game showed for Dina's needs (whole motives) and the two Calientes' moods.
+void needsBarRowsMatchTheGame() {
+    const std::pair<int, int> seen[] = {{59, 49}, {58, 48}, {88, 58}, {49, 46}, {39, 43}, {78, 55}, {56, 48}};
+    for (const auto& [value, row] : seen) {
+        CHECK(ts2::content::meterRow(value, -100, 100, 62) == row);
+    }
+    CHECK(ts2::content::meterRow(100, -100, 100, 62) == 61);
+    CHECK(ts2::content::meterRow(-100, -100, 100, 62) == 0);
+    CHECK(ts2::content::meterRow(500, -100, 100, 62) == 61);  // kept within the range
+    CHECK(ts2::content::meterRow(0, 0, 0, 62) == 0);          // no range
+    CHECK(ts2::content::meterRow(0, -100, 100, 0) == 0);      // no picture
+}
+
+void moodRowsMatchTheGame() {
+    CHECK(ts2::content::moodRow(45, 200) == 55);
+    CHECK(ts2::content::moodRow(59, 200) == 41);
+    CHECK(ts2::content::moodRow(100, 200) == 0);
+    CHECK(ts2::content::moodRow(-100, 200) == 199);
+    CHECK(ts2::content::moodRow(-300, 200) == 199);
+    CHECK(ts2::content::moodRow(0, 0) == 0);
+}
+
+void barPaintingKeepsTheFillShape() {
+    ts2::tga::Pixels fill{3, 2, {9, 9, 9, 0, 9, 9, 9, 128, 9, 9, 9, 255, 9, 9, 9, 255, 9, 9, 9, 64, 9, 9, 9, 0}};
+    ts2::tga::Pixels gradient{3, 2, {1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255, 13, 14, 15, 255, 16, 17, 18, 255}};
+    const auto painted = ts2::content::paintBar(fill, gradient, 1);
+    CHECK(painted.width == 3 && painted.height == 2);
+    for (std::size_t i = 0; i < 6; ++i) {
+        CHECK(painted.rgba[i * 4] == gradient.rgba[(3 + i % 3) * 4]);
+        CHECK(painted.rgba[i * 4 + 3] == fill.rgba[i * 4 + 3]);
+    }
+    ts2::tga::Pixels broken{4, 4, {1, 2, 3}};
+    CHECK(ts2::content::paintBar(broken, gradient, 0).rgba.size() == 3);  // left as it is
+    CHECK(ts2::content::pixel(gradient, 9, 9) == (std::array<std::uint8_t, 3>{0, 0, 0}));
+}
+
+void moodColourFillsTheBackgroundShape() {
+    ts2::tga::Pixels shape{2, 1, {255, 255, 0, 0, 200, 200, 10, 255}};
+    const auto filled = ts2::content::fillShape(shape, {1, 203, 57});
+    CHECK(filled.rgba == (std::vector<std::uint8_t>{1, 203, 57, 0, 1, 203, 57, 255}));
+}
+
+void motivesAreShownAsWholeNumbers() {
+    ts2::sim::SimObject sim;
+    sim.motives[ts2::sim::motive::kMood] = 45.83f;
+    sim.motives[ts2::sim::motive::kHunger] = -45.8f;
+    sim.motives[ts2::sim::motive::kFun] = std::numeric_limits<float>::quiet_NaN();
+    sim.motives[ts2::sim::motive::kSocial] = 1e30f;
+    sim.motives[ts2::sim::motive::kEnvironment] = 56.24f;
+    CHECK(ts2::sim::wholeMotive(sim, ts2::sim::motive::kMood) == 45);
+    CHECK(ts2::sim::wholeMotive(sim, ts2::sim::motive::kHunger) == -45);
+    CHECK(ts2::sim::wholeMotive(sim, ts2::sim::motive::kFun) == 0);
+    CHECK(ts2::sim::wholeMotive(sim, ts2::sim::motive::kSocial) == 100);
+    CHECK(ts2::sim::wholeMotive(sim, ts2::sim::motive::kEnvironment) == 56);
+    CHECK(ts2::sim::wholeMotive(sim, 99) == 0);
+    sim.personData[ts2::sim::kEnvironmentScore] = 70;  // stands in for Environment
+    CHECK(ts2::sim::wholeMotive(sim, ts2::sim::motive::kEnvironment) == 70);
+}
+
+// The mood meter the game showed for Nina (held value 50: gradient column 98 of 131).
+void moodMeterPicksAColumn() {
+    CHECK(ts2::content::meterRow(50, -100, 100, 131) == 98);
+    CHECK(ts2::content::moodMeterValue(50, 19) == 50);
+    CHECK(ts2::content::moodMeterValue(-20, 75) == 100);  // platinum: full
+    CHECK(ts2::content::moodMeterValue(-20, 74) == -20);
+    CHECK(ts2::content::isPlatinum(75) && !ts2::content::isPlatinum(74));
+    ts2::tga::Pixels fill{2, 2, {9, 9, 9, 255, 9, 9, 9, 0, 9, 9, 9, 128, 9, 9, 9, 255}};
+    ts2::tga::Pixels gradient{2, 2, {1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255}};
+    const auto painted = ts2::content::paintColumns(fill, gradient, 1);
+    CHECK(painted.rgba == (std::vector<std::uint8_t>{4, 5, 6, 255, 4, 5, 6, 0, 10, 11, 12, 128, 10, 11, 12, 255}));
+}
+
+// A want's icon is placed 2 pixels in on a transparent 44 x 44 picture (as the game showed it).
+void wantIconIsPlacedOnItsPicture() {
+    ts2::tga::Pixels icon{2, 1, {1, 2, 3, 255, 4, 5, 6, 128}};
+    const auto out = ts2::content::placed(icon, 4, 2, 2, 0);
+    CHECK(out.width == 4 && out.height == 2 && out.rgba.size() == 32);
+    CHECK(out.rgba[8] == 1 && out.rgba[11] == 255 && out.rgba[12] == 4 && out.rgba[15] == 128);
+    CHECK(out.rgba[3] == 0 && out.rgba[19] == 0);
+    const auto cut = ts2::content::placed(icon, 4, 2, 3, -1);  // partly outside: cut
+    CHECK(cut.rgba.size() == 32 && cut.rgba[31] == 0);
+    CHECK(ts2::content::placed(ts2::tga::Pixels{9, 9, {1}}, 2, 2, 0, 0).rgba == std::vector<std::uint8_t>(16, 0));
+}
+
+// A portrait's UI pose by age and gender, and its camera in front of the head (as the game drew
+// five Sims: 1.4506 ahead and 0.05 above the head joint, 20 degrees, looking straight back).
+void portraitPoseAndCamera() {
+    using namespace ts2::scene;
+    CHECK(portraitPose(8, 2, 3) == "a-UIpose-M03");
+    CHECK(portraitPose(4, 1, 8) == "a-UIpose-F08");
+    CHECK(portraitPose(2, 1, 1) == "c-UIpose-F01");
+    CHECK(portraitPose(1, 2, 5) == "p-UIpose-m05");
+    CHECK(portraitPose(0x20, 1, 9) == "b-UIpose-04");  // babies have four; out of range is clamped
+    CHECK(portraitPose(8, 2, 0) == "a-UIpose-M01");
+    CHECK(portraitPoseCount(0x20) == 4 && portraitPoseCount(8) == 8);
+    const auto c = portraitCamera(Transform{}, {-0.0088f, 0.0132f, 1.6752f});
+    CHECK(std::abs(c.eye[0] + 0.0088f) < 1e-5f && std::abs(c.eye[1] - 1.4638f) < 1e-4f && std::abs(c.eye[2] - 1.7252f) < 1e-4f);
+    CHECK(std::abs(c.target[1] - 0.4638f) < 1e-4f && std::abs(c.target[2] - c.eye[2]) < 1e-6f);
+    CHECK(std::abs(c.fovY - 0.3490659f) < 1e-6f && c.nearPlane > 0.68f && c.farPlane < 1.75f);
+    // A Sim turned a quarter at (3, 4, 0): the camera stays 1.4506 from it, at head height + 0.05.
+    const auto t = portraitCamera(Transform::at(3, 4, 0, 1.5707963f), {0, 0, 1.6f});
+    CHECK(std::abs(t.eye[2] - 1.65f) < 1e-4f && std::abs(std::hypot(t.eye[0] - 3, t.eye[1] - 4) - 1.4506f) < 1e-4f);
+    CHECK(std::abs(std::hypot(t.target[0] - 3, t.target[1] - 4) - 0.4506f) < 1e-4f);
+    // Five lights fixed to the camera: the key comes from the Sim's front left, above.
+    const auto lit = portraitLighting(c);
+    CHECK(lit.lights.size() == 5 && lit.ambient == (std::array<float, 3>{0, 0, 0}));
+    CHECK(std::abs(lit.thumbnailScale - 0.4f) < 1e-6f);  // lit as the game lights family thumbnails
+    CHECK(std::abs(lit.lights[0].direction[0] - 0.43493f) < 1e-4f && std::abs(lit.lights[0].direction[1] - 0.79454f) < 1e-4f &&
+          std::abs(lit.lights[0].direction[2] - 0.42373f) < 1e-4f && std::abs(lit.lights[0].color[0] - 1.6452f) < 1e-6f);
+    CHECK(std::abs(lit.lights[1].direction[2] + 1) < 1e-4f);
+}
+
+// Thumbnails show the middle of a portrait: 180 square of a 256 picture, 38 off each side (90 of 128).
+// A portrait's shadow: black, its outline blurred, at most 210 of 255 opaque (matched against the
+// silhouette a character file keeps beside its portrait).
+void portraitShadowIsItsBlurredOutline() {
+    ts2::tga::Pixels portrait{256, 256, std::vector<std::uint8_t>(256 * 256 * 4, 255)};
+    const auto full = ts2::content::portraitSilhouette(portrait);
+    CHECK(full.width == 256 && full.rgba[0] == 0 && full.rgba[3] == 210 && full.rgba[(128 * 256 + 128) * 4 + 3] == 210);
+    // Half opaque (the left half): sharp in the portrait, soft in its shadow.
+    for (std::uint32_t y = 0; y < 256; ++y) {
+        for (std::uint32_t x = 128; x < 256; ++x) {
+            portrait.rgba[(y * 256 + x) * 4 + 3] = 0;
+        }
+    }
+    const auto half = ts2::content::portraitSilhouette(portrait);
+    const auto alpha = [&](std::uint32_t x) { return half.rgba[(100 * 256 + x) * 4 + 3]; };
+    CHECK(alpha(0) == 210 && alpha(255) == 0 && alpha(120) > alpha(128) && alpha(128) > alpha(136) && alpha(136) > 0);
+    CHECK(ts2::content::portraitSilhouette(ts2::tga::Pixels{4, 4, {1}}).rgba.empty());  // broken: nothing
+    // Larger than any portrait: refused rather than blurred.
+    const ts2::tga::Pixels huge{2048, 2048, std::vector<std::uint8_t>(2048u * 2048u * 4u, 255)};
+    CHECK(ts2::content::portraitSilhouette(huge).rgba.empty() && ts2::content::portraitCrop(huge).rgba.empty());
+}
+
+// Thumbnail pictures are scaled by area (colour weighted by alpha) and cut to the thumbnail's
+// rounded shape (alpha only); drawn portraits are made straight alpha.
+void thumbnailPicturesAreScaledAndMasked() {
+    ts2::tga::Pixels two{2, 1, {0, 0, 0, 0, 200, 100, 50, 255}};
+    const auto one = ts2::content::scaled(two, 1, 1);
+    CHECK(one.width == 1 && one.rgba == (std::vector<std::uint8_t>{200, 100, 50, 128}));  // the clear pixel adds no colour
+    const auto up = ts2::content::scaled(ts2::tga::Pixels{1, 1, {9, 9, 9, 9}}, 3, 2);
+    CHECK(up.rgba.size() == 24 && up.rgba[20] == 9);
+    CHECK(ts2::content::scaled(two, 0, 5).rgba.empty() && ts2::content::scaled(two, 100000, 1).rgba.empty());
+    ts2::tga::Pixels shape{2, 1, {0, 0, 0, 255, 0, 0, 0, 0}};
+    const auto cut = ts2::content::masked(ts2::tga::Pixels{2, 1, {10, 20, 30, 255, 10, 20, 30, 255}}, shape);
+    CHECK(cut.rgba == (std::vector<std::uint8_t>{10, 20, 30, 255, 10, 20, 30, 0}));
+    const auto straight = ts2::content::unpremultiplied(ts2::tga::Pixels{2, 1, {50, 25, 0, 128, 7, 7, 7, 0}});
+    CHECK(straight.rgba == (std::vector<std::uint8_t>{100, 50, 0, 128, 7, 7, 7, 0}));
+    CHECK(ts2::content::masked(two, ts2::tga::Pixels{1, 1, {0, 0, 0, 0}}).rgba == two.rgba);  // sizes differ: as it is
+}
+
+void portraitIsCroppedForThumbnails() {
+    ts2::tga::Pixels portrait{256, 256, std::vector<std::uint8_t>(256 * 256 * 4, 0)};
+    portrait.rgba[(38 * 256 + 38) * 4] = 7;
+    const auto crop = ts2::content::portraitCrop(portrait);
+    CHECK(crop.width == 180 && crop.height == 180 && crop.rgba[0] == 7);
+    const auto half = ts2::content::portraitCrop(ts2::tga::Pixels{128, 128, std::vector<std::uint8_t>(128 * 128 * 4, 0)});
+    CHECK(half.width == 90);
+    CHECK(ts2::content::portraitCrop(ts2::tga::Pixels{4, 2, {1}}).width == 4);  // broken: left as it is
+    CHECK(ts2::content::placed(ts2::tga::Pixels{1, 1, {1, 2, 3, 4}}, 100000, 100000, 0, 0).rgba.empty());  // too big: nothing
+}
+
+// Want target pictures load in the background: unknown until they arrive, at most four at once,
+// a failed read leaves none, and forgetting them while loads run doesn't wait for those.
+void targetPicturesLoadInTheBackground() {
+    std::promise<void> open;
+    const std::shared_future<void> gate = open.get_future().share();
+    ts2::content::TargetPictures pictures([gate](const std::filesystem::path& file, std::uint32_t) -> std::optional<ts2::tga::Pixels> {
+        gate.wait();
+        if (file == "broken") {
+            throw std::runtime_error("broken file");
+        }
+        if (file == "none") {
+            return std::nullopt;
+        }
+        return ts2::tga::Pixels{256, 256, std::vector<std::uint8_t>(256 * 256 * 4, 255)};
+    });
+    CHECK(pictures.load(1, "good", 0x10) && pictures.load(2, "broken", 0x10) && pictures.load(3, "none", 0x10));
+    CHECK(pictures.known(1) && pictures.find(1) == nullptr && !pictures.load(1, "good", 0x10));  // loading
+    CHECK(pictures.load(4, "good", 0x10) && !pictures.load(5, "good", 0x10));  // four at most
+    CHECK(!pictures.collect());  // nothing finished yet
+    open.set_value();
+    for (int tries = 0; tries < 500 && pictures.loading() > 0; ++tries) {
+        pictures.collect();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(pictures.loading() == 0);
+    const auto* good = pictures.find(1);
+    CHECK(good && good->width == 44 && good->height == 44 && good->rgba[3] == 255);
+    CHECK(pictures.known(2) && pictures.find(2) == nullptr && pictures.find(3) == nullptr);
+    pictures.make(6, ts2::tga::Pixels{2048, 2048, std::vector<std::uint8_t>(2048u * 2048u * 4u, 255)});
+    CHECK(pictures.known(6) && pictures.find(6) == nullptr);  // too large to be a portrait
+
+    // Forgetting while a load runs returns at once; the load finishes on its own.
+    std::promise<void> later;
+    const std::shared_future<void> slow = later.get_future().share();
+    ts2::content::TargetPictures waiting([slow](const std::filesystem::path&, std::uint32_t) -> std::optional<ts2::tga::Pixels> {
+        slow.wait();
+        return std::nullopt;
+    });
+    CHECK(waiting.load(1, "slow", 0x10));
+    waiting.clear();
+    CHECK(!waiting.known(1) && waiting.loading() == 0);
+    later.set_value();  // let it end before the pictures go
+
+    // Going away while a load is stuck returns at once; the load ends later on its own.
+    std::promise<void> stuck;
+    const std::shared_future<void> held = stuck.get_future().share();
+    std::promise<void> ended;
+    auto endedFuture = ended.get_future();
+    {
+        auto endedShared = std::make_shared<std::promise<void>>(std::move(ended));
+        ts2::content::TargetPictures leaving([held, endedShared](const std::filesystem::path&, std::uint32_t) -> std::optional<ts2::tga::Pixels> {
+            held.wait();
+            endedShared->set_value();
+            return std::nullopt;
+        });
+        CHECK(leaving.load(1, "stuck", 0x10));
+    }
+    stuck.set_value();
+    CHECK(endedFuture.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+}
+
+// The run's log: every line in its file, the last 64 kept in memory (cut to fit), and only the last
+// ten logs kept in its folder.
+void logKeepsItsLinesAndFiles() {
+    namespace fs = std::filesystem;
+    ts2::diag::reset();
+    const fs::path folder = fs::temp_directory_path() / ("neots2-log-test-" + std::to_string(std::random_device{}()));
+    fs::create_directories(folder);
+    for (int i = 0; i < 12; ++i) {  // older runs' logs
+        std::ofstream(folder / ("neots2-20000101-0000" + std::to_string(10 + i) + ".log")) << "old";
+    }
+    CHECK(ts2::diag::open(folder, "NeoTS2 test"));
+    ts2::diag::step("lot opened");
+    ts2::diag::error(std::string(400, 'x'));
+    std::size_t logs = 0;
+    for (const auto& e : fs::directory_iterator(folder)) {
+        logs += e.path().filename().string().rfind("neots2-", 0) == 0 ? 1 : 0;
+    }
+    CHECK(logs == ts2::diag::kKeptLogs && fs::exists(ts2::diag::file()));
+    std::string text;
+    {
+        std::ifstream in(ts2::diag::file());
+        text.assign(std::istreambuf_iterator<char>(in), {});
+    }
+    CHECK(text.rfind("NeoTS2 test\n", 0) == 0 && text.find("step: lot opened") != std::string::npos);
+    CHECK(text.find(std::string(400, 'x')) != std::string::npos);  // whole in the file
+    auto recent = ts2::diag::recentLines();
+    CHECK(recent.size() == 2 && recent[0].find("lot opened") != std::string::npos && recent[1].size() < ts2::diag::kLineLength);
+    for (int i = 0; i < 100; ++i) {
+        ts2::diag::info("line " + std::to_string(i));
+    }
+    recent = ts2::diag::recentLines();
+    CHECK(recent.size() == ts2::diag::kRecentLines && recent.front().find("line 36") != std::string::npos &&
+          recent.back().find("line 99") != std::string::npos);
+    char small[10];
+    CHECK(ts2::diag::recentLines(small, sizeof small) == 9 && small[9] == '\0');
+    ts2::diag::reset();
+    std::error_code ec;
+    fs::remove_all(folder, ec);
+}
+
+// A crash report names what happened and where; its issue link keeps to module names and offsets
+// (no folders, no log lines) and stays short enough for a browser.
+void crashReportsSayWhatHappened() {
+    using namespace ts2::diag;
+    CHECK(exceptionName(0xC0000005) == "access violation" && exceptionName(0xC00000FD) == "stack overflow");
+    CHECK(exceptionName(0x123) == "exception 0x123");
+    CHECK(fileName("D:\\Profiles\\Me\\neots2.exe") == "neots2.exe" && fileName("a/b/c.cpp:3") == "c.cpp:3" && fileName("x") == "x");
+    CHECK(linkEncoded("a b&c/\xC3\xA9") == "a%20b%26c%2F%C3%A9");
+    Crash crash;
+    crash.version = "abc1234";
+    crash.kind = exceptionName(0xC0000005);
+    crash.code = 0xC0000005;
+    crash.where = {"neots2.exe", 0x4a955, "app::crash::test", "crash_handler.cpp:318"};
+    for (int i = 0; i < 40; ++i) {
+        crash.stack.push_back({"D:\\Profiles\\Me\\Games\\NeoTS2\\neots2.exe", 0x1000u + i, "app::f" + std::to_string(i),
+                               "D:\\Profiles\\Me\\src\\file.cpp:" + std::to_string(i)});
+    }
+    const std::string text = crashText(crash, {"12:00:00.000 step: lot opened"});
+    CHECK(text.find("Version: abc1234") != std::string::npos && text.find("access violation (0xc0000005)") != std::string::npos);
+    CHECK(text.find("neots2.exe+0x4a955  app::crash::test  (crash_handler.cpp:318)") != std::string::npos);
+    CHECK(text.find("step: lot opened") != std::string::npos && text.find("Nothing is sent anywhere") != std::string::npos);
+    const std::string link = issueLink(crash);
+    CHECK(link.rfind(std::string(kIssuesPage) + "?title=", 0) == 0 && link.size() <= 2000);
+    CHECK(link.find("abc1234") != std::string::npos && link.find("Users") == std::string::npos && link.find("lot%20opened") == std::string::npos);
+}
+
+// A run that ended without a word is told from what Windows noted in its event log: the fields of
+// its "Application Error" event, and the crash they amount to.
+void unexpectedExitsSayWhatWindowsNoted() {
+    using namespace ts2::diag;
+    const auto fields = eventFields("<EventData><Data Name='AppName'>neots2.exe</Data><Data Name='ExceptionCode'>c0000409</Data>"
+                                    "<Data Name=\"FaultingOffset\">000000000004c172</Data><Data Name='PackageFullName'></Data>"
+                                    "<Data Name='Empty'/><Data Name='ModuleName'>neots2.exe</Data></EventData>");
+    CHECK(fields.size() == 5 && fields.at("AppName") == "neots2.exe" && fields.at("FaultingOffset") == "000000000004c172");
+    CHECK(fields.at("PackageFullName").empty() && !fields.count("Empty"));
+    CHECK(eventFields("<Data Name='broken").empty() && eventFields("").empty());
+
+    UnexpectedExit exit;
+    exit.version = "abc1234";
+    exit.started = "2026-10-12 21:12:10";
+    const Crash none = crashOf(exit);
+    CHECK(none.kind == "closed unexpectedly" && none.code == 0 && none.version == "abc1234");
+    CHECK(unexpectedExitText(exit, {"21:12:10.142 step: lot opened"}).find("Windows noted no crash") != std::string::npos);
+    exit.windows = fields;
+    const Crash noted = crashOf(exit);
+    CHECK(noted.code == 0xC0000409 && noted.where.module == "neots2.exe" && noted.where.offset == 0x4c172);
+    CHECK(noted.kind == exceptionName(0xC0000409));
+    const std::string text = unexpectedExitText(exit, {"21:12:10.142 step: lot opened"});
+    CHECK(text.find("Where: neots2.exe+0x4c172") != std::string::npos && text.find("step: lot opened") != std::string::npos);
+    CHECK(text.find("Nothing is sent anywhere") != std::string::npos);
+    exit.windows["ExceptionCode"] = "not hex";
+    CHECK(crashOf(exit).code == 0);  // nonsense is left out, not thrown
+    CHECK(issueLink(noted).find("Users") == std::string::npos);
+}
+
+// The pieces of sending a report: a stored zip (checked against the standard CRC and its own
+// directory), the upload link read from BugSplat's JSON, and the form the upload is committed with.
+void reportUploadPieces() {
+    using namespace ts2::diag;
+    const std::string check = "123456789";
+    CHECK(crc32(reinterpret_cast<const std::uint8_t*>(check.data()), check.size()) == 0xCBF43926u);
+    const auto z = zip({{"neots2.dmp", {1, 2, 3}}, {"crash.txt", {'h', 'i'}}});
+    auto u32 = [&](std::size_t at) { return z[at] | z[at + 1] << 8 | z[at + 2] << 16 | static_cast<std::uint32_t>(z[at + 3]) << 24; };
+    CHECK(z.size() > 22 && u32(0) == 0x04034B50u && u32(z.size() - 22) == 0x06054B50u);
+    CHECK(z[z.size() - 22 + 10] == 2);  // two files
+    CHECK(std::string(z.begin() + 30, z.begin() + 40) == "neots2.dmp" && z[40] == 1 && z[42] == 3);
+    CHECK(zip({}).empty());
+    std::ofstream(std::filesystem::temp_directory_path() / "neots2-zip-test.zip", std::ios::binary)
+        .write(reinterpret_cast<const char*>(z.data()), static_cast<std::streamsize>(z.size()));
+
+    // As JSON writes a link: slashes escaped, & as &.
+    const std::string reply = "{\"status\":\"success\",\"url\":\"https:\\/\\/s3.example.com\\/a?x=1\\u0026y=2\"}";
+    CHECK(jsonString(reply, "url") == "https://s3.example.com/a?x=1&y=2");
+    CHECK(jsonString(R"({"note":"url", "url" : "b"})", "url") == "b");  // the key's text in a value isn't the key
+    CHECK(jsonString(R"({"url":12})", "url").empty() && jsonString(R"({"url":"cut)", "url").empty() && jsonString("", "url").empty());
+
+    const std::string form = formBody({{"appName", "NeoTS2"}, {"md5", "abc"}}, "XYZ");
+    CHECK(form == "--XYZ\r\nContent-Disposition: form-data; name=\"appName\"\r\n\r\nNeoTS2\r\n"
+                  "--XYZ\r\nContent-Disposition: form-data; name=\"md5\"\r\n\r\nabc\r\n--XYZ--\r\n");
+}
+
+// Reports write the user's own folder as %USERPROFILE%: any case, either slash, whole folder names
+// only, everywhere it appears.
+void reportsDontNameTheUser() {
+    using ts2::diag::withoutUserFolder;
+    const std::string user = "D:\\Profiles\\Sam";
+    CHECK(withoutUserFolder("logging to D:\\Profiles\\Sam\\Documents\\NeoTS2\\logs\\a.log", user) ==
+          "logging to %USERPROFILE%\\Documents\\NeoTS2\\logs\\a.log");
+    CHECK(withoutUserFolder("d:/profiles/sam/Desktop and \"D:\\Profiles\\Sam\"", user) == "%USERPROFILE%/Desktop and \"%USERPROFILE%\"");
+    CHECK(withoutUserFolder("D:\\Profiles\\Sam2\\x and D:\\Profiles\\Sam.old", user) == "D:\\Profiles\\Sam2\\x and D:\\Profiles\\Sam.old");
+    CHECK(withoutUserFolder("D:\\Profiles\\Sam\\", "D:\\Profiles\\Sam\\") == "%USERPROFILE%\\");  // given with a slash at its end
+    CHECK(withoutUserFolder("C:\\Games", "C:") == "C:\\Games" && withoutUserFolder("text", "") == "text");
+}
+
+// A run's log file stops growing at its limit, with a line saying so; the recent lines go on.
+void logFileStopsAtItsLimit() {
+    namespace fs = std::filesystem;
+    ts2::diag::reset();
+    const fs::path folder = fs::temp_directory_path() / ("neots2-logcap-test-" + std::to_string(std::random_device{}()));
+    CHECK(ts2::diag::open(folder, "header", 300));
+    for (int i = 0; i < 40; ++i) {
+        ts2::diag::info("line " + std::to_string(i));
+    }
+    const fs::path file = ts2::diag::file();
+    std::string text;
+    {
+        std::ifstream in(file);
+        text.assign(std::istreambuf_iterator<char>(in), {});
+    }
+    CHECK(text.find("(the log is full") != std::string::npos && text.find("line 39") == std::string::npos);
+    CHECK(text.size() < 300 + 80);
+    const auto recent = ts2::diag::recentLines();
+    CHECK(!recent.empty() && recent.back().find("line 39") != std::string::npos);
+    ts2::diag::reset();
+    std::error_code ec;
+    fs::remove_all(folder, ec);
+}
+
+// Only names the program makes are cleaned up or read; paths become UTF-8 text whatever the
+// Windows language; loads left running by a household change still count toward the limit.
+void diagnosticsKeepToTheirOwnFiles() {
+    using namespace ts2::diag;
+    CHECK(isLogName("neots2-20261012-153000.log") && !isLogName("neots2-notes.log") && !isLogName("neots2-20261012-153000.log.bak"));
+    CHECK(isReportFolderName("crash-20261012-153000") && isReportFolderName("crash-20261012-153000-unexpected-1234"));
+    CHECK(!isReportFolderName("crash-course") && !isReportFolderName("crash-20261012-153000-unexpected-") &&
+          !isReportFolderName("crash-20261012-153000-old") && !isReportFolderName("Crash-20261012-153000"));
+    CHECK(isMarkerName("running-1234.txt") && !isMarkerName("running-.txt") && !isMarkerName("running-12ab.txt") &&
+          !isMarkerName("running-1234.txt.old"));
+    CHECK(utf8(std::filesystem::path(L"D:\\Profiles\\Jos\u00e9\\\u4e2d\u6587")) == "D:\\Profiles\\Jos\xC3\xA9\\\xE4\xB8\xAD\xE6\x96\x87");
+
+    std::promise<void> open;
+    const std::shared_future<void> gate = open.get_future().share();
+    ts2::content::TargetPictures pictures([gate](const std::filesystem::path&, std::uint32_t) -> std::optional<ts2::tga::Pixels> {
+        gate.wait();
+        return std::nullopt;
+    });
+    for (std::int16_t n = 1; n <= 4; ++n) {
+        CHECK(pictures.load(n, "slow", 0x10));
+    }
+    pictures.clear();  // a new household while all four still load
+    CHECK(!pictures.load(5, "slow", 0x10));
+    open.set_value();
+    bool loaded = false;
+    for (int tries = 0; tries < 500 && !loaded; ++tries) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        loaded = pictures.load(5, "slow", 0x10);  // room again once the abandoned loads end
+    }
+    CHECK(loaded);
+    for (int tries = 0; tries < 500 && pictures.loading() > 0; ++tries) {
+        pictures.collect();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
 }
 
 int main(int argc, char** argv) {
@@ -4573,6 +6436,24 @@ int main(int argc, char** argv) {
         {"Lua error without text is reported", luaErrorWithoutTextIsReported},
         {"Installed packs are found", installedPacksAreFound},
         {"Skin under clothes is named as the game names it", skinUnderClothesNames},
+        {"Objects' daylight matches the game", objectDaylightMatchesTheGame},
+        {"Floor light spreads and fades as the game's", floorLightSpreadsAndFades},
+        {"Floor light grid is built as the game builds it", lightGridIsBuiltAsTheGame},
+        {"Wall runs are laid out as the game lays them out", wallRunsAreLaidOutAsTheGame},
+        {"Wall texels and corners are finished as the game finishes them", wallTexelsAndCornersAreFinishedAsTheGame},
+        {"Light files are read as the game reads them", lightFilesAreReadAsTheGame},
+        {"Lamps give the game's floor and wall light records", lampsGiveTheGamesRecords},
+        {"Portals are built as the game builds them", portalsAreBuiltAsTheGame},
+        {"Room samples are gathered as the game gathers them", roomSamplesAreGatheredAsTheGame},
+        {"Lot lighting is worked out as the game works it out", lotLightingIsWorkedOutAsTheGame},
+        {"Light-map texels are written as the game writes them", lightMapTexelsAreWrittenAsTheGame},
+        {"The lot's sun shadow is cast as the game casts it", lotSunShadowIsCastAsTheGame},
+        {"JPEG pictures decode as the game decodes them", jpegDecodesAsTheGame},
+        {"Wall light fades along and up the walls as the game's", wallLightFadesAlongAndUp},
+        {"Room light matches the game", roomLightMatchesTheGame},
+        {"Window light matches the game", windowLightMatchesTheGame},
+        {"Indoor light stays safe on bad data", indoorLightStaysSafeOnBadData},
+        {"Portable maths matches the C library", portableMathMatchesTheLibrary},
         {"Joints the animation leaves keep the mesh's own rest", unanimatedJointsKeepTheMeshRest},
         {"ObjectManager scripts find objects", objectManagerScriptsFindObjects},
         {"data table scripts keep values", dataTableScriptsKeepValues},
@@ -4582,6 +6463,7 @@ int main(int argc, char** argv) {
         {"Manage Inventory changes tokens", manageInventoryChangesTokens},
         {"saved data tables are read", savedDataTablesAreRead},
         {"scenegraph hashes and textures", scenegraphHashesAndTextures},
+        {"Light resources are read", lightResourcesAreRead},
         {"SLOT resource counts container slots", slotResourceCountsContainerSlots},
         {"pattern map reads names by id", patternMapReadsNamesById},
         {"name map reads names", nameMapReadsNames},
@@ -4640,6 +6522,7 @@ int main(int argc, char** argv) {
         {"Relationship with neighbor ids uses the neighborhood", relationshipWithNeighborIdsUsesTheNeighborhood},
         {"Constants [temp] index with temp 0", constantsByTempIndexWithTempZero},
         {"motives are clamped and need a person", motivesAreClampedAndNeedAPerson},
+        {"Change Light sets how strongly an object's lights shine", changeLightSetsLightStrength},
         {"Remove Object removes the stack object", removeObjectRemovesTheStackObject},
         {"Remove Object refuses protected objects", removeObjectRefusesProtectedObjects},
         {"removing me ends the run unless return immediately", removingMeEndsTheRunUnlessReturnImmediately},
@@ -4666,6 +6549,27 @@ int main(int argc, char** argv) {
         {"presentation-only Generic Sims Calls continue", presentationOnlyGenericCallsContinue},
         {"other Generic Sims Calls report their id", otherGenericCallsReportTheirId},
         {"attributes need a 'me' object", attributesNeedAMeObject},
+        {"lot number comes from the package name", lotNumberComesFromThePackageName},
+        {"portrait image is the life stage flag", portraitImageIsTheLifeStageFlag},
+        {"needs bar rows match the game", needsBarRowsMatchTheGame},
+        {"mood rows match the game", moodRowsMatchTheGame},
+        {"bar painting keeps the fill shape", barPaintingKeepsTheFillShape},
+        {"mood colour fills the background shape", moodColourFillsTheBackgroundShape},
+        {"motives are shown as whole numbers", motivesAreShownAsWholeNumbers},
+        {"mood meter picks a column", moodMeterPicksAColumn},
+        {"want icon is placed on its picture", wantIconIsPlacedOnItsPicture},
+        {"portrait pose and camera", portraitPoseAndCamera},
+        {"portrait is cropped for thumbnails", portraitIsCroppedForThumbnails},
+        {"thumbnail pictures are scaled and masked", thumbnailPicturesAreScaledAndMasked},
+        {"target pictures load in the background", targetPicturesLoadInTheBackground},
+        {"log keeps its lines and files", logKeepsItsLinesAndFiles},
+        {"crash reports say what happened", crashReportsSayWhatHappened},
+        {"unexpected exits say what Windows noted", unexpectedExitsSayWhatWindowsNoted},
+        {"report upload pieces", reportUploadPieces},
+        {"reports don't name the user", reportsDontNameTheUser},
+        {"log file stops at its limit", logFileStopsAtItsLimit},
+        {"diagnostics keep to their own files", diagnosticsKeepToTheirOwnFiles},
+        {"portrait shadow is its blurred outline", portraitShadowIsItsBlurredOutline},
     };
 
     for (const auto& [name, test] : tests) {

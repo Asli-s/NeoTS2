@@ -4,6 +4,10 @@
 cbuffer Frame : register(b0, space1) {
     row_major float4x4 viewProjection;  // applied to column vectors
     row_major float4x4 model;           // the instance's placement
+    float4 ambient;                     // w: 1 when lit as the game lights objects
+    float4 lightDirections[8];          // toward each light
+    float4 lightColors[8];
+    float4 thumbnail;                   // rgb: the material's diffuse; w: the thumbnail scale (0: not a thumbnail)
     uint jointBase;
     uint3 padding;
 };
@@ -17,6 +21,7 @@ struct Input {
     float alpha : TEXCOORD3;
     uint4 joint : TEXCOORD4;   // 255: none
     float4 weight : TEXCOORD5;
+    float2 lightUv : TEXCOORD6;  // unused: skinned surfaces have no light map
 };
 
 struct Output {
@@ -25,7 +30,27 @@ struct Output {
     float2 uv : TEXCOORD1;
     float3 world : TEXCOORD2;
     float alpha : TEXCOORD3;
+    float4 light : TEXCOORD4;
+    float2 lightUv : TEXCOORD5;
 };
+
+// The game's object lighting at a vertex: the ambient plus each light's colour times how much the
+// normal faces it. w is 0 when the instance isn't lit this way.
+float4 gameLight(float3 normal) {
+    if (ambient.w < 0.5) {
+        return float4(0, 0, 0, 0);
+    }
+    const float3 n = normalize(normal);
+    float3 sum = ambient.rgb;
+    [unroll] for (int i = 0; i < 8; ++i) {
+        sum += max(0, dot(n, lightDirections[i].xyz)) * lightColors[i].rgb;
+    }
+    // A family thumbnail: the game's vertex colour there, clamped, then doubled by its texture stage.
+    if (thumbnail.w > 0) {
+        return float4(2 * saturate(sum * thumbnail.rgb * thumbnail.w), 2);
+    }
+    return float4(sum, 1);
+}
 
 float3x4 jointMatrix(uint j) {
     const uint row = (jointBase + j) * 3;
@@ -48,5 +73,7 @@ Output main(Input input) {
     output.uv = input.uv;
     output.world = world.xyz;
     output.alpha = input.alpha;
+    output.light = gameLight(output.normal);
+    output.lightUv = float2(0, 0);
     return output;
 }

@@ -54,6 +54,37 @@ std::vector<std::array<float, 2>> holes(SceneBuilder& builder, const std::string
     return spans;
 }
 
+// The rows (as fractions down the texture) where a face's texture is a hole in its first or last
+// column: a window or door running on past that end of the segment into the next.
+std::vector<std::array<float, 2>> endHoles(SceneBuilder& builder, const std::string& material, bool last) {
+    std::vector<std::array<float, 2>> spans;
+    const int m = material.empty() ? -1 : builder.material(material);
+    if (m < 0) {
+        return spans;
+    }
+    const auto& mat = builder.scene().materials[static_cast<std::size_t>(m)];
+    if (mat.alpha != AlphaMode::Mask || mat.image < 0) {
+        return spans;
+    }
+    const Image& image = builder.scene().images[static_cast<std::size_t>(mat.image)];
+    if (image.width == 0 || image.height == 0) {
+        return spans;
+    }
+    const std::size_t c = last ? image.width - 1 : 0;
+    const auto h = static_cast<int>(image.height);
+    int start = -1;
+    for (int r = 0; r <= h; ++r) {
+        const bool hole = r < h && image.rgba[(static_cast<std::size_t>(r) * image.width + c) * 4 + 3] < 128;
+        if (hole && start < 0) {
+            start = r;
+        } else if (!hole && start >= 0) {
+            spans.push_back({static_cast<float>(start) / static_cast<float>(h), static_cast<float>(r) / static_cast<float>(h)});
+            start = -1;
+        }
+    }
+    return spans;
+}
+
 } // namespace
 
 std::map<std::string, std::vector<WallMask>> wallMasks(const std::vector<std::string>& materialNames) {
@@ -114,6 +145,7 @@ std::vector<WallHub> joinWalls(std::vector<ThickWall>& walls) {
             const Arm& next = arms[(k + 1) % arms.size()];
             const Arm& prev = arms[(k + arms.size() - 1) % arms.size()];
             ThickWall& w = walls[a.wall];
+            w.joined[static_cast<std::size_t>(a.end)] = arms.size() > 1;
             const float px = a.end == 0 ? w.q.x0 : w.q.x1, py = a.end == 0 ? w.q.y0 : w.q.y1;
             // The counterclockwise side of an arm is the wall's right side at its start and its
             // left side at its end.
@@ -167,7 +199,8 @@ std::vector<float> WallCeiling::bends(const std::array<float, 2>& p, const std::
 // Coverings run left to right as seen from their side, once along each segment (a tile, or a tile's
 // diagonal) and once over a full storey down from the wall's own top, so short walls such as a
 // deck's skirt show the top of it, and the covering carries on where the wall is cut down or raised.
-void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w, int edge, float cutHeight) {
+void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w, int edge, float cutHeight,
+                  const std::array<std::optional<LightRect>, 2>* lightRects) {
     const WallQuad& q = w.q;
     const float dx = q.x1 - q.x0, dy = q.y1 - q.y0, len = std::sqrt(dx * dx + dy * dy);
     if (len <= 0) {
@@ -217,8 +250,11 @@ void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w,
         if (m < 0) {
             continue;
         }
-        // Raised past its own top (closing a gable), a wall shows its covering without door and window holes.
-        const std::string& plain = left ? w.leftCovering : w.rightCovering;
+        // Raised past its own top (closing a gable), a wall shows its covering without door and window
+        // holes: the outside one on both sides when it has a room on one side only.
+        const bool outsideAbove = w.roomLeft != w.roomRight;
+        const std::string& plain = outsideAbove ? (w.roomLeft ? w.rightCovering : w.leftCovering)
+                                                : (left ? w.leftCovering : w.rightCovering);
         const int above = plain.empty() ? m : builder.material(plain);
         // Past a segment's ends (where corners are mitred) a mask would wrap around to its other
         // edge and could open a slit there; masked sides keep to the segment's own part of the texture.
@@ -228,6 +264,20 @@ void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w,
             return masked ? std::clamp(t, 0.0f, 1.0f) : t;
         };
         const auto pts = left ? points(w.leftA, w.leftB) : points(w.rightA, w.rightB);
+        const std::optional<LightRect> rect = lightRects ? (*lightRects)[left ? 0 : 1] : std::nullopt;
+        // Light-map coordinates for the vertices a quad just added to `p` (from `first` on).
+        auto light = [&](Primitive& p, std::size_t first) {
+            if (!rect) {
+                return;
+            }
+            const auto& r = *rect;
+            for (std::size_t k = first; k < p.positions.size() / 3; ++k) {
+                const std::array<float, 2> c{p.positions[3 * k], p.positions[3 * k + 1]};
+                const float t = std::clamp(left ? along(c) / len : 1 - along(c) / len, 0.0f, 1.0f);
+                const float down = std::clamp((ownTopAt(c) - p.positions[3 * k + 2]) / kLevelHeight, 0.0f, 1.0f);
+                p.lightUvs.insert(p.lightUvs.end(), {r[0] + t * (r[2] - r[0]), r[1] + down * (r[3] - r[1])});
+            }
+        };
         for (std::size_t k = 0; k + 1 < pts.size(); ++k) {
             const auto& p = pts[k];
             const auto& n = pts[k + 1];
@@ -239,9 +289,12 @@ void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w,
                 if (z1p <= z0p + 1e-4f && z1n <= z0n + 1e-4f) {
                     continue;
                 }
-                addQuad(surfaces[material], {{{p[0], p[1], z0p}, {n[0], n[1], z0n}, {n[0], n[1], z1n}, {p[0], p[1], z1p}}},
+                auto& prim = surfaces[material];
+                const std::size_t first = prim.positions.size() / 3;
+                addQuad(prim, {{{p[0], p[1], z0p}, {n[0], n[1], z0n}, {n[0], n[1], z1n}, {p[0], p[1], z1p}}},
                         left ? leftNormal : rightNormal,
                         {{{u(p), v(p, z0p)}, {u(n), v(n, z0n)}, {u(n), v(n, z1n)}, {u(p), v(p, z1p)}}});
+                light(prim, first);
             }
         }
     }
@@ -275,6 +328,24 @@ void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w,
     if (from < len - kTouch) {
         pieces.push_back({from, len});
     }
+    // A doorway reaching an end of a full wall carries on into the next segment (an arch two tiles
+    // wide): that end is left open, or it would stand in the middle of the opening.
+    bool openA = false, openB = false;
+    if (!cut) {
+        const std::array<float, 2> a{q.x0, q.y0}, b{q.x1, q.y1};
+        const float bottom = (v(a, q.bottom0) + v(b, q.bottom1)) / 2;
+        const float touch = kTouch / len;
+        auto reach = [&](float s, float e) {
+            openA = openA || s <= touch;
+            openB = openB || e >= 1 - touch;
+        };
+        for (const auto& g : holes(builder, w.left, bottom - 0.05f, bottom)) {
+            reach(g[0], g[1]);
+        }
+        for (const auto& g : holes(builder, w.right, bottom - 0.05f, bottom)) {
+            reach(1 - g[1], 1 - g[0]);
+        }
+    }
     // Each piece's top and its ends: the wall's own ends (where walls join they are inside the
     // walls, and show when the neighbor is cut down) or a doorway's sides.
     for (const auto& [s, e] : pieces) {
@@ -294,9 +365,48 @@ void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w,
                     {0, 0, 1}, noUv);
         }
         for (const auto& [lp, rp, out] : {std::tuple{l.front(), r.front(), -1.0f}, std::tuple{l.back(), r.back(), 1.0f}}) {
-            addQuad(surfaces[edge], {{{lp[0], lp[1], bottomAt(lp)}, {rp[0], rp[1], bottomAt(rp)}, {rp[0], rp[1], topAt(rp)},
-                                      {lp[0], lp[1], topAt(lp)}}},
-                    {out * ux, out * uy, 0}, noUv);
+            const bool atEnd = out < 0 ? atA : atB;
+            if (out < 0 ? atA && openA : atB && openB) {
+                continue;
+            }
+            // Where another wall joins, it covers the end up to the height walls are cut down to; only
+            // above it can the end show (when the other wall is cut down and this one isn't).
+            const bool joined = atEnd && w.joined[out < 0 ? 0 : 1];
+            if (joined && cut) {
+                continue;
+            }
+            // Where a window or door runs on past the segment's end, the end stays open over its rows
+            // (or it would stand in the middle of the opening).
+            std::vector<std::array<float, 2>> open;
+            if (atEnd) {
+                for (const auto& g : endHoles(builder, w.left, out > 0)) {
+                    open.push_back(g);
+                }
+                for (const auto& g : endHoles(builder, w.right, out < 0)) {
+                    open.push_back(g);
+                }
+                std::sort(open.begin(), open.end());
+            }
+            auto cap = [&](float v0, float v1) {
+                const float lt = std::min(topAt(lp), ownTopAt(lp) - v0 * kLevelHeight), rt = std::min(topAt(rp), ownTopAt(rp) - v0 * kLevelHeight);
+                const float above = joined ? kCutWallHeight : 0;
+                const float lb = std::max(bottomAt(lp) + above, ownTopAt(lp) - v1 * kLevelHeight);
+                const float rb = std::max(bottomAt(rp) + above, ownTopAt(rp) - v1 * kLevelHeight);
+                if (lt <= lb + 1e-4f && rt <= rb + 1e-4f) {
+                    return;
+                }
+                addQuad(surfaces[edge], {{{lp[0], lp[1], lb}, {rp[0], rp[1], rb}, {rp[0], rp[1], rt}, {lp[0], lp[1], lt}}}, {out * ux, out * uy, 0},
+                        noUv);
+            };
+            constexpr float kAll = 1000;  // far past the wall's top and bottom
+            float row = -kAll;
+            for (const auto& g : open) {
+                if (g[0] > row) {
+                    cap(row, g[0]);
+                }
+                row = std::max(row, g[1]);
+            }
+            cap(row, kAll);
         }
     }
 }

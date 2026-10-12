@@ -39,6 +39,10 @@ constexpr std::pair<const char*, WantArgument> kArguments[] = {
     {"Badge", WantArgument::Badge},
 };
 
+constexpr std::pair<const char*, WantLevel> kLevels[] = {
+    {"Transitory", WantLevel::Transitory}, {"Memorable", WantLevel::Memorable}, {"Power", WantLevel::Power},
+};
+
 // The definitions use "Then" for "Than".
 constexpr std::pair<const char*, WantOperator> kOperators[] = {
     {"None", WantOperator::None},
@@ -100,6 +104,16 @@ WantDefinitions loadWantDefinitions(const fs::path& wantsPackage) {
                 d.score = std::stoi(score, nullptr, 0);
             }
             d.simArrayTree = text("simArrayTree");
+            if (const auto influence = text("influence"); !influence.empty()) {
+                d.influence = std::stoi(influence, nullptr, 0);
+            }
+            d.level = lookup(kLevels, text("level")).value_or(WantLevel::Transitory);
+            if (const auto icon = text("primaryIcon"); !icon.empty()) {
+                d.primaryIcon = static_cast<std::uint32_t>(std::stoul(icon, nullptr, 0));
+            }
+            if (const auto icon = text("secondaryIcon"); !icon.empty()) {
+                d.secondaryIcon = static_cast<std::uint32_t>(std::stoul(icon, nullptr, 0));
+            }
             defs.byGuid[d.guid] = std::move(d);
         } catch (const std::exception& ex) {
             defs.problems.push_back("want definition " + std::to_string(e.key.instance) + ": " + ex.what());

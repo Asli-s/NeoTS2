@@ -1,6 +1,7 @@
 #pragma once
 
 #include "content/build_scripts.hpp"
+#include "content/lighting.hpp"
 #include "content/resource_index.hpp"
 #include "formats/objd.hpp"
 #include "formats/scenegraph.hpp"
@@ -41,6 +42,9 @@ public:
     std::optional<Image> texture(const std::string& name);
     // Every face of a texture (six for a cube map, in the file's order), the largest mip level each.
     std::vector<Image> textureFaces(const std::string& name);
+
+    // The game's lighting settings (Lights/Lighting.txt of every product).
+    const content::Lighting& lighting() const { return lighting_; }
 
     // Names of every material in the Sims3D packages (for finding doors' and windows' wall masks).
     const std::vector<std::string>& materialNames() const { return materialNames_; }
@@ -88,6 +92,7 @@ private:
     std::set<std::filesystem::path> added_;
     std::vector<std::string> materialNames_;
     content::BuildScripts scripts_;
+    content::Lighting lighting_;
     std::map<std::uint32_t, std::string> patternsByGuid_;
     std::map<std::uint32_t, Fence> fences_;
     std::map<std::uint32_t, RoofPattern> roofPatterns_;

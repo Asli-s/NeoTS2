@@ -7,6 +7,7 @@
 #include "formats/resource_types.hpp"
 #include "scene/lot_parts.hpp"
 #include "scene/rig.hpp"
+#include "scene/sim_builder.hpp"
 #include "scene/sims.hpp"
 
 #include <algorithm>
@@ -202,6 +203,30 @@ private:
         }
     }
 
+    LightMaps& lightMaps() {
+        if (!b_.scene().lightMaps) {
+            b_.scene().lightMaps.emplace();
+        }
+        return *b_.scene().lightMaps;
+    }
+
+    // Each level's floor light map, 8 texels a tile, grey (no light worked out yet) until it is filled.
+    void makeFloorLightMaps() {
+        auto& maps = lightMaps();
+        const auto floors = lot_.grids.find(content::kFloorGridInstance);
+        if (!maps.floors.empty() || floors == lot_.grids.end()) {
+            return;
+        }
+        for (std::uint32_t level = 0; level < floors->second.levels; ++level) {
+            Image map;
+            map.width = 8 * floors->second.width;
+            map.height = 8 * floors->second.height;
+            map.rgba.assign(static_cast<std::size_t>(map.width) * map.height * 4, 128);
+            maps.floors.push_back(static_cast<int>(b_.scene().images.size()));
+            b_.scene().images.push_back(std::move(map));
+        }
+    }
+
     void log(const content::LotObject& o, const std::string& what, const std::string& model) {
         if (!log_) {
             return;
@@ -369,48 +394,9 @@ private:
             // played from its start.
             const char* prefix = look.age == 8 ? "a" : look.age == 4 ? "t" : nullptr;
             const std::string idle = prefix ? std::string(prefix) + "-idle-neutral-armsSide-wtC-breatheLoop" : std::string();
-            Actor actor;
-            actor.object = sim->id;
-            actor.place = at;
-            actor.rig = rig(look.skeleton);
-            actor.animation = animation(look.skeleton, idle);
             std::vector<Transform> world;
-            if (actor.rig) {
-                poseRig(*actor.rig, actor.animation.get(), 0, world);
-            }
-            // A top and a bottom worn together share one texture: the skin, the top, then the bottom.
-            auto firstMaterial = [&](std::uint32_t kind) {
-                for (const auto& part : look.parts) {
-                    if (part.part == kind && !part.overrides.empty()) {
-                        return part.overrides.front().material;
-                    }
-                }
-                return std::string();
-            };
-            const std::string top = firstMaterial(kTopPart), bottom = firstMaterial(kBottomPart);
-            const std::string separates =
-                !top.empty() && !bottom.empty() ? separatesOverSkin(b_, assets_, look, top, bottom) : std::string();
-            for (const auto& part : look.parts) {
-                // Clothes are drawn over the Sim's skin (its uncovered arms, hands, neck).
-                auto overrides = part.overrides;
-                if (part.part == kBodyPart) {
-                    for (auto& o : overrides) {
-                        o.material = clothesOverSkin(b_, assets_, look, o.material);
-                    }
-                } else if (!separates.empty() && (part.part == kTopPart || part.part == kBottomPart)) {
-                    for (auto& o : overrides) {
-                        if (o.material == top || o.material == bottom) {
-                            o.material = separates;
-                        }
-                    }
-                }
-                const int mesh = actor.rig ? b_.skinnedModel(part.model, overrides) : b_.model(part.model, overrides);
-                const std::size_t instance = b_.scene().instances.size();
-                if (b_.place(mesh, std::to_string(sim->id) + " " + part.model, at, Part::Object, h.value1 - 1) && actor.rig &&
-                    !b_.scene().meshes[static_cast<std::size_t>(mesh)].skin.empty()) {
-                    actor.skinned.push_back({instance, skinNodes(b_.scene().meshes[static_cast<std::size_t>(mesh)], *actor.rig)});
-                }
-            }
+            Actor actor = buildSim(b_, rigs_, look, at, h.value1 - 1, std::to_string(sim->id), idle, world);
+            actor.object = sim->id;
             holdBySim(*sim, file->second, actor, world);
             b_.scene().actors.push_back(std::move(actor));
             assets_.useCharacterFile({});
@@ -465,36 +451,6 @@ private:
                 actor.held.push_back({s.instance, *n});
             }
         }
-    }
-
-    // A skeleton's rig, loaded once per lot.
-    std::shared_ptr<const Rig> rig(const std::string& skeleton) {
-        if (skeleton.empty()) {
-            return nullptr;
-        }
-        auto& r = rigs_[skeleton];
-        if (!r) {
-            auto loaded = std::make_shared<Rig>(loadRig(assets_, skeleton));
-            if (!loaded->nodes.empty()) {
-                r = std::move(loaded);
-            }
-        }
-        return r;
-    }
-
-    // An animation bound to a skeleton's rig, loaded once per lot; nullptr when missing.
-    std::shared_ptr<const RigAnimation> animation(const std::string& skeleton, const std::string& name) {
-        const auto r = rig(skeleton);
-        if (!r || name.empty()) {
-            return nullptr;
-        }
-        auto& a = animations_[skeleton + "|" + name];
-        if (!a) {
-            if (auto loaded = loadAnimation(assets_, name)) {
-                a = std::make_shared<RigAnimation>(bindAnimation(*r, std::make_shared<anim::Animation>(std::move(*loaded))));
-            }
-        }
-        return a;
     }
 
     // The lowest and highest points of a mesh, below and above its origin, and the highest point still
@@ -583,17 +539,53 @@ private:
             return;
         }
         const auto hubs = joinWalls(walls_);
+        // Each face its own light-map rect, 8 texels along a tile by 24 up a storey (as the game's
+        // ordinary walls), 64 to a row of the wall light map; grey until the light is worked out.
+        auto& maps = lightMaps();
+        constexpr int kRectWidth = 8, kRectHeight = 24, kAtlasWidth = 512, kPerRow = kAtlasWidth / kRectWidth;
+        auto faceKey = [](const ThickWall& w, bool left) {
+            const int x0 = static_cast<int>(std::lround(w.q.x0)), y0 = static_cast<int>(std::lround(w.q.y0));
+            const int x1 = static_cast<int>(std::lround(w.q.x1)), y1 = static_cast<int>(std::lround(w.q.y1));
+            return left ? std::array<int, 5>{w.level, x0, y0, x1, y1} : std::array<int, 5>{w.level, x1, y1, x0, y0};
+        };
+        for (const auto& w : walls_) {
+            for (const bool left : {true, false}) {
+                const auto key = faceKey(w, left);
+                if (!maps.wallRects.contains(key)) {
+                    const int i = static_cast<int>(maps.wallRects.size());
+                    const int x0 = (i % kPerRow) * kRectWidth, y0 = (i / kPerRow) * kRectHeight;
+                    maps.wallRects[key] = {x0, y0, x0 + kRectWidth, y0 + kRectHeight};
+                }
+            }
+        }
+        Image atlas;
+        atlas.width = kAtlasWidth;
+        atlas.height = static_cast<std::uint32_t>(std::max<std::size_t>(1, (maps.wallRects.size() + kPerRow - 1) / kPerRow) * kRectHeight);
+        atlas.rgba.assign(static_cast<std::size_t>(atlas.width) * atlas.height * 4, 128);
+        const float atlasW = static_cast<float>(atlas.width), atlasH = static_cast<float>(atlas.height);
+        maps.walls = static_cast<int>(b_.scene().images.size());
+        b_.scene().images.push_back(std::move(atlas));
+        // As texture coordinates, one texel in from each side (the game's inset for these rects).
+        auto lightRect = [&](const ThickWall& w, bool left) -> std::optional<LightRect> {
+            const auto it = maps.wallRects.find(faceKey(w, left));
+            if (it == maps.wallRects.end()) return std::nullopt;
+            const auto& r = it->second;
+            return LightRect{(r.x0 + 1) / atlasW, (r.y0 + 1) / atlasH, (r.x1 - 1) / atlasW, (r.y1 - 1) / atlasH};
+        };
         for (std::size_t i = 0; i < walls_.size(); ++i) {
             const auto& w = walls_[i];
+            const std::array<std::optional<LightRect>, 2> rects{lightRect(w, true), lightRect(w, false)};
             for (const bool cut : {false, true}) {
                 if (cut && !w.cuttable) {
                     continue;
                 }
                 Surfaces surfaces;
-                addThickWall(b_, surfaces, w, edge_, cut ? kCutWallHeight : 0);
+                addThickWall(b_, surfaces, w, edge_, cut ? kCutWallHeight : 0, &rects);
                 if (auto* instance = b_.place(b_.addMesh("wall", std::move(surfaces)), "wall", Transform{}, Part::Wall, w.level)) {
                     instance->cut = cut;
                     instance->walls = {wallBase_ + static_cast<int>(i)};
+                    instance->lightMap = maps.walls;
+                    instance->lightMapOnly = true;  // the game's wall shader leaves the covering's diffuse out
                 }
             }
         }
@@ -648,6 +640,9 @@ private:
             return top * (1 - fy) + bottom * fy;
         };
 
+        // The ground is lit by the ground level's floor light map, as the game lights it.
+        makeFloorLightMaps();
+        const float lotWidth = static_cast<float>(g->width - 1), lotHeight = static_cast<float>(g->height - 1);
         Primitive canvas;
         constexpr float step = 1.0f / kSteps;
         for (std::uint32_t i = 0; i < columns; ++i) {
@@ -659,6 +654,7 @@ private:
                 canvas.positions.insert(canvas.positions.end(), {x, y, height(i, j)});
                 canvas.normals.insert(canvas.normals.end(), {-sx / len, -sy / len, 1 / len});
                 canvas.uvs.insert(canvas.uvs.end(), {x / kRepeat, y / kRepeat});
+                canvas.lightUvs.insert(canvas.lightUvs.end(), {x / lotWidth, y / lotHeight});
             }
         }
         auto cell = [&](std::vector<std::uint32_t>& indices, std::uint32_t i, std::uint32_t j) {
@@ -705,6 +701,7 @@ private:
             paint.positions = canvas.positions;
             paint.normals = canvas.normals;
             paint.uvs = canvas.uvs;
+            paint.lightUvs = canvas.lightUvs;
             for (std::uint32_t i = 0; i < columns; ++i) {
                 for (std::uint32_t j = 0; j < rows; ++j) {
                     paint.alphas.push_back(static_cast<float>(strength.byte(static_cast<std::int32_t>(i), static_cast<std::int32_t>(j))) / 255);
@@ -715,7 +712,14 @@ private:
         }
         b_.scene().meshes.push_back(std::move(mesh));
         // Slightly under the floors standing on it.
-        b_.place(static_cast<int>(b_.scene().meshes.size() - 1), "terrain", Transform::at(0, 0, -kGroundDrop, 0));
+        if (auto* instance = b_.place(static_cast<int>(b_.scene().meshes.size() - 1), "terrain", Transform::at(0, 0, -kGroundDrop, 0));
+            instance && !lightMaps().floors.empty()) {
+            // The game's lot terrain: its paint times twice its diffuse (0.9) times the light map, at most 1.
+            instance->lightMap = lightMaps().floors.front();
+            instance->lightMapGain = 1.8f;
+            instance->lightMapOnly = true;
+            instance->lightMapMultiply = true;
+        }
     }
 
     // Floors: a pattern per quarter tile, each quarter the triangle from one tile edge to the tile's
@@ -728,6 +732,17 @@ private:
         }
         const auto& g = floors->second;
         std::set<int> patterns;
+        // Light-map coordinates: the ground level's tiles run on into each other; above it each tile
+        // keeps to its own texels, its edges on their centres, as the game's light-map slots do.
+        makeFloorLightMaps();
+        auto& maps = lightMaps();
+        const float mapWidth = static_cast<float>(g.width), mapHeight = static_cast<float>(g.height);
+        auto lightUv = [&](std::int32_t level, float tileX, float tileY, float fx, float fy) {
+            if (level == 0) {
+                return std::array<float, 2>{(tileX + fx) / mapWidth, (tileY + fy) / mapHeight};
+            }
+            return std::array<float, 2>{(tileX + (0.5f + 7 * fx) / 8) / mapWidth, (tileY + (0.5f + 7 * fy) / 8) / mapHeight};
+        };
         for (std::int32_t level = 0; level < static_cast<std::int32_t>(g.levels); ++level) {
             Surfaces surfaces;
             for (std::int32_t x = 0; x < static_cast<std::int32_t>(g.width); ++x) {
@@ -750,18 +765,30 @@ private:
                         patterns.insert(material);
                         auto& s = surfaces[material];
                         const std::size_t n = (q + 1) % 4;
-                        // Textures run along the game's own tile axes (world y, x here).
-                        addVertex(s, {corners[q][0], corners[q][1], h[q]}, {0, 0, 1}, {corners[q][1], corners[q][0]});
-                        addVertex(s, {corners[n][0], corners[n][1], h[n]}, {0, 0, 1}, {corners[n][1], corners[n][0]});
-                        addVertex(s, {fx + 0.5f, fy + 0.5f, center}, {0, 0, 1}, {fy + 0.5f, fx + 0.5f});
+                        // Textures run along the game's own tile axes (world y, x here), a repeat
+                        // spanning the material's tiles.
+                        std::array<float, 2> span{1, 1};
+                        if (material >= 0) {
+                            span = b_.scene().materials[static_cast<std::size_t>(material)].floorTiles;
+                        }
+                        addVertex(s, {corners[q][0], corners[q][1], h[q]}, {0, 0, 1}, {corners[q][1] / span[0], corners[q][0] / span[1]});
+                        addVertex(s, {corners[n][0], corners[n][1], h[n]}, {0, 0, 1}, {corners[n][1] / span[0], corners[n][0] / span[1]});
+                        addVertex(s, {fx + 0.5f, fy + 0.5f, center}, {0, 0, 1}, {(fy + 0.5f) / span[0], (fx + 0.5f) / span[1]});
+                        for (const auto& c : {corners[q], corners[n], std::array<float, 2>{fx + 0.5f, fy + 0.5f}}) {
+                            const auto uv = lightUv(level, fx, fy, c[0] - fx, c[1] - fy);
+                            s.lightUvs.insert(s.lightUvs.end(), uv.begin(), uv.end());
+                        }
                     }
                 }
             }
-            b_.place(b_.addMesh("floors", std::move(surfaces)), "floors", Transform{}, Part::Floor, level);
+            if (auto* instance = b_.place(b_.addMesh("floors", std::move(surfaces)), "floors", Transform{}, Part::Floor, level);
+                instance && static_cast<std::size_t>(level) < maps.floors.size()) {
+                instance->lightMap = maps.floors[static_cast<std::size_t>(level)];
+            }
         }
         stats_.floorPatterns = patterns.size();
 
-        // The slab under each floored tile above the ground: a ceiling underneath and a band down each
+        // The slab under each floored quarter tile above the ground: a ceiling underneath and a band down each
         // edge where the floor stops, unless a wall below runs along it (the slab ends inside the wall;
         // a wall standing on the edge with none under it, as over a porch, still shows the slab).
         const int ceiling = b_.colorMaterial("ceiling", {0.92f, 0.91f, 0.88f});
@@ -771,49 +798,56 @@ private:
                 wallEdges.insert(edgeKey(w.q.x0, w.q.y0, w.q.x1, w.q.y1, w.level));
             }
         }
-        auto floored = [&](std::int32_t level, std::int32_t x, std::int32_t y) {
-            if (!g.contains(level, x, y)) {
-                return false;
-            }
-            for (std::size_t q = 0; q < 4; ++q) {
-                if (g.i16(level, x, y, q) != 0) {
-                    return true;
-                }
-            }
-            return false;
+        // Quarter e of a tile is the triangle on its edge e (corners e, e + 1 and the centre).
+        auto floored = [&](std::int32_t level, std::int32_t x, std::int32_t y, std::size_t e) {
+            return g.contains(level, x, y) && g.i16(level, x, y, 3 - e % 4) != 0;
         };
         const std::array<std::array<float, 2>, 4> noUv{};
         for (std::int32_t level = 1; level < static_cast<std::int32_t>(g.levels); ++level) {
             Surfaces slabs;
             for (std::int32_t x = 0; x < static_cast<std::int32_t>(g.width); ++x) {
                 for (std::int32_t y = 0; y < static_cast<std::int32_t>(g.height); ++y) {
-                    if (!floored(level, x, y)) {
-                        continue;
-                    }
                     const float fx = static_cast<float>(x), fy = static_cast<float>(y);
                     const std::array<std::array<float, 2>, 4> c{{{fx, fy}, {fx + 1, fy}, {fx + 1, fy + 1}, {fx, fy + 1}}};
                     std::array<float, 4> top{};
+                    float middle = 0;
                     for (std::size_t k = 0; k < 4; ++k) {
                         top[k] = heights_.corner(level, c[k][0], c[k][1]);
+                        middle += top[k] / 4;
                     }
-                    addQuad(slabs[ceiling],
-                            {{{c[0][0], c[0][1], top[0] - kFloorThickness}, {c[1][0], c[1][1], top[1] - kFloorThickness},
-                              {c[2][0], c[2][1], top[2] - kFloorThickness}, {c[3][0], c[3][1], top[3] - kFloorThickness}}},
-                            {0, 0, -1}, noUv);
+                    const std::array<float, 2> centre{fx + 0.5f, fy + 0.5f};
+                    auto band = [&](const std::array<float, 2>& a, float ta, const std::array<float, 2>& b, float tb, const std::array<float, 3>& out) {
+                        addQuad(slabs[edge_], {{{a[0], a[1], ta - kFloorThickness}, {b[0], b[1], tb - kFloorThickness}, {b[0], b[1], tb}, {a[0], a[1], ta}}},
+                                out, noUv);
+                    };
                     const int neighbor[4][2] = {{0, -1}, {1, 0}, {0, 1}, {-1, 0}};  // across edges c0-c1, c1-c2, ...
                     for (std::size_t e = 0; e < 4; ++e) {
-                        if (floored(level, x + neighbor[e][0], y + neighbor[e][1])) {
+                        if (!floored(level, x, y, e)) {
                             continue;
                         }
                         const auto& a = c[e];
                         const auto& b = c[(e + 1) % 4];
-                        if (wallEdges.contains(edgeKey(a[0], a[1], b[0], b[1], level - 1))) {
-                            continue;
-                        }
                         const float ta = top[e], tb = top[(e + 1) % 4];
-                        addQuad(slabs[edge_],
-                                {{{a[0], a[1], ta - kFloorThickness}, {b[0], b[1], tb - kFloorThickness}, {b[0], b[1], tb}, {a[0], a[1], ta}}},
-                                {static_cast<float>(neighbor[e][0]), static_cast<float>(neighbor[e][1]), 0}, noUv);
+                        addQuad(slabs[ceiling],
+                                {{{a[0], a[1], ta - kFloorThickness}, {b[0], b[1], tb - kFloorThickness},
+                                  {centre[0], centre[1], middle - kFloorThickness}, {centre[0], centre[1], middle - kFloorThickness}}},
+                                {0, 0, -1}, noUv);
+                        const std::array<float, 3> out{static_cast<float>(neighbor[e][0]), static_cast<float>(neighbor[e][1]), 0};
+                        if (!floored(level, x + neighbor[e][0], y + neighbor[e][1], e + 2) &&
+                            !wallEdges.contains(edgeKey(a[0], a[1], b[0], b[1], level - 1))) {
+                            band(a, ta, b, tb, out);
+                        }
+                        // Where only half the tile is floored, along the diagonal (a diagonal wall below
+                        // hides it as well).
+                        const bool diagonalWall = wallEdges.contains(edgeKey(fx, fy, fx + 1, fy + 1, level - 1));
+                        const std::array<float, 3> next{static_cast<float>(neighbor[(e + 1) % 4][0]), static_cast<float>(neighbor[(e + 1) % 4][1]), 0};
+                        if (!floored(level, x, y, e + 1) && !diagonalWall) {
+                            band(centre, middle, b, tb, {out[0] + next[0], out[1] + next[1], 0});
+                        }
+                        const std::array<float, 3> previous{static_cast<float>(neighbor[(e + 3) % 4][0]), static_cast<float>(neighbor[(e + 3) % 4][1]), 0};
+                        if (!floored(level, x, y, e + 3) && !diagonalWall) {
+                            band(a, ta, centre, middle, {out[0] + previous[0], out[1] + previous[1], 0});
+                        }
                     }
                 }
             }
@@ -955,6 +989,8 @@ private:
                         const bool same = (like->q.x1 - like->q.x0) * u[0] + (like->q.y1 - like->q.y0) * u[1] > 0;
                         w.left = w.leftCovering = same ? like->leftCovering : like->rightCovering;
                         w.right = w.rightCovering = same ? like->rightCovering : like->leftCovering;
+                        w.roomLeft = same ? like->roomLeft : like->roomRight;
+                        w.roomRight = same ? like->roomRight : like->roomLeft;
                     }
                     const float h = w.thick ? kWallThickness / 2 : 0;
                     w.leftA = {p0[0] + u[1] * h, p0[1] - u[0] * h};
@@ -962,7 +998,7 @@ private:
                     w.leftB = {p1[0] + u[1] * h, p1[1] - u[0] * h};
                     w.rightB = {p1[0] - u[1] * h, p1[1] + u[0] * h};
                     w.ceiling.gables.push_back(&shape);
-                    addThickWall(b_, r.surfaces, w, edge_);
+                    addThickWall(b_, r.walls, w, edge_);
                 }
             }
         }
@@ -971,6 +1007,10 @@ private:
     void placeRoofs() {
         for (auto& r : roofs_) {
             b_.place(b_.addMesh("roof", std::move(r.surfaces)), "roof", Transform{}, Part::Roof, r.level);
+            // Walls built under its gables stay when the roof is hidden, as walls do.
+            if (!r.walls.empty()) {
+                b_.place(b_.addMesh("roof walls", std::move(r.walls)), "roof walls", Transform{}, Part::Wall, r.level);
+            }
         }
         stats_.roofs = lot_.roofs.size();
     }
@@ -989,6 +1029,7 @@ private:
     std::map<EdgeKey, std::size_t> wallAt_;  // walls_ by their middle
     struct ShapedRoof {
         Surfaces surfaces;
+        Surfaces walls;  // walls added under its gables where none stands
         RoofShape shape;
         RoofLook look;
         int level = 0;
@@ -1003,6 +1044,16 @@ private:
         s.thickness = grid.z(0, 0, 0) - grid.z(0, 0, 2);
         const float lx = std::min(roof.x0, roof.x1), hx = std::max(roof.x0, roof.x1);
         const float ly = std::min(roof.y0, roof.y1), hy = std::max(roof.y0, roof.y1);
+        // The high side of a shed or a slope rises like a gable end, and is closed the same way.
+        if (grid.kind == RoofGrid::Kind::shed || grid.kind == RoofGrid::Kind::slope) {
+            switch (grid.high) {
+            case 0: s.gables.push_back({{lx, ly}, {lx, hy}, {-1, 0}}); break;
+            case 1: s.gables.push_back({{hx, ly}, {hx, hy}, {1, 0}}); break;
+            case 2: s.gables.push_back({{lx, ly}, {hx, ly}, {0, -1}}); break;
+            case 3: s.gables.push_back({{lx, hy}, {hx, hy}, {0, 1}}); break;
+            default: break;
+            }
+        }
         if (grid.kind == RoofGrid::Kind::slope) {
             // A slope's sides along its fall are gable ends.
             if (grid.high <= 1) {
@@ -1013,7 +1064,7 @@ private:
                 s.gables.push_back({{hx, ly}, {hx, hy}, {1, 0}});
             }
         } else if (grid.kind != RoofGrid::Kind::gable) {
-            // Hips slope on every side; a shed's high side is left as it is.
+            // Hips slope on every side.
         } else if (grid.ridgeAlongX) {
             s.gables.push_back({{lx, ly}, {lx, hy}, {-1, 0}});
             s.gables.push_back({{hx, ly}, {hx, hy}, {1, 0}});
@@ -1026,14 +1077,44 @@ private:
     }
     std::vector<ShapedRoof> roofs_;  // reserved up front: walls point at their shapes
     std::vector<Shown> shown_;
-    std::map<std::string, std::shared_ptr<const Rig>> rigs_;
-    std::map<std::string, std::shared_ptr<const RigAnimation>> animations_;
+    RigLibrary rigs_{assets_};
 };
 
 } // namespace
 
+// Daylight as the game gives it to objects outdoors: the "day" lighting state's skylight as the
+// ambient, then its sun, fill and sky lights, each as strength * (colour - 0.5), the values the
+// game's shaders receive.
+std::optional<ObjectLighting> objectDaylight(const content::Lighting& lighting) {
+    const auto day = lighting.states.find("day");
+    if (day == lighting.states.end()) {
+        return std::nullopt;
+    }
+    ObjectLighting out;
+    out.ambient = day->second.skylight;
+    for (const char* name : {"sun", "fill1", "sky"}) {
+        const auto it = day->second.lights.find(name);
+        if (it == day->second.lights.end()) {
+            continue;
+        }
+        const auto& l = it->second;
+        const float len = std::sqrt(l.direction[0] * l.direction[0] + l.direction[1] * l.direction[1] + l.direction[2] * l.direction[2]);
+        if (len <= 0) {
+            continue;
+        }
+        ObjectLighting::Light light;
+        light.direction = {l.direction[0] / len, l.direction[1] / len, l.direction[2] / len};
+        for (int i = 0; i < 3; ++i) {
+            light.color[static_cast<std::size_t>(i)] = l.strength * (l.color[static_cast<std::size_t>(i)] - 0.5f);
+        }
+        out.lights.push_back(light);
+    }
+    return out;
+}
+
 LotSceneStats addLot(SceneBuilder& builder, const std::filesystem::path& lot, bool logObjects) {
     const content::Lot loaded = content::loadLot(lot);
+    builder.scene().objectLighting = objectDaylight(builder.assets().lighting());
     return LotSceneBuilder(builder, loaded, lot, logObjects).build();
 }
 

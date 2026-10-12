@@ -1,0 +1,2 @@
+// The app icon, made from neots2.svg. Windows and SDL use the first icon in the exe.
+1 ICON "neots2.ico"

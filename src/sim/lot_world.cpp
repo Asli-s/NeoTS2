@@ -167,6 +167,7 @@ std::shared_ptr<const SavedNeighborhood> savedNeighborhood(const content::Neighb
     }
     for (const auto& [id, w] : hood.wants) {
         saved->wants[id] = w.wants;
+        saved->fears[id] = w.fears;
     }
     for (const auto& [pair, values] : hood.relationships) {
         // The game stores 32-bit values but the Relationship primitive moves 16-bit ones.

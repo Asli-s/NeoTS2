@@ -132,6 +132,7 @@ struct ThickWall {
     std::string leftMask, rightMask;  // wall masks of doors and windows in this wall
     bool leftMaskMirrored = false, rightMaskMirrored = false;
     std::array<float, 2> leftA{}, leftB{}, rightA{}, rightB{};
+    std::array<bool, 2> joined{};  // another thick wall meets it at (x0, y0), at (x1, y1)
 };
 
 // The top of the space where three or more walls meet, which no wall's own top covers: the point
@@ -156,9 +157,15 @@ std::map<std::string, std::vector<WallMask>> wallMasks(const std::vector<std::st
 // ends where it meets the facing side line of the next wall (mitred corners, T and cross joins).
 std::vector<WallHub> joinWalls(std::vector<ThickWall>& walls);
 
+// A light-map rect a wall face reads, as texture coordinates: u0, v0 (its top) and u1, v1 (its bottom).
+using LightRect = std::array<float, 4>;
+
 // A wall's faces: each side's covering, its top and its ends; with `cutHeight`, cut down to that
-// height above its bottom, otherwise up to its ceiling.
-void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w, int edge, float cutHeight = 0);
+// height above its bottom, otherwise up to its ceiling. With `lightRects` (left, right side), the
+// sides also get light-map coordinates as the game lays them: along the face from its start to
+// its end (cut short at inside corners), from the bottom of the rect up a storey.
+void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w, int edge, float cutHeight = 0,
+                  const std::array<std::optional<LightRect>, 2>* lightRects = nullptr);
 
 // The materials a roof is drawn with.
 struct RoofLook {

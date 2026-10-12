@@ -23,6 +23,22 @@ fs::path neighborhoodOfLot(const fs::path& lotPackage) {
     return lotPackage.parent_path().parent_path();
 }
 
+std::optional<std::int32_t> lotNumber(const fs::path& lotPackage) {
+    const std::string stem = lotPackage.stem().string();
+    const auto at = stem.rfind("_Lot");
+    if (at == std::string::npos || at + 4 >= stem.size() || stem.size() - at - 4 > 9) {
+        return std::nullopt;
+    }
+    std::int32_t n = 0;
+    for (std::size_t i = at + 4; i < stem.size(); ++i) {
+        if (!std::isdigit(static_cast<unsigned char>(stem[i]))) {
+            return std::nullopt;
+        }
+        n = n * 10 + (stem[i] - '0');
+    }
+    return n;
+}
+
 std::vector<fs::path> characterFiles(const fs::path& neighborhood) {
     std::vector<fs::path> files;
     const fs::path folder = neighborhood / "Characters";
@@ -36,6 +52,19 @@ std::vector<fs::path> characterFiles(const fs::path& neighborhood) {
     }
     std::sort(files.begin(), files.end());
     return files;
+}
+
+std::optional<std::uint32_t> portraitImage(std::int16_t lifeStage) {
+    // Each portrait's instance is its life stage's flag.
+    switch (lifeStage) {
+    case 1: return 0x20;  // baby
+    case 2: return 0x01;  // toddler
+    case 3: return 0x02;  // child
+    case 16: return 0x04; // teen
+    case 19: return 0x08; // adult
+    case 51: return 0x10; // elder
+    default: return std::nullopt;
+    }
 }
 
 std::uint32_t localGroupFor(const fs::path& package) {
@@ -100,6 +129,12 @@ Neighborhood loadNeighborhood(const fs::path& neighborhoodPackage) {
                 hood.dataTables[id] = datatables::parse(package.read(e));
             } catch (const std::exception& ex) {
                 hood.problems.push_back("data tables of " + std::to_string(id) + ": " + ex.what());
+            }
+        } else if (e.key.type == types::kFamily) {
+            try {
+                hood.families[e.key.instance] = fami::parse(package.read(e));
+            } catch (const std::exception& ex) {
+                hood.problems.push_back("family " + std::to_string(e.key.instance) + ": " + ex.what());
             }
         } else if (e.key.type == types::kNeighborhoodRecord) {
             try {

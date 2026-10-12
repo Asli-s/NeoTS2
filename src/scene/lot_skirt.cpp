@@ -100,7 +100,7 @@ void addLotSkirt(SceneBuilder& builder, const PaintedTerrain& terrain, const Lot
                                                lowest - 200, lot.z + 200};
 
     // As low as the lot's own ground, which meets it at the lot's edges.
-    builder.place(builder.addMesh("lot skirt", std::move(ground)), "lot skirt", Transform::at(0, 0, -kGroundDrop, 0));
+    builder.place(builder.addMesh("lot skirt", std::move(ground)), "lot skirt", Transform::at(0, 0, -kGroundDrop, 0), Part::Skirt);
 
     // The roads in the area, with the lot view's road textures, blended over the ground.
     Surfaces roads;
@@ -134,7 +134,9 @@ void addLotSkirt(SceneBuilder& builder, const PaintedTerrain& terrain, const Lot
         r.indices.insert(r.indices.end(), {base, base + 2, base + 1, base, base + 3, base + 2});
     }
     if (!roads.empty()) {
-        builder.place(builder.addMesh("lot skirt roads", std::move(roads)), "lot skirt roads", Transform{});
+        if (auto* i = builder.place(builder.addMesh("lot skirt roads", std::move(roads)), "lot skirt roads", Transform{}, Part::Skirt)) {
+            i->skirtAmbient = 4;
+        }
     }
 }
 

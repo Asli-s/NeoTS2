@@ -1,9 +1,11 @@
 #pragma once
 
+#include "content/lighting.hpp"
 #include "scene/builder.hpp"
 
 #include <cstddef>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -28,5 +30,8 @@ struct LotSceneStats {
 // objects in place (including those held in other objects' slots), walls with their coverings and
 // door and window openings, floors and floor slabs, fences, roofs and the terrain.
 LotSceneStats addLot(SceneBuilder& builder, const std::filesystem::path& lot, bool logObjects = false);
+
+// How the game lights objects outdoors by day, from its lighting settings; none without a "day" state.
+std::optional<ObjectLighting> objectDaylight(const content::Lighting& lighting);
 
 } // namespace ts2::scene

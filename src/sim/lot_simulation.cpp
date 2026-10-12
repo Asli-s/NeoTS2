@@ -5,10 +5,12 @@
 #include "content/neighborhood.hpp"
 #include "content/scripts.hpp"
 #include "content/wants.hpp"
+#include "formats/resource_types.hpp"
 #include "sim/lua_runtime.hpp"
 #include "sim/object_reset.hpp"
 
 #include <algorithm>
+#include <optional>
 #include <set>
 #include <vector>
 
@@ -50,13 +52,63 @@ LotSimulation::LotSimulation(const std::filesystem::path& install, const std::fi
     std::copy_n(saved.globals.begin(), std::min(saved.globals.size(), vm_.globals.size()), vm_.globals.begin());
     const auto hood = content::neighborhoodPackage(content::neighborhoodOfLot(lot));
     if (std::filesystem::exists(hood)) {
-        world_.setNeighborhood(savedNeighborhood(content::loadNeighborhood(hood)));
+        const content::Neighborhood loaded = content::loadNeighborhood(hood);
+        findHousehold(loaded, lot);
+        world_.setNeighborhood(savedNeighborhood(loaded));
+        findCharacterFiles();
     }
     if (const auto wants = content::wantsPackage(install)) {
         world_.setWantDefinitions(std::make_shared<content::WantDefinitions>(content::loadWantDefinitions(*wants)));
     }
     world_.setScripts(loadScripts(install, code_));
     startObjects();
+}
+
+void LotSimulation::findHousehold(const content::Neighborhood& hood, const std::filesystem::path& lot) {
+    const auto number = content::lotNumber(lot);
+    if (!number) {
+        return;
+    }
+    for (const auto& [instance, family] : hood.families) {
+        if (family.lot != *number || family.members.empty()) {
+            continue;
+        }
+        for (const std::uint32_t guid : family.members) {
+            const SimObject* sim = world_.nextAfter(0, [&](const SimObject& o) { return o.isPerson() && o.definition.guid() == guid; });
+            if (sim != nullptr) {
+                household_.push_back(sim->id);
+            }
+        }
+        return;
+    }
+}
+
+std::vector<std::uint8_t> LotSimulation::simImage(std::int16_t sim, std::uint32_t instance) {
+    const SimObject* object = world_.find(sim);
+    const auto* image = object ? index_.find({types::kImage, object->group, instance}) : nullptr;
+    return image ? index_.read(*image) : std::vector<std::uint8_t>{};
+}
+
+std::optional<std::filesystem::path> LotSimulation::characterFile(std::int16_t neighbor) const {
+    const SavedNeighbor* n = world_.neighbor(neighbor);
+    const auto it = n ? characterFiles_.find(n->guid) : characterFiles_.end();
+    return it != characterFiles_.end() ? std::optional<std::filesystem::path>(it->second) : std::nullopt;
+}
+
+void LotSimulation::findCharacterFiles() {
+    characterFiles_.clear();
+    std::vector<content::ResourceIndex::Resource> definitions;
+    for (const auto& r : index_.resources()) {
+        if (r.entry.key.type == types::kObjectDefinition && index_.packagePath(r.package).parent_path().filename() == "Characters") {
+            definitions.push_back(r);
+        }
+    }
+    for (const auto& r : definitions) {
+        try {
+            characterFiles_.emplace(objd::parse(index_.read(r)).guid(), index_.packagePath(r.package));
+        } catch (const std::exception&) {
+        }
+    }
 }
 
 // What the game does with each object once the lot is loaded: it runs the object's Load function, and

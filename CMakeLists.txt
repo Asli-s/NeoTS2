@@ -53,6 +53,14 @@ if(NEOTS2_HARDEN AND MSVC AND NOT NEOTS2_FUZZ AND NOT NEOTS2_ASAN AND NOT NEOTS2
     add_link_options(/guard:cf /CETCOMPAT /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT)
 endif()
 
+# Symbols for release builds too, so the crash reports testers send can be read (keep each release's
+# .pdb files; they needn't ship). /OPT keeps the program as small and fast as without them.
+if(MSVC AND NOT NEOTS2_FUZZ AND NOT NEOTS2_ASAN AND NOT NEOTS2_COVERAGE)
+    # /FS: several compilers (or builds) may write one .pdb at once.
+    add_compile_options($<$<CONFIG:Release>:/Zi> $<$<CONFIG:Release>:/FS>)
+    add_link_options($<$<CONFIG:Release>:/DEBUG> $<$<CONFIG:Release>:/OPT:REF> $<$<CONFIG:Release>:/OPT:ICF>)
+endif()
+
 add_library(project_warnings INTERFACE)
 if(MSVC)
     # /sdl: extra security checks and warnings in our own code (third-party code is left as it is).
@@ -60,6 +68,14 @@ if(MSVC)
                            $<$<BOOL:${NEOTS2_STRICT}>:/WX>)
 else()
     target_compile_options(project_warnings INTERFACE -Wall -Wextra -Wpedantic $<$<BOOL:${NEOTS2_STRICT}>:-Werror>)
+endif()
+# Float maths rounded step by step, never fused into one multiply-add, so results that copy the
+# game's exactly (the indoor lighting, for one) come out the same with every compiler. MSVC already
+# does this.
+if(MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(project_warnings INTERFACE /clang:-ffp-contract=off)
+elseif(NOT MSVC)
+    target_compile_options(project_warnings INTERFACE -ffp-contract=off)
 endif()
 
 # The original Lua 5.0.3 interpreter, for the game's object scripts (third-party, MIT).
@@ -73,6 +89,11 @@ if(MSVC)
 else()
     target_compile_options(lua50 PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/src/sim/lua_memory.h)
 endif()
+
+# The run's log and the text of crash reports.
+add_library(ts2diag src/diag/log.cpp src/diag/report.cpp src/diag/upload.cpp)
+target_include_directories(ts2diag PUBLIC src)
+target_link_libraries(ts2diag PRIVATE project_warnings)
 
 add_library(ts2formats
     src/formats/array3d.cpp
@@ -121,8 +142,9 @@ add_library(ts2formats
     src/formats/ui_script.cpp
 )
 target_include_directories(ts2formats PUBLIC src)
-# stb_image (third-party, public domain / MIT) decodes the UI's PNG, JPEG and bitmap images.
-add_library(stb_image STATIC src/formats/image.cpp)
+# stb_image (third-party, public domain / MIT) decodes the UI's PNG and bitmap images; jpeg.cpp
+# decodes JPEGs as the game does, stb taking the kinds it does not read.
+add_library(stb_image STATIC src/formats/image.cpp src/formats/jpeg.cpp)
 target_include_directories(stb_image PRIVATE src third_party/stb)
 target_link_libraries(ts2formats PUBLIC stb_image)
 target_link_libraries(ts2formats PRIVATE project_warnings)
@@ -131,6 +153,7 @@ add_library(ts2content
     src/content/install.cpp
     src/content/cameras.cpp
     src/content/lighting.cpp
+    src/content/covering_colors.cpp
     src/content/material_scripts.cpp
     src/content/nhood_catalog.cpp
     src/content/build_scripts.cpp
@@ -140,8 +163,10 @@ add_library(ts2content
     src/content/scripts.cpp
     src/content/resource_index.cpp
     src/content/ui_data.cpp
+    src/content/ui_meters.cpp
+    src/content/target_pictures.cpp
 )
-target_link_libraries(ts2content PUBLIC ts2formats PRIVATE project_warnings)
+target_link_libraries(ts2content PUBLIC ts2formats ts2diag PRIVATE project_warnings)
 
 add_library(ts2sim
     src/sim/index_code_source.cpp
@@ -176,11 +201,30 @@ add_library(ts2scene
     src/scene/imposters.cpp
     src/scene/lot_skirt.cpp
     src/scene/sims.cpp
+    src/scene/sim_builder.cpp
+    src/scene/portrait.cpp
     src/scene/rig.cpp
     src/scene/animation_library.cpp
     src/scene/neighborhood_scene.cpp
     src/scene/neighborhood_paint.cpp
     src/scene/neighborhood_lighting.cpp
+    src/scene/floor_light.cpp
+    src/scene/light_grid.cpp
+    src/scene/wall_runs.cpp
+    src/scene/lamp_lights.cpp
+    src/scene/portal_records.cpp
+    src/scene/room_samples.cpp
+    src/scene/wall_light.cpp
+    src/scene/light_corners.cpp
+    src/scene/lot_lighting.cpp
+    src/scene/lot_light_objects.cpp
+    src/scene/light_map_texels.cpp
+    src/scene/lot_light_maps.cpp
+    src/scene/lot_shadow.cpp
+    src/scene/lot_shadow_inputs.cpp
+    src/scene/room_light.cpp
+    src/scene/window_light.cpp
+    src/scene/portable_math.cpp
     src/scene/view.cpp
 )
 target_link_libraries(ts2scene PUBLIC ts2content PRIVATE project_warnings)
@@ -192,6 +236,27 @@ if(NEOTS2_FUZZ)
         add_executable(${target} fuzz/${target}.cpp)
         target_link_libraries(${target} PRIVATE ts2formats project_warnings)
     endforeach()
+    # Engine code that is not a file reader but takes values from lots and objects.
+    add_executable(floorlight_fuzz fuzz/floorlight_fuzz.cpp src/scene/floor_light.cpp)
+    target_link_libraries(floorlight_fuzz PRIVATE ts2formats project_warnings)
+    add_executable(walllight_fuzz fuzz/walllight_fuzz.cpp src/scene/wall_light.cpp src/scene/light_corners.cpp src/scene/floor_light.cpp src/scene/portable_math.cpp)
+    target_link_libraries(walllight_fuzz PRIVATE ts2formats project_warnings)
+    add_executable(windowlight_fuzz fuzz/windowlight_fuzz.cpp src/scene/window_light.cpp)
+    target_link_libraries(windowlight_fuzz PRIVATE ts2formats project_warnings)
+    add_executable(lightgrid_fuzz fuzz/lightgrid_fuzz.cpp src/scene/light_grid.cpp src/scene/wall_runs.cpp src/scene/floor_light.cpp)
+    target_link_libraries(lightgrid_fuzz PRIVATE ts2formats project_warnings)
+    add_executable(wallruns_fuzz fuzz/wallruns_fuzz.cpp src/scene/wall_runs.cpp src/scene/wall_light.cpp src/scene/portable_math.cpp)
+    target_link_libraries(wallruns_fuzz PRIVATE ts2formats project_warnings)
+    add_executable(lighting_fuzz fuzz/lighting_fuzz.cpp src/content/lighting.cpp)
+    target_link_libraries(lighting_fuzz PRIVATE ts2formats project_warnings)
+    add_executable(lamplights_fuzz fuzz/lamplights_fuzz.cpp src/scene/lamp_lights.cpp src/scene/portable_math.cpp)
+    target_link_libraries(lamplights_fuzz PRIVATE ts2formats project_warnings)
+    add_executable(portalrecords_fuzz fuzz/portalrecords_fuzz.cpp src/scene/portal_records.cpp src/scene/lamp_lights.cpp src/scene/portable_math.cpp)
+    target_link_libraries(portalrecords_fuzz PRIVATE ts2formats project_warnings)
+    add_executable(roomsamples_fuzz fuzz/roomsamples_fuzz.cpp src/scene/room_samples.cpp src/scene/room_light.cpp src/scene/wall_runs.cpp src/scene/wall_light.cpp src/scene/portable_math.cpp src/content/covering_colors.cpp)
+    target_link_libraries(roomsamples_fuzz PRIVATE ts2formats project_warnings)
+    add_executable(lotlighting_fuzz fuzz/lotlighting_fuzz.cpp src/scene/lot_shadow.cpp src/scene/neighborhood_lighting.cpp src/scene/lot_lighting.cpp src/scene/light_corners.cpp src/scene/light_grid.cpp src/scene/wall_runs.cpp src/scene/wall_light.cpp src/scene/floor_light.cpp src/scene/room_samples.cpp src/scene/room_light.cpp src/scene/window_light.cpp src/scene/portable_math.cpp src/content/lighting.cpp)
+    target_link_libraries(lotlighting_fuzz PRIVATE ts2formats project_warnings)
 else()
     # Reads every resource of an installation with the engine's readers and reports the result.
     add_executable(gamecheck tools/gamecheck/main.cpp)
@@ -265,9 +330,26 @@ else()
         add_library(ts2ui src/ui/fonts.cpp src/ui/screen.cpp)
         target_link_libraries(ts2ui PUBLIC ts2content PRIVATE freetype project_warnings)
 
-        add_executable(neots2 app/main.cpp app/menu.cpp app/neighborhood.cpp app/neighborhood_ui.cpp app/lot_life.cpp app/lot_ui.cpp app/live_panel.cpp)
-        target_link_libraries(neots2 PRIVATE ts2render ts2ui ts2sim project_warnings)
-        add_dependencies(neots2 neots2_shaders)
+        add_executable(neots2 app/main.cpp app/menu.cpp app/neighborhood.cpp app/neighborhood_ui.cpp app/lot_life.cpp app/lot_light.cpp app/lot_ui.cpp app/live_panel.cpp app/mood_meter.cpp app/needs_panel.cpp app/skewer.cpp app/wants_panel.cpp app/portraits.cpp
+                       app/diagnostics.cpp app/crash_handler.cpp app/crash_dialog.cpp app/unexpected_exit.cpp app/report_upload.cpp)
+        target_link_libraries(neots2 PRIVATE ts2render ts2ui ts2sim ts2diag project_warnings)
+        add_dependencies(neots2 neots2_shaders neots2_version)
+        # The build's commit, for logs and crash reports (remade on every build).
+        set(version_header ${CMAKE_BINARY_DIR}/generated/neots2_version.hpp)
+        add_custom_target(neots2_version
+            COMMAND ${CMAKE_COMMAND} -DSOURCE=${CMAKE_SOURCE_DIR} -DOUTPUT=${version_header} -P ${CMAKE_SOURCE_DIR}/cmake/version.cmake
+            BYPRODUCTS ${version_header}
+            COMMENT "Stamping the build's version")
+        target_include_directories(neots2 PRIVATE ${CMAKE_BINARY_DIR}/generated)
+        if(WIN32)
+            # Minidumps and stacks (dbghelp), opening the report's folder and link (shell32), the message
+            # (comctl32), what Windows noted of a run that ended without a word (wevtapi).
+            # Sending a report (winhttp, and bcrypt for its MD5).
+            target_link_libraries(neots2 PRIVATE dbghelp shell32 comctl32 wevtapi winhttp bcrypt)
+        endif()
+        if(WIN32)
+            target_sources(neots2 PRIVATE app/icon/neots2.rc)
+        endif()
         # The app loads its shaders and SDL from beside itself.
         add_custom_command(TARGET neots2 POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_directory ${shader_dir} $<TARGET_FILE_DIR:neots2>/shaders

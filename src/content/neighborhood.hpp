@@ -1,6 +1,7 @@
 #pragma once
 
 #include "formats/datatables.hpp"
+#include "formats/fami.hpp"
 #include "formats/ngbh.hpp"
 
 #include "content/resource_index.hpp"
@@ -20,8 +21,15 @@ namespace ts2::content {
 // The neighborhood folder a lot package belongs to (Neighborhoods/<hood>/Lots/<file> -> <hood>).
 std::filesystem::path neighborhoodOfLot(const std::filesystem::path& lotPackage);
 
+// A lot package's number n (Lots/<hood>_Lot<n>.package), if its name has one.
+std::optional<std::int32_t> lotNumber(const std::filesystem::path& lotPackage);
+
 // Character files (one per Sim): Neighborhoods/<hood>/Characters/*.package.
 std::vector<std::filesystem::path> characterFiles(const std::filesystem::path& neighborhood);
+
+// The image (instance) in a Sim's character file that pictures the Sim at a life stage (person
+// data 0x3A): a file keeps one per life stage the Sim has had. None for an unknown stage.
+std::optional<std::uint32_t> portraitImage(std::int16_t lifeStage);
 
 // The group given to a package's own resources (group 0xFFFFFFFF), derived from its file name.
 std::uint32_t localGroupFor(const std::filesystem::path& package);
@@ -56,6 +64,8 @@ struct Neighborhood {
     std::map<std::int16_t, Neighbor> neighbors;
     // Lots of the neighborhood: n for every Lots/<hood>_Lot<n>.package.
     std::set<std::int32_t> lotIds;
+    // The households (FAMI), by instance.
+    std::map<std::uint32_t, fami::Family> families;
     // Relationship variables neighbor A holds towards neighbor B (SREL, instance (A << 16) | B).
     // Records naming Sims that are no longer neighbors are kept, as the game leaves them.
     std::map<std::pair<std::int16_t, std::int16_t>, std::vector<std::int32_t>> relationships;

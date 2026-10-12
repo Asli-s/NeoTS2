@@ -1,5 +1,10 @@
 #include "lot_life.hpp"
 
+#include "content/neighborhood.hpp"
+#include "diag/log.hpp"
+#include "formats/image.hpp"
+#include "sim/motives.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -20,7 +25,7 @@ std::unique_ptr<ts2::sim::LotSimulation> loadSimulation(const std::filesystem::p
     try {
         return std::make_unique<ts2::sim::LotSimulation>(install, lot);
     } catch (const std::exception& ex) {
-        std::fprintf(stderr, "the lot's Sims won't come to life: %s\n", ex.what());
+        ts2::diag::error(std::string("the lot's Sims won't come to life: ") + ex.what());
         return nullptr;
     }
 }
@@ -44,6 +49,73 @@ std::int16_t LotLife::aspiration() {
     constexpr std::size_t kAspiration = 46;
     const auto* sim = sim_->world().find(sim_->globals()[ts2::sim::global::kSelectedPerson]);
     return sim ? sim->personData[kAspiration] : 0;
+}
+
+std::int16_t LotLife::selected() { return sim_->globals()[ts2::sim::global::kSelectedPerson]; }
+
+void LotLife::select(std::int16_t sim) { sim_->globals()[ts2::sim::global::kSelectedPerson] = sim; }
+
+namespace {
+constexpr std::size_t kLifeStage = 0x3A, kAspirationScore = 0xA0;
+} // namespace
+
+std::vector<ts2::swaf::Want> LotLife::wants(std::int16_t sim) {
+    const auto* object = sim_->world().find(sim);
+    const std::int16_t id = object ? sim_->world().neighborIdOf(*object) : 0;
+    return id ? sim_->world().neighborWants(id) : std::vector<ts2::swaf::Want>{};
+}
+
+std::vector<ts2::swaf::Want> LotLife::fears(std::int16_t sim) {
+    const auto* object = sim_->world().find(sim);
+    const std::int16_t id = object ? sim_->world().neighborIdOf(*object) : 0;
+    return id ? sim_->world().neighborFears(id) : std::vector<ts2::swaf::Want>{};
+}
+
+std::int16_t LotLife::aspirationScore(std::int16_t sim) {
+    const auto* object = sim_->world().find(sim);
+    return object ? object->personData[kAspirationScore] : 0;
+}
+
+std::int16_t LotLife::lifeStage(std::int16_t sim) {
+    const auto* object = sim_->world().find(sim);
+    return object ? object->personData[kLifeStage] : 0;
+}
+
+std::array<int, 16> LotLife::motives(std::int16_t sim) {
+    std::array<int, 16> out{};
+    if (const auto* object = sim_->world().find(sim)) {
+        for (std::size_t i = 0; i < out.size(); ++i) {
+            out[i] = ts2::sim::wholeMotive(*object, i);
+        }
+    }
+    return out;
+}
+
+int LotLife::mood(std::int16_t sim) {
+    const auto* object = sim_->world().find(sim);
+    return object ? ts2::sim::wholeMotive(*object, ts2::sim::motive::kMood) : 0;
+}
+
+std::optional<ts2::tga::Pixels> LotLife::portrait(std::int16_t sim) {
+    const auto* object = sim_->world().find(sim);
+    const auto image = object ? ts2::content::portraitImage(object->personData[kLifeStage]) : std::nullopt;
+    const auto data = image ? sim_->simImage(sim, *image) : std::vector<std::uint8_t>{};
+    return data.empty() ? std::nullopt : ts2::image::decode(data);
+}
+
+std::int16_t LotLife::neighborId(std::int16_t sim) {
+    const auto* object = sim_->world().find(sim);
+    return object ? sim_->world().neighborIdOf(*object) : 0;
+}
+
+std::optional<LotLife::PortraitFile> LotLife::neighborPortrait(std::int16_t neighbor) {
+    const auto* n = sim_->world().neighbor(neighbor);
+    if (n == nullptr || n->personData.size() <= kLifeStage) {
+        return std::nullopt;
+    }
+    const auto image = ts2::content::portraitImage(n->personData[kLifeStage]);
+    auto file = image ? sim_->characterFile(neighbor) : std::nullopt;
+    return file ? std::optional<PortraitFile>(PortraitFile{std::move(*file), *image}) : std::nullopt;
 }
 
 bool LotLife::paused() { return sim_->globals()[ts2::sim::global::kPaused] != 0; }

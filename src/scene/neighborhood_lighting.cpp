@@ -59,6 +59,21 @@ std::uint8_t toByte(double v) {
 
 } // namespace
 
+std::vector<float> sunShadow(const std::vector<float>& raised, std::uint32_t columns, std::uint32_t rows, const std::array<float, 3>& s, double tile) {
+    std::vector<float> shadow(raised.size(), kNoShadow);
+    if (raised.size() != static_cast<std::size_t>(columns) * rows || columns == 0 || rows == 0) {
+        return shadow;
+    }
+    if (s[2] > 0 && (std::fabs(s[0]) >= 0.001 || std::fabs(s[1]) >= 0.001)) {
+        if (std::fabs(s[1]) <= std::fabs(s[0])) {
+            sweep(shadow, raised, columns, rows, s[1], s[0], s[2], tile, false);
+        } else {
+            sweep(shadow, raised, columns, rows, s[0], s[1], s[2], tile, true);
+        }
+    }
+    return shadow;
+}
+
 Image neighborhoodLightMap(std::uint32_t columns, std::uint32_t rows, const std::vector<float>& heights, const std::vector<float>& normals,
                            float tileSize, const NeighborhoodLight& light, const std::vector<ShadowBox>& boxes) {
     Image out;
@@ -80,15 +95,8 @@ Image neighborhoodLightMap(std::uint32_t columns, std::uint32_t rows, const std:
             }
         }
     }
-    std::vector<float> shadow(heights.size(), kNoShadow);
     const auto& s = light.sun;
-    if (s[2] > 0 && (std::fabs(s[0]) >= 0.001 || std::fabs(s[1]) >= 0.001)) {
-        if (std::fabs(s[1]) <= std::fabs(s[0])) {
-            sweep(shadow, raised, columns, rows, s[1], s[0], s[2], tileSize, false);
-        } else {
-            sweep(shadow, raised, columns, rows, s[0], s[1], s[2], tileSize, true);
-        }
-    }
+    const auto shadow = sunShadow(raised, columns, rows, s, tileSize);
 
     // A texel per tile.
     out.width = columns - 1;

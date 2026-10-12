@@ -2,7 +2,7 @@
 
 namespace ts2::tga {
 
-std::optional<Pixels> decode(std::span<const std::uint8_t> data) {
+std::optional<Pixels> decode(std::span<const std::uint8_t> data, std::uint32_t maxSide) {
     if (data.size() < 18) {
         return std::nullopt;
     }
@@ -12,8 +12,8 @@ std::optional<Pixels> decode(std::span<const std::uint8_t> data) {
     const std::uint8_t bits = data[16], descriptor = data[17];
     const bool rle = kind == 10 || kind == 11;
     const bool gray = kind == 3 || kind == 11;
-    if (mapType != 0 || !(kind == 2 || kind == 3 || rle) || width == 0 || height == 0 || width > kMaxSide ||
-        height > kMaxSide) {
+    if (mapType != 0 || !(kind == 2 || kind == 3 || rle) || width == 0 || height == 0 || width > maxSide ||
+        height > maxSide) {
         return std::nullopt;
     }
     if (gray ? bits != 8 : (bits != 24 && bits != 32)) {

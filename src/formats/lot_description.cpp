@@ -13,6 +13,38 @@ std::string text(BinaryReader& r) {
 
 } // namespace
 
+namespace {
+
+constexpr std::size_t kMaxRoomPercents = 4096;
+
+// The room light block that ends the description: the smallest count whose pairs fill the rest
+// of the data exactly, with rooms rising as the game saves them. Empty when none fits.
+std::map<std::int16_t, std::int16_t> roomLightPercents(std::span<const std::uint8_t> d) {
+    auto u16 = [&](std::size_t at) { return static_cast<std::uint16_t>(d[at] | d[at + 1] << 8); };
+    for (std::size_t n = 0; n <= kMaxRoomPercents && 4 + 4 * n <= d.size(); ++n) {
+        const std::size_t at = d.size() - 4 - 4 * n;
+        const std::uint32_t count = static_cast<std::uint32_t>(u16(at)) | static_cast<std::uint32_t>(u16(at + 2)) << 16;
+        if (count != n) {
+            continue;
+        }
+        std::map<std::int16_t, std::int16_t> out;
+        bool rising = true;
+        int last = -1;
+        for (std::size_t i = 0; i < n; ++i) {
+            const int room = u16(at + 4 + 4 * i);
+            rising = rising && room > last;
+            last = room;
+            out[static_cast<std::int16_t>(room)] = static_cast<std::int16_t>(u16(at + 6 + 4 * i));
+        }
+        if (rising) {
+            return out;
+        }
+    }
+    return {};
+}
+
+} // namespace
+
 LotDescription parseLotDescription(std::span<const std::uint8_t> data) {
     BinaryReader r(data);
     LotDescription out;
@@ -66,7 +98,18 @@ LotDescription parseLotDescription(std::span<const std::uint8_t> data) {
     if (out.version >= 11) {
         out.texture = text(r);
     }
+    if (out.version >= 0x12) {
+        out.roomLightPercents = roomLightPercents(data);
+    }
     return out;
+}
+
+std::int16_t LotDescription::roomLightPercent(std::int16_t room) const {
+    if (room == 0) {
+        return 100;
+    }
+    const auto it = roomLightPercents.find(room);
+    return it == roomLightPercents.end() ? std::int16_t{100} : it->second;
 }
 
 } // namespace ts2::nhood

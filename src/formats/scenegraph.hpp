@@ -111,11 +111,12 @@ Shape parseShape(std::span<const std::uint8_t> data);
 // Resource node (CRES) and geometry node (GMND): only their links are read.
 Container parseContainer(std::span<const std::uint8_t> data);
 
-// The node tree of a resource node (CRES): transform nodes (joints, slots, routing points) and
-// shape references, each with a local transform; shapes are drawn at their reference's place in
-// the tree. Nodes are indexed by block; other blocks are kept as empty nodes.
+// The node tree of a resource node (CRES): transform nodes (joints, slots, routing points), shape
+// references and light references, each with a local transform; shapes are drawn and lights shine
+// at their reference's place in the tree (a light is known by its node's name). Nodes are indexed
+// by block; other blocks are kept as empty nodes.
 struct SceneNode {
-    enum class Kind { Other, Root, Transform, ShapeRef };
+    enum class Kind { Other, Root, Transform, ShapeRef, LightRef };
     Kind kind = Kind::Other;
     std::string name;
     std::vector<std::uint32_t> children;  // block indices
@@ -196,6 +197,20 @@ struct SceneObject {
     std::vector<MaterialOverride> overrides;
 };
 SceneObject parseSceneObject(std::span<const std::uint8_t> data);
+
+// A light resource (LGHT: cPointLight or cSpotLight): the values the light files can override by
+// the light's name. Other light kinds are not read (parseLight throws).
+struct LightResource {
+    std::string kind;   // "cPointLight" or "cSpotLight"
+    std::string name;   // the light's own name
+    float intensity = 0;
+    float specular = 0;  // relSpecIntensity
+    std::array<float, 3> color{0, 0, 0};
+    float falloffRate = 0;
+    float range = 0;
+    float coneAngle = 0, conePenumbra = 0;  // spot lights, in radians
+};
+LightResource parseLight(std::span<const std::uint8_t> data);
 
 // Decodes a mip level of the given size and format to 8-bit RGBA.
 std::vector<std::uint8_t> decodeRgba(std::span<const std::uint8_t> data, std::uint32_t width, std::uint32_t height,

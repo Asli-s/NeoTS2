@@ -72,6 +72,8 @@ void BuildScripts::addWallStyles(std::string_view text) {
             style->belowFloor = lower(value) == "floortofloorbasedceiling";
         } else if (key == "mayCutAway") {
             style->cutAway = lower(value) != "false";
+        } else if (key == "blocksLight") {
+            style->blocksLight = lower(value) != "false";
         } else if (key == "notRendered") {
             style->rendered = false;
         } else if (key == "defaultPattern") {

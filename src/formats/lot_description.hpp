@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <span>
 #include <string>
 
@@ -21,6 +22,12 @@ struct LotDescription {
     std::uint32_t id = 0;
     std::uint8_t facing = 0;  // the quarter turn it is placed at in the neighborhood
     std::string texture;
+    // How brightly each room's lights are set, in percent, for rooms the lot saved one for (from
+    // version 0x12, the last block: a count, then room and percent pairs by ascending room).
+    std::map<std::int16_t, std::int16_t> roomLightPercents;
+
+    // A room's light percent; 100 unless saved (room 0, the outdoors, is always 100).
+    std::int16_t roomLightPercent(std::int16_t room) const;
 };
 
 constexpr std::uint32_t kLotDescriptionType = 0x0BF999E7;

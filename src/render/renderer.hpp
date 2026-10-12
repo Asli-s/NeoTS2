@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -69,6 +70,11 @@ public:
 
     // Draws one frame off-screen and saves it as a PNG.
     bool drawToFile(const Camera& camera, unsigned width, unsigned height, const std::filesystem::path& path);
+    // Draws only the shown instances off-screen over a clear (transparent) background, without the
+    // sky, ground, water or sprites, objects lit by `lighting`, and returns the picture (rows from
+    // the top); nullopt when it can't be drawn. For Sim portraits.
+    std::optional<scene::Image> drawInstancesToImage(const Camera& camera, unsigned width, unsigned height,
+                                                     const scene::ObjectLighting& lighting);
 
     // The name of the GPU backend in use (e.g. "direct3d12").
     std::string backend() const;
@@ -89,6 +95,7 @@ private:
         SDL_GPUBuffer* skin = nullptr;  // joints and weights per vertex, for skinned primitives
         unsigned count = 0;
         int material = -1;
+        bool lightMapped = false;  // has light-map coordinates
     };
     struct GpuMesh {
         std::vector<GpuPrimitive> primitives;
@@ -98,13 +105,23 @@ private:
     void releaseSprites();
     void uploadSpriteVertices(SDL_GPUCommandBuffer* cmd, unsigned width, unsigned height);
     void uploadJoints(SDL_GPUCommandBuffer* cmd);
-    void render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigned width, unsigned height, const Camera& camera);
+    // Records one frame; false when it couldn't (no depth buffer), with nothing recorded.
+    bool render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigned width, unsigned height, const Camera& camera);
+    // Draws one frame into a new texture and reads it back as RGBA.
+    bool drawOffscreen(const Camera& camera, unsigned width, unsigned height, scene::Image& out);
+    static constexpr unsigned kMaxOffscreen = 8192;
     void drawImposters(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass, const Mat4& viewProjection);
 
     SDL_Window* window_ = nullptr;
     SDL_GPUDevice* device_ = nullptr;
-    SDL_GPUTexture* depth_ = nullptr;
-    unsigned depthWidth_ = 0, depthHeight_ = 0;
+    // A depth buffer, remade only when the size drawn at changes: one for the window (and shots),
+    // one for portraits, so drawing a portrait doesn't remake the window's.
+    struct DepthBuffer {
+        SDL_GPUTexture* texture = nullptr;
+        unsigned width = 0, height = 0;
+    };
+    SDL_GPUTexture* depthFor(DepthBuffer& depth, unsigned width, unsigned height);
+    DepthBuffer windowDepth_, portraitDepth_;
     SDL_GPUSampler* sampler_ = nullptr;
     SDL_GPUSampler* clampedSampler_ = nullptr;  // sampler_, clamped at the edges
     SDL_GPUTexture* white_ = nullptr;  // stands in for surfaces without a texture
@@ -122,6 +139,7 @@ private:
     std::vector<GpuMesh> meshes_;
     std::vector<scene::Material> materials_;
     std::vector<scene::Instance> instances_;
+    std::optional<scene::ObjectLighting> objectLighting_;
     std::vector<std::uint8_t> visible_;
 
     SDL_GPUGraphicsPipeline* spritePipeline_ = nullptr;
@@ -130,6 +148,7 @@ private:
     std::vector<std::array<unsigned, 2>> spriteSizes_;
     std::vector<Sprite> sprites_;
     bool drawScene_ = true;
+    bool instancesOnly_ = false;  // while drawing a portrait (see drawInstancesToImage)
     float clear_[3] = {0.17f, 0.18f, 0.19f};
     SDL_GPUBuffer* spriteVertices_ = nullptr;
     unsigned spriteCapacity_ = 0;  // vertices the buffer holds

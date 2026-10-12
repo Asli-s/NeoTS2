@@ -26,6 +26,9 @@ class Screen {
 public:
     Screen(content::UiData& data, Fonts& fonts);
 
+    // The game's UI scripts, pictures and texts the windows come from.
+    content::UiData& data() { return data_; }
+
     // Adds a script's windows; the top window's area is moved to (x, y) (inside `parent`'s area when
     // given). Returns the top window, or -1 when the script is missing.
     int load(std::uint32_t group, std::uint32_t instance, int x, int y, int parent = -1);

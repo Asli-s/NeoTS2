@@ -18,7 +18,7 @@ struct Pixels {
 constexpr std::uint32_t kMaxSide = 16384;
 
 // A Targa image: true color (24 or 32 bits) or grayscale (8 bits), plain or run-length encoded.
-// Empty for other kinds or broken data.
-std::optional<Pixels> decode(std::span<const std::uint8_t> data);
+// Empty for other kinds, broken data, or a side over `maxSide`.
+std::optional<Pixels> decode(std::span<const std::uint8_t> data, std::uint32_t maxSide = kMaxSide);
 
 } // namespace ts2::tga

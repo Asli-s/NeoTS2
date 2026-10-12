@@ -12,10 +12,13 @@
 #include "content/install.hpp"
 #include "content/lighting.hpp"
 #include "content/material_scripts.hpp"
+#include "diag/log.hpp"
+#include "diagnostics.hpp"
 #include "formats/nhood_paint_rules.hpp"
 #include "menu.hpp"
 #include "neighborhood.hpp"
 #include "lot_life.hpp"
+#include "lot_light.hpp"
 #include "lot_view.hpp"
 #include "orbit.hpp"
 #include "render/renderer.hpp"
@@ -32,6 +35,7 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <iterator>
 #include <optional>
@@ -120,6 +124,7 @@ bool parseOptions(int argc, char** argv, Options& o) {
 } // namespace
 
 int main(int argc, char** argv) {
+    app::startDiagnostics(argc, argv);
     if (argc >= 3 && std::string_view(argv[2]) == "--menu") {
         MenuOptions menu;
         for (int i = 3; i < argc; ++i) {
@@ -154,7 +159,7 @@ int main(int argc, char** argv) {
             }
         }
         if (!SDL_Init(SDL_INIT_VIDEO)) {
-            std::fprintf(stderr, "SDL: %s\n", SDL_GetError());
+            ts2::diag::error(std::string("SDL: ") + SDL_GetError());
             return 1;
         }
         if (menu.user.empty()) {
@@ -167,7 +172,7 @@ int main(int argc, char** argv) {
         try {
             result = runMenu(utf8Path(argv[1]), utf8Path(SDL_GetBasePath()) / "shaders", menu);
         } catch (const std::exception& ex) {
-            std::fprintf(stderr, "error: %s\n", ex.what());
+            ts2::diag::error(ex.what());
             result = 1;
         }
         SDL_Quit();
@@ -181,12 +186,12 @@ int main(int argc, char** argv) {
     }
     const bool shot = options.shot != nullptr;
     if (!SDL_Init(SDL_INIT_VIDEO)) {
-        std::fprintf(stderr, "SDL: %s\n", SDL_GetError());
+        ts2::diag::error(std::string("SDL: ") + SDL_GetError());
         return 1;
     }
     int result = 0;
     try {
-        std::printf("loading the game's assets...\n");
+        ts2::diag::info("loading the game's assets");
         ts2::scene::Assets assets(utf8Path(argv[1]));
         ts2::scene::SceneBuilder builder(assets);
         // A lot's Sims, run by their own scripts.
@@ -196,13 +201,14 @@ int main(int argc, char** argv) {
         ts2::scene::NeighborhoodSceneStats hoodStats;
         if (hood) {
             hoodStats = app::buildNeighborhood(builder, utf8Path(argv[1]), utf8Path(argv[2]));
-            std::printf("neighborhood %u x %u tiles, %s, sea level %.2f, %zu lots (%zu imposters), %zu plants (%zu shown)\n",
-                        hoodStats.width, hoodStats.height, hoodStats.terrainType.c_str(), hoodStats.seaLevel, hoodStats.lots,
-                        hoodStats.imposters, hoodStats.plants, hoodStats.plantsShown);
+            ts2::diag::info(std::format("neighborhood {} x {} tiles, {}, sea level {:.2f}, {} lots ({} imposters), {} plants ({} shown)",
+                                        hoodStats.width, hoodStats.height, hoodStats.terrainType, hoodStats.seaLevel, hoodStats.lots,
+                                        hoodStats.imposters, hoodStats.plants, hoodStats.plantsShown));
         } else {
             const auto stats = ts2::scene::addLot(builder, utf8Path(argv[2]));
-            std::printf("%zu objects, %zu walls, %zu roofs, %zu terrain paints\n", stats.objects, stats.walls, stats.roofs,
-                        stats.terrainPaints);
+            app::lightLot(assets, builder.scene(), utf8Path(argv[2]));
+            ts2::diag::info(std::format("{} objects, {} walls, {} roofs, {} terrain paints", stats.objects, stats.walls, stats.roofs,
+                                        stats.terrainPaints));
             if (auto sim = app::loadSimulation(utf8Path(argv[1]), utf8Path(argv[2]))) {
                 life = std::make_unique<app::LotLife>(std::move(sim), assets);
             }
@@ -218,7 +224,7 @@ int main(int argc, char** argv) {
         const std::filesystem::path shaders = utf8Path(SDL_GetBasePath()) / "shaders";
         {
             ts2::render::Renderer renderer(window, shaders);
-            std::printf("drawing with %s\n", renderer.backend().c_str());
+            ts2::diag::info("drawing with " + renderer.backend());
             renderer.upload(scene);
             ts2::scene::ScenePose pose;
             // A shot shows the lot `--time` seconds after it came to life.
@@ -228,7 +234,7 @@ int main(int argc, char** argv) {
             app::animateActors(scene, life ? life->seconds() : options.time, renderer, pose);
             for (const auto& actor : scene.actors) {
                 if (actor.animation && actor.animation->animation) {
-                    std::printf("Sim %u plays %s\n", actor.object, actor.animation->animation->name.c_str());
+                    ts2::diag::info(std::format("Sim {} plays {}", actor.object, actor.animation->animation->name));
                 }
             }
             const Uint64 started = SDL_GetTicksNS();
@@ -267,7 +273,7 @@ int main(int argc, char** argv) {
                 if (!renderer.drawToFile(camera, options.shotWidth, options.shotHeight, utf8Path(options.shot))) {
                     throw std::runtime_error(std::string("couldn't save ") + options.shot);
                 }
-                std::printf("wrote %s\n", options.shot);
+                ts2::diag::info(std::string("wrote ") + options.shot);
             }
 
             auto setTitle = [&] {
@@ -348,7 +354,7 @@ int main(int argc, char** argv) {
         }
         SDL_DestroyWindow(window);
     } catch (const std::exception& ex) {
-        std::fprintf(stderr, "error: %s\n", ex.what());
+        ts2::diag::error(ex.what());
         result = 1;
     }
     SDL_Quit();

@@ -38,6 +38,8 @@ constexpr std::uint16_t kAnimateSimOpcode = 0x006A;
 constexpr std::uint16_t kAnimateOverlayOpcode = 0x006B;
 constexpr std::uint16_t kAnimateStopOpcode = 0x006C;
 constexpr std::uint16_t kEffectOpcode = 0x0070;
+constexpr std::uint16_t kChangeLightOpcode = 0x006F;
+constexpr std::uint16_t kLightNameTable = 0x8E;
 constexpr std::uint16_t kFindBestObjectOpcode = 0x000E;
 constexpr std::uint16_t kRunFunctionalTreeOpcode = 0x0014;
 constexpr std::uint16_t kActionStringTable = 0x12E;
@@ -584,6 +586,7 @@ public:
         case kBreakPointOpcode:       return breakPoint(in, f);
         case kArrayOperationOpcode:   return arrayOperation(in, f);
         case kFindBestObjectOpcode:   return findBestObject(in, f);
+        case kChangeLightOpcode:      return changeLight(in, f);
         // These start or stop an animation or an effect and carry on at once; what they show isn't
         // kept yet.
         case kAnimateObjectOpcode:
@@ -748,6 +751,35 @@ public:
         if (object == me_ && (o[2] & kRemoveReturnImmediately) == 0) {
             throw Stop{Outcome::MeRemoved, "", ""};
         }
+        return true;
+    }
+
+    // Operands:
+    //   byte 1     flags: 0x01 fade time from Temp 1, 0x02 intensity from Temp 0
+    //   bytes 2-4  the object (owner, data)
+    //   bytes 5-6  fade time in ticks (0..300, else 10)
+    //   byte 7     intensity in percent (0..100, else 50)
+    //   byte 8     the light: 0xFF all, else an entry of the object's light name table
+    // Sets how strongly all of the object's lights shine; the light named and the fade time don't
+    // change what the game does with it.
+    bool changeLight(const bhav::Instruction& in, Frame& f) {
+        const auto& o = in.operands;
+        const std::int16_t id = read(o[2], static_cast<std::uint16_t>(o[3] | o[4] << 8), f);
+        SimObject* target = world().find(id);
+        if (target == nullptr) {
+            throw Stop{Outcome::Error, "object not found for Change Light", std::to_string(id)};
+        }
+        int percent = (o[1] & 0x02) ? thread_.temps[0] : o[7];
+        if (percent > 100 || percent < 0) {
+            percent = 50;
+        }
+        if (o[8] != 0xFF) {
+            const auto name = code_.string(me().group, kLightNameTable, o[8]);
+            if (!name || name->empty()) {
+                throw Stop{Outcome::Error, "Missing Light Name", std::to_string(o[8])};
+            }
+        }
+        target->lightStrength = static_cast<float>(percent * 0.01);
         return true;
     }
 

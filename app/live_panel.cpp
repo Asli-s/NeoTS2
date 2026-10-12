@@ -22,6 +22,9 @@ constexpr std::uint32_t kButtonsClosed = 0xA94E97E8, kButtonsOpen = 0xA94E97F4;
 constexpr std::uint32_t kAspirations = 0xCD8B8B10;
 // The small buttons, in both button columns.
 constexpr std::uint32_t kNeedsButton = 0x0D8AB291, kRelationshipsButton = 0x17DEFBF5;
+// The last slot holds the inventory (rewards) button for family Sims, or the roommate
+// satisfaction button for roommates. The script shows the roommate one by default.
+constexpr std::uint32_t kInventoryButton = 0x8B85BA4E, kRoommateButton = 0x8B85BADD;
 
 // Where the frame starts its right-hand part (x within the panel), for wants closed and open.
 constexpr int kClosedFrontX = 316, kClosedStartX = 343;
@@ -41,10 +44,19 @@ void LivePanel::attach(ts2::ui::Screen& screen, int panel) {
     screen_ = &screen;
     panel_ = panel;
     wantsContent_ = screen.load(kScripts, kWantsScript, 0, 0, screen.find(panel, kWantsHolder));
+    wants_.attach(screen, wantsContent_);
     needsContent_ = screen.load(kScripts, kNeedsScript, 0, 0, screen.find(panel, kSubHolder));
+    needs_.attach(screen, needsContent_);
+    mood_.attach(screen, panel);
     relationshipsContent_ = screen.load(kScripts, kRelationshipsScript, 0, 0, screen.find(panel, kSubHolder));
     screen.setVisible(screen.find(panel, kAspirations), true);
     screen.setVisible(screen.find(panel, kWantsPopout), false);
+    // Only family Sims are selectable so far.
+    for (const std::uint32_t column : {kButtonsClosed, kButtonsOpen}) {
+        const int c = screen.find(panel, column);
+        screen.setVisible(screen.find(c, kInventoryButton), true);
+        screen.setVisible(screen.find(c, kRoommateButton), false);
+    }
     layout();
 }
 

@@ -3,12 +3,15 @@
 #include "menu.hpp"
 #include "neighborhood.hpp"
 #include "lot_life.hpp"
+#include "lot_light.hpp"
 #include "lot_ui.hpp"
 #include "lot_view.hpp"
 #include "neighborhood_ui.hpp"
 #include "orbit.hpp"
+#include "portraits.hpp"
 
 #include "content/install.hpp"
+#include "diag/log.hpp"
 #include "content/material_scripts.hpp"
 #include "content/neighborhood.hpp"
 #include "content/ui_data.hpp"
@@ -26,6 +29,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <format>
 #include <fstream>
 #include <future>
 #include <map>
@@ -116,10 +120,10 @@ std::vector<ts2::render::Sprite> sprites(const ts2::ui::Screen& screen, double s
 } // namespace
 
 int runMenu(const std::filesystem::path& install, const std::filesystem::path& shaders, const MenuOptions& options) {
-    std::printf("loading the game's UI...\n");
+    ts2::diag::info("loading the game's UI");
     ts2::content::UiData data(install);
     ts2::ui::Fonts fonts(install);
-    std::printf("%zu UI and text packages, %zu font faces\n", data.packageCount(), fonts.faceCount());
+    ts2::diag::info(std::format("{} UI and text packages, {} font faces", data.packageCount(), fonts.faceCount()));
 
     const int width = options.width, height = options.height;
     SDL_Window* window = SDL_CreateWindow("NeoTS2", width, height, options.shot.empty() ? 0 : SDL_WINDOW_HIDDEN);
@@ -172,7 +176,7 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
         // A tile per neighborhood in the thumbnail strip, three to a page, 4 apart, the row centered in
         // the strip both ways (as the game shows them).
         const auto hoods = ts2::content::listNeighborhoods(options.user / "Neighborhoods");
-        std::printf("%zu neighborhoods\n", hoods.size());
+        ts2::diag::info(std::format("{} neighborhoods", hoods.size()));
         const int thumbs = screen.find(menu, kThumbs);
         std::vector<int> tiles;
         for (int i = 0; i < kPerPage; ++i) {
@@ -332,7 +336,7 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
             try {
                 return job.get();
             } catch (const std::exception& ex) {
-                std::fprintf(stderr, "couldn't load the %s: %s\n", what, ex.what());
+                ts2::diag::error(std::format("couldn't load the {}: {}", what, ex.what()));
                 if (!options.shot.empty()) {
                     throw;
                 }
@@ -347,7 +351,7 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
             const auto folder = hoods[chosen].folder;
             openName = hoods[chosen].name;
             openFolder = folder;
-            std::printf("opening %s\n", folder.filename().string().c_str());
+            ts2::diag::step("opening neighborhood " + ts2::diag::utf8(folder.filename()));
             building = std::async(std::launch::async, [assets, install, folder] {
                 ts2::scene::SceneBuilder builder(*assets.get());
                 Built b;
@@ -361,7 +365,7 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
         auto enterLot = [&](std::uint32_t id) {
             enteredLot = id;
             const auto file = openFolder / "Lots" / (openFolder.filename().u8string() + u8"_Lot" + std::u8string(reinterpret_cast<const char8_t*>(std::to_string(id).c_str())) + u8".package");
-            std::printf("entering lot %u\n", id);
+            ts2::diag::step(std::format("entering lot {}", id));
             // The ground around it, as in the game's lot view.
             const auto where = std::find_if(hood.stats.lotFootprints.begin(), hood.stats.lotFootprints.end(),
                                             [&](const ts2::scene::LotFootprint& f) { return f.id == id; });
@@ -377,6 +381,7 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
                 {
                     ts2::scene::SceneBuilder builder(*assets.get());
                     ts2::scene::addLot(builder, file);
+                    app::lightLot(*assets.get(), builder.scene(), file);
                     built.lot = std::move(builder.scene());
                 }
                 if (footprint && hoodScene->terrain) {
@@ -407,7 +412,7 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
             if (!renderer.drawToFile({}, static_cast<unsigned>(width), static_cast<unsigned>(height), options.shot)) {
                 throw std::runtime_error("couldn't save the picture");
             }
-            std::printf("wrote %s\n", options.shot.string().c_str());
+            ts2::diag::info("wrote " + ts2::diag::utf8(options.shot));
         }
         // Back to the neighborhood, as it was.
         auto leaveLot = [&] {
@@ -460,6 +465,7 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
                 lotLife->setPaused(true);
                 break;
             case Action::OptionsClosed: lotLife->setPaused(pausedBeforeOptions); break;
+            case Action::SelectSim: lotLife->select(lotUi.clickedSim()); break;
             default: break;
             }
         };
@@ -518,7 +524,7 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
                     }
                     if (const auto clicked = screen.mouse(static_cast<int>(x), static_cast<int>(y), down, static_cast<double>(SDL_GetTicksNS()) / 1e9)) {
                         const std::uint32_t id = screen.id(*clicked);
-                        std::printf("clicked 0x%08x\n", id);
+                        ts2::diag::info(std::format("clicked 0x{:08x}", id));
                         const auto tile = std::find(tiles.begin(), tiles.end(), screen.parent(*clicked));
                         if (inNeighborhood) {
                             // Back to the menu, but not while a lot is loading: it reads this neighborhood.
@@ -558,8 +564,8 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
                 // Nothing else uses the assets now (no lot loads while a neighborhood does), so the
                 // problems noted while loading the last neighborhood can go.
                 assets.get()->warnings.clear();
-                std::printf("neighborhood %u x %u tiles, %zu lots, %zu plants\n", hood.stats.width, hood.stats.height, hood.stats.imposters,
-                            hood.stats.plantsShown);
+                ts2::diag::info(std::format("neighborhood {} x {} tiles, {} lots, {} plants", hood.stats.width, hood.stats.height,
+                                            hood.stats.imposters, hood.stats.plantsShown));
                 renderer.upload(hood.scene);
                 orbit = {};
                 app::neighborhoodCamera(orbit, install, hood.stats);
@@ -579,7 +585,7 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
                 } else if (options.clickX >= 0) {
                     const auto id = lotAt(orbit.camera(), width, height, static_cast<float>(options.clickX), static_cast<float>(options.clickY),
                                           hood.stats.lotFootprints);
-                    std::printf("clicked lot %u\n", id);
+                    ts2::diag::step(std::format("clicked lot {}", id));
                     if (id) {
                         enterLot(id);
                     }
@@ -617,12 +623,23 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
                 if (!lotLife) {
                     if (auto sim = finished(lotSimBuilding, "lot's simulation"); sim && *sim) {
                         lotLife = std::make_unique<app::LotLife>(std::move(*sim), *assets.get());
+                        ts2::diag::step("the lot's simulation is ready");
+                        // The household's thumbnails: Sims on the lot are drawn anew, as the game
+                        // does; the others keep their character file's portrait.
+                        std::vector<app::Skewer::Member> members;
+                        std::mt19937 poseRandom(static_cast<unsigned>(now));
+                        for (const std::int16_t id : lotLife->household()) {
+                            auto portrait = app::drawPortrait(lot, renderer, lotLife->animations(), static_cast<std::uint32_t>(id), poseRandom);
+                            members.push_back({id, portrait ? std::move(portrait) : lotLife->portrait(id)});
+                        }
+                        renderer.show(ts2::scene::visibleInstances(lot, lotView.view));
+                        lotUi.showHousehold(std::move(members));
+                        ts2::diag::step("household portraits drawn");
                     }
                 }
                 if (lotLife) {
                     lotLife->update(std::min(100.0, static_cast<double>(now - lastFrame) / 1e6), lot);
-                    lotUi.show(lotLife->clockText(), lotLife->speed(), lotLife->paused(), lotLife->funds());
-                    lotUi.showSim(lotLife->aspiration());
+                    lotUi.showLife(*lotLife);
                 }
                 app::animateActors(lot, lotLife ? lotLife->seconds() : static_cast<double>(now - lotShown) / 1e9, renderer, lotPose);
             } else if (inNeighborhood) {
@@ -643,7 +660,7 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
                 if (!renderer.drawToFile(orbit.camera(), static_cast<unsigned>(width), static_cast<unsigned>(height), options.shot)) {
                     throw std::runtime_error("couldn't save the picture");
                 }
-                std::printf("wrote %s\n", options.shot.string().c_str());
+                ts2::diag::info("wrote " + ts2::diag::utf8(options.shot));
                 running = false;
             } else if (!renderer.draw(inNeighborhood || inLot ? orbit.camera() : ts2::render::Camera{})) {
                 SDL_Delay(16);

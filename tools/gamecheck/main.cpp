@@ -140,6 +140,8 @@ std::vector<Reader> readers() {
         {0x7BA3838C, "GMND (geometry node)", throwing([](Bytes d) { scenegraph::parseContainer(d); })},
         {0xAC4F8687, "GMDC (mesh)", throwing([](Bytes d) { scenegraph::parseMesh(d); })},
         {0x49596978, "TXMT (material)", throwing([](Bytes d) { scenegraph::parseMaterial(d); })},
+        {0xC9C81BA9, "LGHT (point light)", throwing([](Bytes d) { scenegraph::parseLight(d); })},
+        {0xC9C81BAD, "LGHT (spot light)", throwing([](Bytes d) { scenegraph::parseLight(d); })},
         {0x1C4A276C, "TXTR (texture)", decodesAsTexture},
         {0xED534136, "LIFO (large texture level)", throwing([](Bytes d) { scenegraph::parseLevelInfo(d); })},
         {anim::kType, "ANIM (animation)", throwing([](Bytes d) { anim::parse(d); })},

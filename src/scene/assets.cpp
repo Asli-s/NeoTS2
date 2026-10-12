@@ -38,6 +38,7 @@ std::string lower(std::string s) {
 
 Assets::Assets(const fs::path& install) : scripts_(content::loadBuildScripts(content::findProducts(install))) {
     const auto products = content::findProducts(install);
+    lighting_ = content::readLighting(products);
     std::set<fs::path> catalogFolders;
     for (const auto& objects : content::objectLoadOrder(products)) {
         objects_.addPackage(objects);

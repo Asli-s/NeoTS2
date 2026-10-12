@@ -1,5 +1,6 @@
 #pragma once
 
+#include "content/neighborhood.hpp"
 #include "content/resource_index.hpp"
 #include "sim/clock.hpp"
 #include "sim/index_code_source.hpp"
@@ -11,6 +12,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <span>
 #include <string>
 
@@ -47,12 +49,22 @@ public:
     };
     const std::map<std::string, Stop>& stops() const { return stops_; }
 
+    // The household living on the lot: its Sims' object ids, in the order of the family's members.
+    const std::vector<std::int16_t>& household() const { return household_; }
+    // An image resource of a Sim's character file, by instance; empty when missing.
+    std::vector<std::uint8_t> simImage(std::int16_t sim, std::uint32_t instance);
+    // A neighbor's character file (by neighbor id), on the lot or not: the one whose object
+    // definition has the neighbor's GUID. Nullopt when unknown. Only looks it up, reads nothing.
+    std::optional<std::filesystem::path> characterFile(std::int16_t neighbor) const;
+
     const LotWorldReport& report() const { return report_; }
     // Objects reset when the lot loaded because their type changed since the save.
     std::size_t resets() const { return resets_; }
 
 private:
     content::ResourceIndex index_;
+    // Character files by their Sim's GUID, gathered while the simulation is built.
+    std::map<std::uint32_t, std::filesystem::path> characterFiles_;
     IndexCodeSource code_;
     World world_;
     Vm vm_;
@@ -60,8 +72,11 @@ private:
     std::size_t ticks_ = 0;
     std::map<std::string, Stop> stops_;
     std::size_t resets_ = 0;
+    std::vector<std::int16_t> household_;
 
     void startObjects();
+    void findHousehold(const content::Neighborhood& hood, const std::filesystem::path& lot);
+    void findCharacterFiles();
     void note(const RunResult& r, std::int16_t object);
 };
 

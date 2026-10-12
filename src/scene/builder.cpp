@@ -175,6 +175,19 @@ int SceneBuilder::material(const std::string& name) {
     if (const auto multiplier = parseFloats(property(m, "stdMatAlphaMultiplier")); !multiplier.empty()) {
         out.color[3] = multiplier[0];
     }
+    // Without a texture the material's own alpha stands in for the texture's (window glass is half
+    // see-through this way).
+    if (out.image < 0) {
+        if (const auto alpha = parseFloats(property(m, "stdMatUntexturedDiffAlpha")); !alpha.empty()) {
+            out.color[3] *= alpha[0];
+        }
+    }
+    // The game's floor shader takes 0.125 to 64 tiles a repeat.
+    for (std::size_t i = 0; i < 2; ++i) {
+        if (const auto tiles = parseFloats(property(m, i == 0 ? "floorMaterialScaleU" : "floorMaterialScaleV")); !tiles.empty()) {
+            out.floorTiles[i] = std::isfinite(tiles[0]) ? std::clamp(tiles[0], 0.125f, 64.0f) : 1.0f;
+        }
+    }
     // Without lighting the material's coefficients don't apply: the texture shows as it is.
     if (const std::string lighting = property(m, "stdMatLightingEnabled"); lighting == "0" || lighting == "false") {
         out.unlit = true;

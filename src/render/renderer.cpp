@@ -6,18 +6,24 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <set>
 #include <stdexcept>
 
 namespace ts2::render {
 
 namespace {
 
-constexpr std::uint32_t kVertexFloats = 9;  // position, normal, texture coordinates, alpha
+constexpr std::uint32_t kVertexFloats = 11;  // position, normal, texture coordinates, alpha, light-map coordinates
 constexpr std::uint32_t kSpriteFloats = 8;  // position, texture coordinates, color
+constexpr std::size_t kObjectLights = 8;  // as many as the game's shaders take
 
 struct VertexUniforms {
     float viewProjection[16];
     float model[16];
+    float ambient[4];  // w: 1 when lit as the game lights objects (see scene::ObjectLighting), 3 as its lot skirt
+    float lightDirections[kObjectLights][4];
+    float lightColors[kObjectLights][4];
+    float thumbnail[4];  // the material's diffuse and the thumbnail scale (see scene::ObjectLighting)
 };
 
 struct SkinnedUniforms {
@@ -35,6 +41,7 @@ struct FragmentUniforms {
     float alphaCutoff;
     float unlit;
     float padding;
+    float lightMap[4];  // x: the gain on the light map (0: none); y: 1 to leave the material's colour out; z: 1 for terrain
 };
 
 std::vector<std::uint8_t> readFile(const std::filesystem::path& path) {
@@ -97,7 +104,7 @@ Renderer::Renderer(SDL_Window* window, const std::filesystem::path& shaderFolder
     };
     SDL_GPUShader* vertex = shader("scene.vert.dxil", SDL_GPU_SHADERSTAGE_VERTEX, 0);
     SDL_GPUShader* skinnedVertex = shader("skinned.vert.dxil", SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, 1);
-    SDL_GPUShader* fragment = shader("scene.frag.dxil", SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
+    SDL_GPUShader* fragment = shader("scene.frag.dxil", SDL_GPU_SHADERSTAGE_FRAGMENT, 2);
 
     for (int skinned = 0; skinned < 2; ++skinned)
     for (int twoSided = 0; twoSided < 2; ++twoSided) {
@@ -110,13 +117,14 @@ Renderer::Renderer(SDL_Window* window, const std::filesystem::path& shaderFolder
             buffers[1].slot = 1;
             buffers[1].pitch = kSkinBytes;
             buffers[1].input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
-            SDL_GPUVertexAttribute attributes[6]{};
+            SDL_GPUVertexAttribute attributes[7]{};
             attributes[0] = {0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 0};
             attributes[1] = {1, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 3 * sizeof(float)};
             attributes[2] = {2, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, 6 * sizeof(float)};
             attributes[3] = {3, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT, 8 * sizeof(float)};
-            attributes[4] = {4, 1, SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4, 0};
-            attributes[5] = {5, 1, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, 4};
+            attributes[4] = {6, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, 9 * sizeof(float)};
+            attributes[5] = {4, 1, SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4, 0};
+            attributes[6] = {5, 1, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, 4};
 
             SDL_GPUColorTargetDescription color{};
             color.format = SDL_GetGPUSwapchainTextureFormat(device_, window_);
@@ -136,7 +144,7 @@ Renderer::Renderer(SDL_Window* window, const std::filesystem::path& shaderFolder
             info.vertex_input_state.vertex_buffer_descriptions = buffers;
             info.vertex_input_state.num_vertex_buffers = skinned ? 2 : 1;
             info.vertex_input_state.vertex_attributes = attributes;
-            info.vertex_input_state.num_vertex_attributes = skinned ? 6 : 4;
+            info.vertex_input_state.num_vertex_attributes = skinned ? 7 : 5;
             info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
             info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
             info.rasterizer_state.cull_mode = twoSided ? SDL_GPU_CULLMODE_NONE : SDL_GPU_CULLMODE_BACK;
@@ -541,8 +549,10 @@ Renderer::~Renderer() {
     if (sampler_) {
         SDL_ReleaseGPUSampler(device_, sampler_);
     }
-    if (depth_) {
-        SDL_ReleaseGPUTexture(device_, depth_);
+    for (const DepthBuffer* d : {&windowDepth_, &portraitDepth_}) {
+        if (d->texture) {
+            SDL_ReleaseGPUTexture(device_, d->texture);
+        }
     }
     SDL_ReleaseWindowFromGPUDevice(device_, window_);
     SDL_DestroyGPUDevice(device_);
@@ -811,6 +821,7 @@ void Renderer::upload(const scene::Scene& scene) {
     release();
     materials_ = scene.materials;
     instances_ = scene.instances;
+    objectLighting_ = scene.objectLighting;
     visible_.clear();
     jointBase_.assign(instances_.size(), -1);
     jointCount_.assign(instances_.size(), 0);
@@ -839,8 +850,14 @@ void Renderer::upload(const scene::Scene& scene) {
         return b;
     };
     std::vector<SDL_GPUTexture*> withMips;
-    auto texture = [&](const scene::Image& image) {
-        const Uint32 levels = static_cast<Uint32>(std::floor(std::log2(std::max(image.width, image.height)))) + 1;
+    // Light maps are drawn as the game draws them: one level, no mipmaps.
+    std::set<std::size_t> lightMaps;
+    if (scene.lightMaps) {
+        for (const int i : scene.lightMaps->floors) lightMaps.insert(static_cast<std::size_t>(i));
+        lightMaps.insert(static_cast<std::size_t>(scene.lightMaps->walls));
+    }
+    auto texture = [&](const scene::Image& image, bool mips = true) {
+        const Uint32 levels = mips ? static_cast<Uint32>(std::floor(std::log2(std::max(image.width, image.height)))) + 1 : 1;
         SDL_GPUTextureCreateInfo info{};
         info.type = SDL_GPU_TEXTURETYPE_2D;
         info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
@@ -866,8 +883,9 @@ void Renderer::upload(const scene::Scene& scene) {
         return t;
     };
 
-    for (const auto& image : scene.images) {
-        textures_.push_back(complete(image) ? texture(image) : nullptr);
+    for (std::size_t i = 0; i < scene.images.size(); ++i) {
+        const auto& image = scene.images[i];
+        textures_.push_back(complete(image) ? texture(image, !lightMaps.contains(i)) : nullptr);
     }
     white_ = texture({1, 1, {255, 255, 255, 255}});
 
@@ -897,12 +915,16 @@ void Renderer::upload(const scene::Scene& scene) {
                     std::copy_n(&p.uvs[i * 2], 2, v + 6);
                 }
                 v[8] = p.alphas.size() == n ? p.alphas[i] : 1.0f;
+                if (p.lightUvs.size() == n * 2) {
+                    std::copy_n(&p.lightUvs[i * 2], 2, v + 9);
+                }
             }
             GpuPrimitive g;
             g.vertices = buffer(SDL_GPU_BUFFERUSAGE_VERTEX, vertices.data(), static_cast<Uint32>(vertices.size() * sizeof(float)));
             g.indices = buffer(SDL_GPU_BUFFERUSAGE_INDEX, p.indices.data(), static_cast<Uint32>(p.indices.size() * sizeof(std::uint32_t)));
             g.count = static_cast<unsigned>(p.indices.size());
             g.material = p.material;
+            g.lightMapped = p.lightUvs.size() == n * 2;
             if (p.joints.size() == n * 4 && p.weights.size() == n * 4) {
                 std::vector<std::uint8_t> skin(n * kSkinBytes);
                 for (std::size_t i = 0; i < n; ++i) {
@@ -1261,7 +1283,43 @@ bool Renderer::draw(const Camera& camera) {
 }
 
 bool Renderer::drawToFile(const Camera& camera, unsigned width, unsigned height, const std::filesystem::path& path) {
+    scene::Image image;
+    if (!drawOffscreen(camera, width, height, image)) {
+        return false;
+    }
+    SDL_Surface* surface = SDL_CreateSurfaceFrom(static_cast<int>(width), static_cast<int>(height), SDL_PIXELFORMAT_RGBA32,
+                                                 image.rgba.data(), static_cast<int>(width * 4));
+    const bool saved = surface != nullptr && SDL_SavePNG(surface, path.string().c_str());
+    SDL_DestroySurface(surface);
+    return saved;
+}
+
+std::optional<scene::Image> Renderer::drawInstancesToImage(const Camera& camera, unsigned width, unsigned height,
+                                                           const scene::ObjectLighting& lighting) {
+    // Back to the scene's own drawing afterwards, even if drawing throws.
+    struct Restore {
+        Renderer& r;
+        std::optional<scene::ObjectLighting> lighting;
+        ~Restore() {
+            r.objectLighting_ = std::move(lighting);
+            r.instancesOnly_ = false;
+        }
+    } restore{*this, std::exchange(objectLighting_, lighting)};
+    instancesOnly_ = true;
+    scene::Image image;
+    const bool drawn = drawOffscreen(camera, width, height, image);
+    return drawn ? std::optional<scene::Image>(std::move(image)) : std::nullopt;
+}
+
+bool Renderer::drawOffscreen(const Camera& camera, unsigned width, unsigned height, scene::Image& out) {
+    if (width == 0 || height == 0 || width > kMaxOffscreen || height > kMaxOffscreen) {
+        return false;
+    }
     const SDL_GPUTextureFormat format = SDL_GetGPUSwapchainTextureFormat(device_, window_);
+    // The pipelines draw in the window's format; only 8-bit RGBA or BGRA can be read back as bytes.
+    if (format != SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM && format != SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM) {
+        return false;
+    }
     SDL_GPUTextureCreateInfo info{};
     info.type = SDL_GPU_TEXTURETYPE_2D;
     info.format = format;
@@ -1275,9 +1333,18 @@ bool Renderer::drawToFile(const Camera& camera, unsigned width, unsigned height,
     transferInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
     transferInfo.size = width * height * 4;
     SDL_GPUTransferBuffer* transfer = SDL_CreateGPUTransferBuffer(device_, &transferInfo);
-
-    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
-    render(cmd, target, width, height, camera);
+    SDL_GPUCommandBuffer* cmd = target && transfer ? SDL_AcquireGPUCommandBuffer(device_) : nullptr;
+    if (cmd == nullptr) {
+        SDL_ReleaseGPUTransferBuffer(device_, transfer);
+        SDL_ReleaseGPUTexture(device_, target);
+        return false;
+    }
+    if (!render(cmd, target, width, height, camera)) {
+        SDL_CancelGPUCommandBuffer(cmd);
+        SDL_ReleaseGPUTransferBuffer(device_, transfer);
+        SDL_ReleaseGPUTexture(device_, target);
+        return false;
+    }
     SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
     SDL_GPUTextureRegion from{};
     from.texture = target;
@@ -1291,27 +1358,35 @@ bool Renderer::drawToFile(const Camera& camera, unsigned width, unsigned height,
     SDL_DownloadFromGPUTexture(copy, &from, &to);
     SDL_EndGPUCopyPass(copy);
     SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
+    if (fence == nullptr) {
+        SDL_ReleaseGPUTransferBuffer(device_, transfer);
+        SDL_ReleaseGPUTexture(device_, target);
+        return false;
+    }
     SDL_WaitForGPUFences(device_, true, &fence, 1);
     SDL_ReleaseGPUFence(device_, fence);
 
-    void* pixels = SDL_MapGPUTransferBuffer(device_, transfer, false);
-    const SDL_PixelFormat pixelFormat =
-        format == SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM ? SDL_PIXELFORMAT_BGRA32 : SDL_PIXELFORMAT_RGBA32;
-    SDL_Surface* surface = SDL_CreateSurfaceFrom(static_cast<int>(width), static_cast<int>(height), pixelFormat, pixels,
-                                                 static_cast<int>(width * 4));
-    const bool saved = surface != nullptr && SDL_SavePNG(surface, path.string().c_str());
-    SDL_DestroySurface(surface);
-    SDL_UnmapGPUTransferBuffer(device_, transfer);
+    const auto* pixels = static_cast<const std::uint8_t*>(SDL_MapGPUTransferBuffer(device_, transfer, false));
+    if (pixels != nullptr) {
+        out.width = width;
+        out.height = height;
+        out.rgba.assign(pixels, pixels + std::size_t{width} * height * 4);
+        if (format == SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM) {
+            for (std::size_t i = 0; i + 3 < out.rgba.size(); i += 4) {
+                std::swap(out.rgba[i], out.rgba[i + 2]);
+            }
+        }
+        SDL_UnmapGPUTransferBuffer(device_, transfer);
+    }
     SDL_ReleaseGPUTransferBuffer(device_, transfer);
     SDL_ReleaseGPUTexture(device_, target);
-    return saved;
+    return pixels != nullptr;
 }
 
-void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigned width, unsigned height,
-                      const Camera& camera) {
-    if (depth_ == nullptr || depthWidth_ != width || depthHeight_ != height) {
-        if (depth_) {
-            SDL_ReleaseGPUTexture(device_, depth_);
+SDL_GPUTexture* Renderer::depthFor(DepthBuffer& depth, unsigned width, unsigned height) {
+    if (depth.texture == nullptr || depth.width != width || depth.height != height) {
+        if (depth.texture) {
+            SDL_ReleaseGPUTexture(device_, depth.texture);
         }
         SDL_GPUTextureCreateInfo info{};
         info.type = SDL_GPU_TEXTURETYPE_2D;
@@ -1321,9 +1396,18 @@ void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigne
         info.height = height;
         info.layer_count_or_depth = 1;
         info.num_levels = 1;
-        depth_ = SDL_CreateGPUTexture(device_, &info);
-        depthWidth_ = width;
-        depthHeight_ = height;
+        depth.texture = SDL_CreateGPUTexture(device_, &info);
+        depth.width = depth.texture ? width : 0;
+        depth.height = depth.texture ? height : 0;
+    }
+    return depth.texture;
+}
+
+bool Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigned width, unsigned height,
+                      const Camera& camera) {
+    SDL_GPUTexture* depthTexture = depthFor(instancesOnly_ ? portraitDepth_ : windowDepth_, width, height);
+    if (depthTexture == nullptr) {
+        return false;
     }
 
     uploadSpriteVertices(cmd, width, height);
@@ -1353,7 +1437,9 @@ void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigne
     };
 
     // The neighborhood water's reflection: the sky and the terrain above the water, mirrored in it.
-    const bool water = drawScene_ && terrainIndexCount_ > 0 && waterIndexCount_ > 0;
+    // A portrait shows its instances alone, over a transparent background.
+    const bool extras = drawScene_ && !instancesOnly_;
+    const bool water = extras && terrainIndexCount_ > 0 && waterIndexCount_ > 0;
     if (water) {
         if (reflection_ == nullptr || reflectionWidth_ != width || reflectionHeight_ != height) {
             for (auto** t : {&reflection_, &reflectionDepth_}) {
@@ -1408,11 +1494,11 @@ void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigne
 
     SDL_GPUColorTargetInfo color{};
     color.texture = target;
-    color.clear_color = {clear_[0], clear_[1], clear_[2], 1.0f};
+    color.clear_color = instancesOnly_ ? SDL_FColor{0, 0, 0, 0} : SDL_FColor{clear_[0], clear_[1], clear_[2], 1.0f};
     color.load_op = SDL_GPU_LOADOP_CLEAR;
     color.store_op = SDL_GPU_STOREOP_STORE;
     SDL_GPUDepthStencilTargetInfo depth{};
-    depth.texture = depth_;
+    depth.texture = depthTexture;
     depth.clear_depth = 0;
     depth.load_op = SDL_GPU_LOADOP_CLEAR;
     depth.store_op = SDL_GPU_STOREOP_DONT_CARE;
@@ -1420,7 +1506,7 @@ void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigne
     depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
     SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(cmd, &color, 1, &depth);
     // A lot's sky, behind everything (the game's skybox screen effect).
-    if (drawScene_ && skybox_ != nullptr) {
+    if (extras && skybox_ != nullptr) {
         const Vec3 f = normalize(sub(camera.target, camera.eye));
         const Vec3 s = normalize(cross(f, {0, 0, 1}));
         const Vec3 u = cross(s, f);
@@ -1433,7 +1519,7 @@ void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigne
         SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
     }
     // Then the boundary curtain, into depth: nothing beyond it shows from inside.
-    if (drawScene_ && clipVertices_ != nullptr) {
+    if (extras && clipVertices_ != nullptr) {
         SDL_BindGPUGraphicsPipeline(pass, clipPipeline_);
         SDL_PushGPUVertexUniformData(cmd, 0, viewProjection.m.data(), 16 * sizeof(float));
         SDL_GPUBufferBinding vertices{clipVertices_, 0};
@@ -1492,6 +1578,28 @@ void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigne
             const auto& t = d.instance->transform.m;
             const float model[16] = {t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10], t[11], 0, 0, 0, 1};
             std::copy(std::begin(model), std::end(model), vu.frame.model);
+            const bool skirt = d.instance->part == scene::Part::Skirt;
+            if (objectLighting_ && (d.instance->part == scene::Part::Object || skirt)) {
+                const auto& l = *objectLighting_;
+                for (std::size_t k = 0; k < 3; ++k) {
+                    // The skirt's ambient: a quarter of it as a byte (the device's ambient), times the
+                    // material's ambient.
+                    vu.frame.ambient[k] =
+                        skirt ? std::round(std::clamp(l.ambient[k] / 4, 0.0f, 1.0f) * 255) / 255 * d.instance->skirtAmbient : l.ambient[k];
+                }
+                vu.frame.ambient[3] = skirt ? 3.0f : 1.0f;
+                if (l.thumbnailScale > 0) {
+                    const auto c = m ? m->color : std::array<float, 4>{1, 1, 1, 1};
+                    vu.frame.thumbnail[0] = c[0];
+                    vu.frame.thumbnail[1] = c[1];
+                    vu.frame.thumbnail[2] = c[2];
+                    vu.frame.thumbnail[3] = l.thumbnailScale;
+                }
+                for (std::size_t i = 0; i < kObjectLights && i < l.lights.size(); ++i) {
+                    std::copy(l.lights[i].direction.begin(), l.lights[i].direction.end(), vu.frame.lightDirections[i]);
+                    std::copy(l.lights[i].color.begin(), l.lights[i].color.end(), vu.frame.lightColors[i]);
+                }
+            }
             if (skinned) {
                 vu.jointBase = static_cast<std::uint32_t>(jointBase_[static_cast<std::size_t>(d.instance - instances_.data())]);
                 SDL_PushGPUVertexUniformData(cmd, 0, &vu, sizeof(vu));
@@ -1516,10 +1624,19 @@ void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigne
                              : blend                               ? 0.01f
                                                                    : 0.0f;
             fu.unlit = m && m->unlit ? 1.0f : 0.0f;
+            // A lot's floors and walls: lit by their light map alone.
+            SDL_GPUTexture* lightMap = white_;
+            if (const int i = d.instance->lightMap; d.primitive->lightMapped && i >= 0 && static_cast<std::size_t>(i) < textures_.size() &&
+                                                    textures_[static_cast<std::size_t>(i)]) {
+                lightMap = textures_[static_cast<std::size_t>(i)];
+                fu.lightMap[0] = d.instance->lightMapGain;
+                fu.lightMap[1] = d.instance->lightMapOnly ? 1.0f : 0.0f;
+                fu.lightMap[2] = d.instance->lightMapMultiply ? 1.0f : 0.0f;
+            }
             SDL_PushGPUFragmentUniformData(cmd, 0, &fu, sizeof(fu));
 
-            SDL_GPUTextureSamplerBinding binding{texture, m && m->clamp ? clampedSampler_ : sampler_};
-            SDL_BindGPUFragmentSamplers(pass, 0, &binding, 1);
+            const SDL_GPUTextureSamplerBinding bindings[2] = {{texture, m && m->clamp ? clampedSampler_ : sampler_}, {lightMap, clampedSampler_}};
+            SDL_BindGPUFragmentSamplers(pass, 0, bindings, 2);
             SDL_GPUBufferBinding vertices[2] = {{d.primitive->vertices, 0}, {d.primitive->skin, 0}};
             SDL_BindGPUVertexBuffers(pass, 0, vertices, skinned ? 2 : 1);
             SDL_GPUBufferBinding indices{d.primitive->indices, 0};
@@ -1528,7 +1645,7 @@ void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigne
         }
     };
     drawList(opaque, 0);
-    if (drawScene_ && terrainVertices_) {
+    if (extras && terrainVertices_) {
         if (terrainIndexCount_ > 0) {
             drawTerrain(pass, viewProjection, false);
         }
@@ -1567,7 +1684,7 @@ void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigne
     drawList(blended, 1);
 
     // Sprites in order, one draw per run of the same texture.
-    if (!sprites_.empty() && spriteVertices_) {
+    if (!instancesOnly_ && !sprites_.empty() && spriteVertices_) {
         SDL_BindGPUGraphicsPipeline(pass, spritePipeline_);
         const float screen[4] = {static_cast<float>(width), static_cast<float>(height), 0, 0};
         SDL_PushGPUVertexUniformData(cmd, 0, screen, sizeof(screen));
@@ -1591,6 +1708,7 @@ void Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigne
         }
     }
     SDL_EndGPURenderPass(pass);
+    return true;
 }
 
 } // namespace ts2::render

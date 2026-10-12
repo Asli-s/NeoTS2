@@ -102,6 +102,8 @@ struct QueuedInteraction {
 
 struct SimObject {
     std::int16_t id = 0;
+    // How strongly its lights shine (set by Change Light; 1 until a script sets it). Not saved.
+    float lightStrength = 1;
     std::uint32_t group = 0;
     objd::ObjectDefinition definition;
     std::array<std::int16_t, kAttributeCount> attributes{};
@@ -160,6 +162,7 @@ struct SavedNeighborhood {
     std::set<std::int32_t> lotIds;
     std::map<std::pair<std::int16_t, std::int16_t>, std::vector<std::int16_t>> relationships;
     std::map<std::int16_t, std::vector<swaf::Want>> wants;  // each neighbor's current wants
+    std::map<std::int16_t, std::vector<swaf::Want>> fears;  // and fears
     std::shared_ptr<const ngbh::Neighborhood> record;      // inventories; null when not saved
     std::map<std::int16_t, DataTables> dataTables;         // each neighbor's script data tables
 };
@@ -296,6 +299,17 @@ public:
             it = neighborWants_.emplace(id, std::move(saved)).first;
         }
         return it->second;
+    }
+
+    // A neighbor's current fears, as saved; empty if none were saved.
+    const std::vector<swaf::Want>& neighborFears(std::int16_t id) const {
+        static const std::vector<swaf::Want> none;
+        if (hood_) {
+            if (const auto s = hood_->fears.find(id); s != hood_->fears.end()) {
+                return s->second;
+            }
+        }
+        return none;
     }
 
     // The neighbor whose Sim is this object (matched by GUID); 0 when there is none.

@@ -180,7 +180,7 @@ std::optional<std::size_t> findBlock(std::span<const std::uint8_t> data, std::si
 } // namespace
 
 ResourceNode parseResourceNode(std::span<const std::uint8_t> data) {
-    constexpr std::uint32_t kResourceNode = 0xE519C933, kTransformNode = 0x65246462, kShapeRefNode = 0x65245517;
+    constexpr std::uint32_t kResourceNode = 0xE519C933, kTransformNode = 0x65246462, kShapeRefNode = 0x65245517, kLightRefNode = 0x253D2018;
     BinaryReader header(data);
     ResourceNode rn;
     rn.container = readContainer(header);
@@ -222,6 +222,12 @@ ResourceNode parseResourceNode(std::span<const std::uint8_t> data) {
                     r.u8();
                     node.shapeLinks.push_back(r.u32());
                 }
+            } else if (type == kLightRefNode) {
+                node.kind = SceneNode::Kind::LightRef;
+                blockHeader(r, "cLightRefNode");
+                blockHeader(r, "cRenderableNode");
+                blockHeader(r, "cBoundedNode");
+                transformNode(r, node);
             } else {
                 r.bytes(5);
             }
@@ -542,6 +548,46 @@ LevelInfo parseLevelInfo(std::span<const std::uint8_t> data) {
     r.u32();  // z level
     const auto bytes = r.bytes(byteCount(r));
     l.data.assign(bytes.begin(), bytes.end());
+    return l;
+}
+
+LightResource parseLight(std::span<const std::uint8_t> data) {
+    BinaryReader r(data);
+    readContainer(r);
+    LightResource l;
+    l.kind = string(r);
+    r.u32();
+    r.u32();
+    if (l.kind != "cPointLight" && l.kind != "cSpotLight") {
+        fail("light kind " + l.kind + " is not read");
+    }
+    blockHeader(r, "cStandardLightBase");
+    sgResource(r);
+    blockHeader(r, "cLightT");
+    sgResource(r);
+    blockHeader(r, "cReferentNode");
+    // The object graph node holds the light's name.
+    const BlockHeader graph = blockHeader(r, "cObjectGraphNode");
+    const std::size_t extensions = count(r, 6);
+    for (std::size_t i = 0; i < extensions; ++i) {
+        r.u8();
+        r.u8();
+        r.u32();
+    }
+    r.u8();  // a byte lights have here before the name (0 in the game's files)
+    if (graph.version >= 4) {
+        l.name = string(r);
+    }
+    auto f = [&] { return std::bit_cast<float>(r.u32()); };
+    l.intensity = f();
+    l.specular = f();
+    l.color = {f(), f(), f()};
+    l.falloffRate = f();
+    if (l.kind == "cSpotLight") {
+        l.coneAngle = f();
+        l.conePenumbra = f();
+    }
+    l.range = f();
     return l;
 }
 

@@ -22,6 +22,9 @@ enum class WantOperator : std::uint8_t {
     GreaterThanOrEquals = 5,
 };
 
+// How big a want is: Power wants and fears show a burst behind their icon.
+enum class WantLevel : std::uint8_t { Transitory = 0, Memorable = 1, Power = 2 };
+
 struct WantDefinition {
     std::uint32_t guid = 0;
     std::string name;
@@ -30,6 +33,10 @@ struct WantDefinition {
     std::int32_t score = 0;  // aspiration points
     // Tree that lists the Sims the want is checked for; empty when it is just the Sim's own.
     std::string simArrayTree;
+    std::int32_t influence = 0;
+    WantLevel level = WantLevel::Transitory;
+    // Its pictures in the UI images (group 0x499DB772): the icon and a small badge; 0 for none.
+    std::uint32_t primaryIcon = 0, secondaryIcon = 0;
 };
 
 struct WantDefinitions {

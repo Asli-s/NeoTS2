@@ -95,8 +95,8 @@ struct LotView {
     }
 };
 
-// Adds a scene's images, materials, meshes, instances and walls to another, its instances moved by
-// `place`.
+// Adds a scene's images, materials, meshes, instances, walls, light maps and object lighting to
+// another, its instances moved by `place`.
 inline void appendScene(ts2::scene::Scene& out, const ts2::scene::Scene& add, const ts2::scene::Transform& place) {
     using namespace ts2::scene;
     const int images = static_cast<int>(out.images.size()), materials = static_cast<int>(out.materials.size());
@@ -121,6 +121,9 @@ inline void appendScene(ts2::scene::Scene& out, const ts2::scene::Scene& add, co
         if (i.mesh >= 0) {
             i.mesh += meshes;
         }
+        if (i.lightMap >= 0) {
+            i.lightMap += images;
+        }
         i.transform = place * i.transform;
         for (auto& w : i.walls) {
             w += walls;
@@ -136,6 +139,30 @@ inline void appendScene(ts2::scene::Scene& out, const ts2::scene::Scene& add, co
             h.instance += instances;
         }
         out.actors.push_back(std::move(a));
+    }
+    if (add.lightMaps && !out.lightMaps) {
+        auto& maps = out.lightMaps.emplace(*add.lightMaps);
+        for (auto& f : maps.floors) {
+            if (f >= 0) {
+                f += images;
+            }
+        }
+        if (maps.walls >= 0) {
+            maps.walls += images;
+        }
+    }
+    // The lights turn with the scene, as its objects' normals do.
+    if (add.objectLighting && !out.objectLighting) {
+        auto& lighting = out.objectLighting.emplace(*add.objectLighting);
+        for (auto& l : lighting.lights) {
+            place.apply(l.direction.data(), false);
+            const float len = std::sqrt(l.direction[0] * l.direction[0] + l.direction[1] * l.direction[1] + l.direction[2] * l.direction[2]);
+            if (len > 0) {
+                for (auto& c : l.direction) {
+                    c /= len;
+                }
+            }
+        }
     }
     for (WallInfo w : add.walls) {
         float a[3] = {w.x0, w.y0, 0}, b[3] = {w.x1, w.y1, 0};

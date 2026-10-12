@@ -46,7 +46,7 @@ NeoTS2 is in early development. It isn't playable yet, but you can already look 
 | --- | --- |
 | ![The main menu](assets/screenshots/main-menu.jpg) | ![Pleasantview with its panel](assets/screenshots/neighborhood.jpg) |
 | **Lot** | **Sims** |
-| ![The Dreamers' house in its neighborhood](assets/screenshots/lot.jpg) | ![Darren and Dirk Dreamer at home, walls cut away](assets/screenshots/sims.jpg) |
+| ![](assets/screenshots/lot.jpg) | ![](assets/screenshots/sims.jpg) |
 
 *Screenshots of NeoTS2 running on the game's own files.*
 
@@ -100,6 +100,19 @@ neots2.exe "C:\Program Files (x86)\Origin Games\The Sims 2 Ultimate Collection" 
 Ultimate Collection. If the game is installed elsewhere, use the folder that holds its "Double
 Deluxe", "Fun with Pets" and other pack folders.
 
+## Crash reports
+
+If NeoTS2 crashes, it saves a report in the `logs` folder next to it (or in
+`%LOCALAPPDATA%\NeoTS2\logs`). Nothing is sent unless you click **Send a report**.
+
+A report has two files: `crash.txt` (what went wrong) and `neots2.dmp` (a snapshot of the program
+when it crashed). In `crash.txt` your user folder is shown as `%USERPROFILE%`; the dump may still
+contain folder names from your computer.
+
+**Send a report** uploads only those two files to [BugSplat](https://www.bugsplat.com), which keeps
+them for a month. We use them only to fix crashes. You can also open a GitHub issue and attach them
+yourself (GitHub issues are public).
+
 ## How NeoTS2 is made
 
 Much of the code is written with AI (Claude). I direct the work and check each part against
@@ -112,6 +125,8 @@ Thanks to The Sims 2 community: [SimPE](https://sourceforge.net/projects/simpe/)
 reference (none of its code is used). The AI has likely picked up general knowledge, like file
 formats and where things are stored, from public community work such as
 [OpenTS2](https://github.com/LazyDuchess/OpenTS2). None of OpenTS2's code is used.
+
+The app icon is hand-drawn by me.
 
 ## Contributing
 

@@ -1,5 +1,9 @@
 #include "lot_ui.hpp"
 
+#include "content/ui_meters.hpp"
+
+#include <algorithm>
+#include <climits>
 #include <string>
 
 namespace app {
@@ -15,6 +19,10 @@ constexpr std::uint32_t kClock = 0x37D82A93, kPause = 0x27D7258F, kNormal = 0x57
                         kUltra = 0x47E01CC5;
 constexpr std::uint32_t kNoPetsBackground = 0xA94E97E4, kPetsBackground = 0xA94E97E3;
 constexpr std::uint32_t kPortraitHolder = 0x4BDEFFA4, kVacationDays = 0x1320BD2F;
+// In the portrait holder: the selected Sim's whole portrait, its shadow, and a small picture whose use isn't known.
+// A saved want's argument kind for a Sim: its argument is the Sim's neighbor id.
+constexpr std::uint8_t kSimArgument = 1;
+constexpr std::uint32_t kPanelPortrait = 0x00000001, kPanelShadow = 0x00000002, kPanelBadge = 0x4BDEFFAA;
 // The options menu's windows.
 constexpr std::uint32_t kNeighborhood = 0x0000A210, kExitTutorial = 0x0000A211;
 
@@ -52,6 +60,7 @@ void LotUi::open() {
             screen_.setVisible(part, part == clock || part == pause || part == speeds);
         }
         panel_.attach(screen_, live_);
+        skewer_.attach(screen_, puck_);
         screen_.setVisible(screen_.find(live_, kPortraitHolder), false);
         screen_.setVisible(screen_.find(live_, kVacationDays), false);
         // A household without pets shows the plain background.
@@ -66,6 +75,8 @@ void LotUi::open() {
             screen_.setVisible(panel, true);
         }
     }
+    // The last lot's household goes; this one's comes with its simulation.
+    skewer_.setHousehold({});
     showOptions(false);
 }
 
@@ -144,6 +155,10 @@ LotUi::Action LotUi::clicked(int window) {
     if (panel_.clicked(window)) {
         return Action::None;
     }
+    if (const auto sim = skewer_.clicked(window)) {
+        clickedSim_ = *sim;
+        return Action::SelectSim;
+    }
     if (id == kNeighborhood && optionsShown()) {
         return Action::Neighborhood;
     }
@@ -167,6 +182,88 @@ void LotUi::show(const std::string& clock, ts2::sim::Speed speed, bool paused, s
     screen_.setChecked(screen_.find(live_, kNormal), !paused && speed == Speed::Normal);
     screen_.setChecked(screen_.find(live_, kHigh), !paused && speed == Speed::High);
     screen_.setChecked(screen_.find(live_, kUltra), !paused && speed == Speed::Ultra);
+}
+
+const ts2::tga::Pixels* LotUi::targetPicture(LotLife& life, std::int16_t neighbor) {
+    if (!targets_.known(neighbor)) {
+        // A household Sim on the lot has its fresh portrait; anyone else its character file's,
+        // read in the background (asked for again next frame while too many are loading).
+        const auto drawn = std::find_if(portraits_.begin(), portraits_.end(), [&](const auto& p) { return life.neighborId(p.first) == neighbor; });
+        if (drawn != portraits_.end()) {
+            targets_.make(neighbor, drawn->second);
+        } else if (const auto file = life.neighborPortrait(neighbor)) {
+            targets_.load(neighbor, file->file, file->instance);
+        } else {
+            targets_.make(neighbor, {});
+        }
+    }
+    return targets_.find(neighbor);
+}
+
+// What the wants panel shows for each want: its definition's pictures and kind, and the portrait
+// of the Sim it is aimed at.
+std::vector<WantsPanel::Want> LotUi::panelWants(LotLife& life, const std::vector<ts2::swaf::Want>& saved) {
+    using ts2::content::WantArgument;
+    std::vector<WantsPanel::Want> out;
+    for (const auto& w : saved) {
+        WantsPanel::Want p;
+        p.guid = w.guid;
+        if (const auto* d = life.wantDefinition(w.guid)) {
+            p.primaryIcon = d->primaryIcon;
+            p.secondaryIcon = d->secondaryIcon;
+            p.hasTarget = d->argument == WantArgument::Sim || d->argument == WantArgument::Object;
+            p.power = d->level == ts2::content::WantLevel::Power;
+            p.influence = d->influence != 0;
+            if (d->argument == WantArgument::Sim && w.type == kSimArgument && w.argument > 0 && w.argument <= INT16_MAX) {
+                p.targetPicture = targetPicture(life, static_cast<std::int16_t>(w.argument));
+            }
+        }
+        out.push_back(p);
+    }
+    return out;
+}
+
+void LotUi::showHousehold(std::vector<Skewer::Member> members) {
+    portraits_.clear();
+    targets_.clear();
+    panel_.refreshWants();  // their pictures may be of the last household
+    portraitShown_ = -1;
+    for (auto& m : members) {
+        // A broken character file could hold a huge picture; portraits are 256 pixels.
+        if (m.portrait && (m.portrait->width > ts2::content::kMaxPortraitSide || m.portrait->height > ts2::content::kMaxPortraitSide)) {
+            m.portrait.reset();
+        }
+        if (m.portrait) {
+            portraits_[m.sim] = *m.portrait;
+        }
+    }
+    skewer_.setHousehold(std::move(members));
+}
+
+void LotUi::showLife(LotLife& life) {
+    show(life.clockText(), life.speed(), life.paused(), life.funds());
+    const std::int16_t sim = life.selected();
+    skewer_.select(sim);
+    targets_.collect();
+    // The live panel shows the selected Sim's whole portrait; its shadow waits until it is traced.
+    if (sim != portraitShown_ && live_ >= 0) {
+        portraitShown_ = sim;
+        const int holder = screen_.find(live_, kPortraitHolder);
+        const auto it = portraits_.find(sim);
+        screen_.setVisible(holder, it != portraits_.end());
+        if (it != portraits_.end()) {
+            screen_.setImage(screen_.find(holder, kPanelPortrait), it->second);
+            screen_.setVisible(screen_.find(holder, kPanelShadow), false);
+            screen_.setVisible(screen_.find(holder, kPanelBadge), false);
+        }
+    }
+    panel_.setAspiration(life.aspiration());
+    panel_.setNeeds(life.lifeStage(sim), life.motives(sim));
+    panel_.setMood(life.mood(sim), life.aspirationScore(sim));
+    panel_.setWants(panelWants(life, life.wants(sim)), panelWants(life, life.fears(sim)));
+    for (const std::int16_t member : life.household()) {
+        skewer_.setMood(member, life.mood(member));
+    }
 }
 
 } // namespace app

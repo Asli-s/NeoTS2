@@ -17,6 +17,7 @@ struct WallStyle {
     bool rendered = true;   // notRendered: never drawn
     bool belowFloor = false;  // verticalSpan floorToFloorBasedCeiling: up to the floor's thickness above
     bool cutAway = true;      // mayCutAway: cut down by the cutaway and walls-down views
+    bool blocksLight = true;  // blocksLight: stops lamp and window light spreading past it
     std::string defaultPattern;
 };
 

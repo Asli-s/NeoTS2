@@ -1,5 +1,7 @@
 #include "formats/image.hpp"
 
+#include "formats/jpeg.hpp"
+
 #include <algorithm>
 #include <limits>
 #include <vector>
@@ -54,25 +56,35 @@ std::vector<std::uint8_t> jpegAlpha(std::span<const std::uint8_t> data, std::siz
 
 } // namespace
 
-std::optional<tga::Pixels> decode(std::span<const std::uint8_t> data) {
+std::optional<tga::Pixels> decode(std::span<const std::uint8_t> data, std::uint32_t maxSide) {
     const bool other = data.size() >= 4 && ((data[0] == 0x89 && data[1] == 'P') || (data[0] == 0xFF && data[1] == 0xD8) ||
                                             (data[0] == 'B' && data[1] == 'M'));
     if (!other) {
-        return tga::decode(data);
+        return tga::decode(data, maxSide);
     }
     if (data.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
         return std::nullopt;
     }
-    int w = 0, h = 0, n = 0;
-    stbi_uc* pixels = stbi_load_from_memory(data.data(), static_cast<int>(data.size()), &w, &h, &n, 4);
-    if (pixels == nullptr) {
-        return std::nullopt;
-    }
+    // JPEGs decode as the game's JPEG library decodes them when it can read them; stb otherwise.
     tga::Pixels out;
-    out.width = static_cast<std::uint32_t>(w);
-    out.height = static_cast<std::uint32_t>(h);
-    out.rgba.assign(pixels, pixels + static_cast<std::size_t>(w) * h * 4);
-    stbi_image_free(pixels);
+    if (auto exact = data[0] == 0xFF ? jpeg::decode(data, maxSide) : std::nullopt) {
+        out = std::move(*exact);
+    } else {
+        int w = 0, h = 0, n = 0;
+        if (!stbi_info_from_memory(data.data(), static_cast<int>(data.size()), &w, &h, &n) || static_cast<std::uint32_t>(w) > maxSide ||
+            static_cast<std::uint32_t>(h) > maxSide) {
+            return std::nullopt;
+        }
+        stbi_uc* pixels = stbi_load_from_memory(data.data(), static_cast<int>(data.size()), &w, &h, &n, 4);
+        if (pixels == nullptr) {
+            return std::nullopt;
+        }
+        out.width = static_cast<std::uint32_t>(w);
+        out.height = static_cast<std::uint32_t>(h);
+        out.rgba.assign(pixels, pixels + static_cast<std::size_t>(w) * h * 4);
+        stbi_image_free(pixels);
+    }
+    const int w = static_cast<int>(out.width), h = static_cast<int>(out.height);
     if (data[0] == 0xFF) {
         const auto alpha = jpegAlpha(data, static_cast<std::size_t>(w) * h);
         for (std::size_t k = 0; k < alpha.size(); ++k) {

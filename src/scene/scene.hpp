@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <map>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -49,6 +50,8 @@ struct Material {
     bool doubleSided = false;
     bool unlit = false;  // shown as its color and texture, without light
     bool clamp = false;  // its texture is clamped at the edges instead of repeating
+    // A floor's texture spans this many tiles along its u and v (floorMaterialScaleU/V).
+    std::array<float, 2> floorTiles{1, 1};
 };
 
 // Triangles sharing one material: per vertex a position, a normal, texture coordinates and,
@@ -58,6 +61,8 @@ struct Material {
 struct Primitive {
     int material = -1;  // index into Scene::materials, -1 for none
     std::vector<float> positions, normals, uvs, alphas;
+    // Light-map coordinates (two per vertex) of surfaces lit by their instance's light map; empty for none.
+    std::vector<float> lightUvs;
     std::vector<std::uint32_t> indices;
     std::vector<std::uint8_t> joints;
     std::vector<float> weights;
@@ -82,7 +87,8 @@ struct Mesh {
 };
 
 // What a placed mesh is, for choosing what a view shows.
-enum class Part : std::uint8_t { Other, Object, Floor, Roof, Wall, WallHub };
+// Skirt: the ground around a lot, lit by the lot's lights as the game's fixed-function skirt pass.
+enum class Part : std::uint8_t { Other, Object, Floor, Roof, Wall, WallHub, Skirt };
 
 // A mesh placed in the world.
 struct Instance {
@@ -95,6 +101,16 @@ struct Instance {
     // Scene::walls) are a wall's own, the walls meeting at a hub, or those a door or window sits in.
     bool cut = false;
     std::vector<int> walls;
+    // Lot floors and walls: the light map (index into Scene::images) their primitives' lightUvs read.
+    // Drawn as the game draws them: the texture (times the material's colour unless `lightMapOnly`)
+    // times the light map times `lightMapGain`, and nothing else lighting them.
+    int lightMap = -1;
+    float lightMapGain = 2;
+    bool lightMapOnly = false;
+    // The lot's terrain: its texture times the light map times `lightMapGain`, that factor at most 1.
+    bool lightMapMultiply = false;
+    // A lot skirt's material ambient: 4 x its diffuse coefficient (the ground's 0.9: 3.6; roads 4).
+    float skirtAmbient = 3.6f;
 };
 
 // A wall as views need it: where it runs, whether there is a room (not outdoors) on each side
@@ -181,6 +197,7 @@ struct RigAnimation;
 // with it and the instances it holds at its joints.
 struct Actor {
     std::uint32_t object = 0;  // the lot object it shows (its id); 0 for none
+    std::uint32_t age = 0, gender = 0;  // as its look has them (see SimLook)
     std::shared_ptr<const Rig> rig;
     std::shared_ptr<const RigAnimation> animation;
     double start = 0;  // seconds: when the animation started
@@ -199,8 +216,37 @@ struct Actor {
     Transform place;  // where the rig stands in the world
 };
 
+// How a lot's objects are lit, as the game's shaders get it: an ambient colour plus directional
+// lights, each adding max(0, normal . direction) times its colour; the sum times the surface.
+struct ObjectLighting {
+    std::array<float, 3> ambient{0, 0, 0};
+    struct Light {
+        std::array<float, 3> direction{0, 0, 1};  // toward the light, normalized
+        std::array<float, 3> color{0, 0, 0};
+    };
+    std::vector<Light> lights;  // the renderer uses the first eight
+    // Above 0, lit as the game lights family thumbnails: per vertex, the sum times the material's
+    // diffuse times this, clamped to 1, then doubled and times the texture.
+    float thumbnailScale = 0;
+};
+
+// Where a lot's light maps are, for filling them once its light is worked out: one image per
+// level for the floors (8 x 8 texels per tile, rows along +y) and one for the wall faces, each
+// face (a tile's wall seen from one side, walked so that it looks to its right) with its own rect.
+struct LightMaps {
+    std::vector<int> floors;  // image per level, from the lowest
+    int walls = -1;           // image
+    struct Rect {
+        int x0 = 0, y0 = 0, x1 = 0, y1 = 0;  // texels, rows from the top
+    };
+    std::map<std::array<int, 5>, Rect> wallRects;  // by level, x0, y0, x1, y1
+};
+
 // Everything needed to draw a scene, independent of any graphics API.
 struct Scene {
+    // How objects are lit; unset, they are lit like everything else.
+    std::optional<ObjectLighting> objectLighting;
+    std::optional<LightMaps> lightMaps;
     std::vector<Image> images;
     std::vector<Material> materials;
     std::vector<Mesh> meshes;
