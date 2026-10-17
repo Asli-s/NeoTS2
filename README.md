@@ -42,13 +42,13 @@ NeoTS2 is in early development. It isn't playable yet, but you can already look 
 - **Simulation:** object behavior (SimAntics, and the Lua scripts the expansions use) running
   against a saved lot, with a growing set of the game's primitives.
 
+*Screenshots from an unreleased development version of NeoTS2.*
+
 | Main menu | Neighborhood |
 | --- | --- |
-| ![The main menu](assets/screenshots/main-menu.jpg) | ![Pleasantview with its panel](assets/screenshots/neighborhood.jpg) |
+| ![The main menu](assets/screenshots/main-menu.jpg) | ![Pleasantview with its panel](assets/screenshots/neighborhood.webp) |
 | **Lot** | **Sims** |
-| ![](assets/screenshots/lot.jpg) | ![](assets/screenshots/sims.jpg) |
-
-*Screenshots of NeoTS2 running on the game's own files.*
+| ![A lot with its Sims and live panel](assets/screenshots/lot.webp) | ![Two Sims talking on a deck](assets/screenshots/sims.webp) |
 
 ## Tools and libraries
 
