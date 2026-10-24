@@ -54,12 +54,7 @@ const array3d::Array3D* gridOf(const content::Lot& lot, std::uint32_t instance, 
 }
 
 std::int32_t i32(const array3d::Array3D& g, std::int32_t level, std::int32_t x, std::int32_t y, std::size_t index) {
-    const auto bytes = g.at(level, x, y);
-    std::int32_t v = 0;
-    if (bytes.size() >= (index + 1) * 4) {
-        std::memcpy(&v, bytes.data() + index * 4, 4);
-    }
-    return v;
+    return static_cast<std::int32_t>(g.u32(level, x, y, index));
 }
 
 class Builder {
