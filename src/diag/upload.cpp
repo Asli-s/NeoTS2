@@ -137,7 +137,7 @@ std::string jsonString(std::string_view json, std::string_view key) {
                     code = code * 16 + static_cast<unsigned>(h >= '0' && h <= '9' ? h - '0' : h >= 'a' && h <= 'f' ? h - 'a' + 10 : h >= 'A' && h <= 'F' ? h - 'A' + 10 : 0);
                 }
                 i += 4;
-                // Links only hold plain characters; anything else is left out.
+                // Links only hold plain characters. Anything else is left out.
                 if (code < 0x80) {
                     value += static_cast<char>(code);
                 }

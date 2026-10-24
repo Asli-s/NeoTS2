@@ -23,7 +23,7 @@ float brightest(const Color& c) {
     return std::max({std::fabs(c[0]), std::fabs(c[1]), std::fabs(c[2])});
 }
 
-// The strongest of the first `count` directions; the first one wins a tie.
+// The strongest of the first `count` directions. The first one wins a tie.
 std::size_t strongest(const std::array<Color, 6>& d, std::size_t count) {
     std::size_t best = 0;
     for (std::size_t i = 1; i < count; ++i) {
@@ -118,7 +118,7 @@ std::optional<Lights> lightsFor(const std::array<Color, 6>& samples, const Setti
     }
     const int count = s.type - 2;
 
-    // Four sides, each with some of the floor's light; then up and down, from all four sides
+    // Four sides, each with some of the floor's light. Then up and down, from all four sides
     // bounced plus their own sample.
     std::array<Color, 6> d{};
     for (std::size_t i = 0; i < 4; ++i) {

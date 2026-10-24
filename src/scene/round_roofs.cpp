@@ -1,13 +1,15 @@
 #include "scene/lot_parts.hpp"
 
+#include "diag/log.hpp"
+
 #include <algorithm>
 #include <cmath>
 
 // Round roofs as the game builds them: cones (type 7), domes (8) and octagonal spires (9) are rings
 // of points rising from the eaves, each ring one course of shingles. The first two rings hang under
-// the eave line and make the edge board's two bands (trim, then edges); the rings above are the
+// the eave line and make the edge board's two bands (trim, then edges). The rings above are the
 // shingled top, and the underside is a fan from the top down to the lowest ring. Texture coordinates
-// are in 511ths of the roof texture: each course is a third of a texture cell high, the three
+// are in 511ths of the roof texture. Each course is a third of a texture cell high, the three
 // courses taking turns, and runs one cell per tile around the roof.
 
 namespace ts2::scene {
@@ -22,7 +24,7 @@ float courseTop(int ring) {
     return (510 - 34 * (ring < 2 ? 0 : ring % 3)) / 511.f;
 }
 
-// The vertices and faces one roof is made of; faces name vertex, normal and texture entries.
+// The vertices and faces one roof is made of. Faces name vertex, normal and texture entries.
 struct RingMesh {
     std::vector<std::array<float, 3>> positions, normals;
     std::vector<std::array<float, 2>> uvs;
@@ -44,7 +46,7 @@ struct RingMesh {
     }
 };
 
-// A ring's height above the eave line: 0.2 per ring from the third, never above the top; the first
+// A ring's height above the eave line: 0.2 per ring from the third, never above the top. The first
 // two hang 0.25 and 0.0875 below it.
 struct Rise {
     float height;
@@ -109,7 +111,7 @@ void addRingRoof(Surfaces& surfaces, const RoofLook& look, int rings, int seg, f
 }
 
 // An octagonal spire: an octagon three tiles across (for a one-tile roof) grown by half a tile,
-// shrinking ring by ring to a point, its sides cut at a tile from each corner; a narrow strip of the
+// shrinking ring by ring to a point, its sides cut at a tile from each corner. A narrow strip of the
 // cap texture runs up each side of every corner.
 void addSpire(Surfaces& surfaces, const RoofLook& look, float width, float height, float slope, float cx, float cy, float z0) {
     const float p = width - 1;
@@ -243,6 +245,13 @@ bool addRoundRoof(Surfaces& surfaces, const roofs::Roof& roof, float eave, const
     const float radius = std::hypot(hx - lx, hy - ly) * 0.5f;
     const float slope = roof.slope > 0 ? roof.slope : 0.5f;
     const float around = std::ceil(2 * kPi * radius);
+    // A broken file's roof could ask for millions of rings. Such a roof is left out.
+    constexpr float kMaxVertices = 1 << 20;
+    const float rings = 5 * std::max(radius, radius * slope) + 3;
+    if (!(rings * std::max(around, 48.0f) <= kMaxVertices && radius * slope * slope <= kMaxVertices)) {
+        diag::warnOnce("round roofs: a round roof needing more than 1048576 vertices is left out");
+        return true;
+    }
     const int seg = around < 49 ? 48 : static_cast<int>(around);
     if (roof.type == 9) {
         addSpire(surfaces, look, hx - lx, radius * slope, slope, cx, cy, z0);

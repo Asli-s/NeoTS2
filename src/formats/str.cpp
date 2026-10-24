@@ -15,19 +15,6 @@ constexpr std::size_t kNameSize = 64;
     throw std::runtime_error("STR#: " + message);
 }
 
-std::string readCString(BinaryReader& r) {
-    std::string out;
-    for (std::uint8_t c = r.u8(); c != 0; c = r.u8()) {
-        out.push_back(static_cast<char>(c));
-    }
-    return out;
-}
-
-std::string readPascalString(BinaryReader& r) {
-    const auto bytes = r.bytes(r.u8());
-    return std::string(bytes.begin(), bytes.end());
-}
-
 } // namespace
 
 std::vector<const Entry*> StringTable::forLanguage(std::uint8_t language) const {
@@ -75,19 +62,19 @@ StringTable parse(std::span<const std::uint8_t> data) {
         Entry e;
         switch (t.format) {
         case 0x0000:
-            e.value = readPascalString(r);
+            e.value = r.text(r.u8());
             break;
         case 0xFFFF:
-            e.value = readCString(r);
+            e.value = r.cString();
             break;
         case 0xFFFE:
-            e.value = readCString(r);
-            e.description = readCString(r);
+            e.value = r.cString();
+            e.description = r.cString();
             break;
         default:
             e.language = r.u8();
-            e.value = readCString(r);
-            e.description = readCString(r);
+            e.value = r.cString();
+            e.description = r.cString();
             break;
         }
         t.entries.push_back(std::move(e));

@@ -2,6 +2,7 @@
 
 #include "formats/datatables.hpp"
 
+#include <cmath>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -10,7 +11,7 @@
 namespace ts2::sim {
 
 // A value kept in a script data table: a number (single-precision, whole or unsigned whole), a
-// boolean, a string, or a nested table. Scripts only make the first two kinds of number; saved
+// boolean, a string, or a nested table. Scripts only make the first two kinds of number. Saved
 // tables may hold the third.
 struct DataValue {
     enum class Kind : std::uint8_t { Float, Int, Unsigned, Bool, String, Table };
@@ -35,13 +36,21 @@ struct DataValue {
         return d;
     }
 
+    // Orders floats with every NaN after all numbers, so a broken saved key keeps the map valid.
+    static bool floatLess(float a, float b) {
+        if (std::isnan(a)) {
+            return false;
+        }
+        return std::isnan(b) || a < b;
+    }
+
     // Orders keys: by kind, then by value (nested tables by identity).
     friend bool operator<(const DataValue& a, const DataValue& b) {
         if (a.kind != b.kind) {
             return a.kind < b.kind;
         }
         switch (a.kind) {
-        case Kind::Float: return a.f < b.f;
+        case Kind::Float: return floatLess(a.f, b.f);
         case Kind::Int: return a.i < b.i;
         case Kind::Unsigned: return a.u < b.u;
         case Kind::Bool: return a.b < b.b;

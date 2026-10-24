@@ -15,18 +15,22 @@ struct LotDescription {
     std::uint32_t width = 0, depth = 0;  // tiles
     std::uint8_t type = 0;
     std::uint8_t roadSides = 0;  // a bit per side with a road, 1 << ownFacing among them
-    std::uint8_t ownFacing = 0;  // the quarter turn the lot was built facing
+    std::uint8_t ownFacing = 0;  // the quarter turn the lot was built facing (on a beach lot, its beach's side)
+    // Flags (from version 5): 0x80 a beach lot.
+    std::uint32_t flags = 0;
     std::string name;
+    std::string description;  // the text its card shows (a community lot's)
     std::uint32_t x = 0, y = 0;  // the lot's corner, in neighborhood tiles
     float elevation = 0;
     std::uint32_t id = 0;
     std::uint8_t facing = 0;  // the quarter turn it is placed at in the neighborhood
     std::string texture;
+    std::int32_t owner = 0;  // from version 0x0E: the owning neighbor's id
     // How brightly each room's lights are set, in percent, for rooms the lot saved one for (from
     // version 0x12, the last block: a count, then room and percent pairs by ascending room).
     std::map<std::int16_t, std::int16_t> roomLightPercents;
 
-    // A room's light percent; 100 unless saved (room 0, the outdoors, is always 100).
+    // A room's light percent, 100 unless saved (room 0, the outdoors, is always 100).
     std::int16_t roomLightPercent(std::int16_t room) const;
 };
 

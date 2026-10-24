@@ -9,6 +9,7 @@
 #include <array>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -19,12 +20,15 @@ constexpr float kPi = 3.14159265358979f;
 constexpr float kLevelHeight = 3.0f;      // storey height, used where a lot has no height grid
 constexpr float kWallThickness = 0.15f;   // walls with thickness
 constexpr float kFloorThickness = 0.15f;  // the slab under floors above the ground
-constexpr float kCutWallHeight = 0.4f;    // walls cut down in views (estimated)
+// How high the walls-down view leaves cut walls (the game's, and cutaway is taken to cut them the same).
+constexpr float kCutWallHeight = 0.2f;
 
-// The lot's corner heights per level (grid 1): the terrain on level 0, each floor above.
+// The lot's corner heights per grid level (grid 1), from the lot's lowest level up.
 class Heights {
 public:
     explicit Heights(const content::Lot& lot);
+    // Keeping its own copy of the height grid, so it outlives the lot.
+    explicit Heights(std::shared_ptr<const array3d::Array3D> grid);
 
     // The height at the grid corner nearest (x, y).
     float corner(int level, float x, float y) const;
@@ -36,8 +40,13 @@ public:
 private:
     float at(int level, int x, int y, bool& found) const;
 
+    std::shared_ptr<const array3d::Array3D> kept_;
     const array3d::Array3D* grid_ = nullptr;
 };
+
+// Whether a level of the surface grid (content::kSurfaceGridInstance) is open at (x, y): the
+// quarter of the tile holding the point has no surface there.
+bool surfaceOpen(const array3d::Array3D& surface, int level, float x, float y);
 
 // A wall segment: its two ends and, at each, the heights of its bottom and top.
 struct WallQuad {
@@ -53,6 +62,8 @@ struct RoofGrid {
     Kind kind = Kind::gable;
     float minX = 0, minY = 0;  // the first grid point
     int nx = 0, ny = 0;        // grid points along x and y
+    float maxX() const;        // the last grid point
+    float maxY() const;
     float scale = 0.5f;        // rise per grid step (the saved slope)
     float eave = 0;            // the height of the eaves' storey
     int level = 0;             // the level the roof is saved on
@@ -65,24 +76,28 @@ struct RoofGrid {
     std::vector<float> steps;  // per point (row by row), in grid steps
     float peak = 0;
 
-    static std::optional<RoofGrid> of(const roofs::Roof& roof, float eave);
+    [[nodiscard]] static std::optional<RoofGrid> of(const roofs::Roof& roof, float eave);
     // Which way the triangles at a cell point (row + col even: split along (0,0)-(1,1)).
     int parity(int row, int col) const;
     // Facing bits, by a triangle's uphill direction: 1 -x, 2 +x, 4 -y, 8 +y. Another roof touching
     // this one at a ridge or hip point does not join a triangle facing one of the point's bits.
-    int ridgeMask(int row, int col) const;  // on the ridge (the highest points); 0 elsewhere
-    int hipMask(int row, int col) const;    // on a hip (a diagonal from a corner); 0 elsewhere
+    int ridgeMask(int row, int col) const;  // on the ridge (the highest points), 0 elsewhere
+    int hipMask(int row, int col) const;    // on a hip (a diagonal from a corner), 0 elsewhere
     // A grid point's height in a layer (0 the top, 1 between the edge board's bands, 2 the underside).
     float z(int row, int col, int layer) const;
     // The top's height anywhere over the grid.
     float surface(float x, float y) const;
     // The top's height at a grid point (none elsewhere or outside the grid).
-    std::optional<float> pointHeight(float x, float y) const;
+    [[nodiscard]] std::optional<float> pointHeight(float x, float y) const;
     // The top's height where it covers a roof on fromLevel (for a lower level, only within the walls).
-    std::optional<float> coveringHeight(float x, float y, int fromLevel) const;
+    [[nodiscard]] std::optional<float> coveringHeight(float x, float y, int fromLevel) const;
 };
 
-// A roof's shape: its height anywhere is the lowest of the planes rising from its sloped edges; its
+// Whether a saved roof's corners and slope are real numbers on a lot-sized area. A broken file's
+// roof is left out rather than built huge.
+bool sensibleRoof(const roofs::Roof& roof);
+
+// A roof's shape: its height anywhere is the lowest of the planes rising from its sloped edges. Its
 // gable ends are left open, to be closed by the walls under them.
 struct RoofShape {
     float eave = 0, slope = 1;
@@ -107,8 +122,8 @@ struct RoofShape {
 };
 
 
-// The topmost walls along a roof's gable end are raised to the roof's underside where that is above
-// their own top (other walls under a roof keep their own top).
+// An attic wall (the wall style the game adds under a roof's gable end) reaches from its floor to the
+// underside of the roofs it closes, above or below its own top. With none it keeps its own top.
 struct WallCeiling {
     std::vector<const RoofShape*> gables;
 
@@ -125,6 +140,10 @@ struct ThickWall {
     int level = 0;
     bool thick = true;  // wall styles without thickness (deck skirts) are a single plane
     bool cuttable = true;  // the wall style may be cut down in views (foundations and deck skirts not)
+    // The style lets light through (walls.txt blocksLight false, but not the pool's edge): the game
+    // draws it with its pattern's own material, lit as things outdoors, without a light map.
+    bool clear = false;
+    bool toRoof = false;   // an attic wall: up to the roof over it (see WallCeiling)
     bool roomLeft = false, roomRight = false;  // a room, not outdoors, on that side
     std::string left, right;
     std::string leftCovering, rightCovering;  // each side's covering, without door and window holes
@@ -160,11 +179,12 @@ std::vector<WallHub> joinWalls(std::vector<ThickWall>& walls);
 // A light-map rect a wall face reads, as texture coordinates: u0, v0 (its top) and u1, v1 (its bottom).
 using LightRect = std::array<float, 4>;
 
-// A wall's faces: each side's covering, its top and its ends; with `cutHeight`, cut down to that
+// A wall's faces: each side's covering, its top (in `topMaterial`, the texture tiled once a tile over the
+// ground plan, its ends too). With `cutHeight` they are cut down to that
 // height above its bottom, otherwise up to its ceiling. With `lightRects` (left, right side), the
 // sides also get light-map coordinates as the game lays them: along the face from its start to
 // its end (cut short at inside corners), from the bottom of the rect up a storey.
-void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w, int edge, float cutHeight = 0,
+void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w, int topMaterial, float cutHeight = 0,
                   const std::array<std::optional<LightRect>, 2>* lightRects = nullptr);
 
 // The materials a roof is drawn with.
@@ -173,15 +193,28 @@ struct RoofLook {
     int atlas = -1;  // the whole top texture (grid roofs pick their pieces from it)
 };
 
-// A grid roof's top, underside and edge board; `others` are the lot's other grid roofs, which cut
+// A grid roof's top, underside and edge board. `others` are the lot's other grid roofs, which cut
 // this one where they are above it and change the pieces where they meet it.
 void addRoofGrid(Surfaces& surfaces, const RoofGrid& roof, const std::vector<const RoofGrid*>& others, const RoofLook& look);
 
-// A cone, dome or octagonal spire (types 7 to 9) as the game builds it; false for other types. A
+// A cone, dome or octagonal spire (types 7 to 9) as the game builds it. False for other types. A
 // spire reaches a tile past its rectangle, within the lot (lotWidth x lotHeight tiles).
 bool addRoundRoof(Surfaces& surfaces, const roofs::Roof& roof, float eave, const RoofLook& look, float lotWidth, float lotHeight);
 
-// A roof over its rectangle, eaves at height `eave`; `slope` is rise over run.
+// The Seasons greenhouse roof: a glass gable built from model pieces, with no shingles.
+constexpr std::uint32_t kGreenhouseRoof = 15;
+
+// One piece of a greenhouse roof: its model, where it stands and its turn about the vertical.
+struct GreenhousePiece {
+    std::string model;
+    float x = 0, y = 0, z = 0, angle = 0;
+};
+
+// A greenhouse roof's pieces, eaves at height `eave`: one per tile, rising one unit per tile
+// to the ridge, and a stack at each gable end one tile past the rectangle.
+std::vector<GreenhousePiece> greenhousePieces(const roofs::Roof& roof, float eave);
+
+// A roof over its rectangle, eaves at height `eave`. `slope` is rise over run.
 RoofShape addRoof(Surfaces& surfaces, const roofs::Roof& roof, float eave, float slope, const RoofLook& look);
 
 // Where roof `a` runs into roof `b` (a dormer into the main roof): a strip of `material` along the

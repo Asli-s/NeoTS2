@@ -9,3 +9,9 @@ interpreter to run them exactly as the game does (for example the order `pairs` 
 - Unchanged copies of `include/`, the core in `src/`, and the auxiliary, base, math, string and
   table libraries from `src/lib/`. Left out: the I/O, dynamic-loading and debug libraries, the
   test build (`ltests.c`) and the standalone `lua` and `luac` programs.
+- Two changes, marked `NeoTS2`. In `src/lib/lstrlib.c`, pattern matching stops with "pattern too
+  complex" past 200 nested match calls or 10 million steps in one search, so a pattern can't
+  overflow the C stack or run without end where the instruction count can't stop it. In `src/ldo.c`: Lua is built as C++, and `luaD_throw` and
+  `luaD_rawrunprotected` throw and catch a C++ exception (`src/sim/lua_error.h`) instead of using
+  `longjmp`, as Lua 5.1 does when built as C++, so errors unwind the engine's C++ functions.
+  Scripts see the same errors.

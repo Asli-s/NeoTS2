@@ -39,7 +39,7 @@ std::optional<ts2::tga::Pixels> drawPortrait(const ts2::scene::Scene& lot, ts2::
     if (!image) {
         return std::nullopt;
     }
-    // Soft edges (blended hair) come out premultiplied; the UI draws straight alpha.
+    // Soft edges (blended hair) come out premultiplied, but the UI draws straight alpha.
     return ts2::content::unpremultiplied(ts2::tga::Pixels{image->width, image->height, std::move(image->rgba)});
 }
 

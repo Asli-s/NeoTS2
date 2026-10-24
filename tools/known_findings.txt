@@ -1,0 +1,72 @@
+# Code-analysis findings that were reviewed and are not bugs (see tools/check_findings.ps1).
+# One per line: file | warning code or check | message. Keep a reason above each group.
+
+# The crash handler crashes on purpose for its tests (--crash-test).
+app\crash_handler.cpp | C6011 | Dereferencing NULL pointer 'nowhere'.
+app\crash_handler.cpp | C6387 | '_Param_(1)' could be '0':  this does not adhere to the specification for the function '_get_errno'.
+
+# The release flag is a constant on purpose.
+app\diagnostics.cpp | C6326 | Potential comparison of a constant with another constant.
+
+# The pointer is used only after a value that exists only when it is set (settings needs state,
+# a lot number needs the world, an interaction table needs its object, a joint needs its lead).
+app\lot_light.cpp | C6011 | Dereferencing NULL pointer 'state'.
+src\sim\lua_objects.cpp | C6011 | Dereferencing NULL pointer 'c.world'.
+src\sim\lua_world.cpp | C6011 | Dereferencing NULL pointer 'c.world'.
+src\sim\route_goals.cpp | C6011 | Dereferencing NULL pointer 'lead'.
+src\sim\route_goals.cpp | C28182 | Dereferencing NULL pointer. 'held' contains the same NULL value as 'container' did. See line N for an earlier location where this can occur
+src\sim\vm_interactions.cpp | C6011 | Dereferencing NULL pointer 'object'.
+src\sim\vm_interactions.cpp | clang-analyzer-core.NullDereference | Access to field 'group' results in a dereference of a null pointer (loaded from variable 'object')
+
+# Large but bounded stack frames, far within the stack.
+app\menu.cpp | C6262 | Function uses 'N' bytes of stack.  Consider moving some data to heap.
+tests\vm_walking_tests.cpp | C6262 | Function uses 'N' bytes of stack.  Consider moving some data to heap.
+
+# The digest starts zeroed.
+app\report_upload.cpp | C28199 | Using possibly uninitialized memory '*<range>$L0':  The variable has had its address taken but no assignment to it has been discovered.
+
+# Indexes the loop or a mask keeps in range (the CRC table, a DXT alpha index, a field from a fixed table).
+src\diag\upload.cpp | C28020 | The expression '_Param_(1)<256' is not true at this call.
+src\formats\scenegraph.cpp | C28020 | The expression '_Param_(1)<8' is not true at this call.
+src\sim\find_best_object.cpp | C28020 | The expression '_Param_(1)<128' is not true at this call.
+
+# A saved byte read as signed on purpose.
+src\formats\neighborhood_id.cpp | bugprone-signed-char-misuse | 'signed char' to 'int' conversion; consider casting to 'unsigned char' first.
+
+# Whole-number results on purpose: a row index, and text centred on whole pixels.
+src\render\renderer_upload.cpp | bugprone-integer-division | result of integer division used in a floating point context; possible loss of precision
+src\ui\screen.cpp | bugprone-integer-division | result of integer division used in a floating point context; possible loss of precision
+
+# A Sleep's countdown in its condition, on purpose.
+src\sim\lot_simulation.cpp | bugprone-inc-dec-in-conditions | decrementing and referencing a variable in a complex condition can cause unintended side-effects due to C++'s order of evaluation, consider moving the modification outside of the condition to avoid misunderstandings
+
+# The analyzer loses track through map and set loops, lambdas and stored functions.
+src\scene\walls.cpp | clang-analyzer-core.CallAndMessage | 1st function call argument is an uninitialized value
+src\sim\lot_simulation.cpp | clang-analyzer-cplusplus.NewDeleteLeaks | Potential leak of memory pointed to by field '_Rep'
+src\sim\route_items.cpp | clang-analyzer-core.NullDereference | Dereference of undefined pointer value
+src\sim\world.cpp | clang-analyzer-core.NullDereference | Dereference of undefined pointer value
+tests\vm_animation_tests.cpp | clang-analyzer-core.NullDereference | Dereference of undefined pointer value
+tools\lotdump\main.cpp | clang-analyzer-core.NullDereference | Dereference of undefined pointer value
+
+# A starting value every branch replaces.
+src\sim\vm_placement.cpp | clang-analyzer-deadcode.DeadStores | Value stored to 'slot' during its initialization is never read
+
+# Found by newer clang-tidy versions than Visual Studio 2022's (19.1).
+# A log file, a timing table and a table of script classes: they fail to build only without memory
+# at start.
+src\diag\log.cpp | bugprone-throwing-static-initialization | initialization of 'out' with static storage duration may throw an exception that cannot be caught
+src\diag\timing.cpp | bugprone-throwing-static-initialization | initialization of 'totals' with static storage duration may throw an exception that cannot be caught
+src\sim\lua_runtime.cpp | bugprone-throwing-static-initialization | initialization of 'kClasses' with static storage duration may throw an exception that cannot be caught
+# A broken number reads as 0 (out of range: INT_MAX or INT_MIN), and the zoom is clamped where it is used.
+src\formats\camera_config.cpp | bugprone-unchecked-string-to-number-conversion | 'atoi' used to convert a string to an integer value, but function will not report conversion errors; consider using 'strtol' instead
+# Float loops with few steps: halving with a shift limit, half-tile grid lines of roofs and walls
+# kept within 256 tiles, points along a path up to its limit.
+src\scene\normal_map.cpp | bugprone-float-loop-counter | loop induction expression should not have floating-point type
+src\scene\roofs.cpp | bugprone-float-loop-counter | loop induction expression should not have floating-point type
+src\sim\path_passes.cpp | bugprone-float-loop-counter | loop induction expression should not have floating-point type
+tests\route_planning_tests.cpp | bugprone-float-loop-counter | loop induction expression should not have floating-point type
+# Spares::push takes only temporaries: a named vector doesn't compile, so nothing is moved by surprise.
+src\sim\vm.hpp | bugprone-move-forwarding-reference | forwarding reference passed to std::move(), which may unexpectedly cause lvalues to be moved; use std::forward() instead
+# Fixed seeds on purpose, so a simulation and a test run the same every time.
+src\sim\vm.hpp | bugprone-random-generator-seed | random number generator seeded with a constant value will generate a predictable sequence of values
+tests\route_planning_tests.cpp | bugprone-random-generator-seed | random number generator seeded with a constant value will generate a predictable sequence of values

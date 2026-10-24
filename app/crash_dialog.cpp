@@ -38,7 +38,7 @@ std::wstring wide(const std::string& s) {
 }
 
 
-// What a choice does; true when the message is done (the report went off to be sent).
+// What a choice does. True when the message is done (the report went off to be sent).
 bool act(int choice, const Message& m) {
     if (choice == kSend && canSend(m.folder) && startSending(m.folder)) {
         return true;  // a fresh copy of NeoTS2 sends it and says how it went
@@ -102,7 +102,7 @@ TASKDIALOGCONFIG dialog(const std::wstring& heading, const std::wstring& text) {
 
 void open(const std::wstring& what) {
     // Waits until the browser or Explorer has the request: these programs end right after.
-    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     // Lets the browser come to the front instead of opening behind our message.
     AllowSetForegroundWindow(ASFW_ANY);
     SHELLEXECUTEINFOW info{};
@@ -112,6 +112,9 @@ void open(const std::wstring& what) {
     info.lpFile = what.c_str();
     info.nShow = SW_SHOWNORMAL;
     ShellExecuteExW(&info);
+    if (SUCCEEDED(com)) {
+        CoUninitialize();
+    }
 }
 
 void show(const Message& m) {

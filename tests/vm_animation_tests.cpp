@@ -1,0 +1,422 @@
+// Animation primitives: Animate Sim, Animate Overlay, Animate Object, overlay events and Animate Stop.
+#include "test_support.hpp"
+
+#include "content/animation_lists.hpp"
+#include "sim/animation.hpp"
+#include "sim/ground_click.hpp"
+#include "sim/idle_spot.hpp"
+#include "sim/route_portals.hpp"
+#include "sim/walking.hpp"
+#include "sim/path_passes.hpp"
+#include "sim/route_world.hpp"
+#include "sim/turn.hpp"
+#include "sim/walk_path.hpp"
+#include "sim/walk_plan.hpp"
+#include <map>
+#include <random>
+
+namespace {
+
+// Social animations (list 0x83) are named for me and the Sim my interaction is with. A teen or elder
+// plays the adult's when there is none of its own (me first, then the partner, then both).
+void socialAnimationsAreNamedForBothSims() {
+    Instruction animate;
+    animate.opcode = 0x006A;
+    animate.trueTarget = T;
+    animate.falseTarget = E;
+    animate.operands[3] = 32;
+    animate.operands[6] = 0x83;
+    MemoryCodeSource code;
+    code.addStrings(kObjectGroup, 0x83, {"soc-admire"});
+    code.add(kObjectGroup, 0x1000, bhav({animate}));
+    ts2::sim::World world;
+    world.setAnimationLengths([](const std::string& name) -> std::optional<float> {
+        if (name == "a2t-soc-admire" || name == "a2a-soc-admire") return 1000.0f;
+        return std::nullopt;
+    });
+    auto person = [&](std::int16_t age) -> ts2::sim::SimObject& {
+        auto& p = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+        p.personData[0x3A] = age;
+        return p;
+    };
+    auto& adult = person(30);
+    auto& teen = person(17);
+    auto& elder = person(60);
+    const auto& chair = world.create(kObjectGroup, typed(kChairGuid));
+    Vm vm(code, {}, &world);
+    auto play = [&](ts2::sim::SimObject& sim, const ts2::sim::SimObject& with) {
+        sim.interactionPartner = with.id;
+        sim.animation.reset();
+        sim.thread = {};
+        const Outcome outcome = vm.run(sim, kObjectGroup, 0x1000).outcome;
+        return outcome == Outcome::Sleeping && sim.animation ? sim.animation->name : std::string("error");
+    };
+    CHECK(play(adult, teen) == "a2t-soc-admire");
+    CHECK(play(elder, teen) == "a2t-soc-admire");   // e2t- missing: as an adult
+    // Animate Sim plays on twice its priority's layer (low 0 .. highest 6, above that taken as highest).
+    CHECK(adult.animation && adult.animation->layer == 0);
+    for (const auto& [priority, layer] : {std::pair{2, 4}, std::pair{9, 6}}) {
+        code.add(kObjectGroup, 0x1001, bhav({[&] { auto in = animate; in.operands[12] = static_cast<std::uint8_t>(priority); return in; }()}));
+        adult.interactionPartner = teen.id;
+        adult.thread = {};
+        adult.animation.reset();
+        Vm fresh(code, {}, &world);
+        CHECK(fresh.run(adult, kObjectGroup, 0x1001).outcome == Outcome::Sleeping && adult.animation && adult.animation->layer == layer);
+    }
+    CHECK(play(teen, elder) == "a2a-soc-admire");   // t2e-, a2e-, t2a- missing: both as adults
+    CHECK(play(adult, chair) == "error");           // not a person
+    adult.interactionPartner = 0;
+    CHECK(vm.run(adult, kObjectGroup, 0x1000).outcome == Outcome::Error);
+    world.setAnimationLengths([](const std::string&) -> std::optional<float> { return 1000.0f; });
+    CHECK(play(elder, adult) == "e2a-soc-admire");  // an elder's own when the game has it
+}
+
+// Animate Sim: plays the named animation from the object's list (else the global one) and waits
+// until it has played by the world's clock, at its speed. Animate Object, Overlay and Stop go on at once.
+void animateSimWaitsForItsAnimation() {
+    auto animate = [](std::uint16_t entry, std::uint8_t list, std::uint8_t speed) {
+        Instruction in;
+        in.opcode = 0x006A;
+        in.trueTarget = T;
+        in.falseTarget = E;
+        in.operands[0] = static_cast<std::uint8_t>(entry);
+        in.operands[3] = speed;
+        in.operands[6] = list;
+        return in;
+    };
+    MemoryCodeSource code;
+    code.addStrings(kObjectGroup, 0x81, {"", "a2o-shower-getOut-E"});
+    code.addStrings(ts2::sim::kGlobalGroup, 0x81, {"a-noExpression", "a-blink", "a-idle-neutral-armsSide-wtC-breatheLoop"});
+    Instruction getOut = animate(1, 0x81, 32);
+    getOut.trueTarget = 1;
+    code.add(kObjectGroup, 0x1000, bhav({
+        getOut,
+        expr(owner::kTemp, 0, op::kAssign, owner::kLiteral, 1, T, E),
+    }));
+    code.add(kObjectGroup, 0x1001, bhav({animate(2, 0x81, 64)}));
+    Instruction overlay;
+    overlay.opcode = 0x006B;
+    overlay.trueTarget = T;
+    overlay.falseTarget = E;
+    overlay.operands[0] = 1;
+    overlay.operands[3] = 32;
+    overlay.operands[9] = 0x81;
+    code.add(kObjectGroup, 0x1002, bhav({overlay}));
+
+    ts2::sim::World world;
+    world.setAnimationLengths([](const std::string& name) -> std::optional<float> {
+        if (name == "a2o-shower-getOut-E") return 1966.0f;
+        if (name == "a-idle-neutral-armsSide-wtC-breatheLoop") return 3166.0f;
+        return std::nullopt;
+    });
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    Vm vm(code, {}, &world);
+
+    CHECK(vm.run(sim, kObjectGroup, 0x1000).outcome == Outcome::Sleeping);
+    CHECK(sim.animation && sim.animation->name == "a2o-shower-getOut-E");
+    world.advanceClock(1000);
+    CHECK(vm.resume(sim).outcome == Outcome::Sleeping && sim.thread.temps[0] == 0);
+    world.advanceClock(1000);
+    CHECK(vm.resume(sim).outcome == Outcome::True && sim.thread.temps[0] == 1 && !sim.animation);
+
+    // From the global list, at double speed: half as long.
+    CHECK(vm.run(sim, kObjectGroup, 0x1001).outcome == Outcome::Sleeping);
+    CHECK(sim.animation && sim.animation->name == "a-idle-neutral-armsSide-wtC-breatheLoop");
+    world.advanceClock(1600);
+    CHECK(vm.resume(sim).outcome == Outcome::True);
+
+    CHECK(vm.run(sim, kObjectGroup, 0x1002).outcome == Outcome::True);
+    CHECK(sim.overlays.size() == 1 && sim.overlays[0].name == "a2o-shower-getOut-E" && sim.overlays[0].lengthMs == 1966.0f);
+    // An entry without a kind is a normal animation, or a carry pose when its clip says so.
+    CHECK(sim.overlays[0].category == ts2::content::animation_category::kNoCategory);
+    world.setAnimationCarries([](const std::string& name) { return name == "a2o-shower-getOut-E"; });
+    CHECK(vm.run(sim, kObjectGroup, 0x1002).outcome == Outcome::True);
+    CHECK(sim.overlays.back().category == ts2::content::animation_category::kCarry);
+    world.setAnimationCarries([](const std::string&) { return false; });
+    CHECK(vm.run(sim, kObjectGroup, 0x1002).outcome == Outcome::True);
+    CHECK(sim.overlays.back().category == ts2::content::animation_category::kNormal);
+    sim.overlays.resize(1);
+    CHECK(sim.overlays[0].plays == 1 && sim.overlays[0].weight == 0.0f && sim.overlays[0].priority == 0);
+
+    // Played as many times as temp 1 says (-1: until stopped, so it never tells its events), at a
+    // weight in hundredths and a priority.
+    overlay.operands[2] = 0x20;
+    overlay.operands[10] = 50;
+    overlay.operands[11] = 9;
+    code.add(kObjectGroup, 0x1003, bhav({overlay}));
+    sim.thread.temps[1] = 2;
+    CHECK(vm.run(sim, kObjectGroup, 0x1003).outcome == Outcome::True);
+    CHECK(sim.overlays.back().plays == 2 && sim.overlays.back().lengthMs == 2 * 1966.0f && sim.overlays.back().weight == 0.5f &&
+          sim.overlays.back().priority == 4);
+    sim.thread.temps[1] = 0;
+    CHECK(vm.run(sim, kObjectGroup, 0x1003).outcome == Outcome::Error);
+    sim.thread.temps[1] = -1;
+    CHECK(vm.run(sim, kObjectGroup, 0x1003).outcome == Outcome::True && sim.overlays.back().plays == -1);
+    sim.overlays.erase(sim.overlays.begin(), sim.overlays.end() - 1);
+    sim.overlays.back().eventTree = 0x1000;
+    world.advanceClock(100000);
+    ts2::sim::tellOverlayEvents(world, vm, sim.id, [](const ts2::sim::RunResult&) {});
+    CHECK(sim.overlays.size() == 1 && !sim.overlays[0].blendingOut);
+}
+
+// Animate Overlay list 0x80 reads my age's list in the global group only, else the adult list when
+// my age's clip doesn't exist.
+void animateOverlaySpecialListUsesTheGlobalAgeLists() {
+    Instruction overlay;
+    overlay.opcode = 0x006B;
+    overlay.trueTarget = T;
+    overlay.falseTarget = E;
+    overlay.operands[3] = 1;
+    overlay.operands[9] = 0x80;
+    MemoryCodeSource code;
+    code.addStrings(ts2::sim::kGlobalGroup, 0x81, {"a-blink"});
+    code.addStrings(ts2::sim::kGlobalGroup, 0x8A, {"t-blink"});
+    code.addStrings(ts2::sim::kGlobalGroup, 0x82, {"c-blink"});
+    code.addStrings(kObjectGroup, 0x80, {"own-list"});
+    code.add(kObjectGroup, 0x1000, bhav({overlay}));
+    ts2::sim::World world;
+    world.setAnimationLengths([](const std::string& name) -> std::optional<float> {
+        if (name == "a-blink" || name == "t-blink") return 500.0f;
+        return std::nullopt;
+    });
+    Vm vm(code, {}, &world);
+    const auto plays = [&](std::int16_t age) {
+        auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+        sim.personData[0x3A] = age;
+        vm.run(sim, kObjectGroup, 0x1000);
+        return sim.overlays.empty() ? std::string() : sim.overlays.back().name;
+    };
+    CHECK(plays(16) == "t-blink");
+    CHECK(plays(5) == "a-blink");
+    CHECK(plays(30) == "a-blink");
+}
+
+// Animate Sim list 0x80 names the clip as Animate Overlay's: my age's list in the global group.
+void animateSimSpecialListUsesTheGlobalAgeLists() {
+    Instruction animate;
+    animate.opcode = 0x006A;
+    animate.trueTarget = T;
+    animate.falseTarget = E;
+    animate.operands[0] = 1;
+    animate.operands[3] = 32;
+    animate.operands[6] = 0x80;
+    MemoryCodeSource code;
+    code.addStrings(ts2::sim::kGlobalGroup, 0x81, {"a-noExpression", "a-sit-crossleg"});
+    code.addStrings(ts2::sim::kGlobalGroup, 0x82, {"a-noExpression", "c-sit-crossleg"});
+    code.addStrings(kObjectGroup, 0x80, {"", "own-list"});
+    code.add(kObjectGroup, 0x1000, bhav({animate}));
+    ts2::sim::World world;
+    world.setAnimationLengths([](const std::string&) -> std::optional<float> { return 500.0f; });
+    Vm vm(code, {}, &world);
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    sim.personData[0x3A] = 8;
+    vm.run(sim, kObjectGroup, 0x1000);
+    CHECK(sim.animation && sim.animation->name == "c-sit-crossleg");
+}
+
+// Limb IK: a leg's and an arm's ends land on targets that are only animation channels, and an arm's
+// hand takes the target's orientation.
+// An overlay tells its event tree, on the object and sharing its temps, when it starts blending out
+// (with the percent played) and when it is gone. Then it is dropped.
+void overlayEventsReachTheirTree() {
+    MemoryCodeSource code;
+    // temp 1 += event id, temp 2 += percent, and temp 0 counts the events.
+    code.add(kObjectGroup, 0x1001, bhav({
+        expr(owner::kTemp, 1, op::kAdd, owner::kParam, 0, 1, E),
+        expr(owner::kTemp, 2, op::kAdd, owner::kParam, 2, 2, E),
+        expr(owner::kTemp, 0, op::kAdd, owner::kLiteral, 1, T, E),
+    }, 5));
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    Vm vm(code, {}, &world);
+    ts2::sim::PlayingOverlay overlay;
+    overlay.name = "a-idle";
+    overlay.lengthMs = 1000;
+    overlay.startMs = world.clockMs();
+    overlay.eventTree = 0x1001;
+    overlay.codeOwner = kObjectGroup;
+    sim.overlays.push_back(overlay);
+    int stops = 0;
+    const auto tell = [&] { ts2::sim::tellOverlayEvents(world, vm, sim.id, [&](const ts2::sim::RunResult&) { ++stops; }); };
+    world.advanceClock(700);
+    tell();
+    CHECK(sim.thread.temps[1] == 0 && sim.overlays.size() == 1);
+    // Between ticks, at the animation clock's time.
+    ts2::sim::tellOverlayEvents(world, vm, sim.id, [&](const ts2::sim::RunResult&) { ++stops; }, 760);
+    CHECK(sim.thread.temps[1] == 9997 && sim.thread.temps[2] == 76 && sim.overlays[0].blendingOut);
+    sim.thread.temps = {};
+    sim.overlays[0].blendingOut = false;
+    world.advanceClock(100);
+    tell();
+    CHECK(sim.thread.temps[1] == 9997 && sim.thread.temps[2] == 80 && sim.thread.temps[0] == 1 && sim.overlays[0].blendingOut);
+    tell();
+    CHECK(sim.thread.temps[1] == 9997);
+    world.advanceClock(200);
+    tell();
+    CHECK(sim.thread.temps[1] == 9997 + 9998 + 9999 && sim.thread.temps[2] == 280 && sim.thread.temps[0] == 3 && sim.overlays.empty() && stops == 0);
+}
+
+// Animate Sim's event tree hears each SimAntics event of its clip once its time has played, in
+// order, with (event, the stack object it started with, percent played, 1, 0). The tree comes from
+// the starting tree's code owner, and my temps are put back after it.
+void animateSimEventsReachTheirTree() {
+    Instruction animate;
+    animate.opcode = 0x006A;
+    animate.trueTarget = T;
+    animate.falseTarget = E;
+    animate.operands[3] = 32;
+    animate.operands[4] = 0x01;
+    animate.operands[5] = 0x10;
+    animate.operands[6] = 0x81;
+    MemoryCodeSource code;
+    code.addStrings(ts2::sim::kGlobalGroup, 0x81, {"a2o-book-get"});
+    code.add(kObjectGroup, 0x1000, bhav({animate}));
+    // Data 0x20 += event, data 0x21 = the stack object, data 0x22 = percent, and temp 5 = 7.
+    code.add(kObjectGroup, 0x1001, bhav({
+        expr(owner::kMyData, 0x20, op::kAdd, owner::kParam, 0, 1, E),
+        expr(owner::kMyData, 0x21, op::kAssign, owner::kParam, 1, 2, E),
+        expr(owner::kMyData, 0x22, op::kAssign, owner::kParam, 2, 3, E),
+        expr(owner::kTemp, 5, op::kAssign, owner::kLiteral, 7, T, E),
+    }, 5));
+    ts2::sim::World world;
+    world.setAnimationLengths([](const std::string&) -> std::optional<float> { return 1000.0f; });
+    world.setAnimationEvents([](const std::string& name) {
+        return name == "a2o-book-get" ? std::vector<ts2::sim::AnimationEvent>{{200, 2}, {600, 5}} : std::vector<ts2::sim::AnimationEvent>{};
+    });
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    sim.thread.stackObjectId = 2;
+    Vm vm(code, {}, &world);
+    int stops = 0;
+    const auto tell = [&] { ts2::sim::tellAnimateSimEvents(world, vm, sim.id, [&](const ts2::sim::RunResult&) { ++stops; }, world.clockMs()); };
+    CHECK(vm.run(sim, kObjectGroup, 0x1000).outcome == Outcome::Sleeping);
+    sim.thread.stackObjectId = 3;
+    world.advanceClock(100);
+    tell();
+    CHECK(sim.data[0x20] == 0);
+    world.advanceClock(150);
+    tell();
+    CHECK(sim.data[0x20] == 2 && sim.data[0x21] == 2 && sim.data[0x22] == 25 && sim.thread.temps[5] == 0);
+    tell();
+    CHECK(sim.data[0x20] == 2);
+    world.advanceClock(800);
+    tell();
+    CHECK(sim.data[0x20] == 7 && sim.data[0x22] == 100 && stops == 0);
+    // The Animate Sim still ends with its clip.
+    CHECK(vm.resume(sim).outcome == Outcome::True && !sim.animation);
+}
+
+// Animate Stop: by kind (overlays) and priority (layers 2p-2, 2p-1) at once, or fading out without
+// telling the overlay's event tree.
+void animateStopEndsOverlaysByKindAndPriority() {
+    auto stop = [](std::uint8_t flags, std::uint8_t kind, std::uint8_t priority) {
+        Instruction in;
+        in.opcode = 0x006C;
+        in.trueTarget = T;
+        in.falseTarget = F;
+        const std::uint8_t bytes[] = {0, 0, flags, owner::kMyData, 0x0B, 0, 0x86, kind, priority};
+        std::copy(std::begin(bytes), std::end(bytes), in.operands.begin());
+        return in;
+    };
+    MemoryCodeSource code;
+    code.add(kObjectGroup, 0x1000, bhav({stop(0x40, 1, 1)}));
+    code.add(kObjectGroup, 0x1001, bhav({stop(0x42, 3, 0)}));
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    for (const auto& [name, priority] : std::vector<std::pair<std::string, std::uint8_t>>{{"a-low", std::uint8_t{0}}, {"a-high", std::uint8_t{2}}}) {
+        ts2::sim::PlayingOverlay overlay;
+        overlay.name = name;
+        overlay.priority = priority;
+        overlay.lengthMs = 3000;
+        overlay.eventTree = 0x1234;
+        sim.overlays.push_back(overlay);
+    }
+    Vm vm(code, {}, &world);
+    world.advanceClock(1000);
+    CHECK(vm.run(sim, kObjectGroup, 0x1000).outcome == Outcome::True);
+    CHECK(sim.overlays.size() == 1 && sim.overlays[0].name == "a-high");
+    CHECK(vm.run(sim, kObjectGroup, 0x1001).outcome == Outcome::True);
+    CHECK(sim.overlays.size() == 1 && sim.overlays[0].stopped && std::fabs(sim.overlays[0].lengthMs - 1233.33f) < 0.1f);
+    world.advanceClock(300);
+    ts2::sim::tellOverlayEvents(world, vm, sim.id, [](const ts2::sim::RunResult&) {});
+    CHECK(sim.overlays.empty());
+
+    // By category (kind 5, idle): only the overlays whose entry says "(idle)" fade out.
+    CHECK(ts2::content::animationCategory("a-idle-neutral-armsside-wtc-breatheloop(idle)") == 4);
+    CHECK(ts2::content::animationCategory("a-idle-neutral-armsside-wtc-breatheloop") == 1);
+    CHECK(ts2::content::animationCategory("c2o-VGS-carry(Carry)") == 3);
+    CHECK(ts2::content::animationCategory("x(facial idle)") == 8 && ts2::content::animationCategory("x(nonsense)") == 0);
+    code.add(kObjectGroup, 0x1002, bhav({stop(0x42, 5, 0)}));
+    for (const auto& [name, category] : std::vector<std::pair<std::string, std::uint8_t>>{{"a-breathe", std::uint8_t{4}}, {"a-wave", std::uint8_t{1}}}) {
+        ts2::sim::PlayingOverlay overlay;
+        overlay.name = name;
+        overlay.category = category;
+        overlay.lengthMs = 3000;
+        overlay.startMs = world.clockMs();
+        sim.overlays.push_back(overlay);
+    }
+    Vm idleStop(code, {}, &world);
+    CHECK(idleStop.run(sim, kObjectGroup, 0x1002).outcome == Outcome::True);
+    CHECK(sim.overlays.size() == 2 && sim.overlays[0].stopped && !sim.overlays[1].stopped);
+}
+
+// Animate Object with byte 9 = 2 (the plumbob's Main) keeps the clip playing on the object until
+// Animate Stop gives it the time it played. Other byte 9 values start nothing yet.
+void animateObjectPlaysUntilStopped() {
+    auto animate = [](std::uint8_t untilStopped) {
+        Instruction in;
+        in.opcode = 0x0069;
+        in.trueTarget = T;
+        in.falseTarget = E;
+        const std::uint8_t bytes[] = {0x01, 0x00, 0x20, 0x20, 0x00, 0x00, owner::kMyData, 0x0B, 0x00, untilStopped};
+        std::copy(std::begin(bytes), std::end(bytes), in.operands.begin());
+        return in;
+    };
+    Instruction stop;
+    stop.opcode = 0x006C;
+    stop.trueTarget = T;
+    stop.falseTarget = E;
+    const std::uint8_t stopBytes[] = {0x01, 0x00, 0x00, owner::kMyData, 0x0B, 0x00, 0x86, 0x00};
+    std::copy(std::begin(stopBytes), std::end(stopBytes), stop.operands.begin());
+    MemoryCodeSource code;
+    code.addStrings(kObjectGroup, 0x86, {"o-spin-pose", "o-spin"});
+    code.add(kObjectGroup, 0x1000, bhav({animate(2)}));
+    code.add(kObjectGroup, 0x1001, bhav({animate(0)}));
+    code.add(kObjectGroup, 0x1002, bhav({stop}));
+    ts2::sim::World world;
+    world.setAnimationLengths([](const std::string& name) -> std::optional<float> {
+        return name == "o-spin" ? std::optional<float>(2316.0f) : std::nullopt;
+    });
+    auto& bob = world.create(kObjectGroup, definition("Bob", 0));
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(bob, kObjectGroup, 0x1001).outcome == Outcome::True && !bob.animation);
+    CHECK(vm.run(bob, kObjectGroup, 0x1000).outcome == Outcome::True);
+    CHECK(bob.animation && bob.animation->name == "o-spin" && bob.animation->loops && bob.animation->speed == 1.0f);
+    world.advanceClock(5000);
+    CHECK(bob.animation && !bob.animation->finished(world.clockMs()));
+    CHECK(vm.run(bob, kObjectGroup, 0x1002).outcome == Outcome::True);
+    CHECK(bob.animation && bob.animation->finished(world.clockMs()) && std::fabs(bob.animation->lengthMs - 5000.0f) < 1.0f);
+}
+
+// Animate Sim's byte 8 flag 0x01 takes the flip from temp 3 instead of byte 2 (the living chair's
+// entry, as the game's sit tree plays it).
+void animateSimFlipsFromTemp3() {
+    const std::uint8_t entry[] = {0x00, 0x00, 0x04, 0x20, 0x46, 0x20, 0x81, 0x01, 0x01, 0x0A, 0x00, 0x00, 0x01, 0xFF, 0x00, 0x00};
+    const auto a = ts2::sim::animateOperands(entry);
+    CHECK(a.flipFromTemp && !a.flipped && a.entryFromParam && a.priority == 1);
+}
+
+} // namespace
+
+std::vector<Test> vmAnimationTests() {
+    return {
+        {"Animate Overlay list 0x80 uses the global age lists", animateOverlaySpecialListUsesTheGlobalAgeLists},
+        {"Animate Sim list 0x80 uses the global age lists", animateSimSpecialListUsesTheGlobalAgeLists},
+        {"social animations are named for both Sims", socialAnimationsAreNamedForBothSims},
+        {"Animate Sim waits for its animation", animateSimWaitsForItsAnimation},
+        {"Overlay events reach their tree", overlayEventsReachTheirTree},
+        {"Animate Sim events reach their tree", animateSimEventsReachTheirTree},
+        {"Animate Stop ends overlays by kind and priority", animateStopEndsOverlaysByKindAndPriority},
+        {"Animate Sim flips from temp 3", animateSimFlipsFromTemp3},
+        {"Animate Object plays until stopped", animateObjectPlaysUntilStopped},
+    };
+}

@@ -70,6 +70,7 @@ void BuildScripts::addWallStyles(std::string_view text) {
             style->thick = value != "none";
         } else if (key == "verticalSpan") {
             style->belowFloor = lower(value) == "floortofloorbasedceiling";
+            style->toRoof = lower(value) == "floortoroof";
         } else if (key == "mayCutAway") {
             style->cutAway = lower(value) != "false";
         } else if (key == "blocksLight") {

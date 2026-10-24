@@ -19,7 +19,7 @@ Family parse(std::span<const std::uint8_t> data) {
         throw std::runtime_error("fami: bad magic");
     }
     f.version = r.u32();
-    // Versions below 7 store a few flags as bytes and older ones another member; they aren't supported.
+    // Versions below 7 store a few flags as bytes and older ones another member. They aren't supported.
     if (f.version < 7) {
         throw std::runtime_error("fami: version too old");
     }

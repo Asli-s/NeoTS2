@@ -1,7 +1,11 @@
 #include "content/neighborhood.hpp"
 
+#include "diag/log.hpp"
 #include "formats/dbpf.hpp"
+#include "formats/famt.hpp"
 #include "formats/hash.hpp"
+#include "formats/lot_description.hpp"
+#include "formats/neighborhood_id.hpp"
 #include "formats/resource_types.hpp"
 #include "formats/sdsc.hpp"
 #include "formats/srel.hpp"
@@ -94,12 +98,15 @@ Neighborhood loadNeighborhood(const fs::path& neighborhoodPackage) {
     const std::string prefix = neighborhoodPackage.parent_path().filename().string() + "_Lot";
     std::error_code ec;
     for (fs::directory_iterator it(lots, ec), end; it != end; it.increment(ec)) {
-        const std::string stem = it->path().stem().string();
-        if (it->path().extension() == ".package" && stem.rfind(prefix, 0) == 0 && stem.size() > prefix.size()) {
-            try {
-                hood.lotIds.insert(std::stoi(stem.substr(prefix.size())));
-            } catch (const std::exception&) {
+        // A file name the system can't convert to text is not a lot, so it is skipped.
+        try {
+            const std::string stem = it->path().stem().string();
+            if (it->path().extension() == ".package" && stem.rfind(prefix, 0) == 0) {
+                if (const auto n = lotNumber(it->path())) {
+                    hood.lotIds.insert(*n);
+                }
             }
+        } catch (const std::exception&) {
         }
     }
     for (const auto& e : package.entries()) {
@@ -112,6 +119,14 @@ Neighborhood loadNeighborhood(const fs::path& neighborhoodPackage) {
             } catch (const std::exception& ex) {
                 hood.problems.push_back("neighbor " + std::to_string(id) + ": " + ex.what());
             }
+        } else if (e.key.type == types::kFamilyTies) {
+            try {
+                for (auto& s : famt::parse(package.read(e)).sims) {
+                    hood.familyTies[s.sim] = std::move(s.ties);
+                }
+            } catch (const std::exception& ex) {
+                hood.problems.push_back(std::string("family ties: ") + ex.what());
+            }
         } else if (e.key.type == types::kSimRelationship) {
             const auto from = static_cast<std::int16_t>(e.key.instance >> 16);
             const auto to = static_cast<std::int16_t>(e.key.instance & 0xFFFF);
@@ -122,6 +137,30 @@ Neighborhood loadNeighborhood(const fs::path& neighborhoodPackage) {
             } catch (const std::exception& ex) {
                 hood.problems.push_back("relationship " + std::to_string(from) + " -> " + std::to_string(to) +
                                         ": " + ex.what());
+            }
+        } else if (e.key.type == nhood::kLotDescriptionType) {
+            try {
+                constexpr std::uint32_t kBeachLot = 0x80;
+                const auto description = nhood::parseLotDescription(package.read(e));
+                const auto id = static_cast<std::int32_t>(e.key.instance);
+                hood.lotTypes[id] = description.type;
+                hood.lotOwners[id] = description.owner;
+                hood.lotShapes[id] = {description.width, description.depth,
+                                      (description.flags & kBeachLot) != 0 ? std::optional<std::uint8_t>(description.ownFacing) : std::nullopt};
+            } catch (const std::exception& ex) {
+                hood.problems.push_back("lot " + std::to_string(e.key.instance) + ": " + ex.what());
+            }
+        } else if (e.key.type == nhoodid::kType) {
+            try {
+                hood.identity = nhoodid::parse(package.read(e));
+            } catch (const std::exception& ex) {
+                hood.problems.push_back(std::string("neighborhood id: ") + ex.what());
+            }
+        } else if (e.key.type == weather::kType) {
+            try {
+                hood.weather = weather::parse(package.read(e));
+            } catch (const std::exception& ex) {
+                hood.problems.push_back(std::string("weather: ") + ex.what());
             }
         } else if (e.key.type == types::kDataTables) {
             const auto id = static_cast<std::int16_t>(e.key.instance);
@@ -184,11 +223,49 @@ std::vector<NeighborhoodEntry> listNeighborhoods(const fs::path& neighborhoods) 
                     break;
                 }
             }
-        } catch (const std::exception&) {
+        } catch (const std::exception& ex) {
+            diag::warnOnce(std::string("neighborhoods: a neighborhood is listed without its name: ") + ex.what());
         }
         out.push_back(std::move(n));
     }
     std::sort(out.begin(), out.end(), [](const NeighborhoodEntry& a, const NeighborhoodEntry& b) { return a.folder.filename() < b.folder.filename(); });
+    return out;
+}
+
+std::map<std::int32_t, nhoodid::NeighborhoodId> neighborhoodIds(const fs::path& neighborhoods) {
+    // A limit on packages opened, so a cluttered folder can't stall a lot's loading.
+    constexpr std::size_t kMaxPackages = 1024;
+    std::map<std::int32_t, nhoodid::NeighborhoodId> out;
+    std::error_code ec;
+    std::size_t opened = 0;
+    try {
+        for (const auto& folder : fs::directory_iterator(neighborhoods, ec)) {
+            if (!folder.is_directory(ec)) {
+                continue;
+            }
+            for (const auto& item : fs::directory_iterator(folder.path(), ec)) {
+                if (item.path().extension() != ".package" || !item.is_regular_file(ec)) {
+                    continue;
+                }
+                if (++opened > kMaxPackages) {
+                    return out;
+                }
+                try {
+                    dbpf::Package p{item.path()};
+                    for (const auto& e : p.entries()) {
+                        if (e.key.type == nhoodid::kType) {
+                            auto record = nhoodid::parse(p.read(e));
+                            out.try_emplace(record.id, std::move(record));
+                            break;
+                        }
+                    }
+                } catch (const std::exception& ex) {
+                    diag::warnOnce(std::string("neighborhoods: a broken package is left out of the list: ") + ex.what());
+                }
+            }
+        }
+    } catch (const std::exception&) {  // a folder that can't be listed: what was found so far
+    }
     return out;
 }
 

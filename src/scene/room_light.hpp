@@ -7,7 +7,7 @@
 namespace ts2::scene::roomlight {
 
 // How the game turns a room's light into the lights its objects, Sims and doors/windows get.
-// A room keeps six coloured samples of the light reaching it from each direction; each is a
+// A room keeps six coloured samples of the light reaching it from each direction. Each is a
 // weighted average of what its floors, walls and windows show.
 
 enum Direction { kPlusX, kMinusX, kPlusY, kMinusY, kFromFloor, kFromCeiling };
@@ -24,7 +24,7 @@ struct Samples {
 };
 
 // A room's light as each group of things is lit by it ("object:", "sim:", "wall:" in the
-// lighting settings; the wall group lights doors, windows and arches).
+// lighting settings). The wall group lights doors, windows and arches.
 struct Settings {
     int type = 4;                  // roomLightingType: 2 + the number of directional lights
     float overall = 0.4f;          // roomOverallStrength
@@ -51,16 +51,16 @@ struct Lights {
     float specular = 0;
 };
 
-// The ambient is the average of the six directions; the brightest remaining directions become
+// The ambient is the average of the six directions. The brightest remaining directions become
 // directional lights, side ones tilted down by the slope. Types 0 and 1 (five or four
-// directionals and no ambient) are not supported; they give nothing.
-std::optional<Lights> lightsFor(const std::array<std::array<float, 3>, 6>& samples, const Settings& settings);
+// directionals and no ambient) are not supported and give nothing.
+[[nodiscard]] std::optional<Lights> lightsFor(const std::array<std::array<float, 3>, 6>& samples, const Settings& settings);
 
 // The room's plain average light, which the game gives everything in the room as well.
 std::array<float, 3> average(const std::array<std::array<float, 3>, 6>& samples);
 
 // How much of the unlit room light (`color`) a room gets: 1 - its brightest average channel /
-// `threshold` below the threshold, else 0; with no threshold all of it unless a lamp or window
+// `threshold` below the threshold, else 0. With no threshold all of it unless a lamp or window
 // lights the room. The game also adds half of it (times this share) to the room's light-map texels.
 float unlitShare(const std::array<std::array<float, 3>, 6>& samples, const std::array<float, 3>& color, float threshold, bool litBySource);
 // Light added to rooms darker than `threshold` (their brightest channel of the average):

@@ -7,6 +7,8 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 namespace ts2::scene {
@@ -16,21 +18,22 @@ class RigLibrary {
 public:
     explicit RigLibrary(Assets& assets) : assets_(assets) {}
 
-    // A skeleton's rig (e.g. "auskel"); null when missing or empty.
-    std::shared_ptr<const Rig> rig(const std::string& skeleton);
-    // An animation (without "_anim") bound to a skeleton's rig; null when either is missing.
-    std::shared_ptr<const RigAnimation> animation(const std::string& skeleton, const std::string& name);
+    // A skeleton's rig (e.g. "auskel") with its bones stretched (see stretched). Null when missing
+    // or empty.
+    std::shared_ptr<const Rig> rig(const std::string& skeleton, float stretch = 1);
+    // An animation (without "_anim") bound to that rig. Null when either is missing.
+    std::shared_ptr<const RigAnimation> animation(const std::string& skeleton, float stretch, const std::string& name);
 
 private:
     Assets& assets_;
-    std::map<std::string, std::shared_ptr<const Rig>> rigs_;
-    std::map<std::string, std::shared_ptr<const RigAnimation>> animations_;
+    std::map<std::pair<std::string, float>, std::shared_ptr<const Rig>> rigs_;
+    std::map<std::tuple<std::string, float, std::string>, std::shared_ptr<const RigAnimation>> animations_;
 };
 
 // Puts a Sim into the scene in what it wears (`look`): each part skinned to the Sim's rig, a top and
 // a bottom sharing one texture over the skin as the game draws them, standing at `at` on `level`
 // and posed by `animation` at its start (at rest when it has none). Instances are named "<name>
-// <part model>". Returns the Sim's actor; `world` gets the rig's pose.
+// <part model>". Returns the Sim's actor. `world` gets the rig's pose.
 Actor buildSim(SceneBuilder& builder, RigLibrary& rigs, const SimLook& look, const Transform& at, int level,
                const std::string& name, const std::string& animation, std::vector<Transform>& world);
 

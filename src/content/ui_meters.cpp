@@ -66,10 +66,19 @@ tga::Pixels paintColumns(const tga::Pixels& fill, const tga::Pixels& gradient, i
     }
     const auto from = static_cast<std::uint32_t>(std::clamp(column, 0, static_cast<int>(gradient.width) - 1));
     tga::Pixels out = fill;
-    for (std::uint32_t y = 0; y < out.height; ++y) {
-        const auto colour = pixel(gradient, from, std::min(y, gradient.height - 1));
+    // Rows below the gradient keep the fill's own pixels.
+    for (std::uint32_t y = 0; y < std::min(out.height, gradient.height); ++y) {
+        const std::size_t source = (static_cast<std::size_t>(y) * gradient.width + from) * 4;
         for (std::uint32_t x = 0; x < out.width; ++x) {
-            std::copy(colour.begin(), colour.end(), out.rgba.begin() + static_cast<std::ptrdiff_t>((static_cast<std::size_t>(y) * out.width + x) * 4));
+            std::copy_n(gradient.rgba.begin() + static_cast<std::ptrdiff_t>(source), 4,
+                        out.rgba.begin() + static_cast<std::ptrdiff_t>((static_cast<std::size_t>(y) * out.width + x) * 4));
+        }
+    }
+    // Then the fill's alpha masks every channel, as the game's meter does (premultiplied).
+    for (std::size_t i = 0; i < out.rgba.size(); i += 4) {
+        const unsigned a = fill.rgba[i + 3];
+        for (std::size_t c = 0; c < 4; ++c) {
+            out.rgba[i + c] = static_cast<std::uint8_t>(out.rgba[i + c] * a / 255);
         }
     }
     return out;
@@ -77,7 +86,123 @@ tga::Pixels paintColumns(const tga::Pixels& fill, const tga::Pixels& gradient, i
 
 bool isPlatinum(int aspirationScore) { return aspirationScore >= 75; }
 
+void NeedTrend::add(int value) {
+    if (values_.size() >= kKept) {
+        sum_ -= values_.front();
+        values_.pop_front();
+        averages_.pop_front();
+    }
+    values_.push_back(value);
+    sum_ += value;
+    const double average = static_cast<double>(sum_) / static_cast<double>(values_.size());
+    averages_.push_back(static_cast<int>(average < 0 ? average - 0.5 : average + 0.5));
+}
+
+int NeedTrend::arrows() const {
+    if (averages_.empty()) {
+        return 0;
+    }
+    const int change = averages_.back() - averages_.front();
+    const int count = std::abs(change) <= 2 ? 1 : std::abs(change) <= 4 ? 2 : 3;
+    return change == 0 ? 0 : change < 0 ? -count : count;
+}
+
+void NeedTrend::clear() {
+    values_.clear();
+    averages_.clear();
+    sum_ = 0;
+}
+
+tga::Pixels greyed(tga::Pixels picture) {
+    for (std::size_t i = 0; i + 3 < picture.rgba.size(); i += 4) {
+        const float grey = picture.rgba[i] * 0.3f + picture.rgba[i + 1] * 0.6f + picture.rgba[i + 2] * 0.1f;
+        const auto v = static_cast<std::uint8_t>(std::min(255.0f, grey + 0.5f));
+        picture.rgba[i] = picture.rgba[i + 1] = picture.rgba[i + 2] = v;
+    }
+    return picture;
+}
+
 int moodMeterValue(int mood, int aspirationScore) { return isPlatinum(aspirationScore) ? 100 : std::clamp(mood, -100, 100); }
+
+AgeProgress ageProgress(std::int16_t ageDuration, std::int16_t ageDaysLeft) {
+    // The game reads both as unsigned 16-bit values.
+    const int length = static_cast<std::uint16_t>(ageDuration) + 1;
+    const int left = std::min(static_cast<std::uint16_t>(ageDaysLeft) + 1, length);
+    return {length - left, length};
+}
+
+int ageStage(std::int16_t lifeStage) {
+    if (lifeStage <= 1) return -1;
+    if (lifeStage == 2) return 0;
+    if (lifeStage <= 15) return 1;
+    if (lifeStage <= 18) return 2;
+    if (lifeStage <= 50) return 3;
+    return 4;
+}
+
+AgeTip ageTip(std::int16_t lifeStage, bool plantSim, std::int16_t ageDuration, std::int16_t ageDaysLeft, std::int16_t daysBefore) {
+    const AgeProgress progress = ageProgress(ageDuration, ageDaysLeft);
+    // The game keeps both counts in 16 bits, so a whole stage of 65536 days wraps to 0.
+    const auto lived = static_cast<std::int16_t>(progress.lived);
+    const auto left = static_cast<std::int16_t>(progress.length - progress.lived);
+    switch (ageStage(lifeStage)) {
+    case 4: return {0x34, daysBefore + lived};
+    case 3: return {static_cast<std::uint16_t>(left == 1 ? 0x30 : 0x2C), left};
+    case 2: return {static_cast<std::uint16_t>(left == 1 ? 0x31 : 0x2D), left};
+    case 1: return {static_cast<std::uint16_t>(left == 1 ? 0x32 : 0x2E), left};
+    case 0:
+        if (plantSim) {
+            return {static_cast<std::uint16_t>(left == 1 ? 0x3F : 0x3E), left};
+        }
+        return {static_cast<std::uint16_t>(left == 1 ? 0x33 : 0x2F), left};
+    default: return {};
+    }
+}
+
+std::uint32_t barFill(int lived, int length, std::uint32_t width) {
+    if (length <= 0 || lived <= 0) {
+        return 0;
+    }
+    if (lived >= length) {
+        return width;
+    }
+    return static_cast<std::uint32_t>(static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(lived) / static_cast<std::uint64_t>(length));
+}
+
+int barPixels(int value, int min, int max, int steps, int size) {
+    if (max <= min || size <= 0) {
+        return 0;
+    }
+    value = std::clamp(value, min, max);
+    const int step = std::max(1, max / std::max(1, steps));
+    value -= value % step;
+    // Worked out in doubles, as the game's x87 code (53-bit precision) does.
+    const double pixels = static_cast<double>(size) / static_cast<double>(max - min) * static_cast<double>(value - min);
+    const int filled = static_cast<int>(std::floor(pixels));
+    return std::clamp(filled, 0, size - 1);
+}
+
+int nearestZodiacSign(int outgoing, int nice, int playful, int neat, int active) {
+    // Outgoing, nice, playful, neat, active of each sign.
+    static constexpr int kSigns[12][5] = {{8, 3, 3, 5, 6}, {5, 4, 8, 5, 3}, {7, 3, 3, 4, 8}, {3, 6, 4, 6, 6},
+                                          {10, 3, 4, 4, 4}, {2, 5, 3, 9, 6}, {8, 7, 6, 2, 2}, {5, 3, 3, 6, 8},
+                                          {3, 4, 7, 2, 9}, {4, 5, 8, 7, 1}, {4, 6, 7, 4, 4}, {3, 7, 3, 5, 7}};
+    const double traits[5] = {outgoing * 0.01, nice * 0.01, playful * 0.01, neat * 0.01, active * 0.01};
+    int best = 1;
+    double bestDistance = 0;
+    for (int sign = 0; sign < 12; ++sign) {
+        double distance = 0;
+        for (int t = 0; t < 5; ++t) {
+            const double d = traits[t] - kSigns[sign][t];
+            distance += d * d;
+        }
+        if (sign == 0 || distance < bestDistance) {
+            best = sign + 1;
+            bestDistance = distance;
+        }
+    }
+    return best;
+}
 
 tga::Pixels placed(const tga::Pixels& picture, std::uint32_t width, std::uint32_t height, int x, int y) {
     if (width > tga::kMaxSide || height > tga::kMaxSide) {
@@ -105,7 +230,7 @@ tga::Pixels placed(const tga::Pixels& picture, std::uint32_t width, std::uint32_
 }
 
 tga::Pixels portraitCrop(const tga::Pixels& portrait) {
-    // The middle 180 of a 256-pixel portrait (38 off each side); other sizes in proportion.
+    // The middle 180 of a 256-pixel portrait (38 off each side), other sizes in proportion.
     const auto scale = [&](std::uint32_t v) { return static_cast<int>(static_cast<std::uint64_t>(v) * portrait.width / 256); };
     const int side = scale(180);
     if (!complete(portrait) || portrait.width != portrait.height || portrait.width > kMaxPortraitSide || side <= 0) {

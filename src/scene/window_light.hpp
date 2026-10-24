@@ -71,7 +71,7 @@ void suppress(std::vector<Portal>& portals, const Suppression& s);
 // The lights of a portal of a room (`fromOutside`: the room is the outdoors, room 0). `lightMap`
 // is the wall light at the portal before portal light was added. Without sun (or with the sky
 // blended in) the game samples the sky instead, which is not supported: no lights then.
-std::optional<PortalLights> lightsFor(const Portal& p, bool fromOutside, bool sun, const Daylight& day,
+[[nodiscard]] std::optional<PortalLights> lightsFor(const Portal& p, bool fromOutside, bool sun, const Daylight& day,
                                       const std::array<float, 3>& lightMap);
 
 } // namespace ts2::scene::windowlight

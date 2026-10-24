@@ -1,5 +1,6 @@
 #include "scene/wall_light.hpp"
 
+#include "diag/log.hpp"
 #include "scene/portable_math.hpp"
 
 #include <algorithm>
@@ -17,16 +18,16 @@ namespace ts2::scene::walllight {
 namespace {
 
 constexpr int kMaxSteps = 1000;
-constexpr int kMaxDepth = 32;          // walls stacked through levels; more means bad links
+constexpr int kMaxDepth = 32;          // walls stacked through levels, more means bad links
 constexpr int kMaxLevelsAbove = 32;
-constexpr std::size_t kMaxSegments = 4096;  // per run; longer runs are left unlit
+constexpr std::size_t kMaxSegments = 4096;  // per run, longer runs are left unlit
 // Safety limits far above what any real lot needs. Spreading counts segment visits: walls
 // stacked over many levels and branching at each can otherwise be revisited exponentially.
 // Lighting from sources counts each light against each wall face's segments.
 constexpr long long kMaxSegmentVisits = 16'000'000;
 constexpr long long kMaxLightChecks = 4'000'000;
 
-// The eight neighbours inside a segment's grid, as steps in row and in half; odd ones are diagonal.
+// The eight neighbours inside a segment's grid, as steps in row and in half. Odd ones are diagonal.
 constexpr int kStepRow[8] = {0, -1, -1, -1, 0, 1, 1, 1};
 constexpr int kStepHalf[8] = {-1, -1, 0, 1, 1, 1, 0, -1};
 
@@ -69,7 +70,7 @@ int fadeFactor(double falloff) {
     return static_cast<std::int16_t>(static_cast<std::uint16_t>(k & 0xFFFFu));
 }
 
-// Raises each channel of `to` to `from` where it is darker; returns whether anything changed.
+// Raises each channel of `to` to `from` where it is darker. Returns whether anything changed.
 bool brighten(Pixel& to, const Pixel& from) {
     bool changed = false;
     auto one = [&](std::uint8_t& a, std::uint8_t b) {
@@ -146,7 +147,7 @@ Facing facing(const Run& run, float x, float y) {
     return f;
 }
 
-// Brightens the middle rows of one half segment; the top and bottom rows take the next,
+// Brightens the middle rows of one half segment. The top and bottom rows take the next,
 // faded value. Returns whether anything brightened.
 bool lightHalf(Run& run, int half, Pixel& color, int fadeBy) {
     Row& row = run.segments[static_cast<std::size_t>(half / 2)].halves[static_cast<std::size_t>(half % 2)];
@@ -182,9 +183,16 @@ void lightAlong(Run& run, int nearest, const Pixel& color, int fadeBy) {
 
 void markLamplit(Walls& walls, int run, int depth) {
     if (depth > kMaxDepth || run < 0 || static_cast<std::size_t>(run) >= walls.runs.size()) {
+        if (depth > kMaxDepth) {
+            diag::warnOnce("wall light: a wall stack deeper than 32 levels stops marking lamplit walls");
+        }
         return;
     }
     Run& r = walls.runs[static_cast<std::size_t>(run)];
+    // Many segments link up to the same run, so marking it once is enough.
+    if (r.lamplit) {
+        return;
+    }
     r.lamplit = true;
     for (const auto& s : r.segments) {
         if (linked(walls, r, s, true)) {
@@ -193,7 +201,7 @@ void markLamplit(Walls& walls, int run, int depth) {
     }
 }
 
-// One light on one run; returns whether it reached the run at all.
+// One light on one run. Returns whether it reached the run at all.
 bool lightRun(Walls& walls, Run& run, const LightSource& light, const FloorAt& floorAt) {
     const float x = (light.x0 + light.x1) * 0.5f, y = (light.y0 + light.y1) * 0.5f;
     const Facing f = facing(run, x, y);
@@ -251,7 +259,7 @@ struct Spreader {
     std::vector<bool> visited;
     long long budget = kMaxSegmentVisits;
 
-    // Counts a visit to a run of `count` segments; false once the safety limit is used up.
+    // Counts a visit to a run of `count` segments. False once the safety limit is used up.
     bool spend(std::size_t count) {
         if (budget <= 0) {
             return false;
@@ -330,6 +338,9 @@ struct Spreader {
     bool withinStack(int runIndex, bool up, bool self, int depth) {
         Run& run = walls.runs[static_cast<std::size_t>(runIndex)];
         if (depth > kMaxDepth || !spend(run.segments.size())) {
+            if (depth > kMaxDepth) {
+                diag::warnOnce("wall light: a wall stack deeper than 32 levels stops lighting within its walls");
+            }
             return false;
         }
         clearLinked(run, up);
@@ -351,6 +362,9 @@ struct Spreader {
     bool betweenStack(int runIndex, bool up, bool self, int depth) {
         Run& run = walls.runs[static_cast<std::size_t>(runIndex)];
         if (depth > kMaxDepth || !spend(run.segments.size())) {
+            if (depth > kMaxDepth) {
+                diag::warnOnce("wall light: a wall stack deeper than 32 levels stops lighting between its walls");
+            }
             return false;
         }
         clearLinked(run, up);
@@ -408,6 +422,9 @@ bool lightFromSources(Walls& walls, const std::vector<LightSource>& sources, con
             budget -= 1 + static_cast<long long>(std::min(run.segments.size(), kMaxSegments));
             if (run.segments.empty() || run.segments.size() > kMaxSegments || run.level > light.level || run.room != light.room ||
                 levelsAbove - run.level > kMaxLevelsAbove) {
+                if (run.segments.size() > kMaxSegments) {
+                    diag::warnOnce("wall light: a wall run longer than 4096 segments is left unlit");
+                }
                 continue;
             }
             if (lightRun(walls, run, light, floorAt)) {

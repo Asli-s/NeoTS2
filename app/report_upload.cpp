@@ -95,7 +95,7 @@ struct Response {
     std::string body;
 };
 
-// One HTTPS request (nothing else is allowed); nullopt when it couldn't be made at all.
+// One HTTPS request (nothing else is allowed). Nullopt when it couldn't be made at all.
 std::optional<Response> request(const wchar_t* method, const std::string& url, const std::wstring& headers, std::string_view body) {
     const std::wstring link = wide(url);
     URL_COMPONENTS parts{};
@@ -241,7 +241,7 @@ Sent send(const fs::path& folder, const std::string& fallbackVersion, const std:
         return sent;
     }
     sent.ok = true;
-    // crashId is a number in the reply ("crashId":123); jsonString reads strings, so it's read here.
+    // crashId is a number in the reply ("crashId":123). jsonString reads strings, so it's read here.
     const std::string& reply = committed->body;
     const auto at = reply.find("\"crashId\"");
     const auto colon = at == std::string::npos ? at : reply.find(':', at);

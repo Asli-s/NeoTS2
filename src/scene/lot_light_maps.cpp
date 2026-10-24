@@ -1,5 +1,6 @@
 #include "scene/lot_light_maps.hpp"
 
+#include "scene/incidence_map.hpp"
 #include "scene/light_map_texels.hpp"
 
 #include <cmath>
@@ -49,7 +50,7 @@ lightmaptexels::OutdoorTexel floorTexel(const Sunlight& sun, int level, int tx, 
 }
 
 // A wall face turned to the sun: each texel's point on the face, an eighth of a tile out from it,
-// against the shadow; the bottom of the face at the lower of its ends' floors, its height whole
+// against the shadow. The bottom of the face is at the lower of its ends' floors, its height whole
 // storeys up to the floor above.
 void shadeWall(std::vector<walllight::Pixel>& texels, lightmaptexels::Size size, const Sunlight& sun, const lightmaptexels::Outdoor& outdoor,
                int level, const walllight::Segment& seg, const std::array<float, 3>& n) {
@@ -78,6 +79,15 @@ void shadeWall(std::vector<walllight::Pixel>& texels, lightmaptexels::Size size,
     }
 }
 
+// Writes a light map's incidence map into its image when the sizes agree.
+void putIncidence(Image* target, const Image& lightMap, const lotlighting::Settings& settings, float heightClamp) {
+    if (!target) return;
+    Image incidence = incidenceMap(lightMap, settings.incidenceScale, heightClamp);
+    if (incidence.width == target->width && incidence.height == target->height) {
+        *target = std::move(incidence);
+    }
+}
+
 } // namespace
 
 void fill(Scene& scene, const lotlighting::Result& light, const lotlighting::Settings& settings, const Sunlight* sunlight) {
@@ -93,18 +103,33 @@ void fill(Scene& scene, const lotlighting::Result& light, const lotlighting::Set
         return room <= 0 || it == light.rooms.end() ? walllight::Pixel{} : lightmaptexels::roomAdd(settings.unlit.color, it->second.unlitShare);
     };
 
-    // Floors, level by level.
-    for (std::size_t level = 0; level < light.floors.size() && level < maps.floors.size(); ++level) {
-        Image* target = image(maps.floors[level]);
-        const auto& grid = light.floors[level];
+    // Floors, level by level (`level` counts from the ground storey).
+    for (std::size_t i = 0; i < light.floors.size(); ++i) {
+        const int level = light.lowest + static_cast<int>(i);
+        const int m = level - maps.lowest;
+        if (m < 0 || static_cast<std::size_t>(m) >= maps.floors.size()) {
+            continue;
+        }
+        Image* target = image(maps.floors[static_cast<std::size_t>(m)]);
+        const auto& grid = light.floors[i];
         auto texels = lightmaptexels::floorTexels(grid, {128, 128, 128, 255});
         if (!target || texels.width != static_cast<int>(target->width) || texels.height != static_cast<int>(target->height)) {
             continue;
         }
         lightmaptexels::addRoomLight(texels, grid, roomAdd);
+        // As the game: the incidence map from the light before the sunlight outdoors is added.
+        if (static_cast<std::size_t>(m) < maps.floorIncidence.size()) {
+            Image before{target->width, target->height, std::vector<std::uint8_t>(target->rgba.size())};
+            for (int y = 0; y < texels.height; ++y) {
+                for (int x = 0; x < texels.width; ++x) {
+                    put(before, static_cast<std::size_t>(x), static_cast<std::size_t>(y), *texels.at(x, y));
+                }
+            }
+            putIncidence(image(maps.floorIncidence[static_cast<std::size_t>(m)]), before, settings, settings.incidenceHeightClamp);
+        }
         lightmaptexels::OutdoorAt at;
         if (sunlight && sunlight->shadow && sunlight->lot) {
-            at = [&, level](int tx, int ty, int i, int k) { return floorTexel(*sunlight, static_cast<int>(level), tx, ty, i, k); };
+            at = [&, level](int tx, int ty, int i, int k) { return floorTexel(*sunlight, level, tx, ty, i, k); };
         }
         lightmaptexels::addOutdoorLight(texels, grid, settings.outdoor, at);
         for (int y = 0; y < texels.height; ++y) {
@@ -119,6 +144,7 @@ void fill(Scene& scene, const lotlighting::Result& light, const lotlighting::Set
     if (!walls) {
         return;
     }
+    Image before = *walls;  // the wall light before the sunlight outdoors, for the incidence map
     for (const auto& run : light.walls.runs) {
         for (const auto& seg : run.segments) {
             const std::array<int, 5> key{run.level, static_cast<int>(std::lround(seg.x0)), static_cast<int>(std::lround(seg.y0)),
@@ -130,9 +156,19 @@ void fill(Scene& scene, const lotlighting::Result& light, const lotlighting::Set
             const auto& ambient = run.room == 0 ? light.walls.outsideAmbient : std::array<float, 3>{0, 0, 0};
             auto texels = lightmaptexels::panelTexels(seg.texels, size, ambient, 0.5f, false, light.walls.falloffScale);
             if (texels.size() != static_cast<std::size_t>(size.width) * static_cast<std::size_t>(size.height)) continue;
+            auto keep = [&] {
+                for (int row = 0; row < size.height; ++row) {
+                    for (int x = 0; x < size.width; ++x) {
+                        put(before, static_cast<std::size_t>(r.x0 + x), static_cast<std::size_t>(r.y1 - 1 - row),
+                            texels[static_cast<std::size_t>(row * size.width + x)]);
+                    }
+                }
+            };
             if (run.room > 0) {
                 lightmaptexels::addRoomLight(texels, roomAdd(run.room));
+                keep();
             } else {
+                keep();
                 const float dx = seg.x1 - seg.x0, dy = seg.y1 - seg.y0, len = std::sqrt(dx * dx + dy * dy);
                 if (len > 0) {
                     const std::array<float, 3> n{dy / len, -dx / len, 0};
@@ -152,6 +188,8 @@ void fill(Scene& scene, const lotlighting::Result& light, const lotlighting::Set
             }
         }
     }
+    // Walls take 0.8 for the height clamp.
+    putIncidence(image(maps.wallIncidence), before, settings, 0.8f);
 }
 
 } // namespace ts2::scene::lotlightmaps

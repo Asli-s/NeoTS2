@@ -25,4 +25,15 @@ struct Array3D {
 
 Array3D parse(std::span<const std::uint8_t> data);
 
+// A c3DArray whose tiles each hold a list of numbers, saved as a count and then that many u32s
+// (lot grid 0x0C).
+struct ListGrid {
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::uint32_t levels = 0;
+    std::vector<std::vector<std::uint32_t>> cells;  // level by level, then by x, then by y
+};
+
+ListGrid parseLists(std::span<const std::uint8_t> data);
+
 } // namespace ts2::array3d

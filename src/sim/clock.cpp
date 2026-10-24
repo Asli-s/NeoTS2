@@ -1,5 +1,7 @@
 #include "sim/clock.hpp"
 
+#include <algorithm>
+
 #include <cstdio>
 
 namespace ts2::sim {
@@ -15,7 +17,23 @@ int daysInMonth(int month, int year) {
 
 } // namespace
 
-void advanceClock(std::span<std::int16_t> g) {
+TimeOfDay timeOfDay(int hour) {
+    if (hour < 6) return TimeOfDay::Night;
+    if (hour < 7) return TimeOfDay::Morning;
+    if (hour < 18) return TimeOfDay::Day;
+    if (hour < 19) return TimeOfDay::Evening;
+    return TimeOfDay::Night;
+}
+
+void updateTimeOfDay(std::span<std::int16_t> g) {
+    if (g.size() > global::kTimeOfDay) {
+        g[global::kTimeOfDay] = static_cast<std::int16_t>(timeOfDay(g[global::kHour]));
+    }
+}
+
+namespace {
+
+void stepClock(std::span<std::int16_t> g) {
     if (g.size() <= global::kYear) {
         return;
     }
@@ -32,6 +50,9 @@ void advanceClock(std::span<std::int16_t> g) {
         return;
     }
     g[global::kHour] = 0;
+    if (g.size() > global::kDayOfWeek) {
+        g[global::kDayOfWeek] = static_cast<std::int16_t>(((g[global::kDayOfWeek] + 1) % 7 + 7) % 7);
+    }
     if (++g[global::kDayOfMonth] <= daysInMonth(g[global::kMonth], g[global::kYear])) {
         return;
     }
@@ -43,7 +64,17 @@ void advanceClock(std::span<std::int16_t> g) {
     ++g[global::kYear];
 }
 
+} // namespace
+
+void advanceClock(std::span<std::int16_t> g) {
+    stepClock(g);
+    updateTimeOfDay(g);
+}
+
 int weekday(std::span<const std::int16_t> g) {
+    if (g.size() > global::kDayOfWeek && g[global::kDayOfWeek] >= 0 && g[global::kDayOfWeek] < 7) {
+        return g[global::kDayOfWeek];
+    }
     // Days since Monday 1 January 1900 (proleptic Gregorian calendar), modulo 7.
     const int year = g[global::kYear], month = g[global::kMonth], day = g[global::kDayOfMonth];
     long days = 0;
@@ -71,6 +102,16 @@ std::string clockText(std::span<const std::int16_t> g) {
 
 std::int32_t funds(std::span<const std::int16_t> g) {
     return g.size() > global::kBudgetHigh ? static_cast<std::int32_t>(g[global::kBudgetHigh]) * 10000 + g[global::kBudgetLow] : 0;
+}
+
+void setFunds(std::span<std::int16_t> g, std::int64_t funds) {
+    constexpr std::int64_t kMost = std::int64_t{32767} * 10000 + 9999;
+    if (g.size() <= global::kBudgetHigh) {
+        return;
+    }
+    funds = std::clamp<std::int64_t>(funds, 0, kMost);
+    g[global::kBudgetHigh] = static_cast<std::int16_t>(funds / 10000);
+    g[global::kBudgetLow] = static_cast<std::int16_t>(funds % 10000);
 }
 
 } // namespace ts2::sim

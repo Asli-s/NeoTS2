@@ -70,8 +70,8 @@ struct LotQueries {
 // The level a point is on: the highest whose floor is below it (by more than 0.01).
 int levelAt(const LotQueries& lot, float x, float y, float z);
 
-// The light source a lamp gives the floor and wall light, as the game makes it; none when it
+// The light source a lamp gives the floor and wall light, as the game makes it. None when it
 // has no colour, stands off the lot, or its placement or area is broken (not finite).
-std::optional<LightSource> sourceFor(const Settings& settings, const Placement& placement, const LotQueries& lot);
+[[nodiscard]] std::optional<LightSource> sourceFor(const Settings& settings, const Placement& placement, const LotQueries& lot);
 
 } // namespace ts2::scene::lamplights

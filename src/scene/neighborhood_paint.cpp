@@ -7,7 +7,7 @@ namespace ts2::scene {
 
 namespace {
 
-// A distance map over the vertices: cells start at 0 (sources) or `far`; each pass gives the four
+// A distance map over the vertices: cells start at 0 (sources) or `far`. Each pass gives the four
 // neighbours of the cells at one level the next level, up to `far - 1`.
 void spreadDistances(std::vector<std::uint8_t>& map, std::uint32_t columns, std::uint32_t rows, std::uint8_t far) {
     std::uint8_t lowest = 0xff;
@@ -41,7 +41,7 @@ void spreadDistances(std::vector<std::uint8_t>& map, std::uint32_t columns, std:
     }
 }
 
-// Puts a paint on a vertex: a paint already there keeps the larger weight; a new one takes a free
+// Puts a paint on a vertex: a paint already there keeps the larger weight. A new one takes a free
 // slot, or else the slot with the smallest weight if it is smaller.
 void addPaint(VertexPaints& v, std::uint8_t paint, float strength) {
     // Worked out in more than float precision, as the game's x87 code does.
@@ -207,8 +207,10 @@ TerrainPaints paintTerrain(const nhood::Terrain& t, const nhood::PaintRules& rul
                 float cliff = 0;
                 if (nz >= cliffStart) {
                     if (water[index(x, y)] > beachWide || h > beachTop) {
-                        const int step = static_cast<int>(std::floor((h - t.seaLevel) * rowsPerHeight));
-                        const int row = std::clamp(31 - step, 0, 31);
+                        // Held in range before the cast: a broken height or tunable can make it huge or NaN.
+                        const float steps = std::floor((h - t.seaLevel) * rowsPerHeight);
+                        const int step = steps >= 32 ? 32 : steps >= 0 ? static_cast<int>(steps) : 0;
+                        const int row = std::max(0, 31 - step);
                         paint = type.table[static_cast<std::size_t>(row)][road[index(x, y)]];
                     } else {
                         paint = type.beach;

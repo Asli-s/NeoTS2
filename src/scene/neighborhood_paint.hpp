@@ -29,7 +29,7 @@ std::vector<float> terrainNormals(const nhood::Terrain& terrain, float tileSize)
 
 // Paints the terrain as the game does when it loads a neighborhood: cliffs where it is steep,
 // beach near the water, elsewhere the type's paint table by height and nearness to roads, each
-// spread around by its curve. `roads` has one byte per tile, row by row (nonzero: a road on it);
+// spread around by its curve. `roads` has one byte per tile, row by row (nonzero: a road on it),
 // empty for none.
 // `normals` (x, y, z per vertex) replaces terrainNormals when given.
 TerrainPaints paintTerrain(const nhood::Terrain& terrain, const nhood::PaintRules& rules, float tileSize,

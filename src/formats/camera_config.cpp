@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <sstream>
 
@@ -107,6 +108,32 @@ std::vector<Config> parse(std::string_view text) {
         } else if (key == "pitch" && lists.size() >= 2) {
             setLevels(c, *lists[0], [](ZoomLevel& l) -> float& { return l.pitchMin; });
             setLevels(c, *lists[1], [](ZoomLevel& l) -> float& { return l.pitchMax; });
+        } else if (key == "setparam" && it.size() >= 3 && !it[1].isList && !it[2].isList) {
+            std::string name = it[1].word;
+            std::transform(name.begin(), name.end(), name.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+            const float value = std::strtof(it[2].word.c_str(), nullptr);
+            // The files' values are small numbers. A wilder one, or more names than any camera has, is left out.
+            constexpr std::size_t kMostParams = 256;
+            if (std::isfinite(value) && std::abs(value) <= 1e6f && (c.params.size() < kMostParams || c.params.contains(name))) {
+                c.params[name] = value;
+            }
+        } else if (key == "clip" && it.size() >= 3 && !it[1].isList && !it[2].isList) {
+            // One near and far clip for every zoom level.
+            const float nearClip = std::strtof(it[1].word.c_str(), nullptr), farClip = std::strtof(it[2].word.c_str(), nullptr);
+            if (std::isfinite(nearClip) && std::isfinite(farClip)) {
+                c.clip = {nearClip, farClip};
+            }
+        } else if (key == "constrain" && it.size() >= 5) {
+            // A fraction of the neighborhood from each edge. Values outside 0 to 0.5 would leave no room.
+            std::array<float, 4> margins{};
+            bool fits = true;
+            for (std::size_t k = 0; k < 4; ++k) {
+                margins[k] = it[k + 1].isList ? -1 : std::strtof(it[k + 1].word.c_str(), nullptr);
+                fits = fits && margins[k] >= 0 && margins[k] <= 0.5f;
+            }
+            if (fits) {
+                c.constrain = margins;
+            }
         } else if (key == "orientation" && it.size() >= 2 && !lists.empty()) {
             c.defaultOrientation = std::atoi(it[1].word.c_str());
             c.orientations = *lists[0];
@@ -115,13 +142,15 @@ std::vector<Config> parse(std::string_view text) {
     return configs;
 }
 
-float pitchAt(const Config& config, float distance) {
+namespace {
+
+// The value `field` gives at a distance, blended between the two zoom levels around it by
+// distance and held beyond the first and last.
+template <typename Field>
+float atDistance(const Config& config, float distance, Field field) {
     const auto& l = config.levels;
     if (l.empty()) {
         return 0;
-    }
-    if (l.size() < 2) {
-        return l[0].pitchMin;
     }
     std::size_t a = 0;
     while (a < l.size() && l[a].distance > distance) {
@@ -131,7 +160,19 @@ float pitchAt(const Config& config, float distance) {
     const std::size_t b = std::min(a + 1, l.size() - 1);
     float t = l[a].distance == l[b].distance ? 0 : (l[a].distance - distance) / (l[a].distance - l[b].distance);
     t = std::clamp(t, 0.0f, 1.0f);
-    return l[a].pitchMin + (l[b].pitchMin - l[a].pitchMin) * t;
+    return field(l[a]) + (field(l[b]) - field(l[a])) * t;
+}
+
+} // namespace
+
+float pitchAt(const Config& config, float distance, float blend) {
+    const float least = atDistance(config, distance, [](const ZoomLevel& l) { return l.pitchMin; });
+    const float most = atDistance(config, distance, [](const ZoomLevel& l) { return l.pitchMax; });
+    return least + (most - least) * blend;
+}
+
+float nearClipAt(const Config& config, float distance) {
+    return atDistance(config, distance, [](const ZoomLevel& l) { return l.nearClip; });
 }
 
 } // namespace ts2::camera

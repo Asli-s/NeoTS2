@@ -8,6 +8,9 @@
 
 namespace ts2::bhav {
 
+// A behavior tree (BHAV): a named list of instructions. Each runs a primitive or calls another tree,
+// then goes to its true or false target: another instruction, or one of these three, which end the
+// tree (true or false), or stop it with an error.
 constexpr std::uint16_t kTargetError = 0xFFFC;
 constexpr std::uint16_t kTargetTrue  = 0xFFFD;
 constexpr std::uint16_t kTargetFalse = 0xFFFE;
@@ -33,7 +36,6 @@ struct Behavior {
     std::size_t trailingBytes = 0;
 };
 
-std::size_t headerSize(std::uint16_t format);
 std::size_t instructionSize(std::uint16_t format);
 
 Behavior parse(std::span<const std::uint8_t> data);

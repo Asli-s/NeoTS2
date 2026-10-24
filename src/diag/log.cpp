@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdio>
 #include <ctime>
+#include <format>
 #include <fstream>
 #include <mutex>
 #include <system_error>
@@ -23,7 +24,7 @@ std::ofstream out;
 std::uintmax_t fileBytes = 0, maxFileBytes = kMaxLogBytes;
 std::filesystem::path path;
 std::array<RecentLine, kRecentLines> recent;
-std::atomic<std::size_t> written{0};  // lines added so far; the next goes to written % kRecentLines
+std::atomic<std::size_t> written{0};  // lines added so far, the next going to written % kRecentLines
 
 const char* name(Level level) {
     switch (level) {
@@ -207,7 +208,44 @@ std::string utf8(const std::filesystem::path& of) {
     return std::string(text.begin(), text.end());
 }
 
+namespace {
+std::mutex warnedMutex;
+// The calling lines that warned already, in a fixed table so that warning never allocates. A file's
+// name is the same text in memory each time it is reached from one compiled file, so it is told apart
+// by where it is (a header's line reached from two files may warn twice). Past the table's end no more
+// lines warn, which the few dozen safety limits never reach.
+struct WarnedLine {
+    const char* file = nullptr;
+    std::uint_least32_t line = 0;
+};
+constexpr std::size_t kMaxWarnedLines = 256;
+std::array<WarnedLine, kMaxWarnedLines> warned;
+std::size_t warnedCount = 0;
+} // namespace
+
+void warnOnce(std::string_view text, std::source_location where) {
+    {
+        std::lock_guard lock(warnedMutex);
+        const auto end = warned.begin() + static_cast<std::ptrdiff_t>(warnedCount);
+        const bool seen = std::any_of(warned.begin(), end, [&](const WarnedLine& w) {
+            return w.file == where.file_name() && w.line == where.line();
+        });
+        if (seen || warnedCount == kMaxWarnedLines) {
+            return;
+        }
+        warned[warnedCount++] = {where.file_name(), where.line()};
+    }
+    // The file's name only: the folder it was built in says nothing useful and can hold a user name.
+    std::string_view file = where.file_name();
+    file = file.substr(file.find_last_of("/\\") + 1);
+    warning(std::format("{} ({}:{})", text, file, where.line()));
+}
+
 void reset() {
+    {
+        std::lock_guard lock(warnedMutex);
+        warnedCount = 0;
+    }
     std::lock_guard lock(mutex);
     out.close();
     out.clear();

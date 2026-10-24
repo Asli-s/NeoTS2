@@ -12,12 +12,12 @@ namespace ts2::content {
 
 namespace {
 
-// The middle of a portrait at want icon size; nullopt for a broken or oversized one.
-std::optional<tga::Pixels> picture(const tga::Pixels& portrait) {
+// The middle of a portrait at `size`, or nullopt for a broken or oversized one.
+std::optional<tga::Pixels> picture(const tga::Pixels& portrait, std::uint32_t size) {
     if (portrait.width > kMaxPortraitSide || portrait.height > kMaxPortraitSide) {
         return std::nullopt;
     }
-    auto out = scaled(portraitCrop(portrait), TargetPictures::kPictureSize, TargetPictures::kPictureSize);
+    auto out = scaled(portraitCrop(portrait), size, size);
     return out.rgba.empty() ? std::nullopt : std::optional<tga::Pixels>(std::move(out));
 }
 
@@ -25,11 +25,12 @@ bool done(const std::future<std::optional<tga::Pixels>>& f) {
     return f.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
 }
 
-// What a load makes, on its thread: the reader's portrait as a want picture.
-std::optional<tga::Pixels> loadPicture(const PortraitReader& reader, const std::filesystem::path& file, std::uint32_t instance) {
+// What a load makes, on its thread: the reader's portrait as a picture of `size`.
+std::optional<tga::Pixels> loadPicture(const PortraitReader& reader, const std::filesystem::path& file, std::uint32_t instance,
+                                       std::uint32_t size) {
     try {
         const auto portrait = reader(file, instance);
-        return portrait ? picture(*portrait) : std::nullopt;
+        return portrait ? picture(*portrait, size) : std::nullopt;
     } catch (...) {
         return std::nullopt;  // a broken file only costs its picture
     }
@@ -52,7 +53,7 @@ const tga::Pixels* TargetPictures::find(std::int16_t neighbor) const {
     return it != ready_.end() && it->second ? &*it->second : nullptr;
 }
 
-void TargetPictures::make(std::int16_t neighbor, const tga::Pixels& portrait) { ready_[neighbor] = picture(portrait); }
+void TargetPictures::make(std::int16_t neighbor, const tga::Pixels& portrait) { ready_[neighbor] = picture(portrait, size_); }
 
 bool TargetPictures::load(std::int16_t neighbor, const std::filesystem::path& characterFile, std::uint32_t instance) {
     joinFinishedAbandoned();
@@ -66,8 +67,8 @@ bool TargetPictures::load(std::int16_t neighbor, const std::filesystem::path& ch
     job.result = promise.get_future();
     try {
         // The thread gets its own copies of what it needs.
-        job.thread = std::thread([promise = std::move(promise), reader = reader_, characterFile, instance]() mutable {
-            promise.set_value(loadPicture(reader, characterFile, instance));
+        job.thread = std::thread([promise = std::move(promise), reader = reader_, characterFile, instance, size = size_]() mutable {
+            promise.set_value(loadPicture(reader, characterFile, instance, size));
         });
     } catch (const std::system_error&) {
         loading_.erase(neighbor);

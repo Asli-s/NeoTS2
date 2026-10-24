@@ -39,6 +39,9 @@ constexpr std::size_t kRoomField = 0x1D;
 constexpr std::size_t kUnavailableField = 0x38;   // bits 0x01 and 0x04 rule an object out
 constexpr std::size_t kReservedField = 0x6B;
 constexpr std::size_t kAwarenessLockoutField = 0x19;
+// Whether the candidate object itself lets the search pick it: not while it is locked out (data
+// 0x19, unless the search ignores that), while its data 0x57 is positive, or with bit 0x04 of data 0x52.
+constexpr std::size_t kLockoutField = 0x19, kBusyField = 0x57, kHeldFlagsField = 0x52;
 constexpr std::int16_t kUnratedScore = 50;
 constexpr float kHalfScoreDistance = 5.0f;  // tiles
 constexpr float kLevelHeight = 10.0f;       // a level counts as this many tiles
@@ -141,6 +144,9 @@ std::optional<std::int16_t> findBestObjectForFunction(const FunctionSearch& s) {
             continue;
         }
         if (awareness && !(flags & kIgnoringLockout) && data[kAwarenessLockoutField] > 0) {
+            continue;
+        }
+        if ((!(flags & kIgnoringLockout) && data[kLockoutField] > 0) || data[kBusyField] > 0 || (data[kHeldFlagsField] & 0x04) != 0) {
             continue;
         }
         auto& score = s.me.data[kFunctionScoreField];

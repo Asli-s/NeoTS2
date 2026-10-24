@@ -1,5 +1,7 @@
 #include "sim/rooms.hpp"
 
+#include "diag/log.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
@@ -8,7 +10,7 @@ namespace ts2::sim {
 
 namespace {
 
-// Bounds well beyond any real lot; a grid larger than this is bad data.
+// Bounds well beyond any real lot. A grid larger than this is bad data.
 constexpr std::int32_t kMaxSide = 256;
 constexpr std::int32_t kMaxLevels = 16;
 
@@ -25,6 +27,7 @@ struct Step {
 std::vector<Step> unitSteps(float fx0, float fy0, float fx1, float fy1) {
     for (const float v : {fx0, fy0, fx1, fy1}) {
         if (!std::isfinite(v) || std::abs(v) > static_cast<float>(kMaxSide) * 2) {
+            diag::warnOnce("rooms: a wall past 512 tiles or with broken numbers divides no rooms");
             return {};
         }
     }
@@ -55,6 +58,9 @@ std::size_t RoomMap::index(std::int32_t level, std::int32_t x, std::int32_t y, i
 
 RoomMap::RoomMap(const wallgraph::WallGraph& graph) : width_(graph.width), height_(graph.height) {
     if (graph.points.empty() || width_ <= 0 || height_ <= 0 || width_ > kMaxSide || height_ > kMaxSide) {
+        if (width_ > kMaxSide || height_ > kMaxSide) {
+            diag::warnOnce("rooms: a lot larger than 256 tiles has no rooms");
+        }
         return;
     }
     std::unordered_map<std::int32_t, const wallgraph::Point*> points;
@@ -65,7 +71,8 @@ RoomMap::RoomMap(const wallgraph::WallGraph& graph) : width_(graph.width), heigh
         lowest = std::min(lowest, p.level);
         highest = std::max(highest, p.level);
     }
-    if (highest - lowest >= kMaxLevels) {
+    if (lowest < -kMaxLevels || highest > kMaxLevels || highest - lowest >= kMaxLevels) {
+        diag::warnOnce("rooms: walls spread over more than 16 levels leave the lot without rooms");
         return;
     }
     firstLevel_ = lowest;
@@ -81,7 +88,7 @@ RoomMap::RoomMap(const wallgraph::WallGraph& graph) : width_(graph.width), heigh
             ++votes[index(level, x, y, q)][room];
         }
     };
-    // Bits 0-3 close a triangle's outer edge; bits 4-7 close its edge to the next triangle.
+    // Bits 0-3 close a triangle's outer edge. Bits 4-7 close its edge to the next triangle.
     auto closeOuter = [&](std::int32_t level, std::int32_t x, std::int32_t y, int q) {
         if (inside(x, y)) {
             blocked[index(level, x, y, q)] |= static_cast<std::uint8_t>(1u << q);
@@ -237,12 +244,16 @@ RoomMap::RoomMap(const wallgraph::WallGraph& graph) : width_(graph.width), heigh
 RoomMap::RoomMap(const array3d::Array3D& savedRooms, std::int32_t firstLevel) {
     if (savedRooms.elementSize != 8 || savedRooms.width > kMaxSide || savedRooms.height > kMaxSide ||
         savedRooms.levels > kMaxLevels) {
+        if (savedRooms.width > kMaxSide || savedRooms.height > kMaxSide || savedRooms.levels > kMaxLevels) {
+            diag::warnOnce("rooms: saved rooms larger than 256 tiles or 16 levels are dropped");
+        }
         return;
     }
     width_ = static_cast<std::int32_t>(savedRooms.width);
     height_ = static_cast<std::int32_t>(savedRooms.height);
     levelCount_ = static_cast<std::int32_t>(savedRooms.levels);
     if (firstLevel < -kMaxLevels || firstLevel > kMaxLevels) {
+        diag::warnOnce("rooms: saved rooms starting past level 16 are dropped");
         return;
     }
     firstLevel_ = firstLevel;
@@ -299,15 +310,12 @@ void RoomMap::assignLayer(int layer, const RoomMap& regions) {
 }
 
 std::int32_t RoomMap::roomAt(std::int32_t level, float x, float y) const {
-    if (quarterRoom_.empty() || level < firstLevel_ || level >= firstLevel_ + levelCount_ || x < 0 ||
-        y < 0) {
+    if (quarterRoom_.empty() || level < firstLevel_ || level >= firstLevel_ + levelCount_ ||
+        !(x >= 0 && y >= 0 && x < static_cast<float>(width_) && y < static_cast<float>(height_))) {
         return kNoRoom;
     }
     const auto tx = static_cast<std::int32_t>(x);
     const auto ty = static_cast<std::int32_t>(y);
-    if (tx >= width_ || ty >= height_) {
-        return kNoRoom;
-    }
     const float dx = x - static_cast<float>(tx) - 0.5f;
     const float dy = y - static_cast<float>(ty) - 0.5f;
     int quarter = kTop;

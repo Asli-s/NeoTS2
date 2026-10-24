@@ -15,6 +15,6 @@ namespace ts2::jpeg {
 // (YCbCr) components in one scan, sampling factors 1 or 2. Anything else (progressive, arithmetic
 // coded, 12-bit, CMYK) gives nullopt, as does broken data or a side over `maxSide`. Alpha is 255
 // everywhere.
-std::optional<tga::Pixels> decode(std::span<const std::uint8_t> data, std::uint32_t maxSide = tga::kMaxSide);
+[[nodiscard]] std::optional<tga::Pixels> decode(std::span<const std::uint8_t> data, std::uint32_t maxSide = tga::kMaxSide);
 
 } // namespace ts2::jpeg

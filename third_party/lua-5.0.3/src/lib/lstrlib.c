@@ -147,6 +147,11 @@ static int str_dump (lua_State *L) {
 
 #ifndef MAX_CAPTURES
 #define MAX_CAPTURES 32  /* arbitrary limit */
+
+/* NeoTS2: how deep a match may recurse and how many steps one search may take, so a pattern
+   can't overflow the C stack or run without end where the instruction count can't stop it */
+#define MAX_MATCH_DEPTH 200
+#define MAX_MATCH_STEPS 10000000UL
 #endif
 
 
@@ -158,6 +163,8 @@ typedef struct MatchState {
   const char *src_end;  /* end (`\0') of source string */
   lua_State *L;
   int level;  /* total number of captures (finished or unfinished) */
+  int depth;  /* NeoTS2: nested match calls */
+  unsigned long steps;  /* NeoTS2: match calls in this search */
   struct {
     const char *init;
     sint32 len;
@@ -348,7 +355,7 @@ static const char *match_capture (MatchState *ms, const char *s, int l) {
 }
 
 
-static const char *match (MatchState *ms, const char *s, const char *p) {
+static const char *do_match (MatchState *ms, const char *s, const char *p) {
   init: /* using goto's to optimize tail recursion */
   switch (*p) {
     case '(': {  /* start capture */
@@ -426,6 +433,18 @@ static const char *match (MatchState *ms, const char *s, const char *p) {
 
 
 
+/* NeoTS2: do_match within the depth and step limits */
+static const char *match (MatchState *ms, const char *s, const char *p) {
+  const char *res;
+  if (ms->depth >= MAX_MATCH_DEPTH || ++ms->steps > MAX_MATCH_STEPS)
+    luaL_error(ms->L, "pattern too complex");
+  ms->depth++;
+  res = do_match(ms, s, p);
+  ms->depth--;
+  return res;
+}
+
+
 static const char *lmemfind (const char *s1, size_t l1,
                                const char *s2, size_t l2) {
   if (l2 == 0) return s1;  /* empty strings are everywhere */
@@ -497,6 +516,8 @@ static int str_find (lua_State *L) {
     ms.L = L;
     ms.src_init = s;
     ms.src_end = s+l1;
+    ms.depth = 0;  /* NeoTS2 */
+    ms.steps = 0;
     do {
       const char *res;
       ms.level = 0;
@@ -521,6 +542,8 @@ static int gfind_aux (lua_State *L) {
   ms.L = L;
   ms.src_init = s;
   ms.src_end = s+ls;
+  ms.depth = 0;  /* NeoTS2 */
+  ms.steps = 0;
   for (src = s + (size_t)lua_tonumber(L, lua_upvalueindex(3));
        src <= ms.src_end;
        src++) {
@@ -599,6 +622,8 @@ static int str_gsub (lua_State *L) {
   ms.L = L;
   ms.src_init = src;
   ms.src_end = src+srcl;
+  ms.depth = 0;  /* NeoTS2 */
+  ms.steps = 0;
   while (n < max_s) {
     const char *e;
     ms.level = 0;

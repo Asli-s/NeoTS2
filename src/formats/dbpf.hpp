@@ -9,6 +9,8 @@
 
 namespace ts2::dbpf {
 
+// A package (DBPF), the game's container file: a header, an index giving each resource's key
+// (type, group and instance), place and size, and the resources themselves.
 struct Header {
     std::uint32_t majorVersion = 0;
     std::uint32_t minorVersion = 0;
@@ -60,7 +62,7 @@ public:
     std::vector<std::uint8_t> readRaw(const IndexEntry& entry);
     std::vector<std::uint8_t> read(const IndexEntry& entry);
 
-    // A package read from a file holds it open from the first read until close(); the next read
+    // A package read from a file holds it open from the first read until close(). The next read
     // reopens it.
     void close();
 

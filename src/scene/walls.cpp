@@ -10,7 +10,7 @@ namespace ts2::scene {
 namespace {
 
 // Where the side line of one wall (offset `h` along normal n, running along d) meets that of
-// another (normal m, along e), both starting from the same point; square when they are parallel.
+// another (normal m, along e), both starting from the same point. Square when they are parallel.
 std::array<float, 2> meet(float px, float py, float dx, float dy, float nx, float ny, float ex, float ey, float mx,
                           float my, float h) {
     const float rx = h * (mx - nx), ry = h * (my - ny);
@@ -88,8 +88,9 @@ std::vector<std::array<float, 2>> endHoles(SceneBuilder& builder, const std::str
 } // namespace
 
 std::map<std::string, std::vector<WallMask>> wallMasks(const std::vector<std::string>& materialNames) {
-    static const std::regex pattern(R"(^(.+)_(0|\d+[ew])_(0|\d+[ns])_(\d+)_(n|s|e|w|ne|nw|se|sw)_wallmask_txmt$)",
-                                    std::regex::icase);
+    // Up to 5 digits, so the numbers always fit an int.
+    const std::regex pattern(R"(^(.+)_(0|\d{1,5}[ew])_(0|\d{1,5}[ns])_(\d{1,5})_(n|s|e|w|ne|nw|se|sw)_wallmask_txmt$)",
+                             std::regex::icase);
     auto offset = [](const std::string& t, char positive) {
         const int n = std::stoi(t);
         return t.size() > 1 && std::tolower(static_cast<unsigned char>(t.back())) != positive ? -n : n;
@@ -131,7 +132,7 @@ std::vector<WallHub> joinWalls(std::vector<ThickWall>& walls) {
             const auto& q = walls[i].q;
             float dx = q.x1 - q.x0, dy = q.y1 - q.y0;
             const float len = std::sqrt(dx * dx + dy * dy);
-            if (len <= 0) {
+            if (!(len > 0)) {
                 continue;
             }
             dx = (end == 0 ? dx : -dx) / len;
@@ -181,8 +182,7 @@ float WallCeiling::at(float x, float y, float top) const {
     for (const auto* g : gables) {
         z = std::min(z, g->height(x, y) - g->thickness);  // up to the roof's underside
     }
-    // Near the eaves the underside is below the wall's own top, which then stays inside the slab.
-    return std::max(top, z);
+    return z;
 }
 
 std::vector<float> WallCeiling::bends(const std::array<float, 2>& p, const std::array<float, 2>& q) const {
@@ -199,7 +199,7 @@ std::vector<float> WallCeiling::bends(const std::array<float, 2>& p, const std::
 // Coverings run left to right as seen from their side, once along each segment (a tile, or a tile's
 // diagonal) and once over a full storey down from the wall's own top, so short walls such as a
 // deck's skirt show the top of it, and the covering carries on where the wall is cut down or raised.
-void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w, int edge, float cutHeight,
+void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w, int topMaterial, float cutHeight,
                   const std::array<std::optional<LightRect>, 2>* lightRects) {
     const WallQuad& q = w.q;
     const float dx = q.x1 - q.x0, dy = q.y1 - q.y0, len = std::sqrt(dx * dx + dy * dy);
@@ -257,7 +257,7 @@ void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w,
                                                 : (left ? w.leftCovering : w.rightCovering);
         const int above = plain.empty() ? m : builder.material(plain);
         // Past a segment's ends (where corners are mitred) a mask would wrap around to its other
-        // edge and could open a slit there; masked sides keep to the segment's own part of the texture.
+        // edge and could open a slit there. Masked sides keep to the segment's own part of the texture.
         const bool masked = !(left ? w.leftMask : w.rightMask).empty();
         auto u = [&](const std::array<float, 2>& c) {
             const float t = left ? along(c) / len : 1 - along(c) / len;
@@ -360,16 +360,16 @@ void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w,
         l.push_back(atB ? w.leftB : across(e, 1));
         r.push_back(atB ? w.rightB : across(e, -1));
         for (std::size_t k = 0; k + 1 < l.size(); ++k) {
-            addQuad(surfaces[edge], {{{l[k][0], l[k][1], topAt(l[k])}, {l[k + 1][0], l[k + 1][1], topAt(l[k + 1])},
-                                      {r[k + 1][0], r[k + 1][1], topAt(r[k + 1])}, {r[k][0], r[k][1], topAt(r[k])}}},
-                    {0, 0, 1}, noUv);
+            addQuad(surfaces[topMaterial], {{{l[k][0], l[k][1], topAt(l[k])}, {l[k + 1][0], l[k + 1][1], topAt(l[k + 1])},
+                                     {r[k + 1][0], r[k + 1][1], topAt(r[k + 1])}, {r[k][0], r[k][1], topAt(r[k])}}},
+                    {0, 0, 1}, {{{l[k][0], l[k][1]}, {l[k + 1][0], l[k + 1][1]}, {r[k + 1][0], r[k + 1][1]}, {r[k][0], r[k][1]}}});
         }
         for (const auto& [lp, rp, out] : {std::tuple{l.front(), r.front(), -1.0f}, std::tuple{l.back(), r.back(), 1.0f}}) {
             const bool atEnd = out < 0 ? atA : atB;
             if (out < 0 ? atA && openA : atB && openB) {
                 continue;
             }
-            // Where another wall joins, it covers the end up to the height walls are cut down to; only
+            // Where another wall joins, it covers the end up to the height walls are cut down to. Only
             // above it can the end show (when the other wall is cut down and this one isn't).
             const bool joined = atEnd && w.joined[out < 0 ? 0 : 1];
             if (joined && cut) {
@@ -395,8 +395,9 @@ void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w,
                 if (lt <= lb + 1e-4f && rt <= rb + 1e-4f) {
                     return;
                 }
-                addQuad(surfaces[edge], {{{lp[0], lp[1], lb}, {rp[0], rp[1], rb}, {rp[0], rp[1], rt}, {lp[0], lp[1], lt}}}, {out * ux, out * uy, 0},
-                        noUv);
+                // With the top's material (the game builds a wall's sides and its top piece only).
+                addQuad(surfaces[topMaterial], {{{lp[0], lp[1], lb}, {rp[0], rp[1], rb}, {rp[0], rp[1], rt}, {lp[0], lp[1], lt}}},
+                        {out * ux, out * uy, 0}, {{{0, lb}, {kWallThickness, rb}, {kWallThickness, rt}, {0, lt}}});
             };
             constexpr float kAll = 1000;  // far past the wall's top and bottom
             float row = -kAll;

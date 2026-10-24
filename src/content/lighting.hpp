@@ -38,6 +38,9 @@ struct Lighting {
     struct State {
         std::map<std::string, Light> lights;     // by name ("sun", "sky", ...)
         std::array<float, 3> skylight{0, 0, 0};  // the sky's colour times its strength
+        // "environment": colour times strength, the light materials take as their texture light
+        // colour (lot imposters, environment cubes, particles).
+        std::array<float, 3> environment{1, 1, 1};
         std::optional<std::uint32_t> lightMap;   // the image a light map is looked up in
         float lightMapStrength = 1;
         std::array<float, 3> lightMapTint{1, 1, 1};
@@ -46,7 +49,7 @@ struct Lighting {
         std::optional<UnlitRoom> unlitRoom;
     };
     // One object light's settings from the "lightAttribOverride <light> <setting> <value>" lines,
-    // the last line for each setting winning; unset ones keep the game's defaults.
+    // the last line for each setting winning. Unset ones keep the game's defaults.
     struct LightAttributes {
         // The light as drawn.
         std::optional<float> intensity, falloffRate, relSpecIntensity, range;
@@ -64,7 +67,7 @@ struct Lighting {
     std::map<std::string, LightAttributes> lights;  // by light name in lower case
 
     float number(const std::string& name, float fallback) const;
-    // A light's settings by its name in a model (any case); null when no line names it.
+    // A light's settings by its name in a model (any case), or null when no line names it.
     const LightAttributes* light(const std::string& name) const;
 };
 
@@ -73,11 +76,11 @@ Lighting readLighting(const std::vector<Product>& products);
 Lighting readLightingText(const std::string& text);
 
 // An image from the products' lighting packages (TSData/Res/Lighting/lighting.package) by
-// instance, the newest product's copy winning, as RGBA rows; empty when none has it.
+// instance, the newest product's copy winning, as RGBA rows. Empty when none has it.
 struct LightingImage {
     std::uint32_t width = 0, height = 0;
     std::vector<std::uint8_t> rgba;
 };
-std::optional<LightingImage> lightingImage(const std::vector<Product>& products, std::uint32_t instance);
+[[nodiscard]] std::optional<LightingImage> lightingImage(const std::vector<Product>& products, std::uint32_t instance);
 
 } // namespace ts2::content

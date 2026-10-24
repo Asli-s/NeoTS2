@@ -125,14 +125,21 @@ struct SavedObject {
     std::array<std::int16_t, kTempCount> temps{};
     // Versions with fewer fields leave the rest at zero, as the game does.
     std::array<std::int16_t, kDataCount> data{};
-    std::array<std::int16_t, 8> extra{};
+    // The object's token reference (version 0x66 and later), as SimObject::TokenSource.
+    std::array<std::int16_t, 8> tokenSource{};
     std::optional<Tail> tail;
     std::optional<PersonPart> person;
-    // Bytes not decoded: all of the tail before version 0x93, and the end of a Sim's part.
+    // Bytes not decoded by parse(): all of the tail before version 0x93, and the end of a Sim's part.
     std::vector<std::uint8_t> rest;
 };
 
 SavedObject parse(std::span<const std::uint8_t> data, std::uint32_t version,
                   RecordKind kind = RecordKind::Object);
+
+// A saved object inside other data (without the 64-byte name a resource of its own starts with),
+// possibly followed by more. `consumed` is set to its length. Throws for records whose length
+// isn't known: versions before 0x93 and Sims.
+SavedObject parseEmbedded(std::span<const std::uint8_t> data, std::uint32_t version, RecordKind kind,
+                          std::size_t& consumed);
 
 } // namespace ts2::xobj

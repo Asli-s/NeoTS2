@@ -1,5 +1,5 @@
 // A lot imposter part, as the game's "Shaders for imposters" script draws it. Its pipeline does the
-// blending; this picks the texture's color and alpha and drops what the alpha test rejects.
+// blending. This picks the texture's color and alpha and drops what the alpha test rejects.
 
 Texture2D<float4> image : register(t0, space2);
 SamplerState imageSampler : register(s0, space2);
@@ -7,8 +7,8 @@ SamplerState imageSampler : register(s0, space2);
 cbuffer Part : register(b0, space3) {
     float3 tint;   // the terrain light map's tint
     float cutoff;  // drawn only where alpha is above this
-    float mode;    // 0 terrain light map (second coordinates, tinted), 1 texture as is, 2 roof (opaque)
-    float3 padding;
+    float mode;    // 0 terrain light map (second coordinates, tinted), 1 texture, 2 roof (opaque)
+    float3 light;  // the texture light colour walls, roofs and slices are multiplied by
 };
 
 struct Input {
@@ -24,6 +24,7 @@ float4 main(Input input) : SV_Target {
         color.rgb *= tint;
     } else {
         color = image.Sample(imageSampler, input.uv);
+        color.rgb *= light;
         if (mode > 1.5) {
             color.a = 1;
         }

@@ -21,7 +21,7 @@ std::span<const std::uint8_t> Array3D::at(std::int32_t level, std::int32_t x, st
         return {};
     }
     const std::size_t index = (static_cast<std::size_t>(level) * width + x) * height + y;
-    // parse() makes the elements fill the grid; a grid built by hand might not.
+    // parse() makes the elements fill the grid, but a grid built by hand might not.
     if (elementSize == 0 || index >= elements.size() / elementSize) {
         return {};
     }
@@ -30,14 +30,16 @@ std::span<const std::uint8_t> Array3D::at(std::int32_t level, std::int32_t x, st
 
 std::int16_t Array3D::i16(std::int32_t level, std::int32_t x, std::int32_t y, std::size_t index) const {
     const auto e = at(level, x, y);
-    if (e.size() < (index + 1) * 2) {
+    if (index >= e.size() / 2) {
         return 0;
     }
     return static_cast<std::int16_t>(e[index * 2] | e[index * 2 + 1] << 8);
 }
 
-Array3D parse(std::span<const std::uint8_t> data) {
-    BinaryReader r(data);
+namespace {
+
+// The header both kinds share. An empty grid (any side 0) is allowed, as the game's readers allow it.
+Array3D readHeader(BinaryReader& r) {
     r.skip(64);
     Array3D a;
     a.classId = r.u32();
@@ -49,11 +51,28 @@ Array3D parse(std::span<const std::uint8_t> data) {
     a.width = r.u32();
     a.height = r.u32();
     a.levels = r.u32();
-    if (a.width == 0 || a.height == 0 || a.levels == 0 || a.width > kMaxSide || a.height > kMaxSide ||
-        a.levels > kMaxLevels) {
+    if (a.width > kMaxSide || a.height > kMaxSide || a.levels > kMaxLevels) {
         throw std::runtime_error("c3DArray: bad size");
     }
-    const std::size_t cells = static_cast<std::size_t>(a.width) * a.height * a.levels;
+    return a;
+}
+
+std::size_t cellCount(const Array3D& a) {
+    return static_cast<std::size_t>(a.width) * a.height * a.levels;
+}
+
+} // namespace
+
+Array3D parse(std::span<const std::uint8_t> data) {
+    BinaryReader r(data);
+    Array3D a = readHeader(r);
+    const std::size_t cells = cellCount(a);
+    if (cells == 0) {
+        if (r.remaining() != 0) {
+            throw std::runtime_error("c3DArray: data in an empty grid");
+        }
+        return a;
+    }
     if (r.remaining() == 0 || r.remaining() % cells != 0) {
         throw std::runtime_error("c3DArray: data does not fill the grid evenly");
     }
@@ -61,6 +80,32 @@ Array3D parse(std::span<const std::uint8_t> data) {
     const auto rest = r.bytes(r.remaining());
     a.elements.assign(rest.begin(), rest.end());
     return a;
+}
+
+ListGrid parseLists(std::span<const std::uint8_t> data) {
+    BinaryReader r(data);
+    const Array3D header = readHeader(r);
+    ListGrid g;
+    g.width = header.width;
+    g.height = header.height;
+    g.levels = header.levels;
+    const std::size_t cells = cellCount(header);
+    // Each tile takes at least its 4-byte count.
+    if (cells > r.remaining() / 4) {
+        throw std::runtime_error("c3DArray: too short for its grid");
+    }
+    g.cells.resize(cells);
+    for (auto& cell : g.cells) {
+        const std::size_t count = r.u32Count(4);
+        cell.reserve(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            cell.push_back(r.u32());
+        }
+    }
+    if (r.remaining() != 0) {
+        throw std::runtime_error("c3DArray: data left after the grid");
+    }
+    return g;
 }
 
 } // namespace ts2::array3d

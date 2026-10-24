@@ -1,4 +1,4 @@
-// Neighborhood terrain vertices: already in world space; the grid position (column, row) is the
+// Neighborhood terrain vertices: already in world space. The grid position (column, row) is the
 // texture coordinate the paints and their alpha maps use.
 
 cbuffer Frame : register(b0, space1) {

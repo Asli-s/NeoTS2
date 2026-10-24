@@ -132,7 +132,7 @@ void blendFloor(floorlight::Grid& grid, const std::vector<Corner>& corners) {
                                                      0x3E8C8C8D, 0x3DA0A0A1, 0x3CC0C0C1, 0x00000000};
     static const std::array<std::uint32_t, 4> kNarrow{0x3F39B9BA, 0x3E909091, 0x3E909091, 0x3D40C0C1};
     for (const auto& c : corners) {
-        constexpr int kFar = 1 << 20;  // beyond any lot; keeps the cell arithmetic in range
+        constexpr int kFar = 1 << 20;  // beyond any lot, keeps the cell arithmetic in range
         if (c.level != grid.level || !(c.octant & 1) || std::abs(c.x) > kFar || std::abs(c.y) > kFar) {
             continue;
         }

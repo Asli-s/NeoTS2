@@ -44,8 +44,9 @@ std::uint8_t Array2D::byte(std::int32_t x, std::int32_t y) const {
     return elements[(static_cast<std::size_t>(y) * width + static_cast<std::size_t>(x)) * elementSize];
 }
 
-Array2D parseArray2D(std::span<const std::uint8_t> data) {
-    BinaryReader r(data);
+namespace {
+
+Array2D readArray2DHeader(BinaryReader& r) {
     r.skip(64);
     Array2D a;
     r.u32();  // type id
@@ -58,6 +59,14 @@ Array2D parseArray2D(std::span<const std::uint8_t> data) {
     if (a.width == 0 || a.height == 0 || a.width > kMaxSide || a.height > kMaxSide) {
         throw std::runtime_error("c2DArray: bad size");
     }
+    return a;
+}
+
+} // namespace
+
+Array2D parseArray2D(std::span<const std::uint8_t> data) {
+    BinaryReader r(data);
+    Array2D a = readArray2DHeader(r);
     const std::size_t cells = static_cast<std::size_t>(a.width) * a.height;
     if (r.remaining() == 0 || r.remaining() % cells != 0) {
         throw std::runtime_error("c2DArray: data does not fill the grid evenly");
@@ -65,6 +74,31 @@ Array2D parseArray2D(std::span<const std::uint8_t> data) {
     a.elementSize = r.remaining() / cells;
     const auto rest = r.bytes(r.remaining());
     a.elements.assign(rest.begin(), rest.end());
+    return a;
+}
+
+Array2D parseByteLists(std::span<const std::uint8_t> data) {
+    constexpr std::size_t kMaxBytes = 3;
+    BinaryReader r(data);
+    Array2D a = readArray2DHeader(r);
+    const std::size_t cells = static_cast<std::size_t>(a.width) * a.height;
+    if (cells > r.remaining()) {
+        throw std::runtime_error("c2DArray: too short for its grid");
+    }
+    a.elementSize = kMaxBytes;
+    a.elements.assign(cells * kMaxBytes, 0xFF);
+    for (std::size_t i = 0; i < cells; ++i) {
+        const std::uint8_t count = r.u8();
+        if (count > kMaxBytes) {
+            throw std::runtime_error("c2DArray: more than three bytes in a tile");
+        }
+        for (std::uint8_t k = 0; k < count; ++k) {
+            a.elements[i * kMaxBytes + k] = r.u8();
+        }
+    }
+    if (r.remaining() != 0) {
+        throw std::runtime_error("c2DArray: data left after the grid");
+    }
     return a;
 }
 

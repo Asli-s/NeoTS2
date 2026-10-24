@@ -70,14 +70,13 @@ std::array<float, 3> averageColor(std::span<const std::uint8_t> rgba) {
     return {static_cast<float>(sum[0] * each), static_cast<float>(sum[1] * each), static_cast<float>(sum[2] * each)};
 }
 
-CoveringColors::CoveringColors(const std::filesystem::path& thumbnails) : path_(thumbnails) {
+CoveringColors::CoveringColors(const std::filesystem::path& thumbnails) {
     std::error_code ec;
     if (thumbnails.empty() || !std::filesystem::is_regular_file(thumbnails, ec)) {
         return;
     }
     try {
-        dbpf::Package package{thumbnails};
-        const auto& entries = package.entries();
+        const auto& entries = package_.emplace(thumbnails).entries();
         for (std::size_t i = 0; i < entries.size(); ++i) {
             const auto& k = entries[i].key;
             if (k.type == kFloorThumbnail || k.type == kWallThumbnail) {
@@ -86,6 +85,7 @@ CoveringColors::CoveringColors(const std::filesystem::path& thumbnails) : path_(
         }
     } catch (const std::exception&) {
         index_.clear();
+        package_.reset();
     }
 }
 
@@ -98,23 +98,33 @@ std::optional<std::array<float, 3>> CoveringColors::color(CoveringKind kind, con
         return hit->second;
     }
     const std::uint32_t type = kind == CoveringKind::Floor ? kFloorThumbnail : kWallThumbnail;
-    // Cached thumbnails carry the CRC-24 as their high instance, or 0 (both are seen).
+    if (missing_.contains({type, low})) {
+        return std::nullopt;
+    }
+    const auto c = read(type, name, low);
+    if (c) {
+        cache_.emplace(low, *c);
+    } else {
+        missing_.insert({type, low});
+    }
+    return c;
+}
+
+std::optional<std::array<float, 3>> CoveringColors::read(std::uint32_t type, const std::string& name, std::uint32_t low) {
+    // Cached thumbnails carry the CRC-24 as their high instance, or 0 (both occur).
     auto found = index_.find({type, (static_cast<std::uint64_t>(nameHash24(name)) << 32) | low});
     if (found == index_.end()) {
         found = index_.find({type, low});
     }
-    if (found == index_.end()) {
+    if (found == index_.end() || !package_) {
         return std::nullopt;
     }
     try {
-        dbpf::Package package{path_};
-        const auto image = image::decode(package.read(package.entries().at(found->second)));
+        const auto image = image::decode(package_->read(package_->entries().at(found->second)));
         if (!image) {
             return std::nullopt;
         }
-        const auto c = averageColor(image->rgba);
-        cache_.emplace(low, c);
-        return c;
+        return averageColor(image->rgba);
     } catch (const std::exception&) {
         return std::nullopt;
     }

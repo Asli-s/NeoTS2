@@ -7,7 +7,7 @@
 namespace ts2::roofs {
 
 // A roof a player built: the rectangle between two corners on the wall graph's grid, at a level
-// (as the lot's height grids count them), its type and its pattern's GUID in the build catalog.
+// (as the wall graph counts them), its type and its pattern's GUID in the build catalog.
 struct Roof {
     std::uint32_t id = 0;
     float x0 = 0, y0 = 0;
@@ -17,8 +17,9 @@ struct Roof {
     std::uint32_t type = 0;
     std::uint32_t pattern = 0;
     // From version 2: the roof's own slope, stored as half the tangent of its angle (0.5 at
-    // 45 degrees); 0 when the lot's global slope applies.
+    // 45 degrees), or 0 when the lot's global slope applies.
     float slope = 0;
+    // A greenhouse roof's colour from its roofs.txt id: 24 metal, 25 white, any other green.
     std::uint32_t extra = 0;
 };
 

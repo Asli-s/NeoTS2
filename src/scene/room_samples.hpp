@@ -30,7 +30,7 @@ struct Settings {
 
 using Color = std::array<float, 3>;
 
-// A covering's colour for room light; the game uses 0.5 grey for coverings it has no thumbnail of.
+// A covering's colour for room light. The game uses 0.5 grey for coverings it has no thumbnail of.
 inline constexpr Color kNoCoveringColor{0.5f, 0.5f, 0.5f};
 
 // One quarter of a floor tile: its covering's colour and the floor light at its middle (the floor
@@ -47,11 +47,11 @@ void addPortal(roomlight::Samples& samples, float nx, float ny, const Color& lig
 
 // What gathering a lot's room samples needs: rooms, coverings and the light on floors and walls.
 struct LotInputs {
-    // The room of a tile quarter (bit 0 -x, 1 +y, 2 +x, 3 -y); 0 or less: outdoors or none.
+    // The room of a tile quarter (bit 0 -x, 1 +y, 2 +x, 3 -y), 0 or less: outdoors or none.
     std::function<std::int16_t(int level, int x, int y, int quarter)> quarterRoom;
-    // The room in front of a wall face; 0 or less: outdoors or none.
+    // The room in front of a wall face, 0 or less: outdoors or none.
     std::function<std::int16_t(const wallruns::Key& face)> faceRoom;
-    // A covering's colour by its name; nullopt where the game has none (it then uses kNoCoveringColor).
+    // A covering's colour by its name. Nullopt where the game has none (it then uses kNoCoveringColor).
     std::function<std::optional<Color>(bool floor, const std::string& name)> covering;
     std::function<Color(int level, float x, float y)> floorLight;  // the floor light grid's sample
     std::function<Color(const wallruns::Key& face)> wallLight;    // the wall light the game reads at a face

@@ -1,5 +1,6 @@
 #include "scene/lamp_lights.hpp"
 
+#include "diag/log.hpp"
 #include "scene/portable_math.hpp"
 
 #include <algorithm>
@@ -94,6 +95,9 @@ std::vector<LightNode> lightNodes(const scenegraph::ResourceNode& model, const P
     std::vector<bool> seen(nodes.size(), false);
     auto walk = [&](auto&& self, std::uint32_t index, const Placement& parent, int depth) -> void {
         if (index >= nodes.size() || seen[index] || depth > kMaxTreeDepth) {
+            if (depth > kMaxTreeDepth) {
+                diag::warnOnce("lamp lights: lights nested deeper than 64 levels in a model are dropped");
+            }
             return;
         }
         seen[index] = true;
@@ -113,7 +117,7 @@ std::vector<LightNode> lightNodes(const scenegraph::ResourceNode& model, const P
 }
 
 std::array<float, 4> facingRotation(int direction) {
-    // The angle in float steps of pi/4 from +y, wrapped into [0, 2 pi) before halving; the game
+    // The angle in float steps of pi/4 from +y, wrapped into [0, 2 pi) before halving. The game
     // keeps the sign this gives (w turns negative past half a turn).
     const float quarter = std::bit_cast<float>(0x3F490FDBu), turn = std::bit_cast<float>(0x40C90FDBu);
     const float angle = r24(static_cast<double>(static_cast<std::int16_t>(2 - direction)) * quarter);

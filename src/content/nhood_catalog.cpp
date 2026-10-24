@@ -1,5 +1,6 @@
 #include "content/nhood_catalog.hpp"
 
+#include "diag/log.hpp"
 #include "formats/dbpf.hpp"
 #include "formats/propset.hpp"
 
@@ -54,7 +55,8 @@ std::map<std::uint32_t, NeighborhoodObjectType> neighborhoodObjectTypes(const st
                             continue;
                         }
                         out[static_cast<std::uint32_t>(std::stoul(guid->second))] = {p["modelname"], p["sort"]};
-                    } catch (const std::exception&) {
+                    } catch (const std::exception& ex) {
+                        diag::warnOnce(std::string("neighborhood objects: a broken catalog entry is left out: ") + ex.what());
                     }
                 }
             }

@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <string>
 #include <string_view>
@@ -31,6 +32,26 @@ namespace {
 
 std::filesystem::path utf8Path(const char* text) {
     return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(text)));
+}
+
+// The system the program runs on, for the log: its version, cores and memory.
+std::string systemText() {
+    std::string name = SDL_GetPlatform();
+#ifdef _WIN32
+    // Read from the system itself: GetVersionEx tells programs an older version unless they say
+    // otherwise in a manifest.
+    using RtlGetVersion = LONG(WINAPI*)(OSVERSIONINFOW*);
+    if (const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll")) {
+        if (const auto get = reinterpret_cast<RtlGetVersion>(GetProcAddress(ntdll, "RtlGetVersion"))) {
+            OSVERSIONINFOW v{};
+            v.dwOSVersionInfoSize = sizeof v;
+            if (get(&v) == 0) {
+                name = std::format("Windows {}.{}.{}", v.dwMajorVersion, v.dwMinorVersion, v.dwBuildNumber);
+            }
+        }
+    }
+#endif
+    return std::format("{}, {} logical cores, {} MB of memory", name, SDL_GetNumLogicalCPUCores(), SDL_GetSystemRAM());
 }
 
 // Whether files can be made in a folder (made if missing): a program under Program Files can't.
@@ -74,7 +95,8 @@ std::filesystem::path logFolder() {
 #ifdef _WIN32
     // Logs stay on this computer: the local app data folder, not the roaming one.
     wchar_t local[MAX_PATH] = {};
-    if (GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH) > 0) {
+    const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
+    if (length > 0 && length < MAX_PATH) {
         return std::filesystem::path(local) / L"NeoTS2" / L"logs";
     }
 #endif
@@ -87,10 +109,18 @@ std::filesystem::path logFolder() {
 
 } // namespace
 
+const char* buildVersion() {
+    return NEOTS2_VERSION;
+}
+
+bool releaseBuild() {
+    return NEOTS2_RELEASE_BUILD != 0;
+}
+
 void startDiagnostics(int& argc, char** argv) {
 #ifdef _WIN32
     // Sharp at any display scaling: without this, Windows draws our messages small and stretches
-    // them (blurry). SDL asks for the same when it starts; this covers what comes before.
+    // them (blurry). SDL asks for the same when it starts. This covers what comes before.
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 #endif
     std::filesystem::path folder;
@@ -119,7 +149,7 @@ void startDiagnostics(int& argc, char** argv) {
     if (folder.empty()) {
         folder = logFolder();
     }
-    std::string header = std::string("NeoTS2 ") + NEOTS2_VERSION + "\ncommand line:";
+    std::string header = std::string("NeoTS2 ") + NEOTS2_VERSION + "\nsystem: " + systemText() + "\ncommand line:";
     for (int i = 0; i < argc; ++i) {
         header += std::string(" \"") + argv[i] + "\"";
     }

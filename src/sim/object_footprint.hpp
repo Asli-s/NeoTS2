@@ -24,7 +24,7 @@ struct FootprintShape {
     // Four 4-bit insets in 1/16 tile, from the low nibble: the -y, -x, +y and +x sides at direction 0
     // (they turn with the object).
     std::uint16_t insets = 0;
-    // The model's "footprint" list; not owned, so it must outlive the shape (keep the parsed lists).
+    // The model's "footprint" list. It is not owned, so it must outlive the shape (keep the parsed lists).
     const scenegraph::DataValue* masks = nullptr;
     int graphic = 0;
     std::optional<RouteRect> modelBox;  // the model's extent in model coordinates
@@ -42,8 +42,8 @@ std::vector<RouteRect> footprintRects(const FootprintShape& shape);
 std::vector<RouteRect> footprintTile(const scenegraph::DataValue& masks, int graphic, int tileX, int tileY);
 
 // The square on the wall in front of a door's tile (route +y, half a tile from its centre) that lets
-// Sims through, before turning. A door is a multi-tile object with a part each side of the wall;
-// each part's mask is where the leaf swings on its side.
+// Sims through, before turning. A door is a multi-tile object with a part each side of the wall.
+// Each part's mask is where the leaf swings on its side.
 RouteRect doorwayRect();
 
 // Turns rectangles around an object's tile centre to face `direction` (object data 1, 0-7) and moves
@@ -59,7 +59,7 @@ struct FootprintRouting {
     int type = 0;           // the item type of the footprint (its padding is one less)
     bool dynamic = false;   // the object's "allow intersection" function decides per Sim
 };
-// `flags` is object data 8, `cost` data 0x0A, `flags2` data 0x28; `objectType` is OBJD field 9 and
+// `flags` is object data 8, `cost` data 0x0A, `flags2` data 0x28. `objectType` is OBJD field 9 and
 // `allowsIntersection` whether the object has object function 5.
 FootprintRouting footprintRouting(std::uint16_t flags, std::int16_t cost, std::uint16_t flags2, int objectType, bool allowsIntersection);
 

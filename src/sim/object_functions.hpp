@@ -10,8 +10,8 @@ namespace ts2::sim {
 // surface 10, clean 11, garden 12, wash hands 13, repair 14, dry clothes 15, wash clothes 16,
 // message handler 17, pre-route 18, post-route 19, goal check 20, reaction handler 21, along-route
 // callback 22, awareness 23, lookat target 25, utility state change 26, global awareness 27), each
-// to its entry in an object's OBJf; nullopt for none.
-constexpr std::optional<std::uint16_t> objectFunctionEntry(std::uint16_t function) {
+// to its entry in an object's OBJf, nullopt for none.
+[[nodiscard]] constexpr std::optional<std::uint16_t> objectFunctionEntry(std::uint16_t function) {
     constexpr std::int16_t kEntries[] = {
         0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B,  // 0-9
         0x0E, 0x1C, 0x10, 0x11, 0x1D, 0x1F, 0x20, 0x24, 0x25, 0x26,  // 10-19

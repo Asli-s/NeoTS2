@@ -36,6 +36,7 @@ std::string exceptionName(std::uint32_t code) {
     case 0xE0000002: return "abort";
     case 0xE0000003: return "pure virtual call";
     case 0xE0000004: return "invalid parameter to a C runtime function";
+    case 0xE0000005: return "closing took too long";
     default: return "exception " + hex(code);
     }
 }
@@ -154,7 +155,7 @@ std::string issueLink(const Crash& crash) {
 }
 
 std::map<std::string, std::string> eventFields(std::string_view xml) {
-    // <Data Name='ExceptionCode'>c0000409</Data> (Windows quotes with ' ; " is taken too)
+    // <Data Name='ExceptionCode'>c0000409</Data> (Windows quotes with ', and " is taken too)
     std::map<std::string, std::string> fields;
     constexpr std::string_view open = "<Data Name=";
     for (std::size_t at = xml.find(open); at != std::string_view::npos; at = xml.find(open, at)) {

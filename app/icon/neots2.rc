@@ -1,2 +1,37 @@
-// The app icon, made from neots2.svg. Windows and SDL use the first icon in the exe.
+// The app icon, made from neots2.svg, and the version Windows shows in the exe's details and its
+// crash records.
+#include <winver.h>
+#include "neots2_version.hpp"
+
 1 ICON "neots2.ico"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION NEOTS2_VERSION_MAJOR, NEOTS2_VERSION_MINOR, NEOTS2_VERSION_PATCH, NEOTS2_VERSION_BUILD
+PRODUCTVERSION NEOTS2_VERSION_MAJOR, NEOTS2_VERSION_MINOR, NEOTS2_VERSION_PATCH, NEOTS2_VERSION_BUILD
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+#if NEOTS2_RELEASE_BUILD
+FILEFLAGS 0
+#else
+FILEFLAGS VS_FF_PRERELEASE
+#endif
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE 0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription", "NeoTS2"
+            VALUE "FileVersion", NEOTS2_VERSION
+            VALUE "InternalName", "neots2"
+            VALUE "OriginalFilename", "neots2.exe"
+            VALUE "ProductName", "NeoTS2"
+            VALUE "ProductVersion", NEOTS2_VERSION
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

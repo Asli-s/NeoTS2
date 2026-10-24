@@ -2,13 +2,13 @@
 
 namespace ts2::scene {
 
-std::shared_ptr<const Rig> RigLibrary::rig(const std::string& skeleton) {
+std::shared_ptr<const Rig> RigLibrary::rig(const std::string& skeleton, float stretch) {
     if (skeleton.empty()) {
         return nullptr;
     }
-    auto& r = rigs_[skeleton];
+    auto& r = rigs_[{skeleton, stretch}];
     if (!r) {
-        auto loaded = std::make_shared<Rig>(loadRig(assets_, skeleton));
+        auto loaded = std::make_shared<Rig>(stretched(loadRig(assets_, skeleton), stretch));
         if (!loaded->nodes.empty()) {
             r = std::move(loaded);
         }
@@ -16,12 +16,12 @@ std::shared_ptr<const Rig> RigLibrary::rig(const std::string& skeleton) {
     return r;
 }
 
-std::shared_ptr<const RigAnimation> RigLibrary::animation(const std::string& skeleton, const std::string& name) {
-    const auto r = rig(skeleton);
+std::shared_ptr<const RigAnimation> RigLibrary::animation(const std::string& skeleton, float stretch, const std::string& name) {
+    const auto r = rig(skeleton, stretch);
     if (!r || name.empty()) {
         return nullptr;
     }
-    auto& a = animations_[skeleton + "|" + name];
+    auto& a = animations_[{skeleton, stretch, name}];
     if (!a) {
         if (auto loaded = loadAnimation(assets_, name)) {
             a = std::make_shared<RigAnimation>(bindAnimation(*r, std::make_shared<anim::Animation>(std::move(*loaded))));
@@ -36,8 +36,8 @@ Actor buildSim(SceneBuilder& builder, RigLibrary& rigs, const SimLook& look, con
     actor.place = at;
     actor.age = look.age;
     actor.gender = look.gender;
-    actor.rig = rigs.rig(look.skeleton);
-    actor.animation = rigs.animation(look.skeleton, animation);
+    actor.rig = rigs.rig(look.skeleton, look.stretch);
+    actor.animation = rigs.animation(look.skeleton, look.stretch, animation);
     if (actor.rig) {
         poseRig(*actor.rig, actor.animation.get(), 0, world);
     }
@@ -57,7 +57,14 @@ Actor buildSim(SceneBuilder& builder, RigLibrary& rigs, const SimLook& look, con
     for (const auto& part : look.parts) {
         // Clothes are drawn over the Sim's skin (its uncovered arms, hands, neck).
         auto overrides = part.overrides;
-        if (part.part == kBodyPart) {
+        if (part.part == kHairPart) {
+            // A hair's scalp is drawn over the Sim's bald head (its strands' alpha layers are not).
+            for (auto& o : overrides) {
+                if (lower(o.group) == "hair") {
+                    o.material = hairOverScalp(builder, assets, look, o.material);
+                }
+            }
+        } else if (part.part == kBodyPart) {
             for (auto& o : overrides) {
                 o.material = clothesOverSkin(builder, assets, look, o.material);
             }
@@ -70,8 +77,13 @@ Actor buildSim(SceneBuilder& builder, RigLibrary& rigs, const SimLook& look, con
         }
         const int mesh = actor.rig ? builder.skinnedModel(part.model, overrides) : builder.model(part.model, overrides);
         const std::size_t instance = builder.scene().instances.size();
-        if (builder.place(mesh, name + " " + part.model, at, Part::Object, level) && actor.rig &&
-            !builder.scene().meshes[static_cast<std::size_t>(mesh)].skin.empty()) {
+        auto* placed = builder.place(mesh, name + " " + part.model, at, Part::Object, level);
+        if (placed) {
+            // A Sim moves, and where it stands isn't tested against the buildings' shadow as it does yet.
+            placed->sunTest = SunTest::Never;
+            placed->lightGroup = LightGroup::Sims;
+        }
+        if (placed && actor.rig && !builder.scene().meshes[static_cast<std::size_t>(mesh)].skin.empty()) {
             actor.skinned.push_back({instance, skinNodes(builder.scene().meshes[static_cast<std::size_t>(mesh)], *actor.rig)});
         }
     }

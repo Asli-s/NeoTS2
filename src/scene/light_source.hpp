@@ -15,7 +15,7 @@ struct LightSource {
     float falloff = 1;                // how fast it fades with distance
     float floorIntensity = 1;
     float wallIntensity = 1;
-    float interFloorFalloff = 0.5f;   // lost per floor it shines down through; 1 or more: none passes
+    float interFloorFalloff = 0.5f;   // lost per floor it shines down through, 1 or more: none passes
 
     // A window's light shines one way: toward `angle` (radians, around the vertical), more so
     // the higher `directionalMix` (0..1).

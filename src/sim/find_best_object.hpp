@@ -20,7 +20,7 @@ namespace ts2::sim {
 //
 // Each object with the function's entry in its OBJf is a candidate. Its rating is the object data
 // field the function names (or 50 when it names none), written to the Sim's object data 0x42
-// ("function score"); a candidate with no rating, or whose check tree fails, is skipped. Its score
+// ("function score"). A candidate with no rating, or whose check tree fails, is skipped. Its score
 // is the rating halved every 5 tiles away: rating / (distance / 5 + 1). The best becomes the
 // stack object.
 //
@@ -34,11 +34,11 @@ struct FunctionSearch {
     std::span<const std::int16_t> temps;
     // The object distances and "the room" are measured from: me, or the object of flag 0x08.
     SimObject& origin;
-    // Runs a candidate's check tree as me with the candidate as stack object; true when it passes.
+    // Runs a candidate's check tree as me with the candidate as stack object. True when it passes.
     std::function<bool(SimObject& candidate, std::uint16_t tree)> check;
 };
 
-// The id of the best object; nullopt when no object serves the function.
-std::optional<std::int16_t> findBestObjectForFunction(const FunctionSearch& search);
+// The id of the best object, nullopt when no object serves the function.
+[[nodiscard]] std::optional<std::int16_t> findBestObjectForFunction(const FunctionSearch& search);
 
 } // namespace ts2::sim

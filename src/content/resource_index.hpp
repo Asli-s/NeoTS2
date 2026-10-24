@@ -23,7 +23,7 @@ public:
         std::size_t overridden = 0;
     };
 
-    // Resources in group 0xFFFFFFFF belong to the package itself (character files use it); with
+    // Resources in group 0xFFFFFFFF belong to the package itself (character files use it). With
     // `localGroup` they are indexed under that group instead.
     std::size_t addPackage(const std::filesystem::path& path,
                            std::optional<std::uint32_t> localGroup = std::nullopt);
@@ -41,7 +41,7 @@ private:
     dbpf::Package& use(std::size_t package);
 
     std::vector<std::unique_ptr<dbpf::Package>> packages_;
-    // Packages most recently read from, oldest first; only these keep their files open.
+    // Packages most recently read from, oldest first. Only these keep their files open.
     std::vector<std::size_t> openPackages_;
     std::vector<std::filesystem::path> paths_;
     std::vector<Resource> resources_;

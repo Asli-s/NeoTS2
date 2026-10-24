@@ -1,8 +1,10 @@
 #pragma once
 
+#include "diag/log.hpp"
 #include "orbit.hpp"
 #include "render/renderer.hpp"
 #include "scene/lot_skirt.hpp"
+#include "scene/neighborhood_plumbobs.hpp"
 #include "scene/neighborhood_scene.hpp"
 #include "scene/rig.hpp"
 #include "scene/scene.hpp"
@@ -12,6 +14,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <format>
+#include <iterator>
+#include <string>
+#include <utility>
 
 namespace app {
 
@@ -41,10 +47,10 @@ inline void frameScene(const ts2::scene::Scene& scene, Orbit& orbit) {
 
 // Looking at a lot: which storey, how walls show, roofs on or off, and the keys that change them
 // (Q/E or comma/period turn a quarter, Page Up/Down change storey, Home/End (or Tab)
-// the next or previous wall mode, R roofs; 1/2/3 are the game's speed keys).
+// the next or previous wall mode, R roofs). 1/2/3 are the game's speed keys.
 struct LotView {
     ts2::scene::View view;
-    int ground = 0, top = 0;  // the lowest storey worth showing on its own, and the highest
+    int ground = 0, top = 0;  // the lowest storey the view goes down to (the ground), and the highest
 
     // Frames the lot and starts on its top storey with walls up.
     void start(const ts2::scene::Scene& scene, Orbit& orbit) {
@@ -58,8 +64,34 @@ struct LotView {
 
     void changeLevel(int delta, Orbit& orbit) {
         const int level = std::clamp(view.level + delta, ground, top);
-        orbit.target[2] += static_cast<float>(level - view.level) * kStorey;
+        // A camera with a goal finds its height from the floors of the storey shown and eases there.
+        if (!orbit.goal) {
+            orbit.target[2] += static_cast<float>(level - view.level) * kStorey;
+        }
+        if (level != view.level) {
+            ts2::diag::step(std::format("view: storey {}", level - ground + 1));
+        }
         view.level = level;
+    }
+
+    // The game's wall modes: 0 walls down, 1 cutaway, 2 walls up, 3 walls up with the roofs.
+    int wallMode() const {
+        switch (view.walls) {
+        case ts2::scene::WallView::Down: return 0;
+        case ts2::scene::WallView::Cutaway: return 1;
+        default: return view.roofs ? 3 : 2;
+        }
+    }
+    void setWallMode(int mode) {
+        static constexpr ts2::scene::WallView kWalls[] = {ts2::scene::WallView::Down, ts2::scene::WallView::Cutaway,
+                                                          ts2::scene::WallView::Up, ts2::scene::WallView::Up};
+        static constexpr const char* kNames[] = {"walls down", "walls cutaway", "walls up", "walls up with roofs"};
+        mode = std::clamp(mode, 0, 3);
+        if (mode != wallMode()) {
+            ts2::diag::step(std::string("view: ") + kNames[mode]);
+        }
+        view.walls = kWalls[mode];
+        view.roofs = mode == 3;
     }
 
     // Returns whether the key was one of the view's.
@@ -81,13 +113,14 @@ struct LotView {
             return true;
         case SDLK_HOME:
         case SDLK_TAB:
-            view.walls = static_cast<ts2::scene::WallView>((static_cast<int>(view.walls) + 1) % 3);
+            setWallMode((wallMode() + 3) % 4);
             return true;
         case SDLK_END:
-            view.walls = static_cast<ts2::scene::WallView>((static_cast<int>(view.walls) + 2) % 3);
+            setWallMode((wallMode() + 1) % 4);
             return true;
         case SDLK_R:
             view.roofs = !view.roofs;
+            ts2::diag::step(view.roofs ? "view: roofs on" : "view: roofs off");
             return true;
         default:
             return false;
@@ -95,21 +128,46 @@ struct LotView {
     }
 };
 
-// Adds a scene's images, materials, meshes, instances, walls, light maps and object lighting to
+// Lights moved with a scene by `place`: they turn as its objects' normals do, and point lights move.
+inline void placeLights(ts2::scene::ObjectLighting& lighting, const ts2::scene::Transform& place) {
+    for (auto& l : lighting.lights) {
+        place.apply(l.direction.data(), false);
+        const float len = std::sqrt(l.direction[0] * l.direction[0] + l.direction[1] * l.direction[1] + l.direction[2] * l.direction[2]);
+        if (len > 0) {
+            for (auto& c : l.direction) {
+                c /= len;
+            }
+        }
+        if (l.point) {
+            place.apply(l.position.data(), true);
+        }
+    }
+}
+
+// Moves a scene's images, materials, meshes, instances, walls, light maps and object lighting into
 // another, its instances moved by `place`.
-inline void appendScene(ts2::scene::Scene& out, const ts2::scene::Scene& add, const ts2::scene::Transform& place) {
+inline void appendScene(ts2::scene::Scene& out, ts2::scene::Scene add, const ts2::scene::Transform& place) {
     using namespace ts2::scene;
     const int images = static_cast<int>(out.images.size()), materials = static_cast<int>(out.materials.size());
     const int meshes = static_cast<int>(out.meshes.size()), walls = static_cast<int>(out.walls.size());
     const std::size_t instances = out.instances.size();
-    out.images.insert(out.images.end(), add.images.begin(), add.images.end());
-    for (Material m : add.materials) {
+    const int lightSets = static_cast<int>(out.lightSets.size());
+    const int envCubes = static_cast<int>(out.envCubes.size());
+    out.envCubes.insert(out.envCubes.end(), std::make_move_iterator(add.envCubes.begin()), std::make_move_iterator(add.envCubes.end()));
+    out.images.insert(out.images.end(), std::make_move_iterator(add.images.begin()), std::make_move_iterator(add.images.end()));
+    for (Material& m : add.materials) {
         if (m.image >= 0) {
             m.image += images;
         }
+        if (m.normalMap >= 0) {
+            m.normalMap += images;
+        }
+        if (m.envCube >= 0) {
+            m.envCube += envCubes;
+        }
         out.materials.push_back(std::move(m));
     }
-    for (Mesh m : add.meshes) {
+    for (Mesh& m : add.meshes) {
         for (auto& p : m.primitives) {
             if (p.material >= 0) {
                 p.material += materials;
@@ -117,21 +175,33 @@ inline void appendScene(ts2::scene::Scene& out, const ts2::scene::Scene& add, co
         }
         out.meshes.push_back(std::move(m));
     }
-    for (Instance i : add.instances) {
+    for (Instance& i : add.instances) {
         if (i.mesh >= 0) {
             i.mesh += meshes;
         }
         if (i.lightMap >= 0) {
             i.lightMap += images;
         }
+        if (i.incidenceMap >= 0) {
+            i.incidenceMap += images;
+        }
         i.transform = place * i.transform;
         for (auto& w : i.walls) {
             w += walls;
         }
+        if (i.lightSet >= 0) {
+            i.lightSet += lightSets;
+        }
+        for (auto& set : i.partLightSets) {
+            if (set >= 0) {
+                set += lightSets;
+            }
+        }
         out.instances.push_back(std::move(i));
     }
-    for (Actor a : add.actors) {
+    for (Actor& a : add.actors) {
         a.place = place * a.place;
+        a.lotFrame = place * a.lotFrame;
         for (auto& s : a.skinned) {
             s.instance += instances;
         }
@@ -140,29 +210,53 @@ inline void appendScene(ts2::scene::Scene& out, const ts2::scene::Scene& add, co
         }
         out.actors.push_back(std::move(a));
     }
-    if (add.lightMaps && !out.lightMaps) {
-        auto& maps = out.lightMaps.emplace(*add.lightMaps);
-        for (auto& f : maps.floors) {
-            if (f >= 0) {
-                f += images;
-            }
-        }
-        if (maps.walls >= 0) {
-            maps.walls += images;
-        }
+    for (ts2::scene::PlacedObject& o : add.placedObjects) {
+        o.instance += instances;
+        o.lotFrame = place * o.lotFrame;
+        out.placedObjects.push_back(std::move(o));
     }
-    // The lights turn with the scene, as its objects' normals do.
-    if (add.objectLighting && !out.objectLighting) {
-        auto& lighting = out.objectLighting.emplace(*add.objectLighting);
-        for (auto& l : lighting.lights) {
-            place.apply(l.direction.data(), false);
-            const float len = std::sqrt(l.direction[0] * l.direction[0] + l.direction[1] * l.direction[1] + l.direction[2] * l.direction[2]);
-            if (len > 0) {
-                for (auto& c : l.direction) {
-                    c /= len;
+    if (add.floorHeight && !out.floorHeight) {
+        out.floorHeight = std::move(add.floorHeight);
+        out.groundLevel = add.groundLevel;
+    }
+    if (add.floorCorner && !out.floorCorner) {
+        out.floorCorner = std::move(add.floorCorner);
+    }
+    if (out.lotSize[0] <= 0) {
+        out.lotSize = add.lotSize;
+    }
+    if (add.lightMaps && !out.lightMaps) {
+        auto& maps = out.lightMaps.emplace(std::move(*add.lightMaps));
+        for (auto* list : {&maps.floors, &maps.floorIncidence}) {
+            for (auto& f : *list) {
+                if (f >= 0) {
+                    f += images;
                 }
             }
         }
+        for (auto* one : {&maps.walls, &maps.wallIncidence}) {
+            if (*one >= 0) {
+                *one += images;
+            }
+        }
+    }
+    if (add.objectLighting && !out.objectLighting) {
+        placeLights(out.objectLighting.emplace(std::move(*add.objectLighting)), place);
+    }
+    for (auto& set : add.lightSets) {
+        placeLights(out.lightSets.emplace_back(std::move(set)), place);
+    }
+    if (add.thingSun && !out.thingSun) {
+        out.thingSun = std::move(add.thingSun);
+    }
+    if (add.thingLights && !out.thingLights) {
+        out.thingLights = [lights = std::move(add.thingLights), place](const Mesh& mesh, const Transform& inLot, int storey) {
+            auto sets = lights(mesh, inLot, storey);
+            for (auto& set : sets) {
+                placeLights(set, place);
+            }
+            return sets;
+        };
     }
     for (WallInfo w : add.walls) {
         float a[3] = {w.x0, w.y0, 0}, b[3] = {w.x1, w.y1, 0};
@@ -180,30 +274,31 @@ inline void appendScene(ts2::scene::Scene& out, const ts2::scene::Scene& add, co
 // it, within the skirt's area, the ground around a lot (`skirt`, in world coordinates), the other
 // lots' imposters and the neighborhood's plants. The neighborhood's own far-view ground, water and
 // roads are not drawn.
-inline ts2::scene::Scene lotInNeighborhood(const ts2::scene::Scene& hood, const ts2::scene::Scene& lot,
-                                           const ts2::scene::Scene& skirt, const ts2::scene::LotFootprint& where,
-                                           const ts2::scene::SkirtArea& area) {
+inline ts2::scene::Scene lotInNeighborhood(const ts2::scene::Scene& hood, ts2::scene::Scene lot, ts2::scene::Scene skirt,
+                                           const ts2::scene::LotFootprint& where, const ts2::scene::SkirtArea& area) {
     using namespace ts2::scene;
     Scene out;
     out.terrain = hood.terrain;
-    out.skybox = lot.skybox;
+    out.skybox = std::move(lot.skybox);
     out.clip = skirt.clip;
     const float tile = out.terrain ? out.terrain->tileSize : 10.0f;
     const float ax0 = static_cast<float>(area.x0) * tile, ay0 = static_cast<float>(area.y0) * tile;
     const float ax1 = static_cast<float>(area.x1) * tile, ay1 = static_cast<float>(area.y1) * tile;
-    // The neighborhood's plants within the area.
+    // The neighborhood's plants within the area. The plumbobs over lots belong to the neighborhood
+    // view only.
     Scene plants = hood;
     plants.terrain.reset();
+    plants.objectLighting.reset();  // the lot's lighting state lights everything in lot view
     std::erase_if(plants.instances, [&](const Instance& i) {
         const float x = i.transform.m[3], y = i.transform.m[7];
-        return x < ax0 || x > ax1 || y < ay0 || y > ay1;
+        return x < ax0 || x > ax1 || y < ay0 || y > ay1 || i.name == ts2::scene::kNeighborhoodPlumbobName;
     });
-    appendScene(out, plants, Transform{});
-    appendScene(out, skirt, Transform{});
-    appendScene(out, lot, where.place);
+    appendScene(out, std::move(plants), Transform{});
+    appendScene(out, std::move(skirt), Transform{});
+    appendScene(out, std::move(lot), where.place);
     if (out.terrain) {
         auto& t = *out.terrain;
-        // Other lots' imposters within the area; not this lot's. In lot view the game stands them on
+        // Other lots' imposters within the area, not this lot's. In lot view the game stands them on
         // their lots, without the neighborhood view's lift.
         std::erase_if(t.imposters, [&](const PaintedTerrain::ImposterPart& p) {
             if (p.lot == where.id || p.vertices.size() < 3) {

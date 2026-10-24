@@ -1,6 +1,7 @@
 #include "scene/light_grid.hpp"
 
 #include "content/lot.hpp"
+#include "diag/log.hpp"
 
 #include <algorithm>
 #include <array>
@@ -109,7 +110,7 @@ void buildTile(Grid& g, const LevelInput& in, int x, int y, std::uint8_t walls) 
 }
 
 // Agrees one link between a cell and its neighbour in direction d: which halves it joins, or
-// none. Only this cell's links and both cells' target bits change; the neighbour settles its own
+// none. Only this cell's links and both cells' target bits change. The neighbour settles its own
 // links when its turn comes.
 void reconcile(Cell& a, Cell& b, int d) {
     const int o = (d + 4) & 7;
@@ -210,10 +211,8 @@ void blockCornerCutting(Grid& g, int x, int y, int d) {
     }
 }
 
+// Whether a tile has floor in any quarter on a grid level (counted from the lot's lowest).
 bool hasFloor(const array3d::Array3D& floors, int level, int x, int y) {
-    if (level == 0) {
-        return true;
-    }
     if (!floors.contains(level, x, y)) {
         return false;
     }
@@ -226,7 +225,7 @@ bool hasFloor(const array3d::Array3D& floors, int level, int x, int y) {
 }
 
 // Marks the tile sides a wall stands on, one tile step at a time. Walls along the grid are on a
-// side of the tiles both sides of them; diagonal walls cross the tiles they pass through.
+// side of the tiles both sides of them. Diagonal walls cross the tiles they pass through.
 void markWall(LevelInput& in, const wallruns::Wall& w) {
     const int ax = w.x0, ay = w.y0, bx = w.x1, by = w.y1;
     auto mark = [&](int x, int y, std::uint8_t side) {
@@ -260,8 +259,13 @@ void markWall(LevelInput& in, const wallruns::Wall& w) {
 LevelInput fromLot(const content::Lot& lot, int level, const std::vector<wallruns::Wall>& walls) {
     LevelInput in;
     const auto floors = lot.grids.find(content::kFloorGridInstance);
-    if (level < 0 || level >= kMaxLevels || floors == lot.grids.end() || floors->second.width == 0 || floors->second.height == 0 ||
+    const int ground = content::groundGridLevel(lot);
+    if (level < -ground || level >= kMaxLevels || floors == lot.grids.end() || floors->second.width == 0 || floors->second.height == 0 ||
         floors->second.width > static_cast<std::uint32_t>(kMaxTiles) || floors->second.height > static_cast<std::uint32_t>(kMaxTiles)) {
+        if (level >= kMaxLevels || (floors != lot.grids.end() && (floors->second.width > static_cast<std::uint32_t>(kMaxTiles) ||
+                                                                  floors->second.height > static_cast<std::uint32_t>(kMaxTiles)))) {
+            diag::warnOnce("light grid: a level past 64 or a lot larger than 256 tiles is left unlit");
+        }
         return in;
     }
     in.level = level;
@@ -272,7 +276,9 @@ LevelInput fromLot(const content::Lot& lot, int level, const std::vector<wallrun
     in.walls.assign(tiles, 0);
     for (int y = 0; y < in.height; ++y) {
         for (int x = 0; x < in.width; ++x) {
-            const bool floor = hasFloor(floors->second, level, x, y) || hasFloor(floors->second, level + 1, x, y);
+            // The ground storey counts every tile, a storey below it only its own floor or the
+            // ground storey's floor above.
+            const bool floor = level == 0 || hasFloor(floors->second, level + ground, x, y) || hasFloor(floors->second, level + ground + 1, x, y);
             in.floor[static_cast<std::size_t>(y) * static_cast<std::size_t>(in.width) + static_cast<std::size_t>(x)] = floor ? 1 : 0;
         }
     }
@@ -289,6 +295,9 @@ floorlight::Grid build(const LevelInput& in) {
     const std::size_t tiles = static_cast<std::size_t>(in.width) * static_cast<std::size_t>(in.height);
     if (in.width <= 0 || in.height <= 0 || in.width > kMaxTiles || in.height > kMaxTiles || in.floor.size() != tiles ||
         in.walls.size() != tiles) {
+        if (in.width > kMaxTiles || in.height > kMaxTiles) {
+            diag::warnOnce("light grid: a level larger than 256 tiles is left unlit");
+        }
         return g;
     }
     g.level = in.level;

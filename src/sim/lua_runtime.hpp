@@ -3,6 +3,7 @@
 #include "formats/luascript.hpp"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -50,24 +51,32 @@ public:
     LuaRuntime(const LuaRuntime&) = delete;
     LuaRuntime& operator=(const LuaRuntime&) = delete;
 
-    // Runs the modules and defines the scripts, in the order given; modules can look up object
+    // Runs the modules and defines the scripts, in the order given. Modules can look up object
     // types and constants through `code`. Problems are collected.
     void load(const std::vector<luascript::Script>& modules, const std::vector<luascript::Script>& scripts,
               CodeSource* code = nullptr);
     bool hasScript(const std::string& name);
 
     // Calls script `name`. False when it couldn't run to the end (see the call's fields).
-    bool run(const std::string& name, ScriptCall& call);
+    [[nodiscard]] bool run(const std::string& name, ScriptCall& call);
+    // Calls the script kept as global `name`, first compiling it from Lua source text: the game
+    // runs a few scripts straight from their string table entry's description.
+    [[nodiscard]] bool runSource(const std::string& name, const std::string& source, ScriptCall& call);
 
     // The game's property set scripts read and write with nGameState.Get/SetProperty, by name.
     using Property = std::variant<bool, std::int32_t, std::uint32_t, float, std::string>;
     std::map<std::string, Property> properties;
-    // The installed packs, as nGameState.IsEPInstalled tests them; 0 when unknown.
+    // The installed packs, as nGameState.IsEPInstalled tests them, 0 when unknown.
     std::uint32_t installedPacks = 0;
 
     std::vector<std::string> problems;
+    // Scripts that raised an object error (the game logs them and goes on): how many, and the last
+    // one's name and error code.
+    std::size_t scriptErrors = 0;
+    std::string lastScriptError;
 
 private:
+    bool callTop(ScriptCall& call);
     lua_State* L_ = nullptr;
 };
 

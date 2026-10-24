@@ -6,18 +6,6 @@
 
 namespace ts2::wallgraph {
 
-namespace {
-
-std::size_t readCount(BinaryReader& r, std::size_t elementSize) {
-    const std::int32_t count = r.i32();
-    if (count < 0 || static_cast<std::size_t>(count) * elementSize > r.remaining()) {
-        throw std::runtime_error("cWallGraph: bad count");
-    }
-    return static_cast<std::size_t>(count);
-}
-
-} // namespace
-
 const Point* WallGraph::point(std::int32_t id) const {
     for (const auto& p : points) {
         if (p.id == id) {
@@ -25,6 +13,18 @@ const Point* WallGraph::point(std::int32_t id) const {
         }
     }
     return nullptr;
+}
+
+PointIndex::PointIndex(const WallGraph& graph) {
+    points_.reserve(graph.points.size());
+    for (const auto& p : graph.points) {
+        points_.emplace(p.id, &p);
+    }
+}
+
+const Point* PointIndex::operator()(std::int32_t id) const {
+    const auto it = points_.find(id);
+    return it == points_.end() ? nullptr : it->second;
 }
 
 WallGraph parse(std::span<const std::uint8_t> data) {
@@ -49,18 +49,18 @@ WallGraph parse(std::span<const std::uint8_t> data) {
         v = r.i32();
     }
 
-    g.points.resize(readCount(r, 16));
+    g.points.resize(r.i32Count(16));
     for (auto& p : g.points) {
         p.id = r.i32();
         p.x = r.f32();
         p.y = r.f32();
         p.level = r.i32();
     }
-    g.rooms.resize(readCount(r, 4));
+    g.rooms.resize(r.i32Count(4));
     for (auto& room : g.rooms) {
         room = r.i32();
     }
-    g.walls.resize(readCount(r, 20));
+    g.walls.resize(r.i32Count(20));
     for (auto& w : g.walls) {
         w.id = r.i32();
         w.from = r.i32();

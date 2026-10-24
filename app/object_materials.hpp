@@ -1,0 +1,75 @@
+#pragma once
+
+#include "scene/animation_library.hpp"
+#include "scene/assets.hpp"
+#include "scene/builder.hpp"
+#include "scene/scene.hpp"
+#include "sim/world.hpp"
+
+#include <cstddef>
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace app {
+
+// Shows the materials scripts put on lot objects (Change Material): each changed object's
+// materials, one per primitive of its mesh, with materials the lot didn't have added to its scene.
+// Also brings in the models of objects scripts create.
+class ObjectMaterials {
+public:
+    explicit ObjectMaterials(ts2::scene::Assets& assets) : assets_(assets), builder_(assets) {}
+
+    // The scene mesh of a game model (e.g. "puddle_cres"), added with its materials on first use.
+    // -1 when it has nothing to draw.
+    int model(const std::string& name, ts2::scene::Scene& scene);
+    // Where a named node of a model sits in it, once model() has added it. Null for none.
+    const ts2::scene::Transform* bone(const std::string& model, const std::string& node) const { return builder_.bone(model, node); }
+
+    // Looks for objects whose materials changed since the last update.
+    void update(ts2::sim::World& world, ts2::scene::Scene& scene);
+    // What the last update changed: scene instance and its materials (see Renderer::setMaterials).
+    const std::vector<std::pair<std::size_t, std::vector<int>>>& changed() const { return changed_; }
+
+    // How the clip an object plays (Animate Object) moves its model at `nowMs` on the world's
+    // clock, in the model's space: the plumbob's spin. Only for models whose every vertex follows
+    // one joint, which the whole model turns with. Nullopt for other objects and when it plays none.
+    std::optional<ts2::scene::Transform> pose(const ts2::sim::SimObject& object, double nowMs, ts2::scene::AnimationLibrary& animations);
+
+private:
+    // A model whose vertices all follow one joint: its rig, that joint and the joint's rest place.
+    struct OneJointModel {
+        std::shared_ptr<const ts2::scene::Rig> rig;
+        int joint = -1;
+        ts2::scene::Transform rest;
+    };
+    // By lower-case model name. Null for models that don't qualify.
+    std::map<std::string, std::shared_ptr<const OneJointModel>> oneJointModels_;
+    std::vector<ts2::scene::Transform> poseScratch_;
+
+    std::vector<int> materialsOf(const ts2::sim::SimObject& object, const ts2::scene::Mesh& mesh, ts2::scene::Scene& scene);
+    // The scene's material of that name, added from the game's files on first use. -1 when the
+    // game has no such material.
+    int material(const std::string& name, ts2::scene::Scene& scene);
+    int image(int builderImage, ts2::scene::Scene& scene);
+    int envCube(int builderCube, ts2::scene::Scene& scene);
+    // The scene's copy of one of the builder's materials.
+    int builderMaterial(int index, ts2::scene::Scene& scene);
+
+    ts2::scene::Assets& assets_;
+    ts2::scene::SceneBuilder builder_;
+    std::map<std::int16_t, std::uint32_t> versions_;  // per object, the materialVersion shown
+    std::map<std::string, int> materials_;           // lower-case name -> scene material
+    bool lotMaterialsKnown_ = false;                 // the lot's own materials are in materials_
+    std::map<int, int> images_;                      // builder image -> scene image
+    std::map<int, int> envCubes_;                    // builder cube -> scene cube
+    std::map<int, int> builderMaterials_;            // builder material -> scene material
+    std::map<std::string, int> models_;              // lower-case name -> scene mesh
+    std::vector<std::pair<std::size_t, std::vector<int>>> changed_;
+};
+
+} // namespace app

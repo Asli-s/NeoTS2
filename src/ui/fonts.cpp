@@ -1,22 +1,39 @@
 #include "ui/fonts.hpp"
 
 #include "content/install.hpp"
+#include "diag/log.hpp"
+
+#include "ui/font_metrics.hpp"
 
 #include <ft2build.h>
 #include FT_FREETYPE_H
+#include FT_FONT_FORMATS_H
 
 #include <algorithm>
+#include <array>
+#include <charconv>
 #include <cmath>
 #include <cctype>
 #include <fstream>
+#include <limits>
+#include <optional>
 #include <set>
 #include <sstream>
+#include <string_view>
+#include <tuple>
 
 namespace ts2::ui {
 
 namespace {
 
 namespace fs = std::filesystem;
+
+// The widest line or letter spacing taken, in pixels, so sizes added to it can't overflow.
+constexpr int kMaxSpacing = 2048;
+
+// The widest line measured, in 26.6 units: far past the largest text picture, and small enough
+// that adding a few more advances can't overflow.
+constexpr std::int64_t kMaxPen = std::int64_t{1} << 40;
 
 std::string lower(std::string s) {
     for (char& c : s) {
@@ -32,6 +49,23 @@ std::string trim(std::string s) {
     }
     const auto last = s.find_last_not_of(" \t\r\n");
     return s.substr(first, last - first + 1);
+}
+
+// A whole number at the start of `text`, read as atoi reads it (leading spaces and a sign allowed)
+// but held within -limit..limit, so a broken file's huge value can't overflow. 0 when there is none.
+int styleNumber(std::string_view text, int limit) {
+    while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) {
+        text.remove_prefix(1);
+    }
+    if (!text.empty() && text.front() == '+') {
+        text.remove_prefix(1);
+    }
+    long long value = 0;
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (error == std::errc::result_out_of_range) {
+        return text.front() == '-' ? -limit : limit;
+    }
+    return static_cast<int>(std::clamp<long long>(value, -limit, limit));
 }
 
 std::string utf8(const fs::path& path) {
@@ -95,6 +129,22 @@ std::vector<std::uint8_t> decodeMxf(const std::vector<std::uint8_t>& file) {
     return out;
 }
 
+// The highest or lowest point of a character's outline in font units (its control points too, as
+// the game measures it), or nothing when the font lacks the character.
+std::optional<int> outlineExtreme(FT_Face face, char32_t c, bool highest) {
+    const FT_UInt glyph = FT_Get_Char_Index(face, c);
+    if (glyph == 0 || FT_Load_Glyph(face, glyph, FT_LOAD_NO_SCALE | FT_LOAD_NO_HINTING) != 0 ||
+        face->glyph->format != FT_GLYPH_FORMAT_OUTLINE || face->glyph->outline.n_points <= 0) {
+        return std::nullopt;
+    }
+    const FT_Outline& o = face->glyph->outline;
+    FT_Pos best = o.points[0].y;
+    for (int i = 1; i < o.n_points; ++i) {
+        best = highest ? std::max(best, o.points[i].y) : std::min(best, o.points[i].y);
+    }
+    return static_cast<int>(std::clamp<FT_Pos>(best, -32767, 32767));
+}
+
 // FreeType's library and faces are closed by their owners' destructors, so nothing is left open
 // even when loading stops halfway with an error.
 struct Fonts::Impl {
@@ -104,6 +154,11 @@ struct Fonts::Impl {
         FT_Face face = nullptr;
         std::string family, fullName;  // the full name: family and style ("HelveticaNeueLT Std Medium")
         bool bold = false;
+        // Type 1 faces: the ascender and descender the game's font engine measures them by (the
+        // top of 'f' and the bottom of 'g', else 750 and -250, as the game's fonts carry no values
+        // of their own). Other faces are measured by FreeType.
+        bool typeOne = false;
+        int ascender = 750, descender = -250;
         ~Face() {
             if (face) {
                 FT_Done_Face(face);
@@ -125,8 +180,8 @@ struct Fonts::Impl {
         }
     }
 
-    // The face a style draws with, set to its size.
-    FT_Face pick(const FontStyle& style, int& size) {
+    // The face a style draws with: its first named face found, the one matching its boldness.
+    Face* find(const FontStyle& style) {
         for (const auto& name : style.faces) {
             const std::string want = lower(name);
             Face* best = nullptr;
@@ -136,18 +191,26 @@ struct Fonts::Impl {
                 }
             }
             if (best) {
-                size = style.size;
-                // A narrowed style is drawn at a narrower width, hinted at that width.
-                FT_Set_Char_Size(best->face, static_cast<FT_F26Dot6>(std::lround(static_cast<float>(style.size) * style.xScale * 64)),
-                                 static_cast<FT_F26Dot6>(style.size) * 64, 72, 72);
-                return best->face;
+                return best;
             }
         }
         return nullptr;
     }
 
-    void readStyles(const fs::path& ini) {
-        std::ifstream in(ini);
+    // The face a style draws with, set to its size.
+    FT_Face pick(const FontStyle& style, int& size) {
+        Face* best = find(style);
+        if (!best) {
+            return nullptr;
+        }
+        size = style.size;
+        // A narrowed style is drawn at a narrower width, hinted at that width.
+        FT_Set_Char_Size(best->face, static_cast<FT_F26Dot6>(std::lround(static_cast<float>(style.size) * style.xScale * 64)),
+                         static_cast<FT_F26Dot6>(style.size) * 64, 72, 72);
+        return best->face;
+    }
+
+    void readStyles(std::istream& in) {
         std::string line, section;
         while (std::getline(in, line)) {
             line = trim(line);
@@ -171,19 +234,47 @@ struct Fonts::Impl {
             for (std::string face; std::getline(faceList, face, ',');) {
                 s.faces.push_back(trim(face));
             }
-            s.size = std::max(1, std::atoi(f[1].c_str()));
+            // Sizes are clamped to 1..2048 pixels, as the game does.
+            s.size = std::clamp(styleNumber(f[1], 2048), 1, 2048);
             if (f.size() > 2) {
                 std::stringstream options(lower(f[2]));
                 for (std::string o; std::getline(options, o, '|');) {
                     o = trim(o);
                     s.bold = s.bold || o == "bold";
                     s.italic = s.italic || o == "italic";
+                    s.marks |= o == "under" || o == "underline" ? 1u : o == "strike" || o == "strikethrough" ? 2u : o == "shadow" ? 4u : 0u;
+                    s.unshared = s.unshared || o == "private";
                     if (o.rfind("linespacing=", 0) == 0) {
-                        s.lineSpacing = std::atoi(o.c_str() + 12);
+                        s.lineSpacing = styleNumber(std::string_view(o).substr(12), kMaxSpacing);
+                    }
+                    if (o.rfind("charspacing=", 0) == 0) {
+                        s.charSpacing = styleNumber(std::string_view(o).substr(12), kMaxSpacing);
                     }
                     if (o.rfind("xscale=", 0) == 0) {
                         s.xScale = static_cast<float>(std::atof(o.c_str() + 7));
                     }
+                    if (o.rfind("yscale=", 0) == 0) {
+                        s.yScale = static_cast<float>(std::atof(o.c_str() + 7));
+                    }
+                }
+                // Safety limits for broken files (the game's own styles use spacings of -2..3 and
+                // scales of 0.8..1.25): a huge spacing overflows a text's height, and a scale that
+                // is zero, negative or huge makes glyphs of no size or of gigabytes.
+                if (s.lineSpacing < -2048 || s.lineSpacing > 2048) {
+                    diag::warnOnce("fonts: a line spacing past 2048 pixels is taken as 0");
+                    s.lineSpacing = 0;
+                }
+                if (s.charSpacing < -2048 || s.charSpacing > 2048) {
+                    diag::warnOnce("fonts: a letter spacing past 2048 pixels is taken as 0");
+                    s.charSpacing = 0;
+                }
+                if (!(s.xScale > 0.0f && s.xScale <= 16.0f)) {
+                    diag::warnOnce("fonts: a width scale outside 0..16 is taken as 1");
+                    s.xScale = 1;
+                }
+                if (!(s.yScale > 0.0f && s.yScale <= 16.0f)) {
+                    diag::warnOnce("fonts: a height scale outside 0..16 is taken as 1");
+                    s.yScale = 1;
                 }
             }
             if (f.size() > 3) {
@@ -192,6 +283,86 @@ struct Fonts::Impl {
             const std::string name = lower(trim(line.substr(0, eq)));
             styles[name] = s;
             byGuid[s.guid] = name;
+            read.push_back(s);
+        }
+    }
+
+    // The game makes one font for all styles with the same face, size, boldness, slant and marks,
+    // unless a style is private. Its spacings and scales are set on that one font, style by style
+    // in file order, so the last style that sets them decides them for all. Spacings are set
+    // together when either isn't 0 and scales together when either isn't 1.
+    void shareFonts() {
+        using Key = std::tuple<const Face*, std::string, int, bool, bool, unsigned>;
+        auto key = [this](const FontStyle& s) {
+            const Face* face = find(s);
+            std::string names;
+            for (const auto& n : s.faces) {
+                names += lower(n) + ",";
+            }
+            return Key{face, face ? std::string() : names, s.size, s.bold, s.italic, s.marks};
+        };
+        struct Set {
+            std::optional<std::array<int, 2>> spacings;
+            std::optional<std::array<float, 2>> scales;
+        };
+        std::map<Key, Set> set;
+        for (const auto& s : read) {
+            if (s.unshared) {
+                continue;
+            }
+            Set& font = set[key(s)];
+            if (s.charSpacing != 0 || s.lineSpacing != 0) {
+                font.spacings = std::array<int, 2>{s.charSpacing, s.lineSpacing};
+            }
+            if (s.xScale != 1 || s.yScale != 1) {
+                font.scales = std::array<float, 2>{s.xScale, s.yScale};
+            }
+        }
+        for (auto& [name, s] : styles) {
+            const auto font = s.unshared ? set.end() : set.find(key(s));
+            if (font == set.end()) {
+                continue;
+            }
+            if (font->second.spacings) {
+                s.charSpacing = (*font->second.spacings)[0];
+                s.lineSpacing = (*font->second.spacings)[1];
+            }
+            if (font->second.scales) {
+                s.xScale = (*font->second.scales)[0];
+                s.yScale = (*font->second.scales)[1];
+            }
+        }
+        read.clear();
+    }
+
+    std::vector<FontStyle> read;  // every style line in the order read, until the fonts are shared
+
+    // Opens a font file's contents (Type 1 or TrueType). Unreadable data is left out.
+    void addFace(std::vector<std::uint8_t> data) {
+        auto face = std::make_unique<Face>();
+        face->data = std::move(data);
+        if (face->data.empty() ||
+            FT_New_Memory_Face(library, face->data.data(), static_cast<FT_Long>(face->data.size()), 0, &face->face) != 0) {
+            face->face = nullptr;
+            return;
+        }
+        face->family = face->face->family_name ? face->face->family_name : "";
+        face->fullName = face->family + " " + (face->face->style_name ? face->face->style_name : "");
+        face->bold = (face->face->style_flags & FT_STYLE_FLAG_BOLD) != 0;
+        if (const char* format = FT_Get_Font_Format(face->face); format && std::string_view(format) == "Type 1") {
+            face->typeOne = true;
+            face->ascender = outlineExtreme(face->face, U'f', true).value_or(750);
+            face->descender = outlineExtreme(face->face, U'g', false).value_or(-250);
+        }
+        faces.push_back(std::move(face));
+    }
+
+    // After every style and face is read: the shared fonts' settings and the Default style.
+    void finish() {
+        shareFonts();
+        const auto d = styles.find("default");
+        if (d != styles.end()) {
+            fallback = d->second;
         }
     }
 };
@@ -209,31 +380,27 @@ Fonts::Fonts(const fs::path& install) : impl_(std::make_unique<Impl>()) {
             if (!fs::is_directory(folder) || !seen.insert(folder).second) {
                 continue;
             }
-            if (fs::exists(folder / "FontStyle.ini")) {
-                impl_->readStyles(folder / "FontStyle.ini");
+            if (std::ifstream ini(folder / "FontStyle.ini"); ini) {
+                impl_->readStyles(ini);
             }
             for (const auto& item : fs::directory_iterator(folder)) {
-                if (lower(utf8(item.path().extension())) != ".mxf") {
-                    continue;
+                if (lower(utf8(item.path().extension())) == ".mxf") {
+                    impl_->addFace(decodeMxf(readFile(item.path())));
                 }
-                auto face = std::make_unique<Impl::Face>();
-                face->data = decodeMxf(readFile(item.path()));
-                if (face->data.empty() ||
-                    FT_New_Memory_Face(impl_->library, face->data.data(), static_cast<FT_Long>(face->data.size()), 0, &face->face) != 0) {
-                    face->face = nullptr;
-                    continue;
-                }
-                face->family = face->face->family_name ? face->face->family_name : "";
-                face->fullName = face->family + " " + (face->face->style_name ? face->face->style_name : "");
-                face->bold = (face->face->style_flags & FT_STYLE_FLAG_BOLD) != 0;
-                impl_->faces.push_back(std::move(face));
             }
         }
     }
-    const auto d = impl_->styles.find("default");
-    if (d != impl_->styles.end()) {
-        impl_->fallback = d->second;
+    impl_->finish();
+}
+
+Fonts::Fonts(const std::string& styles, std::vector<std::vector<std::uint8_t>> files) : impl_(std::make_unique<Impl>()) {
+    FT_Init_FreeType(&impl_->library);
+    std::istringstream ini(styles);
+    impl_->readStyles(ini);
+    for (auto& file : files) {
+        impl_->addFace(std::move(file));
     }
+    impl_->finish();
 }
 
 Fonts::~Fonts() = default;
@@ -261,13 +428,16 @@ int Fonts::width(const FontStyle& style, const std::string& utf8) {
     if (!face) {
         return 0;
     }
-    long w = 0;
+    std::int64_t w = 0;
     for (const char32_t c : codePoints(utf8)) {
+        if (w > kMaxPen) {
+            break;
+        }
         if (FT_Load_Char(face, c, FT_LOAD_DEFAULT) == 0) {
             w += face->glyph->advance.x;
         }
     }
-    return static_cast<int>((w + 63) / 64);
+    return static_cast<int>(std::min<std::int64_t>((w + 63) / 64, std::numeric_limits<int>::max() / 2));
 }
 
 namespace {
@@ -289,6 +459,14 @@ int Fonts::ascent(const FontStyle& style) {
     return face ? ascentOf(face, style) : style.size;
 }
 
+std::optional<LineMetrics> Fonts::gameLine(const FontStyle& style) {
+    const Impl::Face* face = impl_->find(style);
+    if (!face || !face->typeOne) {
+        return std::nullopt;
+    }
+    return typeOneLine(face->ascender, face->descender, 1000, style.size);
+}
+
 int Fonts::lineHeight(const FontStyle& style) {
     return std::max(1, style.size + style.lineSpacing);
 }
@@ -303,18 +481,23 @@ TextImage Fonts::draw(const FontStyle& style, const std::string& utf8) {
     const int ascent = ascentOf(face, style);
     const int descent = static_cast<int>(-face->size->metrics.descender / 64);
     const int w = width(style, utf8);
-    if (w <= 0) {
+    // A broken face can measure a line of no height. A line is cut at the largest picture the
+    // GPU takes, so a string of tens of thousands of letters can't ask for gigabytes.
+    if (w <= 0 || ascent + descent + 1 <= 0) {
         return out;
     }
     out.baseline = ascent;
-    out.pixels.width = static_cast<std::uint32_t>(w + 2);
-    out.pixels.height = static_cast<std::uint32_t>(ascent + descent + 1);
+    out.pixels.width = static_cast<std::uint32_t>(std::min(w + 2, kMaxTextImage));
+    out.pixels.height = static_cast<std::uint32_t>(std::min(ascent + descent + 1, kMaxTextImage));
     out.pixels.rgba.assign(static_cast<std::size_t>(out.pixels.width) * out.pixels.height * 4, 0);
     for (std::size_t i = 0; i < out.pixels.rgba.size(); i += 4) {
         out.pixels.rgba[i] = out.pixels.rgba[i + 1] = out.pixels.rgba[i + 2] = 255;
     }
-    long pen = 0;
+    std::int64_t pen = 0;
     for (const char32_t c : codePoints(utf8)) {
+        if (pen / 64 > std::int64_t{out.pixels.width} + size) {
+            break;  // the rest of the line falls outside the picture, even a glyph reaching back
+        }
         if (FT_Load_Char(face, c, FT_LOAD_RENDER) != 0) {
             continue;
         }

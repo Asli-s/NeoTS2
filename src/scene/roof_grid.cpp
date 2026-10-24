@@ -4,7 +4,7 @@
 #include <cmath>
 
 // Roofs as the game builds them: heights on a grid of points half a tile apart, covering the roof's
-// rectangle and its overhang; three layers of that grid make a slab (the shingled top, the edge
+// rectangle and its overhang. Three layers of that grid make a slab (the shingled top, the edge
 // board's two bands and the underside). Each grid cell is split into two triangles, its diagonal
 // alternating like a checkerboard, and each top triangle shows one cell of the roof texture's
 // 5 x 5 grid of pieces, chosen from what its corners touch: the ridge (the roof's highest points),
@@ -58,10 +58,10 @@ struct Piece {
     bool mirror = false;
 };
 
-// The facing handlers come in two forms. The first looks at one corner (and the junction pair);
-// the second at one corner when one corner meets another roof, at a corner pair when two do.
-// ridges: corners on the ridge; joins: corners meeting another roof; pair: the kind's pair both
-// meet one; other: how many corners of the cell's other triangle meet one.
+// The facing handlers come in two forms. The first looks at one corner (and the junction pair).
+// The second looks at one corner when one corner meets another roof, at a corner pair when two do.
+// ridges: corners on the ridge. joins: corners meeting another roof. pair: the kind's pair both
+// meet one. other: how many corners of the cell's other triangle meet one.
 void pairHandler(Piece& p, int corner, bool singleMirror, bool pairMirror, int ridges, int joins, bool pair, int other,
                  const std::array<int, 3>& flags) {
     const bool joined = (flags[static_cast<std::size_t>(corner)] & kJunction) != 0;
@@ -101,8 +101,11 @@ void cornerHandler(Piece& p, int single, int first, int second, bool singleMirro
 
 // The handlers of each kind, by facing: x down, x up, y down, y up.
 void handle(int kind, int facing, Piece& p, int ridges, int joins, bool pair, int other, const std::array<int, 3>& f) {
-    // Per kind, per facing: {form, corner args...}; form 0 = pair handler (corner, single mirror,
-    // pair mirror), form 1 = corner handler (single, first, second, single mirror).
+    // One row per triangle kind (the four of kKinds: 0 and 1 halve an even cell, 2 and 3 an odd
+    // one), one entry per facing. Each entry is {form, a, b, c, d}. Form 0 calls pairHandler with
+    // corner a, mirrored when one corner joins another roof if b, when the pair does if c. Form 1
+    // calls cornerHandler with single corner a, pair corners b and c, mirrored when one joins if d.
+    // Corners are numbered in the order kKinds lists them.
     struct H {
         int form, a, b, c, d;
     };
@@ -121,7 +124,7 @@ void handle(int kind, int facing, Piece& p, int ridges, int joins, bool pair, in
 }
 
 // Triangles with corners on a hip have their own pieces. These are the game's rules as they stand,
-// per kind; flags as above (kHip marks a corner on a hip), the rest as for handle().
+// per kind. Flags as above (kHip marks a corner on a hip), the rest as for handle().
 constexpr int kHip = 2;
 
 void oneOnHip(int kind, const std::array<float, 2>& g, Piece& p, int ridges, int joins, bool pair, int other,
@@ -333,6 +336,16 @@ int facingBits(const std::array<float, 2>& g) {
 
 }  // namespace
 
+bool sensibleRoof(const roofs::Roof& roof) {
+    constexpr float kMaxSpan = 256;  // tiles, lots are far smaller
+    for (const float v : {roof.x0, roof.y0, roof.x1, roof.y1, roof.slope}) {
+        if (!std::isfinite(v) || std::abs(v) > kMaxSpan) {
+            return false;
+        }
+    }
+    return true;
+}
+
 std::optional<RoofGrid> RoofGrid::of(const roofs::Roof& roof, float eave) {
     RoofGrid g;
     switch (roof.type) {
@@ -373,7 +386,7 @@ std::optional<RoofGrid> RoofGrid::of(const roofs::Roof& roof, float eave) {
     for (int r = 0; r < g.ny; ++r) {
         for (int c = 0; c < g.nx; ++c) {
             // Steps up from the sloped edges: the nearer of the two along the slope for a gable,
-            // the nearest of all four for a hip, of all but the high side for a shed; a slope rises
+            // the nearest of all four for a hip, of all but the high side for a shed. A slope rises
             // from its low side alone, a little above it.
             const int fromX = std::min(g.high == 0 ? g.nx : c, g.high == 1 ? g.nx : g.nx - 1 - c);
             const int fromY = std::min(g.high == 2 ? g.ny : r, g.high == 3 ? g.ny : g.ny - 1 - r);
@@ -416,7 +429,7 @@ namespace {
 
 // Whether a point of a hip roof's grid (w x h points) lies on a hip, as the four faces it parts:
 // from the corner at the low x, low y end 10, high x 9, high y 6, both high 5. The hips run m steps
-// in (half the shorter side); from the far corner only under `far` steps.
+// in (half the shorter side), from the far corner only under `far` steps.
 int hipFrom(int i, int j, int w, int h, int m, int far) {
     if (m < i) {
         if (j <= m) {
@@ -474,6 +487,9 @@ float RoofGrid::surface(float x, float y) const {
     return h(1, 1) + (h(1, 0) - h(1, 1)) * (1 - fc) + (h(0, 1) - h(1, 1)) * (1 - fr);
 }
 
+float RoofGrid::maxX() const { return minX + static_cast<float>(nx - 1) * kStep; }
+float RoofGrid::maxY() const { return minY + static_cast<float>(ny - 1) * kStep; }
+
 std::optional<float> RoofGrid::pointHeight(float x, float y) const {
     const float c = (x - minX) / kStep, r = (y - minY) / kStep;
     if (c < 0 || r < 0 || c > static_cast<float>(nx - 1) || r > static_cast<float>(ny - 1)) {
@@ -487,7 +503,7 @@ std::optional<float> RoofGrid::pointHeight(float x, float y) const {
 }
 
 std::optional<float> RoofGrid::coveringHeight(float x, float y, int fromLevel) const {
-    // Over a roof on a lower level its overhang does not count; over one on its own level it does.
+    // Over a roof on a lower level its overhang does not count. Over one on its own level it does.
     const float lo = fromLevel < level ? kOverhang : 0.0f;
     if (!(minX + lo < x && x <= minX + static_cast<float>(nx - 1) * kStep - lo && minY + lo < y &&
           y <= minY + static_cast<float>(ny - 1) * kStep - lo)) {
@@ -515,7 +531,7 @@ void addRoofGrid(Surfaces& surfaces, const RoofGrid& roof, const std::vector<con
     };
     // A triangle's corner flags: on the ridge, on a hip, and joining another roof. Another roof joins
     // at a corner where it is at the same height there, unless that point is on its ridge or a hip
-    // bordering the way the triangle faces; such a roof joins none of the triangle's corners. When
+    // bordering the way the triangle faces. Such a roof joins none of the triangle's corners. When
     // all three corners meet other roofs, those meeting all three do not join.
     auto cornerFlags = [&](const std::array<std::array<int, 2>, 3>& pts, const std::array<float, 2>& g) {
         std::array<std::array<float, 3>, 3> w{};
@@ -678,7 +694,7 @@ void addRoofGrid(Surfaces& surfaces, const RoofGrid& roof, const std::vector<con
     // material) and 1 and 2 (the trim), unless another roof covers the step's middle. Its texture is
     // the top row of the material's texture. Each quad's corners go in the game's order for its side,
     // a and b being the step's ends (upper layer u, lower l): a u, b u, b l, a l on the low x and high
-    // y sides, a u, a l, b l, b u on the others; it is split from its first corner.
+    // y sides, a u, a l, b l, b u on the others. It is split from its first corner.
     auto strip = [&](int r0, int c0, int r1, int c1, bool down) {
         const auto a = at(r0, c0), b = at(r1, c1);
         if (covered((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)) {

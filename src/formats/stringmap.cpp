@@ -11,8 +11,7 @@ std::map<std::uint16_t, Entry> parse(std::span<const std::uint8_t> data) {
     r.skip(64);
     r.u32();  // type id
     r.u32();  // version
-    const auto cls = r.bytes(r.u8());
-    if (std::string(cls.begin(), cls.end()) != "cStringMap") {
+    if (r.varString() != "cStringMap") {
         throw std::runtime_error("cStringMap: unexpected class name");
     }
     const std::uint32_t count = r.u32();
@@ -22,8 +21,7 @@ std::map<std::uint16_t, Entry> parse(std::span<const std::uint8_t> data) {
     }
     std::map<std::uint16_t, Entry> entries;
     for (std::uint32_t i = 0; i < count; ++i) {
-        const auto name = r.bytes(r.u8());
-        Entry e{std::string(name.begin(), name.end()), 0};
+        Entry e{r.varString(), 0};
         const std::uint16_t id = r.u16();
         e.uses = r.u32();
         entries.insert_or_assign(id, std::move(e));

@@ -49,7 +49,7 @@ LotDescription parseLotDescription(std::span<const std::uint8_t> data) {
     BinaryReader r(data);
     LotDescription out;
     out.version = r.u16();
-    // The lot's own description, with its own version; later versions add fields at the end.
+    // The lot's own description, with its own version. Later versions add fields at the end.
     const std::uint16_t own = r.u16();
     out.width = r.u32();
     out.depth = r.u32();
@@ -57,11 +57,11 @@ LotDescription parseLotDescription(std::span<const std::uint8_t> data) {
     out.roadSides = r.u8();
     out.ownFacing = r.u8();
     if (own >= 5) {
-        r.u32();
+        out.flags = r.u32();
     }
     if (own >= 6) {
         out.name = text(r);
-        text(r);  // description
+        out.description = text(r);
     }
     if (own >= 4) {
         r.skip(std::size_t{r.u32()} * 4);
@@ -97,6 +97,12 @@ LotDescription parseLotDescription(std::span<const std::uint8_t> data) {
     out.facing = out.version >= 8 ? r.u8() : out.ownFacing;
     if (out.version >= 11) {
         out.texture = text(r);
+    }
+    if (out.version > 0x0C) {
+        r.u8();
+    }
+    if (out.version > 0x0D) {
+        out.owner = r.i32();
     }
     if (out.version >= 0x12) {
         out.roomLightPercents = roomLightPercents(data);

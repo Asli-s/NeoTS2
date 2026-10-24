@@ -1,4 +1,4 @@
-// The sky: one triangle covering the screen; the fragment shader works out each pixel's direction.
+// The sky: one triangle covering the screen. The fragment shader works out each pixel's direction.
 
 struct Output {
     float4 position : SV_Position;

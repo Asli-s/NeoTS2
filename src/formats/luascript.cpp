@@ -75,7 +75,10 @@ private:
     }
 
     void string() {
-        std::uint64_t length = sizeT_ == 8 ? (r_.u32() | static_cast<std::uint64_t>(r_.u32()) << 32) : r_.u32();
+        std::uint64_t length = r_.u32();
+        if (sizeT_ == 8) {
+            length |= static_cast<std::uint64_t>(r_.u32()) << 32;
+        }
         if (length > r_.remaining()) {
             throw std::runtime_error("luascript: string longer than the chunk");
         }

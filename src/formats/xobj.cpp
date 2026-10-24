@@ -13,6 +13,8 @@ constexpr std::uint32_t kPersonMarker = 0xDEADBEEF;
 constexpr std::size_t kTimerEntrySize = 38;
 constexpr std::size_t kMaterialBlockSize = 26;
 
+// One step of a saved record's growth: records saved by a version older than `below` hold `count`
+// values. Records newer than every step hold the reader's full count.
 struct Step {
     std::uint32_t below;
     std::size_t count;
@@ -28,14 +30,6 @@ std::size_t countFor(const Step (&steps)[N], std::uint32_t version, std::size_t 
     return last;
 }
 
-// Every element takes at least `minBytes`, so a count larger than this cannot be real.
-std::size_t checkedCount(BinaryReader& r, std::int64_t count, std::size_t minBytes) {
-    if (count < 0 || static_cast<std::uint64_t>(count) * minBytes > r.remaining()) {
-        throw std::runtime_error("XOBJ: bad count");
-    }
-    return static_cast<std::size_t>(count);
-}
-
 std::vector<std::int16_t> readShorts(BinaryReader& r, std::size_t count) {
     std::vector<std::int16_t> values(count);
     for (auto& v : values) {
@@ -45,24 +39,7 @@ std::vector<std::int16_t> readShorts(BinaryReader& r, std::size_t count) {
 }
 
 std::vector<std::int16_t> readCountedShorts(BinaryReader& r) {
-    return readShorts(r, checkedCount(r, r.i16(), 2));
-}
-
-// Length as 7-bit groups, low group first; the top bit of each byte says another byte follows.
-std::string readString(BinaryReader& r) {
-    std::size_t length = 0;
-    for (int shift = 0;; shift += 7) {
-        if (shift > 28) {
-            throw std::runtime_error("XOBJ: bad string length");
-        }
-        const std::uint8_t byte = r.u8();
-        length |= static_cast<std::size_t>(byte & 0x7F) << shift;
-        if ((byte & 0x80) == 0) {
-            break;
-        }
-    }
-    const auto bytes = r.bytes(length);
-    return {bytes.begin(), bytes.end()};
+    return readShorts(r, r.checkedCount(r.i16(), 2));
 }
 
 void readHeader(BinaryReader& r, std::uint32_t version, Header& h) {
@@ -137,7 +114,7 @@ Slots readSlots(BinaryReader& r) {
         }
         s.values = readCountedShorts(r);
     } else if (s.marker > 0) {
-        s.values = readShorts(r, checkedCount(r, (s.marker) * 2, 2));
+        s.values = readShorts(r, r.checkedCount((s.marker) * 2, 2));
     }
     return s;
 }
@@ -146,19 +123,19 @@ Tail readTail(BinaryReader& r, std::uint32_t version, RecordKind kind) {
     Tail t;
     t.token = readToken(r, version);
 
-    const std::size_t arrayCount = checkedCount(r, r.i16(), 2);
+    const std::size_t arrayCount = r.checkedCount(r.i16(), 2);
     for (std::size_t i = 0; i < arrayCount; ++i) {
         t.arrays.push_back(readCountedShorts(r));
     }
     t.shorts = readCountedShorts(r);
     t.value1 = r.i32();
-    const std::size_t stringCount = checkedCount(r, r.i16(), 1);
+    const std::size_t stringCount = r.checkedCount(r.i16(), 1);
     for (std::size_t i = 0; i < stringCount; ++i) {
-        t.strings.push_back(readString(r));
+        t.strings.push_back(r.varString());
     }
     t.value2 = r.u16();
 
-    const std::size_t frames = checkedCount(r, r.i32(), 14);
+    const std::size_t frames = r.checkedCount(r.i32(), 14);
     r.i32();
     for (std::size_t i = 0; i < frames; ++i) {
         t.stack.push_back(readFrame(r, version));
@@ -166,7 +143,7 @@ Tail readTail(BinaryReader& r, std::uint32_t version, RecordKind kind) {
 
     t.relationshipVersion = r.i32();
     if (t.relationshipVersion == 2 || t.relationshipVersion == 3) {
-        const std::size_t ids = checkedCount(r, r.u32(), 4);
+        const std::size_t ids = r.checkedCount(r.u32(), 4);
         for (std::size_t i = 0; i < ids; ++i) {
             t.relationshipIds.push_back(r.u32());
         }
@@ -181,11 +158,11 @@ Tail readTail(BinaryReader& r, std::uint32_t version, RecordKind kind) {
         if (t.effectVersion != 1 && t.effectVersion != 2) {
             throw std::runtime_error("XOBJ: effect list version not supported");
         }
-        const std::size_t effects = checkedCount(r, r.i32(), 10);
+        const std::size_t effects = r.checkedCount(r.i32(), 10);
         for (std::size_t i = 0; i < effects; ++i) {
             Effect e;
-            e.name = readString(r);
-            e.slot = readString(r);
+            e.name = r.varString();
+            e.slot = r.varString();
             e.value1 = r.u32();
             e.value2 = r.u32();
             if (t.effectVersion >= 2) {
@@ -196,18 +173,18 @@ Tail readTail(BinaryReader& r, std::uint32_t version, RecordKind kind) {
     }
 
     if (version > 0x94) {
-        const std::size_t materials = checkedCount(r, r.i16(), 3);
+        const std::size_t materials = r.checkedCount(r.i16(), 3);
         for (std::size_t i = 0; i < materials; ++i) {
             MaterialOverride m;
-            m.resource = readString(r);
-            m.subset = readString(r);
-            m.material = readString(r);
+            m.resource = r.varString();
+            m.subset = r.varString();
+            m.material = r.varString();
             t.materials.push_back(std::move(m));
         }
     }
 
     if (version > 0x95) {
-        const std::size_t timers = checkedCount(r, r.u32(), kTimerEntrySize);
+        const std::size_t timers = r.checkedCount(r.u32(), kTimerEntrySize);
         for (std::size_t i = 0; i < timers; ++i) {
             TimerEntry e;
             e.value1 = r.u32();
@@ -264,10 +241,11 @@ Token readToken(BinaryReader& r, std::uint32_t version) {
     if (version > 0xCA) {
         t.value3 = r.u16();
     }
-    t.properties = readShorts(r, checkedCount(r, r.i32(), 2));
+    t.properties = readShorts(r, r.checkedCount(r.i32(), 2));
     return t;
 }
 
+// How many object data values an object saved by `version` holds.
 std::size_t dataCountForVersion(std::uint32_t version) {
     static constexpr Step steps[] = {
         {0x7D, 0x48}, {0x7E, 0x4E}, {0x86, 0x4F}, {0x89, 0x50}, {0x91, 0x53}, {0x94, 0x54},
@@ -278,6 +256,7 @@ std::size_t dataCountForVersion(std::uint32_t version) {
     return countFor(steps, version, kDataCount);
 }
 
+// How many person data values a Sim saved by `version` holds.
 std::size_t personDataCountForVersion(std::uint32_t version) {
     static constexpr Step steps[] = {
         {0x29, 0x40}, {0x6A, 0x50}, {0x6C, 0x51}, {0x6D, 0x53}, {0x6E, 0x58}, {0x73, 0x59},
@@ -292,10 +271,11 @@ std::size_t personDataCountForVersion(std::uint32_t version) {
     return countFor(steps, version, kPersonDataCount);
 }
 
-SavedObject parse(std::span<const std::uint8_t> data, std::uint32_t version, RecordKind kind) {
-    BinaryReader r(data);
-    r.skip(64);
+namespace {
 
+// Reads one saved object from the reader's position. With `toEnd`, it must be the last thing in
+// the data (a resource of its own). Otherwise it may be followed by more.
+SavedObject readObject(BinaryReader& r, std::uint32_t version, RecordKind kind, bool toEnd) {
     SavedObject o;
     o.version = version;
     readHeader(r, version, o.header);
@@ -323,7 +303,7 @@ SavedObject parse(std::span<const std::uint8_t> data, std::uint32_t version, Rec
         }
         copyData(o, readShorts(r, dataCountForVersion(version)));
         if (version > 0x65) {
-            for (auto& e : o.extra) {
+            for (auto& e : o.tokenSource) {
                 e = r.i16();
             }
         }
@@ -333,13 +313,35 @@ SavedObject parse(std::span<const std::uint8_t> data, std::uint32_t version, Rec
         o.tail = readTail(r, version, kind);
         if (kind == RecordKind::Person) {
             o.person = readPerson(r, version);
-        } else if (r.remaining() != 0) {
+        } else if (toEnd && r.remaining() != 0) {
             throw std::runtime_error("XOBJ: data left after the record");
         }
     }
 
-    const auto rest = r.bytes(r.remaining());
-    o.rest.assign(rest.begin(), rest.end());
+    if (toEnd) {
+        const auto rest = r.bytes(r.remaining());
+        o.rest.assign(rest.begin(), rest.end());
+    }
+    return o;
+}
+
+} // namespace
+
+SavedObject parse(std::span<const std::uint8_t> data, std::uint32_t version, RecordKind kind) {
+    BinaryReader r(data);
+    r.skip(64);
+    return readObject(r, version, kind, true);
+}
+
+SavedObject parseEmbedded(std::span<const std::uint8_t> data, std::uint32_t version, RecordKind kind,
+                          std::size_t& consumed) {
+    // The length of such a record is only known where all of it is decoded.
+    if (version < kFirstDecodedTailVersion || kind == RecordKind::Person) {
+        throw std::runtime_error("XOBJ: embedded record of unknown length");
+    }
+    BinaryReader r(data);
+    SavedObject o = readObject(r, version, kind, false);
+    consumed = data.size() - r.remaining();
     return o;
 }
 

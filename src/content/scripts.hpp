@@ -15,9 +15,9 @@ struct ObjectScripts {
     std::vector<std::string> problems;
 };
 
-// The newest ObjectScripts.package of the install (each product ships a cumulative copy; the
-// largest is the newest), if any.
-std::optional<std::filesystem::path> objectScriptsPackage(const std::filesystem::path& installRoot);
+// The newest ObjectScripts.package of the install, if any. Each product ships a cumulative copy,
+// and the largest is the newest.
+[[nodiscard]] std::optional<std::filesystem::path> objectScriptsPackage(const std::filesystem::path& installRoot);
 
 // The package's modules and scripts, in the package's order.
 ObjectScripts loadObjectScripts(const std::filesystem::path& package);

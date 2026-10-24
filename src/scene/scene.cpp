@@ -1,5 +1,6 @@
 #include "scene/scene.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 namespace ts2::scene {
@@ -15,6 +16,17 @@ Transform Transform::of(const std::array<float, 3>& t, const std::array<float, 4
 
 Transform Transform::at(float x, float y, float z, float angle) {
     return of({x, y, z}, {0, 0, std::sin(angle / 2), std::cos(angle / 2)});
+}
+
+Transform Transform::rigidInverse() const {
+    Transform r;
+    for (int i = 0; i < 3; ++i) {
+        for (int k = 0; k < 3; ++k) {
+            r.m[i * 4 + k] = m[k * 4 + i];
+        }
+        r.m[i * 4 + 3] = -(m[3] * m[i] + m[7] * m[4 + i] + m[11] * m[8 + i]);
+    }
+    return r;
 }
 
 Transform Transform::operator*(const Transform& b) const {
@@ -36,6 +48,28 @@ void Transform::apply(float* v, bool point) const {
     for (int i = 0; i < 3; ++i) {
         v[i] = m[i * 4] * x + m[i * 4 + 1] * y + m[i * 4 + 2] * z + (point ? m[i * 4 + 3] : 0.0f);
     }
+}
+
+std::vector<std::size_t> perPixelLights(const ObjectLighting& lighting, std::size_t usable) {
+    const std::size_t n = std::min(usable, lighting.lights.size());
+    std::vector<std::size_t> out;
+    for (std::size_t i = 0; i < n && out.size() < 3; ++i) {
+        if (!lighting.lights[i].point) {
+            out.push_back(i);
+        }
+    }
+    if (out.size() < 3) {
+        for (const bool spot : {false, true}) {
+            const auto& lights = lighting.lights;
+            const auto it = std::find_if(lights.begin(), lights.begin() + static_cast<std::ptrdiff_t>(n),
+                                         [&](const ObjectLighting::Light& l) { return l.point && l.spot == spot; });
+            if (it != lights.begin() + static_cast<std::ptrdiff_t>(n)) {
+                out.push_back(static_cast<std::size_t>(it - lights.begin()));
+                break;
+            }
+        }
+    }
+    return out;
 }
 
 } // namespace ts2::scene

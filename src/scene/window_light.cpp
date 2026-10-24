@@ -1,5 +1,7 @@
 #include "scene/window_light.hpp"
 
+#include "diag/log.hpp"
+
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -16,7 +18,7 @@ namespace {
 
 using Color = std::array<float, 3>;
 
-// Portals per room that share light; more than any room has, so the pairing stays quick.
+// Portals per room that share light, more than any room has, so the pairing stays quick.
 constexpr std::size_t kMaxSharing = 1024;
 
 Color times(const Color& a, const Color& b) {
@@ -37,7 +39,7 @@ bool lit(const Color& c) {
 
 // A floor and wall light source from the portal's own: its colour times `color` times `share`
 // (rounded as the game rounds it: red and green in one go, blue in two steps), its falloff
-// scaled; none when it would be black.
+// scaled. None when it would be black.
 std::optional<LightSource> sourceFrom(const LightSource& base, const Color& color, float share, float falloffScale) {
     LightSource s = base;
     s.color[0] = static_cast<float>(static_cast<double>(color[0]) * base.color[0] * share);
@@ -61,6 +63,9 @@ void suppress(std::vector<Portal>& portals, const Suppression& s) {
         return;
     }
     const std::size_t count = std::min(portals.size(), kMaxSharing);
+    if (portals.size() > kMaxSharing) {
+        diag::warnOnce("window light: windows and doors past 1024 share no light");
+    }
     auto middle = [](float a, float b) { return static_cast<float>((static_cast<double>(a) + b) * 0.5); };
     for (std::size_t i = 0; i < count; ++i) {
         Portal& p = portals[i];

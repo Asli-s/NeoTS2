@@ -7,6 +7,7 @@
 
 namespace ts2::str {
 
+// A string table (STR#): numbered texts, each in one language, each with an optional description.
 struct Entry {
     std::uint8_t language = 1;
     std::string value;

@@ -1,10 +1,12 @@
 #pragma once
 
+#include <algorithm>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <span>
 #include <stdexcept>
+#include <string>
 
 namespace ts2 {
 
@@ -48,6 +50,47 @@ public:
     void skip(std::size_t count) {
         require(count);
         pos_ += count;
+    }
+
+    // A count of elements that each take at least `minBytes`, so a count larger than the data left
+    // can hold cannot be real.
+    std::size_t checkedCount(std::int64_t count, std::size_t minBytes) const {
+        if (count < 0 || static_cast<std::uint64_t>(count) > remaining() / std::max<std::size_t>(minBytes, 1)) {
+            throw std::runtime_error("BinaryReader: bad count " + std::to_string(count));
+        }
+        return static_cast<std::size_t>(count);
+    }
+
+    std::size_t i32Count(std::size_t minBytes) { return checkedCount(i32(), minBytes); }
+    std::size_t u32Count(std::size_t minBytes) { return checkedCount(u32(), minBytes); }
+
+    std::string text(std::size_t length) {
+        const auto view = bytes(length);
+        return {view.begin(), view.end()};
+    }
+
+    // Length as 7-bit groups, low group first. The top bit of each byte says another byte follows.
+    std::string varString() {
+        std::size_t length = 0;
+        for (int shift = 0;; shift += 7) {
+            if (shift > 28) {
+                throw std::runtime_error("BinaryReader: bad string length");
+            }
+            const std::uint8_t byte = u8();
+            length |= static_cast<std::size_t>(byte & 0x7F) << shift;
+            if ((byte & 0x80) == 0) {
+                break;
+            }
+        }
+        return text(length);
+    }
+
+    std::string cString() {
+        std::string out;
+        for (std::uint8_t c = u8(); c != 0; c = u8()) {
+            out.push_back(static_cast<char>(c));
+        }
+        return out;
     }
 
     std::size_t position() const { return pos_; }

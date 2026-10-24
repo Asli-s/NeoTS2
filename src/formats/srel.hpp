@@ -8,7 +8,7 @@
 namespace ts2::srel {
 
 // Sim relationship (SREL): the relationship variables one neighbor holds towards another,
-// stored with instance (A << 16) | B. The game stops reading at the count; some records have
+// stored with instance (A << 16) | B. The game stops reading at the count. Some records have
 // leftover bytes after it.
 struct Relationship {
     std::int32_t version = 0;

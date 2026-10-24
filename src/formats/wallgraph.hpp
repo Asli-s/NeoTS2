@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace ts2::wallgraph {
@@ -31,7 +32,8 @@ struct WallGraph {
     std::uint32_t version = 0;
     std::string className;
     std::array<std::int32_t, 2> unknown{};
-    // Lowest level the lot uses: -1 with a foundation, else 0 (saved grids start at this level).
+    // The lot's lowest level: -1 when it has a level below the ground storey, else 0. Its grids
+    // start at this level.
     std::int32_t firstLevel = 0;
     std::int32_t width = 0;
     std::int32_t height = 0;
@@ -41,7 +43,19 @@ struct WallGraph {
     std::vector<std::int32_t> rooms;
     std::vector<Wall> walls;
 
+    // The first point with this id, or null. It searches all points: to look up many, use PointIndex.
     const Point* point(std::int32_t id) const;
+};
+
+// A graph's points by id, the first of any repeated id as WallGraph::point finds it. It points into
+// the graph, so it is valid while the graph's points are unchanged.
+class PointIndex {
+public:
+    explicit PointIndex(const WallGraph& graph);
+    const Point* operator()(std::int32_t id) const;
+
+private:
+    std::unordered_map<std::int32_t, const Point*> points_;
 };
 
 WallGraph parse(std::span<const std::uint8_t> data);

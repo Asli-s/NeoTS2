@@ -8,6 +8,14 @@
 
 namespace ts2::scene {
 
+namespace {
+
+// The game draws the lot skirt, its fading edge and its roads on one layer before objects
+// ("Shaders for lot skirt": lotSkirtLayer -6, times 8).
+constexpr int kSkirtLayer = -48;
+
+} // namespace
+
 SkirtArea lotSkirtArea(const PaintedTerrain& terrain, const LotFootprint& lot, int margin) {
     const float tile = terrain.tileSize;
     const int tilesX = static_cast<int>(terrain.columns) - 1, tilesY = static_cast<int>(terrain.rows) - 1;
@@ -58,6 +66,7 @@ void addLotSkirt(SceneBuilder& builder, const PaintedTerrain& terrain, const Lot
     const int material = builder.textureMaterial(lot.texture);
     int faded = -1;
     if (material >= 0) {
+        builder.scene().materials[static_cast<std::size_t>(material)].layer = kSkirtLayer;
         Material m = builder.scene().materials[static_cast<std::size_t>(material)];
         m.name += " (fading)";
         m.alpha = AlphaMode::Blend;
@@ -119,6 +128,7 @@ void addLotSkirt(SceneBuilder& builder, const PaintedTerrain& terrain, const Lot
         // Lit, blended over the ground, the texture clamped (the game's LotSkirtRoadMaterialDefinition).
         const int m = builder.textureMaterial(texture->second, 1.0f, true);
         builder.scene().materials[static_cast<std::size_t>(m)].alpha = AlphaMode::Blend;
+        builder.scene().materials[static_cast<std::size_t>(m)].layer = kSkirtLayer;
         builder.scene().materials[static_cast<std::size_t>(m)].clamp = true;
         Primitive& r = roads[m];
         const auto base = static_cast<std::uint32_t>(r.positions.size() / 3);
@@ -136,8 +146,30 @@ void addLotSkirt(SceneBuilder& builder, const PaintedTerrain& terrain, const Lot
     if (!roads.empty()) {
         if (auto* i = builder.place(builder.addMesh("lot skirt roads", std::move(roads)), "lot skirt roads", Transform{}, Part::Skirt)) {
             i->skirtAmbient = 4;
+            i->skirtRoad = true;
         }
     }
+}
+
+std::vector<std::size_t> lightLotSkirt(Scene& scene, bool day) {
+    // From the game's "Shaders for lot skirt" material script: by day the summer scale (seasons and
+    // clouds pick others), at night a grey for the ground and a blue grey for the roads.
+    constexpr std::array<float, 3> kDay{1, 1, 1};
+    constexpr std::array<float, 3> kNightGround{0.96f, 0.96f, 0.96f};
+    constexpr std::array<float, 3> kNightRoads{0.83f, 0.83f, 0.94f};
+    std::vector<std::size_t> changed;
+    for (std::size_t i = 0; i < scene.instances.size(); ++i) {
+        auto& instance = scene.instances[i];
+        if (instance.part != Part::Skirt) {
+            continue;
+        }
+        const auto& scale = day ? kDay : instance.skirtRoad ? kNightRoads : kNightGround;
+        if (instance.skirtScale != scale) {
+            instance.skirtScale = scale;
+            changed.push_back(i);
+        }
+    }
+    return changed;
 }
 
 } // namespace ts2::scene

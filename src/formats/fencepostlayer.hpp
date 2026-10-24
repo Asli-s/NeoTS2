@@ -6,7 +6,7 @@
 
 namespace ts2::fencepostlayer {
 
-// A fence post: the level (as the lot's height grids count them), its point on the wall graph's
+// A fence post: the level (as the wall graph counts them), its point on the wall graph's
 // grid, and the GUID of its fence in the build catalog.
 struct Post {
     std::int32_t level = 0;

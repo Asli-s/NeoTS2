@@ -52,7 +52,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     suppress(portals, supp);
     const std::uint8_t flags = byte();
     for (const auto& p : portals) {
-        lightsFor(p, flags & 1, flags & 2, day, color());
+        (void)lightsFor(p, flags & 1, flags & 2, day, color());
     }
     return 0;
 }

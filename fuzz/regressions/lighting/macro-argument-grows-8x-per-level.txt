@@ -1,0 +1,5 @@
+define G(x)
+ lightAttribOverride &x intensity 1
+ create G(&x&x&x&x&x&x&x&x)
+enddef
+create G(grow_light)

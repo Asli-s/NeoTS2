@@ -70,7 +70,7 @@ static void seterrorobj (lua_State *L, int errcode, StkId oldtop) {
 void luaD_throw (lua_State *L, int errcode) {
   if (L->errorJmp) {
     L->errorJmp->status = errcode;
-    longjmp(L->errorJmp->b, 1);
+    throw LuaThrow();  /* NeoTS2: was longjmp(L->errorJmp->b, 1) */
   }
   else {
     G(L)->panic(L);
@@ -84,8 +84,14 @@ int luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
   lj.status = 0;
   lj.previous = L->errorJmp;  /* chain new error handler */
   L->errorJmp = &lj;
-  if (setjmp(lj.b) == 0)
+  try {  /* NeoTS2: was if (setjmp(lj.b) == 0) */
     (*f)(L, ud);
+  }
+  catch (const LuaThrow&) {
+  }
+  catch (...) {  /* anything else crossing Lua's frames; as Lua 5.1 does */
+    if (lj.status == 0) lj.status = -1;
+  }
   L->errorJmp = lj.previous;  /* restore old error handler */
   return lj.status;
 }

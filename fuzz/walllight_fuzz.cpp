@@ -7,7 +7,7 @@
 #include <vector>
 
 // Wall light with walls and sources made from the input: any links (including loops and links
-// out of range), levels and rooms, and raw floats for positions and lights; then the corner
+// out of range), levels and rooms, and raw floats for positions and lights. Then the corner
 // blends on those walls and on a small floor.
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size) {
     using namespace ts2::scene::walllight;
@@ -63,7 +63,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
         s.directionalMix = number();
     }
     const float floorValue = number();
-    light(walls, sources, [](float x, float, int) { return x > 3; },
+    (void)light(walls, sources, [](float x, float, int) { return x > 3; },
           [floorValue](float, float, int) { return std::array<float, 3>{floorValue, floorValue, floorValue}; });
 
     using namespace ts2::scene;

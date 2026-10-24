@@ -8,6 +8,8 @@
 
 namespace ts2::objt {
 
+// A lot's object type table (OBJT): one entry per object type the lot's saved objects use, with its
+// GUID and kind.
 constexpr std::uint16_t kPersonKind = 2;
 
 struct Entry {
@@ -17,7 +19,7 @@ struct Entry {
     std::uint16_t kind = 0;
     std::string name;
     std::uint32_t flag = 0;
-    // Equal to guid for ordinary objects; differs for some custom and downloaded content.
+    // Equal to guid for ordinary objects, different for some custom and downloaded content.
     std::uint32_t secondGuid = 0;
 };
 

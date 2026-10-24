@@ -2,12 +2,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
+#include <string_view>
 
 // Roofs: the roof list's type is the roofs.txt id plus one (1 gable shed, 2 hipped shed, 3 tall
 // gable, 4 gable, 5 hipped, 6 mansard...). A roof's surface is the lowest of the planes rising from
 // its sloped edges, so each face is the part of the rectangle where its plane is lowest. Sloped
-// edges reach out by the overhang, with a fascia under them; a shed's high side (toward the second
-// corner, across the shorter span) has no eave and meets the wall there; gable ends are left to the
+// edges reach out by the overhang, with a fascia under them. A shed's high side (toward the second
+// corner, across the shorter span) has no eave and meets the wall there. Gable ends are left to the
 // walls under them, which carry on up to the roof. Mansards and dormers are drawn as hipped.
 
 namespace ts2::scene {
@@ -77,7 +79,7 @@ std::vector<float> RoofShape::bends(const std::array<float, 2>& p, const std::ar
         std::sort(ts.begin(), ts.end());
         return ts;
     }
-    // Each plane's height along the way is c + d t; two planes cross where those are equal.
+    // Each plane's height along the way is c + d t. Two planes cross where those are equal.
     for (std::size_t i = 0; i < planes.size(); ++i) {
         for (std::size_t j = i + 1; j < planes.size(); ++j) {
             auto line = [&](const std::array<float, 4>& e) {
@@ -169,7 +171,7 @@ RoofShape addRoof(Surfaces& surfaces, const roofs::Roof& roof, float eave, float
     const float lx = std::min(roof.x0, roof.x1), hx = std::max(roof.x0, roof.x1);
     const float ly = std::min(roof.y0, roof.y1), hy = std::max(roof.y0, roof.y1);
     const bool wideX = hx - lx >= hy - ly;
-    // Edges: 0 low x, 1 high x, 2 low y, 3 high y; which slope and which is a shed's high side.
+    // Edges: 0 low x, 1 high x, 2 low y, 3 high y. Which slope and which is a shed's high side.
     std::array<bool, 4> sloped{true, true, true, true};
     int high = -1;
     if (roof.type == 1 || roof.type == 2) {
@@ -181,12 +183,14 @@ RoofShape addRoof(Surfaces& surfaces, const roofs::Roof& roof, float eave, float
                 sloped[static_cast<std::size_t>(e)] = e == low;
             }
         }
-    } else if (roof.type == 3 || roof.type == 4) {
-        // Gable: the ridge along the longer side (tall gable: along the shorter one).
-        const bool ridgeAlongX = (roof.type == 4) == wideX;
+    } else if (roof.type == 3 || roof.type == 4 || roof.type == kGreenhouseRoof) {
+        // Gable: the ridge along the longer side (tall gable: along the shorter one). A square
+        // greenhouse has its ridge along y.
+        const bool ridgeAlongX = roof.type == kGreenhouseRoof ? hx - lx > hy - ly : (roof.type == 4) == wideX;
         sloped = ridgeAlongX ? std::array<bool, 4>{false, false, true, true} : std::array<bool, 4>{true, true, false, false};
     }
-    const float o = kRoofOverhang;
+    // A greenhouse's glass ends at its walls.
+    const float o = roof.type == kGreenhouseRoof ? 0 : kRoofOverhang;
     const float xa = lx - (high == 0 ? 0 : o), xb = hx + (high == 1 ? 0 : o);
     const float ya = ly - (high == 2 ? 0 : o), yb = hy + (high == 3 ? 0 : o);
     // Each edge's line: a point on it, its direction (counterclockwise) and inward normal.
@@ -229,7 +233,7 @@ RoofShape addRoof(Surfaces& surfaces, const roofs::Roof& roof, float eave, float
             if (j == i || !sloped[static_cast<std::size_t>(j)]) {
                 continue;
             }
-            // height_i - height_j <= 0, linear in (x, y); ties go to the lower index.
+            // height_i - height_j <= 0, linear in (x, y). Ties go to the lower index.
             const auto& Ej = edges[static_cast<std::size_t>(j)];
             const float a = slope * (Ei.n[0] - Ej.n[0]), b = slope * (Ei.n[1] - Ej.n[1]);
             const float c = slope * (-(Ei.p[0] * Ei.n[0] + Ei.p[1] * Ei.n[1]) + (Ej.p[0] * Ej.n[0] + Ej.p[1] * Ej.n[1])) +
@@ -342,6 +346,57 @@ RoofShape addRoof(Surfaces& surfaces, const roofs::Roof& roof, float eave, float
         }
     }
     return shape;
+}
+
+std::vector<GreenhousePiece> greenhousePieces(const roofs::Roof& roof, float eave) {
+    const int lx = static_cast<int>(std::min(roof.x0, roof.x1)), hx = static_cast<int>(std::max(roof.x0, roof.x1));
+    const int ly = static_cast<int>(std::min(roof.y0, roof.y1)), hy = static_cast<int>(std::max(roof.y0, roof.y1));
+    const std::string colour = roof.extra == 24 ? "Metal" : roof.extra == 25 ? "White" : "Green";
+    const bool ridgeAlongX = hx - lx > hy - ly;
+    // Across the ridge: tiles 0 to across - 1, from the low side. Along it: `along` tiles.
+    const int across = ridgeAlongX ? hy - ly : hx - lx, along = ridgeAlongX ? hx - lx : hy - ly;
+    const int acrossStart = ridgeAlongX ? ly : lx, alongStart = ridgeAlongX ? lx : ly;
+    const float turn = ridgeAlongX ? 0 : -kPi / 2, endTurn = ridgeAlongX ? 0 : kPi / 2;
+    std::vector<GreenhousePiece> pieces;
+    if (across <= 0 || along <= 0) {
+        return pieces;
+    }
+    // A tile each, and the two gable ends' stacks of up to half the span each.
+    pieces.reserve(static_cast<std::size_t>(across) * static_cast<std::size_t>(along) +
+                   static_cast<std::size_t>(across) * static_cast<std::size_t>(across + 1));
+    std::map<std::string_view, std::string> names;
+    auto add = [&](std::string_view piece, int a, float b, float z, float angle) {
+        std::string& name = names[piece];
+        if (name.empty()) {
+            name = "greenhouseRoof" + std::string(piece) + colour;
+        }
+        const float pa = static_cast<float>(acrossStart + a) + 0.5f, pb = static_cast<float>(alongStart) + b;
+        pieces.push_back({name, ridgeAlongX ? pb : pa, ridgeAlongX ? pa : pb, z, angle});
+    };
+    for (int a = 0; a < across; ++a) {
+        const bool nearHalf = 2 * a < across;
+        const float z = eave + static_cast<float>(nearHalf ? a : across - a - 1);
+        const char* piece = 2 * a == across - 1 ? "SpineOdd" : 2 * a == across - 2 || 2 * a == across ? "SpineEven" : "Repeat";
+        const float angle = 2 * a >= across ? turn + kPi : turn;
+        for (int b = 0; b < along; ++b) {
+            add(piece, a, static_cast<float>(b) + 0.5f, z, angle);
+        }
+        // The gable ends: glass panes up to a cap whose shape depends on where it stands across the ridge.
+        const int steps = nearHalf ? a + 1 : across - a;
+        const int d = ridgeAlongX ? 2 * a : 2 * (across - a) - 2;
+        const char* cap = d == across - 1 ? "OddCap"
+                          : d == across - 2 ? "SpineEvenCap"
+                          : d == across     ? "SpineEvenCapM"
+                          : d > across      ? "RepeatCapM"
+                                            : "RepeatCap";
+        for (int k = 0; k < steps; ++k) {
+            const char* p = k + 1 < steps ? "EndRepeat" : cap;
+            const float pz = eave + static_cast<float>(k);
+            add(p, a, -0.5f, pz, endTurn);
+            add(p, across - a - 1, static_cast<float>(along) + 0.5f, pz, endTurn + kPi);
+        }
+    }
+    return pieces;
 }
 
 } // namespace ts2::scene

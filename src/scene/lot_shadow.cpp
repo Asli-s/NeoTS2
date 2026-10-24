@@ -1,5 +1,6 @@
 #include "scene/lot_shadow.hpp"
 
+#include "diag/log.hpp"
 #include "scene/neighborhood_lighting.hpp"
 
 #include <algorithm>
@@ -30,14 +31,24 @@ float Grid::groundAt(int x, int y) const {
 }
 
 float elevation(const Inputs& in, float x, float y, int level) {
-    if (!in.corner || in.levels <= 0) return 0;
+    if (!in.corner || in.levels <= 0 || !(std::abs(x) < 1e6f && std::abs(y) < 1e6f)) return 0;
     if (level < 0) return elevation(in, x, y, 0) + kStorey * static_cast<float>(level);
     if (level >= in.levels) return elevation(in, x, y, in.levels - 1) + kStorey * static_cast<float>(level - in.levels + 1);
-    const float fx0 = std::floor(x), fy0 = std::floor(y);
-    const int x0 = static_cast<int>(fx0), y0 = static_cast<int>(fy0);
-    const float fx = x - fx0, fy = y - fy0;
-    const float a = in.corner(x0, y0, level) * (1 - fx) + in.corner(x0 + 1, y0, level) * fx;
-    const float b = in.corner(x0, y0 + 1, level) * (1 - fx) + in.corner(x0 + 1, y0 + 1, level) * fx;
+    return cornersOf(in, static_cast<int>(std::floor(x)), static_cast<int>(std::floor(y)), level).at(x, y);
+}
+
+Corners cornersOf(const Inputs& in, int x, int y, int level) {
+    if (!in.corner) return {};
+    return {in.corner(x, y, level), in.corner(x + 1, y, level), in.corner(x, y + 1, level), in.corner(x + 1, y + 1, level)};
+}
+
+float Corners::at(float x, float y) const {
+    return between(x - std::floor(x), y - std::floor(y));
+}
+
+float Corners::between(float fx, float fy) const {
+    const float a = x0y0 * (1 - fx) + x1y0 * fx;
+    const float b = x0y1 * (1 - fx) + x1y1 * fx;
     return a * (1 - fy) + b * fy;
 }
 
@@ -49,6 +60,9 @@ float sunVisible(float depth, float zone) {
 Grid build(const Inputs& in, const std::array<float, 3>& sun) {
     Grid g;
     if (in.width <= 0 || in.height <= 0 || in.width > kMaxTiles || in.height > kMaxTiles || in.levels <= 0 || in.levels > 16 || !in.corner) {
+        if (in.width > kMaxTiles || in.height > kMaxTiles || in.levels > 16) {
+            diag::warnOnce("lot shadow: a lot larger than 256 tiles or 16 levels casts no shadows");
+        }
         return g;
     }
     g.width = in.width * kSamplesPerTile;
@@ -61,18 +75,20 @@ Grid build(const Inputs& in, const std::array<float, 3>& sun) {
     // Floors: each quarter tile at its topmost floor, the ground below it kept as well.
     for (int ty = 0; ty < in.height; ++ty) {
         for (int tx = 0; tx < in.width; ++tx) {
+            const Corners groundCorners = cornersOf(in, tx, ty, 0);
             for (int q = 0; q < 4; ++q) {
                 const int triangle = q ^ (q >> 1);
                 for (int level = in.levels - 1; level >= 0; --level) {
                     if (level != 0 && !(in.floorAt && in.floorAt(tx, ty, level, q))) continue;
+                    const Corners floorCorners = level == 0 ? groundCorners : cornersOf(in, tx, ty, level);
                     for (int r = 0; r < kSamplesPerTile; ++r) {
                         for (int c = 0; c < kSamplesPerTile; ++c) {
                             if (((c + r >= 7 ? 1 : 0) | (c >= r ? 2 : 0)) != triangle) continue;
                             const float px = (static_cast<float>(kSamplesPerTile * tx + c) + 0.5f) * kCell;
                             const float py = (static_cast<float>(kSamplesPerTile * ty + r) + 0.5f) * kCell;
                             const std::size_t s = at(kSamplesPerTile * tx + c, kSamplesPerTile * ty + r);
-                            g.heights[s] = elevation(in, px, py, level);
-                            g.ground[s] = elevation(in, px, py, 0);
+                            g.heights[s] = floorCorners.at(px, py);
+                            g.ground[s] = groundCorners.at(px, py);
                         }
                     }
                     break;
@@ -87,7 +103,11 @@ Grid build(const Inputs& in, const std::array<float, 3>& sun) {
         if (c >= 0 && r >= 0 && c < W && r < H) g.heights[at(c, r)] = v;
     };
     for (const auto& w : in.walls) {
-        if (w.level < 0 || std::max({std::abs(w.x0), std::abs(w.y0), std::abs(w.x1), std::abs(w.y1)}) > kMaxTiles) continue;
+        if (w.level < 0) continue;
+        if (std::max({std::abs(w.x0), std::abs(w.y0), std::abs(w.x1), std::abs(w.y1)}) > kMaxTiles) {
+            diag::warnOnce("lot shadow: a wall more than 256 tiles out casts no shadow");
+            continue;
+        }
         float h0, h1;
         if (w.fence) {
             h0 = in.corner(w.x0, w.y0, w.level) + w.fenceHeight;

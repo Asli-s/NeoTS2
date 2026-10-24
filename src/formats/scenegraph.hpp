@@ -13,7 +13,7 @@
 // The game's 3D scenegraph resources. Each is an RCOL container: links to other resources, the
 // type ids of its blocks, then the blocks, each starting with its class name, id and version.
 // Blocks don't store their length, so a reader has to understand every block before the one it
-// wants; the readers here take the first block, which is the one that names the resource.
+// wants. The readers here take the first block, which is the one that names the resource.
 namespace ts2::scenegraph {
 
 constexpr std::uint32_t kScenegraphGroup = 0x1C0532FA;
@@ -41,8 +41,10 @@ struct Element {
 constexpr std::uint32_t kPositions = 0x5B830781;
 constexpr std::uint32_t kNormals = 0x3B83078B;
 constexpr std::uint32_t kTextureCoordinates = 0xBB8307AB;
+constexpr std::uint32_t kColors = 0xDB830795;  // four bytes per vertex: blue, green, red, alpha
 constexpr std::uint32_t kBlendIndices = 0xFBD70111;
 constexpr std::uint32_t kBlendWeights = 0x3BD70105;
+constexpr std::uint32_t kTangents = 0x89D92BA0;  // three floats per vertex, for normal maps
 
 // The elements one part of the mesh draws from.
 struct ElementLink {
@@ -89,7 +91,7 @@ Mesh parseMesh(std::span<const std::uint8_t> data);
 std::vector<float> floats(const Element& element);
 
 // Floats of the link's element with this identity, one item per vertex of the link (aliases
-// applied); empty when the link has no such element or an alias points past its items. `nth` picks
+// applied). Empty when the link has no such element or an alias points past its items. `nth` picks
 // among elements of the same identity (a second set of texture coordinates).
 std::vector<float> vertexFloats(const Mesh& mesh, const ElementLink& link, std::uint32_t identity, std::size_t nth = 0);
 
@@ -102,7 +104,10 @@ struct Shape {
     Container container;
     std::uint32_t version = 0;
     std::string name;
-    std::vector<std::string> geometryNodes;  // per item, by name
+    std::vector<std::string> geometryNodes;  // per item, by name (empty when linked)
+    // Per item: the index in the container's links of its geometry node, for shapes before
+    // version 8 and items that refer to the node instead of naming it.
+    std::vector<std::optional<std::uint32_t>> geometryLinks;
     std::vector<std::uint32_t> detailLevels;  // per item: the level of detail it is drawn at
     std::vector<ShapePart> parts;
 };
@@ -112,9 +117,9 @@ Shape parseShape(std::span<const std::uint8_t> data);
 Container parseContainer(std::span<const std::uint8_t> data);
 
 // The node tree of a resource node (CRES): transform nodes (joints, slots, routing points), shape
-// references and light references, each with a local transform; shapes are drawn and lights shine
+// references and light references, each with a local transform. Shapes are drawn and lights shine
 // at their reference's place in the tree (a light is known by its node's name). Nodes are indexed
-// by block; other blocks are kept as empty nodes.
+// by block, and other blocks are kept as empty nodes.
 struct SceneNode {
     enum class Kind { Other, Root, Transform, ShapeRef, LightRef };
     Kind kind = Kind::Other;
@@ -122,8 +127,16 @@ struct SceneNode {
     std::vector<std::uint32_t> children;  // block indices
     std::array<float, 3> translation{};
     std::array<float, 4> rotation{0, 0, 0, 1};  // quaternion x, y, z, w
-    std::int32_t joint = -1;                    // a transform node's joint index; -1 for none
+    std::int32_t joint = -1;                    // a transform node's joint index, -1 for none
     std::vector<std::uint32_t> shapeLinks;     // indices into the container's links
+    std::vector<std::uint32_t> extensions;     // a transform node's extension blocks (block indices)
+    // A bone data extension block (cBoneDataExtension): three words, a weight and a rotation.
+    struct BoneData {
+        std::array<std::uint32_t, 3> words{};
+        float weight = 0;
+        std::array<float, 4> rotation{0, 0, 0, 1};  // quaternion x, y, z, w
+    };
+    std::optional<BoneData> boneData;
 };
 struct ResourceNode {
     Container container;
@@ -131,14 +144,16 @@ struct ResourceNode {
 };
 ResourceNode parseResourceNode(std::span<const std::uint8_t> data);
 
-// A value of a data list (cDataListExtension): a named number, vector, string, byte blob or list of
-// more values. Resource nodes carry such lists, e.g. "footprint" (where Sims can't walk).
+// A value of a data list (cDataListExtension): a named flag, number, vector, string, byte blob or list
+// of more values. Resource nodes carry such lists, e.g. "footprint" (where Sims can't walk).
 struct DataValue {
-    enum class Type : std::uint8_t { Int = 2, Float = 3, Vector = 5, String = 6, List = 7, Rotation = 8, Bytes = 9 };
+    enum class Type : std::uint8_t {
+        Bool = 1, Int = 2, Float = 3, Vector2 = 4, Vector = 5, String = 6, List = 7, Rotation = 8, Bytes = 9
+    };
     Type type = Type::Int;
     std::string name;
-    std::int32_t integer = 0;
-    std::vector<float> floats;  // Float: one, Vector: three, Rotation: four
+    std::int32_t integer = 0;  // Bool: 0 or 1
+    std::vector<float> floats;  // Float: one, Vector2: two, Vector: three, Rotation: four
     std::string text;
     std::vector<std::uint8_t> bytes;
     std::vector<DataValue> items;  // a list's values
@@ -172,6 +187,9 @@ struct Image {
     std::uint32_t format = 0;  // 4 DXT1, 5 DXT3, 8 DXT5, 1 raw 32-bit, 2 raw 24-bit, 3 alpha only
     std::vector<MipLevel> mips;               // the first texture's
     std::vector<std::vector<MipLevel>> faces;  // every texture's: one normally, six for a cube map
+    // The first texture's float from version 8: a bump map's height scale when the game makes its
+    // normal map (10 in the game's files). Unset before version 8.
+    std::optional<float> bumpAmplitude;
 };
 Image parseImage(std::span<const std::uint8_t> data);
 
@@ -185,9 +203,9 @@ LevelInfo parseLevelInfo(std::span<const std::uint8_t> data);
 
 // A placed object's scene record in its lot (cObject, instance = object id): the model it shows and
 // the materials replacing a mesh group's default one (recolors). Records may wrap cObject in a
-// cAnimatable block; the model name is empty for objects without one. After the model comes a
+// cAnimatable block. The model name is empty for objects without one. After the model comes a
 // list of entries (in practice none or one), each a name and a number and, from cObject version
-// 0x11 on, its material overrides; older records have no overrides.
+// 0x11 on, its material overrides. Older records have no overrides.
 struct MaterialOverride {
     std::string material;
     std::string group;

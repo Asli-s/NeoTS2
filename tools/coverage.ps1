@@ -26,7 +26,7 @@ foreach ($step in $steps) {
 $raw = Join-Path $build "tests.profraw"
 $data = Join-Path $build "tests.profdata"
 $env:LLVM_PROFILE_FILE = $raw
-& "$build\vm_tests.exe" | Select-String "tests,"
+& "$build\vm_tests.exe" | Select-String "tests,|FAILED|\[FAIL\]"  # the summary, and any check that failed
 & "$llvm\llvm-profdata.exe" merge -sparse $raw -o $data
 $ignore = "third_party|tests[\\/]|tools[\\/]|fuzz[\\/]"
 & "$llvm\llvm-cov.exe" report "$build\vm_tests.exe" "-instr-profile=$data" "-ignore-filename-regex=$ignore"

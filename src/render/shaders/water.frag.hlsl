@@ -10,7 +10,7 @@ Texture2D<float4> ripples : register(t1, space2);
 SamplerState rippleSampler : register(s1, space2);
 
 cbuffer Water : register(b0, space3) {
-    float4 tint;       // rgb: the reflection colour; a: the reflection strength
+    float4 tint;       // rgb: the reflection colour, a: the reflection strength
     float2 screen;     // the target's size in pixels
     float offset;      // the second sample's shift
     float scale;       // ripple map repeats per tile

@@ -35,7 +35,7 @@ struct Component {
     int predictor = 0;
 };
 
-// Reads entropy-coded bits; a marker or the end of the data reads as zeros, as libjpeg does.
+// Reads entropy-coded bits. A marker or the end of the data reads as zeros, as libjpeg does.
 class Bits {
 public:
     explicit Bits(std::span<const std::uint8_t> data, std::size_t at) : data_(data), at_(at) {}
@@ -159,6 +159,7 @@ constexpr std::int16_t kRowTables[4][8][4] = {
      {29692, 25172, 25172, -5906}, {16819, 5906, -29692, -16819}, {16819, -29692, 5906, -16819}, {5906, 25172, 25172, -29692}},
     {{19266, 25172, 19266, 10426}, {19266, 10426, -19266, -25172}, {19266, -10426, 19266, -25172}, {-19266, 25172, 19266, -10426},
      {26722, 22654, 22654, -5315}, {15137, 5315, -26722, -15137}, {15137, -26722, 5315, -15137}, {5315, 22654, 22654, -26722}}};
+// Which of the four tables above each of a block's eight rows uses.
 constexpr int kRowTableOf[8] = {0, 1, 2, 3, 0, 3, 2, 1};
 
 // Two products summed into 32 bits, wrapping as the processor's multiply-add does.
@@ -185,6 +186,9 @@ void inverseDct(const std::array<std::int16_t, 64>& coef, const std::array<std::
     for (int r = 0; r < 8; ++r) {
         const auto& t = kRowTables[kRowTableOf[r]];
         const std::int16_t* x = &in[static_cast<std::size_t>(r * 8)];
+        if (std::all_of(x, x + 8, [](std::int16_t v) { return v == 0; })) {
+            continue;  // a row of zeros stays zeros: (0 + kRound) >> 12 is 0
+        }
         const std::int32_t e0 = wrapAdd(wrapAdd(madd(t[0][0], x[0], t[0][1], x[2]), kRound), madd(t[1][0], x[4], t[1][1], x[6]));
         const std::int32_t e1 = wrapAdd(wrapAdd(madd(t[0][2], x[0], t[0][3], x[2]), kRound), madd(t[1][2], x[4], t[1][3], x[6]));
         const std::int32_t e2 = wrapAdd(wrapAdd(madd(t[2][0], x[0], t[2][1], x[2]), kRound), madd(t[3][0], x[4], t[3][1], x[6]));
@@ -241,12 +245,13 @@ void inverseDct(const std::array<std::int16_t, 64>& coef, const std::array<std::
 std::vector<std::uint8_t> upsample(const Component& c, int hMax, int vMax, int outWidth, int outHeight) {
     const int fx = hMax / c.h, fy = vMax / c.v;
     std::vector<std::uint8_t> out(static_cast<std::size_t>(outWidth) * static_cast<std::size_t>(outHeight));
+    std::vector<std::size_t> column(static_cast<std::size_t>(outWidth));
+    for (int x = 0; x < outWidth; ++x) column[static_cast<std::size_t>(x)] = static_cast<std::size_t>(std::min(x / fx, c.stride - 1));
     for (int y = 0; y < outHeight; ++y) {
-        for (int x = 0; x < outWidth; ++x) {
-            const int sx = std::min(x / fx, c.stride - 1), sy = std::min(y / fy, c.rows - 1);
-            out[static_cast<std::size_t>(y) * static_cast<std::size_t>(outWidth) + static_cast<std::size_t>(x)] =
-                c.samples[static_cast<std::size_t>(sy) * static_cast<std::size_t>(c.stride) + static_cast<std::size_t>(sx)];
-        }
+        const int sy = std::min(y / fy, c.rows - 1);
+        const std::uint8_t* from = c.samples.data() + static_cast<std::size_t>(sy) * static_cast<std::size_t>(c.stride);
+        std::uint8_t* to = out.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(outWidth);
+        for (int x = 0; x < outWidth; ++x) to[x] = from[column[static_cast<std::size_t>(x)]];
     }
     return out;
 }
@@ -396,6 +401,16 @@ std::optional<tga::Pixels> decode(std::span<const std::uint8_t> data, std::uint3
     const bool single = comps.size() == 1;
     const int mcuWidth = single ? 8 : 8 * hMax, mcuHeight = single ? 8 : 8 * vMax;
     const int mcusX = (width + mcuWidth - 1) / mcuWidth, mcusY = (height + mcuHeight - 1) / mcuHeight;
+    // Every block takes at least two bits (a DC code and an end of block), so a scan too short for
+    // its blocks is refused before the planes are allocated.
+    std::size_t blocksPerMcu = 0;
+    for (const auto& c : comps) {
+        blocksPerMcu += single ? 1 : static_cast<std::size_t>(c.h) * static_cast<std::size_t>(c.v);
+    }
+    const std::size_t blocks = static_cast<std::size_t>(mcusX) * static_cast<std::size_t>(mcusY) * blocksPerMcu;
+    if ((data.size() - *scanStart) * 4 < blocks) {
+        return std::nullopt;
+    }
     for (auto& c : comps) {
         c.width = (width * c.h + hMax - 1) / hMax;
         c.height = (height * c.v + vMax - 1) / vMax;
@@ -404,7 +419,7 @@ std::optional<tga::Pixels> decode(std::span<const std::uint8_t> data, std::uint3
         c.samples.assign(static_cast<std::size_t>(c.stride) * static_cast<std::size_t>(c.rows), 0);
     }
 
-    // The scan: MCUs left to right, top to bottom; each component's blocks in its h x v layout.
+    // The scan: MCUs left to right, top to bottom, each component's blocks in its h x v layout.
     Bits in(data, *scanStart);
     std::array<std::int16_t, 64> coef{};
     int mcusLeft = restartInterval;

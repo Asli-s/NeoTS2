@@ -54,7 +54,7 @@ std::uint8_t toByte(double v) {
     // The game adds 49152 to a float and keeps the low bits: v * 256, rounded, clamped.
     const auto f = static_cast<float>(v + 49152.0);
     const auto scaled = std::nearbyint((static_cast<double>(f) - 49152.0) * 256.0);
-    return static_cast<std::uint8_t>(std::clamp(scaled, 0.0, 255.0));
+    return scaled > 0.0 ? static_cast<std::uint8_t>(std::min(scaled, 255.0)) : std::uint8_t{0};
 }
 
 } // namespace

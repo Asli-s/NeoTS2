@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <span>
 
@@ -27,7 +28,11 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
         const auto image = sg::parseImage(input);
         for (const auto& mip : image.mips) {
             if (!mip.data.empty() && image.width <= 1024 && image.height <= 1024) {
-                sg::decodeRgba(mip.data, image.width, image.height, image.format);
+                // Decoded twice: different pixels mean memory read before it was written.
+                if (sg::decodeRgba(mip.data, image.width, image.height, image.format) !=
+                    sg::decodeRgba(mip.data, image.width, image.height, image.format)) {
+                    std::abort();
+                }
             }
         }
     });

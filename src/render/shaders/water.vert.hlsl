@@ -1,4 +1,4 @@
-// The neighborhood water sheet: world positions; texture coordinates in tiles.
+// The neighborhood water sheet: world positions, texture coordinates in tiles.
 
 cbuffer Frame : register(b0, space1) {
     row_major float4x4 viewProjection;  // applied to column vectors

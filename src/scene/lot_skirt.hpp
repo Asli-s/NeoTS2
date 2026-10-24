@@ -6,16 +6,21 @@
 
 #include <map>
 #include <string>
+#include <vector>
 
 namespace ts2::scene {
 
 // The ground around a lot in lot view, as the game's lot skirt: the neighborhood's terrain points
 // `margin` tiles around the lot at the neighborhood's heights, less the lot's own tiles, showing the
-// lot's terrain texture once per neighborhood tile; and the neighborhood's road tiles there with the
+// lot's terrain texture once per neighborhood tile, and the neighborhood's road tiles there with the
 // lot view's road textures (`roadTextures`: texture by material "lotSkirtRoad_<terrain type>_<piece>").
 // Added in world coordinates.
 void addLotSkirt(SceneBuilder& builder, const PaintedTerrain& terrain, const LotFootprint& lot, int margin,
                  const std::string& terrainType, const std::map<std::string, std::string>& roadTextures);
+
+// Sets the skirt's colour scales for day or night, as the game's lot skirt materials pick them
+// (summer by day, as the engine knows no seasons or clouds yet). Returns the instances changed.
+std::vector<std::size_t> lightLotSkirt(Scene& scene, bool day);
 
 // The skirt's area: neighborhood tiles [x0, x1) x [y0, y1).
 struct SkirtArea {

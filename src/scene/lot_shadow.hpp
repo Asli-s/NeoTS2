@@ -18,7 +18,7 @@ namespace ts2::scene::lotshadow {
 constexpr int kSamplesPerTile = 8;
 constexpr float kCell = 1.0f / kSamplesPerTile;
 
-// A wall as the shadow sees it: tile points on a level; a fence or railing stands `fenceHeight`
+// A wall as the shadow sees it: tile points on a level. A fence or railing stands `fenceHeight`
 // above its own level, any other wall reaches the floor of the level above.
 struct Wall {
     int level = 0;
@@ -32,7 +32,7 @@ struct Inputs {
     int levels = 0;             // 0 .. levels - 1
     // The height of a level's floor at a tile corner.
     std::function<float(int x, int y, int level)> corner;
-    // Whether a tile quarter has floor on a level (bit 0 west, 1 north, 2 east, 3 south); the ground
+    // Whether a tile quarter has floor on a level (bit 0 west, 1 north, 2 east, 3 south). The ground
     // level always counts.
     std::function<bool(int x, int y, int level, int quarter)> floorAt;
     std::vector<Wall> walls;
@@ -47,13 +47,23 @@ struct Grid {
 };
 
 // A lot's floors, corner heights and walls (any covering for which `isFence` holds stands as a
-// fence or railing, 1.1824 high: the railings seen on the game's lots; where the game keeps that
-// height per style is not read). The inputs read from `lot`, which must outlive them.
+// fence or railing, 1.1824 high, as the game's railings stand. Where the game keeps that
+// height per style is not known yet). The inputs read from `lot`, which must outlive them.
 Inputs fromLot(const content::Lot& lot, const std::function<bool(std::uint32_t covering)>& isFence);
 
 // The height of a level's floor at a point: between its four corners (levels outside the lot's are
 // a storey (3) below its lowest or above its highest).
 float elevation(const Inputs& in, float x, float y, int level);
+
+// A tile's four corner heights on a level, for many elevations in one tile: on the lot's own
+// levels, elevation(in, x, y, level) is cornersOf(in, floor(x), floor(y), level).at(x, y).
+struct Corners {
+    float x0y0 = 0, x1y0 = 0, x0y1 = 0, x1y1 = 0;
+    float at(float x, float y) const;
+    // The same from how far (x, y) lies into the tile, 0..1 each way.
+    float between(float fx, float fy) const;
+};
+Corners cornersOf(const Inputs& in, int x, int y, int level);
 
 // `sun` points toward the sun, normalized. Lots larger than 256 tiles a side give nothing.
 Grid build(const Inputs& in, const std::array<float, 3>& sun);

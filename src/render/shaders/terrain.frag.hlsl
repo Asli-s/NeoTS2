@@ -1,7 +1,7 @@
 // Neighborhood terrain: the game draws the terrain black, adds each paint's texture times its
 // alpha map, darkens what is under the water by depth (the underwater gradient), then multiplies
-// what is above the water by the light map; this does it in one pass. Alpha and light maps are
-// sampled at grid / size (so a vertex falls between two texels, as in the game); paint textures
+// what is above the water by the light map. This does it in one pass. Alpha and light maps are
+// sampled at grid / size (so a vertex falls between two texels, as in the game). Paint textures
 // repeat every few tiles, each cell of the variant grid showing one variant per paint. In the
 // water's reflection only what is above the water is drawn, without the gradient.
 

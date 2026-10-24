@@ -40,7 +40,7 @@ struct Settings {
     bool dimOutside = true;  // samples of floors and walls outdoors leave the outside ambient out (always, in the game)
     // Windows and doors.
     windowlight::Daylight day;
-    bool sun = false;        // the state has a sun (without one the game samples the sky; not supported)
+    bool sun = false;        // the state has a sun (without one the game samples the sky, not supported)
     windowlight::Suppression suppression;
     // Rooms.
     roomsamples::Settings samples;
@@ -48,14 +48,17 @@ struct Settings {
     content::Lighting::UnlitRoom unlit;
     // The sunlight added to outdoor floors and walls in the light maps.
     lightmaptexels::Outdoor outdoor;
+    // The incidence maps made of the light maps (incidenceMapScale, incidenceMapHeightClamp).
+    float incidenceScale = 20, incidenceHeightClamp = 1;
 };
 enum Group { kObjects, kSims, kPortals };
 
 // The settings of `state` (with the light files' global values where the state leaves them out).
 // Nullopt when there is no such state.
-std::optional<Settings> settingsFor(const content::Lighting& lighting, const std::string& state);
+[[nodiscard]] std::optional<Settings> settingsFor(const content::Lighting& lighting, const std::string& state);
 
 struct Inputs {
+    // The whole lot. Levels count from its ground storey (0), the storey below it (a pool's) is -1.
     const content::Lot* lot = nullptr;
     std::vector<LightSource> lamps;             // lamps that are on, as the game records them
     std::vector<portalrecords::Built> portals;  // the lot's windows, doors and arches
@@ -64,7 +67,7 @@ struct Inputs {
     std::function<std::int16_t(int level, int x, int y, int quarter)> quarterRoom;
     std::function<std::int16_t(int level, float x, float y)> roomAt;
     std::function<std::optional<roomsamples::Color>(bool floor, const std::string& name)> covering;
-    // The game numbers rooms 1 .. roomCount - 1 with no gaps; rooms that lost all their tiles still
+    // The game numbers rooms 1 .. roomCount - 1 with no gaps. Rooms that lost all their tiles still
     // get the unlit room light.
     int roomCount = 0;
 };
@@ -80,11 +83,16 @@ struct PortalLight {
     std::int16_t into = 0;                          // the room it shines into
     windowlight::Portal portal;                     // after suppression
     std::array<float, 3> spillPoint{0, 0, 0};
+    std::array<float, 3> lightPosition{0, 0, 0};    // its light node
+    std::array<float, 3> lightAxis{0, 0, 1};        // the node's +z
+    bool spot = false;                              // the beam is a spot light with this cone (radians)
+    float coneAngle = 0, conePenumbra = 0;
     std::optional<windowlight::PortalLights> lights;
 };
 
 struct Result {
     std::vector<floorlight::Grid> floors;   // per level, from the lowest
+    int lowest = 0;                         // the level of floors[0]: 0 the ground storey, -1 a pool's below it
     walllight::Walls walls;                 // with texels filled
     wallruns::Layout layout;
     std::map<std::int16_t, Room> rooms;

@@ -1,0 +1,51 @@
+#pragma once
+
+#include "scene/rig.hpp"
+
+#include <optional>
+#include <span>
+#include <vector>
+
+namespace ts2::scene {
+
+// One animation playing on a rig among others: where it is, how strongly it plays, on which layer
+// (higher layers cover lower ones) and when it started (later ones cover earlier ones on a layer).
+struct LayeredClip {
+    const RigAnimation* animation = nullptr;
+    float ms = 0;
+    float weight = 1;
+    int layer = 0;
+    double start = 0;
+    // Its weight while a newer clip on its layer covers it: without its own fading out, which the newer
+    // clip's fading in stands for. Negative: the same as `weight`.
+    float steady = -1;
+    // Radians the clip's root and limb controls are turned by about their turn axes (Rig::Node::turnAxis):
+    // a locomotion clip plays from its own heading, which may differ from the one the rig is placed at.
+    float turn = 0;
+    // Moves only the body's joints: not the root joints (root_trans, root_rot) and no limb targets. A
+    // walk's last pose under the animation that follows it is drawn this way, as the game's root
+    // already follows that animation.
+    bool bodyOnly = false;
+    // Leaves out where it moves the root (root_trans's move) but keeps the rest. The animation before
+    // a walk is drawn this way under the walk's fade-in: the game's root takes the walk's place at
+    // once, so a Sim leaving a long stair at its top doesn't keep the climb's lift. Its limbs reach
+    // around the drawn root as they do around its own (see LimbSource::shift).
+    bool noRootMove = false;
+    // Where the clip's IK object stands, in the rig's space: its limb targets on that object are
+    // placed from there. None: in the skeleton's own space.
+    std::optional<Transform> objectFrame;
+};
+
+// Poses a rig from several animations as the game mixes them, joint by joint: the highest layer
+// that moves the joint takes it, the layer below gets what it leaves (1 minus its weight), and so
+// on. On an overlay layer the newest clip goes first and older ones get what it leaves at their
+// steady weight (a clip fading in fades the one it replaces out). The clips of layer 0 are averaged
+// by weight. A joint no clip moves stays at rest. Limbs reach for the targets of all the clips, each
+// clip weighted as a joint's mix weighs it.
+// With `held` (one per joint, or empty at first) a joint no clip moves keeps what it held instead,
+// as the game leaves a joint nothing drives. Clips below layer 0 (the pose the rig starts in) count
+// only while it holds nothing yet. `held` is then set to this pose.
+void poseRigLayered(const Rig& rig, std::span<const LayeredClip> clips, std::vector<Transform>& world,
+                    std::vector<HeldJoint>* held = nullptr);
+
+} // namespace ts2::scene

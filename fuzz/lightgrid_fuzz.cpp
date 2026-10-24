@@ -69,7 +69,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
         lamp.x1 = lamp.x0 + 1;
         lamp.y1 = lamp.y0 + 1;
         lamp.room = static_cast<std::int16_t>(byte() & 7);
-        scene::floorlight::light(grid, {lamp}, nullptr);
+        (void)scene::floorlight::light(grid, {lamp}, nullptr);
     }
     return 0;
 }

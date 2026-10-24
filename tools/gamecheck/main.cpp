@@ -12,6 +12,7 @@
 #include "formats/camera_config.hpp"
 #include "formats/datatables.hpp"
 #include "formats/dbpf.hpp"
+#include "formats/effects.hpp"
 #include "formats/fami.hpp"
 #include "formats/famt.hpp"
 #include "formats/fencepostlayer.hpp"
@@ -46,10 +47,8 @@
 #include "formats/wallgraph.hpp"
 #include "formats/walllayer.hpp"
 
-extern "C" {
 #include "lauxlib.h"
 #include "lua.h"
-}
 
 #include <algorithm>
 #include <atomic>
@@ -77,6 +76,8 @@ struct Reader {
     std::uint32_t type;
     const char* name;
     std::function<bool(Bytes)> read;
+    // Used instead of read for types whose layout depends on the instance.
+    std::function<bool(Bytes, std::uint32_t)> readInstance = {};
 };
 
 template <typename F>
@@ -112,6 +113,21 @@ bool decodesAsTexture(Bytes data) {
     return true;
 }
 
+// Type 0 holds other text and data too (want tuning, music titles, movies). The game loads UI
+// scripts from group 0xA99D8A11 or a screen size group, its width and height as decimal digits
+// ("0x%.4u%.4u", e.g. 0x08000600 for 800 x 600).
+bool isUiScriptGroup(std::uint32_t group) {
+    if (group == 0xA99D8A11) {
+        return true;
+    }
+    for (int shift = 0; shift < 32; shift += 4) {
+        if (((group >> shift) & 0xF) > 9) {
+            return false;
+        }
+    }
+    return true;
+}
+
 std::vector<Reader> readers() {
     using namespace ts2;
     namespace t = ts2::types;
@@ -135,7 +151,10 @@ std::vector<Reader> readers() {
              }
              return true;
          }},
-        {0xE519C933, "CRES (model node tree)", throwing([](Bytes d) { scenegraph::parseResourceNode(d); })},
+        {0xE519C933, "CRES (model node tree)", throwing([](Bytes d) {
+             scenegraph::parseResourceNode(d);
+             scenegraph::parseDataLists(d);
+         })},
         {0xFC6EB1F7, "SHPE (shape)", throwing([](Bytes d) { scenegraph::parseShape(d); })},
         {0x7BA3838C, "GMND (geometry node)", throwing([](Bytes d) { scenegraph::parseContainer(d); })},
         {0xAC4F8687, "GMDC (mesh)", throwing([](Bytes d) { scenegraph::parseMesh(d); })},
@@ -151,15 +170,27 @@ std::vector<Reader> readers() {
         {t::kWantDefinition, "XWNT (want definition)", throwing([](Bytes d) { propset::parse(d); })},
         {reflist::kType, "3IDR (reference list)", throwing([](Bytes d) { reflist::parse(d); })},
         {t::kObjectTypeTable, "OBJT (lot object types)", throwing([](Bytes d) { objt::parse(d); })},
-        {t::kObjectMap, "ObjM (lot object map)", throwing([](Bytes d) { objm::parse(d); })},
+        {t::kObjectMap, "ObjM (lot object map)", {},
+         [](Bytes d, std::uint32_t instance) {
+             instance == 2 ? (void)objm::parseGroups(d) : (void)objm::parse(d);
+             return true;
+         }},
         {t::kNameMap, "NMAP (name map)", throwing([](Bytes d) { namemap::parse(d); })},
         {t::kWallGraph, "wall graph", throwing([](Bytes d) { wallgraph::parse(d); })},
         {t::kWallLayer, "wall layer", throwing([](Bytes d) { walllayer::parse(d); })},
         {t::kFencePostLayer, "fence post layer", throwing([](Bytes d) { fencepostlayer::parse(d); })},
         {t::kRoofs, "roofs", throwing([](Bytes d) { roofs::parse(d); })},
         {t::kPatternMap, "pattern map", throwing([](Bytes d) { stringmap::parse(d); })},
-        {t::kArray3D, "3D array (lot grid)", throwing([](Bytes d) { array3d::parse(d); })},
-        {t::kArray2D, "2D array (lot grid)", throwing([](Bytes d) { terrain::parseArray2D(d); })},
+        {t::kArray3D, "3D array (lot grid)", {},
+         [](Bytes d, std::uint32_t instance) {
+             instance == ts2::content::kListGridInstance ? (void)array3d::parseLists(d) : (void)array3d::parse(d);
+             return true;
+         }},
+        {t::kArray2D, "2D array (lot grid)", {},
+         [](Bytes d, std::uint32_t instance) {
+             instance == ts2::content::kByteListGridInstance ? (void)terrain::parseByteLists(d) : (void)terrain::parseArray2D(d);
+             return true;
+         }},
         {t::kLotTexture, "lot terrain textures", throwing([](Bytes d) { terrain::parseLotTexture(d); })},
         {t::kSimDescription, "SDSC (Sim description)", throwing([](Bytes d) { sdsc::parse(d); })},
         {t::kSimRelationship, "SREL (relationship)", throwing([](Bytes d) { srel::parse(d); })},
@@ -171,8 +202,9 @@ std::vector<Reader> readers() {
         {simi::kType, "SIMI (simulator state)", throwing([](Bytes d) { simi::parse(d); })},
         {nhood::kLotDescriptionType, "lot description", throwing([](Bytes d) { nhood::parseLotDescription(d); })},
         {nhood::kTerrainType, "neighborhood terrain", throwing([](Bytes d) { nhood::parseTerrain(d); })},
-        {nhood::kSavedCameraType, "neighborhood camera", throwing([](Bytes d) { nhood::parseSavedCamera(d); })},
+        {nhood::kSavedCameraType, "neighborhood camera", throwing([](Bytes d) { (void)nhood::parseSavedCamera(d); })},
         {nhood::kObjectsType, "neighborhood objects", throwing([](Bytes d) { nhood::parseObjects(d); })},
+        {effects::kEffectsType, "effects", throwing([](Bytes d) { (void)effects::parse(d); })},
     };
 }
 
@@ -253,14 +285,14 @@ void checkPackage(const fs::path& path, const fs::path& root, const std::vector<
             }
             ++resources;
             const auto reader = std::find_if(all.begin(), all.end(), [&](const Reader& r) { return r.type == e.key.type; });
-            if (reader == all.end()) {
+            if (reader == all.end() || (e.key.type == ts2::types::kUiScript && !isUiScriptGroup(e.key.group))) {
                 ++unread[e.key.type];
                 continue;
             }
             Count& c = local[reader->name];
             try {
                 const auto data = package.read(e);
-                out.add(c, reader->read(data), "", "");
+                out.add(c, reader->readInstance ? reader->readInstance(data, e.key.instance) : reader->read(data), "", "");
             } catch (const std::exception& ex) {
                 out.add(c, false, where + " instance " + hex(e.key.instance), ex.what());
                 ++c.failedInstances[e.key.instance];

@@ -32,7 +32,8 @@ namespace {
 
 // Our own codes for the failures that aren't Windows exceptions, raised so that one filter
 // handles everything (the names are in diag::exceptionName).
-constexpr DWORD kTerminate = 0xE0000001, kAbort = 0xE0000002, kPureCall = 0xE0000003, kInvalidParameter = 0xE0000004;
+constexpr DWORD kTerminate = 0xE0000001, kAbort = 0xE0000002, kPureCall = 0xE0000003, kInvalidParameter = 0xE0000004,
+                kClosingStuck = 0xE0000005;
 constexpr DWORD kReportTimeoutMs = 5'000;  // the crashing thread waits this long for the files (they take well under a second)
 constexpr DWORD kShowTimeoutMs = 10'000;  // the message must appear by then (it can't, while some lock is held)
 constexpr std::size_t kMaxFrames = 48;
@@ -64,7 +65,7 @@ std::string userFolder() {
     return GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH) > 0 ? utf8(profile) : std::string();
 }
 
-// The module an address is in and the offset into it; with symbols, its function and line.
+// The module an address is in and the offset into it, and with symbols its function and line.
 ts2::diag::Frame frameAt(HANDLE process, DWORD64 address) {
     ts2::diag::Frame f;
     HMODULE module = nullptr;
@@ -247,7 +248,7 @@ LONG WINAPI onCrash(EXCEPTION_POINTERS* p) {
     SetEvent(request);
     // Little stack is used here: after a stack overflow there is little left.
     if (WaitForSingleObject(written, kReportTimeoutMs) == WAIT_OBJECT_0 && dialog) {
-        // Once the message is up the tester takes their time; if it never appears, end anyway.
+        // Once the message is up the tester takes their time. If it never appears, end anyway.
         const HANDLE either[] = {shown, finished};
         if (WaitForMultipleObjects(2, either, FALSE, kShowTimeoutMs) == WAIT_OBJECT_0) {
             WaitForSingleObject(finished, INFINITE);
@@ -296,7 +297,7 @@ void install(const Settings& settings) {
         ts2::diag::warning("crash reports are off: the crash handler couldn't start");
         return;
     }
-    CloseHandle(thread);  // it runs on; nothing waits for it
+    CloseHandle(thread);  // it runs on and nothing waits for it
     // Room for the handler to run on this thread after a stack overflow.
     ULONG guarantee = 64 * 1024;
     SetThreadStackGuarantee(&guarantee);
@@ -306,6 +307,14 @@ void install(const Settings& settings) {
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
     _set_purecall_handler(onPureCall);
     _set_invalid_parameter_handler(onInvalidParameter);
+}
+
+void watchClosing(unsigned seconds) {
+    std::thread([seconds] {
+        Sleep(seconds * 1000);
+        ts2::diag::error("closing has taken more than " + std::to_string(seconds) + " s: reported as stuck");
+        RaiseException(kClosingStuck, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+    }).detach();
 }
 
 void test(std::string_view kind) {
@@ -351,6 +360,7 @@ void test(std::string_view kind) {
 namespace app::crash {
 
 void install(const Settings&) {}
+void watchClosing(unsigned) {}
 void test(std::string_view kind) {
     if (kind == "access") {
         volatile int* nowhere = nullptr;

@@ -823,7 +823,6 @@ int show(ResourceIndex& index, std::uint32_t group, std::uint32_t instance) {
                         targetText(in.trueTarget).c_str(), targetText(in.falseTarget).c_str());
             if (in.opcode == ts2::bhav::kExpressionOpcode) {
                 std::printf("     %s\n", expressionText(in, ctx).c_str());
-                continue;
             }
             std::printf("     ");
             for (std::size_t k = 0; k < operandCount; ++k) {

@@ -1,5 +1,7 @@
 #include "scene/portal_records.hpp"
 
+#include "diag/log.hpp"
+
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -36,7 +38,7 @@ std::array<float, 2> normalOf(const Edge& e) {
     return {r24(a * inverse), r24(inverse * b)};
 }
 
-// The floor height of a level at a point; levels above and below the lot's go on in steps of a
+// The floor height of a level at a point. Levels above and below the lot's go on in steps of a
 // level's height, and are 0 off the lot.
 float elevation(const LotQueries& lot, float x, float y, int level) {
     const auto& q = lot.lamps;
@@ -112,6 +114,9 @@ std::vector<Built> build(const PortalObject& object, const LotQueries& lot, floa
         bool lost = false;
         while (!(top >= pos[2])) {
             if (top <= 0 || ++steps > kMaxLevelSteps) {
+                if (steps > kMaxLevelSteps) {
+                    diag::warnOnce("portal light: a light more than 64 levels above its portal is skipped");
+                }
                 lost = true;
                 break;
             }
@@ -126,6 +131,7 @@ std::vector<Built> build(const PortalObject& object, const LotQueries& lot, floa
             floor = elevation(lot, x0, y0, --level);
         }
         if (floor > pos[2]) {
+            diag::warnOnce("portal light: a light more than 64 levels below its portal is skipped");
             continue;
         }
         const Edge here{x0, y0, level, r24(static_cast<double>(dx) + x0), r24(static_cast<double>(dy) + y0)};
@@ -134,9 +140,14 @@ std::vector<Built> build(const PortalObject& object, const LotQueries& lot, floa
             continue;
         }
         const std::int16_t roomA = lot.roomInFront(here), roomB = lot.roomInFront(back);
-        // The light shines into the room on the side it faces; it is filed under the other.
+        // The light shines into the room on the side it faces. It is filed under the other.
         const double dot = static_cast<double>(nA[1]) * facing[1] + static_cast<double>(nA[0]) * facing[0];
         Built built;
+        built.lightPosition = pos;
+        built.lightAxis = lamplights::turned(light.place.rotation, {0.0f, 0.0f, 1.0f});
+        built.spot = light.spot;
+        built.coneAngle = light.coneAngle;
+        built.conePenumbra = light.conePenumbra;
         const Edge* corners = nullptr;
         std::array<float, 2> normal{};
         if (dot > 0) {

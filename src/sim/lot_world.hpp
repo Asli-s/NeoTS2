@@ -6,6 +6,7 @@
 #include "sim/world.hpp"
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -20,7 +21,7 @@ struct LotWorldProblem {
 struct LotWorldReport {
     std::size_t objects = 0;
     std::size_t threads = 0;
-    // Objects whose type changed since the lot was saved (Sims aside), by id: the game resets them
+    // Objects and Sims whose type changed since the lot was saved, by id: the game resets them
     // when the lot loads instead of letting them resume (see LotSimulation).
     std::vector<std::int16_t> changedType;
     // Data table records of objects the lot no longer has (the game leaves them in the package).
@@ -34,6 +35,7 @@ struct LotWorldReport {
 LotWorldReport buildWorld(const content::Lot& lot, CodeSource& code, World& world);
 
 // The neighborhood's neighbors and relationships, ready to share between worlds.
-std::shared_ptr<const SavedNeighborhood> savedNeighborhood(const content::Neighborhood& hood);
+std::shared_ptr<const SavedNeighborhood> savedNeighborhood(const content::Neighborhood& hood,
+                                                          std::map<std::int32_t, nhoodid::NeighborhoodId> all = {});
 
 } // namespace ts2::sim

@@ -8,6 +8,8 @@ namespace ts2::types {
 constexpr std::uint32_t kDirectory = 0xE86B1EEF;
 constexpr std::uint32_t kBehavior  = 0x42484156;
 constexpr std::uint32_t kStringTable = 0x53545223;
+constexpr std::uint32_t kCatalogString = 0x43545353;  // CTSS: an object's catalog name and description
+constexpr std::uint32_t kInteractionStrings = 0x54544173;  // TTAs
 constexpr std::uint32_t kObjectDefinition = 0x4F424A44;
 constexpr std::uint32_t kObjectTypeTable = 0x6F626A74;
 constexpr std::uint32_t kObjectMap = 0x4F626A4D;

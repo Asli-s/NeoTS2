@@ -64,7 +64,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
         s.room = static_cast<std::int16_t>(byte() % 8);
     }
     const std::uint8_t stopMask = byte();
-    light(grid, sources, [stopMask](int x, int y, int level) { return ((x + y + level) & 7) == (stopMask & 7); });
+    (void)light(grid, sources, [stopMask](int x, int y, int level) { return ((x + y + level) & 7) == (stopMask & 7); });
     for (int i = 0; i < 8; ++i) {
         sample(grid, number(), number());
     }

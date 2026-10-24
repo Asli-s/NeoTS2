@@ -1,1 +1,4 @@
-* text=auto
+# Fuzz regression inputs are replayed byte for byte: no line-ending conversion.
+fuzz/regressions/*/** -text
+# The test font is kept byte for byte as make_test_font.py writes it.
+tests/data/*.pfa -text

@@ -2,6 +2,7 @@
 
 #include "formats/binary_reader.hpp"
 
+#include <cmath>
 #include <stdexcept>
 
 namespace ts2::nhood {
@@ -27,7 +28,9 @@ std::vector<T> readArray(BinaryReader& r, std::uint32_t& columns, std::uint32_t&
     std::vector<T> values(count);
     for (auto& v : values) {
         if constexpr (sizeof(T) == 4) {
-            v = r.f32();
+            // A height that isn't a number (a broken file) reads as 0.
+            const float h = r.f32();
+            v = std::isfinite(h) ? h : 0.0f;
         } else {
             v = r.u8();
         }

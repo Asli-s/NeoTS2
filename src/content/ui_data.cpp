@@ -132,7 +132,13 @@ std::string UiData::text(std::uint32_t group, std::uint32_t value, std::uint8_t 
     if (!r || n == 0) {
         return {};
     }
-    const auto table = str::parse(index_.read(*r));
+    // A script's captions mostly come from a few tables: each is read once.
+    const std::uint64_t key = static_cast<std::uint64_t>(group) << 32 | (value >> 16);
+    auto known = tables_.find(key);
+    if (known == tables_.end()) {
+        known = tables_.emplace(key, str::parse(index_.read(*r))).first;
+    }
+    const auto& table = known->second;
     auto entries = table.forLanguage(language);
     if (entries.empty()) {
         entries = table.forLanguage(1);

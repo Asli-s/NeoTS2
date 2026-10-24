@@ -35,13 +35,13 @@ PortraitCamera portraitCamera(const Transform& place, const std::array<float, 3>
 ObjectLighting portraitLighting(const PortraitCamera& camera);
 
 // A Sim posed for its portrait: `pose` at its first frame (at rest when null). Gives each skinned
-// instance's joint matrices, the camera and the lighting; false when the actor has no rig or no
+// instance's joint matrices, the camera and the lighting. False when the actor has no rig or no
 // head joint.
 struct PortraitShot {
     std::vector<std::pair<std::size_t, std::vector<Transform>>> joints;
     PortraitCamera camera;
     ObjectLighting lighting;
 };
-bool portraitShot(const Scene& scene, const Actor& actor, const RigAnimation* pose, PortraitShot& out);
+[[nodiscard]] bool portraitShot(const Scene& scene, const Actor& actor, const RigAnimation* pose, PortraitShot& out);
 
 } // namespace ts2::scene

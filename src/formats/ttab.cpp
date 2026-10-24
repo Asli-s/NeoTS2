@@ -24,20 +24,30 @@ std::uint32_t count(BinaryReader& r) {
     return n;
 }
 
-std::vector<MotiveEffect> readEffects(BinaryReader& r, std::uint32_t n) {
+// Older tables save each motive as minimum, range, type. Listed ones save it as type, minimum, range.
+std::vector<MotiveEffect> readEffects(BinaryReader& r, std::uint32_t n, bool typeFirst = false) {
     std::vector<MotiveEffect> effects;
     for (std::uint32_t i = 0; i < n; ++i) {
         MotiveEffect m;
+        if (typeFirst) {
+            m.type = r.i16();
+        }
         m.min = r.i16();
         m.delta = r.i16();
-        m.type = r.i16();
+        if (!typeFirst) {
+            m.type = r.i16();
+        }
         effects.push_back(m);
     }
     return effects;
 }
 
-void readSettings(BinaryReader& r, Interaction& in) {
+void readSettings(BinaryReader& r, Interaction& in, std::uint32_t version) {
     in.flags = r.u32();
+    // Older tables saved two flags the other way round.
+    if (version < 0x52) {
+        in.flags ^= 0x10 | 0x40;
+    }
     in.stringIndex = r.u32();
     in.attenuationCode = r.u32();
     in.attenuation = r.f32();
@@ -51,7 +61,7 @@ Interaction readInteraction(BinaryReader& r, std::uint32_t version) {
     in.test = r.u16();
     if (version < kGroupedMotivesVersion) {
         const std::uint32_t n = count(r);
-        readSettings(r, in);
+        readSettings(r, in, version);
         in.motives.push_back(readEffects(r, n));
         return in;
     }
@@ -62,17 +72,13 @@ Interaction readInteraction(BinaryReader& r, std::uint32_t version) {
             groupSizes.push_back(count(r));
         }
     }
-    readSettings(r, in);
-    // Older tables saved two flags the other way round.
-    if (version < 0x52) {
-        in.flags ^= 0x10 | 0x40;
-    }
+    readSettings(r, in, version);
     if (version >= 0x45) in.value1 = r.u16();
     if (version >= 0x46) in.value2 = r.u32();
     if (version > 0x49) in.value3 = r.f32();
     if (version > 0x4B) {
-        in.value4 = r.u32();
-        in.value5 = r.u32();
+        in.iconGuid = r.u32();
+        in.iconIndex = r.u32();
     }
     if (version < kListedMotivesVersion) {
         for (const auto n : groupSizes) {
@@ -80,12 +86,12 @@ Interaction readInteraction(BinaryReader& r, std::uint32_t version) {
         }
     } else {
         for (std::uint32_t g = count(r); g > 0; --g) {
-            in.motives.push_back(readEffects(r, count(r)));
+            in.motives.push_back(readEffects(r, count(r), true));
         }
         for (std::uint32_t g = count(r); g > 0; --g) {
             auto& group = in.moreMotives.emplace_back();
             for (std::uint32_t k = count(r); k > 0; --k) {
-                group.push_back(readEffects(r, count(r)));
+                group.push_back(readEffects(r, count(r), true));
             }
         }
     }
@@ -93,7 +99,7 @@ Interaction readInteraction(BinaryReader& r, std::uint32_t version) {
 }
 
 // The table's name at the end: a 32-bit length in newer tables, a one-byte (7-bit encoded)
-// length in older ones; some tables of the same version use either.
+// length in older ones. Some tables of the same version use either.
 std::string readTableName(BinaryReader& r) {
     if (r.remaining() >= 4) {
         BinaryReader probe = r;
@@ -103,16 +109,7 @@ std::string readTableName(BinaryReader& r) {
             return {text.begin(), text.end()};
         }
     }
-    std::size_t length = 0;
-    for (int shift = 0; shift < 28; shift += 7) {
-        const std::uint8_t b = r.u8();
-        length |= static_cast<std::size_t>(b & 0x7F) << shift;
-        if ((b & 0x80) == 0) {
-            break;
-        }
-    }
-    const auto text = r.bytes(length);
-    return {text.begin(), text.end()};
+    return r.varString();
 }
 
 } // namespace
@@ -150,6 +147,15 @@ InteractionTable parse(std::span<const std::uint8_t> data) {
     }
     t.extraBytes = r.remaining();
     return t;
+}
+
+const Interaction* find(const InteractionTable& table, std::uint32_t id) {
+    for (const auto& line : table.interactions) {
+        if (line.stringIndex == id) {
+            return &line;
+        }
+    }
+    return nullptr;
 }
 
 } // namespace ts2::ttab

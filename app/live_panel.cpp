@@ -9,6 +9,7 @@ namespace {
 
 constexpr std::uint32_t kScripts = 0xA99D8A11;
 constexpr std::uint32_t kWantsScript = 0x49064900, kNeedsScript = 0x49064905, kRelationshipsScript = 0x49065002;
+constexpr std::uint32_t kJobScript = 0x49065003, kSimologyScript = 0x49064820, kRewardsScript = 0x49064800;
 
 // The frame's pieces: each comes in a version for wants closed and one for wants open.
 constexpr std::uint32_t kFrontCapClosed = 0xA94E97F3, kFrontCapOpen = 0xA94E97F1;
@@ -21,7 +22,8 @@ constexpr std::uint32_t kMoodClosed = 0x49064801, kMoodOpen = 0x49064802;
 constexpr std::uint32_t kButtonsClosed = 0xA94E97E8, kButtonsOpen = 0xA94E97F4;
 constexpr std::uint32_t kAspirations = 0xCD8B8B10;
 // The small buttons, in both button columns.
-constexpr std::uint32_t kNeedsButton = 0x0D8AB291, kRelationshipsButton = 0x17DEFBF5;
+constexpr std::uint32_t kNeedsButton = 0x0D8AB291, kRelationshipsButton = 0x17DEFBF5, kJobButton = 0x57DEFBF4,
+                        kSimologyButton = 0x47DEFBF2;
 // The last slot holds the inventory (rewards) button for family Sims, or the roommate
 // satisfaction button for roommates. The script shows the roommate one by default.
 constexpr std::uint32_t kInventoryButton = 0x8B85BA4E, kRoommateButton = 0x8B85BADD;
@@ -30,6 +32,8 @@ constexpr std::uint32_t kInventoryButton = 0x8B85BA4E, kRoommateButton = 0x8B85B
 constexpr int kClosedFrontX = 316, kClosedStartX = 343;
 constexpr int kOpenFrontX = 500, kOpenStartX = 524;
 constexpr int kFrameY = 136;
+// A sub-panel's bottom sits on the panel's bottom, as the game places needs and Simology.
+constexpr int kPanelBottom = 280;
 // A sub-panel's end cap sits this far left of its content's right edge.
 constexpr int kEndCapInset = 35;
 
@@ -48,7 +52,16 @@ void LivePanel::attach(ts2::ui::Screen& screen, int panel) {
     needsContent_ = screen.load(kScripts, kNeedsScript, 0, 0, screen.find(panel, kSubHolder));
     needs_.attach(screen, needsContent_);
     mood_.attach(screen, panel);
+    aspirationBars_.attach(screen, panel);
+    age_.attach(screen, panel);
     relationshipsContent_ = screen.load(kScripts, kRelationshipsScript, 0, 0, screen.find(panel, kSubHolder));
+    jobContent_ = screen.load(kScripts, kJobScript, 0, 0, screen.find(panel, kSubHolder));
+    simologyContent_ = screen.load(kScripts, kSimologyScript, 0, 0, screen.find(panel, kSubHolder));
+    simology_.attach(screen, simologyContent_);
+    rewardsContent_ = screen.load(kScripts, kRewardsScript, 0, 0, screen.find(panel, kSubHolder));
+    rewards_.attach(screen, rewardsContent_);
+    job_.attach(screen, jobContent_);
+    relationships_.attach(screen, relationshipsContent_);
     screen.setVisible(screen.find(panel, kAspirations), true);
     screen.setVisible(screen.find(panel, kWantsPopout), false);
     // Only family Sims are selectable so far.
@@ -65,14 +78,22 @@ bool LivePanel::clicked(int window) {
         return false;
     }
     const std::uint32_t id = screen_->id(window);
+    auto toggle = [&](Sub sub) { sub_ = sub_ == sub ? Sub::None : sub; };
     if (screen_->parent(window) == screen_->find(panel_, kAspirations)) {
         wantsOpen_ = !wantsOpen_;
     } else if (id == kNeedsButton) {
-        sub_ = sub_ == Sub::Needs ? Sub::None : Sub::Needs;
+        toggle(Sub::Needs);
     } else if (id == kRelationshipsButton) {
-        sub_ = sub_ == Sub::Relationships ? Sub::None : Sub::Relationships;
+        toggle(Sub::Relationships);
+    } else if (id == kJobButton) {
+        toggle(Sub::Job);
+    } else if (id == kSimologyButton) {
+        toggle(Sub::Simology);
+    } else if (id == kInventoryButton) {
+        toggle(Sub::Rewards);
     } else {
-        return false;
+        return (wantsOpen_ && wants_.clicked(window)) || simology_.clicked(window) || job_.clicked(window) || relationships_.clicked(window) ||
+               rewards_.clicked(window);
     }
     layout();
     return true;
@@ -112,21 +133,37 @@ void LivePanel::layout() {
         show(open, wantsOpen_);
         place(wantsOpen_ ? open : closed, front, kFrameY);
     }
-    // The mood meter makes way for the relationships.
-    if (sub_ == Sub::Relationships) {
+    // The mood meter shows only beside the needs or no sub-panel.
+    if (sub_ != Sub::None && sub_ != Sub::Needs) {
         show(kMoodClosed, false);
         show(kMoodOpen, false);
     }
 
     // The sub-panel, after the wants: its holder, tile and end cap.
-    const int content = sub_ == Sub::Needs ? needsContent_ : sub_ == Sub::Relationships ? relationshipsContent_ : -1;
+    int content = -1;
+    switch (sub_) {
+    case Sub::None: break;
+    case Sub::Needs: content = needsContent_; break;
+    case Sub::Relationships: content = relationshipsContent_; break;
+    case Sub::Job: content = jobContent_; break;
+    case Sub::Simology: content = simologyContent_; break;
+    case Sub::Rewards: content = rewardsContent_; break;
+    }
     s.setVisible(needsContent_, sub_ == Sub::Needs);
-    // The relationships' inner layout is set by the game's code (not traced yet): only its width is used.
-    s.setVisible(relationshipsContent_, false);
+    s.setVisible(simologyContent_, sub_ == Sub::Simology);
+    s.setVisible(rewardsContent_, sub_ == Sub::Rewards);
+    s.setVisible(jobContent_, sub_ == Sub::Job);
+    job_.setExpanded(wantsOpen_);
+    s.setVisible(relationshipsContent_, sub_ == Sub::Relationships);
+    relationships_.setMaximized(wantsOpen_);
+    simology_.setMaximized(wantsOpen_);
+    rewards_.setMaximized(wantsOpen_);
     show(kSubHolder, content >= 0);
     show(kSubTile, content >= 0);
     place(kSubTile, start, kFrameY);
-    place(kSubHolder, start - 10, content >= 0 ? 140 : 279);
+    if (content >= 0) {
+        place(kSubHolder, start - 10, kPanelBottom - s.height(content));
+    }
     const std::uint32_t endCap = wantsOpen_ ? (content >= 0 ? kEndCapOpenSub : kEndCapOpen) : (content >= 0 ? kEndCapClosedSub : kEndCapClosed);
     for (const std::uint32_t cap : {kEndCapClosed, kEndCapClosedSub, kEndCapOpen, kEndCapOpenSub}) {
         show(cap, cap == endCap);
@@ -145,6 +182,9 @@ void LivePanel::layout() {
         const int c = s.find(panel_, column);
         s.setChecked(s.find(c, kNeedsButton), sub_ == Sub::Needs);
         s.setChecked(s.find(c, kRelationshipsButton), sub_ == Sub::Relationships);
+        s.setChecked(s.find(c, kJobButton), sub_ == Sub::Job);
+        s.setChecked(s.find(c, kSimologyButton), sub_ == Sub::Simology);
+        s.setChecked(s.find(c, kInventoryButton), sub_ == Sub::Rewards);
     }
 }
 

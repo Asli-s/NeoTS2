@@ -68,6 +68,13 @@ int showObject(const std::filesystem::path& path, std::uint32_t id) {
                 printShorts("  params", f.params);
                 printShorts("  locals", f.locals);
             }
+            for (std::size_t i = 0; i < s.tail->strings.size(); ++i) {
+                std::printf("  string %zu: %s\n", i, s.tail->strings[i].c_str());
+            }
+            for (const auto& m : s.tail->materials) {
+                std::printf("  material: resource %s, subset %s, material %s\n", m.resource.c_str(), m.subset.c_str(),
+                            m.material.c_str());
+            }
         }
         if (s.person) {
             std::printf("  motives  ");
@@ -309,7 +316,7 @@ int showFamilies(const std::filesystem::path& hood) {
     return 0;
 }
 
-// Compares a saved stack frame with the tree it names; the tree id picks the global, private or
+// Compares a saved stack frame with the tree it names. The tree id picks the global, private or
 // semi-global group of the code owner.
 std::string checkFrame(const Lot& lot, const ts2::xobj::StackFrame& f, IndexCodeSource& code) {
     const auto* owner = lot.types.find(static_cast<std::uint16_t>(f.codeOwner));
@@ -433,10 +440,10 @@ int survey(const std::filesystem::path& root, IndexCodeSource* code, ts2::conten
                     if (const auto* d = definitionOf(o, code); d && index && s.marker < 0) {
                         const auto slotsId = d->definition.field(ts2::objd::field::kSlotsId);
                         const auto* r = index->find({ts2::types::kSlots, d->group, slotsId, 0});
-                        std::optional<std::vector<std::uint16_t>> types;
+                        std::optional<ts2::slot::Slots> types;
                         if (r) {
                             try {
-                                types = ts2::slot::parse(index->read(*r)).types;
+                                types = ts2::slot::parse(index->read(*r));
                             } catch (const std::exception&) {
                             }
                         }
@@ -444,15 +451,15 @@ int survey(const std::filesystem::path& root, IndexCodeSource* code, ts2::conten
                             ++slotCounts[slotsId == 0 ? "no SLOT id" : "SLOT not found or not read"];
                             ++slotOdd[std::string(slotsId == 0 ? "no id" : "not found") + ", saved " + std::to_string(s.values.size())];
                         } else {
-                            const auto containers = std::count(types->begin(), types->end(), 0);
+                            const auto containers = types->containerCount();
                             const std::size_t saved = s.values.size();
                             if (saved != static_cast<std::size_t>(containers)) {
                                 const bool person = d->definition.field(ts2::objd::field::kType) == ts2::sim::kPersonType;
                                 ++slotOdd[std::string(person ? "person" : "object") + " saved " + std::to_string(saved) +
-                                          " type-0 " + std::to_string(containers) + " all " + std::to_string(types->size())];
+                                          " type-0 " + std::to_string(containers) + " all " + std::to_string(types->entries.size())];
                             }
                             ++slotCounts[saved == static_cast<std::size_t>(containers) ? "equals type-0 entries"
-                                         : saved == types->size()                     ? "equals all entries"
+                                         : saved == types->entries.size()             ? "equals all entries"
                                          : saved < static_cast<std::size_t>(containers) ? "fewer than type-0 entries"
                                                                                        : "more than type-0 entries"];
                         }

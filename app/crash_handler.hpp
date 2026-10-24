@@ -6,9 +6,9 @@
 
 // Turns a crash into a report testers can send: a folder "crash-<date>-<time>" with crash.txt (what
 // happened, the stack, the last log lines) and neots2.dmp (a small minidump), then a message offering
-// to send it or show the files. Windows only for now; elsewhere install() does nothing.
+// to send it or show the files. Windows only for now. Elsewhere install() does nothing.
 // Failures Windows ends at once (__fastfail: Control Flow Guard or /GS stack cookie violations) can't
-// be caught from inside the program; the next start reports those (see unexpected_exit.hpp).
+// be caught from inside the program. The next start reports those (see unexpected_exit.hpp).
 namespace app::crash {
 
 struct Settings {
@@ -21,9 +21,14 @@ struct Settings {
 // Catches crashes from here on, on every thread.
 void install(const Settings& settings);
 
+// Reports the program as stuck when it is still running `seconds` from now, then ends it. Called
+// once closing starts: closing waits for loads still running, and a wait that never ended would
+// leave the program open with no window, holding the game's files.
+void watchClosing(unsigned seconds);
+
 // Crashes on purpose in one of the ways install() catches, for tests: "access", "stack", "abort",
-// "terminate", "throw", "purecall", "parameter", "thread" or "twice" (two threads at once); "fastfail" ends the program the way
-// install() can't catch. Returns only for an unknown kind.
+// "terminate", "throw", "purecall", "parameter", "thread" or "twice" (two threads at once).
+// "fastfail" ends the program the way install() can't catch. Returns only for an unknown kind.
 void test(std::string_view kind);
 
 } // namespace app::crash

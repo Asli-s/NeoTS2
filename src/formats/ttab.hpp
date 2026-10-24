@@ -30,8 +30,10 @@ struct Interaction {
     std::uint16_t value1 = 0;
     std::uint32_t value2 = 3;
     float value3 = 0.5f;
-    std::uint32_t value4 = 0;
-    std::uint32_t value5 = 0;
+    // The object type GUID and thumbnail index of the icon the queue shows for it, when flag
+    // 0x400000 is set.
+    std::uint32_t iconGuid = 0;
+    std::uint32_t iconIndex = 0;
     std::vector<std::vector<MotiveEffect>> motives;
     std::vector<std::vector<std::vector<MotiveEffect>>> moreMotives;  // newer tables only
 };
@@ -45,5 +47,9 @@ struct InteractionTable {
 };
 
 InteractionTable parse(std::span<const std::uint8_t> data);
+
+// The interaction scripts and the queue call `id`: the first line whose string index is `id`.
+// Null when no line has it.
+const Interaction* find(const InteractionTable& table, std::uint32_t id);
 
 } // namespace ts2::ttab

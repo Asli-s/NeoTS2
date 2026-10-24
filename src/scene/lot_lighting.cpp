@@ -1,6 +1,7 @@
 #include "scene/lot_lighting.hpp"
 
 #include "content/lot.hpp"
+#include "diag/log.hpp"
 #include "scene/light_corners.hpp"
 #include "scene/light_grid.hpp"
 
@@ -71,12 +72,19 @@ roomlight::Settings groupSettings(const content::Lighting& l, const std::string&
     return s;
 }
 
+// A level's floor light grid, null past the lot's levels.
+const floorlight::Grid* gridOf(const Result& r, int level) {
+    const int i = level - r.lowest;
+    return i >= 0 && i < static_cast<int>(r.floors.size()) ? &r.floors[static_cast<std::size_t>(i)] : nullptr;
+}
+
 // The room a point stands in, as the floor light grid of its level has it.
-std::int16_t gridRoom(const std::vector<floorlight::Grid>& grids, int level, float x, float y) {
-    if (level < 0 || level >= static_cast<int>(grids.size()) || !std::isfinite(x) || !std::isfinite(y)) {
+std::int16_t gridRoom(const Result& r, int level, float x, float y) {
+    const auto* grid = gridOf(r, level);
+    if (!grid || !std::isfinite(x) || !std::isfinite(y)) {
         return 0;
     }
-    const auto& g = grids[static_cast<std::size_t>(level)];
+    const auto& g = *grid;
     if (!(x >= 0 && y >= 0 && x < static_cast<float>(g.width) && y < static_cast<float>(g.height))) {
         return 0;
     }
@@ -92,18 +100,19 @@ std::int16_t gridRoom(const std::vector<floorlight::Grid>& grids, int level, flo
     return half.valid ? half.room : 0;
 }
 
-bool tileHasFloor(const std::vector<floorlight::Grid>& grids, int level, int x, int y) {
-    if (level < 0 || level >= static_cast<int>(grids.size())) {
+bool tileHasFloor(const Result& r, int level, int x, int y) {
+    const auto* grid = gridOf(r, level);
+    if (!grid) {
         return false;
     }
-    const auto& g = grids[static_cast<std::size_t>(level)];
+    const auto& g = *grid;
     if (x < 0 || y < 0 || x >= g.width || y >= g.height) {
         return false;
     }
     return g.tiles[static_cast<std::size_t>(y) * static_cast<std::size_t>(g.width) + static_cast<std::size_t>(x)].floor;
 }
 
-// One pass of the floor and wall light with these sources; false when a pass hit its safety limit.
+// One pass of the floor and wall light with these sources. False when a pass hit its safety limit.
 bool lightPass(Result& r, const Settings& s, const std::vector<LightSource>& sources) {
     bool ok = true;
     for (auto& g : r.floors) {
@@ -113,7 +122,7 @@ bool lightPass(Result& r, const Settings& s, const std::vector<LightSource>& sou
         g.falloffScale = s.floorThreshold;
         g.steps = s.steps;
         g.dimOutside = s.dimOutside;
-        ok = floorlight::light(g, sources, [&](int x, int y, int level) { return tileHasFloor(r.floors, level, x / 2, y / 2); }) && ok;
+        ok = floorlight::light(g, sources, [&](int x, int y, int level) { return tileHasFloor(r, level, x / 2, y / 2); }) && ok;
     }
     auto& w = r.walls;
     w.insideAmbient = {s.insideColor[0] * s.insideWallAmbient, s.insideColor[1] * s.insideWallAmbient, s.insideColor[2] * s.insideWallAmbient};
@@ -125,11 +134,11 @@ bool lightPass(Result& r, const Settings& s, const std::vector<LightSource>& sou
     ok = walllight::light(
              w, sources,
              [&](float x, float y, int level) {
-                 return std::isfinite(x) && std::isfinite(y) && tileHasFloor(r.floors, level, static_cast<int>(std::floor(x)), static_cast<int>(std::floor(y)));
+                 return std::isfinite(x) && std::isfinite(y) && tileHasFloor(r, level, static_cast<int>(std::floor(x)), static_cast<int>(std::floor(y)));
              },
              [&](float x, float y, int level) {
-                 if (level < 0 || level >= static_cast<int>(r.floors.size())) return std::array<float, 3>{0, 0, 0};
-                 return floorlight::sample(r.floors[static_cast<std::size_t>(level)], x, y);
+                 const auto* grid = gridOf(r, level);
+                 return grid ? floorlight::sample(*grid, x, y) : std::array<float, 3>{0, 0, 0};
              }) &&
          ok;
     return ok;
@@ -150,7 +159,7 @@ std::optional<Settings> settingsFor(const content::Lighting& l, const std::strin
     const auto& st = it->second;
     Settings s;
     s.insideFloorAmbient = diffusionNumber(l, st, "insideFloorAmbient", "insideFloorAmbient", 0);
-    // The game takes only these from a state; the outside ambients always come from the global settings.
+    // The game takes only these from a state. The outside ambients always come from the global settings.
     s.outsideFloorAmbient = l.number("outsideFloorAmbient", 0);
     s.insideWallAmbient = diffusionNumber(l, st, "insideWallAmbient", "insideWallAmbient", 0);
     s.outsideWallAmbient = l.number("outsideWallAmbient", 0);
@@ -158,9 +167,12 @@ std::optional<Settings> settingsFor(const content::Lighting& l, const std::strin
     s.outsideColor = diffusionColor(l, content::Lighting::State{}, "", "outsideDiffusionAmbientColor");
     s.floorThreshold = diffusionNumber(l, st, "floorThreshold", "floorDiffusionThreshold", s.floorThreshold);
     s.wallThreshold = diffusionNumber(l, st, "wallThreshold", "wallDiffusionThreshold", s.wallThreshold);
-    s.steps = static_cast<int>(l.number("wallPropagationSteps", 50));
+    // Clamped first, because a modded value past int's range can't be cast.
+    s.steps = static_cast<int>(std::clamp(l.number("wallPropagationSteps", 50), -1.0e6f, 1.0e6f));
     s.brightWallFloor = l.number("brightWallFloorContribution", s.brightWallFloor);
     s.darkWallFloor = l.number("darkWallFloorContribution", s.darkWallFloor);
+    s.incidenceScale = l.number("incidenceMapScale", s.incidenceScale);
+    s.incidenceHeightClamp = l.number("incidenceMapHeightClamp", s.incidenceHeightClamp);
 
     if (const auto sun = st.lights.find("sun"); sun != st.lights.end()) {
         const auto& d = sun->second.direction;
@@ -215,21 +227,25 @@ Result compute(const Inputs& in, const Settings& s) {
         return r;
     }
     const int levels = static_cast<int>(std::min<std::uint32_t>(floorGrid->second.levels, 16));
+    if (floorGrid->second.levels > 16) {
+        diag::warnOnce("lot lighting: levels past 16 are left unlit");
+    }
+    r.lowest = -std::clamp(content::groundGridLevel(lot), 0, levels);
 
     // The floor light grids and the wall faces, rooms as the grids see them.
     const auto walls = wallruns::wallsOf(lot, in.blocksLight);
-    for (int level = 0; level < levels; ++level) {
+    for (int level = r.lowest; level < r.lowest + levels; ++level) {
         auto li = lightgrid::fromLot(lot, level, walls);
         if (in.roomAt) {
             li.roomAt = [&in, level](float x, float y) { return in.roomAt(level, x, y); };
         }
         r.floors.push_back(lightgrid::build(li));
     }
-    r.layout = wallruns::build(walls, [&](int level, float x, float y) { return gridRoom(r.floors, level, x, y); }, wallruns::floorSolidOf(lot));
+    r.layout = wallruns::build(walls, [&](int level, float x, float y) { return gridRoom(r, level, x, y); }, wallruns::floorSolidOf(lot));
     r.walls.runs = r.layout.runs;
     r.complete = r.layout.complete;
 
-    // The lamps alone; the windows and doors take their light from those walls.
+    // The lamps alone. The windows and doors take their light from those walls.
     r.complete = lightPass(r, s, in.lamps) && r.complete;
     const std::array<float, 3> outsideWall = s.outsideColor;
     std::map<std::int16_t, std::vector<std::size_t>> byRoom;
@@ -244,6 +260,11 @@ Result compute(const Inputs& in, const Settings& s) {
             pl.into = portals[k].otherRoom;
             pl.portal = portals[k];
             pl.spillPoint = in.portals[list[k]].spillPoint;
+            pl.lightPosition = in.portals[list[k]].lightPosition;
+            pl.lightAxis = in.portals[list[k]].lightAxis;
+            pl.spot = in.portals[list[k]].spot;
+            pl.coneAngle = in.portals[list[k]].coneAngle;
+            pl.conePenumbra = in.portals[list[k]].conePenumbra;
             const auto L = wallruns::portalSample(r.walls.runs, r.layout, portalKey(portals[k]), s.dimOutside, outsideWall, s.outsideWallAmbient);
             pl.lights = windowlight::lightsFor(portals[k], room == 0, s.sun, s.day, L);
             if (pl.lights) {
@@ -273,8 +294,8 @@ Result compute(const Inputs& in, const Settings& s) {
     };
     si.covering = in.covering;
     si.floorLight = [&](int level, float x, float y) {
-        if (level < 0 || level >= static_cast<int>(r.floors.size())) return roomsamples::Color{0, 0, 0};
-        return floorlight::sample(r.floors[static_cast<std::size_t>(level)], x, y);
+        const auto* grid = gridOf(r, level);
+        return grid ? floorlight::sample(*grid, x, y) : roomsamples::Color{0, 0, 0};
     };
     si.wallLight = [&](const wallruns::Key& k) { return wallruns::portalSample(r.walls.runs, r.layout, k, false, {0, 0, 0}, 0); };
     std::vector<roomsamples::PortalInput> portalInputs;

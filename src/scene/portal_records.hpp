@@ -29,6 +29,9 @@ struct PortalLight {
     float intensity = 0;
     std::array<float, 3> color{1, 1, 1};
     float falloffRate = 1;
+    // A spot light (the window's sun beam): its cone and the soft edge around it, full angles in radians.
+    bool spot = false;
+    float coneAngle = 0, conePenumbra = 0;
     lamplights::Settings settings;  // unscaled
 };
 
@@ -50,9 +53,13 @@ struct Built {
     std::int16_t room = 0;  // the room it is filed under (behind the light)
     windowlight::Portal portal;
     std::array<float, 3> spillPoint{0, 0, 0};  // where its spill plane starts
+    std::array<float, 3> lightPosition{0, 0, 0};  // its light node, where objects are lit from
+    std::array<float, 3> lightAxis{0, 0, 1};      // the node's +z, against the way a spot light shines
+    bool spot = false;
+    float coneAngle = 0, conePenumbra = 0;
 };
 
-// The portals of one object; `spillPlaneOffset` is the light files' setting of that name.
+// The portals of one object. `spillPlaneOffset` is the light files' setting of that name.
 std::vector<Built> build(const PortalObject& object, const LotQueries& lot, float spillPlaneOffset);
 
 } // namespace ts2::scene::portalrecords

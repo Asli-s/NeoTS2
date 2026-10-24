@@ -1,6 +1,8 @@
 #include "formats/nhood_paint_rules.hpp"
 
+#include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <sstream>
 
@@ -31,6 +33,7 @@ std::vector<std::string> split(const std::string& s) {
 
 long number(const std::string& s) { return std::strtol(s.c_str(), nullptr, 0); }
 float decimal(const std::string& s) { return std::strtof(s.c_str(), nullptr); }
+float positiveOr(float value, float fallback) { return std::isfinite(value) && value > 0 ? value : fallback; }
 
 } // namespace
 
@@ -60,7 +63,8 @@ PaintRules parsePaintRules(std::string_view text) {
             PaintInfo p;
             p.maxStrength = decimal(values[0]);
             p.texture = values[1];
-            p.variants = static_cast<int>(number(values[2]));
+            // Variants are named with a two-digit suffix, so there are at most 100.
+            p.variants = static_cast<int>(std::clamp(number(values[2]), 1L, 100L));
             p.lotPaint = values[3];
             for (std::size_t i = 4; i + 1 < values.size(); i += 2) {
                 p.spread.emplace_back(decimal(values[i]), decimal(values[i + 1]));
@@ -80,12 +84,12 @@ PaintRules parsePaintRules(std::string_view text) {
             }
         } else if (section == "NHoodTerrainTunables" && !values.empty()) {
             if (key == "MaxBeachAltitude") rules.maxBeachAltitude = decimal(values[0]);
-            else if (key == "MaxBeachWidthInCells") rules.maxBeachWidthInCells = static_cast<int>(number(values[0]));
-            else if (key == "HeightRangeForTemperatureDistribution") rules.heightRangeForTemperature = decimal(values[0]);
+            else if (key == "MaxBeachWidthInCells") rules.maxBeachWidthInCells = static_cast<int>(std::clamp(number(values[0]), 0L, 253L));
+            else if (key == "HeightRangeForTemperatureDistribution") rules.heightRangeForTemperature = positiveOr(decimal(values[0]), rules.heightRangeForTemperature);
             else if (key == "CliffAngleMin") rules.cliffAngleMin = decimal(values[0]);
             else if (key == "CliffAngleMax") rules.cliffAngleMax = decimal(values[0]);
             else if (key == "WaterDepthThresholdForPaint") rules.waterDepthThresholdForPaint = decimal(values[0]);
-            else if (key == "MaxRoadProximityValue") rules.maxRoadProximity = static_cast<int>(number(values[0]));
+            else if (key == "MaxRoadProximityValue") rules.maxRoadProximity = static_cast<int>(std::clamp(number(values[0]), 1L, 255L));
         } else if (section == "NHoodTerrainRenderTunables" && key == "TextureVariantGridSize" && !values.empty()) {
             rules.textureVariantGridSize = static_cast<int>(number(values[0]));
         }

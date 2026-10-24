@@ -4,6 +4,8 @@
 #include <bit>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <optional>
 
 namespace ts2::scene::lightmaptexels {
 
@@ -26,6 +28,14 @@ double roundHalfEven(double v) {
 
 Pixel pack(const Color& c) {
     return walllight::pack(c);
+}
+
+bool sameBits(float a, float b) {
+    return std::bit_cast<std::uint32_t>(a) == std::bit_cast<std::uint32_t>(b);
+}
+
+bool sameBits(const Color& a, const Color& b) {
+    return sameBits(a[0], b[0]) && sameBits(a[1], b[1]) && sameBits(a[2], b[2]);
 }
 
 // ---- Floors ----
@@ -101,7 +111,7 @@ Patch patchOf(const floorlight::Grid& g, int tx, int ty, int half) {
     return p;
 }
 
-// Writes a tile's texels from its patch, bilinearly; for a split tile only the texels of one half
+// Writes a tile's texels from its patch, bilinearly. For a split tile only the texels of one half
 // (`half`, by the test u * a + v < b), with u starting at 0 even on the ground level as the game does.
 void writeTile(FloorImage& img, const Patch& p, int tx, int ty, bool ground, bool split, double a, float b, int half) {
     constexpr int kSide = 8;
@@ -164,26 +174,41 @@ std::array<float, 3> channels(const Pixel& p) {
 
 // The rows a rect samples from the padded grid: u across 0.5 .. 2.5, v from 6.5 down.
 void sample(std::vector<Pixel>& out, const std::array<walllight::Column, 4>& t, int w, int rows, float vstep, const Color& ambient, float scale) {
+    // Every row steps u the same way and reads the same texels: work those out once.
+    std::array<std::array<Color, 8>, 4> texel{};
+    for (std::size_t i = 0; i < 4; ++i) {
+        for (std::size_t j = 0; j < 8; ++j) texel[i][j] = channels(t[i][j]);
+    }
+    struct Across {
+        std::size_t lu = 0, hu = 0;
+        float fu = 0;
+    };
+    std::array<Across, 64> across{};  // panelTexels keeps w at most 64
     const float ustep = r24(2.0 / (w - 1));
+    float u = 0.5f;
+    for (int x = 0; x < w && x < 64; ++x) {
+        auto& a = across[static_cast<std::size_t>(x)];
+        a.lu = static_cast<std::size_t>(std::clamp(std::floor(u), 0.0f, 3.0f));
+        a.hu = static_cast<std::size_t>(std::clamp(std::ceil(u), 0.0f, 3.0f));
+        a.fu = r24(static_cast<double>(u) - std::floor(u));
+        u = r24(static_cast<double>(u) + ustep);
+    }
     float v = 6.5f;
     for (int r = 0; r < rows; ++r) {
-        float u = 0.5f;
-        for (int x = 0; x < w; ++x) {
-            const auto lu = static_cast<std::size_t>(std::clamp(std::floor(u), 0.0f, 3.0f)), hu = static_cast<std::size_t>(std::clamp(std::ceil(u), 0.0f, 3.0f));
-            const auto lv = static_cast<std::size_t>(std::clamp(std::floor(v), 0.0f, 7.0f)), hv = static_cast<std::size_t>(std::clamp(std::ceil(v), 0.0f, 7.0f));
-            const float fu = r24(static_cast<double>(u) - std::floor(u));
-            const double fv = static_cast<double>(v) - std::floor(v);
-            const auto a0 = channels(t[lu][lv]), b0 = channels(t[hu][lv]), a1 = channels(t[lu][hv]), b1 = channels(t[hu][hv]);
+        const auto lv = static_cast<std::size_t>(std::clamp(std::floor(v), 0.0f, 7.0f)), hv = static_cast<std::size_t>(std::clamp(std::ceil(v), 0.0f, 7.0f));
+        const double fv = static_cast<double>(v) - std::floor(v);
+        for (int x = 0; x < w && x < 64; ++x) {
+            const auto [lu, hu, fu] = across[static_cast<std::size_t>(x)];
+            const auto &a0 = texel[lu][lv], &b0 = texel[hu][lv], &a1 = texel[lu][hv], &b1 = texel[hu][hv];
             Color o{};
             for (std::size_t c = 0; c < 3; ++c) {
                 const float p1 = lerp(a1[c], b1[c], fu), p0 = lerp(a0[c], b0[c], fu);
                 o[c] = lerp(p0, p1, fv);
             }
-            // R and G keep the difference unrounded before scaling; B stores it first.
+            // R and G keep the difference unrounded before scaling. B stores it first.
             const Color scaled{r24((static_cast<double>(o[0]) - ambient[0]) * scale), r24((static_cast<double>(o[1]) - ambient[1]) * scale),
                                r24(static_cast<double>(r24(static_cast<double>(o[2]) - ambient[2])) * scale)};
             out[static_cast<std::size_t>(r * w + x)] = pack(scaled);
-            u = r24(static_cast<double>(u) + ustep);
         }
         v = r24(static_cast<double>(v) - vstep);
     }
@@ -259,10 +284,24 @@ Pixel saturatingAdd(const Pixel& t, const Pixel& add) {
 
 } // namespace
 
+namespace {
+
+// 0..1, with a value that isn't a number (from broken light data) as 0.
+double unitClamp(double v) {
+    return v > 0.0 ? std::min(v, 1.0) : 0.0;
+}
+
+// A whole number kept well inside int's range (0 for a value that isn't a number).
+int boundedInt(double v) {
+    return v == v ? static_cast<int>(std::clamp(v, -1.0e6, 1.0e6)) : 0;
+}
+
+} // namespace
+
 walllight::Pixel roomAdd(const std::array<float, 3>& unlitColor, float share) {
     // As the game turns a colour into a byte here: n = 256 x the value (0..1) rounded, then n - n / 256.
     auto byte = [share](float c) {
-        const double x = std::clamp(static_cast<double>(r24(static_cast<double>(r24(c * 0.5)) * share)), 0.0, 1.0);
+        const double x = unitClamp(static_cast<double>(r24(static_cast<double>(r24(c * 0.5)) * share)));
         const int n = static_cast<int>(roundHalfEven(256.0 * x));
         return static_cast<std::uint8_t>(n - (n >> 8));
     };
@@ -314,7 +353,7 @@ walllight::Pixel outdoorAdd(const Outdoor& outdoor, const std::array<float, 3>& 
     }
     // As the game turns it into a byte: n = 256 x the value (0..1) rounded, then n - n / 256.
     auto byte = [&](std::size_t i) {
-        const double x = std::clamp((c[i] + outdoor.skylight[i] * (1.0 - weight)) * 0.5 * outdoor.strength, 0.0, 1.0);
+        const double x = unitClamp((c[i] + outdoor.skylight[i] * (1.0 - weight)) * 0.5 * outdoor.strength);
         const int n = static_cast<int>(roundHalfEven(256.0 * x));
         return static_cast<std::uint8_t>(n - (n >> 8));
     };
@@ -326,6 +365,9 @@ void addOutdoorLight(FloorImage& image, const floorlight::Grid& grid, const Outd
         return;
     }
     const Pixel fullSun = outdoorAdd(outdoor, {0, 0, 1});
+    // Neighbouring texels mostly share their normal and sun: the last texel's light is reused for them.
+    std::optional<OutdoorTexel> last;
+    Pixel lastAdd{};
     const bool ground = grid.level == 0;
     const auto split1 = firstHalfTexels(ground, 1), split2 = firstHalfTexels(ground, 2);
     for (int ty = 0; ty < grid.height; ++ty) {
@@ -353,7 +395,11 @@ void addOutdoorLight(FloorImage& image, const floorlight::Grid& grid, const Outd
                         continue;
                     }
                     const auto texel = at(tx, ty, i, j);
-                    t = saturatingAdd(t, outdoorAdd(outdoor, texel.normal, texel.sun));
+                    if (!last || !sameBits(texel.normal, last->normal) || !sameBits(texel.sun, last->sun)) {
+                        last = texel;
+                        lastAdd = outdoorAdd(outdoor, texel.normal, texel.sun);
+                    }
+                    t = saturatingAdd(t, lastAdd);
                     t.a = texel.alpha;
                 }
             }
@@ -382,7 +428,7 @@ std::vector<walllight::Pixel> panelTexels(const std::array<walllight::Column, 4>
     if (w == 4 && h == 8) {
         // A 1:1 copy in the game's 16-bit steps: (texel - ambient) * scale on the packed bytes.
         const Pixel a = pack(ambient);
-        const auto k = static_cast<int>(roundHalfEven(static_cast<double>(scale) * 4096.0));
+        const auto k = boundedInt(roundHalfEven(static_cast<double>(scale) * 4096.0));
         auto ch = [k](std::uint8_t c, std::uint8_t amb) { return static_cast<std::uint8_t>(std::clamp(((c - amb) * 16 * k) >> 16, 0, 255)); };
         for (int r = 0; r < 8; ++r) {
             for (int x = 0; x < 4; ++x) {
@@ -393,10 +439,10 @@ std::vector<walllight::Pixel> panelTexels(const std::array<walllight::Column, 4>
     } else if (3 * w == h) {
         sample(out, t, w, h, r24(6.0 / (h - 1)), ambient, scale);
     } else if (h % w == 0) {
-        // Shorter rects take the bottom of the 3:1 sampling; taller ones fade upward from it.
+        // Shorter rects take the bottom of the 3:1 sampling. Taller ones fade upward from it.
         const int rows = std::min(h, 3 * w);
         sample(out, t, w, rows, r24(6.0 / (3 * w - 1)), ambient, scale);
-        const auto kF = static_cast<int>(roundHalfEven(65536.0 * r24(0.0625 / (static_cast<double>(fade) * 0.4 + 1.0))));
+        const auto kF = boundedInt(roundHalfEven(65536.0 * r24(0.0625 / (static_cast<double>(fade) * 0.4 + 1.0))));
         auto ch = [kF](std::uint8_t c) { return static_cast<std::uint8_t>(std::clamp((c * 16 * kF) >> 16, 0, 255)); };
         for (int r = rows; r < h; ++r) {
             for (int x = 0; x < w; ++x) {

@@ -7,7 +7,7 @@
 #include <vector>
 
 // Runs that ended without a word (Windows ended them at once, they were killed, the power went)
-// can't report themselves. Each run leaves a marker while it runs; at the next start, a marker whose
+// can't report themselves. Each run leaves a marker while it runs. At the next start, a marker whose
 // run is gone means it ended that way, and what it left behind (its log, what Windows noted) is
 // put together into a crash folder like any other.
 namespace app::crash {

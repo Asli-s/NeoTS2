@@ -6,10 +6,8 @@
 #include "formats/datatables.hpp"
 #include "formats/ttab.hpp"
 
-extern "C" {
 #include "lauxlib.h"
 #include "lua.h"
-}
 
 #include <algorithm>
 #include <chrono>

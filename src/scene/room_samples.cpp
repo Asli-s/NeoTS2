@@ -64,7 +64,7 @@ void addWall(roomlight::Samples& samples, float x0, float y0, float x1, float y1
         half[c] = r24(static_cast<double>(wallLight[c]) * 0.5f);
     }
     const Color color = lit(covering, half, s);
-    // It looks along (dy, -dx); the game keeps the x share as a float and the y share unrounded.
+    // It looks along (dy, -dx). The game keeps the x share as a float and the y share unrounded.
     const float minusDx = r24(-(static_cast<double>(x1) - x0));
     const float dy = r24(static_cast<double>(y1) - y0);
     const float length = r24(std::sqrt(static_cast<double>(dy) * dy + static_cast<double>(minusDx) * minusDx));
@@ -98,13 +98,15 @@ std::map<std::int16_t, roomlight::Samples> gather(const content::Lot& lot, const
     const auto floors = lot.grids.find(content::kFloorGridInstance);
     if (floors != lot.grids.end() && in.quarterRoom && in.floorLight) {
         const auto& grid = floors->second;
+        // Grid levels count from the lot's lowest, rooms and light from the ground storey.
+        const int ground = content::groundGridLevel(lot);
         for (std::uint32_t level = 0; level < grid.levels; ++level) {
             for (std::uint32_t x = 0; x < grid.width; ++x) {
                 for (std::uint32_t y = 0; y < grid.height; ++y) {
                     for (int bit = 0; bit < 4; ++bit) {
-                        const int l = static_cast<int>(level), tx = static_cast<int>(x), ty = static_cast<int>(y);
+                        const int l = static_cast<int>(level) - ground, tx = static_cast<int>(x), ty = static_cast<int>(y);
                         const auto room = in.quarterRoom(l, tx, ty, bit);
-                        const auto pattern = static_cast<std::uint16_t>(grid.i16(l, tx, ty, static_cast<std::size_t>(bit)));
+                        const auto pattern = static_cast<std::uint16_t>(grid.i16(static_cast<int>(level), tx, ty, static_cast<std::size_t>(bit)));
                         const auto name = lot.floorPatterns.find(pattern);
                         if (room <= 0 || pattern == 0 || name == lot.floorPatterns.end()) {
                             continue;

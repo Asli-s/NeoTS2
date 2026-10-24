@@ -1,5 +1,7 @@
 #include "scene/floor_light.hpp"
 
+#include "diag/log.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -20,7 +22,7 @@ constexpr float kSameFalloff = 0.01f;
 // odd settings or thousands of lights cannot stall the game.
 constexpr long long kMaxCellVisits = 32'000'000;
 
-// A rectangle of cells, inclusive; empty while maxX < minX.
+// A rectangle of cells, inclusive. Empty while maxX < minX.
 struct Box {
     int minX = 0, minY = 0, maxX = -1, maxY = -1;
 
@@ -57,7 +59,7 @@ Half* neighbour(Grid& grid, int x, int y, int half, int d) {
 }
 
 // Brightens a half from a neighbour, channel by channel, where the neighbour's light faded by
-// one step is brighter; returns how many channels changed.
+// one step is brighter. Returns how many channels changed.
 int pull(Half& half, const Half& from, int d, float falloff) {
     double k = falloff;
     if (d & 1) {
@@ -94,7 +96,7 @@ int toCell(double v) {
     return v < 2.0 * kMaxTiles + 2 ? static_cast<int>(std::floor(v)) : 2 * kMaxTiles + 2;
 }
 
-// The cells a source's area covers, clamped to the grid; empty when it misses the grid.
+// The cells a source's area covers, clamped to the grid. Empty when it misses the grid.
 Box cellsOf(const Grid& grid, const LightSource& s) {
     int x0 = toCell(2.0 * s.x0 + 0.5), y0 = toCell(2.0 * s.y0 + 0.5);
     int x1 = toCell(2.0 * s.x1 - 0.5), y1 = toCell(2.0 * s.y1 - 0.5);
@@ -136,6 +138,9 @@ bool shinesDown(const Grid& grid, const LightSource& s, int x, int y, const Floo
 bool reaches(Grid& grid, const LightSource& s, const FloorStops& stops, long long& budget) {
     const long long above = static_cast<long long>(s.level) - grid.level;
     if (above < 0 || above > kMaxLevelsAbove || !std::isfinite(s.falloff)) {
+        if (above > kMaxLevelsAbove) {
+            diag::warnOnce("floor light: a light more than 32 levels above a floor leaves it unlit");
+        }
         return false;
     }
     const Box box = cellsOf(grid, s);
@@ -151,7 +156,7 @@ bool reaches(Grid& grid, const LightSource& s, const FloorStops& stops, long lon
     return false;
 }
 
-// Fills a source's area in its room with its light; grows `lit` over the cells it brightened.
+// Fills a source's area in its room with its light and grows `lit` over the cells it brightened.
 bool deposit(Grid& grid, const LightSource& s, const FloorStops& stops, Box& lit, long long& budget) {
     bool any = false;
     const Box box = cellsOf(grid, s);
@@ -198,7 +203,7 @@ bool deposit(Grid& grid, const LightSource& s, const FloorStops& stops, Box& lit
     return any;
 }
 
-// Pulls light into a cell's halves from the given directions; returns the channels changed.
+// Pulls light into a cell's halves from the given directions. Returns the channels changed.
 int pullInto(Grid& grid, int x, int y, const int (&dirs)[3], bool needActive, float falloff) {
     Cell* cell = grid.at(x, y);
     if (!cell) {
@@ -344,7 +349,7 @@ bool light(Grid& grid, const std::vector<LightSource>& sources, const FloorStops
             pending.push_back(&s);
         }
     }
-    // Slowest fading first in the list; taken from the back, so the fastest fading go first.
+    // Slowest fading first in the list. Taken from the back, so the fastest fading go first.
     std::stable_sort(pending.begin(), pending.end(), [](const LightSource* a, const LightSource* b) { return a->falloff > b->falloff; });
 
     while (!pending.empty()) {

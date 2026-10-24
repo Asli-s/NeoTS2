@@ -10,7 +10,7 @@ namespace ts2::sim {
 
 namespace {
 
-// The game's objects have this many data fields; the engine keeps a few more, which a reset leaves.
+// The game's objects have this many data fields. The engine keeps a few more, which a reset leaves.
 constexpr std::size_t kGameDataCount = 0x72;
 static_assert(kGameDataCount <= kObjectDataCount);
 
@@ -73,6 +73,19 @@ std::optional<Frame> startFrame(CodeSource& code, const ObjectType& type, std::u
 
 } // namespace
 
+void restartMain(SimObject& object, const ObjectType& type, CodeSource& code) {
+    object.thread.frames.clear();
+    object.thread.pendingResult.reset();
+    object.thread.sleepTicks = 0;
+    object.thread.stackObjectId = 0;
+    const auto* functions = code.objectFunctions(type);
+    if (functions != nullptr && kMainFunction < functions->size() && (*functions)[kMainFunction].action != 0) {
+        if (auto frame = startFrame(code, type, (*functions)[kMainFunction].action, object.id)) {
+            object.thread.frames.push_back(std::move(*frame));
+        }
+    }
+}
+
 void resetObject(SimObject& object, const ObjectType& type, CodeSource& code) {
     const auto saved = object.data;
     std::fill_n(object.data.begin(), kGameDataCount, std::int16_t{0});
@@ -94,18 +107,37 @@ void resetObject(SimObject& object, const ObjectType& type, CodeSource& code) {
             object.data[f.field] = definitionField(type, f.definitionField);
         }
     }
+    // The temps and the token reference go, the token itself stays.
+    object.thread.temps.fill(0);
+    object.tokenSource = {};
 
-    // Main starts over.
-    object.thread.frames.clear();
-    object.thread.pendingResult.reset();
-    object.thread.sleepTicks = 0;
-    object.thread.stackObjectId = 0;
-    const auto* functions = code.objectFunctions(type);
-    if (functions != nullptr && kMainFunction < functions->size() && (*functions)[kMainFunction].action != 0) {
-        if (auto frame = startFrame(code, type, (*functions)[kMainFunction].action, object.id)) {
-            object.thread.frames.push_back(std::move(*frame));
+    restartMain(object, type, code);
+}
+
+void resetSim(SimObject& sim, const ObjectType& type, CodeSource& code) {
+    constexpr std::size_t kResetClearedField = 0x22;
+    constexpr std::size_t kSittingPersonData = 0x00, kSocialMenuObjectPersonData = 0x3B;
+    sim.queue.clear();
+    sim.actionString.clear();
+    sim.actionIconGuid = 0;
+    sim.actionIconIndex = 0;
+    sim.actionIconObject = 0;
+    sim.running.reset();
+    sim.runningSub.reset();
+    sim.animation.reset();
+    sim.ending.reset();
+    sim.overlays.clear();
+    sim.turning.reset();
+    sim.walking.reset();
+    sim.postRoute.reset();
+    sim.reaching.reset();
+    sim.data[kResetClearedField] = 0;
+    for (const std::size_t index : {kSittingPersonData, kSocialMenuObjectPersonData}) {
+        if (index < sim.personData.size()) {
+            sim.personData[index] = 0;
         }
     }
+    restartMain(sim, type, code);
 }
 
 bool isMultiTilePart(const ObjectType& type) {

@@ -1,8 +1,13 @@
 #include "sim/route_world.hpp"
 
+#include "diag/log.hpp"
 #include "sim/object_footprint.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstdint>
+#include <utility>
 
 namespace ts2::sim {
 
@@ -52,6 +57,19 @@ std::vector<RouteItem> doorRouteItems(const SimObject& object, const SimObject& 
     }
     const float x = tiles(object.x), y = tiles(object.y);
     const auto owner = static_cast<std::uint32_t>(lead.id);
+    // The door's sides: the front part's tile and the tile behind the wall, from this part's place in it.
+    const auto place = [&](float along) {
+        const float ly = along - static_cast<float>(tileY);
+        switch ((object.data[1] & 7) / 2) {
+        case 0: return std::pair{x, y + ly};
+        case 1: return std::pair{x - ly, y};
+        case 2: return std::pair{x, y - ly};
+        default: return std::pair{x + ly, y};
+        }
+    };
+    const auto [ax, ay] = place(0);
+    const auto [bx, by] = place(1);
+    const RouteDoor door{ax, ay, bx, by};
     if (model != nullptr && model->footprint) {
         for (const auto& r : placeFootprint(footprintTile(*model->footprint, lead.data[9], tileX, tileY), x, y, object.data[1])) {
             RouteItem swing;
@@ -60,6 +78,7 @@ std::vector<RouteItem> doorRouteItems(const SimObject& object, const SimObject& 
             swing.type = kSwingType;
             swing.kind = RouteItemKind::Area;
             swing.owner = owner;
+            swing.door = door;
             items.push_back(swing);
             swing.rect = {r.x0 - kPadding, r.y0 - kPadding, r.x1 + kPadding, r.y1 + kPadding};
             swing.cost = kSwingPaddingCost;
@@ -75,12 +94,105 @@ std::vector<RouteItem> doorRouteItems(const SimObject& object, const SimObject& 
         doorway.cost = kDoorwayCost;
         doorway.kind = RouteItemKind::Solid;
         doorway.owner = owner;
+        doorway.door = door;
         items.push_back(doorway);
     }
     return items;
 }
 
+// A place as a 3 x 4 matrix, rows first.
+using Place = std::array<float, 12>;
+
+Place placeOf(const std::array<float, 3>& t, const std::array<float, 4>& q) {
+    const float x = q[0], y = q[1], z = q[2], w = q[3];
+    return {1 - 2 * (y * y + z * z), 2 * (x * y - z * w),     2 * (x * z + y * w),     t[0],
+            2 * (x * y + z * w),     1 - 2 * (x * x + z * z), 2 * (y * z - x * w),     t[1],
+            2 * (x * z - y * w),     2 * (y * z + x * w),     1 - 2 * (x * x + y * y), t[2]};
+}
+
+Place times(const Place& a, const Place& b) {
+    Place r{};
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            float v = j == 3 ? a[static_cast<std::size_t>(i * 4 + 3)] : 0.0f;
+            for (int k = 0; k < 3; ++k) {
+                v += a[static_cast<std::size_t>(i * 4 + k)] * b[static_cast<std::size_t>(k * 4 + j)];
+            }
+            r[static_cast<std::size_t>(i * 4 + j)] = v;
+        }
+    }
+    return r;
+}
+
+bool sameName(const std::string& lower, const std::string& other) {
+    return lower.size() == other.size() && std::equal(lower.begin(), lower.end(), other.begin(), [](char a, char b) {
+               return a == static_cast<char>(std::tolower(static_cast<unsigned char>(b)));
+           });
+}
+
 } // namespace
+
+std::optional<ModelBone> posedModelBone(const RouteModel& model, const std::string& name, std::span<const cobject::SavedJoint> saved) {
+    if (saved.empty()) {
+        const auto found = model.bones.find(name);
+        return found != model.bones.end() ? std::optional<ModelBone>(found->second) : std::nullopt;
+    }
+    const auto node = std::find_if(model.nodes.begin(), model.nodes.end(), [&](const RouteModel::Node& n) { return !n.name.empty() && n.name == name; });
+    if (node == model.nodes.end()) {
+        return std::nullopt;
+    }
+    // The node and its parents, root first. Parents come before their children, so this ends.
+    std::vector<std::size_t> chain;
+    for (auto i = static_cast<int>(node - model.nodes.begin()); i >= 0; i = model.nodes[static_cast<std::size_t>(i)].parent) {
+        chain.push_back(static_cast<std::size_t>(i));
+        if (model.nodes[static_cast<std::size_t>(i)].parent >= i) {
+            break;
+        }
+    }
+    Place place = placeOf({0, 0, 0}, {0, 0, 0, 1});
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+        const auto& n = model.nodes[*it];
+        std::array<float, 3> t = n.translation;
+        std::array<float, 4> q = n.rotation;
+        if (!n.name.empty()) {
+            for (const auto& j : saved) {
+                if (sameName(n.name, j.name) && std::ranges::all_of(j.translation, [](float v) { return std::isfinite(v); }) &&
+                    std::ranges::all_of(j.rotation, [](float v) { return std::isfinite(v); })) {
+                    t = j.translation;
+                    q = j.rotation;
+                    break;
+                }
+            }
+        }
+        place = times(place, placeOf(t, q));
+    }
+    // A broken model's own nodes can still make the place non-finite.
+    const ModelBone bone{place[3], place[7], std::atan2(place[4], place[0])};
+    if (!std::isfinite(bone.x) || !std::isfinite(bone.y) || !std::isfinite(bone.yaw)) {
+        return std::nullopt;
+    }
+    return bone;
+}
+
+std::vector<RouteRect> objectFootprintAt(const SimObject& object, const SimObject& lead, const ObjectType& type,
+                                         const RouteModel* model, float x, float y, std::int16_t direction) {
+    const auto& d = object.data;
+    FootprintShape shape;
+    shape.square = (d[8] & 0x80) != 0;
+    const std::uint16_t size = type.definition.field(0x43);
+    shape.squareSize = size != 0 ? static_cast<float>(size) / 16.0f : 1.0f;
+    shape.insets = type.definition.field(0x4D);
+    if (model != nullptr) {
+        shape.masks = model->footprint ? &*model->footprint : nullptr;
+        shape.modelBox = model->extent;
+    }
+    shape.graphic = lead.data[9];  // a part asks its lead, which uses its own graphic
+    if (&lead != &object &&
+        !footprintTileOf(tiles(lead.x), tiles(lead.y), lead.data[1], tiles(object.x), tiles(object.y), shape.tileX, shape.tileY)) {
+        return {};
+    }
+    return placeFootprint(footprintRects(shape), x, y, direction);
+}
 
 std::vector<RouteItem> objectRouteItems(const SimObject& object, const SimObject& lead, const ObjectType& type, CodeSource& code,
                                         const RouteModel* model) {
@@ -102,52 +214,51 @@ std::vector<RouteItem> objectRouteItems(const SimObject& object, const SimObject
         return items;
     }
 
-    FootprintShape shape;
-    shape.square = (d[8] & 0x80) != 0;
-    const std::uint16_t size = type.definition.field(0x43);
-    shape.squareSize = size != 0 ? static_cast<float>(size) / 16.0f : 1.0f;
-    shape.insets = type.definition.field(0x4D);
-    if (model != nullptr) {
-        shape.masks = model->footprint ? &*model->footprint : nullptr;
-        shape.modelBox = model->extent;
-    }
-    shape.graphic = lead.data[9];  // a part asks its lead, which uses its own graphic
-    if (&lead != &object &&
-        !footprintTileOf(tiles(lead.x), tiles(lead.y), lead.data[1], tiles(object.x), tiles(object.y), shape.tileX, shape.tileY)) {
-        return items;
-    }
-    const auto rects = placeFootprint(footprintRects(shape), tiles(object.x), tiles(object.y), d[1]);
-    for (const auto& r : rects) {
+    for (const auto& r : objectFootprintAt(object, lead, type, model, tiles(object.x), tiles(object.y), d[1])) {
         RouteItem core;
         core.rect = r;
         core.cost = routing.cost;
         core.type = routing.type;
         core.kind = RouteItemKind::Object;
         core.owner = static_cast<std::uint32_t>(object.id);
+        core.dynamic = routing.dynamic && !routing.passable;
+        core.exactFootprint = (static_cast<std::uint16_t>(d[0x28]) & 0x4000) != 0;
         items.push_back(core);
         if (!routing.passable) {
             RouteItem padded = core;
             padded.rect = {r.x0 - kPadding, r.y0 - kPadding, r.x1 + kPadding, r.y1 + kPadding};
             padded.type = routing.type - 1;
+            padded.padding = true;
             items.push_back(padded);
         }
     }
     return items;
 }
 
+constexpr std::int64_t kMaxRouteLevels = 64;
+
 RouteWorld::RouteWorld(const content::Lot& lot, const FenceBlocks& fenceBlocks, const PostFootprint& postFootprint) {
     const auto floors = lot.grids.find(content::kFloorGridInstance);
     if (!lot.roomGraph || floors == lot.grids.end()) {
         return;
     }
-    // The floor grid runs along the wall graph's axes; route x is graph y.
+    // The floor grid runs along the wall graph's axes. Route x is graph y.
     const int width = static_cast<int>(floors->second.height), height = static_cast<int>(floors->second.width);
-    for (int level = 0; level < lot.roomGraph->levels; ++level) {
+    // Routing covers the ground storey and up. The level below the ground is not routed yet.
+    // A broken save's level count is held to the levels the floor grid really has.
+    const int lowest = std::clamp(lot.roomGraph->firstLevel, -1, 0);
+    const std::int64_t graphLevels = std::int64_t{lot.roomGraph->levels} + lowest;
+    const std::int64_t gridLevels = std::int64_t{floors->second.levels} + lowest;
+    const int levels = static_cast<int>(std::clamp<std::int64_t>(std::min(graphLevels, gridLevels), 0, kMaxRouteLevels));
+    if (std::min(graphLevels, gridLevels) > kMaxRouteLevels) {
+        diag::warnOnce("routing: levels past 64 are not routed");
+    }
+    for (int level = 0; level < levels; ++level) {
         RouteGrid& grid = grids_.emplace_back(static_cast<float>(width), static_cast<float>(height));
         for (const auto& item : wallRouteItems(*lot.roomGraph, lot.wallCoverings, level, fenceBlocks)) {
             grid.add(item);
         }
-        for (const auto& item : floorRouteItems(floors->second, lot.floorPatterns, level, width, height)) {
+        for (const auto& item : floorRouteItems(floors->second, lot.floorPatterns, level, lowest, width, height)) {
             grid.add(item);
         }
         for (const auto& item : postRouteItems(lot.fencePosts, level, postFootprint)) {
@@ -156,28 +267,76 @@ RouteWorld::RouteWorld(const content::Lot& lot, const FenceBlocks& fenceBlocks, 
     }
 }
 
+namespace {
+
+// An object's route items now and the level (0 = ground) they go on, level -1 for none.
+struct PlacedItems {
+    int level = -1;
+    std::vector<RouteItem> items;
+};
+
+PlacedItems currentItems(World& world, CodeSource& code, const std::map<std::uint32_t, std::string>& objectModels,
+                         const RouteModelLookup& models, const SimObject& object, int levels) {
+    const ObjectType* type = code.objectType(object.definition.guid());
+    const int level = object.level - 1;
+    if (type == nullptr || level < 0 || level >= levels) {
+        return {};
+    }
+    // A multi-tile part routes as its tile of the lead's model.
+    const SimObject* lead = object.data[0x13] > 0 ? world.find(object.data[0x13]) : nullptr;
+    if (lead == nullptr) {
+        lead = &object;
+    }
+    const auto modelName = objectModels.find(static_cast<std::uint32_t>(lead->id));
+    const RouteModel* model = modelName != objectModels.end() && models ? models(modelName->second) : nullptr;
+    return {level, objectRouteItems(object, *lead, *type, code, model)};
+}
+
+} // namespace
+
 void RouteWorld::addObjects(World& world, CodeSource& code, const content::Lot& lot, const RouteModelLookup& models) {
+    objectModels_ = lot.objectModels;
     world.nextAfter(0, [&](const SimObject& object) {
-        const ObjectType* type = code.objectType(object.definition.guid());
-        if (type == nullptr) {
-            return false;
-        }
-        // A multi-tile part routes as its tile of the lead's model.
-        const SimObject* lead = object.data[0x13] > 0 ? world.find(object.data[0x13]) : nullptr;
-        if (lead == nullptr) {
-            lead = &object;
-        }
-        const auto modelName = lot.objectModels.find(static_cast<std::uint32_t>(lead->id));
-        const RouteModel* model = modelName != lot.objectModels.end() && models ? models(modelName->second) : nullptr;
-        const int level = object.level - 1;
-        if (level < 0 || level >= levels()) {
-            return false;
-        }
-        for (const auto& item : objectRouteItems(object, *lead, *type, code, model)) {
-            grids_[static_cast<std::size_t>(level)].add(item);
+        const PlacedItems placed = currentItems(world, code, objectModels_, models, object, levels());
+        for (const auto& item : placed.items) {
+            grids_[static_cast<std::size_t>(placed.level)].add(item);
         }
         return false;
     });
+}
+
+std::vector<int> RouteWorld::updateObjects(World& world, CodeSource& code, const RouteModelLookup& models, const std::set<std::int16_t>& objects) {
+    // Each level is changed once, for all objects whose items there differ from what they had.
+    std::vector<std::vector<std::uint32_t>> stale(grids_.size());
+    std::vector<std::vector<RouteItem>> added(grids_.size());
+    const std::vector<RouteItem> none;
+    for (const std::int16_t id : objects) {
+        const SimObject* object = world.find(id);
+        PlacedItems now = object != nullptr ? currentItems(world, code, objectModels_, models, *object, levels()) : PlacedItems{};
+        std::erase_if(now.items, [](const RouteItem& item) { return item.kind != RouteItemKind::Object || !RouteGrid::accepts(item); });
+        const auto owner = static_cast<std::uint32_t>(id);
+        for (std::size_t level = 0; level < grids_.size(); ++level) {
+            const auto& wanted = static_cast<int>(level) == now.level ? now.items : none;
+            const auto had = grids_[level].itemsOf(RouteItemKind::Object, owner);
+            if (had.size() != wanted.size() || !std::is_permutation(had.begin(), had.end(), wanted.begin())) {
+                stale[level].push_back(owner);
+                added[level].insert(added[level].end(), wanted.begin(), wanted.end());
+            }
+        }
+    }
+    std::vector<int> changed;
+    for (std::size_t level = 0; level < grids_.size(); ++level) {
+        if (stale[level].empty()) {
+            continue;
+        }
+        std::sort(stale[level].begin(), stale[level].end());
+        grids_[level].remove(RouteItemKind::Object, stale[level]);
+        for (const auto& item : added[level]) {
+            grids_[level].add(item);
+        }
+        changed.push_back(static_cast<int>(level));
+    }
+    return changed;
 }
 
 const RouteGrid* RouteWorld::level(int level) const {

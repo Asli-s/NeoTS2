@@ -29,14 +29,14 @@ struct TerrainTypeInfo {
 struct PaintRules {
     std::map<std::uint8_t, PaintInfo> paints;
     std::map<std::string, TerrainTypeInfo> types;  // by name, as the terrain names its type
-    // [NHoodTerrainTunables]; until read, the shipped file's values.
+    // [NHoodTerrainTunables], holding the shipped file's values until read.
     float maxBeachAltitude = 4;
     int maxBeachWidthInCells = 2;
     float heightRangeForTemperature = 500;
     float cliffAngleMin = 52, cliffAngleMax = 56;  // degrees
     float waterDepthThresholdForPaint = 50;
     int maxRoadProximity = 20;
-    int textureVariantGridSize = 4;  // [NHoodTerrainRenderTunables]; 4 is the game's own default
+    int textureVariantGridSize = 4;  // [NHoodTerrainRenderTunables], 4 is the game's own default
 };
 
 PaintRules parsePaintRules(std::string_view text);

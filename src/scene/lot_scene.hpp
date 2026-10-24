@@ -9,6 +9,10 @@
 #include <string>
 #include <vector>
 
+namespace ts2::content {
+struct Lot;
+}
+
 namespace ts2::scene {
 
 // What adding a lot to a scene found.
@@ -30,8 +34,13 @@ struct LotSceneStats {
 // objects in place (including those held in other objects' slots), walls with their coverings and
 // door and window openings, floors and floor slabs, fences, roofs and the terrain.
 LotSceneStats addLot(SceneBuilder& builder, const std::filesystem::path& lot, bool logObjects = false);
+// The same with the lot already loaded from that package (content::loadLot).
+LotSceneStats addLot(SceneBuilder& builder, const content::Lot& loaded, const std::filesystem::path& lot, bool logObjects = false);
 
-// How the game lights objects outdoors by day, from its lighting settings; none without a "day" state.
-std::optional<ObjectLighting> objectDaylight(const content::Lighting& lighting);
+// How the game lights objects outdoors in a lighting state: the skylight as the ambient, then the
+// sun, fill and sky lights, each as strength * (colour - skylight) per channel.
+[[nodiscard]] ObjectLighting outdoorLighting(const content::Lighting::State& state);
+// The same for the "day" state, none without one.
+[[nodiscard]] std::optional<ObjectLighting> objectDaylight(const content::Lighting& lighting);
 
 } // namespace ts2::scene

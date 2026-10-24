@@ -1,11 +1,13 @@
 #include "content/lighting.hpp"
 
+#include "diag/log.hpp"
 #include "formats/dbpf.hpp"
 #include "formats/image.hpp"
 #include "formats/resource_types.hpp"
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <optional>
@@ -61,6 +63,12 @@ std::vector<std::string> words(const std::string& line) {
     return out;
 }
 
+// A number from the text. Text that isn't a finite number (a broken or modded file) reads as 0.
+float finiteNumber(const std::string& s) {
+    const float f = std::strtof(s.c_str(), nullptr);
+    return std::isfinite(f) ? f : 0.0f;
+}
+
 std::array<float, 3> triple(const std::string& s) {
     std::array<float, 3> v{0, 0, 0};
     std::string t = s;
@@ -72,15 +80,21 @@ std::array<float, 3> triple(const std::string& s) {
     std::istringstream in(t);
     for (auto& x : v) {
         in >> x;
+        if (!std::isfinite(x)) {
+            x = 0;
+        }
     }
     return v;
 }
 
 // Limits for the settings files, which mods may change: how deep files include files and macros
-// create macros, the lines one macro may hold, and the lines read in all (macros multiply them).
+// create macros, the lines one macro may hold, and the lines and bytes read in all (macros multiply
+// them). The game's own files come to about 23,000 lines and 1.5 MB.
 constexpr int kMaxDepth = 16;
 constexpr std::size_t kMaxMacroLines = 4096;
 constexpr std::size_t kMaxLines = 1u << 20;
+constexpr std::size_t kMaxExpandedLine = 64 * 1024;  // macro arguments inside arguments can grow a line exponentially
+constexpr std::size_t kMaxBytes = 64u << 20;
 
 std::array<float, 2> pair(const std::string& s) {
     const auto v = triple(s);
@@ -89,7 +103,7 @@ std::array<float, 2> pair(const std::string& s) {
 
 bool truth(const std::string& s) {
     const std::string l = lower(s);
-    return l == "true" || std::strtof(l.c_str(), nullptr) != 0;
+    return l == "true" || finiteNumber(l) != 0;
 }
 
 // "(text)" without its brackets.
@@ -100,17 +114,32 @@ std::string inside(const std::string& s) {
     return s;
 }
 
-void replaceAll(std::string& s, const std::string& from, const std::string& to) {
+// Replaces every `from` in s with `to`. Returns false, leaving s as it was, when the result would
+// be longer than `limit`.
+bool replaceAll(std::string& s, const std::string& from, const std::string& to, std::size_t limit) {
     if (from.empty()) {
-        return;
+        return s.size() <= limit;
     }
-    for (std::size_t at = s.find(from); at != std::string::npos; at = s.find(from, at + to.size())) {
-        s.replace(at, from.size(), to);
+    std::string out;
+    std::size_t start = 0;
+    for (std::size_t at = s.find(from); at != std::string::npos; at = s.find(from, start)) {
+        out.append(s, start, at - start);
+        out += to;
+        start = at + from.size();
+        if (out.size() > limit) {
+            return false;
+        }
     }
+    out.append(s, start);
+    if (out.size() > limit) {
+        return false;
+    }
+    s = std::move(out);
+    return true;
 }
 
 void setAttribute(Lighting::LightAttributes& a, const std::string& name, const std::string& value) {
-    const float f = std::strtof(value.c_str(), nullptr);
+    const float f = finiteNumber(value);
     if (name == "intensity") a.intensity = f;
     else if (name == "falloffRate") a.falloffRate = f;
     else if (name == "relSpecIntensity") a.relSpecIntensity = f;
@@ -145,7 +174,16 @@ struct Reader {
     // Open if blocks: whether this one's lines are read, and whether a branch was taken.
     std::vector<std::pair<bool, bool>> conditions;
     std::size_t lines = 0;
+    std::size_t bytes = 0;  // read and expanded so far, including macro lines left out for their length
     bool followIncludes = true;
+
+    bool full() {
+        if (lines < kMaxLines && bytes < kMaxBytes) {
+            return false;
+        }
+        diag::warnOnce("lighting: the settings files are too long, the rest is left out");
+        return true;
+    }
 
     std::string value(const std::string& word) const {
         if (!word.empty() && word[0] == '$') {
@@ -174,7 +212,7 @@ struct Reader {
     }
 
     void text(std::istream& in, const fs::path& path, int depth) {
-        for (std::string text; std::getline(in, text) && lines < kMaxLines;) {
+        for (std::string text; !full() && std::getline(in, text);) {
             line(text, path, depth);
         }
     }
@@ -186,9 +224,16 @@ struct Reader {
         }
         const Macro macro = it->second;  // a line of it may redefine it
         for (std::string text : macro.lines) {
-            replaceAll(text, "&{" + macro.parameter + "}", argument);
-            replaceAll(text, "&" + macro.parameter, argument);
-            if (lines >= kMaxLines) {
+            if (!replaceAll(text, "&{" + macro.parameter + "}", argument, kMaxExpandedLine) ||
+                !replaceAll(text, "&" + macro.parameter, argument, kMaxExpandedLine)) {
+                diag::warnOnce("lighting: a macro line expanding past 64 KB is left out");
+                bytes += kMaxExpandedLine;
+                if (full()) {
+                    return;
+                }
+                continue;
+            }
+            if (full()) {
                 return;
             }
             line(text, path, depth + 1);
@@ -197,6 +242,7 @@ struct Reader {
 
     void line(std::string text, const fs::path& path, int depth) {
         ++lines;
+        bytes += text.size();
         if (const auto hash = text.find('#'); hash != std::string::npos) {
             text.resize(hash);
         }
@@ -262,17 +308,21 @@ struct Reader {
             auto& l = state->lights[w[1]];
             l.direction = triple(w[2]);
             l.color = triple(w[3]);
-            l.strength = std::strtof(value(w[4]).c_str(), nullptr);
+            l.strength = finiteNumber(value(w[4]));
         } else if (state && key == "skylight" && w.size() >= 3) {
             const auto color = triple(w[1]);
-            const float strength = std::strtof(value(w[2]).c_str(), nullptr);
+            const float strength = finiteNumber(value(w[2]));
             state->skylight = {color[0] * strength, color[1] * strength, color[2] * strength};
+        } else if (state && key == "environment" && w.size() >= 3) {
+            const auto color = triple(w[1]);
+            const float strength = finiteNumber(value(w[2]));
+            state->environment = {color[0] * strength, color[1] * strength, color[2] * strength};
         } else if (state && key == "lightMap" && w.size() >= 2) {
             const auto id = static_cast<std::uint32_t>(std::strtoul(value(w[1]).c_str(), nullptr, 0));
             state->lightMap = id ? std::optional<std::uint32_t>(id) : std::nullopt;
             for (std::size_t i = 2; i + 1 < w.size(); i += 2) {
                 if (w[i] == "-strength") {
-                    state->lightMapStrength = std::strtof(value(w[i + 1]).c_str(), nullptr);
+                    state->lightMapStrength = finiteNumber(value(w[i + 1]));
                 } else if (w[i] == "-tint") {
                     state->lightMapTint = triple(w[i + 1]);
                 }
@@ -281,7 +331,7 @@ struct Reader {
             auto& m = state->modifiers[w[1]];
             float* fields[] = {&m.practicalStrength, &m.diffusionStrength, &m.practicalFalloff, &m.diffusionFalloff};
             for (std::size_t i = 0; i < 4 && i + 2 < w.size(); ++i) {
-                *fields[i] = std::strtof(value(w[i + 2]).c_str(), nullptr);
+                *fields[i] = finiteNumber(value(w[i + 2]));
             }
         } else if (state && key == "unlitRoomColor" && w.size() >= 2) {
             // The game keeps only the last such line of a state.
@@ -289,7 +339,7 @@ struct Reader {
             u.color = triple(w[1]);
             for (std::size_t i = 2; i + 1 < w.size(); i += 2) {
                 if (w[i] == "-threshold") {
-                    u.threshold = std::strtof(value(w[i + 1]).c_str(), nullptr);
+                    u.threshold = finiteNumber(value(w[i + 1]));
                 }
             }
             state->unlitRoom = u;
@@ -299,7 +349,7 @@ struct Reader {
                 const auto c = triple(v);
                 state->diffParams[w[1]] = {c[0], c[1], c[2]};
             } else {
-                state->diffParams[w[1]] = {std::strtof(v.c_str(), nullptr)};
+                state->diffParams[w[1]] = {finiteNumber(v)};
             }
         }
     }
@@ -314,7 +364,7 @@ const Lighting::LightAttributes* Lighting::light(const std::string& name) const 
 
 float Lighting::number(const std::string& name, float fallback) const {
     const auto it = values.find(name);
-    return it == values.end() ? fallback : std::strtof(it->second.c_str(), nullptr);
+    return it == values.end() ? fallback : finiteNumber(it->second);
 }
 
 Lighting readLighting(const std::vector<Product>& products) {

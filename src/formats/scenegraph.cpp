@@ -19,37 +19,11 @@ void fail(const std::string& what) {
 }
 
 std::size_t count(BinaryReader& r, std::size_t minBytes) {
-    const std::uint32_t n = r.u32();
-    if (n > kMaxCount || n > r.remaining() / std::max<std::size_t>(minBytes, 1)) {
+    const std::size_t n = r.u32Count(minBytes);
+    if (n > kMaxCount) {
         fail("bad count " + std::to_string(n));
     }
     return n;
-}
-
-// A byte array's length: it only has to fit in what is left.
-std::size_t byteCount(BinaryReader& r) {
-    const std::uint32_t n = r.u32();
-    if (n > r.remaining()) {
-        fail("bad byte count " + std::to_string(n));
-    }
-    return n;
-}
-
-// Strings carry their length in 7-bit groups (one byte below 128).
-std::string string(BinaryReader& r) {
-    std::uint32_t length = 0;
-    for (int shift = 0;; shift += 7) {
-        if (shift > 28) {
-            fail("bad string length");
-        }
-        const std::uint8_t b = r.u8();
-        length |= static_cast<std::uint32_t>(b & 0x7F) << shift;
-        if ((b & 0x80) == 0) {
-            break;
-        }
-    }
-    const auto bytes = r.bytes(length);
-    return std::string(bytes.begin(), bytes.end());
 }
 
 Container readContainer(BinaryReader& r) {
@@ -87,7 +61,7 @@ struct BlockHeader {
 
 BlockHeader blockHeader(BinaryReader& r, std::string_view expected) {
     BlockHeader h;
-    h.name = string(r);
+    h.name = r.varString();
     h.id = r.u32();
     h.version = r.u32();
     if (h.name != expected) {
@@ -99,7 +73,7 @@ BlockHeader blockHeader(BinaryReader& r, std::string_view expected) {
 // cSGResource: the resource's own name.
 std::string sgResource(BinaryReader& r) {
     blockHeader(r, "cSGResource");
-    return string(r);
+    return r.varString();
 }
 
 // cObjectGraphNode: extensions (skipped) and, from version 4, a name.
@@ -112,7 +86,7 @@ void objectGraphNode(BinaryReader& r) {
         r.u32();
     }
     if (h.version >= 4) {
-        string(r);
+        r.varString();
     }
 }
 
@@ -125,18 +99,22 @@ Container parseContainer(std::span<const std::uint8_t> data) {
 
 namespace {
 
-// A cCompositionTreeNode: the object graph node, then children (enabled, kind, block index).
-std::vector<std::uint32_t> compositionTree(BinaryReader& r, std::string* name) {
+// A cCompositionTreeNode: the object graph node (its extensions as enabled, kind, block index), then
+// children the same way.
+std::vector<std::uint32_t> compositionTree(BinaryReader& r, std::string* name, std::vector<std::uint32_t>* extensionBlocks = nullptr) {
     blockHeader(r, "cCompositionTreeNode");
     const BlockHeader graph = blockHeader(r, "cObjectGraphNode");
     const std::size_t extensions = count(r, 6);
     for (std::size_t i = 0; i < extensions; ++i) {
         r.u8();
         r.u8();
-        r.u32();
+        const std::uint32_t block = r.u32();
+        if (extensionBlocks) {
+            extensionBlocks->push_back(block);
+        }
     }
     if (graph.version >= 4) {
-        *name = string(r);
+        *name = r.varString();
     }
     std::vector<std::uint32_t> children;
     const std::size_t n = count(r, 6);
@@ -150,7 +128,7 @@ std::vector<std::uint32_t> compositionTree(BinaryReader& r, std::string* name) {
 
 void transformNode(BinaryReader& r, SceneNode& node) {
     blockHeader(r, "cTransformNode");
-    node.children = compositionTree(r, &node.name);
+    node.children = compositionTree(r, &node.name, &node.extensions);
     for (auto& v : node.translation) {
         v = std::bit_cast<float>(r.u32());
     }
@@ -180,7 +158,8 @@ std::optional<std::size_t> findBlock(std::span<const std::uint8_t> data, std::si
 } // namespace
 
 ResourceNode parseResourceNode(std::span<const std::uint8_t> data) {
-    constexpr std::uint32_t kResourceNode = 0xE519C933, kTransformNode = 0x65246462, kShapeRefNode = 0x65245517, kLightRefNode = 0x253D2018;
+    constexpr std::uint32_t kResourceNode = 0xE519C933, kTransformNode = 0x65246462, kShapeRefNode = 0x65245517, kLightRefNode = 0x253D2018,
+                            kBoneData = 0xE9075BC5;
     BinaryReader header(data);
     ResourceNode rn;
     rn.container = readContainer(header);
@@ -212,7 +191,7 @@ ResourceNode parseResourceNode(std::span<const std::uint8_t> data) {
                 r.u16();
                 const std::size_t groups = count(r, 1);
                 for (std::size_t i = 0; i < groups; ++i) {
-                    string(r);  // render group, e.g. "Practical"
+                    r.varString();  // render group, e.g. "Practical"
                 }
                 r.u32();
                 r.u8();
@@ -228,6 +207,18 @@ ResourceNode parseResourceNode(std::span<const std::uint8_t> data) {
                 blockHeader(r, "cRenderableNode");
                 blockHeader(r, "cBoundedNode");
                 transformNode(r, node);
+            } else if (type == kBoneData) {
+                blockHeader(r, "cBoneDataExtension");
+                blockHeader(r, "cExtension");
+                SceneNode::BoneData bone;
+                for (auto& w : bone.words) {
+                    w = r.u32();
+                }
+                bone.weight = std::bit_cast<float>(r.u32());
+                for (auto& v : bone.rotation) {
+                    v = std::bit_cast<float>(r.u32());
+                }
+                node.boneData = bone;
             } else {
                 r.bytes(5);
             }
@@ -257,20 +248,22 @@ DataValue dataValue(BinaryReader& r, int depth, std::size_t& budget) {
     --budget;
     DataValue v;
     v.type = static_cast<DataValue::Type>(r.u8());
-    v.name = string(r);
+    v.name = r.varString();
     auto floats = [&](int n) {
         for (int i = 0; i < n; ++i) {
             v.floats.push_back(std::bit_cast<float>(r.u32()));
         }
     };
     switch (v.type) {
+    case DataValue::Type::Bool: v.integer = r.u8() != 0 ? 1 : 0; break;
     case DataValue::Type::Int: v.integer = static_cast<std::int32_t>(r.u32()); break;
     case DataValue::Type::Float: floats(1); break;
+    case DataValue::Type::Vector2: floats(2); break;
     case DataValue::Type::Vector: floats(3); break;
     case DataValue::Type::Rotation: floats(4); break;
-    case DataValue::Type::String: v.text = string(r); break;
+    case DataValue::Type::String: v.text = r.varString(); break;
     case DataValue::Type::Bytes: {
-        const auto bytes = r.bytes(byteCount(r));
+        const auto bytes = r.bytes(r.u32Count(1));
         v.bytes.assign(bytes.begin(), bytes.end());
         break;
     }
@@ -336,9 +329,18 @@ Mesh parseMesh(std::span<const std::uint8_t> data) {
     Mesh m;
     m.container = readContainer(r);
     m.version = blockHeader(r, "cGeometryDataContainer").version;
-    if (m.version != 4) {
+    if (m.version < 1 || m.version > 4) {
         fail("mesh version " + std::to_string(m.version) + " not supported");
     }
+    // Before version 3 every index list stores its entries as u32s. They are read as u16s.
+    const bool wideIndices = m.version < 3;
+    auto indexList = [&](std::vector<std::uint16_t>& out) {
+        out.resize(count(r, wideIndices ? 4 : 2));
+        for (auto& i : out) {
+            i = wideIndices ? static_cast<std::uint16_t>(r.u32()) : r.u16();
+        }
+    };
+    std::vector<std::uint16_t> skipped;
     m.name = sgResource(r);
     m.elements.resize(count(r, 28));
     for (auto& e : m.elements) {
@@ -347,41 +349,28 @@ Mesh parseMesh(std::span<const std::uint8_t> data) {
         r.u32();  // repetition
         e.blockFormat = r.u32();
         e.setFormat = r.u32();
-        const auto bytes = r.bytes(byteCount(r));
+        const auto bytes = r.bytes(r.u32Count(1));
         e.data.assign(bytes.begin(), bytes.end());
-        const std::size_t items = count(r, 2);
-        for (std::size_t i = 0; i < items; ++i) {
-            r.u16();
-        }
+        indexList(skipped);
     }
     m.links.resize(count(r, 24));
     for (auto& l : m.links) {
-        l.elements.resize(count(r, 2));
-        for (auto& e : l.elements) {
-            e = r.u16();
-        }
+        indexList(l.elements);
         l.vertexCount = r.u32();
         r.u32();  // active elements
         for (auto& alias : l.aliases) {
-            alias.resize(count(r, 2));
-            for (auto& i : alias) {
-                i = r.u16();
-            }
+            indexList(alias);
         }
     }
     m.groups.resize(count(r, 17));
     for (auto& g : m.groups) {
         g.primitive = r.u32();
         g.link = r.u32();
-        g.name = string(r);
-        g.indices.resize(count(r, 2));
-        for (auto& i : g.indices) {
-            i = r.u16();
-        }
+        g.name = r.varString();
+        indexList(g.indices);
         g.opacity = r.u32();
-        g.bones.resize(count(r, 2));
-        for (auto& b : g.bones) {
-            b = r.u16();
+        if (m.version > 1) {
+            indexList(g.bones);
         }
     }
     m.inverseBinds.resize(r.remaining() >= 4 ? count(r, 28) : 0);
@@ -393,7 +382,7 @@ Mesh parseMesh(std::span<const std::uint8_t> data) {
             v = std::bit_cast<float>(r.u32());
         }
     }
-    // Blend group names, a bounding mesh and per-joint bounding hulls follow; they aren't read yet.
+    // Blend group names, a bounding mesh and per-joint bounding hulls follow. They aren't read yet.
     return m;
 }
 
@@ -450,21 +439,35 @@ Shape parseShape(std::span<const std::uint8_t> data) {
     s.name = sgResource(r);
     blockHeader(r, "cReferentNode");
     objectGraphNode(r);
-    const std::size_t lods = count(r, 4);
-    for (std::size_t i = 0; i < lods; ++i) {
-        r.u32();
+    if (s.version > 6) {
+        const std::size_t lods = count(r, 4);
+        for (std::size_t i = 0; i < lods; ++i) {
+            r.u32();
+        }
     }
     const std::size_t items = count(r, 6);
     for (std::size_t i = 0; i < items; ++i) {
-        s.detailLevels.push_back(r.u32());
-        r.u8();
-        s.geometryNodes.push_back(string(r));
+        s.detailLevels.push_back(s.version > 5 ? r.u32() : 0);
+        if (s.version >= 8 && r.u8() != 0) {
+            s.geometryNodes.push_back(r.varString());
+            s.geometryLinks.push_back(std::nullopt);
+        } else {
+            r.u8();
+            r.u8();
+            s.geometryNodes.emplace_back();
+            s.geometryLinks.push_back(r.u32());
+        }
     }
     s.parts.resize(count(r, 11));
     for (auto& p : s.parts) {
-        p.group = string(r);
-        p.material = string(r);
-        r.bytes(9);
+        p.group = r.varString();
+        p.material = r.varString();
+        r.u8();
+        const std::size_t extraNames = count(r, 1);
+        for (std::size_t i = 0; i < extraNames; ++i) {
+            r.varString();
+        }
+        r.u32();
     }
     return s;
 }
@@ -475,62 +478,127 @@ Material parseMaterial(std::span<const std::uint8_t> data) {
     readContainer(r);
     m.version = blockHeader(r, "cMaterialDefinition").version;
     m.name = sgResource(r);
-    m.description = string(r);
-    m.type = string(r);
+    m.description = r.varString();
+    m.type = r.varString();
     const std::size_t properties = count(r, 2);
     for (std::size_t i = 0; i < properties; ++i) {
-        std::string key = string(r);
-        m.properties[std::move(key)] = string(r);
+        std::string key = r.varString();
+        m.properties[std::move(key)] = r.varString();
     }
     if (m.version > 8 && r.remaining() >= 4) {
         const std::size_t textures = count(r, 1);
         for (std::size_t i = 0; i < textures; ++i) {
-            m.textures.push_back(string(r));
+            m.textures.push_back(r.varString());
         }
     }
     return m;
 }
+
+namespace {
+
+// Bytes of one mip level of each texture format, as the game sizes them (0: unknown format).
+std::size_t levelBytes(std::uint32_t format, std::size_t width, std::size_t height) {
+    const std::size_t blocks = ((width + 3) / 4) * ((height + 3) / 4);
+    switch (format) {
+    case 1: return width * height * 4;
+    case 2:
+    case 9: return width * height * 3;
+    case 3:
+    case 6: return width * height;
+    case 7: return width * height * 2;
+    case 4: return blocks * 8;
+    case 5:
+    case 8: return blocks * 16;
+    default: return 0;
+    }
+}
+
+// Before version 9 a texture's mip levels are one block, largest first. Each level halves the
+// last (down to 1) and the game stops at a side that isn't a power of two. Returned smallest first.
+std::vector<MipLevel> packedMipLevels(BinaryReader& r, const Image& img, std::size_t mipCount) {
+    if (img.width > tga::kMaxSide || img.height > tga::kMaxSide) {
+        fail("texture size " + std::to_string(img.width) + " x " + std::to_string(img.height) + " too large");
+    }
+    std::vector<std::size_t> sizes;
+    std::size_t w = img.width, h = img.height;
+    for (std::size_t i = 0; i < mipCount; ++i) {
+        if (w == 0 || h == 0 || (w & (w - 1)) != 0 || (h & (h - 1)) != 0) {
+            break;
+        }
+        const std::size_t bytes = levelBytes(img.format, w, h);
+        if (bytes == 0) {
+            fail("texture format " + std::to_string(img.format) + " not supported");
+        }
+        sizes.push_back(bytes);
+        if (w < 2 && h < 2) {
+            break;
+        }
+        w = std::max<std::size_t>(1, w / 2);
+        h = std::max<std::size_t>(1, h / 2);
+    }
+    r.u32();  // the block's size, which the game ignores for the size it works out
+    std::vector<MipLevel> levels(sizes.size());
+    for (std::size_t i = 0; i < sizes.size(); ++i) {
+        const auto bytes = r.bytes(sizes[i]);
+        levels[sizes.size() - 1 - i].data.assign(bytes.begin(), bytes.end());
+    }
+    return levels;
+}
+
+} // namespace
 
 Image parseImage(std::span<const std::uint8_t> data) {
     BinaryReader r(data);
     Image img;
     readContainer(r);
     img.version = blockHeader(r, "cImageData").version;
-    if (img.version < 9) {
+    if (img.version > 9) {
         fail("image version " + std::to_string(img.version) + " not supported");
     }
     img.name = sgResource(r);
     img.width = r.u32();
     img.height = r.u32();
     img.format = r.u32();
-    r.u32();  // mip level count
+    const std::size_t mipCount = r.u32();
     r.u32();  // a float, normally 1.0
     const std::size_t textures = count(r, 4);
     r.u32();
-    string(r);
+    if (img.version > 6) {
+        r.varString();
+    }
     if (textures == 0) {
         return img;
     }
-    // Each texture: its mip levels, then a colour and a float (8 bytes) before the next one.
+    // Each texture: its mip levels, then (from version 6) a colour and (from version 8) a float.
     for (std::size_t t = 0; t < textures; ++t) {
         std::vector<MipLevel> levels;
-        const std::size_t mips = count(r, 1);
-        for (std::size_t i = 0; i < mips; ++i) {
-            MipLevel level;
-            const std::uint8_t kind = r.u8();
-            if (kind == 0) {
-                const auto bytes = r.bytes(byteCount(r));
-                level.data.assign(bytes.begin(), bytes.end());
-            } else if (kind == 1) {
-                level.largeMipName = string(r);
-            } else {
-                fail("unknown mip level kind " + std::to_string(kind));
+        if (img.version < 9) {
+            levels = packedMipLevels(r, img, mipCount);
+        } else {
+            const std::size_t mips = count(r, 1);
+            for (std::size_t i = 0; i < mips; ++i) {
+                MipLevel level;
+                const std::uint8_t kind = r.u8();
+                if (kind == 0) {
+                    const auto bytes = r.bytes(r.u32Count(1));
+                    level.data.assign(bytes.begin(), bytes.end());
+                } else if (kind == 1) {
+                    level.largeMipName = r.varString();
+                } else {
+                    fail("unknown mip level kind " + std::to_string(kind));
+                }
+                levels.push_back(std::move(level));
             }
-            levels.push_back(std::move(level));
         }
         img.faces.push_back(std::move(levels));
-        if (t + 1 < textures) {
-            r.skip(8);
+        if (img.version >= 6) {
+            r.u32();
+        }
+        if (img.version > 7) {
+            const float amplitude = std::bit_cast<float>(r.u32());
+            if (t == 0) {
+                img.bumpAmplitude = amplitude;
+            }
         }
     }
     img.mips = img.faces.front();
@@ -546,7 +614,7 @@ LevelInfo parseLevelInfo(std::span<const std::uint8_t> data) {
     l.width = r.u32();
     l.height = r.u32();
     r.u32();  // z level
-    const auto bytes = r.bytes(byteCount(r));
+    const auto bytes = r.bytes(r.u32Count(1));
     l.data.assign(bytes.begin(), bytes.end());
     return l;
 }
@@ -555,7 +623,7 @@ LightResource parseLight(std::span<const std::uint8_t> data) {
     BinaryReader r(data);
     readContainer(r);
     LightResource l;
-    l.kind = string(r);
+    l.kind = r.varString();
     r.u32();
     r.u32();
     if (l.kind != "cPointLight" && l.kind != "cSpotLight") {
@@ -576,7 +644,7 @@ LightResource parseLight(std::span<const std::uint8_t> data) {
     }
     r.u8();  // a byte lights have here before the name (0 in the game's files)
     if (graph.version >= 4) {
-        l.name = string(r);
+        l.name = r.varString();
     }
     auto f = [&] { return std::bit_cast<float>(r.u32()); };
     l.intensity = f();
@@ -610,13 +678,13 @@ SceneObject parseSceneObject(std::span<const std::uint8_t> data) {
     const std::uint32_t version = r.u32();
     r.skip(kClass.size());
     SceneObject o;
-    o.model = string(r);
+    o.model = r.varString();
     if (o.model.empty()) {
         return o;
     }
     const std::size_t entries = count(r, 5);
     for (std::size_t e = 0; e < entries; ++e) {
-        string(r);
+        r.varString();
         r.u32();
         if (version < 0x11) {
             continue;  // overrides came with version 0x11
@@ -624,8 +692,8 @@ SceneObject parseSceneObject(std::span<const std::uint8_t> data) {
         const std::size_t overrides = count(r, 2);
         for (std::size_t i = 0; i < overrides; ++i) {
             MaterialOverride m;
-            m.material = string(r);
-            m.group = string(r);
+            m.material = r.varString();
+            m.group = r.varString();
             o.overrides.push_back(std::move(m));
         }
     }
@@ -665,19 +733,37 @@ std::array<std::array<std::uint8_t, 4>, 4> dxtColors(const std::uint8_t* block, 
 
 } // namespace
 
+// The bytes a texture of this size and format needs.
+std::size_t textureBytes(std::uint32_t width, std::uint32_t height, std::uint32_t format) {
+    const std::size_t pixels = static_cast<std::size_t>(width) * height;
+    switch (format) {
+    case 4: case 5: case 8: {
+        const std::size_t blocks = static_cast<std::size_t>(std::max(1u, (width + 3) / 4)) * std::max(1u, (height + 3) / 4);
+        return blocks * (format == 4 ? 8 : 16);
+    }
+    case 1: return pixels * 4;
+    case 2: return pixels * 3;
+    case 3: case 6: return pixels;
+    default:
+        fail("texture format " + std::to_string(format) + " not supported");
+        return 0;
+    }
+}
+
 std::vector<std::uint8_t> decodeRgba(std::span<const std::uint8_t> data, std::uint32_t width, std::uint32_t height,
                                      std::uint32_t format) {
     if (width > tga::kMaxSide || height > tga::kMaxSide) {
         fail("texture size " + std::to_string(width) + " x " + std::to_string(height) + " too large");
+    }
+    // Checked before allocating, so a short resource claiming a huge size costs nothing.
+    if (data.size() < textureBytes(width, height, format)) {
+        fail("texture data too short");
     }
     std::vector<std::uint8_t> out(static_cast<std::size_t>(width) * height * 4, 255);
     auto pixel = [&](std::uint32_t x, std::uint32_t y) { return out.data() + (static_cast<std::size_t>(y) * width + x) * 4; };
     if (format == 4 || format == 5 || format == 8) {
         const std::size_t blockBytes = format == 4 ? 8 : 16;
         const std::uint32_t bw = std::max(1u, (width + 3) / 4), bh = std::max(1u, (height + 3) / 4);
-        if (data.size() < static_cast<std::size_t>(bw) * bh * blockBytes) {
-            fail("texture data too short");
-        }
         for (std::uint32_t by = 0; by < bh; ++by) {
             for (std::uint32_t bx = 0; bx < bw; ++bx) {
                 const std::uint8_t* block = data.data() + (static_cast<std::size_t>(by) * bw + bx) * blockBytes;
@@ -724,9 +810,6 @@ std::vector<std::uint8_t> decodeRgba(std::span<const std::uint8_t> data, std::ui
     }
     if (format == 1 || format == 2) {
         const std::size_t bytesPerPixel = format == 1 ? 4 : 3;
-        if (data.size() < static_cast<std::size_t>(width) * height * bytesPerPixel) {
-            fail("texture data too short");
-        }
         for (std::size_t i = 0; i < static_cast<std::size_t>(width) * height; ++i) {
             const std::uint8_t* s = data.data() + i * bytesPerPixel;
             std::uint8_t* p = out.data() + i * 4;
@@ -739,9 +822,6 @@ std::vector<std::uint8_t> decodeRgba(std::span<const std::uint8_t> data, std::ui
     }
     if (format == 3) {
         // Alpha only: a byte per pixel, black where drawn.
-        if (data.size() < static_cast<std::size_t>(width) * height) {
-            fail("texture data too short");
-        }
         for (std::size_t i = 0; i < static_cast<std::size_t>(width) * height; ++i) {
             std::uint8_t* p = out.data() + i * 4;
             p[0] = p[1] = p[2] = 0;
@@ -749,7 +829,14 @@ std::vector<std::uint8_t> decodeRgba(std::span<const std::uint8_t> data, std::ui
         }
         return out;
     }
-    fail("texture format " + std::to_string(format) + " not supported");
+    if (format == 6) {
+        // A byte per pixel (all bump maps' heights), shown as grey.
+        for (std::size_t i = 0; i < static_cast<std::size_t>(width) * height; ++i) {
+            std::uint8_t* p = out.data() + i * 4;
+            p[0] = p[1] = p[2] = data[i];
+        }
+        return out;
+    }
     return out;
 }
 

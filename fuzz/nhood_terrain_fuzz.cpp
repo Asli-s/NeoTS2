@@ -12,7 +12,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     } catch (const std::exception&) {
     }
     try {
-        ts2::nhood::parseSavedCamera(bytes);
+        (void)ts2::nhood::parseSavedCamera(bytes);
     } catch (const std::exception&) {
     }
     return 0;

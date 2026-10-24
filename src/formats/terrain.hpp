@@ -25,10 +25,13 @@ struct Array2D {
     std::size_t elementSize = 0;
     std::vector<std::uint8_t> elements;
 
-    // The first byte of the element at (x, y); 0 outside the grid.
+    // The first byte of the element at (x, y), or 0 outside the grid.
     std::uint8_t byte(std::int32_t x, std::int32_t y) const;
 };
 
 Array2D parseArray2D(std::span<const std::uint8_t> data);
+// A c2DArray whose tiles each hold up to three bytes, saved as a count and then the bytes (lot grid
+// 0x5CEE). Elements are three bytes, the unused ones 0xFF.
+Array2D parseByteLists(std::span<const std::uint8_t> data);
 
 } // namespace ts2::terrain

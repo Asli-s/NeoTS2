@@ -42,6 +42,6 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     }
     walllight::Walls lit;
     lit.runs = std::move(layout.runs);
-    walllight::light(lit, {}, nullptr, [](float x, float, int) { return std::array<float, 3>{x * 0.1f, 0.5f, 1}; });
+    (void)walllight::light(lit, {}, nullptr, [](float x, float, int) { return std::array<float, 3>{x * 0.1f, 0.5f, 1}; });
     return 0;
 }

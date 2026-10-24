@@ -7,6 +7,7 @@
 
 namespace ts2::bcon {
 
+// A constants table (BCON): a named list of 16-bit values that behavior trees read as constants.
 struct Constants {
     std::string name;
     std::uint8_t flags = 0;

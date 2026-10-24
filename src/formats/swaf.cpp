@@ -2,6 +2,7 @@
 
 #include "formats/binary_reader.hpp"
 
+#include <algorithm>
 #include <iterator>
 #include <stdexcept>
 #include <utility>
@@ -14,6 +15,8 @@ constexpr std::uint32_t kMaxVersion = 6;
 constexpr std::uint32_t kMaxWantVersion = 10;
 constexpr std::uint32_t kMaxHistoryVersion = 2;
 constexpr std::uint32_t kMaxCount = 0x10000;
+// More slots than any panel layout has. The game sets no limit.
+constexpr std::uint32_t kMaxSlots = 64;
 
 Want readWant(BinaryReader& r) {
     Want w;
@@ -86,6 +89,18 @@ std::vector<Want> readWants(BinaryReader& r) {
 }
 
 } // namespace
+
+Slots slots(const WantsAndFears& saved) {
+    Slots out;
+    if (saved.version >= 2) {
+        out.wants = std::min<std::uint32_t>(saved.maxWants, kMaxSlots);
+        out.fears = std::min<std::uint32_t>(saved.maxFears, kMaxSlots);
+    }
+    // The game keeps the extra holds as a short and compares counts unsigned.
+    const std::int32_t extra = saved.version >= 4 ? static_cast<std::int16_t>(saved.lastValue) : 0;
+    out.holds = static_cast<std::uint32_t>(extra + 1);
+    return out;
+}
 
 WantsAndFears parse(std::span<const std::uint8_t> data) {
     BinaryReader r(data);

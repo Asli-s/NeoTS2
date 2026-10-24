@@ -19,7 +19,7 @@ struct InventoryToken {
     std::vector<std::int16_t> properties;
 };
 
-// Counted tokens keep their count in their first property; singular tokens are one each. Tokens
+// Counted tokens keep their count in their first property. Singular tokens are one each. Tokens
 // are shared so that a script holding one keeps it after it leaves the inventory.
 struct Inventory {
     std::vector<std::shared_ptr<InventoryToken>> counted;

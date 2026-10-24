@@ -15,11 +15,17 @@ if (-not $toolPath) {
 }
 $header = Join-Path (Split-Path $Build -Parent) "generated\neots2_version.hpp"
 $version = if ((Get-Content $header -Raw) -match 'NEOTS2_VERSION "([^"]+)"') { $Matches[1] } else { throw "No version in $header; build first." }
+# Crash reports group by version, so only a release build of a clean commit may have symbols there.
 if ($version.EndsWith("-modified")) {
-    Write-Warning "This build has uncommitted changes ($version); release builds should come from a clean commit."
+    throw "This build has uncommitted changes ($version): commit them and build the release again."
+}
+if ($version -match '-dev[.+]') {
+    throw "This is not a release build ($version): configure it with -DNEOTS2_RELEASE=ON (see docs/code-guide.md)."
 }
 Push-Location $Build
 try {
+    # Judged by its exit code only (Windows PowerShell makes its error-stream output errors when redirected).
+    $ErrorActionPreference = "Continue"
     & $toolPath -b NeoTS2 -a NeoTS2 -v $version -i $env:BUGSPLAT_CLIENT_ID -s $env:BUGSPLAT_CLIENT_SECRET -f "**/{neots2.exe,neots2.pdb}"
     if ($LASTEXITCODE -ne 0) { throw "symbol-upload failed ($LASTEXITCODE)" }
 } finally {

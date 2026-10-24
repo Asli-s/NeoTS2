@@ -48,7 +48,7 @@ struct LotResources {
     std::vector<std::string>& warnings;
     std::map<std::string, std::uint32_t> loaded;  // texture name -> index into the terrain's imposter textures
 
-    // Index of a texture in `out`, loaded on first use (its largest level); nullopt when missing.
+    // Index of a texture in `out`, loaded on first use (its largest level). Nullopt when missing.
     std::optional<std::uint32_t> texture(PaintedTerrain& out, const std::string& name) {
         const std::string key = lower(name);
         if (const auto it = loaded.find(key); it != loaded.end()) {

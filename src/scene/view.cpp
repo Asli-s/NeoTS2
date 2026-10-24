@@ -5,10 +5,24 @@
 
 namespace ts2::scene {
 
+namespace {
+
+// A wall or hub made only of attic walls.
+bool attic(const Scene& scene, const Instance& instance) {
+    if ((instance.part != Part::Wall && instance.part != Part::WallHub) || instance.walls.empty()) {
+        return false;
+    }
+    return std::all_of(instance.walls.begin(), instance.walls.end(), [&](int wall) {
+        return wall >= 0 && static_cast<std::size_t>(wall) < scene.walls.size() && scene.walls[static_cast<std::size_t>(wall)].attic;
+    });
+}
+
+} // namespace
+
 int topLevel(const Scene& scene) {
     int top = 0;
     for (const auto& instance : scene.instances) {
-        if (instance.part != Part::Roof) {
+        if (instance.part != Part::Roof && !attic(scene, instance)) {
             top = std::max(top, instance.level);
         }
     }
@@ -16,13 +30,7 @@ int topLevel(const Scene& scene) {
 }
 
 int groundLevel(const Scene& scene) {
-    int ground = -1;
-    for (const auto& wall : scene.walls) {
-        if (wall.cuttable && (ground < 0 || wall.level < ground)) {
-            ground = wall.level;
-        }
-    }
-    return std::max(ground, 0);
+    return scene.groundLevel;
 }
 
 bool cutDown(const WallInfo& wall, const View& view) {
@@ -51,19 +59,21 @@ std::vector<std::uint8_t> visibleInstances(const Scene& scene, const View& view)
     }
     auto isCut = [&](int wall) { return wall >= 0 && static_cast<std::size_t>(wall) < cut.size() && cut[static_cast<std::size_t>(wall)]; };
     const int top = topLevel(scene);
+    const bool roofs = view.roofs && view.walls == WallView::Up && view.level >= top;
     std::vector<std::uint8_t> visible(scene.instances.size());
     for (std::size_t i = 0; i < scene.instances.size(); ++i) {
         const Instance& instance = scene.instances[i];
         bool show = instance.part == Part::Other || instance.level <= view.level;
         switch (instance.part) {
         case Part::Roof:
-            show = show && view.roofs && view.walls == WallView::Up && view.level >= top;
+            // With the walls up, roofs of the storeys below the one looked at stay on.
+            show = show && view.roofs && view.walls == WallView::Up && (instance.level < view.level || roofs);
             break;
         case Part::Wall:
         case Part::WallHub: {
             // The cut version shows when all its walls are cut, the full one otherwise.
             const bool allCut = !instance.walls.empty() && std::all_of(instance.walls.begin(), instance.walls.end(), isCut);
-            show = show && instance.cut == allCut;
+            show = (show || (roofs && attic(scene, instance))) && instance.cut == allCut;
             break;
         }
         case Part::Object:

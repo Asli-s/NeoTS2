@@ -1,5 +1,7 @@
 #include "sim/object_footprint.hpp"
 
+#include "diag/log.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -13,7 +15,7 @@ namespace {
 constexpr float kStep = 0.125f;   // a mask cell, after halving the 16x16 mask
 constexpr float kInset = 0.01f;   // rectangles stay this far inside their cells
 constexpr std::size_t kMaskBytes = 32;  // 16 rows of 16 bits
-// Multi-tile objects are a few tiles across; anything further from its lead is bad data.
+// Multi-tile objects are a few tiles across. Anything further from its lead is bad data.
 constexpr int kMaxTileOffset = 64;
 
 // A tile's 16x16 mask halved to 8x8: each cell is set when any of its four bits is. Bit c of row r
@@ -53,6 +55,7 @@ const scenegraph::DataValue* graphicMasks(const scenegraph::DataValue& footprint
 std::vector<RouteRect> footprintTile(const scenegraph::DataValue& footprint, int graphic, int tileX, int tileY) {
     std::vector<RouteRect> rects;
     if (std::abs(tileX) > kMaxTileOffset || std::abs(tileY) > kMaxTileOffset) {
+        diag::warnOnce("footprints: an object part more than 64 tiles from its lead gets no footprint");
         return rects;
     }
     const auto* masks = graphicMasks(footprint, graphic);
@@ -62,7 +65,7 @@ std::vector<RouteRect> footprintTile(const scenegraph::DataValue& footprint, int
         return rects;
     }
     const auto rows = halveMask(mask->bytes);
-    // Rows that are alike merge into one band; each run of set cells in a band is a rectangle.
+    // Rows that are alike merge into one band. Each run of set cells in a band is a rectangle.
     int bandStart = 0;
     for (int r = 1; r <= 8; ++r) {
         if (r < 8 && rows[r] == rows[bandStart]) {

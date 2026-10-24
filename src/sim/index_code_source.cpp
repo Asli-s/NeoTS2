@@ -1,14 +1,18 @@
 #include "sim/index_code_source.hpp"
 
+#include "diag/log.hpp"
 #include "formats/bcon.hpp"
 #include "formats/glob.hpp"
 #include "formats/hash.hpp"
+#include "formats/image.hpp"
 #include "formats/objd.hpp"
+#include "formats/propset.hpp"
 #include "formats/resource_types.hpp"
 #include "formats/slot.hpp"
 #include "formats/str.hpp"
 
 #include <exception>
+#include <format>
 
 namespace ts2::sim {
 
@@ -32,7 +36,8 @@ IndexCodeSource::IndexCodeSource(content::ResourceIndex& index) : index_(index) 
         try {
             const auto glob = glob::parse(index_.read(r));
             semiGlobals_.emplace(r.entry.key.group, hash::groupId(glob.semiGlobalName));
-        } catch (const std::exception&) {
+        } catch (const std::exception& ex) {
+            diag::warnOnce(std::string("objects: a semi-global reference that can't be read is left out: ") + ex.what());
         }
     }
 }
@@ -45,8 +50,13 @@ std::shared_ptr<const bhav::Behavior> IndexCodeSource::behavior(std::uint32_t gr
     }
 
     std::shared_ptr<const bhav::Behavior> parsed;
+    // A broken tree counts as missing, once, so it can't throw out of whatever needed it.
     if (const auto* r = index_.find({types::kBehavior, group, instance, 0})) {
-        parsed = std::make_shared<const bhav::Behavior>(bhav::parse(index_.read(*r)));
+        try {
+            parsed = std::make_shared<const bhav::Behavior>(bhav::parse(index_.read(*r)));
+        } catch (const std::exception& ex) {
+            diag::warning(std::format("tree 0x{:08X} 0x{:04X} can't be read: {}", group, instance, ex.what()));
+        }
     }
     behaviors_.emplace(key, parsed);
     return parsed;
@@ -62,7 +72,8 @@ std::shared_ptr<const ttab::InteractionTable> IndexCodeSource::interactionTable(
     if (const auto* r = index_.find({types::kInteractionTable, group, instance, 0})) {
         try {
             parsed = std::make_shared<const ttab::InteractionTable>(ttab::parse(index_.read(*r)));
-        } catch (const std::exception&) {
+        } catch (const std::exception& ex) {
+            diag::warning(std::format("interaction table 0x{:08X} 0x{:04X} can't be read: {}", group, instance, ex.what()));
         }
     }
     interactionTables_.emplace(key, parsed);
@@ -76,7 +87,11 @@ const std::vector<std::int16_t>* IndexCodeSource::constants(std::uint32_t group,
     if (it == constants_.end()) {
         std::optional<std::vector<std::int16_t>> values;
         if (const auto* r = index_.find({kBehaviorConstants, group, instance, 0})) {
-            values = bcon::parse(index_.read(*r)).values;
+            try {
+                values = bcon::parse(index_.read(*r)).values;
+            } catch (const std::exception& ex) {
+                diag::warning(std::format("constants 0x{:08X} 0x{:04X} can't be read: {}", group, instance, ex.what()));
+            }
         }
         it = constants_.emplace(key, std::move(values)).first;
     }
@@ -91,12 +106,19 @@ const std::vector<objf::Function>* IndexCodeSource::objectFunctions(const Object
         if (const auto* r = index_.find({objf::kType, type.group, type.instance, 0})) {
             try {
                 functions = objf::parse(index_.read(*r));
-            } catch (const std::exception&) {
+            } catch (const std::exception& ex) {
+                diag::warning(std::format("object functions 0x{:08X} 0x{:04X} can't be read: {}",
+                                          type.group, type.instance, ex.what()));
             }
         }
         it = objectFunctions_.emplace(key, std::move(functions)).first;
     }
     return it->second ? &*it->second : nullptr;
+}
+
+const std::vector<std::uint32_t>& IndexCodeSource::objectTypeGuids() {
+    objectType(0);  // reads the object types the first time
+    return objectTypeGuids_;
 }
 
 const ObjectType* IndexCodeSource::objectType(std::uint32_t guid) {
@@ -110,12 +132,25 @@ const ObjectType* IndexCodeSource::objectType(std::uint32_t guid) {
                 objd::ObjectDefinition definition = objd::parse(index_.read(r));
                 const std::uint32_t id = definition.guid();
                 std::size_t containerSlots = 0;
+                std::vector<slot::Entry> routingSlots;
+                std::vector<float> slotHeights;
+                std::vector<slot::Entry> containerEntries;
                 const auto slotsId = definition.field(objd::field::kSlotsId);
                 if (slotsId != 0) {
                     if (const auto* s = index_.find({types::kSlots, r.entry.key.group, slotsId, 0})) {
                         try {
-                            containerSlots = slot::parse(index_.read(*s)).containerCount();
-                        } catch (const std::exception&) {
+                            const slot::Slots slots = slot::parse(index_.read(*s));
+                            containerSlots = slots.containerCount();
+                            for (const auto& entry : slots.entries) {
+                                if (entry.type == slot::kRoutingSlot) {
+                                    routingSlots.push_back(entry);
+                                } else if (entry.type == slot::kContainerSlot) {
+                                    slotHeights.push_back(entry.z);
+                                    containerEntries.push_back(entry);
+                                }
+                            }
+                        } catch (const std::exception& ex) {
+                            diag::warnOnce(std::string("objects: slots that can't be read are left out: ") + ex.what());
                         }
                     }
                 }
@@ -124,14 +159,71 @@ const ObjectType* IndexCodeSource::objectType(std::uint32_t guid) {
                     multiTileMasters_.try_emplace(static_cast<std::uint64_t>(r.entry.key.group) << 16 | multiTileId, id);
                 }
                 ObjectType type{r.entry.key.group, std::move(definition), static_cast<std::uint16_t>(r.entry.key.instance),
-                                containerSlots};
-                objectTypes_.try_emplace(id, std::move(type));
-            } catch (const std::exception&) {
+                                containerSlots, std::move(slotHeights), std::move(routingSlots), std::move(containerEntries)};
+                if (objectTypes_.try_emplace(id, std::move(type)).second) {
+                    objectTypeGuids_.push_back(id);
+                }
+            } catch (const std::exception& ex) {
+                diag::warnOnce(std::string("objects: an object definition that can't be read is left out: ") + ex.what());
             }
         }
     }
     const auto it = objectTypes_.find(guid);
     return it != objectTypes_.end() ? &it->second : nullptr;
+}
+
+const std::map<std::string, std::string>* IndexCodeSource::ageData(std::uint32_t group) {
+    constexpr std::uint32_t kAgeData = 0xAC598EAC;
+    auto it = ageData_.find(group);
+    if (it == ageData_.end()) {
+        std::optional<std::map<std::string, std::string>> properties;
+        if (const auto* r = index_.find({kAgeData, group, 1, 0})) {
+            try {
+                properties = propset::parse(index_.read(*r));
+            } catch (const std::exception& ex) {
+                diag::warning(std::format("age data 0x{:08X} can't be read: {}", group, ex.what()));
+            }
+        }
+        it = ageData_.emplace(group, std::move(properties)).first;
+    }
+    return it->second ? &*it->second : nullptr;
+}
+
+const fcns::Tunings* IndexCodeSource::tunings() {
+    constexpr std::uint32_t kTunings = 0x46434E53;
+    constexpr std::uint32_t kAutonomyTunings = 2;
+    if (!tunings_) {
+        std::optional<fcns::Tunings> found;
+        if (const auto* r = index_.find({kTunings, kGlobalGroup, kAutonomyTunings, 0})) {
+            try {
+                found = fcns::parse(index_.read(*r));
+            } catch (const std::exception& ex) {
+                diag::warnOnce(std::string("autonomy: the tuning file can't be read: ") + ex.what());
+            }
+        }
+        tunings_ = std::move(found);
+    }
+    return *tunings_ ? &**tunings_ : nullptr;
+}
+
+const std::vector<slot::Entry>& IndexCodeSource::globalSlots() {
+    constexpr std::uint32_t kGlobalSlots = 0x64;
+    if (!globalSlots_) {
+        std::vector<slot::Entry> found;
+        if (const auto* r = index_.find({types::kSlots, kGlobalGroup, kGlobalSlots, 0})) {
+            try {
+                for (const auto& entry : slot::parse(index_.read(*r)).entries) {
+                    if (entry.type == slot::kRoutingSlot) {
+                        found.push_back(entry);
+                    }
+                }
+            } catch (const std::exception& ex) {
+                diag::warnOnce(std::string("objects: the global slots can't be read: ") + ex.what());
+            }
+        }
+        globalSlots_ = std::move(found);
+    }
+    return *globalSlots_;
 }
 
 const ObjectType* IndexCodeSource::multiTileMaster(const ObjectType& part) {
@@ -144,27 +236,59 @@ const ObjectType* IndexCodeSource::multiTileMaster(const ObjectType& part) {
     return it != multiTileMasters_.end() ? objectType(it->second) : nullptr;
 }
 
-std::optional<std::string> IndexCodeSource::string(std::uint32_t group, std::uint16_t instance,
-                                                   std::size_t index) {
-    const std::uint64_t key = groupInstance(group, instance);
-    auto it = strings_.find(key);
-    if (it == strings_.end()) {
+const std::vector<std::string>& IndexCodeSource::strings(std::uint32_t type, std::uint32_t group, std::uint16_t instance,
+                                                         bool descriptions) {
+    const auto key = std::tuple{type, group, instance};
+    auto& cache = descriptions ? descriptions_ : strings_;
+    auto it = cache.find(key);
+    if (it == cache.end()) {
         std::vector<std::string> values;
-        if (const auto* r = index_.find({types::kStringTable, group, instance, 0})) {
+        if (const auto* r = index_.find({type, group, instance, 0})) {
             try {
                 const str::StringTable table = str::parse(index_.read(*r));
                 for (const str::Entry* entry : table.forLanguage(kUsEnglish)) {
-                    values.push_back(entry->value);
+                    values.push_back(descriptions ? entry->description : entry->value);
                 }
-            } catch (const std::exception&) {
+            } catch (const std::exception& ex) {
+                diag::warning(std::format("strings 0x{:08X} 0x{:08X} 0x{:04X} can't be read: {}",
+                                          type, group, instance, ex.what()));
             }
         }
-        it = strings_.emplace(key, std::move(values)).first;
+        it = cache.emplace(key, std::move(values)).first;
     }
-    if (index >= it->second.size()) {
+    return it->second;
+}
+
+std::optional<std::string> IndexCodeSource::string(std::uint32_t group, std::uint16_t instance, std::size_t index) {
+    const auto& values = strings(types::kStringTable, group, instance);
+    return index < values.size() ? std::optional<std::string>(values[index]) : std::nullopt;
+}
+
+std::optional<std::string> IndexCodeSource::stringDescription(std::uint32_t group, std::uint16_t instance, std::size_t index) {
+    const auto& values = strings(types::kStringTable, group, instance, true);
+    return index < values.size() ? std::optional<std::string>(values[index]) : std::nullopt;
+}
+
+std::optional<std::string> IndexCodeSource::catalogString(std::uint32_t group, std::uint16_t instance, std::size_t index) {
+    const auto& values = strings(types::kCatalogString, group, instance);
+    return index < values.size() ? std::optional<std::string>(values[index]) : std::nullopt;
+}
+
+std::optional<tga::Pixels> IndexCodeSource::image(std::uint32_t group, std::uint32_t instance, std::uint32_t maxSide) {
+    const auto* r = index_.find({types::kImage, group, instance, 0});
+    if (r == nullptr) {
         return std::nullopt;
     }
-    return it->second[index];
+    try {
+        return image::decode(index_.read(*r), maxSide);
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+std::optional<std::string> IndexCodeSource::interactionString(std::uint32_t group, std::uint16_t instance, std::size_t index) {
+    const auto& values = strings(types::kInteractionStrings, group, instance);
+    return index < values.size() ? std::optional<std::string>(values[index]) : std::nullopt;
 }
 
 std::optional<std::uint16_t> IndexCodeSource::behaviorByName(std::uint32_t group,

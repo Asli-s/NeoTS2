@@ -123,10 +123,17 @@ ts2::tga::Pixels Skewer::thumbnailPicture(const ts2::tga::Pixels& portrait) cons
     return ts2::content::masked(ts2::content::scaled(crop, backgroundShape_.width, backgroundShape_.height), backgroundShape_);
 }
 
+void Skewer::setLiveMode(bool live) {
+    if (live != live_ && screen_ != nullptr) {
+        live_ = live;
+        layout();
+    }
+}
+
 void Skewer::layout() {
     auto& s = *screen_;
     const int n = static_cast<int>(thumbnails_.size());
-    s.setVisible(skewer_, n > 0);
+    s.setVisible(skewer_, n > 0 && live_);
     if (n == 0) {
         return;
     }

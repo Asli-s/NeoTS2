@@ -35,7 +35,7 @@ Image neighborhoodLightMap(std::uint32_t columns, std::uint32_t rows, const std:
 
 // The height of the sun's shadow over each point of a grid (columns x rows, `tile` apart, row by row)
 // whose heights are `raised`, swept away from the sun one line at a time as the game does for its
-// neighborhood and lot light maps; -1000 where nothing shades it. `sun` points toward the sun.
+// neighborhood and lot light maps. -1000 where nothing shades it. `sun` points toward the sun.
 std::vector<float> sunShadow(const std::vector<float>& raised, std::uint32_t columns, std::uint32_t rows, const std::array<float, 3>& sun,
                              double tile);
 

@@ -30,10 +30,6 @@ std::uint16_t normalizeTarget(std::uint16_t raw, bool wide) {
 
 } // namespace
 
-std::size_t headerSize(std::uint16_t format) {
-    return kNameSize + 12 + (format > 0x8008 ? 1 : 0);
-}
-
 std::size_t instructionSize(std::uint16_t format) {
     const std::size_t targets = format < 0x8007 ? 2 : 4;
     if (format < 0x8003) {
@@ -103,6 +99,17 @@ void upgradeOperands(Instruction& in) {
     };
     auto clear = [&](std::size_t from, std::size_t count) { std::fill_n(o.begin() + from, count, std::uint8_t{0}); };
     std::uint8_t& v = in.nodeVersion;
+
+    // A tree call saved before node version 1 keeps only bit 0 of byte 12, the (owner, data)
+    // arguments form: the "caller's params" bit and the bytes left behind in older trees are dropped,
+    // so such calls pass bytes 0-15 as numbers.
+    if (in.opcode >= 0x100) {
+        if (v == 0) {
+            o[12] &= 0x01;
+            v = 1;
+        }
+        return;
+    }
 
     switch (in.opcode) {
     case 0x10:

@@ -8,7 +8,7 @@ namespace ts2::sim {
 namespace {
 
 // Tree ids: globals below 0x1000, the object's own trees below 0x2000, its semi-globals above.
-// Opcodes from 0x100 to 0x7FFF call trees; ids above 0x7FFF are never calls.
+// Opcodes from 0x100 to 0x7FFF call trees. Ids above 0x7FFF are never calls.
 constexpr std::uint16_t kFirstTreeId = 0x0100;
 constexpr std::uint16_t kLastTreeId = 0x7FFF;
 

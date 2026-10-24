@@ -1,5 +1,7 @@
 #include "formats/hash.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cctype>
 #include <string>
 
@@ -46,9 +48,28 @@ std::uint32_t crc32(std::string_view text) {
     return crc;
 }
 
+// Resources the game ships filed without their instance's high byte. It looks these up so.
+constexpr std::array<std::string_view, 14> kWithoutHighByte = {
+    "paintinghorizontallandscape_canvasback_txmt",
+    "aftophalter-dots0_lifo",
+    "aftophalter-dots1_lifo",
+    "afhairmeg_black_txmt",
+    "ambodysuperchef_japanblack_reflected_txmt",
+    "a-teach-see_anim",
+    "o2a-counter-sandwich2tray-door-counter-animation_anim",
+    "o-accessorytoolswrench-maintain-stop-lhand_anim",
+    "afhairhatfirefighter_kinky_red_txmt",
+    "wall-wallpaperwcoffer-bump_txtr",
+    "afhairmeg_blond_txmt",
+    "amhairpgskater_black_alpha3_txmt",
+    "wall-wallpaperwcoffer-bump0_lifo",
+    "wall-wallpaperwcoffer-bump1_lifo",
+};
+
 ScenegraphKey scenegraphKey(std::string_view name) {
     const std::string low = lowered(name);
-    return {0xFF000000 | crc24(low), crc32(low)};
+    const bool withoutHighByte = std::find(kWithoutHighByte.begin(), kWithoutHighByte.end(), low) != kWithoutHighByte.end();
+    return {(withoutHighByte ? 0 : 0xFF000000) | crc24(low), crc32(low)};
 }
 
 } // namespace ts2::hash

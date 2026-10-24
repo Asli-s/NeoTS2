@@ -4,6 +4,7 @@
 #include "formats/qfs.hpp"
 #include "formats/resource_types.hpp"
 
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -100,6 +101,9 @@ void Package::readHeader() {
         fail("unsupported DBPF version " + std::to_string(header_.majorVersion) +
              " (this reader handles The Sims 2 packages, version 1)");
     }
+    if (header_.indexMajorVersion != 7) {
+        fail("unsupported index version " + std::to_string(header_.indexMajorVersion));
+    }
 }
 
 void Package::readIndex() {
@@ -133,16 +137,9 @@ void Package::readIndex() {
 }
 
 void Package::applyCompressionDirectory() {
-    std::unordered_map<ResourceKey, std::size_t, ResourceKeyHash> byKey;
-    byKey.reserve(entries_.size());
-    const IndexEntry* dir = nullptr;
-    for (std::size_t i = 0; i < entries_.size(); ++i) {
-        byKey.try_emplace(entries_[i].key, i);
-        if (dir == nullptr && entries_[i].key.type == types::kDirectory) {
-            dir = &entries_[i];
-        }
-    }
-    if (dir == nullptr) {
+    const auto dir = std::find_if(entries_.begin(), entries_.end(),
+                                  [](const IndexEntry& e) { return e.key.type == types::kDirectory; });
+    if (dir == entries_.end()) {
         return;
     }
 
@@ -150,6 +147,7 @@ void Package::applyCompressionDirectory() {
     const bool hasInstanceHigh = header_.indexMinorVersion == 2;
     const std::size_t recordSize = hasInstanceHigh ? 20 : 16;
 
+    std::unordered_map<ResourceKey, std::uint32_t, ResourceKeyHash> uncompressedSizes;
     BinaryReader r(bytes);
     while (r.remaining() >= recordSize) {
         ResourceKey key;
@@ -159,12 +157,14 @@ void Package::applyCompressionDirectory() {
         if (hasInstanceHigh) {
             key.instanceHigh = r.u32();
         }
-        const std::uint32_t uncompressedSize = r.u32();
+        uncompressedSizes[key] = r.u32();
+    }
 
-        if (auto it = byKey.find(key); it != byKey.end()) {
-            IndexEntry& e = entries_[it->second];
+    // A key listed twice in the index has every copy marked.
+    for (IndexEntry& e : entries_) {
+        if (auto it = uncompressedSizes.find(e.key); it != uncompressedSizes.end()) {
             e.compressed = true;
-            e.uncompressedSize = uncompressedSize;
+            e.uncompressedSize = it->second;
         }
     }
 }
@@ -176,7 +176,11 @@ std::vector<std::uint8_t> Package::readRaw(const IndexEntry& entry) {
 std::vector<std::uint8_t> Package::read(const IndexEntry& entry) {
     std::vector<std::uint8_t> bytes = readRaw(entry);
     if (entry.compressed && qfs::isCompressed(bytes)) {
-        return qfs::decompress(bytes);
+        std::vector<std::uint8_t> decompressed = qfs::decompress(bytes);
+        if (decompressed.size() != entry.uncompressedSize) {
+            fail("decompressed size differs from the compression directory");
+        }
+        return decompressed;
     }
     return bytes;
 }

@@ -8,7 +8,7 @@
 namespace ts2::sdsc {
 
 // Sim description (SDSC): one neighbor of a neighborhood. Holds the neighbor's copy of its person
-// data, its id and its GUID; the rest of the record is kept raw.
+// data, its id and its GUID. The rest of the record is kept raw.
 struct SimDescription {
     std::uint32_t version = 0;
     std::int32_t personDataVersion = 0;

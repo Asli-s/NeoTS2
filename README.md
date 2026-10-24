@@ -85,11 +85,6 @@ folders. Choose them, or make a new save folder with **New save folder...**, and
 Windows may say "Windows protected your PC", because NeoTS2 isn't signed yet. Click **More info**,
 then **Run anyway**.
 
-## Source code
-
-The source here is from an earlier version than the newest download. The source of newer versions
-will be published once NeoTS2 is in a playable state.
-
 ## Tools and libraries
 
 | What | Used for |
@@ -168,6 +163,13 @@ The app and launcher icons are hand-drawn by me.
 
 The launcher uses [Dear ImGui](https://github.com/ocornut/imgui) (MIT) and the
 [Noto Sans](https://fonts.google.com/noto/specimen/Noto+Sans) font (SIL Open Font License 1.1).
+
+## Contributing
+
+Please read [CONTRIBUTING.md](CONTRIBUTING.md) first. In short:
+
+- no game files, and nothing exported from them
+- no code taken from the game or from projects whose license doesn't allow it
 
 ## Disclaimer
 

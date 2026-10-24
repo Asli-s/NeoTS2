@@ -30,7 +30,7 @@ struct Link {
 };
 
 struct Segment {
-    float x0 = 0, y0 = 0, x1 = 0, y1 = 0;  // in tiles; the face looks to the right of x0,y0 -> x1,y1
+    float x0 = 0, y0 = 0, x1 = 0, y1 = 0;  // in tiles, the face looks to the right of x0,y0 -> x1,y1
     std::array<Row, 2> halves;
     Link up, down;
     // The segment's light as the game draws it: the previous segment's edge column, the two
@@ -41,7 +41,7 @@ struct Segment {
 struct Run {
     std::vector<Segment> segments;
     int level = 0;
-    std::int16_t room = 0;     // the room the face looks into; 0 outside
+    std::int16_t room = 0;     // the room the face looks into, 0 outside
     bool diagonal = false;
     bool lamplit = false;      // a lamp or window lit it this time (it then takes more floor light)
     int previous = -1, next = -1;  // the runs before and after it round the same room
@@ -63,19 +63,19 @@ using FloorAt = std::function<bool(float x, float y, int level)>;
 // The floor's light at a point on a level.
 using FloorLight = std::function<std::array<float, 3>(float x, float y, int level)>;
 
-// The passes, in the game's order; `changed` collects the runs to spread light along. Those
+// The passes, in the game's order. `changed` collects the runs to spread light along. Those
 // that can do a lot of work return false when they stopped early at their safety limit
-// (never on a real lot; worth logging).
+// (never on a real lot, so worth logging).
 void resetToAmbient(Walls& walls);
-bool lightFromSources(Walls& walls, const std::vector<LightSource>& sources, const FloorAt& floorAt, std::set<int>& changed);
+[[nodiscard]] bool lightFromSources(Walls& walls, const std::vector<LightSource>& sources, const FloorAt& floorAt, std::set<int>& changed);
 void lightFromFloor(Walls& walls, const FloorLight& floorLight, std::set<int>& changed);
-bool spread(Walls& walls, const std::set<int>& changed);
+[[nodiscard]] bool spread(Walls& walls, const std::set<int>& changed);
 // Fills every segment's texels from its halves and its neighbours' along the run and on the
 // levels above and below.
 void pad(Walls& walls);
 
-// All of the above; false when a pass stopped early.
-bool light(Walls& walls, const std::vector<LightSource>& sources, const FloorAt& floorAt, const FloorLight& floorLight);
+// All of the above. False when a pass stopped early.
+[[nodiscard]] bool light(Walls& walls, const std::vector<LightSource>& sources, const FloorAt& floorAt, const FloorLight& floorLight);
 
 // A colour as the game stores it in a wall grid.
 Pixel pack(const std::array<float, 3>& color);

@@ -1,9 +1,15 @@
+#include "../../app/route_sources.hpp"
 #include "content/install.hpp"
 #include "content/lot.hpp"
 #include "content/neighborhood.hpp"
 #include "content/scripts.hpp"
 #include "content/wants.hpp"
+#include "scene/animation_library.hpp"
+#include "scene/outfit_properties.hpp"
+#include "scene/assets.hpp"
 #include "sim/lua_runtime.hpp"
+#include "sim/ground_click.hpp"
+#include "sim/route_portals.hpp"
 #include "content/resource_index.hpp"
 #include "formats/objd.hpp"
 #include "formats/resource_types.hpp"
@@ -11,6 +17,7 @@
 #include "sim/index_code_source.hpp"
 #include "sim/lot_simulation.hpp"
 #include "sim/lot_world.hpp"
+#include "sim/pie_menu.hpp"
 #include "sim/type_signature.hpp"
 #include "sim/vm.hpp"
 
@@ -152,7 +159,7 @@ ObjectCatalog buildObjects(ResourceIndex& index, const ts2::sim::IndexCodeSource
 
 using WantDefinitionsPtr = std::shared_ptr<const ts2::content::WantDefinitions>;
 
-// The install's want definitions; null for a single package or an install without them.
+// The install's want definitions, or null for a single package or an install without them.
 WantDefinitionsPtr wantDefinitionsFor(const std::filesystem::path& source) {
     if (!std::filesystem::is_directory(source)) {
         return nullptr;
@@ -164,7 +171,7 @@ WantDefinitionsPtr wantDefinitionsFor(const std::filesystem::path& source) {
 
 using ScriptsPtr = std::shared_ptr<ts2::sim::LuaRuntime>;
 
-// The game's Lua state with the install's object scripts loaded; null for a single package.
+// The game's Lua state with the install's object scripts loaded, or null for a single package.
 ScriptsPtr scriptsFor(const std::filesystem::path& source, ResourceIndex& index) {
     if (!std::filesystem::is_directory(source)) {
         return nullptr;
@@ -334,6 +341,31 @@ int scan(ResourceIndex& index, std::size_t maxSteps, bool interactions,
     return 0;
 }
 
+// An interaction table's lines with their pie-menu texts.
+int printInteractionTable(ResourceIndex& index, std::uint32_t group, std::uint16_t instance) {
+    ts2::sim::IndexCodeSource code(index);
+    const auto table = code.interactionTable(group, instance);
+    if (!table) {
+        std::fprintf(stderr, "no interaction table 0x%08X 0x%04X\n", group, instance);
+        return 1;
+    }
+    std::printf("version 0x%X, %zu lines\n", table->version, table->interactions.size());
+    for (std::size_t i = 0; i < table->interactions.size(); ++i) {
+        const auto& line = table->interactions[i];
+        const auto text = code.interactionString(group, instance, line.stringIndex);
+        std::printf("%3zu  action 0x%04X test 0x%04X flags 0x%08X string %u \"%s\"\n", i, line.action, line.test, line.flags,
+                    line.stringIndex, text ? text->c_str() : "-");
+    }
+    for (std::size_t s = 0;; ++s) {
+        const auto text = code.interactionString(group, instance, s);
+        if (!text) {
+            break;
+        }
+        std::printf("  TTAs %zu \"%s\"\n", s, text->c_str());
+    }
+    return 0;
+}
+
 int runOne(ResourceIndex& index, std::uint32_t group, std::uint16_t instance,
            const std::vector<std::int16_t>& args, bool trace) {
     ts2::sim::IndexCodeSource code(index);
@@ -355,9 +387,8 @@ int runOne(ResourceIndex& index, std::uint32_t group, std::uint16_t instance,
     ts2::sim::Vm vm(code, {}, &world);
     if (trace) {
         vm.onStep = [&](const ts2::sim::StepInfo& s) {
-            const auto bhav = code.behavior(s.group, s.instance);
-            std::printf("%*s[%s] %3u  opcode 0x%04X\n", static_cast<int>(s.depth * 2), "",
-                        bhav ? bhav->name.c_str() : "?", s.pc, s.instruction.opcode);
+            std::printf("%*s[%s] %3u  opcode 0x%04X\n", static_cast<int>(s.depth * 2), "", s.treeName.c_str(), s.pc,
+                        s.instruction.opcode);
         };
     }
 
@@ -384,6 +415,27 @@ int runOne(ResourceIndex& index, std::uint32_t group, std::uint16_t instance,
         }
     }
     std::printf("\n");
+    return 0;
+}
+
+// Prints the lot's outside-for-weather grid: "width height levels", then a line of tile bytes (hex)
+// per level and x.
+int printOutside(const std::filesystem::path& lotPath) {
+    const ts2::content::Lot lot = ts2::content::loadLot(lotPath);
+    ts2::sim::RoomMap regions;
+    if (const auto graph = lot.layerGraphs.find(ts2::content::kLayerGraphInstances[1]); graph != lot.layerGraphs.end()) {
+        regions = ts2::sim::RoomMap(graph->second);
+    }
+    const ts2::sim::OutsideGrid grid(lot, regions);
+    std::printf("%d %d %d\n", grid.width(), grid.height(), grid.levels());
+    for (std::int32_t level = 0; level < grid.levels(); ++level) {
+        for (std::int32_t x = 0; x < grid.width(); ++x) {
+            for (std::int32_t y = 0; y < grid.height(); ++y) {
+                std::printf("%02x ", grid.tile(level, x, y));
+            }
+            std::printf("\n");
+        }
+    }
     return 0;
 }
 
@@ -422,16 +474,92 @@ int typeChanges(ResourceIndex& index, const std::filesystem::path& lotPath) {
     return 0;
 }
 
+void printStep(const ts2::sim::StepInfo& s, const std::string& when) {
+    std::printf("%s  %*s0x%08X 0x%04X %s at %u: opcode 0x%04X\n", when.c_str(), static_cast<int>(2 * s.depth), "", s.group,
+                s.instance, s.treeName.c_str(), s.pc, s.instruction.opcode);
+}
+
 // Brings a saved lot to life and runs it for a number of ticks, then says why scripts stopped.
+// Every object's pie menu for `actor`. The steps of `traced`'s check trees are printed too.
+void printPieMenus(ts2::sim::LotSimulation& sim, ts2::sim::SimObject& actor, std::optional<std::int16_t> traced) {
+    std::vector<std::int16_t> objects;
+    sim.world().nextAfter(0, [&](const ts2::sim::SimObject& o) {
+        objects.push_back(o.id);
+        return false;
+    });
+    for (const auto id : objects) {
+        auto* object = sim.world().find(id);
+        if (object == nullptr || object == &actor) {
+            continue;
+        }
+        if (traced == id) {
+            sim.vm().onStep = [](const ts2::sim::StepInfo& s) { printStep(s, "check"); };
+        }
+        const auto menu = ts2::sim::pieMenu(sim.vm(), sim.code(), actor, *object);
+        sim.vm().onStep = nullptr;
+        if (menu.choices.empty() && menu.problems.empty()) {
+            continue;
+        }
+        std::printf("pie menu of %d (%s, group 0x%08X, table 0x%04X) for Sim %d:\n", id, object->definition.name.c_str(), object->group,
+                    object->definition.field(ts2::objd::field::kInteractionTableId), actor.id);
+        for (const auto& c : menu.choices) {
+            std::printf("  %s  [id %u, order %d, params %d %d %d %d%s]\n", c.name.c_str(), c.interaction, c.order, c.params[0], c.params[1],
+                        c.params[2], c.params[3], c.disabled != ts2::sim::OfferedAction::Disabled::No ? ", disabled" : "");
+        }
+        for (const auto& p : menu.problems) {
+            std::printf("  problem: %s\n", p.c_str());
+        }
+    }
+}
+
 int runLot(ResourceIndex& index, const std::filesystem::path& install, const std::filesystem::path& lotPath,
-           std::size_t ticks) {
+           std::size_t ticks, std::optional<std::size_t> traceTick, std::optional<std::int16_t> traceObject, bool onScreen,
+           bool personData, bool overlays, bool motion, std::optional<std::int16_t> pieSim, std::optional<std::int16_t> pieTrace,
+           std::optional<std::array<int, 3>> queueChoice, std::optional<std::size_t> cancelTick,
+           std::optional<std::array<float, 3>> groundAt, bool portals, std::optional<std::array<float, 4>> groundLater,
+           const std::vector<std::array<float, 5>>& goHere) {
     const auto primitives = editorTable(index, kPrimitiveNames);
     const auto owners = editorTable(index, kDataOwners);
     const auto genericCalls = editorTable(index, kGenericSimsCalls);
     const auto searchTypes = editorTable(index, kSearchTypes);
 
-    ts2::sim::LotSimulation sim(install, lotPath);
+    std::function<void(const ts2::sim::StepInfo&)> traceLoad;
+    if (traceObject) {
+        traceLoad = [&](const ts2::sim::StepInfo& s) {
+            if (s.object == *traceObject) {
+                printStep(s, "load");
+            }
+        };
+    }
+    ts2::sim::LotSimulation sim(install, lotPath, traceLoad);
     auto& world = sim.world();
+    ts2::scene::Assets assets(install);
+    ts2::scene::AnimationLibrary animations(assets);
+    // Routing as the app has it: the lot's route grid from the objects' models.
+    sim.setRouteSources(app::routeSources(assets, app::readRouteModels(assets, lotPath)));
+    world.setAnimationLengths([&](const std::string& name) { return animations.length(name); });
+    world.setAnimationCarries([&](const std::string& name) { return animations.hasTargetType(name, 2); });
+    world.setLocoClips([&](const std::string& name) -> std::optional<ts2::sim::LocoClip> {
+        const auto a = animations.find(name);
+        return a ? std::optional<ts2::sim::LocoClip>({name, a->duration, a->travel, a->loopPhase, a->match, a->speed, a->rootTurn}) : std::nullopt;
+    });
+    world.setAnimationEventTime([&](const std::string& name, int id) { return animations.eventTime(name, id); });
+    world.setAnimationEvents([&](const std::string& name) {
+        std::vector<ts2::sim::AnimationEvent> events;
+        for (const auto& [ms, id] : animations.simAnticsEvents(name)) {
+            events.push_back({ms, id});
+        }
+        return events;
+    });
+    world.setAnimationTurns([&](const std::string& name, float ms) { return animations.rootTurn(name, ms); });
+    ts2::scene::OutfitProperties outfits(assets);
+    world.setOutfitProperty([&](std::int16_t neighbor, std::uint16_t category, std::uint16_t property) -> std::optional<std::int16_t> {
+        if (const auto file = sim.characterFile(neighbor)) {
+            return outfits.get(*file, category, property);
+        }
+        const auto group = sim.characterGroup(neighbor);
+        return group ? std::optional<std::int16_t>(outfits.get(*group, category, property)) : std::nullopt;
+    });
     const auto& report = sim.report();
     std::printf("%zu objects built (%zu with a saved thread, %zu reset: type changed since the save), %zu neighbors, "
                 "%zu stale data table records\n",
@@ -445,8 +573,149 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
         std::printf("  build problem: %s: %zu\n", message.c_str(), n);
     }
 
+    if (portals) {
+        sim.routeWorld();  // the models' joints are known once routing is set up
+        for (const auto& p : ts2::sim::stairPortals(world, sim.code())) {
+            std::printf("stair %d: %.3f %.3f level %d (part %d slot %d) -> %.3f %.3f level %d (part %d slot %d)%s\n", p.owner, p.from.x, p.from.y,
+                        p.from.level, p.from.part, p.from.slot, p.to.x, p.to.y, p.to.level, p.to.part, p.to.slot, p.twoWay ? ", both ways" : "");
+        }
+    }
+
+    // A ground click's destination object (object -1 for --pie-trace and --queue).
+    std::int16_t ground = 0;
+    if (groundAt) {
+        const auto* actor = world.find(queueChoice ? static_cast<std::int16_t>((*queueChoice)[0]) : pieSim.value_or(0));
+        if (auto* made = ts2::sim::groundDestination(sim.vm(), world, actor, {(*groundAt)[0], (*groundAt)[1], static_cast<int>((*groundAt)[2])})) {
+            ground = made->id;
+            std::printf("ground destination %d (%s) at %.3f %.3f level %d\n", made->id, made->definition.name.c_str(), made->x / 65536.0,
+                        made->y / 65536.0, made->level);
+        } else {
+            std::printf("no ground destination there\n");
+        }
+        if (queueChoice && (*queueChoice)[1] == -1) {
+            (*queueChoice)[1] = ground;
+        }
+    }
+
+    // A pie menu choice queued before the ticks: Sim, object, the choice's place in the menu.
+    if (queueChoice) {
+        auto* actor = world.find(static_cast<std::int16_t>((*queueChoice)[0]));
+        auto* object = world.find(static_cast<std::int16_t>((*queueChoice)[1]));
+        const auto menu = actor && object ? ts2::sim::pieMenu(sim.vm(), sim.code(), *actor, *object) : ts2::sim::PieMenu{};
+        const auto at = static_cast<std::size_t>((*queueChoice)[2]);
+        const auto queued = at < menu.choices.size() ? ts2::sim::queuedChoice(sim.code(), *object, menu.choices[at]) : std::nullopt;
+        if (queued) {
+            ts2::sim::queueInteraction(*actor, *queued);
+            std::printf("queued %s for Sim %d\n", menu.choices[at].name.c_str(), actor->id);
+        } else {
+            std::printf("nothing to queue\n");
+        }
+    }
+
+    // The queued Sim's running interaction as it changes, and the player's cancel of it at a tick.
+    std::uint32_t lastRunning = 0;
     for (std::size_t tick = 0; tick < ticks; ++tick) {
+        if (auto* actor = queueChoice ? world.find(static_cast<std::int16_t>((*queueChoice)[0])) : nullptr) {
+            const std::uint32_t running = actor->running ? actor->running->id : 0;
+            if (running != lastRunning) {
+                std::printf("tick %zu: Sim %d runs interaction %u\n", tick, actor->id, running);
+                lastRunning = running;
+            }
+            // A second Go Here on the ground, chosen at a tick.
+            if (groundLater && tick == static_cast<std::size_t>((*groundLater)[0])) {
+                auto* made = ts2::sim::groundDestination(sim.vm(), world, actor, {(*groundLater)[1], (*groundLater)[2], static_cast<int>((*groundLater)[3])});
+                const auto menu = made ? ts2::sim::pieMenu(sim.vm(), sim.code(), *actor, *made) : ts2::sim::PieMenu{};
+                const auto queued = !menu.choices.empty() ? ts2::sim::queuedChoice(sim.code(), *made, menu.choices.front()) : std::nullopt;
+                if (queued) {
+                    ts2::sim::queueInteraction(*actor, *queued);
+                }
+                std::printf("tick %zu: %s\n", tick, queued ? "queued Go Here again" : "no second Go Here");
+            }
+            if (cancelTick && tick == *cancelTick) {
+                const bool done = actor->running && ts2::sim::cancelInteraction(*actor, actor->running->id);
+                std::printf("tick %zu: %s\n", tick, done ? "cancelled it" : "nothing to cancel");
+            }
+        }
+        // Go Here orders for any Sim (Sim, tick, x, y, level), as a click on the ground would queue them.
+        for (const auto& order : goHere) {
+            if (tick != static_cast<std::size_t>(order[1])) {
+                continue;
+            }
+            auto* actor = world.find(static_cast<std::int16_t>(order[0]));
+            auto* made = actor ? ts2::sim::groundDestination(sim.vm(), world, actor, {order[2], order[3], static_cast<int>(order[4])}) : nullptr;
+            const auto menu = made ? ts2::sim::pieMenu(sim.vm(), sim.code(), *actor, *made) : ts2::sim::PieMenu{};
+            const auto queued = !menu.choices.empty() ? ts2::sim::queuedChoice(sim.code(), *made, menu.choices.front()) : std::nullopt;
+            if (queued) {
+                ts2::sim::queueInteraction(*actor, *queued);
+            }
+            std::printf("tick %zu: %s for Sim %d\n", tick, queued ? "queued Go Here" : "no Go Here there", static_cast<int>(order[0]));
+        }
+        if ((traceTick && tick == *traceTick) || traceObject) {
+            sim.vm().onStep = [&, tick](const ts2::sim::StepInfo& s) {
+                if (!traceObject || s.object == *traceObject) {
+                    printStep(s, traceObject ? std::to_string(tick) : "");
+                }
+            };
+        } else {
+            sim.vm().onStep = nullptr;
+        }
+        if (onScreen) {
+            std::vector<std::int16_t> sims;
+            world.nextAfter(0, [&](const ts2::sim::SimObject& o) {
+                if (o.isPerson()) {
+                    sims.push_back(o.id);
+                }
+                return false;
+            });
+            sim.markOnScreen(sims);
+        }
+        const std::size_t resetsBefore = sim.resets();
         sim.tick();
+        if (sim.resets() != resetsBefore && motion) {
+            std::printf("motion tick %zu: %zu Sim resets\n", tick, sim.resets() - resetsBefore);
+        }
+        if (motion) {
+            // A line for each Sim whose place, facing, own animation or walk changed this tick.
+            world.nextAfter(0, [&](const ts2::sim::SimObject& o) {
+                if (!o.isPerson()) {
+                    return false;
+                }
+                const char* phase = !o.walking ? "-"
+                                    : o.walking->phase == ts2::sim::Walking::Phase::Start ? "start"
+                                    : o.walking->phase == ts2::sim::Walking::Phase::Stop  ? "stop"
+                                                                                          : "walk";
+                const float heading = o.heading ? *o.heading : ts2::sim::compassHeading(o.data[1]);
+                char line[256];
+                std::snprintf(line, sizeof line, "%.3f %.3f %.0f %s %s %s", o.x / 65536.0, o.y / 65536.0, heading * 57.29578f,
+                              o.animation ? o.animation->name.c_str() : "-", phase, o.turning ? "turning" : "");
+                static std::map<std::int16_t, std::string> last;
+                if (last[o.id] != line) {
+                    last[o.id] = line;
+                    std::printf("motion tick %zu Sim %d %s\n", tick, o.id, line);
+                }
+                return false;
+            });
+        }
+        if (overlays) {
+            world.nextAfter(0, [&](const ts2::sim::SimObject& o) {
+                if (o.isPerson() && !o.overlays.empty() && o.overlays.back().startMs == world.clockMs()) {
+                    const auto& last = o.overlays.back();
+                    std::printf("overlay tick %zu Sim %d %s type %d stay %d, event tree 0x%04X of 0x%08X, stack object %d, "
+                                "priority %u, plays %d\n",
+                                tick, o.id, last.name.c_str(), o.semiAttributes[0], o.semiAttributes[3], last.eventTree,
+                                last.codeOwner, last.stackObject, last.priority, last.plays);
+                }
+                if (o.isPerson() && o.animation && o.animation->startMs == world.clockMs()) {
+                    std::printf("animate tick %zu Sim %d %s speed %.2f length %.0f ms%s\n", tick, o.id, o.animation->name.c_str(),
+                                o.animation->speed, o.animation->lengthMs, o.animation->flipped ? " flipped" : "");
+                }
+                return false;
+            });
+        }
+    }
+
+    if (auto* actor = pieSim ? world.find(*pieSim) : nullptr) {
+        printPieMenus(sim, *actor, pieTrace && *pieTrace == -1 ? std::optional<std::int16_t>(ground) : pieTrace);
     }
 
     std::size_t running = 0;
@@ -458,16 +727,37 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
     // Where each Sim's script is.
     world.nextAfter(0, [&](const ts2::sim::SimObject& o) {
         if (o.isPerson()) {
-            std::printf("  Sim %d (%s): ", o.id, o.definition.name.c_str());
+            std::printf("  Sim %d (%s, group 0x%08X) at %.2f %.2f level %d: ", o.id, o.definition.name.c_str(), o.group,
+                        o.x / 65536.0, o.y / 65536.0, o.level);
             if (o.thread.frames.empty()) {
                 std::printf("no script running");
             } else {
                 const auto& f = o.thread.frames.back();
                 std::printf("in %s (0x%08X 0x%04X) at %u, %zu frames deep, %s", f.code ? f.code->name.c_str() : "?", f.group,
                             f.instance, f.pc, o.thread.frames.size(), o.thread.sleepTicks > 0 ? "sleeping" : "running");
+                std::printf(" (args");
+                for (const auto arg : f.params) {
+                    std::printf(" %d", arg);
+                }
+                std::printf(")");
             }
-            std::printf("%s%s, %zu queued\n", o.animation ? ", animating " : "", o.animation ? o.animation->name.c_str() : "",
+            std::printf("%s%s, %zu queued", o.animation ? ", animating " : "", o.animation ? o.animation->name.c_str() : "",
                         o.queue.size());
+            for (const auto& q : o.queue) {
+                const auto* target = world.find(q.object);
+                std::printf(", queued: object %d (%s) interaction %u action 0x%04X", q.object,
+                            target ? target->definition.name.c_str() : "gone", q.index, q.action);
+            }
+            for (const auto& overlay : o.overlays) {
+                std::printf(", overlay %s", overlay.name.c_str());
+            }
+            if (personData) {
+                std::printf(", person data:");
+                for (const auto value : o.personData) {
+                    std::printf(" %d", value);
+                }
+            }
+            std::printf("\n");
         }
         return false;
     });
@@ -481,6 +771,9 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
         std::snprintf(where, sizeof(where), "tick %zu, object %d (%s), in %s (0x%08X 0x%04X) at %u", stop.tick, stop.object,
                       object ? object->definition.name.c_str() : "removed", bhav ? bhav->name.c_str() : "?", r.group,
                       r.instance, r.pc);
+        if (object && object->isPerson()) {
+            std::printf("  Sim stop: %s%s%s\n         at %s\n", why.c_str(), r.detail.empty() ? "" : " - ", r.detail.c_str(), where);
+        }
         auto& entry = stops[why];
         if (entry.first == 0) {
             entry.second = where;
@@ -520,8 +813,10 @@ int main(int argc, char** argv) {
                      "  simrun <install-folder | file.package> --scan [max-steps] [--interactions] [--hood <folder>]\n"
                      "  simrun <install-folder | file.package> --run <group> <instance> [args...] [--trace]\n"
                      "  simrun <install-folder | file.package> --guid <hex-guid> [...]\n"
-                     "  simrun <install-folder> --lot <lot.package> [ticks]\n"
-                     "  simrun <install-folder | file.package> --strings <group> <instance>\n");
+                     "  simrun <install-folder> --lot <lot.package> [ticks [--trace-tick <tick>] [--trace-object <id>] [--on-screen] [--pie <sim> [--pie-trace <object>]] [--queue <sim> <object> <choice> [--cancel <tick>]] [--ground <x> <y> <level> [--ground-later <tick> <x> <y> <level>]] [--go-here <sim> <tick> <x> <y> <level>]... [--portals]]\n"
+                     "  simrun <install-folder> --loco <clip>...\n"
+                     "  simrun <install-folder | file.package> --strings <group> <instance>\n"
+                     "  simrun <install-folder | file.package> --ttab <group> <instance>\n");
         return 1;
     }
 
@@ -548,7 +843,60 @@ int main(int argc, char** argv) {
         }
         if (mode == "--lot" && argc >= 4) {
             const std::size_t ticks = argc >= 5 ? std::stoul(argv[4]) : 100;
-            return runLot(index, std::filesystem::path(argv[1]), std::filesystem::path(argv[3]), ticks);
+            std::optional<std::size_t> traceTick;
+            std::optional<std::int16_t> traceObject;
+            bool onScreen = false;
+            bool personData = false;
+            bool overlays = false;
+            bool motion = false;
+            std::optional<std::int16_t> pieSim;
+            std::optional<std::int16_t> pieTrace;
+            std::optional<std::array<int, 3>> queueChoice;
+            std::optional<std::size_t> cancelTick;
+            std::optional<std::array<float, 3>> groundAt;
+            bool portals = false;
+            std::optional<std::array<float, 4>> groundLater;
+            std::vector<std::array<float, 5>> goHere;
+            for (int i = 5; i < argc; ++i) {
+                if (std::string_view(argv[i]) == "--trace-tick" && i + 1 < argc) {
+                    traceTick = std::stoul(argv[++i]);
+                } else if (std::string_view(argv[i]) == "--trace-object" && i + 1 < argc) {
+                    traceObject = static_cast<std::int16_t>(std::stoi(argv[++i]));
+                } else if (std::string_view(argv[i]) == "--on-screen") {
+                    onScreen = true;
+                } else if (std::string_view(argv[i]) == "--person-data") {
+                    personData = true;
+                } else if (std::string_view(argv[i]) == "--overlays") {
+                    overlays = true;
+                } else if (std::string_view(argv[i]) == "--motion") {
+                    motion = true;
+                } else if (std::string_view(argv[i]) == "--pie" && i + 1 < argc) {
+                    pieSim = static_cast<std::int16_t>(std::stoi(argv[++i]));
+                } else if (std::string_view(argv[i]) == "--pie-trace" && i + 1 < argc) {
+                    pieTrace = static_cast<std::int16_t>(std::stoi(argv[++i]));
+                } else if (std::string_view(argv[i]) == "--queue" && i + 3 < argc) {
+                    queueChoice = std::array<int, 3>{std::stoi(argv[i + 1]), std::stoi(argv[i + 2]), std::stoi(argv[i + 3])};
+                    i += 3;
+                } else if (std::string_view(argv[i]) == "--cancel" && i + 1 < argc) {
+                    cancelTick = std::stoul(argv[++i]);
+                } else if (std::string_view(argv[i]) == "--ground-later" && i + 4 < argc) {
+                    groundLater = std::array<float, 4>{std::stof(argv[i + 1]), std::stof(argv[i + 2]), std::stof(argv[i + 3]), std::stof(argv[i + 4])};
+                    i += 4;
+                } else if (std::string_view(argv[i]) == "--go-here" && i + 5 < argc && goHere.size() < 64) {
+                    goHere.push_back({std::stof(argv[i + 1]), std::stof(argv[i + 2]), std::stof(argv[i + 3]), std::stof(argv[i + 4]), std::stof(argv[i + 5])});
+                    i += 5;
+                } else if (std::string_view(argv[i]) == "--portals") {
+                    portals = true;
+                } else if (std::string_view(argv[i]) == "--ground" && i + 3 < argc) {
+                    groundAt = std::array<float, 3>{std::stof(argv[i + 1]), std::stof(argv[i + 2]), std::stof(argv[i + 3])};
+                    i += 3;
+                }
+            }
+            return runLot(index, std::filesystem::path(argv[1]), std::filesystem::path(argv[3]), ticks, traceTick, traceObject, onScreen,
+                          personData, overlays, motion, pieSim, pieTrace, queueChoice, cancelTick, groundAt, portals, groundLater, goHere);
+        }
+        if (mode == "--outside" && argc >= 4) {
+            return printOutside(std::filesystem::path(argv[3]));
         }
         if (mode == "--type-changes" && argc >= 4) {
             return typeChanges(index, std::filesystem::path(argv[3]));
@@ -561,8 +909,26 @@ int main(int argc, char** argv) {
             }
             return 0;
         }
+        if (mode == "--ttab" && argc >= 5) {
+            return printInteractionTable(index, static_cast<std::uint32_t>(std::stoul(argv[3], nullptr, 0)),
+                                         static_cast<std::uint16_t>(std::stoul(argv[4], nullptr, 0)));
+        }
         if (mode == "--guid") {
             return lookupGuids(index, argc - 3, argv + 3);
+        }
+        // Locomotion clip headers, as the walk planner reads them.
+        if (mode == "--loco") {
+            ts2::scene::Assets assets(argv[1]);
+            ts2::scene::AnimationLibrary animations(assets);
+            for (int i = 3; i < argc; ++i) {
+                if (const auto a = animations.find(argv[i])) {
+                    std::printf("%s: %.1f ms, travel %.6f, foot %.3f, match %.6f, speed %.9f, turn %.4f\n", argv[i], a->duration, a->travel,
+                                a->loopPhase, a->match, a->speed, a->rootTurn);
+                } else {
+                    std::printf("%s: not found\n", argv[i]);
+                }
+            }
+            return 0;
         }
         if (mode == "--run" && argc >= 5) {
             std::vector<std::int16_t> args;

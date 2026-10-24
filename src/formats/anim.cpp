@@ -4,9 +4,11 @@
 
 #include <algorithm>
 #include <bit>
+#include <charconv>
 #include <cmath>
 #include <stdexcept>
 #include <string_view>
+#include <system_error>
 
 namespace ts2::anim {
 
@@ -18,6 +20,13 @@ constexpr std::uint32_t kPointer = 0x11BA05F0;
 void pointer(BinaryReader& r) {
     if (r.u32() != kPointer) {
         throw std::runtime_error("animation: layout not as expected");
+    }
+}
+
+// Stops before allocating `count` records of at least `bytes` each when the data left can't hold them.
+void expectRecords(const BinaryReader& r, std::size_t count, std::size_t bytes) {
+    if (count > r.remaining() / bytes) {
+        throw std::runtime_error("animation: more records than data");
     }
 }
 
@@ -39,7 +48,7 @@ struct Component {
 };
 
 // One component's keys. Bits 0-1: one value per frame (0), keys with one slope (1) or with an in
-// and an out slope (2); bits 2-4: values as 16-bit integers (formats 0, 1 and 3, each its own
+// and an out slope (2). Bits 2-4: values as 16-bit integers (formats 0, 1 and 3, each its own
 // scale) or floats (4). Packed keys hold 15 bits of time and 17 of value in 32 bits.
 Curve readCurve(BinaryReader& r, const Component& c) {
     const int curve = c.bits & 3, format = (c.bits >> 2) & 7;
@@ -54,6 +63,7 @@ Curve readCurve(BinaryReader& r, const Component& c) {
     if (curve == 3) {
         throw std::runtime_error("animation: unknown curve");
     }
+    expectRecords(r, c.count, 2);
     std::vector<Key> keys(c.count);
     std::vector<std::uint16_t> inBits(c.count), outBits(c.count);
     for (std::size_t i = 0; i < keys.size(); ++i) {
@@ -88,6 +98,11 @@ Curve readCurve(BinaryReader& r, const Component& c) {
     return Curve{std::move(keys)};
 }
 
+// A float from the file, or `fallback` when it isn't a finite number.
+float finiteOr(float v, float fallback) {
+    return std::isfinite(v) ? v : fallback;
+}
+
 } // namespace
 
 float Curve::sample(float ms) const {
@@ -109,7 +124,7 @@ float Curve::sample(float ms) const {
 
 Animation parse(std::span<const std::uint8_t> data) {
     // The resource block names it (cSGResource: id, version, then the name with a one-byte
-    // length); the memory image follows, after its size.
+    // length). The memory image follows, after its size.
     const std::string_view all(reinterpret_cast<const char*>(data.data()), data.size());
     const auto block = all.find("cSGResource");
     if (block == std::string_view::npos) {
@@ -120,9 +135,9 @@ Animation parse(std::span<const std::uint8_t> data) {
     Animation a;
     a.name = text(r, r.u8());
     r.u32();  // the image's size
-    r.u16();
+    a.duration = r.u16();  // in ms, and a clip can last longer than its keys (a 30 s blink with one key)
     const std::uint16_t targets = r.u16();
-    r.u16();  // events
+    const std::uint16_t eventCount = r.u16();
     const std::uint8_t userDataLength = r.u8();
     r.u8();
     const std::uint32_t header = r.u32();
@@ -130,7 +145,23 @@ Animation parse(std::span<const std::uint8_t> data) {
     for (int i = 0; i < 4; ++i) {
         pointer(r);
     }
-    r.bytes(9 * 4);
+    // Nine floats: the frame turn (radians), travel, loop phase, the planner's match value, one not
+    // known yet, speed, the root turn (radians), the body stretch and one not known yet.
+    a.frameTurn = finiteOr(r.f32(), 0);
+    if (std::abs(a.frameTurn) > 8.0f) {
+        a.frameTurn = 0;  // a broken file, as real ones are whole quarter turns
+    }
+    a.travel = finiteOr(r.f32(), 0);
+    a.loopPhase = finiteOr(r.f32(), 0);
+    a.match = finiteOr(r.f32(), 0);
+    r.f32();
+    a.speed = finiteOr(r.f32(), 0);
+    a.rootTurn = finiteOr(r.f32(), 0);
+    a.bodyStretch = r.f32();
+    if (!std::isfinite(a.bodyStretch) || a.bodyStretch <= 0) {
+        a.bodyStretch = 1;
+    }
+    r.f32();
     a.skeleton = text(r, skeletonLength + 1u);
     text(r, userDataLength + 1u);
     r.bytes((skeletonLength + userDataLength + 2u) % 4);
@@ -141,11 +172,12 @@ Animation parse(std::span<const std::uint8_t> data) {
         std::uint16_t channels = 0, nameLength = 0;
         std::uint8_t chains = 0;
     };
+    expectRecords(r, targets, 28);
     std::vector<Target> ts(targets);
     for (auto& t : ts) {
         pointer(r);
         pointer(r);
-        r.u16();
+        a.targetTypes.push_back(r.u16());
         t.channels = r.u16();
         t.chains = r.u8();
         r.u8();
@@ -162,6 +194,7 @@ Animation parse(std::span<const std::uint8_t> data) {
     r.bytes(total % 4);
     std::vector<std::vector<Channel>> channels(ts.size());
     for (std::size_t t = 0; t < ts.size(); ++t) {
+        expectRecords(r, ts[t].channels, 24);
         channels[t].resize(ts[t].channels);
         for (auto& c : channels[t]) {
             pointer(r);
@@ -210,7 +243,9 @@ Animation parse(std::span<const std::uint8_t> data) {
             pointer(r);
             pointer(r);
             r.u16();
-            c.targets.resize(r.u16());
+            const std::uint16_t targetCount = r.u16();
+            expectRecords(r, targetCount, 43);
+            c.targets.resize(targetCount);
             auto name = [&r] {
                 const std::uint32_t v = r.u32();
                 r.u8();
@@ -247,6 +282,7 @@ Animation parse(std::span<const std::uint8_t> data) {
                 target.frameMirror = v[1];
                 target.node = v[2];
                 target.rotationNode = v[3];
+                target.position = v[4];
                 target.weight = v[5];
             }
         }
@@ -255,14 +291,48 @@ Animation parse(std::span<const std::uint8_t> data) {
         a.channels = std::move(channels[0]);
         a.chains = std::move(chains[0]);
     }
-    for (const auto& c : a.channels) {
-        for (const auto& curve : c.components) {
-            if (!curve.keys.empty()) {
-                a.duration = std::max(a.duration, curve.keys.back().time);
+    // Then the events (14 bytes each), then their texts. A clip whose events don't fit keeps none:
+    // they are a late extra, and its motion is already read.
+    if (eventCount > 0 && eventCount <= r.remaining() / 14) {
+        std::vector<std::uint16_t> lengths(eventCount);
+        a.events.resize(eventCount);
+        for (std::size_t i = 0; i < eventCount; ++i) {
+            pointer(r);
+            a.events[i].timeMs = r.u16();
+            a.events[i].type = r.u16();
+            lengths[i] = r.u16();
+            pointer(r);
+        }
+        for (std::size_t i = 0; i < eventCount; ++i) {
+            // Each text ends in a NUL its length leaves out.
+            if (lengths[i] + 1u > r.remaining()) {
+                a.events.clear();
+                break;
             }
+            const auto bytes = r.bytes(lengths[i] + 1u);
+            std::string t(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+            t.resize(std::min(t.size(), t.find('\0')));
+            a.events[i].text = std::move(t);
         }
     }
     return a;
+}
+
+std::optional<int> simAnticsEventId(const Event& event) {
+    if (event.type != kSimAnticsEvent) {
+        return std::nullopt;
+    }
+    const auto at = event.text.find("event=");
+    if (at == std::string::npos) {
+        return std::nullopt;
+    }
+    int value = 0;
+    const char* first = event.text.data() + at + 6;
+    const char* last = event.text.data() + event.text.size();
+    if (std::from_chars(first, last, value).ec != std::errc{}) {
+        return std::nullopt;
+    }
+    return value;
 }
 
 } // namespace ts2::anim

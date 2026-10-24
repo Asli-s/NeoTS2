@@ -2,7 +2,11 @@
 
 #include "sim/type_signature.hpp"
 
+#include "content/animation_lists.hpp"
+
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstdio>
 #include <optional>
 
@@ -10,10 +14,20 @@ namespace ts2::sim {
 
 namespace {
 
+// Whether a saved position fits the engine's 16.16 fixed point.
+bool fitsFixedPoint(float v) { return std::isfinite(v) && std::fabs(v) < 32767.0f; }
+
 std::string hex(std::uint32_t value) {
     char buffer[11];
     std::snprintf(buffer, sizeof(buffer), "0x%08X", value);
     return buffer;
+}
+
+const ObjectType* originalType(CodeSource& code, const ObjectType& type) {
+    constexpr std::size_t kOriginalGuidLow = 0x46, kOriginalGuidHigh = 0x47;
+    const std::uint32_t original = type.definition.field(kOriginalGuidLow) |
+                                   static_cast<std::uint32_t>(type.definition.field(kOriginalGuidHigh)) << 16;
+    return original != 0 ? code.objectType(original) : nullptr;
 }
 
 template <std::size_t N>
@@ -66,6 +80,44 @@ std::optional<std::string> restoreStack(const content::Lot& lot, const content::
     return std::nullopt;
 }
 
+// The overlays an object was playing when the lot was saved, carrying on from where they were. Only
+// playing ("state 1") overlays come back. The game's other saved animations (an object's own
+// animation, attached ones) are not restored yet.
+void restoreOverlays(const content::Lot& lot, std::uint32_t id, SimObject& object, CodeSource& code, double nowMs) {
+    const auto saved = lot.savedAnimations.find(id);
+    if (saved == lot.savedAnimations.end()) {
+        return;
+    }
+    constexpr std::array<int, 5> kPriorityLayers{1, 3, 5, 7, 0};
+    for (const auto& a : saved->second) {
+        const auto layer = std::find(kPriorityLayers.begin(), kPriorityLayers.end(), a.layer);
+        if (a.kind != cobject::SavedAnimation::Kind::Clip || a.state != 1 || layer == kPriorityLayers.end() ||
+            a.type.size() != 3 || a.type[0] != 'o') {
+            continue;
+        }
+        PlayingOverlay o;
+        o.name = a.name;
+        // Saved values out of range are read as Animate Overlay reads its own (a weight outside 0-1 is 1).
+        const double played = a.startedMsAgo;
+        o.startMs = nowMs - played;
+        o.lengthMs = a.lengthMs && !std::isnan(*a.lengthMs) ? std::max(*a.lengthMs, 0.0f) : 0.0f;
+        o.plays = static_cast<std::int16_t>(std::clamp(a.plays, -1, 0x7FFF));
+        o.weight = a.weight >= 0 && a.weight <= 1 ? a.weight : 1.0f;
+        o.priority = static_cast<std::uint8_t>(layer - kPriorityLayers.begin());
+        // The saved kind lets Animate Stop by kind stop it, so a saved idle stops when the Sim walks.
+        if (a.category && *a.category >= 0 && *a.category <= content::animation_category::kReceptivity) {
+            o.category = static_cast<std::uint8_t>(*a.category);
+        }
+        o.eventTree = a.eventTree;
+        o.stackObject = a.eventObject;
+        if (const ObjectType* owner = code.objectType(a.eventObjectGuid)) {
+            o.codeOwner = owner->group;
+        }
+        o.blendingOut = o.plays >= 0 && played >= o.lengthMs - kOverlayBlendMs;
+        object.overlays.push_back(std::move(o));
+    }
+}
+
 } // namespace
 
 LotWorldReport buildWorld(const content::Lot& lot, CodeSource& code, World& world) {
@@ -104,8 +156,12 @@ LotWorldReport buildWorld(const content::Lot& lot, CodeSource& code, World& worl
             report.problems.push_back({saved.id, "more saved semi-attributes than the engine keeps"});
         }
         std::copy(state.data.begin(), state.data.end(), object.data.begin());
-        object.x = static_cast<std::int32_t>(state.header.location[0] * 65536.0f);
-        object.y = static_cast<std::int32_t>(state.header.location[1] * 65536.0f);
+        if (fitsFixedPoint(state.header.location[0]) && fitsFixedPoint(state.header.location[1])) {
+            object.x = static_cast<std::int32_t>(state.header.location[0] * 65536.0f);
+            object.y = static_cast<std::int32_t>(state.header.location[1] * 65536.0f);
+        } else {
+            report.problems.push_back({saved.id, "position out of range"});
+        }
         object.level = state.header.value1;
         if (const auto& h = state.header;
             h.location[0] >= 0 && h.location[0] < 256 && h.location[1] >= 0 && h.location[1] < 256) {
@@ -113,9 +169,12 @@ LotWorldReport buildWorld(const content::Lot& lot, CodeSource& code, World& worl
                                static_cast<std::uint8_t>(h.value1)};
         }
         object.thread.temps = state.temps;
+        const auto& s = state.tokenSource;
+        object.tokenSource = {s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]};
         object.thread.codeGroup = type->group;
         if (state.tail) {
             object.arrays = state.tail->arrays;
+            object.materialNames = state.tail->strings;
             const auto& t = state.tail->token;
             object.token = InventoryToken{t.guid, t.flags, t.value1, t.value2, t.value3, t.properties};
             object.arrayIterators = state.tail->shorts;
@@ -126,16 +185,27 @@ LotWorldReport buildWorld(const content::Lot& lot, CodeSource& code, World& worl
         } else {
             object.slots.assign(type->containerSlots, 0);
         }
+        // A Sim's slots follow the person it was made from (its original GUID), which newer packs give
+        // more slots than the Sim's own copy has.
+        if (const ObjectType* original = object.isPerson() ? originalType(code, *type) : nullptr;
+            original != nullptr && object.slots.size() < original->containerSlots) {
+            object.slots.resize(original->containerSlots, 0);
+        }
         if (state.person) {
             object.motives = state.person->motives;
+            // A broken save can hold any float: levels that aren't numbers start at 0, others are kept
+            // to the motive range, as every write to them is.
+            for (float& level : object.motives) {
+                level = std::isfinite(level) ? std::clamp(level, kMotiveMin, kMotiveMax) : 0.0f;
+            }
             copyInto(object.personData, state.person->personData);
         }
         if (auto problem = restoreStack(lot, saved, object, code)) {
             report.problems.push_back({saved.id, *problem});
         }
-        // An object whose type changed since the save (a patch, expansion or mod) will start over. Sims
-        // are left as saved for now (their reset also refills their person data).
-        if (!state.person && saved.type && typeChangedSinceSave(code, *type, *saved.type)) {
+        restoreOverlays(lot, saved.id, object, code, world.clockMs());
+        // An object or Sim whose type changed since the save (a patch, expansion or mod) will start over.
+        if (saved.type && typeChangedSinceSave(code, *type, *saved.type)) {
             report.changedType.push_back(object.id);
         }
         ++report.objects;
@@ -149,13 +219,37 @@ LotWorldReport buildWorld(const content::Lot& lot, CodeSource& code, World& worl
         }
         object->dataTables = toDataTables(tables);
     }
+    for (const auto& [pair, values] : lot.relationships) {
+        if (world.find(pair.first) == nullptr || world.find(pair.second) == nullptr) {
+            continue;
+        }
+        // The game stores 32-bit values but the Relationship primitive moves 16-bit ones.
+        auto& stored = world.relationship(pair.first, pair.second);
+        stored.resize(values.size());
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            stored[i] = static_cast<std::int16_t>(values[i]);
+        }
+    }
     return report;
 }
 
-std::shared_ptr<const SavedNeighborhood> savedNeighborhood(const content::Neighborhood& hood) {
+std::shared_ptr<const SavedNeighborhood> savedNeighborhood(const content::Neighborhood& hood,
+                                                          std::map<std::int32_t, nhoodid::NeighborhoodId> all) {
     auto saved = std::make_shared<SavedNeighborhood>();
+    if (hood.identity) {
+        saved->id = hood.identity->id;
+        all.try_emplace(hood.identity->id, *hood.identity);
+    }
+    saved->allNeighborhoods = std::make_shared<const std::map<std::int32_t, nhoodid::NeighborhoodId>>(std::move(all));
     saved->neighborIds = hood.neighborIds;
     saved->lotIds = hood.lotIds;
+    saved->lotTypes = hood.lotTypes;
+    saved->lotOwners = hood.lotOwners;
+    for (const auto& [instance, family] : hood.families) {
+        saved->familyLots[instance] = family.lot;
+        saved->familyFlags[instance] = family.flags;
+        saved->familyMembers[instance] = family.members;
+    }
     if (hood.record) {
         saved->record = std::make_shared<const ngbh::Neighborhood>(*hood.record);
     }
@@ -165,18 +259,14 @@ std::shared_ptr<const SavedNeighborhood> savedNeighborhood(const content::Neighb
     for (const auto& [id, n] : hood.neighbors) {
         saved->neighbors[id] = SavedNeighbor{n.guid, n.personData};
     }
+    saved->familyTies = hood.familyTies;
     for (const auto& [id, w] : hood.wants) {
-        saved->wants[id] = w.wants;
-        saved->fears[id] = w.fears;
+        const auto slots = swaf::slots(w);
+        saved->wantSlots[id] = slots;
+        saved->wants[id].assign(w.wants.begin(), w.wants.begin() + static_cast<std::ptrdiff_t>(std::min<std::size_t>(w.wants.size(), slots.wants)));
+        saved->fears[id].assign(w.fears.begin(), w.fears.begin() + static_cast<std::ptrdiff_t>(std::min<std::size_t>(w.fears.size(), slots.fears)));
     }
-    for (const auto& [pair, values] : hood.relationships) {
-        // The game stores 32-bit values but the Relationship primitive moves 16-bit ones.
-        auto& stored = saved->relationships[pair];
-        stored.resize(values.size());
-        for (std::size_t i = 0; i < values.size(); ++i) {
-            stored[i] = static_cast<std::int16_t>(values[i]);
-        }
-    }
+    saved->relationships = hood.relationships;
     return saved;
 }
 

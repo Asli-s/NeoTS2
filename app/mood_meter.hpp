@@ -10,7 +10,7 @@ namespace app {
 
 // The live panel's mood meter, beside the small buttons: the selected Sim's mood, painted from the
 // meter's own gradient, and full with its platinum glow while the Sim's aspiration is platinum.
-// The panel has one for wants closed and one for wants open; both show the same.
+// The panel has one for wants closed and one for wants open. Both show the same.
 class MoodMeter {
 public:
     // `panel` is the loaded live panel script's root window.

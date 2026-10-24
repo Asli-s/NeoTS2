@@ -15,7 +15,7 @@ constexpr std::string_view kIssuesPage = "https://github.com/Asli-s/NeoTS2/issue
 struct Frame {
     std::string module;    // the module's file name (no folder)
     std::uint64_t offset = 0;  // from the module's start
-    std::string function;  // when symbols were found; empty otherwise
+    std::string function;  // when symbols were found, empty otherwise
     std::string source;    // "file.cpp:123" when known
 };
 
@@ -59,7 +59,7 @@ struct UnexpectedExit {
     std::string version;
     std::string started;
     // What Windows noted of the crash in its event log ("Application Error"), by field name
-    // ("ExceptionCode", "ModuleName", "FaultingOffset"...); empty when it noted none.
+    // ("ExceptionCode", "ModuleName", "FaultingOffset"...). Empty when it noted none.
     std::map<std::string, std::string> windows;
 };
 

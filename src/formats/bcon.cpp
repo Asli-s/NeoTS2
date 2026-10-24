@@ -14,10 +14,12 @@ Constants parse(std::span<const std::uint8_t> data) {
     const auto nameEnd = std::find(nameBytes.begin(), nameBytes.end(), std::uint8_t{0});
     c.name.assign(nameBytes.begin(), nameEnd);
 
-    const std::uint8_t count = r.u8();
-    c.flags = r.u8();
-    c.values.reserve(count);
-    for (std::uint8_t i = 0; i < count; ++i) {
+    // A 15-bit count. The top bit is a flag (what it means is not known).
+    const std::uint16_t header = r.u16();
+    const std::uint16_t count = header & 0x7FFF;
+    c.flags = (header & 0x8000) ? 0x80 : 0;
+    c.values.reserve(std::min<std::size_t>(count, r.remaining() / 2));
+    for (std::uint16_t i = 0; i < count; ++i) {
         c.values.push_back(static_cast<std::int16_t>(r.u16()));
     }
     return c;

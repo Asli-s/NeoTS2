@@ -6,7 +6,9 @@
 #include <array>
 #include <cctype>
 #include <map>
+#include <stdexcept>
 #include <string_view>
+#include <system_error>
 
 namespace ts2::content {
 
@@ -41,6 +43,12 @@ constexpr std::array<KnownProduct, 18> kReleaseOrder = {{
     {"ep8", "Apartment Life",        "apartment life"},
     {"sp9", "Mansion & Garden Stuff", "mansion", "ep9"},  // the Legacy Collection's EP9 folder
 }};
+
+// The packs in the order of the game's "EPsInstalled" list, which is also its numbering of them.
+constexpr std::string_view kGameOrder[] = {
+    "ep1", "ep2", "ep3", "sp1", "sp2", "ep4", "ep5", "sp4", "sp5",
+    "ep6", "sp6", "sp3", "ep7", "sp7", "sp8", "ep8", "sp9",
+};
 
 std::string lower(std::string_view s) {
     std::string out(s);
@@ -93,13 +101,24 @@ std::vector<Product> findProducts(const fs::path& installRoot) {
     std::map<int, Product> byOrder;
     int nextUnknown = static_cast<int>(kReleaseOrder.size());
 
+    // A complete install has about 11,000 files and folders. A folder far larger (a whole drive
+    // chosen by mistake) isn't an install, and walking all of it would look like a hang.
+    constexpr int kMaxEntries = 500000;
+    int entries = 0;
     for (const auto& item : fs::recursive_directory_iterator(
              installRoot, fs::directory_options::skip_permission_denied)) {
+        if (++entries > kMaxEntries) {
+            throw std::runtime_error(utf8(installRoot) + " holds far more files than a game install");
+        }
         if (!item.is_regular_file() || !isObjectPackage(item.path())) {
             continue;
         }
 
-        const fs::path relative = fs::relative(item.path(), installRoot);
+        std::error_code relativeError;
+        const fs::path relative = fs::relative(item.path(), installRoot, relativeError);
+        if (relativeError) {
+            continue;
+        }
         std::vector<std::string> components;
         for (const auto& part : relative.parent_path()) {
             components.push_back(lower(utf8(part)));
@@ -138,20 +157,39 @@ std::vector<Product> findProducts(const fs::path& installRoot) {
 }
 
 std::uint32_t installedPacksMask(const std::vector<Product>& products) {
-    static constexpr std::string_view kPackBits[] = {
-        "ep1", "ep2", "ep3", "sp1", "sp2", "ep4", "ep5", "sp4", "sp5",
-        "ep6", "sp6", "sp3", "ep7", "sp7", "sp8", "ep8", "sp9",
-    };
     constexpr std::uint32_t kAlwaysSet = 0x1000;
     std::uint32_t mask = kAlwaysSet;
     for (const auto& product : products) {
-        for (std::size_t bit = 0; bit < std::size(kPackBits); ++bit) {
-            if (product.code == kPackBits[bit]) {
+        for (std::size_t bit = 0; bit < std::size(kGameOrder); ++bit) {
+            if (product.code == kGameOrder[bit]) {
                 mask |= 1u << bit;
             }
         }
     }
     return mask;
+}
+
+int gameNumber(const Product& product) {
+    if (product.code == "base") {
+        return 0;
+    }
+    for (std::size_t i = 0; i < std::size(kGameOrder); ++i) {
+        if (product.code == kGameOrder[i]) {
+            return static_cast<int>(i) + 1;
+        }
+    }
+    return -1;
+}
+
+std::vector<Product> inGameOrder(const std::vector<Product>& products) {
+    std::vector<Product> out;
+    for (const auto& product : products) {
+        if (gameNumber(product) >= 0) {
+            out.push_back(product);
+        }
+    }
+    std::stable_sort(out.begin(), out.end(), [](const Product& a, const Product& b) { return gameNumber(a) < gameNumber(b); });
+    return out;
 }
 
 std::vector<fs::path> objectLoadOrder(const std::vector<Product>& products) {

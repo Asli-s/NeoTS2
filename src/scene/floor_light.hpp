@@ -10,7 +10,7 @@
 namespace ts2::scene::floorlight {
 
 // How light from lamps and windows spreads over one level's floors, as the game's lighting
-// manager does it ("diffusion"). The floor is a grid of half-tile cells; a cell on a diagonal
+// manager does it ("diffusion"). The floor is a grid of half-tile cells. A cell on a diagonal
 // wall is split into two halves. Light only crosses between neighbouring halves that are linked,
 // so walls stop it.
 
@@ -26,7 +26,7 @@ struct Half {
     bool valid = false;           // there is floor here
     bool outside = false;
     std::int16_t room = 0;
-    // Working state while lighting; nothing to set.
+    // Working state while lighting, nothing to set.
     bool active = false;          // got brighter last round, so it can pass light on
     bool changed = false;
 };
@@ -44,7 +44,7 @@ struct Tile {
 
 struct Grid {
     int level = 0;
-    int width = 0, height = 0;    // in tiles; the grid has 2 * width by 2 * height cells
+    int width = 0, height = 0;    // in tiles, the grid has 2 * width by 2 * height cells
     std::vector<Cell> cells;      // row by row
     std::vector<Tile> tiles;      // width by height, row by row
     std::array<float, 3> insideAmbient{0, 0, 0};   // colour times strength
@@ -64,14 +64,14 @@ struct Grid {
 using FloorStops = std::function<bool(int cellX, int cellY, int level)>;
 
 // Resets the grid to its ambient light, then lets the sources light it: sources with nearly
-// the same falloff (within 0.01) go together, slowest fading last; each fills its area in its
+// the same falloff (within 0.01) go together, slowest fading last. Each fills its area in its
 // room, then the light spreads, fading by 1 / (1 + falloff * falloffScale) per half tile
 // (1.4 times the falloff diagonally) plus 0.01, until it no longer brightens anything.
-// Returns false when it stopped early at its safety limit (never on a real lot; worth logging).
-bool light(Grid& grid, const std::vector<LightSource>& sources, const FloorStops& stops);
+// Returns false when it stopped early at its safety limit (never on a real lot, so worth logging).
+[[nodiscard]] bool light(Grid& grid, const std::vector<LightSource>& sources, const FloorStops& stops);
 
 // The floor's light at a point (in tiles) as walls and rooms see it: twice the light of the
-// half-tile cell (and diagonal half) the point is in; black where there is no floor.
+// half-tile cell (and diagonal half) the point is in. Black where there is no floor.
 std::array<float, 3> sample(const Grid& grid, float x, float y);
 
 } // namespace ts2::scene::floorlight

@@ -1,0 +1,93 @@
+# Slower checks, run by hand (Actions > checks > Run workflow): the compiler's code analysis and clang-tidy, each
+# compared with the reviewed findings in tools/known_findings.txt (only a new finding fails), and a
+# longer fuzz of every file reader that keeps its inputs from one run to the next.
+name: checks
+
+on:
+  workflow_dispatch:
+
+# A repository can set the variable RUNNER to run these jobs on its own machine instead of GitHub's.
+# SDL3_DIR is cleared so a machine's own SDL install can never be picked up.
+env:
+  SDL3_DIR: ""
+
+jobs:
+  analyze:
+    name: MSVC code analysis
+    runs-on: ${{ vars.RUNNER || 'windows-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build with code analysis
+        shell: pwsh
+        run: |
+          cmake -S . -B build-analyze -A x64 -DNEOTS2_ANALYZE=ON
+          cmake --build build-analyze --config Release --parallel *> analyze.log
+          if ($LASTEXITCODE -ne 0) { Get-Content analyze.log -Tail 50; throw "build failed" }
+      - name: Compare with the reviewed findings
+        shell: pwsh
+        run: ./tools/check_findings.ps1 -Log analyze.log
+
+  tidy:
+    name: clang-tidy
+    runs-on: ${{ vars.RUNNER || 'windows-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run clang-tidy
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $llvm = "$vs\VC\Tools\Llvm\x64\bin"
+          # The compiler's environment, for Ninja and for clang-tidy to find the standard headers.
+          cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && set" | ForEach-Object {
+              if ($_ -match '^([^=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2]) }
+          }
+          cmake -S . -B build-tidy -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          $checks = "-*,bugprone-*,-bugprone-easily-swappable-parameters,-bugprone-narrowing-conversions," +
+                    "-bugprone-implicit-widening-of-multiplication-result,-bugprone-branch-clone,-bugprone-switch-missing-default-case," +
+                    "-bugprone-unchecked-optional-access,-bugprone-empty-catch,-bugprone-misplaced-widening-cast,-bugprone-exception-escape," +
+                    "clang-analyzer-core.*,clang-analyzer-cplusplus.*,clang-analyzer-deadcode.*"
+          # Newer versions bring new checks: a finding only they make is reviewed like any other.
+          & "$llvm\clang-tidy.exe" --version
+          # Our own files, not the libraries in third_party (Lua's sources are under a src folder too).
+          python "$llvm\run-clang-tidy" -clang-tidy-binary "$llvm\clang-tidy.exe" -p build-tidy -quiet "-checks=$checks" `
+              "^(?!.*[/\\]third_party[/\\]).*[/\\](src|app|tests|tools)[/\\]" *> tidy.log
+      - name: Compare with the reviewed findings
+        shell: pwsh
+        run: ./tools/check_findings.ps1 -Log tidy.log
+
+  fuzz:
+    name: Fuzz every file reader for longer
+    runs-on: ${{ vars.RUNNER || 'windows-latest' }}
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore the inputs found so far
+        uses: actions/cache@v4
+        with:
+          path: corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+      - name: Build the fuzz targets
+        run: |
+          cmake -S . -B build-fuzz -A x64 -DNEOTS2_FUZZ=ON
+          cmake --build build-fuzz --config RelWithDebInfo --parallel
+      - name: Fuzz each reader for 3 minutes
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $msvc = Get-ChildItem "$vs\VC\Tools\MSVC" -Directory | Sort-Object Name | Select-Object -Last 1
+          $env:PATH = "$($msvc.FullName)\bin\Hostx64\x64;$env:PATH"
+          New-Item -ItemType Directory -Force findings | Out-Null
+          $failed = @()
+          foreach ($fuzzer in Get-ChildItem build-fuzz\RelWithDebInfo\*_fuzz.exe) {
+              New-Item -ItemType Directory -Force "corpus\$($fuzzer.BaseName)" | Out-Null
+              & $fuzzer.FullName "corpus\$($fuzzer.BaseName)" -max_total_time=180 -rss_limit_mb=2048 "-artifact_prefix=findings\$($fuzzer.BaseName)-" 2>&1 | Select-Object -Last 1
+              if ($LASTEXITCODE -ne 0) { $failed += $fuzzer.BaseName }
+          }
+          if ($failed) { throw "fuzzing found problems in: $($failed -join ', ')" }
+      - name: Keep what fuzzing found
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-findings
+          path: findings

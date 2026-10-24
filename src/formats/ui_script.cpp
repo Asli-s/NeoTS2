@@ -8,7 +8,7 @@ namespace ts2::ui {
 
 namespace {
 
-// How deep windows may nest; the game's own scripts go 6 deep at most.
+// How deep windows may nest. The game's own scripts go 6 deep at most.
 constexpr std::size_t kMaxDepth = 64;
 
 bool space(char c) {

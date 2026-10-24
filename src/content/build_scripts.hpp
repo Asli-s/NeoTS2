@@ -16,6 +16,7 @@ struct WallStyle {
     bool thick = true;      // wallThickness standard (none: a flat plane, like a deck's skirt)
     bool rendered = true;   // notRendered: never drawn
     bool belowFloor = false;  // verticalSpan floorToFloorBasedCeiling: up to the floor's thickness above
+    bool toRoof = false;      // verticalSpan floorToRoof: up to the roof (the attic walls under gable ends)
     bool cutAway = true;      // mayCutAway: cut down by the cutaway and walls-down views
     bool blocksLight = true;  // blocksLight: stops lamp and window light spreading past it
     std::string defaultPattern;
@@ -28,7 +29,7 @@ struct BuildScripts {
     std::map<std::string, std::string> wallPatterns;
     std::map<std::uint32_t, WallStyle> wallStyles;
 
-    // Adds one product's scripts; entries replace those of earlier products.
+    // Adds one product's scripts. Its entries replace those of earlier products.
     void addPatterns(std::string_view text, bool walls);
     void addWallStyles(std::string_view text);
 };

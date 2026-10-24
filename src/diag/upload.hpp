@@ -26,8 +26,8 @@ std::vector<std::uint8_t> zip(const std::vector<ZipFile>& files);
 // The CRC-32 zips use.
 std::uint32_t crc32(const std::uint8_t* data, std::size_t size);
 
-// The value of a string field in a JSON object (`{"url":"https:\/\/..."}`), escapes undone;
-// empty when it isn't there.
+// The value of a string field in a JSON object (`{"url":"https:\/\/..."}`), escapes undone.
+// Empty when it isn't there.
 std::string jsonString(std::string_view json, std::string_view key);
 
 // A multipart/form-data body of plain fields, split by `boundary`.

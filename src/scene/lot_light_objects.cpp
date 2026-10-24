@@ -1,6 +1,7 @@
 #include "scene/lot_light_objects.hpp"
 
 #include "content/lot.hpp"
+#include "diag/log.hpp"
 #include "formats/dbpf.hpp"
 #include "formats/objd.hpp"
 #include "formats/resource_types.hpp"
@@ -64,7 +65,8 @@ const Model* modelOf(Assets& assets, std::map<std::string, std::optional<Model>>
             try {
                 auto r = sg::parseLight(*data);
                 m.lights[lowered(r.name)] = r;
-            } catch (const std::exception&) {
+            } catch (const std::exception& ex) {
+                diag::warnOnce(std::string("lights: a light resource that can't be read is left out: ") + ex.what());
             }
         }
     }
@@ -152,7 +154,7 @@ Found gather(Assets& assets, const content::Lot& lot, const std::filesystem::pat
         if (!(x >= 0 && y >= 0 && x <= 256 && y <= 256)) {
             continue;
         }
-        const float z = heights.tile(h.value1 - 1, x, y) + h.value3;
+        const float z = heights.tile(content::gridLevel(lot, h.value1), x, y) + h.value3;
         const auto nodes = lamplights::lightNodes(model->tree, {{x, y, z}, lamplights::facingRotation(object.state.data[1])});
         if (nodes.empty()) {
             continue;
@@ -191,6 +193,11 @@ Found gather(Assets& assets, const content::Lot& lot, const std::filesystem::pat
                 pl.intensity = attrs && attrs->intensity ? *attrs->intensity : res->second.intensity;
                 pl.color = attrs && attrs->color ? *attrs->color : res->second.color;
                 pl.falloffRate = attrs && attrs->falloffRate ? *attrs->falloffRate : res->second.falloffRate;
+                // The light files give the cone in degrees, the light resource in radians.
+                constexpr float kRadians = 3.14159265358979f / 180;
+                pl.spot = res->second.kind == "cSpotLight";
+                pl.coneAngle = attrs && attrs->coneAngle ? *attrs->coneAngle * kRadians : res->second.coneAngle;
+                pl.conePenumbra = attrs && attrs->conePenumbra ? *attrs->conePenumbra * kRadians : res->second.conePenumbra;
             }
             po.lights.push_back(pl);
         }

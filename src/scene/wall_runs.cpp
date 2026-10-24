@@ -1,6 +1,7 @@
 #include "scene/wall_runs.hpp"
 
 #include "content/lot.hpp"
+#include "diag/log.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -20,7 +21,7 @@ constexpr int kMaxCoordinate = 256;
 constexpr int kMaxLevel = 64;
 constexpr std::size_t kMaxFaces = 4096;  // one-tile wall faces, as the wall light allows segments
 
-// One side of a one-tile wall, walked from (x0, y0) to (x1, y1); it faces (dy, -dx).
+// One side of a one-tile wall, walked from (x0, y0) to (x1, y1). It faces (dy, -dx).
 struct Face {
     int level, x0, y0, x1, y1;
     bool used = false;
@@ -71,13 +72,13 @@ std::int16_t roomOf(const Key& k, const RoomAt& roomAt) {
 }
 
 // How far the walk turns from direction a to b, toward the side faces look at first: the next
-// face round a room is the one turning most that way; going back is the last choice.
+// face round a room is the one turning most that way. Going back is the last choice.
 double turn(int ax, int ay, int bx, int by) {
     const int cross = ax * by - ay * bx, dot = ax * bx + ay * by;
     return std::atan2(static_cast<double>(cross), static_cast<double>(dot));
 }
 
-// Every one-tile face of the walls, both sides, once each; false when some were left out.
+// Every one-tile face of the walls, both sides, once each. False when some were left out.
 bool facesOf(const std::vector<Wall>& walls, std::vector<Face>& faces) {
     std::set<std::tuple<int, int, int, int, int>> seen;
     bool complete = true;
@@ -87,6 +88,9 @@ bool facesOf(const std::vector<Wall>& walls, std::vector<Face>& faces) {
         const bool inRange = w.level >= -kMaxLevel && w.level <= kMaxLevel && std::min({w.x0, w.y0, w.x1, w.y1}) >= 0 &&
                              std::max({w.x0, w.y0, w.x1, w.y1}) <= kMaxCoordinate;
         if (!inRange || steps == 0 || (dx != 0 && dy != 0 && std::abs(dx) != std::abs(dy))) {
+            if (!inRange) {
+                diag::warnOnce("wall runs: a wall past 256 tiles or 64 levels is left out");
+            }
             continue;
         }
         const int sx = (dx > 0) - (dx < 0), sy = (dy > 0) - (dy < 0);
@@ -189,16 +193,17 @@ FloorSolid floorSolidOf(const content::Lot& lot) {
         return [](int level, const Key&) { return level == 0; };
     }
     const array3d::Array3D floors = found->second;
-    return [floors](int level, const Key& key) {
+    const int ground = content::groundGridLevel(lot);
+    return [floors, ground](int level, const Key& key) {
         if (level == 0) {
             return true;
         }
         const int mask = quarters(key);
-        if (mask == 0 || !floors.contains(level, key.x, key.y)) {
+        if (mask == 0 || !floors.contains(level + ground, key.x, key.y)) {
             return false;
         }
         for (std::size_t q = 0; q < 4; ++q) {
-            if ((mask & (1 << q)) && floors.i16(level, key.x, key.y, q) == 0) {
+            if ((mask & (1 << q)) && floors.i16(level + ground, key.x, key.y, q) == 0) {
                 return false;
             }
         }
@@ -326,12 +331,12 @@ std::vector<Wall> wallsOf(const content::Lot& lot, const BlocksLight& blocksLigh
             continue;
         }
         const auto covering = coveringOf.find(w.id);
-        if (blocksLight && !blocksLight(covering != coveringOf.end() ? covering->second : 0)) {
+        if (covering == coveringOf.end() || (blocksLight && !blocksLight(covering->second))) {
             continue;
         }
         Wall wall;
         wall.level = a->level;
-        wall.covering = covering != coveringOf.end() ? covering->second : 0;
+        wall.covering = covering->second;
         if (whole(a->x, wall.x0) && whole(a->y, wall.y0) && whole(b->x, wall.x1) && whole(b->y, wall.y1)) {
             out.push_back(wall);
         }

@@ -8,9 +8,14 @@ on:
   push:
   pull_request:
 
+# A repository can set the variable RUNNER to run these jobs on its own machine instead of GitHub's.
+# SDL3_DIR is cleared so a machine's own SDL install can never be picked up.
+env:
+  SDL3_DIR: ""
+
 jobs:
   test:
-    runs-on: windows-latest
+    runs-on: ${{ vars.RUNNER || 'windows-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -42,7 +47,7 @@ jobs:
 
   coverage:
     name: Clang, coverage
-    runs-on: windows-latest
+    runs-on: ${{ vars.RUNNER || 'windows-latest' }}
     steps:
       - uses: actions/checkout@v4
       - name: Build with Clang, run the tests and measure coverage
@@ -55,7 +60,7 @@ jobs:
 
   fuzz:
     name: Fuzz every file reader
-    runs-on: windows-latest
+    runs-on: ${{ vars.RUNNER || 'windows-latest' }}
     steps:
       - uses: actions/checkout@v4
       - name: Build the fuzz targets
