@@ -16,11 +16,7 @@
 
 namespace ts2::render::render_detail {
 
-constexpr std::uint32_t kVertexFloats = 17;  // position, normal, texture coordinates, alpha, light-map coordinates, color, tangent
-
 constexpr std::uint32_t kSpriteFloats = 8;  // position, texture coordinates, color
-
-constexpr std::uint32_t kSkinBytes = 4 + 4 * sizeof(float);  // four joints, four weights
 
 // Windows draws with Direct3D 12 and DXIL shaders, other systems with Vulkan and SPIR-V shaders.
 // The build makes only that kind, so the device must not fall back to the other.

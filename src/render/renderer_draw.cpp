@@ -16,107 +16,7 @@ namespace ts2::render {
 
 using namespace render_detail;
 
-namespace {
-
-constexpr std::size_t kObjectLights = 8;  // as many as the game's shaders take
-
-struct VertexUniforms {
-    float viewProjection[16];
-    float model[16];
-    float ambient[4];  // w: 1 when lit as the game lights objects (see scene::ObjectLighting), 3 as its lot skirt
-    float lightDirections[kObjectLights][4];  // w: a point light's range squared (0: directional)
-    float lightColors[kObjectLights][4];
-    float lightPositions[kObjectLights][4];   // a point light's position and falloff
-    float lightCones[kObjectLights][4];       // a spot light's edge cosine, 1 / (inner - edge) cosines, 1
-    float thumbnail[4];  // the material's diffuse and the thumbnail scale (see scene::ObjectLighting)
-    std::int32_t pixelLights[4];  // how many lights are lit per pixel through the normal map, and which
-    float eye[4];                 // the camera's position
-    float specular[4];            // the material's specular scale and power (0: none)
-};
-
-struct SkinnedUniforms {
-    VertexUniforms frame;
-    std::uint32_t jointBase;
-    std::uint32_t padding[3];
-};
-
-struct FragmentUniforms {
-    float color[4];
-    float sunDirection[4];
-    float hasTexture;
-    float alphaCutoff;
-    float unlit;
-    float padding;
-    float lightMap[4];  // x: the gain on the light map (0: none), y: 1 to leave the material's colour out, z: 1 for terrain
-    float pixelLightColors[3][4];  // the colours of the lights lit per pixel
-    float pixelLightCount;         // how many (0: none)
-    float normalMapped;            // 1: the per-pixel normal from the normal map, 0: straight out
-    float simLighting;             // 1: lit as the game's Sim materials (see scene::Material)
-    float lightMapFade;            // how much of the light map is the new one (see Renderer::setLightMapFade)
-    float envCube[4];              // the environment cube's colour scale, w: 1 when on (see scene::Material)
-    // The camera's right, up and forward, right's w 1 to look the cube up in the camera's space.
-    float cameraRight[4];
-    float cameraUp[4];
-    float cameraForward[4];
-    float emissive[4];  // added to the light before the texture (see scene::Material), w: 1 when on
-};
-
-// The shaders' constant buffers pack in 16-byte rows, so these must match them field for field.
-static_assert(sizeof(VertexUniforms) % 16 == 0 && offsetof(VertexUniforms, eye) == 688 && offsetof(VertexUniforms, specular) == 704);
-static_assert(offsetof(SkinnedUniforms, jointBase) == 720 && sizeof(SkinnedUniforms) % 16 == 0);
-static_assert(sizeof(FragmentUniforms) % 16 == 0 && offsetof(FragmentUniforms, lightMap) == 48 &&
-              offsetof(FragmentUniforms, envCube) == 128 && offsetof(FragmentUniforms, emissive) == 192);
-
-enum class InView { Outside, Inside, Partly };
-
-// Where a model-space box lies against the view of `clip` (projection * view * model). It is
-// outside when all eight corners are outside the same side of the clip volume (-w <= x, y <= w,
-// 0 <= z <= w), so none of its triangles can show, and inside when no corner is outside any side.
-InView boxInView(const Mat4& clip, const std::array<float, 3>& low, const std::array<float, 3>& high) {
-    // The low corner in clip space, and the box's three edges from it.
-    float base[4], edge[3][4];
-    for (int r = 0; r < 4; ++r) {
-        const float* row = &clip.m[static_cast<std::size_t>(r) * 4];
-        base[r] = row[0] * low[0] + row[1] * low[1] + row[2] * low[2] + row[3];
-        for (int k = 0; k < 3; ++k) {
-            edge[k][r] = row[k] * (high[k] - low[k]);
-        }
-    }
-    int outside[6] = {};
-    for (int c = 0; c < 8; ++c) {
-        float p[4];
-        for (int r = 0; r < 4; ++r) {
-            p[r] = base[r] + (c & 1 ? edge[0][r] : 0) + (c & 2 ? edge[1][r] : 0) + (c & 4 ? edge[2][r] : 0);
-        }
-        outside[0] += p[0] < -p[3];
-        outside[1] += p[0] > p[3];
-        outside[2] += p[1] < -p[3];
-        outside[3] += p[1] > p[3];
-        outside[4] += p[2] < 0;
-        outside[5] += p[2] > p[3];
-    }
-    if (std::any_of(std::begin(outside), std::end(outside), [](int n) { return n == 8; })) {
-        return InView::Outside;
-    }
-    return std::all_of(std::begin(outside), std::end(outside), [](int n) { return n == 0; }) ? InView::Inside : InView::Partly;
-}
-
-// How the game sorts a blended surface: the view depth of its box's nearest corner, a corner at or
-// behind the camera counting as on the near plane. `clip`'s last row gives the view depth (the
-// projection's w).
-float nearestDepth(const Mat4& clip, const std::array<float, 3>& low, const std::array<float, 3>& high, float nearZ) {
-    float nearest = std::numeric_limits<float>::max();
-    for (int c = 0; c < 8; ++c) {
-        const float x = c & 1 ? high[0] : low[0], y = c & 2 ? high[1] : low[1], z = c & 4 ? high[2] : low[2];
-        const float w = clip.m[12] * x + clip.m[13] * y + clip.m[14] * z + clip.m[15];
-        nearest = std::min(nearest, w > 1e-5f ? w : nearZ);
-    }
-    return nearest;
-}
-
-} // namespace
-
-void Renderer::drawImposters(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass, const Mat4& viewProjection) {
+void SdlGpuRenderer::drawImposters(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass, const Mat4& viewProjection) {
     if (gpu_->imposterDraws.empty()) {
         return;
     }
@@ -166,11 +66,7 @@ void Renderer::drawImposters(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass,
     }
 }
 
-void Renderer::show(std::vector<std::uint8_t> visible) {
-    visible_ = std::move(visible);
-}
-
-bool Renderer::draw(const Camera& camera) {
+bool SdlGpuRenderer::draw(const Camera& camera) {
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
     if (cmd == nullptr) {
         return false;
@@ -186,7 +82,7 @@ bool Renderer::draw(const Camera& camera) {
     return drawn;
 }
 
-bool Renderer::drawToFile(const Camera& camera, unsigned width, unsigned height, const std::filesystem::path& path) {
+bool SdlGpuRenderer::drawToFile(const Camera& camera, unsigned width, unsigned height, const std::filesystem::path& path) {
     scene::Image image;
     if (!drawOffscreen(camera, width, height, image)) {
         return false;
@@ -198,11 +94,11 @@ bool Renderer::drawToFile(const Camera& camera, unsigned width, unsigned height,
     return saved;
 }
 
-std::optional<scene::Image> Renderer::drawInstancesToImage(const Camera& camera, unsigned width, unsigned height,
+std::optional<scene::Image> SdlGpuRenderer::drawInstancesToImage(const Camera& camera, unsigned width, unsigned height,
                                                            const scene::ObjectLighting& lighting) {
     // Back to the scene's own drawing afterwards, even if drawing throws.
     struct Restore {
-        Renderer& r;
+        SdlGpuRenderer& r;
         std::optional<scene::ObjectLighting> lighting;
         ~Restore() {
             r.objectLighting_ = std::move(lighting);
@@ -215,7 +111,7 @@ std::optional<scene::Image> Renderer::drawInstancesToImage(const Camera& camera,
     return drawn ? std::optional<scene::Image>(std::move(image)) : std::nullopt;
 }
 
-bool Renderer::drawOffscreen(const Camera& camera, unsigned width, unsigned height, scene::Image& out) {
+bool SdlGpuRenderer::drawOffscreen(const Camera& camera, unsigned width, unsigned height, scene::Image& out) {
     if (width == 0 || height == 0 || width > kMaxOffscreen || height > kMaxOffscreen) {
         return false;
     }
@@ -287,7 +183,7 @@ bool Renderer::drawOffscreen(const Camera& camera, unsigned width, unsigned heig
     return pixels != nullptr;
 }
 
-SDL_GPUTexture* Renderer::depthFor(DepthBuffer& depth, unsigned width, unsigned height) {
+SDL_GPUTexture* SdlGpuRenderer::depthFor(DepthBuffer& depth, unsigned width, unsigned height) {
     if (depth.texture == nullptr || depth.width != width || depth.height != height) {
         if (depth.texture) {
             SDL_ReleaseGPUTexture(device_, depth.texture);
@@ -308,38 +204,17 @@ SDL_GPUTexture* Renderer::depthFor(DepthBuffer& depth, unsigned width, unsigned 
 }
 
 // One frame being recorded: where it goes and how it is seen.
-struct Renderer::Frame {
+struct SdlGpuRenderer::Frame : FrameView {
     SDL_GPUCommandBuffer* cmd = nullptr;
     SDL_GPURenderPass* pass = nullptr;  // the frame's main pass, once begun
     unsigned width = 0, height = 0;
-    const Camera* camera = nullptr;
-    float aspect = 1, fovY = 0, nearZ = 0;
-    Mat4 viewProjection;
     // The sky, the boundary curtain, the terrain, roads and imposters. A portrait shows its instances
     // alone, over a transparent background.
     bool extras = false;
     bool water = false;  // the neighborhood's water and its reflection
-    Vec3 sun{};
 };
 
-// A primitive to draw, with what its draw needs.
-struct Renderer::Draw {
-    const GpuPrimitive* primitive;
-    const scene::Instance* instance;
-    const scene::Material* material;
-    int layer;    // the material's draw layer
-    float depth;  // blended: the game's sort depth (nearestDepth)
-    float sun;    // how much of the sun reaches it
-};
-
-// What one draw pushes and binds.
-struct Renderer::DrawUniforms {
-    SkinnedUniforms vertex{};
-    FragmentUniforms fragment{};
-    std::array<SDL_GPUTextureSamplerBinding, 6> samplers{};
-};
-
-bool Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigned width, unsigned height,
+bool SdlGpuRenderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigned width, unsigned height,
                       const Camera& camera) {
     diag::Timer timer("record frame");
     SDL_GPUTexture* depthTexture = depthFor(instancesOnly_ ? portraitDepth_ : windowDepth_, width, height);
@@ -351,18 +226,12 @@ bool Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigne
     uploadJoints(cmd);
 
     Frame f;
+    static_cast<FrameView&>(f) = FrameView::make(camera, width, height);
     f.cmd = cmd;
     f.width = width;
     f.height = height;
-    f.camera = &camera;
-    f.aspect = height ? static_cast<float>(width) / static_cast<float>(height) : 1.0f;
-    f.fovY = camera.fovX > 0 ? 2 * std::atan(std::tan(camera.fovX / 2) / f.aspect) : camera.fovY;
-    f.nearZ = camera.nearPlane > 0 ? camera.nearPlane : camera.farPlane / 10000;
-    f.viewProjection = Mat4::perspective(f.fovY, f.aspect, f.nearZ, camera.farPlane) *
-                       Mat4::lookAt(camera.eye, camera.target, {0, 0, 1});
     f.extras = drawScene_ && !instancesOnly_;
     f.water = f.extras && gpu_->terrainIndexCount > 0 && gpu_->waterIndexCount > 0 && reflectionReady(width, height);
-    f.sun = normalize({0.4f, -0.5f, 0.75f});
 
     if (f.water) {
         drawReflection(f);
@@ -390,7 +259,7 @@ bool Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigne
     }
 
     std::vector<Draw> opaque, layers, blended;
-    collectDraws(f, opaque, layers, blended);
+    FramePlan::collectDraws(*this, *this, f, opaque, layers, blended);
     drawList(f, opaque, 0);
     if (f.extras && gpu_->terrainVertices) {
         if (gpu_->terrainIndexCount > 0) {
@@ -415,7 +284,7 @@ bool Renderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigne
 
 // Makes the water's reflection textures at the size drawn at. False when they couldn't be made (out of
 // video memory), to be tried again next frame.
-bool Renderer::reflectionReady(unsigned width, unsigned height) {
+bool SdlGpuRenderer::reflectionReady(unsigned width, unsigned height) {
     if (reflection_ == nullptr || reflectionDepth_ == nullptr || reflectionWidth_ != width || reflectionHeight_ != height) {
         for (auto** t : {&reflection_, &reflectionDepth_}) {
             if (*t) {
@@ -443,7 +312,7 @@ bool Renderer::reflectionReady(unsigned width, unsigned height) {
 }
 
 // The neighborhood water's reflection: the sky and the terrain above the water, mirrored in it.
-void Renderer::drawReflection(const Frame& f) {
+void SdlGpuRenderer::drawReflection(const Frame& f) {
     SDL_GPUColorTargetInfo rc{};
     rc.texture = reflection_;
     rc.load_op = SDL_GPU_LOADOP_CLEAR;
@@ -467,7 +336,7 @@ void Renderer::drawReflection(const Frame& f) {
 
 // A sky cube map behind everything, looked up by each pixel's ray. `up` is -1 for the rays mirrored
 // in the water.
-void Renderer::drawSky(const Frame& f, SDL_GPURenderPass* on, SDL_GPUTexture* cube, float up) {
+void SdlGpuRenderer::drawSky(const Frame& f, SDL_GPURenderPass* on, SDL_GPUTexture* cube, float up) {
     const Camera& camera = *f.camera;
     const Vec3 forward = normalize(sub(camera.target, camera.eye));
     const Vec3 s = normalize(cross(forward, {0, 0, 1}));
@@ -482,7 +351,7 @@ void Renderer::drawSky(const Frame& f, SDL_GPURenderPass* on, SDL_GPUTexture* cu
 }
 
 // The boundary curtain, into depth only: nothing beyond it shows from inside.
-void Renderer::drawBoundary(const Frame& f) {
+void SdlGpuRenderer::drawBoundary(const Frame& f) {
     SDL_BindGPUGraphicsPipeline(f.pass, clipPipeline_);
     SDL_PushGPUVertexUniformData(f.cmd, 0, f.viewProjection.m.data(), 16 * sizeof(float));
     SDL_GPUBufferBinding vertices{gpu_->clipVertices, 0};
@@ -492,7 +361,7 @@ void Renderer::drawBoundary(const Frame& f) {
     SDL_DrawGPUIndexedPrimitives(f.pass, 24, 1, 0, 0, 0);
 }
 
-void Renderer::drawTerrain(const Frame& f, SDL_GPURenderPass* on, const Mat4& viewProjection, bool reflected) {
+void SdlGpuRenderer::drawTerrain(const Frame& f, SDL_GPURenderPass* on, const Mat4& viewProjection, bool reflected) {
     SDL_BindGPUGraphicsPipeline(on, terrainPipeline_);
     SDL_PushGPUVertexUniformData(f.cmd, 0, viewProjection.m.data(), 16 * sizeof(float));
     TerrainUniforms u = gpu_->terrainUniforms;
@@ -510,69 +379,8 @@ void Renderer::drawTerrain(const Frame& f, SDL_GPURenderPass* on, const Mat4& vi
     SDL_DrawGPUIndexedPrimitives(on, gpu_->terrainIndexCount, 1, 0, 0, 0);
 }
 
-// The shown instances' primitives in view, split by how they are drawn (opaque, layered, blended)
-// and in the game's order: by layer, and blended surfaces of a layer from the farthest to the nearest.
-void Renderer::collectDraws(const Frame& f, std::vector<Draw>& opaque, std::vector<Draw>& layers, std::vector<Draw>& blended) const {
-    std::vector<float> depths;
-    for (std::size_t i = 0; drawScene_ && i < instances_.size(); ++i) {
-        const auto& instance = instances_[i];
-        if (instance.mesh < 0 || static_cast<std::size_t>(instance.mesh) >= gpu_->meshes.size() || (i < visible_.size() && !visible_[i])) {
-            continue;
-        }
-        Mat4 model;
-        std::copy_n(instance.transform.m.begin(), 12, model.m.begin());
-        const Mat4 clip = f.viewProjection * model;
-        const GpuMesh& mesh = gpu_->meshes[static_cast<std::size_t>(instance.mesh)];
-        const InView meshInView = mesh.anyCullable ? boxInView(clip, mesh.low, mesh.high) : InView::Inside;
-        const std::size_t firstBlended = blended.size();
-        for (const auto& p : mesh.primitives) {
-            if (p.skinned && (i >= jointBase_.size() || jointBase_[i] < 0 || !jointBuffer_ || !gpu_->meshBuffers[p.buffers].skin)) {
-                continue;
-            }
-            if (p.cullable && meshInView != InView::Inside &&
-                (meshInView == InView::Outside || boxInView(clip, p.low, p.high) == InView::Outside)) {
-                continue;
-            }
-            int material = p.material;
-            if (i < instanceMaterials_.size() && p.source < instanceMaterials_[i].size()) {
-                material = instanceMaterials_[i][p.source];
-                if (material == scene::kHiddenMaterial) {
-                    continue;
-                }
-            }
-            const scene::Material* m =
-                material >= 0 && static_cast<std::size_t>(material) < materials_.size() ? &materials_[static_cast<std::size_t>(material)] : nullptr;
-            const auto alpha = m ? m->alpha : scene::AlphaMode::Opaque;
-            const bool blends = alpha == scene::AlphaMode::Blend || alpha == scene::AlphaMode::Add;
-            const float sortDepth = blends && p.hasBox ? nearestDepth(clip, p.low, p.high, f.nearZ) : clip.m[15];
-            (blends ? blended : alpha == scene::AlphaMode::Layer ? layers : opaque)
-                .push_back({&p, &instance, m, m ? m->layer : 0, sortDepth, p.source < instance.sun.size() ? instance.sun[p.source] : 1.0f});
-        }
-        // The game draws an object's blended surfaces of one layer from its model's last to its first
-        // (a Sim's hair underside first, the outer strands last): their depths are handed out again,
-        // the farthest to the first, so they keep that order among other objects' surfaces.
-        const auto own = blended.begin() + static_cast<std::ptrdiff_t>(firstBlended);
-        std::reverse(own, blended.end());
-        std::stable_sort(own, blended.end(), [](const Draw& a, const Draw& b) { return a.layer < b.layer; });
-        for (auto run = own; run != blended.end();) {
-            const auto end = std::find_if(run, blended.end(), [&](const Draw& d) { return d.layer != run->layer; });
-            depths.clear();
-            for (auto it = run; it != end; ++it) {
-                depths.push_back(it->depth);
-            }
-            std::sort(depths.begin(), depths.end(), std::greater<>());
-            for (std::size_t k = 0; run != end; ++run, ++k) {
-                run->depth = depths[k];
-            }
-        }
-    }
-    std::stable_sort(opaque.begin(), opaque.end(), [](const Draw& a, const Draw& b) { return a.layer < b.layer; });
-    std::stable_sort(blended.begin(), blended.end(),
-                     [](const Draw& a, const Draw& b) { return a.layer != b.layer ? a.layer < b.layer : a.depth > b.depth; });
-}
-
 // Draws primitives with the scene pipelines (`blend` 1 for the blending ones).
-void Renderer::drawList(const Frame& f, const std::vector<Draw>& list, int blend) {
+void SdlGpuRenderer::drawList(const Frame& f, const std::vector<Draw>& list, int blend) {
     // Each binding SDL is given takes new GPU descriptors, so textures and joints are bound only when
     // they change (and again after a pipeline switch).
     SDL_GPUGraphicsPipeline* bound = nullptr;
@@ -603,7 +411,11 @@ void Renderer::drawList(const Frame& f, const std::vector<Draw>& list, int blend
             SDL_BindGPUVertexStorageBuffers(f.pass, 0, &jointBuffer_, 1);
             jointsBound = true;
         }
-        const DrawUniforms u = uniformsFor(f, d, blend);
+        const DrawUniforms u = FramePlan::uniformsFor(*this, *this, f, d, blend);
+        std::array<SDL_GPUTextureSamplerBinding, 6> samplers;
+        for (std::size_t k = 0; k < samplers.size(); ++k) {
+            samplers[k] = {textureFor(u.samplers[k].texture), samplerFor(u.samplers[k].sampler)};
+        }
         if (skinned) {
             SDL_PushGPUVertexUniformData(f.cmd, 0, &u.vertex, sizeof(u.vertex));
         } else {
@@ -613,9 +425,9 @@ void Renderer::drawList(const Frame& f, const std::vector<Draw>& list, int blend
         const auto same = [](const SDL_GPUTextureSamplerBinding& a, const SDL_GPUTextureSamplerBinding& b) {
             return a.texture == b.texture && a.sampler == b.sampler;
         };
-        if (!std::equal(u.samplers.begin(), u.samplers.end(), boundSamplers.begin(), same)) {
-            SDL_BindGPUFragmentSamplers(f.pass, 0, u.samplers.data(), static_cast<Uint32>(u.samplers.size()));
-            boundSamplers = u.samplers;
+        if (!std::equal(samplers.begin(), samplers.end(), boundSamplers.begin(), same)) {
+            SDL_BindGPUFragmentSamplers(f.pass, 0, samplers.data(), static_cast<Uint32>(samplers.size()));
+            boundSamplers = samplers;
         }
         // A skinned primitive's two vertex streams start where its own part of each buffer does. The
         // others share one binding, with the first vertex given to the draw.
@@ -632,202 +444,41 @@ void Renderer::drawList(const Frame& f, const std::vector<Draw>& list, int blend
     }
 }
 
-// One draw's uniforms and textures: its place, the lights it is lit by, and its material.
-Renderer::DrawUniforms Renderer::uniformsFor(const Frame& f, const Draw& d, int blend) const {
-    DrawUniforms u;
-    SkinnedUniforms& vu = u.vertex;
-    std::copy(f.viewProjection.m.begin(), f.viewProjection.m.end(), vu.frame.viewProjection);
-    const auto& t = d.instance->transform.m;
-    const float model[16] = {t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10], t[11], 0, 0, 0, 1};
-    std::copy(std::begin(model), std::end(model), vu.frame.model);
-    std::copy(f.camera->eye.begin(), f.camera->eye.end(), vu.frame.eye);
-    if (const scene::Material* lit = d.material; lit && lit->specPower > 0 && !lit->simLighting) {
-        std::copy(lit->specCoef.begin(), lit->specCoef.end(), vu.frame.specular);
-        vu.frame.specular[3] = lit->specPower;
-    }
-    const scene::Material* m = d.material;
-    const bool skirt = d.instance->part == scene::Part::Skirt;
-    const scene::ObjectLighting* lighting = objectLighting_ ? &*objectLighting_ : nullptr;
-    const auto& parts = d.instance->partLightSets;
-    const int set = d.primitive->source < parts.size() ? parts[d.primitive->source] : d.instance->lightSet;
-    if (set >= 0 && static_cast<std::size_t>(set) < lightSets_.size()) {
-        lighting = &lightSets_[static_cast<std::size_t>(set)];
-    }
-    const bool roof = d.instance->part == scene::Part::Roof && m && m->roofLight && objectLighting_;
-    // A roof's underside, trim and edges: standard materials, lit as objects outdoors.
-    const bool roofEdge = d.instance->part == scene::Part::Roof && m && !m->roofLight && !m->unlit && objectLighting_;
-    // As the game's standard and Sim materials: on lit surfaces with tangents, the first lights per
-    // pixel, through the normal map. Sims' even without one.
-    SDL_GPUTexture* normalMap = bumpMapping_ && d.primitive->tangents && m && m->normalMap >= 0 &&
-                                        static_cast<std::size_t>(m->normalMap) < gpu_->textures.size()
-                                    ? gpu_->textures[static_cast<std::size_t>(m->normalMap)]
-                                    : nullptr;
-    const bool bumped = bumpMapping_ && d.primitive->tangents && m && !m->unlit && (normalMap != nullptr || m->simLighting);
-    if (roof || roofEdge || (d.instance->litOutdoors && objectLighting_)) {
-        lighting = &*objectLighting_;
-    }
-    if (lighting && (d.instance->part == scene::Part::Object || skirt || roof || roofEdge || d.instance->litOutdoors)) {
-        setLights(u, d, *lighting, skirt, roof, bumped);
-    }
-    if (d.primitive->skinned) {
-        vu.jointBase = static_cast<std::uint32_t>(jointBase_[static_cast<std::size_t>(d.instance - instances_.data())]);
-    }
-    setMaterial(u, f, d, blend, normalMap, lighting);
-    return u;
+bool SdlGpuRenderer::hasImage(int index) const {
+    return index >= 0 && static_cast<std::size_t>(index) < gpu_->textures.size() && gpu_->textures[static_cast<std::size_t>(index)] != nullptr;
 }
 
-// The ambient, thumbnail tint and lights of a lit object, skirt or roof.
-void Renderer::setLights(DrawUniforms& u, const Draw& d, const scene::ObjectLighting& l, bool skirt, bool roof, bool bumped) const {
-    SkinnedUniforms& vu = u.vertex;
-    const scene::Material* m = d.material;
-    for (std::size_t k = 0; k < 3; ++k) {
-        // The skirt's and roofs' ambient: a quarter of it as a byte (the device's ambient),
-        // times the material's ambient (the skirt's own, a roof's four times its diffuse).
-        const float device = std::round(std::clamp(l.ambient[k] / 4, 0.0f, 1.0f) * 255) / 255;
-        vu.frame.ambient[k] = skirt ? device * d.instance->skirtAmbient : roof ? device * 4 : l.ambient[k];
-    }
-    if (highlightObject_ != 0 && d.instance->part == scene::Part::Object && d.instance->object == highlightObject_) {
-        for (std::size_t k = 0; k < 3; ++k) {
-            vu.frame.ambient[k] += highlightAmbient_;
-        }
-    }
-    vu.frame.ambient[3] = skirt ? 3.0f : 1.0f;
-    if (skirt) {
-        std::copy(d.instance->skirtScale.begin(), d.instance->skirtScale.end(), vu.frame.thumbnail);
-    } else if (roof) {
-        // The vertex colour clamped, then doubled by the texture stage: the same as a thumbnail.
-        vu.frame.thumbnail[0] = m->color[0];
-        vu.frame.thumbnail[1] = m->color[1];
-        vu.frame.thumbnail[2] = m->color[2];
-        vu.frame.thumbnail[3] = 0.5f;
-    } else if (l.thumbnailScale > 0) {
-        const auto c = m ? m->color : std::array<float, 4>{1, 1, 1, 1};
-        vu.frame.thumbnail[0] = c[0];
-        vu.frame.thumbnail[1] = c[1];
-        vu.frame.thumbnail[2] = c[2];
-        vu.frame.thumbnail[3] = l.thumbnailScale;
-    }
-    if (bumped && !skirt && !roof && l.thumbnailScale <= 0) {
-        const auto chosen = scene::perPixelLights(l, kObjectLights);
-        vu.frame.pixelLights[0] = static_cast<std::int32_t>(chosen.size());
-        for (std::size_t k = 0; k < chosen.size(); ++k) {
-            vu.frame.pixelLights[k + 1] = static_cast<std::int32_t>(chosen[k]);
-        }
-    }
-    for (std::size_t i = 0; i < kObjectLights && i < l.lights.size(); ++i) {
-        std::copy(l.lights[i].direction.begin(), l.lights[i].direction.end(), vu.frame.lightDirections[i]);
-        if (l.lights[i].point) {
-            vu.frame.lightDirections[i][3] = l.lights[i].range * l.lights[i].range;
-            std::copy(l.lights[i].position.begin(), l.lights[i].position.end(), vu.frame.lightPositions[i]);
-            vu.frame.lightPositions[i][3] = l.lights[i].falloff;
-            if (l.lights[i].spot) {
-                const float width = l.lights[i].coneInner - l.lights[i].coneOuter;
-                vu.frame.lightCones[i][0] = l.lights[i].coneOuter;
-                vu.frame.lightCones[i][1] = width > 1e-6f ? 1 / width : 1e6f;
-                vu.frame.lightCones[i][2] = 1;
-            }
-        }
-        const float share = l.lights[i].sun && !skirt ? d.sun : 1.0f;
-        for (std::size_t k = 0; k < 3; ++k) {
-            vu.frame.lightColors[i][k] = l.lights[i].color[k] * share;
-        }
-    }
+bool SdlGpuRenderer::hasEnvCube(int index) const {
+    return index >= 0 && static_cast<std::size_t>(index) < gpu_->envCubes.size() && gpu_->envCubes[static_cast<std::size_t>(index)] != nullptr;
 }
 
-// The material's color, texture and alpha test, the light map a floor or wall is lit by, and the
-// textures to bind.
-void Renderer::setMaterial(DrawUniforms& u, const Frame& f, const Draw& d, int blend, SDL_GPUTexture* normalMap,
-                           const scene::ObjectLighting* lighting) const {
-    const SkinnedUniforms& vu = u.vertex;
-    FragmentUniforms& fu = u.fragment;
-    const scene::Material* m = d.material;
-    const auto c = m ? m->color : std::array<float, 4>{0.8f, 0.8f, 0.8f, 1};
-    std::copy(c.begin(), c.end(), fu.color);
-    if (night_ && m && m->nightDimmed) {
-        fu.color[0] *= 0.35f;
-        fu.color[1] *= 0.35f;
-        fu.color[2] *= 0.7f;
-    }
-    fu.sunDirection[0] = f.sun[0];
-    fu.sunDirection[1] = f.sun[1];
-    fu.sunDirection[2] = f.sun[2];
-    SDL_GPUTexture* texture = gpu_->white;
-    if (m && m->image >= 0 && static_cast<std::size_t>(m->image) < gpu_->textures.size() && gpu_->textures[static_cast<std::size_t>(m->image)]) {
-        texture = gpu_->textures[static_cast<std::size_t>(m->image)];
-        fu.hasTexture = 1;
-    }
-    fu.alphaCutoff = !m                                     ? 0.0f
-                     : m->alpha == scene::AlphaMode::Mask  ? m->alphaReference
-                     : m->alpha == scene::AlphaMode::Layer ? 10.0f / 255  // as the game's terrain paint
-                     : m->alpha == scene::AlphaMode::Add   ? 1.0f / 255   // as the game's particles
-                     : blend                               ? 0.01f
-                                                           : 0.0f;
-    fu.unlit = m && m->unlit ? 1.0f : 0.0f;
-    // A lot's floors and walls: lit by their light map alone.
-    SDL_GPUTexture* lightMap = gpu_->white;
-    SDL_GPUTexture* lightMapFrom = nullptr;
-    SDL_GPUTexture* incidence = gpu_->white;
-    fu.lightMapFade = 1;
-    if (const int i = d.instance->lightMap; d.primitive->lightMapped && i >= 0 && static_cast<std::size_t>(i) < gpu_->textures.size() &&
-                                            gpu_->textures[static_cast<std::size_t>(i)]) {
-        lightMap = gpu_->textures[static_cast<std::size_t>(i)];
-        if (const auto from = gpu_->fadingFrom.find(i); from != gpu_->fadingFrom.end() && from->second) {
-            lightMapFrom = from->second;
-            fu.lightMapFade = gpu_->lightMapFade;
-        }
-        fu.lightMap[0] = d.instance->lightMapGain;
-        fu.lightMap[1] = d.instance->lightMapOnly ? 1.0f : 0.0f;
-        fu.lightMap[2] = d.instance->lightMapMultiply ? 1.0f : 0.0f;
-        // A floor's or wall's normal map, against its light map's incidence map.
-        const int k = d.instance->incidenceMap;
-        if (bumpMapping_ && floorAndWallNormalMapping_ && m && m->normalMap >= 0 && static_cast<std::size_t>(m->normalMap) < gpu_->textures.size() &&
-            k >= 0 && static_cast<std::size_t>(k) < gpu_->textures.size() && gpu_->textures[static_cast<std::size_t>(m->normalMap)] &&
-            gpu_->textures[static_cast<std::size_t>(k)] && !d.instance->lightMapMultiply) {
-            normalMap = gpu_->textures[static_cast<std::size_t>(m->normalMap)];
-            incidence = gpu_->textures[static_cast<std::size_t>(k)];
-            fu.lightMap[3] = 1;
-        }
-    }
-    fu.pixelLightCount = static_cast<float>(vu.frame.pixelLights[0]);
-    fu.normalMapped = normalMap != nullptr ? 1.0f : 0.0f;
-    fu.simLighting = m && m->simLighting && lighting && d.instance->part == scene::Part::Object && vu.frame.thumbnail[3] <= 0 ? 1.0f : 0.0f;
-    for (std::int32_t k = 0; k < vu.frame.pixelLights[0]; ++k) {
-        const auto& lightColor = vu.frame.lightColors[vu.frame.pixelLights[k + 1]];
-        std::copy(lightColor, lightColor + 4, fu.pixelLightColors[k]);
-    }
-    if (m && (m->emissive[0] > 0 || m->emissive[1] > 0 || m->emissive[2] > 0)) {
-        std::copy(m->emissive.begin(), m->emissive.end(), fu.emissive);
-        fu.emissive[3] = 1;
-    }
-    // The environment cube, black for materials without one so the binding rarely changes.
-    SDL_GPUTexture* cube = gpu_->blackCube;
-    if (m && m->envCube >= 0 && static_cast<std::size_t>(m->envCube) < gpu_->envCubes.size() &&
-        gpu_->envCubes[static_cast<std::size_t>(m->envCube)]) {
-        cube = gpu_->envCubes[static_cast<std::size_t>(m->envCube)];
-        std::copy(m->envCubeCoef.begin(), m->envCubeCoef.end(), fu.envCube);
-        fu.envCube[3] = 1;
-        if (m->envCubeLocked) {
-            const Camera& camera = *f.camera;
-            const Vec3 forward = normalize(sub(camera.target, camera.eye));
-            // Looking straight down or up, the world's y stands in for up so right stays defined.
-            const Vec3 side = cross(forward, {0, 0, 1});
-            const Vec3 right = normalize(dot(side, side) > 1e-8f ? side : cross(forward, {0, 1, 0}));
-            const Vec3 up = cross(right, forward);
-            std::copy(right.begin(), right.end(), fu.cameraRight);
-            std::copy(up.begin(), up.end(), fu.cameraUp);
-            std::copy(forward.begin(), forward.end(), fu.cameraForward);
-            fu.cameraRight[3] = 1;
-        }
-    }
-    u.samplers = {{{texture, m && m->clamp ? clampedSampler_ : sampler_},
-                   {lightMap, clampedSampler_},
-                   {normalMap ? normalMap : gpu_->white, sampler_},
-                   {incidence, clampedSampler_},
-                   {lightMapFrom ? lightMapFrom : lightMap, clampedSampler_},
-                   {cube, clampedSampler_}}};
+bool SdlGpuRenderer::hasFadeFrom(int index) const {
+    const auto from = gpu_->fadingFrom.find(index);
+    return from != gpu_->fadingFrom.end() && from->second != nullptr;
 }
 
-void Renderer::drawRoads(const Frame& f) {
+bool SdlGpuRenderer::skinReady(std::uint32_t buffers) const {
+    return jointBuffer_ != nullptr && gpu_->meshBuffers[buffers].skin != nullptr;
+}
+
+SDL_GPUTexture* SdlGpuRenderer::textureFor(const TextureRef& ref) const {
+    const auto at = static_cast<std::size_t>(ref.index);
+    switch (ref.kind) {
+    case TextureRef::Kind::Image:
+        return gpu_->textures[at];
+    case TextureRef::Kind::BlackCube:
+        return gpu_->blackCube;
+    case TextureRef::Kind::EnvCube:
+        return gpu_->envCubes[at];
+    case TextureRef::Kind::FadeFrom:
+        return gpu_->fadingFrom.at(ref.index);
+    case TextureRef::Kind::White:
+        break;
+    }
+    return gpu_->white;
+}
+
+void SdlGpuRenderer::drawRoads(const Frame& f) {
     SDL_BindGPUGraphicsPipeline(f.pass, roadPipeline_);
     SDL_PushGPUVertexUniformData(f.cmd, 0, f.viewProjection.m.data(), 16 * sizeof(float));
     const float road[4] = {gpu_->lightMapSize, 0, 0, 0};
@@ -841,7 +492,7 @@ void Renderer::drawRoads(const Frame& f) {
     SDL_DrawGPUIndexedPrimitives(f.pass, gpu_->roadIndexCount, 1, 0, 0, 0);
 }
 
-void Renderer::drawWater(const Frame& f) {
+void SdlGpuRenderer::drawWater(const Frame& f) {
     SDL_BindGPUGraphicsPipeline(f.pass, waterPipeline_);
     SDL_PushGPUVertexUniformData(f.cmd, 0, f.viewProjection.m.data(), 16 * sizeof(float));
     WaterUniforms w = gpu_->waterUniforms;
@@ -859,7 +510,7 @@ void Renderer::drawWater(const Frame& f) {
 }
 
 // Sprites in order, one draw per run of the same texture.
-void Renderer::drawSprites(const Frame& f) {
+void SdlGpuRenderer::drawSprites(const Frame& f) {
     SDL_BindGPUGraphicsPipeline(f.pass, spritePipeline_);
     const float screen[4] = {static_cast<float>(f.width), static_cast<float>(f.height), 0, 0};
     SDL_PushGPUVertexUniformData(f.cmd, 0, screen, sizeof(screen));

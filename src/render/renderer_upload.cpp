@@ -151,7 +151,7 @@ SDL_GPUTexture* uploadCube(SDL_GPUDevice* device, UploadPass& pass, const std::v
 
 } // namespace render_detail
 
-void Renderer::SceneGpu::release(SDL_GPUDevice* device) {
+void SdlGpuRenderer::SceneGpu::release(SDL_GPUDevice* device) {
     meshes.clear();
     for (auto* t : textures) {
         if (t) {
@@ -206,51 +206,40 @@ void Renderer::SceneGpu::release(SDL_GPUDevice* device) {
     roadIndexCount = 0;
 }
 
-void Renderer::upload(const scene::Scene& scene) {
-    upload(prepare(scene));
+IRenderer::Prepared SdlGpuRenderer::prepare(const scene::Scene& scene) const {
+    auto p = std::make_unique<GpuPrepared>();
+    p->device = device_;
+    p->gpu = std::make_unique<SceneGpu>();
+    p->gpu->upload(device_, scene, p->withMips);
+    copyScene(*p, scene);
+    return Prepared(std::move(p));
 }
 
-Renderer::Prepared Renderer::prepare(const scene::Scene& scene) const {
-    Prepared p;
-    p.device_ = device_;
-    p.gpu_ = std::make_unique<SceneGpu>();
-    p.gpu_->upload(device_, scene, p.withMips_);
-    p.materials_ = scene.materials;
-    p.instances_ = scene.instances;
-    p.objectLighting_ = scene.objectLighting;
-    p.lightSets_ = scene.lightSets;
-    return p;
-}
-
-void Renderer::upload(Prepared prepared) {
+void SdlGpuRenderer::upload(Prepared prepared) {
     (void)swap(std::move(prepared));
 }
 
-Renderer::Prepared Renderer::swap(Prepared prepared) {
-    if (!prepared.gpu_) {
-        prepared.gpu_ = std::make_unique<SceneGpu>();
+IRenderer::Prepared SdlGpuRenderer::swap(Prepared prepared) {
+    if (!prepared.get()) {
+        prepared = Prepared(std::make_unique<GpuPrepared>());
     }
-    prepared.device_ = device_;
-    std::swap(gpu_, prepared.gpu_);
-    std::swap(materials_, prepared.materials_);
-    std::swap(instances_, prepared.instances_);
-    instanceMaterials_.clear();
-    std::swap(objectLighting_, prepared.objectLighting_);
-    std::swap(lightSets_, prepared.lightSets_);
-    visible_.clear();
-    jointBase_.assign(instances_.size(), -1);
-    jointCount_.assign(instances_.size(), 0);
-    jointData_.clear();
+    auto& p = static_cast<GpuPrepared&>(*prepared.get());
+    if (!p.gpu) {
+        p.gpu = std::make_unique<SceneGpu>();
+    }
+    p.device = device_;
+    std::swap(gpu_, p.gpu);
+    swapScene(p);
     // SDL makes mip levels with its own blit pipelines, which it keeps without a lock: only here, on
     // the drawing thread. The fence comes after them and the copies sent before.
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
     if (cmd == nullptr) {
         throw sdlError("GPU command buffer");
     }
-    for (auto* t : prepared.withMips_) {
+    for (auto* t : p.withMips) {
         SDL_GenerateMipmapsForGPUTexture(cmd, t);
     }
-    prepared.withMips_.clear();
+    p.withMips.clear();
     if (uploadFence_) {
         SDL_ReleaseGPUFence(device_, uploadFence_);
     }
@@ -258,7 +247,7 @@ Renderer::Prepared Renderer::swap(Prepared prepared) {
     return prepared;
 }
 
-bool Renderer::uploaded() {
+bool SdlGpuRenderer::uploaded() {
     if (uploadFence_ && SDL_QueryGPUFence(device_, uploadFence_)) {
         SDL_ReleaseGPUFence(device_, uploadFence_);
         uploadFence_ = nullptr;
@@ -266,31 +255,13 @@ bool Renderer::uploaded() {
     return uploadFence_ == nullptr;
 }
 
-Renderer::Prepared& Renderer::Prepared::operator=(Prepared&& other) noexcept {
-    if (this != &other) {
-        release();
-        device_ = other.device_;
-        gpu_ = std::move(other.gpu_);
-        withMips_ = std::move(other.withMips_);
-        materials_ = std::move(other.materials_);
-        instances_ = std::move(other.instances_);
-        objectLighting_ = std::move(other.objectLighting_);
-        lightSets_ = std::move(other.lightSets_);
-    }
-    return *this;
-}
-
-Renderer::Prepared::~Prepared() {
-    release();
-}
-
-void Renderer::Prepared::releaseSome(std::size_t textures) {
-    if (gpu_ && gpu_->releaseTextures(device_, textures)) {
+void SdlGpuRenderer::GpuPrepared::releaseSome(std::size_t textures) {
+    if (gpu && gpu->releaseTextures(device, textures)) {
         release();
     }
 }
 
-bool Renderer::SceneGpu::releaseTextures(SDL_GPUDevice* device, std::size_t count) {
+bool SdlGpuRenderer::SceneGpu::releaseTextures(SDL_GPUDevice* device, std::size_t count) {
     for (auto* list : {&textures, &imposterTextures}) {
         for (; count > 0 && !list->empty(); --count) {
             if (list->back()) {
@@ -302,104 +273,17 @@ bool Renderer::SceneGpu::releaseTextures(SDL_GPUDevice* device, std::size_t coun
     return textures.empty() && imposterTextures.empty();
 }
 
-void Renderer::Prepared::release() {
-    if (gpu_) {
-        gpu_->release(device_);
-        gpu_.reset();
+void SdlGpuRenderer::GpuPrepared::release() {
+    if (gpu) {
+        gpu->release(device);
+        gpu.reset();
     }
-    withMips_.clear();
-}
-
-Renderer::GpuMesh Renderer::packMesh(const scene::Mesh& mesh, std::size_t materials, std::uint32_t buffers, MeshData& data) {
-    GpuMesh gm;
-    for (const auto& p : mesh.primitives) {
-        const std::size_t n = p.positions.size() / 3;
-        if (n == 0 || p.indices.empty()) {
-            continue;
-        }
-        // The scene builders check their indices. This keeps the GPU from ever reading past the
-        // vertices should one be missed.
-        if (std::any_of(p.indices.begin(), p.indices.end(), [n](std::uint32_t k) { return k >= n; })) {
-            continue;
-        }
-        const bool skinned = p.joints.size() == n * 4 && p.weights.size() == n * 4;
-        // A GPU buffer's size is 32-bit: a scene too big for that leaves out the rest of its primitives.
-        constexpr std::size_t kMaxBytes = 0x7FFFFFFF;
-        if ((data.vertices.size() + n * kVertexFloats) * sizeof(float) > kMaxBytes ||
-            (data.indices.size() + p.indices.size()) * sizeof(std::uint32_t) > kMaxBytes || (data.skin.size() + n * kSkinBytes) > kMaxBytes) {
-            data.tooBig = true;
-            continue;
-        }
-        GpuPrimitive g;
-        g.buffers = buffers;
-        g.firstVertex = static_cast<std::uint32_t>(data.vertices.size() / kVertexFloats);
-        g.firstIndex = static_cast<std::uint32_t>(data.indices.size());
-        data.vertices.resize(data.vertices.size() + n * kVertexFloats, 0.0f);
-        for (std::size_t i = 0; i < n; ++i) {
-            float* v = &data.vertices[(g.firstVertex + i) * kVertexFloats];
-            std::copy_n(&p.positions[i * 3], 3, v);
-            if (p.normals.size() == p.positions.size()) {
-                std::copy_n(&p.normals[i * 3], 3, v + 3);
-            } else {
-                v[5] = 1;
-            }
-            if (p.uvs.size() == n * 2) {
-                std::copy_n(&p.uvs[i * 2], 2, v + 6);
-            }
-            v[8] = p.alphas.size() == n ? p.alphas[i] : 1.0f;
-            if (p.lightUvs.size() == n * 2) {
-                std::copy_n(&p.lightUvs[i * 2], 2, v + 9);
-            }
-            if (p.colors.size() == n * 3) {
-                std::copy_n(&p.colors[i * 3], 3, v + 11);
-            } else {
-                std::fill_n(v + 11, 3, 1.0f);
-            }
-            if (p.tangents.size() == n * 3) {
-                std::copy_n(&p.tangents[i * 3], 3, v + 14);
-            }
-        }
-        data.indices.insert(data.indices.end(), p.indices.begin(), p.indices.end());
-        g.count = static_cast<unsigned>(p.indices.size());
-        g.material = p.material >= 0 && static_cast<std::size_t>(p.material) < materials ? p.material : -1;
-        g.lightMapped = p.lightUvs.size() == n * 2;
-        g.tangents = p.tangents.size() == n * 3 && p.uvs.size() == n * 2;
-        g.source = static_cast<std::size_t>(&p - mesh.primitives.data());
-        g.low = {p.positions[0], p.positions[1], p.positions[2]};
-        g.high = g.low;
-        for (std::size_t i = 1; i < n; ++i) {
-            for (std::size_t k = 0; k < 3; ++k) {
-                g.low[k] = std::min(g.low[k], p.positions[i * 3 + k]);
-                g.high[k] = std::max(g.high[k], p.positions[i * 3 + k]);
-            }
-        }
-        if (skinned) {
-            g.skinned = true;
-            g.firstSkin = static_cast<std::uint32_t>(data.skin.size());
-            data.skin.resize(data.skin.size() + n * kSkinBytes);
-            for (std::size_t i = 0; i < n; ++i) {
-                std::memcpy(&data.skin[g.firstSkin + i * kSkinBytes], &p.joints[i * 4], 4);
-                std::memcpy(&data.skin[g.firstSkin + i * kSkinBytes + 4], &p.weights[i * 4], 4 * sizeof(float));
-            }
-        }
-        const auto finite = [](const std::array<float, 3>& a) { return std::isfinite(a[0]) && std::isfinite(a[1]) && std::isfinite(a[2]); };
-        g.hasBox = finite(g.low) && finite(g.high);
-        g.cullable = !g.skinned && g.hasBox;
-        if (g.cullable) {
-            for (std::size_t k = 0; k < 3; ++k) {
-                gm.low[k] = gm.anyCullable ? std::min(gm.low[k], g.low[k]) : g.low[k];
-                gm.high[k] = gm.anyCullable ? std::max(gm.high[k], g.high[k]) : g.high[k];
-            }
-            gm.anyCullable = true;
-        }
-        gm.primitives.push_back(g);
-    }
-    return gm;
+    withMips.clear();
 }
 
 // One copy pass a scene is uploaded in, and the ways of filling buffers and textures in it. Textures
 // whose mip levels the GPU still has to make go into `withMips`.
-struct Renderer::SceneGpu::Copy {
+struct SdlGpuRenderer::SceneGpu::Copy {
     SDL_GPUDevice* device;
     UploadPass& pass;
     std::vector<SDL_GPUTexture*>& withMips;
@@ -473,7 +357,7 @@ struct Renderer::SceneGpu::Copy {
     }
 };
 
-void Renderer::SceneGpu::upload(SDL_GPUDevice* device, const scene::Scene& scene, std::vector<SDL_GPUTexture*>& withMips) {
+void SdlGpuRenderer::SceneGpu::upload(SDL_GPUDevice* device, const scene::Scene& scene, std::vector<SDL_GPUTexture*>& withMips) {
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device);
     if (cmd == nullptr) {
         throw sdlError("GPU command buffer");
@@ -517,7 +401,7 @@ void Renderer::SceneGpu::upload(SDL_GPUDevice* device, const scene::Scene& scene
 }
 
 // The scene's images, and a white texture for surfaces without one.
-void Renderer::SceneGpu::uploadImages(Copy& c, const scene::Scene& scene) {
+void SdlGpuRenderer::SceneGpu::uploadImages(Copy& c, const scene::Scene& scene) {
     // Light maps are drawn as the game draws them: one level, no mipmaps.
     std::set<std::size_t> lightMaps;
     if (scene.lightMaps) {
@@ -534,7 +418,7 @@ void Renderer::SceneGpu::uploadImages(Copy& c, const scene::Scene& scene) {
 }
 
 // All meshes go into one vertex, one index and one skin buffer. Each primitive keeps where its part starts.
-void Renderer::SceneGpu::uploadMeshes(Copy& c, const scene::Scene& scene) {
+void SdlGpuRenderer::SceneGpu::uploadMeshes(Copy& c, const scene::Scene& scene) {
     MeshData data;
     meshBuffers.emplace_back();
     for (const auto& mesh : scene.meshes) {
@@ -553,7 +437,7 @@ void Renderer::SceneGpu::uploadMeshes(Copy& c, const scene::Scene& scene) {
 }
 
 // The neighborhood terrain's grid of points and its tiles.
-void Renderer::SceneGpu::uploadTerrainGrid(Copy& c, const scene::PaintedTerrain& t) {
+void SdlGpuRenderer::SceneGpu::uploadTerrainGrid(Copy& c, const scene::PaintedTerrain& t) {
     // Vertices: position, normal, grid position.
     std::vector<float> v(static_cast<std::size_t>(t.columns) * t.rows * 8);
     for (std::uint32_t y = 0; y < t.rows; ++y) {
@@ -588,7 +472,7 @@ void Renderer::SceneGpu::uploadTerrainGrid(Copy& c, const scene::PaintedTerrain&
 }
 
 // The terrain's paints, where each shows, its light map and its underwater gradient.
-void Renderer::SceneGpu::uploadTerrainTextures(Copy& c, const scene::PaintedTerrain& t) {
+void SdlGpuRenderer::SceneGpu::uploadTerrainTextures(Copy& c, const scene::PaintedTerrain& t) {
     // The paint textures share one array, so each must be the first one's size. Others are drawn white.
     const auto& first = complete(t.textures.front()) ? t.textures.front() : c.whiteImage;
     std::vector<std::uint8_t> blank;
@@ -625,7 +509,7 @@ void Renderer::SceneGpu::uploadTerrainTextures(Copy& c, const scene::PaintedTerr
 
 // The water sheet: a quad per wet tile at the water level, texture coordinates in tiles, with its
 // ripples and the sky it reflects.
-void Renderer::SceneGpu::uploadWater(Copy& c, const scene::PaintedTerrain& t) {
+void SdlGpuRenderer::SceneGpu::uploadWater(Copy& c, const scene::PaintedTerrain& t) {
     std::vector<float> wv;
     std::vector<std::uint32_t> wi;
     const std::uint32_t tilesX = t.columns - 1;
@@ -679,7 +563,7 @@ void Renderer::SceneGpu::uploadWater(Copy& c, const scene::PaintedTerrain& t) {
 }
 
 // The roads: a quad per tile, split like the terrain's tiles.
-void Renderer::SceneGpu::uploadRoads(Copy& c, const scene::PaintedTerrain& t) {
+void SdlGpuRenderer::SceneGpu::uploadRoads(Copy& c, const scene::PaintedTerrain& t) {
     std::vector<float> rv;
     std::vector<std::uint32_t> ri;
     rv.reserve(t.roads.size() * 24);
@@ -705,7 +589,7 @@ void Renderer::SceneGpu::uploadRoads(Copy& c, const scene::PaintedTerrain& t) {
 }
 
 // The lot imposters: all parts in one buffer, each drawn with its own texture.
-void Renderer::SceneGpu::uploadImposters(Copy& c, const scene::PaintedTerrain& t) {
+void SdlGpuRenderer::SceneGpu::uploadImposters(Copy& c, const scene::PaintedTerrain& t) {
     for (const auto& image : t.imposterTextures) {
         imposterTextures.push_back(c.plain(image, false));
     }
@@ -732,7 +616,7 @@ void Renderer::SceneGpu::uploadImposters(Copy& c, const scene::PaintedTerrain& t
 }
 
 // A lot skirt's boundary curtain: a wall on each edge, facing inwards.
-void Renderer::SceneGpu::uploadBoundary(Copy& c, const scene::Scene& scene) {
+void SdlGpuRenderer::SceneGpu::uploadBoundary(Copy& c, const scene::Scene& scene) {
     const auto& b = *scene.clip;
     const float corners[4][2] = {{b.x0, b.y0}, {b.x1, b.y0}, {b.x1, b.y1}, {b.x0, b.y1}};
     std::vector<float> cv;

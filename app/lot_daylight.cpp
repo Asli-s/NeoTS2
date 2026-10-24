@@ -50,7 +50,7 @@ LotDaylight::~LotDaylight() {
 }
 
 void LotDaylight::update(double seconds, std::span<const std::int16_t> globals, ts2::scene::Assets& assets, ts2::scene::Scene& scene,
-                         ts2::render::Renderer& renderer, LotLife& life) {
+                         ts2::render::IRenderer& renderer, LotLife& life) {
     if (!base_) {
         return;
     }
@@ -103,7 +103,7 @@ void LotDaylight::update(double seconds, std::span<const std::int16_t> globals, 
     });
 }
 
-void LotDaylight::settle(ts2::scene::Scene& scene, ts2::render::Renderer& renderer, LotLife& life) {
+void LotDaylight::settle(ts2::scene::Scene& scene, ts2::render::IRenderer& renderer, LotLife& life) {
     if (working_.valid()) {
         working_.wait();
         try {
@@ -123,7 +123,7 @@ void LotDaylight::settle(ts2::scene::Scene& scene, ts2::render::Renderer& render
     }
 }
 
-void LotDaylight::put(LotLight& light, ts2::scene::Scene& scene, ts2::render::Renderer& renderer, LotLife& life) {
+void LotDaylight::put(LotLight& light, ts2::scene::Scene& scene, ts2::render::IRenderer& renderer, LotLife& life) {
     const auto put = putLotLight(scene, light, place_);
     renderer.setImages(scene, put.images, true);
     renderer.setLightMapFade(0);

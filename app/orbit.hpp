@@ -1,7 +1,7 @@
 #pragma once
 
 #include "formats/camera_config.hpp"
-#include "render/renderer.hpp"
+#include "render/irenderer.hpp"
 #include "scene/hood_drift.hpp"
 #include "scene/neighborhood_scene.hpp"
 

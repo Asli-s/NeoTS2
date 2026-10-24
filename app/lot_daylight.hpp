@@ -1,7 +1,7 @@
 #pragma once
 
 #include "lot_light.hpp"
-#include "render/renderer.hpp"
+#include "render/irenderer.hpp"
 #include "scene/assets.hpp"
 #include "scene/scene.hpp"
 
@@ -33,13 +33,13 @@ public:
 
     // Once a frame, after the simulation's update, with the real seconds since the last frame.
     void update(double seconds, std::span<const std::int16_t> globals, ts2::scene::Assets& assets, ts2::scene::Scene& scene,
-                ts2::render::Renderer& renderer, LotLife& life);
+                ts2::render::IRenderer& renderer, LotLife& life);
 
     // Waits for light being worked out and puts it in with its fade done (for pictures).
-    void settle(ts2::scene::Scene& scene, ts2::render::Renderer& renderer, LotLife& life);
+    void settle(ts2::scene::Scene& scene, ts2::render::IRenderer& renderer, LotLife& life);
 
 private:
-    void put(LotLight& light, ts2::scene::Scene& scene, ts2::render::Renderer& renderer, LotLife& life);
+    void put(LotLight& light, ts2::scene::Scene& scene, ts2::render::IRenderer& renderer, LotLife& life);
 
     std::shared_ptr<LotLightBase> base_;
     std::string state_;  // the state the lot is lit with, or being lit with

@@ -5,6 +5,7 @@
 //          (on the lot's panels before the picture, repeatable)]
 //          [--shot <out.png>] [--seed n (the neighborhood ground's variants, so pictures repeat)]
 //   neots2 <install folder> <lot.package> [--shot <out.png> [yaw pitch distance]]
+//          [--seed n (a neighborhood's ground variants, so pictures repeat)]
 //          [--walls up|cutaway|down] [--level n (1: the ground floor)] [--target x y z] [--roofs off]
 //          [--time seconds (into the Sims' animations, for --shot)]
 // Mouse: middle-drag turns, right-drag pans, the wheel zooms. Keys: WASD or arrows pan, Q/E or
@@ -32,7 +33,7 @@
 #include "paths/game_folders.hpp"
 #include "paths/names.hpp"
 #include "paths/save_folders.hpp"
-#include "render/renderer.hpp"
+#include "render/make_renderer.hpp"
 #include "scene/assets.hpp"
 #include "scene/builder.hpp"
 #include "scene/lot_scene.hpp"
@@ -203,6 +204,7 @@ struct Options {
     int bench = 0;  // frames to time before the shot (--bench)
     std::string lightState;  // a lighting state to light the lot with, in place of its clock's
     int hour = -1, minute = 0;  // the lot's clock to start from (--clock), -1 for the saved one
+    std::optional<std::uint32_t> seed;  // the neighborhood ground's variants (--seed), random when empty
 };
 
 bool parseOptions(int argc, char** argv, Options& o) {
@@ -259,6 +261,8 @@ bool parseOptions(int argc, char** argv, Options& o) {
             ++i;
         } else if (arg == "--bench" && i + 1 < argc) {
             o.bench = std::clamp(std::stoi(argv[++i]), 0, 100000);
+        } else if (arg == "--seed" && i + 1 < argc) {
+            o.seed = static_cast<std::uint32_t>(std::stoul(argv[++i]));
         } else {
             return false;
         }
@@ -432,7 +436,7 @@ int main(int argc, char** argv) {
         ts2::scene::NeighborhoodSceneStats hoodStats;
         if (hood) {
             ts2::content::EffectsFiles effects(utf8Path(argv[1]));
-            hoodStats = app::buildNeighborhood(builder, utf8Path(argv[1]), utf8Path(argv[2]), effects);
+            hoodStats = app::buildNeighborhood(builder, utf8Path(argv[1]), utf8Path(argv[2]), effects, options.seed);
             ts2::diag::info(std::format("neighborhood {} x {} tiles, {}, sea level {:.2f}, {} lots ({} imposters), {} plants ({} shown), {} decorations ({} shown)",
                                         hoodStats.width, hoodStats.height, hoodStats.terrainType, hoodStats.seaLevel, hoodStats.lots,
                                         hoodStats.imposters, hoodStats.plants, hoodStats.plantsShown, hoodStats.decorations,
@@ -467,7 +471,8 @@ int main(int argc, char** argv) {
         }
         const std::filesystem::path shaders = utf8Path(SDL_GetBasePath()) / "shaders";
         {
-            ts2::render::Renderer renderer(window, shaders);
+            const auto rendererOwner = ts2::render::makeRenderer(ts2::render::Backend::SdlGpu, window, shaders);
+            ts2::render::IRenderer& renderer = *rendererOwner;
             renderer.setBumpMapping(options.bumpMapping);
             renderer.setFloorAndWallNormalMapping(options.wallBumps);
             renderer.setNight(ts2::content::stateTime(lightState) == ts2::content::StateTime::Night);

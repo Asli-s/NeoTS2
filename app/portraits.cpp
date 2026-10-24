@@ -5,7 +5,7 @@
 
 namespace app {
 
-std::optional<ts2::tga::Pixels> drawPortrait(const ts2::scene::Scene& lot, ts2::render::Renderer& renderer,
+std::optional<ts2::tga::Pixels> drawPortrait(const ts2::scene::Scene& lot, ts2::render::IRenderer& renderer,
                                              ts2::scene::AnimationLibrary& animations, std::uint32_t sim, std::mt19937& random) {
     using namespace ts2::scene;
     const Actor* actor = nullptr;

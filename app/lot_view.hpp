@@ -2,7 +2,7 @@
 
 #include "diag/log.hpp"
 #include "orbit.hpp"
-#include "render/renderer.hpp"
+#include "render/irenderer.hpp"
 #include "scene/lot_skirt.hpp"
 #include "scene/neighborhood_plumbobs.hpp"
 #include "scene/neighborhood_scene.hpp"
@@ -322,7 +322,7 @@ inline ts2::scene::Scene lotInNeighborhood(const ts2::scene::Scene& hood, ts2::s
 
 // Poses a scene's actors (its Sims) `seconds` after they started and hands their joints and the
 // places of what they hold to the renderer.
-inline void animateActors(const ts2::scene::Scene& scene, double seconds, ts2::render::Renderer& renderer,
+inline void animateActors(const ts2::scene::Scene& scene, double seconds, ts2::render::IRenderer& renderer,
                           ts2::scene::ScenePose& pose) {
     ts2::scene::poseActors(scene, seconds, pose);
     for (const auto& [instance, joints] : pose.joints) {

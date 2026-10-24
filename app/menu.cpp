@@ -29,7 +29,7 @@
 #include "content/ui_data.hpp"
 #include "formats/image.hpp"
 #include "formats/reia.hpp"
-#include "render/renderer.hpp"
+#include "render/make_renderer.hpp"
 #include "scene/assets.hpp"
 #include "scene/builder.hpp"
 #include "scene/lot_scene.hpp"
@@ -216,7 +216,7 @@ struct Built {
     std::optional<ts2::scene::HoodDrift> drift;
     ts2::scene::NeighborhoodPlumbobs plumbobs;
     app::NeighborhoodUi::Content panel;
-    ts2::render::Renderer::Prepared gpu;
+    ts2::render::IRenderer::Prepared gpu;
 };
 
 // A lot built in the background, then shown.
@@ -224,7 +224,7 @@ struct LotBuilt {
     ts2::scene::Scene lot;  // in its neighborhood when it has one
     app::LotView view;
     app::Orbit camera;
-    ts2::render::Renderer::Prepared gpu;
+    ts2::render::IRenderer::Prepared gpu;
     std::shared_ptr<const app::RouteModelTable> routeModels;
     // For lighting it again as its clock moves on.
     std::shared_ptr<app::LotLightBase> light;
@@ -255,7 +255,7 @@ double secondsSince(Uint64 started) {
 // that neighborhood.
 class Game {
 public:
-    Game(ts2::content::UiData& data, ts2::ui::Fonts& fonts, ts2::render::Renderer& renderer, const std::filesystem::path& install,
+    Game(ts2::content::UiData& data, ts2::ui::Fonts& fonts, ts2::render::IRenderer& renderer, const std::filesystem::path& install,
          const MenuOptions& options);
     Game(const Game&) = delete;
     Game& operator=(const Game&) = delete;
@@ -325,7 +325,7 @@ private:
     void clickPanels();
 
     ts2::content::UiData& data_;
-    ts2::render::Renderer& renderer_;
+    ts2::render::IRenderer& renderer_;
     const std::filesystem::path install_;
     const MenuOptions& options_;
     const int width_, height_;
@@ -368,7 +368,7 @@ private:
     // A lot left behind: its scene and simulation are freed in the background, its GPU textures a
     // few a frame (SDL destroys what is given back in the next frame, which took 50 ms for all).
     std::future<void> lotFreeing_;
-    ts2::render::Renderer::Prepared lotLeft_;
+    ts2::render::IRenderer::Prepared lotLeft_;
     ts2::scene::ScenePose lotPose_;
     std::vector<std::uint8_t> lotVisible_;  // the lot's instances shown this frame, for RayTrace
     // The object under the mouse, highlighted while the selected Sim could use it (0: none).
@@ -433,7 +433,7 @@ private:
     std::optional<Uint64> runStarted_;
 };
 
-Game::Game(ts2::content::UiData& data, ts2::ui::Fonts& fonts, ts2::render::Renderer& renderer, const std::filesystem::path& install,
+Game::Game(ts2::content::UiData& data, ts2::ui::Fonts& fonts, ts2::render::IRenderer& renderer, const std::filesystem::path& install,
            const MenuOptions& options)
     : data_(data), renderer_(renderer), install_(install), options_(options), width_(options.width), height_(options.height),
       screen_(data, fonts), lotUi_(screen_, width_, height_), pieMenu_(screen_), hoodUi_(screen_, data, width_, height_) {
@@ -1750,7 +1750,8 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
         throw std::runtime_error(SDL_GetError());
     }
     {
-        ts2::render::Renderer renderer(window, shaders);
+        const auto rendererOwner = ts2::render::makeRenderer(ts2::render::Backend::SdlGpu, window, shaders);
+        ts2::render::IRenderer& renderer = *rendererOwner;
         renderer.setBumpMapping(options.bumpMapping);
         renderer.setFloorAndWallNormalMapping(options.wallBumps);
         ts2::diag::info(std::format("drawing with {} in a {} x {} window", renderer.device(), width, height));

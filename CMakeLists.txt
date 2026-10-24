@@ -338,6 +338,11 @@ add_library(ts2scene
 )
 target_link_libraries(ts2scene PUBLIC ts2content PRIVATE project_warnings)
 
+# What every renderer shares, apart from any graphics API: the CPU side of a scene, culling and
+# draw order, and the numbers each draw's shaders are given.
+add_library(ts2renderplan src/render/frame_plan.cpp src/render/mesh_pack.cpp src/render/shared_state.cpp)
+target_link_libraries(ts2renderplan PUBLIC ts2scene PRIVATE project_warnings)
+
 if(NEOTS2_FUZZ)
     foreach(target qfs_fuzz dbpf_fuzz cobject_fuzz bhav_fuzz str_fuzz bcon_fuzz fcns_fuzz glob_fuzz objd_fuzz
                    objt_fuzz objm_fuzz xobj_fuzz wallgraph_fuzz array3d_fuzz srel_fuzz sdsc_fuzz fami_fuzz famt_fuzz slot_fuzz swaf_fuzz propset_fuzz ttab_fuzz luascript_fuzz ngbh_fuzz datatables_fuzz scenegraph_fuzz stringmap_fuzz walllayer_fuzz namemap_fuzz fencepostlayer_fuzz roofs_fuzz terrain_fuzz reia_fuzz
@@ -417,9 +422,9 @@ else()
         tests/test_main.cpp tests/vm_core_tests.cpp tests/vm_objects_tests.cpp tests/vm_interactions_tests.cpp
         tests/vm_scripts_tests.cpp tests/simulation_tests.cpp tests/route_planning_tests.cpp tests/vm_walking_tests.cpp
         tests/vm_set_to_next_tests.cpp tests/vm_animation_tests.cpp tests/formats_tests.cpp
-        tests/models_and_images_tests.cpp tests/scene_tests.cpp tests/assets_tests.cpp tests/lighting_tests.cpp tests/content_tests.cpp
+        tests/models_and_images_tests.cpp tests/scene_tests.cpp tests/assets_tests.cpp tests/lighting_tests.cpp tests/render_plan_tests.cpp tests/content_tests.cpp
         tests/ui_and_diag_tests.cpp tests/paths_tests.cpp tests/fuzz_regressions_tests.cpp src/ui/pie_layout.cpp src/ui/tip_layout.cpp src/ui/font_metrics.cpp src/ui/drag_arrow.cpp app/object_materials.cpp)
-    target_link_libraries(vm_tests PRIVATE ts2sim ts2scene ts2paths ts2settings lua50 project_warnings)
+    target_link_libraries(vm_tests PRIVATE ts2renderplan ts2sim ts2scene ts2paths ts2settings lua50 project_warnings)
     # Every fuzz target's entry point under its own name, so the tests replay the inputs kept in
     # fuzz/regressions/<target> through the same code the fuzzer ran.
     file(GLOB fuzz_harnesses fuzz/*_fuzz.cpp)
@@ -482,8 +487,8 @@ else()
         add_custom_target(neots2_shaders DEPENDS ${shader_outputs})
 
         add_library(ts2render src/render/renderer.cpp src/render/renderer_pipelines.cpp src/render/renderer_scene.cpp
-                    src/render/renderer_upload.cpp src/render/renderer_draw.cpp)
-        target_link_libraries(ts2render PUBLIC ts2scene SDL3::SDL3 PRIVATE project_warnings)
+                    src/render/renderer_upload.cpp src/render/renderer_draw.cpp src/render/make_renderer.cpp)
+        target_link_libraries(ts2render PUBLIC ts2renderplan SDL3::SDL3 PRIVATE project_warnings)
 
         # The game's UI: its fonts are drawn with FreeType (set freetype_DIR to its cmake folder).
         # Some distributions (Arch) ship no CMake config, so fall back to CMake's own FindFreetype
@@ -585,7 +590,7 @@ else()
 
         foreach(target neots2-launcher ts2paths ts2settings)
             get_target_property(linked ${target} LINK_LIBRARIES)
-            foreach(library ts2render ts2ui ts2sim ts2scene ts2content ts2formats lua50)
+            foreach(library ts2render ts2renderplan ts2ui ts2sim ts2scene ts2content ts2formats lua50)
                 if(library IN_LIST linked)
                     message(FATAL_ERROR "${target} must not link ${library}: the launcher stays apart from the engine")
                 endif()
