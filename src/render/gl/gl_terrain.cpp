@@ -1,5 +1,6 @@
 // The neighborhood: its terrain, roads and lot imposters, the sky behind a lot, and a lot's boundary curtain.
 #include "diag/log.hpp"
+#include "render/fixed_layout.hpp"
 #include "render/frame_plan.hpp"
 #include "render/gl/gl_renderer.hpp"
 #include "render/image_levels.hpp"
@@ -31,6 +32,7 @@ GLuint GlRenderer::uploadBuffer(GLenum target, const void* data, std::size_t byt
 // A texture of these RGBA texels, clamped at its edges, without smaller levels.
 GlRenderer::Texture GlRenderer::uploadRaw(unsigned width, unsigned height, const std::uint8_t* rgba, bool nearest) {
     Texture t;
+    checkTexture(GL_TEXTURE_2D, width, height);
     t.wrap = GL_CLAMP_TO_EDGE;
     t.nearest = nearest;
     gl_.GenTextures(1, &t.id);
@@ -50,7 +52,15 @@ GlRenderer::Texture GlRenderer::uploadRaw(unsigned width, unsigned height, const
 // imposters and the sky's triangle.
 void GlRenderer::uploadTerrain(SceneGpu& gpu, const scene::PaintedTerrain& t) {
     const IndexedMesh grid = terrainGrid(t);
-    gpu.terrainVertices = uploadBuffer(GL_ARRAY_BUFFER, grid.vertices.data(), grid.vertices.size() * sizeof(float));
+    if (fixed_) {
+        // Without shaders the vertices carry the textures' coordinates, and the gradient is in their colours.
+        const std::vector<float> vertices = fixedTerrainVertices(grid, t);
+        gpu.terrainVertices = uploadBuffer(GL_ARRAY_BUFFER, vertices.data(), vertices.size() * sizeof(float));
+        const std::vector<std::uint8_t> colors = fixedTerrainColors(grid, t);
+        gpu.terrainColors = uploadBuffer(GL_ARRAY_BUFFER, colors.data(), colors.size());
+    } else {
+        gpu.terrainVertices = uploadBuffer(GL_ARRAY_BUFFER, grid.vertices.data(), grid.vertices.size() * sizeof(float));
+    }
     if (!grid.indices.empty()) {  // every tile can be hidden (a lot's own ground stands in for it)
         gpu.terrainIndices = uploadBuffer(GL_ELEMENT_ARRAY_BUFFER, grid.indices.data(), grid.indices.size() * sizeof(std::uint32_t));
     }
@@ -67,6 +77,16 @@ void GlRenderer::uploadTerrain(SceneGpu& gpu, const scene::PaintedTerrain& t) {
     // Which paint textures a cell shows, so the others aren't drawn.
     std::set<std::uint8_t> shown(t.cellTextures.begin(), t.cellTextures.end());
     gpu.terrainSlices.assign(shown.begin(), shown.end());
+    if (fixed_) {
+        // Each paint texture's weight over the map, which the pass for it multiplies it by.
+        for (const unsigned slice : gpu.terrainSlices.empty() ? std::vector<std::uint8_t>{0} : gpu.terrainSlices) {
+            const std::vector<std::uint8_t> weights = fixedPaintWeights(t, slice);
+            gpu.terrainWeights.push_back(uploadRaw(t.alphaSize, t.alphaSize, weights.data(), false));
+            // And the colours of its pass when it has one texture to draw with.
+            const std::vector<std::uint8_t> colors = fixedSliceColors(grid, t, slice);
+            gpu.terrainSliceColors.push_back(uploadBuffer(GL_ARRAY_BUFFER, colors.data(), colors.size()));
+        }
+    }
 
     const auto paints = static_cast<unsigned>(t.paints());
     if (paints > kMaxPaintLayers) {
@@ -87,7 +107,7 @@ void GlRenderer::uploadTerrain(SceneGpu& gpu, const scene::PaintedTerrain& t) {
         }
         return out;
     };
-    for (unsigned k = 0; k < 2; ++k) {
+    for (unsigned k = 0; k < 2 && !fixed_; ++k) {
         const auto alphas = pack(t.alphaSize, t.alphaSize, t.alphas.data(), k);
         gpu.terrainAlphas[k] = uploadRaw(t.alphaSize, t.alphaSize, alphas.data(), false);
         const auto cells = pack(t.cellsX, t.cellsY, t.cellTextures.data(), k);
@@ -103,13 +123,18 @@ void GlRenderer::uploadTerrain(SceneGpu& gpu, const scene::PaintedTerrain& t) {
 
     if (!t.roads.empty() && !t.roadTextures.empty()) {
         const RoadMesh roads = roadQuads(t);
-        gpu.roadVertices = uploadBuffer(GL_ARRAY_BUFFER, roads.mesh.vertices.data(), roads.mesh.vertices.size() * sizeof(float));
+        gpu.lightMapSize = t.lightMapScale * t.tileSize;
+        const std::vector<float> roadVertices = fixed_ ? fixedRoadVertices(roads, gpu.lightMapSize) : roads.mesh.vertices;
+        gpu.roadVertices = uploadBuffer(GL_ARRAY_BUFFER, roadVertices.data(), roadVertices.size() * sizeof(float));
+        if (fixed_) {
+            const std::vector<std::uint8_t> colors = fixedRoadColors(roads, t, gpu.lightMapSize);
+            gpu.roadColors = uploadBuffer(GL_ARRAY_BUFFER, colors.data(), colors.size());
+        }
         gpu.roadIndices = uploadBuffer(GL_ELEMENT_ARRAY_BUFFER, roads.mesh.indices.data(), roads.mesh.indices.size() * sizeof(std::uint32_t));
         gpu.roadRuns = roads.runs;
         for (const auto& image : t.roadTextures) {
             gpu.roadTextures.push_back(uploadTexture(complete(image) ? image : white, true, false));
         }
-        gpu.lightMapSize = t.lightMapScale * t.tileSize;
     }
     if (!t.imposters.empty()) {
         for (const auto& image : t.imposterTextures) {
@@ -128,8 +153,14 @@ void GlRenderer::uploadTerrain(SceneGpu& gpu, const scene::PaintedTerrain& t) {
         gpu.waterIndices = uploadBuffer(GL_ELEMENT_ARRAY_BUFFER, water.indices.data(), water.indices.size() * sizeof(std::uint32_t));
         gpu.waterIndexCount = static_cast<unsigned>(water.indices.size());
         gpu.waterLevel = t.waterLevel;
-        gpu.ripples = uploadTexture(complete(t.ripples) ? t.ripples : white, true);
-        gpu.skyCube = uploadCube(t.sky, true);
+        if (fixed_) {
+            // No reflection to show: the water is the sky's average colour, tinted, as see-through as the reflection is strong.
+            const std::array<float, 3> sky = averageColor(t.sky);
+            gpu.waterFlat = {sky[0] * t.reflectionTint[0], sky[1] * t.reflectionTint[1], sky[2] * t.reflectionTint[2], t.reflectionStrength};
+        } else {
+            gpu.ripples = uploadTexture(complete(t.ripples) ? t.ripples : white, true);
+            gpu.skyCube = uploadCube(t.sky, true);
+        }
         gpu.waterUniforms = {{t.reflectionTint[0], t.reflectionTint[1], t.reflectionTint[2], t.reflectionStrength}, {0, 0},
                              t.reflectionOffset, t.rippleScale, t.rippleSpeed, 0, {0, 0}};
     }
@@ -138,6 +169,10 @@ void GlRenderer::uploadTerrain(SceneGpu& gpu, const scene::PaintedTerrain& t) {
 // A sky cube map behind everything, looked up by each pixel's ray. `up` is -1 for the rays mirrored
 // in the water.
 void GlRenderer::drawSky(const FrameView& f, const Texture& cube, float up) {
+    if (fixed_) {
+        drawSkyFixed(f, cube);
+        return;
+    }
     useProgram(sky_);
     State state;
     state.depthTest = false;
@@ -155,6 +190,10 @@ void GlRenderer::drawSky(const FrameView& f, const Texture& cube, float up) {
 
 // The boundary curtain, into depth only: nothing beyond it shows from inside.
 void GlRenderer::drawBoundary(const FrameView& f) {
+    if (fixed_) {
+        drawBoundaryFixed(f);
+        return;
+    }
     useProgram(clip_);
     State state;
     state.cull = true;
@@ -173,6 +212,10 @@ void GlRenderer::drawBoundary(const FrameView& f) {
 
 // The terrain, one pass for each paint texture a cell shows, the passes added up.
 void GlRenderer::drawTerrain(const FrameView& f, const Mat4& viewProjection, bool reflected) {
+    if (fixed_) {
+        drawTerrainFixed(f);
+        return;
+    }
     useProgram(terrain_);
     (void)f;
     gl_.Uniform4fv(terrain_.vertex, 4, viewProjection.m.data());
@@ -215,6 +258,10 @@ void GlRenderer::drawTerrain(const FrameView& f, const Mat4& viewProjection, boo
 }
 
 void GlRenderer::drawRoads(const FrameView& f) {
+    if (fixed_) {
+        drawRoadsFixed(f);
+        return;
+    }
     useProgram(road_);
     SceneGpu& g = *gpu_;
     State state;
@@ -245,6 +292,10 @@ void GlRenderer::drawRoads(const FrameView& f) {
 void GlRenderer::drawImposters(const FrameView& f) {
     SceneGpu& g = *gpu_;
     if (g.imposterDraws.empty()) {
+        return;
+    }
+    if (fixed_) {
+        drawImpostersFixed(f);
         return;
     }
     using Kind = scene::PaintedTerrain::ImposterPart::Kind;
@@ -312,7 +363,10 @@ void GlRenderer::drawImposters(const FrameView& f) {
 }
 
 void GlRenderer::drawWater(const FrameView& f, unsigned width, unsigned height) {
-    (void)f;
+    if (fixed_) {
+        drawWaterFixed(f);
+        return;
+    }
     useProgram(water_);
     SceneGpu& g = *gpu_;
     State state;

@@ -341,7 +341,7 @@ target_link_libraries(ts2scene PUBLIC ts2content PRIVATE project_warnings)
 
 # What every renderer shares, apart from any graphics API: the CPU side of a scene, culling and
 # draw order, and the numbers each draw's shaders are given.
-add_library(ts2renderplan src/render/frame_plan.cpp src/render/mesh_pack.cpp src/render/shared_state.cpp src/render/terrain_mesh.cpp)
+add_library(ts2renderplan src/render/cpu_light.cpp src/render/fixed_layout.cpp src/render/frame_plan.cpp src/render/gl_subset.cpp src/render/mesh_pack.cpp src/render/shared_state.cpp src/render/terrain_mesh.cpp)
 target_link_libraries(ts2renderplan PUBLIC ts2scene PRIVATE project_warnings)
 
 if(NEOTS2_FUZZ)
@@ -584,8 +584,10 @@ else()
         elseif(gl2_wanted)
             message(STATUS "spirv-cross not found: the OpenGL 2 renderer is not built")
         endif()
-        if(NOT sdlgpu_enabled AND NOT gl2_enabled)
-            message(FATAL_ERROR "With ${platform_name} the game draws with the OpenGL 2 renderer, which needs spirv-cross (set NEOTS2_SPIRV_CROSS)")
+        # The OpenGL 1 renderer draws without shaders, so it needs neither dxc nor SPIRV-Cross.
+        option(NEOTS2_GL1 "Build the OpenGL 1 renderer (fixed pipeline, no shaders)" ON)
+        if(NOT sdlgpu_enabled AND NOT gl2_enabled AND NOT NEOTS2_GL1)
+            message(FATAL_ERROR "With ${platform_name} the game draws with the OpenGL 2 renderer, which needs spirv-cross (set NEOTS2_SPIRV_CROSS) and NEOTS2_GL2 on")
         endif()
 
         add_library(ts2render src/render/make_renderer.cpp)
@@ -596,12 +598,17 @@ else()
             target_link_libraries(ts2render PUBLIC SDL3::SDL3)
             target_compile_definitions(ts2render PUBLIC NEOTS2_SDLGPU=1)
         endif()
-        if(gl2_enabled)
+        if(gl2_enabled OR NEOTS2_GL1)
             add_library(ts2render_gl src/render/gl/gl_api.cpp src/render/gl/gl_renderer.cpp src/render/gl/gl_shaders.cpp
-                        src/render/gl/gl_upload.cpp src/render/gl/gl_draw.cpp src/render/gl/gl_terrain.cpp)
+                        src/render/gl/gl_upload.cpp src/render/gl/gl_draw.cpp src/render/gl/gl_fixed.cpp src/render/gl/gl_terrain.cpp)
             target_link_libraries(ts2render_gl PUBLIC ts2renderplan ts2platform PRIVATE project_warnings)
             target_link_libraries(ts2render PUBLIC ts2render_gl)
+        endif()
+        if(gl2_enabled)
             target_compile_definitions(ts2render PUBLIC NEOTS2_GL2=1)
+        endif()
+        if(NEOTS2_GL1)
+            target_compile_definitions(ts2render PUBLIC NEOTS2_GL1=1)
         endif()
 
         # The game's UI: its fonts are drawn with FreeType (set freetype_DIR to its cmake folder).

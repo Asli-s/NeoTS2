@@ -38,7 +38,7 @@ void GlRenderer::SceneGpu::release(Graveyard& graveyard) {
     }
     meshBuffers.clear();
     meshes.clear();
-    for (auto* list : {&terrainPaints, &roadTextures, &imposterTextures}) {
+    for (auto* list : {&terrainPaints, &terrainWeights, &roadTextures, &imposterTextures}) {
         for (auto& t : *list) give(t);
         list->clear();
     }
@@ -49,12 +49,18 @@ void GlRenderer::SceneGpu::release(Graveyard& graveyard) {
     give(terrainGradient);
     give(ripples);
     give(skyCube);
-    for (GLuint* id : {&waterVertices, &waterIndices, &terrainVertices, &terrainIndices, &roadVertices, &roadIndices, &imposterVertices, &imposterIndices, &curtainVertices, &curtainIndices}) {
+    for (GLuint* id : {&waterVertices, &waterIndices, &terrainVertices, &terrainIndices, &terrainColors, &roadVertices, &roadIndices, &roadColors, &imposterVertices, &imposterIndices, &curtainVertices, &curtainIndices}) {
         if (*id != 0) {
             graveyard.buffers.push_back(*id);
             *id = 0;
         }
     }
+    for (GLuint& id : terrainSliceColors) {
+        if (id != 0) {
+            graveyard.buffers.push_back(id);
+        }
+    }
+    terrainSliceColors.clear();
     terrainIndexCount = 0;
     waterIndexCount = 0;
     roadRuns.clear();
@@ -127,6 +133,7 @@ GlRenderer::Texture GlRenderer::uploadTexture(const scene::Image& image, bool mi
     }
     Texture t;
     t.target = GL_TEXTURE_2D;
+    checkTexture(GL_TEXTURE_2D, image.width, image.height);
     t.mips = mips && (image.width > 1 || image.height > 1);
     gl_.GenTextures(1, &t.id);
     gl_.ActiveTexture(GL_TEXTURE0);
@@ -176,6 +183,7 @@ GlRenderer::Texture GlRenderer::uploadCube(const std::vector<scene::Image>& face
         }
     }
     t.target = GL_TEXTURE_CUBE_MAP;
+    checkTexture(GL_TEXTURE_CUBE_MAP, face.width, face.height);
     t.wrap = GL_CLAMP_TO_EDGE;
     gl_.GenTextures(1, &t.id);
     gl_.ActiveTexture(GL_TEXTURE0);
@@ -204,9 +212,12 @@ GlRenderer::MeshBuffers GlRenderer::uploadMeshBuffers(MeshData& data) {
     }
     b.vertices = uploadBuffer(GL_ARRAY_BUFFER, data.vertices.data(), data.vertices.size() * sizeof(float));
     b.indices = uploadBuffer(GL_ELEMENT_ARRAY_BUFFER, data.indices.data(), data.indices.size() * sizeof(std::uint32_t));
-    // Skinned primitives are posed on the CPU from the vertices as they were made.
-    if (!data.skin.empty()) {
+    // Skinned primitives are posed on the CPU from the vertices as they were made. Without shaders
+    // every primitive is lit on the CPU from them too.
+    if (!data.skin.empty() || fixed_) {
         b.cpuVertices = std::move(data.vertices);
+    }
+    if (!data.skin.empty()) {
         b.cpuSkin = std::move(data.skin);
     }
     return b;
@@ -503,6 +514,7 @@ void GlRenderer::setSprites(const std::vector<std::pair<int, const scene::Image*
         if (t.id == 0 || spriteSizes_[i][0] != image->width || spriteSizes_[i][1] != image->height) {
             release(t);
             t = Texture{};
+            checkTexture(GL_TEXTURE_2D, image->width, image->height);
             gl_.GenTextures(1, &t.id);
             gl_.BindTexture(GL_TEXTURE_2D, t.id);
             gl_.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);

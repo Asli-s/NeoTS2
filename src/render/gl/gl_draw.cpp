@@ -23,6 +23,7 @@ const void* offset(std::size_t bytes) {
 void GlRenderer::invalidateState() {
     program_ = ~0u;
     attributeMask_ = ~0u;
+    clientArrays_ = ~0u;
     state_.reset();
     arrayBuffer_ = elementBuffer_ = ~0u;
     bound_ = {};
@@ -54,30 +55,25 @@ void GlRenderer::setState(const State& want) {
     const State& have = state_.value_or(State{});
     const bool unknown = !state_.has_value();
     if (unknown || have.blend != want.blend) {
-        switch (want.blend) {
-        case 0:
+        if (want.blend == 0) {
             gl_.Disable(GL_BLEND);
-            break;
-        case 1:  // over
+        } else {
+            // 1 over, 2 added, 3 multiplied into what is there, 4 over with the colour already multiplied by its alpha, else summed.
+            static constexpr GLenum kFactors[6][4] = {
+                {},
+                {GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA},
+                {GL_SRC_ALPHA, GL_ONE, GL_ZERO, GL_ONE},
+                {GL_DST_COLOR, GL_ONE_MINUS_SRC_ALPHA, GL_DST_COLOR, GL_ONE_MINUS_SRC_ALPHA},
+                {GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA},
+                {GL_ONE, GL_ONE, GL_ONE, GL_ONE},
+            };
+            const GLenum* f = kFactors[std::clamp(want.blend, 1, 5)];
             gl_.Enable(GL_BLEND);
-            gl_.BlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-            break;
-        case 2:  // added
-            gl_.Enable(GL_BLEND);
-            gl_.BlendFuncSeparate(GL_SRC_ALPHA, GL_ONE, GL_ZERO, GL_ONE);
-            break;
-        case 3:  // multiplied into what is there
-            gl_.Enable(GL_BLEND);
-            gl_.BlendFuncSeparate(GL_DST_COLOR, GL_ONE_MINUS_SRC_ALPHA, GL_DST_COLOR, GL_ONE_MINUS_SRC_ALPHA);
-            break;
-        case 4:  // over, the colour already multiplied by its alpha
-            gl_.Enable(GL_BLEND);
-            gl_.BlendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-            break;
-        default:  // summed
-            gl_.Enable(GL_BLEND);
-            gl_.BlendFuncSeparate(GL_ONE, GL_ONE, GL_ONE, GL_ONE);
-            break;
+            if (fixed_) {
+                fxBlendFunc(f[0], f[1], f[2], f[3]);
+            } else {
+                gl_.BlendFuncSeparate(f[0], f[1], f[2], f[3]);
+            }
         }
     }
     if (unknown || have.cull != want.cull) {
@@ -101,6 +97,9 @@ void GlRenderer::setState(const State& want) {
         gl_.DepthFunc(want.depthFunc);
     }
     if (unknown || have.colorWrite != want.colorWrite) {
+        if (subset_ && !want.colorWrite) {
+            subset_->colorMaskOff();
+        }
         const GLboolean on = want.colorWrite ? GL_TRUE : GL_FALSE;
         gl_.ColorMask(on, on, on, on);
     }
@@ -204,6 +203,10 @@ void GlRenderer::poseSkinned(const GpuPrimitive& p, const MeshBuffers& buffers, 
 
 // Draws primitives with the scene program (`blend` 1 for the blending ones).
 void GlRenderer::drawList(const FrameView& f, const std::vector<Draw>& list, int blend) {
+    if (fixed_) {
+        drawListFixed(f, list, blend);
+        return;
+    }
     useProgram(scene_);
     setAttributes(kSceneAttributes);
     for (const auto& d : list) {
@@ -262,17 +265,25 @@ void GlRenderer::drawSprites(unsigned width, unsigned height) {
             v.insert(v.end(), {c[0], c[1], c[2], c[3], s.color[0], s.color[1], s.color[2], s.color[3]});
         }
     }
-    useProgram(ui_);
-    const float screen[4] = {static_cast<float>(width), static_cast<float>(height), 0, 0};
-    gl_.Uniform4fv(ui_.vertex, 1, screen);
+    if (fixed_) {
+        beginFixedSprites(width, height);
+    } else {
+        useProgram(ui_);
+        const float screen[4] = {static_cast<float>(width), static_cast<float>(height), 0, 0};
+        gl_.Uniform4fv(ui_.vertex, 1, screen);
+    }
     gl_.BindBuffer(GL_ARRAY_BUFFER, spriteVertices_);
     arrayBuffer_ = spriteVertices_;
     gl_.BufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(v.size() * sizeof(float)), v.data(), GL_STREAM_DRAW);
-    setAttributes(kSpriteAttributes);
     constexpr GLsizei stride = kSpriteFloats * sizeof(float);
-    gl_.VertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, stride, offset(0));
-    gl_.VertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, stride, offset(2 * sizeof(float)));
-    gl_.VertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, offset(4 * sizeof(float)));
+    if (fixed_) {
+        fixedSpritePointers(stride);
+    } else {
+        setAttributes(kSpriteAttributes);
+        gl_.VertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, stride, offset(0));
+        gl_.VertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, stride, offset(2 * sizeof(float)));
+        gl_.VertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, offset(4 * sizeof(float)));
+    }
     State sprites;
     sprites.blend = 1;
     sprites.depthTest = false;
@@ -293,6 +304,9 @@ void GlRenderer::drawSprites(unsigned width, unsigned height) {
         gl_.DrawArrays(GL_TRIANGLES, static_cast<GLint>(i * 6), static_cast<GLsizei>((j - i) * 6));
         i = j;
     }
+    if (fixed_) {
+        endFixed();
+    }
 }
 
 // Records and draws one frame into the framebuffer bound now. False when it couldn't.
@@ -301,10 +315,11 @@ bool GlRenderer::render(unsigned width, unsigned height, const Camera& camera) {
     collectGarbage();
     invalidateState();
     const FrameView f = FrameView::make(camera, width, height);
-    // The neighborhood's water and its reflection, drawn first into a target of its own.
+    // The neighborhood's water and its reflection, drawn first into a target of its own. Without
+    // shaders the water shows no reflection, so there is none to draw.
     const bool extras = drawScene_ && !instancesOnly_;
-    const bool water = extras && gpu_->terrainIndexCount > 0 && gpu_->waterIndexCount > 0 && reflectionReady(width, height);
-    if (water) {
+    const bool water = extras && gpu_->terrainIndexCount > 0 && gpu_->waterIndexCount > 0 && (fixed_ || reflectionReady(width, height));
+    if (water && !fixed_) {
         drawReflection(f, width, height);
     }
     gl_.Viewport(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
@@ -315,6 +330,9 @@ bool GlRenderer::render(unsigned width, unsigned height, const Camera& camera) {
     // Depth runs from 1 at the near plane to 0 at the far one (see Mat4::perspective).
     gl_.ClearDepth(0.0);
     // Only the part drawn to is cleared, as a picture drawn in a corner of the window (see drawOffscreen) leaves the rest alone.
+    if (subset_) {
+        subset_->enable(GL_SCISSOR_TEST);
+    }
     gl_.Enable(GL_SCISSOR_TEST);
     gl_.Scissor(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
     gl_.Clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);

@@ -318,6 +318,7 @@ private:
 
     ts2::content::UiData& data_;
     ts2::render::IRenderer& renderer_;
+    bool singleTextureTerrain_ = true;  // F9 (see IRenderer::setSingleTextureTerrain): what the renderer starts with
     const std::filesystem::path install_;
     const MenuOptions& options_;
     const int width_, height_;
@@ -1591,7 +1592,12 @@ void Game::handleEvent(const pf::Event& e) {
     }
     const bool freeToggle = e.type == pf::Event::Type::KeyDown && !e.repeat && inLot_ && !quitBox_.isOpen() &&
                             (e.scancode == pf::Key::Tab || e.scancode == pf::Key::Y || (freeCam_ && e.scancode == pf::Key::Escape));
-    if (freeToggle) {
+    if (e.type == pf::Event::Type::KeyDown && !e.repeat && e.key == pf::Key::F9) {
+        // Compares the two ways the OpenGL 1 renderer draws the neighborhood's terrain and roads (the others have only one).
+        singleTextureTerrain_ = !singleTextureTerrain_;
+        renderer_.setSingleTextureTerrain(singleTextureTerrain_);
+        ts2::diag::info(singleTextureTerrain_ ? "terrain and roads: one texture a pass (F9)" : "terrain and roads: two texture units (F9)");
+    } else if (freeToggle) {
         toggleFreeCamera();
     } else if (freeCam_ && (e.type == pf::Event::Type::KeyDown || e.type == pf::Event::Type::KeyUp) &&
                (e.repeat || freeCam_->key(e.scancode, e.type == pf::Event::Type::KeyDown))) {

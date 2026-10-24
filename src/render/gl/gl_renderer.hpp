@@ -3,6 +3,7 @@
 #include "platform/platform.hpp"
 #include "render/frame_plan.hpp"
 #include "render/gl/gl_api.hpp"
+#include "render/gl_subset.hpp"
 #include "render/irenderer.hpp"
 #include "render/mesh_pack.hpp"
 #include "render/shared_state.hpp"
@@ -28,13 +29,19 @@ namespace ts2::render {
 // Draws a Scene with OpenGL 2.1 (and a few common extensions), for systems that have no more.
 // Shaders are GLSL 1.20 made from the same HLSL the SDL GPU renderer uses (see CMakeLists.txt).
 //
+// With `fixedFunction` it draws without shaders, with the fixed pipeline of OpenGL 1.5, for systems
+// whose cards have none: the game's lighting is worked out for each vertex on the CPU (see
+// cpu_light.hpp), and bump mapping, specular, environment cubes and the water's reflection are left
+// out (see capabilities()). The neighborhood's terrain, roads and water are laid out for it when the
+// scene is uploaded (see fixed_layout.hpp), and the terrain and roads use two texture units.
+//
 // A context is current on one thread at a time, and only the thread that draws makes calls on its own.
 // Where the driver can share objects between contexts, prepare() makes its textures and buffers in
 // a context of its own on the thread it is called from. Where it can't, prepare() only gathers what to
 // upload and swap() uploads it. Everything else that touches the GPU is on the drawing thread.
 class GlRenderer final : public RendererState, private ResourceQuery {
 public:
-    GlRenderer(platform::Window& window, const std::filesystem::path& shaderFolder);
+    GlRenderer(platform::Window& window, const std::filesystem::path& shaderFolder, bool fixedFunction = false);
     ~GlRenderer() override;
 
     using IRenderer::upload;
@@ -48,7 +55,7 @@ public:
     [[nodiscard]] bool drawToFile(const Camera& camera, unsigned width, unsigned height, const std::filesystem::path& path) override;
     [[nodiscard]] std::optional<scene::Image> drawInstancesToImage(const Camera& camera, unsigned width, unsigned height,
                                                                    const scene::ObjectLighting& lighting) override;
-    std::string backend() const override { return "opengl"; }
+    std::string backend() const override { return fixed_ ? "opengl1" : "opengl"; }
     std::string device() const override;
     void benchmark(const Camera& camera, unsigned width, unsigned height, int frames) override;
     void addMaterials(const scene::Scene& scene) override;
@@ -56,6 +63,7 @@ public:
     void setImages(const scene::Scene& scene, const std::vector<int>& indexes, bool fade = false) override;
     void setLightMapFade(float fade) override;
     void setSkybox(const std::vector<scene::Image>& faces) override;
+    void setSingleTextureTerrain(bool on) override { singleTextureTerrain_ = on; }
 
 private:
     // What the frame plan asks about the uploaded scene (see ResourceQuery).
@@ -106,6 +114,14 @@ private:
         // each paint texture is its own, and the alpha maps and cells' textures of four paints share one.
         GLuint terrainVertices = 0, terrainIndices = 0;
         unsigned terrainIndexCount = 0;
+        // Without shaders (see fixed_layout.hpp): the grid's gradient colours, and the weight each
+        // paint texture in terrainSlices shows with (a texture each, in that order).
+        GLuint terrainColors = 0;
+        std::vector<Texture> terrainWeights;
+        // And for drawing with one texture a pass: the grid's colours in each paint texture's pass, and the roads' vertices'.
+        std::vector<GLuint> terrainSliceColors;
+        GLuint roadColors = 0;
+        std::array<float, 4> waterFlat{};  // the colour and opacity of the water without its reflection
         std::vector<Texture> terrainPaints;
         std::vector<std::uint8_t> terrainSlices;  // the paint textures some cell shows
         std::array<Texture, 2> terrainAlphas, terrainCells;
@@ -197,6 +213,34 @@ private:
     [[nodiscard]] bool render(unsigned width, unsigned height, const Camera& camera);
     void drawList(const FrameView& f, const std::vector<Draw>& list, int blend);
     void drawSprites(unsigned width, unsigned height);
+    // Drawing without shaders (gl_fixed.cpp).
+    void drawListFixed(const FrameView& f, const std::vector<Draw>& list, int blend);
+    // The fixed pipeline's calls, each checked against the console subset first when that is on (see subset_).
+    void fxEnable(GLenum capability);
+    void fxBlendFunc(GLenum srcRgb, GLenum dstRgb, GLenum srcAlpha, GLenum dstAlpha);
+    void fxAlphaFunc(GLenum func, GLclampf reference);
+    void fxTexEnv(GLint mode);
+    void fxDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices);
+    void fxVertexPointer(GLint size, GLenum type, GLsizei stride, const void* pointer);
+    void fxColorPointer(GLint size, GLenum type, GLsizei stride, const void* pointer);
+    void fxTexCoordPointer(GLint size, GLenum type, GLsizei stride, const void* pointer);
+    void checkTexture(GLenum target, unsigned width, unsigned height) const {
+        if (subset_) {
+            subset_->texture(target, width, height);
+        }
+    }
+    void beginFixedSprites(unsigned width, unsigned height);
+    void fixedSpritePointers(GLsizei stride);
+    void endFixed();
+    void setClientArrays(unsigned mask);
+    void fixedTextureUnits(unsigned units);
+    void fixedWorldMatrices(const FrameView& f);
+    void drawSkyFixed(const FrameView& f, const Texture& cube);
+    void drawBoundaryFixed(const FrameView& f);
+    void drawTerrainFixed(const FrameView& f);
+    void drawRoadsFixed(const FrameView& f);
+    void drawImpostersFixed(const FrameView& f);
+    void drawWaterFixed(const FrameView& f);
     void bindTexture(unsigned unit, Texture& texture, GLint wrap, bool nearest = false);
     void drawSky(const FrameView& f, const Texture& cube, float up);
     void drawBoundary(const FrameView& f);
@@ -233,6 +277,9 @@ private:
     void invalidateState();
     void releaseTarget();
 
+    bool fixed_ = false;  // draws without shaders
+    // With NEOTS2_GL1_STRICT set (and no shaders), what the console OpenGL libraries can't do is reported as it is used.
+    std::unique_ptr<GlSubset> subset_;
     platform::Window* window_ = nullptr;
     platform::GlContextPtr context_;
     std::thread::id drawingThread_;
@@ -245,8 +292,13 @@ private:
     std::string vendor_, renderer_, version_;
 
     Program scene_, ui_, terrain_, road_, imposter_, sky_, clip_, water_;
-    GLuint skyVertices_ = 0;  // the corners of the sky's triangle
+    GLuint skyVertices_ = 0;  // the corners of the sky's triangle (without shaders: the sky cube's triangles)
     GLuint streamVertices_ = 0;  // a posed skinned primitive's vertices
+    GLuint colorStream_ = 0;     // the colours a draw's vertices are lit to, without shaders
+    std::vector<std::uint8_t> litColors_;
+    unsigned clientArrays_ = 0;  // which vertex arrays are enabled, without shaders (see setClientArrays)
+    unsigned textureUnits_ = 1;  // how many texture units are on, without shaders (see fixedTextureUnits)
+    bool singleTextureTerrain_ = true;  // see setSingleTextureTerrain
     GLuint spriteVertices_ = 0;
     std::size_t streamCapacity_ = 0, spriteCapacity_ = 0;  // bytes
 

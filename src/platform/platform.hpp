@@ -30,7 +30,7 @@ enum class Key : std::uint8_t {
     Comma, Period, Minus, Equals, Grave,
     Tab, Escape, Pause,
     PageUp, PageDown, Home, End,
-    F5,
+    F5, F9,
     Up, Down, Left, Right,
 };
 

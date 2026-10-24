@@ -162,6 +162,12 @@ public:
     virtual void setFloorAndWallNormalMapping(bool on) = 0;
     // Brightens a lot object (by its game object id, 0 for none) by adding `ambient` to its ambient light.
     virtual void setHighlight(std::uint32_t object, float ambient) = 0;
+
+    // Whether the neighborhood's terrain and roads are drawn with one texture at a time, their weights
+    // and light map worked out at the vertices, where the renderer has a choice (the OpenGL 1 renderer: it
+    // is how the oldest hardware has to draw them, and its default). Off draws them with two texture
+    // units. The others leave it alone.
+    virtual void setSingleTextureTerrain(bool on) { (void)on; }
 };
 
 } // namespace ts2::render

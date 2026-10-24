@@ -54,6 +54,7 @@ constexpr KeyInfo kKeys[] = {
     {Key::Home, SDLK_HOME, SDL_SCANCODE_HOME},
     {Key::End, SDLK_END, SDL_SCANCODE_END},
     {Key::F5, SDLK_F5, SDL_SCANCODE_F5},
+    {Key::F9, SDLK_F9, SDL_SCANCODE_F9},
     {Key::Up, SDLK_UP, SDL_SCANCODE_UP},
     {Key::Down, SDLK_DOWN, SDL_SCANCODE_DOWN},
     {Key::Left, SDLK_LEFT, SDL_SCANCODE_LEFT},

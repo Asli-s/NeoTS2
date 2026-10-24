@@ -8,7 +8,7 @@
 
 namespace ts2::render::gl {
 
-bool Api::load(const char*& missing) {
+bool Api::load(const char*& missing, bool fixedFunction) {
     missing = nullptr;
 #define TS2_GL_LOAD(name)                                                                \
     name = reinterpret_cast<decltype(name)>(platform::glProcAddress("gl" #name));        \
@@ -16,6 +16,11 @@ bool Api::load(const char*& missing) {
         missing = "gl" #name;                                                            \
     }
     TS2_GL_REQUIRED(TS2_GL_LOAD)
+    if (fixedFunction) {
+        TS2_GL_FIXED(TS2_GL_LOAD)
+    } else {
+        TS2_GL_SHADERS(TS2_GL_LOAD)
+    }
 #undef TS2_GL_LOAD
     if (missing != nullptr) {
         return false;

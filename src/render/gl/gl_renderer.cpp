@@ -4,19 +4,23 @@
 #include "diag/timing.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cstdlib>
 #include <format>
 #include <stdexcept>
 #include <string>
 
 namespace ts2::render {
 
-GlRenderer::GlRenderer(platform::Window& window, const std::filesystem::path& shaderFolder) : window_(&window) {
+GlRenderer::GlRenderer(platform::Window& window, const std::filesystem::path& shaderFolder, bool fixedFunction)
+    : fixed_(fixedFunction), window_(&window) {
     context_ = window_->createGlContext();
     if (context_ == nullptr) {
         diag::error(std::string("no OpenGL context: ") + platform::lastError());
-        throw std::runtime_error(
-            "NeoTS2 needs a graphics card and driver that support OpenGL 2.1, and none was found.\n\n"
-            "Update your graphics driver and try again.");
+        throw std::runtime_error(std::format(
+            "NeoTS2 needs a graphics card and driver that support OpenGL {}, and none was found.\n\n"
+            "Update your graphics driver and try again.",
+            fixed_ ? "1.5" : "2.1"));
     }
     // The destructor doesn't run when the constructor throws, so what was made is released here.
     try {
@@ -25,11 +29,14 @@ GlRenderer::GlRenderer(platform::Window& window, const std::filesystem::path& sh
         // Presented with the display, as the SDL GPU renderer's swapchain is.
         window_->setSwapInterval(1);
         const char* missing = nullptr;
-        if (!gl_.load(missing)) {
+        if (!gl_.load(missing, fixed_)) {
             throw std::runtime_error(std::string("this OpenGL driver lacks ") + missing);
         }
-        if (gl_.majorVersion < 2 || (gl_.majorVersion == 2 && gl_.minorVersion < 1)) {
-            throw std::runtime_error(std::format("NeoTS2 needs OpenGL 2.1, and this driver has {}.{}.", gl_.majorVersion, gl_.minorVersion));
+        // Without shaders it needs buffers, which are 1.5's.
+        const int needMajor = fixed_ ? 1 : 2, needMinor = fixed_ ? 5 : 1;
+        if (gl_.majorVersion < needMajor || (gl_.majorVersion == needMajor && gl_.minorVersion < needMinor)) {
+            throw std::runtime_error(std::format("NeoTS2 needs OpenGL {}.{}, and this driver has {}.{}.", needMajor, needMinor,
+                                                 gl_.majorVersion, gl_.minorVersion));
         }
         const auto text = [&](GLenum name) {
             const auto* s = reinterpret_cast<const char*>(gl_.GetString(name));
@@ -38,13 +45,37 @@ GlRenderer::GlRenderer(platform::Window& window, const std::filesystem::path& sh
         vendor_ = text(GL_VENDOR);
         renderer_ = text(GL_RENDERER);
         version_ = text(GL_VERSION);
+        if (const char* strict = std::getenv("NEOTS2_GL1_STRICT"); fixed_ && strict != nullptr && *strict != '\0' && *strict != '0') {
+            subset_ = std::make_unique<GlSubset>([](const std::string& text) { diag::warning(text); });
+            diag::info("OpenGL 1: reporting what GLdc and ps2gl can't do (NEOTS2_GL1_STRICT)");
+        }
         gl_.GenBuffers(1, &streamVertices_);
         gl_.GenBuffers(1, &spriteVertices_);
-        // The sky is one triangle covering the screen, corners (0,0) (2,0) (0,2).
-        const float corners[6] = {0, 0, 2, 0, 0, 2};
-        skyVertices_ = uploadBuffer(GL_ARRAY_BUFFER, corners, sizeof(corners));
+        if (fixed_) {
+            gl_.GenBuffers(1, &colorStream_);
+            // The sky is a cube around the camera, 36 vertices, which are also the directions the cube map is looked up by.
+            std::array<float, 36 * 3> cube{};
+            constexpr int kFaces[6][4][3] = {{{1, -1, -1}, {1, 1, -1}, {1, 1, 1}, {1, -1, 1}},      {{-1, 1, -1}, {-1, -1, -1}, {-1, -1, 1}, {-1, 1, 1}},
+                                             {{1, 1, -1}, {-1, 1, -1}, {-1, 1, 1}, {1, 1, 1}},      {{-1, -1, -1}, {1, -1, -1}, {1, -1, 1}, {-1, -1, 1}},
+                                             {{-1, -1, 1}, {1, -1, 1}, {1, 1, 1}, {-1, 1, 1}},      {{-1, 1, -1}, {1, 1, -1}, {1, -1, -1}, {-1, -1, -1}}};
+            std::size_t at = 0;
+            for (const auto& face : kFaces) {
+                for (const int corner : {0, 1, 2, 0, 2, 3}) {
+                    for (const int axis : face[corner]) {
+                        cube[at++] = static_cast<float>(axis);
+                    }
+                }
+            }
+            skyVertices_ = uploadBuffer(GL_ARRAY_BUFFER, cube.data(), cube.size() * sizeof(float));
+        } else {
+            // The sky is one triangle covering the screen, corners (0,0) (2,0) (0,2).
+            const float corners[6] = {0, 0, 2, 0, 0, 2};
+            skyVertices_ = uploadBuffer(GL_ARRAY_BUFFER, corners, sizeof(corners));
+        }
         invalidateState();
-        makePrograms(shaderFolder);
+        if (!fixed_) {
+            makePrograms(shaderFolder);
+        }
         gpu_->white = uploadTexture({1, 1, {255, 255, 255, 255}, {}}, false);
         gpu_->blackCube = uploadCube(std::vector<scene::Image>(6, scene::Image{1, 1, {0, 0, 0, 255}, {}}));
         diag::info(std::format("OpenGL {}.{}: framebuffer objects {}, anisotropic filtering {}", gl_.majorVersion, gl_.minorVersion,
@@ -72,6 +103,7 @@ GlRenderer::~GlRenderer() {
     releaseReflection();
     collectGarbage();
     releaseBuffer(streamVertices_);
+    releaseBuffer(colorStream_);
     releaseBuffer(spriteVertices_);
     releaseBuffer(skyVertices_);
     for (const Program* p : {&scene_, &ui_, &terrain_, &road_, &imposter_, &sky_, &clip_, &water_}) {
@@ -84,7 +116,11 @@ GlRenderer::~GlRenderer() {
 
 Capabilities GlRenderer::capabilities() const {
     Capabilities c;
-    c.waterReflection = gl_.framebuffers;
+    // Without shaders: no normal maps, and no reflection to draw (the water isn't drawn at all yet).
+    c.bumpMapping = !fixed_;
+    c.floorWallNormalMapping = !fixed_;
+    c.waterReflection = gl_.framebuffers && !fixed_;
+    c.terrainLayers = !fixed_;
     c.gpuSkinning = false;
     c.anisotropic = gl_.anisotropy;
     c.threadedPrepare = !pool_.empty();

@@ -7,7 +7,7 @@
 #include "render/renderer.hpp"
 #endif
 
-#ifdef NEOTS2_GL2
+#if defined(NEOTS2_GL1) || defined(NEOTS2_GL2)
 #include "render/gl/gl_renderer.hpp"
 #endif
 
@@ -24,12 +24,19 @@ bool available(Backend backend) {
         return true;
     }
 #endif
+#ifdef NEOTS2_GL1
+    if (backend == Backend::OpenGL1) {
+        return true;
+    }
+#endif
     (void)backend;
     return false;
 }
 
 Backend defaultBackend() {
-    return available(Backend::SdlGpu) ? Backend::SdlGpu : Backend::OpenGL2;
+    return available(Backend::SdlGpu)     ? Backend::SdlGpu
+           : available(Backend::OpenGL2) ? Backend::OpenGL2
+                                         : Backend::OpenGL1;
 }
 
 std::optional<Backend> backendNamed(std::string_view name) {
@@ -38,6 +45,9 @@ std::optional<Backend> backendNamed(std::string_view name) {
     }
     if (name == "gl2") {
         return Backend::OpenGL2;
+    }
+    if (name == "gl1") {
+        return Backend::OpenGL1;
     }
     return std::nullopt;
 }
@@ -55,6 +65,18 @@ void prepareWindow(Backend backend, platform::WindowOptions& options) {
         options.gl = request;
     }
 #endif
+#ifdef NEOTS2_GL1
+    if (backend == Backend::OpenGL1) {
+        // OpenGL 1.5, the first with buffers, with the fixed pipeline it draws with.
+        platform::GlRequest request;
+        request.major = 1;
+        request.minor = 5;
+        request.compatibility = true;
+        request.doubleBuffer = true;
+        request.depthBits = 24;
+        options.gl = request;
+    }
+#endif
     (void)backend;
     (void)options;
 }
@@ -63,6 +85,11 @@ std::unique_ptr<IRenderer> makeRenderer(Backend backend, platform::Window& windo
 #ifdef NEOTS2_GL2
     if (backend == Backend::OpenGL2) {
         return std::make_unique<GlRenderer>(window, shaderFolder);
+    }
+#endif
+#ifdef NEOTS2_GL1
+    if (backend == Backend::OpenGL1) {
+        return std::make_unique<GlRenderer>(window, shaderFolder, true);
     }
 #endif
 #ifdef NEOTS2_SDLGPU
