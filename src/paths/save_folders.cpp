@@ -19,6 +19,11 @@
 #include <fcntl.h>
 #include <sys/file.h>
 #include <unistd.h>
+
+#ifndef O_CLOEXEC
+// OS X before 10.7 has no O_CLOEXEC, so the lock file is marked close-on-exec after it is opened.
+#define O_CLOEXEC 0
+#endif
 #endif
 
 namespace ts2::paths {
@@ -267,6 +272,7 @@ SaveFolderLock::SaveFolderLock(const fs::path& folder) : folder_(saveFolderPath(
                    std::generic_category().message(errno);
         return;
     }
+    ::fcntl(file_, F_SETFD, FD_CLOEXEC);
     if (::flock(file_, LOCK_EX | LOCK_NB) != 0) {
         busy_ = errno == EWOULDBLOCK;
         if (!busy_) {
