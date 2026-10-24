@@ -5,16 +5,18 @@
 // repeat every few tiles, each cell of the variant grid showing one variant per paint. In the
 // water's reflection only what is above the water is drawn, without the gradient.
 
-Texture2DArray<float4> paints : register(t0, space2);
-SamplerState paintSampler : register(s0, space2);
-Texture2DArray<float4> alphas : register(t1, space2);
-SamplerState alphaSampler : register(s1, space2);
-Texture2DArray<float4> cells : register(t2, space2);
-SamplerState cellSampler : register(s2, space2);
-Texture2D<float4> lightMap : register(t3, space2);
-SamplerState lightSampler : register(s3, space2);
-Texture2D<float4> gradient : register(t4, space2);
-SamplerState gradientSampler : register(s4, space2);
+#include "sdl_gpu.hlsli"
+
+COMBINED Texture2DArray<float4> paints : register(t0, space2);
+COMBINED SamplerState paintSampler : register(s0, space2);
+COMBINED Texture2DArray<float4> alphas : register(t1, space2);
+COMBINED SamplerState alphaSampler : register(s1, space2);
+COMBINED Texture2DArray<float4> cells : register(t2, space2);
+COMBINED SamplerState cellSampler : register(s2, space2);
+COMBINED Texture2D<float4> lightMap : register(t3, space2);
+COMBINED SamplerState lightSampler : register(s3, space2);
+COMBINED Texture2D<float4> gradient : register(t4, space2);
+COMBINED SamplerState gradientSampler : register(s4, space2);
 
 cbuffer Terrain : register(b0, space3) {
     float alphaSize;

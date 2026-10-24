@@ -2,10 +2,12 @@
 // walls), as the game lights objects when the vertices bring that light, otherwise by a sky and a
 // sun, unless unlit.
 
-Texture2D<float4> baseTexture : register(t0, space2);
-SamplerState baseSampler : register(s0, space2);
-Texture2D<float4> lightMapTexture : register(t1, space2);
-SamplerState lightMapSampler : register(s1, space2);
+#include "sdl_gpu.hlsli"
+
+COMBINED Texture2D<float4> baseTexture : register(t0, space2);
+COMBINED SamplerState baseSampler : register(s0, space2);
+COMBINED Texture2D<float4> lightMapTexture : register(t1, space2);
+COMBINED SamplerState lightMapSampler : register(s1, space2);
 
 cbuffer Material : register(b0, space3) {
     float4 color;

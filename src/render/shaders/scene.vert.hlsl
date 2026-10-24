@@ -9,12 +9,20 @@ cbuffer Frame : register(b0, space1) {
     float4 thumbnail;                   // rgb: the material's diffuse; w: the thumbnail scale (0: not a thumbnail)
 };
 
+// SDL_GPU binds the attributes at the locations of their TEXCOORD numbers; dxc would number them
+// by position (and wants all or none given).
+#ifdef __spirv__
+#define LOCATION(n) [[vk::location(n)]]
+#else
+#define LOCATION(n)
+#endif
+
 struct Input {
-    float3 position : TEXCOORD0;
-    float3 normal : TEXCOORD1;
-    float2 uv : TEXCOORD2;
-    float alpha : TEXCOORD3;
-    float2 lightUv : TEXCOORD6;
+    LOCATION(0) float3 position : TEXCOORD0;
+    LOCATION(1) float3 normal : TEXCOORD1;
+    LOCATION(2) float2 uv : TEXCOORD2;
+    LOCATION(3) float alpha : TEXCOORD3;
+    LOCATION(6) float2 lightUv : TEXCOORD6;
 };
 
 struct Output {

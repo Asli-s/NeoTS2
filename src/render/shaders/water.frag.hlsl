@@ -4,10 +4,12 @@
 // The game's reflection image is mirrored left to right (ours is not), so its offset to the right
 // is an offset to the left here.
 
-Texture2D<float4> reflection : register(t0, space2);
-SamplerState reflectionSampler : register(s0, space2);
-Texture2D<float4> ripples : register(t1, space2);
-SamplerState rippleSampler : register(s1, space2);
+#include "sdl_gpu.hlsli"
+
+COMBINED Texture2D<float4> reflection : register(t0, space2);
+COMBINED SamplerState reflectionSampler : register(s0, space2);
+COMBINED Texture2D<float4> ripples : register(t1, space2);
+COMBINED SamplerState rippleSampler : register(s1, space2);
 
 cbuffer Water : register(b0, space3) {
     float4 tint;       // rgb: the reflection colour; a: the reflection strength

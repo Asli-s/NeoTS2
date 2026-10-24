@@ -2,8 +2,10 @@
 // Seen in the water the ray is mirrored (its z turned around: forward.w -1); a lot's sky, behind
 // everything, is looked up directly (forward.w 1).
 
-TextureCube<float4> sky : register(t0, space2);
-SamplerState skySampler : register(s0, space2);
+#include "sdl_gpu.hlsli"
+
+COMBINED TextureCube<float4> sky : register(t0, space2);
+COMBINED SamplerState skySampler : register(s0, space2);
 
 cbuffer Camera : register(b0, space3) {
     float4 right;    // xyz: the camera's right, times tan(half the horizontal field of view)

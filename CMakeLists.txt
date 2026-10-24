@@ -294,7 +294,8 @@ else()
     target_link_libraries(fuzzseeds PRIVATE ts2formats project_warnings)
 
     # The renderer and the game app need SDL3 (set SDL3_DIR to its cmake folder) and a shader
-    # compiler for HLSL (dxc, from the Windows SDK on Windows).
+    # compiler for HLSL (dxc, from the Windows SDK on Windows). Windows draws with Direct3D 12 and
+    # DXIL shaders; elsewhere dxc makes SPIR-V shaders for Vulkan.
     find_package(SDL3 CONFIG QUIET)
     find_program(NEOTS2_DXC dxc)
     if(NOT NEOTS2_DXC AND WIN32)
@@ -312,11 +313,17 @@ else()
                 set(profile ps_6_0)
             endif()
             set(source ${CMAKE_CURRENT_SOURCE_DIR}/src/render/shaders/${shader}.hlsl)
-            set(output ${shader_dir}/${shader}.dxil)
+            if(WIN32)
+                set(output ${shader_dir}/${shader}.dxil)
+                set(dxc_target)
+            else()
+                set(output ${shader_dir}/${shader}.spv)
+                set(dxc_target -spirv -fspv-target-env=vulkan1.1)
+            endif()
             add_custom_command(OUTPUT ${output}
                 COMMAND ${CMAKE_COMMAND} -E make_directory ${shader_dir}
-                COMMAND ${NEOTS2_DXC} -nologo -T ${profile} -E main -Fo ${output} ${source}
-                DEPENDS ${source}
+                COMMAND ${NEOTS2_DXC} -nologo ${dxc_target} -I ${CMAKE_CURRENT_SOURCE_DIR}/src/render/shaders -T ${profile} -E main -Fo ${output} ${source}
+                DEPENDS ${source} ${CMAKE_CURRENT_SOURCE_DIR}/src/render/shaders/sdl_gpu.hlsli
                 COMMENT "Compiling ${shader}.hlsl")
             list(APPEND shader_outputs ${output})
         endforeach()

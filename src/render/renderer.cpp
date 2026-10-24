@@ -77,21 +77,23 @@ void copyInto(SDL_GPUDevice* device, SDL_GPUTransferBuffer* buffer, const void* 
 } // namespace
 
 Renderer::Renderer(SDL_Window* window, const std::filesystem::path& shaderFolder) : window_(window) {
-    device_ = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_DXIL, false, nullptr);
+    device_ = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_DXIL | SDL_GPU_SHADERFORMAT_SPIRV, false, nullptr);
     if (device_ == nullptr) {
         throw sdlError("no GPU device");
     }
+    // Direct3D 12 takes DXIL; Vulkan takes SPIR-V.
+    const bool dxil = (SDL_GetGPUShaderFormats(device_) & SDL_GPU_SHADERFORMAT_DXIL) != 0;
     if (!SDL_ClaimWindowForGPUDevice(device_, window_)) {
         throw sdlError("can't draw to the window");
     }
 
     auto shader = [&](const char* file, SDL_GPUShaderStage stage, Uint32 samplers, Uint32 uniforms = 1, Uint32 storageBuffers = 0) {
-        const auto code = readFile(shaderFolder / file);
+        const auto code = readFile(shaderFolder / (std::string(file) + (dxil ? ".dxil" : ".spv")));
         SDL_GPUShaderCreateInfo info{};
         info.code_size = code.size();
         info.code = code.data();
         info.entrypoint = "main";
-        info.format = SDL_GPU_SHADERFORMAT_DXIL;
+        info.format = dxil ? SDL_GPU_SHADERFORMAT_DXIL : SDL_GPU_SHADERFORMAT_SPIRV;
         info.stage = stage;
         info.num_samplers = samplers;
         info.num_uniform_buffers = uniforms;
@@ -102,9 +104,9 @@ Renderer::Renderer(SDL_Window* window, const std::filesystem::path& shaderFolder
         }
         return s;
     };
-    SDL_GPUShader* vertex = shader("scene.vert.dxil", SDL_GPU_SHADERSTAGE_VERTEX, 0);
-    SDL_GPUShader* skinnedVertex = shader("skinned.vert.dxil", SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, 1);
-    SDL_GPUShader* fragment = shader("scene.frag.dxil", SDL_GPU_SHADERSTAGE_FRAGMENT, 2);
+    SDL_GPUShader* vertex = shader("scene.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0);
+    SDL_GPUShader* skinnedVertex = shader("skinned.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, 1);
+    SDL_GPUShader* fragment = shader("scene.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 2);
 
     for (int skinned = 0; skinned < 2; ++skinned)
     for (int twoSided = 0; twoSided < 2; ++twoSided) {
@@ -169,8 +171,8 @@ Renderer::Renderer(SDL_Window* window, const std::filesystem::path& shaderFolder
 
     // Sprites: blended over everything, without depth.
     {
-        SDL_GPUShader* spriteVertex = shader("ui.vert.dxil", SDL_GPU_SHADERSTAGE_VERTEX, 0);
-        SDL_GPUShader* spriteFragment = shader("ui.frag.dxil", SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 0);
+        SDL_GPUShader* spriteVertex = shader("ui.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0);
+        SDL_GPUShader* spriteFragment = shader("ui.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 0);
         SDL_GPUVertexBufferDescription buffer{};
         buffer.slot = 0;
         buffer.pitch = kSpriteFloats * sizeof(float);
@@ -237,8 +239,8 @@ Renderer::Renderer(SDL_Window* window, const std::filesystem::path& shaderFolder
 
     // Neighborhood terrain: opaque, both sides (as the game draws it).
     {
-        SDL_GPUShader* terrainVertex = shader("terrain.vert.dxil", SDL_GPU_SHADERSTAGE_VERTEX, 0);
-        SDL_GPUShader* terrainFragment = shader("terrain.frag.dxil", SDL_GPU_SHADERSTAGE_FRAGMENT, 5);
+        SDL_GPUShader* terrainVertex = shader("terrain.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0);
+        SDL_GPUShader* terrainFragment = shader("terrain.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 5);
         SDL_GPUVertexBufferDescription buffer{};
         buffer.slot = 0;
         buffer.pitch = 8 * sizeof(float);
@@ -276,8 +278,8 @@ Renderer::Renderer(SDL_Window* window, const std::filesystem::path& shaderFolder
 
     // Neighborhood roads: blended over the terrain they lie on.
     {
-        SDL_GPUShader* roadVertex = shader("road.vert.dxil", SDL_GPU_SHADERSTAGE_VERTEX, 0);
-        SDL_GPUShader* roadFragment = shader("road.frag.dxil", SDL_GPU_SHADERSTAGE_FRAGMENT, 2);
+        SDL_GPUShader* roadVertex = shader("road.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0);
+        SDL_GPUShader* roadFragment = shader("road.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 2);
         SDL_GPUVertexBufferDescription buffer{};
         buffer.slot = 0;
         buffer.pitch = 6 * sizeof(float);
@@ -331,8 +333,8 @@ Renderer::Renderer(SDL_Window* window, const std::filesystem::path& shaderFolder
 
     // Neighborhood lot imposters: one vertex layout, four ways of blending.
     {
-        SDL_GPUShader* imposterVertex = shader("imposter.vert.dxil", SDL_GPU_SHADERSTAGE_VERTEX, 0);
-        SDL_GPUShader* imposterFragment = shader("imposter.frag.dxil", SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
+        SDL_GPUShader* imposterVertex = shader("imposter.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0);
+        SDL_GPUShader* imposterFragment = shader("imposter.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
         SDL_GPUVertexBufferDescription buffer{};
         buffer.slot = 0;
         buffer.pitch = 7 * sizeof(float);
@@ -396,8 +398,8 @@ Renderer::Renderer(SDL_Window* window, const std::filesystem::path& shaderFolder
 
     // A lot skirt's boundary curtain: one-sided walls written into depth, never into colour.
     {
-        SDL_GPUShader* clipVertex = shader("clip.vert.dxil", SDL_GPU_SHADERSTAGE_VERTEX, 0);
-        SDL_GPUShader* clipFragment = shader("clip.frag.dxil", SDL_GPU_SHADERSTAGE_FRAGMENT, 0);
+        SDL_GPUShader* clipVertex = shader("clip.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0);
+        SDL_GPUShader* clipFragment = shader("clip.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 0);
         SDL_GPUVertexBufferDescription buffer{};
         buffer.slot = 0;
         buffer.pitch = 3 * sizeof(float);
@@ -435,8 +437,8 @@ Renderer::Renderer(SDL_Window* window, const std::filesystem::path& shaderFolder
 
     // The sky seen in the neighborhood water: behind everything, no depth.
     {
-        SDL_GPUShader* skyVertex = shader("sky.vert.dxil", SDL_GPU_SHADERSTAGE_VERTEX, 0, 0);
-        SDL_GPUShader* skyFragment = shader("sky.frag.dxil", SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
+        SDL_GPUShader* skyVertex = shader("sky.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0, 0);
+        SDL_GPUShader* skyFragment = shader("sky.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
         SDL_GPUColorTargetDescription color{};
         color.format = SDL_GetGPUSwapchainTextureFormat(device_, window_);
         SDL_GPUGraphicsPipelineCreateInfo info{};
@@ -459,8 +461,8 @@ Renderer::Renderer(SDL_Window* window, const std::filesystem::path& shaderFolder
 
     // The neighborhood water sheet: blended over what is below, testing depth without writing it.
     {
-        SDL_GPUShader* waterVertex = shader("water.vert.dxil", SDL_GPU_SHADERSTAGE_VERTEX, 0);
-        SDL_GPUShader* waterFragment = shader("water.frag.dxil", SDL_GPU_SHADERSTAGE_FRAGMENT, 2);
+        SDL_GPUShader* waterVertex = shader("water.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0);
+        SDL_GPUShader* waterFragment = shader("water.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 2);
         SDL_GPUVertexBufferDescription buffer{};
         buffer.slot = 0;
         buffer.pitch = 5 * sizeof(float);
