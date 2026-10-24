@@ -69,8 +69,12 @@ void GlRenderer::setState(const State& want) {
             };
             const GLenum* f = kFactors[std::clamp(want.blend, 1, 5)];
             gl_.Enable(GL_BLEND);
-            if (fixed_) {
-                fxBlendFunc(f[0], f[1], f[2], f[3]);
+            if (fixed_ && instancesOnly_) {
+                // A picture of Sims with a see-through background needs the alpha blended apart from the colour.
+                gl_.BlendFuncSeparate(f[0], f[1], f[2], f[3]);
+            } else if (fixed_) {
+                // Elsewhere nothing reads the framebuffer's alpha, so the colour's factors do for it too, as the consoles blend.
+                fxBlendFunc(f[0], f[1], f[0], f[1]);
             } else {
                 gl_.BlendFuncSeparate(f[0], f[1], f[2], f[3]);
             }
@@ -193,12 +197,23 @@ void GlRenderer::poseSkinned(const GpuPrimitive& p, const MeshBuffers& buffers, 
             out[14 + r] = tangent[r];
         }
     }
-    const auto bytes = static_cast<GLsizeiptr>(scratch_.size() * sizeof(float));
+    const float* sent = scratch_.data();
+    std::size_t sentBytes = scratch_.size() * sizeof(float);
+    if (fixed_) {
+        // Without shaders the posed positions alone go to the GPU: the other attributes are in the mesh's buffer.
+        positions_.resize(static_cast<std::size_t>(p.vertices) * 3);
+        for (std::size_t v = 0; v < p.vertices; ++v) {
+            std::copy_n(&scratch_[v * kVertexFloats], 3, &positions_[v * 3]);
+        }
+        sent = positions_.data();
+        sentBytes = positions_.size() * sizeof(float);
+    }
+    const auto bytes = static_cast<GLsizeiptr>(sentBytes);
     gl_.BindBuffer(GL_ARRAY_BUFFER, streamVertices_);
     arrayBuffer_ = streamVertices_;
     // Orphaned first, so the driver needn't wait for the draws still reading the last one, then filled.
     gl_.BufferData(GL_ARRAY_BUFFER, bytes, nullptr, GL_STREAM_DRAW);
-    gl_.BufferSubData(GL_ARRAY_BUFFER, 0, bytes, scratch_.data());
+    gl_.BufferSubData(GL_ARRAY_BUFFER, 0, bytes, sent);
 }
 
 // Draws primitives with the scene program (`blend` 1 for the blending ones).
@@ -259,8 +274,13 @@ void GlRenderer::drawSprites(unsigned width, unsigned height) {
     v.clear();
     v.reserve(sprites_.size() * 6 * kSpriteFloats);
     for (const auto& s : sprites_) {
-        const float corners[6][4] = {{s.x0, s.y0, s.u0, s.v0}, {s.x1, s.y0, s.u1, s.v0}, {s.x1, s.y1, s.u1, s.v1},
-                                     {s.x0, s.y0, s.u0, s.v0}, {s.x1, s.y1, s.u1, s.v1}, {s.x0, s.y1, s.u0, s.v1}};
+        // Without shaders a sprite may fill only part of its texture (see setSprites).
+        const bool fills = fixed_ && s.texture >= 0 && static_cast<std::size_t>(s.texture) < spriteFill_.size();
+        const float fu = fills ? spriteFill_[static_cast<std::size_t>(s.texture)][0] : 1.0f;
+        const float fv = fills ? spriteFill_[static_cast<std::size_t>(s.texture)][1] : 1.0f;
+        const float u0 = s.u0 * fu, u1 = s.u1 * fu, v0 = s.v0 * fv, v1 = s.v1 * fv;
+        const float corners[6][4] = {{s.x0, s.y0, u0, v0}, {s.x1, s.y0, u1, v0}, {s.x1, s.y1, u1, v1},
+                                     {s.x0, s.y0, u0, v0}, {s.x1, s.y1, u1, v1}, {s.x0, s.y1, u0, v1}};
         for (const auto& c : corners) {
             v.insert(v.end(), {c[0], c[1], c[2], c[3], s.color[0], s.color[1], s.color[2], s.color[3]});
         }
@@ -274,11 +294,20 @@ void GlRenderer::drawSprites(unsigned width, unsigned height) {
     }
     gl_.BindBuffer(GL_ARRAY_BUFFER, spriteVertices_);
     arrayBuffer_ = spriteVertices_;
-    gl_.BufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(v.size() * sizeof(float)), v.data(), GL_STREAM_DRAW);
     constexpr GLsizei stride = kSpriteFloats * sizeof(float);
+    const std::size_t spriteVertices = v.size() / kSpriteFloats;
     if (fixed_) {
-        fixedSpritePointers(stride);
+        // Without shaders: the positions, then the texture coordinates, then the colours, each tightly packed.
+        blocks_.resize(v.size());
+        for (std::size_t i = 0; i < spriteVertices; ++i) {
+            std::copy_n(&v[i * kSpriteFloats], 2, &blocks_[i * 2]);
+            std::copy_n(&v[i * kSpriteFloats + 2], 2, &blocks_[spriteVertices * 2 + i * 2]);
+            std::copy_n(&v[i * kSpriteFloats + 4], 4, &blocks_[spriteVertices * 4 + i * 4]);
+        }
+        gl_.BufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(blocks_.size() * sizeof(float)), blocks_.data(), GL_STREAM_DRAW);
+        fixedSpritePointers(spriteVertices);
     } else {
+        gl_.BufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(v.size() * sizeof(float)), v.data(), GL_STREAM_DRAW);
         setAttributes(kSpriteAttributes);
         gl_.VertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, stride, offset(0));
         gl_.VertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, stride, offset(2 * sizeof(float)));
@@ -312,6 +341,9 @@ void GlRenderer::drawSprites(unsigned width, unsigned height) {
 // Records and draws one frame into the framebuffer bound now. False when it couldn't.
 bool GlRenderer::render(unsigned width, unsigned height, const Camera& camera) {
     diag::Timer timer("record frame");
+    viewWidth_ = width;
+    viewHeight_ = height;
+    grown_ = 0;
     collectGarbage();
     invalidateState();
     const FrameView f = FrameView::make(camera, width, height);
@@ -330,20 +362,28 @@ bool GlRenderer::render(unsigned width, unsigned height, const Camera& camera) {
     // Depth runs from 1 at the near plane to 0 at the far one (see Mat4::perspective).
     gl_.ClearDepth(0.0);
     // Only the part drawn to is cleared, as a picture drawn in a corner of the window (see drawOffscreen) leaves the rest alone.
-    if (subset_) {
-        subset_->enable(GL_SCISSOR_TEST);
+    // Without shaders, a draw the size of the window (or of a target of its own) needs no scissor.
+    int windowWidth = 0, windowHeight = 0;
+    window_->sizeInPixels(windowWidth, windowHeight);
+    const bool partial = !fixed_ || (framebuffer_ == 0 && (width != static_cast<unsigned>(windowWidth) || height != static_cast<unsigned>(windowHeight)));
+    if (partial) {
+        if (subset_) {
+            subset_->enable(GL_SCISSOR_TEST);
+        }
+        gl_.Enable(GL_SCISSOR_TEST);
+        gl_.Scissor(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
     }
-    gl_.Enable(GL_SCISSOR_TEST);
-    gl_.Scissor(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
     gl_.Clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    gl_.Disable(GL_SCISSOR_TEST);
+    if (partial) {
+        gl_.Disable(GL_SCISSOR_TEST);
+    }
     gl_.DepthRange(0.0, 1.0);
     gl_.FrontFace(GL_CCW);
     gl_.CullFace(GL_BACK);
 
     // The sky and the boundary curtain, the terrain, roads and imposters. A portrait shows its
     // instances alone, over a transparent background.
-    if (extras && gpu_->skybox.id != 0) {
+    if (extras && (fixed_ ? gpu_->skyFaces[0].id != 0 : gpu_->skybox.id != 0)) {
         drawSky(f, gpu_->skybox, 1);
     }
     if (extras && gpu_->curtainVertices != 0) {

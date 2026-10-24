@@ -40,9 +40,16 @@ bool oneOf(unsigned value, std::initializer_list<unsigned> list) {
 
 } // namespace
 
+namespace {
+
+std::string whoIs(unsigned targets) {
+    return targets == GlSubset::Both ? "GLdc and ps2gl" : targets == GlSubset::GLdc ? "GLdc" : "ps2gl";
+}
+
+} // namespace
+
 void GlSubset::violate(unsigned targets, const std::string& call, const std::string& what) {
-    const std::string who = targets == Both ? "GLdc and ps2gl" : targets == GLdc ? "GLdc" : "ps2gl";
-    const std::string text = std::format("OpenGL 1 subset: {}: {} (not in {})", call, what, who);
+    const std::string text = std::format("OpenGL 1 subset: {}: {} (not in {})", call, what, whoIs(targets));
     {
         std::lock_guard lock(lock_);
         if (!seen_.insert(text).second) {
@@ -54,9 +61,76 @@ void GlSubset::violate(unsigned targets, const std::string& call, const std::str
     }
 }
 
+void GlSubset::violateCounted(unsigned targets, const std::string& rule, const std::string& kind, const std::string& example) {
+    bool first = false;
+    {
+        std::lock_guard lock(lock_);
+        Counted& c = counted_[rule];
+        first = c.count == 0;
+        if (first) {
+            c.targets = targets;
+            c.example = example;
+        }
+        ++c.count;
+        ++c.kinds[kind];
+    }
+    if (first && report_) {
+        report_(std::format("OpenGL 1 subset: {}: {} (not in {})", example, rule, whoIs(targets)));
+    }
+}
+
+void GlSubset::resident(const char* kind, std::size_t bytes) {
+    std::lock_guard lock(lock_);
+    resident_[kind] = bytes;
+    std::size_t total = 0;
+    for (const auto& [name, b] : resident_) {
+        total += b;
+    }
+    if (total > peakTotal_) {
+        peakTotal_ = total;
+        residentPeak_ = resident_;
+    }
+}
+
 std::size_t GlSubset::violations() const {
     std::lock_guard lock(lock_);
-    return seen_.size();
+    return seen_.size() + counted_.size();
+}
+
+std::vector<std::string> GlSubset::summary() const {
+    std::lock_guard lock(lock_);
+    std::vector<std::string> lines;
+    for (const auto& [rule, c] : counted_) {
+        if (c.count < 2) {
+            continue;
+        }
+        std::string kinds;
+        for (const auto& [kind, n] : c.kinds) {
+            kinds += std::format("{}{} {}", kinds.empty() ? "" : ", ", n, kind);
+        }
+        lines.push_back(std::format("OpenGL 1 subset: {}: {} textures in all ({}), the first {} (not in {})", rule, c.count, kinds, c.example,
+                                    whoIs(c.targets)));
+    }
+    if (peakTotal_ > 0) {
+        std::string at;
+        for (const auto& [kind, b] : residentPeak_) {
+            at += std::format("{}{} {:.1f} MiB", at.empty() ? "" : ", ", kind, static_cast<double>(b) / (1024 * 1024));
+        }
+        lines.push_back(std::format("OpenGL 1 subset: textures in use at once peaked at {:.1f} MiB ({})", static_cast<double>(peakTotal_) / (1024 * 1024), at));
+    }
+    std::size_t textures = 0, bytes = 0;
+    std::string kinds;
+    for (const auto& [kind, m] : memory_) {
+        textures += m.textures;
+        bytes += m.bytes;
+        kinds += std::format("{}{} {} {:.1f} MiB", kinds.empty() ? "" : ", ", m.textures, kind, static_cast<double>(m.bytes) / (1024 * 1024));
+    }
+    if (textures > 0) {
+        lines.push_back(std::format("OpenGL 1 subset: {} textures uploaded over the run (scenes replace each other), {:.1f} MiB in all ({}); the "
+                                    "PlayStation 2 has 4 MB of VRAM for textures and its frame buffers, the Dreamcast 8",
+                                    textures, static_cast<double>(bytes) / (1024 * 1024), kinds));
+    }
+    return lines;
 }
 
 void GlSubset::blend(unsigned srcRgb, unsigned dstRgb, unsigned srcAlpha, unsigned dstAlpha) {
@@ -112,6 +186,10 @@ void GlSubset::drawElements(unsigned indexType) {
     }
 }
 
+void GlSubset::overbright() {
+    violate(GLdc, "glTexEnv(GL_COMBINE, GL_RGB_SCALE)", "GLdc has no texture combine, so light can't pass the texture's own brightness");
+}
+
 void GlSubset::array(const char* name, int size, unsigned type, int stride) {
     const int bytes = size * (type == kUnsignedByte ? 1 : 4);
     if (stride != 0 && stride != bytes) {
@@ -125,21 +203,27 @@ void GlSubset::textureUnits(unsigned count) {
     }
 }
 
-void GlSubset::texture(unsigned target, unsigned width, unsigned height) {
-    const std::string call = std::format("texture {}x{}", width, height);
+void GlSubset::texture(const char* what, unsigned target, unsigned width, unsigned height, unsigned bytesPerTexel) {
+    const std::string example = std::format("{} texture {}x{}", what, width, height);
+    {
+        std::lock_guard lock(lock_);
+        Memory& m = memory_[what];
+        ++m.textures;
+        m.bytes += std::size_t{width} * height * bytesPerTexel * (target == kTexture2d ? 1 : 6);
+    }
     if (target != kTexture2d) {
-        violate(Both, std::format("texture target {}", nameOf(target)), "only 2D textures (no cube maps)");
+        violateCounted(Both, "only 2D textures (no cube maps)", what, std::format("{} texture target {}", what, nameOf(target)));
         return;
     }
     const auto isPowerOfTwo = [](unsigned v) { return v != 0 && (v & (v - 1)) == 0; };
     if (!isPowerOfTwo(width) || !isPowerOfTwo(height)) {
-        violate(Both, call, "sides must be powers of two");
+        violateCounted(Both, "sides must be powers of two", what, example);
     }
     if (width > 1024 || height > 1024) {
-        violate(Both, call, "1024 is the largest side");
+        violateCounted(Both, "1024 is the largest side", what, example);
     }
     if (width < 8 || height < 8) {
-        violate(GLdc, call, "GLdc's smallest side is 8");
+        violateCounted(GLdc, "GLdc's smallest side is 8", what, example);
     }
 }
 

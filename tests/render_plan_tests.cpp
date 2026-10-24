@@ -5,6 +5,7 @@
 #include "render/fixed_layout.hpp"
 #include "render/frame_plan.hpp"
 #include "render/gl_subset.hpp"
+#include "render/texture_fit.hpp"
 #include "render/mesh_pack.hpp"
 
 namespace {
@@ -366,14 +367,26 @@ void theConsoleSubsetReportsWhatTheLibrariesCannotDo() {
     subset.enable(cubeMap);
     CHECK(reports.size() == 6 && has("GL_TEXTURE_CUBE_MAP"));
 
-    subset.texture(texture2d, 256, 64);
+    subset.texture("image", texture2d, 256, 64);
     CHECK(reports.size() == 6);
-    subset.texture(texture2d, 100, 64);
+    subset.texture("image", texture2d, 100, 64);
     CHECK(reports.size() == 7 && has("powers of two"));
-    subset.texture(texture2d, 2048, 64);
+    subset.texture("sprite", texture2d, 2048, 64);
     CHECK(reports.size() == 8 && has("1024"));
-    subset.texture(texture2d, 4, 64);
+    subset.texture("image", texture2d, 4, 64);
     CHECK(reports.size() == 9 && has("smallest"));
+    // Many textures break a rule: the first is reported, and the rest only counted.
+    subset.texture("sprite", texture2d, 300, 64);
+    subset.texture("image", texture2d, 300, 64);
+    CHECK(reports.size() == 9);
+    subset.resident("scene", 3 * 1024 * 1024);
+    subset.resident("sprites", 1024 * 1024);
+    subset.resident("scene", 1024 * 1024);  // a smaller scene: the peak stays
+    const std::vector<std::string> summary = subset.summary();
+    CHECK(summary.size() == 3);  // the powers of two rule has more than one texture (3), then the peak in use, then the uploads
+    CHECK(summary[1].find("peaked at 4.0 MiB") != std::string::npos && summary[1].find("scene 3.0 MiB") != std::string::npos);
+    CHECK(summary[2].find("6 textures uploaded") != std::string::npos && summary[2].find("2 sprite") != std::string::npos);
+    CHECK(summary[0].find("3 textures") != std::string::npos && summary[0].find("2 image, 1 sprite") != std::string::npos);
     subset.textureUnits(1);
     CHECK(reports.size() == 9);
     subset.textureUnits(2);
@@ -391,6 +404,77 @@ void theConsoleSubsetReportsWhatTheLibrariesCannotDo() {
     CHECK(reports.size() == 12 && has("placeholder"));
     subset.drawElements(0x1405);
     CHECK(reports.size() == 13 && has("16-bit"));
+    subset.overbright();
+    CHECK(reports.size() == 14 && has("GL_RGB_SCALE"));
+}
+
+void imagesAreFittedToTheHardwaresTextures() {
+    const TextureLimits limits{1024, 8};
+    CHECK(fitsTexture(256, 64, limits) && !fitsTexture(100, 64, limits) && !fitsTexture(2048, 64, limits) && !fitsTexture(4, 64, limits));
+    CHECK(fitSide(100, limits) == 128 && fitSide(300, limits) == 256 && fitSide(1044, limits) == 1024 && fitSide(788, limits) == 1024);
+    CHECK(fitSide(1, limits) == 8 && fitSide(6, limits) == 8 && fitSide(0, limits) == 8);
+
+    // A clamped image is padded up when that fits, and stretched when it is too large.
+    const ClampedFit small = fitClamped(100, 30, limits);
+    CHECK(!small.stretch && small.width == 128 && small.height == 32 && small.u == 100.0f / 128 && small.v == 30.0f / 32);
+    const ClampedFit tiny = fitClamped(5, 5, limits);
+    CHECK(!tiny.stretch && tiny.width == 8 && tiny.u == 5.0f / 8);
+    const ClampedFit big = fitClamped(1044, 788, limits);
+    CHECK(big.stretch && big.width == 1024 && big.height == 1024 && big.u == 1 && big.v == 1);
+    CHECK(fitClamped(1024, 1024, limits).u == 1 && !fitClamped(1024, 1024, limits).stretch);
+
+    // Stretching keeps a flat colour, averages the pairs it shrinks, and interpolates what it grows.
+    scene::Image flat{2, 2, std::vector<std::uint8_t>(16, 200), {}};
+    const scene::Image grown = stretched(flat, 4, 8);
+    CHECK(grown.width == 4 && grown.height == 8 && grown.rgba.size() == 128 && grown.rgba[0] == 200 && grown.rgba[127] == 200);
+    scene::Image row{4, 1, {0, 0, 0, 255, 100, 0, 0, 255, 200, 0, 0, 255, 100, 0, 0, 255}, {}};
+    const scene::Image shrunk = stretched(row, 2, 1);
+    CHECK(shrunk.rgba[0] == 50 && shrunk.rgba[4] == 150 && shrunk.rgba[3] == 255);
+    scene::Image ramp{2, 1, {0, 0, 0, 255, 100, 0, 0, 255}, {}};
+    const scene::Image stretchedRamp = stretched(ramp, 4, 1);
+    CHECK(stretchedRamp.rgba[0] == 0 && stretchedRamp.rgba[12] == 100 && stretchedRamp.rgba[4] > 0 && stretchedRamp.rgba[4] < 50);
+
+    // A palette keeps as many colours as it has entries: four colours squeezed to two, then left as they are.
+    scene::Image four{4, 1, {255, 0, 0, 255, 250, 10, 0, 255, 0, 0, 255, 255, 0, 10, 250, 255}, {}};
+    const scene::Image two = quantized(four, 2);
+    const auto same = [&](const scene::Image& i, std::size_t a, std::size_t b) {
+        return std::equal(i.rgba.begin() + static_cast<std::ptrdiff_t>(a * 4), i.rgba.begin() + static_cast<std::ptrdiff_t>(a * 4 + 4),
+                          i.rgba.begin() + static_cast<std::ptrdiff_t>(b * 4));
+    };
+    CHECK(same(two, 0, 1) && same(two, 2, 3) && !same(two, 0, 2));
+    CHECK(two.rgba[0] == 253 && two.rgba[2] == 0 && two.rgba[8] == 0 && two.rgba[10] == 253);
+    // Refining the palette and dithering still use no more colours than asked, and the error of a palette that is
+    // exact is nothing.
+    QuantizeOptions refined;
+    refined.iterations = 3;
+    refined.dither = true;
+    scene::Image ramp8{8, 1, {}, {}};
+    for (int i = 0; i < 8; ++i) {
+        const auto v = static_cast<std::uint8_t>(i * 36);
+        ramp8.rgba.insert(ramp8.rgba.end(), {v, v, v, 255});
+    }
+    const scene::Image few = quantized(ramp8, 3, refined);
+    std::set<std::array<std::uint8_t, 4>> distinct;
+    for (std::size_t i = 0; i < few.rgba.size(); i += 4) {
+        distinct.insert({few.rgba[i], few.rgba[i + 1], few.rgba[i + 2], few.rgba[i + 3]});
+    }
+    CHECK(distinct.size() <= 3 && distinct.size() >= 2);
+    CHECK(imageError(four, quantized(four, 4, refined)) == 0 && imageError(four, quantized(four, 2)) > 1);
+    CHECK(imageError(four, ramp8) == 0);  // different sizes: nothing to compare
+    const scene::Image kept = quantized(four, 4);
+    CHECK(kept.rgba == four.rgba);
+    CHECK(quantized(four, 1).rgba == four.rgba);  // fewer than two colours: nothing to do
+
+    // Premultiplied colours are divided by their alpha again, clamped, and alpha 0 and 255 are left alone.
+    scene::Image premultiplied{3, 1, {50, 25, 100, 128, 200, 200, 200, 100, 7, 7, 7, 0}, {}};
+    const scene::Image straight = unpremultiplied(premultiplied);
+    CHECK(straight.rgba[0] == 100 && straight.rgba[1] == 50 && straight.rgba[2] == 199 && straight.rgba[3] == 128);
+    CHECK(straight.rgba[4] == 255 && straight.rgba[8] == 7 && straight.rgba[11] == 0);
+
+    // Padding repeats the edge texels into the rest.
+    scene::Image corner{1, 1, {9, 8, 7, 6}, {}};
+    const scene::Image extended = padded(corner, 2, 2);
+    CHECK(extended.rgba.size() == 16 && extended.rgba[12] == 9 && extended.rgba[15] == 6);
 }
 
 void roadsTakeTheirLightMapCoordinatesFromTheirPlace() {
@@ -402,6 +486,12 @@ void roadsTakeTheirLightMapCoordinatesFromTheirPlace() {
     const auto average = averageColor({white, black});
     CHECK(std::fabs(average[0] - 0.5f) < 1e-6f);
     CHECK(averageColor({})[0] == 1);
+
+    // A light map sampled between its texels, and held at its edges.
+    const scene::Image ramp{2, 1, {0, 0, 0, 255, 200, 100, 50, 255}, {}};
+    CHECK(sampleLightMap(ramp, 0, 0.5f)[0] == 0 && std::fabs(sampleLightMap(ramp, 1, 0.5f)[0] - 200.0f / 255) < 1e-6f);
+    CHECK(std::fabs(sampleLightMap(ramp, 0.5f, 0.5f)[1] - 50.0f / 255) < 1e-6f);
+    CHECK(sampleLightMap(scene::Image{}, 0.5f, 0.5f)[2] == 1);
 }
 
 } // namespace
@@ -419,6 +509,7 @@ std::vector<Test> renderPlanTests() {
         {"Terrain is laid out for the fixed pipeline", terrainIsLaidOutForTheFixedPipeline},
         {"Terrain passes can be coloured at their vertices", terrainPassesCanBeColouredAtTheirVertices},
         {"The console subset reports what the libraries can't do", theConsoleSubsetReportsWhatTheLibrariesCannotDo},
+        {"Images are fitted to the hardware's textures", imagesAreFittedToTheHardwaresTextures},
         {"Roads take their light map coordinates from their place", roadsTakeTheirLightMapCoordinatesFromTheirPlace},
     };
 }

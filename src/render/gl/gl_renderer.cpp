@@ -49,24 +49,92 @@ GlRenderer::GlRenderer(platform::Window& window, const std::filesystem::path& sh
             subset_ = std::make_unique<GlSubset>([](const std::string& text) { diag::warning(text); });
             diag::info("OpenGL 1: reporting what GLdc and ps2gl can't do (NEOTS2_GL1_STRICT)");
         }
+        if (fixed_) {
+            limits_.maxSide = std::min(1024u, static_cast<unsigned>(gl_.maxTextureSize));
+            if (const char* side = std::getenv("NEOTS2_GL1_MAX_TEXTURE"); side != nullptr && std::atoi(side) >= 8) {
+                unsigned largest = 8;
+                while (largest * 2 <= static_cast<unsigned>(std::atoi(side)) && largest * 2 <= limits_.maxSide) {
+                    largest *= 2;
+                }
+                limits_.maxSide = largest;
+            }
+            spriteLimits_ = limits_;
+            spriteLimits_.maxSide = std::min(1024u, static_cast<unsigned>(gl_.maxTextureSize));
+            if (const char* sprite = std::getenv("NEOTS2_GL1_MAX_SPRITE"); sprite != nullptr && std::atoi(sprite) >= 8) {
+                unsigned largest = 8;
+                while (largest * 2 <= static_cast<unsigned>(std::atoi(sprite)) && largest * 2 <= spriteLimits_.maxSide) {
+                    largest *= 2;
+                }
+                spriteLimits_.maxSide = largest;
+            }
+            if (const char* detail = std::getenv("NEOTS2_GL1_TEXTURE_DETAIL"); detail != nullptr && std::atof(detail) > 0) {
+                detail_ = static_cast<float>(std::atof(detail));
+            }
+            if (const char* side = std::getenv("NEOTS2_GL1_OBJECT_SIDE"); side != nullptr && std::atoi(side) >= 8) {
+                objectSide_ = static_cast<float>(std::atoi(side));
+            }
+            if (const char* side = std::getenv("NEOTS2_GL1_SIM_SIDE"); side != nullptr && std::atoi(side) >= 8) {
+                simSide_ = static_cast<float>(std::atoi(side));
+            }
+            if (const char* palette = std::getenv("NEOTS2_GL1_PALETTE"); palette != nullptr) {
+                if (std::atoi(palette) == 4 || std::atoi(palette) == 8) {
+                    paletteBits_ = static_cast<unsigned>(std::atoi(palette));
+                } else if (std::string(palette) == "auto") {
+                    paletteAuto_ = true;
+                }
+            }
+            if (const char* error = std::getenv("NEOTS2_GL1_PALETTE_ERROR"); error != nullptr && std::atof(error) > 0) {
+                paletteError_ = static_cast<float>(std::atof(error));
+            }
+            if (const char* dither = std::getenv("NEOTS2_GL1_DITHER"); dither != nullptr && *dither != '\0' && *dither != '0') {
+                dither_ = true;
+            }
+            if (const char* surface = std::getenv("NEOTS2_GL1_SURFACE_SIDE"); surface != nullptr && std::atoi(surface) >= 8) {
+                surfaceSide_ = static_cast<float>(std::atoi(surface));
+            }
+            if (const char* width = std::getenv("NEOTS2_GL1_TARGET_WIDTH"); width != nullptr && std::atoi(width) >= 160) {
+                consoleWidth_ = static_cast<unsigned>(std::atoi(width));
+            }
+            const char* bits = std::getenv("NEOTS2_GL1_TEXTURE_BITS");
+            sixteenBit_ = bits != nullptr && std::atoi(bits) == 16;
+            diag::info(std::format("OpenGL 1: textures are powers of two from {} to {}{}{}", limits_.minSide, limits_.maxSide,
+                                   paletteAuto_ ? std::string(", palettes where they show little") : paletteBits_ != 0 ? std::format(", {}-bit palettes", paletteBits_) : sixteenBit_ ? std::string(", 16 bits a texel") : std::string(),
+                                   detail_ > 0 ? std::format(", sized to {} texels for each pixel a {}-pixel-wide screen needs", detail_, consoleWidth_) : std::string()));
+        }
         gl_.GenBuffers(1, &streamVertices_);
         gl_.GenBuffers(1, &spriteVertices_);
         if (fixed_) {
             gl_.GenBuffers(1, &colorStream_);
-            // The sky is a cube around the camera, 36 vertices, which are also the directions the cube map is looked up by.
-            std::array<float, 36 * 3> cube{};
-            constexpr int kFaces[6][4][3] = {{{1, -1, -1}, {1, 1, -1}, {1, 1, 1}, {1, -1, 1}},      {{-1, 1, -1}, {-1, -1, -1}, {-1, -1, 1}, {-1, 1, 1}},
-                                             {{1, 1, -1}, {-1, 1, -1}, {-1, 1, 1}, {1, 1, 1}},      {{-1, -1, -1}, {1, -1, -1}, {1, -1, 1}, {-1, -1, 1}},
-                                             {{-1, -1, 1}, {1, -1, 1}, {1, 1, 1}, {-1, 1, 1}},      {{-1, 1, -1}, {1, 1, -1}, {1, -1, -1}, {-1, -1, -1}}};
-            std::size_t at = 0;
-            for (const auto& face : kFaces) {
+            // The sky is a box around the camera: 36 vertices (the directions the sky is looked up by), then where each
+            // is on its face's picture, by the rule a cube map has (the faces in the order +x -x +y -y +z -z).
+            std::array<float, 36 * 3 + 36 * 2> box{};
+            std::size_t at = 0, uvAt = 36 * 3;
+            for (int face = 0; face < 6; ++face) {
+                const int axis = face / 2;
+                const float sign = face % 2 == 0 ? 1.0f : -1.0f;
                 for (const int corner : {0, 1, 2, 0, 2, 3}) {
-                    for (const int axis : face[corner]) {
-                        cube[at++] = static_cast<float>(axis);
+                    static constexpr int kCorners[4][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
+                    float r[3];
+                    r[axis] = sign;
+                    r[(axis + 1) % 3] = static_cast<float>(kCorners[corner][0]);
+                    r[(axis + 2) % 3] = static_cast<float>(kCorners[corner][1]);
+                    float s = 0, t = 0;
+                    switch (face) {
+                    case 0: s = -r[2]; t = -r[1]; break;
+                    case 1: s = r[2]; t = -r[1]; break;
+                    case 2: s = r[0]; t = r[2]; break;
+                    case 3: s = r[0]; t = -r[2]; break;
+                    case 4: s = r[0]; t = -r[1]; break;
+                    default: s = -r[0]; t = -r[1]; break;
                     }
+                    box[at++] = r[0];
+                    box[at++] = r[1];
+                    box[at++] = r[2];
+                    box[uvAt++] = (s + 1) / 2;
+                    box[uvAt++] = (t + 1) / 2;
                 }
             }
-            skyVertices_ = uploadBuffer(GL_ARRAY_BUFFER, cube.data(), cube.size() * sizeof(float));
+            skyVertices_ = uploadBuffer(GL_ARRAY_BUFFER, box.data(), box.size() * sizeof(float));
         } else {
             // The sky is one triangle covering the screen, corners (0,0) (2,0) (0,2).
             const float corners[6] = {0, 0, 2, 0, 0, 2};
@@ -77,7 +145,9 @@ GlRenderer::GlRenderer(platform::Window& window, const std::filesystem::path& sh
             makePrograms(shaderFolder);
         }
         gpu_->white = uploadTexture({1, 1, {255, 255, 255, 255}, {}}, false);
-        gpu_->blackCube = uploadCube(std::vector<scene::Image>(6, scene::Image{1, 1, {0, 0, 0, 255}, {}}));
+        if (!fixed_) {
+            gpu_->blackCube = uploadCube(std::vector<scene::Image>(6, scene::Image{1, 1, {0, 0, 0, 255}, {}}));
+        }
         diag::info(std::format("OpenGL {}.{}: framebuffer objects {}, anisotropic filtering {}", gl_.majorVersion, gl_.minorVersion,
                                gl_.framebuffers ? "yes" : "no", gl_.anisotropy ? "yes" : "no"));
         makeSharedContexts(2);
@@ -91,6 +161,12 @@ GlRenderer::GlRenderer(platform::Window& window, const std::filesystem::path& sh
 }
 
 GlRenderer::~GlRenderer() {
+    if (subset_) {
+        reportScene(*gpu_, "of the scene at exit");
+        for (const std::string& line : subset_->summary()) {
+            diag::warning(line);
+        }
+    }
     if (context_ == nullptr) {
         return;
     }

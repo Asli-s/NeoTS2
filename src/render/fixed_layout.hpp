@@ -37,6 +37,9 @@ std::vector<std::uint8_t> fixedPaintWeights(const scene::PaintedTerrain& t, unsi
 // The road quads' vertices with the light map's texture coordinates, which the world position gives.
 std::vector<float> fixedRoadVertices(const RoadMesh& roads, float lightMapSize);
 
+// A light map (or any image) at a place in it, 0 to 1 across, sampled linearly and clamped at its edges.
+std::array<float, 3> sampleLightMap(const scene::Image& image, float u, float v);
+
 // The average colour of the images (RGB, 0 to 1), looking at a spread of their texels. White for none.
 std::array<float, 3> averageColor(const std::vector<scene::Image>& images);
 

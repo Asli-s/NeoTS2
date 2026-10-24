@@ -29,10 +29,42 @@ GLuint GlRenderer::uploadBuffer(GLenum target, const void* data, std::size_t byt
     return id;
 }
 
+GLuint GlRenderer::uploadBlocks(const float* data, std::size_t count, std::size_t stride, std::initializer_list<std::array<std::size_t, 2>> attributes) {
+    std::size_t floats = 0;
+    for (const auto& attribute : attributes) {
+        floats += attribute[1];
+    }
+    std::vector<float> blocks(count * floats);
+    std::size_t at = 0;
+    for (const auto& [first, size] : attributes) {
+        for (std::size_t v = 0; v < count; ++v) {
+            std::copy_n(data + v * stride + first, size, blocks.begin() + static_cast<std::ptrdiff_t>(at + v * size));
+        }
+        at += count * size;
+    }
+    return uploadBuffer(GL_ARRAY_BUFFER, blocks.data(), blocks.size() * sizeof(float));
+}
+
+GLuint GlRenderer::uploadIndices(const std::vector<std::uint32_t>& indices, bool& wide) {
+    wide = true;
+    if (fixed_ && std::all_of(indices.begin(), indices.end(), [](std::uint32_t i) { return i <= 0xFFFF; })) {
+        const std::vector<std::uint16_t> narrow(indices.begin(), indices.end());
+        wide = false;
+        return uploadBuffer(GL_ELEMENT_ARRAY_BUFFER, narrow.data(), narrow.size() * sizeof(std::uint16_t));
+    }
+    return uploadBuffer(GL_ELEMENT_ARRAY_BUFFER, indices.data(), indices.size() * sizeof(std::uint32_t));
+}
+
 // A texture of these RGBA texels, clamped at its edges, without smaller levels.
 GlRenderer::Texture GlRenderer::uploadRaw(unsigned width, unsigned height, const std::uint8_t* rgba, bool nearest) {
+    if (fixed_ && !fitsTexture(width, height, limits_)) {
+        const scene::Image source{width, height, std::vector<std::uint8_t>(rgba, rgba + std::size_t{width} * height * 4), {}};
+        const scene::Image fitted = stretched(source, fitSide(width, limits_), fitSide(height, limits_));
+        return uploadRaw(fitted.width, fitted.height, fitted.rgba.data(), nearest);
+    }
     Texture t;
-    checkTexture(GL_TEXTURE_2D, width, height);
+    t.bytes = bytesFor(std::size_t{width} * height, false);
+    checkTexture("map", GL_TEXTURE_2D, width, height);
     t.wrap = GL_CLAMP_TO_EDGE;
     t.nearest = nearest;
     gl_.GenTextures(1, &t.id);
@@ -44,7 +76,8 @@ GlRenderer::Texture GlRenderer::uploadRaw(unsigned width, unsigned height, const
     gl_.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, nearest ? GL_NEAREST : GL_LINEAR);
     gl_.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     gl_.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    gl_.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, static_cast<GLsizei>(width), static_cast<GLsizei>(height), 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    gl_.TexImage2D(GL_TEXTURE_2D, 0, internalFormatFor(rgba, std::size_t{width} * height), static_cast<GLsizei>(width), static_cast<GLsizei>(height), 0,
+                   GL_RGBA, GL_UNSIGNED_BYTE, rgba);
     return t;
 }
 
@@ -55,14 +88,15 @@ void GlRenderer::uploadTerrain(SceneGpu& gpu, const scene::PaintedTerrain& t) {
     if (fixed_) {
         // Without shaders the vertices carry the textures' coordinates, and the gradient is in their colours.
         const std::vector<float> vertices = fixedTerrainVertices(grid, t);
-        gpu.terrainVertices = uploadBuffer(GL_ARRAY_BUFFER, vertices.data(), vertices.size() * sizeof(float));
+        gpu.terrainVertexCount = static_cast<unsigned>(vertices.size() / kFixedTerrainFloats);
+        gpu.terrainVertices = uploadBlocks(vertices.data(), gpu.terrainVertexCount, kFixedTerrainFloats, {{{0, 3}}, {{3, 2}}, {{5, 2}}, {{7, 2}}});
         const std::vector<std::uint8_t> colors = fixedTerrainColors(grid, t);
         gpu.terrainColors = uploadBuffer(GL_ARRAY_BUFFER, colors.data(), colors.size());
     } else {
         gpu.terrainVertices = uploadBuffer(GL_ARRAY_BUFFER, grid.vertices.data(), grid.vertices.size() * sizeof(float));
     }
     if (!grid.indices.empty()) {  // every tile can be hidden (a lot's own ground stands in for it)
-        gpu.terrainIndices = uploadBuffer(GL_ELEMENT_ARRAY_BUFFER, grid.indices.data(), grid.indices.size() * sizeof(std::uint32_t));
+        gpu.terrainIndices = uploadIndices(grid.indices, gpu.terrainWide);
     }
     gpu.terrainIndexCount = static_cast<unsigned>(grid.indices.size());
 
@@ -116,7 +150,9 @@ void GlRenderer::uploadTerrain(SceneGpu& gpu, const scene::PaintedTerrain& t) {
     // The light map wraps: the game's lighting stage sets no addressing, leaving D3D's default. White (no change) when there is none.
     gpu.terrainLight = uploadTexture(complete(t.lightMap) ? t.lightMap : white, false);
     const scene::Image& gradient = complete(t.underwaterGradient) ? t.underwaterGradient : white;
-    gpu.terrainGradient = uploadRaw(gradient.width, gradient.height, gradient.rgba.data(), false);
+    if (!fixed_) {  // without shaders the gradient is in the vertices' colours
+        gpu.terrainGradient = uploadRaw(gradient.width, gradient.height, gradient.rgba.data(), false);
+    }
     gpu.terrainUniforms = {static_cast<float>(t.alphaSize), t.textureRepeat, static_cast<float>(t.cellTiles), static_cast<float>(paints),
                            static_cast<float>(t.cellsX), static_cast<float>(t.cellsY), t.lightMap.width ? t.lightMapScale : 1.0f, t.litFrom,
                            t.gradientDepth, 0, 0, 0};
@@ -125,32 +161,57 @@ void GlRenderer::uploadTerrain(SceneGpu& gpu, const scene::PaintedTerrain& t) {
         const RoadMesh roads = roadQuads(t);
         gpu.lightMapSize = t.lightMapScale * t.tileSize;
         const std::vector<float> roadVertices = fixed_ ? fixedRoadVertices(roads, gpu.lightMapSize) : roads.mesh.vertices;
-        gpu.roadVertices = uploadBuffer(GL_ARRAY_BUFFER, roadVertices.data(), roadVertices.size() * sizeof(float));
+        if (fixed_) {
+            gpu.roadVertexCount = static_cast<unsigned>(roadVertices.size() / kFixedRoadFloats);
+            gpu.roadVertices = uploadBlocks(roadVertices.data(), gpu.roadVertexCount, kFixedRoadFloats, {{{0, 3}}, {{3, 2}}, {{5, 2}}});
+        } else {
+            gpu.roadVertices = uploadBuffer(GL_ARRAY_BUFFER, roadVertices.data(), roadVertices.size() * sizeof(float));
+        }
         if (fixed_) {
             const std::vector<std::uint8_t> colors = fixedRoadColors(roads, t, gpu.lightMapSize);
             gpu.roadColors = uploadBuffer(GL_ARRAY_BUFFER, colors.data(), colors.size());
         }
-        gpu.roadIndices = uploadBuffer(GL_ELEMENT_ARRAY_BUFFER, roads.mesh.indices.data(), roads.mesh.indices.size() * sizeof(std::uint32_t));
+        gpu.roadIndices = uploadIndices(roads.mesh.indices, gpu.roadWide);
         gpu.roadRuns = roads.runs;
         for (const auto& image : t.roadTextures) {
             gpu.roadTextures.push_back(uploadTexture(complete(image) ? image : white, true, false));
         }
     }
     if (!t.imposters.empty()) {
-        for (const auto& image : t.imposterTextures) {
-            gpu.imposterTextures.push_back(uploadTexture(complete(image) ? image : white, false));
-        }
         const ImposterMesh parts = imposterParts(t);
-        gpu.imposterVertices = uploadBuffer(GL_ARRAY_BUFFER, parts.mesh.vertices.data(), parts.mesh.vertices.size() * sizeof(float));
-        gpu.imposterIndices = uploadBuffer(GL_ELEMENT_ARRAY_BUFFER, parts.mesh.indices.data(), parts.mesh.indices.size() * sizeof(std::uint32_t));
+        // Their colours are multiplied by their alpha already. Without shaders they are divided by it again (roofs excepted,
+        // which are drawn opaque as they are), because the consoles blend by the alpha alone.
+        std::set<std::uint32_t> roofTextures;
+        for (const auto& d : parts.draws) {
+            if (d.kind == scene::PaintedTerrain::ImposterPart::Kind::Roof) {
+                roofTextures.insert(d.texture);
+            }
+        }
+        for (std::size_t i = 0; i < t.imposterTextures.size(); ++i) {
+            const scene::Image& image = complete(t.imposterTextures[i]) ? t.imposterTextures[i] : white;
+            const bool straight = fixed_ && !roofTextures.contains(static_cast<std::uint32_t>(i));
+            gpu.imposterTextures.push_back(straight ? uploadTexture(unpremultiplied(image), false) : uploadTexture(image, false));
+        }
+        if (fixed_) {
+            gpu.imposterVertexCount = static_cast<unsigned>(parts.mesh.vertices.size() / kImposterFloats);
+            gpu.imposterVertices = uploadBlocks(parts.mesh.vertices.data(), gpu.imposterVertexCount, kImposterFloats, {{{0, 3}}, {{3, 2}}, {{5, 2}}});
+        } else {
+            gpu.imposterVertices = uploadBuffer(GL_ARRAY_BUFFER, parts.mesh.vertices.data(), parts.mesh.vertices.size() * sizeof(float));
+        }
+        gpu.imposterIndices = uploadIndices(parts.mesh.indices, gpu.imposterWide);
         gpu.imposterDraws = parts.draws;
     }
 
     // The water: a sheet over the wet tiles, its ripples, and the sky it reflects.
     const IndexedMesh water = waterSheet(t);
     if (!water.indices.empty() && t.sky.size() == 6 && t.ripples.width) {
-        gpu.waterVertices = uploadBuffer(GL_ARRAY_BUFFER, water.vertices.data(), water.vertices.size() * sizeof(float));
-        gpu.waterIndices = uploadBuffer(GL_ELEMENT_ARRAY_BUFFER, water.indices.data(), water.indices.size() * sizeof(std::uint32_t));
+        if (fixed_) {
+            // The water has no texture without shaders: its positions alone.
+            gpu.waterVertices = uploadBlocks(water.vertices.data(), water.vertices.size() / kWaterFloats, kWaterFloats, {{{0, 3}}});
+        } else {
+            gpu.waterVertices = uploadBuffer(GL_ARRAY_BUFFER, water.vertices.data(), water.vertices.size() * sizeof(float));
+        }
+        gpu.waterIndices = uploadIndices(water.indices, gpu.waterWide);
         gpu.waterIndexCount = static_cast<unsigned>(water.indices.size());
         gpu.waterLevel = t.waterLevel;
         if (fixed_) {
@@ -170,7 +231,7 @@ void GlRenderer::uploadTerrain(SceneGpu& gpu, const scene::PaintedTerrain& t) {
 // in the water.
 void GlRenderer::drawSky(const FrameView& f, const Texture& cube, float up) {
     if (fixed_) {
-        drawSkyFixed(f, cube);
+        drawSkyFixed(f);
         return;
     }
     useProgram(sky_);

@@ -174,6 +174,16 @@ std::vector<std::uint8_t> fixedRoadColors(const RoadMesh& roads, const scene::Pa
     return out;
 }
 
+std::array<float, 3> sampleLightMap(const scene::Image& image, float u, float v) {
+    if (!complete(image)) {
+        return {1, 1, 1};
+    }
+    const float x = u * static_cast<float>(image.width), y = v * static_cast<float>(image.height);
+    return {sampleTexels(image.rgba.data(), image.width, image.height, x, y, 0, false),
+            sampleTexels(image.rgba.data(), image.width, image.height, x, y, 1, false),
+            sampleTexels(image.rgba.data(), image.width, image.height, x, y, 2, false)};
+}
+
 std::array<float, 3> averageColor(const std::vector<scene::Image>& images) {
     double sum[3] = {};
     std::size_t taken = 0;

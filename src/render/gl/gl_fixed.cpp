@@ -15,16 +15,29 @@ namespace ts2::render {
 
 namespace {
 
-constexpr GLsizei kVertexBytes = static_cast<GLsizei>(kVertexFloats * sizeof(float));
 constexpr unsigned kVertexArray = 1, kColorArray = 2, kTexCoordArray = 4;
 // Where a vertex keeps what (see kVertexFloats).
-constexpr std::size_t kNormalAt = 3, kUvAt = 6, kAlphaAt = 8, kLightUvAt = 9, kColorAt = 11;
+constexpr std::size_t kNormalAt = 3, kAlphaAt = 8, kLightUvAt = 9, kColorAt = 11;
 // The light a surface that a light map would darken is drawn with where it can't be multiplied in
 // (see drawListFixed), as a share of the light map's gain.
 constexpr float kBlendedLightMapShare = 0.5f;
 
 const void* offset(std::size_t bytes) {
     return reinterpret_cast<const void*>(bytes);
+}
+
+// Where a vertex's attribute starts in a buffer of blocks (see uploadBlocks): `before` floats of each of the
+// `count` vertices come ahead of the attribute's block, which has `size` floats for each.
+const void* inBlocks(std::size_t count, std::size_t before, std::size_t size, std::size_t first) {
+    return offset((count * before + first * size) * sizeof(float));
+}
+
+GLenum indexType(bool wide) {
+    return wide ? GL_UNSIGNED_INT : GL_UNSIGNED_SHORT;
+}
+
+std::size_t indexBytes(bool wide) {
+    return wide ? 4 : 2;
 }
 
 Mat4 fromRows(const float* rows) {
@@ -58,9 +71,10 @@ std::uint8_t byteOf(float v) {
 
 // What colours a draw's vertices to what scene.frag.hlsl makes of them, apart from the texture the
 // colour is multiplied by. `lightMapShare` is the share of a light map's gain that draws its surface
-// when the light map itself can't be multiplied in.
-void vertexColors(const VertexUniforms& vu, const FragmentUniforms& fu, const float* vertices, unsigned count, float lightMapShare,
-                  std::vector<std::uint8_t>& out) {
+// when the light map itself can't be multiplied in. `scale` is what the colours are multiplied by on their
+// way to bytes: 0.5 where the texture environment multiplies by 2 again (see fxTexEnvScale).
+void vertexColors(const VertexUniforms& vu, const FragmentUniforms& fu, const float* vertices, unsigned count, float lightMapShare, float scale,
+                  const scene::Image* lightImage, const scene::Image* lightFrom, std::vector<std::uint8_t>& out) {
     const Mat4 model = fromRows(vu.model);
     const std::array<float, 16>& m = model.m;
     const bool lightMap = fu.lightMap[0] > 0;
@@ -73,9 +87,27 @@ void vertexColors(const VertexUniforms& vu, const FragmentUniforms& fu, const fl
         const float* vc = v + kColorAt;
         float rgb[3];
         if (lightMap) {
-            // Floors and walls: the texture alone or times the material's colour, then the light map.
+            // Floors and walls: the texture alone or times the material's colour, then the light map. Taken from
+            // the light map's pixels at the vertex where it has them, else `lightMapShare` of its gain.
+            std::array<float, 3> lit{1, 1, 1};
+            if (lightImage != nullptr) {
+                lit = sampleLightMap(*lightImage, v[kLightUvAt], v[kLightUvAt + 1]);
+                if (lightFrom != nullptr && fu.lightMapFade < 1) {
+                    const auto from = sampleLightMap(*lightFrom, v[kLightUvAt], v[kLightUvAt + 1]);
+                    for (std::size_t k = 0; k < 3; ++k) {
+                        lit[k] = from[k] + (lit[k] - from[k]) * fu.lightMapFade;
+                    }
+                }
+            }
             for (std::size_t k = 0; k < 3; ++k) {
-                rgb[k] = (fu.lightMap[1] > 0.5f && hasTexture ? 1.0f : color[k] * vc[k]) * lightMapShare;
+                float factor = lightMapShare;
+                if (lightImage != nullptr) {
+                    factor = lit[k] * fu.lightMap[0];
+                    if (fu.lightMap[2] > 0.5f) {  // the lot's terrain: darkened by its light map, never brightened
+                        factor = std::min(1.0f, factor);
+                    }
+                }
+                rgb[k] = (fu.lightMap[1] > 0.5f && hasTexture ? 1.0f : color[k] * vc[k]) * factor;
             }
         } else if (fu.unlit > 0.5f) {
             for (std::size_t k = 0; k < 3; ++k) {
@@ -114,9 +146,9 @@ void vertexColors(const VertexUniforms& vu, const FragmentUniforms& fu, const fl
             }
         }
         std::uint8_t* at = &out[std::size_t{i} * 4];
-        at[0] = byteOf(rgb[0]);
-        at[1] = byteOf(rgb[1]);
-        at[2] = byteOf(rgb[2]);
+        at[0] = byteOf(rgb[0] * scale);
+        at[1] = byteOf(rgb[1] * scale);
+        at[2] = byteOf(rgb[2] * scale);
         at[3] = byteOf(color[3] * v[kAlphaAt]);
     }
 }
@@ -134,7 +166,11 @@ void GlRenderer::fxBlendFunc(GLenum srcRgb, GLenum dstRgb, GLenum srcAlpha, GLen
     if (subset_) {
         subset_->blend(srcRgb, dstRgb, srcAlpha, dstAlpha);
     }
-    gl_.BlendFuncSeparate(srcRgb, dstRgb, srcAlpha, dstAlpha);
+    if (srcRgb == srcAlpha && dstRgb == dstAlpha) {
+        gl_.BlendFunc(srcRgb, dstRgb);
+    } else {
+        gl_.BlendFuncSeparate(srcRgb, dstRgb, srcAlpha, dstAlpha);
+    }
 }
 
 void GlRenderer::fxAlphaFunc(GLenum func, GLclampf reference) {
@@ -149,6 +185,25 @@ void GlRenderer::fxTexEnv(GLint mode) {
         subset_->texEnv(static_cast<unsigned>(mode));
     }
     gl_.TexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, mode);
+}
+
+// Multiplies the texture times the vertex colour by `scale` (1 or 2). Twice is how colours brighter than 1 get
+// past the byte they are kept in: the GS does it by calling 0x80 full brightness, and OpenGL by combining.
+void GlRenderer::fxTexEnvScale(int scale) {
+    if (scale > 1) {
+        if (subset_) {
+            subset_->overbright();
+        }
+        gl_.TexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
+        gl_.TexEnvi(GL_TEXTURE_ENV, GL_RGB_SCALE, scale);
+        texEnvScaled_ = true;
+    } else {
+        fxTexEnv(GL_MODULATE);
+        if (texEnvScaled_) {
+            gl_.TexEnvi(GL_TEXTURE_ENV, GL_RGB_SCALE, 1);
+            texEnvScaled_ = false;
+        }
+    }
 }
 
 void GlRenderer::fxDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {
@@ -179,6 +234,74 @@ void GlRenderer::fxTexCoordPointer(GLint size, GLenum type, GLsizei stride, cons
     gl_.TexCoordPointer(size, type, stride, pointer);
 }
 
+// How many pixels one repeat of the texture covers across and down in this draw, on a console's screen: for a few of
+// its triangles, how the screen position changes with the texture coordinates, and the longer of u and v. The most
+// any draw asked for is what the image needs to be as big as.
+std::optional<std::array<float, 2>> GlRenderer::noteDensity(const GpuPrimitive& p, const MeshBuffers& buffers, const Mat4& clip, int image, float scale,
+                                                            float cap) {
+    if (buffers.cpuIndices.empty() || buffers.cpuVertices.empty() || viewWidth_ == 0) {
+        return std::nullopt;
+    }
+    const std::size_t triangles = p.count / 3;
+    const std::size_t samples = std::min<std::size_t>(triangles, 12);
+    const float scaleX = static_cast<float>(consoleWidth_), scaleY = static_cast<float>(consoleWidth_) * static_cast<float>(viewHeight_) / static_cast<float>(viewWidth_);
+    double sumU = 0, sumV = 0;
+    std::size_t used = 0;
+    for (std::size_t s = 0; s < samples; ++s) {
+        const std::size_t t = s * triangles / samples;
+        float px[3][2], uv[3][2];
+        bool ok = true;
+        for (std::size_t k = 0; k < 3 && ok; ++k) {
+            const std::size_t at = static_cast<std::size_t>(p.firstIndex) + t * 3 + k;
+            if (at >= buffers.cpuIndices.size()) {
+                ok = false;
+                break;
+            }
+            const std::size_t vertex = static_cast<std::size_t>(p.firstVertex) + buffers.cpuIndices[at];
+            if ((vertex + 1) * kVertexFloats > buffers.cpuVertices.size()) {
+                ok = false;
+                break;
+            }
+            const float* v = &buffers.cpuVertices[vertex * kVertexFloats];
+            const auto& m = clip.m;
+            const float cw = m[12] * v[0] + m[13] * v[1] + m[14] * v[2] + m[15];
+            if (cw <= 1e-4f) {
+                ok = false;
+                break;
+            }
+            px[k][0] = ((m[0] * v[0] + m[1] * v[1] + m[2] * v[2] + m[3]) / cw * 0.5f + 0.5f) * scaleX;
+            px[k][1] = ((m[4] * v[0] + m[5] * v[1] + m[6] * v[2] + m[7]) / cw * 0.5f + 0.5f) * scaleY;
+            uv[k][0] = v[6];
+            uv[k][1] = v[7];
+        }
+        if (!ok) {
+            continue;
+        }
+        const float e1u = uv[1][0] - uv[0][0], e1v = uv[1][1] - uv[0][1], e2u = uv[2][0] - uv[0][0], e2v = uv[2][1] - uv[0][1];
+        const float det = e1u * e2v - e2u * e1v;
+        if (std::fabs(det) < 1e-9f) {
+            continue;
+        }
+        const float q1x = px[1][0] - px[0][0], q1y = px[1][1] - px[0][1], q2x = px[2][0] - px[0][0], q2y = px[2][1] - px[0][1];
+        const float pux = (q1x * e2v - q2x * e1v) / det, puy = (q1y * e2v - q2y * e1v) / det;
+        const float pvx = (q2x * e1u - q1x * e2u) / det, pvy = (q2y * e1u - q1y * e2u) / det;
+        sumU += std::hypot(pux, puy);
+        sumV += std::hypot(pvx, pvy);
+        ++used;
+    }
+    if (used == 0) {
+        return std::nullopt;
+    }
+    const std::array<float, 2> here{std::min(cap, scale * static_cast<float>(sumU / static_cast<double>(used))),
+                                    std::min(cap, scale * static_cast<float>(sumV / static_cast<double>(used)))};
+    if (subset_) {
+        auto& need = gpu_->neededPixels[image];
+        need[0] = std::max(need[0], here[0]);
+        need[1] = std::max(need[1], here[1]);
+    }
+    return here;
+}
+
 // Enables the vertex arrays in `mask` (kVertexArray, kColorArray, kTexCoordArray) and disables the others.
 void GlRenderer::setClientArrays(unsigned mask) {
     const bool unknown = clientArrays_ == ~0u;
@@ -196,16 +319,18 @@ void GlRenderer::setClientArrays(unsigned mask) {
 }
 
 // The objects, as scene.vert.hlsl and scene.frag.hlsl would draw them, less what needs shaders: the
-// normal-mapped light, specular and environment cubes. Blended light-mapped surfaces (floor decals)
-// can't have the light map multiplied in over what is behind them, so they are darkened by a share of
-// its gain instead.
+// normal-mapped light, specular and environment cubes. A floor's or wall's light map is sampled at its
+// vertices (one sample a tile on a floor, where the map has several). With the multiplying pass instead,
+// blended light-mapped surfaces (floor decals) can't have the light map multiplied in over what is behind
+// them, so they are darkened by a share of its gain.
 void GlRenderer::drawListFixed(const FrameView& f, const std::vector<Draw>& list, int blend) {
     if (list.empty()) {
         return;
     }
     gl_.ActiveTexture(GL_TEXTURE0);
     fxEnable(GL_TEXTURE_2D);
-    fxTexEnv(GL_MODULATE);
+    const float colorScale = overbright_ ? 0.5f : 1.0f;
+    fxTexEnvScale(overbright_ ? 2 : 1);
     gl_.MatrixMode(GL_PROJECTION);
     gl_.LoadMatrixf(byColumns(clipSpace() * f.viewProjection).data());
     gl_.MatrixMode(GL_MODELVIEW);
@@ -224,21 +349,53 @@ void GlRenderer::drawListFixed(const FrameView& f, const std::vector<Draw>& list
         const DrawUniforms u = FramePlan::uniformsFor(*this, *this, f, d, blend);
         const VertexUniforms& vu = u.vertex.frame;
         const FragmentUniforms& fu = u.fragment;
+        if (subset_) {
+            for (const SamplerBinding& binding : {u.samplers[0], u.samplers[1]}) {
+                if (binding.texture.kind == TextureRef::Kind::Image) {
+                    gpu_->drawnImages.insert(binding.texture.index);
+                }
+            }
+        }
+        if ((subset_ || detail_ > 0) && u.samplers[0].texture.kind == TextureRef::Kind::Image) {
+            const int image = u.samplers[0].texture.index;
+            // How sharp it needs to be depends on what it is: floors, walls and the like may be soft, however close the
+            // camera, and a Sim is looked at more than a thing, so gets twice the texels.
+            const scene::Part part = d.instance->part;
+            const bool surface = part == scene::Part::Floor || part == scene::Part::Wall || part == scene::Part::WallHub || part == scene::Part::Skirt ||
+                                 part == scene::Part::Roof;
+            const bool sim = m && m->simLighting;
+            const float scale = (detail_ > 0 ? detail_ : 1.0f) * (sim ? 2.0f : 1.0f);
+            const float cap = surface ? surfaceSide_ : sim ? simSide_ : objectSide_;
+            if (const auto need = noteDensity(p, buffers, f.viewProjection * fromRows(vu.model), image, scale, cap); need && detail_ > 0) {
+                growTexture(image, *need);
+            }
+        }
 
         // The vertices as they are in the model's space: a skinned primitive's are posed (into the streaming buffer).
         const float* vertices = nullptr;
-        std::size_t start = 0;
         if (p.skinned) {
             poseSkinned(p, buffers, static_cast<std::size_t>(d.instance - instances_.data()));
             vertices = scratch_.data();
         } else {
             vertices = &buffers.cpuVertices[static_cast<std::size_t>(p.firstVertex) * kVertexFloats];
-            start = static_cast<std::size_t>(p.firstVertex) * kVertexBytes;
         }
+        // A floor's or wall's light is taken from its light map at the vertices where the pixels are kept. If not (or when
+        // setVertexLightMaps asks for it), it is multiplied in by a pass of its own over what the first drew.
         const bool lightMapped = fu.lightMap[0] > 0;
-        const bool multiplied = lightMapped && blend == 0;
-        vertexColors(vu, fu, vertices, p.vertices, lightMapped && !multiplied ? std::min(1.0f, kBlendedLightMapShare * fu.lightMap[0]) : 1.0f,
-                     litColors_);
+        const scene::Image* lightImage = nullptr;
+        const scene::Image* lightFrom = nullptr;
+        if (lightMapped && vertexLightMaps_) {
+            if (const auto found = gpu_->lightImages.find(d.instance->lightMap); found != gpu_->lightImages.end()) {
+                lightImage = &found->second;
+                if (const auto from = gpu_->lightFrom.find(d.instance->lightMap); from != gpu_->lightFrom.end()) {
+                    lightFrom = &from->second;
+                }
+            }
+        }
+        const bool multiplied = lightMapped && blend == 0 && lightImage == nullptr;
+        vertexColors(vu, fu, vertices, p.vertices,
+                     lightMapped && !multiplied && lightImage == nullptr ? std::min(1.0f, kBlendedLightMapShare * fu.lightMap[0]) : 1.0f, colorScale,
+                     lightImage, lightFrom, litColors_);
 
         // The lit colours, then the vertices they belong to.
         const auto colorBytes = static_cast<GLsizeiptr>(litColors_.size());
@@ -248,11 +405,14 @@ void GlRenderer::drawListFixed(const FrameView& f, const std::vector<Draw>& list
         setClientArrays(kVertexArray | kColorArray | kTexCoordArray);
         fxColorPointer(4, GL_UNSIGNED_BYTE, 0, nullptr);
         arrayBuffer_ = colorStream_;
-        const GLuint vertexBuffer = p.skinned ? streamVertices_ : buffers.vertices;
-        gl_.BindBuffer(GL_ARRAY_BUFFER, vertexBuffer);
-        arrayBuffer_ = vertexBuffer;
-        fxVertexPointer(3, GL_FLOAT, kVertexBytes, offset(start));
-        fxTexCoordPointer(2, GL_FLOAT, kVertexBytes, offset(start + kUvAt * sizeof(float)));
+        // The positions: a posed primitive's are alone in the streaming buffer, the others are in the mesh's. The
+        // texture coordinates and the light map's are always in the mesh's.
+        const std::size_t count = buffers.vertexCount, first = p.firstVertex;
+        gl_.BindBuffer(GL_ARRAY_BUFFER, p.skinned ? streamVertices_ : buffers.vertices);
+        fxVertexPointer(3, GL_FLOAT, 0, p.skinned ? offset(0) : inBlocks(count, 0, 3, first));
+        gl_.BindBuffer(GL_ARRAY_BUFFER, buffers.vertices);
+        arrayBuffer_ = buffers.vertices;
+        fxTexCoordPointer(2, GL_FLOAT, 0, inBlocks(count, 3, 2, first));
         if (elementBuffer_ != buffers.indices) {
             gl_.BindBuffer(GL_ELEMENT_ARRAY_BUFFER, buffers.indices);
             elementBuffer_ = buffers.indices;
@@ -268,24 +428,26 @@ void GlRenderer::drawListFixed(const FrameView& f, const std::vector<Draw>& list
         } else {
             gl_.Disable(GL_ALPHA_TEST);
         }
-        const auto indices = offset(static_cast<std::size_t>(p.firstIndex) * 4);
-        fxDrawElements(GL_TRIANGLES, static_cast<GLsizei>(p.count), GL_UNSIGNED_INT, indices);
+        const GLenum kind = indexType(buffers.wideIndices);
+        const auto indices = offset(static_cast<std::size_t>(p.firstIndex) * indexBytes(buffers.wideIndices));
+        fxDrawElements(GL_TRIANGLES, static_cast<GLsizei>(p.count), kind, indices);
 
         if (multiplied) {
             // The light map times what the first pass drew (the gain is the pass's colour), writing no depth.
             gl_.Disable(GL_ALPHA_TEST);
             fxEnable(GL_BLEND);
-            fxBlendFunc(GL_DST_COLOR, GL_ZERO, GL_ZERO, GL_ONE);
+            fxBlendFunc(GL_DST_COLOR, GL_ZERO, GL_DST_COLOR, GL_ZERO);
             gl_.DepthMask(GL_FALSE);
             setClientArrays(kVertexArray | kTexCoordArray);
-            const float gain = fu.lightMap[0];
+            const float gain = fu.lightMap[0] * colorScale;
             gl_.Color4f(gain, gain, gain, 1);
-            fxTexCoordPointer(2, GL_FLOAT, kVertexBytes, offset(start + kLightUvAt * sizeof(float)));
+            fxTexCoordPointer(2, GL_FLOAT, 0, inBlocks(count, 5, 2, first));
             bindTexture(0, textureFor(u.samplers[1].texture), GL_CLAMP_TO_EDGE);
-            fxDrawElements(GL_TRIANGLES, static_cast<GLsizei>(p.count), GL_UNSIGNED_INT, indices);
+            fxDrawElements(GL_TRIANGLES, static_cast<GLsizei>(p.count), kind, indices);
             state_.reset();  // the blend and depth mask are not what setState thinks they are
         }
     }
+    fxTexEnvScale(1);
     endFixed();
 }
 
@@ -303,12 +465,13 @@ void GlRenderer::beginFixedSprites(unsigned width, unsigned height) {
     gl_.LoadIdentity();
 }
 
-// Points the arrays at the sprites' vertices (position, texture coordinates, colour), bound now.
-void GlRenderer::fixedSpritePointers(GLsizei stride) {
+// Points the arrays at the sprites' vertices, bound now: the positions, then the texture coordinates, then
+// the colours, each a block of tightly packed values.
+void GlRenderer::fixedSpritePointers(std::size_t vertices) {
     setClientArrays(kVertexArray | kColorArray | kTexCoordArray);
-    fxVertexPointer(2, GL_FLOAT, stride, offset(0));
-    fxTexCoordPointer(2, GL_FLOAT, stride, offset(2 * sizeof(float)));
-    fxColorPointer(4, GL_FLOAT, stride, offset(4 * sizeof(float)));
+    fxVertexPointer(2, GL_FLOAT, 0, inBlocks(vertices, 0, 2, 0));
+    fxTexCoordPointer(2, GL_FLOAT, 0, inBlocks(vertices, 2, 2, 0));
+    fxColorPointer(4, GL_FLOAT, 0, inBlocks(vertices, 4, 4, 0));
 }
 
 void GlRenderer::endFixed() {
@@ -349,10 +512,11 @@ void GlRenderer::fixedWorldMatrices(const FrameView& f) {
     gl_.LoadIdentity();
 }
 
-// A lot's sky: a cube around the camera showing the cube map. Its corners are the directions the
-// cube map is looked up by, which is what the shader works out per pixel from the camera's rays.
-void GlRenderer::drawSkyFixed(const FrameView& f, const Texture& cube) {
-    if (cube.id == 0 || skyVertices_ == 0) {
+// A lot's sky: a box around the camera with a picture on each side. Its corners are the directions the sky
+// is looked up by, which is what the shader works out per pixel from the camera's rays.
+void GlRenderer::drawSkyFixed(const FrameView& f) {
+    SceneGpu& g = *gpu_;
+    if (g.skyFaces[0].id == 0 || skyVertices_ == 0) {
         return;
     }
     State state;
@@ -365,18 +529,16 @@ void GlRenderer::drawSkyFixed(const FrameView& f, const Texture& cube) {
     Mat4 place;
     place.m = {size, 0, 0, eye[0], 0, size, 0, eye[1], 0, 0, size, eye[2], 0, 0, 0, 1};
     gl_.LoadMatrixf(byColumns(place).data());
-    gl_.Disable(GL_TEXTURE_2D);
-    fxEnable(GL_TEXTURE_CUBE_MAP);
-    bindTexture(0, const_cast<Texture&>(cube), GL_CLAMP_TO_EDGE);
     gl_.Color4f(1, 1, 1, 1);
     gl_.BindBuffer(GL_ARRAY_BUFFER, skyVertices_);
     arrayBuffer_ = skyVertices_;
     setClientArrays(kVertexArray | kTexCoordArray);
     fxVertexPointer(3, GL_FLOAT, 0, nullptr);
-    fxTexCoordPointer(3, GL_FLOAT, 0, nullptr);
-    gl_.DrawArrays(GL_TRIANGLES, 0, 36);
-    gl_.Disable(GL_TEXTURE_CUBE_MAP);
-    fxEnable(GL_TEXTURE_2D);
+    fxTexCoordPointer(2, GL_FLOAT, 0, offset(36 * 3 * sizeof(float)));
+    for (int face = 0; face < 6; ++face) {
+        bindTexture(0, g.skyFaces[static_cast<std::size_t>(face)], GL_CLAMP_TO_EDGE);
+        gl_.DrawArrays(GL_TRIANGLES, face * 6, 6);
+    }
 }
 
 // A lot skirt's boundary curtain, into depth only.
@@ -393,8 +555,8 @@ void GlRenderer::drawBoundaryFixed(const FrameView& f) {
     arrayBuffer_ = gpu_->curtainVertices;
     elementBuffer_ = gpu_->curtainIndices;
     setClientArrays(kVertexArray);
-    fxVertexPointer(3, GL_FLOAT, 3 * sizeof(float), nullptr);
-    fxDrawElements(GL_TRIANGLES, 24, GL_UNSIGNED_INT, nullptr);
+    fxVertexPointer(3, GL_FLOAT, 0, nullptr);
+    fxDrawElements(GL_TRIANGLES, 24, indexType(gpu_->curtainWide), nullptr);
     fxEnable(GL_TEXTURE_2D);
 }
 
@@ -410,17 +572,18 @@ void GlRenderer::drawTerrainFixed(const FrameView& f) {
     SceneGpu& g = *gpu_;
     const bool single = singleTextureTerrain_;
     fixedWorldMatrices(f);
-    constexpr GLsizei stride = kFixedTerrainFloats * sizeof(float);
+    const std::size_t count = g.terrainVertexCount;
+    const GLenum kind = indexType(g.terrainWide);
     fixedTextureUnits(single ? 1 : 2);
     setClientArrays(kVertexArray | kColorArray | kTexCoordArray);
     gl_.BindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.terrainIndices);
     elementBuffer_ = g.terrainIndices;
     gl_.BindBuffer(GL_ARRAY_BUFFER, g.terrainVertices);
-    fxVertexPointer(3, GL_FLOAT, stride, nullptr);
-    fxTexCoordPointer(2, GL_FLOAT, stride, offset(3 * sizeof(float)));
+    fxVertexPointer(3, GL_FLOAT, 0, inBlocks(count, 0, 3, 0));
+    fxTexCoordPointer(2, GL_FLOAT, 0, inBlocks(count, 3, 2, 0));
     if (!single) {
         gl_.ClientActiveTexture(GL_TEXTURE1);
-        fxTexCoordPointer(2, GL_FLOAT, stride, offset(5 * sizeof(float)));
+        fxTexCoordPointer(2, GL_FLOAT, 0, inBlocks(count, 5, 2, 0));
         gl_.ClientActiveTexture(GL_TEXTURE0);
         gl_.BindBuffer(GL_ARRAY_BUFFER, g.terrainColors);
         fxColorPointer(4, GL_UNSIGNED_BYTE, 0, nullptr);
@@ -450,7 +613,7 @@ void GlRenderer::drawTerrainFixed(const FrameView& f) {
         if (!single) {
             bindTexture(1, g.terrainWeights[pass], GL_CLAMP_TO_EDGE);
         }
-        fxDrawElements(GL_TRIANGLES, static_cast<GLsizei>(g.terrainIndexCount), GL_UNSIGNED_INT, nullptr);
+        fxDrawElements(GL_TRIANGLES, static_cast<GLsizei>(g.terrainIndexCount), kind, nullptr);
     }
     fixedTextureUnits(1);
     if (first || single) {
@@ -460,14 +623,14 @@ void GlRenderer::drawTerrainFixed(const FrameView& f) {
     lit.depthWrite = false;
     setState(lit);
     fxEnable(GL_BLEND);
-    fxBlendFunc(GL_DST_COLOR, GL_ZERO, GL_ZERO, GL_ONE);
+    fxBlendFunc(GL_DST_COLOR, GL_ZERO, GL_DST_COLOR, GL_ZERO);
     state_.reset();
     setClientArrays(kVertexArray | kTexCoordArray);
     gl_.Color4f(1, 1, 1, 1);
     gl_.BindBuffer(GL_ARRAY_BUFFER, g.terrainVertices);
-    fxTexCoordPointer(2, GL_FLOAT, stride, offset(7 * sizeof(float)));
+    fxTexCoordPointer(2, GL_FLOAT, 0, inBlocks(count, 7, 2, 0));
     bindTexture(0, g.terrainLight, GL_REPEAT);
-    fxDrawElements(GL_TRIANGLES, static_cast<GLsizei>(g.terrainIndexCount), GL_UNSIGNED_INT, nullptr);
+    fxDrawElements(GL_TRIANGLES, static_cast<GLsizei>(g.terrainIndexCount), kind, nullptr);
 }
 
 // The roads: their texture blended over the terrain, times the terrain's light map at the same spot,
@@ -479,21 +642,23 @@ void GlRenderer::drawRoadsFixed(const FrameView& f) {
     State state;
     state.blend = 1;
     setState(state);
-    constexpr GLsizei stride = kFixedRoadFloats * sizeof(float);
+    const std::size_t count = g.roadVertexCount;
+    const GLenum kind = indexType(g.roadWide);
+    const std::size_t indexSize = indexBytes(g.roadWide);
     fixedTextureUnits(single ? 1 : 2);
     setClientArrays(kVertexArray | kTexCoordArray | (single ? kColorArray : 0u));
     gl_.Color4f(1, 1, 1, 1);
     gl_.BindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.roadIndices);
     elementBuffer_ = g.roadIndices;
     gl_.BindBuffer(GL_ARRAY_BUFFER, g.roadVertices);
-    fxVertexPointer(3, GL_FLOAT, stride, nullptr);
-    fxTexCoordPointer(2, GL_FLOAT, stride, offset(3 * sizeof(float)));
+    fxVertexPointer(3, GL_FLOAT, 0, inBlocks(count, 0, 3, 0));
+    fxTexCoordPointer(2, GL_FLOAT, 0, inBlocks(count, 3, 2, 0));
     if (single) {
         gl_.BindBuffer(GL_ARRAY_BUFFER, g.roadColors);
         fxColorPointer(4, GL_UNSIGNED_BYTE, 0, nullptr);
     } else {
         gl_.ClientActiveTexture(GL_TEXTURE1);
-        fxTexCoordPointer(2, GL_FLOAT, stride, offset(5 * sizeof(float)));
+        fxTexCoordPointer(2, GL_FLOAT, 0, inBlocks(count, 5, 2, 0));
         gl_.ClientActiveTexture(GL_TEXTURE0);
         bindTexture(1, g.terrainLight, GL_REPEAT);
     }
@@ -503,13 +668,12 @@ void GlRenderer::drawRoadsFixed(const FrameView& f) {
             continue;
         }
         bindTexture(0, g.roadTextures[run.texture], GL_CLAMP_TO_EDGE);
-        fxDrawElements(GL_TRIANGLES, static_cast<GLsizei>(run.indexCount), GL_UNSIGNED_INT, offset(static_cast<std::size_t>(run.firstIndex) * 4));
+        fxDrawElements(GL_TRIANGLES, static_cast<GLsizei>(run.indexCount), kind, offset(static_cast<std::size_t>(run.firstIndex) * indexSize));
     }
     fixedTextureUnits(1);
 }
 
-// The lots' imposters, as drawImposters has them: terrain (its light map multiplied over what is
-// there, then its texture over that), then walls, slices and roofs.
+// The lots' imposters, as drawImposters has them: terrain, then walls, slices and roofs.
 void GlRenderer::drawImpostersFixed(const FrameView& f) {
     SceneGpu& g = *gpu_;
     using Kind = scene::PaintedTerrain::ImposterPart::Kind;
@@ -519,7 +683,9 @@ void GlRenderer::drawImpostersFixed(const FrameView& f) {
     arrayBuffer_ = g.imposterVertices;
     elementBuffer_ = g.imposterIndices;
     setClientArrays(kVertexArray | kTexCoordArray);
-    constexpr GLsizei stride = kImposterFloats * sizeof(float);
+    const std::size_t count = g.imposterVertexCount;
+    const GLenum kind = indexType(g.imposterWide);
+    const std::size_t indexSize = indexBytes(g.imposterWide);
     // `secondSet` takes the texture coordinates of the second set, `color` multiplies the texture, and
     // pixels with alpha at or below `cutoff` are dropped (none for a cutoff below 0).
     const auto draw = [&](const State& state, const ImposterMesh::Part& d, int texture, GLint wrap, bool nearest, float cutoff, bool secondSet,
@@ -533,29 +699,25 @@ void GlRenderer::drawImpostersFixed(const FrameView& f) {
             gl_.Disable(GL_ALPHA_TEST);
         }
         bindTexture(0, g.imposterTextures[static_cast<std::size_t>(texture)], wrap, nearest);
-        const std::size_t start = static_cast<std::size_t>(d.vertexOffset) * stride;
-        fxVertexPointer(3, GL_FLOAT, stride, offset(start));
-        fxTexCoordPointer(2, GL_FLOAT, stride, offset(start + (secondSet ? 5 : 3) * sizeof(float)));
-        fxDrawElements(GL_TRIANGLES, static_cast<GLsizei>(d.indexCount), GL_UNSIGNED_INT, offset(static_cast<std::size_t>(d.firstIndex) * 4));
+        const auto first = static_cast<std::size_t>(d.vertexOffset);
+        fxVertexPointer(3, GL_FLOAT, 0, inBlocks(count, 0, 3, first));
+        fxTexCoordPointer(2, GL_FLOAT, 0, inBlocks(count, secondSet ? 5 : 3, 2, first));
+        fxDrawElements(GL_TRIANGLES, static_cast<GLsizei>(d.indexCount), kind, offset(static_cast<std::size_t>(d.firstIndex) * indexSize));
     };
-    State light, terrain, wall, roof;
-    light.blend = 3;
-    light.cull = true;
-    light.depthWrite = false;
-    terrain.blend = 4;
+    // Their textures are not premultiplied here (see uploadTerrain), so they blend over by their alpha. The terrain's
+    // light map multiplied over what is there first is left out: it only shows through the ground texture's
+    // see-through edges, and the consoles can't multiply a colour by a colour.
+    State terrain, wall, roof;
+    terrain.blend = 1;
     terrain.cull = true;
     terrain.depthWrite = false;
-    wall.blend = 4;
+    wall.blend = 1;
     wall.cull = true;
     const std::array<float, 3> lit{imposterLight_[0], imposterLight_[1], imposterLight_[2]};
     for (const auto& d : g.imposterDraws) {
-        if (d.kind != Kind::Terrain) {
-            continue;
+        if (d.kind == Kind::Terrain) {
+            draw(terrain, d, static_cast<int>(d.texture), GL_CLAMP_TO_EDGE, false, 0, false, lit);
         }
-        if (d.lightMap >= 0) {
-            draw(light, d, d.lightMap, GL_REPEAT, false, 0, true, {d.tint[0], d.tint[1], d.tint[2]});
-        }
-        draw(terrain, d, static_cast<int>(d.texture), GL_CLAMP_TO_EDGE, false, 0, false, lit);
     }
     for (const auto& d : g.imposterDraws) {
         switch (d.kind) {
@@ -591,8 +753,8 @@ void GlRenderer::drawWaterFixed(const FrameView& f) {
     arrayBuffer_ = g.waterVertices;
     elementBuffer_ = g.waterIndices;
     setClientArrays(kVertexArray);
-    fxVertexPointer(3, GL_FLOAT, kWaterFloats * sizeof(float), nullptr);
-    fxDrawElements(GL_TRIANGLES, static_cast<GLsizei>(g.waterIndexCount), GL_UNSIGNED_INT, nullptr);
+    fxVertexPointer(3, GL_FLOAT, 0, nullptr);
+    fxDrawElements(GL_TRIANGLES, static_cast<GLsizei>(g.waterIndexCount), indexType(g.waterWide), nullptr);
     fxEnable(GL_TEXTURE_2D);
 }
 

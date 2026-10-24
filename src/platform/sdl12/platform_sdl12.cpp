@@ -56,6 +56,8 @@ constexpr KeyInfo kKeys[] = {
     {Key::End, SDLK_END},
     {Key::F5, SDLK_F5},
     {Key::F9, SDLK_F9},
+    {Key::F10, SDLK_F10},
+    {Key::F11, SDLK_F11},
     {Key::Up, SDLK_UP},
     {Key::Down, SDLK_DOWN},
     {Key::Left, SDLK_LEFT},

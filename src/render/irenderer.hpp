@@ -168,6 +168,14 @@ public:
     // is how the oldest hardware has to draw them, and its default). Off draws them with two texture
     // units. The others leave it alone.
     virtual void setSingleTextureTerrain(bool on) { (void)on; }
+    // Whether objects may be lit brighter than their textures (the game's lights add up past 1), where the
+    // renderer has a choice (the OpenGL 1 renderer, through its texture environment's scale: on by
+    // default; the Dreamcast has no such scale). Off clamps the light at 1. The others leave it alone.
+    virtual void setOverbrightLight(bool on) { (void)on; }
+    // Whether a lot's floors and walls take their light map's light at their vertices (the OpenGL 1 renderer, and
+    // how the oldest hardware has to light them; its default) or multiply the light map in with a pass of its own.
+    // The others leave it alone.
+    virtual void setVertexLightMaps(bool on) { (void)on; }
 };
 
 } // namespace ts2::render

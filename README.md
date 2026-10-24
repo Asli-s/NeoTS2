@@ -136,7 +136,31 @@ maps, specular and environment cubes. Floors and walls draw their texture and th
 light map in with a second pass. The terrain's paint weights and underwater gradient are worked out
 once when the scene is uploaded. The terrain and roads are drawn with one texture a pass, their
 weights and light map worked out at the vertices, which is all the oldest hardware can do. F9 switches
-them to two texture units (weights and light map per pixel), to compare the two.
+them to two texture units (weights and light map per pixel), to compare the two. Objects are lit
+brighter than their textures where the game's lights add up past 1 (the texture environment multiplies
+by 2, and the colours are kept at half); F10 clamps the light at 1 instead. Floors and walls take their
+light map's light at their vertices (one sample a tile on a floor), as the oldest hardware must; F11
+multiplies the light map in with a second pass for comparing, as before. The Dreamcast has no such
+multiplier, the PlayStation 2 does (0x80 is full brightness). Vertex arrays are one tightly packed block
+for each attribute, and indices are 16-bit where they fit.
+
+Textures are powers of two from 8 to 1024 on a side, as the consoles take them. Images are resampled to
+fit; UI sprites, which are never repeated, are padded instead (their texture coordinates shrink to match).
+A lot's sky is a box of six pictures rather than a cube map. UI sprites have a cap of their own
+(`NEOTS2_GL1_MAX_SPRITE`, 1024 by default), so a small `NEOTS2_GL1_MAX_TEXTURE` leaves the UI alone.
+`NEOTS2_GL1_TEXTURE_DETAIL=0.25` makes each scene image only as big as the screen needs it (times that,
+as texels for each pixel across a repeat of it), growing from 32 pixels as things are looked at, to see
+what small textures cost. How close the camera is doesn't matter past a limit for each kind of
+thing: floors, walls, roofs and the ground around a lot are given at most 128 texels across
+(`NEOTS2_GL1_SURFACE_SIDE`), things 256 (`NEOTS2_GL1_OBJECT_SIDE`), and Sims, who get twice the detail,
+512 (`NEOTS2_GL1_SIM_SIDE`). `NEOTS2_GL1_PALETTE=4` (or 8) shows textures with only 16 (or 256) colours, by
+median cut (improved by k-means passes), to see what a console's palettes would keep. `NEOTS2_GL1_DITHER=1`
+dithers them. `NEOTS2_GL1_PALETTE=auto` gives each texture a 4-bit palette if that changes it by no more than
+`NEOTS2_GL1_PALETTE_ERROR` (8 by default, in levels RMS), else 8-bit if that changes it by half as much, else none. The strict mode also logs, for each scene, how big its images would need to be on a screen
+`NEOTS2_GL1_TARGET_WIDTH` pixels wide (640 by default), as 16-bit texels and as 8- and 4-bit palettes. To see what the consoles' limits look
+like, `NEOTS2_GL1_MAX_TEXTURE=256` caps textures at 256 a side and `NEOTS2_GL1_TEXTURE_BITS=16` keeps them
+at 16 bits a texel (4-4-4-4 where any is see-through, else 5-5-5). With `NEOTS2_GL1_STRICT=1`, the log ends
+with how many textures there were, and how much memory they would take.
 
 Set `NEOTS2_GL1_STRICT=1` to have it report, once each in the log, the calls the console OpenGL
 libraries (GLdc and ps2gl) can't do: blend factors, alpha tests, texture sizes, 32-bit indices, a

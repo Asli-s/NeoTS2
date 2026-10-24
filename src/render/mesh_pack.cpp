@@ -6,6 +6,26 @@
 
 namespace ts2::render {
 
+void reserveMeshData(const std::vector<scene::Mesh>& meshes, std::size_t first, MeshData& data) {
+    std::size_t vertices = 0, indices = 0, skinned = 0;
+    for (std::size_t m = first; m < meshes.size(); ++m) {
+        for (const auto& p : meshes[m].primitives) {
+            const std::size_t n = p.positions.size() / 3;
+            if (n == 0 || p.indices.empty()) {
+                continue;
+            }
+            vertices += n;
+            indices += p.indices.size();
+            if (p.joints.size() == n * 4 && p.weights.size() == n * 4) {
+                skinned += n;
+            }
+        }
+    }
+    data.vertices.reserve(data.vertices.size() + vertices * kVertexFloats);
+    data.indices.reserve(data.indices.size() + indices);
+    data.skin.reserve(data.skin.size() + skinned * kSkinBytes);
+}
+
 GpuMesh packMesh(const scene::Mesh& mesh, std::size_t materials, std::uint32_t buffers, MeshData& data) {
     GpuMesh gm;
     for (const auto& p : mesh.primitives) {

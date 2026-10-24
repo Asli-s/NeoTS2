@@ -341,7 +341,7 @@ target_link_libraries(ts2scene PUBLIC ts2content PRIVATE project_warnings)
 
 # What every renderer shares, apart from any graphics API: the CPU side of a scene, culling and
 # draw order, and the numbers each draw's shaders are given.
-add_library(ts2renderplan src/render/cpu_light.cpp src/render/fixed_layout.cpp src/render/frame_plan.cpp src/render/gl_subset.cpp src/render/mesh_pack.cpp src/render/shared_state.cpp src/render/terrain_mesh.cpp)
+add_library(ts2renderplan src/render/cpu_light.cpp src/render/fixed_layout.cpp src/render/frame_plan.cpp src/render/gl_subset.cpp src/render/mesh_pack.cpp src/render/shared_state.cpp src/render/terrain_mesh.cpp src/render/texture_fit.cpp)
 target_link_libraries(ts2renderplan PUBLIC ts2scene PRIVATE project_warnings)
 
 if(NEOTS2_FUZZ)

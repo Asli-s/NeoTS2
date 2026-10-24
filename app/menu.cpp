@@ -318,6 +318,8 @@ private:
 
     ts2::content::UiData& data_;
     ts2::render::IRenderer& renderer_;
+    bool vertexLightMaps_ = true;        // F11 (see IRenderer::setVertexLightMaps): what the renderer starts with
+    bool overbright_ = true;             // F10 (see IRenderer::setOverbrightLight): what the renderer starts with
     bool singleTextureTerrain_ = true;  // F9 (see IRenderer::setSingleTextureTerrain): what the renderer starts with
     const std::filesystem::path install_;
     const MenuOptions& options_;
@@ -1597,6 +1599,14 @@ void Game::handleEvent(const pf::Event& e) {
         singleTextureTerrain_ = !singleTextureTerrain_;
         renderer_.setSingleTextureTerrain(singleTextureTerrain_);
         ts2::diag::info(singleTextureTerrain_ ? "terrain and roads: one texture a pass (F9)" : "terrain and roads: two texture units (F9)");
+    } else if (e.type == pf::Event::Type::KeyDown && !e.repeat && e.key == pf::Key::F10) {
+        overbright_ = !overbright_;
+        renderer_.setOverbrightLight(overbright_);
+        ts2::diag::info(overbright_ ? "object light: brighter than the textures (F10)" : "object light: no brighter than the textures (F10)");
+    } else if (e.type == pf::Event::Type::KeyDown && !e.repeat && e.key == pf::Key::F11) {
+        vertexLightMaps_ = !vertexLightMaps_;
+        renderer_.setVertexLightMaps(vertexLightMaps_);
+        ts2::diag::info(vertexLightMaps_ ? "floors and walls: light taken at the vertices (F11)" : "floors and walls: light map multiplied in (F11)");
     } else if (freeToggle) {
         toggleFreeCamera();
     } else if (freeCam_ && (e.type == pf::Event::Type::KeyDown || e.type == pf::Event::Type::KeyUp) &&

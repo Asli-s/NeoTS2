@@ -51,6 +51,10 @@ struct MeshData {
     bool tooBig = false;  // some primitives were left out (a buffer's size is 32-bit)
 };
 
+// Makes room in `data` for all the meshes from index `first` on, so that packing them doesn't grow its arrays again and
+// again (each growth holds the old array and the new together, which at a lot's size is the peak of its load).
+void reserveMeshData(const std::vector<scene::Mesh>& meshes, std::size_t first, MeshData& data);
+
 // Appends a mesh's primitives to `data`, the set of mesh buffers numbered `buffers`.
 GpuMesh packMesh(const scene::Mesh& mesh, std::size_t materials, std::uint32_t buffers, MeshData& data);
 
