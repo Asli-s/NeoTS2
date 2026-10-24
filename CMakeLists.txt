@@ -105,8 +105,8 @@ if(MSVC)
                                          /FI${CMAKE_CURRENT_SOURCE_DIR}/src/sim/lua_error.h)
     target_compile_definitions(lua50 PRIVATE _CRT_SECURE_NO_WARNINGS)
 else()
-    target_compile_options(lua50 PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/src/sim/lua_memory.h
-                                         -include ${CMAKE_CURRENT_SOURCE_DIR}/src/sim/lua_error.h)
+    target_compile_options(lua50 PRIVATE "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/src/sim/lua_memory.h"
+                                         "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/src/sim/lua_error.h")
 endif()
 
 # The run's log and the text of crash reports.
@@ -189,6 +189,9 @@ target_include_directories(ts2formats PUBLIC src)
 add_library(stb_image STATIC src/formats/image.cpp src/formats/jpeg.cpp)
 target_include_directories(stb_image PRIVATE src third_party/stb)
 target_link_libraries(ts2formats PUBLIC stb_image)
+# image.cpp calls tga::decode, which is in ts2formats. The two static libraries need each other, so
+# CMake repeats them on the link line; without this GNU ld, which reads archives once in order, fails.
+target_link_libraries(stb_image PRIVATE ts2formats)
 target_link_libraries(ts2formats PRIVATE project_warnings)
 
 add_library(ts2content
@@ -483,7 +486,14 @@ else()
         target_link_libraries(ts2render PUBLIC ts2scene SDL3::SDL3 PRIVATE project_warnings)
 
         # The game's UI: its fonts are drawn with FreeType (set freetype_DIR to its cmake folder).
-        find_package(freetype CONFIG REQUIRED)
+        # Some distributions (Arch) ship no CMake config, so fall back to CMake's own FindFreetype
+        # module (which uses pkg-config/headers) and expose it under the same target name.
+        find_package(freetype CONFIG QUIET)
+        if(NOT TARGET freetype)
+            find_package(Freetype REQUIRED)
+            add_library(freetype INTERFACE IMPORTED)
+            target_link_libraries(freetype INTERFACE Freetype::Freetype)
+        endif()
         add_library(ts2ui src/ui/fonts.cpp src/ui/font_metrics.cpp src/ui/screen.cpp src/ui/pie_layout.cpp src/ui/tip_layout.cpp src/ui/drag_arrow.cpp)
         target_link_libraries(ts2ui PUBLIC ts2content PRIVATE freetype project_warnings)
         # Text layout is tested with our own small font (tests/data), so only where the UI builds.
