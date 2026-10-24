@@ -103,7 +103,7 @@ float3 tangentLight(int k, float3 n, float3 t, float3 b, float3 world) {
     if (k >= pixelLights.x) {
         return float3(0, 0, 0);
     }
-    const int i = k == 0 ? pixelLights.y : k == 1 ? pixelLights.z : pixelLights.w;
+    const int i = (int)(k == 0 ? pixelLights.y : k == 1 ? pixelLights.z : pixelLights.w);
     float reach;
     const float3 l = towardLight(i, world, reach);
     return reach * float3(dot(l, t), dot(l, b), dot(l, n));

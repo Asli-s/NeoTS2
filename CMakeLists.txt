@@ -462,6 +462,8 @@ else()
     if(SDL3_FOUND AND NEOTS2_DXC)
         set(shader_dir ${CMAKE_CURRENT_BINARY_DIR}/shaders)
         set(shader_outputs)
+        # The shaders the OpenGL 2 renderer draws with (skinned ones are posed on the CPU there).
+        set(gl2_shaders scene.vert scene.frag ui.vert ui.frag)
         foreach(shader scene.vert skinned.vert scene.frag ui.vert ui.frag terrain.vert terrain.frag sky.vert sky.frag water.vert water.frag road.vert road.frag imposter.vert imposter.frag clip.vert clip.frag)
             if(shader MATCHES "vert$")
                 set(profile vs_6_0)
@@ -486,9 +488,51 @@ else()
         endforeach()
         add_custom_target(neots2_shaders DEPENDS ${shader_outputs})
 
+        # The OpenGL 2 renderer (for systems with no more) draws with GLSL 1.20 made from the same HLSL,
+        # which needs SPIRV-Cross (the spirv-cross tool, from the Vulkan SDK or a package) and a dxc built with SPIR-V.
+        option(NEOTS2_GL2 "Build the OpenGL 2 renderer" ON)
+        find_program(NEOTS2_SPIRV_CROSS spirv-cross)
+        set(gl2_enabled OFF)
+        if(NEOTS2_GL2 AND NEOTS2_SPIRV_CROSS)
+            set(gl2_enabled ON)
+            set(gl_shader_outputs)
+            foreach(shader ${gl2_shaders})
+                if(shader MATCHES "vert$")
+                    set(profile vs_6_0)
+                    set(stage vert)
+                else()
+                    set(profile ps_6_0)
+                    set(stage frag)
+                endif()
+                set(source ${CMAKE_CURRENT_SOURCE_DIR}/src/render/shaders/${shader}.hlsl)
+                set(output ${shader_dir}/${shader}.glsl)
+                add_custom_command(OUTPUT ${output}
+                    COMMAND ${CMAKE_COMMAND} -E make_directory ${shader_dir}
+                    COMMAND ${CMAKE_COMMAND} -DDXC=${NEOTS2_DXC} -DSPIRV_CROSS=${NEOTS2_SPIRV_CROSS} -DSOURCE=${source} -DPROFILE=${profile}
+                            -DSTAGE=${stage} -DSPIRV=${CMAKE_CURRENT_BINARY_DIR}/gl/${shader}.spv -DOUTPUT=${output}
+                            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/glsl_shader.cmake
+                    DEPENDS ${source} ${CMAKE_CURRENT_SOURCE_DIR}/src/render/shaders/object_light.hlsli
+                            ${CMAKE_CURRENT_SOURCE_DIR}/src/render/shaders/sdl_gpu.hlsli
+                            ${CMAKE_CURRENT_SOURCE_DIR}/cmake/glsl_shader.cmake
+                    COMMENT "Making GLSL for ${shader}.hlsl")
+                list(APPEND gl_shader_outputs ${output})
+            endforeach()
+            file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/gl)
+            add_custom_target(neots2_gl_shaders DEPENDS ${gl_shader_outputs})
+        elseif(NEOTS2_GL2)
+            message(STATUS "spirv-cross not found: the OpenGL 2 renderer is not built")
+        endif()
+
         add_library(ts2render src/render/renderer.cpp src/render/renderer_pipelines.cpp src/render/renderer_scene.cpp
                     src/render/renderer_upload.cpp src/render/renderer_draw.cpp src/render/make_renderer.cpp)
         target_link_libraries(ts2render PUBLIC ts2renderplan SDL3::SDL3 PRIVATE project_warnings)
+        if(gl2_enabled)
+            add_library(ts2render_gl src/render/gl/gl_api.cpp src/render/gl/gl_renderer.cpp src/render/gl/gl_shaders.cpp
+                        src/render/gl/gl_upload.cpp src/render/gl/gl_draw.cpp)
+            target_link_libraries(ts2render_gl PUBLIC ts2renderplan SDL3::SDL3 PRIVATE project_warnings)
+            target_link_libraries(ts2render PUBLIC ts2render_gl)
+            target_compile_definitions(ts2render PUBLIC NEOTS2_GL2=1)
+        endif()
 
         # The game's UI: its fonts are drawn with FreeType (set freetype_DIR to its cmake folder).
         # Some distributions (Arch) ship no CMake config, so fall back to CMake's own FindFreetype
@@ -510,6 +554,9 @@ else()
                        app/diagnostics.cpp app/crash_handler.cpp app/crash_dialog.cpp app/unexpected_exit.cpp app/report_upload.cpp app/message_box.cpp)
         target_link_libraries(neots2 PRIVATE ts2render ts2ui ts2sim ts2diag project_warnings)
         add_dependencies(neots2 neots2_shaders neots2_version)
+        if(gl2_enabled)
+            add_dependencies(neots2 neots2_gl_shaders)
+        endif()
         # The build's version (release number and commit), for logs, crash reports, the exe's details and
         # the screen (remade on every build).
         set(version_header ${CMAKE_BINARY_DIR}/generated/neots2_version.hpp)
@@ -590,7 +637,7 @@ else()
 
         foreach(target neots2-launcher ts2paths ts2settings)
             get_target_property(linked ${target} LINK_LIBRARIES)
-            foreach(library ts2render ts2renderplan ts2ui ts2sim ts2scene ts2content ts2formats lua50)
+            foreach(library ts2render ts2render_gl ts2renderplan ts2ui ts2sim ts2scene ts2content ts2formats lua50)
                 if(library IN_LIST linked)
                     message(FATAL_ERROR "${target} must not link ${library}: the launcher stays apart from the engine")
                 endif()

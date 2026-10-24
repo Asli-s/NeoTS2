@@ -195,9 +195,9 @@ void FramePlan::setLights(const RendererState& s, DrawUniforms& u, const Draw& d
     }
     if (bumped && !skirt && !roof && l.thumbnailScale <= 0) {
         const auto chosen = scene::perPixelLights(l, kObjectLights);
-        vu.frame.pixelLights[0] = static_cast<std::int32_t>(chosen.size());
+        vu.frame.pixelLights[0] = static_cast<float>(chosen.size());
         for (std::size_t k = 0; k < chosen.size(); ++k) {
-            vu.frame.pixelLights[k + 1] = static_cast<std::int32_t>(chosen[k]);
+            vu.frame.pixelLights[k + 1] = static_cast<float>(chosen[k]);
         }
     }
     for (std::size_t i = 0; i < kObjectLights && i < l.lights.size(); ++i) {
@@ -273,8 +273,8 @@ void FramePlan::setMaterial(const RendererState& s, const ResourceQuery& q, Draw
     fu.pixelLightCount = static_cast<float>(vu.frame.pixelLights[0]);
     fu.normalMapped = normalMap >= 0 ? 1.0f : 0.0f;
     fu.simLighting = m && m->simLighting && lighting && d.instance->part == scene::Part::Object && vu.frame.thumbnail[3] <= 0 ? 1.0f : 0.0f;
-    for (std::int32_t k = 0; k < vu.frame.pixelLights[0]; ++k) {
-        const auto& lightColor = vu.frame.lightColors[vu.frame.pixelLights[k + 1]];
+    for (int k = 0; k < static_cast<int>(vu.frame.pixelLights[0]); ++k) {
+        const auto& lightColor = vu.frame.lightColors[static_cast<int>(vu.frame.pixelLights[k + 1])];
         std::copy(lightColor, lightColor + 4, fu.pixelLightColors[k]);
     }
     if (m && (m->emissive[0] > 0 || m->emissive[1] > 0 || m->emissive[2] > 0)) {

@@ -57,6 +57,7 @@ GpuMesh packMesh(const scene::Mesh& mesh, std::size_t materials, std::uint32_t b
         }
         data.indices.insert(data.indices.end(), p.indices.begin(), p.indices.end());
         g.count = static_cast<unsigned>(p.indices.size());
+        g.vertices = static_cast<unsigned>(n);
         g.material = p.material >= 0 && static_cast<std::size_t>(p.material) < materials ? p.material : -1;
         g.lightMapped = p.lightUvs.size() == n * 2;
         g.tangents = p.tangents.size() == n * 3 && p.uvs.size() == n * 2;

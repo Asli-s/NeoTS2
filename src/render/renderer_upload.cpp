@@ -1,3 +1,4 @@
+#include "render/image_levels.hpp"
 #include "render/renderer.hpp"
 #include "render/renderer_internals.hpp"
 
@@ -18,24 +19,6 @@ namespace ts2::render {
 using namespace render_detail;
 
 namespace render_detail {
-
-namespace {
-
-// An image's own smaller levels are uploaded when it has them all the way down. Otherwise the
-// GPU makes them.
-bool ownLevels(const scene::Image& image) {
-    std::uint32_t w = image.width, h = image.height;
-    for (const auto& level : image.smallerLevels) {
-        w = std::max(1u, w / 2);
-        h = std::max(1u, h / 2);
-        if (level.size() != static_cast<std::size_t>(w) * h * 4) {
-            return false;
-        }
-    }
-    return !image.smallerLevels.empty() && w == 1 && h == 1;
-}
-
-} // namespace
 
 SDL_GPUTransferBuffer* filledUpload(SDL_GPUDevice* device, const void* data, Uint32 size) {
     SDL_GPUTransferBufferCreateInfo info{};

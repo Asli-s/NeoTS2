@@ -23,7 +23,8 @@ struct GpuPrimitive {
     std::uint32_t firstIndex = 0;
     std::uint32_t firstSkin = 0;  // in the set's skin data, for skinned primitives
     bool skinned = false;         // has joints and weights per vertex
-    unsigned count = 0;
+    unsigned count = 0;     // indices
+    unsigned vertices = 0;  // vertices, which the indices count from 0
     int material = -1;
     bool lightMapped = false;  // has light-map coordinates
     bool tangents = false;     // has tangents (and texture coordinates), for normal maps

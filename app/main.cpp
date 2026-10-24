@@ -4,8 +4,10 @@
 //          [--hover x y] [--ui-click x y | --ui-right-click x y | --ui-hover x y
 //          (on the lot's panels before the picture, repeatable)]
 //          [--shot <out.png>] [--seed n (the neighborhood ground's variants, so pictures repeat)]
+//          [--renderer sdlgpu|gl2 (what draws: SDL's GPU API, or OpenGL 2.1)]
 //   neots2 <install folder> <lot.package> [--shot <out.png> [yaw pitch distance]]
 //          [--seed n (a neighborhood's ground variants, so pictures repeat)]
+//          [--renderer sdlgpu|gl2 (what draws: SDL's GPU API, or OpenGL 2.1)]
 //          [--walls up|cutaway|down] [--level n (1: the ground floor)] [--target x y z] [--roofs off]
 //          [--time seconds (into the Sims' animations, for --shot)]
 // Mouse: middle-drag turns, right-drag pans, the wheel zooms. Keys: WASD or arrows pan, Q/E or
@@ -205,6 +207,7 @@ struct Options {
     std::string lightState;  // a lighting state to light the lot with, in place of its clock's
     int hour = -1, minute = 0;  // the lot's clock to start from (--clock), -1 for the saved one
     std::optional<std::uint32_t> seed;  // the neighborhood ground's variants (--seed), random when empty
+    ts2::render::Backend backend = ts2::render::Backend::SdlGpu;  // what draws (--renderer)
 };
 
 bool parseOptions(int argc, char** argv, Options& o) {
@@ -263,6 +266,12 @@ bool parseOptions(int argc, char** argv, Options& o) {
             o.bench = std::clamp(std::stoi(argv[++i]), 0, 100000);
         } else if (arg == "--seed" && i + 1 < argc) {
             o.seed = static_cast<std::uint32_t>(std::stoul(argv[++i]));
+        } else if (arg == "--renderer" && i + 1 < argc) {
+            const auto backend = ts2::render::backendNamed(argv[++i]);
+            if (!backend || !ts2::render::available(*backend)) {
+                return false;
+            }
+            o.backend = *backend;
         } else {
             return false;
         }
@@ -297,6 +306,13 @@ int main(int argc, char** argv) {
                 i += 3;
             } else if (arg == "--seed" && i + 1 < argc) {
                 menu.seed = static_cast<std::uint32_t>(std::stoul(argv[++i]));
+            } else if (arg == "--renderer" && i + 1 < argc) {
+                const auto backend = ts2::render::backendNamed(argv[++i]);
+                if (!backend || !ts2::render::available(*backend)) {
+                    std::fprintf(stderr, "Unknown renderer: use sdlgpu%s\n", ts2::render::available(ts2::render::Backend::OpenGL2) ? " or gl2" : "");
+                    return 1;
+                }
+                menu.backend = *backend;
             } else if (arg == "--click" && i + 2 < argc) {
                 menu.clickX = std::stoi(argv[i + 1]);
                 menu.clickY = std::stoi(argv[i + 2]);
@@ -465,13 +481,14 @@ int main(int argc, char** argv) {
         const int top = ts2::scene::topLevel(scene);
 
         SDL_Window* window = SDL_CreateWindow("NeoTS2", 1280, 800,
-                                              SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | (shot ? SDL_WINDOW_HIDDEN : 0));
+                                              SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | ts2::render::windowFlagsFor(options.backend) |
+                                                  (shot ? SDL_WINDOW_HIDDEN : 0));
         if (window == nullptr) {
             throw std::runtime_error(SDL_GetError());
         }
         const std::filesystem::path shaders = utf8Path(SDL_GetBasePath()) / "shaders";
         {
-            const auto rendererOwner = ts2::render::makeRenderer(ts2::render::Backend::SdlGpu, window, shaders);
+            const auto rendererOwner = ts2::render::makeRenderer(options.backend, window, shaders);
             ts2::render::IRenderer& renderer = *rendererOwner;
             renderer.setBumpMapping(options.bumpMapping);
             renderer.setFloorAndWallNormalMapping(options.wallBumps);

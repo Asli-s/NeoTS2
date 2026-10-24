@@ -26,7 +26,7 @@ struct VertexUniforms {
     float lightPositions[kObjectLights][4];   // a point light's position and falloff
     float lightCones[kObjectLights][4];       // a spot light's edge cosine, 1 / (inner - edge) cosines, 1
     float thumbnail[4];  // the material's diffuse and the thumbnail scale (see scene::ObjectLighting)
-    std::int32_t pixelLights[4];  // how many lights are lit per pixel through the normal map, and which
+    float pixelLights[4];         // how many lights are lit per pixel through the normal map, and which (whole numbers)
     float eye[4];                 // the camera's position
     float specular[4];            // the material's specular scale and power (0: none)
 };

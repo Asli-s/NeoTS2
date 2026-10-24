@@ -1745,12 +1745,13 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
     ts2::diag::info(std::format("{} UI and text packages, {} font faces", data.packageCount(), fonts.faceCount()));
 
     const int width = options.width, height = options.height;
-    SDL_Window* window = SDL_CreateWindow("NeoTS2", width, height, options.shot.empty() ? 0 : SDL_WINDOW_HIDDEN);
+    SDL_Window* window = SDL_CreateWindow("NeoTS2", width, height,
+                                          ts2::render::windowFlagsFor(options.backend) | (options.shot.empty() ? 0 : SDL_WINDOW_HIDDEN));
     if (window == nullptr) {
         throw std::runtime_error(SDL_GetError());
     }
     {
-        const auto rendererOwner = ts2::render::makeRenderer(ts2::render::Backend::SdlGpu, window, shaders);
+        const auto rendererOwner = ts2::render::makeRenderer(options.backend, window, shaders);
         ts2::render::IRenderer& renderer = *rendererOwner;
         renderer.setBumpMapping(options.bumpMapping);
         renderer.setFloorAndWallNormalMapping(options.wallBumps);

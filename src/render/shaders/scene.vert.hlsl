@@ -9,7 +9,7 @@ cbuffer Frame : register(b0, space1) {
     float4 lightPositions[8];           // a point light's position, w: its falloff
     float4 lightCones[8];               // a spot light's cosine at the cone's edge and 1 / (inner - edge) cosines, z: 1 for a spot
     float4 thumbnail;                   // rgb: the material's diffuse (a lot skirt's colour scale), w: the thumbnail scale (0: not a thumbnail)
-    int4 pixelLights;                   // x: how many lights are lit per pixel through the normal map, y, z, w: which
+    float4 pixelLights;                 // whole numbers, x: how many lights are lit per pixel through the normal map, y, z, w: which
     float4 eye;                         // xyz: the camera's position
     float4 specular;                    // rgb: the material's specular scale, w: its power (0: none)
 };
