@@ -120,6 +120,19 @@ void GlRenderer::uploadTerrain(SceneGpu& gpu, const scene::PaintedTerrain& t) {
         gpu.imposterIndices = uploadBuffer(GL_ELEMENT_ARRAY_BUFFER, parts.mesh.indices.data(), parts.mesh.indices.size() * sizeof(std::uint32_t));
         gpu.imposterDraws = parts.draws;
     }
+
+    // The water: a sheet over the wet tiles, its ripples, and the sky it reflects.
+    const IndexedMesh water = waterSheet(t);
+    if (!water.indices.empty() && t.sky.size() == 6 && t.ripples.width) {
+        gpu.waterVertices = uploadBuffer(GL_ARRAY_BUFFER, water.vertices.data(), water.vertices.size() * sizeof(float));
+        gpu.waterIndices = uploadBuffer(GL_ELEMENT_ARRAY_BUFFER, water.indices.data(), water.indices.size() * sizeof(std::uint32_t));
+        gpu.waterIndexCount = static_cast<unsigned>(water.indices.size());
+        gpu.waterLevel = t.waterLevel;
+        gpu.ripples = uploadTexture(complete(t.ripples) ? t.ripples : white, true);
+        gpu.skyCube = uploadCube(t.sky, true);
+        gpu.waterUniforms = {{t.reflectionTint[0], t.reflectionTint[1], t.reflectionTint[2], t.reflectionStrength}, {0, 0},
+                             t.reflectionOffset, t.rippleScale, t.rippleSpeed, 0, {0, 0}};
+    }
 }
 
 // A sky cube map behind everything, looked up by each pixel's ray. `up` is -1 for the rays mirrored
@@ -159,9 +172,10 @@ void GlRenderer::drawBoundary(const FrameView& f) {
 }
 
 // The terrain, one pass for each paint texture a cell shows, the passes added up.
-void GlRenderer::drawTerrain(const FrameView& f) {
+void GlRenderer::drawTerrain(const FrameView& f, const Mat4& viewProjection, bool reflected) {
     useProgram(terrain_);
-    gl_.Uniform4fv(terrain_.vertex, 4, f.viewProjection.m.data());
+    (void)f;
+    gl_.Uniform4fv(terrain_.vertex, 4, viewProjection.m.data());
     SceneGpu& g = *gpu_;
     bindTexture(1, g.terrainAlphas[0], GL_CLAMP_TO_EDGE);
     bindTexture(2, g.terrainAlphas[1], GL_CLAMP_TO_EDGE);
@@ -193,6 +207,7 @@ void GlRenderer::drawTerrain(const FrameView& f) {
         state.depthWrite = pass == 0;
         setState(state);
         TerrainUniforms u = g.terrainUniforms;
+        u.reflected = reflected ? 1.0f : 0.0f;
         u.slice = static_cast<float>(slice);
         u.passAlpha = pass == 0 ? 1.0f : 0.0f;
         gl_.Uniform4fv(terrain_.fragment, static_cast<GLsizei>(sizeof(u) / 16), reinterpret_cast<const GLfloat*>(&u));
@@ -296,6 +311,102 @@ void GlRenderer::drawImposters(const FrameView& f) {
             break;
         }
     }
+}
+
+void GlRenderer::drawWater(const FrameView& f, unsigned width, unsigned height) {
+    (void)f;
+    useProgram(water_);
+    SceneGpu& g = *gpu_;
+    State state;
+    state.blend = 1;
+    state.depthWrite = false;
+    setState(state);
+    gl_.Uniform4fv(water_.vertex, 4, f.viewProjection.m.data());
+    WaterUniforms w = g.waterUniforms;
+    w.screen[0] = static_cast<float>(width);
+    w.screen[1] = static_cast<float>(height);
+    w.time = time_;
+    gl_.Uniform4fv(water_.fragment, static_cast<GLsizei>(sizeof(w) / 16), reinterpret_cast<const GLfloat*>(&w));
+    bindTexture(0, reflection_, GL_CLAMP_TO_EDGE);
+    bindTexture(1, g.ripples, GL_REPEAT);
+    gl_.BindBuffer(GL_ARRAY_BUFFER, g.waterVertices);
+    gl_.BindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.waterIndices);
+    arrayBuffer_ = g.waterVertices;
+    elementBuffer_ = g.waterIndices;
+    setAttributes((1u << 0) | (1u << 1));
+    constexpr GLsizei stride = kWaterFloats * sizeof(float);
+    attributes(0, 3, stride, 0);
+    attributes(1, 2, stride, 3 * sizeof(float));
+    gl_.DrawElements(GL_TRIANGLES, static_cast<GLsizei>(g.waterIndexCount), GL_UNSIGNED_INT, nullptr);
+}
+
+void GlRenderer::releaseReflection() {
+    if (gl_.framebuffers) {
+        if (reflectionFramebuffer_) gl_.DeleteFramebuffersEXT(1, &reflectionFramebuffer_);
+        if (reflectionDepth_) gl_.DeleteRenderbuffersEXT(1, &reflectionDepth_);
+    }
+    release(reflection_);
+    reflectionFramebuffer_ = reflectionDepth_ = 0;
+    reflectionWidth_ = reflectionHeight_ = 0;
+}
+
+// Makes the water's reflection target at the size drawn at. False when it couldn't be made.
+bool GlRenderer::reflectionReady(unsigned width, unsigned height) {
+    if (!gl_.framebuffers || width > static_cast<unsigned>(gl_.maxTextureSize) || height > static_cast<unsigned>(gl_.maxTextureSize)) {
+        return false;
+    }
+    if (reflectionFramebuffer_ != 0 && reflectionWidth_ == width && reflectionHeight_ == height) {
+        return true;
+    }
+    releaseReflection();
+    reflection_.wrap = GL_CLAMP_TO_EDGE;
+    gl_.GenTextures(1, &reflection_.id);
+    gl_.ActiveTexture(GL_TEXTURE0);
+    gl_.BindTexture(GL_TEXTURE_2D, reflection_.id);
+    bound_ = {};
+    gl_.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    gl_.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    gl_.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    gl_.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    gl_.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, static_cast<GLsizei>(width), static_cast<GLsizei>(height), 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    gl_.GenRenderbuffersEXT(1, &reflectionDepth_);
+    gl_.BindRenderbufferEXT(GL_RENDERBUFFER_EXT, reflectionDepth_);
+    gl_.RenderbufferStorageEXT(GL_RENDERBUFFER_EXT, GL_DEPTH_COMPONENT24, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
+    gl_.GenFramebuffersEXT(1, &reflectionFramebuffer_);
+    const GLuint before = framebuffer_;
+    bindFramebuffer(reflectionFramebuffer_);
+    gl_.FramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, GL_TEXTURE_2D, reflection_.id, 0);
+    gl_.FramebufferRenderbufferEXT(GL_FRAMEBUFFER_EXT, GL_DEPTH_ATTACHMENT_EXT, GL_RENDERBUFFER_EXT, reflectionDepth_);
+    const bool complete = gl_.CheckFramebufferStatusEXT(GL_FRAMEBUFFER_EXT) == GL_FRAMEBUFFER_COMPLETE_EXT;
+    bindFramebuffer(before);
+    if (!complete) {
+        releaseReflection();
+        return false;
+    }
+    reflectionWidth_ = width;
+    reflectionHeight_ = height;
+    return true;
+}
+
+// The neighborhood water's reflection: the sky and the terrain above the water, mirrored in it.
+void GlRenderer::drawReflection(const FrameView& f, unsigned width, unsigned height) {
+    const GLuint before = framebuffer_;
+    bindFramebuffer(reflectionFramebuffer_);
+    gl_.Viewport(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
+    gl_.ColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    gl_.DepthMask(GL_TRUE);
+    gl_.ClearColor(0, 0, 0, 0);
+    gl_.ClearDepth(0.0);
+    gl_.Clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    state_.reset();
+    // The sky, by each pixel's ray mirrored in the water.
+    drawSky(f, gpu_->skyCube, -1);
+    // The terrain, mirrored about the water's surface.
+    Mat4 flip;
+    flip.m = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 2 * gpu_->waterLevel, 0, 0, 0, 1};
+    drawTerrain(f, f.viewProjection * flip, true);
+    bindFramebuffer(before);
+    state_.reset();
 }
 
 } // namespace ts2::render

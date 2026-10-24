@@ -120,6 +120,12 @@ private:
         std::vector<ImposterMesh::Part> imposterDraws;
         // A lot skirt's boundary curtain.
         GLuint curtainVertices = 0, curtainIndices = 0;
+        // The neighborhood water's sheet, its ripples and the sky it reflects.
+        GLuint waterVertices = 0, waterIndices = 0;
+        unsigned waterIndexCount = 0;
+        Texture ripples, skyCube;
+        float waterLevel = 0;
+        WaterUniforms waterUniforms{};
 
         void release(Graveyard& graveyard);
         // Releases up to `count` textures. True when none are left.
@@ -159,7 +165,7 @@ private:
     Texture uploadRaw(unsigned width, unsigned height, const std::uint8_t* rgba, bool nearest);
     GLuint uploadBuffer(GLenum target, const void* data, std::size_t bytes);
     void uploadTerrain(SceneGpu& gpu, const scene::PaintedTerrain& terrain);
-    Texture uploadCube(const std::vector<scene::Image>& faces);
+    Texture uploadCube(const std::vector<scene::Image>& faces, bool mips = false);
     MeshBuffers uploadMeshBuffers(MeshData& data);
     void release(Texture& texture);
     void releaseBuffer(GLuint& buffer);
@@ -178,7 +184,13 @@ private:
     void bindTexture(unsigned unit, Texture& texture, GLint wrap, bool nearest = false);
     void drawSky(const FrameView& f, const Texture& cube, float up);
     void drawBoundary(const FrameView& f);
-    void drawTerrain(const FrameView& f);
+    void drawTerrain(const FrameView& f, const Mat4& viewProjection, bool reflected);
+    void drawWater(const FrameView& f, unsigned width, unsigned height);
+    // The water's reflection: the sky and the terrain above the water, mirrored in it.
+    [[nodiscard]] bool reflectionReady(unsigned width, unsigned height);
+    void drawReflection(const FrameView& f, unsigned width, unsigned height);
+    void releaseReflection();
+    void bindFramebuffer(GLuint framebuffer);
     void drawRoads(const FrameView& f);
     void drawImposters(const FrameView& f);
     // A draw's state: how it blends, whether it tests and writes depth (and how), and what it writes.
@@ -211,7 +223,7 @@ private:
     std::shared_ptr<Graveyard> graveyard_ = std::make_shared<Graveyard>();
     std::string vendor_, renderer_, version_;
 
-    Program scene_, ui_, terrain_, road_, imposter_, sky_, clip_;
+    Program scene_, ui_, terrain_, road_, imposter_, sky_, clip_, water_;
     GLuint skyVertices_ = 0;  // the corners of the sky's triangle
     GLuint streamVertices_ = 0;  // a posed skinned primitive's vertices
     GLuint spriteVertices_ = 0;
@@ -232,6 +244,11 @@ private:
     // The off-screen target of drawOffscreen, remade when its size changes.
     GLuint targetFramebuffer_ = 0, targetColor_ = 0, targetDepth_ = 0;
     unsigned targetWidth_ = 0, targetHeight_ = 0;
+    // The water's reflection, the size of the target drawn to.
+    GLuint reflectionFramebuffer_ = 0, reflectionDepth_ = 0;
+    Texture reflection_;
+    unsigned reflectionWidth_ = 0, reflectionHeight_ = 0;
+    GLuint framebuffer_ = 0;  // what is drawn to: 0 for the window
     static constexpr unsigned kMaxOffscreen = 8192;
 
     std::unique_ptr<SceneGpu> gpu_ = std::make_unique<SceneGpu>();

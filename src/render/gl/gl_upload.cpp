@@ -45,13 +45,16 @@ void GlRenderer::SceneGpu::release(Graveyard& graveyard) {
     }
     give(terrainLight);
     give(terrainGradient);
-    for (GLuint* id : {&terrainVertices, &terrainIndices, &roadVertices, &roadIndices, &imposterVertices, &imposterIndices, &curtainVertices, &curtainIndices}) {
+    give(ripples);
+    give(skyCube);
+    for (GLuint* id : {&waterVertices, &waterIndices, &terrainVertices, &terrainIndices, &roadVertices, &roadIndices, &imposterVertices, &imposterIndices, &curtainVertices, &curtainIndices}) {
         if (*id != 0) {
             graveyard.buffers.push_back(*id);
             *id = 0;
         }
     }
     terrainIndexCount = 0;
+    waterIndexCount = 0;
     roadRuns.clear();
     imposterDraws.clear();
 }
@@ -151,7 +154,7 @@ GlRenderer::Texture GlRenderer::uploadTexture(const scene::Image& image, bool mi
 }
 
 // A cube map of six faces of one size. Empty when the faces are not that.
-GlRenderer::Texture GlRenderer::uploadCube(const std::vector<scene::Image>& faces) {
+GlRenderer::Texture GlRenderer::uploadCube(const std::vector<scene::Image>& faces, bool mips) {
     Texture t;
     if (faces.size() != 6 || faces.front().width == 0 || faces.front().width != faces.front().height) {
         return t;
@@ -169,8 +172,12 @@ GlRenderer::Texture GlRenderer::uploadCube(const std::vector<scene::Image>& face
     gl_.BindTexture(GL_TEXTURE_CUBE_MAP, t.id);
     bound_ = {};
     gl_.PixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    gl_.TexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    t.mips = mips && face.width > 1;
+    gl_.TexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, t.mips ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
     gl_.TexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    if (t.mips) {
+        gl_.TexParameteri(GL_TEXTURE_CUBE_MAP, GL_GENERATE_MIPMAP, GL_TRUE);
+    }
     gl_.TexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     gl_.TexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     for (GLenum l = 0; l < 6; ++l) {

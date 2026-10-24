@@ -63,11 +63,12 @@ GlRenderer::~GlRenderer() {
     gpu_->release(*graveyard_);
     releaseSprites();
     releaseTarget();
+    releaseReflection();
     collectGarbage();
     releaseBuffer(streamVertices_);
     releaseBuffer(spriteVertices_);
     releaseBuffer(skyVertices_);
-    for (const Program* p : {&scene_, &ui_, &terrain_, &road_, &imposter_, &sky_, &clip_}) {
+    for (const Program* p : {&scene_, &ui_, &terrain_, &road_, &imposter_, &sky_, &clip_, &water_}) {
         if (p->id != 0) {
             gl_.DeleteProgram(p->id);
         }
@@ -77,7 +78,7 @@ GlRenderer::~GlRenderer() {
 
 Capabilities GlRenderer::capabilities() const {
     Capabilities c;
-    c.waterReflection = false;
+    c.waterReflection = gl_.framebuffers;
     c.gpuSkinning = false;
     c.anisotropic = gl_.anisotropy;
     c.threadedPrepare = false;
@@ -90,10 +91,15 @@ std::string GlRenderer::device() const {
     return std::format("{} {}, driver {} ({})", vendor_, renderer_, version_, backend());
 }
 
-void GlRenderer::bindWindow() {
+void GlRenderer::bindFramebuffer(GLuint framebuffer) {
     if (gl_.framebuffers) {
-        gl_.BindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
+        gl_.BindFramebufferEXT(GL_FRAMEBUFFER_EXT, framebuffer);
     }
+    framebuffer_ = framebuffer;
+}
+
+void GlRenderer::bindWindow() {
+    bindFramebuffer(0);
 }
 
 bool GlRenderer::draw(const Camera& camera) {
@@ -139,7 +145,7 @@ bool GlRenderer::renderToTarget(const Camera& camera, unsigned width, unsigned h
         gl_.BindRenderbufferEXT(GL_RENDERBUFFER_EXT, targetDepth_);
         gl_.RenderbufferStorageEXT(GL_RENDERBUFFER_EXT, GL_DEPTH_COMPONENT24, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
         gl_.GenFramebuffersEXT(1, &targetFramebuffer_);
-        gl_.BindFramebufferEXT(GL_FRAMEBUFFER_EXT, targetFramebuffer_);
+        bindFramebuffer(targetFramebuffer_);
         gl_.FramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, GL_TEXTURE_2D, targetColor_, 0);
         gl_.FramebufferRenderbufferEXT(GL_FRAMEBUFFER_EXT, GL_DEPTH_ATTACHMENT_EXT, GL_RENDERBUFFER_EXT, targetDepth_);
         if (gl_.CheckFramebufferStatusEXT(GL_FRAMEBUFFER_EXT) != GL_FRAMEBUFFER_COMPLETE_EXT) {
@@ -150,7 +156,7 @@ bool GlRenderer::renderToTarget(const Camera& camera, unsigned width, unsigned h
         targetWidth_ = width;
         targetHeight_ = height;
     } else {
-        gl_.BindFramebufferEXT(GL_FRAMEBUFFER_EXT, targetFramebuffer_);
+        bindFramebuffer(targetFramebuffer_);
     }
     return render(width, height, camera);
 }

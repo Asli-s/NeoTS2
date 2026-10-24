@@ -301,6 +301,12 @@ bool GlRenderer::render(unsigned width, unsigned height, const Camera& camera) {
     collectGarbage();
     invalidateState();
     const FrameView f = FrameView::make(camera, width, height);
+    // The neighborhood's water and its reflection, drawn first into a target of its own.
+    const bool extras = drawScene_ && !instancesOnly_;
+    const bool water = extras && gpu_->terrainIndexCount > 0 && gpu_->waterIndexCount > 0 && reflectionReady(width, height);
+    if (water) {
+        drawReflection(f, width, height);
+    }
     gl_.Viewport(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
     gl_.ColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     gl_.DepthMask(GL_TRUE);
@@ -315,7 +321,6 @@ bool GlRenderer::render(unsigned width, unsigned height, const Camera& camera) {
 
     // The sky and the boundary curtain, the terrain, roads and imposters. A portrait shows its
     // instances alone, over a transparent background.
-    const bool extras = drawScene_ && !instancesOnly_;
     if (extras && gpu_->skybox.id != 0) {
         drawSky(f, gpu_->skybox, 1);
     }
@@ -327,7 +332,7 @@ bool GlRenderer::render(unsigned width, unsigned height, const Camera& camera) {
     drawList(f, opaque, 0);
     if (extras && gpu_->terrainVertices != 0) {
         if (gpu_->terrainIndexCount > 0) {
-            drawTerrain(f);
+            drawTerrain(f, f.viewProjection, false);
         }
         if (!gpu_->roadRuns.empty()) {
             drawRoads(f);
@@ -335,6 +340,9 @@ bool GlRenderer::render(unsigned width, unsigned height, const Camera& camera) {
         drawImposters(f);
     }
     drawList(f, layers, 1);
+    if (water) {
+        drawWater(f, width, height);
+    }
     drawList(f, blended, 1);
     if (!instancesOnly_ && !sprites_.empty()) {
         drawSprites(width, height);

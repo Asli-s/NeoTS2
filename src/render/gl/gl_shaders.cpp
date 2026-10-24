@@ -92,6 +92,7 @@ void GlRenderer::makePrograms(const std::filesystem::path& folder) {
     imposter_ = loadProgram(folder, "imposter.vert", "imposter.frag", "type_Frame", "type_Part", {"image"});
     sky_ = loadProgram(folder, "sky.vert", "sky.frag", nullptr, "type_Camera", {"sky"});
     clip_ = loadProgram(folder, "clip.vert", "clip.frag", "type_Frame", nullptr, {});
+    water_ = loadProgram(folder, "water.vert", "water.frag", "type_Frame", "type_Water", {"reflection", "ripples"});
 }
 
 } // namespace ts2::render
