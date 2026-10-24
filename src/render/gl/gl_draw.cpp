@@ -314,7 +314,11 @@ bool GlRenderer::render(unsigned width, unsigned height, const Camera& camera) {
                    instancesOnly_ ? 0.0f : 1.0f);
     // Depth runs from 1 at the near plane to 0 at the far one (see Mat4::perspective).
     gl_.ClearDepth(0.0);
+    // Only the part drawn to is cleared, as a picture drawn in a corner of the window (see drawOffscreen) leaves the rest alone.
+    gl_.Enable(GL_SCISSOR_TEST);
+    gl_.Scissor(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
     gl_.Clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    gl_.Disable(GL_SCISSOR_TEST);
     gl_.DepthRange(0.0, 1.0);
     gl_.FrontFace(GL_CCW);
     gl_.CullFace(GL_BACK);

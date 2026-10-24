@@ -49,6 +49,8 @@ GlRenderer::GlRenderer(SDL_Window* window, const std::filesystem::path& shaderFo
         makePrograms(shaderFolder);
         gpu_->white = uploadTexture({1, 1, {255, 255, 255, 255}, {}}, false);
         gpu_->blackCube = uploadCube(std::vector<scene::Image>(6, scene::Image{1, 1, {0, 0, 0, 255}, {}}));
+        diag::info(std::format("OpenGL {}.{}: framebuffer objects {}, anisotropic filtering {}", gl_.majorVersion, gl_.minorVersion,
+                               gl_.framebuffers ? "yes" : "no", gl_.anisotropy ? "yes" : "no"));
         makeSharedContexts(2);
         diag::info(pool_.empty() ? "OpenGL: contexts can't share objects here, so scenes are uploaded as they are drawn"
                                  : "OpenGL: scenes are uploaded on other threads in contexts that share objects");
@@ -89,7 +91,7 @@ Capabilities GlRenderer::capabilities() const {
     c.gpuSkinning = false;
     c.anisotropic = gl_.anisotropy;
     c.threadedPrepare = !pool_.empty();
-    c.offscreen = gl_.framebuffers;
+    c.offscreen = true;  // in a corner of the window when there are no framebuffer objects, which limits its size
     c.maxTextureSize = gl_.maxTextureSize;
     return c;
 }
@@ -170,7 +172,16 @@ bool GlRenderer::renderToTarget(const Camera& camera, unsigned width, unsigned h
 
 // Draws one frame off-screen and reads it back as RGBA, rows from the top.
 bool GlRenderer::drawOffscreen(const Camera& camera, unsigned width, unsigned height, scene::Image& out) {
-    if (!renderToTarget(camera, width, height)) {
+    if (!gl_.framebuffers) {
+        // With no framebuffer objects the picture is drawn in a corner of the window's back buffer, which
+        // the next frame draws over. It can't be larger than the window.
+        int windowWidth = 0, windowHeight = 0;
+        SDL_GetWindowSizeInPixels(window_, &windowWidth, &windowHeight);
+        if (width == 0 || height == 0 || width > static_cast<unsigned>(windowWidth) || height > static_cast<unsigned>(windowHeight) ||
+            !render(width, height, camera)) {
+            return false;
+        }
+    } else if (!renderToTarget(camera, width, height)) {
         bindWindow();
         return false;
     }
@@ -224,7 +235,7 @@ void GlRenderer::benchmark(const Camera& camera, unsigned width, unsigned height
     for (int f = -10; f < frames; ++f) {
         diag::setTimings(f >= 0);
         diag::Timer timer("gpu frame");
-        if (!renderToTarget(camera, width, height)) {
+        if (gl_.framebuffers ? !renderToTarget(camera, width, height) : !render(width, height, camera)) {
             break;
         }
         gl_.Finish();
