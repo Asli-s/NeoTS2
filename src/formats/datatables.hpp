@@ -9,6 +9,8 @@
 
 namespace ts2::datatables {
 
+struct Entry;
+
 // A value in a script data table, as saved: a type byte, then the value.
 struct Value {
     enum class Type : std::uint8_t { Float = 0, Int = 1, Unsigned = 2, Bool = 3, String = 4, Table = 5 };
@@ -18,13 +20,19 @@ struct Value {
     std::uint32_t u = 0;
     bool b = false;
     std::string s;
-    std::vector<std::pair<Value, Value>> table;  // key, value
+    std::vector<Entry> table;
+};
+
+// A key and its value. Not a std::pair, which needs both types complete while Value holds these.
+struct Entry {
+    Value key;
+    Value value;
 };
 
 struct Table {
     std::uint32_t id = 0;
     std::string name;
-    std::vector<std::pair<Value, Value>> values;
+    std::vector<Entry> values;
 };
 
 // The script data tables of one object (saved in its lot, instance = object id) or one neighbor

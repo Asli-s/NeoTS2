@@ -20,17 +20,18 @@ cbuffer Frame : register(b0, space1) {
 StructuredBuffer<float4> joints : register(t0, space0);
 
 #include "object_light.hlsli"
+#include "sdl_gpu.hlsli"
 
 struct Input {
-    float3 position : TEXCOORD0;
-    float3 normal : TEXCOORD1;
-    float2 uv : TEXCOORD2;
-    float alpha : TEXCOORD3;
-    uint4 joint : TEXCOORD4;   // 255: none
-    float4 weight : TEXCOORD5;
-    float2 lightUv : TEXCOORD6;  // unused: skinned surfaces have no light map
-    float3 color : TEXCOORD7;
-    float3 tangent : TEXCOORD8;
+    LOCATION(0) float3 position : TEXCOORD0;
+    LOCATION(1) float3 normal : TEXCOORD1;
+    LOCATION(2) float2 uv : TEXCOORD2;
+    LOCATION(3) float alpha : TEXCOORD3;
+    LOCATION(4) uint4 joint : TEXCOORD4;   // 255: none
+    LOCATION(5) float4 weight : TEXCOORD5;
+    LOCATION(6) float2 lightUv : TEXCOORD6;  // unused: skinned surfaces have no light map
+    LOCATION(7) float3 color : TEXCOORD7;
+    LOCATION(8) float3 tangent : TEXCOORD8;
 };
 
 float3x4 jointMatrix(uint j) {

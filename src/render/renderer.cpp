@@ -15,11 +15,12 @@ namespace ts2::render {
 using namespace render_detail;
 
 Renderer::Renderer(SDL_Window* window, const std::filesystem::path& shaderFolder) : window_(window) {
-    device_ = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_DXIL, false, nullptr);
+    device_ = SDL_CreateGPUDevice(kShaderFormat, false, nullptr);
     if (device_ == nullptr) {
         // SDL's own reason goes to the log only: it means little to players.
         diag::error(std::string("no GPU device: ") + SDL_GetError());
-        throw std::runtime_error("NeoTS2 needs a graphics card and driver that support Direct3D 12, and none was found.\n\n"
+        throw std::runtime_error(std::string("NeoTS2 needs a graphics card and driver that support ") + kGraphicsApi +
+                                 ", and none was found.\n\n"
                                  "Update your graphics driver and try again. NeoTS2 can't run over Remote Desktop or in "
                                  "most virtual machines.");
     }

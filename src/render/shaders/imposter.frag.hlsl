@@ -1,8 +1,10 @@
 // A lot imposter part, as the game's "Shaders for imposters" script draws it. Its pipeline does the
 // blending. This picks the texture's color and alpha and drops what the alpha test rejects.
 
-Texture2D<float4> image : register(t0, space2);
-SamplerState imageSampler : register(s0, space2);
+#include "sdl_gpu.hlsli"
+
+COMBINED Texture2D<float4> image : register(t0, space2);
+COMBINED SamplerState imageSampler : register(s0, space2);
 
 cbuffer Part : register(b0, space3) {
     float3 tint;   // the terrain light map's tint

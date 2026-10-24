@@ -1,7 +1,9 @@
 // UI pixels: the texture times the quad's color (text is white glyphs tinted to its color).
 
-Texture2D<float4> image : register(t0, space2);
-SamplerState imageSampler : register(s0, space2);
+#include "sdl_gpu.hlsli"
+
+COMBINED Texture2D<float4> image : register(t0, space2);
+COMBINED SamplerState imageSampler : register(s0, space2);
 
 struct Input {
     float4 position : SV_Position;

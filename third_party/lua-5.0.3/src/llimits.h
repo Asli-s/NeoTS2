@@ -114,7 +114,8 @@ typedef LUA_UACNUMBER l_uacNumber;
 ** type for virtual-machine instructions
 ** must be an unsigned with (at least) 4 bytes (see details in lopcodes.h)
 */
-typedef unsigned long Instruction;
+/* NeoTS2: exactly 4 bytes, as in the game's compiled scripts, also where long is 8 bytes */
+typedef unsigned int Instruction;
 
 
 /* maximum depth for calls (unsigned short) */

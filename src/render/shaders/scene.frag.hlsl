@@ -2,18 +2,20 @@
 // walls), as the game lights objects when the vertices bring that light, otherwise by a sky and a
 // sun, unless unlit.
 
-Texture2D<float4> baseTexture : register(t0, space2);
-SamplerState baseSampler : register(s0, space2);
-Texture2D<float4> lightMapTexture : register(t1, space2);
-SamplerState lightMapSampler : register(s1, space2);
-Texture2D<float4> normalTexture : register(t2, space2);
-SamplerState normalSampler : register(s2, space2);
-Texture2D<float4> incidenceTexture : register(t3, space2);
-SamplerState incidenceSampler : register(s3, space2);
-Texture2D<float4> lightMapFromTexture : register(t4, space2);  // the light map being faded from
-SamplerState lightMapFromSampler : register(s4, space2);
-TextureCube<float4> envCubeTexture : register(t5, space2);
-SamplerState envCubeSampler : register(s5, space2);
+#include "sdl_gpu.hlsli"
+
+COMBINED Texture2D<float4> baseTexture : register(t0, space2);
+COMBINED SamplerState baseSampler : register(s0, space2);
+COMBINED Texture2D<float4> lightMapTexture : register(t1, space2);
+COMBINED SamplerState lightMapSampler : register(s1, space2);
+COMBINED Texture2D<float4> normalTexture : register(t2, space2);
+COMBINED SamplerState normalSampler : register(s2, space2);
+COMBINED Texture2D<float4> incidenceTexture : register(t3, space2);
+COMBINED SamplerState incidenceSampler : register(s3, space2);
+COMBINED Texture2D<float4> lightMapFromTexture : register(t4, space2);  // the light map being faded from
+COMBINED SamplerState lightMapFromSampler : register(s4, space2);
+COMBINED TextureCube<float4> envCubeTexture : register(t5, space2);
+COMBINED SamplerState envCubeSampler : register(s5, space2);
 
 cbuffer Material : register(b0, space3) {
     float4 color;

@@ -15,15 +15,16 @@ cbuffer Frame : register(b0, space1) {
 };
 
 #include "object_light.hlsli"
+#include "sdl_gpu.hlsli"
 
 struct Input {
-    float3 position : TEXCOORD0;
-    float3 normal : TEXCOORD1;
-    float2 uv : TEXCOORD2;
-    float alpha : TEXCOORD3;
-    float2 lightUv : TEXCOORD6;
-    float3 color : TEXCOORD7;
-    float3 tangent : TEXCOORD8;
+    LOCATION(0) float3 position : TEXCOORD0;
+    LOCATION(1) float3 normal : TEXCOORD1;
+    LOCATION(2) float2 uv : TEXCOORD2;
+    LOCATION(3) float alpha : TEXCOORD3;
+    LOCATION(6) float2 lightUv : TEXCOORD6;
+    LOCATION(7) float3 color : TEXCOORD7;
+    LOCATION(8) float3 tangent : TEXCOORD8;
 };
 
 Output main(Input input) {

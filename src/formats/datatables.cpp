@@ -23,7 +23,7 @@ std::size_t count(BinaryReader& r, std::size_t minBytes) {
     return n;
 }
 
-std::vector<std::pair<Value, Value>> readPairs(BinaryReader& r, int depth);
+std::vector<Entry> readPairs(BinaryReader& r, int depth);
 
 Value readValue(BinaryReader& r, int depth) {
     Value v;
@@ -47,16 +47,16 @@ Value readValue(BinaryReader& r, int depth) {
     return v;
 }
 
-std::vector<std::pair<Value, Value>> readPairs(BinaryReader& r, int depth) {
+std::vector<Entry> readPairs(BinaryReader& r, int depth) {
     // Grown as pairs are read, so memory follows the bytes actually there: a nested table can
     // claim a large count while its parent's count is still being read.
     const std::size_t n = count(r, 10);  // two values of 5 bytes or more
-    std::vector<std::pair<Value, Value>> pairs;
+    std::vector<Entry> pairs;
     pairs.reserve(std::min<std::size_t>(n, 256));
     for (std::size_t i = 0; i < n; ++i) {
         Value key = readValue(r, depth);
         Value value = readValue(r, depth);
-        pairs.emplace_back(std::move(key), std::move(value));
+        pairs.push_back({std::move(key), std::move(value)});
     }
     return pairs;
 }

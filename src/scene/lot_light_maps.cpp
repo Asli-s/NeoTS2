@@ -3,6 +3,7 @@
 #include "scene/incidence_map.hpp"
 #include "scene/light_map_texels.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 

@@ -21,6 +21,18 @@ constexpr std::uint32_t kSpriteFloats = 8;  // position, texture coordinates, co
 
 constexpr std::uint32_t kSkinBytes = 4 + 4 * sizeof(float);  // four joints, four weights
 
+// Windows draws with Direct3D 12 and DXIL shaders, other systems with Vulkan and SPIR-V shaders.
+// The build makes only that kind, so the device must not fall back to the other.
+#ifdef _WIN32
+constexpr SDL_GPUShaderFormat kShaderFormat = SDL_GPU_SHADERFORMAT_DXIL;
+constexpr const char* kShaderExtension = ".dxil";
+constexpr const char* kGraphicsApi = "Direct3D 12";
+#else
+constexpr SDL_GPUShaderFormat kShaderFormat = SDL_GPU_SHADERFORMAT_SPIRV;
+constexpr const char* kShaderExtension = ".spv";
+constexpr const char* kGraphicsApi = "Vulkan";
+#endif
+
 // Whether all of an image's pixels are there (a broken one is drawn plain white instead).
 inline bool complete(const scene::Image& image) {
     return image.width > 0 && image.height > 0 && image.rgba.size() == static_cast<std::size_t>(image.width) * image.height * 4;
