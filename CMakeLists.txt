@@ -140,13 +140,13 @@ add_library(ts2formats
     src/formats/lot_description.cpp
     src/formats/nhood_objects.cpp
     src/formats/ui_script.cpp
+    src/formats/image.cpp
+    src/formats/jpeg.cpp
 )
 target_include_directories(ts2formats PUBLIC src)
-# stb_image (third-party, public domain / MIT) decodes the UI's PNG and bitmap images; jpeg.cpp
-# decodes JPEGs as the game does, stb taking the kinds it does not read.
-add_library(stb_image STATIC src/formats/image.cpp src/formats/jpeg.cpp)
-target_include_directories(stb_image PRIVATE src third_party/stb)
-target_link_libraries(ts2formats PUBLIC stb_image)
+# image.cpp uses stb_image (third-party, public domain / MIT) to decode the UI's PNG and bitmap images;
+# jpeg.cpp decodes JPEGs as the game does, stb taking the kinds it does not read.
+target_include_directories(ts2formats SYSTEM PRIVATE third_party/stb)
 target_link_libraries(ts2formats PRIVATE project_warnings)
 
 add_library(ts2content

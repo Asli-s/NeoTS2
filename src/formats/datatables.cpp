@@ -27,7 +27,7 @@ std::string readString(BinaryReader& r) {
     return std::string(bytes.begin(), bytes.end());
 }
 
-std::vector<std::pair<Value, Value>> readPairs(BinaryReader& r, int depth);
+std::vector<Entry> readPairs(BinaryReader& r, int depth);
 
 Value readValue(BinaryReader& r, int depth) {
     Value v;
@@ -51,8 +51,8 @@ Value readValue(BinaryReader& r, int depth) {
     return v;
 }
 
-std::vector<std::pair<Value, Value>> readPairs(BinaryReader& r, int depth) {
-    std::vector<std::pair<Value, Value>> pairs(count(r, 10));  // two values of 5 bytes or more
+std::vector<Entry> readPairs(BinaryReader& r, int depth) {
+    std::vector<Entry> pairs(count(r, 10));  // two values of 5 bytes or more
     for (auto& [key, value] : pairs) {
         key = readValue(r, depth);
         value = readValue(r, depth);

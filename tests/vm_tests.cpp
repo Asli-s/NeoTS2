@@ -5878,8 +5878,8 @@ void portableMathMatchesTheLibrary() {
     }
     CHECK(sinesOk && powersOk);
     CHECK(sine(0) == 0 && cosine(0) == 1 && power(0.5, 2) == 0.25 && power(2, 0) == 1);
-    CHECK(std::isnan(sine(std::numeric_limits<double>::infinity())) && std::isnan(power(-1, 2)) && std::isnan(log(-1)));
-    CHECK(exp(1000) == std::numeric_limits<double>::infinity() && exp(-1000) == 0 && power(0, 2) == 0);
+    CHECK(std::isnan(sine(std::numeric_limits<double>::infinity())) && std::isnan(power(-1, 2)) && std::isnan(ts2::scene::portable::log(-1)));
+    CHECK(ts2::scene::portable::exp(1000) == std::numeric_limits<double>::infinity() && ts2::scene::portable::exp(-1000) == 0 && power(0, 2) == 0);
 }
 
 void objectDaylightMatchesTheGame() {

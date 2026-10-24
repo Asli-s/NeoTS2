@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <algorithm>
 
 namespace ts2::scene::lotlightmaps {
 
