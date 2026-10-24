@@ -6,7 +6,7 @@
 #include "diag/log.hpp"
 #include "neots2_version.hpp"
 
-#include <SDL3/SDL.h>
+#include "platform/platform.hpp"
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -36,7 +36,8 @@ std::filesystem::path utf8Path(const char* text) {
 
 // The system the program runs on, for the log: its version, cores and memory.
 std::string systemText() {
-    std::string name = SDL_GetPlatform();
+    const ts2::platform::SystemInfo info = ts2::platform::systemInfo();
+    std::string name = info.name;
 #ifdef _WIN32
     // Read from the system itself: GetVersionEx tells programs an older version unless they say
     // otherwise in a manifest.
@@ -51,7 +52,7 @@ std::string systemText() {
         }
     }
 #endif
-    return std::format("{}, {} logical cores, {} MB of memory", name, SDL_GetNumLogicalCPUCores(), SDL_GetSystemRAM());
+    return std::format("{}, {} logical cores, {} MB of memory", name, info.cores, info.memoryMb);
 }
 
 // Whether files can be made in a folder (made if missing): a program under Program Files can't.
@@ -85,8 +86,8 @@ void removeOldReports(const std::filesystem::path& folder) {
 }
 
 std::filesystem::path logFolder() {
-    if (const char* base = SDL_GetBasePath()) {
-        const auto beside = utf8Path(base) / "logs";
+    if (const auto base = ts2::platform::basePath(); !base.empty()) {
+        const auto beside = base / "logs";
         if (writable(beside)) {
             return beside;
         }
@@ -100,9 +101,8 @@ std::filesystem::path logFolder() {
         return std::filesystem::path(local) / L"NeoTS2" / L"logs";
     }
 #endif
-    if (char* data = SDL_GetPrefPath(nullptr, "NeoTS2")) {
-        folder = utf8Path(data) / "logs";
-        SDL_free(data);
+    if (const auto data = ts2::platform::prefPath("NeoTS2"); !data.empty()) {
+        folder = data / "logs";
     }
     return folder;
 }

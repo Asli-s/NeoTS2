@@ -1,15 +1,15 @@
 #pragma once
 
-#include <string>
+#include "platform/platform.hpp"
 
-struct SDL_Window;
+#include <string>
 
 namespace app {
 
-enum class MessageKind { Error, Warning, Information };
+using MessageKind = ts2::platform::MessageKind;
 
 // A message for the player, in UTF-8. On Windows it is a task dialog of a fixed width with room
-// around the text, as the launcher shows its messages. Elsewhere it is SDL's message box.
-void showMessage(MessageKind kind, const std::string& text, SDL_Window* parent = nullptr);
+// around the text, as the launcher shows its messages. Elsewhere it is the platform's message box.
+void showMessage(MessageKind kind, const std::string& text, ts2::platform::Window* parent = nullptr);
 
 } // namespace app

@@ -2,8 +2,7 @@
 // system with a GL 2.1 driver (and on Mac OS X's OpenGL framework, which has no loader of its own).
 #pragma once
 
-#define GL_GLEXT_PROTOTYPES 1
-#include <SDL3/SDL_opengl.h>
+#include "platform/opengl.hpp"
 
 namespace ts2::render::gl {
 
@@ -41,7 +40,7 @@ struct Api {
     bool anisotropy = false;     // GL_EXT_texture_filter_anisotropic
     float maxAnisotropy = 1;
     int majorVersion = 0, minorVersion = 0;
-    int maxTextureSize = 1024;
+    GLint maxTextureSize = 1024;  // GLint, not int: on Mac OS X before 10.6 it is a long, and glGetIntegerv wants its own type
 };
 
 } // namespace ts2::render::gl

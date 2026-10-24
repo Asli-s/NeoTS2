@@ -1,7 +1,5 @@
 #include "message_box.hpp"
 
-#include <SDL3/SDL.h>
-
 #ifdef _WIN32
 
 #ifndef NOMINMAX
@@ -32,10 +30,9 @@ std::wstring wide(const std::string& s) {
 
 } // namespace
 
-void showMessage(MessageKind kind, const std::string& text, SDL_Window* parent) {
+void showMessage(MessageKind kind, const std::string& text, ts2::platform::Window* parent) {
     const std::wstring content = wide(text);
-    HWND owner = parent ? static_cast<HWND>(SDL_GetPointerProperty(SDL_GetWindowProperties(parent), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr))
-                        : nullptr;
+    HWND owner = parent ? static_cast<HWND>(parent->nativeHandle()) : nullptr;
     TASKDIALOGCONFIG config{};
     config.cbSize = sizeof(config);
     config.hwndParent = owner;
@@ -46,10 +43,7 @@ void showMessage(MessageKind kind, const std::string& text, SDL_Window* parent) 
     config.pszContent = content.c_str();
     config.cxWidth = kWidth;
     if (FAILED(TaskDialogIndirect(&config, nullptr, nullptr, nullptr))) {
-        const Uint32 flags = kind == MessageKind::Error     ? SDL_MESSAGEBOX_ERROR
-                             : kind == MessageKind::Warning ? SDL_MESSAGEBOX_WARNING
-                                                            : SDL_MESSAGEBOX_INFORMATION;
-        SDL_ShowSimpleMessageBox(flags, "NeoTS2", text.c_str(), parent);
+        ts2::platform::showMessageBox(kind, "NeoTS2", text, parent);
     }
 }
 
@@ -59,11 +53,8 @@ void showMessage(MessageKind kind, const std::string& text, SDL_Window* parent) 
 
 namespace app {
 
-void showMessage(MessageKind kind, const std::string& text, SDL_Window* parent) {
-    const Uint32 flags = kind == MessageKind::Error     ? SDL_MESSAGEBOX_ERROR
-                         : kind == MessageKind::Warning ? SDL_MESSAGEBOX_WARNING
-                                                        : SDL_MESSAGEBOX_INFORMATION;
-    SDL_ShowSimpleMessageBox(flags, "NeoTS2", text.c_str(), parent);
+void showMessage(MessageKind kind, const std::string& text, ts2::platform::Window* parent) {
+    ts2::platform::showMessageBox(kind, "NeoTS2", text, parent);
 }
 
 } // namespace app

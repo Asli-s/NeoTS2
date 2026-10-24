@@ -3,8 +3,6 @@
 #include "render/gl/gl_renderer.hpp"
 #include "render/image_levels.hpp"
 
-#include <SDL3/SDL.h>
-
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -283,31 +281,29 @@ void GlRenderer::forgetBindings() {
 // Makes contexts that share their textures and buffers with the drawing one, for prepare() to use
 // on other threads. Made with the drawing context current, which they then share with.
 void GlRenderer::makeSharedContexts(unsigned count) {
-    SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 1);
     for (unsigned i = 0; i < count; ++i) {
-        SDL_GLContext shared = SDL_GL_CreateContext(window_);
+        platform::GlContextPtr shared = window_->createGlContext(true);
         if (shared == nullptr) {
             break;
         }
-        pool_.push_back({shared, false});
+        pool_.push_back(SharedContext{std::move(shared), false});
     }
-    SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 0);
     // Making one current again is what made them current here.
-    SDL_GL_MakeCurrent(window_, context_);
+    window_->makeCurrent(context_.get());
     // Some systems (EGL on Wayland, macOS) can't make a context current on the window from another thread.
     // One is tried on a thread now, and the pool is given up when that fails.
     if (!pool_.empty()) {
         bool works = false;
         std::thread([&] {
-            works = SDL_GL_MakeCurrent(window_, pool_.front().context);
+            works = window_->makeCurrent(pool_.front().context.get());
             if (works) {
-                SDL_GL_MakeCurrent(window_, nullptr);
+                window_->makeCurrent(nullptr);
             }
         }).join();
         if (!works) {
             destroySharedContexts();
             closing_ = false;
-            SDL_GL_MakeCurrent(window_, context_);
+            window_->makeCurrent(context_.get());
         }
     }
 }
@@ -325,9 +321,6 @@ void GlRenderer::destroySharedContexts() {
         }
         return true;
     });
-    for (const auto& shared : pool_) {
-        SDL_GL_DestroyContext(shared.context);
-    }
     pool_.clear();
 }
 
@@ -355,7 +348,7 @@ std::unique_ptr<GlRenderer::SceneGpu> GlRenderer::uploadShared(const scene::Scen
         mine->busy = true;
     }
     std::unique_ptr<SceneGpu> gpu;
-    if (SDL_GL_MakeCurrent(window_, mine->context)) {
+    if (window_->makeCurrent(mine->context.get())) {
         // This touches nothing but what this thread made: the caches of what is bound are the drawing thread's.
         auto* self = const_cast<GlRenderer*>(this);
         auto staged = stage(scene, false);  // the scene is alive until this returns
@@ -367,7 +360,7 @@ std::unique_ptr<GlRenderer::SceneGpu> GlRenderer::uploadShared(const scene::Scen
             gpu->release(*graveyard_);
             gpu.reset();
         }
-        SDL_GL_MakeCurrent(window_, nullptr);
+        window_->makeCurrent(nullptr);
     }
     {
         std::lock_guard lock(poolLock_);

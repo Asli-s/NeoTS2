@@ -39,11 +39,12 @@
 #include "ui/fonts.hpp"
 #include "ui/screen.hpp"
 
-#include <SDL3/SDL.h>
+#include "platform/platform.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <format>
 #include <fstream>
@@ -55,6 +56,8 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+
+namespace pf = ts2::platform;
 
 namespace {
 
@@ -72,7 +75,7 @@ constexpr std::uint32_t kTileButton = 0x000000a2;
 // The tile's tooltip, which the game sets itself: "Click for Preview of Neighborhood".
 constexpr std::uint32_t kNeighborhoodText = 0x7F3A262A, kTileTip = 0x0086003F;  // a string id, leakcheck: ok
 // A second click on a lot within this long enters it instead of opening its card.
-constexpr Uint64 kDoubleClickNs = 250000000;
+constexpr std::uint64_t kDoubleClickNs = 250000000;
 // The square marking where a camera drag started (a 15 x 15 picture), from the UI scripts.
 constexpr std::uint32_t kUiScripts = 0xA99D8A11, kPressMark = 0xFFFF8000;
 // The picture a middle-button camera turn shows where it was pressed, while the pointer is hidden.
@@ -248,8 +251,8 @@ bool loading(const Job& job) {
     return job.valid() && job.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
 }
 
-double secondsSince(Uint64 started) {
-    return static_cast<double>(SDL_GetTicksNS() - started) / 1e9;
+double secondsSince(std::uint64_t started) {
+    return static_cast<double>(ts2::platform::ticksNs() - started) / 1e9;
 }
 
 // The game in its window: the main menu, a neighborhood opened from it, and a lot entered from
@@ -288,36 +291,36 @@ private:
     void lotClicked(float x, float y);
     void showLotCard(std::uint32_t lot);
     void showLotTag();
-    void placePlumbobs(Uint64 now);
+    void placePlumbobs(std::uint64_t now);
 
     // The lot.
     void enterLot(std::uint32_t id);
     void showLot(LotBuilt& built);
     void leaveLot();
-    app::LotUi::Action lotKey(SDL_Keycode key);
+    app::LotUi::Action lotKey(pf::Key key);
     void lotAction(app::LotUi::Action action);
     bool openGroundMenu(float x, float y);
     void toggleFreeCamera();
-    void freeCameraMouse(const SDL_Event& e);
+    void freeCameraMouse(const pf::Event& e);
     void freeCameraLook();
     std::function<void(app::Vec3&)> keepNearLot(float inset) const;
     ts2::render::Camera lotCamera() const { return freeCam_ ? freeCam_->camera() : orbit_.camera(); }
     void showPieCursor();
-    void lotMouse(const SDL_Event& e, float x, float y);
-    void cameraDrag(const SDL_Event& e, float x, float y);
+    void lotMouse(const pf::Event& e, float x, float y);
+    void cameraDrag(const pf::Event& e, float x, float y);
     void endCameraDrag();
-    void updateLot(Uint64 now);
+    void updateLot(std::uint64_t now);
     void startLotLife();
-    void drawHousehold(Uint64 now);
+    void drawHousehold(std::uint64_t now);
     void sendLotChanges();
 
     // Every screen.
     void startFromOptions();
-    void handleEvent(const SDL_Event& e);
-    void mouseEvent(const SDL_Event& e);
+    void handleEvent(const pf::Event& e);
+    void mouseEvent(const pf::Event& e);
     void windowClicked(int window);
     void showSprites(double seconds, bool scene);
-    void reportFrame(Uint64 now);
+    void reportFrame(std::uint64_t now);
     template <typename T>
     std::optional<T> finished(std::future<T>& job, const char* what);
 
@@ -342,7 +345,7 @@ private:
     std::vector<Playing> playing_;
     int page_ = 0;
     int pages_ = 1;
-    Uint64 pageShown_ = 0;
+    std::uint64_t pageShown_ = 0;
 
     // The game's 3D assets, read in the background from the start so a neighborhood opens quickly.
     std::shared_future<std::shared_ptr<ts2::scene::Assets>> assets_;
@@ -361,7 +364,7 @@ private:
     app::LotView lotView_;
     // The lot's Sims, run by their own scripts and posed each frame (from when the lot was shown,
     // without a simulation).
-    Uint64 lotShown_ = 0;
+    std::uint64_t lotShown_ = 0;
     std::future<std::unique_ptr<ts2::sim::LotSimulation>> lotSimBuilding_;  // built beside the lot's scene
     std::unique_ptr<app::LotLife> lotLife_;
     std::unique_ptr<app::LotDaylight> lotDaylight_;
@@ -393,7 +396,7 @@ private:
     std::uint32_t hoodCursor_ = app::Cursors::kArrow;
     // A lot clicked once on the neighborhood: its card opens unless a second click comes in time.
     std::uint32_t clickedLot_ = 0;
-    Uint64 clickedAt_ = 0;
+    std::uint64_t clickedAt_ = 0;
     app::Orbit orbit_;
     app::CameraHeight cameraHeight_;
     // The free camera while it is on (Tab), and its settings.
@@ -408,7 +411,7 @@ private:
     std::size_t chosen_ = 0;
     // A neighborhood tile clicked once, waiting for a second click, and when.
     std::optional<std::size_t> clickedTile_;
-    Uint64 tileClickedAt_ = 0;
+    std::uint64_t tileClickedAt_ = 0;
 
     // Textures added or changed go to the GPU when a sprite draws them, and the others a few a
     // frame: panels load many pictures they keep hidden, and making a GPU texture for each at
@@ -416,22 +419,22 @@ private:
     std::vector<ts2::scene::Image> staged_;
     std::set<int> unsent_;
     // When the neighborhood and lot being loaded were asked for, for their load times in the log.
-    Uint64 hoodLoadStarted_ = 0, lotLoadStarted_ = 0;
-    Uint64 hoodShownAt_ = 0;  // when the neighborhood was shown, the plumbobs' clock
+    std::uint64_t hoodLoadStarted_ = 0, lotLoadStarted_ = 0;
+    std::uint64_t hoodShownAt_ = 0;  // when the neighborhood was shown, the plumbobs' clock
     std::vector<std::pair<std::size_t, ts2::scene::Transform>> plumbobPlaces_;
     std::uint32_t enteredLot_ = 0;
 
     bool running_ = true;
     bool down_ = false;
-    Uint64 lastFrame_ = 0;
-    Uint64 lastSlowFrame_ = 0, lastTimings_ = 0;  // 0: no slow frame yet
+    std::uint64_t lastFrame_ = 0;
+    std::uint64_t lastSlowFrame_ = 0, lastTimings_ = 0;  // 0: no slow frame yet
     // The slow steps of showing a lot (the lot, its simulation, the household's portraits) take a
     // frame each, so no frame waits for two. A picture being taken waits for all.
     bool stepTaken_ = false;
     // A picture's clicks are made once, then the lot plays on for --run seconds.
     bool uiClicked_ = false;
     bool groundClicked_ = false;
-    std::optional<Uint64> runStarted_;
+    std::optional<std::uint64_t> runStarted_;
 };
 
 Game::Game(ts2::content::UiData& data, ts2::ui::Fonts& fonts, ts2::render::IRenderer& renderer, const std::filesystem::path& install,
@@ -469,7 +472,7 @@ void Game::setUpMenu() {
 // A Sim in the upper left and one in the lower right, each one of the pictures listed in the
 // menu's table of constants (kUpperLeft, kLowerRight). Which one the game picks is not known yet.
 void Game::pickMenuSims() {
-    std::mt19937 random(static_cast<unsigned>(SDL_GetTicksNS()));
+    std::mt19937 random(static_cast<unsigned>(ts2::platform::ticksNs()));
     for (const auto& line : screen_.childTexts(screen_.find(menu_, kConstants))) {
         const auto eq = line.find('=');
         if (eq == std::string::npos) {
@@ -545,7 +548,7 @@ void Game::showPage() {
     }
     screen_.setVisible(screen_.find(menu_, kPrevious), page_ > 0);
     screen_.setVisible(screen_.find(menu_, kNext), page_ + 1 < pages_);
-    pageShown_ = SDL_GetTicksNS();
+    pageShown_ = ts2::platform::ticksNs();
 }
 
 void Game::showPreview() {
@@ -560,7 +563,7 @@ void Game::showPreview() {
 }
 
 void Game::playVideos() {
-    const double seconds = static_cast<double>(SDL_GetTicksNS() - pageShown_) / 1e9;
+    const double seconds = static_cast<double>(ts2::platform::ticksNs() - pageShown_) / 1e9;
     for (auto& p : playing_) {
         if (p.video.frames.empty()) {
             continue;
@@ -617,7 +620,7 @@ void Game::menuClicked(int window, std::uint32_t id) {
         // Otherwise the preview opens once the wait is over. The wait is the one the game uses for
         // clicks on lots. The tiles' own wait is not known yet.
         const auto index = static_cast<std::size_t>(page_ * kPerPage + (tile - tiles_.begin()));
-        const Uint64 now = SDL_GetTicksNS();
+        const std::uint64_t now = ts2::platform::ticksNs();
         if (clickedTile_ == index && now - tileClickedAt_ <= kDoubleClickNs) {
             clickedTile_.reset();
             chosen_ = index;
@@ -638,7 +641,7 @@ void Game::openNeighborhood() {
     openName_ = hoods_[chosen_].name;
     openFolder_ = folder;
     ts2::diag::step("opening neighborhood " + ts2::diag::utf8(folder.filename()));
-    hoodLoadStarted_ = SDL_GetTicksNS();
+    hoodLoadStarted_ = ts2::platform::ticksNs();
     building_ = std::async(std::launch::async, [assets = assets_, install = install_, folder, user = options_.user, seed = options_.seed,
                                                 &renderer = renderer_] {
         ts2::scene::SceneBuilder builder(*assets.get());
@@ -649,7 +652,7 @@ void Game::openNeighborhood() {
         b.scene = std::move(builder.scene());
         app::neighborhoodCamera(b.camera, install, b.stats);
         if (const auto* file = effects.newest()) {
-            b.drift = ts2::scene::HoodDrift::load(*file, static_cast<std::uint32_t>(SDL_GetTicksNS()));
+            b.drift = ts2::scene::HoodDrift::load(*file, static_cast<std::uint32_t>(ts2::platform::ticksNs()));
             if (!b.drift) {
                 ts2::diag::warning("the neighborhood camera won't drift: the effects file has no usable nhoodcam effect");
             }
@@ -670,7 +673,7 @@ void Game::showNeighborhood(Built built) {
                                 hood_.stats.height, hood_.stats.imposters, hood_.stats.plantsShown, hood_.stats.decorationsShown,
                                 secondsSince(hoodLoadStarted_)));
     renderer_.upload(std::move(hood_.gpu));
-    hoodShownAt_ = SDL_GetTicksNS();
+    hoodShownAt_ = ts2::platform::ticksNs();
     orbit_ = hood_.camera;
     hoodDrift_ = hood_.drift;
     hoodUi_.open(openFolder_, openName_, std::move(hood_.panel));
@@ -765,7 +768,7 @@ void Game::lotClicked(float x, float y) {
         hoodUi_.hideCard();
         return;
     }
-    const Uint64 now = SDL_GetTicksNS();
+    const std::uint64_t now = ts2::platform::ticksNs();
     const auto& lived = hoodUi_.occupiedLots();
     if (clickedLot_ == id && now - clickedAt_ <= kDoubleClickNs && std::find(lived.begin(), lived.end(), id) != lived.end()) {
         clickedLot_ = 0;
@@ -780,7 +783,7 @@ void Game::lotClicked(float x, float y) {
 // The tag of the lot under the mouse (not under the panels), placed by where the camera shows the
 // lot's centre, 2 below its ground.
 // The neighborhood's plumbobs as they are now, their sprites facing the camera.
-void Game::placePlumbobs(Uint64 now) {
+void Game::placePlumbobs(std::uint64_t now) {
     if (hood_.plumbobs.empty()) {
         return;
     }
@@ -802,7 +805,7 @@ void Game::showLotTag() {
         return;
     }
     float x = 0, y = 0;
-    SDL_GetMouseState(&x, &y);
+    pf::mousePosition(x, y);
     if (options_.hoverX >= 0) {
         x = static_cast<float>(options_.hoverX);
         y = static_cast<float>(options_.hoverY);
@@ -846,7 +849,7 @@ void Game::enterLot(std::uint32_t id) {
     enteredLot_ = id;
     const auto file = openFolder_ / "Lots" / (openFolder_.filename().u8string() + u8"_Lot" + std::u8string(reinterpret_cast<const char8_t*>(std::to_string(id).c_str())) + u8".package");
     ts2::diag::step(std::format("entering lot {}", id));
-    lotLoadStarted_ = SDL_GetTicksNS();
+    lotLoadStarted_ = ts2::platform::ticksNs();
     // The ground around it, as in the game's lot view.
     const auto where = std::find_if(hood_.stats.lotFootprints.begin(), hood_.stats.lotFootprints.end(),
                                     [&](const ts2::scene::LotFootprint& f) { return f.id == id; });
@@ -935,7 +938,7 @@ void Game::showLot(LotBuilt& built) {
     hood_.gpu = renderer_.swap(std::move(built.gpu));
     lotPicker_.prepare(lot_);
     hovered_ = 0;
-    lotShown_ = SDL_GetTicksNS();
+    lotShown_ = ts2::platform::ticksNs();
     ts2::diag::info(std::format("lot {} shown after {:.1f} s", enteredLot_, secondsSince(lotLoadStarted_)));
 
     screen_.setVisible(hoodUi_.root(), false);
@@ -964,7 +967,7 @@ void Game::leaveLot() {
         freeCam_.reset();
         freeMouse_.reset();
         lotUi_.hideForFreeCamera(false);
-        SDL_ShowCursor();
+        pf::showCursor();
     }
     lotUi_.close();
     pieMenu_.close();
@@ -980,20 +983,20 @@ void Game::leaveLot() {
 
 // The game's live-mode keys. P, Pause, ` or 0 on the number pad pause. 1, 2 and 3 pick a
 // speed. F5 opens the options.
-app::LotUi::Action Game::lotKey(SDL_Keycode key) {
+app::LotUi::Action Game::lotKey(pf::Key key) {
     using Action = app::LotUi::Action;
     switch (key) {
-    case SDLK_P:
-    case SDLK_PAUSE:
-    case SDLK_GRAVE:
-    case SDLK_KP_0: return Action::Pause;
-    case SDLK_1:
-    case SDLK_KP_1: return Action::Normal;
-    case SDLK_2:
-    case SDLK_KP_2: return Action::High;
-    case SDLK_3:
-    case SDLK_KP_3: return Action::Ultra;
-    case SDLK_F5:
+    case pf::Key::P:
+    case pf::Key::Pause:
+    case pf::Key::Grave:
+    case pf::Key::Pad0: return Action::Pause;
+    case pf::Key::Num1:
+    case pf::Key::Pad1: return Action::Normal;
+    case pf::Key::Num2:
+    case pf::Key::Pad2: return Action::High;
+    case pf::Key::Num3:
+    case pf::Key::Pad3: return Action::Ultra;
+    case pf::Key::F5:
         lotUi_.showOptions(!lotUi_.optionsShown());
         return lotUi_.optionsShown() ? Action::OptionsOpened : Action::OptionsClosed;
     default: return Action::None;
@@ -1068,12 +1071,12 @@ bool Game::openGroundMenu(float x, float y) {
 // marks the press point, and once the mouse is more than 8 pixels from it (along either axis) the
 // cursor is the turned drag arrow pointing from the press point to the mouse. Within those 8
 // pixels it is the cursor for what is under the mouse.
-void Game::cameraDrag(const SDL_Event& e, float x, float y) {
+void Game::cameraDrag(const pf::Event& e, float x, float y) {
     // The middle button turns the camera: the pointer hides and stays where it was pressed (the
     // game puts it back after every move), with the game's picture centred on that point.
-    if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_MIDDLE && !pieMenu_.isOpen() && !turnFrom_ &&
+    if (e.type == pf::Event::Type::MouseDown && e.button == pf::MouseButton::Middle && !pieMenu_.isOpen() && !turnFrom_ &&
         !screen_.over(static_cast<int>(x), static_cast<int>(y))) {
-        turnFrom_ = {e.button.x, e.button.y};
+        turnFrom_ = {e.x, e.y};
         ts2::ui::Window mark;
         // Its magenta shows through, as it does in the game.
         const std::uint32_t markImage = inLot_ ? kTurnMark : kTurnMarkSides;
@@ -1085,14 +1088,11 @@ void Game::cameraDrag(const SDL_Event& e, float x, float y) {
             screen_.resize(turnMark_, static_cast<int>(image->width), static_cast<int>(image->height));
         }
         screen_.move(turnMark_, static_cast<int>(x) - screen_.width(turnMark_) / 2, static_cast<int>(y) - screen_.height(turnMark_) / 2);
-        // Real pointer moves, as the game's, not SDL's raw relative input it would switch to
-        // (that skips the system's pointer speed and acceleration).
-        SDL_SetHint(SDL_HINT_MOUSE_EMULATE_WARP_WITH_RELATIVE, "0");
-        SDL_HideCursor();
+        pf::hideCursor();
         return;
     }
-    if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_MIDDLE && turnFrom_) {
-        SDL_ShowCursor();
+    if (e.type == pf::Event::Type::MouseUp && e.button == pf::MouseButton::Middle && turnFrom_) {
+        pf::showCursor();
         turnFrom_.reset();
         screen_.remove(turnMark_);
         turnMark_ = -1;
@@ -1100,31 +1100,31 @@ void Game::cameraDrag(const SDL_Event& e, float x, float y) {
     }
     // Each move turns by how far the pointer went from the press point, and the pointer goes back
     // there (the move that causes lands on the press point and turns nothing).
-    if (e.type == SDL_EVENT_MOUSE_MOTION && turnFrom_) {
-        const float dx = e.motion.x - (*turnFrom_)[0], dy = e.motion.y - (*turnFrom_)[1];
+    if (e.type == pf::Event::Type::MouseMotion && turnFrom_) {
+        const float dx = e.x - (*turnFrom_)[0], dy = e.y - (*turnFrom_)[1];
         if (dx != 0 || dy != 0) {
             orbit_.turnMove[0] += dx;
             orbit_.turnMove[1] += dy;
-            if (SDL_Window* window = SDL_GetWindowFromID(e.motion.windowID)) {
-                SDL_WarpMouseInWindow(window, (*turnFrom_)[0], (*turnFrom_)[1]);
+            if (pf::Window* window = pf::mouseFocus()) {
+                window->warpMouse((*turnFrom_)[0], (*turnFrom_)[1]);
             }
         }
         return;
     }
-    if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_RIGHT && !pieMenu_.isOpen() &&
+    if (e.type == pf::Event::Type::MouseDown && e.button == pf::MouseButton::Right && !pieMenu_.isOpen() &&
         !screen_.over(static_cast<int>(x), static_cast<int>(y))) {
         dragFrom_ = {x, y};
         screen_.remove(pressMark_);
         pressMark_ = screen_.load(kUiScripts, kPressMark, 0, 0);
         screen_.setPassive(pressMark_);
         screen_.move(pressMark_, static_cast<int>(x) - screen_.width(pressMark_) / 2, static_cast<int>(y) - screen_.height(pressMark_) / 2);
-    } else if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_RIGHT && dragFrom_) {
+    } else if (e.type == pf::Event::Type::MouseUp && e.button == pf::MouseButton::Right && dragFrom_) {
         dragFrom_.reset();
         orbit_.dragSpeed = {0, 0};
         screen_.remove(pressMark_);
         pressMark_ = -1;
         hoverAt_ = {x, y};  // the live cursor again, for what is under the mouse now
-    } else if (e.type == SDL_EVENT_MOUSE_MOTION && dragFrom_) {
+    } else if (e.type == pf::Event::Type::MouseMotion && dragFrom_) {
         const float dx = x - (*dragFrom_)[0], dy = y - (*dragFrom_)[1];
         orbit_.scrollBy(dx * 0.25f, dy * 0.25f, width_, height_);
         if (std::max(std::abs(dx), std::abs(dy)) > 8) {
@@ -1146,7 +1146,7 @@ void Game::endCameraDrag() {
         turnFrom_.reset();
         screen_.remove(turnMark_);
         turnMark_ = -1;
-        SDL_ShowCursor();
+        pf::showCursor();
     }
 }
 
@@ -1193,7 +1193,7 @@ void Game::toggleFreeCamera() {
         freeCam_.reset();
         freeMouse_.reset();
         lotUi_.hideForFreeCamera(false);
-        SDL_ShowCursor();
+        pf::showCursor();
         return;
     }
     if (!freeRig_ || !orbit_.rig) {
@@ -1206,46 +1206,45 @@ void Game::toggleFreeCamera() {
     hovered_ = 0;
     // Only the pause frame stays on screen, as in the game.
     lotUi_.hideForFreeCamera(true);
-    SDL_SetHint(SDL_HINT_MOUSE_EMULATE_WARP_WITH_RELATIVE, "0");
-    SDL_HideCursor();
+    pf::hideCursor();
 }
 
 // The mouse while the free camera is on: where the pointer went, for the next frame.
-void Game::freeCameraMouse(const SDL_Event& e) {
-    if (e.type == SDL_EVENT_MOUSE_MOTION) {
-        freeMouse_ = std::array<float, 2>{e.motion.x, e.motion.y};
+void Game::freeCameraMouse(const pf::Event& e) {
+    if (e.type == pf::Event::Type::MouseMotion) {
+        freeMouse_ = std::array<float, 2>{e.x, e.y};
     }
 }
 
 // As the game: once a frame the free camera looks round by how far the pointer went from the
 // middle of the window, and the pointer goes back there (while the window has the mouse).
 void Game::freeCameraLook() {
-    SDL_Window* window = SDL_GetMouseFocus();
+    pf::Window* window = pf::mouseFocus();
     if (!freeMouse_ || !window) {
         freeMouse_.reset();
         return;
     }
     int w = 0, h = 0;
-    SDL_GetWindowSize(window, &w, &h);
+    window->size(w, h);
     const float cx = static_cast<float>(w / 2), cy = static_cast<float>(h / 2);
     const float dx = (*freeMouse_)[0] - cx, dy = (*freeMouse_)[1] - cy;
     freeMouse_.reset();
     if (dx != 0 || dy != 0) {
         freeCam_->look(dx, dy);
-        SDL_WarpMouseInWindow(window, cx, cy);
+        window->warpMouse(cx, cy);
     }
 }
 
 // The mouse over the lot: the open pie menu takes it first, then a click on an object or on the
 // ground, then the panels and the camera.
-void Game::lotMouse(const SDL_Event& e, float x, float y) {
+void Game::lotMouse(const pf::Event& e, float x, float y) {
     const int ix = static_cast<int>(x), iy = static_cast<int>(y);
     if (pieMenu_.isOpen()) {
         using Mouse = app::PieMenuUi::Mouse;
-        const bool leftButton = e.type != SDL_EVENT_MOUSE_MOTION && e.button.button == SDL_BUTTON_LEFT;
-        const bool right = e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_RIGHT;
+        const bool leftButton = e.type != pf::Event::Type::MouseMotion && e.button == pf::MouseButton::Left;
+        const bool right = e.type == pf::Event::Type::MouseDown && e.button == pf::MouseButton::Right;
         const Mouse what = right ? Mouse::RightDown
-                           : leftButton ? (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN ? Mouse::LeftDown : Mouse::LeftUp)
+                           : leftButton ? (e.type == pf::Event::Type::MouseDown ? Mouse::LeftDown : Mouse::LeftUp)
                                         : Mouse::Move;
         if (const auto picked = pieMenu_.mouse(ix, iy, what); picked && lotLife_) {
             lotLife_->choose(pieObject_, *picked);
@@ -1255,7 +1254,7 @@ void Game::lotMouse(const SDL_Event& e, float x, float y) {
         }
         return;
     }
-    const bool leftDown = e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT;
+    const bool leftDown = e.type == pf::Event::Type::MouseDown && e.button == pf::MouseButton::Left;
     // A left click on the highlighted object opens its pie menu for the selected Sim.
     if (lotLife_ && hovered_ != 0 && leftDown && !screen_.over(ix, iy)) {
         if (auto choices = lotLife_->pieMenu(hovered_); !choices.empty()) {
@@ -1271,29 +1270,29 @@ void Game::lotMouse(const SDL_Event& e, float x, float y) {
         return;
     }
     lotUi_.mouseMoved(ix, iy);
-    if (e.type != SDL_EVENT_MOUSE_MOTION && e.button.button == SDL_BUTTON_LEFT && lotLife_) {
-        lotUi_.mouseButton(ix, iy, e.type == SDL_EVENT_MOUSE_BUTTON_DOWN, *lotLife_);
+    if (e.type != pf::Event::Type::MouseMotion && e.button == pf::MouseButton::Left && lotLife_) {
+        lotUi_.mouseButton(ix, iy, e.type == pf::Event::Type::MouseDown, *lotLife_);
     }
-    if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_RIGHT && lotLife_) {
+    if (e.type == pf::Event::Type::MouseDown && e.button == pf::MouseButton::Right && lotLife_) {
         if (const auto button = screen_.buttonAt(ix, iy)) {
             lotUi_.rightClicked(*button, *lotLife_);
         }
     }
     if (!screen_.over(ix, iy)) {
         app::orbitEvent(orbit_, e);
-        if (e.type == SDL_EVENT_MOUSE_MOTION && !down_ && !dragFrom_) {
+        if (e.type == pf::Event::Type::MouseMotion && !down_ && !dragFrom_) {
             hoverAt_ = {x, y};
         }
     } else {
         cursors_.show(app::Cursors::kArrow);
     }
-    if (const auto clicked = screen_.mouse(ix, iy, down_, static_cast<double>(SDL_GetTicksNS()) / 1e9)) {
+    if (const auto clicked = screen_.mouse(ix, iy, down_, static_cast<double>(ts2::platform::ticksNs()) / 1e9)) {
         lotAction(lotUi_.clicked(*clicked));
     }
 }
 
 // A frame of the lot: the camera, the object under the mouse, the Sims and what they changed.
-void Game::updateLot(Uint64 now) {
+void Game::updateLot(std::uint64_t now) {
     const float dt = std::min(0.1f, static_cast<float>(now - lastFrame_) / 1e9f);    if (freeCam_) {
         freeCameraLook();
         // The game's free camera samples its corners half a tile out, at half their height.
@@ -1359,7 +1358,7 @@ void Game::startLotLife() {
 
 // The household's thumbnails: Sims on the lot are drawn anew, as the game does. The others keep
 // their character file's portrait.
-void Game::drawHousehold(Uint64 now) {
+void Game::drawHousehold(std::uint64_t now) {
     householdShown_ = true;
     std::vector<app::Skewer::Member> members;
     std::mt19937 poseRandom(static_cast<unsigned>(now));
@@ -1423,18 +1422,18 @@ void Game::startFromOptions() {
 void Game::run() {
     startFromOptions();
     running_ = options_.shot.empty() || building_.valid();
-    lastFrame_ = SDL_GetTicksNS();
+    lastFrame_ = ts2::platform::ticksNs();
     lastTimings_ = lastFrame_;
     while (running_) {
         ts2::diag::Timer frameTimer("frame");
         stepTaken_ = false;
-        SDL_Event e;
-        while (SDL_PollEvent(&e)) {
+        pf::Event e;
+        while (pf::pollEvent(e)) {
             handleEvent(e);
         }
         if (options_.takeInstallWarning && options_.shot.empty()) {
             if (const std::string warning = options_.takeInstallWarning(); !warning.empty()) {
-                app::showMessage(app::MessageKind::Warning, warning, SDL_GetMouseFocus());
+                app::showMessage(app::MessageKind::Warning, warning, pf::mouseFocus());
             }
         }
         if (auto opened = finished(building_, "neighborhood")) {
@@ -1448,7 +1447,7 @@ void Game::run() {
         if (auto done = finished(lotBuilding_, "lot")) {
             showLot(*done);
         }
-        const Uint64 now = SDL_GetTicksNS();
+        const std::uint64_t now = ts2::platform::ticksNs();
         reportFrame(now);
         if (!inLot_ && !inNeighborhood_) {
             cursors_.show(app::Cursors::kArrow);
@@ -1480,7 +1479,7 @@ void Game::run() {
             playVideos();
         }
         lastFrame_ = now;
-        showSprites(static_cast<double>(SDL_GetTicksNS()) / 1e9, inNeighborhood_ || inLot_);
+        showSprites(static_cast<double>(ts2::platform::ticksNs()) / 1e9, inNeighborhood_ || inLot_);
         // Clicks on the lot's panels wait for the household to be in them.
         const bool panelsReady = options_.uiClicks.empty() || householdShown_;
         if (!options_.shot.empty() && (options_.lot > 0 || options_.clickX >= 0 ? inLot_ && panelsReady : inNeighborhood_)) {
@@ -1488,54 +1487,54 @@ void Game::run() {
                 running_ = false;
             }
         } else if (!renderer_.draw(inLot_ ? lotCamera() : inNeighborhood_ ? orbit_.camera() : ts2::render::Camera{})) {
-            SDL_Delay(16);
+            ts2::platform::delayMs(16);
         }
     }
 }
 
-void Game::handleEvent(const SDL_Event& e) {
+void Game::handleEvent(const pf::Event& e) {
     // Mouse movement, clicks, the wheel and keys all end the neighborhood camera's drift.
-    const bool input = e.type == SDL_EVENT_MOUSE_MOTION || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_UP ||
-                       e.type == SDL_EVENT_MOUSE_WHEEL || e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP;
+    const bool input = e.type == pf::Event::Type::MouseMotion || e.type == pf::Event::Type::MouseDown || e.type == pf::Event::Type::MouseUp ||
+                       e.type == pf::Event::Type::MouseWheel || e.type == pf::Event::Type::KeyDown || e.type == pf::Event::Type::KeyUp;
     if (inNeighborhood_ && hoodDrift_ && input) {
         hoodDrift_->interrupt();
     }
-    const bool freeToggle = e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && inLot_ &&
-                            (e.key.scancode == SDL_SCANCODE_TAB || e.key.scancode == SDL_SCANCODE_Y || (freeCam_ && e.key.scancode == SDL_SCANCODE_ESCAPE));
+    const bool freeToggle = e.type == pf::Event::Type::KeyDown && !e.repeat && inLot_ &&
+                            (e.scancode == pf::Key::Tab || e.scancode == pf::Key::Y || (freeCam_ && e.scancode == pf::Key::Escape));
     if (freeToggle) {
         toggleFreeCamera();
-    } else if (freeCam_ && (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP) &&
-               (e.key.repeat || freeCam_->key(e.key.scancode, e.type == SDL_EVENT_KEY_DOWN))) {
+    } else if (freeCam_ && (e.type == pf::Event::Type::KeyDown || e.type == pf::Event::Type::KeyUp) &&
+               (e.repeat || freeCam_->key(e.scancode, e.type == pf::Event::Type::KeyDown))) {
         // The free camera's own keys.
-    } else if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE && quitBox_.isOpen()) {
+    } else if (e.type == pf::Event::Type::KeyDown && e.key == pf::Key::Escape && quitBox_.isOpen()) {
         closeQuitBox();  // Escape answers No
-    } else if (e.type == SDL_EVENT_QUIT) {
+    } else if (e.type == pf::Event::Type::Quit) {
         ts2::diag::step("window closed");
         running_ = false;
-    } else if (e.type == SDL_EVENT_KEY_DOWN && inLot_ && pieMenu_.isOpen()) {
+    } else if (e.type == pf::Event::Type::KeyDown && inLot_ && pieMenu_.isOpen()) {
         // Any key, Escape too, closes an open pie menu. Escape does nothing else in the game.
         pieMenu_.close();
-    } else if (e.type == SDL_EVENT_KEY_DOWN && inLot_) {
-        if (const auto action = lotKey(e.key.key); action != app::LotUi::Action::None) {
+    } else if (e.type == pf::Event::Type::KeyDown && inLot_) {
+        if (const auto action = lotKey(e.key); action != app::LotUi::Action::None) {
             lotAction(action);
         } else {
-            lotView_.key(e.key.key, orbit_);
+            lotView_.key(e.key, orbit_);
         }
-    } else if (e.type == SDL_EVENT_MOUSE_WHEEL && (inNeighborhood_ || inLot_) && !neighborhoodCovered()) {
+    } else if (e.type == pf::Event::Type::MouseWheel && (inNeighborhood_ || inLot_) && !neighborhoodCovered()) {
         app::orbitEvent(orbit_, e);
-    } else if (e.type == SDL_EVENT_MOUSE_MOTION || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+    } else if (e.type == pf::Event::Type::MouseMotion || e.type == pf::Event::Type::MouseDown || e.type == pf::Event::Type::MouseUp) {
         mouseEvent(e);
     }
 }
 
-void Game::mouseEvent(const SDL_Event& e) {
+void Game::mouseEvent(const pf::Event& e) {
     float x = 0, y = 0;
-    SDL_GetMouseState(&x, &y);
-    if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
+    pf::mousePosition(x, y);
+    if (e.type == pf::Event::Type::MouseDown && e.button == pf::MouseButton::Left) {
         down_ = true;
         downX_ = x;
         downY_ = y;
-    } else if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_LEFT) {
+    } else if (e.type == pf::Event::Type::MouseUp && e.button == pf::MouseButton::Left) {
         down_ = false;
         // A click (not a drag) on the neighborhood enters the lot under it.
         // Not while a lot (or the last one's Sims) is still loading.
@@ -1556,7 +1555,7 @@ void Game::mouseEvent(const SDL_Event& e) {
     if (inNeighborhood_ && !neighborhoodCovered()) {
         cameraDrag(e, x, y);
     }
-    if (const auto clicked = screen_.mouse(static_cast<int>(x), static_cast<int>(y), down_, static_cast<double>(SDL_GetTicksNS()) / 1e9)) {
+    if (const auto clicked = screen_.mouse(static_cast<int>(x), static_cast<int>(y), down_, static_cast<double>(ts2::platform::ticksNs()) / 1e9)) {
         windowClicked(*clicked);
     }
 }
@@ -1620,9 +1619,9 @@ void Game::showSprites(double seconds, bool scene) {
 
 // A frame that took long is what a tester sees as a stutter: where it happened, at most one line
 // every 10 seconds. The timing report goes to the log as often.
-void Game::reportFrame(Uint64 now) {
+void Game::reportFrame(std::uint64_t now) {
     constexpr double kSlowFrameMs = 100;
-    constexpr Uint64 kLogGapNs = 10'000'000'000;
+    constexpr std::uint64_t kLogGapNs = 10'000'000'000;
     if (const double ms = static_cast<double>(now - lastFrame_) / 1e6; ms > kSlowFrameMs && (lastSlowFrame_ == 0 || now - lastSlowFrame_ > kLogGapNs)) {
         lastSlowFrame_ = now;
         const std::string where = inLot_ ? std::format("in lot {}", enteredLot_) : inNeighborhood_ ? "in the neighborhood" : "in the menu";
@@ -1658,7 +1657,7 @@ bool Game::takePicture() {
     if (inLot_ && !options_.uiClicks.empty() && !uiClicked_) {
         uiClicked_ = true;
         clickPanels();
-        showSprites(static_cast<double>(SDL_GetTicksNS()) / 1e9, true);
+        showSprites(static_cast<double>(ts2::platform::ticksNs()) / 1e9, true);
     }
     // The ground click waits for the Sims to come to life.
     if (inLot_ && options_.groundClick && !groundClicked_ && !lotLife_) {
@@ -1673,18 +1672,18 @@ bool Game::takePicture() {
             }
             pieMenu_.close();
         }
-        showSprites(static_cast<double>(SDL_GetTicksNS()) / 1e9, true);
+        showSprites(static_cast<double>(ts2::platform::ticksNs()) / 1e9, true);
     }
     if (inLot_ && options_.runSeconds > 0) {
         if (!runStarted_) {
-            runStarted_ = SDL_GetTicksNS();
+            runStarted_ = ts2::platform::ticksNs();
         }
         if (secondsSince(*runStarted_) < options_.runSeconds) {
             return false;
         }
         // The mouse rests where it was asked to again, as if for a second, so tips of what the
         // lot shows by now are in the picture.
-        const double nowSeconds = static_cast<double>(SDL_GetTicksNS()) / 1e9;
+        const double nowSeconds = static_cast<double>(ts2::platform::ticksNs()) / 1e9;
         for (const auto& [cx, cy, kind] : options_.uiClicks) {
             if (kind == 2) {
                 screen_.mouse(cx, cy, false, nowSeconds - 1);
@@ -1746,10 +1745,16 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
     ts2::diag::info(std::format("{} UI and text packages, {} font faces", data.packageCount(), fonts.faceCount()));
 
     const int width = options.width, height = options.height;
-    SDL_Window* window = nullptr;
+    pf::WindowOptions windowOptions;
+    windowOptions.title = "NeoTS2";
+    windowOptions.width = width;
+    windowOptions.height = height;
+    windowOptions.resizable = false;
+    windowOptions.highDensity = false;
+    windowOptions.hidden = !options.shot.empty();
+    std::unique_ptr<pf::Window> window;
     {
-        const auto rendererOwner = app::openRenderer(window, options.backend, width, height, options.shot.empty() ? 0 : SDL_WINDOW_HIDDEN, shaders,
-                                                     !options.shot.empty());
+        const auto rendererOwner = app::openRenderer(window, options.backend, windowOptions, shaders, !options.shot.empty());
         ts2::render::IRenderer& renderer = *rendererOwner;
         renderer.setBumpMapping(options.bumpMapping);
         renderer.setFloorAndWallNormalMapping(options.wallBumps);
@@ -1762,13 +1767,12 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
             game.run();
             // Loads still running are waited for as the game goes. The window goes first so that
             // quitting doesn't look frozen meanwhile. Normal closing takes a second or two.
-            SDL_HideWindow(window);
+            window->hide();
             app::crash::watchClosing(kMaxClosingSeconds);
             if (ts2::diag::timingsOn()) {
                 ts2::diag::info("timings:\n" + ts2::diag::takeTimings());
             }
         }
     }
-    SDL_DestroyWindow(window);
     return 0;
 }

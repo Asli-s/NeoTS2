@@ -3,8 +3,6 @@
 #include "diag/log.hpp"
 #include "diag/timing.hpp"
 
-#include <SDL3/SDL.h>
-
 #include <algorithm>
 #include <format>
 #include <stdexcept>
@@ -12,20 +10,20 @@
 
 namespace ts2::render {
 
-GlRenderer::GlRenderer(SDL_Window* window, const std::filesystem::path& shaderFolder) : window_(window) {
-    context_ = SDL_GL_CreateContext(window_);
+GlRenderer::GlRenderer(platform::Window& window, const std::filesystem::path& shaderFolder) : window_(&window) {
+    context_ = window_->createGlContext();
     if (context_ == nullptr) {
-        diag::error(std::string("no OpenGL context: ") + SDL_GetError());
+        diag::error(std::string("no OpenGL context: ") + platform::lastError());
         throw std::runtime_error(
             "NeoTS2 needs a graphics card and driver that support OpenGL 2.1, and none was found.\n\n"
             "Update your graphics driver and try again.");
     }
     // The destructor doesn't run when the constructor throws, so what was made is released here.
     try {
-        SDL_GL_MakeCurrent(window_, context_);
+        window_->makeCurrent(context_.get());
         drawingThread_ = std::this_thread::get_id();
         // Presented with the display, as the SDL GPU renderer's swapchain is.
-        SDL_GL_SetSwapInterval(1);
+        window_->setSwapInterval(1);
         const char* missing = nullptr;
         if (!gl_.load(missing)) {
             throw std::runtime_error(std::string("this OpenGL driver lacks ") + missing);
@@ -56,8 +54,7 @@ GlRenderer::GlRenderer(SDL_Window* window, const std::filesystem::path& shaderFo
                                  : "OpenGL: scenes are uploaded on other threads in contexts that share objects");
     } catch (...) {
         destroySharedContexts();
-        SDL_GL_DestroyContext(context_);
-        context_ = nullptr;
+        context_.reset();
         throw;
     }
 }
@@ -66,9 +63,9 @@ GlRenderer::~GlRenderer() {
     if (context_ == nullptr) {
         return;
     }
-    SDL_GL_MakeCurrent(window_, context_);
+    window_->makeCurrent(context_.get());
     destroySharedContexts();
-    SDL_GL_MakeCurrent(window_, context_);
+    window_->makeCurrent(context_.get());
     gpu_->release(*graveyard_);
     releaseSprites();
     releaseTarget();
@@ -82,7 +79,7 @@ GlRenderer::~GlRenderer() {
             gl_.DeleteProgram(p->id);
         }
     }
-    SDL_GL_DestroyContext(context_);
+    context_.reset();
 }
 
 Capabilities GlRenderer::capabilities() const {
@@ -113,13 +110,13 @@ void GlRenderer::bindWindow() {
 
 bool GlRenderer::draw(const Camera& camera) {
     int width = 0, height = 0;
-    SDL_GetWindowSizeInPixels(window_, &width, &height);
-    if (width <= 0 || height <= 0 || (SDL_GetWindowFlags(window_) & SDL_WINDOW_MINIMIZED)) {
+    window_->sizeInPixels(width, height);
+    if (width <= 0 || height <= 0 || window_->minimized()) {
         return false;
     }
     bindWindow();
     const bool drawn = render(static_cast<unsigned>(width), static_cast<unsigned>(height), camera);
-    SDL_GL_SwapWindow(window_);
+    window_->swapBuffers();
     return drawn;
 }
 
@@ -176,7 +173,7 @@ bool GlRenderer::drawOffscreen(const Camera& camera, unsigned width, unsigned he
         // With no framebuffer objects the picture is drawn in a corner of the window's back buffer, which
         // the next frame draws over. It can't be larger than the window.
         int windowWidth = 0, windowHeight = 0;
-        SDL_GetWindowSizeInPixels(window_, &windowWidth, &windowHeight);
+        window_->sizeInPixels(windowWidth, windowHeight);
         if (width == 0 || height == 0 || width > static_cast<unsigned>(windowWidth) || height > static_cast<unsigned>(windowHeight) ||
             !render(width, height, camera)) {
             return false;
@@ -205,11 +202,7 @@ bool GlRenderer::drawToFile(const Camera& camera, unsigned width, unsigned heigh
     if (!drawOffscreen(camera, width, height, image)) {
         return false;
     }
-    SDL_Surface* surface = SDL_CreateSurfaceFrom(static_cast<int>(width), static_cast<int>(height), SDL_PIXELFORMAT_RGBA32, image.rgba.data(),
-                                                 static_cast<int>(width * 4));
-    const bool saved = surface != nullptr && SDL_SavePNG(surface, path.string().c_str());
-    SDL_DestroySurface(surface);
-    return saved;
+    return platform::savePng(path, image.rgba.data(), width, height);
 }
 
 std::optional<scene::Image> GlRenderer::drawInstancesToImage(const Camera& camera, unsigned width, unsigned height,

@@ -5,7 +5,7 @@
 #include "scene/hood_drift.hpp"
 #include "scene/neighborhood_scene.hpp"
 
-#include <SDL3/SDL.h>
+#include "platform/platform.hpp"
 
 #include <algorithm>
 #include <array>
@@ -215,33 +215,35 @@ struct Orbit {
 
 // Turns, pans and zooms the camera for a mouse event: middle-drag turns, right-drag pans (a camera
 // with a goal scrolls by its drag speed instead), the wheel zooms. Returns whether the event was used.
-inline bool orbitEvent(Orbit& orbit, const SDL_Event& e) {
-    if (e.type == SDL_EVENT_MOUSE_MOTION) {
-        if ((e.motion.state & SDL_BUTTON_MMASK) && orbit.goal) {
+inline bool orbitEvent(Orbit& orbit, const ts2::platform::Event& e) {
+    using ts2::platform::Event;
+    using ts2::platform::MouseButton;
+    if (e.type == Event::Type::MouseMotion) {
+        if (e.held(MouseButton::Middle) && orbit.goal) {
             return true;  // the drag's movement is added to turnMove by whoever holds the pointer
         }
-        if (e.motion.state & SDL_BUTTON_MMASK) {
-            orbit.yaw -= e.motion.xrel * 0.005f;
+        if (e.held(MouseButton::Middle)) {
+            orbit.yaw -= e.xrel * 0.005f;
             orbit.yawGoal = orbit.yaw;
             if (!orbit.rig) {
-                orbit.pitch = std::clamp(orbit.pitch + e.motion.yrel * 0.005f, 0.05f, 1.55f);
+                orbit.pitch = std::clamp(orbit.pitch + e.yrel * 0.005f, 0.05f, 1.55f);
             }
             return true;
         }
-        if ((e.motion.state & SDL_BUTTON_RMASK) && !orbit.goal) {
+        if (e.held(MouseButton::Right) && !orbit.goal) {
             // Drag the ground along, scaled to how far away the camera is.
             const float s = orbit.distance * 0.0015f;
-            orbit.pan(-e.motion.xrel * s, e.motion.yrel * s);
+            orbit.pan(-e.xrel * s, e.yrel * s);
             return true;
         }
-    } else if (e.type == SDL_EVENT_MOUSE_WHEEL && orbit.goal) {
+    } else if (e.type == Event::Type::MouseWheel && orbit.goal) {
         // As the game's lot camera: each notch moves the zoom goal by a tenth of the distance plus
         // 10 (the camera file's wheel scaling, 5, times 0.02), within the zoom levels.
         const float z = orbit.distanceGoal;
-        orbit.distanceGoal = std::clamp(z - (z + 10) * e.wheel.y * 5 * 0.02f, orbit.minDistance, orbit.maxDistance);
+        orbit.distanceGoal = std::clamp(z - (z + 10) * e.wheel * 5 * 0.02f, orbit.minDistance, orbit.maxDistance);
         return true;
-    } else if (e.type == SDL_EVENT_MOUSE_WHEEL) {
-        orbit.zoomTo(orbit.distance * std::pow(0.9f, e.wheel.y));
+    } else if (e.type == Event::Type::MouseWheel) {
+        orbit.zoomTo(orbit.distance * std::pow(0.9f, e.wheel));
         return true;
     }
     return false;
@@ -250,10 +252,11 @@ inline bool orbitEvent(Orbit& orbit, const SDL_Event& e) {
 // One step of a camera with a goal, `ms` milliseconds long, as the game's lot camera steps: the
 // keys, the drag's turn, then everything easing toward its goal.
 inline void orbitGameStep(Orbit& orbit, unsigned ms, int width, int height) {
-    const bool* keys = SDL_GetKeyboardState(nullptr);
-    const auto held = [&](SDL_Scancode a, SDL_Scancode b) { return orbit.keysOn && (keys[a] || keys[b]); };
-    const int right = held(SDL_SCANCODE_D, SDL_SCANCODE_RIGHT) - held(SDL_SCANCODE_A, SDL_SCANCODE_LEFT);
-    const int down = held(SDL_SCANCODE_S, SDL_SCANCODE_DOWN) - held(SDL_SCANCODE_W, SDL_SCANCODE_UP);
+    using ts2::platform::Key;
+    using ts2::platform::keyHeld;
+    const auto held = [&](Key a, Key b) { return orbit.keysOn && (keyHeld(a) || keyHeld(b)); };
+    const int right = held(Key::D, Key::Right) - held(Key::A, Key::Left);
+    const int down = held(Key::S, Key::Down) - held(Key::W, Key::Up);
     easeToward(orbit.keyOffset, {static_cast<float>(right) * orbit.keySpeed, static_cast<float>(down) * orbit.keySpeed, 0}, ms, orbit.keyPeriod,
                orbit.keyMinChange);
     if (orbit.keyOffset[0] != 0 || orbit.keyOffset[1] != 0) {
@@ -263,8 +266,8 @@ inline void orbitGameStep(Orbit& orbit, unsigned ms, int width, int height) {
         orbit.dragSpeed = {0, 0};
         orbit.keyScrolling = false;
     }
-    const int zoom = !orbit.keysOn ? 0 : (keys[SDL_SCANCODE_X] || keys[SDL_SCANCODE_MINUS] || keys[SDL_SCANCODE_KP_MINUS]) -
-                     (keys[SDL_SCANCODE_Z] || keys[SDL_SCANCODE_EQUALS] || keys[SDL_SCANCODE_KP_PLUS]);
+    const int zoom = !orbit.keysOn ? 0 : (keyHeld(Key::X) || keyHeld(Key::Minus) || keyHeld(Key::PadMinus)) -
+                     (keyHeld(Key::Z) || keyHeld(Key::Equals) || keyHeld(Key::PadPlus));
     if (zoom != 0) {
         // The game's zoom keys are not known yet. These move the goal the eased zoom follows.
         orbit.distanceGoal = std::clamp(orbit.distanceGoal * std::exp(static_cast<float>(zoom) * 1.5f * static_cast<float>(ms) / 1000),
@@ -328,13 +331,14 @@ inline void orbitStep(Orbit& orbit, float dt, int width = 0, int height = 0, con
         orbit.between = orbit.stepTime / kStep;
         return;
     }
-    const bool* keys = SDL_GetKeyboardState(nullptr);
+    using ts2::platform::Key;
+    using ts2::platform::keyHeld;
     const float step = orbit.distance * 0.8f * dt;
-    const int right = (keys[SDL_SCANCODE_D] || keys[SDL_SCANCODE_RIGHT]) - (keys[SDL_SCANCODE_A] || keys[SDL_SCANCODE_LEFT]);
-    const int up = (keys[SDL_SCANCODE_W] || keys[SDL_SCANCODE_UP]) - (keys[SDL_SCANCODE_S] || keys[SDL_SCANCODE_DOWN]);
+    const int right = (keyHeld(Key::D) || keyHeld(Key::Right)) - (keyHeld(Key::A) || keyHeld(Key::Left));
+    const int up = (keyHeld(Key::W) || keyHeld(Key::Up)) - (keyHeld(Key::S) || keyHeld(Key::Down));
     orbit.pan(static_cast<float>(right) * step, static_cast<float>(up) * step);
-    const int zoom = (keys[SDL_SCANCODE_X] || keys[SDL_SCANCODE_MINUS] || keys[SDL_SCANCODE_KP_MINUS]) -
-                     (keys[SDL_SCANCODE_Z] || keys[SDL_SCANCODE_EQUALS] || keys[SDL_SCANCODE_KP_PLUS]);
+    const int zoom = (keyHeld(Key::X) || keyHeld(Key::Minus) || keyHeld(Key::PadMinus)) -
+                     (keyHeld(Key::Z) || keyHeld(Key::Equals) || keyHeld(Key::PadPlus));
     if (zoom != 0) {
         orbit.zoomTo(orbit.distance * std::exp(static_cast<float>(zoom) * 1.5f * dt));
     }

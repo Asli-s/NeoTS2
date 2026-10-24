@@ -1,5 +1,6 @@
 #pragma once
 
+#include "platform/platform.hpp"
 #include "render/frame_plan.hpp"
 #include "render/gl/gl_api.hpp"
 #include "render/irenderer.hpp"
@@ -22,9 +23,6 @@
 #include <utility>
 #include <vector>
 
-struct SDL_Window;
-typedef struct SDL_GLContextState* SDL_GLContext;
-
 namespace ts2::render {
 
 // Draws a Scene with OpenGL 2.1 (and a few common extensions), for systems that have no more.
@@ -36,7 +34,7 @@ namespace ts2::render {
 // upload and swap() uploads it. Everything else that touches the GPU is on the drawing thread.
 class GlRenderer final : public RendererState, private ResourceQuery {
 public:
-    GlRenderer(SDL_Window* window, const std::filesystem::path& shaderFolder);
+    GlRenderer(platform::Window& window, const std::filesystem::path& shaderFolder);
     ~GlRenderer() override;
 
     using IRenderer::upload;
@@ -165,7 +163,7 @@ private:
 
     // Contexts sharing objects with the drawing one, for prepare() to upload in on other threads.
     struct SharedContext {
-        SDL_GLContext context = nullptr;
+        platform::GlContextPtr context;
         bool busy = false;
     };
     void makeSharedContexts(unsigned count);
@@ -235,8 +233,8 @@ private:
     void invalidateState();
     void releaseTarget();
 
-    SDL_Window* window_ = nullptr;
-    SDL_GLContext context_ = nullptr;
+    platform::Window* window_ = nullptr;
+    platform::GlContextPtr context_;
     std::thread::id drawingThread_;
     mutable std::mutex poolLock_;
     mutable std::condition_variable poolFree_;

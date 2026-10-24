@@ -449,21 +449,71 @@ else()
     add_executable(fuzzseeds tools/fuzzseeds/main.cpp)
     target_link_libraries(fuzzseeds PRIVATE ts2formats project_warnings)
 
-    # The renderer and the game app need SDL3 (set SDL3_DIR to its cmake folder) and a shader
-    # compiler for HLSL (dxc, from the Windows SDK on Windows). Windows draws with Direct3D 12 and
-    # DXIL shaders, other systems with Vulkan and SPIR-V shaders, which need a dxc built with SPIR-V.
+    # The renderer and the game app need a window, the keyboard and mouse and an OpenGL context from
+    # SDL 3 (set SDL3_DIR to its cmake folder), or from SDL 1.2 where there is no SDL 3 (Mac OS X 10.4 and
+    # 10.5 on PowerPC). NEOTS2_PLATFORM picks: sdl3, sdl12, or auto, which takes SDL 3 when it is there.
+    # SDL 1.2 has the OpenGL 2 renderer only (the SDL GPU renderer needs SDL 3).
+    # They also need a shader compiler for HLSL (dxc, from the Windows SDK on Windows). Windows draws with
+    # Direct3D 12 and DXIL shaders, other systems with Vulkan and SPIR-V shaders, which need a dxc built with SPIR-V.
+    set(NEOTS2_PLATFORM auto CACHE STRING "Where the window and input come from: sdl3, sdl12 or auto")
+    set_property(CACHE NEOTS2_PLATFORM PROPERTY STRINGS auto sdl3 sdl12)
     find_package(SDL3 CONFIG QUIET)
+    set(platform_name "")
+    if(NEOTS2_PLATFORM STREQUAL "sdl3" OR NEOTS2_PLATFORM STREQUAL "auto")
+        if(SDL3_FOUND)
+            set(platform_name sdl3)
+        endif()
+    endif()
+    if(NOT platform_name AND (NEOTS2_PLATFORM STREQUAL "sdl12" OR NEOTS2_PLATFORM STREQUAL "auto"))
+        # SDL 1.2 has no CMake package: its header, library and the main() it starts a Mac program from.
+        find_path(NEOTS2_SDL12_INCLUDE_DIR SDL.h PATH_SUFFIXES SDL)
+        find_library(NEOTS2_SDL12_LIBRARY NAMES SDL)
+        find_library(NEOTS2_SDL12_MAIN_LIBRARY NAMES SDLmain)
+        if(NEOTS2_SDL12_INCLUDE_DIR AND NEOTS2_SDL12_LIBRARY)
+            set(platform_name sdl12)
+        endif()
+    endif()
     find_program(NEOTS2_DXC dxc)
     if(NOT NEOTS2_DXC AND WIN32)
         file(GLOB sdk_dxc "C:/Program Files (x86)/Windows Kits/10/bin/10.*/x64/dxc.exe")
         list(SORT sdk_dxc ORDER DESCENDING)
         list(GET sdk_dxc 0 NEOTS2_DXC)
     endif()
-    if(SDL3_FOUND AND NEOTS2_DXC)
+    if(platform_name AND NEOTS2_DXC)
+        add_library(ts2platform src/platform/time.cpp)
+        target_include_directories(ts2platform PUBLIC src)
+        if(platform_name STREQUAL "sdl3")
+            target_sources(ts2platform PRIVATE src/platform/sdl3/platform_sdl3.cpp)
+            target_link_libraries(ts2platform PUBLIC SDL3::SDL3 PRIVATE project_warnings)
+            target_compile_definitions(ts2platform PUBLIC NEOTS2_PLATFORM_SDL3=1)
+        else()
+            target_sources(ts2platform PRIVATE src/platform/sdl12/platform_sdl12.cpp src/platform/sdl12/png.cpp src/platform/sdl12/system_unix.cpp)
+            target_include_directories(ts2platform PUBLIC ${NEOTS2_SDL12_INCLUDE_DIR})
+            # SDLmain goes before SDL itself: it holds the main() that starts the program (a Mac program must be started through it).
+            set(sdl12_libraries ${NEOTS2_SDL12_LIBRARY})
+            if(NEOTS2_SDL12_MAIN_LIBRARY)
+                set(sdl12_libraries ${NEOTS2_SDL12_MAIN_LIBRARY} ${NEOTS2_SDL12_LIBRARY})
+            endif()
+            target_link_libraries(ts2platform PUBLIC ${sdl12_libraries} PRIVATE project_warnings)
+            if(APPLE)
+                # What a static SDL 1.2 needs of the system (sdl-config --static-libs).
+                target_link_libraries(ts2platform PUBLIC "-framework Cocoa" "-framework OpenGL" "-framework ApplicationServices"
+                                      "-framework Carbon" "-framework AudioToolbox" "-framework AudioUnit" "-framework CoreAudio"
+                                      "-framework CoreFoundation" "-framework IOKit")
+            endif()
+            target_compile_definitions(ts2platform PUBLIC NEOTS2_PLATFORM_SDL12=1)
+        endif()
+        message(STATUS "Window and input from ${platform_name}")
+        set(sdlgpu_enabled OFF)
+        if(platform_name STREQUAL "sdl3")
+            set(sdlgpu_enabled ON)
+        endif()
+
         set(shader_dir ${CMAKE_CURRENT_BINARY_DIR}/shaders)
         set(shader_outputs)
         # The shaders the OpenGL 2 renderer draws with (skinned ones are posed on the CPU there).
         set(gl2_shaders scene.vert scene.frag ui.vert ui.frag terrain.vert terrain.frag sky.vert sky.frag road.vert road.frag imposter.vert imposter.frag clip.vert clip.frag water.vert water.frag)
+        if(sdlgpu_enabled)
         foreach(shader scene.vert skinned.vert scene.frag ui.vert ui.frag terrain.vert terrain.frag sky.vert sky.frag water.vert water.frag road.vert road.frag imposter.vert imposter.frag clip.vert clip.frag)
             if(shader MATCHES "vert$")
                 set(profile vs_6_0)
@@ -487,6 +537,7 @@ else()
             list(APPEND shader_outputs ${output})
         endforeach()
         add_custom_target(neots2_shaders DEPENDS ${shader_outputs})
+        endif()
 
         # The OpenGL 2 renderer (for systems with no more) draws with GLSL 1.20 made from the same HLSL,
         # which needs SPIRV-Cross (the spirv-cross tool, from the Vulkan SDK or a package) and a dxc built with SPIR-V.
@@ -522,14 +573,22 @@ else()
         elseif(NEOTS2_GL2)
             message(STATUS "spirv-cross not found: the OpenGL 2 renderer is not built")
         endif()
+        if(NOT sdlgpu_enabled AND NOT gl2_enabled)
+            message(FATAL_ERROR "With ${platform_name} the game draws with the OpenGL 2 renderer, which needs spirv-cross (set NEOTS2_SPIRV_CROSS) and NEOTS2_GL2 on")
+        endif()
 
-        add_library(ts2render src/render/renderer.cpp src/render/renderer_pipelines.cpp src/render/renderer_scene.cpp
-                    src/render/renderer_upload.cpp src/render/renderer_draw.cpp src/render/make_renderer.cpp)
-        target_link_libraries(ts2render PUBLIC ts2renderplan SDL3::SDL3 PRIVATE project_warnings)
+        add_library(ts2render src/render/make_renderer.cpp)
+        target_link_libraries(ts2render PUBLIC ts2renderplan ts2platform PRIVATE project_warnings)
+        if(sdlgpu_enabled)
+            target_sources(ts2render PRIVATE src/render/renderer.cpp src/render/renderer_pipelines.cpp src/render/renderer_scene.cpp
+                           src/render/renderer_upload.cpp src/render/renderer_draw.cpp)
+            target_link_libraries(ts2render PUBLIC SDL3::SDL3)
+            target_compile_definitions(ts2render PUBLIC NEOTS2_SDLGPU=1)
+        endif()
         if(gl2_enabled)
             add_library(ts2render_gl src/render/gl/gl_api.cpp src/render/gl/gl_renderer.cpp src/render/gl/gl_shaders.cpp
                         src/render/gl/gl_upload.cpp src/render/gl/gl_draw.cpp src/render/gl/gl_terrain.cpp)
-            target_link_libraries(ts2render_gl PUBLIC ts2renderplan SDL3::SDL3 PRIVATE project_warnings)
+            target_link_libraries(ts2render_gl PUBLIC ts2renderplan ts2platform PRIVATE project_warnings)
             target_link_libraries(ts2render PUBLIC ts2render_gl)
             target_compile_definitions(ts2render PUBLIC NEOTS2_GL2=1)
         endif()
@@ -553,7 +612,10 @@ else()
         add_executable(neots2 app/main.cpp app/menu.cpp app/neighborhood.cpp app/neighborhood_ui.cpp app/lot_life.cpp app/object_materials.cpp app/lot_light.cpp app/lot_daylight.cpp app/route_sources.cpp app/lot_ui.cpp app/live_panel.cpp app/job_panel.cpp app/memories_page.cpp app/age_meter.cpp app/queue_panel.cpp app/pie_menu_ui.cpp app/mood_meter.cpp app/aspiration_bars.cpp app/pause_frame.cpp app/needs_panel.cpp app/personality_page.cpp app/relationships_panel.cpp app/rewards_panel.cpp app/simology_panel.cpp app/skewer.cpp app/wants_panel.cpp app/portraits.cpp app/cursors.cpp
                        app/diagnostics.cpp app/crash_handler.cpp app/crash_dialog.cpp app/unexpected_exit.cpp app/report_upload.cpp app/message_box.cpp app/open_renderer.cpp)
         target_link_libraries(neots2 PRIVATE ts2render ts2ui ts2sim ts2diag project_warnings)
-        add_dependencies(neots2 neots2_shaders neots2_version)
+        add_dependencies(neots2 neots2_version)
+        if(sdlgpu_enabled)
+            add_dependencies(neots2 neots2_shaders)
+        endif()
         if(gl2_enabled)
             add_dependencies(neots2 neots2_gl_shaders)
         endif()
@@ -575,14 +637,21 @@ else()
         if(WIN32)
             target_sources(neots2 PRIVATE app/icon/neots2.rc)
         endif()
-        # The app loads its shaders and SDL from beside itself.
+        # The app loads its shaders and SDL from beside itself (SDL 1.2 is linked in).
         add_custom_command(TARGET neots2 POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_directory ${shader_dir} $<TARGET_FILE_DIR:neots2>/shaders
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:neots2>)
+            COMMAND ${CMAKE_COMMAND} -E copy_directory ${shader_dir} $<TARGET_FILE_DIR:neots2>/shaders)
+        if(platform_name STREQUAL "sdl3")
+            add_custom_command(TARGET neots2 POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3> $<TARGET_FILE_DIR:neots2>)
+        endif()
 
         # Every header compiles on its own (it includes what it uses), so any of them can be included
         # first. Built on request: cmake --build build --config Release --target header_check
         file(GLOB_RECURSE all_headers CONFIGURE_DEPENDS src/*.hpp app/*.hpp)
+        # What is for SDL 3 only (the SDL GPU renderer, the launcher) can't be included where it isn't.
+        if(NOT platform_name STREQUAL "sdl3")
+            list(FILTER all_headers EXCLUDE REGEX "/(src/platform/sdl3/|src/render/renderer(_internals)?\\.hpp$|app/launcher/)")
+        endif()
         set(header_sources "")
         foreach(header ${all_headers})
             file(RELATIVE_PATH name ${CMAKE_SOURCE_DIR} ${header})

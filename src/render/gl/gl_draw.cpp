@@ -1,8 +1,6 @@
 #include "diag/timing.hpp"
 #include "render/gl/gl_renderer.hpp"
 
-#include <SDL3/SDL.h>
-
 #include <algorithm>
 #include <cmath>
 #include <cstring>
