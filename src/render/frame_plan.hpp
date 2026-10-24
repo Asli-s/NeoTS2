@@ -67,7 +67,8 @@ static_assert(sizeof(FragmentUniforms) % 16 == 0 && offsetof(FragmentUniforms, l
 // A neighborhood's painted terrain (see scene::PaintedTerrain).
 struct TerrainUniforms {
     float alphaSize, textureRepeat, cellTiles, layers, cellsX, cellsY, lightMapScale, litFrom;
-    float gradientDepth, reflected, padding[2];
+    float gradientDepth, reflected;
+    float slice, passAlpha;  // OpenGL 2 draws a pass per paint texture (see terrain.frag.hlsl); unused elsewhere
 };
 
 struct WaterUniforms {
@@ -136,6 +137,10 @@ struct FrameView {
 
     static FrameView make(const Camera& camera, unsigned width, unsigned height);
 };
+
+// What the sky shader is given: the camera's right and up (scaled to the field of view) and forward,
+// forward's w being `up`: 1, or -1 for the rays mirrored in the water.
+std::array<float, 12> skyCamera(const FrameView& f, float up);
 
 // A primitive to draw, with what its draw needs.
 struct Draw {

@@ -41,6 +41,9 @@ GlRenderer::GlRenderer(SDL_Window* window, const std::filesystem::path& shaderFo
         version_ = text(GL_VERSION);
         gl_.GenBuffers(1, &streamVertices_);
         gl_.GenBuffers(1, &spriteVertices_);
+        // The sky is one triangle covering the screen, corners (0,0) (2,0) (0,2).
+        const float corners[6] = {0, 0, 2, 0, 0, 2};
+        skyVertices_ = uploadBuffer(GL_ARRAY_BUFFER, corners, sizeof(corners));
         invalidateState();
         makePrograms(shaderFolder);
         gpu_->white = uploadTexture({1, 1, {255, 255, 255, 255}, {}}, false);
@@ -63,7 +66,8 @@ GlRenderer::~GlRenderer() {
     collectGarbage();
     releaseBuffer(streamVertices_);
     releaseBuffer(spriteVertices_);
-    for (const Program* p : {&scene_, &ui_}) {
+    releaseBuffer(skyVertices_);
+    for (const Program* p : {&scene_, &ui_, &terrain_, &road_, &imposter_, &sky_, &clip_}) {
         if (p->id != 0) {
             gl_.DeleteProgram(p->id);
         }
@@ -74,7 +78,6 @@ GlRenderer::~GlRenderer() {
 Capabilities GlRenderer::capabilities() const {
     Capabilities c;
     c.waterReflection = false;
-    c.terrainLayers = false;
     c.gpuSkinning = false;
     c.anisotropic = gl_.anisotropy;
     c.threadedPrepare = false;

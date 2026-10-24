@@ -1,5 +1,6 @@
 #include "render/image_levels.hpp"
 #include "render/renderer.hpp"
+#include "render/terrain_mesh.hpp"
 #include "render/renderer_internals.hpp"
 
 #include "diag/log.hpp"
@@ -421,37 +422,12 @@ void SdlGpuRenderer::SceneGpu::uploadMeshes(Copy& c, const scene::Scene& scene) 
 
 // The neighborhood terrain's grid of points and its tiles.
 void SdlGpuRenderer::SceneGpu::uploadTerrainGrid(Copy& c, const scene::PaintedTerrain& t) {
-    // Vertices: position, normal, grid position.
-    std::vector<float> v(static_cast<std::size_t>(t.columns) * t.rows * 8);
-    for (std::uint32_t y = 0; y < t.rows; ++y) {
-        for (std::uint32_t x = 0; x < t.columns; ++x) {
-            const std::size_t i = static_cast<std::size_t>(y) * t.columns + x;
-            float* p = &v[i * 8];
-            p[0] = static_cast<float>(x) * t.tileSize;
-            p[1] = static_cast<float>(y) * t.tileSize;
-            p[2] = t.heights[i];
-            std::copy_n(&t.normals[i * 3], 3, p + 3);
-            p[6] = static_cast<float>(x);
-            p[7] = static_cast<float>(y);
-        }
+    const IndexedMesh m = terrainGrid(t);
+    terrainVertices = c.buffer(SDL_GPU_BUFFERUSAGE_VERTEX, m.vertices.data(), static_cast<Uint32>(m.vertices.size() * sizeof(float)));
+    if (!m.indices.empty()) {  // every tile can be hidden (a lot's own ground stands in for it)
+        terrainIndices = c.buffer(SDL_GPU_BUFFERUSAGE_INDEX, m.indices.data(), static_cast<Uint32>(m.indices.size() * sizeof(std::uint32_t)));
     }
-    // Two triangles per tile, split from its (x, y) corner to its (x + 1, y + 1) corner.
-    std::vector<std::uint32_t> idx;
-    idx.reserve(static_cast<std::size_t>(t.columns - 1) * (t.rows - 1) * 6);
-    for (std::uint32_t y = 0; y + 1 < t.rows; ++y) {
-        for (std::uint32_t x = 0; x + 1 < t.columns; ++x) {
-            const std::uint32_t a = y * t.columns + x, b = a + 1, d = a + t.columns, e = d + 1;
-            if (!t.hiddenTiles.empty() && t.hiddenTiles[static_cast<std::size_t>(y) * (t.columns - 1) + x]) {
-                continue;
-            }
-            idx.insert(idx.end(), {a, b, e, a, e, d});
-        }
-    }
-    terrainVertices = c.buffer(SDL_GPU_BUFFERUSAGE_VERTEX, v.data(), static_cast<Uint32>(v.size() * sizeof(float)));
-    if (!idx.empty()) {  // every tile can be hidden (a lot's own ground stands in for it)
-        terrainIndices = c.buffer(SDL_GPU_BUFFERUSAGE_INDEX, idx.data(), static_cast<Uint32>(idx.size() * sizeof(std::uint32_t)));
-    }
-    terrainIndexCount = static_cast<unsigned>(idx.size());
+    terrainIndexCount = static_cast<unsigned>(m.indices.size());
 }
 
 // The terrain's paints, where each shows, its light map and its underwater gradient.
@@ -486,27 +462,16 @@ void SdlGpuRenderer::SceneGpu::uploadTerrainTextures(Copy& c, const scene::Paint
                            [&](Uint32) { return light.rgba.data(); });
     terrainUniforms = {static_cast<float>(t.alphaSize), t.textureRepeat, static_cast<float>(t.cellTiles), static_cast<float>(paints),
                        static_cast<float>(t.cellsX), static_cast<float>(t.cellsY), t.lightMap.width ? t.lightMapScale : 1.0f, t.litFrom,
-                       t.gradientDepth, 0, {0, 0}};
+                       t.gradientDepth, 0, 0, 0};
     terrainGradient = c.plain(t.underwaterGradient.width ? t.underwaterGradient : c.whiteImage, false);
 }
 
 // The water sheet: a quad per wet tile at the water level, texture coordinates in tiles, with its
 // ripples and the sky it reflects.
 void SdlGpuRenderer::SceneGpu::uploadWater(Copy& c, const scene::PaintedTerrain& t) {
-    std::vector<float> wv;
-    std::vector<std::uint32_t> wi;
-    const std::uint32_t tilesX = t.columns - 1;
-    for (std::size_t i = 0; i < t.waterTiles.size(); ++i) {
-        if (!t.waterTiles[i] || (!t.hiddenTiles.empty() && t.hiddenTiles[i])) {
-            continue;
-        }
-        const auto x = static_cast<float>(i % tilesX), y = static_cast<float>(i / tilesX);
-        const auto base = static_cast<std::uint32_t>(wv.size() / 5);
-        for (const auto [cx, cy] : {std::pair{x, y}, std::pair{x + 1, y}, std::pair{x + 1, y + 1}, std::pair{x, y + 1}}) {
-            wv.insert(wv.end(), {cx * t.tileSize, cy * t.tileSize, t.waterLevel, cx, cy});
-        }
-        wi.insert(wi.end(), {base, base + 1, base + 2, base, base + 2, base + 3});
-    }
+    const IndexedMesh water = waterSheet(t);
+    const auto& wv = water.vertices;
+    const auto& wi = water.indices;
     if (wi.empty() || t.sky.size() != 6 || !t.ripples.width) {
         return;
     }
@@ -547,17 +512,9 @@ void SdlGpuRenderer::SceneGpu::uploadWater(Copy& c, const scene::PaintedTerrain&
 
 // The roads: a quad per tile, split like the terrain's tiles.
 void SdlGpuRenderer::SceneGpu::uploadRoads(Copy& c, const scene::PaintedTerrain& t) {
-    std::vector<float> rv;
-    std::vector<std::uint32_t> ri;
-    rv.reserve(t.roads.size() * 24);
-    ri.reserve(t.roads.size() * 6);
-    for (const auto& road : t.roads) {
-        const auto base = static_cast<std::uint32_t>(rv.size() / 6);
-        for (const auto& corner : road.corners) {
-            rv.insert(rv.end(), {corner[0], corner[1], corner[2], corner[3], corner[4], static_cast<float>(road.texture)});
-        }
-        ri.insert(ri.end(), {base, base + 2, base + 1, base, base + 3, base + 2});
-    }
+    const IndexedMesh roads = roadQuads(t).mesh;
+    const auto& rv = roads.vertices;
+    const auto& ri = roads.indices;
     roadVertices = c.buffer(SDL_GPU_BUFFERUSAGE_VERTEX, rv.data(), static_cast<Uint32>(rv.size() * sizeof(float)));
     roadIndices = c.buffer(SDL_GPU_BUFFERUSAGE_INDEX, ri.data(), static_cast<Uint32>(ri.size() * sizeof(std::uint32_t)));
     roadIndexCount = static_cast<unsigned>(ri.size());
@@ -576,22 +533,17 @@ void SdlGpuRenderer::SceneGpu::uploadImposters(Copy& c, const scene::PaintedTerr
     for (const auto& image : t.imposterTextures) {
         imposterTextures.push_back(c.plain(image, false));
     }
-    std::vector<float> iv;
-    std::vector<std::uint32_t> ii;
-    for (const auto& part : t.imposters) {
-        if (part.texture >= imposterTextures.size()) {
-            continue;
-        }
+    const ImposterMesh parts = imposterParts(t);
+    const auto& iv = parts.mesh.vertices;
+    const auto& ii = parts.mesh.indices;
+    for (const auto& part : parts.draws) {
         ImposterDraw draw{part.kind};
         draw.texture = imposterTextures[part.texture];
-        const auto lightMap = static_cast<std::size_t>(part.lightMap);
-        draw.lightMap = part.lightMap >= 0 && lightMap < imposterTextures.size() ? imposterTextures[lightMap] : nullptr;
-        std::copy_n(part.lightMapTint.data(), 3, draw.tint);
-        draw.firstIndex = static_cast<std::uint32_t>(ii.size());
-        draw.indexCount = static_cast<std::uint32_t>(part.indices.size());
-        draw.vertexOffset = static_cast<std::int32_t>(iv.size() / 7);
-        iv.insert(iv.end(), part.vertices.begin(), part.vertices.end());
-        ii.insert(ii.end(), part.indices.begin(), part.indices.end());
+        draw.lightMap = part.lightMap >= 0 ? imposterTextures[static_cast<std::size_t>(part.lightMap)] : nullptr;
+        std::copy(part.tint.begin(), part.tint.end(), draw.tint);
+        draw.firstIndex = part.firstIndex;
+        draw.indexCount = part.indexCount;
+        draw.vertexOffset = part.vertexOffset;
         imposterDraws.push_back(draw);
     }
     imposterVertices = c.buffer(SDL_GPU_BUFFERUSAGE_VERTEX, iv.data(), static_cast<Uint32>(iv.size() * sizeof(float)));
@@ -600,17 +552,9 @@ void SdlGpuRenderer::SceneGpu::uploadImposters(Copy& c, const scene::PaintedTerr
 
 // A lot skirt's boundary curtain: a wall on each edge, facing inwards.
 void SdlGpuRenderer::SceneGpu::uploadBoundary(Copy& c, const scene::Scene& scene) {
-    const auto& b = *scene.clip;
-    const float corners[4][2] = {{b.x0, b.y0}, {b.x1, b.y0}, {b.x1, b.y1}, {b.x0, b.y1}};
-    std::vector<float> cv;
-    std::vector<std::uint32_t> ci;
-    for (int i = 0; i < 4; ++i) {
-        const auto& p = corners[i];
-        const auto& q = corners[(i + 1) % 4];
-        const auto base = static_cast<std::uint32_t>(cv.size() / 3);
-        cv.insert(cv.end(), {p[0], p[1], b.bottom, q[0], q[1], b.bottom, q[0], q[1], b.top, p[0], p[1], b.top});
-        ci.insert(ci.end(), {base, base + 3, base + 2, base, base + 2, base + 1});
-    }
+    const IndexedMesh curtain = boundaryCurtain(*scene.clip);
+    const auto& cv = curtain.vertices;
+    const auto& ci = curtain.indices;
     clipVertices = c.buffer(SDL_GPU_BUFFERUSAGE_VERTEX, cv.data(), static_cast<Uint32>(cv.size() * sizeof(float)));
     clipIndices = c.buffer(SDL_GPU_BUFFERUSAGE_INDEX, ci.data(), static_cast<Uint32>(ci.size() * sizeof(std::uint32_t)));
 }

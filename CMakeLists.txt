@@ -340,7 +340,7 @@ target_link_libraries(ts2scene PUBLIC ts2content PRIVATE project_warnings)
 
 # What every renderer shares, apart from any graphics API: the CPU side of a scene, culling and
 # draw order, and the numbers each draw's shaders are given.
-add_library(ts2renderplan src/render/frame_plan.cpp src/render/mesh_pack.cpp src/render/shared_state.cpp)
+add_library(ts2renderplan src/render/frame_plan.cpp src/render/mesh_pack.cpp src/render/shared_state.cpp src/render/terrain_mesh.cpp)
 target_link_libraries(ts2renderplan PUBLIC ts2scene PRIVATE project_warnings)
 
 if(NEOTS2_FUZZ)
@@ -463,7 +463,7 @@ else()
         set(shader_dir ${CMAKE_CURRENT_BINARY_DIR}/shaders)
         set(shader_outputs)
         # The shaders the OpenGL 2 renderer draws with (skinned ones are posed on the CPU there).
-        set(gl2_shaders scene.vert scene.frag ui.vert ui.frag)
+        set(gl2_shaders scene.vert scene.frag ui.vert ui.frag terrain.vert terrain.frag sky.vert sky.frag road.vert road.frag imposter.vert imposter.frag clip.vert clip.frag)
         foreach(shader scene.vert skinned.vert scene.frag ui.vert ui.frag terrain.vert terrain.frag sky.vert sky.frag water.vert water.frag road.vert road.frag imposter.vert imposter.frag clip.vert clip.frag)
             if(shader MATCHES "vert$")
                 set(profile vs_6_0)
@@ -528,7 +528,7 @@ else()
         target_link_libraries(ts2render PUBLIC ts2renderplan SDL3::SDL3 PRIVATE project_warnings)
         if(gl2_enabled)
             add_library(ts2render_gl src/render/gl/gl_api.cpp src/render/gl/gl_renderer.cpp src/render/gl/gl_shaders.cpp
-                        src/render/gl/gl_upload.cpp src/render/gl/gl_draw.cpp)
+                        src/render/gl/gl_upload.cpp src/render/gl/gl_draw.cpp src/render/gl/gl_terrain.cpp)
             target_link_libraries(ts2render_gl PUBLIC ts2renderplan SDL3::SDL3 PRIVATE project_warnings)
             target_link_libraries(ts2render PUBLIC ts2render_gl)
             target_compile_definitions(ts2render PUBLIC NEOTS2_GL2=1)

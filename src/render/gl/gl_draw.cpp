@@ -25,7 +25,7 @@ const void* offset(std::size_t bytes) {
 void GlRenderer::invalidateState() {
     program_ = ~0u;
     attributeMask_ = ~0u;
-    blend_ = cull_ = depthWrite_ = -1;
+    state_.reset();
     arrayBuffer_ = elementBuffer_ = ~0u;
     bound_ = {};
 }
@@ -50,56 +50,91 @@ void GlRenderer::setAttributes(unsigned mask) {
     attributeMask_ = mask;
 }
 
-// Blending as the SDL GPU pipelines have it: none, over, or added.
-void GlRenderer::setBlend(int kind) {
-    if (blend_ == kind) {
-        return;
+// Sets what a draw needs of the GL state that isn't what the last draw left, as the SDL GPU
+// renderer's pipelines have it.
+void GlRenderer::setState(const State& want) {
+    const State& have = state_.value_or(State{});
+    const bool unknown = !state_.has_value();
+    if (unknown || have.blend != want.blend) {
+        switch (want.blend) {
+        case 0:
+            gl_.Disable(GL_BLEND);
+            break;
+        case 1:  // over
+            gl_.Enable(GL_BLEND);
+            gl_.BlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+            break;
+        case 2:  // added
+            gl_.Enable(GL_BLEND);
+            gl_.BlendFuncSeparate(GL_SRC_ALPHA, GL_ONE, GL_ZERO, GL_ONE);
+            break;
+        case 3:  // multiplied into what is there
+            gl_.Enable(GL_BLEND);
+            gl_.BlendFuncSeparate(GL_DST_COLOR, GL_ONE_MINUS_SRC_ALPHA, GL_DST_COLOR, GL_ONE_MINUS_SRC_ALPHA);
+            break;
+        case 4:  // over, the colour already multiplied by its alpha
+            gl_.Enable(GL_BLEND);
+            gl_.BlendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+            break;
+        default:  // summed
+            gl_.Enable(GL_BLEND);
+            gl_.BlendFuncSeparate(GL_ONE, GL_ONE, GL_ONE, GL_ONE);
+            break;
+        }
     }
-    blend_ = kind;
-    if (kind == 0) {
-        gl_.Disable(GL_BLEND);
-        return;
+    if (unknown || have.cull != want.cull) {
+        if (want.cull) {
+            gl_.Enable(GL_CULL_FACE);
+        } else {
+            gl_.Disable(GL_CULL_FACE);
+        }
     }
-    gl_.Enable(GL_BLEND);
-    if (kind == 1) {
-        gl_.BlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-    } else {
-        gl_.BlendFuncSeparate(GL_SRC_ALPHA, GL_ONE, GL_ZERO, GL_ONE);
+    if (unknown || have.depthTest != want.depthTest) {
+        if (want.depthTest) {
+            gl_.Enable(GL_DEPTH_TEST);
+        } else {
+            gl_.Disable(GL_DEPTH_TEST);
+        }
     }
+    if (unknown || have.depthWrite != want.depthWrite) {
+        gl_.DepthMask(want.depthWrite ? GL_TRUE : GL_FALSE);
+    }
+    if (unknown || have.depthFunc != want.depthFunc) {
+        gl_.DepthFunc(want.depthFunc);
+    }
+    if (unknown || have.colorWrite != want.colorWrite) {
+        const GLboolean on = want.colorWrite ? GL_TRUE : GL_FALSE;
+        gl_.ColorMask(on, on, on, on);
+    }
+    state_ = want;
 }
 
-void GlRenderer::setCull(bool on) {
-    if (cull_ == static_cast<int>(on)) {
-        return;
-    }
-    cull_ = on;
-    if (on) {
-        gl_.Enable(GL_CULL_FACE);
-    } else {
-        gl_.Disable(GL_CULL_FACE);
-    }
+// Points an attribute at its place in the bound vertex buffer.
+void GlRenderer::attributes(unsigned location, int size, GLsizei stride, std::size_t at) {
+    gl_.VertexAttribPointer(location, size, GL_FLOAT, GL_FALSE, stride, offset(at));
 }
 
-void GlRenderer::setDepthWrite(bool on) {
-    if (depthWrite_ != static_cast<int>(on)) {
-        depthWrite_ = on;
-        gl_.DepthMask(on ? GL_TRUE : GL_FALSE);
-    }
-}
-
-void GlRenderer::bindTexture(unsigned unit, Texture& texture, GLint wrap) {
-    if (bound_[unit].first == texture.id && bound_[unit].second == wrap) {
+void GlRenderer::bindTexture(unsigned unit, Texture& texture, GLint wrap, bool nearest) {
+    const GLint how = wrap + (nearest ? 0x10000 : 0);
+    if (bound_[unit].first == texture.id && bound_[unit].second == how) {
         return;
     }
     gl_.ActiveTexture(GL_TEXTURE0 + unit);
     gl_.BindTexture(texture.target, texture.id);
-    if (texture.target == GL_TEXTURE_2D && texture.wrap != wrap) {
-        gl_.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap);
-        gl_.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap);
-        texture.wrap = wrap;
+    if (texture.target == GL_TEXTURE_2D) {
+        if (texture.wrap != wrap) {
+            gl_.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap);
+            gl_.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap);
+            texture.wrap = wrap;
+        }
+        if (texture.nearest != nearest) {
+            gl_.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, nearest ? GL_NEAREST : texture.mips ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
+            gl_.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, nearest ? GL_NEAREST : GL_LINEAR);
+            texture.nearest = nearest;
+        }
     }
-    bound_[unit] = {texture.id, wrap};
-    // Another unit with this texture could now see another wrap mode than it was told of.
+    bound_[unit] = {texture.id, how};
+    // Another unit with this texture could now see another way of sampling it than it was told of.
     for (unsigned u = 0; u < bound_.size(); ++u) {
         if (u != unit && bound_[u].first == texture.id) {
             bound_[u].second = -1;
@@ -171,7 +206,6 @@ void GlRenderer::poseSkinned(const GpuPrimitive& p, const MeshBuffers& buffers, 
 void GlRenderer::drawList(const FrameView& f, const std::vector<Draw>& list, int blend) {
     useProgram(scene_);
     setAttributes(kSceneAttributes);
-    setDepthWrite(blend == 0);
     for (const auto& d : list) {
         const MeshBuffers& buffers = gpu_->meshBuffers[d.primitive->buffers];
         if (buffers.vertices == 0 || buffers.indices == 0) {
@@ -179,11 +213,14 @@ void GlRenderer::drawList(const FrameView& f, const std::vector<Draw>& list, int
         }
         const auto& p = *d.primitive;
         const scene::Material* m = d.material;
-        setBlend(blend && m && m->alpha == scene::AlphaMode::Add ? 2 : blend);
-        setCull(!(m && m->doubleSided));
+        State state;
+        state.blend = blend && m && m->alpha == scene::AlphaMode::Add ? 2 : blend;
+        state.cull = !(m && m->doubleSided);
+        state.depthWrite = blend == 0;
+        setState(state);
         const DrawUniforms u = FramePlan::uniformsFor(*this, *this, f, d, blend);
-        gl_.Uniform4fv(scene_.frame, static_cast<GLsizei>(sizeof(VertexUniforms) / 16), reinterpret_cast<const GLfloat*>(&u.vertex.frame));
-        gl_.Uniform4fv(scene_.material, static_cast<GLsizei>(sizeof(FragmentUniforms) / 16), reinterpret_cast<const GLfloat*>(&u.fragment));
+        gl_.Uniform4fv(scene_.vertex, static_cast<GLsizei>(sizeof(VertexUniforms) / 16), reinterpret_cast<const GLfloat*>(&u.vertex.frame));
+        gl_.Uniform4fv(scene_.fragment, static_cast<GLsizei>(sizeof(FragmentUniforms) / 16), reinterpret_cast<const GLfloat*>(&u.fragment));
         for (unsigned k = 0; k < u.samplers.size(); ++k) {
             bindTexture(k, textureFor(u.samplers[k].texture), u.samplers[k].sampler == SamplerKind::Clamped ? GL_CLAMP_TO_EDGE : GL_REPEAT);
         }
@@ -227,7 +264,7 @@ void GlRenderer::drawSprites(unsigned width, unsigned height) {
     }
     useProgram(ui_);
     const float screen[4] = {static_cast<float>(width), static_cast<float>(height), 0, 0};
-    gl_.Uniform4fv(ui_.screen, 1, screen);
+    gl_.Uniform4fv(ui_.vertex, 1, screen);
     gl_.BindBuffer(GL_ARRAY_BUFFER, spriteVertices_);
     arrayBuffer_ = spriteVertices_;
     gl_.BufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(v.size() * sizeof(float)), v.data(), GL_STREAM_DRAW);
@@ -236,10 +273,11 @@ void GlRenderer::drawSprites(unsigned width, unsigned height) {
     gl_.VertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, stride, offset(0));
     gl_.VertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, stride, offset(2 * sizeof(float)));
     gl_.VertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, offset(4 * sizeof(float)));
-    gl_.Disable(GL_DEPTH_TEST);
-    setDepthWrite(false);
-    setCull(false);
-    setBlend(1);
+    State sprites;
+    sprites.blend = 1;
+    sprites.depthTest = false;
+    sprites.depthWrite = false;
+    setState(sprites);
     for (std::size_t i = 0; i < sprites_.size();) {
         const int t = sprites_[i].texture;
         std::size_t j = i;
@@ -255,7 +293,6 @@ void GlRenderer::drawSprites(unsigned width, unsigned height) {
         gl_.DrawArrays(GL_TRIANGLES, static_cast<GLint>(i * 6), static_cast<GLsizei>((j - i) * 6));
         i = j;
     }
-    gl_.Enable(GL_DEPTH_TEST);
 }
 
 // Records and draws one frame into the framebuffer bound now. False when it couldn't.
@@ -272,15 +309,31 @@ bool GlRenderer::render(unsigned width, unsigned height, const Camera& camera) {
     // Depth runs from 1 at the near plane to 0 at the far one (see Mat4::perspective).
     gl_.ClearDepth(0.0);
     gl_.Clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    gl_.Enable(GL_DEPTH_TEST);
-    gl_.DepthFunc(GL_GEQUAL);
     gl_.DepthRange(0.0, 1.0);
     gl_.FrontFace(GL_CCW);
     gl_.CullFace(GL_BACK);
 
+    // The sky and the boundary curtain, the terrain, roads and imposters. A portrait shows its
+    // instances alone, over a transparent background.
+    const bool extras = drawScene_ && !instancesOnly_;
+    if (extras && gpu_->skybox.id != 0) {
+        drawSky(f, gpu_->skybox, 1);
+    }
+    if (extras && gpu_->curtainVertices != 0) {
+        drawBoundary(f);
+    }
     std::vector<Draw> opaque, layers, blended;
     FramePlan::collectDraws(*this, *this, f, opaque, layers, blended);
     drawList(f, opaque, 0);
+    if (extras && gpu_->terrainVertices != 0) {
+        if (gpu_->terrainIndexCount > 0) {
+            drawTerrain(f);
+        }
+        if (!gpu_->roadRuns.empty()) {
+            drawRoads(f);
+        }
+        drawImposters(f);
+    }
     drawList(f, layers, 1);
     drawList(f, blended, 1);
     if (!instancesOnly_ && !sprites_.empty()) {

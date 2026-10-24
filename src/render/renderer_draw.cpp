@@ -337,14 +337,9 @@ void SdlGpuRenderer::drawReflection(const Frame& f) {
 // A sky cube map behind everything, looked up by each pixel's ray. `up` is -1 for the rays mirrored
 // in the water.
 void SdlGpuRenderer::drawSky(const Frame& f, SDL_GPURenderPass* on, SDL_GPUTexture* cube, float up) {
-    const Camera& camera = *f.camera;
-    const Vec3 forward = normalize(sub(camera.target, camera.eye));
-    const Vec3 s = normalize(cross(forward, {0, 0, 1}));
-    const Vec3 u = cross(s, forward);
-    const float ty = std::tan(f.fovY / 2), tx = ty * f.aspect;
-    const float skyCamera[12] = {s[0] * tx, s[1] * tx, s[2] * tx, 0, u[0] * ty, u[1] * ty, u[2] * ty, 0, forward[0], forward[1], forward[2], up};
+    const std::array<float, 12> skyCamera = render::skyCamera(f, up);
     SDL_BindGPUGraphicsPipeline(on, skyPipeline_);
-    SDL_PushGPUFragmentUniformData(f.cmd, 0, skyCamera, sizeof(skyCamera));
+    SDL_PushGPUFragmentUniformData(f.cmd, 0, skyCamera.data(), sizeof(skyCamera));
     SDL_GPUTextureSamplerBinding skyBinding{cube, sampler_};
     SDL_BindGPUFragmentSamplers(on, 0, &skyBinding, 1);
     SDL_DrawGPUPrimitives(on, 3, 1, 0, 0);

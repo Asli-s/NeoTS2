@@ -36,17 +36,37 @@ void GlRenderer::SceneGpu::release(Graveyard& graveyard) {
     }
     meshBuffers.clear();
     meshes.clear();
+    for (auto* list : {&terrainPaints, &roadTextures, &imposterTextures}) {
+        for (auto& t : *list) give(t);
+        list->clear();
+    }
+    for (auto* pair : {&terrainAlphas, &terrainCells}) {
+        for (auto& t : *pair) give(t);
+    }
+    give(terrainLight);
+    give(terrainGradient);
+    for (GLuint* id : {&terrainVertices, &terrainIndices, &roadVertices, &roadIndices, &imposterVertices, &imposterIndices, &curtainVertices, &curtainIndices}) {
+        if (*id != 0) {
+            graveyard.buffers.push_back(*id);
+            *id = 0;
+        }
+    }
+    terrainIndexCount = 0;
+    roadRuns.clear();
+    imposterDraws.clear();
 }
 
 bool GlRenderer::SceneGpu::releaseTextures(Graveyard& graveyard, std::size_t count) {
     std::lock_guard lock(graveyard.lock);
-    for (; count > 0 && !textures.empty(); --count) {
-        if (textures.back().id != 0) {
-            graveyard.textures.push_back(textures.back().id);
+    for (auto* list : {&textures, &imposterTextures}) {
+        for (; count > 0 && !list->empty(); --count) {
+            if (list->back().id != 0) {
+                graveyard.textures.push_back(list->back().id);
+            }
+            list->pop_back();
         }
-        textures.pop_back();
     }
-    return textures.empty();
+    return textures.empty() && imposterTextures.empty();
 }
 
 void GlRenderer::GpuPrepared::releaseSome(std::size_t count) {
@@ -94,7 +114,7 @@ void GlRenderer::releaseBuffer(GLuint& buffer) {
 }
 
 // A texture of a complete image, with mip levels unless `mips` is false.
-GlRenderer::Texture GlRenderer::uploadTexture(const scene::Image& image, bool mips) {
+GlRenderer::Texture GlRenderer::uploadTexture(const scene::Image& image, bool mips, bool anisotropic) {
     Texture t;
     t.target = GL_TEXTURE_2D;
     t.mips = mips && (image.width > 1 || image.height > 1);
@@ -108,7 +128,7 @@ GlRenderer::Texture GlRenderer::uploadTexture(const scene::Image& image, bool mi
     gl_.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     gl_.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
     t.wrap = GL_REPEAT;
-    if (t.mips && gl_.anisotropy) {
+    if (t.mips && anisotropic && gl_.anisotropy) {
         gl_.TexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, std::min(8.0f, gl_.maxAnisotropy));
     }
     const bool own = t.mips && ownLevels(image);
@@ -165,15 +185,8 @@ GlRenderer::MeshBuffers GlRenderer::uploadMeshBuffers(MeshData& data) {
     if (data.indices.empty()) {
         return b;
     }
-    gl_.GenBuffers(1, &b.vertices);
-    gl_.BindBuffer(GL_ARRAY_BUFFER, b.vertices);
-    gl_.BufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(data.vertices.size() * sizeof(float)), data.vertices.data(), GL_STATIC_DRAW);
-    gl_.GenBuffers(1, &b.indices);
-    gl_.BindBuffer(GL_ELEMENT_ARRAY_BUFFER, b.indices);
-    gl_.BufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(data.indices.size() * sizeof(std::uint32_t)), data.indices.data(),
-                   GL_STATIC_DRAW);
-    arrayBuffer_ = b.vertices;
-    elementBuffer_ = b.indices;
+    b.vertices = uploadBuffer(GL_ARRAY_BUFFER, data.vertices.data(), data.vertices.size() * sizeof(float));
+    b.indices = uploadBuffer(GL_ELEMENT_ARRAY_BUFFER, data.indices.data(), data.indices.size() * sizeof(std::uint32_t));
     // Skinned primitives are posed on the CPU from the vertices as they were made.
     if (!data.skin.empty()) {
         b.cpuVertices = std::move(data.vertices);
@@ -200,6 +213,10 @@ std::unique_ptr<GlRenderer::Staged> GlRenderer::stage(const scene::Scene& scene)
     }
     s->skybox = scene.skybox;
     s->envCubes = scene.envCubes;
+    if (scene.terrain && scene.terrain->paints() > 0 && !scene.terrain->textures.empty()) {
+        s->terrain = scene.terrain;
+    }
+    s->clip = scene.clip;
     return s;
 }
 
@@ -218,6 +235,14 @@ void GlRenderer::uploadStaged(SceneGpu& gpu, Staged& staged) {
         gpu.envCubes.push_back(uploadCube(faces));
     }
     gpu.blackCube = uploadCube(std::vector<scene::Image>(6, scene::Image{1, 1, {0, 0, 0, 255}, {}}));
+    if (staged.terrain) {
+        uploadTerrain(gpu, *staged.terrain);
+    }
+    if (staged.clip) {
+        const IndexedMesh curtain = boundaryCurtain(*staged.clip);
+        gpu.curtainVertices = uploadBuffer(GL_ARRAY_BUFFER, curtain.vertices.data(), curtain.vertices.size() * sizeof(float));
+        gpu.curtainIndices = uploadBuffer(GL_ELEMENT_ARRAY_BUFFER, curtain.indices.data(), curtain.indices.size() * sizeof(std::uint32_t));
+    }
 }
 
 IRenderer::Prepared GlRenderer::prepare(const scene::Scene& scene) const {

@@ -60,6 +60,15 @@ FrameView FrameView::make(const Camera& camera, unsigned width, unsigned height)
     return f;
 }
 
+std::array<float, 12> skyCamera(const FrameView& f, float up) {
+    const Camera& camera = *f.camera;
+    const Vec3 forward = normalize(sub(camera.target, camera.eye));
+    const Vec3 s = normalize(cross(forward, {0, 0, 1}));
+    const Vec3 u = cross(s, forward);
+    const float ty = std::tan(f.fovY / 2), tx = ty * f.aspect;
+    return {s[0] * tx, s[1] * tx, s[2] * tx, 0, u[0] * ty, u[1] * ty, u[2] * ty, 0, forward[0], forward[1], forward[2], up};
+}
+
 void FramePlan::collectDraws(const RendererState& s, const ResourceQuery& q, const FrameView& f, std::vector<Draw>& opaque,
                              std::vector<Draw>& layers, std::vector<Draw>& blended) {
     std::vector<float> depths;

@@ -31,9 +31,12 @@ GLuint GlRenderer::compile(GLenum stage, const std::filesystem::path& file) {
     return shader;
 }
 
-// Links the shaders `vertex` and `fragment` (files in `folder`, named without their extension). Its
-// textures are on the units in the order of `samplers` in the fragment shader's own names.
-GlRenderer::Program GlRenderer::loadProgram(const std::filesystem::path& folder, const char* vertex, const char* fragment) {
+// Links the shaders `vertex` and `fragment` (files in `folder`, named without their extension). The
+// shaders' constants are the blocks of that name (see the shaders' cbuffers), and the fragment
+// shader's textures are on the units in the order of `samplers`.
+GlRenderer::Program GlRenderer::loadProgram(const std::filesystem::path& folder, const char* vertex, const char* fragment,
+                                            const char* vertexBlock, const char* fragmentBlock,
+                                            std::initializer_list<const char*> samplers) {
     const GLuint vs = compile(GL_VERTEX_SHADER, folder / (std::string(vertex) + ".glsl"));
     GLuint fs = 0;
     try {
@@ -61,28 +64,34 @@ GlRenderer::Program GlRenderer::loadProgram(const std::filesystem::path& folder,
         gl_.DeleteProgram(p.id);
         throw std::runtime_error(std::string(vertex) + " + " + fragment + ": " + log);
     }
-    p.frame = gl_.GetUniformLocation(p.id, "type_Frame");
-    p.material = gl_.GetUniformLocation(p.id, "type_Material");
-    p.screen = gl_.GetUniformLocation(p.id, "type_Screen");
+    if (vertexBlock != nullptr) {
+        p.vertex = gl_.GetUniformLocation(p.id, vertexBlock);
+    }
+    if (fragmentBlock != nullptr) {
+        p.fragment = gl_.GetUniformLocation(p.id, fragmentBlock);
+    }
+    useProgram(p);
+    GLint unit = 0;
+    for (const char* name : samplers) {
+        if (const GLint at = gl_.GetUniformLocation(p.id, name); at >= 0) {
+            gl_.Uniform1i(at, unit);
+        }
+        ++unit;
+    }
     return p;
 }
 
 void GlRenderer::makePrograms(const std::filesystem::path& folder) {
     // The scene's textures, in the order of the HLSL's registers.
-    scene_ = loadProgram(folder, "scene.vert", "scene.frag");
-    useProgram(scene_);
-    const char* sceneSamplers[] = {"baseTexture", "lightMapTexture", "normalTexture", "incidenceTexture", "lightMapFromTexture", "envCubeTexture"};
-    for (int unit = 0; unit < 6; ++unit) {
-        const GLint at = gl_.GetUniformLocation(scene_.id, sceneSamplers[unit]);
-        if (at >= 0) {
-            gl_.Uniform1i(at, unit);
-        }
-    }
-    ui_ = loadProgram(folder, "ui.vert", "ui.frag");
-    useProgram(ui_);
-    if (const GLint at = gl_.GetUniformLocation(ui_.id, "image"); at >= 0) {
-        gl_.Uniform1i(at, 0);
-    }
+    scene_ = loadProgram(folder, "scene.vert", "scene.frag", "type_Frame", "type_Material",
+                         {"baseTexture", "lightMapTexture", "normalTexture", "incidenceTexture", "lightMapFromTexture", "envCubeTexture"});
+    ui_ = loadProgram(folder, "ui.vert", "ui.frag", "type_Screen", nullptr, {"image"});
+    terrain_ = loadProgram(folder, "terrain.vert", "terrain.frag", "type_Frame", "type_Terrain",
+                           {"paint", "alphas0", "alphas1", "cells0", "cells1", "lightMap", "gradient"});
+    road_ = loadProgram(folder, "road.vert", "road.frag", "type_Frame", "type_Road", {"roads", "lightMap"});
+    imposter_ = loadProgram(folder, "imposter.vert", "imposter.frag", "type_Frame", "type_Part", {"image"});
+    sky_ = loadProgram(folder, "sky.vert", "sky.frag", nullptr, "type_Camera", {"sky"});
+    clip_ = loadProgram(folder, "clip.vert", "clip.frag", "type_Frame", nullptr, {});
 }
 
 } // namespace ts2::render
