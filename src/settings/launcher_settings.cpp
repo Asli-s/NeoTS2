@@ -67,6 +67,13 @@ std::optional<LauncherSettings> parseLauncherSettings(std::string_view text) {
             settings.backupReminderSeen = line.substr(equals + 1) == "seen";
             continue;
         }
+        if (key == "renderer") {
+            const std::string_view value = line.substr(equals + 1);
+            if (value == "sdlgpu" || value == "gl2") {
+                settings.renderer = value;
+            }
+            continue;
+        }
         const auto path = pathFrom(line.substr(equals + 1));
         if (!path) {
             continue;
@@ -109,6 +116,9 @@ std::string formatLauncherSettings(const LauncherSettings& settings) {
     line("save-folder", settings.saveFolder);
     if (settings.backupReminderSeen) {
         out += "backup-reminder=seen\n";
+    }
+    if (settings.renderer == "sdlgpu" || settings.renderer == "gl2") {
+        out.append("renderer=").append(settings.renderer).append("\n");
     }
     for (std::size_t i = 0; i < settings.addedInstalls.size() && i < kMaxAdded; ++i) {
         line("added-install", settings.addedInstalls[i]);

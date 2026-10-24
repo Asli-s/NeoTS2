@@ -1,6 +1,9 @@
 #include "diag/log.hpp"
+#include "diag/timing.hpp"
 #include "render/gl/gl_renderer.hpp"
 #include "render/image_levels.hpp"
+
+#include <SDL3/SDL.h>
 
 #include <algorithm>
 #include <cmath>
@@ -124,7 +127,7 @@ GlRenderer::Texture GlRenderer::uploadTexture(const scene::Image& image, bool mi
     gl_.GenTextures(1, &t.id);
     gl_.ActiveTexture(GL_TEXTURE0);
     gl_.BindTexture(GL_TEXTURE_2D, t.id);
-    bound_ = {};
+    forgetBindings();
     gl_.PixelStorei(GL_UNPACK_ALIGNMENT, 1);
     gl_.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, t.mips ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
     gl_.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -170,7 +173,7 @@ GlRenderer::Texture GlRenderer::uploadCube(const std::vector<scene::Image>& face
     gl_.GenTextures(1, &t.id);
     gl_.ActiveTexture(GL_TEXTURE0);
     gl_.BindTexture(GL_TEXTURE_CUBE_MAP, t.id);
-    bound_ = {};
+    forgetBindings();
     gl_.PixelStorei(GL_UNPACK_ALIGNMENT, 1);
     t.mips = mips && face.width > 1;
     gl_.TexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, t.mips ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
@@ -228,6 +231,7 @@ std::unique_ptr<GlRenderer::Staged> GlRenderer::stage(const scene::Scene& scene)
 }
 
 void GlRenderer::uploadStaged(SceneGpu& gpu, Staged& staged) {
+    diag::Timer timer("upload scene");
     gpu.textures.reserve(staged.images.size());
     for (std::size_t i = 0; i < staged.images.size(); ++i) {
         gpu.textures.push_back(complete(staged.images[i]) ? uploadTexture(staged.images[i], !staged.noMips.contains(i)) : Texture{});
@@ -252,10 +256,85 @@ void GlRenderer::uploadStaged(SceneGpu& gpu, Staged& staged) {
     }
 }
 
+void GlRenderer::forgetBindings() {
+    if (onDrawingThread()) {
+        bound_ = {};
+        arrayBuffer_ = elementBuffer_ = ~0u;
+    }
+}
+
+// Makes contexts that share their textures and buffers with the drawing one, for prepare() to use
+// on other threads. Made with the drawing context current, which they then share with.
+void GlRenderer::makeSharedContexts(unsigned count) {
+    SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 1);
+    for (unsigned i = 0; i < count; ++i) {
+        SDL_GLContext shared = SDL_GL_CreateContext(window_);
+        if (shared == nullptr) {
+            break;
+        }
+        pool_.push_back({shared, false});
+    }
+    SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 0);
+    // Making one current again is what made them current here.
+    SDL_GL_MakeCurrent(window_, context_);
+}
+
+void GlRenderer::destroySharedContexts() {
+    for (const auto& shared : pool_) {
+        SDL_GL_DestroyContext(shared.context);
+    }
+    pool_.clear();
+}
+
+// Uploads a scene on this thread in a context of its own. The objects it makes are the drawing context's
+// too, once the driver is done with them (waited for here).
+std::unique_ptr<GlRenderer::SceneGpu> GlRenderer::uploadShared(const scene::Scene& scene) const {
+    SharedContext* mine = nullptr;
+    {
+        std::unique_lock lock(poolLock_);
+        poolFree_.wait(lock, [&] {
+            for (auto& shared : pool_) {
+                if (!shared.busy) {
+                    mine = &shared;
+                    return true;
+                }
+            }
+            return false;
+        });
+        mine->busy = true;
+    }
+    std::unique_ptr<SceneGpu> gpu;
+    if (SDL_GL_MakeCurrent(window_, mine->context)) {
+        // This touches nothing but what this thread made: the caches of what is bound are the drawing thread's.
+        auto* self = const_cast<GlRenderer*>(this);
+        auto staged = stage(scene);
+        gpu = std::make_unique<SceneGpu>();
+        try {
+            self->uploadStaged(*gpu, *staged);
+            self->gl_.Finish();
+        } catch (...) {
+            gpu.reset();
+        }
+        SDL_GL_MakeCurrent(window_, nullptr);
+    }
+    {
+        std::lock_guard lock(poolLock_);
+        mine->busy = false;
+    }
+    poolFree_.notify_one();
+    return gpu;
+}
+
 IRenderer::Prepared GlRenderer::prepare(const scene::Scene& scene) const {
     auto p = std::make_unique<GpuPrepared>();
     p->graveyard = graveyard_;
-    p->staged = stage(scene);
+    // On the drawing thread there is no need: swap uploads what is staged there and then.
+    if (!pool_.empty() && !onDrawingThread()) {
+        p->gpu = uploadShared(scene);
+    }
+    if (!p->gpu) {
+        p->staged = stage(scene);
+    }
     copyScene(*p, scene);
     return Prepared(std::move(p));
 }

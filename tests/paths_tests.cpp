@@ -171,6 +171,7 @@ void launcherSettingsRoundTrip() {
     settings.addedInstalls = {root / "Other"};
     settings.addedSaveFolders = {root / "Saves A", root / "Saves B"};
     settings.backupReminderSeen = true;
+    settings.renderer = "gl2";
     const fs::path file = root / "NeoTS2" / "launcher-settings.txt";
     CHECK(saveLauncherSettings(file, settings));
     const auto loaded = loadLauncherSettings(file);
@@ -188,6 +189,14 @@ void launcherSettingsRoundTrip() {
                                               "added-save-folder=C:\\a\r\n");
     CHECK(parsed && parsed->install.empty() && parsed->saveFolder.empty() && parsed->addedSaveFolders.size() == 1);
     CHECK(!parseLauncherSettings("") && !parseLauncherSettings("NeoTS2 launcher settings 2\n"));
+    // Only the renderers there are are taken.
+    const auto drawn = parseLauncherSettings("NeoTS2 launcher settings 1\nrenderer=sdlgpu\n");
+    CHECK(drawn && drawn->renderer == "sdlgpu");
+    const auto unknown = parseLauncherSettings("NeoTS2 launcher settings 1\nrenderer=metal\n");
+    CHECK(unknown && unknown->renderer.empty());
+    LauncherSettings invalid;
+    invalid.renderer = "metal";
+    CHECK(formatLauncherSettings(invalid).find("renderer") == std::string::npos);
     CHECK(!parseLauncherSettings("NeoTS2 launcher settings 1\n" + std::string(70 * 1024, 'x')));
     std::error_code error;
     fs::remove_all(root, error);

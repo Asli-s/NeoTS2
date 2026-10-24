@@ -122,6 +122,7 @@ settings::LauncherSettings chosenSettings(const LauncherState& state) {
     out.addedInstalls = state.addedInstalls;
     out.addedSaveFolders = state.addedSaveFolders;
     out.backupReminderSeen = state.backupReminderSeen;
+    out.renderer = state.renderer;
     return out;
 }
 
@@ -416,7 +417,7 @@ void startPlaying(LauncherState& state, bool addNeighborhoods) {
         state.message = "NeoTS2 is already playing with this save folder.";
         return;
     }
-    state.game = startGame(install.root, folder, addNeighborhoods, state.message);
+    state.game = startGame(install.root, folder, addNeighborhoods, state.renderer, state.message);
     state.folderNotes.clear();
 }
 
@@ -582,7 +583,36 @@ void findInstalls(LauncherState& state, const settings::LauncherSettings& rememb
         }
     }
     state.backupReminderSeen = remembered.backupReminderSeen;
+    state.renderer = remembered.renderer;
     state.remembered = chosenSettings(state);
+}
+
+// What draws the game: its own choice (Direct3D 12 or Vulkan), or OpenGL 2 for systems with no more.
+void drawRenderer(LauncherState& state, const LauncherFonts& fonts) {
+    heading(fonts, "Graphics");
+    struct Choice {
+        const char* value;
+        const char* label;
+    };
+    static constexpr Choice kChoices[] = {
+        {"", "Automatic (Direct3D 12 or Vulkan)"},
+        {"gl2", "OpenGL 2 (for older systems)"},
+    };
+    const Choice* current = &kChoices[0];
+    for (const auto& choice : kChoices) {
+        if (state.renderer == choice.value) {
+            current = &choice;
+        }
+    }
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18);
+    if (ImGui::BeginCombo("##renderer", current->label)) {
+        for (const auto& choice : kChoices) {
+            if (ImGui::Selectable(choice.label, &choice == current)) {
+                state.renderer = choice.value;
+            }
+        }
+        ImGui::EndCombo();
+    }
 }
 
 void drawLauncher(LauncherState& state, SDL_Window* window, const LauncherFonts& fonts) {
@@ -590,6 +620,8 @@ void drawLauncher(LauncherState& state, SDL_Window* window, const LauncherFonts&
     drawInstalls(state, window, fonts);
     ImGui::Spacing();
     drawSaveFolders(state, window, fonts);
+    ImGui::Spacing();
+    drawRenderer(state, fonts);
     ImGui::Spacing();
     // Measured before the Play row and the message, which both stretch to the window's edge.
     const ImGuiWindow* frame = ImGui::GetCurrentWindow();

@@ -9,6 +9,7 @@
 #include "scene/scene.hpp"
 
 #include <array>
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -17,6 +18,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -28,8 +30,10 @@ namespace ts2::render {
 // Draws a Scene with OpenGL 2.1 (and a few common extensions), for systems that have no more.
 // Shaders are GLSL 1.20 made from the same HLSL the SDL GPU renderer uses (see CMakeLists.txt).
 //
-// OpenGL has one context, which only the thread that draws may use, so prepare() only gathers what
-// to upload and swap() uploads it. Everything else that touches the GPU is on the drawing thread too.
+// A context is current on one thread at a time, and only the thread that draws makes calls on its own.
+// Where the driver can share objects between contexts, prepare() makes its textures and buffers in
+// a context of its own on the thread it is called from. Where it can't, prepare() only gathers what to
+// upload and swap() uploads it. Everything else that touches the GPU is on the drawing thread.
 class GlRenderer final : public RendererState, private ResourceQuery {
 public:
     GlRenderer(SDL_Window* window, const std::filesystem::path& shaderFolder);
@@ -158,6 +162,19 @@ private:
         GLint vertex = -1, fragment = -1;  // the vertex and fragment shaders' constants
     };
 
+    // Contexts sharing objects with the drawing one, for prepare() to upload in on other threads.
+    struct SharedContext {
+        SDL_GLContext context = nullptr;
+        bool busy = false;
+    };
+    void makeSharedContexts(unsigned count);
+    void destroySharedContexts();
+    // Uploads `scene` in a shared context. Null when there is none to be had (the caller stages it instead).
+    std::unique_ptr<SceneGpu> uploadShared(const scene::Scene& scene) const;
+    bool onDrawingThread() const { return std::this_thread::get_id() == drawingThread_; }
+    // Forgets what is bound, which an upload on the drawing thread changes (another thread has its own context).
+    void forgetBindings();
+
     // Gathering and uploading (gl_upload.cpp).
     static std::unique_ptr<Staged> stage(const scene::Scene& scene);
     void uploadStaged(SceneGpu& gpu, Staged& staged);
@@ -219,6 +236,10 @@ private:
 
     SDL_Window* window_ = nullptr;
     SDL_GLContext context_ = nullptr;
+    std::thread::id drawingThread_;
+    mutable std::mutex poolLock_;
+    mutable std::condition_variable poolFree_;
+    mutable std::vector<SharedContext> pool_;
     gl::Api gl_;
     std::shared_ptr<Graveyard> graveyard_ = std::make_shared<Graveyard>();
     std::string vendor_, renderer_, version_;

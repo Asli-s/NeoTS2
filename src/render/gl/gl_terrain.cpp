@@ -24,7 +24,7 @@ GLuint GlRenderer::uploadBuffer(GLenum target, const void* data, std::size_t byt
     gl_.GenBuffers(1, &id);
     gl_.BindBuffer(target, id);
     gl_.BufferData(target, static_cast<GLsizeiptr>(bytes), data, GL_STATIC_DRAW);
-    arrayBuffer_ = elementBuffer_ = ~0u;
+    forgetBindings();
     return id;
 }
 
@@ -36,7 +36,7 @@ GlRenderer::Texture GlRenderer::uploadRaw(unsigned width, unsigned height, const
     gl_.GenTextures(1, &t.id);
     gl_.ActiveTexture(GL_TEXTURE0);
     gl_.BindTexture(GL_TEXTURE_2D, t.id);
-    bound_ = {};
+    forgetBindings();
     gl_.PixelStorei(GL_UNPACK_ALIGNMENT, 1);
     gl_.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, nearest ? GL_NEAREST : GL_LINEAR);
     gl_.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, nearest ? GL_NEAREST : GL_LINEAR);

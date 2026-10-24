@@ -6,6 +6,7 @@
 
 #include <optional>
 #include <system_error>
+#include <vector>
 
 namespace ts2::launcher {
 
@@ -25,7 +26,7 @@ std::optional<std::string> exactUtf8(const std::filesystem::path& path) {
 } // namespace
 
 SDL_Process* startGame(const std::filesystem::path& install, const std::filesystem::path& saveFolder, bool addNeighborhoods,
-                       std::string& error) {
+                       const std::string& renderer, std::string& error) {
     const char* base = SDL_GetBasePath();
     const auto baseFolder = base ? paths::pathFromUtf8(base) : std::nullopt;
     if (!baseFolder) {
@@ -51,9 +52,16 @@ SDL_Process* startGame(const std::filesystem::path& install, const std::filesyst
     }
     // The same arguments the game takes when started by hand, so a launcher-made start can always
     // be repeated from a command line. The list ends at the first null.
-    const char* args[] = {gameText->c_str(), installText->c_str(), "--menu", "--user", saveText->c_str(),
-                          addNeighborhoods ? "--add-neighborhoods" : nullptr, nullptr};
-    SDL_Process* process = SDL_CreateProcess(args, false);
+    std::vector<const char*> args = {gameText->c_str(), installText->c_str(), "--menu", "--user", saveText->c_str()};
+    if (addNeighborhoods) {
+        args.push_back("--add-neighborhoods");
+    }
+    if (!renderer.empty()) {
+        args.push_back("--renderer");
+        args.push_back(renderer.c_str());
+    }
+    args.push_back(nullptr);
+    SDL_Process* process = SDL_CreateProcess(args.data(), false);
     if (!process) {
         error = SDL_GetError();
     }

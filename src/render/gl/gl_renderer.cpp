@@ -23,6 +23,7 @@ GlRenderer::GlRenderer(SDL_Window* window, const std::filesystem::path& shaderFo
     // The destructor doesn't run when the constructor throws, so what was made is released here.
     try {
         SDL_GL_MakeCurrent(window_, context_);
+        drawingThread_ = std::this_thread::get_id();
         // Presented with the display, as the SDL GPU renderer's swapchain is.
         SDL_GL_SetSwapInterval(1);
         const char* missing = nullptr;
@@ -48,7 +49,11 @@ GlRenderer::GlRenderer(SDL_Window* window, const std::filesystem::path& shaderFo
         makePrograms(shaderFolder);
         gpu_->white = uploadTexture({1, 1, {255, 255, 255, 255}, {}}, false);
         gpu_->blackCube = uploadCube(std::vector<scene::Image>(6, scene::Image{1, 1, {0, 0, 0, 255}, {}}));
+        makeSharedContexts(2);
+        diag::info(pool_.empty() ? "OpenGL: contexts can't share objects here, so scenes are uploaded as they are drawn"
+                                 : "OpenGL: scenes are uploaded on other threads in contexts that share objects");
     } catch (...) {
+        destroySharedContexts();
         SDL_GL_DestroyContext(context_);
         context_ = nullptr;
         throw;
@@ -59,6 +64,8 @@ GlRenderer::~GlRenderer() {
     if (context_ == nullptr) {
         return;
     }
+    SDL_GL_MakeCurrent(window_, context_);
+    destroySharedContexts();
     SDL_GL_MakeCurrent(window_, context_);
     gpu_->release(*graveyard_);
     releaseSprites();
@@ -81,7 +88,7 @@ Capabilities GlRenderer::capabilities() const {
     c.waterReflection = gl_.framebuffers;
     c.gpuSkinning = false;
     c.anisotropic = gl_.anisotropy;
-    c.threadedPrepare = false;
+    c.threadedPrepare = !pool_.empty();
     c.offscreen = gl_.framebuffers;
     c.maxTextureSize = gl_.maxTextureSize;
     return c;
