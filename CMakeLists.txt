@@ -483,7 +483,14 @@ else()
         target_link_libraries(ts2render PUBLIC ts2scene SDL3::SDL3 PRIVATE project_warnings)
 
         # The game's UI: its fonts are drawn with FreeType (set freetype_DIR to its cmake folder).
-        find_package(freetype CONFIG REQUIRED)
+        # Some distributions (Arch) ship no CMake config, so fall back to CMake's own FindFreetype
+        # module (which uses pkg-config/headers) and expose it under the same target name.
+        find_package(freetype CONFIG QUIET)
+        if(NOT TARGET freetype)
+            find_package(Freetype REQUIRED)
+            add_library(freetype INTERFACE IMPORTED)
+            target_link_libraries(freetype INTERFACE Freetype::Freetype)
+        endif()
         add_library(ts2ui src/ui/fonts.cpp src/ui/font_metrics.cpp src/ui/screen.cpp src/ui/pie_layout.cpp src/ui/tip_layout.cpp src/ui/drag_arrow.cpp)
         target_link_libraries(ts2ui PUBLIC ts2content PRIVATE freetype project_warnings)
         # Text layout is tested with our own small font (tests/data), so only where the UI builds.
