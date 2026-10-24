@@ -1,4 +1,4 @@
-# NeoTS2
+<h1><img src="app/icon/neots2.svg" alt="" height="28"> NeoTS2</h1>
 
 **A new, open, 64-bit engine for The Sims 2.**
 
@@ -17,38 +17,78 @@ closed to deeper modding. NeoTS2 aims to keep everything that makes the game wha
 giving it:
 
 - **a native 64-bit (x64) engine** that uses modern graphics APIs (Direct3D 12 today) and the
-  memory a modern PC has;
-- **an engine you can read and change**;
+  memory a modern PC has
+- **an engine you can read and change**
 - **modern graphics as an option**: the classic look by default, with room for improved
-  lighting, shadows and effects as mods;
+  lighting, shadows and effects as mods
 - **modding without limits**: new behavior, new rendering, new tools, built on code rather
-  than workarounds.
+  than workarounds
 
-The classic look is rebuilt from how the original game works, not approximated: where the game
+The classic look is rebuilt from how the original game works and is not approximated: where the game
 computes something (terrain paint, lighting, camera framing), NeoTS2 does the same computation.
 
 ## What works today
 
-NeoTS2 is in early development. It isn't playable yet, but you can already look around:
+NeoTS2 is in early development. It isn't a full game yet, but you can already visit your
+neighborhoods and lots:
 
+- **Launcher:** finds or lets you choose your Ultimate Collection or Legacy Collection and your
+  save folders
 - **Main menu:** the game's neighborhood chooser, built from its own UI scripts, fonts and
-  images, with the neighborhood videos, previews, buttons and tooltips.
+  images
 - **Neighborhoods:** the terrain with the game's paints, lighting and shadows, and its
-  reflective water, seen through the game's neighborhood camera.
-- **Lots:** a saved lot in 3D: walls with doors and windows, floors, roofs, fences and objects,
-  with walls up, cutaway or down.
-- **Game files:** the game's packages and most of its resource formats: objects, string tables,
-  behavior scripts, 3D models and textures, saved neighborhoods, families, lots and Sims.
-- **Simulation:** object behavior (SimAntics, and the Lua scripts the expansions use) running
-  against a saved lot, with a growing set of the game's primitives.
+  reflective water
+- **Lots:** walls with doors and windows, floors, roofs, fences and objects, in the game's
+  daylight and night lighting, with bump-mapped surfaces
+- **Live mode:** the game's camera for lots (drag, scroll, zoom and turn), and its panels: needs,
+  mood and aspiration bars
+- **Sims:** your Sims are on their lots, but what they do is still very early and buggy
+- **Game files:** the game's packages and resource formats: objects, string tables,
+  behavior scripts, 3D models and textures, saved neighborhoods, families, lots and Sims
+
+Custom content (your Downloads folder) isn't read yet, so objects, clothes, hair and other
+downloads don't show in NeoTS2 for now.
 
 *Screenshots from an unreleased development version of NeoTS2.*
 
 | Main menu | Neighborhood |
 | --- | --- |
-| ![The main menu](assets/screenshots/main-menu.jpg) | ![Pleasantview with its panel](assets/screenshots/neighborhood.webp) |
+| ![The main menu](assets/screenshots/main-menu.jpg) | ![Pleasantview with its lots panel](assets/screenshots/neighborhood.webp) |
 | **Lot** | **Sims** |
 | ![A lot with its Sims and live panel](assets/screenshots/lot.webp) | ![Two Sims talking on a deck](assets/screenshots/sims.webp) |
+
+## Your saves
+
+> **Back up your saves before you try NeoTS2.** It is early, unfinished software. Copy your save
+> folder (in Documents\EA Games, for example The Sims™ 2 Ultimate Collection) somewhere safe first, or
+> make a new save folder for NeoTS2 with the launcher's **New save folder...**.
+
+NeoTS2 doesn't save games yet, and when it starts with a save folder:
+
+- a folder that already has anything in it is loaded as it is, and nothing is added or changed
+- only a missing or empty folder is set up, and the copy is made beside it and moved in at the
+  end, so a crash or power cut part way leaves the folder as it was
+- if a save folder has files but no neighborhoods, the launcher asks before adding the ones your
+  install ships
+- what your install holds is copied as it is, so if you removed the shipped neighborhoods or
+  neighborhood templates from your install, they stay removed
+- system folders and the game's own install folder are never used as save folders
+
+## Running
+
+**Back up your saves first** (see [Your saves](#your-saves)).
+
+Download the newest release from the [Releases page](https://github.com/Asli-s/NeoTS2/releases),
+extract the whole zip, and start **`neots2-launcher.exe`**. It finds your install and your save
+folders. Choose them, or make a new save folder with **New save folder...**, and press **Play**.
+
+Windows may say "Windows protected your PC", because NeoTS2 isn't signed yet. Click **More info**,
+then **Run anyway**.
+
+## Source code
+
+The source here is from an earlier version than the newest download. The source of newer versions
+will be published once NeoTS2 is in a playable state.
 
 ## Tools and libraries
 
@@ -73,27 +113,24 @@ cmake -S . -B build -A x64 -DSDL3_DIR=<SDL3>/cmake -Dfreetype_DIR=<FreeType inst
 cmake --build build --config Release
 ```
 
-Without SDL 3 or DXC, the libraries, tools and tests still build; the `neots2` app is skipped.
+This builds `neots2`. Without SDL 3 or DXC, the libraries, tools and tests still build; the app
+is skipped.
 
-## Running
+A build from this source starts from the command line:
 
 ```
 neots2 "<The Sims 2 install folder>" --menu --user "<your Sims 2 user folder>"
 neots2 "<The Sims 2 install folder>" "<user folder>/Neighborhoods/N001"
-neots2 "<The Sims 2 install folder>" "<user folder>/Neighborhoods/N001/Lots/N001_Lot1.package"
 ```
 
-The first opens the main menu, the second a neighborhood, the third a lot. In 3D views: hold down 
-and drag with the middle mouse button to turn, with the right button or WASD to move, and use the 
-wheel to zoom; on lots, Page Up/Down change storey, 1/2/3 show walls up, cutaway or down, and R turns 
-roofs on and off.
+The first opens the main menu, the second a neighborhood.
 
-For example, with the Ultimate Collection installed through Origin or the EA app, open a Command
-Prompt in the folder you built into and run:
+For example, with the Ultimate Collection installed, open a Command Prompt in the folder you 
+built into and run:
 
 ```
 cd build\Release
-neots2.exe "C:\Program Files (x86)\Origin Games\The Sims 2 Ultimate Collection" --menu
+neots2.exe "C:\Program Files\EA Games\The Sims 2 Ultimate Collection" --menu
 ```
 
 `--user` can be left out when your user folder is the usual one, in Documents\EA Games\The Sims™ 2
@@ -110,7 +147,7 @@ when it crashed). In `crash.txt` your user folder is shown as `%USERPROFILE%`; t
 contain folder names from your computer.
 
 **Send a report** uploads only those two files to [BugSplat](https://www.bugsplat.com), which keeps
-them for a month. We use them only to fix crashes. You can also open a GitHub issue and attach them
+them for a month. I use them only to fix crashes. You can also open a GitHub issue and attach them
 yourself (GitHub issues are public).
 
 ## How NeoTS2 is made
@@ -127,19 +164,15 @@ reference (none of its code is used). The AI has likely picked up general knowle
 formats and where things are stored, from public community work such as
 [OpenTS2](https://github.com/LazyDuchess/OpenTS2). None of OpenTS2's code is used.
 
-The app icon is hand-drawn by me.
+The app and launcher icons are hand-drawn by me.
 
-## Contributing
-
-Please read [CONTRIBUTING.md](CONTRIBUTING.md) first. In short:
-
-- no game files, and nothing exported from them;
-- no code taken from the game or from projects whose license doesn't allow it.
+The launcher uses [Dear ImGui](https://github.com/ocornut/imgui) (MIT) and the
+[Noto Sans](https://fonts.google.com/noto/specimen/Noto+Sans) font (SIL Open Font License 1.1).
 
 ## Disclaimer
 
 NeoTS2 is an independent fan project. It is not affiliated with, endorsed by or connected to
-Electronic Arts or Maxis. The Sims is a trademark of Electronic Arts Inc.
+Electronic Arts or Maxis. The Sims and the plumbob are trademarks of Electronic Arts Inc.
 
 Portions of this software are copyright © 2024 The FreeType Project (www.freetype.org). All
 rights reserved.
