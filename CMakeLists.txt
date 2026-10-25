@@ -451,12 +451,15 @@ else()
 
     # The renderer and the game app need a window, the keyboard and mouse and an OpenGL context from
     # SDL 3 (set SDL3_DIR to its cmake folder), or from SDL 1.2 where there is no SDL 3 (Mac OS X 10.4 and
-    # 10.5 on PowerPC). NEOTS2_PLATFORM picks: sdl3, sdl12, or auto, which takes SDL 3 when it is there.
+    # 10.5 on PowerPC). NEOTS2_PLATFORM picks: sdl3, sdl12, or auto, which takes SDL 3 when it is there (and SDL 1.2 on a Mac).
     # SDL 1.2 has the OpenGL 2 renderer only (the SDL GPU renderer needs SDL 3).
     # They also need a shader compiler for HLSL (dxc, from the Windows SDK on Windows). Windows draws with
     # Direct3D 12 and DXIL shaders, other systems with Vulkan and SPIR-V shaders, which need a dxc built with SPIR-V.
     set(NEOTS2_PLATFORM auto CACHE STRING "Where the window and input come from: sdl3, sdl12 or auto")
     set_property(CACHE NEOTS2_PLATFORM PROPERTY STRINGS auto sdl3 sdl12)
+    if(NOT NEOTS2_PLATFORM MATCHES "^(auto|sdl3|sdl12)$")
+        message(FATAL_ERROR "NEOTS2_PLATFORM is '${NEOTS2_PLATFORM}': use auto, sdl3 or sdl12")
+    endif()
     find_package(SDL3 CONFIG QUIET)
     set(platform_name "")
     if(NEOTS2_PLATFORM STREQUAL "sdl3" OR NEOTS2_PLATFORM STREQUAL "auto")
@@ -464,7 +467,8 @@ else()
             set(platform_name sdl3)
         endif()
     endif()
-    if(NOT platform_name AND (NEOTS2_PLATFORM STREQUAL "sdl12" OR NEOTS2_PLATFORM STREQUAL "auto"))
+    # Auto takes SDL 1.2 on a Mac only: elsewhere SDL 1.2 is there for other reasons, and it is asked for by name.
+    if(NOT platform_name AND (NEOTS2_PLATFORM STREQUAL "sdl12" OR (NEOTS2_PLATFORM STREQUAL "auto" AND APPLE)))
         # SDL 1.2 has no CMake package: its header, library and the main() it starts a Mac program from.
         find_path(NEOTS2_SDL12_INCLUDE_DIR SDL.h PATH_SUFFIXES SDL)
         find_library(NEOTS2_SDL12_LIBRARY NAMES SDL)
@@ -544,7 +548,12 @@ else()
         option(NEOTS2_GL2 "Build the OpenGL 2 renderer (needs spirv-cross)" OFF)
         find_program(NEOTS2_SPIRV_CROSS spirv-cross)
         set(gl2_enabled OFF)
-        if(NEOTS2_GL2 AND NEOTS2_SPIRV_CROSS)
+        # Without SDL 3 it is the only renderer there is, so it is built whatever NEOTS2_GL2 says.
+        set(gl2_wanted ${NEOTS2_GL2})
+        if(NOT sdlgpu_enabled)
+            set(gl2_wanted ON)
+        endif()
+        if(gl2_wanted AND NEOTS2_SPIRV_CROSS)
             set(gl2_enabled ON)
             set(gl_shader_outputs)
             foreach(shader ${gl2_shaders})
@@ -570,11 +579,11 @@ else()
             endforeach()
             file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/gl)
             add_custom_target(neots2_gl_shaders DEPENDS ${gl_shader_outputs})
-        elseif(NEOTS2_GL2)
+        elseif(gl2_wanted)
             message(STATUS "spirv-cross not found: the OpenGL 2 renderer is not built")
         endif()
         if(NOT sdlgpu_enabled AND NOT gl2_enabled)
-            message(FATAL_ERROR "With ${platform_name} the game draws with the OpenGL 2 renderer, which needs spirv-cross (set NEOTS2_SPIRV_CROSS) and NEOTS2_GL2 on")
+            message(FATAL_ERROR "With ${platform_name} the game draws with the OpenGL 2 renderer, which needs spirv-cross (set NEOTS2_SPIRV_CROSS)")
         endif()
 
         add_library(ts2render src/render/make_renderer.cpp)

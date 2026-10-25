@@ -132,8 +132,10 @@ SystemInfo systemInfo() {
     utsname un{};
     uname(&un);
     info.name = std::string(un.sysname) + " " + un.release;
-    info.cores = static_cast<int>(sysconf(_SC_NPROCESSORS_ONLN));
-    info.memoryMb = static_cast<int>((static_cast<std::uint64_t>(sysconf(_SC_PHYS_PAGES)) * static_cast<std::uint64_t>(sysconf(_SC_PAGESIZE))) >> 20);
+    // sysconf says -1 for what it doesn't know: one core, and no memory size, then.
+    const long cpus = sysconf(_SC_NPROCESSORS_ONLN), pages = sysconf(_SC_PHYS_PAGES), pageSize = sysconf(_SC_PAGESIZE);
+    info.cores = cpus > 0 ? static_cast<int>(cpus) : 1;
+    info.memoryMb = pages > 0 && pageSize > 0 ? static_cast<int>((static_cast<std::uint64_t>(pages) * static_cast<std::uint64_t>(pageSize)) >> 20) : 0;
     return info;
 }
 

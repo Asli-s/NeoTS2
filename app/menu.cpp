@@ -1756,14 +1756,22 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
     {
         const auto rendererOwner = app::openRenderer(window, options.backend, windowOptions, shaders, !options.shot.empty());
         ts2::render::IRenderer& renderer = *rendererOwner;
+        // The window can come smaller than asked (SDL 1.2 keeps it on the screen): the game is laid out for the one it has.
+        MenuOptions sized = options;
+        int actualWidth = 0, actualHeight = 0;
+        window->size(actualWidth, actualHeight);
+        if (actualWidth > 0 && actualHeight > 0) {
+            sized.width = actualWidth;
+            sized.height = actualHeight;
+        }
         renderer.setBumpMapping(options.bumpMapping);
         renderer.setFloorAndWallNormalMapping(options.wallBumps);
-        ts2::diag::info(std::format("drawing with {} in a {} x {} window", renderer.device(), width, height));
+        ts2::diag::info(std::format("drawing with {} in a {} x {} window", renderer.device(), sized.width, sized.height));
         ts2::diag::setTimings(options.timings);
         // What shows around the menu: the game's dark blue (as the game shows it).
         renderer.setClearColor(1 / 255.f, 35 / 255.f, 62 / 255.f);
         {
-            Game game(data, fonts, renderer, install, options);
+            Game game(data, fonts, renderer, install, sized);
             game.run();
             // Loads still running are waited for as the game goes. The window goes first so that
             // quitting doesn't look frozen meanwhile. Normal closing takes a second or two.

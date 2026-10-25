@@ -16,7 +16,8 @@ namespace ts2::platform {
 void quit();
 [[nodiscard]] std::string lastError();
 
-// Nanoseconds since the program started its video system, and a pause for the thread.
+// Nanoseconds from a start near the program's own (a count from the computer's start would be too large
+// for the floats animations are timed in), and a pause for the thread.
 [[nodiscard]] std::uint64_t ticksNs();
 void delayMs(std::uint32_t milliseconds);
 
@@ -46,7 +47,7 @@ struct Event {
     // A mouse event: the pointer in the window's own units, and for motion how far it moved.
     float x = 0, y = 0;
     float xrel = 0, yrel = 0;
-    MouseButton button = MouseButton::Left;  // for a button's press or release
+    MouseButton button = MouseButton::Other; // for a button's press or release (no event but one of those is a click of Left)
     std::uint8_t buttons = 0;                // for motion, the buttons held: one bit for each MouseButton
     float wheel = 0;                         // for the wheel, notches (positive: away from the player)
 

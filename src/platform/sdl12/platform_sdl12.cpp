@@ -7,7 +7,9 @@
 #include <SDL.h>
 
 #include <algorithm>
+#include <iterator>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 namespace ts2::platform {
@@ -87,6 +89,9 @@ std::uint8_t buttonsOf(Uint8 state) {
 Window* gWindow = nullptr;            // the only one
 SDL_Cursor* gDefaultCursor = nullptr; // the arrow the window started with
 bool gContextMade = false;
+bool gKeyDown[SDLK_LAST] = {};          // the keys held, to tell a press from its repeats
+GlContext* gContext = nullptr;          // the context made with the window
+std::thread::id gDrawingThread;         // the one that made it, where it is current
 
 } // namespace
 
@@ -119,8 +124,12 @@ bool pollEvent(Event& out) {
         case SDL_KEYDOWN:
         case SDL_KEYUP:
             out.type = e.type == SDL_KEYDOWN ? Event::Type::KeyDown : Event::Type::KeyUp;
-            // SDL 1.2 knows a key by its symbol only, and sends no repeats unless asked to.
+            // SDL 1.2 knows a key by its symbol only, and sends a held key's repeats as presses again.
             out.key = out.scancode = keyOf(e.key.keysym.sym);
+            if (const auto sym = static_cast<std::size_t>(e.key.keysym.sym); sym < std::size(gKeyDown)) {
+                out.repeat = e.type == SDL_KEYDOWN && gKeyDown[sym];
+                gKeyDown[sym] = e.type == SDL_KEYDOWN;
+            }
             return true;
         case SDL_MOUSEMOTION:
             out.type = Event::Type::MouseMotion;
@@ -206,9 +215,27 @@ std::unique_ptr<Window> Window::create(const WindowOptions& options) {
     // A window that is resized is made again by SDL 1.2, and its OpenGL context with it, which would lose
     // everything in it. So it stays the size it was made.
     SDL_WM_SetCaption(options.title.c_str(), options.title.c_str());
-    if (SDL_SetVideoMode(width, height, 0, flags) == nullptr) {
+    SDL_Surface* screen = SDL_SetVideoMode(width, height, 0, flags);
+    if (screen == nullptr && options.gl) {
+        // A Mac set to "Thousands" of colours has no 8 bits for each: ask for what it has.
+        const GlRequest& gl = *options.gl;
+        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, gl.doubleBuffer ? 1 : 0);
+        SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, gl.depthBits);
+        SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 5);
+        SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 5);
+        SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 5);
+        SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 0);
+        screen = SDL_SetVideoMode(width, height, 0, flags);
+        if (screen == nullptr) {
+            SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 16);
+            screen = SDL_SetVideoMode(width, height, 0, flags);
+        }
+    }
+    if (screen == nullptr) {
         throw std::runtime_error(SDL_GetError());
     }
+    // Held keys repeat as they do on the other platforms (the camera keys turn for as long as they are held).
+    SDL_EnableKeyRepeat(SDL_DEFAULT_REPEAT_DELAY, SDL_DEFAULT_REPEAT_INTERVAL);
     gDefaultCursor = SDL_GetCursor();
     std::unique_ptr<Window> window(new Window);
     window->impl_->glWindow = options.gl.has_value();
@@ -255,11 +282,15 @@ GlContextPtr Window::createGlContext(bool shared) {
         return nullptr;
     }
     gContextMade = true;
-    return GlContextPtr(new GlContext);
+    gContext = new GlContext;
+    gDrawingThread = std::this_thread::get_id();
+    return GlContextPtr(gContext);
 }
 
-bool Window::makeCurrent(GlContext*) {
-    return true;  // the one context is current on the thread that made the window, the only one that draws
+bool Window::makeCurrent(GlContext* context) {
+    // The one context is current on the thread that made the window, and stays: no other thread can have it,
+    // and nothing releases it.
+    return context != nullptr && context == gContext && std::this_thread::get_id() == gDrawingThread;
 }
 
 void Window::swapBuffers() {
@@ -269,6 +300,9 @@ void Window::swapBuffers() {
 void Window::setSwapInterval(int) {}
 
 void GlContextDeleter::operator()(GlContext* context) const {
+    if (context == gContext) {
+        gContext = nullptr;
+    }
     delete context;
     gContextMade = false;
 }
