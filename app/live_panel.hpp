@@ -54,11 +54,14 @@ public:
     // Shows the selected Sim's life stage, how far through it the Sim is and the age tooltip.
     void setAge(std::int16_t lifeStage, int lived, int length, const ts2::content::AgeTip& tip) { age_.show(lifeStage, lived, length, tip); }
     // Shows the selected Sim's Simology: its life stage and person data.
-    void setSimology(std::int16_t lifeStage, std::span<const std::int16_t> personData) { simology_.show(lifeStage, personData); }
+    void setSimology(std::int16_t lifeStage, std::span<const std::int16_t> personData, std::span<const std::int16_t> secretLots) {
+        simology_.show(lifeStage, personData, secretLots);
+    }
     // Shows the selected Sim's skills and career from its person data.
     void setJob(std::span<const std::int16_t> personData, std::span<const std::int16_t> globals, ts2::sim::CodeSource& code) {
         job_.show(personData, globals, code);
     }
+    void setBadges(std::span<const std::int16_t> personData, int badges) { job_.showBadges(personData, badges); }
     // Whether Simology's memories are open, and showing them.
     bool showsMemories() const { return sub_ == Sub::Simology && simology_.showsMemories(); }
     void setMemories(std::vector<MemoriesPage::Memory> memories) { simology_.showMemories(std::move(memories)); }
@@ -99,8 +102,10 @@ private:
     int panel_ = -1;
     int wantsContent_ = -1, needsContent_ = -1, relationshipsContent_ = -1, jobContent_ = -1, simologyContent_ = -1,
         rewardsContent_ = -1;
-    bool wantsOpen_ = false;
-    Sub sub_ = Sub::None;
+    // The first lot opens with the wants and the needs open, as in the game. Later lots keep the
+    // panel as it was left.
+    bool wantsOpen_ = true;
+    Sub sub_ = Sub::Needs;
     NeedsPanel needs_;
     MoodMeter mood_;
     AspirationBars aspirationBars_;

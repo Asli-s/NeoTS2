@@ -7,6 +7,7 @@
 #include "formats/objt.hpp"
 #include "formats/stringmap.hpp"
 #include "formats/fencepostlayer.hpp"
+#include "formats/neighbor_remap.hpp"
 #include "formats/roofs.hpp"
 #include "formats/terrain.hpp"
 #include "formats/walllayer.hpp"
@@ -77,6 +78,10 @@ struct Lot {
     std::map<std::pair<std::int16_t, std::int16_t>, std::vector<std::int32_t>> relationships;
     // The simulator's global variables as saved with the lot (SIMI), empty when it has none.
     std::vector<std::int16_t> globals;
+    // The lot's neighbor id remap tables (kNeighborRemap, instance 2), when it has them.
+    std::optional<neighbor_remap::NeighborRemap> neighborRemap;
+    // Remap tables the engine can't read: the other type the game looks for first, or a broken one.
+    bool unreadNeighborRemap = false;
 };
 
 constexpr std::uint32_t kRoomGridInstance = 9;
@@ -98,6 +103,9 @@ constexpr std::uint32_t kFloorHeightGridInstance = 1;
 // A byte per quarter tile per level, in the floor grid's quarter order: 0 where the level has no
 // surface (on the ground storey, over a pool or a sunken pond).
 constexpr std::uint32_t kSurfaceGridInstance = 21;
+// Four 32-bit platform region ids per tile per level, in the floor grid's quarter order and from its
+// lowest level, -1 where no platform is (see World::platformRegion).
+constexpr std::uint32_t kPlatformRegionGridInstance = 0x14;
 
 // The covering layer names the walls of the wall graph (instance 24), whose ids the room graph shares
 // only on lots whose walls were never renumbered: this gives the coverings by room graph wall, matched

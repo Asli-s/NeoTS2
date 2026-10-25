@@ -318,6 +318,50 @@ int surveyDataTables(ts2::dbpf::Package& package) {
     return failed == 0 ? 0 : 1;
 }
 
+void printDataValue(const ts2::datatables::Value& v) {
+    using Type = ts2::datatables::Value::Type;
+    switch (v.type) {
+    case Type::Float: std::printf("%g", v.f); break;
+    case Type::Int: std::printf("%d", v.i); break;
+    case Type::Unsigned: std::printf("%u", v.u); break;
+    case Type::Bool: std::printf(v.b ? "true" : "false"); break;
+    case Type::String: std::printf("\"%s\"", v.s.c_str()); break;
+    case Type::Table:
+        std::printf("{");
+        for (const auto& e : v.table) {
+            printDataValue(e.key);
+            std::printf("=");
+            printDataValue(e.value);
+            std::printf(" ");
+        }
+        std::printf("}");
+        break;
+    }
+}
+
+// Prints every script data table whose name contains `name`, with the object it belongs to.
+int printDataTables(ts2::dbpf::Package& package, std::string_view name) {
+    for (const auto& e : package.entries()) {
+        if (e.key.type != ts2::types::kDataTables) {
+            continue;
+        }
+        for (const auto& t : ts2::datatables::parse(package.read(e)).tables) {
+            if (t.name.find(name) == std::string::npos) {
+                continue;
+            }
+            std::printf("object %u table %u \"%s\":", e.key.instance, t.id, t.name.c_str());
+            for (const auto& v : t.values) {
+                std::printf(" ");
+                printDataValue(v.key);
+                std::printf("=");
+                printDataValue(v.value);
+            }
+            std::printf("\n");
+        }
+    }
+    return 0;
+}
+
 // Reads the neighborhood record (NGBH) and summarizes its inventories.
 int showNeighborhoodRecord(ts2::dbpf::Package& package) {
     for (const auto& e : package.entries()) {
@@ -348,7 +392,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
                      "Usage: dbpfdump <file.package> [--list | --verify | --grep <text> |\n"
                      "                                --str <group> <instance> | --str-survey | --ttab-survey | --lua-survey |\n"
-                     "                                --ngbh | --datatable-survey |\n"
+                     "                                --ngbh | --datatable-survey | --datatables <name> |\n"
                      "                                --hex <type> <group> <instance> [bytes] |\n"
                      "                                --extract <type> <folder>]\n");
         return 1;
@@ -378,6 +422,9 @@ int main(int argc, char** argv) {
         }
         if (mode == "--ttab-survey") {
             return surveyInteractionTables(package);
+        }
+        if (mode == "--datatables" && argc > 3) {
+            return printDataTables(package, argv[3]);
         }
         if (mode == "--datatable-survey") {
             return surveyDataTables(package);

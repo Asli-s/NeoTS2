@@ -95,6 +95,18 @@ bool isObjectPackage(const fs::path& path) {
            lower(utf8(folder.parent_path().parent_path().filename())) == "res";
 }
 
+// A catalog bundle holding objects (TSData/Res/Catalog/Bins/*.bundle.package): the Holiday packs'
+// objects, among them the holiday NPCs, are only in these. globalcatbin holds no objects.
+bool isObjectBundle(const fs::path& path) {
+    const std::string file = lower(utf8(path.filename()));
+    constexpr std::string_view kSuffix = ".bundle.package";
+    if (file.size() <= kSuffix.size() || !file.ends_with(kSuffix) || file == "globalcatbin.bundle.package") {
+        return false;
+    }
+    const fs::path folder = path.parent_path();
+    return lower(utf8(folder.filename())) == "bins" && lower(utf8(folder.parent_path().filename())) == "catalog";
+}
+
 } // namespace
 
 std::vector<Product> findProducts(const fs::path& installRoot) {
@@ -110,7 +122,11 @@ std::vector<Product> findProducts(const fs::path& installRoot) {
         if (++entries > kMaxEntries) {
             throw std::runtime_error(utf8(installRoot) + " holds far more files than a game install");
         }
-        if (!item.is_regular_file() || !isObjectPackage(item.path())) {
+        if (!item.is_regular_file()) {
+            continue;
+        }
+        const bool bundle = isObjectBundle(item.path());
+        if (!bundle && !isObjectPackage(item.path())) {
             continue;
         }
 
@@ -142,15 +158,15 @@ std::vector<Product> findProducts(const fs::path& installRoot) {
             order = nextUnknown++;
         }
         product->releaseOrder = order;
-        product->objectPackages.push_back(item.path());
+        (bundle ? product->objectBundles : product->objectPackages).push_back(item.path());
     }
 
     std::vector<Product> products;
+    // By name, so the order is the same on every system and not the folder listing's.
+    const auto byName = [](const fs::path& a, const fs::path& b) { return lower(utf8(a.filename())) < lower(utf8(b.filename())); };
     for (auto& [order, product] : byOrder) {
-        std::sort(product.objectPackages.begin(), product.objectPackages.end(),
-                  [](const fs::path& a, const fs::path& b) {
-                      return lower(utf8(a.filename())) < lower(utf8(b.filename()));
-                  });
+        std::sort(product.objectPackages.begin(), product.objectPackages.end(), byName);
+        std::sort(product.objectBundles.begin(), product.objectBundles.end(), byName);
         products.push_back(std::move(product));
     }
     return products;
@@ -217,6 +233,9 @@ std::vector<fs::path> objectLoadOrder(const std::vector<Product>& products) {
     });
 
     std::vector<fs::path> order;
+    for (const auto& product : products) {
+        order.insert(order.end(), product.objectBundles.begin(), product.objectBundles.end());
+    }
     for (const auto& s : snapshots) {
         order.push_back(s.path);
     }

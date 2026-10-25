@@ -63,13 +63,19 @@ void findLocationForCentresASimOnItsTile() {
     CHECK(sim.x == 3 * 65536 + 32768 && sim.y == 4 * 65536 + 32768 && sim.data[1] == 2);
     sim.data[1] = 3;
     CHECK(vm.run(sim, 0x1001).outcome == Outcome::True && sim.data[1] == 3);
-    // Mode 1 leaves the stack object where it is.
+    // Mode 1 leaves the stack object where it is, but out of the slot it was in.
     Instruction stay = call(0x0010, T, F);
     stay.operands = {1, 0, 0x02};
     code.add(kObjectGroup, 0x1002, bhav({stay}));
     sim.thread.stackObjectId = 2;
-    const auto x = w.world.find(2)->x;
-    CHECK(vm.run(sim, 0x1002).outcome == Outcome::True && w.world.find(2)->x == x);
+    auto& held = *w.world.find(2);
+    sim.slots.assign(2, 0);
+    sim.slots[0] = held.id;
+    held.data[2] = sim.id;
+    held.data[3] = 0;
+    const auto x = held.x;
+    CHECK(vm.run(sim, 0x1002).outcome == Outcome::True && held.x == x);
+    CHECK(sim.slots[0] == 0 && held.data[2] == 0 && held.data[3] == -1);
 }
 
 // Johnny's drop: the stack object goes next to the Sim in local 0, whose own tile isn't empty.
@@ -215,7 +221,10 @@ void findLocationForPlacesByAGlobalSlot() {
 // in the stack object's array 0. Ids: the first free one from the counter (one past the highest),
 // or, past the neighbor count, the first gap from 1.
 void makeNewCharacterAddsANeighbor() {
+    constexpr std::uint32_t kTemplatePerson = 0x7FD96B54, kTemplateDog = 0x0F83C946;
     MemoryCodeSource code;
+    code.addObjectType(kObjectGroup, typed(kTemplatePerson, 0x10));
+    code.addObjectType(kObjectGroup, typed(kTemplateDog, 0x10));
     Instruction make = primitiveCall(0x0013, T, F);
     make.operands = {0, 0, 1, 0, 0, 0, 0, 0, 0, 0x00, 0, 0, 0, 0, 2, 0};  // skin, age, gender, ..., species
     SmallWorld w;
@@ -241,6 +250,15 @@ void makeNewCharacterAddsANeighbor() {
     CHECK(make1(4, 2, 1).outcome == Outcome::True && w.controller->arrays[0] == std::vector<std::int16_t>{10});
     made = w.world.neighbor(10);
     CHECK(made != nullptr && made->personData[0x3A] == 16 && made->personData[0x41] == 0 && made->personData[0xBA] == 1);
+    // Each new Sim is a person made from its species' template, under a GUID of its own.
+    const auto* person = code.objectType(w.world.neighbor(9)->guid);
+    const auto* dog = code.objectType(made->guid);
+    CHECK(person != nullptr && dog != nullptr && person != dog);
+    CHECK(person->definition.field(0x09) == 2 && person->definition.guid() == w.world.neighbor(9)->guid);
+    CHECK(person->definition.field(0x1D) == person->definition.field(0x0E) && person->definition.field(0x1E) == person->definition.field(0x0F));
+    CHECK((static_cast<std::uint32_t>(person->definition.field(0x47)) << 16 | person->definition.field(0x46)) == kTemplatePerson);
+    CHECK((static_cast<std::uint32_t>(dog->definition.field(0x47)) << 16 | dog->definition.field(0x46)) == kTemplateDog);
+    CHECK(make1(8, 1, 3).outcome == Outcome::False);  // no cat template
     CHECK(hood->neighborIds.size() == 2);  // the saved neighborhood itself is untouched
     CHECK(make1(8, 1, 4).outcome == Outcome::Error);  // species out of range
     w.controller->arrays.clear();
@@ -677,6 +695,41 @@ void createObjectGoesInMyHand() {
     CHECK(vm.run(sim, 0x1000).outcome == Outcome::Unsupported);
 }
 
+// Placements 4 and 0xA put the new object in slot byte 9 of the stack object or of the object in
+// temp 0, at its place. No such object is false. A missing or full slot needs the game's fit test.
+void createObjectGoesInAnotherObjectsSlot() {
+    MemoryCodeSource code;
+    code.addObjectType(kLampGroup, typed(kLampGuid));
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    auto& meter = world.create(kObjectGroup, typed(0x52525252));
+    meter.slots.assign(3, 0);
+    meter.x = 4 << 16 | 0x8000;
+    meter.y = 6 << 16 | 0x8000;
+    meter.level = 1;
+    Instruction intoStackObject = createObject(kLampGuid, 0x04, 0, T, F);
+    intoStackObject.operands[9] = 2;
+    Instruction intoTemp0Object = createObject(kLampGuid, 0x0A, 0, T, F);
+    intoTemp0Object.operands[9] = 1;
+    code.add(kObjectGroup, 0x1000, bhav({intoStackObject}));
+    code.add(kObjectGroup, 0x1001, bhav({intoTemp0Object}));
+    Vm vm(code, {}, &world);
+    sim.thread.stackObjectId = meter.id;
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::True);
+    const ts2::sim::SimObject* made = world.find(sim.thread.stackObjectId);
+    CHECK(made != nullptr && meter.slots[2] == made->id && made->data[2] == meter.id && made->data[3] == 2 &&
+          made->x == meter.x && made->y == meter.y);
+    sim.thread.stackObjectId = meter.id;
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::Unsupported);
+
+    sim.thread.temps[0] = meter.id;
+    CHECK(vm.run(sim, 0x1001).outcome == Outcome::True && meter.slots[1] == sim.thread.stackObjectId);
+    sim.thread.temps[0] = 999;
+    CHECK(vm.run(sim, 0x1001).outcome == Outcome::False);
+    sim.thread.stackObjectId = 999;
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::False);
+}
+
 // A removed object leaves its container's slot when removed objects are freed, as the game deletes
 // it: the slot is empty again and the object's data 2 and 3 no longer name it.
 void removedObjectsLeaveTheirSlot() {
@@ -896,6 +949,29 @@ void createObjectWithUnknownGuidReturnsFalse() {
     CHECK(world.size() == 1);
 }
 
+// Flag 0x04 creates the Sim of the neighbor whose id is the stack object, whatever the operand GUID
+// and flag 0x80 say. An unknown neighbor is false.
+void createObjectCanMakeANeighborsSim() {
+    constexpr std::uint32_t kNeighborSimGuid = 0x5A5A5A5A;
+    MemoryCodeSource code;
+    code.addObjectType(kLampGroup, typed(kLampGuid));
+    code.addObjectType(kLampGroup, typed(kNeighborSimGuid, ts2::sim::kPersonType));
+    code.add(kObjectGroup, 0x1000, bhav({createObject(kLampGuid, 0x06, 0x04 | 0x80, T, F)}));
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
+    hood->neighborIds = {41};
+    hood->neighbors[41].guid = kNeighborSimGuid;
+    world.setNeighborhood(hood);
+    Vm vm(code, {}, &world);
+    sim.thread.stackObjectId = 41;
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::True);
+    const ts2::sim::SimObject* made = world.find(sim.thread.stackObjectId);
+    CHECK(made != nullptr && made->definition.guid() == kNeighborSimGuid && made->personData[0x1F] == 41);
+    sim.thread.stackObjectId = 42;
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::False);
+}
+
 void createObjectRefusesTemplates() {
     MemoryCodeSource code;
     code.addObjectType(kLampGroup, typed(kLampGuid, 0x10));
@@ -977,6 +1053,15 @@ void relationshipWithMissingObjectIsAnError() {
     auto& a = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
     Vm vm(code, {}, &world);
     CHECK(vm.run(a, 0x1000).outcome == Outcome::Error);
+
+    // An object removed this tick is still there by id until the world is purged.
+    auto& gone = world.create(kObjectGroup, typed(kFridgeGuid));
+    code.add(kObjectGroup, 0x1001, bhav({
+        relationship(0, 0x00, owner::kMyData, 0x0B, owner::kStackObjectId, 0, owner::kTemp, 0, T, F),
+    }));
+    world.remove(gone);
+    a.thread.stackObjectId = gone.id;
+    CHECK(vm.run(a, 0x1001).outcome == Outcome::True);
 }
 
 // With flag 0x08 only A must be an object: B (here a neighbor id, 9) just picks A's list.
@@ -1635,6 +1720,11 @@ void outsideIsRegionZeroInLayerZero() {
         CHECK(vm.run(me, 0x1000).outcome == Outcome::True);
         CHECK(me.thread.temps[1] == outside);
     }
+    // Room -1, an object in no room, is not outside in either layer.
+    me.thread.temps[0] = -1;
+    CHECK(vm.run(me, 0x1000).outcome == Outcome::True && me.thread.temps[1] == 0);
+    me.thread.temps[0] = -1;
+    CHECK(vm.run(me, 0x1001).outcome == Outcome::True && me.thread.temps[1] == 0);
     me.thread.temps[0] = 5;
     const RunResult layer1 = vm.run(me, 0x1001);
     CHECK(layer1.outcome == Outcome::Unsupported && layer1.reason == "room has no region in that layer");
@@ -1662,6 +1752,7 @@ std::vector<Test> vmObjectTests() {
         {"Create Object can take its GUID from temps", createObjectCanTakeItsGuidFromTemps},
         {"Create Object can go below the object in a local", createObjectCanGoBelowTheObjectInALocal},
         {"Create Object goes in my hand", createObjectGoesInMyHand},
+        {"Create Object goes in another object's slot", createObjectGoesInAnotherObjectsSlot},
         {"removed objects leave their slot", removedObjectsLeaveTheirSlot},
         {"use count follows interaction frames", useCountFollowsInteractionFrames},
         {"Sims forget a deleted object", simsForgetADeletedObject},
@@ -1671,6 +1762,7 @@ std::vector<Test> vmObjectTests() {
         {"Create Object passes my id and stack object", createObjectPassesMyIdAndStackObject},
         {"Create Object passes nothing to a Main without params", createObjectPassesNothingToMainWithoutParams},
         {"Create Object with unknown GUID returns false", createObjectWithUnknownGuidReturnsFalse},
+        {"Create Object can make a neighbor's Sim", createObjectCanMakeANeighborsSim},
         {"Create Object refuses templates", createObjectRefusesTemplates},
         {"Create Object rejects two passing values", createObjectRejectsTwoPassingValues},
         {"Relationship writes and reads back", relationshipWritesAndReadsBack},

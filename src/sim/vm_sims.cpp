@@ -19,6 +19,22 @@ bool Execution::genericSimsCall(const bhav::Instruction& in) {
         world().markFootprintChanged(stackObject());
         return true;
     }
+    if (call == kDisableBuildBuyGenericCall) {
+        world().blockBuildBuy(me().id);
+        return true;
+    }
+    if (call == kEnableBuildBuyGenericCall) {
+        world().unblockBuildBuy(me().id);
+        return true;
+    }
+    if (call == kAbortInteractionsGenericCall) {
+        // Objects queued for delete are still found.
+        if (world().findIncludingRemoved(stackObject()) == nullptr) {
+            throw Stop{Outcome::Error, "stack object does not exist", std::to_string(stackObject())};
+        }
+        tellSimsObjectGoes(stackObject());
+        return true;
+    }
     if (call == kOkToIdleHereGenericCall) {
         return okToIdleHere(world(), me());
     }
@@ -43,6 +59,27 @@ bool Execution::genericSimsCall(const bhav::Instruction& in) {
         }
         return true;
     }
+    if (call == kRemappedNeighborIdGenericCall) {
+        if (world().neighborRemapUnread()) {
+            throw Stop{Outcome::Unsupported, "Get Remapped Neighbor Id with unreadable remap tables", ""};
+        }
+        // The id is sign-extended, so a negative one is never found.
+        const auto id = static_cast<std::uint32_t>(static_cast<std::int32_t>(thread_.temps[0]));
+        std::int16_t result = -1;
+        if (const auto& remap = world().neighborRemap()) {
+            if (const auto it = remap->find(id); it != remap->end()) {
+                result = static_cast<std::int16_t>(it->second);
+            }
+        }
+        thread_.temps[1] = result;
+        return true;
+    }
+    if (call == kFitsWithFootprintGenericCall) {
+        return fitsWithFootprint();
+    }
+    if (call == kOutfitsInformationGenericCall) {
+        return outfitsInformation();
+    }
     if (call == kAddToFamilyGenericCall) {
         return addToFamily();
     }
@@ -50,6 +87,60 @@ bool Execution::genericSimsCall(const bhav::Instruction& in) {
         return me().isPerson();
     }
     throw Stop{Outcome::Unsupported, "Generic Sims Call not implemented", hex(call, 2)};
+}
+
+// The outfit category number in temp 0 becomes the category's flag (0 and any number not listed
+// is everyday). Temp 3 = 0 asks about the family's wardrobe and -1 about every character, which
+// are not done yet. A missing object, or one without looks, has none.
+bool Execution::outfitsInformation() {
+    constexpr std::array<std::uint32_t, 14> kCategoryFlags{1, 0x80, 8, 0x200, 0x20, 0x10, 0x400, 1, 0x100, 2, 4, 0x40, 1, 0x1000};
+    const std::int16_t who = thread_.temps[3];
+    if (who == 0 || who == -1) {
+        throw Stop{Outcome::Unsupported, "Get Outfits Information for the family or every character not implemented", std::to_string(who)};
+    }
+    const auto number = static_cast<std::size_t>(static_cast<std::uint16_t>(thread_.temps[0]));
+    const std::uint32_t category = number < kCategoryFlags.size() ? kCategoryFlags[number] : 1;
+    std::int16_t result = 0;
+    if (const SimObject* object = world().findIncludingRemoved(who)) {
+        const auto& hasOutfit = world().hasOutfit();
+        if (!hasOutfit) {
+            throw Stop{Outcome::Unsupported, "Get Outfits Information needs the Sims' looks", ""};
+        }
+        result = hasOutfit(*object, category).value_or(false) ? 1 : 0;
+    }
+    thread_.temps[1] = result;
+    return true;
+}
+
+// The game swaps the footprint index in, runs the test where the object stands and swaps it back.
+bool Execution::fitsWithFootprint() {
+    SimObject* object = world().find(stackObject());
+    if (object == nullptr) {
+        throw Stop{Outcome::Error, "stack object does not exist", std::to_string(stackObject())};
+    }
+    const std::int16_t footprint = thread_.temps[0];
+    if (object->data[kFootprintIndexField] == footprint) {
+        return true;
+    }
+    const auto& fits = world().objectFits();
+    if (!fits) {
+        return true;
+    }
+    if (object->x == kOffLot || object->y == kOffLot) {
+        throw Stop{Outcome::Unsupported, "footprint test for an object off the lot", std::to_string(object->id)};
+    }
+    const std::int16_t saved = object->data[kFootprintIndexField];
+    object->data[kFootprintIndexField] = footprint;
+    bool result = false;
+    try {
+        result = fits(*object, static_cast<float>(object->x) / 65536.0f, static_cast<float>(object->y) / 65536.0f, object->level,
+                      object->data[kDirectionField]);
+    } catch (...) {
+        object->data[kFootprintIndexField] = saved;
+        throw;
+    }
+    object->data[kFootprintIndexField] = saved;
+    return result;
 }
 
 // "Add to family": the neighbor whose id is my stack object joins family temp 0, which is made
@@ -87,8 +178,9 @@ bool Execution::addToFamily() {
 }
 
 // Make New Character: a new neighbor of the age, gender and species in my locals (bytes 1, 2 and 14).
-// Age and gender 0 or less are picked at random. Its id goes into the stack object's object
-// array 0, which is emptied first. False when the neighborhood has no free id.
+// Age and gender 0 or less are picked at random. Its Sim gets a definition of its own (see
+// madeCharacterType). Its id goes into the stack object's object array 0, which is emptied first.
+// False when the neighborhood has no free id or the template type is missing.
 bool Execution::makeNewCharacter(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     const std::uint8_t flags = o[9];
@@ -105,7 +197,8 @@ bool Execution::makeNewCharacter(const bhav::Instruction& in, Frame& f) {
     if (flags & kNewCharacterTemplateFromToken) {
         throw Stop{Outcome::Unsupported, "Make New Character from an inventory token", ""};
     }
-    // The template (else the species' own) gives the new character file, which isn't made yet.
+    // The template the new Sim's definition is made from: the type in temps 0 and 1, else the species' own.
+    std::optional<std::uint32_t> templateGuid;
     if (flags & kNewCharacterTemplateInTemps) {
         const std::uint32_t guid = static_cast<std::uint16_t>(thread_.temps[0]) |
                                    static_cast<std::uint32_t>(static_cast<std::uint16_t>(thread_.temps[1])) << 16;
@@ -116,6 +209,7 @@ bool Execution::makeNewCharacter(const bhav::Instruction& in, Frame& f) {
         if (type->definition.field(objd::field::kType) == kNotCreatableObjectType) {
             throw Stop{Outcome::Error, "a new character can't be made from this object type", hex(guid, 8)};
         }
+        templateGuid = guid;
     }
     auto random = [&](std::uint32_t n) {
         return static_cast<std::uint32_t>((static_cast<std::uint64_t>(static_cast<std::uint32_t>(rng_())) * n) >> 32);
@@ -133,8 +227,16 @@ bool Execution::makeNewCharacter(const bhav::Instruction& in, Frame& f) {
     // The skin color (byte 0) and the outfit (flag 0x40) only shape the new character's look,
     // which isn't made yet.
 
+    // Human, large dog, small dog and cat templates.
+    constexpr std::array<std::uint32_t, 4> kSpeciesTemplates{0x7FD96B54, 0x0F83C946, 0x111D8FFF, 0x911D900A};
+    const ObjectType* type = code_.objectType(templateGuid.value_or(kSpeciesTemplates[static_cast<std::size_t>(species)]));
+    // Without a neighborhood there is no neighbor to add, so nothing is made. Otherwise each retry
+    // would keep a new definition.
+    if (type == nullptr || world().neighbors() == nullptr) {
+        return false;
+    }
     SavedNeighbor made;
-    made.guid = 0;  // the new character's own GUID is not known yet
+    made.guid = madeCharacterType(*type, random(8));
     made.personData.assign(kNeighborPersonDataCount, 0);
     made.personData[kSpeciesPersonData] = static_cast<std::int16_t>(species);
     made.personData[kNewAgePersonData] = newCharacterAge(age);
@@ -148,6 +250,34 @@ bool Execution::makeNewCharacter(const bhav::Instruction& in, Frame& f) {
     }
     holder->arrays[0].assign(1, *id);
     return true;
+}
+
+// The definition the game gives a new character: its template's, now a person (type 2), under a
+// new GUID that also fills fields 0x1D and 0x1E, with the template's GUID in fields 0x46 and 0x47.
+// A new GUID is `top` (0-7) in its top three bits over a 29-bit count. Returns that GUID.
+// Field 0x2C also changes in the game (to a value the same for all of one game's new Sims), what
+// it holds is not known yet and it keeps the template's.
+std::uint32_t Execution::madeCharacterType(const ObjectType& from, std::uint32_t top) {
+    constexpr std::size_t kGuidCopy1 = 0x1D, kGuidCopy2 = 0x1E, kTemplateGuid1 = 0x46, kTemplateGuid2 = 0x47;
+    std::uint32_t guid = 0;
+    // A GUID some type already has would hide it, so such a count is skipped (an engine guard, the
+    // game's time count doesn't meet saved GUIDs).
+    do {
+        guid = (top & 7u) << 29 | world().nextGuidCount();
+    } while (code_.objectType(guid) != nullptr);
+    ObjectType made = from;
+    auto& fields = made.definition.fields;
+    fields.resize(std::max<std::size_t>(fields.size(), kTemplateGuid2 + 1), 0);
+    const std::uint32_t templateGuid = from.definition.guid();
+    fields[objd::field::kType] = kPersonType;
+    fields[objd::field::kGuid1] = fields[kGuidCopy1] = static_cast<std::uint16_t>(guid);
+    fields[objd::field::kGuid2] = fields[kGuidCopy2] = static_cast<std::uint16_t>(guid >> 16);
+    fields[kTemplateGuid1] = static_cast<std::uint16_t>(templateGuid);
+    fields[kTemplateGuid2] = static_cast<std::uint16_t>(templateGuid >> 16);
+    if (code_.addMadeObjectType(std::move(made)) == nullptr) {
+        throw Stop{Outcome::Unsupported, "this code source can't hold a new character's definition", ""};
+    }
+    return guid;
 }
 
 // Person data "age" of a new character from its age flag: baby 0x20, toddler 1, child 2, teen 4,
@@ -193,13 +323,14 @@ bool Execution::relationship(const bhav::Instruction& in, Frame& f) {
         }
         foundNeighbor = &world().neighborRelationship(from, to);
     } else if (flags & kRelationshipOnlyA) {
-        if (world().find(from) == nullptr) {
+        if (world().findIncludingRemoved(from) == nullptr) {
             throw Stop{Outcome::Error, "could not find object reference", std::to_string(from)};
         }
         found = &world().relationship(from, to);
     } else {
-        const SimObject* a = world().find(from);
-        const SimObject* b = world().find(to);
+        // An object removed this tick is still found by id, as in the game.
+        const SimObject* a = world().findIncludingRemoved(from);
+        const SimObject* b = world().findIncludingRemoved(to);
         if (a == nullptr || b == nullptr) {
             throw Stop{Outcome::Error, "could not find object reference",
                        std::to_string(from) + " " + std::to_string(to)};
@@ -380,13 +511,9 @@ bool Execution::wantSatisfy(const bhav::Instruction& in, Frame& f) {
     }
     const std::int16_t argument = read(o[7], static_cast<std::uint16_t>(o[8] | o[9] << 8), f);
     const std::int16_t value = read(o[10], static_cast<std::uint16_t>(o[11] | o[12] << 8), f);
-    if (!def->simArrayTree.empty()) {
-        throw Stop{Outcome::Unsupported, "Want Satisfy for wants with a Sim list tree", def->simArrayTree};
-    }
 
     // The request the Sim's wants are compared with.
     swaf::Want request;
-    request.id = static_cast<std::uint16_t>(sim);
     request.guid = guid;
     request.type = static_cast<std::uint8_t>(def->argument);
     request.value = value;
@@ -412,13 +539,61 @@ bool Execution::wantSatisfy(const bhav::Instruction& in, Frame& f) {
         break;
     }
 
-    auto& wants = world().neighborWants(sim);
-    const auto matched = std::remove_if(wants.begin(), wants.end(), [&](const swaf::Want& w) {
-        return wantMatches(w, request, def->op);
-    });
-    const bool satisfied = matched != wants.end();
-    wants.erase(matched, wants.end());
-    return satisfied;
+    auto satisfyFor = [&](std::int16_t neighbor) {
+        request.id = static_cast<std::uint16_t>(neighbor);
+        auto& wants = world().neighborWants(neighbor);
+        const auto matched = std::remove_if(wants.begin(), wants.end(), [&](const swaf::Want& w) {
+            return wantMatches(w, request, def->op);
+        });
+        const bool satisfied = matched != wants.end();
+        wants.erase(matched, wants.end());
+        return satisfied;
+    };
+    if (def->simArrayTree.empty()) {
+        return satisfyFor(sim);
+    }
+    // A want with a Sim list tree is satisfied for every Sim the tree lists for this Sim, and the
+    // primitive is then false whatever they matched.
+    for (const std::int16_t listed : wantSimList(def->simArrayTree, sim)) {
+        satisfyFor(listed);
+    }
+    return false;
+}
+
+// The Sims a want's Sim list tree lists for `sim` (neighbor ids). The tree is one of the "Wants -
+// Check Trees" object's, found by name as Run Tree by Name finds it. It runs at once on the lot's
+// "Wants - Controller", on its temps, with the Sim as param 0. When it is true, the list is array 0
+// of the object whose id it left in temp 0. Without either object, the tree or that array, no Sims.
+std::vector<std::int16_t> Execution::wantSimList(const std::string& treeName, std::int16_t sim) {
+    constexpr std::uint32_t kWantsControllerGuid = 0x6D9E58F0, kWantsCheckTreesGuid = 0x8D92DD2E;
+    SimObject* controller = world().nextAfter(0, [](const SimObject& s) { return s.definition.guid() == kWantsControllerGuid; });
+    const ObjectType* checkTrees = code_.objectType(kWantsCheckTreesGuid);
+    if (controller == nullptr || checkTrees == nullptr || treeName.empty()) {
+        return {};
+    }
+    const std::uint32_t group = checkTrees->group;
+    std::optional<std::uint16_t> tree;
+    for (const std::uint32_t g : {group, code_.semiGlobalGroup(group), kGlobalGroup}) {
+        if ((tree = code_.behaviorByName(g, treeName))) {
+            break;
+        }
+    }
+    if (!tree) {
+        return {};
+    }
+    const std::array<std::int16_t, 4> args{sim, 0, 0, 0};
+    const RunResult r = runOnObject(*controller, group, *tree, controller->id, args);
+    if (r.outcome == Outcome::Unsupported || r.outcome == Outcome::MissingCode) {
+        throw Stop{r.outcome, r.reason, r.detail};
+    }
+    if (r.outcome != Outcome::True) {
+        return {};
+    }
+    const SimObject* list = world().find(controller->thread.temps[0]);
+    if (list == nullptr || list->arrays.empty()) {
+        return {};
+    }
+    return list->arrays[0];
 }
 
 // A Sim reference as a neighbor id: an object id turned into its Sim's neighbor id, or a

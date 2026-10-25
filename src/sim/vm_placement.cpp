@@ -3,7 +3,8 @@
 namespace ts2::sim::vm_detail {
 
 // Operands:
-//   byte 0     mode: 1 leaves the object where it is and is true, 0 searches the reference's room,
+//   byte 0     mode: 1 takes the object out of its container's slot, leaves it where it is and is
+//              true (the game does more for multi-tile objects and Sims, not known yet), 0 searches the reference's room,
 //              then any room, 2 only the room, 7 by the reference's routing slot, 8 by a global
 //              slot (bytes 10-11). Any other mode is not kept yet
 //   byte 1     local holding the reference object (flag 0x01)
@@ -25,6 +26,7 @@ bool Execution::findLocationFor(const bhav::Instruction& in, Frame& f) {
         throw Stop{Outcome::Error, "no object to place", std::to_string(placedId)};
     }
     if (o[0] == 1) {
+        takeOutOfSlot(*placed);
         return true;
     }
     const bool bySlot = o[0] == 7 || o[0] == 8;

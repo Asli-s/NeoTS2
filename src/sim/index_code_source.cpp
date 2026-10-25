@@ -121,6 +121,12 @@ const std::vector<std::uint32_t>& IndexCodeSource::objectTypeGuids() {
     return objectTypeGuids_;
 }
 
+const ObjectType* IndexCodeSource::addMadeObjectType(ObjectType type) {
+    objectType(0);  // the saved types first, so a made one never hides one of them
+    const auto [it, added] = objectTypes_.try_emplace(type.definition.guid(), std::move(type));
+    return added ? &it->second : nullptr;
+}
+
 const ObjectType* IndexCodeSource::objectType(std::uint32_t guid) {
     if (!objectTypesLoaded_) {
         objectTypesLoaded_ = true;

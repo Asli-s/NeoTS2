@@ -27,6 +27,7 @@ struct MenuOptions {
     // A point of the lot clicked before its picture (x, y) and the menu choice made (-1: left open).
     std::optional<std::array<int, 3>> groundClick;
     double runSeconds = 0;       // the lot plays on this long after the clicks before its picture
+    bool unpaused = false;       // the lot starts with time running (the game opens lots paused)
     bool bumpMapping = true;     // the game's bump mapping (High Material Detail)
     bool wallBumps = true;       // and of floors and walls (High Lighting Quality)
     bool timings = false;        // write the timing report (diag/timing.hpp) to the log every 10 seconds

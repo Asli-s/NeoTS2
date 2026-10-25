@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <chrono>
 #include <climits>
+#include <functional>
 #include <cstdio>
 #include <exception>
 #include <format>
@@ -202,7 +203,9 @@ SimFrame simFrame(const ts2::sim::SimObject& sim, double nowMs) {
 
 // A Sim in an object's slot (a seat, a stair step) is drawn where the slot's bone is, turned as it
 // is, as the game draws it: a stair's slots stand a step higher each and face up or down the stair.
-void placeSim(ts2::scene::Actor& actor, const ts2::sim::SimObject& sim, const SimFrame& frame, const ts2::scene::Scene& scene) {
+// `standing` gives where the object stands without its clip (see LotLife::followClips).
+void placeSim(ts2::scene::Actor& actor, const ts2::sim::SimObject& sim, const SimFrame& frame, const ts2::scene::Scene& scene,
+              const std::function<const ts2::scene::Transform&(const ts2::scene::PlacedObject&)>& standing) {
     constexpr std::size_t kContainerField = 2, kSlotField = 3;
     if (!actor.floorHeight || sim.x == ts2::sim::kOffLot || sim.y == ts2::sim::kOffLot) {
         return;
@@ -213,7 +216,7 @@ void placeSim(ts2::scene::Actor& actor, const ts2::sim::SimObject& sim, const Si
         const auto slot = static_cast<std::size_t>(sim.data[kSlotField]);
         if (container != scene.placedObjects.end() && container->instance < scene.instances.size() && slot < container->slots.size() &&
             container->slots[slot]) {
-            actor.place = scene.instances[container->instance].transform * *container->slots[slot];
+            actor.place = standing(*container) * *container->slots[slot];
             return;
         }
     }
@@ -287,6 +290,13 @@ LotLife::LotLife(std::unique_ptr<ts2::sim::LotSimulation> sim, ts2::scene::Asset
         }
         const auto group = sim_->characterGroup(neighbor);
         return group ? std::optional<std::int16_t>(outfits_.get(*group, category, property)) : std::nullopt;
+    });
+    sim_->world().setHasOutfit([this](const ts2::sim::SimObject& object, std::uint32_t category) -> std::optional<bool> {
+        const std::int16_t neighbor = sim_->world().neighborIdOf(object);
+        if (const auto file = neighbor != 0 ? sim_->characterFile(neighbor) : std::nullopt) {
+            return outfits_.hasOutfit(*file, category);
+        }
+        return outfits_.hasOutfit(object.group, category);
     });
 }
 
@@ -677,6 +687,24 @@ std::optional<std::int16_t> LotLife::inventoryValue(std::int16_t sim, std::uint3
     return std::nullopt;
 }
 
+std::vector<std::int16_t> LotLife::inventoryValues(std::int16_t sim, std::uint32_t guid) {
+    auto& world = sim_->world();
+    const auto* object = world.find(sim);
+    const std::int16_t self = object ? world.neighborIdOf(*object) : 0;
+    const auto* inventory = self ? world.inventory(ts2::sim::InventoryKind::Neighbor, self) : nullptr;
+    if (inventory == nullptr) {
+        return {};
+    }
+    for (const auto* list : {&inventory->singular, &inventory->counted}) {
+        for (const auto& token : *list) {
+            if (token->guid == guid) {
+                return token->properties;
+            }
+        }
+    }
+    return {};
+}
+
 bool LotLife::hasCountedToken(std::int16_t sim, std::uint32_t guid) {
     auto& world = sim_->world();
     const auto* object = world.find(sim);
@@ -895,11 +923,12 @@ void LotLife::update(double ms, ts2::scene::Scene& scene) {
                 playClips(actor, *object, own.current, own.previous, frame.heading, animations_, nullptr, 1, 0, ownEnding,
                           overWalk && !own.endedPoses.empty() ? &own.endedPoses : nullptr);
             }
-            placeSim(actor, *object, frame, scene);
+            placeSim(actor, *object, frame, scene, [&](const ts2::scene::PlacedObject& p) -> const ts2::scene::Transform& { return standingPlace(p, scene); });
         }
     }
     addCreatedObjects(scene);
     placeObjects(scene);
+    followClips(scene);
     for (auto* list : {&changedInstances_, &relit_}) {
         std::sort(list->begin(), list->end());
         list->erase(std::unique(list->begin(), list->end()), list->end());
@@ -969,7 +998,7 @@ void LotLife::placeObjects(ts2::scene::Scene& scene) {
             if (container == scene.placedObjects.end() || container->instance >= scene.instances.size()) {
                 continue;
             }
-            const auto& base = scene.instances[container->instance].transform;
+            const auto& base = standingPlace(*container, scene);
             const auto slot = static_cast<std::size_t>(now.slot);
             place = slot < container->slots.size() && container->slots[slot] ? base * *container->slots[slot] : base;
         } else if (now.x == ts2::sim::kOffLot || now.y == ts2::sim::kOffLot || !scene.floorHeight) {
@@ -981,8 +1010,44 @@ void LotLife::placeObjects(ts2::scene::Scene& scene) {
             scene.instances[placed.instance].level = scene.groundLevel + now.level - 1;
         }
         scene.instances[placed.instance].transform = place;
+        clipBases_.erase(placed.instance);
         moved_.emplace_back(placed.instance, place);
         relight(scene, placed.instance, placed.lotFrame.rigidInverse() * place, now.level - 1);
+    }
+}
+
+// Where a lot object stands without its clip. Its slots stay there while the clip moves its model,
+// so a Sim sitting down on a dining chair isn't carried by the chair's slide.
+const ts2::scene::Transform& LotLife::standingPlace(const ts2::scene::PlacedObject& placed, const ts2::scene::Scene& scene) const {
+    const auto base = clipBases_.find(placed.instance);
+    return base != clipBases_.end() ? base->second : scene.instances[placed.instance].transform;
+}
+
+// An object playing a clip (Animate Object) whose whole drawn model hangs under one joint moves
+// with that joint, from where it stands: a dining chair sliding in under its table or out again.
+// It keeps the clip's last pose once the clip has played.
+void LotLife::followClips(ts2::scene::Scene& scene) {
+    const double nowMs = sim_->world().clockMs() + leadMs_;
+    for (const auto& placed : scene.placedObjects) {
+        if (placed.followJoint.empty() || placed.object > static_cast<std::uint32_t>(INT16_MAX) ||
+            placed.instance >= scene.instances.size()) {
+            continue;
+        }
+        const auto* object = sim_->world().find(static_cast<std::int16_t>(placed.object));
+        if (object == nullptr || object->removed || !object->animation) {
+            continue;
+        }
+        const auto joint = objectMaterials_.jointPose(*object, nowMs, animations_, placed.followModel, placed.followJoint);
+        if (!joint) {
+            continue;
+        }
+        auto& instance = scene.instances[placed.instance];
+        const auto base = clipBases_.try_emplace(placed.instance, instance.transform).first;
+        const ts2::scene::Transform place = base->second * *joint * placed.followRest.rigidInverse();
+        if (place.m != instance.transform.m) {
+            instance.transform = place;
+            moved_.emplace_back(placed.instance, place);
+        }
     }
 }
 

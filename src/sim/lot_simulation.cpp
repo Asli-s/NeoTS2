@@ -1,6 +1,7 @@
 #include "sim/lot_simulation.hpp"
 #include "sim/forget_object.hpp"
 
+#include "content/build_scripts.hpp"
 #include "content/install.hpp"
 #include "content/lot.hpp"
 #include "content/neighborhood.hpp"
@@ -64,6 +65,11 @@ LotSimulation::LotSimulation(const std::filesystem::path& install, const std::fi
     : index_(loadCode(install, lot)), code_(index_), vm_(code_, {kMaxStepsPerRun, 64}, &world_),
       installedPacks_(content::installedPacksMask(content::findProducts(install))), motiveUpdate_(code_, installedPacks_) {
     vm_.onInteractionStart = [this](const SimObject& sim, const QueuedInteraction& started) { logInteractionStart(sim, started); };
+    vm_.resetSim = [this](SimObject& sim) {
+        if (const ObjectType* type = code_.objectType(sim.definition.guid())) {
+            resetAfterFailure(sim, *type);
+        }
+    };
     lot_ = std::make_unique<const content::Lot>(content::loadLot(lot));
     const content::Lot& saved = *lot_;
     objectModels_ = saved.objectModels;
@@ -71,6 +77,31 @@ LotSimulation::LotSimulation(const std::filesystem::path& install, const std::fi
     report_ = buildWorld(saved, code_, world_);
     world_.setWalls(WallTiles::fromLot(saved));
     world_.setSightWalls(WallTiles::builtWalls(saved));
+    const content::BuildScripts buildScripts = content::loadBuildScripts(content::findProducts(install));
+    std::vector<World::WallSection> sections;
+    std::unordered_map<std::int32_t, const wallgraph::Wall*> walls;
+    std::optional<wallgraph::PointIndex> points;
+    if (saved.roomGraph) {
+        for (const auto& w : saved.roomGraph->walls) {
+            walls.emplace(w.id, &w);
+        }
+        points.emplace(*saved.roomGraph);
+    }
+    for (const auto& e : saved.wallCoverings) {
+        if (!buildScripts.isRoomWall(e.type)) {
+            continue;
+        }
+        World::WallSection section;
+        if (const auto wall = walls.find(static_cast<std::int32_t>(e.wall)); wall != walls.end() && points) {
+            const auto* from = (*points)(wall->second->from);
+            const auto* to = (*points)(wall->second->to);
+            if (from != nullptr && to != nullptr) {
+                section = {*from, *to, true};
+            }
+        }
+        sections.push_back(section);
+    }
+    world_.setWallSections(std::move(sections));
     if (const auto graph = saved.layerGraphs.find(content::kLayerGraphInstances[1]); graph != saved.layerGraphs.end()) {
         world_.setWeatherRegions(RoomMap(graph->second));
     }
@@ -88,13 +119,16 @@ LotSimulation::LotSimulation(const std::filesystem::path& install, const std::fi
             return static_cast<std::uint16_t>(grid->i16(static_cast<std::int32_t>(index), x, y, static_cast<std::size_t>(quarter)));
         });
     }
+    world_.setPlatformRegion(platformRegions(saved));
+    world_.setNeighborRemap(saved.neighborRemap ? std::optional(saved.neighborRemap->neighborIds) : std::nullopt,
+                            saved.unreadNeighborRemap);
     std::copy_n(saved.globals.begin(), std::min(saved.globals.size(), vm_.globals.size()), vm_.globals.begin());
     updateTimeOfDay(vm_.globals);
     const auto hood = content::neighborhoodPackage(content::neighborhoodOfLot(lot));
     if (std::filesystem::exists(hood)) {
         const content::Neighborhood loaded = content::loadNeighborhood(hood);
         findHousehold(loaded, lot);
-        world_.setNeighborhood(savedNeighborhood(loaded, content::neighborhoodIds(content::neighborhoodOfLot(lot).parent_path())));
+        world_.setNeighborhood(savedNeighborhood(loaded, code_, content::neighborhoodIds(content::neighborhoodOfLot(lot).parent_path())));
         // Global 0x28, the current neighborhood's id, is what scripts ask NeighborhoodManager about.
         constexpr std::size_t kCurrentNeighborhoodGlobal = 0x28;
         if (loaded.identity && kCurrentNeighborhoodGlobal < vm_.globals.size()) {
@@ -919,9 +953,7 @@ void LotSimulation::forgetRemoved() {
 
 void LotSimulation::forget(SimObject& sim, std::int16_t removed) {
     if (forgetObject(sim, removed)) {
-        if (const ObjectType* type = code_.objectType(sim.definition.guid())) {
-            resetAfterFailure(sim, *type);
-        }
+        vm_.resetSim(sim);
     }
 }
 

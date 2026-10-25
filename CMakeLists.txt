@@ -145,6 +145,7 @@ add_library(ts2formats
     src/formats/slot.cpp
     src/formats/objf.cpp
     src/formats/simi.cpp
+    src/formats/neighbor_remap.cpp
     src/formats/weather.cpp
     src/formats/neighborhood_id.cpp
     src/formats/srel.cpp
@@ -341,7 +342,8 @@ target_link_libraries(ts2scene PUBLIC ts2content PRIVATE project_warnings)
 if(NEOTS2_FUZZ)
     foreach(target qfs_fuzz dbpf_fuzz cobject_fuzz bhav_fuzz str_fuzz bcon_fuzz fcns_fuzz glob_fuzz objd_fuzz
                    objt_fuzz objm_fuzz xobj_fuzz wallgraph_fuzz array3d_fuzz srel_fuzz sdsc_fuzz fami_fuzz famt_fuzz slot_fuzz swaf_fuzz propset_fuzz ttab_fuzz luascript_fuzz ngbh_fuzz datatables_fuzz scenegraph_fuzz stringmap_fuzz walllayer_fuzz namemap_fuzz fencepostlayer_fuzz roofs_fuzz terrain_fuzz reia_fuzz
-                   anim_fuzz image_fuzz lot_description_fuzz nhood_objects_fuzz nhood_terrain_fuzz objf_fuzz reference_list_fuzz simi_fuzz weather_fuzz neighborhood_id_fuzz camera_config_fuzz nhood_paint_rules_fuzz ui_script_fuzz cursor_fuzz effects_fuzz)
+                   anim_fuzz image_fuzz lot_description_fuzz nhood_objects_fuzz nhood_terrain_fuzz objf_fuzz reference_list_fuzz simi_fuzz weather_fuzz neighborhood_id_fuzz camera_config_fuzz nhood_paint_rules_fuzz ui_script_fuzz cursor_fuzz effects_fuzz
+                   neighbor_remap_fuzz)
         add_executable(${target} fuzz/${target}.cpp)
         target_link_libraries(${target} PRIVATE ts2formats project_warnings)
     endforeach()
@@ -501,7 +503,7 @@ else()
         target_link_libraries(vm_tests PRIVATE ts2ui)
         target_compile_definitions(vm_tests PRIVATE NEOTS2_TEXT_LAYOUT_TESTS)
 
-        add_executable(neots2 app/main.cpp app/menu.cpp app/neighborhood.cpp app/neighborhood_ui.cpp app/lot_life.cpp app/object_materials.cpp app/lot_light.cpp app/lot_daylight.cpp app/route_sources.cpp app/lot_ui.cpp app/live_panel.cpp app/job_panel.cpp app/memories_page.cpp app/age_meter.cpp app/queue_panel.cpp app/pie_menu_ui.cpp app/mood_meter.cpp app/aspiration_bars.cpp app/pause_frame.cpp app/needs_panel.cpp app/personality_page.cpp app/relationships_panel.cpp app/rewards_panel.cpp app/simology_panel.cpp app/skewer.cpp app/wants_panel.cpp app/portraits.cpp app/cursors.cpp
+        add_executable(neots2 app/main.cpp app/menu.cpp app/neighborhood.cpp app/neighborhood_ui.cpp app/lot_life.cpp app/object_materials.cpp app/lot_light.cpp app/lot_daylight.cpp app/route_sources.cpp app/lot_ui.cpp app/live_panel.cpp app/job_panel.cpp app/memories_page.cpp app/age_meter.cpp app/queue_panel.cpp app/pie_menu_ui.cpp app/mood_meter.cpp app/aspiration_bars.cpp app/pause_frame.cpp app/needs_panel.cpp app/personality_page.cpp app/relationships_panel.cpp app/rewards_panel.cpp app/simology_panel.cpp app/interests_page.cpp app/hobbies_page.cpp app/chemistry_page.cpp app/meter_bar.cpp app/skewer.cpp app/wants_panel.cpp app/portraits.cpp app/cursors.cpp
                        app/diagnostics.cpp app/crash_handler.cpp app/crash_dialog.cpp app/unexpected_exit.cpp app/report_upload.cpp app/message_box.cpp)
         target_link_libraries(neots2 PRIVATE ts2render ts2ui ts2sim ts2diag project_warnings)
         add_dependencies(neots2 neots2_shaders neots2_version)

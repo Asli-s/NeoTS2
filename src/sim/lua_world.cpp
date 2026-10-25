@@ -4,24 +4,90 @@
 
 namespace ts2::sim::lua_detail {
 
+namespace {
+
+// A point's tile and quarter from script arguments (x, y, level): the quarter is which of the tile's
+// four triangles (split along both diagonals) holds the point. Nothing for a point off any lot.
+struct QuarterTile {
+    int x, y, level, quarter;
+};
+
+std::optional<QuarterTile> quarterTileArg(lua_State* L) {
+    const double x = lua_tonumber(L, 1), y = lua_tonumber(L, 2);
+    const int level = argInt(L, 3);
+    if (!std::isfinite(x) || !std::isfinite(y) || x < 0 || y < 0 || x > 1e6 || y > 1e6) {
+        return std::nullopt;
+    }
+    const double fx = x - std::floor(x), fy = y - std::floor(y);
+    const int quarter = fx <= fy ? (fx + fy < 1 ? 0 : 1) : (fx + fy < 1 ? 3 : 2);
+    return QuarterTile{static_cast<int>(x), static_cast<int>(y), level, quarter};
+}
+
+} // namespace
+
 // nWorld.HasSolidFloor(x, y, level): whether the quarter of the tile the point lies in has a floor
-// pattern, which is what the game asks first. The quarter is which of the tile's four triangles
-// (split along both diagonals) holds the point. Not done yet: the game's deck test when there is no
+// pattern, which is what the game asks first. Not done yet: the game's deck test when there is no
 // pattern, its flat-ground test above the ground, the ground's terrain test and the second
 // per-quarter grid it checks last.
 int hasSolidFloor(lua_State* L) {
     const ScriptCall& c = call(L);
-    const double x = lua_tonumber(L, 1), y = lua_tonumber(L, 2);
-    const int level = argInt(L, 3);
-    if (!std::isfinite(x) || !std::isfinite(y) || x < 0 || y < 0 || x > 1e6 || y > 1e6 || c.world == nullptr ||
-        !c.world->floorPattern()) {
+    const auto at = quarterTileArg(L);
+    if (!at || c.world == nullptr || !c.world->floorPattern()) {
         lua_pushboolean(L, false);
         return 1;
     }
-    const double fx = x - std::floor(x), fy = y - std::floor(y);
-    const int quarter = fx <= fy ? (fx + fy < 1 ? 0 : 1) : (fx + fy < 1 ? 3 : 2);
-    const auto pattern = c.world->floorPattern()(level, static_cast<int>(x), static_cast<int>(y), quarter);
+    const auto pattern = c.world->floorPattern()(at->level, at->x, at->y, at->quarter);
     lua_pushboolean(L, pattern.has_value() && *pattern != 0);
+    return 1;
+}
+
+// nWorld.HasStage(x, y, level): whether the point's quarter is on a split-level interior foundation,
+// platform region 4. HasStageAny gives the same answer in the game: it loops over the tile's
+// quarters but asks about the point's own quarter each time.
+int hasStage(lua_State* L) {
+    constexpr std::int32_t kStageRegion = 4;
+    const ScriptCall& c = call(L);
+    const auto at = quarterTileArg(L);
+    if (!at || c.world == nullptr || !c.world->platformRegion()) {
+        lua_pushboolean(L, false);
+        return 1;
+    }
+    const auto region = c.world->platformRegion()(at->level, at->x, at->y, at->quarter);
+    lua_pushboolean(L, region.has_value() && *region == kStageRegion);
+    return 1;
+}
+
+// nWorld.GetNumWallSections(): how many full room wall segments the lot has (World::wallSections).
+int getNumWallSections(lua_State* L) {
+    const ScriptCall& c = call(L);
+    if (c.world == nullptr || !c.world->wallSections()) {
+        return stopUnsupported(L, "nWorld.GetNumWallSections without the lot's walls");
+    }
+    lua_pushnumber(L, static_cast<lua_Number>(c.world->wallSections()->size()));
+    return 1;
+}
+
+// nWorld.GetRoomOnSideOfWall(index, side): the room beside full room wall `index` (from 0), on its
+// left for side 0 and on its right for any other side, or -1 off the room map.
+int getRoomOnSideOfWall(lua_State* L) {
+    const ScriptCall& c = call(L);
+    const std::int32_t index = argInt(L, 1);
+    const std::int32_t side = argInt(L, 2);
+    if (c.world == nullptr || !c.world->wallSections()) {
+        return stopUnsupported(L, "nWorld.GetRoomOnSideOfWall without the lot's walls");
+    }
+    const auto& sections = *c.world->wallSections();
+    // The game reads no wall past the end and returns a meaningless number then.
+    if (index < 0 || static_cast<std::size_t>(index) >= sections.size()) {
+        return stopUnsupported(L, "nWorld.GetRoomOnSideOfWall past the last wall");
+    }
+    const auto& wall = sections[static_cast<std::size_t>(index)];
+    if (!wall.placed) {
+        return stopUnsupported(L, "nWorld.GetRoomOnSideOfWall on a wall the room graph doesn't have");
+    }
+    const std::int32_t room = side == 0 ? roomOnSideOfWall(c.world->rooms(), wall.from, wall.to)
+                                        : roomOnSideOfWall(c.world->rooms(), wall.to, wall.from);
+    lua_pushnumber(L, static_cast<std::int16_t>(room));
     return 1;
 }
 

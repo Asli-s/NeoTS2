@@ -39,6 +39,13 @@ public:
     // clock, in the model's space: the plumbob's spin. Only for models whose every vertex follows
     // one joint, which the whole model turns with. Nullopt for other objects and when it plays none.
     std::optional<ts2::scene::Transform> pose(const ts2::sim::SimObject& object, double nowMs, ts2::scene::AnimationLibrary& animations);
+    // Where joint `joint` (lower case) of the object's model `model` sits at `nowMs` as the object's
+    // clip moves it, in the model's space. Joints the clip doesn't move are at rest. Nullopt when it
+    // plays none or the model has no such joint. The clips name a skeleton of their own ("chairdining"
+    // for every dining chair), but drive the joints of the model that plays them.
+    std::optional<ts2::scene::Transform> jointPose(const ts2::sim::SimObject& object, double nowMs,
+                                                   ts2::scene::AnimationLibrary& animations, const std::string& model,
+                                                   const std::string& joint);
 
 private:
     // A model whose vertices all follow one joint: its rig, that joint and the joint's rest place.
@@ -49,6 +56,7 @@ private:
     };
     // By lower-case model name. Null for models that don't qualify.
     std::map<std::string, std::shared_ptr<const OneJointModel>> oneJointModels_;
+    std::map<std::string, std::shared_ptr<const ts2::scene::Rig>> rigs_;  // by lower-case model name
     std::vector<ts2::scene::Transform> poseScratch_;
 
     std::vector<int> materialsOf(const ts2::sim::SimObject& object, const ts2::scene::Mesh& mesh, ts2::scene::Scene& scene);

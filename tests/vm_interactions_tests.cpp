@@ -19,6 +19,157 @@ void setSkinToTheSimsOwnIsTrue() {
     CHECK(vm.run(*w.world.find(5), 0x1000).outcome == Outcome::Unsupported);
 }
 
+// Generic call 0x30 maps the neighbor id in temp 0 through the lot's remap table into temp 1, -1
+// when the lot has none or the id isn't in it.
+void remappedNeighborIdComesFromTheRemapTable() {
+    MemoryCodeSource code;
+    Instruction remap = call(0x0001, T, F);
+    remap.operands[0] = 0x30;
+    code.add(kObjectGroup, 0x1000, bhav({remap}));
+    SmallWorld w;
+    auto& temps = w.controller->thread.temps;
+    Vm vm(code, {}, &w.world);
+    auto remapped = [&](std::int16_t id) {
+        temps[0] = id;
+        temps[1] = 5;
+        CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::True);
+        return temps[1];
+    };
+    CHECK(remapped(12) == -1);
+    w.world.setNeighborRemap(ts2::sim::World::NeighborRemap{{12, 0x151}, {0xFFFFFFFF, 3}, {7, 0x12345}}, false);
+    CHECK(remapped(12) == 0x151);
+    CHECK(remapped(-1) == 3);
+    CHECK(remapped(7) == 0x2345);
+    CHECK(remapped(13) == -1);
+    w.world.setNeighborRemap(std::nullopt, true);
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::Unsupported);
+}
+
+// Generic call 0x20: temp 1 = 1 when the object in temp 3 has a whole outfit in the category in
+// temp 0 (a number turned into the category's flag), else 0. A missing object has none.
+void outfitsInformationAsksTheSimsLooks() {
+    MemoryCodeSource code;
+    Instruction ask = call(0x0001, T, F);
+    ask.operands[0] = 0x20;
+    code.add(kObjectGroup, 0x1000, bhav({ask}));
+    SmallWorld w;
+    auto& temps = w.controller->thread.temps;
+    Vm vm(code, {}, &w.world);
+    temps[3] = 3;
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::Unsupported);
+    std::vector<std::uint32_t> asked;
+    w.world.setHasOutfit([&](const ts2::sim::SimObject& object, std::uint32_t category) -> std::optional<bool> {
+        asked.push_back(category);
+        return object.id == 3 && category == 8;
+    });
+    auto has = [&](std::int16_t who, std::int16_t number) {
+        temps[0] = number;
+        temps[1] = 5;
+        temps[3] = who;
+        CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::True);
+        return temps[1];
+    };
+    CHECK(has(3, 2) == 1);  // formal
+    CHECK(has(3, 0) == 0 && has(3, 7) == 0 && has(3, -4) == 0 && has(3, 13) == 0);
+    CHECK(has(999, 2) == 0);
+    CHECK((asked == std::vector<std::uint32_t>{8, 1, 1, 1, 0x1000}));
+    temps[3] = 0;
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::Unsupported);
+}
+
+// Generic calls 0x0A and 0x0B list and unlist the running object as keeping Build and Buy mode off.
+// Each 0x0A adds an entry, and deleting the object drops them all.
+void buildBuyCallsListTheRunningObject() {
+    MemoryCodeSource code;
+    Instruction disable = call(0x0001, T, F);
+    disable.operands[0] = 0x0A;
+    Instruction enable = call(0x0001, T, F);
+    enable.operands[0] = 0x0B;
+    code.add(kObjectGroup, 0x1000, bhav({disable}));
+    code.add(kObjectGroup, 0x1001, bhav({enable}));
+    SmallWorld w;
+    Vm vm(code, {}, &w.world);
+    auto* fridge = w.world.find(2);
+    CHECK(vm.run(*w.controller, 0x1001).outcome == Outcome::True);
+    CHECK(!w.world.buildBuyBlocked());
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::True);
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::True);
+    CHECK(vm.run(*fridge, 0x1000).outcome == Outcome::True);
+    CHECK(vm.run(*w.controller, 0x1001).outcome == Outcome::True);
+    CHECK(vm.run(*w.controller, 0x1001).outcome == Outcome::True);
+    CHECK(w.world.buildBuyBlocked());
+    CHECK(vm.run(*fridge, 0x1000).outcome == Outcome::True);
+    w.world.remove(*fridge);
+    CHECK(w.world.buildBuyBlocked());
+    w.world.purge();
+    CHECK(!w.world.buildBuyBlocked());
+}
+
+// Generic call 0x0D makes every other Sim forget the stack object at once: queued interactions on it
+// go, and a Sim whose current interaction object it is gets reset.
+void abortInteractionsTellsEverySim() {
+    MemoryCodeSource code;
+    Instruction abort = call(0x0001, T, F);
+    abort.operands[0] = 0x0D;
+    code.add(kObjectGroup, 0x1000, bhav({abort}));
+    SmallWorld w;
+    Vm vm(code, {}, &w.world);
+    auto& queuer = *w.world.find(5);
+    auto& user = *w.world.find(7);
+    ts2::sim::QueuedInteraction q;
+    q.object = 2;
+    q.group = kObjectGroup;
+    q.action = 0x1000;
+    queuer.queue.push_back(q);
+    q.object = 4;
+    queuer.queue.push_back(q);
+    queuer.data[0x5A] = 2;
+    user.personData[0x50] = 2;
+    std::vector<std::int16_t> reset;
+    CHECK(vm.runEvent(*w.controller, kObjectGroup, 0x1000, 2, {}).outcome == Outcome::Unsupported);
+    vm.resetSim = [&](ts2::sim::SimObject& sim) { reset.push_back(sim.id); };
+    q.object = 2;
+    queuer.queue.push_back(q);
+    queuer.data[0x5A] = 2;
+    CHECK(vm.runEvent(*w.controller, kObjectGroup, 0x1000, 2, {}).outcome == Outcome::True);
+    CHECK(queuer.queue.size() == 1 && queuer.queue[0].object == 4 && queuer.data[0x5A] == 0);
+    CHECK((reset == std::vector<std::int16_t>{7}));
+    // A Sim that would need a reset while its own code runs stops instead.
+    CHECK(vm.runEvent(user, kObjectGroup, 0x1000, 2, {}).outcome == Outcome::Unsupported);
+    CHECK(vm.runEvent(*w.controller, kObjectGroup, 0x1000, 99, {}).outcome == Outcome::Error);
+}
+
+// Generic call 0x31 tests the stack object where it stands with footprint index temp 0, then puts
+// its own footprint index back.
+void fitsWithFootprintTestsTheOtherFootprint() {
+    MemoryCodeSource code;
+    Instruction test = call(0x0001, T, F);
+    test.operands[0] = 0x31;
+    code.add(kObjectGroup, 0x1000, bhav({test}));
+    SmallWorld w;
+    auto* chair = w.world.find(3);
+    chair->x = 5 * 65536 + 32768;
+    chair->y = 7 * 65536 + 32768;
+    chair->level = 1;
+    chair->data[9] = 2;
+    std::vector<std::int16_t> tested;
+    w.world.setObjectFits([&](const ts2::sim::SimObject& placed, float x, float y, std::int32_t level, std::int16_t) {
+        tested.push_back(placed.data[9]);
+        return x == 5.5f && y == 7.5f && level == 1 && placed.data[9] == 3;
+    });
+    w.controller->thread.stackObjectId = chair->id;
+    Vm vm(code, {}, &w.world);
+    w.controller->thread.temps[0] = 2;
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::True);
+    CHECK(tested.empty());
+    w.controller->thread.temps[0] = 3;
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::True);
+    w.controller->thread.temps[0] = 4;
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::False);
+    CHECK((tested == std::vector<std::int16_t>{3, 4}));
+    CHECK(chair->data[9] == 2);
+}
+
 // Generic call 0x27 is true for a Sim (temp 0 below 10) or a known neighbor in temp 1. Debug is true.
 void recalcWantsAndDebugCarryOn() {
     MemoryCodeSource code;
@@ -497,6 +648,29 @@ void runTreeByNameReadsTheSemiGlobalNames() {
     CHECK(s.fridge->attributes[0] == 12);
 }
 
+// The tree is looked up in the stack object's own, semi-global and global trees, in that order.
+// Flag 0x08 leaves out the semi-global trees and flag 0x04 the global ones.
+void runTreeByNameSkipsTheGroupsItsFlagsName() {
+    NamedTreeSetup s;
+    s.code.addStrings(kSimGroup, 0x12F, {"Restock", "Missing Tree", "Shared", "Global Only"});
+    s.code.add(kSemiGroup, 0x2001, named("Shared", {
+        expr(owner::kStackObjectAttribute, 0, op::kAssign, owner::kLiteral, 1, T, E)}));
+    s.code.add(ts2::sim::kGlobalGroup, 0x0101, named("Shared", {
+        expr(owner::kStackObjectAttribute, 0, op::kAssign, owner::kLiteral, 2, T, E)}));
+    s.code.add(ts2::sim::kGlobalGroup, 0x0102, named("Global Only", {
+        expr(owner::kStackObjectAttribute, 0, op::kAssign, owner::kLiteral, 3, T, E)}));
+    s.code.add(kSimGroup, 0x1000, named("Both", {runTreeByName(2, 0x00, 0x00, T, F)}));
+    s.code.add(kSimGroup, 0x1001, named("No Semi-Global", {runTreeByName(2, 0x08, 0x00, T, F)}));
+    s.code.add(kSimGroup, 0x1002, named("Neither", {runTreeByName(2, 0x0C, 0x00, T, F)}));
+    s.code.add(kSimGroup, 0x1003, named("No Global", {runTreeByName(3, 0x04, 0x00, T, F)}));
+    Vm vm(s.code, {}, &s.world);
+    CHECK(vm.run(*s.sim, 0x1000).outcome == Outcome::True && s.fridge->attributes[0] == 1);
+    CHECK(vm.run(*s.sim, 0x1001).outcome == Outcome::True && s.fridge->attributes[0] == 2);
+    s.fridge->attributes[0] = 0;
+    CHECK(vm.run(*s.sim, 0x1002).outcome == Outcome::False && s.fridge->attributes[0] == 0);
+    CHECK(vm.run(*s.sim, 0x1003).outcome == Outcome::False && s.fridge->attributes[0] == 0);
+}
+
 // Mode 1 runs the stack object's tree at once as the stack object, its params from the stack object's
 // temps. A tree that waits leaves the stack object to be reset and is false.
 void runTreeByNameRunsOnTheStackObjectsStack() {
@@ -581,19 +755,19 @@ void runTreeByNamePushesOntoMyStack() {
     CHECK(bad.outcome == Outcome::Error && bad.reason == "you sent me a crappy GUID, please fix it");
 }
 
-Instruction pushInteraction(std::uint8_t index, std::uint8_t objectTemp, std::uint8_t priority,
+Instruction pushInteraction(std::uint8_t index, std::uint8_t objectParam, std::uint8_t priority,
                             std::uint16_t t, std::uint16_t f) {
     Instruction in;
     in.opcode = 0x000D;
     in.trueTarget = t;
     in.falseTarget = f;
     in.operands[0] = index;
-    in.operands[1] = objectTemp;
+    in.operands[1] = objectParam;
     in.operands[2] = priority;
     return in;
 }
 
-// Push Interaction queues interaction N of the object in a temp onto the stack object (a Sim),
+// Push Interaction queues interaction N of the object in a param onto the stack object (a Sim),
 // after its test tree agrees (on a copy of its line, whose advertisements it may read). Failures
 // leave a reason in my object data 0x34.
 void pushInteractionQueuesForTheSim() {
@@ -612,44 +786,48 @@ void pushInteractionQueuesForTheSim() {
     code.addInteractionTable(kObjectGroup, 0x80, table);
     code.add(kObjectGroup, 0x1002, bhav({expr(owner::kTemp, 0, op::kAssign, owner::kLiteral, 0, F, F)}));
     code.add(kObjectGroup, 0x1003, bhav({expr(owner::kTemp, 0, op::kAssign, ts2::sim::owner::kCheckTreeAdRange, 9, T, E)}));
-    code.add(kObjectGroup, 0x1104, bhav({pushInteraction(2, 1, 1, T, F)}));
-    code.add(kObjectGroup, 0x1100, bhav({pushInteraction(0, 1, 1, T, F)}));
-    code.add(kObjectGroup, 0x1101, bhav({pushInteraction(1, 1, 3, T, F)}));
-    code.add(kObjectGroup, 0x1102, bhav({pushInteraction(0, 1, 0, T, F)}));
-    code.add(kObjectGroup, 0x1103, bhav({pushInteraction(5, 1, 1, T, F)}));
+    code.add(kObjectGroup, 0x1104, bhav({pushInteraction(2, 0, 1, T, F)}, 1));
+    code.add(kObjectGroup, 0x1100, bhav({pushInteraction(0, 0, 1, T, F)}, 1));
+    code.add(kObjectGroup, 0x1101, bhav({pushInteraction(1, 0, 3, T, F)}, 1));
+    code.add(kObjectGroup, 0x1102, bhav({pushInteraction(0, 0, 0, T, F)}, 1));
+    code.add(kObjectGroup, 0x1103, bhav({pushInteraction(5, 0, 1, T, F)}, 1));
+    code.add(kObjectGroup, 0x1105, bhav({pushInteraction(0, 4, 1, T, F)}, 1));
 
     ts2::sim::World world;
     auto& controller = world.create(kObjectGroup, typed(0x0BADF00D));
     auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
     auto& fridge = world.create(kObjectGroup, fridgeType);
     controller.thread.stackObjectId = sim.id;
-    controller.thread.temps[1] = fridge.id;
+    controller.thread.temps[1] = fridge.id;  // not where the object is taken from
+    const std::array<std::int16_t, 1> onFridge{fridge.id};
     Vm vm(code, {}, &world);
-    CHECK(vm.run(controller, 0x1100).outcome == Outcome::True);
+    CHECK(vm.run(controller, kObjectGroup, 0x1100, onFridge).outcome == Outcome::True);
     CHECK(sim.queue.size() == 1 && sim.queue[0].object == fridge.id && sim.queue[0].action == 0x1000 &&
           sim.queue[0].priority == 100);
     CHECK(sim.personData[0x4F] == fridge.id && sim.personData[0x2D] == 0);  // the next queued interaction
-    CHECK(vm.run(controller, 0x1101).outcome == Outcome::False && controller.data[0x34] == 2);
-    CHECK(vm.run(controller, 0x1104).outcome == Outcome::True && sim.queue.size() == 2);
+    CHECK(vm.run(controller, kObjectGroup, 0x1101, onFridge).outcome == Outcome::False && controller.data[0x34] == 2);
+    CHECK(vm.run(controller, kObjectGroup, 0x1104, onFridge).outcome == Outcome::True && sim.queue.size() == 2);
     sim.queue.pop_back();
-    const RunResult missing = vm.run(controller, 0x1103);
+    const RunResult missing = vm.run(controller, kObjectGroup, 0x1103, onFridge);
     CHECK(missing.outcome == Outcome::Error && missing.reason == "reference to tree table entry that does not exist");
+    // Byte 1 names a param: one the tree doesn't have is an error.
+    const RunResult noParam = vm.run(controller, kObjectGroup, 0x1105, onFridge);
+    CHECK(noParam.outcome == Outcome::Error && noParam.reason == "param index out of range");
 
     // A Sim pushing with its own priority needs one.
     sim.thread.stackObjectId = sim.id;
-    sim.thread.temps[1] = fridge.id;
-    CHECK(vm.run(sim, kObjectGroup, 0x1102).outcome == Outcome::False && sim.data[0x34] == 1);
+    CHECK(vm.run(sim, kObjectGroup, 0x1102, onFridge).outcome == Outcome::False && sim.data[0x34] == 1);
     sim.personData[0x21] = 40;
-    CHECK(vm.run(sim, kObjectGroup, 0x1102).outcome == Outcome::True && sim.queue.back().priority == 40);
+    CHECK(vm.run(sim, kObjectGroup, 0x1102, onFridge).outcome == Outcome::True && sim.queue.back().priority == 40);
     sim.queue.front().index = 1;
-    CHECK(vm.run(controller, 0x1100).outcome == Outcome::True && sim.personData[0x2D] == 1);
+    CHECK(vm.run(controller, kObjectGroup, 0x1100, onFridge).outcome == Outcome::True && sim.personData[0x2D] == 1);
     sim.queue.pop_back();
 
     for (int i = 0; i < 5; ++i) {
-        CHECK(vm.run(controller, 0x1100).outcome == Outcome::True);
+        CHECK(vm.run(controller, kObjectGroup, 0x1100, onFridge).outcome == Outcome::True);
     }
     CHECK(sim.queue.size() == 7);
-    CHECK(vm.run(controller, 0x1100).outcome == Outcome::False && controller.data[0x34] == 3);
+    CHECK(vm.run(controller, kObjectGroup, 0x1100, onFridge).outcome == Outcome::False && controller.data[0x34] == 3);
 }
 
 // A check tree that pushes its own interaction runs that check tree again: nested check trees stop
@@ -664,20 +842,21 @@ void checkTreesNestOnlySoDeep() {
     table.interactions[0].test = 0x1002;
     code.addInteractionTable(kObjectGroup, 0x80, table);
     code.add(kObjectGroup, 0x1000, bhav({expr(owner::kTemp, 0, op::kAssign, owner::kLiteral, 0, T, T)}));
-    code.add(kObjectGroup, 0x1002, bhav({expr(owner::kStackObjectId, 0, op::kAssign, owner::kTemp, 2, 1, F),
-                                         pushInteraction(0, 1, 1, T, F)}));
-    code.add(kObjectGroup, 0x1100, bhav({pushInteraction(0, 1, 1, T, F)}));
+    // Each push passes its params on (byte 14 bit 0), so the check tree gets the fridge as param 0.
+    Instruction push = pushInteraction(0, 0, 1, T, F);
+    push.operands[14] = 0x01;
+    code.add(kObjectGroup, 0x1002, bhav({expr(owner::kStackObjectId, 0, op::kAssign, owner::kTemp, 2, 1, F), push}, 1));
+    code.add(kObjectGroup, 0x1100, bhav({push}, 1));
 
     ts2::sim::World world;
     auto& controller = world.create(kObjectGroup, typed(0x0BADF00D));
     auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
     auto& fridge = world.create(kObjectGroup, fridgeType);
     controller.thread.stackObjectId = sim.id;
-    controller.thread.temps[1] = fridge.id;
-    sim.thread.temps[1] = fridge.id;  // check trees start on the Sim's temps
     sim.thread.temps[2] = sim.id;
     Vm vm(code, {}, &world);
-    CHECK(vm.run(controller, 0x1100).outcome == Outcome::DepthLimit);
+    const std::array<std::int16_t, 1> onFridge{fridge.id};
+    CHECK(vm.run(controller, kObjectGroup, 0x1100, onFridge).outcome == Outcome::DepthLimit);
     CHECK(sim.queue.empty());
 }
 
@@ -722,8 +901,9 @@ void idleForInputStartsQueuedInteractions() {
     CHECK(vm.resume(sim).outcome == Outcome::Sleeping);
     CHECK(vm.resume(sim).outcome == Outcome::True && sim.thread.temps[0] == 1);
 
-    // Something queued above the Sim's Priority (person data 0x21): it starts, and the caller goes
-    // on afterwards even though it returned false. At or below it, the Sim keeps waiting.
+    // Something queued above the Sim's Priority (person data 0x21): it starts, and afterwards the
+    // primitive runs again and waits out its last tick, even though the interaction returned
+    // false. At or below it, the Sim keeps waiting.
     ts2::sim::QueuedInteraction q;
     q.object = fridge.id;
     q.group = kObjectGroup;
@@ -737,9 +917,10 @@ void idleForInputStartsQueuedInteractions() {
     sim.thread.temps[0] = 0;
     CHECK(vm.run(sim, kObjectGroup, 0x1100, twoTicks).outcome == Outcome::Sleeping && sim.queue.size() == 1);
     sim.personData[0x21] = 0;
-    CHECK(vm.resume(sim).outcome == Outcome::True);
-    CHECK(fridge.attributes[0] == 7 && sim.queue.empty() && sim.thread.temps[0] == 1 && sim.personData[0x4F] == 0);
+    CHECK(vm.resume(sim).outcome == Outcome::Sleeping && fridge.attributes[0] == 7);
     CHECK((sim.data[8] & 0x40) != 0);
+    CHECK(vm.resume(sim).outcome == Outcome::True && (sim.data[8] & 0x40) == 0);
+    CHECK(fridge.attributes[0] == 7 && sim.queue.empty() && sim.thread.temps[0] == 1 && sim.personData[0x4F] == 0);
     // While it ran my person data named it ("ci: Current Interaction Object ID", "... Running ..."). Now it is 0.
     CHECK(sim.thread.temps[2] == fridge.id && sim.thread.temps[3] == 3);
     CHECK(sim.personData[0x15] == 0 && sim.personData[0x50] == 0 && sim.personData[0x66] == 0 && sim.personData[0x67] == 0);
@@ -750,6 +931,31 @@ void idleForInputStartsQueuedInteractions() {
     CHECK(vm.run(sim, kObjectGroup, 0x1101).outcome == Outcome::True);
     sim.queue.push_back(q);
     CHECK(vm.run(sim, kObjectGroup, 0x1102, twoTicks).outcome == Outcome::True && sim.queue.size() == 1);
+
+    // When an interaction it started ends, a continuation at the head of the queue starts at
+    // once. Anything else ends the primitive, as does a continuation while the Sim carries
+    // something (semi-attribute 0x22).
+    const std::array<std::int16_t, 1> noTicks{0};
+    sim.queue.clear();
+    fridge.attributes[0] = 0;
+    sim.queue.push_back(q);
+    ts2::sim::QueuedInteraction next = q;
+    next.continuation = true;
+    sim.queue.push_back(next);
+    sim.personData[0x21] = 0;
+    CHECK(vm.run(sim, kObjectGroup, 0x1100, noTicks).outcome == Outcome::True);
+    CHECK(fridge.attributes[0] == 14 && sim.queue.empty());
+    sim.queue.push_back(q);
+    sim.queue.push_back(q);
+    CHECK(vm.run(sim, kObjectGroup, 0x1100, noTicks).outcome == Outcome::True);
+    CHECK(fridge.attributes[0] == 21 && sim.queue.size() == 1);
+    sim.queue.clear();
+    sim.queue.push_back(q);
+    sim.queue.push_back(next);
+    sim.semiAttributes[0x22] = 1;
+    CHECK(vm.run(sim, kObjectGroup, 0x1100, noTicks).outcome == Outcome::True);
+    CHECK(fridge.attributes[0] == 28 && sim.queue.size() == 1 && sim.personData[0x48] == 1);
+    sim.semiAttributes[0x22] = 0;
 }
 
 // What the queue shows: Push Interaction's icon (an object type from temps 4 and 5 with the index in
@@ -768,11 +974,11 @@ void queuedInteractionsShowAndCancel() {
     code.addInteractionTable(kObjectGroup, 0x80, table);
     // The interaction waits two ticks (its first argument) before it ends.
     code.add(kObjectGroup, 0x1000, bhav({idleForInput(0, false, false, T, E)}));
-    Instruction withIcon = pushInteraction(0, 1, 1, T, F);
+    Instruction withIcon = pushInteraction(0, 1, 1, T, F);  // the fridge in param 1
     withIcon.operands[14] = 0x01 | 0x04;
     withIcon.operands[15] = 3;
-    code.add(kObjectGroup, 0x1100, bhav({withIcon}));
-    code.add(kObjectGroup, 0x1101, bhav({pushInteraction(1, 1, 1, T, F)}));
+    code.add(kObjectGroup, 0x1100, bhav({withIcon}, 2));
+    code.add(kObjectGroup, 0x1101, bhav({pushInteraction(1, 1, 1, T, F)}, 2));
     code.add(kObjectGroup, 0x1102, bhav({idleForInput(0, true, false, T, E)}, 1));
     code.add(kObjectGroup, 0x1103, bhav({idleForInput(0, false, true, T, E)}));
 
@@ -781,14 +987,14 @@ void queuedInteractionsShowAndCancel() {
     auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
     auto& fridge = world.create(kObjectGroup, fridgeType);
     controller.thread.stackObjectId = sim.id;
-    controller.thread.temps[1] = fridge.id;
     controller.thread.temps[4] = 0x5678;
     controller.thread.temps[5] = 0x1234;
     Vm vm(code, {}, &world);
     const std::array<std::int16_t, 1> twoTicks{2};
-    CHECK(vm.run(controller, kObjectGroup, 0x1100, twoTicks).outcome == Outcome::True);
-    CHECK(vm.run(controller, 0x1101).outcome == Outcome::True);
-    CHECK(vm.run(controller, 0x1101).outcome == Outcome::True);
+    const std::array<std::int16_t, 2> twoTicksOnFridge{2, fridge.id};
+    CHECK(vm.run(controller, kObjectGroup, 0x1100, twoTicksOnFridge).outcome == Outcome::True);
+    CHECK(vm.run(controller, kObjectGroup, 0x1101, twoTicksOnFridge).outcome == Outcome::True);
+    CHECK(vm.run(controller, kObjectGroup, 0x1101, twoTicksOnFridge).outcome == Outcome::True);
     CHECK(sim.queue.size() == 3);
     CHECK(sim.queue[0].iconGuid == 0x12345678 && sim.queue[0].iconIndex == 3 && !sim.queue[0].nested);
     CHECK(sim.queue[1].iconGuid == 0 && sim.queue[1].nested);
@@ -811,7 +1017,7 @@ void queuedInteractionsShowAndCancel() {
     CHECK(vm.resume(sim).outcome == Outcome::True && !sim.running);
 
     // Started at once (byte 4 bit 0), it is the running sub-interaction until its tree returns.
-    CHECK(vm.run(controller, kObjectGroup, 0x1100, twoTicks).outcome == Outcome::True);
+    CHECK(vm.run(controller, kObjectGroup, 0x1100, twoTicksOnFridge).outcome == Outcome::True);
     CHECK(vm.run(sim, kObjectGroup, 0x1103).outcome == Outcome::Sleeping);
     CHECK(sim.runningSub && sim.runningSub->id == 4 && !sim.running);
     CHECK(vm.resume(sim).outcome == Outcome::Sleeping);
@@ -990,6 +1196,17 @@ void runFunctionalTreeCallsTheObjectsTree() {
     CHECK(vm.run(sim, kObjectGroup, 0x1000).outcome == Outcome::True && chair.attributes[0] == 9);
     sim.thread.stackObjectId = chair.id;
     CHECK(vm.run(sim, kObjectGroup, 0x1002).outcome == Outcome::False);
+
+    // With byte 2 bit 0 the object becomes the running interaction's queue icon, picture 0.
+    Instruction withIcon = run(8);
+    withIcon.operands[2] = 0x01;
+    code.add(kObjectGroup, 0x1003, bhav({withIcon}));
+    sim.running = ts2::sim::QueuedInteraction{};
+    sim.actionIconGuid = 0x1234;
+    sim.actionIconIndex = 3;
+    sim.thread.stackObjectId = chair.id;
+    CHECK(vm.run(sim, kObjectGroup, 0x1003).outcome == Outcome::True);
+    CHECK(sim.actionIconObject == chair.id && sim.actionIconGuid == 0 && sim.actionIconIndex == 0);
 }
 
 // The pie menu: each interaction line the Sim's age allows whose check tree agrees, named from the
@@ -1237,7 +1454,57 @@ void wantSatisfyMatchesCurrentWants() {
     CHECK(world.neighborWants(27).size() == 1 && hood->wants[27].size() == 3);
     const RunResult unknown = vm.run(sim, 0x1003);
     CHECK(unknown.outcome == Outcome::Error && unknown.reason == "data number out of range");
-    CHECK(vm.run(sim, 0x1004).outcome == Outcome::Unsupported);
+    CHECK(vm.run(sim, 0x1004).outcome == Outcome::False);  // no Wants - Controller on the lot: no Sims
+}
+
+// A want with a Sim list tree: the tree (a "Wants - Check Trees" one, by name) runs on the Wants -
+// Controller with the Sim as param 0 and leaves in temp 0 an object whose array 0 lists the Sims.
+// Each listed Sim's matching wants are satisfied, and the primitive is false.
+void wantSatisfyWithASimListSatisfiesTheListedSims() {
+    constexpr std::uint32_t kSimGuid = 0x51515151, kControllerGuid = 0x6D9E58F0, kCheckTreesGuid = 0x8D92DD2E;
+    constexpr std::uint32_t kCheckTreesGroup = 0x7F739728, kListWant = 0x0EEEEEEE;
+    MemoryCodeSource code;
+    code.addObjectType(kCheckTreesGroup, typed(kCheckTreesGuid));
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(kSimGuid, ts2::sim::kPersonType));
+    auto& controller = world.create(kObjectGroup, typed(kControllerGuid));
+    auto& list = world.create(kObjectGroup, typed(0x0BADF00D));
+    list.arrays = {{28, 29}};
+    Behavior tree = bhav({
+        expr(owner::kTemp, 1, op::kAssign, owner::kParam, 0, 1, E),
+        expr(owner::kTemp, 0, op::kAssign, owner::kLiteral, static_cast<std::uint16_t>(list.id), T, E),
+    }, 1);
+    tree.name = "CT - nID Array - Sims I Know";
+    code.add(kCheckTreesGroup, 0x1096, tree);
+    code.add(kObjectGroup, 0x1000, bhav({
+        expr(owner::kStackObjectId, 0, op::kAssign, owner::kLiteral, 1, 1, E),
+        wantSatisfy(kListWant, owner::kLiteral, 0, 0, T, F),
+    }));
+
+    auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
+    hood->neighborIds = {27, 28, 29, 30};
+    hood->neighbors[27].guid = kSimGuid;
+    auto want = [](std::int16_t id) {
+        ts2::swaf::Want w;
+        w.id = static_cast<std::uint16_t>(id);
+        w.guid = kListWant;
+        return w;
+    };
+    hood->wants[27] = {want(27)};
+    hood->wants[28] = {want(28)};
+    hood->wants[29] = {want(29)};
+    hood->wants[30] = {want(30)};
+    world.setNeighborhood(hood);
+    auto defs = std::make_shared<ts2::content::WantDefinitions>();
+    defs->byGuid[kListWant] = {kListWant, "met", ts2::content::WantArgument::None, ts2::content::WantOperator::None, 500,
+                               "CT - nID Array - Sims I Know"};
+    world.setWantDefinitions(defs);
+
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::False);
+    CHECK(controller.thread.temps[1] == 27);  // the tree ran on the controller with the Sim as param 0
+    CHECK(world.neighborWants(28).empty() && world.neighborWants(29).empty());
+    CHECK(world.neighborWants(27).size() == 1 && world.neighborWants(30).size() == 1);
 }
 
 void motivesAreClampedAndNeedAPerson() {
@@ -1271,6 +1538,11 @@ std::vector<Test> vmInteractionTests() {
     return {
         {"set skin to the Sim's own is true", setSkinToTheSimsOwnIsTrue},
         {"recalc wants and Debug carry on", recalcWantsAndDebugCarryOn},
+        {"remapped neighbor id comes from the remap table", remappedNeighborIdComesFromTheRemapTable},
+        {"Get Outfits Information asks the Sim's looks", outfitsInformationAsksTheSimsLooks},
+        {"fits with footprint tests the other footprint", fitsWithFootprintTestsTheOtherFootprint},
+        {"Build and Buy calls list the running object", buildBuyCallsListTheRunningObject},
+        {"abort interactions tells every Sim", abortInteractionsTellsEverySim},
         {"multi-tile parts use their master's interaction table", multiTilePartsUseTheirMastersTable},
         {"advertisers list objects by motive", advertisersListObjectsByMotive},
         {"Find Best Interaction picks the happiest near line", findBestInteractionPicksTheHappiestNearLine},
@@ -1278,6 +1550,7 @@ std::vector<Test> vmInteractionTests() {
         {"check tree kinds find trees that change the line", checkTreeKindsFindTreesThatChangeTheLine},
         {"Find Best Interaction scores what check trees advertise", findBestInteractionScoresWhatCheckTreesAdvertise},
         {"Want Satisfy matches current wants", wantSatisfyMatchesCurrentWants},
+        {"Want Satisfy with a Sim list satisfies the listed Sims", wantSatisfyWithASimListSatisfiesTheListedSims},
         {"Push Interaction queues for the Sim", pushInteractionQueuesForTheSim},
         {"check trees nest only so deep", checkTreesNestOnlySoDeep},
         {"Idle for Input starts queued interactions", idleForInputStartsQueuedInteractions},
@@ -1296,6 +1569,7 @@ std::vector<Test> vmInteractionTests() {
         {"Run Tree by Name passes the temps without flags", runTreeByNamePassesTheTempsWithoutFlags},
         {"Run Tree by Name passes every temp the tree takes", runTreeByNamePassesEveryTempTheTreeTakes},
         {"Run Tree by Name reads the semi-global names", runTreeByNameReadsTheSemiGlobalNames},
+        {"Run Tree by Name skips the groups its flags name", runTreeByNameSkipsTheGroupsItsFlagsName},
         {"Run Tree by Name runs on the stack object's stack", runTreeByNameRunsOnTheStackObjectsStack},
         {"Run Tree by Name other modes report themselves", runTreeByNameOtherModesReportThemselves},
         {"Run Tree by Name on the stack object shares the step limit", runTreeByNameOnTheStackObjectSharesTheStepLimit},

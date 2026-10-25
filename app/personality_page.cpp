@@ -53,21 +53,12 @@ std::int16_t at(std::span<const std::int16_t> data, std::size_t index) { return 
 void PersonalityPage::attach(ts2::ui::Screen& screen, int page) {
     screen_ = &screen;
     page_ = page;
-    auto bar = [&](int fill, std::uint32_t picture, bool vertical) {
-        Bar b;
-        b.fill = fill;
-        b.width = fill >= 0 ? screen.width(fill) : 0;
-        b.height = fill >= 0 ? screen.height(fill) : 0;
-        b.vertical = vertical;
-        b.picture = screen.data().image(kImages, picture).value_or(ts2::tga::Pixels{});
-        return b;
-    };
     for (std::size_t i = 0; i < traits_.size(); ++i) {
         const int window = screen.find(page, kTraits[i].window);
-        traits_[i] = bar(child(screen, window, kFill), kTraitPicture, false);
-        born_[i] = bar(child(screen, child(screen, window, kBornLine), kFill), kBornPicture, false);
+        traits_[i] = MeterBar(screen, child(screen, window, kFill), kTraitPicture, false);
+        born_[i] = MeterBar(screen, child(screen, child(screen, window, kBornLine), kFill), kBornPicture, false);
     }
-    fitness_ = bar(child(screen, screen.find(page, kFitnessBar), kFill), kFitnessPicture, true);
+    fitness_ = MeterBar(screen, child(screen, screen.find(page, kFitnessBar), kFill), kFitnessPicture, true);
 }
 
 void PersonalityPage::show(std::span<const std::int16_t> personData) {
@@ -75,10 +66,10 @@ void PersonalityPage::show(std::span<const std::int16_t> personData) {
         return;
     }
     for (std::size_t i = 0; i < traits_.size(); ++i) {
-        showBar(traits_[i], at(personData, kTraits[i].value), kTraitSteps);
-        showBar(born_[i], at(personData, kTraits[i].born), kTraitSteps);
+        traits_[i].show(at(personData, kTraits[i].value), kTraitSteps);
+        born_[i].show(at(personData, kTraits[i].born), kTraitSteps);
     }
-    showBar(fitness_, kTraitMax - at(personData, kFitness), kTraitMax);
+    fitness_.show(kTraitMax - at(personData, kFitness), kTraitMax);
     const int body = at(personData, kBody);
     screen_->setVisible(screen_->find(page_, kTopIcon), (body & 0x10) != 0);
     screen_->setVisible(screen_->find(page_, kBottomIcon), (body & 0x01) != 0);
@@ -96,33 +87,6 @@ void PersonalityPage::show(std::span<const std::int16_t> personData) {
             screen_->setImage(window, std::move(*picture));
         }
         zodiac_ = sign;
-    }
-}
-
-void PersonalityPage::showBar(Bar& bar, int value, int steps) {
-    if (bar.fill < 0) {
-        return;
-    }
-    const int pixels = ts2::content::barPixels(value, 0, kTraitMax, steps, bar.vertical ? bar.height : bar.width);
-    if (pixels == bar.pixels) {
-        return;
-    }
-    bar.pixels = pixels;
-    screen_->setVisible(bar.fill, pixels > 0);
-    if (pixels <= 0) {
-        return;
-    }
-    const auto w = static_cast<std::uint32_t>(bar.width), h = static_cast<std::uint32_t>(bar.height);
-    const auto p = static_cast<std::uint32_t>(pixels);
-    if (bar.vertical) {
-        // The fill shows the picture's bottom rows, at the bar's bottom.
-        screen_->setImage(bar.fill, ts2::content::placed(bar.picture, w, p, 0, pixels - bar.height));
-        screen_->move(bar.fill, 0, bar.height - pixels);
-        screen_->resize(bar.fill, bar.width, pixels);
-    } else {
-        // The fill shows the picture's left columns, from the bar's left.
-        screen_->setImage(bar.fill, ts2::content::placed(bar.picture, p, h, 0, 0));
-        screen_->resize(bar.fill, pixels, bar.height);
     }
 }
 

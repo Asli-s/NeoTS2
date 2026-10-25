@@ -8,6 +8,8 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <limits>
 #include <optional>
 
 namespace ts2::sim {
@@ -119,6 +121,30 @@ void restoreOverlays(const content::Lot& lot, std::uint32_t id, SimObject& objec
 }
 
 } // namespace
+
+World::PlatformRegion platformRegions(const content::Lot& lot) {
+    const auto regions = lot.grids.find(content::kPlatformRegionGridInstance);
+    constexpr std::size_t kCellSize = 16;  // four 32-bit regions
+    if (regions == lot.grids.end() || regions->second.elementSize != kCellSize) {
+        return {};
+    }
+    const int ground = content::groundGridLevel(lot);
+    return [grid = std::make_shared<const array3d::Array3D>(regions->second), ground](int level, int x, int y,
+                                                                                     int quarter) -> std::optional<std::int32_t> {
+        constexpr int kQuarters = 4;
+        const auto index = static_cast<std::int64_t>(level) + ground;
+        if (quarter < 0 || quarter >= kQuarters || index < 0 || index > std::numeric_limits<std::int32_t>::max()) {
+            return std::nullopt;
+        }
+        const auto cell = grid->at(static_cast<std::int32_t>(index), x, y);
+        if (cell.size() != kCellSize) {
+            return std::nullopt;
+        }
+        std::int32_t region = 0;
+        std::memcpy(&region, cell.data() + static_cast<std::size_t>(quarter) * sizeof region, sizeof region);
+        return region;
+    };
+}
 
 LotWorldReport buildWorld(const content::Lot& lot, CodeSource& code, World& world) {
     LotWorldReport report;
@@ -233,7 +259,27 @@ LotWorldReport buildWorld(const content::Lot& lot, CodeSource& code, World& worl
     return report;
 }
 
-std::shared_ptr<const SavedNeighborhood> savedNeighborhood(const content::Neighborhood& hood,
+namespace {
+
+bool isNeighborSim(const ObjectType* type) {
+    constexpr std::uint16_t kFamilyTreeOnlyType = 0x11;
+    if (type == nullptr) {
+        return false;
+    }
+    const std::uint16_t kind = type->definition.field(objd::field::kType);
+    return kind == kPersonType || kind == kFamilyTreeOnlyType;
+}
+
+void dropNeighbor(SavedNeighborhood& hood, std::int16_t id) {
+    hood.neighborIds.erase(id);
+    hood.neighbors.erase(id);
+    hood.familyTies.erase(id);
+    std::erase_if(hood.relationships, [id](const auto& r) { return r.first.first == id || r.first.second == id; });
+}
+
+} // namespace
+
+std::shared_ptr<const SavedNeighborhood> savedNeighborhood(const content::Neighborhood& hood, CodeSource& code,
                                                           std::map<std::int32_t, nhoodid::NeighborhoodId> all) {
     auto saved = std::make_shared<SavedNeighborhood>();
     if (hood.identity) {
@@ -247,6 +293,8 @@ std::shared_ptr<const SavedNeighborhood> savedNeighborhood(const content::Neighb
     saved->lotOwners = hood.lotOwners;
     for (const auto& [instance, family] : hood.families) {
         saved->familyLots[instance] = family.lot;
+        saved->familyCurrentLots[instance] = family.currentLot;
+        saved->familyVacationLots[instance] = family.vacationLot;
         saved->familyFlags[instance] = family.flags;
         saved->familyMembers[instance] = family.members;
     }
@@ -267,6 +315,12 @@ std::shared_ptr<const SavedNeighborhood> savedNeighborhood(const content::Neighb
         saved->fears[id].assign(w.fears.begin(), w.fears.begin() + static_cast<std::ptrdiff_t>(std::min<std::size_t>(w.fears.size(), slots.fears)));
     }
     saved->relationships = hood.relationships;
+    for (const std::int16_t id : hood.neighborIds) {
+        const auto n = saved->neighbors.find(id);
+        if (n == saved->neighbors.end() || !isNeighborSim(code.objectType(n->second.guid))) {
+            dropNeighbor(*saved, id);
+        }
+    }
     return saved;
 }
 

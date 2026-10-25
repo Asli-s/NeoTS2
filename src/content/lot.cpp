@@ -212,6 +212,15 @@ Lot loadLot(const std::filesystem::path& path) {
             } catch (const std::exception& ex) {
                 lot.problems.push_back({e.key.instance, std::string("roofs: ") + ex.what()});
             }
+        } else if (e.key.type == types::kNeighborRemapOther && e.key.instance == 2) {
+            lot.unreadNeighborRemap = true;
+        } else if (e.key.type == types::kNeighborRemap && e.key.instance == 2) {
+            try {
+                lot.neighborRemap = neighbor_remap::parse(package.read(e));
+            } catch (const std::exception& ex) {
+                lot.unreadNeighborRemap = true;
+                lot.problems.push_back({e.key.instance, std::string("neighbor remap: ") + ex.what()});
+            }
         } else if (e.key.type == types::kSavedObject || e.key.type == types::kSavedObjectWithMaterial ||
                    e.key.type == types::kSavedPerson) {
             records[e.key.instance].push_back(&e);

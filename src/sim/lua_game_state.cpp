@@ -41,6 +41,29 @@ int postMessage(lua_State* L) {
     return 0;
 }
 
+// nMessaging.SubscribeMessage(object id, message id, tree name): the object's tree of that name is
+// to run when the message is posted. Subscribing again replaces the name. UnsubscribeMessage does
+// the same in the game, so a script that unsubscribes subscribes again. Nothing in the engine
+// delivers messages to subscribers yet.
+int subscribeMessage(lua_State* L) {
+    const std::int32_t id = argInt(L, 1);
+    const auto message = static_cast<std::uint32_t>(argInt(L, 2));
+    if (lua_type(L, 3) != LUA_TSTRING) {
+        return stopUnsupported(L, "nMessaging.SubscribeMessage without a tree name");
+    }
+    const std::string_view tree(lua_tostring(L, 3), lua_strlen(L, 3));
+    ScriptCall& c = call(L);
+    const bool known = id >= 1 && id <= INT16_MAX && c.world != nullptr &&
+                       c.world->find(static_cast<std::int16_t>(id)) != nullptr;
+    if (!known) {
+        return scriptCheckError(L, "Could not find object: %d", static_cast<int>(id));
+    }
+    if (!c.world->messageSubscriptions().subscribe(message, static_cast<std::int16_t>(id), tree)) {
+        return scriptCheckError(L, "Too many message subscriptions.");
+    }
+    return 0;
+}
+
 // nGameState.GetProperty(name): the property's value, nil when it isn't set.
 int getProperty(lua_State* L) {
     const char* name = lua_tostring(L, 1);

@@ -3,6 +3,20 @@
 
 namespace {
 
+// The instruction that runs script `script` of string table 0x130 through primitive 0x7E, going
+// to true or false as the script ends.
+Instruction luaScriptCall(std::uint8_t script) {
+    Instruction in;
+    in.opcode = 0x007E;
+    in.trueTarget = T;
+    in.falseTarget = F;
+    in.operands[0] = 0x30;
+    in.operands[1] = 0x01;
+    in.operands[2] = script;
+    in.operands[4] = 0x01;
+    return in;
+}
+
 // Whether `run` ends false after its script raised an object error, as the game goes on past one.
 template <typename Run>
 bool scriptRaisesError(const ts2::sim::World& world, Run run) {
@@ -20,14 +34,7 @@ ScriptEnd runScript(const char* source) {
     CHECK(runtime->problems.empty());
     MemoryCodeSource code;
     code.addStrings(ts2::sim::kGlobalGroup, 0x130, {"Script"});
-    Instruction in;
-    in.opcode = 0x007E;
-    in.trueTarget = T;
-    in.falseTarget = F;
-    in.operands[0] = 0x30;
-    in.operands[1] = 0x01;
-    in.operands[2] = 1;
-    in.operands[4] = 0x01;
+    Instruction in = luaScriptCall(1);
     code.add(kObjectGroup, 0x1000, bhav({in}));
     ts2::sim::World world;
     world.setScripts(runtime);
@@ -38,6 +45,12 @@ ScriptEnd runScript(const char* source) {
         return ScriptEnd::Stopped;
     }
     return r.outcome == Outcome::True ? ScriptEnd::True : ScriptEnd::False;
+}
+
+// A script's result is true unless it says otherwise.
+void scriptsAreTrueUnlessTheySayOtherwise() {
+    CHECK(runScript("SetTemp(0, 1)") == ScriptEnd::True);
+    CHECK(runScript("SetScriptReturnValue(false)") == ScriptEnd::False);
 }
 
 // Scripts can't make a userdata of their own, which could pass for an engine object.
@@ -163,7 +176,7 @@ void luaScriptPrimitiveRunsScripts() {
     CHECK(vm.run(object, 0x1000).outcome == Outcome::False && object.thread.temps[1] == 17);
     object.thread.temps[2] = 5;
     CHECK(vm.run(object, 0x1000).outcome == Outcome::True);
-    CHECK(vm.run(object, 0x1001).outcome == Outcome::False && object.thread.temps[0] == 5 &&
+    CHECK(vm.run(object, 0x1001).outcome == Outcome::True && object.thread.temps[0] == 5 &&
           object.thread.temps[1] == 2);
     const RunResult missing = vm.run(object, 0x1002);
     CHECK(missing.outcome == Outcome::Unsupported && missing.reason == "script function not implemented: GetCatalogName");
@@ -173,7 +186,7 @@ void luaScriptPrimitiveRunsScripts() {
     CHECK(vm.run(object, 0x1005).outcome == Outcome::True && object.thread.temps[3] == 2);
     CHECK(std::get<std::int32_t>(runtime->properties.at("Count")) == 2);
     object.thread.temps[0] = 0;
-    CHECK(vm.run(object, 0x1006).outcome == Outcome::False && object.thread.temps[0] == 5);
+    CHECK(vm.run(object, 0x1006).outcome == Outcome::True && object.thread.temps[0] == 5);
     object.thread.temps[3] = 0;
     CHECK(vm.run(object, 0x1007).outcome == Outcome::True && object.thread.temps[3] == 2);
 }
@@ -261,7 +274,74 @@ void objectScriptsReadAndWriteValues() {
     }
     // The fridge running its own code runs on itself.
     fridge.thread.stackObjectId = fridge.id;
-    CHECK(vm.run(fridge, 0x1011).outcome == Outcome::False && fridge.thread.temps[0] == 22);
+    CHECK(vm.run(fridge, 0x1011).outcome == Outcome::True && fridge.thread.temps[0] == 22);
+}
+
+// SubscribeMessage keeps one tree name per object and message, and UnsubscribeMessage subscribes
+// too, as in the game. A deleted object's subscriptions go when it is freed.
+void scriptsSubscribeToMessages() {
+    constexpr std::uint32_t kGameSaving = 0xACFD5984, kSeasonChanged = 0xB23B7D66;
+    auto runtime = std::make_shared<ts2::sim::LuaRuntime>();
+    runtime->load({}, {compileScript("Subscribe", R"(
+        local me = GetStackObjectId()
+        nMessaging.SubscribeMessage(me, 2902284676, "CT - Old Name")
+        nMessaging.SubscribeMessage(me, 2902284676, "CT - Run On Save")
+        nMessaging.UnsubscribeMessage(me, 2990243174, "CT - Update TVs")
+    )"), compileScript("MissingObject", "nMessaging.SubscribeMessage(99, 1, \"CT - Run On Save\")"),
+           compileScript("NoName", "nMessaging.SubscribeMessage(GetStackObjectId(), 1)")});
+    CHECK(runtime->problems.empty());
+
+    MemoryCodeSource code;
+    code.addObjectType(kObjectGroup, typed(kFridgeGuid));
+    code.addStrings(ts2::sim::kGlobalGroup, 0x130, {"Subscribe", "MissingObject", "NoName"});
+    Instruction in;
+    in.opcode = 0x007E;
+    in.operands[4] = 0x01;
+    in.trueTarget = T;
+    in.falseTarget = F;
+    in.operands[0] = 0x30;
+    in.operands[1] = 0x01;
+    for (std::uint8_t i = 1; i <= 3; ++i) {
+        in.operands[2] = i;
+        code.add(kObjectGroup, static_cast<std::uint16_t>(0x0FFF + i), bhav({in}));
+    }
+
+    ts2::sim::World world;
+    world.setScripts(runtime);
+    auto& fridge = world.create(kObjectGroup, typed(kFridgeGuid));
+    fridge.thread.stackObjectId = fridge.id;
+    Vm vm(code, {}, &world);
+
+    CHECK(vm.run(fridge, 0x1000).outcome == Outcome::True);
+    const auto& subscriptions = world.messageSubscriptions();
+    CHECK(subscriptions.size() == 2);
+    const auto* saving = subscriptions.subscribers(kGameSaving);
+    CHECK(saving != nullptr && saving->size() == 1 && saving->at(fridge.id) == "CT - Run On Save");
+    const auto* season = subscriptions.subscribers(kSeasonChanged);
+    CHECK(season != nullptr && season->at(fridge.id) == "CT - Update TVs");
+    CHECK(scriptRaisesError(world, [&] { return vm.run(fridge, 0x1001); }));
+    CHECK(vm.run(fridge, 0x1002).outcome == Outcome::Unsupported);
+
+    world.remove(fridge);
+    CHECK(subscriptions.size() == 2);
+    world.purge();
+    CHECK(subscriptions.size() == 0 && subscriptions.subscribers(kGameSaving) == nullptr);
+}
+
+// The subscription limits: a full table takes no new subscriber, but still renames one, and a long
+// tree name is kept only as far as a tree name could match.
+void messageSubscriptionsAreBounded() {
+    using ts2::sim::MessageSubscriptions;
+    MessageSubscriptions subscriptions;
+    for (std::size_t i = 0; i < MessageSubscriptions::kMaxSubscriptions; ++i) {
+        CHECK(subscriptions.subscribe(static_cast<std::uint32_t>(i), 1, "CT - Tree"));
+    }
+    CHECK(!subscriptions.subscribe(0xFFFFFFFF, 1, "CT - Tree"));
+    CHECK(subscriptions.subscribers(0xFFFFFFFF) == nullptr);
+    CHECK(subscriptions.subscribe(0, 1, std::string(1000, 'x')));
+    CHECK(subscriptions.subscribers(0)->at(1).size() == MessageSubscriptions::kMaxNameLength);
+    subscriptions.dropObject(1);
+    CHECK(subscriptions.size() == 0 && subscriptions.subscribe(0xFFFFFFFF, 1, "CT - Tree"));
 }
 
 Instruction manageInventory(std::uint8_t inventory, std::uint8_t op, std::uint8_t byte9,
@@ -479,14 +559,7 @@ void savedDataTablesAreRead() {
     )")});
     MemoryCodeSource code;
     code.addStrings(ts2::sim::kGlobalGroup, 0x130, {"Read"});
-    Instruction in;
-    in.opcode = 0x007E;
-    in.operands[4] = 0x01;
-    in.trueTarget = T;
-    in.falseTarget = F;
-    in.operands[0] = 0x30;
-    in.operands[1] = 0x01;
-    in.operands[2] = 1;
+    Instruction in = luaScriptCall(1);
     code.add(kObjectGroup, 0x1000, bhav({in}));
     auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
     hood->neighborIds = {8};
@@ -592,6 +665,33 @@ void inventoryScriptsUseSavedTokens() {
     CHECK(vm.run(object, 0x1007).outcome == Outcome::Unsupported);
 }
 
+// Loading a neighborhood keeps neighbors whose Sim is a person (OBJD type 2) or family-tree-only
+// (0x11). Others, an unknown or zero GUID included, go with their relationships and family ties.
+void neighborhoodLoadDropsNeighborsWithoutASim() {
+    const auto pair = [](std::int16_t from, std::int16_t to) { return std::pair{from, to}; };
+    constexpr std::uint32_t kPerson = 0x11110001, kTreeOnly = 0x11110002, kChair = 0x11110003;
+    MemoryCodeSource code;
+    code.addObjectType(kObjectGroup, typed(kPerson, ts2::sim::kPersonType));
+    code.addObjectType(kObjectGroup, typed(kTreeOnly, 0x11));
+    code.addObjectType(kObjectGroup, typed(kChair));
+    ts2::content::Neighborhood loaded;
+    loaded.neighborIds = {1, 2, 3, 4, 5};
+    loaded.neighbors[1].guid = kPerson;
+    loaded.neighbors[2].guid = kTreeOnly;
+    loaded.neighbors[3].guid = 0x759390DF;  // no OBJD anywhere
+    loaded.neighbors[4].guid = 0;
+    loaded.neighbors[5].guid = kChair;
+    loaded.relationships[pair(1, 3)] = {10};
+    loaded.relationships[pair(3, 1)] = {20};
+    loaded.relationships[pair(1, 2)] = {30};
+    loaded.familyTies[1] = {};
+    loaded.familyTies[3] = {};
+    const auto hood = ts2::sim::savedNeighborhood(loaded, code);
+    CHECK((hood->neighborIds == std::set<std::int16_t>{1, 2}));
+    CHECK(hood->neighbors.size() == 2 && hood->relationships.size() == 1 && hood->relationships.contains(pair(1, 2)));
+    CHECK(hood->familyTies.size() == 1 && hood->familyTies.contains(1));
+}
+
 // NeighborhoodManager answers from the Neighborhoods folder's neighborhoods: validity, type names,
 // the current neighborhood's type, the season of a quadrant (-1 for an unknown neighborhood) and
 // how many of the current neighborhood's sub-neighborhoods have a type.
@@ -633,7 +733,8 @@ void neighborhoodManagerReadsNeighborhoods() {
     elsewhere.id = 9;
     elsewhere.prefix = "N001";
     ts2::sim::World world;
-    world.setNeighborhood(ts2::sim::savedNeighborhood(loaded, {{27, university}, {12, suburb}, {13, otherSuburb}, {9, elsewhere}}));
+    MemoryCodeSource noCode;
+    world.setNeighborhood(ts2::sim::savedNeighborhood(loaded, noCode, {{27, university}, {12, suburb}, {13, otherSuburb}, {9, elsewhere}}));
     std::array<std::int16_t, 8> temps{};
     ts2::sim::ScriptCall call;
     call.world = &world;
@@ -754,8 +855,75 @@ void dataTableScriptsKeepValues() {
     }
 }
 
-// CachedNeighbor reads and writes the neighbor's own person data (0 outside 0-230) and gives its
-// GUID as a signed number.
+// nWorld.HasStage and HasStageAny: whether the point's quarter lies on platform region 4, a
+// split-level interior foundation. Other regions, other quarters and other levels are not.
+void hasStageReadsThePlatformRegion() {
+    auto runtime = std::make_shared<ts2::sim::LuaRuntime>();
+    runtime->load({}, {compileScript("Stage", R"(
+        SetTemp(0, (nWorld.HasStage(11.5, 25.2, 1) and 1 or 0) + (nWorld.HasStageAny(11.5, 25.9, 1) and 10 or 0) +
+                   (nWorld.HasStage(11.5, 25.5, 0) and 100 or 0) + (nWorld.HasStageAny(13.5, 25.5, 1) and 1000 or 0) +
+                   (nWorld.HasStage(-1, 25.5, 1) and 10000 or 0) + (nWorld.HasStageAny(11.5, 25.2, 1) and 20000 or 0))
+        SetScriptReturnValue(true)
+    )")});
+    CHECK(runtime->problems.empty());
+    MemoryCodeSource code;
+    code.addStrings(ts2::sim::kGlobalGroup, 0x130, {"Stage"});
+    Instruction in = luaScriptCall(1);
+    code.add(kObjectGroup, 0x1000, bhav({in}));
+    ts2::sim::World world;
+    world.setScripts(runtime);
+    // Tile (11, 25) on level 1: the stage on its bottom quarter (3) only. Tile (13, 25) a deck.
+    world.setPlatformRegion([](int level, int x, int y, int quarter) -> std::optional<std::int32_t> {
+        if (level == 1 && x == 11 && y == 25) return quarter == 3 ? 4 : -1;
+        if (level == 1 && x == 13 && y == 25) return 1;
+        return level == 0 ? std::optional<std::int32_t>(0) : std::nullopt;
+    });
+    auto& object = world.create(kObjectGroup, typed(kFridgeGuid));
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(object, 0x1000).outcome == Outcome::True && object.thread.temps[0] == 20001);
+}
+
+// nWorld.GetNumWallSections gives the lot's room wall count, and GetRoomOnSideOfWall the room on side
+// 0 (the wall's left) or 1 of a wall. Both stop without the lot's walls. The second also stops past the
+// last wall and on a wall the room graph doesn't have, which still counts.
+void numWallSectionsIsTheRoomWallCount() {
+    auto runtime = std::make_shared<ts2::sim::LuaRuntime>();
+    runtime->load({}, {compileScript("Walls", R"(
+        SetTemp(0, nWorld.GetNumWallSections())
+        SetTemp(1, nWorld.GetRoomOnSideOfWall(1, 0))
+        SetTemp(2, nWorld.GetRoomOnSideOfWall(1, 1))
+        SetTemp(3, nWorld.GetRoomOnSideOfWall(GetTemp(4), 0))
+    )")});
+    CHECK(runtime->problems.empty());
+    MemoryCodeSource code;
+    code.addStrings(ts2::sim::kGlobalGroup, 0x130, {"Walls"});
+    code.add(kObjectGroup, 0x1000, bhav({luaScriptCall(1)}));
+    ts2::sim::World world;
+    world.setScripts(runtime);
+    auto& object = world.create(kObjectGroup, typed(kFridgeGuid));
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(object, 0x1000).outcome == Outcome::Unsupported);
+    const auto graph = squareRoom(false);
+    world.setRooms(ts2::sim::RoomMap(graph));
+    std::vector<ts2::sim::World::WallSection> sections;
+    for (const auto& wall : graph.walls) {
+        sections.push_back({*graph.point(wall.from), *graph.point(wall.to), true});
+    }
+    world.setWallSections(std::move(sections));
+    object.thread.temps[4] = 0;
+    CHECK(vm.run(object, 0x1000).outcome == Outcome::True && object.thread.temps[0] == 4);
+    CHECK(object.thread.temps[1] == 0 && object.thread.temps[2] == 5 && object.thread.temps[3] == 0);
+    object.thread.temps[4] = 4;
+    CHECK(vm.run(object, 0x1000).outcome == Outcome::Unsupported);
+    auto withUnplaced = *world.wallSections();
+    withUnplaced.push_back({});
+    world.setWallSections(std::move(withUnplaced));
+    object.thread.temps[4] = 0;
+    CHECK(vm.run(object, 0x1000).outcome == Outcome::True && object.thread.temps[0] == 5);
+    object.thread.temps[4] = 4;
+    CHECK(vm.run(object, 0x1000).outcome == Outcome::Unsupported);
+}
+
 // nWorld.HasSolidFloor: whether the point's quarter of its tile (split along both diagonals) has a
 // floor pattern. Off the grid or without floors, no.
 void hasSolidFloorReadsTheFloorQuarter() {
@@ -771,14 +939,7 @@ void hasSolidFloorReadsTheFloorQuarter() {
     CHECK(runtime->problems.empty());
     MemoryCodeSource code;
     code.addStrings(ts2::sim::kGlobalGroup, 0x130, {"Floor"});
-    Instruction in;
-    in.opcode = 0x007E;
-    in.operands[4] = 0x01;
-    in.trueTarget = T;
-    in.falseTarget = F;
-    in.operands[0] = 0x30;
-    in.operands[1] = 0x01;
-    in.operands[2] = 1;
+    Instruction in = luaScriptCall(1);
     code.add(kObjectGroup, 0x1000, bhav({in}));
     ts2::sim::World world;
     world.setScripts(runtime);
@@ -823,14 +984,7 @@ void queuedInteractionAdvertisingIsSeen() {
     table.interactions[0].motives[0][5].delta = 40;
     table.interactions[0].motives[0][2].min = 10;
     code.addInteractionTable(kObjectGroup, 0x80, table);
-    Instruction in;
-    in.opcode = 0x007E;
-    in.operands[4] = 0x01;
-    in.trueTarget = T;
-    in.falseTarget = F;
-    in.operands[0] = 0x30;
-    in.operands[1] = 0x01;
-    in.operands[2] = 1;
+    Instruction in = luaScriptCall(1);
     code.add(kObjectGroup, 0x1000, bhav({in}));
     ts2::sim::World world;
     world.setScripts(runtime);
@@ -846,6 +1000,8 @@ void queuedInteractionAdvertisingIsSeen() {
     CHECK(vm.run(sim, 0x1000).outcome == Outcome::True && sim.thread.temps[0] == 1);
 }
 
+// CachedNeighbor reads and writes the neighbor's own person data (0 outside 0-230) and gives its
+// GUID as a signed number.
 void cachedNeighborScriptsReadTheNeighbor() {
     auto runtime = std::make_shared<ts2::sim::LuaRuntime>();
     runtime->load({}, {compileScript("Neighbor", R"(
@@ -866,14 +1022,7 @@ void cachedNeighborScriptsReadTheNeighbor() {
                                 {"skincolor", "B6EE1DBC-5BB3-4146-8315-02BD64EDA707"},
                                 {"eyecolor", "00000000-0000-0000-0000-000000000000"},
                                 {"species", "0"}});
-    Instruction in;
-    in.opcode = 0x007E;
-    in.operands[4] = 0x01;
-    in.trueTarget = T;
-    in.falseTarget = F;
-    in.operands[0] = 0x30;
-    in.operands[1] = 0x01;
-    in.operands[2] = 1;
+    Instruction in = luaScriptCall(1);
     code.add(kObjectGroup, 0x1000, bhav({in}));
     ts2::sim::World world;
     world.setScripts(runtime);
@@ -893,13 +1042,56 @@ void cachedNeighborScriptsReadTheNeighbor() {
     CHECK((*world.neighborPersonData(8))[5] == 77);
 }
 
-// Neighborhood:isApartmentDoor is false off apartment lots. On one (type 8 or 9) it isn't ported yet.
+// Neighborhood:isApartmentDoor is false off apartment lots. On one (type 8 or 9) it is true for an
+// object of category 0x1A (data 0x3B) whose OBJD field 0x4B is 0xCC.
 void apartmentDoorIsFalseOffApartmentLots() {
     auto runtime = std::make_shared<ts2::sim::LuaRuntime>();
-    runtime->load({}, {compileScript("Door", "SetScriptReturnValue(not Neighborhood.new():isApartmentDoor(1))")});
+    runtime->load({}, {compileScript("Door", "SetScriptReturnValue(not Neighborhood.new():isApartmentDoor(GetTemp(0)))")});
     CHECK(runtime->problems.empty());
     MemoryCodeSource code;
     code.addStrings(ts2::sim::kGlobalGroup, 0x130, {"Door"});
+    Instruction in = luaScriptCall(1);
+    code.add(kObjectGroup, 0x1000, bhav({in}));
+    ts2::sim::World world;
+    world.setScripts(runtime);
+    auto apartmentDoor = typed(kChairGuid);
+    apartmentDoor.fields[0x4B] = 0xCC;
+    auto& door = world.create(kObjectGroup, apartmentDoor);
+    door.data[0x3B] = 0x1A;
+    door.thread.temps[0] = door.id;
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(door, 0x1000).outcome == Outcome::True);
+    for (const std::uint8_t lot : {std::uint8_t{8}, std::uint8_t{9}}) {
+        world.setLotType(lot);
+        door.thread.temps[0] = door.id;
+        CHECK(vm.run(door, 0x1000).outcome == Outcome::False);
+    }
+    door.data[0x3B] = 0x1B;
+    door.thread.temps[0] = door.id;
+    CHECK(vm.run(door, 0x1000).outcome == Outcome::True);
+    door.data[0x3B] = 0x1A;
+    door.definition.fields[0x4B] = 0xCD;
+    door.thread.temps[0] = door.id;
+    CHECK(vm.run(door, 0x1000).outcome == Outcome::True);
+    door.thread.temps[0] = 999;
+    CHECK(vm.run(door, 0x1000).outcome == Outcome::True);
+}
+
+// CachedFamily.new takes a family of the neighborhood (error 0x9A for any other), whose id and three
+// saved lots its getters read.
+void cachedFamilyReadsTheSavedLots() {
+    auto runtime = std::make_shared<ts2::sim::LuaRuntime>();
+    runtime->load({}, {compileScript("Family", R"(
+        local family = CachedFamily.new(3)
+        SetTemp(0, family:getId())
+        SetTemp(1, family:getLotId())
+        SetTemp(2, family:getCurrentLotId())
+        SetTemp(3, family:getVacationLotId())
+        SetScriptReturnValue(true)
+    )"), compileScript("Missing", "CachedFamily.new(4)")});
+    CHECK(runtime->problems.empty());
+    MemoryCodeSource code;
+    code.addStrings(ts2::sim::kGlobalGroup, 0x130, {"Family", "Missing"});
     Instruction in;
     in.opcode = 0x007E;
     in.operands[4] = 0x01;
@@ -907,15 +1099,53 @@ void apartmentDoorIsFalseOffApartmentLots() {
     in.falseTarget = F;
     in.operands[0] = 0x30;
     in.operands[1] = 0x01;
-    in.operands[2] = 1;
+    for (std::uint8_t i = 1; i <= 2; ++i) {
+        in.operands[2] = i;
+        code.add(kObjectGroup, static_cast<std::uint16_t>(0x0FFF + i), bhav({in}));
+    }
+    auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
+    hood->familyLots[3] = 10;
+    hood->familyCurrentLots[3] = 12;
+    hood->familyVacationLots[3] = 77;
+    ts2::sim::World world;
+    world.setScripts(runtime);
+    world.setNeighborhood(hood);
+    auto& object = world.create(kObjectGroup, typed(kFridgeGuid));
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(object, 0x1000).outcome == Outcome::True);
+    const auto& t = object.thread.temps;
+    CHECK(t[0] == 3 && t[1] == 10 && t[2] == 12 && t[3] == 77);
+    CHECK(scriptRaisesError(world, [&] { return vm.run(object, 0x1001); }));
+}
+
+// Neighborhood:isApartmentResident: a Sim with person data 0x20 = 8, only on apartment lots (types 8
+// and 9). Other Sims and objects that aren't Sims are not.
+void apartmentResidentsAreSimsOfType8OnApartmentLots() {
+    auto runtime = std::make_shared<ts2::sim::LuaRuntime>();
+    runtime->load({}, {compileScript("Residents", R"(
+        local hood = Neighborhood.new()
+        SetTemp(0, (hood:isApartmentResident(1) and 1 or 0) + (hood:isApartmentResident(2) and 10 or 0) +
+                   (hood:isApartmentResident(3) and 100 or 0) + (hood:isApartmentResident(99) and 1000 or 0))
+        SetScriptReturnValue(true)
+    )")});
+    CHECK(runtime->problems.empty());
+    MemoryCodeSource code;
+    code.addStrings(ts2::sim::kGlobalGroup, 0x130, {"Residents"});
+    Instruction in = luaScriptCall(1);
     code.add(kObjectGroup, 0x1000, bhav({in}));
     ts2::sim::World world;
     world.setScripts(runtime);
-    auto& door = world.create(kObjectGroup, typed(kChairGuid));
+    auto& resident = world.create(kSimGroup, typed(0x51515151, ts2::sim::kPersonType));  // 1
+    auto& visitor = world.create(kSimGroup, typed(0x51515152, ts2::sim::kPersonType));   // 2
+    auto& chair = world.create(kObjectGroup, typed(kChairGuid));                          // 3
+    resident.personData[0x20] = 8;
+    visitor.personData[0x20] = 0;
     Vm vm(code, {}, &world);
-    CHECK(vm.run(door, 0x1000).outcome == Outcome::True);
+    CHECK(vm.run(chair, 0x1000).outcome == Outcome::True && chair.thread.temps[0] == 0);
+    world.setLotType(9);
+    CHECK(vm.run(chair, 0x1000).outcome == Outcome::True && chair.thread.temps[0] == 1);
     world.setLotType(8);
-    CHECK(vm.run(door, 0x1000).outcome == Outcome::Unsupported);
+    CHECK(vm.run(chair, 0x1000).outcome == Outcome::True && chair.thread.temps[0] == 1);
 }
 
 // GetNeighborRelationship gives a neighbor's variable towards another as the unsigned 32-bit value
@@ -1100,22 +1330,30 @@ std::vector<Test> vmScriptTests() {
         {"CachedNeighbor scripts read the neighbor", cachedNeighborScriptsReadTheNeighbor},
         {"CachedPerson sees queued interactions that advertise a motive", queuedInteractionAdvertisingIsSeen},
         {"nWorld.HasSolidFloor reads the floor quarter", hasSolidFloorReadsTheFloorQuarter},
+        {"nWorld.HasStage reads the platform region", hasStageReadsThePlatformRegion},
+        {"nWorld.GetNumWallSections is the room wall count", numWallSectionsIsTheRoomWallCount},
         {"ObjectManager lists a multi-tile object's parts", objectManagerListsMultiTileParts},
-        {"Neighborhood:isApartmentDoor is false off apartment lots", apartmentDoorIsFalseOffApartmentLots},
+        {"Neighborhood:isApartmentDoor tests the category and OBJD field 0x4B", apartmentDoorIsFalseOffApartmentLots},
+        {"Neighborhood:isApartmentResident needs an apartment lot", apartmentResidentsAreSimsOfType8OnApartmentLots},
+        {"CachedFamily reads the saved lots", cachedFamilyReadsTheSavedLots},
         {"Neighborhood reads lot owners", neighborhoodReadsLotOwners},
         {"neighbor relationships read as saved", neighborRelationshipsReadAsSaved},
         {"Lua script primitive runs scripts", luaScriptPrimitiveRunsScripts},
         {"ObjectManager scripts find objects", objectManagerScriptsFindObjects},
         {"data table scripts keep values", dataTableScriptsKeepValues},
         {"object scripts read and write values", objectScriptsReadAndWriteValues},
+        {"scripts subscribe objects to messages", scriptsSubscribeToMessages},
+        {"message subscriptions are bounded", messageSubscriptionsAreBounded},
         {"inventory scripts use saved tokens", inventoryScriptsUseSavedTokens},
         {"Manage Inventory changes tokens", manageInventoryChangesTokens},
         {"Lua primitive runs descriptions", luaScriptPrimitiveRunsDescriptions},
         {"NeighborhoodManager reads neighborhoods", neighborhoodManagerReadsNeighborhoods},
+        {"neighborhood load drops neighbors without a Sim", neighborhoodLoadDropsNeighborsWithoutASim},
         {"Temporary Token reads the token reference", temporaryTokenReadsTheTokenReference},
         {"saved data tables are read", savedDataTablesAreRead},
         {"script globals are looked up raw", scriptGlobalsAreLookedUpRaw},
         {"script memory runs out inside functions", scriptMemoryRunsOutInsideFunctions},
+        {"scripts are true unless they say otherwise", scriptsAreTrueUnlessTheySayOtherwise},
         {"scripts can't make userdata", scriptsCantMakeUserdata},
         {"scripts can't start coroutines", scriptsCantStartCoroutines},
         {"scripts can't change class metatables", scriptsCantChangeClassMetatables},

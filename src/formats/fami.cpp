@@ -25,8 +25,8 @@ Family parse(std::span<const std::uint8_t> data) {
     }
     f.unknown0 = r.u32();
     f.lot = r.i32();
-    f.lot2 = f.version >= 0x50 ? r.i32() : f.lot;
-    f.value3 = f.version >= 0x55 ? r.i32() : 0;
+    f.currentLot = f.version >= 0x50 ? r.i32() : f.lot;
+    f.vacationLot = f.version >= 0x55 ? r.i32() : 0;
     f.value4 = r.i32();
     f.funds = r.i32();
     if (f.version < 0x4D) {

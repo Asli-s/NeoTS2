@@ -13,8 +13,8 @@ struct Family {
     std::uint32_t version = 0;
     std::uint32_t unknown0 = 0;
     std::int32_t lot = 0;        // the lot the family lives on (Lots/<hood>_Lot<n>), 0 for none
-    std::int32_t lot2 = 0;       // from version 0x50, else the lot
-    std::int32_t value3 = 0;     // from version 0x55
+    std::int32_t currentLot = 0;   // CachedFamily:getCurrentLotId, from version 0x50, else the lot
+    std::int32_t vacationLot = 0;  // CachedFamily:getVacationLotId, from version 0x55, else 0
     std::int32_t value4 = 0;
     std::int32_t funds = 0;      // from version 2
     std::int32_t value6 = 0;     // from version 2

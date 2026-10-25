@@ -338,6 +338,23 @@ void brokenNumbersAreLeftOut() {
     CHECK(table.size() == 2 && table.at(nan).i == 2 && table.begin()->first.f == 1);
 }
 
+// The room on each side of a wall, found in the room map beside the wall, is the room the wall
+// graph names on that side: its left room walking from `from` to `to`, its right room the other way.
+// The four walls of the square and its diagonal cover every direction a wall can run.
+void roomOnSideOfWallMatchesTheWallGraph() {
+    const auto graph = squareRoom(true);
+    const ts2::sim::RoomMap rooms(graph);
+    for (const auto& wall : graph.walls) {
+        const auto& from = *graph.point(wall.from);
+        const auto& to = *graph.point(wall.to);
+        CHECK(ts2::sim::roomOnSideOfWall(rooms, from, to) == wall.leftRoom);
+        CHECK(ts2::sim::roomOnSideOfWall(rooms, to, from) == wall.rightRoom);
+    }
+    // A wall along the lot's edge has nothing on its outer side.
+    CHECK(ts2::sim::roomOnSideOfWall(rooms, {0, 0, 2, 0}, {0, 0, 0, 0}) == ts2::sim::RoomMap::kNoRoom);
+    CHECK(ts2::sim::roomOnSideOfWall(rooms, {0, 0, 0, 0}, {0, 0, 2, 0}) == 0);
+}
+
 void roomsAreFilledBetweenWalls() {
     const ts2::sim::RoomMap rooms(squareRoom(false));
     CHECK(rooms.roomAt(0, 2.5f, 2.5f) == 5);
@@ -454,6 +471,7 @@ void motivesAreShownAsWholeNumbers() {
 std::vector<Test> simulationTests() {
     return {
         {"rooms are filled between walls", roomsAreFilledBetweenWalls},
+        {"the room on a side of a wall matches the wall graph", roomOnSideOfWallMatchesTheWallGraph},
         {"broken numbers are left out", brokenNumbersAreLeftOut},
         {"diagonal walls split tiles", diagonalWallsSplitTiles},
         {"saved room grid is read by quarter", savedRoomGridIsReadByQuarter},

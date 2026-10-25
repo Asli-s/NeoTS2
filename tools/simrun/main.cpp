@@ -439,6 +439,93 @@ int printOutside(const std::filesystem::path& lotPath) {
     return 0;
 }
 
+// Prints every quarter with a platform region as "level x y quarter region", levels as scripts
+// count them (0 = the ground storey) from one below the ground to the top.
+int printPlatforms(const std::filesystem::path& lotPath) {
+    const ts2::content::Lot lot = ts2::content::loadLot(lotPath);
+    const auto regions = ts2::sim::platformRegions(lot);
+    const auto grid = lot.grids.find(ts2::content::kPlatformRegionGridInstance);
+    if (!regions || grid == lot.grids.end()) {
+        std::printf("no platform region grid\n");
+        return 1;
+    }
+    const int ground = ts2::content::groundGridLevel(lot);
+    for (int level = -ground; level < static_cast<int>(grid->second.levels) - ground; ++level) {
+        for (int x = 0; x < static_cast<int>(grid->second.width); ++x) {
+            for (int y = 0; y < static_cast<int>(grid->second.height); ++y) {
+                for (int quarter = 0; quarter < 4; ++quarter) {
+                    const auto region = regions(level, x, y, quarter);
+                    if (region && *region != -1) {
+                        std::printf("%d %d %d %d %d\n", level, x, y, quarter, *region);
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+// Prints how many of the lot's saved wall segments have each wall layer type, "type count".
+int printWallTypes(const std::filesystem::path& lotPath) {
+    const ts2::content::Lot lot = ts2::content::loadLot(lotPath);
+    std::map<std::uint32_t, std::size_t> counts;
+    for (const auto& entry : lot.wallCoverings) {
+        ++counts[entry.type];
+    }
+    for (const auto& [type, n] : counts) {
+        std::printf("0x%X %zu\n", type, n);
+    }
+    std::printf("total %zu\n", lot.wallCoverings.size());
+    return 0;
+}
+
+// Prints every saved wall segment in file order: "segment type", then for a segment of the room graph
+// its two points (x y level) and the rooms on its left and right.
+int printWallList(const std::filesystem::path& lotPath) {
+    const ts2::content::Lot lot = ts2::content::loadLot(lotPath);
+    std::map<std::int32_t, const ts2::wallgraph::Wall*> walls;
+    std::optional<ts2::wallgraph::PointIndex> points;
+    if (lot.roomGraph) {
+        for (const auto& w : lot.roomGraph->walls) {
+            walls.emplace(w.id, &w);
+        }
+        points.emplace(*lot.roomGraph);
+    }
+    for (const auto& entry : lot.wallCoverings) {
+        std::printf("%u 0x%X", entry.wall, entry.type);
+        if (const auto it = walls.find(static_cast<std::int32_t>(entry.wall)); it != walls.end()) {
+            const auto* a = (*points)(it->second->from);
+            const auto* b = (*points)(it->second->to);
+            if (a != nullptr && b != nullptr) {
+                std::printf(" %g %g %d %g %g %d rooms %d %d", a->x, a->y, a->level, b->x, b->y, b->level, it->second->leftRoom,
+                            it->second->rightRoom);
+            }
+        }
+        std::printf("\n");
+    }
+    return 0;
+}
+
+// Prints the room on each side of every full room wall as scripts number them, "index side0 side1".
+int printWallSides(const std::filesystem::path& install, const std::filesystem::path& lotPath) {
+    ts2::sim::LotSimulation sim(install, lotPath);
+    const auto& sections = sim.world().wallSections();
+    if (!sections) {
+        std::printf("no walls\n");
+        return 1;
+    }
+    for (std::size_t i = 0; i < sections->size(); ++i) {
+        const auto& wall = (*sections)[i];
+        if (!wall.placed) {
+            std::printf("%zu not in the room graph\n", i);
+            continue;
+        }
+        std::printf("%zu %d %d\n", i, ts2::sim::roomOnSideOfWall(sim.world().rooms(), wall.from, wall.to),
+                    ts2::sim::roomOnSideOfWall(sim.world().rooms(), wall.to, wall.from));
+    }
+    return 0;
+}
+
 // Compares the object type table saved with a lot (its Init and Main signatures and two OBJD counts)
 // with the installed object types, one line per type: saved and installed values, and "changed".
 int typeChanges(ResourceIndex& index, const std::filesystem::path& lotPath) {
@@ -515,7 +602,7 @@ void printPieMenus(ts2::sim::LotSimulation& sim, ts2::sim::SimObject& actor, std
 int runLot(ResourceIndex& index, const std::filesystem::path& install, const std::filesystem::path& lotPath,
            std::size_t ticks, std::optional<std::size_t> traceTick, std::optional<std::int16_t> traceObject, bool onScreen,
            bool personData, bool overlays, bool motion, std::optional<std::int16_t> pieSim, std::optional<std::int16_t> pieTrace,
-           std::optional<std::array<int, 3>> queueChoice, std::optional<std::size_t> cancelTick,
+           std::optional<std::array<int, 3>> queueChoice, std::size_t queueTick, std::optional<std::size_t> cancelTick,
            std::optional<std::array<float, 3>> groundAt, bool portals, std::optional<std::array<float, 4>> groundLater,
            const std::vector<std::array<float, 5>>& goHere) {
     const auto primitives = editorTable(index, kPrimitiveNames);
@@ -560,11 +647,33 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
         const auto group = sim.characterGroup(neighbor);
         return group ? std::optional<std::int16_t>(outfits.get(*group, category, property)) : std::nullopt;
     });
+    world.setHasOutfit([&](const ts2::sim::SimObject& object, std::uint32_t category) -> std::optional<bool> {
+        const std::int16_t neighbor = world.neighborIdOf(object);
+        if (const auto file = neighbor != 0 ? sim.characterFile(neighbor) : std::nullopt) {
+            return outfits.hasOutfit(*file, category);
+        }
+        return outfits.hasOutfit(object.group, category);
+    });
     const auto& report = sim.report();
     std::printf("%zu objects built (%zu with a saved thread, %zu reset: type changed since the save), %zu neighbors, "
                 "%zu stale data table records\n",
                 report.objects, report.threads, sim.resets(), world.neighbors() ? world.neighbors()->size() : 0,
                 report.staleDataTables);
+    if (const auto* ids = world.neighbors()) {
+        // Neighbors whose Sim has no object type (no GUID, or no OBJD for it): scripts can't read their definition.
+        std::size_t untyped = 0;
+        for (const std::int16_t id : *ids) {
+            const auto guid = world.neighborGuid(id);
+            if (!guid || sim.code().objectType(*guid) == nullptr) {
+                if (++untyped <= 20) {
+                    std::printf("  neighbor %d has no Sim type (GUID 0x%08X)\n", id, guid.value_or(0));
+                }
+            }
+        }
+        if (untyped > 20) {
+            std::printf("  ... %zu neighbors without a Sim type in all\n", untyped);
+        }
+    }
     std::map<std::string, std::size_t> problems;
     for (const auto& p : report.problems) {
         ++problems[p.message];
@@ -597,8 +706,8 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
         }
     }
 
-    // A pie menu choice queued before the ticks: Sim, object, the choice's place in the menu.
-    if (queueChoice) {
+    // A pie menu choice queued before the ticks, or at a later tick: Sim, object, the choice's place in the menu.
+    const auto queuePieChoice = [&] {
         auto* actor = world.find(static_cast<std::int16_t>((*queueChoice)[0]));
         auto* object = world.find(static_cast<std::int16_t>((*queueChoice)[1]));
         const auto menu = actor && object ? ts2::sim::pieMenu(sim.vm(), sim.code(), *actor, *object) : ts2::sim::PieMenu{};
@@ -610,6 +719,9 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
         } else {
             std::printf("nothing to queue\n");
         }
+    };
+    if (queueChoice && queueTick == 0) {
+        queuePieChoice();
     }
 
     // The queued Sim's running interaction as it changes, and the player's cancel of it at a tick.
@@ -630,6 +742,9 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
                     ts2::sim::queueInteraction(*actor, *queued);
                 }
                 std::printf("tick %zu: %s\n", tick, queued ? "queued Go Here again" : "no second Go Here");
+            }
+            if (queueTick != 0 && tick == queueTick) {
+                queuePieChoice();
             }
             if (cancelTick && tick == *cancelTick) {
                 const bool done = actor->running && ts2::sim::cancelInteraction(*actor, actor->running->id);
@@ -705,9 +820,9 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
                                 tick, o.id, last.name.c_str(), o.semiAttributes[0], o.semiAttributes[3], last.eventTree,
                                 last.codeOwner, last.stackObject, last.priority, last.plays);
                 }
-                if (o.isPerson() && o.animation && o.animation->startMs == world.clockMs()) {
-                    std::printf("animate tick %zu Sim %d %s speed %.2f length %.0f ms%s\n", tick, o.id, o.animation->name.c_str(),
-                                o.animation->speed, o.animation->lengthMs, o.animation->flipped ? " flipped" : "");
+                if (o.animation && o.animation->startMs == world.clockMs()) {
+                    std::printf("animate tick %zu %s %d %s speed %.2f length %.0f ms%s\n", tick, o.isPerson() ? "Sim" : "object", o.id,
+                                o.animation->name.c_str(), o.animation->speed, o.animation->lengthMs, o.animation->flipped ? " flipped" : "");
                 }
                 return false;
             });
@@ -813,8 +928,11 @@ int main(int argc, char** argv) {
                      "  simrun <install-folder | file.package> --scan [max-steps] [--interactions] [--hood <folder>]\n"
                      "  simrun <install-folder | file.package> --run <group> <instance> [args...] [--trace]\n"
                      "  simrun <install-folder | file.package> --guid <hex-guid> [...]\n"
-                     "  simrun <install-folder> --lot <lot.package> [ticks [--trace-tick <tick>] [--trace-object <id>] [--on-screen] [--pie <sim> [--pie-trace <object>]] [--queue <sim> <object> <choice> [--cancel <tick>]] [--ground <x> <y> <level> [--ground-later <tick> <x> <y> <level>]] [--go-here <sim> <tick> <x> <y> <level>]... [--portals]]\n"
+                     "  simrun <install-folder> --lot <lot.package> [ticks [--trace-tick <tick>] [--trace-object <id>] [--on-screen] [--pie <sim> [--pie-trace <object>]] [--queue <sim> <object> <choice> [--queue-at <tick>] [--cancel <tick>]] [--ground <x> <y> <level> [--ground-later <tick> <x> <y> <level>]] [--go-here <sim> <tick> <x> <y> <level>]... [--portals]]\n"
                      "  simrun <install-folder> --loco <clip>...\n"
+                     "  simrun <install-folder> --wall-types <lot.package>\n"
+                     "  simrun <install-folder> --wall-list <lot.package>\n"
+                     "  simrun <install-folder> --wall-sides <lot.package>\n"
                      "  simrun <install-folder | file.package> --strings <group> <instance>\n"
                      "  simrun <install-folder | file.package> --ttab <group> <instance>\n");
         return 1;
@@ -833,8 +951,10 @@ int main(int argc, char** argv) {
                 if (std::string_view(argv[i]) == "--interactions") {
                     interactions = true;
                 } else if (std::string_view(argv[i]) == "--hood" && i + 1 < argc) {
-                    hood = ts2::sim::savedNeighborhood(ts2::content::loadNeighborhood(
-                        ts2::content::neighborhoodPackage(std::filesystem::path(argv[++i]))));
+                    const std::filesystem::path folder(argv[++i]);
+                    ts2::content::addCharacters(index, folder);  // the neighbors' Sims
+                    ts2::sim::IndexCodeSource code(index);
+                    hood = ts2::sim::savedNeighborhood(ts2::content::loadNeighborhood(ts2::content::neighborhoodPackage(folder)), code);
                 } else {
                     maxSteps = std::stoul(argv[i]);
                 }
@@ -852,6 +972,7 @@ int main(int argc, char** argv) {
             std::optional<std::int16_t> pieSim;
             std::optional<std::int16_t> pieTrace;
             std::optional<std::array<int, 3>> queueChoice;
+            std::size_t queueTick = 0;
             std::optional<std::size_t> cancelTick;
             std::optional<std::array<float, 3>> groundAt;
             bool portals = false;
@@ -877,6 +998,8 @@ int main(int argc, char** argv) {
                 } else if (std::string_view(argv[i]) == "--queue" && i + 3 < argc) {
                     queueChoice = std::array<int, 3>{std::stoi(argv[i + 1]), std::stoi(argv[i + 2]), std::stoi(argv[i + 3])};
                     i += 3;
+                } else if (std::string_view(argv[i]) == "--queue-at" && i + 1 < argc) {
+                    queueTick = std::stoul(argv[++i]);
                 } else if (std::string_view(argv[i]) == "--cancel" && i + 1 < argc) {
                     cancelTick = std::stoul(argv[++i]);
                 } else if (std::string_view(argv[i]) == "--ground-later" && i + 4 < argc) {
@@ -893,10 +1016,22 @@ int main(int argc, char** argv) {
                 }
             }
             return runLot(index, std::filesystem::path(argv[1]), std::filesystem::path(argv[3]), ticks, traceTick, traceObject, onScreen,
-                          personData, overlays, motion, pieSim, pieTrace, queueChoice, cancelTick, groundAt, portals, groundLater, goHere);
+                          personData, overlays, motion, pieSim, pieTrace, queueChoice, queueTick, cancelTick, groundAt, portals, groundLater, goHere);
         }
         if (mode == "--outside" && argc >= 4) {
             return printOutside(std::filesystem::path(argv[3]));
+        }
+        if (mode == "--platforms" && argc >= 4) {
+            return printPlatforms(std::filesystem::path(argv[3]));
+        }
+        if (mode == "--wall-types" && argc >= 4) {
+            return printWallTypes(std::filesystem::path(argv[3]));
+        }
+        if (mode == "--wall-list" && argc >= 4) {
+            return printWallList(std::filesystem::path(argv[3]));
+        }
+        if (mode == "--wall-sides" && argc >= 4) {
+            return printWallSides(argv[1], std::filesystem::path(argv[3]));
         }
         if (mode == "--type-changes" && argc >= 4) {
             return typeChanges(index, std::filesystem::path(argv[3]));

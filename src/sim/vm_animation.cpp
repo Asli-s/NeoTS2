@@ -231,45 +231,107 @@ void Execution::layOverlay(SimObject& sim, PlayingOverlay overlay) {
     sim.overlays.push_back(std::move(overlay));
 }
 
+// Animate Object's entry text from the code of `owner`, empty when there is none. With a Sim, the
+// list for its age and species (see content::objectAnimationList) is tried in the object's own code
+// and then its semi-global code, a non-human young or elder Sim's also as an adult's. Last comes the
+// object list 0x86 of both.
+std::string Execution::objectAnimationText(std::uint32_t owner, const SimObject* sim, std::uint16_t entry) {
+    constexpr std::int16_t kAdultAge = 50, kOldestYoung = 18;
+    const std::uint32_t semi = code_.semiGlobalGroup(owner);
+    const std::int16_t species = sim ? sim->personData[kSpeciesPersonData] : std::int16_t{0};
+    const std::int16_t age = sim ? sim->personData[kLifeStagePersonData] : kAdultAge;
+    const bool asAdultToo = sim != nullptr && species != 0 && (age > kAdultAge || age <= kOldestYoung);
+    std::vector<std::pair<std::uint32_t, std::uint16_t>> tries;
+    for (const std::uint32_t group : {owner, semi}) {
+        if (sim != nullptr) {
+            tries.emplace_back(group, content::objectAnimationList(species, age));
+            if (asAdultToo) {
+                tries.emplace_back(group, content::objectAnimationList(species, kAdultAge));
+            }
+        }
+    }
+    tries.emplace_back(owner, content::animation_list::kObject);
+    tries.emplace_back(semi, content::animation_list::kObject);
+    for (const auto& [group, list] : tries) {
+        if (group == 0) {
+            continue;
+        }
+        if (auto text = code_.string(group, list, entry); text && !text->empty()) {
+            return *text;
+        }
+    }
+    return {};
+}
+
 // Animate Object. Operands:
-//   bytes 0-1  animation entry of the object list 0x86 (byte 2 bit 0x04: the param it names)
-//   byte 2     flags: 0x02 speed from temp 2, 0x04 entry in a param
+//   bytes 0-1  animation entry (byte 2 bit 0x04: the param it names)
+//   byte 2     flags: 0x01 flipped, 0x02 speed from temp 2, 0x04 entry in a param, 0x20 play count
+//              from temp 1
 //   byte 3     speed, in 32nds (32 = as authored)
 //   byte 6, 7-8  the object that plays it (owner, data)
-//   byte 9     2: plays until stopped (the plumbob's spin, water)
-//   byte 10    more flags (0x02 and 0x20 pick other sources, not read yet)
-// The animation starts and the primitive carries on at once. Only the clips that play until stopped
-// are kept, with plain sources. What the other values of byte 9 do is not known yet (AN-23), so
-// those calls show nothing, as before.
+//   byte 10    more flags: 0x01 flipped if temp 3, 0x02 the entry is for the Sim in temp 5 (see
+//              objectAnimationText), 0x20 the lists are the running tree's code, not the object's
+// The clip plays once, or temp 1 times (-1: until Animate Stop, 0 or below -1 is an error). The
+// primitive carries on at once and the object keeps the clip's last pose once it has played. A
+// clip the game doesn't have plays nothing. Calls on Sims and with other byte 10 flags show nothing
+// yet (AN-23).
 bool Execution::animateObject(const bhav::Instruction& in, Frame& f) {
-    constexpr std::uint8_t kObjectAnimations = 0x86, kUntilStopped = 2, kOtherSources = 0x22;
+    constexpr std::uint8_t kFlipFromTemp3 = 0x01, kForSimInTemp5 = 0x02, kRefresh = 0x10, kRunningTreeCode = 0x20,
+                           kPlaysFromTemp1 = 0x20;
+    constexpr std::uint8_t kKnownFlags = kFlipFromTemp3 | kForSimInTemp5 | kRefresh | kRunningTreeCode;
     const auto& o = in.operands;
     const std::int16_t targetId = read(o[6], static_cast<std::uint16_t>(o[7] | o[8] << 8), f);
     SimObject* target = world().find(targetId);
     if (target == nullptr) {
         throw Stop{Outcome::Error, "could not find object reference", std::to_string(targetId)};
     }
-    if (o[9] != kUntilStopped || (o[10] & kOtherSources) != 0 || target->isPerson()) {
+    if ((o[10] & ~kKnownFlags) != 0 || target->isPerson()) {
         return true;
     }
     const auto entry = static_cast<std::uint16_t>(o[0] | o[1] << 8);
     const std::int16_t index = (o[2] & 0x04) ? slotAt(f.params, entry, "param") : static_cast<std::int16_t>(entry);
-    const auto name = animationEntry(f, kObjectAnimations, static_cast<std::uint16_t>(index), false);
-    if (!name) {
-        // The game logs a missing animation and goes on, playing nothing.
+    const SimObject* sim = nullptr;
+    if (o[10] & kForSimInTemp5) {
+        sim = world().find(thread_.temps[5]);
+        if (sim == nullptr) {
+            throw Stop{Outcome::Error, "could not find object reference", std::to_string(thread_.temps[5])};
+        }
+        if (!sim->isPerson()) {
+            throw Stop{Outcome::Error, "Object referred to must be a person.", std::to_string(sim->id)};
+        }
+    }
+    const std::string text = objectAnimationText((o[10] & kRunningTreeCode) ? f.codeOwner : target->group, sim,
+                                                 static_cast<std::uint16_t>(index));
+    if (content::animationCategory(text) == content::animation_category::kUnknownCategory) {
+        throw Stop{Outcome::Error, "Invalid animation type specified in animation string", text};
+    }
+    const std::string name = content::animationName(text);
+    if (name.empty()) {
+        throw Stop{Outcome::Error, "Animation name is empty string.", std::to_string(index)};
+    }
+    const std::int16_t plays = (o[2] & kPlaysFromTemp1) ? thread_.temps[1] : std::int16_t{1};
+    if (plays == 0 || plays < -1) {
+        throw Stop{Outcome::Error, "Invalid number of loops", std::to_string(plays)};
+    }
+    const auto& lengths = world().animationLengths();
+    if (lengths && !lengths(name)) {
         return true;
     }
+    // Speed 0 holds the clip's first pose.
     const auto speed = (o[2] & 0x02) ? thread_.temps[2] : static_cast<std::int8_t>(o[3]);
-    if (speed == 0) {
-        throw Stop{Outcome::Error, "Animation speed cannot be zero", ""};
-    }
     PlayingAnimation play;
-    play.name = *name;
+    play.name = name;
     play.startMs = world().eventClockMs();
     play.speed = static_cast<float>(speed) / 32.0f;
-    play.loops = true;
-    // Until Animate Stop gives it the time it played.
+    play.flipped = (o[10] & kFlipFromTemp3) ? thread_.temps[3] != 0 : (o[2] & 0x01) != 0;
+    play.loops = plays != 1;
+    // Until Animate Stop gives it the time it played. Counted plays end after the last one.
     play.lengthMs = std::numeric_limits<float>::infinity();
+    if (plays > 1 && speed > 0 && lengths) {
+        if (const auto length = lengths(name)) {
+            play.lengthMs = static_cast<float>(plays) * *length / play.speed;
+        }
+    }
     target->animation = std::move(play);
     return true;
 }

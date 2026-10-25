@@ -341,3 +341,45 @@ const RoomInfo* RoomMap::room(std::int32_t id) const {
 }
 
 } // namespace ts2::sim
+
+namespace ts2::sim {
+
+std::int32_t roomOnSideOfWall(const RoomMap& rooms, const wallgraph::Point& from, const wallgraph::Point& to) {
+    // The tile beside the wall and where in it to look, a third of a tile from its centre toward the
+    // wall's left side: straight across for a wall along a tile edge, toward the corner for a diagonal.
+    constexpr float kThird = 1.0f / 3.0f;
+    auto look = [&](float x, float y, float dx, float dy) {
+        // A broken lot file's points may be far off or not numbers, and can't be made whole tiles.
+        constexpr float kFar = 1e6f;
+        if (!(std::abs(x) < kFar && std::abs(y) < kFar)) {
+            return RoomMap::kNoRoom;
+        }
+        const auto tileX = static_cast<float>(static_cast<std::int32_t>(x));
+        const auto tileY = static_cast<float>(static_cast<std::int32_t>(y));
+        return rooms.roomAt(from.level, tileX + 0.5f + dx, tileY + 0.5f + dy);
+    };
+    if (from.x < to.x) {
+        if (from.y < to.y) {
+            return look(from.x, from.y, kThird, -kThird);
+        }
+        if (from.y > to.y) {
+            return look(from.x, to.y, -kThird, -kThird);
+        }
+        return look(from.x, from.y - 1, 0, kThird);
+    }
+    if (from.x > to.x) {
+        if (from.y > to.y) {
+            return look(to.x, to.y, -kThird, kThird);
+        }
+        if (from.y < to.y) {
+            return look(to.x, from.y, kThird, kThird);
+        }
+        return look(to.x, to.y, 0, -kThird);
+    }
+    if (from.y < to.y) {
+        return look(from.x, from.y, -kThird, 0);
+    }
+    return look(to.x - 1, to.y, kThird, 0);
+}
+
+} // namespace ts2::sim

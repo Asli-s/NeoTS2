@@ -110,6 +110,36 @@ void fencePostLayerReadsPosts() {
     CHECK(posts.size() == 1 && posts[0].level == 1 && posts[0].x == 13.0f && posts[0].y == 9.0f && posts[0].fence == 0xAD0DABD2);
 }
 
+// A lot's neighbor remap tables: only table 6 is kept, its last value for a repeated key wins.
+void neighborRemapKeepsTableSix() {
+    std::vector<std::uint8_t> d;
+    auto u32 = [&d](std::uint32_t v) {
+        for (int i = 0; i < 4; ++i) d.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
+    };
+    u32(2);
+    u32(1); u32(1); u32(2);          // table 1: one pair
+    u32(0);                          // table 2
+    u32(2); u32(5); u32(6);          // table 3: two ids
+    u32(0);                          // table 4
+    u32(1); u32(1); u32(0x724CD298); // table 5
+    u32(3); u32(1); u32(7); u32(0x38); u32(0x151); u32(1); u32(9);  // table 6
+    u32(0);                          // table 7
+    const auto remap = ts2::neighbor_remap::parse(d);
+    CHECK(remap.version == 2 && remap.neighborIds.size() == 2);
+    CHECK(remap.neighborIds.at(1) == 9 && remap.neighborIds.at(0x38) == 0x151);
+
+    const std::vector<std::uint8_t> versionOne{1, 0, 0, 0, 0, 0, 0, 0};
+    CHECK(ts2::neighbor_remap::parse(versionOne).neighborIds.empty());
+    d.resize(d.size() - 8);
+    bool refused = false;
+    try {
+        ts2::neighbor_remap::parse(d);
+    } catch (const std::exception&) {
+        refused = true;
+    }
+    CHECK(refused);
+}
+
 // A saved object's posed joints and playing animations: the cObject joints, then the cAnimatable
 // entries after the cObject data. An empty entry is skipped, cut-off data is refused.
 void savedObjectReadsPlayingAnimations() {
@@ -563,7 +593,7 @@ void familyRecordIsReadByVersion() {
         for (int i = 0; i < 4; ++i) d.push_back(static_cast<std::uint8_t>(w >> (8 * i)));
     }
     const auto f = ts2::fami::parse(d);
-    CHECK(f.lot == 23 && f.lot2 == 23 && f.funds == 20000 && f.flags == 9 && f.funds2 == 20000);
+    CHECK(f.lot == 23 && f.currentLot == 23 && f.vacationLot == 0 && f.funds == 20000 && f.flags == 9 && f.funds2 == 20000);
     CHECK(f.members.size() == 2 && f.members[1] == 0x0A000102 && f.id7 == 0xE0000301 && f.extraBytes == 0);
 }
 
@@ -1342,6 +1372,7 @@ std::vector<Test> formatTests() {
         {"lot description parse", lotDescriptionParse},
         {"binary property sets and reference lists", binaryPropertySetsAndReferenceLists},
         {"fence post layer reads posts", fencePostLayerReadsPosts},
+        {"neighbor remap keeps table 6", neighborRemapKeepsTableSix},
         {"wall layer reads coverings per side", wallLayerReadsCoveringsPerSide},
         {"wants and fears parse", wantsAndFearsParse},
         {"want slots follow the version", wantSlotsFollowTheVersion},

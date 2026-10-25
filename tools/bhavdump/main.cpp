@@ -375,6 +375,7 @@ int survey(ResourceIndex& index) {
 int expressionSurvey(ResourceIndex& index) {
     constexpr std::uint8_t kConstantOwner = 0x1A;
     constexpr std::uint8_t kMaxOperator = 0x15;
+    constexpr std::uint8_t kAssign32Operator = 0x15;
     constexpr std::uint8_t kMaxOwner = 0x33;
 
     const Catalog catalog = buildCatalog(index);
@@ -386,6 +387,7 @@ int expressionSurvey(ResourceIndex& index) {
     std::map<std::uint8_t, std::size_t> signedByte;
     std::map<std::uint8_t, std::size_t> owners;
     std::map<std::uint8_t, int> maxData;
+    std::map<std::pair<std::uint8_t, std::uint8_t>, std::size_t> assign32Owners;  // (left, right)
 
     struct Candidate {
         std::uint32_t base;
@@ -438,6 +440,9 @@ int expressionSurvey(ResourceIndex& index) {
             ++owners[x.rhsOwner];
             maxData[x.lhsOwner] = std::max<int>(maxData[x.lhsOwner], x.lhsData);
             maxData[x.rhsOwner] = std::max<int>(maxData[x.rhsOwner], x.rhsData);
+            if (x.op == kAssign32Operator) {
+                ++assign32Owners[{x.lhsOwner, x.rhsOwner}];
+            }
             badOperator += x.op > kMaxOperator ? 1 : 0;
             badOwner += (x.lhsOwner > kMaxOwner ? 1 : 0) + (x.rhsOwner > kMaxOwner ? 1 : 0);
             if (std::any_of(in.operands.begin() + 8, in.operands.end(),
@@ -597,6 +602,10 @@ int expressionSurvey(ResourceIndex& index) {
     std::printf("\n\nOwner usage:\n");
     for (const auto& [owner, n] : owners) {
         std::printf("  0x%02X %8zu   max data %d\n", owner, n, maxData[owner]);
+    }
+    std::printf("\nAssign 32bit Value (operator 0x15) owners, left <- right:\n");
+    for (const auto& [pair, n] : assign32Owners) {
+        std::printf("  0x%02X <- 0x%02X %6zu\n", pair.first, pair.second, n);
     }
     return 0;
 }

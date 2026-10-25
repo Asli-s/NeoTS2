@@ -108,12 +108,10 @@ void Execution::setActionIcon(SimObject& self, std::uint16_t flags, std::int16_t
 // Run Functional Tree: calls the stack object's tree for an object function (bytes 0-1, see
 // objectFunctionEntry) from its OBJf: the action tree, or with byte 2 bit 2 the check tree, given
 // my params with bit 1. The call runs on my stack with the object as stack object. It is false when the
-// object has no such tree.
+// object has no such tree. With bit 0 the object becomes the queue icon (picture 0) of a Sim's running
+// sub-interaction, else of its running interaction.
 std::optional<Execution::NamedCall> Execution::functionalTree(const bhav::Instruction& in, const Frame& f) {
     const auto& o = in.operands;
-    if (o[2] & 0x01) {
-        throw Stop{Outcome::Unsupported, "Run Functional Tree flags not implemented", hex(o[2], 2)};
-    }
     SimObject& object = stack();
     const auto entry = objectFunctionEntry(static_cast<std::uint16_t>(o[0] | o[1] << 8));
     const ObjectType* type = code_.objectType(object.definition.guid());
@@ -137,6 +135,18 @@ std::optional<Execution::NamedCall> Execution::functionalTree(const bhav::Instru
     call.stackObject = object.id;
     if (o[2] & 0x02) {
         call.args = f.params;
+    }
+    if ((o[2] & 0x01) && me().isPerson()) {
+        SimObject& self = me();
+        if (self.runningSub) {
+            self.runningSub->iconObject = object.id;
+            self.runningSub->iconGuid = 0;
+            self.runningSub->iconIndex = 0;
+        } else if (self.running) {
+            self.actionIconObject = object.id;
+            self.actionIconGuid = 0;
+            self.actionIconIndex = 0;
+        }
     }
     return call;
 }
@@ -293,7 +303,8 @@ bool Execution::findBestInteraction(const bhav::Instruction& in) {
 // the primitive is true at 0. With something pending it sets bit 0x40 of my object data 8 and
 // starts the first waiting interaction, or is true when none may start or none waits: that is
 // how a cancelled interaction's loop learns to finish. A started interaction runs its action
-// tree on my stack with its object as stack object. Afterwards the primitive is true.
+// tree on my stack with its object as stack object. When it ends the primitive runs again, so a
+// continuation pushed meanwhile starts at once and anything else waits for the next call.
 Execution::IdleResult Execution::idleForInput(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     SimObject& sim = me();
@@ -329,7 +340,16 @@ Execution::IdleResult Execution::idleForInput(const bhav::Instruction& in, Frame
     }
     sim.data[kIdleFlagsField] |= kInteractionsWaitingBit;
     const bool mayStart = (o[2] | o[3]) != 0;
-    return mayStart && !sim.queue.empty() ? startFirst() : IdleResult{};
+    if (!mayStart || sim.queue.empty()) {
+        return IdleResult{};
+    }
+    // Run again after an interaction it started, it starts only a continuation, and only while
+    // the Sim carries nothing. The game also checks a flag that a few social pushes set (Push
+    // Interaction byte 14 bit 4) on an interaction the Sim keeps, which one is not known yet.
+    if (f.idleStarted && (!sim.queue.front().continuation || sim.semiAttributes[kCarryFlagsSemiAttribute] != 0)) {
+        return IdleResult{};
+    }
+    return startFirst();
 }
 
 // Alter Budget. Operands:
@@ -374,11 +394,11 @@ bool Execution::alterBudget(const bhav::Instruction& in, Frame& f) {
 // Push Interaction: adds interaction N of an object's interaction table to the stack object's
 // queue. Operands:
 //   byte 0       interaction number (byte 3 bit 4: from owner byte 5, data bytes 6-7)
-//   byte 1       the temp (byte 3 bit 1: the local) holding the object
+//   byte 1       the param (byte 3 bit 1: the local) holding the object
 //   byte 2       priority: 0 my own ("Priority" person data), 1 high (100), 2 low (20), 3 medium (50)
 //   byte 3       bit 0: the Sim it is with (its queue icon) is the object in local [byte 4].
 //                Bit 3: it is autonomous (person data 0xA6 while it runs). Bit 2 makes it a
-//                continuation, which is not implemented.
+//                continuation, which isn't held back by the queue limit.
 //   byte 14     bit 0: pass my parameters as its arguments. Bit 1: take the object and the number
 //                from autonomy's choice (my person data 0x35, my object data 0x14). Bit 2: its
 //                queue icon is the object type with GUID temp 5 << 16 | temp 4. Bit 3: that
@@ -403,10 +423,7 @@ bool Execution::pushInteraction(const bhav::Instruction& in, Frame& f) {
         }
         objectId = f.locals[o[1]];
     } else {
-        if (o[1] >= kTempCount) {
-            throw Stop{Outcome::Error, "stack number out of range", std::to_string(o[1])};
-        }
-        objectId = thread_.temps[o[1]];
+        objectId = slotAt(f.params, o[1], "param");
     }
     const SimObject* object = world().find(objectId);
     if (object == nullptr) {
@@ -449,6 +466,7 @@ bool Execution::pushInteraction(const bhav::Instruction& in, Frame& f) {
     queued.priority = priority;
     queued.source = fromAutonomy ? QueuedInteraction::Source::Autonomy : QueuedInteraction::Source::Script;
     queued.autonomous = (o[3] & 0x08) != 0;
+    queued.continuation = (o[3] & 0x04) != 0;
     if (o[3] & 0x01) {
         queued.partner = slotAt(f.locals, o[4], "local");
     }
@@ -477,7 +495,7 @@ bool Execution::pushInteraction(const bhav::Instruction& in, Frame& f) {
             throw Stop{check.outcome, "interaction test tree: " + check.reason, check.detail};
         }
     }
-    if (sim.queue.size() >= kMaxQueuedInteractions) {
+    if (sim.queue.size() >= (queued.continuation ? kMaxQueuedWithContinuations : kMaxQueuedInteractions)) {
         self.data[kPrimitiveResultField] = 3;
         return false;
     }

@@ -17,6 +17,8 @@ struct WallStyle {
     bool rendered = true;   // notRendered: never drawn
     bool belowFloor = false;  // verticalSpan floorToFloorBasedCeiling: up to the floor's thickness above
     bool toRoof = false;      // verticalSpan floorToRoof: up to the roof (the attic walls under gable ends)
+    // verticalSpan floorToFloor, the default. A stage wall (stageWall) is a span of its own.
+    bool floorToFloor = true;
     bool cutAway = true;      // mayCutAway: cut down by the cutaway and walls-down views
     bool blocksLight = true;  // blocksLight: stops lamp and window light spreading past it
     std::string defaultPattern;
@@ -28,6 +30,13 @@ struct BuildScripts {
     std::map<std::string, std::string> floorPatterns;  // pattern name: material
     std::map<std::string, std::string> wallPatterns;
     std::map<std::uint32_t, WallStyle> wallStyles;
+
+    // Whether a wall segment of this wall layer type is a full room wall: a drawn wall style spanning
+    // floor to floor. Fences (types that are GUIDs) and unknown styles are not.
+    bool isRoomWall(std::uint32_t type) const {
+        const auto it = wallStyles.find(type);
+        return it != wallStyles.end() && it->second.rendered && it->second.floorToFloor;
+    }
 
     // Adds one product's scripts. Its entries replace those of earlier products.
     void addPatterns(std::string_view text, bool walls);

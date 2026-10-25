@@ -21,6 +21,7 @@ public:
     std::uint32_t semiGlobalGroup(std::uint32_t objectGroup) override;
     const ObjectType* objectType(std::uint32_t guid) override;
     const ObjectType* multiTileMaster(const ObjectType& part) override;
+    const ObjectType* addMadeObjectType(ObjectType type) override;
     const std::vector<std::uint32_t>& objectTypeGuids() override;
     const std::map<std::string, std::string>* ageData(std::uint32_t group) override;
     [[nodiscard]] std::optional<std::string> string(std::uint32_t group, std::uint16_t instance,

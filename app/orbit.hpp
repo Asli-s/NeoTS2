@@ -136,6 +136,9 @@ struct Orbit {
     };
     std::optional<Pose> previous;
     float between = 1, stepTime = 0;
+    // What the camera tracks (a Sim's root_trans in the world), none while it tracks nothing.
+    // Scrolling ends the tracking, turning and zooming don't.
+    std::function<std::optional<Vec3>()> subject;
 
     // Takes the easing settings from the camera file.
     void useRigEasing() {
@@ -205,6 +208,17 @@ struct Orbit {
         const float right = dx * perPixel, forward = -dy * perPixel;
         const float co = std::cos(yaw), si = std::sin(yaw);
         dragSpeed = {-si * right - co * forward, co * right - si * forward};
+        subject = nullptr;
+    }
+
+    // Ends any tracking and eases the target to `point`, kept where the camera may go.
+    void centreOn(const Vec3& point) {
+        subject = nullptr;
+        Vec3& moved = goal ? *goal : target;
+        moved = point;
+        if (goal && limitGoal) {
+            limitGoal(*goal);
+        }
     }
 
     // The nearest view at 45 degrees to the lot's grid, `quarters` turns on.
@@ -212,6 +226,46 @@ struct Orbit {
         yawGoal = std::round((yawGoal + kPi / 4) / (kPi / 2)) * (kPi / 2) - kPi / 4 + static_cast<float>(quarters) * kPi / 2;
     }
 };
+
+// Where a point of the world shows on a `width` x `height` view, in pixels. A point behind the
+// camera gives (-1, -1).
+inline std::array<float, 2> screenPoint(const ts2::render::Camera& c, int width, int height, const Vec3& p) {
+    const float aspect = static_cast<float>(width) / static_cast<float>(height);
+    const float tx = c.fovX > 0 ? std::tan(c.fovX / 2) : std::tan(c.fovY / 2) * aspect;
+    const float ty = tx / aspect;
+    const Vec3 f = ts2::render::normalize(ts2::render::sub(c.target, c.eye));
+    const Vec3 s = ts2::render::normalize(ts2::render::cross(f, {0, 0, 1}));
+    const Vec3 u = ts2::render::cross(s, f);
+    const Vec3 d = ts2::render::sub(p, c.eye);
+    const float depth = ts2::render::dot(d, f);
+    if (depth <= 1e-6f) {
+        return {-1, -1};
+    }
+    const float nx = ts2::render::dot(d, s) / depth / tx, ny = ts2::render::dot(d, u) / depth / ty;
+    return {(nx + 1) / 2 * static_cast<float>(width), (1 - ny) / 2 * static_cast<float>(height)};
+}
+
+// One step of the camera's tracking, as the game's lot camera tracks a Sim: once the subject's
+// floor point (its root_trans less the pivot height) shows more than 30 pixels from the target's
+// goal on screen, the goal moves under it.
+inline void followSubject(Orbit& orbit, int width, int height) {
+    constexpr float kDeadZone = 30;
+    const auto at = orbit.subject();
+    if (!at || !orbit.goal || width <= 0 || height <= 0) {
+        return;
+    }
+    const Vec3 floor = {(*at)[0], (*at)[1], (*at)[2] - orbit.pivotHeight};
+    const auto camera = orbit.camera();
+    const auto goal = screenPoint(camera, width, height, *orbit.goal);
+    const auto subject = screenPoint(camera, width, height, floor);
+    if (std::hypot(subject[0] - goal[0], subject[1] - goal[1]) > kDeadZone) {
+        (*orbit.goal)[0] = floor[0];
+        (*orbit.goal)[1] = floor[1];
+        if (orbit.limitGoal) {
+            orbit.limitGoal(*orbit.goal);
+        }
+    }
+}
 
 // Turns, pans and zooms the camera for a mouse event: middle-drag turns, right-drag pans (a camera
 // with a goal scrolls by its drag speed instead), the wheel zooms. Returns whether the event was used.
@@ -302,6 +356,9 @@ inline void orbitGameStep(Orbit& orbit, unsigned ms, int width, int height) {
         if (orbit.limitGoal) {
             orbit.limitGoal(*orbit.goal);
         }
+    }
+    if (orbit.subject) {
+        followSubject(orbit, width, height);
     }
     easeToward(orbit.target, *orbit.goal, ms, 7, orbit.minChange);
 }

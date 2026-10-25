@@ -86,6 +86,10 @@ bool Execution::setToNext(const bhav::Instruction& in, Frame& f) {
         return nextOnSameTile(o, targetOwner, targetData, f);
     case kSearchMultiTilePart:
         return nextMultiTilePart(targetOwner, targetData, f);
+    case kSearchObjectOwner:
+        return nextObjectOwner(targetOwner, targetData, f);
+    case kSearchVehicle:
+        return nextVehicle(targetOwner, targetData, f);
     case kSearchAdjacent:
         return nextAdjacent(o, targetOwner, targetData, f);
     case kSearchFamilyTie:
@@ -159,6 +163,14 @@ bool Execution::setToNext(const bhav::Instruction& in, Frame& f) {
         matches = [type](const SimObject& s) { return s.definition.guid() == type; };
         break;
     }
+    case kSearchObjectInRoomInTemp0: {
+        const std::int16_t room = thread_.temps[0];
+        matches = [room](const SimObject& s) { return s.data[kRoomDataField] == room; };
+        break;
+    }
+    case kSearchHauntable:
+        matches = [](const SimObject& s) { return s.definition.field(objd::field::kHauntable) != 0; };
+        break;
     case kSearchPerson:        matches = speciesIs([](std::int16_t v) { return v == 0; }); break;
     case kSearchAnySpecies:    matches = speciesIs([](std::int16_t) { return true; }); break;
     case kSearchNonHuman:      matches = speciesIs([](std::int16_t v) { return v != 0; }); break;
@@ -482,6 +494,65 @@ bool Execution::nextMultiTilePart(std::uint8_t targetOwner, std::uint16_t target
     });
     write(targetOwner, targetData, f, next->id);
     return true;
+}
+
+// Search 0x20: the next id the object in temp 0 holds a relationship record towards, after the
+// target (from the first when the target is below 1), whose record has a variable 1 of at least
+// temp 1. The game compares them without sign. Running out, or a target the object has no record
+// towards, leaves -1 and is false. A missing object is false and leaves the target alone. The
+// game walks its records in its own hash order, taken as id order here.
+bool Execution::nextObjectOwner(std::uint8_t targetOwner, std::uint16_t targetData, Frame& f) {
+    const SimObject* object = world().find(thread_.temps[0]);
+    if (object == nullptr) {
+        return false;
+    }
+    const std::vector<std::int16_t> ids = world().relationshipTargets(object->id);
+    const std::int16_t target = read(targetOwner, targetData, f);
+    auto it = ids.begin();
+    if (target >= 1) {
+        it = std::find(ids.begin(), ids.end(), target);
+        if (it != ids.end()) {
+            ++it;
+        }
+    }
+    const auto threshold = static_cast<std::uint32_t>(static_cast<std::int32_t>(thread_.temps[1]));
+    for (; it != ids.end(); ++it) {
+        const std::vector<std::int16_t>& values = world().relationship(object->id, *it);
+        if (values.size() > 1 && static_cast<std::uint32_t>(static_cast<std::int32_t>(values[1])) >= threshold) {
+            write(targetOwner, targetData, f, *it);
+            return true;
+        }
+    }
+    write(targetOwner, targetData, f, -1);
+    return false;
+}
+
+// Search 0x10: the game keeps a list of the objects of OBJD type 0x0D or 0x12 (vehicles). The next
+// one after the target (the first when the target is 0) that isn't removed. A target not in the
+// list, or running out, leaves 0 and is false. The search filters don't apply. The game's list is
+// in the order objects were added, taken as id order here.
+bool Execution::nextVehicle(std::uint8_t targetOwner, std::uint16_t targetData, Frame& f) {
+    constexpr std::uint16_t kVehicleType = 0x0D, kOtherVehicleType = 0x12;
+    const std::vector<std::int16_t> ids = world().idsIncludingRemoved([](const SimObject& s) {
+        const std::uint16_t type = s.definition.field(objd::field::kType);
+        return type == kVehicleType || type == kOtherVehicleType;
+    });
+    const std::int16_t target = read(targetOwner, targetData, f);
+    auto it = ids.begin();
+    if (target != 0) {
+        it = std::find(ids.begin(), ids.end(), target);
+        if (it != ids.end()) {
+            ++it;
+        }
+    }
+    for (; it != ids.end(); ++it) {
+        if (world().find(*it) != nullptr) {
+            write(targetOwner, targetData, f, *it);
+            return true;
+        }
+    }
+    write(targetOwner, targetData, f, 0);
+    return false;
 }
 
 // Next object on the target's tile, wrapping around (the target itself when it is alone).

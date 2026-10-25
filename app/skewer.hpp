@@ -12,7 +12,7 @@ namespace app {
 // The household's thumbnails over the puck (the game's "skewer"): one per Sim, the first family
 // member at the bottom, the column growing up from the puck's skewer anchor. The selected Sim's
 // frame is lit, and each background takes the colour of its Sim's mood. Clicking a thumbnail
-// picks that Sim.
+// picks that Sim, and the Sim the camera tracks has a star on its thumbnail.
 class Skewer {
 public:
     struct Member {
@@ -28,6 +28,8 @@ public:
     // Shows the skewer in live mode only (the game hides it in the options menu).
     void setLiveMode(bool live);
     void select(std::int16_t sim);
+    // Shows the star on the tracked Sim's thumbnail (0: on none).
+    void setTracked(std::int16_t sim);
     // Colours a Sim's thumbnail background by its mood (-100..100).
     void setMood(std::int16_t sim, int mood);
 
@@ -52,6 +54,7 @@ private:
     };
     std::vector<Thumbnail> thumbnails_;
     std::int16_t selected_ = 0;
+    std::int16_t tracked_ = 0;
     ts2::tga::Pixels moodGradient_, backgroundShape_;
 };
 

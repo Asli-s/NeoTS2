@@ -336,20 +336,29 @@ std::optional<Execution::CreateSpot> Execution::tileInFront(const SimObject* ref
 //   byte 6     local
 //   byte 9     slot
 //   byte 10    more flags
-// The new object becomes the stack object. Placements: 1 "on top of me" and 2 "in my hand" (both
-// into my slot 0, the game treats them alike, and my tile must pass the tile tests), 3 in front of the
-// stack object (see tileInFront), 9 next to me (see tileBeside, the turn in local byte 10), "out of world", and
-// "below object in local" or "in param 0" (at the exact place of the object whose id is there,
-// false when there is none). The spot's tile must pass the tile tests (see tileRefuses).
-// Not done yet: the game's test that the object fits at the spot or in my slot (here it always
-// fits, and a slot 0 that is missing or full is reported as not implemented), and placement 9's wall test.
+// With flag 0x04 the object is the Sim of the neighbor whose id is in the stack object (the GUID
+// and flags 0x40 and 0x80 are not used). The new object becomes the stack object.
+// Placements:
+// - 1 "on top of me" and 2 "in my hand": both into my slot 0, the game treats them alike, and my
+//   tile must pass the tile tests.
+// - 4 and 0xA: into slot byte 9 of the stack object or of the object in temp 0 (false when there
+//   is none, its tile must pass the tile tests).
+// - 3: in front of the stack object (see tileInFront).
+// - 9: next to me (see tileBeside, the turn in local byte 10).
+// - "out of world".
+// - "below object in local" or "in param 0": at the exact place of the object whose id is there,
+//   false when there is none.
+// The spot's tile must pass the tile tests (see tileRefuses).
+// Not done yet: the game's test that the object fits at the spot or in the slot (here it always
+// fits, and a slot that is missing or full is reported as not implemented), and placement 9's
+// wall test.
 bool Execution::createObject(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     const std::uint8_t flags = o[5];
-    if (flags & kCreateFromNeighbor) {
+    if ((flags & kCreateFromNeighbor) && !world().neighbors()) {
         throw Stop{Outcome::Unsupported, "Create Object from a neighbor needs the neighborhood", ""};
     }
-    if (flags & kCreateFromInventoryToken) {
+    if (!(flags & kCreateFromNeighbor) && (flags & kCreateFromInventoryToken)) {
         throw Stop{Outcome::Unsupported, "Create Object from an inventory token", ""};
     }
     if ((flags & kCreatePassObjectIds) && (flags & kCreatePassTemp0)) {
@@ -357,7 +366,14 @@ bool Execution::createObject(const bhav::Instruction& in, Frame& f) {
     }
 
     std::uint32_t guid = readGuid(o);
-    if (flags & kCreateGuidFromTemps) {
+    if (flags & kCreateFromNeighbor) {
+        // The neighbor whose id is the stack object: its Sim's type. No such neighbor is false.
+        const auto neighborGuid = world().neighborGuid(stackObject());
+        if (!neighborGuid) {
+            return false;
+        }
+        guid = *neighborGuid;
+    } else if (flags & kCreateGuidFromTemps) {
         guid = static_cast<std::uint16_t>(thread_.temps[0]) |
                static_cast<std::uint32_t>(static_cast<std::uint16_t>(thread_.temps[1])) << 16;
     }
@@ -373,19 +389,32 @@ bool Execution::createObject(const bhav::Instruction& in, Frame& f) {
         return false;
     }
     std::optional<CreateSpot> spot;
-    const bool intoMySlot = o[4] == kPlaceOnTopOfMe || o[4] == kPlaceInMyHand;
-    if (intoMySlot) {
-        const SimObject& self = me();
-        if (self.slots.empty() || self.slots[0] != 0) {
-            const SimObject* held = self.slots.empty() ? nullptr : world().find(self.slots[0]);
-            throw Stop{Outcome::Unsupported, "Create Object into my slot 0 when it isn't free (the game's fit test)",
-                       held != nullptr ? std::to_string(held->id) + " " + held->definition.name : self.slots.empty() ? "no slot 0" : "held " + std::to_string(self.slots[0]) + " (gone)"};
-        }
-        if (self.x == kOffLot || self.y == kOffLot) {
+    SimObject* container = nullptr;
+    std::size_t slot = 0;
+    if (o[4] == kPlaceOnTopOfMe || o[4] == kPlaceInMyHand) {
+        container = &me();
+    } else if (o[4] == kPlaceInStackObjectSlot || o[4] == kPlaceInSlotOfObjectInTemp0) {
+        container = world().find(o[4] == kPlaceInStackObjectSlot ? stackObject() : thread_.temps[0]);
+        if (container == nullptr) {
             return false;
         }
-        spot = CreateSpot{self.x, self.y, self.level,
-                          Tile{static_cast<std::uint8_t>(self.x >> 16), static_cast<std::uint8_t>(self.y >> 16), static_cast<std::uint8_t>(self.level)}};
+        slot = o[9];
+    }
+    if (container != nullptr) {
+        if (slot >= container->slots.size() || container->slots[slot] != 0) {
+            const std::string where = "slot " + std::to_string(slot) + " of " + std::to_string(container->id);
+            const SimObject* held = slot < container->slots.size() ? world().find(container->slots[slot]) : nullptr;
+            throw Stop{Outcome::Unsupported, "Create Object into a slot that isn't free (the game's fit test)",
+                       held != nullptr                       ? where + " held by " + std::to_string(held->id) + " " + held->definition.name
+                       : slot >= container->slots.size() ? where + " missing"
+                                                             : where + " held by " + std::to_string(container->slots[slot]) + " (gone)"};
+        }
+        if (container->x == kOffLot || container->y == kOffLot) {
+            return false;
+        }
+        spot = CreateSpot{container->x, container->y, container->level,
+                          Tile{static_cast<std::uint8_t>(container->x >> 16), static_cast<std::uint8_t>(container->y >> 16),
+                               static_cast<std::uint8_t>(container->level)}};
     } else if (o[4] == kPlaceInFrontOfStackObject) {
         spot = tileInFront(world().find(stackObject()));
         if (!spot) {
@@ -419,8 +448,8 @@ bool Execution::createObject(const bhav::Instruction& in, Frame& f) {
     }
 
     SimObject& created = world().create(type->group, type->definition, type->containerSlots);
-    if (intoMySlot) {
-        putInSlot(created, me(), 0);
+    if (container != nullptr) {
+        putInSlot(created, *container, static_cast<std::int16_t>(slot));  // a byte, checked against the slots
     } else if (spot) {
         created.x = spot->x;
         created.y = spot->y;

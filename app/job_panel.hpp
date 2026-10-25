@@ -32,6 +32,10 @@ public:
     // (career and school tables and strings).
     void show(std::span<const std::int16_t> personData, std::span<const std::int16_t> globals, ts2::sim::CodeSource& code);
 
+    // Shows the talent badges page for a Sim with `badges` badges. The badges' own icons are not
+    // shown yet.
+    void showBadges(std::span<const std::int16_t> personData, int badges);
+
 private:
     // An object's constant table (BCON) and string table, by its GUID.
     struct ObjectData {
@@ -67,6 +71,7 @@ private:
     int rowWidth_ = 0;            // a skill row
     ts2::tga::Pixels picture_;
     int teenMode_ = 1, elderMode_ = 3;  // teen: 1 school, 2 job. Elder: 3 retired, 4 job
+    std::optional<std::pair<bool, int>> badgesShown_;  // too young, and the badges, as last shown
     int performanceColumn_ = -1;
     ts2::tga::Pixels performanceFill_, performanceGradient_;
     // Career and school pictures by group and instance (nullopt: none), and what each icon shows.

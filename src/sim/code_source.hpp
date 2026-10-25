@@ -67,6 +67,9 @@ public:
                                                                           std::uint16_t instance) = 0;
     // An object type's functions (OBJf), if it has them.
     virtual const std::vector<objf::Function>* objectFunctions(const ObjectType&) { return nullptr; }
+    // Adds the type of an object made during play (a new character's Sim), found by its GUID from
+    // then on. Null when this source can't hold one.
+    virtual const ObjectType* addMadeObjectType(ObjectType) { return nullptr; }
     // The master of a multi-tile object's part: the type in the same group with the same multi-tile
     // id whose sub-index (OBJD field 0x0B) is 0xFFFF. Null for other types or when it is missing.
     virtual const ObjectType* multiTileMaster(const ObjectType&) { return nullptr; }

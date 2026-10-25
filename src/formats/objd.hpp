@@ -19,6 +19,7 @@ constexpr std::size_t kGuid1 = 0x0E;
 constexpr std::size_t kGuid2 = 0x0F;
 constexpr std::size_t kPrice = 0x12;
 constexpr std::size_t kSlotsId = 0x14;
+constexpr std::size_t kHauntable = 0x1C;  // nonzero marks a hauntable object (Set to Next 0x21)
 constexpr std::size_t kCatalogStringsId = 0x29;
 constexpr std::size_t kNumAttributes = 0x3A;
 constexpr std::size_t kObjectArrayCount = 0x3B;

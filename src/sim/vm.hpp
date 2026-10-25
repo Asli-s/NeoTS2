@@ -55,6 +55,7 @@ constexpr std::uint8_t kStackObjectMotives = 0x0F;
 constexpr std::uint8_t kStackObjectMotiveByTemp = 0x11;
 constexpr std::uint8_t kMyPersonData = 0x12;
 constexpr std::uint8_t kStackObjectPersonData = 0x13;
+constexpr std::uint8_t kStackObjectTemp = 0x0D;
 constexpr std::uint8_t kStackObjectDefinition = 0x15;
 // The stack object's attribute whose index is in a param of the frame (data = the param).
 constexpr std::uint8_t kStackObjectAttributeByParam = 0x16;
@@ -72,6 +73,8 @@ constexpr std::uint8_t kStackObjectHasFunction = 0x23;
 // My or the stack object's container slot [temp [data]].
 constexpr std::uint8_t kMySlotByTemp = 0x30;
 constexpr std::uint8_t kStackObjectSlotByTemp = 0x31;
+// Like 0x15, but a multi-tile object's parts read their master's definition.
+constexpr std::uint8_t kStackObjectMasterDefinition = 0x33;
 constexpr std::uint8_t kStackObjectPersonDataByTemp = 0x1F;
 constexpr std::uint8_t kConstant = 0x1A;
 } // namespace owner
@@ -98,6 +101,8 @@ constexpr std::uint8_t kDecrementAndGreater = 0x11;
 constexpr std::uint8_t kOr = 0x12;
 constexpr std::uint8_t kXor = 0x13;
 constexpr std::uint8_t kAbs = 0x14;
+// "Assign 32bit Value": the left word and the one after it take the right word and the one after it.
+constexpr std::uint8_t kAssign32 = 0x15;
 } // namespace op
 
 enum class Outcome { True, False, Error, Unsupported, StepLimit, DepthLimit, MissingCode, Sleeping,
@@ -197,6 +202,9 @@ public:
     std::function<void(const StepInfo&)> onStep;
     // Called when a Sim takes an interaction from its queue and starts it, or starts autonomy's pick.
     std::function<void(const SimObject& sim, const QueuedInteraction& interaction)> onInteractionStart;
+    // Resets a Sim that has to drop everything because an object it is using goes away (see
+    // forgetObject). Without it, a call that needs such a reset stops as unsupported.
+    std::function<void(SimObject& sim)> resetSim;
     std::mt19937 rng{0x5132};
 
 private:
@@ -206,6 +214,9 @@ private:
                       std::optional<std::uint32_t> entryGroup = std::nullopt);
     // Starts an object made by Create New Object Instance, before the primitive returns.
     void startCreated(SimObject& created, const ObjectType& type);
+    // Every Sim but `object` forgets it at once (Generic Sims Call 0x0D). Resetting a Sim whose code
+    // is running right now is not supported, so needing that stops.
+    void tellSimsObjectGoes(std::int16_t object);
     // A check tree run by a primitive, as Vm::runCheck runs it, with the step limit to itself. The line
     // it tests is put back afterwards. `offered` (if set) receives the lines it offers.
     RunResult checkFromTree(SimObject& who, std::uint32_t codeOwner, std::uint16_t tree, std::int16_t stackObject,
@@ -233,6 +244,8 @@ private:
     InteractionIcon* candidateIcon_ = nullptr;       // that candidate's queue icon
     // A copy of the interaction line last tested. Like the game, it is kept after the check tree ends.
     std::optional<ttab::Interaction> testedLine_;
+    // The thread and the object of each run in progress.
+    std::vector<std::pair<const ThreadState*, const SimObject*>> running_;
     std::optional<AutonomyTunings> autonomyTunings_;  // read from the game's tunings on first use
     CheckTreeKinds checkTreeKinds_{code_};
 

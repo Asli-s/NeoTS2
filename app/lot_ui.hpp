@@ -52,12 +52,15 @@ public:
     void hideForFreeCamera(bool hide);
 
     // What a released button asks for.
-    enum class Action { None, Neighborhood, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, RewardsOpened, RewardsClosed, SelectSim, FloorUp, FloorDown, WallMode };
+    enum class Action { None, Neighborhood, Quit, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, RewardsOpened, RewardsClosed, SelectSim, TrackSim, FloorUp, FloorDown, WallMode };
     Action clicked(int window);
     // A right click on one of the panels' buttons: on a want or fear it puts a hold on it or takes it
-    // off.
-    void rightClicked(int window, LotLife& life);
-    // The Sim whose thumbnail was clicked (for SelectSim).
+    // off, on a Sim's thumbnail it asks to track the Sim.
+    Action rightClicked(int window, LotLife& life);
+    // Marks the Sim the camera tracks (0: none) with a star on its thumbnail, and on the live
+    // panel's portrait while it is the selected Sim.
+    void showTracked(std::int16_t sim);
+    // The Sim whose thumbnail was clicked (for SelectSim and TrackSim).
     std::int16_t clickedSim() const { return clickedSim_; }
     // The wall mode picked (for WallMode): 0 walls down, 1 cutaway, 2 walls up, 3 roofs.
     int pickedWallMode() const { return pickedWallMode_; }
@@ -134,6 +137,8 @@ private:
     // Each household Sim's portrait, and whose the live panel shows (-1: none yet).
     std::map<std::int16_t, ts2::tga::Pixels> portraits_;
     int portraitShown_ = -1;
+    std::int16_t tracked_ = 0;
+    std::optional<bool> starShown_;  // whether the live panel's star shows, none until it is set
     ts2::content::TargetPictures targets_;
     // Relationship thumbnails' pictures, at their portrait window's size.
     ts2::content::TargetPictures relationshipPictures_{ts2::content::readCharacterPortrait, 56};

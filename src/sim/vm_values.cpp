@@ -23,6 +23,10 @@ std::int16_t Execution::read(std::uint8_t owner, std::uint16_t data, Frame& f) {
     case owner::kStackObjectDefinition:
         return static_cast<std::int16_t>(
             slotAt(stackData().definition.fields, data, "object definition field"));
+    case owner::kStackObjectTemp: return stackTemp(data);
+    case owner::kStackObjectMasterDefinition:
+        return static_cast<std::int16_t>(
+            slotAt(stackMasterDefinition().fields, data, "object definition field"));
     case owner::kGlobal:        return slotAt(globals_, data, "global");
     case owner::kLiteral:       return static_cast<std::int16_t>(data);
     case owner::kTemp:          return slotAt(thread_.temps, data, "temp");
@@ -60,6 +64,10 @@ std::int16_t Execution::read(std::uint8_t owner, std::uint16_t data, Frame& f) {
 // Room fields: 0 ambient light, 1 outside, 2 level, 3 area (counted in quarter tiles), 4 pool,
 // 5 windows. Fields 1 and 7 are the room's region in room layers 0 and 1 (0 = outdoors).
 std::int16_t Execution::roomField(std::int16_t roomId, std::uint16_t field) {
+    // Room -1 (an object in no room) has no region in any layer, so it is never outside.
+    if (roomId == -1 && (field == kRoomOutside || field == kRoomLayer1)) {
+        return 0;
+    }
     const RoomInfo* room = world().rooms().room(roomId);
     if (room == nullptr) {
         throw Stop{Outcome::Unsupported, "room not known", std::to_string(roomId)};
@@ -224,7 +232,8 @@ std::int16_t Execution::neighborDefinitionField(std::uint16_t data) {
     }
     const ObjectType* type = code_.objectType(neighbor->guid);
     if (type == nullptr || data >= type->definition.fields.size()) {
-        throw Stop{Outcome::Error, "index into object definition out of range", std::to_string(data)};
+        throw Stop{Outcome::Error, "index into object definition out of range",
+                   std::to_string(data) + " of neighbor " + std::to_string(stackObject()) + " " + hex(neighbor->guid, 8)};
     }
     return static_cast<std::int16_t>(type->definition.fields[data]);
 }
@@ -270,6 +279,9 @@ void Execution::write(std::uint8_t owner, std::uint16_t data, Frame& f, std::int
         slotAt(stackData().definition.fields, data, "object definition field") =
             static_cast<std::uint16_t>(value);
         return;
+    case owner::kStackObjectTemp: stackTemp(data) = value; return;
+    case owner::kStackObjectMasterDefinition:
+        throw Stop{Outcome::Unsupported, "writing a master definition not implemented", hex(owner, 2)};
     case owner::kGlobal:        slotAt(globals_, data, "global") = value; return;
     case owner::kTemp:          slotAt(thread_.temps, data, "temp") = value; return;
     case owner::kParam:         slotAt(f.params, data, "param") = value; return;
@@ -305,6 +317,42 @@ void Execution::write(std::uint8_t owner, std::uint16_t data, Frame& f, std::int
     default:
         throw Stop{Outcome::Unsupported, "data owner not implemented", hex(owner, 2)};
     }
+}
+
+// The owners whose next word is the next value of the same array (data + 1). Only these are known
+// to work with Assign 32bit Value.
+static bool hasNextWord(std::uint8_t owner) {
+    switch (owner) {
+    case owner::kStackObjectSemiAttribute:
+    case owner::kTemp:
+    case owner::kParam:
+    case owner::kStackObjectTemp:
+    case owner::kMyPersonData:
+    case owner::kStackObjectPersonData:
+    case owner::kStackObjectDefinition:
+    case owner::kLocal:
+    case owner::kNeighborPersonData:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// Both words of each side must exist before anything is written. The second word is read after the
+// first one is written, as in the game.
+void Execution::assign32(const bhav::ExpressionOperands& x, Frame& f) {
+    if (!hasNextWord(x.lhsOwner) || !hasNextWord(x.rhsOwner)) {
+        throw Stop{Outcome::Unsupported, "Assign 32bit Value with this data owner",
+                   hex(x.lhsOwner, 2) + " " + hex(x.rhsOwner, 2)};
+    }
+    const auto lhsNext = static_cast<std::uint16_t>(x.lhsData + 1);
+    const auto rhsNext = static_cast<std::uint16_t>(x.rhsData + 1);
+    read(x.lhsOwner, x.lhsData, f);
+    read(x.lhsOwner, lhsNext, f);
+    read(x.rhsOwner, x.rhsData, f);
+    read(x.rhsOwner, rhsNext, f);
+    write(x.lhsOwner, x.lhsData, f, read(x.rhsOwner, x.rhsData, f));
+    write(x.lhsOwner, lhsNext, f, read(x.rhsOwner, rhsNext, f));
 }
 
 // Expression doesn't use operand byte 4 or bytes 8-15.
@@ -346,6 +394,7 @@ bool Execution::expression(const bhav::Instruction& in, Frame& f) {
     case op::kClearFlag:           set(lhs() & ~flagBit(rhs())); return true;
     case op::kIncrementAndLess:    return set(lhs() + 1) < rhs();
     case op::kDecrementAndGreater: return set(lhs() - 1) > rhs();
+    case op::kAssign32:            assign32(x, f); return true;
     default:
         throw Stop{Outcome::Unsupported, "expression operator not implemented", hex(x.op, 2)};
     }

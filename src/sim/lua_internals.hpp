@@ -76,6 +76,7 @@ constexpr std::int16_t kErrorInvalidConstant = 0x2E;
 constexpr std::int16_t kErrorMissingNeighbor = 0x37;
 constexpr std::int16_t kErrorGlobalOutOfRange = 0x3F;
 constexpr std::int16_t kErrorBadGuid = 0x7A;
+constexpr std::int16_t kErrorMissingFamily = 0x9A;
 
 // Script results, temps, params, locals, bits and GUIDs (lua_script_values.cpp).
 int setScriptReturnValue(lua_State* L);
@@ -102,6 +103,7 @@ int roundFloat(lua_State* L);
 
 // Messages, game properties, installed packs and businesses (lua_game_state.cpp).
 int postMessage(lua_State* L);
+int subscribeMessage(lua_State* L);
 int getProperty(lua_State* L);
 int setProperty(lua_State* L);
 int isEpInstalled(lua_State* L);
@@ -215,8 +217,14 @@ int setObjectArray(lua_State* L);
 int newNeighborhood(lua_State* L);
 int newCachedNeighbor(lua_State* L);
 int newCachedPerson(lua_State* L);
+int newCachedFamily(lua_State* L);
+int cachedFamilyId(lua_State* L);
+int cachedFamilyLotId(lua_State* L);
+int cachedFamilyCurrentLotId(lua_State* L);
+int cachedFamilyVacationLotId(lua_State* L);
 int neighborhoodIsRoommate(lua_State* L);
 int neighborhoodIsApartmentDoor(lua_State* L);
+int neighborhoodIsApartmentResident(lua_State* L);
 int neighborhoodGetLotOwner(lua_State* L);
 int neighborhoodGetWitchLotType(lua_State* L);
 int neighborhoodIsValidLot(lua_State* L);
@@ -243,6 +251,9 @@ int cachedNeighborOutfitProperty(lua_State* L);
 
 // Floors, tiles, locations, weather and the camera (lua_world.cpp).
 int hasSolidFloor(lua_State* L);
+int hasStage(lua_State* L);
+int getNumWallSections(lua_State* L);
+int getRoomOnSideOfWall(lua_State* L);
 int isBeachLocation(lua_State* L);
 int getObjectsOnTile(lua_State* L);
 int getObjectTile(lua_State* L);

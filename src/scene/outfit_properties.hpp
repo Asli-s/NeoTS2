@@ -23,6 +23,11 @@ public:
     std::int16_t get(const std::filesystem::path& characterFile, std::uint16_t category, std::uint16_t property);
     std::int16_t get(std::uint32_t objectGroup, std::uint16_t category, std::uint16_t property);
 
+    // Whether the Sim has a whole outfit in outfit category `category` (a flag: everyday 1, formal 8,
+    // ...): a full-body part, or both a top and a bottom.
+    bool hasOutfit(const std::filesystem::path& characterFile, std::uint32_t category);
+    bool hasOutfit(std::uint32_t objectGroup, std::uint32_t category);
+
     // A catalog skin tone or makeup (XTOL or XMOL) that a face material's overlay names by family.
     struct Overlay {
         std::uint32_t subtype = 0;
@@ -38,6 +43,7 @@ private:
 
     const std::vector<Overlay>* overlays(const std::string& family);
     std::int16_t answerFor(const std::string& sim, std::uint16_t category, std::uint16_t property);
+    bool hasOutfitInUse(std::uint32_t category);
 };
 
 } // namespace ts2::scene

@@ -83,6 +83,75 @@ void personSearchesFilterBySpecies() {
     CHECK(countWithLoop(setToNext(0x2C, owner::kStackObjectId, 0, 0, 0, 0), oneIsAPet) == 0);
 }
 
+void setToNextFindsHauntableObjects() {
+    const Instruction hauntable = setToNext(0x21, owner::kStackObjectId, 0, 0, 0, 0);
+    auto hauntFridges = [](SmallWorld& w) {
+        for (std::int16_t id : {std::int16_t{2}, std::int16_t{4}}) {
+            auto& fields = w.world.find(id)->definition.fields;
+            fields.resize(std::max<std::size_t>(fields.size(), 0x1D));
+            fields[0x1C] = 1;
+        }
+    };
+    CHECK(countWithLoop(hauntable) == 0);
+    CHECK(countWithLoop(hauntable, hauntFridges) == 2);
+    CHECK(countWithLoop(withFlags(hauntable, 0x02, 0x0E, -3), hauntFridges) == 0);
+}
+
+// Search 0x20: ids toward whom the object in temp 0 holds relationship variable 1 of at least temp 1,
+// in id order, compared without sign. Running out leaves -1.
+void setToNextFindsOwnersOfAnObject() {
+    MemoryCodeSource code;
+    code.add(kObjectGroup, 0x1000, bhav({
+        setToNext(0x20, owner::kTemp, 4, 0, 1, T),
+        expr(owner::kTemp, 2, op::kAdd, owner::kLiteral, 1, 2, E),
+        expr(owner::kTemp, 3, op::kAdd, owner::kTemp, 4, 0, E),
+    }));
+    SmallWorld w;
+    auto& world = w.world;
+    world.relationship(2, 40) = {0, 7};
+    world.relationship(2, 30) = {0, 3};
+    world.relationship(2, 50) = {9};      // no variable 1
+    world.relationship(2, 60) = {0, -1};  // negative: above any threshold without sign
+    auto& temps = w.controller->thread.temps;
+    Vm vm(code, {}, &world);
+    temps = {2, 5, 0, 0, 0};
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::True);
+    CHECK(temps[2] == 2 && temps[3] == 100 && temps[4] == -1);
+    // A target the object has no record towards ends it. A missing object leaves the target alone.
+    temps = {2, 5, 0, 0, 35};
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::True && temps[2] == 0 && temps[4] == -1);
+    temps = {999, 5, 0, 0, 35};
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::True && temps[2] == 0 && temps[4] == 35);
+}
+
+// Search 0x10: objects of OBJD type 0x0D or 0x12, in id order, skipping removed ones. A target
+// that isn't one ends it with 0.
+void setToNextFindsVehicles() {
+    MemoryCodeSource code;
+    code.add(kObjectGroup, 0x1000, bhav({
+        setToNext(0x10, owner::kTemp, 4, 0, 1, T),
+        expr(owner::kTemp, 2, op::kAdd, owner::kLiteral, 1, 2, E),
+        expr(owner::kTemp, 3, op::kAdd, owner::kTemp, 4, 0, E),
+    }));
+    SmallWorld w;
+    auto vehicle = [&](std::uint16_t type) -> ts2::sim::SimObject& {
+        auto definition = typed(kChairGuid);
+        definition.fields[ts2::objd::field::kType] = type;
+        return w.world.create(kObjectGroup, definition);
+    };
+    auto& car = vehicle(0x0D);
+    auto& bus = vehicle(0x12);
+    auto& gone = vehicle(0x0D);
+    w.world.remove(gone);
+    auto& temps = w.controller->thread.temps;
+    Vm vm(code, {}, &w.world);
+    temps = {0, 0, 0, 0, 0};
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::True);
+    CHECK(temps[2] == 2 && temps[3] == car.id + bus.id && temps[4] == 0);
+    temps = {0, 0, 0, 0, 3};  // the chair
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::True && temps[2] == 0 && temps[4] == 0);
+}
+
 // Search type 0x0C: objects whose object data field 0x3B ("category") equals temp 0.
 void setToNextFindsObjectsByCategory() {
     MemoryCodeSource code;
@@ -96,6 +165,24 @@ void setToNextFindsObjectsByCategory() {
     w.world.find(2)->data[0x3B] = 5;
     w.world.find(3)->data[0x3B] = 7;
     w.world.find(5)->data[0x3B] = 5;
+    Vm vm(code, {}, &w.world);
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::True);
+    CHECK(w.controller->thread.temps[1] == 2);
+}
+
+// Search 0x19: like 0x0C with the room (object data 0x1D) in place of the category.
+void setToNextFindsObjectsInARoom() {
+    MemoryCodeSource code;
+    code.add(kObjectGroup, 0x1000, bhav({
+        expr(owner::kStackObjectId, 0, op::kAssign, owner::kLiteral, 0, 1, E),
+        expr(owner::kTemp, 0, op::kAssign, owner::kLiteral, 4, 2, E),
+        setToNext(0x19, owner::kStackObjectId, 0, 0, 3, T),
+        expr(owner::kTemp, 1, op::kAdd, owner::kLiteral, 1, 2, E),
+    }));
+    SmallWorld w;
+    w.world.find(1)->data[0x1D] = 4;
+    w.world.find(3)->data[0x1D] = 2;
+    w.world.find(5)->data[0x1D] = 4;
     Vm vm(code, {}, &w.world);
     CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::True);
     CHECK(w.controller->thread.temps[1] == 2);
@@ -492,6 +579,10 @@ std::vector<Test> vmSetToNextTests() {
         {"Set to Next finds objects by category in param 0", setToNextFindsObjectsByCategoryInParam0},
         {"Set to Next walks neighbors of a family", setToNextWalksNeighborsOfAFamily},
         {"Set to Next finds objects by category", setToNextFindsObjectsByCategory},
+        {"Set to Next finds objects in a room", setToNextFindsObjectsInARoom},
+        {"Set to Next finds hauntable objects", setToNextFindsHauntableObjects},
+        {"Set to Next finds the owners of an object", setToNextFindsOwnersOfAnObject},
+        {"Set to Next finds vehicles", setToNextFindsVehicles},
         {"Set to Next finds objects on the same tile", setToNextFindsObjectsOnTheSameTile},
         {"Set to Next walks multi-tile parts", setToNextWalksMultiTileParts},
         {"Set to Next finds an object type from temps", setToNextObjectOfTypeInTemps},

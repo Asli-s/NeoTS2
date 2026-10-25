@@ -182,6 +182,43 @@ std::int16_t OutfitProperties::get(std::uint32_t objectGroup, std::uint16_t cate
     return answerFor("group " + std::to_string(objectGroup), category, property);
 }
 
+bool OutfitProperties::hasOutfit(const std::filesystem::path& characterFile, std::uint32_t category) {
+    const Assets::CharacterInUse inUse(assets_, characterFile);
+    return hasOutfitInUse(category);
+}
+
+bool OutfitProperties::hasOutfit(std::uint32_t objectGroup, std::uint32_t category) {
+    const Assets::CharacterInUse inUse(assets_, objectGroup);
+    return hasOutfitInUse(category);
+}
+
+// For the character in use: a non-empty list of full-body parts, or of tops and of bottoms, whose
+// parts all load. The game also checks that the resources each part names exist, which isn't done
+// here.
+bool OutfitProperties::hasOutfitInUse(std::uint32_t category) {
+    constexpr std::uint32_t kTopPart = 4, kBodyPart = 8, kBottomPart = 0x10;
+    AgeData age;
+    const auto agedBytes = assets_.byKey({kAgeData, kLocalGroup, 1, 0});
+    const auto refBytes = assets_.byKey({reflist::kType, kLocalGroup, 1, 0});
+    if (!agedBytes || !refBytes) {
+        return false;
+    }
+    try {
+        age.properties = propset::parse(*agedBytes);
+        age.refs = reflist::parse(*refBytes);
+    } catch (const std::exception& ex) {
+        diag::warnOnce(std::string("outfits: a Sim's age data that can't be read has no outfits: ") + ex.what());
+        return false;
+    }
+    const auto complete = [&](std::uint32_t piece) {
+        const auto entries = listEntries(age, category << 16 | piece, false);
+        return !entries.empty() && std::all_of(entries.begin(), entries.end(), [&](std::uint32_t e) {
+            return part(assets_, age, e).has_value();
+        });
+    };
+    return complete(kBodyPart) || (complete(kTopPart) && complete(kBottomPart));
+}
+
 // The answer for the character in use (see Assets::useCharacterFile).
 std::int16_t OutfitProperties::answerFor(const std::string& sim, std::uint16_t category, std::uint16_t property) {
     auto& answers = answers_[sim];

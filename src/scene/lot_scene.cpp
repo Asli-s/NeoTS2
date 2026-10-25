@@ -89,6 +89,7 @@ struct Shown {
     Transform world;
     float yaw;
     std::size_t instance = 0;  // index into the scene's instances once placed
+    std::string boneModel;     // the name the builder knows its posed model's bones by
 };
 
 // The container slots kept for each object, for placing what scripts put into them.
@@ -371,7 +372,13 @@ private:
                 log(object, "no model", so.model);
                 continue;
             }
-            const int mesh = b_.model(so.model, so.overrides);
+            // Its joints as the lot saved them: a dining chair pushed under a table is drawn that way.
+            const auto saved = lot_.savedJoints.find(object.id);
+            std::string boneModel;
+            const int mesh = b_.savedPoseModel(so.model, so.overrides,
+                                               saved != lot_.savedJoints.end() ? std::span<const cobject::SavedJoint>(saved->second)
+                                                                               : std::span<const cobject::SavedJoint>{},
+                                               boneModel);
             if (mesh < 0) {
                 ++stats_.withoutModel;
                 log(object, "model not found", so.model);
@@ -389,7 +396,7 @@ private:
             }
             // Direction d faces 180 - 45d degrees (0 along -X, 6 along -Y). Models face +Y.
             const float angle = kPi / 2 - static_cast<float>(object.state.data[1]) * kPi / 4;
-            shown_.push_back({&object, mesh, so.model, Transform::at(x, y, z, angle), angle});
+            shown_.push_back({&object, mesh, so.model, Transform::at(x, y, z, angle), angle, 0, boneModel});
             byId[object.id] = shown_.size() - 1;
             log(object, "placed", so.model);
         }
@@ -411,7 +418,7 @@ private:
             if (c.object->type) {
                 name = assets_.slotBone(c.object->type->guid, static_cast<std::size_t>(s.object->state.data[3]));
             }
-            const Transform* bone = name.empty() ? nullptr : b_.bone(c.model, name);
+            const Transform* bone = name.empty() ? nullptr : b_.bone(c.boneModel, name);
             const Transform slot = bone ? base * *bone : base;
             // The saved direction is the slot's rounded to 45 degrees unless the player turned the
             // object on it: keep whole quarter turns of difference.
@@ -445,11 +452,18 @@ private:
                 if (shown_[i].object->type) {
                     for (std::size_t slot = 0; slot < kMaxShownSlots; ++slot) {
                         const std::string bone = assets_.slotBone(shown_[i].object->type->guid, slot);
-                        const Transform* at = bone.empty() ? nullptr : b_.bone(shown_[i].model, bone);
+                        const Transform* at = bone.empty() ? nullptr : b_.bone(shown_[i].boneModel, bone);
                         record.slots.push_back(at ? std::optional<Transform>(*at) : std::nullopt);
                     }
                     while (!record.slots.empty() && !record.slots.back()) {
                         record.slots.pop_back();
+                    }
+                }
+                if (const std::string* joint = b_.followJoint(shown_[i].boneModel)) {
+                    if (const Transform* at = b_.bone(shown_[i].boneModel, *joint)) {
+                        record.followJoint = *joint;
+                        record.followModel = shown_[i].model;
+                        record.followRest = *at;
                     }
                 }
                 b_.scene().placedObjects.push_back(std::move(record));

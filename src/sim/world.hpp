@@ -11,6 +11,7 @@
 #include "sim/idle_spot.hpp"
 #include "sim/data_tables.hpp"
 #include "sim/inventory.hpp"
+#include "sim/message_subscriptions.hpp"
 #include "sim/ray_trace.hpp"
 #include "sim/object_timer.hpp"
 #include "sim/reaching.hpp"
@@ -74,6 +75,11 @@ struct Frame {
     // The caller continues on its true branch when this frame returns, whatever it returns
     // (an interaction started by Idle for Input).
     bool callerContinuesTrue = false;
+    // The caller's Idle for Input runs again when this frame returns (an interaction it started
+    // from the queue).
+    bool callerIdlesAgain = false;
+    // The Idle for Input at pc started an interaction, which has ended when it runs again.
+    bool idleStarted = false;
     // The caller runs its instruction again when this frame returns (a turn's or walk's pre-route tree).
     bool callerReruns = false;
     // The Dialog at pc posted a dialog and waits for its answer.
@@ -155,6 +161,9 @@ struct QueuedInteraction {
     // Whether the game counts it as autonomous ("Interaction Autonomous", person data 0xA6, while
     // it runs): autonomy's own pick, or a push with byte 3 bit 3.
     bool autonomous = false;
+    // A continuation (Push Interaction byte 3 bit 2): it starts as soon as the interaction before
+    // it ends, before the Sim's main loop runs again.
+    bool continuation = false;
     // The queue shows picture `iconIndex` of the object type `iconGuid` when it is set, else of
     // `iconObject`, else of `partner`, else of `object`.
     std::uint32_t iconGuid = 0;
@@ -320,6 +329,8 @@ struct SavedNeighborhood {
     std::map<std::int32_t, std::uint8_t> lotTypes;    // each placed lot's type (its description)
     std::map<std::int32_t, std::int32_t> lotOwners;   // and its owner, a neighbor id
     std::map<std::uint32_t, std::int32_t> familyLots;  // each family's home lot (FAMI instance -> lot, 0 for none)
+    std::map<std::uint32_t, std::int32_t> familyCurrentLots;   // and the two other lots its FAMI saves
+    std::map<std::uint32_t, std::int32_t> familyVacationLots;
     std::map<std::uint32_t, std::uint32_t> familyFlags;  // each family's saved flags (FAMI)
     std::map<std::uint32_t, std::vector<std::uint32_t>> familyMembers;  // each family's members' GUIDs (FAMI)
     std::map<std::pair<std::int16_t, std::int16_t>, std::vector<std::int32_t>> relationships;
@@ -364,6 +375,25 @@ public:
     void markFootprintChanged(std::int16_t id);
     std::set<std::int16_t> takeFootprintChanges() { return std::exchange(footprintChanges_, {}); }
 
+    // Objects keeping Build and Buy mode off (Generic Sims Calls 0x0A and 0x0B). An object is listed
+    // once per call that blocks, and deleting it drops every entry it has.
+    void blockBuildBuy(std::int16_t id) { buildBuyBlockers_.push_back(id); }
+    void unblockBuildBuy(std::int16_t id) {
+        if (const auto it = std::ranges::find(buildBuyBlockers_, id); it != buildBuyBlockers_.end()) {
+            buildBuyBlockers_.erase(it);
+        }
+    }
+    bool buildBuyBlocked() const { return !buildBuyBlockers_.empty(); }
+
+    // The ids `from` holds a relationship record towards, in id order.
+    std::vector<std::int16_t> relationshipTargets(std::int16_t from) const {
+        std::vector<std::int16_t> ids;
+        for (auto it = relationships_.lower_bound({from, static_cast<std::int16_t>(INT16_MIN)}); it != relationships_.end() && it->first.first == from; ++it) {
+            ids.push_back(it->first.second);
+        }
+        return ids;
+    }
+
     // Relationship variables `from` holds towards `to`, empty until first grown.
     std::vector<std::int16_t>& relationship(std::int16_t from, std::int16_t to) {
         const auto [it, added] = relationships_.try_emplace({from, to});
@@ -388,6 +418,23 @@ public:
     using FloorPattern = std::function<std::optional<std::uint16_t>(int level, int x, int y, int quarter)>;
     void setFloorPattern(FloorPattern f) { floorPattern_ = std::move(f); }
     const FloorPattern& floorPattern() const { return floorPattern_; }
+    // The platform region of a quarter, from the lot's region grid (c3DArray instance 0x14), with the
+    // same levels and quarters as the floor pattern. The regions are the same on every lot: 0 the
+    // house's foundation, 1 and 2 decks, 3 and 5 pools, 4 split-level interior foundations ("stages").
+    // -1 or nothing where no platform is.
+    using PlatformRegion = std::function<std::optional<std::int32_t>(int level, int x, int y, int quarter)>;
+    void setPlatformRegion(PlatformRegion f) { platformRegion_ = std::move(f); }
+    const PlatformRegion& platformRegion() const { return platformRegion_; }
+
+    // The lot's neighbor id remap table (Generic Sims Call 0x30): the neighbor id each id maps to.
+    // None when the lot has no remap tables. Unread when it has tables the engine can't read.
+    using NeighborRemap = std::unordered_map<std::uint32_t, std::uint32_t>;
+    void setNeighborRemap(std::optional<NeighborRemap> remap, bool unread) {
+        neighborRemap_ = std::move(remap);
+        neighborRemapUnread_ = unread;
+    }
+    const std::optional<NeighborRemap>& neighborRemap() const { return neighborRemap_; }
+    bool neighborRemapUnread() const { return neighborRemapUnread_; }
 
     // Where rain and snow reach (see OutsideGrid).
     const OutsideGrid& outside() const { return outside_; }
@@ -402,6 +449,9 @@ public:
 
     // The neighborhood's weather and season, as scripts read and change them.
     weather::Weather& weather() { return weather_; }
+
+    // The messages objects subscribed to. Deleted objects leave them when purge() frees them.
+    MessageSubscriptions& messageSubscriptions() { return messageSubscriptions_; }
 
     void setNeighborhood(std::shared_ptr<const SavedNeighborhood> hood) {
         hood_ = std::move(hood);
@@ -458,6 +508,17 @@ public:
     };
     const LotShape& lotShape() const { return lotShape_; }
     void setLotShape(LotShape shape) { lotShape_ = shape; }
+    // The lot's full room walls: drawn, of a style that spans floor to floor (not fences, attic, deck
+    // or stage walls), in the order of the lot's saved wall coverings. Scripts number them from 0
+    // (nWorld.GetNumWallSections, GetRoomOnSideOfWall). Unset for worlds not built from a lot.
+    struct WallSection {
+        // Its two room graph points. A wall the room graph doesn't have still counts, without them.
+        wallgraph::Point from;
+        wallgraph::Point to;
+        bool placed = false;
+    };
+    const std::optional<std::vector<WallSection>>& wallSections() const { return wallSections_; }
+    void setWallSections(std::vector<WallSection> sections) { wallSections_ = std::move(sections); }
     // A neighbor's saved description, null when unknown.
     const SavedNeighbor* neighbor(std::int16_t id) const {
         if (!hood_) {
@@ -552,9 +613,27 @@ public:
     // Adds a neighbor made while playing (Make New Character) and returns its id, or nothing when the
     // neighborhood has no free id. It is kept for this run only, as nothing is saved yet.
     std::optional<std::int16_t> addNeighbor(SavedNeighbor neighbor);
+    // The 29-bit count under a new GUID made during play. The game counts time for it, the engine
+    // counts the GUIDs it made from 1, so a run repeats.
+    std::uint32_t nextGuidCount() { return ++guidCount_ & 0x1FFFFFFF; }
     // Adds a family with no home lot unless the neighborhood has it. It lasts for this run only.
     void addFamily(std::uint32_t family);
     bool hasFamily(std::uint32_t family) const { return hood_ && hood_->familyLots.contains(family); }
+    // A family's lots as CachedFamily reads them, or nothing for a family the neighborhood doesn't have.
+    // A family added during this run has 0 for all three.
+    struct FamilyLotIds {
+        std::int32_t home = 0, current = 0, vacation = 0;
+    };
+    std::optional<FamilyLotIds> familyLotIds(std::uint32_t family) const {
+        if (!hasFamily(family)) {
+            return std::nullopt;
+        }
+        const auto lotIn = [family](const std::map<std::uint32_t, std::int32_t>& lots) {
+            const auto it = lots.find(family);
+            return it != lots.end() ? it->second : 0;
+        };
+        return FamilyLotIds{lotIn(hood_->familyLots), lotIn(hood_->familyCurrentLots), lotIn(hood_->familyVacationLots)};
+    }
 
     // A neighbor's copy of its person data: the saved values until changed, null for an unknown
     // neighbor.
@@ -674,6 +753,16 @@ public:
         return 0;
     }
 
+    // The GUID of a neighbor's Sim, none when the neighborhood has no such neighbor.
+    std::optional<std::uint32_t> neighborGuid(std::int16_t id) const {
+        if (hood_) {
+            if (const auto it = hood_->neighbors.find(id); it != hood_->neighbors.end()) {
+                return it->second.guid;
+            }
+        }
+        return std::nullopt;
+    }
+
     // The simulation's clock in milliseconds, moved on by whoever runs the world. Animations are
     // timed by it.
     double clockMs() const { return clockMs_; }
@@ -742,6 +831,12 @@ public:
     using OutfitProperty = std::function<std::optional<std::int16_t>(std::int16_t neighbor, std::uint16_t category, std::uint16_t property)>;
     void setOutfitProperty(OutfitProperty f) { outfitProperty_ = std::move(f); }
     const OutfitProperty& outfitProperty() const { return outfitProperty_; }
+    // Whether an object's looks have a whole outfit in an outfit category (a flag: everyday 1,
+    // see scene::OutfitProperties::hasOutfit), none when its looks aren't found. Without it,
+    // scripts that ask stop as unsupported.
+    using HasOutfit = std::function<std::optional<bool>(const SimObject& object, std::uint32_t category)>;
+    void setHasOutfit(HasOutfit f) { hasOutfit_ = std::move(f); }
+    const HasOutfit& hasOutfit() const { return hasOutfit_; }
     // The joint named `bone` (lower case) in an object's model, none without one. Without it, bone
     // slots are not known.
     using ModelBoneLookup = std::function<std::optional<ModelBone>(std::int16_t object, const std::string& bone)>;
@@ -796,6 +891,18 @@ public:
         }
         const auto it = wantDefs_->categories.find(id);
         return it != wantDefs_->categories.end() ? &it->second : nullptr;
+    }
+
+    // The ids of the objects that match, removed ones too, in id order.
+    template <typename Predicate>
+    std::vector<std::int16_t> idsIncludingRemoved(Predicate matches) const {
+        std::vector<std::int16_t> ids;
+        for (const auto& [id, object] : objects_) {
+            if (matches(*object)) {
+                ids.push_back(id);
+            }
+        }
+        return ids;
     }
 
     template <typename Predicate>
@@ -859,9 +966,11 @@ private:
     std::uint8_t lotType_ = 0;
     std::int16_t nextNeighborId_ = 1;  // where the search for a new neighbor's id starts
     weather::Weather weather_;
+    MessageSubscriptions messageSubscriptions_;
     std::optional<std::int32_t> lotNumber_;
     WallTiles walls_;
     LotShape lotShape_;
+    std::optional<std::vector<WallSection>> wallSections_;
     WallTiles sightWalls_;
     RoomMap weatherRegions_;
     OutsideGrid outside_;
@@ -896,8 +1005,13 @@ private:
     RayQuery rayQuery_;
     CameraPoint cameraPoint_;
     FloorPattern floorPattern_;
+    PlatformRegion platformRegion_;
+    std::optional<NeighborRemap> neighborRemap_;
+    std::uint32_t guidCount_ = 0;
+    bool neighborRemapUnread_ = false;
     AnimationTurns animationTurns_;
     OutfitProperty outfitProperty_;
+    HasOutfit hasOutfit_;
     ModelBoneLookup modelBones_;
     LocoClips locoClips_;
     SimScale simScale_;
@@ -914,6 +1028,7 @@ private:
     // Each object by its id (1..32767), beside objects_, so find() is one read: scripts look objects
     // up all the time. Null for ids with no object.
     std::vector<SimObject*> byId_ = std::vector<SimObject*>(0x8000, nullptr);
+    std::vector<std::int16_t> buildBuyBlockers_;
     // The Sim each neighbor GUID is on this lot (0: none), as neighborData field 0 finds it. Social
     // check trees ask it thousands of times a tick, so it's kept until objects are added or removed.
     mutable std::map<std::uint32_t, std::int16_t> simOfNeighbor_;

@@ -106,6 +106,11 @@ constexpr std::size_t kHoldInterruptsPersonData = 0x47;
 constexpr std::size_t kBestActionObjectPersonData = 0x35;
 constexpr std::size_t kTreeTableEntryField = 0x14;
 constexpr std::size_t kMaxQueuedInteractions = 7;
+// The Sim's semi-attribute 0x22, "Carry Flags": not 0 while it carries something.
+constexpr std::size_t kCarryFlagsSemiAttribute = 0x22;
+// Continuations skip the game's limit of 7. A safety limit of ours keeps a pushing loop from
+// growing the queue without end.
+constexpr std::size_t kMaxQueuedWithContinuations = 64;
 // Interaction table line flag: the queue shows the interaction nested.
 constexpr std::uint32_t kNestedInteractionFlag = 0x8000;
 // The first waiting interaction, as the game shows it to scripts ("cn: Next Queued Interaction ...").
@@ -164,6 +169,8 @@ constexpr std::uint16_t kTreeNameTable = 0x12F;
 constexpr std::uint8_t kPlaceOnTopOfMe = 0x01;
 constexpr std::uint8_t kPlaceInMyHand = 0x02;
 constexpr std::uint8_t kPlaceInFrontOfStackObject = 0x03;
+constexpr std::uint8_t kPlaceInStackObjectSlot = 0x04;
+constexpr std::uint8_t kPlaceInSlotOfObjectInTemp0 = 0x0A;
 constexpr std::uint8_t kPlaceOutOfWorld = 0x06;
 constexpr std::uint8_t kPlaceBesideMe = 0x09;
 constexpr std::uint8_t kPlaceBelowObjectInParam0 = 0x07;
@@ -254,15 +261,33 @@ constexpr std::uint8_t kClearHairOverrideGenericCall = 0x2F;
 // nothing changes and it is true. Other skins are named by a text resource (not kept yet).
 constexpr std::uint8_t kSetSkinGenericCall = 0x3C;
 constexpr std::uint8_t kAddToFamilyGenericCall = 0x04;
+// Generic calls 0x0A and 0x0B turn Build and Buy mode off and back on for the object running them.
+// Always true.
+constexpr std::uint8_t kDisableBuildBuyGenericCall = 0x0A;
+constexpr std::uint8_t kEnableBuildBuyGenericCall = 0x0B;
+// Generic call 0x0D "abort interactions": every Sim but the stack object forgets the stack object,
+// as when it is deleted, and drops or resets what it was doing with it. Always true.
+constexpr std::uint8_t kAbortInteractionsGenericCall = 0x0D;
+// Generic call 0x30 "Get Remapped Neighbor Id": temp 1 becomes what the lot's neighbor id remap
+// table maps the neighbor id in temp 0 to (its low 16 bits), or -1. Always true.
+constexpr std::uint8_t kRemappedNeighborIdGenericCall = 0x30;
+// Generic call 0x31: whether the stack object would still pass the placement test where it stands
+// with footprint index (object data 9) temp 0. True when that is already its footprint index. Chairs
+// ask it before a sectional changes footprint.
+constexpr std::uint8_t kFitsWithFootprintGenericCall = 0x31;
+// Generic call 0x20, "Get Outfits Information": temp 1 = 1 when the object in temp 3 has a whole
+// outfit in the outfit category in temp 0, else 0. Always true.
+constexpr std::uint8_t kOutfitsInformationGenericCall = 0x20;
+constexpr std::size_t kFootprintIndexField = 0x09;
 // Generic call 0x27 refreshes a Sim's wants and fears in the way temp 0 asks (0-9 mine, 10 and up those
 // of the neighbor in temp 1). Always true. The refresh itself isn't kept yet.
 constexpr std::uint8_t kRecalcWantsGenericCall = 0x27;
 
-// Called whenever a Sim's queue changes. Continuations aren't queued yet, so that entry stays 0.
+// Called whenever a Sim's queue changes.
 inline void noteNextQueued(SimObject& sim) {
     const bool waiting = !sim.queue.empty();
     sim.personData[kNextQueuedIndexPersonData] = waiting ? static_cast<std::int16_t>(sim.queue.front().index) : 0;
-    sim.personData[kNextQueuedContinuationPersonData] = 0;
+    sim.personData[kNextQueuedContinuationPersonData] = waiting && sim.queue.front().continuation ? 1 : 0;
     sim.personData[kNextQueuedObjectPersonData] = waiting ? sim.queue.front().object : 0;
 }
 
@@ -332,6 +357,10 @@ constexpr std::uint8_t kSearchNonHuman = 0x29;
 constexpr std::uint8_t kSearchCategoryInTemp0 = 0x0C;
 constexpr std::uint8_t kSearchCategoryInParam0 = 0x06;
 constexpr std::size_t kCategoryField = 0x3B;
+// Search 0x19: objects in the room in temp 0 (object data 0x1D).
+constexpr std::uint8_t kSearchObjectInRoomInTemp0 = 0x19;
+// Search 0x21 "Hauntable Object": objects whose OBJD field 0x1C is nonzero.
+constexpr std::uint8_t kSearchHauntable = 0x21;
 constexpr std::uint8_t kSearchSpecies1Or2 = 0x2A;
 constexpr std::uint8_t kSearchSpecies1 = 0x2B;
 constexpr std::uint8_t kSearchSpecies2 = 0x2C;
@@ -367,6 +396,11 @@ constexpr std::uint8_t kSearchRelationshipFlags = 0x24;
 // temp 1.
 constexpr std::uint8_t kSearchRelationshipAbove = 0x23;
 constexpr std::uint8_t kSearchObjectTypeByFields = 0x26;
+// Search 0x10, "vehicle": objects of OBJD type 0x0D or 0x12.
+constexpr std::uint8_t kSearchVehicle = 0x10;
+// Search 0x20, "Owner of Object": ids toward whom the object in temp 0 holds relationship variable
+// 1 of at least temp 1.
+constexpr std::uint8_t kSearchObjectOwner = 0x20;
 // Search 0x0E: the job object of the Sim in the target, whose GUID is person data 0x5A (high) and
 // 0x59 (low).
 constexpr std::uint8_t kSearchJobObject = 0x0E;
@@ -434,8 +468,15 @@ public:
     // and stack object (a message handler). Set by the VM.
     std::function<RunResult(std::uint32_t codeGroup, std::uint16_t tree, std::int16_t stackObject, std::span<const std::int16_t> args)>
         runOnMe;
+    // Runs a tree to the end at once as `who`, on its temps, with the given code and stack object.
+    // Set by the VM.
+    std::function<RunResult(SimObject& who, std::uint32_t codeGroup, std::uint16_t tree, std::int16_t stackObject,
+                            std::span<const std::int16_t> args)>
+        runOnObject;
     // Starts a newly created object (see Vm::startCreated). Set by the VM.
     std::function<void(SimObject& created, const ObjectType& type)> startCreated;
+    // Tells every Sim an object goes away (see Vm::tellSimsObjectGoes). Set by the VM.
+    std::function<void(std::int16_t object)> tellSimsObjectGoes;
     // Where Add/Change the Action String puts its lines and icon while a candidate's check tree runs.
     std::vector<OfferedAction>* offered = nullptr;
     InteractionIcon* candidateIcon = nullptr;
@@ -552,11 +593,16 @@ public:
     std::int16_t& neighborPersonData(std::uint16_t data);
     void write(std::uint8_t owner, std::uint16_t data, Frame& f, std::int16_t value);
     bool expression(const bhav::Instruction& in, Frame& f);
+    void assign32(const bhav::ExpressionOperands& x, Frame& f);
     bool arrayOperation(const bhav::Instruction& in, Frame& f);
 
     // Generic Sims Calls, family, new characters, relationships, motives and wants (vm_sims.cpp).
     bool genericSimsCall(const bhav::Instruction& in);
     bool addToFamily();
+    bool fitsWithFootprint();
+    bool outfitsInformation();
+    std::uint32_t madeCharacterType(const ObjectType& from, std::uint32_t top);
+    std::vector<std::int16_t> wantSimList(const std::string& treeName, std::int16_t sim);
     bool makeNewCharacter(const bhav::Instruction& in, Frame& f);
     static std::int16_t newCharacterAge(int flag);
     bool relationship(const bhav::Instruction& in, Frame& f);
@@ -631,6 +677,8 @@ public:
     bool nextAdjacent(const std::array<std::uint8_t, 16>& o, std::uint8_t targetOwner, std::uint16_t targetData,
                       Frame& f);
     bool nextMultiTilePart(std::uint8_t targetOwner, std::uint16_t targetData, Frame& f);
+    bool nextObjectOwner(std::uint8_t targetOwner, std::uint16_t targetData, Frame& f);
+    bool nextVehicle(std::uint8_t targetOwner, std::uint16_t targetData, Frame& f);
     bool nextOnSameTile(const std::array<std::uint8_t, 16>& o, std::uint8_t targetOwner,
                         std::uint16_t targetData, Frame& f);
 
@@ -651,6 +699,7 @@ public:
     // Animate Sim, Animate Overlay, Animate Stop and Reach/Put (vm_animation.cpp).
     std::optional<std::string> animationEntry(const Frame& f, std::uint8_t list, std::uint16_t entry, bool orMissing = false,
                                               std::uint8_t* category = nullptr);
+    std::string objectAnimationText(std::uint32_t owner, const SimObject* sim, std::uint16_t entry);
     std::optional<std::string> socialAnimation(const Frame& f, const SimObject& sim, std::uint16_t entry);
     std::optional<bool> animateSim(const bhav::Instruction& in, Frame& f);
     std::uint8_t entryCategory(const std::string& name, std::uint8_t category);
@@ -805,6 +854,29 @@ private:
             throw Stop{Outcome::Error, "stack object does not exist", std::to_string(stackObject())};
         }
         return *object;
+    }
+
+    // The stack object's temp [index] (data owner 0x0D). When I am my own stack object these are my
+    // running temps.
+    std::int16_t& stackTemp(std::uint16_t index) {
+        SimObject& object = stackData();
+        auto& temps = &object == &me() ? thread_.temps : object.thread.temps;
+        return slotAt(temps, index, "temp");
+    }
+
+    // The definition data owner 0x33 reads: the master type's for a multi-tile object, else the
+    // stack object's own.
+    const objd::ObjectDefinition& stackMasterDefinition() {
+        const SimObject& object = stackData();
+        if (object.definition.field(objd::field::kMultiTileMasterId) == 0) {
+            return object.definition;
+        }
+        const ObjectType* type = code_.objectType(object.definition.guid());
+        const ObjectType* master = type != nullptr ? code_.multiTileMaster(*type) : nullptr;
+        if (master == nullptr) {
+            throw Stop{Outcome::Error, "multi-tile object without a master", hex(object.definition.guid(), 8)};
+        }
+        return master->definition;
     }
 
     CodeSource& code_;

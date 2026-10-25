@@ -13,12 +13,14 @@ struct Product {
     std::string name;
     int releaseOrder = 0;
     std::vector<std::filesystem::path> objectPackages;
+    std::vector<std::filesystem::path> objectBundles;  // catalog bundles that hold objects
 };
 
 std::vector<Product> findProducts(const std::filesystem::path& installRoot);
 
 // Treats every objects.package as a cumulative snapshot, so a larger one is newer. Snapshots load smallest-first, ties in release
-// order, and stuff packs' own SPObjects.package files load last.
+// order, and stuff packs' own SPObjects.package files load last. Catalog bundles with objects load first, so a resource
+// the object packages also have keeps theirs (which one the game keeps is not known yet).
 std::vector<std::filesystem::path> objectLoadOrder(const std::vector<Product>& products);
 
 // The game's mask of installed expansion and stuff packs (what scripts test with

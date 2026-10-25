@@ -359,15 +359,16 @@ void animateStopEndsOverlaysByKindAndPriority() {
     CHECK(sim.overlays.size() == 2 && sim.overlays[0].stopped && !sim.overlays[1].stopped);
 }
 
-// Animate Object with byte 9 = 2 (the plumbob's Main) keeps the clip playing on the object until
-// Animate Stop gives it the time it played. Other byte 9 values start nothing yet.
+// Animate Object plays its clip once, or temp 1 times with byte 2 flag 0x20, where -1 (the
+// plumbob's Main) keeps it playing until Animate Stop gives it the time it played. A count of 0 or
+// below -1 is an error.
 void animateObjectPlaysUntilStopped() {
-    auto animate = [](std::uint8_t untilStopped) {
+    auto animate = [](std::uint8_t flags) {
         Instruction in;
         in.opcode = 0x0069;
         in.trueTarget = T;
         in.falseTarget = E;
-        const std::uint8_t bytes[] = {0x01, 0x00, 0x20, 0x20, 0x00, 0x00, owner::kMyData, 0x0B, 0x00, untilStopped};
+        const std::uint8_t bytes[] = {0x01, 0x00, flags, 0x20, 0x00, 0x00, owner::kMyData, 0x0B, 0x00, 0x00, 0x10};
         std::copy(std::begin(bytes), std::end(bytes), in.operands.begin());
         return in;
     };
@@ -379,8 +380,8 @@ void animateObjectPlaysUntilStopped() {
     std::copy(std::begin(stopBytes), std::end(stopBytes), stop.operands.begin());
     MemoryCodeSource code;
     code.addStrings(kObjectGroup, 0x86, {"o-spin-pose", "o-spin"});
-    code.add(kObjectGroup, 0x1000, bhav({animate(2)}));
-    code.add(kObjectGroup, 0x1001, bhav({animate(0)}));
+    code.add(kObjectGroup, 0x1000, bhav({animate(0x20)}));
+    code.add(kObjectGroup, 0x1001, bhav({animate(0x00)}));
     code.add(kObjectGroup, 0x1002, bhav({stop}));
     ts2::sim::World world;
     world.setAnimationLengths([](const std::string& name) -> std::optional<float> {
@@ -388,13 +389,64 @@ void animateObjectPlaysUntilStopped() {
     });
     auto& bob = world.create(kObjectGroup, definition("Bob", 0));
     Vm vm(code, {}, &world);
-    CHECK(vm.run(bob, kObjectGroup, 0x1001).outcome == Outcome::True && !bob.animation);
+    CHECK(vm.run(bob, kObjectGroup, 0x1001).outcome == Outcome::True);
+    CHECK(bob.animation && bob.animation->name == "o-spin" && !bob.animation->loops && bob.animation->speed == 1.0f);
+    bob.thread.temps[1] = -1;
     CHECK(vm.run(bob, kObjectGroup, 0x1000).outcome == Outcome::True);
-    CHECK(bob.animation && bob.animation->name == "o-spin" && bob.animation->loops && bob.animation->speed == 1.0f);
+    CHECK(bob.animation && bob.animation->loops);
     world.advanceClock(5000);
     CHECK(bob.animation && !bob.animation->finished(world.clockMs()));
     CHECK(vm.run(bob, kObjectGroup, 0x1002).outcome == Outcome::True);
     CHECK(bob.animation && bob.animation->finished(world.clockMs()) && std::fabs(bob.animation->lengthMs - 5000.0f) < 1.0f);
+    bob.thread.temps[1] = 3;
+    CHECK(vm.run(bob, kObjectGroup, 0x1000).outcome == Outcome::True);
+    CHECK(bob.animation && bob.animation->loops && std::fabs(bob.animation->lengthMs - 3 * 2316.0f) < 1.0f);
+    for (const std::int16_t bad : {std::int16_t{0}, std::int16_t{-2}}) {
+        bob.thread.temps[1] = bad;
+        const RunResult r = vm.run(bob, kObjectGroup, 0x1000);
+        CHECK(r.outcome == Outcome::Error && r.reason == "Invalid number of loops");
+    }
+}
+
+// Animate Object byte 10 flag 0x02 reads the entry from the list for the age of the Sim in temp 5
+// (a dining chair sliding as a child sits), else from the object list, flag 0x20 from the running tree's lists instead of the
+// object's, and flag 0x01 takes the flip from temp 3.
+void animateObjectReadsTheSimsList() {
+    constexpr std::uint32_t kChairCode = 0x7F000123;
+    auto animate = [](std::uint8_t flags) {
+        Instruction in;
+        in.opcode = 0x0069;
+        in.trueTarget = T;
+        in.falseTarget = E;
+        const std::uint8_t bytes[] = {0x00, 0x00, 0x00, 0x20, 0x00, 0x00, owner::kStackObjectId, 0x00, 0x00, 0x00, flags};
+        std::copy(std::begin(bytes), std::end(bytes), in.operands.begin());
+        return in;
+    };
+    MemoryCodeSource code;
+    code.addStrings(kChairCode, 0x86, {"o2a-chair-getIn"});
+    code.addStrings(kChairCode, 0x192, {"o2c-chair-getIn"});
+    code.addStrings(kObjectGroup, 0x86, {"o-tree-list"});
+    code.add(kObjectGroup, 0x1000, bhav({animate(0x13)}));
+    code.add(kObjectGroup, 0x1001, bhav({animate(0x20)}));
+    code.add(kObjectGroup, 0x1002, bhav({animate(0x02)}));
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    auto& chair = world.create(kChairCode, typed(kChairGuid));
+    Vm vm(code, {}, &world);
+    sim.thread.temps[5] = sim.id;
+    sim.thread.temps[3] = 1;
+    sim.thread.stackObjectId = chair.id;
+    sim.personData[0x3A] = 8;
+    CHECK(vm.run(sim, kObjectGroup, 0x1000).outcome == Outcome::True);
+    CHECK(chair.animation && chair.animation->name == "o2c-chair-getIn" && chair.animation->flipped && !chair.animation->loops);
+    sim.personData[0x3A] = 30;
+    CHECK(vm.run(sim, kObjectGroup, 0x1000).outcome == Outcome::True && chair.animation->name == "o2a-chair-getIn");
+    sim.personData[0x3A] = 17;  // no teen list: the object list
+    CHECK(vm.run(sim, kObjectGroup, 0x1000).outcome == Outcome::True && chair.animation->name == "o2a-chair-getIn");
+    CHECK(vm.run(sim, kObjectGroup, 0x1001).outcome == Outcome::True && chair.animation->name == "o-tree-list" && !chair.animation->flipped);
+    sim.thread.temps[5] = chair.id;
+    const RunResult notASim = vm.run(sim, kObjectGroup, 0x1002);
+    CHECK(notASim.outcome == Outcome::Error && notASim.reason == "Object referred to must be a person.");
 }
 
 // Animate Sim's byte 8 flag 0x01 takes the flip from temp 3 instead of byte 2 (the living chair's
@@ -417,6 +469,7 @@ std::vector<Test> vmAnimationTests() {
         {"Animate Sim events reach their tree", animateSimEventsReachTheirTree},
         {"Animate Stop ends overlays by kind and priority", animateStopEndsOverlaysByKindAndPriority},
         {"Animate Sim flips from temp 3", animateSimFlipsFromTemp3},
-        {"Animate Object plays until stopped", animateObjectPlaysUntilStopped},
+        {"Animate Object plays once, a count from temp 1, or until stopped", animateObjectPlaysUntilStopped},
+        {"Animate Object reads the Sim's list", animateObjectReadsTheSimsList},
     };
 }

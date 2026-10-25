@@ -14,7 +14,9 @@ constexpr std::pair<std::uint32_t, std::uint32_t> kTabs[] = {
     {0x70000000, 0xA0000000},  // Chemistry
     {0x80000000, 0xB0000000},  // Hobbies
 };
-constexpr std::uint32_t kPersonalityTab = 0x40000000, kPersonalityPage = 0x10000000, kMemoriesPage = 0x30000000, kChemistryTab = 0x70000000;
+constexpr std::uint32_t kPersonalityTab = 0x40000000, kPersonalityPage = 0x10000000, kInterestsPage = 0x20000000, kMemoriesPage = 0x30000000;
+constexpr std::uint32_t kHobbiesPage = 0xB0000000;
+constexpr std::uint32_t kChemistryTab = 0x70000000, kChemistryPage = 0xA0000000;
 // Life stages (person data 0x3A) without chemistry, and the person data bit that also turns it off.
 constexpr std::int16_t kToddler = 2, kChild = 3;
 constexpr std::size_t kChemistryFlags = 0x54;
@@ -26,11 +28,14 @@ void SimologyPanel::attach(ts2::ui::Screen& screen, int content) {
     screen_ = &screen;
     content_ = content;
     personality_.attach(screen, screen.find(content, kPersonalityPage));
+    interests_.attach(screen, screen.find(content, kInterestsPage));
+    hobbies_.attach(screen, screen.find(content, kHobbiesPage));
+    chemistryPage_.attach(screen, screen.find(content, kChemistryPage));
     memories_.attach(screen, screen.find(content, kMemoriesPage));
     showPage(kPersonalityTab);
 }
 
-void SimologyPanel::show(std::int16_t lifeStage, std::span<const std::int16_t> personData) {
+void SimologyPanel::show(std::int16_t lifeStage, std::span<const std::int16_t> personData, std::span<const std::int16_t> secretLots) {
     if (screen_ == nullptr) {
         return;
     }
@@ -43,13 +48,16 @@ void SimologyPanel::show(std::int16_t lifeStage, std::span<const std::int16_t> p
         showPage(page_ == kChemistryTab && !chemistry ? kPersonalityTab : page_);
     }
     personality_.show(personData);
+    interests_.show(personData);
+    hobbies_.show(personData, secretLots);
+    chemistryPage_.show(personData);
 }
 
 bool SimologyPanel::clicked(int window) {
     if (screen_ == nullptr) {
         return false;
     }
-    if (memories_.clicked(window)) {
+    if (memories_.clicked(window) || interests_.clicked(window)) {
         return true;
     }
     if (screen_->parent(window) != content_) {

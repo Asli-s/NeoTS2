@@ -132,24 +132,6 @@ ts2::render::Vec3 screenRay(const ts2::render::Camera& c, int width, int height,
     return {f[0] + s[0] * nx * tx + u[0] * ny * ty, f[1] + s[1] * nx * tx + u[1] * ny * ty, f[2] + s[2] * nx * tx + u[2] * ny * ty};
 }
 
-// Where a point of the world shows on the screen, in pixels.
-std::array<float, 2> screenPoint(const ts2::render::Camera& c, int width, int height, const ts2::render::Vec3& p) {
-    using ts2::render::Vec3;
-    const float aspect = static_cast<float>(width) / static_cast<float>(height);
-    const float tx = c.fovX > 0 ? std::tan(c.fovX / 2) : std::tan(c.fovY / 2) * aspect;
-    const float ty = tx / aspect;
-    const Vec3 f = ts2::render::normalize(ts2::render::sub(c.target, c.eye));
-    const Vec3 s = ts2::render::normalize(ts2::render::cross(f, {0, 0, 1}));
-    const Vec3 u = ts2::render::cross(s, f);
-    const Vec3 d = ts2::render::sub(p, c.eye);
-    const float depth = ts2::render::dot(d, f);
-    if (depth <= 1e-6f) {
-        return {-1, -1};
-    }
-    const float nx = ts2::render::dot(d, s) / depth / tx, ny = ts2::render::dot(d, u) / depth / ty;
-    return {(nx + 1) / 2 * static_cast<float>(width), (1 - ny) / 2 * static_cast<float>(height)};
-}
-
 // The live-mode cursor for what is under the mouse: an object the selected Sim can use, the ground
 // (floor or terrain), pool water (the game's water check gives the usable cursor), or anything
 // else. Sims are not picked yet, so the person cursor isn't shown.
@@ -281,7 +263,10 @@ private:
     // A box or menu over the neighborhood that takes the mouse and keys: lots can't be clicked and
     // the camera only drifts behind it.
     bool neighborhoodCovered() const { return chooserOpen() || quitBox_.isOpen(); }
-    void openQuitBox();
+    // Whether the lot has something to save: as in the game, once time has run unpaused since the
+    // lot loaded. The game's other reasons are not known yet.
+    bool lotChanged() const { return lotRan_; }
+    void openQuitBox(bool askSave = false);
     void closeQuitBox();
     void closeChooser();
     void lotClicked(float x, float y);
@@ -295,6 +280,9 @@ private:
     void leaveLot();
     app::LotUi::Action lotKey(SDL_Keycode key);
     void lotAction(app::LotUi::Action action);
+    void trackSim(std::int16_t sim);
+    bool centreOnSim(std::int16_t sim);
+    std::optional<ts2::render::Vec3> simRoot(std::int16_t sim) const;
     bool openGroundMenu(float x, float y);
     void toggleFreeCamera();
     void freeCameraMouse(const SDL_Event& e);
@@ -353,6 +341,10 @@ private:
     app::Orbit hoodOrbit_;
     std::optional<ts2::scene::HoodDrift> hoodDrift_;  // the camera's drift while mouse and keys rest
     app::QuitBox quitBox_;  // the game's "Are you sure you want to quit?" box
+    // Whether the lot was paused before the quit box paused it. None when the box didn't pause it
+    // (no lot running when it opened).
+    std::optional<bool> pausedBeforeQuitBox_;
+    bool lotRan_ = false;  // time has run unpaused on this lot
     std::future<LotBuilt> lotBuilding_;
     ts2::scene::Scene lot_;
     std::shared_ptr<const app::RouteModelTable> lotRouteModels_;
@@ -370,6 +362,7 @@ private:
     std::future<void> lotFreeing_;
     ts2::render::Renderer::Prepared lotLeft_;
     ts2::scene::ScenePose lotPose_;
+    std::int16_t trackedSim_ = 0;  // the Sim the camera tracks while orbit_ has a subject
     std::vector<std::uint8_t> lotVisible_;  // the lot's instances shown this frame, for RayTrace
     // The object under the mouse, highlighted while the selected Sim could use it (0: none).
     ts2::scene::Picker lotPicker_;
@@ -737,7 +730,7 @@ void Game::closeChooser() {
 
 // The quit box, with any tile click still waiting for its second click dropped, so no preview
 // opens over the box. The camera takes no input while it is open.
-void Game::openQuitBox() {
+void Game::openQuitBox(bool askSave) {
     clickedTile_.reset();
     clickedLot_ = 0;
     if (inNeighborhood_) {
@@ -746,10 +739,19 @@ void Game::openQuitBox() {
         cursors_.show(app::Cursors::kArrow);
     }
     orbit_.keysOn = false;
-    quitBox_.open(screen_, data_, width_, height_);
+    // On a lot the game pauses while the box is open.
+    if (inLot_ && lotLife_ && !quitBox_.isOpen()) {
+        pausedBeforeQuitBox_ = lotLife_->paused();
+        lotLife_->setPaused(true);
+    }
+    quitBox_.open(screen_, data_, width_, height_, askSave);
 }
 
 void Game::closeQuitBox() {
+    if (inLot_ && lotLife_ && quitBox_.isOpen() && pausedBeforeQuitBox_) {
+        lotLife_->setPaused(*pausedBeforeQuitBox_);
+    }
+    pausedBeforeQuitBox_.reset();
     quitBox_.close(screen_);
     orbit_.keysOn = !chooserOpen();
 }
@@ -822,7 +824,7 @@ void Game::showLotTag() {
         hoodUi_.showTag(0, 0, 0);
         return;
     }
-    const auto at = screenPoint(orbit_.camera(), width_, height_, {(where->x0 + where->x1) / 2, (where->y0 + where->y1) / 2, where->z - 2});
+    const auto at = app::screenPoint(orbit_.camera(), width_, height_, {(where->x0 + where->x1) / 2, (where->y0 + where->y1) / 2, where->z - 2});
     hoodUi_.showTag(lot, static_cast<int>(at[0]), static_cast<int>(at[1]));
 }
 
@@ -836,7 +838,7 @@ void Game::showLotCard(std::uint32_t lot) {
     if (where == hood_.stats.lotFootprints.end()) {
         return;
     }
-    const auto at = screenPoint(orbit_.camera(), width_, height_, {(where->x0 + where->x1) / 2, (where->y0 + where->y1) / 2, where->z});
+    const auto at = app::screenPoint(orbit_.camera(), width_, height_, {(where->x0 + where->x1) / 2, (where->y0 + where->y1) / 2, where->z});
     hoodUi_.showCard(lot, static_cast<int>(at[0]));
 }
 
@@ -1005,6 +1007,10 @@ void Game::lotAction(app::LotUi::Action action) {
         leaveLot();
         return;
     }
+    if (action == Action::Quit) {
+        openQuitBox(lotChanged());
+        return;
+    }
     if (action == Action::FloorUp || action == Action::FloorDown) {
         lotView_.changeLevel(action == Action::FloorUp ? 1 : -1, orbit_);
         return;
@@ -1031,9 +1037,72 @@ void Game::lotAction(app::LotUi::Action action) {
         lotLife_->setPaused(true);
         break;
     case Action::RewardsClosed: lotLife_->setPaused(pausedBeforeRewards_); break;
-    case Action::SelectSim: lotLife_->select(lotUi_.clickedSim()); break;
+    case Action::SelectSim:
+        // Clicking the selected Sim's thumbnail again centres the camera on the Sim and ends any
+        // tracking.
+        if (lotUi_.clickedSim() == lotLife_->selected()) {
+            orbit_.subject = nullptr;
+            centreOnSim(lotUi_.clickedSim());
+        } else {
+            lotLife_->select(lotUi_.clickedSim());
+        }
+        break;
+    case Action::TrackSim: trackSim(lotUi_.clickedSim()); break;
     default: break;
     }
+}
+
+// A right click on a Sim's thumbnail: the camera centres on the Sim and tracks it, or stops
+// tracking it when it already does. A Sim that isn't on the lot is not tracked.
+void Game::trackSim(std::int16_t sim) {
+    if (orbit_.subject && trackedSim_ == sim) {
+        orbit_.subject = nullptr;
+        return;
+    }
+    if (!centreOnSim(sim)) {
+        return;
+    }
+    trackedSim_ = sim;
+    orbit_.subject = [this, sim] { return simRoot(sim); };
+}
+
+// Centres the camera on a Sim on the lot, ending any tracking, and returns false for a Sim that
+// isn't on it. The view first changes storey to the Sim's. A Sim indoors gets its storey either way.
+// A Sim outside (room 0) gets it only when the view is below it.
+bool Game::centreOnSim(std::int16_t sim) {
+    const auto root = simRoot(sim);
+    if (!root) {
+        return false;
+    }
+    if (const auto* object = lotLife_ ? lotLife_->simulation().world().find(sim) : nullptr; object && object->level > 0) {
+        const int storey = lotView_.ground + object->level - 1;
+        // Positions are kept in 1/65536 tiles.
+        const float x = static_cast<float>(object->x) / 65536, y = static_cast<float>(object->y) / 65536;
+        const bool indoors = lotLife_->simulation().world().rooms().roomAtPosition(object->level - 1, x, y) > 0;
+        if (indoors || lotView_.view.level < storey) {
+            lotView_.changeLevel(storey - lotView_.view.level, orbit_);
+        }
+    }
+    orbit_.centreOn(*root);
+    return true;
+}
+
+// Where a Sim's root_trans joint is in the world as last posed, none for a Sim not on the lot.
+std::optional<ts2::render::Vec3> Game::simRoot(std::int16_t sim) const {
+    for (const auto& [actor, nodes] : lotPose_.nodes) {
+        if (actor >= lot_.actors.size() || lot_.actors[actor].object != static_cast<std::uint32_t>(sim) || !lot_.actors[actor].rig) {
+            continue;
+        }
+        const int root = lot_.actors[actor].rig->find("root_trans");
+        if (root < 0 || static_cast<std::size_t>(root) >= nodes.size()) {
+            return std::nullopt;
+        }
+        const auto place = lot_.actors[actor].place * nodes[static_cast<std::size_t>(root)];
+        float at[3] = {0, 0, 0};
+        place.apply(at, true);
+        return ts2::render::Vec3{at[0], at[1], at[2]};
+    }
+    return std::nullopt;
 }
 
 // A click on the lot where no object is highlighted: on empty floor or ground (not pool water,
@@ -1125,8 +1194,11 @@ void Game::cameraDrag(const SDL_Event& e, float x, float y) {
         hoverAt_ = {x, y};  // the live cursor again, for what is under the mouse now
     } else if (e.type == SDL_EVENT_MOUSE_MOTION && dragFrom_) {
         const float dx = x - (*dragFrom_)[0], dy = y - (*dragFrom_)[1];
-        orbit_.scrollBy(dx * 0.25f, dy * 0.25f, width_, height_);
-        if (std::max(std::abs(dx), std::abs(dy)) > 8) {
+        // Every move scrolls (which ends any tracking), but within 8 pixels of the press point the
+        // scroll speed is zero.
+        const bool dragging = std::max(std::abs(dx), std::abs(dy)) > 8;
+        orbit_.scrollBy(dragging ? dx * 0.25f : 0.0f, dragging ? dy * 0.25f : 0.0f, width_, height_);
+        if (dragging) {
             cursors_.showDragArrow(-std::atan2(dy, dx));
         } else {
             cursors_.show(inLot_ ? liveCursor_ : hoodCursor_);
@@ -1239,6 +1311,13 @@ void Game::freeCameraLook() {
 // ground, then the panels and the camera.
 void Game::lotMouse(const SDL_Event& e, float x, float y) {
     const int ix = static_cast<int>(x), iy = static_cast<int>(y);
+    if (quitBox_.isOpen()) {
+        cursors_.show(app::Cursors::kArrow);
+        if (const auto clicked = screen_.mouse(ix, iy, down_, static_cast<double>(SDL_GetTicksNS()) / 1e9)) {
+            windowClicked(*clicked);
+        }
+        return;
+    }
     if (pieMenu_.isOpen()) {
         using Mouse = app::PieMenuUi::Mouse;
         const bool leftButton = e.type != SDL_EVENT_MOUSE_MOTION && e.button.button == SDL_BUTTON_LEFT;
@@ -1275,7 +1354,7 @@ void Game::lotMouse(const SDL_Event& e, float x, float y) {
     }
     if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_RIGHT && lotLife_) {
         if (const auto button = screen_.buttonAt(ix, iy)) {
-            lotUi_.rightClicked(*button, *lotLife_);
+            lotAction(lotUi_.rightClicked(*button, *lotLife_));
         }
     }
     if (!screen_.over(ix, iy)) {
@@ -1307,6 +1386,7 @@ void Game::updateLot(Uint64 now) {
         app::orbitStep(orbit_, dt, width_, height_, [&] { cameraHeight_.apply(orbit_, lot_, lotVisible_, lotPlace_, lotView_.view.level); });
         lotView_.view.facing = orbit_.facing();
     }
+    lotUi_.showTracked(orbit_.subject ? trackedSim_ : 0);
     const auto shown = ts2::scene::visibleInstances(lot_, lotView_.view);
     lotVisible_ = shown;
     renderer_.show(shown);
@@ -1334,6 +1414,7 @@ void Game::updateLot(Uint64 now) {
         lotLife_->markOnScreen(simsInView(lot_, lotCamera(), width_, height_));
         lotLife_->setCamera(lotCamera().eye);
         lotLife_->update(std::min(100.0, static_cast<double>(now - lastFrame_) / 1e6), lot_);
+        lotRan_ = lotRan_ || !lotLife_->paused();
         if (lotDaylight_) {
             lotDaylight_->update(static_cast<double>(now - lastFrame_) / 1e9, lotLife_->simulation().globals(), *assets_.get(), lot_, renderer_,
                                  *lotLife_);
@@ -1352,6 +1433,15 @@ void Game::startLotLife() {
         stepTaken_ = true;
         lotLife_ = std::make_unique<app::LotLife>(std::move(*sim), *assets_.get(), lotRouteModels_);
         lotLife_->traceIn(lot_, lotPose_, lotVisible_);
+        // A lot opens paused, as in the game, after the game's 10 ticks of loading. Sims start
+        // their main loop in them (Sims without turn-ons get theirs there). The ticks need the
+        // scene traced in, for the scripts' ray tests and the Sims' sizes.
+        constexpr int kLoadTicks = 10;
+        for (int i = 0; i < kLoadTicks; ++i) {
+            lotLife_->simulation().tick();
+        }
+        lotLife_->setPaused(!options_.unpaused);
+        lotRan_ = false;
         ts2::diag::step(std::format("the lot's simulation is ready after {:.1f} s", secondsSince(lotLoadStarted_)));
     }
 }
@@ -1499,15 +1589,17 @@ void Game::handleEvent(const SDL_Event& e) {
     if (inNeighborhood_ && hoodDrift_ && input) {
         hoodDrift_->interrupt();
     }
-    const bool freeToggle = e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && inLot_ &&
+    const bool freeToggle = e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && inLot_ && !quitBox_.isOpen() &&
                             (e.key.scancode == SDL_SCANCODE_TAB || e.key.scancode == SDL_SCANCODE_Y || (freeCam_ && e.key.scancode == SDL_SCANCODE_ESCAPE));
     if (freeToggle) {
         toggleFreeCamera();
     } else if (freeCam_ && (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP) &&
                (e.key.repeat || freeCam_->key(e.key.scancode, e.type == SDL_EVENT_KEY_DOWN))) {
         // The free camera's own keys.
-    } else if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE && quitBox_.isOpen()) {
-        closeQuitBox();  // Escape answers No
+    } else if (e.type == SDL_EVENT_KEY_DOWN && quitBox_.isOpen()) {
+        if (e.key.key == SDLK_ESCAPE) {
+            closeQuitBox();  // Escape answers No, or Cancel on the save question
+        }
     } else if (e.type == SDL_EVENT_QUIT) {
         ts2::diag::step("window closed");
         running_ = false;
@@ -1548,7 +1640,9 @@ void Game::mouseEvent(const SDL_Event& e) {
         return;
     }
     if (inLot_) {
-        cameraDrag(e, x, y);
+        if (!quitBox_.isOpen()) {
+            cameraDrag(e, x, y);
+        }
         lotMouse(e, x, y);
         return;
     }
@@ -1561,9 +1655,11 @@ void Game::mouseEvent(const SDL_Event& e) {
 }
 
 void Game::windowClicked(int window) {
-    if (const auto yes = quitBox_.clicked(screen_, window)) {
+    if (const auto answer = quitBox_.clicked(screen_, window)) {
+        // On the save question No quits too, and Yes saves first in the game. Saving isn't done yet.
+        const bool quit = *answer == app::QuitBox::Answer::Yes || (*answer == app::QuitBox::Answer::No && quitBox_.asksSave());
         closeQuitBox();
-        if (*yes) {
+        if (quit) {
             ts2::diag::step("quitting (quit box)");
             running_ = false;
         }
@@ -1718,7 +1814,7 @@ void Game::clickPanels() {
             lotUi_.mouseMoved(cx, cy);
         } else if (right != 0) {
             if (const auto button = screen_.buttonAt(cx, cy); button && lotLife_) {
-                lotUi_.rightClicked(*button, *lotLife_);
+                lotAction(lotUi_.rightClicked(*button, *lotLife_));
             }
         } else {
             screen_.mouse(cx, cy, true, 0);

@@ -325,6 +325,8 @@ int main(int argc, char** argv) {
                 ++i;
             } else if (arg == "--run" && i + 1 < argc) {
                 menu.runSeconds = std::stod(argv[++i]);
+            } else if (arg == "--unpaused") {
+                menu.unpaused = true;
             } else if (arg == "--timings") {
                 menu.timings = true;
             } else if (arg == "--size" && i + 2 < argc) {

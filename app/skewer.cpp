@@ -21,9 +21,11 @@ constexpr std::uint32_t kPortraitGroup = 0x00001000, kPortrait = 0x00000001, kSh
 // colour fills.
 constexpr std::uint32_t kImages = 0x499DB772, kMoodGradient = 0xE9100002, kBackgroundPicture = 0xA9300115;
 constexpr std::uint32_t kFrame = 0x00002000;
-// Shown by the script but hidden in the game for a Sim at home: the platinum mood background, the
-// second frame and the small marker.
-constexpr std::uint32_t kHiddenAtHome[] = {0x00009000, 0x00003000, 0x00004000};
+// Shown by the script but hidden in the game for a Sim at home: the platinum mood background and
+// the second frame.
+constexpr std::uint32_t kHiddenAtHome[] = {0x00009000, 0x00003000};
+// The yellow star marking the Sim the camera tracks.
+constexpr std::uint32_t kTrackedMark = 0x00004000;
 // The connector's top sits this far above the tile's bottom.
 constexpr int kSimConnectorOverlap = 9;
 
@@ -72,6 +74,7 @@ void Skewer::setHousehold(std::vector<Member> members) {
         for (const std::uint32_t id : kHiddenAtHome) {
             s.setVisible(s.find(thumbnail, id), false);
         }
+        s.setVisible(s.find(thumbnail, kTrackedMark), m.sim == tracked_);
         const int group = s.find(thumbnail, kPortraitGroup);
         // Over the mood colour: the portrait's soft shadow, then the portrait (the script's own
         // shadow picture would cover the mood colour), both cut to the thumbnail's rounded shape.
@@ -90,6 +93,16 @@ void Skewer::select(std::int16_t sim) {
     selected_ = sim;
     for (const Thumbnail& t : thumbnails_) {
         screen_->setChecked(screen_->find(t.window, kFrame), t.sim == sim);
+    }
+}
+
+void Skewer::setTracked(std::int16_t sim) {
+    if (sim == tracked_ || screen_ == nullptr) {
+        return;
+    }
+    tracked_ = sim;
+    for (const Thumbnail& t : thumbnails_) {
+        screen_->setVisible(screen_->find(t.window, kTrackedMark), t.sim == sim);
     }
 }
 

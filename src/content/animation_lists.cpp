@@ -25,6 +25,29 @@ std::uint8_t ageAnimationList(std::uint8_t list, std::int16_t age) {
     return age <= 50 ? animation_list::kAdult : animation_list::kElder;
 }
 
+std::uint16_t objectAnimationList(std::int16_t species, std::int16_t age) {
+    constexpr std::uint16_t kHumanElder = 0x190, kHumanTeen = 0x191, kHumanChild = 0x192, kHumanToddler = 0x193, kHumanBaby = 0x194;
+    constexpr std::int16_t kOldestYoung = 18, kOldestAdult = 50;
+    switch (species) {
+    case 0:
+        if (age > kOldestAdult) {
+            return kHumanElder;
+        }
+        if (age > kOldestYoung) {
+            return animation_list::kObject;
+        }
+        return age > 15 ? kHumanTeen : age > 2 ? kHumanChild : age == 2 ? kHumanToddler : kHumanBaby;
+    case 1:
+        return age > kOldestAdult ? 0x19A : age > kOldestYoung ? 0x195 : 0x197;
+    case 2:
+        return age > kOldestAdult ? 0x19B : age > kOldestYoung ? 0x199 : 0x197;
+    case 3:
+        return age > kOldestAdult ? 0x19C : age > kOldestYoung ? 0x196 : 0x198;
+    default:
+        return animation_list::kObject;
+    }
+}
+
 char socialAgeLetter(std::int16_t age) {
     if (age > 50) {
         return 'e';

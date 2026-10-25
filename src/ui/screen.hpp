@@ -76,6 +76,8 @@ public:
     void fitToText(int window);
     // How wide and high a text is in a font (by name or GUID), in pixels.
     std::array<int, 2> textSize(const std::string& font, const std::string& text);
+    // A text broken into lines no wider than `width` in a font, as wrapped windows break theirs.
+    std::vector<std::string> wrapText(const std::string& font, const std::string& text, int width);
     int x(int window) const;
     int y(int window) const;
     // A window's caption (its text).
@@ -126,6 +128,8 @@ private:
         // is everything inside it.
         bool keyed = false;
         bool toggle = false;             // a toggle button (style=toggle): pressed frame only while checked
+        bool autosize = false;           // a button sized to its caption (autosize)
+        bool checkBox = false;           // a check box or radio button (style=checkbox, radiobtn or radiocheck)
         std::string text, font;
         HAlign hAlign = HAlign::Left;  // the text's place in the window (align)
         VAlign vAlign = VAlign::Top;
@@ -160,6 +164,7 @@ private:
     void release(int texture);
     void layoutText(int window);
     std::vector<std::string> wrapLines(const Window& w, const FontStyle& style) const;
+    std::vector<std::string> wrapAt(const std::string& text, const FontStyle& style, int room) const;
     void emitLines(const Window& w, float x0, float y0, std::vector<Quad>& out) const;
     // Draws a window's tooltip text into an image, if it has a tip and none is drawn yet.
     void drawTip(Window& window);

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "formats/tga.hpp"
+#include "meter_bar.hpp"
 #include "ui/screen.hpp"
 
 #include <array>
@@ -20,20 +20,10 @@ public:
     void show(std::span<const std::int16_t> personData);
 
 private:
-    struct Bar {
-        int fill = -1;    // the bar's fill window
-        int width = 0, height = 0;
-        bool vertical = false;
-        int pixels = -1;  // how much of it is shown
-        ts2::tga::Pixels picture;
-    };
-
-    void showBar(Bar& bar, int value, int steps);
-
     ts2::ui::Screen* screen_ = nullptr;
     int page_ = -1;
-    std::array<Bar, 5> traits_, born_;
-    Bar fitness_;
+    std::array<MeterBar, 5> traits_, born_;
+    MeterBar fitness_;
     int zodiac_ = -1;  // the sign shown
 };
 

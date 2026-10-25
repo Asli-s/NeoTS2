@@ -36,6 +36,11 @@ constexpr std::uint32_t kElderParts[] = {0xC1, 0xC2, 0xC3, 0xC4, 0xC5};
 
 // The skills page and the talent badges page, and the buttons that pick them.
 constexpr std::uint32_t kSkillsPage = 0xA6, kBadgesPage = 0xAE, kSkillsButton = 0x506E0940, kBadgesButton = 0x506E0941;
+// The badges page's texts for a Sim too young for badges and for one with none, and its list's
+// page buttons. The list shows three badges a page.
+constexpr std::uint32_t kTooYoungText = 0xF0AEAB42, kNoBadgesText = 0xF0AEAB43;
+constexpr std::uint32_t kBadgesPrevious = 0x1004, kBadgesNext = 0x1005;
+constexpr int kBadgesPerPage = 3;
 
 // The backgrounds: expanded (wants open) and minimized, each with its skills tab.
 constexpr std::uint32_t kExpanded[] = {0x8CB609AB, 0xD06E0E91, 0x306E0EF1};
@@ -140,8 +145,27 @@ bool JobPanel::clicked(int window) {
     return false;
 }
 
+void JobPanel::showBadges(std::span<const std::int16_t> personData, int badges) {
+    if (screen_ == nullptr) {
+        return;
+    }
+    auto& s = *screen_;
+    const int page = s.find(content_, kBadgesPage);
+    // Babies and toddlers get the text saying toddlers can't learn badges and no list.
+    const bool tooYoung = at(personData, kLifeStage) < kChild;
+    badges = tooYoung ? 0 : badges;
+    if (badgesShown_ == std::pair{tooYoung, badges}) {
+        return;
+    }
+    badgesShown_ = {tooYoung, badges};
+    s.setVisible(s.find(page, kTooYoungText), tooYoung);
+    s.setVisible(s.find(page, kNoBadgesText), !tooYoung && badges == 0);
+    // The list stays on its first page, so Previous is hidden and Next shows while there are more.
+    s.setVisible(s.find(page, kBadgesPrevious), false);
+    s.setVisible(s.find(page, kBadgesNext), badges > kBadgesPerPage);
+}
+
 void JobPanel::showSkillsPage(bool skills) {
-    // The badges page's contents are not filled yet.
     screen_->setVisible(screen_->find(content_, kSkillsPage), skills);
     screen_->setVisible(screen_->find(content_, kBadgesPage), !skills);
     screen_->setChecked(screen_->find(content_, kSkillsButton), skills);

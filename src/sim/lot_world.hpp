@@ -34,8 +34,14 @@ struct LotWorldReport {
 // (each frame with its own stack object).
 LotWorldReport buildWorld(const content::Lot& lot, CodeSource& code, World& world);
 
-// The neighborhood's neighbors and relationships, ready to share between worlds.
-std::shared_ptr<const SavedNeighborhood> savedNeighborhood(const content::Neighborhood& hood,
+// The lot's platform regions as World::platformRegion reads them, or none when the lot has no
+// region grid. The lookup keeps its own copy of the grid.
+World::PlatformRegion platformRegions(const content::Lot& lot);
+
+// The neighborhood's neighbors and relationships, ready to share between worlds. As the game loads
+// a neighborhood it drops every neighbor whose Sim isn't a person (OBJD type 2) or a family-tree-only
+// Sim (type 0x11), its type unknown included, with its relationships both ways and its family ties.
+std::shared_ptr<const SavedNeighborhood> savedNeighborhood(const content::Neighborhood& hood, CodeSource& code,
                                                           std::map<std::int32_t, nhoodid::NeighborhoodId> all = {});
 
 } // namespace ts2::sim

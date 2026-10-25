@@ -1,5 +1,6 @@
 #pragma once
 
+#include "formats/cobject.hpp"
 #include "formats/scenegraph.hpp"
 #include "scene/assets.hpp"
 #include "scene/scene.hpp"
@@ -8,6 +9,7 @@
 #include <cstddef>
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -63,12 +65,22 @@ public:
     int posedModel(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides, const Pose& pose,
                    const std::string& poseName);
 
+    // The same with its joints placed as a lot saved them: each saved joint's place relative to its
+    // parent replaces the model's own, and the shapes under it move along (a dining chair pushed under
+    // a table). Skinned vertices stay as model() leaves them. `boneKey` gets the name bone() knows the
+    // result by, which is the model's own name when no joint moved.
+    int savedPoseModel(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides,
+                       std::span<const cobject::SavedJoint> joints, std::string& boneKey);
+
     // The same left in its bind pose, skinned to be posed when drawn (see Primitive and Mesh::skin).
     // Groups without skinning data are placed as model() places them.
     int skinnedModel(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides);
 
     // Where a named node of a model sits in it, once the model has been built.
     const Transform* bone(const std::string& model, const std::string& node) const;
+    // The joint (lower case) that every shape of a built model hangs under, unskinned, so that the
+    // whole drawn model moves with it (a dining chair's seat joint). Null for other models.
+    const std::string* followJoint(const std::string& model) const;
 
     // A material by name, -1 when there is no such material.
     int material(const std::string& name);
@@ -118,8 +130,10 @@ public:
     Assets& assets() { return assets_; }
 
 private:
+    // `places`: joints' places relative to their parents that replace the model's own (see
+    // savedPoseModel), its bones then known as `boneKey`.
     int buildModel(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides, const Pose* pose,
-                   bool skinned = false);
+                   bool skinned = false, const Pose* places = nullptr, const std::string& boneKey = {});
     int image(const std::string& texture);
     // A bump map's normal map (see Assets::normalMap), -1 when it is missing.
     int normalMap(const std::string& texture);
@@ -140,6 +154,13 @@ private:
     bool drawShadows_ = false;
     std::map<std::string, int> models_, materials_, images_, envCubes_;
     std::map<std::string, std::map<std::string, Transform>> bones_;
+    std::map<std::string, std::string> followJoints_;  // see followJoint, by the name bone() takes
+    // Each model's joints at rest relative to their parents, by lower-case model and joint name, read once.
+    struct RestJoint {
+        std::array<float, 3> translation{};
+        std::array<float, 4> rotation{0, 0, 0, 1};
+    };
+    std::map<std::string, std::map<std::string, RestJoint>> restJoints_;
     std::map<std::string, std::string> baseTextures_;  // game materials' base textures, by material key
 };
 

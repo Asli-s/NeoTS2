@@ -65,6 +65,7 @@
 #include "scene/portrait.hpp"
 #include "formats/cobject.hpp"
 #include "formats/fencepostlayer.hpp"
+#include "formats/neighbor_remap.hpp"
 #include "content/lot.hpp"
 #include "scene/floor_light.hpp"
 #include "scene/light_grid.hpp"
@@ -205,6 +206,10 @@ public:
     const ts2::sim::ObjectType* objectType(std::uint32_t guid) override {
         const auto it = objectTypes_.find(guid);
         return it != objectTypes_.end() ? &it->second : nullptr;
+    }
+    const ts2::sim::ObjectType* addMadeObjectType(ts2::sim::ObjectType type) override {
+        const auto [it, added] = objectTypes_.try_emplace(type.definition.guid(), std::move(type));
+        return added ? &it->second : nullptr;
     }
     void setMultiTileMaster(std::uint32_t partGuid, std::uint32_t masterGuid) { masters_[partGuid] = masterGuid; }
     const ts2::sim::ObjectType* multiTileMaster(const ts2::sim::ObjectType& part) override {

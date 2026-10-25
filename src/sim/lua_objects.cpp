@@ -270,6 +270,56 @@ int newCachedNeighbor(lua_State* L) {
     return pushInstance(L, "CachedNeighbor", id);
 }
 
+// CachedFamily.new(familyId): a family of the neighborhood (its FAMI instance). Anything else is
+// error 0x9A.
+int newCachedFamily(lua_State* L) {
+    ScriptCall& c = call(L);
+    const std::int32_t id = argInt(L, 1);
+    if (c.world == nullptr || id < 0 || !c.world->hasFamily(static_cast<std::uint32_t>(id))) {
+        return gameError(L, kErrorMissingFamily);
+    }
+    return pushInstance(L, "CachedFamily", id);
+}
+
+namespace {
+
+std::optional<World::FamilyLotIds> selfFamilyLots(lua_State* L) {
+    const auto* self = selfInstance(L);
+    const ScriptCall& c = call(L);
+    if (self == nullptr || c.world == nullptr || self->id < 0) {
+        return std::nullopt;
+    }
+    return c.world->familyLotIds(static_cast<std::uint32_t>(self->id));
+}
+
+} // namespace
+
+// CachedFamily:getId(), getLotId(), getCurrentLotId() and getVacationLotId(): the family's id and the
+// three lot ids its FAMI saves (home lot, current lot, vacation lot), 0 for none.
+int cachedFamilyId(lua_State* L) {
+    const auto* self = selfInstance(L);
+    lua_pushnumber(L, self != nullptr ? self->id : 0);
+    return 1;
+}
+
+int cachedFamilyLotId(lua_State* L) {
+    const auto lots = selfFamilyLots(L);
+    lua_pushnumber(L, lots ? lots->home : 0);
+    return 1;
+}
+
+int cachedFamilyCurrentLotId(lua_State* L) {
+    const auto lots = selfFamilyLots(L);
+    lua_pushnumber(L, lots ? lots->current : 0);
+    return 1;
+}
+
+int cachedFamilyVacationLotId(lua_State* L) {
+    const auto lots = selfFamilyLots(L);
+    lua_pushnumber(L, lots ? lots->vacation : 0);
+    return 1;
+}
+
 // CachedPerson.new(objectId): a Sim on the lot. Anything else is error 0x1C.
 int newCachedPerson(lua_State* L) {
     const std::int16_t id = argShort(L, 1);
@@ -287,15 +337,40 @@ int neighborhoodIsRoommate(lua_State* L) {
     return 1;
 }
 
-// Neighborhood:isApartmentDoor(objectId): false unless this lot is an apartment building or one of
-// its apartments (types 8 and 9). The door test on those lots is not ported.
-int neighborhoodIsApartmentDoor(lua_State* L) {
-    const ScriptCall& c = call(L);
+// Neighborhood:isApartmentResident(objectId): on an apartment building or one of its apartments
+// (lot types 8 and 9), whether the object is a Sim whose person data 0x20 ("Person Type") is 8.
+// False on other lots.
+int neighborhoodIsApartmentResident(lua_State* L) {
+    ScriptCall& c = call(L);
+    const std::int16_t id = argShort(L, 2);
     const std::uint8_t type = c.world ? c.world->lotType() : 0;
-    if (type == kApartmentBuildingLot || type == kApartmentLot) {
-        return stopUnsupported(L, "Neighborhood:isApartmentDoor on an apartment lot");
+    if (type != kApartmentBuildingLot && type != kApartmentLot) {
+        lua_pushboolean(L, false);
+        return 1;
     }
-    lua_pushboolean(L, false);
+    constexpr std::int16_t kApartmentResidentType = 8;
+    const SimObject* sim = personOnLot(c, id);
+    lua_pushboolean(L, sim != nullptr && sim->personData[0x20] == kApartmentResidentType);
+    return 1;
+}
+
+// Neighborhood:isApartmentDoor(objectId): on an apartment building or one of its apartments (lot
+// types 8 and 9), whether the object is a door (object data 0x3B, its category, is 0x1A) whose OBJD
+// field 0x4B is 0xCC. Objects queued for delete still count. False on other lots.
+int neighborhoodIsApartmentDoor(lua_State* L) {
+    ScriptCall& c = call(L);
+    const std::int16_t id = argShort(L, 2);
+    const std::uint8_t type = c.world ? c.world->lotType() : 0;
+    constexpr std::size_t kCategoryField = 0x3B, kApartmentDoorField = 0x4B;
+    constexpr std::int16_t kDoorCategory = 0x1A;
+    constexpr std::uint16_t kApartmentDoorValue = 0xCC;
+    bool door = false;
+    if (type == kApartmentBuildingLot || type == kApartmentLot) {
+        const SimObject* o = c.world->findIncludingRemoved(id);
+        door = o != nullptr && o->data[kCategoryField] == kDoorCategory &&
+               o->definition.field(kApartmentDoorField) == kApartmentDoorValue;
+    }
+    lua_pushboolean(L, door);
     return 1;
 }
 

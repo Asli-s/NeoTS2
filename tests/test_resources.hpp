@@ -271,6 +271,62 @@ inline std::vector<std::uint8_t> placedResourceNode(const std::string& name, con
     return b.out;
 }
 
+// A resource node (CRES) whose tree is a root, a joint named `jointName` at rest at the model's
+// origin, and under it a shape reference node that draws the shape.
+inline std::vector<std::uint8_t> jointedResourceNode(const std::string& name, const std::string& shapeName,
+                                                     const std::string& jointName) {
+    constexpr std::uint32_t kResourceNodeBlock = 0xE519C933, kTransformBlock = 0x65246462, kShapeRefBlock = 0x65245517;
+    Bytes b;
+    container(b, {keyOf(kShpe, shapeName)}, {kResourceNodeBlock, kTransformBlock, kShapeRefBlock});
+    auto header = [&](const std::string& className, std::uint32_t id, std::uint32_t version) {
+        b.text(className);
+        b.u32(id);
+        b.u32(version);
+    };
+    auto compositionTree = [&](const std::string& nodeName, const std::vector<std::uint32_t>& children) {
+        header("cCompositionTreeNode", 0, 11);
+        header("cObjectGraphNode", 0, 4);
+        b.u32(0);  // extensions
+        b.text(nodeName);
+        b.u32(static_cast<std::uint32_t>(children.size()));
+        for (const auto c : children) {
+            b.u8(1);
+            b.u8(0);
+            b.u32(c);
+        }
+    };
+    auto atRest = [&] {
+        for (const float v : {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f}) {
+            b.f32(v);
+        }
+    };
+    header("cResourceNode", kResourceNodeBlock, 7);
+    b.u8(1);
+    sgResource(b, name);
+    compositionTree(name, {1});
+    header("cTransformNode", kTransformBlock, 7);
+    compositionTree(jointName, {2});
+    atRest();
+    b.u32(0);  // joint 0
+    header("cShapeRefNode", kShapeRefBlock, 21);
+    header("cRenderableNode", 0, 5);
+    header("cBoundedNode", 0, 5);
+    header("cTransformNode", 0, 7);
+    compositionTree("shape", {});
+    atRest();
+    b.u32(0xFFFFFFFF);  // no joint
+    b.u16(1);
+    b.u32(1);  // render groups
+    b.text("Practical");
+    b.u32(0);
+    b.u8(0);
+    b.u32(1);  // shapes
+    b.u8(1);
+    b.u8(0);
+    b.u32(0);  // the container's link 0
+    return b.out;
+}
+
 struct Resource {
     ts2::scenegraph::Link key;
     std::vector<std::uint8_t> data;

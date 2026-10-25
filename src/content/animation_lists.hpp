@@ -20,6 +20,11 @@ constexpr std::uint8_t kAdult = 0x81, kChild = 0x82, kSocial = 0x83, kObject = 0
 // list, any other list as it is.
 std::uint8_t ageAnimationList(std::uint8_t list, std::int16_t age);
 
+// The list an object's animation is read from when it plays with a Sim (Animate Object byte 10 flag
+// 0x02): the object list 0x86 for an adult human, else one list per age and species. `species` is
+// person data 0xBA, `age` as above. Other species read 0x86 too.
+std::uint16_t objectAnimationList(std::int16_t species, std::int16_t age);
+
 // Social animations (list 0x83) are named for who plays them with whom: "<actor>2<partner>-" before
 // the entry, each a person's age letter (e elder, a adult, t teen, c child, p toddler, b baby), as in
 // "a2t-" for an adult with a teen.

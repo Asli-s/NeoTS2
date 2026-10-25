@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 
@@ -217,6 +218,74 @@ int SceneBuilder::posedModel(const std::string& name, const std::vector<sg::Mate
         return it->second;
     }
     return models_[key] = buildModel(name, overrides, &pose);
+}
+
+int SceneBuilder::savedPoseModel(const std::string& name, const std::vector<sg::MaterialOverride>& overrides,
+                                 std::span<const cobject::SavedJoint> joints, std::string& boneKey) {
+    boneKey = name;
+    if (joints.empty()) {
+        return model(name, overrides);
+    }
+    auto [known, added] = restJoints_.try_emplace(lower(name));
+    if (added) {
+        if (const auto cres = assets_.byName(kCres, name + "_cres")) {
+            try {
+                for (const auto& n : sg::parseResourceNode(*cres).nodes) {
+                    if (n.kind == sg::SceneNode::Kind::Transform) {
+                        known->second.try_emplace(lower(n.name), RestJoint{n.translation, n.rotation});
+                    }
+                }
+            } catch (const std::exception&) {
+                // model() reports the broken model.
+            }
+        }
+    }
+    // Only joints that moved count, so that objects saved at rest share the model's own mesh.
+    constexpr float kSame = 1e-4f;
+    auto near = [&](float a, float b) { return std::fabs(a - b) <= kSame; };
+    Pose places;
+    for (const auto& j : joints) {
+        const std::string low = lower(j.name);
+        const auto rest = known->second.find(low);
+        if (rest == known->second.end() || !std::ranges::all_of(j.translation, [](float v) { return std::isfinite(v); }) ||
+            !std::ranges::all_of(j.rotation, [](float v) { return std::isfinite(v); })) {
+            continue;
+        }
+        bool same = true;
+        for (std::size_t i = 0; i < 3; ++i) {
+            same = same && near(j.translation[i], rest->second.translation[i]);
+        }
+        // q and -q are the same turn.
+        bool sameTurn = true, oppositeTurn = true;
+        for (std::size_t i = 0; i < 4; ++i) {
+            sameTurn = sameTurn && near(j.rotation[i], rest->second.rotation[i]);
+            oppositeTurn = oppositeTurn && near(j.rotation[i], -rest->second.rotation[i]);
+        }
+        if (!same || !(sameTurn || oppositeTurn)) {
+            places.insert_or_assign(low, Transform::of(j.translation, j.rotation));
+        }
+    }
+    if (places.empty()) {
+        return model(name, overrides);
+    }
+    std::string key = lower(name) + "|joints";
+    for (const auto& [joint, place] : places) {
+        key += "|" + joint;
+        for (const float v : place.m) {
+            char text[32];
+            const auto end = std::to_chars(text, text + sizeof text, v).ptr;
+            key += ",";
+            key.append(text, end);
+        }
+    }
+    boneKey = key;
+    for (const auto& o : overrides) {
+        key += "|" + lower(o.group) + "=" + lower(o.material);
+    }
+    if (const auto it = models_.find(key); it != models_.end()) {
+        return it->second;
+    }
+    return models_[key] = buildModel(name, overrides, nullptr, false, &places, boneKey);
 }
 
 int SceneBuilder::skinnedModel(const std::string& name, const std::vector<sg::MaterialOverride>& overrides) {
@@ -914,7 +983,7 @@ bool skinData(const sg::Mesh& mesh, const sg::ElementLink& link, const sg::Group
 } // namespace
 
 int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::MaterialOverride>& overrides, const Pose* pose,
-                             bool skinned) {
+                             bool skinned, const Pose* places, const std::string& boneKey) {
     const auto cres = assets_.byName(kCres, name + "_cres");
     std::vector<std::pair<sg::Shape, Transform>> placements;
     sg::ResourceNode tree;
@@ -952,14 +1021,25 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
     }
     std::vector<Transform> world(tree.nodes.size());
     std::vector<bool> seen(tree.nodes.size(), false);
-    auto walk = [&](auto&& self, std::uint32_t index, const Transform& parent, int depth) -> void {
+    // The nearest named joint above each node that draws shapes.
+    std::set<std::string> shapeJoints;
+    auto walk = [&](auto&& self, std::uint32_t index, const Transform& parent, const std::string& under, int depth) -> void {
         if (index >= tree.nodes.size() || seen[index] || depth > 64) {
             return;
         }
         seen[index] = true;
         const auto& node = tree.nodes[index];
-        world[index] = parent * Transform::of(node.translation, node.rotation);
+        const Transform rest = Transform::of(node.translation, node.rotation);
+        const Transform* placed = nullptr;
+        if (places != nullptr && node.kind == sg::SceneNode::Kind::Transform) {
+            const auto found = places->find(lower(node.name));
+            placed = found != places->end() ? &found->second : nullptr;
+        }
+        world[index] = parent * (placed != nullptr ? *placed : rest);
         if (node.kind == sg::SceneNode::Kind::ShapeRef) {
+            if (!node.shapeLinks.empty()) {
+                shapeJoints.insert(under);
+            }
             for (const auto l : node.shapeLinks) {
                 if (l < tree.container.links.size() && tree.container.links[l].type == kShpe) {
                     if (const auto data = assets_.byKey(tree.container.links[l])) {
@@ -972,12 +1052,13 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
                 }
             }
         }
+        const std::string next = node.kind == sg::SceneNode::Kind::Transform && !node.name.empty() ? lower(node.name) : under;
         for (const auto c : node.children) {
-            self(self, c, world[index], depth + 1);
+            self(self, c, world[index], next, depth + 1);
         }
     };
     if (!tree.nodes.empty()) {
-        walk(walk, 0, Transform{}, 0);
+        walk(walk, 0, Transform{}, {}, 0);
         // Nodes the root didn't reach: start from those no node lists as a child.
         std::vector<bool> isChild(tree.nodes.size(), false);
         for (const auto& n : tree.nodes) {
@@ -989,10 +1070,10 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
         }
         for (std::uint32_t i = 0; i < tree.nodes.size(); ++i) {
             if (!seen[i] && !isChild[i]) {
-                walk(walk, i, Transform{}, 0);
+                walk(walk, i, Transform{}, {}, 0);
             }
         }
-        auto& bones = bones_[lower(name)];
+        auto& bones = bones_[boneKey.empty() ? lower(name) : boneKey];
         for (std::uint32_t i = 0; i < tree.nodes.size(); ++i) {
             if (seen[i] && !tree.nodes[i].name.empty()) {
                 bones.try_emplace(lower(tree.nodes[i].name), world[i]);
@@ -1020,6 +1101,7 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
     }
     Mesh mesh;
     mesh.name = name;
+    bool skinnedGroups = false;
     for (const auto& [shape, xf] : placements) {
         // With object detail on High the game draws level of detail 0, or the next one a shape has
         // (LODConfig.txt, Graphics Rules "lodOverride 0").
@@ -1129,6 +1211,7 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
                     vertexColors(*data, link, vertices, p);
                 }
                 p.origin = {xf.m[3], xf.m[7], xf.m[11]};
+                skinnedGroups = skinnedGroups || !group.bones.empty();
                 mesh.primitives.push_back(std::move(p));
             }
         }
@@ -1136,8 +1219,16 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
     if (mesh.primitives.empty()) {
         return -1;
     }
+    if (!skinnedGroups && shapeJoints.size() == 1 && !shapeJoints.begin()->empty()) {
+        followJoints_.try_emplace(boneKey.empty() ? lower(name) : boneKey, *shapeJoints.begin());
+    }
     scene_.meshes.push_back(std::move(mesh));
     return static_cast<int>(scene_.meshes.size() - 1);
+}
+
+const std::string* SceneBuilder::followJoint(const std::string& model) const {
+    const auto it = followJoints_.find(lower(model));
+    return it != followJoints_.end() ? &it->second : nullptr;
 }
 
 } // namespace ts2::scene

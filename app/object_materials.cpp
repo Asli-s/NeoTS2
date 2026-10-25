@@ -124,6 +124,22 @@ int ObjectMaterials::envCube(int builderCube, ts2::scene::Scene& scene) {
     return envCubes_[builderCube] = static_cast<int>(scene.envCubes.size() - 1);
 }
 
+namespace {
+
+// Time into an object's clip of `length` ms at `nowMs`: looping clips wrap, the others hold their
+// last pose, and so does a looping clip whose counted plays have ended. A stopped one holds the
+// pose it was stopped at.
+float clipMs(const ts2::sim::PlayingAnimation& playing, double length, double nowMs) {
+    double ms = std::max(0.0, std::min<double>(nowMs - playing.startMs, playing.lengthMs) * playing.speed);
+    if (length > 0) {
+        const double wrapped = std::fmod(ms, length);
+        ms = !playing.loops ? std::min(ms, length) : ms > 0 && wrapped == 0 ? length : wrapped;
+    }
+    return static_cast<float>(ms);
+}
+
+} // namespace
+
 std::optional<ts2::scene::Transform> ObjectMaterials::pose(const ts2::sim::SimObject& object, double nowMs,
                                                            ts2::scene::AnimationLibrary& animations) {
     if (!object.animation || object.isPerson()) {
@@ -169,15 +185,28 @@ std::optional<ts2::scene::Transform> ObjectMaterials::pose(const ts2::sim::SimOb
     if (!bound || !bound->animation) {
         return std::nullopt;
     }
-    // Time into the clip: looping clips wrap, the others hold their last pose. A stopped one holds
-    // the pose it was stopped at.
-    const double length = bound->animation->duration;
-    double ms = std::max(0.0, std::min<double>(nowMs - playing.startMs, playing.lengthMs) * playing.speed);
-    if (length > 0) {
-        ms = playing.loops ? std::fmod(ms, length) : std::min(ms, length);
-    }
-    ts2::scene::poseRig(*model->rig, bound.get(), static_cast<float>(ms), poseScratch_);
+    ts2::scene::poseRig(*model->rig, bound.get(), clipMs(playing, bound->animation->duration, nowMs), poseScratch_);
     return poseScratch_[static_cast<std::size_t>(model->joint)] * model->rest.rigidInverse();
+}
+
+std::optional<ts2::scene::Transform> ObjectMaterials::jointPose(const ts2::sim::SimObject& object, double nowMs,
+                                                                ts2::scene::AnimationLibrary& animations, const std::string& model,
+                                                                const std::string& joint) {
+    if (!object.animation || object.isPerson()) {
+        return std::nullopt;
+    }
+    const auto& playing = *object.animation;
+    auto [it, first] = rigs_.try_emplace(ts2::scene::lower(model));
+    if (first) {
+        it->second = std::make_shared<ts2::scene::Rig>(ts2::scene::loadRig(assets_, model));
+    }
+    const int node = it->second->find(joint);
+    const auto bound = node >= 0 ? animations.bound(it->second, playing.name, playing.flipped) : nullptr;
+    if (!bound || !bound->animation) {
+        return std::nullopt;
+    }
+    ts2::scene::poseRig(*it->second, bound.get(), clipMs(playing, bound->animation->duration, nowMs), poseScratch_);
+    return poseScratch_[static_cast<std::size_t>(node)];
 }
 
 } // namespace app

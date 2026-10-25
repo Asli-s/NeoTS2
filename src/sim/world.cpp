@@ -164,6 +164,8 @@ void World::purge() {
     }
     std::erase_if(objects_, [this](const auto& entry) {
         if (entry.second->removed) {
+            messageSubscriptions_.dropObject(entry.first);
+            std::erase(buildBuyBlockers_, entry.first);
             byId_[static_cast<std::size_t>(entry.first)] = nullptr;
             return true;
         }

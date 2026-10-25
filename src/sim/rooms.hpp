@@ -71,4 +71,9 @@ private:
     std::map<std::int32_t, RoomInfo> rooms_;
 };
 
+// The room on one side of the wall from `from` to `to` (wall graph points): the room of the quarter
+// tile beside the wall on the left, walking from `from` to `to` (the wall's left room when the room
+// map agrees with the wall graph). Swap the points for the other side. -1 off the room map.
+std::int32_t roomOnSideOfWall(const RoomMap& rooms, const wallgraph::Point& from, const wallgraph::Point& to);
+
 } // namespace ts2::sim

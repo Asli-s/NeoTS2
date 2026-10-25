@@ -34,7 +34,9 @@ struct ScriptCall {
     std::int16_t* globals = nullptr;  // the simulator globals
     std::size_t globalCount = 0;
 
-    bool returnValue = false;  // set by SetScriptReturnValue
+    // Set by SetScriptReturnValue. A script that never calls it is true (PercentCalculate, which
+    // every "Percentage" tree runs, is one).
+    bool returnValue = true;
     std::uint64_t instructions = 0;  // Lua instructions run so far, counted to stop endless loops
     // How the script ended when it didn't simply return.
     std::int16_t errorCode = 0;   // the game's error number for a bad index, 0 for none

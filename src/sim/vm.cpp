@@ -1,5 +1,6 @@
 #include "sim/vm.hpp"
 #include "sim/vm_execution.hpp"
+#include "sim/forget_object.hpp"
 
 namespace ts2::sim {
 
@@ -11,7 +12,8 @@ namespace vm_detail {
 //   3: one of the trees of the object type whose GUID is in temps 0 (low) and 1 (high), run
 //      with the stack object (or me, without one) as its stack object
 // The name comes from the global table (flag 0x01), the code owner's semi-global one (0x02) or its
-// own. The tree is looked up in the object's group, then its semi-global group, then the global one.
+// own. The tree is looked up in the object's group, then its semi-global group (unless flag 0x08),
+// then the global one (unless flag 0x04).
 // Mode 1 runs the tree at once on the stack object's own stack (see runOnStack).
 std::optional<Execution::NamedCall> Execution::namedTree(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
@@ -50,7 +52,13 @@ std::optional<Execution::NamedCall> Execution::namedTree(const bhav::Instruction
 
     NamedCall call;
     call.stackObject = frameStackObject;
-    for (const std::uint32_t group : {treeGroup, code_.semiGlobalGroup(treeGroup), kGlobalGroup}) {
+    const std::array<std::uint32_t, 3> groups{treeGroup, code_.semiGlobalGroup(treeGroup), kGlobalGroup};
+    const std::array<bool, 3> searched{true, (flags & 0x08) == 0, (flags & 0x04) == 0};
+    for (std::size_t i = 0; i < groups.size(); ++i) {
+        const std::uint32_t group = groups[i];
+        if (!searched[i]) {
+            continue;
+        }
         if (const auto instance = code_.behaviorByName(group, *name)) {
             call.group = group;
             call.instance = *instance;
@@ -300,7 +308,7 @@ void Vm::startCreated(SimObject& created, const ObjectType& type) {
     auto note = [&](const RunResult& r) {
         if (r.outcome != Outcome::True && r.outcome != Outcome::False && r.outcome != Outcome::Sleeping &&
             !created.failedRun) {
-            created.failedRun = r.reason;
+            created.failedRun = r.detail.empty() ? r.reason : r.reason + " " + r.detail;
         }
     };
 
@@ -325,6 +333,28 @@ void Vm::startCreated(SimObject& created, const ObjectType& type) {
     }
     if (created.thread.isRunning()) {
         note(resume(created));
+    }
+}
+
+void Vm::tellSimsObjectGoes(std::int16_t object) {
+    if (world_ == nullptr) {
+        return;
+    }
+    // Sims queued for delete still hear it, as the game keeps them in its list of Sims until then.
+    const auto sims = world_->idsIncludingRemoved([&](const SimObject& o) { return o.isPerson() && o.id != object; });
+    for (const std::int16_t id : sims) {
+        SimObject* sim = world_->findIncludingRemoved(id);
+        if (sim == nullptr || !forgetObject(*sim, object)) {
+            continue;
+        }
+        const bool busy = std::ranges::any_of(running_, [&](const auto& run) { return run.first == &sim->thread || run.second == sim; });
+        if (busy) {
+            throw Stop{Outcome::Unsupported, "a Sim reset while its own code runs", std::to_string(id)};
+        }
+        if (!resetSim) {
+            throw Stop{Outcome::Unsupported, "a Sim reset needs the lot simulation", std::to_string(id)};
+        }
+        resetSim(*sim);
     }
 }
 
@@ -514,6 +544,7 @@ bool Vm::RunState::followBranch(bool branch) {
         }
         const bool returned = target == bhav::kTargetTrue || frames_.back().callerContinuesTrue;
         const bool callerReruns = frames_.back().callerReruns;
+        const bool callerIdlesAgain = frames_.back().callerIdlesAgain;
         if (frames_.back().runsInteraction && me_ != nullptr) {
             if (vm_.world_ != nullptr) {
                 vm_.world_->releaseUse(frames_.back());
@@ -536,6 +567,9 @@ bool Vm::RunState::followBranch(bool branch) {
         if (frames_.empty()) {
             result_.outcome = returned ? Outcome::True : Outcome::False;
             return true;
+        }
+        if (callerIdlesAgain) {
+            return false;
         }
         if (callerReruns) {
             if (me_ != nullptr && me_->turning) {
@@ -735,6 +769,7 @@ Vm::RunState::Next Vm::RunState::idleForInput(const bhav::Instruction& in, Frame
         return waitTick();
     }
     if (idle.kind == Execution::IdleResult::Kind::True) {
+        f.idleStarted = false;
         return branch(true);
     }
     const QueuedInteraction& started = idle.interaction;
@@ -758,7 +793,12 @@ Vm::RunState::Next Vm::RunState::idleForInput(const bhav::Instruction& in, Frame
         frames_.back().runsInteraction = true;
         vm_.world_->countUse(frames_.back());
     }
-    frames_.back().callerContinuesTrue = true;
+    if (idle.sub) {
+        frames_.back().callerContinuesTrue = true;
+    } else {
+        frames_[frames_.size() - 2].idleStarted = true;
+        frames_.back().callerIdlesAgain = true;
+    }
     return Next::Continue;
 }
 
@@ -834,10 +874,15 @@ RunResult Vm::execute(ThreadState& thread, std::uint32_t objectGroup, SimObject*
     if (activeRuns_++ == 0) {
         stepsUsed_ = 0;
     }
+    running_.emplace_back(&thread, me);
     struct EndRun {
         int& runs;
-        ~EndRun() { --runs; }
-    } endRun{activeRuns_};
+        std::vector<std::pair<const ThreadState*, const SimObject*>>& running;
+        ~EndRun() {
+            --runs;
+            running.pop_back();
+        }
+    } endRun{activeRuns_, running_};
     Execution ex(code_, globals, thread, world_, me, rng);
     ex.offered = offered_;
     ex.candidateIcon = candidateIcon_;
@@ -849,8 +894,11 @@ RunResult Vm::execute(ThreadState& thread, std::uint32_t objectGroup, SimObject*
     ex.testedLine = testedLine_ ? &*testedLine_ : nullptr;
     ex.runCheck = std::bind_front(&Vm::checkFromTree, this);
     ex.startCreated = std::bind_front(&Vm::startCreated, this);
+    ex.tellSimsObjectGoes = std::bind_front(&Vm::tellSimsObjectGoes, this);
     ex.runOnMe = std::bind_front(&Vm::runOnTop, this, std::ref(thread), me);
     ex.runNow = std::bind_front(&Vm::runNow, this);
+    ex.runOnObject = [this](SimObject& who, std::uint32_t codeGroup, std::uint16_t tree, std::int16_t stackObject,
+                            std::span<const std::int16_t> args) { return runOnTop(who.thread, &who, codeGroup, tree, stackObject, args); };
 
     std::vector<Frame>& frames = thread.frames;
     if (frames.capacity() == 0) {

@@ -16,6 +16,23 @@ namespace {
 // shows them: idle, hovered and pressed). Disabled takes the one left, a bare outline.
 constexpr int kButtonFrame[4] = {1, 3, 2, 0};  // normal, hover, pressed, disabled
 
+// Part of an image (u0..u1 of an iw x ih image) drawn over a window in thirds: corners kept, edges
+// and middle stretched. The corners are always drawn whole, overlapping in a window narrower or
+// shorter than two of them, and the edges and middle between them only where there is room.
+void pushThirds(std::vector<Quad>& out, int texture, float x0, float y0, float x1, float y1, float u0, float u1, float iw, float ih) {
+    const float cw = std::floor((u1 - u0) * iw / 3), ch = std::floor(ih / 3);
+    const float xs[4] = {x0, x0 + cw, x1 - cw, x1}, ys[4] = {y0, y0 + ch, y1 - ch, y1};
+    const float us[4] = {u0, u0 + cw / iw, u1 - cw / iw, u1}, vs[4] = {0, ch / ih, 1 - ch / ih, 1};
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            if ((r == 1 && ys[1] >= ys[2]) || (c == 1 && xs[1] >= xs[2])) {
+                continue;
+            }
+            out.push_back({xs[c], ys[r], xs[c + 1], ys[r + 1], us[c], vs[r], us[c + 1], vs[r + 1], texture});
+        }
+    }
+}
+
 std::array<float, 4> color(const std::vector<std::int64_t>& rgb) {
     if (rgb.size() < 3) {
         return {1, 1, 1, 1};
@@ -97,7 +114,10 @@ int Screen::add(const ui::Window& source, int parent) {
         w.imageRect = {static_cast<int>(rect[0]), static_cast<int>(rect[1]), static_cast<int>(rect[2]), static_cast<int>(rect[3])};
     }
     w.edge = source.flag("edgeimage");
-    w.toggle = source.text("style") == "toggle";
+    const auto style = source.text("style");
+    w.toggle = style == "toggle";
+    w.checkBox = style == "checkbox" || style == "radiobtn" || style == "radiocheck";
+    w.autosize = source.flag("autosize");
     const auto res = source.list("captionres");
     if (res.size() == 2 && res[0] != 0) {
         w.text = data_.text(static_cast<std::uint32_t>(res[0]), static_cast<std::uint32_t>(res[1]));
@@ -242,8 +262,12 @@ std::vector<std::string> Screen::wrapLines(const Window& w, const FontStyle& sty
             room = std::min(room, child.x - 2 * w.gutters[0]);
         }
     }
+    return wrapAt(w.text, style, room);
+}
+
+std::vector<std::string> Screen::wrapAt(const std::string& text, const FontStyle& style, int room) const {
     std::vector<std::string> lines;
-    std::istringstream paragraphs(w.text);
+    std::istringstream paragraphs(text);
     std::string paragraph;
     while (std::getline(paragraphs, paragraph)) {
         std::istringstream words(paragraph);
@@ -505,6 +529,10 @@ std::array<int, 2> Screen::textSize(const std::string& font, const std::string& 
     return {fonts_.width(style, text), fonts_.lineHeight(style)};
 }
 
+std::vector<std::string> Screen::wrapText(const std::string& font, const std::string& text, int width) {
+    return wrapAt(text, fonts_.style(font), width);
+}
+
 void Screen::setTextColor(int window, const std::array<float, 4>& color) {
     if (window >= 0) {
         windows_[static_cast<std::size_t>(window)].textColor = color;
@@ -626,8 +654,14 @@ void Screen::drawTip(Window& b) {
             if (row >= image.height) {
                 break;
             }
-            std::copy_n(p.rgba.begin() + static_cast<std::ptrdiff_t>(y * p.width * 4), p.width * 4,
-                        image.rgba.begin() + static_cast<std::ptrdiff_t>(row * image.width * 4));
+            // A line's image reaches into the line above it, so it must not clear that line's descenders.
+            for (std::uint32_t x = 0; x < p.width; ++x) {
+                const auto from = p.rgba.begin() + static_cast<std::ptrdiff_t>((y * p.width + x) * 4);
+                const auto to = image.rgba.begin() + static_cast<std::ptrdiff_t>((row * image.width + x) * 4);
+                if (from[3] > to[3]) {
+                    std::copy_n(from, 4, to);
+                }
+            }
         }
     }
     // A drawn line is 2 pixels wider than the text the game measures.
@@ -735,17 +769,18 @@ void Screen::emit(int index, std::vector<Quad>& out) const {
                 look = ButtonState::Pressed;
             }
             const int frame = kButtonFrame[static_cast<int>(look)];
-            out.push_back({x0, y0, x1, y1, static_cast<float>(frame) / 4, 0, static_cast<float>(frame + 1) / 4, 1, w.image});
-        } else if (w.edge) {
-            // Corners kept, edges and middle stretched: the image in thirds.
-            const float cw = std::floor(iw / 3), ch = std::floor(ih / 3);
-            const float xs[4] = {x0, x0 + cw, x1 - cw, x1}, ys[4] = {y0, y0 + ch, y1 - ch, y1};
-            const float us[4] = {0, cw / iw, 1 - cw / iw, 1}, vs[4] = {0, ch / ih, 1 - ch / ih, 1};
-            for (int r = 0; r < 3; ++r) {
-                for (int c = 0; c < 3; ++c) {
-                    out.push_back({xs[c], ys[r], xs[c + 1], ys[r + 1], us[c], vs[r], us[c + 1], vs[r + 1], w.image});
-                }
+            const float u0 = static_cast<float>(frame) / 4, u1 = static_cast<float>(frame + 1) / 4;
+            // A button wider or narrower than its picture's frame keeps the frame's corners: the
+            // frame in thirds, edges and middle stretched. Not an autosize button without a caption,
+            // nor a check box or radio button.
+            const float fw = iw / 4;
+            if ((!w.autosize || w.showCaption) && !w.checkBox && static_cast<float>(w.w) != fw) {
+                pushThirds(out, w.image, x0, y0, x1, y1, u0, u1, iw, ih);
+            } else {
+                out.push_back({x0, y0, x1, y1, u0, 0, u1, 1, w.image});
             }
+        } else if (w.edge) {
+            pushThirds(out, w.image, x0, y0, x1, y1, 0, 1, iw, ih);
         } else if (w.imageRect[2] > w.imageRect[0]) {
             // Part of the image (one frame of the plumbob's animation strip), drawn at the window's size
             // from the image's top left: not known yet.

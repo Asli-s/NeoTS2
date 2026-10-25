@@ -71,6 +71,9 @@ void BuildScripts::addWallStyles(std::string_view text) {
         } else if (key == "verticalSpan") {
             style->belowFloor = lower(value) == "floortofloorbasedceiling";
             style->toRoof = lower(value) == "floortoroof";
+            style->floorToFloor = lower(value) == "floortofloor";
+        } else if (key == "stageWall") {
+            style->floorToFloor = false;
         } else if (key == "mayCutAway") {
             style->cutAway = lower(value) != "false";
         } else if (key == "blocksLight") {

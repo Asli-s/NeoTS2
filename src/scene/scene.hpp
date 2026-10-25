@@ -333,6 +333,11 @@ struct PlacedObject {
     std::size_t instance = 0;
     Transform lotFrame;
     std::vector<std::optional<Transform>> slots;
+    // The joint its whole drawn model moves with when it plays a clip, empty for none, the model and
+    // where that joint sits in the model as drawn.
+    std::string followJoint;
+    std::string followModel;
+    Transform followRest;
 };
 
 // How a lot's objects are lit, as the game's shaders get it: an ambient colour plus directional

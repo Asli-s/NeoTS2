@@ -181,6 +181,37 @@ void shapesSitWhereTheirNodePutsThem() {
     std::filesystem::remove_all(root);
 }
 
+// A lot saves an object's joints as it posed them (a dining chair's seat slid under a table): the
+// model is drawn with them, and its bones are known under the posed name. Joints saved at rest
+// share the model's own mesh.
+void savedJointsMoveTheModel() {
+    auto resources = testres::squareModel("square");
+    resources[0].data = testres::jointedResourceNode("square_cres", "square_shpe", "Slot_Seat");
+    const auto root = testres::gameFolder("neots2-builder-saved-pose-test", resources);
+    {
+        ts2::scene::Assets assets(root);
+        ts2::scene::SceneBuilder builder(assets);
+        const int rest = builder.model("square", {});
+        std::string boneKey;
+        CHECK(builder.savedPoseModel("square", {}, std::vector<ts2::cobject::SavedJoint>{{"slot_seat", {0, 0, 0}}}, boneKey) == rest);
+        CHECK(boneKey == "square");
+        const std::vector<ts2::cobject::SavedJoint> pushed{{"slot_seat", {0, 0.5f, 0}}, {"elsewhere", {9, 9, 9}}};
+        const int posed = builder.savedPoseModel("square", {}, pushed, boneKey);
+        CHECK(posed >= 0 && posed != rest && boneKey != "square");
+        if (posed >= 0 && rest >= 0) {
+            const auto& a = builder.scene().meshes[static_cast<std::size_t>(rest)].primitives.front().positions;
+            const auto& b = builder.scene().meshes[static_cast<std::size_t>(posed)].primitives.front().positions;
+            CHECK(a.size() == b.size() && b[1] == a[1] + 0.5f && b[0] == a[0] && b[2] == a[2]);
+        }
+        const auto* seat = builder.bone(boneKey, "slot_seat");
+        const auto* restSeat = builder.bone("square", "slot_seat");
+        CHECK(seat != nullptr && seat->m[7] == 0.5f && restSeat != nullptr && restSeat->m[7] == 0);
+        std::string again;
+        CHECK(builder.savedPoseModel("square", {}, pushed, again) == posed && again == boneKey);  // shared
+    }
+    std::filesystem::remove_all(root);
+}
+
 // A model whose material is missing is still built, without a material. One whose mesh is missing
 // has nothing to draw.
 void modelsWithMissingPartsAreHandled() {
@@ -260,6 +291,7 @@ std::vector<Test> assetTests() {
         {"sims wear the last hair, top, bottom and body", simsWearTheLastHairTopBottomAndBody},
         {"models are built from their resources", modelsAreBuiltFromTheirResources},
         {"models with missing parts are handled", modelsWithMissingPartsAreHandled},
+        {"saved joints move the model", savedJointsMoveTheModel},
         {"shapes sit where their node puts them", shapesSitWhereTheirNodePutsThem},
         {"env cube reflection turns on as the game's", envCubeReflectionTurnsOnAsTheGames},
         {"specular turns on as the game's", specularTurnsOnAsTheGames},

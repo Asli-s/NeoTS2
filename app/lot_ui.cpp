@@ -56,6 +56,13 @@ constexpr std::int16_t kPlantSim = 0x100;
 // which aspiration's button shows.
 constexpr std::size_t kAge = 0x3A, kYoungAdult = 0xAF;
 constexpr std::uint32_t kAspirationToken = 0x53D08989;
+// The talent badges' tokens. A badge counts once its token's value 0 reaches bronze (333). The game
+// reads the value unsigned, so a negative one counts as gold.
+constexpr std::uint32_t kBadgeTokens[] = {0x505FDC28, 0x705FDC8F, 0x905FDBB5, 0x505FDBC6, 0xB05FDC1B, 0x105FDC52,
+                                          0xD05FDB91, 0x1215A8C1, 0x12297157, 0xF3D9B8DA, 0xD3DB2A27};
+constexpr std::int16_t kBronzeBadge = 333;
+// The token whose values list the hobbies (by person data index) whose Secret Lot the Sim has found.
+constexpr std::uint32_t kSecretLotToken = 0x53F9DF4E;
 // The sizes of the rewards panel's pictures: inventory and aspiration rewards, career rewards.
 constexpr std::uint32_t kSmallRewardPicture = 60, kLargeRewardWidth = 80, kLargeRewardHeight = 72;
 // The career icon on career rewards (window 0xA006).
@@ -66,9 +73,9 @@ constexpr std::size_t kRewardKind = 0x28;
 constexpr std::uint16_t kAspirationReward = 0x400, kCareerReward = 0x800;
 constexpr std::size_t kRewardPoints = 0xA1, kLifetimeLevels = 0xD9, kLifetimeLevelsSpent = 0xDA;
 constexpr std::uint32_t kFreeTime = 0x2000;
-constexpr std::uint32_t kPanelPortrait = 0x00000001, kPanelShadow = 0x00000002, kPanelBadge = 0x4BDEFFAA;
+constexpr std::uint32_t kPanelPortrait = 0x00000001, kPanelShadow = 0x00000002, kPanelStar = 0x4BDEFFAA;
 // The options menu's windows.
-constexpr std::uint32_t kNeighborhood = 0x0000A210, kExitTutorial = 0x0000A211;
+constexpr std::uint32_t kNeighborhood = 0x0000A210, kExitTutorial = 0x0000A211, kQuit = 0x0000A220;
 
 // A window's own child with an id (the puck's skewer thumbnails reuse some of the puck's ids).
 int child(const ts2::ui::Screen& screen, int parent, std::uint32_t id) {
@@ -372,6 +379,9 @@ LotUi::Action LotUi::clicked(int window) {
     if (id == kNeighborhood && optionsShown()) {
         return Action::Neighborhood;
     }
+    if (id == kQuit && optionsShown()) {
+        return Action::Quit;
+    }
     switch (id) {
     case kPause: return Action::Pause;
     case kNormal: return Action::Normal;
@@ -381,10 +391,26 @@ LotUi::Action LotUi::clicked(int window) {
     }
 }
 
-void LotUi::rightClicked(int window, LotLife& life) {
+void LotUi::showTracked(std::int16_t sim) {
+    tracked_ = sim;
+    skewer_.setTracked(sim);
+    // The live panel's portrait has the star too, while its Sim is the one tracked.
+    const bool star = sim != 0 && sim == portraitShown_;
+    if (live_ >= 0 && starShown_ != star) {
+        starShown_ = star;
+        screen_.setVisible(screen_.find(screen_.find(live_, kPortraitHolder), kPanelStar), star);
+    }
+}
+
+LotUi::Action LotUi::rightClicked(int window, LotLife& life) {
     if (const auto want = panel_.wantAt(window)) {
         life.toggleHold(life.selected(), want->index, want->fear);
     }
+    if (const auto sim = skewer_.clicked(window)) {
+        clickedSim_ = *sim;
+        return Action::TrackSim;
+    }
+    return Action::None;
 }
 
 void LotUi::show(const std::string& clock, ts2::sim::Speed speed, bool paused, std::int32_t funds) {
@@ -515,15 +541,19 @@ void LotUi::wantPopupTexts(LotLife& life, const ts2::swaf::Want& w, const ts2::c
     auto tipValue = [&](std::uint32_t label, std::int32_t v) {
         return "\n" + std::string(v > 0 ? "+" : "") + ts2::content::groupedNumber(v) + " " + screen_.data().text(kLiveText, kValues << 16 | label);
     };
+    // Wants saved before version 6 have no aspiration value and those before version 9 no influence.
+    // The game takes them from the want's score and influence.
+    const std::int32_t aspiration = w.tail.size() > 1 ? w.tail[1] : d.score;
+    const std::int32_t influence = w.tail.size() > 2 ? w.tail[2] : d.influence;
     p.tip = name;
     // (Rows 0xB and 8, counted from 0.)
-    if (w.tail.size() > 1 && w.tail[1] != 0) {
-        p.tip += tipValue(0xE, w.tail[1]);
-        name += value(0xC, w.tail[1]);
+    if (aspiration != 0) {
+        p.tip += tipValue(0xE, aspiration);
+        name += value(0xC, aspiration);
     }
-    if (w.tail.size() > 2 && w.tail[2] != 0) {
-        p.tip += tipValue(0xD, w.tail[2]);
-        name += value(0x9, w.tail[2]);
+    if (influence != 0) {
+        p.tip += tipValue(0xD, influence);
+        name += value(0x9, influence);
     }
     p.popupName = name;
     p.description = row(4);
@@ -738,8 +768,9 @@ void LotUi::showLife(LotLife& life) {
         if (it != portraits_.end()) {
             screen_.setImage(screen_.find(holder, kPanelPortrait), it->second);
             screen_.setVisible(screen_.find(holder, kPanelShadow), false);
-            screen_.setVisible(screen_.find(holder, kPanelBadge), false);
         }
+        starShown_.reset();
+        showTracked(tracked_);
     }
     panel_.setAspiration(life.aspiration());
     if (panel_.sub() == LivePanel::Sub::Rewards) {
@@ -756,8 +787,20 @@ void LotUi::showLife(LotLife& life) {
     const auto tip = ts2::content::ageTip(life.lifeStage(sim), (person(kPersonFlags) & kPlantSim) != 0, person(kAgeDuration), person(kAgeDaysLeft),
                                           person(kDaysBeforeElder));
     panel_.setAge(life.lifeStage(sim), age.lived, age.length, tip);
-    panel_.setSimology(life.lifeStage(sim), life.personData(sim));
+    // The Secret Lot token is only read while Simology is open, as it is copied out of the inventory.
+    const auto secretLots = panel_.sub() == LivePanel::Sub::Simology ? life.inventoryValues(sim, kSecretLotToken) : std::vector<std::int16_t>{};
+    panel_.setSimology(life.lifeStage(sim), life.personData(sim), secretLots);
     panel_.setJob(life.personData(sim), life.simulation().globals(), life.simulation().code());
+    if (panel_.sub() == LivePanel::Sub::Job) {
+        int badges = 0;
+        for (const std::uint32_t token : kBadgeTokens) {
+            // The game reads the first token of the badge, value 0 counting as none.
+            const auto values = life.inventoryValues(sim, token);
+            const std::int16_t value = values.empty() ? 0 : values.front();
+            badges += value < 0 || value >= kBronzeBadge;
+        }
+        panel_.setBadges(life.personData(sim), badges);
+    }
     if (panel_.showsMemories()) {
         panel_.setMemories(panelMemories(life, sim));
     }

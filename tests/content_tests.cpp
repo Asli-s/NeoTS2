@@ -22,7 +22,12 @@ void buildScriptsReadPatternsAndWallStyles() {
     b.addPatterns("# comment\r\nwallPattern \"deckredwood\"\r\nmaterial \"wall_deckRedwoodAlpha_base\"\r\nnotInCatalog\r\n", true);
     b.addPatterns("floorPattern \"sidewalk\"\nmaterial \"floor_sidewalk\"\n", false);
     b.addWallStyles("wall 16\ndefaultPattern \"deckRedwood\"\nwallThickness none\nverticalSpan floorToFloorBasedCeiling\n"
-                    "wall 4\nnotRendered\nwall 1\nwallThickness standard\nwall 3\nverticalSpan floorToRoof\n");
+                    "wall 4\nnotRendered\nwall 1\nwallThickness standard\nwall 3\nverticalSpan floorToRoof\n"
+                    "wall 301\nstageWall\nwall 23\nverticalSpan floorToFloor\n");
+    // Room walls (nWorld.GetNumWallSections): drawn and floor to floor. Fences and unknown styles are not.
+    CHECK(b.isRoomWall(1) && b.isRoomWall(23));
+    CHECK(!b.isRoomWall(4) && !b.isRoomWall(16) && !b.isRoomWall(3) && !b.isRoomWall(301));
+    CHECK(!b.isRoomWall(2) && !b.isRoomWall(0x8D0EB171));
     CHECK(b.wallPatterns.at("deckredwood") == "wall_deckRedwoodAlpha_base" && b.floorPatterns.at("sidewalk") == "floor_sidewalk");
     CHECK(!b.wallStyles.at(16).thick && b.wallStyles.at(16).belowFloor && b.wallStyles.at(16).defaultPattern == "deckredwood");
     CHECK(!b.wallStyles.at(4).rendered && b.wallStyles.at(1).thick && !b.wallStyles.at(1).belowFloor);
@@ -65,6 +70,13 @@ void animateSimUsesItsAgesList() {
     CHECK(ageAnimationList(0x81, 0) == 0x91 && ageAnimationList(0x81, 2) == 0x89 && ageAnimationList(0x81, 3) == 0x82 &&
           ageAnimationList(0x81, 15) == 0x82 && ageAnimationList(0x81, 18) == 0x8A && ageAnimationList(0x81, 50) == 0x81 &&
           ageAnimationList(0x81, 51) == 0x8B && ageAnimationList(0x86, 16) == 0x86);
+    using ts2::content::objectAnimationList;
+    CHECK(objectAnimationList(0, 30) == 0x86 && objectAnimationList(0, 51) == 0x190 && objectAnimationList(0, 16) == 0x191 &&
+          objectAnimationList(0, 3) == 0x192 && objectAnimationList(0, 2) == 0x193 && objectAnimationList(0, 1) == 0x194);
+    CHECK(objectAnimationList(1, 30) == 0x195 && objectAnimationList(1, 10) == 0x197 && objectAnimationList(1, 60) == 0x19A &&
+          objectAnimationList(2, 30) == 0x199 && objectAnimationList(2, 10) == 0x197 && objectAnimationList(2, 60) == 0x19B &&
+          objectAnimationList(3, 30) == 0x196 && objectAnimationList(3, 10) == 0x198 && objectAnimationList(3, 60) == 0x19C &&
+          objectAnimationList(4, 30) == 0x86 && objectAnimationList(-1, 30) == 0x86);
     CHECK(ts2::content::animationName("a-x(idle)") == "a-x" && ts2::content::animationName("a-x") == "a-x" &&
           ts2::content::animationName("(idle)").empty());
     CHECK(ts2::content::animationName("a-x ") == "a-x" && ts2::content::animationName(" ").empty());
@@ -280,6 +292,23 @@ void installedPacksAreFound() {
         pack(folder);
     }
     CHECK(codes() == "base ep5 sp9 ");
+
+    // Catalog bundles with objects (the Holiday packs' H05/H06) belong to their product.
+    // globalcatbin and the localized bins are not object sources.
+    auto file = [&](const fs::path& relative) {
+        fs::create_directories((root / relative).parent_path());
+        std::ofstream(root / relative).put('\0');
+    };
+    file("Double Deluxe/Base/TSData/Res/Catalog/Bins/H05.bundle.package");
+    file("Double Deluxe/Base/TSData/Res/Catalog/Bins/globalcatbin.bundle.package");
+    file("Double Deluxe/Base/TSData/Res/Locale/Japanese/Bins/H05.bundle.package");
+    std::vector<std::string> bundles;
+    for (const auto& product : ts2::content::findProducts(root)) {
+        for (const auto& b : product.objectBundles) {
+            bundles.push_back(product.code + " " + b.filename().string());
+        }
+    }
+    CHECK((bundles == std::vector<std::string>{"base H05.bundle.package"}));
     fs::remove_all(root);
 }
 

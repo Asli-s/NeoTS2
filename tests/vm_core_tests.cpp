@@ -365,6 +365,87 @@ void definitionWritesChangeOnlyThatObjectsCopy() {
     CHECK(b.definition.field(0x3B) == 0);
 }
 
+void assign32CopiesTwoWords() {
+    MemoryCodeSource code;
+    code.add(kObjectGroup, 0x1000, bhav({
+        expr(owner::kTemp, 2, op::kAssign32, owner::kStackObjectDefinition, ts2::objd::field::kGuid1, T, E),
+    }));
+    code.add(kObjectGroup, 0x1001, bhav({
+        expr(owner::kTemp, 7, op::kAssign32, owner::kTemp, 0, T, E),
+    }));
+    code.add(kObjectGroup, 0x1002, bhav({
+        expr(owner::kMyData, 0, op::kAssign32, owner::kTemp, 0, T, E),
+    }));
+    ts2::sim::World world;
+    auto& me = world.create(kObjectGroup, definition("Me", 0));
+    auto& fridge = world.create(kObjectGroup, typed(kFridgeGuid));
+    me.thread.stackObjectId = fridge.id;
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(me, 0x1000).outcome == Outcome::True);
+    CHECK(static_cast<std::uint16_t>(me.thread.temps[2]) == (kFridgeGuid & 0xFFFF));
+    CHECK(static_cast<std::uint16_t>(me.thread.temps[3]) == kFridgeGuid >> 16);
+
+    // A side without a second word is an error before anything is written.
+    me.thread.temps[0] = 5;
+    CHECK(vm.run(me, 0x1001).outcome == Outcome::Error);
+    CHECK(me.thread.temps[7] == 0);
+    CHECK(vm.run(me, 0x1002).outcome == Outcome::Unsupported);
+}
+
+void stackObjectTempsAreThatObjectsTemps() {
+    MemoryCodeSource code;
+    code.add(kObjectGroup, 0x1000, bhav({
+        expr(owner::kTemp, 0, op::kAssign, owner::kStackObjectTemp, 3, 1, E),
+        expr(owner::kStackObjectTemp, 5, op::kAssign, owner::kLiteral, 77, 2, E),
+        expr(owner::kStackObjectTemp, 8, op::kAssign, owner::kLiteral, 1, T, E),
+    }));
+    ts2::sim::World world;
+    auto& me = world.create(kObjectGroup, definition("Me", 0));
+    auto& door = world.create(kObjectGroup, definition("Door", 0));
+    door.thread.temps[3] = 12;
+    me.thread.stackObjectId = door.id;
+    Vm vm(code, {}, &world);
+    const RunResult r = vm.run(me, 0x1000);
+    CHECK(r.outcome == Outcome::Error);
+    CHECK(r.reason == "temp index out of range");
+    CHECK(me.thread.temps[0] == 12);
+    CHECK(door.thread.temps[5] == 77);
+    CHECK(me.thread.temps[5] == 0);
+}
+
+void masterDefinitionIsTheMultiTileMastersForParts() {
+    constexpr std::uint32_t kPartGuid = 0x1111, kMasterGuid = 0x2222;
+    auto part = typed(kPartGuid);
+    part.fields[ts2::objd::field::kMultiTileMasterId] = 7;
+    part.fields[ts2::objd::field::kPrice] = 0;
+    auto master = typed(kMasterGuid);
+    master.fields[ts2::objd::field::kMultiTileMasterId] = 7;
+    master.fields[ts2::objd::field::kPrice] = 900;
+    MemoryCodeSource code;
+    code.addObjectType(kObjectGroup, part);
+    code.addObjectType(kObjectGroup, master);
+    code.setMultiTileMaster(kPartGuid, kMasterGuid);
+    code.add(kObjectGroup, 0x1000, bhav({
+        expr(owner::kTemp, 0, op::kAssign, owner::kStackObjectMasterDefinition, ts2::objd::field::kPrice, T, E),
+    }));
+    ts2::sim::World world;
+    auto& me = world.create(kObjectGroup, definition("Me", 0));
+    auto& fridge = world.create(kObjectGroup, definition("Fridge", 600));
+    auto& tile = world.create(kObjectGroup, part);
+    Vm vm(code, {}, &world);
+    me.thread.stackObjectId = fridge.id;
+    CHECK(vm.run(me, 0x1000).outcome == Outcome::True);
+    CHECK(me.thread.temps[0] == 600);
+    me.thread.stackObjectId = tile.id;
+    CHECK(vm.run(me, 0x1000).outcome == Outcome::True);
+    CHECK(me.thread.temps[0] == 900);
+
+    code.setMultiTileMaster(kPartGuid, 0xDEAD);
+    const RunResult missing = vm.run(me, 0x1000);
+    CHECK(missing.outcome == Outcome::Error);
+    CHECK(missing.reason == "multi-tile object without a master");
+}
+
 void scopedArgumentsBeyondCalleeArgCountAreIgnored() {
     MemoryCodeSource code;
     code.add(kObjectGroup, 0x1001, bhav({
@@ -913,6 +994,9 @@ std::vector<Test> vmCoreTests() {
         {"each frame keeps its own stack object", eachFrameKeepsItsOwnStackObject},
         {"missing stack object is an error", missingStackObjectIsAnError},
         {"definition writes change only that object's copy", definitionWritesChangeOnlyThatObjectsCopy},
+        {"master definition is the multi-tile master's for parts", masterDefinitionIsTheMultiTileMastersForParts},
+        {"stack object temps are that object's temps", stackObjectTempsAreThatObjectsTemps},
+        {"Assign 32bit Value copies two words", assign32CopiesTwoWords},
         {"scoped arguments beyond callee arg count are ignored", scopedArgumentsBeyondCalleeArgCountAreIgnored},
         {"call argument form is picked by byte 12 bits", callArgumentFormIsPickedByByte12Bits},
         {"Set Motive Change keeps changes", setMotiveChangeKeepsChanges},

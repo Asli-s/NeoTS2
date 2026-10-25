@@ -135,6 +135,8 @@ public:
     std::vector<InventoryObject> inventoryObjects(std::int16_t sim);
     // Value 0 of the token of `guid` in a Sim's own inventory. Nullopt when it has none.
     std::optional<std::int16_t> inventoryValue(std::int16_t sim, std::uint32_t guid);
+    // All values of the token of `guid` in a Sim's own inventory. Empty when it has none.
+    std::vector<std::int16_t> inventoryValues(std::int16_t sim, std::uint32_t guid);
     // Whether a Sim's own inventory has a counted token of `guid` (a career reward it has earned).
     bool hasCountedToken(std::int16_t sim, std::uint32_t guid);
     // A Sim's aspiration score (person data 0xA0). 0 for a Sim that is gone.
@@ -204,6 +206,8 @@ public:
 
 private:
     void placeObjects(ts2::scene::Scene& scene);
+    void followClips(ts2::scene::Scene& scene);
+    const ts2::scene::Transform& standingPlace(const ts2::scene::PlacedObject& placed, const ts2::scene::Scene& scene) const;
     void addCreatedObjects(ts2::scene::Scene& scene);
     void relight(ts2::scene::Scene& scene, std::size_t index, const ts2::scene::Transform& inLot, int storey);
     ts2::scene::Assets& assets_;
@@ -241,6 +245,8 @@ private:
         bool operator==(const ObjectPlace&) const = default;
     };
     std::map<std::uint32_t, ObjectPlace> objectPlaces_;
+    // Per scene instance moved by its object's clip (see followClips): where it stands without the clip.
+    std::map<std::size_t, ts2::scene::Transform> clipBases_;
     // Per neighbor: its held wants and fears (GUIDs) in the order they were held. Saved holds come
     // first, wants before fears.
     struct Hold {

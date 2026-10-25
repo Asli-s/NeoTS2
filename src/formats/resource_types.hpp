@@ -24,6 +24,9 @@ constexpr std::uint32_t kPatternMap = 0xCAC4FC40;
 constexpr std::uint32_t kWallLayer = 0x8A84D7B0;
 constexpr std::uint32_t kFencePostLayer = 0xAB4BA572;
 constexpr std::uint32_t kRoofs = 0xAB9406AA;
+// A lot's neighbor id remap tables (instance 2). The game looks for either type.
+constexpr std::uint32_t kNeighborRemap = 0x6E9C59CF;
+constexpr std::uint32_t kNeighborRemapOther = 0x2DB5C0F4;
 constexpr std::uint32_t kNameMap = 0x4E6D6150;
 constexpr std::uint32_t kSceneObject = 0xFA1C39F7;
 constexpr std::uint32_t kSimDescription = 0xAACE2EFB;
