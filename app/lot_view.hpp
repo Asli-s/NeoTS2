@@ -2,7 +2,7 @@
 
 #include "diag/log.hpp"
 #include "orbit.hpp"
-#include "render/renderer.hpp"
+#include "render/irenderer.hpp"
 #include "scene/lot_skirt.hpp"
 #include "scene/neighborhood_plumbobs.hpp"
 #include "scene/neighborhood_scene.hpp"
@@ -10,7 +10,7 @@
 #include "scene/scene.hpp"
 #include "scene/view.hpp"
 
-#include <SDL3/SDL.h>
+#include "platform/platform.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -95,30 +95,31 @@ struct LotView {
     }
 
     // Returns whether the key was one of the view's.
-    bool key(SDL_Keycode key, Orbit& orbit) {
+    bool key(ts2::platform::Key key, Orbit& orbit) {
+        using ts2::platform::Key;
         switch (key) {
-        case SDLK_Q:
-        case SDLK_COMMA:
+        case Key::Q:
+        case Key::Comma:
             orbit.turn(-1);
             return true;
-        case SDLK_E:
-        case SDLK_PERIOD:
+        case Key::E:
+        case Key::Period:
             orbit.turn(1);
             return true;
-        case SDLK_PAGEUP:
+        case Key::PageUp:
             changeLevel(1, orbit);
             return true;
-        case SDLK_PAGEDOWN:
+        case Key::PageDown:
             changeLevel(-1, orbit);
             return true;
-        case SDLK_HOME:
-        case SDLK_TAB:
+        case Key::Home:
+        case Key::Tab:
             setWallMode((wallMode() + 3) % 4);
             return true;
-        case SDLK_END:
+        case Key::End:
             setWallMode((wallMode() + 1) % 4);
             return true;
-        case SDLK_R:
+        case Key::R:
             view.roofs = !view.roofs;
             ts2::diag::step(view.roofs ? "view: roofs on" : "view: roofs off");
             return true;
@@ -322,7 +323,7 @@ inline ts2::scene::Scene lotInNeighborhood(const ts2::scene::Scene& hood, ts2::s
 
 // Poses a scene's actors (its Sims) `seconds` after they started and hands their joints and the
 // places of what they hold to the renderer.
-inline void animateActors(const ts2::scene::Scene& scene, double seconds, ts2::render::Renderer& renderer,
+inline void animateActors(const ts2::scene::Scene& scene, double seconds, ts2::render::IRenderer& renderer,
                           ts2::scene::ScenePose& pose) {
     ts2::scene::poseActors(scene, seconds, pose);
     for (const auto& [instance, joints] : pose.joints) {

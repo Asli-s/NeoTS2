@@ -37,9 +37,7 @@ float Heights::at(int level, int x, int y, bool& found) const {
     if (!found) {
         return static_cast<float>(level) * kLevelHeight;
     }
-    float v = 0;
-    std::memcpy(&v, grid_->at(level, x, y).data(), 4);
-    return v;
+    return grid_->f32(level, x, y, 0);
 }
 
 float Heights::corner(int level, float x, float y) const {
@@ -774,9 +772,7 @@ private:
         const std::uint32_t columns = (g->width - 1) * kSteps + 1, rows = (g->height - 1) * kSteps + 1;
         const int ground = g->contains(content::groundGridLevel(lot_), 0, 0) ? content::groundGridLevel(lot_) : 0;
         auto corner = [&](std::uint32_t x, std::uint32_t y) {
-            float v = 0;
-            std::memcpy(&v, g->at(ground, static_cast<std::int32_t>(std::min(x, g->width - 1)), static_cast<std::int32_t>(std::min(y, g->height - 1))).data(), 4);
-            return v;
+            return g->f32(ground, static_cast<std::int32_t>(std::min(x, g->width - 1)), static_cast<std::int32_t>(std::min(y, g->height - 1)), 0);
         };
         auto height = [&](std::int64_t i, std::int64_t j) {
             const auto ci = static_cast<std::uint32_t>(std::clamp<std::int64_t>(i, 0, columns - 1));

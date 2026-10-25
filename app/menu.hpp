@@ -1,5 +1,7 @@
 #pragma once
 
+#include "render/make_renderer.hpp"
+
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -30,6 +32,7 @@ struct MenuOptions {
     bool unpaused = false;       // the lot starts with time running (the game opens lots paused)
     bool bumpMapping = true;     // the game's bump mapping (High Material Detail)
     bool wallBumps = true;       // and of floors and walls (High Lighting Quality)
+    ts2::render::Backend backend = ts2::render::defaultBackend();  // what draws (--renderer)
     bool timings = false;        // write the timing report (diag/timing.hpp) to the log every 10 seconds
     std::optional<std::uint32_t> seed;  // fixes a neighborhood's ground variants, so its pictures repeat
     // Asked once a frame: a warning about the install's files found by a check running beside the

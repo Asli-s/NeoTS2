@@ -2,6 +2,7 @@
 
 #include "formats/binary_reader.hpp"
 
+#include <bit>
 #include <stdexcept>
 
 namespace ts2::array3d {
@@ -34,6 +35,20 @@ std::int16_t Array3D::i16(std::int32_t level, std::int32_t x, std::int32_t y, st
         return 0;
     }
     return static_cast<std::int16_t>(e[index * 2] | e[index * 2 + 1] << 8);
+}
+
+std::uint32_t Array3D::u32(std::int32_t level, std::int32_t x, std::int32_t y, std::size_t index) const {
+    const auto e = at(level, x, y);
+    if (index >= e.size() / 4) {
+        return 0;
+    }
+    const std::uint8_t* p = e.data() + index * 4;
+    return static_cast<std::uint32_t>(p[0]) | static_cast<std::uint32_t>(p[1]) << 8 | static_cast<std::uint32_t>(p[2]) << 16 |
+           static_cast<std::uint32_t>(p[3]) << 24;
+}
+
+float Array3D::f32(std::int32_t level, std::int32_t x, std::int32_t y, std::size_t index) const {
+    return std::bit_cast<float>(u32(level, x, y, index));
 }
 
 namespace {

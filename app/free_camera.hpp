@@ -2,7 +2,7 @@
 
 #include "orbit.hpp"
 
-#include <SDL3/SDL.h>
+#include "platform/platform.hpp"
 
 #include <algorithm>
 #include <array>
@@ -94,28 +94,29 @@ public:
 
     // A key going down or up. The movement keys set their axis while down and clear it when either of
     // its keys comes up. Z and X step the field of view. Returns whether the key is the camera's.
-    bool key(SDL_Scancode code, bool down) {
+    bool key(ts2::platform::Key code, bool down) {
+        using ts2::platform::Key;
         auto axis = [&](std::size_t k, float value) {
             move[k] = down ? value : 0;
             return true;
         };
         switch (code) {
-        case SDL_SCANCODE_A: return axis(0, -1);
-        case SDL_SCANCODE_D: return axis(0, 1);
-        case SDL_SCANCODE_W: return axis(1, 1);
-        case SDL_SCANCODE_S: return axis(1, -1);
-        case SDL_SCANCODE_Q: return axis(2, -1);
-        case SDL_SCANCODE_E: return axis(2, 1);
-        case SDL_SCANCODE_Z:
-        case SDL_SCANCODE_EQUALS:
-        case SDL_SCANCODE_KP_PLUS:
+        case Key::A: return axis(0, -1);
+        case Key::D: return axis(0, 1);
+        case Key::W: return axis(1, 1);
+        case Key::S: return axis(1, -1);
+        case Key::Q: return axis(2, -1);
+        case Key::E: return axis(2, 1);
+        case Key::Z:
+        case Key::Equals:
+        case Key::PadPlus:
             if (down && fovIndex_ > 0) {
                 fovGoal_ = fovs_[--fovIndex_];
             }
             return true;
-        case SDL_SCANCODE_X:
-        case SDL_SCANCODE_MINUS:
-        case SDL_SCANCODE_KP_MINUS:
+        case Key::X:
+        case Key::Minus:
+        case Key::PadMinus:
             if (down && fovIndex_ + 1 < fovs_.size()) {
                 fovGoal_ = fovs_[++fovIndex_];
             }

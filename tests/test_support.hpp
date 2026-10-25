@@ -475,6 +475,7 @@ std::vector<Test> modelAndImageTests();
 std::vector<Test> sceneTests();
 std::vector<Test> assetTests();
 std::vector<Test> lightingTests();
+std::vector<Test> renderPlanTests();
 std::vector<Test> contentTests();
 std::vector<Test> uiAndDiagTests();
 #ifdef NEOTS2_TEXT_LAYOUT_TESTS

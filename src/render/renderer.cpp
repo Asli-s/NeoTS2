@@ -14,7 +14,7 @@ namespace ts2::render {
 
 using namespace render_detail;
 
-Renderer::Renderer(SDL_Window* window, const std::filesystem::path& shaderFolder) : window_(window) {
+SdlGpuRenderer::SdlGpuRenderer(SDL_Window* window, const std::filesystem::path& shaderFolder) : window_(window) {
     device_ = SDL_CreateGPUDevice(kShaderFormat, false, nullptr);
     if (device_ == nullptr) {
         // SDL's own reason goes to the log only: it means little to players.
@@ -39,11 +39,11 @@ Renderer::Renderer(SDL_Window* window, const std::filesystem::path& shaderFolder
     }
 }
 
-Renderer::~Renderer() {
+SdlGpuRenderer::~SdlGpuRenderer() {
     destroy();
 }
 
-void Renderer::destroy() {
+void SdlGpuRenderer::destroy() {
     if (device_ == nullptr) {
         return;
     }
@@ -103,19 +103,19 @@ void Renderer::destroy() {
     device_ = nullptr;
 }
 
-std::string Renderer::backend() const {
+std::string SdlGpuRenderer::backend() const {
     const char* name = SDL_GetGPUDeviceDriver(device_);
     return name ? name : "";
 }
 
-std::string Renderer::device() const {
+std::string SdlGpuRenderer::device() const {
     const SDL_PropertiesID properties = SDL_GetGPUDeviceProperties(device_);
     const char* name = SDL_GetStringProperty(properties, SDL_PROP_GPU_DEVICE_NAME_STRING, "unknown card");
     const char* driver = SDL_GetStringProperty(properties, SDL_PROP_GPU_DEVICE_DRIVER_VERSION_STRING, "unknown");
     return std::format("{}, driver {} ({})", name, driver, backend());
 }
 
-void Renderer::benchmark(const Camera& camera, unsigned width, unsigned height, int frames) {
+void SdlGpuRenderer::benchmark(const Camera& camera, unsigned width, unsigned height, int frames) {
     if (width == 0 || height == 0 || width > kMaxOffscreen || height > kMaxOffscreen) {
         return;
     }
@@ -153,7 +153,7 @@ void Renderer::benchmark(const Camera& camera, unsigned width, unsigned height, 
     SDL_ReleaseGPUTexture(device_, target);
 }
 
-void Renderer::release() {
+void SdlGpuRenderer::release() {
     gpu_->release(device_);
 }
 

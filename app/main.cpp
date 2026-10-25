@@ -4,7 +4,10 @@
 //          [--hover x y] [--ui-click x y | --ui-right-click x y | --ui-hover x y
 //          (on the lot's panels before the picture, repeatable)]
 //          [--shot <out.png>] [--seed n (the neighborhood ground's variants, so pictures repeat)]
+//          [--renderer sdlgpu|gl2 (what draws: SDL's GPU API, or OpenGL 2.1)]
 //   neots2 <install folder> <lot.package> [--shot <out.png> [yaw pitch distance]]
+//          [--seed n (a neighborhood's ground variants, so pictures repeat)]
+//          [--renderer sdlgpu|gl2 (what draws: SDL's GPU API, or OpenGL 2.1)]
 //          [--walls up|cutaway|down] [--level n (1: the ground floor)] [--target x y z] [--roofs off]
 //          [--time seconds (into the Sims' animations, for --shot)]
 // Mouse: middle-drag turns, right-drag pans, the wheel zooms. Keys: WASD or arrows pan, Q/E or
@@ -23,6 +26,7 @@
 #include "formats/nhood_paint_rules.hpp"
 #include "menu.hpp"
 #include "message_box.hpp"
+#include "open_renderer.hpp"
 #include "neighborhood.hpp"
 #include "lot_life.hpp"
 #include "lot_daylight.hpp"
@@ -32,7 +36,7 @@
 #include "paths/game_folders.hpp"
 #include "paths/names.hpp"
 #include "paths/save_folders.hpp"
-#include "render/renderer.hpp"
+#include "render/make_renderer.hpp"
 #include "scene/assets.hpp"
 #include "scene/builder.hpp"
 #include "scene/lot_scene.hpp"
@@ -40,8 +44,8 @@
 #include "scene/view.hpp"
 #include "sim/clock.hpp"
 
-#include <SDL3/SDL.h>
-#include <SDL3/SDL_main.h>
+#include "platform/entry.hpp"
+#include "platform/platform.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -67,7 +71,7 @@ using app::Orbit;
 using ts2::render::Vec3;
 using ts2::scene::WallView;
 
-// SDL hands main its arguments in UTF-8.
+// The platform hands main its arguments in UTF-8.
 std::filesystem::path utf8Path(const char* text) {
     return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(text)));
 }
@@ -203,6 +207,8 @@ struct Options {
     int bench = 0;  // frames to time before the shot (--bench)
     std::string lightState;  // a lighting state to light the lot with, in place of its clock's
     int hour = -1, minute = 0;  // the lot's clock to start from (--clock), -1 for the saved one
+    std::optional<std::uint32_t> seed;  // the neighborhood ground's variants (--seed), random when empty
+    ts2::render::Backend backend = ts2::render::defaultBackend();  // what draws (--renderer)
 };
 
 bool parseOptions(int argc, char** argv, Options& o) {
@@ -259,6 +265,14 @@ bool parseOptions(int argc, char** argv, Options& o) {
             ++i;
         } else if (arg == "--bench" && i + 1 < argc) {
             o.bench = std::clamp(std::stoi(argv[++i]), 0, 100000);
+        } else if (arg == "--seed" && i + 1 < argc) {
+            o.seed = static_cast<std::uint32_t>(std::stoul(argv[++i]));
+        } else if (arg == "--renderer" && i + 1 < argc) {
+            const auto backend = ts2::render::backendNamed(argv[++i]);
+            if (!backend || !ts2::render::available(*backend)) {
+                return false;
+            }
+            o.backend = *backend;
         } else {
             return false;
         }
@@ -293,6 +307,15 @@ int main(int argc, char** argv) {
                 i += 3;
             } else if (arg == "--seed" && i + 1 < argc) {
                 menu.seed = static_cast<std::uint32_t>(std::stoul(argv[++i]));
+            } else if (arg == "--renderer" && i + 1 < argc) {
+                const auto backend = ts2::render::backendNamed(argv[++i]);
+                if (!backend || !ts2::render::available(*backend)) {
+                    const bool both = ts2::render::available(ts2::render::Backend::SdlGpu) && ts2::render::available(ts2::render::Backend::OpenGL2);
+                    std::fprintf(stderr, "Unknown renderer: use %s\n",
+                                 both ? "sdlgpu or gl2" : ts2::render::available(ts2::render::Backend::OpenGL2) ? "gl2" : "sdlgpu");
+                    return 1;
+                }
+                menu.backend = *backend;
             } else if (arg == "--click" && i + 2 < argc) {
                 menu.clickX = std::stoi(argv[i + 1]);
                 menu.clickY = std::stoi(argv[i + 2]);
@@ -335,14 +358,14 @@ int main(int argc, char** argv) {
                 i += 2;
             }
         }
-        if (!SDL_Init(SDL_INIT_VIDEO)) {
-            ts2::diag::error(std::string("SDL: ") + SDL_GetError());
+        if (!ts2::platform::init()) {
+            ts2::diag::error(std::string("SDL: ") + ts2::platform::lastError());
             return 1;
         }
         if (menu.user.empty()) {
             // The game keeps its user files in Documents.
-            if (const char* documents = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS)) {
-                menu.user = utf8Path(documents) / u8"EA Games" / u8"The Sims™ 2 Ultimate Collection";
+            if (const auto documents = ts2::platform::documentsFolder(); !documents.empty()) {
+                menu.user = documents / u8"EA Games" / u8"The Sims™ 2 Ultimate Collection";
             }
         }
         int result = 0;
@@ -360,7 +383,7 @@ int main(int argc, char** argv) {
                     if (menu.shot.empty()) {
                         app::showMessage(app::MessageKind::Error, message);
                     }
-                    SDL_Quit();
+                    ts2::platform::quit();
                     return 1;
                 }
             }
@@ -388,7 +411,7 @@ int main(int argc, char** argv) {
                     }
                 }
             }
-            result = runMenu(utf8Path(argv[1]), utf8Path(SDL_GetBasePath()) / "shaders", menu);
+            result = runMenu(utf8Path(argv[1]), ts2::platform::basePath() / "shaders", menu);
         } catch (const std::exception& ex) {
             ts2::diag::error(ex.what());
             result = 1;
@@ -399,7 +422,7 @@ int main(int argc, char** argv) {
                 app::showMessage(app::MessageKind::Error, message);
             }
         }
-        SDL_Quit();
+        ts2::platform::quit();
         return result;
     }
     Options options;
@@ -415,8 +438,8 @@ int main(int argc, char** argv) {
         return 1;
     }
     const bool shot = options.shot != nullptr;
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
-        ts2::diag::error(std::string("SDL: ") + SDL_GetError());
+    if (!ts2::platform::init()) {
+        ts2::diag::error(std::string("SDL: ") + ts2::platform::lastError());
         return 1;
     }
     int result = 0;
@@ -434,7 +457,7 @@ int main(int argc, char** argv) {
         ts2::scene::NeighborhoodSceneStats hoodStats;
         if (hood) {
             ts2::content::EffectsFiles effects(utf8Path(argv[1]));
-            hoodStats = app::buildNeighborhood(builder, utf8Path(argv[1]), utf8Path(argv[2]), effects);
+            hoodStats = app::buildNeighborhood(builder, utf8Path(argv[1]), utf8Path(argv[2]), effects, options.seed);
             ts2::diag::info(std::format("neighborhood {} x {} tiles, {}, sea level {:.2f}, {} lots ({} imposters), {} plants ({} shown), {} decorations ({} shown)",
                                         hoodStats.width, hoodStats.height, hoodStats.terrainType, hoodStats.seaLevel, hoodStats.lots,
                                         hoodStats.imposters, hoodStats.plants, hoodStats.plantsShown, hoodStats.decorations,
@@ -462,14 +485,18 @@ int main(int argc, char** argv) {
         auto& scene = builder.scene();
         const int top = ts2::scene::topLevel(scene);
 
-        SDL_Window* window = SDL_CreateWindow("NeoTS2", 1280, 800,
-                                              SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | (shot ? SDL_WINDOW_HIDDEN : 0));
-        if (window == nullptr) {
-            throw std::runtime_error(SDL_GetError());
-        }
-        const std::filesystem::path shaders = utf8Path(SDL_GetBasePath()) / "shaders";
+        ts2::platform::WindowOptions windowOptions;
+        windowOptions.title = "NeoTS2";
+        windowOptions.width = 1280;
+        windowOptions.height = 800;
+        windowOptions.resizable = true;
+        windowOptions.highDensity = true;
+        windowOptions.hidden = shot;
+        std::unique_ptr<ts2::platform::Window> window;
+        const std::filesystem::path shaders = ts2::platform::basePath() / "shaders";
         {
-            ts2::render::Renderer renderer(window, shaders);
+            const auto rendererOwner = app::openRenderer(window, options.backend, windowOptions, shaders, shot);
+            ts2::render::IRenderer& renderer = *rendererOwner;
             renderer.setBumpMapping(options.bumpMapping);
             renderer.setFloorAndWallNormalMapping(options.wallBumps);
             renderer.setNight(ts2::content::stateTime(lightState) == ts2::content::StateTime::Night);
@@ -525,7 +552,7 @@ int main(int argc, char** argv) {
                     ts2::diag::info(std::format("Sim {} plays {}", actor.object, actor.animation->animation->name));
                 }
             }
-            const Uint64 started = SDL_GetTicksNS();
+            const std::uint64_t started = ts2::platform::ticksNs();
             Orbit orbit;
             app::frameScene(scene, orbit);
             if (hood) {
@@ -572,7 +599,7 @@ int main(int argc, char** argv) {
                 const std::string title = "NeoTS2 - walls " + std::string(wallViewName(view.walls)) + ", storey " +
                                           std::to_string(view.level - ground + 1) + " of " + std::to_string(top - ground + 1) +
                                           (view.roofs ? "" : ", roofs off");
-                SDL_SetWindowTitle(window, title.c_str());
+                window->setTitle(title);
             };
             setTitle();
             auto changeLevel = [&](int delta) {
@@ -583,39 +610,40 @@ int main(int argc, char** argv) {
             };
 
             bool running = !shot;
-            Uint64 last = SDL_GetTicksNS();
+            std::uint64_t last = ts2::platform::ticksNs();
             while (running) {
-                SDL_Event e;
-                while (SDL_PollEvent(&e)) {
-                    if (e.type == SDL_EVENT_QUIT || (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE)) {
+                ts2::platform::Event e;
+                while (ts2::platform::pollEvent(e)) {
+                    using ts2::platform::Key;
+                    if (e.type == ts2::platform::Event::Type::Quit || (e.type == ts2::platform::Event::Type::KeyDown && e.key == Key::Escape)) {
                         running = false;
-                    } else if (e.type == SDL_EVENT_KEY_DOWN) {
-                        switch (e.key.key) {
-                        case SDLK_Q:
-                        case SDLK_COMMA:
+                    } else if (e.type == ts2::platform::Event::Type::KeyDown) {
+                        switch (e.key) {
+                        case Key::Q:
+                        case Key::Comma:
                             orbit.turn(-1);
                             break;
-                        case SDLK_E:
-                        case SDLK_PERIOD:
+                        case Key::E:
+                        case Key::Period:
                             orbit.turn(1);
                             break;
-                        case SDLK_PAGEUP:
+                        case Key::PageUp:
                             changeLevel(1);
                             break;
-                        case SDLK_PAGEDOWN:
+                        case Key::PageDown:
                             changeLevel(-1);
                             break;
-                        case SDLK_1:
-                        case SDLK_2:
-                        case SDLK_3:
-                            view.walls = static_cast<WallView>(e.key.key - SDLK_1);
+                        case Key::Num1:
+                        case Key::Num2:
+                        case Key::Num3:
+                            view.walls = static_cast<WallView>(static_cast<int>(e.key) - static_cast<int>(Key::Num1));
                             setTitle();
                             break;
-                        case SDLK_TAB:
+                        case Key::Tab:
                             view.walls = static_cast<WallView>((static_cast<int>(view.walls) + 1) % 3);
                             setTitle();
                             break;
-                        case SDLK_R:
+                        case Key::R:
                             view.roofs = !view.roofs;
                             setTitle();
                             break;
@@ -627,7 +655,7 @@ int main(int argc, char** argv) {
                     }
                 }
 
-                const Uint64 now = SDL_GetTicksNS();
+                const std::uint64_t now = ts2::platform::ticksNs();
                 const float dt = std::min(0.1f, static_cast<float>(now - last) / 1e9f);
                 last = now;
                 app::orbitStep(orbit, dt);
@@ -641,15 +669,14 @@ int main(int argc, char** argv) {
                 app::animateActors(scene, life ? life->seconds() : static_cast<double>(now - started) / 1e9, renderer, pose);
                 renderer.setTime(static_cast<float>(static_cast<double>(now) / 1e9));
                 if (!renderer.draw(orbit.camera())) {
-                    SDL_Delay(16);
+                    ts2::platform::delayMs(16);
                 }
             }
         }
-        SDL_DestroyWindow(window);
     } catch (const std::exception& ex) {
         ts2::diag::error(ex.what());
         result = 1;
     }
-    SDL_Quit();
+    ts2::platform::quit();
     return result;
 }

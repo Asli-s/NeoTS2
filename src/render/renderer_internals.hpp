@@ -3,6 +3,7 @@
 // keeps what is shown, renderer_upload.cpp uploads scenes and renderer_draw.cpp draws frames.
 #pragma once
 
+#include "render/image_levels.hpp"
 #include "render/renderer.hpp"
 
 #include <SDL3/SDL.h>
@@ -16,11 +17,7 @@
 
 namespace ts2::render::render_detail {
 
-constexpr std::uint32_t kVertexFloats = 17;  // position, normal, texture coordinates, alpha, light-map coordinates, color, tangent
-
 constexpr std::uint32_t kSpriteFloats = 8;  // position, texture coordinates, color
-
-constexpr std::uint32_t kSkinBytes = 4 + 4 * sizeof(float);  // four joints, four weights
 
 // Windows draws with Direct3D 12 and DXIL shaders, other systems with Vulkan and SPIR-V shaders.
 // The build makes only that kind, so the device must not fall back to the other.
@@ -33,11 +30,6 @@ constexpr SDL_GPUShaderFormat kShaderFormat = SDL_GPU_SHADERFORMAT_SPIRV;
 constexpr const char* kShaderExtension = ".spv";
 constexpr const char* kGraphicsApi = "Vulkan";
 #endif
-
-// Whether all of an image's pixels are there (a broken one is drawn plain white instead).
-inline bool complete(const scene::Image& image) {
-    return image.width > 0 && image.height > 0 && image.rgba.size() == static_cast<std::size_t>(image.width) * image.height * 4;
-}
 
 inline std::runtime_error sdlError(const char* what) {
     return std::runtime_error(std::string(what) + ": " + SDL_GetError());

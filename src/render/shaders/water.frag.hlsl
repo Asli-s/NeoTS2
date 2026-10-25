@@ -29,7 +29,12 @@ struct Input {
 float4 main(Input input) : SV_Target {
     const float2 at = input.position.xy / screen;
     const float3 first = reflection.Sample(reflectionSampler, at).rgb * tint.rgb;
+#ifdef GL2
+    // OpenGL's window y runs up where the others' runs down, so the second sample's shift is flipped to match.
+    const float3 second = reflection.Sample(reflectionSampler, at + float2(-offset, -offset)).rgb * tint.rgb;
+#else
     const float3 second = reflection.Sample(reflectionSampler, at + float2(-offset, offset)).rgb * tint.rgb;
+#endif
     const float slide = frac(time * speed / scale) * scale;
     const float a = ripples.Sample(rippleSampler, input.tiles * scale + float2(slide, 0)).a;
     return float4(first * a + second * (1 - a), tint.a);

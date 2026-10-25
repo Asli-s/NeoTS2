@@ -3,7 +3,11 @@
 
 #include "sdl_gpu.hlsli"
 
+#ifdef GL2
+COMBINED Texture2D<float4> roads : register(t0, space2);  // OpenGL 2 has no texture arrays: one road texture per draw
+#else
 COMBINED Texture2DArray<float4> roads : register(t0, space2);
+#endif
 COMBINED SamplerState roadSampler : register(s0, space2);
 COMBINED Texture2D<float4> lightMap : register(t1, space2);
 COMBINED SamplerState lightSampler : register(s1, space2);
@@ -21,7 +25,11 @@ struct Input {
 };
 
 float4 main(Input input) : SV_Target {
+#ifdef GL2
+    float4 color = roads.Sample(roadSampler, input.uv);
+#else
     float4 color = roads.Sample(roadSampler, float3(input.uv, round(input.texture)));
+#endif
     color.rgb *= lightMap.Sample(lightSampler, input.ground / lightMapSize).rgb;
     return color;
 }

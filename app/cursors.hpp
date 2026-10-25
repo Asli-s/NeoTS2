@@ -1,11 +1,11 @@
 #pragma once
 
+#include "platform/platform.hpp"
+
 #include <cstdint>
 #include <filesystem>
 #include <map>
 #include <vector>
-
-struct SDL_Cursor;
 
 namespace ts2::content {
 class UiData;
@@ -34,10 +34,10 @@ public:
     void showDragArrow(float angle);
 
 private:
-    std::map<std::uint32_t, SDL_Cursor*> cursors_;
+    std::map<std::uint32_t, ts2::platform::CursorPtr> cursors_;
     std::uint32_t shown_ = 0;
     std::vector<std::uint8_t> arrow_;  // the drag arrow's grey picture, 32 x 32
-    SDL_Cursor* turned_ = nullptr;     // the drag arrow as last turned
+    ts2::platform::CursorPtr turned_;  // the drag arrow as last turned
     float turnedAngle_ = 0;
 };
 

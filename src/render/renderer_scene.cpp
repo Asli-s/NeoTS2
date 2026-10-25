@@ -13,7 +13,7 @@ namespace ts2::render {
 
 using namespace render_detail;
 
-void Renderer::releaseSprites() {
+void SdlGpuRenderer::releaseSprites() {
     for (auto* t : spriteTextures_) {
         if (t) {
             SDL_ReleaseGPUTexture(device_, t);
@@ -23,7 +23,7 @@ void Renderer::releaseSprites() {
     spriteSizes_.clear();
 }
 
-void Renderer::setSprites(const std::vector<std::pair<int, const scene::Image*>>& images) {
+void SdlGpuRenderer::setSprites(const std::vector<std::pair<int, const scene::Image*>>& images) {
     if (images.empty()) {
         return;
     }
@@ -83,47 +83,7 @@ void Renderer::setSprites(const std::vector<std::pair<int, const scene::Image*>>
     SDL_SubmitGPUCommandBuffer(cmd);
 }
 
-void Renderer::showSprites(std::vector<Sprite> sprites, bool scene) {
-    sprites_ = std::move(sprites);
-    drawScene_ = scene;
-}
-
-void Renderer::setJoints(std::size_t instance, const std::vector<scene::Transform>& joints) {
-    if (instance >= jointBase_.size() || joints.empty()) {
-        return;
-    }
-    // An instance keeps its place in the buffer while its joints fit there, so the buffer only grows
-    // when an instance needs more of them than before.
-    if (jointBase_[instance] < 0 || jointCount_[instance] < static_cast<int>(joints.size())) {
-        jointBase_[instance] = static_cast<int>(jointData_.size() / 12);
-        jointCount_[instance] = static_cast<int>(joints.size());
-        jointData_.resize(jointData_.size() + joints.size() * 12);
-    }
-    float* out = &jointData_[static_cast<std::size_t>(jointBase_[instance]) * 12];
-    for (const auto& j : joints) {
-        std::copy(j.m.begin(), j.m.end(), out);
-        out += 12;
-    }
-    jointsChanged_ = true;
-}
-
-void Renderer::setPlace(std::size_t instance, const scene::Transform& transform) {
-    if (instance < instances_.size()) {
-        instances_[instance].transform = transform;
-    }
-}
-
-void Renderer::setMaterials(std::size_t instance, std::vector<int> materials) {
-    if (instance >= instances_.size()) {
-        return;
-    }
-    if (instanceMaterials_.size() <= instance) {
-        instanceMaterials_.resize(instance + 1);
-    }
-    instanceMaterials_[instance] = std::move(materials);
-}
-
-void Renderer::addMaterials(const scene::Scene& scene) {
+void SdlGpuRenderer::addMaterials(const scene::Scene& scene) {
     if (scene.materials.size() <= materials_.size() && scene.images.size() <= gpu_->textures.size() &&
         scene.envCubes.size() <= gpu_->envCubes.size()) {
         return;
@@ -153,7 +113,7 @@ void Renderer::addMaterials(const scene::Scene& scene) {
     }
 }
 
-void Renderer::addMeshes(const scene::Scene& scene) {
+void SdlGpuRenderer::addMeshes(const scene::Scene& scene) {
     if (scene.meshes.size() <= gpu_->meshes.size()) {
         return;
     }
@@ -187,36 +147,7 @@ void Renderer::addMeshes(const scene::Scene& scene) {
     gpu_->meshes.insert(gpu_->meshes.end(), std::make_move_iterator(added.begin()), std::make_move_iterator(added.end()));
 }
 
-void Renderer::setInstance(const scene::Scene& scene, std::size_t index) {
-    if (index > instances_.size() || index >= scene.instances.size()) {
-        return;
-    }
-    const scene::Instance& instance = scene.instances[index];
-    addLightSets(scene);
-    if (index == instances_.size()) {
-        instances_.push_back(instance);
-        jointBase_.push_back(-1);
-        jointCount_.push_back(0);
-    } else {
-        instances_[index] = instance;
-    }
-    if (index < instanceMaterials_.size()) {
-        instanceMaterials_[index].clear();
-    }
-}
-
-void Renderer::setLights(const scene::Scene& scene, std::size_t index) {
-    if (index >= instances_.size() || index >= scene.instances.size()) {
-        return;
-    }
-    addLightSets(scene);
-    instances_[index].lightSet = scene.instances[index].lightSet;
-    instances_[index].partLightSets = scene.instances[index].partLightSets;
-    instances_[index].sun = scene.instances[index].sun;
-    instances_[index].skirtScale = scene.instances[index].skirtScale;
-}
-
-void Renderer::setImages(const scene::Scene& scene, const std::vector<int>& indexes, bool fade) {
+void SdlGpuRenderer::setImages(const scene::Scene& scene, const std::vector<int>& indexes, bool fade) {
     if (indexes.empty()) {
         return;
     }
@@ -253,7 +184,7 @@ void Renderer::setImages(const scene::Scene& scene, const std::vector<int>& inde
     SDL_SubmitGPUCommandBuffer(cmd);
 }
 
-void Renderer::setLightMapFade(float fade) {
+void SdlGpuRenderer::setLightMapFade(float fade) {
     gpu_->lightMapFade = std::clamp(fade, 0.0f, 1.0f);
     if (gpu_->lightMapFade >= 1) {
         for (const auto& [index, texture] : gpu_->fadingFrom) {
@@ -265,7 +196,7 @@ void Renderer::setLightMapFade(float fade) {
     }
 }
 
-void Renderer::setSkybox(const std::vector<scene::Image>& faces) {
+void SdlGpuRenderer::setSkybox(const std::vector<scene::Image>& faces) {
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
     if (cmd == nullptr) {
         throw sdlError("GPU command buffer");
@@ -283,13 +214,7 @@ void Renderer::setSkybox(const std::vector<scene::Image>& faces) {
     gpu_->skybox = fresh;
 }
 
-void Renderer::addLightSets(const scene::Scene& scene) {
-    if (scene.lightSets.size() > lightSets_.size()) {
-        lightSets_.insert(lightSets_.end(), scene.lightSets.begin() + static_cast<std::ptrdiff_t>(lightSets_.size()), scene.lightSets.end());
-    }
-}
-
-void Renderer::uploadJoints(SDL_GPUCommandBuffer* cmd) {
+void SdlGpuRenderer::uploadJoints(SDL_GPUCommandBuffer* cmd) {
     if (!jointsChanged_ || jointData_.empty()) {
         return;
     }
@@ -321,7 +246,7 @@ void Renderer::uploadJoints(SDL_GPUCommandBuffer* cmd) {
     SDL_ReleaseGPUTransferBuffer(device_, tb);
 }
 
-void Renderer::uploadSpriteVertices(SDL_GPUCommandBuffer* cmd, unsigned, unsigned) {
+void SdlGpuRenderer::uploadSpriteVertices(SDL_GPUCommandBuffer* cmd, unsigned, unsigned) {
     if (sprites_.empty()) {
         return;
     }

@@ -21,6 +21,9 @@ struct Array3D {
     bool contains(std::int32_t level, std::int32_t x, std::int32_t y) const;
     std::span<const std::uint8_t> at(std::int32_t level, std::int32_t x, std::int32_t y) const;
     std::int16_t i16(std::int32_t level, std::int32_t x, std::int32_t y, std::size_t index) const;
+    // The element's index-th 32-bit number (0 when there is none), stored little-endian on any CPU.
+    std::uint32_t u32(std::int32_t level, std::int32_t x, std::int32_t y, std::size_t index) const;
+    float f32(std::int32_t level, std::int32_t x, std::int32_t y, std::size_t index) const;
 };
 
 Array3D parse(std::span<const std::uint8_t> data);

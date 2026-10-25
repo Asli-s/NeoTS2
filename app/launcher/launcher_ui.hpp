@@ -36,6 +36,7 @@ struct LauncherState {
     bool askNeighborhoods = false;  // open the question about a save folder without neighborhoods
     bool askBackup = false;         // open the reminder to back up saves
     bool backupReminderSeen = false;  // the reminder was shown and the player went on, so it isn't shown again
+    std::string renderer;             // what the game is asked to draw with: "sdlgpu", "gl2", or empty for its own choice
     std::array<char, 128> newFolderName{};  // what the player types for a new save folder (UTF-8)
     std::string newFolderProblem;           // why the last one couldn't be made
     PickedFolder picked;

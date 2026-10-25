@@ -6,11 +6,10 @@
 #include "formats/cursor.hpp"
 #include "ui/drag_arrow.hpp"
 
-#include <SDL3/SDL.h>
-
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace app {
@@ -36,18 +35,12 @@ constexpr std::uint32_t kImageGroup = 0x499DB772, kDragArrow = 0xFFFF0000;
 // What show() remembers while the drag arrow is up (no cursor id).
 constexpr std::uint32_t kShowingDragArrow = 0xFFFFFFFF;
 
-SDL_Cursor* make(const ts2::tga::Pixels& pixels, int hotX, int hotY) {
-    SDL_Surface* surface = SDL_CreateSurfaceFrom(static_cast<int>(pixels.width), static_cast<int>(pixels.height), SDL_PIXELFORMAT_RGBA32,
-                                                 const_cast<std::uint8_t*>(pixels.rgba.data()), static_cast<int>(pixels.width * 4));
-    if (!surface) {
-        return nullptr;
-    }
-    SDL_Cursor* made = SDL_CreateColorCursor(surface, hotX, hotY);
-    SDL_DestroySurface(surface);
-    return made;
+ts2::platform::CursorPtr make(const ts2::tga::Pixels& pixels, int hotX, int hotY) {
+    return ts2::platform::createCursor(pixels.rgba.data(), static_cast<unsigned>(pixels.width), static_cast<unsigned>(pixels.height),
+                                       static_cast<unsigned>(hotX), static_cast<unsigned>(hotY));
 }
 
-SDL_Cursor* load(const std::vector<ts2::content::Product>& products, const std::string& name) {
+ts2::platform::CursorPtr load(const std::vector<ts2::content::Product>& products, const std::string& name) {
     for (const std::string file : {name + kEnding + ".cur", name + ".cur"}) {
         const auto path = ts2::content::newestDataFile(products, std::filesystem::path("Res/UI/Cursors") / file);
         if (!path) {
@@ -71,8 +64,8 @@ SDL_Cursor* load(const std::vector<ts2::content::Product>& products, const std::
 Cursors::Cursors(const std::filesystem::path& install, ts2::content::UiData& ui) {
     const auto products = ts2::content::findProducts(install);
     for (const auto& [id, name] : kNames) {
-        if (SDL_Cursor* cursor = load(products, name)) {
-            cursors_[id] = cursor;
+        if (auto cursor = load(products, name)) {
+            cursors_[id] = std::move(cursor);
         }
     }
     if (const auto image = ui.image(kImageGroup, kDragArrow); image && image->width == ts2::ui::kDragArrowSide && image->height == ts2::ui::kDragArrowSide) {
@@ -85,14 +78,7 @@ Cursors::Cursors(const std::filesystem::path& install, ts2::content::UiData& ui)
     }
 }
 
-Cursors::~Cursors() {
-    for (const auto& [id, cursor] : cursors_) {
-        SDL_DestroyCursor(cursor);
-    }
-    if (turned_) {
-        SDL_DestroyCursor(turned_);
-    }
-}
+Cursors::~Cursors() = default;
 
 void Cursors::show(std::uint32_t id) {
     if (id == shown_) {
@@ -100,7 +86,7 @@ void Cursors::show(std::uint32_t id) {
     }
     shown_ = id;
     const auto found = cursors_.find(id);
-    SDL_SetCursor(found != cursors_.end() ? found->second : SDL_GetDefaultCursor());
+    ts2::platform::setCursor(found != cursors_.end() ? found->second.get() : nullptr);
 }
 
 // The game makes a new cursor each frame of a drag. Here a new one is made only when the angle changes.
@@ -109,16 +95,14 @@ void Cursors::showDragArrow(float angle) {
         return;
     }
     if (!turned_ || angle != turnedAngle_ || shown_ != kShowingDragArrow) {
-        SDL_Cursor* made = make(ts2::ui::turnDragArrow(arrow_, angle), static_cast<int>(ts2::ui::kDragArrowSide / 2),
-                                static_cast<int>(ts2::ui::kDragArrowSide / 2));
+        auto made = make(ts2::ui::turnDragArrow(arrow_, angle), static_cast<int>(ts2::ui::kDragArrowSide / 2),
+                         static_cast<int>(ts2::ui::kDragArrowSide / 2));
         if (!made) {
             return;
         }
-        SDL_SetCursor(made);
-        if (turned_) {
-            SDL_DestroyCursor(turned_);
-        }
-        turned_ = made;
+        ts2::platform::setCursor(made.get());
+        // The one before is dropped only now that the system shows the new one.
+        turned_ = std::move(made);
         turnedAngle_ = angle;
     }
     shown_ = kShowingDragArrow;

@@ -19,6 +19,17 @@ namespace {
 
 namespace fs = std::filesystem;
 
+// `name` when the game has that renderer, else nothing, which is the game's own choice. A setting made
+// with a build that had OpenGL 2 must not make the game of one without it stop at every start.
+std::string builtRenderer(const std::string& name) {
+#ifndef NEOTS2_GL2
+    if (name == "gl2") {
+        return {};
+    }
+#endif
+    return name;
+}
+
 void heading(const LauncherFonts& fonts, const char* text) {
     ImGui::PushFont(fonts.heading);
     ImGui::SeparatorText(text);
@@ -122,6 +133,7 @@ settings::LauncherSettings chosenSettings(const LauncherState& state) {
     out.addedInstalls = state.addedInstalls;
     out.addedSaveFolders = state.addedSaveFolders;
     out.backupReminderSeen = state.backupReminderSeen;
+    out.renderer = state.renderer;
     return out;
 }
 
@@ -416,7 +428,7 @@ void startPlaying(LauncherState& state, bool addNeighborhoods) {
         state.message = "NeoTS2 is already playing with this save folder.";
         return;
     }
-    state.game = startGame(install.root, folder, addNeighborhoods, state.message);
+    state.game = startGame(install.root, folder, addNeighborhoods, builtRenderer(state.renderer), state.message);
     state.folderNotes.clear();
 }
 
@@ -582,7 +594,39 @@ void findInstalls(LauncherState& state, const settings::LauncherSettings& rememb
         }
     }
     state.backupReminderSeen = remembered.backupReminderSeen;
+    state.renderer = builtRenderer(remembered.renderer);
     state.remembered = chosenSettings(state);
+}
+
+// What draws the game: its own choice (Direct3D 12 or Vulkan), or OpenGL 2 for systems with no more
+// (offered only when the game is built with it).
+void drawRenderer(LauncherState& state, const LauncherFonts& fonts) {
+    heading(fonts, "Graphics");
+    struct Choice {
+        const char* value;
+        const char* label;
+    };
+    static constexpr Choice kChoices[] = {
+        {"", "Automatic (Direct3D 12 or Vulkan)"},
+#ifdef NEOTS2_GL2
+        {"gl2", "OpenGL 2 (for older systems)"},
+#endif
+    };
+    const Choice* current = &kChoices[0];
+    for (const auto& choice : kChoices) {
+        if (state.renderer == choice.value) {
+            current = &choice;
+        }
+    }
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18);
+    if (ImGui::BeginCombo("##renderer", current->label)) {
+        for (const auto& choice : kChoices) {
+            if (ImGui::Selectable(choice.label, &choice == current)) {
+                state.renderer = choice.value;
+            }
+        }
+        ImGui::EndCombo();
+    }
 }
 
 void drawLauncher(LauncherState& state, SDL_Window* window, const LauncherFonts& fonts) {
@@ -590,6 +634,8 @@ void drawLauncher(LauncherState& state, SDL_Window* window, const LauncherFonts&
     drawInstalls(state, window, fonts);
     ImGui::Spacing();
     drawSaveFolders(state, window, fonts);
+    ImGui::Spacing();
+    drawRenderer(state, fonts);
     ImGui::Spacing();
     // Measured before the Play row and the message, which both stretch to the window's edge.
     const ImGuiWindow* frame = ImGui::GetCurrentWindow();

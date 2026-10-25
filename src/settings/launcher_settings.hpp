@@ -15,6 +15,8 @@ struct LauncherSettings {
     std::vector<std::filesystem::path> addedInstalls;     // installs the player picked by hand
     std::vector<std::filesystem::path> addedSaveFolders;  // save folders the player picked by hand
     bool backupReminderSeen = false;  // the player was reminded to back up their saves and went on
+    // What draws the game: "sdlgpu" (Direct3D 12 or Vulkan), "gl2" (OpenGL 2.1), or empty for the game's own choice.
+    std::string renderer;
 
     bool operator==(const LauncherSettings&) const = default;
 };

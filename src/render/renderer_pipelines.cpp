@@ -42,7 +42,7 @@ SDL_GPUShader* loadShader(SDL_GPUDevice* device, const std::filesystem::path& fo
 
 } // namespace
 
-void Renderer::create(const std::filesystem::path& shaderFolder) {
+void SdlGpuRenderer::create(const std::filesystem::path& shaderFolder) {
     makeScenePipelines(shaderFolder);
     makeSpritePipeline(shaderFolder);
     makeSamplers();
@@ -55,7 +55,7 @@ void Renderer::create(const std::filesystem::path& shaderFolder) {
 }
 
 // The scene's pipelines, by skinned, two-sided and blending.
-void Renderer::makeScenePipelines(const std::filesystem::path& shaders) {
+void SdlGpuRenderer::makeScenePipelines(const std::filesystem::path& shaders) {
     SDL_GPUShader* vertex = loadShader(device_, shaders, "scene.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0);
     SDL_GPUShader* skinnedVertex = loadShader(device_, shaders, "skinned.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, 1);
     SDL_GPUShader* fragment = loadShader(device_, shaders, "scene.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 6);
@@ -125,7 +125,7 @@ void Renderer::makeScenePipelines(const std::filesystem::path& shaders) {
 }
 
 // Sprites: blended over everything, without depth.
-void Renderer::makeSpritePipeline(const std::filesystem::path& shaders) {
+void SdlGpuRenderer::makeSpritePipeline(const std::filesystem::path& shaders) {
         SDL_GPUShader* spriteVertex = loadShader(device_, shaders, "ui.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0);
         SDL_GPUShader* spriteFragment = loadShader(device_, shaders, "ui.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 0);
         SDL_GPUVertexBufferDescription buffer{};
@@ -176,7 +176,7 @@ void Renderer::makeSpritePipeline(const std::filesystem::path& shaders) {
 }
 
 // The samplers of scene textures: repeating, and clamped at the edges.
-void Renderer::makeSamplers() {
+void SdlGpuRenderer::makeSamplers() {
     SDL_GPUSamplerCreateInfo sampler{};
     sampler.min_filter = SDL_GPU_FILTER_LINEAR;
     sampler.mag_filter = SDL_GPU_FILTER_LINEAR;
@@ -196,7 +196,7 @@ void Renderer::makeSamplers() {
 }
 
 // Neighborhood terrain: opaque, both sides (as the game draws it).
-void Renderer::makeTerrainPipeline(const std::filesystem::path& shaders) {
+void SdlGpuRenderer::makeTerrainPipeline(const std::filesystem::path& shaders) {
         SDL_GPUShader* terrainVertex = loadShader(device_, shaders, "terrain.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0);
         SDL_GPUShader* terrainFragment = loadShader(device_, shaders, "terrain.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 5);
         SDL_GPUVertexBufferDescription buffer{};
@@ -235,7 +235,7 @@ void Renderer::makeTerrainPipeline(const std::filesystem::path& shaders) {
 }
 
 // Neighborhood roads: blended over the terrain they lie on.
-void Renderer::makeRoadPipeline(const std::filesystem::path& shaders) {
+void SdlGpuRenderer::makeRoadPipeline(const std::filesystem::path& shaders) {
         SDL_GPUShader* roadVertex = loadShader(device_, shaders, "road.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0);
         SDL_GPUShader* roadFragment = loadShader(device_, shaders, "road.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 2);
         SDL_GPUVertexBufferDescription buffer{};
@@ -290,7 +290,7 @@ void Renderer::makeRoadPipeline(const std::filesystem::path& shaders) {
 }
 
 // Neighborhood lot imposters: one vertex layout, four ways of blending.
-void Renderer::makeImposterPipelines(const std::filesystem::path& shaders) {
+void SdlGpuRenderer::makeImposterPipelines(const std::filesystem::path& shaders) {
         SDL_GPUShader* imposterVertex = loadShader(device_, shaders, "imposter.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0);
         SDL_GPUShader* imposterFragment = loadShader(device_, shaders, "imposter.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
         SDL_GPUVertexBufferDescription buffer{};
@@ -355,7 +355,7 @@ void Renderer::makeImposterPipelines(const std::filesystem::path& shaders) {
 }
 
 // A lot skirt's boundary curtain: one-sided walls written into depth, never into colour.
-void Renderer::makeClipPipeline(const std::filesystem::path& shaders) {
+void SdlGpuRenderer::makeClipPipeline(const std::filesystem::path& shaders) {
         SDL_GPUShader* clipVertex = loadShader(device_, shaders, "clip.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0);
         SDL_GPUShader* clipFragment = loadShader(device_, shaders, "clip.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 0);
         SDL_GPUVertexBufferDescription buffer{};
@@ -394,7 +394,7 @@ void Renderer::makeClipPipeline(const std::filesystem::path& shaders) {
 }
 
 // The sky seen in the neighborhood water: behind everything, no depth.
-void Renderer::makeSkyPipeline(const std::filesystem::path& shaders) {
+void SdlGpuRenderer::makeSkyPipeline(const std::filesystem::path& shaders) {
         SDL_GPUShader* skyVertex = loadShader(device_, shaders, "sky.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0, 0);
         SDL_GPUShader* skyFragment = loadShader(device_, shaders, "sky.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
         SDL_GPUColorTargetDescription color{};
@@ -418,7 +418,7 @@ void Renderer::makeSkyPipeline(const std::filesystem::path& shaders) {
 }
 
 // The neighborhood water sheet: blended over what is below, testing depth without writing it.
-void Renderer::makeWaterPipeline(const std::filesystem::path& shaders) {
+void SdlGpuRenderer::makeWaterPipeline(const std::filesystem::path& shaders) {
         SDL_GPUShader* waterVertex = loadShader(device_, shaders, "water.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0);
         SDL_GPUShader* waterFragment = loadShader(device_, shaders, "water.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 2);
         SDL_GPUVertexBufferDescription buffer{};

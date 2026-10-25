@@ -18,6 +18,7 @@ int main(int argc, char** argv) {
     for (auto& t : sceneTests()) tests.push_back(t);
     for (auto& t : assetTests()) tests.push_back(t);
     for (auto& t : lightingTests()) tests.push_back(t);
+    for (auto& t : renderPlanTests()) tests.push_back(t);
     for (auto& t : contentTests()) tests.push_back(t);
     for (auto& t : uiAndDiagTests()) tests.push_back(t);
 #ifdef NEOTS2_TEXT_LAYOUT_TESTS

@@ -111,6 +111,21 @@ cmake --build build --config Release
 This builds `neots2`. Without SDL 3 or DXC, the libraries, tools and tests still build; the app
 is skipped.
 
+### OpenGL 2 renderer
+
+NeoTS2 draws with SDL's GPU API (Direct3D 12 on Windows, Metal on macOS, Vulkan elsewhere). It can also draw with
+OpenGL 2.1, for systems with no more: start it with `--renderer gl2` (the launcher has a Graphics
+choice). It is not built unless you ask for it with `-DNEOTS2_GL2=ON`, which needs `spirv-cross` (from the Vulkan SDK
+or your package manager; or give `-DNEOTS2_SPIRV_CROSS=<path>`). The launcher offers it only in a build that has it.
+If it can't start (a driver below OpenGL 2.1), the game says so and draws with the default renderer.
+Its GLSL 1.20 shaders are made from the same HLSL by DXC (built with SPIR-V) and SPIRV-Cross.
+
+The OpenGL 2 renderer draws the same things, some another way: the neighborhood terrain takes a pass
+for each paint texture (there are no texture arrays) and Sims are posed on the CPU. The water's reflection
+and the pictures drawn off-screen (portraits) need framebuffer objects: without them the reflection is left
+out and the pictures are drawn in a corner of the window. Scenes are uploaded on other threads where the
+driver lets contexts share objects.
+
 A build from this source starts from the command line:
 
 ```
