@@ -138,6 +138,7 @@ private:
     // What prepare gathers on any thread, for swap to upload on the drawing thread.
     struct Staged {
         std::vector<scene::Image> images;
+        const std::vector<scene::Image>* borrowed = nullptr;  // the scene's own, when it outlives the upload: nothing is copied
         std::set<std::size_t> noMips;  // light maps, drawn without smaller levels
         std::vector<GpuMesh> meshes;
         MeshData meshData;
@@ -176,7 +177,7 @@ private:
     void forgetBindings();
 
     // Gathering and uploading (gl_upload.cpp).
-    static std::unique_ptr<Staged> stage(const scene::Scene& scene);
+    static std::unique_ptr<Staged> stage(const scene::Scene& scene, bool copyImages = true);
     void uploadStaged(SceneGpu& gpu, Staged& staged);
     Texture uploadTexture(const scene::Image& image, bool mips, bool anisotropic = true);
     Texture uploadRaw(unsigned width, unsigned height, const std::uint8_t* rgba, bool nearest);
@@ -240,6 +241,7 @@ private:
     mutable std::mutex poolLock_;
     mutable std::condition_variable poolFree_;
     mutable std::vector<SharedContext> pool_;
+    bool closing_ = false;  // the pool is being destroyed (under poolLock_): no context is lent any more
     gl::Api gl_;
     std::shared_ptr<Graveyard> graveyard_ = std::make_shared<Graveyard>();
     std::string vendor_, renderer_, version_;

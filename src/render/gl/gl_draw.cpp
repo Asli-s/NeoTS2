@@ -166,7 +166,9 @@ void GlRenderer::poseSkinned(const GpuPrimitive& p, const MeshBuffers& buffers, 
     const float* source = &buffers.cpuVertices[static_cast<std::size_t>(p.firstVertex) * kVertexFloats];
     const std::uint8_t* skin = &buffers.cpuSkin[p.firstSkin];
     const float* joints = jointData_.data();
-    const auto base = static_cast<std::size_t>(jointBase_[instance]);
+    // The joint ids are the mesh file's: one past the joints there are is skipped, as 255 is.
+    const std::size_t jointTotal = jointData_.size() / 12;
+    const std::size_t base = instance < jointBase_.size() && jointBase_[instance] >= 0 ? static_cast<std::size_t>(jointBase_[instance]) : jointTotal;
     for (std::size_t v = 0; v < p.vertices; ++v) {
         const float* in = source + v * kVertexFloats;
         float* out = &scratch_[v * kVertexFloats];
@@ -176,7 +178,7 @@ void GlRenderer::poseSkinned(const GpuPrimitive& p, const MeshBuffers& buffers, 
         std::memcpy(weights, ids + 4, sizeof(weights));
         float position[3] = {}, normal[3] = {}, tangent[3] = {};
         for (int k = 0; k < 4; ++k) {
-            if (ids[k] == 255 || !(weights[k] > 0)) {
+            if (ids[k] == 255 || !(weights[k] > 0) || base + ids[k] >= jointTotal) {
                 continue;
             }
             const float* m = joints + (base + ids[k]) * 12;
@@ -197,9 +199,9 @@ void GlRenderer::poseSkinned(const GpuPrimitive& p, const MeshBuffers& buffers, 
     const auto bytes = static_cast<GLsizeiptr>(scratch_.size() * sizeof(float));
     gl_.BindBuffer(GL_ARRAY_BUFFER, streamVertices_);
     arrayBuffer_ = streamVertices_;
-    // The buffer is let go of first, so the driver needn't wait for the draws still reading the last one.
+    // Orphaned first, so the driver needn't wait for the draws still reading the last one, then filled.
     gl_.BufferData(GL_ARRAY_BUFFER, bytes, nullptr, GL_STREAM_DRAW);
-    gl_.BufferData(GL_ARRAY_BUFFER, bytes, scratch_.data(), GL_STREAM_DRAW);
+    gl_.BufferSubData(GL_ARRAY_BUFFER, 0, bytes, scratch_.data());
 }
 
 // Draws primitives with the scene program (`blend` 1 for the blending ones).

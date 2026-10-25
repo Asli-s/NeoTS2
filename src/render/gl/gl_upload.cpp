@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 namespace ts2::render {
@@ -121,6 +122,11 @@ void GlRenderer::releaseBuffer(GLuint& buffer) {
 
 // A texture of a complete image, with mip levels unless `mips` is false.
 GlRenderer::Texture GlRenderer::uploadTexture(const scene::Image& image, bool mips, bool anisotropic) {
+    // One the driver can't hold is left out, and is drawn as the white one is.
+    const auto largest = static_cast<std::uint32_t>(gl_.maxTextureSize);
+    if (image.width > largest || image.height > largest) {
+        return Texture{};
+    }
     Texture t;
     t.target = GL_TEXTURE_2D;
     t.mips = mips && (image.width > 1 || image.height > 1);
@@ -163,6 +169,9 @@ GlRenderer::Texture GlRenderer::uploadCube(const std::vector<scene::Image>& face
         return t;
     }
     const auto& face = faces.front();
+    if (face.width > static_cast<std::uint32_t>(gl_.maxTextureSize)) {
+        return t;
+    }
     for (const auto& f : faces) {
         if (f.width != face.width || f.height != face.height || !complete(f)) {
             return t;
@@ -206,9 +215,14 @@ GlRenderer::MeshBuffers GlRenderer::uploadMeshBuffers(MeshData& data) {
 }
 
 // What a scene is uploaded from, gathered on any thread.
-std::unique_ptr<GlRenderer::Staged> GlRenderer::stage(const scene::Scene& scene) {
+// The images are copied unless `copyImages` is false, when the scene is to be alive for the upload.
+std::unique_ptr<GlRenderer::Staged> GlRenderer::stage(const scene::Scene& scene, bool copyImages) {
     auto s = std::make_unique<Staged>();
-    s->images = scene.images;
+    if (copyImages) {
+        s->images = scene.images;
+    } else {
+        s->borrowed = &scene.images;
+    }
     if (scene.lightMaps) {
         for (const int i : scene.lightMaps->floors) s->noMips.insert(static_cast<std::size_t>(i));
         for (const int i : scene.lightMaps->floorIncidence) s->noMips.insert(static_cast<std::size_t>(i));
@@ -232,11 +246,14 @@ std::unique_ptr<GlRenderer::Staged> GlRenderer::stage(const scene::Scene& scene)
 
 void GlRenderer::uploadStaged(SceneGpu& gpu, Staged& staged) {
     diag::Timer timer("upload scene");
-    gpu.textures.reserve(staged.images.size());
-    for (std::size_t i = 0; i < staged.images.size(); ++i) {
-        gpu.textures.push_back(complete(staged.images[i]) ? uploadTexture(staged.images[i], !staged.noMips.contains(i)) : Texture{});
-        // The pixels are on the GPU: the copy made to carry them here isn't needed any more.
-        staged.images[i] = scene::Image{};
+    const std::vector<scene::Image>& images = staged.borrowed ? *staged.borrowed : staged.images;
+    gpu.textures.reserve(images.size());
+    for (std::size_t i = 0; i < images.size(); ++i) {
+        gpu.textures.push_back(complete(images[i]) ? uploadTexture(images[i], !staged.noMips.contains(i)) : Texture{});
+        if (!staged.borrowed) {
+            // The pixels are on the GPU: the copy made to carry them here isn't needed any more.
+            staged.images[i] = scene::Image{};
+        }
     }
     gpu.white = uploadTexture({1, 1, {255, 255, 255, 255}, {}}, false);
     gpu.meshes = std::move(staged.meshes);
@@ -277,9 +294,37 @@ void GlRenderer::makeSharedContexts(unsigned count) {
     SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 0);
     // Making one current again is what made them current here.
     SDL_GL_MakeCurrent(window_, context_);
+    // Some systems (EGL on Wayland, macOS) can't make a context current on the window from another thread.
+    // One is tried on a thread now, and the pool is given up when that fails.
+    if (!pool_.empty()) {
+        bool works = false;
+        std::thread([&] {
+            works = SDL_GL_MakeCurrent(window_, pool_.front().context);
+            if (works) {
+                SDL_GL_MakeCurrent(window_, nullptr);
+            }
+        }).join();
+        if (!works) {
+            destroySharedContexts();
+            closing_ = false;
+            SDL_GL_MakeCurrent(window_, context_);
+        }
+    }
 }
 
 void GlRenderer::destroySharedContexts() {
+    std::unique_lock lock(poolLock_);
+    // Waits for the contexts a thread is uploading in, and lets none be taken after this.
+    closing_ = true;
+    poolFree_.notify_all();
+    poolFree_.wait(lock, [&] {
+        for (const auto& shared : pool_) {
+            if (shared.busy) {
+                return false;
+            }
+        }
+        return true;
+    });
     for (const auto& shared : pool_) {
         SDL_GL_DestroyContext(shared.context);
     }
@@ -293,6 +338,9 @@ std::unique_ptr<GlRenderer::SceneGpu> GlRenderer::uploadShared(const scene::Scen
     {
         std::unique_lock lock(poolLock_);
         poolFree_.wait(lock, [&] {
+            if (closing_) {
+                return true;
+            }
             for (auto& shared : pool_) {
                 if (!shared.busy) {
                     mine = &shared;
@@ -301,18 +349,22 @@ std::unique_ptr<GlRenderer::SceneGpu> GlRenderer::uploadShared(const scene::Scen
             }
             return false;
         });
+        if (mine == nullptr) {
+            return nullptr;
+        }
         mine->busy = true;
     }
     std::unique_ptr<SceneGpu> gpu;
     if (SDL_GL_MakeCurrent(window_, mine->context)) {
         // This touches nothing but what this thread made: the caches of what is bound are the drawing thread's.
         auto* self = const_cast<GlRenderer*>(this);
-        auto staged = stage(scene);
+        auto staged = stage(scene, false);  // the scene is alive until this returns
         gpu = std::make_unique<SceneGpu>();
         try {
             self->uploadStaged(*gpu, *staged);
             self->gl_.Finish();
         } catch (...) {
+            gpu->release(*graveyard_);
             gpu.reset();
         }
         SDL_GL_MakeCurrent(window_, nullptr);
@@ -321,7 +373,7 @@ std::unique_ptr<GlRenderer::SceneGpu> GlRenderer::uploadShared(const scene::Scen
         std::lock_guard lock(poolLock_);
         mine->busy = false;
     }
-    poolFree_.notify_one();
+    poolFree_.notify_all();
     return gpu;
 }
 
@@ -347,7 +399,11 @@ IRenderer::Prepared GlRenderer::swap(Prepared prepared) {
     if (!prepared.get()) {
         prepared = Prepared(std::make_unique<GpuPrepared>());
     }
-    auto& p = static_cast<GpuPrepared&>(*prepared.get());
+    auto* made = dynamic_cast<GpuPrepared*>(prepared.get());
+    if (made == nullptr) {
+        throw std::logic_error("a scene prepared by another renderer was given to the OpenGL 2 one");
+    }
+    auto& p = *made;
     p.graveyard = graveyard_;
     if (!p.gpu) {
         p.gpu = std::make_unique<SceneGpu>();

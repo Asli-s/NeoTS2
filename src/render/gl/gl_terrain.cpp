@@ -192,10 +192,8 @@ void GlRenderer::drawTerrain(const FrameView& f, const Mat4& viewProjection, boo
     attributes(0, 3, stride, 0);
     attributes(1, 3, stride, 3 * sizeof(float));
     attributes(2, 2, stride, 6 * sizeof(float));
-    std::vector<std::uint8_t> slices = g.terrainSlices;
-    if (slices.empty()) {
-        slices.push_back(0);
-    }
+    static const std::vector<std::uint8_t> kFirstSlice{0};
+    const std::vector<std::uint8_t>& slices = g.terrainSlices.empty() ? kFirstSlice : g.terrainSlices;
     for (std::size_t pass = 0; pass < slices.size(); ++pass) {
         const std::size_t slice = slices[pass];
         if (slice >= g.terrainPaints.size()) {

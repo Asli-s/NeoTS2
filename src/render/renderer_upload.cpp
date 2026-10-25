@@ -207,7 +207,11 @@ IRenderer::Prepared SdlGpuRenderer::swap(Prepared prepared) {
     if (!prepared.get()) {
         prepared = Prepared(std::make_unique<GpuPrepared>());
     }
-    auto& p = static_cast<GpuPrepared&>(*prepared.get());
+    auto* made = dynamic_cast<GpuPrepared*>(prepared.get());
+    if (made == nullptr) {
+        throw std::logic_error("a scene prepared by another renderer was given to the SDL GPU one");
+    }
+    auto& p = *made;
     if (!p.gpu) {
         p.gpu = std::make_unique<SceneGpu>();
     }

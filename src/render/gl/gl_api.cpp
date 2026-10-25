@@ -28,11 +28,21 @@ bool Api::load(const char*& missing) {
     }
     GetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTextureSize);
 
-    framebuffers = hasExtension("GL_EXT_framebuffer_object");
+    // Framebuffer objects: the EXT extension, or the same functions without the suffix that GL 3.0 and
+    // GL_ARB_framebuffer_object have (their constants are the same).
+    const bool ext = hasExtension("GL_EXT_framebuffer_object");
+    const bool core = majorVersion >= 3 || hasExtension("GL_ARB_framebuffer_object");
+    framebuffers = ext || core;
     if (framebuffers) {
-#define TS2_GL_LOAD_OPTIONAL(name)                                                       \
-    name = reinterpret_cast<decltype(name)>(SDL_GL_GetProcAddress("gl" #name));          \
-    framebuffers = framebuffers && name != nullptr;
+#define TS2_GL_LOAD_OPTIONAL(name)                                                                       \
+    {                                                                                                    \
+        std::string function = "gl" #name;                                                               \
+        if (!ext) {                                                                                      \
+            function.resize(function.size() - 3);                                                        \
+        }                                                                                                \
+        name = reinterpret_cast<decltype(name)>(SDL_GL_GetProcAddress(function.c_str()));                \
+        framebuffers = framebuffers && name != nullptr;                                                  \
+    }
         TS2_GL_FRAMEBUFFER(TS2_GL_LOAD_OPTIONAL)
 #undef TS2_GL_LOAD_OPTIONAL
     }
