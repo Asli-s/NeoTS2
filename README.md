@@ -129,7 +129,7 @@ driver lets contexts share objects.
 ### OpenGL 1 renderer (work in progress)
 
 `--renderer gl1` draws without shaders, with the fixed pipeline of OpenGL 1.5, as a step toward
-older hardware. It needs neither DXC nor SPIRV-Cross, and is left out with `-DNEOTS2_GL1=OFF`. The
+older hardware. It needs neither DXC nor SPIRV-Cross, and is built where SDL's GPU renderer is not available, or with `-DNEOTS2_GL1=ON`. The
 game's lighting is worked out for each vertex on the CPU. It draws lots, the neighborhood (terrain,
 roads, lot imposters, a flat water without a reflection, the sky) and the UI, and leaves out normal
 maps, specular and environment cubes. Floors and walls draw their texture and then multiply their

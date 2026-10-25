@@ -1594,16 +1594,16 @@ void Game::handleEvent(const pf::Event& e) {
     }
     const bool freeToggle = e.type == pf::Event::Type::KeyDown && !e.repeat && inLot_ && !quitBox_.isOpen() &&
                             (e.scancode == pf::Key::Tab || e.scancode == pf::Key::Y || (freeCam_ && e.scancode == pf::Key::Escape));
-    if (e.type == pf::Event::Type::KeyDown && !e.repeat && e.key == pf::Key::F9) {
+    if (e.type == pf::Event::Type::KeyDown && !e.repeat && e.key == pf::Key::F9 && renderer_.fixedPipeline()) {
         // Compares the two ways the OpenGL 1 renderer draws the neighborhood's terrain and roads (the others have only one).
         singleTextureTerrain_ = !singleTextureTerrain_;
         renderer_.setSingleTextureTerrain(singleTextureTerrain_);
         ts2::diag::info(singleTextureTerrain_ ? "terrain and roads: one texture a pass (F9)" : "terrain and roads: two texture units (F9)");
-    } else if (e.type == pf::Event::Type::KeyDown && !e.repeat && e.key == pf::Key::F10) {
+    } else if (e.type == pf::Event::Type::KeyDown && !e.repeat && e.key == pf::Key::F10 && renderer_.fixedPipeline()) {
         overbright_ = !overbright_;
         renderer_.setOverbrightLight(overbright_);
         ts2::diag::info(overbright_ ? "object light: brighter than the textures (F10)" : "object light: no brighter than the textures (F10)");
-    } else if (e.type == pf::Event::Type::KeyDown && !e.repeat && e.key == pf::Key::F11) {
+    } else if (e.type == pf::Event::Type::KeyDown && !e.repeat && e.key == pf::Key::F11 && renderer_.fixedPipeline()) {
         vertexLightMaps_ = !vertexLightMaps_;
         renderer_.setVertexLightMaps(vertexLightMaps_);
         ts2::diag::info(vertexLightMaps_ ? "floors and walls: light taken at the vertices (F11)" : "floors and walls: light map multiplied in (F11)");

@@ -65,6 +65,7 @@ public:
     void setLightMapFade(float fade) override;
     void setSkybox(const std::vector<scene::Image>& faces) override;
     void setSingleTextureTerrain(bool on) override { singleTextureTerrain_ = on; }
+    [[nodiscard]] bool fixedPipeline() const override { return fixed_; }
     void setOverbrightLight(bool on) override { overbright_ = on; }
     void setVertexLightMaps(bool on) override;
 

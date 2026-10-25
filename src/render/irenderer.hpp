@@ -168,6 +168,9 @@ public:
     // is how the oldest hardware has to draw them, and its default). Off draws them with two texture
     // units. The others leave it alone.
     virtual void setSingleTextureTerrain(bool on) { (void)on; }
+    // Whether this is the renderer those three choices are for (the OpenGL 1 renderer), so a key for them
+    // can be left alone in the others.
+    [[nodiscard]] virtual bool fixedPipeline() const { return false; }
     // Whether objects may be lit brighter than their textures (the game's lights add up past 1), where the
     // renderer has a choice (the OpenGL 1 renderer, through its texture environment's scale: on by
     // default; the Dreamcast has no such scale). Off clamps the light at 1. The others leave it alone.
