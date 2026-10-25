@@ -174,6 +174,9 @@ reference (none of its code is used). The AI has likely picked up general knowle
 formats and where things are stored, from public community work such as
 [OpenTS2](https://github.com/LazyDuchess/OpenTS2). None of OpenTS2's code is used.
 
+Thanks to [kouta-kun](https://github.com/kouta-kun) for the Linux build, the Vulkan path, the
+OpenGL 2 renderer and the Mac OS X PowerPC port.
+
 The app and launcher icons are hand-drawn by me.
 
 The launcher uses [Dear ImGui](https://github.com/ocornut/imgui) (MIT) and the
