@@ -26,6 +26,7 @@
 #include "formats/nhood_paint_rules.hpp"
 #include "menu.hpp"
 #include "message_box.hpp"
+#include "open_renderer.hpp"
 #include "neighborhood.hpp"
 #include "lot_life.hpp"
 #include "lot_daylight.hpp"
@@ -480,15 +481,11 @@ int main(int argc, char** argv) {
         auto& scene = builder.scene();
         const int top = ts2::scene::topLevel(scene);
 
-        SDL_Window* window = SDL_CreateWindow("NeoTS2", 1280, 800,
-                                              SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | ts2::render::windowFlagsFor(options.backend) |
-                                                  (shot ? SDL_WINDOW_HIDDEN : 0));
-        if (window == nullptr) {
-            throw std::runtime_error(SDL_GetError());
-        }
+        SDL_Window* window = nullptr;
         const std::filesystem::path shaders = utf8Path(SDL_GetBasePath()) / "shaders";
         {
-            const auto rendererOwner = ts2::render::makeRenderer(options.backend, window, shaders);
+            const auto rendererOwner = app::openRenderer(window, options.backend, 1280, 800,
+                                                         SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | (shot ? SDL_WINDOW_HIDDEN : 0), shaders, shot);
             ts2::render::IRenderer& renderer = *rendererOwner;
             renderer.setBumpMapping(options.bumpMapping);
             renderer.setFloorAndWallNormalMapping(options.wallBumps);

@@ -490,7 +490,7 @@ else()
 
         # The OpenGL 2 renderer (for systems with no more) draws with GLSL 1.20 made from the same HLSL,
         # which needs SPIRV-Cross (the spirv-cross tool, from the Vulkan SDK or a package) and a dxc built with SPIR-V.
-        option(NEOTS2_GL2 "Build the OpenGL 2 renderer" ON)
+        option(NEOTS2_GL2 "Build the OpenGL 2 renderer (needs spirv-cross)" OFF)
         find_program(NEOTS2_SPIRV_CROSS spirv-cross)
         set(gl2_enabled OFF)
         if(NEOTS2_GL2 AND NEOTS2_SPIRV_CROSS)
@@ -551,7 +551,7 @@ else()
         target_compile_definitions(vm_tests PRIVATE NEOTS2_TEXT_LAYOUT_TESTS)
 
         add_executable(neots2 app/main.cpp app/menu.cpp app/neighborhood.cpp app/neighborhood_ui.cpp app/lot_life.cpp app/object_materials.cpp app/lot_light.cpp app/lot_daylight.cpp app/route_sources.cpp app/lot_ui.cpp app/live_panel.cpp app/job_panel.cpp app/memories_page.cpp app/age_meter.cpp app/queue_panel.cpp app/pie_menu_ui.cpp app/mood_meter.cpp app/aspiration_bars.cpp app/pause_frame.cpp app/needs_panel.cpp app/personality_page.cpp app/relationships_panel.cpp app/rewards_panel.cpp app/simology_panel.cpp app/skewer.cpp app/wants_panel.cpp app/portraits.cpp app/cursors.cpp
-                       app/diagnostics.cpp app/crash_handler.cpp app/crash_dialog.cpp app/unexpected_exit.cpp app/report_upload.cpp app/message_box.cpp)
+                       app/diagnostics.cpp app/crash_handler.cpp app/crash_dialog.cpp app/unexpected_exit.cpp app/report_upload.cpp app/message_box.cpp app/open_renderer.cpp)
         target_link_libraries(neots2 PRIVATE ts2render ts2ui ts2sim ts2diag project_warnings)
         add_dependencies(neots2 neots2_shaders neots2_version)
         if(gl2_enabled)
@@ -624,6 +624,10 @@ else()
                        app/launcher/launcher_style.cpp app/launcher/running_games.cpp ${launcher_font_sources})
         target_include_directories(neots2-launcher PRIVATE app)
         target_link_libraries(neots2-launcher PRIVATE ts2paths ts2settings imgui SDL3::SDL3 project_warnings)
+        if(gl2_enabled)
+            # So that it offers the OpenGL 2 choice only when the game has that renderer.
+            target_compile_definitions(neots2-launcher PRIVATE NEOTS2_GL2=1)
+        endif()
         if(WIN32)
             target_sources(neots2-launcher PRIVATE app/launcher/launcher.rc app/launcher/launcher.manifest)
         endif()

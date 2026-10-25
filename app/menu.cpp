@@ -6,6 +6,7 @@
 #include "cursors.hpp"
 #include "free_camera.hpp"
 #include "message_box.hpp"
+#include "open_renderer.hpp"
 #include "neighborhood.hpp"
 #include "lot_daylight.hpp"
 #include "lot_life.hpp"
@@ -1745,13 +1746,10 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
     ts2::diag::info(std::format("{} UI and text packages, {} font faces", data.packageCount(), fonts.faceCount()));
 
     const int width = options.width, height = options.height;
-    SDL_Window* window = SDL_CreateWindow("NeoTS2", width, height,
-                                          ts2::render::windowFlagsFor(options.backend) | (options.shot.empty() ? 0 : SDL_WINDOW_HIDDEN));
-    if (window == nullptr) {
-        throw std::runtime_error(SDL_GetError());
-    }
+    SDL_Window* window = nullptr;
     {
-        const auto rendererOwner = ts2::render::makeRenderer(options.backend, window, shaders);
+        const auto rendererOwner = app::openRenderer(window, options.backend, width, height, options.shot.empty() ? 0 : SDL_WINDOW_HIDDEN, shaders,
+                                                     !options.shot.empty());
         ts2::render::IRenderer& renderer = *rendererOwner;
         renderer.setBumpMapping(options.bumpMapping);
         renderer.setFloorAndWallNormalMapping(options.wallBumps);
