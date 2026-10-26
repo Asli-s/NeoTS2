@@ -15,7 +15,9 @@
 #include <charconv>
 #include <cmath>
 #include <map>
+#include <locale>
 #include <optional>
+#include <sstream>
 #include <string_view>
 
 namespace sg = ts2::scenegraph;
@@ -66,9 +68,13 @@ float stretchOf(const std::map<std::string, std::string>& p) {
     if (it == p.end()) {
         return 1;
     }
+    // Floating-point from_chars is unavailable in libc++ before macOS 26.  The classic locale
+    // keeps the game's dot decimal separator independent of the player's regional settings.
+    std::istringstream input{it->second};
+    input.imbue(std::locale::classic());
     float value = 1;
-    const auto [end, error] = std::from_chars(it->second.data(), it->second.data() + it->second.size(), value);
-    return error == std::errc{} && std::isfinite(value) ? std::clamp(value, 0.02f, 50.0f) : 1.0f;
+    input >> std::noskipws >> value;
+    return input && input.eof() && std::isfinite(value) ? std::clamp(value, 0.02f, 50.0f) : 1.0f;
 }
 
 // The Sim's skeleton model, read as the game does: older files name its key outright (and then

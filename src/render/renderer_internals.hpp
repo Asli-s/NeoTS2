@@ -19,16 +19,25 @@ namespace ts2::render::render_detail {
 
 constexpr std::uint32_t kSpriteFloats = 8;  // position, texture coordinates, color
 
-// Windows draws with Direct3D 12 and DXIL shaders, other systems with Vulkan and SPIR-V shaders.
+// Windows draws with Direct3D 12 and DXIL shaders; macOS draws with Metal and MSL shaders.
 // The build makes only that kind, so the device must not fall back to the other.
 #ifdef _WIN32
 constexpr SDL_GPUShaderFormat kShaderFormat = SDL_GPU_SHADERFORMAT_DXIL;
 constexpr const char* kShaderExtension = ".dxil";
 constexpr const char* kGraphicsApi = "Direct3D 12";
+#elif defined(__APPLE__)
+constexpr SDL_GPUShaderFormat kShaderFormat = SDL_GPU_SHADERFORMAT_MSL;
+constexpr const char* kShaderExtension = ".msl";
+constexpr const char* kShaderEntrypoint = "main0";
+constexpr const char* kGraphicsApi = "Metal";
 #else
 constexpr SDL_GPUShaderFormat kShaderFormat = SDL_GPU_SHADERFORMAT_SPIRV;
 constexpr const char* kShaderExtension = ".spv";
 constexpr const char* kGraphicsApi = "Vulkan";
+#endif
+
+#ifndef __APPLE__
+constexpr const char* kShaderEntrypoint = "main";
 #endif
 
 inline std::runtime_error sdlError(const char* what) {

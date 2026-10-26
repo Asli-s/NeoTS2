@@ -111,6 +111,32 @@ cmake --build build --config Release
 This builds `neots2`. Without SDL 3 or DXC, the libraries, tools and tests still build; the app
 is skipped.
 
+### macOS (Apple Silicon)
+
+NeoTS2 can run natively on macOS: it does **not** run the original Windows executable. Instead,
+it reads the data files from your own Windows Ultimate Collection installation and renders through
+Metal. Copy that installation to the Mac (or make it available on a mounted volume), keeping the
+pack folders such as `Double Deluxe` and `Fun with Pets` together.
+
+With [Homebrew](https://brew.sh/), install the build dependencies and make the native arm64 apps:
+
+```
+brew install cmake sdl3 shaderc spirv-cross freetype
+cmake -S . -B build-macos -DNEOTS2_STRICT=OFF
+cmake --build build-macos --target neots2 neots2-launcher --parallel
+```
+
+Start `build-macos/neots2-launcher`, choose the copied game folder when asked, then choose or make
+a save folder in your Documents directory. The launcher remembers both choices. For a direct start:
+
+```
+build-macos/neots2 "<The Sims 2 install folder>" --menu --user "<save folder>"
+```
+
+The macOS build uses Shaderc (`glslc`) to compile the project's HLSL shaders to SPIR-V, then
+SPIRV-Cross to make the MSL shaders that SDL 3 loads with its Metal backend. DXC's official binary
+releases do not provide a macOS executable.
+
 ### OpenGL 2 renderer
 
 NeoTS2 draws with SDL's GPU API (Direct3D 12 on Windows, Metal on macOS, Vulkan elsewhere). It can also draw with

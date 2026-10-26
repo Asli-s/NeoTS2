@@ -177,6 +177,8 @@ struct Reader {
     std::size_t bytes = 0;  // read and expanded so far, including macro lines left out for their length
     bool followIncludes = true;
 
+    explicit Reader(Lighting& lighting) : out(lighting) {}
+
     bool full() {
         if (lines < kMaxLines && bytes < kMaxBytes) {
             return false;

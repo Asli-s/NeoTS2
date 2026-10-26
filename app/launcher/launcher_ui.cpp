@@ -602,7 +602,7 @@ void findInstalls(LauncherState& state, const settings::LauncherSettings& rememb
     state.remembered = chosenSettings(state);
 }
 
-// What draws the game: its own choice (Direct3D 12 or Vulkan), or OpenGL 2 for systems with no more
+// What draws the game: its own choice (Direct3D 12, Metal or Vulkan), or OpenGL 2 for systems with no more
 // (offered only when the game is built with it).
 void drawRenderer(LauncherState& state, const LauncherFonts& fonts) {
     heading(fonts, "Graphics");
@@ -611,7 +611,13 @@ void drawRenderer(LauncherState& state, const LauncherFonts& fonts) {
         const char* label;
     };
     static constexpr Choice kChoices[] = {
-        {"", "Automatic (Direct3D 12 or Vulkan)"},
+#ifdef __APPLE__
+        {"", "Automatic (Metal)"},
+#elif defined(_WIN32)
+        {"", "Automatic (Direct3D 12)"},
+#else
+        {"", "Automatic (Vulkan)"},
+#endif
 #ifdef NEOTS2_GL2
         {"gl2", "OpenGL 2 (for older systems)"},
 #endif

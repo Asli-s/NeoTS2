@@ -7,13 +7,13 @@ cbuffer Frame : register(b0, space1) {
 struct Input {
     float3 position : TEXCOORD0;
     float2 uv : TEXCOORD1;
-    float texture : TEXCOORD2;
+    float textureLayer : TEXCOORD2;
 };
 
 struct Output {
     float4 position : SV_Position;
     float2 uv : TEXCOORD0;
-    float texture : TEXCOORD1;
+    float textureLayer : TEXCOORD1;
     float2 ground : TEXCOORD2;  // x and y in world units
 };
 
@@ -21,7 +21,7 @@ Output main(Input input) {
     Output output;
     output.position = mul(viewProjection, float4(input.position, 1));
     output.uv = input.uv;
-    output.texture = input.texture;
+    output.textureLayer = input.textureLayer;
     output.ground = input.position.xy;
     return output;
 }
