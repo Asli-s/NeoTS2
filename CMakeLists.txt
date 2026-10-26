@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(NeoTS2 VERSION 0.2.0 LANGUAGES C CXX)
+project(NeoTS2 VERSION 0.2.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -578,8 +578,14 @@ else()
             list(APPEND shader_outputs ${output})
             if(APPLE)
                 set(msl_output ${shader_dir}/${shader}.msl)
+                set(msl_binding_options)
+                if(shader MATCHES "frag$")
+                    # Fragment shaders sample SDL slot n from Metal texture and sampler n.
+                    # Keep the HLSL register numbers instead of compacting active resources.
+                    set(msl_binding_options --msl-decoration-binding)
+                endif()
                 add_custom_command(OUTPUT ${msl_output}
-                    COMMAND ${NEOTS2_SPIRV_CROSS} ${output} --msl --msl-version 23000 --output ${msl_output}
+                    COMMAND ${NEOTS2_SPIRV_CROSS} ${output} --msl --msl-version 23000 ${msl_binding_options} --output ${msl_output}
                     DEPENDS ${output}
                     COMMENT "Making Metal shader ${shader}.hlsl")
                 list(APPEND shader_outputs ${msl_output})

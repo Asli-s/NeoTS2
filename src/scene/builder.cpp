@@ -348,8 +348,8 @@ int SceneBuilder::material(const std::string& name) {
     }
     const auto c = diffuse(m);
     out.color = {c[0], c[1], c[2], 1};
-    if (const std::string texture = property(m, "stdMatBaseTextureName");
-        !texture.empty() && property(m, "stdMatBaseTextureEnabled") == "true") {
+    if (const std::string texture = property(m, "stdMatBaseTextureName"), enabled = property(m, "stdMatBaseTextureEnabled");
+        !texture.empty() && (enabled == "true" || enabled == "1")) {
         out.image = image(texture);
         baseTextures_[key] = texture;
     }
