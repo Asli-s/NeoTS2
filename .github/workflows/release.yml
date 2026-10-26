@@ -19,6 +19,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Install the app's libraries
         shell: pwsh
         run: vcpkg install sdl3 freetype --triplet x64-windows
@@ -45,6 +47,8 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Install the app's libraries
         run: brew install sdl3 shaderc spirv-cross freetype
       - name: Build and package
