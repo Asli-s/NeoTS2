@@ -23,6 +23,8 @@ const std::string kFont = "0x2966548b";  // "piemenu"
 constexpr std::array<float, 4> kTextNormal{178 / 255.f, 193 / 255.f, 1, 1};
 constexpr std::array<float, 4> kTextHighlighted{0, 1, 0, 1};
 constexpr std::array<float, 4> kTextDisabled{80 / 255.f, 80 / 255.f, 80 / 255.f, 1};
+// "More...": string 0x19 of table 0xAB in the UI text.
+constexpr std::uint32_t kUiText = 0x7FA7DC7C, kMoreText = 0x00AB0019;  // string ids, leakcheck: ok
 
 std::uint32_t knobPiece(pie::Shape shape) {
     switch (shape) {
@@ -61,6 +63,8 @@ ts2::ui::Window text(int x, int y, int w, int h, const std::string& caption) {
 
 } // namespace
 
+PieMenuUi::PieMenuUi(ts2::ui::Screen& screen, ts2::content::UiData& data) : screen_(screen), moreText_(data.text(kUiText, kMoreText)) {}
+
 void PieMenuUi::open(std::vector<ts2::sim::PieChoice> choices, int x, int y, int screenWidth, int screenHeight) {
     close();
     choices_ = std::move(choices);
@@ -97,7 +101,7 @@ void PieMenuUi::open(std::vector<ts2::sim::PieChoice> choices, int x, int y, int
     if (top_.empty()) {
         return;
     }
-    levels_ = {Level{&top_, x, y, nullptr}};
+    levels_ = {Level{&top_, 0, x, y, nullptr}};
     show(levels_.back());
 }
 
@@ -195,17 +199,22 @@ void PieMenuUi::show(const Level& level) {
     pressed_ = false;
 
     const auto textHeight = screen_.textSize(kFont, "Ag")[1];
+    page_ = pie::page(level.nodes->size(), level.first);
     std::vector<int> widths;
-    for (const auto& node : *level.nodes) {
-        widths.push_back(screen_.textSize(kFont, node.label)[0]);
+    if (page_.more) {
+        widths.push_back(screen_.textSize(kFont, moreText_)[0]);
+    }
+    for (std::size_t i = 0; i < page_.count; ++i) {
+        widths.push_back(screen_.textSize(kFont, (*level.nodes)[page_.first + i].label)[0]);
     }
     // A sub-menu goes round the item clicked. The head stays where the menu opened.
     const bool top = level.back == nullptr;
     layout_ = pie::layout(level.x, level.y, widths, textHeight, top ? kHeadWidth : 0, top ? kHeadHeight : 0, screenWidth_, screenHeight_);
-    for (std::size_t i = 0; i < level.nodes->size(); ++i) {
-        const Node& node = (*level.nodes)[i];
+    for (std::size_t i = 0; i < widths.size(); ++i) {
+        const auto entry = entryOf(i);
+        const Node* node = entry ? &(*level.nodes)[*entry] : nullptr;
         Shown s;
-        addItem(layout_.items[i], widths[i], top ? kNormalBase : kSubmenuBase, node.label, node.disabled, s);
+        addItem(layout_.items[i], widths[i], top ? kNormalBase : kSubmenuBase, node ? node->label : moreText_, node && node->disabled, s);
         shown_.push_back(s);
     }
     backItem_.reset();
@@ -272,7 +281,10 @@ std::optional<ts2::sim::PieChoice> PieMenuUi::mouse(int x, int y, Mouse what) {
                 show(levels_.back());
             } else if (!item) {
                 close();
-            } else if (!(*levels_.back().nodes)[*item].disabled) {
+            } else if (const auto entry = entryOf(*item); !entry) {
+                levels_.back().first = page_.next;
+                show(levels_.back());
+            } else if (!(*levels_.back().nodes)[*entry].disabled) {
                 return choose(*item);
             }
         }
@@ -282,9 +294,20 @@ std::optional<ts2::sim::PieChoice> PieMenuUi::mouse(int x, int y, Mouse what) {
     return std::nullopt;
 }
 
+std::optional<std::size_t> PieMenuUi::entryOf(std::size_t item) const {
+    if (page_.more && item == 0) {
+        return std::nullopt;
+    }
+    return page_.first + item - (page_.more ? 1 : 0);
+}
+
 // Picks the item: a choice closes the menu and is returned, a sub-menu opens round the item.
 std::optional<ts2::sim::PieChoice> PieMenuUi::choose(std::size_t item) {
-    const Node& node = (*levels_.back().nodes)[item];
+    const auto entry = entryOf(item);
+    if (!entry) {
+        return std::nullopt;
+    }
+    const Node& node = (*levels_.back().nodes)[*entry];
     if (node.choice) {
         auto chosen = choices_[*node.choice];
         close();
@@ -292,7 +315,7 @@ std::optional<ts2::sim::PieChoice> PieMenuUi::choose(std::size_t item) {
     }
     const auto& clicked = layout_.items[item];
     const auto size = screen_.textSize(kFont, node.label);
-    levels_.push_back(Level{&node.children, clicked.rect.x + clicked.textX + size[0] / 2, clicked.rect.y + clicked.textY + size[1] / 2, &node});
+    levels_.push_back(Level{&node.children, 0, clicked.rect.x + clicked.textX + size[0] / 2, clicked.rect.y + clicked.textY + size[1] / 2, &node});
     show(levels_.back());
     return std::nullopt;
 }

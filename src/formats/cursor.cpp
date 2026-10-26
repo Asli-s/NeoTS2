@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <exception>
+#include <stdexcept>
+#include <vector>
 
 namespace ts2::cursor {
 
@@ -17,7 +19,140 @@ std::size_t rowBytes(std::uint32_t width, std::uint32_t bits) {
     return (static_cast<std::size_t>(width) * bits + 31) / 32 * 4;
 }
 
+constexpr std::uint32_t fourCc(const char (&c)[5]) {
+    return static_cast<std::uint32_t>(static_cast<std::uint8_t>(c[0])) | static_cast<std::uint32_t>(static_cast<std::uint8_t>(c[1])) << 8 |
+           static_cast<std::uint32_t>(static_cast<std::uint8_t>(c[2])) << 16 | static_cast<std::uint32_t>(static_cast<std::uint8_t>(c[3])) << 24;
+}
+
+// The RIFF chunk ids an .ani file uses.
+constexpr std::uint32_t kRiff = fourCc("RIFF"), kAcon = fourCc("ACON"), kAnih = fourCc("anih"), kRate = fourCc("rate");
+constexpr std::uint32_t kSequence = fourCc("seq "), kList = fourCc("LIST"), kFrames = fourCc("fram"), kIcon = fourCc("icon");
+
+// The anih header's flag for pictures stored as .cur or .ico files (not raw bitmaps).
+constexpr std::uint32_t kFramesAreIcons = 1;
+constexpr std::size_t kAnihSize = 36;
+
+// Calls `chunk(id, data)` for each chunk in a RIFF chunk list. Each chunk is padded to an even size.
+template <typename Chunk>
+void forEachChunk(std::span<const std::uint8_t> list, Chunk&& chunk) {
+    BinaryReader r(list);
+    while (r.remaining() >= 8) {
+        const std::uint32_t id = r.u32(), size = r.u32();
+        chunk(id, r.bytes(size));
+        if (size % 2 != 0 && r.remaining() > 0) {
+            r.skip(1);
+        }
+    }
+}
+
+// A chunk of u32 values, one per step.
+std::vector<std::uint32_t> perStep(std::span<const std::uint8_t> chunk, std::uint32_t steps) {
+    if (chunk.size() < static_cast<std::size_t>(steps) * 4) {
+        throw std::runtime_error("ani: a per-step chunk is too short");
+    }
+    BinaryReader r(chunk);
+    std::vector<std::uint32_t> out(steps);
+    for (auto& v : out) {
+        v = r.u32();
+    }
+    return out;
+}
+
 } // namespace
+
+std::optional<AnimatedCursor> decodeAnimated(std::span<const std::uint8_t> data) {
+    try {
+        BinaryReader r(data);
+        if (r.u32() != kRiff) {
+            return std::nullopt;
+        }
+        // Some files count the 8 bytes before the size in it, the game's hourglass among them, so the
+        // size is kept within the file.
+        const std::uint32_t stated = r.u32();
+        const std::size_t size = std::min<std::size_t>(stated, r.remaining());
+        if (size < 4 || r.u32() != kAcon) {
+            return std::nullopt;
+        }
+        std::optional<std::span<const std::uint8_t>> header, rates, sequence;
+        AnimatedCursor out;
+        bool broken = false;
+        forEachChunk(r.bytes(size - 4), [&](std::uint32_t id, std::span<const std::uint8_t> chunk) {
+            if (id == kAnih) {
+                header = chunk;
+            } else if (id == kRate) {
+                rates = chunk;
+            } else if (id == kSequence) {
+                sequence = chunk;
+            } else if (id == kList && chunk.size() >= 4 && BinaryReader(chunk).u32() == kFrames) {
+                forEachChunk(chunk.subspan(4), [&](std::uint32_t frameId, std::span<const std::uint8_t> frame) {
+                    if (frameId != kIcon || broken) {
+                        return;
+                    }
+                    auto cursor = out.frames.size() < kMaxFrames ? decode(frame) : std::nullopt;
+                    if (!cursor) {
+                        broken = true;
+                        return;
+                    }
+                    out.frames.push_back(std::move(*cursor));
+                });
+            }
+        });
+        if (broken || !header || header->size() < kAnihSize || out.frames.empty()) {
+            return std::nullopt;
+        }
+        BinaryReader h(*header);
+        h.skip(4);
+        const std::uint32_t frames = h.u32(), steps = h.u32();
+        h.skip(16);
+        const std::uint32_t rate = h.u32(), flags = h.u32();
+        if ((flags & kFramesAreIcons) == 0 || frames != out.frames.size() || steps == 0 || steps > kMaxSteps) {
+            return std::nullopt;
+        }
+        // Without a sequence there is one step per picture.
+        const std::vector<std::uint32_t> order = sequence ? perStep(*sequence, steps) : std::vector<std::uint32_t>();
+        if (!sequence && steps != frames) {
+            return std::nullopt;
+        }
+        const std::vector<std::uint32_t> times = rates ? perStep(*rates, steps) : std::vector<std::uint32_t>(steps, rate);
+        out.steps.resize(steps);
+        for (std::uint32_t i = 0; i < steps; ++i) {
+            const std::uint32_t frame = sequence ? order[i] : i;
+            if (frame >= frames) {
+                return std::nullopt;
+            }
+            // A step of no time would never let the animation move on.
+            out.steps[i] = {frame, std::max<std::uint32_t>(times[i], 1)};
+        }
+        return out;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+void CursorPlayback::restart() {
+    step_ = 0;
+    stepEnds_.reset();
+}
+
+std::size_t CursorPlayback::step(std::span<const AnimatedCursor::Step> steps, double seconds) {
+    constexpr double kJiffySeconds = 1.0 / 60;
+    if (steps.empty()) {
+        return 0;
+    }
+    if (step_ >= steps.size()) {
+        restart();
+    }
+    // A step of no time (never from decodeAnimated) counts as one jiffy, so the loop below ends.
+    const auto length = [&](std::size_t i) { return std::max<std::uint32_t>(steps[i].jiffies, 1) * kJiffySeconds; };
+    if (!stepEnds_ || seconds - *stepEnds_ > 1) {
+        stepEnds_ = seconds + length(step_);
+    }
+    while (seconds >= *stepEnds_) {
+        step_ = (step_ + 1) % steps.size();
+        *stepEnds_ += length(step_);
+    }
+    return step_;
+}
 
 std::optional<Cursor> decode(std::span<const std::uint8_t> data) {
     try {

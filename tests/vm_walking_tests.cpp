@@ -79,6 +79,16 @@ void goToRoutingSlotWalksTheRoute() {
     CHECK(vm.resume(sim).outcome == Outcome::True && sim.y == static_cast<std::int32_t>(std::lround(5.08 * 65536)));
     CHECK(sim.data[1] == 6 && !sim.walking && sim.animation && sim.animation->name == "a-walkPose" && !sim.animation->loops);
 
+    // Already on the goal: true at once when facing its way, else a turn on the spot first (with no
+    // turn clip, the facing changes on the next tick), as the game turns a Sim back into a bed.
+    planned.points = {{5.0f, 5.08f}};
+    CHECK(vm.run(sim, kObjectGroup, 0x1100).outcome == Outcome::True && !sim.walking);
+    sim.heading.reset();
+    sim.data[1] = 2;
+    CHECK(vm.run(sim, kObjectGroup, 0x1100).outcome == Outcome::Sleeping && sim.walking && sim.walking->turnOnly);
+    world.advanceClock(50);
+    CHECK(vm.resume(sim).outcome == Outcome::True && sim.data[1] == 6 && !sim.walking);
+
     planned.points.clear();
     planned.failure = 2;
     CHECK(vm.run(sim, kObjectGroup, 0x1100).outcome == Outcome::False && sim.personData[0x3E] == 2);

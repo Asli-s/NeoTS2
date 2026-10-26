@@ -1,6 +1,7 @@
 #include "scene/rig.hpp"
 
 #include "diag/timing.hpp"
+#include "formats/hash.hpp"
 #include "formats/scenegraph.hpp"
 #include "scene/assets.hpp"
 #include "scene/rig_layers.hpp"
@@ -296,6 +297,35 @@ void poseRig(const Rig& rig, const RigAnimation* animation, float ms, std::vecto
     }
 }
 
+bool isSkinned(const Primitive& p) {
+    const std::size_t vertices = p.positions.size() / 3;
+    return p.joints.size() == vertices * 4 && p.weights.size() == vertices * 4;
+}
+
+void posedPositions(const Primitive& p, const std::vector<Transform>& joints, std::vector<float>& out) {
+    constexpr std::size_t kNoJoint = 255;
+    const std::size_t vertices = p.positions.size() / 3;
+    out.assign(p.positions.size(), 0.0f);
+    if (!isSkinned(p)) {
+        return;
+    }
+    for (std::size_t v = 0; v < vertices; ++v) {
+        const std::array<float, 3> rest{p.positions[v * 3], p.positions[v * 3 + 1], p.positions[v * 3 + 2]};
+        for (std::size_t k = 0; k < 4; ++k) {
+            const std::size_t j = p.joints[v * 4 + k];
+            const float w = p.weights[v * 4 + k];
+            if (j == kNoJoint || j >= joints.size() || !(w > 0)) {
+                continue;
+            }
+            auto moved = rest;
+            joints[j].apply(moved.data(), true);
+            for (std::size_t n = 0; n < 3; ++n) {
+                out[v * 3 + n] += w * moved[n];
+            }
+        }
+    }
+}
+
 std::vector<int> skinNodes(const Mesh& mesh, const Rig& rig) {
     std::vector<int> nodes;
     nodes.reserve(mesh.skin.size());
@@ -331,7 +361,7 @@ void skinMatrices(const Mesh& mesh, const std::vector<int>& nodes, const Rig& ri
 }
 
 void skinMatrices(const Mesh& mesh, const std::vector<int>& nodes, const Rig& rig, std::span<const RigAnimation* const> animations,
-                  const std::vector<Transform>& world, std::vector<Transform>& out) {
+                  const std::vector<Transform>& world, std::vector<Transform>& out, bool ownRig) {
     out.resize(mesh.skin.size());
     for (std::size_t i = 0; i < mesh.skin.size(); ++i) {
         const auto& s = mesh.skin[i];
@@ -342,7 +372,7 @@ void skinMatrices(const Mesh& mesh, const std::vector<int>& nodes, const Rig& ri
             continue;
         }
         const int parent = rig.nodes[static_cast<std::size_t>(n)].parent;
-        const bool moved = std::any_of(animations.begin(), animations.end(), [&](const RigAnimation* a) { return animated(a, n); });
+        const bool moved = ownRig || std::any_of(animations.begin(), animations.end(), [&](const RigAnimation* a) { return animated(a, n); });
         if (s.rest && parent >= 0 && static_cast<std::size_t>(parent) < world.size() && !moved) {
             out[i] = s.placement * world[static_cast<std::size_t>(parent)] * *s.rest * s.inverseBind;
         } else {
@@ -353,8 +383,12 @@ void skinMatrices(const Mesh& mesh, const std::vector<int>& nodes, const Rig& ri
 
 namespace {
 
+// Where a bone (by its name's hash) of the actor showing a lot object is in the world, as last posed.
+using BoneFinder = std::function<std::optional<Transform>(std::uint32_t object, std::uint32_t bone)>;
+
 // The actor's clips as they play at `seconds`.
-void clipsAt(const Actor& actor, double seconds, std::vector<LayeredClip>& clips, std::vector<const RigAnimation*>& playing) {
+void clipsAt(const Actor& actor, double seconds, std::vector<LayeredClip>& clips, std::vector<const RigAnimation*>& playing,
+             const BoneFinder& boneOf) {
     clips.clear();
     playing.clear();
     for (const auto& clip : actor.clips) {
@@ -383,6 +417,12 @@ void clipsAt(const Actor& actor, double seconds, std::vector<LayeredClip>& clips
         }
         clips.push_back({clip.animation.get(), ms, static_cast<float>(weight), clip.layer, clip.start, static_cast<float>(steady), turn, clip.bodyOnly,
                          clip.noRootMove, clip.objectPlace ? std::optional<Transform>(actor.place.rigidInverse() * *clip.objectPlace) : std::nullopt});
+        if (clip.ikActor != 0) {
+            clips.back().objectBone = [&actor, &boneOf, object = clip.ikActor](std::uint32_t bone) -> std::optional<Transform> {
+                const auto at = boneOf(object, bone);
+                return at ? std::optional<Transform>(actor.place.rigidInverse() * *at) : std::nullopt;
+            };
+        }
         playing.push_back(clip.animation.get());
     }
 }
@@ -435,15 +475,63 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
     std::vector<Transform> world;
     std::vector<LayeredClip> clips;
     std::vector<const RigAnimation*> playing;
+    // A Sim's bones as last posed: this call's pose for a Sim posed before the one asking, else the
+    // last call's. Each rig's node names are hashed once per call, on its first lookup.
+    std::unordered_map<const Rig*, std::vector<std::uint32_t>> nameHashes;
+    const BoneFinder boneOf = [&](std::uint32_t object, std::uint32_t bone) -> std::optional<Transform> {
+        const auto actor = std::find_if(scene.actors.begin(), scene.actors.end(), [&](const Actor& a) { return a.object == object; });
+        if (actor == scene.actors.end() || !actor->rig) {
+            return std::nullopt;
+        }
+        const auto index = static_cast<std::size_t>(actor - scene.actors.begin());
+        const auto nodes = std::find_if(out.nodes.begin(), out.nodes.end(), [&](const auto& n) { return n.first == index; });
+        if (nodes == out.nodes.end()) {
+            return std::nullopt;
+        }
+        auto [hashes, first] = nameHashes.try_emplace(actor->rig.get());
+        if (first) {
+            for (const auto& node : actor->rig->nodes) {
+                // 0 for a node with no name, which no bone matches.
+                hashes->second.push_back(node.name.empty() ? 0 : hash::crc32(node.name));
+            }
+        }
+        for (std::size_t i = 0; i < hashes->second.size() && i < nodes->second.size(); ++i) {
+            if (bone != 0 && hashes->second[i] == bone) {
+                return actor->place * nodes->second[i];
+            }
+        }
+        return std::nullopt;
+    };
     // Only the actors still in the scene keep what they hold.
     std::unordered_map<std::uint32_t, std::vector<HeldJoint>> held;
     std::unordered_map<std::uint32_t, float> headings;
+    // Lot objects first: a Sim's hand places an object it holds over where the object would stand.
+    for (const auto& actor : scene.objectActors) {
+        if (!actor.rig) {
+            continue;
+        }
+        clipsAt(actor, seconds, clips, playing, boneOf);
+        auto& last = held[actor.object];
+        if (const auto was = out.held.find(actor.object); was != out.held.end()) {
+            last = std::move(was->second);
+        }
+        poseRigLayered(*actor.rig, clips, world, &last);
+        for (const auto& s : actor.skinned) {
+            const int mesh = s.instance < scene.instances.size() ? scene.instances[s.instance].mesh : -1;
+            if (mesh < 0 || static_cast<std::size_t>(mesh) >= scene.meshes.size()) {
+                continue;
+            }
+            auto& joints = out.joints.emplace_back(s.instance, std::vector<Transform>{}).second;
+            skinMatrices(scene.meshes[static_cast<std::size_t>(mesh)], s.nodes, *actor.rig, playing, world, joints, true);
+            out.places.emplace_back(s.instance, actor.place);
+        }
+    }
     for (const auto& actor : scene.actors) {
         if (!actor.rig) {
             continue;
         }
         if (!actor.clips.empty()) {
-            clipsAt(actor, seconds, clips, playing);
+            clipsAt(actor, seconds, clips, playing, boneOf);
             if (actor.object != 0) {
                 auto& joints = held[actor.object];
                 if (const auto was = out.held.find(actor.object); was != out.held.end()) {

@@ -325,12 +325,12 @@ std::vector<LimbChain> bindLimbs(const Rig& rig, const anim::Animation& animatio
         std::reverse(limb.joints.begin(), limb.joints.end());
         // A target on the animation's IK object (kind 2) whose frame is 0 or the special name below is
         // in the space of that object's own node: the clip's IK object where it has one (a reach
-        // clip's), else the Sim itself. Kind-2 targets on a named bone of another object are left out
-        // (how the game handles them is not known yet, see AN-21). A target with a frame isn't turned with the clip.
+        // clip's), else the Sim itself. Any other frame names a bone of the IK object (a hug's hands on
+        // the other Sim's back). A target with a frame isn't turned with the clip.
         constexpr std::uint32_t kIkObjectNode = 0x6E80A11A;
         for (const auto& t : chain.targets) {
             const std::uint32_t objectFrame = mirrored ? t.frameMirror : t.frame;
-            const int kind = t.kind == 2 && (objectFrame == 0 || objectFrame == kIkObjectNode) ? 0 : t.kind;
+            const int kind = t.kind == 2 ? 0 : t.kind;
             LimbTarget target;
             target.position = channel(translations, t.position);
             target.rotation = channel(rotations, t.node);
@@ -343,7 +343,8 @@ std::vector<LimbChain> bindLimbs(const Rig& rig, const anim::Animation& animatio
             target.positionAxis = targetAxis(target.position);
             target.rotationAxis = targetAxis(target.rotation);
             target.extraRotationAxis = targetAxis(target.extraRotation);
-            target.onObject = t.kind == 2 && kind == 0;
+            target.onObject = t.kind == 2;
+            target.objectBone = target.onObject && objectFrame != kIkObjectNode ? objectFrame : 0;
             target.positionTurnAxis = target.onObject ? -1 : turnAxis(target.position, frame);
             target.rotationTurnAxis = target.onObject ? -1 : turnAxis(target.rotation, frame);
             target.frame = kind == 1 ? frame : root;
@@ -409,7 +410,7 @@ void solveLimbs(const Rig& rig, std::span<const LimbSource> sources, std::vector
                 }
                 Vec poleAt = inFrame(world, limb.poleFrame, sampleVec(a, limb.pole, s.ms, limb.poleAxis, limb.poleTurnAxis, s.turn));
                 if (inSkeleton(limb.poleFrame)) {
-                    poleAt = add(poleAt, s.shift);
+                    s.rootMove.apply(poleAt.data(), true);
                 }
                 pole = add(pole, scale(poleAt, follow));
                 for (const auto& t : limb.targets) {
@@ -417,14 +418,19 @@ void solveLimbs(const Rig& rig, std::span<const LimbSource> sources, std::vector
                     if (w <= kWeightEpsilon) {
                         continue;
                     }
-                    const bool onObject = t.onObject && s.objectFrame;
+                    const std::optional<Transform> objectFrame =
+                        t.objectBone == 0 ? s.objectFrame : s.objectBone ? s.objectBone(t.objectBone) : std::nullopt;
+                    if (t.objectBone != 0 && !objectFrame) {
+                        continue;
+                    }
+                    const bool onObject = t.onObject && objectFrame;
                     Vec at = sampleVec(a, t.position, s.ms, t.positionAxis, t.positionTurnAxis, s.turn);
                     if (onObject) {
-                        s.objectFrame->apply(at.data(), true);
+                        objectFrame->apply(at.data(), true);
                     } else {
                         at = inFrame(world, t.frame, at);
                         if (inSkeleton(t.frame)) {
-                            at = add(at, s.shift);
+                            s.rootMove.apply(at.data(), true);
                         }
                     }
                     target = add(target, scale(at, w));
@@ -438,9 +444,12 @@ void solveLimbs(const Rig& rig, std::span<const LimbSource> sources, std::vector
                         turn = mul(turn, sampleRotation(a, t.extraRotation, s.ms, t.extraRotationAxis, -1, 0));
                     }
                     if (onObject) {
-                        turn = mul(rotation(*s.objectFrame), turn);
+                        turn = mul(rotation(*objectFrame), turn);
                     } else if (t.frame >= 0) {
                         turn = mul(rotation(world[static_cast<std::size_t>(t.frame)]), turn);
+                    }
+                    if (!onObject && inSkeleton(t.frame)) {
+                        turn = mul(rotation(s.rootMove), turn);
                     }
                     rotationWeight += w;
                     orientation = rotationWeight == w ? quatOf(turn) : slerp(orientation, quatOf(turn), w / rotationWeight);

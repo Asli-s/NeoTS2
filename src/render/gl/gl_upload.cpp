@@ -351,14 +351,17 @@ std::unique_ptr<GlRenderer::SceneGpu> GlRenderer::uploadShared(const scene::Scen
     if (window_->makeCurrent(mine->context.get())) {
         // This touches nothing but what this thread made: the caches of what is bound are the drawing thread's.
         auto* self = const_cast<GlRenderer*>(this);
-        auto staged = stage(scene, false);  // the scene is alive until this returns
-        gpu = std::make_unique<SceneGpu>();
         try {
+            auto staged = stage(scene, false);  // the scene is alive until this returns
+            gpu = std::make_unique<SceneGpu>();
             self->uploadStaged(*gpu, *staged);
             self->gl_.Finish();
         } catch (...) {
-            gpu->release(*graveyard_);
-            gpu.reset();
+            // The context must still be let go of below. prepare then stages the scene on the drawing thread.
+            if (gpu) {
+                gpu->release(*graveyard_);
+                gpu.reset();
+            }
         }
         window_->makeCurrent(nullptr);
     }

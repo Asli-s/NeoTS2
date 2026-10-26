@@ -18,6 +18,8 @@ AnimateOperands animateOperands(std::span<const std::uint8_t> o) {
     a.list = o[6];
     a.eventTreeScope = o[7];
     a.flipFromTemp = (o[8] & 0x01) != 0;
+    a.ikOwner = o[9];
+    a.ikData = static_cast<std::uint16_t>(o[10] | o[11] << 8);
     a.priority = std::min<std::uint8_t>(o[12], 3);
     a.blend = static_cast<std::int8_t>(o[13]);
     return a;

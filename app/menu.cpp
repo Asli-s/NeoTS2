@@ -3,6 +3,7 @@
 #include "menu.hpp"
 #include "camera_height.hpp"
 #include "crash_handler.hpp"
+#include "click_gate.hpp"
 #include "cursors.hpp"
 #include "free_camera.hpp"
 #include "message_box.hpp"
@@ -136,12 +137,12 @@ ts2::render::Vec3 screenRay(const ts2::render::Camera& c, int width, int height,
     return {f[0] + s[0] * nx * tx + u[0] * ny * ty, f[1] + s[1] * nx * tx + u[1] * ny * ty, f[2] + s[2] * nx * tx + u[2] * ny * ty};
 }
 
-// The live-mode cursor for what is under the mouse: an object the selected Sim can use, the ground
-// (floor or terrain), pool water (the game's water check gives the usable cursor), or anything
-// else. Sims are not picked yet, so the person cursor isn't shown.
-std::uint32_t liveCursor(const ts2::scene::Instance* under, bool usable) {
+// The live-mode cursor for what is under the mouse: a Sim or an object the selected Sim can use,
+// the ground (floor or terrain), pool water (the game's water check gives the usable cursor), or
+// anything else.
+std::uint32_t liveCursor(const ts2::scene::Instance* under, bool usable, bool sim) {
     if (usable) {
-        return app::Cursors::kLiveObjectAvailable;
+        return sim ? app::Cursors::kLivePerson : app::Cursors::kLiveObjectAvailable;
     }
     if (under && under->object == 0 && under->name == "pool water") {
         return app::Cursors::kLiveObjectAvailable;
@@ -286,6 +287,8 @@ private:
     void lotAction(app::LotUi::Action action);
     void trackSim(std::int16_t sim);
     bool centreOnSim(std::int16_t sim);
+    void showSimStorey(const ts2::sim::SimObject& object);
+    void followSimStorey();
     std::optional<ts2::render::Vec3> simRoot(std::int16_t sim) const;
     bool openGroundMenu(float x, float y);
     void toggleFreeCamera();
@@ -303,6 +306,11 @@ private:
     void sendLotChanges();
 
     // Every screen.
+    // A neighborhood, a lot or the lot's Sims are still loading. The game covers this time with its
+    // loading screens, which show the hourglass and take no clicks. The engine has no loading screens
+    // yet and keeps the last screen up instead, so it shows the hourglass and drops clicks itself.
+    bool loadingScene() const { return building_.valid() || lotBuilding_.valid() || loading(lotSimBuilding_); }
+    bool blockedWhileLoading(const pf::Event& e);
     void startFromOptions();
     void handleEvent(const pf::Event& e);
     void mouseEvent(const pf::Event& e);
@@ -371,6 +379,8 @@ private:
     // The object under the mouse, highlighted while the selected Sim could use it (0: none).
     ts2::scene::Picker lotPicker_;
     std::uint32_t hovered_ = 0;
+    bool hoveredSim_ = false;  // the game never highlights a Sim
+    std::array<float, 3> hoveredPoint_{};  // where the mouse's ray hit it, in the scene
     std::optional<std::array<float, 2>> hoverAt_;  // where the mouse moved to since the last frame
     // The live-mode panels over the lot. The options menu pauses the game while it's open.
     app::LotUi lotUi_;
@@ -419,6 +429,7 @@ private:
 
     bool running_ = true;
     bool down_ = false;
+    app::ClickGate loadingGate_;  // drops clicks while a scene loads (see loadingScene)
     std::uint64_t lastFrame_ = 0;
     std::uint64_t lastSlowFrame_ = 0, lastTimings_ = 0;  // 0: no slow frame yet
     // The slow steps of showing a lot (the lot, its simulation, the household's portraits) take a
@@ -433,7 +444,7 @@ private:
 Game::Game(ts2::content::UiData& data, ts2::ui::Fonts& fonts, ts2::render::IRenderer& renderer, const std::filesystem::path& install,
            const MenuOptions& options)
     : data_(data), renderer_(renderer), install_(install), options_(options), width_(options.width), height_(options.height),
-      screen_(data, fonts), lotUi_(screen_, width_, height_), pieMenu_(screen_), hoodUi_(screen_, data, width_, height_) {
+      screen_(data, fonts), lotUi_(screen_, width_, height_), pieMenu_(screen_, data), hoodUi_(screen_, data, width_, height_) {
     setUpMenu();
     pickMenuSims();
     setUpTiles();
@@ -926,6 +937,7 @@ void Game::showLot(LotBuilt& built) {
     hoodOrbit_ = orbit_;
     lotView_ = built.view;
     orbit_ = built.camera;
+    orbit_.smoothFollow = options_.smoothFollow;
     orbit_.goal = orbit_.target;
     orbit_.useRigEasing();
     cameraHeight_ = {};
@@ -940,6 +952,7 @@ void Game::showLot(LotBuilt& built) {
     hood_.gpu = renderer_.swap(std::move(built.gpu));
     lotPicker_.prepare(lot_);
     hovered_ = 0;
+    hoveredSim_ = false;
     lotShown_ = ts2::platform::ticksNs();
     ts2::diag::info(std::format("lot {} shown after {:.1f} s", enteredLot_, secondsSince(lotLoadStarted_)));
 
@@ -974,6 +987,7 @@ void Game::leaveLot() {
     lotUi_.close();
     pieMenu_.close();
     hovered_ = 0;
+    hoveredSim_ = false;
     renderer_.setHighlight(0, 0);
     renderer_.setImposterLight({1, 1, 1});
     renderer_.setNight(false);
@@ -1016,7 +1030,7 @@ void Game::lotAction(app::LotUi::Action action) {
         return;
     }
     if (action == Action::FloorUp || action == Action::FloorDown) {
-        lotView_.changeLevel(action == Action::FloorUp ? 1 : -1, orbit_);
+        lotView_.stepLevel(action == Action::FloorUp ? 1 : -1, orbit_);
         return;
     }
     if (action == Action::WallMode) {
@@ -1071,24 +1085,46 @@ void Game::trackSim(std::int16_t sim) {
 }
 
 // Centres the camera on a Sim on the lot, ending any tracking, and returns false for a Sim that
-// isn't on it. The view first changes storey to the Sim's. A Sim indoors gets its storey either way.
-// A Sim outside (room 0) gets it only when the view is below it.
+// isn't on it. The view first changes storey to the Sim's (see showSimStorey).
 bool Game::centreOnSim(std::int16_t sim) {
     const auto root = simRoot(sim);
     if (!root) {
         return false;
     }
-    if (const auto* object = lotLife_ ? lotLife_->simulation().world().find(sim) : nullptr; object && object->level > 0) {
-        const int storey = lotView_.ground + object->level - 1;
-        // Positions are kept in 1/65536 tiles.
-        const float x = static_cast<float>(object->x) / 65536, y = static_cast<float>(object->y) / 65536;
-        const bool indoors = lotLife_->simulation().world().rooms().roomAtPosition(object->level - 1, x, y) > 0;
-        if (indoors || lotView_.view.level < storey) {
-            lotView_.changeLevel(storey - lotView_.view.level, orbit_);
-        }
+    if (const auto* object = lotLife_ ? lotLife_->simulation().world().find(sim) : nullptr) {
+        showSimStorey(*object);
     }
     orbit_.centreOn(*root);
     return true;
+}
+
+// The view's storey for a Sim the camera centres on or tracks, as the game picks it: a Sim indoors
+// gets its storey either way, a Sim outside only when the view is below it. So a tracked Sim walking
+// down from a deck to the garden leaves the view on the deck's storey.
+void Game::showSimStorey(const ts2::sim::SimObject& object) {
+    if (object.level <= 0 || object.x == ts2::sim::kOffLot || object.y == ts2::sim::kOffLot) {
+        return;
+    }
+    const int storey = lotView_.ground + object.level - 1;
+    // Positions are kept in 1/65536 tiles.
+    const float x = static_cast<float>(object.x) / 65536, y = static_cast<float>(object.y) / 65536;
+    // Outside as the room's "outside" field has it: a room its outside layer's walls don't enclose.
+    // A fenced yard is a room of its own but still outside.
+    const auto& rooms = lotLife_->simulation().world().rooms();
+    const ts2::sim::RoomInfo* room = rooms.room(rooms.roomAtPosition(object.level - 1, x, y));
+    const bool indoors = room != nullptr && room->layerRegion[0] > 0;
+    if (indoors || lotView_.view.level < storey) {
+        lotView_.changeLevel(storey - lotView_.view.level, orbit_);
+    }
+}
+
+// While the camera tracks a Sim, the view keeps to the Sim's storey by the same rule as centring:
+// it moves as soon as the Sim reaches another storey or walks indoors from a deck or the yard. A
+// storey change by the player ends the tracking, so the rule never fights the player.
+void Game::followSimStorey() {
+    if (const auto* object = orbit_.subject && lotLife_ ? lotLife_->simulation().world().find(trackedSim_) : nullptr) {
+        showSimStorey(*object);
+    }
 }
 
 // Where a Sim's root_trans joint is in the world as last posed, none for a Sim not on the lot.
@@ -1115,7 +1151,7 @@ std::optional<ts2::render::Vec3> Game::simRoot(std::int16_t sim) const {
 bool Game::openGroundMenu(float x, float y) {
     const auto ray = screenRay(orbit_.camera(), width_, height_, x, y);
     const auto& eye = orbit_.camera().eye;
-    const auto hit = lotPicker_.pick(lot_, lotVisible_, eye, ray);
+    const auto hit = lotPicker_.pick(lot_, lotVisible_, eye, ray, &lotPose_);
     if (!hit || !lotLife_) {
         return false;
     }
@@ -1276,6 +1312,7 @@ void Game::toggleFreeCamera() {
     freeCam_.emplace(*freeRig_);
     freeCam_->enter(orbit_);
     hovered_ = 0;
+    hoveredSim_ = false;
     // Only the pause frame stays on screen, as in the game.
     lotUi_.hideForFreeCamera(true);
     pf::hideCursor();
@@ -1336,8 +1373,9 @@ void Game::lotMouse(const pf::Event& e, float x, float y) {
     const bool leftDown = e.type == pf::Event::Type::MouseDown && e.button == pf::MouseButton::Left;
     // A left click on the highlighted object opens its pie menu for the selected Sim.
     if (lotLife_ && hovered_ != 0 && leftDown && !screen_.over(ix, iy)) {
-        if (auto choices = lotLife_->pieMenu(hovered_); !choices.empty()) {
-            pieObject_ = hovered_;
+        const std::uint32_t part = lotLife_->partAt(hovered_, hoveredPoint_, lot_);
+        if (auto choices = lotLife_->pieMenu(part); !choices.empty()) {
+            pieObject_ = part;
             pieMenu_.open(std::move(choices), ix, iy, width_, height_);
             showPieCursor();
             return;
@@ -1394,14 +1432,19 @@ void Game::updateLot(std::uint64_t now) {
     // The game looks for the object under the mouse as it moves with no button held.
     if (hoverAt_ && lotLife_ && !freeCam_) {
         const auto ray = screenRay(orbit_.camera(), width_, height_, (*hoverAt_)[0], (*hoverAt_)[1]);
-        const auto hit = lotPicker_.pick(lot_, shown, orbit_.camera().eye, ray);
-        const std::uint32_t object = hit ? lot_.instances[hit->instance].object : 0;
+        const auto hit = lotPicker_.pick(lot_, shown, orbit_.camera().eye, ray, &lotPose_);
+        const std::uint32_t object = hit ? hit->object : 0;
         hovered_ = lotLife_->hoverable(object) ? object : 0;
-        liveCursor_ = liveCursor(hit ? &lot_.instances[hit->instance] : nullptr, hovered_ != 0);
+        if (hit) {
+            const auto& eye = orbit_.camera().eye;
+            hoveredPoint_ = {eye[0] + ray[0] * hit->distance, eye[1] + ray[1] * hit->distance, eye[2] + ray[2] * hit->distance};
+        }
+        hoveredSim_ = hovered_ != 0 && lotLife_->isSim(hovered_);
+        liveCursor_ = liveCursor(hit ? &lot_.instances[hit->instance] : nullptr, hovered_ != 0, hoveredSim_);
         cursors_.show(liveCursor_);
         hoverAt_.reset();
     }
-    renderer_.setHighlight(hovered_, ts2::scene::hoverAmbient(static_cast<double>(now) / 1e9));
+    renderer_.setHighlight(hoveredSim_ ? 0 : hovered_, ts2::scene::hoverAmbient(static_cast<double>(now) / 1e9));
     const bool shooting = !options_.shot.empty();
     if (!lotLife_ && (!stepTaken_ || shooting)) {
         startLotLife();
@@ -1420,6 +1463,7 @@ void Game::updateLot(std::uint64_t now) {
                                  *lotLife_);
         }
         lotUi_.showLife(*lotLife_);
+        followSimStorey();
     }
     app::animateActors(lot_, lotLife_ ? lotLife_->seconds() : static_cast<double>(now - lotShown_) / 1e9, renderer_, lotPose_);
     if (lotLife_) {
@@ -1542,6 +1586,8 @@ void Game::run() {
         if (!inLot_ && !inNeighborhood_) {
             cursors_.show(app::Cursors::kArrow);
         }
+        cursors_.setBusy(loadingScene());
+        cursors_.animate(static_cast<double>(now) / 1e9);
         if (clickedTile_ && now - tileClickedAt_ > kDoubleClickNs) {
             chosen_ = *clickedTile_;
             clickedTile_.reset();
@@ -1582,7 +1628,18 @@ void Game::run() {
     }
 }
 
+// Whether a click is dropped because a scene is loading (see app::ClickGate).
+bool Game::blockedWhileLoading(const pf::Event& e) {
+    if (e.type != pf::Event::Type::MouseDown && e.type != pf::Event::Type::MouseUp) {
+        return false;
+    }
+    return loadingGate_.drops(e.type == pf::Event::Type::MouseDown, static_cast<unsigned>(e.button), loadingScene());
+}
+
 void Game::handleEvent(const pf::Event& e) {
+    if (blockedWhileLoading(e)) {
+        return;
+    }
     // Mouse movement, clicks, the wheel and keys all end the neighborhood camera's drift.
     const bool input = e.type == pf::Event::Type::MouseMotion || e.type == pf::Event::Type::MouseDown || e.type == pf::Event::Type::MouseUp ||
                        e.type == pf::Event::Type::MouseWheel || e.type == pf::Event::Type::KeyDown || e.type == pf::Event::Type::KeyUp;

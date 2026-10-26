@@ -422,6 +422,43 @@ void limbIkReachesChannelTargets() {
         CHECK(std::fabs(world[0].m[11] - 1) < 1e-4f && std::fabs(world[1].m[11] - 1.5f) < 1e-4f);
     }
 
+    // A clip fading out by its body only under one that turns the root (getting into bed handing over
+    // to lying there, a quarter turn round) still reaches with its arm, around the root as drawn: its
+    // target turns with the root, so the arm doesn't swing out to where the clip alone has it.
+    {
+        Rig rig;
+        rig.nodes.push_back({"skel", -1, {0, 0, 0}, {0, 0, 0, 1}});
+        rig.nodes.push_back({"root_trans", 0, {0, 0, 0}, {0, 0, 0, 1}});
+        rig.nodes.push_back({"root_rot", 1, {0, 0, 0}, {0, 0, 0, 1}});
+        for (int i = 0; i < 3; ++i) rig.nodes.push_back({"a" + std::to_string(i), i == 0 ? 2 : 2 + i, {0, i == 0 ? 1.0f : 0.25f, 0}, {0, 0, 0, 1}});
+        auto getIn = std::make_shared<Animation>();
+        getIn->duration = 1000;
+        getIn->channels.push_back(channel("root_rot", ts2::anim::ChannelKind::Rotation, {0, 0, 0}));
+        getIn->channels.push_back(channel("ctr", ts2::anim::ChannelKind::Translation, {0.2f, 1.3f, 0.1f}));
+        getIn->channels.push_back(channel("pole", ts2::anim::ChannelKind::Translation, {0, 1.4f, 1}));
+        ts2::anim::IkChain chain;
+        chain.strategy = ts2::anim::kLimbStrategy;
+        chain.begin = h("a0");
+        chain.end = h("a2");
+        chain.pole = h("pole");
+        ts2::anim::IkTarget target;
+        target.position = h("ctr");
+        chain.targets.push_back(target);
+        getIn->chains.push_back(chain);
+        auto lie = std::make_shared<Animation>();
+        lie->duration = 1000;
+        lie->channels.push_back(channel("root_rot", ts2::anim::ChannelKind::Rotation, {0, 0, 90}));
+        const auto fading = ts2::scene::bindAnimation(rig, getIn), lying = ts2::scene::bindAnimation(rig, lie);
+        ts2::scene::LayeredClip under{&fading, 0, 1, 0, 0};
+        under.bodyOnly = under.noRootMove = true;
+        ts2::scene::LayeredClip over{&lying, 0, 1, 1, 1};
+        std::vector<ts2::scene::Transform> world;
+        ts2::scene::poseRigLayered(rig, std::vector<ts2::scene::LayeredClip>{under, over}, world);
+        // The target (0.2, 1.3, 0.1) turned a quarter round z with the root.
+        const auto& end = world.back().m;
+        CHECK(std::fabs(end[3] + 1.3f) < 1e-3f && std::fabs(end[7] - 0.2f) < 1e-3f && std::fabs(end[11] - 0.1f) < 1e-3f);
+    }
+
     // An overlay on a higher layer that reaches with one limb (an arm carrying something) leaves the
     // other limbs (the legs of a walk under it) to the clips below.
     {
@@ -506,6 +543,51 @@ void limbIkAddsAdditiveTargets() {
     ts2::scene::poseRigLayered(rig, std::vector<ts2::scene::LayeredClip>{{&base, 0, 1, 0}, {&shift, 0, 0.5f, 1}}, world);
     const auto& end = world.back().m;
     CHECK(std::fabs(end[3] - 0.22f) < 1e-4f && std::fabs(end[7] - 1.3f) < 1e-4f && std::fabs(end[11] - 0.1f) < 1e-4f);
+}
+
+// A target on a named bone of the clip's IK object (a hug's hand on the other Sim's back) is placed
+// in that bone's frame. Without the bone it is left out and the limb keeps its own turns.
+void limbIkReachesBonesOfTheIkObject() {
+    using ts2::anim::Animation;
+    const auto h = [](const char* s) { return ts2::hash::crc32(s); };
+    ts2::scene::Rig rig;
+    rig.nodes.push_back({"skel", -1, {0, 0, 0}, {0, 0, 0, 1}});
+    for (int i = 0; i < 3; ++i) rig.nodes.push_back({"a" + std::to_string(i), i, {0, i == 0 ? 1.0f : 0.25f, 0}, {0, 0, 0, 1}});
+    auto animation = std::make_shared<Animation>();
+    for (const auto& [name, v] : {std::pair<std::string, std::array<float, 3>>{"ctr", {0.2f, 0.3f, 0.1f}}, {"pole", {0, 1.4f, 1}}}) {
+        ts2::anim::Channel c;
+        c.name = name;
+        c.flags = static_cast<std::uint32_t>(ts2::anim::ChannelKind::Translation) << 22 | 0x8000u;
+        for (const float x : v) {
+            ts2::anim::Curve curve;
+            curve.keys.push_back({0, x, 0, 0});
+            c.components.push_back(curve);
+        }
+        animation->channels.push_back(c);
+    }
+    ts2::anim::IkChain chain;
+    chain.strategy = ts2::anim::kLimbStrategy;
+    chain.begin = h("a0");
+    chain.end = h("a2");
+    chain.pole = h("pole");
+    ts2::anim::IkTarget target;
+    target.kind = 2;
+    target.frame = target.frameMirror = h("backtarget_surface");
+    target.position = h("ctr");
+    chain.targets.push_back(target);
+    animation->chains.push_back(chain);
+    const auto clip = ts2::scene::bindAnimation(rig, animation);
+    ts2::scene::LayeredClip layered{&clip, 0, 1, 0};
+    layered.objectBone = [&](std::uint32_t bone) -> std::optional<ts2::scene::Transform> {
+        return bone == h("backtarget_surface") ? std::optional(ts2::scene::Transform::at(0.1f, 1, 0, 0)) : std::nullopt;
+    };
+    std::vector<ts2::scene::Transform> world;
+    ts2::scene::poseRigLayered(rig, std::vector<ts2::scene::LayeredClip>{layered}, world);
+    const auto& end = world.back().m;
+    CHECK(std::fabs(end[3] - 0.3f) < 1e-4f && std::fabs(end[7] - 1.3f) < 1e-4f && std::fabs(end[11] - 0.1f) < 1e-4f);
+    layered.objectBone = [](std::uint32_t) -> std::optional<ts2::scene::Transform> { return std::nullopt; };
+    ts2::scene::poseRigLayered(rig, std::vector<ts2::scene::LayeredClip>{layered}, world);
+    CHECK(std::fabs(world.back().m[3]) < 1e-4f && std::fabs(world.back().m[7] - 1.5f) < 1e-4f);
 }
 
 // Scenegraph resources are filed under name hashes: instance 0xFF000000 | crc24, high instance
@@ -1133,6 +1215,7 @@ std::vector<Test> modelAndImageTests() {
         {"clips fit the skeleton's stretch", clipsFitTheSkeletonsStretch},
         {"Limb IK reaches channel targets", limbIkReachesChannelTargets},
         {"Limb IK adds additive targets", limbIkAddsAdditiveTargets},
+        {"Limb IK reaches bones of the IK object", limbIkReachesBonesOfTheIkObject},
         {"JPEG pictures decode as the game decodes them", jpegDecodesAsTheGame},
         {"scenegraph hashes and textures", scenegraphHashesAndTextures},
         {"Light resources are read", lightResourcesAreRead},

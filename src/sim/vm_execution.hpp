@@ -697,7 +697,7 @@ public:
     void putInSlot(SimObject& object, SimObject& container, std::int16_t slot);
 
     // Animate Sim, Animate Overlay, Animate Stop and Reach/Put (vm_animation.cpp).
-    std::optional<std::string> animationEntry(const Frame& f, std::uint8_t list, std::uint16_t entry, bool orMissing = false,
+    std::optional<std::string> animationEntry(const Frame& f, std::uint16_t list, std::uint16_t entry, bool orMissing = false,
                                               std::uint8_t* category = nullptr);
     std::string objectAnimationText(std::uint32_t owner, const SimObject* sim, std::uint16_t entry);
     std::optional<std::string> socialAnimation(const Frame& f, const SimObject& sim, std::uint16_t entry);

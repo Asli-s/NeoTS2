@@ -494,7 +494,7 @@ RouteIntersects LotSimulation::intersectionsFor(const SimObject& sim) {
 // one it reaches, on the owner's level.
 SlotRoute LotSimulation::routeToSlot(const SimObject& sim, const SimObject& owner, const slot::Entry& slot,
                                      const std::vector<std::optional<ModelBone>>& joints) {
-    constexpr std::int16_t kPathNotFound = 2, kNoValidGoals = 6, kDestinationOccupied = 7, kOtherLevel = 10;
+    constexpr std::int16_t kPathNotFound = 2, kNoValidGoals = 6, kDestinationOccupied = 7;
     constexpr int kDoorType = 8;
     SlotRoute route;
     const RouteWorld* routes = routeWorld();
@@ -504,13 +504,8 @@ SlotRoute LotSimulation::routeToSlot(const SimObject& sim, const SimObject& owne
         route.failure = kNoValidGoals;
         return route;
     }
-    // A slot on another level is routed to only with its flag 0x8000 (Go To Routing Slot byte 4 bit 3,
-    // Go To Relative Position byte 6 bit 2), over stairs.
-    constexpr std::uint32_t kOtherLevels = 0x8000;
-    if (sim.level != owner.level && (slot.routingFlags & kOtherLevels) == 0) {
-        route.failure = kOtherLevel;
-        return route;
-    }
+    // A slot on another level is routed to over stairs whatever its flag 0x8000 says. The game sends a
+    // Sim upstairs to bed with that flag clear. What the flag changes is not known yet.
     const RouteIntersects intersects = intersectionsFor(sim);
     SlotGoalWorld goalWorld;
     goalWorld.walls = &world_.walls();
@@ -690,6 +685,16 @@ SlotRoute LotSimulation::routeToSlot(const SimObject& sim, const SimObject& owne
         route.facing = static_cast<std::int16_t>(*reached.facing);
         return route;
     }
+    // A swept slot's spot faces as the slot says (see slotGoalFacing): a social's slot faces the
+    // other Sim, as both Sims stand in the game.
+    if (swept) {
+        if (const auto facing = slotGoalFacing(base, slot, reached.x, reached.y)) {
+            route.facing = static_cast<std::int16_t>(*facing);
+        }
+        return route;
+    }
+    // A bone slot's spot faces as its bone turns, whatever the slot's flag bit 12 says (that flag is
+    // only Snap's): a Sim at a fridge ends its walk facing it.
     for (const auto& joint : joints) {
         if (!joint) {
             continue;
@@ -697,7 +702,7 @@ SlotRoute LotSimulation::routeToSlot(const SimObject& sim, const SimObject& owne
         const auto target = routingSlotTarget(owner, slot, joint);
         if (target && std::fabs(static_cast<float>(target->x) / 65536.0f - reached.x) < 1e-3f &&
             std::fabs(static_cast<float>(target->y) / 65536.0f - reached.y) < 1e-3f) {
-            route.facing = target->facing;
+            route.facing = isBoneSlot(slot) ? std::optional<std::int16_t>(boneSlotFacing(owner, *joint)) : target->facing;
             break;
         }
     }

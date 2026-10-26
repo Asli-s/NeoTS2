@@ -17,6 +17,11 @@
 
 namespace app {
 
+// Time into an object's clip of `length` ms at `nowMs`: looping clips wrap, the others hold their
+// last pose, and so does a looping clip whose counted plays have ended. A stopped one holds the
+// pose it was stopped at.
+float clipMs(const ts2::sim::PlayingAnimation& playing, double length, double nowMs);
+
 // Shows the materials scripts put on lot objects (Change Material): each changed object's
 // materials, one per primitive of its mesh, with materials the lot didn't have added to its scene.
 // Also brings in the models of objects scripts create.
@@ -27,11 +32,19 @@ public:
     // The scene mesh of a game model (e.g. "puddle_cres"), added with its materials on first use.
     // -1 when it has nothing to draw.
     int model(const std::string& name, ts2::scene::Scene& scene);
+    // The scene mesh of a lot object's model with the materials the lot put on it, skinned to the
+    // model's joints. -1 when it has nothing to draw or follows no joint.
+    int skinnedModel(const std::string& name, const std::vector<ts2::scenegraph::MaterialOverride>& overrides, ts2::scene::Scene& scene);
+    // The rig of an object's model, at rest as the lot saved its joints. Empty when the model has none.
+    std::shared_ptr<const ts2::scene::Rig> objectRig(const std::string& model, const std::vector<ts2::cobject::SavedJoint>& saved);
     // Where a named node of a model sits in it, once model() has added it. Null for none.
     const ts2::scene::Transform* bone(const std::string& model, const std::string& node) const { return builder_.bone(model, node); }
 
     // Looks for objects whose materials changed since the last update.
     void update(ts2::sim::World& world, ts2::scene::Scene& scene);
+    // The next update sends the object's materials again if scripts changed them (its instance got
+    // a new mesh).
+    void showAgain(std::int16_t object) { versions_.erase(object); }
     // What the last update changed: scene instance and its materials (see Renderer::setMaterials).
     const std::vector<std::pair<std::size_t, std::vector<int>>>& changed() const { return changed_; }
 
@@ -77,6 +90,7 @@ private:
     std::map<int, int> envCubes_;                    // builder cube -> scene cube
     std::map<int, int> builderMaterials_;            // builder material -> scene material
     std::map<std::string, int> models_;              // lower-case name -> scene mesh
+    std::map<std::string, int> skinnedModels_;       // lower-case name and materials -> scene mesh
     std::vector<std::pair<std::size_t, std::vector<int>>> changed_;
 };
 

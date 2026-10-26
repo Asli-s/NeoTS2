@@ -1,8 +1,30 @@
-// Runs every test file's tests. With an argument, only those whose names contain it.
+// Runs every test file's tests. With an argument, only those whose names contain it. With
+// "--group k/n", only every n-th test starting at the k-th (k from 1), so n processes can share the
+// tests (ctest runs the groups side by side).
 #include "test_support.hpp"
 
+#include <charconv>
+
 int main(int argc, char** argv) {
-    const std::string_view filter = argc > 1 ? argv[1] : "";
+    std::string_view filter;
+    std::size_t group = 0, groups = 1;
+    for (int i = 1; i < argc; ++i) {
+        const std::string_view arg = argv[i];
+        if (arg == "--group" && i + 1 < argc) {
+            const std::string_view value = argv[++i];
+            const auto slash = value.find('/');
+            const bool read = slash != std::string_view::npos &&
+                              std::from_chars(value.data(), value.data() + slash, group).ec == std::errc{} &&
+                              std::from_chars(value.data() + slash + 1, value.data() + value.size(), groups).ec == std::errc{};
+            if (!read || groups == 0 || group == 0 || group > groups) {
+                std::printf("--group needs k/n with 1 <= k <= n, not %.*s\n", static_cast<int>(value.size()), value.data());
+                return 2;
+            }
+            --group;
+        } else {
+            filter = arg;
+        }
+    }
     std::vector<Test> tests;
     for (auto& t : vmCoreTests()) tests.push_back(t);
     for (auto& t : vmObjectTests()) tests.push_back(t);
@@ -27,10 +49,13 @@ int main(int argc, char** argv) {
     for (auto& t : pathsTests()) tests.push_back(t);
     for (auto& t : fuzzRegressionTests()) tests.push_back(t);
 
-    for (const auto& [name, test] : tests) {
-        if (!filter.empty() && std::string_view(name).find(filter) == std::string_view::npos) {
+    std::size_t run = 0;
+    for (std::size_t i = 0; i < tests.size(); ++i) {
+        const auto& [name, test] = tests[i];
+        if (i % groups != group || (!filter.empty() && std::string_view(name).find(filter) == std::string_view::npos)) {
             continue;
         }
+        ++run;
         const int before = failures;
 #if defined(_MSC_VER) && defined(_DEBUG)
         // In debug builds, memory a test leaves allocated is a failure.
@@ -48,6 +73,7 @@ int main(int argc, char** argv) {
 #endif
         std::printf("%s %s\n", failures == before ? "[pass]" : "[FAIL]", name);
     }
-    std::printf("\n%zu tests, %d failed checks\n", tests.size(), failures);
+    // A group counts only its own tests.
+    std::printf("\n%zu tests, %d failed checks\n", groups == 1 ? tests.size() : run, failures);
     return failures == 0 ? 0 : 1;
 }

@@ -18,6 +18,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <vector>
@@ -141,9 +142,14 @@ public:
     bool hasCountedToken(std::int16_t sim, std::uint32_t guid);
     // A Sim's aspiration score (person data 0xA0). 0 for a Sim that is gone.
     std::int16_t aspirationScore(std::int16_t sim);
-    // Whether the mouse highlights an object: one (not a Sim) on which the selected Sim's pie menu
-    // would offer something.
+    // Whether the mouse can use an object or a Sim (the selected Sim itself too): one on which the
+    // selected Sim's pie menu would offer something.
     bool hoverable(std::uint32_t object);
+    bool isSim(std::uint32_t object);
+    // The object a click at a point of the scene on `object` picks, as the game does: for a
+    // multi-tile object the part whose spot on its floor is nearest the point (the side of a double
+    // bed clicked), for any other the object itself.
+    std::uint32_t partAt(std::uint32_t object, const std::array<float, 3>& scenePoint, const ts2::scene::Scene& scene);
     // The selected Sim's pie menu on an object. Empty when it offers nothing.
     std::vector<ts2::sim::PieChoice> pieMenu(std::uint32_t object);
     // A click on empty floor or ground at a point of the scene, on a storey (1 = ground): the game
@@ -205,8 +211,12 @@ public:
     void relightAll(ts2::scene::Scene& scene);
 
 private:
+    // The lot object of a scene object id, null for none.
+    ts2::sim::SimObject* lotObject(std::uint32_t id);
     void placeObjects(ts2::scene::Scene& scene);
     void followClips(ts2::scene::Scene& scene);
+    void animateObjects(ts2::scene::Scene& scene);
+    std::optional<ts2::scene::Transform> partSlot(std::int16_t part, std::size_t slot, const ts2::scene::Scene& scene);
     const ts2::scene::Transform& standingPlace(const ts2::scene::PlacedObject& placed, const ts2::scene::Scene& scene) const;
     void addCreatedObjects(ts2::scene::Scene& scene);
     void relight(ts2::scene::Scene& scene, std::size_t index, const ts2::scene::Transform& inLot, int storey);
@@ -229,10 +239,11 @@ private:
         std::optional<ts2::sim::PlayingAnimation> held;
         bool walking = false;  // while the Sim walks, `previous` is what it did before the walk
         double walkStartMs = 0;  // when that walk started (a walk straight after another starts anew)
-        // The walk's last clips as drawn, and when it ended (negative: none), so that an animation
-        // starting as the walk ends fades in over the walk's last pose.
+        // The walk's last clips as drawn, the heading they were drawn at, and when it ended (negative:
+        // none), so that an animation starting as the walk ends fades in over the walk's last pose.
         std::vector<ts2::sim::LocoClip> endedClips;
         std::vector<ts2::sim::WalkPose> endedPoses;
+        float endedHeading = 0;
         double walkEndMs = -1;
     };
     std::vector<ts2::sim::WalkPose> walkPoses_;
@@ -247,6 +258,9 @@ private:
     std::map<std::uint32_t, ObjectPlace> objectPlaces_;
     // Per scene instance moved by its object's clip (see followClips): where it stands without the clip.
     std::map<std::size_t, ts2::scene::Transform> clipBases_;
+    // Per multi-tile part and container slot: where the slot's bone sits in its lead's model (see partSlot).
+    std::map<std::pair<std::int16_t, std::size_t>, std::optional<ts2::scene::Transform>> partSlots_;
+    std::set<std::uint32_t> unskinned_;  // objects whose model can't be drawn skinned (see animateObjects)
     // Per neighbor: its held wants and fears (GUIDs) in the order they were held. Saved holds come
     // first, wants before fears.
     struct Hold {

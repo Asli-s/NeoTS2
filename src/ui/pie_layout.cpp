@@ -112,6 +112,16 @@ Layout layout(int centreX, int centreY, std::span<const int> textWidths, int tex
     return menu;
 }
 
+Page page(std::size_t total, std::size_t first) {
+    constexpr std::size_t kMaxItems = 12;
+    if (first == 0 && total <= kMaxItems) {
+        return {0, total, false, 0};
+    }
+    first = std::min(first, total);
+    const std::size_t count = std::min(kMaxItems - 1, total - first);
+    return {first, count, true, first + count < total ? first + count : 0};
+}
+
 Item centreItem(int x, int y, int textWidth, int textHeight) { return place(Shape::Centre, x, y, textWidth, textHeight); }
 
 bool over(const Item& item, int x, int y) {

@@ -16,7 +16,7 @@ namespace ts2::sim {
 // A route for Go To Routing Slot, as the simulation plans it: the points a Sim walks from its spot
 // to the goal (route coordinates, which are the position's, in tiles) and the direction it faces
 // at the end when the slot says one. With no points, `failure` is the game's route result (person
-// data 0x3E): 2 path not found, 6 no valid goals, 10 the goal on another level.
+// data 0x3E): 2 path not found, 6 no valid goals, 7 the destination occupied.
 // A stair on the way: the Sim walks to points[at] (its entry), the stair's Portal tree climbs it, and
 // the walk goes on from points[at + 1] (its exit). Levels count from 1 (the ground).
 struct StairCrossing {
@@ -121,6 +121,7 @@ struct Walking {
     std::optional<bool> preRoute;
     bool started = false;        // walking (after the pre-route tree)
     bool nested = false;         // started inside a post-route tree: no post-route tree of its own
+    bool turnOnly = false;       // already at the goal, only turning to its facing: no route trees
     bool feedback = true;        // a failure runs "CT - Route Failure Feedback" (route flag 0x4000)
     // The slot the first plan chose (owner id, number, global): a plan again after the pre-route
     // tree routes to the same slot, whatever that tree did to the temps.

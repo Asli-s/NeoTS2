@@ -110,12 +110,19 @@ void poseRig(const Rig& rig, const RigAnimation* animation, float ms, std::vecto
 // place under its posed parent.
 void skinMatrices(const Mesh& mesh, const std::vector<int>& nodes, const Rig& rig, const RigAnimation* animation,
                   const std::vector<Transform>& world, std::vector<Transform>& out);
-// The same for a rig posed by several animations at once.
+// The same for a rig posed by several animations at once. With `ownRig` (a lot object's rig, made
+// from the mesh's own model), every joint is placed as the rig is posed.
 void skinMatrices(const Mesh& mesh, const std::vector<int>& nodes, const Rig& rig, std::span<const RigAnimation* const> animations,
-                  const std::vector<Transform>& world, std::vector<Transform>& out);
+                  const std::vector<Transform>& world, std::vector<Transform>& out, bool ownRig = false);
 
 // Each skin entry of a mesh as a node of the rig (see skinMatrices).
 std::vector<int> skinNodes(const Mesh& mesh, const Rig& rig);
+
+// Whether a primitive has four joints and four weights per vertex.
+bool isSkinned(const Primitive& p);
+// A skinned primitive's positions as `joints` pose them, as the skinned vertex shader does, into
+// `out` (all 0 for a primitive that isn't skinned).
+void posedPositions(const Primitive& p, const std::vector<Transform>& joints, std::vector<float>& out);
 
 // A joint's local place and turn as last posed.
 struct HeldJoint {
@@ -125,7 +132,7 @@ struct HeldJoint {
 
 // Poses every actor of a scene at `seconds`, each animation looping from its start: the joint
 // matrices of each skinned instance and the place of each skinned and held instance, by instance,
-// and each actor's rig nodes in its model's space, by actor.
+// and each Sim actor's rig nodes in its model's space, by actor.
 
 struct ScenePose {
     std::vector<std::pair<std::size_t, std::vector<Transform>>> joints;

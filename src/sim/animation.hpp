@@ -39,6 +39,9 @@ struct AnimateOperands {
     std::uint8_t list = 0;
     std::uint8_t priority = 0;
     std::int8_t blend = 0;
+    // The clip's IK object: the value of byte 9 (owner) and bytes 10-11 (data), read when either isn't 0.
+    std::uint8_t ikOwner = 0;
+    std::uint16_t ikData = 0;
 };
 AnimateOperands animateOperands(std::span<const std::uint8_t> operands);
 
@@ -73,6 +76,9 @@ struct PlayingAnimation {
         float heading = 0;
     };
     std::optional<IkObject> ikObject;
+    // The object Animate Sim names as the clip's IK object, whose bones its targets can name (a
+    // hug's other Sim), 0 for none.
+    std::int16_t ikTarget = 0;
     // The mixer layer it plays on: twice its priority (0 low .. 6 highest), between the overlays'
     // odd layers. Walks and turns play on 0.
     int layer = 0;
@@ -92,17 +98,21 @@ struct PlayingAnimation {
     bool finished(double nowMs) const { return nowMs - startMs >= lengthMs; }
 };
 
-// An animation laid over a Sim by Animate Overlay (0x6B). It plays on its own while scripts go on.
-// Its event tree hears when it starts blending out (kBlendingOutEvent), then when it is gone
-// (kBlendedOutEvent and kEndEvent), with the percent of it played.
+// An animation laid over a Sim or an object by Animate Overlay (0x6B). It plays on its own while
+// scripts go on. Its event tree hears when it starts blending out (kBlendingOutEvent), then when it
+// is gone (kBlendedOutEvent and kEndEvent), with the percent of it played.
 //   bytes 0-1  the entry of the animation list, or with byte 2 flag 0x04 the parameter holding it
 //   byte 2     flags: 0x01 flipped, 0x04 entry from a parameter, 0x20 times to play from temp 1,
 //              0x40 no blending out, 0x80 no blending in
 //   byte 3     speed, in 32nds
 //   bytes 4-5  the tree told of its events (0: none)
+//   byte 6, 7-8  the object it plays on (owner, data), mostly "my object id". A bed's tree lays its
+//              own clip on the bed this way while the Sim's clip plays on the Sim.
 //   byte 9     the animation list (0x81 adult animations...)
 //   byte 10    weight, in hundredths (outside 0-100: whole)
 //   byte 11    priority 0-4 (low, medium, high, highest, under everything)
+//   byte 15    flags: 0x01 flipped if temp 3 (in place of byte 2's flag), so a bed's clip plays on
+//              the side the Sim gets in on, as the Sim's own clip does
 struct PlayingOverlay {
     std::string name;
     double startMs = 0;   // on the world's clock
@@ -116,6 +126,9 @@ struct PlayingOverlay {
     std::uint16_t eventTree = 0;
     std::uint32_t codeOwner = 0;     // whose code the event tree is looked up in
     std::int16_t stackObject = 0;    // the event tree's stack object
+    // Who ran Animate Overlay (0: the object playing it). The event tree runs as that object. Where
+    // the game runs it when the overlay plays on another object is not known yet.
+    std::int16_t caller = 0;
     bool blendingOut = false;        // kBlendingOutEvent told
     std::uint8_t category = 1;       // see content::animationCategory
     bool stopped = false;            // ended by Animate Stop: fades out without telling events

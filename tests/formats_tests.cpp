@@ -1320,8 +1320,10 @@ void wallGraphPointIndexFindsTheFirstPoint() {
 
 } // namespace
 
+namespace {
+
 // A 2 x 2 cursor with two palette colors: rows are stored bottom up and the mask hides one pixel.
-void cursorReadsPictureMaskAndHotspot() {
+std::vector<std::uint8_t> tinyCursor() {
     std::vector<std::uint8_t> d;
     auto u16 = [&d](std::uint32_t v) { d.push_back(static_cast<std::uint8_t>(v)); d.push_back(static_cast<std::uint8_t>(v >> 8)); };
     auto u32 = [&](std::uint32_t v) { u16(v & 0xFFFF); u16(v >> 16); };
@@ -1334,6 +1336,13 @@ void cursorReadsPictureMaskAndHotspot() {
     d.insert(d.end(), {0, 0, 255, 0, 255, 0, 0, 0});  // red, blue (BGRA)
     d.insert(d.end(), {1, 1, 0, 0, 0, 0, 0, 0});      // bottom row blue, top row red
     d.insert(d.end(), {0, 0, 0, 0, 0x40, 0, 0, 0});   // the top row's right pixel masked out
+    return d;
+}
+
+} // namespace
+
+void cursorReadsPictureMaskAndHotspot() {
+    auto d = tinyCursor();
     const auto c = ts2::cursor::decode(d);
     CHECK(c && c->pixels.width == 2 && c->pixels.height == 2 && c->hotX == 1 && c->hotY == 0);
     CHECK(c->pixels.rgba[0] == 255 && c->pixels.rgba[2] == 0 && c->pixels.rgba[3] == 255);
@@ -1341,6 +1350,103 @@ void cursorReadsPictureMaskAndHotspot() {
     CHECK(c->pixels.rgba[8] == 0 && c->pixels.rgba[10] == 255 && c->pixels.rgba[11] == 255);
     d[27] = 0x02;  // a picture 514 wide
     CHECK(!ts2::cursor::decode(d));
+}
+
+// Two pictures shown in three steps (0, 1, 0), the first step longer, as the game's hourglass does.
+// An animated cursor shows each step for its own time and loops. A stall of over a second starts the
+// step shown again, and steps of no time can't hang it.
+void cursorPlaybackStepsAndLoops() {
+    using Step = ts2::cursor::AnimatedCursor::Step;
+    const std::vector<Step> steps{{0, 6}, {1, 3}, {2, 12}};  // 0.1 s, 0.05 s, 0.2 s
+    ts2::cursor::CursorPlayback play;
+    CHECK(play.step(steps, 10.0) == 0);
+    CHECK(play.step(steps, 10.09) == 0);
+    CHECK(play.step(steps, 10.11) == 1);
+    CHECK(play.step(steps, 10.16) == 2);
+    CHECK(play.step(steps, 10.36) == 0);  // looped
+    CHECK(play.step(steps, 10.46) == 1);
+    CHECK(play.step(steps, 15.0) == 1);   // after a stall the shown step starts again
+    CHECK(play.step(steps, 15.04) == 1);
+    CHECK(play.step(steps, 15.06) == 2);
+    play.restart();
+    CHECK(play.step(steps, 20.0) == 0);
+    const std::vector<Step> empty;
+    CHECK(play.step(empty, 21.0) == 0);
+    const std::vector<Step> none{{0, 0}, {1, 0}};
+    ts2::cursor::CursorPlayback quick;
+    CHECK(quick.step(none, 0.0) == 0);
+    CHECK(quick.step(none, 0.9) < 2);  // each counts as one jiffy, and the call returns
+}
+
+void animatedCursorReadsSequenceAndRates() {
+    auto make = [](std::uint32_t steps, std::vector<std::uint32_t> sequence, std::vector<std::uint32_t> rates) {
+        std::vector<std::uint8_t> body;
+        auto u32 = [](std::vector<std::uint8_t>& to, std::uint32_t v) {
+            for (int i = 0; i < 4; ++i) {
+                to.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
+            }
+        };
+        auto chunk = [&](std::vector<std::uint8_t>& to, const char* id, const std::vector<std::uint8_t>& data) {
+            to.insert(to.end(), id, id + 4);
+            u32(to, static_cast<std::uint32_t>(data.size()));
+            to.insert(to.end(), data.begin(), data.end());
+            if (data.size() % 2 != 0) {
+                to.push_back(0);
+            }
+        };
+        std::vector<std::uint8_t> header;
+        for (const std::uint32_t v : {36u, 2u, steps, 0u, 0u, 0u, 0u, 10u, 3u}) {
+            u32(header, v);
+        }
+        chunk(body, "anih", header);
+        auto list = [&](const std::vector<std::uint32_t>& values) {
+            std::vector<std::uint8_t> out;
+            for (const std::uint32_t v : values) {
+                u32(out, v);
+            }
+            return out;
+        };
+        if (!rates.empty()) {
+            chunk(body, "rate", list(rates));
+        }
+        if (!sequence.empty()) {
+            chunk(body, "seq ", list(sequence));
+        }
+        std::vector<std::uint8_t> frames{'f', 'r', 'a', 'm'};
+        chunk(frames, "icon", tinyCursor());
+        chunk(frames, "icon", tinyCursor());
+        chunk(body, "LIST", frames);
+        std::vector<std::uint8_t> file{'R', 'I', 'F', 'F'};
+        u32(file, static_cast<std::uint32_t>(body.size() + 4));
+        file.insert(file.end(), {'A', 'C', 'O', 'N'});
+        file.insert(file.end(), body.begin(), body.end());
+        return file;
+    };
+    const auto a = ts2::cursor::decodeAnimated(make(3, {0, 1, 0}, {40, 5, 5}));
+    CHECK(a && a->frames.size() == 2 && a->steps.size() == 3);
+    CHECK(a->steps[0].frame == 0 && a->steps[0].jiffies == 40 && a->steps[1].frame == 1 && a->steps[1].jiffies == 5);
+    CHECK(a->frames[1].hotX == 1 && a->frames[1].pixels.width == 2);
+    // A size that counts the 8 bytes before it, as the game's hourglass has, still reads.
+    auto counted = make(3, {0, 1, 0}, {40, 5, 5});
+    const std::uint32_t whole = static_cast<std::uint32_t>(counted.size());
+    for (int i = 0; i < 4; ++i) {
+        counted[4 + static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(whole >> (8 * i));
+    }
+    CHECK(ts2::cursor::decodeAnimated(counted).has_value());
+    // No sequence and no rates: each picture in turn, all at the header's rate.
+    const auto plain = ts2::cursor::decodeAnimated(make(2, {}, {}));
+    CHECK(plain && plain->steps.size() == 2 && plain->steps[1].frame == 1 && plain->steps[1].jiffies == 10);
+    // A step of no time still lasts one sixtieth of a second.
+    const auto still = ts2::cursor::decodeAnimated(make(2, {}, {0, 0}));
+    CHECK(still && still->steps[0].jiffies == 1);
+    CHECK(!ts2::cursor::decodeAnimated(make(3, {0, 2, 0}, {})));          // a step showing a picture that isn't there
+    CHECK(!ts2::cursor::decodeAnimated(make(3, {0, 1}, {})));             // a sequence shorter than the steps
+    CHECK(!ts2::cursor::decodeAnimated(make(3, {}, {})));                 // more steps than pictures, no sequence
+    CHECK(!ts2::cursor::decodeAnimated(make(ts2::cursor::kMaxSteps + 1, {}, {})));
+    auto cut = make(3, {0, 1, 0}, {40, 5, 5});
+    cut.resize(cut.size() - 10);
+    CHECK(!ts2::cursor::decodeAnimated(cut));
+    CHECK(!ts2::cursor::decodeAnimated(tinyCursor()));
 }
 
 std::vector<Test> formatTests() {
@@ -1355,6 +1461,8 @@ std::vector<Test> formatTests() {
         {"SLOT resource counts container slots", slotResourceCountsContainerSlots},
         {"SLOT entry reads every field", slotEntryReadsEveryField},
         {"cursor reads picture, mask and hotspot", cursorReadsPictureMaskAndHotspot},
+        {"animated cursor reads sequence and rates", animatedCursorReadsSequenceAndRates},
+        {"cursor playback steps and loops", cursorPlaybackStepsAndLoops},
         {"pattern map reads names by id", patternMapReadsNamesById},
         {"pattern map reads long names", patternMapReadsLongNames},
         {"name map reads names", nameMapReadsNames},

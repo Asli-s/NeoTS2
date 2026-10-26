@@ -19,6 +19,7 @@ namespace {
 // The cursors' file names by id, as the game registers them.
 constexpr std::pair<std::uint32_t, const char*> kNames[] = {
     {Cursors::kArrow, "arrow"},
+    {Cursors::kHourglass, "hourglass"},
     {Cursors::kLiveNothing, "livenothing"},
     {Cursors::kLivePerson, "liveperson"},
     {Cursors::kLiveObjectAvailable, "liveobjectavail"},
@@ -26,8 +27,9 @@ constexpr std::pair<std::uint32_t, const char*> kNames[] = {
 };
 
 // The game's cursor setting picks the "_8" files (its default, on) or the "_1" ones. Each name is
-// tried with that ending, then without one. Animated .ani files come first in the game: none of
-// these cursors has one, and they are not read yet.
+// looked for as an animated .ani file with that ending, then a .cur file with it, then a .cur without
+// one. The game uses the first file that exists, so a broken one is not replaced by the next. What
+// the game shows for a broken file is not known yet. Here it is the system arrow.
 constexpr const char* kEnding = "_8";
 
 // The drag arrow's picture: UI image 0xFFFF0000, of which the game keeps the green channel.
@@ -40,23 +42,53 @@ ts2::platform::CursorPtr make(const ts2::tga::Pixels& pixels, int hotX, int hotY
                                        static_cast<unsigned>(hotX), static_cast<unsigned>(hotY));
 }
 
-ts2::platform::CursorPtr load(const std::vector<ts2::content::Product>& products, const std::string& name) {
+// A cursor's pictures, all made, or nothing.
+std::optional<std::vector<ts2::platform::CursorPtr>> makeAll(const std::vector<ts2::cursor::Cursor>& pictures) {
+    std::vector<ts2::platform::CursorPtr> out;
+    for (const auto& c : pictures) {
+        auto made = make(c.pixels, static_cast<int>(c.hotX), static_cast<int>(c.hotY));
+        if (!made) {
+            return std::nullopt;
+        }
+        out.push_back(std::move(made));
+    }
+    return out;
+}
+
+std::optional<std::vector<std::uint8_t>> readFile(const std::vector<ts2::content::Product>& products, const std::string& file) {
+    const auto path = ts2::content::newestDataFile(products, std::filesystem::path("Res/UI/Cursors") / file);
+    if (!path) {
+        return std::nullopt;
+    }
+    std::ifstream in(*path, std::ios::binary);
+    return std::vector<std::uint8_t>{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+
+std::optional<Cursors::Shape> load(const std::vector<ts2::content::Product>& products, const std::string& name) {
+    if (const std::string file = name + kEnding + ".ani"; const auto bytes = readFile(products, file)) {
+        auto animated = ts2::cursor::decodeAnimated(*bytes);
+        auto frames = animated ? makeAll(animated->frames) : std::nullopt;
+        if (!frames) {
+            ts2::diag::warnOnce("cursors: " + file + " can't be read");
+            return std::nullopt;
+        }
+        return Cursors::Shape{std::move(*frames), std::move(animated->steps)};
+    }
     for (const std::string file : {name + kEnding + ".cur", name + ".cur"}) {
-        const auto path = ts2::content::newestDataFile(products, std::filesystem::path("Res/UI/Cursors") / file);
-        if (!path) {
+        const auto bytes = readFile(products, file);
+        if (!bytes) {
             continue;
         }
-        std::ifstream in(*path, std::ios::binary);
-        const std::vector<std::uint8_t> bytes{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
-        auto cursor = ts2::cursor::decode(bytes);
-        if (!cursor) {
+        auto cursor = ts2::cursor::decode(*bytes);
+        auto frames = cursor ? makeAll({*cursor}) : std::nullopt;
+        if (!frames) {
             ts2::diag::warnOnce("cursors: " + file + " can't be read");
-            return nullptr;
+            return std::nullopt;
         }
-        return make(cursor->pixels, static_cast<int>(cursor->hotX), static_cast<int>(cursor->hotY));
+        return Cursors::Shape{std::move(*frames), {}};
     }
     ts2::diag::warnOnce("cursors: " + name + " was not found");
-    return nullptr;
+    return std::nullopt;
 }
 
 } // namespace
@@ -64,8 +96,8 @@ ts2::platform::CursorPtr load(const std::vector<ts2::content::Product>& products
 Cursors::Cursors(const std::filesystem::path& install, ts2::content::UiData& ui) {
     const auto products = ts2::content::findProducts(install);
     for (const auto& [id, name] : kNames) {
-        if (auto cursor = load(products, name)) {
-            cursors_[id] = std::move(cursor);
+        if (auto shape = load(products, name)) {
+            cursors_[id] = std::move(*shape);
         }
     }
     if (const auto image = ui.image(kImageGroup, kDragArrow); image && image->width == ts2::ui::kDragArrowSide && image->height == ts2::ui::kDragArrowSide) {
@@ -81,17 +113,45 @@ Cursors::Cursors(const std::filesystem::path& install, ts2::content::UiData& ui)
 Cursors::~Cursors() = default;
 
 void Cursors::show(std::uint32_t id) {
-    if (id == shown_) {
+    wanted_ = id;
+    if (!busy_ && id != shown_) {
+        display(id);
+    }
+}
+
+void Cursors::display(std::uint32_t id) {
+    shown_ = id;
+    playback_.restart();
+    const auto found = cursors_.find(id);
+    const Shape* shape = found != cursors_.end() ? &found->second : nullptr;
+    set_ = shape && !shape->frames.empty() ? shape->frames[shape->steps.empty() ? 0 : shape->steps.front().frame].get() : nullptr;
+    ts2::platform::setCursor(set_);
+}
+
+void Cursors::setBusy(bool busy) {
+    if (busy == busy_) {
         return;
     }
-    shown_ = id;
-    const auto found = cursors_.find(id);
-    ts2::platform::setCursor(found != cursors_.end() ? found->second.get() : nullptr);
+    busy_ = busy;
+    display(busy ? kHourglass : wanted_);
+}
+
+void Cursors::animate(double seconds) {
+    const auto found = cursors_.find(shown_);
+    if (found == cursors_.end() || found->second.steps.empty()) {
+        return;
+    }
+    const auto& steps = found->second.steps;
+    const auto* picture = found->second.frames[steps[playback_.step(steps, seconds)].frame].get();
+    if (picture != set_) {
+        set_ = picture;
+        ts2::platform::setCursor(set_);
+    }
 }
 
 // The game makes a new cursor each frame of a drag. Here a new one is made only when the angle changes.
 void Cursors::showDragArrow(float angle) {
-    if (arrow_.empty()) {
+    if (arrow_.empty() || busy_) {
         return;
     }
     if (!turned_ || angle != turnedAngle_ || shown_ != kShowingDragArrow) {

@@ -51,6 +51,16 @@ struct Layout {
 Layout layout(int centreX, int centreY, std::span<const int> textWidths, int textHeight, int headWidth, int headHeight,
               int screenWidth, int screenHeight);
 
+// A pie menu ring holds at most 12 items. With more entries, "More..." goes first and the
+// entries follow 11 a page. Every page shows "More...", which on the last page goes back to the first.
+struct Page {
+    std::size_t first = 0, count = 0;  // the entries shown
+    bool more = false;                 // "More..." goes before them
+    std::size_t next = 0;              // where the page "More..." opens starts
+};
+// The page of `total` entries that starts at entry `first`.
+[[nodiscard]] Page page(std::size_t total, std::size_t first);
+
 // The centre item a sub-menu shows to go back, centred on (x, y).
 Item centreItem(int x, int y, int textWidth, int textHeight);
 

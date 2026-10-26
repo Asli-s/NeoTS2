@@ -43,7 +43,8 @@ jobs:
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
           $msvc = Get-ChildItem "$vs\VC\Tools\MSVC" -Directory | Sort-Object Name | Select-Object -Last 1
           $env:PATH = "$($msvc.FullName)\bin\Hostx64\x64;$env:PATH"
-          ctest --test-dir build -C ${{ matrix.config }} --output-on-failure
+          # The tests come in groups (see CMakeLists.txt), run side by side.
+          ctest --test-dir build -C ${{ matrix.config }} --output-on-failure -j 4
 
   coverage:
     name: Clang, coverage
@@ -73,10 +74,14 @@ jobs:
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
           $msvc = Get-ChildItem "$vs\VC\Tools\MSVC" -Directory | Sort-Object Name | Select-Object -Last 1
           $env:PATH = "$($msvc.FullName)\bin\Hostx64\x64;$env:PATH"
-          $failed = @()
-          foreach ($fuzzer in Get-ChildItem build-fuzz\RelWithDebInfo\*_fuzz.exe) {
-              New-Item -ItemType Directory -Force "corpus\$($fuzzer.BaseName)" | Out-Null
-              & $fuzzer.FullName "corpus\$($fuzzer.BaseName)" -max_total_time=15 -rss_limit_mb=2048 2>&1 | Select-Object -Last 1
-              if ($LASTEXITCODE -ne 0) { $failed += $fuzzer.BaseName }
+          # Four readers at a time, each for the same 15 seconds as on its own.
+          $root = $PWD.Path
+          $results = Get-ChildItem build-fuzz\RelWithDebInfo\*_fuzz.exe | ForEach-Object -ThrottleLimit 4 -Parallel {
+              $corpus = Join-Path $using:root "corpus\$($_.BaseName)"
+              New-Item -ItemType Directory -Force $corpus | Out-Null
+              $last = & $_.FullName $corpus -max_total_time=15 -rss_limit_mb=2048 2>&1 | Select-Object -Last 1
+              [pscustomobject]@{ Name = $_.BaseName; Last = "$last"; Failed = $LASTEXITCODE -ne 0 }
           }
+          $results | Sort-Object Name | ForEach-Object { "$($_.Name): $($_.Last)" }
+          $failed = @($results | Where-Object Failed | ForEach-Object Name)
           if ($failed) { throw "fuzzing found problems in: $($failed -join ', ')" }

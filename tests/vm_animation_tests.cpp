@@ -100,6 +100,8 @@ void animateSimWaitsForItsAnimation() {
     overlay.falseTarget = E;
     overlay.operands[0] = 1;
     overlay.operands[3] = 32;
+    overlay.operands[6] = 0x03;  // on "my object id"
+    overlay.operands[7] = 0x0B;
     overlay.operands[9] = 0x81;
     code.add(kObjectGroup, 0x1002, bhav({overlay}));
 
@@ -167,6 +169,8 @@ void animateOverlaySpecialListUsesTheGlobalAgeLists() {
     overlay.trueTarget = T;
     overlay.falseTarget = E;
     overlay.operands[3] = 1;
+    overlay.operands[6] = 0x03;
+    overlay.operands[7] = 0x0B;
     overlay.operands[9] = 0x80;
     MemoryCodeSource code;
     code.addStrings(ts2::sim::kGlobalGroup, 0x81, {"a-blink"});
@@ -189,6 +193,95 @@ void animateOverlaySpecialListUsesTheGlobalAgeLists() {
     CHECK(plays(16) == "t-blink");
     CHECK(plays(5) == "a-blink");
     CHECK(plays(30) == "a-blink");
+}
+
+// Animate Overlay plays on the object its bytes 6-8 name: a bed's tree lays the bed's clip on the bed
+// (here the stack object) while I keep none. Its event tree still runs as me. No such object is an error.
+void animateOverlayPlaysOnTheObjectItNames() {
+    Instruction overlay;
+    overlay.opcode = 0x006B;
+    overlay.trueTarget = T;
+    overlay.falseTarget = E;
+    overlay.operands[3] = 32;
+    overlay.operands[4] = 0x01;  // event tree 0x1001
+    overlay.operands[5] = 0x10;
+    overlay.operands[6] = 0x0A;  // the stack object
+    overlay.operands[9] = 0x81;
+    MemoryCodeSource code;
+    code.addStrings(kObjectGroup, 0x81, {"o2a-dbl-bed-relax-loop-breathe"});
+    code.add(kObjectGroup, 0x1000, bhav({overlay}));
+    ts2::sim::World world;
+    world.setAnimationLengths([](const std::string&) -> std::optional<float> { return 1858.0f; });
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    auto& bed = world.create(kObjectGroup, typed(kFridgeGuid));
+    Vm vm(code, {}, &world);
+    sim.thread.stackObjectId = bed.id;
+    CHECK(vm.run(sim, kObjectGroup, 0x1000).outcome == Outcome::True);
+    CHECK(sim.overlays.empty() && bed.overlays.size() == 1 && bed.overlays[0].name == "o2a-dbl-bed-relax-loop-breathe");
+    CHECK(bed.overlays[0].caller == sim.id && bed.overlays[0].stackObject == bed.id);
+    sim.thread.stackObjectId = 0;
+    CHECK(vm.run(sim, kObjectGroup, 0x1000).outcome == Outcome::Error);
+}
+
+// Animate Overlay byte 15 flag 0x01 flips the overlay by temp 3 in place of byte 2's flag, as a bed's
+// clip follows the side the Sim gets in on.
+void animateOverlayFlipsFromTemp3() {
+    Instruction overlay;
+    overlay.opcode = 0x006B;
+    overlay.trueTarget = T;
+    overlay.falseTarget = E;
+    overlay.operands[2] = 0x01;
+    overlay.operands[3] = 32;
+    overlay.operands[6] = 0x03;  // my object id
+    overlay.operands[7] = 0x0B;
+    overlay.operands[9] = 0x81;
+    overlay.operands[15] = 0x01;
+    MemoryCodeSource code;
+    code.addStrings(kObjectGroup, 0x81, {"o2a-dbl-bed-relax-getin-start"});
+    code.add(kObjectGroup, 0x1000, bhav({overlay}));
+    ts2::sim::World world;
+    world.setAnimationLengths([](const std::string&) -> std::optional<float> { return 3041.0f; });
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    Vm vm(code, {}, &world);
+    sim.thread.temps[3] = 0;
+    CHECK(vm.run(sim, kObjectGroup, 0x1000).outcome == Outcome::True);
+    sim.thread.temps[3] = 1;
+    CHECK(vm.run(sim, kObjectGroup, 0x1000).outcome == Outcome::True);
+    CHECK(sim.overlays.size() == 2 && !sim.overlays[0].flipped && sim.overlays[1].flipped);
+}
+
+// Animate Overlay's object list 0x86 is read from my age's object list first, as a child's bed
+// covers play the child clip, and from 0x86 itself when that entry names no animation.
+void animateOverlayObjectListUsesTheAgeList() {
+    Instruction overlay;
+    overlay.opcode = 0x006B;
+    overlay.trueTarget = T;
+    overlay.falseTarget = E;
+    overlay.operands[2] = 0x04;  // entry from param 0
+    overlay.operands[3] = 32;
+    overlay.operands[6] = 0x03;  // my object id
+    overlay.operands[7] = 0x0B;
+    overlay.operands[9] = 0x86;
+    MemoryCodeSource code;
+    code.addStrings(kObjectGroup, 0x86, {"o2a-doublebed-sheets-getin", "o2a-doublebed-sheets-getout-stop"});
+    code.addStrings(kObjectGroup, 0x192, {"o2c-dbl-getin", "-"});
+    code.add(kObjectGroup, 0x1000, bhav({overlay}));
+    ts2::sim::World world;
+    world.setAnimationLengths([](const std::string& name) -> std::optional<float> {
+        if (name == "-") return std::nullopt;
+        return 1000.0f;
+    });
+    Vm vm(code, {}, &world);
+    const auto plays = [&](std::int16_t age, std::int16_t entry) {
+        auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+        sim.personData[0x3A] = age;
+        const std::array<std::int16_t, 4> args{entry, 0, 0, 0};
+        vm.run(sim, kObjectGroup, 0x1000, args);
+        return sim.overlays.empty() ? std::string() : sim.overlays.back().name;
+    };
+    CHECK(plays(5, 0) == "o2c-dbl-getin");
+    CHECK(plays(5, 1) == "o2a-doublebed-sheets-getout-stop");
+    CHECK(plays(30, 0) == "o2a-doublebed-sheets-getin");
 }
 
 // Animate Sim list 0x80 names the clip as Animate Overlay's: my age's list in the global group.
@@ -462,6 +555,9 @@ void animateSimFlipsFromTemp3() {
 std::vector<Test> vmAnimationTests() {
     return {
         {"Animate Overlay list 0x80 uses the global age lists", animateOverlaySpecialListUsesTheGlobalAgeLists},
+        {"Animate Overlay plays on the object it names", animateOverlayPlaysOnTheObjectItNames},
+        {"Animate Overlay flips from temp 3", animateOverlayFlipsFromTemp3},
+        {"Animate Overlay object list uses the age list", animateOverlayObjectListUsesTheAgeList},
         {"Animate Sim list 0x80 uses the global age lists", animateSimSpecialListUsesTheGlobalAgeLists},
         {"social animations are named for both Sims", socialAnimationsAreNamedForBothSims},
         {"Animate Sim waits for its animation", animateSimWaitsForItsAnimation},

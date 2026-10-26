@@ -134,6 +134,7 @@ settings::LauncherSettings chosenSettings(const LauncherState& state) {
     out.addedSaveFolders = state.addedSaveFolders;
     out.backupReminderSeen = state.backupReminderSeen;
     out.renderer = state.renderer;
+    out.smoothFollow = state.smoothFollow;
     return out;
 }
 
@@ -428,7 +429,7 @@ void startPlaying(LauncherState& state, bool addNeighborhoods) {
         state.message = "NeoTS2 is already playing with this save folder.";
         return;
     }
-    state.game = startGame(install.root, folder, addNeighborhoods, builtRenderer(state.renderer), state.message);
+    state.game = startGame(install.root, folder, addNeighborhoods, builtRenderer(state.renderer), state.smoothFollow, state.message);
     state.folderNotes.clear();
 }
 
@@ -465,6 +466,8 @@ void drawPlay(LauncherState& state, const LauncherFonts& fonts) {
     // The row needs its own width, as Play always reaches the window's edge.
     const float rowTop = ImGui::GetCursorPosY();
     const float rowLeft = ImGui::GetCursorPosX();
+    // Measured before the text, which would leave less room after it and push Play to the left.
+    const float rowRight = rowLeft + ImGui::GetContentRegionAvail().x;
     state.playRowWidth = button.x;
     if (state.game) {
         ImGui::SetCursorPosY(rowTop + (button.y - ImGui::GetTextLineHeight()) / 2);
@@ -472,7 +475,7 @@ void drawPlay(LauncherState& state, const LauncherFonts& fonts) {
         state.playRowWidth += ImGui::GetItemRectSize().x + ImGui::GetStyle().ItemSpacing.x;
         ImGui::SameLine();
     }
-    ImGui::SetCursorPos(ImVec2(std::max(rowLeft + ImGui::GetContentRegionAvail().x - button.x, rowLeft), rowTop));
+    ImGui::SetCursorPos(ImVec2(std::max(rowRight - button.x, rowLeft), rowTop));
     ImGui::BeginDisabled(!hasSaves || state.game != nullptr);
     ImGui::PushFont(fonts.heading);
     const bool play = ImGui::Button("Play", button);
@@ -595,6 +598,7 @@ void findInstalls(LauncherState& state, const settings::LauncherSettings& rememb
     }
     state.backupReminderSeen = remembered.backupReminderSeen;
     state.renderer = builtRenderer(remembered.renderer);
+    state.smoothFollow = remembered.smoothFollow;
     state.remembered = chosenSettings(state);
 }
 
@@ -629,6 +633,15 @@ void drawRenderer(LauncherState& state, const LauncherFonts& fonts) {
     }
 }
 
+// Choices that change the game from the original, all off unless the player turns them on.
+void drawChanges(LauncherState& state, const LauncherFonts& fonts) {
+    heading(fonts, "Changes from the original");
+    ImGui::Checkbox("Smooth camera when following a Sim", &state.smoothFollow);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("The game's camera follows in small steps. This makes it glide instead.");
+    }
+}
+
 void drawLauncher(LauncherState& state, SDL_Window* window, const LauncherFonts& fonts) {
     takePickedFolder(state);
     drawInstalls(state, window, fonts);
@@ -636,6 +649,8 @@ void drawLauncher(LauncherState& state, SDL_Window* window, const LauncherFonts&
     drawSaveFolders(state, window, fonts);
     ImGui::Spacing();
     drawRenderer(state, fonts);
+    ImGui::Spacing();
+    drawChanges(state, fonts);
     ImGui::Spacing();
     // Measured before the Play row and the message, which both stretch to the window's edge.
     const ImGuiWindow* frame = ImGui::GetCurrentWindow();

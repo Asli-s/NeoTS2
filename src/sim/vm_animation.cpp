@@ -7,7 +7,7 @@ namespace ts2::sim::vm_detail {
 // The animation entry [entry] of string list [list] names, from the frame's code owner, its
 // semi-global code or the global code, the first that has the entry, nullopt when that entry is
 // empty or (unless `orMissing`) names an animation the game doesn't have.
-std::optional<std::string> Execution::animationEntry(const Frame& f, std::uint8_t list, std::uint16_t entry, bool orMissing,
+std::optional<std::string> Execution::animationEntry(const Frame& f, std::uint16_t list, std::uint16_t entry, bool orMissing,
                                           std::uint8_t* category) {
     for (const auto group : {f.codeOwner, code_.semiGlobalGroup(f.codeOwner), kGlobalGroup}) {
         const auto text = code_.string(group, list, entry);
@@ -68,7 +68,7 @@ std::optional<std::string> Execution::socialAnimation(const Frame& f, const SimO
 // of my age's string list for [list] (see content::ageAnimationList), else of [list] itself.
 // List 0x80 names the clip as Animate Overlay does (specialAnimationName), list 0x83 by the social prefixes.
 // The clip's SimAntics events run the event tree in bytes 4-5 (see tellAnimateSimEvents).
-// Not yet: blending, flipping, IK objects.
+// Not yet: blending.
 std::optional<bool> Execution::animateSim(const bhav::Instruction& in, Frame& f) {
     SimObject& sim = me();
     const std::size_t frame = thread_.frames.size() - 1;
@@ -121,6 +121,9 @@ std::optional<bool> Execution::animateSim(const bhav::Instruction& in, Frame& f)
     play.eventTree = a.eventTree;
     play.eventCodeOwner = f.codeOwner;
     play.eventStackObject = stackObject();
+    if (a.ikOwner != 0 || a.ikData != 0) {
+        play.ikTarget = read(a.ikOwner, a.ikData, f);
+    }
     if (const auto& lengths = world().animationLengths()) {
         if (const auto ms = lengths(play.name)) {
             play.lengthMs = *ms / std::abs(play.speed);
@@ -167,10 +170,19 @@ std::optional<std::string> Execution::specialAnimationName(const SimObject& sim,
     return name;
 }
 
-// Animate Overlay (operands: see PlayingOverlay): lays the animation over me and goes on at once.
+// Animate Overlay (operands: see PlayingOverlay): lays the animation over the object the operands
+// name and goes on at once. The entry is looked up for me (the caller), not that object. A Sim
+// reads its age's list first, for the object list 0x86 the one Animate Object reads (see
+// content::objectAnimationList), and the given list when that entry names no animation. Which
+// Sim's age picks the list when it plays on another Sim is not known yet.
 bool Execution::animateOverlay(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     SimObject& sim = me();
+    const std::int16_t targetId = read(o[6], static_cast<std::uint16_t>(o[7] | o[8] << 8), f);
+    SimObject* target = world().find(targetId);
+    if (target == nullptr) {
+        throw Stop{Outcome::Error, "could not find object reference", std::to_string(targetId)};
+    }
     const auto entry = static_cast<std::uint16_t>(o[0] | o[1] << 8);
     const std::int16_t index = (o[2] & 0x04) ? slotAt(f.params, entry, "param") : static_cast<std::int16_t>(entry);
     const std::uint8_t list = o[9];
@@ -179,8 +191,13 @@ bool Execution::animateOverlay(const bhav::Instruction& in, Frame& f) {
     if (list == kSpecialAnimationList) {
         name = specialAnimationName(sim, static_cast<std::uint16_t>(index), &category);
     } else {
-        const std::uint8_t ageList = content::ageAnimationList(list, sim.personData[kLifeStagePersonData]);
-        name = animationEntry(f, ageList, static_cast<std::uint16_t>(index), true, &category);
+        const std::int16_t age = sim.personData[kLifeStagePersonData];
+        std::uint16_t ageList = list;
+        if (sim.isPerson()) {
+            ageList = list == content::animation_list::kObject ? content::objectAnimationList(sim.personData[kSpeciesPersonData], age)
+                                                               : content::ageAnimationList(list, age);
+        }
+        name = animationEntry(f, ageList, static_cast<std::uint16_t>(index), ageList == list, &category);
         if (!name && ageList != list) {
             name = animationEntry(f, list, static_cast<std::uint16_t>(index), true, &category);
         }
@@ -205,11 +222,12 @@ bool Execution::animateOverlay(const bhav::Instruction& in, Frame& f) {
     overlay.name = *name;
     overlay.startMs = world().eventClockMs();
     overlay.speed = static_cast<float>(speed) / 32.0f;
-    overlay.flipped = (o[2] & 0x01) != 0;
+    overlay.flipped = (o[15] & 0x01) ? thread_.temps[3] != 0 : (o[2] & 0x01) != 0;
     overlay.category = entryCategory(overlay.name, category);
     overlay.eventTree = static_cast<std::uint16_t>(o[4] | o[5] << 8);
     overlay.codeOwner = f.codeOwner;
     overlay.stackObject = f.stackObjectId;
+    overlay.caller = target->id != sim.id ? sim.id : std::int16_t{0};
     if (const auto& lengths = world().animationLengths()) {
         const auto ms = lengths(overlay.name);
         if (!ms) {
@@ -218,7 +236,7 @@ bool Execution::animateOverlay(const bhav::Instruction& in, Frame& f) {
         }
         overlay.lengthMs = *ms / std::abs(overlay.speed) * std::max<std::int16_t>(overlay.plays, 1);
     }
-    layOverlay(sim, std::move(overlay));
+    layOverlay(*target, std::move(overlay));
     return true;
 }
 

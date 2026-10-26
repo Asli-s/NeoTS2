@@ -27,6 +27,11 @@ bool isBoneSlot(const slot::Entry& slot);
 // beyond any lot.
 [[nodiscard]] std::optional<SnapTarget> routingSlotTarget(const SimObject& owner, const slot::Entry& slot, const std::optional<ModelBone>& bone = std::nullopt);
 
+// The facing a bone slot's bone gives a Sim on it: the owner's facing turned by the bone's turn, in
+// steps of 45 degrees. Snap uses it with the slot's flag bit 12. A route to a bone slot always ends
+// in it.
+[[nodiscard]] std::int16_t boneSlotFacing(const SimObject& owner, const ModelBone& bone);
+
 enum class SnapRefusal {
     None,
     NotSameRoom,   // or the spot is not on the lot

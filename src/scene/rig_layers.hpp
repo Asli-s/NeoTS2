@@ -22,18 +22,21 @@ struct LayeredClip {
     // Radians the clip's root and limb controls are turned by about their turn axes (Rig::Node::turnAxis):
     // a locomotion clip plays from its own heading, which may differ from the one the rig is placed at.
     float turn = 0;
-    // Moves only the body's joints: not the root joints (root_trans, root_rot) and no limb targets. A
-    // walk's last pose under the animation that follows it is drawn this way, as the game's root
-    // already follows that animation.
+    // Moves only the body's joints and limbs, not the root joints (root_trans, root_rot). A walk's last
+    // pose under the animation that follows it is drawn this way, as the game's root already follows
+    // that animation, and its limb targets still count as it fades out.
     bool bodyOnly = false;
     // Leaves out where it moves the root (root_trans's move) but keeps the rest. The animation before
     // a walk is drawn this way under the walk's fade-in: the game's root takes the walk's place at
     // once, so a Sim leaving a long stair at its top doesn't keep the climb's lift. Its limbs reach
-    // around the drawn root as they do around its own (see LimbSource::shift).
+    // around the drawn root as they do around its own (see LimbSource::rootMove). With bodyOnly the
+    // root's turn is left out too, for an animation fading out under one that took the root.
     bool noRootMove = false;
     // Where the clip's IK object stands, in the rig's space: its limb targets on that object are
     // placed from there. None: in the skeleton's own space.
     std::optional<Transform> objectFrame;
+    // Where a bone of the clip's IK object is, in the rig's space (see LimbSource::objectBone).
+    std::function<std::optional<Transform>(std::uint32_t bone)> objectBone;
 };
 
 // Poses a rig from several animations as the game mixes them, joint by joint: the highest layer

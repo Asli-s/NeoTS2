@@ -1,5 +1,8 @@
 #pragma once
 
+#include "formats/cobject.hpp"
+#include "formats/scenegraph.hpp"
+
 #include <array>
 #include <map>
 #include <cstdint>
@@ -303,6 +306,8 @@ struct Actor {
         // Where the clip's IK object stands in the world (see LayeredClip::objectFrame). With none, the
         // targets on it are in the Sim's own space.
         std::optional<Transform> objectPlace;
+        // The lot object (a Sim) whose bones its targets on its IK object name, 0 for none.
+        std::uint32_t ikActor = 0;
     };
     std::vector<Clip> clips;
     std::string basePose;  // the pose it starts in, under its first clips (see standingPose), empty for none
@@ -333,10 +338,13 @@ struct PlacedObject {
     std::size_t instance = 0;
     Transform lotFrame;
     std::vector<std::optional<Transform>> slots;
-    // The joint its whole drawn model moves with when it plays a clip, empty for none, the model and
-    // where that joint sits in the model as drawn.
+    // Its model, the materials the lot put on it and its joints as the lot saved them.
+    std::string model;
+    std::vector<scenegraph::MaterialOverride> overrides;
+    std::vector<cobject::SavedJoint> savedJoints;
+    // The joint its whole drawn model moves with when it plays a clip, empty for none, and where that
+    // joint sits in the model as drawn.
     std::string followJoint;
-    std::string followModel;
     Transform followRest;
 };
 
@@ -418,6 +426,9 @@ struct Scene {
     };
     std::optional<BoundaryClip> clip;
     std::vector<Actor> actors;
+    // Lot objects drawn skinned to their own model's joints once their clips move several of them (a
+    // bed's covers, a fridge's doors). They keep each joint's last pose.
+    std::vector<Actor> objectActors;
     std::vector<PlacedObject> placedObjects;
     // The height of the lot's floor on a storey (1 = ground) at a lot position.
     std::function<float(int storey, float x, float y)> floorHeight;

@@ -22,9 +22,11 @@ constexpr int kMaxDepth = 32;          // walls stacked through levels, more mea
 constexpr int kMaxLevelsAbove = 32;
 constexpr std::size_t kMaxSegments = 4096;  // per run, longer runs are left unlit
 // Safety limits far above what any real lot needs. Spreading counts segment visits: walls
-// stacked over many levels and branching at each can otherwise be revisited exponentially.
-// Lighting from sources counts each light against each wall face's segments.
-constexpr long long kMaxSegmentVisits = 16'000'000;
+// stacked over many levels and branching at each can otherwise be revisited exponentially. The
+// biggest lots of the shipped neighborhoods use under 8,000, and the limit keeps a broken lot's
+// stall to a fraction of a second. Lighting from sources counts each light against each wall
+// face's segments.
+constexpr long long kMaxSegmentVisits = 1'000'000;
 constexpr long long kMaxLightChecks = 4'000'000;
 
 // The eight neighbours inside a segment's grid, as steps in row and in half. Odd ones are diagonal.

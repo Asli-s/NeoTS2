@@ -30,6 +30,7 @@ struct MenuOptions {
     std::optional<std::array<int, 3>> groundClick;
     double runSeconds = 0;       // the lot plays on this long after the clicks before its picture
     bool unpaused = false;       // the lot starts with time running (the game opens lots paused)
+    bool smoothFollow = false;   // the camera glides after a followed Sim (see Orbit::smoothFollow)
     bool bumpMapping = true;     // the game's bump mapping (High Material Detail)
     bool wallBumps = true;       // and of floors and walls (High Lighting Quality)
     ts2::render::Backend backend = ts2::render::defaultBackend();  // what draws (--renderer)

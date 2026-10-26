@@ -67,12 +67,15 @@ std::optional<SnapTarget> routingSlotTarget(const SimObject& owner, const slot::
     target.y = static_cast<std::int32_t>(std::lround(y * kFixedPoint));
     target.level = owner.level;
     if ((slot.routingFlags & kFaceSlot) != 0) {
-        const int turn = atBone ? -boneSteps(bone->yaw) : slotFacing(slot);
-        target.facing = static_cast<std::int16_t>((owner.data[1] + turn) & 7);
+        target.facing = atBone ? boneSlotFacing(owner, *bone) : static_cast<std::int16_t>((owner.data[1] + slotFacing(slot)) & 7);
     }
     target.checkRoom = (slot.routingFlags & kSkipRoomCheck) == 0;
     target.checkWalls = (slot.routingFlags & kSkipWallCheck) == 0;
     return target;
+}
+
+std::int16_t boneSlotFacing(const SimObject& owner, const ModelBone& bone) {
+    return static_cast<std::int16_t>((owner.data[1] - boneSteps(bone.yaw)) & 7);
 }
 
 SnapRefusal snapRefusal(const World& world, const SimObject& object, const SnapTarget& target) {

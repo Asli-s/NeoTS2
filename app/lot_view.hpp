@@ -74,6 +74,15 @@ struct LotView {
         view.level = level;
     }
 
+    // A storey change asked for by the player. It ends any tracking, as in the game.
+    void stepLevel(int delta, Orbit& orbit) {
+        const int before = view.level;
+        changeLevel(delta, orbit);
+        if (view.level != before) {
+            orbit.subject = nullptr;
+        }
+    }
+
     // The game's wall modes: 0 walls down, 1 cutaway, 2 walls up, 3 walls up with the roofs.
     int wallMode() const {
         switch (view.walls) {
@@ -107,10 +116,10 @@ struct LotView {
             orbit.turn(1);
             return true;
         case Key::PageUp:
-            changeLevel(1, orbit);
+            stepLevel(1, orbit);
             return true;
         case Key::PageDown:
-            changeLevel(-1, orbit);
+            stepLevel(-1, orbit);
             return true;
         case Key::Home:
         case Key::Tab:

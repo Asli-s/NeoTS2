@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("qfs", "dbpf", "cobject", "bhav", "str", "bcon", "fcns", "glob", "objd", "objt", "objm", "xobj", "wallgraph", "array3d", "srel", "sdsc", "fami", "famt", "slot", "swaf", "propset", "ttab", "luascript", "ngbh", "datatables", "scenegraph", "stringmap", "walllayer", "namemap", "fencepostlayer", "roofs", "terrain", "reia", "anim", "image", "lot_description", "nhood_objects", "nhood_terrain", "objf", "reference_list", "simi", "weather", "neighborhood_id", "camera_config", "effects", "hood_drift", "ground_decal", "nhood_paint_rules", "ui_script", "floorlight", "walllight", "windowlight", "lightgrid", "wallruns", "lighting", "lamplights", "portalrecords", "roomsamples", "lotlighting", "lotlevels", "objectsun", "route_search", "lua_runtime", "vm", "steam_files", "launcher_settings")] [string]$Target = "dbpf",
+    [ValidateSet("qfs", "dbpf", "cobject", "bhav", "str", "bcon", "fcns", "glob", "objd", "objt", "objm", "xobj", "wallgraph", "array3d", "srel", "sdsc", "fami", "famt", "slot", "swaf", "propset", "ttab", "luascript", "ngbh", "datatables", "scenegraph", "stringmap", "walllayer", "namemap", "fencepostlayer", "roofs", "terrain", "reia", "anim", "image", "lot_description", "nhood_objects", "nhood_terrain", "objf", "reference_list", "simi", "weather", "neighborhood_id", "camera_config", "effects", "hood_drift", "ground_decal", "nhood_paint_rules", "ui_script", "cursor", "floorlight", "walllight", "windowlight", "lightgrid", "wallruns", "lighting", "lamplights", "portalrecords", "roomsamples", "lotlighting", "lotlevels", "objectsun", "route_search", "lua_runtime", "vm", "steam_files", "launcher_settings")] [string]$Target = "dbpf",
     [int]$Minutes = 10
 )
 
@@ -20,7 +20,7 @@ $options = @("-max_total_time=$($Minutes * 60)", "-print_final_stats=1", "-mallo
              "-artifact_prefix=$root\fuzz\findings\$Target-")
 # Models, textures, saved objects, packages, pictures and effects files are often far larger than
 # the default 4 KB.
-if ($Target -in "scenegraph", "cobject", "dbpf", "image", "anim", "effects", "hood_drift") { $options += "-max_len=65536" }
+if ($Target -in "scenegraph", "cobject", "dbpf", "image", "anim", "effects", "hood_drift", "cursor") { $options += "-max_len=65536" }
 # Words the format uses, which the fuzzer puts into inputs (fuzz\dict\<target>.dict).
 if (Test-Path "$root\fuzz\dict\$Target.dict") { $options += "-dict=$root\fuzz\dict\$Target.dict" }
 & "$root\build-fuzz\RelWithDebInfo\${Target}_fuzz.exe" "$root\fuzz\corpus\$Target" @options

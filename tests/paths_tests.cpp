@@ -197,6 +197,14 @@ void launcherSettingsRoundTrip() {
     LauncherSettings invalid;
     invalid.renderer = "metal";
     CHECK(formatLauncherSettings(invalid).find("renderer") == std::string::npos);
+    // Smooth follow is off unless the file turns it on, and is kept when saved.
+    CHECK(drawn && !drawn->smoothFollow);
+    LauncherSettings smooth;
+    smooth.smoothFollow = true;
+    const auto kept = parseLauncherSettings(formatLauncherSettings(smooth));
+    CHECK(kept && kept->smoothFollow);
+    const auto other = parseLauncherSettings("NeoTS2 launcher settings 1\nsmooth-follow=yes\n");
+    CHECK(other && !other->smoothFollow);
     CHECK(!parseLauncherSettings("NeoTS2 launcher settings 1\n" + std::string(70 * 1024, 'x')));
     std::error_code error;
     fs::remove_all(root, error);

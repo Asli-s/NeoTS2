@@ -11,7 +11,6 @@ namespace {
 using Vec = std::array<float, 3>;
 
 constexpr float kAheadTiles = 128;
-constexpr std::size_t kNoJoint = 255;
 
 Vec applied(const Transform& t, Vec v, bool point) {
     t.apply(v.data(), point);
@@ -109,32 +108,6 @@ void addCrossings(const Primitive& p, const std::vector<float>& positions, const
             out.push_back(hit);
         }
     }
-}
-
-// A skinned primitive's positions as posed by `joints` (as the skinned vertex shader does).
-std::vector<float> skinned(const Primitive& p, const std::vector<Transform>& joints) {
-    const std::size_t vertices = p.positions.size() / 3;
-    std::vector<float> out(p.positions.size(), 0.0f);
-    for (std::size_t v = 0; v < vertices; ++v) {
-        const Vec rest{p.positions[v * 3], p.positions[v * 3 + 1], p.positions[v * 3 + 2]};
-        for (std::size_t k = 0; k < 4; ++k) {
-            const std::size_t j = p.joints[v * 4 + k];
-            const float w = p.weights[v * 4 + k];
-            if (j == kNoJoint || j >= joints.size() || !(w > 0)) {
-                continue;
-            }
-            const Vec moved = applied(joints[j], rest, true);
-            for (std::size_t n = 0; n < 3; ++n) {
-                out[v * 3 + n] += w * moved[n];
-            }
-        }
-    }
-    return out;
-}
-
-bool isSkinned(const Primitive& p) {
-    const std::size_t vertices = p.positions.size() / 3;
-    return p.joints.size() == vertices * 4 && p.weights.size() == vertices * 4;
 }
 
 } // namespace
@@ -272,6 +245,7 @@ SceneRays::Result SceneRays::trace(const Point& from, const std::optional<Point>
             actorParts[s.instance] = actor.object;
         }
     }
+    std::vector<float> skinned;
     for (std::size_t i = 0; i < scene_.instances.size(); ++i) {
         if (!visible.empty() && (i >= visible.size() || !visible[i])) {
             continue;
@@ -306,7 +280,8 @@ SceneRays::Result SceneRays::trace(const Point& from, const std::optional<Point>
             const Primitive& primitive = mesh->primitives[p];
             if (isSkinned(primitive)) {
                 if (posed != joints.end()) {
-                    addCrossings(primitive, skinned(primitive, *posed->second), o, d, hit, result.hits);
+                    posedPositions(primitive, *posed->second, skinned);
+                    addCrossings(primitive, skinned, o, d, hit, result.hits);
                 }
                 continue;
             }

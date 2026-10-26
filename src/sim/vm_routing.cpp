@@ -86,8 +86,8 @@ bool Execution::rayTrace(const bhav::Instruction& in, Frame& f) {
 //   bytes 0-1  the slot number, or the param or local holding it
 //   bytes 2-3  where it comes from: 0 a param, 1 the number (temp 0 with byte 4 bit 1), 2 a global
 //              slot, 3 a local. From a param, the number or a local, 1000 and up is global slot n - 1000
-//   byte 4     bit 0: no failure feedback tree. Bit 3: the slot may be on another level. These
-//              replace the slot's own flags 0x4000 and 0x8000 for this route.
+//   byte 4     bit 0: no failure feedback tree. Bit 3: flag 0x8000, "allow different altitudes"
+//              (its effect is not known yet). These replace the slot's own flags 0x4000 and 0x8000.
 // Walks me to a routing slot of the stack object and is true, or false when there is no route, my
 // person data 0x3E then saying why. Waits a tick at a time while I walk. My pre-route tree runs
 // before the walk and my post-route tree after it (it sits me in a seat the route reached). A step
@@ -252,9 +252,21 @@ Execution::WalkStep Execution::goToRoutingSlot(const bhav::Instruction& in, Fram
         walk.fromY = static_cast<float>(sim.y) / 65536.0f;
         cutAtStair(walk);
         const float length = distanceLeft(walk.route.points, 1, walk.fromX, walk.fromY);
-        // Already there: the route ends at once, with no pre- or post-route tree and no walk.
+        // Already there: the route ends at once, with no pre- or post-route tree and no walk. When
+        // the goal gives a facing I don't face yet, I first turn to it on the spot, as the game turns
+        // a Sim ordered back into the bed it just got out of. Whether the game runs the route trees
+        // around that turn is not known yet. None are run.
         if (!(length > 0) && !walk.ahead) {
-            return WalkStep{WalkStep::Kind::Done, true};
+            const float facing = sim.heading ? *sim.heading : compassHeading(sim.data[kDirectionField]);
+            if (!walk.route.facing || std::abs(wrapAngle(compassHeading(*walk.route.facing) - facing)) <= kSameHeading) {
+                return WalkStep{WalkStep::Kind::Done, true};
+            }
+            walk.turn = Walking::Turn{facing, compassHeading(*walk.route.facing)};
+            walk.turnOnly = walk.started = walk.arrived = walk.startChecked = true;
+            walk.preRoute = true;
+            walk.startMs = world().clockMs();
+            sim.walking = std::move(walk);
+            return WalkStep{WalkStep::Kind::Wait};
         }
         rememberSims(walk);
         sim.walking = std::move(walk);
@@ -508,7 +520,7 @@ Execution::WalkStep Execution::goToRoutingSlot(const bhav::Instruction& in, Fram
     }
     // My post-route tree then runs, after a walk my pre-route tree let start, given the seat
     // reached (which it sits me in) and the route's result.
-    const bool nestedWalk = walk.nested;
+    const bool nestedWalk = walk.nested || walk.turnOnly;
     const std::int16_t seat = walk.route.goalObject;
     dropWalk(sim);
     if (auto post = nestedWalk ? std::nullopt : routeTree(sim, kPostRouteEntry)) {
@@ -576,7 +588,7 @@ Execution::WalkStep Execution::climbStair(SimObject& sim, Walking& walk) {
 //   byte 2  where: -2 on top of the object (its own spot), -1 anywhere near, 0-7 a side (0 in
 //           front, 2 right, 4 behind, 6 left, odd ones both neighbouring sides)
 //   byte 3  my facing at the end: -2 facing the object, -1 any, 0-7 relative to its facing
-//   byte 6  bit 1 no failure trees, bit 2 a different level allowed
+//   byte 6  bit 1 no failure trees, bit 2 flag 0x8000 (as Go To Routing Slot's byte 4 bit 3)
 // False when the stack object is missing or off the lot, or byte 3 is out of range.
 Execution::WalkStep Execution::goToRelativePosition(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;

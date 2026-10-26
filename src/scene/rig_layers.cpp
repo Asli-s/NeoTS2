@@ -196,40 +196,75 @@ void poseRigLayered(const Rig& rig, std::span<const LayeredClip> clips, std::vec
         }
     }
     placeRig(rig, local, world);
-    // For a clip whose root move is left out: where the drawn root is less where the clip has it.
-    const auto rootShift = [&](const LayeredClip& clip) -> std::array<float, 3> {
-        if (!clip.noRootMove || rootTrans < 0 || static_cast<std::size_t>(rootTrans) >= clip.animation->translation.size()) {
+    // For a clip whose root move is left out: the move from where the clip has its root to where the
+    // root is drawn. With bodyOnly that is its turn too.
+    const auto rootMove = [&](const LayeredClip& clip) -> Transform {
+        const int last = clip.bodyOnly ? rootRot : rootTrans;
+        if (!clip.noRootMove || rootTrans < 0 || last < 0 || rig.nodes[static_cast<std::size_t>(rootTrans)].parent < 0) {
             return {};
         }
-        const int c = clip.animation->translation[static_cast<std::size_t>(rootTrans)];
-        if (c < 0) {
+        const auto& moves = clip.animation->translation;
+        if (!clip.bodyOnly && (static_cast<std::size_t>(rootTrans) >= moves.size() || moves[static_cast<std::size_t>(rootTrans)] < 0)) {
             return {};
         }
-        const auto& node = rig.nodes[static_cast<std::size_t>(rootTrans)];
-        const auto& k = clip.animation->animation->channels[static_cast<std::size_t>(c)].components;
-        std::array<float, 3> own{k[0].sample(clip.ms), k[1].sample(clip.ms), k[2].sample(clip.ms)};
-        if (clip.animation->mirrored) {
-            own = mirroredPlace(own, node.mirrorAxis);
+        const auto& channels = clip.animation->animation->channels;
+        // Each root joint as the clip alone has it, up from the skeleton.
+        const auto own = [&](int i) {
+            const auto& node = rig.nodes[static_cast<std::size_t>(i)];
+            std::array<float, 3> t = node.translation;
+            std::array<float, 4> q = node.rotation;
+            // The clip's own (not additive) channel of the joint in `list`, -1 for none.
+            const auto channelOf = [&](const std::vector<int>& list) {
+                const auto at = static_cast<std::size_t>(i);
+                const int c = at < list.size() ? list[at] : -1;
+                return c >= 0 && !channels[static_cast<std::size_t>(c)].additive() ? c : -1;
+            };
+            if (const int c = channelOf(clip.animation->translation); c >= 0) {
+                const auto& k = channels[static_cast<std::size_t>(c)].components;
+                t = {k[0].sample(clip.ms), k[1].sample(clip.ms), k[2].sample(clip.ms)};
+                if (clip.animation->mirrored) {
+                    t = mirroredPlace(t, node.mirrorAxis);
+                }
+                t = turnedPlace(t, node.turnAxis, clip.turn);
+            }
+            if (const int c = channelOf(clip.animation->rotation); c >= 0) {
+                q = animatedRotation(node, channels[static_cast<std::size_t>(c)], clip.ms);
+                if (clip.animation->mirrored) {
+                    q = mirroredTurn(q, node.mirrorAxis);
+                }
+                q = turnedTurn(q, node.turnAxis, clip.turn);
+            }
+            return Transform::of(t, q);
+        };
+        // Walked up to the skeleton, and in a broken rig no more steps than the rig has nodes.
+        const int skeleton = rig.nodes[static_cast<std::size_t>(rootTrans)].parent;
+        Transform below;
+        std::size_t steps = 0;
+        for (int i = last; i >= 0 && i != skeleton && steps < rig.nodes.size(); i = rig.nodes[static_cast<std::size_t>(i)].parent, ++steps) {
+            below = own(i) * below;
         }
-        own = turnedPlace(own, node.turnAxis, clip.turn);
-        if (node.parent >= 0) {
-            world[static_cast<std::size_t>(node.parent)].apply(own.data(), true);
+        const Transform ownWorld = world[static_cast<std::size_t>(skeleton)] * below;
+        const auto& drawn = world[static_cast<std::size_t>(last)];
+        // Without bodyOnly the root keeps the drawn turn, so only the place counts.
+        if (!clip.bodyOnly) {
+            return Transform::of({drawn.m[3] - ownWorld.m[3], drawn.m[7] - ownWorld.m[7], drawn.m[11] - ownWorld.m[11]}, {0, 0, 0, 1});
         }
-        const auto& drawn = world[static_cast<std::size_t>(rootTrans)].m;
-        return {drawn[3] - own[0], drawn[7] - own[1], drawn[11] - own[2]};
+        return drawn * ownWorld.rigidInverse();
     };
     // The clips with limbs, each weighted as the mixing above weighs a joint they all move.
     // Clips whose limbs only add offsets take no share of the layers. They come in by their own weight.
+    // A clip fading out by its body only still reaches with its limbs, so the arms of a Sim getting
+    // into bed don't drop to rest as one clip hands over to the next.
     std::vector<const LayeredClip*> withLimbs;
     std::vector<LimbSource> sources;
     for (const auto& clip : clips) {
-        if (!clip.animation || !clip.animation->animation || clip.animation->limbs.empty() || clip.bodyOnly || (holding && clip.layer < 0)) {
+        if (!clip.animation || !clip.animation->animation || clip.animation->limbs.empty() || (holding && clip.layer < 0)) {
             continue;
         }
         const auto& a = *clip.animation->animation;
         const auto& limbs = clip.animation->limbs;
         if (std::all_of(limbs.begin(), limbs.end(), [&](const LimbChain& l) { return isAdditive(a, l); })) {
-            sources.push_back({&a, &limbs, clip.ms, 0, clip.weight, clip.turn, {}, clip.objectFrame, rootShift(clip)});
+            sources.push_back({&a, &limbs, clip.ms, 0, clip.weight, clip.turn, {}, clip.objectFrame, rootMove(clip), clip.objectBone});
         } else {
             withLimbs.push_back(&clip);
         }
@@ -309,7 +344,7 @@ void poseRigLayered(const Rig& rig, std::span<const LayeredClip> clips, std::vec
     for (std::size_t c = 0; c < withLimbs.size(); ++c) {
         if (std::any_of(weights[c].begin(), weights[c].end(), [](float w) { return w > kLeastWeight; })) {
             const LayeredClip& clip = *withLimbs[c];
-            sources.push_back({clip.animation->animation.get(), &clip.animation->limbs, clip.ms, 0, clip.weight, clip.turn, std::move(weights[c]), clip.objectFrame, rootShift(clip)});
+            sources.push_back({clip.animation->animation.get(), &clip.animation->limbs, clip.ms, 0, clip.weight, clip.turn, std::move(weights[c]), clip.objectFrame, rootMove(clip), clip.objectBone});
         }
     }
     if (!sources.empty()) {

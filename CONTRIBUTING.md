@@ -9,6 +9,11 @@ Thanks for helping. A few rules keep the project healthy and legally clean.
 - **Code taken from the game**, or from other projects whose license doesn't allow it.
 - **Personal or local details**: paths on your machine, logs, traces.
 
+## While NeoTS2 is early
+
+The engine is still taking shape, so for now the most helpful things are bug reports and small, tested fixes.
+Please open an issue before starting anything big (new features, renderers or ports), so we can check it fits first.
+
 ## How pull requests are merged
 
 NeoTS2 is developed in a private repository, and this one gets a snapshot of it every few days.

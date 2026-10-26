@@ -74,6 +74,10 @@ std::optional<LauncherSettings> parseLauncherSettings(std::string_view text) {
             }
             continue;
         }
+        if (key == "smooth-follow") {
+            settings.smoothFollow = line.substr(equals + 1) == "on";
+            continue;
+        }
         const auto path = pathFrom(line.substr(equals + 1));
         if (!path) {
             continue;
@@ -119,6 +123,9 @@ std::string formatLauncherSettings(const LauncherSettings& settings) {
     }
     if (settings.renderer == "sdlgpu" || settings.renderer == "gl2") {
         out.append("renderer=").append(settings.renderer).append("\n");
+    }
+    if (settings.smoothFollow) {
+        out += "smooth-follow=on\n";
     }
     for (std::size_t i = 0; i < settings.addedInstalls.size() && i < kMaxAdded; ++i) {
         line("added-install", settings.addedInstalls[i]);

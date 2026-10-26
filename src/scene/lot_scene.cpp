@@ -88,6 +88,7 @@ struct Shown {
     float yaw;
     std::size_t instance = 0;  // index into the scene's instances once placed
     std::string boneModel;     // the name the builder knows its posed model's bones by
+    std::vector<sg::MaterialOverride> overrides;
 };
 
 // The container slots kept for each object, for placing what scripts put into them.
@@ -394,7 +395,7 @@ private:
             }
             // Direction d faces 180 - 45d degrees (0 along -X, 6 along -Y). Models face +Y.
             const float angle = kPi / 2 - static_cast<float>(object.state.data[1]) * kPi / 4;
-            shown_.push_back({&object, mesh, so.model, Transform::at(x, y, z, angle), angle, 0, boneModel});
+            shown_.push_back({&object, mesh, so.model, Transform::at(x, y, z, angle), angle, 0, boneModel, so.overrides});
             byId[object.id] = shown_.size() - 1;
             log(object, "placed", so.model);
         }
@@ -447,6 +448,11 @@ private:
                                           Part::Object, content::gridLevel(lot_, shown_[i].object->state.header.value1))) {
                 instance->object = shown_[i].object->id;
                 PlacedObject record{shown_[i].object->id, shown_[i].instance, Transform{}, {}};
+                record.model = shown_[i].model;
+                record.overrides = shown_[i].overrides;
+                if (const auto saved = lot_.savedJoints.find(shown_[i].object->id); saved != lot_.savedJoints.end()) {
+                    record.savedJoints = saved->second;
+                }
                 if (shown_[i].object->type) {
                     for (std::size_t slot = 0; slot < kMaxShownSlots; ++slot) {
                         const std::string bone = assets_.slotBone(shown_[i].object->type->guid, slot);
@@ -460,7 +466,6 @@ private:
                 if (const std::string* joint = b_.followJoint(shown_[i].boneModel)) {
                     if (const Transform* at = b_.bone(shown_[i].boneModel, *joint)) {
                         record.followJoint = *joint;
-                        record.followModel = shown_[i].model;
                         record.followRest = *at;
                     }
                 }

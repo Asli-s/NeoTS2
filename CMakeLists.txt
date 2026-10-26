@@ -446,7 +446,11 @@ else()
     if(MSVC)
         target_compile_options(vm_tests PRIVATE /bigobj)
     endif()
-    add_test(NAME vm_tests COMMAND vm_tests)
+    # The tests in 4 groups, which ctest -j runs side by side. Each test still runs once.
+    set(test_groups 4)
+    foreach(group RANGE 1 ${test_groups})
+        add_test(NAME vm_tests_${group} COMMAND vm_tests --group ${group}/${test_groups})
+    endforeach()
 
     add_executable(fuzzseeds tools/fuzzseeds/main.cpp)
     target_link_libraries(fuzzseeds PRIVATE ts2formats project_warnings)

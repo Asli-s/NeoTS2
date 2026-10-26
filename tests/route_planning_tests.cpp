@@ -909,6 +909,21 @@ void boneSlotWithABrokenTurnHasNoSpot() {
     CHECK(!ts2::sim::routingSlotTarget(chair, slot, ts2::sim::ModelBone{0.5f, 0, std::numeric_limits<float>::infinity()}));
 }
 
+// A bone slot's facing is the owner's turned by the bone. Snap only faces it with flag bit 12, as a
+// fridge's slot (without it) shows: a route there still ends facing the fridge.
+void boneSlotFacingTurnsWithTheBone() {
+    ts2::sim::SimObject fridge;
+    fridge.data[1] = 6;
+    ts2::slot::Entry slot;
+    slot.objectFlags = 0x20000;
+    const ts2::sim::ModelBone back{0, -0.5f, -3.14159265f};  // turned half round
+    CHECK(ts2::sim::boneSlotFacing(fridge, back) == 2);
+    CHECK(!ts2::sim::routingSlotTarget(fridge, slot, back)->facing);
+    slot.routingFlags = 0x1000;
+    CHECK(ts2::sim::routingSlotTarget(fridge, slot, back)->facing == 2);
+    CHECK(ts2::sim::boneSlotFacing(fridge, ts2::sim::ModelBone{0, 0, 1.5707963f}) == 4);
+}
+
 // A Sim in a container's slot (on a sofa) has its goals measured from where that slot holds it, as
 // Snap would place it there. Out of it, they are measured from its own place.
 void slotGoalsMeasureFromTheContainersSlot() {
@@ -1500,6 +1515,7 @@ std::vector<Test> routePlanningTests() {
         {"update footprint marks every multi-tile part", updateFootprintMarksEveryMultiTilePart},
         {"snap puts me at a routing slot", snapPutsMeAtARoutingSlot},
         {"a bone slot with a broken turn has no spot", boneSlotWithABrokenTurnHasNoSpot},
+        {"a bone slot's facing turns with its bone", boneSlotFacingTurnsWithTheBone},
         {"snap uses the slot's bone", snapUsesTheSlotsBone},
         {"walks are planned as the game plans them", walksArePlannedAsTheGamePlansThem},
         {"turn clips are picked by foot", turnClipsArePickedByFoot},

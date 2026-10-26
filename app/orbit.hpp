@@ -137,8 +137,11 @@ struct Orbit {
     std::optional<Pose> previous;
     float between = 1, stepTime = 0;
     // What the camera tracks (a Sim's root_trans in the world), none while it tracks nothing.
-    // Scrolling ends the tracking, turning and zooming don't.
+    // Scrolling and changing storey end the tracking, turning and zooming don't.
     std::function<std::optional<Vec3>()> subject;
+    // Not in the original game, an option: the goal stays on the subject every step, so the camera
+    // glides after it instead of jumping each time the subject leaves the dead zone.
+    bool smoothFollow = false;
 
     // Takes the easing settings from the camera file.
     void useRigEasing() {
@@ -258,7 +261,7 @@ inline void followSubject(Orbit& orbit, int width, int height) {
     const auto camera = orbit.camera();
     const auto goal = screenPoint(camera, width, height, *orbit.goal);
     const auto subject = screenPoint(camera, width, height, floor);
-    if (std::hypot(subject[0] - goal[0], subject[1] - goal[1]) > kDeadZone) {
+    if (orbit.smoothFollow || std::hypot(subject[0] - goal[0], subject[1] - goal[1]) > kDeadZone) {
         (*orbit.goal)[0] = floor[0];
         (*orbit.goal)[1] = floor[1];
         if (orbit.limitGoal) {

@@ -4,6 +4,8 @@
 #include "scene/scene.hpp"
 
 #include <array>
+#include <cstdint>
+#include <functional>
 #include <optional>
 #include <span>
 #include <vector>
@@ -25,6 +27,7 @@ struct LimbTarget {
     int weight = -1;  // blends this target with the limb's others, none: 1
     int frame = -1;
     bool onObject = false;  // on the clip's IK object (see LimbSource::objectFrame)
+    std::uint32_t objectBone = 0;  // on that bone of the IK object (its name's hash), 0: on the object's own node
     // In a mirrored clip, the axes the position and turns are reflected across (see mirroredTurn),
     // -1: not reflected.
     int positionAxis = -1, rotationAxis = -1, extraRotationAxis = -1;
@@ -61,11 +64,14 @@ struct LimbSource {
     // Where the clip's IK object stands in the rig's space. Its targets on that object are placed
     // from there. None: they are in the skeleton's own space.
     std::optional<Transform> objectFrame;
-    // Added to its targets and poles in the skeleton's own space, for a clip whose root move is left
-    // out (LayeredClip::noRootMove): where the drawn root is less where the clip has it. Its limbs
-    // then reach as its body does around the drawn root, as the game keeps a Sim's last pose whole
-    // when it moves the Sim (a long stair's climb at the top).
-    std::array<float, 3> shift{};
+    // Applied to its targets and poles in the skeleton's own space, for a clip whose root move is left
+    // out (LayeredClip::noRootMove): the move from where the clip has its root to where the root is
+    // drawn. Its limbs then reach as its body does around the drawn root, as the game keeps a Sim's
+    // last pose whole when it moves the Sim (a long stair's climb at the top, getting into bed).
+    Transform rootMove;
+    // Where a bone of the clip's IK object is in the rig's space, by its name's hash: a hug's hands go
+    // to the other Sim's back. Targets on a bone it can't give are left out.
+    std::function<std::optional<Transform>(std::uint32_t bone)> objectBone;
 };
 
 // Whether all the limb's target positions are additive channels (anim::Channel::additive).

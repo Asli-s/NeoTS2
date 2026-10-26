@@ -638,6 +638,32 @@ void unanimatedJointsKeepTheMeshRest() {
     CHECK(std::abs(skeleton[1]) < 1e-5f && std::abs(skeleton[2] - 2) < 1e-5f);
 }
 
+// A lot object's actor poses every joint from its own model's rig, which holds the joints as the
+// lot saved them: its instance gets those joints and the actor's place, and no rig nodes.
+void objectActorsPoseEveryJointFromTheirRig() {
+    using ts2::scene::Transform;
+    auto rig = std::make_shared<ts2::scene::Rig>();
+    rig->nodes.push_back({"root", -1, {0, 0, 1}, {0, 0, 0, 1}});
+    rig->nodes.push_back({"door", 0, {0, 0, 0}, {0.70710678f, 0, 0, 0.70710678f}});  // a quarter turn about x
+    ts2::scene::Scene scene;
+    auto& mesh = scene.meshes.emplace_back();
+    mesh.skin.push_back({"door", Transform{}, Transform{}, Transform::of({0, 0, 0}, {1, 0, 0, 0})});  // the model's own rest
+    scene.instances.emplace_back().mesh = 0;
+    auto& actor = scene.objectActors.emplace_back();
+    actor.object = 5;
+    actor.rig = rig;
+    actor.skinned.push_back({0, {1}});
+    actor.place = Transform::at(1, 2, 3, 0);
+    ts2::scene::ScenePose pose;
+    ts2::scene::poseActors(scene, 0, pose);
+    CHECK(pose.joints.size() == 1 && pose.joints[0].first == 0 && pose.joints[0].second.size() == 1);
+    CHECK(pose.places.size() == 1 && pose.places[0].second.m == actor.place.m);
+    CHECK(pose.nodes.empty() && pose.held.contains(5));
+    float p[3] = {0, 1, 0};
+    pose.joints[0].second[0].apply(p, true);
+    CHECK(std::abs(p[1]) < 1e-5f && std::abs(p[2] - 2) < 1e-5f);
+}
+
 void roomSamplesAreGatheredAsTheGame() {
     using namespace ts2::scene;
     // The game's name hashes and thumbnail average.
@@ -769,6 +795,98 @@ void pickerFindsTheNearestShownTriangle() {
         CHECK(std::abs(back.m[k] - identity.m[k]) < 1e-5f);
     }
     CHECK(std::abs(hoverAmbient(0.0) - 0.08f) < 1e-6f && std::abs(hoverAmbient(2.5) - 0.1f) < 1e-6f);
+}
+
+// With a pose, a Sim is hit by its skinned triangles where the pose puts them, not at rest, and
+// the hit names the Sim. A hidden Sim and one without joints in the pose are not hit.
+void pickerHitsPosedSims() {
+    using namespace ts2::scene;
+    Scene scene;
+    Mesh body;
+    Primitive p;
+    p.positions = {-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0};
+    p.indices = {0, 1, 2, 0, 2, 3};
+    p.joints.assign(16, 255);
+    p.weights.assign(16, 0);
+    for (std::size_t v = 0; v < 4; ++v) {
+        p.joints[v * 4] = 0;
+        p.weights[v * 4] = 1;
+    }
+    body.primitives.push_back(p);
+    scene.meshes.push_back(body);
+    Instance i;
+    i.mesh = 0;
+    i.transform = Transform::at(0, 0, 1, 0);
+    scene.instances.push_back(i);
+    Actor sim;
+    sim.object = 42;
+    sim.skinned.push_back({0, {}});
+    scene.actors.push_back(sim);
+    Picker picker;
+    picker.prepare(scene);
+    ScenePose pose;
+    pose.joints.emplace_back(0, std::vector<Transform>{Transform::at(10, 0, 0, 0)});  // the joint moves it 10 along x
+    pose.places.emplace_back(0, Transform::at(0, 0, 3, 0));
+    const std::array<float, 3> down{0, 0, -1};
+    CHECK(!picker.pick(scene, {}, {0, 0, 10}, down));  // a Sim isn't hit without a pose
+    CHECK(!picker.pick(scene, {}, {0, 0, 10}, down, &pose));  // nor where it rests
+    auto hit = picker.pick(scene, {}, {10, 0, 10}, down, &pose);
+    CHECK(hit && hit->instance == 0 && hit->object == 42 && std::abs(hit->distance - 7) < 1e-5f);
+    const std::vector<std::uint8_t> hidden{0};
+    CHECK(!picker.pick(scene, hidden, {10, 0, 10}, down, &pose));
+    ScenePose unposed;
+    unposed.places = pose.places;
+    CHECK(!picker.pick(scene, {}, {10, 0, 10}, down, &unposed));
+}
+
+// The box a posed Sim is first checked against never leaves out a triangle the pose puts under the
+// ray: not when its weights add up to less than 1 (pulled toward the model's origin), and not when
+// they add up to more (a broken file, tested in full).
+void pickerBoxKeepsEveryPosedHit() {
+    using namespace ts2::scene;
+    const auto sceneWith = [](float weight0, float weight1) {
+        Scene scene;
+        Mesh body;
+        Primitive p;
+        p.positions = {-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0};
+        p.indices = {0, 1, 2, 0, 2, 3};
+        p.joints.assign(16, 255);
+        p.weights.assign(16, 0);
+        for (std::size_t v = 0; v < 4; ++v) {
+            p.joints[v * 4] = 0;
+            p.weights[v * 4] = weight0;
+            p.joints[v * 4 + 1] = 1;
+            p.weights[v * 4 + 1] = weight1;
+        }
+        body.primitives.push_back(p);
+        scene.meshes.push_back(body);
+        Instance i;
+        i.mesh = 0;
+        scene.instances.push_back(i);
+        Actor sim;
+        sim.object = 42;
+        sim.skinned.push_back({0, {}});
+        scene.actors.push_back(sim);
+        return scene;
+    };
+    ScenePose pose;
+    pose.joints.emplace_back(0, std::vector<Transform>{Transform::at(10, 0, 0, 0), Transform{}});
+    pose.places.emplace_back(0, Transform::at(0, 0, 3, 0));
+    const std::array<float, 3> down{0, 0, -1};
+    // Half weight on the moved joint only: the quad sits at x 4.5 to 5.5, between the origin and the joint.
+    const Scene half = sceneWith(0.5f, 0);
+    Picker picker;
+    picker.prepare(half);
+    for (int twice = 0; twice < 2; ++twice) {  // the second pick uses the kept box
+        const auto hit = picker.pick(half, {}, {5, 0, 10}, down, &pose);
+        CHECK(hit && hit->object == 42 && std::abs(hit->distance - 7) < 1e-5f);
+        CHECK(!picker.pick(half, {}, {30, 0, 10}, down, &pose));
+    }
+    // Whole weight on both joints: the quad is twice its size at x 8 to 12, beyond either joint's box.
+    const Scene doubled = sceneWith(1, 1);
+    picker.prepare(doubled);
+    const auto hit = picker.pick(doubled, {}, {11.5f, 1.5f, 10}, down, &pose);
+    CHECK(hit && hit->object == 42 && std::abs(hit->distance - 7) < 1e-5f);
 }
 
 // A portrait's UI pose by age and gender, and its camera in front of the head (as the game drew
@@ -1100,6 +1218,7 @@ std::vector<Test> sceneTests() {
         {"Room samples are gathered as the game gathers them", roomSamplesAreGatheredAsTheGame},
         {"Portable maths matches the C library", portableMathMatchesTheLibrary},
         {"Joints the animation leaves keep the mesh's own rest", unanimatedJointsKeepTheMeshRest},
+        {"A lot object's actor poses every joint from its own rig", objectActorsPoseEveryJointFromTheirRig},
         {"scene transforms turn and move", sceneTransformsTurnAndMove},
         {"scene quads face their normal", sceneQuadsFaceTheirNormal},
         {"scene hip roof rises to its ridge", sceneHipRoofRisesToItsRidge},
@@ -1112,6 +1231,8 @@ std::vector<Test> sceneTests() {
         {"pool water has the game's depth layers", poolWaterHasTheGamesDepthLayers},
         {"attic walls reach the roof's underside", atticWallsReachTheRoofsUnderside},
         {"picker finds the nearest shown triangle", pickerFindsTheNearestShownTriangle},
+        {"picker hits posed Sims", pickerHitsPosedSims},
+        {"picker box keeps every posed hit", pickerBoxKeepsEveryPosedHit},
         {"portrait pose and camera", portraitPoseAndCamera},
         {"animated rotation turns first", animatedRotationTurnsFirst},
         {"channel turns take the short way", channelTurnsTakeTheShortWay},

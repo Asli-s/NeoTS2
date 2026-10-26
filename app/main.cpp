@@ -5,11 +5,13 @@
 //          (on the lot's panels before the picture, repeatable)]
 //          [--shot <out.png>] [--seed n (the neighborhood ground's variants, so pictures repeat)]
 //          [--renderer sdlgpu|gl2 (what draws: SDL's GPU API, or OpenGL 2.1)]
+//          [--smooth-follow (the camera glides after a followed Sim, not in the original game)]
 //   neots2 <install folder> <lot.package> [--shot <out.png> [yaw pitch distance]]
 //          [--seed n (a neighborhood's ground variants, so pictures repeat)]
 //          [--renderer sdlgpu|gl2 (what draws: SDL's GPU API, or OpenGL 2.1)]
 //          [--walls up|cutaway|down] [--level n (1: the ground floor)] [--target x y z] [--roofs off]
 //          [--time seconds (into the Sims' animations, for --shot)]
+//          [--choose object choice (the selected Sim's pick from the object's menu, by its place)]
 // Mouse: middle-drag turns, right-drag pans, the wheel zooms. Keys: WASD or arrows pan, Q/E or
 // comma/period turn a quarter, Z/X or +/- zoom, Page Up/Down change storey, 1/2/3 or Tab walls
 // up/cutaway/down, R roofs on/off. --shot draws one frame to a file and exits.
@@ -202,6 +204,9 @@ struct Options {
     float fov = 0;  // degrees, up and down, and 0 keeps the default
     int shotWidth = 1280, shotHeight = 800;
     double time = 0;  // seconds into the Sims' animations a shot shows
+    // An object's menu choice made for the selected Sim as the lot comes to life (--choose: object id,
+    // the choice's place in the menu).
+    std::optional<std::array<int, 2>> choose;
     bool bumpMapping = true;
     bool wallBumps = true;
     int bench = 0;  // frames to time before the shot (--bench)
@@ -251,6 +256,9 @@ bool parseOptions(int argc, char** argv, Options& o) {
             o.level = std::stoi(argv[++i]);
         } else if (arg == "--time" && i + 1 < argc) {
             o.time = std::stod(argv[++i]);
+        } else if (arg == "--choose" && i + 2 < argc) {
+            o.choose = std::array<int, 2>{std::stoi(argv[i + 1]), std::stoi(argv[i + 2])};
+            i += 2;
         } else if (arg == "--clock" && i + 2 < argc) {
             o.hour = std::clamp(std::stoi(argv[i + 1]), 0, 23);
             o.minute = std::clamp(std::stoi(argv[i + 2]), 0, 59);
@@ -350,6 +358,8 @@ int main(int argc, char** argv) {
                 menu.runSeconds = std::stod(argv[++i]);
             } else if (arg == "--unpaused") {
                 menu.unpaused = true;
+            } else if (arg == "--smooth-follow") {
+                menu.smoothFollow = true;
             } else if (arg == "--timings") {
                 menu.timings = true;
             } else if (arg == "--size" && i + 2 < argc) {
@@ -508,6 +518,13 @@ int main(int argc, char** argv) {
             if (life) {
                 life->traceIn(scene, pose, allShown);
                 life->setPaused(false);
+                if (options.choose && (*options.choose)[0] > 0 && (*options.choose)[1] >= 0) {
+                    const auto object = static_cast<std::uint32_t>((*options.choose)[0]);
+                    const auto choices = life->pieMenu(object);
+                    if (const auto at = static_cast<std::size_t>((*options.choose)[1]); at < choices.size()) {
+                        life->choose(object, choices[at]);
+                    }
+                }
             }
             std::unique_ptr<app::LotDaylight> daylight;
             if (life && lightBase) {

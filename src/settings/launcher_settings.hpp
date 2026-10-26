@@ -17,6 +17,9 @@ struct LauncherSettings {
     bool backupReminderSeen = false;  // the player was reminded to back up their saves and went on
     // What draws the game: "sdlgpu" (Direct3D 12 or Vulkan), "gl2" (OpenGL 2.1), or empty for the game's own choice.
     std::string renderer;
+    // The camera glides after a followed Sim instead of moving in the game's steps. Not in the
+    // original game, so off unless the player turns it on.
+    bool smoothFollow = false;
 
     bool operator==(const LauncherSettings&) const = default;
 };

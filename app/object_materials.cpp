@@ -98,6 +98,49 @@ int ObjectMaterials::model(const std::string& name, ts2::scene::Scene& scene) {
     return models_[key] = static_cast<int>(scene.meshes.size() - 1);
 }
 
+int ObjectMaterials::skinnedModel(const std::string& name, const std::vector<ts2::scenegraph::MaterialOverride>& overrides,
+                                  ts2::scene::Scene& scene) {
+    std::string key = ts2::scene::lower(name);
+    for (const auto& o : overrides) {
+        key += "|" + ts2::scene::lower(o.group) + "=" + ts2::scene::lower(o.material);
+    }
+    if (const auto it = skinnedModels_.find(key); it != skinnedModels_.end()) {
+        return it->second;
+    }
+    const int built = builder_.skinnedModel(name, overrides);
+    if (built < 0 || builder_.scene().meshes[static_cast<std::size_t>(built)].skin.empty()) {
+        return skinnedModels_[key] = -1;
+    }
+    // Copied: pose() reads the builder's skinned models too.
+    ts2::scene::Mesh mesh = builder_.scene().meshes[static_cast<std::size_t>(built)];
+    for (auto& p : mesh.primitives) {
+        p.material = builderMaterial(p.material, scene);
+    }
+    scene.meshes.push_back(std::move(mesh));
+    return skinnedModels_[key] = static_cast<int>(scene.meshes.size() - 1);
+}
+
+std::shared_ptr<const ts2::scene::Rig> ObjectMaterials::objectRig(const std::string& model, const std::vector<ts2::cobject::SavedJoint>& saved) {
+    auto [it, first] = rigs_.try_emplace(ts2::scene::lower(model));
+    if (first) {
+        it->second = std::make_shared<ts2::scene::Rig>(ts2::scene::loadRig(assets_, model));
+    }
+    if (saved.empty() || it->second->nodes.empty()) {
+        return it->second;
+    }
+    auto rig = std::make_shared<ts2::scene::Rig>(*it->second);
+    for (const auto& j : saved) {
+        const int node = rig->find(ts2::scene::lower(j.name));
+        if (node < 0 || !std::ranges::all_of(j.translation, [](float v) { return std::isfinite(v); }) ||
+            !std::ranges::all_of(j.rotation, [](float v) { return std::isfinite(v); })) {
+            continue;
+        }
+        rig->nodes[static_cast<std::size_t>(node)].translation = j.translation;
+        rig->nodes[static_cast<std::size_t>(node)].rotation = j.rotation;
+    }
+    return rig;
+}
+
 // Images move into the scene: the builder only needs their place in its own list.
 int ObjectMaterials::image(int builderImage, ts2::scene::Scene& scene) {
     auto& images = builder_.scene().images;
@@ -124,11 +167,6 @@ int ObjectMaterials::envCube(int builderCube, ts2::scene::Scene& scene) {
     return envCubes_[builderCube] = static_cast<int>(scene.envCubes.size() - 1);
 }
 
-namespace {
-
-// Time into an object's clip of `length` ms at `nowMs`: looping clips wrap, the others hold their
-// last pose, and so does a looping clip whose counted plays have ended. A stopped one holds the
-// pose it was stopped at.
 float clipMs(const ts2::sim::PlayingAnimation& playing, double length, double nowMs) {
     double ms = std::max(0.0, std::min<double>(nowMs - playing.startMs, playing.lengthMs) * playing.speed);
     if (length > 0) {
@@ -137,8 +175,6 @@ float clipMs(const ts2::sim::PlayingAnimation& playing, double length, double no
     }
     return static_cast<float>(ms);
 }
-
-} // namespace
 
 std::optional<ts2::scene::Transform> ObjectMaterials::pose(const ts2::sim::SimObject& object, double nowMs,
                                                            ts2::scene::AnimationLibrary& animations) {

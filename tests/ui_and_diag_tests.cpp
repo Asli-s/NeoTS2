@@ -1,6 +1,8 @@
 // UI scripts and layout, logs and crash reports.
 #include "test_support.hpp"
 
+#include "../app/click_gate.hpp"
+
 #include "ui/drag_arrow.hpp"
 #include "ui/tip_layout.hpp"
 
@@ -18,6 +20,37 @@ void tipsArePlacedAsTheGame() {
     CHECK(is(placeTip(18, 500, 74, 24, hd), 26, 488, 74, 24));      // at the left edge: to the right
     CHECK(is(placeTip(500, 30, 74, 24, hd), 463, 38, 74, 24));      // near the top: below
     CHECK(is(placeTip(500, 500, 10, 4, hd), 491, 483, 18, 9));      // the frame's smallest box
+}
+
+// Up to 12 entries share one pie. With more, each page shows "More..." and 11 of them, and the last
+// page's "More..." goes back to the first.
+// While a scene loads, presses are dropped and so are their releases, even once loading has ended.
+// A button pressed before loading keeps its release, and other buttons aren't touched.
+void clicksAreDroppedWhileLoading() {
+    app::ClickGate gate;
+    constexpr unsigned kLeft = 0, kRight = 2;
+    CHECK(!gate.drops(true, kLeft, false) && !gate.drops(false, kLeft, false));  // not loading
+    CHECK(!gate.drops(true, kRight, false));
+    CHECK(gate.drops(true, kLeft, true));    // pressed while loading
+    CHECK(!gate.drops(false, kRight, true));  // pressed before loading
+    CHECK(gate.drops(false, kLeft, false));   // released after loading ended
+    CHECK(!gate.drops(true, kLeft, false) && !gate.drops(false, kLeft, false));  // the next click goes through
+    CHECK(!gate.drops(true, 99, true));       // a button past the 8 it tracks goes through
+}
+
+void piePagesHoldElevenAndMore() {
+    namespace pie = ts2::ui::pie;
+    auto same = [](const pie::Page& p, std::size_t first, std::size_t count, bool more, std::size_t next) {
+        return p.first == first && p.count == count && p.more == more && p.next == next;
+    };
+    CHECK(same(pie::page(0, 0), 0, 0, false, 0));
+    CHECK(same(pie::page(12, 0), 0, 12, false, 0));
+    CHECK(same(pie::page(13, 0), 0, 11, true, 11));
+    CHECK(same(pie::page(13, 11), 11, 2, true, 0));
+    CHECK(same(pie::page(30, 11), 11, 11, true, 22));
+    CHECK(same(pie::page(30, 22), 22, 8, true, 0));
+    CHECK(same(pie::page(22, 11), 11, 11, true, 0));  // a full later page: its "More..." goes back
+    CHECK(same(pie::page(5, 40), 5, 0, true, 0));     // past the end: nothing but "More..."
 }
 
 // The pie menu's items go round the mouse clockwise from the top, their knobs 68 pixels out, the
@@ -367,6 +400,8 @@ std::vector<Test> uiAndDiagTests() {
     return {
         {"the drag arrow turns about its middle", dragArrowTurnsAboutItsMiddle},
         {"pie items go round the centre", pieItemsGoRoundTheCentre},
+        {"clicks are dropped while loading", clicksAreDroppedWhileLoading},
+        {"pie pages hold eleven and More", piePagesHoldElevenAndMore},
         {"tips are placed as the game", tipsArePlacedAsTheGame},
         {"type 1 lines as the game measures", typeOneLinesAsTheGameMeasures},
         {"ui scripts parse", uiScriptsParse},
