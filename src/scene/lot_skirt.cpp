@@ -28,7 +28,8 @@ SkirtArea lotSkirtArea(const PaintedTerrain& terrain, const LotFootprint& lot, i
 }
 
 void addLotSkirt(SceneBuilder& builder, const PaintedTerrain& terrain, const LotFootprint& lot, int margin,
-                 const std::string& terrainType, const std::map<std::string, std::string>& roadTextures) {
+                 const std::string& terrainType, const std::map<std::string, std::string>& roadTextures,
+                 const Heights* lotHeights, int groundLevel) {
     if (terrain.columns < 2 || terrain.rows < 2) {
         return;
     }
@@ -36,9 +37,19 @@ void addLotSkirt(SceneBuilder& builder, const PaintedTerrain& terrain, const Lot
     const float tile = terrain.tileSize;
     const int lx0 = static_cast<int>(std::lround(lot.x0 / tile)), ly0 = static_cast<int>(std::lround(lot.y0 / tile));
     const int lx1 = static_cast<int>(std::lround(lot.x1 / tile)), ly1 = static_cast<int>(std::lround(lot.y1 / tile));
+    const Transform toLot = lot.place.rigidInverse();
     auto corner = [&](int x, int y) {
+        const float wx = static_cast<float>(x) * tile, wy = static_cast<float>(y) * tile;
+        const bool onLotEdge = (x == lx0 || x == lx1 || y == ly0 || y == ly1) && x >= lx0 && x <= lx1 && y >= ly0 && y <= ly1;
+        if (lotHeights != nullptr && lotHeights->grid() != nullptr && onLotEdge) {
+            float p[3] = {wx, wy, 0};
+            toLot.apply(p, true);
+            p[2] = lotHeights->corner(groundLevel, p[0], p[1]);
+            lot.place.apply(p, true);
+            return std::array<float, 3>{wx, wy, p[2]};
+        }
         const std::size_t i = static_cast<std::size_t>(y) * terrain.columns + static_cast<std::size_t>(x);
-        return std::array<float, 3>{static_cast<float>(x) * tile, static_cast<float>(y) * tile, terrain.heights[i]};
+        return std::array<float, 3>{wx, wy, terrain.heights[i]};
     };
     auto normal = [&](int x, int y) {
         const std::size_t i = (static_cast<std::size_t>(y) * terrain.columns + static_cast<std::size_t>(x)) * 3;

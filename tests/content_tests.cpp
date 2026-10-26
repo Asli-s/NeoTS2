@@ -16,7 +16,7 @@
 
 namespace {
 
-// The build catalog scripts: pattern materials and wall styles, keyed in lowercase.
+// The build catalog scripts: pattern materials keyed in lowercase, wall styles and roof patterns.
 void buildScriptsReadPatternsAndWallStyles() {
     ts2::content::BuildScripts b;
     b.addPatterns("# comment\r\nwallPattern \"deckredwood\"\r\nmaterial \"wall_deckRedwoodAlpha_base\"\r\nnotInCatalog\r\n", true);
@@ -32,6 +32,11 @@ void buildScriptsReadPatternsAndWallStyles() {
     CHECK(!b.wallStyles.at(16).thick && b.wallStyles.at(16).belowFloor && b.wallStyles.at(16).defaultPattern == "deckredwood");
     CHECK(!b.wallStyles.at(4).rendered && b.wallStyles.at(1).thick && !b.wallStyles.at(1).belowFloor);
     CHECK(b.wallStyles.at(3).toRoof && !b.wallStyles.at(1).toRoof && !b.wallStyles.at(16).toRoof);
+    // The base game's default roof, pattern 0.
+    b.addRoofPatterns("version 1\nroofPattern 0\nrooftop \"roof-manor\"\nrooftopbump \"roof-manor-bump\"\nmayUseBump true\n"
+                      "roofunder \"roof-manor-under\"\nroofedges \"roof-manor-edges\"\nrooftrim \"roof-manor-trim\"\nnotInCatalog\ndefault");
+    const auto& manor = b.roofPatterns.at(0);
+    CHECK(manor.top == "roof-manor" && manor.under == "roof-manor-under" && manor.edges == "roof-manor-edges" && manor.trim == "roof-manor-trim");
 }
 
 // Animate Sim from the adult list: a Sim reads its own age's list at the same entry, the entry's

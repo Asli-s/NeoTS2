@@ -505,6 +505,9 @@ void Assets::readMaterialNames(const fs::path& path) {
 }
 
 void Assets::readCatalog() {
+    for (const auto& [id, p] : scripts_.roofPatterns) {
+        roofPatterns_[id] = {p.top, p.under, p.edges, p.trim};
+    }
     for (const auto& r : catalog_.resources()) {
         const auto type = r.entry.key.type;
         if (type != kPatternProperties && type != kFenceProperties && type != kRoofProperties) {

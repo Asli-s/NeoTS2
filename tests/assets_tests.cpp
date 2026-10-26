@@ -5,9 +5,12 @@
 #include "formats/dbpf.hpp"
 #include "scene/assets.hpp"
 #include "scene/builder.hpp"
+#include "scene/lot_skirt.hpp"
 #include "scene/sims.hpp"
 
+#include <cmath>
 #include <filesystem>
+#include <memory>
 
 namespace {
 
@@ -280,6 +283,59 @@ void specularTurnsOnAsTheGames() {
     CHECK(!ts2::scene::specularSettings(m));
 }
 
+// The ground around a lot meets the lot's own ground along the lot's edges, also on a lot placed
+// turned, and keeps the neighborhood's heights elsewhere.
+void lotSkirtMeetsTheLotsEdges() {
+    using namespace ts2::scene;
+    PaintedTerrain terrain;
+    terrain.columns = terrain.rows = 6;
+    terrain.heights.assign(36, 5.0f);
+    LotFootprint lot;
+    lot.x0 = lot.y0 = 20;
+    lot.x1 = lot.y1 = 30;
+    lot.z = 5;
+    // A 10 x 10 tile lot a quarter turn round, its ground falling 0.1 a tile along its own x.
+    lot.place = Transform::at(20, 30, 5, -1.5707963267948966f);
+    auto grid = std::make_shared<ts2::array3d::Array3D>();
+    grid->width = grid->height = 11;
+    grid->levels = 1;
+    grid->elementSize = 4;
+    for (std::uint32_t x = 0; x < 11; ++x) {
+        for (std::uint32_t y = 0; y < 11; ++y) {
+            const float h = -0.1f * static_cast<float>(x);
+            const auto* bytes = reinterpret_cast<const std::uint8_t*>(&h);
+            grid->elements.insert(grid->elements.end(), bytes, bytes + 4);
+        }
+    }
+    // The elements go level, x, then y, so the loop above filled them in order.
+    const Heights heights(grid);
+    const auto root = testres::gameFolder("neots2-skirt-test", {});
+    {
+        Assets assets(root);
+        SceneBuilder builder(assets);
+        addLotSkirt(builder, terrain, lot, 2, "Temperate", {}, &heights, 0);
+        auto heightAt = [&](float x, float y) {
+            for (const auto& mesh : builder.scene().meshes) {
+                for (const auto& p : mesh.primitives) {
+                    for (std::size_t i = 0; i + 2 < p.positions.size(); i += 3) {
+                        if (p.positions[i] == x && p.positions[i + 1] == y) {
+                            return p.positions[i + 2];
+                        }
+                    }
+                }
+            }
+            return -100.0f;
+        };
+        // The lot's own (0, 0) lies at world (20, 30) and its own x runs toward world -y.
+        CHECK(std::abs(heightAt(20, 30) - 5.0f) < 1e-4f);
+        CHECK(std::abs(heightAt(20, 20) - 4.0f) < 1e-4f);
+        CHECK(std::abs(heightAt(30, 20) - 4.0f) < 1e-4f);
+        CHECK(std::abs(heightAt(30, 30) - 5.0f) < 1e-4f);
+        CHECK(heightAt(10, 20) == 5.0f && heightAt(40, 40) == 5.0f);
+    }
+    std::filesystem::remove_all(root);
+}
+
 } // namespace
 
 std::vector<Test> assetTests() {
@@ -295,5 +351,6 @@ std::vector<Test> assetTests() {
         {"shapes sit where their node puts them", shapesSitWhereTheirNodePutsThem},
         {"env cube reflection turns on as the game's", envCubeReflectionTurnsOnAsTheGames},
         {"specular turns on as the game's", specularTurnsOnAsTheGames},
+        {"lot skirt meets the lot's edges", lotSkirtMeetsTheLotsEdges},
     };
 }

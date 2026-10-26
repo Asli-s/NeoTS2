@@ -86,6 +86,25 @@ void BuildScripts::addWallStyles(std::string_view text) {
     });
 }
 
+void BuildScripts::addRoofPatterns(std::string_view text) {
+    RoofPatternTextures* pattern = nullptr;
+    forEachLine(text, [&](const std::string& key, const std::string& value) {
+        if (key == "roofPattern") {
+            pattern = &(roofPatterns[static_cast<std::uint32_t>(std::strtoul(value.c_str(), nullptr, 10))] = RoofPatternTextures{});
+        } else if (pattern == nullptr) {
+            return;
+        } else if (key == "rooftop") {
+            pattern->top = value;
+        } else if (key == "roofunder") {
+            pattern->under = value;
+        } else if (key == "roofedges") {
+            pattern->edges = value;
+        } else if (key == "rooftrim") {
+            pattern->trim = value;
+        }
+    });
+}
+
 BuildScripts loadBuildScripts(const std::vector<Product>& products) {
     BuildScripts scripts;
     std::set<std::filesystem::path> seen;
@@ -97,6 +116,7 @@ BuildScripts loadBuildScripts(const std::vector<Product>& products) {
         scripts.addPatterns(read(folder / "floorPatterns.txt"), false);
         scripts.addPatterns(read(folder / "wallPatterns.txt"), true);
         scripts.addWallStyles(read(folder / "walls.txt"));
+        scripts.addRoofPatterns(read(folder / "roofPatterns.txt"));
     }
     return scripts;
 }

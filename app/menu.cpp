@@ -876,9 +876,16 @@ void Game::enterLot(std::uint32_t id) {
     lotUi_.setObjectThumbnails(openFolder_.parent_path().parent_path() / "Thumbnails" / "ObjectThumbnails.package");
     lotBuilding_ = std::async(std::launch::async, [assets = assets_, file, install = install_, footprint, hoodScene, terrainType, &renderer = renderer_] {
         LotBuilt built;
+        // The lot's ground heights, which the skirt meets at the lot's edges.
+        std::shared_ptr<const ts2::scene::Heights> lotHeights;
+        int groundLevel = 0;
         {
             ts2::scene::SceneBuilder builder(*assets.get());
             const auto lot = ts2::content::loadLot(file);
+            if (const ts2::scene::Heights heights(lot); heights.grid() != nullptr) {
+                lotHeights = std::make_shared<const ts2::scene::Heights>(std::make_shared<const ts2::array3d::Array3D>(*heights.grid()));
+                groundLevel = ts2::content::groundGridLevel(lot);
+            }
             ts2::scene::addLot(builder, lot, file);
             built.lightState = app::savedLightingState(assets.get()->lighting(), lot);
             built.light = app::lightLot(*assets.get(), builder.scene(), lot, file, built.lightState);
@@ -907,7 +914,8 @@ void Game::enterLot(std::uint32_t id) {
                 area = ts2::scene::lotSkirtArea(*hoodScene->terrain, *footprint, margin);
                 ts2::scene::SceneBuilder builder(*assets.get());
                 ts2::scene::addLotSkirt(builder, *hoodScene->terrain, *footprint, margin, terrainType,
-                                        ts2::content::lotSkirtRoadTextures(ts2::content::findProducts(install)));
+                                        ts2::content::lotSkirtRoadTextures(ts2::content::findProducts(install)), lotHeights.get(),
+                                        groundLevel);
                 skirt = std::move(builder.scene());
             }
             built.lot = app::lotInNeighborhood(*hoodScene, std::move(built.lot), std::move(skirt), *footprint, area);
