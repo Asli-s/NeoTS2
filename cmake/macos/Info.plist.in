@@ -6,6 +6,8 @@
     <string>neots2-launcher</string>
     <key>CFBundleIdentifier</key>
     <string>org.neots2.launcher</string>
+    <key>CFBundleIconFile</key>
+    <string>neots2.icns</string>
     <key>CFBundleName</key>
     <string>NeoTS2</string>
     <key>CFBundlePackageType</key>

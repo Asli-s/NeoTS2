@@ -26,6 +26,7 @@ rm -rf "$app"
 mkdir -p "$macos" "$app/Contents/Resources/shaders" "$frameworks"
 cp "$build/neots2" "$build/neots2-launcher" "$macos"
 cp "$build"/shaders/*.msl "$app/Contents/Resources/shaders"
+cp "$source/app/icon/neots2.icns" "$app/Contents/Resources/neots2.icns"
 sed "s/@NEOTS2_VERSION@/$version/g" "$source/cmake/macos/Info.plist.in" > "$app/Contents/Info.plist"
 
 homebrew=$(brew --prefix)

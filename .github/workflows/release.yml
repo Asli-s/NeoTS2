@@ -1,0 +1,78 @@
+# Makes the two archives people download from a pre-release. Start it by hand from Actions, after
+# choosing a new version tag. Game files are never part of either archive.
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, for example v0.2.1
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows x64 archive
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the app's libraries
+        shell: pwsh
+        run: vcpkg install sdl3 freetype --triplet x64-windows
+      - name: Build
+        shell: pwsh
+        run: |
+          cmake -S . -B build -A x64 -DNEOTS2_RELEASE=ON -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake"
+          cmake --build build --config Release --target neots2 neots2-launcher --parallel
+      - name: Make the zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package\NeoTS2 | Out-Null
+          Copy-Item build\Release\neots2.exe, build\Release\neots2-launcher.exe package\NeoTS2
+          Copy-Item "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin\*.dll" package\NeoTS2
+          Copy-Item build\Release\shaders package\NeoTS2\shaders -Recurse
+          Compress-Archive -Path package\NeoTS2 -DestinationPath "NeoTS2-${{ inputs.tag }}-windows-x64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: NeoTS2-${{ inputs.tag }}-windows-x64.zip
+
+  macos:
+    name: macOS Apple Silicon archive
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the app's libraries
+        run: brew install sdl3 shaderc spirv-cross freetype
+      - name: Build and package
+        run: |
+          cmake -S . -B build-macos -DNEOTS2_RELEASE=ON -DNEOTS2_STRICT=OFF
+          cmake --build build-macos --target neots2 neots2-launcher --parallel
+          tools/package_macos.sh build-macos
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: build-macos/NeoTS2-*-macos-arm64.zip
+
+  publish:
+    name: Create the pre-release
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ inputs.tag }}" release/*.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "NeoTS2 ${{ inputs.tag }}: early preview" \
+            --notes "Back up your saves before you try NeoTS2. This early preview has Windows x64 and native Apple Silicon macOS downloads." \
+            --prerelease
