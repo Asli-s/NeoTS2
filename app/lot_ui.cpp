@@ -20,6 +20,8 @@ constexpr std::uint32_t kScripts = 0xA99D8A11;
 constexpr std::uint32_t kPuck = 0x4905F85B, kLivePanel = 0x49060005, kOptionsMenu = 0x49060001;
 // The puck's windows.
 constexpr std::uint32_t kLiveMode = 0x37D97B25, kOptions = 0x67D97B2F, kFunds = 0x00003000;
+// The puck's four camera buttons: rotate left/right, then zoom in/out.
+constexpr std::uint32_t kTurnLeft = 0x00001001, kTurnRight = 0x00001000, kZoomIn = 0x00001002, kZoomOut = 0x00001003;
 constexpr std::uint32_t kFloorUp = 0x00002001, kFloorDown = 0x00002000;
 // One wall button per wall mode, in the same place. The one for the mode in use shows.
 constexpr std::uint32_t kWallButtons = 0x00001100;
@@ -353,6 +355,18 @@ LotUi::Action LotUi::clicked(int window) {
         }
         if (id == kFloorDown) {
             return Action::FloorDown;
+        }
+        if (id == kTurnLeft) {
+            return Action::TurnLeft;
+        }
+        if (id == kTurnRight) {
+            return Action::TurnRight;
+        }
+        if (id == kZoomIn) {
+            return Action::ZoomIn;
+        }
+        if (id == kZoomOut) {
+            return Action::ZoomOut;
         }
     }
     if (id == kOptions && screen_.parent(window) == puck_) {

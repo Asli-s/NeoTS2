@@ -52,7 +52,10 @@ public:
     void hideForFreeCamera(bool hide);
 
     // What a released button asks for.
-    enum class Action { None, Neighborhood, Quit, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, RewardsOpened, RewardsClosed, SelectSim, TrackSim, FloorUp, FloorDown, WallMode };
+    enum class Action {
+        None, Neighborhood, Quit, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, RewardsOpened, RewardsClosed, SelectSim, TrackSim,
+        FloorUp, FloorDown, TurnLeft, TurnRight, ZoomIn, ZoomOut, WallMode
+    };
     Action clicked(int window);
     // A right click on one of the panels' buttons: on a want or fear it puts a hold on it or takes it
     // off, on a Sim's thumbnail it asks to track the Sim.
