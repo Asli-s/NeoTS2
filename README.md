@@ -16,8 +16,8 @@ The Sims 2 engine is twenty years old: a 32-bit, fixed-function program tied to 
 closed to deeper modding. NeoTS2 aims to keep everything that makes the game what it is while
 giving it:
 
-- **a native 64-bit (x64) engine** that uses modern graphics APIs (Direct3D 12 today) and the
-  memory a modern PC has
+- **a native 64-bit engine** that uses modern graphics APIs (Direct3D 12 on Windows, Metal on
+  macOS) and the memory a modern computer has
 - **an engine you can read and change**
 - **modern graphics as an option**: the classic look by default, with room for improved
   lighting, shadows and effects as mods
@@ -78,12 +78,17 @@ NeoTS2 doesn't save games yet, and when it starts with a save folder:
 
 **Back up your saves first** (see [Your saves](#your-saves)).
 
-Download the newest release from the [Releases page](https://github.com/Asli-s/NeoTS2/releases),
-extract the whole zip, and start **`neots2-launcher.exe`**. It finds your install and your save
-folders. Choose them, or make a new save folder with **New save folder...**, and press **Play**.
+On Windows, download the newest release from the [Releases page](https://github.com/Asli-s/NeoTS2/releases),
+extract the whole zip, and start **`neots2-launcher.exe`**. On an Apple Silicon Mac, download the
+`macos-arm64` zip, move **NeoTS2.app** somewhere permanent (such as Applications), and open it.
+The launcher finds your install and your save folders. Choose them, or make a new save folder with
+**New save folder...**, and press **Play**.
 
 Windows may say "Windows protected your PC", because NeoTS2 isn't signed yet. Click **More info**,
 then **Run anyway**.
+
+macOS may say it cannot verify NeoTS2 because it isn't signed or notarized yet. Control-click the
+app, choose **Open**, then choose **Open** again.
 
 ## Tools and libraries
 
@@ -131,6 +136,12 @@ a save folder in your Documents directory. The launcher remembers both choices. 
 
 ```
 build-macos/neots2 "<The Sims 2 install folder>" --menu --user "<save folder>"
+```
+
+To make the `NeoTS2.app` and `macos-arm64` zip for a release:
+
+```
+tools/package_macos.sh build-macos
 ```
 
 The macOS build uses Shaderc (`glslc`) to compile the project's HLSL shaders to SPIR-V, then

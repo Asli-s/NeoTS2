@@ -68,6 +68,20 @@
 namespace {
 
 using app::kPi;
+
+// A built executable keeps its shaders beside itself. A macOS app keeps them in Resources, where
+// they are data rather than code inside Contents/MacOS and can be signed as part of the bundle.
+std::filesystem::path shaderFolder() {
+    const std::filesystem::path beside = ts2::platform::basePath() / "shaders";
+#ifdef __APPLE__
+    const std::filesystem::path resources = ts2::platform::basePath().parent_path() / "Resources" / "shaders";
+    std::error_code error;
+    if (std::filesystem::is_directory(resources, error)) {
+        return resources;
+    }
+#endif
+    return beside;
+}
 using app::kStorey;
 using app::Orbit;
 using ts2::render::Vec3;
@@ -421,7 +435,7 @@ int main(int argc, char** argv) {
                     }
                 }
             }
-            result = runMenu(utf8Path(argv[1]), ts2::platform::basePath() / "shaders", menu);
+            result = runMenu(utf8Path(argv[1]), shaderFolder(), menu);
         } catch (const std::exception& ex) {
             ts2::diag::error(ex.what());
             result = 1;
@@ -503,7 +517,7 @@ int main(int argc, char** argv) {
         windowOptions.highDensity = true;
         windowOptions.hidden = shot;
         std::unique_ptr<ts2::platform::Window> window;
-        const std::filesystem::path shaders = ts2::platform::basePath() / "shaders";
+        const std::filesystem::path shaders = shaderFolder();
         {
             const auto rendererOwner = app::openRenderer(window, options.backend, windowOptions, shaders, shot);
             ts2::render::IRenderer& renderer = *rendererOwner;
