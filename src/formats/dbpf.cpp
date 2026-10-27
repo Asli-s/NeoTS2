@@ -53,6 +53,9 @@ std::unique_ptr<std::istream> Package::openFile() const {
 
 void Package::load() {
     readHeader();
+    if (appleDouble_) {
+        return;
+    }
     readIndex();
     applyCompressionDirectory();
 }
@@ -74,6 +77,14 @@ std::vector<std::uint8_t> Package::readBytes(std::uint64_t offset, std::size_t s
 }
 
 void Package::readHeader() {
+    if (fileSize_ < 4) {
+        fail("file is smaller than the 4-byte magic");
+    }
+    const std::vector<std::uint8_t> magic = readBytes(0, 4);
+    if (magic == std::vector<std::uint8_t>{0x00, 0x05, 0x16, 0x07}) {
+        appleDouble_ = true;
+        return;
+    }
     if (fileSize_ < kHeaderSize) {
         fail("file is smaller than the 96-byte header");
     }

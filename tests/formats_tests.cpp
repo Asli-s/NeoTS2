@@ -1449,10 +1449,17 @@ void animatedCursorReadsSequenceAndRates() {
     CHECK(!ts2::cursor::decodeAnimated(tinyCursor()));
 }
 
+void packageRecognisesAppleDoubleMetadata() {
+    const std::vector<std::uint8_t> appleDouble{0x00, 0x05, 0x16, 0x07};
+    const ts2::dbpf::Package package{std::span<const std::uint8_t>(appleDouble)};
+    CHECK(package.appleDouble() && package.entries().empty());
+}
+
 std::vector<Test> formatTests() {
     return {
         {"a 3D array refuses element indexes past the element", array3dRefusesElementIndexesPastTheElement},
         {"a package marks every copy of a compressed key", packageMarksEveryCopyOfACompressedKey},
+        {"a package recognises AppleDouble metadata", packageRecognisesAppleDoubleMetadata},
         {"written packages read back", writtenPackagesReadBack},
         {"interactions are found by string index", interactionsAreFoundByStringIndex},
         {"Weather record reads its values", weatherRecordReadsItsValues},
