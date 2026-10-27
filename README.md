@@ -214,6 +214,9 @@ formats and where things are stored, from public community work such as
 Thanks to [kouta-kun](https://github.com/kouta-kun) for the Linux build, the Vulkan path, the
 OpenGL 2 renderer and the Mac OS X PowerPC port.
 
+Thanks to [VHSMODDING](https://github.com/VHSMODDING) for the native macOS build for Apple
+Silicon, drawn with Metal.
+
 The app and launcher icons are hand-drawn by me.
 
 The launcher uses [Dear ImGui](https://github.com/ocornut/imgui) (MIT) and the
