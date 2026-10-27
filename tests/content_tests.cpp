@@ -741,16 +741,24 @@ void lotNumberComesFromThePackageName() {
 }
 
 void characterFilesIgnoreAppleDoubleSidecars() {
-    const fs::path root = fs::temp_directory_path() / ("neots2-character-files-" + std::to_string(std::random_device{}()));
-    const fs::path neighborhood = root / "Neighborhoods/N001";
-    const fs::path characters = neighborhood / "Characters";
+    const std::filesystem::path root = std::filesystem::temp_directory_path() / ("neots2-character-files-" + std::to_string(std::random_device{}()));
+    const std::filesystem::path neighborhood = root / "Neighborhoods/N001";
+    const std::filesystem::path characters = neighborhood / "Characters";
+    const auto write = [](const std::filesystem::path& file, const std::string& text) {
+        std::filesystem::create_directories(file.parent_path());
+        std::ofstream output(file, std::ios::binary);
+        output.write(text.data(), static_cast<std::streamsize>(text.size()));
+    };
     write(characters / "N001_User00000.package", "a real package would be here");
-    write(characters / "._N001_User00000.package", "AppleDouble metadata, not a DBPF package");
+    write(characters / "._N001_User00000.package", std::string{"\x00\x05\x16\x07", 4});
+    write(characters / "._N001_User00001.package", "not an AppleDouble file");
     write(characters / "note.txt", "not a package");
     const auto files = ts2::content::characterFiles(neighborhood);
-    CHECK(files.size() == 1 && files[0].filename() == "N001_User00000.package");
+    CHECK(files.size() == 2);
+    CHECK(std::find(files.begin(), files.end(), characters / "N001_User00000.package") != files.end());
+    CHECK(std::find(files.begin(), files.end(), characters / "._N001_User00001.package") != files.end());
     std::error_code error;
-    fs::remove_all(root, error);
+    std::filesystem::remove_all(root, error);
 }
 
 void portraitImageIsTheLifeStageFlag() {
