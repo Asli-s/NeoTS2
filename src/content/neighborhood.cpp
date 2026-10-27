@@ -50,7 +50,9 @@ std::vector<fs::path> characterFiles(const fs::path& neighborhood) {
         return files;
     }
     for (const auto& entry : fs::directory_iterator(folder)) {
-        if (entry.is_regular_file() && entry.path().extension() == ".package") {
+        // Finder writes AppleDouble metadata beside files copied to some volumes. Its `._` sidecars
+        // can have a .package extension, but are never TS2 DBPF packages.
+        if (entry.is_regular_file() && entry.path().extension() == ".package" && !entry.path().filename().string().starts_with("._")) {
             files.push_back(entry.path());
         }
     }
