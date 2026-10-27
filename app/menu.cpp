@@ -1041,15 +1041,6 @@ void Game::lotAction(app::LotUi::Action action) {
         lotView_.stepLevel(action == Action::FloorUp ? 1 : -1, orbit_);
         return;
     }
-    if (action == Action::TurnLeft || action == Action::TurnRight) {
-        orbit_.turn(action == Action::TurnLeft ? -1 : 1);
-        return;
-    }
-    if (action == Action::ZoomIn || action == Action::ZoomOut) {
-        const float factor = action == Action::ZoomIn ? 0.9f : 1.0f / 0.9f;
-        orbit_.distanceGoal = std::clamp(orbit_.distanceGoal * factor, orbit_.minDistance, orbit_.maxDistance);
-        return;
-    }
     if (action == Action::WallMode) {
         lotView_.setWallMode(lotUi_.pickedWallMode());
         return;

@@ -81,18 +81,10 @@ std::uint32_t localGroupFor(const fs::path& package) {
 
 std::size_t addCharacters(ResourceIndex& index, const fs::path& neighborhood) {
     const auto files = characterFiles(neighborhood);
-    std::size_t added = 0;
     for (const auto& file : files) {
-        // A neighborhood can keep an incomplete or damaged character package after a failed save.
-        // It must not stop the lot's whole household (and its skewer) from loading.
-        try {
-            index.addPackage(file, localGroupFor(file));
-            ++added;
-        } catch (const std::exception& ex) {
-            diag::warnOnce("characters: " + diag::utf8(file.filename()) + " is left out: " + ex.what());
-        }
+        index.addPackage(file, localGroupFor(file));
     }
-    return added;
+    return files.size();
 }
 
 fs::path neighborhoodPackage(const fs::path& neighborhood) {

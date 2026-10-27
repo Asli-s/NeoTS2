@@ -4,13 +4,12 @@
 #include "formats/dbpf.hpp"
 #include "formats/propset.hpp"
 #include "formats/resource_types.hpp"
+#include "parse_float.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <charconv>
 #include <exception>
-#include <locale>
-#include <sstream>
 #include <system_error>
 #include <utility>
 
@@ -189,13 +188,7 @@ std::optional<TuningCurve> parseInfluenceCurve(std::string_view tuning) {
     constexpr std::size_t kMaxPoints = 64;
     // A number running up to `end`, all of it read.
     auto number = [](std::string_view s) -> std::optional<float> {
-        // libc++ before macOS 26 declares floating-point from_chars unavailable.  Parsing with
-        // the classic locale keeps the game's dot decimal separator independent of the Mac's locale.
-        std::istringstream input{std::string(s)};
-        input.imbue(std::locale::classic());
-        float value = 0;
-        input >> std::noskipws >> value;
-        return input && input.eof() ? std::optional<float>(value) : std::nullopt;
+        return parseFloat(s);
     };
     TuningCurve curve;
     for (std::size_t at = text.find('('); at != std::string_view::npos; at = text.find('(', at + 1)) {
