@@ -27,7 +27,7 @@ SDL_GPUShader* loadShader(SDL_GPUDevice* device, const std::filesystem::path& fo
     SDL_GPUShaderCreateInfo info{};
     info.code_size = code.size();
     info.code = code.data();
-    info.entrypoint = "main";
+    info.entrypoint = kShaderEntrypoint;
     info.format = kShaderFormat;
     info.stage = stage;
     info.num_samplers = samplers;

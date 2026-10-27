@@ -4,6 +4,7 @@
 #include "formats/dbpf.hpp"
 #include "formats/propset.hpp"
 #include "formats/resource_types.hpp"
+#include "parse_float.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -187,9 +188,7 @@ std::optional<TuningCurve> parseInfluenceCurve(std::string_view tuning) {
     constexpr std::size_t kMaxPoints = 64;
     // A number running up to `end`, all of it read.
     auto number = [](std::string_view s) -> std::optional<float> {
-        float v = 0;
-        const auto [rest, error] = std::from_chars(s.data(), s.data() + s.size(), v);
-        return error == std::errc() && rest == s.data() + s.size() ? std::optional<float>(v) : std::nullopt;
+        return parseFloat(s);
     };
     TuningCurve curve;
     for (std::size_t at = text.find('('); at != std::string_view::npos; at = text.find('(', at + 1)) {

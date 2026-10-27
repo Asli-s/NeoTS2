@@ -9,6 +9,7 @@
 #include "formats/resource_types.hpp"
 #include "formats/slot.hpp"
 #include "formats/str.hpp"
+#include "parse_float.hpp"
 #include "scene/rig.hpp"
 
 #include <algorithm>
@@ -66,9 +67,8 @@ float stretchOf(const std::map<std::string, std::string>& p) {
     if (it == p.end()) {
         return 1;
     }
-    float value = 1;
-    const auto [end, error] = std::from_chars(it->second.data(), it->second.data() + it->second.size(), value);
-    return error == std::errc{} && std::isfinite(value) ? std::clamp(value, 0.02f, 50.0f) : 1.0f;
+    const auto value = parseFloat(it->second);
+    return value && std::isfinite(*value) ? std::clamp(*value, 0.02f, 50.0f) : 1.0f;
 }
 
 // The Sim's skeleton model, read as the game does: older files name its key outright (and then

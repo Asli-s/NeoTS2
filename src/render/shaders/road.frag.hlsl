@@ -20,7 +20,7 @@ cbuffer Road : register(b0, space3) {
 struct Input {
     float4 position : SV_Position;
     float2 uv : TEXCOORD0;
-    float texture : TEXCOORD1;
+    float textureLayer : TEXCOORD1;
     float2 ground : TEXCOORD2;
 };
 
@@ -28,7 +28,7 @@ float4 main(Input input) : SV_Target {
 #ifdef GL2
     float4 color = roads.Sample(roadSampler, input.uv);
 #else
-    float4 color = roads.Sample(roadSampler, float3(input.uv, round(input.texture)));
+    float4 color = roads.Sample(roadSampler, float3(input.uv, round(input.textureLayer)));
 #endif
     color.rgb *= lightMap.Sample(lightSampler, input.ground / lightMapSize).rgb;
     return color;
