@@ -17,7 +17,7 @@ closed to deeper modding. NeoTS2 aims to keep everything that makes the game wha
 giving it:
 
 - **a native 64-bit engine** that uses modern graphics APIs (Direct3D 12 on Windows, Metal on
-  macOS) and the memory a modern computer has
+  macOS, Vulkan on Linux) and the memory a modern computer has
 - **an engine you can read and change**
 - **modern graphics as an option**: the classic look by default, with room for improved
   lighting, shadows and effects as mods
@@ -96,7 +96,7 @@ app, choose **Open**, then choose **Open** again.
 | --- | --- |
 | C++20, CMake 3.20+ | the language and the build |
 | Visual Studio 2022 (MSVC), x64 | the compiler on Windows; NeoTS2 is built and tested as 64-bit |
-| [SDL 3](https://www.libsdl.org/) | the window, input and GPU access (Direct3D 12) |
+| [SDL 3](https://www.libsdl.org/) | the window, input and GPU access (Direct3D 12, Metal or Vulkan) |
 | DXC, from the Windows SDK | compiling the HLSL shaders |
 | [FreeType](https://freetype.org/) 2.13 | drawing the game's fonts |
 | [stb_image](https://github.com/nothings/stb) 2.30 (included) | reading PNG, JPEG and BMP images |
