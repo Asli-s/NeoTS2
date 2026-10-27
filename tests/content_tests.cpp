@@ -740,6 +740,27 @@ void lotNumberComesFromThePackageName() {
     CHECK(!ts2::content::lotNumber("N001_Lot12345678901.package"));  // too long to be a lot number
 }
 
+void characterFilesIgnoreAppleDoubleSidecars() {
+    const std::filesystem::path root = std::filesystem::temp_directory_path() / ("neots2-character-files-" + std::to_string(std::random_device{}()));
+    const std::filesystem::path neighborhood = root / "Neighborhoods/N001";
+    const std::filesystem::path characters = neighborhood / "Characters";
+    const auto write = [](const std::filesystem::path& file, const std::string& text) {
+        std::filesystem::create_directories(file.parent_path());
+        std::ofstream output(file, std::ios::binary);
+        output.write(text.data(), static_cast<std::streamsize>(text.size()));
+    };
+    write(characters / "N001_User00000.package", "a real package would be here");
+    write(characters / "._N001_User00000.package", std::string{"\x00\x05\x16\x07", 4});
+    write(characters / "._N001_User00001.package", "not an AppleDouble file");
+    write(characters / "note.txt", "not a package");
+    const auto files = ts2::content::characterFiles(neighborhood);
+    CHECK(files.size() == 2);
+    CHECK(std::find(files.begin(), files.end(), characters / "N001_User00000.package") != files.end());
+    CHECK(std::find(files.begin(), files.end(), characters / "._N001_User00001.package") != files.end());
+    std::error_code error;
+    std::filesystem::remove_all(root, error);
+}
+
 void portraitImageIsTheLifeStageFlag() {
     CHECK(ts2::content::portraitImage(1) == 0x20u);   // baby
     CHECK(ts2::content::portraitImage(2) == 0x01u);   // toddler
@@ -1023,6 +1044,7 @@ std::vector<Test> contentTests() {
         {"objects stand on their storey when grids start below the ground", objectsStandOnTheirStoreyWhenGridsStartBelowTheGround},
         {"build scripts read patterns and wall styles", buildScriptsReadPatternsAndWallStyles},
         {"lot number comes from the package name", lotNumberComesFromThePackageName},
+        {"character files leave out AppleDouble sidecars", characterFilesIgnoreAppleDoubleSidecars},
         {"portrait image is the life stage flag", portraitImageIsTheLifeStageFlag},
         {"needs bar rows match the game", needsBarRowsMatchTheGame},
         {"mood rows match the game", moodRowsMatchTheGame},

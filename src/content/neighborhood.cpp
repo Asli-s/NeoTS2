@@ -15,7 +15,9 @@
 #include <exception>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <fstream>
 #include <string>
 #include <system_error>
 
@@ -50,9 +52,22 @@ std::vector<fs::path> characterFiles(const fs::path& neighborhood) {
         return files;
     }
     for (const auto& entry : fs::directory_iterator(folder)) {
-        if (entry.is_regular_file() && entry.path().extension() == ".package") {
-            files.push_back(entry.path());
+        if (!entry.is_regular_file() || entry.path().extension() != ".package") {
+            continue;
         }
+        // Finder writes AppleDouble metadata beside files copied to some volumes. It uses `._`
+        // names and the AppleDouble magic, but a TS2 package with only one of those is kept.
+        const std::string name = entry.path().filename().string();
+        if (name.starts_with("._")) {
+            std::array<char, 4> magic{};
+            std::ifstream input(entry.path(), std::ios::binary);
+            input.read(magic.data(), magic.size());
+            if (magic == std::array<char, 4>{0x00, 0x05, 0x16, 0x07}) {
+                diag::warnOnce("characters: AppleDouble metadata is left out: " + diag::utf8(entry.path().filename()));
+                continue;
+            }
+        }
+        files.push_back(entry.path());
     }
     std::sort(files.begin(), files.end());
     return files;
