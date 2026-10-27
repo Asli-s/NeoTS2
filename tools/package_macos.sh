@@ -21,12 +21,16 @@ fi
 
 app="$build/NeoTS2.app"
 macos="$app/Contents/MacOS"
+resources="$app/Contents/Resources"
 frameworks="$app/Contents/Frameworks"
 rm -rf "$app"
-mkdir -p "$macos" "$app/Contents/Resources/shaders" "$frameworks"
-cp "$build/neots2" "$build/neots2-launcher" "$macos"
-cp "$build"/shaders/*.msl "$app/Contents/Resources/shaders"
-cp "$source/app/icon/neots2.icns" "$app/Contents/Resources/neots2.icns"
+mkdir -p "$macos" "$resources/shaders" "$frameworks"
+cp "$build/neots2-launcher" "$macos"
+# SDL_GetBasePath() names Contents/Resources inside an app bundle, so keep the game and its
+# shaders there for the launcher to find them beside each other.
+cp "$build/neots2" "$resources"
+cp "$build"/shaders/*.msl "$resources/shaders"
+cp "$source/app/icon/neots2.icns" "$resources/neots2.icns"
 sed "s/@NEOTS2_VERSION@/$version/g" "$source/cmake/macos/Info.plist.in" > "$app/Contents/Info.plist"
 
 homebrew=$(brew --prefix)
@@ -43,10 +47,10 @@ copy_dependencies() {
         esac
     done
 }
-copy_dependencies "$macos/neots2"
+copy_dependencies "$resources/neots2"
 copy_dependencies "$macos/neots2-launcher"
 
-for binary in "$macos/neots2" "$macos/neots2-launcher" "$frameworks"/*.dylib; do
+for binary in "$resources/neots2" "$macos/neots2-launcher" "$frameworks"/*.dylib; do
     otool -L "$binary" | tail -n +2 | awk '{print $1}' | while IFS= read -r library; do
         case "$library" in
             "$homebrew"/*.dylib)
@@ -59,7 +63,7 @@ for library in "$frameworks"/*.dylib; do
     install_name_tool -id "@executable_path/../Frameworks/$(basename "$library")" "$library"
 done
 
-codesign --force --sign - "$macos/neots2" "$macos/neots2-launcher" "$frameworks"/*.dylib
+codesign --force --sign - "$resources/neots2" "$macos/neots2-launcher" "$frameworks"/*.dylib
 codesign --force --sign - "$app"
 codesign --verify --strict "$app"
 
