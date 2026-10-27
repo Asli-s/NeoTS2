@@ -56,9 +56,12 @@ std::vector<fs::path> characterFiles(const fs::path& neighborhood) {
             continue;
         }
         // Finder writes AppleDouble metadata beside files copied to some volumes. It uses `._`
-        // names and the AppleDouble magic, but a TS2 package with only one of those is kept.
-        const std::string name = entry.path().filename().string();
-        if (name.starts_with("._")) {
+        // names and the AppleDouble magic, but a TS2 package with only one of those is kept. The
+        // name is checked as stored, since converting it to text throws on Windows when it holds
+        // characters the system's code page lacks.
+        const fs::path file = entry.path().filename();
+        const auto& name = file.native();
+        if (name.size() >= 2 && name[0] == '.' && name[1] == '_') {
             std::array<char, 4> magic{};
             std::ifstream input(entry.path(), std::ios::binary);
             input.read(magic.data(), magic.size());

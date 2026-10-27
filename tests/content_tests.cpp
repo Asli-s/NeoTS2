@@ -753,10 +753,15 @@ void characterFilesIgnoreAppleDoubleSidecars() {
     write(characters / "._N001_User00000.package", std::string{"\x00\x05\x16\x07", 4});
     write(characters / "._N001_User00001.package", "not an AppleDouble file");
     write(characters / "note.txt", "not a package");
+    // Names the system's code page can't hold are read too, a sidecar among them.
+    const std::filesystem::path wide = characters / std::filesystem::path(u8"N001_User\u4E2D.package");
+    write(wide, "a real package would be here");
+    write(characters / std::filesystem::path(u8"._\u4E2D.package"), std::string{"\x00\x05\x16\x07", 4});
     const auto files = ts2::content::characterFiles(neighborhood);
-    CHECK(files.size() == 2);
+    CHECK(files.size() == 3);
     CHECK(std::find(files.begin(), files.end(), characters / "N001_User00000.package") != files.end());
     CHECK(std::find(files.begin(), files.end(), characters / "._N001_User00001.package") != files.end());
+    CHECK(std::find(files.begin(), files.end(), wide) != files.end());
     std::error_code error;
     std::filesystem::remove_all(root, error);
 }
