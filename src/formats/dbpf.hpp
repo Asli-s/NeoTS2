@@ -58,6 +58,7 @@ public:
 
     const Header& header() const { return header_; }
     const std::vector<IndexEntry>& entries() const { return entries_; }
+    bool appleDouble() const { return appleDouble_; }
 
     std::vector<std::uint8_t> readRaw(const IndexEntry& entry);
     std::vector<std::uint8_t> read(const IndexEntry& entry);
@@ -79,6 +80,7 @@ private:
     std::uintmax_t fileSize_ = 0;
     Header header_;
     std::vector<IndexEntry> entries_;
+    bool appleDouble_ = false;
 };
 
 } // namespace ts2::dbpf
