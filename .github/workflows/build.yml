@@ -46,12 +46,10 @@ jobs:
           # The tests come in groups (see CMakeLists.txt), run side by side.
           ctest --test-dir build -C ${{ matrix.config }} --output-on-failure -j 4
 
-  # Linux and macOS: the libraries, tools and tests built and run as on a contributor's machine. A
-  # failure here shows on the job but doesn't fail the run. They run on GitHub's machines, only in this
-  # repository.
+  # Linux and macOS: the libraries, tools and tests built and run as on a contributor's machine. They
+  # run on GitHub's machines, only in this repository.
   other-systems:
     if: github.repository == 'Asli-s/NeoTS2'
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
