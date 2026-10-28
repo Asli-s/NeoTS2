@@ -56,10 +56,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # jobs: one compile per core. With no number make starts every file at once, which can be more
+          # than the macOS machine's memory holds.
           - name: Linux, GCC
             os: ubuntu-latest
+            jobs: 4
           - name: macOS, Apple Silicon
             os: macos-14
+            jobs: 3
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     steps:
@@ -67,7 +71,7 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
       - name: Build
-        run: cmake --build build --parallel
+        run: cmake --build build --parallel ${{ matrix.jobs }}
       - name: Test
         run: ctest --test-dir build --output-on-failure -j 4
 
