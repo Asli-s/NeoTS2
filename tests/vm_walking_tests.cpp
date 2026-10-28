@@ -669,6 +669,100 @@ void turnBodyTowardsTurnsWithItsClip() {
           sim.animation->name == "a-TurnInPlace-180");
 }
 
+// Turn Body Towards modes 19-24 face a slot of an object, and every turn finds its target again once
+// the pre-route tree has returned.
+void turnBodyTowardsSlotsAndTargetAfterPreRoute() {
+    auto turn = [](std::uint8_t mode, std::uint8_t slot = 0) {
+        Instruction in;
+        in.opcode = 0x0016;
+        in.trueTarget = T;
+        in.falseTarget = F;
+        in.operands[0] = mode;
+        in.operands[2] = owner::kStackObjectId;
+        in.operands[5] = slot;
+        return in;
+    };
+    MemoryCodeSource code;
+    code.add(kObjectGroup, 0x1100, bhav({turn(19)}));
+    code.add(kObjectGroup, 0x1101, bhav({turn(20)}));
+    code.add(kObjectGroup, 0x1102, bhav({turn(23)}));
+    code.add(kObjectGroup, 0x1103, bhav({turn(20, 1)}));
+    code.add(kObjectGroup, 0x1104, bhav({turn(21)}));
+    code.add(kObjectGroup, 0x1105, bhav({turn(4)}));
+    // The pre-route tree turns me to compass 1 when temp 5 is 1.
+    code.add(kObjectGroup, 0x1200, bhav({expr(owner::kTemp, 5, op::kEquals, owner::kLiteral, 1, 1, T),
+                                         expr(owner::kMyData, 1, op::kAssign, owner::kLiteral, 1, T, E)}));
+    std::vector<ts2::objf::Function> functions(0x30);
+    functions[0x25].action = 0x1200;
+    code.addFunctions(kObjectGroup, functions);
+    code.addObjectType(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    ts2::slot::Entry routing;
+    routing.type = ts2::slot::kRoutingSlot;
+    ts2::slot::Entry target;
+    target.type = ts2::slot::kTargetSlot;
+    target.y = 3;  // three tiles to the chair's world -y at facing 2
+    code.addObjectType(kObjectGroup, typed(kChairGuid), {routing}, {}, {target});
+
+    ts2::sim::World world;
+    world.setAnimationLengths([](const std::string& name) -> std::optional<float> {
+        return name.find("TurnInPlace") != std::string::npos ? std::optional<float>(1000.0f) : std::nullopt;
+    });
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    auto& chair = world.create(kObjectGroup, typed(kChairGuid));
+    sim.x = sim.y = 5 << 16;
+    sim.personData[0x3A] = 30;
+    chair.x = 5 << 16;
+    chair.y = 8 << 16;
+    chair.data[1] = 2;
+    Vm vm(code, {}, &world);
+    const auto run = [&](std::uint16_t tree, std::int16_t temp5 = 0) {
+        sim.data[1] = 2;
+        sim.heading.reset();
+        sim.animation.reset();
+        sim.turning.reset();
+        sim.thread = {};
+        sim.thread.stackObjectId = chair.id;
+        sim.thread.temps[5] = temp5;
+        return vm.run(sim, kObjectGroup, tree).outcome;
+    };
+
+    // The target slot is three tiles from the chair to the world's -y: 135 degrees to my right.
+    CHECK(run(0x1100) == Outcome::Sleeping && sim.animation && sim.animation->name == "a-TurnInPlace-135" && !sim.animation->flipped);
+    // The routing slot is at the chair: 90 degrees to the right, and facing away 90 degrees to the left.
+    CHECK(run(0x1101) == Outcome::Sleeping && sim.animation && sim.animation->name == "a-TurnInPlace-90" && !sim.animation->flipped);
+    CHECK(run(0x1102) == Outcome::Sleeping && sim.animation && sim.animation->name == "a-TurnInPlace-90" && sim.animation->flipped);
+    // A slot the chair doesn't have is an error.
+    CHECK(run(0x1103) == Outcome::Error && run(0x1104) == Outcome::Error);
+    // An object off the lot: true, as for every mode but 1-3.
+    chair.x = ts2::sim::kOffLot;
+    CHECK(run(0x1101) == Outcome::True && !sim.animation);
+
+    // Compass 0 is 90 degrees to my left. Once my pre-route tree has turned me to compass 1, the turn
+    // is 45 degrees.
+    CHECK(run(0x1105) == Outcome::Sleeping && sim.animation && sim.animation->name == "a-TurnInPlace-90" && sim.animation->flipped);
+    CHECK(run(0x1105, 1) == Outcome::Sleeping && sim.animation && sim.animation->name == "a-TurnInPlace-45" && sim.animation->flipped);
+
+    // A finished turn runs my post-route tree with 0 and 1. Facing an object, the turn is then false
+    // when the object has gone off the lot meanwhile.
+    code.add(kObjectGroup, 0x1106, bhav({turn(2)}));
+    code.add(kObjectGroup, 0x1201, bhav({expr(owner::kMyPersonData, 0xF0, op::kAdd, owner::kLiteral, 1, 1, E),
+                                         expr(owner::kMyPersonData, 0xF1, op::kAssign, owner::kParam, 1, T, E)}, 2));
+    functions[0x26].action = 0x1201;
+    code.addFunctions(kObjectGroup, functions);
+    chair.x = 5 << 16;
+    CHECK(run(0x1106) == Outcome::Sleeping && sim.personData[0xF0] == 0);
+    // The 625 ms clip ends the turn as it starts its last 233.33 ms fade out, and fades on.
+    world.advanceClock(380);
+    CHECK(vm.resume(sim).outcome == Outcome::Sleeping && sim.animation);
+    world.advanceClock(20);
+    CHECK(vm.resume(sim).outcome == Outcome::True && sim.personData[0xF0] == 1 && sim.personData[0xF1] == 1 && sim.data[1] == 4);
+    CHECK(!sim.animation && sim.ending && sim.ending->name == "a-TurnInPlace-90" && sim.ending->fadeOutMs > 233.0f);
+    CHECK(run(0x1106) == Outcome::Sleeping);
+    world.advanceClock(700);
+    chair.x = ts2::sim::kOffLot;
+    CHECK(vm.resume(sim).outcome == Outcome::False && sim.personData[0xF0] == 2 && !sim.turning);
+}
+
 // Blocked routes. Sim a walks from (5, 5) to (5, 8) with Sim b standing at (5, 6) in its way. A step
 // within half a tile of b (or of `object`, when set) is blocked. The global route trees count
 // their runs in a's person data and keep the values they were given there.
@@ -1214,6 +1308,7 @@ std::vector<Test> vmWalkingTests() {
         {"interrupted walks stop soon", interruptedWalksStopSoon},
         {"walks begun right after one keep its foot", walksBegunRightAfterOneKeepItsFoot},
         {"Turn Body Towards turns with its clip", turnBodyTowardsTurnsWithItsClip},
+        {"Turn Body Towards faces slots and finds its target after the pre-route", turnBodyTowardsSlotsAndTargetAfterPreRoute},
         {"blocked routes ask a standing Sim to move", blockedRoutesAskAStandingSimToMove},
         {"blocked routes wait for a walking Sim, then fail", blockedRoutesWaitForAWalkingSimThenFail},
         {"blocked routes show feedback only for the only route", blockedRoutesShowFeedbackOnlyForTheOnlyRoute},

@@ -74,6 +74,10 @@ struct WindowOptions {
     bool resizable = true;
     bool hidden = false;
     bool highDensity = true;      // as many pixels as the screen has, where it has more than points
+    // Fill the screen's free area (all but the taskbar or dock), title bar included, instead of
+    // taking width and height. Where the system can't say where that area is or how tall the title
+    // bar is (so far everywhere but Windows), width and height are kept.
+    bool fitScreen = false;
     std::optional<GlRequest> gl;  // a window to draw in with OpenGL
 };
 

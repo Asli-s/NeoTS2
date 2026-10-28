@@ -24,9 +24,10 @@ public:
     };
 
     // Resources in group 0xFFFFFFFF belong to the package itself (character files use it). With
-    // `localGroup` they are indexed under that group instead.
-    std::size_t addPackage(const std::filesystem::path& path,
-                           std::optional<std::uint32_t> localGroup = std::nullopt);
+    // `localGroup` they are indexed under that group instead. False when the file is an AppleDouble
+    // sidecar, which is left out.
+    bool addPackage(const std::filesystem::path& path,
+                    std::optional<std::uint32_t> localGroup = std::nullopt);
 
     const std::vector<Resource>& resources() const { return resources_; }
     const Resource* find(const dbpf::ResourceKey& key) const;

@@ -2,6 +2,7 @@
 #include "platform/platform.hpp"
 
 #include "platform/sdl3/sdl3_window.hpp"
+#include "platform/sdl3/window_frame.hpp"
 
 #include <SDL3/SDL.h>
 
@@ -12,6 +13,33 @@
 namespace ts2::platform {
 
 namespace {
+
+// Sizes and places a window to fill its screen's free area, title bar and borders included. The
+// window is left as it is when the system can't say where that area is or how tall its title bar is.
+// Some systems only know a window's borders once it is shown, and report none before.
+void fitScreen(SDL_Window* window) {
+    SDL_Rect usable{};
+    int top = 0, left = 0, bottom = 0, right = 0;
+    if (!SDL_GetDisplayUsableBounds(SDL_GetDisplayForWindow(window), &usable) ||
+        !SDL_GetWindowBordersSize(window, &top, &left, &bottom, &right) || top <= 0) {
+        return;
+    }
+    const int width = usable.w - left - right, height = usable.h - top - bottom;
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+    SDL_SetWindowSize(window, width, height);
+    SDL_SetWindowPosition(window, usable.x + left, usable.y + top);
+    SDL_SyncWindow(window);
+    // As with a maximized window, the frame's invisible parts may lie outside the free area, so the
+    // visible frame meets its edges.
+    const HiddenFrame hidden = hiddenFrame(window);
+    if (hidden.left || hidden.top || hidden.right || hidden.bottom) {
+        SDL_SetWindowSize(window, width + hidden.left + hidden.right, height + hidden.top + hidden.bottom);
+        SDL_SetWindowPosition(window, usable.x + left - hidden.left, usable.y + top - hidden.top);
+        SDL_SyncWindow(window);
+    }
+}
 
 // Each key by what is printed on it and by where it is.
 struct KeyInfo {
@@ -193,8 +221,8 @@ std::unique_ptr<Window> Window::create(const WindowOptions& options) {
     if (options.highDensity) {
         flags |= SDL_WINDOW_HIGH_PIXEL_DENSITY;
     }
-    if (options.hidden) {
-        flags |= SDL_WINDOW_HIDDEN;
+    if (options.hidden || options.fitScreen) {
+        flags |= SDL_WINDOW_HIDDEN;  // a fitted window is shown once it is in place
     }
     if (options.gl) {
         const GlRequest& gl = *options.gl;
@@ -208,6 +236,12 @@ std::unique_ptr<Window> Window::create(const WindowOptions& options) {
     SDL_Window* made = SDL_CreateWindow(options.title.c_str(), options.width, options.height, flags);
     if (made == nullptr) {
         throw std::runtime_error(SDL_GetError());
+    }
+    if (options.fitScreen) {
+        fitScreen(made);
+        if (!options.hidden) {
+            SDL_ShowWindow(made);
+        }
     }
     std::unique_ptr<Window> window(new Window);
     window->impl_->window = made;

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 
@@ -89,9 +90,23 @@ std::array<float, 3> turned(const std::array<float, 4>& q, const std::array<floa
     return {x, y, z};
 }
 
-std::vector<LightNode> lightNodes(const scenegraph::ResourceNode& model, const Placement& object) {
+std::vector<LightNode> lightNodes(const scenegraph::ResourceNode& model, const Placement& object, std::span<const cobject::SavedJoint> saved) {
     std::vector<LightNode> out;
     const auto& nodes = model.nodes;
+    auto sameName = [](const std::string& a, const std::string& b) {
+        return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+                   return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
+               });
+    };
+    auto finite = [](const auto& values) { return std::ranges::all_of(values, [](float v) { return std::isfinite(v); }); };
+    auto placeOf = [&](const scenegraph::SceneNode& node) -> Placement {
+        for (const auto& j : saved) {
+            if (!node.name.empty() && sameName(j.name, node.name) && finite(j.translation) && finite(j.rotation)) {
+                return {j.translation, j.rotation};
+            }
+        }
+        return {node.translation, node.rotation};
+    };
     std::vector<bool> seen(nodes.size(), false);
     auto walk = [&](auto&& self, std::uint32_t index, const Placement& parent, int depth) -> void {
         if (index >= nodes.size() || seen[index] || depth > kMaxTreeDepth) {
@@ -102,7 +117,7 @@ std::vector<LightNode> lightNodes(const scenegraph::ResourceNode& model, const P
         }
         seen[index] = true;
         const auto& node = nodes[index];
-        const Placement here = within(parent, {node.translation, node.rotation});
+        const Placement here = within(parent, placeOf(node));
         if (node.kind == scenegraph::SceneNode::Kind::LightRef && !node.name.empty()) {
             out.push_back({node.name, here});
         }

@@ -260,22 +260,47 @@ RigAnimation bindAnimation(const Rig& rig, std::shared_ptr<const anim::Animation
     }
     if (animation) {
         r.limbs = bindLimbs(rig, *animation, mirrored);
+        for (const auto& chain : animation->chains) {
+            int weight = -1;
+            for (std::size_t c = 0; c < animation->channels.size() && chain.extra != 0; ++c) {
+                const auto& channel = animation->channels[c];
+                if (channel.kind() == anim::ChannelKind::Scalar && channel.components.size() == 1 && hash::crc32(lower(channel.name)) == chain.extra) {
+                    weight = static_cast<int>(c);
+                    break;
+                }
+            }
+            r.chainWeights.push_back(weight);
+        }
     }
     r.animation = std::move(animation);
     r.mirrored = mirrored;
     return r;
 }
 
+float channelShare(const RigAnimation& animation, int channel, float ms) {
+    if (!animation.animation || channel < 0 || static_cast<std::size_t>(channel) >= animation.animation->channels.size()) {
+        return 1;
+    }
+    const int chain = animation.animation->channels[static_cast<std::size_t>(channel)].chain();
+    // A tag past the animation's chains names none, and the channel counts in full.
+    if (chain < 0 || static_cast<std::size_t>(chain) >= animation.chainWeights.size()) {
+        return 1;
+    }
+    const int weight = animation.chainWeights[static_cast<std::size_t>(chain)];
+    return weight < 0 ? -1.0f : 1 - limbWeightAt(*animation.animation, weight, ms);
+}
+
 void poseRig(const Rig& rig, const RigAnimation* animation, float ms, std::vector<Transform>& world) {
     world.resize(rig.nodes.size());
     std::vector<Transform> local(rig.nodes.size());
     const auto* channels = animation && animation->animation ? &animation->animation->channels : nullptr;
+    std::vector<float> turns(rig.nodes.size(), 0.0f);
     for (std::size_t i = 0; i < rig.nodes.size(); ++i) {
         const auto& node = rig.nodes[i];
         auto t = node.translation;
         auto q = node.rotation;
         if (channels) {
-            if (const int c = animation->translation[i]; c >= 0) {
+            if (const int c = animation->translation[i]; c >= 0 && channelShare(*animation, c, ms) >= 0) {
                 const auto& k = (*channels)[static_cast<std::size_t>(c)].components;
                 t = {k[0].sample(ms), k[1].sample(ms), k[2].sample(ms)};
                 if (animation->mirrored) {
@@ -283,9 +308,12 @@ void poseRig(const Rig& rig, const RigAnimation* animation, float ms, std::vecto
                 }
             }
             if (const int c = animation->rotation[i]; c >= 0) {
-                q = animatedRotation(node, (*channels)[static_cast<std::size_t>(c)], ms);
-                if (animation->mirrored) {
-                    q = mirroredTurn(q, node.mirrorAxis);
+                if (const float share = channelShare(*animation, c, ms); share >= 0) {
+                    q = animatedRotation(node, (*channels)[static_cast<std::size_t>(c)], ms);
+                    if (animation->mirrored) {
+                        q = mirroredTurn(q, node.mirrorAxis);
+                    }
+                    turns[i] = share;
                 }
             }
         }
@@ -293,7 +321,22 @@ void poseRig(const Rig& rig, const RigAnimation* animation, float ms, std::vecto
     }
     placeRig(rig, local, world);
     if (channels && !animation->limbs.empty()) {
-        solveLimbs(rig, *animation->animation, animation->limbs, ms, local, world);
+        // The clip alone on its layer: each limb joint weighed as the game weighs its layers.
+        std::vector<float> shares(rig.nodes.size(), 1.0f);
+        for (const auto& limb : animation->limbs) {
+            if (isAdditive(*animation->animation, limb)) {
+                continue;
+            }
+            for (std::size_t k = 0; k < limb.joints.size(); ++k) {
+                const auto j = static_cast<std::size_t>(limb.joints[k]);
+                const LimbFloor floor = limbFloor(*animation->animation, limb, k, ms);
+                const LimbJointLayer layer{turns[j], floor.targets, floor.pole};
+                float scale = 0;
+                const float ik = weighLimbJoint(std::span(&layer, 1), std::span(&scale, 1));
+                shares[j] = solvedShare(ik, scale * turns[j]);
+            }
+        }
+        solveLimbs(rig, *animation->animation, animation->limbs, ms, local, world, &shares);
     }
 }
 
@@ -386,6 +429,17 @@ namespace {
 // Where a bone (by its name's hash) of the actor showing a lot object is in the world, as last posed.
 using BoneFinder = std::function<std::optional<Transform>(std::uint32_t object, std::uint32_t bone)>;
 
+// Milliseconds into a clip `length` ms long, `elapsedMs` after it started at `speed` (1: as authored).
+// A negative speed plays it from its end back to its start, as the game's clip track does.
+float clipTime(double length, double elapsedMs, float speed, bool repeats) {
+    if (!(length > 0)) {
+        return 0.0f;
+    }
+    const double played = elapsedMs * std::abs(speed);
+    const double at = repeats ? std::fmod(played, length) : std::min(played, length);
+    return static_cast<float>(speed < 0 ? length - at : at);
+}
+
 // The actor's clips as they play at `seconds`.
 void clipsAt(const Actor& actor, double seconds, std::vector<LayeredClip>& clips, std::vector<const RigAnimation*>& playing,
              const BoneFinder& boneOf) {
@@ -396,8 +450,7 @@ void clipsAt(const Actor& actor, double seconds, std::vector<LayeredClip>& clips
             continue;
         }
         const double length = clip.animation->animation->duration;
-        const double played = std::max(0.0, seconds - clip.start) * 1000.0 * clip.speed;
-        float ms = length > 0 ? static_cast<float>(clip.repeats ? std::fmod(played, length) : std::min(played, length)) : 0.0f;
+        float ms = clipTime(length, std::max(0.0, seconds - clip.start) * 1000.0, clip.speed, clip.repeats);
         if (clip.atMs) {
             ms = std::clamp(*clip.atMs, 0.0f, static_cast<float>(std::max(0.0, length)));
         }
@@ -405,7 +458,6 @@ void clipsAt(const Actor& actor, double seconds, std::vector<LayeredClip>& clips
         if (clip.fadeIn && clip.fadeInSeconds > 0) {
             weight *= std::clamp((seconds - clip.start) / clip.fadeInSeconds, 0.0, 1.0);
         }
-        const double steady = weight;
         if (clip.fadeOut && clip.end > clip.start) {
             weight *= clip.fadeOutSeconds > 0 ? std::clamp((clip.end - seconds) / clip.fadeOutSeconds, 0.0, 1.0) : (seconds < clip.end ? 1.0 : 0.0);
         }
@@ -415,8 +467,11 @@ void clipsAt(const Actor& actor, double seconds, std::vector<LayeredClip>& clips
             const float own = clip.animation->animation->frameTurn;
             turn += clip.animation->mirrored ? -own : own;
         }
-        clips.push_back({clip.animation.get(), ms, static_cast<float>(weight), clip.layer, clip.start, static_cast<float>(steady), turn, clip.bodyOnly,
+        clips.push_back({clip.animation.get(), ms, static_cast<float>(weight), clip.layer, clip.start, turn, clip.bodyOnly,
                          clip.noRootMove, clip.objectPlace ? std::optional<Transform>(actor.place.rigidInverse() * *clip.objectPlace) : std::nullopt});
+        if (clip.playedAt) {
+            clips.back().placeMove = actor.place.rigidInverse() * *clip.playedAt;
+        }
         if (clip.ikActor != 0) {
             clips.back().objectBone = [&actor, &boneOf, object = clip.ikActor](std::uint32_t bone) -> std::optional<Transform> {
                 const auto at = boneOf(object, bone);
@@ -542,7 +597,7 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
                 if (const auto was = out.heldHeading.find(actor.object); was != out.heldHeading.end()) {
                     turnHeldRoot(*actor.rig, clips, joints, was->second - heading);
                 }
-                poseRigLayered(*actor.rig, clips, world, &joints);
+                poseRigLayered(*actor.rig, clips, world, &joints, actor.look ? &actor.look : nullptr);
             } else {
                 poseRigLayered(*actor.rig, clips, world);
             }
@@ -551,9 +606,7 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
         }
         float ms = 0;
         if (actor.animation && actor.animation->animation && actor.animation->animation->duration > 0) {
-            const double length = actor.animation->animation->duration;
-            const double played = std::max(0.0, seconds - actor.start) * 1000.0 * actor.speed;
-            ms = static_cast<float>(actor.loop ? std::fmod(played, length) : std::min(played, length));
+            ms = clipTime(actor.animation->animation->duration, std::max(0.0, seconds - actor.start) * 1000.0, actor.speed, actor.loop);
         }
         if (actor.clips.empty()) {
             poseRig(*actor.rig, actor.animation.get(), ms, world);

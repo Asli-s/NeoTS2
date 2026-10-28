@@ -135,20 +135,98 @@ settings::LauncherSettings chosenSettings(const LauncherState& state) {
     out.backupReminderSeen = state.backupReminderSeen;
     out.renderer = state.renderer;
     out.smoothFollow = state.smoothFollow;
+    out.windowSize = state.windowSize;
     return out;
 }
 
-// A Remove button beside a folder the player added by hand. True when it was pressed. Paths are
-// compared as spelled, in any letter case, so no disk is read while drawing.
-bool removeButton(const std::vector<fs::path>& added, const fs::path& folder) {
+// True when the player added this folder by hand. Paths are compared as spelled, in any letter case,
+// so no disk is read while drawing.
+bool addedByHand(const std::vector<fs::path>& added, const fs::path& folder) {
     const auto same = [&](const fs::path& p) { return paths::spelledWithin(p, folder) && paths::spelledWithin(folder, p); };
-    if (std::none_of(added.begin(), added.end(), same)) {
+    return std::any_of(added.begin(), added.end(), same);
+}
+
+// The width a remove button takes beside the item before it. The button is a square as tall as a
+// radio button.
+float removeButtonWidth() {
+    return ImGui::GetStyle().ItemSpacing.x + ImGui::GetFrameHeight();
+}
+
+// A remove button on the line of a folder the player added by hand: a cross at `right`, the column's
+// right edge, so every one lines up. Lit when the pointer is on it. True when it was pressed.
+bool removeButton(const std::vector<fs::path>& added, const fs::path& folder, float right) {
+    if (!addedByHand(added, folder)) {
         return false;
     }
     ImGui::SameLine();
-    const bool pressed = ImGui::SmallButton("Remove");
-    ImGui::SetItemTooltip("Takes it off this list. The folder itself stays as it is.");
+    const float size = ImGui::GetFrameHeight();
+    ImGui::SetCursorScreenPos(ImVec2(std::max(right - size, ImGui::GetCursorScreenPos().x), ImGui::GetCursorScreenPos().y));
+    const ImVec2 corner = ImGui::GetCursorScreenPos();
+    const bool pressed = ImGui::InvisibleButton("remove", ImVec2(size, size));
+    const bool lit = ImGui::IsItemHovered();
+    ImGui::SetItemTooltip("Remove from the list");
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const ImVec2 far(corner.x + size, corner.y + size);
+    if (lit) {
+        draw->AddRectFilled(corner, far, ImGui::GetColorU32(ImGuiCol_ButtonHovered), ImGui::GetStyle().FrameRounding);
+    }
+    const float inset = size * 0.33f;
+    const float thickness = std::max(1.0f, ImGui::GetFontSize() / 12);
+    const ImU32 color = ImGui::GetColorU32(lit ? ImGuiCol_Text : ImGuiCol_TextDisabled);
+    draw->AddLine(ImVec2(corner.x + inset, corner.y + inset), ImVec2(far.x - inset, far.y - inset), color, thickness);
+    draw->AddLine(ImVec2(corner.x + inset, far.y - inset), ImVec2(far.x - inset, corner.y + inset), color, thickness);
     return pressed;
+}
+
+// `text` cut down to fit `width` by taking characters out of its middle, which keeps a path's drive
+// and its last folder's name. Whole when it fits.
+std::string fitted(const std::string& text, float width) {
+    if (ImGui::CalcTextSize(text.c_str()).x <= width) {
+        return text;
+    }
+    // Where each character starts, so a cut never splits one (the text is UTF-8).
+    std::vector<std::size_t> starts;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if ((static_cast<unsigned char>(text[i]) & 0xC0) != 0x80) {
+            starts.push_back(i);
+        }
+    }
+    const std::size_t count = starts.size();
+    // A third of the kept characters come from the start and the rest from the end.
+    const auto keep = [&](std::size_t kept) {
+        const std::size_t head = kept / 3;
+        const std::size_t tail = kept - head;
+        const std::size_t headEnd = head < count ? starts[head] : text.size();
+        const std::size_t tailStart = tail > 0 ? starts[count - tail] : text.size();
+        return text.substr(0, headEnd) + "..." + text.substr(tailStart);
+    };
+    // The most characters that still fit, found by halving.
+    std::size_t low = 0;
+    std::size_t high = count > 0 ? count - 1 : 0;
+    while (low < high) {
+        const std::size_t middle = (low + high + 1) / 2;
+        if (ImGui::CalcTextSize(keep(middle).c_str()).x <= width) {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    return keep(low);
+}
+
+// A path in at most `width`, shortened in the middle when it is longer, with the whole path shown
+// when the pointer rests on it.
+void pathText(const fs::path& path, float width, bool dimmed) {
+    const std::string whole = paths::utf8Text(path);
+    const std::string shown = fitted(whole, width);
+    if (dimmed) {
+        ImGui::TextDisabled("%s", shown.c_str());
+    } else {
+        ImGui::TextUnformatted(shown.c_str());
+    }
+    if (shown != whole) {
+        ImGui::SetItemTooltip("%s", whole.c_str());
+    }
 }
 
 void removeInstall(LauncherState& state, int index) {
@@ -278,9 +356,10 @@ void takePickedFolder(LauncherState& state) {
 void drawInstalls(LauncherState& state, SDL_Window* window, const LauncherFonts& fonts) {
     heading(fonts, "Game");
     if (state.installs.empty()) {
-        ImGui::TextUnformatted("No Sims 2 install was found. Choose the folder it is installed in.");
+        ImGui::TextWrapped("No Sims 2 install was found. Choose the folder it is installed in.");
     }
     int removed = -1;
+    ImGui::PushID("installs");  // the save folders' rows are numbered from 0 too
     for (std::size_t i = 0; i < state.installs.size(); ++i) {
         const paths::GameInstall& install = state.installs[i];
         ImGui::PushID(static_cast<int>(i));
@@ -291,15 +370,31 @@ void drawInstalls(LauncherState& state, SDL_Window* window, const LauncherFonts&
             state.folderNotes.clear();
             state.message.clear();
         }
-        if (removeButton(state.addedInstalls, install.root)) {
+        // The status goes beside the name, or under the path when it is too long for that line.
+        const std::string status = std::string(installStatus(install.check)) + ", " + std::to_string(install.check.packFolders) + " packs";
+        const float removeRoom = addedByHand(state.addedInstalls, install.root) ? removeButtonWidth() : 0;
+        ImGui::SameLine();
+        const bool besideName =
+            ImGui::GetCursorScreenPos().x + ImGui::CalcTextSize(status.c_str()).x + removeRoom <= state.columnRight;
+        if (besideName) {
+            ImGui::TextDisabled("%s", status.c_str());
+        } else {
+            ImGui::Dummy(ImVec2(0, 0));
+        }
+        if (removeButton(state.addedInstalls, install.root, state.columnRight)) {
             removed = static_cast<int>(i);
         }
         ImGui::Indent();
-        ImGui::TextDisabled("%s", paths::utf8Text(install.root).c_str());
-        ImGui::TextDisabled("%s, %d packs", installStatus(install.check), install.check.packFolders);
+        pathText(install.root, state.columnRight - ImGui::GetCursorScreenPos().x, true);
+        if (!besideName) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TextWrapped("%s", status.c_str());
+            ImGui::PopStyleColor();
+        }
         ImGui::Unindent();
         ImGui::PopID();
     }
+    ImGui::PopID();
     if (removed >= 0) {
         removeInstall(state, removed);
     }
@@ -354,7 +449,9 @@ void drawNewSaveFolder(LauncherState& state) {
 void drawSaveFolders(LauncherState& state, SDL_Window* window, const LauncherFonts& fonts) {
     heading(fonts, "Save folder");
     // Amber, so it reads as a warning without looking like an error.
-    ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f), "Back up your saves first: NeoTS2 is early, unfinished software.");
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.35f, 1.0f));
+    ImGui::TextWrapped("Back up your saves first: NeoTS2 is early, unfinished software.");
+    ImGui::PopStyleColor();
     ImGui::Spacing();
     if (state.install < 0) {
         ImGui::TextDisabled("Choose a game first.");
@@ -363,21 +460,24 @@ void drawSaveFolders(LauncherState& state, SDL_Window* window, const LauncherFon
     const paths::GameInstall& install = state.installs[static_cast<std::size_t>(state.install)];
     const auto& folders = install.saveFolders;
     if (folders.empty()) {
-        ImGui::TextUnformatted("No save folder was found for this game. Choose one.");
+        ImGui::TextWrapped("No save folder was found for this game. Choose one.");
     }
     std::optional<fs::path> removed;
+    ImGui::PushID("saveFolders");
     for (std::size_t i = 0; i < folders.size(); ++i) {
         ImGui::PushID(static_cast<int>(i));
         // The path is text beside the button, as ImGui reads "##" in a label as the end of it.
         bool pick = ImGui::RadioButton("##pick", state.saveFolder == static_cast<int>(i));
         ImGui::SameLine();
-        ImGui::TextUnformatted(paths::utf8Text(folders[i]).c_str());
+        // Room is kept for the remove button, so a long path never pushes it out of sight.
+        const float removeRoom = addedByHand(state.addedSaveFolders, folders[i]) ? removeButtonWidth() : 0;
+        pathText(folders[i], state.columnRight - ImGui::GetCursorScreenPos().x - removeRoom, false);
         pick = pick || ImGui::IsItemClicked();
         if (pick && state.saveFolder != static_cast<int>(i)) {
             state.saveFolder = static_cast<int>(i);
             state.message.clear();
         }
-        if (removeButton(state.addedSaveFolders, folders[i])) {
+        if (removeButton(state.addedSaveFolders, folders[i], state.columnRight)) {
             removed = folders[i];
         }
         auto note = state.folderNotes.find(folders[i]);
@@ -386,11 +486,14 @@ void drawSaveFolders(LauncherState& state, SDL_Window* window, const LauncherFon
         }
         if (!note->second.empty()) {
             ImGui::Indent();
-            ImGui::TextDisabled("%s", note->second.c_str());
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TextWrapped("%s", note->second.c_str());
+            ImGui::PopStyleColor();
             ImGui::Unindent();
         }
         ImGui::PopID();
     }
+    ImGui::PopID();
     if (removed) {
         removeSaveFolder(state, *removed);
     }
@@ -429,7 +532,9 @@ void startPlaying(LauncherState& state, bool addNeighborhoods) {
         state.message = "NeoTS2 is already playing with this save folder.";
         return;
     }
-    state.game = startGame(install.root, folder, addNeighborhoods, builtRenderer(state.renderer), state.smoothFollow, state.message);
+    const settings::WindowSize* size = settings::findWindowSize(state.windowSize);
+    state.game = startGame(install.root, folder, addNeighborhoods, builtRenderer(state.renderer), state.smoothFollow, size ? size->width : 0,
+                           size ? size->height : 0, size && size->fitScreen, state.message);
     state.folderNotes.clear();
 }
 
@@ -599,11 +704,12 @@ void findInstalls(LauncherState& state, const settings::LauncherSettings& rememb
     state.backupReminderSeen = remembered.backupReminderSeen;
     state.renderer = builtRenderer(remembered.renderer);
     state.smoothFollow = remembered.smoothFollow;
+    state.windowSize = remembered.windowSize;
     state.remembered = chosenSettings(state);
 }
 
 // What draws the game: its own choice (Direct3D 12, Metal or Vulkan), or OpenGL 2 for systems with no more
-// (offered only when the game is built with it).
+// (offered only when the game is built with it). And the size of the game's window.
 void drawRenderer(LauncherState& state, const LauncherFonts& fonts) {
     heading(fonts, "Graphics");
     struct Choice {
@@ -628,11 +734,55 @@ void drawRenderer(LauncherState& state, const LauncherFonts& fonts) {
             current = &choice;
         }
     }
+    // Each choice has its name in front, and the choices line up after the longer name.
+    const float labelWidth = std::max(ImGui::CalcTextSize("Renderer").x, ImGui::CalcTextSize("Window size").x) +
+                             ImGui::GetStyle().ItemSpacing.x * 2;
+    const auto label = [labelWidth](const char* text) {
+        const float start = ImGui::GetCursorPosX();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(text);
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(start + labelWidth);
+    };
+    label("Renderer");
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18);
     if (ImGui::BeginCombo("##renderer", current->label)) {
         for (const auto& choice : kChoices) {
             if (ImGui::Selectable(choice.label, &choice == current)) {
                 state.renderer = choice.value;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    // The window sizes are offered here until the game has its own display settings.
+    static constexpr const char* kDefaultSize = "Window 1280 x 800 (default)";
+    static constexpr const char* kSizeLabels[] = {"Window 1280 x 720 (720p)", "Window 1920 x 1080 (1080p)", "Window 2560 x 1440 (1440p)",
+                                                  "Fit the screen (windowed)"};
+    static_assert(std::size(kSizeLabels) == std::size(settings::kWindowSizes));
+#ifdef _WIN32
+    constexpr bool kFitScreenWorks = true;
+#else
+    constexpr bool kFitScreenWorks = false;  // the game can't measure its title bar here yet
+#endif
+    const char* currentSize = kDefaultSize;
+    for (std::size_t i = 0; i < std::size(kSizeLabels); ++i) {
+        if (state.windowSize == settings::kWindowSizes[i].key) {
+            currentSize = kSizeLabels[i];
+        }
+    }
+    label("Window size");
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18);
+    if (ImGui::BeginCombo("##windowSize", currentSize)) {
+        if (ImGui::Selectable(kDefaultSize, state.windowSize.empty())) {
+            state.windowSize.clear();
+        }
+        for (std::size_t i = 0; i < std::size(kSizeLabels); ++i) {
+            const auto& size = settings::kWindowSizes[i];
+            if (size.fitScreen && !kFitScreenWorks) {
+                continue;
+            }
+            if (ImGui::Selectable(kSizeLabels[i], state.windowSize == size.key)) {
+                state.windowSize = size.key;
             }
         }
         ImGui::EndCombo();
@@ -648,20 +798,81 @@ void drawChanges(LauncherState& state, const LauncherFonts& fonts) {
     }
 }
 
+// The space between the two columns.
+float columnGap() {
+    return ImGui::GetFontSize() * 2;
+}
+
+// The game and its save folder in one column, the options in the other. True when they are side by side.
+bool drawSections(LauncherState& state, SDL_Window* window, const LauncherFonts& fonts) {
+    const ImGuiStyle& style = ImGui::GetStyle();
+    // The game's column has one width, so a long folder name never widens the window. Its paths are
+    // shortened to fit and its notes wrap. A screen too narrow for it gets what it has.
+    const float gameWidth = std::max(
+        std::min(ImGui::GetFontSize() * 30, state.maxWidth - style.WindowPadding.x * 2 - style.ScrollbarSize), ImGui::GetFontSize() * 12);
+    const auto game = [&] {
+        state.columnRight = ImGui::GetCursorScreenPos().x + gameWidth;
+        ImGui::BeginGroup();
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + gameWidth);
+        drawInstalls(state, window, fonts);
+        ImGui::Spacing();
+        drawSaveFolders(state, window, fonts);
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(gameWidth, 0));
+        ImGui::EndGroup();
+        state.leftWidth = ImGui::GetItemRectSize().x;
+    };
+    const auto options = [&] {
+        ImGui::BeginGroup();
+        drawRenderer(state, fonts);
+        ImGui::Spacing();
+        drawChanges(state, fonts);
+        ImGui::EndGroup();
+        state.rightWidth = ImGui::GetItemRectSize().x;
+    };
+    // Side by side when the screen is wide enough for both, one above the other when not.
+    const float sideBySide = state.leftWidth + columnGap() + state.rightWidth + style.WindowPadding.x * 2 + style.ScrollbarSize;
+    // Each cell is padded on its inner side only, as the table has no outer borders.
+    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(columnGap() / 2, 0));
+    const bool columns = state.leftWidth > 0 && sideBySide <= state.maxWidth &&
+                         ImGui::BeginTable("columns", 2, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoHostExtendX);
+    ImGui::PopStyleVar();
+    if (columns) {
+        ImGui::TableNextColumn();
+        game();
+        ImGui::TableNextColumn();
+        options();
+        ImGui::EndTable();
+    } else {
+        game();
+        ImGui::Spacing();
+        options();
+    }
+    return columns;
+}
+
 void drawLauncher(LauncherState& state, SDL_Window* window, const LauncherFonts& fonts) {
     takePickedFolder(state);
-    drawInstalls(state, window, fonts);
-    ImGui::Spacing();
-    drawSaveFolders(state, window, fonts);
-    ImGui::Spacing();
-    drawRenderer(state, fonts);
-    ImGui::Spacing();
-    drawChanges(state, fonts);
-    ImGui::Spacing();
-    // Measured before the Play row and the message, which both stretch to the window's edge.
-    const ImGuiWindow* frame = ImGui::GetCurrentWindow();
-    state.contentWidth = frame->DC.IdealMaxPos.x - frame->Pos.x + ImGui::GetStyle().WindowPadding.x;
+    const ImGuiStyle& style = ImGui::GetStyle();
+    // The sections scroll when the window is too short for them, so the Play row below them always
+    // shows. Their height is the one measured in the last frame, and the whole window's space in the
+    // first.
+    const float room = ImGui::GetContentRegionAvail().y - state.footerHeight - style.ItemSpacing.y;
+    const float height = state.sectionsHeight > 0 ? std::min(state.sectionsHeight, std::max(room, ImGui::GetFontSize() * 4)) : 0;
+    ImGui::BeginChild("sections", ImVec2(0, height));
+    const bool columns = drawSections(state, window, fonts);
+    state.sectionsHeight = ImGui::GetCursorPosY() - style.ItemSpacing.y;
+    // Measured before the Play row and the message, which both stretch to the window's edge. Side by
+    // side, the columns' contents give the width, as a table only spans the width it is given.
+    const ImGuiWindow* sections = ImGui::GetCurrentWindow();
+    const float scrollbar = sections->ScrollbarY ? style.ScrollbarSize : 0;
+    state.contentWidth = columns ? style.WindowPadding.x + state.leftWidth + columnGap() + state.rightWidth + scrollbar
+                                 : sections->DC.IdealMaxPos.x - sections->ParentWindow->Pos.x + style.WindowPadding.x + scrollbar;
+    ImGui::EndChild();
+    const float footerTop = ImGui::GetCursorPosY();
     drawPlay(state, fonts);
+    state.footerHeight = ImGui::GetCursorPosY() - footerTop - style.ItemSpacing.y;
+    state.contentHeight = state.sectionsHeight + style.ItemSpacing.y + state.footerHeight;
     rememberChoices(state);
 }
 

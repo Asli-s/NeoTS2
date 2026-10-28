@@ -59,11 +59,10 @@ bool Execution::findLocationFor(const bhav::Instruction& in, Frame& f) {
     if (o[2] & kInFrontOfReference) {
         search.startDirection = ref->data[kDirectionField] & 7;
     }
-    search.randomTurn = static_cast<int>((static_cast<std::uint64_t>(static_cast<std::uint32_t>(rng_())) * 8) >> 32);
-    std::optional<FoundLocation> found = findLocation(world(), *placed, search);
+    std::optional<FoundLocation> found = findLocation(world(), *placed, search, rng_);
     if (!found && o[0] == 0) {
         search.sameRoom = false;
-        found = findLocation(world(), *placed, search);
+        found = findLocation(world(), *placed, search, rng_);
     }
     if (!found) {
         return false;

@@ -712,7 +712,14 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
         auto* object = world.find(static_cast<std::int16_t>((*queueChoice)[1]));
         const auto menu = actor && object ? ts2::sim::pieMenu(sim.vm(), sim.code(), *actor, *object) : ts2::sim::PieMenu{};
         const auto at = static_cast<std::size_t>((*queueChoice)[2]);
-        const auto queued = at < menu.choices.size() ? ts2::sim::queuedChoice(sim.code(), *object, menu.choices[at]) : std::nullopt;
+        if (at < menu.choices.size() && ts2::sim::runsAtOnce(sim.code(), *object, menu.choices[at])) {
+            const auto r = ts2::sim::runAtOnce(sim.vm(), sim.code(), world, *actor, *object, menu.choices[at]);
+            std::printf("light strength of %d now %.2f\n", object->id, object->lightStrength);
+            std::printf("ran %s at once for Sim %d: %s %s %s\n", menu.choices[at].name.c_str(), actor->id, ts2::sim::outcomeName(r.outcome), r.reason.c_str(),
+                        r.detail.c_str());
+            return;
+        }
+        const auto queued = at < menu.choices.size() ? ts2::sim::queuedChoice(sim.code(), world, *object, menu.choices[at]) : std::nullopt;
         if (queued) {
             ts2::sim::queueInteraction(*actor, *queued);
             std::printf("queued %s for Sim %d\n", menu.choices[at].name.c_str(), actor->id);
@@ -737,7 +744,7 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
             if (groundLater && tick == static_cast<std::size_t>((*groundLater)[0])) {
                 auto* made = ts2::sim::groundDestination(sim.vm(), world, actor, {(*groundLater)[1], (*groundLater)[2], static_cast<int>((*groundLater)[3])});
                 const auto menu = made ? ts2::sim::pieMenu(sim.vm(), sim.code(), *actor, *made) : ts2::sim::PieMenu{};
-                const auto queued = !menu.choices.empty() ? ts2::sim::queuedChoice(sim.code(), *made, menu.choices.front()) : std::nullopt;
+                const auto queued = !menu.choices.empty() ? ts2::sim::queuedChoice(sim.code(), world, *made, menu.choices.front()) : std::nullopt;
                 if (queued) {
                     ts2::sim::queueInteraction(*actor, *queued);
                 }
@@ -759,7 +766,7 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
             auto* actor = world.find(static_cast<std::int16_t>(order[0]));
             auto* made = actor ? ts2::sim::groundDestination(sim.vm(), world, actor, {order[2], order[3], static_cast<int>(order[4])}) : nullptr;
             const auto menu = made ? ts2::sim::pieMenu(sim.vm(), sim.code(), *actor, *made) : ts2::sim::PieMenu{};
-            const auto queued = !menu.choices.empty() ? ts2::sim::queuedChoice(sim.code(), *made, menu.choices.front()) : std::nullopt;
+            const auto queued = !menu.choices.empty() ? ts2::sim::queuedChoice(sim.code(), world, *made, menu.choices.front()) : std::nullopt;
             if (queued) {
                 ts2::sim::queueInteraction(*actor, *queued);
             }

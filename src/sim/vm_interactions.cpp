@@ -429,6 +429,7 @@ bool Execution::pushInteraction(const bhav::Instruction& in, Frame& f) {
     if (object == nullptr) {
         throw Stop{Outcome::Error, "could not find object reference", std::to_string(objectId)};
     }
+    object = world().find(world().interactionPart(*object));
     const std::int16_t index = (o[3] & 0x10) ? read(o[5], static_cast<std::uint16_t>(o[6] | o[7] << 8), f)
                                : fromAutonomy ? self.data[kTreeTableEntryField]
                                               : static_cast<std::int16_t>(o[0]);

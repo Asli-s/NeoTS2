@@ -9,6 +9,7 @@
 #include <chrono>
 #include <exception>
 #include <format>
+#include <tuple>
 
 namespace app {
 
@@ -25,13 +26,15 @@ ts2::scene::ObjectLighting between(const ts2::scene::ObjectLighting& from, const
     ts2::scene::ObjectLighting out;
     for (std::size_t i = 0; i < 3; ++i) {
         out.ambient[i] = from.ambient[i] + (to.ambient[i] - from.ambient[i]) * t;
+        out.textureLight[i] = from.textureLight[i] + (to.textureLight[i] - from.textureLight[i]) * t;
     }
-    for (const auto& [lights, share] : {std::pair{&from.lights, 1 - t}, std::pair{&to.lights, t}}) {
+    for (const auto& [lights, share, into] : {std::tuple{&from.lights, 1 - t, &out.lights}, std::tuple{&to.lights, t, &out.lights},
+                                              std::tuple{&from.simLights, 1 - t, &out.simLights}, std::tuple{&to.simLights, t, &out.simLights}}) {
         for (auto light : *lights) {
             for (auto& c : light.color) {
                 c *= share;
             }
-            out.lights.push_back(light);
+            into->push_back(light);
         }
     }
     return out;
@@ -77,18 +80,34 @@ void LotDaylight::update(double seconds, std::span<const std::int16_t> globals, 
             ts2::diag::error(std::format("lot light: lighting the lot again failed: {}", ex.what()));
         }
     }
-    if (globals.size() <= ts2::sim::global::kTimeOfDay || globals[ts2::sim::global::kTimeOfDay] == timeOfDay_) {
-        return;
+    const auto& world = life.simulation().world();
+    auto strengthOf = [&world](std::uint32_t id) {
+        const auto* object = id <= 0x7FFF ? world.find(static_cast<std::int16_t>(id)) : nullptr;
+        return object ? object->lightStrength : 0.0f;
+    };
+    const bool lampsChanged = !lampsRead_ || std::any_of(lamps_.begin(), lamps_.end(), [&](const auto& lamp) {
+        return strengthOf(lamp.first) != lamp.second;
+    });
+    std::string wanted = state_;
+    if (globals.size() > ts2::sim::global::kTimeOfDay && globals[ts2::sim::global::kTimeOfDay] != timeOfDay_) {
+        timeOfDay_ = globals[ts2::sim::global::kTimeOfDay];
+        if (auto byClock = ts2::content::lotLightingState(assets.lighting(), timeOfDay_); !byClock.empty()) {
+            wanted = std::move(byClock);
+        }
     }
-    timeOfDay_ = globals[ts2::sim::global::kTimeOfDay];
-    const auto wanted = ts2::content::lotLightingState(assets.lighting(), timeOfDay_);
-    if (wanted.empty() || wanted == state_) {
+    if (wanted == state_ && !lampsChanged) {
         return;
     }
     // The lot's lamps and windows are read here, where the game's files are. The rest runs beside.
     std::shared_ptr<LotLight> light;
+    lamps_.clear();
+    lampsRead_ = true;
     try {
-        light = gatherLotLight(assets, base_, wanted);
+        light = gatherLotLight(assets, base_, wanted, [&](std::uint32_t id) {
+            const float strength = strengthOf(id);
+            lamps_.emplace_back(id, strength);
+            return strength;
+        });
     } catch (const std::exception& ex) {
         ts2::diag::error(std::format("lot light: reading the lot's lights for {} failed: {}", wanted, ex.what()));
     }
@@ -127,7 +146,6 @@ void LotDaylight::put(LotLight& light, ts2::scene::Scene& scene, ts2::render::IR
     const auto put = putLotLight(scene, light, place_);
     renderer.setImages(scene, put.images, true);
     renderer.setLightMapFade(0);
-    renderer.setNight(ts2::content::stateTime(lotLightState(light)) == ts2::content::StateTime::Night);
     if (put.sky) {
         renderer.setSkybox(scene.skybox);
     }

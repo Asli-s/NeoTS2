@@ -19,25 +19,25 @@ namespace ts2::render::render_detail {
 
 constexpr std::uint32_t kSpriteFloats = 8;  // position, texture coordinates, color
 
-// Windows draws with Direct3D 12 and DXIL shaders; macOS draws with Metal and MSL shaders.
-// The build makes only that kind, so the device must not fall back to the other.
+// Windows draws with Direct3D 12 and DXIL shaders, macOS with Metal and MSL shaders, other systems
+// with Vulkan and SPIR-V shaders. The build makes only that kind, so the device must not fall back
+// to another.
 #ifdef _WIN32
 constexpr SDL_GPUShaderFormat kShaderFormat = SDL_GPU_SHADERFORMAT_DXIL;
 constexpr const char* kShaderExtension = ".dxil";
+constexpr const char* kShaderEntrypoint = "main";
 constexpr const char* kGraphicsApi = "Direct3D 12";
 #elif defined(__APPLE__)
 constexpr SDL_GPUShaderFormat kShaderFormat = SDL_GPU_SHADERFORMAT_MSL;
 constexpr const char* kShaderExtension = ".msl";
+// SPIRV-Cross renames each shader's main to main0, because Metal reserves the name main.
 constexpr const char* kShaderEntrypoint = "main0";
 constexpr const char* kGraphicsApi = "Metal";
 #else
 constexpr SDL_GPUShaderFormat kShaderFormat = SDL_GPU_SHADERFORMAT_SPIRV;
 constexpr const char* kShaderExtension = ".spv";
-constexpr const char* kGraphicsApi = "Vulkan";
-#endif
-
-#ifndef __APPLE__
 constexpr const char* kShaderEntrypoint = "main";
+constexpr const char* kGraphicsApi = "Vulkan";
 #endif
 
 inline std::runtime_error sdlError(const char* what) {
@@ -172,3 +172,18 @@ SDL_GPUTexture* uploadTexture(SDL_GPUDevice* device, UploadPass& pass, const sce
 SDL_GPUTexture* uploadCube(SDL_GPUDevice* device, UploadPass& pass, const std::vector<scene::Image>& faces);
 
 } // namespace ts2::render::render_detail
+
+namespace ts2::render {
+
+// One frame being recorded: where it goes and how it is seen.
+struct SdlGpuRenderer::Frame : FrameView {
+    SDL_GPUCommandBuffer* cmd = nullptr;
+    SDL_GPURenderPass* pass = nullptr;  // the frame's main pass, once begun
+    unsigned width = 0, height = 0;
+    // The sky, the boundary curtain, the terrain, roads and imposters. A portrait shows its instances
+    // alone, over a transparent background.
+    bool extras = false;
+    bool water = false;  // the neighborhood's water and its reflection
+};
+
+} // namespace ts2::render

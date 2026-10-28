@@ -90,6 +90,8 @@ public:
     // The mouse moved or a button changed (at `seconds`, for tooltips). Returns the button released
     // over, if any.
     std::optional<int> mouse(int x, int y, bool down, double seconds = 0);
+    // Whether a button is held down with the mouse still over it.
+    bool held(int window) const;
     // The topmost shown, enabled button at (x, y), if any.
     std::optional<int> buttonAt(int x, int y) const;
     // Whether (x, y) is over a shown window that draws something.

@@ -3,6 +3,7 @@
 #include "formats/binary_reader.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 
 namespace ts2::cobject {
@@ -80,7 +81,7 @@ void objectData(BinaryReader& r, std::uint32_t version, std::vector<SavedJoint>&
 void request(BinaryReader& r, SavedAnimation& a) {
     expect(r.u32(), kRequestTag, "bad request");
     const std::uint32_t version = r.u32();
-    r.u32();  // flags
+    a.flipped = (r.u32() & 1) != 0;  // flags: bit 0 played mirrored, the top 3 bits who played it
     a.name = r.varString();
     if (version >= 3) {
         a.type = r.varString();
@@ -93,7 +94,7 @@ void request(BinaryReader& r, SavedAnimation& a) {
     a.eventTree = r.u16();
     r.i32();
     if (version >= 9) {
-        r.f32();
+        a.rate = r.f32();
     }
     skipFloats(r, 2);
     r.skip(4 * 4);
@@ -139,13 +140,29 @@ void instance(BinaryReader& r, SavedAnimation& a) {
     if (r.i32() != 0) {
         expect(r.u32(), kCurveTag, "bad blend curve");
         r.skip(3 * 4);
+        // Segments of a kind each: 0 rising to the clip's weight, 1 holding it, 2 falling from it.
         float total = 0;
         for (std::size_t k = r.i32Count(16); k > 0; --k) {
-            r.i32();
+            const std::int32_t kind = r.i32();
             skipFloats(r, 2);
-            total += r.f32();
+            const float length = r.f32();
+            total += length;
+            if (std::isfinite(length) && length > 0) {
+                if (kind == 0) {
+                    a.fadeInMs += length;
+                } else if (kind == 2) {
+                    a.fadeOutMs += length;
+                }
+            }
         }
-        a.lengthMs = total;
+        // A broken save could sum to infinity, which would make the fades' arithmetic NaN.
+        if (std::isfinite(total)) {
+            a.lengthMs = total;
+            a.fadeInMs = std::min(a.fadeInMs, std::max(total, 0.0f));
+            a.fadeOutMs = std::min(a.fadeOutMs, std::max(total, 0.0f));
+        } else {
+            a.fadeInMs = a.fadeOutMs = 0;
+        }
     }
     r.i32();
     a.plays = r.i32();

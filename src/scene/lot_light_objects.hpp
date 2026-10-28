@@ -2,6 +2,7 @@
 
 #include "content/lighting.hpp"
 #include "scene/light_source.hpp"
+#include "scene/object_lights.hpp"
 #include "scene/portal_records.hpp"
 
 #include <cstdint>
@@ -34,6 +35,7 @@ struct Queries {
 struct Found {
     std::vector<LightSource> lamps;
     std::vector<portalrecords::Built> portals;
+    std::vector<objectlights::LampLight> lampLights;  // their light on things
 };
 
 // `lotPackage` is the lot's file (its objects' scene records). `state` is the lighting state now.

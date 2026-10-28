@@ -10,7 +10,6 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
-#include <random>
 #include <span>
 #include <string>
 #include <vector>
@@ -205,7 +204,9 @@ public:
     // Resets a Sim that has to drop everything because an object it is using goes away (see
     // forgetObject). Without it, a call that needs such a reset stops as unsupported.
     std::function<void(SimObject& sim)> resetSim;
-    std::mt19937 rng{0x5132};
+    // Seeded from the lot's saved state when it has one. What the game starts from without one is not
+    // known yet.
+    SimRandom rng{0x5132};
 
 private:
     // entryGroup: where the entry tree is, when it isn't where its number says.

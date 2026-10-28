@@ -11,6 +11,8 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace app {
 
@@ -21,6 +23,8 @@ class LotLife;
 // in with the state's sky and the ground around the lot's colours, and the outdoor lights on
 // objects and the light maps fade to the new ones over a few real seconds, as the game's do. The
 // lights of things in rooms change at once (whether the game fades them too is not known yet).
+// The lot is lit again the same way when its scripts switch a lamp on or off or dim it (Change
+// Light), and the first time it is played, as the lamps are off until its scripts have run.
 class LotDaylight {
 public:
     // `state` is what the lot was lit with (with `environment`, its environment colour), `place`
@@ -45,6 +49,10 @@ private:
     std::string state_;  // the state the lot is lit with, or being lit with
     ts2::scene::Transform place_;
     int timeOfDay_ = -1;
+    // Each object with lights of its own and how strongly they shone when the light was gathered.
+    // Empty and not read until the lot's scripts have run.
+    std::vector<std::pair<std::uint32_t, float>> lamps_;
+    bool lampsRead_ = false;
     std::future<std::shared_ptr<LotLight>> working_;
     // The outdoor lights fading from one state's to the next's.
     ts2::scene::ObjectLighting from_, to_;

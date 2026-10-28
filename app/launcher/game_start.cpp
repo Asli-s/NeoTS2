@@ -26,7 +26,8 @@ std::optional<std::string> exactUtf8(const std::filesystem::path& path) {
 } // namespace
 
 SDL_Process* startGame(const std::filesystem::path& install, const std::filesystem::path& saveFolder, bool addNeighborhoods,
-                       const std::string& renderer, bool smoothFollow, std::string& error) {
+                       const std::string& renderer, bool smoothFollow, int width, int height, bool fitScreen,
+                       std::string& error) {
     const char* base = SDL_GetBasePath();
     const auto baseFolder = base ? paths::pathFromUtf8(base) : std::nullopt;
     if (!baseFolder) {
@@ -62,6 +63,13 @@ SDL_Process* startGame(const std::filesystem::path& install, const std::filesyst
     }
     if (smoothFollow) {
         args.push_back("--smooth-follow");
+    }
+    const std::string widthText = std::to_string(width), heightText = std::to_string(height);
+    if (width > 0 && height > 0) {
+        args.insert(args.end(), {"--size", widthText.c_str(), heightText.c_str()});
+    }
+    if (fitScreen) {
+        args.push_back("--fit-screen");
     }
     args.push_back(nullptr);
     SDL_Process* process = SDL_CreateProcess(args.data(), false);

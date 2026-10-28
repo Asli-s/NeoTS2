@@ -68,18 +68,6 @@ ObjectLighting fromRoom(const roomlight::Lights& lights) {
 
 namespace {
 
-// A point light a window or door gives the room it lights, as objects there take it, with what the
-// game scores it by: its strength (a quarter of its colour's length) and, for the spill, the plane
-// through the spill point facing into the room (nothing behind it scores).
-struct PointLight {
-    std::int16_t room = 0;
-    ObjectLighting::Light light;
-    float strength = 0;
-    bool plane = false;
-    std::array<float, 3> planePoint{0, 0, 0};
-    std::array<float, 2> planeNormal{0, 0};
-};
-
 float length(const std::array<float, 3>& v) {
     return std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
 }
@@ -93,10 +81,40 @@ float rangeOf(const std::array<float, 3>& color, float falloff, float cutoff) {
     return falloff <= 0 ? 10000.0f : std::sqrt((x - 1) / falloff);
 }
 
-std::vector<PointLight> pointLights(const std::vector<lotlighting::PortalLight>& portals, float cutoff) {
+// A spot light's cone from its full angle and penumbra (radians), as cosines.
+void setCone(ObjectLighting::Light& light, const std::array<float, 3>& axis, float coneAngle, float conePenumbra) {
+    const float l = length(axis);
+    light.spot = true;
+    light.direction = {axis[0] / l, axis[1] / l, axis[2] / l};
+    light.coneInner = std::cos(coneAngle / 2);
+    light.coneOuter = std::cos((coneAngle + conePenumbra) / 2);
+}
+
+} // namespace
+
+std::vector<PointLight> pointLights(const std::vector<lotlighting::PortalLight>& portals, const std::vector<LampLight>& lamps, float cutoff) {
     std::vector<PointLight> out;
+    for (const auto& lamp : lamps) {
+        PointLight p;
+        p.room = lamp.room;
+        p.light.point = true;
+        p.light.position = lamp.position;
+        p.light.color = lamp.color;
+        p.light.falloff = lamp.falloff;
+        p.light.range = rangeOf(lamp.color, lamp.falloff, cutoff);
+        p.strength = 0.25f * length(lamp.color);
+        if (lamp.spot) {
+            if (!(length(lamp.axis) > 0)) {
+                continue;
+            }
+            setCone(p.light, lamp.axis, lamp.coneAngle, lamp.conePenumbra);
+        }
+        if (p.strength > 0 && p.light.range > 0 && std::isfinite(p.strength) && std::isfinite(p.light.range)) {
+            out.push_back(p);
+        }
+    }
     for (const auto& portal : portals) {
-        if (!portal.lights || portal.into == 0) {
+        if (!portal.lights) {
             continue;
         }
         auto add = [&](const windowlight::Light& from, bool spill) {
@@ -112,14 +130,10 @@ std::vector<PointLight> pointLights(const std::vector<lotlighting::PortalLight>&
             p.planePoint = portal.spillPoint;
             p.planeNormal = {portal.portal.nx, portal.portal.ny};
             if (!spill && portal.spot) {
-                const float axis = length(portal.lightAxis);
-                if (!(axis > 0)) {
+                if (!(length(portal.lightAxis) > 0)) {
                     return;
                 }
-                p.light.spot = true;
-                p.light.direction = {portal.lightAxis[0] / axis, portal.lightAxis[1] / axis, portal.lightAxis[2] / axis};
-                p.light.coneInner = std::cos(portal.coneAngle / 2);
-                p.light.coneOuter = std::cos((portal.coneAngle + portal.conePenumbra) / 2);
+                setCone(p.light, portal.lightAxis, portal.coneAngle, portal.conePenumbra);
             }
             if (p.strength > 0 && p.light.range > 0 && std::isfinite(p.strength) && std::isfinite(p.light.range)) {
                 out.push_back(p);
@@ -132,6 +146,8 @@ std::vector<PointLight> pointLights(const std::vector<lotlighting::PortalLight>&
     }
     return out;
 }
+
+namespace {
 
 using Corners = std::array<std::array<float, 3>, 8>;
 
@@ -186,16 +202,21 @@ float score(const PointLight& p, const Corners& corners) {
     return best;
 }
 
-// The lights a part in room `room` gets, as the game picks them: the group's directional lights and
-// the room's point lights, the eight that score best, directionals first. `ambient` replaces the
-// group's own (doors' and windows' parts).
-ObjectLighting choose(const roomlight::Lights& group, const std::optional<std::array<float, 3>>& ambient, const std::vector<PointLight>& points,
-                      std::int16_t room, const Corners& corners) {
-    constexpr std::size_t kMaxLights = 8;
-    ObjectLighting base = fromRoom(group);
+// A room's light for one group (`lit`), with the room's average as its texture light. `ambient`
+// replaces the group's own (doors' and windows' parts).
+ObjectLighting roomBase(const lotlighting::Room& lit, int group, const std::optional<std::array<float, 3>>& ambient) {
+    ObjectLighting base = fromRoom(*lit.groups[group]);
+    base.textureLight = lit.average;
     if (ambient) {
         base.ambient = *ambient;
     }
+    return base;
+}
+
+// The lights a part in room `room` (0 outdoors) gets, as the game picks them: the directional lights
+// of `base` and the room's point lights, the eight that score best, directionals first.
+ObjectLighting choose(ObjectLighting base, const std::vector<PointLight>& points, std::int16_t room, const Corners& corners) {
+    constexpr std::size_t kMaxLights = 8;
     std::vector<std::pair<float, ObjectLighting::Light>> scored;
     for (const auto& light : base.lights) {
         scored.push_back({0.25f * length(light.color), light});
@@ -218,9 +239,14 @@ ObjectLighting choose(const roomlight::Lights& group, const std::optional<std::a
     return base;
 }
 
+bool hasPointLight(const ObjectLighting& set) {
+    return std::any_of(set.lights.begin(), set.lights.end(), [](const ObjectLighting::Light& l) { return l.point; });
+}
+
 // What tells two light sets apart, to share equal ones.
 std::vector<float> key(const ObjectLighting& set) {
     std::vector<float> out(set.ambient.begin(), set.ambient.end());
+    out.insert(out.end(), set.textureLight.begin(), set.textureLight.end());
     for (const auto& l : set.lights) {
         out.insert(out.end(), {l.point ? 1.0f : 0.0f, l.direction[0], l.direction[1], l.direction[2], l.color[0], l.color[1], l.color[2],
                                l.position[0], l.position[1], l.position[2], l.falloff, l.range, l.spot ? 1.0f : 0.0f, l.coneInner, l.coneOuter});
@@ -229,42 +255,54 @@ std::vector<float> key(const ObjectLighting& set) {
 }
 
 // A thing's light sets in the room at `at` (x, y in the lot), one per part: the game picks the lights
-// for each part by the part's box. Empty outdoors.
-std::vector<ObjectLighting> thingSets(const std::map<std::int16_t, lotlighting::Room>& rooms, const std::vector<PointLight>& points,
-                                      const RoomAt& roomAt, const Mesh& mesh, const Transform& inLot, int storey,
-                                      const std::array<float, 2>& at) {
+// for each part by the part's box. Outdoors the parts pick from `outdoor` (with the Sim-only lights
+// for a Sim) and the outdoor lamps and windows. Empty outdoors when no lamp or window reaches any
+// part, so the thing keeps the daylight as it fades.
+std::vector<ObjectLighting> thingSets(const std::map<std::int16_t, lotlighting::Room>& rooms, const ObjectLighting& outdoor,
+                                      const std::vector<PointLight>& points, const RoomAt& roomAt, const Mesh& mesh, const Transform& inLot,
+                                      int storey, const std::array<float, 2>& at, LightGroup group) {
     const std::int16_t id = roomAt(storey, at[0], at[1]);
     const auto room = rooms.find(id);
-    if (id == 0 || room == rooms.end() || !room->second.groups[lotlighting::kObjects]) {
+    const int kind = group == LightGroup::Sims ? lotlighting::kSims : lotlighting::kObjects;
+    ObjectLighting base;
+    if (id == 0) {
+        base = group == LightGroup::Sims ? withSimLights(outdoor) : outdoor;
+    } else if (room != rooms.end() && room->second.groups[kind]) {
+        base = roomBase(room->second, kind, std::nullopt);
+    } else {
         return {};
     }
     std::vector<ObjectLighting> out;
     for (const auto& primitive : mesh.primitives) {
-        out.push_back(choose(*room->second.groups[lotlighting::kObjects], std::nullopt, points, id, boxCorners(primitive, inLot)));
+        out.push_back(choose(base, points, id, boxCorners(primitive, inLot)));
+    }
+    if (id == 0 && std::none_of(out.begin(), out.end(), hasPointLight)) {
+        out.clear();
     }
     return out;
 }
 
 } // namespace
 
-ThingLights thingLights(std::map<std::int16_t, lotlighting::Room> rooms, const std::vector<lotlighting::PortalLight>& portals, float rangeCutoff,
-                        RoomAt roomAt) {
+ThingLights thingLights(std::map<std::int16_t, lotlighting::Room> rooms, ObjectLighting outdoor, const std::vector<lotlighting::PortalLight>& portals,
+                        const std::vector<LampLight>& lamps, float rangeCutoff, RoomAt roomAt) {
     if (!roomAt) {
         return {};
     }
-    return [rooms = std::move(rooms), points = pointLights(portals, rangeCutoff), roomAt = std::move(roomAt)](
-               const Mesh& mesh, const Transform& inLot, int storey) {
-        return thingSets(rooms, points, roomAt, mesh, inLot, storey, {inLot.m[3], inLot.m[7]});
+    return [rooms = std::move(rooms), outdoor = std::move(outdoor), points = pointLights(portals, lamps, rangeCutoff), roomAt = std::move(roomAt)](
+               const Mesh& mesh, const Transform& inLot, int storey, LightGroup group) {
+        return thingSets(rooms, outdoor, points, roomAt, mesh, inLot, storey, {inLot.m[3], inLot.m[7]}, group);
     };
 }
 
 namespace {
 
-// Each part of a door or window by the room its node stands in: outdoors (none) the daylight, in a
-// room the room's light for doors and windows with the floor light map under the node as its
-// ambient. Empty when no part stands in a lit room.
+// Each part of a door or window by the room its node stands in: in a room the room's light for doors
+// and windows with the floor light map under the node as its ambient, outdoors `outdoor` with the
+// outdoor lamps and windows. None (the daylight) for a part outdoors that no lamp or window reaches.
+// Empty when no part has a light set.
 std::vector<std::optional<ObjectLighting>> portalParts(const Scene& scene, const Instance& instance, const Mesh& mesh, int storey,
-                                                       const std::map<std::int16_t, lotlighting::Room>& rooms,
+                                                       const std::map<std::int16_t, lotlighting::Room>& rooms, const ObjectLighting& outdoor,
                                                        const std::vector<PointLight>& points, const RoomAt& roomAt) {
     std::vector<std::optional<ObjectLighting>> out;
     const auto nodes = objectsun::testPoints(scene, instance);
@@ -273,7 +311,17 @@ std::vector<std::optional<ObjectLighting>> portalParts(const Scene& scene, const
         const auto& node = nodes[i];
         const std::int16_t id = roomAt(storey, node[0], node[1]);
         const auto room = rooms.find(id);
-        if (id == 0 || room == rooms.end() || !room->second.groups[lotlighting::kPortals]) {
+        if (id == 0) {
+            auto set = choose(outdoor, points, id, boxCorners(mesh.primitives[i], instance.transform));
+            if (hasPointLight(set)) {
+                out.push_back(std::move(set));
+                lit = true;
+            } else {
+                out.emplace_back();
+            }
+            continue;
+        }
+        if (room == rooms.end() || !room->second.groups[lotlighting::kPortals]) {
             out.emplace_back();
             continue;
         }
@@ -285,7 +333,7 @@ std::vector<std::optional<ObjectLighting>> portalParts(const Scene& scene, const
             }
         }
         const auto corners = boxCorners(mesh.primitives[i], instance.transform);
-        out.push_back(choose(*room->second.groups[lotlighting::kPortals], ambient, points, id, corners));
+        out.push_back(choose(roomBase(room->second, lotlighting::kPortals, ambient), points, id, corners));
         lit = true;
     }
     if (!lit) {
@@ -297,12 +345,12 @@ std::vector<std::optional<ObjectLighting>> portalParts(const Scene& scene, const
 } // namespace
 
 std::vector<std::optional<ObjectLighting>> portalLights(const Scene& scene, const Instance& inLot, int storey,
-                                                        const std::map<std::int16_t, lotlighting::Room>& rooms,
-                                                        const std::vector<lotlighting::PortalLight>& portals, float rangeCutoff, const RoomAt& roomAt) {
+                                                        const std::map<std::int16_t, lotlighting::Room>& rooms, const ObjectLighting& outdoor,
+                                                        const std::vector<PointLight>& points, const RoomAt& roomAt) {
     if (!roomAt || inLot.mesh < 0 || static_cast<std::size_t>(inLot.mesh) >= scene.meshes.size()) {
         return {};
     }
-    return portalParts(scene, inLot, scene.meshes[static_cast<std::size_t>(inLot.mesh)], storey, rooms, pointLights(portals, rangeCutoff), roomAt);
+    return portalParts(scene, inLot, scene.meshes[static_cast<std::size_t>(inLot.mesh)], storey, rooms, outdoor, points, roomAt);
 }
 
 int lightStorey(const std::function<float(int, float, float)>& floorHeight, const Transform& inLot, int storey) {
@@ -318,9 +366,38 @@ int lightStorey(const std::function<float(int, float, float)>& floorHeight, cons
     return storey;
 }
 
-void light(Scene& scene, const std::map<std::int16_t, lotlighting::Room>& rooms, const std::vector<lotlighting::PortalLight>& portals,
-           float rangeCutoff, const RoomAt& roomAt, int groundLevel) {
-    const auto points = pointLights(portals, rangeCutoff);
+namespace {
+
+// A thing's light sets (not a door's or window's) as light() gives them. A fence's rail or post
+// stands in the room at its box's centre. A rail starts on a tile corner, which may be the corner of
+// a room it only touches.
+std::vector<ObjectLighting> propParts(const Scene& scene, const Instance& instance, const Mesh& mesh, int storey,
+                                      const std::map<std::int16_t, lotlighting::Room>& rooms, const ObjectLighting& outdoor,
+                                      const std::vector<PointLight>& points, const RoomAt& roomAt) {
+    std::array<float, 2> at{instance.transform.m[3], instance.transform.m[7]};
+    if (instance.sunTest == SunTest::AboveBox) {
+        if (const auto centre = objectsun::testPoints(scene, instance); !centre.empty()) {
+            at = {centre[0][0], centre[0][1]};
+        }
+    }
+    return thingSets(rooms, outdoor, points, roomAt, mesh, instance.transform, lightStorey(scene.floorHeight, instance.transform, storey), at,
+                     LightGroup::Props);
+}
+
+} // namespace
+
+std::vector<ObjectLighting> propLights(const Scene& scene, const Instance& inLot, int storey, const std::map<std::int16_t, lotlighting::Room>& rooms,
+                                       const ObjectLighting& outdoor, const std::vector<PointLight>& points, const RoomAt& roomAt) {
+    if (!roomAt || inLot.mesh < 0 || static_cast<std::size_t>(inLot.mesh) >= scene.meshes.size()) {
+        return {};
+    }
+    return propParts(scene, inLot, scene.meshes[static_cast<std::size_t>(inLot.mesh)], storey, rooms, outdoor, points, roomAt);
+}
+
+void light(Scene& scene, const std::map<std::int16_t, lotlighting::Room>& rooms, const ObjectLighting& outdoor,
+           const std::vector<lotlighting::PortalLight>& portals, const std::vector<LampLight>& lamps, float rangeCutoff, const RoomAt& roomAt,
+           int groundLevel) {
+    const auto points = pointLights(portals, lamps, rangeCutoff);
     std::map<std::vector<float>, int> setOf;
     auto add = [&](ObjectLighting&& set) {
         auto [it, added] = setOf.emplace(key(set), static_cast<int>(scene.lightSets.size()));
@@ -339,7 +416,7 @@ void light(Scene& scene, const std::map<std::int16_t, lotlighting::Room>& rooms,
         const Mesh& mesh = scene.meshes[static_cast<std::size_t>(instance.mesh)];
         const int storey = instance.level - groundLevel;
         if (instance.lightGroup == LightGroup::Portals) {
-            for (auto& part : portalParts(scene, instance, mesh, storey, rooms, points, roomAt)) {
+            for (auto& part : portalParts(scene, instance, mesh, storey, rooms, outdoor, points, roomAt)) {
                 instance.partLightSets.push_back(part ? add(std::move(*part)) : -1);
             }
             continue;
@@ -347,15 +424,7 @@ void light(Scene& scene, const std::map<std::int16_t, lotlighting::Room>& rooms,
         if (instance.lightGroup != LightGroup::Props) {
             continue;
         }
-        // A fence's rail or post stands in the room at its box's centre. A rail starts on a tile
-        // corner, which may be the corner of a room it only touches.
-        std::array<float, 2> at{instance.transform.m[3], instance.transform.m[7]};
-        if (instance.sunTest == SunTest::AboveBox) {
-            if (const auto centre = objectsun::testPoints(scene, instance); !centre.empty()) {
-                at = {centre[0][0], centre[0][1]};
-            }
-        }
-        for (auto& set : thingSets(rooms, points, roomAt, mesh, instance.transform, lightStorey(scene.floorHeight, instance.transform, storey), at)) {
+        for (auto& set : propParts(scene, instance, mesh, storey, rooms, outdoor, points, roomAt)) {
             instance.partLightSets.push_back(add(std::move(set)));
         }
         if (!instance.partLightSets.empty() &&

@@ -216,6 +216,15 @@ private:
     void placeObjects(ts2::scene::Scene& scene);
     void followClips(ts2::scene::Scene& scene);
     void animateObjects(ts2::scene::Scene& scene);
+    void lookHeads(ts2::scene::Scene& scene, double nowMs);
+    // What a Sim's current look aims at on the lot, worked out where the simulation may be read.
+    struct LookAim {
+        int request = 0;  // the look it is for, 0 for none
+        std::int16_t object = 0;  // the object looked at, the lead part for a multi-tile object
+        bool objectSlot = false;  // an object's targeting or routing slot, placed by `local`
+        std::optional<ts2::scene::Transform> local;  // none when the object has no such slot
+    };
+    LookAim lookAim(const ts2::sim::SimObject& sim, const ts2::scene::Scene& scene);
     std::optional<ts2::scene::Transform> partSlot(std::int16_t part, std::size_t slot, const ts2::scene::Scene& scene);
     const ts2::scene::Transform& standingPlace(const ts2::scene::PlacedObject& placed, const ts2::scene::Scene& scene) const;
     void addCreatedObjects(ts2::scene::Scene& scene);
@@ -226,6 +235,9 @@ private:
     ts2::scene::OutfitProperties outfits_;
     ObjectMaterials objectMaterials_;
     std::unique_ptr<ts2::scene::SceneRays> rays_;
+    const ts2::scene::ScenePose* pose_ = nullptr;  // the Sims as last posed
+    // The states each Sim's looks took as it was last posed, told at the next update.
+    std::map<std::int16_t, std::vector<ts2::sim::LookController::Change>> lookChanges_;
     std::optional<std::array<float, 3>> cameraEye_;
     ts2::scene::Transform lotFrame_;  // the lot's place in the scene
     double pendingMs_ = 0;
@@ -234,6 +246,11 @@ private:
     // the one before, fading out under it.
     struct OwnAnimations {
         std::optional<ts2::sim::PlayingAnimation> current, previous;
+        // Where the Sim stood while `current` played (last drawn), and while `previous` did.
+        std::optional<ts2::scene::Transform> currentPlace, previousPlace;
+        // Where and on which storey its lights were last picked.
+        std::array<float, 12> litPlace{};
+        int litLevel = -1;
         // The last animation that played out and faded, whose last pose the Sim still holds: a walk
         // starting from it fades in over that pose.
         std::optional<ts2::sim::PlayingAnimation> held;

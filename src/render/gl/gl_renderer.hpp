@@ -211,7 +211,7 @@ private:
     void drawImposters(const FrameView& f);
     // A draw's state: how it blends, whether it tests and writes depth (and how), and what it writes.
     struct State {
-        int blend = 0;  // 0 none, 1 over, 2 add, 3 imposter light (multiply), 4 premultiplied over, 5 sum
+        int blend = 0;  // 0 none, 1 over, 2 add, 3 imposter light (multiply), 4 premultiplied over, 5 sum, 6 colour added
         bool cull = false;
         bool depthTest = true;
         bool depthWrite = true;

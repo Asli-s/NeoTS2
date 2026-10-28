@@ -82,6 +82,8 @@ constexpr std::uint16_t kStopAllSoundsOpcode = 0x0030;
 constexpr std::uint16_t kAssignLocomotionOpcode = 0x0072;
 constexpr std::uint16_t kDebugOpcode = 0x0073;
 constexpr std::uint16_t kEffectOpcode = 0x0070;
+constexpr std::uint16_t kCinematicOpcode = 0x007B;
+constexpr std::uint8_t kCinematicIndexInVariable = 0x10;
 constexpr std::uint16_t kChangeLightOpcode = 0x006F;
 constexpr std::uint16_t kLightNameTable = 0x8E;
 constexpr std::uint16_t kFindBestObjectOpcode = 0x000E;
@@ -171,6 +173,7 @@ constexpr std::uint8_t kPlaceInMyHand = 0x02;
 constexpr std::uint8_t kPlaceInFrontOfStackObject = 0x03;
 constexpr std::uint8_t kPlaceInStackObjectSlot = 0x04;
 constexpr std::uint8_t kPlaceInSlotOfObjectInTemp0 = 0x0A;
+constexpr std::uint8_t kPlaceUnderneathMe = 0x05;
 constexpr std::uint8_t kPlaceOutOfWorld = 0x06;
 constexpr std::uint8_t kPlaceBesideMe = 0x09;
 constexpr std::uint8_t kPlaceBelowObjectInParam0 = 0x07;
@@ -282,6 +285,9 @@ constexpr std::size_t kFootprintIndexField = 0x09;
 // Generic call 0x27 refreshes a Sim's wants and fears in the way temp 0 asks (0-9 mine, 10 and up those
 // of the neighbor in temp 1). Always true. The refresh itself isn't kept yet.
 constexpr std::uint8_t kRecalcWantsGenericCall = 0x27;
+// Generic call 0x17 ends the family tie between the neighbors in temps 0 and 1 (a broken engagement
+// or a divorce). Each must be a neighbor. Always true.
+constexpr std::uint8_t kRemoveFamilyTieGenericCall = 0x17;
 
 // Called whenever a Sim's queue changes.
 inline void noteNextQueued(SimObject& sim) {
@@ -456,7 +462,7 @@ inline std::int16_t flagBit(std::int16_t flag) {
 class Execution {
 public:
     Execution(CodeSource& code, std::array<std::int16_t, kGlobalCount>& globals,
-              ThreadState& thread, World* world, SimObject* me, std::mt19937& rng)
+              ThreadState& thread, World* world, SimObject* me, SimRandom& rng)
         : code_(code), globals_(globals), thread_(thread), world_(world), me_(me), rng_(rng) {}
 
     // Runs a tree to the end at once on a scratch thread, as `who` with the given stack object
@@ -544,9 +550,10 @@ public:
     };
 
     struct TurnStep {
-        enum class Kind { Done, Wait, PreRoute } kind = Kind::Done;
+        enum class Kind { Done, Wait, PreRoute, PostRoute } kind = Kind::Done;
         bool result = false;
-        // For PreRoute: the Sim's pre-route tree, run on its stack before the instruction runs again.
+        // For PreRoute and PostRoute: the Sim's pre- or post-route tree, run on its stack before the
+        // instruction runs again.
         std::uint32_t group = 0;
         std::uint16_t instance = 0;
         std::shared_ptr<const bhav::Behavior> code;
@@ -637,6 +644,7 @@ public:
     bool luaScript(const bhav::Instruction& in, Frame& f);
     bool message(const bhav::Instruction& in, Frame& f);
     bool onTimer(const bhav::Instruction& in, Frame& f);
+    bool cinematic(const bhav::Instruction& in, Frame& f);
     bool notifyOutOfIdle();
     bool testObjectType(const bhav::Instruction& in, Frame& f);
 
@@ -708,6 +716,7 @@ public:
     void layOverlay(SimObject& sim, PlayingOverlay overlay);
     bool animateStop(const bhav::Instruction& in, Frame& f);
     bool animateObject(const bhav::Instruction& in, Frame& f);
+    bool lookAt(const bhav::Instruction& in, Frame& f);
     ReachStep reachPut(const bhav::Instruction& in, Frame& f);
     std::string childClip(const SimObject& sim, const std::string& clip);
     void playReachStages(SimObject& sim, const SimObject& object, bool grab, bool flipped, std::uint16_t entry, float length,
@@ -761,7 +770,9 @@ public:
     WalkStep routeInterrupted(SimObject& sim);
     TurnStep turnBodyTowards(const bhav::Instruction& in, Frame& f);
     static void faceHeading(SimObject& sim, float heading);
-    std::optional<float> turnTarget(std::uint16_t mode, const Frame& f, const SimObject& sim, float current);
+    std::optional<float> turnTarget(const bhav::Instruction& in, Frame& f, const SimObject& sim, float current,
+                                    std::int16_t direction);
+    std::optional<float> slotTurnTarget(const bhav::Instruction& in, Frame& f, const SimObject& sim);
     std::optional<TurnStep> routeTree(const SimObject& sim, std::size_t entry);
     std::optional<WalkStep> goalCheck(SimObject& sim, const Frame& f, float remaining);
     bool getDistanceTo(const bhav::Instruction& in, Frame& f);
@@ -884,7 +895,7 @@ private:
     ThreadState& thread_;
     World* world_;
     SimObject* me_;
-    std::mt19937& rng_;
+    SimRandom& rng_;
 };
 
 } // namespace ts2::sim::vm_detail

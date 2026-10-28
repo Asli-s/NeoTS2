@@ -64,18 +64,19 @@ std::optional<std::string> Execution::socialAnimation(const Frame& f, const SimO
 }
 
 // Animate Sim (operands: see AnimateOperands). Starts the animation on me and waits, a tick at a
-// time, until it has played (by the world's clock), then is true. The animation is entry [entry]
+// time, until it begins fading out (by the world's clock), then is true. The clip plays on to its
+// end as it fades, under whatever the script starts next. The animation is entry [entry]
 // of my age's string list for [list] (see content::ageAnimationList), else of [list] itself.
 // List 0x80 names the clip as Animate Overlay does (specialAnimationName), list 0x83 by the social prefixes.
 // The clip's SimAntics events run the event tree in bytes 4-5 (see tellAnimateSimEvents).
-// Not yet: blending.
+// Byte 2 flag 0x80 turns its fade in off, 0x40 its fade out (see animateFades).
 std::optional<bool> Execution::animateSim(const bhav::Instruction& in, Frame& f) {
     SimObject& sim = me();
     const std::size_t frame = thread_.frames.size() - 1;
     const double now = world().clockMs();
     if (sim.animation && sim.animation->frame == frame && sim.animation->group == f.group && sim.animation->tree == f.instance &&
         sim.animation->pc == f.pc) {
-        if (!sim.animation->finished(now)) {
+        if (!sim.animation->fadingOut(now)) {
             return std::nullopt;
         }
         if (sim.animation->blendsOut) {
@@ -102,14 +103,22 @@ std::optional<bool> Execution::animateSim(const bhav::Instruction& in, Frame& f)
     if (!name) {
         throw Stop{Outcome::Error, "Animation name is empty string.", hex(a.list, 2) + " " + std::to_string(entry)};
     }
+    // The clip the lot was saved playing carries on at its saved rate from where it got to. The temps
+    // that gave its speed may have changed since it started.
+    auto resumed = std::exchange(sim.resumedClip, std::nullopt);
+    if (resumed && !std::ranges::equal(resumed->name, *name, [](char x, char y) {
+            return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
+        })) {
+        resumed.reset();
+    }
     const std::int16_t speed = a.speedFromTemp ? thread_.temps[2] : a.speed;
-    if (speed == 0) {
+    if (speed == 0 && !resumed) {
         throw Stop{Outcome::Error, "Animation speed cannot be zero", ""};
     }
     PlayingAnimation play;
     play.name = *name;
-    play.startMs = now;
-    play.speed = static_cast<float>(speed) / 32.0f;
+    play.startMs = resumed ? now - resumed->playedMs : now;
+    play.speed = resumed ? resumed->speed : static_cast<float>(speed) / 32.0f;
     play.flipped = a.flipFromTemp ? thread_.temps[3] != 0 : a.flipped;
     play.blendsOut = (in.operands[2] & 0x40) == 0;
     play.layer = 2 * a.priority;
@@ -127,6 +136,18 @@ std::optional<bool> Execution::animateSim(const bhav::Instruction& in, Frame& f)
     if (const auto& lengths = world().animationLengths()) {
         if (const auto ms = lengths(play.name)) {
             play.lengthMs = *ms / std::abs(play.speed);
+        }
+    }
+    const AnimateFades fades = animateFades(play.lengthMs, (in.operands[2] & 0x80) == 0, play.blendsOut);
+    play.fades = true;
+    play.fadeInMs = fades.inMs;
+    play.fadeOutMs = fades.outMs;
+    // Its events before the save were told then.
+    if (resumed && world().animationEvents()) {
+        for (const AnimationEvent& e : world().animationEvents()(play.name)) {
+            if (e.timeMs / std::abs(play.speed) <= resumed->playedMs) {
+                ++play.eventsTold;
+            }
         }
     }
     sim.animation = std::move(play);
@@ -741,6 +762,61 @@ bool Execution::reachTransfer(SimObject& sim, const Reaching& reach) {
         return false;
     }
     putInSlot(*object, *container, reach.slot);
+    return true;
+}
+
+// Look At (0x6E) turns the Sim's head toward an object, a slot of it or the camera, or with STOP
+// turns it back. It carries on at once (see LookController).
+bool Execution::lookAt(const bhav::Instruction& in, Frame& f) {
+    constexpr float kRadiansPerDegree = 3.14159265358979f / 180;
+    // What the latest looks look at, enough for the ones the controller may still tell of.
+    constexpr std::size_t kKeptLooks = 8;
+    const LookAtOperands o = lookAtOperands(in.operands);
+    SimObject& sim = me();
+    const bool camera = (o.flags & 0x80) != 0;
+    const float towards = (o.flags & 0x08) ? static_cast<float>(thread_.temps[1]) : static_cast<float>(o.towards) * 2;
+    if (!(towards > 0)) {
+        throw Stop{Outcome::Error, "Look At turn speed must be above 0", std::to_string(towards)};
+    }
+    std::int16_t target = -1;
+    if (!camera) {
+        target = read(o.owner, o.data, f);
+        if (world().find(target) == nullptr) {
+            throw Stop{Outcome::Error, "could not find object reference", std::to_string(target)};
+        }
+    }
+    const float away = (o.flags2 & 0x02)   ? static_cast<float>(thread_.temps[1])
+                       : (o.flags2 & 0x01) ? static_cast<float>(thread_.temps[2])
+                                           : static_cast<float>(o.away) * 2;
+    if (!(away > 0)) {
+        throw Stop{Outcome::Error, "Look At turn speed must be above 0", std::to_string(away)};
+    }
+    if (!sim.isPerson()) {
+        throw Stop{Outcome::Error, "not a person", "Look At"};
+    }
+    const double now = world().clockMs();
+    if (o.flags & 0x01) {
+        sim.look.stop(now, away * kRadiansPerDegree);
+        return true;
+    }
+    LookRequest r;
+    r.id = ++sim.looksStarted;
+    r.startMs = now;
+    r.towards = towards * kRadiansPerDegree;
+    r.away = away * kRadiansPerDegree;
+    const std::int16_t duration = (o.flags & 0x10) ? thread_.temps[0] : o.duration;
+    r.forever = duration == -1;
+    r.remainingMs = r.forever ? 0.0f : static_cast<float>(duration);
+    r.noEarlyExit = (o.flags & 0x02) != 0;
+    sim.look.begin(r);
+    sim.lookTargets.push_back({r.id, target, o.pointKind, o.slot, (o.flags & 0x20) == 0, o.eventTree, f.codeOwner, f.stackObjectId});
+    if (sim.lookTargets.size() > kKeptLooks) {
+        sim.lookTargets.erase(sim.lookTargets.begin());
+    }
+    sim.personData[kLookTargetPersonData] = target;
+    sim.personData[kLookPointPersonData] = static_cast<std::int16_t>(o.slot | o.pointKind << 12);
+    sim.personData[kLookStatePersonData] = static_cast<std::int16_t>(kLookTurningTo);
+    sim.personData[kLookHoldPersonData] = duration;
     return true;
 }
 

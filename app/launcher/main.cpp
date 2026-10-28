@@ -156,7 +156,7 @@ ImVec2 neededSize(const ts2::launcher::LauncherState& state, float scale) {
     constexpr float kMinWidth = 760.0f;
     const ImVec2 padding = ImGui::GetStyle().WindowPadding;
     const float width = std::max({state.contentWidth + padding.x, state.playRowWidth + padding.x * 2, kMinWidth * scale});
-    return ImVec2(width, ImGui::GetCurrentWindow()->ContentSizeIdeal.y + padding.y * 2);
+    return ImVec2(width, state.contentHeight + padding.y * 2);
 }
 
 // The display's usable area (the screen without the taskbar), and the window's frame around its
@@ -261,8 +261,8 @@ int main(int, char**) {
     ts2::launcher::findInstalls(state, loaded.settings);
     state.message = loaded.problem;
 
-    // ImGui works out a window's size over its first two frames.
-    constexpr int kLayoutFrames = 2;
+    // ImGui works out a window's size over its first two frames, and the columns' widths in a third.
+    constexpr int kLayoutFrames = 3;
     int frame = 0;
     bool running = true;
     while (running) {
@@ -287,12 +287,14 @@ int main(int, char**) {
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
         // The window fills the SDL window, which is sized to what the contents ask for. Contents
-        // taller than the screen scroll.
+        // taller than the screen scroll above the Play row.
         const ImGuiViewport* view = ImGui::GetMainViewport();
         ImGui::SetNextWindowPos(view->WorkPos);
         ImGui::SetNextWindowSize(view->WorkSize);
         ImGui::Begin("NeoTS2", nullptr,
-                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
+                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        state.maxWidth = static_cast<float>(roomFor(window).maxWidth());
         ts2::launcher::drawLauncher(state, window, fonts);
         const ImVec2 needed = neededSize(state, scale);
         ImGui::End();

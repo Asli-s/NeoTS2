@@ -8,11 +8,12 @@
 namespace ts2::sim {
 
 SimObject& World::create(std::uint32_t group, objd::ObjectDefinition definition, std::size_t containerSlots) {
-    if (nextId_ <= 0) {
+    const auto free = std::find(byId_.begin() + 1, byId_.end(), nullptr);
+    if (free == byId_.end()) {
         throw std::runtime_error("World: out of object ids");
     }
     auto object = std::make_unique<SimObject>();
-    object->id = nextId_++;
+    object->id = static_cast<std::int16_t>(free - byId_.begin());
     object->group = group;
     object->definition = std::move(definition);
     object->data[kObjectIdField] = object->id;
@@ -24,6 +25,7 @@ SimObject& World::create(std::uint32_t group, objd::ObjectDefinition definition,
     SimObject& ref = *object;
     objects_.emplace(ref.id, std::move(object));
     byId_[static_cast<std::size_t>(ref.id)] = &ref;
+    highestId_ = std::max(highestId_, ref.id);
     objectsChanged();
     footprintChanges_.insert(ref.id);
     return ref;
@@ -43,11 +45,9 @@ SimObject& World::restore(std::int16_t id, std::uint32_t group, objd::ObjectDefi
     SimObject& ref = *object;
     objects_.emplace(id, std::move(object));
     byId_[static_cast<std::size_t>(id)] = &ref;
+    highestId_ = std::max(highestId_, id);
     objectsChanged();
     footprintChanges_.insert(id);
-    if (id >= nextId_) {
-        nextId_ = static_cast<std::int16_t>(id + 1);
-    }
     return ref;
 }
 
@@ -66,11 +66,25 @@ SimObject* World::findIncludingRemoved(std::int16_t id) {
 }
 
 void World::remove(SimObject& object) {
-    if (!object.removed) {
+    if (object.keptUntilUnload) {
+        object.keptUntilUnload = false;
+        --keptCount_;
+        ++removedCount_;
+        footprintChanges_.insert(object.id);
+    } else if (!object.removed) {
         object.removed = true;
         objectsChanged();
         ++removedCount_;
         footprintChanges_.insert(object.id);
+    }
+}
+
+void World::keepUntilUnload(SimObject& object) {
+    if (!object.removed) {
+        object.removed = true;
+        object.keptUntilUnload = true;
+        objectsChanged();
+        ++keptCount_;
     }
 }
 
@@ -105,6 +119,22 @@ void World::markFootprintChanged(std::int16_t id) {
     }
 }
 
+std::int16_t World::interactionPart(const SimObject& part) const {
+    const auto group = static_cast<std::int16_t>(part.definition.field(objd::field::kInteractionGroup));
+    if (group <= 0 || part.definition.field(objd::field::kMultiTileMasterId) == 0) {
+        return part.id;
+    }
+    const std::int16_t lead = part.data[kLeadTileField];
+    for (const auto& [id, other] : objects_) {
+        if (!other->removed && other->data[kLeadTileField] == lead &&
+            other->definition.field(objd::field::kMultiTileMasterId) != 0 &&
+            static_cast<std::int16_t>(other->definition.field(objd::field::kInteractionGroup)) == -group) {
+            return id;
+        }
+    }
+    return part.id;
+}
+
 void World::countUse(const Frame& interaction) {
     constexpr std::size_t kUseCountField = 0x3E;
     if (SimObject* object = findIncludingRemoved(interaction.runningOnId)) {
@@ -134,7 +164,7 @@ std::vector<std::int16_t> World::removedIds() const {
         return ids;
     }
     for (const auto& [id, object] : objects_) {
-        if (object->removed) {
+        if (object->removed && !object->keptUntilUnload) {
             ids.push_back(id);
         }
     }
@@ -150,7 +180,7 @@ void World::purge() {
     // A deleted object leaves the slot it was in (object data 2 and 3 name the container and slot).
     constexpr std::size_t kContainerField = 2, kSlotField = 3;
     for (const auto& [id, object] : objects_) {
-        if (!object->removed || object->data[kContainerField] <= 0) {
+        if (!object->removed || object->keptUntilUnload || object->data[kContainerField] <= 0) {
             continue;
         }
         if (SimObject* container = findIncludingRemoved(object->data[kContainerField])) {
@@ -163,7 +193,7 @@ void World::purge() {
         object->data[kSlotField] = -1;
     }
     std::erase_if(objects_, [this](const auto& entry) {
-        if (entry.second->removed) {
+        if (entry.second->removed && !entry.second->keptUntilUnload) {
             messageSubscriptions_.dropObject(entry.first);
             std::erase(buildBuyBlockers_, entry.first);
             byId_[static_cast<std::size_t>(entry.first)] = nullptr;
@@ -297,6 +327,20 @@ void World::addFamily(std::uint32_t family) {
     if (hood_ && !hood_->familyLots.contains(family)) {
         ownNeighborhood().familyLots[family] = 0;
     }
+}
+
+void World::removeFamilyTie(std::int16_t a, std::int16_t b) {
+    if (!hood_) {
+        return;
+    }
+    auto& ties = ownNeighborhood().familyTies;
+    const auto removeFirst = [](std::vector<famt::Tie>& list, std::int16_t other) {
+        if (const auto it = std::ranges::find(list, other, &famt::Tie::other); it != list.end()) {
+            list.erase(it);
+        }
+    };
+    removeFirst(ties[a], b);
+    removeFirst(ties[b], a);
 }
 
 // The saved neighborhood is shared, so the first change makes this world its own copy.

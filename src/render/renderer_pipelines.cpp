@@ -1,5 +1,6 @@
 #include "render/renderer.hpp"
 #include "render/renderer_internals.hpp"
+#include "scene/sim_shadows.hpp"
 
 #include <SDL3/SDL.h>
 
@@ -40,6 +41,26 @@ SDL_GPUShader* loadShader(SDL_GPUDevice* device, const std::filesystem::path& fo
     return s;
 }
 
+// The scene's vertex layout: positions, normals and the rest in one buffer, and a skinned
+// primitive's joints and weights in a second.
+void sceneVertexLayout(SDL_GPUVertexBufferDescription (&buffers)[2], SDL_GPUVertexAttribute (&attributes)[9]) {
+    buffers[0].slot = 0;
+    buffers[0].pitch = kVertexFloats * sizeof(float);
+    buffers[0].input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+    buffers[1].slot = 1;
+    buffers[1].pitch = kSkinBytes;
+    buffers[1].input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+    attributes[0] = {0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 0};
+    attributes[1] = {1, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 3 * sizeof(float)};
+    attributes[2] = {2, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, 6 * sizeof(float)};
+    attributes[3] = {3, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT, 8 * sizeof(float)};
+    attributes[4] = {6, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, 9 * sizeof(float)};
+    attributes[5] = {7, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 11 * sizeof(float)};
+    attributes[6] = {8, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 14 * sizeof(float)};
+    attributes[7] = {4, 1, SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4, 0};
+    attributes[8] = {5, 1, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, 4};
+}
+
 } // namespace
 
 void SdlGpuRenderer::create(const std::filesystem::path& shaderFolder) {
@@ -52,45 +73,32 @@ void SdlGpuRenderer::create(const std::filesystem::path& shaderFolder) {
     makeClipPipeline(shaderFolder);
     makeSkyPipeline(shaderFolder);
     makeWaterPipeline(shaderFolder);
+    makeShadowPipelines(shaderFolder);
 }
 
 // The scene's pipelines, by skinned, two-sided and blending.
 void SdlGpuRenderer::makeScenePipelines(const std::filesystem::path& shaders) {
     SDL_GPUShader* vertex = loadShader(device_, shaders, "scene.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0);
     SDL_GPUShader* skinnedVertex = loadShader(device_, shaders, "skinned.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, 1);
-    SDL_GPUShader* fragment = loadShader(device_, shaders, "scene.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 6);
+    SDL_GPUShader* fragment = loadShader(device_, shaders, "scene.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 10, 2);
 
     for (int skinned = 0; skinned < 2; ++skinned)
     for (int twoSided = 0; twoSided < 2; ++twoSided) {
-        for (int blend = 0; blend < 3; ++blend) {
-            // Skinned primitives take their joints and weights from a second buffer.
+        for (int blend = 0; blend < 4; ++blend) {
             SDL_GPUVertexBufferDescription buffers[2]{};
-            buffers[0].slot = 0;
-            buffers[0].pitch = kVertexFloats * sizeof(float);
-            buffers[0].input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
-            buffers[1].slot = 1;
-            buffers[1].pitch = kSkinBytes;
-            buffers[1].input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
             SDL_GPUVertexAttribute attributes[9]{};
-            attributes[0] = {0, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 0};
-            attributes[1] = {1, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 3 * sizeof(float)};
-            attributes[2] = {2, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, 6 * sizeof(float)};
-            attributes[3] = {3, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT, 8 * sizeof(float)};
-            attributes[4] = {6, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, 9 * sizeof(float)};
-            attributes[5] = {7, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 11 * sizeof(float)};
-            attributes[6] = {8, 0, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 14 * sizeof(float)};
-            attributes[7] = {4, 1, SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4, 0};
-            attributes[8] = {5, 1, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, 4};
+            sceneVertexLayout(buffers, attributes);
 
             SDL_GPUColorTargetDescription color{};
             color.format = SDL_GetGPUSwapchainTextureFormat(device_, window_);
             if (blend) {
                 color.blend_state.enable_blend = true;
-                color.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
-                color.blend_state.dst_color_blendfactor = blend == 2 ? SDL_GPU_BLENDFACTOR_ONE : SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+                const bool adds = blend >= 2;
+                color.blend_state.src_color_blendfactor = blend == 3 ? SDL_GPU_BLENDFACTOR_ONE : SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+                color.blend_state.dst_color_blendfactor = adds ? SDL_GPU_BLENDFACTOR_ONE : SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
                 color.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
-                color.blend_state.src_alpha_blendfactor = blend == 2 ? SDL_GPU_BLENDFACTOR_ZERO : SDL_GPU_BLENDFACTOR_ONE;
-                color.blend_state.dst_alpha_blendfactor = blend == 2 ? SDL_GPU_BLENDFACTOR_ONE : SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+                color.blend_state.src_alpha_blendfactor = adds ? SDL_GPU_BLENDFACTOR_ZERO : SDL_GPU_BLENDFACTOR_ONE;
+                color.blend_state.dst_alpha_blendfactor = adds ? SDL_GPU_BLENDFACTOR_ONE : SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
                 color.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
             }
 
@@ -460,6 +468,141 @@ void SdlGpuRenderer::makeWaterPipeline(const std::filesystem::path& shaders) {
         if (waterPipeline_ == nullptr) {
             throw sdlError("water pipeline");
         }
+}
+
+// The Sims' shadow pictures: each Sim drawn flat into its tile without depth, then the tiles blurred
+// into a second atlas. The atlases are made once.
+void SdlGpuRenderer::makeShadowPipelines(const std::filesystem::path& shaders) {
+    constexpr SDL_GPUTextureFormat kFormat = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    SDL_GPUShader* casterVertex = loadShader(device_, shaders, "skinned.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, 1);
+    SDL_GPUShader* casterFragment = loadShader(device_, shaders, "shadow_caster.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 0, 0);
+    SDL_GPUShader* blurVertex = loadShader(device_, shaders, "sky.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0, 0);
+    SDL_GPUShader* blurFragment = loadShader(device_, shaders, "shadow_blur.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
+    SDL_GPUColorTargetDescription color{};
+    color.format = kFormat;
+    SDL_GPUVertexBufferDescription buffers[2]{};
+    SDL_GPUVertexAttribute attributes[9]{};
+    sceneVertexLayout(buffers, attributes);
+    SDL_GPUGraphicsPipelineCreateInfo info{};
+    info.vertex_shader = casterVertex;
+    info.fragment_shader = casterFragment;
+    info.vertex_input_state.vertex_buffer_descriptions = buffers;
+    info.vertex_input_state.num_vertex_buffers = 2;
+    info.vertex_input_state.vertex_attributes = attributes;
+    info.vertex_input_state.num_vertex_attributes = 9;
+    info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+    info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+    info.target_info.color_target_descriptions = &color;
+    info.target_info.num_color_targets = 1;
+    shadowCasterPipeline_ = SDL_CreateGPUGraphicsPipeline(device_, &info);
+    info = {};
+    info.vertex_shader = blurVertex;
+    info.fragment_shader = blurFragment;
+    info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+    info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+    info.target_info.color_target_descriptions = &color;
+    info.target_info.num_color_targets = 1;
+    shadowBlurPipeline_ = SDL_CreateGPUGraphicsPipeline(device_, &info);
+    for (auto* s : {casterVertex, casterFragment, blurVertex, blurFragment}) {
+        SDL_ReleaseGPUShader(device_, s);
+    }
+    if (shadowCasterPipeline_ == nullptr || shadowBlurPipeline_ == nullptr) {
+        throw sdlError("shadow pipeline");
+    }
+    SDL_GPUTextureCreateInfo texture{};
+    texture.type = SDL_GPU_TEXTURETYPE_2D;
+    texture.format = kFormat;
+    texture.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    // shadow_blur.frag and scene.frag are written for this size: 4 tiles across of 128 texels.
+    static_assert(scene::simshadows::kResolution == 128 && kShadowTilesAcross == 4);
+    texture.width = texture.height = scene::simshadows::kResolution * kShadowTilesAcross;
+    texture.layer_count_or_depth = 1;
+    texture.num_levels = 1;
+    shadowPictures_ = SDL_CreateGPUTexture(device_, &texture);
+    shadowBlurred_ = SDL_CreateGPUTexture(device_, &texture);
+    SDL_GPUSamplerCreateInfo sampler{};
+    sampler.min_filter = SDL_GPU_FILTER_LINEAR;
+    sampler.mag_filter = SDL_GPU_FILTER_LINEAR;
+    sampler.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+    sampler.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    sampler.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    sampler.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    shadowSampler_ = SDL_CreateGPUSampler(device_, &sampler);
+    sampler.min_filter = SDL_GPU_FILTER_NEAREST;
+    sampler.mag_filter = SDL_GPU_FILTER_NEAREST;
+    shadowPoint_ = SDL_CreateGPUSampler(device_, &sampler);
+    if (shadowPictures_ == nullptr || shadowBlurred_ == nullptr || shadowSampler_ == nullptr || shadowPoint_ == nullptr) {
+        throw sdlError("shadow pictures");
+    }
+    makeObjectShadowPipelines(shaders);
+}
+
+// The lot objects' pictures from the sun: their models drawn flat into a scratch picture, then
+// blurred into the atlas, and the list and grid the scene's fragment shader reads.
+void SdlGpuRenderer::makeObjectShadowPipelines(const std::filesystem::path& shaders) {
+    constexpr SDL_GPUTextureFormat kFormat = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    SDL_GPUShader* casterVertex = loadShader(device_, shaders, "scene.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0);
+    SDL_GPUShader* casterFragment = loadShader(device_, shaders, "shadow_caster.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 0, 0);
+    SDL_GPUShader* blurVertex = loadShader(device_, shaders, "sky.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0, 0);
+    SDL_GPUShader* blurFragment = loadShader(device_, shaders, "object_blur.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 1);
+    SDL_GPUColorTargetDescription color{};
+    color.format = kFormat;
+    SDL_GPUVertexBufferDescription buffers[2]{};
+    SDL_GPUVertexAttribute attributes[9]{};
+    sceneVertexLayout(buffers, attributes);
+    SDL_GPUGraphicsPipelineCreateInfo info{};
+    info.vertex_shader = casterVertex;
+    info.fragment_shader = casterFragment;
+    info.vertex_input_state.vertex_buffer_descriptions = buffers;
+    info.vertex_input_state.num_vertex_buffers = 1;
+    info.vertex_input_state.vertex_attributes = attributes;
+    info.vertex_input_state.num_vertex_attributes = 7;
+    info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+    info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+    info.target_info.color_target_descriptions = &color;
+    info.target_info.num_color_targets = 1;
+    objectCasterPipeline_ = SDL_CreateGPUGraphicsPipeline(device_, &info);
+    info = {};
+    info.vertex_shader = blurVertex;
+    info.fragment_shader = blurFragment;
+    info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+    info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+    info.target_info.color_target_descriptions = &color;
+    info.target_info.num_color_targets = 1;
+    objectBlurPipeline_ = SDL_CreateGPUGraphicsPipeline(device_, &info);
+    for (auto* s : {casterVertex, casterFragment, blurVertex, blurFragment}) {
+        SDL_ReleaseGPUShader(device_, s);
+    }
+    if (objectCasterPipeline_ == nullptr || objectBlurPipeline_ == nullptr) {
+        throw sdlError("object shadow pipeline");
+    }
+    SDL_GPUTextureCreateInfo texture{};
+    texture.type = SDL_GPU_TEXTURETYPE_2D;
+    texture.format = kFormat;
+    texture.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    texture.layer_count_or_depth = 1;
+    texture.num_levels = 1;
+    texture.width = texture.height = scene::simshadows::kResolution;
+    objectScratch_ = SDL_CreateGPUTexture(device_, &texture);
+    // object_blur.frag and scene.frag are written for this size: 2048 texels square.
+    static_assert(scene::simshadows::kResolution * kObjectTilesAcross == 2048);
+    texture.width = texture.height = scene::simshadows::kResolution * kObjectTilesAcross;
+    objectPictures_ = SDL_CreateGPUTexture(device_, &texture);
+    texture.format = SDL_GPU_TEXTUREFORMAT_R32G32B32A32_FLOAT;
+    texture.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    texture.width = kObjectPlaceTexels;
+    texture.height = static_cast<Uint32>(kMaxObjectPlaces);
+    objectPlaces_ = SDL_CreateGPUTexture(device_, &texture);
+    texture.width = 2 * kMaxObjectGrid;
+    texture.height = kMaxObjectGrid;
+    objectGrid_ = SDL_CreateGPUTexture(device_, &texture);
+    if (objectScratch_ == nullptr || objectPictures_ == nullptr || objectPlaces_ == nullptr || objectGrid_ == nullptr) {
+        throw sdlError("object shadow pictures");
+    }
 }
 
 } // namespace ts2::render

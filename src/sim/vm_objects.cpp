@@ -170,6 +170,32 @@ bool Execution::soundEvent(const bhav::Instruction& in, Frame& f) {
     return true;
 }
 
+// Cinematic: asks the camera to play a cinematic with the actors listed in object array 0 of an
+// object, usually a "Temp Array" object. True when the cinematic starts, and it never waits.
+// Operands:
+//   bytes 0-1   cinematic: entry (counted from 1) of string table 0x97, or with byte 5 bit 0x10
+//               the variable in bytes 6, 7-8
+//   byte 5      flags: 0x20 the global names, 0x40 the semi-global ones, else the tree's own
+//   byte 9      the variable holding the actors' object, data in bytes 10-11
+// An object that doesn't exist or has no object arrays is an error. The engine plays no cinematics
+// yet, so none starts and this is false. The scripts then go on without one (a wedding shows the
+// Sim in a picture-in-picture instead).
+bool Execution::cinematic(const bhav::Instruction& in, Frame& f) {
+    const auto& o = in.operands;
+    const std::int16_t actorsId = read(o[9], static_cast<std::uint16_t>(o[10] | o[11] << 8), f);
+    const SimObject* actors = world().find(actorsId);
+    if (actors == nullptr) {
+        throw Stop{Outcome::Error, "could not find object reference", std::to_string(actorsId)};
+    }
+    if (actors->arrays.empty()) {
+        throw Stop{Outcome::Error, "bad object array", "0"};
+    }
+    if (o[5] & kCinematicIndexInVariable) {
+        read(o[6], static_cast<std::uint16_t>(o[7] | o[8] << 8), f);  // read as the game does, for its errors
+    }
+    return false;
+}
+
 // Dialog. Operands: byte 5 the type, byte 7 bit 0: show it and go on, bits 4-6: the temp holding a
 // notification's id (or a yes-no-cancel answer). Text notifications get a new id in that temp and
 // go on. Stop is true when the notification was shown (and removes it), Modify and Append when it
@@ -348,6 +374,7 @@ std::optional<Execution::CreateSpot> Execution::tileInFront(const SimObject* ref
 // - "out of world".
 // - "below object in local" or "in param 0": at the exact place of the object whose id is there,
 //   false when there is none.
+// - 5 "underneath me": at my exact place and level. Off the lot it is not supported.
 // The spot's tile must pass the tile tests (see tileRefuses).
 // Not done yet: the game's test that the object fits at the spot or in the slot (here it always
 // fits, and a slot that is missing or full is reported as not implemented), and placement 9's
@@ -436,6 +463,14 @@ bool Execution::createObject(const bhav::Instruction& in, Frame& f) {
             return false;
         }
         spot = CreateSpot{below->x, below->y, below->level, below->tile};
+    } else if (o[4] == kPlaceUnderneathMe) {
+        const SimObject& self = me();
+        if (self.x == kOffLot || self.y == kOffLot) {
+            throw Stop{Outcome::Unsupported, "Create Object underneath an object off the lot", ""};
+        }
+        spot = CreateSpot{self.x, self.y, self.level,
+                          Tile{static_cast<std::uint8_t>(self.x >> 16), static_cast<std::uint8_t>(self.y >> 16),
+                               static_cast<std::uint8_t>(self.level)}};
     } else if (o[4] != kPlaceOutOfWorld) {
         throw Stop{Outcome::Unsupported, "Create Object placement not implemented", hex(o[4], 2)};
     }

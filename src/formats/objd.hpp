@@ -12,6 +12,7 @@ namespace ts2::objd {
 // and the ids of its interaction table, slots and strings, among others).
 namespace field {
 constexpr std::size_t kInteractionTableId = 0x07;
+constexpr std::size_t kInteractionGroup = 0x08;  // signed, pairs multi-tile parts (see World::interactionPart)
 constexpr std::size_t kType = 0x09;
 constexpr std::size_t kMultiTileMasterId = 0x0A;
 constexpr std::size_t kMultiTileSubIndex = 0x0B;  // 0xFFFF for the master, (x << 8) | y for parts

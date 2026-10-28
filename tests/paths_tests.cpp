@@ -82,12 +82,15 @@ void installCheckReadsNamesOnly() {
 
 void installRootHoldsEveryPack() {
     using ts2::paths::commonFolder;
-    CHECK(commonFolder({"C:\\Games\\UC\\Double Deluxe\\Base", "C:\\Games\\UC\\Seasons", "c:\\games\\uc\\University Life\\EP1"}) ==
-          fs::path("C:\\Games\\UC"));
-    CHECK(commonFolder({"C:\\Games\\UC\\Double Deluxe\\Base"}) == fs::path("C:\\Games\\UC\\Double Deluxe\\Base"));
-    CHECK(commonFolder({"C:\\A\\Base", "D:\\B\\Seasons"}).empty());
-    CHECK(commonFolder({"C:\\Base", "C:\\Seasons"}).empty());
+    const fs::path root = fs::temp_directory_path().root_path();
+    const fs::path uc = root / "Games" / "UC";
+    CHECK(commonFolder({uc / "Double Deluxe" / "Base", uc / "Seasons", root / "games" / "uc" / "University Life" / "EP1"}) == uc);
+    CHECK(commonFolder({uc / "Double Deluxe" / "Base"}) == uc / "Double Deluxe" / "Base");
+    CHECK(commonFolder({root / "Base", root / "Seasons"}).empty());
     CHECK(commonFolder({}).empty());
+#ifdef _WIN32
+    CHECK(commonFolder({"C:\\A\\Base", "D:\\B\\Seasons"}).empty());
+#endif
 }
 
 // The launcher's notes and the game's fill name and judge save folders the same way.
@@ -184,9 +187,15 @@ void launcherSettingsRoundTrip() {
     const auto broken = loadLauncherSettings(root / "broken.txt");
     CHECK(!broken.problem.empty() && broken.settings == LauncherSettings{});
 
+    // Settings hold absolute paths, and what is absolute depends on the system.
+#ifdef _WIN32
+    const std::string absolute = "C:\\a";
+#else
+    const std::string absolute = "/a";
+#endif
     const auto parsed = parseLauncherSettings("NeoTS2 launcher settings 1\r\ninstall=relative\\path\r\nsave-folder=\xFF\xFE\r\n"
-                                              "unknown=C:\\x\r\nno equals sign\r\nadded-save-folder=C:\\a\r\n"
-                                              "added-save-folder=C:\\a\r\n");
+                                              "unknown=C:\\x\r\nno equals sign\r\nadded-save-folder=" + absolute + "\r\n"
+                                              "added-save-folder=" + absolute + "\r\n");
     CHECK(parsed && parsed->install.empty() && parsed->saveFolder.empty() && parsed->addedSaveFolders.size() == 1);
     CHECK(!parseLauncherSettings("") && !parseLauncherSettings("NeoTS2 launcher settings 2\n"));
     // Only the renderers there are are taken.
@@ -205,6 +214,19 @@ void launcherSettingsRoundTrip() {
     CHECK(kept && kept->smoothFollow);
     const auto other = parseLauncherSettings("NeoTS2 launcher settings 1\nsmooth-follow=yes\n");
     CHECK(other && !other->smoothFollow);
+    // The window size is one the launcher offers, or the game's default.
+    CHECK(drawn && drawn->windowSize.empty());
+    LauncherSettings sized;
+    sized.windowSize = "1920x1080";
+    const auto sizeKept = parseLauncherSettings(formatLauncherSettings(sized));
+    CHECK(sizeKept && sizeKept->windowSize == "1920x1080");
+    const auto oddSize = parseLauncherSettings("NeoTS2 launcher settings 1\nwindow-size=99999x99999\n");
+    CHECK(oddSize && oddSize->windowSize.empty());
+    sized.windowSize = "fit-screen";
+    const auto fitKept = parseLauncherSettings(formatLauncherSettings(sized));
+    CHECK(fitKept && fitKept->windowSize == "fit-screen" && findWindowSize("fit-screen")->fitScreen);
+    sized.windowSize = "800x600";
+    CHECK(formatLauncherSettings(sized).find("window-size") == std::string::npos);
     CHECK(!parseLauncherSettings("NeoTS2 launcher settings 1\n" + std::string(70 * 1024, 'x')));
     std::error_code error;
     fs::remove_all(root, error);
@@ -262,7 +284,7 @@ void longSettingsListsStillLoad() {
     using namespace ts2::settings;
     LauncherSettings settings;
     for (int i = 0; i < 100; ++i) {
-        settings.addedSaveFolders.push_back(fs::path("C:/Saves") / std::to_string(i));
+        settings.addedSaveFolders.push_back(fs::temp_directory_path() / "Saves" / std::to_string(i));
     }
     const auto parsed = parseLauncherSettings(formatLauncherSettings(settings));
     CHECK(parsed && parsed->addedSaveFolders.size() == 64);
@@ -290,7 +312,7 @@ void writePackage(const fs::path& file, std::size_t size, std::uint32_t count, s
 }
 
 // Packages cut short, never written or not packages at all are found. Whole ones, files that
-// aren't packages and downloads still under way aren't.
+// aren't packages, downloads still under way and Mac sidecars aren't.
 void damagedPackagesAreFound() {
     const fs::path root = fs::temp_directory_path() / ("neots2-damage-test-" + std::to_string(std::random_device{}()));
     writePackage(root / "Base/TSData/Res/Objects/objects.package", 116, 1, 96);
@@ -299,6 +321,7 @@ void damagedPackagesAreFound() {
     writePackage(root / "EP1/TSData/Res/UI/ui.package", 50, 0, 0);                // shorter than its header
     writePackage(root / "EP2/TSData/Res/UI/zeros.package", 4096, 0, 0, "\0\0\0\0");  // never written
     writePackage(root / "EP2/TSData/Res/UI/ui.package_DiP_Staged", 10, 0, 0);
+    writePackage(root / "EP2/TSData/Res/UI/._ui.package", 4096, 0, 0, "\x00\x05\x16\x07");  // a Mac's sidecar
     std::ofstream(root / "EP2/readme.txt") << "not a package";
 
     const auto damaged = ts2::paths::findDamagedPackages(root);

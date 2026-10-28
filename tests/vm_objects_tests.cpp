@@ -695,6 +695,23 @@ void createObjectGoesInMyHand() {
     CHECK(vm.run(sim, 0x1000).outcome == Outcome::Unsupported);
 }
 
+// Placement 5 "underneath me" puts the new object at my exact place and level, in no slot.
+void createObjectGoesUnderneathMe() {
+    MemoryCodeSource code;
+    code.addObjectType(kLampGroup, typed(kLampGuid));
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    sim.x = 4 << 16 | 0x1234;
+    sim.y = 6 << 16 | 0x8000;
+    sim.level = 2;
+    code.add(kObjectGroup, 0x1000, bhav({createObject(kLampGuid, 0x05, 0, T, F)}));
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::True);
+    const ts2::sim::SimObject* made = world.find(sim.thread.stackObjectId);
+    CHECK(made != nullptr && made->x == sim.x && made->y == sim.y && made->level == 2 && made->data[2] == 0);
+    CHECK(made->tile && made->tile->x == 4 && made->tile->y == 6 && made->tile->level == 2);
+}
+
 // Placements 4 and 0xA put the new object in slot byte 9 of the stack object or of the object in
 // temp 0, at its place. No such object is false. A missing or full slot needs the game's fit test.
 void createObjectGoesInAnotherObjectsSlot() {
@@ -1431,6 +1448,32 @@ void soundEventNamesTheSoundAndItsSource() {
     CHECK(run(soundEvent(1, 0x02)) == Outcome::True && heard.empty());
 }
 
+// Cinematic needs an object with object arrays (its actors) and is false: no cinematic starts.
+void cinematicChecksItsActorsAndStartsNone() {
+    MemoryCodeSource code;
+    SmallWorld w;
+    auto run = [&](std::uint8_t actorsOwner, std::uint16_t actorsData, std::uint8_t flags = 0) {
+        Instruction in = primitiveCall(0x007B, T, F);
+        in.operands[0] = 1;
+        in.operands[5] = flags;
+        in.operands[6] = owner::kTemp;
+        in.operands[7] = 9;  // temp 9 is past the temps: an error when the entry is read from it
+        in.operands[9] = actorsOwner;
+        in.operands[10] = static_cast<std::uint8_t>(actorsData);
+        code.add(kObjectGroup, 0x1000, bhav({in}));
+        Vm vm(code, {}, &w.world);
+        return vm.run(*w.controller, 0x1000);
+    };
+    w.controller->thread.temps[0] = 3;
+    w.world.find(3)->arrays.assign(1, {});
+    CHECK(run(owner::kTemp, 0).outcome == Outcome::False);
+    CHECK(run(owner::kTemp, 0, 0x10).outcome == Outcome::Error);
+    w.world.find(3)->arrays.clear();
+    CHECK(run(owner::kTemp, 0).reason == "bad object array");
+    w.controller->thread.temps[0] = 99;
+    CHECK(run(owner::kTemp, 0).reason == "could not find object reference");
+}
+
 // RayTrace's rules over the hits nearest first, as the game decides them: the watching Sim's own body
 // (from its slot) is passed, the TV ends it clear with its id, another Sim in the way blocks with its id.
 // One wall face may be passed but leaves the ray blocked, and two block at once. Floors block.
@@ -1673,6 +1716,36 @@ void removedObjectsKeepTheirDataUntilPurge() {
     CHECK(world.findIncludingRemoved(goneId) == nullptr);
 }
 
+// A saved Placeholder or TemplatePerson among the ids the object map's wait table covers is marked
+// for delete as the lot loads, as the game does. Purges keep it until a script removes it.
+void loadedPlaceholdersAreKeptUntilUnload() {
+    constexpr std::uint32_t kPlaceholder = 0x3C08965F, kTemplatePerson = 0x7FD96B54;
+    MemoryCodeSource code;
+    code.addObjectType(kObjectGroup, typed(kFridgeGuid));
+    code.addObjectType(kObjectGroup, typed(kPlaceholder));
+    code.addObjectType(kObjectGroup, typed(kTemplatePerson, 0x10));
+    ts2::content::Lot lot;
+    for (const auto& [id, guid] : {std::pair{1u, kFridgeGuid}, {2u, kPlaceholder}, {3u, kTemplatePerson}, {4u, kPlaceholder}}) {
+        ts2::content::LotObject saved;
+        saved.id = id;
+        saved.type = ts2::objt::Entry{};
+        saved.type->guid = guid;
+        lot.objects.push_back(saved);
+    }
+    lot.objectMap.waitTicks.assign(3, 0);  // ids 1 to 3
+    ts2::sim::World world;
+    CHECK(ts2::sim::buildWorld(lot, code, world).keptUntilUnload == 2);
+    CHECK(world.find(1) != nullptr && world.find(2) == nullptr && world.find(3) == nullptr);
+    CHECK(world.find(4) != nullptr);  // past the wait table
+    CHECK(world.size() == 2 && world.removedIds().empty());
+    world.purge();
+    CHECK(world.findIncludingRemoved(2) != nullptr && world.findIncludingRemoved(3) != nullptr);
+    world.remove(*world.findIncludingRemoved(2));
+    CHECK(world.removedIds() == std::vector<std::int16_t>{2});
+    world.purge();
+    CHECK(world.findIncludingRemoved(2) == nullptr && world.findIncludingRemoved(3) != nullptr && world.size() == 2);
+}
+
 void roomFieldsAreReadThroughTempZero() {
     MemoryCodeSource code;
     code.add(kObjectGroup, 0x1000, bhav({
@@ -1753,6 +1826,7 @@ std::vector<Test> vmObjectTests() {
         {"Create Object can go below the object in a local", createObjectCanGoBelowTheObjectInALocal},
         {"Create Object goes in my hand", createObjectGoesInMyHand},
         {"Create Object goes in another object's slot", createObjectGoesInAnotherObjectsSlot},
+        {"Create Object goes underneath me", createObjectGoesUnderneathMe},
         {"removed objects leave their slot", removedObjectsLeaveTheirSlot},
         {"use count follows interaction frames", useCountFollowsInteractionFrames},
         {"Sims forget a deleted object", simsForgetADeletedObject},
@@ -1776,6 +1850,7 @@ std::vector<Test> vmObjectTests() {
         {"Change Light sets how strongly an object's lights shine", changeLightSetsLightStrength},
         {"Change Material names a material for a mesh group", changeMaterialNamesAMaterialForAMeshGroup},
         {"Play/Stop Sound Event names the sound and its source", soundEventNamesTheSoundAndItsSource},
+        {"Cinematic checks its actors and starts none", cinematicChecksItsActorsAndStartsNone},
         {"RayTrace rules judge the hits", rayTraceRulesJudgeTheHits},
         {"RayTrace asks the scene and writes temp 0", rayTraceAsksTheSceneAndWritesTemp0},
         {"dialogs answer as the game does headless", dialogsAnswerAsTheGameDoesHeadless},
@@ -1784,6 +1859,7 @@ std::vector<Test> vmObjectTests() {
         {"new objects lead themselves", newObjectsLeadThemselves},
         {"Remove Object refuses protected objects", removeObjectRefusesProtectedObjects},
         {"Removed objects keep their data until purge", removedObjectsKeepTheirDataUntilPurge},
+        {"loaded Placeholders and TemplatePersons are kept until unload", loadedPlaceholdersAreKeptUntilUnload},
         {"removing me ends the run unless return immediately", removingMeEndsTheRunUnlessReturnImmediately},
         {"Test Object Type compares GUIDs", testObjectTypeComparesGuids},
         {"Test Object Type on missing object is false", testObjectTypeOnMissingObjectIsFalse},

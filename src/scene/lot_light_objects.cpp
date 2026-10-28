@@ -136,7 +136,7 @@ Found gather(Assets& assets, const content::Lot& lot, const std::filesystem::pat
     std::map<std::string, std::optional<Model>> models;
     for (const auto& object : lot.objects) {
         const auto rec = records.find(object.id);
-        if (rec == records.end()) {
+        if (rec == records.end() || isExtraTile(assets, object)) {
             continue;
         }
         sg::SceneObject so;
@@ -155,7 +155,10 @@ Found gather(Assets& assets, const content::Lot& lot, const std::filesystem::pat
             continue;
         }
         const float z = heights.tile(content::gridLevel(lot, h.value1), x, y) + h.value3;
-        const auto nodes = lamplights::lightNodes(model->tree, {{x, y, z}, lamplights::facingRotation(object.state.data[1])});
+        const auto saved = lot.savedJoints.find(object.id);
+        const auto nodes = lamplights::lightNodes(model->tree, {{x, y, z}, lamplights::facingRotation(object.state.data[1])},
+                                                  saved != lot.savedJoints.end() ? std::span<const cobject::SavedJoint>(saved->second)
+                                                                                 : std::span<const cobject::SavedJoint>{});
         if (nodes.empty()) {
             continue;
         }
@@ -176,6 +179,30 @@ Found gather(Assets& assets, const content::Lot& lot, const std::filesystem::pat
                 if (const auto s = lamplights::sourceFor(settings, node.place, lamps)) {
                     out.lamps.push_back(*s);
                 }
+                // Its light on things: the light files' settings over the light resource's, times the
+                // state's practical strength and falloff for lamps indoors or outdoors.
+                const auto* attrs = lighting.light(node.name);
+                const auto res = model->lights.find(lowered(node.name));
+                if (res == model->lights.end() && !attrs) {
+                    continue;
+                }
+                const auto* own = res != model->lights.end() ? &res->second : nullptr;
+                const float intensity = attrs && attrs->intensity ? *attrs->intensity : own ? own->intensity : 0.0f;
+                const auto color = attrs && attrs->color ? *attrs->color : own ? own->color : std::array<float, 3>{1, 1, 1};
+                objectlights::LampLight light;
+                light.room = room;
+                light.position = p;
+                const float scale = intensity * mod.practicalStrength * strength;
+                light.color = {color[0] * scale, color[1] * scale, color[2] * scale};
+                light.falloff = (attrs && attrs->falloffRate ? *attrs->falloffRate : own ? own->falloffRate : 1.0f) * mod.practicalFalloff;
+                if (own && own->kind == "cSpotLight") {
+                    constexpr float kRadians = 3.14159265358979f / 180;
+                    light.spot = true;
+                    light.axis = lamplights::turned(node.place.rotation, {0.0f, 0.0f, 1.0f});
+                    light.coneAngle = attrs && attrs->coneAngle ? *attrs->coneAngle * kRadians : own->coneAngle;
+                    light.conePenumbra = attrs && attrs->conePenumbra ? *attrs->conePenumbra * kRadians : own->conePenumbra;
+                }
+                out.lampLights.push_back(light);
             }
             continue;
         }

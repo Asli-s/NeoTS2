@@ -633,6 +633,16 @@ void randomNumberRangeCanComeFromALocal() {
     CHECK(runPrivate(code, t, 0x1000).outcome == Outcome::True);
 }
 
+// The simulator's random numbers step as the game's do: three states in a row taken from the game.
+void simRandomStepsAsTheGameDoes() {
+    ts2::sim::SimRandom random(48557956);
+    random();
+    CHECK(random.state() == 3230425965u);
+    const std::uint32_t draw = random();
+    CHECK(random.state() == 1432337314u);
+    CHECK(draw == static_cast<std::uint32_t>((3230425965ull * 0x41C64E6Du + 12345u) >> 16));
+}
+
 void randomNumberWithZeroRangeWritesZero() {
     MemoryCodeSource code;
     code.add(kObjectGroup, 0x1000, bhav({
@@ -1009,6 +1019,7 @@ std::vector<Test> vmCoreTests() {
         {"Random Number stays in range", randomNumberStaysInRange},
         {"Random Number range can come from a local", randomNumberRangeCanComeFromALocal},
         {"Random Number with zero range writes 0", randomNumberWithZeroRangeWritesZero},
+        {"simulator random numbers step as the game's do", simRandomStepsAsTheGameDoes},
         {"Set to Next 0x0E finds the Sim's job object", setToNextFindsTheJobObjectOfTheSim},
         {"Find 5 Worst Motives writes the five lowest", findWorstMotivesWritesTheFiveLowest},
         {"Break Point ignored in release continues", breakPointIgnoredInReleaseContinues},

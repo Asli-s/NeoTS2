@@ -126,11 +126,65 @@ Mat sampleRotation(const anim::Animation& a, int channel, float ms, int axis, in
 
 } // namespace
 
+std::array<float, 4> turnToward(const std::array<float, 4>& a, const std::array<float, 4>& b, float t) { return slerp(a, b, t); }
+
 // A limb whose target positions are additive channels: its whole chain only adds to the others.
 bool isAdditive(const anim::Animation& a, const LimbChain& limb) {
     return !limb.targets.empty() && std::all_of(limb.targets.begin(), limb.targets.end(), [&](const LimbTarget& t) {
         return t.position >= 0 && a.channels[static_cast<std::size_t>(t.position)].additive();
     });
+}
+
+float limbWeightAt(const anim::Animation& a, int channel, float ms) { return weightAt(a, channel, ms); }
+
+LimbFloor limbFloor(const anim::Animation& a, const LimbChain& limb, std::size_t joint, float ms) {
+    const float weight = weightAt(a, limb.weight, ms);
+    const bool placing = joint < (limb.joints.size() == 3 ? 2u : 3u);
+    LimbFloor floor;
+    for (const auto& t : limb.targets) {
+        if (placing || t.rotation >= 0) {
+            floor.targets += weight * weightAt(a, t.weight, ms);
+        }
+    }
+    floor.pole = placing ? weight : 0.0f;
+    return floor;
+}
+
+float weighLimbJoint(std::span<const LimbJointLayer> layers, std::span<float> scales) {
+    std::fill(scales.begin(), scales.end(), 0.0f);
+    float left = 1, total = 0, ik = 0;
+    for (std::size_t k = 0; k < layers.size() && k < scales.size(); ++k) {
+        const float floor = std::max(layers[k].targets, layers[k].pole);
+        const float sum = layers[k].turns + floor;
+        if (!(sum > 0)) {
+            continue;
+        }
+        // A layer that takes all that is left shares it by its own weights and closes the mix.
+        if (sum >= 1) {
+            total += 1;
+            scales[k] = left / sum;
+            ik += left * floor / sum;
+            break;
+        }
+        total += sum;
+        scales[k] = left;
+        ik += left * floor;
+        left *= 1 - sum;
+    }
+    // Layers that weigh less than 1 in all are scaled up to 1, but the IK weight stays as it is.
+    if (total > 0 && total < 1) {
+        for (auto& s : scales) {
+            s /= total;
+        }
+    }
+    return ik;
+}
+
+float solvedShare(float ikWeight, float turns) {
+    if (!(ikWeight > kWeightEpsilon)) {
+        return 0;
+    }
+    return turns > 0 ? ikWeight / (turns + ikWeight) : 1.0f;
 }
 
 namespace {
@@ -365,7 +419,8 @@ std::vector<LimbChain> bindLimbs(const Rig& rig, const anim::Animation& animatio
     return limbs;
 }
 
-void solveLimbs(const Rig& rig, std::span<const LimbSource> sources, std::vector<Transform>& local, std::vector<Transform>& world) {
+void solveLimbs(const Rig& rig, std::span<const LimbSource> sources, std::vector<Transform>& local, std::vector<Transform>& world,
+                const std::vector<float>* shares) {
     // The skeleton's own space: the frame of targets that name none.
     const int rootTrans = rig.find("root_trans");
     const int skeleton = rootTrans >= 0 ? rig.nodes[static_cast<std::size_t>(rootTrans)].parent : -1;
@@ -461,10 +516,8 @@ void solveLimbs(const Rig& rig, std::span<const LimbSource> sources, std::vector
         }
         target = add(scale(target, 1 / positionWeight), addedTarget);
         pole = add(scale(pole, 1 / following), addedPole);
-        orientation = turnProduct(addedTurn, orientation);
-        // The clips' weights are their shares of the limb's joints in the mix (the rest is the turns
-        // of clips that don't reach with it), so the limb follows its targets by their sum.
-        const float follow = std::min(following, 1.0f);
+        // Added target turns are in the target's own frame, so they come after its turn, as a joint's do.
+        orientation = turnProduct(orientation, addedTurn);
         std::vector<Transform> own;
         for (const int j : chain->joints) {
             own.push_back(local[static_cast<std::size_t>(j)]);
@@ -478,13 +531,22 @@ void solveLimbs(const Rig& rig, std::span<const LimbSource> sources, std::vector
             solveOrientation(*chain, split, matOf(orientation), local, world, rig);
             placeRig(rig, local, world);
         }
-        // Partly following: between the animations' own turns and the solved ones.
-        if (follow < 1) {
+        // Each joint between the clips' own turn and the solved one, by the solved turn's share.
+        if (shares != nullptr) {
+            bool partly = false;
             for (std::size_t i = 0; i < chain->joints.size(); ++i) {
-                auto& joint = local[static_cast<std::size_t>(chain->joints[i])];
-                setRotation(joint, matOf(slerp(quatOf(rotation(own[i])), quatOf(rotation(joint)), follow)));
+                const auto j = static_cast<std::size_t>(chain->joints[i]);
+                const float share = j < shares->size() ? (*shares)[j] : 1.0f;
+                if (share >= 1) {
+                    continue;
+                }
+                auto& joint = local[j];
+                setRotation(joint, matOf(slerp(quatOf(rotation(own[i])), quatOf(rotation(joint)), std::max(share, 0.0f))));
+                partly = true;
             }
-            placeRig(rig, local, world);
+            if (partly) {
+                placeRig(rig, local, world);
+            }
         }
     }
 }

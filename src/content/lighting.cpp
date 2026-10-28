@@ -309,10 +309,16 @@ struct Reader {
             l.direction = triple(w[2]);
             l.color = triple(w[3]);
             l.strength = finiteNumber(value(w[4]));
-        } else if (state && key == "skylight" && w.size() >= 3) {
+        } else if (state && key == "skylight" && w.size() >= 2) {
+            // The strength may be left out.
             const auto color = triple(w[1]);
-            const float strength = finiteNumber(value(w[2]));
+            const float strength = w.size() >= 3 ? finiteNumber(value(w[2])) : 1.0f;
             state->skylight = {color[0] * strength, color[1] * strength, color[2] * strength};
+            state->hasSkylight = true;
+        } else if (state && key == "portalSaturation" && w.size() >= 2) {
+            state->portalSaturation = finiteNumber(value(w[1]));
+        } else if (state && key == "projectiveShadowStrength" && w.size() >= 2) {
+            state->projectiveShadowStrength = finiteNumber(value(w[1]));
         } else if (state && key == "environment" && w.size() >= 3) {
             const auto color = triple(w[1]);
             const float strength = finiteNumber(value(w[2]));

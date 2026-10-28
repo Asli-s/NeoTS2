@@ -49,7 +49,20 @@ struct ObjectInteractions {
 ObjectInteractions interactionsOf(CodeSource& code, const SimObject& object);
 
 // What a Sim queues for a choice of `object`'s menu, at the priority the game gives a menu choice.
-[[nodiscard]] std::optional<QueuedInteraction> queuedChoice(CodeSource& code, const SimObject& object, const PieChoice& choice);
+// It runs on the part World::interactionPart gives.
+[[nodiscard]] std::optional<QueuedInteraction> queuedChoice(CodeSource& code, const World& world, const SimObject& object,
+                                                            const PieChoice& choice);
+
+// Whether a choice of `object`'s menu runs at once when picked instead of waiting in the Sim's queue
+// (interaction table flag 0x4, as the lights' Turn On and Turn Off have).
+[[nodiscard]] bool runsAtOnce(CodeSource& code, const SimObject& object, const PieChoice& choice);
+
+// Runs such a choice as the game does when it is picked: its line is checked again and dropped
+// (False) when it is no longer offered. Otherwise its action tree runs to its end at once on top
+// of whatever `sim` is doing, as `sim`, with the part as its stack object. Meanwhile person data
+// 0x21 holds the choice's priority and the Sim counts as not autonomous (person data 0xA6 and its
+// running interaction). Those and the Sim's temps are put back afterwards.
+RunResult runAtOnce(Vm& vm, CodeSource& code, World& world, SimObject& sim, SimObject& object, const PieChoice& choice);
 
 // The text of interaction `index` of `object`'s menu, as the pie menu shows it ("?" and the index
 // when the object has no such line).

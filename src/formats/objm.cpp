@@ -28,6 +28,19 @@ ObjectMap parse(std::span<const std::uint8_t> data) {
         const std::uint32_t object = r.u32();
         map.typeIndexByObject[object] = r.u32();
     }
+    // Object ids are 16-bit, so a longer table is broken. A map cut short before it has none.
+    constexpr std::uint32_t kMaxWaitEntries = 0x7FFF;
+    if (r.remaining() >= 4) {
+        const std::uint32_t waits = r.u32();
+        if (waits > kMaxWaitEntries || waits > r.remaining() / 4) {
+            throw std::runtime_error("ObjM: wait table exceeds data");
+        }
+        map.waitTicks.resize(waits);
+        for (auto& ticks : map.waitTicks) {
+            ticks = r.i16();
+            r.u16();
+        }
+    }
     return map;
 }
 

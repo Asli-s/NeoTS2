@@ -19,6 +19,13 @@ SimulatorState parse(std::span<const std::uint8_t> data) {
     for (auto& g : s.globals) {
         g = r.i16();
     }
+    // Versions before 0xD4 save fewer globals, so the fields after them sit elsewhere.
+    constexpr std::uint32_t kSixtyGlobals = 0xD4;
+    constexpr std::size_t kBeforeRandomState = 4 + 2 + 4;
+    if (s.version >= kSixtyGlobals && r.remaining() >= kBeforeRandomState + 4) {
+        r.skip(kBeforeRandomState);
+        s.randomState = r.u32();
+    }
     return s;
 }
 

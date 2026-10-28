@@ -61,6 +61,12 @@ float Heights::tile(int level, float x, float y) const {
     return n ? sum / static_cast<float>(n) : static_cast<float>(level) * kLevelHeight;
 }
 
+bool isExtraTile(Assets& assets, const content::LotObject& object) {
+    const auto* d = object.type ? assets.objectDefinition(object.type->guid) : nullptr;
+    return d && d->field(objd::field::kMultiTileMasterId) != 0 && d->field(objd::field::kMultiTileSubIndex) != 0xFFFF &&
+           object.state.data[0x13] > 0 && object.state.data[0x13] != static_cast<std::int32_t>(object.id);
+}
+
 bool surfaceOpen(const array3d::Array3D& surface, int level, float x, float y) {
     if (surface.elementSize != 4 || !(x >= 0) || !(y >= 0) || x >= static_cast<float>(surface.width) || y >= static_cast<float>(surface.height)) {
         return false;
@@ -344,11 +350,7 @@ private:
                 log(object, "off the lot", "");
                 continue;
             }
-            // The extra tiles of a multi-tile object show nothing: its lead tile draws the whole model.
-            // A scene record filed under an extra tile's id is left over from an earlier object.
-            if (const auto* d = object.type ? assets_.objectDefinition(object.type->guid) : nullptr;
-                d && d->field(objd::field::kMultiTileMasterId) != 0 && d->field(objd::field::kMultiTileSubIndex) != 0xFFFF &&
-                object.state.data[0x13] > 0 && object.state.data[0x13] != static_cast<std::int32_t>(object.id)) {
+            if (isExtraTile(assets_, object)) {
                 log(object, "part of " + std::to_string(object.state.data[0x13]), "");
                 continue;
             }
@@ -474,9 +476,32 @@ private:
                 if (instance->sunTest == SunTest::NodePosition) {
                     instance->lightGroup = LightGroup::Portals;
                 }
+                instance->shadowFacts = shadowFactsOf(*shown_[i].object, shown_[i].model, shown_[i].mesh);
+                instance->shadow = objectshadow::requested(instance->shadowFacts);
+                if (instance->shadow == objectshadow::Kind::Sun) {
+                    instance->shadowMesh = b_.model(shown_[i].model, {});
+                }
+                instance->shadowFacing = static_cast<std::uint8_t>((2 - shown_[i].object->state.data[1]) & 7);
             }
             ++stats_.objects;
         }
+    }
+
+    // What the game reads from an object to choose its shadow (see objectshadow).
+    objectshadow::Facts shadowFactsOf(const content::LotObject& object, const std::string& model, int mesh) {
+        objectshadow::Facts f;
+        const auto* d = object.type ? assets_.objectDefinition(object.type->guid) : nullptr;
+        f.type = d ? d->field(objd::field::kType) : 0;
+        f.data8 = object.state.data[8];
+        f.data13 = object.state.data[0x0D];
+        f.data68 = object.state.data[0x44];
+        const auto& meshes = b_.scene().meshes;
+        if (mesh >= 0 && static_cast<std::size_t>(mesh) < meshes.size()) {
+            const auto& primitives = meshes[static_cast<std::size_t>(mesh)].primitives;
+            f.drawable = !primitives.empty() && lower(model) != "nullmodel";
+            f.hasShadowGroups = std::ranges::any_of(primitives, [](const Primitive& p) { return objectshadow::isShadowGroup(p.group); });
+        }
+        return f;
     }
 
     // Doors and windows are tested where their parts stand in their wall. Stairs never are.
@@ -539,6 +564,9 @@ private:
             actor.floorHeight = floorHeight;
             for (const auto& bone : simSlotBones(file->second)) {
                 actor.slotNodes.push_back(actor.rig && !bone.empty() ? actor.rig->find(bone) : -1);
+            }
+            for (const auto& bone : simSlotBones(file->second, true)) {
+                actor.targetNodes.push_back(actor.rig && !bone.empty() ? actor.rig->find(bone) : -1);
             }
             holdBySim(*sim, file->second, actor, world);
             b_.scene().actors.push_back(std::move(actor));
@@ -1274,7 +1302,7 @@ private:
 ObjectLighting outdoorLighting(const content::Lighting::State& state) {
     ObjectLighting out;
     out.ambient = state.skylight;
-    for (const char* name : {"sun", "fill1", "sky"}) {
+    for (const char* name : {"sun", "fill1", "sky", "simFill1", "simFill2"}) {
         const auto it = state.lights.find(name);
         if (it == state.lights.end()) {
             continue;
@@ -1290,7 +1318,7 @@ ObjectLighting outdoorLighting(const content::Lighting::State& state) {
         for (int i = 0; i < 3; ++i) {
             light.color[static_cast<std::size_t>(i)] = l.strength * (l.color[static_cast<std::size_t>(i)] - state.skylight[static_cast<std::size_t>(i)]);
         }
-        out.lights.push_back(light);
+        (std::string_view(name).starts_with("sim") ? out.simLights : out.lights).push_back(light);
     }
     return out;
 }

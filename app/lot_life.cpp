@@ -3,10 +3,13 @@
 #include "content/neighborhood.hpp"
 #include "diag/log.hpp"
 #include "formats/image.hpp"
+#include "scene/look_at.hpp"
 #include "scene/object_lights.hpp"
 #include "sim/motives.hpp"
 #include "sim/ground_click.hpp"
 #include "sim/pie_menu.hpp"
+#include "sim/route_goals.hpp"
+#include "sim/snap.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -41,15 +44,34 @@ constexpr double kWalkFadeMs = 233.33;
 // How far ahead a walk's way is read where the Sim hasn't moved yet (route slivers shorter than this don't turn it).
 constexpr float kRouteAhead = 0.01f;
 
+// An Animate Sim clip's weight as the game gives it: in over its fade in from its start, out over
+// its fade out to its end, each clip on its own whatever plays after it. One without a fade out
+// holds its last pose until the next takes over.
+void fadeAsAnimateSim(ts2::scene::Actor::Clip& clip, const ts2::sim::PlayingAnimation& a) {
+    clip.end = (a.startMs + std::max(0.0f, a.lengthMs)) / 1000.0;
+    clip.fadeIn = a.fadeInMs > 0;
+    clip.fadeInSeconds = a.fadeInMs / 1000.0f;
+    clip.fadeOut = a.fadeOutMs > 0;
+    clip.fadeOutSeconds = a.fadeOutMs / 1000.0f;
+}
+
+// Whether `previous` is an Animate Sim clip still fading out as `latest` starts. One that had played
+// out is only a held pose, which the latest takes over from as other animations do.
+bool stillFading(const ts2::sim::PlayingAnimation& previous, const ts2::sim::PlayingAnimation& latest) {
+    return previous.fades && previous.fadeOutMs > 0 && previous.startMs + previous.lengthMs > latest.startMs;
+}
+
 // What an object plays, as the actor's clips: its own animation and its overlays, or while a Sim
 // walks, the walk's clips at the moments the distance walked gives them (`walk`, fading in by
 // `walkFade` over `previous`, which keeps the facing the Sim had as the walk started, as the game's
 // body does, but not its root's place). A locomotion clip plays turned from the heading the Sim is
 // placed at (`frameHeading`) to its own base heading (see PlayingAnimation::baseHeading).
+// `previousPlace` is where the Sim stood while `previous` played.
 void playClips(ts2::scene::Actor& actor, const ts2::sim::SimObject& object, const std::optional<ts2::sim::PlayingAnimation>& own,
                const std::optional<ts2::sim::PlayingAnimation>& previous, float frameHeading, ts2::scene::AnimationLibrary& animations,
                const std::vector<ts2::sim::WalkPose>* walk = nullptr, float walkFade = 1, float walkStartHeading = 0, bool ownEnding = false,
-               const std::vector<ts2::sim::WalkPose>* endedWalk = nullptr, float endedHeading = 0) {
+               const std::vector<ts2::sim::WalkPose>* endedWalk = nullptr, float endedHeading = 0,
+               const std::optional<ts2::scene::Transform>& previousPlace = std::nullopt) {
     actor.clips.clear();
     // Where an animation's IK object stands in the world (the lot's x and y are the position's y and x).
     const auto objectPlace = [&](const ts2::sim::PlayingAnimation& a) -> std::optional<ts2::scene::Transform> {
@@ -102,26 +124,36 @@ void playClips(ts2::scene::Actor& actor, const ts2::sim::SimObject& object, cons
             }
         }
     }
-    // The animation before fades out as the latest fades in, both holding their last pose once played.
+    // An Animate Sim clip still fading out as the latest starts plays out its own fades under it, its
+    // root blended with the latest's (see fadeAsAnimateSim). Otherwise the animation before fades out
+    // as the latest fades in, both holding their last pose once played.
     // Between two animations only the upper one's weight changes, as the game's mixer gives the
     // layer under the top 1 less the top's weight: the latest fades in over one below it or on its
     // own layer, and one above it fades out over it. A turn or stop clip (one placed by its base
     // heading) fades out by its body only, as the root already follows the latest. So does any
     // animation before one that moves the root: the game's root takes the latest at once (a stair
     // step's clip starts a step on from where the last one ended, as the Sim snaps a step on). Its
-    // limbs then reach around the drawn root as they did around its own, so a Sim's elbows don't
-    // swing out as getting into bed hands over to lying there.
+    // limb targets stay where they were in the world, also when the Sim is placed anew as the latest
+    // starts: the game keeps a Sim's planted feet still while a chat's listen clips hand over, each
+    // moving the root a few centimetres, and the elbows still as getting into bed hands over to lying
+    // there, which places the Sim 0.92 m on and a quarter turn round.
     const bool crossfade = previous && own;
     std::optional<std::size_t> previousClip;
     if (!walk && previous && own) {
         if (auto* clip = add(previous->name, previous->startMs, previous->lengthMs, previous->speed, previous->flipped, previous->baseHeading)) {
             clip->layer = previous->layer;
             clip->objectPlace = objectPlace(*previous);
-            clip->end = own->startMs / 1000.0 + kOwnCrossfadeSeconds;
-            clip->fadeIn = false;
             clip->ikActor = static_cast<std::uint32_t>(std::max<std::int16_t>(previous->ikTarget, 0));
-            clip->fadeOut = previous->layer >= own->layer;
+            if (stillFading(*previous, *own)) {
+                // An Animate Sim clip plays out its own fades under the latest.
+                fadeAsAnimateSim(*clip, *previous);
+            } else {
+                clip->end = own->startMs / 1000.0 + kOwnCrossfadeSeconds;
+                clip->fadeIn = false;
+                clip->fadeOut = previous->layer >= own->layer;
+            }
             clip->bodyOnly = previous->baseHeading.has_value();
+            clip->playedAt = previousPlace;
             previousClip = actor.clips.size() - 1;
         }
     }
@@ -144,20 +176,23 @@ void playClips(ts2::scene::Actor& actor, const ts2::sim::SimObject& object, cons
         if (auto* clip = add(own->name, own->startMs, own->lengthMs, own->speed, own->flipped, own->baseHeading)) {
             clip->layer = own->layer;
             clip->objectPlace = objectPlace(*own);
-            clip->fadeIn = (crossfade && own->layer >= previous->layer) || endedWalk != nullptr;
-            clip->fadeOut = ownEnding;
             clip->ikActor = static_cast<std::uint32_t>(std::max<std::int16_t>(own->ikTarget, 0));
-            if (ownEnding) {
-                clip->end += kOwnCrossfadeSeconds;
+            if (own->fades && endedWalk == nullptr) {
+                fadeAsAnimateSim(*clip, *own);
+            } else {
+                clip->fadeIn = (crossfade && own->layer >= previous->layer) || endedWalk != nullptr;
+                clip->fadeOut = ownEnding;
+                if (ownEnding) {
+                    clip->end += kOwnCrossfadeSeconds;
+                }
             }
             clip->repeats = own->loops;
             const int root = actor.rig ? actor.rig->find("root_trans") : -1;
             const auto& moves = clip->animation->translation;
-            if (previousClip && root >= 0 && static_cast<std::size_t>(root) < moves.size() && moves[static_cast<std::size_t>(root)] >= 0) {
+            // An Animate Sim clip still fading out keeps its root, which the game blends with the latest's.
+            if (previousClip && !stillFading(*previous, *own) && root >= 0 && static_cast<std::size_t>(root) < moves.size() &&
+                moves[static_cast<std::size_t>(root)] >= 0) {
                 actor.clips[*previousClip].bodyOnly = true;
-            }
-            if (previousClip) {
-                actor.clips[*previousClip].noRootMove = actor.clips[*previousClip].bodyOnly;
             }
         }
     }
@@ -337,6 +372,7 @@ LotLife::LotLife(std::unique_ptr<ts2::sim::LotSimulation> sim, ts2::scene::Asset
 
 void LotLife::traceIn(ts2::scene::Scene& scene, const ts2::scene::ScenePose& pose, const std::vector<std::uint8_t>& shown) {
     rays_ = std::make_unique<ts2::scene::SceneRays>(scene);
+    pose_ = &pose;
     sim_->world().setSimScale([&scene](std::int16_t object) {
         for (const auto& actor : scene.actors) {
             if (actor.object == static_cast<std::uint32_t>(object) && actor.rig) {
@@ -497,7 +533,15 @@ void LotLife::choose(std::uint32_t object, const ts2::sim::PieChoice& choice) {
     if (found == nullptr || actor == nullptr) {
         return;
     }
-    if (const auto queued = ts2::sim::queuedChoice(sim_->code(), *found, choice)) {
+    if (ts2::sim::runsAtOnce(sim_->code(), *found, choice)) {
+        ts2::diag::step(std::format("Sim {} does \"{}\" on {} {} at once", actor->id, choice.name, found->definition.name, found->id));
+        const auto r = ts2::sim::runAtOnce(sim_->vm(), sim_->code(), sim_->world(), *actor, *found, choice);
+        if (r.outcome != ts2::sim::Outcome::True && r.outcome != ts2::sim::Outcome::False) {
+            ts2::diag::warning(std::format("simulation: \"{}\" stopped: {} {}", choice.name, r.reason, r.detail));
+        }
+        return;
+    }
+    if (const auto queued = ts2::sim::queuedChoice(sim_->code(), sim_->world(), *found, choice)) {
         ts2::diag::step(std::format("Sim {} is told to \"{}\" on {} {}", actor->id, choice.name, found->definition.name, found->id));
         ts2::sim::queueInteraction(*actor, *queued);
     }
@@ -893,6 +937,128 @@ void LotLife::setPaused(bool paused) {
     sim_->globals()[ts2::sim::global::kPaused] = paused ? 1 : 0;
 }
 
+// The game takes a multi-tile part's lead as the target of a look. An object's targeting slot
+// (kind 1) or routing slot (kind 2) is read from the lead's SLOT list, counting that kind's entries
+// from 0: a slot at a bone is that bone of the model, any other its offset (x, -y, z) in the model.
+LotLife::LookAim LotLife::lookAim(const ts2::sim::SimObject& sim, const ts2::scene::Scene& scene) {
+    constexpr std::uint16_t kModelBones = 0x90;
+    LookAim aim;
+    const int following = sim.look.following();
+    const auto target = std::find_if(sim.lookTargets.begin(), sim.lookTargets.end(),
+                                      [&](const ts2::sim::LookTarget& t) { return t.request == following; });
+    if (target == sim.lookTargets.end()) {
+        return aim;
+    }
+    aim.request = following;
+    aim.object = target->object;
+    const auto& world = sim_->world();
+    const ts2::sim::SimObject* object = target->object == -1 ? nullptr : world.find(target->object);
+    if (object == nullptr) {
+        return aim;
+    }
+    const std::int16_t lead = object->data[ts2::sim::kLeadTileField];
+    if (lead != 0 && lead != object->id && world.find(lead) != nullptr) {
+        aim.object = lead;
+        object = world.find(lead);
+    }
+    if ((target->pointKind != 1 && target->pointKind != 2) || object->isPerson()) {
+        return aim;
+    }
+    aim.objectSlot = true;
+    auto& code = sim_->code();
+    const auto* type = code.objectType(object->definition.guid());
+    const auto* slots = type == nullptr ? nullptr : target->pointKind == 1 ? &type->targetSlots : &type->routingSlots;
+    if (slots == nullptr || target->slot >= slots->size()) {
+        return aim;
+    }
+    const auto& entry = (*slots)[target->slot];
+    if (!ts2::sim::isBoneSlot(entry)) {
+        aim.local = ts2::scene::Transform::at(entry.x, -entry.y, entry.z, 0);
+        return aim;
+    }
+    // The bone is the first joint its "Model - Bones" entry names, in the model at rest.
+    const auto names = entry.bone >= 0 ? code.string(type->group, kModelBones, static_cast<std::size_t>(entry.bone)) : std::nullopt;
+    const auto joints = names ? ts2::sim::slotJointNames(*names) : std::vector<std::string>{};
+    const auto placed = std::find_if(scene.placedObjects.begin(), scene.placedObjects.end(),
+                                     [&](const ts2::scene::PlacedObject& p) { return p.object == static_cast<std::uint32_t>(aim.object); });
+    if (joints.empty() || placed == scene.placedObjects.end() || placed->model.empty()) {
+        return aim;
+    }
+    const auto rig = objectMaterials_.objectRig(placed->model, placed->savedJoints);
+    const int node = rig ? rig->find(joints.front()) : -1;
+    if (node >= 0) {
+        std::vector<ts2::scene::Transform> rest;
+        ts2::scene::poseRig(*rig, nullptr, 0, rest);
+        aim.local = rest[static_cast<std::size_t>(node)];
+    }
+    return aim;
+}
+
+// Turns each Sim's head as its looks have it (Look At). The look moves on as the Sim is posed, from
+// where its neck is then toward where its target was last drawn, and the head IK follows it. The
+// states it took are told at the next update.
+void LotLife::lookHeads(ts2::scene::Scene& scene, double nowMs) {
+    for (auto& [id, changes] : lookChanges_) {
+        sim_->tellLookStates(id, changes);
+    }
+    lookChanges_.clear();
+    for (auto& actor : scene.actors) {
+        auto* sim = actor.object != 0 && actor.rig ? sim_->world().find(static_cast<std::int16_t>(actor.object)) : nullptr;
+        if (sim == nullptr || !sim->isPerson() || !sim->look.busy() || pose_ == nullptr || !rays_) {
+            actor.look = nullptr;
+            continue;
+        }
+        const auto id = static_cast<std::int16_t>(actor.object);
+        const ts2::scene::Transform fromLot = actor.place.rigidInverse();
+        const LookAim aim = lookAim(*sim, scene);
+        actor.look = [this, id, fromLot, nowMs, aim](const ts2::scene::HeadPlace& head) -> std::optional<ts2::scene::HeadLook> {
+            auto* sim = sim_->world().find(id);
+            if (sim == nullptr) {
+                return std::nullopt;
+            }
+            ts2::sim::LookPose look;
+            look.neck = head.neck;
+            look.head = head.head;
+            look.eye = head.eye;
+            look.headTurn = head.headTurn;
+            look.headRest = head.headRest;
+            // Where the target is, from the rig's space.
+            const int following = sim->look.following();
+            const auto target = std::find_if(sim->lookTargets.begin(), sim->lookTargets.end(),
+                                              [&](const ts2::sim::LookTarget& t) { return t.request == following; });
+            std::optional<std::array<float, 3>> at;
+            if (target != sim->lookTargets.end()) {
+                if (target->object == -1) {
+                    at = cameraEye_;
+                } else if (aim.request == following && (!aim.objectSlot || aim.local) && sim_->world().find(aim.object) != nullptr) {
+                    bool slotMissing = false, objectMissing = false;
+                    const ts2::scene::SceneRays::Point point{static_cast<std::uint32_t>(aim.object), target->pointKind, target->slot, aim.local};
+                    if (const auto place = rays_->locate(point, *pose_, slotMissing, objectMissing, true)) {
+                        at = std::array<float, 3>{place->m[3], place->m[7], place->m[11]};
+                    }
+                }
+            }
+            if (at) {
+                float p[3] = {(*at)[0], (*at)[1], (*at)[2]};
+                fromLot.apply(p, true);
+                look.target = {p[0], p[1], p[2]};
+            } else {
+                // A point not placed yet (another kind of slot, or none drawn) ends the look, which turns
+                // back from where it last aimed.
+                sim->look.lose(nowMs);
+                look.target = sim->look.target();
+            }
+            auto& changes = lookChanges_[id];
+            sim->look.update(nowMs, look, changes);
+            const auto* current = sim->look.current();
+            if (current == nullptr) {
+                return std::nullopt;
+            }
+            return ts2::scene::HeadLook{current->weightAt(nowMs), sim->look.target(), sim->look.pole()};
+        };
+    }
+}
+
 void LotLife::update(double ms, ts2::scene::Scene& scene) {
     using ts2::sim::LotSimulation;
     using ts2::sim::Speed;
@@ -948,20 +1114,31 @@ void LotLife::update(double ms, ts2::scene::Scene& scene) {
                     // A new animation fades in over the one before it, or over the last pose of one
                     // that has played out, as the game's play clips follow one another.
                     own.previous = own.current ? std::move(own.current) : std::move(own.held);
+                    // An Animate Sim clip that faded out is gone at its end, so it can't come back.
+                    if (own.previous && own.previous->fades && own.previous->fadeOutMs > 0 && !stillFading(*own.previous, *now)) {
+                        own.previous.reset();
+                    }
+                    own.previousPlace = own.currentPlace;
                     own.current = *now;
                     own.held.reset();
                 }
-                if (own.previous && own.current && seconds() > own.current->startMs / 1000.0 + kOwnCrossfadeSeconds) {
-                    own.previous.reset();
+                if (own.previous && own.current) {
+                    const double goneMs = stillFading(*own.previous, *own.current) ? own.previous->startMs + own.previous->lengthMs
+                                                                                    : own.current->startMs + kOwnCrossfadeSeconds * 1000.0;
+                    if (nowMs > goneMs) {
+                        own.previous.reset();
+                    }
                 }
                 // An Animate Sim clip that has played and that nothing followed fades out, then is gone
                 // (locomotion clips aside). One that doesn't blend out (Animate Sim byte 2 flag 0x40)
                 // holds its last pose until the next animation takes over, as the game's does.
                 if (!now && own.current && !own.current->loops && !own.current->baseHeading && own.current->blendsOut &&
-                    own.current->finished(nowMs)) {
+                    (own.current->fades ? own.current->fadingOut(nowMs) : own.current->finished(nowMs))) {
                     const double endMs = own.current->startMs + own.current->lengthMs;
                     const bool fading = object->ending && object->ending->startMs == own.current->startMs && object->ending->name == own.current->name;
-                    if (!fading || nowMs >= endMs + kOwnCrossfadeSeconds * 1000.0) {
+                    // An Animate Sim clip fades within its own length, others over a while after it.
+                    const double goneMs = own.current->fades ? endMs : endMs + kOwnCrossfadeSeconds * 1000.0;
+                    if (!fading || nowMs >= goneMs) {
                         own.held = std::move(own.current);
                         own.current.reset();
                         own.previous.reset();
@@ -991,12 +1168,22 @@ void LotLife::update(double ms, ts2::scene::Scene& scene) {
                     own.walkEndMs = -1;
                 }
                 playClips(actor, *object, own.current, own.previous, frame.heading, animations_, nullptr, 1, 0, ownEnding,
-                          overWalk && !own.endedPoses.empty() ? &own.endedPoses : nullptr, own.endedHeading);
+                          overWalk && !own.endedPoses.empty() ? &own.endedPoses : nullptr, own.endedHeading, own.previousPlace);
             }
             placeSim(
                 actor, *object, frame, scene, [&](const ts2::scene::PlacedObject& p) -> const ts2::scene::Transform& { return standingPlace(p, scene); },
                 [&](std::int16_t part, std::size_t slot) { return partSlot(part, slot, scene); });
+            own.currentPlace = actor.place;
             setSimStorey(scene, actor, object->level);
+            // The game picks a Sim's lights afresh as it moves.
+            if (actor.place.m != own.litPlace || object->level != own.litLevel) {
+                own.litPlace = actor.place.m;
+                own.litLevel = object->level;
+                const auto inLot = actor.lotFrame.rigidInverse() * actor.place;
+                for (const auto& skinned : actor.skinned) {
+                    relight(scene, skinned.instance, inLot, object->level - 1);
+                }
+            }
         }
     }
     addCreatedObjects(scene);
@@ -1017,6 +1204,7 @@ void LotLife::update(double ms, ts2::scene::Scene& scene) {
             h.pose = pose.value_or(ts2::scene::Transform{});
         }
     }
+    lookHeads(scene, nowMs);
 }
 
 // An object a script moved goes where the simulation has it: into a Sim's hand (where the Sim's pose
@@ -1027,9 +1215,10 @@ void LotLife::placeObjects(ts2::scene::Scene& scene) {
         if (placed.object > static_cast<std::uint32_t>(INT16_MAX) || placed.instance >= scene.instances.size()) {
             continue;
         }
-        const auto* object = sim_->world().find(static_cast<std::int16_t>(placed.object));
+        // An object the lot keeps until it unloads is still drawn.
+        const auto* object = sim_->world().findIncludingRemoved(static_cast<std::int16_t>(placed.object));
         ObjectPlace now;
-        if (object == nullptr || object->removed) {
+        if (object == nullptr || (object->removed && !object->keptUntilUnload)) {
             now.gone = true;
         } else {
             now = {object->x, object->y, object->level, object->data[1], object->data[2], object->data[3], false};
@@ -1234,15 +1423,26 @@ void LotLife::relightAll(ts2::scene::Scene& scene) {
         }
         relight(scene, placed.instance, placed.lotFrame.rigidInverse() * instance.transform, instance.level - scene.groundLevel);
     }
+    for (const auto& actor : scene.actors) {
+        const auto inLot = actor.lotFrame.rigidInverse() * actor.place;
+        for (const auto& skinned : actor.skinned) {
+            if (skinned.instance < scene.instances.size()) {
+                relight(scene, skinned.instance, inLot, scene.instances[skinned.instance].level - scene.groundLevel);
+            }
+        }
+    }
     std::sort(relit_.begin(), relit_.end());
     relit_.erase(std::unique(relit_.begin(), relit_.end()), relit_.end());
 }
 
 // An object takes the sun that reaches it under the buildings' shadow where it stands now, and a
-// thing the lights of the room it is in (doors and windows keep theirs).
+// thing or a Sim the lights of the room it is in (doors and windows keep theirs).
 void LotLife::relight(ts2::scene::Scene& scene, std::size_t index, const ts2::scene::Transform& inLot, int storey) {
     // Light sets only ever grow. Past this a thing keeps the light it has.
     constexpr std::size_t kMaxLightSets = 4096;
+    if (index >= scene.instances.size()) {
+        return;
+    }
     auto& instance = scene.instances[index];
     if (scene.thingSun && instance.part == ts2::scene::Part::Object) {
         ts2::scene::Instance placed = instance;
@@ -1252,13 +1452,13 @@ void LotLife::relight(ts2::scene::Scene& scene, std::size_t index, const ts2::sc
             relit_.push_back(index);
         }
     }
-    if (!scene.thingLights || instance.lightGroup != ts2::scene::LightGroup::Props || instance.mesh < 0 ||
+    if (!scene.thingLights || instance.lightGroup == ts2::scene::LightGroup::Portals || instance.mesh < 0 ||
         static_cast<std::size_t>(instance.mesh) >= scene.meshes.size()) {
         return;
     }
     std::vector<int> parts;
     for (auto& set : scene.thingLights(scene.meshes[static_cast<std::size_t>(instance.mesh)], inLot,
-                                       ts2::scene::objectlights::lightStorey(scene.floorHeight, inLot, storey))) {
+                                       ts2::scene::objectlights::lightStorey(scene.floorHeight, inLot, storey), instance.lightGroup)) {
         const auto same = std::find(scene.lightSets.begin(), scene.lightSets.end(), set);
         if (same == scene.lightSets.end() && scene.lightSets.size() >= kMaxLightSets) {
             return;

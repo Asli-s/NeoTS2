@@ -202,7 +202,9 @@ Lot loadLot(const std::filesystem::path& path) {
             }
         } else if (e.key.type == simi::kType) {
             try {
-                lot.globals = simi::parse(package.read(e)).globals;
+                auto state = simi::parse(package.read(e));
+                lot.globals = std::move(state.globals);
+                lot.randomState = state.randomState;
             } catch (const std::exception& ex) {
                 lot.problems.push_back({e.key.instance, std::string("simulator state: ") + ex.what()});
             }

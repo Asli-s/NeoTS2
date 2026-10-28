@@ -16,6 +16,8 @@ struct Rig;
 
 // A transform's turn as a quaternion (x, y, z, w).
 std::array<float, 4> turnOf(const Transform& t);
+// From turn `a` toward `b` by `t` (0 to 1), the short way round.
+std::array<float, 4> turnToward(const std::array<float, 4>& a, const std::array<float, 4>& b, float t);
 
 // A limb an animation reaches with IK, as the game's 7DOF strategy solves it: a leg (thigh, calf,
 // foot) or an arm (upper arm, bicep, forearm, wrist, hand). Its target and pole are the animation's
@@ -64,10 +66,11 @@ struct LimbSource {
     // Where the clip's IK object stands in the rig's space. Its targets on that object are placed
     // from there. None: they are in the skeleton's own space.
     std::optional<Transform> objectFrame;
-    // Applied to its targets and poles in the skeleton's own space, for a clip whose root move is left
+    // Applied to its targets and poles in the skeleton's own space. For a clip whose root move is left
     // out (LayeredClip::noRootMove): the move from where the clip has its root to where the root is
-    // drawn. Its limbs then reach as its body does around the drawn root, as the game keeps a Sim's
-    // last pose whole when it moves the Sim (a long stair's climb at the top, getting into bed).
+    // drawn, as the game keeps a Sim's last pose whole when it moves the Sim (a long stair's climb at
+    // the top). For a clip fading out after the Sim was placed anew: the move of the Sim's place
+    // (LayeredClip::placeMove), so its limbs reach where they did (getting into bed).
     Transform rootMove;
     // Where a bone of the clip's IK object is in the rig's space, by its name's hash: a hug's hands go
     // to the other Sim's back. Targets on a bone it can't give are left out.
@@ -77,16 +80,44 @@ struct LimbSource {
 // Whether all the limb's target positions are additive channels (anim::Channel::additive).
 bool isAdditive(const anim::Animation& a, const LimbChain& limb);
 
+// A scalar channel's value at `ms` clamped to 0..1, 1 for none (-1): a limb or target weight.
+float limbWeightAt(const anim::Animation& a, int channel, float ms);
+
+// What a limb puts on one of its joints (index into LimbChain::joints) in the game's mix, per unit
+// of its clip's weight. The joints that place the end take the limb weight times the sum of its
+// targets' weights, and the limb weight for the pole. The end's orientation joints take the limb
+// weight times the weights of its targets with an orientation, and nothing for the pole.
+struct LimbFloor {
+    float targets = 0, pole = 0;
+};
+LimbFloor limbFloor(const anim::Animation& a, const LimbChain& limb, std::size_t joint, float ms);
+
+// One layer of a limb joint's mix in the game (each overlay clip counts as a layer of its own): the
+// weight of its clips' turns of the joint, and what its limbs' targets and poles put on it.
+struct LimbJointLayer {
+    float turns = 0, targets = 0, pole = 0;
+};
+// The game's weighing of a limb joint, top layer first. A layer weighs its turns plus the larger of
+// its targets and its pole, and leaves the rest to the layers below. Sets the factor on each layer's
+// turn weights in `scales` (one per layer) and returns the IK weight, the solved turn's weight.
+float weighLimbJoint(std::span<const LimbJointLayer> layers, std::span<float> scales);
+// The share of the solved turn in a limb joint whose clips' turns weigh `turns` in all (after the
+// scales of weighLimbJoint): none below the least weight that counts, all of it with no clip turns.
+float solvedShare(float ikWeight, float turns);
+
 // Turns each limb's joints so that its end reaches its target, bending toward its pole, and its end
 // takes the target's orientation. `local` and `world` are the rig's pose, updated in place. A limb
 // reaches for the weighted average of all its targets in all the animations, each weighted by how
-// much its animation shows, as the game feeds them into one chain.
-void solveLimbs(const Rig& rig, std::span<const LimbSource> sources, std::vector<Transform>& local, std::vector<Transform>& world);
+// much its animation shows, as the game feeds them into one chain. `shares` gives, per rig node,
+// the share of the solved turn in the joint (solvedShare), the rest staying with the turn it has in
+// `local`. Null: the solved turns whole.
+void solveLimbs(const Rig& rig, std::span<const LimbSource> sources, std::vector<Transform>& local, std::vector<Transform>& world,
+                const std::vector<float>* shares = nullptr);
 
 inline void solveLimbs(const Rig& rig, const anim::Animation& animation, const std::vector<LimbChain>& limbs, float ms,
-                       std::vector<Transform>& local, std::vector<Transform>& world) {
+                       std::vector<Transform>& local, std::vector<Transform>& world, const std::vector<float>* shares = nullptr) {
     const LimbSource one{&animation, &limbs, ms, 1, 1};
-    solveLimbs(rig, std::span<const LimbSource>(&one, 1), local, world);
+    solveLimbs(rig, std::span<const LimbSource>(&one, 1), local, world, shares);
 }
 
 } // namespace ts2::scene

@@ -86,6 +86,7 @@ Capabilities GlRenderer::capabilities() const {
     Capabilities c;
     c.waterReflection = gl_.framebuffers;
     c.gpuSkinning = false;
+    c.projectedShadows = false;  // not drawn by this renderer yet
     c.anisotropic = gl_.anisotropy;
     c.threadedPrepare = !pool_.empty();
     c.offscreen = true;  // in a corner of the window when there are no framebuffer objects, which limits its size

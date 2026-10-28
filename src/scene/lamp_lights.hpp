@@ -1,6 +1,7 @@
 #pragma once
 
 #include "content/lighting.hpp"
+#include "formats/cobject.hpp"
 #include "formats/scenegraph.hpp"
 #include "scene/light_source.hpp"
 
@@ -8,6 +9,7 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -51,12 +53,14 @@ std::array<float, 3> turned(const std::array<float, 4>& q, const std::array<floa
 std::array<float, 4> facingRotation(int direction);
 
 // The lights of a model standing at `object` (its position and turn): each light node's name and
-// its place in the world, through the nodes above it.
+// its place in the world, through the nodes above it. A node named in `saved` (the lot's saved
+// places of the object's nodes) takes that place instead of the model's own.
 struct LightNode {
     std::string name;
     Placement place;
 };
-std::vector<LightNode> lightNodes(const scenegraph::ResourceNode& model, const Placement& object);
+std::vector<LightNode> lightNodes(const scenegraph::ResourceNode& model, const Placement& object,
+                                  std::span<const cobject::SavedJoint> saved = {});
 
 // What the record needs from the lot: the floor height of a level at a point, whether a tile
 // is on the lot, and the room at a point.

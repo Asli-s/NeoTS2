@@ -77,18 +77,16 @@ std::vector<std::uint8_t> Package::readBytes(std::uint64_t offset, std::size_t s
 }
 
 void Package::readHeader() {
-    if (fileSize_ < 4) {
-        fail("file is smaller than the 4-byte magic");
-    }
-    const std::vector<std::uint8_t> magic = readBytes(0, 4);
-    if (magic == std::vector<std::uint8_t>{0x00, 0x05, 0x16, 0x07}) {
+    const std::vector<std::uint8_t> bytes =
+        readBytes(0, static_cast<std::size_t>(std::min<std::uintmax_t>(fileSize_, kHeaderSize)));
+    // A Mac's AppleDouble sidecar, a "._" file of metadata, reads as an empty package.
+    if (bytes.size() >= 4 && bytes[0] == 0x00 && bytes[1] == 0x05 && bytes[2] == 0x16 && bytes[3] == 0x07) {
         appleDouble_ = true;
         return;
     }
-    if (fileSize_ < kHeaderSize) {
+    if (bytes.size() < kHeaderSize) {
         fail("file is smaller than the 96-byte header");
     }
-    const std::vector<std::uint8_t> bytes = readBytes(0, kHeaderSize);
 
     if (bytes[0] != 'D' || bytes[1] != 'B' || bytes[2] != 'P' || bytes[3] != 'F') {
         fail("missing 'DBPF' magic - not a package file");

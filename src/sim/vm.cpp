@@ -98,6 +98,7 @@ bool Execution::primitive(const bhav::Instruction& in, Frame& f) {
     case kSetMotiveChangeOpcode:  return setMotiveChange(in, f);
     case kWantSatisfyOpcode:      return wantSatisfy(in, f);
     case kOnTimerOpcode:          return onTimer(in, f);
+    case kCinematicOpcode:        return cinematic(in, f);
     case kMessageOpcode:          return message(in, f);
     case kGetDirectionToOpcode:   return getDirectionTo(in, f);
     case kGetDistanceToOpcode:    return getDistanceTo(in, f);
@@ -133,10 +134,9 @@ bool Execution::primitive(const bhav::Instruction& in, Frame& f) {
     case kAnimateOverlayOpcode:   return animateOverlay(in, f);
     case kAnimateStopOpcode:      return animateStop(in, f);
     case kAnimateObjectOpcode:    return animateObject(in, f);
-    // These start a head turn (Look At) or an effect, stop all of an object's sounds or
-    // pick a Sim's walk animations (Assign Locomotion Animations), and carry on at once. What they
-    // show or play isn't kept yet.
-    case kLookAtOpcode:
+    case kLookAtOpcode:           return lookAt(in, f);
+    // These start an effect, stop all of an object's sounds or pick a Sim's walk animations (Assign
+    // Locomotion Animations), and carry on at once. What they show or play isn't kept yet.
     case kStopAllSoundsOpcode:
     case kAssignLocomotionOpcode:
     case kEffectOpcode:
@@ -572,8 +572,12 @@ bool Vm::RunState::followBranch(bool branch) {
             return false;
         }
         if (callerReruns) {
-            if (me_ != nullptr && me_->turning) {
-                me_->turning->preRoute = returned;
+            if (me_ != nullptr && me_->turning && me_->turning->frame == frames_.size() - 1) {
+                if (me_->turning->turned) {
+                    me_->turning->postRouteReturned = true;
+                } else {
+                    me_->turning->preRoute = returned;
+                }
             }
             if (me_ != nullptr && me_->walking && me_->walking->checking && !me_->walking->goalCheck) {
                 me_->walking->goalCheck = returned;
@@ -843,11 +847,14 @@ Vm::RunState::Next Vm::RunState::turn(const bhav::Instruction& in, Frame& f) {
     if (step.kind == Execution::TurnStep::Kind::Wait) {
         return waitTick();
     }
-    if (step.kind == Execution::TurnStep::Kind::PreRoute) {
-        // What the game passes a turn's pre-route tree. The instruction runs again after it.
+    if (step.kind == Execution::TurnStep::Kind::PreRoute || step.kind == Execution::TurnStep::Kind::PostRoute) {
+        // What the game passes a turn's pre- and post-route trees. The instruction runs again after them.
         constexpr std::array<std::int16_t, 7> kPreRouteArgs{0, -1, 0, 0, -1, 0, 0};
+        constexpr std::array<std::int16_t, 4> kPostRouteArgs{0, 1, 0, 0};
         checkDepth();
-        push(step.group, std::move(step.code), step.instance, kPreRouteArgs, me_->group);
+        const bool pre = step.kind == Execution::TurnStep::Kind::PreRoute;
+        push(step.group, std::move(step.code), step.instance,
+             pre ? std::span<const std::int16_t>(kPreRouteArgs) : std::span<const std::int16_t>(kPostRouteArgs), me_->group);
         frames_.back().stackObjectId = me_->id;
         frames_.back().callerReruns = true;
         return Next::Continue;

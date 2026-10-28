@@ -64,9 +64,17 @@ struct RigAnimation {
     std::shared_ptr<const anim::Animation> animation;
     std::vector<int> rotation, translation;
     std::vector<LimbChain> limbs;
+    // Per IK chain of the animation (anim::Animation::chains), the scalar channel giving its limb
+    // weight (IkChain::extra), -1 for none.
+    std::vector<int> chainWeights;
     bool mirrored = false;
 };
 RigAnimation bindAnimation(const Rig& rig, std::shared_ptr<const anim::Animation> animation, bool mirrored = false);
+
+// The factor on a clip's weight for one of its joint channels at `ms`. A channel tagged with an IK
+// chain (anim::Channel::chain) gives way to the chain's solve: 1 minus the chain's limb weight, or
+// negative (the channel isn't used at all) when the chain has no limb weight channel. 1 otherwise.
+float channelShare(const RigAnimation& animation, int channel, float ms);
 
 // The joint a channel moves when its clip is played mirrored: "l_" and "r_" at the start of the
 // name swapped (case matters), any other name unchanged.

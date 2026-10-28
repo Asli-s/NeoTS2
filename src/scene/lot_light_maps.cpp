@@ -91,6 +91,63 @@ void putIncidence(Image* target, const Image& lightMap, const lotlighting::Setti
 
 } // namespace
 
+GroundNormals groundNormals(const lotshadow::Inputs& lot) {
+    constexpr int kMaxTiles = 256;
+    GroundNormals out;
+    if (!lot.corner || lot.levels <= 0 || lot.width <= 0 || lot.height <= 0 || lot.width > kMaxTiles || lot.height > kMaxTiles) {
+        return out;
+    }
+    const int w = lot.width, h = lot.height;
+    out.width = w;
+    out.height = h;
+    out.corners.assign(static_cast<std::size_t>(w + 1) * static_cast<std::size_t>(h + 1), {0, 0, 0});
+    auto corner = [&](int x, int y) -> std::array<float, 3>& {
+        return out.corners[static_cast<std::size_t>(y) * static_cast<std::size_t>(w + 1) + static_cast<std::size_t>(x)];
+    };
+    auto add = [](std::array<float, 3>& to, const std::array<float, 3>& n) {
+        for (std::size_t c = 0; c < 3; ++c) to[c] += n[c];
+    };
+    auto unit = [](std::array<float, 3> n) {
+        const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+        return len > 0 && std::isfinite(len) ? std::array<float, 3>{n[0] / len, n[1] / len, n[2] / len} : std::array<float, 3>{0, 0, 1};
+    };
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const float h00 = lot.corner(x, y, 0);
+            const float d10 = lot.corner(x + 1, y, 0) - h00, d01 = lot.corner(x, y + 1, 0) - h00, d11 = lot.corner(x + 1, y + 1, 0) - h00;
+            // Triangle (x, y) (x + 1, y) (x + 1, y + 1), then (x, y) (x + 1, y + 1) (x, y + 1).
+            const auto lower = unit({-d10, d10 - d11, 1});
+            const auto upper = unit({d01 - d11, -d01, 1});
+            add(corner(x, y), lower);
+            add(corner(x + 1, y), lower);
+            add(corner(x + 1, y + 1), lower);
+            add(corner(x, y), upper);
+            add(corner(x + 1, y + 1), upper);
+            add(corner(x, y + 1), upper);
+        }
+    }
+    for (auto& n : out.corners) n = unit(n);
+    return out;
+}
+
+std::array<float, 3> GroundNormals::at(float x, float y) const {
+    if (width <= 0 || height <= 0 || corners.size() != static_cast<std::size_t>(width + 1) * static_cast<std::size_t>(height + 1) ||
+        !std::isfinite(x) || !std::isfinite(y)) {
+        return {0, 0, 1};
+    }
+    const float tx = std::clamp(std::floor(x), 0.0f, static_cast<float>(width - 1)), ty = std::clamp(std::floor(y), 0.0f, static_cast<float>(height - 1));
+    const float u = std::clamp(x - tx, 0.0f, 1.0f), v = std::clamp(y - ty, 0.0f, 1.0f);
+    const auto at = [&](int cx, int cy) { return corners[static_cast<std::size_t>(cy) * static_cast<std::size_t>(width + 1) + static_cast<std::size_t>(cx)]; };
+    const int ix = static_cast<int>(tx), iy = static_cast<int>(ty);
+    const auto a = at(ix, iy), b = at(ix + 1, iy), c = at(ix, iy + 1), d = at(ix + 1, iy + 1);
+    std::array<float, 3> n{};
+    for (std::size_t k = 0; k < 3; ++k) {
+        n[k] = a[k] * (1 - u) * (1 - v) + b[k] * u * (1 - v) + c[k] * (1 - u) * v + d[k] * u * v;
+    }
+    const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    return len > 0 && std::isfinite(len) ? std::array<float, 3>{n[0] / len, n[1] / len, n[2] / len} : std::array<float, 3>{0, 0, 1};
+}
+
 void fill(Scene& scene, const lotlighting::Result& light, const lotlighting::Settings& settings, const Sunlight* sunlight) {
     if (!scene.lightMaps) {
         return;

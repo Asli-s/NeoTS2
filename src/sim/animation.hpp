@@ -60,8 +60,8 @@ struct PlayingAnimation {
     float lengthMs = 0;   // at that speed, 0 when its length isn't known (it ends at once)
     bool flipped = false;
     bool loops = false;   // plays over and over (a walk) instead of holding its last pose
-    // Once played, an Animate Sim clip fades out over a quarter second, unless byte 2 flag 0x40 says
-    // to drop it at once. Then it is gone, and the joints it drove keep their last pose.
+    // An Animate Sim clip fades out over its last fadeOutMs, unless byte 2 flag 0x40 says to drop it
+    // at its end. Then it is gone, and the joints it drove keep their last pose.
     bool blendsOut = true;
     // A locomotion clip's base heading: its root and limb controls play turned to it (the heading
     // where a turn in place starts, the path's heading for a walk's clips). None for other clips.
@@ -95,8 +95,23 @@ struct PlayingAnimation {
     std::int16_t eventStackObject = 0;
     std::size_t eventsTold = 0;
 
+    // Set for an Animate Sim clip: it fades in over fadeInMs from its start and out over its last
+    // fadeOutMs (see animateFades), on its own whatever plays after it. It holds its full weight
+    // between.
+    bool fades = false;
+    float fadeInMs = 0, fadeOutMs = 0;
+
     bool finished(double nowMs) const { return nowMs - startMs >= lengthMs; }
+    // Whether it has begun fading out: Animate Sim lets the script go on from then.
+    bool fadingOut(double nowMs) const { return nowMs - startMs >= lengthMs - fadeOutMs; }
 };
+
+// How long an Animate Sim clip playing `lengthMs` fades in and out: a fixed time each (none where
+// the operands turn it off), both shortened alike to fit a clip shorter than the two together.
+struct AnimateFades {
+    float inMs = 0, outMs = 0;
+};
+AnimateFades animateFades(float lengthMs, bool fadesIn, bool fadesOut);
 
 // An animation laid over a Sim or an object by Animate Overlay (0x6B). It plays on its own while
 // scripts go on. Its event tree hears when it starts blending out (kBlendingOutEvent), then when it

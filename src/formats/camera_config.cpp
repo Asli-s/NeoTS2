@@ -175,4 +175,14 @@ float nearClipAt(const Config& config, float distance) {
     return atDistance(config, distance, [](const ZoomLevel& l) { return l.nearClip; });
 }
 
+int zoomLevelAt(const Config& config, float distance) {
+    const auto& l = config.levels;
+    for (std::size_t i = 0; i < l.size(); ++i) {
+        if (l[i].distance <= distance) {
+            return static_cast<int>(i);
+        }
+    }
+    return static_cast<int>(l.size()) - 1;
+}
+
 } // namespace ts2::camera

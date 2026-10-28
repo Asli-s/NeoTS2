@@ -88,6 +88,7 @@ private:
     void makeClipPipeline(const std::filesystem::path& shaders);
     void makeSkyPipeline(const std::filesystem::path& shaders);
     void makeWaterPipeline(const std::filesystem::path& shaders);
+    void makeShadowPipelines(const std::filesystem::path& shaders);
     void destroy();
     void releaseSprites();
     void uploadSpriteVertices(SDL_GPUCommandBuffer* cmd, unsigned width, unsigned height);
@@ -102,6 +103,13 @@ private:
     void drawBoundary(const Frame& f);
     void drawTerrain(const Frame& f, SDL_GPURenderPass* on, const Mat4& viewProjection, bool reflected);
     void drawList(const Frame& f, const std::vector<Draw>& list, int blend);
+    [[nodiscard]] std::size_t drawShadows(const Frame& f);
+    void makeObjectShadowPipelines(const std::filesystem::path& shaders);
+    // Makes the objects' pictures, list and grid again when the shadows' layout changed.
+    void updateObjectShadows(const Frame& f);
+    void drawObjectPictures(const Frame& f, const scene::objectshadow::Layout& layout);
+    // False when the upload couldn't be staged, so the next frame tries again.
+    bool uploadObjectPlaces(const Frame& f, const scene::objectshadow::Layout& layout);
     void drawRoads(const Frame& f);
     void drawWater(const Frame& f);
     void drawSprites(const Frame& f);
@@ -123,8 +131,8 @@ private:
     SDL_GPUSampler* sampler_ = nullptr;
     SDL_GPUSampler* clampedSampler_ = nullptr;  // sampler_, clamped at the edges
     // Pipelines by [two-sided][blend]: opaque and alpha-tested surfaces write depth, blended ones don't.
-    SDL_GPUGraphicsPipeline* pipelines_[2][3] = {};  // by two-sided, then opaque, blended or added
-    SDL_GPUGraphicsPipeline* skinnedPipelines_[2][3] = {};  // the same for skinned primitives
+    SDL_GPUGraphicsPipeline* pipelines_[2][4] = {};  // by two-sided, then opaque, blended, added or summed
+    SDL_GPUGraphicsPipeline* skinnedPipelines_[2][4] = {};  // the same for skinned primitives
     SDL_GPUBuffer* jointBuffer_ = nullptr;  // jointData_ on the GPU
     std::size_t jointCapacity_ = 0;  // floats the buffer holds
 
@@ -145,6 +153,26 @@ private:
     SDL_GPUTexture* reflection_ = nullptr;
     SDL_GPUTexture* reflectionDepth_ = nullptr;
     unsigned reflectionWidth_ = 0, reflectionHeight_ = 0;
+
+    // The Sims' projected shadows: their pictures and the same blurred, an atlas each (see
+    // kShadowTilesAcross), and how they are drawn and read.
+    SDL_GPUGraphicsPipeline* shadowCasterPipeline_ = nullptr;
+    SDL_GPUGraphicsPipeline* shadowBlurPipeline_ = nullptr;
+    SDL_GPUTexture* shadowPictures_ = nullptr;
+    SDL_GPUTexture* shadowBlurred_ = nullptr;
+    SDL_GPUSampler* shadowSampler_ = nullptr;  // linear, clamped, no mip levels
+    SDL_GPUSampler* shadowPoint_ = nullptr;    // nearest texel, clamped
+    // The lot objects' shadows from the sun: each picture drawn into a scratch picture, then blurred
+    // into its tile of an atlas (see kObjectTilesAcross), and the places' list and the grid saying
+    // which places reach each tile. All made again only when the layout changes.
+    SDL_GPUGraphicsPipeline* objectCasterPipeline_ = nullptr;
+    SDL_GPUGraphicsPipeline* objectBlurPipeline_ = nullptr;
+    SDL_GPUTexture* objectScratch_ = nullptr;
+    SDL_GPUTexture* objectPictures_ = nullptr;
+    SDL_GPUTexture* objectPlaces_ = nullptr;
+    SDL_GPUTexture* objectGrid_ = nullptr;
+    std::shared_ptr<const scene::objectshadow::Layout> objectLayout_;
+    std::array<float, 4> objectGridArea_{};  // see ShadowUniforms::objectGrid
 
     // Its roads.
     SDL_GPUGraphicsPipeline* roadPipeline_ = nullptr;

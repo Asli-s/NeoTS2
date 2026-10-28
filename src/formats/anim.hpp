@@ -39,6 +39,12 @@ struct Channel {
     // Without flag bit 15 the channel is added on top of what the other clips make of the joint
     // instead of being averaged with them (weight-shift overlays and the like).
     bool additive() const { return (flags & 0x8000) == 0; }
+    // The IK chain whose joint the channel turns, as an index into Animation::chains, -1 for none.
+    // Such a channel shares its joint with the chain's solve (see scene::channelShare).
+    int chain() const {
+        const int c = static_cast<int>((flags >> 25) & 15);
+        return c == 15 ? -1 : c;
+    }
 };
 
 // Where an IK chain's end reaches, as channels of the animation (they need not be skeleton joints):

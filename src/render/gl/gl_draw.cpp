@@ -74,6 +74,10 @@ void GlRenderer::setState(const State& want) {
             gl_.Enable(GL_BLEND);
             gl_.BlendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
             break;
+        case 6:  // added whatever its alpha
+            gl_.Enable(GL_BLEND);
+            gl_.BlendFuncSeparate(GL_ONE, GL_ONE, GL_ZERO, GL_ONE);
+            break;
         default:  // summed
             gl_.Enable(GL_BLEND);
             gl_.BlendFuncSeparate(GL_ONE, GL_ONE, GL_ONE, GL_ONE);
@@ -214,7 +218,10 @@ void GlRenderer::drawList(const FrameView& f, const std::vector<Draw>& list, int
         const auto& p = *d.primitive;
         const scene::Material* m = d.material;
         State state;
-        state.blend = blend && m && m->alpha == scene::AlphaMode::Add ? 2 : blend;
+        state.blend = !blend || !m                          ? blend
+                      : m->alpha == scene::AlphaMode::Add ? 2
+                      : m->alpha == scene::AlphaMode::Sum ? 6
+                                                          : blend;
         state.cull = !(m && m->doubleSided);
         state.depthWrite = blend == 0;
         setState(state);

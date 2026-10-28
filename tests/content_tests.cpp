@@ -1,9 +1,12 @@
 // Content found in the install: products, neighborhoods, UI data and lot lists.
 #include "test_support.hpp"
 
+#include "content/resource_index.hpp"
 #include "content/save_folder.hpp"
+#include "content/user_props.hpp"
 #include "content/ui_queue.hpp"
 #include "formats/dbpf_writer.hpp"
+#include "parse_float.hpp"
 #include "paths/save_folders.hpp"
 
 #include <cstdlib>
@@ -205,9 +208,17 @@ void lightFilesAreReadAsTheGame() {
         "lightingState day\n"
         "  modifiers insideObjects .8 .7 .35 .5\n"
         "  diffParam insideAmbientColor (.85, .75, .75)\n"
+        "  skylight (1, 1, 1) 0.5\n"
+        "  portalSaturation 0.6\n"
+        "  projectiveShadowStrength 0.73\n"
         "end\n"
         "lightingState dusk : day\n"
         "  modifiers insideObjects 2 3\n"
+        "end\n"
+        "lightingState dark\n"
+        "  skylight (0.2, 0.2, 0.4)\n"
+        "end\n"
+        "lightingState plain\n"
         "end\n"
         "include \"elsewhere.txt\"\n");
     const auto* lamp = l.light("mylamp_LIGHT");
@@ -225,6 +236,11 @@ void lightFilesAreReadAsTheGame() {
     const auto& dusk = l.states.at("dusk").modifiers.at("insideObjects");
     CHECK(dusk.practicalStrength == 2 && dusk.diffusionStrength == 3 && dusk.diffusionFalloff == 0.5f);
     CHECK((l.states.at("day").diffParams.at("insideAmbientColor") == std::vector<float>{0.85f, 0.75f, 0.75f}));
+    // A skylight line marks the state (its strength may be left out), and states inherit it.
+    CHECK(l.states.at("day").hasSkylight && l.states.at("dusk").hasSkylight && l.states.at("dusk").portalSaturation == 0.6f);
+    CHECK(l.states.at("dark").hasSkylight && (l.states.at("dark").skylight == std::array<float, 3>{0.2f, 0.2f, 0.4f}));
+    CHECK(!l.states.at("plain").hasSkylight && l.states.at("plain").portalSaturation == 1);
+    CHECK(l.states.at("dusk").projectiveShadowStrength == 0.73f && l.states.at("plain").projectiveShadowStrength == 1);
 
     // Macros that create themselves or multiply stop at the limits instead of running away.
     const auto bomb = ts2::content::readLightingText(
@@ -270,6 +286,20 @@ void objectDaylightMatchesTheGame() {
     night.lights["sun"] = {{-1.5f, -1, 2}, {0.45f, 0.45f, 1}, 0.6f};
     const auto n = ts2::scene::outdoorLighting(night);
     CHECK(n.lights.size() == 1 && near(n.lights[0].color, {0.1575f, 0.1575f, 0.465f}));
+
+    // Sims outdoors also get simFill1 and simFill2, all sorted by brightness as the game drew them on
+    // the Smiths' lot: sun, simFill2, simFill1, fill1, sky.
+    day.lights["simFill1"] = {{1, -1.2f, 1}, {1, 0.95f, 0.89f}, 0.5f};
+    day.lights["simFill2"] = {{-2, 2, 1}, {1, 0.95f, 0.89f}, 1.75f};
+    const auto withSims = ts2::scene::objectDaylight(lighting);
+    CHECK(withSims && withSims->lights.size() == 3 && withSims->simLights.size() == 2);
+    if (!withSims) return;
+    const auto sims = ts2::scene::withSimLights(*withSims);
+    CHECK(sims.lights.size() == 5 && sims.simLights.empty());
+    if (sims.lights.size() == 5) {
+        CHECK(near(sims.lights[0].color, {0.94f, 0.88f, 0.66f}) && near(sims.lights[1].color, {0.875f, 0.7875f, 0.6825f}));
+        CHECK(near(sims.lights[2].color, {0.25f, 0.225f, 0.195f}) && near(sims.lights[3].color, {0.25f, 0.15f, 0.2f}));
+    }
 }
 
 void installedPacksAreFound() {
@@ -405,8 +435,11 @@ void newSaveFolderIsFilledAsTheGame() {
     CHECK(fs::is_directory(saves / "LotCatalog") && fs::is_empty(saves / "LotCatalog"));
     CHECK(!fs::exists(saves / "Neighborhoods/X001") && !fs::exists(saves / "Neighborhoods/Link"));
     CHECK(!fs::exists(saves / "properties.txt"));
-    CHECK(!fs::exists(root / "saves.neots2-setup") && !fs::exists(root / "saves.neots2-lock"));
+    CHECK(!fs::exists(root / "saves.neots2-setup"));
+    CHECK(!ts2::paths::saveFolderBusy(saves));
 #ifdef _WIN32
+    // Only Windows deletes the lock file when the lock ends. Elsewhere the empty file stays.
+    CHECK(!fs::exists(root / "saves.neots2-lock"));
     CHECK(linked);
 #endif
 
@@ -766,6 +799,29 @@ void characterFilesIgnoreAppleDoubleSidecars() {
     std::filesystem::remove_all(root, error);
 }
 
+void resourceIndexLeavesOutAppleDoubleSidecars() {
+    const std::filesystem::path root = std::filesystem::temp_directory_path() / ("neots2-sidecar-index-" + std::to_string(std::random_device{}()));
+    std::filesystem::create_directories(root);
+    const ts2::dbpf::ResourceKey key{0xAC2950C1, 0x6C2A22C3, 1, 0};
+    {
+        std::ofstream out(root / "objects.package", std::ios::binary);
+        ts2::dbpf::PackageWriter writer(out);
+        const std::string bytes = "resource";
+        writer.add(key, std::span(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()), false, 0);
+        writer.finish(0);
+        std::ofstream sidecar(root / "._objects.package", std::ios::binary);
+        sidecar.write("\x00\x05\x16\x07", 4);
+    }
+    ts2::content::ResourceIndex index;
+    CHECK(!index.addPackage(root / "._objects.package"));
+    CHECK(index.addPackage(root / "objects.package"));
+    CHECK(index.packageCount() == 1 && index.packagePath(0) == root / "objects.package");
+    const auto* found = index.find(key);
+    CHECK(found && found->package == 0);
+    std::error_code error;
+    std::filesystem::remove_all(root, error);
+}
+
 void portraitImageIsTheLifeStageFlag() {
     CHECK(ts2::content::portraitImage(1) == 0x20u);   // baby
     CHECK(ts2::content::portraitImage(2) == 0x01u);   // toddler
@@ -1038,6 +1094,35 @@ void thumbnailPicturesAreScaledAndMasked() {
     CHECK(ts2::content::masked(two, ts2::tga::Pixels{1, 1, {0, 0, 0, 0}}).rgba == two.rgba);  // sizes differ: as it is
 }
 
+void numbersAreReadWholeOrFromTheStart() {
+    CHECK(ts2::parseFloat("1.25") == 1.25f && ts2::parseFloat("-0.5") == -0.5f);
+    CHECK(!ts2::parseFloat("1.25x") && !ts2::parseFloat("") && !ts2::parseFloat(" 1") && !ts2::parseFloat("x"));
+    std::size_t length = 0;
+    CHECK(ts2::parseLeadingFloat("1.25x", &length) == 1.25f && length == 4);
+    CHECK(ts2::parseLeadingFloat("2", &length) == 2.0f && length == 1);
+    CHECK(!ts2::parseLeadingFloat("x1") && !ts2::parseLeadingFloat(""));
+}
+
+void userOptionsAreReadAsTheGameSavesThem() {
+    // Laid out as the game writes Config/userProps.xml.
+    const auto props = ts2::content::parseUserProps(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<cGZPropertySetString>\n"
+        "  <AnyBoolean key=\"edgeScrolling\" type=\"0xcba908e1\">true</AnyBoolean>\n"
+        "  <AnyFloat32 key=\"horzedgescrollrate\" type=\"0xabc78708\">0.5</AnyFloat32>\n"
+        "  <AnyBoolean key=\"rotateCameraSims1Mode\" type=\"0xcba908e1\">false</AnyBoolean>\n"
+        "  <AnyStringSet key=\"visitedNeighborhoods\" type=\"0xad9a861e\">\n    <Element>N001_Neighborhood</Element>\n  </AnyStringSet>\n"
+        "  <AnyStringSet key=\"visitedNeighborhoodsNoCollege\" type=\"0xad9a861e\"/>\n"
+        "  <AnyBoolean key=\"quickTips\" type=\"0xcba908e1\">yes</AnyBoolean>\n</cGZPropertySetString>\n");
+    CHECK(props.flag("edgeScrolling") == true && props.flag("rotateCameraSims1Mode") == false);
+    CHECK(props.values.at("horzedgescrollrate") == "0.5" && !props.values.contains("visitedNeighborhoods"));
+    CHECK(!props.flag("quickTips") && !props.flag("missing") && !props.values.contains("visitedNeighborhoodsNoCollege"));
+    // A file cut short keeps what came before the break.
+    const auto cut = ts2::content::parseUserProps("<AnyBoolean key=\"a\" type=\"0x1\">true</AnyBoolean><AnyBoolean key=\"b\" type=\"0x1\">tr");
+    CHECK(cut.flag("a") == true && !cut.values.contains("b"));
+    CHECK(ts2::content::parseUserProps("<Any").values.empty() && ts2::content::parseUserProps("<Any key=\"x\">").values.empty());
+    CHECK(ts2::content::readUserProps("no such folder").values.empty());
+}
+
 } // namespace
 
 std::vector<Test> contentTests() {
@@ -1050,6 +1135,7 @@ std::vector<Test> contentTests() {
         {"build scripts read patterns and wall styles", buildScriptsReadPatternsAndWallStyles},
         {"lot number comes from the package name", lotNumberComesFromThePackageName},
         {"character files leave out AppleDouble sidecars", characterFilesIgnoreAppleDoubleSidecars},
+        {"a resource index leaves out AppleDouble sidecars", resourceIndexLeavesOutAppleDoubleSidecars},
         {"portrait image is the life stage flag", portraitImageIsTheLifeStageFlag},
         {"needs bar rows match the game", needsBarRowsMatchTheGame},
         {"mood rows match the game", moodRowsMatchTheGame},
@@ -1077,5 +1163,7 @@ std::vector<Test> contentTests() {
         {"thumbnails are merged as the game", thumbnailsAreMergedAsTheGame},
         {"lot catalog is imported as the game", lotCatalogIsImportedAsTheGame},
         {"neighborhoods are added only when missing", neighborhoodsAreAddedOnlyWhenMissing},
+        {"user options are read as the game saves them", userOptionsAreReadAsTheGameSavesThem},
+        {"numbers are read whole or from the start", numbersAreReadWholeOrFromTheStart},
     };
 }

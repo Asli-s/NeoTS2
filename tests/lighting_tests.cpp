@@ -3,6 +3,11 @@
 #include "content/lighting_state.hpp"
 #include "scene/lot_skirt.hpp"
 #include "scene/incidence_map.hpp"
+#include "scene/object_shadow.hpp"
+#include "scene/object_shadow_picture.hpp"
+#include "scene/sim_shadows.hpp"
+
+#include <limits>
 
 namespace {
 
@@ -116,8 +121,10 @@ void objectsInRoomsGetTheirRoomsLights() {
     scene.instances = {prop, outdoors, window, sim, wall};
     std::map<std::int16_t, lotlighting::Room> rooms;
     rooms[4].groups[lotlighting::kObjects] = lights;
-    objectlights::light(scene, rooms, {}, 0.275f, [](int level, float x, float) { return std::int16_t(level == 1 && x < 4 ? 4 : 0); }, 1);
+    rooms[4].average = {0.375f, 0.354f, 0.333f};
+    objectlights::light(scene, rooms, {}, {}, {}, 0.275f, [](int level, float x, float) { return std::int16_t(level == 1 && x < 4 ? 4 : 0); }, 1);
     CHECK(scene.lightSets.size() == 1 && scene.instances[0].lightSet == 0 && scene.instances[1].lightSet == -1);
+    CHECK(scene.lightSets[0].textureLight == rooms[4].average);
     CHECK(scene.instances[2].lightSet == -1 && scene.instances[3].lightSet == -1 && scene.instances[4].lightSet == -1);
 }
 
@@ -159,7 +166,7 @@ void objectsGetTheWindowLightsOfTheirRoom() {
     other.into = 5;
     std::vector<lotlighting::PortalLight> portals{window, other};
     const auto roomAt = [](int level, float x, float) { return std::int16_t(level == 0 && x > 0 ? 4 : 0); };
-    objectlights::light(scene, rooms, portals, 0.275f, roomAt, 1);
+    objectlights::light(scene, rooms, {}, portals, {}, 0.275f, roomAt, 1);
     CHECK(scene.instances[0].lightSet == 0 && scene.lightSets.size() == 1);
     if (scene.lightSets.empty()) return;
     const auto& lights = scene.lightSets[0].lights;
@@ -169,15 +176,91 @@ void objectsGetTheWindowLightsOfTheirRoom() {
 
     // Turned toward the thing, the beam reaches it too. A thing behind the spill's plane gets neither.
     portals[0].lightAxis = {-0.848f, 0, 0.53f};
-    objectlights::light(scene, rooms, portals, 0.275f, roomAt, 1);
+    objectlights::light(scene, rooms, {}, portals, {}, 0.275f, roomAt, 1);
     CHECK(scene.lightSets.size() == 1 && scene.lightSets[0].lights.size() == 3 && scene.lightSets[0].lights[2].spot);
     if (scene.lightSets.size() == 1 && scene.lightSets[0].lights.size() == 3) {
         CHECK(std::abs(scene.lightSets[0].lights[2].coneOuter - 0.866025f) < 1e-5f);
     }
     portals[0].spillPoint = {1.9f, 1.5f, 1.5f};
     portals[0].lightAxis = {0, 0.848f, 0.53f};
-    objectlights::light(scene, rooms, portals, 0.275f, roomAt, 1);
+    objectlights::light(scene, rooms, {}, portals, {}, 0.275f, roomAt, 1);
     CHECK(scene.lightSets.size() == 1 && scene.lightSets[0].lights.size() == 1);
+
+    // A ceiling lamp in the room lights it as a point light. Its reach squared, 18.308, is what the
+    // game gave the Smiths' ceiling lamps. A lamp in another room lights nothing here.
+    objectlights::LampLight lamp;
+    lamp.room = 4;
+    lamp.position = {2.5f, 1.5f, 2.7f};
+    lamp.color = {1.2f, 1.176f, 1.152f};
+    lamp.falloff = 0.35f;
+    auto elsewhere = lamp;
+    elsewhere.room = 5;
+    objectlights::light(scene, rooms, {}, portals, {lamp, elsewhere}, 0.275f, roomAt, 1);
+    CHECK(scene.lightSets.size() == 1 && scene.lightSets[0].lights.size() == 2);
+    if (scene.lightSets.size() == 1 && scene.lightSets[0].lights.size() == 2) {
+        const auto& l = scene.lightSets[0].lights[1];
+        CHECK(l.point && !l.spot && l.position == lamp.position && std::abs(l.range * l.range - 18.3083f) < 1e-3f);
+    }
+
+    // A Sim standing there gets the room's "sim:" lights with the same lamp, a thing its "object:" ones.
+    roomlight::Lights sims = objects;
+    sims.ambient = {0.66445f, 0.62695f, 0.57278f};
+    rooms[4].groups[lotlighting::kSims] = sims;
+    const auto lightsAt = objectlights::thingLights(rooms, {}, {}, {lamp}, 0.275f, roomAt);
+    const auto simSets = lightsAt(scene.meshes[0], thing.transform, 0, LightGroup::Sims);
+    const auto thingSets = lightsAt(scene.meshes[0], thing.transform, 0, LightGroup::Props);
+    CHECK(simSets.size() == 1 && thingSets.size() == 1);
+    if (simSets.size() == 1 && thingSets.size() == 1) {
+        CHECK(simSets[0].ambient == sims.ambient && thingSets[0].ambient == objects.ambient);
+        CHECK(simSets[0].lights.size() == 2 && simSets[0].lights[1].point);
+    }
+}
+
+// Outdoors is room 0: a thing there picks from the daylight's lights and the lamps and windows
+// lighting outdoors, never from a lamp in a room. A thing no outdoor lamp reaches keeps the daylight.
+// A Sim outdoors also picks from the daylight's Sim-only lights.
+void objectsOutdoorsGetTheOutdoorLampsAndWindows() {
+    using namespace ts2::scene;
+    Scene scene;
+    Mesh mesh;
+    mesh.primitives.resize(1);
+    mesh.primitives[0].positions = {-0.25f, -0.25f, 0, 0.25f, 0.25f, 0.5f};
+    scene.meshes.push_back(mesh);
+    Instance near, far;
+    near.part = far.part = Part::Object;
+    near.mesh = far.mesh = 0;
+    near.level = far.level = 1;
+    near.transform = Transform::at(1.5f, 1.5f, 0, 0);
+    far.transform = Transform::at(30.5f, 1.5f, 0, 0);
+    scene.instances = {near, far};
+    ObjectLighting outdoor;
+    outdoor.ambient = {0.188f, 0.188f, 0.225f};
+    outdoor.textureLight = {0.35f, 0.35f, 0.7f};
+    outdoor.lights.resize(2);
+    outdoor.lights[0].color = {0.158f, 0.158f, 0.465f};
+    outdoor.lights[0].sun = true;
+    outdoor.lights[1].color = {0.037f, 0.037f, 0.465f};
+    outdoor.simLights.resize(1);
+    outdoor.simLights[0].color = {0.2f, 0.2f, 0.3f};
+    objectlights::LampLight post;  // a deck post lamp
+    post.position = {2.5f, 1.5f, 1.2f};
+    post.color = {1.5f, 1.47f, 1.44f};
+    post.falloff = 0.4f;
+    auto inside = post;
+    inside.room = 4;
+    const auto roomAt = [](int, float, float) { return std::int16_t(0); };
+    objectlights::light(scene, {}, outdoor, {}, {post, inside}, 0.275f, roomAt, 1);
+    CHECK(scene.lightSets.size() == 1 && scene.instances[0].lightSet == 0 && scene.instances[1].lightSet == -1);
+    if (scene.lightSets.size() != 1) return;
+    const auto& set = scene.lightSets[0];
+    CHECK(set.ambient == outdoor.ambient && set.textureLight == outdoor.textureLight);
+    CHECK(set.lights.size() == 3 && set.lights[0].sun && !set.lights[1].point);
+    if (set.lights.size() == 3) CHECK(set.lights[2].point && set.lights[2].position == post.position);
+
+    const auto lightsAt = objectlights::thingLights({}, outdoor, {}, {post, inside}, 0.275f, roomAt);
+    const auto sim = lightsAt(scene.meshes[0], near.transform, 0, LightGroup::Sims);
+    CHECK(sim.size() == 1 && lightsAt(scene.meshes[0], far.transform, 0, LightGroup::Sims).empty());
+    if (sim.size() == 1) CHECK(sim[0].lights.size() == 4 && sim[0].simLights.empty() && sim[0].lights[3].point);
 }
 
 // A window's part whose node is in a room gets the room's door and window light with the floor light
@@ -212,7 +295,7 @@ void doorAndWindowPartsInRoomsGetTheFloorLightUnderThem() {
     portals.directionals.push_back({{0.044f, 0.042f, 0.039f}, {0, 1, -0.75f}});
     std::map<std::int16_t, lotlighting::Room> rooms;
     rooms[12].groups[lotlighting::kPortals] = portals;
-    objectlights::light(scene, rooms, {}, 0.275f, [](int level, float, float y) { return std::int16_t(level == 1 && y > 2 ? 12 : 0); }, 1);
+    objectlights::light(scene, rooms, {}, {}, {}, 0.275f, [](int level, float, float y) { return std::int16_t(level == 1 && y > 2 ? 12 : 0); }, 1);
     const auto& parts = scene.instances[0].partLightSets;
     CHECK((parts == std::vector<int>{-1, 0, 0}) && scene.lightSets.size() == 1);
     if (scene.lightSets.empty()) return;
@@ -514,20 +597,38 @@ void windowLightMatchesTheGame() {
     CHECK(std::abs(pair[0].suppression - 0.85f) < 1e-6f && std::abs(pair[1].suppression - 0.85f) < 1e-6f);
 
     // Looking out from the outdoors into room 1, against the sun's x.
-    const auto l = lightsFor(pair[0], true, true, day, {0, 0, 0});
-    CHECK(l && l->spill && l->sources.size() == 2);
+    const auto l = lightsFor(pair[0], true, day, {0, 0, 0});
+    CHECK(l.spill && l.sources.size() == 2);
     const float sun = 0.54091f;  // how much the window faces the sun
-    CHECK(std::abs(l->beam.color[0] - 1.94f * 0.5f * 0.85f * 1.5f * sun) < 1e-5f && l->beam.falloff == 1.3f);
-    CHECK(std::abs(l->spill->color[2] - 0.5f * 0.772f * 0.9f * 0.85f * 1.5f) < 1e-5f && l->spill->falloff == 0.4f);
-    CHECK(std::abs(l->sources[0].color[0] - 1.25f * 1.94f * 0.7f * sun) < 1e-5f);  // the sun beam on floors and walls
-    CHECK(std::abs(l->sources[1].color[0] - 1.25f * 0.5f * 0.8f) < 1e-5f && std::abs(l->sources[1].falloff - 0.9f) < 1e-6f);
+    CHECK(std::abs(l.beam.color[0] - 1.94f * 0.5f * 0.85f * 1.5f * sun) < 1e-5f && l.beam.falloff == 1.3f);
+    CHECK(std::abs(l.spill->color[2] - 0.5f * 0.772f * 0.9f * 0.85f * 1.5f) < 1e-5f && l.spill->falloff == 0.4f);
+    CHECK(std::abs(l.sources[0].color[0] - 1.25f * 1.94f * 0.7f * sun) < 1e-5f);  // the sun beam on floors and walls
+    CHECK(std::abs(l.sources[1].color[0] - 1.25f * 0.5f * 0.8f) < 1e-5f && std::abs(l.sources[1].falloff - 0.9f) < 1e-6f);
 
-    // A door lets no sun beam through (doorOrArchDirectMultiplier 0), and without sun nothing is supported.
+    // A door lets no sun beam through (doorOrArchDirectMultiplier 0).
     Portal door = pair[0];
     door.doorOrArch = true;
-    const auto d = lightsFor(door, true, true, day, {0, 0, 0});
-    CHECK(d && d->beam.color[0] == 0 && d->sources.size() == 1);
-    CHECK(!lightsFor(pair[0], true, false, day, {0, 0, 0}));
+    const auto d = lightsFor(door, true, day, {0, 0, 0});
+    CHECK(d.beam.color[0] == 0 && d.sources.size() == 1);
+
+    // Without a skylight line the window takes the sky's light outside it, all of it and no spill.
+    // Outside is +x here: the sun's weight is 2 x 0.54091, the sky line faces away, the rest is skylight.
+    day.outdoorLights = {{day.sunColor, 2, day.sunDirection}, {{0.8f, 0.8f, 0.73f}, 0.5f, {-0.54091f, -0.43273f, 0.72122f}}};
+    const float sunWeight = 2 * sun;
+    const float outside = 0.97f * sunWeight + 0.5f * (1 - sunWeight);
+    CHECK(std::abs(skyLight(day, {1, 0, 0})[0] - outside) < 1e-5f);
+    day.skylight = false;
+    const auto n = lightsFor(pair[0], true, day, {0, 0, 0});
+    CHECK(!n.spill && std::abs(n.beam.color[0] - outside * 0.5f * 0.85f * 1.5f) < 1e-5f);
+    CHECK(std::abs(n.roomColor[0] - outside * 0.85f) < 1e-5f);
+
+    // Below full saturation the sun and skylight lean toward that same sky light.
+    day.skylight = true;
+    day.saturation = 0.5f;
+    const auto h = lightsFor(pair[0], true, day, {0, 0, 0});
+    const float share = (sun - 1) * 0.5f + 1;
+    CHECK(std::abs(h.beam.color[0] - ((1.94f - outside) * 0.5f + outside) * 0.5f * 0.85f * 1.5f * share) < 1e-5f);
+    CHECK(std::abs(h.spill->color[0] - ((0.5f - outside) * 0.5f + outside) * 0.9f * 0.85f * 1.5f) < 1e-5f);
 }
 
 void wallRunsAreLaidOutAsTheGame() {
@@ -932,7 +1033,7 @@ void lotLightingIsWorkedOutAsTheGame() {
     if (!s) return;
     CHECK(s->insideFloorAmbient == 0.001f && s->outsideFloorAmbient == 0.25f && s->outsideColor[1] == 0.5f);
     CHECK(s->insideColor[0] == 0.85f && s->floorThreshold == 0.3f && s->wallThreshold == 0.4f);
-    CHECK(s->sun && s->day.sky[0] == 0.5f && std::abs(s->day.sunDirection[2] - 2 / std::sqrt(1.5f * 1.5f + 1.2f * 1.2f + 4)) < 1e-6f);
+    CHECK(s->day.skylight && s->day.sky[0] == 0.5f && std::abs(s->day.sunDirection[2] - 2 / std::sqrt(1.5f * 1.5f + 1.2f * 1.2f + 4)) < 1e-6f);
     CHECK(s->day.insidePortals.practical == 0.5f && s->day.insidePortals.diffusion == 0.7f && s->day.insidePortals.practicalFalloff == 1.3f);
     CHECK(s->groups[lotlighting::kObjects].overall == 0.5f && s->groups[lotlighting::kSims].overall == 0.4f);
     CHECK(s->unlit.color[0] == 0.45f && s->unlit.threshold == 0.4f && s->suppression.radius == 3);
@@ -1327,7 +1428,160 @@ void incidenceMapsFollowTheGame() {
     CHECK(ts2::scene::incidenceMap(even, 0, 1).rgba.empty());
 }
 
+// The ground's normals come from the lot's own triangles only: a flat lot faces straight up to its
+// edges, and a slope leans its corners away from the rise.
+void groundNormalsUseTheLotsOwnTriangles() {
+    using namespace ts2::scene;
+    lotshadow::Inputs flat;
+    flat.width = 3;
+    flat.height = 2;
+    flat.levels = 1;
+    flat.corner = [](int, int, int) { return 0.0f; };
+    const auto up = lotlightmaps::groundNormals(flat);
+    CHECK(up.corners.size() == 12);
+    for (const auto& p : {std::array<float, 2>{0, 0}, {0.125f, 1.5f}, {2.875f, 1.875f}, {3, 2}}) {
+        const auto n = up.at(p[0], p[1]);
+        CHECK(n[0] == 0 && n[1] == 0 && n[2] == 1);
+    }
+    // Rising one a tile along x: every corner leans back along -x by 45 degrees, edges included.
+    lotshadow::Inputs ramp = flat;
+    ramp.corner = [](int x, int, int) { return static_cast<float>(x); };
+    const auto lean = lotlightmaps::groundNormals(ramp);
+    for (const auto& n : lean.corners) {
+        CHECK(std::abs(n[0] + 0.70710678f) < 1e-5f && std::abs(n[1]) < 1e-5f && std::abs(n[2] - 0.70710678f) < 1e-5f);
+    }
+    // A corner only one tile's lower triangle touches takes that triangle's normal alone.
+    lotshadow::Inputs bump = flat;
+    bump.width = bump.height = 1;
+    bump.corner = [](int x, int y, int) { return x == 1 && y == 0 ? 1.0f : 0.0f; };
+    const auto c = lotlightmaps::groundNormals(bump).corners[1];
+    const float s = 1 / std::sqrt(3.0f);
+    CHECK(std::abs(c[0] + s) < 1e-5f && std::abs(c[1] - s) < 1e-5f && std::abs(c[2] - s) < 1e-5f);
+    // No heights, or a broken size: straight up.
+    lotshadow::Inputs none;
+    CHECK(lotlightmaps::groundNormals(none).corners.empty() && lotlightmaps::groundNormals(none).at(1, 1)[2] == 1);
+    lotshadow::Inputs huge = flat;
+    huge.width = 100000;
+    CHECK(lotlightmaps::groundNormals(huge).corners.empty());
+}
+
+// A fence casts its shadow from the top of its post model, or its rail's when it has no post.
+void fencesCastFromTheirModelsTop() {
+    using namespace ts2::scene;
+    Scene scene;
+    auto add = [&](const std::string& name, std::vector<float> positions) {
+        Mesh m;
+        m.name = name;
+        m.primitives.emplace_back().positions = std::move(positions);
+        scene.meshes.push_back(std::move(m));
+    };
+    add("fenceShortPost", {0, 0, -0.01f, 0, 0, 0.1978f});
+    add("fenceShortRail", {0, 0, 0, 1, 0, 0.1686f});
+    add("other", {0, 0, 5});
+    add("fenceFlowerBoxPost", {0, 0, 1.16f});
+    add("fenceFlowerBoxRail", {0, 0, 1.5678f});
+    add("fenceBrokenPost", {0, 0, 0.5f, 0, 0, std::numeric_limits<float>::quiet_NaN(), 0, 0, 1e9f});
+    CHECK(lotshadow::fenceTop(scene, "fenceshortpost", "fenceShortRail") == 0.1978f);
+    CHECK(lotshadow::fenceTop(scene, "", "fenceShortRail") == 0.1686f);
+    CHECK(lotshadow::fenceTop(scene, "fenceFlowerBoxPost", "fenceFlowerBoxRail") == 1.16f);
+    CHECK(lotshadow::fenceTop(scene, "missing", "fenceShortRail") == 0.0f);
+    CHECK(lotshadow::fenceTop(scene, "fenceBrokenPost", "") == 0.5f);
+}
+
 } // namespace
+
+// Lot objects' shadows on High: outdoors a picture from the sun takes the place of the model's
+// shadow groups, indoors the groups stay, and object data 0x44 or a door's type change the choice.
+void objectShadowsFollowTheGame() {
+    using namespace ts2::scene::objectshadow;
+    Facts pinball;
+    pinball.type = 4;
+    pinball.drawable = true;
+    pinball.hasShadowGroups = true;
+    CHECK(requested(pinball) == Kind::Sun);
+    CHECK(resolved(requested(pinball), true, pinball) == Kind::Sun && !showsShadowGroups(Kind::Sun));
+    CHECK(resolved(requested(pinball), false, pinball) == Kind::Quad && showsShadowGroups(Kind::Quad));
+
+    Facts groups = pinball;
+    groups.data68 = 2;
+    CHECK(resolved(requested(groups), false, groups) == Kind::Quad);
+    CHECK(resolved(requested(groups), true, groups) == Kind::None);
+    Facts wall = groups;
+    wall.data13 = 1;
+    wall.data8 = 2;
+    CHECK(resolved(requested(wall), true, wall) == Kind::Quad);
+
+    Facts none = pinball;
+    none.data68 = 1;
+    CHECK(requested(none) == Kind::Model && showsShadowGroups(Kind::Model));
+    Facts live = pinball;
+    live.data68 = 3;
+    CHECK(resolved(requested(live), true, live) == Kind::Live);
+
+    Facts door;
+    door.type = 8;
+    door.hasShadowGroups = true;
+    CHECK(resolved(requested(door), true, door) == Kind::Quad);
+    door.hasShadowGroups = false;
+    CHECK(requested(door) == Kind::Model);
+    Facts empty;
+    empty.type = 4;
+    CHECK(requested(empty) == Kind::Model);
+    CHECK(isShadowGroup("GroundShadow") && isShadowGroup("westwallshadow") && !isShadowGroup("shadows"));
+
+    // A pinball machine's picture camera matches the game's to 5 decimals.
+    ts2::scene::Mesh pinballBox;
+    pinballBox.primitives.emplace_back().positions = {-0.49132f, -0.45231f, -0.00479f, 0.49132f, 1.58297f, 2.04161f};
+    const auto shot = picture(pinballBox, 0, 0, {-0.5570860f, -0.3713907f, 0.7427813f});
+    const float game[12] = {0.34256f, -0.51385f, 0, 0.29049f, 0.303f, 0.202f, 0.32825f, -0.48069f, 0.19756f, 0.13171f, -0.26342f, 0.69444f};
+    bool same = shot.has_value() && shot->size == 128;
+    for (std::size_t i = 0; same && i < 12; ++i) {
+        same = std::abs(shot->camera[i] - game[i]) < 2e-5f;
+    }
+    CHECK(same);
+
+    // A broken model far bigger than any lot casts none.
+    ts2::scene::Mesh huge;
+    huge.primitives.emplace_back().positions = {-1e5f, -1e5f, 0, 1e5f, 1e5f, 1e5f};
+    CHECK(!picture(huge, 0, 0, {-0.5570860f, -0.3713907f, 0.7427813f}).has_value());
+}
+
+// Sims' projected shadows: the blur shares 255 between its taps, the colour is the game's by day and
+// at night, to the byte, and the picture frames the Sim as the game does.
+void simShadowsFollowTheGame() {
+    using namespace ts2::scene;
+    int sum = 0;
+    for (int i = -2; i <= 2; ++i) {
+        for (int j = -2; j <= 2; ++j) {
+            sum += simshadows::blurWeight(i, j, 2);
+        }
+    }
+    CHECK(sum == 255 && simshadows::blurWeight(-2, -2, 2) == 10 && simshadows::blurWeight(1, 2, 2) == 10 && simshadows::blurWeight(2, -2, 2) == 11);
+    CHECK(simshadows::blurWeight(3, 0, 2) == 0);
+
+    windowlight::Daylight day;
+    day.sky = {0.5f, 0.5f, 0.5f};
+    day.outdoorLights = {{{0.97f, 0.94f, 0.83f}, 2, {0.540914f, 0.432731f, 0.721218f}},
+                         {{0.8f, 0.8f, 0.73f}, 0.5f, {-0.540914f, -0.432731f, 0.721218f}},
+                         {{1, 0.8f, 0.9f}, 0.5f, {0.57735f, 0.57735f, -0.57735f}}};
+    day.outdoorStrength = 0.9f;  // plays no part
+    const auto byDay = simshadows::shade(day, 0.73f);
+    CHECK(std::lround(byDay[0] * 255) == 0xCB && std::lround(byDay[1] * 255) == 0xC8 && std::lround(byDay[2] * 255) == 0xB6);
+    windowlight::Daylight night;
+    night.sky = {0.25f * 0.75f, 0.25f * 0.75f, 0.3f * 0.75f};
+    const float l = std::sqrt(1.5f * 1.5f + 1 + 4), k = std::sqrt(1.5f * 1.5f + 1 + 1);
+    night.outdoorLights = {{{0.45f, 0.45f, 1}, 0.6f, {-1.5f / l, -1 / l, 2 / l}}, {{0.25f, 0.25f, 1}, 0.6f, {1.5f / k, 1 / k, 1 / k}}};
+    const auto atNight = simshadows::shade(night, 0.4f);
+    CHECK(std::lround(atNight[0] * 255) == 0xDB && std::lround(atNight[1] * 255) == 0xDB && std::lround(atNight[2] * 255) == 0xD4);
+
+    // The night sun (z 0.743): the root in the middle, its up axis scaled 2 / 3.05 and shifted -0.22,
+    // as the game's own picture camera. The near end is 8 toward the sun.
+    const auto m = simshadows::camera({-1.5f, -1, 2}, {10, 20, 1});
+    auto at = [&](float x, float y, float z, int r) { return m[r * 4] * x + m[r * 4 + 1] * y + m[r * 4 + 2] * z + m[r * 4 + 3]; };
+    CHECK(std::abs(at(10, 20, 1, 0)) < 1e-5f && std::abs(at(10, 20, 1, 1) + 0.2205f) < 1e-3f && std::abs(at(10, 20, 1, 2) - 8.0f / 9) < 1e-5f);
+    CHECK(std::abs(at(10, 20, 2, 1) - at(10, 20, 1, 1) - 0.4387f) < 1e-3f);
+    CHECK(std::abs(at(10 - 1.5f * 8 / l, 20 - 8 / l, 1 + 2 * 8 / l, 2)) < 1e-5f);
+}
 
 std::vector<Test> lightingTests() {
     return {
@@ -1353,5 +1607,10 @@ std::vector<Test> lightingTests() {
         {"objects in rooms get their room's lights", objectsInRoomsGetTheirRoomsLights},
         {"door and window parts in rooms get the floor light under them", doorAndWindowPartsInRoomsGetTheFloorLightUnderThem},
         {"objects get the window lights of their room", objectsGetTheWindowLightsOfTheirRoom},
+        {"objects outdoors get the outdoor lamps and windows", objectsOutdoorsGetTheOutdoorLampsAndWindows},
+        {"Sim shadows follow the game", simShadowsFollowTheGame},
+        {"object shadows follow the game", objectShadowsFollowTheGame},
+        {"ground normals use the lot's own triangles", groundNormalsUseTheLotsOwnTriangles},
+        {"fences cast from their models' top", fencesCastFromTheirModelsTop},
     };
 }

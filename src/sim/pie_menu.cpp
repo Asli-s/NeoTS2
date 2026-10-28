@@ -1,5 +1,7 @@
 #include "sim/pie_menu.hpp"
 
+#include "sim/vm_execution.hpp"
+
 #include <algorithm>
 
 namespace ts2::sim {
@@ -12,6 +14,7 @@ constexpr std::uint32_t kDebugOnly = 0x80;
 // The line names its own queue icon (an object type and picture).
 constexpr std::uint32_t kOwnIcon = 0x00400000;  // a flag bit, leakcheck: ok
 constexpr std::uint32_t kNested = 0x8000;
+constexpr std::uint32_t kRunsAtOnce = 0x4;
 constexpr std::uint32_t kHiddenByParentalControl = 0x20000;
 // The flags naming who may use an interaction (see whoFlag).
 constexpr std::uint32_t kWhoFlags = 0x3F013E51;
@@ -122,15 +125,20 @@ ObjectInteractions interactionsOf(CodeSource& code, const SimObject& object) {
     return {code.interactionTable(semiGlobal, tableId), semiGlobal};
 }
 
-std::optional<QueuedInteraction> queuedChoice(CodeSource& code, const SimObject& object, const PieChoice& choice) {
+std::optional<QueuedInteraction> queuedChoice(CodeSource& code, const World& world, const SimObject& object,
+                                              const PieChoice& choice) {
     const auto found = interactionsOf(code, object);
     const ttab::Interaction* line = found.table ? ttab::find(*found.table, choice.interaction) : nullptr;
     if (line == nullptr) {
         return std::nullopt;
     }
+    const SimObject* part = world.find(world.interactionPart(object));
+    if (part == nullptr) {
+        part = &object;
+    }
     QueuedInteraction queued;
-    queued.object = object.id;
-    queued.group = object.group;
+    queued.object = part->id;
+    queued.group = part->group;
     queued.index = choice.interaction;
     queued.action = line->action;
     queued.priority = kMenuPriority;
@@ -143,6 +151,41 @@ std::optional<QueuedInteraction> queuedChoice(CodeSource& code, const SimObject&
     queued.iconGuid = choice.icon.guid;
     queued.iconIndex = choice.icon.index;
     return queued;
+}
+
+bool runsAtOnce(CodeSource& code, const SimObject& object, const PieChoice& choice) {
+    const auto found = interactionsOf(code, object);
+    const ttab::Interaction* line = found.table ? ttab::find(*found.table, choice.interaction) : nullptr;
+    return line != nullptr && (line->flags & kRunsAtOnce) != 0;
+}
+
+RunResult runAtOnce(Vm& vm, CodeSource& code, World& world, SimObject& sim, SimObject& object, const PieChoice& choice) {
+    const auto menu = pieMenu(vm, code, sim, object);
+    const bool offered = std::any_of(menu.choices.begin(), menu.choices.end(), [&](const PieChoice& c) {
+        return c.interaction == choice.interaction && c.params == choice.params && c.disabled == OfferedAction::Disabled::No;
+    });
+    const auto queued = offered ? queuedChoice(code, world, object, choice) : std::nullopt;
+    SimObject* part = queued ? world.find(queued->object) : nullptr;
+    if (part == nullptr) {
+        return {Outcome::False};
+    }
+    const std::int16_t priority = sim.personData[vm_detail::kPriorityPersonData];
+    const std::int16_t autonomous = sim.personData[vm_detail::kInteractionAutonomousPersonData];
+    const std::optional<QueuedInteraction> running = sim.running;
+    sim.personData[vm_detail::kPriorityPersonData] = queued->priority;
+    sim.personData[vm_detail::kInteractionAutonomousPersonData] = 0;
+    if (sim.running) {
+        sim.running->autonomous = false;
+    }
+    const RunResult r = vm.runEvent(sim, queued->group, queued->action, part->id, queued->args, true);
+    sim.personData[vm_detail::kPriorityPersonData] = priority;
+    sim.personData[vm_detail::kInteractionAutonomousPersonData] = autonomous;
+    // The tree can end the running interaction or start another, which keeps its own flag.
+    if (running && sim.running && sim.running->object == running->object && sim.running->group == running->group &&
+        sim.running->index == running->index && sim.running->action == running->action) {
+        sim.running->autonomous = running->autonomous;
+    }
+    return r;
 }
 
 std::string interactionName(CodeSource& code, const SimObject& object, std::uint16_t index) {

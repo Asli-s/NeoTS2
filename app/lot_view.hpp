@@ -6,6 +6,8 @@
 #include "scene/lot_skirt.hpp"
 #include "scene/neighborhood_plumbobs.hpp"
 #include "scene/neighborhood_scene.hpp"
+#include "scene/object_lights.hpp"
+#include "scene/object_shadow_picture.hpp"
 #include "scene/rig.hpp"
 #include "scene/scene.hpp"
 #include "scene/view.hpp"
@@ -46,8 +48,8 @@ inline void frameScene(const ts2::scene::Scene& scene, Orbit& orbit) {
 }
 
 // Looking at a lot: which storey, how walls show, roofs on or off, and the keys that change them
-// (Q/E or comma/period turn a quarter, Page Up/Down change storey, Home/End (or Tab)
-// the next or previous wall mode, R roofs). 1/2/3 are the game's speed keys.
+// (comma and period turn while held, Z/X and keypad +/- step the zoom, Page Up/Down change storey,
+// Home/End (or Tab) the next or previous wall mode, R roofs). 1/2/3 are the game's speed keys.
 struct LotView {
     ts2::scene::View view;
     int ground = 0, top = 0;  // the lowest storey the view goes down to (the ground), and the highest
@@ -107,13 +109,19 @@ struct LotView {
     bool key(ts2::platform::Key key, Orbit& orbit) {
         using ts2::platform::Key;
         switch (key) {
-        case Key::Q:
         case Key::Comma:
-            orbit.turn(-1);
-            return true;
-        case Key::E:
         case Key::Period:
-            orbit.turn(1);
+            orbit.turnKeys[key == Key::Comma ? 0 : 1] = true;
+            return true;
+        case Key::Z:
+        case Key::X:
+        case Key::PadPlus:
+        case Key::PadMinus:
+            if (!orbit.lotKeys) {
+                return false;
+            }
+            // Each press, and each repeat while held, is one zoom level.
+            orbit.stepZoom(key == Key::Z || key == Key::PadPlus);
             return true;
         case Key::PageUp:
             stepLevel(1, orbit);
@@ -140,16 +148,18 @@ struct LotView {
 
 // Lights moved with a scene by `place`: they turn as its objects' normals do, and point lights move.
 inline void placeLights(ts2::scene::ObjectLighting& lighting, const ts2::scene::Transform& place) {
-    for (auto& l : lighting.lights) {
-        place.apply(l.direction.data(), false);
-        const float len = std::sqrt(l.direction[0] * l.direction[0] + l.direction[1] * l.direction[1] + l.direction[2] * l.direction[2]);
-        if (len > 0) {
-            for (auto& c : l.direction) {
-                c /= len;
+    for (auto* list : {&lighting.lights, &lighting.simLights}) {
+        for (auto& l : *list) {
+            place.apply(l.direction.data(), false);
+            const float len = std::sqrt(l.direction[0] * l.direction[0] + l.direction[1] * l.direction[1] + l.direction[2] * l.direction[2]);
+            if (len > 0) {
+                for (auto& c : l.direction) {
+                    c /= len;
+                }
             }
-        }
-        if (l.point) {
-            place.apply(l.position.data(), true);
+            if (l.point) {
+                place.apply(l.position.data(), true);
+            }
         }
     }
 }
@@ -188,6 +198,9 @@ inline void appendScene(ts2::scene::Scene& out, ts2::scene::Scene add, const ts2
     for (Instance& i : add.instances) {
         if (i.mesh >= 0) {
             i.mesh += meshes;
+        }
+        if (i.shadowMesh >= 0) {
+            i.shadowMesh += meshes;
         }
         if (i.lightMap >= 0) {
             i.lightMap += images;
@@ -259,9 +272,20 @@ inline void appendScene(ts2::scene::Scene& out, ts2::scene::Scene add, const ts2
     if (add.thingSun && !out.thingSun) {
         out.thingSun = std::move(add.thingSun);
     }
+    if (add.roomAt && !out.roomAt) {
+        out.roomAt = std::move(add.roomAt);
+    }
+    if (add.shadowLook && !out.shadowLook) {
+        auto& look = out.shadowLook.emplace(*add.shadowLook);
+        place.apply(look.toSun.data(), false);
+        // The objects' shadows again, laid where the lot now stands.
+        if (add.objectShadows) {
+            out.objectShadows = std::make_shared<const objectshadow::Layout>(objectshadow::layout(out, add.shadowLook->toSun, place));
+        }
+    }
     if (add.thingLights && !out.thingLights) {
-        out.thingLights = [lights = std::move(add.thingLights), place](const Mesh& mesh, const Transform& inLot, int storey) {
-            auto sets = lights(mesh, inLot, storey);
+        out.thingLights = [lights = std::move(add.thingLights), place](const Mesh& mesh, const Transform& inLot, int storey, LightGroup group) {
+            auto sets = lights(mesh, inLot, storey, group);
             for (auto& set : sets) {
                 placeLights(set, place);
             }
@@ -303,6 +327,12 @@ inline ts2::scene::Scene lotInNeighborhood(const ts2::scene::Scene& hood, ts2::s
         const float x = i.transform.m[3], y = i.transform.m[7];
         return x < ax0 || x > ax1 || y < ay0 || y > ay1 || i.name == ts2::scene::kNeighborhoodPlumbobName;
     });
+    // They are lit as lot objects outdoors are, always in the sun: the lot's buildings shade nothing
+    // beyond the lot.
+    for (auto& i : plants.instances) {
+        i.litOutdoors = true;
+        i.sunTest = SunTest::Never;
+    }
     appendScene(out, std::move(plants), Transform{});
     appendScene(out, std::move(skirt), Transform{});
     appendScene(out, std::move(lot), where.place);
@@ -330,16 +360,61 @@ inline ts2::scene::Scene lotInNeighborhood(const ts2::scene::Scene& hood, ts2::s
     return out;
 }
 
-// Poses a scene's actors (its Sims) `seconds` after they started and hands their joints and the
-// places of what they hold to the renderer.
+// The projected shadows of a lot's Sims as just posed: those standing outdoors cast one, centred on
+// their root joint. None without the lot's shadow look.
+inline ts2::render::Shadows simShadows(const ts2::scene::Scene& scene, const ts2::scene::ScenePose& pose) {
+    using namespace ts2::scene;
+    ts2::render::Shadows out;
+    if (!scene.shadowLook || !scene.roomAt) {
+        return out;
+    }
+    out.toSun = scene.shadowLook->toSun;
+    out.shade = scene.shadowLook->shade;
+    out.groundLevel = scene.groundLevel;
+    out.objects = scene.objectShadows;
+    for (const auto& [index, nodes] : pose.nodes) {
+        if (index >= scene.actors.size()) {
+            continue;
+        }
+        const Actor& actor = scene.actors[index];
+        if (!actor.rig || actor.skinned.empty() || actor.skinned[0].instance >= scene.instances.size()) {
+            continue;
+        }
+        const int root = actor.rig->find("root_trans");
+        if (root < 0 || static_cast<std::size_t>(root) >= nodes.size()) {
+            continue;
+        }
+        const Transform inLot = actor.lotFrame.rigidInverse() * actor.place;
+        const int storey = objectlights::lightStorey(scene.floorHeight, inLot, scene.instances[actor.skinned[0].instance].level - scene.groundLevel);
+        if (scene.roomAt(storey, inLot.m[3], inLot.m[7]) != 0) {
+            continue;
+        }
+        auto& caster = out.casters.emplace_back();
+        for (const auto& s : actor.skinned) {
+            caster.instances.push_back(s.instance);
+        }
+        const Transform at = actor.place * nodes[static_cast<std::size_t>(root)];
+        caster.root = {at.m[3], at.m[7], at.m[11]};
+        caster.level = storey + scene.groundLevel;
+    }
+    return out;
+}
+
+// Poses a scene's actors (its Sims) `seconds` after they started and hands their joints, the
+// places of what they hold and their shadows to the renderer, with the same time for its animated
+// textures.
 inline void animateActors(const ts2::scene::Scene& scene, double seconds, ts2::render::IRenderer& renderer,
                           ts2::scene::ScenePose& pose) {
+    renderer.setLotTime(seconds);
     ts2::scene::poseActors(scene, seconds, pose);
     for (const auto& [instance, joints] : pose.joints) {
         renderer.setJoints(instance, joints);
     }
     for (const auto& [instance, place] : pose.places) {
         renderer.setPlace(instance, place);
+    }
+    if (renderer.capabilities().projectedShadows) {
+        renderer.setShadows(simShadows(scene, pose));
     }
 }
 

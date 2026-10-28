@@ -62,6 +62,7 @@ GpuMesh packMesh(const scene::Mesh& mesh, std::size_t materials, std::uint32_t b
         g.lightMapped = p.lightUvs.size() == n * 2;
         g.tangents = p.tangents.size() == n * 3 && p.uvs.size() == n * 2;
         g.source = static_cast<std::size_t>(&p - mesh.primitives.data());
+        g.shadowGroup = scene::objectshadow::isShadowGroup(p.group);
         g.low = {p.positions[0], p.positions[1], p.positions[2]};
         g.high = g.low;
         for (std::size_t i = 1; i < n; ++i) {

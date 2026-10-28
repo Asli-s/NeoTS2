@@ -21,12 +21,29 @@ struct Modifiers {
     float diffusionFalloff = 1;
 };
 
+// One of a lighting state's outdoor lights, for the sky's light from a direction.
+struct OutdoorLight {
+    std::array<float, 3> color{0, 0, 0};
+    float strength = 0;
+    std::array<float, 3> direction{0, 0, 1};  // toward the light, normalized
+};
+
 // What a lighting state says about portals.
 struct Daylight {
     std::array<float, 3> sunColor{0, 0, 0};
     float sunStrength = 0;
     std::array<float, 3> sunDirection{0, 0, 1};  // toward the sun, normalized
     std::array<float, 3> sky{0, 0, 0};
+    // Whether the state has a "skylight" line. Without one, windows take the sky's light from
+    // outside them in place of the sun and the skylight.
+    bool skylight = true;
+    // How much of the sun and skylight windows keep, the rest coming from the sky's light outside
+    // them (portalSaturation, 1 in every shipped state).
+    float saturation = 1;
+    // The sky's light from a direction: these lights (the sun, sky and fill1 lines) by how much
+    // the direction faces each, the rest of the way the skylight, times outdoorStrength.
+    std::vector<OutdoorLight> outdoorLights;
+    float outdoorStrength = 1;
     Modifiers insidePortals, outsidePortals, insidePortalSpills, outsidePortalSpills;
     float doorOrArchDirect = 0;   // doorOrArchDirectMultiplier
     bool suppressionDimsRoomLight = true;  // portalSuppressionAffectsRoomLighting
@@ -68,10 +85,11 @@ struct PortalLights {
 // Sets each portal's suppression from the others in the same list (one room's portals).
 void suppress(std::vector<Portal>& portals, const Suppression& s);
 
+// The sky's light from `direction` (see Daylight::outdoorLights).
+std::array<float, 3> skyLight(const Daylight& day, const std::array<float, 3>& direction);
+
 // The lights of a portal of a room (`fromOutside`: the room is the outdoors, room 0). `lightMap`
-// is the wall light at the portal before portal light was added. Without sun (or with the sky
-// blended in) the game samples the sky instead, which is not supported: no lights then.
-[[nodiscard]] std::optional<PortalLights> lightsFor(const Portal& p, bool fromOutside, bool sun, const Daylight& day,
-                                      const std::array<float, 3>& lightMap);
+// is the wall light at the portal before portal light was added.
+[[nodiscard]] PortalLights lightsFor(const Portal& p, bool fromOutside, const Daylight& day, const std::array<float, 3>& lightMap);
 
 } // namespace ts2::scene::windowlight

@@ -43,7 +43,7 @@ struct FragmentUniforms {
     float hasTexture;
     float alphaCutoff;
     float unlit;
-    float padding;
+    float alphaReplicate;  // 1: the texture's alpha stands in for its colour
     float lightMap[4];  // x: the gain on the light map (0: none), y: 1 to leave the material's colour out, z: 1 for terrain
     float pixelLightColors[3][4];  // the colours of the lights lit per pixel
     float pixelLightCount;         // how many (0: none)
@@ -56,13 +56,54 @@ struct FragmentUniforms {
     float cameraUp[4];
     float cameraForward[4];
     float emissive[4];  // added to the light before the texture (see scene::Material), w: 1 when on
+    float uvTile[4];    // the texture coordinates times xy plus zw: one frame of a tiled texture
+    float shadowReceiver[4];  // x: 1 when Sims' projected shadows fall on it, y: its level, z: 1 to fade them by the light map
 };
 
 // The shaders' constant buffers pack in 16-byte rows, so these must match them field for field.
 static_assert(sizeof(VertexUniforms) % 16 == 0 && offsetof(VertexUniforms, eye) == 688 && offsetof(VertexUniforms, specular) == 704);
 static_assert(offsetof(SkinnedUniforms, jointBase) == 720 && sizeof(SkinnedUniforms) % 16 == 0);
 static_assert(sizeof(FragmentUniforms) % 16 == 0 && offsetof(FragmentUniforms, lightMap) == 48 &&
-              offsetof(FragmentUniforms, envCube) == 128 && offsetof(FragmentUniforms, emissive) == 192);
+              offsetof(FragmentUniforms, envCube) == 128 && offsetof(FragmentUniforms, emissive) == 192 &&
+              offsetof(FragmentUniforms, uvTile) == 208 && offsetof(FragmentUniforms, shadowReceiver) == 224);
+
+// The Sims' shadow pictures share one atlas, a square of tiles each simshadows::kResolution texels
+// wide.
+constexpr int kShadowTilesAcross = 4;
+constexpr std::size_t kMaxShadowCasters = kShadowTilesAcross * kShadowTilesAcross;
+
+// What the scene's fragment shader is given once a frame about the Sims' projected shadows.
+struct ShadowUniforms {
+    float cameras[kMaxShadowCasters][16];  // each caster's picture camera (see simshadows::camera)
+    float casters[kMaxShadowCasters][4];   // x, y: its tile's corner in the atlas (0..1), z: its level
+    float shade[4];                        // rgb: what a shadow multiplies the ground by, w: how many casters
+    // The lot objects' shadows: the grid's first tile (x, y) and its size in tiles (z by w, 0 for none).
+    float objectGrid[4];
+};
+static_assert(sizeof(ShadowUniforms) % 16 == 0 && offsetof(ShadowUniforms, shade) == 1280 && offsetof(ShadowUniforms, objectGrid) == 1296);
+
+// The lot objects' pictures from the sun: an atlas of kObjectTilesAcross square tiles of
+// simshadows::kResolution texels, each picture in the corner of its tile.
+constexpr int kObjectTilesAcross = 16;
+constexpr std::size_t kMaxObjectPictures = kObjectTilesAcross * kObjectTilesAcross;
+// The places' list: a row of kObjectPlaceTexels texels each (the camera's first three rows, then
+// the tile's corner, the picture's share of the atlas and the level, then the rect).
+constexpr int kObjectPlaceTexels = 5;
+constexpr std::size_t kMaxObjectPlaces = 1024;
+// The grid over the lot: up to kObjectGridSlots places per tile, two texels of four each.
+constexpr int kObjectGridSlots = 8;
+constexpr int kMaxObjectGrid = 256;
+
+// What an object's picture is blurred into its tile with.
+struct ObjectBlurUniforms {
+    float weights[25][4];  // x only, as ShadowBlurUniforms
+    float tile[4];         // x, y: the tile's corner in the atlas (texels), z: the picture's size (texels)
+};
+
+// What the blur shader is given: each tap's weight (see simshadows::blurWeight), across then up.
+struct ShadowBlurUniforms {
+    float weights[25][4];  // x only
+};
 
 // A neighborhood's painted terrain (see scene::PaintedTerrain).
 struct TerrainUniforms {
@@ -136,6 +177,8 @@ struct FrameView {
     Vec3 sun{};
 
     static FrameView make(const Camera& camera, unsigned width, unsigned height);
+    // The view keeps a pointer to its camera, so a temporary one would be gone before it is read.
+    static FrameView make(Camera&& camera, unsigned width, unsigned height) = delete;
 };
 
 // What the sky shader is given: the camera's right and up (scaled to the field of view) and forward,
@@ -166,6 +209,15 @@ struct FramePlan {
                              std::vector<Draw>& layers, std::vector<Draw>& blended);
     // One draw's uniforms and textures: its place, the lights it is lit by, and its material.
     static DrawUniforms uniformsFor(const RendererState& state, const ResourceQuery& resources, const FrameView& f, const Draw& d, int blend);
+
+    // The Sims casting projected shadows this frame, at most kMaxShadowCasters (the rest cast none).
+    // Each one's skinned primitives that can be drawn, in its tile's order.
+    static std::vector<std::vector<Draw>> shadowCasters(const RendererState& state, const ResourceQuery& resources);
+    // What a caster's primitive is drawn into its shadow picture with.
+    static SkinnedUniforms shadowCasterUniforms(const RendererState& state, const Draw& d, std::size_t caster);
+    // The shadows' camera and colour for the scene's fragment shader, for `casters` casters.
+    static ShadowUniforms shadowUniforms(const RendererState& state, std::size_t casters);
+    static ShadowBlurUniforms shadowBlurUniforms();
 
 private:
     static void setLights(const RendererState& state, DrawUniforms& u, const Draw& d, const scene::ObjectLighting& l, bool skirt, bool roof,

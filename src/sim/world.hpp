@@ -9,6 +9,7 @@
 #include "formats/weather.hpp"
 #include "sim/animation.hpp"
 #include "sim/idle_spot.hpp"
+#include "sim/look_at.hpp"
 #include "sim/data_tables.hpp"
 #include "sim/inventory.hpp"
 #include "sim/message_subscriptions.hpp"
@@ -276,11 +277,25 @@ struct SimObject {
     std::optional<OutfitChange> outfitChange;
     // What Animate Sim or Animate Object last started on it, while it plays.
     std::optional<PlayingAnimation> animation;
+    // The Animate Sim clip a Sim was playing when the lot was saved, with its rate and how far it had
+    // played. The game keeps that clip for the Animate Sim the Sim waits in, so that primitive carries on
+    // with it when it runs again instead of starting the clip anew from its operands and temps.
+    struct ResumedClip {
+        std::string name;
+        float speed = 1;
+        double playedMs = 0;
+    };
+    std::optional<ResumedClip> resumedClip;
     // The Animate Sim clip it last finished, while that fades out (see PlayingAnimation::blendsOut).
     // An instant Animate Stop removes it.
     std::optional<PlayingAnimation> ending;
     // Animations laid over it, oldest first.
     std::vector<PlayingOverlay> overlays;
+    // Where a Sim's head looks (Look At): the head's controller, and what each look it was given
+    // looks at, newest last, while the controller may still tell of it.
+    LookController look;
+    std::vector<LookTarget> lookTargets;
+    int looksStarted = 0;
     // A Sim's facing once it has turned (see turn.hpp). Before that, its direction (data 1).
     std::optional<float> heading;
     std::optional<Turning> turning;
@@ -304,6 +319,8 @@ struct SimObject {
     // Why a tree another object ran on it at once failed. The simulation resets it on its next turn.
     std::optional<std::string> failedRun;
     bool removed = false;
+    // Removed for scripts but kept on the lot until it unloads (see World::keepUntilUnload).
+    bool keptUntilUnload = false;
 
     bool isPerson() const { return definition.field(objd::field::kType) == kPersonType; }
 };
@@ -347,18 +364,26 @@ struct SavedNeighborhood {
 
 class World {
 public:
+    // A new object under the lowest free id, as the game gives them. A removed object keeps its id until
+    // the purge. Objects run in id order each tick, so the id decides when a new one runs.
     SimObject& create(std::uint32_t group, objd::ObjectDefinition definition, std::size_t containerSlots = 0);
-    // Recreates a saved object under its saved id. New objects get ids after the highest one.
+    // The highest id held since the lot loaded. A freed id stays a free slot below it, so this never goes down.
+    std::int16_t highestId() const { return highestId_; }
+    // Recreates a saved object under its saved id.
     SimObject& restore(std::int16_t id, std::uint32_t group, objd::ObjectDefinition definition);
     SimObject* find(std::int16_t id);
     const SimObject* find(std::int16_t id) const;
-    std::size_t size() const { return objects_.size() - removedCount_; }
+    std::size_t size() const { return objects_.size() - removedCount_ - keptCount_; }
 
     // Removal only marks the object, as the game queues the delete: find() and searches stop
     // seeing it at once, but findIncludingRemoved() still finds it by id, so code may keep using
     // its data until purge() frees removed objects at the end of the tick.
     SimObject* findIncludingRemoved(std::int16_t id);
     void remove(SimObject& object);
+    // Marks an object removed for scripts, as remove() does, but leaves it on the lot: purge() keeps
+    // it and it is still drawn. The game does this to a saved Placeholder or TemplatePerson as the
+    // lot loads. A later remove() deletes it at the end of that tick.
+    void keepUntilUnload(SimObject& object);
     void purge();
     // The removed objects purge() has yet to free, by id.
     std::vector<std::int16_t> removedIds() const;
@@ -368,6 +393,12 @@ public:
     void countUse(const Frame& interaction);
     void releaseUse(const Frame& frame);
     void releaseUses(const std::vector<Frame>& frames);
+
+    // The id of the part an interaction made on `part` runs on. A multi-tile part whose interaction group
+    // (OBJD field 8) is N above 0 hands its interactions to the part of the same object whose group
+    // is -N, so that one part keeps the use count and the script's data. The Wedding Arch's end parts
+    // (group 1) hand theirs to its middle part (group -1). Any other object is its own part.
+    std::int16_t interactionPart(const SimObject& part) const;
 
     // Objects whose route footprint may have changed: new and removed ones, and those Update
     // Footprint names. The route world takes them before it is next used, as the game does.
@@ -539,6 +570,10 @@ public:
 
     // Whether the family ties record has an entry for neighbor `id`.
     bool hasFamilyTies(std::int16_t id) const { return hood_ && hood_->familyTies.contains(id); }
+    // Ends the family tie between neighbors `a` and `b` (Generic Sims Call 0x17): each loses its first
+    // tie to the other, of any type. Each gets an entry in the record if it had none. It lasts for
+    // this run only, as nothing is saved yet.
+    void removeFamilyTie(std::int16_t a, std::int16_t b);
     // The neighbors neighbor `id` has a family tie of `type` with, in the order the record lists them.
     std::vector<std::int16_t> familyTies(std::int16_t id, famt::TieType type) const {
         std::vector<std::int16_t> out;
@@ -1021,13 +1056,14 @@ private:
     PlacementSpots placementSpots_;
     ObjectFits objectFits_;
     StepBlocker stepBlocker_;
-    std::int16_t nextId_ = 1;
     std::size_t removedCount_ = 0;
+    std::size_t keptCount_ = 0;  // objects kept until the lot unloads
     bool relationshipAdded_ = false;  // since the last purge
     std::set<std::int16_t> footprintChanges_;
     // Each object by its id (1..32767), beside objects_, so find() is one read: scripts look objects
     // up all the time. Null for ids with no object.
     std::vector<SimObject*> byId_ = std::vector<SimObject*>(0x8000, nullptr);
+    std::int16_t highestId_ = 0;
     std::vector<std::int16_t> buildBuyBlockers_;
     // The Sim each neighbor GUID is on this lot (0: none), as neighborData field 0 finds it. Social
     // check trees ask it thousands of times a tick, so it's kept until objects are added or removed.

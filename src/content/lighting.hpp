@@ -38,6 +38,10 @@ struct Lighting {
     struct State {
         std::map<std::string, Light> lights;     // by name ("sun", "sky", ...)
         std::array<float, 3> skylight{0, 0, 0};  // the sky's colour times its strength
+        bool hasSkylight = false;                // a "skylight" line set it
+        float portalSaturation = 1;
+        // How much of the sun the projected shadows of Sims and objects take away (0..1).
+        float projectiveShadowStrength = 1;
         // "environment": colour times strength, the light materials take as their texture light
         // colour (lot imposters, environment cubes, particles).
         std::array<float, 3> environment{1, 1, 1};

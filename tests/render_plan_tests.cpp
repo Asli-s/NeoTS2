@@ -184,16 +184,18 @@ void textureReferencesFollowWhatIsUploaded() {
     CHECK(u.samplers[2].texture.kind == TextureRef::Kind::White && u.samplers[2].sampler == SamplerKind::Repeat);
 }
 
-void nightDimsOnlyTheMaterialsThatDimAtNight() {
+void textureLightScalesOnlyTheMaterialsThatTakeIt() {
     scene::Scene s;
     scene::Material dim, plain;
-    dim.nightDimmed = true;
+    dim.takesTextureLight = true;
     s.materials = {dim, plain};
     s.meshes = {quad(0), quad(1)};
     s.instances = {at(0, 0, 0, 0), at(1, 0, 0, 0)};
     StateOnly r;
     r.load(s);
-    r.setNight(true);
+    scene::ObjectLighting night;
+    night.textureLight = {0.35f, 0.35f, 0.7f};
+    r.setObjectLighting(night);
     const Camera camera = front();
     const FrameView f = FrameView::make(camera, 1280, 800);
     std::vector<Draw> draws, layers, blended;
@@ -203,6 +205,35 @@ void nightDimsOnlyTheMaterialsThatDimAtNight() {
     const DrawUniforms b = FramePlan::uniformsFor(r, r, f, draws[1], 0);
     CHECK(std::fabs(a.fragment.color[0] - 0.35f) < 1e-6f && std::fabs(a.fragment.color[2] - 0.7f) < 1e-6f);
     CHECK(b.fragment.color[0] == 1.0f);
+}
+
+// A candle flame's texture holds 4 frames side by side, shown 10 a second on the lot's clock, left to
+// right and over again, as the game steps it. Its colour is added whatever its alpha, so nothing of
+// it is cut away.
+void tiledTexturesStepThroughTheirFrames() {
+    scene::Scene s;
+    scene::Material flame;
+    flame.tiles = 4;
+    flame.tileSpeed = 10;
+    flame.alpha = scene::AlphaMode::Sum;
+    flame.color[3] = 0;
+    s.materials = {flame};
+    s.meshes = {quad(0)};
+    s.instances = {at(0, 0, 0, 0)};
+    StateOnly r;
+    r.load(s);
+    const Camera camera = front();
+    const FrameView f = FrameView::make(camera, 1280, 800);
+    std::vector<Draw> draws, layers, blended;
+    FramePlan::collectDraws(r, r, f, draws, layers, blended);
+    CHECK(blended.size() == 1);
+    if (blended.size() != 1) return;
+    r.setLotTime(0.25);
+    const DrawUniforms third = FramePlan::uniformsFor(r, r, f, blended[0], 1);
+    CHECK(third.fragment.uvTile[0] == 0.25f && third.fragment.uvTile[1] == 1 && third.fragment.uvTile[2] == 0.5f && third.fragment.uvTile[3] == 0);
+    CHECK(third.fragment.alphaCutoff == 0);
+    r.setLotTime(0.45);
+    CHECK(FramePlan::uniformsFor(r, r, f, blended[0], 1).fragment.uvTile[2] == 0);
 }
 
 void packedMeshesAreLaidOutInTheSharedBuffers() {
@@ -229,7 +260,8 @@ std::vector<Test> renderPlanTests() {
         {"Draws are sorted as the game sorts them", drawsAreSortedAsTheGameSortsThem},
         {"A hidden material is not drawn", aMaterialSetToHiddenIsNotDrawn},
         {"Texture references follow what is uploaded", textureReferencesFollowWhatIsUploaded},
-        {"Night dims only the materials that dim at night", nightDimsOnlyTheMaterialsThatDimAtNight},
+        {"The texture light scales only the materials that take it", textureLightScalesOnlyTheMaterialsThatTakeIt},
+        {"Tiled textures step through their frames", tiledTexturesStepThroughTheirFrames},
         {"Packed meshes share their buffers", packedMeshesAreLaidOutInTheSharedBuffers},
     };
 }

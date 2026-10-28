@@ -78,6 +78,8 @@ struct Lot {
     std::map<std::pair<std::int16_t, std::int16_t>, std::vector<std::int32_t>> relationships;
     // The simulator's global variables as saved with the lot (SIMI), empty when it has none.
     std::vector<std::int16_t> globals;
+    // The random number state the simulator's ticks run on, as saved with the lot (SIMI), when it has one.
+    std::optional<std::uint32_t> randomState;
     // The lot's neighbor id remap tables (kNeighborRemap, instance 2), when it has them.
     std::optional<neighbor_remap::NeighborRemap> neighborRemap;
     // Remap tables the engine can't read: the other type the game looks for first, or a broken one.

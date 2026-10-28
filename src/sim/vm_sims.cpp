@@ -59,6 +59,16 @@ bool Execution::genericSimsCall(const bhav::Instruction& in) {
         }
         return true;
     }
+    if (call == kRemoveFamilyTieGenericCall) {
+        const auto* ids = world().neighbors();
+        for (const std::int16_t id : {thread_.temps[0], thread_.temps[1]}) {
+            if (ids == nullptr || !ids->contains(id)) {
+                throw Stop{Outcome::Error, "neighbor not found", std::to_string(id)};
+            }
+        }
+        world().removeFamilyTie(thread_.temps[0], thread_.temps[1]);
+        return true;
+    }
     if (call == kRemappedNeighborIdGenericCall) {
         if (world().neighborRemapUnread()) {
             throw Stop{Outcome::Unsupported, "Get Remapped Neighbor Id with unreadable remap tables", ""};

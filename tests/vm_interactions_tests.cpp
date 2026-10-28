@@ -192,6 +192,30 @@ void recalcWantsAndDebugCarryOn() {
     CHECK(vm.run(*w.controller, 0x1001).outcome == Outcome::True);
 }
 
+// Generic call 0x17 ends the family tie between the neighbors in temps 0 and 1: each loses its first
+// tie to the other, of any type, and both must be neighbors.
+void removeFamilyTieEndsTheTieBothWays() {
+    using ts2::famt::TieType;
+    MemoryCodeSource code;
+    Instruction remove = call(0x0001, T, F);
+    remove.operands[0] = 0x17;
+    code.add(kObjectGroup, 0x1000, bhav({remove}));
+    SmallWorld w;
+    auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
+    hood->neighborIds = {3, 4, 6};
+    hood->familyTies[3] = {{2, 4}, {4, 6}, {2, 4}};  // spouse 4 twice, child 6
+    w.world.setNeighborhood(hood);
+    Vm vm(code, {}, &w.world);
+    w.controller->thread.temps[0] = 3;
+    w.controller->thread.temps[1] = 4;
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::True);
+    CHECK(w.world.familyTies(3, TieType::Spouse) == std::vector<std::int16_t>{4});  // only the first goes
+    CHECK(w.world.familyTies(3, TieType::Child) == std::vector<std::int16_t>{6});
+    CHECK(w.world.hasFamilyTies(4) && hood->familyTies.at(3).size() == 3);  // the saved record is untouched
+    w.controller->thread.temps[1] = 5;
+    CHECK(vm.run(*w.controller, 0x1000).reason == "neighbor not found");
+}
+
 void multiTilePartsUseTheirMastersTable() {
     constexpr std::uint32_t kMaster = 0x0A0A0A0A, kPart = 0x0B0B0B0B, kBroken = 0x0C0C0C0C;
     MemoryCodeSource code;
@@ -830,6 +854,53 @@ void pushInteractionQueuesForTheSim() {
     CHECK(vm.run(controller, kObjectGroup, 0x1100, onFridge).outcome == Outcome::False && controller.data[0x34] == 3);
 }
 
+// An interaction made on a multi-tile part whose interaction group (OBJD field 8) is N above 0 runs
+// on the part of the same object whose group is -N, from Push Interaction and from the pie menu.
+// The Wedding Arch's end parts (1) hand theirs to its middle part (-1).
+void pairedPartsHandTheirInteractionsOn() {
+    constexpr std::uint32_t kEnd = 0x0A0A0A0A, kMiddle = 0x0B0B0B0B, kOther = 0x0C0C0C0C;
+    MemoryCodeSource code;
+    const auto part = [](std::uint32_t guid, std::uint16_t group) {
+        auto type = typed(guid);
+        type.fields[ts2::objd::field::kInteractionTableId] = 0x80;
+        type.fields[ts2::objd::field::kMultiTileMasterId] = 4;
+        type.fields[ts2::objd::field::kInteractionGroup] = group;
+        return type;
+    };
+    ts2::ttab::InteractionTable table;
+    table.interactions.resize(1);
+    table.interactions[0].action = 0x1000;
+    code.addInteractionTable(kObjectGroup, 0x80, table);
+    code.add(kObjectGroup, 0x1100, bhav({pushInteraction(0, 0, 1, T, F)}, 1));
+
+    ts2::sim::World world;
+    auto& controller = world.create(kObjectGroup, typed(0x0BADF00D));
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    auto& end = world.create(kObjectGroup, part(kEnd, 1));
+    auto& middle = world.create(kObjectGroup, part(kMiddle, 0xFFFF));
+    auto& otherArch = world.create(kObjectGroup, part(kMiddle, 0xFFFF));
+    auto& single = world.create(kObjectGroup, part(kOther, 1));
+    single.definition.fields[ts2::objd::field::kMultiTileMasterId] = 0;
+    for (auto* o : {&end, &middle}) {
+        o->data[ts2::sim::kLeadTileField] = end.id;
+    }
+    otherArch.data[ts2::sim::kLeadTileField] = otherArch.id;
+    CHECK(world.interactionPart(end) == middle.id && world.interactionPart(middle) == middle.id);
+    CHECK(world.interactionPart(single) == single.id);  // only multi-tile parts are paired
+
+    controller.thread.stackObjectId = sim.id;
+    const std::array<std::int16_t, 1> onEnd{end.id};
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(controller, kObjectGroup, 0x1100, onEnd).outcome == Outcome::True);
+    CHECK(sim.queue.size() == 1 && sim.queue[0].object == middle.id);
+    const auto chosen = ts2::sim::queuedChoice(code, world, end, ts2::sim::PieChoice{});
+    CHECK(chosen && chosen->object == middle.id);
+
+    // A part with no partner keeps its interactions.
+    middle.definition.fields[ts2::objd::field::kInteractionGroup] = 2;
+    CHECK(world.interactionPart(end) == end.id);
+}
+
 // A check tree that pushes its own interaction runs that check tree again: nested check trees stop
 // at the nesting limit instead of overflowing the stack.
 void checkTreesNestOnlySoDeep() {
@@ -1277,6 +1348,48 @@ void pieMenuOffersWhatChecksAllow() {
     CHECK(ts2::sim::pieMenu(vm, code, sim, chair).choices.empty());
 }
 
+// A line with interaction table flag 0x4 (the lights' Turn On and Turn Off) runs at once when picked:
+// as the Sim, on its object, with the menu's priority and not counted as autonomous meanwhile. The
+// Sim's queue, temps and person data are as before. A line no longer offered does nothing.
+void choicesFlaggedToRunAtOnceSkipTheQueue() {
+    MemoryCodeSource code;
+    auto lampType = typed(kFridgeGuid);
+    lampType.fields[ts2::objd::field::kInteractionTableId] = 0x80;
+    ts2::ttab::InteractionTable table;
+    table.interactions.resize(2);
+    table.interactions[0].action = 0x1000;
+    table.interactions[0].flags = 0x40 | 0x4;
+    table.interactions[1].action = 0x1000;
+    table.interactions[1].flags = 0x40;
+    table.interactions[1].stringIndex = 1;
+    code.addInteractionTable(kObjectGroup, 0x80, table);
+    code.addInteractionStrings(kObjectGroup, 0x80, {"Turn Off", "Dispose"});
+    code.add(kObjectGroup, 0x1000, bhav({expr(owner::kStackObjectData, 1, op::kAssign, owner::kMyPersonData, 0x21, 1, E),
+                                         expr(owner::kStackObjectData, 2, op::kAssign, owner::kMyPersonData, 0xA6, 2, E),
+                                         expr(owner::kTemp, 0, op::kAssign, owner::kLiteral, 9, T, E)}));
+
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    auto& lamp = world.create(kObjectGroup, lampType);
+    sim.personData[0x3A] = 30;
+    sim.personData[0x21] = 7;
+    sim.personData[0xA6] = 1;
+    sim.thread.temps[0] = 3;
+    Vm vm(code, {}, &world);
+    const auto menu = ts2::sim::pieMenu(vm, code, sim, lamp);
+    CHECK(menu.choices.size() == 2);
+    if (menu.choices.size() != 2) return;
+    CHECK(ts2::sim::runsAtOnce(code, lamp, menu.choices[0]) && !ts2::sim::runsAtOnce(code, lamp, menu.choices[1]));
+    const auto r = ts2::sim::runAtOnce(vm, code, world, sim, lamp, menu.choices[0]);
+    CHECK(r.outcome == ts2::sim::Outcome::True);
+    CHECK(lamp.data[1] == 50 && lamp.data[2] == 0);
+    CHECK(sim.personData[0x21] == 7 && sim.personData[0xA6] == 1 && sim.thread.temps[0] == 3 && sim.queue.empty());
+
+    lamp.data[1] = 0;
+    lamp.data[0x57] = 1;  // the lamp's interactions are off now
+    CHECK(ts2::sim::runAtOnce(vm, code, world, sim, lamp, menu.choices[0]).outcome == ts2::sim::Outcome::False && lamp.data[1] == 0);
+}
+
 // A check tree reads and changes the advertisement of the line it tests for the Sim's age group (a
 // copy: the table stays as it is). The stack object's functions and slots by temp are read too.
 void checkTreeOwnersReadTheTestedLine() {
@@ -1538,6 +1651,7 @@ std::vector<Test> vmInteractionTests() {
     return {
         {"set skin to the Sim's own is true", setSkinToTheSimsOwnIsTrue},
         {"recalc wants and Debug carry on", recalcWantsAndDebugCarryOn},
+        {"Remove Family Tie ends the tie both ways", removeFamilyTieEndsTheTieBothWays},
         {"remapped neighbor id comes from the remap table", remappedNeighborIdComesFromTheRemapTable},
         {"Get Outfits Information asks the Sim's looks", outfitsInformationAsksTheSimsLooks},
         {"fits with footprint tests the other footprint", fitsWithFootprintTestsTheOtherFootprint},
@@ -1552,6 +1666,7 @@ std::vector<Test> vmInteractionTests() {
         {"Want Satisfy matches current wants", wantSatisfyMatchesCurrentWants},
         {"Want Satisfy with a Sim list satisfies the listed Sims", wantSatisfyWithASimListSatisfiesTheListedSims},
         {"Push Interaction queues for the Sim", pushInteractionQueuesForTheSim},
+        {"paired multi-tile parts hand their interactions on", pairedPartsHandTheirInteractionsOn},
         {"check trees nest only so deep", checkTreesNestOnlySoDeep},
         {"Idle for Input starts queued interactions", idleForInputStartsQueuedInteractions},
         {"queued interactions show and cancel", queuedInteractionsShowAndCancel},
@@ -1561,6 +1676,7 @@ std::vector<Test> vmInteractionTests() {
         {"Run Functional Tree calls the object's tree", runFunctionalTreeCallsTheObjectsTree},
         {"Add/Change the Action String sets text and icon", actionStringSetsTextAndIcon},
         {"pie menu offers what checks allow", pieMenuOffersWhatChecksAllow},
+        {"choices flagged to run at once skip the queue", choicesFlaggedToRunAtOnceSkipTheQueue},
         {"check tree owners read the tested line", checkTreeOwnersReadTheTestedLine},
         {"Run Tree by Name runs the stack object's tree", runTreeByNameRunsTheStackObjectsTree},
         {"Run Tree by Name takes false when the tree is missing", runTreeByNameTakesFalseWhenTheTreeIsMissing},

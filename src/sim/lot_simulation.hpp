@@ -44,6 +44,9 @@ public:
     // Tells overlays' event trees of what has happened by `nowMs` on the animation clock (a little past
     // the last tick while animations play on between ticks).
     void tellAnimationEvents(double nowMs);
+    // Tells a Sim's look trees of the states its looks took (see tellLookStates), and puts its look
+    // into its person data.
+    void tellLookStates(std::int16_t id, std::span<const LookController::Change> changes);
 
     // Marks objects as seen on screen now: as the game does for what it draws, each gets the next
     // minute of the day (hour * 60 + minute + 1) in its object data 102, which scripts' "On Screen?"

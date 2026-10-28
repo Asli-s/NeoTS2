@@ -257,14 +257,14 @@ private:
     }
 
     // The k-th candidate, best first, that passes its check, where k is 0 or, for residents, one of the
-    // best `random selection count` at random. Checks not run yet run now, for the candidates up
-    // to the pick.
+    // best `random selection count` at random. Residents draw even when only one can come up, as the
+    // game does. Checks not run yet run now, for the candidates up to the pick.
     std::optional<std::size_t> choose(bool firstPass) {
         std::stable_sort(candidates_.begin(), candidates_.end(),
                          [](const Candidate& a, const Candidate& b) { return a.score > b.score; });
         std::size_t k = 0;
         const auto n = std::min<std::size_t>(candidates_.size(), static_cast<std::size_t>(std::max(0, s_.tunings.randomSelection)));
-        if (!visitor_ && n > 1) {
+        if (!visitor_ && !candidates_.empty()) {
             k = static_cast<std::size_t>((static_cast<std::uint64_t>(static_cast<std::uint32_t>(s_.rng())) * n) >> 32);
         }
         std::size_t valid = 0;

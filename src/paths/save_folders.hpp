@@ -60,9 +60,10 @@ const char* saveFolderRefusal(const std::filesystem::path& folder, const std::fi
 bool saveFolderBusy(const std::filesystem::path& folder);
 
 // Keeps a save folder to one NeoTS2 at a time, from its first-start fill until the game ends. It is
-// a hidden file beside the folder, named after where the folder really leads, so every spelling of
-// one folder shares it. Windows deletes the file when NeoTS2 ends, even in a crash. The folder that
-// holds the save folder must exist. A system folder is never locked, so no game uses one.
+// a file beside the folder, named after where the folder really leads, so every spelling of one
+// folder shares it. On Windows the file is hidden and deleted when NeoTS2 ends, even in a crash.
+// Other systems keep it, empty, as deleting a locked file there isn't safe. The folder that holds
+// the save folder must exist. A system folder is never locked, so no game uses one.
 class SaveFolderLock {
 public:
     explicit SaveFolderLock(const std::filesystem::path& folder);

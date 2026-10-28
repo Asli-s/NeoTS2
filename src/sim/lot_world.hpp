@@ -26,6 +26,8 @@ struct LotWorldReport {
     std::vector<std::int16_t> changedType;
     // Data table records of objects the lot no longer has (the game leaves them in the package).
     std::size_t staleDataTables = 0;
+    // Placeholders and TemplatePersons marked for delete as the lot loaded (see World::keepUntilUnload).
+    std::size_t keptUntilUnload = 0;
     std::vector<LotWorldProblem> problems;
 };
 

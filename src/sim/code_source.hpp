@@ -33,6 +33,8 @@ struct ObjectType {
     std::vector<slot::Entry> routingSlots;
     // Its container slots (type-0 entries of the SLOT resource) in their order.
     std::vector<slot::Entry> containerSlotEntries;
+    // Its target slots (type-4 entries of the SLOT resource) in their order.
+    std::vector<slot::Entry> targetSlots;
 };
 
 class CodeSource {

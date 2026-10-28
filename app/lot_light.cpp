@@ -3,7 +3,10 @@
 #include "content/covering_colors.hpp"
 #include "content/lighting_state.hpp"
 #include "content/lot.hpp"
+#include "content/neighborhood.hpp"
 #include "diag/log.hpp"
+#include "formats/dbpf.hpp"
+#include "formats/lot_description.hpp"
 #include "lot_view.hpp"
 #include "scene/lot_light_maps.hpp"
 #include "scene/lot_light_objects.hpp"
@@ -12,7 +15,9 @@
 #include "scene/lot_shadow.hpp"
 #include "scene/lot_skirt.hpp"
 #include "scene/object_lights.hpp"
+#include "scene/object_shadow_picture.hpp"
 #include "scene/object_sun.hpp"
+#include "scene/sim_shadows.hpp"
 #include "sim/clock.hpp"
 #include "sim/rooms.hpp"
 
@@ -21,6 +26,7 @@
 #include <cmath>
 #include <format>
 #include <functional>
+#include <map>
 #include <memory>
 #include <set>
 #include <vector>
@@ -52,13 +58,14 @@ struct LotLightBase {
     std::shared_ptr<const ts2::sim::RoomMap> rooms;
     std::function<std::int16_t(int level, float x, float y)> roomAt;
     std::set<std::uint32_t> clearWalls;  // wall styles that let light through (see makeBase)
+    // The lot's description in its neighborhood, for each room's saved light percent.
+    ts2::nhood::LotDescription description;
     std::unique_ptr<ts2::content::CoveringColors> colors;
     ts2::scene::lotshadow::Inputs shadowIn;  // reads `lot`
-    // Whether each ground tile is bare terrain, and the ground's tile corners from a tile before the
-    // lot to a tile past it: asked for every texel, so worked out once.
+    // Whether each ground tile is bare terrain, and the ground's normals: asked for every texel, so
+    // worked out once.
     std::vector<std::uint8_t> bareTiles;
-    std::vector<ts2::scene::lotshadow::Corners> groundCorners;
-    int cornersWide = 0;
+    ts2::scene::lotlightmaps::GroundNormals groundNormals;
     // The lot scene's light maps before any light was put in them (fill keeps what it does not reach).
     ts2::scene::Scene maps;
 };
@@ -80,6 +87,28 @@ struct LotLight {
 };
 
 namespace {
+
+// The state's projected shadows, their sun line turned by `place`.
+ts2::scene::Scene::ShadowLook shadowLook(const LotLight& light, const ts2::scene::Transform& place) {
+    ts2::scene::Scene::ShadowLook look;
+    look.toSun = light.settings.day.sunDirection;
+    place.apply(look.toSun.data(), false);
+    look.shade = ts2::scene::simshadows::shade(light.settings.day, light.settings.projectiveShadowStrength);
+    return look;
+}
+
+// Each lot object's shadow, now that the room it stands in is known.
+void resolveObjectShadows(ts2::scene::Scene& scene, int groundLevel) {
+    using namespace ts2::scene;
+    for (auto& instance : scene.instances) {
+        if (instance.object == 0) {
+            continue;
+        }
+        const int storey = objectlights::lightStorey(scene.floorHeight, instance.transform, instance.level - groundLevel);
+        const bool outdoors = scene.roomAt && scene.roomAt(storey, instance.transform.m[3], instance.transform.m[7]) == 0;
+        instance.shadow = objectshadow::resolved(objectshadow::requested(instance.shadowFacts), outdoors, instance.shadowFacts);
+    }
+}
 
 // Works the light out and fills the light maps of `target` (the lot scene, or a copy of its maps).
 void workOut(LotLight& l, ts2::scene::Scene& target) {
@@ -132,20 +161,7 @@ void workOut(LotLight& l, ts2::scene::Scene& target) {
         if (base.bareTiles.empty() || x < 0 || y < 0 || x >= shadowIn.width || y >= shadowIn.height) return bareGround(x, y);
         return base.bareTiles[static_cast<std::size_t>(y) * static_cast<std::size_t>(shadowIn.width) + static_cast<std::size_t>(x)] != 0;
     };
-    auto groundAt = [&](float x, float y) {
-        const float fx = std::floor(x), fy = std::floor(y);
-        if (!base.groundCorners.empty() && fx >= -1 && fy >= -1 && fx <= static_cast<float>(shadowIn.width) && fy <= static_cast<float>(shadowIn.height)) {
-            const auto i = static_cast<std::size_t>(fy + 1) * static_cast<std::size_t>(base.cornersWide) + static_cast<std::size_t>(fx + 1);
-            return base.groundCorners[i].between(x - fx, y - fy);
-        }
-        return lotshadow::elevation(shadowIn, x, y, 0);
-    };
-    sunlight.terrainNormal = [&](float x, float y) {
-        const float sx = groundAt(x + 0.5f, y) - groundAt(x - 0.5f, y);
-        const float sy = groundAt(x, y + 0.5f) - groundAt(x, y - 0.5f);
-        const float len = std::sqrt(sx * sx + sy * sy + 1);
-        return std::array<float, 3>{-sx / len, -sy / len, 1 / len};
-    };
+    sunlight.terrainNormal = [&base](float x, float y) { return base.groundNormals.at(x, y); };
     lotlightmaps::fill(target, l.light, l.settings, l.shadow->width > 0 ? &sunlight : nullptr);
     l.done = true;
     ts2::diag::info(std::format("lot light ({}): {} lamps, {} windows and doors, {} rooms in {:.1f} ms", l.state, l.found.lamps.size(),
@@ -166,6 +182,19 @@ std::shared_ptr<LotLightBase> makeBase(ts2::scene::Assets& assets, const ts2::sc
         return nullptr;
     }
     base->package = lotPackage;
+    if (const auto number = ts2::content::lotNumber(lotPackage)) {
+        try {
+            ts2::dbpf::Package hood{ts2::content::neighborhoodPackage(ts2::content::neighborhoodOfLot(lotPackage))};
+            for (const auto& e : hood.entries()) {
+                if (e.key.type == ts2::nhood::kLotDescriptionType && e.key.instance == static_cast<std::uint32_t>(*number)) {
+                    base->description = ts2::nhood::parseLotDescription(hood.read(e));
+                    break;
+                }
+            }
+        } catch (const std::exception& ex) {
+            ts2::diag::warning(std::format("lot light: the lot's description can't be read, every room is lit fully: {}", ex.what()));
+        }
+    }
     // Styles walls.txt marks blocksLight false, but the pool's edge (type 0x1D) blocks light anyway,
     // as the game's own wall test has it.
     constexpr std::uint32_t kPoolEdge = 0x1D;
@@ -182,7 +211,15 @@ std::shared_ptr<LotLightBase> makeBase(ts2::scene::Assets& assets, const ts2::sc
     // The user folder's build-mode thumbnails give the coverings' colours (Neighborhoods/<hood>/Lots/<lot>).
     const auto userFolder = lotPackage.parent_path().parent_path().parent_path().parent_path();
     base->colors = std::make_unique<ts2::content::CoveringColors>(userFolder / "Thumbnails" / "BuildModeThumbnails.package");
-    base->shadowIn = lotshadow::fromLot(lot, [&](std::uint32_t covering) { return assets.fence(covering) != nullptr; });
+    // Each fence's height once: a lot asks for it on every segment.
+    std::map<std::uint32_t, std::optional<float>> fenceHeights;
+    base->shadowIn = lotshadow::fromLot(lot, [&](std::uint32_t covering) {
+        const auto [it, added] = fenceHeights.try_emplace(covering);
+        if (added) {
+            if (const auto* fence = assets.fence(covering)) it->second = lotshadow::fenceTop(scene, fence->post, fence->rail);
+        }
+        return it->second;
+    });
     const auto& shadowIn = base->shadowIn;
     const bool small = shadowIn.width > 0 && shadowIn.height > 0 && shadowIn.width <= kMaxCachedSide && shadowIn.height <= kMaxCachedSide;
     const auto floorGrid = lot.grids.find(ts2::content::kFloorGridInstance);
@@ -199,13 +236,7 @@ std::shared_ptr<LotLightBase> makeBase(ts2::scene::Assets& assets, const ts2::sc
             }
         }
     }
-    if (small && shadowIn.corner && shadowIn.levels > 0) {
-        base->cornersWide = shadowIn.width + 2;
-        base->groundCorners.reserve(static_cast<std::size_t>(base->cornersWide) * static_cast<std::size_t>(shadowIn.height + 2));
-        for (int y = -1; y <= shadowIn.height; ++y) {
-            for (int x = -1; x <= shadowIn.width; ++x) base->groundCorners.push_back(lotshadow::cornersOf(shadowIn, x, y, 0));
-        }
-    }
+    base->groundNormals = lotlightmaps::groundNormals(shadowIn);
     // The light maps alone, numbered from 0 in the order lightMapImages gives.
     LightMaps maps = *scene.lightMaps;
     int next = 0;
@@ -233,7 +264,8 @@ std::string savedLightingState(const ts2::content::Lighting& lighting, const ts2
     return ts2::content::lotLightingState(lighting, static_cast<int>(ts2::sim::timeOfDay(hour)));
 }
 
-std::shared_ptr<LotLight> gatherLotLight(ts2::scene::Assets& assets, std::shared_ptr<LotLightBase> base, const std::string& stateName) {
+std::shared_ptr<LotLight> gatherLotLight(ts2::scene::Assets& assets, std::shared_ptr<LotLightBase> base, const std::string& stateName,
+                                         const std::function<float(std::uint32_t object)>& strength) {
     using namespace ts2::scene;
     if (!base) {
         return nullptr;
@@ -248,9 +280,11 @@ std::shared_ptr<LotLight> gatherLotLight(ts2::scene::Assets& assets, std::shared
     out->settings = std::move(*settings);
     lotlightobjects::Queries queries;
     queries.roomAt = base->roomAt;
-    queries.strength = [](std::uint32_t) { return 0.0f; };  // lamps off until the lot's scripts switch them
+    queries.strength = strength ? strength : [](std::uint32_t) { return 0.0f; };
+    queries.roomLit = [description = &base->description](std::int16_t room) { return description->roomLightPercent(room) >= 100; };
     out->found = lotlightobjects::gather(assets, base->fromGround, base->package, *state, queries);
     out->outdoor = outdoorLighting(*state);
+    out->outdoor.textureLight = state->environment;
     out->environment = state->environment;
     out->sky = assets.textureFaces(ts2::content::lotSkybox(ts2::content::stateTime(out->state)));
     out->zone = lighting.number("hmSunLightTransitionZone", 1);
@@ -278,9 +312,13 @@ std::shared_ptr<LotLightBase> lightLot(ts2::scene::Assets& assets, ts2::scene::S
         scene.skybox = light->sky;
     }
     objectsun::shade(scene, *light->shadow, light->zone);
-    objectlights::light(scene, light->light.rooms, light->light.portals, light->rangeCutoff, base->roomAt, ts2::content::groundGridLevel(saved));
+    objectlights::light(scene, light->light.rooms, light->outdoor, light->light.portals, light->found.lampLights, light->rangeCutoff, base->roomAt, ts2::content::groundGridLevel(saved));
     scene.thingSun = objectsun::thingSun(light->shadow, light->zone);
-    scene.thingLights = objectlights::thingLights(light->light.rooms, light->light.portals, light->rangeCutoff, base->roomAt);
+    scene.thingLights = objectlights::thingLights(light->light.rooms, light->outdoor, light->light.portals, light->found.lampLights, light->rangeCutoff, base->roomAt);
+    scene.roomAt = base->roomAt;
+    scene.shadowLook = shadowLook(*light, Transform{});
+    resolveObjectShadows(scene, ts2::content::groundGridLevel(saved));
+    scene.objectShadows = std::make_shared<const ts2::scene::objectshadow::Layout>(ts2::scene::objectshadow::layout(scene, scene.shadowLook->toSun));
     return base;
 }
 
@@ -309,9 +347,14 @@ PutLight putLotLight(ts2::scene::Scene& scene, const LotLight& light, const ts2:
         out.sky = true;
     }
     scene.thingSun = objectsun::thingSun(light.shadow, light.zone);
-    scene.thingLights = [lights = objectlights::thingLights(light.light.rooms, light.light.portals, light.rangeCutoff, light.base->roomAt),
-                         place](const Mesh& mesh, const Transform& inLot, int storey) {
-        auto sets = lights(mesh, inLot, storey);
+    scene.shadowLook = shadowLook(light, place);
+    // The objects' pictures follow the sun (only where the lot's own lighting made them).
+    if (scene.objectShadows) {
+        scene.objectShadows = std::make_shared<const objectshadow::Layout>(objectshadow::layout(scene, light.settings.day.sunDirection, place));
+    }
+    scene.thingLights = [lights = objectlights::thingLights(light.light.rooms, light.outdoor, light.light.portals, light.found.lampLights, light.rangeCutoff, light.base->roomAt),
+                         place](const Mesh& mesh, const Transform& inLot, int storey, LightGroup group) {
+        auto sets = lights(mesh, inLot, storey, group);
         for (auto& set : sets) {
             placeLights(set, place);
         }
@@ -338,6 +381,7 @@ PutLight putLotLight(ts2::scene::Scene& scene, const LotLight& light, const ts2:
         }
     }
     const auto toLot = place.rigidInverse();
+    const auto points = objectlights::pointLights(light.light.portals, light.found.lampLights, light.rangeCutoff);
     for (std::size_t i = 0; i < scene.instances.size(); ++i) {
         auto& instance = scene.instances[i];
         if (instance.part != Part::Object && !instance.litOutdoors) {
@@ -356,13 +400,33 @@ PutLight putLotLight(ts2::scene::Scene& scene, const LotLight& light, const ts2:
         if (scripted[i] && instance.lightGroup == LightGroup::Portals) {
             std::vector<int> parts;
             bool full = false;
-            for (auto& part : objectlights::portalLights(scene, inLot, storey, light.light.rooms, light.light.portals, light.rangeCutoff,
-                                                         light.base->roomAt)) {
+            for (auto& part : objectlights::portalLights(scene, inLot, storey, light.light.rooms, light.outdoor, points, light.base->roomAt)) {
                 const auto set = part ? setOf(std::move(*part)) : std::optional<int>(-1);
                 full = full || !set;
                 parts.push_back(set.value_or(-1));
             }
             if (!full && parts != instance.partLightSets) {
+                instance.partLightSets = std::move(parts);
+                relit = true;
+            }
+        }
+        // Things no script places (fences) are lit again here. Sims and scripted things are lit
+        // again by the simulation.
+        if (!scripted[i] && instance.part == Part::Object && instance.lightGroup == LightGroup::Props) {
+            std::vector<int> parts;
+            bool full = false;
+            for (auto& part : objectlights::propLights(scene, inLot, storey, light.light.rooms, light.outdoor, points, light.base->roomAt)) {
+                const auto set = setOf(std::move(part));
+                full = full || !set;
+                parts.push_back(set.value_or(-1));
+            }
+            int whole = -1;
+            if (!parts.empty() && std::all_of(parts.begin(), parts.end(), [&](int set) { return set == parts[0]; })) {
+                whole = parts[0];
+                parts.clear();
+            }
+            if (!full && (whole != instance.lightSet || parts != instance.partLightSets)) {
+                instance.lightSet = whole;
                 instance.partLightSets = std::move(parts);
                 relit = true;
             }

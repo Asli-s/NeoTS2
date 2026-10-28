@@ -2,11 +2,16 @@
 
 #include "content/lot.hpp"
 #include "scene/lot_parts.hpp"
+#include "scene/scene.hpp"
 #include "scene/wall_runs.hpp"
+
+#include <algorithm>
+#include <cctype>
+#include <cmath>
 
 namespace ts2::scene::lotshadow {
 
-Inputs fromLot(const content::Lot& lot, const std::function<bool(std::uint32_t covering)>& isFence) {
+Inputs fromLot(const content::Lot& lot, const std::function<std::optional<float>(std::uint32_t covering)>& fenceHeight) {
     Inputs in;
     const auto floors = lot.grids.find(content::kFloorGridInstance);
     if (floors == lot.grids.end() || floors->second.elementSize != 8) {
@@ -27,11 +32,32 @@ Inputs fromLot(const content::Lot& lot, const std::function<bool(std::uint32_t c
     };
     for (const auto& w : wallruns::wallsOf(lot, nullptr)) {
         Wall sw{w.level, w.x0, w.y0, w.x1, w.y1};
-        sw.fence = isFence && isFence(w.covering);
-        sw.fenceHeight = 1.1824f;
+        if (const auto height = fenceHeight ? fenceHeight(w.covering) : std::nullopt) {
+            sw.fence = true;
+            sw.fenceHeight = *height;
+        }
         in.walls.push_back(sw);
     }
     return in;
+}
+
+float fenceTop(const Scene& scene, const std::string& post, const std::string& rail) {
+    auto same = [](const std::string& a, const std::string& b) {
+        return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+                   return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
+               });
+    };
+    float top = 0;
+    for (const auto& mesh : scene.meshes) {
+        if (!same(mesh.name, post.empty() ? rail : post)) continue;
+        for (const auto& p : mesh.primitives) {
+            for (std::size_t i = 2; i < p.positions.size(); i += 3) {
+                // Past 16 is a broken model, not a fence.
+                if (std::isfinite(p.positions[i]) && p.positions[i] <= 16) top = std::max(top, p.positions[i]);
+            }
+        }
+    }
+    return top;
 }
 
 } // namespace ts2::scene::lotshadow

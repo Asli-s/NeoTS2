@@ -21,6 +21,8 @@ constexpr std::uint32_t kPuck = 0x4905F85B, kLivePanel = 0x49060005, kOptionsMen
 // The puck's windows.
 constexpr std::uint32_t kLiveMode = 0x37D97B25, kOptions = 0x67D97B2F, kFunds = 0x00003000;
 constexpr std::uint32_t kFloorUp = 0x00002001, kFloorDown = 0x00002000;
+// The camera buttons: rotate left and right, zoom in and out.
+constexpr std::uint32_t kCameraButtons[] = {0x00001001, 0x00001000, 0x00001002, 0x00001003};
 // One wall button per wall mode, in the same place. The one for the mode in use shows.
 constexpr std::uint32_t kWallButtons = 0x00001100;
 constexpr int kWallModes = 4;
@@ -158,6 +160,9 @@ void LotUi::load() {
         // Exit Tutorial shares the Neighborhood button's place. It only shows in the tutorial.
         screen_.setVisible(screen_.find(options_, kExitTutorial), false);
         funds_ = child(screen_, puck_, kFunds);
+        for (std::size_t i = 0; i < cameraButtons_.size(); ++i) {
+            cameraButtons_[i] = child(screen_, puck_, kCameraButtons[i]);
+        }
         wallMenu_ = child(screen_, puck_, kWallMenu);
         screen_.setVisible(wallMenu_, false);
         setUpVersion();
@@ -331,6 +336,15 @@ void LotUi::showWallMode(int mode) {
     for (int m = 0; m < kWallModes; ++m) {
         screen_.setVisible(child(screen_, puck_, kWallButtons + static_cast<std::uint32_t>(m)), m == mode);
     }
+}
+
+LotUi::CameraButton LotUi::heldCameraButton() const {
+    for (std::size_t i = 0; i < cameraButtons_.size(); ++i) {
+        if (screen_.held(cameraButtons_[i])) {
+            return static_cast<CameraButton>(i + 1);
+        }
+    }
+    return CameraButton::None;
 }
 
 LotUi::Action LotUi::clicked(int window) {

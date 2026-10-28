@@ -76,10 +76,14 @@ struct Turning {
     std::uint32_t group = 0;
     std::uint16_t tree = 0;
     std::uint16_t pc = 0;
+    std::uint16_t mode = 0;
+    std::int16_t direction = 0;      // modes 25 and 26: the compass direction picked when the turn started
     float start = 0;
     float end = 0;
     bool failsFalse = false;         // facing a point or object: false when the turn fails
     std::optional<bool> preRoute;    // what the Sim's pre-route tree returned, unset while it runs
+    std::optional<bool> turned;      // set once the turn has ended (false when it failed) and the post-route tree runs
+    bool postRouteReturned = false;
 };
 
 } // namespace ts2::sim

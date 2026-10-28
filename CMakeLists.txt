@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(NeoTS2 VERSION 0.2.0 LANGUAGES C CXX)
+project(NeoTS2 VERSION 0.2.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -202,6 +202,7 @@ add_library(ts2content
     src/content/thumbnail_merge.cpp
     src/content/lot_import.cpp
     src/content/cameras.cpp
+    src/content/user_props.cpp
     src/content/lighting.cpp
     src/content/lighting_state.cpp
     src/content/covering_colors.cpp
@@ -226,6 +227,7 @@ add_library(ts2sim
     src/sim/index_code_source.cpp
     src/sim/lot_world.cpp
     src/sim/lot_simulation.cpp
+    src/sim/look_at.cpp
     src/sim/ground_click.cpp
     src/sim/route_portals.cpp
     src/sim/pie_menu.cpp
@@ -300,6 +302,8 @@ add_library(ts2scene
     src/scene/object_sun.cpp
     src/scene/pick.cpp
     src/scene/object_lights.cpp
+    src/scene/object_shadow.cpp
+    src/scene/object_shadow_picture.cpp
     src/scene/outfit_properties.cpp
     src/scene/sims.cpp
     src/scene/texture_blend.cpp
@@ -308,6 +312,7 @@ add_library(ts2scene
     src/scene/sim_builder.cpp
     src/scene/portrait.cpp
     src/scene/limb_ik.cpp
+    src/scene/look_at.cpp
     src/scene/rig.cpp
     src/scene/scene_ray.cpp
     src/scene/rig_layers.cpp
@@ -334,6 +339,7 @@ add_library(ts2scene
     src/scene/lot_shadow_inputs.cpp
     src/scene/room_light.cpp
     src/scene/window_light.cpp
+    src/scene/sim_shadows.cpp
     src/scene/portable_math.cpp
     src/scene/view.cpp
 )
@@ -391,6 +397,8 @@ if(NEOTS2_FUZZ)
     target_link_libraries(steam_files_fuzz PRIVATE ts2paths project_warnings)
     add_executable(launcher_settings_fuzz fuzz/launcher_settings_fuzz.cpp)
     target_link_libraries(launcher_settings_fuzz PRIVATE ts2settings project_warnings)
+    add_executable(user_props_fuzz fuzz/user_props_fuzz.cpp)
+    target_link_libraries(user_props_fuzz PRIVATE ts2content project_warnings)
 else()
     # Reads every resource of an installation with the engine's readers and reports the result.
     add_executable(gamecheck tools/gamecheck/main.cpp)
@@ -512,6 +520,10 @@ else()
         if(platform_name STREQUAL "sdl3")
             target_sources(ts2platform PRIVATE src/platform/sdl3/platform_sdl3.cpp)
             target_link_libraries(ts2platform PUBLIC SDL3::SDL3 PRIVATE project_warnings)
+            if(WIN32)
+                target_sources(ts2platform PRIVATE src/platform/sdl3/window_frame_win32.cpp)
+                target_link_libraries(ts2platform PRIVATE dwmapi)
+            endif()
             target_compile_definitions(ts2platform PUBLIC NEOTS2_PLATFORM_SDL3=1)
         else()
             target_sources(ts2platform PRIVATE src/platform/sdl12/platform_sdl12.cpp src/platform/sdl12/png.cpp src/platform/sdl12/system_unix.cpp)
@@ -541,7 +553,7 @@ else()
         # The shaders the OpenGL 2 renderer draws with (skinned ones are posed on the CPU there).
         set(gl2_shaders scene.vert scene.frag ui.vert ui.frag terrain.vert terrain.frag sky.vert sky.frag road.vert road.frag imposter.vert imposter.frag clip.vert clip.frag water.vert water.frag)
         if(sdlgpu_enabled)
-        foreach(shader scene.vert skinned.vert scene.frag ui.vert ui.frag terrain.vert terrain.frag sky.vert sky.frag water.vert water.frag road.vert road.frag imposter.vert imposter.frag clip.vert clip.frag)
+        foreach(shader scene.vert skinned.vert scene.frag ui.vert ui.frag terrain.vert terrain.frag sky.vert sky.frag water.vert water.frag road.vert road.frag imposter.vert imposter.frag clip.vert clip.frag shadow_caster.frag shadow_blur.frag object_blur.frag)
             if(shader MATCHES "vert$")
                 set(profile vs_6_0)
             else()
@@ -641,7 +653,7 @@ else()
         target_link_libraries(ts2render PUBLIC ts2renderplan ts2platform PRIVATE project_warnings)
         if(sdlgpu_enabled)
             target_sources(ts2render PRIVATE src/render/renderer.cpp src/render/renderer_pipelines.cpp src/render/renderer_scene.cpp
-                           src/render/renderer_upload.cpp src/render/renderer_draw.cpp)
+                           src/render/renderer_upload.cpp src/render/renderer_draw.cpp src/render/renderer_object_shadows.cpp)
             target_link_libraries(ts2render PUBLIC SDL3::SDL3)
             target_compile_definitions(ts2render PUBLIC NEOTS2_SDLGPU=1)
         endif()

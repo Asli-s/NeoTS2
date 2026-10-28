@@ -29,6 +29,7 @@ struct GpuPrimitive {
     bool lightMapped = false;  // has light-map coordinates
     bool tangents = false;     // has tangents (and texture coordinates), for normal maps
     std::size_t source = 0;    // its index among the scene mesh's primitives
+    bool shadowGroup = false;  // one of the model's ground or wall shadow groups (see scene::objectshadow)
     // The box around its vertices in model space. Skinned primitives move out of it, so they are
     // never culled.
     std::array<float, 3> low{}, high{};

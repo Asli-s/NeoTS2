@@ -22,11 +22,14 @@ struct SavedAnimation {
     std::int16_t eventObject = 0;       // the event tree's stack object
     std::uint16_t eventTree = 0;
     std::uint32_t eventObjectGuid = 0;  // the type whose code holds the event tree
+    float rate = 1;                     // as Animate Sim's speed / 32 gives it (negative: backwards)
     std::int32_t state = 0;             // 1 playing
     std::int32_t layer = 0;
     std::int32_t plays = 1;             // -1: until stopped
     float weight = 1;
     std::optional<float> lengthMs;      // all of its plays, blends included, none without a blend curve
+    float fadeInMs = 0, fadeOutMs = 0;  // its blend curve's rise at the start and fall at the end
+    bool flipped = false;               // played mirrored
     std::int32_t startedMsAgo = 0;      // when the lot was saved (game ticks are milliseconds)
 };
 

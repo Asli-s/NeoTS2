@@ -188,10 +188,11 @@ public:
         return objectGroup == kObjectGroup ? kSemiGroup : objectGroup;
     }
     void addObjectType(std::uint32_t group, ts2::objd::ObjectDefinition definition,
-                       std::vector<ts2::slot::Entry> routingSlots = {}, std::vector<ts2::slot::Entry> containerSlots = {}) {
+                       std::vector<ts2::slot::Entry> routingSlots = {}, std::vector<ts2::slot::Entry> containerSlots = {},
+                       std::vector<ts2::slot::Entry> targetSlots = {}) {
         const std::uint32_t guid = definition.guid();
         objectTypes_[guid] = ts2::sim::ObjectType{group, std::move(definition), 0, containerSlots.size(), {}, std::move(routingSlots),
-                                                  std::move(containerSlots)};
+                                                  std::move(containerSlots), std::move(targetSlots)};
     }
     void addInteractionTable(std::uint32_t group, std::uint16_t instance, ts2::ttab::InteractionTable table) {
         tables_[{group, instance}] = std::make_shared<const ts2::ttab::InteractionTable>(std::move(table));

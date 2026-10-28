@@ -25,4 +25,25 @@ AnimateOperands animateOperands(std::span<const std::uint8_t> o) {
     return a;
 }
 
+AnimateFades animateFades(float lengthMs, bool fadesIn, bool fadesOut) {
+    constexpr float kFadeMs = 233.33f;
+    AnimateFades f{fadesIn ? kFadeMs : 0.0f, fadesOut ? kFadeMs : 0.0f};
+    const float both = f.inMs + f.outMs;
+    const float length = std::max(lengthMs, 0.0f);
+    if (both > length + 1e-6f) {
+        // Just under the length, so the clip still holds its full weight for an instant.
+        const float scale = length / both * 0.9999f;
+        f.inMs *= scale;
+        f.outMs *= scale;
+    }
+    // A fade of a millisecond or less is none.
+    if (f.inMs <= 1) {
+        f.inMs = 0;
+    }
+    if (f.outMs <= 1) {
+        f.outMs = 0;
+    }
+    return f;
+}
+
 } // namespace ts2::sim

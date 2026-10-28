@@ -1,6 +1,7 @@
 #include "sim/lot_world.hpp"
 
 #include "sim/type_signature.hpp"
+#include "sim/vm_execution.hpp"
 
 #include "content/animation_lists.hpp"
 
@@ -76,6 +77,15 @@ std::optional<std::string> restoreStack(const content::Lot& lot, const content::
         frames.push_back(std::move(f));
     }
     if (!frames.empty()) {
+        // A Sleep saved part way through goes on for the ticks the object map kept for it, then is true.
+        // It doesn't start over.
+        const auto& waits = lot.objectMap.waitTicks;
+        const auto wait = static_cast<std::size_t>(object.id) - 1;
+        const Frame& top = frames.back();
+        if (wait < waits.size() && waits[wait] > 0 && top.code->instructions[top.pc].opcode == vm_detail::kSleepOpcode) {
+            object.thread.pendingResult = true;
+            object.thread.sleepTicks = waits[wait] + 1;
+        }
         object.thread.frames = std::move(frames);
         object.thread.stackObjectId = saved.state.tail->stack.front().objectId;
     }
@@ -83,8 +93,8 @@ std::optional<std::string> restoreStack(const content::Lot& lot, const content::
 }
 
 // The overlays an object was playing when the lot was saved, carrying on from where they were. Only
-// playing ("state 1") overlays come back. The game's other saved animations (an object's own
-// animation, attached ones) are not restored yet.
+// playing ("state 1") overlays come back. A Sim's Animate Sim clip comes back by restoreSimClip.
+// An object's own animation and attached ones are not restored yet.
 void restoreOverlays(const content::Lot& lot, std::uint32_t id, SimObject& object, CodeSource& code, double nowMs) {
     const auto saved = lot.savedAnimations.find(id);
     if (saved == lot.savedAnimations.end()) {
@@ -99,6 +109,7 @@ void restoreOverlays(const content::Lot& lot, std::uint32_t id, SimObject& objec
         }
         PlayingOverlay o;
         o.name = a.name;
+        o.flipped = a.flipped;
         // Saved values out of range are read as Animate Overlay reads its own (a weight outside 0-1 is 1).
         const double played = a.startedMsAgo;
         o.startMs = nowMs - played;
@@ -115,8 +126,35 @@ void restoreOverlays(const content::Lot& lot, std::uint32_t id, SimObject& objec
         if (const ObjectType* owner = code.objectType(a.eventObjectGuid)) {
             o.codeOwner = owner->group;
         }
-        o.blendingOut = o.plays >= 0 && played >= o.lengthMs - kOverlayBlendMs;
+        // Its saved blend curve gives its fades: a weight-shift pose held between its start and reverse
+        // clips has none, so it hands over at full weight instead of fading out first.
+        if (a.lengthMs) {
+            o.blendsIn = a.fadeInMs > 0;
+            o.blendsOut = a.fadeOutMs > 0;
+            o.blendInMs = a.fadeInMs;
+            o.blendOutMs = a.fadeOutMs;
+        }
+        o.blendingOut = o.plays >= 0 && played >= o.lengthMs - o.blendOutMs.value_or(kOverlayBlendMs);
         object.overlays.push_back(std::move(o));
+    }
+}
+
+// The Animate Sim clip a Sim was playing when the lot was saved. Its type names its priority: "sil"
+// low, "sim" medium, "sih" high, "siu" underlay. A rate outside what Animate Sim's speed byte can
+// give, or 0, is left out, and the clip then starts as the operands say.
+void restoreSimClip(const content::Lot& lot, std::uint32_t id, SimObject& object) {
+    const auto saved = lot.savedAnimations.find(id);
+    if (saved == lot.savedAnimations.end()) {
+        return;
+    }
+    constexpr float kMinRate = -128.0f / 32, kMaxRate = 127.0f / 32;
+    const auto animateSim = [](const std::string& type) { return type == "sil" || type == "sim" || type == "sih" || type == "siu"; };
+    for (const auto& a : saved->second) {
+        if (a.kind == cobject::SavedAnimation::Kind::Clip && a.state == 1 && animateSim(a.type) && std::isfinite(a.rate) &&
+            a.rate != 0 && a.rate >= kMinRate && a.rate <= kMaxRate) {
+            object.resumedClip = SimObject::ResumedClip{a.name, a.rate, static_cast<double>(a.startedMsAgo)};
+            return;
+        }
     }
 }
 
@@ -230,6 +268,7 @@ LotWorldReport buildWorld(const content::Lot& lot, CodeSource& code, World& worl
             report.problems.push_back({saved.id, *problem});
         }
         restoreOverlays(lot, saved.id, object, code, world.clockMs());
+        restoreSimClip(lot, saved.id, object);
         // An object or Sim whose type changed since the save (a patch, expansion or mod) will start over.
         if (saved.type && typeChangedSinceSave(code, *type, *saved.type)) {
             report.changedType.push_back(object.id);
@@ -254,6 +293,17 @@ LotWorldReport buildWorld(const content::Lot& lot, CodeSource& code, World& worl
         stored.resize(values.size());
         for (std::size_t i = 0; i < values.size(); ++i) {
             stored[i] = static_cast<std::int16_t>(values[i]);
+        }
+    }
+    // As the game reads the object map's wait table, a Placeholder or TemplatePerson among the ids it
+    // covers is marked for delete instead. Scripts skip it from then on, but it stays until the lot
+    // unloads.
+    constexpr std::uint32_t kPlaceholderGuid = 0x3C08965F, kTemplatePersonGuid = 0x7FD96B54;
+    for (std::size_t i = 0; i < lot.objectMap.waitTicks.size(); ++i) {
+        SimObject* object = world.find(static_cast<std::int16_t>(i + 1));
+        if (object != nullptr && (object->definition.guid() == kPlaceholderGuid || object->definition.guid() == kTemplatePersonGuid)) {
+            world.keepUntilUnload(*object);
+            ++report.keptUntilUnload;
         }
     }
     return report;

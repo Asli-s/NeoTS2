@@ -120,6 +120,26 @@ struct Orbit {
     float yawOffset = 0;
     // Where the zoom distance is easing to, for a camera with a goal.
     float distanceGoal = 30;
+    // Set by the wheel, which leaves the zoom between the rig's levels. A step in then only clears
+    // it, a step out clears it and steps, as in the game.
+    bool freeZoom = false;
+    // The lot camera's keys. Z and keypad + step one zoom level in a press, X and keypad - one level
+    // out, and the main row's - does nothing. Comma and period turn while held. Other cameras zoom
+    // while those zoom keys are held and don't turn by key.
+    bool lotKeys = false;
+    // Comma and period held, by what is printed on them. Their turn offset eases toward the
+    // keyboardrotation speed each way a key is held (0 when let go) and is sent each step as a
+    // middle-button turn of that many pixels, so the turn eases in and out. The defaults are the
+    // Live camera's settings.
+    std::array<bool, 2> turnKeys{false, false};
+    float turnKeyOffset = 0;
+    // The puck's zoom button held: -1 in, 1 out, 0 none. Each step it moves the zoom goal by 0.04 of
+    // (zoom + 10), as a free zoom, as the game's puck does while held.
+    int puckZoom = 0;
+    // The puck's arrow held: -1 the left one, 1 the right one, 0 none. They turn as comma and period
+    // do, the left one as comma.
+    int puckTurn = 0;
+    float turnKeySpeed = 200, turnKeyPeriod = 1, turnKeyMinChange = 0.5f;
     // The least step of each eased value (the camera file's defaultminchange), and the scroll keys'
     // ease period, least step and offset in pixels (keyboardtranslationlerpsteps, -lerpminchange
     // and -speed). The defaults are the Live camera's.
@@ -151,6 +171,9 @@ struct Orbit {
             keyPeriod = std::max(1.0f, rig->param("keyboardtranslationlerpsteps", keyPeriod));
             keyMinChange = std::max(0.0f, rig->param("keyboardtranslationlerpminchange", keyMinChange));
             keySpeed = rig->param("keyboardtranslationspeed", keySpeed);
+            turnKeySpeed = rig->param("keyboardrotationspeed", turnKeySpeed);
+            turnKeyPeriod = std::max(1.0f, rig->param("keyboardrotationlerpsteps", turnKeyPeriod));
+            turnKeyMinChange = std::max(0.0f, rig->param("keyboardrotationlerpminchange", turnKeyMinChange));
         }
     }
 
@@ -222,6 +245,22 @@ struct Orbit {
         if (goal && limitGoal) {
             limitGoal(*goal);
         }
+    }
+
+    // Sets the zoom goal one of the rig's levels nearer (`in`) or farther, as the game's zoom keys
+    // do: from the level the goal is at, and no further than the first and last levels.
+    void stepZoom(bool in) {
+        if (!rig || rig->levels.empty()) {
+            return;
+        }
+        const bool wasFree = freeZoom;
+        freeZoom = false;
+        if (in && wasFree) {
+            return;
+        }
+        const int last = static_cast<int>(rig->levels.size()) - 1;
+        const int level = std::clamp(ts2::camera::zoomLevelAt(*rig, distanceGoal) + (in ? 1 : -1), 0, last);
+        distanceGoal = std::clamp(rig->levels[static_cast<std::size_t>(level)].distance, minDistance, maxDistance);
     }
 
     // The nearest view at 45 degrees to the lot's grid, `quarters` turns on.
@@ -298,6 +337,7 @@ inline bool orbitEvent(Orbit& orbit, const ts2::platform::Event& e) {
         // 10 (the camera file's wheel scaling, 5, times 0.02), within the zoom levels.
         const float z = orbit.distanceGoal;
         orbit.distanceGoal = std::clamp(z - (z + 10) * e.wheel * 5 * 0.02f, orbit.minDistance, orbit.maxDistance);
+        orbit.freeZoom = true;
         return true;
     } else if (e.type == Event::Type::MouseWheel) {
         orbit.zoomTo(orbit.distance * std::pow(0.9f, e.wheel));
@@ -323,12 +363,27 @@ inline void orbitGameStep(Orbit& orbit, unsigned ms, int width, int height) {
         orbit.dragSpeed = {0, 0};
         orbit.keyScrolling = false;
     }
-    const int zoom = !orbit.keysOn ? 0 : (keyHeld(Key::X) || keyHeld(Key::Minus) || keyHeld(Key::PadMinus)) -
-                     (keyHeld(Key::Z) || keyHeld(Key::Equals) || keyHeld(Key::PadPlus));
+    const bool holdZoom = !orbit.lotKeys;
+    const int zoom = !orbit.keysOn ? 0 : (holdZoom && (keyHeld(Key::X) || keyHeld(Key::Minus) || keyHeld(Key::PadMinus))) -
+                     (keyHeld(Key::Equals) || (holdZoom && (keyHeld(Key::Z) || keyHeld(Key::PadPlus))));
     if (zoom != 0) {
-        // The game's zoom keys are not known yet. These move the goal the eased zoom follows.
+        // What the main row's = does in the game, and the neighborhood camera's zoom keys, are not
+        // known yet. These move the goal the eased zoom follows.
         orbit.distanceGoal = std::clamp(orbit.distanceGoal * std::exp(static_cast<float>(zoom) * 1.5f * static_cast<float>(ms) / 1000),
                                         orbit.minDistance, orbit.maxDistance);
+    }
+    if (orbit.puckZoom != 0) {
+        const float z = orbit.distanceGoal;
+        orbit.distanceGoal = std::clamp(z + static_cast<float>(orbit.puckZoom) * 0.04f * (z + 10), orbit.minDistance, orbit.maxDistance);
+        orbit.freeZoom = true;
+    }
+    if (orbit.lotKeys) {
+        const int keys = orbit.keysOn ? orbit.turnKeys[1] - orbit.turnKeys[0] : 0;
+        const int turn = std::clamp(keys + orbit.puckTurn, -1, 1);
+        easeToward(orbit.turnKeyOffset, static_cast<float>(turn) * orbit.turnKeySpeed, ms, orbit.turnKeyPeriod, orbit.turnKeyMinChange);
+        if (orbit.turnKeyOffset != 0) {
+            orbit.yawGoal = wrapAngle(orbit.yaw + std::clamp(orbit.turnKeyOffset * 0.003f, -3.0f, 3.0f));
+        }
     }
     if (orbit.turnMove[0] != 0 || orbit.turnMove[1] != 0) {
         // As the game's lot camera: the larger of the two moves wins, 0.003 radians of turn (at

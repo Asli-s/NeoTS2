@@ -5,7 +5,9 @@
 #include "scene/scene.hpp"
 
 #include <array>
+#include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -26,15 +28,18 @@ struct LotLight;
 std::string savedLightingState(const ts2::content::Lighting& lighting, const ts2::content::Lot& saved);
 
 // Works out a lot's light the way the game does in lighting state `state` (lamps off until the
-// lot's own scripts switch them) and fills the scene's floor and wall light maps and its objects'
-// lights with it. `saved` is the lot as loaded from `lotPackage`. Returns what lighting the lot again
+// lot's own scripts switch them, see LotDaylight) and fills the scene's floor and wall light maps
+// and its objects' lights with it. `saved` is the lot as loaded from `lotPackage`. Returns what lighting the lot again
 // needs, or null when the lot gives nothing to light.
 std::shared_ptr<LotLightBase> lightLot(ts2::scene::Assets& assets, ts2::scene::Scene& scene, const ts2::content::Lot& saved,
                                        const std::filesystem::path& lotPackage, const std::string& state);
 
 // Lighting the lot again in another state, in three steps. First the lot's lamps, windows and doors
 // in `state`, read from the game's files (on the thread that uses `assets`), or null without that state.
-std::shared_ptr<LotLight> gatherLotLight(ts2::scene::Assets& assets, std::shared_ptr<LotLightBase> base, const std::string& state);
+// `strength` gives how strongly each object's lights shine now (by object id, asked once for each
+// object with lights of its own), all off without it.
+std::shared_ptr<LotLight> gatherLotLight(ts2::scene::Assets& assets, std::shared_ptr<LotLightBase> base, const std::string& state,
+                                         const std::function<float(std::uint32_t object)>& strength = {});
 // Then the light worked out, on any thread (one at a time for a lot).
 void workOutLotLight(LotLight& light);
 // Then put into the lot's scene (`place` is where the lot stands in it): its sky, its light maps,

@@ -76,9 +76,22 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
         }
         portals.push_back(portal);
     }
+    std::vector<objectlights::LampLight> lamps;
+    for (int l = byte() % 8; l > 0; --l) {
+        objectlights::LampLight lamp;
+        lamp.room = static_cast<std::int16_t>(byte() % 4);
+        lamp.position = {number(), number(), number()};
+        lamp.axis = {number(), number(), number()};
+        lamp.color = {number(), number(), number()};
+        lamp.falloff = number();
+        lamp.spot = (byte() & 1) != 0;
+        lamp.coneAngle = number();
+        lamp.conePenumbra = number();
+        lamps.push_back(lamp);
+    }
     for (auto& instance : scene.instances) instance.level = static_cast<int>(byte() % 8) - 2;
     const std::uint8_t roomSeed = byte();
-    objectlights::light(scene, rooms, portals, number(), [&](int level, float x, float) { return std::int16_t((level + static_cast<int>(x) + roomSeed) & 3); }, byte() % 3);
+    objectlights::light(scene, rooms, {}, portals, lamps, number(), [&](int level, float x, float) { return std::int16_t((level + static_cast<int>(x) + roomSeed) & 3); }, byte() % 3);
     for (const auto& instance : scene.instances) {
         if (instance.lightSet >= static_cast<int>(scene.lightSets.size())) {
             std::abort();

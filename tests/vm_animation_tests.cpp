@@ -116,10 +116,13 @@ void animateSimWaitsForItsAnimation() {
 
     CHECK(vm.run(sim, kObjectGroup, 0x1000).outcome == Outcome::Sleeping);
     CHECK(sim.animation && sim.animation->name == "a2o-shower-getOut-E");
-    world.advanceClock(1000);
+    CHECK(std::fabs(sim.animation->fadeInMs - 233.33f) < 1e-3f && std::fabs(sim.animation->fadeOutMs - 233.33f) < 1e-3f);
+    world.advanceClock(1700);
     CHECK(vm.resume(sim).outcome == Outcome::Sleeping && sim.thread.temps[0] == 0);
-    world.advanceClock(1000);
+    // It goes on once its clip starts fading out, and the clip fades on as the one ending.
+    world.advanceClock(40);
     CHECK(vm.resume(sim).outcome == Outcome::True && sim.thread.temps[0] == 1 && !sim.animation);
+    CHECK(sim.ending && sim.ending->name == "a2o-shower-getOut-E");
 
     // From the global list, at double speed: half as long.
     CHECK(vm.run(sim, kObjectGroup, 0x1001).outcome == Outcome::Sleeping);
@@ -221,6 +224,39 @@ void animateOverlayPlaysOnTheObjectItNames() {
     CHECK(bed.overlays[0].caller == sim.id && bed.overlays[0].stackObject == bed.id);
     sim.thread.stackObjectId = 0;
     CHECK(vm.run(sim, kObjectGroup, 0x1000).outcome == Outcome::Error);
+}
+
+// Look At starts a head look at the object it names and notes it in person data 0x29 to 0x2C at once.
+// STOP before the head took it cancels it. A speed of 0 is an error.
+void lookAtStartsAndStopsAHeadLook() {
+    Instruction look;
+    look.opcode = 0x006E;
+    look.trueTarget = T;
+    look.falseTarget = E;
+    look.operands[1] = 0x0A;  // the stack object
+    look.operands[4] = 22;    // 44 degrees a second each way
+    look.operands[5] = 22;
+    look.operands[6] = 0xFF;  // held until stopped
+    look.operands[7] = 0xFF;
+    look.operands[14] = 1;    // its targeting slot 0
+    MemoryCodeSource code;
+    code.add(kObjectGroup, 0x1000, bhav({look}));
+    Instruction stop = look;
+    stop.operands[0] = 0x01;
+    code.add(kObjectGroup, 0x1001, bhav({stop}));
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    auto& other = world.create(kObjectGroup, typed(0x52525252, ts2::sim::kPersonType));
+    Vm vm(code, {}, &world);
+    sim.thread.stackObjectId = other.id;
+    CHECK(vm.run(sim, kObjectGroup, 0x1000).outcome == Outcome::True);
+    const auto& pd = sim.personData;
+    CHECK(pd[0x29] == other.id && pd[0x2A] == 0x1000 && pd[0x2B] == 9901 && pd[0x2C] == -1);
+    CHECK(sim.look.following() == 1 && sim.lookTargets.size() == 1 && sim.lookTargets[0].object == other.id);
+    CHECK(vm.run(sim, kObjectGroup, 0x1001).outcome == Outcome::True);
+    CHECK(sim.look.following() == 0);
+    code.add(kObjectGroup, 0x1002, bhav({[&] { Instruction slow = look; slow.operands[4] = 0; return slow; }()}));
+    CHECK(vm.run(sim, kObjectGroup, 0x1002).outcome == Outcome::Error);
 }
 
 // Animate Overlay byte 15 flag 0x01 flips the overlay by temp 3 in place of byte 2's flag, as a bed's
@@ -542,6 +578,57 @@ void animateObjectReadsTheSimsList() {
     CHECK(notASim.outcome == Outcome::Error && notASim.reason == "Object referred to must be a person.");
 }
 
+// A lot saved while a Sim waited in Animate Sim: the saved clip carries on at its saved rate from
+// where it got to, not at the speed temp 2 holds now, and events it had played are not told again.
+// Another clip starts as its operands say.
+void animateSimCarriesOnTheSavedClip() {
+    Instruction animate;
+    animate.opcode = 0x006A;
+    animate.trueTarget = T;
+    animate.falseTarget = E;
+    animate.operands[2] = 0x02;  // speed from temp 2
+    animate.operands[4] = 0x01;
+    animate.operands[5] = 0x10;
+    animate.operands[6] = 0x81;
+    MemoryCodeSource code;
+    code.addStrings(ts2::sim::kGlobalGroup, 0x81, {"a-soc-talkListen-side-loop150-agree-wow"});
+    code.add(kObjectGroup, 0x1000, bhav({animate}));
+    code.add(kObjectGroup, 0x1001, bhav({expr(owner::kMyData, 0x20, op::kAdd, owner::kParam, 0, T, E)}, 1));
+    ts2::sim::World world;
+    world.setAnimationLengths([](const std::string&) -> std::optional<float> { return 4350.0f; });
+    world.setAnimationEvents([](const std::string&) { return std::vector<ts2::sim::AnimationEvent>{{1000, 2}, {3000, 5}}; });
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    sim.thread.temps[2] = 3;
+    sim.resumedClip = ts2::sim::SimObject::ResumedClip{"a-soc-talkListen-side-loop150-AGREE-wow", 1.0f, 2000};
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(sim, kObjectGroup, 0x1000).outcome == Outcome::Sleeping && !sim.resumedClip);
+    CHECK(sim.animation && sim.animation->speed == 1.0f && sim.animation->lengthMs == 4350.0f && sim.animation->startMs == -2000.0);
+    world.advanceClock(1100);
+    ts2::sim::tellAnimateSimEvents(world, vm, sim.id, [](const ts2::sim::RunResult&) {}, world.clockMs());
+    CHECK(sim.data[0x20] == 5);
+    world.advanceClock(1250);
+    CHECK(vm.resume(sim).outcome == Outcome::True);
+
+    sim.thread = {};
+    sim.thread.temps[2] = 16;
+    sim.resumedClip = ts2::sim::SimObject::ResumedClip{"a-other", 1.0f, 2000};
+    CHECK(vm.run(sim, kObjectGroup, 0x1000).outcome == Outcome::Sleeping && !sim.resumedClip);
+    CHECK(sim.animation && sim.animation->speed == 0.5f && sim.animation->startMs == world.clockMs());
+}
+
+// An Animate Sim clip fades in and out over 233.33 ms each, both shortened alike to fit a shorter
+// clip, and a fade of a millisecond or less is none.
+void animateFadesFitTheClip() {
+    const auto both = ts2::sim::animateFades(150, true, true);
+    CHECK(std::fabs(both.inMs - 74.9925f) < 1e-3f && std::fabs(both.outMs - 74.9925f) < 1e-3f);
+    const auto outOnly = ts2::sim::animateFades(150, false, true);
+    CHECK(outOnly.inMs == 0 && std::fabs(outOnly.outMs - 149.985f) < 1e-3f);
+    const auto tiny = ts2::sim::animateFades(1.5f, true, true);
+    CHECK(tiny.inMs == 0 && tiny.outMs == 0);
+    const auto none = ts2::sim::animateFades(1000, false, false);
+    CHECK(none.inMs == 0 && none.outMs == 0);
+}
+
 // Animate Sim's byte 8 flag 0x01 takes the flip from temp 3 instead of byte 2 (the living chair's
 // entry, as the game's sit tree plays it).
 void animateSimFlipsFromTemp3() {
@@ -557,6 +644,7 @@ std::vector<Test> vmAnimationTests() {
         {"Animate Overlay list 0x80 uses the global age lists", animateOverlaySpecialListUsesTheGlobalAgeLists},
         {"Animate Overlay plays on the object it names", animateOverlayPlaysOnTheObjectItNames},
         {"Animate Overlay flips from temp 3", animateOverlayFlipsFromTemp3},
+        {"Look At starts and stops a head look", lookAtStartsAndStopsAHeadLook},
         {"Animate Overlay object list uses the age list", animateOverlayObjectListUsesTheAgeList},
         {"Animate Sim list 0x80 uses the global age lists", animateSimSpecialListUsesTheGlobalAgeLists},
         {"social animations are named for both Sims", socialAnimationsAreNamedForBothSims},
@@ -565,6 +653,8 @@ std::vector<Test> vmAnimationTests() {
         {"Animate Sim events reach their tree", animateSimEventsReachTheirTree},
         {"Animate Stop ends overlays by kind and priority", animateStopEndsOverlaysByKindAndPriority},
         {"Animate Sim flips from temp 3", animateSimFlipsFromTemp3},
+        {"Animate Sim clips fade to fit", animateFadesFitTheClip},
+        {"Animate Sim carries on the saved clip", animateSimCarriesOnTheSavedClip},
         {"Animate Object plays once, a count from temp 1, or until stopped", animateObjectPlaysUntilStopped},
         {"Animate Object reads the Sim's list", animateObjectReadsTheSimsList},
     };

@@ -40,7 +40,6 @@ struct Settings {
     bool dimOutside = true;  // samples of floors and walls outdoors leave the outside ambient out (always, in the game)
     // Windows and doors.
     windowlight::Daylight day;
-    bool sun = false;        // the state has a sun (without one the game samples the sky, not supported)
     windowlight::Suppression suppression;
     // Rooms.
     roomsamples::Settings samples;
@@ -50,6 +49,8 @@ struct Settings {
     lightmaptexels::Outdoor outdoor;
     // The incidence maps made of the light maps (incidenceMapScale, incidenceMapHeightClamp).
     float incidenceScale = 20, incidenceHeightClamp = 1;
+    // How much of the sun a Sim's projected shadow takes away (see simshadows::shade).
+    float projectiveShadowStrength = 1;
 };
 enum Group { kObjects, kSims, kPortals };
 

@@ -4,6 +4,7 @@
 #include "formats/cursor.hpp"
 #include "formats/dbpf_writer.hpp"
 #include "formats/effects.hpp"
+#include "formats/simi.hpp"
 
 #include <sstream>
 
@@ -110,6 +111,29 @@ void fencePostLayerReadsPosts() {
     CHECK(posts.size() == 1 && posts[0].level == 1 && posts[0].x == 13.0f && posts[0].y == 9.0f && posts[0].fence == 0xAD0DABD2);
 }
 
+// A lot's simulator state: the ticks' random number state comes after the globals and three other
+// values, in versions with sixty globals only.
+void simulatorStateReadsTheRandomState() {
+    std::vector<std::uint8_t> d(64, 0);
+    auto put = [&d](std::uint32_t v, int bytes) {
+        for (int i = 0; i < bytes; ++i) d.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
+    };
+    put(0x53494D49, 4);
+    put(0xD8, 4);
+    put(0, 4);
+    for (int g = 0; g < 60; ++g) put(static_cast<std::uint32_t>(g), 2);
+    put(1, 4); put(2, 2); put(3, 4);
+    put(0xBC598883, 4); put(0x4EE46106, 4);
+    const auto state = ts2::simi::parse(d);
+    CHECK(state.globals.size() == 60 && state.globals[59] == 59);
+    CHECK(state.randomState == 0xBC598883u);
+    d[0x44] = 0xD3;
+    CHECK(!ts2::simi::parse(d).randomState);
+    d[0x44] = 0xD8;
+    d.resize(d.size() - 6);
+    CHECK(!ts2::simi::parse(d).randomState);
+}
+
 // A lot's neighbor remap tables: only table 6 is kept, its last value for a repeated key wins.
 void neighborRemapKeepsTableSix() {
     std::vector<std::uint8_t> d;
@@ -165,15 +189,15 @@ void savedObjectReadsPlayingAnimations() {
     u32(2);                                                   // entries
     u32(0);
     u32(1);
-    u32(0x09D0CE69), u32(11), u32(0x60000000), str("a-idle"), str("ovl"), u32(6), u32(4);
+    u32(0x09D0CE69), u32(11), u32(0x60000001), str("a-idle"), str("ovl"), u32(6), u32(4);
     d.push_back(43), d.push_back(0), d.push_back(0x00), d.push_back(0x20);  // event object 43, tree 0x2000
-    u32(0), f32(1), f32(-1), f32(-1), u32(1), u32(1), u32(0x7FFFFF00), u32(0), floats(7), u32(0xFFFFFFFF), u32(1);
+    u32(0), f32(-1.5f), f32(-1), f32(-1), u32(1), u32(1), u32(0x7FFFFF00), u32(0), floats(7), u32(0xFFFFFFFF), u32(1);
     u32(0x584BA0BB), u32(0), u32(0), str(""), u32(0), u32(0), u32(0), u32(0);
     u32(0xC9DE69B6), u32(1), u32(0x3AFF30DB), u32(7), u32(1), u32(0), u32(100), u32(0x7FFFFF00), f32(0.1f), f32(1);
     u32(5), u32(1), f32(0.5f), u32(1);                        // layer 1, weight 0.5, blend curve:
     u32(0x8B969D64), u32(1), u32(1), f32(0), u32(3);
-    for (const float ms : {200.0f, 3000.0f, 200.0f}) {
-        u32(0), f32(0), f32(1), f32(ms);
+    for (const auto& [kind, ms] : {std::pair{0u, 150.0f}, std::pair{1u, 3000.0f}, std::pair{2u, 250.0f}}) {  // rise, hold, fall
+        u32(kind), f32(0), f32(1), f32(ms);
     }
     u32(0), u32(1), f32(1), f32(0), floats(24), u32(454), u32(1), u32(0), u32(0x7FFFFF00), f32(0), u32(1), f32(354);
     str("a-idle_anim"), u32(1);
@@ -185,8 +209,9 @@ void savedObjectReadsPlayingAnimations() {
     CHECK(saved.animations.size() == 1);
     const auto& a = saved.animations.front();
     CHECK(a.name == "a-idle" && a.type == "ovl" && a.category == 4 && a.eventObject == 43 && a.eventTree == 0x2000 &&
-          a.eventObjectGuid == 0x584BA0BB);
+          a.eventObjectGuid == 0x584BA0BB && a.rate == -1.5f);
     CHECK(a.state == 1 && a.layer == 1 && a.plays == 1 && a.weight == 0.5f && a.lengthMs == 3400.0f && a.startedMsAgo == 354);
+    CHECK(a.fadeInMs == 150.0f && a.fadeOutMs == 250.0f && a.flipped);
     d.pop_back();
     bool refused = false;
     try {
@@ -311,6 +336,35 @@ void lotGridsWithVariableTilesParse() {
     auto filledEmpty = header(0x2A51171B, "c3DArray", {20, 30, 0});
     filledEmpty.push_back(1);
     CHECK(throws([&] { ts2::array3d::parse(filledEmpty); }));
+}
+
+// The object map: its objects, then each object id's wait as a Sleep left it (an s16 and a value
+// not known yet). A wait table longer than its data is refused.
+void objectMapReadsWaits() {
+    std::vector<std::uint8_t> d(64, 0);
+    auto u32 = [&d](std::uint32_t v) {
+        for (int i = 0; i < 4; ++i) d.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
+    };
+    u32(0);
+    u32(0xD8);
+    u32(0x4F626A4D);
+    u32(1);
+    u32(2);
+    u32(7);
+    u32(2);
+    u32(0xFFFE | 9u << 16);
+    u32(193 | 1u << 16);
+    const auto map = ts2::objm::parse(d);
+    CHECK(map.typeIndexByObject.at(2) == 7);
+    CHECK((map.waitTicks == std::vector<std::int16_t>{-2, 193}));
+    d.resize(d.size() - 2);
+    bool threw = false;
+    try {
+        ts2::objm::parse(d);
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK(threw);
 }
 
 // ObjM instance 2: object id lists under a number. Version 1 ends with a list of u32s.
@@ -1060,6 +1114,11 @@ void neighborhoodCameraReads() {
     CHECK(free.size() == 1 && free[0].clip && (*free[0].clip)[0] == 0.15f && (*free[0].clip)[1] == 2000 && free[0].levels.size() == 2);
     CHECK(ts2::camera::pitchAt(live[0], 70, 1) == 40 && ts2::camera::pitchAt(live[0], 70, 0.5f) == 35);
     CHECK(ts2::camera::pitchAt(live[0], 3, 1) == 65 && ts2::camera::pitchAt(live[0], 3, 0) == 2);
+    // A distance's zoom level is the first level at or nearer than it, the nearest below them all.
+    const auto levels = ts2::camera::parse("camera \"Live\" Live\nzoom 1 (70 40 25 15 8 3)\n");
+    CHECK(levels.size() == 1 && ts2::camera::zoomLevelAt(levels[0], 70) == 0 && ts2::camera::zoomLevelAt(levels[0], 80) == 0);
+    CHECK(ts2::camera::zoomLevelAt(levels[0], 13.96f) == 4 && ts2::camera::zoomLevelAt(levels[0], 7.28f) == 5);
+    CHECK(ts2::camera::zoomLevelAt(levels[0], 2) == 5 && ts2::camera::zoomLevelAt(ts2::camera::Config{}, 10) == -1);
     // The neighborhood's edge margins, and margins that would leave no room are dropped.
     const auto kept = ts2::camera::parse("camera \"N\" Neighborhood\nconstrain   .35 .35 .35 .35\n");
     CHECK(kept.size() == 1 && kept[0].constrain && (*kept[0].constrain)[3] == 0.35f && !c.constrain);
@@ -1475,6 +1534,7 @@ std::vector<Test> formatTests() {
         {"name map reads names", nameMapReadsNames},
         {"terrain resources parse", terrainResourcesParse},
         {"lot grids with variable tiles parse", lotGridsWithVariableTilesParse},
+        {"object map reads waits", objectMapReadsWaits},
         {"object groups parse", objectGroupsParse},
         {"object functions ignore the magic", objectFunctionsIgnoreTheMagic},
         {"roofs read every version", roofsReadEveryVersion},
@@ -1498,6 +1558,7 @@ std::vector<Test> formatTests() {
         {"Constant tables count in fifteen bits", constantTablesCountInFifteenBits},
         {"tuning lists read named values", tuningListsReadNamedValues},
         {"saved object reads playing animations", savedObjectReadsPlayingAnimations},
+        {"simulator state reads the random state", simulatorStateReadsTheRandomState},
         {"wall graph point index finds the first point", wallGraphPointIndexFindsTheFirstPoint},
     };
 }

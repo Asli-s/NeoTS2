@@ -48,6 +48,11 @@ private:
 // quarter of the tile holding the point has no surface there.
 bool surfaceOpen(const array3d::Array3D& surface, int level, float x, float y);
 
+// Whether a lot object is an extra tile of a multi-tile object. Its lead tile draws the whole model
+// and shines its lights, and a scene record filed under an extra tile's id is left over from an
+// earlier object.
+bool isExtraTile(Assets& assets, const content::LotObject& object);
+
 // A wall segment: its two ends and, at each, the heights of its bottom and top.
 struct WallQuad {
     float x0, y0, x1, y1, bottom0, top0, bottom1, top1;

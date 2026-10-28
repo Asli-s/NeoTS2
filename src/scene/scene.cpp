@@ -50,6 +50,19 @@ void Transform::apply(float* v, bool point) const {
     }
 }
 
+ObjectLighting withSimLights(const ObjectLighting& lighting) {
+    ObjectLighting out = lighting;
+    out.lights.insert(out.lights.end(), lighting.simLights.begin(), lighting.simLights.end());
+    out.simLights.clear();
+    auto score = [](const ObjectLighting::Light& l) { return l.color[0] * l.color[0] + l.color[1] * l.color[1] + l.color[2] * l.color[2]; };
+    std::stable_sort(out.lights.begin(), out.lights.end(), [&](const auto& a, const auto& b) { return score(a) > score(b); });
+    constexpr std::size_t kMaxLights = 8;
+    if (out.lights.size() > kMaxLights) {
+        out.lights.resize(kMaxLights);
+    }
+    return out;
+}
+
 std::vector<std::size_t> perPixelLights(const ObjectLighting& lighting, std::size_t usable) {
     const std::size_t n = std::min(usable, lighting.lights.size());
     std::vector<std::size_t> out;

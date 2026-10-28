@@ -100,20 +100,43 @@ std::int16_t gridRoom(const Result& r, int level, float x, float y) {
     return half.valid ? half.room : 0;
 }
 
-bool tileHasFloor(const Result& r, int level, int x, int y) {
-    const auto* grid = gridOf(r, level);
-    if (!grid) {
-        return false;
+// Whether a storey's floor stops light from a lamp above it at a point. The ground storey always
+// does. A higher storey does where the quarter tile holding the point has both a floor and a
+// surface (content::kSurfaceGridInstance).
+class FloorStops {
+public:
+    explicit FloorStops(const content::Lot& lot) : ground_(content::groundGridLevel(lot)) {
+        const auto floors = lot.grids.find(content::kFloorGridInstance);
+        const auto surface = lot.grids.find(content::kSurfaceGridInstance);
+        floors_ = floors != lot.grids.end() && floors->second.elementSize == 8 ? &floors->second : nullptr;
+        surface_ = surface != lot.grids.end() && surface->second.elementSize == 4 ? &surface->second : nullptr;
     }
-    const auto& g = *grid;
-    if (x < 0 || y < 0 || x >= g.width || y >= g.height) {
-        return false;
+
+    bool operator()(int level, float x, float y) const {
+        if (level == 0) {
+            return true;
+        }
+        if (!floors_ || !surface_ || !std::isfinite(x) || !std::isfinite(y) || x < 0 || y < 0 || x >= kMaxTile || y >= kMaxTile) {
+            return false;
+        }
+        const int tx = static_cast<int>(std::floor(x)), ty = static_cast<int>(std::floor(y));
+        const float fx = x - static_cast<float>(tx), fy = y - static_cast<float>(ty);
+        // The quarter triangle holding the point, in the grids' order: west, north, east, south.
+        const std::size_t q = fx <= fy ? (fx + fy < 1 ? 0 : 1) : (fx + fy >= 1 ? 2 : 3);
+        const int l = level + ground_;
+        const auto open = surface_->at(l, tx, ty);
+        return floors_->contains(l, tx, ty) && open.size() == 4 && floors_->i16(l, tx, ty, q) != 0 && open[q] != 0;
     }
-    return g.tiles[static_cast<std::size_t>(y) * static_cast<std::size_t>(g.width) + static_cast<std::size_t>(x)].floor;
-}
+
+private:
+    static constexpr float kMaxTile = 4096;  // further than any lot reaches, so the cast stays in range
+    int ground_ = 0;
+    const array3d::Array3D* floors_ = nullptr;
+    const array3d::Array3D* surface_ = nullptr;
+};
 
 // One pass of the floor and wall light with these sources. False when a pass hit its safety limit.
-bool lightPass(Result& r, const Settings& s, const std::vector<LightSource>& sources) {
+bool lightPass(Result& r, const Settings& s, const std::vector<LightSource>& sources, const FloorStops& stops) {
     bool ok = true;
     for (auto& g : r.floors) {
         g.insideAmbient = {s.insideColor[0] * s.insideFloorAmbient, s.insideColor[1] * s.insideFloorAmbient, s.insideColor[2] * s.insideFloorAmbient};
@@ -122,7 +145,8 @@ bool lightPass(Result& r, const Settings& s, const std::vector<LightSource>& sou
         g.falloffScale = s.floorThreshold;
         g.steps = s.steps;
         g.dimOutside = s.dimOutside;
-        ok = floorlight::light(g, sources, [&](int x, int y, int level) { return tileHasFloor(r, level, x / 2, y / 2); }) && ok;
+        // Each cell is tested at its corner.
+        ok = floorlight::light(g, sources, [&](int x, int y, int level) { return stops(level, static_cast<float>(x) * 0.5f, static_cast<float>(y) * 0.5f); }) && ok;
     }
     auto& w = r.walls;
     w.insideAmbient = {s.insideColor[0] * s.insideWallAmbient, s.insideColor[1] * s.insideWallAmbient, s.insideColor[2] * s.insideWallAmbient};
@@ -133,9 +157,7 @@ bool lightPass(Result& r, const Settings& s, const std::vector<LightSource>& sou
     w.darkFloor = s.darkWallFloor;
     ok = walllight::light(
              w, sources,
-             [&](float x, float y, int level) {
-                 return std::isfinite(x) && std::isfinite(y) && tileHasFloor(r, level, static_cast<int>(std::floor(x)), static_cast<int>(std::floor(y)));
-             },
+             [&](float x, float y, int level) { return stops(level, x, y); },
              [&](float x, float y, int level) {
                  const auto* grid = gridOf(r, level);
                  return grid ? floorlight::sample(*grid, x, y) : std::array<float, 3>{0, 0, 0};
@@ -173,18 +195,21 @@ std::optional<Settings> settingsFor(const content::Lighting& l, const std::strin
     s.darkWallFloor = l.number("darkWallFloorContribution", s.darkWallFloor);
     s.incidenceScale = l.number("incidenceMapScale", s.incidenceScale);
     s.incidenceHeightClamp = l.number("incidenceMapHeightClamp", s.incidenceHeightClamp);
+    s.projectiveShadowStrength = st.projectiveShadowStrength;
 
     if (const auto sun = st.lights.find("sun"); sun != st.lights.end()) {
         const auto& d = sun->second.direction;
         const double length = std::sqrt(static_cast<double>(d[0]) * d[0] + static_cast<double>(d[1]) * d[1] + static_cast<double>(d[2]) * d[2]);
         if (length > 0) {
-            s.sun = true;
             s.day.sunColor = sun->second.color;
             s.day.sunStrength = sun->second.strength;
             for (std::size_t c = 0; c < 3; ++c) s.day.sunDirection[c] = static_cast<float>(d[c] / length);
         }
     }
     s.day.sky = st.skylight;
+    s.day.skylight = st.hasSkylight;
+    s.day.saturation = st.portalSaturation;
+    s.day.outdoorStrength = l.number("outdoorStrength", 1);
     // The outdoor lights the light maps take, the sun first.
     for (const char* lightName : {"sun", "sky", "fill1"}) {
         const auto light = st.lights.find(lightName);
@@ -196,6 +221,7 @@ std::optional<Settings> settingsFor(const content::Lighting& l, const std::strin
                                     {static_cast<float>(d[0] / length), static_cast<float>(d[1] / length), static_cast<float>(d[2] / length)}});
     }
     s.outdoor.skylight = st.skylight;
+    for (const auto& light : s.outdoor.lights) s.day.outdoorLights.push_back({light.color, light.strength, light.direction});
     s.outdoor.strength = l.number("terrainStrength", 1);
     s.day.insidePortals = modifiersOf(st, "insidePortals");
     s.day.outsidePortals = modifiersOf(st, "outsidePortals");
@@ -246,7 +272,8 @@ Result compute(const Inputs& in, const Settings& s) {
     r.complete = r.layout.complete;
 
     // The lamps alone. The windows and doors take their light from those walls.
-    r.complete = lightPass(r, s, in.lamps) && r.complete;
+    const FloorStops stops(lot);
+    r.complete = lightPass(r, s, in.lamps, stops) && r.complete;
     const std::array<float, 3> outsideWall = s.outsideColor;
     std::map<std::int16_t, std::vector<std::size_t>> byRoom;
     for (std::size_t i = 0; i < in.portals.size(); ++i) byRoom[in.portals[i].room].push_back(i);
@@ -266,7 +293,7 @@ Result compute(const Inputs& in, const Settings& s) {
             pl.coneAngle = in.portals[list[k]].coneAngle;
             pl.conePenumbra = in.portals[list[k]].conePenumbra;
             const auto L = wallruns::portalSample(r.walls.runs, r.layout, portalKey(portals[k]), s.dimOutside, outsideWall, s.outsideWallAmbient);
-            pl.lights = windowlight::lightsFor(portals[k], room == 0, s.sun, s.day, L);
+            pl.lights = windowlight::lightsFor(portals[k], room == 0, s.day, L);
             if (pl.lights) {
                 sources.insert(sources.end(), pl.lights->sources.begin(), pl.lights->sources.end());
             }
@@ -276,7 +303,7 @@ Result compute(const Inputs& in, const Settings& s) {
 
     // Lamps and windows together, then the corners.
     r.walls.runs = r.layout.runs;
-    r.complete = lightPass(r, s, sources) && r.complete;
+    r.complete = lightPass(r, s, sources, stops) && r.complete;
     lightcorners::blendWalls(r.walls);
     std::vector<std::vector<lightcorners::Tile>> tiles;
     for (const auto& keys : r.layout.keys) {

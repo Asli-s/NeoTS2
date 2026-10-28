@@ -14,13 +14,13 @@ constexpr std::size_t kMaxOpenPackages = 16;
 
 } // namespace
 
-std::size_t ResourceIndex::addPackage(const std::filesystem::path& path,
-                                      std::optional<std::uint32_t> localGroup) {
+bool ResourceIndex::addPackage(const std::filesystem::path& path,
+                               std::optional<std::uint32_t> localGroup) {
     constexpr std::uint32_t kLocalGroup = 0xFFFFFFFF;
     auto package = std::make_unique<dbpf::Package>(path);
     if (package->appleDouble()) {
         diag::warnOnce("packages: AppleDouble metadata is left out: " + diag::utf8(path.filename()));
-        return packages_.size();
+        return false;
     }
     const std::size_t packageIndex = packages_.size();
 
@@ -41,7 +41,7 @@ std::size_t ResourceIndex::addPackage(const std::filesystem::path& path,
 
     packages_.push_back(std::move(package));
     paths_.push_back(path);
-    return packageIndex;
+    return true;
 }
 
 const ResourceIndex::Resource* ResourceIndex::find(const dbpf::ResourceKey& key) const {

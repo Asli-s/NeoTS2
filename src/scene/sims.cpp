@@ -67,7 +67,7 @@ float stretchOf(const std::map<std::string, std::string>& p) {
     if (it == p.end()) {
         return 1;
     }
-    const auto value = parseFloat(it->second);
+    const auto value = parseLeadingFloat(it->second);
     return value && std::isfinite(*value) ? std::clamp(*value, 0.02f, 50.0f) : 1.0f;
 }
 
@@ -318,7 +318,7 @@ std::string simSlotBone(const std::filesystem::path& characterFile, std::size_t 
     return slot < bones.size() ? bones[slot] : std::string();
 }
 
-std::vector<std::string> simSlotBones(const std::filesystem::path& characterFile) {
+std::vector<std::string> simSlotBones(const std::filesystem::path& characterFile, bool targeting) {
     try {
         dbpf::Package package{characterFile};
         const dbpf::IndexEntry* definition = nullptr;
@@ -345,12 +345,21 @@ std::vector<std::string> simSlotBones(const std::filesystem::path& characterFile
         const auto parsed = slot::parse(package.read(*slots));
         const auto table = str::parse(package.read(*names));
         const auto entries = table.forLanguage(1);
-        std::vector<std::string> bones(parsed.containerCount());
-        for (std::size_t slot = 0; slot < bones.size(); ++slot) {
-            const std::int32_t b = parsed.containerBone(slot);
-            if (b >= 0 && static_cast<std::size_t>(b) < entries.size()) {
-                bones[slot] = lower(entries[static_cast<std::size_t>(b)]->value);
+        const auto boneName = [&](std::int32_t b) {
+            return b >= 0 && static_cast<std::size_t>(b) < entries.size() ? lower(entries[static_cast<std::size_t>(b)]->value) : std::string();
+        };
+        std::vector<std::string> bones;
+        if (targeting) {
+            for (const auto& e : parsed.entries) {
+                if (e.type == slot::kTargetSlot) {
+                    bones.push_back(boneName(e.bone));
+                }
             }
+            return bones;
+        }
+        bones.resize(parsed.containerCount());
+        for (std::size_t slot = 0; slot < bones.size(); ++slot) {
+            bones[slot] = boneName(parsed.containerBone(slot));
         }
         return bones;
     } catch (const std::exception&) {

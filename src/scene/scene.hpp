@@ -2,6 +2,7 @@
 
 #include "formats/cobject.hpp"
 #include "formats/scenegraph.hpp"
+#include "scene/object_shadow.hpp"
 
 #include <array>
 #include <map>
@@ -49,7 +50,9 @@ struct Image {
 // and in the order placed, as terrain paint is.
 // Add: blended by adding the colour times its alpha, as the game's additive particles
 // (stdPMAdditive) are drawn.
-enum class AlphaMode { Opaque, Mask, Blend, Layer, Add };
+// Sum: blended by adding the colour whatever its alpha (stdMatAlphaBlendMode addNoSrcAlphaScale,
+// candle flames).
+enum class AlphaMode { Opaque, Mask, Blend, Layer, Add, Sum };
 
 // How a surface looks: a color, optionally times an image, and how its alpha is used.
 struct Material {
@@ -59,10 +62,15 @@ struct Material {
     AlphaMode alpha = AlphaMode::Opaque;
     float alphaReference = 0.5f;  // Mask: drawn where alpha is at least this
     bool doubleSided = false;
+    bool alphaReplicate = false;  // the texture's alpha stands in for its colour (stdMatBaseTextureAlphaReplicate)
+    // A texture of `tiles` frames side by side, shown one at a time, `tileSpeed` frames a second on
+    // the lot's clock (stdMatTextureCoordAnimMode tile). 0: the whole texture.
+    int tiles = 0;
+    float tileSpeed = 0;
     bool unlit = false;  // shown as its color and texture, without light
-    // Unlit and textured, without texture animation or glow: times (0.35, 0.35, 0.7) at night, as
-    // the game's standard material draws it.
-    bool nightDimmed = false;
+    // Unlit and textured, without texture animation or glow: times its light set's texture light
+    // (ObjectLighting::textureLight), as the game's standard material draws it.
+    bool takesTextureLight = false;
     bool vertexColor = false;  // the game's VertexAlpha: colored and see-through by its vertices' colors
     bool clamp = false;  // its texture is clamped at the edges instead of repeating
     // The game's draw layer (its shader's -layer): lower layers are drawn first. Opaque materials
@@ -90,8 +98,8 @@ struct Material {
     // against the light to the power specPower, times specCoef. A power of 0 is none.
     std::array<float, 3> specCoef{0, 0, 0};
     float specPower = 0;
-    // The particle model material's emissive coefficient: added to its light before the texture
-    // multiplies it, so it glows in its own colour. Not used by other materials yet.
+    // A lit standard material's emissive coefficient: added to its light before the texture
+    // multiplies it, so it glows in its own colour.
     std::array<float, 3> emissive{0, 0, 0};
 };
 
@@ -185,11 +193,20 @@ struct Instance {
     // buildings' shadow leaves, as lot objects outdoors are, instead of a light map.
     bool litOutdoors = false;
     LightGroup lightGroup = LightGroup::Props;
-    // The lights it gets instead of the daylight (objects in rooms): an index into Scene::lightSets.
+    // The lights it gets instead of the daylight (objects in rooms, and outdoors those a lamp or
+    // window reaches): an index into Scene::lightSets.
     int lightSet = -1;
     // Doors and windows: a light set per primitive of its mesh, from the room the primitive's node
     // stands in (-1: the daylight). Used in place of `lightSet`.
     std::vector<int> partLightSets;
+    // Lot objects: what decides their shadow, and the shadow drawn (the kind they ask for until the
+    // lot's lighting knows which room they stand in).
+    objectshadow::Facts shadowFacts;
+    objectshadow::Kind shadow = objectshadow::Kind::Model;
+    // Lot objects: the scene mesh of their model at rest, which their picture from the sun is drawn
+    // from, and their facing in eighths of a turn counterclockwise.
+    int shadowMesh = -1;
+    std::uint8_t shadowFacing = 0;
 };
 
 // A wall as views need it: where it runs, whether there is a room (not outdoors) on each side
@@ -274,6 +291,21 @@ struct PaintedTerrain {
 struct Rig;
 struct RigAnimation;
 
+// A Sim's head looking at something (Look At): the head IK's weight, and
+// its target and pole in the rig's space.
+struct HeadLook {
+    float weight = 0;
+    std::array<float, 3> target{}, pole{};
+};
+
+// Where a posed head is, as a look's update takes it, in the rig's space: the neck's turn, the
+// head joint, the eye's (head_grip's) offset from it, the head's turn under the neck and its turn at rest.
+struct HeadPlace {
+    std::array<float, 4> neck{0, 0, 0, 1};
+    std::array<float, 3> head{}, eye{};
+    std::array<float, 4> headTurn{0, 0, 0, 1}, headRest{0, 0, 0, 1};
+};
+
 // Something animated in a scene (a Sim): a rig playing an animation, the skinned instances drawn
 // with it and the instances it holds at its joints.
 struct Actor {
@@ -303,6 +335,9 @@ struct Actor {
         std::optional<float> atMs;
         bool bodyOnly = false;    // see LayeredClip::bodyOnly
         bool noRootMove = false;  // see LayeredClip::noRootMove
+        // Where the actor stood while the clip played, for one fading out after the actor was placed
+        // anew (see LayeredClip::placeMove).
+        std::optional<Transform> playedAt;
         // Where the clip's IK object stands in the world (see LayeredClip::objectFrame). With none, the
         // targets on it are in the Sim's own space.
         std::optional<Transform> objectPlace;
@@ -329,6 +364,11 @@ struct Actor {
     std::function<float(int storey, float x, float y)> floorHeight;
     // A Sim's: the rig node each of its container slots sits at (-1: its own place).
     std::vector<int> slotNodes;
+    // A Sim's: the rig node each of its targeting slots sits at (-1: unknown).
+    std::vector<int> targetNodes;
+    // A Sim's look (Look At): asked as the actor is posed, once its clips are mixed and before its head's
+    // IK, with where its head is then. Nothing while it looks at nothing.
+    std::function<std::optional<HeadLook>(const HeadPlace& head)> look;
 };
 
 // A lot object as the lot scene drew it, so that it can follow the simulation when a script moves
@@ -369,11 +409,21 @@ struct ObjectLighting {
         bool operator==(const Light&) const = default;
     };
     std::vector<Light> lights;  // the renderer uses the first eight
+    // Lights only Sims get outdoors (a lighting state's simFill1 and simFill2), see withSimLights.
+    std::vector<Light> simLights;
     // Above 0, lit as the game lights family thumbnails: per vertex, the sum times the material's
     // diffuse times this, clamped to 1, then doubled and times the texture.
     float thumbnailScale = 0;
+    // What unlit textures and environment cube reflections are multiplied by (the game's
+    // "environmentCube" light): in a room its average light, outdoors the lighting state's
+    // environment colour.
+    std::array<float, 3> textureLight{1, 1, 1};
     bool operator==(const ObjectLighting&) const = default;
 };
+
+// The lights a Sim outdoors gets: `lighting`'s own and its Sim-only ones, brightest first as the
+// game scores directional lights (by the length of their colour), at most eight.
+ObjectLighting withSimLights(const ObjectLighting& lighting);
 
 // Which of a light set's first `usable` lights the game lights per pixel on a normal-mapped
 // surface, in that order (the rest stay at the vertices): the first one, two or three directional
@@ -398,7 +448,8 @@ struct LightMaps {
 };
 
 // See Scene::thingLights. `storey` counts from the ground storey (0).
-using ThingLights = std::function<std::vector<ObjectLighting>(const Mesh& mesh, const Transform& inLot, int storey)>;
+enum class LightGroup : std::uint8_t;
+using ThingLights = std::function<std::vector<ObjectLighting>(const Mesh& mesh, const Transform& inLot, int storey, LightGroup group)>;
 struct Scene;
 using ThingSun = std::function<std::vector<float>(const Scene& scene, const Instance& inLot)>;
 
@@ -406,7 +457,8 @@ using ThingSun = std::function<std::vector<float>(const Scene& scene, const Inst
 struct Scene {
     // How objects are lit. Unset, they are lit like everything else.
     std::optional<ObjectLighting> objectLighting;
-    // The lights of objects lit by the room they stand in (Instance::lightSet).
+    // The lights of objects lit by the room they stand in or the lamps and windows outdoors
+    // (Instance::lightSet).
     std::vector<ObjectLighting> lightSets;
     std::optional<LightMaps> lightMaps;
     std::vector<Image> images;
@@ -440,12 +492,25 @@ struct Scene {
     int groundLevel = 0;
     // A lot's size in tiles along x and y, in its own coordinates from (0, 0). Zero when unknown.
     std::array<float, 2> lotSize{0, 0};
-    // A lot's: the lights a thing standing at `inLot` (in the lot's own coordinates) gets from the
-    // room there, one set per part of its mesh, none outdoors (see objectlights::thingLights).
+    // A lot's: the lights a thing or a Sim (`group`) standing at `inLot` (in the lot's own
+    // coordinates) gets from the room there, one set per part of its mesh, none outdoors (see
+    // objectlights::thingLights).
     ThingLights thingLights;
     // A lot's: how much sun reaches an object (its Instance::sun) placed as `inLot` is, in the lot's
     // own coordinates, under the buildings' shadow (see objectsun::thingSun).
     ThingSun thingSun;
+    // A lot's: the room at a position in the lot's own coordinates on a storey (0 = ground), 0
+    // outdoors.
+    std::function<std::int16_t(int storey, float x, float y)> roomAt;
+    // A lot's projected shadows (see simshadows): the sun line they are cast along and the colour
+    // they multiply the ground by. None when unset.
+    struct ShadowLook {
+        std::array<float, 3> toSun{0, 0, 1};
+        std::array<float, 3> shade{1, 1, 1};
+    };
+    std::optional<ShadowLook> shadowLook;
+    // The lot objects' shadows from the sun, rebuilt whenever the sun moves (see objectshadow).
+    std::shared_ptr<const objectshadow::Layout> objectShadows;
 };
 
 } // namespace ts2::scene

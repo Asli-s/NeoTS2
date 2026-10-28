@@ -11,6 +11,7 @@
 #include "sim/clock.hpp"
 #include "ui/screen.hpp"
 
+#include <array>
 #include <chrono>
 
 #include <cstdint>
@@ -54,6 +55,9 @@ public:
     // What a released button asks for.
     enum class Action { None, Neighborhood, Quit, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, RewardsOpened, RewardsClosed, SelectSim, TrackSim, FloorUp, FloorDown, WallMode };
     Action clicked(int window);
+    // The puck's camera button held down under the mouse.
+    enum class CameraButton { None, RotateLeft, RotateRight, ZoomIn, ZoomOut };
+    CameraButton heldCameraButton() const;
     // A right click on one of the panels' buttons: on a want or fear it puts a hold on it or takes it
     // off, on a Sim's thumbnail it asks to track the Sim.
     Action rightClicked(int window, LotLife& life);
@@ -120,6 +124,7 @@ private:
     int version_ = -1;  // the version text, -1 when it isn't shown
     int loaded_ = 0;  // parts of the panels loaded (see load), 2 when all are
     int funds_ = -1, wallMenu_ = -1;
+    std::array<int, 4> cameraButtons_{-1, -1, -1, -1};  // in CameraButton's order, from RotateLeft
     int wallMode_ = 2, pickedWallMode_ = 2;
     LivePanel panel_;
     Skewer skewer_;

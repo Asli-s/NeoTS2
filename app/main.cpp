@@ -1,5 +1,5 @@
 // NeoTS2: opens a saved lot in a window, or shows the game's main menu.
-//   neots2 <install folder> --menu [--user <user folder>] [--size w h] [--preview n]
+//   neots2 <install folder> --menu [--user <user folder>] [--size w h | --fit-screen] [--preview n]
 //          [--play n [--bin families|lots|options|chooser|quit] [--lot id] [--click x y] [--card x y]]
 //          [--hover x y] [--ui-click x y | --ui-right-click x y | --ui-hover x y
 //          (on the lot's panels before the picture, repeatable)]
@@ -68,6 +68,10 @@
 namespace {
 
 using app::kPi;
+using app::kStorey;
+using app::Orbit;
+using ts2::render::Vec3;
+using ts2::scene::WallView;
 
 // A built executable keeps its shaders beside itself. A macOS app keeps them in Resources, where
 // they are data rather than code inside Contents/MacOS and can be signed as part of the bundle.
@@ -82,10 +86,6 @@ std::filesystem::path shaderFolder() {
 #endif
     return beside;
 }
-using app::kStorey;
-using app::Orbit;
-using ts2::render::Vec3;
-using ts2::scene::WallView;
 
 // The platform hands main its arguments in UTF-8.
 std::filesystem::path utf8Path(const char* text) {
@@ -380,6 +380,8 @@ int main(int argc, char** argv) {
                 menu.width = std::stoi(argv[i + 1]);
                 menu.height = std::stoi(argv[i + 2]);
                 i += 2;
+            } else if (arg == "--fit-screen") {
+                menu.fitScreen = true;
             }
         }
         if (!ts2::platform::init()) {
@@ -523,7 +525,6 @@ int main(int argc, char** argv) {
             ts2::render::IRenderer& renderer = *rendererOwner;
             renderer.setBumpMapping(options.bumpMapping);
             renderer.setFloorAndWallNormalMapping(options.wallBumps);
-            renderer.setNight(ts2::content::stateTime(lightState) == ts2::content::StateTime::Night);
             ts2::diag::info("drawing with " + renderer.device());
             renderer.upload(scene);
             ts2::scene::ScenePose pose;

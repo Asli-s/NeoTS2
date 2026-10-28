@@ -16,6 +16,16 @@ COMBINED Texture2D<float4> lightMapFromTexture : register(t4, space2);  // the l
 COMBINED SamplerState lightMapFromSampler : register(s4, space2);
 COMBINED TextureCube<float4> envCubeTexture : register(t5, space2);
 COMBINED SamplerState envCubeSampler : register(s5, space2);
+#ifndef GL2
+COMBINED Texture2D<float4> shadowTexture : register(t6, space2);  // the Sims' blurred shadow pictures
+COMBINED SamplerState shadowSampler : register(s6, space2);
+COMBINED Texture2D<float4> objectPictures : register(t7, space2);  // the lot objects' pictures from the sun
+COMBINED SamplerState objectPicturesSampler : register(s7, space2);
+COMBINED Texture2D<float4> objectPlaces : register(t8, space2);    // where each object lays its picture
+COMBINED SamplerState objectPlacesSampler : register(s8, space2);
+COMBINED Texture2D<float4> objectGridTexture : register(t9, space2);  // which places reach each tile
+COMBINED SamplerState objectGridSampler : register(s9, space2);
+#endif
 
 cbuffer Material : register(b0, space3) {
     float4 color;
@@ -23,7 +33,7 @@ cbuffer Material : register(b0, space3) {
     float hasTexture;
     float alphaCutoff;    // discard below this (0 for none)
     float unlit;          // 1: color and texture as they are, without light
-    float padding;
+    float alphaReplicate; // 1: the texture's alpha stands in for its colour
     float4 lightMap;      // x: the gain on the light map (0: none), y: 1 to leave the color out, z: 1 for terrain, w: 1 with a normal map
     float4 pixelLightColors[3];  // the colours of the lights lit per pixel through the normal map
     float pixelLightCount;       // how many there are (0: none)
@@ -37,7 +47,87 @@ cbuffer Material : register(b0, space3) {
     float4 cameraUp;
     float4 cameraForward;
     float4 emissive;  // rgb added to the light before the texture multiplies it, w: 1 when on
+    float4 uvTile;    // the texture coordinates times xy plus zw: one frame of a tiled texture
+    float4 shadowReceiver;  // x: 1 when Sims' projected shadows fall on it, y: its level, z: 1 to fade them by the light map
 };
+
+#ifndef GL2
+// The Sims' projected shadows, given once a frame. Each Sim's picture is a tile of the atlas.
+cbuffer Shadows : register(b1, space3) {
+    row_major float4x4 shadowCameras[16];  // world to each picture's clip space
+    float4 shadowCasters[16];              // xy: the tile's corner in the atlas, z: the Sim's level
+    float4 shadowShade;                    // rgb: what a shadow multiplies the ground by, w: how many Sims
+    float4 objectGrid;                     // the objects' grid: its first tile (xy) and its size in tiles (zw)
+};
+#endif
+
+#ifndef GL2
+// Whether a lot object on the receiver's storey lays its picture from the sun over this point: its
+// picture holds more than 100/255 there. The grid over the lot's tiles names the objects to look at.
+bool objectShadowAt(float3 world) {
+    const int2 tile = int2(floor(world.xy - objectGrid.xy));
+    if (tile.x < 0 || tile.y < 0 || tile.x >= (int)objectGrid.z || tile.y >= (int)objectGrid.w) {
+        return false;
+    }
+    [unroll] for (int half = 0; half < 2; ++half) {
+        const float4 slots = objectGridTexture.Load(int3(tile.x * 2 + half, tile.y, 0));
+        [unroll] for (int k = 0; k < 4; ++k) {
+            const int place = (int)slots[k];
+            if (place < 0) {
+                return false;
+            }
+            const float4 picture = objectPlaces.Load(int3(3, place, 0));  // xy: tile corner, z: share, w: level
+            const float4 rect = objectPlaces.Load(int3(4, place, 0));
+            if (abs(picture.w - shadowReceiver.y) > 0.5 || world.x < rect.x || world.x > rect.y || world.y < rect.z || world.y > rect.w) {
+                continue;
+            }
+            const float4 w = float4(world, 1);
+            const float2 p = float2(dot(objectPlaces.Load(int3(0, place, 0)), w), dot(objectPlaces.Load(int3(1, place, 0)), w));
+            if (abs(p.x) > 1 || abs(p.y) > 1) {
+                continue;
+            }
+            // Kept half a texel inside the picture, so the filter never reaches past it.
+            const float texels = picture.z * 2048;  // the atlas is 2048 texels square
+            const float2 inPicture = clamp(float2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5), 0.5 / texels, 1 - 0.5 / texels);
+            if (objectPictures.SampleLevel(objectPicturesSampler, picture.xy + inPicture * picture.z, 0).a > 100.0 / 255) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+#endif
+
+// What a Sim's or a lot object's projected shadow multiplies this point of a floor or the terrain
+// by: its colour where a caster on the same storey has a blurred picture holding more than 100/255.
+// On the ground storey it fades to none where the buildings' shadow already takes the sun (`sun`,
+// the light map's alpha). Shadows don't add up.
+float3 simShadow(float3 world, float sun) {
+#ifndef GL2
+    if (shadowReceiver.x < 0.5) {
+        return float3(1, 1, 1);
+    }
+    if (objectShadowAt(world)) {
+        return lerp(float3(1, 1, 1), shadowShade.rgb, shadowReceiver.z > 0.5 ? sun : 1);
+    }
+    const int count = (int)shadowShade.w;
+    [loop] for (int i = 0; i < count; ++i) {
+        if (abs(shadowCasters[i].z - shadowReceiver.y) > 0.5) {
+            continue;
+        }
+        const float4 p = mul(shadowCameras[i], float4(world, 1));
+        if (abs(p.x) > 1 || abs(p.y) > 1) {
+            continue;
+        }
+        // Kept half a texel inside the tile, so the filter never reaches the next one.
+        const float2 inTile = clamp(float2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5), 0.5 / 128, 1 - 0.5 / 128);
+        if (shadowTexture.SampleLevel(shadowSampler, shadowCasters[i].xy + inTile * 0.25, 0).a > 100.0 / 255) {
+            return lerp(float3(1, 1, 1), shadowShade.rgb, shadowReceiver.z > 0.5 ? sun : 1);
+        }
+    }
+#endif
+    return float3(1, 1, 1);
+}
 
 struct Input {
     float4 position : SV_Position;
@@ -72,7 +162,10 @@ float3 normalMappedLight(Input input) {
 }
 
 float4 shade(Input input) {
-    const float4 texel = hasTexture > 0.5 ? baseTexture.Sample(baseSampler, input.uv) : float4(1, 1, 1, 1);
+    float4 texel = hasTexture > 0.5 ? baseTexture.Sample(baseSampler, input.uv) : float4(1, 1, 1, 1);
+    if (alphaReplicate > 0.5) {
+        texel.rgb = texel.aaa;
+    }
     float4 albedo = color * texel;
     albedo.rgb *= input.color;
     albedo.a *= input.alpha;
@@ -84,10 +177,12 @@ float4 shade(Input input) {
     // with its own light-mapped material, so a pattern whose material is unlit is light-mapped too.
     if (lightMap.x > 0) {
         const float3 base = lightMap.y > 0.5 && hasTexture > 0.5 ? texel.rgb : albedo.rgb;
-        float3 lit = lightMapTexture.Sample(lightMapSampler, input.lightUv).rgb;
+        float4 map = lightMapTexture.Sample(lightMapSampler, input.lightUv);
         if (lightMapFade < 1) {
-            lit = lerp(lightMapFromTexture.Sample(lightMapFromSampler, input.lightUv).rgb, lit, lightMapFade);
+            map = lerp(lightMapFromTexture.Sample(lightMapFromSampler, input.lightUv), map, lightMapFade);
         }
+        const float3 lit = map.rgb;
+        const float3 shadow = simShadow(input.world, map.a);
         // A bump-mapped floor or wall: times how much the normal map faces the incidence map's
         // direction (where the light map grows brighter, straight out where it is even).
         float bump = 1;
@@ -98,9 +193,9 @@ float4 shade(Input input) {
         }
         // The lot's terrain: darkened by its light map (a multiply pass in the game, so at most 1).
         if (lightMap.z > 0.5) {
-            return float4(base * saturate(lit * lightMap.x), albedo.a);
+            return float4(base * saturate(lit * lightMap.x) * shadow, albedo.a);
         }
-        return float4(saturate(base * lit * lightMap.x * bump), albedo.a);
+        return float4(saturate(base * lit * lightMap.x * bump) * shadow, albedo.a);
     }
     if (unlit > 0.5) {
         return albedo;
@@ -130,9 +225,9 @@ float4 shade(Input input) {
 }
 
 // The specular, then the environment cube, are added over the lit colour, leaving its alpha. The
-// game scales the cube by its texture light, white by day. Its night value is not known yet, so it
-// is white here too.
+// cube's colour scale already holds the texture light.
 float4 main(Input input) : SV_Target {
+    input.uv = input.uv * uvTile.xy + uvTile.zw;
     float4 lit = shade(input);
     if (emissive.w > 0.5) {
         lit.rgb += emissive.rgb * (hasTexture > 0.5 ? baseTexture.Sample(baseSampler, input.uv).rgb : float3(1, 1, 1)) * input.color;

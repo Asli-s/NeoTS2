@@ -30,6 +30,10 @@ SdlGpuRenderer::SdlGpuRenderer(SDL_Window* window, const std::filesystem::path& 
         device_ = nullptr;
         throw error;
     }
+    // One frame in flight: each frame waits for the screen before it starts, so frames start an even
+    // screen refresh apart. With two, they came in pairs a few milliseconds apart, and Sims posed at
+    // those uneven times trembled when shown at the screen's even pace.
+    SDL_SetGPUAllowedFramesInFlight(device_, 1);
     // The destructor doesn't run when the constructor throws, so what was made is released here.
     try {
         create(shaderFolder);
@@ -59,18 +63,19 @@ void SdlGpuRenderer::destroy() {
     if (spritePipeline_) {
         SDL_ReleaseGPUGraphicsPipeline(device_, spritePipeline_);
     }
-    for (auto* s : {clampedMips_, pointSampler_, clampedSampler_}) {
+    for (auto* s : {clampedMips_, pointSampler_, clampedSampler_, shadowSampler_, shadowPoint_}) {
         if (s) {
             SDL_ReleaseGPUSampler(device_, s);
         }
     }
     for (auto* p : {clipPipeline_, terrainPipeline_, skyPipeline_, waterPipeline_, roadPipeline_, imposterLightPipeline_, imposterTerrainPipeline_,
-                    imposterWallPipeline_, imposterRoofPipeline_}) {
+                    imposterWallPipeline_, imposterRoofPipeline_, shadowCasterPipeline_, shadowBlurPipeline_, objectCasterPipeline_,
+                    objectBlurPipeline_}) {
         if (p) {
             SDL_ReleaseGPUGraphicsPipeline(device_, p);
         }
     }
-    for (auto* t : {reflection_, reflectionDepth_}) {
+    for (auto* t : {reflection_, reflectionDepth_, shadowPictures_, shadowBlurred_, objectScratch_, objectPictures_, objectPlaces_, objectGrid_}) {
         if (t) {
             SDL_ReleaseGPUTexture(device_, t);
         }

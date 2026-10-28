@@ -135,6 +135,84 @@ const SceneRays::Box& SceneRays::primitiveBox(std::size_t mesh, std::size_t prim
     return *box;
 }
 
+std::optional<Transform> SceneRays::locate(const Point& point, const ScenePose& pose, bool& slotMissing, bool& objectMissing,
+                                           bool targetingSlots) {
+    const auto placeOf = [&](std::size_t instance) {
+        const auto it = std::find_if(pose.places.begin(), pose.places.end(), [&](const auto& p) { return p.first == instance; });
+        return it != pose.places.end() ? it->second : scene_.instances[instance].transform;
+    };
+    const auto meshOf = [&](std::size_t instance) -> const Mesh* {
+        const int mesh = scene_.instances[instance].mesh;
+        return mesh >= 0 && static_cast<std::size_t>(mesh) < scene_.meshes.size() ? &scene_.meshes[static_cast<std::size_t>(mesh)] : nullptr;
+    };
+    const Mesh* mesh = nullptr;
+    Transform base;
+    std::optional<Transform> slot;
+    if (const auto placed = std::find_if(scene_.placedObjects.begin(), scene_.placedObjects.end(),
+                                         [&](const PlacedObject& p) { return p.object == point.object; });
+        placed != scene_.placedObjects.end() && placed->instance < scene_.instances.size()) {
+        mesh = meshOf(placed->instance);
+        base = placeOf(placed->instance);
+        if (point.local) {
+            slot = base * *point.local;
+        } else if (point.kind == 3) {
+            if (point.slot >= placed->slots.size()) {
+                slotMissing = true;
+            } else {
+                slot = placed->slots[point.slot] ? base * *placed->slots[point.slot] : base;
+            }
+        } else if (targetingSlots && point.kind != 0) {
+            slotMissing = true;
+        }
+    } else if (const auto actor = std::find_if(scene_.actors.begin(), scene_.actors.end(),
+                                               [&](const Actor& a) { return a.object == point.object; });
+               actor != scene_.actors.end()) {
+        base = actor->place;
+        if (!actor->skinned.empty() && actor->skinned.front().instance < scene_.instances.size()) {
+            mesh = meshOf(actor->skinned.front().instance);
+        }
+        if ((point.kind == 1 && targetingSlots) || point.kind == 3) {
+            const auto& nodes = point.kind == 1 ? actor->targetNodes : actor->slotNodes;
+            if (point.slot >= nodes.size() || (point.kind == 1 && nodes[point.slot] < 0)) {
+                slotMissing = true;
+            } else {
+                const int node = nodes[point.slot];
+                const auto index = static_cast<std::size_t>(actor - scene_.actors.begin());
+                const auto posed = std::find_if(pose.nodes.begin(), pose.nodes.end(), [&](const auto& n) { return n.first == index; });
+                const bool known = node >= 0 && posed != pose.nodes.end() && static_cast<std::size_t>(node) < posed->second.size();
+                slot = known ? actor->place * posed->second[static_cast<std::size_t>(node)] : actor->place;
+            }
+        } else if (targetingSlots && point.kind != 0) {
+            slotMissing = true;
+        }
+    } else {
+        objectMissing = true;
+        return std::nullopt;
+    }
+    if (slotMissing) {
+        return std::nullopt;
+    }
+    if (slot) {
+        return slot;
+    }
+    Vec low{0, 0, 0}, high{0, 0, 0};
+    for (std::size_t p = 0; mesh != nullptr && p < mesh->primitives.size(); ++p) {
+        const auto& positions = mesh->primitives[p].positions;
+        for (std::size_t i = 0; i + 2 < positions.size(); i += 3) {
+            for (std::size_t k = 0; k < 3; ++k) {
+                low[k] = std::min(low[k], positions[i + k]);
+                high[k] = std::max(high[k], positions[i + k]);
+            }
+        }
+    }
+    Transform at = base;
+    const Vec middle = applied(base, {(low[0] + high[0]) * 0.5f, (low[1] + high[1]) * 0.5f, (low[2] + high[2]) * 0.75f}, true);
+    at.m[3] = middle[0];
+    at.m[7] = middle[1];
+    at.m[11] = middle[2];
+    return at;
+}
+
 SceneRays::Result SceneRays::trace(const Point& from, const std::optional<Point>& to, const ScenePose& pose,
                                    const std::vector<std::uint8_t>& visible) {
     Result result;
@@ -156,67 +234,11 @@ SceneRays::Result SceneRays::trace(const Point& from, const std::optional<Point>
     };
 
     // Where a point is in the world, and the transform it faces by.
-    auto locate = [&](const Point& point) -> std::optional<Transform> {
-        const Mesh* mesh = nullptr;
-        Transform base;
-        std::optional<Transform> slot;
-        bool slotMissing = false;
-        if (const auto placed = std::find_if(scene_.placedObjects.begin(), scene_.placedObjects.end(),
-                                             [&](const PlacedObject& p) { return p.object == point.object; });
-            placed != scene_.placedObjects.end() && placed->instance < scene_.instances.size()) {
-            mesh = meshOf(placed->instance);
-            base = placeOf(placed->instance);
-            if (point.kind == 3) {
-                if (point.slot >= placed->slots.size()) {
-                    slotMissing = true;
-                } else {
-                    slot = placed->slots[point.slot] ? base * *placed->slots[point.slot] : base;
-                }
-            }
-        } else if (const auto actor = std::find_if(scene_.actors.begin(), scene_.actors.end(),
-                                                   [&](const Actor& a) { return a.object == point.object; });
-                   actor != scene_.actors.end()) {
-            base = actor->place;
-            if (!actor->skinned.empty() && actor->skinned.front().instance < scene_.instances.size()) {
-                mesh = meshOf(actor->skinned.front().instance);
-            }
-            if (point.kind == 3) {
-                if (point.slot >= actor->slotNodes.size()) {
-                    slotMissing = true;
-                } else {
-                    const int node = actor->slotNodes[point.slot];
-                    const auto index = static_cast<std::size_t>(actor - scene_.actors.begin());
-                    const auto posed = std::find_if(pose.nodes.begin(), pose.nodes.end(), [&](const auto& n) { return n.first == index; });
-                    const bool known = node >= 0 && posed != pose.nodes.end() && static_cast<std::size_t>(node) < posed->second.size();
-                    slot = known ? actor->place * posed->second[static_cast<std::size_t>(node)] : actor->place;
-                }
-            }
-        } else {
-            result.objectMissing = true;
-            return std::nullopt;
-        }
-        if (slotMissing) {
-            result.slotMissing = true;
-            return std::nullopt;
-        }
-        if (slot) {
-            return slot;
-        }
-        Vec low{0, 0, 0}, high{0, 0, 0};
-        for (std::size_t p = 0; mesh != nullptr && p < mesh->primitives.size(); ++p) {
-            const auto& positions = mesh->primitives[p].positions;
-            for (std::size_t i = 0; i + 2 < positions.size(); i += 3) {
-                for (std::size_t k = 0; k < 3; ++k) {
-                    low[k] = std::min(low[k], positions[i + k]);
-                    high[k] = std::max(high[k], positions[i + k]);
-                }
-            }
-        }
-        Transform at = base;
-        const Vec middle = applied(base, {(low[0] + high[0]) * 0.5f, (low[1] + high[1]) * 0.5f, (low[2] + high[2]) * 0.75f}, true);
-        at.m[3] = middle[0];
-        at.m[7] = middle[1];
-        at.m[11] = middle[2];
+    auto locate = [&](const Point& point) {
+        bool slotMissing = false, objectMissing = false;
+        auto at = this->locate(point, pose, slotMissing, objectMissing);
+        result.slotMissing = result.slotMissing || slotMissing;
+        result.objectMissing = result.objectMissing || objectMissing;
         return at;
     };
 

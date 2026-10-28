@@ -299,9 +299,13 @@ void limbIkReachesChannelTargets() {
     const auto channel = [&](const std::string& name, ts2::anim::ChannelKind kind, std::vector<float> values) {
         ts2::anim::Channel c;
         c.name = name;
-        c.flags = static_cast<std::uint32_t>(kind) << 22 | 0x8000;
+        c.flags = 15u << 25 | static_cast<std::uint32_t>(kind) << 22 | 0x8000;  // of no IK chain
         for (const float v : values) c.components.push_back(curve(v));
         return c;
+    };
+    // The angle a joint's world transform turns by, in radians.
+    const auto angle = [](const ts2::scene::Transform& t) {
+        return std::acos(std::clamp((t.m[0] + t.m[5] + t.m[10] - 1) / 2, -1.0f, 1.0f));
     };
     const auto h = [](const char* s) { return ts2::hash::crc32(s); };
     for (const bool arm : {false, true}) {
@@ -336,8 +340,15 @@ void limbIkReachesChannelTargets() {
     }
 
     // Two targets weighted half and half: the leg reaches between them. With the chain's weight at 0
-    // it keeps the animation's own pose (here the rest pose, its end at y 1.5).
-    for (const float chainWeight : {1.0f, 0.0f}) {
+    // it keeps the animation's own pose (here the rest pose, its end at y 1.5). At half weight it still
+    // reaches fully, as no clip turns its joints. With the clip turning its first joint (to rest) it
+    // goes only part of the way. A turn of the clip's own counts in full against the limb's weight
+    // on the joint (the larger of its targets' 0.5 and its pole's 0.5), so the joint takes a third of
+    // the solved turn. A turn tagged with the chain counts by 1 minus the chain's weight: half.
+    float solvedAngle = 0;
+    for (const float chainWeight : {1.0f, 0.5f, 0.0f}) {
+      for (const int clipTurns : {0, 1, 2}) {
+        if (clipTurns != 0 && chainWeight != 0.5f) continue;
         Rig rig;
         rig.nodes.push_back({"skel", -1, {0, 0, 0}, {0, 0, 0, 1}});
         for (int i = 0; i < 3; ++i) rig.nodes.push_back({"a" + std::to_string(i), i, {0, i == 0 ? 1.0f : 0.25f, 0}, {0, 0, 0, 1}});
@@ -348,6 +359,13 @@ void limbIkReachesChannelTargets() {
         animation->channels.push_back(channel("ctr2_a", ts2::anim::ChannelKind::Scalar, {0.5f}));
         animation->channels.push_back(channel("w", ts2::anim::ChannelKind::Scalar, {chainWeight}));
         animation->channels.push_back(channel("pole", ts2::anim::ChannelKind::Translation, {0, 1.4f, 1}));
+        if (clipTurns != 0) {
+            auto turn = channel("a0", ts2::anim::ChannelKind::Rotation, {0, 0, 0});
+            if (clipTurns == 2) {
+                turn.flags &= ~(15u << 25);  // of chain 0
+            }
+            animation->channels.push_back(turn);
+        }
         ts2::anim::IkChain chain;
         chain.strategy = ts2::anim::kLimbStrategy;
         chain.begin = h("a0");
@@ -366,11 +384,23 @@ void limbIkReachesChannelTargets() {
         std::vector<ts2::scene::Transform> world;
         ts2::scene::poseRig(rig, &bound, 0, world);
         const auto& end = world.back().m;
-        if (chainWeight > 0) {
+        if (chainWeight == 1.0f) {
+            solvedAngle = angle(world[1]);
+            CHECK(solvedAngle > 0.1f);
+        }
+        if (clipTurns != 0) {
+            CHECK(std::fabs(end[3] - 0.2f) > 0.01f || std::fabs(end[7] - 1.3f) > 0.01f);
+            CHECK(std::fabs(angle(world[1]) - solvedAngle / (clipTurns == 1 ? 3 : 2)) < 1e-3f);
+            // The layered mix weighs it the same way.
+            std::vector<ts2::scene::Transform> layered;
+            ts2::scene::poseRigLayered(rig, std::vector<ts2::scene::LayeredClip>{{&bound, 0, 1, 0, 0}}, layered);
+            CHECK(std::fabs(angle(layered[1]) - angle(world[1])) < 1e-4f);
+        } else if (chainWeight > 0) {
             CHECK(std::fabs(end[3] - 0.2f) < 1e-4f && std::fabs(end[7] - 1.3f) < 1e-4f && std::fabs(end[11]) < 1e-4f);
         } else {
             CHECK(std::fabs(end[3]) < 1e-4f && std::fabs(end[7] - 1.5f) < 1e-4f && std::fabs(end[11]) < 1e-4f);
         }
+      }
     }
 
     // Two clips with the same limb, one fading into the other: the limb reaches between their targets
@@ -397,7 +427,7 @@ void limbIkReachesChannelTargets() {
         };
         const auto older = clipReaching(0.1f), newer = clipReaching(-0.1f);
         std::vector<ts2::scene::Transform> world;
-        ts2::scene::poseRigLayered(rig, std::vector<ts2::scene::LayeredClip>{{&older, 0, 0.75f, 1, 0, 1}, {&newer, 0, 0.25f, 1, 1}}, world);
+        ts2::scene::poseRigLayered(rig, std::vector<ts2::scene::LayeredClip>{{&older, 0, 0.75f, 1, 0}, {&newer, 0, 0.25f, 1, 1}}, world);
         CHECK(std::fabs(world.back().m[11] - 0.05f) < 1e-4f);
     }
 
@@ -422,9 +452,10 @@ void limbIkReachesChannelTargets() {
         CHECK(std::fabs(world[0].m[11] - 1) < 1e-4f && std::fabs(world[1].m[11] - 1.5f) < 1e-4f);
     }
 
-    // A clip fading out by its body only under one that turns the root (getting into bed handing over
-    // to lying there, a quarter turn round) still reaches with its arm, around the root as drawn: its
-    // target turns with the root, so the arm doesn't swing out to where the clip alone has it.
+    // A clip fading out by its body only keeps reaching where it did in the world. Under one that turns
+    // the root its target stays put (a chat's listen clips handing over keep the feet still). When the
+    // Sim was placed anew as the latest started (getting into bed handing over to lying there, a
+    // quarter turn round) its target moves back by that change of place (placeMove).
     {
         Rig rig;
         rig.nodes.push_back({"skel", -1, {0, 0, 0}, {0, 0, 0, 1}});
@@ -450,13 +481,17 @@ void limbIkReachesChannelTargets() {
         lie->channels.push_back(channel("root_rot", ts2::anim::ChannelKind::Rotation, {0, 0, 90}));
         const auto fading = ts2::scene::bindAnimation(rig, getIn), lying = ts2::scene::bindAnimation(rig, lie);
         ts2::scene::LayeredClip under{&fading, 0, 1, 0, 0};
-        under.bodyOnly = under.noRootMove = true;
+        under.bodyOnly = true;
         ts2::scene::LayeredClip over{&lying, 0, 1, 1, 1};
         std::vector<ts2::scene::Transform> world;
         ts2::scene::poseRigLayered(rig, std::vector<ts2::scene::LayeredClip>{under, over}, world);
-        // The target (0.2, 1.3, 0.1) turned a quarter round z with the root.
-        const auto& end = world.back().m;
-        CHECK(std::fabs(end[3] + 1.3f) < 1e-3f && std::fabs(end[7] - 0.2f) < 1e-3f && std::fabs(end[11] - 0.1f) < 1e-3f);
+        // Its target (0.2, 1.3, 0.1) doesn't turn with the root, so the turned arm doesn't reach the
+        // turned target (-1.3, 0.2, 0.1).
+        CHECK(std::hypot(world.back().m[3] + 1.3f, world.back().m[7] - 0.2f, world.back().m[11] - 0.1f) > 0.05f);
+        // The same target after a quarter turn of the Sim's place round z.
+        under.placeMove = ts2::scene::Transform::of({0, 0, 0}, {0, 0, 0.70710678f, 0.70710678f});
+        ts2::scene::poseRigLayered(rig, std::vector<ts2::scene::LayeredClip>{under, over}, world);
+        CHECK(std::fabs(world.back().m[3] + 1.3f) < 1e-3f && std::fabs(world.back().m[7] - 0.2f) < 1e-3f && std::fabs(world.back().m[11] - 0.1f) < 1e-3f);
     }
 
     // An overlay on a higher layer that reaches with one limb (an arm carrying something) leaves the
@@ -543,6 +578,45 @@ void limbIkAddsAdditiveTargets() {
     ts2::scene::poseRigLayered(rig, std::vector<ts2::scene::LayeredClip>{{&base, 0, 1, 0}, {&shift, 0, 0.5f, 1}}, world);
     const auto& end = world.back().m;
     CHECK(std::fabs(end[3] - 0.22f) < 1e-4f && std::fabs(end[7] - 1.3f) < 1e-4f && std::fabs(end[11] - 0.1f) < 1e-4f);
+
+    // An additive turn of the target is in the target's own frame: it comes after the target's turn.
+    const auto turned = [&](std::vector<float> at, std::vector<float> turn, bool additive) {
+        auto animation = std::make_shared<Animation>();
+        animation->channels.push_back(channel("ctr", ts2::anim::ChannelKind::Translation, at, additive));
+        animation->channels.push_back(channel("ctr", ts2::anim::ChannelKind::Rotation, turn, additive));
+        animation->channels.push_back(channel("pole", ts2::anim::ChannelKind::Translation, {0, additive ? 0.0f : 1.4f, additive ? 0.0f : 1.0f}, additive));
+        ts2::anim::IkChain chain;
+        chain.strategy = ts2::anim::kLimbStrategy;
+        chain.begin = h("a0");
+        chain.end = h("a2");
+        chain.pole = h("pole");
+        ts2::anim::IkTarget target;
+        target.node = h("ctr");
+        target.position = h("ctr");
+        chain.targets.push_back(target);
+        animation->chains.push_back(chain);
+        return ts2::scene::bindAnimation(rig, animation);
+    };
+    const auto facing = turned({0.2f, 1.3f, 0.1f}, {0, 90, 0}, false);
+    const auto tilt = turned({0, 0, 0}, {30, 0, 0}, true);
+    std::vector<ts2::scene::Transform> plain, tilted;
+    ts2::scene::poseRigLayered(rig, std::vector<ts2::scene::LayeredClip>{{&facing, 0, 1, 0}}, plain);
+    ts2::scene::poseRigLayered(rig, std::vector<ts2::scene::LayeredClip>{{&facing, 0, 1, 0}, {&tilt, 0, 1, 1}}, tilted);
+    // tilted = plain's turn then 30 degrees about x, so tilted * plain^T turns about plain's x axis:
+    // y turned 90 degrees takes x to -z.
+    const auto& r0 = plain.back().m;
+    const auto& r1 = tilted.back().m;
+    const float c = std::cos(0.5235988f), s = std::sin(0.5235988f);
+    const float expected[3][3] = {{c, s, 0}, {-s, c, 0}, {0, 0, 1}};
+    bool same = true;
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            float v = 0;
+            for (int k = 0; k < 3; ++k) v += r1[4 * i + k] * r0[4 * j + k];
+            same = same && std::fabs(v - expected[i][j]) < 1e-3f;
+        }
+    }
+    CHECK(same);
 }
 
 // A target on a named bone of the clip's IK object (a hug's hand on the other Sim's back) is placed

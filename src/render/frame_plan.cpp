@@ -1,5 +1,7 @@
 #include "render/frame_plan.hpp"
 
+#include "scene/sim_shadows.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -8,6 +10,24 @@
 #include <optional>
 
 namespace ts2::render {
+
+namespace {
+
+// A Sim's lights outdoors: the lighting with its Sim-only lights merged in. A Sim's parts and the
+// Sims beside it are drawn with the same lighting, so the last merge is kept and reused while its
+// source is the same. Each drawing thread keeps its own.
+const scene::ObjectLighting& simLightingFor(const scene::ObjectLighting& lighting) {
+    thread_local scene::ObjectLighting source, merged;
+    thread_local bool made = false;
+    if (!made || !(lighting == source)) {
+        source = lighting;
+        merged = scene::withSimLights(lighting);
+        made = true;
+    }
+    return merged;
+}
+
+} // namespace
 
 InView boxInView(const Mat4& clip, const std::array<float, 3>& low, const std::array<float, 3>& high) {
     // The low corner in clip space, and the box's three edges from it.
@@ -73,6 +93,8 @@ void FramePlan::collectDraws(const RendererState& s, const ResourceQuery& q, con
                              std::vector<Draw>& layers, std::vector<Draw>& blended) {
     std::vector<float> depths;
     const auto& meshes = q.meshes();
+    // Without projected shadows the game falls back to the models' own shadow groups.
+    const bool objectShadows = s.capabilities().projectedShadows;
     for (std::size_t i = 0; s.drawScene_ && i < s.instances_.size(); ++i) {
         const auto& instance = s.instances_[i];
         if (instance.mesh < 0 || static_cast<std::size_t>(instance.mesh) >= meshes.size() || (i < s.visible_.size() && !s.visible_[i])) {
@@ -92,6 +114,9 @@ void FramePlan::collectDraws(const RendererState& s, const ResourceQuery& q, con
                 (meshInView == InView::Outside || boxInView(clip, p.low, p.high) == InView::Outside)) {
                 continue;
             }
+            if (p.shadowGroup && objectShadows && !scene::objectshadow::showsShadowGroups(instance.shadow)) {
+                continue;
+            }
             int material = p.material;
             if (i < s.instanceMaterials_.size() && p.source < s.instanceMaterials_[i].size()) {
                 material = s.instanceMaterials_[i][p.source];
@@ -103,7 +128,7 @@ void FramePlan::collectDraws(const RendererState& s, const ResourceQuery& q, con
                                            ? &s.materials_[static_cast<std::size_t>(material)]
                                            : nullptr;
             const auto alpha = m ? m->alpha : scene::AlphaMode::Opaque;
-            const bool blends = alpha == scene::AlphaMode::Blend || alpha == scene::AlphaMode::Add;
+            const bool blends = alpha == scene::AlphaMode::Blend || alpha == scene::AlphaMode::Add || alpha == scene::AlphaMode::Sum;
             const float sortDepth = blends && p.hasBox ? nearestDepth(clip, p.low, p.high, f.nearZ) : clip.m[15];
             (blends ? blended : alpha == scene::AlphaMode::Layer ? layers : opaque)
                 .push_back({&p, &instance, m, m ? m->layer : 0, sortDepth, p.source < instance.sun.size() ? instance.sun[p.source] : 1.0f});
@@ -148,8 +173,13 @@ DrawUniforms FramePlan::uniformsFor(const RendererState& s, const ResourceQuery&
     const scene::ObjectLighting* lighting = s.objectLighting_ ? &*s.objectLighting_ : nullptr;
     const auto& parts = d.instance->partLightSets;
     const int set = d.primitive->source < parts.size() ? parts[d.primitive->source] : d.instance->lightSet;
-    if (set >= 0 && static_cast<std::size_t>(set) < s.lightSets_.size()) {
+    // A portrait lights everything it draws with its own lights, not the room's.
+    if (!s.instancesOnly_ && set >= 0 && static_cast<std::size_t>(set) < s.lightSets_.size()) {
         lighting = &s.lightSets_[static_cast<std::size_t>(set)];
+    }
+    // A Sim outdoors also gets the lighting state's Sim-only lights.
+    if (lighting && !lighting->simLights.empty() && d.instance->lightGroup == scene::LightGroup::Sims) {
+        lighting = &simLightingFor(*lighting);
     }
     const bool roof = d.instance->part == scene::Part::Roof && m && m->roofLight && s.objectLighting_;
     // A roof's underside, trim and edges: standard materials, lit as objects outdoors.
@@ -236,10 +266,10 @@ void FramePlan::setMaterial(const RendererState& s, const ResourceQuery& q, Draw
     const scene::Material* m = d.material;
     const auto c = m ? m->color : std::array<float, 4>{0.8f, 0.8f, 0.8f, 1};
     std::copy(c.begin(), c.end(), fu.color);
-    if (s.night_ && m && m->nightDimmed) {
-        fu.color[0] *= 0.35f;
-        fu.color[1] *= 0.35f;
-        fu.color[2] *= 0.7f;
+    if (lighting && m && m->takesTextureLight) {
+        for (std::size_t i = 0; i < 3; ++i) {
+            fu.color[i] *= lighting->textureLight[i];
+        }
     }
     fu.sunDirection[0] = f.sun[0];
     fu.sunDirection[1] = f.sun[1];
@@ -253,9 +283,11 @@ void FramePlan::setMaterial(const RendererState& s, const ResourceQuery& q, Draw
                      : m->alpha == scene::AlphaMode::Mask  ? m->alphaReference
                      : m->alpha == scene::AlphaMode::Layer ? 10.0f / 255  // as the game's terrain paint
                      : m->alpha == scene::AlphaMode::Add   ? 1.0f / 255   // as the game's particles
+                     : m->alpha == scene::AlphaMode::Sum   ? 0.0f         // its alpha plays no part
                      : blend                               ? 0.01f
                                                            : 0.0f;
     fu.unlit = m && m->unlit ? 1.0f : 0.0f;
+    fu.alphaReplicate = m && m->alphaReplicate && fu.hasTexture > 0 ? 1.0f : 0.0f;
     // A lot's floors and walls: lit by their light map alone.
     TextureRef lightMap{TextureRef::Kind::White, 0};
     std::optional<TextureRef> lightMapFrom;
@@ -270,6 +302,15 @@ void FramePlan::setMaterial(const RendererState& s, const ResourceQuery& q, Draw
         fu.lightMap[0] = d.instance->lightMapGain;
         fu.lightMap[1] = d.instance->lightMapOnly ? 1.0f : 0.0f;
         fu.lightMap[2] = d.instance->lightMapMultiply ? 1.0f : 0.0f;
+        // Floors and the lot's terrain take the projected shadows of the Sims on their storey. Only on
+        // the ground storey does the light map fade them where the buildings shade the sun. Higher
+        // storeys get the full shadow colour.
+        if (d.instance->part == scene::Part::Floor || d.instance->lightMapMultiply) {
+            const int level = d.instance->lightMapMultiply ? s.shadows_.groundLevel : d.instance->level;
+            fu.shadowReceiver[0] = 1;
+            fu.shadowReceiver[1] = static_cast<float>(level);
+            fu.shadowReceiver[2] = level == s.shadows_.groundLevel ? 1.0f : 0.0f;
+        }
         // A floor's or wall's normal map, against its light map's incidence map.
         const int k = d.instance->incidenceMap;
         if (s.bumpMapping_ && s.floorAndWallNormalMapping_ && m && m->normalMap >= 0 && q.hasImage(m->normalMap) && k >= 0 && q.hasImage(k) &&
@@ -290,11 +331,24 @@ void FramePlan::setMaterial(const RendererState& s, const ResourceQuery& q, Draw
         std::copy(m->emissive.begin(), m->emissive.end(), fu.emissive);
         fu.emissive[3] = 1;
     }
+    // A tiled texture shows one frame at a time, left to right, then over again.
+    fu.uvTile[0] = fu.uvTile[1] = 1;
+    if (m && m->tiles > 1 && m->tileSpeed > 0) {
+        const double frames = std::floor(s.lotTime_ * m->tileSpeed);
+        const double frame = frames - std::floor(frames / m->tiles) * m->tiles;
+        fu.uvTile[0] = 1.0f / static_cast<float>(m->tiles);
+        fu.uvTile[2] = static_cast<float>(frame) * fu.uvTile[0];
+    }
     // The environment cube, black for materials without one so the binding rarely changes.
     TextureRef cube{TextureRef::Kind::BlackCube, 0};
     if (m && m->envCube >= 0 && q.hasEnvCube(m->envCube)) {
         cube = {TextureRef::Kind::EnvCube, m->envCube};
         std::copy(m->envCubeCoef.begin(), m->envCubeCoef.end(), fu.envCube);
+        if (lighting) {
+            for (std::size_t i = 0; i < 3; ++i) {
+                fu.envCube[i] *= lighting->textureLight[i];
+            }
+        }
         fu.envCube[3] = 1;
         if (m->envCubeLocked) {
             const Camera& camera = *f.camera;
@@ -316,6 +370,76 @@ void FramePlan::setMaterial(const RendererState& s, const ResourceQuery& q, Draw
                    {incidence, SamplerKind::Clamped},
                    {lightMapFrom ? *lightMapFrom : lightMap, SamplerKind::Clamped},
                    {cube, SamplerKind::Clamped}}};
+}
+
+std::vector<std::vector<Draw>> FramePlan::shadowCasters(const RendererState& s, const ResourceQuery& q) {
+    std::vector<std::vector<Draw>> out;
+    const auto& meshes = q.meshes();
+    for (const auto& caster : s.shadows_.casters) {
+        if (out.size() == kMaxShadowCasters) {
+            break;
+        }
+        auto& draws = out.emplace_back();
+        for (const std::size_t i : caster.instances) {
+            if (i >= s.instances_.size() || (i < s.visible_.size() && !s.visible_[i])) {
+                continue;
+            }
+            const auto& instance = s.instances_[i];
+            if (instance.mesh < 0 || static_cast<std::size_t>(instance.mesh) >= meshes.size() || i >= s.jointBase_.size() || s.jointBase_[i] < 0) {
+                continue;
+            }
+            for (const auto& p : meshes[static_cast<std::size_t>(instance.mesh)].primitives) {
+                if (!p.skinned || !q.skinReady(p.buffers)) {
+                    continue;
+                }
+                if (i < s.instanceMaterials_.size() && p.source < s.instanceMaterials_[i].size() &&
+                    s.instanceMaterials_[i][p.source] == scene::kHiddenMaterial) {
+                    continue;
+                }
+                draws.push_back({&p, &instance, nullptr, 0, 0, 1});
+            }
+        }
+    }
+    return out;
+}
+
+SkinnedUniforms FramePlan::shadowCasterUniforms(const RendererState& s, const Draw& d, std::size_t caster) {
+    SkinnedUniforms u{};
+    const auto camera = scene::simshadows::camera(s.shadows_.toSun, s.shadows_.casters[caster].root);
+    std::copy(camera.begin(), camera.end(), u.frame.viewProjection);
+    const auto& t = d.instance->transform.m;
+    const float model[16] = {t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10], t[11], 0, 0, 0, 1};
+    std::copy(std::begin(model), std::end(model), u.frame.model);
+    u.jointBase = static_cast<std::uint32_t>(s.jointBase_[static_cast<std::size_t>(d.instance - s.instances_.data())]);
+    return u;
+}
+
+ShadowUniforms FramePlan::shadowUniforms(const RendererState& s, std::size_t casters) {
+    ShadowUniforms u{};
+    casters = std::min({casters, s.shadows_.casters.size(), kMaxShadowCasters});
+    for (std::size_t i = 0; i < casters; ++i) {
+        const auto& caster = s.shadows_.casters[i];
+        const auto camera = scene::simshadows::camera(s.shadows_.toSun, caster.root);
+        std::copy(camera.begin(), camera.end(), u.cameras[i]);
+        u.casters[i][0] = static_cast<float>(i % kShadowTilesAcross) / kShadowTilesAcross;
+        u.casters[i][1] = static_cast<float>(i / kShadowTilesAcross) / kShadowTilesAcross;
+        u.casters[i][2] = static_cast<float>(caster.level);
+    }
+    std::copy(s.shadows_.shade.begin(), s.shadows_.shade.end(), u.shade);
+    u.shade[3] = static_cast<float>(casters);
+    return u;
+}
+
+ShadowBlurUniforms FramePlan::shadowBlurUniforms() {
+    constexpr int r = scene::simshadows::kOutdoorBlur;
+    static_assert(r == 2, "the blur shader takes 5 x 5 taps");
+    ShadowBlurUniforms u{};
+    for (int across = -r; across <= r; ++across) {
+        for (int up = -r; up <= r; ++up) {
+            u.weights[(across + r) * (2 * r + 1) + up + r][0] = static_cast<float>(scene::simshadows::blurWeight(across, up, r)) / 255;
+        }
+    }
+    return u;
 }
 
 } // namespace ts2::render

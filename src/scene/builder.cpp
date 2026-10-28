@@ -60,7 +60,8 @@ std::array<float, 3> diffuse(const sg::Material& m) {
 // of deprecated material definitions sets them: whether the base texture is used, blending or alpha
 // test with the diffuse's alpha as the alpha multiplier, no lighting, the normal map (on only for
 // the Bump types), and the diffuse times the material's deprecatedStdMatInvDiffuseCoeffMultiplier.
-void asStandardMaterial(sg::Material& m) {
+// Returns whether `m` was one of those types.
+bool asStandardMaterial(sg::Material& m) {
     struct Old {
         const char* type;
         bool texture, blend, test, unlit, additive, bump;
@@ -84,7 +85,7 @@ void asStandardMaterial(sg::Material& m) {
     };
     const auto old = std::find_if(std::begin(kOld), std::end(kOld), [&](const Old& o) { return m.type == o.type; });
     if (old == std::end(kOld)) {
-        return;
+        return false;
     }
     auto& p = m.properties;
     auto diff = parseFloats(property(m, "stdMatDiffCoef"));
@@ -95,6 +96,9 @@ void asStandardMaterial(sg::Material& m) {
     p["stdMatNormalMapTextureEnabled"] = old->bump ? "true" : "false";
     if (old->additive) {
         p["stdMatAlphaBlendMode"] = "additive";
+        if (m.type == "AdditiveTextureAlphaBlend") {
+            p["stdMatBaseTextureAlphaReplicate"] = "true";
+        }
         const auto strength = parseFloats(property(m, "blendStrength"));
         p["stdMatAlphaMultiplier"] = std::to_string(strength.empty() ? 1.0f : strength[0]);
     } else if (old->blend || old->test) {
@@ -113,6 +117,7 @@ void asStandardMaterial(sg::Material& m) {
     }
     p["stdMatDiffCoef"] = std::to_string(diff[0] * scale) + "," + std::to_string(diff[1] * scale) + "," + std::to_string(diff[2] * scale) + "," +
                           std::to_string(diff[3]);
+    return true;
 }
 
 // The vertices' colors (rgb into `colors`, alpha into `alphas`), when the link has one per vertex.
@@ -333,7 +338,7 @@ int SceneBuilder::material(const std::string& name) {
         ++missingMaterials;
         return materials_[key] = -1;
     }
-    asStandardMaterial(m);
+    const bool deprecated = asStandardMaterial(m);
     Material out;
     out.name = name;
     const int stdLayer = intProperty(m, "stdMatLayer");
@@ -344,6 +349,21 @@ int SceneBuilder::material(const std::string& name) {
         out.alpha = AlphaMode::Blend;
         out.layer = stdLayer * 18 + 17;
         out.doubleSided = property(m, "stdMatCullMode") == "none";
+        return addMaterial(key, std::move(out));
+    }
+    // Unlit and blended: its texture times the diffuse, alpha too (a fig tree's ground shadow).
+    if (m.type == "TextureAlpha") {
+        const auto d = parseFloats(property(m, "stdMatDiffCoef"));
+        for (std::size_t i = 0; i < 4; ++i) {
+            out.color[i] = i < d.size() && std::isfinite(d[i]) ? std::clamp(d[i], 0.0f, 1.0f) : 1.0f;
+        }
+        if (const std::string texture = property(m, "stdMatBaseTextureName"); !texture.empty()) {
+            out.image = image(texture);
+            baseTextures_[key] = texture;
+        }
+        out.unlit = true;
+        out.alpha = AlphaMode::Blend;
+        out.layer = stdLayer * 18 + 17;
         return addMaterial(key, std::move(out));
     }
     const auto c = diffuse(m);
@@ -373,7 +393,13 @@ int SceneBuilder::material(const std::string& name) {
         const std::string v = property(m, key);
         return v == "true" || v == "1";
     };
-    if (const std::string blend = property(m, "stdMatAlphaBlendMode"); !blend.empty() && blend != "none") {
+    // "additive" adds the colour times its alpha, "addNoSrcAlphaScale" the colour alone. The other
+    // modes are drawn as blending.
+    if (const std::string blend = property(m, "stdMatAlphaBlendMode"); blend == "additive") {
+        out.alpha = AlphaMode::Add;
+    } else if (blend == "addNoSrcAlphaScale") {
+        out.alpha = AlphaMode::Sum;
+    } else if (!blend.empty() && blend != "none") {
         out.alpha = AlphaMode::Blend;
     } else if (enabled("stdMatAlphaTestEnabled")) {
         out.alpha = AlphaMode::Mask;
@@ -386,6 +412,18 @@ int SceneBuilder::material(const std::string& name) {
     }
     if (const auto multiplier = parseFloats(property(m, "stdMatAlphaMultiplier")); !multiplier.empty()) {
         out.color[3] = multiplier[0];
+    }
+    out.alphaReplicate = enabled("stdMatBaseTextureAlphaReplicate");
+    if (property(m, "stdMatTextureCoordAnimMode") == "tile" && out.image >= 0) {
+        // Only a single row of frames is read. How the game steps through more rows is not known yet.
+        const auto tiles = parseFloats(property(m, "stdMatTextureCoordAnimNumTiles"));
+        const auto speed = parseFloats(property(m, "stdMatTextureCoordTileAnimSpeed"));
+        constexpr float kMaxTiles = 64;  // more is a broken file
+        const bool wholeRow = tiles.size() >= 2 && tiles[1] == 1 && tiles[0] >= 2 && tiles[0] <= kMaxTiles && tiles[0] == std::floor(tiles[0]);
+        if (wholeRow && !speed.empty() && speed[0] > 0 && std::isfinite(speed[0])) {
+            out.tiles = static_cast<int>(tiles[0]);
+            out.tileSpeed = speed[0];
+        }
     }
     // Without a texture the material's own alpha stands in for the texture's (window glass is half
     // see-through this way).
@@ -400,14 +438,21 @@ int SceneBuilder::material(const std::string& name) {
             out.floorTiles[i] = std::isfinite(tiles[0]) ? std::clamp(tiles[0], 0.125f, 64.0f) : 1.0f;
         }
     }
-    // Without lighting the material's coefficients don't apply: the texture shows as it is.
+    // Without lighting the colour is the diffuse, plus the emissive colour on a texture, clamped to
+    // 1 as the game's pixel shader clamps it.
     if (const std::string lighting = property(m, "stdMatLightingEnabled"); lighting == "0" || lighting == "false") {
         out.unlit = true;
-        out.color = {1, 1, 1, out.color[3]};
-        // The standard material darkens such a texture at night, unless its texture moves or it glows.
         const std::string anim = property(m, "stdMatTextureCoordAnimMode");
         const auto glow = parseFloats(property(m, "stdMatEmissiveCoef"));
-        out.nightDimmed = out.image >= 0 && (anim.empty() || anim == "none") && std::none_of(glow.begin(), glow.end(), [](float c) { return c > 0; });
+        for (std::size_t i = 0; i < 3; ++i) {
+            const float add = out.image >= 0 && i < glow.size() && std::isfinite(glow[i]) ? glow[i] : 0.0f;
+            out.color[i] = std::clamp(std::isfinite(out.color[i]) ? out.color[i] + add : 1.0f, 0.0f, 1.0f);
+        }
+        // The standard material scales such a texture by the room's or the outdoors' light, unless
+        // its texture moves, it glows or it is a lamp's: the game counts a material whose name holds
+        // "lighting" (exact case) as a light material, as every lamp's is named.
+        out.takesTextureLight = out.image >= 0 && (anim.empty() || anim == "none") && std::none_of(glow.begin(), glow.end(), [](float c) { return c > 0; }) &&
+                                name.find("lighting") == std::string::npos;
     }
     // As the game's standard material: a normal map only when lit (the scripts' default bump map is
     // reggrid-bump). The Sims' own material types bump-map through other scripts, not drawn yet.
@@ -415,7 +460,8 @@ int SceneBuilder::material(const std::string& name) {
     // A model drawn by an effect (a plumbob): its material script lights it as the standard material
     // does, with its emissive, its specular and a pass adding its environment cube.
     const bool particleModel = m.type == "StandardParticleModelMaterial";
-    if (particleModel && !out.unlit) {
+    // A lit standard material glows by its emissive colour (a lit lamp's glass and shade).
+    if ((m.type == "StandardMaterial" || deprecated || particleModel) && !out.unlit) {
         const auto glow = parseFloats(property(m, "stdMatEmissiveCoef"));
         for (std::size_t i = 0; i < 3 && i < glow.size(); ++i) {
             out.emissive[i] = std::isfinite(glow[i]) ? std::clamp(glow[i], 0.0f, 4.0f) : 0.0f;
@@ -453,11 +499,13 @@ int SceneBuilder::material(const std::string& name) {
     }
     out.doubleSided = property(m, "stdMatCullMode") == "none";
     // As the game's material scripts number it: a Sim's hair blends 3 above its opaque layer instead
-    // of 17, so it is drawn before other blended surfaces of the same stdMatLayer.
+    // of 17, so it is drawn before other blended surfaces of the same stdMatLayer. Every blend mode
+    // counts, adding ones too.
+    const bool blends = out.alpha == AlphaMode::Blend || out.alpha == AlphaMode::Add || out.alpha == AlphaMode::Sum;
     if (m.type == "SimHair") {
-        out.layer = stdLayer * 18 + (out.alpha == AlphaMode::Blend ? 3 : 0);
+        out.layer = stdLayer * 18 + (blends ? 3 : 0);
     } else {
-        out.layer = stdLayer * 18 + intProperty(m, "stdMatAddLayer") + (out.alpha == AlphaMode::Blend ? 17 : 0);
+        out.layer = stdLayer * 18 + intProperty(m, "stdMatAddLayer") + (blends ? 17 : 0);
     }
     return addMaterial(key, std::move(out));
 }

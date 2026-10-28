@@ -720,6 +720,11 @@ int Screen::tipWindowAt(int x, int y) const {
     return over;
 }
 
+bool Screen::held(int window) const {
+    return window >= 0 && static_cast<std::size_t>(window) < windows_.size() &&
+           windows_[static_cast<std::size_t>(window)].state == ButtonState::Pressed;
+}
+
 std::optional<int> Screen::mouse(int x, int y, bool down, double seconds) {
     const int over = buttonAt(x, y).value_or(-1);
     // Any window can carry a tip (the queue's icons do). A button under the mouse comes first.

@@ -1024,11 +1024,16 @@ Execution::WalkStep Execution::routeInterrupted(SimObject& sim) {
 // Turn Body Towards (Sims only). Bytes 0-1 pick what to face:
 //   0 nothing (true), 1 the camera, 2 the stack object, 3 away from it, 4-11 compass direction (mode - 4),
 //   12-18 the current facing turned by 45, 90, 135, -45, -90, -135 or 180 degrees,
-//   25 the compass direction in temp 0, 26 temp 0 plus my direction.
+//   19, 20 and 21 a target, routing or container slot (byte 5) of the object in byte 2 (owner) and
+//   bytes 3-4 (data), 22-24 the same slots faced away from,
+//   25 the compass direction in temp 0, 26 temp 0 plus my direction (both read once, as the turn starts).
 // Within 22.5 degrees it is true at once. Otherwise my pre-route tree runs first (a false return
-// fails the turn), then the turn-in-place clip plays (see turnClip) and my facing follows the
-// clip's root, a tick at a time. The turn ends on the nearest 45 degrees, true. A failed turn
-// is false when facing an object, else true.
+// fails the turn). Then the target is found again from where I am and the turn-in-place clip plays
+// (see turnClip), my facing following the clip's root a tick at a time. The turn ends on the nearest
+// 45 degrees once the clip starts its last 233 ms fade out. My post-route tree then runs, given 0
+// and 1, and the turn is true unless the object to face is gone by then. A failed turn is false for
+// modes 1-3, else true. The object being gone once the pre-route tree has returned true fails the
+// turn after the post-route tree.
 Execution::TurnStep Execution::turnBodyTowards(const bhav::Instruction& in, Frame& f) {
     SimObject& sim = me();
     if (!sim.isPerson()) {
@@ -1046,48 +1051,84 @@ Execution::TurnStep Execution::turnBodyTowards(const bhav::Instruction& in, Fram
         sim.turning.reset();
         return TurnStep{TurnStep::Kind::Done, turned || !failsFalse};
     };
+    // A heading left from an earlier turn counts while my direction still agrees with it.
+    const auto currentHeading = [&] {
+        const bool headingKept = sim.heading && compassDirection(*sim.heading) == sim.data[kDirectionField];
+        return headingKept ? *sim.heading : compassHeading(sim.data[kDirectionField]);
+    };
     if (!sim.turning) {
         const auto mode = static_cast<std::uint16_t>(in.operands[0] | in.operands[1] << 8);
         if (mode == 0) {
             return TurnStep{TurnStep::Kind::Done, true};
         }
-        // A heading left from an earlier turn counts while my direction still agrees with it.
-        const bool headingKept = sim.heading && compassDirection(*sim.heading) == sim.data[kDirectionField];
-        const float current = headingKept ? *sim.heading : compassHeading(sim.data[kDirectionField]);
+        std::int16_t direction = 0;
+        if (mode == 25) {
+            direction = static_cast<std::int16_t>(thread_.temps[0] & 7);
+        } else if (mode == 26) {
+            direction = static_cast<std::int16_t>((thread_.temps[0] + sim.data[kDirectionField]) & 7);
+        }
+        const float current = currentHeading();
         const bool failsFalse = mode >= 1 && mode <= 3;
-        const auto target = turnTarget(mode, f, sim, current);
+        const auto target = turnTarget(in, f, sim, current, direction);
         if (!target) {
             return TurnStep{TurnStep::Kind::Done, !failsFalse};
         }
         if (std::abs(wrapAngle(*target - current)) <= kNoTurnAngle) {
             return TurnStep{TurnStep::Kind::Done, true};
         }
-        sim.turning = Turning{frame, f.group, f.instance, f.pc, current, snapHeading(*target), failsFalse, std::nullopt};
+        sim.turning = Turning{frame, f.group, f.instance, f.pc, mode, direction, current, snapHeading(*target), failsFalse, std::nullopt};
         if (auto step = routeTree(sim, kPreRouteEntry)) {
             return std::move(*step);
         }
         sim.turning->preRoute = true;
     }
-    const Turning& turning = *sim.turning;
-    if (!turning.preRoute || !*turning.preRoute) {
+    if (!sim.turning->preRoute || !*sim.turning->preRoute) {
         return done(false);
     }
+    // The post-route tree has returned. A turn that went ahead still fails when the object to face
+    // is gone. The tree's own result doesn't count.
+    if (sim.turning->postRouteReturned) {
+        const bool turned = *sim.turning->turned && turnTarget(in, f, sim, currentHeading(), sim.turning->direction).has_value();
+        return done(turned);
+    }
+    const auto ended = [&](bool turned) {
+        sim.turning->turned = turned;
+        auto post = routeTree(sim, kPostRouteEntry);
+        if (!post) {
+            return done(turned);
+        }
+        post->kind = TurnStep::Kind::PostRoute;
+        return std::move(*post);
+    };
     const double now = world().clockMs();
     if (sim.animation && startedHere(*sim.animation)) {
         const PlayingAnimation& clip = *sim.animation;
-        if (clip.finished(now)) {
-            const float end = turning.end;
+        // The turn is over when its clip starts fading out, as for Animate Sim. The clip plays on to
+        // its end as it fades, under whatever comes next.
+        if (clip.fadingOut(now)) {
+            const float end = sim.turning->end;
+            sim.ending = std::move(sim.animation);
             sim.animation.reset();
             faceHeading(sim, end);
-            return done(true);
+            return ended(true);
         }
         if (const auto& turns = world().animationTurns()) {
             if (const auto root = turns(clip.name, static_cast<float>((now - clip.startMs) * clip.speed))) {
-                faceHeading(sim, turning.start + (clip.flipped ? -*root : *root));
+                faceHeading(sim, sim.turning->start + (clip.flipped ? -*root : *root));
             }
         }
         return TurnStep{TurnStep::Kind::Wait};
     }
+    // The pre-route tree may have moved or turned me, so the turn sets off from where I am now, and
+    // without the 22.5-degree test again.
+    const float current = currentHeading();
+    const auto target = turnTarget(in, f, sim, current, sim.turning->direction);
+    if (!target) {
+        return ended(false);
+    }
+    Turning& turning = *sim.turning;
+    turning.start = current;
+    turning.end = snapHeading(*target);
     const auto clip = turnClip(turning.start, turning.end, sim.personData[kLifeStagePersonData]);
     const auto& lengths = world().animationLengths();
     const auto length = clip && lengths ? lengths(clip->name) : std::nullopt;
@@ -1100,6 +1141,8 @@ Execution::TurnStep Execution::turnBodyTowards(const bhav::Instruction& in, Fram
     play.speed = kTurnInPlaceSpeed;
     play.lengthMs = *length / kTurnInPlaceSpeed;
     play.flipped = clip->mirrored;
+    play.fades = true;
+    play.fadeOutMs = animateFades(play.lengthMs, false, true).outMs;
     play.baseHeading = turning.start;
     play.frame = frame;
     play.group = f.group;
@@ -1114,9 +1157,12 @@ void Execution::faceHeading(SimObject& sim, float heading) {
     sim.data[kDirectionField] = compassDirection(heading);
 }
 
-// The heading a turn mode faces, nullopt when the object to face is gone.
-std::optional<float> Execution::turnTarget(std::uint16_t mode, const Frame& f, const SimObject& sim, float current) {
+// The heading a turn faces, nullopt when the object to face is gone or off the lot. `direction` is
+// what modes 25 and 26 picked.
+std::optional<float> Execution::turnTarget(const bhav::Instruction& in, Frame& f, const SimObject& sim, float current,
+                                           std::int16_t direction) {
     constexpr float kPi = 3.14159265358979f;
+    const auto mode = static_cast<std::uint16_t>(in.operands[0] | in.operands[1] << 8);
     if (mode == 1) {
         const auto camera = world().cameraPoint() ? world().cameraPoint()() : std::nullopt;
         if (!camera) {
@@ -1130,7 +1176,9 @@ std::optional<float> Execution::turnTarget(std::uint16_t mode, const Frame& f, c
         if (target == nullptr || target->x == kOffLot || target->y == kOffLot) {
             return std::nullopt;
         }
-        double tx = target->x, ty = target->y;
+        // An object in a container's slot is faced where that slot holds it.
+        const SimObject base = slotGoalBase(world(), code_, *target);
+        double tx = base.x, ty = base.y;
         if (mode == 3) {
             tx = 2.0 * sim.x - tx;
             ty = 2.0 * sim.y - ty;
@@ -1146,16 +1194,48 @@ std::optional<float> Execution::turnTarget(std::uint16_t mode, const Frame& f, c
         constexpr float kTurns[] = {kPi / 4, kPi / 2, 3 * kPi / 4, -kPi / 4, -kPi / 2, -3 * kPi / 4, kPi};
         return current + kTurns[mode - 12];
     }
-    if (mode == 25) {
-        return compassHeading(thread_.temps[0] & 7);
-    }
-    if (mode == 26) {
-        return compassHeading((thread_.temps[0] + sim.data[kDirectionField]) & 7);
-    }
     if (mode >= 19 && mode <= 24) {
-        throw Stop{Outcome::Unsupported, "Turn Body Towards mode not implemented", std::to_string(mode)};
+        return slotTurnTarget(in, f, sim);
+    }
+    if (mode == 25 || mode == 26) {
+        return compassHeading(direction);
     }
     throw Stop{Outcome::Error, "Turn Body Towards mode out of range", std::to_string(mode)};
+}
+
+// Modes 19-24 of Turn Body Towards: the heading from me to a slot of the object in bytes 2-4.
+// 19 and 22 take its target slots, 20 and 23 its routing slots, 21 and 24 its container slots,
+// numbered from 0 in the SLOT resource's order. 22-24 face away. A slot number the object doesn't
+// have is error 0x1B.
+std::optional<float> Execution::slotTurnTarget(const bhav::Instruction& in, Frame& f, const SimObject& sim) {
+    constexpr float kPi = 3.14159265358979f;
+    const auto mode = static_cast<std::uint16_t>(in.operands[0] | in.operands[1] << 8);
+    const std::int16_t id = read(in.operands[2], static_cast<std::uint16_t>(in.operands[3] | in.operands[4] << 8), f);
+    const SimObject* owner = world().find(id);
+    if (owner == nullptr || owner->x == kOffLot || owner->y == kOffLot) {
+        return std::nullopt;
+    }
+    const ObjectType* type = code_.objectType(owner->definition.guid());
+    const std::vector<slot::Entry>* slots = nullptr;
+    if (type != nullptr) {
+        slots = mode == 19 || mode == 22 ? &type->targetSlots : mode == 20 || mode == 23 ? &type->routingSlots : &type->containerSlotEntries;
+    }
+    const std::size_t index = in.operands[5];
+    if (slots == nullptr || index >= slots->size()) {
+        throw Stop{Outcome::Error, "Slot number out of range", std::to_string(index)};
+    }
+    const slot::Entry& entry = (*slots)[index];
+    // The slot is measured from where the object is, in a container's slot if it is held in one.
+    const SimObject base = slotGoalBase(world(), code_, *owner);
+    const auto joints = slotJoints(*owner, entry, type->group);
+    const auto spot = routingSlotTarget(base, entry, joints.empty() ? std::nullopt : joints.front());
+    if (!spot) {
+        return std::nullopt;
+    }
+    // The world's x and y are the route's y and x.
+    const double worldDx = static_cast<double>(spot->y) - sim.y, worldDy = static_cast<double>(spot->x) - sim.x;
+    const auto heading = static_cast<float>(std::atan2(-worldDx, worldDy));
+    return mode >= 22 ? heading + kPi : heading;
 }
 
 std::optional<Execution::TurnStep> Execution::routeTree(const SimObject& sim, std::size_t entry) {

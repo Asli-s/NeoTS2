@@ -3,10 +3,15 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <optional>
+#include <string>
 #include <vector>
 
 namespace ts2::content {
 struct Lot;
+}
+namespace ts2::scene {
+struct Scene;
 }
 
 namespace ts2::scene::lotshadow {
@@ -46,10 +51,10 @@ struct Grid {
     float groundAt(int sampleX, int sampleY) const;
 };
 
-// A lot's floors, corner heights and walls (any covering for which `isFence` holds stands as a
-// fence or railing, 1.1824 high, as the game's railings stand. Where the game keeps that
-// height per style is not known yet). The inputs read from `lot`, which must outlive them.
-Inputs fromLot(const content::Lot& lot, const std::function<bool(std::uint32_t covering)>& isFence);
+// A lot's floors, corner heights and walls. A covering for which `fenceHeight` gives a height is a
+// fence or railing standing that high above its floor. The inputs read from `lot`, which must
+// outlive them.
+Inputs fromLot(const content::Lot& lot, const std::function<std::optional<float>(std::uint32_t covering)>& fenceHeight);
 
 // The height of a level's floor at a point: between its four corners (levels outside the lot's are
 // a storey (3) below its lowest or above its highest).
@@ -71,5 +76,10 @@ Grid build(const Inputs& in, const std::array<float, 3>& sun);
 // How much of the sun reaches a point under a shadow `depth` deep (the shadow's height above it):
 // all of it at or above the shadow, fading out over `zone` (hmSunLightTransitionZone) below it.
 float sunVisible(float depth, float zone);
+
+// How high a fence casts its shadow: the top of its post model, even where the rail is taller,
+// as the models stand in `scene` (meshes named after them). A fence with no post casts from its
+// rail. 0 when the model is not there.
+float fenceTop(const Scene& scene, const std::string& post, const std::string& rail);
 
 } // namespace ts2::scene::lotshadow

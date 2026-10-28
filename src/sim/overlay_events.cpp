@@ -89,20 +89,35 @@ void tellAnimateSimEvents(World& world, Vm& vm, std::int16_t id, const std::func
     // An event tree can start another animation or remove the object, so each event looks again.
     for (std::size_t told = 0; told < kMaxEventsPerClip; ++told) {
         SimObject* object = world.find(id);
-        if (object == nullptr || !object->animation || object->animation->eventTree == 0 || !world.animationEvents()) {
+        if (object == nullptr || !world.animationEvents()) {
             return;
         }
-        PlayingAnimation& a = *object->animation;
-        const std::vector<AnimationEvent> events = world.animationEvents()(a.name);
-        if (a.eventsTold >= events.size()) {
+        // The clip that ended its wait plays on as it fades out, and its last events still come.
+        PlayingAnimation* clip = nullptr;
+        std::vector<AnimationEvent> events;
+        double at = 0;
+        for (auto* candidate : {object->ending ? &*object->ending : nullptr, object->animation ? &*object->animation : nullptr}) {
+            if (candidate == nullptr || candidate->eventTree == 0) {
+                continue;
+            }
+            auto list = world.animationEvents()(candidate->name);
+            if (candidate->eventsTold >= list.size()) {
+                continue;
+            }
+            const double speed = std::abs(candidate->speed) > 0 ? std::abs(candidate->speed) : 1.0;
+            const double when = candidate->startMs + list[candidate->eventsTold].timeMs / speed;
+            if (when <= now) {
+                clip = candidate;
+                events = std::move(list);
+                at = when;
+                break;
+            }
+        }
+        if (clip == nullptr) {
             return;
         }
+        PlayingAnimation& a = *clip;
         const AnimationEvent& e = events[a.eventsTold];
-        const double speed = std::abs(a.speed) > 0 ? std::abs(a.speed) : 1.0;
-        const double at = a.startMs + e.timeMs / speed;
-        if (at > now) {
-            return;
-        }
         ++a.eventsTold;
         const double played = now - a.startMs;
         const auto percent = static_cast<std::int16_t>(a.lengthMs > 0 ? std::clamp(100.0 * played / a.lengthMs, 0.0, 100.0) : 100.0);
@@ -117,6 +132,60 @@ void tellAnimateSimEvents(World& world, Vm& vm, std::int16_t id, const std::func
             onStop(r);
         }
     }
+}
+
+void tellLookStates(World& world, Vm& vm, std::int16_t id, std::span<const LookController::Change> changes,
+                    const std::function<void(const RunResult&)>& onStop) {
+    for (const auto& change : changes) {
+        SimObject* sim = world.find(id);
+        if (sim == nullptr) {
+            return;
+        }
+        const auto t = std::find_if(sim->lookTargets.begin(), sim->lookTargets.end(),
+                                    [&](const LookTarget& l) { return l.request == change.request; });
+        if (t == sim->lookTargets.end() || t->eventTree == 0) {
+            continue;
+        }
+        const LookTarget target = *t;
+        const auto flag = static_cast<std::int16_t>(change.state == kLookEndedEarly || change.state == kLookCancelled ? 1 : 0);
+        for (const int event : {change.state, change.state >= kLookDone ? kEndEvent : 0}) {
+            SimObject* who = world.find(id);
+            if (event == 0 || who == nullptr) {
+                break;
+            }
+            const std::array<std::int16_t, 5> args{static_cast<std::int16_t>(event), target.stackObject,
+                                                   static_cast<std::int16_t>(change.percent), static_cast<std::int16_t>(std::clamp(change.holdMs, -1, 32767)), flag};
+            const RunResult r = vm.runEvent(*who, target.codeOwner, target.eventTree, target.stackObject, args);
+            if (r.outcome != Outcome::True && r.outcome != Outcome::False) {
+                onStop(r);
+            }
+        }
+    }
+    if (SimObject* sim = world.find(id)) {
+        // A look started by an event tree is followed next, but the look the head is on still
+        // needs its target until it ends.
+        const LookRequest* current = sim->look.current();
+        const int following = sim->look.following();
+        const int keep = current ? std::min(current->id, following) : following;
+        std::erase_if(sim->lookTargets, [&](const LookTarget& l) { return l.request < keep; });
+    }
+}
+
+void noteLook(SimObject& sim) {
+    const LookRequest* r = sim.look.current();
+    const auto t = r ? std::find_if(sim.lookTargets.begin(), sim.lookTargets.end(), [&](const LookTarget& l) { return l.request == r->id; })
+                     : sim.lookTargets.end();
+    if (t == sim.lookTargets.end()) {
+        sim.personData[kLookTargetPersonData] = 0;
+        sim.personData[kLookPointPersonData] = 0;
+        sim.personData[kLookStatePersonData] = static_cast<std::int16_t>(kLookNone);
+        sim.personData[kLookHoldPersonData] = 0;
+        return;
+    }
+    sim.personData[kLookTargetPersonData] = t->object;
+    sim.personData[kLookPointPersonData] = static_cast<std::int16_t>(t->slot | t->pointKind << 12);
+    sim.personData[kLookStatePersonData] = static_cast<std::int16_t>(r->state);
+    sim.personData[kLookHoldPersonData] = r->untilStopped ? std::int16_t{-1} : static_cast<std::int16_t>(std::clamp(r->remainingMs, 0.0f, 32767.0f));
 }
 
 } // namespace ts2::sim

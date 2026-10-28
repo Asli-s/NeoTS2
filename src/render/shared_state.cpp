@@ -101,6 +101,7 @@ void RendererState::swapScene(PreparedBase& prepared) {
     jointBase_.assign(instances_.size(), -1);
     jointCount_.assign(instances_.size(), 0);
     jointData_.clear();
+    shadows_ = {};
 }
 
 } // namespace ts2::render

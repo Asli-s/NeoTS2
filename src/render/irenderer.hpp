@@ -28,6 +28,7 @@ struct Capabilities {
     bool anisotropic = true;               // textures are filtered anisotropically
     bool threadedPrepare = true;           // prepare() can run on another thread and upload there
     bool offscreen = true;                 // drawToFile and drawInstancesToImage can draw off-screen
+    bool projectedShadows = true;          // Sims' projected shadows (setShadows)
     int maxTextureSize = 8192;
 };
 
@@ -146,13 +147,14 @@ public:
     // The light lot imposters' walls, roofs and slices are drawn with from the next frame on: the
     // lighting state's environment colour in lot view, white in the neighborhood.
     virtual void setImposterLight(const std::array<float, 3>& light) = 0;
-    // Whether the lot is lit by a night state: unlit textured materials are darkened then.
-    virtual void setNight(bool night) = 0;
     // How objects are lit from the next frame on (see scene::Scene::objectLighting).
     virtual void setObjectLighting(std::optional<scene::ObjectLighting> lighting) = 0;
 
     // The time animated surfaces (the neighborhood water) are drawn at, in seconds.
     virtual void setTime(float seconds) = 0;
+    // The lot's clock in seconds, which stops while the lot is paused: what animated textures
+    // (candle flames) play on.
+    virtual void setLotTime(double seconds) = 0;
 
     // Whether materials with a normal map are drawn with it (the game's bumpMapping, on at its High
     // Material Detail). On by default.
@@ -160,6 +162,9 @@ public:
     // Whether floors and walls are bump-mapped too (the game's floorAndWallNormalMapping, on at its
     // High Lighting Quality). It also needs bump mapping. On by default.
     virtual void setFloorAndWallNormalMapping(bool on) = 0;
+    // The Sims' projected shadows drawn from the next frame on (the game's, with its Shadows option
+    // at High). None by default.
+    virtual void setShadows(Shadows shadows) = 0;
     // Brightens a lot object (by its game object id, 0 for none) by adding `ambient` to its ambient light.
     virtual void setHighlight(std::uint32_t object, float ambient) = 0;
 };

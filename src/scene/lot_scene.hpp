@@ -38,7 +38,8 @@ LotSceneStats addLot(SceneBuilder& builder, const std::filesystem::path& lot, bo
 LotSceneStats addLot(SceneBuilder& builder, const content::Lot& loaded, const std::filesystem::path& lot, bool logObjects = false);
 
 // How the game lights objects outdoors in a lighting state: the skylight as the ambient, then the
-// sun, fill and sky lights, each as strength * (colour - skylight) per channel.
+// sun, fill and sky lights, each as strength * (colour - skylight) per channel. Sims also get the
+// state's simFill1 and simFill2 the same way (ObjectLighting::simLights).
 [[nodiscard]] ObjectLighting outdoorLighting(const content::Lighting::State& state);
 // The same for the "day" state, none without one.
 [[nodiscard]] std::optional<ObjectLighting> objectDaylight(const content::Lighting& lighting);

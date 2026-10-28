@@ -85,11 +85,11 @@ bool holdsSomethingElse(const World& world, const SimObject& placed, const Tile&
     }) != nullptr;
 }
 
-std::optional<std::int16_t> pickFacing(const SimObject& placed, const LocationSearch& search) {
+std::optional<std::int16_t> pickFacing(const SimObject& placed, const LocationSearch& search, int firstTurn) {
     const bool diagonalsAllowed = placed.definition.field(kNoDiagonalFacingDefinitionField) == 0 &&
                                   placed.data[kFacingRuleField] < 2;
     for (int i = 0; i < 8; ++i) {
-        const int turn = (search.randomTurn + i) & 7;
+        const int turn = (firstTurn + i) & 7;
         const int facing = (search.referenceFacing + turn) & 7;
         if (((search.allowedFacings >> turn) & 1) != 0 && (diagonalsAllowed || (facing & 1) == 0)) {
             return static_cast<std::int16_t>(facing);
@@ -117,7 +117,8 @@ int directionTo(const LocationSearch& search, std::int32_t x, std::int32_t y) {
 }
 } // namespace
 
-std::optional<FoundLocation> findLocation(const World& world, const SimObject& placed, const LocationSearch& search) {
+std::optional<FoundLocation> findLocation(const World& world, const SimObject& placed, const LocationSearch& search,
+                                          SimRandom& rng) {
     const RoomMap& rooms = world.rooms();
     const std::int32_t width = rooms.positionWidth() > 0 ? std::min(rooms.positionWidth(), kLotLimit) : kLotLimit;
     const std::int32_t height = rooms.positionHeight() > 0 ? std::min(rooms.positionHeight(), kLotLimit) : kLotLimit;
@@ -162,7 +163,8 @@ std::optional<FoundLocation> findLocation(const World& world, const SimObject& p
         }
         FoundLocation found{x * 65536 + 32768, y * 65536 + 32768, std::nullopt};
         if (search.allowedFacings != 0) {
-            found.facing = pickFacing(placed, search);
+            const int firstTurn = static_cast<int>((static_cast<std::uint64_t>(rng()) * 8) >> 32);
+            found.facing = pickFacing(placed, search, firstTurn);
             if (!found.facing) {
                 continue;
             }

@@ -20,6 +20,7 @@
 #include "sim/snap.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <format>
@@ -30,6 +31,17 @@
 namespace ts2::sim {
 
 namespace {
+
+const auto programStart = std::chrono::steady_clock::now();
+
+// The seed the game makes from the clock: the time in seconds since 1970 xor (ms | ms << 16), where ms
+// counts the milliseconds since the program started.
+std::uint32_t clockSeed() {
+    const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    const auto ms = static_cast<std::uint32_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - programStart).count());
+    return static_cast<std::uint32_t>(seconds) ^ (ms | (ms << 16));
+}
 
 // Scripts may run this many primitives in one tick before they are stopped.
 constexpr std::size_t kMaxStepsPerRun = 10000;
@@ -123,6 +135,8 @@ LotSimulation::LotSimulation(const std::filesystem::path& install, const std::fi
     world_.setNeighborRemap(saved.neighborRemap ? std::optional(saved.neighborRemap->neighborIds) : std::nullopt,
                             saved.unreadNeighborRemap);
     std::copy_n(saved.globals.begin(), std::min(saved.globals.size(), vm_.globals.size()), vm_.globals.begin());
+    // A lot saved without a random state starts from the clock, as the game seeds its generator.
+    vm_.rng.seed(saved.randomState ? *saved.randomState : clockSeed());
     updateTimeOfDay(vm_.globals);
     const auto hood = content::neighborhoodPackage(content::neighborhoodOfLot(lot));
     if (std::filesystem::exists(hood)) {
@@ -1051,7 +1065,14 @@ void LotSimulation::tick() {
         tellOverlayEvents(world_, vm_, id, [&](const RunResult& r) { note(r, id); }, world_.clockMs());
         tellAnimateSimEvents(world_, vm_, id, [&](const RunResult& r) { note(r, id); }, world_.clockMs());
     }
-    for (const std::int16_t id : ids) {
+    // Ids run in order up to the highest one held as the pass starts. An object made during the pass
+    // runs in it when it takes a free id after the one running.
+    const std::int16_t last = world_.highestId();
+    for (int i = 1; i <= last; ++i) {
+        const auto id = static_cast<std::int16_t>(i);
+        if (world_.findIncludingRemoved(id) == nullptr) {
+            continue;
+        }
         // The destinations a Sim made to make way go once nothing uses them, checked as its tick
         // starts, before its scripts run. All of them go once the Sim is gone.
         if (SimObject* o = world_.find(id); o != nullptr && !o->destinations.empty()) {
@@ -1079,6 +1100,13 @@ void LotSimulation::tellAnimationEvents(double nowMs) {
     for (const std::int16_t id : ids) {
         tellOverlayEvents(world_, vm_, id, [&](const RunResult& r) { note(r, id); }, nowMs);
         tellAnimateSimEvents(world_, vm_, id, [&](const RunResult& r) { note(r, id); }, nowMs);
+    }
+}
+
+void LotSimulation::tellLookStates(std::int16_t id, std::span<const LookController::Change> changes) {
+    ts2::sim::tellLookStates(world_, vm_, id, changes, [&](const RunResult& r) { note(r, id); });
+    if (SimObject* o = world_.find(id)) {
+        noteLook(*o);
     }
 }
 

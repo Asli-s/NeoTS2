@@ -4,6 +4,8 @@
 #include "../app/object_materials.hpp"
 #include "scene/neighborhood_scene.hpp"
 #include "scene/hood_drift.hpp"
+#include "scene/look_at.hpp"
+#include "sim/look_at.hpp"
 #include "scene/scene_ray.hpp"
 
 #include <cmath>
@@ -437,7 +439,7 @@ void clipsTurnToTheirOwnHeading() {
     }
     const auto bound = ts2::scene::bindAnimation(rig, a);
     std::vector<ts2::scene::Transform> world;
-    ts2::scene::poseRigLayered(rig, std::vector<ts2::scene::LayeredClip>{{&bound, 0, 1, 0, 0, -1, kQuarter}}, world);
+    ts2::scene::poseRigLayered(rig, std::vector<ts2::scene::LayeredClip>{{&bound, 0, 1, 0, 0, kQuarter}}, world);
     CHECK(std::fabs(world[0].m[3]) < 1e-5f && std::fabs(world[0].m[7] - 2) < 1e-5f);
     CHECK(std::fabs(world[2].m[3] - 2) < 1e-5f && std::fabs(world[2].m[7]) < 1e-5f);
 }
@@ -482,16 +484,16 @@ void layeredClipsMixLikeTheGame() {
     }
     CHECK(armX({{&low, 0, 1, 0}, {&high, 0, 1, 1}}) == 4.0f);
     CHECK(std::fabs(armX({{&low, 0, 1, 0}, {&high, 0, 0.25f, 1}}) - 2.5f) < 1e-5f);
-    // On an overlay layer the newer clip goes first: one fading in takes its share from the older one,
-    // and one fully in hides it. Layer 0 averages its clips.
-    CHECK(std::fabs(armX({{&high, 0, 1, 1, 0}, {&other, 0, 0.25f, 1, 2}}) - 4.5f) < 1e-5f);
-    CHECK(armX({{&other, 0, 1, 1, 2}, {&high, 0, 1, 1, 0}}) == 6.0f);
+    // An overlay layer's clips count by their weights, and share the layer by them when they weigh
+    // 1 or more together. Layer 0 averages its clips.
+    CHECK(std::fabs(armX({{&high, 0, 1, 1, 0}, {&other, 0, 0.25f, 1, 2}}) - 4.4f) < 1e-5f);
+    CHECK(armX({{&other, 0, 1, 1, 2}, {&high, 0, 1, 1, 0}}) == 5.0f);
     CHECK(std::fabs(armX({{&high, 0, 1, 0, 0}, {&other, 0, 1, 0, 2}}) - 5.0f) < 1e-5f);
     CHECK(armX({{&low, 0, 1, 0}, {&high, 0, 0.0005f, 1}}) == 2.0f);
     // A clip fading out under a newer one fading in gives way only to it: the two sum to 1. Alone it
     // fades out to the layer below.
-    CHECK(std::fabs(armX({{&other, 0, 0.75f, 1, 0, 1}, {&high, 0, 0.25f, 1, 2}}) - 5.5f) < 1e-5f);
-    CHECK(std::fabs(armX({{&other, 0, 0.5f, 1, 0, 1}, {&low, 0, 1, -1}}) - 4.0f) < 1e-5f);
+    CHECK(std::fabs(armX({{&other, 0, 0.75f, 1, 0}, {&high, 0, 0.25f, 1, 2}}) - 5.5f) < 1e-5f);
+    CHECK(std::fabs(armX({{&other, 0, 0.5f, 1, 0}, {&low, 0, 1, -1}}) - 4.0f) < 1e-5f);
 
     // The same turn saved as 150 and as -210 degrees (opposite quaternions) mixes to that turn.
     const auto armTurned = [&](float degrees) {
@@ -638,6 +640,136 @@ void unanimatedJointsKeepTheMeshRest() {
     CHECK(std::abs(skeleton[1]) < 1e-5f && std::abs(skeleton[2] - 2) < 1e-5f);
 }
 
+// The head turns so that the eye (head_grip, up the head's Y) looks along the head's Z through the
+// target, its X square to the target and the pole, whatever its parent's turn.
+void headAimsItsEyeAtTheTarget() {
+    using ts2::scene::Transform;
+    ts2::scene::Rig rig;
+    rig.nodes.push_back({"neck", -1, {0, 0, 1.5f}, {0, 0, 0.70710678f, 0.70710678f}});  // a quarter turn about z
+    rig.nodes.push_back({"head", 0, {0, 0, 0.1f}, {0, 0, 0, 1}});
+    rig.nodes.push_back({"head_grip", 1, {0, 0.075f, 0}, {0, 0, 0, 1}});
+    const auto chain = ts2::scene::headChain(rig);
+    CHECK(chain.head == 1 && chain.grip == 2);
+    std::vector<Transform> local(3), world(3);
+    for (std::size_t i = 0; i < 3; ++i) {
+        local[i] = Transform::of(rig.nodes[i].translation, rig.nodes[i].rotation);
+    }
+    ts2::scene::placeRig(rig, local, world);
+    const std::array<float, 3> target{1, 2, 1.7f}, pole{0, 0, 2.6f};
+    CHECK(ts2::scene::aimHead(rig, chain, target, pole, local, world));
+    ts2::scene::placeRig(rig, local, world);
+    const auto& h = world[1].m;
+    const auto& g = world[2].m;
+    // From the eye along the head's Z to the target.
+    const float to[3] = {target[0] - g[3], target[1] - g[7], target[2] - g[11]};
+    const float along = to[0] * h[2] + to[1] * h[6] + to[2] * h[10];
+    CHECK(along > 0);
+    CHECK(std::abs(to[0] - along * h[2]) < 1e-4f && std::abs(to[1] - along * h[6]) < 1e-4f && std::abs(to[2] - along * h[10]) < 1e-4f);
+    // X square to the head-target and head-pole lines.
+    const float t[3] = {target[0] - h[3], target[1] - h[7], target[2] - h[11]}, p[3] = {pole[0] - h[3], pole[1] - h[7], pole[2] - h[11]};
+    CHECK(std::abs(t[0] * h[0] + t[1] * h[4] + t[2] * h[8]) < 1e-4f && std::abs(p[0] * h[0] + p[1] * h[4] + p[2] * h[8]) < 1e-4f);
+    // Y leans to the pole.
+    CHECK(p[0] * h[1] + p[1] * h[5] + p[2] * h[9] > 0);
+    // Too close to the eye: nothing to do.
+    CHECK(!ts2::scene::aimHead(rig, chain, {h[3], h[7] + 0.01f, h[11]}, pole, local, world));
+}
+
+// A look's direction as angles, forward +Z and up +Y, clamped to the head's cone.
+void lookAnglesClampToTheCone() {
+    constexpr float degree = 3.14159265f / 180;
+    auto a = ts2::sim::lookAngles({1, 0, 1});
+    CHECK(std::abs(a.yaw - 45 * degree) < 1e-5f && std::abs(a.pitch) < 1e-6f);
+    CHECK(!ts2::sim::clampLook(a));
+    a = ts2::sim::lookAngles({0, -2, 1});  // well down
+    CHECK(a.pitch > 36 * degree && ts2::sim::clampLook(a) && std::abs(a.pitch - 36 * degree) < 1e-6f);
+    a = ts2::sim::lookAngles({-1, 1, -1});  // behind, up and to the other side
+    CHECK(ts2::sim::clampLook(a) && std::abs(a.yaw + 70 * degree) < 1e-6f && a.pitch < 0);
+}
+
+namespace look {
+
+using ts2::sim::LookController;
+constexpr float degree = 3.14159265f / 180;
+
+// A look turning at 80 degrees a second, held `holdMs` (negative: forever).
+ts2::sim::LookRequest request(int id, double start, float holdMs) {
+    ts2::sim::LookRequest r;
+    r.id = id;
+    r.startMs = start;
+    r.towards = r.away = 80 * degree;
+    r.remainingMs = holdMs;
+    r.forever = holdMs < 0;
+    return r;
+}
+// A target 1 m away, `yawDegrees` toward +X from straight ahead (+Z).
+ts2::sim::LookPose pose(float yawDegrees) {
+    ts2::sim::LookPose p;
+    p.target = {std::sin(yawDegrees * degree), 0, std::cos(yawDegrees * degree)};
+    return p;
+}
+// When each state came, stepping 33 ms frames up to `untilMs`.
+std::vector<LookController::Change> run(LookController& c, const ts2::sim::LookPose& p, double fromMs, double untilMs,
+                                        std::vector<float>* weights = nullptr) {
+    std::vector<LookController::Change> changes;
+    for (double now = fromMs; now <= untilMs; now += 33) {
+        c.update(now, p, changes);
+        if (weights != nullptr) {
+            weights->push_back(c.current() ? c.current()->weightAt(now) : 0.0f);
+        }
+    }
+    return changes;
+}
+
+} // namespace look
+
+// A look turns the head over about 30 degrees' worth of time at its speed whatever its size under
+// 30 degrees, the head IK coming in over half of it. It holds for its duration, then turns back as
+// the IK goes out, and is done.
+void lookTurnsHoldsAndTurnsBack() {
+    using namespace look;
+    LookController c;
+    c.begin(request(1, 0, 1500));
+    std::vector<float> weights;
+    const auto changes = run(c, pose(20), 0, 3000, &weights);
+    CHECK(changes.size() == 4);
+    CHECK(changes[0].state == ts2::sim::kLookTurningTo && changes[0].atMs == 0);
+    CHECK(changes[1].state == ts2::sim::kLookHolding && changes[1].atMs > 350 && changes[1].atMs < 480);
+    CHECK(changes[2].state == ts2::sim::kLookTimeUp);
+    CHECK(changes[2].atMs - changes[1].atMs > 1450 && changes[2].atMs - changes[1].atMs < 1560);
+    CHECK(changes[3].state == ts2::sim::kLookDone && changes[3].atMs - changes[2].atMs > 330 && changes[3].atMs - changes[2].atMs < 450);
+    CHECK(c.current() == nullptr);
+    // In by 187.5 ms: 0.001 at the start, about 0.35 at 66 ms, whole from 198 ms.
+    CHECK(std::abs(weights[2] - (0.001f + 0.999f * 66 / 187.5f)) < 0.01f && weights[6] == 1);
+    // The target lies along the look at the target's distance, the pole a metre up the head from the eye.
+    LookController held;
+    held.begin(request(2, 0, -1));
+    run(held, pose(20), 0, 1000);
+    const auto t = held.target(), p = pose(20).target;
+    CHECK(std::abs(t[0] - p[0]) < 1e-3f && std::abs(t[1] - p[1]) < 1e-3f && std::abs(t[2] - p[2]) < 1e-3f);
+    CHECK(std::abs(held.pole()[1] - 1) < 1e-5f);
+}
+
+// A newer look cancels the one followed, STOP turns the head back, and a target outside the cone
+// ends the look once the head reaches the cone's edge.
+void looksAreReplacedStoppedAndEndAtTheCone() {
+    using namespace look;
+    LookController c;
+    c.begin(request(1, 0, -1));
+    run(c, pose(20), 0, 600);
+    c.begin(request(2, 610, -1));
+    auto changes = run(c, pose(-20), 610, 620);
+    CHECK(changes.size() >= 2 && changes[0].request == 1 && changes[0].state == ts2::sim::kLookCancelled);
+    CHECK(changes[1].request == 2 && changes[1].state == ts2::sim::kLookTurningTo);
+    c.stop(700, 80 * degree);
+    changes = run(c, pose(-20), 709, 2000);
+    CHECK(!changes.empty() && changes[0].request == 2 && changes[0].state == ts2::sim::kLookEndedEarly);
+    CHECK(changes.back().state == ts2::sim::kLookCancelled && c.current() == nullptr);
+    LookController behind;
+    behind.begin(request(3, 0, -1));
+    changes = run(behind, pose(120), 0, 3000);
+    CHECK(changes.size() >= 3 && changes[1].state == ts2::sim::kLookEndedEarly);
+}
+
 // A lot object's actor poses every joint from its own model's rig, which holds the joints as the
 // lot saved them: its instance gets those joints and the actor's place, and no rig nodes.
 void objectActorsPoseEveryJointFromTheirRig() {
@@ -662,6 +794,42 @@ void objectActorsPoseEveryJointFromTheirRig() {
     float p[3] = {0, 1, 0};
     pose.joints[0].second[0].apply(p, true);
     CHECK(std::abs(p[1]) < 1e-5f && std::abs(p[2] - 2) < 1e-5f);
+}
+
+// A clip played at a negative speed runs from its end back to its start (a chat's talk-to-idle
+// transition plays its idle-to-talk clip backwards), on its own and among layered clips.
+void backwardClipsPlayFromTheirEnd() {
+    using ts2::scene::Transform;
+    auto rig = std::make_shared<ts2::scene::Rig>();
+    rig->nodes.push_back({"root", -1, {0, 0, 0}, {0, 0, 0, 1}});
+    auto clip = std::make_shared<ts2::anim::Animation>();
+    clip->duration = 1000;
+    ts2::anim::Channel move;
+    move.name = "root";
+    move.flags = static_cast<std::uint32_t>(ts2::anim::ChannelKind::Translation) << 22 | 0x8000;
+    move.components.resize(3);
+    move.components[0].keys = {{0, 0, 1, 1}, {1000, 1, 1, 1}};  // x from 0 to 1 over the second
+    move.components[1].keys = move.components[2].keys = {{0, 0, 0, 0}};
+    clip->channels.push_back(move);
+    const auto bound = std::make_shared<const ts2::scene::RigAnimation>(ts2::scene::bindAnimation(*rig, clip));
+    for (const bool layered : {false, true}) {
+        ts2::scene::Scene scene;
+        auto& actor = scene.actors.emplace_back();
+        actor.rig = rig;
+        if (layered) {
+            auto& c = actor.clips.emplace_back();
+            c.animation = bound;
+            c.speed = -1;
+            c.fadeIn = c.fadeOut = false;
+        } else {
+            actor.animation = bound;
+            actor.speed = -1;
+            actor.loop = false;
+        }
+        ts2::scene::ScenePose pose;
+        ts2::scene::poseActors(scene, 0.25, pose);
+        CHECK(pose.nodes.size() == 1 && std::abs(pose.nodes[0].second[0].m[3] - 0.75f) < 1e-3f);
+    }
 }
 
 void roomSamplesAreGatheredAsTheGame() {
@@ -1179,6 +1347,18 @@ void sceneRaysMeetWhatIsDrawn() {
     CHECK(r.hits.size() == 2 && !r.objectMissing);
     CHECK(r.hits.size() == 2 && r.hits[0].kind == SceneRays::Hit::Kind::Wall && std::abs(r.hits[0].t - 1.0f / 3) < 1e-4f);
     CHECK(rays.trace({20, 0, 0}, SceneRays::Point{30, 0, 0}, pose, {}).hits.size() == 2);
+    // Look At finds no point yet for an object's routing or targeting slot. Ray Trace takes the middle, as it has so far.
+    for (const int kind : {1, 2}) {
+        bool slotMissing = false, objectMissing = false;
+        CHECK(!rays.locate({20, kind, 0}, pose, slotMissing, objectMissing, true) && slotMissing && !objectMissing);
+        slotMissing = false;
+        CHECK(rays.locate({20, kind, 0}, pose, slotMissing, objectMissing) && !slotMissing);
+    }
+    bool slotMissing = false, objectMissing = false;
+    CHECK(rays.locate({20, 0, 0}, pose, slotMissing, objectMissing, true) && !slotMissing);
+    // A place Look At worked out in the object's model goes with the object.
+    const auto placedPoint = rays.locate({20, 1, 0, ts2::scene::Transform::at(0.5f, 0, 1, 0)}, pose, slotMissing, objectMissing, true);
+    CHECK(placedPoint && !slotMissing && std::abs(placedPoint->m[3] - 4.5f) < 1e-4f && std::abs(placedPoint->m[11] - 1) < 1e-4f);
 }
 
 // The tiles the plumbob over a lot is centred on: the lot's tiles less the row along each road side,
@@ -1218,7 +1398,12 @@ std::vector<Test> sceneTests() {
         {"Room samples are gathered as the game gathers them", roomSamplesAreGatheredAsTheGame},
         {"Portable maths matches the C library", portableMathMatchesTheLibrary},
         {"Joints the animation leaves keep the mesh's own rest", unanimatedJointsKeepTheMeshRest},
+        {"A head aims its eye at the target", headAimsItsEyeAtTheTarget},
+        {"Look angles clamp to the head's cone", lookAnglesClampToTheCone},
+        {"A look turns, holds and turns back", lookTurnsHoldsAndTurnsBack},
+        {"Looks are replaced, stopped and end at the cone", looksAreReplacedStoppedAndEndAtTheCone},
         {"A lot object's actor poses every joint from its own rig", objectActorsPoseEveryJointFromTheirRig},
+        {"Backward clips play from their end", backwardClipsPlayFromTheirEnd},
         {"scene transforms turn and move", sceneTransformsTurnAndMove},
         {"scene quads face their normal", sceneQuadsFaceTheirNormal},
         {"scene hip roof rises to its ridge", sceneHipRoofRisesToItsRidge},

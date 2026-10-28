@@ -29,6 +29,11 @@ Color scaled(const Color& a, float k) {
     return {a[0] * k, a[1] * k, a[2] * k};
 }
 
+// A dot product summed as the game sums it: z, then y, then x.
+float dot(const Color& a, const Color& b) {
+    return static_cast<float>((static_cast<double>(a[2]) * b[2] + static_cast<double>(a[1]) * b[1]) + static_cast<double>(a[0]) * b[0]);
+}
+
 Color plus(const Color& a, const Color& b) {
     return {a[0] + b[0], a[1] + b[1], a[2] + b[2]};
 }
@@ -95,7 +100,32 @@ void suppress(std::vector<Portal>& portals, const Suppression& s) {
     }
 }
 
-std::optional<PortalLights> lightsFor(const Portal& p, bool fromOutside, bool sun, const Daylight& day, const Color& lightMap) {
+Color skyLight(const Daylight& day, const Color& direction) {
+    // Each light's weight is its strength times how much the direction faces it (none behind).
+    std::array<float, 4> weight{0, 0, 0, 0};
+    std::array<Color, 4> color{};
+    for (std::size_t i = 0; i < day.outdoorLights.size() && i < weight.size(); ++i) {
+        const auto& l = day.outdoorLights[i];
+        const float facing = dot(direction, l.direction);
+        weight[i] = facing >= 0 ? l.strength * facing : 0.0f;
+        color[i] = l.color;
+    }
+    const float rest = static_cast<float>(1.0 - (((static_cast<double>(weight[2]) + weight[3]) + weight[1]) + weight[0]));
+    Color out;
+    for (std::size_t c = 0; c < 3; ++c) {
+        const double lights = (static_cast<double>(color[3][c]) * weight[3] + static_cast<double>(color[2][c]) * weight[2]) +
+                              static_cast<double>(color[1][c]) * weight[1];
+        const double sky = static_cast<double>(day.sky[c]) * rest;
+        const double first = static_cast<double>(color[0][c]) * weight[0];
+        // The game adds the first channel's sky before the first light, the others after it. The
+        // order changes how the sums round, so it is kept.
+        const float sum = static_cast<float>(c == 0 ? (lights + sky) + first : (lights + first) + sky);
+        out[c] = day.outdoorStrength * sum;
+    }
+    return out;
+}
+
+PortalLights lightsFor(const Portal& p, bool fromOutside, const Daylight& day, const Color& lightMap) {
     Modifiers direct = p.otherRoom == 0 ? day.outsidePortals : day.insidePortals;
     Modifiers spill = p.otherRoom == 0 ? day.outsidePortalSpills : day.insidePortalSpills;
     direct.practical *= p.suppression;
@@ -105,19 +135,31 @@ std::optional<PortalLights> lightsFor(const Portal& p, bool fromOutside, bool su
     Color directColor{0, 0, 0}, diffuseColor{0, 0, 0};
     float directShare = 1, diffuseShare = 0;
     if (fromOutside && p.otherRoom != 0) {
-        if (!sun) {
-            return std::nullopt;
+        const Color outward{-p.nx, -p.ny, 0};
+        if (!day.skylight) {
+            directColor = skyLight(day, outward);
+        } else {
+            const float facing = dot(outward, day.sunDirection);
+            directShare = facing > 0 ? facing : 0;  // also NaN
+            directColor = scaled(day.sunColor, day.sunStrength);
+            diffuseColor = day.sky;
+            diffuseShare = 1;
+            // Below full saturation both lean toward the sky's light outside the portal.
+            if (day.saturation < 1) {
+                const Color outside = skyLight(day, outward);
+                const float s = day.saturation;
+                directShare = (directShare - 1) * s + 1;
+                for (std::size_t c = 0; c < 3; ++c) {
+                    directColor[c] = (directColor[c] - outside[c]) * s + outside[c];
+                    diffuseColor[c] = (diffuseColor[c] - outside[c]) * s + outside[c];
+                }
+            }
         }
-        const double dot = (0.0 * day.sunDirection[2] + static_cast<double>(-p.ny) * day.sunDirection[1]) +
-                           static_cast<double>(-p.nx) * day.sunDirection[0];
-        const float facing = static_cast<float>(dot);
-        directShare = facing > 0 ? facing : 0;  // also NaN
-        directColor = plus(scaled(day.sunColor, day.sunStrength), lightMap);
-        diffuseColor = plus(day.sky, scaled(lightMap, 0.5f));
-        diffuseShare = 1;
+        directColor = plus(directColor, lightMap);
+        diffuseColor = plus(diffuseColor, scaled(lightMap, 0.5f));
     } else {
         directColor = scaled(lightMap, 0.5f);
-        if (sun) {
+        if (day.skylight) {
             diffuseColor = scaled(lightMap, 0.5f);
             diffuseShare = 1;
         }

@@ -3,6 +3,7 @@
 #include "formats/fcns.hpp"
 #include "formats/ttab.hpp"
 #include "sim/code_source.hpp"
+#include "sim/sim_random.hpp"
 #include "sim/world.hpp"
 
 #include <array>
@@ -10,7 +11,6 @@
 #include <functional>
 #include <map>
 #include <optional>
-#include <random>
 #include <span>
 #include <string>
 #include <vector>
@@ -92,7 +92,7 @@ struct InteractionSearch {
     std::span<const std::uint8_t> operands;
     std::span<const std::int16_t> temps;
     const AutonomyTunings& tunings;
-    std::mt19937& rng;
+    SimRandom& rng;
     // Runs a line's check tree for autonomy, with `object` as the stack object. True when it passes.
     // `changed` receives the line as the tree left it (check trees can write its advertisements),
     // `icon` the candidate's queue icon as the tree left it, `offers` the lines it offered.

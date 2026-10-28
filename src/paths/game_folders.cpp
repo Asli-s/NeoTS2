@@ -47,6 +47,15 @@ bool packageHeaderWhole(const fs::path& file, std::uintmax_t size) {
            (count == 0 || (offset + indexSize <= size && count * 20 <= indexSize));
 }
 
+// A Mac's AppleDouble sidecar, a "._" file of metadata that starts 00 05 16 07. Loading the game
+// data leaves these out, so they aren't damage.
+bool appleDouble(const fs::path& file) {
+    constexpr std::array<unsigned char, 4> kMarker{0x00, 0x05, 0x16, 0x07};
+    std::array<unsigned char, 4> h{};
+    std::ifstream in(file, std::ios::binary);
+    return in.read(reinterpret_cast<char*>(h.data()), h.size()) && h == kMarker;
+}
+
 } // namespace
 
 std::string_view editionName(Edition edition) {
@@ -109,7 +118,7 @@ DamagedPackages findDamagedPackages(const fs::path& root) {
             continue;
         }
         const std::uintmax_t size = entry.file_size(typeError);
-        if (typeError || !packageHeaderWhole(entry.path(), size)) {
+        if (typeError || (!packageHeaderWhole(entry.path(), size) && !appleDouble(entry.path()))) {
             ++damaged.count;
             if (damaged.examples.size() < kExamples) {
                 damaged.examples.push_back(entry.path());

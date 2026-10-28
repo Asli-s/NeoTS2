@@ -2,6 +2,7 @@
 
 #include "scene/rig.hpp"
 
+#include <functional>
 #include <optional>
 #include <span>
 #include <vector>
@@ -16,9 +17,6 @@ struct LayeredClip {
     float weight = 1;
     int layer = 0;
     double start = 0;
-    // Its weight while a newer clip on its layer covers it: without its own fading out, which the newer
-    // clip's fading in stands for. Negative: the same as `weight`.
-    float steady = -1;
     // Radians the clip's root and limb controls are turned by about their turn axes (Rig::Node::turnAxis):
     // a locomotion clip plays from its own heading, which may differ from the one the rig is placed at.
     float turn = 0;
@@ -29,26 +27,31 @@ struct LayeredClip {
     // Leaves out where it moves the root (root_trans's move) but keeps the rest. The animation before
     // a walk is drawn this way under the walk's fade-in: the game's root takes the walk's place at
     // once, so a Sim leaving a long stair at its top doesn't keep the climb's lift. Its limbs reach
-    // around the drawn root as they do around its own (see LimbSource::rootMove). With bodyOnly the
-    // root's turn is left out too, for an animation fading out under one that took the root.
+    // around the drawn root as they do around its own (see LimbSource::rootMove).
     bool noRootMove = false;
     // Where the clip's IK object stands, in the rig's space: its limb targets on that object are
     // placed from there. None: in the skeleton's own space.
     std::optional<Transform> objectFrame;
     // Where a bone of the clip's IK object is, in the rig's space (see LimbSource::objectBone).
     std::function<std::optional<Transform>(std::uint32_t bone)> objectBone;
+    // For an animation fading out after the Sim was placed anew (onto a bed's slot as getting in hands
+    // over to lying there): the move from where the Sim stood while it played to where it stands now,
+    // in the rig's space. Its limb targets and poles in the skeleton's space move by it, so they stay
+    // where they were in the world, as the game's do (see LimbSource::rootMove).
+    std::optional<Transform> placeMove;
 };
 
 // Poses a rig from several animations as the game mixes them, joint by joint: the highest layer
-// that moves the joint takes it, the layer below gets what it leaves (1 minus its weight), and so
-// on. On an overlay layer the newest clip goes first and older ones get what it leaves at their
-// steady weight (a clip fading in fades the one it replaces out). The clips of layer 0 are averaged
-// by weight. A joint no clip moves stays at rest. Limbs reach for the targets of all the clips, each
+// that moves the joint takes it by its clips' summed weights, the layer below gets what it leaves
+// (1 minus that sum), and so on. A layer whose clips weigh 1 or more takes all that is left, shared
+// by their weights. A joint no clip moves stays at rest. Limbs reach for the targets of all the clips, each
 // clip weighted as a joint's mix weighs it.
 // With `held` (one per joint, or empty at first) a joint no clip moves keeps what it held instead,
 // as the game leaves a joint nothing drives. Clips below layer 0 (the pose the rig starts in) count
-// only while it holds nothing yet. `held` is then set to this pose.
+// only while it holds nothing yet. `held` is then set to this pose. `look` is asked where the head
+// looks once the clips are mixed: the head turns toward its target on a layer above every clip.
 void poseRigLayered(const Rig& rig, std::span<const LayeredClip> clips, std::vector<Transform>& world,
-                    std::vector<HeldJoint>* held = nullptr);
+                    std::vector<HeldJoint>* held = nullptr,
+                    const std::function<std::optional<HeadLook>(const HeadPlace&)>* look = nullptr);
 
 } // namespace ts2::scene

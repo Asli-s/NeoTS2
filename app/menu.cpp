@@ -29,6 +29,7 @@
 #include "content/material_scripts.hpp"
 #include "content/neighborhood.hpp"
 #include "content/ui_data.hpp"
+#include "content/user_props.hpp"
 #include "formats/image.hpp"
 #include "formats/reia.hpp"
 #include "render/make_renderer.hpp"
@@ -301,6 +302,7 @@ private:
     void cameraDrag(const pf::Event& e, float x, float y);
     void endCameraDrag();
     void updateLot(std::uint64_t now);
+    void puckCamera();
     void startLotLife();
     void drawHousehold(std::uint64_t now);
     void sendLotChanges();
@@ -401,6 +403,9 @@ private:
     std::uint32_t clickedLot_ = 0;
     std::uint64_t clickedAt_ = 0;
     app::Orbit orbit_;
+    // The game's Camera Rotation option set to Sims 1 Style, which turns the middle-button drag and
+    // comma and period the other way.
+    bool sims1Turn_ = false;
     app::CameraHeight cameraHeight_;
     // The free camera while it is on (Tab), and its settings.
     std::optional<app::FreeCamera> freeCam_;
@@ -454,6 +459,7 @@ Game::Game(ts2::content::UiData& data, ts2::ui::Fonts& fonts, ts2::render::IRend
     // picture, and Play.
     preview_ = screen_.load(kScripts, kPreview, menuX_, menuY_);
     screen_.setVisible(preview_, false);
+    sims1Turn_ = ts2::content::readUserProps(options.user).flag("rotateCameraSims1Mode").value_or(false);
 }
 
 void Game::setUpMenu() {
@@ -903,6 +909,7 @@ void Game::enterLot(std::uint32_t id) {
             built.camera.pitchBlend = built.camera.pitchBlendGoal = 0.15f;
             built.camera.zoomTo(built.camera.distance);
             built.camera.distanceGoal = built.camera.distance;
+            built.camera.lotKeys = true;
         }
         built.freeRig = ts2::content::findCamera(install, "CameraMan");
         // Shown in its neighborhood, where its imposter was.
@@ -939,7 +946,6 @@ void Game::showLot(LotBuilt& built) {
         const auto* state = ts2::content::findState(assets_.get()->lighting(), built.lightState);
         const std::array<float, 3> environment = state ? state->environment : std::array<float, 3>{1, 1, 1};
         renderer_.setImposterLight(environment);
-        renderer_.setNight(ts2::content::stateTime(built.lightState) == ts2::content::StateTime::Night);
         lotDaylight_ = std::make_unique<app::LotDaylight>(std::move(built.light), built.lightState, environment, built.place);
     }
     hoodOrbit_ = orbit_;
@@ -998,7 +1004,6 @@ void Game::leaveLot() {
     hoveredSim_ = false;
     renderer_.setHighlight(0, 0);
     renderer_.setImposterLight({1, 1, 1});
-    renderer_.setNight(false);
     orbit_ = hoodOrbit_;
     orbit_.dragSpeed = {0, 0};
     screen_.setVisible(hoodUi_.root(), true);
@@ -1216,7 +1221,7 @@ void Game::cameraDrag(const pf::Event& e, float x, float y) {
     if (e.type == pf::Event::Type::MouseMotion && turnFrom_) {
         const float dx = e.x - (*turnFrom_)[0], dy = e.y - (*turnFrom_)[1];
         if (dx != 0 || dy != 0) {
-            orbit_.turnMove[0] += dx;
+            orbit_.turnMove[0] += sims1Turn_ ? -dx : dx;
             orbit_.turnMove[1] += dy;
             if (pf::Window* window = pf::mouseFocus()) {
                 window->warpMouse((*turnFrom_)[0], (*turnFrom_)[1]);
@@ -1416,6 +1421,16 @@ void Game::lotMouse(const pf::Event& e, float x, float y) {
     }
 }
 
+// The puck's camera buttons turn and zoom while held. Sims 1 Style swaps the arrows, as it does
+// comma and period.
+void Game::puckCamera() {
+    using Button = app::LotUi::CameraButton;
+    const Button held = lotUi_.heldCameraButton();
+    const int turn = held == Button::RotateLeft ? -1 : held == Button::RotateRight ? 1 : 0;
+    orbit_.puckTurn = sims1Turn_ ? -turn : turn;
+    orbit_.puckZoom = held == Button::ZoomIn ? -1 : held == Button::ZoomOut ? 1 : 0;
+}
+
 // A frame of the lot: the camera, the object under the mouse, the Sims and what they changed.
 void Game::updateLot(std::uint64_t now) {
     const float dt = std::min(0.1f, static_cast<float>(now - lastFrame_) / 1e9f);    if (freeCam_) {
@@ -1429,6 +1444,7 @@ void Game::updateLot(std::uint64_t now) {
             keepNearLot(freeCam_->constraintWidth()));
         lotView_.view.facing = freeCam_->facing();
     } else {
+        puckCamera();
         app::orbitStep(orbit_, dt, width_, height_, [&] { cameraHeight_.apply(orbit_, lot_, lotVisible_, lotPlace_, lotView_.view.level); });
         lotView_.view.facing = orbit_.facing();
     }
@@ -1654,6 +1670,12 @@ void Game::handleEvent(const pf::Event& e) {
     if (inNeighborhood_ && hoodDrift_ && input) {
         hoodDrift_->interrupt();
     }
+    // Sims 1 Style turns the other way by comma and period too.
+    const pf::Key key = !sims1Turn_ ? e.key : e.key == pf::Key::Comma ? pf::Key::Period : e.key == pf::Key::Period ? pf::Key::Comma : e.key;
+    // The turn keys stop turning when let go, wherever the key went meanwhile.
+    if (e.type == pf::Event::Type::KeyUp && (key == pf::Key::Comma || key == pf::Key::Period)) {
+        orbit_.turnKeys[key == pf::Key::Comma ? 0 : 1] = false;
+    }
     const bool freeToggle = e.type == pf::Event::Type::KeyDown && !e.repeat && inLot_ && !quitBox_.isOpen() &&
                             (e.scancode == pf::Key::Tab || e.scancode == pf::Key::Y || (freeCam_ && e.scancode == pf::Key::Escape));
     if (freeToggle) {
@@ -1675,7 +1697,7 @@ void Game::handleEvent(const pf::Event& e) {
         if (const auto action = lotKey(e.key); action != app::LotUi::Action::None) {
             lotAction(action);
         } else {
-            lotView_.key(e.key, orbit_);
+            lotView_.key(key, orbit_);
         }
     } else if (e.type == pf::Event::Type::MouseWheel && (inNeighborhood_ || inLot_) && !neighborhoodCovered()) {
         app::orbitEvent(orbit_, e);
@@ -1913,6 +1935,7 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
     windowOptions.resizable = false;
     windowOptions.highDensity = false;
     windowOptions.hidden = !options.shot.empty();
+    windowOptions.fitScreen = options.fitScreen && options.shot.empty();
     std::unique_ptr<pf::Window> window;
     {
         const auto rendererOwner = app::openRenderer(window, options.backend, windowOptions, shaders, !options.shot.empty());

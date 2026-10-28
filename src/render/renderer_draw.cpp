@@ -2,6 +2,7 @@
 #include "render/renderer_internals.hpp"
 
 #include "diag/timing.hpp"
+#include "scene/sim_shadows.hpp"
 
 #include <SDL3/SDL.h>
 
@@ -203,17 +204,6 @@ SDL_GPUTexture* SdlGpuRenderer::depthFor(DepthBuffer& depth, unsigned width, uns
     return depth.texture;
 }
 
-// One frame being recorded: where it goes and how it is seen.
-struct SdlGpuRenderer::Frame : FrameView {
-    SDL_GPUCommandBuffer* cmd = nullptr;
-    SDL_GPURenderPass* pass = nullptr;  // the frame's main pass, once begun
-    unsigned width = 0, height = 0;
-    // The sky, the boundary curtain, the terrain, roads and imposters. A portrait shows its instances
-    // alone, over a transparent background.
-    bool extras = false;
-    bool water = false;  // the neighborhood's water and its reflection
-};
-
 bool SdlGpuRenderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigned width, unsigned height,
                       const Camera& camera) {
     diag::Timer timer("record frame");
@@ -236,6 +226,15 @@ bool SdlGpuRenderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, u
     if (f.water) {
         drawReflection(f);
     }
+    // The shadows' data stays with the command buffer for every scene draw after it.
+    if (f.extras) {
+        updateObjectShadows(f);
+    }
+    ShadowUniforms shadows = FramePlan::shadowUniforms(*this, f.extras ? drawShadows(f) : 0);
+    if (f.extras) {
+        std::copy(objectGridArea_.begin(), objectGridArea_.end(), shadows.objectGrid);
+    }
+    SDL_PushGPUFragmentUniformData(cmd, 1, &shadows, sizeof(shadows));
 
     SDL_GPUColorTargetInfo color{};
     color.texture = target;
@@ -379,7 +378,7 @@ void SdlGpuRenderer::drawList(const Frame& f, const std::vector<Draw>& list, int
     // Each binding SDL is given takes new GPU descriptors, so textures and joints are bound only when
     // they change (and again after a pipeline switch).
     SDL_GPUGraphicsPipeline* bound = nullptr;
-    std::array<SDL_GPUTextureSamplerBinding, 6> boundSamplers{};
+    std::array<SDL_GPUTextureSamplerBinding, 10> boundSamplers{};
     bool jointsBound = false;
     const MeshBuffers* boundBuffers = nullptr;
     for (const auto& d : list) {
@@ -394,7 +393,10 @@ void SdlGpuRenderer::drawList(const Frame& f, const std::vector<Draw>& list, int
         }
         const scene::Material* m = d.material;
         const bool skinned = d.primitive->skinned;
-        const int kind = blend && m && m->alpha == scene::AlphaMode::Add ? 2 : blend;
+        const int kind = !blend || !m                          ? blend
+                         : m->alpha == scene::AlphaMode::Add ? 2
+                         : m->alpha == scene::AlphaMode::Sum ? 3
+                                                             : blend;
         SDL_GPUGraphicsPipeline* pipeline = (skinned ? skinnedPipelines_ : pipelines_)[m && m->doubleSided ? 1 : 0][kind];
         if (pipeline != bound) {
             SDL_BindGPUGraphicsPipeline(f.pass, pipeline);
@@ -407,10 +409,14 @@ void SdlGpuRenderer::drawList(const Frame& f, const std::vector<Draw>& list, int
             jointsBound = true;
         }
         const DrawUniforms u = FramePlan::uniformsFor(*this, *this, f, d, blend);
-        std::array<SDL_GPUTextureSamplerBinding, 6> samplers;
-        for (std::size_t k = 0; k < samplers.size(); ++k) {
+        std::array<SDL_GPUTextureSamplerBinding, 10> samplers;
+        for (std::size_t k = 0; k < u.samplers.size(); ++k) {
             samplers[k] = {textureFor(u.samplers[k].texture), samplerFor(u.samplers[k].sampler)};
         }
+        samplers[u.samplers.size()] = {shadowBlurred_, shadowSampler_};
+        samplers[u.samplers.size() + 1] = {objectPictures_, shadowSampler_};
+        samplers[u.samplers.size() + 2] = {objectPlaces_, shadowPoint_};
+        samplers[u.samplers.size() + 3] = {objectGrid_, shadowPoint_};
         if (skinned) {
             SDL_PushGPUVertexUniformData(f.cmd, 0, &u.vertex, sizeof(u.vertex));
         } else {
@@ -437,6 +443,65 @@ void SdlGpuRenderer::drawList(const Frame& f, const std::vector<Draw>& list, int
         }
         SDL_DrawGPUIndexedPrimitives(f.pass, p.count, 1, p.firstIndex, skinned ? 0 : static_cast<Sint32>(p.firstVertex), 0);
     }
+}
+
+// The Sims' shadow pictures: each Sim drawn from the sun into its tile, then every tile blurred.
+// Returns how many Sims cast a shadow.
+std::size_t SdlGpuRenderer::drawShadows(const Frame& f) {
+    if (jointBuffer_ == nullptr) {
+        return 0;
+    }
+    const auto casters = FramePlan::shadowCasters(*this, *this);
+    if (casters.empty()) {
+        return 0;
+    }
+    constexpr float kSide = scene::simshadows::kResolution;
+    SDL_GPUColorTargetInfo pictures{};
+    pictures.texture = shadowPictures_;
+    pictures.clear_color = SDL_FColor{1, 1, 1, 0};
+    pictures.load_op = SDL_GPU_LOADOP_CLEAR;
+    pictures.store_op = SDL_GPU_STOREOP_STORE;
+    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(f.cmd, &pictures, 1, nullptr);
+    SDL_BindGPUGraphicsPipeline(pass, shadowCasterPipeline_);
+    SDL_BindGPUVertexStorageBuffers(pass, 0, &jointBuffer_, 1);
+    for (std::size_t c = 0; c < casters.size(); ++c) {
+        const SDL_GPUViewport tile{static_cast<float>(c % kShadowTilesAcross) * kSide, static_cast<float>(c / kShadowTilesAcross) * kSide, kSide, kSide, 0, 1};
+        SDL_SetGPUViewport(pass, &tile);
+        for (const auto& d : casters[c]) {
+            const MeshBuffers& buffers = gpu_->meshBuffers[d.primitive->buffers];
+            if (buffers.vertices == nullptr || buffers.indices == nullptr || buffers.skin == nullptr) {
+                continue;
+            }
+            const SkinnedUniforms u = FramePlan::shadowCasterUniforms(*this, d, c);
+            SDL_PushGPUVertexUniformData(f.cmd, 0, &u, sizeof(u));
+            const SDL_GPUBufferBinding indices{buffers.indices, 0};
+            SDL_BindGPUIndexBuffer(pass, &indices, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+            const auto& p = *d.primitive;
+            const SDL_GPUBufferBinding vertices[2] = {{buffers.vertices, p.firstVertex * kVertexFloats * static_cast<Uint32>(sizeof(float))},
+                                                      {buffers.skin, p.firstSkin}};
+            SDL_BindGPUVertexBuffers(pass, 0, vertices, 2);
+            SDL_DrawGPUIndexedPrimitives(pass, p.count, 1, p.firstIndex, 0, 0);
+        }
+    }
+    SDL_EndGPURenderPass(pass);
+
+    // Only the rows of tiles in use are blurred.
+    SDL_GPUColorTargetInfo blurred{};
+    blurred.texture = shadowBlurred_;
+    blurred.load_op = SDL_GPU_LOADOP_DONT_CARE;
+    blurred.store_op = SDL_GPU_STOREOP_STORE;
+    pass = SDL_BeginGPURenderPass(f.cmd, &blurred, 1, nullptr);
+    const std::size_t rows = (casters.size() + kShadowTilesAcross - 1) / kShadowTilesAcross;
+    const SDL_GPUViewport used{0, 0, kSide * kShadowTilesAcross, kSide * static_cast<float>(rows), 0, 1};
+    SDL_SetGPUViewport(pass, &used);
+    SDL_BindGPUGraphicsPipeline(pass, shadowBlurPipeline_);
+    const ShadowBlurUniforms weights = FramePlan::shadowBlurUniforms();
+    SDL_PushGPUFragmentUniformData(f.cmd, 0, &weights, sizeof(weights));
+    const SDL_GPUTextureSamplerBinding source{shadowPictures_, shadowPoint_};
+    SDL_BindGPUFragmentSamplers(pass, 0, &source, 1);
+    SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+    SDL_EndGPURenderPass(pass);
+    return casters.size();
 }
 
 bool SdlGpuRenderer::hasImage(int index) const {

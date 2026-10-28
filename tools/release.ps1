@@ -11,7 +11,7 @@
 #    releases\v<number>, with the zip players download (see package.ps1). A rehearsal makes the zip
 #    too, in releases\rehearsal.
 # 4. Tags the commit v<number>, and pushes the tag after asking, when there is a remote.
-# 5. Raises the number in CMakeLists.txt to -Next (by default the next minor release) on main.
+# 5. Raises the number in CMakeLists.txt to -Next (by default the next patch release) on main.
 #
 # The build settings (generator, SDL3_DIR, freetype_DIR) are taken from an existing build folder (-Settings).
 param(
@@ -72,7 +72,7 @@ if ($last -and [version]$number -le $last) {
 }
 if (-not $Next) {
     $v = [version]$number
-    $Next = "$($v.Major).$($v.Minor + 1).0"
+    $Next = "$($v.Major).$($v.Minor).$($v.Build + 1)"
 }
 if ($Next -notmatch '^\d+\.\d+\.\d+$' -or [version]$Next -le [version]$number) {
     throw "-Next must be a release number larger than $number, not '$Next'."

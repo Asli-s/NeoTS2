@@ -30,6 +30,11 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     day.outsidePortalSpills = mods();
     day.doorOrArchDirect = number();
     day.suppressionDimsRoomLight = byte() & 1;
+    day.skylight = byte() & 1;
+    day.saturation = number();
+    day.outdoorLights.resize(byte() % 6);
+    for (auto& l : day.outdoorLights) l = {color(), number(), color()};
+    day.outdoorStrength = number();
     const Suppression supp{number(), number(), number()};
 
     std::vector<Portal> portals(byte() % 12);
@@ -52,7 +57,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     suppress(portals, supp);
     const std::uint8_t flags = byte();
     for (const auto& p : portals) {
-        (void)lightsFor(p, flags & 1, flags & 2, day, color());
+        (void)lightsFor(p, flags & 1, day, color());
     }
     return 0;
 }
