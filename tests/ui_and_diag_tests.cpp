@@ -301,6 +301,7 @@ void logFileStopsAtItsLimit() {
 }
 
 // A warn-once line is written the first time its calling line is reached, with the file name only.
+// Lines other tests' threads write meanwhile are left out of the count.
 void warnOnceWritesOncePerLine() {
     ts2::diag::reset();
     for (int i = 0; i < 3; ++i) {
@@ -308,9 +309,11 @@ void warnOnceWritesOncePerLine() {
     }
     ts2::diag::warnOnce("other limit");
     const auto recent = ts2::diag::recentLines();
-    CHECK(recent.size() == 2);
-    CHECK(recent[0].find("limit hit (ui_and_diag_tests.cpp:") != std::string::npos);
-    CHECK(recent[1].find("other limit (ui_and_diag_tests.cpp:") != std::string::npos);
+    const auto count = [&](std::string_view text) {
+        return std::count_if(recent.begin(), recent.end(), [&](const std::string& line) { return line.find(text) != std::string::npos; });
+    };
+    CHECK(count("limit hit (ui_and_diag_tests.cpp:") == 1);
+    CHECK(count("other limit (ui_and_diag_tests.cpp:") == 1);
     ts2::diag::reset();
 }
 
