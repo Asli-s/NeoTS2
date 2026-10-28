@@ -131,7 +131,7 @@ void saveFoldersAreJudgedOneWay() {
 }
 
 // New NeoTS2 save folders are named "The Sims 2 Neo - <name>". An empty name takes the lowest free
-// number, and a name that is taken or that Windows can't use makes nothing.
+// number, and a name that is taken in any letter case or that Windows can't use makes nothing.
 void newSaveFoldersAreNamed() {
     using namespace ts2::paths;
     const fs::path root = fs::temp_directory_path() / ("neots2-paths-test-" + std::to_string(std::random_device{}()));

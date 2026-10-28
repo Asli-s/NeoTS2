@@ -18,7 +18,7 @@ struct NewSaveFolder {
 
 // Makes a new, empty NeoTS2 save folder in `parent` (the "EA Games" folder), named from what the
 // player typed (UTF-8). An empty name takes the lowest number no folder there has yet. A name
-// Windows can't use, or one a folder already has, makes nothing.
+// Windows can't use, or one a folder already has in any letter case, makes nothing.
 NewSaveFolder makeNewSaveFolder(const std::filesystem::path& parent, std::string_view name);
 
 // The NeoTS2 save folders already in `parent`, in name order.

@@ -46,6 +46,20 @@ fs::path folderFor(const fs::path& parent, std::string_view name) {
     return parent / fs::path(text);
 }
 
+// Whether `parent` holds an entry named as `folder` apart from letter case. Windows sees those as one
+// name, so a save folder stays usable when it is copied there from a system that doesn't.
+bool takenIgnoringCase(const fs::path& parent, const fs::path& folder) {
+    const std::string wanted = foldedName(folder.filename());
+    std::error_code error;
+    int seen = 0;
+    for (fs::directory_iterator it(parent, error), end; !error && it != end && ++seen <= kMaxEntries; it.increment(error)) {
+        if (foldedName(it->path().filename()) == wanted) {
+            return true;
+        }
+    }
+    return false;
+}
+
 NewSaveFolder makeFolder(const fs::path& parent, std::string_view name) {
     NewSaveFolder result;
     std::error_code error;
@@ -86,8 +100,12 @@ NewSaveFolder makeFolder(const fs::path& parent, std::string_view name) {
         result.problem = "That name ends like the folders NeoTS2 makes for itself while it works.";
         return result;
     }
-    // Fails when the name is taken, also by a folder made a moment ago.
-    if (fs::exists(fs::symlink_status(folder, error)) || !fs::create_directory(folder, error)) {
+    if (fs::exists(fs::symlink_status(folder, error)) || takenIgnoringCase(parent, folder)) {
+        result.problem = "A save folder with that name already exists.";
+        return result;
+    }
+    // Fails also when a folder of that name was made a moment ago.
+    if (!fs::create_directory(folder, error)) {
         result.problem = error ? "The save folder can't be made: " + error.message() : "A save folder with that name already exists.";
         return result;
     }
