@@ -223,22 +223,22 @@ std::array<WarnedLine, kMaxWarnedLines> warned;
 std::size_t warnedCount = 0;
 } // namespace
 
-void warnOnce(std::string_view text, std::source_location where) {
+void warnOnce(std::string_view text, const char* file, unsigned line) {
     {
         std::lock_guard lock(warnedMutex);
         const auto end = warned.begin() + static_cast<std::ptrdiff_t>(warnedCount);
         const bool seen = std::any_of(warned.begin(), end, [&](const WarnedLine& w) {
-            return w.file == where.file_name() && w.line == where.line();
+            return w.file == file && w.line == line;
         });
         if (seen || warnedCount == kMaxWarnedLines) {
             return;
         }
-        warned[warnedCount++] = {where.file_name(), where.line()};
+        warned[warnedCount++] = {file, line};
     }
     // The file's name only: the folder it was built in says nothing useful and can hold a user name.
-    std::string_view file = where.file_name();
-    file = file.substr(file.find_last_of("/\\") + 1);
-    warning(std::format("{} ({}:{})", text, file, where.line()));
+    std::string_view name = file != nullptr ? file : "";
+    name = name.substr(name.find_last_of("/\\") + 1);
+    warning(std::format("{} ({}:{})", text, name, line));
 }
 
 void reset() {

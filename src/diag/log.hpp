@@ -2,7 +2,6 @@
 
 #include <cstddef>
 #include <filesystem>
-#include <source_location>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -35,8 +34,10 @@ inline void error(std::string_view text) { write(Level::Error, text); }
 inline void step(std::string_view text) { write(Level::Step, text); }
 // A warning written only the first time the line calling it is reached, with that file name and
 // line, for things only broken data should cause (a safety limit hit): the program carries on, and
-// the log isn't flooded when it happens every frame.
-void warnOnce(std::string_view text, std::source_location where = std::source_location::current());
+// the log isn't flooded when it happens every frame. The calling line comes from the compiler's
+// built-ins, because older clang, Apple's included, gives std::source_location::current() the line
+// of this declaration instead.
+void warnOnce(std::string_view text, const char* file = __builtin_FILE(), unsigned line = __builtin_LINE());
 
 // The last lines, oldest first. Takes no lock and allocates nothing until it copies them out. A
 // line being written at that moment may come out partly written.
