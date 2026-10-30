@@ -54,7 +54,8 @@ const scenegraph::DataValue* graphicMasks(const scenegraph::DataValue& footprint
 
 std::vector<RouteRect> footprintTile(const scenegraph::DataValue& footprint, int graphic, int tileX, int tileY) {
     std::vector<RouteRect> rects;
-    if (std::abs(tileX) > kMaxTileOffset || std::abs(tileY) > kMaxTileOffset) {
+    // No std::abs here: it is undefined for INT_MIN, which a broken file can give.
+    if (tileX < -kMaxTileOffset || tileX > kMaxTileOffset || tileY < -kMaxTileOffset || tileY > kMaxTileOffset) {
         diag::warnOnce("footprints: an object part more than 64 tiles from its lead gets no footprint");
         return rects;
     }

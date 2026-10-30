@@ -107,10 +107,11 @@ std::string separatesOverSkin(SceneBuilder& builder, Assets& assets, const SimLo
                               const std::string& bottom);
 
 // The bone (lowercase) a Sim's slot `slot` sits at: the Sim's SLOT resource names it through the
-// Sim's "Model - Bones" string table, both in its character file. Empty when unknown.
-std::string simSlotBone(const std::filesystem::path& characterFile, std::size_t slot);
+// Sim's "Model - Bones" string table, both in its character file. A file with no trees and no such
+// table reads the template person's, as the game does. Empty when unknown.
+std::string simSlotBone(Assets& assets, const std::filesystem::path& characterFile, std::size_t slot);
 // All of them, by slot, read at once. With `targeting`, the bones of its targeting slots instead.
-std::vector<std::string> simSlotBones(const std::filesystem::path& characterFile, bool targeting = false);
+std::vector<std::string> simSlotBones(Assets& assets, const std::filesystem::path& characterFile, bool targeting = false);
 
 // The animation a Sim of this age (SimLook::age) stands idle with, as the game's idle code names it
 // for each age (adults' when its age has none). Empty when unknown.

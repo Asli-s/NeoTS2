@@ -475,6 +475,29 @@ std::optional<std::string> Assets::objectString(std::uint32_t group, std::uint32
     }
 }
 
+std::vector<std::string> Assets::objectStrings(std::uint32_t group, std::uint32_t table) {
+    std::vector<std::string> values;
+    const auto* strings = objects_.find({types::kStringTable, group, table, 0});
+    if (strings == nullptr) {
+        return values;
+    }
+    try {
+        const auto parsed = str::parse(objects_.read(*strings));
+        for (const str::Entry* e : parsed.forLanguage(1)) {
+            values.push_back(e->value);
+        }
+    } catch (const std::exception&) {
+        values.clear();
+    }
+    return values;
+}
+
+std::optional<std::uint32_t> Assets::objectGroup(std::uint32_t guid) {
+    readObjectTypes();
+    const auto type = objectTypes_.find(guid);
+    return type == objectTypes_.end() ? std::nullopt : std::optional<std::uint32_t>(type->second.group);
+}
+
 std::string Assets::patternMaterial(const std::string& name, bool wall) const {
     const auto& scripted = wall ? scripts_.wallPatterns : scripts_.floorPatterns;
     if (const auto it = scripted.find(lower(name)); it != scripted.end()) {

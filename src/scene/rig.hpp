@@ -154,6 +154,8 @@ struct ScenePose {
     // Each lot object's actor's frozen clip (see Actor::Clip::frozen): its start (seconds) and the
     // pose it holds. Kept between calls.
     std::unordered_map<std::uint32_t, std::pair<double, std::vector<HeldJoint>>> frozen;
+    // Where each carried Sim's actor was placed as last posed (see Actor::carrier), by its object.
+    std::unordered_map<std::uint32_t, Transform> carried;
 };
 void poseActors(const Scene& scene, double seconds, ScenePose& out);
 

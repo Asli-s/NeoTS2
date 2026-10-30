@@ -366,6 +366,10 @@ struct Actor {
     std::function<float(int storey, float x, float y)> floorHeight;
     // A Sim's: the rig node each of its container slots sits at (-1: its own place).
     std::vector<int> slotNodes;
+    // A Sim another Sim carries: that Sim (its object id, 0 for none) and the container slot it is in.
+    // It hangs at that slot's bone as the carrier is posed, the way a held object does (see poseActors).
+    std::uint32_t carrier = 0;
+    std::size_t carrierSlot = 0;
     // A Sim's: the rig node each of its targeting slots sits at (-1: unknown).
     std::vector<int> targetNodes;
     // A Sim's look (Look At): asked as the actor is posed, once its clips are mixed and before its head's

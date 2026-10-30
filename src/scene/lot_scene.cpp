@@ -562,10 +562,10 @@ private:
             actor.object = sim->id;
             actor.basePose = standingPose(assets_, look.age);
             actor.floorHeight = floorHeight;
-            for (const auto& bone : simSlotBones(file->second)) {
+            for (const auto& bone : simSlotBones(assets_, file->second)) {
                 actor.slotNodes.push_back(actor.rig && !bone.empty() ? actor.rig->find(bone) : -1);
             }
-            for (const auto& bone : simSlotBones(file->second, true)) {
+            for (const auto& bone : simSlotBones(assets_, file->second, true)) {
                 actor.targetNodes.push_back(actor.rig && !bone.empty() ? actor.rig->find(bone) : -1);
             }
             holdBySim(*sim, file->second, actor, world);
@@ -602,7 +602,7 @@ private:
             }
             std::optional<int> result;
             if (container == sim.id) {
-                const std::string bone = simSlotBone(characterFile, static_cast<std::size_t>(o->second->state.data[3]));
+                const std::string bone = simSlotBone(assets_, characterFile, static_cast<std::size_t>(o->second->state.data[3]));
                 result = actor.rig && !bone.empty() ? actor.rig->find(bone) : -1;
             } else {
                 result = self(self, container, depth + 1);

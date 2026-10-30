@@ -510,9 +510,10 @@ else()
         list(GET sdk_dxc 0 NEOTS2_DXC)
         set(NEOTS2_SHADER_COMPILER ${NEOTS2_DXC})
     endif()
-    # DXC's release archives do not include a macOS executable. Shaderc's glslc accepts the
-    # same HLSL sources and produces the SPIR-V that SDL's Metal backend loads on macOS.
-    if(NOT NEOTS2_SHADER_COMPILER AND APPLE)
+    # DXC's release archives have no macOS executable and most Linux systems don't package it.
+    # Shaderc's glslc accepts the same HLSL sources and makes the SPIR-V that SDL's Vulkan backend
+    # loads, and that SPIRV-Cross turns into MSL for Metal on macOS.
+    if(NOT NEOTS2_SHADER_COMPILER AND NOT WIN32)
         find_program(NEOTS2_GLSLC glslc)
         if(NEOTS2_GLSLC)
             set(NEOTS2_SHADER_COMPILER ${NEOTS2_GLSLC})
@@ -747,7 +748,7 @@ else()
         target_include_directories(header_check PRIVATE ${CMAKE_BINARY_DIR}/generated)
         add_dependencies(header_check neots2_version)
     else()
-        message(STATUS "SDL3, a shader compiler (dxc; glslc on macOS), or spirv-cross on macOS not found: the renderer and the neots2 app are not built")
+        message(STATUS "SDL3, a shader compiler (dxc, or glslc off Windows), or spirv-cross on macOS not found: the renderer and the neots2 app are not built")
     endif()
 
     if(SDL3_FOUND)

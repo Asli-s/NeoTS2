@@ -557,6 +557,40 @@ void animateStopByNameFallsBackToTheAdultClip() {
     CHECK(teen.overlays.empty());
 }
 
+// Animate Stop list 0x80 names the clip as Animate Overlay names it, for me: an adult putting a
+// toddler down stops the carry pose it laid on the toddler. Only a Sim's animations stop this way.
+void animateStopSpecialListNamesTheClipForMe() {
+    Instruction stop;
+    stop.opcode = 0x006C;
+    stop.trueTarget = T;
+    stop.falseTarget = E;
+    const std::uint8_t bytes[] = {0, 0, 0, owner::kStackObjectId, 0, 0, 0x80, 0, 0};
+    std::copy(std::begin(bytes), std::end(bytes), stop.operands.begin());
+    MemoryCodeSource code;
+    code.addStrings(ts2::sim::kGlobalGroup, 0x81, {"p2a-carry"});
+    code.addStrings(ts2::sim::kGlobalGroup, 0x89, {"p-other"});
+    code.addStrings(kObjectGroup, 0x80, {"own-list"});
+    code.add(kObjectGroup, 0x1000, bhav({stop}));
+    ts2::sim::World world;
+    world.setAnimationLengths([](const std::string&) -> std::optional<float> { return 1000.0f; });
+    auto& adult = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    adult.personData[0x3A] = 30;
+    auto& toddler = world.create(kObjectGroup, typed(0x51515152, ts2::sim::kPersonType));
+    toddler.personData[0x3A] = 2;
+    ts2::sim::PlayingOverlay overlay;
+    overlay.name = "p2a-carry";
+    overlay.priority = 2;
+    overlay.plays = -1;
+    toddler.overlays.push_back(overlay);
+    Vm vm(code, {}, &world);
+    adult.thread.stackObjectId = toddler.id;
+    CHECK(vm.run(adult, kObjectGroup, 0x1000).outcome == Outcome::True);
+    CHECK(toddler.overlays.empty());
+    auto& chair = world.create(kObjectGroup, typed(kFridgeGuid));
+    adult.thread.stackObjectId = chair.id;
+    CHECK(vm.run(adult, kObjectGroup, 0x1000).outcome == Outcome::Error);
+}
+
 // Animate Object plays its clip once, or temp 1 times with byte 2 flag 0x20, where -1 (the
 // plumbob's Main) keeps it playing until Animate Stop gives it the time it played. A count of 0 or
 // below -1 is an error.
@@ -722,6 +756,7 @@ std::vector<Test> vmAnimationTests() {
         {"Animate Sim events reach their tree", animateSimEventsReachTheirTree},
         {"Animate Stop ends overlays by kind and priority", animateStopEndsOverlaysByKindAndPriority},
         {"Animate Stop by name falls back to the adult clip", animateStopByNameFallsBackToTheAdultClip},
+        {"Animate Stop list 0x80 names the clip for me", animateStopSpecialListNamesTheClipForMe},
         {"Animate Sim flips from temp 3", animateSimFlipsFromTemp3},
         {"Animate Sim clips fade to fit", animateFadesFitTheClip},
         {"Animate Sim carries on the saved clip", animateSimCarriesOnTheSavedClip},

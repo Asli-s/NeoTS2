@@ -105,6 +105,10 @@ public:
     // Entry `entry` (US English) of string table `table` in the objects' code group `group`. Nullopt
     // when there is none.
     [[nodiscard]] std::optional<std::string> objectString(std::uint32_t group, std::uint32_t table, std::size_t entry);
+    // All of that table's entries (US English), none when there is no such table.
+    [[nodiscard]] std::vector<std::string> objectStrings(std::uint32_t group, std::uint32_t table);
+    // The code group the object type `guid` is defined in. Nullopt when no objects package has it.
+    [[nodiscard]] std::optional<std::uint32_t> objectGroup(std::uint32_t guid);
 
     // The material a lot's floor or wall pattern name shows: a built-in pattern from the catalog
     // scripts, or a catalog pattern by its GUID in hex.

@@ -1,0 +1,76 @@
+# Builds the Linux and macOS release downloads: on every v* tag, and by hand from the Actions page
+# (Run workflow) to try them before a release. The Windows zip is made locally by tools/release.ps1.
+# Each job tests its build and keeps its download as the run's artifact, to attach to the release.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  linux:
+    if: github.repository == 'Asli-s/NeoTS2'
+    name: Linux x86_64
+    # The oldest Ubuntu GitHub offers with a new enough compiler, so the download runs on as many
+    # systems as possible (glibc 2.39 or newer).
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # A release build names its commit and checks it against the release tags.
+          fetch-depth: 0
+      - name: Install the build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build glslc patchelf libfreetype-dev \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev libx11-dev libxext-dev libxrandr-dev \
+            libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxtst-dev libxkbcommon-dev libwayland-dev \
+            libdecor-0-dev libdrm-dev libgbm-dev libgl1-mesa-dev libegl1-mesa-dev libdbus-1-dev \
+            libibus-1.0-dev libudev-dev
+      # Ubuntu 24.04 has no SDL 3 package, so it is built here, the same version the Windows download ships.
+      - name: Build SDL 3
+        run: |
+          git clone --depth 1 --branch release-3.4.16 https://github.com/libsdl-org/SDL.git "$RUNNER_TEMP/sdl"
+          cmake -S "$RUNNER_TEMP/sdl" -B "$RUNNER_TEMP/sdl/build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/sdl3"
+          cmake --build "$RUNNER_TEMP/sdl/build"
+          cmake --install "$RUNNER_TEMP/sdl/build"
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DNEOTS2_RELEASE=ON \
+            -DSDL3_DIR="$RUNNER_TEMP/sdl3/lib/cmake/SDL3"
+          cmake --build build --target neots2 neots2-launcher vm_tests --parallel 4
+      - name: Test
+        run: build/vm_tests
+      - name: Package
+        run: sh tools/package_linux.sh build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: build/NeoTS2-*-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  macos:
+    if: github.repository == 'Asli-s/NeoTS2'
+    name: macOS, Apple Silicon
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install the build tools
+        run: brew install cmake sdl3 shaderc spirv-cross freetype
+      - name: Build
+        run: |
+          cmake -S . -B build-macos -DCMAKE_BUILD_TYPE=Release -DNEOTS2_RELEASE=ON
+          cmake --build build-macos --target neots2 neots2-launcher vm_tests --parallel 3
+      - name: Test
+        run: build-macos/vm_tests
+      - name: Package
+        run: sh tools/package_macos.sh build-macos
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: build-macos/NeoTS2-*-macos-arm64.zip
+          if-no-files-found: error

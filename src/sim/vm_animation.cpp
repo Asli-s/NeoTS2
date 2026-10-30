@@ -417,7 +417,7 @@ bool Execution::animateObject(const bhav::Instruction& in, Frame& f) {
 //   byte 2     flags: 0x01 flipped, 0x02 blend out (233 ms), 0x20 short blend out (70 ms),
 //              0x04 entry in a param, 0x08 flipped if temp 3, 0x40 flipped or not
 //   byte 3, 4-5  the object whose animations stop (owner, data)
-//   byte 6     list, for stopping by name
+//   byte 6     list, for stopping by name (0x80 named as Animate Overlay names it)
 //   byte 7     what stops: 0 by name, 1 overlays, 2 full-body animations, 3 all, 4-11 by category
 //              (carry, idle, gesture, reaction, normal, facial, facial idle, receptivity, see
 //              content::animationCategory). An entry without a kind is a carry pose or a normal
@@ -442,7 +442,13 @@ bool Execution::animateStop(const bhav::Instruction& in, Frame& f) {
         const auto entry = static_cast<std::uint16_t>(o[0] | o[1] << 8);
         const std::int16_t index = (o[2] & 0x04) ? slotAt(f.params, entry, "param") : static_cast<std::int16_t>(entry);
         const std::uint8_t list = o[6];
-        if (list == content::animation_list::kSocial && target->isPerson()) {
+        if (list == kSpecialAnimationList) {
+            // Named as Animate Overlay names it, for me. Only a Sim's animations stop this way.
+            if (!target->isPerson()) {
+                throw Stop{Outcome::Error, "not a person", "animation list 0x80"};
+            }
+            name = specialAnimationName(me(), static_cast<std::uint16_t>(index), nullptr);
+        } else if (list == content::animation_list::kSocial && target->isPerson()) {
             // Named as the start names it, for the Sim whose clips stop and its interaction's partner.
             name = socialAnimation(f, *target, static_cast<std::uint16_t>(index));
         } else {

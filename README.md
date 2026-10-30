@@ -81,6 +81,9 @@ NeoTS2 doesn't save games yet, and when it starts with a save folder:
 On Windows, download the newest release from the [Releases page](https://github.com/Asli-s/NeoTS2/releases),
 extract the whole zip, and start **`neots2-launcher.exe`**. On an Apple Silicon Mac, download the
 `macos-arm64` zip, move **NeoTS2.app** somewhere permanent (such as Applications), and open it.
+On Linux (x86_64), download the `linux-x86_64` archive, extract it and run **`./neots2-launcher`**.
+It needs a Vulkan driver. The macOS and Linux downloads are new and barely tested yet: reports are
+very welcome.
 The launcher finds your install and your save folders. Choose them, or make a new save folder with
 **New save folder...**, and press **Play**.
 
@@ -147,6 +150,25 @@ tools/package_macos.sh build-macos
 The macOS build uses Shaderc (`glslc`) to compile the project's HLSL shaders to SPIR-V, then
 SPIRV-Cross to make the MSL shaders that SDL 3 loads with its Metal backend. DXC's official binary
 releases do not provide a macOS executable.
+
+### Linux
+
+As on macOS, NeoTS2 reads the data files of your own Windows Ultimate Collection installation,
+copied to the Linux machine, and draws with Vulkan. On Ubuntu 26.04 (or any system with an SDL 3
+package), install the build dependencies and build:
+
+```
+sudo apt install cmake ninja-build pkg-config libsdl3-dev libfreetype-dev glslc
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target neots2 neots2-launcher
+```
+
+Start `build/neots2-launcher`. Without DXC the shaders are compiled to SPIR-V by Shaderc (`glslc`).
+To make the `linux-x86_64` download for a release (needs `patchelf`):
+
+```
+tools/package_linux.sh build
+```
 
 ### OpenGL 2 renderer
 

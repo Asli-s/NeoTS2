@@ -276,6 +276,8 @@ private:
         // Keeps where the Sim stands now as the start place of each of its clips that has none yet (its
         // own animation unless it walks, and its overlays), and forgets the clips no longer drawn.
         void noteStarts(const ts2::sim::SimObject& object, const ts2::scene::Transform& place, bool walks);
+        // Where the Sim last hung while another Sim carried it (see Actor::carrier), none while it isn't carried.
+        std::optional<ts2::scene::Transform> carriedAt;
         // Where and on which storey its lights were last picked.
         std::array<float, 12> litPlace{};
         int litLevel = -1;

@@ -553,6 +553,12 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
     // PlacedObject::bones). Each rig's node names are hashed once per call, on its first lookup.
     std::unordered_map<const Rig*, std::vector<std::uint32_t>> nameHashes;
     std::vector<std::pair<const Actor*, std::vector<Transform>>> objectNodes;
+    // Where this call placed each carried Sim (see Actor::carrier). Any other stands at its own place.
+    std::unordered_map<const Actor*, Transform> carriedNow;
+    const auto placeOf = [&](const Actor& actor) {
+        const auto found = carriedNow.find(&actor);
+        return found != carriedNow.end() ? found->second : actor.place;
+    };
     const auto boneIn = [&](const Actor& actor, const std::vector<Transform>& nodes, std::uint32_t bone) -> std::optional<Transform> {
         auto [hashes, first] = nameHashes.try_emplace(actor.rig.get());
         if (first) {
@@ -563,7 +569,7 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
         }
         for (std::size_t i = 0; i < hashes->second.size() && i < nodes.size(); ++i) {
             if (bone != 0 && hashes->second[i] == bone) {
-                return actor.place * nodes[i];
+                return placeOf(actor) * nodes[i];
             }
         }
         return std::nullopt;
@@ -591,6 +597,7 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
     std::unordered_map<std::uint32_t, std::vector<HeldJoint>> held;
     std::unordered_map<std::uint32_t, std::pair<double, std::vector<HeldJoint>>> frozen;
     std::unordered_map<std::uint32_t, float> headings;
+    std::unordered_map<std::uint32_t, Transform> carried;
     std::unordered_set<std::size_t> inHand;
     for (const auto& actor : scene.actors) {
         for (const auto& h : actor.held) {
@@ -622,10 +629,43 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
             }
         }
     }
-    for (const auto& actor : scene.actors) {
+    // A carried Sim is posed after its carrier and hangs at the bone of the carrier's slot it is in,
+    // as that bone is posed now. A carrier missing from the scene leaves it at its own place.
+    const auto carrierOf = [&](const Actor& actor) -> const Actor* {
+        if (actor.carrier == 0) {
+            return nullptr;
+        }
+        const auto found = std::find_if(scene.actors.begin(), scene.actors.end(), [&](const Actor& a) { return a.object == actor.carrier; });
+        return found != scene.actors.end() && &*found != &actor ? &*found : nullptr;
+    };
+    // Carries nest only so deep, so a loop of carriers in a broken save still ends.
+    constexpr int kMaxCarryDepth = 4;
+    std::vector<std::pair<int, std::size_t>> order;  // carry depth, actor
+    for (std::size_t i = 0; i < scene.actors.size(); ++i) {
+        int depth = 0;
+        for (const Actor* c = carrierOf(scene.actors[i]); c != nullptr && depth < kMaxCarryDepth; c = carrierOf(*c)) {
+            ++depth;
+        }
+        order.emplace_back(depth, i);
+    }
+    std::stable_sort(order.begin(), order.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (const auto& [depth, actorIndex] : order) {
+        const Actor& actor = scene.actors[actorIndex];
         if (!actor.rig) {
             continue;
         }
+        if (const Actor* carrier = carrierOf(actor); carrier != nullptr && actor.carrierSlot < carrier->slotNodes.size()) {
+            const auto carrierIndex = static_cast<std::size_t>(carrier - scene.actors.data());
+            const int node = carrier->slotNodes[actor.carrierSlot];
+            const auto nodes = std::find_if(out.nodes.begin(), out.nodes.begin() + static_cast<std::ptrdiff_t>(posed),
+                                            [&](const auto& n) { return n.first == carrierIndex; });
+            if (node >= 0 && nodes != out.nodes.begin() + static_cast<std::ptrdiff_t>(posed) &&
+                static_cast<std::size_t>(node) < nodes->second.size()) {
+                carriedNow[&actor] = placeOf(*carrier) * nodes->second[static_cast<std::size_t>(node)];
+                carried[actor.object] = carriedNow[&actor];
+            }
+        }
+        const Transform place = placeOf(actor);
         if (!actor.clips.empty()) {
             // A frozen clip holds the pose the actor was last posed in before it started.
             const std::vector<HeldJoint>* still = nullptr;
@@ -645,7 +685,7 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
                 if (const auto was = out.held.find(actor.object); was != out.held.end()) {
                     joints = std::move(was->second);
                 }
-                const float heading = std::atan2(actor.place.m[4], actor.place.m[0]);
+                const float heading = std::atan2(place.m[4], place.m[0]);
                 headings[actor.object] = heading;
                 if (const auto was = out.heldHeading.find(actor.object); was != out.heldHeading.end()) {
                     turnHeldRoot(*actor.rig, clips, joints, was->second - heading);
@@ -675,7 +715,7 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
             auto& joints = out.joints.emplace_back(s.instance, std::vector<Transform>{}).second;
             skinMatrices(scene.meshes[static_cast<std::size_t>(mesh)], s.nodes, *actor.rig, playing, world, joints);
             // The body goes where the actor stands now (it walks).
-            out.places.emplace_back(s.instance, actor.place);
+            out.places.emplace_back(s.instance, place);
         }
         if (posed == out.nodes.size()) {
             out.nodes.emplace_back();
@@ -684,13 +724,14 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
         out.nodes[posed++].second.assign(world.begin(), world.end());
         for (const auto& h : actor.held) {
             const bool known = h.node >= 0 && static_cast<std::size_t>(h.node) < world.size();
-            out.places.emplace_back(h.instance, known ? actor.place * world[static_cast<std::size_t>(h.node)] : actor.place);
+            out.places.emplace_back(h.instance, known ? place * world[static_cast<std::size_t>(h.node)] : place);
         }
     }
     out.nodes.resize(posed);
     out.held = std::move(held);
     out.heldHeading = std::move(headings);
     out.frozen = std::move(frozen);
+    out.carried = std::move(carried);
 }
 
 } // namespace ts2::scene

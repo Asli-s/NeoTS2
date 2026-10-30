@@ -499,19 +499,29 @@ std::string separatesOverSkin(SceneBuilder& builder, Assets& assets, const SimLo
     return builder.layeredMaterial(name, bottom, layers) >= 0 ? name : std::string();
 }
 
-std::string simSlotBone(const std::filesystem::path& characterFile, std::size_t slot) {
-    const auto bones = simSlotBones(characterFile);
+namespace {
+
+// The type new Sims are made from. Its own resources serve Sims whose files carry no trees.
+constexpr std::uint32_t kTemplatePersonGuid = 0x7FD96B54;
+constexpr std::uint32_t kBoneNames = 0x90;
+
+} // namespace
+
+std::string simSlotBone(Assets& assets, const std::filesystem::path& characterFile, std::size_t slot) {
+    const auto bones = simSlotBones(assets, characterFile);
     return slot < bones.size() ? bones[slot] : std::string();
 }
 
-std::vector<std::string> simSlotBones(const std::filesystem::path& characterFile, bool targeting) {
+std::vector<std::string> simSlotBones(Assets& assets, const std::filesystem::path& characterFile, bool targeting) {
     try {
         dbpf::Package package{characterFile};
         const dbpf::IndexEntry* definition = nullptr;
+        bool trees = false;
         for (const auto& e : package.entries()) {
             if (e.key.type == types::kObjectDefinition) {
                 definition = &e;
             }
+            trees = trees || e.key.type == types::kBehavior;
         }
         if (definition == nullptr) {
             return {};
@@ -521,18 +531,28 @@ std::vector<std::string> simSlotBones(const std::filesystem::path& characterFile
         for (const auto& e : package.entries()) {
             if (e.key.type == types::kSlots && e.key.instance == slotsId) {
                 slots = &e;
-            } else if (e.key.type == types::kStringTable && e.key.instance == 0x90) {
+            } else if (e.key.type == types::kStringTable && e.key.instance == kBoneNames) {
                 names = &e;
             }
         }
-        if (slots == nullptr || names == nullptr) {
+        // A file with no trees reads its strings from the template person, as its code does.
+        const std::optional<std::uint32_t> templateGroup =
+            names == nullptr && !trees ? assets.objectGroup(kTemplatePersonGuid) : std::nullopt;
+        if (slots == nullptr || (names == nullptr && !templateGroup)) {
             return {};
         }
         const auto parsed = slot::parse(package.read(*slots));
-        const auto table = str::parse(package.read(*names));
-        const auto entries = table.forLanguage(1);
+        std::vector<std::string> entries;
+        if (names != nullptr) {
+            const auto table = str::parse(package.read(*names));
+            for (const str::Entry* e : table.forLanguage(1)) {
+                entries.push_back(e->value);
+            }
+        } else {
+            entries = assets.objectStrings(*templateGroup, kBoneNames);
+        }
         const auto boneName = [&](std::int32_t b) {
-            return b >= 0 && static_cast<std::size_t>(b) < entries.size() ? lower(entries[static_cast<std::size_t>(b)]->value) : std::string();
+            return b >= 0 && static_cast<std::size_t>(b) < entries.size() ? lower(entries[static_cast<std::size_t>(b)]) : std::string();
         };
         std::vector<std::string> bones;
         if (targeting) {

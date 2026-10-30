@@ -391,15 +391,32 @@ SimFrame simFrame(const ts2::sim::SimObject& sim, double nowMs) {
 // A Sim in an object's slot (a seat, a stair step) is drawn where the slot's bone is, turned as it
 // is, as the game draws it: a stair's slots stand a step higher each and face up or down the stair.
 // `slotAt` gives where an object's slot is (see LotLife::slotPlace). A slot of a multi-tile part
-// drawn by its lead (the far side of a double bed) is placed by `partSlot`.
+// drawn by its lead (the far side of a double bed) is placed by `partSlot`. A Sim in another Sim's
+// slot is carried: posing hangs it at that Sim's slot bone (see Actor::carrier), and until then it
+// stands where it was last posed (`pose`), else at its carrier's place.
 void placeSim(ts2::scene::Actor& actor, const ts2::sim::SimObject& sim, const SimFrame& frame, const ts2::scene::Scene& scene,
               const std::function<std::optional<ts2::scene::Transform>(const ts2::scene::PlacedObject&, std::size_t slot)>& slotAt,
-              const std::function<std::optional<ts2::scene::Transform>(std::int16_t part, std::size_t slot)>& partSlot) {
+              const std::function<std::optional<ts2::scene::Transform>(std::int16_t part, std::size_t slot)>& partSlot,
+              const ts2::scene::ScenePose* pose) {
     constexpr std::size_t kContainerField = 2, kSlotField = 3;
+    actor.carrier = 0;
     if (!actor.floorHeight || sim.x == ts2::sim::kOffLot || sim.y == ts2::sim::kOffLot) {
         return;
     }
     if (const std::int16_t holder = sim.data[kContainerField]; holder > 0 && sim.data[kSlotField] >= 0) {
+        const auto carrier = std::find_if(scene.actors.begin(), scene.actors.end(),
+                                          [&](const ts2::scene::Actor& a) { return a.object == static_cast<std::uint32_t>(holder); });
+        if (carrier != scene.actors.end() && &*carrier != &actor) {
+            actor.carrier = carrier->object;
+            actor.carrierSlot = static_cast<std::size_t>(sim.data[kSlotField]);
+            actor.place = carrier->place;
+            if (pose != nullptr) {
+                if (const auto last = pose->carried.find(actor.object); last != pose->carried.end()) {
+                    actor.place = last->second;
+                }
+            }
+            return;
+        }
         const auto container = std::find_if(scene.placedObjects.begin(), scene.placedObjects.end(),
                                             [&](const ts2::scene::PlacedObject& c) { return c.object == static_cast<std::uint32_t>(holder); });
         const auto slot = static_cast<std::size_t>(sim.data[kSlotField]);
@@ -1370,6 +1387,27 @@ void LotLife::update(double ms, ts2::scene::Scene& scene) {
                 }
             }
             const SimFrame frame = simFrame(*object, nowMs);
+            // As the game places each clip, one playing as the Sim snaps into a carrier's slot stays where it
+            // was in the world, and from then on hangs from the slot's bone with the Sim: its start place
+            // moves as the bone does.
+            constexpr std::size_t kContainerField = 2;
+            const ts2::scene::Transform* hung = nullptr;
+            if (pose_ != nullptr && object->data[kContainerField] > 0) {
+                if (const auto found = pose_->carried.find(actor.object); found != pose_->carried.end()) {
+                    hung = &found->second;
+                }
+            }
+            if (hung != nullptr) {
+                if (own.carriedAt) {
+                    const ts2::scene::Transform moved = *hung * own.carriedAt->rigidInverse();
+                    for (auto& s : own.started) {
+                        s.place = moved * s.place;
+                    }
+                }
+                own.carriedAt = *hung;
+            } else {
+                own.carriedAt.reset();
+            }
             const StartedAt startedAt = [&own](const std::string& name, double startMs) -> std::optional<ts2::scene::Transform> {
                 for (const auto& s : own.started) {
                     if (s.startMs == startMs && s.name == name) {
@@ -1416,7 +1454,7 @@ void LotLife::update(double ms, ts2::scene::Scene& scene) {
             }
             placeSim(
                 actor, *object, frame, scene, [&](const ts2::scene::PlacedObject& p, std::size_t slot) { return slotPlace(p, slot, scene); },
-                [&](std::int16_t part, std::size_t slot) { return partSlot(part, slot, scene); });
+                [&](std::int16_t part, std::size_t slot) { return partSlot(part, slot, scene); }, pose_);
             own.noteStarts(*object, actor.place, walking);
             setSimStorey(scene, actor, object->level);
             // The game picks a Sim's lights afresh as it moves.
@@ -1851,10 +1889,10 @@ bool LotLife::addCreatedSim(ts2::scene::Scene& scene, const ts2::sim::SimObject&
     actor.basePose = ts2::scene::standingPose(assets_, look.age);
     actor.lotFrame = lotFrame_;
     actor.floorHeight = scene.floorHeight;
-    for (const auto& bone : file ? ts2::scene::simSlotBones(*file) : std::vector<std::string>{}) {
+    for (const auto& bone : file ? ts2::scene::simSlotBones(assets_, *file) : std::vector<std::string>{}) {
         actor.slotNodes.push_back(actor.rig && !bone.empty() ? actor.rig->find(bone) : -1);
     }
-    for (const auto& bone : file ? ts2::scene::simSlotBones(*file, true) : std::vector<std::string>{}) {
+    for (const auto& bone : file ? ts2::scene::simSlotBones(assets_, *file, true) : std::vector<std::string>{}) {
         actor.targetNodes.push_back(actor.rig && !bone.empty() ? actor.rig->find(bone) : -1);
     }
     auto& instances = createdSims_[sim.id];

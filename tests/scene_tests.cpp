@@ -796,6 +796,35 @@ void objectActorsPoseEveryJointFromTheirRig() {
     CHECK(std::abs(p[1]) < 1e-5f && std::abs(p[2] - 2) < 1e-5f);
 }
 
+// A carried Sim hangs at the bone of its carrier's slot as the carrier is posed in the same call,
+// even when it comes first in the scene. Carriers that carry each other still get posed.
+void carriedSimsHangAtTheCarriersSlotBone() {
+    using ts2::scene::Transform;
+    auto rig = std::make_shared<ts2::scene::Rig>();
+    rig->nodes.push_back({"root", -1, {0, 0, 0}, {0, 0, 0, 1}});
+    rig->nodes.push_back({"r_hand_grip", 0, {0.25f, 0, 1}, {0, 0, 0, 1}});
+    ts2::scene::Scene scene;
+    auto& carried = scene.actors.emplace_back();
+    carried.object = 2;
+    carried.rig = rig;
+    carried.carrier = 1;
+    carried.carrierSlot = 0;
+    carried.place = Transform::at(9, 9, 0, 0);
+    auto& carrier = scene.actors.emplace_back();
+    carrier.object = 1;
+    carrier.rig = rig;
+    carrier.slotNodes = {1};
+    carrier.place = Transform::at(5, 0, 0, 0);
+    ts2::scene::ScenePose pose;
+    ts2::scene::poseActors(scene, 0, pose);
+    CHECK(pose.carried.size() == 1 && pose.carried.contains(2));
+    const Transform& at = pose.carried.at(2);
+    CHECK(std::abs(at.m[3] - 5.25f) < 1e-5f && std::abs(at.m[7]) < 1e-5f && std::abs(at.m[11] - 1) < 1e-5f);
+    scene.actors[1].carrier = 2;
+    ts2::scene::poseActors(scene, 0, pose);
+    CHECK(pose.nodes.size() == 2);
+}
+
 // A clip played at a negative speed runs from its end back to its start (a chat's talk-to-idle
 // transition plays its idle-to-talk clip backwards), on its own and among layered clips.
 void backwardClipsPlayFromTheirEnd() {
@@ -1404,6 +1433,7 @@ std::vector<Test> sceneTests() {
         {"Looks are replaced, stopped and end at the cone", looksAreReplacedStoppedAndEndAtTheCone},
         {"A lot object's actor poses every joint from its own rig", objectActorsPoseEveryJointFromTheirRig},
         {"Backward clips play from their end", backwardClipsPlayFromTheirEnd},
+        {"Carried Sims hang at the carrier's slot bone", carriedSimsHangAtTheCarriersSlotBone},
         {"scene transforms turn and move", sceneTransformsTurnAndMove},
         {"scene quads face their normal", sceneQuadsFaceTheirNormal},
         {"scene hip roof rises to its ridge", sceneHipRoofRisesToItsRidge},
