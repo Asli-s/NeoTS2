@@ -20,6 +20,11 @@ void tipsArePlacedAsTheGame() {
     CHECK(is(placeTip(18, 500, 74, 24, hd), 26, 488, 74, 24));      // at the left edge: to the right
     CHECK(is(placeTip(500, 30, 74, 24, hd), 463, 38, 74, 24));      // near the top: below
     CHECK(is(placeTip(500, 500, 10, 4, hd), 491, 483, 18, 9));      // the frame's smallest box
+    // A tip over a Sim in the world keeps 28 pixels from its spot and 8 from the screen's top left.
+    const std::array<int, 4> world{8, 8, 1904, 1064};
+    CHECK(is(placeTip(1200, 500, 120, 23, world, 28), 1140, 449, 120, 23));
+    CHECK(is(placeTip(30, 500, 120, 23, world, 28), 8, 449, 120, 23));
+    CHECK(is(placeTip(1200, 40, 120, 23, world, 28), 1140, 68, 120, 23));  // near the top: below
 }
 
 // Up to 12 entries share one pie. With more, each page shows "More..." and 11 of them, and the last

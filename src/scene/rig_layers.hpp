@@ -34,11 +34,14 @@ struct LayeredClip {
     std::optional<Transform> objectFrame;
     // Where a bone of the clip's IK object is, in the rig's space (see LimbSource::objectBone).
     std::function<std::optional<Transform>(std::uint32_t bone)> objectBone;
-    // For an animation fading out after the Sim was placed anew (onto a bed's slot as getting in hands
-    // over to lying there): the move from where the Sim stood while it played to where it stands now,
-    // in the rig's space. Its limb targets and poles in the skeleton's space move by it, so they stay
-    // where they were in the world, as the game's do (see LimbSource::rootMove).
+    // For a clip with a root joint, the move from where the Sim stood as it started to where it stands
+    // now, in the rig's space. Its root joints and its limb targets and poles in the skeleton's space
+    // move by it, so the clip plays on where it started in the world while the Sim is placed anew
+    // (snapped to a slot, or walking off), as the game's clips do (see LimbSource::rootMove).
     std::optional<Transform> placeMove;
+    // In place of `animation`: a pose to hold, one per rig node (a Sim's pose as it was at some moment,
+    // see Actor::Clip::frozen). It moves every joint and has no limbs of its own.
+    const std::vector<HeldJoint>* pose = nullptr;
 };
 
 // Poses a rig from several animations as the game mixes them, joint by joint: the highest layer

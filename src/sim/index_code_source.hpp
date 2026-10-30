@@ -7,6 +7,7 @@
 #include <optional>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace ts2::sim {
 
@@ -24,6 +25,7 @@ public:
     const ObjectType* addMadeObjectType(ObjectType type) override;
     const std::vector<std::uint32_t>& objectTypeGuids() override;
     const std::map<std::string, std::string>* ageData(std::uint32_t group) override;
+    std::optional<std::vector<std::uint8_t>> characterResource(std::uint32_t type, std::uint32_t group) override;
     [[nodiscard]] std::optional<std::string> string(std::uint32_t group, std::uint16_t instance,
                                       std::size_t index) override;
     [[nodiscard]] std::optional<std::string> stringDescription(std::uint32_t group, std::uint16_t instance, std::size_t index) override;
@@ -54,6 +56,11 @@ private:
     std::unordered_map<std::uint64_t, std::uint32_t> multiTileMasters_;
     std::unordered_map<std::uint64_t, std::optional<std::vector<objf::Function>>> objectFunctions_;
     bool objectTypesLoaded_ = false;
+    std::unordered_set<std::uint32_t> groupsWithTrees_;
+    std::unordered_set<std::uint32_t> simGroups_;  // groups of Sims' own types
+    // The group a type's own trees, constants and object functions are read from: its own, or for a
+    // Sim whose character file carries no trees, the template person's, as the game does.
+    std::uint32_t privateCodeGroup(std::uint32_t group);
     const std::vector<std::string>& strings(std::uint32_t type, std::uint32_t group, std::uint16_t instance,
                                            bool descriptions = false);
     // Each table's US English texts, by (type, group, instance).

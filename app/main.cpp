@@ -1,17 +1,18 @@
 // NeoTS2: opens a saved lot in a window, or shows the game's main menu.
 //   neots2 <install folder> --menu [--user <user folder>] [--size w h | --fit-screen] [--preview n]
 //          [--play n [--bin families|lots|options|chooser|quit] [--lot id] [--click x y] [--card x y]]
-//          [--hover x y] [--ui-click x y | --ui-right-click x y | --ui-hover x y
+//          [--hover x y (on the neighborhood, or the lot before the picture)] [--ui-click x y | --ui-right-click x y | --ui-hover x y
 //          (on the lot's panels before the picture, repeatable)]
 //          [--shot <out.png>] [--seed n (the neighborhood ground's variants, so pictures repeat)]
 //          [--renderer sdlgpu|gl2 (what draws: SDL's GPU API, or OpenGL 2.1)]
 //          [--smooth-follow (the camera glides after a followed Sim, not in the original game)]
 //   neots2 <install folder> <lot.package> [--shot <out.png> [yaw pitch distance]]
-//          [--seed n (a neighborhood's ground variants, so pictures repeat)]
+//          [--seed n (the lot's random draws when it has no saved random state, so runs repeat)]
 //          [--renderer sdlgpu|gl2 (what draws: SDL's GPU API, or OpenGL 2.1)]
 //          [--walls up|cutaway|down] [--level n (1: the ground floor)] [--target x y z] [--roofs off]
 //          [--time seconds (into the Sims' animations, for --shot)]
 //          [--choose object choice (the selected Sim's pick from the object's menu, by its place)]
+//          [--numbers <out.txt> (the lot run for --time seconds, its poses written each second, nothing drawn)]
 // Mouse: middle-drag turns, right-drag pans, the wheel zooms. Keys: WASD or arrows pan, Q/E or
 // comma/period turn a quarter, Z/X or +/- zoom, Page Up/Down change storey, 1/2/3 or Tab walls
 // up/cutaway/down, R roofs on/off. --shot draws one frame to a file and exits.
@@ -35,6 +36,7 @@
 #include "lot_light.hpp"
 #include "lot_view.hpp"
 #include "orbit.hpp"
+#include "pose_numbers.hpp"
 #include "paths/game_folders.hpp"
 #include "paths/names.hpp"
 #include "paths/save_folders.hpp"
@@ -208,6 +210,7 @@ const char* wallViewName(WallView v) {
 
 struct Options {
     const char* shot = nullptr;
+    const char* numbers = nullptr;  // a file for the lot's poses as numbers (--numbers), in place of a window
     bool camera = false;
     float yaw = 0, pitch = 0, distance = 0;
     WallView walls = WallView::Up;
@@ -242,6 +245,8 @@ bool parseOptions(int argc, char** argv, Options& o) {
                 o.distance = std::stof(argv[i + 3]);
                 i += 3;
             }
+        } else if (arg == "--numbers" && i + 1 < argc) {
+            o.numbers = argv[++i];
         } else if (arg == "--walls" && i + 1 < argc) {
             const std::string_view v = argv[++i];
             if (v == "up") {
@@ -499,7 +504,7 @@ int main(int argc, char** argv) {
             lightBase = app::lightLot(assets, builder.scene(), lot, utf8Path(argv[2]), lightState);
             ts2::diag::info(std::format("{} objects, {} walls, {} roofs, {} terrain paints", stats.objects, stats.walls, stats.roofs,
                                         stats.terrainPaints));
-            if (auto sim = app::loadSimulation(utf8Path(argv[1]), utf8Path(argv[2]))) {
+            if (auto sim = app::loadSimulation(utf8Path(argv[1]), utf8Path(argv[2]), options.seed)) {
                 if (options.hour >= 0) {
                     sim->globals()[ts2::sim::global::kHour] = static_cast<std::int16_t>(options.hour);
                     sim->globals()[ts2::sim::global::kMinute] = static_cast<std::int16_t>(options.minute);
@@ -509,6 +514,13 @@ int main(int argc, char** argv) {
             }
         }
         auto& scene = builder.scene();
+        if (options.numbers) {
+            if (!life || !app::writePoseNumbers(*life, scene, options.time, utf8Path(options.numbers))) {
+                throw std::runtime_error(std::string("no poses written to ") + options.numbers);
+            }
+            ts2::platform::quit();
+            return result;
+        }
         const int top = ts2::scene::topLevel(scene);
 
         ts2::platform::WindowOptions windowOptions;

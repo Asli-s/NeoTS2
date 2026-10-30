@@ -205,6 +205,27 @@ void infiniteLoopHitsStepLimit() {
     CHECK(r.steps == 1000);
 }
 
+// Global 0x33 flag 1 raises the step limit. Clearing it lowers the limit again and puts the count
+// back to where it was raised, so the steps run meanwhile don't count.
+void objectErrorFlagOneRaisesTheStepLimit() {
+    MemoryCodeSource code;
+    code.add(kObjectGroup, 0x1000, bhav({
+        expr(owner::kGlobal, 0x33, op::kSetFlag, owner::kLiteral, 1, 1, E),
+        expr(owner::kTemp, 0, op::kIncrementAndLess, owner::kLiteral, 1500, 1, 2),
+        expr(owner::kGlobal, 0x33, op::kClearFlag, owner::kLiteral, 1, 3, E),
+        expr(owner::kTemp, 1, op::kIncrementAndLess, owner::kLiteral, 900, 3, T),
+    }));
+    ThreadState t;
+    CHECK(runPrivate(code, t, 0x1000, {1000, 64, 3000}).outcome == Outcome::True);
+    code.add(kObjectGroup, 0x1001, bhav({
+        expr(owner::kGlobal, 0x33, op::kSetFlag, owner::kLiteral, 1, 1, E),
+        expr(owner::kLiteral, 1, op::kEquals, owner::kLiteral, 1, 1, E),
+    }));
+    ThreadState forever;
+    const RunResult r = runPrivate(code, forever, 0x1001, {1000, 64, 3000});
+    CHECK(r.outcome == Outcome::StepLimit && r.steps == 3000);
+}
+
 void infiniteRecursionHitsDepthLimit() {
     MemoryCodeSource code;
     code.add(kObjectGroup, 0x1000, bhav({call(0x1000, T, F)}));
@@ -993,6 +1014,7 @@ std::vector<Test> vmCoreTests() {
         {"writing a literal is an error", writingALiteralIsAnError},
         {"out-of-range temp is an error", outOfRangeTempIsAnError},
         {"infinite loop hits step limit", infiniteLoopHitsStepLimit},
+        {"object error flag 1 raises the step limit", objectErrorFlagOneRaisesTheStepLimit},
         {"infinite recursion hits depth limit", infiniteRecursionHitsDepthLimit},
         {"missing call target is reported", missingCallTargetIsReported},
         {"unimplemented primitive stops with its opcode", unimplementedPrimitiveStopsWithItsOpcode},

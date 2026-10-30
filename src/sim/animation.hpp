@@ -63,6 +63,8 @@ struct PlayingAnimation {
     // An Animate Sim clip fades out over its last fadeOutMs, unless byte 2 flag 0x40 says to drop it
     // at its end. Then it is gone, and the joints it drove keep their last pose.
     bool blendsOut = true;
+    // An Animate Sim clip fades in unless byte 2 flag 0x80 says not to.
+    bool blendsIn = true;
     // A locomotion clip's base heading: its root and limb controls play turned to it (the heading
     // where a turn in place starts, the path's heading for a walk's clips). None for other clips.
     std::optional<float> baseHeading;
@@ -106,8 +108,9 @@ struct PlayingAnimation {
     bool fadingOut(double nowMs) const { return nowMs - startMs >= lengthMs - fadeOutMs; }
 };
 
-// How long an Animate Sim clip playing `lengthMs` fades in and out: a fixed time each (none where
+// How long an Animate Sim clip playing `lengthMs` fades in and out: kAnimateFadeMs each (none where
 // the operands turn it off), both shortened alike to fit a clip shorter than the two together.
+constexpr float kAnimateFadeMs = 233.33f;
 struct AnimateFades {
     float inMs = 0, outMs = 0;
 };
@@ -127,7 +130,8 @@ AnimateFades animateFades(float lengthMs, bool fadesIn, bool fadesOut);
 //   byte 10    weight, in hundredths (outside 0-100: whole)
 //   byte 11    priority 0-4 (low, medium, high, highest, under everything)
 //   byte 15    flags: 0x01 flipped if temp 3 (in place of byte 2's flag), so a bed's clip plays on
-//              the side the Sim gets in on, as the Sim's own clip does
+//              the side the Sim gets in on, as the Sim's own clip does, 0x08 its IK object is the
+//              one temp 6 names (a child's dance on an older Sim's feet reaches for that Sim's hands)
 struct PlayingOverlay {
     std::string name;
     double startMs = 0;   // on the world's clock
@@ -147,12 +151,16 @@ struct PlayingOverlay {
     bool blendingOut = false;        // kBlendingOutEvent told
     std::uint8_t category = 1;       // see content::animationCategory
     bool stopped = false;            // ended by Animate Stop: fades out without telling events
+    // Its share of its weight (0-1, by its fades) as Animate Stop ended it. It falls from there to none
+    // over the stop's blend and doesn't go on fading in.
+    std::optional<float> stoppedAt;
     // How long it fades in at its start and out before its end, when not kOverlayBlendMs.
     std::optional<float> blendInMs, blendOutMs;
+    std::int16_t ikTarget = 0;  // as PlayingAnimation::ikTarget
 };
 constexpr std::int16_t kBlendingOutEvent = 9997, kBlendedOutEvent = 9998, kEndEvent = 9999;
-// How long before its end an overlay starts blending out.
-constexpr float kOverlayBlendMs = 250;
+// How long an overlay fades in and out when its own fades aren't set (see PlayingOverlay::blendInMs).
+constexpr float kOverlayBlendMs = kAnimateFadeMs;
 
 // How long an animation lasts as authored, in milliseconds, by name (without "_anim"), nullopt when
 // the animation isn't known. Supplied by whoever has the game's animation files.

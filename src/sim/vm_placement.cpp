@@ -5,19 +5,20 @@ namespace ts2::sim::vm_detail {
 // Operands:
 //   byte 0     mode: 1 takes the object out of its container's slot, leaves it where it is and is
 //              true (the game does more for multi-tile objects and Sims, not known yet), 0 searches the reference's room,
-//              then any room, 2 only the room, 7 by the reference's routing slot, 8 by a global
-//              slot (bytes 10-11). Any other mode is not kept yet
+//              then any room, 2 only the room, 3 the line the reference faces, in its room, 4 the
+//              same turned a quarter, 7 by the reference's routing slot, 8 by a global slot (bytes
+//              10-11). Any other mode is not kept yet
 //   byte 1     local holding the reference object (flag 0x01)
 //   byte 2     flags: 0x01 reference from the local, 0x02 don't prefer empty tiles, 0x04 tiles the
 //              player can edit (not checked yet), 0x08 both objects from bytes 4-9 (else the stack
-//              object is placed by me), 0x40 start in front of the reference object, and 0x10, 0x20 and
-//              0x80 not kept yet
+//              object is placed by me), 0x10 "on level ground" (see below), 0x40 start in front of the
+//              reference object, and 0x20 and 0x80 not kept yet
 //   byte 3     facings not allowed, relative to the reference object's (bit 0 the same, ...)
 //   bytes 4-6  the object to place (owner, data)
 //   bytes 7-9  the reference object
 bool Execution::findLocationFor(const bhav::Instruction& in, Frame& f) {
     constexpr std::uint8_t kReferenceInLocal = 0x01, kDontPreferEmpty = 0x02, kUserEditable = 0x04,
-                           kObjectsInOperands = 0x08, kInFrontOfReference = 0x40;
+                           kObjectsInOperands = 0x08, kLevelGround = 0x10, kInFrontOfReference = 0x40;
     const auto& o = in.operands;
     const bool inOperands = (o[2] & kObjectsInOperands) != 0;
     const std::int16_t placedId = inOperands ? read(o[4], static_cast<std::uint16_t>(o[5] | o[6] << 8), f) : stackObject();
@@ -30,7 +31,8 @@ bool Execution::findLocationFor(const bhav::Instruction& in, Frame& f) {
         return true;
     }
     const bool bySlot = o[0] == 7 || o[0] == 8;
-    if (!bySlot && ((o[0] != 0 && o[0] != 2) || (o[2] & ~(kReferenceInLocal | kDontPreferEmpty | kUserEditable | kObjectsInOperands | kInFrontOfReference)) != 0)) {
+    const bool onLine = o[0] == 3 || o[0] == 4;
+    if (!bySlot && ((o[0] != 0 && o[0] != 2 && !onLine) || (o[2] & ~(kReferenceInLocal | kDontPreferEmpty | kUserEditable | kObjectsInOperands | kLevelGround | kInFrontOfReference)) != 0)) {
         throw Stop{Outcome::Unsupported, "Find Location For form not implemented", hex(o[0], 2) + " " + hex(o[2], 2)};
     }
     std::int16_t refId = me().id;
@@ -56,8 +58,20 @@ bool Execution::findLocationFor(const bhav::Instruction& in, Frame& f) {
     search.referenceFacing = ref->data[kDirectionField];
     search.allowedFacings = static_cast<std::uint8_t>(~o[3]);
     search.preferEmpty = (o[2] & kDontPreferEmpty) == 0;
-    if (o[2] & kInFrontOfReference) {
+    if (onLine) {
+        // Along the line the reference faces (mode 4: turned a quarter), in its room only. Flag 0x40
+        // plays no part here.
+        search.lineDirection = (ref->data[kDirectionField] + (o[0] == 4 ? 2 : 0)) & 7;
+    } else if (o[2] & kInFrontOfReference) {
         search.startDirection = ref->data[kDirectionField] & 7;
+    }
+    // "On level ground" clears bit 0x100 of the placed object's placement flags (data 0x2A) for the
+    // search. The game puts it back when no place is found and leaves it cleared when one is.
+    constexpr std::size_t kPlacementFlagsField = 0x2A;
+    constexpr std::int16_t kLevelGroundBit = 0x100;
+    const std::int16_t placementFlags = placed->data[kPlacementFlagsField];
+    if (o[2] & kLevelGround) {
+        placed->data[kPlacementFlagsField] = static_cast<std::int16_t>(placementFlags & ~kLevelGroundBit);
     }
     std::optional<FoundLocation> found = findLocation(world(), *placed, search, rng_);
     if (!found && o[0] == 0) {
@@ -65,6 +79,7 @@ bool Execution::findLocationFor(const bhav::Instruction& in, Frame& f) {
         found = findLocation(world(), *placed, search, rng_);
     }
     if (!found) {
+        placed->data[kPlacementFlagsField] = placementFlags;
         return false;
     }
     snapTo(world(), *placed, SnapTarget{found->x, found->y, ref->level, found->facing});

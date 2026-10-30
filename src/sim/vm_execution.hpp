@@ -107,24 +107,38 @@ constexpr std::size_t kHoldInterruptsPersonData = 0x47;
 // Autonomy's choice: the object (person data) and the interaction number (object data).
 constexpr std::size_t kBestActionObjectPersonData = 0x35;
 constexpr std::size_t kTreeTableEntryField = 0x14;
+// How many interactions and sub-interactions may wait for Push Interaction to add another.
 constexpr std::size_t kMaxQueuedInteractions = 7;
+constexpr std::size_t kMaxQueuedSubInteractions = 5;
 // The Sim's semi-attribute 0x22, "Carry Flags": not 0 while it carries something.
 constexpr std::size_t kCarryFlagsSemiAttribute = 0x22;
-// Continuations skip the game's limit of 7. A safety limit of ours keeps a pushing loop from
+// Continuations skip the game's limits. A safety limit of ours keeps a pushing loop from
 // growing the queue without end.
 constexpr std::size_t kMaxQueuedWithContinuations = 64;
 // Interaction table line flag: the queue shows the interaction nested.
 constexpr std::uint32_t kNestedInteractionFlag = 0x8000;
+// Interaction table line flag: it runs at once instead of waiting in the queue.
+constexpr std::uint32_t kRunAtOnceInteractionFlag = 0x4;
 // The first waiting interaction, as the game shows it to scripts ("cn: Next Queued Interaction ...").
 constexpr std::size_t kNextQueuedIndexPersonData = 0x2D;
 constexpr std::size_t kNextQueuedContinuationPersonData = 0x48;
 constexpr std::size_t kNextQueuedObjectPersonData = 0x4F;
-// The interaction running on my stack ("ci: Current ..."). The "Running" pair copies it, as there are no
-// sub-queues yet.
+// The interaction running on my stack ("ci: Current ..."), and the "Running" pair, which names the
+// running sub-interaction while there is one (see noteSubQueue).
 constexpr std::size_t kCurrentIndexPersonData = 0x15;
 constexpr std::size_t kCurrentObjectPersonData = 0x50;
 constexpr std::size_t kRunningIndexPersonData = 0x66;
 constexpr std::size_t kRunningObjectPersonData = 0x67;
+// The object of the running sub-interaction ("ci: Sub Queue ..."), 0 once it ends.
+constexpr std::size_t kSubQueueObjectPersonData = 0x9D;
+// The sub-queue as scripts see it (see noteSubQueue).
+constexpr std::size_t kSubQueueCountPersonData = 0x1A;
+constexpr std::size_t kSubQueueMasterObjectPersonData = 0x4B;
+constexpr std::size_t kSubQueueMasterIndexPersonData = 0x4C;
+constexpr std::size_t kNextSubIndexPersonData = 0x4D;
+constexpr std::size_t kNextSubObjectPersonData = 0x4E;
+// Global 0x23: parental control is on.
+constexpr std::size_t kParentalControlGlobal = 0x23;
 // A level counts as this many tiles in distances.
 constexpr float kLevelHeight = 10.0f;
 // OBJD field a category want compares with an object's.
@@ -141,6 +155,8 @@ constexpr int kYoungAdultAgeFlag = 0x40;
 constexpr std::size_t kNewAgePersonData = 0x3A, kYoungAdultPersonData = 0xAF;
 // Make New Character flags (byte 9).
 constexpr std::uint8_t kNewCharacterChild = 0x01;         // a child of two parents
+constexpr std::uint8_t kNewCharacterParent1Neighbor = 0x02;  // parent 1 is a neighbor id, else an object
+constexpr std::uint8_t kNewCharacterParent2Neighbor = 0x04;
 constexpr std::uint8_t kNewCharacterTemplateInTemps = 0x08;
 constexpr std::uint8_t kNewCharacterTemplateFromToken = 0x10;
 constexpr std::uint8_t kRemoveReturnImmediately = 0x01;
@@ -203,7 +219,7 @@ constexpr std::uint16_t kCameraControlOpcode = 0x0023;
 // Dialog types (byte 5).
 constexpr std::uint8_t kTextNotification = 0x08, kStopNotification = 0x09, kModifyNotification = 0x0A,
                        kAppendNotification = 0x1C, kTutorialTasks = 0x12, kTutorialNext = 0x16, kTutorialNextModal = 0x19,
-                       kHint = 0x39;
+                       kHint = 0x39, kSetBabyName = 0x17;
 // Pickers, which list the stack object's object arrays.
 constexpr std::uint8_t kPickerDialogs[] = {0x05, 0x06, 0x07, 0x0B, 0x0C, 0x0D, 0x0F, 0x21, 0x33, 0x34, 0x46};
 constexpr std::size_t kContainerData = 2;    // object data: the object it is held by
@@ -288,18 +304,46 @@ constexpr std::uint8_t kRecalcWantsGenericCall = 0x27;
 // Generic call 0x17 ends the family tie between the neighbors in temps 0 and 1 (a broken engagement
 // or a divorce). Each must be a neighbor. Always true.
 constexpr std::uint8_t kRemoveFamilyTieGenericCall = 0x17;
+// Generic Sims Call 0x15 "Add Child to Family Relationship Array": the neighbor in temp 0 becomes the
+// child of the neighbor in temp 1 (World::setFamilyTie). Always true.
+constexpr std::uint8_t kAddChildGenericCall = 0x15;
+
+// The first interaction waiting in the Sim's main queue, or null. The game keeps sub-interactions
+// (nested) in a queue of their own.
+inline const QueuedInteraction* firstMainQueued(const SimObject& sim) {
+    const auto it = std::find_if(sim.queue.begin(), sim.queue.end(), [](const QueuedInteraction& q) { return !q.nested; });
+    return it != sim.queue.end() ? &*it : nullptr;
+}
 
 // Called whenever a Sim's queue changes.
 inline void noteNextQueued(SimObject& sim) {
-    const bool waiting = !sim.queue.empty();
-    sim.personData[kNextQueuedIndexPersonData] = waiting ? static_cast<std::int16_t>(sim.queue.front().index) : 0;
-    sim.personData[kNextQueuedContinuationPersonData] = waiting && sim.queue.front().continuation ? 1 : 0;
-    sim.personData[kNextQueuedObjectPersonData] = waiting ? sim.queue.front().object : 0;
+    const QueuedInteraction* next = firstMainQueued(sim);
+    sim.personData[kNextQueuedIndexPersonData] = next ? static_cast<std::int16_t>(next->index) : 0;
+    sim.personData[kNextQueuedContinuationPersonData] = next && next->continuation ? 1 : 0;
+    sim.personData[kNextQueuedObjectPersonData] = next ? next->object : 0;
+}
+
+// The sub-queue's person data, kept as the game keeps them when a sub-interaction is queued, starts
+// or is taken out: 0x1A how many wait, 0x4D/0x4E the index and object of the first, 0x4B/0x4C the
+// object and index of the running interaction, and 0x66/0x67 those of the running sub-interaction,
+// else of the running interaction. Scripts wait on 0x4E to start a sub-interaction.
+inline void noteSubQueue(SimObject& sim) {
+    const auto nested = [](const QueuedInteraction& q) { return q.nested; };
+    const auto first = std::find_if(sim.queue.begin(), sim.queue.end(), nested);
+    auto& pd = sim.personData;
+    pd[kSubQueueCountPersonData] = static_cast<std::int16_t>(std::count_if(sim.queue.begin(), sim.queue.end(), nested));
+    pd[kNextSubIndexPersonData] = first != sim.queue.end() ? static_cast<std::int16_t>(first->index) : 0;
+    pd[kNextSubObjectPersonData] = first != sim.queue.end() ? first->object : 0;
+    pd[kSubQueueMasterObjectPersonData] = sim.running ? sim.running->object : 0;
+    pd[kSubQueueMasterIndexPersonData] = sim.running ? static_cast<std::int16_t>(sim.running->index) : 0;
+    const std::optional<QueuedInteraction>& shown = sim.runningSub ? sim.runningSub : sim.running;
+    pd[kRunningIndexPersonData] = shown ? static_cast<std::int16_t>(shown->index) : 0;
+    pd[kRunningObjectPersonData] = shown ? shown->object : 0;
 }
 
 // Whether something should interrupt what the Sim does: its running interaction or sub-interaction
-// was cancelled, or the first waiting one has a higher priority than the Sim's Priority (person
-// data 0x21). Person data 0x47 set holds everything back.
+// was cancelled, or the first one waiting in the main queue has a higher priority than the Sim's
+// Priority (person data 0x21). Person data 0x47 set holds everything back.
 inline bool interruptPending(const SimObject& sim) {
     if (sim.personData[kHoldInterruptsPersonData] != 0) {
         return false;
@@ -307,7 +351,8 @@ inline bool interruptPending(const SimObject& sim) {
     if ((sim.runningSub && sim.runningSub->cancelled) || (sim.running && sim.running->cancelled)) {
         return true;
     }
-    return !sim.queue.empty() && sim.personData[kPriorityPersonData] < sim.queue.front().priority;
+    const QueuedInteraction* next = firstMainQueued(sim);
+    return next != nullptr && sim.personData[kPriorityPersonData] < next->priority;
 }
 
 // Called when an interaction starts (its index and object) and when it ends (0, 0).
@@ -329,9 +374,7 @@ inline void notePriority(SimObject& sim, const QueuedInteraction* running) {
 inline void startRunning(SimObject& sim, const QueuedInteraction& interaction) {
     sim.running = interaction;
     sim.actionString = interaction.name;
-    sim.actionIconObject = interaction.iconObject != 0 ? interaction.iconObject
-                           : interaction.partner != 0  ? interaction.partner
-                                                       : interaction.object;
+    sim.actionIconObject = interaction.icon();
     sim.actionIconGuid = interaction.iconGuid;
     sim.actionIconIndex = interaction.iconIndex;
 }
@@ -425,6 +468,8 @@ constexpr std::uint8_t kSearchSpecies2Neighbor = 0x32;
 constexpr std::uint8_t kSearchSpecies3Neighbor = 0x33;
 // Search 0x11: neighbors of the family (person data 0x3D) in temp 0.
 constexpr std::uint8_t kSearchFamilyNeighbor = 0x11;
+// Search 0x07: neighbors whose Sim is of a type (see nextNeighborOfType).
+constexpr std::uint8_t kSearchNeighborOfType = 0x07;
 constexpr std::size_t kFamilyPersonData = 0x3D;
 constexpr std::size_t kLeadTileObjectField = 0x13;
 constexpr std::int16_t kSameTileRefusedBit = 0x2000;
@@ -516,9 +561,10 @@ public:
         std::shared_ptr<const bhav::Behavior> code;
         std::uint32_t codeOwner = 0;
         std::vector<std::int16_t> args = std::vector<std::int16_t>(4);
-        std::optional<std::int16_t> stackObject;  // the new frame's, when it isn't the caller's
+        std::optional<std::int16_t> stackObject;  // the new frame's, when set
         std::optional<std::int16_t> runningOn;    // the object the new frame runs on, when it isn't the caller's
-        bool onStackObject = false;               // mode 1: runs at once on the stack object's own stack
+        bool atOnce = false;                      // modes 0 and 1: runs to its end before the caller goes on
+        bool onStackObject = false;               // mode 1: runs as the stack object, on its temps
         std::optional<QueuedInteraction> interaction;  // Gosub Found Action: the interaction it starts
     };
 
@@ -610,7 +656,11 @@ public:
     bool outfitsInformation();
     std::uint32_t madeCharacterType(const ObjectType& from, std::uint32_t top);
     std::vector<std::int16_t> wantSimList(const std::string& treeName, std::int16_t sim);
-    bool makeNewCharacter(const bhav::Instruction& in, Frame& f);
+    std::optional<bool> makeNewCharacter(const bhav::Instruction& in, Frame& f);
+    std::optional<bool> makeChildren(const bhav::Instruction& in, Frame& f, SimObject& holder, std::optional<std::uint32_t> templateGuid);
+    std::int16_t speciesFlag(std::int16_t neighbor);
+    std::optional<std::int16_t> makeChild(std::int16_t parent1, std::int16_t parent2, std::optional<std::uint32_t> templateGuid);
+    std::optional<Genome> parentGenes(std::int16_t neighbor);
     static std::int16_t newCharacterAge(int flag);
     bool relationship(const bhav::Instruction& in, Frame& f);
     bool findWorstMotives(const bhav::Instruction& in);
@@ -630,6 +680,7 @@ public:
     bool changeMaterial(const bhav::Instruction& in, Frame& f);
     bool soundEvent(const bhav::Instruction& in, Frame& f);
     std::optional<bool> dialog(const bhav::Instruction& in, Frame& f);
+    std::optional<bool> babyNameDialog(Frame& f);
     std::optional<bool> cameraControl(const bhav::Instruction& in, Frame& f);
     static void setMaterial(SimObject& object, MaterialChange change);
     std::optional<CreateSpot> tileBeside(const SimObject& sim, std::int16_t turn);
@@ -672,6 +723,7 @@ public:
     bool setToNext(const bhav::Instruction& in, Frame& f);
     template <typename Filters>
     bool nextInView(const Filters& passesFilters, std::uint8_t targetOwner, std::uint16_t targetData, Frame& f);
+    bool nextNeighborOfType(std::uint32_t guid, std::uint8_t targetOwner, std::uint16_t targetData, Frame& f);
     template <typename Filters>
     bool nextNeighbor(std::uint8_t searchType, const Filters& passesFilters, std::uint8_t targetOwner,
                       std::uint16_t targetData, Frame& f);
@@ -768,6 +820,7 @@ public:
     void stopWalk(SimObject& sim, Walking& walk, double now);
     void interruptWalk(SimObject& sim, Walking& walk, double now);
     WalkStep routeInterrupted(SimObject& sim);
+    bool settleAfterStop(SimObject& sim, Walking& walk, double now);
     TurnStep turnBodyTowards(const bhav::Instruction& in, Frame& f);
     static void faceHeading(SimObject& sim, float heading);
     std::optional<float> turnTarget(const bhav::Instruction& in, Frame& f, const SimObject& sim, float current,
@@ -789,8 +842,12 @@ public:
     bool findBestObject(const bhav::Instruction& in, Frame& f);
     bool findBestInteraction(const bhav::Instruction& in);
     IdleResult idleForInput(const bhav::Instruction& in, Frame& f);
+    bool passesStartCheck(SimObject& sim, const SimObject& object, const QueuedInteraction& waiting);
+    void queueSkipped(const SimObject& sim, SimObject& object);
     bool alterBudget(const bhav::Instruction& in, Frame& f);
     bool pushInteraction(const bhav::Instruction& in, Frame& f);
+    // Runs a pushed interaction whose line has flag 0x4 to its end now.
+    void runPushedAtOnce(SimObject& sim, const SimObject& object, const QueuedInteraction& pushed);
 
 private:
     // Reading and writing operands, Expression, fields, arrays and constants (vm_values.cpp).

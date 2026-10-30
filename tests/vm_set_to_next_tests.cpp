@@ -353,6 +353,40 @@ void setToNextWalksNeighborsOfAFamily() {
     CHECK(next(12) == -1 && w.controller->thread.temps[1] == 0);
 }
 
+// Search 0x07 walks neighbor ids for a Sim of the GUID's type, or for a template type (OBJD type
+// 0x10) one cloned from it, passing over family-tree-only neighbors. An unknown GUID is false after
+// one step, and running out leaves 0.
+void setToNextFindsNeighborsOfAType() {
+    constexpr std::uint32_t kTemplate = 0x2E17B9FC, kAlien = 0x0D000008, kPlain = 0x0D000003, kTreeOnly = 0x0D000005;
+    MemoryCodeSource code;
+    code.addObjectType(kObjectGroup, typed(kTemplate, 0x10));
+    code.addObjectType(kObjectGroup, typed(kPlain, ts2::sim::kPersonType));
+    code.addObjectType(kObjectGroup, typed(kTreeOnly, 0x11));
+    auto alien = typed(kAlien, ts2::sim::kPersonType);
+    alien.fields[0x46] = static_cast<std::uint16_t>(kTemplate);
+    alien.fields[0x47] = static_cast<std::uint16_t>(kTemplate >> 16);
+    code.addObjectType(kObjectGroup, alien);
+    code.add(kObjectGroup, 0x1000, bhav({setToNext(0x07, owner::kTemp, 1, kTemplate, T, F)}));
+    code.add(kObjectGroup, 0x1001, bhav({setToNext(0x07, owner::kTemp, 1, kPlain, T, F)}));
+    code.add(kObjectGroup, 0x1002, bhav({setToNext(0x07, owner::kTemp, 1, 0x12345678, T, F)}));
+    SmallWorld w;
+    auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
+    hood->neighborIds = {3, 5, 8};
+    hood->neighbors[3].guid = kPlain;
+    hood->neighbors[5].guid = kTreeOnly;
+    hood->neighbors[8].guid = kAlien;
+    w.world.setNeighborhood(hood);
+    Vm vm(code, {}, &w.world);
+    auto run = [&](std::uint16_t tree, std::int16_t from) {
+        w.controller->thread.temps[1] = from;
+        return vm.run(*w.controller, tree).outcome;
+    };
+    CHECK(run(0x1000, 0) == Outcome::True && w.controller->thread.temps[1] == 8);
+    CHECK(run(0x1001, 0) == Outcome::True && w.controller->thread.temps[1] == 3);
+    CHECK(run(0x1001, 3) == Outcome::False && w.controller->thread.temps[1] == 0);
+    CHECK(run(0x1002, 0) == Outcome::False && w.controller->thread.temps[1] == 3);
+}
+
 // Searches 0x15-0x17 and 0x1F walk the family ties of the neighbor in temp 0: siblings in the
 // record's order, then false with 0. Parents: father, mother, then 0. Neighbors gone are skipped.
 void setToNextWalksFamilyTies() {
@@ -578,6 +612,7 @@ std::vector<Test> vmSetToNextTests() {
         {"person searches filter by species", personSearchesFilterBySpecies},
         {"Set to Next finds objects by category in param 0", setToNextFindsObjectsByCategoryInParam0},
         {"Set to Next walks neighbors of a family", setToNextWalksNeighborsOfAFamily},
+        {"Set to Next finds neighbors of a type", setToNextFindsNeighborsOfAType},
         {"Set to Next finds objects by category", setToNextFindsObjectsByCategory},
         {"Set to Next finds objects in a room", setToNextFindsObjectsInARoom},
         {"Set to Next finds hauntable objects", setToNextFindsHauntableObjects},

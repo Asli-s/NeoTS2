@@ -78,6 +78,30 @@ void findLocationForCentresASimOnItsTile() {
     CHECK(sim.slots[0] == 0 && held.data[2] == 0 && held.data[3] == -1);
 }
 
+// Find Location For "on level ground" (flag 0x10) clears bit 0x100 of the placed object's data 0x2A
+// when it finds a place, and leaves the data as it was when it finds none.
+void findLocationForOnLevelGroundClearsAPlacementBit() {
+    MemoryCodeSource code;
+    Instruction find = call(0x0010, T, F);
+    const std::uint8_t operands[10] = {0, 0, 0x1A, 0, owner::kMyData, 0x0B, 0, owner::kMyData, 0x0B, 0};
+    std::copy(std::begin(operands), std::end(operands), find.operands.begin());
+    code.add(kObjectGroup, 0x1000, bhav({find}));
+    find.operands[3] = 0x55;  // only diagonal turns allowed
+    code.add(kObjectGroup, 0x1001, bhav({find}));
+    SmallWorld w;
+    ts2::sim::SimObject& sim = *w.world.find(5);
+    sim.tile = ts2::sim::Tile{3, 4, 1};
+    sim.x = 3 * 65536 + 32768;
+    sim.y = 4 * 65536 + 32768;
+    sim.data[0x2A] = 0x0181;
+    Vm vm(code, {}, &w.world);
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::True && sim.data[0x2A] == 0x0081);
+    sim.data[0x2A] = 0x0181;
+    sim.data[1] = 0;
+    sim.data[0x17] = 2;  // a Sim that never faces diagonally: nowhere to go
+    CHECK(vm.run(sim, 0x1001).outcome == Outcome::False && sim.data[0x2A] == 0x0181);
+}
+
 // Johnny's drop: the stack object goes next to the Sim in local 0, whose own tile isn't empty.
 void findLocationForSkipsTheSimsTile() {
     MemoryCodeSource code;
@@ -137,6 +161,36 @@ void findLocationForStartsInFrontOfTheReference() {
     sim.y = 4 * 65536;
     CHECK(vm.run(sim, 0x1001).outcome == Outcome::True);
     CHECK(placed.x == 3 * 65536 + 32768 && placed.y == 3 * 65536 + 32768);
+}
+
+// Find Location For mode 3 (a car's driver placed by its portal) walks the line the reference faces,
+// both ways in turn: 1 tile ahead, 1 back, 2 ahead... and never round. Mode 4 turns the line a quarter.
+void findLocationForWalksTheReferencesLine() {
+    MemoryCodeSource code;
+    Instruction find = call(0x0010, T, F);
+    find.operands[0] = 3;
+    code.add(kObjectGroup, 0x1000, bhav({find}));
+    find.operands[0] = 4;
+    code.add(kObjectGroup, 0x1001, bhav({find}));
+    SmallWorld w;
+    ts2::sim::SimObject& sim = *w.world.find(5);
+    sim.tile = ts2::sim::Tile{3, 4, 1};
+    sim.x = 3 * 65536 + 32768;
+    sim.y = 4 * 65536 + 32768;
+    sim.data[1] = 2;
+    sim.thread.stackObjectId = 2;
+    Vm vm(code, {}, &w.world);
+    const ts2::sim::SimObject& placed = *w.world.find(2);
+    // My own tile is taken, so the first tile is the one ahead (+x).
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::True);
+    CHECK(placed.x == 4 * 65536 + 32768 && placed.y == 4 * 65536 + 32768);
+    // With that one taken too, the tile behind comes next, not the ones beside me.
+    w.world.find(3)->tile = ts2::sim::Tile{4, 4, 1};
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::True);
+    CHECK(placed.x == 2 * 65536 + 32768 && placed.y == 4 * 65536 + 32768);
+    // Mode 4: the line +y.
+    CHECK(vm.run(sim, 0x1001).outcome == Outcome::True);
+    CHECK(placed.x == 3 * 65536 + 32768 && placed.y == 5 * 65536 + 32768);
 }
 
 // Jill's floor sit marker: Find Location For mode 8 puts the stack object on the first spot of global
@@ -276,6 +330,175 @@ void makeNewCharacterAddsANeighbor() {
     CHECK(vm.run(*w.controller, 0x1002).outcome == Outcome::True);
     CHECK(w.world.neighborPersonValue(9, 0x3D) == 32767 && w.world.hasFamily(32767));
     CHECK(vm.run(*w.controller, 0x1002).outcome == Outcome::False);
+}
+
+const std::string kLight = "00000001-0000-0000-0000-000000000000", kMedium = "00000002-0000-0000-0000-000000000000",
+                  kMediumDark = "00000003-0000-0000-0000-000000000000", kDark = "00000004-0000-0000-0000-000000000000",
+                  kAlien = "6baf064a-85ad-4e37-8d81-a987e9f8da46";
+const std::string kBlack = "00000001-0000-0000-0000-000000000000", kBlond = "00000003-0000-0000-0000-000000000000";
+const std::string kBrownEyes = "32dee745-b6ce-419f-9e86-ae93802d2682", kBlueEyes = "e43f3360-3a08-4755-8b83-a0d37a6c424b";
+
+// The base game's skin, hair and eye values that the tests use.
+ts2::content::GeneticsCatalog testGeneticsCatalog() {
+    ts2::content::GeneticsCatalog c;
+    c.skins = {{kLight, 0.1f}, {kMedium, 0.3f}, {kMediumDark, 0.6f}, {kDark, 0.9f}, {kAlien, 0}};
+    c.hairs = {{kBlack, 1}, {kBlond, 2}};
+    c.eyes = {{kBrownEyes, 1}, {kBlueEyes, 2}};
+    return c;
+}
+
+// A baby's genes as the game draws them: hair and eyes take the more dominant colour first, skin
+// shows a catalog skin between the parents' and keeps their alleles in gene 2, an alien skin (0) is
+// shown as passed and leads when its parent's two skins match, and the face regions follow their
+// odds (one in two from the carrier, two in three from the other parent). Parents carry gene 2 as
+// well as gene 6, as every Sim's DNA does.
+void babyGenesFollowTheGameRules() {
+    using ts2::sim::Gene;
+    using ts2::sim::Genome;
+    const auto catalog = testGeneticsCatalog();
+    const std::string allRegions = "nose,brow,mouth,eyes,jaw,ears,";
+    Genome a{{1, {kBlack, kBlack}}, {2, {kLight, kLight}}, {3, {kBlueEyes, kBlueEyes}}, {6, {kLight, kLight}},
+             {5, {allRegions, ""}}};
+    Genome b{{1, {kBlond, kBlond}}, {2, {kDark, kDark}}, {3, {kBrownEyes, kBrownEyes}}, {6, {kDark, kDark}},
+             {5, {"", ""}}};
+    std::set<std::string> shownSkins;
+    int noseFromA = 0;
+    constexpr int kRuns = 3000;
+    for (std::uint32_t seed = 0; seed < kRuns; ++seed) {
+        ts2::sim::SimRandom random(seed);
+        const Genome child = ts2::sim::childGenome(a, b, catalog, random);
+        CHECK(child.at(1) == (Gene{kBlack, kBlond}) && child.at(3) == (Gene{kBrownEyes, kBlueEyes}));
+        CHECK(child.at(2) == (Gene{kLight, kDark}) && child.at(6).dominant == child.at(6).recessive);
+        shownSkins.insert(child.at(6).dominant);
+        noseFromA += child.at(5).dominant.find("nose") != std::string::npos ? 1 : 0;
+    }
+    CHECK(shownSkins == (std::set<std::string>{kLight, kMedium, kMediumDark, kDark}));
+    CHECK(noseFromA > kRuns * 45 / 100 && noseFromA < kRuns * 55 / 100);
+
+    // A region only the other parent passes dominant stays two times in three, one both pass always.
+    std::swap(a[5], b[5]);
+    int noseFromB = 0;
+    for (std::uint32_t seed = 0; seed < kRuns; ++seed) {
+        ts2::sim::SimRandom random(seed);
+        noseFromB += ts2::sim::childGenome(a, b, catalog, random).at(5).dominant.find("nose") != std::string::npos ? 1 : 0;
+    }
+    CHECK(noseFromB > kRuns * 62 / 100 && noseFromB < kRuns * 72 / 100);
+    a[5] = b[5];
+    ts2::sim::SimRandom once(7);
+    CHECK(ts2::sim::childGenome(a, b, catalog, once).at(5).dominant == allRegions);
+
+    // A pure alien's skin leads, whichever parent carried the baby.
+    for (std::uint32_t seed = 0; seed < 50; ++seed) {
+        const Genome alien{{2, {kAlien, kAlien}}, {6, {kAlien, kAlien}}}, human{{2, {kMedium, kMedium}}, {6, {kMedium, kMedium}}};
+        ts2::sim::SimRandom r1(seed), r2(seed);
+        CHECK(ts2::sim::childGenome(alien, human, catalog, r1).at(6) == (Gene{kAlien, kMedium}));
+        CHECK(ts2::sim::childGenome(human, alien, catalog, r2).at(2) == (Gene{kAlien, kMedium}));
+    }
+}
+
+// Each gene either parent has costs an allele draw from each parent first (the carrier's first),
+// then genes 7-15 one more for their order. The six face regions draw last.
+void babyGenesDrawInTheGamesOrder() {
+    const ts2::sim::Genome a{{7, {"p", "q"}}}, b{{7, {"r", "s"}}};
+    ts2::sim::SimRandom expected(1234);
+    auto coin = [&] { return ((static_cast<std::uint64_t>(expected()) * 100) >> 32) < 50; };
+    const std::string fromA = coin() ? "p" : "q";
+    const std::string fromB = coin() ? "r" : "s";
+    const ts2::sim::Gene gene = coin() ? ts2::sim::Gene{fromA, fromB} : ts2::sim::Gene{fromB, fromA};
+    for (int region = 0; region < 6; ++region) {
+        expected();
+    }
+    ts2::sim::SimRandom random(1234);
+    const auto child = ts2::sim::childGenome(a, b, testGeneticsCatalog(), random);
+    CHECK(child.at(7) == gene && random.state() == expected.state());
+    const auto read = ts2::sim::genomeFromProperties({{"1", "x"}, {"268435457", "y"}, {"5", "mouth,"}, {"16", "q"}, {"name", "z"}});
+    CHECK(read.size() == 2 && read.at(1) == (ts2::sim::Gene{"x", "y"}) && read.at(5).dominant == "mouth,");
+}
+
+// Make New Character for babies of two parents (flag 0x01, both parents neighbor ids): temp 0 babies
+// go into array 0, the instruction waits a tick and is then true. Each is a baby of the parents'
+// species. With only the mother marked (person data 0xA5) a baby takes the opposite of the father's
+// gender, and is named "Baby Girl" or "Baby Boy" by it. The unmarked father then stands for both
+// parents' genes. A count outside 1-10 and parents of two species are errors.
+void makeNewCharacterMakesBabiesOfTwoParents() {
+    MemoryCodeSource code;
+    code.addObjectType(kObjectGroup, typed(0x7FD96B54, 0x10));
+    Instruction make = primitiveCall(0x0013, T, F);
+    // Parent 2 is literal 8 (bytes 3-5), parent 1 literal 3 (bytes 6-8), flags 0x07.
+    make.operands = {0, 0, 0, owner::kLiteral, 8, 0, owner::kLiteral, 3, 0, 0x07, 0, 0, 0, 0, 0, 1};
+    SmallWorld w;
+    auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
+    hood->neighborIds = {3, 8};
+    for (const std::int16_t id : {std::int16_t{3}, std::int16_t{8}}) {
+        hood->neighbors[id].guid = 0x0D000000u + static_cast<std::uint32_t>(id);
+        hood->neighbors[id].personData.assign(0xE7, 0);
+    }
+    hood->neighbors[3].personData[0x41] = 1;  // the mother
+    hood->neighbors[3].personData[0xA5] = 1;
+    hood->neighbors[3].genes[1] = {kBlond, kBlond};
+    hood->neighbors[8].genes[1] = {kBlack, kBlack};
+    w.world.setNeighborhood(hood);
+    w.world.setBabyFirstNames("Baby Boy", "Baby Girl");
+    const ts2::content::GeneticsCatalog catalog = testGeneticsCatalog();
+    w.world.setGeneticsCatalog([&] { return &catalog; });
+    w.controller->arrays.assign(1, {7});
+    Vm vm(code, {}, &w.world);
+    auto makeBabies = [&](std::int16_t count) {
+        code.add(kObjectGroup, 0x1001, bhav({
+            expr(owner::kTemp, 0, op::kAssign, owner::kLiteral, static_cast<std::uint16_t>(count), 1, E),
+            expr(owner::kStackObjectId, 0, op::kAssign, owner::kLiteral, 1, 2, E),
+            make,
+        }));
+        return vm.run(*w.controller, 0x1001);
+    };
+    CHECK(makeBabies(2).outcome == Outcome::Sleeping && w.controller->arrays[0].size() == 2);
+    CHECK(vm.resume(*w.controller).outcome == Outcome::True);
+    for (const auto id : w.controller->arrays[0]) {
+        const auto* baby = w.world.neighbor(static_cast<std::int16_t>(id));
+        CHECK(baby != nullptr && baby->personData[0x3A] == 1 && baby->personData[0xBA] == 0 && baby->personData[0x41] == 1);
+        CHECK(baby != nullptr && baby->personData[0x52] == 500 && code.objectType(baby->guid) != nullptr);
+        CHECK(w.world.neighborFirstName(static_cast<std::int16_t>(id)) == "Baby Girl");
+        CHECK(baby != nullptr && baby->genes.at(1) == (ts2::sim::Gene{kBlack, kBlack}));
+    }
+    CHECK(makeBabies(0).outcome == Outcome::Error);
+    CHECK(makeBabies(11).outcome == Outcome::Error);
+    w.world.neighborPersonData(8)->at(0xBA) = 3;  // a cat
+    CHECK(makeBabies(1).outcome == Outcome::Error);
+}
+
+// "Add to family" with family 0 joins the household living on the lot (the first family the game
+// lists whose home is this lot) and leaves temp 0 at 0. The Sim's GUID is added after the family's members. A lot no
+// family lives on stops as unsupported.
+void addToFamilyZeroJoinsTheLotsHousehold() {
+    Instruction add = primitiveCall(0x0001, T, F);
+    add.operands[0] = 0x04;
+    MemoryCodeSource code;
+    code.add(kObjectGroup, 0x1000, bhav({
+        expr(owner::kStackObjectId, 0, op::kAssign, owner::kLiteral, 9, 1, E),
+        expr(owner::kTemp, 0, op::kAssign, owner::kLiteral, 0, 2, E),
+        add,
+    }));
+    SmallWorld w;
+    auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
+    hood->neighborIds = {9};
+    hood->neighbors[9].guid = 0x0D000009;
+    hood->neighbors[9].personData.assign(0xE7, 0);
+    hood->familyLots[1] = 4;
+    hood->familyLots[6] = 10;
+    hood->familyMembers[6] = {0x0D000001};
+    // Of two families on the lot, the higher rank is listed first, then the higher id.
+    hood->familyLots[9] = 10;
+    hood->familyRanks[6] = 1;
+    w.world.setNeighborhood(hood);
+    w.world.setLotNumber(10);
+    Vm vm(code, {}, &w.world);
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::True);
+    CHECK(w.world.neighborPersonValue(9, 0x3D) == 6 && w.controller->thread.temps[0] == 0);
+    const auto members = w.world.familyMemberGuids(6);
+    CHECK(members.size() == 2 && members[0] == 0x0D000001 && members[1] == 0x0D000009);
+    w.world.setLotNumber(5);
+    w.world.neighborPersonData(9)->at(0x3D) = 0;
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::Unsupported);
 }
 
 // Neighbor data field 6 ("house number") is the lot of the neighbor's family (person data 0x3D).
@@ -1647,6 +1870,65 @@ void dialogsAnswerAsTheGameDoesHeadless() {
     CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::Sleeping);
 }
 
+// "Set Baby Name" asks to name the neighbors in temps 0-3 and waits for the answer once someone shows
+// it. Each keeps its place, a temp naming no neighbor counts as 0. OK names them, trimmed of
+// spaces and tabs. Namings wait in one list in the order asked, one per object, and show one at a
+// time, as in the game. Without anyone showing it the dialog waits a tick and is true.
+void setBabyNameWaitsForTheNames() {
+    MemoryCodeSource code;
+    code.add(kObjectGroup, 0x1000, bhav({dialog(0x17, 0x04)}));
+    SmallWorld w;
+    auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
+    hood->neighborIds = {9, 10};
+    for (const std::int16_t id : hood->neighborIds) {
+        hood->neighbors[id].guid = 0x0D000000u | static_cast<std::uint32_t>(id);
+        hood->neighbors[id].personData.assign(0xE7, 0);
+    }
+    w.world.setNeighborhood(hood);
+    Vm vm(code, {}, &w.world);
+    auto& temps = w.controller->thread.temps;
+    auto start = [&](std::int16_t first, std::int16_t second) {
+        w.controller->thread = {};
+        temps[0] = first;
+        temps[1] = second;
+        temps[2] = 77;  // not a neighbor
+        return vm.run(*w.controller, 0x1000).outcome;
+    };
+    CHECK(start(9, 10) == Outcome::Sleeping);
+    CHECK(vm.resume(*w.controller).outcome == Outcome::True);  // nobody shows it
+    w.world.setAsksNames(true);
+    CHECK(start(9, 10) == Outcome::Sleeping);
+    CHECK((w.world.namesAsked() == std::vector<std::int16_t>{9, 10, 0, 0}));
+    CHECK(vm.resume(*w.controller).outcome == Outcome::Sleeping);
+    w.world.answerNames(true, {"  Ada\t", "Bo"});
+    CHECK(vm.resume(*w.controller).outcome == Outcome::True);
+    CHECK(w.world.neighborFirstName(9) == "Ada" && w.world.neighborFirstName(10) == "Bo");
+    CHECK(w.world.namesAsked().empty());
+    CHECK(start(10, 0) == Outcome::Sleeping);
+    w.world.answerNames(false, {"Cy"});
+    CHECK(vm.resume(*w.controller).outcome == Outcome::False);  // Cancel
+    CHECK(w.world.neighborFirstName(10) == "Bo");
+    // Requests wait in the order asked and show one at a time. Object 3's shows first.
+    w.world.askNames(3, {9});
+    CHECK(start(10, 0) == Outcome::Sleeping && w.world.namesAsked() == std::vector<std::int16_t>{9});  // waits its turn
+    w.world.answerNames(true, {"Di"});
+    CHECK((w.world.namesAsked() == std::vector<std::int16_t>{10, 0, 0, 0}));  // the next one shows
+    CHECK(vm.resume(*w.controller).outcome == Outcome::Sleeping);
+    w.world.answerNames(true, {"Ed"});
+    CHECK(vm.resume(*w.controller).outcome == Outcome::True && w.world.neighborFirstName(10) == "Ed");
+    // Object 3 was reset before it took its answer: its next naming takes that answer.
+    w.world.askNames(3, {10});
+    CHECK(w.world.takeNamesAnswer(3) == std::optional<bool>(true) && w.world.neighborFirstName(9) == "Di");
+    // A naming started while its own earlier one shows closes it and asks anew.
+    w.world.askNames(3, {9});
+    w.world.askNames(3, {10});
+    CHECK(w.world.namesAsked() == std::vector<std::int16_t>{10});
+    // A removed asker's naming is cancelled.
+    w.world.remove(*w.world.find(3));
+    CHECK(w.world.namesAsked().empty());
+    CHECK(start(0, 0) == Outcome::True);  // none to name
+}
+
 // New objects lead themselves (object data 0x13), as every saved single-tile object does, so code
 // that takes "stack obj's lead tile object ID" as the stack object (CT - Intersect IDs) keeps it.
 void newObjectsLeadThemselves() {
@@ -1811,9 +2093,13 @@ std::vector<Test> vmObjectTests() {
         {"outside is region 0 in layer 0", outsideIsRegionZeroInLayerZero},
         {"Find Location For centres a Sim on its tile", findLocationForCentresASimOnItsTile},
         {"Find Location For starts in front of the reference", findLocationForStartsInFrontOfTheReference},
+        {"Find Location For walks the reference's line", findLocationForWalksTheReferencesLine},
         {"Find Location For skips the Sim's own tile", findLocationForSkipsTheSimsTile},
+        {"Find Location For on level ground clears a placement bit", findLocationForOnLevelGroundClearsAPlacementBit},
         {"Find Location For places by a global slot", findLocationForPlacesByAGlobalSlot},
         {"make new character adds a neighbor", makeNewCharacterAddsANeighbor},
+        {"make new character makes babies of two parents", makeNewCharacterMakesBabiesOfTwoParents},
+        {"add to family 0 joins the lot's household", addToFamilyZeroJoinsTheLotsHousehold},
         {"A neighbor's house number is its family's lot", neighborHouseNumberIsTheFamilysLot},
         {"neighbor object definition reads", neighborObjectDefinitionReads},
         {"Get Distance To measures in tiles", getDistanceToMeasuresInTiles},
@@ -1854,6 +2140,9 @@ std::vector<Test> vmObjectTests() {
         {"RayTrace rules judge the hits", rayTraceRulesJudgeTheHits},
         {"RayTrace asks the scene and writes temp 0", rayTraceAsksTheSceneAndWritesTemp0},
         {"dialogs answer as the game does headless", dialogsAnswerAsTheGameDoesHeadless},
+        {"set baby name waits for the names", setBabyNameWaitsForTheNames},
+        {"baby genes follow the game's rules", babyGenesFollowTheGameRules},
+        {"baby genes draw in the game's order", babyGenesDrawInTheGamesOrder},
         {"Camera Control waits while the camera moves", cameraControlWaitsWhileTheCameraMoves},
         {"Alter Budget charges the funds", alterBudgetChargesTheFunds},
         {"new objects lead themselves", newObjectsLeadThemselves},

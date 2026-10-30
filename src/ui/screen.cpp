@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <sstream>
 
@@ -137,6 +138,11 @@ int Screen::add(const ui::Window& source, int parent) {
     w.textColor = color(source.list(w.kind == Kind::Text ? "forecolor" : "colorfontnormal"));
     if (const auto disabled = source.list("colorfontdisabled"); w.kind == Kind::Button && disabled.size() >= 3) {
         w.disabledTextColor = color(disabled);
+    }
+    if (w.kind == Kind::TextEdit) {
+        w.highlightColor = color(source.list("highlightcolor"));
+        w.selectedTextColor = color(source.list("colorfonthilited"));
+        w.caretColor = color(source.list("caretcolor"));
     }
     w.paint = w.kind != Kind::Generic || source.flag("paint");
     const auto gutters = source.list("gutters");
@@ -427,6 +433,43 @@ void Screen::setText(int window, const std::string& text) {
     }
 }
 
+void Screen::setSelection(int window, std::size_t begin, std::size_t end) {
+    if (window >= 0) {
+        Window& w = windows_[static_cast<std::size_t>(window)];
+        w.selectionBegin = std::min(begin, end);
+        w.selectionEnd = std::max(begin, end);
+    }
+}
+
+void Screen::setCaret(int window, std::optional<std::size_t> at) {
+    if (window >= 0) {
+        windows_[static_cast<std::size_t>(window)].caret = at;
+    }
+}
+
+std::size_t Screen::textIndexAt(int window, int x) {
+    if (window < 0) {
+        return 0;
+    }
+    const Window& w = windows_[static_cast<std::size_t>(window)];
+    const FontStyle& style = fonts_.style(w.font);
+    const int local = x - origin(window)[0] - w.gutters[0];
+    // The boundary whose left part is nearest in width to the click.
+    std::size_t best = 0;
+    int bestDistance = std::abs(local);
+    for (std::size_t i = 1; i <= w.text.size(); ++i) {
+        if (i < w.text.size() && (static_cast<unsigned char>(w.text[i]) & 0xC0) == 0x80) {
+            continue;
+        }
+        const int distance = std::abs(fonts_.width(style, w.text.substr(0, i)) - local);
+        if (distance < bestDistance) {
+            best = i;
+            bestDistance = distance;
+        }
+    }
+    return best;
+}
+
 void Screen::setImage(int window, tga::Pixels pixels) {
     if (window < 0) {
         return;
@@ -614,6 +657,45 @@ void Screen::setTip(int window, const std::string& text) {
     }
 }
 
+void Screen::setSpotTip(const std::string& text) {
+    if (text == spotTip_.text) {
+        return;
+    }
+    release(spotTip_.image);
+    spotTip_.image = -1;
+    spotTip_.text = text;
+    if (text.empty()) {
+        return;
+    }
+    TextImage line = fonts_.draw(fonts_.style("Default"), text);
+    // As for window tips, a drawn line is 2 pixels wider than the text the game measures.
+    spotTip_.width = std::max(0, static_cast<int>(line.pixels.width) - 2);
+    spotTip_.baseline = line.baseline;
+    spotTip_.image = texture(std::move(line.pixels));
+}
+
+void Screen::emitTip(int x, int y, int w, int h, int image, int baseline, int baselineY, std::vector<Quad>& out) const {
+    const auto& text = textures_[static_cast<std::size_t>(image)];
+    const float l = static_cast<float>(x), t = static_cast<float>(y);
+    const float r = static_cast<float>(x + w - 2), bt = static_cast<float>(y + h - 3);
+    auto rect = [&](float x0, float y0, float x1, float y1, std::array<float, 4> c) { out.push_back({x0, y0, x1, y1, 0, 0, 1, 1, white_, c}); };
+    const float shadowBelow[3] = {0.4f, 0.2f, 0.07f}, shadowRight[2] = {0.2f, 0.07f};
+    for (int k = 0; k < 3; ++k) {
+        rect(l + 2, bt + static_cast<float>(k), r + 2, bt + static_cast<float>(k + 1), {0, 0, 0, shadowBelow[k]});
+    }
+    for (int k = 0; k < 2; ++k) {
+        rect(r + static_cast<float>(k), t + 2, r + static_cast<float>(k + 1), bt, {0, 0, 0, shadowRight[k]});
+    }
+    rect(l + 1, t + 1, r - 1, bt - 1, {236 / 255.f, 210 / 255.f, 140 / 255.f, 212 / 255.f});
+    const std::array<float, 4> edge{29 / 255.f, 39 / 255.f, 126 / 255.f, 1};
+    rect(l, t, r, t + 1, edge);
+    rect(l, bt - 1, r, bt, edge);
+    rect(l, t + 1, l + 1, bt - 1, edge);
+    rect(r - 1, t + 1, r, bt - 1, edge);
+    const float px = l + 12, py = static_cast<float>(baselineY - baseline);
+    out.push_back({px, py, px + static_cast<float>(text.width), py + static_cast<float>(text.height), 0, 0, 1, 1, image, {0, 0, 0, 1}});
+}
+
 void Screen::drawTip(Window& b) {
     if (b.tip.empty() || b.tipImage >= 0) {
         return;
@@ -705,11 +787,11 @@ std::optional<int> Screen::buttonAt(int x, int y) const {
     return over >= 0 ? std::optional<int>(over) : std::nullopt;
 }
 
-int Screen::tipWindowAt(int x, int y) const {
+int Screen::tipWindowAt(int x, int y, int within) const {
     int over = -1;
     for (int i = 0; i < static_cast<int>(windows_.size()); ++i) {
         const Window& w = windows_[static_cast<std::size_t>(i)];
-        if (w.tip.empty() || !shown(i) || (modal_ >= 0 && !inside(i, modal_))) {
+        if (w.tip.empty() || !shown(i) || (modal_ >= 0 && !inside(i, modal_)) || (within >= 0 && !inside(i, within))) {
             continue;
         }
         const auto at = origin(i);
@@ -727,8 +809,12 @@ bool Screen::held(int window) const {
 
 std::optional<int> Screen::mouse(int x, int y, bool down, double seconds) {
     const int over = buttonAt(x, y).value_or(-1);
-    // Any window can carry a tip (the queue's icons do). A button under the mouse comes first.
-    const int hovered = over >= 0 ? over : tipWindowAt(x, y);
+    // Any window can carry a tip (the queue's icons do, and a household thumbnail's portrait under
+    // its button). A button with a tip under the mouse comes first. A button without one passes the
+    // mouse on only to windows beside it in its parent, so a panel never shows the tip of what it covers.
+    const bool buttonTip = over >= 0 && !windows_[static_cast<std::size_t>(over)].tip.empty();
+    const int within = over < 0 ? -1 : parent(over) >= 0 ? parent(over) : over;
+    const int hovered = buttonTip ? over : tipWindowAt(x, y, within);
     if (hovered != hover_) {
         hover_ = hovered;
         hoverSince_ = seconds;
@@ -830,9 +916,34 @@ void Screen::emit(int index, std::vector<Quad>& out) const {
         // Other text is cut off inside the window's gutters.
         const float cx0 = std::max(tx, x0 + gx), cy0 = std::max(ty, top), cx1 = std::min(tx + tw, x1 - gx), cy1 = std::min(ty + th, bottom);
         if (cx1 > cx0 && cy1 > cy0) {
-            out.push_back({cx0, cy0, cx1, cy1, (cx0 - tx) / tw, (cy0 - ty) / th, (cx1 - tx) / tw, (cy1 - ty) / th, w.textImage,
-                           w.state == ButtonState::Disabled && w.disabledTextColor ? *w.disabledTextColor : w.textColor});
+            const std::array<float, 4> color = w.state == ButtonState::Disabled && w.disabledTextColor ? *w.disabledTextColor : w.textColor;
+            // A text box's selection is a highlighted stretch with its text in the selected colour.
+            float sx0 = cx1, sx1 = cx1;
+            if (w.kind == Kind::TextEdit && w.selectionEnd > w.selectionBegin) {
+                const FontStyle& style = fonts_.style(w.font);
+                sx0 = std::clamp(tx + static_cast<float>(fonts_.width(style, w.text.substr(0, w.selectionBegin))), cx0, cx1);
+                sx1 = std::clamp(tx + static_cast<float>(fonts_.width(style, w.text.substr(0, w.selectionEnd))), cx0, cx1);
+            }
+            auto part = [&](float a, float b, const std::array<float, 4>& c) {
+                if (b > a) {
+                    out.push_back({a, cy0, b, cy1, (a - tx) / tw, (cy0 - ty) / th, (b - tx) / tw, (cy1 - ty) / th, w.textImage, c});
+                }
+            };
+            if (sx1 > sx0) {
+                out.push_back({sx0, cy0, sx1, cy1, 0, 0, 1, 1, white_, w.highlightColor});
+            }
+            part(cx0, sx0, color);
+            part(sx0, sx1, w.selectedTextColor);
+            part(sx1, cx1, color);
         }
+        if (w.caret) {
+            const float before = static_cast<float>(fonts_.width(fonts_.style(w.font), w.text.substr(0, std::min(*w.caret, w.text.size()))));
+            const float cx = std::min(tx + before, x1 - gx - 1);
+            out.push_back({cx, cy0, cx + 1, cy1, 0, 0, 1, 1, white_, w.caretColor});
+        }
+    } else if (w.caret) {
+        const float gx = static_cast<float>(w.gutters[0]), gy = static_cast<float>(w.gutters[1]);
+        out.push_back({x0 + gx, y0 + gy, x0 + gx + 1, y1 - gy, 0, 0, 1, 1, white_, w.caretColor});
     }
     for (const int c : w.children) {
         emit(c, out);
@@ -883,6 +994,20 @@ std::vector<Quad> Screen::quads(double seconds) const {
     for (const int r : roots_) {
         emit(r, out);
     }
+    // The tip over a Sim in the world: its text in the Default style, the box the text's width plus
+    // 20 by a line plus 12, kept 28 pixels from its spot, 8 from the screen's top and left edges and
+    // 16 from its others.
+    if (spotTip_.image >= 0 && size_[0] > 0 && size_[1] > 0) {
+        constexpr int kSpotGap = 28, kSpotInset = 8, kSpotFar = 16;
+        const FontStyle& style = fonts_.style("Default");
+        const TipBox box = placeTip(spotTip_.at[0], spotTip_.at[1], spotTip_.width + 20, fonts_.lineHeight(style) + 12,
+                                    {kSpotInset, kSpotInset, size_[0] - kSpotFar, size_[1] - kSpotFar}, kSpotGap);
+        // The line's top is 6 pixels into the box, its baseline the font's ascent below as the game's
+        // font engine measures it (8 for the Default font, where the face itself says 11).
+        const auto line = fonts_.gameLine(style);
+        const int ascent = line ? line->ascent : fonts_.ascent(style);
+        emitTip(box.x, box.y, box.w, box.h, spotTip_.image, spotTip_.baseline, box.y + 6 + ascent, out);
+    }
     // The tooltip of the button the mouse rests on, as the game draws it: it shows 0.4 s after the
     // mouse came to the button and, unless the button keeps it (tipstimeout=no), hides 3 s after
     // the mouse came. The box is the text's width plus 24 and its lines plus 12, placed by placeTip.
@@ -896,28 +1021,10 @@ std::vector<Quad> Screen::quads(double seconds) const {
     if (b.tip.empty() || b.tipImage < 0 || (b.tipTimeout && seconds - hoverSince_ >= kTipTimeout)) {
         return out;
     }
-    const auto& text = textures_[static_cast<std::size_t>(b.tipImage)];
     const auto at = origin(hover_);
     const int advance = fonts_.lineHeight(fonts_.style("HoverTipTitle"));
     const TipBox box = placeTip(at[0] + b.w / 2, at[1] + b.h / 2, b.tipWidth + 24, b.tipLines * advance + 12, size_);
-    const float l = static_cast<float>(box.x), t = static_cast<float>(box.y);
-    const float r = static_cast<float>(box.x + box.w - 2), bt = static_cast<float>(box.y + box.h - 3);
-    auto rect = [&](float x0, float y0, float x1, float y1, std::array<float, 4> c) { out.push_back({x0, y0, x1, y1, 0, 0, 1, 1, white_, c}); };
-    const float shadowBelow[3] = {0.4f, 0.2f, 0.07f}, shadowRight[2] = {0.2f, 0.07f};
-    for (int k = 0; k < 3; ++k) {
-        rect(l + 2, bt + static_cast<float>(k), r + 2, bt + static_cast<float>(k + 1), {0, 0, 0, shadowBelow[k]});
-    }
-    for (int k = 0; k < 2; ++k) {
-        rect(r + static_cast<float>(k), t + 2, r + static_cast<float>(k + 1), bt, {0, 0, 0, shadowRight[k]});
-    }
-    rect(l + 1, t + 1, r - 1, bt - 1, {236 / 255.f, 210 / 255.f, 140 / 255.f, 212 / 255.f});
-    const std::array<float, 4> edge{29 / 255.f, 39 / 255.f, 126 / 255.f, 1};
-    rect(l, t, r, t + 1, edge);
-    rect(l, bt - 1, r, bt, edge);
-    rect(l, t + 1, l + 1, bt - 1, edge);
-    rect(r - 1, t + 1, r, bt - 1, edge);
-    const float px = l + 12, py = t + 15 - static_cast<float>(b.tipBaseline);
-    out.push_back({px, py, px + static_cast<float>(text.width), py + static_cast<float>(text.height), 0, 0, 1, 1, b.tipImage, {0, 0, 0, 1}});
+    emitTip(box.x, box.y, box.w, box.h, b.tipImage, b.tipBaseline, box.y + 15, out);
     return out;
 }
 

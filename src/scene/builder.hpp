@@ -7,6 +7,7 @@
 
 #include <array>
 #include <cstddef>
+#include <functional>
 #include <map>
 #include <optional>
 #include <span>
@@ -53,13 +54,20 @@ void addQuad(Primitive& p, const std::array<std::array<float, 3>, 4>& corners, c
 // Builds a Scene from the game's assets: models, materials and textures are loaded once and shared
 // by everything that uses them. Materials can be looked up by name, whether they come from the game
 // (TXMT) or were made here (plain colors, texture cells, wall cutouts).
+// A change made to a model's mesh data before it is built. `key` names it.
+struct MeshEdit {
+    std::string key;
+    std::function<void(scenegraph::Mesh&)> apply;
+};
+
 class SceneBuilder {
 public:
     explicit SceneBuilder(Assets& assets) : assets_(assets) {}
 
     // The mesh of a model with these material overrides, built on first use. -1 when it has nothing
-    // to draw. Each shape is placed where its reference sits in the model's transform tree.
-    int model(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides);
+    // to draw. Each shape is placed where its reference sits in the model's transform tree. With
+    // `edit`, the model's mesh data is changed first, as skinnedModel() does.
+    int model(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides, const MeshEdit* edit = nullptr);
     // The same with its meshes skinned to a pose (named `poseName`, for sharing): each vertex follows
     // its joints, from the bind pose to where `pose` has them.
     int posedModel(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides, const Pose& pose,
@@ -74,7 +82,10 @@ public:
 
     // The same left in its bind pose, skinned to be posed when drawn (see Primitive and Mesh::skin).
     // Groups without skinning data are placed as model() places them.
-    int skinnedModel(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides);
+    // With `edit`, the model's mesh data is changed first (a newborn's blended face). Models built
+    // with different edits are kept apart by the edit's key.
+    int skinnedModel(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides,
+                     const MeshEdit* edit = nullptr);
 
     // Where a named node of a model sits in it, once the model has been built.
     const Transform* bone(const std::string& model, const std::string& node) const;
@@ -87,7 +98,9 @@ public:
 
     // A game material (by name) whose texture is drawn over other textures (`under`, bottom first),
     // as one image: a Sim's clothing over its skin. Known afterwards as `name`.
-    int layeredMaterial(const std::string& name, const std::string& material, const std::vector<std::string>& under);
+    // Textures in `over` are drawn over it, bottom first.
+    int layeredMaterial(const std::string& name, const std::string& material, const std::vector<std::string>& under,
+                        const std::vector<std::string>& over = {});
 
     // A plain colored material.
     int colorMaterial(const std::string& name, const std::array<float, 3>& color, bool doubleSided = false);
@@ -133,7 +146,8 @@ private:
     // `places`: joints' places relative to their parents that replace the model's own (see
     // savedPoseModel), its bones then known as `boneKey`.
     int buildModel(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides, const Pose* pose,
-                   bool skinned = false, const Pose* places = nullptr, const std::string& boneKey = {});
+                   bool skinned = false, const Pose* places = nullptr, const std::string& boneKey = {},
+                   const MeshEdit* edit = nullptr);
     int image(const std::string& texture);
     // A bump map's normal map (see Assets::normalMap), -1 when it is missing.
     int normalMap(const std::string& texture);

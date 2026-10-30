@@ -77,6 +77,9 @@ constexpr KeyInfo kKeys[] = {
     {Key::Tab, SDLK_TAB, SDL_SCANCODE_TAB},
     {Key::Escape, SDLK_ESCAPE, SDL_SCANCODE_ESCAPE},
     {Key::Pause, SDLK_PAUSE, SDL_SCANCODE_PAUSE},
+    {Key::Backspace, SDLK_BACKSPACE, SDL_SCANCODE_BACKSPACE},
+    {Key::Delete, SDLK_DELETE, SDL_SCANCODE_DELETE},
+    {Key::Return, SDLK_RETURN, SDL_SCANCODE_RETURN},
     {Key::PageUp, SDLK_PAGEUP, SDL_SCANCODE_PAGEUP},
     {Key::PageDown, SDLK_PAGEDOWN, SDL_SCANCODE_PAGEDOWN},
     {Key::Home, SDLK_HOME, SDL_SCANCODE_HOME},
@@ -162,6 +165,9 @@ bool pollEvent(Event& out) {
             out.key = keyOf(e.key.key);
             out.scancode = keyOf(e.key.scancode);
             out.repeat = e.key.repeat;
+            out.shift = (e.key.mod & SDL_KMOD_SHIFT) != 0;
+            out.ctrl = (e.key.mod & SDL_KMOD_CTRL) != 0;
+            out.alt = (e.key.mod & SDL_KMOD_ALT) != 0;
             return true;
         case SDL_EVENT_MOUSE_MOTION:
             out.type = Event::Type::MouseMotion;
@@ -182,6 +188,10 @@ bool pollEvent(Event& out) {
             out.type = Event::Type::MouseWheel;
             out.wheel = e.wheel.y;
             return true;
+        case SDL_EVENT_TEXT_INPUT:
+            out.type = Event::Type::Text;
+            out.text = e.text.text != nullptr ? e.text.text : "";
+            return true;
         default:
             break;
         }
@@ -201,6 +211,18 @@ bool keyHeld(Key key) {
 
 void mousePosition(float& x, float& y) {
     SDL_GetMouseState(&x, &y);
+}
+
+void startTextInput() {
+    for (Window* w : windows()) {
+        SDL_StartTextInput(w->impl().window);
+    }
+}
+
+void stopTextInput() {
+    for (Window* w : windows()) {
+        SDL_StopTextInput(w->impl().window);
+    }
 }
 
 Window::Window() : impl_(std::make_unique<Impl>()) {}

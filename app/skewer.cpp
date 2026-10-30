@@ -106,6 +106,16 @@ void Skewer::setTracked(std::int16_t sim) {
     }
 }
 
+void Skewer::setName(std::int16_t sim, const std::string& name) {
+    for (const Thumbnail& t : thumbnails_) {
+        if (t.sim == sim) {
+            // The script marks the portrait group to show its caption as a tip,
+            // under the thumbnail's button, which has none.
+            screen_->setTip(screen_->find(t.window, kPortraitGroup), name);
+        }
+    }
+}
+
 void Skewer::setMood(std::int16_t sim, int mood) {
     for (Thumbnail& t : thumbnails_) {
         if (t.sim != sim) {

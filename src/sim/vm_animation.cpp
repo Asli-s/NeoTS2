@@ -4,6 +4,15 @@
 
 namespace ts2::sim::vm_detail {
 
+namespace {
+
+// How far a fade of `fadeMs` has got `ms` in (0-1), whole when there is no fade.
+float fadeShare(double ms, float fadeMs) {
+    return fadeMs > 0 ? static_cast<float>(std::clamp(ms / fadeMs, 0.0, 1.0)) : 1.0f;
+}
+
+} // namespace
+
 // The animation entry [entry] of string list [list] names, from the frame's code owner, its
 // semi-global code or the global code, the first that has the entry, nullopt when that entry is
 // empty or (unless `orMissing`) names an animation the game doesn't have.
@@ -121,6 +130,7 @@ std::optional<bool> Execution::animateSim(const bhav::Instruction& in, Frame& f)
     play.speed = resumed ? resumed->speed : static_cast<float>(speed) / 32.0f;
     play.flipped = a.flipFromTemp ? thread_.temps[3] != 0 : a.flipped;
     play.blendsOut = (in.operands[2] & 0x40) == 0;
+    play.blendsIn = (in.operands[2] & 0x80) == 0;
     play.layer = 2 * a.priority;
     play.category = entryCategory(play.name, category);
     play.frame = frame;
@@ -138,7 +148,7 @@ std::optional<bool> Execution::animateSim(const bhav::Instruction& in, Frame& f)
             play.lengthMs = *ms / std::abs(play.speed);
         }
     }
-    const AnimateFades fades = animateFades(play.lengthMs, (in.operands[2] & 0x80) == 0, play.blendsOut);
+    const AnimateFades fades = animateFades(play.lengthMs, play.blendsIn, play.blendsOut);
     play.fades = true;
     play.fadeInMs = fades.inMs;
     play.fadeOutMs = fades.outMs;
@@ -209,13 +219,18 @@ bool Execution::animateOverlay(const bhav::Instruction& in, Frame& f) {
     const std::uint8_t list = o[9];
     std::optional<std::string> name;
     std::uint8_t category = content::animation_category::kNoCategory;
+    // A clip laid on another Sim is named for that Sim: its age's list, and for social animations
+    // that Sim and the one its interaction is with.
+    const SimObject& named = target->isPerson() ? *target : sim;
     if (list == kSpecialAnimationList) {
         name = specialAnimationName(sim, static_cast<std::uint16_t>(index), &category);
+    } else if (list == content::animation_list::kSocial && named.isPerson()) {
+        name = socialAnimation(f, named, static_cast<std::uint16_t>(index));
     } else {
-        const std::int16_t age = sim.personData[kLifeStagePersonData];
+        const std::int16_t age = named.personData[kLifeStagePersonData];
         std::uint16_t ageList = list;
-        if (sim.isPerson()) {
-            ageList = list == content::animation_list::kObject ? content::objectAnimationList(sim.personData[kSpeciesPersonData], age)
+        if (named.isPerson()) {
+            ageList = list == content::animation_list::kObject ? content::objectAnimationList(named.personData[kSpeciesPersonData], age)
                                                                : content::ageAnimationList(list, age);
         }
         name = animationEntry(f, ageList, static_cast<std::uint16_t>(index), ageList == list, &category);
@@ -249,6 +264,9 @@ bool Execution::animateOverlay(const bhav::Instruction& in, Frame& f) {
     overlay.codeOwner = f.codeOwner;
     overlay.stackObject = f.stackObjectId;
     overlay.caller = target->id != sim.id ? sim.id : std::int16_t{0};
+    if (o[15] & 0x08) {
+        overlay.ikTarget = thread_.temps[6];
+    }
     if (const auto& lengths = world().animationLengths()) {
         const auto ms = lengths(overlay.name);
         if (!ms) {
@@ -256,6 +274,12 @@ bool Execution::animateOverlay(const bhav::Instruction& in, Frame& f) {
             return true;
         }
         overlay.lengthMs = *ms / std::abs(overlay.speed) * std::max<std::int16_t>(overlay.plays, 1);
+        // It fades as an Animate Sim clip does, the fades shrunk to fit only when it plays a set number
+        // of times.
+        const AnimateFades fades = overlay.plays < 0 ? AnimateFades{overlay.blendsIn ? kAnimateFadeMs : 0.0f, overlay.blendsOut ? kAnimateFadeMs : 0.0f}
+                                                     : animateFades(overlay.lengthMs, overlay.blendsIn, overlay.blendsOut);
+        overlay.blendInMs = fades.inMs;
+        overlay.blendOutMs = fades.outMs;
     }
     layOverlay(*target, std::move(overlay));
     return true;
@@ -305,7 +329,7 @@ std::string Execution::objectAnimationText(std::uint32_t owner, const SimObject*
 // Animate Object. Operands:
 //   bytes 0-1  animation entry (byte 2 bit 0x04: the param it names)
 //   byte 2     flags: 0x01 flipped, 0x02 speed from temp 2, 0x04 entry in a param, 0x20 play count
-//              from temp 1
+//              from temp 1, 0x40 no fade out, 0x80 no fade in
 //   byte 3     speed, in 32nds (32 = as authored)
 //   byte 6, 7-8  the object that plays it (owner, data)
 //   byte 10    more flags: 0x01 flipped if temp 3, 0x02 the entry is for the Sim in temp 5 (see
@@ -364,12 +388,25 @@ bool Execution::animateObject(const bhav::Instruction& in, Frame& f) {
     play.speed = static_cast<float>(speed) / 32.0f;
     play.flipped = (o[10] & kFlipFromTemp3) ? thread_.temps[3] != 0 : (o[2] & 0x01) != 0;
     play.loops = plays != 1;
-    // Until Animate Stop gives it the time it played. Counted plays end after the last one.
+    play.blendsIn = (o[2] & 0x80) == 0;
+    play.blendsOut = (o[2] & 0x40) == 0;
+    // Counted plays end after the last one. One played until Animate Stop ends when that gives it the
+    // time it played.
     play.lengthMs = std::numeric_limits<float>::infinity();
-    if (plays > 1 && speed > 0 && lengths) {
+    if (plays > 0 && speed != 0 && lengths) {
         if (const auto length = lengths(name)) {
-            play.lengthMs = static_cast<float>(plays) * *length / play.speed;
+            play.lengthMs = static_cast<float>(plays) * *length / std::abs(play.speed);
         }
+    }
+    // It fades in and out as an Animate Sim clip does. One played until Animate Stop fades in once.
+    const AnimateFades fades = plays < 0 ? AnimateFades{play.blendsIn ? kAnimateFadeMs : 0.0f, play.blendsOut ? kAnimateFadeMs : 0.0f}
+                                         : animateFades(play.lengthMs, play.blendsIn, play.blendsOut);
+    play.fades = true;
+    play.fadeInMs = fades.inMs;
+    play.fadeOutMs = fades.outMs;
+    // The clip it replaces plays on under it until it ends or the new one crossfades it.
+    if (target->animation) {
+        target->ending = std::move(target->animation);
     }
     target->animation = std::move(play);
     return true;
@@ -405,10 +442,18 @@ bool Execution::animateStop(const bhav::Instruction& in, Frame& f) {
         const auto entry = static_cast<std::uint16_t>(o[0] | o[1] << 8);
         const std::int16_t index = (o[2] & 0x04) ? slotAt(f.params, entry, "param") : static_cast<std::int16_t>(entry);
         const std::uint8_t list = o[6];
-        const std::uint8_t ageList = target->isPerson() ? content::ageAnimationList(list, target->personData[kLifeStagePersonData]) : list;
-        name = animationEntry(f, ageList, static_cast<std::uint16_t>(index), true);
-        if (!name && ageList != list) {
-            name = animationEntry(f, list, static_cast<std::uint16_t>(index), true);
+        if (list == content::animation_list::kSocial && target->isPerson()) {
+            // Named as the start names it, for the Sim whose clips stop and its interaction's partner.
+            name = socialAnimation(f, *target, static_cast<std::uint16_t>(index));
+        } else {
+            const std::uint8_t ageList =
+                target->isPerson() ? content::ageAnimationList(list, target->personData[kLifeStagePersonData]) : list;
+            // As for the start, an age's entry naming a clip the game doesn't have falls back to the
+            // adult list, so a teen stops the adult clip it was given.
+            name = animationEntry(f, ageList, static_cast<std::uint16_t>(index), ageList == list);
+            if (!name && ageList != list) {
+                name = animationEntry(f, list, static_cast<std::uint16_t>(index), true);
+            }
         }
         if (!name) {
             return true;
@@ -448,6 +493,10 @@ bool Execution::animateStop(const bhav::Instruction& in, Frame& f) {
                 it = target->overlays.erase(it);
                 continue;
             }
+            const double played = std::max(0.0, now - it->startMs);
+            const float fadedIn = it->blendsIn ? fadeShare(played, it->blendInMs.value_or(kOverlayBlendMs)) : 1.0f;
+            const float fadedOut = it->blendsOut && it->plays >= 0 ? fadeShare(it->lengthMs - played, it->blendOutMs.value_or(kOverlayBlendMs)) : 1.0f;
+            it->stoppedAt = fadedIn * fadedOut;
             it->stopped = true;
             it->plays = 1;
             it->lengthMs = static_cast<float>(std::max(0.0, now - it->startMs) + blendMs);

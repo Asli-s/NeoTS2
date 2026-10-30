@@ -460,11 +460,14 @@ void walksStartAndStopWithTheirClips() {
     world.advanceClock(total / 2);
     CHECK(vm.resume(sim).outcome == Outcome::Sleeping && sim.y > (6 << 16) && sim.y < (7 << 16));
     CHECK(sim.animation && sim.animation->name == "a-female-walk-alt0-normal" && sim.animation->loops);
-    world.advanceClock(total / 2 - 100);
+    // The route hands back as the walk starts fading out, half a fade before its end, and the walk's
+    // clips play on under what follows.
+    world.advanceClock(total / 2 - 120);
     CHECK(vm.resume(sim).outcome == Outcome::Sleeping && sim.animation && sim.animation->name == "a-turnAndStop-alt-0");
-    world.advanceClock(200);
+    world.advanceClock(10);
     CHECK(vm.resume(sim).outcome == Outcome::True && at(8.0f) && !sim.walking);
     CHECK(sim.animation && sim.animation->name == "a-turnAndStop-alt-0" && sim.data[1] == 4);
+    CHECK(sim.walkTail && sim.walkTail->plan.segments.size() == 3);
 }
 
 // A walk begun within 140 ms of the last one's end in its stop clip begins on the foot that stop
@@ -587,7 +590,9 @@ void interruptedWalksStopSoon() {
     CHECK(outcome == Outcome::False && sim.personData[0x3E] == 3 && !sim.walking);
     const float y1 = static_cast<float>(sim.y) / 65536.0f;
     CHECK(y1 > y0 && y1 < y0 + 0.8f && sim.data[1] == 4);
-    CHECK(sim.animation && sim.animation->name == "a-turnAndStop-alt-0");
+    // Once the stop has faded the walk settles into the walk pose, holding nothing, and the route
+    // ends then.
+    CHECK(!sim.animation && sim.walkSettledMs && *sim.walkSettledMs == world.clockMs());
 
     // Still to be interrupted when the next route starts: it isn't planned.
     sim.personData[0x3E] = 0;
@@ -929,8 +934,10 @@ void blockedRoutesAskAStandingSimToMove() {
         const std::uint64_t askedAt = w.world.ticks();
         const float d = std::hypot(w.a->x / 65536.0f - 5.0f, w.a->y / 65536.0f - 6.0f);
         CHECK(w.a->personData[0xF4] == w.b->id && w.step() == Step::AskToMove && w.a->personData[0xF0] == 0);
-        // The block ended the walk where a stands: it shows no walk while it waits.
+        // The block ended the walk where a stands: it shows no walk while it waits. It had moved, so
+        // it settled into the walk pose then.
         CHECK(w.a->walking->stopped && !ts2::sim::alongPlan(*w.a->walking) && !w.a->lastWalkEnd);
+        CHECK(w.a->walkSettledMs && *w.a->walkSettledMs <= w.world.clockMs());
         CHECK(w.a->personData[0xF5] == 1 && w.a->personData[0xF6] == std::max(1, static_cast<int>((1.25f - d) * 24.0f)));
         CHECK(w.b->queue.size() == 1 && w.b->destinations.size() == 1 && w.a->walking && w.a->walking->block.waitingOn == w.b->id);
         const ts2::sim::SimObject* made = w.world.find(w.b->destinations.front());

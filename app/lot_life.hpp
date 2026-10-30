@@ -4,7 +4,9 @@
 #include "scene/animation_library.hpp"
 #include "scene/outfit_properties.hpp"
 #include "scene/scene.hpp"
+#include "scene/newborn_face.hpp"
 #include "scene/scene_ray.hpp"
+#include "scene/sims.hpp"
 #include "sim/clock.hpp"
 #include "content/ui_meters.hpp"
 #include "formats/tga.hpp"
@@ -15,6 +17,7 @@
 #include <array>
 #include <deque>
 #include <filesystem>
+#include <future>
 #include <map>
 #include <memory>
 #include <optional>
@@ -26,7 +29,8 @@
 namespace app {
 
 // A lot's simulation, or null (saying why) when it can't be built.
-std::unique_ptr<ts2::sim::LotSimulation> loadSimulation(const std::filesystem::path& install, const std::filesystem::path& lot);
+std::unique_ptr<ts2::sim::LotSimulation> loadSimulation(const std::filesystem::path& install, const std::filesystem::path& lot,
+                                                        std::optional<std::uint32_t> seed = std::nullopt);
 
 // A lot's Sims driven by their own scripts: the lot's simulation, run in step with real time, and
 // each Sim's actor playing the animation its scripts started last (its idle loop until then).
@@ -59,7 +63,7 @@ public:
     void select(std::int16_t sim);
     // The household's Sims (object ids, in family order), and a Sim's portrait for its life stage
     // from its character file.
-    const std::vector<std::int16_t>& household() const { return sim_->household(); }
+    std::vector<std::int16_t> household() const { return sim_->household(); }
     [[nodiscard]] std::optional<ts2::tga::Pixels> portrait(std::int16_t sim);
     // A Sim's neighbor id (0 when it has none), and where a neighbor's portrait for its life stage
     // is: its character file and the picture's instance there (nullopt when unknown).
@@ -91,6 +95,16 @@ public:
         bool female = false;
     };
     std::optional<NeighborName> neighborName(std::int16_t id);
+    // The parts of a Sim's name as the game shows it over the Sim and its portraits: its neighbor's
+    // first and last name, or without a neighbor its character's first name alone. `title` is person
+    // data 0xE6, a witch's title (0 for none).
+    struct SimName {
+        std::string first, last;
+        std::int16_t title = 0;
+    };
+    SimName simName(std::int16_t sim);
+    // Changes whenever a first name is given while playing (see World::namesVersion).
+    std::uint32_t namesVersion() const { return sim_->world().namesVersion(); }
     // An object's catalog name (its catalog strings' first line). Empty when unknown.
     std::string objectName(std::uint32_t guid);
     // Whether the neighborhood has this neighbor.
@@ -216,6 +230,8 @@ private:
     void placeObjects(ts2::scene::Scene& scene);
     void followClips(ts2::scene::Scene& scene);
     void animateObjects(ts2::scene::Scene& scene);
+    void shadeHeld(ts2::scene::Scene& scene);
+    void shadeCreated(ts2::scene::Scene& scene, std::size_t index, std::int16_t direction);
     void lookHeads(ts2::scene::Scene& scene, double nowMs);
     // What a Sim's current look aims at on the lot, worked out where the simulation may be read.
     struct LookAim {
@@ -226,8 +242,11 @@ private:
     };
     LookAim lookAim(const ts2::sim::SimObject& sim, const ts2::scene::Scene& scene);
     std::optional<ts2::scene::Transform> partSlot(std::int16_t part, std::size_t slot, const ts2::scene::Scene& scene);
+    std::optional<ts2::scene::Transform> slotPlace(const ts2::scene::PlacedObject& placed, std::size_t slot, const ts2::scene::Scene& scene);
     const ts2::scene::Transform& standingPlace(const ts2::scene::PlacedObject& placed, const ts2::scene::Scene& scene) const;
-    void addCreatedObjects(ts2::scene::Scene& scene);
+    void addCreatedObjects(ts2::scene::Scene& scene, bool removeSims = true);
+    // Puts a Sim created during play into the scene. False when it has no look to draw.
+    bool addCreatedSim(ts2::scene::Scene& scene, const ts2::sim::SimObject& sim);
     void relight(ts2::scene::Scene& scene, std::size_t index, const ts2::scene::Transform& inLot, int storey);
     ts2::scene::Assets& assets_;
     std::unique_ptr<ts2::sim::LotSimulation> sim_;
@@ -246,8 +265,17 @@ private:
     // the one before, fading out under it.
     struct OwnAnimations {
         std::optional<ts2::sim::PlayingAnimation> current, previous;
-        // Where the Sim stood while `current` played (last drawn), and while `previous` did.
-        std::optional<ts2::scene::Transform> currentPlace, previousPlace;
+        // Where the Sim stood as each of its clips started (first drawn), by name and start, for the
+        // clips still drawn: one with a root joint plays on there (see LayeredClip::placeMove).
+        struct Started {
+            std::string name;
+            double startMs = 0;
+            ts2::scene::Transform place;
+        };
+        std::vector<Started> started;
+        // Keeps where the Sim stands now as the start place of each of its clips that has none yet (its
+        // own animation unless it walks, and its overlays), and forgets the clips no longer drawn.
+        void noteStarts(const ts2::sim::SimObject& object, const ts2::scene::Transform& place, bool walks);
         // Where and on which storey its lights were last picked.
         std::array<float, 12> litPlace{};
         int litLevel = -1;
@@ -256,14 +284,18 @@ private:
         std::optional<ts2::sim::PlayingAnimation> held;
         bool walking = false;  // while the Sim walks, `previous` is what it did before the walk
         double walkStartMs = 0;  // when that walk started (a walk straight after another starts anew)
-        // The walk's last clips as drawn, the heading they were drawn at, and when it ended (negative:
-        // none), so that an animation starting as the walk ends fades in over the walk's last pose.
-        std::vector<ts2::sim::LocoClip> endedClips;
-        std::vector<ts2::sim::WalkPose> endedPoses;
-        float endedHeading = 0;
-        double walkEndMs = -1;
+        // The walk that handed back, while its clips play out their fade (under the next walk too), and
+        // the heading they were last drawn at while it walked.
+        std::optional<ts2::sim::SimObject::WalkTail> tail;
+        float tailHeading = 0;
+        float endedHeading = 0;  // the heading the walk in progress was last drawn at
+        // When the Sim's last stopped walk settled (see SimObject::walkSettledMs), and where the
+        // Sim stood then.
+        std::optional<double> settledMs;
+        std::optional<ts2::scene::Transform> settledAt;
     };
     std::vector<ts2::sim::WalkPose> walkPoses_;
+    std::vector<ts2::sim::WalkPose> tailPoses_;
     std::map<std::uint32_t, OwnAnimations> ownAnimations_;
     // Per lot object: where the simulation had it when last drawn (place, facing, container, slot).
     struct ObjectPlace {
@@ -278,6 +310,10 @@ private:
     // Per multi-tile part and container slot: where the slot's bone sits in its lead's model (see partSlot).
     std::map<std::pair<std::int16_t, std::size_t>, std::optional<ts2::scene::Transform>> partSlots_;
     std::set<std::uint32_t> unskinned_;  // objects whose model can't be drawn skinned (see animateObjects)
+    std::set<std::size_t> heldNow_;  // the scene instances Sims hold, this frame
+    std::set<std::size_t> unshaded_;  // created objects' instances not yet placed out of a Sim's hands
+    // The shadow each held object had before a Sim took it, by scene instance (see shadeHeld).
+    std::map<std::size_t, ts2::scene::objectshadow::Kind> heldShadows_;
     // Per neighbor: its held wants and fears (GUIDs) in the order they were held. Saved holds come
     // first, wants before fears.
     struct Hold {
@@ -287,11 +323,16 @@ private:
     };
     std::map<std::int16_t, std::deque<Hold>> holds_;
     std::vector<std::pair<std::size_t, ts2::scene::Transform>> moved_;
-    // Objects up to this id were on the lot when it was loaded or have been seen since (ids are
-    // never given out twice).
-    std::int16_t lastSeenId_ = 0;
+    // The type (GUID) of the object each id was drawn for, the lot's objects and those created since.
+    // A freed id goes to the next object created, which may be of another type.
+    std::map<std::int16_t, std::uint32_t> drawnTypes_;
     std::map<std::int16_t, std::size_t> created_;  // created objects in the scene: id -> instance
     std::vector<std::size_t> freeInstances_;       // instances of removed created objects, for reuse
+    std::vector<std::size_t> freeSimInstances_;    // instances of removed Sims, for the next Sim drawn
+    std::map<std::int16_t, std::vector<std::size_t>> createdSims_;  // Sims created during play: id -> instances
+    std::shared_future<ts2::scene::BabyCatalog> babyCatalog_;  // read in the background from the start
+    std::shared_ptr<ts2::scene::NewbornFaceData> newbornFaces_ = std::make_shared<ts2::scene::NewbornFaceData>();
+    std::set<std::int16_t> triedSims_;  // Sims already drawn or tried
     std::vector<std::size_t> changedInstances_;
     std::vector<std::size_t> relit_;
 };

@@ -69,6 +69,42 @@ void socialAnimationsAreNamedForBothSims() {
     CHECK(vm.run(adult, kObjectGroup, 0x1000).outcome == Outcome::Error);
     world.setAnimationLengths([](const std::string&) -> std::optional<float> { return 1000.0f; });
     CHECK(play(elder, adult) == "e2a-soc-admire");  // an elder's own when the game has it
+
+    // Animate Overlay laid on another Sim names the clip for that Sim and its partner: a teen leading a
+    // child's dance lays c2a- on the child (no c2t- clip, and a child never plays an adult's).
+    Instruction overlay;
+    overlay.opcode = 0x006B;
+    overlay.trueTarget = T;
+    overlay.falseTarget = E;
+    const std::uint8_t bytes[] = {0, 0, 0, 32, 0, 0, owner::kMyData, 0x0B, 0, 0x83, 0xFF, 1, 0, 0, 0, 0x08};
+    std::copy(std::begin(bytes), std::end(bytes), overlay.operands.begin());
+    code.add(kObjectGroup, 0x1002, bhav({overlay}));
+    world.setAnimationLengths([](const std::string& name) -> std::optional<float> {
+        if (name == "c2a-soc-admire" || name == "a2c-soc-admire") return 1000.0f;
+        return std::nullopt;
+    });
+    auto& child = person(8);
+    child.interactionPartner = teen.id;
+    teen.interactionPartner = child.id;
+    teen.data[0x0B] = child.id;
+    teen.thread = {};
+    teen.thread.temps[6] = teen.id;  // byte 15 flag 0x08: the IK object is in temp 6
+    Vm lay(code, {}, &world);
+    CHECK(lay.run(teen, kObjectGroup, 0x1002).outcome == Outcome::True);
+    CHECK(child.overlays.size() == 1 && child.overlays[0].name == "c2a-soc-admire" && child.overlays[0].ikTarget == teen.id);
+
+    // Animate Stop by name names a social clip the same way, so it finds the overlay laid above.
+    Instruction stop;
+    stop.opcode = 0x006C;
+    stop.trueTarget = T;
+    stop.falseTarget = E;
+    const std::uint8_t stopBytes[] = {0, 0, 0, owner::kMyData, 0x0B, 0, 0x83, 0, 0};
+    std::copy(std::begin(stopBytes), std::end(stopBytes), stop.operands.begin());
+    code.add(kObjectGroup, 0x1003, bhav({stop}));
+    teen.thread = {};
+    Vm stopper(code, {}, &world);
+    CHECK(stopper.run(teen, kObjectGroup, 0x1003).outcome == Outcome::True);
+    CHECK(child.overlays.empty());
 }
 
 // Animate Sim: plays the named animation from the object's list (else the global one) and waits
@@ -371,8 +407,8 @@ void overlayEventsReachTheirTree() {
     tell();
     CHECK(sim.thread.temps[1] == 0 && sim.overlays.size() == 1);
     // Between ticks, at the animation clock's time.
-    ts2::sim::tellOverlayEvents(world, vm, sim.id, [&](const ts2::sim::RunResult&) { ++stops; }, 760);
-    CHECK(sim.thread.temps[1] == 9997 && sim.thread.temps[2] == 76 && sim.overlays[0].blendingOut);
+    ts2::sim::tellOverlayEvents(world, vm, sim.id, [&](const ts2::sim::RunResult&) { ++stops; }, 770);
+    CHECK(sim.thread.temps[1] == 9997 && sim.thread.temps[2] == 77 && sim.overlays[0].blendingOut);
     sim.thread.temps = {};
     sim.overlays[0].blendingOut = false;
     world.advanceClock(100);
@@ -484,8 +520,41 @@ void animateStopEndsOverlaysByKindAndPriority() {
         sim.overlays.push_back(overlay);
     }
     Vm idleStop(code, {}, &world);
+    world.advanceClock(42);
     CHECK(idleStop.run(sim, kObjectGroup, 0x1002).outcome == Outcome::True);
     CHECK(sim.overlays.size() == 2 && sim.overlays[0].stopped && !sim.overlays[1].stopped);
+    // Stopped 42 ms into its 233.33 ms fade in, it falls from the share it had then.
+    CHECK(sim.overlays[0].stoppedAt && std::fabs(*sim.overlays[0].stoppedAt - 42.0f / 233.33f) < 0.01f);
+}
+
+// Animate Stop by name finds the clip as the start does: a teen's entry naming a clip the game
+// doesn't have falls back to the adult list, so the adult clip a teen was given stops.
+void animateStopByNameFallsBackToTheAdultClip() {
+    Instruction stop;
+    stop.opcode = 0x006C;
+    stop.trueTarget = T;
+    stop.falseTarget = F;
+    const std::uint8_t bytes[] = {0, 0, 0x40, owner::kMyData, 0x0B, 0, 0x81, 0, 0};
+    std::copy(std::begin(bytes), std::end(bytes), stop.operands.begin());
+    MemoryCodeSource code;
+    code.addStrings(ts2::sim::kGlobalGroup, 0x81, {"a-idle-breatheLoop50"});
+    code.addStrings(ts2::sim::kGlobalGroup, 0x8A, {"t-idle-breatheLoop50"});
+    code.add(kObjectGroup, 0x1000, bhav({stop}));
+    ts2::sim::World world;
+    world.setAnimationLengths([](const std::string& name) -> std::optional<float> {
+        if (name == "a-idle-breatheLoop50") return 1000.0f;
+        return std::nullopt;
+    });
+    auto& teen = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    teen.personData[0x3A] = 17;
+    ts2::sim::PlayingOverlay overlay;
+    overlay.name = "a-idle-breatheLoop50";
+    overlay.priority = 1;
+    overlay.lengthMs = 3000;
+    teen.overlays.push_back(overlay);
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(teen, kObjectGroup, 0x1000).outcome == Outcome::True);
+    CHECK(teen.overlays.empty());
 }
 
 // Animate Object plays its clip once, or temp 1 times with byte 2 flag 0x20, where -1 (the
@@ -652,6 +721,7 @@ std::vector<Test> vmAnimationTests() {
         {"Overlay events reach their tree", overlayEventsReachTheirTree},
         {"Animate Sim events reach their tree", animateSimEventsReachTheirTree},
         {"Animate Stop ends overlays by kind and priority", animateStopEndsOverlaysByKindAndPriority},
+        {"Animate Stop by name falls back to the adult clip", animateStopByNameFallsBackToTheAdultClip},
         {"Animate Sim flips from temp 3", animateSimFlipsFromTemp3},
         {"Animate Sim clips fade to fit", animateFadesFitTheClip},
         {"Animate Sim carries on the saved clip", animateSimCarriesOnTheSavedClip},

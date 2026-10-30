@@ -59,6 +59,16 @@ bool Execution::genericSimsCall(const bhav::Instruction& in) {
         }
         return true;
     }
+    if (call == kAddChildGenericCall) {
+        const auto* ids = world().neighbors();
+        for (const std::int16_t id : {thread_.temps[0], thread_.temps[1]}) {
+            if (ids == nullptr || !ids->contains(id)) {
+                throw Stop{Outcome::Error, "neighbor not found", std::to_string(id)};
+            }
+        }
+        world().setFamilyTie(thread_.temps[0], thread_.temps[1], famt::TieType::Child);
+        return true;
+    }
     if (call == kRemoveFamilyTieGenericCall) {
         const auto* ids = world().neighbors();
         for (const std::int16_t id : {thread_.temps[0], thread_.temps[1]}) {
@@ -153,9 +163,11 @@ bool Execution::fitsWithFootprint() {
     return result;
 }
 
-// "Add to family": the neighbor whose id is my stack object joins family temp 0, which is made
-// when the neighborhood doesn't have it (32767 holds the NPCs). Its person data "family" (0x3D)
-// and 0x43 are set, also on its Sim when on the lot. False when it is already in that family.
+// "Add to family": the neighbor whose id is my stack object joins family temp 0, or with 0 the
+// household living on the lot, which is made when the neighborhood doesn't have it (32767 holds the
+// NPCs). Its person data "family" (0x3D) and 0x43 are set, also on its Sim when on the lot, its
+// GUID joins the family's members, and temp 0 becomes 0. False when it is already in that family. A lot with no household makes the
+// game wait for one, which isn't done.
 bool Execution::addToFamily() {
     constexpr std::size_t kFamilyField = 0x3D, kClearedOnJoin = 0x43;
     const std::int16_t neighborId = stackObject();
@@ -164,9 +176,13 @@ bool Execution::addToFamily() {
     if (data == nullptr) {
         throw Stop{Outcome::Error, "missing neighbor for data access", std::to_string(neighborId)};
     }
-    const std::int16_t family = thread_.temps[0];
+    std::int16_t family = thread_.temps[0];
     if (family == 0) {
-        throw Stop{Outcome::Unsupported, "add to family: the lot's own household", ""};
+        const std::optional<std::uint32_t> household = world().lotHousehold();
+        if (!household) {
+            throw Stop{Outcome::Unsupported, "add to family: no household on the lot", ""};
+        }
+        family = static_cast<std::int16_t>(*household);
     }
     const std::int16_t current = (*data)[kFamilyField];
     if (current == family) {
@@ -176,9 +192,11 @@ bool Execution::addToFamily() {
         throw Stop{Outcome::Unsupported, "add to family: moving out of another family", std::to_string(current)};
     }
     world().addFamily(static_cast<std::uint16_t>(family));
+    thread_.temps[0] = 0;
     (*data)[kFamilyField] = family;
     (*data)[kClearedOnJoin] = 0;
     const std::uint32_t guid = neighbor->guid;
+    world().addFamilyMember(static_cast<std::uint16_t>(family), guid);
     if (SimObject* sim = guid != 0 ? world().nextAfter(0, [&](const SimObject& s) { return s.isPerson() && s.definition.guid() == guid; })
                                    : nullptr) {
         sim->personData[kFamilyField] = family;
@@ -190,8 +208,9 @@ bool Execution::addToFamily() {
 // Make New Character: a new neighbor of the age, gender and species in my locals (bytes 1, 2 and 14).
 // Age and gender 0 or less are picked at random. Its Sim gets a definition of its own (see
 // madeCharacterType). Its id goes into the stack object's object array 0, which is emptied first.
-// False when the neighborhood has no free id or the template type is missing.
-bool Execution::makeNewCharacter(const bhav::Instruction& in, Frame& f) {
+// False when the neighborhood has no free id or the template type is missing. Flag 0x01 makes
+// babies of two parents instead (see makeChildren).
+std::optional<bool> Execution::makeNewCharacter(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     const std::uint8_t flags = o[9];
     SimObject* holder = world().find(stackObject());
@@ -200,9 +219,6 @@ bool Execution::makeNewCharacter(const bhav::Instruction& in, Frame& f) {
     }
     if (holder->arrays.empty()) {
         throw Stop{Outcome::Error, "bad object array", "0"};
-    }
-    if (flags & kNewCharacterChild) {
-        throw Stop{Outcome::Unsupported, "Make New Character for a child of two parents", ""};
     }
     if (flags & kNewCharacterTemplateFromToken) {
         throw Stop{Outcome::Unsupported, "Make New Character from an inventory token", ""};
@@ -220,6 +236,9 @@ bool Execution::makeNewCharacter(const bhav::Instruction& in, Frame& f) {
             throw Stop{Outcome::Error, "a new character can't be made from this object type", hex(guid, 8)};
         }
         templateGuid = guid;
+    }
+    if (flags & kNewCharacterChild) {
+        return makeChildren(in, f, *holder, templateGuid);
     }
     auto random = [&](std::uint32_t n) {
         return static_cast<std::uint32_t>((static_cast<std::uint64_t>(static_cast<std::uint32_t>(rng_())) * n) >> 32);
@@ -260,6 +279,162 @@ bool Execution::makeNewCharacter(const bhav::Instruction& in, Frame& f) {
     }
     holder->arrays[0].assign(1, *id);
     return true;
+}
+
+// Make New Character for babies of two parents (flag 0x01). Parent 1 is bytes 6, 7-8 and parent 2
+// bytes 3, 4-5 (owner, data), each a neighbor id with flag 0x02 or 0x04, else an object whose Sim
+// names its neighbor. Temp 0 says how many babies, 1 to 10. The parents must be one species, though
+// a large and a small dog may mix. The babies' neighbor ids go into the stack object's object array 0.
+// The instruction then waits for them to be built and is true. How many ticks the game's build takes
+// is not known yet, it waits one. The game also posts a message (0xAD90F890) unless byte 15 bit 0 is
+// set, which nothing receives yet.
+std::optional<bool> Execution::makeChildren(const bhav::Instruction& in, Frame& f, SimObject& holder,
+                                            std::optional<std::uint32_t> templateGuid) {
+    constexpr std::int16_t kMaxChildren = 10;
+    constexpr std::int16_t kSpeciesFlagDogs = 0x06;
+    if (f.childrenPending) {
+        f.childrenPending = false;
+        return true;
+    }
+    const auto& o = in.operands;
+    holder.arrays[0].clear();
+    // A parent's neighbor: by id, or the neighbor whose Sim the object is (0 for a missing object).
+    auto parent = [&](std::uint8_t owner, std::uint16_t data, std::uint8_t neighborFlag) -> std::int16_t {
+        const std::int16_t value = read(owner, data, f);
+        if (o[9] & neighborFlag) {
+            if (world().neighbor(value) == nullptr) {
+                throw Stop{Outcome::Error, "neighbor not found", std::to_string(value)};
+            }
+            return value;
+        }
+        const SimObject* object = world().find(value);
+        if (object == nullptr) {
+            return 0;
+        }
+        const std::int16_t id = object->definition.guid() != 0 ? world().neighborIdWithGuid(object->definition.guid()) : 0;
+        if (id == 0) {
+            throw Stop{Outcome::Error, "neighbor not found", std::to_string(value)};
+        }
+        return id;
+    };
+    const std::int16_t parent1 = parent(o[6], static_cast<std::uint16_t>(o[7] | o[8] << 8), kNewCharacterParent1Neighbor);
+    const std::int16_t parent2 = parent(o[3], static_cast<std::uint16_t>(o[4] | o[5] << 8), kNewCharacterParent2Neighbor);
+    const std::int16_t count = thread_.temps[0];
+    if (count < 1 || count > kMaxChildren) {
+        throw Stop{Outcome::Error, "number of new characters out of range", std::to_string(count)};
+    }
+    if (parent1 == 0 || parent2 == 0) {
+        throw Stop{Outcome::Error, "neighbor not found", "0"};
+    }
+    const std::int16_t species1 = speciesFlag(parent1), species2 = speciesFlag(parent2);
+    if (species1 != species2 && ((species1 & kSpeciesFlagDogs) == 0 || (species2 & kSpeciesFlagDogs) == 0)) {
+        throw Stop{Outcome::Error, "parents of different species", std::to_string(species1) + " " + std::to_string(species2)};
+    }
+    for (std::int16_t i = 0; i < count; ++i) {
+        if (const std::optional<std::int16_t> id = makeChild(parent1, parent2, templateGuid)) {
+            holder.arrays[0].push_back(*id);
+        }
+    }
+    f.childrenPending = true;
+    return std::nullopt;
+}
+
+// A neighbor's species as the game's flag: 1 human, 2 large dog, 4 small dog, 8 cat (person data
+// 0xBA 1-3, anything else counts as human).
+std::int16_t Execution::speciesFlag(std::int16_t neighbor) {
+    const std::int16_t species = world().neighborPersonValue(neighbor, kSpeciesPersonData);
+    return species == 1 ? 2 : species == 2 ? 4 : species == 3 ? 8 : 1;
+}
+
+// One baby of two neighbors as the game's factory makes it, or nothing when it can't. Without a
+// template it takes the species of a parent picked at random, and that species' template. With a
+// template given it is human. The baby is 1 (a baby) with skin data 0x52 = 500 and 0x51 = 0. When
+// exactly one parent has person data 0xA5 set, the baby's gender is the other parent's opposite.
+// Otherwise it is drawn 50/50. It is named "Baby Boy" or "Baby Girl" until the player names it. A
+// human baby inherits its genes (see childGenome) from both parents, the first given first. When
+// exactly one parent has person data 0xA5 set, the other stands for both. Its look is not made yet.
+std::optional<std::int16_t> Execution::makeChild(std::int16_t parent1, std::int16_t parent2,
+                                                 std::optional<std::uint32_t> templateGuid) {
+    constexpr std::size_t kMarkPersonData = 0xA5, kSkinPersonData = 0x51, kSkinShadePersonData = 0x52;
+    constexpr std::int16_t kBabyAge = 1, kBabySkinShade = 500;
+    constexpr std::array<std::uint32_t, 4> kSpeciesTemplates{0x7FD96B54, 0x0F83C946, 0x111D8FFF, 0x911D900A};
+    auto random = [&](std::uint32_t n) {
+        return static_cast<std::uint32_t>((static_cast<std::uint64_t>(static_cast<std::uint32_t>(rng_())) * n) >> 32);
+    };
+    if (world().neighbor(parent1) == nullptr || world().neighbor(parent2) == nullptr || world().neighbors() == nullptr) {
+        return std::nullopt;
+    }
+    std::int16_t flag = 1;
+    if (!templateGuid) {
+        flag = speciesFlag(random(100) > 50 ? parent1 : parent2);
+        templateGuid = kSpeciesTemplates[flag == 2 ? 1 : flag == 4 ? 2 : flag == 8 ? 3 : 0];
+    }
+    const ObjectType* type = code_.objectType(*templateGuid);
+    if (type == nullptr) {
+        return std::nullopt;
+    }
+    SavedNeighbor made;
+    made.guid = madeCharacterType(*type, random(8));
+    made.personData.assign(kNeighborPersonDataCount, 0);
+    // A draw at or below one half is a girl, unless one parent decides.
+    const bool drawnFemale = static_cast<double>(static_cast<std::uint32_t>(rng_())) / 4294967296.0 <= 0.5;
+    std::optional<std::int16_t> decides = parent1 == parent2 ? std::optional<std::int16_t>{parent1} : std::nullopt;
+    const bool marked1 = world().neighborPersonValue(parent1, kMarkPersonData) != 0;
+    const bool marked2 = world().neighborPersonValue(parent2, kMarkPersonData) != 0;
+    if (marked1 != marked2) {
+        decides = marked1 ? parent2 : parent1;
+    }
+    const bool female = decides ? world().neighborPersonValue(*decides, kGenderPersonData) != 1 : drawnFemale;
+    made.personData[kNewAgePersonData] = kBabyAge;
+    made.personData[kSpeciesPersonData] = static_cast<std::int16_t>(flag == 2 ? 1 : flag == 4 ? 2 : flag == 8 ? 3 : 0);
+    made.personData[kGenderPersonData] = female ? 1 : 0;
+    made.personData[kSkinShadePersonData] = kBabySkinShade;
+    made.personData[kSkinPersonData] = 0;
+    if (flag == 1) {
+        const std::int16_t geneticA = marked1 != marked2 ? *decides : parent1;
+        const std::int16_t geneticB = marked1 != marked2 ? *decides : parent2;
+        const std::optional<Genome> a = parentGenes(geneticA), b = parentGenes(geneticB);
+        if (const auto* catalog = world().geneticsCatalog(); catalog != nullptr && a && b) {
+            made.genes = childGenome(*a, *b, *catalog, world().geneticsRandom(), &made.facePicks);
+            made.faceParentA = geneticA;
+            made.faceParentB = geneticB;
+            // The eyebrows are drawn after the genes, from the catalog when the look is made. The
+            // game draws them with the birth job's generator, not the genes', so they are drawn with
+            // the factory's other draws here and the genes' stream stays as the game's.
+            made.browDraw = static_cast<std::uint32_t>(rng_());
+        }
+    }
+    const std::optional<std::int16_t> id = world().addNeighbor(std::move(made));
+    if (id && !world().babyFirstName(female).empty()) {
+        world().setNeighborFirstName(*id, world().babyFirstName(female));
+    }
+    return id;
+}
+
+// A parent's genes: its saved DNA, else made from its age data as the game makes them (both
+// alleles of skin, hair and eyes its own colour). None without either.
+std::optional<Genome> Execution::parentGenes(std::int16_t neighbor) {
+    const SavedNeighbor* saved = world().neighbor(neighbor);
+    if (saved == nullptr) {
+        return std::nullopt;
+    }
+    if (!saved->genes.empty()) {
+        return saved->genes;
+    }
+    const ObjectType* type = saved->guid != 0 ? code_.objectType(saved->guid) : nullptr;
+    const auto* age = type ? code_.ageData(type->group) : nullptr;
+    if (age == nullptr) {
+        return std::nullopt;
+    }
+    const auto colour = [&](const char* key) {
+        const auto it = age->find(key);
+        return it != age->end() ? it->second : std::string{};
+    };
+    const Gene skin{colour("skincolor"), colour("skincolor")};
+    return Genome{{kHairGene, Gene{colour("haircolor"), colour("haircolor")}},
+                  {kSkinAllelesGene, skin},
+                  {kEyeGene, Gene{colour("eyecolor"), colour("eyecolor")}},
+                  {kSkinGene, skin}};
 }
 
 // The definition the game gives a new character: its template's, now a person (type 2), under a

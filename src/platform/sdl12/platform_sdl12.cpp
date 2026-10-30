@@ -50,6 +50,9 @@ constexpr KeyInfo kKeys[] = {
     {Key::Tab, SDLK_TAB},
     {Key::Escape, SDLK_ESCAPE},
     {Key::Pause, SDLK_PAUSE},
+    {Key::Backspace, SDLK_BACKSPACE},
+    {Key::Delete, SDLK_DELETE},
+    {Key::Return, SDLK_RETURN},
     {Key::PageUp, SDLK_PAGEUP},
     {Key::PageDown, SDLK_PAGEDOWN},
     {Key::Home, SDLK_HOME},
@@ -92,6 +95,23 @@ bool gContextMade = false;
 bool gKeyDown[SDLK_LAST] = {};          // the keys held, to tell a press from its repeats
 GlContext* gContext = nullptr;          // the context made with the window
 std::thread::id gDrawingThread;         // the one that made it, where it is current
+bool gTextInput = false;                // typing makes text events
+
+// A character as UTF-8.
+std::string utf8(Uint16 c) {
+    std::string s;
+    if (c < 0x80) {
+        s += static_cast<char>(c);
+    } else if (c < 0x800) {
+        s += static_cast<char>(0xC0 | c >> 6);
+        s += static_cast<char>(0x80 | (c & 0x3F));
+    } else {
+        s += static_cast<char>(0xE0 | c >> 12);
+        s += static_cast<char>(0x80 | (c >> 6 & 0x3F));
+        s += static_cast<char>(0x80 | (c & 0x3F));
+    }
+    return s;
+}
 
 } // namespace
 
@@ -123,6 +143,15 @@ bool pollEvent(Event& out) {
             return true;
         case SDL_KEYDOWN:
         case SDL_KEYUP:
+            // SDL 1.2 gives a key press its character, which is the text typed while text input is on.
+            // Characters past 0xFFFF come as two halves of a UTF-16 pair, which aren't text alone and
+            // are left out.
+            if (const Uint16 c = e.key.keysym.unicode;
+                gTextInput && e.type == SDL_KEYDOWN && c >= 0x20 && c != 0x7F && (c < 0xD800 || c > 0xDFFF)) {
+                out.type = Event::Type::Text;
+                out.text = utf8(e.key.keysym.unicode);
+                return true;
+            }
             out.type = e.type == SDL_KEYDOWN ? Event::Type::KeyDown : Event::Type::KeyUp;
             // SDL 1.2 knows a key by its symbol only, and sends a held key's repeats as presses again.
             out.key = out.scancode = keyOf(e.key.keysym.sym);
@@ -130,6 +159,9 @@ bool pollEvent(Event& out) {
                 out.repeat = e.type == SDL_KEYDOWN && gKeyDown[sym];
                 gKeyDown[sym] = e.type == SDL_KEYDOWN;
             }
+            out.shift = (e.key.keysym.mod & KMOD_SHIFT) != 0;
+            out.ctrl = (e.key.keysym.mod & KMOD_CTRL) != 0;
+            out.alt = (e.key.keysym.mod & KMOD_ALT) != 0;
             return true;
         case SDL_MOUSEMOTION:
             out.type = Event::Type::MouseMotion;
@@ -170,6 +202,16 @@ bool keyHeld(Key key) {
         }
     }
     return false;
+}
+
+void startTextInput() {
+    gTextInput = true;
+    SDL_EnableUNICODE(1);
+}
+
+void stopTextInput() {
+    gTextInput = false;
+    SDL_EnableUNICODE(0);
 }
 
 void mousePosition(float& x, float& y) {

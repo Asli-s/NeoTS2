@@ -10,7 +10,7 @@
 namespace ts2::sim {
 
 // Tells the event trees of an object's overlays how far each has played, as the game does: when one
-// starts blending out (kOverlayBlendMs before its end) and when it is gone, each event run on the
+// starts blending out (its fade out before its end) and when it is gone, each event run on the
 // object with (event, the overlay's stack object, percent played, 1, 0). Finished overlays are
 // dropped. `onStop` hears of event trees that end other than true or false. `nowMs` is the time on the
 // animation clock (the game tells events as animations play, between simulation ticks).

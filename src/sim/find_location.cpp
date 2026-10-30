@@ -79,6 +79,17 @@ Offset nextInWalk(int first, Offset p) {
     }
 }
 
+// One tile's step in a direction (0 is -y, 2 is +x, odd ones diagonal).
+constexpr Offset kStep[8] = {{-1, 0}, {-1, 1}, {0, 1}, {1, 1}, {1, 0}, {1, -1}, {0, -1}, {-1, -1}};
+
+// Step `n` (from 1) of the walk along a line through the start tile: 1 tile in `direction`, 1 the
+// other way, 2 in `direction`, 2 the other way, and so on.
+Offset onLine(int direction, std::int64_t n) {
+    const auto reach = static_cast<std::int32_t>((n + 1) / 2);
+    const Offset s = kStep[(n % 2 == 1 ? direction : direction + 4) & 7];
+    return {s.along * reach, s.across * reach};
+}
+
 bool holdsSomethingElse(const World& world, const SimObject& placed, const Tile& tile) {
     return world.nextAfter(0, [&](const SimObject& s) {
         return s.id != placed.id && s.tile == tile && (s.data[kPlacementFlagsField] & kIgnoredByPreferEmpty) == 0;
@@ -140,7 +151,12 @@ std::optional<FoundLocation> findLocation(const World& world, const SimObject& p
     Offset at{};
     bool restarted = false;
     for (std::int64_t step = 0; offLotInARow < offLotLimit; ++step) {
-        if (step > 0 && !restarted) {
+        if (step > 0 && search.lineDirection >= 0) {
+            if (step > 4LL * kLotLimit * kLotLimit) {
+                break;
+            }
+            at = onLine(search.lineDirection & 7, step);
+        } else if (step > 0 && !restarted) {
             const Offset next = nextInWalk(first, at);
             if ((next.along == at.along && next.across == at.across) || step > 4LL * kLotLimit * kLotLimit) {
                 break;
@@ -171,10 +187,9 @@ std::optional<FoundLocation> findLocation(const World& world, const SimObject& p
         }
         // With a start direction, a start tile that isn't that way from the start point gives way to
         // the tile in front of it: the walk starts again there.
-        if (search.startDirection >= 0 && at.along == 0 && at.across == 0 && directionTo(search, x, y) != first) {
-            static constexpr Offset kFront[8] = {{-1, 0}, {-1, 1}, {0, 1}, {1, 1}, {1, 0}, {1, -1}, {0, -1}, {-1, -1}};
-            const std::int32_t frontX = std::clamp((search.startX >> 16) + kFront[first].across, 1, width - 2);
-            const std::int32_t frontY = std::clamp((search.startY >> 16) + kFront[first].along, 1, height - 2);
+        if (search.lineDirection < 0 && search.startDirection >= 0 && at.along == 0 && at.across == 0 && directionTo(search, x, y) != first) {
+            const std::int32_t frontX = std::clamp((search.startX >> 16) + kStep[first].across, 1, width - 2);
+            const std::int32_t frontY = std::clamp((search.startY >> 16) + kStep[first].along, 1, height - 2);
             if (frontX != startX || frontY != startY) {
                 startX = frontX;
                 startY = frontY;

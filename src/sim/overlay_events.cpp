@@ -68,9 +68,10 @@ void tellOverlayEvents(World& world, Vm& vm, std::int16_t id, const std::functio
         }
         const double length = found->lengthMs;
         const auto percent = static_cast<std::int16_t>(length > 0 ? std::clamp(100.0 * played / length, 0.0, 100.0) : 100.0);
-        if (!found->blendingOut && played >= length - kOverlayBlendMs) {
+        const double blendOut = found->blendOutMs.value_or(kOverlayBlendMs);
+        if (!found->blendingOut && played >= length - blendOut) {
             found->blendingOut = true;
-            tell(PlayingOverlay(*found), kBlendingOutEvent, percent, found->startMs + length - kOverlayBlendMs);
+            tell(PlayingOverlay(*found), kBlendingOutEvent, percent, found->startMs + length - blendOut);
             found = find(key);
             if (found == nullptr) {
                 continue;

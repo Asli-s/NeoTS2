@@ -11,6 +11,7 @@
 #include "sim/idle_spot.hpp"
 #include "sim/look_at.hpp"
 #include "sim/data_tables.hpp"
+#include "sim/genetics.hpp"
 #include "sim/inventory.hpp"
 #include "sim/message_subscriptions.hpp"
 #include "sim/ray_trace.hpp"
@@ -85,6 +86,8 @@ struct Frame {
     bool callerReruns = false;
     // The Dialog at pc posted a dialog and waits for its answer.
     bool dialogOpen = false;
+    // The Make New Character at pc made children and waits for them to be built.
+    bool childrenPending = false;
     // How far the Camera Control at pc has got (0 not started).
     std::uint8_t cameraStep = 0;
     // The frame runs the Sim's current interaction, which ends when it returns.
@@ -102,6 +105,9 @@ struct ThreadState {
     std::uint32_t codeGroup = 0;
     std::optional<bool> pendingResult;
     std::int32_t sleepTicks = 0;
+    // The step count as this thread raised the step limit. Lowering it puts the count back to this,
+    // so steps run under the raised limit don't count (see Limits::maxRaisedSteps).
+    std::size_t stepsAtRaise = 0;
 
     bool isRunning() const { return !frames.empty(); }
 };
@@ -166,10 +172,18 @@ struct QueuedInteraction {
     // it ends, before the Sim's main loop runs again.
     bool continuation = false;
     // The queue shows picture `iconIndex` of the object type `iconGuid` when it is set, else of
-    // `iconObject`, else of `partner`, else of `object`.
+    // icon(). With neither it leaves the interaction out.
     std::uint32_t iconGuid = 0;
     std::uint32_t iconIndex = 0;
     std::int16_t iconObject = 0;
+    // Push Interaction named the Sim it is with, but no object has that id. Then it has no icon
+    // object, as with the pregnancy's hidden "*" interactions.
+    bool noIconObject = false;
+    // The object whose picture the queue shows: `iconObject`, else `partner`, else `object`.
+    // 0 for none.
+    std::int16_t icon() const {
+        return iconObject != 0 ? iconObject : noIconObject ? std::int16_t{0} : partner != 0 ? partner : object;
+    }
     // Interaction table flag 0x8000: the queue shows it in a column under its first icon.
     bool nested = false;
     // The player cancelled it while it ran. The queue shows it crossed out until it ends.
@@ -287,7 +301,7 @@ struct SimObject {
     };
     std::optional<ResumedClip> resumedClip;
     // The Animate Sim clip it last finished, while that fades out (see PlayingAnimation::blendsOut).
-    // An instant Animate Stop removes it.
+    // For an object, the clip Animate Object last replaced. An instant Animate Stop removes it.
     std::optional<PlayingAnimation> ending;
     // Animations laid over it, oldest first.
     std::vector<PlayingOverlay> overlays;
@@ -307,6 +321,19 @@ struct SimObject {
         float foot = 0.5f;
     };
     std::optional<WalkEnd> lastWalkEnd;
+    // My last walk once its route handed back to its script: its clips play out their fade under
+    // what I do next (see walkWeight). It only shows, so it isn't saved.
+    struct WalkTail {
+        WalkPlan plan;
+        double startMs = 0;  // when the walk started, on the world's clock
+        WalkPath path;       // the walk's path, which its clips play on to the end of
+        std::int32_t level = 1;
+    };
+    std::optional<WalkTail> walkTail;
+    // When my last interrupted or blocked walk settled (clock ms): the pose I was in fades out over
+    // kSettlePoseMs while the walk pose fades in and out over kSettleWalkPoseMs. It only shows, so it
+    // isn't saved.
+    std::optional<double> walkSettledMs;
     // A routing slot this object was given in place of its type's slot 0 (see route_destinations.hpp).
     std::optional<slot::Entry> ownRoutingSlot;
     // The destinations a Sim's router made for it to make way, until nothing uses them.
@@ -318,6 +345,10 @@ struct SimObject {
     std::uint16_t lastTimerId = 0;
     // Why a tree another object ran on it at once failed. The simulation resets it on its next turn.
     std::optional<std::string> failedRun;
+    // Whether its scripts run on while the game is paused (the plumbob, which follows the selected
+    // Sim). It is object data 0x3C as the object was last loaded or reset, so a script setting that
+    // field later changes nothing until the next reset.
+    bool runsWhilePaused = false;
     bool removed = false;
     // Removed for scripts but kept on the lot until it unloads (see World::keepUntilUnload).
     bool keptUntilUnload = false;
@@ -337,6 +368,12 @@ struct SoundEvent {
 struct SavedNeighbor {
     std::uint32_t guid = 0;
     std::vector<std::int16_t> personData;
+    Genome genes;  // its DNA (SDNA), empty when none is saved
+    // A baby made during play: the parents its face is blended from (the first one carried it),
+    // which gave each region, and the draw that picks its eyebrows.
+    std::int16_t faceParentA = 0, faceParentB = 0;
+    FacePicks facePicks;
+    std::uint32_t browDraw = 0;
 };
 
 struct SavedNeighborhood {
@@ -349,6 +386,8 @@ struct SavedNeighborhood {
     std::map<std::uint32_t, std::int32_t> familyCurrentLots;   // and the two other lots its FAMI saves
     std::map<std::uint32_t, std::int32_t> familyVacationLots;
     std::map<std::uint32_t, std::uint32_t> familyFlags;  // each family's saved flags (FAMI)
+    // Each family's FAMI value4, which orders the game's families (highest first). Its meaning is not known yet.
+    std::map<std::uint32_t, std::int32_t> familyRanks;
     std::map<std::uint32_t, std::vector<std::uint32_t>> familyMembers;  // each family's members' GUIDs (FAMI)
     std::map<std::pair<std::int16_t, std::int16_t>, std::vector<std::int32_t>> relationships;
     std::map<std::int16_t, std::vector<famt::Tie>> familyTies;  // each neighbor's, in saved order
@@ -574,6 +613,9 @@ public:
     // tie to the other, of any type. Each gets an entry in the record if it had none. It lasts for
     // this run only, as nothing is saved yet.
     void removeFamilyTie(std::int16_t a, std::int16_t b);
+    // Makes neighbor `a` neighbor `b`'s `type` (father, mother, spouse, sibling or child), as the game's
+    // family ties do, and returns whether every step took. See World::setFamilyTie.
+    bool setFamilyTie(std::int16_t a, std::int16_t b, famt::TieType type);
     // The neighbors neighbor `id` has a family tie of `type` with, in the order the record lists them.
     std::vector<std::int16_t> familyTies(std::int16_t id, famt::TieType type) const {
         std::vector<std::int16_t> out;
@@ -653,7 +695,27 @@ public:
     std::uint32_t nextGuidCount() { return ++guidCount_ & 0x1FFFFFFF; }
     // Adds a family with no home lot unless the neighborhood has it. It lasts for this run only.
     void addFamily(std::uint32_t family);
+    // Adds a Sim's GUID to the end of a family's members unless it is there. It lasts for this run only.
+    void addFamilyMember(std::uint32_t family, std::uint32_t guid);
     bool hasFamily(std::uint32_t family) const { return hood_ && hood_->familyLots.contains(family); }
+    // The household of the lot being played: of the families whose home is this lot, the one the
+    // game lists first, with the highest rank (familyRanks) and then the highest id.
+    std::optional<std::uint32_t> lotHousehold() const {
+        if (!hood_ || !lotNumber_) {
+            return std::nullopt;
+        }
+        const auto rankOf = [&](std::uint32_t family) {
+            const auto it = hood_->familyRanks.find(family);
+            return std::pair{it != hood_->familyRanks.end() ? it->second : 0, static_cast<std::int32_t>(family)};
+        };
+        std::optional<std::uint32_t> first;
+        for (const auto& [family, lot] : hood_->familyLots) {
+            if (lot == *lotNumber_ && (!first || rankOf(family) > rankOf(*first))) {
+                first = family;
+            }
+        }
+        return first;
+    }
     // A family's lots as CachedFamily reads them, or nothing for a family the neighborhood doesn't have.
     // A family added during this run has 0 for all three.
     struct FamilyLotIds {
@@ -668,6 +730,14 @@ public:
             return it != lots.end() ? it->second : 0;
         };
         return FamilyLotIds{lotIn(hood_->familyLots), lotIn(hood_->familyCurrentLots), lotIn(hood_->familyVacationLots)};
+    }
+    // The GUIDs of a family's Sims in its FAMI's order, empty for an unknown family.
+    std::span<const std::uint32_t> familyMemberGuids(std::uint32_t family) const {
+        if (!hood_) {
+            return {};
+        }
+        const auto it = hood_->familyMembers.find(family);
+        return it != hood_->familyMembers.end() ? std::span<const std::uint32_t>(it->second) : std::span<const std::uint32_t>{};
     }
 
     // A neighbor's copy of its person data: the saved values until changed, null for an unknown
@@ -824,6 +894,47 @@ public:
     bool notificationShown(std::int16_t id) const { return std::find(notifications_.begin(), notifications_.end(), id) != notifications_.end(); }
     bool hideNotification(std::int16_t id) { return std::erase(notifications_, id) != 0; }
 
+    // Whether an interaction with line flag 0x4 is running at once. Only one can at a time.
+    bool runningAtOnce() const { return runningAtOnce_; }
+    void setRunningAtOnce(bool running) { runningAtOnce_ = running; }
+
+    // Naming Sims (Dialog "Set Baby Name"). Whoever shows the dialog turns asking on, and a request
+    // then waits for its answer. With asking off the dialog waits a tick and is true, and no name
+    // changes, as OK on the untouched names would. As in the game, the requests wait in one list in
+    // the order they were made, one per asking object, and are shown one at a time. A reset leaves an
+    // object's request in the list, still shown or holding its answer, and its next naming takes it.
+    void setAsksNames(bool asks) { asksNames_ = asks; }
+    bool asksNames() const { return asksNames_; }
+    // A naming started by `asker` (temps 0-3 of the dialog, 0 where there is none). The first is a
+    // baby or the Sim renamed, the second a twin. An earlier request of the asker's that is shown is
+    // closed and this one asked anew. One still waiting or answered is taken as this one's instead.
+    void askNames(std::int16_t asker, std::vector<std::int16_t> neighbors);
+    // The neighbors the shown request names, empty when none is shown.
+    const std::vector<std::int16_t>& namesAsked() const;
+    // Answers the shown request and shows the next. OK gives each neighbor asked its name in `names`,
+    // in the same order, trimmed of spaces and tabs as the game trims them. A neighbor past the end of
+    // `names`, and the 0 places, keep theirs. Cancel changes nothing.
+    void answerNames(bool ok, const std::vector<std::string>& names);
+    // The answer to `asker`'s request once given (true for OK), which ends the request. Nothing while
+    // it waits or shows. False when the asker has none, which only a broken caller can see.
+    std::optional<bool> takeNamesAnswer(std::int16_t asker);
+    // The first names the game gives a new baby, a boy's and a girl's (Live text 0x95, entries 1 and
+    // 2), set by whoever has the game's texts. Without them a new baby has no first name.
+    void setBabyFirstNames(std::string boy, std::string girl) { babyFirstNames_ = {std::move(boy), std::move(girl)}; }
+    const std::string& babyFirstName(bool female) const { return babyFirstNames_[female ? 1 : 0]; }
+    void setNeighborFirstName(std::int16_t id, std::string name) {
+        firstNames_[id] = std::move(name);
+        ++namesVersion_;
+    }
+    // Counts the first names given while playing, so a name shown can tell it has changed.
+    std::uint32_t namesVersion() const { return namesVersion_; }
+    // A neighbor's first name when the game gave it one while playing, nothing when its character
+    // file's name stands.
+    std::optional<std::string> neighborFirstName(std::int16_t id) const {
+        const auto it = firstNames_.find(id);
+        return it == firstNames_.end() ? std::nullopt : std::optional<std::string>{it->second};
+    }
+
     // Who plays the sounds scripts start and stop. Without it they go unheard.
     using SoundEvents = std::function<void(const SoundEvent&)>;
     void setSoundEvents(SoundEvents events) { soundEvents_ = std::move(events); }
@@ -872,6 +983,13 @@ public:
     using HasOutfit = std::function<std::optional<bool>(const SimObject& object, std::uint32_t category)>;
     void setHasOutfit(HasOutfit f) { hasOutfit_ = std::move(f); }
     const HasOutfit& hasOutfit() const { return hasOutfit_; }
+    // The colours babies inherit, read when first asked. Without it babies get no genes.
+    using GeneticsCatalogSource = std::function<const content::GeneticsCatalog*()>;
+    void setGeneticsCatalog(GeneticsCatalogSource f) { geneticsCatalog_ = std::move(f); }
+    const content::GeneticsCatalog* geneticsCatalog() const { return geneticsCatalog_ ? geneticsCatalog_() : nullptr; }
+    // The generator the game draws babies' genes on, apart from the simulator's. Where its state
+    // comes from is not known yet.
+    SimRandom& geneticsRandom() { return geneticsRandom_; }
     // The joint named `bone` (lower case) in an object's model, none without one. Without it, bone
     // slots are not known.
     using ModelBoneLookup = std::function<std::optional<ModelBone>(std::int16_t object, const std::string& bone)>;
@@ -1037,6 +1155,20 @@ private:
     SoundEvents soundEvents_;
     std::vector<std::int16_t> notifications_;
     std::int16_t lastNotification_ = 0;
+    bool runningAtOnce_ = false;
+    bool asksNames_ = false;
+    std::uint32_t namesVersion_ = 0;
+    struct NameRequest {
+        enum class State { Waiting, Shown, Ok, Cancelled };
+        std::int16_t asker = 0;
+        std::vector<std::int16_t> neighbors;
+        State state = State::Waiting;
+    };
+    std::vector<NameRequest> nameRequests_;  // in the order asked
+    // Shows the first waiting request when none is shown.
+    void showNextNames();
+    std::map<std::int16_t, std::string> firstNames_;
+    std::array<std::string, 2> babyFirstNames_;
     RayQuery rayQuery_;
     CameraPoint cameraPoint_;
     FloorPattern floorPattern_;
@@ -1047,6 +1179,8 @@ private:
     AnimationTurns animationTurns_;
     OutfitProperty outfitProperty_;
     HasOutfit hasOutfit_;
+    GeneticsCatalogSource geneticsCatalog_;
+    SimRandom geneticsRandom_{0};
     ModelBoneLookup modelBones_;
     LocoClips locoClips_;
     SimScale simScale_;

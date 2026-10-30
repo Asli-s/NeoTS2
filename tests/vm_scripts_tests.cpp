@@ -212,6 +212,7 @@ void objectScriptsReadAndWriteValues() {
         SetTemp(7, GetNeighborData(8, -1) + 5)  -- a negative field has no value, not an error
         nMessaging.PostMessage(3, true, 2, "changed")
         SetSimulatorGlobal(5, 77)
+        if nUI.InvalidateSimThumbnail(FridgeGuid) then SetSimulatorGlobal(5, 0) end  -- no picture cache here
         local x, y, level = nWorld.GetObjectTile(fridge)
         SetTemp(5, x * 100 + y * 10 + level)
         SetScriptReturnValue(GetObjectName(fridge) == "Fridge")
@@ -1118,6 +1119,92 @@ void cachedFamilyReadsTheSavedLots() {
     CHECK(scriptRaisesError(world, [&] { return vm.run(object, 0x1001); }));
 }
 
+// CachedFamily:getMembers lists the neighbor ids of the family's Sims in its order, without members
+// who have no neighbor or exist only in family trees. getNumMembers counts every member.
+void cachedFamilyListsItsMembers() {
+    auto runtime = std::make_shared<ts2::sim::LuaRuntime>();
+    runtime->load({}, {compileScript("Members", R"(
+        local family = CachedFamily.new(3)
+        local members = family:getMembers()
+        SetTemp(0, table.getn(members))
+        SetTemp(1, members[1])
+        SetTemp(2, members[2])
+        SetTemp(3, family:getNumMembers())
+        SetScriptReturnValue(true)
+    )")});
+    CHECK(runtime->problems.empty());
+    MemoryCodeSource code;
+    code.addObjectType(kObjectGroup, typed(0x0D000005, 0x11));
+    code.addStrings(ts2::sim::kGlobalGroup, 0x130, {"Members"});
+    code.add(kObjectGroup, 0x1000, bhav({luaScriptCall(1)}));
+    auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
+    hood->neighborIds = {3, 5, 8};
+    hood->neighbors[3].guid = 0x0D000003;
+    hood->neighbors[5].guid = 0x0D000005;
+    hood->neighbors[8].guid = 0x0D000008;
+    hood->familyLots[3] = 10;
+    hood->familyMembers[3] = {0x0D000008, 0x0D000099, 0x0D000005, 0, 0x0D000003};
+    ts2::sim::World world;
+    world.setScripts(runtime);
+    world.setNeighborhood(hood);
+    auto& object = world.create(kObjectGroup, typed(kFridgeGuid));
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(object, 0x1000).outcome == Outcome::True);
+    const auto& t = object.thread.temps;
+    CHECK(t[0] == 2 && t[1] == 8 && t[2] == 3 && t[3] == 5);
+}
+
+// CachedPerson:getFriendsRequiredForPromtion: the career's friends for the next level less the
+// credits of the Sim's neighbor tokens, never below 0, and 0 past the table's end or with no career.
+void friendsForPromotionCountTokenCredits() {
+    auto runtime = std::make_shared<ts2::sim::LuaRuntime>();
+    runtime->load({}, {compileScript("Friends", R"(
+        SetTemp(0, CachedPerson.new(GetStackObjectId()):getFriendsRequiredForPromtion())
+        SetScriptReturnValue(true)
+    )")});
+    CHECK(runtime->problems.empty());
+    constexpr std::uint32_t kCareer = 0x0C000001, kOtherCareer = 0x0C000002;
+    constexpr std::uint32_t kCredit = 0x53FEA775, kDebit = 0x74BF3B69;
+    MemoryCodeSource code;
+    code.addObjectType(kObjectGroup, typed(kCareer));
+    code.addConstants(kObjectGroup, 0x1003, {0, 0, 1, 4, 6});
+    code.addStrings(ts2::sim::kGlobalGroup, 0x130, {"Friends"});
+    code.add(kObjectGroup, 0x1000, bhav({luaScriptCall(1)}));
+    ts2::sim::World world;
+    world.setScripts(runtime);
+    world.setNeighborhood(std::make_shared<ts2::sim::SavedNeighborhood>());
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    sim.personData[0x1F] = 8;
+    sim.personData[0x59] = static_cast<std::int16_t>(kCareer & 0xFFFF);
+    sim.personData[0x5A] = static_cast<std::int16_t>(kCareer >> 16);
+    sim.thread.stackObjectId = sim.id;
+    auto& tokens = world.inventory(ts2::sim::InventoryKind::Neighbor, 8)->singular;
+    const auto token = [&](std::uint32_t guid, std::vector<std::int16_t> values, std::uint16_t flags = 0, std::uint16_t category = 0) {
+        tokens.push_back(std::make_shared<ts2::sim::InventoryToken>(ts2::sim::InventoryToken{guid, flags, 0, 0, category, std::move(values)}));
+    };
+    const auto low = static_cast<std::int16_t>(kCareer & 0xFFFF), high = static_cast<std::int16_t>(kCareer >> 16);
+    token(kCredit, {0, static_cast<std::int16_t>(kOtherCareer & 0xFFFF), high});  // 1
+    token(kCredit, {2, low, high});                                                // 1, its career
+    token(kCredit, {1, low, high});                                                // 2
+    token(kCredit, {3, low, high});                                                // none
+    token(kCredit, {0}, 1);                                                        // flags set: none
+    token(kDebit, {});                                                             // -1
+    token(kDebit, {}, 0, 2);                                                       // category set: none
+    Vm vm(code, {}, &world);
+    const auto friendsAtLevel = [&](std::int16_t level) {
+        sim.personData[0x39] = level;
+        CHECK(vm.run(sim, 0x1000).outcome == Outcome::True);
+        return sim.thread.temps[0];
+    };
+    CHECK(friendsAtLevel(2) == 1);
+    CHECK(friendsAtLevel(3) == 3);
+    CHECK(friendsAtLevel(1) == 0);
+    CHECK(friendsAtLevel(4) == 0);
+    sim.personData[0x5A] = 0;
+    sim.personData[0x59] = 0;
+    CHECK(friendsAtLevel(2) == 0);
+}
+
 // Neighborhood:isApartmentResident: a Sim with person data 0x20 = 8, only on apartment lots (types 8
 // and 9). Other Sims and objects that aren't Sims are not.
 void apartmentResidentsAreSimsOfType8OnApartmentLots() {
@@ -1336,6 +1423,8 @@ std::vector<Test> vmScriptTests() {
         {"Neighborhood:isApartmentDoor tests the category and OBJD field 0x4B", apartmentDoorIsFalseOffApartmentLots},
         {"Neighborhood:isApartmentResident needs an apartment lot", apartmentResidentsAreSimsOfType8OnApartmentLots},
         {"CachedFamily reads the saved lots", cachedFamilyReadsTheSavedLots},
+        {"CachedFamily lists its members", cachedFamilyListsItsMembers},
+        {"CachedPerson friends for promotion count token credits", friendsForPromotionCountTokenCredits},
         {"Neighborhood reads lot owners", neighborhoodReadsLotOwners},
         {"neighbor relationships read as saved", neighborRelationshipsReadAsSaved},
         {"Lua script primitive runs scripts", luaScriptPrimitiveRunsScripts},

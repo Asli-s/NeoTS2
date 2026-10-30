@@ -210,13 +210,15 @@ private:
             icon.index = line->iconIndex;
         }
         if (s_.checkFirst(object, *line)) {
-            // The lines it offers are kept even when the check fails.
+            // The lines it offers are kept even when the check fails. A line whose check offered lines
+            // is not a candidate itself: only what it offered is.
             std::vector<AutonomyOffer> offered;
             const bool passed = runCheck(object, *line, changed, icon, offered);
+            const bool offeredLines = !offered.empty();
             for (auto& o : offered) {
                 offers_.push_back({object.id, id, std::move(o)});
             }
-            if (!passed) {
+            if (!passed || offeredLines) {
                 return;
             }
             scoredLine = &changed;
@@ -277,11 +279,12 @@ private:
                 SimObject* object = s_.world.find(c.object);
                 const auto table = object != nullptr ? interactionsOf(s_.code, *object).table : nullptr;
                 const ttab::Interaction* line = table ? ttab::find(*table, c.interaction) : nullptr;
-                // What this check sets and offers comes too late to count.
+                // What this check sets and offers comes too late to count, but a check that offers
+                // lines still rules the line out.
                 ttab::Interaction changed;
                 InteractionIcon unusedIcon = c.icon;
                 std::vector<AutonomyOffer> unusedOffers;
-                if (line == nullptr || !runCheck(*object, *line, changed, unusedIcon, unusedOffers)) {
+                if (line == nullptr || !runCheck(*object, *line, changed, unusedIcon, unusedOffers) || !unusedOffers.empty()) {
                     continue;
                 }
             }

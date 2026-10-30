@@ -82,6 +82,8 @@ public:
     }
     // The properties of a Sim's age data (AGED, instance 1) in its character group, if any.
     virtual const std::map<std::string, std::string>* ageData(std::uint32_t) { return nullptr; }
+    // Another resource of that type (instance 1) in a Sim's character group (an NPC's face shape), if any.
+    virtual std::optional<std::vector<std::uint8_t>> characterResource(std::uint32_t, std::uint32_t) { return std::nullopt; }
     // The game's named tuning values (FCNS instance 2 of the global group), if any.
     virtual const fcns::Tunings* tunings() { return nullptr; }
     // The global routing slots (the routing entries of SLOT 0x64 in the global group, in order), which

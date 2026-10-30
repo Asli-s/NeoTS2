@@ -41,6 +41,7 @@ constexpr std::uint32_t kLuaModule = 0x9012468A;
 constexpr std::uint32_t kLuaScript = 0x9012468B;
 constexpr std::uint32_t kNeighborhoodRecord = 0x4E474248;  // NGBH
 constexpr std::uint32_t kDataTables = 0x3053CF74;
+constexpr std::uint32_t kSimDna = 0xEBFEE33F;  // SDNA
 constexpr std::uint32_t kUiScript = 0x00000000;
 constexpr std::uint32_t kImage = 0x856DDBAC;  // JPEG, PNG, Targa or bitmap
 

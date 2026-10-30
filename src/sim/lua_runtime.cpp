@@ -187,8 +187,9 @@ const ScriptClass kClasses[] = {
      {}},
     {"CachedFamily", true, newCachedFamily,
      {{"getId", cachedFamilyId}, {"getLotId", cachedFamilyLotId}, {"getCurrentLotId", cachedFamilyCurrentLotId},
-      {"getVacationLotId", cachedFamilyVacationLotId}},
-     {"setVacationLotId", "getName", "getMembers", "getNumMembers", "getFunds", "getLastSavedFunds", "isNeighborInFamily", "addMemberClothing", "IsAFamilyInThisLot"},
+      {"getVacationLotId", cachedFamilyVacationLotId}, {"getMembers", cachedFamilyMembers},
+      {"getNumMembers", cachedFamilyMemberCount}},
+     {"setVacationLotId", "getName", "getFunds", "getLastSavedFunds", "isNeighborInFamily", "addMemberClothing", "IsAFamilyInThisLot"},
      {}},
     {"ObjectDefinition", true, nullptr,
      {},
@@ -225,8 +226,8 @@ const ScriptClass kClasses[] = {
      {},
      {}},
     {"nUI", false, nullptr,
-     {},
-     {"ShowTextNotification", "DebugTNS", "InvalidateSimThumbnail", "OpenProgressDialog", "CloseProgressDialog", "ShowProgressDialogControl", "UpdateSimChooserUI", "AddActionString", "UpdateSkewerAndPortrait"},
+     {{"InvalidateSimThumbnail", invalidateSimThumbnail}},
+     {"ShowTextNotification", "DebugTNS", "OpenProgressDialog", "CloseProgressDialog", "ShowProgressDialogControl", "UpdateSimChooserUI", "AddActionString", "UpdateSkewerAndPortrait"},
      {}},
     {"nMessaging", false, nullptr,
      {{"PostMessage", postMessage}, {"SubscribeMessage", subscribeMessage},
@@ -286,8 +287,9 @@ const ScriptClass kClasses[] = {
     {"CachedPerson", true, newCachedPerson,
      {{"getPersonData", cachedPersonGetData}, {"setPersonData", cachedPersonSetData},
       {"getNumQueuedInteractions", cachedPersonQueueCount}, {"getGUID", cachedPersonGuid},
-      {"isQueuedObjAdvertisingForX", cachedPersonQueuedAdvertising}},
-     {"getMotive", "setMotive", "getQueuedInteractionId", "getQueuedInteractionObjectId", "cancelQueuedInteraction", "getNumSubQueuedInteractions", "getQueuedSubInteractionId", "getQueuedSubInteractionObjectId", "unlockVacationCollectible", "getFriendsRequiredForPromtion", "isAccessibleRoom"},
+      {"isQueuedObjAdvertisingForX", cachedPersonQueuedAdvertising},
+      {"getFriendsRequiredForPromtion", cachedPersonFriendsForPromotion}},
+     {"getMotive", "setMotive", "getQueuedInteractionId", "getQueuedInteractionObjectId", "cancelQueuedInteraction", "getNumSubQueuedInteractions", "getQueuedSubInteractionId", "getQueuedSubInteractionObjectId", "unlockVacationCollectible", "isAccessibleRoom"},
      {}},
     {"ObjectDataTable", true, newObjectDataTable,
      {{"newTable", dataTableNew}, {"removeTable", dataTableRemove}, {"clearTable", dataTableClear},
@@ -407,6 +409,29 @@ int unsupported(lua_State* L) {
 } // namespace lua_detail
 
 using namespace lua_detail;
+
+std::vector<ScriptFunctionInfo> scriptFunctions() {
+    std::vector<ScriptFunctionInfo> out;
+    for (const auto& f : kFunctions) {
+        out.push_back({f.name, true});
+    }
+    for (const char* name : kNotYetImplemented) {
+        out.push_back({name, false});
+    }
+    for (const auto& cls : kClasses) {
+        const std::string prefix = std::string(cls.name) + (cls.isClass ? ":" : ".");
+        for (const auto& f : cls.methods) {
+            out.push_back({prefix + f.name, true});
+        }
+        for (const char* name : cls.notYetImplemented) {
+            out.push_back({prefix + name, false});
+        }
+        if (cls.isClass) {
+            out.push_back({std::string(cls.name) + ".new", cls.constructor != nullptr});
+        }
+    }
+    return out;
+}
 
 LuaRuntime::LuaRuntime() : L_(lua_open()) {
     luaopen_base(L_);

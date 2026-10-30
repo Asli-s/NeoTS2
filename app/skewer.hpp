@@ -32,6 +32,8 @@ public:
     void setTracked(std::int16_t sim);
     // Colours a Sim's thumbnail background by its mood (-100..100).
     void setMood(std::int16_t sim, int mood);
+    // Sets the tip of a Sim's thumbnail, the Sim's name.
+    void setName(std::int16_t sim, const std::string& name);
 
     // The Sim whose thumbnail `window` is part of, if any.
     [[nodiscard]] std::optional<std::int16_t> clicked(int window) const;

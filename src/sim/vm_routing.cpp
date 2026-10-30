@@ -499,6 +499,9 @@ Execution::WalkStep Execution::goToRoutingSlot(const bhav::Instruction& in, Fram
         }
     }
     if (walk.interrupted) {
+        if (!settleAfterStop(sim, walk, now)) {
+            return WalkStep{WalkStep::Kind::Wait};
+        }
         return routeInterrupted(sim);
     }
     if (walk.turnAfter) {
@@ -621,9 +624,9 @@ Execution::WalkStep Execution::goToRelativePosition(const bhav::Instruction& in,
 }
 
 // Moves me as far along the route as the walk's speed has carried me, facing the route's way
-// there. True once there, on the route's last point exactly (its goal, which later goals
-// compare with my spot), facing the way the walk ends in and holding the stop's last pose (else
-// the walk's standing pose). A walk cut short to stop soon ends where its stop does. Each step
+// there. True once there: from when the walk starts fading out I am on the route's last point
+// exactly (its goal, which later goals compare with my spot), facing the way the walk ends in and
+// holding the stop's last pose (else the walk's standing pose), while its clips play out. A walk cut short to stop soon ends where its stop does. Each step
 // must be free, as the game tests a walking Sim's place every tick: when a Sim or an object is in
 // the way, `blocker` is its id and I stay where I am.
 bool Execution::walkTo(SimObject& sim, Walking& walk, double now, std::int16_t& blocker) {
@@ -645,7 +648,11 @@ bool Execution::walkTo(SimObject& sim, Walking& walk, double now, std::int16_t& 
         sim.tile = Tile{static_cast<std::uint8_t>(at.x), static_cast<std::uint8_t>(at.y), static_cast<std::uint8_t>(sim.level)};
         world().updateRoom(sim);
     }
-    if (ms < walkMs(walk.plan)) {
+    // The route hands back as the walk starts fading out. On a path of half a tile or less it hands
+    // back once less than 40 ms of the walk is left.
+    constexpr float kShortPath = 0.5f, kLastMs = 40;
+    const bool over = walk.plan.length > kShortPath ? ms >= walkFadeOutMs(walk.plan) : walkMs(walk.plan) - ms < kLastMs;
+    if (!over) {
         followWalk(sim, walk, walked, now);
         return false;
     }
@@ -943,8 +950,11 @@ void Execution::followWalk(SimObject& sim, Walking& walk, float walked, double n
 
 // At the walk's end my animation holds the stop's last pose, played from the way the route's
 // last stretch runs (a step's from my facing turned as the step was). Without a stop, it holds the walk's
-// standing pose.
+// standing pose. The walk's clips play out their fade (see SimObject::walkTail).
 void Execution::endWalk(SimObject& sim, const Walking& walk, double now) {
+    if (!walk.plan.segments.empty()) {
+        sim.walkTail = SimObject::WalkTail{walk.plan, walk.startMs, walk.path, sim.level};
+    }
     std::vector<WalkPose> poses;
     walkPoses(walk.plan, walk.plan.length, poses);
     const WalkPose* last = nullptr;
@@ -985,12 +995,17 @@ void Execution::standAfterWalk(SimObject& sim, double now) {
     }
 }
 
-// A blocked step ends the walk where I stand, as a walk's end does: the pose I am in blends into
-// the walk's standing pose, whatever part of the walk was playing.
+// A blocked step ends the walk where I stand at once, with no stop clip. A walk whose clips have
+// started settles there and then, as an interrupted one does once its stop has played (see
+// settleAfterStop). Before they start, while I still turn on the spot, what I was doing plays on.
 void Execution::stopWalk(SimObject& sim, Walking& walk, double now) {
+    const bool walkClips = alongPlan(walk);
     walk.stopped = true;
     sim.lastWalkEnd.reset();
-    standAfterWalk(sim, now);
+    if (walkClips) {
+        sim.walkSettledMs = now;
+        sim.animation.reset();
+    }
 }
 
 // My route is interrupted while I walk: the walk is told to stop soon (see stopSoon) and the
@@ -1011,6 +1026,21 @@ void Execution::interruptWalk(SimObject& sim, Walking& walk, double now) {
     case StopSoon::AsPlanned: break;
     case StopSoon::Now: stopWalk(sim, walk, now); break;
     }
+}
+
+// An interrupted walk that moved and has played out its stop settles as its route ends: once its
+// clips have faded, the pose I am in fades out under the walk pose (see kSettlePoseMs). True once
+// the route may end.
+bool Execution::settleAfterStop(SimObject& sim, Walking& walk, double now) {
+    if (!walk.arrived || walk.plan.segments.empty() || walk.plan.length <= 0) {
+        return true;
+    }
+    if (now - walk.startMs < walkFadeOutMs(walk.plan) + kWalkFadeMs) {
+        return false;
+    }
+    sim.walkSettledMs = now;
+    sim.animation.reset();
+    return true;
 }
 
 // My route ends interrupted (route result 3), with no failure feedback.

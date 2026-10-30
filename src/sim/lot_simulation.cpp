@@ -1,7 +1,9 @@
 #include "sim/lot_simulation.hpp"
 #include "sim/forget_object.hpp"
+#include "sim/object_model.hpp"
 
 #include "content/build_scripts.hpp"
+#include "content/genetics_catalog.hpp"
 #include "content/install.hpp"
 #include "content/lot.hpp"
 #include "content/neighborhood.hpp"
@@ -11,6 +13,7 @@
 #include "diag/timing.hpp"
 #include "formats/resource_types.hpp"
 #include "sim/lua_runtime.hpp"
+#include "sim/object_footprint.hpp"
 #include "sim/object_reset.hpp"
 #include "sim/overlay_events.hpp"
 #include "sim/pie_menu.hpp"
@@ -24,6 +27,7 @@
 #include <cmath>
 #include <limits>
 #include <format>
+#include <future>
 #include <optional>
 #include <set>
 #include <vector>
@@ -44,7 +48,7 @@ std::uint32_t clockSeed() {
 }
 
 // Scripts may run this many primitives in one tick before they are stopped.
-constexpr std::size_t kMaxStepsPerRun = 10000;
+constexpr std::size_t kMaxStepsPerRun = 100000;
 constexpr std::size_t kMaxLoggedStops = 32;
 constexpr std::size_t kMaxLoggedStarts = 5000;  // a long play session's worth. The log file has its own cap too
 
@@ -73,10 +77,21 @@ std::shared_ptr<LuaRuntime> loadScripts(const std::filesystem::path& install, Co
 } // namespace
 
 LotSimulation::LotSimulation(const std::filesystem::path& install, const std::filesystem::path& lot,
-                             std::function<void(const StepInfo&)> onLoadStep)
+                             std::function<void(const StepInfo&)> onLoadStep, std::optional<std::uint32_t> seed)
     : index_(loadCode(install, lot)), code_(index_), vm_(code_, {kMaxStepsPerRun, 64}, &world_),
       installedPacks_(content::installedPacksMask(content::findProducts(install))), motiveUpdate_(code_, installedPacks_) {
     vm_.onInteractionStart = [this](const SimObject& sim, const QueuedInteraction& started) { logInteractionStart(sim, started); };
+    // Read in the background from the start, so that a birth doesn't stop the game to read it.
+    const auto catalog = std::async(std::launch::async, [install] {
+                             try {
+                                 return content::loadGeneticsCatalog(content::findProducts(install));
+                             } catch (const std::exception& ex) {
+                                 diag::warnOnce(std::string("genetics: the skin catalogs can't be read: ") + ex.what());
+                                 return content::GeneticsCatalog{};
+                             }
+                         }).share();
+    world_.setGeneticsCatalog([catalog] { return &catalog.get(); });
+    world_.geneticsRandom().seed(seed ? *seed : clockSeed());
     vm_.resetSim = [this](SimObject& sim) {
         if (const ObjectType* type = code_.objectType(sim.definition.guid())) {
             resetAfterFailure(sim, *type);
@@ -87,6 +102,10 @@ LotSimulation::LotSimulation(const std::filesystem::path& install, const std::fi
     objectModels_ = saved.objectModels;
     savedJoints_ = saved.savedJoints;
     report_ = buildWorld(saved, code_, world_);
+    world_.nextAfter(0, [&](const SimObject& o) {
+        savedGuids_.emplace(static_cast<std::uint32_t>(o.id), o.definition.guid());
+        return false;
+    });
     world_.setWalls(WallTiles::fromLot(saved));
     world_.setSightWalls(WallTiles::builtWalls(saved));
     const content::BuildScripts buildScripts = content::loadBuildScripts(content::findProducts(install));
@@ -136,7 +155,7 @@ LotSimulation::LotSimulation(const std::filesystem::path& install, const std::fi
                             saved.unreadNeighborRemap);
     std::copy_n(saved.globals.begin(), std::min(saved.globals.size(), vm_.globals.size()), vm_.globals.begin());
     // A lot saved without a random state starts from the clock, as the game seeds its generator.
-    vm_.rng.seed(saved.randomState ? *saved.randomState : clockSeed());
+    vm_.rng.seed(saved.randomState ? *saved.randomState : seed ? *seed : clockSeed());
     updateTimeOfDay(vm_.globals);
     const auto hood = content::neighborhoodPackage(content::neighborhoodOfLot(lot));
     if (std::filesystem::exists(hood)) {
@@ -180,14 +199,15 @@ LotSimulation::LotSimulation(const std::filesystem::path& install, const std::fi
 
 void LotSimulation::setRouteSources(RouteSources sources) {
     routeSources_ = std::move(sources);
-    world_.setModelBones([this](std::int16_t object, const std::string& bone) -> std::optional<ModelBone> {
-        const auto name = objectModels_.find(static_cast<std::uint32_t>(object));
-        const RouteModel* model = name != objectModels_.end() && routeSources_->models ? routeSources_->models(name->second) : nullptr;
+    world_.setModelBones([this](std::int16_t id, const std::string& bone) -> std::optional<ModelBone> {
+        const SimObject* object = world_.find(id);
+        const std::string name = object != nullptr ? modelOf(*object) : std::string();
+        const RouteModel* model = !name.empty() && routeSources_->models ? routeSources_->models(name) : nullptr;
         if (model == nullptr) {
             return std::nullopt;
         }
         // As the object was posed when the lot was saved (a dining chair pushed in keeps its seat slid).
-        const auto saved = savedJoints_.find(static_cast<std::uint32_t>(object));
+        const auto saved = isSaved(*object) ? savedJoints_.find(static_cast<std::uint32_t>(id)) : savedJoints_.end();
         return posedModelBone(*model, bone, saved != savedJoints_.end() ? std::span<const cobject::SavedJoint>(saved->second)
                                                                              : std::span<const cobject::SavedJoint>());
     });
@@ -311,6 +331,20 @@ bool LotSimulation::objectFits(const SimObject& placed, float x, float y, std::i
     return (d[kHeightsField] & kOnTheFloor) != 0;
 }
 
+bool LotSimulation::isSaved(const SimObject& object) const {
+    const auto guid = savedGuids_.find(static_cast<std::uint32_t>(object.id));
+    return guid != savedGuids_.end() && guid->second == object.definition.guid();
+}
+
+std::string LotSimulation::modelOf(const SimObject& object) {
+    constexpr std::uint16_t kModelNames = 0x85;
+    if (isSaved(object)) {
+        const auto name = objectModels_.find(static_cast<std::uint32_t>(object.id));
+        return name != objectModels_.end() ? name->second : std::string();
+    }
+    return createdModelName(object, [&](std::size_t row) { return code_.string(object.group, kModelNames, row); });
+}
+
 // Whether something stands in the way of `placed` at (x, y) facing `direction`, as the game's
 // placement test finds it. Objects on the tiles round the spot count when their footprints overlap
 // the placed one's, Sims when they stand within 0.3 tiles of it. Left out: objects in a slot or a
@@ -328,8 +362,8 @@ bool LotSimulation::objectInTheWay(const SimObject& placed, const ObjectType& ty
     constexpr float kSimClearance = 0.3f;
     constexpr int kDoorType = 8, kWindowType = 9;
     const auto model = [&](const SimObject& o) -> const RouteModel* {
-        const auto name = objectModels_.find(static_cast<std::uint32_t>(o.id));
-        return name != objectModels_.end() && routeSources_ && routeSources_->models ? routeSources_->models(name->second) : nullptr;
+        const std::string name = modelOf(o);
+        return !name.empty() && routeSources_ && routeSources_->models ? routeSources_->models(name) : nullptr;
     };
     const std::vector<RouteRect> mine = objectFootprintAt(placed, placed, type, model(placed), x, y, direction);
     if (mine.empty()) {
@@ -504,6 +538,48 @@ RouteIntersects LotSimulation::intersectionsFor(const SimObject& sim) {
     };
 }
 
+// Before each plan the other Sims get rings in the path search (see simRingItems), each round its
+// square where it stands now: every Sim on the lot and not held by an object, except one walking its
+// route, unless that one is my route's last blocker. My own rings go. `target` is the route's target
+// object. Rings stay until the next plan of any Sim moves them.
+void LotSimulation::ringSims(const SimObject& sim, std::int16_t target) {
+    constexpr std::size_t kContainerField = 2;
+    constexpr float kHalfSquare = 0.1f;
+    if (!routeWorld_) {
+        return;
+    }
+    const std::int16_t blocker = sim.walking ? sim.walking->block.blocker : 0;
+    std::set<std::int16_t> seen;
+    const auto ring = [this](std::int16_t id, const std::optional<RouteWorld::SimRings>& rings) {
+        for (const int level : routeWorld_->ringSim(id, rings)) {
+            routeLinks_.erase(level);
+        }
+    };
+    world_.nextAfter(std::numeric_limits<std::int16_t>::min(), [&](const SimObject& o) {
+        if (!o.isPerson()) {
+            return false;
+        }
+        seen.insert(o.id);
+        const bool walking = o.walking && alongPlan(*o.walking) && o.id != blocker;
+        std::optional<RouteWorld::SimRings> rings;
+        if (o.id != sim.id && !o.removed && o.x != kOffLot && o.y != kOffLot && o.data[kContainerField] == 0 && !walking) {
+            const float x = static_cast<float>(o.x) / 65536.0f, y = static_cast<float>(o.y) / 65536.0f;
+            const auto square = placeFootprint({{-kHalfSquare, -kHalfSquare, kHalfSquare, kHalfSquare}}, x, y, 0);
+            if (!square.empty()) {
+                rings = RouteWorld::SimRings{o.level - 1, square.front(), o.id == target};
+            }
+        }
+        ring(o.id, rings);
+        return false;
+    });
+    // Sims gone from the lot take theirs with them.
+    for (const std::int16_t id : routeWorld_->ringedSims()) {
+        if (!seen.contains(id)) {
+            ring(id, std::nullopt);
+        }
+    }
+}
+
 // Go To Routing Slot's route: the slot's goals (see route_goals.hpp) and the path search to the best
 // one it reaches, on the owner's level.
 SlotRoute LotSimulation::routeToSlot(const SimObject& sim, const SimObject& owner, const slot::Entry& slot,
@@ -512,6 +588,7 @@ SlotRoute LotSimulation::routeToSlot(const SimObject& sim, const SimObject& owne
     constexpr int kDoorType = 8;
     SlotRoute route;
     const RouteWorld* routes = routeWorld();
+    ringSims(sim, owner.id);
     const int level = owner.level - 1;
     const RouteGrid* grid = routes != nullptr ? routes->level(level) : nullptr;
     if (grid == nullptr) {
@@ -740,6 +817,21 @@ void LotSimulation::findHousehold(const content::Neighborhood& hood, const std::
         }
         return;
     }
+}
+
+std::vector<std::int16_t> LotSimulation::household() const {
+    const std::optional<std::uint32_t> family = world_.lotHousehold();
+    if (!family) {
+        return household_;
+    }
+    std::vector<std::int16_t> out;
+    for (const std::uint32_t guid : world_.familyMemberGuids(*family)) {
+        const SimObject* sim = world_.nextAfter(0, [&](const SimObject& o) { return o.isPerson() && o.definition.guid() == guid; });
+        if (sim != nullptr) {
+            out.push_back(sim->id);
+        }
+    }
+    return out;
 }
 
 std::vector<std::uint8_t> LotSimulation::simImage(std::int16_t sim, std::uint32_t instance) {
@@ -1089,6 +1181,28 @@ void LotSimulation::tick() {
     world_.purge();
     world_.countTick();
     ++ticks_;
+}
+
+void LotSimulation::pausedPass() {
+    const std::int16_t last = world_.highestId();
+    for (int i = 1; i <= last; ++i) {
+        const auto id = static_cast<std::int16_t>(i);
+        SimObject* o = world_.find(id);
+        if (o == nullptr || !o->runsWhilePaused) {
+            continue;
+        }
+        // Its make-way destinations are kept up as in a tick (the game runs the same tick here).
+        if (!o->destinations.empty()) {
+            cleanUpDestinations(world_, *o, false);
+        }
+        stepObject(id);
+        runTimers(id);
+        if (SimObject* after = world_.findIncludingRemoved(id); after != nullptr && after->removed && !after->destinations.empty()) {
+            cleanUpDestinations(world_, *after, true);
+        }
+    }
+    forgetRemoved();
+    world_.purge();
 }
 
 void LotSimulation::tellAnimationEvents(double nowMs) {

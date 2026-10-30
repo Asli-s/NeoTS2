@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <unordered_set>
 
 namespace sg = ts2::scenegraph;
 
@@ -112,7 +113,8 @@ Rig loadRig(Assets& assets, const std::string& skeleton) {
         seen[index] = true;
         const auto& node = tree.nodes[index];
         Rig::Node n;
-        if (node.kind == sg::SceneNode::Kind::Transform) {
+        // A shape node is a joint too, as in held objects whose root_rot holds the mesh.
+        if (node.kind == sg::SceneNode::Kind::Transform || node.kind == sg::SceneNode::Kind::ShapeRef) {
             n.name = lower(node.name);
         }
         n.parent = parent;
@@ -442,10 +444,31 @@ float clipTime(double length, double elapsedMs, float speed, bool repeats) {
 
 // The actor's clips as they play at `seconds`.
 void clipsAt(const Actor& actor, double seconds, std::vector<LayeredClip>& clips, std::vector<const RigAnimation*>& playing,
-             const BoneFinder& boneOf) {
+             const BoneFinder& boneOf, const std::vector<HeldJoint>* frozen = nullptr) {
     clips.clear();
     playing.clear();
+    const auto faded = [&](const Actor::Clip& clip) {
+        double weight = clip.weight;
+        if (clip.fadeIn && clip.fadeInSeconds > 0) {
+            weight *= std::clamp((seconds - clip.start) / clip.fadeInSeconds, 0.0, 1.0);
+        }
+        if (clip.fadeOut && clip.end > clip.start) {
+            weight *= clip.fadeOutSeconds > 0 ? std::clamp((clip.end - seconds) / clip.fadeOutSeconds, 0.0, 1.0) : (seconds < clip.end ? 1.0 : 0.0);
+        }
+        return static_cast<float>(weight);
+    };
     for (const auto& clip : actor.clips) {
+        if (clip.frozen && frozen != nullptr && seconds >= clip.start) {
+            LayeredClip& held = clips.emplace_back();
+            held.weight = faded(clip);
+            held.layer = clip.layer;
+            held.start = clip.start;
+            held.pose = frozen;
+            if (clip.playedAt) {
+                held.placeMove = actor.place.rigidInverse() * *clip.playedAt;
+            }
+            continue;
+        }
         if (!clip.animation || !clip.animation->animation || seconds < clip.start) {
             continue;
         }
@@ -454,20 +477,14 @@ void clipsAt(const Actor& actor, double seconds, std::vector<LayeredClip>& clips
         if (clip.atMs) {
             ms = std::clamp(*clip.atMs, 0.0f, static_cast<float>(std::max(0.0, length)));
         }
-        double weight = clip.weight;
-        if (clip.fadeIn && clip.fadeInSeconds > 0) {
-            weight *= std::clamp((seconds - clip.start) / clip.fadeInSeconds, 0.0, 1.0);
-        }
-        if (clip.fadeOut && clip.end > clip.start) {
-            weight *= clip.fadeOutSeconds > 0 ? std::clamp((clip.end - seconds) / clip.fadeOutSeconds, 0.0, 1.0) : (seconds < clip.end ? 1.0 : 0.0);
-        }
+        const float weight = faded(clip);
         // The clip plays at its own frame turn too (mirrored the other way).
         float turn = clip.turn;
         if (clip.animation->animation) {
             const float own = clip.animation->animation->frameTurn;
             turn += clip.animation->mirrored ? -own : own;
         }
-        clips.push_back({clip.animation.get(), ms, static_cast<float>(weight), clip.layer, clip.start, turn, clip.bodyOnly,
+        clips.push_back({clip.animation.get(), ms, weight, clip.layer, clip.start, turn, clip.bodyOnly,
                          clip.noRootMove, clip.objectPlace ? std::optional<Transform>(actor.place.rigidInverse() * *clip.objectPlace) : std::nullopt});
         if (clip.playedAt) {
             clips.back().placeMove = actor.place.rigidInverse() * *clip.playedAt;
@@ -531,35 +548,55 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
     std::vector<LayeredClip> clips;
     std::vector<const RigAnimation*> playing;
     // A Sim's bones as last posed: this call's pose for a Sim posed before the one asking, else the
-    // last call's. Each rig's node names are hashed once per call, on its first lookup.
+    // last call's. A lot object's bones as this call posed them, as objects are posed before Sims (a
+    // fridge's door handle), or as its clip placed them (a dining chair's seat grabs, see
+    // PlacedObject::bones). Each rig's node names are hashed once per call, on its first lookup.
     std::unordered_map<const Rig*, std::vector<std::uint32_t>> nameHashes;
-    const BoneFinder boneOf = [&](std::uint32_t object, std::uint32_t bone) -> std::optional<Transform> {
-        const auto actor = std::find_if(scene.actors.begin(), scene.actors.end(), [&](const Actor& a) { return a.object == object; });
-        if (actor == scene.actors.end() || !actor->rig) {
-            return std::nullopt;
-        }
-        const auto index = static_cast<std::size_t>(actor - scene.actors.begin());
-        const auto nodes = std::find_if(out.nodes.begin(), out.nodes.end(), [&](const auto& n) { return n.first == index; });
-        if (nodes == out.nodes.end()) {
-            return std::nullopt;
-        }
-        auto [hashes, first] = nameHashes.try_emplace(actor->rig.get());
+    std::vector<std::pair<const Actor*, std::vector<Transform>>> objectNodes;
+    const auto boneIn = [&](const Actor& actor, const std::vector<Transform>& nodes, std::uint32_t bone) -> std::optional<Transform> {
+        auto [hashes, first] = nameHashes.try_emplace(actor.rig.get());
         if (first) {
-            for (const auto& node : actor->rig->nodes) {
+            for (const auto& node : actor.rig->nodes) {
                 // 0 for a node with no name, which no bone matches.
                 hashes->second.push_back(node.name.empty() ? 0 : hash::crc32(node.name));
             }
         }
-        for (std::size_t i = 0; i < hashes->second.size() && i < nodes->second.size(); ++i) {
+        for (std::size_t i = 0; i < hashes->second.size() && i < nodes.size(); ++i) {
             if (bone != 0 && hashes->second[i] == bone) {
-                return actor->place * nodes->second[i];
+                return actor.place * nodes[i];
             }
         }
         return std::nullopt;
     };
+    const BoneFinder boneOf = [&](std::uint32_t object, std::uint32_t bone) -> std::optional<Transform> {
+        const auto actor = std::find_if(scene.actors.begin(), scene.actors.end(), [&](const Actor& a) { return a.object == object; });
+        if (actor == scene.actors.end() || !actor->rig) {
+            const auto posed = std::find_if(objectNodes.begin(), objectNodes.end(), [&](const auto& n) { return n.first->object == object; });
+            if (posed != objectNodes.end()) {
+                return boneIn(*posed->first, posed->second, bone);
+            }
+            const auto placed = std::find_if(scene.placedObjects.begin(), scene.placedObjects.end(),
+                                             [&](const PlacedObject& p) { return p.object == object && !p.bones.empty(); });
+            if (placed == scene.placedObjects.end() || bone == 0) {
+                return std::nullopt;
+            }
+            const auto found = std::find_if(placed->bones.begin(), placed->bones.end(), [&](const auto& b) { return b.first == bone; });
+            return found != placed->bones.end() ? std::optional<Transform>(found->second) : std::nullopt;
+        }
+        const auto index = static_cast<std::size_t>(actor - scene.actors.begin());
+        const auto nodes = std::find_if(out.nodes.begin(), out.nodes.end(), [&](const auto& n) { return n.first == index; });
+        return nodes != out.nodes.end() ? boneIn(*actor, nodes->second, bone) : std::nullopt;
+    };
     // Only the actors still in the scene keep what they hold.
     std::unordered_map<std::uint32_t, std::vector<HeldJoint>> held;
+    std::unordered_map<std::uint32_t, std::pair<double, std::vector<HeldJoint>>> frozen;
     std::unordered_map<std::uint32_t, float> headings;
+    std::unordered_set<std::size_t> inHand;
+    for (const auto& actor : scene.actors) {
+        for (const auto& h : actor.held) {
+            inHand.insert(h.instance);
+        }
+    }
     // Lot objects first: a Sim's hand places an object it holds over where the object would stand.
     for (const auto& actor : scene.objectActors) {
         if (!actor.rig) {
@@ -571,6 +608,7 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
             last = std::move(was->second);
         }
         poseRigLayered(*actor.rig, clips, world, &last);
+        objectNodes.emplace_back(&actor, world);
         for (const auto& s : actor.skinned) {
             const int mesh = s.instance < scene.instances.size() ? scene.instances[s.instance].mesh : -1;
             if (mesh < 0 || static_cast<std::size_t>(mesh) >= scene.meshes.size()) {
@@ -578,7 +616,10 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
             }
             auto& joints = out.joints.emplace_back(s.instance, std::vector<Transform>{}).second;
             skinMatrices(scene.meshes[static_cast<std::size_t>(mesh)], s.nodes, *actor.rig, playing, world, joints, true);
-            out.places.emplace_back(s.instance, actor.place);
+            // One a Sim holds is placed at the Sim's hand below.
+            if (!inHand.contains(s.instance)) {
+                out.places.emplace_back(s.instance, actor.place);
+            }
         }
     }
     for (const auto& actor : scene.actors) {
@@ -586,7 +627,19 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
             continue;
         }
         if (!actor.clips.empty()) {
-            clipsAt(actor, seconds, clips, playing, boneOf);
+            // A frozen clip holds the pose the actor was last posed in before it started.
+            const std::vector<HeldJoint>* still = nullptr;
+            const auto freeze = std::find_if(actor.clips.begin(), actor.clips.end(), [](const Actor::Clip& c) { return c.frozen; });
+            if (actor.object != 0 && freeze != actor.clips.end() && seconds >= freeze->start) {
+                auto& kept = frozen[actor.object];
+                if (const auto was = out.frozen.find(actor.object); was != out.frozen.end() && was->second.first == freeze->start) {
+                    kept = std::move(was->second);
+                } else if (const auto last = out.held.find(actor.object); last != out.held.end()) {
+                    kept = {freeze->start, last->second};
+                }
+                still = kept.second.empty() ? nullptr : &kept.second;
+            }
+            clipsAt(actor, seconds, clips, playing, boneOf, still);
             if (actor.object != 0) {
                 auto& joints = held[actor.object];
                 if (const auto was = out.held.find(actor.object); was != out.held.end()) {
@@ -631,12 +684,13 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
         out.nodes[posed++].second.assign(world.begin(), world.end());
         for (const auto& h : actor.held) {
             const bool known = h.node >= 0 && static_cast<std::size_t>(h.node) < world.size();
-            out.places.emplace_back(h.instance, (known ? actor.place * world[static_cast<std::size_t>(h.node)] : actor.place) * h.pose);
+            out.places.emplace_back(h.instance, known ? actor.place * world[static_cast<std::size_t>(h.node)] : actor.place);
         }
     }
     out.nodes.resize(posed);
     out.held = std::move(held);
     out.heldHeading = std::move(headings);
+    out.frozen = std::move(frozen);
 }
 
 } // namespace ts2::scene

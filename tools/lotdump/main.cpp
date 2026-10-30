@@ -654,6 +654,50 @@ int showFrameSurvey(const std::filesystem::path& folder) {
     return 0;
 }
 
+// Counts the animations every lot under `folder` saved, by Sim or object, type, kind and state, with a
+// few examples of each.
+int showAnimationSurvey(const std::filesystem::path& folder) {
+    std::map<std::string, std::size_t> counts;
+    std::map<std::string, std::vector<std::string>> examples;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(folder)) {
+        if (entry.path().extension() != ".package" || entry.path().parent_path().filename() != "Lots") {
+            continue;
+        }
+        Lot lot;
+        try {
+            lot = ts2::content::loadLot(entry.path());
+        } catch (const std::exception&) {
+            continue;
+        }
+        for (const auto& o : lot.objects) {
+            const auto saved = lot.savedAnimations.find(o.id);
+            if (saved == lot.savedAnimations.end()) {
+                continue;
+            }
+            for (const auto& a : saved->second) {
+                const std::string key = std::string(o.state.person ? "Sim    " : "object ") +
+                                        (a.kind == ts2::cobject::SavedAnimation::Kind::Clip ? "clip     " : "attached ") + a.type +
+                                        " state " + std::to_string(a.state) + " layer " + std::to_string(a.layer);
+                ++counts[key];
+                auto& list = examples[key];
+                if (list.size() < 3) {
+                    char line[256];
+                    std::snprintf(line, sizeof line, "%s %u %s: %s plays %d rate %.2f", entry.path().filename().string().c_str(), o.id,
+                                  o.type ? o.type->name.c_str() : "-", a.name.c_str(), a.plays, a.rate);
+                    list.emplace_back(line);
+                }
+            }
+        }
+    }
+    for (const auto& [key, n] : counts) {
+        std::printf("%8zu  %s\n", n, key.c_str());
+        for (const auto& e : examples[key]) {
+            std::printf("            %s\n", e.c_str());
+        }
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr,
@@ -665,7 +709,8 @@ int main(int argc, char** argv) {
                      "  lotdump <neighborhood-folder> --families\n"
                      "  lotdump <neighborhood-folder> --wants [id]\n"
                      "  lotdump <neighborhoods-folder> --survey [--install <folder>]\n"
-                     "  lotdump <neighborhoods-folder> --frame-survey\n");
+                     "  lotdump <neighborhoods-folder> --frame-survey\n"
+                     "  lotdump <neighborhoods-folder> --animation-survey\n");
         return 1;
     }
     try {
@@ -696,6 +741,8 @@ int main(int argc, char** argv) {
                 return showObject(std::filesystem::path(argv[1]), static_cast<std::uint32_t>(std::stoul(argv[++i])));
             } else if (arg == "--frame-survey") {
                 return showFrameSurvey(std::filesystem::path(argv[1]));
+            } else if (arg == "--animation-survey") {
+                return showAnimationSurvey(std::filesystem::path(argv[1]));
             } else if (arg == "--graphs") {
                 return showGraphs(std::filesystem::path(argv[1]));
             } else {

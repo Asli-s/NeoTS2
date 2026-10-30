@@ -1,6 +1,7 @@
 // The game's main menu (the neighborhood chooser), built from its UI script, and the neighborhood
 // it opens.
 #include "menu.hpp"
+#include "baby_name_dialog.hpp"
 #include "camera_height.hpp"
 #include "crash_handler.hpp"
 #include "click_gate.hpp"
@@ -67,6 +68,8 @@ namespace {
 constexpr unsigned kMaxClosingSeconds = 30;
 
 constexpr std::uint32_t kScripts = 0xA99D8A11;
+// Live text: a new baby's first name until it is named, a boy's and a girl's.
+constexpr std::uint32_t kLiveText = 0x7F96C284, kBabyBoyText = 0x00950001, kBabyGirlText = 0x00950002;  // string ids, leakcheck: ok
 constexpr std::uint32_t kMainMenu = 0x49001017;
 constexpr std::uint32_t kNeighborhoodTile = 0x49001018;
 // Windows of the main menu by id.
@@ -136,6 +139,29 @@ ts2::render::Vec3 screenRay(const ts2::render::Camera& c, int width, int height,
     const Vec3 u = ts2::render::cross(s, f);
     const float nx = 2 * mx / static_cast<float>(width) - 1, ny = 1 - 2 * my / static_cast<float>(height);
     return {f[0] + s[0] * nx * tx + u[0] * ny * ty, f[1] + s[1] * nx * tx + u[1] * ny * ty, f[2] + s[2] * nx * tx + u[2] * ny * ty};
+}
+
+// Where a point of the scene shows on the screen, none behind the camera.
+std::optional<std::array<int, 2>> screenPoint(const ts2::render::Camera& c, int width, int height, const ts2::render::Vec3& point) {
+    using ts2::render::Vec3;
+    const float aspect = static_cast<float>(width) / static_cast<float>(height);
+    const float tx = c.fovX > 0 ? std::tan(c.fovX / 2) : std::tan(c.fovY / 2) * aspect;
+    const float ty = tx / aspect;
+    const Vec3 f = ts2::render::normalize(ts2::render::sub(c.target, c.eye));
+    const Vec3 s = ts2::render::normalize(ts2::render::cross(f, {0, 0, 1}));
+    const Vec3 u = ts2::render::cross(s, f);
+    const Vec3 p = ts2::render::sub(point, c.eye);
+    const float z = ts2::render::dot(p, f);
+    if (!(z > 0) || !(tx > 0) || !(ty > 0)) {
+        return std::nullopt;
+    }
+    const float nx = ts2::render::dot(p, s) / (z * tx), ny = ts2::render::dot(p, u) / (z * ty);
+    const float x = (nx + 1) * static_cast<float>(width) / 2, y = (1 - ny) * static_cast<float>(height) / 2;
+    // Far off the screen only for a broken camera, kept to what an int holds.
+    if (!std::isfinite(x) || !std::isfinite(y) || std::abs(x) > 1e6f || std::abs(y) > 1e6f) {
+        return std::nullopt;
+    }
+    return std::array<int, 2>{static_cast<int>(std::lround(x)), static_cast<int>(std::lround(y))};
 }
 
 // The live-mode cursor for what is under the mouse: a Sim or an object the selected Sim can use,
@@ -273,6 +299,9 @@ private:
     // lot loaded. The game's other reasons are not known yet.
     bool lotChanged() const { return lotRan_; }
     void openQuitBox(bool askSave = false);
+    // Shows the baby naming dialog when the lot's scripts ask for names, and closes it when answered.
+    void updateBabyNames();
+    void answerBabyNames();
     void closeQuitBox();
     void closeChooser();
     void lotClicked(float x, float y);
@@ -355,6 +384,8 @@ private:
     app::Orbit hoodOrbit_;
     std::optional<ts2::scene::HoodDrift> hoodDrift_;  // the camera's drift while mouse and keys rest
     app::QuitBox quitBox_;  // the game's "Are you sure you want to quit?" box
+    app::BabyNameDialog babyNames_;  // the game's "Set Baby Name" dialog
+    std::optional<bool> pausedBeforeBabyNames_;  // the game pauses while it is open
     // Whether the lot was paused before the quit box paused it. None when the box didn't pause it
     // (no lot running when it opened).
     std::optional<bool> pausedBeforeQuitBox_;
@@ -371,6 +402,7 @@ private:
     std::unique_ptr<app::LotLife> lotLife_;
     std::unique_ptr<app::LotDaylight> lotDaylight_;
     bool householdShown_ = false;
+    std::vector<std::int16_t> householdDrawn_;  // whose portraits the household shows
     // A lot left behind: its scene and simulation are freed in the background, its GPU textures a
     // few a frame (SDL destroys what is given back in the next frame, which took 50 ms for all).
     std::future<void> lotFreeing_;
@@ -384,6 +416,11 @@ private:
     bool hoveredSim_ = false;  // the game never highlights a Sim
     std::array<float, 3> hoveredPoint_{};  // where the mouse's ray hit it, in the scene
     std::optional<std::array<float, 2>> hoverAt_;  // where the mouse moved to since the last frame
+    // The tip over a Sim in the world: the object the mouse last came to (a Sim or not), where the
+    // ray hit it in the scene and when its tip showed (ns).
+    std::uint32_t spotTipObject_ = 0;
+    std::array<float, 3> spotTipPoint_{};
+    std::optional<std::uint64_t> spotTipShown_;
     // The live-mode panels over the lot. The options menu pauses the game while it's open.
     app::LotUi lotUi_;
     // The pie menu of the object clicked. The object stays highlighted while it is open.
@@ -443,6 +480,8 @@ private:
     // A picture's clicks are made once, then the lot plays on for --run seconds.
     bool uiClicked_ = false;
     bool groundClicked_ = false;
+    bool lotHovered_ = false;
+    std::uint8_t mouseHeld_ = 0;  // one bit for each MouseButton held
     std::optional<std::uint64_t> runStarted_;
 };
 
@@ -754,9 +793,11 @@ void Game::closeChooser() {
 void Game::openQuitBox(bool askSave) {
     clickedTile_.reset();
     clickedLot_ = 0;
+    // The box takes the mouse, so a camera drag or turn under way ends here, as its button coming
+    // up would never reach the camera.
+    endCameraDrag();
     if (inNeighborhood_) {
         hoodUi_.showTag(0, 0, 0);
-        endCameraDrag();
         cursors_.show(app::Cursors::kArrow);
     }
     orbit_.keysOn = false;
@@ -766,6 +807,58 @@ void Game::openQuitBox(bool askSave) {
         lotLife_->setPaused(true);
     }
     quitBox_.open(screen_, data_, width_, height_, askSave);
+}
+
+// The game asks for names when a baby is born, and pauses while it asks. OK puts the speed back as it
+// was. Only human babies have their panel shown so far. For others the names stay as they are, as OK
+// on the untouched boxes would leave them.
+void Game::updateBabyNames() {
+    constexpr std::size_t kAge = 0x3A, kGender = 0x41, kSpecies = 0xBA;
+    constexpr std::int16_t kBaby = 1;
+    auto& world = lotLife_->simulation().world();
+    const std::vector<std::int16_t>& asked = world.namesAsked();
+    if (asked.empty()) {
+        babyNames_.close(screen_);
+        return;
+    }
+    if (babyNames_.isOpen()) {
+        return;
+    }
+    // The game picks the panel by the first Sim (temp 0) and whether a second (temp 1) is there.
+    // One Sim older than a baby gets a rename panel, a pet a pet panel, a robot the robot panel.
+    // Anyone else gets the baby panel, or the twins panel with a second Sim. Only the panel's
+    // boxes are named, the other Sims asked keep their names.
+    const std::int16_t first = asked[0], second = asked.size() > 1 ? asked[1] : std::int16_t{0};
+    const bool onlyFirst = std::all_of(asked.begin() + 1, asked.end(), [](std::int16_t id) { return id == 0; });
+    const bool rename = first != 0 && onlyFirst && world.neighborPersonValue(first, kAge) > kBaby;
+    const bool pet = first != 0 && world.neighborPersonValue(first, kSpecies) != 0;
+    std::vector<app::BabyNameDialog::Baby> babies;
+    for (const std::int16_t id : {first, second}) {
+        if (id != 0) {
+            const auto name = lotLife_->neighborName(id);
+            babies.push_back({world.neighborPersonValue(id, kGender) == 1, name ? name->first : std::string{}});
+        }
+    }
+    // Robots aren't told apart yet and get the baby panels.
+    if (first != 0 && !rename && !pet && babyNames_.open(screen_, width_, height_, babies)) {
+        endCameraDrag();  // the dialog takes the mouse, as the quit box does
+        pausedBeforeBabyNames_ = lotLife_->paused();
+        lotLife_->setPaused(true);
+    } else {
+        ts2::diag::warnOnce("baby names: only the baby and twins panels are shown so far, other names are kept");
+        world.answerNames(true, {});
+    }
+}
+
+void Game::answerBabyNames() {
+    if (lotLife_) {
+        lotLife_->simulation().world().answerNames(true, babyNames_.names());
+        if (pausedBeforeBabyNames_) {
+            lotLife_->setPaused(*pausedBeforeBabyNames_);
+        }
+    }
+    pausedBeforeBabyNames_.reset();
+    babyNames_.close(screen_);
 }
 
 void Game::closeQuitBox() {
@@ -967,6 +1060,9 @@ void Game::showLot(LotBuilt& built) {
     lotPicker_.prepare(lot_);
     hovered_ = 0;
     hoveredSim_ = false;
+    spotTipObject_ = 0;
+    spotTipShown_.reset();
+    screen_.setSpotTip({});
     lotShown_ = ts2::platform::ticksNs();
     ts2::diag::info(std::format("lot {} shown after {:.1f} s", enteredLot_, secondsSince(lotLoadStarted_)));
 
@@ -1000,8 +1096,13 @@ void Game::leaveLot() {
     }
     lotUi_.close();
     pieMenu_.close();
+    babyNames_.close(screen_);
+    pausedBeforeBabyNames_.reset();
     hovered_ = 0;
     hoveredSim_ = false;
+    spotTipObject_ = 0;
+    spotTipShown_.reset();
+    screen_.setSpotTip({});
     renderer_.setHighlight(0, 0);
     renderer_.setImposterLight({1, 1, 1});
     orbit_ = hoodOrbit_;
@@ -1011,7 +1112,7 @@ void Game::leaveLot() {
 }
 
 // The game's live-mode keys. P, Pause, ` or 0 on the number pad pause. 1, 2 and 3 pick a
-// speed. F5 opens the options.
+// speed. F5 opens the options. Q asks to quit, as in most of the game's modes.
 app::LotUi::Action Game::lotKey(pf::Key key) {
     using Action = app::LotUi::Action;
     switch (key) {
@@ -1028,6 +1129,7 @@ app::LotUi::Action Game::lotKey(pf::Key key) {
     case pf::Key::F5:
         lotUi_.showOptions(!lotUi_.optionsShown());
         return lotUi_.optionsShown() ? Action::OptionsOpened : Action::OptionsClosed;
+    case pf::Key::Q: return Action::Quit;
     default: return Action::None;
     }
 }
@@ -1326,6 +1428,9 @@ void Game::toggleFreeCamera() {
     freeCam_->enter(orbit_);
     hovered_ = 0;
     hoveredSim_ = false;
+    spotTipObject_ = 0;
+    spotTipShown_.reset();
+    screen_.setSpotTip({});
     // Only the pause frame stays on screen, as in the game.
     lotUi_.hideForFreeCamera(true);
     pf::hideCursor();
@@ -1361,6 +1466,21 @@ void Game::freeCameraLook() {
 // ground, then the panels and the camera.
 void Game::lotMouse(const pf::Event& e, float x, float y) {
     const int ix = static_cast<int>(x), iy = static_cast<int>(y);
+    if (babyNames_.isOpen() && !quitBox_.isOpen()) {
+        cursors_.show(app::Cursors::kArrow);
+        if (e.type == pf::Event::Type::MouseDown && e.button == pf::MouseButton::Left) {
+            babyNames_.mouseDown(screen_, ix, iy);
+        } else if (e.type == pf::Event::Type::MouseUp && e.button == pf::MouseButton::Left) {
+            babyNames_.mouseUp();
+        } else if (e.type == pf::Event::Type::MouseMotion) {
+            babyNames_.mouseMoved(screen_, ix, iy);
+        }
+        if (const auto clicked = screen_.mouse(ix, iy, down_, static_cast<double>(ts2::platform::ticksNs()) / 1e9);
+            clicked && babyNames_.clickedOk(screen_, *clicked)) {
+            answerBabyNames();
+        }
+        return;
+    }
     if (quitBox_.isOpen()) {
         cursors_.show(app::Cursors::kArrow);
         if (const auto clicked = screen_.mouse(ix, iy, down_, static_cast<double>(ts2::platform::ticksNs()) / 1e9)) {
@@ -1466,7 +1586,32 @@ void Game::updateLot(std::uint64_t now) {
         hoveredSim_ = hovered_ != 0 && lotLife_->isSim(hovered_);
         liveCursor_ = liveCursor(hit ? &lot_.instances[hit->instance] : nullptr, hovered_ != 0, hoveredSim_);
         cursors_.show(liveCursor_);
+        // A Sim the mouse comes to shows its name at once, pointing at where the ray hit it. Moving
+        // over the same Sim changes nothing, and the tip goes when the mouse leaves it.
+        if (object != spotTipObject_) {
+            spotTipObject_ = object;
+            spotTipPoint_ = hoveredPoint_;
+            const bool sim = object != 0 && lotLife_->isSim(object);
+            screen_.setSpotTip(sim ? lotUi_.fullName(*lotLife_, static_cast<std::int16_t>(object)) : std::string());
+            spotTipShown_ = sim ? std::optional(now) : std::nullopt;
+        }
         hoverAt_.reset();
+    }
+    // It hides 3 s after it showed, and shows again only once the mouse has been on something else.
+    constexpr std::uint64_t kSpotTipTimeoutNs = 3'000'000'000;
+    if (spotTipShown_ && (freeCam_ || now - *spotTipShown_ >= kSpotTipTimeoutNs)) {
+        screen_.setSpotTip({});
+        spotTipShown_.reset();
+    }
+    // It points at the same spot of the scene however the camera moves.
+    if (spotTipShown_) {
+        const auto at = screenPoint(orbit_.camera(), width_, height_, spotTipPoint_);
+        if (at) {
+            screen_.moveSpotTip((*at)[0], (*at)[1]);
+        } else {
+            screen_.setSpotTip({});
+            spotTipShown_.reset();
+        }
     }
     renderer_.setHighlight(hoveredSim_ ? 0 : hovered_, ts2::scene::hoverAmbient(static_cast<double>(now) / 1e9));
     const bool shooting = !options_.shot.empty();
@@ -1475,6 +1620,10 @@ void Game::updateLot(std::uint64_t now) {
     }
     // Drawn once the lot's textures are on the GPU, as reading a picture back waits for them.
     if (lotLife_ && !householdShown_ && ((!stepTaken_ && renderer_.uploaded()) || shooting)) {
+        drawHousehold(now);
+    }
+    // A Sim born or joining during play gets its portrait.
+    if (lotLife_ && householdShown_ && lotLife_->household() != householdDrawn_) {
         drawHousehold(now);
     }
     if (lotLife_) {
@@ -1487,6 +1636,7 @@ void Game::updateLot(std::uint64_t now) {
                                  *lotLife_);
         }
         lotUi_.showLife(*lotLife_);
+        updateBabyNames();
         followSimStorey();
     }
     app::animateActors(lot_, lotLife_ ? lotLife_->seconds() : static_cast<double>(now - lotShown_) / 1e9, renderer_, lotPose_);
@@ -1500,6 +1650,8 @@ void Game::startLotLife() {
     if (auto sim = finished(lotSimBuilding_, "lot's simulation"); sim && *sim) {
         stepTaken_ = true;
         lotLife_ = std::make_unique<app::LotLife>(std::move(*sim), *assets_.get(), lotRouteModels_);
+        lotLife_->simulation().world().setAsksNames(true);
+        lotLife_->simulation().world().setBabyFirstNames(data_.text(kLiveText, kBabyBoyText), data_.text(kLiveText, kBabyGirlText));
         lotLife_->traceIn(lot_, lotPose_, lotVisible_);
         // A lot opens paused, as in the game, after the game's 10 ticks of loading. Sims start
         // their main loop in them (Sims without turn-ons get theirs there). The ticks need the
@@ -1518,9 +1670,10 @@ void Game::startLotLife() {
 // their character file's portrait.
 void Game::drawHousehold(std::uint64_t now) {
     householdShown_ = true;
+    householdDrawn_ = lotLife_->household();
     std::vector<app::Skewer::Member> members;
     std::mt19937 poseRandom(static_cast<unsigned>(now));
-    for (const std::int16_t id : lotLife_->household()) {
+    for (const std::int16_t id : householdDrawn_) {
         auto portrait = app::drawPortrait(lot_, renderer_, lotLife_->animations(), static_cast<std::uint32_t>(id), poseRandom);
         members.push_back({id, portrait ? std::move(portrait) : lotLife_->portrait(id)});
     }
@@ -1661,6 +1814,11 @@ bool Game::blockedWhileLoading(const pf::Event& e) {
 }
 
 void Game::handleEvent(const pf::Event& e) {
+    // The left, middle and right buttons held, which a key press carries in the game.
+    if ((e.type == pf::Event::Type::MouseDown || e.type == pf::Event::Type::MouseUp) && e.button != pf::MouseButton::Other) {
+        const auto bit = static_cast<std::uint8_t>(1u << static_cast<unsigned>(e.button));
+        mouseHeld_ = e.type == pf::Event::Type::MouseDown ? mouseHeld_ | bit : mouseHeld_ & ~bit;
+    }
     if (blockedWhileLoading(e)) {
         return;
     }
@@ -1676,6 +1834,19 @@ void Game::handleEvent(const pf::Event& e) {
     if (e.type == pf::Event::Type::KeyUp && (key == pf::Key::Comma || key == pf::Key::Period)) {
         orbit_.turnKeys[key == pf::Key::Comma ? 0 : 1] = false;
     }
+    // The naming dialog takes the keyboard while it is open. Keys let go still stop the camera's
+    // turn above and the free camera's moves, so none goes on after the dialog.
+    if (babyNames_.isOpen() && e.type != pf::Event::Type::Quit && e.type != pf::Event::Type::MouseMotion &&
+        e.type != pf::Event::Type::MouseDown && e.type != pf::Event::Type::MouseUp && e.type != pf::Event::Type::MouseWheel) {
+        if (e.type == pf::Event::Type::Text) {
+            babyNames_.text(screen_, e.text);
+        } else if (e.type == pf::Event::Type::KeyDown) {
+            babyNames_.key(screen_, e.key);
+        } else if (e.type == pf::Event::Type::KeyUp && freeCam_) {
+            freeCam_->key(e.scancode, false);
+        }
+        return;
+    }
     const bool freeToggle = e.type == pf::Event::Type::KeyDown && !e.repeat && inLot_ && !quitBox_.isOpen() &&
                             (e.scancode == pf::Key::Tab || e.scancode == pf::Key::Y || (freeCam_ && e.scancode == pf::Key::Escape));
     if (freeToggle) {
@@ -1684,8 +1855,11 @@ void Game::handleEvent(const pf::Event& e) {
                (e.repeat || freeCam_->key(e.scancode, e.type == pf::Event::Type::KeyDown))) {
         // The free camera's own keys.
     } else if (e.type == pf::Event::Type::KeyDown && quitBox_.isOpen()) {
-        if (e.key == pf::Key::Escape) {
-            closeQuitBox();  // Escape answers No, or Cancel on the save question
+        // Escape answers No, or Cancel on the save question. As in the game's message box, only a
+        // press on its own counts: not a held key's repeat, not with Shift, Ctrl or Alt, and not
+        // while a mouse button is held.
+        if (e.key == pf::Key::Escape && !e.repeat && !e.shift && !e.ctrl && !e.alt && mouseHeld_ == 0) {
+            closeQuitBox();
         }
     } else if (e.type == pf::Event::Type::Quit) {
         ts2::diag::step("window closed");
@@ -1693,6 +1867,8 @@ void Game::handleEvent(const pf::Event& e) {
     } else if (e.type == pf::Event::Type::KeyDown && inLot_ && pieMenu_.isOpen()) {
         // Any key, Escape too, closes an open pie menu. Escape does nothing else in the game.
         pieMenu_.close();
+    } else if (e.type == pf::Event::Type::KeyDown && !e.repeat && inNeighborhood_ && !neighborhoodCovered() && e.key == pf::Key::Q) {
+        openQuitBox();  // Q asks to quit in the neighborhood too
     } else if (e.type == pf::Event::Type::KeyDown && inLot_) {
         if (const auto action = lotKey(e.key); action != app::LotUi::Action::None) {
             lotAction(action);
@@ -1727,7 +1903,7 @@ void Game::mouseEvent(const pf::Event& e) {
         return;
     }
     if (inLot_) {
-        if (!quitBox_.isOpen()) {
+        if (!quitBox_.isOpen() && !babyNames_.isOpen()) {
             cameraDrag(e, x, y);
         }
         lotMouse(e, x, y);
@@ -1842,6 +2018,14 @@ bool Game::takePicture() {
         clickPanels();
         showSprites(static_cast<double>(ts2::platform::ticksNs()) / 1e9, true);
     }
+    // The mouse resting on the lot (--hover) is picked up by the next frame, once the Sims are there.
+    if (inLot_ && options_.hoverX >= 0 && !lotHovered_) {
+        if (lotLife_ && householdShown_) {
+            lotHovered_ = true;
+            hoverAt_ = {static_cast<float>(options_.hoverX), static_cast<float>(options_.hoverY)};
+        }
+        return false;
+    }
     // The ground click waits for the Sims to come to life.
     if (inLot_ && options_.groundClick && !groundClicked_ && !lotLife_) {
         return false;
@@ -1897,7 +2081,8 @@ bool Game::takePicture() {
 void Game::clickPanels() {
     for (const auto& [cx, cy, right] : options_.uiClicks) {
         if (right == 2) {
-            screen_.mouse(cx, cy, false, 0);
+            // A second before the picture, so a tip that shows after a while and hides 3 s later is in it.
+            screen_.mouse(cx, cy, false, static_cast<double>(ts2::platform::ticksNs()) / 1e9 - 1.0);
             lotUi_.mouseMoved(cx, cy);
         } else if (right != 0) {
             if (const auto button = screen_.buttonAt(cx, cy); button && lotLife_) {

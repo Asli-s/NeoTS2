@@ -24,6 +24,10 @@ void resetSim(SimObject& sim, const ObjectType& type, CodeSource& code);
 // The object's script stack is replaced by its Main tree, which starts from the top on the next tick.
 void restartMain(SimObject& object, const ObjectType& type, CodeSource& code);
 
+// Takes whether the object's scripts run while the game is paused from its object data 0x3C, as the
+// game does each time it loads or resets an object.
+void notePausedRun(SimObject& object);
+
 // Whether an object of this type is a part of a multi-tile object.
 bool isMultiTilePart(const ObjectType& type);
 

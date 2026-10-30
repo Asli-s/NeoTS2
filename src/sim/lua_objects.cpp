@@ -320,6 +320,44 @@ int cachedFamilyVacationLotId(lua_State* L) {
     return 1;
 }
 
+namespace {
+
+std::span<const std::uint32_t> selfFamilyMembers(lua_State* L) {
+    const auto* self = selfInstance(L);
+    const ScriptCall& c = call(L);
+    if (self == nullptr || c.world == nullptr || self->id < 0) {
+        return {};
+    }
+    return c.world->familyMemberGuids(static_cast<std::uint32_t>(self->id));
+}
+
+} // namespace
+
+// CachedFamily:getMembers(): an array of the neighbor ids of the family's Sims, in the family's
+// order. A member with no neighbor, or a family-tree-only one, is left out.
+int cachedFamilyMembers(lua_State* L) {
+    const ScriptCall& c = call(L);
+    lua_newtable(L);
+    int n = 0;
+    for (const std::uint32_t guid : selfFamilyMembers(L)) {
+        const std::int16_t id = guid != 0 ? c.world->neighborIdWithGuid(guid) : 0;
+        const SavedNeighbor* neighbor = id != 0 ? c.world->neighbor(id) : nullptr;
+        if (neighbor == nullptr || isFamilyTreeOnly(c, *neighbor)) {
+            continue;
+        }
+        lua_pushnumber(L, ++n);
+        lua_pushnumber(L, id);
+        lua_settable(L, -3);
+    }
+    return 1;
+}
+
+// CachedFamily:getNumMembers(): how many Sims the family lists, all of them counted.
+int cachedFamilyMemberCount(lua_State* L) {
+    lua_pushnumber(L, static_cast<lua_Number>(selfFamilyMembers(L).size()));
+    return 1;
+}
+
 // CachedPerson.new(objectId): a Sim on the lot. Anything else is error 0x1C.
 int newCachedPerson(lua_State* L) {
     const std::int16_t id = argShort(L, 1);
@@ -596,6 +634,69 @@ int cachedPersonGuid(lua_State* L) {
     const auto* self = selfInstance(L);
     const SimObject& o = personOrError(L, self ? static_cast<std::int16_t>(self->id) : 0);
     lua_pushnumber(L, static_cast<lua_Number>(static_cast<std::int32_t>(o.definition.guid())));
+    return 1;
+}
+
+namespace {
+
+// Tokens in a neighbor's inventory that lower or raise the family friends a promotion needs. A
+// token counts only with no flags set and category 0.
+constexpr std::uint32_t kFriendCreditToken = 0x53FEA775, kFriendDebitToken = 0x74BF3B69;
+
+// Credits from a Sim's tokens against the friends a promotion needs. Each credit token whose first
+// value is 0 or 1 is one. One whose first value is 0, 1 or 2 and whose next two name the Sim's
+// career (low then high half of its GUID, both non-zero) is one more. Each debit token takes one away.
+int friendCredits(const Inventory& inventory, std::int16_t careerLow, std::int16_t careerHigh) {
+    int credits = 0;
+    for (const auto& token : inventory.singular) {
+        if (!token || token->flags != 0 || token->category != 0) {
+            continue;
+        }
+        if (token->guid == kFriendDebitToken) {
+            --credits;
+            continue;
+        }
+        if (token->guid != kFriendCreditToken) {
+            continue;
+        }
+        const auto value = [&](std::size_t i) { return i < token->properties.size() ? token->properties[i] : std::int16_t{0}; };
+        const std::int16_t kind = value(0), low = value(1), high = value(2);
+        if (kind < 0 || kind > 2) {
+            continue;
+        }
+        credits += kind <= 1 ? 1 : 0;
+        if (low != 0 && high != 0 && low == careerLow && high == careerHigh) {
+            ++credits;
+        }
+    }
+    return credits;
+}
+
+} // namespace
+
+// CachedPerson:getFriendsRequiredForPromtion(): the family friends the Sim still needs for the next
+// career level. Its career's table 0x1003 gives the friends for each level (0 past its end), less
+// the credits from the Sim's neighbor inventory, never below 0. 0 without a career or the table.
+int cachedPersonFriendsForPromotion(lua_State* L) {
+    constexpr std::size_t kNeighborId = 0x1F, kJobLevel = 0x39, kCareerLow = 0x59, kCareerHigh = 0x5A;
+    constexpr std::uint16_t kFriendsTable = 0x1003;
+    const auto* self = selfInstance(L);
+    ScriptCall& c = call(L);
+    const SimObject& sim = personOrError(L, self ? static_cast<std::int16_t>(self->id) : 0);
+    const auto data = [&](std::size_t i) { return i < sim.personData.size() ? sim.personData[i] : std::int16_t{0}; };
+    const std::int16_t careerLow = data(kCareerLow), careerHigh = data(kCareerHigh);
+    const std::uint32_t career = static_cast<std::uint32_t>(static_cast<std::uint16_t>(careerHigh)) << 16 | static_cast<std::uint16_t>(careerLow);
+    const ObjectType* type = career != 0 && c.code != nullptr ? c.code->objectType(career) : nullptr;
+    const std::vector<std::int16_t>* friends = type != nullptr ? c.code->constants(type->group, kFriendsTable) : nullptr;
+    std::int16_t needed = 0;
+    if (friends != nullptr) {
+        const int next = data(kJobLevel) + 1;
+        const std::int16_t perLevel = next >= 0 && static_cast<std::size_t>(next) < friends->size() ? (*friends)[static_cast<std::size_t>(next)] : 0;
+        const Inventory* inventory = c.world != nullptr ? c.world->inventory(InventoryKind::Neighbor, data(kNeighborId)) : nullptr;
+        const int credits = inventory != nullptr ? friendCredits(*inventory, careerLow, careerHigh) : 0;
+        needed = static_cast<std::int16_t>(perLevel - credits);
+    }
+    lua_pushnumber(L, needed > 0 ? needed : 0);
     return 1;
 }
 

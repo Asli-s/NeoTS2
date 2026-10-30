@@ -183,9 +183,16 @@ int objectManagerGetObjectIds(lua_State* L) {
     }
 }
 
+// Whether a neighbor's object type is 0x11, a Sim who exists only in family trees. Scripts listing
+// neighbors leave these out.
+bool isFamilyTreeOnly(const ScriptCall& c, const SavedNeighbor& neighbor) {
+    constexpr std::uint16_t kFamilyTreeOnlyType = 0x11;
+    const ObjectType* type = c.code != nullptr ? c.code->objectType(neighbor.guid) : nullptr;
+    return type != nullptr && type->definition.field(objd::field::kType) == kFamilyTreeOnlyType;
+}
+
 // getNeighborIds([species mask]): the neighborhood's neighbor ids as an array, in the order the
-// game lists them. Neighbors whose object type is 0x11 (Sims who exist only in family trees) are
-// left out. A number argument is a mask of species (person data 0xBA, bit 1 << species).
+// game lists them. Family-tree-only neighbors are left out. A number argument is a mask of species (person data 0xBA, bit 1 << species).
 // Anything else, or 0, takes every species.
 int objectManagerGetNeighborIds(lua_State* L) {
     ScriptCall& c = call(L);
@@ -195,14 +202,12 @@ int objectManagerGetNeighborIds(lua_State* L) {
         mask = value > -2147483649.0 && value < 2147483648.0 ? static_cast<std::int32_t>(value)
                                                                 : std::numeric_limits<std::int32_t>::min();
     }
-    constexpr std::uint16_t kLeftOutType = 0x11;
     lua_newtable(L);
     int n = 0;
     if (const auto* ids = c.world ? c.world->neighbors() : nullptr) {
         for (const std::int16_t id : *ids) {
             const SavedNeighbor* saved = c.world->neighbor(id);
-            const ObjectType* type = saved && c.code ? c.code->objectType(saved->guid) : nullptr;
-            if (type != nullptr && type->definition.field(objd::field::kType) == kLeftOutType) {
+            if (saved != nullptr && isFamilyTreeOnly(c, *saved)) {
                 continue;
             }
             const auto species = static_cast<std::uint32_t>(c.world->neighborPersonValue(id, kSpeciesPersonData)) & 31;

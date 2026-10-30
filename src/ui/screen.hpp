@@ -51,6 +51,12 @@ public:
     void setModal(int window) { modal_ = window; }
     int modal() const { return modal_; }
     void setText(int window, const std::string& text);
+    // A text box's selection (bytes `begin` to `end` of its text, shown in its highlight colour, none
+    // when they are equal) and its caret (before byte `at`, none when not given).
+    void setSelection(int window, std::size_t begin, std::size_t end);
+    void setCaret(int window, std::optional<std::size_t> at);
+    // The place in a window's text (a byte index between characters) nearest to screen x.
+    std::size_t textIndexAt(int window, int x);
     void setTextColor(int window, const std::array<float, 4>& color);
     void setImage(int window, tga::Pixels pixels);  // drawn over the window's whole area
     // Textures added or changed since the last call (a window's own picture or text keeps its
@@ -98,6 +104,11 @@ public:
     bool over(int x, int y) const;
     // A window's tooltip text (empty: none).
     void setTip(int window, const std::string& text);
+    // A tip pointing at a spot rather than a window, as the game's tip over a Sim in the world: one
+    // line in the Default style, shown at once at the spot set by moveSpotTip. Empty text takes it
+    // away.
+    void setSpotTip(const std::string& text);
+    void moveSpotTip(int x, int y) { spotTip_.at = {x, y}; }
     std::uint32_t id(int window) const;
     int parent(int window) const;
     const std::vector<int>& children(int window) const;
@@ -159,6 +170,11 @@ private:
         int band = 0, lineStep = 0, firstBaseline = 0;
         ButtonState state = ButtonState::Normal;
         bool checked = false;
+        // A text box: its selection in bytes, its caret's byte, and their colours (highlightcolor,
+        // colorfonthilited, caretcolor).
+        std::size_t selectionBegin = 0, selectionEnd = 0;
+        std::optional<std::size_t> caret;
+        std::array<float, 4> highlightColor{0, 0, 1, 1}, selectedTextColor{1, 1, 1, 1}, caretColor{0, 0, 0, 1};
     };
 
     int add(const ui::Window& w, int parent);
@@ -170,8 +186,13 @@ private:
     void emitLines(const Window& w, float x0, float y0, std::vector<Quad>& out) const;
     // Draws a window's tooltip text into an image, if it has a tip and none is drawn yet.
     void drawTip(Window& window);
-    // The topmost shown window with a tip under the mouse, or -1 when none.
-    int tipWindowAt(int x, int y) const;
+    // A tip's frame, w by h at (x, y), and its text image with its baseline at `baselineY`. The frame
+    // is a dark blue border and a see-through beige inside on all but its last 2 columns and 3 rows,
+    // which hold a soft shadow.
+    void emitTip(int x, int y, int w, int h, int image, int baseline, int baselineY, std::vector<Quad>& out) const;
+    // The topmost shown window with a tip under the mouse, or -1 when none. With `within`, only
+    // windows inside that one count.
+    int tipWindowAt(int x, int y, int within = -1) const;
     std::array<int, 2> origin(int window) const;
     bool shown(int window) const;
     bool inside(int window, int root) const;
@@ -187,7 +208,12 @@ private:
     int pressed_ = -1;
     int modal_ = -1;
     std::array<int, 2> size_{0, 0};
-    int hover_ = -1;          // the button, or else the window with a tip, the mouse is over
+    int hover_ = -1;          // the button with a tip, or else the window with a tip, the mouse is over
+    struct SpotTip {
+        std::string text;
+        int image = -1, width = 0, baseline = 0;
+        std::array<int, 2> at{0, 0};
+    } spotTip_;
     double hoverSince_ = 0;
     int white_ = -1;          // a white texture for plain colors
     std::vector<int> changed_;

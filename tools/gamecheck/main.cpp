@@ -3,6 +3,8 @@
 // types the engine doesn't read yet. Whole lots and neighborhoods are loaded as the engine loads
 // them, too. Nothing is written to the game's folders.
 //   gamecheck <install folder> [--user <user folder>] [--report <report.md>]
+// With --types it only counts the resource types against the readers, without reading them.
+//   gamecheck <install folder> --types
 #include "content/lot.hpp"
 #include "content/neighborhood.hpp"
 #include "formats/anim.hpp"
@@ -472,10 +474,69 @@ int main(int argc, char** argv) {
 
 namespace {
 
+// Counts the resource types in the folder against the engine's readers without reading any
+// resource: a quick measure of which kinds of game data the engine reads.
+int countTypes(const fs::path& root) {
+    const auto all = readers();
+    std::map<std::uint32_t, std::size_t> read, unread;
+    std::size_t packages = 0;
+    for (const auto& item : fs::recursive_directory_iterator(root, fs::directory_options::skip_permission_denied)) {
+        if (!item.is_regular_file() || item.path().extension() != ".package") {
+            continue;
+        }
+        try {
+            ts2::dbpf::Package package{item.path()};
+            ++packages;
+            for (const auto& e : package.entries()) {
+                if (e.key.type == ts2::types::kDirectory) {
+                    continue;
+                }
+                const bool known = std::any_of(all.begin(), all.end(), [&](const Reader& r) { return r.type == e.key.type; }) &&
+                                   (e.key.type != ts2::types::kUiScript || isUiScriptGroup(e.key.group));
+                ++(known ? read : unread)[e.key.type];
+            }
+        } catch (const std::exception&) {
+        }
+    }
+    std::size_t readCount = 0, unreadCount = 0;
+    for (const auto& [t, n] : read) {
+        readCount += n;
+    }
+    std::vector<std::pair<std::size_t, std::uint32_t>> missing;
+    for (const auto& [t, n] : unread) {
+        unreadCount += n;
+        if (!read.contains(t)) {
+            missing.emplace_back(n, t);
+        }
+    }
+    std::sort(missing.rbegin(), missing.rend());
+    const std::size_t total = readCount + unreadCount;
+    std::printf("Resource types in %zu packages: %zu types, %zu with a reader\n", packages,
+                read.size() + missing.size(), read.size());
+    std::printf("  resources with a reader: %zu of %zu (%.1f%%)\n", readCount, total,
+                total ? 100.0 * static_cast<double>(readCount) / static_cast<double>(total) : 0.0);
+    std::printf("Types with no reader yet (top 15 by count):\n");
+    for (std::size_t i = 0; i < std::min<std::size_t>(missing.size(), 15); ++i) {
+        // Many type ids are four letters ("XOBJ"), shown when they are.
+        std::string letters;
+        for (int shift = 24; shift >= 0; shift -= 8) {
+            const char c = static_cast<char>((missing[i].second >> shift) & 0xFF);
+            letters += (c >= 0x20 && c < 0x7F) ? c : '?';
+        }
+        std::printf("  %s %-4s %8zu\n", hex(missing[i].second).c_str(),
+                    letters.find('?') == std::string::npos ? letters.c_str() : "", missing[i].first);
+    }
+    return 0;
+}
+
 int run(const std::vector<fs::path>& args) {
     if (args.empty()) {
-        std::fprintf(stderr, "Usage: gamecheck <install folder> [--user <user folder>] [--report <report.md>]\n");
+        std::fprintf(stderr, "Usage: gamecheck <install folder> [--user <user folder>] [--report <report.md>]\n"
+                             "       gamecheck <install folder> --types\n");
         return 2;
+    }
+    if (args.size() >= 2 && args[1] == "--types") {
+        return countTypes(args[0]);
     }
     std::vector<fs::path> roots{args[0]};
     fs::path reportPath;

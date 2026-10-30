@@ -60,9 +60,13 @@ Actor buildSim(SceneBuilder& builder, RigLibrary& rigs, const SimLook& look, con
         if (part.part == kHairPart) {
             // A hair's scalp is drawn over the Sim's bald head (its strands' alpha layers are not).
             for (auto& o : overrides) {
-                if (lower(o.group) == "hair") {
+                if (lower(o.group) == "hair" && o.material != look.skinHair) {
                     o.material = hairOverScalp(builder, assets, look, o.material);
                 }
+            }
+        } else if (part.part == kFacePart) {
+            for (auto& o : overrides) {
+                o.material = faceWithOverlays(builder, look, o.material);
             }
         } else if (part.part == kBodyPart) {
             for (auto& o : overrides) {
@@ -75,7 +79,7 @@ Actor buildSim(SceneBuilder& builder, RigLibrary& rigs, const SimLook& look, con
                 }
             }
         }
-        const int mesh = actor.rig ? builder.skinnedModel(part.model, overrides) : builder.model(part.model, overrides);
+        const int mesh = actor.rig ? builder.skinnedModel(part.model, overrides, part.meshEdit.get()) : builder.model(part.model, overrides, part.meshEdit.get());
         const std::size_t instance = builder.scene().instances.size();
         auto* placed = builder.place(mesh, name + " " + part.model, at, Part::Object, level);
         if (placed) {

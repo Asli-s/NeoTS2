@@ -743,7 +743,20 @@ std::vector<RelationshipsPanel::Person> LotUi::panelRelationships(LotLife& life,
     return out;
 }
 
+std::string LotUi::fullName(LotLife& life, std::int16_t sim) const {
+    constexpr std::uint32_t kLiveText = 0x7F96C284, kTitles = 0x336;
+    const LotLife::SimName parts = life.simName(sim);
+    std::string name = parts.first.empty() ? parts.last : parts.last.empty() ? parts.first : parts.first + " " + parts.last;
+    if (parts.title > 0) {
+        if (const std::string title = screen_.data().text(kLiveText, kTitles << 16 | static_cast<std::uint32_t>(parts.title)); !title.empty()) {
+            name = ts2::content::formatted(title, {name});
+        }
+    }
+    return name;
+}
+
 void LotUi::showHousehold(std::vector<Skewer::Member> members) {
+    namesShown_.clear();  // the new thumbnails have no names yet
     portraits_.clear();
     targets_.clear();
     relationshipPictures_.clear();
@@ -827,7 +840,34 @@ void LotUi::showLife(LotLife& life) {
     for (const std::int16_t member : life.household()) {
         skewer_.setMood(member, life.mood(member));
     }
+    showNames(life, sim);
     showQueue(life, sim);
+}
+
+// The household's names as tips over their thumbnails, and the selected Sim's over the live panel's
+// portrait, whose script marks it to show its caption as a tip. They are made again only when a name
+// may have changed: a first name given, another Sim selected or a witch's title.
+void LotUi::showNames(LotLife& life, std::int16_t sim) {
+    constexpr std::size_t kTitle = 0xE6;
+    const auto title = [&](std::int16_t s) {
+        const auto data = life.personData(s);
+        return kTitle < data.size() ? data[kTitle] : std::int16_t{0};
+    };
+    namesScratch_.assign({static_cast<std::int32_t>(life.namesVersion()), sim, title(sim)});
+    for (const std::int16_t member : life.household()) {
+        namesScratch_.push_back(member);
+        namesScratch_.push_back(title(member));
+    }
+    if (namesScratch_ == namesShown_) {
+        return;
+    }
+    namesShown_.swap(namesScratch_);
+    for (const std::int16_t member : life.household()) {
+        skewer_.setName(member, fullName(life, member));
+    }
+    if (live_ >= 0) {
+        screen_.setTip(screen_.find(live_, kPortraitHolder), sim != 0 ? fullName(life, sim) : std::string());
+    }
 }
 
 // The queue's icons: an object type's picture, or a Sim's portrait.

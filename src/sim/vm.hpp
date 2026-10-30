@@ -120,8 +120,11 @@ struct RunResult {
 };
 
 struct Limits {
+    // A run stops on reaching this many primitives, or maxRaisedSteps while global 0x33 "Object
+    // Error Flags" has flag 1 set (trees doing heavy work set it, relationship decay among them).
     std::size_t maxSteps = 100000;
     std::size_t maxDepth = 64;
+    std::size_t maxRaisedSteps = 300000;
 };
 
 struct StepInfo {
@@ -223,6 +226,8 @@ private:
     RunResult checkFromTree(SimObject& who, std::uint32_t codeOwner, std::uint16_t tree, std::int16_t stackObject,
                             std::span<const std::int16_t> args, const ttab::Interaction& line, ttab::Interaction& changed,
                             InteractionIcon* icon, std::vector<OfferedAction>* offered);
+    // Lets go of what a nested thread's frames still use, and drops them, when its run waited.
+    void releaseWaiting(ThreadState& nested);
     // A tree run to its end at once on top of `thread`'s own stack, as `me`, on its temps (a message handler).
     RunResult runOnTop(ThreadState& thread, SimObject* me, std::uint32_t codeGroup, std::uint16_t tree,
                        std::int16_t stackObject, std::span<const std::int16_t> args);
@@ -238,9 +243,13 @@ private:
     Limits limits_;
     World* world_;
     int nestedRuns_ = 0;  // synchronous runs started by primitives (check trees), in progress
-    // Runs started inside a run share its step limit, so nested runs can't multiply it.
+    // Runs started inside a run share its step count, apart from those the game counts on their own
+    // (check trees, Run Tree by Name on another object), which kMaxNestedRuns keeps few.
     int activeRuns_ = 0;
     std::size_t stepsUsed_ = 0;
+    // The step limit now, one for every thread as the game's: raised by a step that sees global 0x33
+    // flag 1 set, and lowered again by one that sees it clear.
+    std::size_t stepLimit_ = limits_.maxSteps;
     std::vector<OfferedAction>* offered_ = nullptr;  // while a candidate's check tree runs
     InteractionIcon* candidateIcon_ = nullptr;       // that candidate's queue icon
     // A copy of the interaction line last tested. Like the game, it is kept after the check tree ends.

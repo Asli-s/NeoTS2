@@ -172,6 +172,39 @@ void addTurns(const std::vector<Contribution>& parts, std::array<float, 4>& out)
     }
 }
 
+// How a clip that started where the Sim no longer stands moves its root joints (see
+// LayeredClip::placeMove): their places by the clip's move seen from root_trans's parent, their
+// turns by that move seen from root_trans's own axes, as the game does. Additive channels don't
+// move, as they are offsets on top of the other clips.
+struct RootMove {
+    Transform place;
+    std::array<float, 4> turn{0, 0, 0, 1};
+};
+
+std::vector<std::optional<RootMove>> rootMovesOf(const Rig& rig, std::span<const LayeredClip> clips, int rootTrans) {
+    std::vector<std::optional<RootMove>> moves(clips.size());
+    if (rootTrans < 0) {
+        return moves;
+    }
+    // root_trans's parent at rest, in the rig's space. A node's parent comes before it, which also
+    // ends the walk up through a broken file's parents.
+    Transform parent;
+    for (int i = rig.nodes[static_cast<std::size_t>(rootTrans)].parent, below = rootTrans; i >= 0 && i < below;
+         below = i, i = rig.nodes[static_cast<std::size_t>(i)].parent) {
+        const auto& node = rig.nodes[static_cast<std::size_t>(i)];
+        parent = Transform::of(node.translation, node.rotation) * parent;
+    }
+    const auto& own = rig.nodes[static_cast<std::size_t>(rootTrans)].rotation;
+    const std::array<float, 4> ownBack{-own[0], -own[1], -own[2], own[3]};
+    for (std::size_t c = 0; c < clips.size(); ++c) {
+        if (clips[c].placeMove) {
+            const Transform place = parent.rigidInverse() * *clips[c].placeMove * parent;
+            moves[c] = RootMove{place, turnProduct(ownBack, turnProduct(turnOf(place), own))};
+        }
+    }
+    return moves;
+}
+
 } // namespace
 
 void poseRigLayered(const Rig& rig, std::span<const LayeredClip> clips, std::vector<Transform>& world, std::vector<HeldJoint>* held,
@@ -182,13 +215,14 @@ void poseRigLayered(const Rig& rig, std::span<const LayeredClip> clips, std::vec
     std::vector<Contribution> rotations, translations, addedRotations, addedTranslations;
     // The share of the solved turn in each limb joint, 1 elsewhere.
     std::vector<float> shares(rig.nodes.size(), 1.0f);
+    const auto frozen = [&](const LayeredClip& clip) { return clip.pose != nullptr && clip.pose->size() == rig.nodes.size(); };
     const auto usable = [&](const LayeredClip& clip) {
-        return clip.animation != nullptr && clip.animation->animation && clip.weight > 0 && !(holding && clip.layer < 0);
+        return (frozen(clip) || (clip.animation != nullptr && clip.animation->animation)) && clip.weight > 0 && !(holding && clip.layer < 0);
     };
     // The joints some clip's limb reaches with, which mix with its solve.
     std::vector<bool> limbJoint(rig.nodes.size(), false);
     for (const auto& clip : clips) {
-        if (usable(clip)) {
+        if (usable(clip) && !frozen(clip)) {
             for (const auto& limb : clip.animation->limbs) {
                 if (!isAdditive(*clip.animation->animation, limb)) {
                     for (const int j : limb.joints) {
@@ -203,6 +237,7 @@ void poseRigLayered(const Rig& rig, std::span<const LayeredClip> clips, std::vec
     std::vector<Contribution> headTurns, headAddedTurns;
     std::array<float, 4> headStart{0, 0, 0, 1};
     const int rootTrans = rig.find("root_trans"), rootRot = rig.find("root_rot");
+    const std::vector<std::optional<RootMove>> rootMoves = rootMovesOf(rig, clips, rootTrans);
     for (std::size_t i = 0; i < rig.nodes.size(); ++i) {
         const bool root = static_cast<int>(i) == rootTrans || static_cast<int>(i) == rootRot;
         rotations.clear();
@@ -210,7 +245,24 @@ void poseRigLayered(const Rig& rig, std::span<const LayeredClip> clips, std::vec
         addedRotations.clear();
         addedTranslations.clear();
         for (const auto& clip : clips) {
+            const auto& rootMove = rootMoves[static_cast<std::size_t>(&clip - clips.data())];
+            const RootMove* move = root && rootMove ? &*rootMove : nullptr;
             if (!usable(clip) || (root && clip.bodyOnly)) {
+                continue;
+            }
+            if (frozen(clip)) {
+                // A held pose moves the joint as it was held, its root joints by the clip's place move.
+                auto t = (*clip.pose)[i].translation;
+                auto q = (*clip.pose)[i].rotation;
+                // As a clip's channels move them: root_trans's place and root_rot's turn.
+                if (move != nullptr && static_cast<int>(i) == rootTrans) {
+                    move->place.apply(t.data(), true);
+                }
+                if (move != nullptr && static_cast<int>(i) == rootRot) {
+                    q = turnProduct(move->turn, q);
+                }
+                translations.push_back({clip.layer, clip.start, clip.weight, {t[0], t[1], t[2], 0}, 1});
+                rotations.push_back({clip.layer, clip.start, clip.weight, q, 1, true, LimbFloor{}});
                 continue;
             }
             const auto& channels = clip.animation->animation->channels;
@@ -237,6 +289,9 @@ void poseRigLayered(const Rig& rig, std::span<const LayeredClip> clips, std::vec
                         t = mirroredPlace(t, rig.nodes[i].mirrorAxis);
                     }
                     t = turnedPlace(t, rig.nodes[i].turnAxis, clip.turn);
+                    if (move != nullptr && !channel.additive()) {
+                        move->place.apply(t.data(), true);
+                    }
                     if (channel.additive()) {
                         addedTranslations.push_back({clip.layer, clip.start, clip.weight * share, {t[0], t[1], t[2], 0}});
                     } else {
@@ -263,6 +318,9 @@ void poseRigLayered(const Rig& rig, std::span<const LayeredClip> clips, std::vec
                             q = mirroredTurn(q, rig.nodes[i].mirrorAxis);
                         }
                         q = turnedTurn(q, rig.nodes[i].turnAxis, clip.turn);
+                        if (move != nullptr) {
+                            q = turnProduct(move->turn, q);
+                        }
                         rotations.push_back({clip.layer, clip.start, clip.weight, q, share, true, floor});
                         turns = true;
                     }
@@ -380,13 +438,16 @@ void poseRigLayered(const Rig& rig, std::span<const LayeredClip> clips, std::vec
     }
     std::vector<const LayeredClip*> ordered;
     for (const auto& clip : clips) {
-        if (clip.animation && clip.animation->animation && clip.weight > 0 && !(holding && clip.layer < 0)) {
+        if (usable(clip)) {
             ordered.push_back(&clip);
         }
     }
     std::sort(ordered.begin(), ordered.end(),
               [](const LayeredClip* a, const LayeredClip* b) { return coversEarlier(a->layer, a->start, b->layer, b->start); });
-    const auto limbOf = [](const LayeredClip& clip, const std::vector<int>& joints) -> int {
+    const auto limbOf = [&](const LayeredClip& clip, const std::vector<int>& joints) -> int {
+        if (frozen(clip)) {
+            return -1;
+        }
         const auto& limbs = clip.animation->limbs;
         for (std::size_t k = 0; k < limbs.size(); ++k) {
             if (limbs[k].joints == joints && !isAdditive(*clip.animation->animation, limbs[k])) {
@@ -395,7 +456,10 @@ void poseRigLayered(const Rig& rig, std::span<const LayeredClip> clips, std::vec
         }
         return -1;
     };
-    const auto turnsJoints = [](const LayeredClip& clip, const std::vector<int>& joints) {
+    const auto turnsJoints = [&](const LayeredClip& clip, const std::vector<int>& joints) {
+        if (frozen(clip)) {
+            return true;
+        }
         const auto& channels = clip.animation->animation->channels;
         const auto moves = [&](const std::vector<int>& by, int j) {
             const int c = static_cast<std::size_t>(j) < by.size() ? by[static_cast<std::size_t>(j)] : -1;

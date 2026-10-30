@@ -21,8 +21,7 @@ bool forgetObject(SimObject& sim, std::int16_t removed) {
         return true;
     }
     std::erase_if(sim.queue, [&](const QueuedInteraction& q) {
-        const std::int16_t icon = q.iconObject != 0 ? q.iconObject : q.partner != 0 ? q.partner : q.object;
-        return q.object == removed || icon == removed;
+        return q.object == removed || q.icon() == removed;
     });
     return false;
 }

@@ -494,6 +494,47 @@ void limbIkReachesChannelTargets() {
         CHECK(std::fabs(world.back().m[3] + 1.3f) < 1e-3f && std::fabs(world.back().m[7] - 0.2f) < 1e-3f && std::fabs(world.back().m[11] - 0.1f) < 1e-3f);
     }
 
+    // A clip that started where the Sim no longer stands plays its root there: the whole body moves
+    // by the change of place, also when root_trans's own axes are turned from the skeleton's (the
+    // game's root has y up under a z-up skeleton).
+    {
+        Rig rig;
+        rig.nodes.push_back({"skel", -1, {0, 0, 0}, {0, 0, 0, 1}});
+        rig.nodes.push_back({"root_trans", 0, {0, 0, 0}, {0.70710678f, 0, 0, 0.70710678f}});
+        rig.nodes.push_back({"root_rot", 1, {0, 0, 0}, {0, 0, 0, 1}});
+        rig.nodes.push_back({"spine", 2, {0, 1, 0.5f}, {0, 0, 0, 1}});
+        auto animation = std::make_shared<Animation>();
+        animation->duration = 1000;
+        animation->channels.push_back(channel("root_trans", ts2::anim::ChannelKind::Translation, {0.3f, 0.9f, 0.1f}));
+        animation->channels.push_back(channel("root_rot", ts2::anim::ChannelKind::Rotation, {20, 35, 10}));
+        const auto bound = ts2::scene::bindAnimation(rig, animation);
+        ts2::scene::LayeredClip clip{&bound, 0, 1, 0, 0};
+        std::vector<ts2::scene::Transform> still, moved;
+        ts2::scene::poseRigLayered(rig, std::vector<ts2::scene::LayeredClip>{clip}, still);
+        const auto move = ts2::scene::Transform::of({2, -1, 0}, {0, 0, 0.38268343f, 0.92387953f});
+        clip.placeMove = move;
+        ts2::scene::poseRigLayered(rig, std::vector<ts2::scene::LayeredClip>{clip}, moved);
+        for (const std::size_t i : {std::size_t{2}, std::size_t{3}}) {
+            const auto want = move * still[i];
+            float off = 0;
+            for (std::size_t k = 0; k < 12; ++k) off = std::max(off, std::fabs(want.m[k] - moved[i].m[k]));
+            CHECK(off < 1e-4f);
+        }
+        // Additive root channels are offsets on top of the other clips, so they don't move.
+        for (auto& c : animation->channels) c.flags &= ~0x8000u;
+        const auto added = ts2::scene::bindAnimation(rig, animation);
+        ts2::scene::LayeredClip offset{&added, 0, 1, 0, 0};
+        std::vector<ts2::scene::Transform> offsetStill, offsetMoved;
+        ts2::scene::poseRigLayered(rig, std::vector<ts2::scene::LayeredClip>{offset}, offsetStill);
+        offset.placeMove = move;
+        ts2::scene::poseRigLayered(rig, std::vector<ts2::scene::LayeredClip>{offset}, offsetMoved);
+        float off = 0;
+        for (std::size_t i = 0; i < rig.nodes.size(); ++i) {
+            for (std::size_t k = 0; k < 12; ++k) off = std::max(off, std::fabs(offsetStill[i].m[k] - offsetMoved[i].m[k]));
+        }
+        CHECK(off < 1e-6f);
+    }
+
     // An overlay on a higher layer that reaches with one limb (an arm carrying something) leaves the
     // other limbs (the legs of a walk under it) to the clips below.
     {

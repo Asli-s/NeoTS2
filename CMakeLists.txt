@@ -138,6 +138,7 @@ add_library(ts2formats
     src/formats/swaf.cpp
     src/formats/propset.cpp
     src/formats/anim.cpp
+    src/formats/face_shape.cpp
     src/formats/reference_list.cpp
     src/formats/ttab.cpp
     src/formats/luascript.cpp
@@ -212,6 +213,7 @@ add_library(ts2content
     src/content/build_scripts.cpp
     src/content/lot.cpp
     src/content/neighborhood.cpp
+    src/content/genetics_catalog.cpp
     src/content/wants.cpp
     src/content/scripts.cpp
     src/content/resource_index.cpp
@@ -265,10 +267,12 @@ add_library(ts2sim
     src/sim/object_reset.cpp
     src/sim/route_world.cpp
     src/sim/find_location.cpp
+    src/sim/object_model.cpp
     src/sim/forget_object.cpp
     src/sim/snap.cpp
     src/sim/in_view.cpp
     src/sim/happiness.cpp
+    src/sim/genetics.cpp
     src/sim/motive_update.cpp
     src/sim/advertisement.cpp
     src/sim/advertisers.cpp
@@ -305,6 +309,8 @@ add_library(ts2scene
     src/scene/object_shadow.cpp
     src/scene/object_shadow_picture.cpp
     src/scene/outfit_properties.cpp
+    src/scene/face_blend.cpp
+    src/scene/newborn_face.cpp
     src/scene/sims.cpp
     src/scene/texture_blend.cpp
     src/scene/normal_map.cpp
@@ -354,7 +360,7 @@ if(NEOTS2_FUZZ)
     foreach(target qfs_fuzz dbpf_fuzz cobject_fuzz bhav_fuzz str_fuzz bcon_fuzz fcns_fuzz glob_fuzz objd_fuzz
                    objt_fuzz objm_fuzz xobj_fuzz wallgraph_fuzz array3d_fuzz srel_fuzz sdsc_fuzz fami_fuzz famt_fuzz slot_fuzz swaf_fuzz propset_fuzz ttab_fuzz luascript_fuzz ngbh_fuzz datatables_fuzz scenegraph_fuzz stringmap_fuzz walllayer_fuzz namemap_fuzz fencepostlayer_fuzz roofs_fuzz terrain_fuzz reia_fuzz
                    anim_fuzz image_fuzz lot_description_fuzz nhood_objects_fuzz nhood_terrain_fuzz objf_fuzz reference_list_fuzz simi_fuzz weather_fuzz neighborhood_id_fuzz camera_config_fuzz nhood_paint_rules_fuzz ui_script_fuzz cursor_fuzz effects_fuzz
-                   neighbor_remap_fuzz)
+                   neighbor_remap_fuzz face_shape_fuzz)
         add_executable(${target} fuzz/${target}.cpp)
         target_link_libraries(${target} PRIVATE ts2formats project_warnings)
     endforeach()
@@ -389,6 +395,10 @@ if(NEOTS2_FUZZ)
     target_link_libraries(lua_runtime_fuzz PRIVATE ts2sim lua50 project_warnings)
     add_executable(vm_fuzz fuzz/vm_fuzz.cpp)
     target_link_libraries(vm_fuzz PRIVATE ts2sim project_warnings)
+    add_executable(genetics_fuzz fuzz/genetics_fuzz.cpp)
+    target_link_libraries(genetics_fuzz PRIVATE ts2sim project_warnings)
+    add_executable(face_blend_fuzz fuzz/face_blend_fuzz.cpp)
+    target_link_libraries(face_blend_fuzz PRIVATE ts2scene project_warnings)
     add_executable(lotlevels_fuzz fuzz/lotlevels_fuzz.cpp src/scene/pool_water.cpp)
     target_link_libraries(lotlevels_fuzz PRIVATE ts2content project_warnings)
     add_executable(objectsun_fuzz fuzz/objectsun_fuzz.cpp src/scene/object_sun.cpp src/scene/object_lights.cpp src/scene/lot_shadow.cpp src/scene/neighborhood_lighting.cpp src/scene/scene.cpp)
@@ -681,7 +691,7 @@ else()
         target_link_libraries(vm_tests PRIVATE ts2ui)
         target_compile_definitions(vm_tests PRIVATE NEOTS2_TEXT_LAYOUT_TESTS)
 
-        add_executable(neots2 app/main.cpp app/menu.cpp app/neighborhood.cpp app/neighborhood_ui.cpp app/lot_life.cpp app/object_materials.cpp app/lot_light.cpp app/lot_daylight.cpp app/route_sources.cpp app/lot_ui.cpp app/live_panel.cpp app/job_panel.cpp app/memories_page.cpp app/age_meter.cpp app/queue_panel.cpp app/pie_menu_ui.cpp app/mood_meter.cpp app/aspiration_bars.cpp app/pause_frame.cpp app/needs_panel.cpp app/personality_page.cpp app/relationships_panel.cpp app/rewards_panel.cpp app/simology_panel.cpp app/interests_page.cpp app/hobbies_page.cpp app/chemistry_page.cpp app/meter_bar.cpp app/skewer.cpp app/wants_panel.cpp app/portraits.cpp app/cursors.cpp
+        add_executable(neots2 app/main.cpp app/menu.cpp app/neighborhood.cpp app/neighborhood_ui.cpp app/lot_life.cpp app/pose_numbers.cpp app/object_materials.cpp app/lot_light.cpp app/lot_daylight.cpp app/route_sources.cpp app/lot_ui.cpp app/live_panel.cpp app/job_panel.cpp app/memories_page.cpp app/age_meter.cpp app/queue_panel.cpp app/pie_menu_ui.cpp app/mood_meter.cpp app/aspiration_bars.cpp app/pause_frame.cpp app/baby_name_dialog.cpp app/needs_panel.cpp app/personality_page.cpp app/relationships_panel.cpp app/rewards_panel.cpp app/simology_panel.cpp app/interests_page.cpp app/hobbies_page.cpp app/chemistry_page.cpp app/meter_bar.cpp app/skewer.cpp app/wants_panel.cpp app/portraits.cpp app/cursors.cpp
                        app/diagnostics.cpp app/crash_handler.cpp app/crash_dialog.cpp app/unexpected_exit.cpp app/report_upload.cpp app/message_box.cpp app/open_renderer.cpp)
         target_link_libraries(neots2 PRIVATE ts2render ts2ui ts2sim ts2diag project_warnings)
         add_dependencies(neots2 neots2_version)

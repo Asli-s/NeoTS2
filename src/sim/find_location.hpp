@@ -18,6 +18,9 @@ struct LocationSearch {
     bool preferEmpty = true;             // skip tiles holding another object or a Sim
     bool sameRoom = true;                // only the start tile's room
     int startDirection = -1;             // 0-7: start in front of the reference this way, -1 the default walk
+    // 0-7: in place of the rings, walk the line through the start tile this way, both ways in turn
+    // (1 tile this way, 1 back, 2 this way, 2 back, ...). -1 for the rings.
+    int lineDirection = -1;
 };
 
 struct FoundLocation {
@@ -28,8 +31,9 @@ struct FoundLocation {
 
 // The game's walk: ring by ring out from the start tile, the first tile passing the checks. With a
 // start direction the walk goes round from that side, and moves to the tile in front of the start
-// point when the start tile isn't that way. With allowed facings, every tile that passes the other
-// checks draws a random number 0-7, where its facing tries begin.
+// point when the start tile isn't that way. With a line direction it walks that line instead. With
+// allowed facings, every tile that passes the other checks draws a random number 0-7, where its
+// facing tries begin.
 // Not checked yet: blocked tiles, tiles the player can't edit, and whether the object fits there.
 [[nodiscard]] std::optional<FoundLocation> findLocation(const World& world, const SimObject& placed,
                                                         const LocationSearch& search, SimRandom& rng);

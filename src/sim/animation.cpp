@@ -26,8 +26,7 @@ AnimateOperands animateOperands(std::span<const std::uint8_t> o) {
 }
 
 AnimateFades animateFades(float lengthMs, bool fadesIn, bool fadesOut) {
-    constexpr float kFadeMs = 233.33f;
-    AnimateFades f{fadesIn ? kFadeMs : 0.0f, fadesOut ? kFadeMs : 0.0f};
+    AnimateFades f{fadesIn ? kAnimateFadeMs : 0.0f, fadesOut ? kAnimateFadeMs : 0.0f};
     const float both = f.inMs + f.outMs;
     const float length = std::max(lengthMs, 0.0f);
     if (both > length + 1e-6f) {

@@ -26,6 +26,8 @@
 #include <cstdio>
 #include <exception>
 #include <filesystem>
+#include <fstream>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -193,9 +195,12 @@ ScriptsPtr scriptsFor(const std::filesystem::path& source, ResourceIndex& index)
     return runtime;
 }
 
+// Runs every BHAV once and prints how they end. onResult sees each final result and onStep each
+// instruction run. quiet leaves the printing to the caller.
 int scan(ResourceIndex& index, std::size_t maxSteps, bool interactions,
          const std::shared_ptr<const ts2::sim::SavedNeighborhood>& hood, const WantDefinitionsPtr& wants,
-         const ScriptsPtr& scripts) {
+         const ScriptsPtr& scripts, const std::function<void(const RunResult&)>& onResult = {},
+         const std::function<void(const ts2::sim::StepInfo&)>& onStep = {}, bool quiet = false) {
     ts2::sim::IndexCodeSource code(index);
     const auto primitives = editorTable(index, kPrimitiveNames);
     const auto owners = editorTable(index, kDataOwners);
@@ -240,6 +245,7 @@ int scan(ResourceIndex& index, std::size_t maxSteps, bool interactions,
         }
         world.setScripts(scripts);
         ts2::sim::Vm vm(code, {maxSteps, 64}, &world);
+        vm.onStep = onStep;
         ts2::sim::SimObject* runner = nullptr;
         RunResult result;
         if (interactions && objectGroup != standInGroup) {
@@ -266,6 +272,9 @@ int scan(ResourceIndex& index, std::size_t maxSteps, bool interactions,
         if (ticks > 0) {
             ++slept;
         }
+        if (onResult) {
+            onResult(result);
+        }
 
         ++outcomes[result.outcome];
         if (result.outcome == Outcome::True || result.outcome == Outcome::False) {
@@ -285,6 +294,9 @@ int scan(ResourceIndex& index, std::size_t maxSteps, bool interactions,
         }
     }
     const auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start);
+    if (quiet) {
+        return 0;
+    }
 
     if (interactions) {
         std::printf("Ran %zu BHAVs in %.1f s as interactions: a Sim runs each object's code, stack object = the object\n",
@@ -337,6 +349,167 @@ int scan(ResourceIndex& index, std::size_t maxSteps, bool interactions,
                 completed.size());
     for (std::size_t i = 0; i < std::min<std::size_t>(completed.size(), 12); ++i) {
         std::printf("  %s\n", completed[i].second.c_str());
+    }
+    return 0;
+}
+
+// A short report of how far the engine gets with what the game uses: every BHAV runs once as an
+// interaction (with the --hood neighborhood loaded when given), and the report counts how the runs
+// end and which primitives the game's BHAVs use, run, or refuse a mode of. A stop on something only
+// a running lot provides (rooms, a route grid, the neighborhood) isn't counted as missing. Writes
+// the same numbers as JSON to `json` when given, for the progress chart.
+int progress(ResourceIndex& index, const std::shared_ptr<const ts2::sim::SavedNeighborhood>& hood,
+             const WantDefinitionsPtr& wants, const ScriptsPtr& scripts, const std::string& json) {
+    ts2::sim::IndexCodeSource code(index);
+    const auto names = editorTable(index, kPrimitiveNames);
+    const auto owners = editorTable(index, kDataOwners);
+    const auto genericCalls = editorTable(index, kGenericSimsCalls);
+    const auto searchTypes = editorTable(index, kSearchTypes);
+
+    std::map<std::uint16_t, std::size_t> uses;
+    for (const auto& r : index.resources()) {
+        if (r.entry.key.type != ts2::types::kBehavior) {
+            continue;
+        }
+        if (const auto b = code.behavior(r.entry.key.group, static_cast<std::uint16_t>(r.entry.key.instance))) {
+            for (const auto& in : b->instructions) {
+                if (in.opcode < 0x100) {
+                    ++uses[in.opcode];
+                }
+            }
+        }
+    }
+
+    std::set<std::uint16_t> ran;
+    std::map<std::uint16_t, std::size_t> refused;
+    std::set<std::uint16_t> notImplemented;
+    std::map<std::string, std::size_t> missing, needsLot;
+    std::size_t ended = 0, waiting = 0, gameErrors = 0, other = 0, total = 0;
+    const auto onResult = [&](const RunResult& r) {
+        ++total;
+        switch (r.outcome) {
+        case Outcome::True:
+        case Outcome::False:    ++ended; return;
+        case Outcome::Sleeping: ++waiting; return;
+        case Outcome::Error:    ++gameErrors; return;
+        case Outcome::Unsupported: break;
+        default:                ++other; return;
+        }
+        const std::string text = describe(r, names, owners, genericCalls, searchTypes).substr(13);
+        // The scan's objects stand off any lot, without rooms or a route grid.
+        if (r.reason.find("needs") != std::string::npos || r.reason == "room not known" ||
+            r.reason.find("off the lot") != std::string::npos) {
+            ++needsLot[text];
+            return;
+        }
+        ++missing[text];
+        const auto b = code.behavior(r.group, r.instance);
+        if (b && r.pc < b->instructions.size() && b->instructions[r.pc].opcode < 0x100) {
+            const auto op = b->instructions[r.pc].opcode;
+            ++refused[op];
+            if (r.reason == "primitive not implemented") {
+                notImplemented.insert(op);
+            }
+        }
+    };
+    const auto onStep = [&](const ts2::sim::StepInfo& s) {
+        if (s.instruction.opcode < 0x100) {
+            ran.insert(s.instruction.opcode);
+        }
+    };
+    scan(index, 10000, true, hood, wants, scripts, onResult, onStep, true);
+
+    struct Primitive { std::uint16_t op; std::string name; std::size_t uses; const char* status; std::size_t refused; };
+    std::vector<Primitive> prims;
+    std::map<std::string, std::size_t> byStatus, callsByStatus;
+    std::size_t calls = 0;
+    for (const auto& [op, n] : uses) {
+        const char* status = notImplemented.contains(op) ? "missing"
+                           : refused.contains(op)        ? "some modes missing"
+                           : ran.contains(op)            ? "runs"
+                                                         : "not reached";
+        const auto it = refused.find(op);
+        prims.push_back({op, op < names.size() ? names[op] : "", n, status, it == refused.end() ? 0 : it->second});
+        ++byStatus[status];
+        callsByStatus[status] += n;
+        calls += n;
+    }
+    const auto pct = [](std::size_t a, std::size_t b) { return b ? 100.0 * static_cast<double>(a) / static_cast<double>(b) : 0.0; };
+    const auto sorted = [](const std::map<std::string, std::size_t>& m) {
+        std::vector<std::pair<std::size_t, std::string>> v;
+        for (const auto& [k, n] : m) {
+            v.emplace_back(n, k);
+        }
+        std::sort(v.rbegin(), v.rend());
+        return v;
+    };
+
+    const auto sum = [](const std::map<std::string, std::size_t>& m) {
+        std::size_t n = 0;
+        for (const auto& [k, v] : m) {
+            n += v;
+        }
+        return n;
+    };
+    std::printf("\nScripts: %zu run once each\n", total);
+    std::printf("  ran to an end %.1f%%, waiting %.1f%%, stopped by the game's own error checks %.1f%%,\n"
+                "  missing in our engine %.1f%%, need a running lot %.1f%%, other %.1f%%\n",
+                pct(ended, total), pct(waiting, total), pct(gameErrors, total), pct(sum(missing), total),
+                pct(sum(needsLot), total), pct(other, total));
+    std::printf("\nPrimitives: %zu used by the game's BHAVs (%zu calls)\n", prims.size(), calls);
+    for (const char* status : {"runs", "some modes missing", "missing", "not reached"}) {
+        std::printf("  %-19s %3zu  (%.1f%% of calls)\n", status, byStatus[status], pct(callsByStatus[status], calls));
+    }
+    for (const auto& p : prims) {
+        if (std::string_view(p.status) != "runs") {
+            std::printf("    0x%02X %-34s %-19s %6zu uses\n", p.op, p.name.c_str(), p.status, p.uses);
+        }
+    }
+    const auto luaFunctions = ts2::sim::scriptFunctions();
+    const auto luaDone = static_cast<std::size_t>(
+        std::count_if(luaFunctions.begin(), luaFunctions.end(), [](const auto& f) { return f.implemented; }));
+    std::printf("\nLua functions the game registers: %zu, %zu implemented (%.1f%%), the rest named in --json\n",
+                luaFunctions.size(), luaDone, pct(luaDone, luaFunctions.size()));
+    std::printf("\nMissing in our engine (scripts stopped, top 20):\n");
+    const auto missingSorted = sorted(missing);
+    for (std::size_t i = 0; i < std::min<std::size_t>(missingSorted.size(), 20); ++i) {
+        std::printf("  %6zu  %s\n", missingSorted[i].first, missingSorted[i].second.c_str());
+    }
+
+    if (!json.empty()) {
+        std::ofstream f(json);
+        if (!f) {
+            std::fprintf(stderr, "can't write %s\n", json.c_str());
+            return 1;
+        }
+        const auto quoted = [](const std::string& s) {
+            std::string out = "\"";
+            for (const char c : s) {
+                if (c == '"' || c == '\\') {
+                    out += '\\';
+                }
+                out += (static_cast<unsigned char>(c) < 0x20) ? ' ' : c;
+            }
+            return out + "\"";
+        };
+        const auto list = [&](const std::vector<std::pair<std::size_t, std::string>>& v) {
+            std::string out;
+            for (const auto& [n, text] : v) {
+                out += std::string(out.empty() ? "[" : ",[") + quoted(text) + "," + std::to_string(n) + "]";
+            }
+            return out;
+        };
+        f << "{\"scripts\":{\"total\":" << total << ",\"ended\":" << ended << ",\"waiting\":" << waiting
+          << ",\"gameErrors\":" << gameErrors << ",\"other\":" << other << "},\n\"primitives\":[";
+        for (std::size_t i = 0; i < prims.size(); ++i) {
+            f << (i ? "," : "") << "[" << prims[i].op << "," << quoted(prims[i].name) << "," << prims[i].uses << ",\""
+              << prims[i].status << "\"," << prims[i].refused << "]";
+        }
+        f << "],\n\"lua\":[";
+        for (std::size_t i = 0; i < luaFunctions.size(); ++i) {
+            f << (i ? "," : "") << "[" << quoted(luaFunctions[i].name) << "," << (luaFunctions[i].implemented ? 1 : 0) << "]";
+        }
+        f << "],\n\"missing\":[" << list(missingSorted) << "],\n\"needsLot\":[" << list(sorted(needsLot)) << "]}\n";
     }
     return 0;
 }
@@ -604,7 +777,7 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
            bool personData, bool overlays, bool motion, std::optional<std::int16_t> pieSim, std::optional<std::int16_t> pieTrace,
            std::optional<std::array<int, 3>> queueChoice, std::size_t queueTick, std::optional<std::size_t> queueAgainTick, std::optional<std::size_t> cancelTick,
            std::optional<std::array<float, 3>> groundAt, bool portals, std::optional<std::array<float, 4>> groundLater,
-           const std::vector<std::array<float, 5>>& goHere) {
+           const std::vector<std::array<float, 5>>& goHere, std::optional<std::uint32_t> seed) {
     const auto primitives = editorTable(index, kPrimitiveNames);
     const auto owners = editorTable(index, kDataOwners);
     const auto genericCalls = editorTable(index, kGenericSimsCalls);
@@ -618,7 +791,7 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
             }
         };
     }
-    ts2::sim::LotSimulation sim(install, lotPath, traceLoad);
+    ts2::sim::LotSimulation sim(install, lotPath, traceLoad, seed);
     auto& world = sim.world();
     ts2::scene::Assets assets(install);
     ts2::scene::AnimationLibrary animations(assets);
@@ -935,9 +1108,10 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
                      "Usage:\n"
                      "  simrun <install-folder | file.package> --scan [max-steps] [--interactions] [--hood <folder>]\n"
+                     "  simrun <install-folder> --progress [--hood <folder>] [--json <file>]\n"
                      "  simrun <install-folder | file.package> --run <group> <instance> [args...] [--trace]\n"
                      "  simrun <install-folder | file.package> --guid <hex-guid> [...]\n"
-                     "  simrun <install-folder> --lot <lot.package> [ticks [--trace-tick <tick>] [--trace-object <id>] [--on-screen] [--pie <sim> [--pie-trace <object>]] [--queue <sim> <object> <choice> [--queue-at <tick>] [--queue-again <tick>] [--cancel <tick>]] [--ground <x> <y> <level> [--ground-later <tick> <x> <y> <level>]] [--go-here <sim> <tick> <x> <y> <level>]... [--portals]]\n"
+                     "  simrun <install-folder> --lot <lot.package> [ticks [--trace-tick <tick>] [--trace-object <id>] [--on-screen] [--pie <sim> [--pie-trace <object>]] [--queue <sim> <object> <choice> [--queue-at <tick>] [--queue-again <tick>] [--cancel <tick>]] [--ground <x> <y> <level> [--ground-later <tick> <x> <y> <level>]] [--go-here <sim> <tick> <x> <y> <level>]... [--portals] [--seed <n>]]\n"
                      "  simrun <install-folder> --loco <clip>...\n"
                      "  simrun <install-folder> --wall-types <lot.package>\n"
                      "  simrun <install-folder> --wall-list <lot.package>\n"
@@ -970,6 +1144,21 @@ int main(int argc, char** argv) {
             }
             return scan(index, maxSteps, interactions, hood, wantDefinitionsFor(argv[1]), scriptsFor(argv[1], index));
         }
+        if (mode == "--progress") {
+            std::shared_ptr<const ts2::sim::SavedNeighborhood> hood;
+            std::string json;
+            for (int i = 3; i + 1 < argc; ++i) {
+                if (std::string_view(argv[i]) == "--hood") {
+                    const std::filesystem::path folder(argv[++i]);
+                    ts2::content::addCharacters(index, folder);
+                    ts2::sim::IndexCodeSource code(index);
+                    hood = ts2::sim::savedNeighborhood(ts2::content::loadNeighborhood(ts2::content::neighborhoodPackage(folder)), code);
+                } else if (std::string_view(argv[i]) == "--json") {
+                    json = argv[++i];
+                }
+            }
+            return progress(index, hood, wantDefinitionsFor(argv[1]), scriptsFor(argv[1], index), json);
+        }
         if (mode == "--lot" && argc >= 4) {
             const std::size_t ticks = argc >= 5 ? std::stoul(argv[4]) : 100;
             std::optional<std::size_t> traceTick;
@@ -988,6 +1177,7 @@ int main(int argc, char** argv) {
             bool portals = false;
             std::optional<std::array<float, 4>> groundLater;
             std::vector<std::array<float, 5>> goHere;
+            std::optional<std::uint32_t> seed;
             for (int i = 5; i < argc; ++i) {
                 if (std::string_view(argv[i]) == "--trace-tick" && i + 1 < argc) {
                     traceTick = std::stoul(argv[++i]);
@@ -1020,6 +1210,8 @@ int main(int argc, char** argv) {
                 } else if (std::string_view(argv[i]) == "--go-here" && i + 5 < argc && goHere.size() < 64) {
                     goHere.push_back({std::stof(argv[i + 1]), std::stof(argv[i + 2]), std::stof(argv[i + 3]), std::stof(argv[i + 4]), std::stof(argv[i + 5])});
                     i += 5;
+                } else if (std::string_view(argv[i]) == "--seed" && i + 1 < argc) {
+                    seed = static_cast<std::uint32_t>(std::stoul(argv[++i]));
                 } else if (std::string_view(argv[i]) == "--portals") {
                     portals = true;
                 } else if (std::string_view(argv[i]) == "--ground" && i + 3 < argc) {
@@ -1028,7 +1220,7 @@ int main(int argc, char** argv) {
                 }
             }
             return runLot(index, std::filesystem::path(argv[1]), std::filesystem::path(argv[3]), ticks, traceTick, traceObject, onScreen,
-                          personData, overlays, motion, pieSim, pieTrace, queueChoice, queueTick, queueAgainTick, cancelTick, groundAt, portals, groundLater, goHere);
+                          personData, overlays, motion, pieSim, pieTrace, queueChoice, queueTick, queueAgainTick, cancelTick, groundAt, portals, groundLater, goHere, seed);
         }
         if (mode == "--outside" && argc >= 4) {
             return printOutside(std::filesystem::path(argv[3]));

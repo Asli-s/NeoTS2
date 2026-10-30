@@ -34,13 +34,18 @@ public:
     static constexpr double kHighTickMs = kNormalTickMs / 3;
 
     // Loads the code from the install's object packages and the lot from its package. `onLoadStep`
-    // watches the scripts objects run as the lot loads.
+    // watches the scripts objects run as the lot loads. `seed` stands in for the clock where the game
+    // seeds its random draws from it, so runs repeat. A lot's saved random state still comes first.
     LotSimulation(const std::filesystem::path& install, const std::filesystem::path& lot,
-                  std::function<void(const StepInfo&)> onLoadStep = {});
+                  std::function<void(const StepInfo&)> onLoadStep = {}, std::optional<std::uint32_t> seed = std::nullopt);
 
     // Runs one tick: sleeping scripts wait out their ticks and the others run until they sleep, end
     // or stop. Then the Sim clock moves on. The world's clock (animation time) moves on a normal tick.
     void tick();
+    // Runs one pass while the game is paused, as the game does on each frame then: only objects that
+    // run while paused (SimObject::runsWhilePaused) count their sleeps down or run, then their timers.
+    // Neither clock moves.
+    void pausedPass();
     // Tells overlays' event trees of what has happened by `nowMs` on the animation clock (a little past
     // the last tick while animations play on between ticks).
     void tellAnimationEvents(double nowMs);
@@ -81,7 +86,8 @@ public:
     const std::map<std::string, Stop>& stops() const { return stops_; }
 
     // The household living on the lot: its Sims' object ids, in the order of the family's members.
-    const std::vector<std::int16_t>& household() const { return household_; }
+    // It follows the family as it changes, so a Sim born or added during play is in it.
+    std::vector<std::int16_t> household() const;
     // An image resource of a Sim's character file, by instance, empty when missing.
     std::vector<std::uint8_t> simImage(std::int16_t sim, std::uint32_t instance);
     // A neighbor's character file (by neighbor id), on the lot or not: the one whose object
@@ -110,6 +116,7 @@ private:
     std::vector<std::int16_t> household_;
     std::unique_ptr<const content::Lot> lot_;  // kept until the route world is built
     std::map<std::uint32_t, std::string> objectModels_;  // the lot's model name of each object id
+    std::map<std::uint32_t, std::uint32_t> savedGuids_;  // the type (GUID) each id had when the lot was saved
     std::map<std::uint32_t, std::vector<cobject::SavedJoint>> savedJoints_;  // as the lot saved each object's model posed
     std::optional<RouteSources> routeSources_;
     std::optional<RouteWorld> routeWorld_;
@@ -143,8 +150,14 @@ private:
     std::int16_t stepBlocker(const SimObject& sim, float x, float y, std::int32_t level);
     std::optional<std::int16_t> placeTest(const SimObject& sim, float x, float y, std::int32_t level, const RouteIntersects& intersects);
     bool objectInTheWay(const SimObject& placed, const ObjectType& type, float x, float y, std::int32_t level, std::int16_t direction);
+    // Whether the object at an id is still the one the lot saved there (ids are given to new objects).
+    bool isSaved(const SimObject& object) const;
+    // An object's model: the one the lot saved for it, or for an object made since, the one it was made
+    // with (see createdModelName). Empty for none.
+    std::string modelOf(const SimObject& object);
     SlotRoute routeToSlot(const SimObject& sim, const SimObject& owner, const slot::Entry& slot,
                           const std::vector<std::optional<ModelBone>>& joints);
+    void ringSims(const SimObject& sim, std::int16_t target);
 };
 
 } // namespace ts2::sim

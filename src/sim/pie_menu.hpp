@@ -39,6 +39,13 @@ struct PieMenu {
 // join lines and the cheat menus are not offered yet.
 PieMenu pieMenu(Vm& vm, CodeSource& code, SimObject& sim, SimObject& object, const PieMenuOptions& options = {});
 
+// The checks the game gives a waiting interaction's line just before it starts, before its check
+// tree: who may use it (age and species, visitors), whether `object` takes interactions (not burning,
+// not turned off, and with `autonomy` its lockout, object data 0x19, at 0), parental control, and
+// not a debug line. The game lets debug lines start from a shift-click menu, which isn't kept yet.
+[[nodiscard]] bool mayStartLine(const ttab::Interaction& line, const SimObject& sim, const SimObject& object,
+                                bool parentalControl, bool autonomy);
+
 // The interaction table an object's menu comes from: the one its definition names (field 7), from
 // its own group, else its semi-global group, returned with the group it was found in. A multi-tile part
 // whose definition names 0xFFFF uses its master's.

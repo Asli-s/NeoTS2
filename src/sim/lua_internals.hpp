@@ -103,6 +103,7 @@ int roundFloat(lua_State* L);
 
 // Messages, game properties, installed packs and businesses (lua_game_state.cpp).
 int postMessage(lua_State* L);
+int invalidateSimThumbnail(lua_State* L);
 int subscribeMessage(lua_State* L);
 int getProperty(lua_State* L);
 int setProperty(lua_State* L);
@@ -154,6 +155,7 @@ int objectManagerGetPersonIdFromGuid(lua_State* L);
 int objectManagerGetPersonIds(lua_State* L);
 int objectManagerGetObjectIds(lua_State* L);
 int objectManagerGetNeighborIds(lua_State* L);
+bool isFamilyTreeOnly(const ScriptCall& c, const SavedNeighbor& neighbor);
 
 template <typename... Args>
 [[noreturn]] int scriptCheckError(lua_State* L, const char* format, Args... args) {
@@ -222,6 +224,8 @@ int cachedFamilyId(lua_State* L);
 int cachedFamilyLotId(lua_State* L);
 int cachedFamilyCurrentLotId(lua_State* L);
 int cachedFamilyVacationLotId(lua_State* L);
+int cachedFamilyMembers(lua_State* L);
+int cachedFamilyMemberCount(lua_State* L);
 int neighborhoodIsRoommate(lua_State* L);
 int neighborhoodIsApartmentDoor(lua_State* L);
 int neighborhoodIsApartmentResident(lua_State* L);
@@ -243,6 +247,7 @@ int cachedPersonGetData(lua_State* L);
 int cachedPersonQueuedAdvertising(lua_State* L);
 int cachedPersonQueueCount(lua_State* L);
 int cachedPersonGuid(lua_State* L);
+int cachedPersonFriendsForPromotion(lua_State* L);
 int cachedPersonSetData(lua_State* L);
 int cachedNeighborGetData(lua_State* L);
 int cachedNeighborSetData(lua_State* L);

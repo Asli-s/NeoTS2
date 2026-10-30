@@ -41,6 +41,15 @@ int postMessage(lua_State* L) {
     return 0;
 }
 
+// nUI.InvalidateSimThumbnail(GUID): the game drops a Sim's pictures from the neighborhood's thumbnail
+// cache so they are made again, and returns true when it did. The engine keeps no such cache, so it
+// returns false. The trees that call it go on the same way either way.
+int invalidateSimThumbnail(lua_State* L) {
+    argInt(L, 1);
+    lua_pushboolean(L, 0);
+    return 1;
+}
+
 // nMessaging.SubscribeMessage(object id, message id, tree name): the object's tree of that name is
 // to run when the message is posted. Subscribing again replaces the name. UnsubscribeMessage does
 // the same in the game, so a script that unsubscribes subscribes again. Nothing in the engine

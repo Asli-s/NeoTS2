@@ -112,6 +112,12 @@ void resetObject(SimObject& object, const ObjectType& type, CodeSource& code) {
     object.tokenSource = {};
 
     restartMain(object, type, code);
+    notePausedRun(object);
+}
+
+void notePausedRun(SimObject& object) {
+    constexpr std::size_t kRunsWhilePausedField = 0x3C;
+    object.runsWhilePaused = object.data[kRunsWhilePausedField] != 0;
 }
 
 void resetSim(SimObject& sim, const ObjectType& type, CodeSource& code) {
@@ -129,6 +135,7 @@ void resetSim(SimObject& sim, const ObjectType& type, CodeSource& code) {
     sim.overlays.clear();
     sim.turning.reset();
     sim.walking.reset();
+    sim.walkTail.reset();
     sim.postRoute.reset();
     sim.reaching.reset();
     sim.data[kResetClearedField] = 0;
@@ -138,6 +145,7 @@ void resetSim(SimObject& sim, const ObjectType& type, CodeSource& code) {
         }
     }
     restartMain(sim, type, code);
+    notePausedRun(sim);
 }
 
 bool isMultiTilePart(const ObjectType& type) {
@@ -150,6 +158,7 @@ void finishSingleTileReset(SimObject& object, const ObjectType& type) {
         object.data[0x2A] = definitionField(type, 0x6A);
         object.data[0x52] = definitionField(type, 0x6B);
     }
+    notePausedRun(object);
 }
 
 } // namespace ts2::sim

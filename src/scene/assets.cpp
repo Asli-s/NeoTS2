@@ -126,33 +126,43 @@ void Assets::useCharacterGroup(std::uint32_t group) {
     characterGroup_ = group;
 }
 
+std::vector<fs::path> Assets::skinPackages() const {
+    std::vector<fs::path> all;
+    for (const auto& folder : skinFolders_) {
+        std::error_code ec;
+        std::vector<fs::path> packages;
+        for (fs::directory_iterator it(folder, ec), end; it != end; it.increment(ec)) {
+            if (it->path().extension() == ".package") {
+                packages.push_back(it->path());
+            }
+        }
+        std::sort(packages.begin(), packages.end());
+        all.insert(all.end(), packages.begin(), packages.end());
+    }
+    return all;
+}
+
 void Assets::readSkins() {
     if (!skinsRead_) {
         skinsRead_ = true;
-        for (const auto& folder : skinFolders_) {
-            std::error_code ec;
-            std::vector<fs::path> packages;
-            for (fs::directory_iterator it(folder, ec), end; it != end; it.increment(ec)) {
-                if (it->path().extension() == ".package") {
-                    packages.push_back(it->path());
-                }
-            }
-            std::sort(packages.begin(), packages.end());
-            for (const auto& p : packages) {
-                skins_.addPackage(p);
-            }
+        for (const auto& p : skinPackages()) {
+            skins_.addPackage(p);
         }
     }
 }
 
 void Assets::forEachSkinResource(std::uint32_t type, const std::function<void(const std::vector<std::uint8_t>&)>& visit) {
+    forEachSkinResource(type, [&](const sg::Link&, const std::vector<std::uint8_t>& bytes) { visit(bytes); });
+}
+
+void Assets::forEachSkinResource(std::uint32_t type, const std::function<void(const sg::Link&, const std::vector<std::uint8_t>&)>& visit) {
     readSkins();
     for (const auto& r : skins_.resources()) {
         if (r.entry.key.type != type) {
             continue;
         }
         try {
-            visit(skins_.read(r));
+            visit({r.entry.key.type, r.entry.key.group, r.entry.key.instance, r.entry.key.instanceHigh}, skins_.read(r));
         } catch (const std::exception& ex) {
             diag::warnOnce(std::string("skins: a resource that can't be read is left out: ") + ex.what());
         }

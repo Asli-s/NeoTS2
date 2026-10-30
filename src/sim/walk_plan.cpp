@@ -598,6 +598,30 @@ float walkMs(const WalkPlan& plan) {
     return ms;
 }
 
+float walkFadeOutMs(const WalkPlan& plan) {
+    const float ms = std::max(0.0f, finiteOr(walkMs(plan), 0));
+    return ms >= kWalkFadeMs ? ms - kWalkFadeMs / 2 : ms;
+}
+
+float walkWeight(const WalkPlan& plan, float ms) {
+    constexpr float kLeast = 0.001f;
+    const float t = finiteOr(ms, 0);
+    const float fadeOut = walkFadeOutMs(plan);
+    // Over its fade in it rises from the least weight, from half a fade before its start.
+    float in = 1;
+    if (walkMs(plan) >= kWalkFadeMs) {
+        in = std::clamp((t + kWalkFadeMs / 2) / kWalkFadeMs, 0.0f, 1.0f);
+    }
+    const float out = 1 - std::clamp((t - fadeOut) / kWalkFadeMs, 0.0f, 1.0f);
+    return kLeast + (1 - kLeast) * std::min(in, out);
+}
+
+float settleWalkPoseFadeMs() {
+    // Fades that don't fit in a clip's play are cut by the same share to just under it.
+    constexpr float kJustUnder = 0.9999f;
+    return std::min(kWalkFadeMs, kSettleWalkPoseMs / (2 * kWalkFadeMs) * kJustUnder * kWalkFadeMs);
+}
+
 float walkedAt(const WalkPlan& plan, float ms) {
     float walked = 0;
     float left = std::max(0.0f, finiteOr(ms, 0));
@@ -806,7 +830,7 @@ StopSoon stopSoon(WalkPlan& plan, float ms, const std::optional<LocoPair>& strai
     return StopSoon::Soon;
 }
 
-void walkPoses(const WalkPlan& plan, float distance, std::vector<WalkPose>& out) {
+void walkPoses(const WalkPlan& plan, float distance, std::vector<WalkPose>& out, bool scaleToOne) {
     out.clear();
     const float d = finiteOr(distance, 0);
     for (const auto& s : plan.segments) {
@@ -840,6 +864,9 @@ void walkPoses(const WalkPlan& plan, float distance, std::vector<WalkPose>& out)
         if (s.clips.alt && w * (1 - shortShare) > kLeastWeight) {
             out.push_back({&*s.clips.alt, w * (1 - shortShare), phase, s.clips.mirrored, turnOf(*s.clips.alt)});
         }
+    }
+    if (!scaleToOne) {
+        return;
     }
     float sum = 0;
     for (const auto& p : out) {

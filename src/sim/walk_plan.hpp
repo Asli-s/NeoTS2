@@ -135,6 +135,25 @@ float walkMs(const WalkPlan& plan);
 float walkedAt(const WalkPlan& plan, float ms);
 float speedAt(const WalkPlan& plan, float ms);
 
+// A walk's weight fades in and out over this long, each fade centred on the walk's start and end,
+// so it weighs half as it starts. A walk shorter than one fade weighs fully from its start and fades
+// out after its end.
+constexpr float kWalkFadeMs = 233.33f;
+// When the walk's weight starts falling, `ms` after it started. The route hands back to its script
+// on the first tick from then, while the walk's clips play out their fade under what follows.
+float walkFadeOutMs(const WalkPlan& plan);
+// The walk's weight `ms` after it started (0.001 to 1, as the game's fades start and end).
+float walkWeight(const WalkPlan& plan, float ms);
+
+// An interrupted walk that moved settles once its clips have faded: the pose the Sim is in fades
+// out over kSettlePoseMs, and the walk set's walk pose (a clip with no length) plays for
+// kSettleWalkPoseMs, fading in and out over half of that each (the usual fades, cut to fit). The
+// route ends as the settling starts, and both play on under what follows.
+constexpr float kSettlePoseMs = 121;
+constexpr float kSettleWalkPoseMs = 186;
+// How long the walk pose fades in, and out, when it settles a walk.
+float settleWalkPoseFadeMs();
+
 // Stops a walk soon, `ms` into it, as the game does when the walk's route is interrupted. The part
 // playing goes on to the next half of the walk cycle (a start plays to its end). From there the walk
 // set's straight stop clips (`straightStop`, unmirrored) play on the foot that comes down next,
@@ -160,7 +179,10 @@ struct WalkPose {
     // step on the spot), so the body keeps facing forward.
     float turn = 0;
 };
-// The clips showing at `distance`, their weights summing to 1 (none before the walk starts).
-void walkPoses(const WalkPlan& plan, float distance, std::vector<WalkPose>& out);
+// The clips showing at `distance` (none before the walk starts). Each weighs its part's eased
+// weight times its share of the part, as the game weighs them, so at the walk's end, where the stop
+// eases out, they weigh half. With `scaleToOne` their weights are scaled to sum to 1, as a walk
+// fading in over what the Sim did before is drawn (the game's rule there is not ported yet).
+void walkPoses(const WalkPlan& plan, float distance, std::vector<WalkPose>& out, bool scaleToOne = true);
 
 } // namespace ts2::sim

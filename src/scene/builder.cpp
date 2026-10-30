@@ -202,15 +202,18 @@ void addQuad(Primitive& p, const std::array<std::array<float, 3>, 4>& c, const s
     }
 }
 
-int SceneBuilder::model(const std::string& name, const std::vector<sg::MaterialOverride>& overrides) {
+int SceneBuilder::model(const std::string& name, const std::vector<sg::MaterialOverride>& overrides, const MeshEdit* edit) {
     std::string key = lower(name);
+    if (edit != nullptr) {
+        key += "|" + edit->key;
+    }
     for (const auto& o : overrides) {
         key += "|" + lower(o.group) + "=" + lower(o.material);
     }
     if (const auto it = models_.find(key); it != models_.end()) {
         return it->second;
     }
-    return models_[key] = buildModel(name, overrides, nullptr);
+    return models_[key] = buildModel(name, overrides, nullptr, false, nullptr, {}, edit);
 }
 
 int SceneBuilder::posedModel(const std::string& name, const std::vector<sg::MaterialOverride>& overrides, const Pose& pose,
@@ -236,7 +239,7 @@ int SceneBuilder::savedPoseModel(const std::string& name, const std::vector<sg::
         if (const auto cres = assets_.byName(kCres, name + "_cres")) {
             try {
                 for (const auto& n : sg::parseResourceNode(*cres).nodes) {
-                    if (n.kind == sg::SceneNode::Kind::Transform) {
+                    if (n.kind == sg::SceneNode::Kind::Transform || n.kind == sg::SceneNode::Kind::ShapeRef) {
                         known->second.try_emplace(lower(n.name), RestJoint{n.translation, n.rotation});
                     }
                 }
@@ -293,15 +296,18 @@ int SceneBuilder::savedPoseModel(const std::string& name, const std::vector<sg::
     return models_[key] = buildModel(name, overrides, nullptr, false, &places, boneKey);
 }
 
-int SceneBuilder::skinnedModel(const std::string& name, const std::vector<sg::MaterialOverride>& overrides) {
+int SceneBuilder::skinnedModel(const std::string& name, const std::vector<sg::MaterialOverride>& overrides, const MeshEdit* edit) {
     std::string key = lower(name) + "|skinned";
+    if (edit != nullptr) {
+        key += "|" + edit->key;
+    }
     for (const auto& o : overrides) {
         key += "|" + lower(o.group) + "=" + lower(o.material);
     }
     if (const auto it = models_.find(key); it != models_.end()) {
         return it->second;
     }
-    return models_[key] = buildModel(name, overrides, nullptr, true);
+    return models_[key] = buildModel(name, overrides, nullptr, true, nullptr, {}, edit);
 }
 
 const Transform* SceneBuilder::bone(const std::string& model, const std::string& node) const {
@@ -845,7 +851,8 @@ int SceneBuilder::layeredImage(const std::vector<std::string>& textures) {
     return images_[key] = out ? addImage(std::move(*out)) : -1;
 }
 
-int SceneBuilder::layeredMaterial(const std::string& name, const std::string& material, const std::vector<std::string>& under) {
+int SceneBuilder::layeredMaterial(const std::string& name, const std::string& material, const std::vector<std::string>& under,
+                                  const std::vector<std::string>& over) {
     const std::string key = lower(name);
     if (const auto it = materials_.find(key); it != materials_.end()) {
         return it->second;
@@ -859,6 +866,7 @@ int SceneBuilder::layeredMaterial(const std::string& name, const std::string& ma
     if (const auto texture = baseTextures_.find(lower(material)); texture != baseTextures_.end()) {
         std::vector<std::string> layers = under;
         layers.push_back(texture->second);
+        layers.insert(layers.end(), over.begin(), over.end());
         if (const int composite = layeredImage(layers); composite >= 0) {
             m.image = composite;
         }
@@ -1028,12 +1036,41 @@ bool skinData(const sg::Mesh& mesh, const sg::ElementLink& link, const sg::Group
     return true;
 }
 
+// Skins a group without skinning data wholly to `node`, the named node that holds its shape, so it
+// moves as that node does (a held snack bag's root_rot). Its vertices stay in the shape's own space.
+// Returns false (and adds nothing) when the mesh's skin is full.
+bool skinToNode(const std::string& node, std::vector<SkinJoint>& skin, Primitive& p) {
+    auto at = std::find_if(skin.begin(), skin.end(), [&](const SkinJoint& s) {
+        return s.joint == node && s.inverseBind.m == Transform{}.m && s.placement.m == Transform{}.m && !s.rest;
+    });
+    if (at == skin.end()) {
+        if (skin.size() >= 255) {
+            return false;
+        }
+        at = skin.insert(skin.end(), SkinJoint{node, Transform{}, Transform{}, std::nullopt});
+    }
+    const std::size_t vertices = p.positions.size() / 3;
+    p.joints.assign(vertices * 4, 255);
+    p.weights.assign(vertices * 4, 0.0f);
+    for (std::size_t v = 0; v < vertices; ++v) {
+        p.joints[v * 4] = static_cast<std::uint8_t>(at - skin.begin());
+        p.weights[v * 4] = 1;
+    }
+    return true;
+}
+
 } // namespace
 
 int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::MaterialOverride>& overrides, const Pose* pose,
-                             bool skinned, const Pose* places, const std::string& boneKey) {
+                             bool skinned, const Pose* places, const std::string& boneKey, const MeshEdit* edit) {
     const auto cres = assets_.byName(kCres, name + "_cres");
-    std::vector<std::pair<sg::Shape, Transform>> placements;
+    // Each shape with where it sits in the model and the named node that holds it (empty for none).
+    struct Placement {
+        sg::Shape shape;
+        Transform place;
+        std::string node;
+    };
+    std::vector<Placement> placements;
     sg::ResourceNode tree;
     if (!cres) {
         // Effects name a shape itself (e.g. "..._shpe"), drawn where the effect places it.
@@ -1043,7 +1080,7 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
             return -1;
         }
         try {
-            placements.emplace_back(sg::parseShape(*shpe), Transform{});
+            placements.push_back({sg::parseShape(*shpe), Transform{}, {}});
         } catch (const std::exception& ex) {
             assets_.warnings.push_back("shape " + name + ": " + ex.what());
             ++missingModels;
@@ -1062,14 +1099,15 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
     std::map<int, std::string> joints;
     std::map<std::string, Transform> rests;
     for (const auto& n : tree.nodes) {
-        if (n.kind == sg::SceneNode::Kind::Transform && n.joint >= 0 && n.joint < 0x7FFFFFFF) {
+        if ((n.kind == sg::SceneNode::Kind::Transform || n.kind == sg::SceneNode::Kind::ShapeRef) && n.joint >= 0 &&
+            n.joint < 0x7FFFFFFF) {
             joints.emplace(n.joint, lower(n.name));
             rests.try_emplace(lower(n.name), Transform::of(n.translation, n.rotation));
         }
     }
     std::vector<Transform> world(tree.nodes.size());
     std::vector<bool> seen(tree.nodes.size(), false);
-    // The nearest named joint above each node that draws shapes.
+    // The joint each node that draws shapes follows: itself when named, else the nearest named one above.
     std::set<std::string> shapeJoints;
     auto walk = [&](auto&& self, std::uint32_t index, const Transform& parent, const std::string& under, int depth) -> void {
         if (index >= tree.nodes.size() || seen[index] || depth > 64) {
@@ -1079,20 +1117,26 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
         const auto& node = tree.nodes[index];
         const Transform rest = Transform::of(node.translation, node.rotation);
         const Transform* placed = nullptr;
-        if (places != nullptr && node.kind == sg::SceneNode::Kind::Transform) {
+        // A saved place goes to the node of that name, shape nodes too, as the game restores them.
+        if (places != nullptr && (node.kind == sg::SceneNode::Kind::Transform || node.kind == sg::SceneNode::Kind::ShapeRef)) {
             const auto found = places->find(lower(node.name));
             placed = found != places->end() ? &found->second : nullptr;
         }
         world[index] = parent * (placed != nullptr ? *placed : rest);
+        // A named shape node is a joint itself, which its shapes follow.
+        const std::string next = (node.kind == sg::SceneNode::Kind::Transform || node.kind == sg::SceneNode::Kind::ShapeRef) &&
+                                         !node.name.empty()
+                                     ? lower(node.name)
+                                     : under;
         if (node.kind == sg::SceneNode::Kind::ShapeRef) {
             if (!node.shapeLinks.empty()) {
-                shapeJoints.insert(under);
+                shapeJoints.insert(next);
             }
             for (const auto l : node.shapeLinks) {
                 if (l < tree.container.links.size() && tree.container.links[l].type == kShpe) {
                     if (const auto data = assets_.byKey(tree.container.links[l])) {
                         try {
-                            placements.emplace_back(sg::parseShape(*data), world[index]);
+                            placements.push_back({sg::parseShape(*data), world[index], lower(node.name)});
                         } catch (const std::exception& ex) {
                             diag::warnOnce(std::string("models: a shape that can't be read is left out: ") + ex.what());
                         }
@@ -1100,7 +1144,6 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
                 }
             }
         }
-        const std::string next = node.kind == sg::SceneNode::Kind::Transform && !node.name.empty() ? lower(node.name) : under;
         for (const auto c : node.children) {
             self(self, c, world[index], next, depth + 1);
         }
@@ -1134,7 +1177,7 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
             if (link.type == kShpe) {
                 if (const auto data = assets_.byKey(link)) {
                     try {
-                        placements.emplace_back(sg::parseShape(*data), Transform{});
+                        placements.push_back({sg::parseShape(*data), Transform{}, {}});
                         break;
                     } catch (const std::exception& ex) {
                         diag::warnOnce(std::string("models: a shape that can't be read is left out: ") + ex.what());
@@ -1150,7 +1193,7 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
     Mesh mesh;
     mesh.name = name;
     bool skinnedGroups = false;
-    for (const auto& [shape, xf] : placements) {
+    for (const auto& [shape, xf, shapeNode] : placements) {
         // With object detail on High the game draws level of detail 0, or the next one a shape has
         // (LODConfig.txt, Graphics Rules "lodOverride 0").
         std::uint32_t detail = UINT32_MAX;
@@ -1179,6 +1222,9 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
                     if (link.type == kGmdc) {
                         if (const auto bytes = assets_.byKey(link)) {
                             data = sg::parseMesh(*bytes);
+                            if (edit != nullptr && edit->apply) {
+                                edit->apply(*data);
+                            }
                         }
                     }
                 }
@@ -1233,7 +1279,10 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
                     skin(*data, link, group, joints, *pose, p.positions, p.normals, p.tangents);
                 }
                 // A skinned group is placed by its joints' matrices when drawn.
-                const bool placed = skinned && skinData(*data, link, group, joints, rests, xf, mesh.skin, p);
+                bool placed = skinned && skinData(*data, link, group, joints, rests, xf, mesh.skin, p);
+                if (skinned && !placed && group.bones.empty() && !shapeNode.empty()) {
+                    placed = skinToNode(shapeNode, mesh.skin, p);
+                }
                 if (!placed) {
                     for (std::size_t i = 0; i + 2 < p.positions.size(); i += 3) {
                         xf.apply(&p.positions[i], true);

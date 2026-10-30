@@ -85,11 +85,17 @@ public:
     void show(const std::string& clock, ts2::sim::Speed speed, bool paused, std::int32_t funds);
     // Puts up the household's thumbnails.
     void showHousehold(std::vector<Skewer::Member> members);
+    // A Sim's name as its tips show it: first and last name with a space between, either alone when
+    // the other is empty, and a witch's title round it (Live text 0x336). Only English order is
+    // done. The game puts the last name first in some languages.
+    std::string fullName(LotLife& life, std::int16_t sim) const;
     // Shows the lot's life: the clock, speed and funds, the selected Sim (its aspiration and needs)
     // and every household Sim's mood.
     void showLife(LotLife& life);
 
 private:
+    // Sets the Sims' names as the tips of their thumbnails and the live panel's portrait.
+    void showNames(LotLife& life, std::int16_t sim);
     // Moves a panel so that its anchor (a hidden window captioned "<window id>:bl") sits on that
     // window of the puck.
     void anchor(int panel);
@@ -144,6 +150,8 @@ private:
     int portraitShown_ = -1;
     std::int16_t tracked_ = 0;
     std::optional<bool> starShown_;  // whether the live panel's star shows, none until it is set
+    // What the names shown were made from (see showNames), and the same for this frame.
+    std::vector<std::int32_t> namesShown_, namesScratch_;
     ts2::content::TargetPictures targets_;
     // Relationship thumbnails' pictures, at their portrait window's size.
     ts2::content::TargetPictures relationshipPictures_{ts2::content::readCharacterPortrait, 56};

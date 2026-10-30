@@ -73,6 +73,9 @@ void World::remove(SimObject& object) {
         footprintChanges_.insert(object.id);
     } else if (!object.removed) {
         object.removed = true;
+        // Its namings are cancelled and no names change.
+        std::erase_if(nameRequests_, [&](const NameRequest& r) { return r.asker == object.id; });
+        showNextNames();
         objectsChanged();
         ++removedCount_;
         footprintChanges_.insert(object.id);
@@ -329,6 +332,16 @@ void World::addFamily(std::uint32_t family) {
     }
 }
 
+void World::addFamilyMember(std::uint32_t family, std::uint32_t guid) {
+    if (!hood_) {
+        return;
+    }
+    auto& members = ownNeighborhood().familyMembers[family];
+    if (std::ranges::find(members, guid) == members.end()) {
+        members.push_back(guid);
+    }
+}
+
 void World::removeFamilyTie(std::int16_t a, std::int16_t b) {
     if (!hood_) {
         return;
@@ -341,6 +354,150 @@ void World::removeFamilyTie(std::int16_t a, std::int16_t b) {
     };
     removeFirst(ties[a], b);
     removeFirst(ties[b], a);
+}
+
+// A neighbor's ties are kept by type, in the order they were added within a type. A father, mother
+// or spouse tie replaces the one of its type. A child or sibling tie is added unless it is already
+// there. False when nothing was added.
+namespace {
+
+bool addFamilyTie(std::vector<famt::Tie>& ties, famt::TieType type, std::int16_t other) {
+    const auto t = static_cast<std::uint32_t>(type);
+    const bool many = type == famt::TieType::Child || type == famt::TieType::Sibling;
+    const auto sameType = std::ranges::find(ties, t, &famt::Tie::type);
+    if (!many && sameType != ties.end()) {
+        sameType->other = other;
+        return true;
+    }
+    if (many && std::ranges::find_if(ties, [&](const famt::Tie& tie) { return tie.type == t && tie.other == other; }) != ties.end()) {
+        return false;
+    }
+    const auto after = std::ranges::find_if(ties, [&](const famt::Tie& tie) { return tie.type > t; });
+    ties.insert(after, famt::Tie{t, other});
+    return true;
+}
+
+std::optional<std::int16_t> firstFamilyTie(const std::vector<famt::Tie>& ties, famt::TieType type) {
+    const auto it = std::ranges::find(ties, static_cast<std::uint32_t>(type), &famt::Tie::type);
+    return it != ties.end() ? std::optional{it->other} : std::nullopt;
+}
+
+// Built before main, so a debug build's per-test leak check never sees its allocation.
+const std::vector<std::int16_t> kNoNamesAsked;
+
+} // namespace
+
+void World::askNames(std::int16_t asker, std::vector<std::int16_t> neighbors) {
+    const auto own = std::ranges::find_if(nameRequests_, [&](const NameRequest& r) { return r.asker == asker; });
+    if (own != nameRequests_.end()) {
+        if (own->state != NameRequest::State::Shown) {
+            return;
+        }
+        nameRequests_.erase(own);
+    }
+    nameRequests_.push_back({asker, std::move(neighbors), NameRequest::State::Waiting});
+    showNextNames();
+}
+
+const std::vector<std::int16_t>& World::namesAsked() const {
+    const auto shown = std::ranges::find_if(nameRequests_, [](const NameRequest& r) { return r.state == NameRequest::State::Shown; });
+    return shown != nameRequests_.end() ? shown->neighbors : kNoNamesAsked;
+}
+
+std::optional<bool> World::takeNamesAnswer(std::int16_t asker) {
+    const auto own = std::ranges::find_if(nameRequests_, [&](const NameRequest& r) { return r.asker == asker; });
+    if (own == nameRequests_.end()) {
+        return false;
+    }
+    if (own->state != NameRequest::State::Ok && own->state != NameRequest::State::Cancelled) {
+        return std::nullopt;
+    }
+    const bool ok = own->state == NameRequest::State::Ok;
+    nameRequests_.erase(own);
+    return ok;
+}
+
+void World::showNextNames() {
+    if (std::ranges::any_of(nameRequests_, [](const NameRequest& r) { return r.state == NameRequest::State::Shown; })) {
+        return;
+    }
+    const auto next = std::ranges::find_if(nameRequests_, [](const NameRequest& r) { return r.state == NameRequest::State::Waiting; });
+    if (next != nameRequests_.end()) {
+        next->state = NameRequest::State::Shown;
+    }
+}
+
+void World::answerNames(bool ok, const std::vector<std::string>& names) {
+    const auto shown = std::ranges::find_if(nameRequests_, [](const NameRequest& r) { return r.state == NameRequest::State::Shown; });
+    if (shown == nameRequests_.end()) {
+        return;
+    }
+    if (ok) {
+        const auto& asked = shown->neighbors;
+        for (std::size_t i = 0; i < asked.size() && i < names.size(); ++i) {
+            if (asked[i] == 0) {
+                continue;
+            }
+            const std::string& name = names[i];
+            const std::size_t first = name.find_first_not_of(" \t");
+            const std::size_t last = name.find_last_not_of(" \t");
+            firstNames_[asked[i]] = first == std::string::npos ? std::string{} : name.substr(first, last - first + 1);
+            ++namesVersion_;
+        }
+    }
+    shown->state = ok ? NameRequest::State::Ok : NameRequest::State::Cancelled;
+    showNextNames();
+}
+
+// A neighbor never ties to itself. Any tie between the two goes first. A new father or mother also
+// becomes the sibling of the parent's other children. A new spouse ends both old marriages. A child
+// gets `b` as father, or as mother when it has a father, and can't be given a third parent. The
+// recursion is at most two deep (child, then parent, then sibling).
+bool World::setFamilyTie(std::int16_t a, std::int16_t b, famt::TieType type) {
+    if (!hood_ || a == b) {
+        return false;
+    }
+    auto& all = ownNeighborhood().familyTies;
+    all[a];
+    all[b];
+    removeFamilyTie(a, b);
+    switch (type) {
+    case famt::TieType::Father:
+    case famt::TieType::Mother: {
+        bool took = true;
+        for (const std::int16_t child : familyTies(a, famt::TieType::Child)) {
+            if (child != b) {
+                took = setFamilyTie(b, child, famt::TieType::Sibling) && took;
+            }
+        }
+        addFamilyTie(all[a], famt::TieType::Child, b);
+        addFamilyTie(all[b], type, a);
+        return took;
+    }
+    case famt::TieType::Spouse:
+        if (const auto old = firstFamilyTie(all[a], famt::TieType::Spouse)) {
+            removeFamilyTie(a, *old);
+        }
+        if (const auto old = firstFamilyTie(all[b], famt::TieType::Spouse)) {
+            removeFamilyTie(b, *old);
+        }
+        addFamilyTie(all[a], famt::TieType::Spouse, b);
+        addFamilyTie(all[b], famt::TieType::Spouse, a);
+        return true;
+    case famt::TieType::Sibling:
+        addFamilyTie(all[a], famt::TieType::Sibling, b);
+        addFamilyTie(all[b], famt::TieType::Sibling, a);
+        return true;
+    case famt::TieType::Child:
+        if (!firstFamilyTie(all[a], famt::TieType::Father)) {
+            return setFamilyTie(b, a, famt::TieType::Father);
+        }
+        if (!firstFamilyTie(all[a], famt::TieType::Mother)) {
+            return setFamilyTie(b, a, famt::TieType::Mother);
+        }
+        return false;
+    }
+    return false;
 }
 
 // The saved neighborhood is shared, so the first change makes this world its own copy.

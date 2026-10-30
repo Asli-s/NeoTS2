@@ -6,6 +6,7 @@
 #include "formats/hash.hpp"
 #include "formats/lot_description.hpp"
 #include "formats/neighborhood_id.hpp"
+#include "formats/propset.hpp"
 #include "formats/resource_types.hpp"
 #include "formats/sdsc.hpp"
 #include "formats/srel.hpp"
@@ -198,6 +199,13 @@ Neighborhood loadNeighborhood(const fs::path& neighborhoodPackage) {
                 hood.record = ngbh::parse(package.read(e));
             } catch (const std::exception& ex) {
                 hood.problems.push_back(std::string("neighborhood record: ") + ex.what());
+            }
+        } else if (e.key.type == types::kSimDna) {
+            const auto id = static_cast<std::int16_t>(e.key.instance);
+            try {
+                hood.dna[id] = propset::parse(package.read(e));
+            } catch (const std::exception& ex) {
+                hood.problems.push_back("DNA of " + std::to_string(id) + ": " + ex.what());
             }
         } else if (e.key.type == types::kWantsAndFears) {
             const auto id = static_cast<std::int16_t>(e.key.instance);

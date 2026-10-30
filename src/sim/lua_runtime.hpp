@@ -44,6 +44,16 @@ struct ScriptCall {
     std::string luaError;         // any other Lua error
 };
 
+// A script function the game registers for its Lua scripts, and whether the engine has it.
+// Class methods are named "Class:method", functions of plain tables "Table.function".
+struct ScriptFunctionInfo {
+    std::string name;
+    bool implemented = false;
+};
+
+// Every script function the game registers, implemented or not yet.
+std::vector<ScriptFunctionInfo> scriptFunctions();
+
 // The game's Lua 5.0 state: shared modules run once, and every object script is a global
 // function named after its resource.
 class LuaRuntime {

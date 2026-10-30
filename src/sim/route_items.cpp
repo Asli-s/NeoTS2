@@ -4,7 +4,9 @@
 #include <cmath>
 #include <map>
 #include <set>
+#include <span>
 #include <string>
+#include <tuple>
 #include <utility>
 
 namespace ts2::sim {
@@ -13,10 +15,16 @@ namespace {
 
 // Wall piece sizes, in tiles.
 constexpr float kWallHalfWidth = 0.075f;    // the solid core is 0.15 wide
-constexpr float kPaddedHalfWidth = 0.2f;    // the padded copy is 0.4 wide...
-constexpr float kPaddedOverhang = 0.125f;   // ...and reaches this far past each end
+constexpr float kPaddingGrowth = 0.12499f;  // the padded copy is the core grown this much on every side
+// A diagonal piece is this many small squares, each 1/16 tile, corner to corner across its tile.
+constexpr int kDiagonalSquares = 16;
+constexpr float kDiagonalSquare = 1.0f / kDiagonalSquares;
+// Longer diagonals than any lot's come only from broken files and are left out.
+constexpr float kMaxDiagonalTiles = 256;
 constexpr float kJointHalfSize = 0.3f;      // joints are 0.6 squares
 constexpr float kJointCost = 12;
+// Walls round a point whose largest gap in angle order is wider than this get a joint.
+constexpr double kJointGap = 1.05 * 3.14159265358979323846;
 
 // Item types: the core and the padding around it, for walls and for fences.
 constexpr int kWallType = 15, kWallPaddingType = 14;
@@ -41,11 +49,44 @@ constexpr int kEdgeType = 2;
 // The foundation under a raised floor: the tile itself and a margin around it.
 constexpr int kFoundationType = 7, kFoundationPaddingType = 6;
 constexpr float kFoundationMargin = 0.125f;
+// A floor above the ground is raised on a foundation where it stands less than a storey above it.
+constexpr float kStoreyHeight = 3.0f;
+constexpr float kHeightTolerance = 0.001f;
+
+// Tells whether two of the directions, neighbours in angle order (the last and first included), are
+// more than kJointGap apart. The order and the gaps are the wall graph's, whose x and y the route
+// swaps. A wall of no length sorts as a half turn and is no gap from either neighbour, and walls in
+// the same direction keep their file order.
+bool hasWideGap(const std::vector<std::pair<float, float>>& dirs) {
+    constexpr double kPi = 3.14159265358979323846;
+    struct Direction {
+        double x, y, angle;
+    };
+    std::vector<Direction> around;
+    around.reserve(dirs.size());
+    for (const auto& [routeX, routeY] : dirs) {
+        const double x = routeY, y = routeX;
+        around.push_back({x, y, y == 0 ? (x > 0 ? 0 : kPi) : std::atan2(y, x)});
+    }
+    std::ranges::stable_sort(around, {}, &Direction::angle);
+    for (std::size_t i = 0; i < around.size(); ++i) {
+        const Direction& u = around[i];
+        const Direction& v = around[(i + 1) % around.size()];
+        double gap = std::atan2(u.x * v.y - v.x * u.y, u.x * v.x + u.y * v.y);
+        if (gap < 0) {
+            gap += 2 * kPi;
+        }
+        if (gap > kJointGap) {
+            return true;
+        }
+    }
+    return false;
+}
 
 } // namespace
 
 std::vector<RouteItem> wallRouteItems(const wallgraph::WallGraph& rooms, const std::vector<walllayer::Entry>& coverings, int level,
-                                      const FenceBlocks& fenceBlocks) {
+                                      const FenceBlocks& fenceBlocks, int width, int height) {
     std::map<std::int32_t, std::uint32_t> coveringOf;
     for (const auto& c : coverings) {
         coveringOf[static_cast<std::int32_t>(c.wall)] = c.type;
@@ -67,6 +108,8 @@ std::vector<RouteItem> wallRouteItems(const wallgraph::WallGraph& rooms, const s
     // The directions walls leave each point in, to find ends and corners. Route coordinates swap the
     // wall graph's x and y.
     std::map<std::pair<float, float>, std::vector<std::pair<float, float>>> directions;
+    // The tiles holding a diagonal piece already, by direction.
+    std::set<std::tuple<int, int, bool>> diagonalTiles;
     const wallgraph::PointIndex pointById(rooms);
     for (const auto& w : rooms.walls) {
         const auto* a = pointById(w.from);
@@ -81,27 +124,46 @@ std::vector<RouteItem> wallRouteItems(const wallgraph::WallGraph& rooms, const s
         }
         directions[{ax, ay}].push_back({bx - ax, by - ay});
         directions[{bx, by}].push_back({ax - bx, ay - by});
-        // Only walls along the grid are routed for now. Diagonal walls are not handled yet.
-        if (ax != bx && ay != by) {
+        const bool fence = kind == Barrier::Fence;
+        auto add = [&](const RouteRect& core) {
+            const float g = kPaddingGrowth;
+            const auto owner = static_cast<std::uint32_t>(w.id);
+            items.push_back({core, kBlockedCost, fence ? kFenceType : kWallType, RouteItemKind::Wall, false, owner});
+            items.push_back({{core.x0 - g, core.y0 - g, core.x1 + g, core.y1 + g}, kBlockedCost,
+                             fence ? kFencePaddingType : kWallPaddingType, RouteItemKind::Wall, false, owner});
+        };
+        if (ax == bx || ay == by) {
+            const RouteRect span{std::min(ax, bx), std::min(ay, by), std::max(ax, bx), std::max(ay, by)};
+            const float h = kWallHalfWidth;
+            add(ay == by ? RouteRect{span.x0, span.y0 - h, span.x1, span.y1 + h} : RouteRect{span.x0 - h, span.y0, span.x1 + h, span.y1});
             continue;
         }
-        const bool fence = kind == Barrier::Fence;
-        const RouteRect span{std::min(ax, bx), std::min(ay, by), std::max(ax, bx), std::max(ay, by)};
-        const bool alongX = ay == by;
-        auto widened = [&](float halfWidth, float overhang) {
-            return alongX ? RouteRect{span.x0 - overhang, span.y0 - halfWidth, span.x1 + overhang, span.y1 + halfWidth}
-                          : RouteRect{span.x0 - halfWidth, span.y0 - overhang, span.x1 + halfWidth, span.y1 + overhang};
-        };
-        items.push_back({widened(kWallHalfWidth, 0), kBlockedCost, fence ? kFenceType : kWallType, RouteItemKind::Wall, false,
-                         static_cast<std::uint32_t>(w.id)});
-        items.push_back({widened(kPaddedHalfWidth, kPaddedOverhang), kBlockedCost, fence ? kFencePaddingType : kWallPaddingType,
-                         RouteItemKind::Wall, false, static_cast<std::uint32_t>(w.id)});
+        // A diagonal runs corner to corner through whole tiles. Other slants are not walls the game builds.
+        const float run = std::abs(bx - ax);
+        if (run != std::abs(by - ay) || run > kMaxDiagonalTiles || std::floor(run) != run || std::floor(ax) != ax || std::floor(ay) != ay) {
+            continue;
+        }
+        const float x0 = std::min(ax, bx), yAtX0 = ax < bx ? ay : by;
+        const bool rising = (ax < bx) == (ay < by);
+        for (int tile = 0; tile < static_cast<int>(run); ++tile) {
+            const float tx = x0 + static_cast<float>(tile);
+            const float ty = rising ? yAtX0 + static_cast<float>(tile) : yAtX0 - static_cast<float>(tile + 1);
+            if (tx < 0 || ty < 0 || tx >= static_cast<float>(width) || ty >= static_cast<float>(height) ||
+                !diagonalTiles.insert({static_cast<int>(tx), static_cast<int>(ty), rising}).second) {
+                continue;
+            }
+            for (int i = 0; i < kDiagonalSquares; ++i) {
+                const float t = static_cast<float>(i) * kDiagonalSquare;
+                const float y = rising ? ty + t : ty + 1 - t - kDiagonalSquare;
+                add({tx + t, y, tx + t + kDiagonalSquare, y + kDiagonalSquare});
+            }
+        }
     }
-    // A joint where a wall ends or turns. Straight runs and T-junctions get none.
+    // A joint where a wall ends, or where the walls round a point leave a gap wider than 1.05 pi between
+    // two neighbours in angle order. Straight runs and T-junctions get none, and walls bunched within
+    // less than 0.95 pi of each other get one.
     for (const auto& [point, dirs] : directions) {
-        const bool end = dirs.size() == 1;
-        const bool corner = dirs.size() == 2 && !(dirs[0].first == -dirs[1].first && dirs[0].second == -dirs[1].second);
-        if (end || corner) {
+        if (dirs.size() == 1 || hasWideGap(dirs)) {
             const auto [x, y] = point;
             items.push_back({{x - kJointHalfSize, y - kJointHalfSize, x + kJointHalfSize, y + kJointHalfSize}, kJointCost, 0,
                              RouteItemKind::WallJoint, false, 0});
@@ -126,8 +188,9 @@ std::vector<RouteItem> postRouteItems(const std::vector<fencepostlayer::Post>& p
     return items;
 }
 
-std::vector<RouteItem> floorRouteItems(const array3d::Array3D& floors, const std::map<std::uint16_t, stringmap::Entry>& patterns,
-                                       int level, int lowestLevel, int width, int height) {
+std::vector<RouteItem> floorRouteItems(const array3d::Array3D& floors, const array3d::Array3D* heights, const array3d::Array3D* surface,
+                                       const std::map<std::uint16_t, stringmap::Entry>& patterns, int level, int lowestLevel, int width,
+                                       int height) {
     // Floor grid cells are indexed by the wall graph's x and y. Route tile (x, y) is grid (y, x).
     auto floored = [&](int floorLevel, int x, int y) {
         const int index = floorLevel - lowestLevel;
@@ -152,6 +215,30 @@ std::vector<RouteItem> floorRouteItems(const array3d::Array3D& floors, const std
         return kFloorCost;
     };
 
+    // A ground tile is the foundation of the storey above when that storey has floor in all four
+    // quarters there, its surface flag set in each, and stands less than a storey above the ground at
+    // one of the tile's corners at least. A second storey over a ground floor room is a storey up.
+    auto raisedAbove = [&](int x, int y) {
+        const int ground = -lowestLevel, above = 1 - lowestLevel;
+        const auto open = surface != nullptr ? surface->at(above, y, x) : std::span<const std::uint8_t>{};
+        if (heights == nullptr || open.size() != 4 || !floors.contains(above, y, x)) {
+            return false;
+        }
+        for (std::size_t q = 0; q < 4; ++q) {
+            if (floors.i16(above, y, x, q) == 0 || open[q] == 0) {
+                return false;
+            }
+        }
+        for (const auto [dx, dy] : {std::pair{0, 0}, {1, 0}, {0, 1}, {1, 1}}) {
+            const int cx = y + dy, cy = x + dx;
+            if (heights->contains(ground, cx, cy) && heights->contains(above, cx, cy) &&
+                heights->f32(above, cx, cy, 0) - heights->f32(ground, cx, cy, 0) + kHeightTolerance < kStoreyHeight) {
+                return true;
+            }
+        }
+        return false;
+    };
+
     // The tiles that have floor: on the ground, every lot tile but those under a raised floor, where the
     // foundation blocks instead.
     std::set<std::pair<int, int>> tiles;
@@ -159,7 +246,7 @@ std::vector<RouteItem> floorRouteItems(const array3d::Array3D& floors, const std
     for (int x = 0; x < width; ++x) {
         for (int y = 0; y < height; ++y) {
             const bool hasFloor = floored(level, x, y);
-            const bool raised = level == 0 && floored(1, x, y);
+            const bool raised = level == 0 && raisedAbove(x, y);
             const bool ground = level == 0 && !raised;
             const float fx = static_cast<float>(x), fy = static_cast<float>(y);
             if (raised) {
@@ -195,6 +282,28 @@ std::vector<RouteItem> floorRouteItems(const array3d::Array3D& floors, const std
                 strip({cx, cy, cx + s, cy + s});
             }
         }
+    }
+    return items;
+}
+
+std::vector<RouteItem> simRingItems(const RouteRect& square, bool target, std::uint32_t owner) {
+    struct Ring {
+        float growth;
+        float cost;
+    };
+    constexpr Ring kOuter{0.375f, 5.0f}, kMiddle{0.1875f, 7.5f}, kInner{0.0625f, 10.0f};
+    std::vector<RouteItem> items;
+    for (const Ring& ring : {kOuter, kMiddle, kInner}) {
+        if (target && ring.growth == kOuter.growth) {
+            continue;
+        }
+        RouteItem item;
+        item.rect = {square.x0 - ring.growth, square.y0 - ring.growth, square.x1 + ring.growth, square.y1 + ring.growth};
+        item.cost = ring.cost;
+        item.type = 1;
+        item.kind = RouteItemKind::Soft;
+        item.owner = owner;
+        items.push_back(item);
     }
     return items;
 }

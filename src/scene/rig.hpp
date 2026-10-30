@@ -16,7 +16,7 @@ namespace ts2::scene {
 class Assets;
 
 // A skeleton ready to be posed: its nodes parents first, each with its rest place relative to its
-// parent. Joints are the named transform nodes (lowercase names).
+// parent. Joints are the named transform and shape nodes (lowercase names).
 struct Rig {
     struct Node {
         std::string name;  // empty for nodes that aren't joints
@@ -151,6 +151,9 @@ struct ScenePose {
     std::unordered_map<std::uint32_t, std::vector<HeldJoint>> held;
     // The heading (radians) each lot object's actor was placed at as it was last posed.
     std::unordered_map<std::uint32_t, float> heldHeading;
+    // Each lot object's actor's frozen clip (see Actor::Clip::frozen): its start (seconds) and the
+    // pose it holds. Kept between calls.
+    std::unordered_map<std::uint32_t, std::pair<double, std::vector<HeldJoint>>> frozen;
 };
 void poseActors(const Scene& scene, double seconds, ScenePose& out);
 

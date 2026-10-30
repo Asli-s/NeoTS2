@@ -1,5 +1,6 @@
 #include "sim/lot_world.hpp"
 
+#include "sim/object_reset.hpp"
 #include "sim/type_signature.hpp"
 #include "sim/vm_execution.hpp"
 
@@ -93,8 +94,8 @@ std::optional<std::string> restoreStack(const content::Lot& lot, const content::
 }
 
 // The overlays an object was playing when the lot was saved, carrying on from where they were. Only
-// playing ("state 1") overlays come back. A Sim's Animate Sim clip comes back by restoreSimClip.
-// An object's own animation and attached ones are not restored yet.
+// playing ("state 1") overlays come back. A Sim's Animate Sim clip comes back by restoreSimClip and
+// an object's Animate Object clip by restoreObjectClip. Attached animations are not restored yet.
 void restoreOverlays(const content::Lot& lot, std::uint32_t id, SimObject& object, CodeSource& code, double nowMs) {
     const auto saved = lot.savedAnimations.find(id);
     if (saved == lot.savedAnimations.end()) {
@@ -103,8 +104,9 @@ void restoreOverlays(const content::Lot& lot, std::uint32_t id, SimObject& objec
     constexpr std::array<int, 5> kPriorityLayers{1, 3, 5, 7, 0};
     for (const auto& a : saved->second) {
         const auto layer = std::find(kPriorityLayers.begin(), kPriorityLayers.end(), a.layer);
+        // An Animate Object clip ("obj") is restoreObjectClip's, on whatever layer a broken save puts it.
         if (a.kind != cobject::SavedAnimation::Kind::Clip || a.state != 1 || layer == kPriorityLayers.end() ||
-            a.type.size() != 3 || a.type[0] != 'o') {
+            a.type.size() != 3 || a.type[0] != 'o' || a.type == "obj") {
             continue;
         }
         PlayingOverlay o;
@@ -155,6 +157,35 @@ void restoreSimClip(const content::Lot& lot, std::uint32_t id, SimObject& object
             object.resumedClip = SimObject::ResumedClip{a.name, a.rate, static_cast<double>(a.startedMsAgo)};
             return;
         }
+    }
+}
+
+// The Animate Object clip an object was playing when the lot was saved ("obj"), carrying on from where
+// it got to. Animate Object never waits, so no script starts it again. Shipped saves only hold clips
+// played once or until stopped. A clip saved with more plays is left out, as its length isn't known
+// while the lot loads. So is a rate outside what the speed byte can give.
+void restoreObjectClip(const content::Lot& lot, std::uint32_t id, SimObject& object, double nowMs) {
+    const auto saved = lot.savedAnimations.find(id);
+    if (saved == lot.savedAnimations.end() || object.isPerson()) {
+        return;
+    }
+    constexpr float kMinRate = -128.0f / 32, kMaxRate = 127.0f / 32;
+    for (const auto& a : saved->second) {
+        if (a.kind != cobject::SavedAnimation::Kind::Clip || a.state != 1 || a.type != "obj") {
+            continue;
+        }
+        if ((a.plays != 1 && a.plays != -1) || !std::isfinite(a.rate) || a.rate < kMinRate || a.rate > kMaxRate) {
+            return;
+        }
+        PlayingAnimation play;
+        play.name = a.name;
+        play.startMs = nowMs - a.startedMsAgo;
+        play.speed = a.rate;
+        play.flipped = a.flipped;
+        play.loops = a.plays == -1;
+        play.lengthMs = std::numeric_limits<float>::infinity();
+        object.animation = std::move(play);
+        return;
     }
 }
 
@@ -220,6 +251,7 @@ LotWorldReport buildWorld(const content::Lot& lot, CodeSource& code, World& worl
             report.problems.push_back({saved.id, "more saved semi-attributes than the engine keeps"});
         }
         std::copy(state.data.begin(), state.data.end(), object.data.begin());
+        notePausedRun(object);
         if (fitsFixedPoint(state.header.location[0]) && fitsFixedPoint(state.header.location[1])) {
             object.x = static_cast<std::int32_t>(state.header.location[0] * 65536.0f);
             object.y = static_cast<std::int32_t>(state.header.location[1] * 65536.0f);
@@ -269,6 +301,7 @@ LotWorldReport buildWorld(const content::Lot& lot, CodeSource& code, World& worl
         }
         restoreOverlays(lot, saved.id, object, code, world.clockMs());
         restoreSimClip(lot, saved.id, object);
+        restoreObjectClip(lot, saved.id, object, world.clockMs());
         // An object or Sim whose type changed since the save (a patch, expansion or mod) will start over.
         if (saved.type && typeChangedSinceSave(code, *type, *saved.type)) {
             report.changedType.push_back(object.id);
@@ -346,6 +379,7 @@ std::shared_ptr<const SavedNeighborhood> savedNeighborhood(const content::Neighb
         saved->familyCurrentLots[instance] = family.currentLot;
         saved->familyVacationLots[instance] = family.vacationLot;
         saved->familyFlags[instance] = family.flags;
+        saved->familyRanks[instance] = family.value4;
         saved->familyMembers[instance] = family.members;
     }
     if (hood.record) {
@@ -355,7 +389,8 @@ std::shared_ptr<const SavedNeighborhood> savedNeighborhood(const content::Neighb
         saved->dataTables[id] = toDataTables(tables);
     }
     for (const auto& [id, n] : hood.neighbors) {
-        saved->neighbors[id] = SavedNeighbor{n.guid, n.personData};
+        const auto dna = hood.dna.find(id);
+        saved->neighbors[id] = SavedNeighbor{n.guid, n.personData, dna != hood.dna.end() ? genomeFromProperties(dna->second) : Genome{}};
     }
     saved->familyTies = hood.familyTies;
     for (const auto& [id, w] : hood.wants) {

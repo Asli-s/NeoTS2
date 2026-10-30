@@ -10,6 +10,7 @@
 #include "formats/resource_types.hpp"
 #include "formats/slot.hpp"
 #include "formats/str.hpp"
+#include "sim/world.hpp"
 
 #include <exception>
 #include <format>
@@ -21,6 +22,8 @@ namespace {
 constexpr std::uint32_t kBehaviorConstants = 0x42434F4E;
 constexpr std::uint32_t kSemiGlobalReference = 0x474C4F42;
 constexpr std::uint8_t kUsEnglish = 1;
+// The type new Sims are made from. Its own trees serve Sims whose files carry none.
+constexpr std::uint32_t kTemplatePersonGuid = 0x7FD96B54;
 
 std::uint64_t groupInstance(std::uint32_t group, std::uint16_t instance) {
     return static_cast<std::uint64_t>(group) << 32 | instance;
@@ -30,6 +33,9 @@ std::uint64_t groupInstance(std::uint32_t group, std::uint16_t instance) {
 
 IndexCodeSource::IndexCodeSource(content::ResourceIndex& index) : index_(index) {
     for (const auto& r : index_.resources()) {
+        if (r.entry.key.type == types::kBehavior) {
+            groupsWithTrees_.insert(r.entry.key.group);
+        }
         if (r.entry.key.type != kSemiGlobalReference) {
             continue;
         }
@@ -42,8 +48,21 @@ IndexCodeSource::IndexCodeSource(content::ResourceIndex& index) : index_(index) 
     }
 }
 
+std::uint32_t IndexCodeSource::privateCodeGroup(std::uint32_t group) {
+    if (groupsWithTrees_.contains(group)) {
+        return group;
+    }
+    objectType(0);  // finds the Sims' groups the first time
+    if (!simGroups_.contains(group)) {
+        return group;
+    }
+    const ObjectType* templatePerson = objectType(kTemplatePersonGuid);
+    return templatePerson != nullptr ? templatePerson->group : group;
+}
+
 std::shared_ptr<const bhav::Behavior> IndexCodeSource::behavior(std::uint32_t group,
                                                                 std::uint16_t instance) {
+    group = privateCodeGroup(group);
     const std::uint64_t key = groupInstance(group, instance);
     if (const auto it = behaviors_.find(key); it != behaviors_.end()) {
         return it->second;
@@ -82,6 +101,7 @@ std::shared_ptr<const ttab::InteractionTable> IndexCodeSource::interactionTable(
 
 const std::vector<std::int16_t>* IndexCodeSource::constants(std::uint32_t group,
                                                            std::uint16_t instance) {
+    group = privateCodeGroup(group);
     const std::uint64_t key = groupInstance(group, instance);
     auto it = constants_.find(key);
     if (it == constants_.end()) {
@@ -99,16 +119,17 @@ const std::vector<std::int16_t>* IndexCodeSource::constants(std::uint32_t group,
 }
 
 const std::vector<objf::Function>* IndexCodeSource::objectFunctions(const ObjectType& type) {
-    const std::uint64_t key = groupInstance(type.group, type.instance);
+    const std::uint32_t group = privateCodeGroup(type.group);
+    const std::uint64_t key = groupInstance(group, type.instance);
     auto it = objectFunctions_.find(key);
     if (it == objectFunctions_.end()) {
         std::optional<std::vector<objf::Function>> functions;
-        if (const auto* r = index_.find({objf::kType, type.group, type.instance, 0})) {
+        if (const auto* r = index_.find({objf::kType, group, type.instance, 0})) {
             try {
                 functions = objf::parse(index_.read(*r));
             } catch (const std::exception& ex) {
                 diag::warning(std::format("object functions 0x{:08X} 0x{:04X} can't be read: {}",
-                                          type.group, type.instance, ex.what()));
+                                          group, type.instance, ex.what()));
             }
         }
         it = objectFunctions_.emplace(key, std::move(functions)).first;
@@ -170,6 +191,9 @@ const ObjectType* IndexCodeSource::objectType(std::uint32_t guid) {
                 ObjectType type{r.entry.key.group, std::move(definition), static_cast<std::uint16_t>(r.entry.key.instance),
                                 containerSlots, std::move(slotHeights), std::move(routingSlots), std::move(containerEntries),
                                 std::move(targetSlots)};
+                if (type.definition.field(objd::field::kType) == kPersonType) {
+                    simGroups_.insert(r.entry.key.group);
+                }
                 if (objectTypes_.try_emplace(id, std::move(type)).second) {
                     objectTypeGuids_.push_back(id);
                 }
@@ -197,6 +221,19 @@ const std::map<std::string, std::string>* IndexCodeSource::ageData(std::uint32_t
         it = ageData_.emplace(group, std::move(properties)).first;
     }
     return it->second ? &*it->second : nullptr;
+}
+
+std::optional<std::vector<std::uint8_t>> IndexCodeSource::characterResource(std::uint32_t type, std::uint32_t group) {
+    const auto* r = index_.find({type, group, 1, 0});
+    if (r == nullptr) {
+        return std::nullopt;
+    }
+    try {
+        return index_.read(*r);
+    } catch (const std::exception& ex) {
+        diag::warning(std::format("resource 0x{:08X} of 0x{:08X} can't be read: {}", type, group, ex.what()));
+        return std::nullopt;
+    }
 }
 
 const fcns::Tunings* IndexCodeSource::tunings() {

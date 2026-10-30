@@ -1,4 +1,5 @@
 #include "object_materials.hpp"
+#include "formats/hash.hpp"
 
 #include <algorithm>
 #include <climits>
@@ -111,13 +112,49 @@ int ObjectMaterials::skinnedModel(const std::string& name, const std::vector<ts2
     if (built < 0 || builder_.scene().meshes[static_cast<std::size_t>(built)].skin.empty()) {
         return skinnedModels_[key] = -1;
     }
-    // Copied: pose() reads the builder's skinned models too.
     ts2::scene::Mesh mesh = builder_.scene().meshes[static_cast<std::size_t>(built)];
     for (auto& p : mesh.primitives) {
         p.material = builderMaterial(p.material, scene);
     }
     scene.meshes.push_back(std::move(mesh));
     return skinnedModels_[key] = static_cast<int>(scene.meshes.size() - 1);
+}
+
+ts2::scene::Actor ObjectMaterials::sim(const ts2::scene::SimLook& look, const std::string& name, const ts2::scene::Transform& at,
+                                      int level, const std::string& animation, ts2::scene::Scene& scene,
+                                      std::vector<std::size_t>& reuse) {
+    auto& built = builder_.scene();
+    const std::size_t first = built.instances.size();
+    std::vector<ts2::scene::Transform> world;
+    ts2::scene::Actor actor = ts2::scene::buildSim(builder_, simRigs_, look, at, level, name, animation, world);
+    std::map<std::size_t, std::size_t> moved;
+    for (std::size_t i = first; i < built.instances.size(); ++i) {
+        ts2::scene::Instance instance = std::move(built.instances[i]);
+        auto [mesh, added] = simMeshes_.try_emplace(instance.mesh, -1);
+        if (added) {
+            ts2::scene::Mesh copy = built.meshes[static_cast<std::size_t>(instance.mesh)];
+            for (auto& p : copy.primitives) {
+                p.material = builderMaterial(p.material, scene);
+            }
+            scene.meshes.push_back(std::move(copy));
+            mesh->second = static_cast<int>(scene.meshes.size() - 1);
+        }
+        instance.mesh = mesh->second;
+        if (!reuse.empty() && reuse.back() < scene.instances.size()) {
+            moved[i] = reuse.back();
+            reuse.pop_back();
+            scene.instances[moved[i]] = std::move(instance);
+        } else {
+            moved[i] = scene.instances.size();
+            scene.instances.push_back(std::move(instance));
+        }
+    }
+    // Only the meshes stay in the builder, for the next Sim wearing them.
+    built.instances.resize(first);
+    for (auto& s : actor.skinned) {
+        s.instance = moved.at(s.instance);
+    }
+    return actor;
 }
 
 std::shared_ptr<const ts2::scene::Rig> ObjectMaterials::objectRig(const std::string& model, const std::vector<ts2::cobject::SavedJoint>& saved) {
@@ -176,58 +213,10 @@ float clipMs(const ts2::sim::PlayingAnimation& playing, double length, double no
     return static_cast<float>(ms);
 }
 
-std::optional<ts2::scene::Transform> ObjectMaterials::pose(const ts2::sim::SimObject& object, double nowMs,
-                                                           ts2::scene::AnimationLibrary& animations) {
-    if (!object.animation || object.isPerson()) {
-        return std::nullopt;
-    }
-    const auto& playing = *object.animation;
-    const auto clip = animations.find(playing.name);
-    if (!clip || clip->skeleton.empty()) {
-        return std::nullopt;
-    }
-    // An object's clips are made for its model, which is also their skeleton.
-    const std::string key = ts2::scene::lower(clip->skeleton);
-    auto [it, first] = oneJointModels_.try_emplace(key);
-    if (first) {
-        const int mesh = builder_.skinnedModel(clip->skeleton, {});
-        const auto& meshes = builder_.scene().meshes;
-        if (mesh >= 0 && static_cast<std::size_t>(mesh) < meshes.size() && meshes[static_cast<std::size_t>(mesh)].skin.size() == 1) {
-            const auto& m = meshes[static_cast<std::size_t>(mesh)];
-            const bool allFollow = std::all_of(m.primitives.begin(), m.primitives.end(), [](const ts2::scene::Primitive& p) {
-                if (p.joints.empty() || p.joints.size() % 4 != 0) {
-                    return false;
-                }
-                for (std::size_t i = 0; i < p.joints.size(); i += 4) {
-                    if (p.joints[i] != 0 || p.joints[i + 1] != 255) {
-                        return false;
-                    }
-                }
-                return true;
-            });
-            auto rig = std::make_shared<ts2::scene::Rig>(ts2::scene::loadRig(assets_, clip->skeleton));
-            const int joint = rig->find(ts2::scene::lower(m.skin[0].joint));
-            if (allFollow && joint >= 0) {
-                ts2::scene::poseRig(*rig, nullptr, 0, poseScratch_);
-                it->second = std::make_shared<OneJointModel>(OneJointModel{rig, joint, poseScratch_[static_cast<std::size_t>(joint)]});
-            }
-        }
-    }
-    const auto model = it->second;
-    if (!model) {
-        return std::nullopt;
-    }
-    const auto bound = animations.bound(model->rig, playing.name, playing.flipped);
-    if (!bound || !bound->animation) {
-        return std::nullopt;
-    }
-    ts2::scene::poseRig(*model->rig, bound.get(), clipMs(playing, bound->animation->duration, nowMs), poseScratch_);
-    return poseScratch_[static_cast<std::size_t>(model->joint)] * model->rest.rigidInverse();
-}
-
 std::optional<ts2::scene::Transform> ObjectMaterials::jointPose(const ts2::sim::SimObject& object, double nowMs,
                                                                 ts2::scene::AnimationLibrary& animations, const std::string& model,
-                                                                const std::string& joint) {
+                                                                const std::string& joint,
+                                                                std::vector<std::pair<std::uint32_t, ts2::scene::Transform>>* bones) {
     if (!object.animation || object.isPerson()) {
         return std::nullopt;
     }
@@ -242,6 +231,14 @@ std::optional<ts2::scene::Transform> ObjectMaterials::jointPose(const ts2::sim::
         return std::nullopt;
     }
     ts2::scene::poseRig(*it->second, bound.get(), clipMs(playing, bound->animation->duration, nowMs), poseScratch_);
+    if (bones != nullptr) {
+        bones->clear();
+        for (std::size_t i = 0; i < it->second->nodes.size() && i < poseScratch_.size(); ++i) {
+            if (!it->second->nodes[i].name.empty()) {
+                bones->emplace_back(ts2::hash::crc32(it->second->nodes[i].name), poseScratch_[i]);
+            }
+        }
+    }
     return poseScratch_[static_cast<std::size_t>(node)];
 }
 

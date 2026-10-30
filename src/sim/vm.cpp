@@ -14,7 +14,7 @@ namespace vm_detail {
 // The name comes from the global table (flag 0x01), the code owner's semi-global one (0x02) or its
 // own. The tree is looked up in the object's group, then its semi-global group (unless flag 0x08),
 // then the global one (unless flag 0x04).
-// Mode 1 runs the tree at once on the stack object's own stack (see runOnStack).
+// Modes 0 and 1 run the tree to its end at once, as me or as the stack object (see runAtOnce).
 std::optional<Execution::NamedCall> Execution::namedTree(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     const std::uint8_t mode = o[5];
@@ -84,8 +84,9 @@ std::optional<Execution::NamedCall> Execution::namedTree(const bhav::Instruction
         const auto& temps = mode == kRunInStackObjectsStack ? stack().thread.temps : thread_.temps;
         call.args.assign(temps.begin(), temps.end());
     }
-    if (mode == kRunInStackObjectsStack) {
-        call.onStackObject = true;
+    if (mode == kRunInMyStack || mode == kRunInStackObjectsStack) {
+        call.atOnce = true;
+        call.onStackObject = mode == kRunInStackObjectsStack;
         call.stackObject = stackObject();
     }
     return call;
@@ -114,7 +115,6 @@ bool Execution::primitive(const bhav::Instruction& in, Frame& f) {
     case kCreateObjectOpcode:     return createObject(in, f);
     case kRelationshipOpcode:     return relationship(in, f);
     case kRemoveObjectOpcode:     return removeObject(in);
-    case kMakeNewCharacterOpcode: return makeNewCharacter(in, f);
     case kBreakPointOpcode:       return breakPoint(in, f);
     case kFindLocationForOpcode:  return findLocationFor(in, f);
     case kSnapOpcode:             return snap(in, f);
@@ -405,13 +405,31 @@ RunResult Vm::runOnTop(ThreadState& thread, SimObject* me, std::uint32_t codeGro
     if (nestedRuns_ >= kMaxNestedRuns) {
         throw Stop{Outcome::DepthLimit, "too many nested runs", ""};
     }
+    // An object whose run at once failed earlier runs nothing more until it is reset.
+    if (me != nullptr && me->failedRun) {
+        RunResult failed;
+        failed.outcome = Outcome::False;
+        return failed;
+    }
     ThreadState nested;
     nested.temps = thread.temps;
     nested.stackObjectId = stackObject;
     nested.codeGroup = codeGroup;
-    const NestedRun counted(nestedRuns_);
-    RunResult r = execute(nested, codeGroup, me, &tree, callArgs);
+    nested.stepsAtRaise = thread.stepsAtRaise;
+    RunResult r;
+    {
+        const NestedRun counted(nestedRuns_);
+        // It counts its own steps, and the caller's count is put back after (PR-6).
+        struct Restore {
+            std::size_t& steps;
+            std::size_t outerSteps;
+            ~Restore() { steps = outerSteps; }
+        } restore{stepsUsed_, std::exchange(stepsUsed_, 0)};
+        r = execute(nested, codeGroup, me, &tree, callArgs);
+    }
+    releaseWaiting(nested);
     thread.temps = nested.temps;
+    thread.stepsAtRaise = nested.stepsAtRaise;
     return r;
 }
 
@@ -433,6 +451,15 @@ RunResult Vm::runNow(SimObject& who, std::uint32_t codeGroup, std::uint16_t tree
     return execute(scratch, codeGroup, &who, &tree, callArgs);
 }
 
+// A nested thread is dropped after its run, so the objects a waiting run still uses are let go now,
+// as the reset of the object it ran as would.
+void Vm::releaseWaiting(ThreadState& nested) {
+    if (world_ != nullptr) {
+        world_->releaseUses(nested.frames);
+    }
+    nested.frames.clear();
+}
+
 // One call of Vm::execute: its thread's frames as trees are called and return, and the run's result.
 class Vm::RunState {
 public:
@@ -446,6 +473,7 @@ public:
     Next start(const std::uint16_t* entry, std::span<const std::int16_t> args, std::uint32_t objectGroup,
                std::optional<std::uint32_t> entryGroup);
     // Runs the current instruction.
+    void countStep();
     Next step();
 
 private:
@@ -455,7 +483,7 @@ private:
               std::span<const std::int16_t> callArgs, std::uint32_t codeOwner);
     void pushCall(Execution::NamedCall& call);
     bool followBranch(bool branch);
-    bool runOnStack(const Execution::NamedCall& call);
+    bool runAtOnce(const Execution::NamedCall& call);
 
     Next branch(bool result) { return followBranch(result) ? Next::Ended : Next::Continue; }
     // Waits a tick: the same instruction runs again when the thread resumes.
@@ -549,13 +577,19 @@ bool Vm::RunState::followBranch(bool branch) {
             if (vm_.world_ != nullptr) {
                 vm_.world_->releaseUse(frames_.back());
             }
-            noteCurrentInteraction(*me_, 0, 0);
             const std::uint32_t ended = frames_.back().interactionId;
             if (me_->runningSub && me_->runningSub->id == ended) {
+                // The running pair names the interaction again.
                 me_->runningSub.reset();
-            } else if (me_->running && me_->running->id == ended) {
-                me_->running.reset();
-                notePriority(*me_, nullptr);
+                me_->personData[kSubQueueObjectPersonData] = 0;
+                me_->personData[kRunningIndexPersonData] = me_->personData[kCurrentIndexPersonData];
+                me_->personData[kRunningObjectPersonData] = me_->personData[kCurrentObjectPersonData];
+            } else {
+                noteCurrentInteraction(*me_, 0, 0);
+                if (me_->running && me_->running->id == ended) {
+                    me_->running.reset();
+                    notePriority(*me_, nullptr);
+                }
             }
         }
         if (frames_.size() == 1) {
@@ -602,29 +636,51 @@ bool Vm::RunState::followBranch(bool branch) {
     }
 }
 
-// Run Tree by Name mode 1: the tree runs to its end at once as the stack object, on its temps, with
-// itself as stack object, and its result is the instruction's. A tree that waits, or fails, leaves
-// the stack object to be reset (game error 0x451 for waiting) and is false here. What the engine
-// can't run yet stops the caller as before.
-bool Vm::RunState::runOnStack(const Execution::NamedCall& call) {
-    SimObject* target = vm_.world_ ? vm_.world_->find(*call.stackObject) : nullptr;
+// Run Tree by Name modes 0 and 1: the tree runs to its end at once, as me on my temps (mode 0) or as
+// the stack object on its temps with itself as stack object (mode 1), and its result is the
+// instruction's. A tree that waits, or fails, leaves the object it ran as to be reset (game error
+// 0x451 for waiting) and is false here. What the engine can't run yet stops the caller as before.
+bool Vm::RunState::runAtOnce(const Execution::NamedCall& call) {
+    SimObject* target = me_;
+    ThreadState* owner = &thread_;
+    if (call.onStackObject) {
+        target = vm_.world_ ? vm_.world_->find(*call.stackObject) : nullptr;
+        if (target == nullptr) {
+            throw Stop{Outcome::Error, "stack object does not exist", std::to_string(*call.stackObject)};
+        }
+        // The stack object may be me, running on a nested thread.
+        owner = target == me_ ? &thread_ : &target->thread;
+    }
     if (target == nullptr) {
-        throw Stop{Outcome::Error, "stack object does not exist", std::to_string(*call.stackObject)};
+        throw Stop{Outcome::Error, "Run Tree by Name needs an object to run as", ""};
+    }
+    // An object whose run at once failed earlier runs nothing more until it is reset.
+    if (target->failedRun) {
+        return false;
     }
     if (vm_.nestedRuns_ >= kMaxNestedRuns) {
         throw Stop{Outcome::DepthLimit, "too many nested runs", ""};
     }
     ThreadState nested;
-    nested.temps = target->thread.temps;
-    nested.stackObjectId = target->id;
+    nested.temps = owner->temps;
+    nested.stackObjectId = *call.stackObject;
     nested.codeGroup = call.codeOwner;
+    nested.stepsAtRaise = owner->stepsAtRaise;
     RunResult r;
     {
         const NestedRun counted(vm_.nestedRuns_);
+        // It counts its steps from 0, and the caller's count is put back after, as the game runs it.
+        struct Restore {
+            std::size_t& steps;
+            std::size_t outerSteps;
+            ~Restore() { steps = outerSteps; }
+        } restore{vm_.stepsUsed_, std::exchange(vm_.stepsUsed_, 0)};
         const std::uint16_t tree = call.instance;
         r = vm_.execute(nested, call.codeOwner, target, &tree, call.args, call.group);
     }
-    target->thread.temps = nested.temps;
+    vm_.releaseWaiting(nested);
+    owner->temps = nested.temps;
+    owner->stepsAtRaise = nested.stepsAtRaise;
     switch (r.outcome) {
     case Outcome::True:
         return true;
@@ -667,10 +723,30 @@ Vm::RunState::Next Vm::RunState::start(const std::uint16_t* entry, std::span<con
     return Next::Continue;
 }
 
-Vm::RunState::Next Vm::RunState::step() {
-    if (vm_.stepsUsed_ >= vm_.limits_.maxSteps) {
-        throw Stop{Outcome::StepLimit, "step limit reached", std::to_string(vm_.limits_.maxSteps)};
+// Counts the step about to run and stops the run when the count reaches the step limit, as the
+// game does before each primitive. Global 0x33 flag 1 raises the limit, and clearing it lowers the
+// limit and puts the count back to where it was raised.
+void Vm::RunState::countStep() {
+    constexpr std::size_t kObjectErrorFlags = 0x33;
+    ++result_.steps;
+    ++vm_.stepsUsed_;
+    const Limits& limits = vm_.limits_;
+    if ((vm_.globals[kObjectErrorFlags] & 1) != 0) {
+        if (vm_.stepLimit_ < limits.maxRaisedSteps) {
+            vm_.stepLimit_ = limits.maxRaisedSteps;
+            thread_.stepsAtRaise = vm_.stepsUsed_;
+        }
+    } else if (vm_.stepLimit_ > limits.maxSteps) {
+        vm_.stepLimit_ = limits.maxSteps;
+        vm_.stepsUsed_ = thread_.stepsAtRaise;
     }
+    if (vm_.stepsUsed_ >= vm_.stepLimit_) {
+        throw Stop{Outcome::StepLimit, "step limit reached", std::to_string(vm_.stepLimit_)};
+    }
+}
+
+Vm::RunState::Next Vm::RunState::step() {
+    countStep();
     Frame& f = frames_.back();
     if (f.code->instructions.empty()) {
         throw Stop{Outcome::Error, "BHAV has no instructions", ""};
@@ -679,8 +755,6 @@ Vm::RunState::Next Vm::RunState::step() {
         throw Stop{Outcome::Error, "jump to a missing instruction", std::to_string(f.pc)};
     }
     const bhav::Instruction& in = f.code->instructions[f.pc];
-    ++result_.steps;
-    ++vm_.stepsUsed_;
     if (vm_.onStep) {
         vm_.onStep({frames_.size() - 1, f.group, f.instance, f.pc, in, f.code->name, me_ != nullptr ? me_->id : std::int16_t{0}});
     }
@@ -714,6 +788,8 @@ Vm::RunState::Next Vm::RunState::step() {
         return branchOrWait(ex_.cameraControl(in, f));
     case kAnimateSimOpcode:
         return branchOrWait(ex_.animateSim(in, f));
+    case kMakeNewCharacterOpcode:
+        return branchOrWait(ex_.makeNewCharacter(in, f));
     case kSleepOpcode:
         return sleep(in, f);
     default:
@@ -726,8 +802,8 @@ Vm::RunState::Next Vm::RunState::runTreeByName(const bhav::Instruction& in, Fram
     if (!call) {
         return branch(false);
     }
-    if (call->onStackObject) {
-        return branch(runOnStack(*call));
+    if (call->atOnce) {
+        return branch(runAtOnce(*call));
     }
     pushCall(*call);
     if (call->stackObject) {
@@ -786,10 +862,13 @@ Vm::RunState::Next Vm::RunState::idleForInput(const bhav::Instruction& in, Frame
     frames_.back().runningOnId = started.object;
     if (me_ != nullptr) {
         me_->interactionPartner = started.partner != 0 ? started.partner : started.object;
-        noteCurrentInteraction(*me_, static_cast<std::int16_t>(started.index), started.object);
         if (idle.sub) {
+            // The current interaction stays named, the running pair names the sub-interaction.
             me_->runningSub = started;
+            me_->personData[kSubQueueObjectPersonData] = started.object;
+            noteSubQueue(*me_);
         } else {
+            noteCurrentInteraction(*me_, static_cast<std::int16_t>(started.index), started.object);
             notePriority(*me_, &started);
             startRunning(*me_, started);
         }
@@ -988,8 +1067,13 @@ bool cancelInteraction(SimObject& sim, std::uint32_t id) {
     if (it == sim.queue.end()) {
         return false;
     }
+    const bool nested = it->nested;
     sim.queue.erase(it);
-    noteNextQueued(sim);
+    if (nested) {
+        noteSubQueue(sim);
+    } else {
+        noteNextQueued(sim);
+    }
     return true;
 }
 

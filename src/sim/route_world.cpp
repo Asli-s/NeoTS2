@@ -253,12 +253,18 @@ RouteWorld::RouteWorld(const content::Lot& lot, const FenceBlocks& fenceBlocks, 
     if (std::min(graphLevels, gridLevels) > kMaxRouteLevels) {
         diag::warnOnce("routing: levels past 64 are not routed");
     }
+    const auto gridOf = [&](std::uint32_t instance) {
+        const auto it = lot.grids.find(instance);
+        return it != lot.grids.end() && it->second.elementSize == 4 ? &it->second : nullptr;
+    };
+    const array3d::Array3D* heights = gridOf(content::kFloorHeightGridInstance);
+    const array3d::Array3D* surface = gridOf(content::kSurfaceGridInstance);
     for (int level = 0; level < levels; ++level) {
         RouteGrid& grid = grids_.emplace_back(static_cast<float>(width), static_cast<float>(height));
-        for (const auto& item : wallRouteItems(*lot.roomGraph, lot.wallCoverings, level, fenceBlocks)) {
+        for (const auto& item : wallRouteItems(*lot.roomGraph, lot.wallCoverings, level, fenceBlocks, width, height)) {
             grid.add(item);
         }
-        for (const auto& item : floorRouteItems(floors->second, lot.floorPatterns, level, lowest, width, height)) {
+        for (const auto& item : floorRouteItems(floors->second, heights, surface, lot.floorPatterns, level, lowest, width, height)) {
             grid.add(item);
         }
         for (const auto& item : postRouteItems(lot.fencePosts, level, postFootprint)) {
@@ -337,6 +343,40 @@ std::vector<int> RouteWorld::updateObjects(World& world, CodeSource& code, const
         changed.push_back(static_cast<int>(level));
     }
     return changed;
+}
+
+std::vector<int> RouteWorld::ringSim(std::int16_t sim, const std::optional<SimRings>& rings) {
+    const auto old = rings_.find(sim);
+    if (old == rings_.end() ? !rings : (rings && old->second == *rings)) {
+        return {};
+    }
+    std::vector<int> changed;
+    const std::uint32_t owner[] = {static_cast<std::uint32_t>(sim)};
+    if (old != rings_.end()) {
+        if (old->second.level >= 0 && old->second.level < levels()) {
+            grids_[static_cast<std::size_t>(old->second.level)].remove(RouteItemKind::Soft, owner);
+            changed.push_back(old->second.level);
+        }
+        rings_.erase(old);
+    }
+    if (rings && rings->level >= 0 && rings->level < levels()) {
+        for (const RouteItem& item : simRingItems(rings->square, rings->target, owner[0])) {
+            grids_[static_cast<std::size_t>(rings->level)].add(item);
+        }
+        rings_.emplace(sim, *rings);
+        if (std::ranges::find(changed, rings->level) == changed.end()) {
+            changed.push_back(rings->level);
+        }
+    }
+    return changed;
+}
+
+std::vector<std::int16_t> RouteWorld::ringedSims() const {
+    std::vector<std::int16_t> ids;
+    for (const auto& [id, rings] : rings_) {
+        ids.push_back(id);
+    }
+    return ids;
 }
 
 const RouteGrid* RouteWorld::level(int level) const {

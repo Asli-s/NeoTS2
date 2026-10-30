@@ -28,7 +28,7 @@ enum class Key : std::uint8_t {
     Num1, Num2, Num3,
     Pad0, Pad1, Pad2, Pad3, PadPlus, PadMinus,
     Comma, Period, Minus, Equals, Grave,
-    Tab, Escape, Pause,
+    Tab, Escape, Pause, Backspace, Delete, Return,
     PageUp, PageDown, Home, End,
     F5,
     Up, Down, Left, Right,
@@ -37,19 +37,21 @@ enum class Key : std::uint8_t {
 enum class MouseButton : std::uint8_t { Left, Middle, Right, Other };
 
 struct Event {
-    enum class Type : std::uint8_t { Quit, KeyDown, KeyUp, MouseMotion, MouseDown, MouseUp, MouseWheel };
+    enum class Type : std::uint8_t { Quit, KeyDown, KeyUp, MouseMotion, MouseDown, MouseUp, MouseWheel, Text };
     Type type = Type::Quit;
     // A key event: the key by what is printed on it (so the Q key of a French keyboard is A), and by
     // where it is (so W is above S on every layout). The same where the system doesn't tell them apart.
     Key key = Key::Unknown;
     Key scancode = Key::Unknown;
     bool repeat = false;  // the key is held and this is not its first press
+    bool shift = false, ctrl = false, alt = false;  // for a key, the modifier keys held with it
     // A mouse event: the pointer in the window's own units, and for motion how far it moved.
     float x = 0, y = 0;
     float xrel = 0, yrel = 0;
     MouseButton button = MouseButton::Other; // for a button's press or release (no event but one of those is a click of Left)
     std::uint8_t buttons = 0;                // for motion, the buttons held: one bit for each MouseButton
     float wheel = 0;                         // for the wheel, notches (positive: away from the player)
+    std::string text;                        // typed text (UTF-8), sent only while text input is on
 
     [[nodiscard]] bool held(MouseButton b) const { return (buttons >> static_cast<unsigned>(b)) & 1u; }
 };
@@ -57,6 +59,9 @@ struct Event {
 // The next event the game uses, false when there is none. Others are skipped.
 [[nodiscard]] bool pollEvent(Event& out);
 [[nodiscard]] bool keyHeld(Key key);
+// Text events for typing (with the system's keyboard layout and input methods), off until started.
+void startTextInput();
+void stopTextInput();
 // The pointer's place in the window that has it.
 void mousePosition(float& x, float& y);
 

@@ -88,6 +88,8 @@ struct Neighborhood {
     std::map<std::int16_t, std::vector<famt::Tie>> familyTies;
     // Each neighbor's wants, fears and want history (instance = neighbor id).
     std::map<std::int16_t, swaf::WantsAndFears> wants;
+    // Each neighbor's DNA (SDNA, instance = neighbor id): its property set as saved.
+    std::map<std::int16_t, std::map<std::string, std::string>> dna;
     std::size_t wantsWithExtraBytes = 0;  // stale bytes after the history, which the game ignores
     // The neighborhood record (NGBH): the global, lot, family and neighbor inventories.
     std::optional<ngbh::Neighborhood> record;

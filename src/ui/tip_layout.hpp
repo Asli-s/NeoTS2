@@ -13,5 +13,8 @@ struct TipBox {
 // `w` and `h` are the box's size: the text's width and height plus 24 and 12.
 // `screen` is the screen's width and height (0 for no limits).
 TipBox placeTip(int anchorX, int anchorY, int w, int h, std::array<int, 2> screen);
+// The same with the bounds the box stays inside (left, top, right, bottom) and the gap between the
+// anchor and the box given. A tip over a Sim in the world keeps 28 pixels from its anchor.
+TipBox placeTip(int anchorX, int anchorY, int w, int h, std::array<int, 4> bounds, int gap);
 
 } // namespace ts2::ui

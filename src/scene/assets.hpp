@@ -70,6 +70,11 @@ public:
     [[nodiscard]] std::optional<std::vector<std::uint8_t>> skinResource(const scenegraph::Link& link);
     // Every resource of `type` in the outfit catalog, in load order (unreadable ones are skipped).
     void forEachSkinResource(std::uint32_t type, const std::function<void(const std::vector<std::uint8_t>&)>& visit);
+    // The same with each resource's key.
+    void forEachSkinResource(std::uint32_t type, const std::function<void(const scenegraph::Link&, const std::vector<std::uint8_t>&)>& visit);
+    // The outfit catalog's packages, in the order the catalog is read, for a reader of its own on
+    // another thread.
+    std::vector<std::filesystem::path> skinPackages() const;
 
     // The largest mip level of a texture, decoded. Empty when it is missing or unreadable.
     [[nodiscard]] std::optional<Image> texture(const std::string& name);

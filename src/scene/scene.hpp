@@ -343,6 +343,9 @@ struct Actor {
         std::optional<Transform> objectPlace;
         // The lot object (a Sim) whose bones its targets on its IK object name, 0 for none.
         std::uint32_t ikActor = 0;
+        // In place of `animation`: the pose the actor was in as the clip started, held still. A Sim
+        // has one at most.
+        bool frozen = false;
     };
     std::vector<Clip> clips;
     std::string basePose;  // the pose it starts in, under its first clips (see standingPose), empty for none
@@ -354,7 +357,6 @@ struct Actor {
     struct Held {
         std::size_t instance = 0;
         int node = -1;  // the rig node it is held at
-        Transform pose;  // how its own clip moves its model, in the model's space
     };
     std::vector<Held> held;
     Transform place;  // where the rig stands in the world
@@ -386,6 +388,9 @@ struct PlacedObject {
     // joint sits in the model as drawn.
     std::string followJoint;
     Transform followRest;
+    // While it follows a clip, where each named bone of its model is in the world, by the name's
+    // hash: a dining chair's seat grabs that a Sim's hands reach for. Empty before its first clip.
+    std::vector<std::pair<std::uint32_t, Transform>> bones;
 };
 
 // How a lot's objects are lit, as the game's shaders get it: an ambient colour plus directional

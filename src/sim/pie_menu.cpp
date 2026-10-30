@@ -37,6 +37,7 @@ constexpr std::int16_t kBurning = 0x200;
 constexpr std::size_t kPlacementFlags2 = 0x52;
 constexpr std::int16_t kPlacementNoInteractions = 0x4;
 constexpr std::size_t kDisableAllInteractions = 0x57;
+constexpr std::size_t kLockout = 0x19;
 
 constexpr std::size_t kParentalControlGlobal = 0x23;
 
@@ -105,7 +106,23 @@ std::string lineName(CodeSource& code, std::uint32_t group, std::uint16_t table,
     return "?" + std::to_string(line.action);
 }
 
+bool startChecksPass(const ttab::Interaction& line, const SimObject& sim, const SimObject& object, bool parentalControl,
+                     bool autonomy) {
+    if ((whoFlag(sim) & line.flags & kWhoFlags) == 0 || (sim.personData[kPersonType] != 0 && (line.flags & kVisitorsMay) == 0)) {
+        return false;
+    }
+    if (objectOffersNothing(object) || (autonomy && object.data[kLockout] > 0)) {
+        return false;
+    }
+    return !(parentalControl && (line.flags & kHiddenByParentalControl) != 0) && (line.flags & kDebugOnly) == 0;
+}
+
 } // namespace
+
+bool mayStartLine(const ttab::Interaction& line, const SimObject& sim, const SimObject& object, bool parentalControl,
+                  bool autonomy) {
+    return startChecksPass(line, sim, object, parentalControl, autonomy);
+}
 
 ObjectInteractions interactionsOf(CodeSource& code, const SimObject& object) {
     std::uint16_t tableId = object.definition.field(objd::field::kInteractionTableId);

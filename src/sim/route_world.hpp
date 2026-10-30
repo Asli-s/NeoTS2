@@ -75,6 +75,20 @@ public:
     // Doors keep their items. The game adds those elsewhere. Returns the levels whose grid changed.
     std::vector<int> updateObjects(World& world, CodeSource& code, const RouteModelLookup& models, const std::set<std::int16_t>& objects);
 
+    // Where a Sim's rings go (see simRingItems): its level (0 = ground), its square there and whether
+    // it is the target of the route being planned.
+    struct SimRings {
+        int level = 0;
+        RouteRect square;
+        bool target = false;
+        bool operator==(const SimRings&) const = default;
+    };
+    // Puts Sim `sim`'s rings where `rings` says, or takes them away with none. Returns the levels
+    // whose grid changed.
+    std::vector<int> ringSim(std::int16_t sim, const std::optional<SimRings>& rings);
+    // The Sims that have rings now.
+    std::vector<std::int16_t> ringedSims() const;
+
     int levels() const { return static_cast<int>(grids_.size()); }
     // Level `level` (0 = ground), or null past the top.
     const RouteGrid* level(int level) const;
@@ -82,6 +96,7 @@ public:
 private:
     std::vector<RouteGrid> grids_;
     std::map<std::uint32_t, std::string> objectModels_;  // the lot's model name of each object id
+    std::map<std::int16_t, SimRings> rings_;              // each ringed Sim's rings
 };
 
 } // namespace ts2::sim

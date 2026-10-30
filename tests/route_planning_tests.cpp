@@ -122,15 +122,36 @@ void floorRouteItemsFollowTheFloors() {
     floors.levels = 2;
     floors.elementSize = 8;
     floors.elements.assign(2 * 2 * 3 * 8, 0);
-    auto setFloor = [&](int level, int x, int y, std::int16_t pattern) {
+    auto setFloor = [](ts2::array3d::Array3D& grid, int level, int x, int y, std::int16_t pattern) {
         const std::size_t at = ((static_cast<std::size_t>(level) * 2 + static_cast<std::size_t>(y)) * 3 + static_cast<std::size_t>(x)) * 8;
-        for (std::size_t q = 0; q < 4; ++q) floors.elements[at + q * 2] = static_cast<std::uint8_t>(pattern);
+        for (std::size_t q = 0; q < 4; ++q) grid.elements[at + q * 2] = static_cast<std::uint8_t>(pattern);
     };
-    setFloor(0, 0, 0, 1);  // a road tile on the ground
-    setFloor(1, 2, 1, 2);  // one raised tile
+    setFloor(floors, 0, 0, 0, 1);  // a road tile on the ground
+    setFloor(floors, 1, 2, 1, 2);  // one raised tile
     std::map<std::uint16_t, ts2::stringmap::Entry> patterns{{1, {"road_asphalt", 1}}, {2, {"6cc25ec0", 1}}};
+    // Corner heights (one more corner than tiles each way): the ground at 0, the level above 1 up from
+    // route x 2 on (a foundation) and a full storey up before it.
+    ts2::array3d::Array3D heights;
+    heights.width = 3;
+    heights.height = 4;
+    heights.levels = 2;
+    heights.elementSize = 4;
+    heights.elements.assign(2 * 3 * 4 * 4, 0);
+    for (int cy = 0; cy < 3; ++cy) {
+        for (int cx = 0; cx < 4; ++cx) {
+            const float h = cx >= 2 ? 1.0f : 3.0f;
+            std::memcpy(&heights.elements[((3 + static_cast<std::size_t>(cy)) * 4 + static_cast<std::size_t>(cx)) * 4], &h, 4);
+        }
+    }
+    // Every quarter of both levels has a surface.
+    ts2::array3d::Array3D surface;
+    surface.width = 2;
+    surface.height = 3;
+    surface.levels = 2;
+    surface.elementSize = 4;
+    surface.elements.assign(2 * 2 * 3 * 4, 1);
 
-    const auto ground = floorRouteItems(floors, patterns, 0, 0, 3, 2);
+    const auto ground = floorRouteItems(floors, &heights, &surface, patterns, 0, 0, 3, 2);
     auto has = [](const std::vector<RouteItem>& items, RouteRect r, int type, float cost) {
         return std::any_of(items.begin(), items.end(), [&](const RouteItem& i) {
             return i.rect.x0 == r.x0 && i.rect.y0 == r.y0 && i.rect.x1 == r.x1 && i.rect.y1 == r.y1 && i.type == type && i.cost == cost;
@@ -142,13 +163,24 @@ void floorRouteItemsFollowTheFloors() {
     CHECK(has(ground, {2, 1, 3, 2}, 7, kBlockedCost));  // ...but its foundation
     CHECK(has(ground, {0, 0, 0.125f, 1}, 2, 1));     // the lot's edge
 
-    const auto upper = floorRouteItems(floors, patterns, 1, 0, 3, 2);
+    const auto upper = floorRouteItems(floors, &heights, &surface, patterns, 1, 0, 3, 2);
     CHECK(has(upper, {2, 1, 3, 2}, 0, 1));
     CHECK(has(upper, {2, 1, 2.125f, 2}, 2, 1));      // edges all round the lone tile
     CHECK(upper.size() == 5);
 
+    // A second storey a full storey up leaves the ground floor below it walkable.
+    auto storeys = floors;
+    setFloor(storeys, 1, 0, 1, 2);
+    const auto under = floorRouteItems(storeys, &heights, &surface, patterns, 0, 0, 3, 2);
+    CHECK(has(under, {0, 1, 1, 2}, 0, 1.3f) && !has(under, {0, 1, 1, 2}, 7, kBlockedCost));
+    CHECK(has(under, {2, 1, 3, 2}, 7, kBlockedCost));
+    // A level above without its surface flag in a quarter is no foundation.
+    auto holed = surface;
+    holed.elements[((2 + 1) * 3 + 2) * 4 + 3] = 0;
+    CHECK(!has(floorRouteItems(floors, &heights, &holed, patterns, 0, 0, 3, 2), {2, 1, 3, 2}, 7, kBlockedCost));
+
     // On a lot whose grid starts a level below the ground, grid level 1 is the ground storey.
-    const auto pool = floorRouteItems(floors, patterns, 0, -1, 3, 2);
+    const auto pool = floorRouteItems(floors, &heights, &surface, patterns, 0, -1, 3, 2);
     CHECK(has(pool, {2, 1, 3, 2}, 0, 1));
     CHECK(!has(pool, {0, 0, 1, 1}, 0, 4));
 }
@@ -235,6 +267,95 @@ void routeGridRemovalMergesCells() {
     const std::uint32_t nobody[] = {5};
     grid.remove(RouteItemKind::Object, nobody);
     CHECK(routeLeaves(grid) == routeLeaves(fresh));
+}
+
+// A point gets a joint when it ends a wall, or when its walls leave a gap wider than 1.05 pi between
+// neighbours in angle order. Straight runs and T-junctions get none, bunched walls and corners do.
+void wallJointsFollowTheAngleGaps() {
+    using namespace ts2::sim;
+    const auto noFences = [](std::uint32_t) { return false; };
+    // Walls from the point (4, 4) to each end, all in one graph.
+    auto joints = [&](const std::vector<std::pair<int, int>>& ends) {
+        ts2::wallgraph::WallGraph g;
+        g.levels = 1;
+        g.points = {{0, 4, 4, 0}};
+        std::vector<ts2::walllayer::Entry> styles;
+        for (const auto& [x, y] : ends) {
+            const auto id = static_cast<std::int32_t>(g.points.size());
+            g.points.push_back({id, static_cast<float>(x), static_cast<float>(y), 0});
+            g.walls.push_back({id, 0, 0, id, 0});
+            styles.push_back({static_cast<std::uint32_t>(id), 1, 0, 0});
+        }
+        const auto items = wallRouteItems(g, styles, 0, noFences, 8, 8);
+        return std::ranges::count_if(items, [](const RouteItem& i) {
+            return i.kind == RouteItemKind::WallJoint && i.rect.x0 == 4 - 0.3f && i.rect.y0 == 4 - 0.3f;
+        });
+    };
+    CHECK(joints({{6, 4}}) == 1);                  // a wall end
+    CHECK(joints({{6, 4}, {3, 4}}) == 0);          // straight on, of different lengths
+    CHECK(joints({{6, 4}, {4, 6}}) == 1);          // a corner
+    CHECK(joints({{6, 6}, {3, 3}}) == 0);          // a straight diagonal run
+    CHECK(joints({{6, 4}, {3, 4}, {4, 6}}) == 0);  // a T-junction
+    CHECK(joints({{6, 4}, {6, 6}, {4, 6}}) == 1);  // bunched within a quarter turn
+    CHECK(joints({{6, 4}, {6, 6}, {4, 6}, {2, 4}}) == 0);  // a half turn apart at most
+    // A wall of no length sorts as a half turn and is no gap from its neighbours: here it closes the
+    // corner's wide side.
+    CHECK(joints({{6, 4}, {4, 6}}) == 1);
+    CHECK(joints({{4, 4}, {6, 4}, {4, 6}}) == 0);
+}
+
+// A diagonal wall routes as 16 squares of 1/16 tile per tile it crosses, corner to corner, each with a
+// copy grown 0.12499 on every side. Sims walk around its ends and never through it.
+void diagonalWallsBlockRouting() {
+    using namespace ts2::sim;
+    auto graph = [](float ax, float ay, float bx, float by) {
+        ts2::wallgraph::WallGraph g;
+        g.levels = 1;
+        g.points = {{0, ax, ay, 0}, {1, bx, by, 0}};
+        g.walls = {{7, 0, 0, 1, 0}};
+        return g;
+    };
+    const std::vector<ts2::walllayer::Entry> style{{7, 1, 0, 0}};
+    const auto noFences = [](std::uint32_t) { return false; };
+
+    const auto rising = wallRouteItems(graph(1, 1, 3, 3), style, 0, noFences, 8, 8);
+    CHECK(rising.size() == 2 * 16 * 2 + 2);  // two tiles of squares and padding, a joint at each end
+    CHECK(rising[0].rect == (RouteRect{1, 1, 1.0625f, 1.0625f}) && rising[0].type == 15 && rising[0].owner == 7);
+    CHECK(rising[1].rect == (RouteRect{1 - 0.12499f, 1 - 0.12499f, 1.0625f + 0.12499f, 1.0625f + 0.12499f}) && rising[1].type == 14);
+    CHECK(rising[62].rect == (RouteRect{2.9375f, 2.9375f, 3, 3}));
+    // Graph (1, 4)-(3, 2) is route (4, 1)-(2, 3): it falls as route x grows.
+    const auto falling = wallRouteItems(graph(1, 4, 3, 2), style, 0, noFences, 8, 8);
+    CHECK(falling[0].rect == (RouteRect{2, 2.9375f, 2.0625f, 3}) && falling[30].rect == (RouteRect{2.9375f, 2, 3, 2.0625f}));
+    CHECK(falling[32].rect == (RouteRect{3, 1.9375f, 3.0625f, 2}));
+    CHECK(wallRouteItems(graph(1, 1, 3, 2), style, 0, noFences, 8, 8).size() == 2);  // not a diagonal: only its joints
+    // A broken file's diagonals add squares only on the lot's tiles, one piece per tile and direction.
+    const auto cores = [](const std::vector<RouteItem>& items) {
+        return std::ranges::count_if(items, [](const RouteItem& i) { return i.type == 15 && i.rect.x1 - i.rect.x0 == 0.0625f; });
+    };
+    auto twice = graph(1, 1, 3, 3);
+    twice.walls.push_back({8, 0, 0, 1, 0});
+    const std::vector<ts2::walllayer::Entry> styles{{7, 1, 0, 0}, {8, 1, 0, 0}};
+    CHECK(cores(wallRouteItems(twice, styles, 0, noFences, 8, 8)) == 2 * 16);
+    CHECK(cores(wallRouteItems(graph(1, 1, 10, 10), style, 0, noFences, 8, 8)) == 7 * 16);
+
+    auto plan = [&](const ts2::wallgraph::WallGraph& g) {
+        RouteGrid grid(8, 8);
+        grid.add({{0, 0, 8, 8}, 1, 0, RouteItemKind::Floor, true, 0});
+        for (const auto& item : wallRouteItems(g, style, 0, noFences, 8, 8)) grid.add(item);
+        const RouteLinks links = RouteLinks::build(grid);
+        RouteRandom jitter(1), heuristic(2);
+        const RouteStart start[] = {{4.5f, 2.5f}};
+        const RouteGoal across[] = {{2.5f, 4.5f, 1}};
+        return planRoute(grid, links, start, across, 2.5f, 4.5f, {}, jitter, heuristic);
+    };
+    const auto around = plan(graph(1, 1, 6, 6));
+    CHECK(around.has_value());
+    if (around) {
+        bool aroundAnEnd = false;
+        for (const auto& p : around->waypoints) aroundAnEnd |= std::min(p.x, p.y) < 1 || std::max(p.x, p.y) > 6;
+        CHECK(aroundAnEnd);
+    }
+    CHECK(!plan(graph(0, 0, 8, 8)).has_value());  // corner to corner across the lot, no way through
 }
 
 // The path search links leaves that share an edge (both ways), walks around a wall to the goal, and
@@ -1152,6 +1273,25 @@ void walksArePlannedAsTheGamePlansThem() {
     // Halfway through the start only the start's clips show, mixed to travel its distance.
     ts2::sim::walkPoses(plan, 0.3f, poses);
     CHECK(poses.size() == 2 && poses[0].mirrored && near(poses[0].phase, 0.3f / 0.64844f, 1e-4f));
+    // At the walk's end the stop eases out to half its weight, as the game weighs a walk's clips.
+    ts2::sim::walkPoses(plan, plan.length, poses, false);
+    total = 0;
+    for (const auto& p : poses) {
+        total += p.weight;
+    }
+    CHECK(near(total, 0.5f, 1e-4f));
+    // The walk's weight: half at its start, full half a fade in, falling from half a fade before
+    // its end to the least weight half a fade after it.
+    const float walkTime = ts2::sim::walkMs(plan);
+    CHECK(near(ts2::sim::walkFadeOutMs(plan), walkTime - 116.665f, 0.01f));
+    CHECK(near(ts2::sim::walkWeight(plan, 0), 0.5005f, 1e-3f) && near(ts2::sim::walkWeight(plan, 200), 1, 1e-6f));
+    CHECK(near(ts2::sim::walkWeight(plan, walkTime), 0.5005f, 1e-3f) && near(ts2::sim::walkWeight(plan, walkTime + 117), 0.001f, 1e-6f));
+    // A walk shorter than a fade weighs fully from its start and fades out after its end.
+    ts2::sim::WalkPlan brief;
+    brief.speed.push_back({0.001f, 0.001f, 100});
+    CHECK(near(ts2::sim::walkFadeOutMs(brief), 100, 1e-4f) && near(ts2::sim::walkWeight(brief, 0), 1, 1e-6f));
+    // The walk pose that settles an interrupted walk fades in and out over its 186 ms play, cut to fit.
+    CHECK(near(ts2::sim::settleWalkPoseFadeMs(), 92.99f, 0.01f));
     // A teen boy's walk with two styles of walk loop (person data 0x70 and 0x71 at 42 and 57) and
     // the teens' size 0.94, which shortens the loop but not the start and stop, checked against
     // the game's own plan of the same 3.19-tile walk: start 0.77907, stride 1.40202, stop 0.31078.
@@ -1425,6 +1565,29 @@ void stepsArePlannedAsTheGamePlansThem() {
     }
 }
 
+// A Sim's rings in the path search: its square grown 0.375 at cost 5, 0.1875 at 7.5 and 0.0625 at 10,
+// all walkable, the outer one left out for the route's target, as checked against the game's rings
+// round a Sim standing at (24.36, 15.451).
+void simRingsAreSoftCosts() {
+    using namespace ts2::sim;
+    const RouteRect square{24.26f, 15.385f, 24.46f, 15.49f};
+    const auto rings = simRingItems(square, false, 389);
+    CHECK(rings.size() == 3 && simRingItems(square, true, 389).size() == 2);
+    for (const RouteItem& ring : rings) {
+        CHECK(ring.type == 1 && ring.kind == RouteItemKind::Soft && ring.owner == 389);
+    }
+    CHECK(std::abs(rings[1].rect.x0 - 24.0725f) < 1e-4f && std::abs(rings[1].rect.y1 - 15.6775f) < 1e-4f && rings[1].cost == 7.5f);
+
+    const RouteItem floor{{0, 0, 32, 32}, 1, 0, RouteItemKind::Floor, true, 1};
+    RouteGrid grid(32, 32);
+    grid.add(floor);
+    const auto costAt = [&grid](float x, float y) { return grid.passage(grid.cells()[static_cast<std::size_t>(grid.leafAt(x, y))]).cost; };
+    CHECK(costAt(24.36f, 15.45f) == 1);
+    for (const RouteItem& ring : rings) grid.add(ring);
+    // Costs are kept per grid cell, so the points are clear of the rings' edges.
+    CHECK(costAt(24.36f, 15.45f) == 10 && costAt(24.36f, 15.64f) == 7.5f && costAt(24.36f, 15.8f) == 5 && costAt(24.36f, 16.0f) == 1);
+}
+
 // A walk's path is laid over the points the game makes from the route (a point ahead along the Sim's
 // facing, the end point along the end facing, long stretches cut in pieces), as a B-spline that
 // starts and ends on the route and turns smoothly.
@@ -1496,6 +1659,8 @@ std::vector<Test> routePlanningTests() {
         {"object route items follow the game rules", objectRouteItemsFollowTheGameRules},
         {"route grid removal merges cells", routeGridRemovalMergesCells},
         {"route search walks around a wall", routeSearchWalksAroundAWall},
+        {"wall joints follow the angle gaps", wallJointsFollowTheAngleGaps},
+        {"diagonal walls block routing", diagonalWallsBlockRouting},
         {"path pass lines see the grid", pathPassLinesSeeTheGrid},
         {"path passes smooth a path", pathPassesSmoothAPath},
         {"route search escapes and refuses", routeSearchEscapesAndRefuses},
@@ -1521,6 +1686,7 @@ std::vector<Test> routePlanningTests() {
         {"turn clips are picked by foot", turnClipsArePickedByFoot},
         {"walks told to stop soon stop at the next foot", walksToldToStopSoonStopAtTheNextFoot},
         {"steps are planned as the game plans them", stepsArePlannedAsTheGamePlansThem},
+        {"sim rings are soft costs", simRingsAreSoftCosts},
         {"walk paths round corners", walkPathsRoundCorners},
         {"short routes turn on the spot", shortRoutesTurnOnTheSpot},
     };

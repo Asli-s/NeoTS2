@@ -7,6 +7,8 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -24,11 +26,13 @@ struct SimPart {
     std::uint32_t part = 0;  // one of the kinds above
     std::string model;       // resource node name, without "_cres"
     std::vector<scenegraph::MaterialOverride> overrides;
+    std::shared_ptr<const MeshEdit> meshEdit;  // a change to its mesh first, or none
 };
 
 // What a Sim wears, from its character file: the parts its age data (AGED) lists for the outfit
 // category it has active (1 everyday, 8 formal, 16 pajamas...), each through its part property set
-// (GZPS) and that set's reference list. Leaves the character file in use in `assets`.
+// (GZPS) and that set's reference list. With no hair listed (a baby), its skin outfit's bald head.
+// Leaves the character file in use in `assets`.
 struct SimLook {
     std::uint32_t category = 0;
     std::uint32_t age = 0;     // one of the age flags below
@@ -37,6 +41,8 @@ struct SimLook {
     // The materials of its bald head, bare top and bottom, and a toddler's bare body (its skin
     // outfit), e.g. "emtopnaked_nude_s5", "pubodynaked_nude_s1".
     std::string skinHair, skinTop, skinBottom, skinBody;
+    // Textures drawn over the face's own, bottom first (a newborn's eyes and eyebrows).
+    std::vector<std::string> faceOverlays;
     // A PlantSim's plant skin (outfit category 0x800), laid over the skin above: its head, and its
     // body under any top, bottom or full outfit. Empty for other Sims.
     std::string plantHead, plantBody;
@@ -46,6 +52,30 @@ struct SimLook {
     std::vector<std::string> problems;
 };
 SimLook simLook(Assets& assets, const std::filesystem::path& characterFile);
+
+// A newborn before it has a character file: its gender (1 female, 2 male), the dominant values of
+// its skin, hair and eye genes, the draw that picks its eyebrows and the change that blends its
+// face from its parents' (none for the plain baby face).
+struct Newborn {
+    std::uint32_t gender = 0;
+    std::string skinTone, hairTone, eyeColour;
+    std::uint32_t browDraw = 0;
+    std::shared_ptr<const MeshEdit> face;
+};
+
+// The outfit catalog's entries made for babies: part property sets and texture overlays, each with
+// its key, in the order the catalog is read. Reading them takes a while, so they are read once, and
+// on any thread: `skinPackages` are Assets::skinPackages().
+struct BabyCatalog {
+    std::vector<std::pair<scenegraph::Link, std::map<std::string, std::string>>> parts, overlays;
+};
+BabyCatalog readBabyCatalog(const std::vector<std::filesystem::path>& skinPackages);
+
+// What a newborn wears, picked from the outfit catalog as the game picks it for a baby: the skin
+// outfit's bald head, face and bare body of its tone, and the one baby body worn every day (the
+// diaper). On the face, its eye colour and then eyebrows of its hair tone, one of the baby
+// eyebrows drawn by `browDraw`.
+SimLook newbornLook(Assets& assets, const BabyCatalog& catalog, const Newborn& baby);
 
 // Whether a Sim wears only the last entry of an outfit's list of this part (kHairPart...). A Sim
 // wears one hair, top, bottom and body each, so the game takes the last of those (a PlantSim's
@@ -65,6 +95,10 @@ std::string clothesOverSkin(SceneBuilder& builder, Assets& assets, const SimLook
 // game names the composite ("_amhairbald_skin_s5_amhairpompodore_grey"). `material` when there is
 // no bald head.
 std::string hairOverScalp(SceneBuilder& builder, Assets& assets, const SimLook& look, const std::string& material);
+
+// The material for a face with the look's face overlays drawn over it (a newborn's eyes and
+// eyebrows). `material` when there are none.
+std::string faceWithOverlays(SceneBuilder& builder, const SimLook& look, const std::string& material);
 
 // The material for a top and a bottom worn together: as the game does, the skin, the top and the
 // bottom are drawn into one texture that both use, bottom last

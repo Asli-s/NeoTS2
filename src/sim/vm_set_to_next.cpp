@@ -102,6 +102,8 @@ bool Execution::setToNext(const bhav::Instruction& in, Frame& f) {
         return nextObjectTypeByFields(targetOwner, targetData, f);
     case kSearchJobObject:
         return jobObject(targetOwner, targetData, f);
+    case kSearchNeighborOfType:
+        return nextNeighborOfType(guid, targetOwner, targetData, f);
     case kSearchParents:
     case kSearchSiblings:
     case kSearchChildren:
@@ -247,6 +249,56 @@ bool Execution::nextInView(const Filters& passesFilters, std::uint8_t targetOwne
             return true;
         }
     }
+}
+
+// Search 0x07: the next neighbor id after the target whose Sim is of the type with the operands'
+// GUID. When that type is an NPC template (OBJD type 0x10), a neighbor matches whose type was
+// cloned from it (OBJD fields 0x46-0x47). The walk passes over family-tree-only neighbors and
+// writes each id it reaches into the target, 0 when it runs out (false). An unknown GUID is false
+// after the first step. The filters don't apply.
+bool Execution::nextNeighborOfType(std::uint32_t guid, std::uint8_t targetOwner, std::uint16_t targetData, Frame& f) {
+    constexpr std::uint16_t kTemplateType = 0x10, kFamilyTreeOnlyType = 0x11;
+    constexpr std::size_t kOriginalGuidLowField = 0x46, kOriginalGuidHighField = 0x47;
+    const auto* ids = world().neighbors();
+    if (ids == nullptr) {
+        throw Stop{Outcome::Unsupported, "Set to Next needs the neighborhood", hex(kSearchNeighborOfType, 2)};
+    }
+    auto typeOf = [&](std::int16_t id) {
+        const SavedNeighbor* n = world().neighbor(id);
+        return n != nullptr ? code_.objectType(n->guid) : nullptr;
+    };
+    auto step = [&](std::int16_t after) -> std::int16_t {
+        for (auto it = ids->upper_bound(after); it != ids->end(); ++it) {
+            const ObjectType* type = typeOf(*it);
+            if (type == nullptr || type->definition.field(objd::field::kType) != kFamilyTreeOnlyType) {
+                write(targetOwner, targetData, f, *it);
+                return *it;
+            }
+        }
+        write(targetOwner, targetData, f, 0);
+        return 0;
+    };
+    std::int16_t target = step(read(targetOwner, targetData, f));
+    const ObjectType* wanted = code_.objectType(guid);
+    if (wanted == nullptr) {
+        return false;
+    }
+    const bool byTemplate = wanted->definition.field(objd::field::kType) == kTemplateType;
+    for (; target != 0; target = step(target)) {
+        const SavedNeighbor* n = world().neighbor(target);
+        const ObjectType* type = typeOf(target);
+        std::optional<std::uint32_t> value;
+        if (byTemplate && type != nullptr) {
+            value = type->definition.field(kOriginalGuidLowField) |
+                    static_cast<std::uint32_t>(type->definition.field(kOriginalGuidHighField)) << 16;
+        } else if (!byTemplate && n != nullptr) {
+            value = n->guid;
+        }
+        if (value == guid) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // Next neighbor id after the target whose species fits the search.

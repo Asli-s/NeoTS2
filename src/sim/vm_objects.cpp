@@ -199,8 +199,9 @@ bool Execution::cinematic(const bhav::Instruction& in, Frame& f) {
 // Dialog. Operands: byte 5 the type, byte 7 bit 0: show it and go on, bits 4-6: the temp holding a
 // notification's id (or a yes-no-cancel answer). Text notifications get a new id in that temp and
 // go on. Stop is true when the notification was shown (and removes it), Modify and Append when it
-// is shown. Tutorial popups and hints go on. Other dialogs wait a tick and are answered with their
-// first button (true). Pickers need the stack object to have object arrays. Nothing is shown yet.
+// is shown. Tutorial popups and hints go on. "Set Baby Name" waits for the player when someone shows
+// it (see babyNameDialog). Other dialogs wait a tick and are answered with their first button
+// (true). Pickers need the stack object to have object arrays. Nothing else is shown yet.
 std::optional<bool> Execution::dialog(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     const std::uint8_t type = o[5];
@@ -218,6 +219,9 @@ std::optional<bool> Execution::dialog(const bhav::Instruction& in, Frame& f) {
     if (o[7] & 0x01) {
         return true;
     }
+    if (type == kSetBabyName && world().asksNames()) {
+        return babyNameDialog(f);
+    }
     if (f.dialogOpen) {
         f.dialogOpen = false;
         return true;
@@ -231,6 +235,30 @@ std::optional<bool> Execution::dialog(const bhav::Instruction& in, Frame& f) {
             throw Stop{Outcome::Error, "bad object array", "Dialog picker"};
         }
     }
+    f.dialogOpen = true;
+    return std::nullopt;
+}
+
+// "Set Baby Name" asks to name the neighbors in temps 0-3 and waits for the answer: true for OK,
+// false for Cancel. A temp that names no neighbor counts as 0. It waits its turn while another
+// naming is shown (see World::askNames). With none to name it is true at once.
+std::optional<bool> Execution::babyNameDialog(Frame& f) {
+    if (f.dialogOpen) {
+        const std::optional<bool> answer = world().takeNamesAnswer(me().id);
+        if (answer) {
+            f.dialogOpen = false;
+        }
+        return answer;
+    }
+    std::vector<std::int16_t> neighbors;
+    for (std::size_t i = 0; i < 4; ++i) {
+        const std::int16_t id = thread_.temps[i];
+        neighbors.push_back(id != 0 && world().neighbor(id) != nullptr ? id : std::int16_t{0});
+    }
+    if (std::ranges::all_of(neighbors, [](std::int16_t id) { return id == 0; })) {
+        return true;
+    }
+    world().askNames(me().id, std::move(neighbors));
     f.dialogOpen = true;
     return std::nullopt;
 }

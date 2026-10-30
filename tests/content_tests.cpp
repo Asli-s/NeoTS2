@@ -6,6 +6,8 @@
 #include "content/user_props.hpp"
 #include "content/ui_queue.hpp"
 #include "formats/dbpf_writer.hpp"
+#include "formats/resource_types.hpp"
+#include "sim/index_code_source.hpp"
 #include "parse_float.hpp"
 #include "paths/save_folders.hpp"
 
@@ -822,6 +824,47 @@ void resourceIndexLeavesOutAppleDoubleSidecars() {
     std::filesystem::remove_all(root, error);
 }
 
+// A Sim whose character file carries no trees runs its own trees from the template person, as the
+// Greenmans' files do in the game. Other objects without trees get none.
+void simsWithoutTreesUseTheTemplatePersonsTrees() {
+    const std::filesystem::path root = std::filesystem::temp_directory_path() / ("neots2-person-trees-" + std::to_string(std::random_device{}()));
+    std::filesystem::create_directories(root);
+    constexpr std::uint32_t kTemplate = 0x7FEDFE16, kSim = 0x7F1A1C8E, kChair = 0x7F000123;
+    const auto definition = [](std::uint32_t guid, std::uint16_t type) {
+        std::vector<std::uint8_t> bytes(64 + 2 * 0x40, 0);
+        const auto set = [&](std::size_t field, std::uint16_t v) {
+            bytes[64 + 2 * field] = static_cast<std::uint8_t>(v);
+            bytes[64 + 2 * field + 1] = static_cast<std::uint8_t>(v >> 8);
+        };
+        set(ts2::objd::field::kType, type);
+        set(ts2::objd::field::kGuid1, static_cast<std::uint16_t>(guid));
+        set(ts2::objd::field::kGuid2, static_cast<std::uint16_t>(guid >> 16));
+        return bytes;
+    };
+    std::vector<std::uint8_t> tree(64 + 12, 0);
+    tree[64] = 0x00;
+    tree[65] = 0x80;  // format 0x8000, no instructions
+    {
+        std::ofstream out(root / "objects.package", std::ios::binary);
+        ts2::dbpf::PackageWriter writer(out);
+        writer.add({ts2::types::kObjectDefinition, kTemplate, 0x80, 0}, definition(0x7FD96B54, 2), false, 0);
+        writer.add({ts2::types::kBehavior, kTemplate, 0x1000, 0}, tree, false, 0);
+        writer.add({ts2::types::kObjectDefinition, kSim, 0x80, 0}, definition(0xB263764F, 2), false, 0);
+        writer.add({ts2::types::kObjectDefinition, kChair, 0x80, 0}, definition(0x12345678, 4), false, 0);
+        writer.finish(0);
+    }
+    {
+        ts2::content::ResourceIndex index;
+        CHECK(index.addPackage(root / "objects.package"));
+        ts2::sim::IndexCodeSource code(index);
+        CHECK(code.behavior(kSim, 0x1000) != nullptr);
+        CHECK(code.behavior(kChair, 0x1000) == nullptr);
+        CHECK(code.behavior(kSim, 0x1001) == nullptr);
+    }
+    std::error_code error;
+    std::filesystem::remove_all(root, error);
+}
+
 void portraitImageIsTheLifeStageFlag() {
     CHECK(ts2::content::portraitImage(1) == 0x20u);   // baby
     CHECK(ts2::content::portraitImage(2) == 0x01u);   // toddler
@@ -1136,6 +1179,7 @@ std::vector<Test> contentTests() {
         {"lot number comes from the package name", lotNumberComesFromThePackageName},
         {"character files leave out AppleDouble sidecars", characterFilesIgnoreAppleDoubleSidecars},
         {"a resource index leaves out AppleDouble sidecars", resourceIndexLeavesOutAppleDoubleSidecars},
+        {"Sims without trees use the template person's", simsWithoutTreesUseTheTemplatePersonsTrees},
         {"portrait image is the life stage flag", portraitImageIsTheLifeStageFlag},
         {"needs bar rows match the game", needsBarRowsMatchTheGame},
         {"mood rows match the game", moodRowsMatchTheGame},

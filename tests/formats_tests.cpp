@@ -1,11 +1,14 @@
 // File formats: packages, object data, lot and neighborhood resources.
 #include "test_support.hpp"
 
+#include "formats/face_shape.hpp"
 #include "formats/cursor.hpp"
 #include "formats/dbpf_writer.hpp"
 #include "formats/effects.hpp"
 #include "formats/simi.hpp"
 
+#include <bit>
+#include <limits>
 #include <sstream>
 
 namespace {
@@ -1292,6 +1295,65 @@ void binaryPropertySetsAndReferenceLists() {
     CHECK(refs.size() == 1 && refs[0].type == 0xE519C933 && refs[0].instance == 0xFF6B8A91 && refs[0].instanceHigh == 0x12345678);
 }
 
+// A face shape (LxNR): points as (offset, texture coordinates) pairs of a shared pool, per mesh key.
+// Baby meshes of versions before 5 are left out, and broken data throws.
+void faceShapesRead() {
+    auto make = [](std::uint32_t version, std::uint16_t badIndex) {
+        std::vector<std::uint8_t> d;
+        auto u16 = [&](std::uint16_t v) { d.insert(d.end(), {static_cast<std::uint8_t>(v), static_cast<std::uint8_t>(v >> 8)}); };
+        auto u32 = [&](std::uint32_t v) {
+            for (int i = 0; i < 4; ++i) d.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
+        };
+        auto f32 = [&](float f) { u32(std::bit_cast<std::uint32_t>(f)); };
+        u32(version);
+        u32(2);
+        u32(0x00000005);  // baby, gender 0, face
+        u32(0x00000003);  // adult, gender 0, face
+        u32(0x6B657965);
+        u16(2);
+        f32(0.5f), f32(0), f32(-0.25f);
+        f32(0.1f), f32(0.2f), f32(0);
+        u32(0x6D737472);
+        u16(2), u16(0), u16(badIndex);
+        u16(2), u16(1), u16(1);
+        u32(0x64617461);
+        return d;
+    };
+    const auto shape = ts2::faceshape::parse(make(5, 1));
+    const auto* baby = shape.find(5, 0, 0);
+    CHECK(shape.meshes.size() == 2 && baby != nullptr && baby->points.size() == 1);
+    CHECK(baby != nullptr && baby->points[0].offset[0] == 0.5f && baby->points[0].offset[2] == -0.25f && baby->points[0].uv[1] == 0.2f);
+    CHECK(ts2::faceshape::parse(make(4, 1)).find(5, 0, 0) == nullptr);
+    bool threw = false;
+    try {
+        ts2::faceshape::parse(make(5, 7));
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK(threw);
+    threw = false;
+    try {
+        auto cut = make(5, 1);
+        cut.resize(cut.size() - 6);
+        ts2::faceshape::parse(cut);
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK(threw);
+    // A point that isn't a finite number is broken data too.
+    threw = false;
+    try {
+        auto bad = make(5, 1);
+        const std::uint32_t nan = std::bit_cast<std::uint32_t>(std::numeric_limits<float>::quiet_NaN());
+        // The pool's first float sits after the version, the key count, two keys, the tag and the size.
+        for (int i = 0; i < 4; ++i) bad[4 * 5 + 2 + static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(nan >> (8 * i));
+        ts2::faceshape::parse(bad);
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
 void wallCoveringsFollowTheWallGraph() {
     // The room graph numbers its walls 1..3. The wall graph has the first two, numbered 10 and 11.
     ts2::wallgraph::WallGraph rooms, walls;
@@ -1546,6 +1608,7 @@ std::vector<Test> formatTests() {
         {"wall coverings follow the wall graph", wallCoveringsFollowTheWallGraph},
         {"lot description parse", lotDescriptionParse},
         {"binary property sets and reference lists", binaryPropertySetsAndReferenceLists},
+        {"face shapes read", faceShapesRead},
         {"fence post layer reads posts", fencePostLayerReadsPosts},
         {"neighbor remap keeps table 6", neighborRemapKeepsTableSix},
         {"wall layer reads coverings per side", wallLayerReadsCoveringsPerSide},

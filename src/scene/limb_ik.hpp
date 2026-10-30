@@ -69,7 +69,7 @@ struct LimbSource {
     // Applied to its targets and poles in the skeleton's own space. For a clip whose root move is left
     // out (LayeredClip::noRootMove): the move from where the clip has its root to where the root is
     // drawn, as the game keeps a Sim's last pose whole when it moves the Sim (a long stair's climb at
-    // the top). For a clip fading out after the Sim was placed anew: the move of the Sim's place
+    // the top). For a clip that started where the Sim no longer stands: the move of the Sim's place
     // (LayeredClip::placeMove), so its limbs reach where they did (getting into bed).
     Transform rootMove;
     // Where a bone of the clip's IK object is in the rig's space, by its name's hash: a hug's hands go
