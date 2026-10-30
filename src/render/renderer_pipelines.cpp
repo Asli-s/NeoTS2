@@ -135,7 +135,7 @@ void SdlGpuRenderer::makeScenePipelines(const std::filesystem::path& shaders) {
 // Sprites: blended over everything, without depth.
 void SdlGpuRenderer::makeSpritePipeline(const std::filesystem::path& shaders) {
         SDL_GPUShader* spriteVertex = loadShader(device_, shaders, "ui.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0);
-        SDL_GPUShader* spriteFragment = loadShader(device_, shaders, "ui.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 0);
+        SDL_GPUShader* spriteFragment = loadShader(device_, shaders, "ui.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
         SDL_GPUVertexBufferDescription buffer{};
         buffer.slot = 0;
         buffer.pitch = kSpriteFloats * sizeof(float);

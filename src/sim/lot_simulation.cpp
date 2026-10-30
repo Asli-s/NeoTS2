@@ -1,5 +1,6 @@
 #include "sim/lot_simulation.hpp"
 #include "sim/forget_object.hpp"
+#include "sim/linked_interactions.hpp"
 #include "sim/object_model.hpp"
 
 #include "content/build_scripts.hpp"
@@ -930,9 +931,13 @@ void LotSimulation::startObjects() {
     world_.purge();
 }
 
-// The Sim reset, then the Sim's Cleanup function run there and then.
+// The Sim reset, then the Sim's Cleanup function run there and then. The running interaction drops
+// the interactions linked with it first.
 void LotSimulation::restartSim(SimObject& sim, const ObjectType& type) {
     constexpr std::uint16_t kCleanup = 3;  // OBJf entry
+    if (sim.running) {
+        dropLinkedInteractions(world_, *sim.running, &sim, {});
+    }
     resetSim(sim, type, code_);
     ++resets_;
     const auto* functions = code_.objectFunctions(type);

@@ -409,10 +409,17 @@ void placeSim(ts2::scene::Actor& actor, const ts2::sim::SimObject& sim, const Si
         if (carrier != scene.actors.end() && &*carrier != &actor) {
             actor.carrier = carrier->object;
             actor.carrierSlot = static_cast<std::size_t>(sim.data[kSlotField]);
+            // Just snapped in, it hangs at the slot's bone as the carrier was last posed, so the clips it
+            // starts there have the slot as their place, as the game's do.
             actor.place = carrier->place;
             if (pose != nullptr) {
+                const auto index = static_cast<std::size_t>(carrier - scene.actors.begin());
+                const auto nodes = std::find_if(pose->nodes.begin(), pose->nodes.end(), [&](const auto& n) { return n.first == index; });
+                const int node = actor.carrierSlot < carrier->slotNodes.size() ? carrier->slotNodes[actor.carrierSlot] : -1;
                 if (const auto last = pose->carried.find(actor.object); last != pose->carried.end()) {
                     actor.place = last->second;
+                } else if (nodes != pose->nodes.end() && node >= 0 && static_cast<std::size_t>(node) < nodes->second.size()) {
+                    actor.place = carrier->place * nodes->second[static_cast<std::size_t>(node)];
                 }
             }
             return;
@@ -769,7 +776,7 @@ std::vector<LotLife::QueuedAction> LotLife::queue(std::int16_t sim) {
 
 bool LotLife::cancelInteraction(std::int16_t sim, std::uint32_t id) {
     auto* person = sim_->world().find(sim);
-    if (person == nullptr || !ts2::sim::cancelInteraction(*person, id)) {
+    if (person == nullptr || !ts2::sim::cancelInteraction(sim_->world(), *person, id)) {
         return false;
     }
     ts2::diag::step(std::format("Sim {} is told to stop interaction {}", sim, id));
@@ -816,6 +823,9 @@ std::optional<LotLife::NeighborName> LotLife::neighborName(std::int16_t id) {
     }
     if (auto given = world.neighborFirstName(id)) {
         name.first = std::move(*given);
+    }
+    if (auto taken = world.neighborSurname(id)) {
+        name.last = std::move(*taken);
     }
     return name;
 }
@@ -1259,7 +1269,8 @@ void LotLife::update(double ms, ts2::scene::Scene& scene) {
     changedInstances_.clear();
     relit_.clear();
     if (paused()) {
-        pendingMs_ = 0;
+        // The time already run towards the next tick is kept, so the Sims hold the moment they were
+        // drawn at instead of stepping back to the last tick.
         sim_->pausedPass();
     } else if (speed() == Speed::Ultra) {
         const auto start = std::chrono::steady_clock::now();
@@ -1388,8 +1399,8 @@ void LotLife::update(double ms, ts2::scene::Scene& scene) {
             }
             const SimFrame frame = simFrame(*object, nowMs);
             // As the game places each clip, one playing as the Sim snaps into a carrier's slot stays where it
-            // was in the world, and from then on hangs from the slot's bone with the Sim: its start place
-            // moves as the bone does.
+            // was in the world, and from then on hangs from the slot's bone with the Sim: its start place is
+            // kept as seen from the bone, taken once, and follows the bone.
             constexpr std::size_t kContainerField = 2;
             const ts2::scene::Transform* hung = nullptr;
             if (pose_ != nullptr && object->data[kContainerField] > 0) {
@@ -1397,16 +1408,15 @@ void LotLife::update(double ms, ts2::scene::Scene& scene) {
                     hung = &found->second;
                 }
             }
-            if (hung != nullptr) {
-                if (own.carriedAt) {
-                    const ts2::scene::Transform moved = *hung * own.carriedAt->rigidInverse();
-                    for (auto& s : own.started) {
-                        s.place = moved * s.place;
-                    }
+            for (auto& s : own.started) {
+                if (hung == nullptr) {
+                    s.fromCarrier.reset();
+                    continue;
                 }
-                own.carriedAt = *hung;
-            } else {
-                own.carriedAt.reset();
+                if (!s.fromCarrier) {
+                    s.fromCarrier = hung->rigidInverse() * s.place;
+                }
+                s.place = *hung * *s.fromCarrier;
             }
             const StartedAt startedAt = [&own](const std::string& name, double startMs) -> std::optional<ts2::scene::Transform> {
                 for (const auto& s : own.started) {

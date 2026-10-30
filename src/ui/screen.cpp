@@ -29,7 +29,9 @@ void pushThirds(std::vector<Quad>& out, int texture, float x0, float y0, float x
             if ((r == 1 && ys[1] >= ys[2]) || (c == 1 && xs[1] >= xs[2])) {
                 continue;
             }
-            out.push_back({xs[c], ys[r], xs[c + 1], ys[r + 1], us[c], vs[r], us[c + 1], vs[r + 1], texture});
+            Quad q{xs[c], ys[r], xs[c + 1], ys[r + 1], us[c], vs[r], us[c + 1], vs[r + 1], texture};
+            q.joined = static_cast<std::uint8_t>((c > 0 ? 1 : 0) | (r > 0 ? 2 : 0) | (c < 2 ? 4 : 0) | (r < 2 ? 8 : 0));
+            out.push_back(q);
         }
     }
 }

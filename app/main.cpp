@@ -6,6 +6,7 @@
 //          [--shot <out.png>] [--seed n (the neighborhood ground's variants, so pictures repeat)]
 //          [--renderer sdlgpu|gl2 (what draws: SDL's GPU API, or OpenGL 2.1)]
 //          [--smooth-follow (the camera glides after a followed Sim, not in the original game)]
+//          [--ui-scale 100|125|150|175|200 (the UI drawn larger, in percent, not in the original game)]
 //   neots2 <install folder> <lot.package> [--shot <out.png> [yaw pitch distance]]
 //          [--seed n (the lot's random draws when it has no saved random state, so runs repeat)]
 //          [--renderer sdlgpu|gl2 (what draws: SDL's GPU API, or OpenGL 2.1)]
@@ -46,6 +47,7 @@
 #include "scene/lot_scene.hpp"
 #include "scene/neighborhood_scene.hpp"
 #include "scene/view.hpp"
+#include "settings/launcher_settings.hpp"
 #include "sim/clock.hpp"
 
 #include "platform/entry.hpp"
@@ -387,6 +389,10 @@ int main(int argc, char** argv) {
                 i += 2;
             } else if (arg == "--fit-screen") {
                 menu.fitScreen = true;
+            } else if (arg == "--ui-scale" && i + 1 < argc) {
+                if (const int scale = std::stoi(argv[++i]); ts2::settings::isUiScale(scale)) {
+                    menu.uiScale = scale;
+                }
             }
         }
         if (!ts2::platform::init()) {

@@ -152,8 +152,10 @@ struct OfferedAction {
 void queueInteraction(SimObject& sim, const QueuedInteraction& interaction);
 // The player's click on a queue icon: a waiting interaction leaves the queue at once. The running
 // one is marked cancelled and the Sim's Priority (person data 0x21) drops to 0, which tells its
-// scripts to finish. False when the Sim has no such interaction or it is cancelled already.
-bool cancelInteraction(SimObject& sim, std::uint32_t id);
+// scripts to finish. Either way the interactions linked with it are dropped. False when the Sim
+// has no such interaction or it is cancelled already. The game also runs a waiting one's Queue
+// Skipped function, which is not done here yet.
+bool cancelInteraction(World& world, SimObject& sim, std::uint32_t id);
 
 class Vm {
 public:

@@ -263,7 +263,6 @@ bool Execution::animateOverlay(const bhav::Instruction& in, Frame& f) {
     overlay.eventTree = static_cast<std::uint16_t>(o[4] | o[5] << 8);
     overlay.codeOwner = f.codeOwner;
     overlay.stackObject = f.stackObjectId;
-    overlay.caller = target->id != sim.id ? sim.id : std::int16_t{0};
     if (o[15] & 0x08) {
         overlay.ikTarget = thread_.temps[6];
     }

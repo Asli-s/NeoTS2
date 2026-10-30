@@ -284,7 +284,7 @@ Execution::BlockedStep Execution::lastResort(SimObject& sim, Walking& walk) {
 void Execution::releaseWait(RouteBlock& block) {
     if (block.waitingOn != 0 && block.waitInteraction != 0) {
         if (SimObject* other = world().find(block.waitingOn)) {
-            cancelInteraction(*other, block.waitInteraction);
+            cancelInteraction(world(), *other, block.waitInteraction);
         }
     }
     block.waitingOn = 0;

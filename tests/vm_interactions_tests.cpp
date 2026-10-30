@@ -1194,6 +1194,94 @@ void idleForInputStartsQueuedInteractions() {
     sim.semiAttributes[0x22] = 0;
 }
 
+// Push Interaction byte 3 bit 7 keeps the pushed interaction's link number, bit 6 links a later push
+// with it, as "Pickup - Do Carry Sim" links the carrier's "Hold Youngster" with the baby's "Be
+// Held". When one ends, is cancelled or fails its start check, the other leaves its queue, or,
+// already running, its Sim's person data 0x6E becomes 1.
+void linkedInteractionsDropEachOther() {
+    MemoryCodeSource code;
+    auto fridgeType = typed(kFridgeGuid);
+    fridgeType.fields[ts2::objd::field::kInteractionTableId] = 0x80;
+    ts2::ttab::InteractionTable table;
+    table.interactions.resize(2);
+    table.interactions[0].action = 0x1000;
+    table.interactions[0].flags = 0x40;  // adults
+    table.interactions[1].action = 0x1000;
+    table.interactions[1].test = 0x1001;
+    table.interactions[1].stringIndex = 1;
+    table.interactions[1].flags = 0x40;
+    code.addInteractionTable(kObjectGroup, 0x80, table);
+    code.add(kObjectGroup, 0x1000, bhav({expr(owner::kTemp, 0, op::kAssign, owner::kLiteral, 0, T, T)}));
+    // Line 1 passes its test while the fridge's attribute 0 is 0.
+    code.add(kObjectGroup, 0x1001, bhav({expr(owner::kStackObjectAttribute, 0, op::kEquals, owner::kLiteral, 0, T, F)}));
+    Instruction keep = pushInteraction(0, 0, 1, T, F);  // the link number goes to temp 3
+    keep.operands[3] = 0x80;
+    keep.operands[11] = owner::kTemp;
+    keep.operands[12] = 3;
+    code.add(kObjectGroup, 0x1110, bhav({keep}, 1));
+    Instruction link = pushInteraction(0, 0, 1, T, F);  // linked with the one in temp 3
+    link.operands[3] = 0x40;
+    link.operands[8] = owner::kTemp;
+    link.operands[9] = 3;
+    code.add(kObjectGroup, 0x1111, bhav({link}, 1));
+    Instruction keepLine1 = keep;
+    keepLine1.operands[0] = 1;
+    code.add(kObjectGroup, 0x1112, bhav({keepLine1}, 1));
+    code.add(kObjectGroup, 0x1102, bhav({idleForInput(0, true, false, T, E)}, 1));
+
+    ts2::sim::World world;
+    auto& controller = world.create(kObjectGroup, typed(0x0BADF00D));
+    auto& carrier = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    auto& baby = world.create(kObjectGroup, typed(0x51515152, ts2::sim::kPersonType));
+    auto& fridge = world.create(kObjectGroup, fridgeType);
+    carrier.personData[0x3A] = 30;
+    baby.personData[0x3A] = 30;
+    const std::array<std::int16_t, 1> onFridge{fridge.id};
+    const std::array<std::int16_t, 1> noTicks{0};
+    Vm vm(code, {}, &world);
+    const auto pushPair = [&](std::uint16_t first) {
+        controller.thread.stackObjectId = carrier.id;
+        CHECK(vm.run(controller, kObjectGroup, first, onFridge).outcome == Outcome::True);
+        controller.thread.stackObjectId = baby.id;
+        CHECK(vm.run(controller, kObjectGroup, 0x1111, onFridge).outcome == Outcome::True);
+    };
+
+    pushPair(0x1110);
+    CHECK(carrier.queue.size() == 1 && baby.queue.size() == 1);
+    if (carrier.queue.size() != 1 || baby.queue.size() != 1) {
+        return;
+    }
+    CHECK(carrier.queue[0].linkId != 0 && controller.thread.temps[3] == static_cast<std::int16_t>(carrier.queue[0].linkId));
+    CHECK(baby.queue[0].linkedId == carrier.queue[0].linkId && carrier.queue[0].linkedId == baby.queue[0].linkId);
+    CHECK(ts2::sim::cancelInteraction(world, carrier, carrier.queue[0].id) && carrier.queue.empty() && baby.queue.empty());
+
+    // The carrier's runs and ends: the baby's waiting one leaves, and starting cleared 0x6E.
+    pushPair(0x1110);
+    carrier.personData[0x6E] = 1;
+    CHECK(vm.run(carrier, kObjectGroup, 0x1102, noTicks).outcome == Outcome::True);
+    CHECK(!carrier.running && carrier.queue.empty() && baby.queue.empty() && carrier.personData[0x6E] == 0);
+
+    // The carrier's fails its start check (and Idle for Input waits a tick): the baby's leaves too.
+    pushPair(0x1112);
+    fridge.attributes[0] = 1;
+    CHECK(vm.run(carrier, kObjectGroup, 0x1102, noTicks).outcome == Outcome::Sleeping);
+    CHECK(!carrier.running && carrier.queue.empty() && baby.queue.empty());
+    fridge.attributes[0] = 0;
+
+    // The baby's already runs: it stays, and the baby learns its partner is gone.
+    pushPair(0x1110);
+    baby.running = baby.queue[0];
+    baby.queue.clear();
+    CHECK(ts2::sim::cancelInteraction(world, carrier, carrier.queue[0].id));
+    CHECK(baby.running && baby.personData[0x6E] == 1 && baby.running->linkedId == 0);
+
+    // A link number no interaction has links nothing.
+    controller.thread.temps[3] = 999;
+    controller.thread.stackObjectId = baby.id;
+    CHECK(vm.run(controller, kObjectGroup, 0x1111, onFridge).outcome == Outcome::True);
+    CHECK(baby.queue.size() == 1 && baby.queue[0].linkId == 0 && baby.queue[0].linkedId == 0);
+}
+
 // What the queue shows: Push Interaction's icon (an object type from temps 4 and 5 with the index in
 // byte 15) and the line's nested flag, the interaction a Sim runs while its tree runs, and the
 // player's cancel, which takes a waiting interaction out at once and marks the running one.
@@ -1250,9 +1338,9 @@ void queuedInteractionsShowAndCancel() {
     CHECK(sim.queue[0].id == 1 && sim.queue[1].id == 2 && sim.queue[2].id == 3);
 
     // A waiting one leaves at once.
-    CHECK(ts2::sim::cancelInteraction(sim, 2) && sim.queue.size() == 2 && sim.queue[1].id == 3);
-    CHECK(!ts2::sim::cancelInteraction(sim, 2));
-    CHECK(ts2::sim::cancelInteraction(sim, 3) && sim.queue.size() == 1);
+    CHECK(ts2::sim::cancelInteraction(world, sim, 2) && sim.queue.size() == 2 && sim.queue[1].id == 3);
+    CHECK(!ts2::sim::cancelInteraction(world, sim, 2));
+    CHECK(ts2::sim::cancelInteraction(world, sim, 3) && sim.queue.size() == 1);
 
     // The first starts: it runs until its tree returns, its icon the Sim's action icon.
     CHECK(vm.run(sim, kObjectGroup, 0x1102).outcome == Outcome::Sleeping);
@@ -1260,8 +1348,8 @@ void queuedInteractionsShowAndCancel() {
     CHECK(sim.actionIconGuid == 0x12345678 && sim.actionIconIndex == 3 && sim.actionIconObject == fridge.id);
     CHECK(sim.actionString.empty());  // a pushed interaction has no name of its own
     sim.personData[0x21] = 100;
-    CHECK(ts2::sim::cancelInteraction(sim, 1) && sim.running->cancelled && sim.personData[0x21] == 0);
-    CHECK(!ts2::sim::cancelInteraction(sim, 1));
+    CHECK(ts2::sim::cancelInteraction(world, sim, 1) && sim.running->cancelled && sim.personData[0x21] == 0);
+    CHECK(!ts2::sim::cancelInteraction(world, sim, 1));
     // Its Idle for Input is true at once now, so its tree finishes.
     CHECK(vm.resume(sim).outcome == Outcome::True && !sim.running);
 
@@ -2038,6 +2126,7 @@ std::vector<Test> vmInteractionTests() {
         {"Idle for Input tests what starts", idleForInputTestsWhatStarts},
         {"Push Interaction limits each queue", pushInteractionLimitsEachQueue},
         {"queued interactions show and cancel", queuedInteractionsShowAndCancel},
+        {"linked interactions drop each other", linkedInteractionsDropEachOther},
         {"On Timer sets, changes and removes timers", onTimerSetsChangesAndRemovesTimers},
         {"Message runs the receiver's handler on me", messageRunsTheReceiversHandlerOnMe},
         {"Find Best Object picks the best rated nearest", findBestObjectPicksTheBestRatedNearest},

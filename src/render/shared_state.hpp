@@ -18,6 +18,7 @@ public:
     void show(std::vector<std::uint8_t> visible) override;
     void setClearColor(float r, float g, float b) override { clear_[0] = r; clear_[1] = g; clear_[2] = b; }
     void showSprites(std::vector<Sprite> sprites, bool scene = true) override;
+    void setSpriteScale(float scale) override { spriteScale_ = scale; }
     void setJoints(std::size_t instance, const std::vector<scene::Transform>& joints) override;
     void setPlace(std::size_t instance, const scene::Transform& transform) override;
     void setMaterials(std::size_t instance, std::vector<int> materials) override;
@@ -58,6 +59,7 @@ protected:
     bool jointsChanged_ = false;
 
     std::vector<Sprite> sprites_;
+    float spriteScale_ = 1;
     bool drawScene_ = true;
     bool instancesOnly_ = false;  // while drawing a portrait (see drawInstancesToImage)
     float clear_[3] = {0.17f, 0.18f, 0.19f};

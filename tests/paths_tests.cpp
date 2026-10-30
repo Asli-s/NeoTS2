@@ -227,6 +227,16 @@ void launcherSettingsRoundTrip() {
     CHECK(fitKept && fitKept->windowSize == "fit-screen" && findWindowSize("fit-screen")->fitScreen);
     sized.windowSize = "800x600";
     CHECK(formatLauncherSettings(sized).find("window-size") == std::string::npos);
+    // The UI's size is one the launcher offers, or the game's own 100%.
+    CHECK(drawn && drawn->uiScale == 100);
+    LauncherSettings scaled;
+    scaled.uiScale = 175;
+    const auto scaleKept = parseLauncherSettings(formatLauncherSettings(scaled));
+    CHECK(scaleKept && scaleKept->uiScale == 175);
+    const auto oddScale = parseLauncherSettings("NeoTS2 launcher settings 1\nui-scale=1000\n");
+    CHECK(oddScale && oddScale->uiScale == 100);
+    scaled.uiScale = 300;
+    CHECK(formatLauncherSettings(scaled).find("ui-scale") == std::string::npos);
     CHECK(!parseLauncherSettings("NeoTS2 launcher settings 1\n" + std::string(70 * 1024, 'x')));
     std::error_code error;
     fs::remove_all(root, error);

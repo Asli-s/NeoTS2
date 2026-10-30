@@ -191,6 +191,11 @@ struct QueuedInteraction {
     // Tells it from the Sim's other interactions while it waits and runs (1 and up, see
     // SimObject::nextInteractionId).
     std::uint32_t id = 0;
+    // Push Interaction can link interactions, even on different Sims, so that one ending drops the
+    // other (see dropLinkedInteractions). `linkId` is its own link number and `linkedId` the one it
+    // drops. 0 for none.
+    std::uint16_t linkId = 0;
+    std::uint16_t linkedId = 0;
     // Its name in the queue's tooltip: the pie menu line it was chosen from. Empty for its
     // interaction table line's.
     std::string name;
@@ -897,6 +902,14 @@ public:
     // Whether an interaction with line flag 0x4 is running at once. Only one can at a time.
     bool runningAtOnce() const { return runningAtOnce_; }
     void setRunningAtOnce(bool running) { runningAtOnce_ = running; }
+    // A new link number for linked interactions, never 0. How the game counts them is not known
+    // yet. Only telling links apart matters.
+    std::uint16_t newLinkId() {
+        if (++lastLinkId_ == 0) {
+            ++lastLinkId_;
+        }
+        return lastLinkId_;
+    }
 
     // Naming Sims (Dialog "Set Baby Name"). Whoever shows the dialog turns asking on, and a request
     // then waits for its answer. With asking off the dialog waits a tick and is true, and no name
@@ -933,6 +946,15 @@ public:
     std::optional<std::string> neighborFirstName(std::int16_t id) const {
         const auto it = firstNames_.find(id);
         return it == firstNames_.end() ? std::nullopt : std::optional<std::string>{it->second};
+    }
+    // The same for surnames. A new baby takes one at birth.
+    void setNeighborSurname(std::int16_t id, std::string name) {
+        surnames_[id] = std::move(name);
+        ++namesVersion_;
+    }
+    std::optional<std::string> neighborSurname(std::int16_t id) const {
+        const auto it = surnames_.find(id);
+        return it == surnames_.end() ? std::nullopt : std::optional<std::string>{it->second};
     }
 
     // Who plays the sounds scripts start and stop. Without it they go unheard.
@@ -1156,6 +1178,7 @@ private:
     std::vector<std::int16_t> notifications_;
     std::int16_t lastNotification_ = 0;
     bool runningAtOnce_ = false;
+    std::uint16_t lastLinkId_ = 0;
     bool asksNames_ = false;
     std::uint32_t namesVersion_ = 0;
     struct NameRequest {
@@ -1168,6 +1191,7 @@ private:
     // Shows the first waiting request when none is shown.
     void showNextNames();
     std::map<std::int16_t, std::string> firstNames_;
+    std::map<std::int16_t, std::string> surnames_;
     std::array<std::string, 2> babyFirstNames_;
     RayQuery rayQuery_;
     CameraPoint cameraPoint_;

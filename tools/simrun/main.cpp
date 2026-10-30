@@ -927,7 +927,7 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
                 queuePieChoice();
             }
             if (cancelTick && tick == *cancelTick) {
-                const bool done = actor->running && ts2::sim::cancelInteraction(*actor, actor->running->id);
+                const bool done = actor->running && ts2::sim::cancelInteraction(world, *actor, actor->running->id);
                 std::printf("tick %zu: %s\n", tick, done ? "cancelled it" : "nothing to cancel");
             }
         }

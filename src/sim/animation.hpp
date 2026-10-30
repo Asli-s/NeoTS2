@@ -144,10 +144,9 @@ struct PlayingOverlay {
     bool blendsIn = true, blendsOut = true;
     std::uint16_t eventTree = 0;
     std::uint32_t codeOwner = 0;     // whose code the event tree is looked up in
-    std::int16_t stackObject = 0;    // the event tree's stack object
-    // Who ran Animate Overlay (0: the object playing it). The event tree runs as that object. Where
-    // the game runs it when the overlay plays on another object is not known yet.
-    std::int16_t caller = 0;
+    // The event tree's stack object. The tree runs as the object playing the overlay, even when another
+    // object's tree started it: a carried baby's put-down clip snaps the baby itself to the floor.
+    std::int16_t stackObject = 0;
     bool blendingOut = false;        // kBlendingOutEvent told
     std::uint8_t category = 1;       // see content::animationCategory
     bool stopped = false;            // ended by Animate Stop: fades out without telling events

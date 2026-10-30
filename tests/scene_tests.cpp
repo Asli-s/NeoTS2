@@ -820,6 +820,7 @@ void carriedSimsHangAtTheCarriersSlotBone() {
     CHECK(pose.carried.size() == 1 && pose.carried.contains(2));
     const Transform& at = pose.carried.at(2);
     CHECK(std::abs(at.m[3] - 5.25f) < 1e-5f && std::abs(at.m[7]) < 1e-5f && std::abs(at.m[11] - 1) < 1e-5f);
+    CHECK(pose.drawnAt.at(2).m == at.m && pose.drawnAt.at(1).m == carrier.place.m);
     scene.actors[1].carrier = 2;
     ts2::scene::poseActors(scene, 0, pose);
     CHECK(pose.nodes.size() == 2);

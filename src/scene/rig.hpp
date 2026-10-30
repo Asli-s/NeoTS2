@@ -156,6 +156,8 @@ struct ScenePose {
     std::unordered_map<std::uint32_t, std::pair<double, std::vector<HeldJoint>>> frozen;
     // Where each carried Sim's actor was placed as last posed (see Actor::carrier), by its object.
     std::unordered_map<std::uint32_t, Transform> carried;
+    // Where each Sim was placed and each held object hung as last posed, by object.
+    std::unordered_map<std::uint32_t, Transform> drawnAt;
 };
 void poseActors(const Scene& scene, double seconds, ScenePose& out);
 

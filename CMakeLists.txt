@@ -269,6 +269,7 @@ add_library(ts2sim
     src/sim/find_location.cpp
     src/sim/object_model.cpp
     src/sim/forget_object.cpp
+    src/sim/linked_interactions.cpp
     src/sim/snap.cpp
     src/sim/in_view.cpp
     src/sim/happiness.cpp

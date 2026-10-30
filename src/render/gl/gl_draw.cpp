@@ -297,6 +297,9 @@ void GlRenderer::drawSprites(unsigned width, unsigned height) {
             continue;
         }
         bindTexture(0, has ? spriteTextures_[static_cast<std::size_t>(t)] : gpu_->white, GL_CLAMP_TO_EDGE);
+        const auto size = has ? spriteSizes_[static_cast<std::size_t>(t)] : std::array<unsigned, 2>{1, 1};
+        const float picture[4] = {static_cast<float>(size[0]), static_cast<float>(size[1]), spriteScale_, 0};
+        gl_.Uniform4fv(ui_.fragment, 1, picture);
         gl_.DrawArrays(GL_TRIANGLES, static_cast<GLint>(i * 6), static_cast<GLsizei>((j - i) * 6));
         i = j;
     }

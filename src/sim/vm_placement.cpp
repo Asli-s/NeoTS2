@@ -7,7 +7,8 @@ namespace ts2::sim::vm_detail {
 //              true (the game does more for multi-tile objects and Sims, not known yet), 0 searches the reference's room,
 //              then any room, 2 only the room, 3 the line the reference faces, in its room, 4 the
 //              same turned a quarter, 7 by the reference's routing slot, 8 by a global slot (bytes
-//              10-11). Any other mode is not kept yet
+//              10-11), 5 and 6 by the reference's routing slot whose number is in the param (5) or
+//              local (6) that bytes 10-11 name. Any other mode is not kept yet
 //   byte 1     local holding the reference object (flag 0x01)
 //   byte 2     flags: 0x01 reference from the local, 0x02 don't prefer empty tiles, 0x04 tiles the
 //              player can edit (not checked yet), 0x08 both objects from bytes 4-9 (else the stack
@@ -30,7 +31,7 @@ bool Execution::findLocationFor(const bhav::Instruction& in, Frame& f) {
         takeOutOfSlot(*placed);
         return true;
     }
-    const bool bySlot = o[0] == 7 || o[0] == 8;
+    const bool bySlot = o[0] >= 5 && o[0] <= 8;
     const bool onLine = o[0] == 3 || o[0] == 4;
     if (!bySlot && ((o[0] != 0 && o[0] != 2 && !onLine) || (o[2] & ~(kReferenceInLocal | kDontPreferEmpty | kUserEditable | kObjectsInOperands | kLevelGround | kInFrontOfReference)) != 0)) {
         throw Stop{Outcome::Unsupported, "Find Location For form not implemented", hex(o[0], 2) + " " + hex(o[2], 2)};
@@ -49,7 +50,11 @@ bool Execution::findLocationFor(const bhav::Instruction& in, Frame& f) {
         throw Stop{Outcome::Error, "no reference object to place by", std::to_string(refId)};
     }
     if (bySlot) {
-        return placeBySlot(o, *placed, *ref);
+        const auto number = static_cast<std::int16_t>(o[10] | o[11] << 8);
+        const std::int16_t index = o[0] == 5 ? slotAt(f.params, number, "param")
+                                   : o[0] == 6 ? slotAt(f.locals, number, "local")
+                                               : number;
+        return placeBySlot(o, index, *placed, *ref);
     }
     LocationSearch search;
     search.startX = ref->x;
@@ -106,12 +111,11 @@ std::optional<int> Execution::jointFacing(const SimObject& owner, const slot::En
 
 // The slot's spots by the reference, best first: the first with a facing the object may take wins.
 // The game would also test that the object fits there, which isn't done yet.
-bool Execution::placeBySlot(const std::array<std::uint8_t, 16>& o, SimObject& placed, const SimObject& ref) {
+bool Execution::placeBySlot(const std::array<std::uint8_t, 16>& o, std::int16_t index, SimObject& placed, const SimObject& ref) {
     constexpr std::uint32_t kSlotKindBits = (1u << 21) | (1u << 25);
-    const auto index = static_cast<std::int16_t>(o[10] | o[11] << 8);
     const std::vector<slot::Entry>* slots = &code_.globalSlots();
     std::uint32_t group = kGlobalGroup;
-    if (o[0] == 7) {
+    if (o[0] != 8) {
         const ObjectType* type = code_.objectType(ref.definition.guid());
         slots = type != nullptr ? &type->routingSlots : nullptr;
         group = type != nullptr ? type->group : 0;

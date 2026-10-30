@@ -201,18 +201,51 @@ std::uint32_t lotAt(const ts2::render::Camera& c, int width, int height, float m
     return best;
 }
 
-std::vector<ts2::render::Sprite> sprites(const ts2::ui::Screen& screen, double seconds) {
+// The UI's scale in a window: `percent` / 100, made smaller when needed so the UI keeps a screen of
+// at least 800 x 600 of its pixels, the smallest the game lays it out for (its Low screen resolution).
+// Never below 1.
+float uiScaleFor(int percent, int width, int height) {
+    const float fit = std::min(static_cast<float>(width) / 800, static_cast<float>(height) / 600);
+    const float scale = std::max(1.0f, std::min(static_cast<float>(percent) / 100, fit));
+    if (scale * 100 < static_cast<float>(percent)) {
+        ts2::diag::info(std::format("the UI is drawn at {:.0f}% to fit the window", scale * 100));
+    }
+    return scale;
+}
+
+// One side of a quad enlarged to window pixels: its edges a0..a1 and texture coordinates t0..t1.
+// An outer edge is rounded out to a whole pixel, so a picture laid over another covers every pixel
+// it touches and the one below never shows what it hides there. An edge shared with another piece
+// of the same picture is rounded to the nearest pixel, so the pieces neither overlap nor part. The
+// texture coordinates follow, so the picture stays where it was.
+void snapSide(float& a0, float& a1, float& t0, float& t1, bool joined0, bool joined1) {
+    const float b0 = joined0 ? std::round(a0) : std::floor(a0), b1 = joined1 ? std::round(a1) : std::ceil(a1);
+    if (a1 > a0) {
+        const float perPixel = (t1 - t0) / (a1 - a0);
+        t0 += (b0 - a0) * perPixel;
+        t1 += (b1 - a1) * perPixel;
+    }
+    a0 = b0;
+    a1 = b1;
+}
+
+// The UI's quads as sprites in window pixels, `scale` times their size in UI pixels.
+std::vector<ts2::render::Sprite> sprites(const ts2::ui::Screen& screen, double seconds, float scale) {
     std::vector<ts2::render::Sprite> out;
     for (const auto& q : screen.quads(seconds)) {
         ts2::render::Sprite s;
-        s.x0 = q.x0;
-        s.y0 = q.y0;
-        s.x1 = q.x1;
-        s.y1 = q.y1;
+        s.x0 = q.x0 * scale;
+        s.y0 = q.y0 * scale;
+        s.x1 = q.x1 * scale;
+        s.y1 = q.y1 * scale;
         s.u0 = q.u0;
         s.v0 = q.v0;
         s.u1 = q.u1;
         s.v1 = q.v1;
+        if (scale > 1) {
+            snapSide(s.x0, s.x1, s.u0, s.u1, q.joined & 1, q.joined & 4);
+            snapSide(s.y0, s.y1, s.v0, s.v1, q.joined & 2, q.joined & 8);
+        }
         s.texture = q.texture;
         for (int k = 0; k < 4; ++k) {
             s.color[k] = q.color[static_cast<std::size_t>(k)];
@@ -347,6 +380,8 @@ private:
     void mouseEvent(const pf::Event& e);
     void windowClicked(int window);
     void showSprites(double seconds, bool scene);
+    // A point of the window in the UI's pixels.
+    std::array<int, 2> toUi(float x, float y) const { return {static_cast<int>(x / uiScale_), static_cast<int>(y / uiScale_)}; }
     void reportFrame(std::uint64_t now);
     template <typename T>
     std::optional<T> finished(std::future<T>& job, const char* what);
@@ -359,7 +394,11 @@ private:
     ts2::render::IRenderer& renderer_;
     const std::filesystem::path install_;
     const MenuOptions& options_;
-    const int width_, height_;
+    const int width_, height_;  // the window's, which the scene is drawn and picked at
+    // The UI is laid out in pixels of its own, uiScale_ window pixels each, so it fills a screen
+    // uiWidth_ x uiHeight_ of them (see MenuOptions::uiScale).
+    const float uiScale_;
+    const int uiWidth_, uiHeight_;
     ts2::ui::Screen screen_;
     int menu_ = -1;
     int menuX_ = 0, menuY_ = 0;  // where the menu is
@@ -488,7 +527,9 @@ private:
 Game::Game(ts2::content::UiData& data, ts2::ui::Fonts& fonts, ts2::render::IRenderer& renderer, const std::filesystem::path& install,
            const MenuOptions& options)
     : data_(data), renderer_(renderer), install_(install), options_(options), width_(options.width), height_(options.height),
-      screen_(data, fonts), lotUi_(screen_, width_, height_), pieMenu_(screen_, data), hoodUi_(screen_, data, width_, height_) {
+      uiScale_(uiScaleFor(options.uiScale, width_, height_)), uiWidth_(static_cast<int>(static_cast<float>(width_) / uiScale_)),
+      uiHeight_(static_cast<int>(static_cast<float>(height_) / uiScale_)), screen_(data, fonts), lotUi_(screen_, uiWidth_, uiHeight_),
+      pieMenu_(screen_, data), hoodUi_(screen_, data, uiWidth_, uiHeight_) {
     setUpMenu();
     pickMenuSims();
     setUpTiles();
@@ -502,20 +543,20 @@ Game::Game(ts2::content::UiData& data, ts2::ui::Fonts& fonts, ts2::render::IRend
 }
 
 void Game::setUpMenu() {
-    screen_.setSize(width_, height_);
+    screen_.setSize(uiWidth_, uiHeight_);
     // Placed in the middle of the screen (as the game places it at 1920 x 1080).
     menu_ = screen_.load(kScripts, kMainMenu, 0, 0);
     if (menu_ < 0) {
         throw std::runtime_error("the main menu's UI script is missing");
     }
-    menuX_ = (width_ - screen_.width(menu_)) / 2;
-    menuY_ = (height_ - screen_.height(menu_)) / 2;
+    menuX_ = (uiWidth_ - screen_.width(menu_)) / 2;
+    menuY_ = (uiHeight_ - screen_.height(menu_)) / 2;
     screen_.move(menu_, menuX_, menuY_);
     // At start the blurred neighborhood picture shows behind the menu, in the middle of the
     // screen (as the game shows it).
     const int backdrop = screen_.find(menu_, kBackdrop);
     screen_.setVisible(backdrop, true);
-    screen_.move(backdrop, (width_ - screen_.width(backdrop)) / 2 - menuX_, (height_ - screen_.height(backdrop)) / 2 - menuY_);
+    screen_.move(backdrop, (uiWidth_ - screen_.width(backdrop)) / 2 - menuX_, (uiHeight_ - screen_.height(backdrop)) / 2 - menuY_);
 }
 
 // A Sim in the upper left and one in the lower right, each one of the pictures listed in the
@@ -806,7 +847,7 @@ void Game::openQuitBox(bool askSave) {
         pausedBeforeQuitBox_ = lotLife_->paused();
         lotLife_->setPaused(true);
     }
-    quitBox_.open(screen_, data_, width_, height_, askSave);
+    quitBox_.open(screen_, data_, uiWidth_, uiHeight_, askSave);
 }
 
 // The game asks for names when a baby is born, and pauses while it asks. OK puts the speed back as it
@@ -840,7 +881,7 @@ void Game::updateBabyNames() {
         }
     }
     // Robots aren't told apart yet and get the baby panels.
-    if (first != 0 && !rename && !pet && babyNames_.open(screen_, width_, height_, babies)) {
+    if (first != 0 && !rename && !pet && babyNames_.open(screen_, uiWidth_, uiHeight_, babies)) {
         endCameraDrag();  // the dialog takes the mouse, as the quit box does
         pausedBeforeBabyNames_ = lotLife_->paused();
         lotLife_->setPaused(true);
@@ -923,7 +964,7 @@ void Game::showLotTag() {
         y = static_cast<float>(options_.hoverY);
     }
     std::uint32_t lot = 0;
-    if (!down_ && !screen_.over(static_cast<int>(x), static_cast<int>(y))) {
+    if (const auto [ux, uy] = toUi(x, y); !down_ && !screen_.over(ux, uy)) {
         lot = lotAt(orbit_.camera(), width_, height_, x, y, hood_.stats.lotFootprints);
     }
     const auto where = std::find_if(hood_.stats.lotFootprints.begin(), hood_.stats.lotFootprints.end(),
@@ -939,7 +980,8 @@ void Game::showLotTag() {
         return;
     }
     const auto at = app::screenPoint(orbit_.camera(), width_, height_, {(where->x0 + where->x1) / 2, (where->y0 + where->y1) / 2, where->z - 2});
-    hoodUi_.showTag(lot, static_cast<int>(at[0]), static_cast<int>(at[1]));
+    const auto [tagX, tagY] = toUi(at[0], at[1]);
+    hoodUi_.showTag(lot, tagX, tagY);
 }
 
 // The card opens beside the lot's centre as the camera shows it.
@@ -953,7 +995,7 @@ void Game::showLotCard(std::uint32_t lot) {
         return;
     }
     const auto at = app::screenPoint(orbit_.camera(), width_, height_, {(where->x0 + where->x1) / 2, (where->y0 + where->y1) / 2, where->z});
-    hoodUi_.showCard(lot, static_cast<int>(at[0]));
+    hoodUi_.showCard(lot, toUi(at[0], at[1])[0]);
 }
 
 // Builds a lot of the open neighborhood in the background. It shows once built.
@@ -1283,7 +1325,8 @@ bool Game::openGroundMenu(float x, float y) {
         return false;
     }
     pieObject_ = ground.object;
-    pieMenu_.open(std::move(ground.choices), static_cast<int>(x), static_cast<int>(y), width_, height_);
+    const auto [ux, uy] = toUi(x, y);
+    pieMenu_.open(std::move(ground.choices), ux, uy, uiWidth_, uiHeight_);
     return true;
 }
 
@@ -1294,8 +1337,8 @@ bool Game::openGroundMenu(float x, float y) {
 void Game::cameraDrag(const pf::Event& e, float x, float y) {
     // The middle button turns the camera: the pointer hides and stays where it was pressed (the
     // game puts it back after every move), with the game's picture centred on that point.
-    if (e.type == pf::Event::Type::MouseDown && e.button == pf::MouseButton::Middle && !pieMenu_.isOpen() && !turnFrom_ &&
-        !screen_.over(static_cast<int>(x), static_cast<int>(y))) {
+    const auto [ux, uy] = toUi(x, y);
+    if (e.type == pf::Event::Type::MouseDown && e.button == pf::MouseButton::Middle && !pieMenu_.isOpen() && !turnFrom_ && !screen_.over(ux, uy)) {
         turnFrom_ = {e.x, e.y};
         ts2::ui::Window mark;
         // Its magenta shows through, as it does in the game.
@@ -1307,7 +1350,7 @@ void Game::cameraDrag(const pf::Event& e, float x, float y) {
         if (const auto image = data_.image(kTurnMarkGroup, markImage)) {
             screen_.resize(turnMark_, static_cast<int>(image->width), static_cast<int>(image->height));
         }
-        screen_.move(turnMark_, static_cast<int>(x) - screen_.width(turnMark_) / 2, static_cast<int>(y) - screen_.height(turnMark_) / 2);
+        screen_.move(turnMark_, ux - screen_.width(turnMark_) / 2, uy - screen_.height(turnMark_) / 2);
         pf::hideCursor();
         return;
     }
@@ -1331,13 +1374,12 @@ void Game::cameraDrag(const pf::Event& e, float x, float y) {
         }
         return;
     }
-    if (e.type == pf::Event::Type::MouseDown && e.button == pf::MouseButton::Right && !pieMenu_.isOpen() &&
-        !screen_.over(static_cast<int>(x), static_cast<int>(y))) {
+    if (e.type == pf::Event::Type::MouseDown && e.button == pf::MouseButton::Right && !pieMenu_.isOpen() && !screen_.over(ux, uy)) {
         dragFrom_ = {x, y};
         screen_.remove(pressMark_);
         pressMark_ = screen_.load(kUiScripts, kPressMark, 0, 0);
         screen_.setPassive(pressMark_);
-        screen_.move(pressMark_, static_cast<int>(x) - screen_.width(pressMark_) / 2, static_cast<int>(y) - screen_.height(pressMark_) / 2);
+        screen_.move(pressMark_, ux - screen_.width(pressMark_) / 2, uy - screen_.height(pressMark_) / 2);
     } else if (e.type == pf::Event::Type::MouseUp && e.button == pf::MouseButton::Right && dragFrom_) {
         dragFrom_.reset();
         orbit_.dragSpeed = {0, 0};
@@ -1465,7 +1507,7 @@ void Game::freeCameraLook() {
 // The mouse over the lot: the open pie menu takes it first, then a click on an object or on the
 // ground, then the panels and the camera.
 void Game::lotMouse(const pf::Event& e, float x, float y) {
-    const int ix = static_cast<int>(x), iy = static_cast<int>(y);
+    const auto [ix, iy] = toUi(x, y);
     if (babyNames_.isOpen() && !quitBox_.isOpen()) {
         cursors_.show(app::Cursors::kArrow);
         if (e.type == pf::Event::Type::MouseDown && e.button == pf::MouseButton::Left) {
@@ -1509,7 +1551,7 @@ void Game::lotMouse(const pf::Event& e, float x, float y) {
         const std::uint32_t part = lotLife_->partAt(hovered_, hoveredPoint_, lot_);
         if (auto choices = lotLife_->pieMenu(part); !choices.empty()) {
             pieObject_ = part;
-            pieMenu_.open(std::move(choices), ix, iy, width_, height_);
+            pieMenu_.open(std::move(choices), ix, iy, uiWidth_, uiHeight_);
             showPieCursor();
             return;
         }
@@ -1607,7 +1649,8 @@ void Game::updateLot(std::uint64_t now) {
     if (spotTipShown_) {
         const auto at = screenPoint(orbit_.camera(), width_, height_, spotTipPoint_);
         if (at) {
-            screen_.moveSpotTip((*at)[0], (*at)[1]);
+            const auto [tipX, tipY] = toUi(static_cast<float>((*at)[0]), static_cast<float>((*at)[1]));
+            screen_.moveSpotTip(tipX, tipY);
         } else {
             screen_.setSpotTip({});
             spotTipShown_.reset();
@@ -1719,7 +1762,8 @@ void Game::startFromOptions() {
         showPreview();
     }
     if (options_.hoverX >= 0) {
-        screen_.mouse(options_.hoverX, options_.hoverY, false, 0);
+        const auto [ux, uy] = toUi(static_cast<float>(options_.hoverX), static_cast<float>(options_.hoverY));
+        screen_.mouse(ux, uy, false, 0);
     }
     if (!options_.shot.empty() && !building_.valid()) {
         showSprites(options_.hoverX >= 0 ? 10.0 : 0.0, false);
@@ -1893,8 +1937,9 @@ void Game::mouseEvent(const pf::Event& e) {
         down_ = false;
         // A click (not a drag) on the neighborhood enters the lot under it.
         // Not while a lot (or the last one's Sims) is still loading.
+        const auto [ux, uy] = toUi(x, y);
         if (inNeighborhood_ && !neighborhoodCovered() && !lotBuilding_.valid() && !loading(lotSimBuilding_) && std::abs(x - downX_) < 4 && std::abs(y - downY_) < 4 &&
-            !screen_.over(static_cast<int>(x), static_cast<int>(y))) {
+            !screen_.over(ux, uy)) {
             lotClicked(x, y);
         }
     }
@@ -1912,7 +1957,7 @@ void Game::mouseEvent(const pf::Event& e) {
     if (inNeighborhood_ && !neighborhoodCovered()) {
         cameraDrag(e, x, y);
     }
-    if (const auto clicked = screen_.mouse(static_cast<int>(x), static_cast<int>(y), down_, static_cast<double>(ts2::platform::ticksNs()) / 1e9)) {
+    if (const auto [ux, uy] = toUi(x, y); const auto clicked = screen_.mouse(ux, uy, down_, static_cast<double>(ts2::platform::ticksNs()) / 1e9)) {
         windowClicked(*clicked);
     }
 }
@@ -1951,7 +1996,7 @@ void Game::showSprites(double seconds, bool scene) {
     for (const int t : screen_.takeChangedTextures()) {
         unsent_.insert(t);
     }
-    auto shown = sprites(screen_, seconds);
+    auto shown = sprites(screen_, seconds, uiScale_);
     std::vector<int> send;
     for (const auto& sprite : shown) {
         if (unsent_.erase(sprite.texture)) {
@@ -1973,6 +2018,7 @@ void Game::showSprites(double seconds, bool scene) {
         upload.emplace_back(t, &staged_.back());
     }
     renderer_.setSprites(upload);
+    renderer_.setSpriteScale(uiScale_);
     renderer_.showSprites(std::move(shown), scene);
 }
 
@@ -2051,7 +2097,8 @@ bool Game::takePicture() {
         // The mouse rests where it was asked to again, as if for a second, so tips of what the
         // lot shows by now are in the picture.
         const double nowSeconds = static_cast<double>(ts2::platform::ticksNs()) / 1e9;
-        for (const auto& [cx, cy, kind] : options_.uiClicks) {
+        for (const auto& [wx, wy, kind] : options_.uiClicks) {
+            const auto [cx, cy] = toUi(static_cast<float>(wx), static_cast<float>(wy));
             if (kind == 2) {
                 screen_.mouse(cx, cy, false, nowSeconds - 1);
                 lotUi_.mouseMoved(cx, cy);
@@ -2079,7 +2126,8 @@ bool Game::takePicture() {
 
 // The clicks on the lot's panels the options ask for before the picture.
 void Game::clickPanels() {
-    for (const auto& [cx, cy, right] : options_.uiClicks) {
+    for (const auto& [wx, wy, right] : options_.uiClicks) {
+        const auto [cx, cy] = toUi(static_cast<float>(wx), static_cast<float>(wy));
         if (right == 2) {
             // A second before the picture, so a tip that shows after a while and hides 3 s later is in it.
             screen_.mouse(cx, cy, false, static_cast<double>(ts2::platform::ticksNs()) / 1e9 - 1.0);

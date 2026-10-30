@@ -1,4 +1,5 @@
 #include "sim/vm_execution.hpp"
+#include "sim/linked_interactions.hpp"
 
 namespace ts2::sim::vm_detail {
 
@@ -384,6 +385,14 @@ void Execution::queueSkipped(const SimObject& sim, SimObject& object) {
     }
 }
 
+void Execution::dropLinked(QueuedInteraction& ended, const SimObject* skip) {
+    dropLinkedInteractions(world(), ended, skip, [this](SimObject& sim, const QueuedInteraction& removed) {
+        if (SimObject* object = world().find(removed.object)) {
+            queueSkipped(sim, *object);
+        }
+    });
+}
+
 // Idle for Input (Sims only). Operands:
 //   bytes 0-1  the parameter that counts down the ticks left to wait
 //   bytes 2-3  non-zero: a waiting interaction may start
@@ -398,8 +407,9 @@ void Execution::queueSkipped(const SimObject& sim, SimObject& object) {
 // primitive runs again, so a continuation pushed meanwhile starts at once and anything else waits
 // for the next call.
 // Each interaction leaves the queue when its turn comes and is tested again (see passesStartCheck).
-// One whose object is gone or which fails the test is dropped, and the test's failure runs its
-// object's Queue Skipped function. Then a sub-interaction is true, and an interaction waits a tick.
+// One whose object is gone or which fails the test is dropped. Failing the test also drops the
+// interactions linked with it and runs its object's Queue Skipped function. Then a sub-interaction
+// is true, and an interaction waits a tick.
 Execution::IdleResult Execution::idleForInput(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     SimObject& sim = me();
@@ -429,6 +439,7 @@ Execution::IdleResult Execution::idleForInput(const bhav::Instruction& in, Frame
             if (nested) {
                 dropSubQueue(sim);
             }
+            dropLinked(head, &sim);
             queueSkipped(sim, *object);
             return std::nullopt;
         }
@@ -577,14 +588,16 @@ void Execution::runPushedAtOnce(SimObject& sim, const SimObject& object, const Q
 //   byte 3       bit 0: the Sim it is with (its queue icon) is the object in local [byte 4]. With
 //                no such object and no icon GUID (byte 14 bit 2) the queue leaves it out. Bit 3: it is
 //                autonomous (person data 0xA6 while it runs). Bit 2 makes it a continuation,
-//                which isn't held back by the queue limit.
+//                which isn't held back by the queue limit. Bit 6 links it with the interaction
+//                whose link number is the value of owner byte 8, data bytes 9-10. Bit 7 writes its
+//                own link number to owner byte 11, data bytes 12-13 (see linked_interactions.hpp)
 //   byte 14     bit 0: pass my parameters as its arguments. Bit 1: take the object and the number
 //                from autonomy's choice (my person data 0x35, my object data 0x14). Bit 2: its
 //                queue icon is the object type with GUID temp 5 << 16 | temp 4. Bit 3: that
 //                icon's index is temp 6 instead of byte 15
 // On failure my object data 0x34 says why: 1 no priority, 2 the test tree said no, 3 the queue
 // is full, 4 the sub-queue is full, 6 a sub-interaction the Sim can't take now or a line with flag
-// 0x4 that couldn't run at once. The other flag bits (joining, messages) are not implemented.
+// 0x4 that couldn't run at once. Byte 3 bit 5 and byte 14 bit 4 are not implemented.
 bool Execution::pushInteraction(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     SimObject& self = me();
@@ -694,6 +707,13 @@ bool Execution::pushInteraction(const bhav::Instruction& in, Frame& f) {
     if (!runsAtOnce && sim.queue.size() >= kMaxQueuedWithContinuations) {
         self.data[kPrimitiveResultField] = 3;
         return false;
+    }
+    // The links are made before the queue takes it, so a refused push still leaves them written.
+    if (o[3] & 0x40) {
+        linkInteraction(world(), queued, read(o[8], static_cast<std::uint16_t>(o[9] | o[10] << 8), f));
+    }
+    if (o[3] & 0x80) {
+        write(o[11], static_cast<std::uint16_t>(o[12] | o[13] << 8), f, static_cast<std::int16_t>(ownLinkId(world(), queued)));
     }
     // A sub-interaction is taken only while the Sim runs an interaction whose line has flag 0x4000.
     if (queued.nested && !takesSubInteractions(code_, world(), sim)) {

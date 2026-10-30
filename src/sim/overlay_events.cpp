@@ -24,7 +24,7 @@ void tellOverlayEvents(World& world, Vm& vm, std::int16_t id, const std::functio
         if (o.eventTree == 0) {
             return;
         }
-        SimObject* who = world.find(o.caller != 0 ? o.caller : id);
+        SimObject* who = world.find(id);
         if (who == nullptr) {
             return;
         }

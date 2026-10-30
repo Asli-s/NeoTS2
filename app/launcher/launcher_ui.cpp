@@ -136,6 +136,7 @@ settings::LauncherSettings chosenSettings(const LauncherState& state) {
     out.renderer = state.renderer;
     out.smoothFollow = state.smoothFollow;
     out.windowSize = state.windowSize;
+    out.uiScale = state.uiScale;
     return out;
 }
 
@@ -534,7 +535,7 @@ void startPlaying(LauncherState& state, bool addNeighborhoods) {
     }
     const settings::WindowSize* size = settings::findWindowSize(state.windowSize);
     state.game = startGame(install.root, folder, addNeighborhoods, builtRenderer(state.renderer), state.smoothFollow, size ? size->width : 0,
-                           size ? size->height : 0, size && size->fitScreen, state.message);
+                           size ? size->height : 0, size && size->fitScreen, state.uiScale, state.message);
     state.folderNotes.clear();
 }
 
@@ -705,6 +706,7 @@ void findInstalls(LauncherState& state, const settings::LauncherSettings& rememb
     state.renderer = builtRenderer(remembered.renderer);
     state.smoothFollow = remembered.smoothFollow;
     state.windowSize = remembered.windowSize;
+    state.uiScale = remembered.uiScale;
     state.remembered = chosenSettings(state);
 }
 
@@ -795,6 +797,22 @@ void drawChanges(LauncherState& state, const LauncherFonts& fonts) {
     ImGui::Checkbox("Smooth camera when following a Sim", &state.smoothFollow);
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("The game's camera follows in small steps. This makes it glide instead.");
+    }
+    const auto scaleLabel = [](int scale) { return scale == 100 ? std::string("100% (original)") : std::to_string(scale) + "%"; };
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Interface size");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9);
+    if (ImGui::BeginCombo("##uiScale", scaleLabel(state.uiScale).c_str())) {
+        for (const int scale : settings::kUiScales) {
+            if (ImGui::Selectable(scaleLabel(scale).c_str(), state.uiScale == scale)) {
+                state.uiScale = scale;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("The game draws its panels and menus at one size. This makes them larger, for big screens.");
     }
 }
 

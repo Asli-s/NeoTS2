@@ -548,9 +548,10 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
     std::vector<LayeredClip> clips;
     std::vector<const RigAnimation*> playing;
     // A Sim's bones as last posed: this call's pose for a Sim posed before the one asking, else the
-    // last call's. A lot object's bones as this call posed them, as objects are posed before Sims (a
-    // fridge's door handle), or as its clip placed them (a dining chair's seat grabs, see
-    // PlacedObject::bones). Each rig's node names are hashed once per call, on its first lookup.
+    // last call's, each at the place it was posed at. A lot object's bones as this call posed them, as
+    // objects are posed before Sims (a fridge's door handle), or as its clip placed them (a dining
+    // chair's seat grabs, see PlacedObject::bones). One a Sim holds is where it last hung in the hand.
+    // Each rig's node names are hashed once per call, on its first lookup.
     std::unordered_map<const Rig*, std::vector<std::uint32_t>> nameHashes;
     std::vector<std::pair<const Actor*, std::vector<Transform>>> objectNodes;
     // Where this call placed each carried Sim (see Actor::carrier). Any other stands at its own place.
@@ -559,7 +560,19 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
         const auto found = carriedNow.find(&actor);
         return found != carriedNow.end() ? found->second : actor.place;
     };
-    const auto boneIn = [&](const Actor& actor, const std::vector<Transform>& nodes, std::uint32_t bone) -> std::optional<Transform> {
+    std::unordered_map<std::uint32_t, Transform> drawnAt;
+    std::unordered_set<const Actor*> posedNow;
+    std::unordered_set<std::size_t> inHand;
+    for (const auto& actor : scene.actors) {
+        for (const auto& h : actor.held) {
+            inHand.insert(h.instance);
+        }
+    }
+    const auto lastDrawn = [&](const Actor& actor) -> std::optional<Transform> {
+        const auto found = out.drawnAt.find(actor.object);
+        return found != out.drawnAt.end() ? std::optional<Transform>(found->second) : std::nullopt;
+    };
+    const auto boneIn = [&](const Actor& actor, const Transform& place, const std::vector<Transform>& nodes, std::uint32_t bone) -> std::optional<Transform> {
         auto [hashes, first] = nameHashes.try_emplace(actor.rig.get());
         if (first) {
             for (const auto& node : actor.rig->nodes) {
@@ -569,7 +582,7 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
         }
         for (std::size_t i = 0; i < hashes->second.size() && i < nodes.size(); ++i) {
             if (bone != 0 && hashes->second[i] == bone) {
-                return placeOf(actor) * nodes[i];
+                return place * nodes[i];
             }
         }
         return std::nullopt;
@@ -579,7 +592,10 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
         if (actor == scene.actors.end() || !actor->rig) {
             const auto posed = std::find_if(objectNodes.begin(), objectNodes.end(), [&](const auto& n) { return n.first->object == object; });
             if (posed != objectNodes.end()) {
-                return boneIn(*posed->first, posed->second, bone);
+                const Actor& a = *posed->first;
+                const bool held = std::any_of(a.skinned.begin(), a.skinned.end(), [&](const Actor::Skinned& s) { return inHand.contains(s.instance); });
+                const auto hung = held ? lastDrawn(a) : std::nullopt;
+                return boneIn(a, hung.value_or(a.place), posed->second, bone);
             }
             const auto placed = std::find_if(scene.placedObjects.begin(), scene.placedObjects.end(),
                                              [&](const PlacedObject& p) { return p.object == object && !p.bones.empty(); });
@@ -591,19 +607,17 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
         }
         const auto index = static_cast<std::size_t>(actor - scene.actors.begin());
         const auto nodes = std::find_if(out.nodes.begin(), out.nodes.end(), [&](const auto& n) { return n.first == index; });
-        return nodes != out.nodes.end() ? boneIn(*actor, nodes->second, bone) : std::nullopt;
+        if (nodes == out.nodes.end()) {
+            return std::nullopt;
+        }
+        const auto drawn = posedNow.contains(&*actor) ? std::nullopt : lastDrawn(*actor);
+        return boneIn(*actor, drawn.value_or(placeOf(*actor)), nodes->second, bone);
     };
     // Only the actors still in the scene keep what they hold.
     std::unordered_map<std::uint32_t, std::vector<HeldJoint>> held;
     std::unordered_map<std::uint32_t, std::pair<double, std::vector<HeldJoint>>> frozen;
     std::unordered_map<std::uint32_t, float> headings;
     std::unordered_map<std::uint32_t, Transform> carried;
-    std::unordered_set<std::size_t> inHand;
-    for (const auto& actor : scene.actors) {
-        for (const auto& h : actor.held) {
-            inHand.insert(h.instance);
-        }
-    }
     // Lot objects first: a Sim's hand places an object it holds over where the object would stand.
     for (const auto& actor : scene.objectActors) {
         if (!actor.rig) {
@@ -722,9 +736,17 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
         }
         out.nodes[posed].first = static_cast<std::size_t>(&actor - scene.actors.data());
         out.nodes[posed++].second.assign(world.begin(), world.end());
+        posedNow.insert(&actor);
+        drawnAt[actor.object] = place;
         for (const auto& h : actor.held) {
             const bool known = h.node >= 0 && static_cast<std::size_t>(h.node) < world.size();
-            out.places.emplace_back(h.instance, known ? place * world[static_cast<std::size_t>(h.node)] : place);
+            const Transform at = known ? place * world[static_cast<std::size_t>(h.node)] : place;
+            out.places.emplace_back(h.instance, at);
+            for (const auto& o : scene.objectActors) {
+                if (std::any_of(o.skinned.begin(), o.skinned.end(), [&](const Actor::Skinned& s) { return s.instance == h.instance; })) {
+                    drawnAt[o.object] = at;
+                }
+            }
         }
     }
     out.nodes.resize(posed);
@@ -732,6 +754,7 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
     out.heldHeading = std::move(headings);
     out.frozen = std::move(frozen);
     out.carried = std::move(carried);
+    out.drawnAt = std::move(drawnAt);
 }
 
 } // namespace ts2::scene

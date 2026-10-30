@@ -102,8 +102,12 @@ constexpr std::int16_t kInteractionsWaitingBit = 0x40;
 constexpr std::size_t kPrimitiveResultField = 0x34;
 constexpr std::size_t kPriorityPersonData = 0x21;
 constexpr std::size_t kInteractionAutonomousPersonData = 0xA6;
-// Holds back interruptions (see interruptPending). What sets it is not known yet.
+// Holds back interruptions (see interruptPending). Starting an interaction clears it, and what
+// sets it is not known yet.
 constexpr std::size_t kHoldInterruptsPersonData = 0x47;
+// "Interactions Linked Deleted": 1 once an interaction linked with the running one has ended (see
+// dropLinkedInteractions), 0 again when an interaction starts.
+constexpr std::size_t kLinkedDeletedPersonData = 0x6E;
 // Autonomy's choice: the object (person data) and the interaction number (object data).
 constexpr std::size_t kBestActionObjectPersonData = 0x35;
 constexpr std::size_t kTreeTableEntryField = 0x14;
@@ -373,6 +377,8 @@ inline void notePriority(SimObject& sim, const QueuedInteraction* running) {
 // Makes `interaction` the one the Sim runs, its name and icon the action string and icon.
 inline void startRunning(SimObject& sim, const QueuedInteraction& interaction) {
     sim.running = interaction;
+    sim.personData[kHoldInterruptsPersonData] = 0;
+    sim.personData[kLinkedDeletedPersonData] = 0;
     sim.actionString = interaction.name;
     sim.actionIconObject = interaction.icon();
     sim.actionIconGuid = interaction.iconGuid;
@@ -660,6 +666,8 @@ public:
     std::optional<bool> makeChildren(const bhav::Instruction& in, Frame& f, SimObject& holder, std::optional<std::uint32_t> templateGuid);
     std::int16_t speciesFlag(std::int16_t neighbor);
     std::optional<std::int16_t> makeChild(std::int16_t parent1, std::int16_t parent2, std::optional<std::uint32_t> templateGuid);
+    // A neighbor's surname: the one it took while playing, else its character's (catalog string 2).
+    std::string neighborSurname(std::int16_t neighbor);
     std::optional<Genome> parentGenes(std::int16_t neighbor);
     static std::int16_t newCharacterAge(int flag);
     bool relationship(const bhav::Instruction& in, Frame& f);
@@ -747,7 +755,7 @@ public:
     std::vector<std::optional<ModelBone>> slotJoints(const SimObject& owner, const slot::Entry& entry, std::uint32_t group);
     static std::optional<int> jointFacing(const SimObject& owner, const slot::Entry& entry,
                                           const std::vector<std::optional<ModelBone>>& joints, float x, float y);
-    bool placeBySlot(const std::array<std::uint8_t, 16>& o, SimObject& placed, const SimObject& ref);
+    bool placeBySlot(const std::array<std::uint8_t, 16>& o, std::int16_t index, SimObject& placed, const SimObject& ref);
     bool snap(const bhav::Instruction& in, Frame& f);
     void leaveContainer(SimObject& object);
     std::optional<ModelBone> slotBone(const SimObject& object, std::uint32_t group, const slot::Entry& entry);
@@ -844,6 +852,8 @@ public:
     IdleResult idleForInput(const bhav::Instruction& in, Frame& f);
     bool passesStartCheck(SimObject& sim, const SimObject& object, const QueuedInteraction& waiting);
     void queueSkipped(const SimObject& sim, SimObject& object);
+    // dropLinkedInteractions, with each dropped waiting interaction's Queue Skipped function run.
+    void dropLinked(QueuedInteraction& ended, const SimObject* skip);
     bool alterBudget(const bhav::Instruction& in, Frame& f);
     bool pushInteraction(const bhav::Instruction& in, Frame& f);
     // Runs a pushed interaction whose line has flag 0x4 to its end now.

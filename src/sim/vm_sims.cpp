@@ -350,7 +350,8 @@ std::int16_t Execution::speciesFlag(std::int16_t neighbor) {
 // template it takes the species of a parent picked at random, and that species' template. With a
 // template given it is human. The baby is 1 (a baby) with skin data 0x52 = 500 and 0x51 = 0. When
 // exactly one parent has person data 0xA5 set, the baby's gender is the other parent's opposite.
-// Otherwise it is drawn 50/50. It is named "Baby Boy" or "Baby Girl" until the player names it. A
+// Otherwise it is drawn 50/50. It is named "Baby Boy" or "Baby Girl" until the player names it,
+// and takes the first parent's surname (a birth gives the one who carried it first). A
 // human baby inherits its genes (see childGenome) from both parents, the first given first. When
 // exactly one parent has person data 0xA5 set, the other stands for both. Its look is not made yet.
 std::optional<std::int16_t> Execution::makeChild(std::int16_t parent1, std::int16_t parent2,
@@ -404,11 +405,29 @@ std::optional<std::int16_t> Execution::makeChild(std::int16_t parent1, std::int1
             made.browDraw = static_cast<std::uint32_t>(rng_());
         }
     }
+    const std::string surname = neighborSurname(parent1);
     const std::optional<std::int16_t> id = world().addNeighbor(std::move(made));
     if (id && !world().babyFirstName(female).empty()) {
         world().setNeighborFirstName(*id, world().babyFirstName(female));
     }
+    if (id) {
+        world().setNeighborSurname(*id, surname);
+    }
     return id;
+}
+
+std::string Execution::neighborSurname(std::int16_t neighbor) {
+    constexpr std::size_t kSurnameEntry = 2;
+    if (auto taken = world().neighborSurname(neighbor)) {
+        return std::move(*taken);
+    }
+    const SavedNeighbor* saved = world().neighbor(neighbor);
+    const ObjectType* type = saved ? code_.objectType(saved->guid) : nullptr;
+    if (type == nullptr) {
+        return {};
+    }
+    const auto set = static_cast<std::uint16_t>(type->definition.field(objd::field::kCatalogStringsId));
+    return code_.catalogString(type->group, set, kSurnameEntry).value_or("");
 }
 
 // A parent's genes: its saved DNA, else made from its age data as the game makes them (both

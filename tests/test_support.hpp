@@ -264,6 +264,16 @@ public:
         }
         return it->second[index];
     }
+    void addCatalogStrings(std::uint32_t group, std::uint16_t instance, std::vector<std::string> values) {
+        catalogStrings_[{group, instance}] = std::move(values);
+    }
+    std::optional<std::string> catalogString(std::uint32_t group, std::uint16_t instance, std::size_t index) override {
+        const auto it = catalogStrings_.find({group, instance});
+        if (it == catalogStrings_.end() || index >= it->second.size()) {
+            return std::nullopt;
+        }
+        return it->second[index];
+    }
     std::optional<std::uint16_t> behaviorByName(std::uint32_t group, const std::string& name) override {
         for (const auto& [key, b] : behaviors_) {
             if (key.first == group && b->name == name) {
@@ -281,6 +291,7 @@ private:
     std::map<std::pair<std::uint32_t, std::uint16_t>, std::vector<std::string>> descriptions_;
     std::map<std::uint32_t, std::map<std::string, std::string>> ageData_;
     std::map<std::pair<std::uint32_t, std::uint16_t>, std::vector<std::string>> interactionStrings_;
+    std::map<std::pair<std::uint32_t, std::uint16_t>, std::vector<std::string>> catalogStrings_;
     std::map<std::uint32_t, ts2::sim::ObjectType> objectTypes_;
     std::map<std::pair<std::uint32_t, std::uint16_t>, std::shared_ptr<const ts2::ttab::InteractionTable>> tables_;
     std::map<std::pair<std::uint32_t, std::uint16_t>, std::shared_ptr<const Behavior>> behaviors_;

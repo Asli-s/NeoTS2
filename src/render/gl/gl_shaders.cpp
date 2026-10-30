@@ -85,7 +85,7 @@ void GlRenderer::makePrograms(const std::filesystem::path& folder) {
     // The scene's textures, in the order of the HLSL's registers.
     scene_ = loadProgram(folder, "scene.vert", "scene.frag", "type_Frame", "type_Material",
                          {"baseTexture", "lightMapTexture", "normalTexture", "incidenceTexture", "lightMapFromTexture", "envCubeTexture"});
-    ui_ = loadProgram(folder, "ui.vert", "ui.frag", "type_Screen", nullptr, {"image"});
+    ui_ = loadProgram(folder, "ui.vert", "ui.frag", "type_Screen", "type_Picture", {"image"});
     terrain_ = loadProgram(folder, "terrain.vert", "terrain.frag", "type_Frame", "type_Terrain",
                            {"paint", "alphas0", "alphas1", "cells0", "cells1", "lightMap", "gradient"});
     road_ = loadProgram(folder, "road.vert", "road.frag", "type_Frame", "type_Road", {"roads", "lightMap"});

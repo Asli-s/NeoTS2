@@ -28,6 +28,19 @@ inline const WindowSize* findWindowSize(std::string_view key) {
     return nullptr;
 }
 
+// The sizes of the game's UI the launcher offers, in percent. The game draws its UI at 100% only.
+inline constexpr int kUiScales[] = {100, 125, 150, 175, 200};
+
+// True for a size in kUiScales.
+inline bool isUiScale(int percent) {
+    for (const int scale : kUiScales) {
+        if (scale == percent) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // What the launcher remembers between starts. Every path is absolute.
 struct LauncherSettings {
     std::filesystem::path install;     // the chosen install, empty for the first one found
@@ -42,6 +55,9 @@ struct LauncherSettings {
     bool smoothFollow = false;
     // The game window's size: a key of kWindowSizes, or empty for the game's own default.
     std::string windowSize;
+    // The game's UI drawn larger, in percent: one of kUiScales. Not in the original game, so 100
+    // unless the player chooses another.
+    int uiScale = 100;
 
     bool operator==(const LauncherSettings&) const = default;
 };

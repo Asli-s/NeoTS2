@@ -18,6 +18,8 @@ struct Quad {
     float u0 = 0, v0 = 0, u1 = 1, v1 = 1;
     int texture = -1;
     std::array<float, 4> color{1, 1, 1, 1};
+    // The edges it shares with another piece of the same picture: 1 left, 2 top, 4 right, 8 bottom.
+    std::uint8_t joined = 0;
 };
 
 // The windows on screen, built from UI scripts: what each draws (its image, its frame of a

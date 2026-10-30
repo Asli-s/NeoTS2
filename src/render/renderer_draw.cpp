@@ -589,6 +589,9 @@ void SdlGpuRenderer::drawSprites(const Frame& f) {
         }
         SDL_GPUTextureSamplerBinding binding{has ? spriteTextures_[static_cast<std::size_t>(t)] : gpu_->white, spriteSampler_};
         SDL_BindGPUFragmentSamplers(f.pass, 0, &binding, 1);
+        const auto size = has ? spriteSizes_[static_cast<std::size_t>(t)] : std::array<unsigned, 2>{1, 1};
+        const float picture[4] = {static_cast<float>(size[0]), static_cast<float>(size[1]), spriteScale_, 0};
+        SDL_PushGPUFragmentUniformData(f.cmd, 0, picture, sizeof(picture));
         SDL_DrawGPUPrimitives(f.pass, static_cast<Uint32>((j - i) * 6), 1, static_cast<Uint32>(i * 6), 0);
         i = j;
     }

@@ -235,7 +235,7 @@ void animateOverlaySpecialListUsesTheGlobalAgeLists() {
 }
 
 // Animate Overlay plays on the object its bytes 6-8 name: a bed's tree lays the bed's clip on the bed
-// (here the stack object) while I keep none. Its event tree still runs as me. No such object is an error.
+// (here the stack object) while I keep none. Its event tree runs as the bed. No such object is an error.
 void animateOverlayPlaysOnTheObjectItNames() {
     Instruction overlay;
     overlay.opcode = 0x006B;
@@ -249,6 +249,7 @@ void animateOverlayPlaysOnTheObjectItNames() {
     MemoryCodeSource code;
     code.addStrings(kObjectGroup, 0x81, {"o2a-dbl-bed-relax-loop-breathe"});
     code.add(kObjectGroup, 0x1000, bhav({overlay}));
+    code.add(kObjectGroup, 0x1001, bhav({expr(owner::kMyData, 0x20, op::kAssign, owner::kLiteral, 1, T, E)}));
     ts2::sim::World world;
     world.setAnimationLengths([](const std::string&) -> std::optional<float> { return 1858.0f; });
     auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
@@ -257,7 +258,10 @@ void animateOverlayPlaysOnTheObjectItNames() {
     sim.thread.stackObjectId = bed.id;
     CHECK(vm.run(sim, kObjectGroup, 0x1000).outcome == Outcome::True);
     CHECK(sim.overlays.empty() && bed.overlays.size() == 1 && bed.overlays[0].name == "o2a-dbl-bed-relax-loop-breathe");
-    CHECK(bed.overlays[0].caller == sim.id && bed.overlays[0].stackObject == bed.id);
+    CHECK(bed.overlays[0].stackObject == bed.id);
+    world.advanceClock(1800);
+    ts2::sim::tellOverlayEvents(world, vm, bed.id, [](const ts2::sim::RunResult&) {});
+    CHECK(bed.data[0x20] == 1 && sim.data[0x20] == 0);
     sim.thread.stackObjectId = 0;
     CHECK(vm.run(sim, kObjectGroup, 0x1000).outcome == Outcome::Error);
 }

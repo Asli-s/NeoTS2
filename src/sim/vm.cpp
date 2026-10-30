@@ -1,6 +1,7 @@
 #include "sim/vm.hpp"
 #include "sim/vm_execution.hpp"
 #include "sim/forget_object.hpp"
+#include "sim/linked_interactions.hpp"
 
 namespace ts2::sim {
 
@@ -587,6 +588,7 @@ bool Vm::RunState::followBranch(bool branch) {
             } else {
                 noteCurrentInteraction(*me_, 0, 0);
                 if (me_->running && me_->running->id == ended) {
+                    ex_.dropLinked(*me_->running, me_);
                     me_->running.reset();
                     notePriority(*me_, nullptr);
                 }
@@ -864,7 +866,13 @@ Vm::RunState::Next Vm::RunState::idleForInput(const bhav::Instruction& in, Frame
         me_->interactionPartner = started.partner != 0 ? started.partner : started.object;
         if (idle.sub) {
             // The current interaction stays named, the running pair names the sub-interaction.
+            // One still running before it drops its links, on this Sim too.
+            if (me_->runningSub) {
+                ex_.dropLinked(*me_->runningSub, nullptr);
+            }
             me_->runningSub = started;
+            me_->personData[kHoldInterruptsPersonData] = 0;
+            me_->personData[kLinkedDeletedPersonData] = 0;
             me_->personData[kSubQueueObjectPersonData] = started.object;
             noteSubQueue(*me_);
         } else {
@@ -1043,7 +1051,7 @@ void queueInteraction(SimObject& sim, const QueuedInteraction& interaction) {
     noteNextQueued(sim);
 }
 
-bool cancelInteraction(SimObject& sim, std::uint32_t id) {
+bool cancelInteraction(World& world, SimObject& sim, std::uint32_t id) {
     if (sim.running && sim.running->id == id) {
         if (sim.running->cancelled) {
             return false;
@@ -1053,14 +1061,15 @@ bool cancelInteraction(SimObject& sim, std::uint32_t id) {
             sim.runningSub->cancelled = true;
         }
         sim.personData[kPriorityPersonData] = 0;
+        dropLinkedInteractions(world, *sim.running, &sim, {});
         return true;
     }
-    // What cancelling the sub-interaction alone does besides marking it is not known yet.
     if (sim.runningSub && sim.runningSub->id == id) {
         if (sim.runningSub->cancelled) {
             return false;
         }
         sim.runningSub->cancelled = true;
+        dropLinkedInteractions(world, *sim.runningSub, &sim, {});
         return true;
     }
     const auto it = std::find_if(sim.queue.begin(), sim.queue.end(), [id](const QueuedInteraction& q) { return q.id == id; });
@@ -1068,7 +1077,9 @@ bool cancelInteraction(SimObject& sim, std::uint32_t id) {
         return false;
     }
     const bool nested = it->nested;
+    QueuedInteraction cancelled = *it;
     sim.queue.erase(it);
+    dropLinkedInteractions(world, cancelled, &sim, {});
     if (nested) {
         noteSubQueue(sim);
     } else {

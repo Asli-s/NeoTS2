@@ -271,6 +271,42 @@ void findLocationForPlacesByAGlobalSlot() {
     CHECK(vm.run(sim, 0x1001).outcome == Outcome::Error);
 }
 
+// Find Location For modes 5 and 6 place by the reference's routing slot whose number is in the param
+// (5) or the local (6) that bytes 10-11 name, as a carried baby is put down by its drop spot. A param or
+// local past the frame's is an error, and so is a number past the reference's slots.
+void findLocationForTakesTheSlotNumberFromAParamOrLocal() {
+    MemoryCodeSource code;
+    ts2::slot::Entry slot;
+    slot.type = ts2::slot::kRoutingSlot;
+    slot.facing = -1;
+    code.addObjectType(kObjectGroup, typed(kFridgeGuid), {slot, slot});
+    const auto& slots = code.objectType(kFridgeGuid)->routingSlots;
+    Instruction find = call(0x0010, T, F);
+    find.operands = {6, 0, 0x08, 0, owner::kMyData, 0x0B, 0, owner::kStackObjectId, 0, 0, 1};
+    code.add(kObjectGroup, 0x1000, bhav({expr(owner::kLocal, 1, op::kAssign, owner::kLiteral, 1, 1, E), find}, 0, 2));
+    find.operands[0] = 5;
+    code.add(kObjectGroup, 0x1001, bhav({find}, 2));
+    find.operands[10] = 4;
+    code.add(kObjectGroup, 0x1002, bhav({find}, 2));
+    SmallWorld w;
+    ts2::sim::SimObject& sim = *w.world.find(5);
+    sim.thread.stackObjectId = 2;
+    const ts2::slot::Entry* seen = nullptr;
+    w.world.setPlacementSpots([&](const ts2::sim::SimObject&, const ts2::sim::SimObject&, const ts2::slot::Entry& s,
+                                  std::span<const std::optional<ts2::sim::ModelBone>>) {
+        seen = &s;
+        return std::vector<std::pair<float, float>>{{3.5f, 4.5f}};
+    });
+    Vm vm(code, {}, &w.world);
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::True && seen == &slots[1]);
+    CHECK(sim.x == 3 * 65536 + 32768 && sim.y == 4 * 65536 + 32768);
+    const std::array<std::int16_t, 2> first{0, 0}, second{0, 1}, past{0, 2};
+    CHECK(vm.run(sim, 0x1001, first).outcome == Outcome::True && seen == &slots[0]);
+    CHECK(vm.run(sim, 0x1001, second).outcome == Outcome::True && seen == &slots[1]);
+    CHECK(vm.run(sim, 0x1001, past).outcome == Outcome::Error);
+    CHECK(vm.run(sim, 0x1002, first).outcome == Outcome::Error);
+}
+
 // Make New Character adds a neighbor with the age, gender and species from my locals and puts its id
 // in the stack object's array 0. Ids: the first free one from the counter (one past the highest),
 // or, past the neighbor count, the first gap from 1.
@@ -418,8 +454,9 @@ void babyGenesDrawInTheGamesOrder() {
 // Make New Character for babies of two parents (flag 0x01, both parents neighbor ids): temp 0 babies
 // go into array 0, the instruction waits a tick and is then true. Each is a baby of the parents'
 // species. With only the mother marked (person data 0xA5) a baby takes the opposite of the father's
-// gender, and is named "Baby Girl" or "Baby Boy" by it. The unmarked father then stands for both
-// parents' genes. A count outside 1-10 and parents of two species are errors.
+// gender, and is named "Baby Girl" or "Baby Boy" by it. It takes the first parent's surname, the
+// one that parent took while playing or else its character's. The unmarked father then stands for
+// both parents' genes. A count outside 1-10 and parents of two species are errors.
 void makeNewCharacterMakesBabiesOfTwoParents() {
     MemoryCodeSource code;
     code.addObjectType(kObjectGroup, typed(0x7FD96B54, 0x10));
@@ -432,6 +469,14 @@ void makeNewCharacterMakesBabiesOfTwoParents() {
     for (const std::int16_t id : {std::int16_t{3}, std::int16_t{8}}) {
         hood->neighbors[id].guid = 0x0D000000u + static_cast<std::uint32_t>(id);
         hood->neighbors[id].personData.assign(0xE7, 0);
+    }
+    // The mother's character is Ana Patel, the father's Jo Jones.
+    for (const auto& [id, surname] : {std::pair{3, "Patel"}, std::pair{8, "Jones"}}) {
+        auto parent = typed(0x0D000000u + static_cast<std::uint32_t>(id), 2);
+        parent.fields[ts2::objd::field::kCatalogStringsId] = 0x7D0;
+        const std::uint32_t group = 0x7F0000A0u + static_cast<std::uint32_t>(id);
+        code.addObjectType(group, parent);
+        code.addCatalogStrings(group, 0x7D0, {"Parent", "", surname});
     }
     hood->neighbors[3].personData[0x41] = 1;  // the mother
     hood->neighbors[3].personData[0xA5] = 1;
@@ -458,8 +503,12 @@ void makeNewCharacterMakesBabiesOfTwoParents() {
         CHECK(baby != nullptr && baby->personData[0x3A] == 1 && baby->personData[0xBA] == 0 && baby->personData[0x41] == 1);
         CHECK(baby != nullptr && baby->personData[0x52] == 500 && code.objectType(baby->guid) != nullptr);
         CHECK(w.world.neighborFirstName(static_cast<std::int16_t>(id)) == "Baby Girl");
+        CHECK(w.world.neighborSurname(static_cast<std::int16_t>(id)) == "Patel");
         CHECK(baby != nullptr && baby->genes.at(1) == (ts2::sim::Gene{kBlack, kBlack}));
     }
+    w.world.setNeighborSurname(3, "Curious");
+    CHECK(makeBabies(1).outcome == Outcome::Sleeping && vm.resume(*w.controller).outcome == Outcome::True);
+    CHECK(w.world.neighborSurname(static_cast<std::int16_t>(w.controller->arrays[0].back())) == "Curious");
     CHECK(makeBabies(0).outcome == Outcome::Error);
     CHECK(makeBabies(11).outcome == Outcome::Error);
     w.world.neighborPersonData(8)->at(0xBA) = 3;  // a cat
@@ -2097,6 +2146,7 @@ std::vector<Test> vmObjectTests() {
         {"Find Location For skips the Sim's own tile", findLocationForSkipsTheSimsTile},
         {"Find Location For on level ground clears a placement bit", findLocationForOnLevelGroundClearsAPlacementBit},
         {"Find Location For places by a global slot", findLocationForPlacesByAGlobalSlot},
+        {"Find Location For takes the slot number from a param or local", findLocationForTakesTheSlotNumberFromAParamOrLocal},
         {"make new character adds a neighbor", makeNewCharacterAddsANeighbor},
         {"make new character makes babies of two parents", makeNewCharacterMakesBabiesOfTwoParents},
         {"add to family 0 joins the lot's household", addToFamilyZeroJoinsTheLotsHousehold},

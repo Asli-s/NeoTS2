@@ -12,9 +12,10 @@ namespace ts2::launcher {
 // reason in `error`. `renderer` is what the game is asked to draw with ("sdlgpu" or "gl2"), empty to let it choose.
 // `smoothFollow` asks for the gliding follow camera (see LauncherSettings::smoothFollow). `width`
 // and `height` size the game's window, 0 for its default. `fitScreen` asks for a window that fills the
-// screen's free area instead.
+// screen's free area instead. `uiScale` is the size of the game's UI in percent (see
+// LauncherSettings::uiScale).
 SDL_Process* startGame(const std::filesystem::path& install, const std::filesystem::path& saveFolder, bool addNeighborhoods,
-                       const std::string& renderer, bool smoothFollow, int width, int height, bool fitScreen,
+                       const std::string& renderer, bool smoothFollow, int width, int height, bool fitScreen, int uiScale,
                        std::string& error);
 
 } // namespace ts2::launcher

@@ -96,6 +96,9 @@ public:
     virtual void setClearColor(float r, float g, float b) = 0;
     // What to draw over the scene, in order, from the next frame on, and whether to draw the scene.
     virtual void showSprites(std::vector<Sprite> sprites, bool scene = true) = 0;
+    // How many times larger than their pictures the sprites are drawn (the UI's size, 1 as the game
+    // draws it). Above 1 their pictures are enlarged sharply.
+    virtual void setSpriteScale(float scale) = 0;
 
     // Draws one frame. Returns false when the window can't be drawn to right now (minimized, or no
     // depth buffer).
