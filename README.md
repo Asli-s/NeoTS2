@@ -2,6 +2,10 @@
 
 **A new, open, 64-bit engine for The Sims 2.**
 
+[![Download NeoTS2](https://img.shields.io/github/v/release/Asli-s/NeoTS2?include_prereleases&label=Download&color=brightgreen&style=for-the-badge)](https://github.com/Asli-s/NeoTS2/releases)
+
+For Windows, Linux and macOS: on the [Releases page](https://github.com/Asli-s/NeoTS2/releases), pick the newest release, then open **Assets** to get the file for your computer.
+
 NeoTS2 runs The Sims 2 on a modern, open codebase. It reads the game's own files from your
 installation (neighborhoods, lots, objects, Sims, scripts, 3D assets and the user interface) and
 rebuilds the game on top of them: the simulation that drives objects and Sims, the houses and
@@ -55,7 +59,7 @@ downloads don't show in NeoTS2 for now.
 | --- | --- |
 | ![The main menu](assets/screenshots/main-menu.jpg) | ![Pleasantview with its lots panel](assets/screenshots/neighborhood.webp) |
 | **Lot** | **Sims** |
-| ![A lot with its Sims and live panel](assets/screenshots/lot.webp) | ![Two Sims talking on a deck](assets/screenshots/sims.webp) |
+| ![A lot with its Sims and live panel](assets/screenshots/lot.webp) | ![The Smiths at home](assets/screenshots/sims.webp) |
 
 ## Your saves
 
