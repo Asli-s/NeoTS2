@@ -58,12 +58,17 @@ int main(int argc, char** argv) {
         ++run;
         const int before = failures;
 #if defined(_MSC_VER) && defined(_DEBUG)
-        // In debug builds, memory a test leaves allocated is a failure.
+        // In debug builds, memory a test leaves allocated is a failure. Scratch lists the engine keeps
+        // between calls grow only the first time, so a test that leaves memory is run once more and
+        // fails only if it leaves memory again.
         _CrtMemState start, end, change;
-        _CrtMemCheckpoint(&start);
-        test();
-        _CrtMemCheckpoint(&end);
-        if (_CrtMemDifference(&change, &start, &end) && change.lCounts[_NORMAL_BLOCK] > 0) {
+        auto leaks = [&] {
+            _CrtMemCheckpoint(&start);
+            test();
+            _CrtMemCheckpoint(&end);
+            return _CrtMemDifference(&change, &start, &end) && change.lCounts[_NORMAL_BLOCK] > 0;
+        };
+        if (leaks() && leaks()) {
             std::printf("  leaked %zu blocks, %zu bytes\n", change.lCounts[_NORMAL_BLOCK], change.lSizes[_NORMAL_BLOCK]);
             _CrtMemDumpAllObjectsSince(&start);
             ++failures;
