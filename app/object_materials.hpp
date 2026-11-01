@@ -55,14 +55,16 @@ public:
     const std::vector<std::pair<std::size_t, std::vector<int>>>& changed() const { return changed_; }
 
     // Where joint `joint` (lower case) of the object's model `model` sits at `nowMs` as the object's
-    // clip moves it, in the model's space. Joints the clip doesn't move are at rest. Nullopt when it
+    // clip moves it, in the model's space. Joints the clip doesn't move are where the object was last
+    // drawn with them (`held`, see ScenePose::held), else at rest. Nullopt when it
     // plays none or the model has no such joint. The clips name a skeleton of their own ("chairdining"
     // for every dining chair), but drive the joints of the model that plays them. `bones` gets every
     // named joint as posed, in the model's space, by its name's hash.
     std::optional<ts2::scene::Transform> jointPose(const ts2::sim::SimObject& object, double nowMs,
                                                    ts2::scene::AnimationLibrary& animations, const std::string& model,
                                                    const std::string& joint,
-                                                   std::vector<std::pair<std::uint32_t, ts2::scene::Transform>>* bones = nullptr);
+                                                   std::vector<std::pair<std::uint32_t, ts2::scene::Transform>>* bones = nullptr,
+                                                   const std::vector<ts2::scene::HeldJoint>* held = nullptr);
 
 private:
     std::map<std::string, std::shared_ptr<const ts2::scene::Rig>> rigs_;  // by lower-case model name

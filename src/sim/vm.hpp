@@ -117,13 +117,17 @@ struct RunResult {
     std::uint32_t group = 0;
     std::uint16_t instance = 0;
     std::uint16_t pc = 0;
+    // For a depth stop, the trees on the stack from the bottom up, for the log.
+    std::string calls;
 };
 
 struct Limits {
     // A run stops on reaching this many primitives, or maxRaisedSteps while global 0x33 "Object
     // Error Flags" has flag 1 set (trees doing heavy work set it, relationship decay among them).
     std::size_t maxSteps = 100000;
-    std::size_t maxDepth = 64;
+    // A tree call or a pushed interaction fails when the stack already holds more than this many
+    // frames, the game's error 0x452 "Max stack depth exceeded."
+    std::size_t maxDepth = 1000;
     std::size_t maxRaisedSteps = 300000;
 };
 
@@ -220,6 +224,9 @@ private:
                       std::optional<std::uint32_t> entryGroup = std::nullopt);
     // Starts an object made by Create New Object Instance, before the primitive returns.
     void startCreated(SimObject& created, const ObjectType& type);
+    void markVisitor(SimObject& created);
+    // Starts the parts of a multi-tile object made the same way, lead first.
+    void startCreatedParts(std::span<SimObject* const> parts);
     // Every Sim but `object` forgets it at once (Generic Sims Call 0x0D). Resetting a Sim whose code
     // is running right now is not supported, so needing that stops.
     void tellSimsObjectGoes(std::int16_t object);

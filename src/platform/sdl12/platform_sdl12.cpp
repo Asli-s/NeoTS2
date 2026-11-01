@@ -23,6 +23,7 @@ struct KeyInfo {
 
 constexpr KeyInfo kKeys[] = {
     {Key::A, SDLK_a},
+    {Key::C, SDLK_c},
     {Key::D, SDLK_d},
     {Key::E, SDLK_e},
     {Key::P, SDLK_p},
@@ -62,6 +63,8 @@ constexpr KeyInfo kKeys[] = {
     {Key::Down, SDLK_DOWN},
     {Key::Left, SDLK_LEFT},
     {Key::Right, SDLK_RIGHT},
+    {Key::Shift, SDLK_LSHIFT},
+    {Key::Shift, SDLK_RSHIFT},
 };
 
 Key keyOf(SDLKey sym) {
@@ -87,6 +90,12 @@ std::uint8_t buttonsOf(Uint8 state) {
     return static_cast<std::uint8_t>((state & SDL_BUTTON(SDL_BUTTON_LEFT) ? 1u << static_cast<unsigned>(MouseButton::Left) : 0u) |
                                      (state & SDL_BUTTON(SDL_BUTTON_MIDDLE) ? 1u << static_cast<unsigned>(MouseButton::Middle) : 0u) |
                                      (state & SDL_BUTTON(SDL_BUTTON_RIGHT) ? 1u << static_cast<unsigned>(MouseButton::Right) : 0u));
+}
+
+void mouseModifiers(Event& out, SDLMod mod) {
+    out.shift = (mod & KMOD_SHIFT) != 0;
+    out.ctrl = (mod & KMOD_CTRL) != 0;
+    out.alt = (mod & KMOD_ALT) != 0;
 }
 
 Window* gWindow = nullptr;            // the only one
@@ -170,6 +179,7 @@ bool pollEvent(Event& out) {
             out.xrel = e.motion.xrel;
             out.yrel = e.motion.yrel;
             out.buttons = buttonsOf(e.motion.state);
+            mouseModifiers(out, SDL_GetModState());
             return true;
         case SDL_MOUSEBUTTONDOWN:
         case SDL_MOUSEBUTTONUP:
@@ -186,6 +196,7 @@ bool pollEvent(Event& out) {
             out.button = buttonOf(e.button.button);
             out.x = e.button.x;
             out.y = e.button.y;
+            mouseModifiers(out, SDL_GetModState());
             return true;
         default:
             break;
@@ -197,8 +208,8 @@ bool pollEvent(Event& out) {
 bool keyHeld(Key key) {
     const Uint8* state = SDL_GetKeyState(nullptr);
     for (const KeyInfo& k : kKeys) {
-        if (k.key == key) {
-            return state[k.sym] != 0;
+        if (k.key == key && state[k.sym] != 0) {
+            return true;
         }
     }
     return false;

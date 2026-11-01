@@ -61,6 +61,9 @@ public:
     std::size_t textIndexAt(int window, int x);
     void setTextColor(int window, const std::array<float, 4>& color);
     void setImage(int window, tga::Pixels pixels);  // drawn over the window's whole area
+    // Shows only the part of the window's image from (left, top) to (right, bottom) in pixels,
+    // stretched over the window's area. An empty part shows the whole image again.
+    void setImagePart(int window, const std::array<int, 4>& part);
     // Textures added or changed since the last call (a window's own picture or text keeps its
     // texture when it changes).
     std::vector<int> takeChangedTextures();
@@ -68,6 +71,9 @@ public:
     void resize(int window, int w, int h);
     // Draws a top window (one a script was loaded as) over the others.
     void raise(int window);
+    // Takes a window out of the one it is in and makes it a top window drawn just under `under`, at
+    // the same place on screen.
+    void detach(int window, int under);
     // Takes a window and the windows inside it off the screen for good, freeing their pictures and
     // text. Their numbers are given to windows added later.
     void remove(int window);
@@ -100,7 +106,11 @@ public:
     std::optional<int> mouse(int x, int y, bool down, double seconds = 0);
     // Whether a button is held down with the mouse still over it.
     bool held(int window) const;
-    // The topmost shown, enabled button at (x, y), if any.
+    // The window the mouse at (x, y) goes to, as the game picks it, or -1. Among the top windows the
+    // one drawn on top that takes the mouse there gets it, then the same among the windows inside it.
+    // Nothing under it is tried, so a panel keeps clicks on its bare parts.
+    int mouseWindow(int x, int y) const;
+    // The button the mouse at (x, y) goes to, if it goes to one.
     std::optional<int> buttonAt(int x, int y) const;
     // Whether (x, y) is over a shown window that draws something.
     bool over(int x, int y) const;
@@ -120,6 +130,8 @@ public:
 
     // What to draw. A tooltip shows once the mouse has rested on a button for a while (at `seconds`).
     std::vector<Quad> quads(double seconds = 0) const;
+    // The same into `out`, emptied first, so a caller can keep its storage between frames.
+    void quads(double seconds, std::vector<Quad>& out) const;
     const std::vector<tga::Pixels>& textures() const { return textures_; }
 
 private:
@@ -137,8 +149,15 @@ private:
         int image = -1;                  // texture
         bool ownImage = false;           // the texture is this window's own (not a shared UI image)
         std::array<int, 4> imageRect{};  // part of the image shown (imagerect), when set
+        std::array<int, 4> part{};       // part of the image stretched over the window (setImagePart), when set
         bool edge = false;               // the image is stretched around its border (edgeimage)
         bool passive = false;            // shown only: the mouse goes through it to what is under it
+        // How the window takes the mouse. A disabled window or one with winflag_ignoremouse lets it
+        // through, and buttons are enabled by their state instead. A container (winflag_container)
+        // takes it only over a shown child, and so do generic windows and flat rectangles of the
+        // classes 0x49495e7f and 0x0c683787 with winflag_mousetrans. A buffered window with
+        // winflag_mousetrans and winflag_premulalpha lets it through where nothing it draws shows.
+        bool enabled = true, ignoresMouse = false, container = false, overChildren = false, seeThrough = false;
         // Drawn through a buffer whose magenta (255, 0, 255) shows through (winflag_pbufftrans), as
         // is everything inside it.
         bool keyed = false;
@@ -195,6 +214,19 @@ private:
     // The topmost shown window with a tip under the mouse, or -1 when none. With `within`, only
     // windows inside that one count.
     int tipWindowAt(int x, int y, int within = -1) const;
+    // Every window in the order drawn, so the last one at a point is the one on top.
+    std::vector<int> drawOrder() const;
+    // Whether a window can get the mouse: shown, enabled and not letting it through.
+    bool takesMouse(int window) const;
+    // Whether (x, y) is a window's own for the mouse, by its area and the rules of its kind.
+    bool holds(int window, int x, int y) const;
+    // Whether a shown window inside `window`, or `window` itself, holds (x, y). With `ignoring`
+    // false, windows that ignore the mouse don't count.
+    bool shownHolds(int window, int x, int y, bool ignoring) const;
+    // Whether anything `window` draws, itself or inside it, shows at (x, y).
+    bool drawnAt(int window, int x, int y) const;
+    // The window the mouse at (x, y) goes to among `windows` and those inside them, or -1.
+    int mouseWindowIn(const std::vector<int>& windows, int x, int y) const;
     std::array<int, 2> origin(int window) const;
     bool shown(int window) const;
     bool inside(int window, int root) const;

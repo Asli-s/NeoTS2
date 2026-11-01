@@ -230,7 +230,10 @@ void infiniteRecursionHitsDepthLimit() {
     MemoryCodeSource code;
     code.add(kObjectGroup, 0x1000, bhav({call(0x1000, T, F)}));
     ThreadState t;
-    CHECK(runPrivate(code, t, 0x1000, {100000, 32}).outcome == Outcome::DepthLimit);
+    const RunResult r = runPrivate(code, t, 0x1000, {100000, 32});
+    CHECK(r.outcome == Outcome::DepthLimit);
+    // 33 frames: the first and last 12 are named and the 9 between are counted.
+    CHECK(r.calls.find("(9 more)") != std::string::npos);
 }
 
 void missingCallTargetIsReported() {
@@ -276,6 +279,47 @@ void attributesBelongToEachObject() {
     CHECK(vm.run(other, 0x1000).outcome == Outcome::True);
     CHECK(fridge.attributes[0] == 10);
     CHECK(other.attributes[0] == 5);
+}
+
+// Generic Sims Call 0x1D waits a tick at a time while the neighbor's character loads, for up to
+// temp 1 ticks, and is true at once when nothing loads characters.
+void loadingACharacterWaits() {
+    MemoryCodeSource code;
+    Instruction load = call(0x0001, T, E);
+    load.operands = {};
+    load.operands[0] = 0x1D;
+    code.add(kObjectGroup, 0x1000, bhav({
+        expr(owner::kTemp, 0, op::kAssign, owner::kParam, 0, 1, E),
+        expr(owner::kTemp, 1, op::kAssign, owner::kParam, 1, 2, E),
+        load,
+    }, 2));
+    ts2::sim::World world;
+    auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
+    hood->neighborIds = {9};
+    hood->neighbors[9] = {};
+    world.setNeighborhood(hood);
+    constexpr std::int16_t kNeighbor = 9;
+    auto& me = world.create(kObjectGroup, definition("Me", 0));
+    Vm vm(code, {}, &world);
+    const std::array<std::int16_t, 2> args{kNeighbor, 2};
+    CHECK(vm.run(me, kObjectGroup, 0x1000, args).outcome == Outcome::True);
+    int asked = 0, readyAfter = 3;
+    world.setCharacterLoad([&](std::int16_t id) -> std::optional<bool> {
+        CHECK(id == kNeighbor);
+        return ++asked >= readyAfter;
+    });
+    CHECK(vm.run(me, kObjectGroup, 0x1000, args).outcome == Outcome::Sleeping);
+    CHECK(vm.resume(me).outcome == Outcome::Sleeping);
+    CHECK(vm.resume(me).outcome == Outcome::True && asked == 3);
+    // Out of ticks before the load is done: true anyway.
+    asked = 0;
+    readyAfter = 10;
+    CHECK(vm.run(me, kObjectGroup, 0x1000, args).outcome == Outcome::Sleeping);
+    CHECK(vm.resume(me).outcome == Outcome::Sleeping);
+    CHECK(vm.resume(me).outcome == Outcome::True && asked == 3);
+    // No such neighbor: nothing to wait for.
+    const std::array<std::int16_t, 2> missing{999, 2};
+    CHECK(vm.run(me, kObjectGroup, 0x1000, missing).outcome == Outcome::True);
 }
 
 void initObjectSetsDefaultsAndAttributesByParam() {
@@ -688,11 +732,6 @@ void breakPointIgnoredInReleaseContinues() {
     code.add(kObjectGroup, 0x1000, bhav({breakPoint(1, 0x01)}));
     ThreadState t;
     CHECK(runPrivate(code, t, 0x1000).outcome == Outcome::True);
-
-    Instruction unconditional = primitiveCall(0x000F, T, E);
-    std::fill_n(unconditional.operands.begin(), 8, std::uint8_t{0xFF});
-    code.add(kObjectGroup, 0x1001, bhav({unconditional}));
-    CHECK(runPrivate(code, t, 0x1001).outcome == Outcome::True);
 }
 
 void breakPointWithFalseConditionContinues() {
@@ -708,7 +747,18 @@ void breakPointWithTrueConditionIsAnError() {
     ThreadState t;
     const RunResult r = runPrivate(code, t, 0x1000);
     CHECK(r.outcome == Outcome::Error);
-    CHECK(r.reason == "break point hit");
+    CHECK(r.reason == "Tree break encountered.");
+}
+
+// Owner 0xFFFF stops at once, the ignore bit set or not, as the game's "CT - Object Error" does.
+void breakPointOnOwnerMinusOneAlwaysStops() {
+    MemoryCodeSource code;
+    Instruction stop = breakPoint(0, 0xFF);
+    std::fill_n(stop.operands.begin(), 8, std::uint8_t{0xFF});
+    code.add(kObjectGroup, 0x1000, bhav({stop}));
+    ThreadState t;
+    const RunResult r = runPrivate(code, t, 0x1000);
+    CHECK(r.outcome == Outcome::Error && r.reason == "Hit Break Point Primitive.");
 }
 
 void expressionIgnoresStaleOperandBytes() {
@@ -1021,6 +1071,7 @@ std::vector<Test> vmCoreTests() {
         {"jump past the end is an error", jumpPastTheEndIsAnError},
         {"attributes belong to each object", attributesBelongToEachObject},
         {"Init - Object sets defaults; attributes by param", initObjectSetsDefaultsAndAttributesByParam},
+        {"loading a character waits", loadingACharacterWaits},
         {"object id field matches the object", objectIdFieldMatchesTheObject},
         {"stack object is reached through its id", stackObjectIsReachedThroughItsId},
         {"each frame keeps its own stack object", eachFrameKeepsItsOwnStackObject},
@@ -1047,6 +1098,7 @@ std::vector<Test> vmCoreTests() {
         {"Break Point ignored in release continues", breakPointIgnoredInReleaseContinues},
         {"Break Point with false condition continues", breakPointWithFalseConditionContinues},
         {"Break Point with true condition is an error", breakPointWithTrueConditionIsAnError},
+        {"Break Point on owner -1 always stops", breakPointOnOwnerMinusOneAlwaysStops},
         {"Expression ignores stale operand bytes", expressionIgnoresStaleOperandBytes},
         {"Sleep yields inside a call and resumes", sleepYieldsInsideACallAndResumes},
         {"Sleep as last instruction completes on resume", sleepAsLastInstructionCompletesOnResume},

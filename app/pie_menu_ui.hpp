@@ -34,6 +34,9 @@ public:
     // press on the menu picks the highlighted item. Pressing the left button away from the items, or
     // the right button anywhere, closes the menu.
     std::optional<ts2::sim::PieChoice> mouse(int x, int y, Mouse what);
+    // Tab: the next page, as "More..." shows it. A ring without more pages closes the menu with
+    // nothing chosen, as in the game.
+    void tab();
 
 private:
     struct Node {

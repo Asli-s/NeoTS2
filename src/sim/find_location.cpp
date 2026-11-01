@@ -1,5 +1,7 @@
 #include "sim/find_location.hpp"
 
+#include "sim/snap.hpp"
+
 #include <algorithm>
 #include <cmath>
 
@@ -10,6 +12,7 @@ constexpr std::int32_t kLotLimit = 256;  // tiles, a lot is never wider
 constexpr std::size_t kPlacementFlagsField = 8;
 constexpr std::int16_t kIgnoredByPreferEmpty = 0x06;
 constexpr std::size_t kFacingRuleField = 0x17;
+constexpr std::size_t kDirectionField = 0x01;
 constexpr std::uint16_t kNoDiagonalFacingDefinitionField = 0x0A;
 
 constexpr int kDefaultWalk = 6;
@@ -96,14 +99,16 @@ bool holdsSomethingElse(const World& world, const SimObject& placed, const Tile&
     }) != nullptr;
 }
 
-std::optional<std::int16_t> pickFacing(const SimObject& placed, const LocationSearch& search, int firstTurn) {
+// The first facing tried from `firstTurn` on that the object may take and that passes `fits`.
+template <typename Fits>
+std::optional<std::int16_t> pickFacing(const SimObject& placed, const LocationSearch& search, int firstTurn, const Fits& fits) {
     const bool diagonalsAllowed = placed.definition.field(kNoDiagonalFacingDefinitionField) == 0 &&
                                   placed.data[kFacingRuleField] < 2;
     for (int i = 0; i < 8; ++i) {
         const int turn = (firstTurn + i) & 7;
-        const int facing = (search.referenceFacing + turn) & 7;
-        if (((search.allowedFacings >> turn) & 1) != 0 && (diagonalsAllowed || (facing & 1) == 0)) {
-            return static_cast<std::int16_t>(facing);
+        const auto facing = static_cast<std::int16_t>((search.referenceFacing + turn) & 7);
+        if (((search.allowedFacings >> turn) & 1) != 0 && (diagonalsAllowed || (facing & 1) == 0) && fits(facing)) {
+            return facing;
         }
     }
     return std::nullopt;
@@ -178,12 +183,18 @@ std::optional<FoundLocation> findLocation(const World& world, const SimObject& p
             continue;
         }
         FoundLocation found{x * 65536 + 32768, y * 65536 + 32768, std::nullopt};
+        // Each facing tried goes through Snap's placement test there, as the game tests every try.
+        const auto fits = [&](std::int16_t facing) {
+            return !placementCode(world, placed, SnapTarget{found.x, found.y, search.level, facing});
+        };
         if (search.allowedFacings != 0) {
             const int firstTurn = static_cast<int>((static_cast<std::uint64_t>(rng()) * 8) >> 32);
-            found.facing = pickFacing(placed, search, firstTurn);
+            found.facing = pickFacing(placed, search, firstTurn, fits);
             if (!found.facing) {
                 continue;
             }
+        } else if (!fits(placed.data[kDirectionField])) {
+            continue;
         }
         // With a start direction, a start tile that isn't that way from the start point gives way to
         // the tile in front of it: the walk starts again there.

@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 namespace ts2::sim {
 
@@ -34,14 +35,44 @@ bool isBoneSlot(const slot::Entry& slot);
 
 enum class SnapRefusal {
     None,
-    NotSameRoom,   // or the spot is not on the lot
+    OffLot,        // the room check is on and the spot is off the lot: placement code 2
+    NotSameRoom,
     WallInTheWay,  // a wall crosses the straight line there
 };
-// The checks Snap makes before moving `object` to `target`. The game also checks walls close to the
-// spot and other objects and Sims in the way, which isn't done yet.
+// The room and wall checks Snap makes before moving `object` to `target` (see placementCode for the
+// placement test). The game also checks walls close to the spot, which isn't done yet.
 SnapRefusal snapRefusal(const World& world, const SimObject& object, const SnapTarget& target);
 
-// Moves `object` to `target`. Its footprint is marked as changed.
+// Moves `object` to `target`. Its footprint is marked as changed. What sits in its slots and the
+// other parts of a multi-tile object move with it (see moveContents and moveParts).
 void snapTo(World& world, SimObject& object, const SnapTarget& target);
+
+// Puts what sits in `container`'s slots, and what sits in theirs, at the container's place and
+// level, as the game keeps a passenger at its car's place while the car drives.
+void moveContents(World& world, const SimObject& container, int depth = 0);
+
+// Where one part of a multi-tile object goes.
+struct PartSpot {
+    std::int16_t id = 0;
+    std::int32_t x = kOffLot;  // kOffLot when the part would land off the lot
+    std::int32_t y = kOffLot;
+    std::int32_t level = 1;
+    std::int16_t facing = 0;
+};
+// Where the other parts of `moved`'s multi-tile object go when `moved` stands at `at`, as the game
+// moves a multi-tile object as one: each at its offset from `moved`, turned with the facing, which
+// they all take. A part's offset is its sub-index x and y (OBJD field 0x0B) and its storey (field
+// 0x38). Empty for an object of one tile. Diagonal facings are not known yet and give none.
+[[nodiscard]] std::vector<PartSpot> partSpots(const World& world, const SimObject& moved, const SnapTarget& at);
+
+// Puts the other parts of `moved`'s multi-tile object where they belong around it (see partSpots).
+// A part landing off the lot goes out of the world.
+void moveParts(World& world, const SimObject& moved);
+
+// The game's placement code when Snap's placement test refuses `object` at `target`, none when it
+// passes: every part of a multi-tile object is tested at its own spot, in turn. 2: the spot is off
+// the lot. 0x0C: another object or a Sim is in the way (Snap tests Sims by other rules, which aren't
+// run yet, so a Sim is never in the way of another Sim here).
+[[nodiscard]] std::optional<std::int16_t> placementCode(const World& world, const SimObject& object, const SnapTarget& target);
 
 } // namespace ts2::sim

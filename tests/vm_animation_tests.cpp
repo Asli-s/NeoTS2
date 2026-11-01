@@ -297,6 +297,16 @@ void lookAtStartsAndStopsAHeadLook() {
     CHECK(sim.look.following() == 0);
     code.add(kObjectGroup, 0x1002, bhav({[&] { Instruction slow = look; slow.operands[4] = 0; return slow; }()}));
     CHECK(vm.run(sim, kObjectGroup, 0x1002).outcome == Outcome::Error);
+    // STOP doesn't read its target, so one naming a local the tree doesn't have still works, as the
+    // chessboard's Practice/Join ends.
+    Instruction stopOnLocal = stop;
+    stopOnLocal.operands[1] = 0x19;
+    stopOnLocal.operands[2] = 3;
+    code.add(kObjectGroup, 0x1003, bhav({stopOnLocal}));
+    CHECK(vm.run(sim, kObjectGroup, 0x1003).outcome == Outcome::True);
+    stopOnLocal.operands[0] = 0;
+    code.add(kObjectGroup, 0x1004, bhav({stopOnLocal}));
+    CHECK(vm.run(sim, kObjectGroup, 0x1004).outcome == Outcome::Error);
 }
 
 // Animate Overlay byte 15 flag 0x01 flips the overlay by temp 3 in place of byte 2's flag, as a bed's
@@ -425,6 +435,83 @@ void overlayEventsReachTheirTree() {
     CHECK(sim.thread.temps[1] == 9997 + 9998 + 9999 && sim.thread.temps[2] == 280 && sim.thread.temps[0] == 3 && sim.overlays.empty() && stops == 0);
 }
 
+// An overlay tells its clip's own events as it plays past them, each once, as a chair's carry clips
+// tell it to start and stop the slot IK pose. One played more than once tells only its fades, and one
+// restored from a save doesn't tell again what it told before the save.
+void overlaysTellTheirClipsEvents() {
+    MemoryCodeSource code;
+    // temp 1 += event id, and temp 0 counts the events.
+    code.add(kObjectGroup, 0x1001, bhav({
+        expr(owner::kTemp, 1, op::kAdd, owner::kParam, 0, 1, E),
+        expr(owner::kTemp, 0, op::kAdd, owner::kLiteral, 1, T, E),
+    }, 5));
+    ts2::sim::World world;
+    world.setAnimationEvents([](const std::string& name) -> const std::vector<ts2::sim::AnimationEvent>& {
+        static const std::vector<ts2::sim::AnimationEvent> carry{{200, 601}, {500, 602}}, none;
+        return name == "c2o-carry" ? carry : none;
+    });
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    Vm vm(code, {}, &world);
+    ts2::sim::PlayingOverlay overlay;
+    overlay.name = "c2o-carry";
+    overlay.lengthMs = 1000;
+    overlay.startMs = world.clockMs();
+    overlay.eventTree = 0x1001;
+    overlay.codeOwner = kObjectGroup;
+    sim.overlays.push_back(overlay);
+    const auto tell = [&] { ts2::sim::tellOverlayEvents(world, vm, sim.id, [](const ts2::sim::RunResult&) {}); };
+    world.advanceClock(100);
+    tell();
+    CHECK(sim.thread.temps[0] == 0);
+    world.advanceClock(150);
+    tell();
+    tell();
+    CHECK(sim.thread.temps[1] == 601 && sim.thread.temps[0] == 1);
+    world.advanceClock(550);
+    tell();
+    CHECK(sim.thread.temps[1] == 601 + 602 + 9997 && sim.thread.temps[0] == 3);
+    // Played twice: its fades and end only.
+    sim.thread.temps = {};
+    sim.overlays.clear();
+    overlay.startMs = world.clockMs();
+    overlay.plays = 2;
+    sim.overlays.push_back(overlay);
+    world.advanceClock(1000);
+    tell();
+    CHECK(sim.thread.temps[1] == 9997 + 9998 + 9999 && sim.thread.temps[0] == 3 && sim.overlays.empty());
+    // Restored from a save 300 ms in: its first mark was told before the save and isn't told again.
+    sim.thread.temps = {};
+    overlay.plays = 1;
+    overlay.startMs = world.clockMs() - 300;
+    overlay.restoredAtMs = world.clockMs();
+    sim.overlays.push_back(overlay);
+    world.advanceClock(300);
+    tell();
+    CHECK(sim.thread.temps[1] == 602 && sim.thread.temps[0] == 1);
+}
+
+// Two overlays of the same clip started together each tell their own events.
+void sameOverlaysTellTheirOwnEvents() {
+    MemoryCodeSource code;
+    code.add(kObjectGroup, 0x1001, bhav({expr(owner::kTemp, 0, op::kAdd, owner::kLiteral, 1, T, E)}, 5));
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    Vm vm(code, {}, &world);
+    ts2::sim::PlayingOverlay overlay;
+    overlay.name = "a-idle";
+    overlay.lengthMs = 1000;
+    overlay.startMs = world.clockMs();
+    overlay.eventTree = 0x1001;
+    overlay.codeOwner = kObjectGroup;
+    sim.overlays = {overlay, overlay};
+    world.advanceClock(800);
+    ts2::sim::tellOverlayEvents(world, vm, sim.id, [](const ts2::sim::RunResult&) {});
+    CHECK(sim.thread.temps[0] == 2 && sim.overlays.size() == 2 && sim.overlays[0].blendingOut && sim.overlays[1].blendingOut);
+    world.advanceClock(200);
+    ts2::sim::tellOverlayEvents(world, vm, sim.id, [](const ts2::sim::RunResult&) {});
+    CHECK(sim.thread.temps[0] == 6 && sim.overlays.empty());
+}
+
 // Animate Sim's event tree hears each SimAntics event of its clip once its time has played, in
 // order, with (event, the stack object it started with, percent played, 1, 0). The tree comes from
 // the starting tree's code owner, and my temps are put back after it.
@@ -449,8 +536,9 @@ void animateSimEventsReachTheirTree() {
     }, 5));
     ts2::sim::World world;
     world.setAnimationLengths([](const std::string&) -> std::optional<float> { return 1000.0f; });
-    world.setAnimationEvents([](const std::string& name) {
-        return name == "a2o-book-get" ? std::vector<ts2::sim::AnimationEvent>{{200, 2}, {600, 5}} : std::vector<ts2::sim::AnimationEvent>{};
+    world.setAnimationEvents([](const std::string& name) -> const std::vector<ts2::sim::AnimationEvent>& {
+        static const std::vector<ts2::sim::AnimationEvent> book{{200, 2}, {600, 5}}, none;
+        return name == "a2o-book-get" ? book : none;
     });
     auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
     sim.thread.stackObjectId = 2;
@@ -644,6 +732,59 @@ void animateObjectPlaysUntilStopped() {
     }
 }
 
+// Animate Object's event tree (bytes 4-5) hears the clip's own events, then 9997, 9998 and 9999 at
+// its end, run on the object that plays it. A clip Animate Stop ends tells nothing more.
+void animateObjectEventsReachTheirTree() {
+    Instruction animate;
+    animate.opcode = 0x0069;
+    animate.trueTarget = T;
+    animate.falseTarget = E;
+    const std::uint8_t bytes[] = {0x01, 0x00, 0xC0, 0x20, 0x01, 0x10, owner::kMyData, 0x0B, 0x00, 0x00, 0x00};
+    std::copy(std::begin(bytes), std::end(bytes), animate.operands.begin());
+    Instruction stop;
+    stop.opcode = 0x006C;
+    stop.trueTarget = T;
+    stop.falseTarget = E;
+    const std::uint8_t stopBytes[] = {0x01, 0x00, 0x00, owner::kMyData, 0x0B, 0x00, 0x86, 0x00};
+    std::copy(std::begin(stopBytes), std::end(stopBytes), stop.operands.begin());
+    MemoryCodeSource code;
+    code.addStrings(kObjectGroup, 0x86, {"o-pose", "o-drive"});
+    code.add(kObjectGroup, 0x1000, bhav({animate}));
+    // Data 0x20 += event, data 0x21 counts the events, data 0x22 = percent.
+    code.add(kObjectGroup, 0x1001, bhav({
+        expr(owner::kMyData, 0x20, op::kAdd, owner::kParam, 0, 1, E),
+        expr(owner::kMyData, 0x21, op::kAdd, owner::kLiteral, 1, 2, E),
+        expr(owner::kMyData, 0x22, op::kAssign, owner::kParam, 2, T, E),
+    }, 5));
+    code.add(kObjectGroup, 0x1002, bhav({stop}));
+    ts2::sim::World world;
+    world.setAnimationLengths([](const std::string&) -> std::optional<float> { return 1000.0f; });
+    world.setAnimationEvents([](const std::string& name) -> const std::vector<ts2::sim::AnimationEvent>& {
+        static const std::vector<ts2::sim::AnimationEvent> drive{{300, 5}}, none;
+        return name == "o-drive" ? drive : none;
+    });
+    auto& car = world.create(kObjectGroup, definition("Car", 0));
+    Vm vm(code, {}, &world);
+    const auto tell = [&] { ts2::sim::tellAnimateSimEvents(world, vm, car.id, [](const ts2::sim::RunResult&) {}, world.clockMs()); };
+    CHECK(vm.run(car, kObjectGroup, 0x1000).outcome == Outcome::True);
+    world.advanceClock(400);
+    tell();
+    CHECK(car.data[0x20] == 5 && car.data[0x21] == 1);
+    world.advanceClock(600);
+    tell();
+    CHECK(car.data[0x20] == 5 + 9997 + 9998 + 9999 && car.data[0x21] == 4 && car.data[0x22] == 100);
+    tell();
+    CHECK(car.data[0x21] == 4);
+    CHECK(vm.run(car, kObjectGroup, 0x1000).outcome == Outcome::True);
+    world.advanceClock(500);
+    tell();
+    CHECK(car.data[0x21] == 5);
+    CHECK(vm.run(car, kObjectGroup, 0x1002).outcome == Outcome::True);
+    world.advanceClock(1000);
+    tell();
+    CHECK(car.data[0x21] == 5);
+}
+
 // Animate Object byte 10 flag 0x02 reads the entry from the list for the age of the Sim in temp 5
 // (a dining chair sliding as a child sits), else from the object list, flag 0x20 from the running tree's lists instead of the
 // object's, and flag 0x01 takes the flip from temp 3.
@@ -703,7 +844,10 @@ void animateSimCarriesOnTheSavedClip() {
     code.add(kObjectGroup, 0x1001, bhav({expr(owner::kMyData, 0x20, op::kAdd, owner::kParam, 0, T, E)}, 1));
     ts2::sim::World world;
     world.setAnimationLengths([](const std::string&) -> std::optional<float> { return 4350.0f; });
-    world.setAnimationEvents([](const std::string&) { return std::vector<ts2::sim::AnimationEvent>{{1000, 2}, {3000, 5}}; });
+    world.setAnimationEvents([](const std::string&) -> const std::vector<ts2::sim::AnimationEvent>& {
+        static const std::vector<ts2::sim::AnimationEvent> events{{1000, 2}, {3000, 5}};
+        return events;
+    });
     auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
     sim.thread.temps[2] = 3;
     sim.resumedClip = ts2::sim::SimObject::ResumedClip{"a-soc-talkListen-side-loop150-AGREE-wow", 1.0f, 2000};
@@ -736,6 +880,40 @@ void animateFadesFitTheClip() {
     CHECK(none.inMs == 0 && none.outMs == 0);
 }
 
+// An empty entry is an error. A name the game has no clip for plays nothing and Animate Sim is true
+// at once (Hang Out's "-" pose changes). My age's list falls back to the adult one when its entry
+// names no clip.
+void animateSimWithoutAClipGoesOn() {
+    auto animate = [](std::uint8_t entry) {
+        Instruction in;
+        in.opcode = 0x006A;
+        in.trueTarget = T;
+        in.falseTarget = E;
+        in.operands[0] = entry;
+        in.operands[3] = 32;
+        in.operands[6] = 0x81;
+        return in;
+    };
+    MemoryCodeSource code;
+    code.addStrings(kObjectGroup, 0x81, {"", "-", "a-sit-crossleg"});
+    code.addStrings(kObjectGroup, 0x8A, {"", "-", "-"});
+    for (std::uint8_t entry = 0; entry < 3; ++entry) {
+        code.add(kObjectGroup, static_cast<std::uint16_t>(0x1000 + entry), bhav({animate(entry)}));
+    }
+    ts2::sim::World world;
+    world.setAnimationLengths([](const std::string& name) -> std::optional<float> {
+        return name == "a-sit-crossleg" ? std::optional<float>{2000.0f} : std::nullopt;
+    });
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    Vm vm(code, {}, &world);
+
+    CHECK(vm.run(sim, kObjectGroup, 0x1000).outcome == Outcome::Error);
+    CHECK(vm.run(sim, kObjectGroup, 0x1001).outcome == Outcome::True && !sim.animation);
+    sim.personData[0x3A] = 17;
+    CHECK(vm.run(sim, kObjectGroup, 0x1001).outcome == Outcome::True && !sim.animation);
+    CHECK(vm.run(sim, kObjectGroup, 0x1002).outcome == Outcome::Sleeping && sim.animation && sim.animation->name == "a-sit-crossleg");
+}
+
 // Animate Sim's byte 8 flag 0x01 takes the flip from temp 3 instead of byte 2 (the living chair's
 // entry, as the game's sit tree plays it).
 void animateSimFlipsFromTemp3() {
@@ -756,7 +934,10 @@ std::vector<Test> vmAnimationTests() {
         {"Animate Sim list 0x80 uses the global age lists", animateSimSpecialListUsesTheGlobalAgeLists},
         {"social animations are named for both Sims", socialAnimationsAreNamedForBothSims},
         {"Animate Sim waits for its animation", animateSimWaitsForItsAnimation},
+        {"Animate Sim without a clip goes on", animateSimWithoutAClipGoesOn},
         {"Overlay events reach their tree", overlayEventsReachTheirTree},
+        {"Overlays tell their clips' events", overlaysTellTheirClipsEvents},
+        {"Same overlays tell their own events", sameOverlaysTellTheirOwnEvents},
         {"Animate Sim events reach their tree", animateSimEventsReachTheirTree},
         {"Animate Stop ends overlays by kind and priority", animateStopEndsOverlaysByKindAndPriority},
         {"Animate Stop by name falls back to the adult clip", animateStopByNameFallsBackToTheAdultClip},
@@ -765,6 +946,7 @@ std::vector<Test> vmAnimationTests() {
         {"Animate Sim clips fade to fit", animateFadesFitTheClip},
         {"Animate Sim carries on the saved clip", animateSimCarriesOnTheSavedClip},
         {"Animate Object plays once, a count from temp 1, or until stopped", animateObjectPlaysUntilStopped},
+        {"Animate Object events reach their tree", animateObjectEventsReachTheirTree},
         {"Animate Object reads the Sim's list", animateObjectReadsTheSimsList},
     };
 }

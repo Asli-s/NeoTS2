@@ -300,8 +300,8 @@ PlacedItems currentItems(World& world, CodeSource& code, const std::map<std::uin
 
 } // namespace
 
-void RouteWorld::addObjects(World& world, CodeSource& code, const content::Lot& lot, const RouteModelLookup& models) {
-    objectModels_ = lot.objectModels;
+void RouteWorld::addObjects(World& world, CodeSource& code, const std::map<std::uint32_t, std::string>& objectModels, const RouteModelLookup& models) {
+    objectModels_ = objectModels;
     world.nextAfter(0, [&](const SimObject& object) {
         const PlacedItems placed = currentItems(world, code, objectModels_, models, object, levels());
         for (const auto& item : placed.items) {

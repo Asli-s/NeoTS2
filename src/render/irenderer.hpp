@@ -95,7 +95,8 @@ public:
     // The color the frame starts from (RGB, 0 to 1).
     virtual void setClearColor(float r, float g, float b) = 0;
     // What to draw over the scene, in order, from the next frame on, and whether to draw the scene.
-    virtual void showSprites(std::vector<Sprite> sprites, bool scene = true) = 0;
+    // Takes the sprites and hands back the last ones in `sprites`, so the caller reuses their storage.
+    virtual void showSprites(std::vector<Sprite>& sprites, bool scene = true) = 0;
     // How many times larger than their pictures the sprites are drawn (the UI's size, 1 as the game
     // draws it). Above 1 their pictures are enlarged sharply.
     virtual void setSpriteScale(float scale) = 0;
@@ -170,6 +171,9 @@ public:
     virtual void setShadows(Shadows shadows) = 0;
     // Brightens a lot object (by its game object id, 0 for none) by adding `ambient` to its ambient light.
     virtual void setHighlight(std::uint32_t object, float ambient) = 0;
+    // Draws an uploaded instance with this shape colour from the next frame on, none to stop (see
+    // scene::Instance::shapeColor).
+    virtual void setShapeColor(std::size_t instance, std::optional<std::array<float, 4>> color) = 0;
 };
 
 } // namespace ts2::render

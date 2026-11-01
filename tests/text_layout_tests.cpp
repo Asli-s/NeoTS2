@@ -199,6 +199,101 @@ void textGuardsHold() {
     CHECK(wide.pixels.width == static_cast<std::uint32_t>(ts2::ui::kMaxTextImage));
 }
 
+// A window removed twice frees its slot once, so the next two windows get slots of their own.
+void removedWindowsFreeTheirSlotOnce() {
+    Rig rig("Plain = \"NeoTS2 Test\", \"20\", \"bold\"\n");
+    const int gone = rig.screen.addWindows({window("IGZWinText", "(0,0,200,40)", "Plain", "lefttop", "A")}, 0, 0);
+    rig.screen.remove(gone);
+    rig.screen.remove(gone);
+    const int first = rig.screen.addWindows({window("IGZWinText", "(0,0,200,40)", "Plain", "lefttop", "B")}, 0, 0);
+    const int second = rig.screen.addWindows({window("IGZWinText", "(0,0,200,40)", "Plain", "lefttop", "C")}, 0, 0);
+    CHECK(first != second);
+    rig.screen.remove(first);
+    CHECK(rig.screen.textHeight(second) == measures(20).height);
+}
+
+// The mouse goes to the button drawn on top, also after an earlier window is raised over a later one.
+void theMouseGoesToTheWindowOnTop() {
+    Rig rig("Button = \"NeoTS2 Test\", \"20\", \"bold\"\n");
+    const int under = rig.screen.addWindows({window("IGZWinBtn", "(0,0,100,34)", "Button", "center", "")}, 0, 0);
+    const int over = rig.screen.addWindows({window("IGZWinBtn", "(0,0,100,34)", "Button", "center", "")}, 50, 0);
+    CHECK(rig.screen.buttonAt(60, 10) == over && rig.screen.buttonAt(10, 10) == under);
+    rig.screen.raise(under);
+    CHECK(rig.screen.buttonAt(60, 10) == under && rig.screen.buttonAt(120, 10) == over);
+}
+
+// The game's mouse rules: a window on top keeps the mouse, also on its bare parts, unless it is
+// disabled, ignores the mouse or is a container away from its children. A disabled button lets the
+// mouse through too.
+void windowsKeepTheMouseAsInTheGame() {
+    Rig rig("Button = \"NeoTS2 Test\", \"20\", \"bold\"\n");
+    auto panel = [](std::vector<std::pair<std::string, std::string>> extra) {
+        ts2::ui::Window w{{{"iid", "IGZWinGen"}, {"winflag_visible", "yes"}, {"area", "(0,0,100,100)"}}, {}};
+        w.attributes.insert(w.attributes.end(), extra.begin(), extra.end());
+        return w;
+    };
+    const int button = rig.screen.addWindows({window("IGZWinBtn", "(0,0,100,34)", "Button", "center", "")}, 0, 0);
+    const int cover = rig.screen.addWindows({panel({})}, 0, 0);
+    CHECK(!rig.screen.buttonAt(10, 10) && rig.screen.mouseWindow(10, 10) == cover);
+    rig.screen.remove(cover);
+    for (const auto& flag : {std::pair<std::string, std::string>{"winflag_enabled", "no"}, {"winflag_ignoremouse", "yes"}}) {
+        const int through = rig.screen.addWindows({panel({flag})}, 0, 0);
+        CHECK(rig.screen.buttonAt(10, 10) == button);
+        rig.screen.remove(through);
+    }
+    // A container, and a generic window of the child-only class with winflag_mousetrans, take the
+    // mouse only over a shown child, and the child gets it there.
+    for (const auto& kind : {std::vector<std::pair<std::string, std::string>>{{"winflag_container", "yes"}},
+                             {{"clsid", "0x49495E7F"}, {"winflag_mousetrans", "yes"}}}) {
+        auto box = panel(kind);
+        box.children.push_back(window("IGZWinBtn", "(0,50,100,84)", "Button", "center", ""));
+        const int holder = rig.screen.addWindows({box}, 0, 0);
+        const auto child = rig.screen.buttonAt(10, 60);
+        CHECK(rig.screen.buttonAt(10, 10) == button && child && *child != button && rig.screen.mouseWindow(10, 90) != holder);
+        rig.screen.remove(holder);
+    }
+    const int top = rig.screen.addWindows({window("IGZWinBtn", "(0,0,100,34)", "Button", "center", "")}, 0, 0);
+    CHECK(rig.screen.buttonAt(10, 10) == top);
+    rig.screen.setEnabled(top, false);
+    CHECK(rig.screen.buttonAt(10, 10) == button);
+}
+
+// A buffered window with winflag_mousetrans and winflag_premulalpha lets the mouse through where its
+// picture is see-through.
+void seeThroughWindowsLetTheMouseThrough() {
+    Rig rig("Button = \"NeoTS2 Test\", \"20\", \"bold\"\n");
+    const int button = rig.screen.addWindows({window("IGZWinBtn", "(0,0,100,34)", "Button", "center", "")}, 0, 0);
+    ts2::ui::Window w{{{"iid", "IGZWinBMP"}, {"winflag_visible", "yes"}, {"area", "(0,0,100,100)"}, {"winflag_pbuff", "yes"},
+                       {"winflag_mousetrans", "yes"}, {"winflag_premulalpha", "yes"}},
+                      {}};
+    const int picture = rig.screen.addWindows({w}, 0, 0);
+    ts2::tga::Pixels half;
+    half.width = 100;
+    half.height = 100;
+    half.rgba.assign(std::size_t{100} * 100 * 4, 255);
+    for (std::size_t y = 0; y < 100; ++y) {
+        for (std::size_t x = 0; x < 50; ++x) {
+            half.rgba[(y * 100 + x) * 4 + 3] = 0;
+        }
+    }
+    rig.screen.setImage(picture, std::move(half));
+    CHECK(rig.screen.buttonAt(10, 10) == button && rig.screen.mouseWindow(60, 10) == picture);
+}
+
+// A detached window keeps its place on screen and is drawn just under the window given.
+void detachedWindowsKeepTheirPlace() {
+    Rig rig("Button = \"NeoTS2 Test\", \"20\", \"bold\"\n");
+    ts2::ui::Window box{{{"iid", "IGZWinGen"}, {"winflag_visible", "yes"}, {"area", "(0,0,200,200)"}}, {}};
+    box.children.push_back(window("IGZWinBtn", "(10,10,60,40)", "Button", "center", ""));
+    const int parent = rig.screen.addWindows({box}, 100, 100);
+    const int cover = rig.screen.addWindows({window("IGZWinBtn", "(0,0,30,30)", "Button", "center", "")}, 110, 110);
+    const auto child = rig.screen.buttonAt(150, 130);
+    CHECK(child.has_value());
+    rig.screen.detach(*child, cover);
+    rig.screen.move(parent, 0, 0);
+    CHECK(rig.screen.buttonAt(150, 130) == child && rig.screen.buttonAt(115, 115) == cover);
+}
+
 } // namespace
 
 std::vector<Test> textLayoutTests() {
@@ -209,5 +304,10 @@ std::vector<Test> textLayoutTests() {
         {"button captions take the line spacing", buttonCaptionsTakeTheLineSpacing},
         {"font styles share their font", fontStylesShareTheirFont},
         {"text guards hold", textGuardsHold},
+        {"removed windows free their slot once", removedWindowsFreeTheirSlotOnce},
+        {"the mouse goes to the window on top", theMouseGoesToTheWindowOnTop},
+        {"detached windows keep their place", detachedWindowsKeepTheirPlace},
+        {"windows keep the mouse as in the game", windowsKeepTheMouseAsInTheGame},
+        {"see-through windows let the mouse through", seeThroughWindowsLetTheMouseThrough},
     };
 }

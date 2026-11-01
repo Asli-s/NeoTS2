@@ -46,4 +46,11 @@ bool blendsBabyFace(const std::optional<faceshape::FaceShape>& a, const std::opt
 void blendBabyFace(scenegraph::Mesh& mesh, const std::optional<faceshape::FaceShape>& a, const std::optional<faceshape::FaceShape>& b,
                    const FacePicks& picks, const FaceMasks& masks, const std::vector<FacePair>& pairs);
 
+// Turns a base face `mesh` into a face template's (face archetype), as the game builds a made Sim's
+// face at full weight: each vertex of the template's mesh, group by group, takes the place of every
+// base vertex at its texture coordinates, the last one winning. Base vertices it doesn't reach, and
+// the hair and neck, stay as they are. Normals are made again from the new triangles except where
+// the "normals" mask keeps the base's.
+void applyFaceTemplate(scenegraph::Mesh& mesh, const scenegraph::Mesh& faceTemplate, const FaceMasks& masks);
+
 } // namespace ts2::scene

@@ -129,6 +129,7 @@ bool Execution::primitive(const bhav::Instruction& in, Frame& f) {
     case kSoundEventOpcode:       return soundEvent(in, f);
     case kRayTraceOpcode:         return rayTrace(in, f);
     case kChangeOutfitOpcode:     return changeOutfit(in, f);
+    case kAgeOpcode:              return age(in);
     case kFindBestObjectOpcode:   return findBestObject(in, f);
     case kFindBestInteractionOpcode: return findBestInteraction(in);
     case kChangeLightOpcode:      return changeLight(in, f);
@@ -204,6 +205,26 @@ RunResult tooManyNestedChecks() {
     r.outcome = Outcome::DepthLimit;
     r.reason = "too many nested check trees";
     return r;
+}
+
+// Each frame's tree and node from the bottom up. A deep stack keeps only its first and last
+// kShownCalls frames, and a loop shows in the last ones.
+std::string callChain(const std::vector<Frame>& frames) {
+    constexpr std::size_t kShownCalls = 12;
+    const bool cut = frames.size() > 2 * kShownCalls;
+    std::string text;
+    for (std::size_t i = 0; i < frames.size(); ++i) {
+        if (cut && i == kShownCalls) {
+            text += " > (" + std::to_string(frames.size() - 2 * kShownCalls) + " more)";
+            i = frames.size() - kShownCalls;
+        }
+        if (!text.empty()) {
+            text += " > ";
+        }
+        text += frames[i].code ? frames[i].code->name : "?";
+        text += " at " + std::to_string(frames[i].pc);
+    }
+    return text;
 }
 
 } // namespace
@@ -310,6 +331,7 @@ void Vm::startCreated(SimObject& created, const ObjectType& type) {
         if (r.outcome != Outcome::True && r.outcome != Outcome::False && r.outcome != Outcome::Sleeping &&
             !created.failedRun) {
             created.failedRun = r.detail.empty() ? r.reason : r.reason + " " + r.detail;
+            created.failedRunGap = r.outcome == Outcome::Unsupported;
         }
     };
 
@@ -332,8 +354,71 @@ void Vm::startCreated(SimObject& created, const ObjectType& type) {
         }
         finishSingleTileReset(created, type);
     }
+    markVisitor(created);
     if (created.thread.isRunning()) {
         note(resume(created));
+    }
+}
+
+// The game tells the lot's household of every object it makes, and the household makes a new Sim of
+// Person Type 0 (person data 0x20) a visitor (1), unless it is one of the household's Sims. A
+// visitor passes outside doors only once greeted. Not known yet: when the game sets its own Sims back
+// to 0, so they are kept at 0 here.
+void Vm::markVisitor(SimObject& created) {
+    constexpr std::size_t kPersonTypePersonData = 0x20;
+    constexpr std::int16_t kVisitor = 1;
+    if (!created.isPerson() || world_ == nullptr || created.personData[kPersonTypePersonData] != 0) {
+        return;
+    }
+    if (const auto household = world_->lotHousehold()) {
+        const auto members = world_->familyMemberGuids(*household);
+        if (std::find(members.begin(), members.end(), created.definition.guid()) != members.end()) {
+            return;
+        }
+    }
+    created.personData[kPersonTypePersonData] = kVisitor;
+}
+
+// The game starts a multi-tile object it made through its lead, as the lot load does: every part
+// gets the reset a new object gets, then each part in turn runs its Init and takes the two
+// placement fields. The lead's Main then runs until it first waits. Other parts with a Main run
+// theirs from their next turn.
+void Vm::startCreatedParts(std::span<SimObject* const> parts) {
+    constexpr std::uint16_t kInit = 0;  // OBJf entry
+    if (parts.empty()) {
+        return;
+    }
+    if (nestedRuns_ >= kMaxNestedRuns) {
+        throw Stop{Outcome::DepthLimit, "too many nested runs", "creating an object"};
+    }
+    const NestedRun counted(nestedRuns_);
+    auto note = [](SimObject& object, const RunResult& r) {
+        if (r.outcome != Outcome::True && r.outcome != Outcome::False && r.outcome != Outcome::Sleeping &&
+            !object.failedRun) {
+            object.failedRun = r.detail.empty() ? r.reason : r.reason + " " + r.detail;
+            object.failedRunGap = r.outcome == Outcome::Unsupported;
+        }
+    };
+    for (SimObject* part : parts) {
+        if (const ObjectType* type = code_.objectType(part->definition.guid())) {
+            resetObject(*part, *type, code_);
+        }
+    }
+    for (SimObject* part : parts) {
+        const ObjectType* type = code_.objectType(part->definition.guid());
+        if (type == nullptr) {
+            continue;
+        }
+        const auto* functions = code_.objectFunctions(*type);
+        if (functions != nullptr && kInit < functions->size() && (*functions)[kInit].action != 0 &&
+            hasTree(type->group, (*functions)[kInit].action)) {
+            note(*part, runOnce(*part, type->group, (*functions)[kInit].action));
+        }
+        finishSingleTileReset(*part, *type);
+    }
+    SimObject& lead = *parts.front();
+    if (lead.thread.isRunning()) {
+        note(lead, resume(lead));
     }
 }
 
@@ -364,7 +449,7 @@ SimObject* Vm::create(std::uint32_t guid) {
     if (type == nullptr || world_ == nullptr) {
         return nullptr;
     }
-    SimObject& created = world_->create(type->group, type->definition, type->containerSlots);
+    SimObject& created = world_->create(type->group, type->definition, containerSlotsOf(code_, *type));
     startCreated(created, *type);
     return &created;
 }
@@ -515,7 +600,7 @@ private:
 };
 
 void Vm::RunState::checkDepth() {
-    if (frames_.size() >= vm_.limits_.maxDepth) {
+    if (frames_.size() > vm_.limits_.maxDepth) {
         throw Stop{Outcome::DepthLimit, "call depth limit reached",
                    std::to_string(vm_.limits_.maxDepth)};
     }
@@ -792,6 +877,11 @@ Vm::RunState::Next Vm::RunState::step() {
         return branchOrWait(ex_.animateSim(in, f));
     case kMakeNewCharacterOpcode:
         return branchOrWait(ex_.makeNewCharacter(in, f));
+    case kGenericSimsCallOpcode:
+        if (in.operands[0] == kLoadCharacterGenericCall) {
+            return branchOrWait(ex_.loadCharacter(f));
+        }
+        return branch(ex_.primitive(in, f));
     case kSleepOpcode:
         return sleep(in, f);
     default:
@@ -988,6 +1078,7 @@ RunResult Vm::execute(ThreadState& thread, std::uint32_t objectGroup, SimObject*
     ex.testedLine = testedLine_ ? &*testedLine_ : nullptr;
     ex.runCheck = std::bind_front(&Vm::checkFromTree, this);
     ex.startCreated = std::bind_front(&Vm::startCreated, this);
+    ex.startCreatedParts = std::bind_front(&Vm::startCreatedParts, this);
     ex.tellSimsObjectGoes = std::bind_front(&Vm::tellSimsObjectGoes, this);
     ex.runOnMe = std::bind_front(&Vm::runOnTop, this, std::ref(thread), me);
     ex.runNow = std::bind_front(&Vm::runNow, this);
@@ -1033,6 +1124,9 @@ RunResult Vm::execute(ThreadState& thread, std::uint32_t objectGroup, SimObject*
         result.group = frames.back().group;
         result.instance = frames.back().instance;
         result.pc = frames.back().pc;
+    }
+    if (result.outcome == Outcome::DepthLimit) {
+        result.calls = callChain(frames);
     }
     if (result.outcome != Outcome::Sleeping) {
         if (world_ != nullptr) {

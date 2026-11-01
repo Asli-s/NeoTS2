@@ -163,6 +163,8 @@ constexpr std::uint8_t kNewCharacterParent1Neighbor = 0x02;  // parent 1 is a ne
 constexpr std::uint8_t kNewCharacterParent2Neighbor = 0x04;
 constexpr std::uint8_t kNewCharacterTemplateInTemps = 0x08;
 constexpr std::uint8_t kNewCharacterTemplateFromToken = 0x10;
+constexpr std::uint8_t kNewCharacterOutfit = 0x40;         // clothes from an outfit object
+constexpr std::uint8_t kNewCharacterOutfitInTemps = 0x80;  // its GUID in temps 2 and 3, else bytes 10 to 13
 constexpr std::uint8_t kRemoveReturnImmediately = 0x01;
 // Objects the game refuses to remove (a fixed list).
 constexpr std::uint32_t kProtectedGuids[] = {
@@ -218,6 +220,7 @@ constexpr std::uint16_t kChangeMaterialOpcode = 0x006D;
 constexpr std::uint16_t kSoundEventOpcode = 0x0017;
 constexpr std::uint16_t kRayTraceOpcode = 0x0078;
 constexpr std::uint16_t kChangeOutfitOpcode = 0x0079;
+constexpr std::uint16_t kAgeOpcode = 0x0075;
 constexpr std::uint16_t kDialogOpcode = 0x0024;
 constexpr std::uint16_t kCameraControlOpcode = 0x0023;
 // Dialog types (byte 5).
@@ -267,8 +270,10 @@ constexpr std::uint8_t kArraySortAscending = 13;
 // Generic Sims Calls with no effect on simulation state: camera, UI, preloading and 3D sync. 0x1C
 // floats the money a transaction moved (temp 0 x temp 2) over the object in temp 1 (UI message 0xD6).
 constexpr std::uint8_t kNoOpGenericCalls[] = {
-    0x01, 0x02, 0x03, 0x12, 0x18, 0x1C, 0x1D, 0x1E, 0x1F, 0x28, 0x29, 0x2A, 0x2C, 0x33,
+    0x01, 0x02, 0x03, 0x12, 0x18, 0x1C, 0x1E, 0x1F, 0x28, 0x29, 0x2A, 0x2C, 0x33,
 };
+// Generic call 0x1D waits for the character of the neighbor in temp 0 to load (see loadCharacter).
+constexpr std::uint8_t kLoadCharacterGenericCall = 0x1D;
 // Generic call 0x21 marks the stack object's route footprint as changed. The route world updates
 // it before it is next used. True.
 constexpr std::uint8_t kUpdateFootprintGenericCall = 0x21;
@@ -532,6 +537,8 @@ public:
         runOnObject;
     // Starts a newly created object (see Vm::startCreated). Set by the VM.
     std::function<void(SimObject& created, const ObjectType& type)> startCreated;
+    // Starts the parts of a newly created multi-tile object (see Vm::startCreatedParts). Set by the VM.
+    std::function<void(std::span<SimObject* const> parts)> startCreatedParts;
     // Tells every Sim an object goes away (see Vm::tellSimsObjectGoes). Set by the VM.
     std::function<void(std::int16_t object)> tellSimsObjectGoes;
     // Where Add/Change the Action String puts its lines and icon while a candidate's check tree runs.
@@ -663,6 +670,8 @@ public:
     std::uint32_t madeCharacterType(const ObjectType& from, std::uint32_t top);
     std::vector<std::int16_t> wantSimList(const std::string& treeName, std::int16_t sim);
     std::optional<bool> makeNewCharacter(const bhav::Instruction& in, Frame& f);
+    void nameNewCharacter(std::int16_t id, const ObjectType& type, int species, int gender);
+    std::optional<bool> loadCharacter(Frame& f);
     std::optional<bool> makeChildren(const bhav::Instruction& in, Frame& f, SimObject& holder, std::optional<std::uint32_t> templateGuid);
     std::int16_t speciesFlag(std::int16_t neighbor);
     std::optional<std::int16_t> makeChild(std::int16_t parent1, std::int16_t parent2, std::optional<std::uint32_t> templateGuid);
@@ -673,6 +682,7 @@ public:
     bool relationship(const bhav::Instruction& in, Frame& f);
     bool findWorstMotives(const bhav::Instruction& in);
     bool changeOutfit(const bhav::Instruction& in, Frame& f);
+    bool age(const bhav::Instruction& in);
     bool testSimInteractingWith();
     bool followSim();
     bool setMotiveChange(const bhav::Instruction& in, Frame& f);
@@ -696,6 +706,7 @@ public:
     bool tileRefuses(const CreateSpot& spot, std::uint8_t flags, std::uint32_t guid);
     std::optional<CreateSpot> tileInFront(const SimObject* ref);
     bool createObject(const bhav::Instruction& in, Frame& f);
+    bool createParts(const ObjectType& master, std::uint8_t placement, std::uint8_t flags);
     void passToMain(SimObject& created, std::uint8_t flags);
     bool breakPoint(const bhav::Instruction& in, Frame& f);
     bool randomNumber(const bhav::Instruction& in, Frame& f);

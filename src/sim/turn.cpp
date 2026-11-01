@@ -65,6 +65,7 @@ std::string walkClip(std::int16_t lifeStage, std::int16_t gender) {
     if (lifeStage == 2) return "p-walk";
     if (lifeStage <= 15) return "c-walk-alt0-normal";
     if (lifeStage <= 18) return "t-" + sex + "walk-alt0-normal";
+    if (lifeStage > 50) return "e-" + sex + "walk-alt0-normal";
     return "a-" + sex + "walk-alt0-normal";
 }
 
@@ -74,6 +75,7 @@ std::string walkShortClip(std::int16_t lifeStage, std::int16_t gender) {
     if (lifeStage == 2) return "p-walkShort";
     if (lifeStage <= 15) return "c-walkShort-alt0-normal";
     if (lifeStage <= 18) return "t-" + sex + "walkShort-alt0-normal";
+    if (lifeStage > 50) return "e-" + sex + "walkShort-alt0-normal";
     return "a-" + sex + "walkShort-alt0-normal";
 }
 
@@ -86,7 +88,7 @@ std::string walkStyleClip(std::int16_t lifeStage, std::int16_t gender, int style
         return "";
     }
     const std::string sex = gender == 1 ? "female-" : "male-";
-    const std::string prefix = lifeStage <= 15 ? "c-" : lifeStage <= 18 ? "t-" + sex : "a-" + sex;
+    const std::string prefix = lifeStage <= 15 ? "c-" : lifeStage <= 18 ? "t-" + sex : lifeStage > 50 ? "e-" + sex : "a-" + sex;
     return prefix + (shortOne ? "walkShort" : "walk") + "-alt" + std::to_string(style) + "-" + kStyles[style];
 }
 
@@ -94,7 +96,12 @@ std::string walkPoseClip(std::int16_t lifeStage) {
     if (lifeStage <= 1) return "";
     if (lifeStage == 2) return "p-walkPose";
     if (lifeStage <= 15) return "c-walkPose";
+    if (lifeStage > 50) return "e-walkPose";
     return "a-walkPose";
+}
+
+std::string adultClipFor(const std::string& name) {
+    return name.starts_with("e-") ? "a-" + name.substr(2) : "";
 }
 
 float compassHeading(int direction) {
@@ -104,6 +111,10 @@ float compassHeading(int direction) {
 std::int16_t compassDirection(float heading) {
     const float h = heading - 2 * kPi * std::floor(heading / (2 * kPi));
     return static_cast<std::int16_t>(static_cast<int>(std::floor(2.5f - h / kQuarterPi)) & 7);
+}
+
+float drawnHeading(float heading) {
+    return compassHeading(compassDirection(heading));
 }
 
 float wrapAngle(float angle) {

@@ -1388,14 +1388,18 @@ void perPixelLightsFollowTheShaderScripts() {
         return l;
     };
     using V = std::vector<std::size_t>;
+    auto perPixel = [](const ts2::scene::ObjectLighting& l, std::size_t usable) {
+        const auto chosen = ts2::scene::perPixelLights(l, usable);
+        return V(chosen.begin(), chosen.end());
+    };
     CHECK(ts2::scene::perPixelLights(set({}), 8).empty());
-    CHECK((ts2::scene::perPixelLights(set({'d'}), 8) == V{0}));
-    CHECK((ts2::scene::perPixelLights(set({'d', 'd', 'd', 'd', 'd'}), 8) == V{0, 1, 2}));
-    CHECK((ts2::scene::perPixelLights(set({'d', 'd', 's', 'p'}), 8) == V{0, 1, 3}));  // points before spots
-    CHECK((ts2::scene::perPixelLights(set({'d', 's'}), 8) == V{0, 1}));
-    CHECK((ts2::scene::perPixelLights(set({'p', 'p'}), 8) == V{0}));
-    CHECK((ts2::scene::perPixelLights(set({'d', 'd', 'd', 'p'}), 8) == V{0, 1, 2}));
-    CHECK((ts2::scene::perPixelLights(set({'d', 'p'}), 1) == V{0}));  // only the lights drawn with count
+    CHECK((perPixel(set({'d'}), 8) == V{0}));
+    CHECK((perPixel(set({'d', 'd', 'd', 'd', 'd'}), 8) == V{0, 1, 2}));
+    CHECK((perPixel(set({'d', 'd', 's', 'p'}), 8) == V{0, 1, 3}));  // points before spots
+    CHECK((perPixel(set({'d', 's'}), 8) == V{0, 1}));
+    CHECK((perPixel(set({'p', 'p'}), 8) == V{0}));
+    CHECK((perPixel(set({'d', 'd', 'd', 'p'}), 8) == V{0, 1, 2}));
+    CHECK((perPixel(set({'d', 'p'}), 1) == V{0}));  // only the lights drawn with count
 }
 
 // Incidence maps as the game makes them of its light maps: 2 x 2 blocks of a wall light-map

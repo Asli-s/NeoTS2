@@ -31,6 +31,12 @@ namespace app {
 // clock, the speed buttons) and the options menu the puck's Options button opens in the live panel's
 // place. The puck's wall button opens a small menu of the four wall modes. It closes when one is
 // picked or the mouse leaves the area around it.
+// The live panel's portrait windows as its script describes them (see portraitWindows).
+struct PortraitWindows {
+    ts2::tga::Pixels shape, shadowShape;
+    int shadowX = 5, shadowY = 5;
+};
+
 class LotUi {
 public:
     LotUi(ts2::ui::Screen& screen, int width, int height);
@@ -43,11 +49,14 @@ public:
         objectThumbnailsFile_ = std::move(file);
         objectThumbnails_.reset();
         objectPictures_.clear();
+        wantsPending_ = true;
         careerIcons_.clear();
         rewardObjects_.reset();
     }
     void open();
     void close();
+    // Whether testingCheatsEnabled is on. The version text only looks at it while the panels load.
+    void setTestingCheats(bool on) { testingCheats_ = on; }
     // Hides every panel but the pause frame while the free camera is on, and brings them back as
     // they were.
     void hideForFreeCamera(bool hide);
@@ -126,6 +135,7 @@ private:
 
     ts2::ui::Screen& screen_;
     int width_, height_;
+    bool testingCheats_ = false;
     int puck_ = -1, live_ = -1, options_ = -1;
     int version_ = -1;  // the version text, -1 when it isn't shown
     int loaded_ = 0;  // parts of the panels loaded (see load), 2 when all are
@@ -144,14 +154,22 @@ private:
     bool rewardsPaused_ = false;
     // Hidden for the free camera, and whether the options menu was open then.
     bool hidden_ = false, optionsWereShown_ = false;
+    bool hasMembers_ = false;  // the household is known and has anyone in it
     std::int16_t clickedSim_ = 0;
     // Each household Sim's portrait, and whose the live panel shows (-1: none yet).
     std::map<std::int16_t, ts2::tga::Pixels> portraits_;
     int portraitShown_ = -1;
+    PortraitWindows portraitWindows_;
     std::int16_t tracked_ = 0;
     std::optional<bool> starShown_;  // whether the live panel's star shows, none until it is set
     // What the names shown were made from (see showNames), and the same for this frame.
     std::vector<std::int32_t> namesShown_, namesScratch_;
+    // The wants and fears the wants panel was made from, and what it shows (see showLife).
+    std::vector<ts2::swaf::Want> wantsSaved_, fearsSaved_;
+    std::vector<WantsPanel::Want> wantsShown_, fearsShown_;
+    std::int16_t wantsSim_ = 0;
+    std::uint32_t wantsNames_ = 0;
+    bool wantsPending_ = true;
     ts2::content::TargetPictures targets_;
     // Relationship thumbnails' pictures, at their portrait window's size.
     ts2::content::TargetPictures relationshipPictures_{ts2::content::readCharacterPortrait, 56};

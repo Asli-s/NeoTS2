@@ -1,6 +1,8 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -35,6 +37,24 @@ struct ObjectDefinition {
 
     std::uint16_t field(std::size_t index) const {
         return index < fields.size() ? fields[index] : 0;
+    }
+    // A field as scripts number them (GetObjectDefinitionField): 0 to 107 a field itself, signed, and
+    // 201 to 210 a 32-bit value of two fields, low first, starting at fields 0x00, 0x0E (the GUID),
+    // 0x46 (an NPC's template GUID), 0x48, 0x5C, 0x15, 0x17, 0x1D, 0x34 and 0x40. None for other numbers.
+    std::optional<std::int32_t> scriptField(std::size_t index) const {
+        constexpr std::size_t kFirstPair = 201;
+        constexpr std::array<std::size_t, 10> kPairs{0x00, 0x0E, 0x46, 0x48, 0x5C, 0x15, 0x17, 0x1D, 0x34, 0x40};
+        if (index < kMaxFields) {
+            return static_cast<std::int16_t>(field(index));
+        }
+        if (index >= kFirstPair && index - kFirstPair < kPairs.size()) {
+            const std::size_t low = kPairs[index - kFirstPair];
+            return static_cast<std::int32_t>(static_cast<std::uint32_t>(field(low)) | static_cast<std::uint32_t>(field(low + 1)) << 16);
+        }
+        return std::nullopt;
+    }
+    bool isMultiTileMaster() const {
+        return field(field::kMultiTileMasterId) != 0 && field(field::kMultiTileSubIndex) == 0xFFFF;
     }
     std::uint32_t guid() const {
         return static_cast<std::uint32_t>(field(field::kGuid1)) |

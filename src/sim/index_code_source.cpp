@@ -1,5 +1,7 @@
 #include "sim/index_code_source.hpp"
 
+#include <algorithm>
+
 #include "diag/log.hpp"
 #include "formats/bcon.hpp"
 #include "formats/glob.hpp"
@@ -187,6 +189,8 @@ const ObjectType* IndexCodeSource::objectType(std::uint32_t guid) {
                 const std::uint16_t multiTileId = definition.field(objd::field::kMultiTileMasterId);
                 if (multiTileId != 0 && definition.field(objd::field::kMultiTileSubIndex) == 0xFFFF) {
                     multiTileMasters_.try_emplace(static_cast<std::uint64_t>(r.entry.key.group) << 16 | multiTileId, id);
+                } else if (multiTileId != 0 && !objectTypes_.contains(id)) {
+                    multiTilePartGuids_[static_cast<std::uint64_t>(r.entry.key.group) << 16 | multiTileId].push_back(id);
                 }
                 ObjectType type{r.entry.key.group, std::move(definition), static_cast<std::uint16_t>(r.entry.key.instance),
                                 containerSlots, std::move(slotHeights), std::move(routingSlots), std::move(containerEntries),
@@ -236,6 +240,26 @@ std::optional<std::vector<std::uint8_t>> IndexCodeSource::characterResource(std:
     }
 }
 
+std::vector<std::pair<std::uint32_t, std::vector<std::uint8_t>>> IndexCodeSource::groupResources(std::uint32_t type,
+                                                                                                    std::uint32_t group) {
+    std::vector<std::pair<std::uint32_t, const content::ResourceIndex::Resource*>> found;
+    for (const auto& r : index_.resources()) {
+        if (r.entry.key.type == type && r.entry.key.group == group) {
+            found.emplace_back(r.entry.key.instance, &r);
+        }
+    }
+    std::sort(found.begin(), found.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::vector<std::pair<std::uint32_t, std::vector<std::uint8_t>>> out;
+    for (const auto& [instance, r] : found) {
+        try {
+            out.emplace_back(instance, index_.read(*r));
+        } catch (const std::exception& ex) {
+            diag::warning(std::format("resource 0x{:08X} of 0x{:08X} can't be read: {}", type, group, ex.what()));
+        }
+    }
+    return out;
+}
+
 const fcns::Tunings* IndexCodeSource::tunings() {
     constexpr std::uint32_t kTunings = 0x46434E53;
     constexpr std::uint32_t kAutonomyTunings = 2;
@@ -281,6 +305,31 @@ const ObjectType* IndexCodeSource::multiTileMaster(const ObjectType& part) {
     objectType(0);  // loads the types (and masters) on first use
     const auto it = multiTileMasters_.find(static_cast<std::uint64_t>(part.group) << 16 | multiTileId);
     return it != multiTileMasters_.end() ? objectType(it->second) : nullptr;
+}
+
+std::vector<const ObjectType*> IndexCodeSource::multiTileParts(const ObjectType& master) {
+    constexpr std::size_t kLeadPartField = 0x3F;
+    const std::uint16_t multiTileId = master.definition.field(objd::field::kMultiTileMasterId);
+    if (multiTileId == 0) {
+        return {};
+    }
+    objectType(0);  // loads the types (and parts) on first use
+    const auto it = multiTilePartGuids_.find(static_cast<std::uint64_t>(master.group) << 16 | multiTileId);
+    if (it == multiTilePartGuids_.end()) {
+        return {};
+    }
+    std::vector<const ObjectType*> parts;
+    for (const std::uint32_t guid : it->second) {
+        if (const ObjectType* part = objectType(guid)) {
+            parts.push_back(part);
+        }
+    }
+    const auto lead = std::ranges::find_if(parts, [](const ObjectType* p) { return p->definition.field(kLeadPartField) != 0; });
+    if (lead == parts.end()) {
+        return {};
+    }
+    std::rotate(parts.begin(), lead, lead + 1);
+    return parts;
 }
 
 const std::vector<std::string>& IndexCodeSource::strings(std::uint32_t type, std::uint32_t group, std::uint16_t instance,

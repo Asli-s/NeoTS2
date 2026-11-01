@@ -13,4 +13,7 @@ namespace ts2::propset {
 // values written as the text form would show them.
 std::map<std::string, std::string> parse(std::span<const std::uint8_t> data);
 
+// A property as a number (decimal, or hex with 0x), 0 when missing or not a number.
+std::uint32_t number(const std::map<std::string, std::string>& properties, const std::string& key);
+
 } // namespace ts2::propset

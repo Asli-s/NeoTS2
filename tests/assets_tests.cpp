@@ -3,11 +3,15 @@
 #include "test_resources.hpp"
 
 #include "formats/dbpf.hpp"
+#include "scene/age_data.hpp"
 #include "scene/assets.hpp"
 #include "scene/builder.hpp"
+#include "scene/face_blend.hpp"
 #include "scene/lot_skirt.hpp"
+#include "scene/outfit_catalog.hpp"
 #include "scene/sims.hpp"
 
+#include <bit>
 #include <cmath>
 #include <filesystem>
 #include <memory>
@@ -129,6 +133,199 @@ void simsWearTheLastHairTopBottomAndBody() {
     CHECK(wearsLastEntryOnly(kHairPart) && wearsLastEntryOnly(kTopPart) && wearsLastEntryOnly(kBodyPart) &&
           wearsLastEntryOnly(kBottomPart));
     CHECK(!wearsLastEntryOnly(kFacePart) && !wearsLastEntryOnly(0x20));
+}
+
+// The skin catalog lists parts per part bit in key order and keeps only those that match.
+void catalogQueriesMatchAsTheGames() {
+    using namespace ts2::scene;
+    const auto part = [](std::uint32_t instance, std::uint32_t high, std::uint32_t parts, std::uint32_t category, const char* skin) {
+        CatalogPart p;
+        p.key = {0xEBCF3E27, 0x2C17B74A, instance, high};
+        p.age = 0x08;
+        p.gender = 1;
+        p.parts = parts;
+        p.category = category;
+        p.skinTone = catalogGuid(skin);
+        p.hairTone = catalogGuid("");
+        return p;
+    };
+    OutfitCatalog catalog;
+    // Sorted as the game sorts keys: the high instance before the instance.
+    catalog.parts = {part(2, 0, 4, 0, ""), part(9, 0, 4 | 8, 1, "00000002-0000-0000-0000-000000000000"),
+                     part(1, 1, 4, 8, ""), part(3, 1, 8, 0, "{00000003-0000-0000-0000-000000000000}")};
+    const auto keys = [](const std::vector<const CatalogPart*>& found) {
+        std::vector<std::uint32_t> out;
+        for (const auto* p : found) {
+            out.push_back(p->key.instance);
+        }
+        return out;
+    };
+    PartQuery q;
+    q.age = 0x08;
+    q.gender = 1;
+    q.species = 1;
+    q.part = 4;
+    CHECK((keys(findParts(catalog, q)) == std::vector<std::uint32_t>{2, 9, 1}));
+    q.category = 1;
+    CHECK((keys(findParts(catalog, q)) == std::vector<std::uint32_t>{2, 9}));
+    q.part = 4 | 8;
+    q.category = 0;
+    q.skinTone = "00000003-0000-0000-0000-000000000000";
+    CHECK((keys(findParts(catalog, q)) == std::vector<std::uint32_t>{2, 1, 3}));
+    q.skinTone.reset();
+    CHECK((keys(findParts(catalog, q)) == std::vector<std::uint32_t>{2, 9, 1, 9, 3}));
+    q.gender = 2;
+    CHECK(findParts(catalog, q).empty());
+}
+
+// Old everyday hairs and one-gender faces are worn with outerwear too, as the game reads them.
+void oldEverydayHairsAndFacesFitOuterwear() {
+    using ts2::scene::partCategories;
+    CHECK(partCategories({{"category", "1"}, {"outfit", "1"}}) == 0x1001);
+    CHECK(partCategories({{"category", "1"}, {"outfit", "1"}, {"version", "5"}}) == 0x1);
+    CHECK(partCategories({{"category", "3"}, {"outfit", "2"}, {"gender", "1"}, {"version", "5"}}) == 0x1003);
+    CHECK(partCategories({{"category", "1"}, {"outfit", "2"}, {"gender", "3"}}) == 0x1);
+    CHECK(partCategories({{"category", "8"}, {"outfit", "1"}}) == 0x8);
+    CHECK(partCategories({{"category", "1"}, {"outfit", "4"}}) == 0x1);
+}
+
+// A teen ages as the game ages one: its hair becomes the adult hair of its family, its own adult
+// face is put on, the bare skin outfit and new clothes come from the catalog, and an outfit the
+// new age has nothing for keeps the old lists.
+void teensAgeIntoAdults() {
+    using namespace ts2::scene;
+    namespace sg = ts2::scenegraph;
+    const auto key = [](std::uint32_t instance) { return sg::Link{0xEBCF3E27, 0x2C17B74A, instance, 0}; };
+    const auto part = [&](std::uint32_t instance, std::map<std::string, std::string> p) { return catalogPart(key(instance), std::move(p)); };
+    OutfitCatalog catalog;
+    catalog.parts = {part(1, {{"age", "8"}, {"gender", "2"}, {"outfit", "1"}, {"category", "1"}, {"family", "aaaa"}, {"hairtone", "3"}}),
+                     part(2, {{"age", "4"}, {"gender", "2"}, {"outfit", "1"}, {"category", "1"}, {"family", "aaaa"}, {"hairtone", "3"}}),
+                     part(3, {{"age", "8"}, {"gender", "2"}, {"outfit", "4"}, {"category", "128"}}),
+                     part(4, {{"age", "8"}, {"gender", "2"}, {"outfit", "8"}, {"category", "1"}, {"flags", "4"}}),
+                     part(5, {{"age", "16"}, {"gender", "2"}, {"outfit", "1"}, {"category", "1"}, {"family", "aaaa"}, {"hairtone", "5"}})};
+    catalog.skinTones = {catalogPart({0x4C158081, 1, 1, 0}, {{"age", "127"}, {"gender", "3"}, {"family", "bbbb"}})};
+    const std::vector<CatalogPart> own = {catalogPart({0xEBCF3E27, 0xFFFFFFFF, 2, 0}, {{"age", "8"}, {"gender", "2"}, {"outfit", "2"}})};
+    AgeData teen;
+    teen.properties = {{"age", "4"}, {"gender", "2"}, {"species", "1"}, {"skincolor", "bbbb"}, {"haircolor", "3"}, {"stretch", "0.94"}};
+    teen.lists[0x10001] = {key(2)};
+    teen.lists[0x10002] = {{0xEBCF3E27, 0xFFFFFFFF, 1, 0}};
+    teen.lists[0x4000001] = {key(2)};
+    teen.lists[0x4000008] = {key(9)};
+    OutfitRandom random(1);
+    const auto adult = ageUp(teen, 8, own, catalog, random);
+    CHECK(adult.has_value());
+    if (!adult) {
+        return;
+    }
+    CHECK(adult->properties.at("age") == "8" && adult->properties.at("stretch") == "1");
+    CHECK(adult->lists.at(0x10001).front().instance == 1);
+    CHECK(adult->lists.at(0x10002).front().instance == 2 && adult->lists.at(0x10002).front().group == 0xFFFFFFFF);
+    CHECK(adult->lists.at(0x800004).front().instance == 3);
+    CHECK(adult->lists.at(0x10008).front().instance == 4 && !adult->lists.contains(0x10004));
+    // Outerwear-less hair and an outfit left out of the fill keep the teen's lists.
+    CHECK(adult->lists.at(0x4000001).front().instance == 2 && adult->lists.at(0x4000008).front().instance == 9);
+    const auto elder = ageUp(*adult, 0x10, own, catalog, random);
+    CHECK(elder && elder->properties.at("haircolor") == "00000005-0000-0000-0000-000000000000" &&
+          elder->lists.at(0x10001).front().instance == 5);
+}
+
+// A bus driver made by Make New Character: a skin of its own, hair and eyebrows of the drawn hair
+// colour, eyes, a face template and the bare skin outfit from the catalog, and the uniform's body
+// in place of the drawn everyday clothes. Glasses of flag 8 are never drawn.
+void madeSimsWearTheirUniform() {
+    using namespace ts2::scene;
+    const auto key = [](std::uint32_t type, std::uint32_t instance) { return sg::Link{type, 0x2C17B74A, instance, 0}; };
+    const auto gzps = [&](std::uint32_t instance, std::map<std::string, std::string> p) {
+        return catalogPart(key(0xEBCF3E27, instance), std::move(p));
+    };
+    OutfitCatalog catalog;
+    catalog.parts = {gzps(1, {{"age", "8"}, {"gender", "2"}, {"outfit", "1"}, {"category", "1"}, {"hairtone", "cccc"}}),
+                     gzps(3, {{"age", "8"}, {"gender", "2"}, {"outfit", "2"}, {"category", "128"}}),
+                     gzps(4, {{"age", "8"}, {"gender", "2"}, {"outfit", "8"}, {"category", "1"}})};
+    catalog.skinTones = {catalogPart(key(0x4C158081, 1), {{"age", "127"}, {"gender", "3"}, {"family", "bbbb"}})};
+    catalog.hairTones = {catalogPart(key(0x8C1580B5, 1), {{"age", "127"}, {"gender", "3"}, {"family", "cccc"}})};
+    catalog.faceOverlays = {catalogPart(key(0x2C1FD8A1, 1), {{"age", "8"}, {"gender", "3"}, {"subtype", "1"}, {"hairtone", "cccc"}}),
+                            catalogPart(key(0x2C1FD8A1, 2), {{"age", "8"}, {"gender", "3"}, {"subtype", "3"}, {"family", "eeee"}}),
+                            catalogPart(key(0x2C1FD8A1, 3), {{"age", "8"}, {"gender", "3"}, {"subtype", "5"}, {"flags", "8"}})};
+    catalog.faceTemplates = {catalogPart(key(0x8C93E35C, 1), {{"age", "8"}, {"gender", "2"}, {"family", "ffff"}})};
+    AgeData uniform;
+    uniform.properties = {{"age", "8"}, {"gender", "2"}, {"species", "1"}, {"validparts", "992"}};
+    uniform.lists[0x10008] = {key(0xEBCF3E27, 9)};
+    OutfitRandom random(1);
+    const auto made = makeLook({8, 2, 2}, {uniform}, catalog, random);
+    const auto& d = made.data;
+    CHECK(d.properties.at("skincolor") == "00000002-0000-0000-0000-000000000000");
+    CHECK(d.properties.at("haircolor") == "cccc" && d.properties.at("eyecolor") == "eeee");
+    CHECK(d.lists.at(0x10001).front().instance == 1 && d.lists.at(0x800002).front().instance == 3);
+    CHECK(d.lists.at(0x10008).size() == 1 && d.lists.at(0x10008).front().instance == 9);
+    CHECK(made.faceFamily == "ffff" && made.problems.empty());
+    CHECK(made.faceOverlays.size() == 2 && made.faceOverlays[0].instance == 1 && made.faceOverlays[1].instance == 2);
+}
+
+// Change Outfit picks among an outfit object's age data those of the Sim's age and gender (or of
+// none), one drawn from the Sim's GUID when there are several, and puts on what its lock names.
+void outfitsArePickedAndPutOn() {
+    using namespace ts2::scene;
+    const auto key = [](std::uint32_t instance) { return sg::Link{0xEBCF3E27, 0x2C17B74A, instance, 0}; };
+    const auto outfit = [&](const char* age, const char* gender, std::uint32_t part) {
+        AgeData d;
+        d.properties = {{"age", age}, {"gender", gender}, {"validparts", "992"}};
+        d.lists[0x10008] = {key(part)};
+        return d;
+    };
+    const std::vector<AgeData> outfits = {outfit("8", "1", 1), outfit("2", "2", 2), outfit("8", "1", 3), outfit("0", "0", 4)};
+    CHECK(pickOutfit(outfits, 4, 2, 7) == &outfits[3]);  // only the one of no age and gender fits a teen male
+    const std::vector<AgeData> adultOnly = {outfits[0]};
+    CHECK(pickOutfit(adultOnly, 4, 1, 7) == nullptr);
+    // Three fit an adult female: the draw from the GUID picks the same one each time.
+    const AgeData* first = pickOutfit(outfits, 8, 1, 0x51515151);
+    CHECK(first != nullptr && first != &outfits[1] && pickOutfit(outfits, 8, 1, 0x51515151) == first);
+    AgeData sim;
+    sim.properties = {{"age", "8"}, {"gender", "1"}};
+    sim.lists[0x10004] = {key(10)};
+    sim.lists[0x10010] = {key(11)};
+    sim.lists[0x80008] = {key(12)};
+    CHECK(putOn(sim, outfits[0]).empty());
+    CHECK(sim.lists.at(0x10008).front().instance == 1 && !sim.lists.contains(0x10004) && !sim.lists.contains(0x10010));
+    CHECK(sim.lists.at(0x80008).front().instance == 12);
+}
+
+// A face template's vertices take the place of the base face's at their texture coordinates, while
+// the hair and neck stay where the base has them.
+void faceTemplatesMoveTheFace() {
+    auto element = [](std::uint32_t identity, std::uint32_t format, const std::vector<float>& values) {
+        sg::Element e;
+        e.identity = identity;
+        e.blockFormat = format;
+        e.count = static_cast<std::uint32_t>(values.size() / (format + 1));
+        for (float v : values) {
+            const auto bits = std::bit_cast<std::uint32_t>(v);
+            for (int i = 0; i < 4; ++i) {
+                e.data.push_back(static_cast<std::uint8_t>(bits >> (8 * i)));
+            }
+        }
+        return e;
+    };
+    auto mesh = [&](const std::vector<float>& positions, const std::vector<float>& uv) {
+        sg::Mesh m;
+        m.elements.push_back(element(sg::kPositions, 2, positions));
+        m.elements.push_back(element(sg::kTextureCoordinates, 1, uv));
+        sg::ElementLink link;
+        link.elements = {0, 1};
+        link.vertexCount = static_cast<std::uint32_t>(uv.size() / 2);
+        m.links.push_back(link);
+        sg::Group g;
+        g.primitive = sg::kTriangleList;
+        g.indices = {0, 1, 2};
+        m.groups.push_back(g);
+        return m;
+    };
+    auto base = mesh({0, 0, 0, 1, 0, 0, 0, 1, 0}, {0, 0, 1, 0, 0, 1});
+    const auto from = mesh({5, 5, 5, 7, 7, 7}, {1, 0, 0, 1});
+    ts2::scene::FaceMasks masks;
+    masks["hairneck"] = {{0, 1, 1}};
+    ts2::scene::applyFaceTemplate(base, from, masks);
+    CHECK(sg::vertexFloats(base, base.links[0], sg::kPositions) == std::vector<float>({0, 0, 0, 5, 5, 5, 0, 1, 0}));
 }
 
 // A model's resource node leads to its shape, geometry node, mesh, material and texture.
@@ -345,6 +542,12 @@ std::vector<Test> assetTests() {
         {"character files find their session group names", characterFilesFindTheirSessionGroupNames},
         {"plant skin lies between skin and clothes", plantSkinLiesBetweenSkinAndClothes},
         {"sims wear the last hair, top, bottom and body", simsWearTheLastHairTopBottomAndBody},
+        {"catalog queries match as the game's", catalogQueriesMatchAsTheGames},
+        {"old everyday hairs and faces fit outerwear", oldEverydayHairsAndFacesFitOuterwear},
+        {"teens age into adults", teensAgeIntoAdults},
+        {"made Sims wear their uniform", madeSimsWearTheirUniform},
+        {"outfits are picked and put on", outfitsArePickedAndPutOn},
+        {"face templates move the face", faceTemplatesMoveTheFace},
         {"models are built from their resources", modelsAreBuiltFromTheirResources},
         {"models with missing parts are handled", modelsWithMissingPartsAreHandled},
         {"saved joints move the model", savedJointsMoveTheModel},

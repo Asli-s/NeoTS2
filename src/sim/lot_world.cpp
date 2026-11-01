@@ -27,13 +27,6 @@ std::string hex(std::uint32_t value) {
     return buffer;
 }
 
-const ObjectType* originalType(CodeSource& code, const ObjectType& type) {
-    constexpr std::size_t kOriginalGuidLow = 0x46, kOriginalGuidHigh = 0x47;
-    const std::uint32_t original = type.definition.field(kOriginalGuidLow) |
-                                   static_cast<std::uint32_t>(type.definition.field(kOriginalGuidHigh)) << 16;
-    return original != 0 ? code.objectType(original) : nullptr;
-}
-
 template <std::size_t N>
 bool copyInto(std::array<std::int16_t, N>& to, const std::vector<std::int16_t>& from) {
     std::copy_n(from.begin(), std::min(N, from.size()), to.begin());
@@ -46,6 +39,8 @@ std::optional<std::string> restoreStack(const content::Lot& lot, const content::
         return std::nullopt;
     }
     std::vector<Frame> frames;
+    // The frame below is an Idle for Input that started this one: 1 from the queue, 2 an immediate one.
+    int startedBelow = 0;
     for (const auto& s : saved.state.tail->stack) {
         const auto* ownerEntry = lot.types.find(static_cast<std::uint16_t>(s.codeOwner));
         const auto* owner = ownerEntry ? code.objectType(ownerEntry->guid) : nullptr;
@@ -74,6 +69,21 @@ std::optional<std::string> restoreStack(const content::Lot& lot, const content::
         f.locals.resize(std::max<std::size_t>(bhav->localCount, f.locals.size()), 0);
         f.stackObjectId = s.objectId;
         f.runningOnId = s.value2 != 0 ? s.value2 : static_cast<std::int16_t>(object.id);
+        // The value after the locals is the frame's waiting flag: 1 when the primitive at its node
+        // has pushed the frame above it and runs again once that returns. For Idle for Input that
+        // frame is the interaction it started. An immediate Idle for Input started a sub-interaction,
+        // after which it is true.
+        if (startedBelow == 1) {
+            f.callerIdlesAgain = true;
+        } else if (startedBelow == 2) {
+            f.callerContinuesTrue = true;
+        }
+        startedBelow = 0;
+        const auto& at = bhav->instructions[f.pc];
+        if (s.value3 == 1 && at.opcode == vm_detail::kIdleForInputOpcode) {
+            startedBelow = at.operands[4] & 0x01 ? 2 : 1;
+            f.idleStarted = startedBelow == 1;
+        }
         f.code = std::move(bhav);
         frames.push_back(std::move(f));
     }
@@ -115,6 +125,7 @@ void restoreOverlays(const content::Lot& lot, std::uint32_t id, SimObject& objec
         // Saved values out of range are read as Animate Overlay reads its own (a weight outside 0-1 is 1).
         const double played = a.startedMsAgo;
         o.startMs = nowMs - played;
+        o.restoredAtMs = nowMs;
         o.lengthMs = a.lengthMs && !std::isnan(*a.lengthMs) ? std::max(*a.lengthMs, 0.0f) : 0.0f;
         o.plays = static_cast<std::int16_t>(std::clamp(a.plays, -1, 0x7FFF));
         o.weight = a.weight >= 0 && a.weight <= 1 ? a.weight : 1.0f;
@@ -180,6 +191,7 @@ void restoreObjectClip(const content::Lot& lot, std::uint32_t id, SimObject& obj
         PlayingAnimation play;
         play.name = a.name;
         play.startMs = nowMs - a.startedMsAgo;
+        play.restoredAtMs = nowMs;
         play.speed = a.rate;
         play.flipped = a.flipped;
         play.loops = a.plays == -1;
@@ -269,7 +281,12 @@ LotWorldReport buildWorld(const content::Lot& lot, CodeSource& code, World& worl
         object.tokenSource = {s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]};
         object.thread.codeGroup = type->group;
         if (state.tail) {
+            // An object saved when its type had fewer arrays (an older pack's) gets the rest, empty,
+            // as the game loads it.
             object.arrays = state.tail->arrays;
+            if (const std::size_t count = object.definition.field(kObjectArrayCountField); object.arrays.size() < count) {
+                object.arrays.resize(count);
+            }
             object.materialNames = state.tail->strings;
             const auto& t = state.tail->token;
             object.token = InventoryToken{t.guid, t.flags, t.value1, t.value2, t.value3, t.properties};
@@ -281,11 +298,8 @@ LotWorldReport buildWorld(const content::Lot& lot, CodeSource& code, World& worl
         } else {
             object.slots.assign(type->containerSlots, 0);
         }
-        // A Sim's slots follow the person it was made from (its original GUID), which newer packs give
-        // more slots than the Sim's own copy has.
-        if (const ObjectType* original = object.isPerson() ? originalType(code, *type) : nullptr;
-            original != nullptr && object.slots.size() < original->containerSlots) {
-            object.slots.resize(original->containerSlots, 0);
+        if (const std::size_t slots = containerSlotsOf(code, *type); object.slots.size() < slots) {
+            object.slots.resize(slots, 0);
         }
         if (state.person) {
             object.motives = state.person->motives;

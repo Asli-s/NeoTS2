@@ -13,7 +13,9 @@
 #include "sim/world.hpp"
 
 #include <cstddef>
+#include <deque>
 #include <cstdint>
+#include <initializer_list>
 #include <filesystem>
 #include <span>
 #include <map>
@@ -29,9 +31,9 @@ namespace ts2::sim {
 // objects with their saved script stacks, run a tick at a time.
 class LotSimulation {
 public:
-    // How long a tick lasts at normal and high speed (ultra runs as fast as it can).
+    // How far a tick moves the simulation's clock, in ms. How many ticks run a second is the speed
+    // clock's (see TickPacer).
     static constexpr double kNormalTickMs = 1000.0 / 23.83;
-    static constexpr double kHighTickMs = kNormalTickMs / 3;
 
     // Loads the code from the install's object packages and the lot from its package. `onLoadStep`
     // watches the scripts objects run as the lot loads. `seed` stands in for the clock where the game
@@ -86,8 +88,9 @@ public:
     const std::map<std::string, Stop>& stops() const { return stops_; }
 
     // The household living on the lot: its Sims' object ids, in the order of the family's members.
-    // It follows the family as it changes, so a Sim born or added during play is in it.
-    std::vector<std::int16_t> household() const;
+    // It follows the family as it changes, so a Sim born or added during play is in it. The list
+    // is kept and only changes when the household does.
+    const std::vector<std::int16_t>& household() const;
     // An image resource of a Sim's character file, by instance, empty when missing.
     std::vector<std::uint8_t> simImage(std::int16_t sim, std::uint32_t instance);
     // A neighbor's character file (by neighbor id), on the lot or not: the one whose object
@@ -95,6 +98,21 @@ public:
     [[nodiscard]] std::optional<std::filesystem::path> characterFile(std::int16_t neighbor) const;
     // The group of a neighbor's object type, where a neighbor without a character file keeps its looks.
     [[nodiscard]] std::optional<std::uint32_t> characterGroup(std::int16_t neighbor);
+
+    // A script error held for the game's "Object Error" dialog. With testingCheatsEnabled on the game
+    // asks the player what to do with the object instead of resetting it.
+    struct ObjectError {
+        std::int16_t object = 0;
+        std::size_t tick = 0;
+        std::string text;  // what went wrong, in the game's words where they are known
+        RunResult run;     // where it stopped, for the stack trace
+    };
+    // The errors waiting for an answer, oldest first.
+    const std::deque<ObjectError>& objectErrors() const { return objectErrors_; }
+    enum class ErrorAnswer { Cancel, Reset, Delete };
+    // Answers the oldest error. Cancel leaves the object as it is, Reset gives it the reset it gets
+    // with the cheat off, and Delete removes it.
+    void answerObjectError(ErrorAnswer answer);
 
     const LotWorldReport& report() const { return report_; }
     // Objects reset when the lot loaded because their type changed since the save.
@@ -113,7 +131,9 @@ private:
     std::size_t ticks_ = 0;
     std::map<std::string, Stop> stops_;
     std::size_t resets_ = 0;
+    std::deque<ObjectError> objectErrors_;
     std::vector<std::int16_t> household_;
+    mutable std::vector<std::int16_t> familyHousehold_;  // the family's Sims on the lot, as household() last found them
     std::unique_ptr<const content::Lot> lot_;  // kept until the route world is built
     std::map<std::uint32_t, std::string> objectModels_;  // the lot's model name of each object id
     std::map<std::uint32_t, std::uint32_t> savedGuids_;  // the type (GUID) each id had when the lot was saved
@@ -121,6 +141,11 @@ private:
     std::optional<RouteSources> routeSources_;
     std::optional<RouteWorld> routeWorld_;
     std::map<int, RouteLinks> routeLinks_;  // by level, rebuilt when the grids change
+    void markLinksStale(int level) {
+        if (const auto it = routeLinks_.find(level); it != routeLinks_.end()) {
+            it->second.stale = true;
+        }
+    }
     RouteRandom routeJitter_{1};             // the search's small step costs run on from plan to plan, as the game's
     std::uint32_t routePlans_ = 0;
     // The last start each Sim logged (object and interaction), so a loop of the same one is logged once.
@@ -135,13 +160,16 @@ private:
     void startObjects();
     void restartSim(SimObject& sim, const ObjectType& type);
     void resetAfterFailure(SimObject& object, const ObjectType& type);
+    // Holds the error for the dialog when testingCheatsEnabled is on, and is false otherwise.
+    bool holdForDialog(const SimObject& object, const RunResult& r);
     void forgetRemoved();
+    void purgeRemoved();
     void forget(SimObject& sim, std::int16_t removed);
     void stepObject(std::int16_t id);
     void runTimers(std::int16_t id);
     void findHousehold(const content::Neighborhood& hood, const std::filesystem::path& lot);
     RouteIntersects intersectionsFor(const SimObject& sim);
-    std::pair<bool, float> stairCheck(const SimObject& sim, const StairPortal& stair);
+    std::pair<bool, float> portalCheck(const SimObject& sim, std::initializer_list<std::int16_t> parts);
     void findCharacterFiles();
     void note(const RunResult& r, std::int16_t object);
     std::vector<std::pair<float, float>> placementSpots(const SimObject& placed, const SimObject& owner, const slot::Entry& slot,

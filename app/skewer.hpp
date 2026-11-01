@@ -9,8 +9,8 @@
 
 namespace app {
 
-// The household's thumbnails over the puck (the game's "skewer"): one per Sim, the first family
-// member at the bottom, the column growing up from the puck's skewer anchor. The selected Sim's
+// The household's thumbnails over the puck (the game's "skewer"): one per Sim in the order given,
+// the first at the top, the column growing up from the puck's skewer anchor. The selected Sim's
 // frame is lit, and each background takes the colour of its Sim's mood. Clicking a thumbnail
 // picks that Sim, and the Sim the camera tracks has a star on its thumbnail.
 class Skewer {

@@ -2,6 +2,7 @@
 #include "test_support.hpp"
 
 #include "content/animation_lists.hpp"
+#include "sim/cheats.hpp"
 
 namespace {
 
@@ -347,6 +348,162 @@ void findBestInteractionPicksTheHappiestNearLine() {
     world.countTick();
     sim.motives[7] = 100;  // nothing left to gain
     CHECK(vm.run(sim, 0x1100).outcome == Outcome::False && sim.data[0x14] == -1);
+}
+
+// A visitor (person data 0x20 not 0) is refused every line without flag 0x01 when the line is
+// checked, as a resident is not, so it picks the best line visitors may use.
+void findBestInteractionKeepsVisitorsToTheirLines() {
+    constexpr std::uint32_t kSnack = 0x0E0F0E0F;
+    MemoryCodeSource code;
+    code.addStrings(ts2::sim::kGlobalGroup, 0x28B, std::vector<std::string>(16, "(-100;0) (100;2000)"));
+    ts2::fcns::Tunings tunings;
+    tunings.values.push_back({"random selection count", 1.0f});
+    code.setTunings(tunings);
+    auto snackType = typed(kSnack);
+    snackType.fields[ts2::objd::field::kInteractionTableId] = 0x80;
+    code.addObjectType(kObjectGroup, snackType);
+    ts2::ttab::InteractionTable table;
+    auto line = [](std::uint32_t id, std::int16_t hunger, std::uint32_t flags) {
+        ts2::ttab::Interaction l;
+        l.stringIndex = id;
+        l.action = static_cast<std::uint16_t>(0x1000 + id);
+        l.flags = flags;
+        l.autonomy = 50;
+        l.attenuationCode = 4;
+        l.motives.assign(1, std::vector<ts2::ttab::MotiveEffect>(16));
+        l.motives[0][7] = {0, hunger, 0};
+        return l;
+    };
+    table.interactions.push_back(line(5, 5000, 0x40));         // adults, residents only
+    table.interactions.push_back(line(6, 1000, 0x40 | 0x01));  // adults, visitors too
+    code.addInteractionTable(kObjectGroup, 0x80, table);
+    code.add(kObjectGroup, 0x1100, bhav({primitiveCall(0x0003, T, F)}));
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    sim.personData[0x3A] = 27;
+    sim.personData[0x24] = 100;
+    sim.motives.fill(50);
+    sim.motives[7] = -50;
+    sim.x = sim.y = 10 << 16;
+    auto& snack = world.create(kObjectGroup, snackType);
+    snack.x = 11 << 16;
+    snack.y = 10 << 16;
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(sim, 0x1100).outcome == Outcome::True && sim.data[0x14] == 5);
+    world.countTick();
+    sim.personData[0x20] = 1;
+    CHECK(vm.run(sim, 0x1100).outcome == Outcome::True && sim.data[0x14] == 6);
+}
+
+// A pick autonomy remembers scores times its line's memory multiplier on the same object, so the
+// Sim tries the farther snack next. Once the memory's time is up the nearer one wins again.
+void findBestInteractionRemembersItsPicks() {
+    constexpr std::uint32_t kSnack = 0x0E0F0E0F;
+    MemoryCodeSource code;
+    code.addStrings(ts2::sim::kGlobalGroup, 0x28B, std::vector<std::string>(16, "(-100;0) (100;2000)"));
+    ts2::fcns::Tunings tunings;
+    tunings.values.push_back({"random selection count", 1.0f});
+    tunings.values.push_back({"max duration autonomy memory ", 10.0f});
+    code.setTunings(tunings);
+    auto snackType = typed(kSnack);
+    snackType.fields[ts2::objd::field::kInteractionTableId] = 0x80;
+    code.addObjectType(kObjectGroup, snackType);
+    ts2::ttab::InteractionTable table;
+    ts2::ttab::Interaction line;
+    line.stringIndex = 5;
+    line.action = 0x1005;
+    line.flags = 0x40;  // adults
+    line.autonomy = 50;
+    line.attenuationCode = 4;  // high: 0.1 a tile
+    line.motives.assign(1, std::vector<ts2::ttab::MotiveEffect>(16));
+    line.motives[0][7] = {0, 1000, 0};
+    table.interactions.push_back(line);
+    code.addInteractionTable(kObjectGroup, 0x80, table);
+    code.add(kObjectGroup, 0x1100, bhav({primitiveCall(0x0003, T, F)}));
+
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    sim.personData[0x3A] = 27;   // adult
+    sim.personData[0x24] = 100;  // autonomy level
+    sim.motives.fill(50);
+    sim.motives[7] = -50;
+    sim.x = sim.y = 10 << 16;
+    auto& near = world.create(kObjectGroup, snackType);
+    near.x = 11 << 16;
+    near.y = 10 << 16;
+    auto& far = world.create(kObjectGroup, snackType);
+    far.x = 13 << 16;
+    far.y = 10 << 16;
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(sim, 0x1100).outcome == Outcome::True && sim.personData[0x35] == near.id);
+    world.countTick();
+    CHECK(vm.run(sim, 0x1100).outcome == Outcome::True && sim.personData[0x35] == far.id);
+    for (int i = 0; i < 10; ++i) {
+        world.countTick();
+    }
+    CHECK(vm.run(sim, 0x1100).outcome == Outcome::True && sim.personData[0x35] == near.id);
+}
+
+// The social bias: a Sim keeps away from the places near a Sim it is furious at and is drawn to
+// those near a Sim it is attracted to, by the tokens in its neighbor inventory.
+void findBestInteractionWeighsTheSocialBias() {
+    constexpr std::uint32_t kSnack = 0x0E0F0E0F;
+    MemoryCodeSource code;
+    code.addStrings(ts2::sim::kGlobalGroup, 0x28B, std::vector<std::string>(16, "(-100;0) (100;2000)"));
+    ts2::fcns::Tunings tunings;
+    tunings.values.push_back({"random selection count", 1.0f});
+    tunings.values.push_back({"max duration autonomy memory ", 0.0f});  // no memory
+    tunings.values.push_back({"min autonomy score for family", 0.001f});
+    code.setTunings(tunings);
+    auto snackType = typed(kSnack);
+    snackType.fields[ts2::objd::field::kInteractionTableId] = 0x80;
+    code.addObjectType(kObjectGroup, snackType);
+    ts2::ttab::InteractionTable table;
+    ts2::ttab::Interaction line;
+    line.stringIndex = 5;
+    line.action = 0x1005;
+    line.flags = 0x40;  // adults
+    line.autonomy = 50;
+    line.attenuationCode = 4;  // high: 0.1 a tile
+    line.motives.assign(1, std::vector<ts2::ttab::MotiveEffect>(16));
+    line.motives[0][7] = {0, 1000, 0};
+    table.interactions.push_back(line);
+    code.addInteractionTable(kObjectGroup, 0x80, table);
+    code.add(kObjectGroup, 0x1100, bhav({primitiveCall(0x0003, T, F)}));
+
+    ts2::sim::World world;
+    auto person = [&](std::int16_t neighbor, int x) -> ts2::sim::SimObject& {
+        auto& s = world.create(kObjectGroup, typed(0x51515100u + static_cast<std::uint32_t>(neighbor), ts2::sim::kPersonType));
+        s.personData[0x3A] = 27;  // adult
+        s.personData[0x1F] = neighbor;
+        s.x = x << 16;
+        s.y = 10 << 16;
+        return s;
+    };
+    auto& sim = person(3, 10);
+    sim.personData[0x24] = 100;  // autonomy level
+    sim.motives.fill(50);
+    sim.motives[7] = -50;
+    auto& near = world.create(kObjectGroup, snackType);
+    near.x = 11 << 16;
+    near.y = 10 << 16;
+    auto& far = world.create(kObjectGroup, snackType);
+    far.x = 13 << 16;
+    far.y = 10 << 16;
+    person(7, 11);  // by the near snack
+    person(9, 13);  // by the far one
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(sim, 0x1100).outcome == Outcome::True && sim.personData[0x35] == near.id);
+
+    auto& tokens = world.inventory(ts2::sim::InventoryKind::Neighbor, 3)->singular;
+    tokens.push_back(std::make_shared<ts2::sim::InventoryToken>(ts2::sim::InventoryToken{0xCF505AB0, 0, 0, 0, 0, {7, 0, 100}}));
+    world.countTick();
+    CHECK(vm.run(sim, 0x1100).outcome == Outcome::True && sim.personData[0x35] == far.id);
+
+    tokens.clear();
+    tokens.push_back(std::make_shared<ts2::sim::InventoryToken>(ts2::sim::InventoryToken{0x2F4D6811, 0, 0, 0, 0, {100, 9}}));
+    world.countTick();
+    CHECK(vm.run(sim, 0x1100).outcome == Outcome::True && sim.personData[0x35] == far.id);
 }
 
 // A check tree autonomy runs before scoring offers lines with Add/Change the Action String. Each
@@ -1786,9 +1943,14 @@ void pieMenuOffersWhatChecksAllow() {
     CHECK(sim.thread.temps[0] == 7);
     CHECK(sim.actionString.empty());
 
-    // Debug lines alone, with the "*" mark, on a shift-click with testing cheats.
+    // Debug lines alone, named as any other line, on a shift-click with testing cheats.
     menu = ts2::sim::pieMenu(vm, code, sim, chair, {.debug = true});
-    CHECK(menu.choices.size() == 1 && menu.choices[0].name == "*Debug");
+    // The game's own "Force Error" comes last and queues its global tree, with an id no table line has.
+    CHECK(menu.choices.size() == 2 && menu.choices[0].name == "Debug" && menu.choices[1].name == "Force Error");
+    if (menu.choices.size() == 2) {
+        const auto forced = ts2::sim::queuedChoice(code, world, chair, menu.choices[1]);
+        CHECK(forced && forced->action == 0x02DA && forced->index == 0xFFFE && forced->object == chair.id);
+    }
 
     // Children see the children's line. Nothing is offered by an object with its interactions off.
     sim.personData[0x3A] = 10;
@@ -1796,6 +1958,112 @@ void pieMenuOffersWhatChecksAllow() {
     CHECK(menu.choices.size() == 1 && menu.choices[0].name == "Play");
     chair.data[0x57] = 1;
     CHECK(ts2::sim::pieMenu(vm, code, sim, chair).choices.empty());
+}
+
+// The cheat window's commands as the game's cheat system runs them: names without case, boolProp with
+// true, on, false or off, help listing the commands not hidden, and "Unknown command" for any other.
+void cheatWindowRunsTheGamesCommands() {
+    using ts2::sim::CheatResult;
+    using ts2::sim::runCheat;
+    ts2::sim::CheatProperties properties;
+    CHECK(!properties.testingCheats());
+    auto result = runCheat(properties, nullptr, "boolProp testingCheatsEnabled true");
+    CHECK(result.ok && result.output.empty() && properties.testingCheats());
+    result = runCheat(properties, nullptr, "BOOLPROP testingcheatsenabled FALSE");
+    CHECK(result.ok && !properties.testingCheats());
+    CHECK(runCheat(properties, nullptr, "boolProp testingCheatsEnabled on").ok && properties.testingCheats());
+    CHECK(runCheat(properties, nullptr, "boolProp testingCheatsEnabled Off").ok && !properties.testingCheats());
+    // A value boolProp doesn't take changes nothing.
+    properties.set("testingCheatsEnabled", true);
+    CHECK(!runCheat(properties, nullptr, "boolProp testingCheatsEnabled maybe").ok && properties.testingCheats());
+    CHECK(!runCheat(properties, nullptr, "boolProp testingCheatsEnabled").ok);
+    const std::vector<std::string> help{
+        "TSCheatSystem: expand              : Expands or contracts the output portion of the cheat console.",
+        "TSCheatSystem: help                : [wildcard] [-all]  Logs this help output.",
+        "TSCheatSystem: lockAspiration      : lockAspiration [on/off]: Locks/Unlocks the aspiration score of sims on the lot.",
+        "TSCheatSystem: maxMotives          : Sets all the motives to maximum for all sims on the lot",
+        "TSCheatSystem: motiveDecay         : motiveDecay [on/off]: Turns motive decay on/off for all sims on the lot ",
+        "TSCheatSystem: setHour             : [0-23] sets the hour of the day"};
+    result = runCheat(properties, nullptr, "help");
+    CHECK(result.ok && result.output == help);
+    const std::vector<std::string> unknown{"Unknown command"};
+    result = runCheat(properties, nullptr, "motherlode");
+    CHECK(!result.ok && result.output == unknown);
+    CHECK(runCheat(properties, nullptr, "Expand").window == CheatResult::Window::Expand);
+    CHECK(runCheat(properties, nullptr, "hide").window == CheatResult::Window::Hide);
+    CHECK(runCheat(properties, nullptr, "   ").ok);
+    CHECK(!runCheat(properties, nullptr, std::string(5000, 'a')).ok);
+}
+
+// maxMotives sets motives 0-15 to 100 on every Sim, all but 2 and 10-13. motiveDecay off sets person
+// data 0x1D to 2 and on to 0. lockAspiration on sets person data 0xC1 to 1 and off to 0. Objects
+// that aren't Sims are left alone, and without a lot nothing changes.
+void lotCheatsSetEverySim() {
+    using ts2::sim::runCheat;
+    ts2::sim::CheatProperties properties;
+    ts2::sim::World world;
+    std::array<std::int16_t, 256> globals{};
+    ts2::sim::CheatLot lot{world, globals};
+    auto& first = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    auto& fridge = world.create(kObjectGroup, typed(kFridgeGuid));
+    auto& second = world.create(kObjectGroup, typed(0x51515152, ts2::sim::kPersonType));
+    for (auto* sim : {&first, &second}) {
+        sim->motives.fill(-50.0f);
+    }
+    CHECK(runCheat(properties, nullptr, "maxMotives").ok && first.motives[0] == -50.0f);
+    CHECK(runCheat(properties, &lot, "MAXMOTIVES").ok);
+    for (const auto* sim : {&first, &second}) {
+        for (std::size_t motive = 0; motive < ts2::sim::kMotiveCount; ++motive) {
+            const bool kept = motive == 2 || (motive >= 10 && motive <= 13);
+            CHECK(sim->motives[motive] == (kept ? -50.0f : 100.0f));
+        }
+    }
+    CHECK(runCheat(properties, &lot, "motiveDecay off").ok && first.personData[0x1D] == 2 && second.personData[0x1D] == 2);
+    CHECK(fridge.personData[0x1D] == 0);
+    CHECK(runCheat(properties, &lot, "motiveDecay true").ok && first.personData[0x1D] == 0);
+    CHECK(runCheat(properties, &lot, "lockAspiration on").ok && first.personData[0xC1] == 1 && second.personData[0xC1] == 1);
+    CHECK(runCheat(properties, &lot, "lockAspiration FALSE").ok && second.personData[0xC1] == 0);
+    // Without a word the game does nothing and the line is done. A word it doesn't take fails.
+    CHECK(runCheat(properties, &lot, "lockAspiration on").ok);
+    CHECK(runCheat(properties, &lot, "lockAspiration").ok && first.personData[0xC1] == 1);
+    CHECK(!runCheat(properties, &lot, "lockAspiration maybe").ok && first.personData[0xC1] == 1);
+    // setHour sets the hour, minute 0, global 0x1D to 30 and the Time Of Day. 24 and up change nothing.
+    globals[0x00] = 9;
+    globals[0x05] = 41;
+    globals[0x01] = 12;
+    CHECK(runCheat(properties, &lot, "setHour 19").ok && globals[0x00] == 19 && globals[0x05] == 0 && globals[0x1D] == 30);
+    CHECK(globals[0x04] == 2 && globals[0x01] == 12);
+    CHECK(runCheat(properties, &lot, "sethour 6").ok && globals[0x00] == 6 && globals[0x04] == 3);
+    CHECK(runCheat(properties, &lot, "setHour 24").ok && globals[0x00] == 6);
+    CHECK(!runCheat(properties, &lot, "setHour noon").ok && globals[0x00] == 6);
+    CHECK(runCheat(properties, nullptr, "setHour 3").ok);
+}
+
+// A Shift-click marks every part with the clicked object's lead. A debug line (interaction table flag
+// 0x80) starts only when it isn't autonomy's, the object is marked and testingCheatsEnabled is on.
+// Then no other line starts.
+void debugLinesStartFromShiftClickedObjects() {
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    auto& lead = world.create(kObjectGroup, typed(kFridgeGuid));
+    auto& part = world.create(kObjectGroup, typed(kFridgeGuid));
+    auto& other = world.create(kObjectGroup, typed(kFridgeGuid));
+    lead.data[0x13] = lead.id;
+    part.data[0x13] = lead.id;
+    sim.personData[0x3A] = 30;  // an adult
+    world.markShiftClick(part, true);
+    CHECK(lead.shiftClicked && part.shiftClicked && !other.shiftClicked);
+
+    ts2::ttab::Interaction plain;
+    plain.flags = 0x40;  // adults
+    ts2::ttab::Interaction debug = plain;
+    debug.flags |= 0x80;
+    CHECK(!ts2::sim::mayStartLine(debug, sim, lead, false, false));
+    CHECK(ts2::sim::mayStartLine(plain, sim, lead, false, false));
+    CHECK(ts2::sim::mayStartLine(debug, sim, lead, false, false, true));
+    CHECK(!ts2::sim::mayStartLine(plain, sim, lead, false, false, true));
+    world.markShiftClick(lead, false);
+    CHECK(!lead.shiftClicked && !part.shiftClicked);
 }
 
 // A line with interaction table flag 0x4 (the lights' Turn On and Turn Off) runs at once when picked:
@@ -2111,6 +2379,9 @@ std::vector<Test> vmInteractionTests() {
         {"multi-tile parts use their master's interaction table", multiTilePartsUseTheirMastersTable},
         {"advertisers list objects by motive", advertisersListObjectsByMotive},
         {"Find Best Interaction picks the happiest near line", findBestInteractionPicksTheHappiestNearLine},
+        {"Find Best Interaction keeps visitors to their lines", findBestInteractionKeepsVisitorsToTheirLines},
+        {"Find Best Interaction remembers its picks", findBestInteractionRemembersItsPicks},
+        {"Find Best Interaction weighs the social bias", findBestInteractionWeighsTheSocialBias},
         {"Find Best Interaction weighs offered lines", findBestInteractionWeighsOfferedLines},
         {"check tree kinds find trees that change the line", checkTreeKindsFindTreesThatChangeTheLine},
         {"Find Best Interaction scores what check trees advertise", findBestInteractionScoresWhatCheckTreesAdvertise},
@@ -2133,6 +2404,9 @@ std::vector<Test> vmInteractionTests() {
         {"Run Functional Tree calls the object's tree", runFunctionalTreeCallsTheObjectsTree},
         {"Add/Change the Action String sets text and icon", actionStringSetsTextAndIcon},
         {"pie menu offers what checks allow", pieMenuOffersWhatChecksAllow},
+        {"cheat window runs the game's commands", cheatWindowRunsTheGamesCommands},
+        {"lot cheats set every Sim's motives and fields, and the hour", lotCheatsSetEverySim},
+        {"debug lines start from Shift-clicked objects", debugLinesStartFromShiftClickedObjects},
         {"choices flagged to run at once skip the queue", choicesFlaggedToRunAtOnceSkipTheQueue},
         {"check tree owners read the tested line", checkTreeOwnersReadTheTestedLine},
         {"Run Tree by Name runs the stack object's tree", runTreeByNameRunsTheStackObjectsTree},

@@ -90,12 +90,19 @@ struct PlayingAnimation {
     std::uint32_t group = 0;
     std::uint16_t tree = 0;
     std::uint16_t pc = 0;
-    // Animate Sim's event tree (0: none), from the code owner of the tree that started it, with the
-    // stack object it had then, and how many of the clip's events it has been told.
+    // Animate Sim's or Animate Object's event tree (0: none), from the code owner of the tree that
+    // started it, with the stack object it had then, and how many of the clip's events it has been told.
     std::uint16_t eventTree = 0;
     std::uint32_t eventCodeOwner = 0;
     std::int16_t eventStackObject = 0;
     std::size_t eventsTold = 0;
+    // A clip restored from a save: the world's time it was loaded at. The game doesn't tell its events
+    // from before then again.
+    std::optional<double> restoredAtMs;
+    // An Animate Object clip also tells its tree when it starts fading out (kBlendingOutEvent), then
+    // kBlendedOutEvent and kEndEvent at its end, as an overlay does. Cars drive on from their end event.
+    bool tellsEnd = false;
+    int endEventsTold = 0;  // 0 none, 1 the fade out, 2 all (a clip Animate Stop ends tells none)
 
     // Set for an Animate Sim clip: it fades in over fadeInMs from its start and out over its last
     // fadeOutMs (see animateFades), on its own whatever plays after it. It holds its full weight
@@ -148,6 +155,8 @@ struct PlayingOverlay {
     // object's tree started it: a carried baby's put-down clip snaps the baby itself to the floor.
     std::int16_t stackObject = 0;
     bool blendingOut = false;        // kBlendingOutEvent told
+    std::size_t eventsTold = 0;      // its clip's own SimAntics events told so far
+    std::optional<double> restoredAtMs;  // see PlayingAnimation::restoredAtMs
     std::uint8_t category = 1;       // see content::animationCategory
     bool stopped = false;            // ended by Animate Stop: fades out without telling events
     // Its share of its weight (0-1, by its fades) as Animate Stop ended it. It falls from there to none
@@ -156,6 +165,8 @@ struct PlayingOverlay {
     // How long it fades in at its start and out before its end, when not kOverlayBlendMs.
     std::optional<float> blendInMs, blendOutMs;
     std::int16_t ikTarget = 0;  // as PlayingAnimation::ikTarget
+    // Tells two overlays with the same clip and start apart while their events are told.
+    std::uint32_t serial = 0;
 };
 constexpr std::int16_t kBlendingOutEvent = 9997, kBlendedOutEvent = 9998, kEndEvent = 9999;
 // How long an overlay fades in and out when its own fades aren't set (see PlayingOverlay::blendInMs).

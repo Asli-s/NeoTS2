@@ -1,5 +1,6 @@
 // Primitives that find, make, compare and remove objects, neighbors and relationships.
 #include "sim/forget_object.hpp"
+#include "sim/snap.hpp"
 #include "test_support.hpp"
 
 namespace {
@@ -63,7 +64,7 @@ void findLocationForCentresASimOnItsTile() {
     CHECK(sim.x == 3 * 65536 + 32768 && sim.y == 4 * 65536 + 32768 && sim.data[1] == 2);
     sim.data[1] = 3;
     CHECK(vm.run(sim, 0x1001).outcome == Outcome::True && sim.data[1] == 3);
-    // Mode 1 leaves the stack object where it is, but out of the slot it was in.
+    // Mode 1 takes the stack object out of the slot it was in and out of the world.
     Instruction stay = call(0x0010, T, F);
     stay.operands = {1, 0, 0x02};
     code.add(kObjectGroup, 0x1002, bhav({stay}));
@@ -73,8 +74,7 @@ void findLocationForCentresASimOnItsTile() {
     sim.slots[0] = held.id;
     held.data[2] = sim.id;
     held.data[3] = 0;
-    const auto x = held.x;
-    CHECK(vm.run(sim, 0x1002).outcome == Outcome::True && held.x == x);
+    CHECK(vm.run(sim, 0x1002).outcome == Outcome::True && held.x == ts2::sim::kOffLot && held.y == ts2::sim::kOffLot && !held.tile);
     CHECK(sim.slots[0] == 0 && held.data[2] == 0 && held.data[3] == -1);
 }
 
@@ -322,6 +322,8 @@ void makeNewCharacterAddsANeighbor() {
     hood->neighborIds = {3, 8};
     w.world.setNeighborhood(hood);
     w.controller->arrays.assign(1, {7, 7});
+    // Human first names and surnames, by gender. The pets' tables are missing.
+    w.world.setNameTables({{0x96, {"Ted"}}, {0x97, {"Ann", "Brittany"}}, {0x98, {"Smith"}}, {0xCC, {"Wendland"}}});
     Vm vm(code, {}, &w.world);
     auto make1 = [&](std::int16_t age, std::int16_t gender, std::int16_t species) {
         code.add(kObjectGroup, 0x1001, bhav({
@@ -337,9 +339,12 @@ void makeNewCharacterAddsANeighbor() {
     CHECK(w.controller->arrays[0] == std::vector<std::int16_t>{9});
     const auto* made = w.world.neighbor(9);
     CHECK(made != nullptr && made->personData[0x3A] == 19 && made->personData[0xAF] == 1 && made->personData[0x41] == 1);
+    // She is named from the female tables. A dog gets no names without the pets' tables.
+    CHECK(w.world.neighborFirstName(9) && !w.world.neighborFirstName(9)->empty() && w.world.neighborSurname(9) == "Wendland");
     CHECK(make1(4, 2, 1).outcome == Outcome::True && w.controller->arrays[0] == std::vector<std::int16_t>{10});
     made = w.world.neighbor(10);
     CHECK(made != nullptr && made->personData[0x3A] == 16 && made->personData[0x41] == 0 && made->personData[0xBA] == 1);
+    CHECK(!w.world.neighborFirstName(10) && !w.world.neighborSurname(10));
     // Each new Sim is a person made from its species' template, under a GUID of its own.
     const auto* person = code.objectType(w.world.neighbor(9)->guid);
     const auto* dog = code.objectType(made->guid);
@@ -776,6 +781,68 @@ void testObjectTypeComparesTheOriginalGuid() {
     CHECK(vm.run(me, kObjectGroup, 0x1001).outcome == Outcome::False);
 }
 
+// A Sim made during play has as many container slots as the person it was made from, when newer
+// packs give that person more than the Sim's own copy has. A Sim's Cleanup empties slot 19.
+void madeSimsHaveTheirOriginalPersonsSlots() {
+    constexpr std::uint32_t kTemplate = 0x0E0E0E0E, kSim = 0x0F0F0F0F;
+    MemoryCodeSource code;
+    code.addObjectType(kObjectGroup, typed(kTemplate, ts2::sim::kPersonType), {}, std::vector<ts2::slot::Entry>(23));
+    auto sim = typed(kSim, ts2::sim::kPersonType);
+    sim.fields[0x46] = static_cast<std::uint16_t>(kTemplate);
+    sim.fields[0x47] = static_cast<std::uint16_t>(kTemplate >> 16);
+    code.addObjectType(kObjectGroup, sim, {}, std::vector<ts2::slot::Entry>(19));
+    code.addObjectType(kObjectGroup, typed(kFridgeGuid), {}, std::vector<ts2::slot::Entry>(2));
+    ts2::sim::World world;
+    Vm vm(code, {}, &world);
+    const ts2::sim::SimObject* made = vm.create(kSim);
+    CHECK(made != nullptr && made->slots.size() == 23 && made->data[ts2::sim::kSlotCountField] == 23);
+    const ts2::sim::SimObject* fridge = vm.create(kFridgeGuid);
+    CHECK(fridge != nullptr && fridge->slots.size() == 2);
+}
+
+// A Sim made during play is a visitor (person data 0x20 = 1) unless it belongs to the lot's
+// household. Any other Person Type it already has is kept.
+void madeSimsAreVisitorsUnlessHousehold() {
+    constexpr std::uint32_t kGuest = 0x0E0E0E0E, kResident = 0x0F0F0F0F, kFamily = 7;
+    MemoryCodeSource code;
+    code.addObjectType(kObjectGroup, typed(kGuest, ts2::sim::kPersonType));
+    code.addObjectType(kObjectGroup, typed(kResident, ts2::sim::kPersonType));
+    code.addObjectType(kObjectGroup, typed(kFridgeGuid));
+    auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
+    hood->familyLots[kFamily] = 12;
+    hood->familyMembers[kFamily] = {kResident};
+    ts2::sim::World world;
+    world.setNeighborhood(hood);
+    world.setLotNumber(12);
+    Vm vm(code, {}, &world);
+    const ts2::sim::SimObject* guest = vm.create(kGuest);
+    const ts2::sim::SimObject* resident = vm.create(kResident);
+    CHECK(guest != nullptr && guest->personData[0x20] == 1);
+    CHECK(resident != nullptr && resident->personData[0x20] == 0);
+}
+
+// A part of a multi-tile object matches its master's GUID too, as the sunken hot tub's Get In Tub
+// needs for the seat it gets in at. Any other GUID is still false.
+void testObjectTypeMatchesAPartsMaster() {
+    constexpr std::uint32_t kSeatGuid = 0x0C0C0C0C, kTubGuid = 0x0B0B0B0B;
+    MemoryCodeSource code;
+    code.add(kObjectGroup, 0x1000, bhav({testObjectType(kTubGuid, owner::kStackObjectId, 0, T, F)}));
+    code.add(kObjectGroup, 0x1001, bhav({testObjectType(kFridgeGuid, owner::kStackObjectId, 0, T, F)}));
+    auto seatType = typed(kSeatGuid);
+    seatType.fields[ts2::objd::field::kMultiTileMasterId] = 7;
+    code.addObjectType(kObjectGroup, seatType);
+    code.addObjectType(kObjectGroup, typed(kTubGuid));
+    code.setMultiTileMaster(kSeatGuid, kTubGuid);
+    ts2::sim::World world;
+    auto& me = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    auto& seat = world.create(kObjectGroup, seatType);
+    Vm vm(code, {}, &world);
+    me.thread.stackObjectId = seat.id;
+    CHECK(vm.run(me, kObjectGroup, 0x1000).outcome == Outcome::True);
+    me.thread.stackObjectId = seat.id;
+    CHECK(vm.run(me, kObjectGroup, 0x1001).outcome == Outcome::False);
+}
+
 void testObjectTypeOnMissingObjectIsFalse() {
     MemoryCodeSource code;
     code.add(kObjectGroup, 0x1000, bhav({testObjectType(kFridgeGuid, owner::kLiteral, 99, T, F)}));
@@ -814,6 +881,158 @@ void createObjectCanTakeItsGuidFromTemps() {
     Vm vm(code, {}, &world);
     CHECK(vm.run(sim, 0x1000).outcome == Outcome::True);
     CHECK(world.size() == 2);
+}
+
+// A multi-tile master's GUID makes its parts, lead first: each is reset and runs its own Init,
+// names the lead in data 0x13, and the lead's Main runs before the primitive returns. The lead's
+// data 0x29 is the master's price, and the lead becomes the stack object.
+void createObjectMakesAMultiTileObjectsParts() {
+    constexpr std::uint32_t kMasterGuid = 0x0A000001, kLeadGuid = 0x0A000002, kPartGuid = 0x0A000003;
+    constexpr std::uint32_t kLeadGroup = 0x7F000201, kPartGroup = 0x7F000202;
+    auto tile = [](std::uint32_t guid, std::uint16_t subIndex, bool lead) {
+        auto d = typed(guid);
+        d.fields[ts2::objd::field::kMultiTileMasterId] = 7;
+        d.fields[ts2::objd::field::kMultiTileSubIndex] = subIndex;
+        d.fields[0x3F] = lead ? 1 : 0;
+        return d;
+    };
+    MemoryCodeSource code;
+    auto master = tile(kMasterGuid, 0xFFFF, false);
+    master.fields[ts2::objd::field::kPrice] = 250;
+    code.addObjectType(kLampGroup, master);
+    code.addObjectType(kLeadGroup, tile(kLeadGuid, 0x0005, true));
+    code.addObjectType(kPartGroup, tile(kPartGuid, 0x0000, false));
+    code.setMultiTileParts(kMasterGuid, {kLeadGuid, kPartGuid});
+    for (const std::uint32_t group : {kLeadGroup, kPartGroup}) {
+        code.add(group, 0x1001, bhav({expr(owner::kMyData, 0x20, op::kAssign, owner::kLiteral, 1, T, E)}));
+        std::vector<ts2::objf::Function> functions(2);
+        functions[0].action = 0x1001;
+        functions[1].action = group == kLeadGroup ? 0x1000 : 0;
+        code.addFunctions(group, functions);
+    }
+    code.add(kLeadGroup, 0x1000, bhav({expr(owner::kMyData, 0x21, op::kAssign, owner::kLiteral, 5, T, E)}));
+    code.add(kObjectGroup, 0x1000, bhav({createObject(kMasterGuid, 0x06, 0x00, T, F)}));
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::True);
+    CHECK(world.size() == 3);
+    const auto* lead = world.find(sim.thread.stackObjectId);
+    const auto* part = world.find(static_cast<std::int16_t>(sim.id + 2));
+    CHECK(lead != nullptr && lead->id == sim.id + 1 && lead->definition.guid() == kLeadGuid);
+    CHECK(part != nullptr && part->definition.guid() == kPartGuid);
+    if (lead != nullptr && part != nullptr) {
+        CHECK(lead->data[0x13] == lead->id && part->data[0x13] == lead->id);
+        CHECK(lead->data[0x20] == 1 && part->data[0x20] == 1);
+        CHECK(lead->data[0x21] == 5 && part->data[0x21] == 0);
+        CHECK(lead->data[0x29] == 250);
+    }
+}
+
+// A multi-tile object moves as one: when a part moves, the others go to their offsets from it,
+// turned with its facing, as the game keeps them (a window "0,1" facing 2 sits a tile to the -x of
+// its "0,0" lead). A part off the lot goes out of the world.
+void movedPartsFollow() {
+    auto tile = [](std::uint32_t guid, std::uint16_t subIndex, std::uint16_t storey) {
+        auto d = typed(guid);
+        d.fields[ts2::objd::field::kMultiTileMasterId] = 3;
+        d.fields[ts2::objd::field::kMultiTileSubIndex] = subIndex;
+        d.fields[0x38] = storey;
+        return d;
+    };
+    ts2::sim::World world;
+    auto& lead = world.create(kObjectGroup, tile(0x0B000001, 0x0000, 0));
+    auto& side = world.create(kObjectGroup, tile(0x0B000002, 0x0001, 0));
+    auto& corner = world.create(kObjectGroup, tile(0x0B000003, 0x0101, 1));
+    for (auto* part : {&lead, &side, &corner}) {
+        part->data[ts2::sim::kLeadTileField] = lead.id;
+        part->x = part->y = ts2::sim::kOffLot;
+    }
+    const auto at = [](float tiles) { return static_cast<std::int32_t>(tiles * 65536.0f); };
+    struct Case {
+        std::int16_t facing;
+        float sideX, sideY, cornerX, cornerY;
+    };
+    for (const Case c : {Case{0, 10.5f, 11.5f, 11.5f, 11.5f}, Case{2, 9.5f, 10.5f, 9.5f, 11.5f}, Case{4, 10.5f, 9.5f, 9.5f, 9.5f},
+                         Case{6, 11.5f, 10.5f, 11.5f, 9.5f}}) {
+        ts2::sim::snapTo(world, lead, {at(10.5f), at(10.5f), 1, c.facing});
+        CHECK(side.x == at(c.sideX) && side.y == at(c.sideY) && side.level == 1 && side.data[1] == c.facing);
+        CHECK(corner.x == at(c.cornerX) && corner.y == at(c.cornerY) && corner.level == 2);
+    }
+    ts2::sim::snapTo(world, side, {at(0.5f), at(0.5f), 1, std::int16_t{0}});
+    CHECK(lead.x == ts2::sim::kOffLot && lead.y == ts2::sim::kOffLot && corner.x == at(1.5f) && corner.y == at(0.5f));
+}
+
+void snappedCarsTakeTheirPassengers() {
+    ts2::sim::World world;
+    auto& car = world.create(kObjectGroup, typed(0x0B000001), 2);
+    auto& passenger = world.create(kObjectGroup, typed(0x0B000002));
+    CHECK(car.slots.size() == 2 && car.data[ts2::sim::kSlotCountField] == 2);
+    car.slots[1] = passenger.id;
+    passenger.data[2] = car.id;
+    passenger.data[3] = 1;
+    const auto at = [](float tiles) { return static_cast<std::int32_t>(tiles * 65536.0f); };
+    ts2::sim::snapTo(world, car, {at(20.5f), at(34.5f), 1, std::int16_t{6}});
+    CHECK(passenger.x == car.x && passenger.y == car.y && passenger.level == 1);
+}
+
+void removingAPartRemovesTheWholeObject() {
+    auto tile = [](std::uint32_t guid, std::uint16_t subIndex) {
+        auto d = typed(guid);
+        d.fields[ts2::objd::field::kMultiTileMasterId] = 3;
+        d.fields[ts2::objd::field::kMultiTileSubIndex] = subIndex;
+        return d;
+    };
+    ts2::sim::World world;
+    auto& lead = world.create(kObjectGroup, tile(0x0B000001, 0x0000));
+    auto& side = world.create(kObjectGroup, tile(0x0B000002, 0x0001));
+    auto& otherLead = world.create(kObjectGroup, tile(0x0B000001, 0x0000));
+    for (auto* part : {&lead, &side}) {
+        part->data[ts2::sim::kLeadTileField] = lead.id;
+    }
+    otherLead.data[ts2::sim::kLeadTileField] = otherLead.id;
+    world.remove(side);
+    CHECK(lead.removed && side.removed && !otherLead.removed);
+}
+
+void snapTestsEveryPartAtItsSpot() {
+    auto tile = [](std::uint32_t guid, std::uint16_t subIndex) {
+        auto d = typed(guid);
+        d.fields[ts2::objd::field::kMultiTileMasterId] = 3;
+        d.fields[ts2::objd::field::kMultiTileSubIndex] = subIndex;
+        return d;
+    };
+    ts2::sim::World world;
+    auto& lead = world.create(kObjectGroup, tile(0x0B000001, 0x0000));
+    auto& side = world.create(kObjectGroup, tile(0x0B000002, 0x0001));
+    for (auto* part : {&lead, &side}) {
+        part->data[ts2::sim::kLeadTileField] = lead.id;
+    }
+    const auto at = [](float tiles) { return static_cast<std::int32_t>(tiles * 65536.0f); };
+    ts2::sim::snapTo(world, lead, {at(10.5f), at(10.5f), 1, std::int16_t{0}});
+    // Something stands at 20.5, 21.5. With facing 2 the side part lands there.
+    std::vector<std::int16_t> tested;
+    world.setObjectInTheWay([&](const ts2::sim::SimObject& placed, float x, float y, std::int32_t, std::int16_t facing) {
+        tested.push_back(placed.id);
+        return placed.id == side.id && x == 20.5f && y == 21.5f && facing == 2;
+    });
+    CHECK(!ts2::sim::placementCode(world, lead, {at(20.5f), at(21.5f), 1, std::int16_t{0}}));
+    CHECK(tested == std::vector<std::int16_t>({lead.id, side.id}));
+    CHECK(ts2::sim::placementCode(world, lead, {at(21.5f), at(21.5f), 1, std::int16_t{2}}) == 0x0C);
+    // A part landing off the lot: placement code 2.
+    CHECK(ts2::sim::placementCode(world, lead, {at(0.5f), at(0.5f), 1, std::int16_t{2}}) == 2);
+    CHECK(lead.x == at(10.5f) && side.x == at(10.5f) && side.y == at(11.5f));
+}
+
+// The placement test keeps the lot's far edge on the lot. The room check's tile test does not.
+void placementTestKeepsTheFarEdgeOnTheLot() {
+    ts2::sim::World world;
+    world.setRooms(ts2::sim::RoomMap(squareRoom(false)));
+    auto& me = world.create(kObjectGroup, definition("Me", 0));
+    const auto at = [](float tiles) { return static_cast<std::int32_t>(tiles * 65536.0f); };
+    CHECK(!ts2::sim::placementCode(world, me, {at(6.0f), at(6.0f), 1, std::int16_t{0}}));
+    CHECK(ts2::sim::placementCode(world, me, {at(6.5f), at(1.5f), 1, std::int16_t{0}}) == 2);
+    CHECK(ts2::sim::snapRefusal(world, me, {at(6.0f), at(1.5f), 1, std::int16_t{0}}) == ts2::sim::SnapRefusal::OffLot);
 }
 
 void reachPutMovesTheObjectAtTheClipsEvent() {
@@ -940,7 +1159,8 @@ void snapIntoPutsTheObjectInTheSlot() {
 }
 
 // Placements 1 "on top of me" and 2 "in my hand" both put the new object in my slot 0, at my place.
-// Off the lot it is false. A slot 0 that is missing or full needs the game's fit test.
+// Off the lot it is false. A slot 0 that is missing or full fails the fit test: false, and the object
+// made for the test is gone again.
 void createObjectGoesInMyHand() {
     MemoryCodeSource code;
     code.addObjectType(kLampGroup, typed(kLampGuid));
@@ -957,14 +1177,18 @@ void createObjectGoesInMyHand() {
     const ts2::sim::SimObject* made = world.find(sim.thread.stackObjectId);
     CHECK(made != nullptr && sim.slots[0] == made->id && made->data[2] == sim.id && made->data[3] == 0 && made->x == sim.x &&
           made->y == sim.y && !made->tile);
-    CHECK(vm.run(sim, 0x1001).outcome == Outcome::Unsupported);
+    const std::int16_t held = made->id;
+    const std::size_t count = world.idsIncludingRemoved([](const ts2::sim::SimObject& o) { return !o.removed; }).size();
+    CHECK(vm.run(sim, 0x1001).outcome == Outcome::False && sim.slots[0] == held && sim.thread.stackObjectId == held);
+    CHECK(world.idsIncludingRemoved([](const ts2::sim::SimObject& o) { return !o.removed; }).size() == count);
     sim.slots[0] = 0;
     CHECK(vm.run(sim, 0x1001).outcome == Outcome::True && sim.slots[0] == sim.thread.stackObjectId);
     sim.slots[0] = 0;
     sim.x = ts2::sim::kOffLot;
     CHECK(vm.run(sim, 0x1000).outcome == Outcome::False && sim.slots[0] == 0);
+    sim.x = 4 << 16 | 0x8000;
     sim.slots.clear();
-    CHECK(vm.run(sim, 0x1000).outcome == Outcome::Unsupported);
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::False);
 }
 
 // Placement 5 "underneath me" puts the new object at my exact place and level, in no slot.
@@ -985,7 +1209,7 @@ void createObjectGoesUnderneathMe() {
 }
 
 // Placements 4 and 0xA put the new object in slot byte 9 of the stack object or of the object in
-// temp 0, at its place. No such object is false. A missing or full slot needs the game's fit test.
+// temp 0, at its place. No such object is false, and so is a missing or full slot (the fit test).
 void createObjectGoesInAnotherObjectsSlot() {
     MemoryCodeSource code;
     code.addObjectType(kLampGroup, typed(kLampGuid));
@@ -1009,7 +1233,7 @@ void createObjectGoesInAnotherObjectsSlot() {
     CHECK(made != nullptr && meter.slots[2] == made->id && made->data[2] == meter.id && made->data[3] == 2 &&
           made->x == meter.x && made->y == meter.y);
     sim.thread.stackObjectId = meter.id;
-    CHECK(vm.run(sim, 0x1000).outcome == Outcome::Unsupported);
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::False && meter.slots[2] == made->id);
 
     sim.thread.temps[0] = meter.id;
     CHECK(vm.run(sim, 0x1001).outcome == Outcome::True && meter.slots[1] == sim.thread.stackObjectId);
@@ -1371,9 +1595,53 @@ void relationshipWithFlag8NeedsOnlyA() {
 }
 
 // With flag 0x02, A and B are neighbor ids and the variables are A's saved list towards B.
-// Change Outfit asks a Sim (owner byte 9 / data 10-11) to wear a category's outfit: byte 8, or with
-// flag 0x04 a value. The source GUID comes from the stack object (0x01), the operands (0x02) or
-// temps 0-1 (0x40). Flag 0x20 clears person data 0x77-0x78. A missing object or one that isn't a Sim is an error.
+// Change Outfit puts on a Sim (owner byte 9 / data 10-11) an outfit: byte 8, or with flag 0x04 a
+// value, in person data 0x08's numbering (8 pajamas, 2 formal). The game wears it only when the Sim's
+// age data lists a top and a bottom, or a full body, for that category, and then sets person data
+// 0x08. A Sim that aged on the lot is checked in its new age's lists. Flags 0x20 and 0x10 clear the
+// outfit source GUID (0x77-0x78). An outfit from a source (the
+// stack object 0x01, the operands 0x02, temps 0x40) isn't worn yet. A Sim without age data keeps
+// everything but the 0x20 clear. A missing object or one that isn't a Sim is an error.
+// With the app's working copy of the Sim's age data, Change Outfit is told the source, flag 0x10 and
+// flag 0x08, and checks the copy's lists. A source's outfit put on keeps its GUID in person data
+// 0x77-0x78 unless it is the Sim's own.
+void changeOutfitDressesFromTheWorkingCopy() {
+    auto changeOutfit = [](std::uint8_t flags, std::uint8_t category) {
+        Instruction in;
+        in.opcode = 0x0079;
+        in.trueTarget = T;
+        in.falseTarget = E;
+        in.operands = {flags, 0, 0, 0, 0x67, 0xDF, 0x4E, 0xB4, category, owner::kStackObjectId, 0, 0, 0, 0, 0, 0};
+        return in;
+    };
+    constexpr std::uint32_t kSimGuid = 0x51515151, kSimFile = 0x7F000010, kUniform = 0xB44EDF67;
+    MemoryCodeSource code;
+    code.add(kObjectGroup, 0x1000, bhav({changeOutfit(0x02 | 0x08 | 0x10, 0)}));
+    code.add(kObjectGroup, 0x1001, bhav({changeOutfit(0, 8)}));
+    code.addObjectType(kSimFile, typed(kSimGuid, ts2::sim::kPersonType));
+    code.addAgeData(kSimFile, {{"listcnt", "0"}});
+    ts2::sim::World world;
+    auto& sim = world.create(kSimFile, typed(kSimGuid, ts2::sim::kPersonType));
+    auto& dresser = world.create(kObjectGroup, typed(kChairGuid));
+    dresser.thread.stackObjectId = sim.id;
+    std::vector<ts2::sim::World::OutfitBuildRequest> asked;
+    ts2::sim::World::BuiltOutfit copy{{0x00010008}, true};
+    world.setOutfitBuild([&](const ts2::sim::SimObject&, const ts2::sim::World::OutfitBuildRequest& request) {
+        asked.push_back(request);
+        return std::optional(copy);
+    });
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(dresser, 0x1000).outcome == Outcome::True);
+    CHECK(asked.size() == 1 && asked[0].sourceGuid == kUniform && asked[0].renew && asked[0].commit);
+    CHECK(sim.personData[0x77] == static_cast<std::int16_t>(0xDF67) && sim.personData[0x78] == static_cast<std::int16_t>(0xB44E));
+    CHECK(sim.outfitChange && sim.outfitChange->category == 0 && sim.outfitChange->sourceGuid == kUniform);
+    // No formal body in the copy: the Sim stays dressed as it is.
+    sim.outfitChange.reset();
+    CHECK(vm.run(dresser, 0x1001).outcome == Outcome::True);
+    CHECK(asked.size() == 2 && asked[1].sourceGuid == 0 && !asked[1].renew && !asked[1].commit);
+    CHECK(!sim.outfitChange && sim.personData[0x08] == 0 && sim.personData[0x77] == static_cast<std::int16_t>(0xDF67));
+}
+
 void changeOutfitAsksTheSim() {
     auto changeOutfit = [](std::uint8_t flags, std::uint8_t category, std::uint8_t simOwner, std::uint16_t simData) {
         Instruction in;
@@ -1384,14 +1652,23 @@ void changeOutfitAsksTheSim() {
                        static_cast<std::uint8_t>(simData), static_cast<std::uint8_t>(simData >> 8), 0, 0, 0, 0};
         return in;
     };
+    constexpr std::uint32_t kSimGuid = 0x51515151, kBareGuid = 0x52525252, kSimFile = 0x7F000010, kBareFile = 0x7F000011;
     MemoryCodeSource code;
     code.add(kObjectGroup, 0x1000, bhav({changeOutfit(0x10, 8, owner::kStackObjectId, 0)}));
     code.add(kObjectGroup, 0x1001, bhav({changeOutfit(0x02 | 0x04 | 0x20, 0, owner::kStackObjectId, 0)}));
     code.add(kObjectGroup, 0x1002, bhav({changeOutfit(0x40, 1, owner::kStackObjectId, 0)}));
     code.add(kObjectGroup, 0x1003, bhav({changeOutfit(0, 1, owner::kLiteral, 99)}));
     code.add(kObjectGroup, 0x1004, bhav({changeOutfit(0, 1, owner::kMyData, 0x0B)}));
+    code.add(kObjectGroup, 0x1005, bhav({changeOutfit(0, 2, owner::kStackObjectId, 0)}));
+    code.add(kObjectGroup, 0x1006, bhav({changeOutfit(0x20, 8, owner::kStackObjectId, 0)}));
+    code.addObjectType(kSimFile, typed(kSimGuid, ts2::sim::kPersonType));
+    code.addObjectType(kBareFile, typed(kBareGuid, ts2::sim::kPersonType));
+    // Pajamas (0x100) have a full body, formal (0x08) only a top, and an empty bottom list.
+    code.addAgeData(kSimFile, {{"listcnt", "3"}, {"lk0", "0x01000008"}, {"ls0", "1"},  // leakcheck: ok
+                               {"lk1", "0x00080004"}, {"ls1", "1"}, {"lk2", "0x00080010"}, {"ls2", "0"}});
     ts2::sim::World world;
-    auto& sim = world.create(kSimGroup, typed(0x51515151, ts2::sim::kPersonType));
+    auto& sim = world.create(kSimFile, typed(kSimGuid, ts2::sim::kPersonType));
+    auto& bare = world.create(kBareFile, typed(kBareGuid, ts2::sim::kPersonType));
     auto& dresser = world.create(kObjectGroup, typed(kChairGuid));
     sim.personData[0x77] = 5;
     sim.personData[0x78] = 6;
@@ -1399,15 +1676,86 @@ void changeOutfitAsksTheSim() {
     Vm vm(code, {}, &world);
     CHECK(vm.run(dresser, 0x1000).outcome == Outcome::True);
     CHECK(sim.outfitChange && sim.outfitChange->category == 8 && !sim.outfitChange->sourceGuid);
+    CHECK(sim.personData[0x08] == 8 && sim.personData[0x77] == 0 && sim.personData[0x78] == 0);
+    sim.personData[0x77] = 5;
+    CHECK(vm.run(dresser, 0x1005).outcome == Outcome::True);  // formal has no bottom
+    CHECK(sim.personData[0x08] == 8 && sim.outfitChange->category == 8 && sim.personData[0x77] == 5);
+    // Aged on the lot: its new age's lists are checked, which have a formal top and bottom.
+    world.agedOutfitLists[kSimGuid] = {0x00080004, 0x00080010};
+    CHECK(vm.run(dresser, 0x1005).outcome == Outcome::True && sim.personData[0x08] == 2 && sim.outfitChange->category == 2);
+    CHECK(vm.run(dresser, 0x1000).outcome == Outcome::True && sim.personData[0x08] == 2);  // no pajamas any more
+    world.agedOutfitLists.clear();
+    sim.personData[0x08] = 8;
+    sim.outfitChange->category = 8;
+    sim.personData[0x77] = 5;
     dresser.thread.temps[2] = 4;
     CHECK(vm.run(dresser, 0x1001).outcome == Outcome::True);
-    CHECK(sim.outfitChange->category == 4 && sim.outfitChange->sourceGuid == 0x6C22B41Bu);
-    CHECK(sim.personData[0x77] == 0 && sim.personData[0x78] == 0);
+    CHECK(sim.personData[0x77] == 0 && sim.personData[0x08] == 8 && sim.outfitChange->category == 8);
     dresser.thread.temps[0] = static_cast<std::int16_t>(0xB41B);
     dresser.thread.temps[1] = 0x6C22;
-    CHECK(vm.run(dresser, 0x1002).outcome == Outcome::True && sim.outfitChange->sourceGuid == 0x6C22B41Bu);
+    CHECK(vm.run(dresser, 0x1002).outcome == Outcome::True && sim.outfitChange->category == 8);
     CHECK(vm.run(dresser, 0x1003).outcome == Outcome::Error);
     CHECK(vm.run(dresser, 0x1004).outcome == Outcome::Error);  // the dresser itself is no Sim
+    bare.personData[0x77] = 5;
+    dresser.thread.stackObjectId = bare.id;
+    CHECK(vm.run(dresser, 0x1000).outcome == Outcome::True);
+    CHECK(!bare.outfitChange && bare.personData[0x08] == 0 && bare.personData[0x77] == 5);
+    CHECK(vm.run(dresser, 0x1006).outcome == Outcome::True && bare.personData[0x77] == 0 && !bare.outfitChange);
+}
+
+// Age makes me the stage in operand 0 at once, as the game's table gives it: person data 0x3A in
+// years (young adults 19 with 0xAF set), the outfit source GUID cleared, what my slots hold put back
+// into the same slots. Stages outside the table change nothing. Always true.
+void ageSetsTheLifeStage() {
+    auto age = [](std::uint8_t stage) {
+        Instruction in;
+        in.opcode = 0x0075;
+        in.trueTarget = T;
+        in.falseTarget = E;
+        in.operands = {stage, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        return in;
+    };
+    MemoryCodeSource code;
+    code.add(kSimGroup, 0x1000, bhav({age(0x0E)}));
+    code.add(kSimGroup, 0x1001, bhav({age(0x03)}));
+    code.add(kSimGroup, 0x1002, bhav({age(0x09)}));
+    code.add(kSimGroup, 0x1003, bhav({age(0x04)}));
+    code.add(kObjectGroup, 0x1003, bhav({age(0x04)}));
+    ts2::sim::World world;
+    auto& sim = world.create(kSimGroup, typed(0x51515151, ts2::sim::kPersonType));
+    auto& cup = world.create(kObjectGroup, typed(kChairGuid));
+    sim.slots.assign(2, 0);
+    sim.slots[1] = cup.id;
+    cup.data[2] = sim.id;
+    cup.data[3] = 1;
+    sim.personData[0x3A] = 16;
+    sim.personData[0x77] = 5;
+    sim.personData[0x78] = 6;
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::True);
+    CHECK(sim.personData[0x3A] == 19 && sim.personData[0xAF] == 1 && sim.newAge == 0x40u);
+    CHECK(sim.personData[0x77] == 0 && sim.personData[0x78] == 0);
+    CHECK(sim.slots[1] == cup.id && cup.data[2] == sim.id && cup.data[3] == 1);
+    CHECK(vm.run(sim, 0x1001).outcome == Outcome::True);
+    CHECK(sim.personData[0x3A] == 16 && sim.personData[0xAF] == 0 && sim.newAge == 0x04u);
+    sim.personData[0x77] = 5;
+    CHECK(vm.run(sim, 0x1002).outcome == Outcome::True);
+    CHECK(sim.personData[0x3A] == 16 && sim.personData[0x77] == 5);
+    CHECK(vm.run(sim, 0x1003).outcome == Outcome::True && sim.personData[0x3A] == 51 && sim.newAge == 0x10u);
+    CHECK(vm.run(cup, 0x1003).outcome == Outcome::Unsupported);
+    // The new age's data is built as Age runs, and the Sim gets a new body only when it was.
+    std::vector<std::uint32_t> asked;
+    bool builds = true;
+    world.setAgeDataBuild([&](const ts2::sim::SimObject&, std::uint32_t age) -> std::optional<std::set<std::uint32_t>> {
+        asked.push_back(age);
+        return builds ? std::optional<std::set<std::uint32_t>>({0x00080004}) : std::nullopt;
+    });
+    sim.newAge.reset();
+    CHECK(vm.run(sim, 0x1001).outcome == Outcome::True && sim.newAge == 0x04u);
+    CHECK(asked == std::vector<std::uint32_t>{0x04} && world.agedOutfitLists[0x51515151] == std::set<std::uint32_t>{0x00080004});
+    builds = false;
+    sim.newAge.reset();
+    CHECK(vm.run(sim, 0x1003).outcome == Outcome::True && !sim.newAge && sim.personData[0x3A] == 51);
 }
 
 // A Sim created during play is the neighbor of its GUID: it gets that neighbor's person data and
@@ -1598,6 +1946,17 @@ void changeLightSetsLightStrength() {
     CHECK(outcome == Outcome::Error);
     run(changeLight(0, 99, 40, 0xFF), 0, outcome);                        // no such object
     CHECK(outcome == Outcome::Error);
+    // A named light is looked up in the stack object's table, as a Sim lighting a cake's candles
+    // reads the cake's.
+    MemoryCodeSource code;
+    constexpr std::uint32_t kCakeGroup = 0x7F0000AA;
+    code.add(kObjectGroup, 0x1000, bhav({changeLight(0, 3, 40, 0)}));
+    code.addStrings(kCakeGroup, 0x8E, {"candle"});
+    SmallWorld w;
+    auto& cake = w.world.create(kCakeGroup, typed(kChairGuid));
+    w.controller->thread.stackObjectId = cake.id;
+    Vm vm(code, {}, &w.world);
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::True && w.world.find(3)->lightStrength == static_cast<float>(40 * 0.01));
 }
 
 Instruction changeMaterial(std::uint16_t material, std::uint8_t flags, std::uint16_t meshGroup, std::int16_t object,
@@ -2077,6 +2436,47 @@ void loadedPlaceholdersAreKeptUntilUnload() {
     CHECK(world.findIncludingRemoved(2) == nullptr && world.findIncludingRemoved(3) != nullptr && world.size() == 2);
 }
 
+// A Sim saved inside an interaction its Idle for Input started (the Idle's frame saved with its
+// waiting flag) runs that Idle again when the interaction ends, as the game does, whatever the
+// interaction returned. Before, an interaction ending false took the Idle's false branch.
+void savedIdleForInputRunsAgainAfterItsInteraction() {
+    Instruction idle;
+    idle.opcode = 0x0011;
+    idle.trueTarget = T;
+    idle.falseTarget = E;
+    idle.operands[2] = 1;  // a waiting interaction may start
+    MemoryCodeSource code;
+    code.add(kObjectGroup, 0x1000, bhav({idle}));
+    code.add(kObjectGroup, 0x1001, bhav({expr(owner::kTemp, 0, op::kAssign, owner::kLiteral, 1, F, E)}));
+    code.addObjectType(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    ts2::content::Lot lot;
+    ts2::objt::Entry entry;
+    entry.guid = 0x51515151;
+    entry.index = 1;
+    lot.types.entries.push_back(entry);
+    ts2::content::LotObject saved;
+    saved.id = 1;
+    saved.type = entry;
+    saved.state.tail.emplace();
+    ts2::xobj::StackFrame waiting;
+    waiting.objectId = 1;
+    waiting.treeId = 0x1000;
+    waiting.params = {0, 0};
+    waiting.value3 = 1;
+    waiting.codeOwner = 1;
+    ts2::xobj::StackFrame interaction = waiting;
+    interaction.treeId = 0x1001;
+    interaction.value3 = 0;
+    saved.state.tail->stack = {waiting, interaction};
+    lot.objects.push_back(saved);
+    ts2::sim::World world;
+    ts2::sim::buildWorld(lot, code, world);
+    auto* sim = world.find(1);
+    CHECK(sim != nullptr && sim->thread.frames.size() == 2);
+    Vm vm(code, {}, &world);
+    CHECK(sim != nullptr && vm.resume(*sim).outcome == Outcome::True);
+}
+
 void roomFieldsAreReadThroughTempZero() {
     MemoryCodeSource code;
     code.add(kObjectGroup, 0x1000, bhav({
@@ -2154,11 +2554,20 @@ std::vector<Test> vmObjectTests() {
         {"neighbor object definition reads", neighborObjectDefinitionReads},
         {"Get Distance To measures in tiles", getDistanceToMeasuresInTiles},
         {"Test Object Type compares the original GUID", testObjectTypeComparesTheOriginalGuid},
+        {"made Sims have their original person's slots", madeSimsHaveTheirOriginalPersonsSlots},
+        {"made Sims are visitors unless household", madeSimsAreVisitorsUnlessHousehold},
+        {"Change Outfit dresses from the working copy", changeOutfitDressesFromTheWorkingCopy},
         {"slot owners read the held object", slotOwnersReadTheHeldObject},
         {"verify neighbor checks the neighborhood", verifyNeighborChecksTheNeighborhood},
         {"array operations work on object arrays", arrayOperationsWorkOnObjectArrays},
         {"neighbor fields come from the neighbor", neighborFieldsComeFromTheNeighbor},
         {"Create Object can take its GUID from temps", createObjectCanTakeItsGuidFromTemps},
+        {"Create Object makes a multi-tile object's parts", createObjectMakesAMultiTileObjectsParts},
+        {"a moved multi-tile part takes the others with it", movedPartsFollow},
+        {"Snap tests every part of a multi-tile object at its spot", snapTestsEveryPartAtItsSpot},
+        {"the placement test keeps the lot's far edge on the lot", placementTestKeepsTheFarEdgeOnTheLot},
+        {"removing a part removes the whole multi-tile object", removingAPartRemovesTheWholeObject},
+        {"snapped cars take their passengers", snappedCarsTakeTheirPassengers},
         {"Create Object can go below the object in a local", createObjectCanGoBelowTheObjectInALocal},
         {"Create Object goes in my hand", createObjectGoesInMyHand},
         {"Create Object goes in another object's slot", createObjectGoesInAnotherObjectsSlot},
@@ -2182,6 +2591,7 @@ std::vector<Test> vmObjectTests() {
         {"Relationship with neighbor ids uses the neighborhood", relationshipWithNeighborIdsUsesTheNeighborhood},
         {"created Sims are their neighbor", createdSimsAreTheirNeighbor},
         {"Change Outfit asks the Sim", changeOutfitAsksTheSim},
+        {"Age sets the life stage", ageSetsTheLifeStage},
         {"Relationship between Sims uses their neighbors", relationshipBetweenSimsUsesTheirNeighbors},
         {"Change Light sets how strongly an object's lights shine", changeLightSetsLightStrength},
         {"Change Material names a material for a mesh group", changeMaterialNamesAMaterialForAMeshGroup},
@@ -2199,8 +2609,10 @@ std::vector<Test> vmObjectTests() {
         {"Remove Object refuses protected objects", removeObjectRefusesProtectedObjects},
         {"Removed objects keep their data until purge", removedObjectsKeepTheirDataUntilPurge},
         {"loaded Placeholders and TemplatePersons are kept until unload", loadedPlaceholdersAreKeptUntilUnload},
+        {"a saved Idle for Input runs again after its interaction", savedIdleForInputRunsAgainAfterItsInteraction},
         {"removing me ends the run unless return immediately", removingMeEndsTheRunUnlessReturnImmediately},
         {"Test Object Type compares GUIDs", testObjectTypeComparesGuids},
+        {"Test Object Type matches a part's master", testObjectTypeMatchesAPartsMaster},
         {"Test Object Type on missing object is false", testObjectTypeOnMissingObjectIsFalse},
         {"Test Object Type can ask whether a GUID exists", testObjectTypeCanAskWhetherAGuidExists},
     };

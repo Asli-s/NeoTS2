@@ -19,6 +19,7 @@
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <format>
 #include <map>
 #include <memory>
 #include <optional>
@@ -61,6 +62,10 @@ int showObject(const std::filesystem::path& path, std::uint32_t id) {
         printShorts("temps", s.temps);
         printShorts("data", s.data);
         if (s.tail) {
+            for (std::size_t i = 0; i < s.tail->arrays.size(); ++i) {
+                printShorts(std::format("array {}", i).c_str(), s.tail->arrays[i]);
+            }
+            printShorts("iterators", s.tail->shorts);
             for (const auto& f : s.tail->stack) {
                 std::printf("  frame: object %d, tree 0x%04X node %u, values %d %d %d, owner %d\n",
                             f.objectId, static_cast<std::uint16_t>(f.treeId), f.node, f.value1, f.value2,
@@ -682,8 +687,9 @@ int showAnimationSurvey(const std::filesystem::path& folder) {
                 auto& list = examples[key];
                 if (list.size() < 3) {
                     char line[256];
-                    std::snprintf(line, sizeof line, "%s %u %s: %s plays %d rate %.2f", entry.path().filename().string().c_str(), o.id,
-                                  o.type ? o.type->name.c_str() : "-", a.name.c_str(), a.plays, a.rate);
+                    std::snprintf(line, sizeof line, "%s %u %s: %s plays %d rate %.2f played %d ms tree 0x%04X on %d",
+                                  entry.path().filename().string().c_str(), o.id, o.type ? o.type->name.c_str() : "-", a.name.c_str(),
+                                  a.plays, a.rate, a.startedMsAgo, a.eventTree, a.eventObject);
                     list.emplace_back(line);
                 }
             }

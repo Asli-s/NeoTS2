@@ -10,6 +10,9 @@
 #include "formats/slot.hpp"
 #include "formats/str.hpp"
 #include "parse_float.hpp"
+#include "scene/face_blend.hpp"
+#include "scene/newborn_face.hpp"
+#include "scene/outfit_catalog.hpp"
 #include "scene/rig.hpp"
 
 #include <algorithm>
@@ -35,22 +38,7 @@ constexpr std::uint32_t kLocalGroup = 0xFFFFFFFF;
 constexpr std::uint32_t kTxmt = 0x49596978;
 constexpr std::uint32_t kCres = 0xE519C933;
 
-// A property as a number (decimal, or hex with 0x), 0 when missing or not a number.
-std::uint32_t number(const std::map<std::string, std::string>& p, const std::string& key) {
-    const auto it = p.find(key);
-    if (it == p.end()) {
-        return 0;
-    }
-    std::string_view s = it->second;
-    int base = 10;
-    if (s.size() > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
-        s.remove_prefix(2);
-        base = 16;
-    }
-    std::uint32_t value = 0;
-    const auto [end, error] = std::from_chars(s.data(), s.data() + s.size(), value, base);
-    return error == std::errc{} ? value : 0;
-}
+using propset::number;
 
 // A resource's own name (its root block's), without the type suffix ("_cres", "_txmt").
 std::string resourceName(const std::string& name, const char* suffix) {
@@ -76,7 +64,7 @@ float stretchOf(const std::map<std::string, std::string>& p) {
 // The Sim's skeleton model, read as the game does: older files name its key outright (and then
 // any index into the reference list is ignored), newer ones index their reference list. Without
 // either, the default skeleton for the Sim's age. Empty when it can't be read.
-std::string skeletonName(Assets& assets, const std::map<std::string, std::string>& age, const std::vector<sg::Link>& refs,
+std::string skeletonName(Assets& assets, const std::map<std::string, std::string>& age, const std::optional<sg::Link>& listed,
                          std::uint32_t ageFlag, std::vector<std::string>& problems) {
     std::optional<sg::Link> key;
     bool useRefs = true;
@@ -92,8 +80,8 @@ std::string skeletonName(Assets& assets, const std::map<std::string, std::string
         key = key.value_or(sg::Link{});
         key->instance = number(age, "skelinst");
     }
-    if (const std::uint32_t s = number(age, "skeletonkeyidx"); useRefs && age.count("skeletonkeyidx") && s < refs.size()) {
-        key = refs[s];
+    if (useRefs && listed) {
+        key = *listed;
     }
     const auto cres = key ? assets.byKey(*key) : assets.byName(kCres, defaultSkeleton(ageFlag) + "_cres");
     if (!cres) {
@@ -124,7 +112,8 @@ std::string& skinOf(SimLook& look, std::uint32_t part) {
 
 // A part from its part property set (GZPS) and that set's reference list: its model and the
 // materials replacing its groups' own. Nullopt when the set or its model is missing.
-std::optional<SimPart> readPart(Assets& assets, const sg::Link& set, std::uint32_t kind, std::vector<std::string>& problems) {
+std::optional<SimPart> readPart(Assets& assets, const sg::Link& set, std::uint32_t kind, std::vector<std::string>& problems,
+                                std::uint32_t wornIn = 0) {
     const auto bytes = assets.skinResource(set);
     const auto setRefs = assets.skinResource({reflist::kType, set.group, set.instance, set.instanceHigh});
     if (!bytes || !setRefs) {
@@ -132,6 +121,13 @@ std::optional<SimPart> readPart(Assets& assets, const sg::Link& set, std::uint32
         return std::nullopt;
     }
     const auto props = propset::parse(*bytes);
+    // A part worn in an outfit category its own "category" leaves out is not put on, as glasses are
+    // taken off in the shower. A part with no categories fits all, and so does any outfit with 0x400.
+    constexpr std::uint32_t kFitsAllCategory = 0x400;
+    const std::uint32_t categories = partCategories(props);
+    if (wornIn != 0 && categories != 0 && !(wornIn & kFitsAllCategory) && !(categories & wornIn)) {
+        return std::nullopt;
+    }
     const auto links = reflist::parse(*setRefs);
     const std::uint32_t resource = number(props, "resourcekeyidx");
     if (resource >= links.size()) {
@@ -175,35 +171,48 @@ bool wearsLastEntryOnly(std::uint32_t part) {
     return part == kHairPart || part == kTopPart || part == kBodyPart || part == kBottomPart;
 }
 
-SimLook simLook(Assets& assets, const std::filesystem::path& characterFile) {
-    SimLook look;
+std::optional<AgeData> characterAgeData(Assets& assets, const std::filesystem::path& characterFile) {
     assets.useCharacterFile(characterFile);
     const auto aged = assets.byKey({kAgeData, kLocalGroup, 1, 0});
     const auto agedRefs = assets.byKey({reflist::kType, kLocalGroup, 1, 0});
     if (!aged || !agedRefs) {
+        return std::nullopt;
+    }
+    return readAgeData(propset::parse(*aged), reflist::parse(*agedRefs));
+}
+
+SimLook simLook(Assets& assets, const std::filesystem::path& characterFile, std::optional<std::uint32_t> category) {
+    const auto data = characterAgeData(assets, characterFile);
+    if (!data) {
+        SimLook look;
         look.problems.push_back("no age data");
         return look;
     }
-    const auto age = propset::parse(*aged);
-    const auto refs = reflist::parse(*agedRefs);
-    look.category = number(age, "activecat");
+    return simLook(assets, *data, category);
+}
+
+SimLook simLook(Assets& assets, const AgeData& data, std::optional<std::uint32_t> category) {
+    SimLook look;
+    const auto& age = data.properties;
+    look.category = category.value_or(number(age, "activecat"));
     look.age = number(age, "age");
     look.gender = number(age, "gender");
     if (const auto it = age.find("skincolor"); it != age.end()) {
         look.skinTone = it->second;
     }
     look.stretch = stretchOf(age);
-    look.skeleton = skeletonName(assets, age, refs, look.age, look.problems);
-    // Counts come from the file. Each list and entry has its own properties, so a set can't have
-    // more than it has properties (a broken file could claim billions).
-    const auto atMost = [](std::uint32_t n, std::size_t properties) {
-        return static_cast<std::uint32_t>(std::min<std::size_t>(n, properties));
+    look.skeleton = skeletonName(assets, age, data.skeleton, look.age, look.problems);
+    // The bare skin outfit takes its hair and face from the formal outfit (category 8), so a Sim in
+    // the shower keeps its own head.
+    const auto wornCategory = [&](std::uint32_t kind) {
+        return look.category == kSkinCategory && (kind == kHairPart || kind == kFacePart) ? 8u : look.category;
     };
-    const std::uint32_t lists = atMost(number(age, "listcnt"), age.size());
+    // A category with a body wears it alone, without its tops and bottoms.
+    const auto body = data.lists.find(look.category << 16 | kBodyPart);
+    const bool wearsBody = body != data.lists.end() && !body->second.empty();
     SimPart bald;  // the skin outfit's bald head
-    for (std::uint32_t i = 0; i < lists; ++i) {
+    for (const auto& [key, list] : data.lists) {
         // Each list holds the parts of one kind for one category: key (category << 16) | part.
-        const std::uint32_t key = number(age, "lk" + std::to_string(i));
         // The skin outfit (category 0x80) holds the Sim's bald head and bare top and bottom (a toddler's
         // bare body): the skin under hair and clothes.
         const std::uint32_t kind = key & 0xFFFF;
@@ -212,18 +221,18 @@ SimLook simLook(Assets& assets, const std::filesystem::path& characterFile) {
         // The game lays a 0x800 list over the skin whenever the file has one: the head's over the bald
         // head, and the body's under tops, bottoms and full outfits alike.
         const bool plant = (key >> 16) == kPlantCategory && (kind == kHairPart || kind == kBodyPart);
-        if ((key >> 16) != look.category && !skin && !plant) {
+        const bool worn = (key >> 16) == wornCategory(kind) && !(wearsBody && (kind == kTopPart || kind == kBottomPart));
+        if (!worn && !skin && !plant) {
             continue;
         }
-        const std::uint32_t entries = atMost(number(age, "ls" + std::to_string(i)), age.size());
-        const bool lastOnly = !skin && !plant && wearsLastEntryOnly(kind);
-        for (std::uint32_t j = lastOnly && entries > 0 ? entries - 1 : 0; j < entries; ++j) {
-            const std::uint32_t index = number(age, "le" + std::to_string(i) + "_" + std::to_string(j));
-            if (index >= refs.size() || refs[index].type != kPartProperties) {
-                look.problems.push_back("list " + std::to_string(i) + ": no part property set");
+        const std::size_t entries = list.size();
+        const bool lastOnly = wearsLastEntryOnly(kind);
+        for (std::size_t j = lastOnly && !skin && !plant && entries > 0 ? entries - 1 : 0; j < entries; ++j) {
+            if (list[j].type != kPartProperties) {
+                look.problems.push_back("an outfit list holds no part property set");
                 continue;
             }
-            auto read = readPart(assets, refs[index], kind, look.problems);
+            auto read = readPart(assets, list[j], kind, look.problems, skin || plant ? 0 : wornCategory(kind));
             if (!read) {
                 continue;
             }
@@ -234,8 +243,12 @@ SimLook simLook(Assets& assets, const std::filesystem::path& characterFile) {
                 }
                 if (part.part == kHairPart) {
                     bald = std::move(part);
+                    continue;
                 }
-                continue;
+                // Worn as the outfit itself, the list's last entry is the one put on.
+                if (!worn || (lastOnly && j + 1 != entries)) {
+                    continue;
+                }
             }
             if (plant) {
                 if (!part.overrides.empty()) {
@@ -252,7 +265,6 @@ SimLook simLook(Assets& assets, const std::filesystem::path& characterFile) {
     }
     return look;
 }
-
 namespace {
 
 bool noGuid(const std::string& guid) {
@@ -404,6 +416,96 @@ SimLook newbornLook(Assets& assets, const BabyCatalog& catalog, const Newborn& b
         look.problems.push_back("no baby body");
     }
     look.faceOverlays = newbornFaceOverlays(assets, catalog, baby);
+    return look;
+}
+
+namespace {
+
+// The change that turns a face into its face template's: the first template in catalog order of
+// the family, species, age and gender. None when there is no such template or its mesh can't be read.
+std::optional<MeshEdit> faceTemplateEdit(Assets& assets, const OutfitCatalog& catalog, const std::string& family, std::uint32_t age,
+                                         std::uint32_t gender, std::vector<std::string>& problems) {
+    constexpr std::uint32_t kHuman = 1;
+    const auto t = std::find_if(catalog.faceTemplates.begin(), catalog.faceTemplates.end(), [&](const CatalogPart& p) {
+        return p.family == family && (p.species & kHuman) && (p.age & age) && (p.gender & gender);
+    });
+    if (t == catalog.faceTemplates.end()) {
+        return std::nullopt;
+    }
+    const auto bytes = assets.skinResource(t->key);
+    const auto refs = assets.skinResource({reflist::kType, t->key.group, t->key.instance, t->key.instanceHigh});
+    if (!bytes || !refs) {
+        problems.push_back("a face template can't be found");
+        return std::nullopt;
+    }
+    try {
+        const auto p = propset::parse(*bytes);
+        const auto links = reflist::parse(*refs);
+        const std::uint32_t shape = number(p, "shapekeyidx");
+        auto mesh = p.contains("shapekeyidx") && shape < links.size() ? shapeMesh(assets, links[shape]) : std::nullopt;
+        if (!mesh) {
+            problems.push_back("a face template has no mesh");
+            return std::nullopt;
+        }
+        auto from = std::make_shared<const sg::Mesh>(std::move(*mesh));
+        auto masks = std::make_shared<const FaceMasks>(faceRegionMasks(assets, age));
+        std::string key = "facetemplate_" + family + "_" + std::to_string(age) + "_" + std::to_string(gender);
+        return MeshEdit{std::move(key), [from, masks](sg::Mesh& m) { applyFaceTemplate(m, *from, *masks); }};
+    } catch (const std::exception& ex) {
+        problems.push_back(std::string("a face template can't be read: ") + ex.what());
+        return std::nullopt;
+    }
+}
+
+} // namespace
+
+SimLook madeSimLook(Assets& assets, const OutfitCatalog& catalog, const MadeLook& made, std::uint32_t category) {
+    constexpr std::uint32_t kMeshOverlay = 0x0C1FE246;
+    SimLook look = simLook(assets, made.data, category);
+    look.problems.insert(look.problems.end(), made.problems.begin(), made.problems.end());
+    // The game gives the made Sim a face of its own, built on the bare skin outfit's and worn in
+    // every outfit (its part property set has no category).
+    const auto skinFace = made.data.lists.find(kSkinCategory << 16 | kFacePart);
+    if (skinFace != made.data.lists.end() && !skinFace->second.empty() &&
+        std::none_of(look.parts.begin(), look.parts.end(), [](const SimPart& p) { return p.part == kFacePart; })) {
+        if (auto face = readPart(assets, skinFace->second.back(), kFacePart, look.problems)) {
+            look.parts.push_back(std::move(*face));
+        }
+    }
+    if (!made.faceFamily.empty()) {
+        if (auto edit = faceTemplateEdit(assets, catalog, made.faceFamily, look.age == kYoungAdultAge ? kAdultAge : look.age, look.gender,
+                                         look.problems)) {
+            auto shared = std::make_shared<const MeshEdit>(std::move(*edit));
+            for (auto& part : look.parts) {
+                if (part.part == kFacePart) {
+                    part.meshEdit = shared;
+                }
+            }
+        }
+    }
+    std::vector<std::pair<std::uint32_t, std::string>> layers;
+    for (const auto& key : made.faceOverlays) {
+        if (key.type == kMeshOverlay) {
+            look.problems.push_back("a mesh overlay (facial hair, glasses) isn't drawn yet");
+            continue;
+        }
+        const auto bytes = assets.skinResource(key);
+        if (!bytes) {
+            continue;
+        }
+        try {
+            const auto p = propset::parse(*bytes);
+            layers.emplace_back(number(p, "layer"), overlayTexture(assets, key, p));
+        } catch (const std::exception& ex) {
+            look.problems.push_back(std::string("a face overlay can't be read: ") + ex.what());
+        }
+    }
+    std::stable_sort(layers.begin(), layers.end(), [](const auto& x, const auto& y) { return x.first < y.first; });
+    for (auto& [layer, texture] : layers) {
+        if (!texture.empty()) {
+            look.faceOverlays.push_back(std::move(texture));
+        }
+    }
     return look;
 }
 

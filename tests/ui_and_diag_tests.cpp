@@ -4,6 +4,7 @@
 #include "../app/click_gate.hpp"
 
 #include "ui/drag_arrow.hpp"
+#include "ui/scroll_bar.hpp"
 #include "ui/tip_layout.hpp"
 
 namespace {
@@ -401,9 +402,45 @@ void dragArrowTurnsAboutItsMiddle() {
     CHECK(turned.rgba[(2 * 32 + 5) * 4 + 3] == 0);
 }
 
+// The game's scroll bar as the cheat window's output had it in the game: 44 lines with 13 shown on
+// a bar 171 high, scrolled to the end, held its thumb at 139 with 31 positions and 4 pages.
+void scrollBarStepsAsTheGame() {
+    using Part = ts2::ui::ScrollBar::Part;
+    ts2::ui::ScrollBar bar;
+    bar.setHeight(171);
+    bar.setLines(44, 13);
+    CHECK(bar.lastPosition() == 31 && bar.position() == 0 && bar.thumbTop() == 16);
+    CHECK(bar.setPosition(31) && bar.thumbTop() == 139);
+    CHECK(bar.partAt(5) == Part::Up && bar.partAt(100) == Part::PageUp && bar.partAt(145) == Part::Thumb);
+    CHECK(bar.partAt(160) == Part::Down);
+    // An arrow moves a line at once and again each time more than 200 ms pass while it is held.
+    CHECK(bar.press(5, 1000) && bar.position() == 30 && bar.pressed() == Part::Up);
+    CHECK(!bar.tick(1200) && bar.tick(1201) && bar.position() == 29);
+    // Off the arrow the press stops repeating.
+    bar.move(100, true);
+    CHECK(!bar.tick(1500) && bar.position() == 29);
+    bar.release(100);
+    CHECK(bar.pressed() == Part::None);
+    // A page is the 32 positions over 4 pages.
+    CHECK(bar.press(20, 2000) && bar.position() == 21);
+    bar.release(20);
+    // The thumb's middle follows the mouse: at 16 + 8 it is at the top, past the end at the bottom.
+    CHECK(!bar.press(bar.thumbTop() + 3, 3000) && bar.pressed() == Part::Thumb);
+    bar.move(24, true);
+    CHECK(bar.position() == 0 && bar.thumbTop() == 16);
+    bar.move(400, false);
+    CHECK(bar.position() == 31 && bar.thumbTop() == 139);
+    bar.release(78);
+    CHECK(bar.position() == 14 && bar.pressed() == Part::None);
+    // Nothing to scroll: the thumb stays at the top and the arrows do nothing.
+    bar.setLines(5, 13);
+    CHECK(bar.lastPosition() == 0 && bar.position() == 0 && bar.thumbTop() == 16 && !bar.press(5, 4000));
+}
+
 std::vector<Test> uiAndDiagTests() {
     return {
         {"the drag arrow turns about its middle", dragArrowTurnsAboutItsMiddle},
+        {"the scroll bar steps as the game's", scrollBarStepsAsTheGame},
         {"pie items go round the centre", pieItemsGoRoundTheCentre},
         {"clicks are dropped while loading", clicksAreDroppedWhileLoading},
         {"pie pages hold eleven and More", piePagesHoldElevenAndMore},

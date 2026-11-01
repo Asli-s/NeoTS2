@@ -11,6 +11,8 @@ namespace {
 // Interaction flags.
 constexpr std::uint32_t kVisitorsMay = 0x1;
 constexpr std::uint32_t kDebugOnly = 0x80;
+// The game's own Force Error line: its id (-2, which no table line has) and its global tree.
+constexpr std::uint16_t kForceErrorLine = 0xFFFE, kForceErrorTree = 0x02DA;
 // The line names its own queue icon (an object type and picture).
 constexpr std::uint32_t kOwnIcon = 0x00400000;  // a flag bit, leakcheck: ok
 constexpr std::uint32_t kNested = 0x8000;
@@ -107,21 +109,21 @@ std::string lineName(CodeSource& code, std::uint32_t group, std::uint16_t table,
 }
 
 bool startChecksPass(const ttab::Interaction& line, const SimObject& sim, const SimObject& object, bool parentalControl,
-                     bool autonomy) {
+                     bool autonomy, bool debugOnly) {
     if ((whoFlag(sim) & line.flags & kWhoFlags) == 0 || (sim.personData[kPersonType] != 0 && (line.flags & kVisitorsMay) == 0)) {
         return false;
     }
     if (objectOffersNothing(object) || (autonomy && object.data[kLockout] > 0)) {
         return false;
     }
-    return !(parentalControl && (line.flags & kHiddenByParentalControl) != 0) && (line.flags & kDebugOnly) == 0;
+    return !(parentalControl && (line.flags & kHiddenByParentalControl) != 0) && ((line.flags & kDebugOnly) != 0) == debugOnly;
 }
 
 } // namespace
 
 bool mayStartLine(const ttab::Interaction& line, const SimObject& sim, const SimObject& object, bool parentalControl,
-                  bool autonomy) {
-    return startChecksPass(line, sim, object, parentalControl, autonomy);
+                  bool autonomy, bool debugOnly) {
+    return startChecksPass(line, sim, object, parentalControl, autonomy, debugOnly);
 }
 
 ObjectInteractions interactionsOf(CodeSource& code, const SimObject& object) {
@@ -146,7 +148,7 @@ std::optional<QueuedInteraction> queuedChoice(CodeSource& code, const World& wor
                                               const PieChoice& choice) {
     const auto found = interactionsOf(code, object);
     const ttab::Interaction* line = found.table ? ttab::find(*found.table, choice.interaction) : nullptr;
-    if (line == nullptr) {
+    if (line == nullptr && choice.tree == 0) {
         return std::nullopt;
     }
     const SimObject* part = world.find(world.interactionPart(object));
@@ -157,13 +159,13 @@ std::optional<QueuedInteraction> queuedChoice(CodeSource& code, const World& wor
     queued.object = part->id;
     queued.group = part->group;
     queued.index = choice.interaction;
-    queued.action = line->action;
+    queued.action = line != nullptr ? line->action : choice.tree;
     queued.priority = kMenuPriority;
     queued.args = choice.params;
     queued.source = QueuedInteraction::Source::Player;
     queued.name = choice.name;
     // Line flag 0x8000 shows it nested in the queue.
-    queued.nested = (line->flags & 0x8000) != 0;
+    queued.nested = line != nullptr && (line->flags & 0x8000) != 0;
     queued.iconObject = choice.icon.object;
     queued.iconGuid = choice.icon.guid;
     queued.iconIndex = choice.icon.index;
@@ -177,7 +179,7 @@ bool runsAtOnce(CodeSource& code, const SimObject& object, const PieChoice& choi
 }
 
 RunResult runAtOnce(Vm& vm, CodeSource& code, World& world, SimObject& sim, SimObject& object, const PieChoice& choice) {
-    const auto menu = pieMenu(vm, code, sim, object);
+    const auto menu = pieMenu(vm, code, sim, object, {.debug = object.shiftClicked && world.testingCheats});
     const bool offered = std::any_of(menu.choices.begin(), menu.choices.end(), [&](const PieChoice& c) {
         return c.interaction == choice.interaction && c.params == choice.params && c.disabled == OfferedAction::Disabled::No;
     });
@@ -211,7 +213,7 @@ std::string interactionName(CodeSource& code, const SimObject& object, std::uint
     if (line == nullptr) {
         return "?" + std::to_string(index);
     }
-    return ((line->flags & kDebugOnly) ? "*" : "") + lineName(code, tableGroup, object.definition.field(objd::field::kInteractionTableId), *line, object.group);
+    return lineName(code, tableGroup, object.definition.field(objd::field::kInteractionTableId), *line, object.group);
 }
 
 PieMenu pieMenu(Vm& vm, CodeSource& code, SimObject& sim, SimObject& object, const PieMenuOptions& options) {
@@ -263,7 +265,7 @@ PieMenu pieMenu(Vm& vm, CodeSource& code, SimObject& sim, SimObject& object, con
         }
         if (offered.empty() && passed && sim.data[kHideInteraction] == 0) {
             const std::string name = lineName(code, tableGroup, tableId, line, object.group);
-            menu.choices.push_back(PieChoice{((line.flags & kDebugOnly) ? "*" : "") + name, static_cast<std::uint16_t>(line.stringIndex), {}, OfferedAction::Disabled::No,
+            menu.choices.push_back(PieChoice{name, static_cast<std::uint16_t>(line.stringIndex), {}, OfferedAction::Disabled::No,
                                              sim.data[kMenuOrder], icon});
         }
         if (options.firstOnly && !menu.choices.empty()) {
@@ -271,6 +273,12 @@ PieMenu pieMenu(Vm& vm, CodeSource& code, SimObject& sim, SimObject& object, con
         }
     }
     sim.thread.temps = temps;
+    // A debug menu also offers "Force Error" (global tree "Interaction - Object Error"), which runs
+    // "CT - Object Error" on the object to make it fail at a Break Point. It has no check and no line
+    // of its own.
+    if (options.debug && !(options.firstOnly && !menu.choices.empty())) {
+        menu.choices.push_back(PieChoice{"Force Error", kForceErrorLine, {}, OfferedAction::Disabled::No, 0, {}, kForceErrorTree});
+    }
     std::stable_sort(menu.choices.begin(), menu.choices.end(), [](const PieChoice& a, const PieChoice& b) { return a.order > b.order; });
     return menu;
 }

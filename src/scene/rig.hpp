@@ -108,9 +108,11 @@ std::array<float, 4> animatedRotation(const Rig::Node& node, const anim::Channel
 // The places of all of the rig's nodes from their places relative to their parents.
 void placeRig(const Rig& rig, const std::vector<Transform>& local, std::vector<Transform>& world);
 
+struct HeldJoint;
 // Where each of the rig's nodes is at `ms` into the animation, in the model's space. At rest
-// without one.
-void poseRig(const Rig& rig, const RigAnimation* animation, float ms, std::vector<Transform>& world);
+// without one. With `held` (one per node), the nodes the animation doesn't move keep those instead.
+void poseRig(const Rig& rig, const RigAnimation* animation, float ms, std::vector<Transform>& world,
+             const std::vector<HeldJoint>* held = nullptr);
 
 // The joint matrices a skinned mesh is drawn with (see Mesh::skin), for a rig posed by `animation`
 // (null: at rest). `nodes` maps each of the mesh's skin entries to a rig node (-1: the entry's joint
@@ -149,8 +151,6 @@ struct ScenePose {
     // Each lot object's actor's joints as last posed, which joints no clip moves keep (see
     // poseRigLayered). Kept between calls.
     std::unordered_map<std::uint32_t, std::vector<HeldJoint>> held;
-    // The heading (radians) each lot object's actor was placed at as it was last posed.
-    std::unordered_map<std::uint32_t, float> heldHeading;
     // Each lot object's actor's frozen clip (see Actor::Clip::frozen): its start (seconds) and the
     // pose it holds. Kept between calls.
     std::unordered_map<std::uint32_t, std::pair<double, std::vector<HeldJoint>>> frozen;
@@ -158,6 +158,8 @@ struct ScenePose {
     std::unordered_map<std::uint32_t, Transform> carried;
     // Where each Sim was placed and each held object hung as last posed, by object.
     std::unordered_map<std::uint32_t, Transform> drawnAt;
+    // The rig each actor was last posed with, by object, so a pose kept from another rig is dropped.
+    std::unordered_map<std::uint32_t, const Rig*> heldRig;
 };
 void poseActors(const Scene& scene, double seconds, ScenePose& out);
 

@@ -102,9 +102,13 @@ bool mix(std::vector<Contribution>& parts, std::array<float, N>& out) {
 // when no clip turn counts.
 bool mixLimbJoint(std::vector<Contribution>& parts, std::array<float, 4>& out, float& solved) {
     std::sort(parts.begin(), parts.end(), [](const Contribution& a, const Contribution& b) { return a.layer > b.layer; });
-    // The layers, top first, each part's weight and layer noted.
-    std::vector<LimbJointLayer> layers;
-    std::vector<std::pair<float, std::size_t>> weights(parts.size());
+    // The layers, top first, each part's weight and layer noted. The lists are kept between calls,
+    // as every limb joint of every Sim is mixed each frame.
+    thread_local std::vector<LimbJointLayer> layers;
+    thread_local std::vector<std::pair<float, std::size_t>> weights;
+    thread_local std::vector<float> scales;
+    layers.clear();
+    weights.assign(parts.size(), {});
     for (std::size_t i = 0; i < parts.size(); ++i) {
         if (i == 0 || parts[i - 1].layer != parts[i].layer) {
             layers.emplace_back();
@@ -115,7 +119,7 @@ bool mixLimbJoint(std::vector<Contribution>& parts, std::array<float, 4>& out, f
         sums.targets += parts[i].weight * parts[i].floor.targets;
         sums.pole += parts[i].weight * parts[i].floor.pole;
     }
-    std::vector<float> scales(layers.size());
+    scales.assign(layers.size(), 0.0f);
     const float ik = weighLimbJoint(layers, scales);
     std::array<float, 4> sum{};
     float total = 0;
@@ -181,10 +185,10 @@ struct RootMove {
     std::array<float, 4> turn{0, 0, 0, 1};
 };
 
-std::vector<std::optional<RootMove>> rootMovesOf(const Rig& rig, std::span<const LayeredClip> clips, int rootTrans) {
-    std::vector<std::optional<RootMove>> moves(clips.size());
+void rootMovesOf(const Rig& rig, std::span<const LayeredClip> clips, int rootTrans, std::vector<std::optional<RootMove>>& moves) {
+    moves.assign(clips.size(), std::nullopt);
     if (rootTrans < 0) {
-        return moves;
+        return;
     }
     // root_trans's parent at rest, in the rig's space. A node's parent comes before it, which also
     // ends the walk up through a broken file's parents.
@@ -202,7 +206,6 @@ std::vector<std::optional<RootMove>> rootMovesOf(const Rig& rig, std::span<const
             moves[c] = RootMove{place, turnProduct(ownBack, turnProduct(turnOf(place), own))};
         }
     }
-    return moves;
 }
 
 } // namespace
@@ -211,16 +214,27 @@ void poseRigLayered(const Rig& rig, std::span<const LayeredClip> clips, std::vec
                     const std::function<std::optional<HeadLook>(const HeadPlace&)>* look) {
     world.resize(rig.nodes.size());
     const bool holding = held != nullptr && held->size() == rig.nodes.size();
-    std::vector<Transform> local(rig.nodes.size());
-    std::vector<Contribution> rotations, translations, addedRotations, addedTranslations;
+    // The working lists are kept between calls, as every Sim is posed each frame.
+    thread_local std::vector<Transform> local;
+    thread_local std::vector<Contribution> rotations, translations, addedRotations, addedTranslations, headTurns, headAddedTurns;
+    thread_local std::vector<float> shares;
+    thread_local std::vector<bool> limbJoint;
+    thread_local std::vector<std::optional<RootMove>> rootMoves;
+    thread_local std::vector<const LayeredClip*> withLimbs, ordered, moving;
+    thread_local std::vector<LimbSource> sources;
+    thread_local std::vector<std::vector<float>> weights;
+    thread_local std::vector<const std::vector<int>*> seen;
+    local.assign(rig.nodes.size(), Transform{});
+    headTurns.clear();
+    headAddedTurns.clear();
     // The share of the solved turn in each limb joint, 1 elsewhere.
-    std::vector<float> shares(rig.nodes.size(), 1.0f);
+    shares.assign(rig.nodes.size(), 1.0f);
     const auto frozen = [&](const LayeredClip& clip) { return clip.pose != nullptr && clip.pose->size() == rig.nodes.size(); };
     const auto usable = [&](const LayeredClip& clip) {
         return (frozen(clip) || (clip.animation != nullptr && clip.animation->animation)) && clip.weight > 0 && !(holding && clip.layer < 0);
     };
     // The joints some clip's limb reaches with, which mix with its solve.
-    std::vector<bool> limbJoint(rig.nodes.size(), false);
+    limbJoint.assign(rig.nodes.size(), false);
     for (const auto& clip : clips) {
         if (usable(clip) && !frozen(clip)) {
             for (const auto& limb : clip.animation->limbs) {
@@ -234,10 +248,9 @@ void poseRigLayered(const Rig& rig, std::span<const LayeredClip> clips, std::vec
     }
     // The head's clip turns, kept to mix again with the look once the neck is placed.
     const HeadChain head = look != nullptr && *look ? headChain(rig) : HeadChain{};
-    std::vector<Contribution> headTurns, headAddedTurns;
     std::array<float, 4> headStart{0, 0, 0, 1};
     const int rootTrans = rig.find("root_trans"), rootRot = rig.find("root_rot");
-    const std::vector<std::optional<RootMove>> rootMoves = rootMovesOf(rig, clips, rootTrans);
+    rootMovesOf(rig, clips, rootTrans, rootMoves);
     for (std::size_t i = 0; i < rig.nodes.size(); ++i) {
         const bool root = static_cast<int>(i) == rootTrans || static_cast<int>(i) == rootRot;
         rotations.clear();
@@ -412,8 +425,8 @@ void poseRigLayered(const Rig& rig, std::span<const LayeredClip> clips, std::vec
     // Clips whose limbs only add offsets take no share of the layers. They come in by their own weight.
     // A clip fading out by its body only still reaches with its limbs, so the arms of a Sim getting
     // into bed don't drop to rest as one clip hands over to the next.
-    std::vector<const LayeredClip*> withLimbs;
-    std::vector<LimbSource> sources;
+    withLimbs.clear();
+    sources.clear();
     for (const auto& clip : clips) {
         if (!clip.animation || !clip.animation->animation || clip.animation->limbs.empty() || (holding && clip.layer < 0)) {
             continue;
@@ -432,11 +445,11 @@ void poseRigLayered(const Rig& rig, std::span<const LayeredClip> clips, std::vec
     // joints cover one another by layer, whether they reach with it or only turn its joints (an
     // arm-only overlay leaves the legs to the walk under it, and a walk's swinging arms cover the
     // standing pose's reach below).
-    std::vector<std::vector<float>> weights(withLimbs.size());
+    weights.resize(withLimbs.size());
     for (std::size_t c = 0; c < withLimbs.size(); ++c) {
         weights[c].assign(withLimbs[c]->animation->limbs.size(), 0.0f);
     }
-    std::vector<const LayeredClip*> ordered;
+    ordered.clear();
     for (const auto& clip : clips) {
         if (usable(clip)) {
             ordered.push_back(&clip);
@@ -467,14 +480,14 @@ void poseRigLayered(const Rig& rig, std::span<const LayeredClip> clips, std::vec
         };
         return std::any_of(joints.begin(), joints.end(), [&](int j) { return moves(clip.animation->rotation, j) || moves(clip.animation->translation, j); });
     };
-    std::vector<const std::vector<int>*> seen;
+    seen.clear();
     for (const auto* first : withLimbs) {
         for (const auto& l : first->animation->limbs) {
             if (std::any_of(seen.begin(), seen.end(), [&](const std::vector<int>* s) { return *s == l.joints; })) {
                 continue;
             }
             seen.push_back(&l.joints);
-            std::vector<const LayeredClip*> moving;
+            moving.clear();
             for (const auto* clip : ordered) {
                 if (limbOf(*clip, l.joints) >= 0 || turnsJoints(*clip, l.joints)) {
                     moving.push_back(clip);
@@ -505,7 +518,7 @@ void poseRigLayered(const Rig& rig, std::span<const LayeredClip> clips, std::vec
     for (std::size_t c = 0; c < withLimbs.size(); ++c) {
         if (std::any_of(weights[c].begin(), weights[c].end(), [](float w) { return w > kLeastWeight; })) {
             const LayeredClip& clip = *withLimbs[c];
-            sources.push_back({clip.animation->animation.get(), &clip.animation->limbs, clip.ms, 0, clip.weight, clip.turn, std::move(weights[c]), clip.objectFrame, rootMove(clip), clip.objectBone});
+            sources.push_back({clip.animation->animation.get(), &clip.animation->limbs, clip.ms, 0, clip.weight, clip.turn, weights[c], clip.objectFrame, rootMove(clip), clip.objectBone});
         }
     }
     if (!sources.empty()) {

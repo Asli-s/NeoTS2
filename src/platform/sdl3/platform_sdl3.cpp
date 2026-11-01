@@ -50,6 +50,7 @@ struct KeyInfo {
 
 constexpr KeyInfo kKeys[] = {
     {Key::A, SDLK_A, SDL_SCANCODE_A},
+    {Key::C, SDLK_C, SDL_SCANCODE_C},
     {Key::D, SDLK_D, SDL_SCANCODE_D},
     {Key::E, SDLK_E, SDL_SCANCODE_E},
     {Key::P, SDLK_P, SDL_SCANCODE_P},
@@ -89,6 +90,8 @@ constexpr KeyInfo kKeys[] = {
     {Key::Down, SDLK_DOWN, SDL_SCANCODE_DOWN},
     {Key::Left, SDLK_LEFT, SDL_SCANCODE_LEFT},
     {Key::Right, SDLK_RIGHT, SDL_SCANCODE_RIGHT},
+    {Key::Shift, SDLK_LSHIFT, SDL_SCANCODE_LSHIFT},
+    {Key::Shift, SDLK_RSHIFT, SDL_SCANCODE_RSHIFT},
 };
 
 Key keyOf(SDL_Keycode code) {
@@ -124,6 +127,12 @@ std::uint8_t buttonsOf(SDL_MouseButtonFlags state) {
                                      (state & SDL_BUTTON_RMASK ? 1u << static_cast<unsigned>(MouseButton::Right) : 0u));
 }
 
+void mouseModifiers(Event& out, SDL_Keymod mod) {
+    out.shift = (mod & SDL_KMOD_SHIFT) != 0;
+    out.ctrl = (mod & SDL_KMOD_CTRL) != 0;
+    out.alt = (mod & SDL_KMOD_ALT) != 0;
+}
+
 std::filesystem::path utf8Path(const char* text) {
     return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(text)));
 }
@@ -140,6 +149,9 @@ struct Window::Impl {
 };
 
 bool init() {
+    // Cursors at the system's cursor size, as the game asks for: 32 pixels grow with the display's
+    // scaling (48 at 150%).
+    SDL_SetHint(SDL_HINT_MOUSE_DPI_SCALE_CURSORS, "1");
     return SDL_Init(SDL_INIT_VIDEO);
 }
 
@@ -176,6 +188,7 @@ bool pollEvent(Event& out) {
             out.xrel = e.motion.xrel;
             out.yrel = e.motion.yrel;
             out.buttons = buttonsOf(e.motion.state);
+            mouseModifiers(out, SDL_GetModState());
             return true;
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
         case SDL_EVENT_MOUSE_BUTTON_UP:
@@ -183,6 +196,7 @@ bool pollEvent(Event& out) {
             out.button = buttonOf(e.button.button);
             out.x = e.button.x;
             out.y = e.button.y;
+            mouseModifiers(out, SDL_GetModState());
             return true;
         case SDL_EVENT_MOUSE_WHEEL:
             out.type = Event::Type::MouseWheel;
@@ -202,8 +216,8 @@ bool pollEvent(Event& out) {
 bool keyHeld(Key key) {
     const bool* state = SDL_GetKeyboardState(nullptr);
     for (const KeyInfo& k : kKeys) {
-        if (k.key == key) {
-            return state[k.scan];
+        if (k.key == key && state[k.scan]) {
+            return true;
         }
     }
     return false;

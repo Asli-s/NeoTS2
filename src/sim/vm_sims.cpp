@@ -1,6 +1,35 @@
 #include "sim/vm_execution.hpp"
 
+#include "formats/propset.hpp"
+
 namespace ts2::sim::vm_detail {
+
+namespace {
+
+// The keys of the part lists in a Sim's age data that hold a part ("listcntStd" with "lks"/"lss",
+// or without it the older "listcnt" with "lk"/"ls"). Each list is keyed (category << 16) | part.
+std::set<std::uint32_t> filledOutfitLists(const std::map<std::string, std::string>& age) {
+    const bool newer = age.contains("listcntStd");
+    const std::string count = newer ? "listcntStd" : "listcnt", key = newer ? "lks" : "lk", size = newer ? "lss" : "ls";
+    // A broken file could claim billions of lists: there can't be more than it has properties.
+    const std::uint32_t lists = std::min<std::uint32_t>(propset::number(age, count), static_cast<std::uint32_t>(age.size()));
+    std::set<std::uint32_t> filled;
+    for (std::uint32_t i = 0; i < lists; ++i) {
+        if (propset::number(age, size + std::to_string(i)) != 0) {
+            filled.insert(propset::number(age, key + std::to_string(i)));
+        }
+    }
+    return filled;
+}
+
+// Whether a Sim has clothes for an outfit category: a top and a bottom, or a full body.
+bool hasClothesFor(const std::set<std::uint32_t>& filled, std::uint32_t category) {
+    constexpr std::uint32_t kTop = 0x04, kBody = 0x08, kBottom = 0x10;
+    const auto has = [&](std::uint32_t part) { return filled.contains(category << 16 | part); };
+    return (has(kTop) && has(kBottom)) || has(kBody);
+}
+
+} // namespace
 
 bool Execution::genericSimsCall(const bhav::Instruction& in) {
     const std::uint8_t call = in.operands[0];
@@ -253,8 +282,15 @@ std::optional<bool> Execution::makeNewCharacter(const bhav::Instruction& in, Fra
     if (species < 0 || species > 3) {
         throw Stop{Outcome::Error, "species of a new character out of range", std::to_string(species)};
     }
-    // The skin color (byte 0) and the outfit (flag 0x40) only shape the new character's look,
-    // which isn't made yet.
+    // The skin (byte 0) and the outfit object only shape the new character's look, which the lot's
+    // drawing builds.
+    const int skin = slotAt(f.locals, o[0], "local");
+    std::uint32_t outfit = 0;
+    if (flags & kNewCharacterOutfit) {
+        outfit = (flags & kNewCharacterOutfitInTemps)
+                     ? static_cast<std::uint16_t>(thread_.temps[2]) | static_cast<std::uint32_t>(static_cast<std::uint16_t>(thread_.temps[3])) << 16
+                     : static_cast<std::uint32_t>(o[10] | o[11] << 8 | o[12] << 16 | o[13] << 24);
+    }
 
     // Human, large dog, small dog and cat templates.
     constexpr std::array<std::uint32_t, 4> kSpeciesTemplates{0x7FD96B54, 0x0F83C946, 0x111D8FFF, 0x911D900A};
@@ -273,12 +309,44 @@ std::optional<bool> Execution::makeNewCharacter(const bhav::Instruction& in, Fra
         made.personData[kYoungAdultPersonData] = 1;
     }
     made.personData[kGenderPersonData] = gender == 1 ? 1 : 0;
+    made.madeAs = SavedNeighbor::MadeAs{age, gender, skin, outfit};
     const std::optional<std::int16_t> id = world().addNeighbor(std::move(made));
     if (!id) {
         return false;
     }
+    nameNewCharacter(*id, *type, species, gender);
     holder->arrays[0].assign(1, *id);
     return true;
+}
+
+// A Sim Make New Character makes from a template gets a first name and a surname drawn from the
+// game's name tables by species and gender, first name first, each drawn among the table's entries
+// by the character factory's generator. A table missing draws nothing. A template whose definition
+// field 0x30 is set keeps its own first name and gets no surname.
+void Execution::nameNewCharacter(std::int16_t id, const ObjectType& type, int species, int gender) {
+    constexpr std::size_t kKeepsName = 0x30;
+    if (type.definition.field(kKeepsName) != 0) {
+        world().setNeighborSurname(id, "");
+        return;
+    }
+    const bool female = gender == 1;
+    const bool human = species == 0;
+    const std::uint16_t firstNames = human ? (female ? 0x97 : 0x96) : (female ? 0xEB : 0xEA);
+    const std::uint16_t surnames = human ? (female ? 0xCC : 0x98) : (female ? 0xED : 0xEC);
+    const auto draw = [&](std::uint16_t table) -> std::optional<std::string> {
+        const auto* names = world().nameTable(table);
+        if (names == nullptr || names->empty()) {
+            return std::nullopt;
+        }
+        const auto pick = (static_cast<std::uint64_t>(world().characterRandom()()) * names->size()) >> 32;
+        return (*names)[static_cast<std::size_t>(pick)];
+    };
+    if (auto first = draw(firstNames)) {
+        world().setNeighborFirstName(id, std::move(*first));
+    }
+    if (auto last = draw(surnames)) {
+        world().setNeighborSurname(id, std::move(*last));
+    }
 }
 
 // Make New Character for babies of two parents (flag 0x01). Parent 1 is bytes 6, 7-8 and parent 2
@@ -336,6 +404,33 @@ std::optional<bool> Execution::makeChildren(const bhav::Instruction& in, Frame& 
         }
     }
     f.childrenPending = true;
+    return std::nullopt;
+}
+
+// Generic Sims Call 0x1D: true once the character of the neighbor in temp 0 is loaded, or when there
+// is none. Until then it starts the load and waits a tick at a time, for up to temp 1 ticks (no end
+// below 0), and is true when they run out. Loads take as long as they take, so Sims made one after
+// the other appear one after the other, as the game's cars do. The game skips the wait in some state
+// that isn't known yet.
+std::optional<bool> Execution::loadCharacter(Frame& f) {
+    if (!f.characterWaits) {
+        f.characterWaits = thread_.temps[1];
+    }
+    const auto& load = world().characterLoad();
+    const std::int16_t neighbor = thread_.temps[0];
+    if (!load || world().neighbor(neighbor) == nullptr) {
+        return true;
+    }
+    if (const std::optional<bool> loaded = load(neighbor); !loaded || *loaded) {
+        return true;
+    }
+    std::int16_t& left = *f.characterWaits;
+    if (left == 0) {
+        return true;
+    }
+    if (left > 0) {
+        --left;
+    }
     return std::nullopt;
 }
 
@@ -578,12 +673,16 @@ bool Execution::relationship(const bhav::Instruction& in, Frame& f) {
 // Operands: byte 0 holds flags. Owner byte 9 / data 10-11 name the Sim. Byte 8 is the outfit category, or with
 // flag 0x04 the value of owner byte 1 / data 2-3. The outfit's source GUID: flag 0x01 the stack
 // object's type, 0x02 bytes 4-7, 0x40 temps 0 (low) and 1 (high). Flag 0x20 clears person data
-// 0x77-0x78 (the source GUID). The Sim is dressed by its appearance. Scripts keep the category in
-// person data 0x08 themselves. Always true.
+// 0x77-0x78 (the source GUID). A Sim with age data is dressed from its working copy of it: flag
+// 0x10 makes the copy anew from the Sim's own (and clears the source GUID), and a source's outfit is
+// put on the copy, the source GUID kept unless it is the Sim's own. The Sim gets the outfit when the
+// copy's lists have a top and a bottom, or a full body, for the category: person data 0x08 takes the
+// outfit number and the scene draws it. Flag 0x08 then writes the copy back into the Sim's own age
+// data. Always true.
 bool Execution::changeOutfit(const bhav::Instruction& in, Frame& f) {
-    constexpr std::uint8_t kFromStackObject = 0x01, kGuidInOperands = 0x02, kCategoryFromValue = 0x04,
-                           kClearSource = 0x20, kGuidFromTemps = 0x40;
-    constexpr std::size_t kSourceGuidLow = 0x77, kSourceGuidHigh = 0x78;
+    constexpr std::uint8_t kFromStackObject = 0x01, kGuidInOperands = 0x02, kCategoryFromValue = 0x04, kCommit = 0x08,
+                           kRenewCopy = 0x10, kClearSource = 0x20, kGuidFromTemps = 0x40;
+    constexpr std::size_t kCurrentOutfit = 0x08, kSourceGuidLow = 0x77, kSourceGuidHigh = 0x78;
     const auto& o = in.operands;
     const std::uint8_t flags = o[0];
     const std::int16_t simId = read(o[9], static_cast<std::uint16_t>(o[10] | o[11] << 8), f);
@@ -608,10 +707,109 @@ bool Execution::changeOutfit(const bhav::Instruction& in, Frame& f) {
     change.category = (flags & kCategoryFromValue) ? read(o[1], static_cast<std::uint16_t>(o[2] | o[3] << 8), f)
                                                    : static_cast<std::int16_t>(o[8]);
     if (flags & kClearSource) {
-        sim->personData[kSourceGuidLow] = 0;
-        sim->personData[kSourceGuidHigh] = 0;
+        personData(*sim, kSourceGuidLow) = 0;
+        personData(*sim, kSourceGuidHigh) = 0;
     }
+    // Without age data the game changes nothing more.
+    const ObjectType* type = code_.objectType(sim->definition.guid());
+    const auto* outfits = type != nullptr ? code_.ageData(type->group) : nullptr;
+    if (outfits == nullptr) {
+        return true;
+    }
+    // The Sim keeps a working copy of its outfits from its load. Flag 0x10 makes it anew.
+    if (flags & kRenewCopy) {
+        personData(*sim, kSourceGuidLow) = 0;
+        personData(*sim, kSourceGuidHigh) = 0;
+    }
+    if (const auto& build = world().outfitBuild()) {
+        const auto built = build(*sim, {change.sourceGuid.value_or(0), (flags & kRenewCopy) != 0, (flags & kCommit) != 0});
+        if (built) {
+            if (change.sourceGuid && built->sourceFound) {
+                const std::uint32_t kept = *change.sourceGuid != sim->definition.guid() ? *change.sourceGuid : 0;
+                personData(*sim, kSourceGuidLow) = static_cast<std::int16_t>(kept & 0xFFFF);
+                personData(*sim, kSourceGuidHigh) = static_cast<std::int16_t>(kept >> 16);
+            }
+            if (hasClothesFor(built->lists, change.categoryFlag())) {
+                personData(*sim, kCurrentOutfit) = change.category;
+                sim->outfitChange = change;
+            }
+            return true;
+        }
+    }
+    if (change.sourceGuid) {
+        diag::warnOnce("Change Outfit: an outfit from a source isn't worn yet (PR-63)");
+        return true;
+    }
+    // A category with no clothes leaves the Sim as it is. A Sim that aged here is checked in its new
+    // age's lists.
+    const auto aged = world().agedOutfitLists.find(sim->definition.guid());
+    if (!hasClothesFor(aged != world().agedOutfitLists.end() ? aged->second : filledOutfitLists(*outfits), change.categoryFlag())) {
+        return true;
+    }
+    personData(*sim, kCurrentOutfit) = change.category;
     sim->outfitChange = change;
+    return true;
+}
+
+// Age (operand 0, a life stage) makes me that age at once: 0 adult, 1 child, 2 toddler, 3 teen,
+// 4 elder, 0x0D baby, 0x0E young adult. Any other value does nothing. Person data 0x3A gets the
+// age in years the game gives each stage (young adults count as 19, with person data 0xAF set),
+// and the outfit source GUID (0x77-0x78) is cleared. Everything in my slots comes out and goes
+// back into the same slot on the new body. The new age's data is built at once, and the scene
+// builds the new body from it. Always true.
+// Not done yet: the walk and run sets for the new age, the scripts the slot moves run, a pet's new
+// routing size (PR-62).
+bool Execution::age(const bhav::Instruction& in) {
+    constexpr std::size_t kOutfitSourceLow = 0x77, kOutfitSourceHigh = 0x78;
+    if (!me().isPerson()) {
+        throw Stop{Outcome::Unsupported, "only a Sim can age", hex(me().definition.guid(), 8)};
+    }
+    // The years, and the age flag the scene dresses the Sim for (none for a baby, whose age data
+    // the game leaves as it is).
+    std::int16_t years = 0;
+    std::optional<std::uint32_t> ageFlag;
+    switch (in.operands[0]) {
+    case 0x00: years = 19; ageFlag = 0x08; break;
+    case 0x01: years = 3; ageFlag = 0x02; break;
+    case 0x02: years = 2; ageFlag = 0x01; break;
+    case 0x03: years = 16; ageFlag = 0x04; break;
+    case 0x04: years = 51; ageFlag = 0x10; break;
+    case 0x0D: years = 0; break;
+    case 0x0E: years = 19; ageFlag = 0x40; break;
+    default: return true;
+    }
+    SimObject& sim = me();
+    std::int16_t& youngAdult = personData(sim, kYoungAdultPersonData);
+    std::int16_t& sourceLow = personData(sim, kOutfitSourceLow);
+    std::int16_t& sourceHigh = personData(sim, kOutfitSourceHigh);
+    std::int16_t& ageYears = personData(sim, kNewAgePersonData);
+    std::vector<std::pair<std::int16_t, std::int16_t>> held;  // (slot, object id)
+    for (std::size_t i = 0; i < sim.slots.size(); ++i) {
+        if (SimObject* object = sim.slots[i] != 0 ? world().find(sim.slots[i]) : nullptr) {
+            held.emplace_back(static_cast<std::int16_t>(i), object->id);
+            takeOutOfSlot(*object);
+        }
+    }
+    // The new age's data becomes the Sim's own at once, so a Change Outfit right after reads it.
+    if (ageFlag) {
+        const auto& build = world().ageDataBuild();
+        auto lists = build ? build(sim, *ageFlag) : std::nullopt;
+        if (lists) {
+            world().agedOutfitLists[sim.definition.guid()] = std::move(*lists);
+        }
+        if (lists || !build) {
+            sim.newAge = *ageFlag;
+        }
+    }
+    youngAdult = in.operands[0] == 0x0E ? 1 : 0;
+    sourceLow = 0;
+    sourceHigh = 0;
+    ageYears = years;
+    for (const auto& [slot, id] : held) {
+        if (SimObject* object = world().find(id); object != nullptr && static_cast<std::size_t>(slot) < sim.slots.size()) {
+            putInSlot(*object, sim, slot);
+        }
+    }
     return true;
 }
 

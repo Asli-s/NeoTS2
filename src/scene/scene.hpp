@@ -199,6 +199,10 @@ struct Instance {
     // Doors and windows: a light set per primitive of its mesh, from the room the primitive's node
     // stands in (-1: the daylight). Used in place of `lightSet`.
     std::vector<int> partLightSets;
+    // Lot objects: the game's shape colour while it has one (an object fading out, as a car leaving
+    // the lot does). Its materials then draw blended, without reflections, their colour and alpha
+    // times this.
+    std::optional<std::array<float, 4>> shapeColor;
     // Lot objects: what decides their shadow, and the shadow drawn (the kind they ask for until the
     // lot's lighting knows which room they stand in).
     objectshadow::Facts shadowFacts;
@@ -364,10 +368,11 @@ struct Actor {
     // and the height of the lot's floor on a storey (1 = ground) at a lot position.
     Transform lotFrame;
     std::function<float(int storey, float x, float y)> floorHeight;
-    // A Sim's: the rig node each of its container slots sits at (-1: its own place).
+    // The rig node each of its container slots sits at (-1: its own place), a Sim's or a lot object's.
     std::vector<int> slotNodes;
-    // A Sim another Sim carries: that Sim (its object id, 0 for none) and the container slot it is in.
-    // It hangs at that slot's bone as the carrier is posed, the way a held object does (see poseActors).
+    // A Sim another Sim carries, or one in a slot of a lot object drawn by its clips (a car's seat):
+    // that Sim or object (its object id, 0 for none) and the container slot it is in. It hangs at
+    // that slot's bone as the carrier is posed, the way a held object does (see poseActors).
     std::uint32_t carrier = 0;
     std::size_t carrierSlot = 0;
     // A Sim's: the rig node each of its targeting slots sits at (-1: unknown).
@@ -437,8 +442,18 @@ ObjectLighting withSimLights(const ObjectLighting& lighting);
 // Which of a light set's first `usable` lights the game lights per pixel on a normal-mapped
 // surface, in that order (the rest stay at the vertices): the first one, two or three directional
 // lights, then, while that makes fewer than three, the first point light (spot lights come after
-// plain point lights).
-std::vector<std::size_t> perPixelLights(const ObjectLighting& lighting, std::size_t usable);
+// plain point lights). Held in place, as it is picked for every draw.
+struct PixelLights {
+    std::array<std::size_t, 3> index{};
+    std::size_t count = 0;
+
+    std::size_t size() const { return count; }
+    bool empty() const { return count == 0; }
+    const std::size_t* begin() const { return index.data(); }
+    const std::size_t* end() const { return index.data() + count; }
+    std::size_t operator[](std::size_t i) const { return index[i]; }
+};
+PixelLights perPixelLights(const ObjectLighting& lighting, std::size_t usable);
 
 // Where a lot's light maps are, for filling them once its light is worked out: one image per
 // level for the floors (8 x 8 texels per tile, rows along +y) and one for the wall faces, each

@@ -249,6 +249,11 @@ fs::path eaGamesFolder() {
     return documents.empty() ? fs::path() : documents / L"EA Games";
 }
 
+fs::path systemFontsFolder() {
+    wchar_t buffer[MAX_PATH] = {};
+    return SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_FONTS, nullptr, 0, buffer)) ? fs::path(buffer) : fs::path();
+}
+
 std::vector<GameInstall> findInstalls() {
     const fs::path documents = documentsFolder();
     std::vector<GameInstall> installs;

@@ -21,6 +21,8 @@ struct PieChoice {
     OfferedAction::Disabled disabled = OfferedAction::Disabled::No;
     std::int16_t order = 0;  // higher first
     InteractionIcon icon;    // its queue icon, as the line and its check tree left it
+    // A line the game adds itself, outside the object's table: the global tree it runs. 0 for a table line.
+    std::uint16_t tree = 0;
 };
 
 struct PieMenuOptions {
@@ -35,16 +37,18 @@ struct PieMenu {
 };
 
 // What `sim` may do with `object`, as the game's pie menu offers it: each line of the object's
-// interaction table that passes the game's checks and its check tree, highest order first. The
-// join lines and the cheat menus are not offered yet.
+// interaction table that passes the game's checks and its check tree, highest order first. A debug
+// menu ends with the game's own "Force Error" line. The join lines, "Dump Happy Log" and the cheat
+// menus are not offered yet.
 PieMenu pieMenu(Vm& vm, CodeSource& code, SimObject& sim, SimObject& object, const PieMenuOptions& options = {});
 
 // The checks the game gives a waiting interaction's line just before it starts, before its check
 // tree: who may use it (age and species, visitors), whether `object` takes interactions (not burning,
 // not turned off, and with `autonomy` its lockout, object data 0x19, at 0), parental control, and
-// not a debug line. The game lets debug lines start from a shift-click menu, which isn't kept yet.
+// whether it is a debug line. Only debug lines start with `debugOnly` (not autonomy, a Shift-clicked
+// object and testingCheatsEnabled on), and no debug line starts otherwise.
 [[nodiscard]] bool mayStartLine(const ttab::Interaction& line, const SimObject& sim, const SimObject& object,
-                                bool parentalControl, bool autonomy);
+                                bool parentalControl, bool autonomy, bool debugOnly = false);
 
 // The interaction table an object's menu comes from: the one its definition names (field 7), from
 // its own group, else its semi-global group, returned with the group it was found in. A multi-tile part

@@ -405,6 +405,25 @@ Fonts::Fonts(const std::string& styles, std::vector<std::vector<std::uint8_t>> f
 
 Fonts::~Fonts() = default;
 
+bool Fonts::addStyle(const std::string& line, const fs::path& file) {
+    // A system font is far smaller than this. A bigger file isn't read.
+    constexpr std::uintmax_t kMaxFontBytes = 64u << 20;
+    std::error_code error;
+    const auto size = fs::file_size(file, error);
+    if (error || size == 0 || size > kMaxFontBytes) {
+        return false;
+    }
+    const std::size_t before = impl_->faces.size();
+    impl_->addFace(readFile(file));
+    if (impl_->faces.size() == before) {
+        return false;
+    }
+    std::istringstream ini("[Font Styles]\n" + line);
+    impl_->readStyles(ini);
+    impl_->finish();
+    return true;
+}
+
 std::size_t Fonts::faceCount() const {
     return impl_->faces.size();
 }

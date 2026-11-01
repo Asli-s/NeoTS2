@@ -17,7 +17,7 @@ class RendererState : public IRenderer {
 public:
     void show(std::vector<std::uint8_t> visible) override;
     void setClearColor(float r, float g, float b) override { clear_[0] = r; clear_[1] = g; clear_[2] = b; }
-    void showSprites(std::vector<Sprite> sprites, bool scene = true) override;
+    void showSprites(std::vector<Sprite>& sprites, bool scene = true) override;
     void setSpriteScale(float scale) override { spriteScale_ = scale; }
     void setJoints(std::size_t instance, const std::vector<scene::Transform>& joints) override;
     void setPlace(std::size_t instance, const scene::Transform& transform) override;
@@ -34,6 +34,11 @@ public:
     void setHighlight(std::uint32_t object, float ambient) override {
         highlightObject_ = object;
         highlightAmbient_ = ambient;
+    }
+    void setShapeColor(std::size_t instance, std::optional<std::array<float, 4>> color) override {
+        if (instance < instances_.size()) {
+            instances_[instance].shapeColor = color;
+        }
     }
 
 protected:

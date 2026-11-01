@@ -162,6 +162,10 @@ std::vector<std::filesystem::path> originalSaveFolderNames() {
 std::filesystem::path eaGamesFolder() {
     return {};
 }
+
+std::filesystem::path systemFontsFolder() {
+    return {};
+}
 #endif
 
 } // namespace ts2::paths

@@ -4,6 +4,7 @@
 #include "ui/tip_layout.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <cstdint>
@@ -89,6 +90,15 @@ int Screen::add(const ui::Window& source, int parent) {
         w.h = static_cast<int>(area[3] - area[1]);
     }
     w.visible = source.flag("winflag_visible");
+    w.enabled = source.get("winflag_enabled") != "no";
+    w.ignoresMouse = source.flag("winflag_ignoremouse");
+    w.container = source.flag("winflag_container");
+    if (source.flag("winflag_mousetrans")) {
+        std::string clsid = source.text("clsid");
+        std::transform(clsid.begin(), clsid.end(), clsid.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        w.overChildren = clsid == "0x49495e7f" || clsid == "0x0c683787";
+        w.seeThrough = source.flag("winflag_pbuff") && source.flag("winflag_premulalpha");
+    }
     w.keyed = source.flag("winflag_pbufftrans") ||
               (parent >= 0 && static_cast<std::size_t>(parent) < windows_.size() && windows_[static_cast<std::size_t>(parent)].keyed);
     const auto image = source.list("image");
@@ -369,7 +379,8 @@ void Screen::setChecked(int window, bool checked) {
 }
 
 void Screen::remove(int window) {
-    if (window < 0) {
+    // A handle removed before stays free, or two later windows would share its slot.
+    if (window < 0 || std::find(freeWindows_.begin(), freeWindows_.end(), window) != freeWindows_.end()) {
         return;
     }
     // The windows inside first (each takes itself out of this one's children).
@@ -488,6 +499,13 @@ void Screen::setImage(int window, tga::Pixels pixels) {
     w.edge = false;
 }
 
+void Screen::setImagePart(int window, const std::array<int, 4>& part) {
+    if (window < 0 || static_cast<std::size_t>(window) >= windows_.size()) {
+        return;
+    }
+    windows_[static_cast<std::size_t>(window)].part = part;
+}
+
 std::vector<int> Screen::takeChangedTextures() {
     std::vector<int> out;
     out.swap(changed_);
@@ -521,6 +539,23 @@ void Screen::raise(int window) {
         roots_.erase(at);
         roots_.push_back(window);
     }
+}
+
+void Screen::detach(int window, int under) {
+    if (window < 0 || static_cast<std::size_t>(window) >= windows_.size()) {
+        return;
+    }
+    Window& w = windows_[static_cast<std::size_t>(window)];
+    if (w.parent >= 0) {
+        const auto at = origin(window);
+        std::erase(windows_[static_cast<std::size_t>(w.parent)].children, window);
+        w.parent = -1;
+        w.x = at[0];
+        w.y = at[1];
+    } else {
+        std::erase(roots_, window);
+    }
+    roots_.insert(std::find(roots_.begin(), roots_.end(), under), window);
 }
 
 void Screen::setWrapped(int window, bool wrapped) {
@@ -773,25 +808,98 @@ bool Screen::over(int x, int y) const {
     return false;
 }
 
-std::optional<int> Screen::buttonAt(int x, int y) const {
-    // The topmost shown button under the mouse: the last one drawn.
-    int over = -1;
-    for (int i = 0; i < static_cast<int>(windows_.size()); ++i) {
-        const Window& w = windows_[static_cast<std::size_t>(i)];
-        if (w.kind != Kind::Button || !shown(i) || w.state == ButtonState::Disabled || (modal_ >= 0 && !inside(i, modal_))) {
-            continue;
+std::vector<int> Screen::drawOrder() const {
+    std::vector<int> order;
+    std::vector<int> pending(roots_.rbegin(), roots_.rend());
+    while (!pending.empty()) {
+        const int i = pending.back();
+        pending.pop_back();
+        order.push_back(i);
+        const auto& children = windows_[static_cast<std::size_t>(i)].children;
+        pending.insert(pending.end(), children.rbegin(), children.rend());
+    }
+    return order;
+}
+
+bool Screen::takesMouse(int window) const {
+    const Window& w = windows_[static_cast<std::size_t>(window)];
+    const bool enabled = w.kind == Kind::Button ? w.state != ButtonState::Disabled : w.enabled;
+    return w.visible && enabled && !w.ignoresMouse && !w.passive;
+}
+
+bool Screen::holds(int window, int x, int y) const {
+    const Window& w = windows_[static_cast<std::size_t>(window)];
+    const auto at = origin(window);
+    if (x < at[0] || y < at[1] || x >= at[0] + w.w || y >= at[1] + w.h) {
+        return false;
+    }
+    auto overChild = [&](bool ignoring) {
+        return std::any_of(w.children.begin(), w.children.end(), [&](int c) { return shownHolds(c, x, y, ignoring); });
+    };
+    if (w.container && !overChild(true)) {
+        return false;
+    }
+    // Of the two child-only kinds, the generic windows don't count children that ignore the mouse.
+    if (w.overChildren && !overChild(w.kind != Kind::Generic)) {
+        return false;
+    }
+    return !w.seeThrough || drawnAt(window, x, y);
+}
+
+bool Screen::shownHolds(int window, int x, int y, bool ignoring) const {
+    const Window& w = windows_[static_cast<std::size_t>(window)];
+    if (!w.visible || (!ignoring && w.ignoresMouse)) {
+        return false;
+    }
+    return std::any_of(w.children.begin(), w.children.end(), [&](int c) { return shownHolds(c, x, y, ignoring); }) || holds(window, x, y);
+}
+
+bool Screen::drawnAt(int window, int x, int y) const {
+    std::vector<Quad> quads;
+    emit(window, quads);
+    const float px = static_cast<float>(x) + 0.5f, py = static_cast<float>(y) + 0.5f;
+    return std::any_of(quads.begin(), quads.end(), [&](const Quad& q) {
+        if (px < q.x0 || py < q.y0 || px >= q.x1 || py >= q.y1 || q.color[3] <= 0 || q.texture < 0 ||
+            static_cast<std::size_t>(q.texture) >= textures_.size()) {
+            return false;
         }
-        const auto at = origin(i);
-        if (x >= at[0] && y >= at[1] && x < at[0] + w.w && y < at[1] + w.h) {
-            over = i;
+        const tga::Pixels& t = textures_[static_cast<std::size_t>(q.texture)];
+        if (t.width == 0 || t.height == 0) {
+            return false;
+        }
+        const float u = q.u0 + (px - q.x0) / (q.x1 - q.x0) * (q.u1 - q.u0), v = q.v0 + (py - q.y0) / (q.y1 - q.y0) * (q.v1 - q.v0);
+        const auto tx = static_cast<std::size_t>(std::clamp(u * static_cast<float>(t.width), 0.0f, static_cast<float>(t.width - 1)));
+        const auto ty = static_cast<std::size_t>(std::clamp(v * static_cast<float>(t.height), 0.0f, static_cast<float>(t.height - 1)));
+        return t.rgba[(ty * t.width + tx) * 4 + 3] != 0;
+    });
+}
+
+int Screen::mouseWindowIn(const std::vector<int>& windows, int x, int y) const {
+    // The one drawn on top is tried first.
+    for (auto it = windows.rbegin(); it != windows.rend(); ++it) {
+        if (takesMouse(*it) && holds(*it, x, y)) {
+            const int inner = mouseWindowIn(windows_[static_cast<std::size_t>(*it)].children, x, y);
+            return inner >= 0 ? inner : *it;
         }
     }
-    return over >= 0 ? std::optional<int>(over) : std::nullopt;
+    return -1;
+}
+
+int Screen::mouseWindow(int x, int y) const {
+    if (modal_ >= 0) {
+        return shown(modal_) ? mouseWindowIn({modal_}, x, y) : -1;
+    }
+    return mouseWindowIn(roots_, x, y);
+}
+
+std::optional<int> Screen::buttonAt(int x, int y) const {
+    const int window = mouseWindow(x, y);
+    return window >= 0 && windows_[static_cast<std::size_t>(window)].kind == Kind::Button ? std::optional<int>(window) : std::nullopt;
 }
 
 int Screen::tipWindowAt(int x, int y, int within) const {
     int over = -1;
-    for (int i = 0; i < static_cast<int>(windows_.size()); ++i) {
+    for (const int i : drawOrder()) {
         const Window& w = windows_[static_cast<std::size_t>(i)];
         if (w.tip.empty() || !shown(i) || (modal_ >= 0 && !inside(i, modal_)) || (within >= 0 && !inside(i, within))) {
             continue;
@@ -874,6 +982,9 @@ void Screen::emit(int index, std::vector<Quad>& out) const {
             }
         } else if (w.edge) {
             pushThirds(out, w.image, x0, y0, x1, y1, 0, 1, iw, ih);
+        } else if (w.part[2] > w.part[0] && w.part[3] > w.part[1]) {
+            out.push_back({x0, y0, x1, y1, static_cast<float>(w.part[0]) / iw, static_cast<float>(w.part[1]) / ih,
+                           static_cast<float>(w.part[2]) / iw, static_cast<float>(w.part[3]) / ih, w.image});
         } else if (w.imageRect[2] > w.imageRect[0]) {
             // Part of the image (one frame of the plumbob's animation strip), drawn at the window's size
             // from the image's top left: not known yet.
@@ -993,6 +1104,12 @@ void Screen::emitLines(const Window& w, float x0, float y0, std::vector<Quad>& o
 
 std::vector<Quad> Screen::quads(double seconds) const {
     std::vector<Quad> out;
+    quads(seconds, out);
+    return out;
+}
+
+void Screen::quads(double seconds, std::vector<Quad>& out) const {
+    out.clear();
     for (const int r : roots_) {
         emit(r, out);
     }
@@ -1017,17 +1134,17 @@ std::vector<Quad> Screen::quads(double seconds) const {
     // 3 rows, which hold a soft shadow.
     constexpr double kTipDelay = 0.4, kTipTimeout = 3;
     if (hover_ < 0 || pressed_ >= 0 || seconds - hoverSince_ < kTipDelay) {
-        return out;
+        return;
     }
     const Window& b = windows_[static_cast<std::size_t>(hover_)];
     if (b.tip.empty() || b.tipImage < 0 || (b.tipTimeout && seconds - hoverSince_ >= kTipTimeout)) {
-        return out;
+        return;
     }
     const auto at = origin(hover_);
     const int advance = fonts_.lineHeight(fonts_.style("HoverTipTitle"));
     const TipBox box = placeTip(at[0] + b.w / 2, at[1] + b.h / 2, b.tipWidth + 24, b.tipLines * advance + 12, size_);
     emitTip(box.x, box.y, box.w, box.h, b.tipImage, b.tipBaseline, box.y + 15, out);
-    return out;
+    return;
 }
 
 } // namespace ts2::ui

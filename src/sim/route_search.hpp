@@ -30,7 +30,10 @@ private:
 // tries neighbours in that order). Built once per grid state. Rebuild it after the grid changes.
 struct RouteLinks {
     std::vector<std::vector<int>> of;  // by cell index, empty for cells that aren't leaves
+    bool stale = false;                // the grid changed since it was built
     static RouteLinks build(const RouteGrid& grid);
+    // Builds the links again in place, keeping the lists' storage, as grids change often.
+    void rebuild(const RouteGrid& grid);
 };
 
 // Levels count from 0 (the ground) here, as the route grids do.

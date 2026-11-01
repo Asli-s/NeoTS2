@@ -68,6 +68,11 @@ public:
 
     std::size_t faceCount() const;
 
+    // Adds a style written as a FontStyle.ini line and the font file it draws with, after the game's
+    // fonts (a font of the system, as the game asks Windows for some). False when the file can't be
+    // read as a font, and the style is then left out.
+    bool addStyle(const std::string& line, const std::filesystem::path& file);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

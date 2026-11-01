@@ -63,21 +63,21 @@ ObjectLighting withSimLights(const ObjectLighting& lighting) {
     return out;
 }
 
-std::vector<std::size_t> perPixelLights(const ObjectLighting& lighting, std::size_t usable) {
+PixelLights perPixelLights(const ObjectLighting& lighting, std::size_t usable) {
     const std::size_t n = std::min(usable, lighting.lights.size());
-    std::vector<std::size_t> out;
-    for (std::size_t i = 0; i < n && out.size() < 3; ++i) {
+    PixelLights out;
+    for (std::size_t i = 0; i < n && out.count < 3; ++i) {
         if (!lighting.lights[i].point) {
-            out.push_back(i);
+            out.index[out.count++] = i;
         }
     }
-    if (out.size() < 3) {
+    if (out.count < 3) {
         for (const bool spot : {false, true}) {
             const auto& lights = lighting.lights;
             const auto it = std::find_if(lights.begin(), lights.begin() + static_cast<std::ptrdiff_t>(n),
                                          [&](const ObjectLighting::Light& l) { return l.point && l.spot == spot; });
             if (it != lights.begin() + static_cast<std::ptrdiff_t>(n)) {
-                out.push_back(static_cast<std::size_t>(it - lights.begin()));
+                out.index[out.count++] = static_cast<std::size_t>(it - lights.begin());
                 break;
             }
         }

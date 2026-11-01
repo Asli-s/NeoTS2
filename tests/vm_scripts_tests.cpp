@@ -193,6 +193,22 @@ void luaScriptPrimitiveRunsScripts() {
 
 // The object-facing script functions read and write the same values the VM uses. The running
 // object is the thread's owner and the running-on object the one whose code runs.
+// Scripts read fields 0 to 107 signed, and 201 to 210 as 32-bit values of two fields: 203 is an NPC's
+// template GUID (fields 0x46 and 0x47).
+void definitionFieldsAsScriptsNumberThem() {
+    ts2::objd::ObjectDefinition d;
+    d.fields.assign(0x50, 0);
+    d.fields[0x46] = 0x1B5D;
+    d.fields[0x47] = 0x4C07;
+    d.fields[0x0E] = 0xFFFF;
+    d.fields[0x0F] = 0x8000;
+    CHECK(d.scriptField(203) == 0x4C071B5D);
+    CHECK(d.scriptField(0x0E) == -1);
+    CHECK(d.scriptField(202) == static_cast<std::int32_t>(0x8000FFFFu));
+    CHECK(d.scriptField(107) == 0);  // past the saved fields: 0
+    CHECK(!d.scriptField(108) && !d.scriptField(200) && !d.scriptField(211));
+}
+
 void objectScriptsReadAndWriteValues() {
     auto runtime = std::make_shared<ts2::sim::LuaRuntime>();
     runtime->load({compileScript("Guids", "FridgeGuid = 1817229926")}, {compileScript("Values", R"(
@@ -1001,6 +1017,35 @@ void queuedInteractionAdvertisingIsSeen() {
     CHECK(vm.run(sim, 0x1000).outcome == Outcome::True && sim.thread.temps[0] == 1);
 }
 
+// CachedPerson:getQueuedInteractionObjectId and getQueuedInteractionId give the object and table index
+// of a queued interaction, counted from 0, and raise a script check error past the queue's end.
+void queuedInteractionObjectIsRead() {
+    auto runtime = std::make_shared<ts2::sim::LuaRuntime>();
+    runtime->load({}, {compileScript("QueuedObject", R"(
+        local p = CachedPerson.new(GetStackObjectId())
+        SetTemp(0, p:getQueuedInteractionObjectId(1))
+        SetTemp(2, p:getQueuedInteractionId(0))
+        SetTemp(1, p:getQueuedInteractionObjectId(2))
+        SetScriptReturnValue(true)
+    )")});
+    CHECK(runtime->problems.empty());
+    MemoryCodeSource code;
+    code.addStrings(ts2::sim::kGlobalGroup, 0x130, {"QueuedObject"});
+    code.add(kObjectGroup, 0x1000, bhav({luaScriptCall(1)}));
+    ts2::sim::World world;
+    world.setScripts(runtime);
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    for (const std::int16_t object : {std::int16_t{40}, std::int16_t{41}}) {
+        ts2::sim::QueuedInteraction q;
+        q.object = object;
+        q.index = static_cast<std::int16_t>(object - 33);
+        sim.queue.push_back(q);
+    }
+    sim.thread.stackObjectId = sim.id;
+    Vm vm(code, {}, &world);
+    CHECK(scriptRaisesError(world, [&] { return vm.run(sim, 0x1000); }) && sim.thread.temps[0] == 41 && sim.thread.temps[2] == 7);
+}
+
 // CachedNeighbor reads and writes the neighbor's own person data (0 outside 0-230) and gives its
 // GUID as a signed number.
 void cachedNeighborScriptsReadTheNeighbor() {
@@ -1416,6 +1461,7 @@ std::vector<Test> vmScriptTests() {
         {"Manage Inventory puts the stack object away", manageInventoryPutsTheStackObjectAway},
         {"CachedNeighbor scripts read the neighbor", cachedNeighborScriptsReadTheNeighbor},
         {"CachedPerson sees queued interactions that advertise a motive", queuedInteractionAdvertisingIsSeen},
+        {"CachedPerson reads a queued interaction's object", queuedInteractionObjectIsRead},
         {"nWorld.HasSolidFloor reads the floor quarter", hasSolidFloorReadsTheFloorQuarter},
         {"nWorld.HasStage reads the platform region", hasStageReadsThePlatformRegion},
         {"nWorld.GetNumWallSections is the room wall count", numWallSectionsIsTheRoomWallCount},
@@ -1431,6 +1477,7 @@ std::vector<Test> vmScriptTests() {
         {"ObjectManager scripts find objects", objectManagerScriptsFindObjects},
         {"data table scripts keep values", dataTableScriptsKeepValues},
         {"object scripts read and write values", objectScriptsReadAndWriteValues},
+        {"definition fields as scripts number them", definitionFieldsAsScriptsNumberThem},
         {"scripts subscribe objects to messages", scriptsSubscribeToMessages},
         {"message subscriptions are bounded", messageSubscriptionsAreBounded},
         {"inventory scripts use saved tokens", inventoryScriptsUseSavedTokens},

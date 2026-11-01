@@ -257,7 +257,11 @@ bool SdlGpuRenderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, u
         drawBoundary(f);
     }
 
-    std::vector<Draw> opaque, layers, blended;
+    // The draw lists are kept between frames, so they reuse their storage.
+    thread_local std::vector<Draw> opaque, layers, blended;
+    opaque.clear();
+    layers.clear();
+    blended.clear();
     FramePlan::collectDraws(*this, *this, f, opaque, layers, blended);
     drawList(f, opaque, 0);
     if (f.extras && gpu_->terrainVertices) {

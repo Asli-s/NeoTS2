@@ -425,8 +425,11 @@ void solveLimbs(const Rig& rig, std::span<const LimbSource> sources, std::vector
     const int rootTrans = rig.find("root_trans");
     const int skeleton = rootTrans >= 0 ? rig.nodes[static_cast<std::size_t>(rootTrans)].parent : -1;
     const auto inSkeleton = [&](int frame) { return frame < 0 || frame == skeleton; };
-    // Each limb once, in the order the animations name them.
-    std::vector<const LimbChain*> distinct;
+    // Each limb once, in the order the animations name them. The lists are kept between calls, as
+    // every Sim's limbs are solved each frame.
+    thread_local std::vector<const LimbChain*> distinct;
+    thread_local std::vector<Transform> own;
+    distinct.clear();
     for (const auto& s : sources) {
         for (const auto& limb : *s.limbs) {
             if (std::none_of(distinct.begin(), distinct.end(), [&](const LimbChain* d) { return d->joints == limb.joints; })) {
@@ -518,7 +521,7 @@ void solveLimbs(const Rig& rig, std::span<const LimbSource> sources, std::vector
         pole = add(scale(pole, 1 / following), addedPole);
         // Added target turns are in the target's own frame, so they come after its turn, as a joint's do.
         orientation = turnProduct(orientation, addedTurn);
-        std::vector<Transform> own;
+        own.clear();
         for (const int j : chain->joints) {
             own.push_back(local[static_cast<std::size_t>(j)]);
         }

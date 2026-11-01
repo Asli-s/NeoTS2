@@ -91,7 +91,7 @@ std::array<float, 12> skyCamera(const FrameView& f, float up) {
 
 void FramePlan::collectDraws(const RendererState& s, const ResourceQuery& q, const FrameView& f, std::vector<Draw>& opaque,
                              std::vector<Draw>& layers, std::vector<Draw>& blended) {
-    std::vector<float> depths;
+    thread_local std::vector<float> depths;
     const auto& meshes = q.meshes();
     // Without projected shadows the game falls back to the models' own shadow groups.
     const bool objectShadows = s.capabilities().projectedShadows;
@@ -128,7 +128,9 @@ void FramePlan::collectDraws(const RendererState& s, const ResourceQuery& q, con
                                            ? &s.materials_[static_cast<std::size_t>(material)]
                                            : nullptr;
             const auto alpha = m ? m->alpha : scene::AlphaMode::Opaque;
-            const bool blends = alpha == scene::AlphaMode::Blend || alpha == scene::AlphaMode::Add || alpha == scene::AlphaMode::Sum;
+            // A shape colour draws every material blended, as the game turns standard materials to blend mode.
+            const bool blends = alpha == scene::AlphaMode::Blend || alpha == scene::AlphaMode::Add || alpha == scene::AlphaMode::Sum ||
+                                instance.shapeColor.has_value();
             const float sortDepth = blends && p.hasBox ? nearestDepth(clip, p.low, p.high, f.nearZ) : clip.m[15];
             (blends ? blended : alpha == scene::AlphaMode::Layer ? layers : opaque)
                 .push_back({&p, &instance, m, m ? m->layer : 0, sortDepth, p.source < instance.sun.size() ? instance.sun[p.source] : 1.0f});
@@ -271,6 +273,11 @@ void FramePlan::setMaterial(const RendererState& s, const ResourceQuery& q, Draw
             fu.color[i] *= lighting->textureLight[i];
         }
     }
+    if (const auto& shape = d.instance->shapeColor) {
+        for (std::size_t i = 0; i < 4; ++i) {
+            fu.color[i] *= (*shape)[i];
+        }
+    }
     fu.sunDirection[0] = f.sun[0];
     fu.sunDirection[1] = f.sun[1];
     fu.sunDirection[2] = f.sun[2];
@@ -339,9 +346,10 @@ void FramePlan::setMaterial(const RendererState& s, const ResourceQuery& q, Draw
         fu.uvTile[0] = 1.0f / static_cast<float>(m->tiles);
         fu.uvTile[2] = static_cast<float>(frame) * fu.uvTile[0];
     }
-    // The environment cube, black for materials without one so the binding rarely changes.
+    // The environment cube, black for materials without one so the binding rarely changes. A shape
+    // colour turns reflections off, as the game's material scripts do.
     TextureRef cube{TextureRef::Kind::BlackCube, 0};
-    if (m && m->envCube >= 0 && q.hasEnvCube(m->envCube)) {
+    if (m && m->envCube >= 0 && q.hasEnvCube(m->envCube) && !d.instance->shapeColor) {
         cube = {TextureRef::Kind::EnvCube, m->envCube};
         std::copy(m->envCubeCoef.begin(), m->envCubeCoef.end(), fu.envCube);
         if (lighting) {

@@ -3,8 +3,9 @@
 namespace ts2::sim::vm_detail {
 
 // Operands:
-//   byte 0     mode: 1 takes the object out of its container's slot, leaves it where it is and is
-//              true (the game does more for multi-tile objects and Sims, not known yet), 0 searches the reference's room,
+//   byte 0     mode: 1 takes the object out of its container's slot and out of the world and is
+//              true (a Sim getting on a school bus goes this way, the game does more for multi-tile
+//              objects and Sims, not known yet), 0 searches the reference's room,
 //              then any room, 2 only the room, 3 the line the reference faces, in its room, 4 the
 //              same turned a quarter, 7 by the reference's routing slot, 8 by a global slot (bytes
 //              10-11), 5 and 6 by the reference's routing slot whose number is in the param (5) or
@@ -29,6 +30,10 @@ bool Execution::findLocationFor(const bhav::Instruction& in, Frame& f) {
     }
     if (o[0] == 1) {
         takeOutOfSlot(*placed);
+        placed->x = kOffLot;
+        placed->y = kOffLot;
+        placed->tile.reset();
+        world().markFootprintChanged(placed->id);
         return true;
     }
     const bool bySlot = o[0] >= 5 && o[0] <= 8;
@@ -166,8 +171,9 @@ bool Execution::placeBySlot(const std::array<std::uint8_t, 16>& o, std::int16_t 
 //   byte 4       0x02 ask a Sim in the way to move, 0x08 slot number in temp 0, 0x10 test only
 //   bytes 10-11  1: put my own slot (temp 1) there instead of me (not kept yet)
 // Moves me to a routing slot of the stack object, its routing slots counted from 0, and is true.
-// It is false when a check refuses, my object data 0x34 then saying why (2: not the same room). Moving
-// takes me out of what I was in: a Sim standing up from a seat is no longer in it (data 2).
+// It is false when a check refuses, my object data 0x34 then saying why (2: not the same room, 4: off
+// the lot, as a car reaching the lot's edge finds, 14: something in the way). Moving takes me out of
+// what I was in: a Sim standing up from a seat is no longer in it (data 2).
 bool Execution::snap(const bhav::Instruction& in, Frame& f) {
     constexpr std::uint8_t kSlotInTemp0 = 0x08, kTestOnly = 0x10;
     const auto& o = in.operands;
@@ -220,10 +226,19 @@ bool Execution::snap(const bhav::Instruction& in, Frame& f) {
         fromSpot->y = spot->y;
     }
     const SnapRefusal refusal = snapRefusal(world(), fromSpot ? *fromSpot : self, *target);
+    // A placement code is told as the code plus 2, a different room as 2 itself.
+    constexpr std::int16_t kOffLotResult = 2 + 2;
+    if (refusal == SnapRefusal::OffLot) {
+        self.data[kPrimitiveResultField] = kOffLotResult;
+    }
     if (refusal == SnapRefusal::NotSameRoom) {
         self.data[kPrimitiveResultField] = 2;
     }
     if (refusal != SnapRefusal::None) {
+        return false;
+    }
+    if (const auto code = placementCode(world(), self, *target)) {
+        self.data[kPrimitiveResultField] = static_cast<std::int16_t>(*code + 2);
         return false;
     }
     if ((o[4] & kTestOnly) == 0) {

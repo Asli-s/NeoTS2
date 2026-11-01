@@ -546,7 +546,7 @@ void interactionTableParse() {
     CHECK(t.name == name && t.version == 0x55 && t.interactions.size() == 1 && t.tableName == name);
     const auto& in = t.interactions[0];
     CHECK(in.action == 0x2007 && in.test == 0x2008 && in.flags == 0xC45 && in.autonomy == 50 &&
-          in.joiningIndex == -1 && in.value3 == 0.5f && in.iconIndex == 1);
+          in.joiningIndex == -1 && in.memoryMultiplier == 0.5f && in.iconIndex == 1);
     CHECK(in.motives.size() == 1 && in.motives[0].size() == 1 && in.motives[0][0].min == 10 &&
           in.motives[0][0].delta == -5 && in.motives[0][0].type == 3);
     CHECK(t.extraBytes == 0);

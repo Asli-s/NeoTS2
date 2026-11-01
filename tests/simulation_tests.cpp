@@ -8,6 +8,7 @@
 #include "sim/walking.hpp"
 #include "sim/path_passes.hpp"
 #include "sim/route_world.hpp"
+#include "sim/speed_clock.hpp"
 #include "sim/turn.hpp"
 #include "sim/walk_path.hpp"
 #include "sim/walk_plan.hpp"
@@ -466,10 +467,65 @@ void motivesAreShownAsWholeNumbers() {
     CHECK(ts2::sim::wholeMotive(sim, ts2::sim::motive::kEnvironment) == 70);
 }
 
+void speedClockMovesAtMost200MsAnUpdate() {
+    ts2::sim::SpeedClock clock;
+    clock.setRate(21);
+    clock.update(16);  // 16 real ms at 21 times is 336, more than an update moves
+    CHECK(clock.timeMs() == 200);
+    clock.update(116);
+    CHECK(clock.timeMs() == 400);
+    clock.setRate(1);
+    clock.update(416);  // a 300 ms frame takes in 200 of it
+    CHECK(clock.timeMs() == 600);
+    clock.update(426);
+    CHECK(clock.timeMs() == 610);
+}
+
+// Runs `frames` frames of `frameMs` real ms each, whose ticks take no real time.
+int runFrames(ts2::sim::TickPacer& pacer, bool ultra, int frames, std::int64_t frameMs, std::int64_t& watch) {
+    int ticks = 0;
+    for (int i = 0; i < frames; ++i) {
+        watch += frameMs;
+        ticks += pacer.frame(ultra, [] {}, [&] { return watch; }, [] { return 0.0; });
+    }
+    return ticks;
+}
+
+void ticksKeepUpWithTheSpeedClock() {
+    std::int64_t watch = 0;
+    ts2::sim::TickPacer normal;
+    const int atNormal = runFrames(normal, false, 100, 42, watch);
+    CHECK(atNormal >= 97 && atNormal <= 101);  // 4200 clock ms, a tick each 42
+    // At ultra speed 60 frames a second move the clock 200 ms a frame, not 336.
+    ts2::sim::TickPacer ultra;
+    ultra.setSpeed(21);
+    watch = 0;
+    const int atUltra = runFrames(ultra, true, 100, 16, watch);
+    CHECK(atUltra >= 470 && atUltra <= 482);
+    // Each frame's ticks run up to three ticks past the clock, as whether one runs is decided from
+    // what was owed before the last ran.
+    CHECK(ultra.owedMs() > -3 * ts2::sim::TickPacer::kTickMs && ultra.owedMs() < ts2::sim::TickPacer::kTickMs);
+    ultra.setSpeed(1);
+    CHECK(ultra.owedMs() == 0);
+    // A slow frame's ticks stop after 250 real ms.
+    ts2::sim::TickPacer slow;
+    slow.setSpeed(21);
+    int ran = 0;
+    double taken = 0;
+    for (int i = 0; i < 20; ++i) {
+        watch += 200;
+        ran = slow.frame(true, [&] { taken += 100; }, [&] { return watch; }, [&] { return taken; });
+        taken = 0;
+    }
+    CHECK(ran == 3);
+}
+
 } // namespace
 
 std::vector<Test> simulationTests() {
     return {
+        {"the speed clock moves at most 200 ms an update", speedClockMovesAtMost200MsAnUpdate},
+        {"ticks keep up with the speed clock", ticksKeepUpWithTheSpeedClock},
         {"rooms are filled between walls", roomsAreFilledBetweenWalls},
         {"the room on a side of a wall matches the wall graph", roomOnSideOfWallMatchesTheWallGraph},
         {"broken numbers are left out", brokenNumbersAreLeftOut},

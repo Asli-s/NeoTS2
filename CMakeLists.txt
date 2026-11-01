@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(NeoTS2 VERSION 0.2.1 LANGUAGES C CXX)
+project(NeoTS2 VERSION 0.2.2 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -233,6 +233,7 @@ add_library(ts2sim
     src/sim/ground_click.cpp
     src/sim/route_portals.cpp
     src/sim/pie_menu.cpp
+    src/sim/cheats.cpp
     src/sim/lua_runtime.cpp
     src/sim/lua_script_values.cpp
     src/sim/lua_game_state.cpp
@@ -313,6 +314,8 @@ add_library(ts2scene
     src/scene/face_blend.cpp
     src/scene/newborn_face.cpp
     src/scene/sims.cpp
+    src/scene/outfit_catalog.cpp
+    src/scene/age_data.cpp
     src/scene/texture_blend.cpp
     src/scene/normal_map.cpp
     src/scene/incidence_map.cpp
@@ -686,14 +689,14 @@ else()
             add_library(freetype INTERFACE IMPORTED)
             target_link_libraries(freetype INTERFACE Freetype::Freetype)
         endif()
-        add_library(ts2ui src/ui/fonts.cpp src/ui/font_metrics.cpp src/ui/screen.cpp src/ui/pie_layout.cpp src/ui/tip_layout.cpp src/ui/drag_arrow.cpp)
+        add_library(ts2ui src/ui/fonts.cpp src/ui/font_metrics.cpp src/ui/screen.cpp src/ui/pie_layout.cpp src/ui/tip_layout.cpp src/ui/drag_arrow.cpp src/ui/scroll_bar.cpp)
         target_link_libraries(ts2ui PUBLIC ts2content PRIVATE freetype project_warnings)
         # Text layout is tested with our own small font (tests/data), so only where the UI builds.
         target_sources(vm_tests PRIVATE tests/text_layout_tests.cpp)
         target_link_libraries(vm_tests PRIVATE ts2ui)
         target_compile_definitions(vm_tests PRIVATE NEOTS2_TEXT_LAYOUT_TESTS)
 
-        add_executable(neots2 app/main.cpp app/menu.cpp app/neighborhood.cpp app/neighborhood_ui.cpp app/lot_life.cpp app/pose_numbers.cpp app/object_materials.cpp app/lot_light.cpp app/lot_daylight.cpp app/route_sources.cpp app/lot_ui.cpp app/live_panel.cpp app/job_panel.cpp app/memories_page.cpp app/age_meter.cpp app/queue_panel.cpp app/pie_menu_ui.cpp app/mood_meter.cpp app/aspiration_bars.cpp app/pause_frame.cpp app/baby_name_dialog.cpp app/needs_panel.cpp app/personality_page.cpp app/relationships_panel.cpp app/rewards_panel.cpp app/simology_panel.cpp app/interests_page.cpp app/hobbies_page.cpp app/chemistry_page.cpp app/meter_bar.cpp app/skewer.cpp app/wants_panel.cpp app/portraits.cpp app/cursors.cpp
+        add_executable(neots2 app/main.cpp app/menu.cpp app/neighborhood.cpp app/neighborhood_ui.cpp app/lot_life.cpp app/pose_numbers.cpp app/object_materials.cpp app/sim_loader.cpp app/lot_light.cpp app/lot_daylight.cpp app/route_sources.cpp app/lot_ui.cpp app/live_panel.cpp app/job_panel.cpp app/memories_page.cpp app/age_meter.cpp app/queue_panel.cpp app/pie_menu_ui.cpp app/mood_meter.cpp app/aspiration_bars.cpp app/pause_frame.cpp app/baby_name_dialog.cpp app/cheat_console.cpp app/needs_panel.cpp app/personality_page.cpp app/relationships_panel.cpp app/rewards_panel.cpp app/simology_panel.cpp app/interests_page.cpp app/hobbies_page.cpp app/chemistry_page.cpp app/meter_bar.cpp app/skewer.cpp app/wants_panel.cpp app/portraits.cpp app/cursors.cpp
                        app/diagnostics.cpp app/crash_handler.cpp app/crash_dialog.cpp app/unexpected_exit.cpp app/report_upload.cpp app/message_box.cpp app/open_renderer.cpp)
         target_link_libraries(neots2 PRIVATE ts2render ts2ui ts2sim ts2diag project_warnings)
         add_dependencies(neots2 neots2_version)

@@ -9,8 +9,8 @@ void RendererState::show(std::vector<std::uint8_t> visible) {
     visible_ = std::move(visible);
 }
 
-void RendererState::showSprites(std::vector<Sprite> sprites, bool scene) {
-    sprites_ = std::move(sprites);
+void RendererState::showSprites(std::vector<Sprite>& sprites, bool scene) {
+    sprites_.swap(sprites);
     drawScene_ = scene;
 }
 

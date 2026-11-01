@@ -217,7 +217,9 @@ ObjectLighting roomBase(const lotlighting::Room& lit, int group, const std::opti
 // of `base` and the room's point lights, the eight that score best, directionals first.
 ObjectLighting choose(ObjectLighting base, const std::vector<PointLight>& points, std::int16_t room, const Corners& corners) {
     constexpr std::size_t kMaxLights = 8;
-    std::vector<std::pair<float, ObjectLighting::Light>> scored;
+    // Kept between calls, as a Sim's parts choose again whenever it moves.
+    thread_local std::vector<std::pair<float, ObjectLighting::Light>> scored;
+    scored.clear();
     for (const auto& light : base.lights) {
         scored.push_back({0.25f * length(light.color), light});
     }

@@ -769,8 +769,10 @@ int search(ResourceIndex& index, std::string_view text) {
 }
 
 // Lists every expression whose left side is object data `field` (the object's own or the stack
-// object's), to find which scripts set a flag.
-int writes(ResourceIndex& index, std::uint16_t field) {
+// object's), or person data with `person`, to find which scripts set a flag.
+int writes(ResourceIndex& index, std::uint16_t field, bool person) {
+    constexpr std::uint8_t kMyData = 0x03, kStackData = 0x04, kMyPersonData = 0x12, kStackPersonData = 0x13;
+    const std::uint8_t mine = person ? kMyPersonData : kMyData, stacks = person ? kStackPersonData : kStackData;
     const Catalog catalog = buildCatalog(index);
     std::size_t hits = 0;
     for (const auto& r : index.resources()) {
@@ -791,7 +793,7 @@ int writes(ResourceIndex& index, std::uint16_t field) {
                 continue;
             }
             const auto x = ts2::bhav::decodeExpression(in);
-            if ((x.lhsOwner != 0x03 && x.lhsOwner != 0x04) || x.lhsData != field) {
+            if ((x.lhsOwner != mine && x.lhsOwner != stacks) || x.lhsData != field) {
                 continue;
             }
             const auto objIt = catalog.objectNames.find(e.key.group);
@@ -801,6 +803,36 @@ int writes(ResourceIndex& index, std::uint16_t field) {
         }
     }
     std::printf("%zu expressions\n", hits);
+    return 0;
+}
+
+// Lists every node that calls tree `opcode`. Semi-global trees (0x2000 and up) share numbers across
+// groups, so the caller's group tells which one is meant.
+int callers(ResourceIndex& index, std::uint16_t opcode) {
+    const Catalog catalog = buildCatalog(index);
+    std::size_t hits = 0;
+    for (const auto& r : index.resources()) {
+        const auto& e = r.entry;
+        if (e.key.type != ts2::types::kBehavior) {
+            continue;
+        }
+        Behavior b;
+        try {
+            b = ts2::bhav::parse(index.read(r));
+        } catch (const std::exception&) {
+            continue;
+        }
+        for (std::size_t i = 0; i < b.instructions.size(); ++i) {
+            if (b.instructions[i].opcode != opcode) {
+                continue;
+            }
+            const auto objIt = catalog.objectNames.find(e.key.group);
+            std::printf("0x%08X 0x%04X %3zu  %-40s [%s]\n", e.key.group, e.key.instance, i, b.name.c_str(),
+                        objIt != catalog.objectNames.end() ? objIt->second.c_str() : "");
+            ++hits;
+        }
+    }
+    std::printf("%zu calls\n", hits);
     return 0;
 }
 
@@ -853,6 +885,8 @@ int main(int argc, char** argv) {
                      "Usage:\n"
                      "  bhavdump <file.package | install-folder> --survey | --expr-survey\n"
                      "  bhavdump <file.package | install-folder> --search <text>\n"
+                     "  bhavdump <file.package | install-folder> --callers <opcode>\n"
+                     "  bhavdump <file.package | install-folder> --writes <field> [person]\n"
                      "  bhavdump <file.package | install-folder> --show <group> <instance>\n");
         return 1;
     }
@@ -888,7 +922,11 @@ int main(int argc, char** argv) {
             return search(index, argv[3]);
         }
         if (mode == "--writes" && argc >= 4) {
-            return writes(index, static_cast<std::uint16_t>(std::stoul(argv[3], nullptr, 0)));
+            return writes(index, static_cast<std::uint16_t>(std::stoul(argv[3], nullptr, 0)),
+                          argc >= 5 && std::string_view(argv[4]) == "person");
+        }
+        if (mode == "--callers" && argc >= 4) {
+            return callers(index, static_cast<std::uint16_t>(std::stoul(argv[3], nullptr, 0)));
         }
         if (mode == "--show" && argc >= 5) {
             return show(index, static_cast<std::uint32_t>(std::stoul(argv[3], nullptr, 0)),

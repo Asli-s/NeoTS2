@@ -292,15 +292,17 @@ float channelShare(const RigAnimation& animation, int channel, float ms) {
     return weight < 0 ? -1.0f : 1 - limbWeightAt(*animation.animation, weight, ms);
 }
 
-void poseRig(const Rig& rig, const RigAnimation* animation, float ms, std::vector<Transform>& world) {
+void poseRig(const Rig& rig, const RigAnimation* animation, float ms, std::vector<Transform>& world,
+             const std::vector<HeldJoint>* held) {
     world.resize(rig.nodes.size());
     std::vector<Transform> local(rig.nodes.size());
     const auto* channels = animation && animation->animation ? &animation->animation->channels : nullptr;
     std::vector<float> turns(rig.nodes.size(), 0.0f);
+    const bool holding = held != nullptr && held->size() == rig.nodes.size();
     for (std::size_t i = 0; i < rig.nodes.size(); ++i) {
         const auto& node = rig.nodes[i];
-        auto t = node.translation;
-        auto q = node.rotation;
+        auto t = holding ? (*held)[i].translation : node.translation;
+        auto q = holding ? (*held)[i].rotation : node.rotation;
         if (channels) {
             if (const int c = animation->translation[i]; c >= 0 && channelShare(*animation, c, ms) >= 0) {
                 const auto& k = (*channels)[static_cast<std::size_t>(c)].components;
@@ -501,59 +503,31 @@ void clipsAt(const Actor& actor, double seconds, std::vector<LayeredClip>& clips
 
 } // namespace
 
-namespace {
-
-// When the Sim's placement turns by `turn` radians while no clip moves its root joints, the root
-// joints it holds turn back by as much, so the body stays where it was drawn. The game turns its node
-// in eighth turns and its root joint the other way in the same frame.
-void turnHeldRoot(const Rig& rig, std::span<const LayeredClip> clips, std::vector<HeldJoint>& joints, float turn) {
-    if (std::abs(turn) < 1e-5f || joints.size() != rig.nodes.size()) {
-        return;
-    }
-    for (const bool translation : {true, false}) {
-        const int j = rig.find(translation ? "root_trans" : "root_rot");
-        if (j < 0) {
-            continue;
-        }
-        const auto at = static_cast<std::size_t>(j);
-        const bool driven = std::any_of(clips.begin(), clips.end(), [&](const LayeredClip& c) {
-            if (!c.animation || c.weight <= 0 || c.bodyOnly || c.layer < 0) {
-                return false;
-            }
-            const auto& by = translation ? c.animation->translation : c.animation->rotation;
-            return at < by.size() && by[at] >= 0;
-        });
-        if (driven) {
-            continue;
-        }
-        auto& h = joints[at];
-        const int axis = rig.nodes[at].turnAxis;
-        // root_rot hangs under root_trans: the place turns with the one, the facing with the other.
-        if (translation) {
-            h.translation = turnedPlace(h.translation, axis, turn);
-        } else {
-            h.rotation = turnedTurn(h.rotation, axis, turn);
-        }
-    }
-}
-
-} // namespace
-
 void poseActors(const Scene& scene, double seconds, ScenePose& out) {
     diag::Timer timer("pose actors");
-    out.joints.clear();
     out.places.clear();
-    std::size_t posed = 0;  // actors in out.nodes, their vectors are kept between calls
-    std::vector<Transform> world;
-    std::vector<LayeredClip> clips;
-    std::vector<const RigAnimation*> playing;
+    std::size_t posed = 0;    // actors in out.nodes, their vectors are kept between calls
+    std::size_t skinned = 0;  // meshes in out.joints, kept the same way
+    // An entry of out.joints for a skinned mesh, reusing the storage of the last call's.
+    const auto jointsFor = [&](std::size_t instance) -> std::vector<Transform>& {
+        if (skinned == out.joints.size()) {
+            out.joints.emplace_back();
+        }
+        out.joints[skinned].first = instance;
+        return out.joints[skinned++].second;
+    };
+    // The working lists are kept between calls, as every actor is posed each frame.
+    thread_local std::vector<Transform> world;
+    thread_local std::vector<LayeredClip> clips;
+    thread_local std::vector<const RigAnimation*> playing;
     // A Sim's bones as last posed: this call's pose for a Sim posed before the one asking, else the
     // last call's, each at the place it was posed at. A lot object's bones as this call posed them, as
     // objects are posed before Sims (a fridge's door handle), or as its clip placed them (a dining
     // chair's seat grabs, see PlacedObject::bones). One a Sim holds is where it last hung in the hand.
     // Each rig's node names are hashed once per call, on its first lookup.
     std::unordered_map<const Rig*, std::vector<std::uint32_t>> nameHashes;
-    std::vector<std::pair<const Actor*, std::vector<Transform>>> objectNodes;
+    thread_local std::vector<std::pair<const Actor*, std::vector<Transform>>> objectNodes;
+    std::size_t objectsPosed = 0;  // entries of objectNodes posed this call
     // Where this call placed each carried Sim (see Actor::carrier). Any other stands at its own place.
     std::unordered_map<const Actor*, Transform> carriedNow;
     const auto placeOf = [&](const Actor& actor) {
@@ -561,13 +535,17 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
         return found != carriedNow.end() ? found->second : actor.place;
     };
     std::unordered_map<std::uint32_t, Transform> drawnAt;
-    std::unordered_set<const Actor*> posedNow;
-    std::unordered_set<std::size_t> inHand;
+    thread_local std::vector<const Actor*> posedNow;
+    thread_local std::vector<std::size_t> inHand;  // sorted
+    posedNow.clear();
+    inHand.clear();
     for (const auto& actor : scene.actors) {
         for (const auto& h : actor.held) {
-            inHand.insert(h.instance);
+            inHand.push_back(h.instance);
         }
     }
+    std::sort(inHand.begin(), inHand.end());
+    const auto isInHand = [&](std::size_t instance) { return std::binary_search(inHand.begin(), inHand.end(), instance); };
     const auto lastDrawn = [&](const Actor& actor) -> std::optional<Transform> {
         const auto found = out.drawnAt.find(actor.object);
         return found != out.drawnAt.end() ? std::optional<Transform>(found->second) : std::nullopt;
@@ -590,10 +568,11 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
     const BoneFinder boneOf = [&](std::uint32_t object, std::uint32_t bone) -> std::optional<Transform> {
         const auto actor = std::find_if(scene.actors.begin(), scene.actors.end(), [&](const Actor& a) { return a.object == object; });
         if (actor == scene.actors.end() || !actor->rig) {
-            const auto posed = std::find_if(objectNodes.begin(), objectNodes.end(), [&](const auto& n) { return n.first->object == object; });
-            if (posed != objectNodes.end()) {
+            const auto objectsEnd = objectNodes.begin() + static_cast<std::ptrdiff_t>(objectsPosed);
+            const auto posed = std::find_if(objectNodes.begin(), objectsEnd, [&](const auto& n) { return n.first->object == object; });
+            if (posed != objectsEnd) {
                 const Actor& a = *posed->first;
-                const bool held = std::any_of(a.skinned.begin(), a.skinned.end(), [&](const Actor::Skinned& s) { return inHand.contains(s.instance); });
+                const bool held = std::any_of(a.skinned.begin(), a.skinned.end(), [&](const Actor::Skinned& s) { return isInHand(s.instance); });
                 const auto hung = held ? lastDrawn(a) : std::nullopt;
                 return boneIn(a, hung.value_or(a.place), posed->second, bone);
             }
@@ -610,14 +589,26 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
         if (nodes == out.nodes.end()) {
             return std::nullopt;
         }
-        const auto drawn = posedNow.contains(&*actor) ? std::nullopt : lastDrawn(*actor);
+        const bool posedHere = std::find(posedNow.begin(), posedNow.end(), &*actor) != posedNow.end();
+        const auto drawn = posedHere ? std::nullopt : lastDrawn(*actor);
         return boneIn(*actor, drawn.value_or(placeOf(*actor)), nodes->second, bone);
     };
     // Only the actors still in the scene keep what they hold.
     std::unordered_map<std::uint32_t, std::vector<HeldJoint>> held;
     std::unordered_map<std::uint32_t, std::pair<double, std::vector<HeldJoint>>> frozen;
-    std::unordered_map<std::uint32_t, float> headings;
     std::unordered_map<std::uint32_t, Transform> carried;
+    // A pose kept from another rig (a Sim that aged onto a new skeleton) doesn't fit this one.
+    std::unordered_map<std::uint32_t, const Rig*> rigs;
+    for (const auto* list : {&scene.objectActors, &scene.actors}) {
+        for (const auto& actor : *list) {
+            if (const auto was = out.heldRig.find(actor.object); was != out.heldRig.end() && was->second != actor.rig.get()) {
+                out.held.erase(actor.object);
+                out.frozen.erase(actor.object);
+            }
+            rigs[actor.object] = actor.rig.get();
+        }
+    }
+    out.heldRig = std::move(rigs);
     // Lot objects first: a Sim's hand places an object it holds over where the object would stand.
     for (const auto& actor : scene.objectActors) {
         if (!actor.rig) {
@@ -629,32 +620,54 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
             last = std::move(was->second);
         }
         poseRigLayered(*actor.rig, clips, world, &last);
-        objectNodes.emplace_back(&actor, world);
+        if (objectsPosed == objectNodes.size()) {
+            objectNodes.emplace_back();
+        }
+        objectNodes[objectsPosed].first = &actor;
+        objectNodes[objectsPosed++].second.assign(world.begin(), world.end());
         for (const auto& s : actor.skinned) {
             const int mesh = s.instance < scene.instances.size() ? scene.instances[s.instance].mesh : -1;
             if (mesh < 0 || static_cast<std::size_t>(mesh) >= scene.meshes.size()) {
                 continue;
             }
-            auto& joints = out.joints.emplace_back(s.instance, std::vector<Transform>{}).second;
+            auto& joints = jointsFor(s.instance);
             skinMatrices(scene.meshes[static_cast<std::size_t>(mesh)], s.nodes, *actor.rig, playing, world, joints, true);
             // One a Sim holds is placed at the Sim's hand below.
-            if (!inHand.contains(s.instance)) {
+            if (!isInHand(s.instance)) {
                 out.places.emplace_back(s.instance, actor.place);
             }
         }
     }
     // A carried Sim is posed after its carrier and hangs at the bone of the carrier's slot it is in,
-    // as that bone is posed now. A carrier missing from the scene leaves it at its own place.
+    // as that bone is posed now. The carrier is a Sim or a lot object (a car's seat). A carrier missing
+    // from the scene leaves it at its own place.
     const auto carrierOf = [&](const Actor& actor) -> const Actor* {
         if (actor.carrier == 0) {
             return nullptr;
         }
         const auto found = std::find_if(scene.actors.begin(), scene.actors.end(), [&](const Actor& a) { return a.object == actor.carrier; });
-        return found != scene.actors.end() && &*found != &actor ? &*found : nullptr;
+        if (found != scene.actors.end()) {
+            return &*found != &actor ? &*found : nullptr;
+        }
+        const auto object = std::find_if(scene.objectActors.begin(), scene.objectActors.end(),
+                                         [&](const Actor& a) { return a.object == actor.carrier; });
+        return object != scene.objectActors.end() ? &*object : nullptr;
+    };
+    // The carrier's bones as this call posed them, none when it isn't posed yet.
+    const auto posedBones = [&](const Actor& carrier) -> const std::vector<Transform>* {
+        const auto objects = objectNodes.begin() + static_cast<std::ptrdiff_t>(objectsPosed);
+        if (const auto o = std::find_if(objectNodes.begin(), objects, [&](const auto& n) { return n.first == &carrier; }); o != objects) {
+            return &o->second;
+        }
+        const auto carrierIndex = static_cast<std::size_t>(&carrier - scene.actors.data());
+        const auto sims = out.nodes.begin() + static_cast<std::ptrdiff_t>(posed);
+        const auto s = std::find_if(out.nodes.begin(), sims, [&](const auto& n) { return n.first == carrierIndex; });
+        return s != sims ? &s->second : nullptr;
     };
     // Carries nest only so deep, so a loop of carriers in a broken save still ends.
     constexpr int kMaxCarryDepth = 4;
-    std::vector<std::pair<int, std::size_t>> order;  // carry depth, actor
+    thread_local std::vector<std::pair<int, std::size_t>> order;  // carry depth, actor
+    order.clear();
     for (std::size_t i = 0; i < scene.actors.size(); ++i) {
         int depth = 0;
         for (const Actor* c = carrierOf(scene.actors[i]); c != nullptr && depth < kMaxCarryDepth; c = carrierOf(*c)) {
@@ -669,13 +682,10 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
             continue;
         }
         if (const Actor* carrier = carrierOf(actor); carrier != nullptr && actor.carrierSlot < carrier->slotNodes.size()) {
-            const auto carrierIndex = static_cast<std::size_t>(carrier - scene.actors.data());
             const int node = carrier->slotNodes[actor.carrierSlot];
-            const auto nodes = std::find_if(out.nodes.begin(), out.nodes.begin() + static_cast<std::ptrdiff_t>(posed),
-                                            [&](const auto& n) { return n.first == carrierIndex; });
-            if (node >= 0 && nodes != out.nodes.begin() + static_cast<std::ptrdiff_t>(posed) &&
-                static_cast<std::size_t>(node) < nodes->second.size()) {
-                carriedNow[&actor] = placeOf(*carrier) * nodes->second[static_cast<std::size_t>(node)];
+            const auto* nodes = posedBones(*carrier);
+            if (node >= 0 && nodes != nullptr && static_cast<std::size_t>(node) < nodes->size()) {
+                carriedNow[&actor] = placeOf(*carrier) * (*nodes)[static_cast<std::size_t>(node)];
                 carried[actor.object] = carriedNow[&actor];
             }
         }
@@ -699,11 +709,6 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
                 if (const auto was = out.held.find(actor.object); was != out.held.end()) {
                     joints = std::move(was->second);
                 }
-                const float heading = std::atan2(place.m[4], place.m[0]);
-                headings[actor.object] = heading;
-                if (const auto was = out.heldHeading.find(actor.object); was != out.heldHeading.end()) {
-                    turnHeldRoot(*actor.rig, clips, joints, was->second - heading);
-                }
                 poseRigLayered(*actor.rig, clips, world, &joints, actor.look ? &actor.look : nullptr);
             } else {
                 poseRigLayered(*actor.rig, clips, world);
@@ -726,7 +731,7 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
             if (mesh < 0 || static_cast<std::size_t>(mesh) >= scene.meshes.size()) {
                 continue;
             }
-            auto& joints = out.joints.emplace_back(s.instance, std::vector<Transform>{}).second;
+            auto& joints = jointsFor(s.instance);
             skinMatrices(scene.meshes[static_cast<std::size_t>(mesh)], s.nodes, *actor.rig, playing, world, joints);
             // The body goes where the actor stands now (it walks).
             out.places.emplace_back(s.instance, place);
@@ -736,7 +741,7 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
         }
         out.nodes[posed].first = static_cast<std::size_t>(&actor - scene.actors.data());
         out.nodes[posed++].second.assign(world.begin(), world.end());
-        posedNow.insert(&actor);
+        posedNow.push_back(&actor);
         drawnAt[actor.object] = place;
         for (const auto& h : actor.held) {
             const bool known = h.node >= 0 && static_cast<std::size_t>(h.node) < world.size();
@@ -750,8 +755,8 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
         }
     }
     out.nodes.resize(posed);
+    out.joints.resize(skinned);
     out.held = std::move(held);
-    out.heldHeading = std::move(headings);
     out.frozen = std::move(frozen);
     out.carried = std::move(carried);
     out.drawnAt = std::move(drawnAt);

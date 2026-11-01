@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <map>
 #include <set>
@@ -203,7 +204,9 @@ private:
     int cells_ = 0;
     std::vector<Node> nodes_;
     std::vector<std::vector<int>> extra_;  // starts and goals linked to each cell, after its leaf links
-    std::set<std::tuple<double, double, int>> open_;  // f, order, node
+    // The open nodes as a heap of (f, order, node), lowest first. A node moved or taken out leaves its
+    // old entry behind, skipped when it comes up (its order no longer matches).
+    std::vector<std::tuple<double, double, int>> open_;
     double front_ = 0, back_ = 0;
     std::map<std::uint32_t, RouteDoorState> doors_;
     const RouteIntersects& intersects_;
@@ -459,13 +462,11 @@ double Search::heuristicFor(float x, float y, double g) {
 
 void Search::enqueue(int n, bool improved) {
     Node& v = node(n);
-    if (v.state == 1) {
-        open_.erase({v.f, v.order, n});
-    }
     // A node reached for the first time goes before others of equal f, an improved one after them.
     v.order = improved ? ++back_ : --front_;
     v.state = 1;
-    open_.insert({v.f, v.order, n});
+    open_.emplace_back(v.f, v.order, n);
+    std::push_heap(open_.begin(), open_.end(), std::greater<>());
 }
 
 void Search::relax(int n, int parent) {
@@ -509,7 +510,6 @@ void Search::relax(int n, int parent) {
         v.x = x;
         v.y = y;
         v.g = g;
-        open_.erase({v.f, v.order, n});
         v.state = 0;
         v.f = f;
         enqueue(n, true);
@@ -750,9 +750,13 @@ std::optional<RoutePlan> Search::run(std::span<const RouteStart> starts, std::sp
     std::size_t found = 0;
     int best = -1;
     while (!open_.empty() && found < goals.size()) {
-        const int n = std::get<2>(*open_.begin());
-        open_.erase(open_.begin());
+        std::pop_heap(open_.begin(), open_.end(), std::greater<>());
+        const auto [f, order, n] = open_.back();
+        open_.pop_back();
         Node& v = node(n);
+        if (v.state != 1 || v.order != order) {
+            continue;
+        }
         v.state = 2;
         if (v.kind == Kind::Goal && !reached[static_cast<std::size_t>(v.goal)]) {
             reached[static_cast<std::size_t>(v.goal)] = true;
@@ -899,11 +903,19 @@ void Search::addPortals() {
 
 RouteLinks RouteLinks::build(const RouteGrid& grid) {
     RouteLinks links;
-    links.of.resize(grid.cells().size());
-    if (!grid.cells().empty()) {
-        linkCell(grid, links, 0, {-1, -1, -1, -1});
-    }
+    links.rebuild(grid);
     return links;
+}
+
+void RouteLinks::rebuild(const RouteGrid& grid) {
+    of.resize(grid.cells().size());
+    for (auto& cell : of) {
+        cell.clear();
+    }
+    stale = false;
+    if (!grid.cells().empty()) {
+        linkCell(grid, *this, 0, {-1, -1, -1, -1});
+    }
 }
 
 std::optional<RoutePlan> planRoute(const RouteGrid& grid, const RouteLinks& links, std::span<const RouteStart> starts,

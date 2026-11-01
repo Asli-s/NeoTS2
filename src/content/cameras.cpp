@@ -51,11 +51,17 @@ std::optional<camera::Config> findCamera(const fs::path& installRoot, std::strin
         if (!fs::is_directory(folder)) {
             continue;
         }
+        // The shipped folders name each camera once. Which of two files naming the same camera the game
+        // takes is not known yet, so files are read in name order to give the same one on every system.
+        std::vector<fs::path> files;
         for (const auto& item : fs::directory_iterator(folder)) {
-            if (lower(item.path().extension().string()) != ".txt") {
-                continue;
+            if (lower(item.path().extension().string()) == ".txt") {
+                files.push_back(item.path());
             }
-            std::ifstream in(item.path(), std::ios::binary);
+        }
+        std::sort(files.begin(), files.end());
+        for (const auto& file : files) {
+            std::ifstream in(file, std::ios::binary);
             std::stringstream text;
             text << in.rdbuf();
             for (auto& c : camera::parse(text.str())) {

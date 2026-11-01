@@ -11,8 +11,9 @@ std::int32_t Execution::sleepTicks(const bhav::Instruction& in, Frame& f) {
 
 // Operands:
 //   bytes 0-1  who (0 = me, 1 = stack object, 2 = nobody)
-//   byte 2     bit 0 return immediately, bit 1 clear = clean up all
+//   byte 2     bit 0 return immediately, bit 1 clear = clean up all (what it changes isn't known yet)
 // A few object types can't be removed. Removing me without "return immediately" ends my run.
+// Removing a part of a multi-tile object removes the whole object.
 bool Execution::removeObject(const bhav::Instruction& in) {
     const auto& o = in.operands;
     const auto who = static_cast<std::int16_t>(o[0] | o[1] << 8);
@@ -29,8 +30,11 @@ bool Execution::removeObject(const bhav::Instruction& in) {
         std::end(kProtectedGuids)) {
         return false;
     }
+    const bool meWasRemoved = me_->removed;
     world().remove(*object);
-    if (object == me_ && (o[2] & kRemoveReturnImmediately) == 0) {
+    // Another part of my multi-tile object removes me with it.
+    const bool removesMe = object == me_ || (!meWasRemoved && me_->removed);
+    if (removesMe && (o[2] & kRemoveReturnImmediately) == 0) {
         throw Stop{Outcome::MeRemoved, "", ""};
     }
     return true;
@@ -41,7 +45,7 @@ bool Execution::removeObject(const bhav::Instruction& in) {
 //   bytes 2-4  the object (owner, data)
 //   bytes 5-6  fade time in ticks (0..300, else 10)
 //   byte 7     intensity in percent (0..100, else 50)
-//   byte 8     the light: 0xFF all, else an entry of the object's light name table
+//   byte 8     the light: 0xFF all, else an entry of the stack object's light name table
 // Sets how strongly all of the object's lights shine. The light named and the fade time don't
 // change what the game does with it.
 bool Execution::changeLight(const bhav::Instruction& in, Frame& f) {
@@ -56,7 +60,13 @@ bool Execution::changeLight(const bhav::Instruction& in, Frame& f) {
         percent = 50;
     }
     if (o[8] != 0xFF) {
-        const auto name = code_.string(me().group, kLightNameTable, o[8]);
+        // The light names come from the stack object's table, so a Sim lighting a cake's candles
+        // reads the cake's.
+        const SimObject* named = world().find(stackObject());
+        if (named == nullptr) {
+            throw Stop{Outcome::Error, "Change Light needs a stack object to name its light", std::to_string(stackObject())};
+        }
+        const auto name = code_.string(named->group, kLightNameTable, o[8]);
         if (!name || name->empty()) {
             throw Stop{Outcome::Error, "Missing Light Name", std::to_string(o[8])};
         }
@@ -404,9 +414,10 @@ std::optional<Execution::CreateSpot> Execution::tileInFront(const SimObject* ref
 //   false when there is none.
 // - 5 "underneath me": at my exact place and level. Off the lot it is not supported.
 // The spot's tile must pass the tile tests (see tileRefuses).
-// Not done yet: the game's test that the object fits at the spot or in the slot (here it always
-// fits, and a slot that is missing or full is reported as not implemented), and placement 9's
-// wall test.
+// A slot that is missing or already holds something fails the game's fit test: the object is made
+// and started, then deleted, and the primitive is false.
+// Not done yet: the rest of the game's fit test (at the spot, and in a slot its size, nesting, the
+// slot's kinds and the container's own test), and placement 9's wall test.
 bool Execution::createObject(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     const std::uint8_t flags = o[5];
@@ -455,15 +466,9 @@ bool Execution::createObject(const bhav::Instruction& in, Frame& f) {
         }
         slot = o[9];
     }
+    bool fits = true;
     if (container != nullptr) {
-        if (slot >= container->slots.size() || container->slots[slot] != 0) {
-            const std::string where = "slot " + std::to_string(slot) + " of " + std::to_string(container->id);
-            const SimObject* held = slot < container->slots.size() ? world().find(container->slots[slot]) : nullptr;
-            throw Stop{Outcome::Unsupported, "Create Object into a slot that isn't free (the game's fit test)",
-                       held != nullptr                       ? where + " held by " + std::to_string(held->id) + " " + held->definition.name
-                       : slot >= container->slots.size() ? where + " missing"
-                                                             : where + " held by " + std::to_string(container->slots[slot]) + " (gone)"};
-        }
+        fits = slot < container->slots.size() && container->slots[slot] == 0;
         if (container->x == kOffLot || container->y == kOffLot) {
             return false;
         }
@@ -509,8 +514,18 @@ bool Execution::createObject(const bhav::Instruction& in, Frame& f) {
         throw Stop{Outcome::Error, "copy-materials source in temp 5 does not exist",
                    std::to_string(thread_.temps[5])};
     }
+    if (type->definition.isMultiTileMaster()) {
+        return createParts(*type, o[4], flags);
+    }
 
-    SimObject& created = world().create(type->group, type->definition, type->containerSlots);
+    SimObject& created = world().create(type->group, type->definition, containerSlotsOf(code_, *type));
+    if (!fits) {
+        if (startCreated) {
+            startCreated(created, *type);
+        }
+        world().remove(created);
+        return false;
+    }
     if (container != nullptr) {
         putInSlot(created, *container, static_cast<std::int16_t>(slot));  // a byte, checked against the slots
     } else if (spot) {
@@ -531,6 +546,37 @@ bool Execution::createObject(const bhav::Instruction& in, Frame& f) {
     return true;
 }
 
+// A multi-tile master's type makes its parts, each an object of its own, lead first (see
+// CodeSource::multiTileParts). Each part's data 0x13 names the lead, and the lead's current value
+// (data 0x29) is the master's price. The lead becomes the stack object. Only out of world is done
+// yet. A master without a lead part is not supported.
+bool Execution::createParts(const ObjectType& master, std::uint8_t placement, std::uint8_t flags) {
+    constexpr std::size_t kCurrentValueField = 0x29;
+    if (placement != kPlaceOutOfWorld) {
+        throw Stop{Outcome::Unsupported, "Create Object of a multi-tile object placed on the lot", hex(placement, 2)};
+    }
+    const std::vector<const ObjectType*> types = code_.multiTileParts(master);
+    if (types.empty()) {
+        throw Stop{Outcome::Unsupported, "Create Object of a multi-tile object without a lead part", hex(master.definition.guid(), 8)};
+    }
+    std::vector<SimObject*> parts;
+    parts.reserve(types.size());
+    for (const ObjectType* type : types) {
+        parts.push_back(&world().create(type->group, type->definition, containerSlotsOf(code_, *type)));
+    }
+    SimObject& lead = *parts.front();
+    for (SimObject* part : parts) {
+        part->data[kLeadTileField] = lead.id;
+    }
+    lead.data[kCurrentValueField] = static_cast<std::int16_t>(master.definition.field(objd::field::kPrice));
+    if (startCreatedParts) {
+        startCreatedParts(parts);
+    }
+    passToMain(lead, flags);
+    stackObject() = lead.id;
+    return true;
+}
+
 // Flag 0x10 gives the new object's Main my temp 0 as its first parameter. Flag 0x02 gives it my id
 // and my stack object. Main has run up to its first wait by now, and a Main without parameters
 // gets no value.
@@ -548,19 +594,24 @@ void Execution::passToMain(SimObject& created, std::uint8_t flags) {
     }
 }
 
-// Byte 4 bit 0 means "ignore in release". Otherwise a non-zero condition is an error.
+// The condition is read first: owner 0xFFFF is the game's own stop, error 0x5B "Hit Break Point
+// Primitive.", even with byte 4 bit 0 ("ignore in release") set, as the global tree "CT - Object Error"
+// uses it. Otherwise, unless that bit is set, a non-zero condition is error 0x3E "Tree break encountered."
 bool Execution::breakPoint(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
+    const auto data = static_cast<std::uint16_t>(o[0] | o[1] << 8);
+    const auto conditionOwner = static_cast<std::uint16_t>(o[2] | o[3] << 8);
+    if (conditionOwner == 0xFFFF) {
+        throw Stop{Outcome::Error, "Hit Break Point Primitive.", ""};
+    }
     if (o[4] & 1) {
         return true;
     }
-    const auto data = static_cast<std::uint16_t>(o[0] | o[1] << 8);
-    const auto conditionOwner = static_cast<std::uint16_t>(o[2] | o[3] << 8);
     if (conditionOwner > 0xFF) {
         throw Stop{Outcome::Error, "illegal owner field in data reference", hex(conditionOwner, 4)};
     }
     if (read(static_cast<std::uint8_t>(conditionOwner), data, f) != 0) {
-        throw Stop{Outcome::Error, "break point hit", ""};
+        throw Stop{Outcome::Error, "Tree break encountered.", ""};
     }
     return true;
 }
@@ -819,12 +870,6 @@ bool Execution::onTimer(const bhav::Instruction& in, Frame& f) {
     return true;
 }
 
-// Operands:
-//   bytes 0-3  GUID
-//   bytes 4-5  object id (data), byte 6 its owner
-//   byte 7     flags: 0x04 "does this GUID exist", 0x02 neighbor id, 0x01 compare the GUID the
-//              object's type was cloned from (OBJD fields 0x46-0x47) instead of its own
-// A missing object is false, not an error.
 // Notify the Stack Object out of Idle: when the stack object's script waits at a Sleep or an Idle
 // for Input, its param 0 (the ticks left, as those trees use them) becomes 0, so a wait counted
 // there ends. Anything else is left alone. Always true.
@@ -848,6 +893,13 @@ bool Execution::notifyOutOfIdle() {
     return true;
 }
 
+// Test Object Type. Operands:
+//   bytes 0-3  GUID
+//   bytes 4-5  object id (data), byte 6 its owner
+//   byte 7     flags: 0x04 "does this GUID exist", 0x02 neighbor id, 0x01 compare the GUID the
+//              object's type was cloned from (OBJD fields 0x46-0x47) instead of its own
+// A part of a multi-tile object that doesn't match is also true when its master's GUID matches,
+// so a test for the sunken hot tub takes any of its seats. A missing object is false, not an error.
 bool Execution::testObjectType(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     const std::uint32_t guid = readGuid(o);
@@ -874,9 +926,15 @@ bool Execution::testObjectType(const bhav::Instruction& in, Frame& f) {
     if (flags & kTestOriginalGuid) {
         const std::uint32_t original = object->definition.field(kOriginalGuidLow) |
                                        static_cast<std::uint32_t>(object->definition.field(kOriginalGuidHigh)) << 16;
-        return original == guid && code_.objectType(original) != nullptr;
+        if (original == guid && code_.objectType(original) != nullptr) {
+            return true;
+        }
+    } else if (object->definition.guid() == guid) {
+        return true;
     }
-    return object->definition.guid() == guid;
+    const ObjectType* type = code_.objectType(object->definition.guid());
+    const ObjectType* master = type != nullptr ? code_.multiTileMaster(*type) : nullptr;
+    return master != nullptr && master->definition.guid() == guid;
 }
 
 } // namespace ts2::sim::vm_detail

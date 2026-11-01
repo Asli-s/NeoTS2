@@ -68,8 +68,11 @@ public:
     RouteWorld(const content::Lot& lot, const FenceBlocks& fenceBlocks, const PostFootprint& postFootprint);
 
     // Adds every object's footprint, from the objects' current data (their flags are set by their
-    // scripts while the lot loads, so this comes after).
-    void addObjects(World& world, CodeSource& code, const content::Lot& lot, const RouteModelLookup& models);
+    // scripts while the lot loads, so this comes after). `objectModels` is the lot's model name of each
+    // object id.
+    void addObjects(World& world, CodeSource& code, const std::map<std::uint32_t, std::string>& objectModels, const RouteModelLookup& models);
+    // Drops the lot's model name of a removed object, so a new object given its id doesn't take it.
+    void forgetModel(std::uint32_t id) { objectModels_.erase(id); }
     // Brings the footprints of `objects` up to date, as the game does before routing work: each
     // object's footprint items are replaced by its current ones (none once it is gone or held).
     // Doors keep their items. The game adds those elsewhere. Returns the levels whose grid changed.

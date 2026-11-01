@@ -147,7 +147,8 @@ int getObjectIdInSlot(lua_State* L) {
     return 1;
 }
 
-// GetObjectDefinitionField(guid, field): a field of an object type's definition.
+// GetObjectDefinitionField(guid, field): a field of an object type's definition, numbered as
+// ObjectDefinition::scriptField numbers them.
 int getObjectDefinitionField(lua_State* L) {
     ScriptCall& c = call(L);
     const ObjectType* type = c.code ? c.code->objectType(argUnsigned(L, 1)) : nullptr;
@@ -155,7 +156,11 @@ int getObjectDefinitionField(lua_State* L) {
         return gameError(L, kErrorBadGuid);
     }
     const int field = argInt(L, 2);
-    lua_pushnumber(L, element(L, type->definition.fields, field, kErrorDefinitionFieldOutOfRange));
+    const auto value = field >= 0 ? type->definition.scriptField(static_cast<std::size_t>(field)) : std::nullopt;
+    if (!value) {
+        return gameError(L, kErrorDefinitionFieldOutOfRange);
+    }
+    lua_pushnumber(L, *value);
     return 1;
 }
 
@@ -626,6 +631,36 @@ int cachedPersonQueueCount(lua_State* L) {
     const auto* self = selfInstance(L);
     const SimObject& o = personOrError(L, self ? static_cast<std::int16_t>(self->id) : 0);
     lua_pushnumber(L, static_cast<lua_Number>(static_cast<std::int16_t>(o.queue.size())));
+    return 1;
+}
+
+namespace {
+
+// The interaction at the script's `index` argument in the Sim's queue (0 the first). A script check
+// error without one there.
+const QueuedInteraction& queuedAt(lua_State* L) {
+    const auto* self = selfInstance(L);
+    const SimObject& o = personOrError(L, self ? static_cast<std::int16_t>(self->id) : 0);
+    const auto index = static_cast<std::int16_t>(argInt(L, 2));
+    if (index < 0 || static_cast<std::size_t>(index) >= o.queue.size()) {
+        scriptCheckError(L, "No interaction at index %d.", static_cast<int>(index));
+    }
+    return o.queue[static_cast<std::size_t>(index)];
+}
+
+} // namespace
+
+// CachedPerson:getQueuedInteractionId(index): the interaction table index of the queued interaction
+// at `index`, as person data 0x15 holds it while it runs.
+int cachedPersonQueuedId(lua_State* L) {
+    lua_pushnumber(L, static_cast<lua_Number>(queuedAt(L).index));
+    return 1;
+}
+
+// CachedPerson:getQueuedInteractionObjectId(index): the id of the object the queued interaction at
+// `index` is on.
+int cachedPersonQueuedObjectId(lua_State* L) {
+    lua_pushnumber(L, static_cast<lua_Number>(queuedAt(L).object));
     return 1;
 }
 

@@ -12,6 +12,7 @@
 #include "formats/slot.hpp"
 #include "formats/str.hpp"
 #include "scene/normal_map.hpp"
+#include "scene/outfit_catalog.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -54,6 +55,7 @@ std::string lower(std::string s) {
 
 Assets::Assets(const fs::path& install) : scripts_(content::loadBuildScripts(content::findProducts(install))) {
     const auto products = content::findProducts(install);
+    skinCatalog_ = skinCatalogPackages(products);
     lighting_ = content::readLighting(products);
     std::set<fs::path> catalogFolders;
     for (const auto& objects : content::objectLoadOrder(products)) {

@@ -259,6 +259,46 @@ void walksRunTheGoalCheckBeforeSettingOff() {
     }
 }
 
+// Over a stair the goal check is given the whole path still to walk, measured flat: this stretch,
+// the stair from its entry to its exit and the route on from there. Given only the stretch, a
+// social's "Update Dynamic Route?" refreshed the route without end near the stair.
+void goalChecksCountTheRoutePastAStair() {
+    Instruction go;
+    go.opcode = 0x002D;
+    go.trueTarget = T;
+    go.falseTarget = F;
+    go.operands[2] = 1;
+    MemoryCodeSource code;
+    code.add(kObjectGroup, 0x1100, bhav({go}));
+    code.add(kObjectGroup, 0x1300, bhav({expr(owner::kMyPersonData, 0xF0, op::kAssign, owner::kParam, 3, T, E)}, 4));
+    std::vector<ts2::objf::Function> functions(0x30);
+    functions[0x27].action = 0x1300;
+    code.addFunctions(kObjectGroup, functions);
+    ts2::slot::Entry slot;
+    slot.type = ts2::slot::kRoutingSlot;
+    code.addObjectType(kObjectGroup, typed(kChairGuid), {slot});
+    code.addObjectType(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    auto& chair = world.create(kObjectGroup, typed(kChairGuid));
+    sim.x = sim.y = 5 << 16;
+    chair.x = 5 << 16;
+    chair.y = 9 << 16;
+    sim.thread.stackObjectId = chair.id;
+    ts2::sim::SlotRoute planned;
+    planned.points = {{5.0f, 5.0f}, {5.0f, 6.0f}, {5.0f, 8.0f}, {5.0f, 9.0f}};
+    ts2::sim::StairCrossing stair;
+    stair.at = 1;
+    stair.exitLevel = 2;
+    planned.stairs = {stair};
+    world.setSlotRouter([&](const ts2::sim::SimObject&, const ts2::sim::SimObject&, const ts2::slot::Entry&,
+                            const std::vector<std::optional<ts2::sim::ModelBone>>&) { return planned; });
+    Vm vm(code, {}, &world);
+    vm.run(sim, kObjectGroup, 0x1100);
+    CHECK(sim.walking && sim.walking->ahead);
+    CHECK(sim.personData[0xF0] == 399 || sim.personData[0xF0] == 400);  // 1 + 2 + 1 tiles, truncated
+}
+
 // A pre-route tree that moves the Sim (a seated Sim stands up) has the route planned again from
 // where it stands. One that leaves it in place keeps the route.
 void walksAreReplannedWhenThePreRouteTreeMovesTheSim() {
@@ -410,6 +450,12 @@ void walksStartAndStopWithTheirClips() {
     CHECK(child && child->full == "c-turnAndStop-alt-45" && child->mirrored);
     const auto toddler = ts2::sim::walkStartClips(0, 0.1f, 2);
     CHECK(toddler && toddler->shortOne == "p-walkTurnAndGoShort-0" && toddler->turn == 0);
+    // Elders settle into their own walk pose, teens into the adults'.
+    CHECK(ts2::sim::walkPoseClip(51) == "e-walkPose" && ts2::sim::walkPoseClip(16) == "a-walkPose");
+    // Elders walk with their own loops, and a style the game has no elder clip for falls back to the adults'.
+    CHECK(ts2::sim::walkClip(51, 1) == "e-female-walk-alt0-normal" && ts2::sim::walkShortClip(51, 0) == "e-male-walkShort-alt0-normal");
+    CHECK(ts2::sim::walkStyleClip(51, 0, 4, false) == "e-male-walk-alt4-happy" && ts2::sim::adultClipFor("e-male-walk-alt4-happy") == "a-male-walk-alt4-happy");
+    CHECK(ts2::sim::walkClip(19, 0) == "a-male-walk-alt0-normal" && ts2::sim::adultClipFor("a-male-walk-alt0-normal").empty());
 
     Instruction go;
     go.opcode = 0x002D;
@@ -597,6 +643,24 @@ void interruptedWalksStopSoon() {
     // Still to be interrupted when the next route starts: it isn't planned.
     sim.personData[0x3E] = 0;
     CHECK(vm.run(sim, kObjectGroup, 0x1100).outcome == Outcome::False && sim.personData[0x3E] == 3 && !sim.walking);
+}
+
+// A Sim is drawn at the compass direction nearest its heading, as the game turns its drawn place
+// only in eighth turns.
+void simsAreDrawnAtTheNearestEighth() {
+    constexpr float kPi = 3.14159265f;
+    const auto drawnAt = [](float heading, float expected) {
+        return std::abs(ts2::sim::wrapAngle(ts2::sim::drawnHeading(heading) - expected)) < 1e-5f;
+    };
+    CHECK(drawnAt(0.3f, 0));
+    CHECK(drawnAt(0.5f, kPi / 4));
+    CHECK(drawnAt(-0.5f, -kPi / 4));
+    CHECK(drawnAt(3.0f, kPi));
+    CHECK(drawnAt(-2.0f, -3 * kPi / 4));
+    for (int d = 0; d < 8; ++d) {
+        CHECK(drawnAt(ts2::sim::compassHeading(d) + 0.3f, ts2::sim::compassHeading(d)));
+        CHECK(drawnAt(ts2::sim::compassHeading(d) - 0.3f, ts2::sim::compassHeading(d)));
+    }
 }
 
 void turnBodyTowardsTurnsWithItsClip() {
@@ -1308,12 +1372,14 @@ std::vector<Test> vmWalkingTests() {
         {"Go To Relative Position makes a slot", goToRelativePositionMakesASlot},
         {"walks run the pre-route tree first", walksRunThePreRouteTreeFirst},
         {"walks run the goal check before setting off", walksRunTheGoalCheckBeforeSettingOff},
+        {"goal checks count the route past a stair", goalChecksCountTheRoutePastAStair},
         {"walks are planned again when the pre-route tree moves the Sim", walksAreReplannedWhenThePreRouteTreeMovesTheSim},
         {"walks planned again keep their slot", walksPlannedAgainKeepTheirSlot},
         {"walks end with the post-route tree", walksEndWithThePostRouteTree},
         {"walks start and stop with their clips", walksStartAndStopWithTheirClips},
         {"interrupted walks stop soon", interruptedWalksStopSoon},
         {"walks begun right after one keep its foot", walksBegunRightAfterOneKeepItsFoot},
+        {"Sims are drawn at the nearest eighth", simsAreDrawnAtTheNearestEighth},
         {"Turn Body Towards turns with its clip", turnBodyTowardsTurnsWithItsClip},
         {"Turn Body Towards faces slots and finds its target after the pre-route", turnBodyTowardsSlotsAndTargetAfterPreRoute},
         {"blocked routes ask a standing Sim to move", blockedRoutesAskAStandingSimToMove},

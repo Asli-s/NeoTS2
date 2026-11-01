@@ -38,6 +38,9 @@
 
 namespace {
 
+// --list-objects: list every object but the Sims when a lot run ends.
+bool listObjects = false;
+
 using ts2::content::ResourceIndex;
 using ts2::sim::Outcome;
 using ts2::sim::RunResult;
@@ -804,8 +807,13 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
         return a ? std::optional<ts2::sim::LocoClip>({name, a->duration, a->travel, a->loopPhase, a->match, a->speed, a->rootTurn}) : std::nullopt;
     });
     world.setAnimationEventTime([&](const std::string& name, int id) { return animations.eventTime(name, id); });
-    world.setAnimationEvents([&](const std::string& name) {
-        std::vector<ts2::sim::AnimationEvent> events;
+    // The world reads each clip's events in place, so they are kept for the whole run.
+    std::map<std::string, std::vector<ts2::sim::AnimationEvent>, std::less<>> animationEvents;
+    world.setAnimationEvents([&](const std::string& name) -> const std::vector<ts2::sim::AnimationEvent>& {
+        if (const auto it = animationEvents.find(name); it != animationEvents.end()) {
+            return it->second;
+        }
+        auto& events = animationEvents[name];
         for (const auto& [ms, id] : animations.simAnticsEvents(name)) {
             events.push_back({ms, id});
         }
@@ -1020,7 +1028,8 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
         running += o.thread.isRunning();
         return false;
     });
-    std::printf("after %zu ticks: %zu threads still running\n", ticks, running);
+    std::printf("after %zu ticks (%02d:%02d): %zu threads still running\n", ticks, sim.globals()[ts2::sim::global::kHour],
+                sim.globals()[ts2::sim::global::kMinute], running);
     // Where each Sim's script is.
     world.nextAfter(0, [&](const ts2::sim::SimObject& o) {
         if (o.isPerson()) {
@@ -1037,6 +1046,14 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
                     std::printf(" %d", arg);
                 }
                 std::printf(")");
+                // The --trace object's whole stack, outermost first.
+                if (traceObject && *traceObject == o.id) {
+                    for (const auto& frame : o.thread.frames) {
+                        std::printf("\n    %s (0x%08X 0x%04X) at %u, stack object %d", frame.code ? frame.code->name.c_str() : "?",
+                                    frame.group, frame.instance, frame.pc, frame.stackObjectId);
+                    }
+                    std::printf("\n   ");
+                }
             }
             std::printf("%s%s, %zu queued", o.animation ? ", animating " : "", o.animation ? o.animation->name.c_str() : "",
                         o.queue.size());
@@ -1084,6 +1101,16 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
     std::sort(sorted.rbegin(), sorted.rend());
     for (const auto& [n, why] : sorted) {
         std::printf("  %5zu  %s\n         e.g. %s\n", n, why.c_str(), stops[why].second.c_str());
+    }
+    if (listObjects) {
+        // Every object but the Sims: where it is, its direction (data 1) and its lead (data 0x13).
+        world.nextAfter(0, [&](const ts2::sim::SimObject& o) {
+            if (!o.isPerson()) {
+                std::printf("object %d %s at %.2f %.2f level %d dir %d lead %d\n", o.id, o.definition.name.c_str(), o.x / 65536.0,
+                            o.y / 65536.0, o.level, o.data[1], o.data[0x13]);
+            }
+            return false;
+        });
     }
     return 0;
 }
@@ -1214,6 +1241,8 @@ int main(int argc, char** argv) {
                     seed = static_cast<std::uint32_t>(std::stoul(argv[++i]));
                 } else if (std::string_view(argv[i]) == "--portals") {
                     portals = true;
+                } else if (std::string_view(argv[i]) == "--list-objects") {
+                    listObjects = true;
                 } else if (std::string_view(argv[i]) == "--ground" && i + 3 < argc) {
                     groundAt = std::array<float, 3>{std::stof(argv[i + 1]), std::stof(argv[i + 2]), std::stof(argv[i + 3])};
                     i += 3;

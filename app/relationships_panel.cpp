@@ -60,6 +60,24 @@ bool listed(const RelationshipsPanel::Person& p, int filter) {
 // The overlay frame for a value 0..1 (1 the first frame).
 int overlayFrame(float v) { return std::clamp(static_cast<int>((1.0f - v) * kOverlayFrames), 0, kOverlayFrames - 1); }
 
+// The picture of a thumbnail's portrait window, from its script: the shape portraits are cut to
+// (rounded, inside the frame). Empty when the script has none.
+ts2::tga::Pixels portraitShape(ts2::ui::Screen& screen) {
+    const auto script = screen.data().script(kScripts, kThumbnailScript);
+    if (!script || script->empty()) {
+        return {};
+    }
+    const auto& children = script->front().children;
+    const auto it = std::find_if(children.begin(), children.end(), [](const ts2::ui::Window& w) { return w.number("id") == kPortrait; });
+    const auto image = it != children.end() ? it->list("image") : std::vector<std::int64_t>{};
+    if (image.size() < 2) {
+        return {};
+    }
+    return screen.data()
+        .image(static_cast<std::uint32_t>(image[image.size() - 2]), static_cast<std::uint32_t>(image.back()))
+        .value_or(ts2::tga::Pixels{});
+}
+
 } // namespace
 
 void RelationshipsPanel::attach(ts2::ui::Screen& screen, int content) {
@@ -71,6 +89,7 @@ void RelationshipsPanel::attach(ts2::ui::Screen& screen, int content) {
     icons_ = screen.data().image(kImages, kIconStrip).value_or(ts2::tga::Pixels{});
     enemies_ = screen.data().image(kImages, kEnemyStrip).value_or(ts2::tga::Pixels{});
     contacts_ = screen.data().image(kImages, kContactStrip).value_or(ts2::tga::Pixels{});
+    portraitShape_ = portraitShape(screen);
     makeThumbnails(screen.find(screen.find(content, kCollapsed), kCollapsedArea), kCollapsedPage, collapsed_);
     makeThumbnails(screen.find(screen.find(content, kExpanded), kExpandedArea), kExpandedPage, expandedThumbs_);
     layout();
@@ -208,7 +227,10 @@ void RelationshipsPanel::showThumbnail(Thumbnail& t, const Person& p, std::int16
     }
     s.setVisible(window(kPortrait), p.picture != nullptr);
     if (p.picture) {
-        s.setImage(window(kPortrait), *p.picture);
+        // Scaled to the window's picture and cut to its shape, as the game shows it.
+        const auto& shape = portraitShape_;
+        s.setImage(window(kPortrait), shape.width > 0 ? ts2::content::masked(ts2::content::scaled(*p.picture, shape.width, shape.height), shape)
+                                                      : *p.picture);
     }
     s.setChecked(window(kFrame), false);
 

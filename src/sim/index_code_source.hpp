@@ -22,10 +22,12 @@ public:
     std::uint32_t semiGlobalGroup(std::uint32_t objectGroup) override;
     const ObjectType* objectType(std::uint32_t guid) override;
     const ObjectType* multiTileMaster(const ObjectType& part) override;
+    std::vector<const ObjectType*> multiTileParts(const ObjectType& master) override;
     const ObjectType* addMadeObjectType(ObjectType type) override;
     const std::vector<std::uint32_t>& objectTypeGuids() override;
     const std::map<std::string, std::string>* ageData(std::uint32_t group) override;
     std::optional<std::vector<std::uint8_t>> characterResource(std::uint32_t type, std::uint32_t group) override;
+    std::vector<std::pair<std::uint32_t, std::vector<std::uint8_t>>> groupResources(std::uint32_t type, std::uint32_t group) override;
     [[nodiscard]] std::optional<std::string> string(std::uint32_t group, std::uint16_t instance,
                                       std::size_t index) override;
     [[nodiscard]] std::optional<std::string> stringDescription(std::uint32_t group, std::uint16_t instance, std::size_t index) override;
@@ -54,6 +56,8 @@ private:
     std::vector<std::uint32_t> objectTypeGuids_;
     // Multi-tile masters by (group << 16 | multi-tile id): their GUIDs.
     std::unordered_map<std::uint64_t, std::uint32_t> multiTileMasters_;
+    // Their parts' GUIDs by the same key, in the order they were read.
+    std::unordered_map<std::uint64_t, std::vector<std::uint32_t>> multiTilePartGuids_;
     std::unordered_map<std::uint64_t, std::optional<std::vector<objf::Function>>> objectFunctions_;
     bool objectTypesLoaded_ = false;
     std::unordered_set<std::uint32_t> groupsWithTrees_;

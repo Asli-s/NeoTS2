@@ -75,6 +75,8 @@ public:
     // The outfit catalog's packages, in the order the catalog is read, for a reader of its own on
     // another thread.
     std::vector<std::filesystem::path> skinPackages() const;
+    // The packages of the skin catalog, in the order the game reads them (see skinCatalogPackages).
+    const std::vector<std::filesystem::path>& skinCatalog() const { return skinCatalog_; }
 
     // The largest mip level of a texture, decoded. Empty when it is missing or unreadable.
     [[nodiscard]] std::optional<Image> texture(const std::string& name);
@@ -142,6 +144,7 @@ private:
     content::ResourceIndex catalog_;   // Catalog/Patterns packages
     content::ResourceIndex skins_;     // Catalog/Skins packages, read on first use
     std::vector<std::filesystem::path> skinFolders_;
+    std::vector<std::filesystem::path> skinCatalog_;
     bool skinsRead_ = false;
     void readSkins();
     std::optional<std::uint32_t> localGroup_;  // the character file in use

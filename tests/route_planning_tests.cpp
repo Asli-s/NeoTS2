@@ -1129,10 +1129,10 @@ void snapPutsMeAtARoutingSlot() {
     world.setWalls(walls);
     CHECK(vm.run(me, 0x1000).outcome == Outcome::False && me.y == 3 * 65536);
 
-    // Off the lot: refused, data 0x34 = 2.
+    // Off the lot: refused, data 0x34 = 4 (placement code 2, plus 2), as a car at the lot's edge finds.
     chair.data[1] = 2;
     chair.x = chair.y = 32768;
-    CHECK(vm.run(me, 0x1002).outcome == Outcome::False && me.data[0x34] == 2);
+    CHECK(vm.run(me, 0x1002).outcome == Outcome::False && me.data[0x34] == 4);
 
     CHECK(vm.run(me, 0x1003).reason == "slot number out of range");
     CHECK(vm.run(me, 0x1004).outcome == Outcome::Unsupported);

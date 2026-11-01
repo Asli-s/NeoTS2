@@ -216,7 +216,8 @@ float clipMs(const ts2::sim::PlayingAnimation& playing, double length, double no
 std::optional<ts2::scene::Transform> ObjectMaterials::jointPose(const ts2::sim::SimObject& object, double nowMs,
                                                                 ts2::scene::AnimationLibrary& animations, const std::string& model,
                                                                 const std::string& joint,
-                                                                std::vector<std::pair<std::uint32_t, ts2::scene::Transform>>* bones) {
+                                                                std::vector<std::pair<std::uint32_t, ts2::scene::Transform>>* bones,
+                                                                const std::vector<ts2::scene::HeldJoint>* held) {
     if (!object.animation || object.isPerson()) {
         return std::nullopt;
     }
@@ -230,7 +231,7 @@ std::optional<ts2::scene::Transform> ObjectMaterials::jointPose(const ts2::sim::
     if (!bound || !bound->animation) {
         return std::nullopt;
     }
-    ts2::scene::poseRig(*it->second, bound.get(), clipMs(playing, bound->animation->duration, nowMs), poseScratch_);
+    ts2::scene::poseRig(*it->second, bound.get(), clipMs(playing, bound->animation->duration, nowMs), poseScratch_, held);
     if (bones != nullptr) {
         bones->clear();
         for (std::size_t i = 0; i < it->second->nodes.size() && i < poseScratch_.size(); ++i) {

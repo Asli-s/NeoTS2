@@ -246,6 +246,8 @@ int setPersonData(lua_State* L);
 int cachedPersonGetData(lua_State* L);
 int cachedPersonQueuedAdvertising(lua_State* L);
 int cachedPersonQueueCount(lua_State* L);
+int cachedPersonQueuedId(lua_State* L);
+int cachedPersonQueuedObjectId(lua_State* L);
 int cachedPersonGuid(lua_State* L);
 int cachedPersonFriendsForPromotion(lua_State* L);
 int cachedPersonSetData(lua_State* L);

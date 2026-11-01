@@ -231,4 +231,63 @@ void blendBabyFace(sg::Mesh& mesh, const std::optional<faceshape::FaceShape>& a,
     }
 }
 
+void applyFaceTemplate(sg::Mesh& mesh, const sg::Mesh& faceTemplate, const FaceMasks& masks) {
+    const auto group = std::find_if(mesh.groups.begin(), mesh.groups.end(),
+                                    [&](const sg::Group& g) { return g.primitive == sg::kTriangleList && g.link < mesh.links.size(); });
+    if (group == mesh.groups.end()) {
+        return;
+    }
+    const std::size_t link = group->link;
+    const auto& elements = mesh.links[link];
+    if (std::any_of(elements.aliases.begin(), elements.aliases.end(), [](const auto& alias) { return !alias.empty(); })) {
+        diag::warnOnce("face template: the base face's vertices are shared in a way not read, so it isn't changed");
+        return;
+    }
+    auto element = [&](std::uint32_t identity) -> sg::Element* {
+        for (const std::uint16_t e : elements.elements) {
+            if (e < mesh.elements.size() && mesh.elements[e].identity == identity) {
+                return &mesh.elements[e];
+            }
+        }
+        return nullptr;
+    };
+    sg::Element* positionElement = element(sg::kPositions);
+    sg::Element* normalElement = element(sg::kNormals);
+    const auto base = sg::vertexFloats(mesh, elements, sg::kPositions);
+    const auto uv = sg::vertexFloats(mesh, elements, sg::kTextureCoordinates);
+    const auto ownNormals = sg::vertexFloats(mesh, elements, sg::kNormals);
+    if (positionElement == nullptr || base.empty() || uv.size() / 2 != base.size() / 3) {
+        return;
+    }
+    std::vector<float> face = base;
+    for (const auto& from : faceTemplate.links) {
+        const auto points = sg::vertexFloats(faceTemplate, from, sg::kPositions);
+        const auto coords = sg::vertexFloats(faceTemplate, from, sg::kTextureCoordinates);
+        if (points.empty() || coords.size() / 2 != points.size() / 3) {
+            continue;
+        }
+        for (std::size_t t = 0; t < coords.size() / 2; ++t) {
+            for (std::size_t v = 0; v < uv.size() / 2; ++v) {
+                if (std::fabs(uv[v * 2] - coords[t * 2]) < kSameUv && std::fabs(uv[v * 2 + 1] - coords[t * 2 + 1]) < kSameUv) {
+                    std::copy_n(points.begin() + static_cast<std::ptrdiff_t>(t * 3), 3, face.begin() + static_cast<std::ptrdiff_t>(v * 3));
+                }
+            }
+        }
+    }
+    if (const auto hairNeck = masks.find("hairneck"); hairNeck != masks.end()) {
+        const auto w = weights(hairNeck->second, uv);
+        for (std::size_t v = 0; v < w.size(); ++v) {
+            if (w[v] > 0) {
+                std::copy_n(base.begin() + static_cast<std::ptrdiff_t>(v * 3), 3, face.begin() + static_cast<std::ptrdiff_t>(v * 3));
+            }
+        }
+    }
+    writeFloats(*positionElement, face);
+    if (normalElement != nullptr && ownNormals.size() == face.size()) {
+        const auto keep = masks.find("normals");
+        const std::vector<float> none(face.size() / 3, 0.0f);
+        writeFloats(*normalElement, faceNormals(mesh, link, face, ownNormals, keep != masks.end() ? weights(keep->second, uv) : none));
+    }
+}
+
 } // namespace ts2::scene

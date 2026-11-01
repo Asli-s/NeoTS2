@@ -29,7 +29,8 @@ struct Interaction {
     std::int32_t joiningIndex = -1;
     std::uint16_t value1 = 0;
     std::uint32_t value2 = 3;
-    float value3 = 0.5f;
+    // What autonomy keeps of the line's score while it remembers picking it on the same object.
+    float memoryMultiplier = 0.5f;
     // The object type GUID and thumbnail index of the icon the queue shows for it, when flag
     // 0x400000 is set.
     std::uint32_t iconGuid = 0;

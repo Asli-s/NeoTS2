@@ -126,6 +126,27 @@ std::optional<tga::Pixels> UiData::image(std::uint32_t group, std::uint32_t inst
     return image::decode(index_.read(*r));
 }
 
+std::vector<std::string> UiData::texts(std::uint32_t group, std::uint32_t instance, std::uint8_t language) {
+    const auto* r = index_.find({types::kStringTable, group, instance, 0});
+    if (!r) {
+        return {};
+    }
+    const std::uint64_t key = static_cast<std::uint64_t>(group) << 32 | instance;
+    auto known = tables_.find(key);
+    if (known == tables_.end()) {
+        known = tables_.emplace(key, str::parse(index_.read(*r))).first;
+    }
+    const auto& table = known->second;
+    const bool has = std::any_of(table.entries.begin(), table.entries.end(), [&](const str::Entry& e) { return e.language == language; });
+    std::vector<std::string> out;
+    for (const auto& e : table.entries) {
+        if (e.language == (has ? language : 1)) {
+            out.push_back(asUtf8(e.value));
+        }
+    }
+    return out;
+}
+
 std::string UiData::text(std::uint32_t group, std::uint32_t value, std::uint8_t language) {
     const auto* r = index_.find({types::kStringTable, group, value >> 16, 0});
     const std::uint32_t n = value & 0xFFFF;
@@ -139,11 +160,17 @@ std::string UiData::text(std::uint32_t group, std::uint32_t value, std::uint8_t 
         known = tables_.emplace(key, str::parse(index_.read(*r))).first;
     }
     const auto& table = known->second;
-    auto entries = table.forLanguage(language);
-    if (entries.empty()) {
-        entries = table.forLanguage(1);
+    // The table's own language when it has any, US English otherwise. Found in place, as captions are
+    // asked for every frame.
+    const bool has = std::any_of(table.entries.begin(), table.entries.end(), [&](const str::Entry& e) { return e.language == language; });
+    const std::uint8_t used = has ? language : 1;
+    std::uint32_t seen = 0;
+    for (const auto& e : table.entries) {
+        if (e.language == used && ++seen == n) {
+            return asUtf8(e.value);
+        }
     }
-    return n <= entries.size() ? asUtf8(entries[n - 1]->value) : std::string();
+    return {};
 }
 
 } // namespace ts2::content

@@ -23,6 +23,7 @@ constexpr std::size_t kAutonomyLevelPersonData = 0x24;
 constexpr std::size_t kSittingPersonData = 0x00;
 constexpr std::size_t kLastAutonomyObjectPersonData = 0x35;
 constexpr std::size_t kSpeciesPersonData = 0xBA;
+constexpr std::size_t kNeighborIdPersonData = 0x1F;
 constexpr std::size_t kTreeTableEntryField = 0x14;
 constexpr std::size_t kLockoutField = 0x19;
 constexpr std::size_t kRoomField = 0x1D;
@@ -33,6 +34,12 @@ constexpr std::size_t kDisableInteractionsField = 0x57;
 constexpr std::uint32_t kAgeFlags = 0x3F013E51;
 constexpr std::uint32_t kDebugLine = 0x80;
 constexpr std::uint32_t kOnSelf = 0x00100000;
+constexpr std::uint32_t kPreferredByFurious = 0x00800000;  // a flag bit, leakcheck: ok
+// Tokens in a Sim's neighbor inventory that the social bias reads. "Token - Furious" holds the
+// other Sim's neighbor id in property 0 and how furious in property 2. "Token - Attraction Marker"
+// holds the attraction in property 0 and the other Sim's neighbor id in property 1.
+constexpr std::uint32_t kFuriousToken = 0xCF505AB0;
+constexpr std::uint32_t kAttractionToken = 0x2F4D6811;
 // The line names its own queue icon (an object type and picture).
 constexpr std::uint32_t kOwnIconFlag = 0x00400000;  // a flag bit, leakcheck: ok
 constexpr float kLowestScore = 0.00001f;
@@ -78,6 +85,20 @@ float distance(const SimObject& from, const SimObject& to, float floorCost) {
     return static_cast<float>(std::sqrt(dx * dx + dy * dy + dz * dz));
 }
 
+// Autonomy remembers a pick on a multi-tile object by its lead, so every part counts as the same.
+std::int16_t rememberedAs(const SimObject& object) {
+    return object.data[kLeadTileField] > 0 ? object.data[kLeadTileField] : object.id;
+}
+
+// Forgets the picks whose time is up and keeps the `count` latest of the rest.
+void forgetOldPicks(std::vector<AutonomyMemory>& memory, std::uint64_t tick, int count) {
+    std::erase_if(memory, [tick](const AutonomyMemory& m) { return m.until < tick; });
+    std::stable_sort(memory.begin(), memory.end(), [](const AutonomyMemory& a, const AutonomyMemory& b) { return a.until > b.until; });
+    if (memory.size() > static_cast<std::size_t>(std::max(0, count))) {
+        memory.resize(static_cast<std::size_t>(std::max(0, count)));
+    }
+}
+
 class Search {
 public:
     explicit Search(const InteractionSearch& s) : s_(s), visitor_(s.me.personData[kVisitorPersonData] != 0) {}
@@ -89,6 +110,7 @@ public:
             return std::nullopt;
         }
         motives_ = scoredMotives(me);
+        noteInfluences();
         now_ = happiness(*curves_, motives_);
         const auto [kind, ageFlag] = ageKind(me);
         ageFlag_ = ageFlag;
@@ -231,7 +253,7 @@ private:
     void score(const SimObject& object, std::uint16_t id, const ttab::Interaction& line, Candidate c) {
         const float after = happiness(*curves_, advertisedMotives(line, s_.me, motives_));
         const float fall = attenuationOf(line, s_.tunings, visitor_) * distance(*origin_, object, s_.tunings.floorCost) + 1.0f;
-        const float value = (after - now_) / fall;
+        const float value = (after - now_) / fall * remembered(object, id, line) * socialBias(object, line);
         const float minimum = visitor_ ? s_.tunings.visitorMinimum : s_.tunings.familyMinimum;
         if (value >= minimum && value >= kLowestScore) {
             c.interaction = id;
@@ -239,6 +261,91 @@ private:
             c.after = after;
             candidates_.push_back(std::move(c));
         }
+    }
+
+    // The Sims I am furious at and the places of those I'm furious at or attracted to, from the tokens
+    // in my neighbor inventory, as they stand when the search starts. Only Sims on the lot count.
+    void noteInfluences() {
+        const std::int16_t mine = s_.me.personData[kNeighborIdPersonData];
+        if (s_.tunings.biasOff || mine <= 0) {
+            return;
+        }
+        const Inventory* inventory = s_.world.inventory(InventoryKind::Neighbor, mine);
+        if (inventory == nullptr) {
+            return;
+        }
+        for (const auto& token : inventory->singular) {
+            if (token->guid == kFuriousToken && token->properties.size() > 1 && token->properties[0] != mine) {
+                furious_.insert(token->properties[0]);
+            }
+        }
+        const AutonomyTunings& t = s_.tunings;
+        for (const auto& token : inventory->singular) {
+            const auto& p = token->properties;
+            if (token->guid == kFuriousToken && p.size() > 2) {
+                addInfluence(p[0], -static_cast<float>(p[2]) * t.furiousWeight, t.furiousStart, t.furiousEnd, true);
+            } else if (token->guid == kAttractionToken && p.size() > 1 && p[1] != mine && !furious_.contains(p[1])) {
+                addInfluence(p[1], static_cast<float>(p[0]) * t.attractionWeight, t.attractionStart, t.attractionEnd, false);
+            }
+        }
+    }
+
+    // A source at the place of the Sim whose neighbor id is `neighbor`: `weight` hundredths, in full up
+    // to `start` tiles away (at least 1) and falling to nothing at `end` (at least `start`).
+    void addInfluence(std::int16_t neighbor, float weight, float start, float end, bool furious) {
+        const auto ids = s_.world.idsIncludingRemoved([neighbor](const SimObject& o) {
+            return !o.removed && o.isPerson() && o.personData[kNeighborIdPersonData] == neighbor;
+        });
+        const SimObject* sim = ids.empty() ? nullptr : s_.world.find(ids.front());
+        if (sim == nullptr || !placed(*sim)) {
+            return;
+        }
+        influences_.push_back(Influence{static_cast<double>(sim->x) / 65536.0, static_cast<double>(sim->y) / 65536.0, sim->level,
+                                        sim->data[kRoomField], weight * 0.01f, std::max(1.0f, start), std::max(start, end), furious});
+    }
+
+    // The social bias of a candidate on `object`: the sources on its level and in its room, summed by
+    // their falloff at its place, give s. The bias is (s + 1) to the positive tuning when s is not
+    // negative, else (1 / (1 - s)) to the negative tuning, at least 0.0001. A line flagged 0x800000
+    // ("preferred by furious") on a Sim I am furious at is worth `preferred furious` times that, and
+    // its sum leaves out the furious sources.
+    float socialBias(const SimObject& object, const ttab::Interaction& line) const {
+        const AutonomyTunings& t = s_.tunings;
+        if (t.biasOff || !placed(object)) {
+            return 1.0f;
+        }
+        float factor = 1.0f;
+        bool atFurious = false;
+        if ((line.flags & kPreferredByFurious) && object.isPerson() && furious_.contains(object.personData[kNeighborIdPersonData])) {
+            atFurious = true;
+            factor = t.preferredFurious;
+        }
+        const double x = static_cast<double>(object.x) / 65536.0, y = static_cast<double>(object.y) / 65536.0;
+        double sum = 0;
+        for (const Influence& source : influences_) {
+            if (source.level != object.level || source.room != object.data[kRoomField] || (atFurious && source.furious)) {
+                continue;
+            }
+            const double d = std::hypot(x - source.x, y - source.y);
+            const double share = d <= source.start ? 1.0 : d < source.end ? (source.end - d) / (source.end - source.start) : 0.0;
+            sum += share * source.weight;
+        }
+        if (sum >= 0) {
+            return factor * static_cast<float>(std::pow(sum + 1.0, t.biasPositive));
+        }
+        return std::max(0.0001f, factor * static_cast<float>(std::pow(1.0 / (1.0 - sum), t.biasNegative)));
+    }
+
+    // The line's memory multiplier while I remember picking it on this object, else 1.
+    float remembered(const SimObject& object, std::uint16_t id, const ttab::Interaction& line) const {
+        const std::int16_t key = rememberedAs(object);
+        const std::uint64_t tick = s_.world.ticks();
+        for (const AutonomyMemory& m : s_.me.autonomyMemory) {
+            if (m.object == key && m.interaction == id && tick < m.until) {
+                return line.memoryMultiplier;
+            }
+        }
+        return 1.0f;
     }
 
     // Every line offered so far, as a candidate already checked, with its own name and params.
@@ -254,8 +361,15 @@ private:
     bool runCheck(SimObject& object, const ttab::Interaction& line, ttab::Interaction& changed, InteractionIcon& icon,
                   std::vector<AutonomyOffer>& offered) {
         ++checks_;
-        changed = line;
-        return line.test == 0 || s_.check(object, line, changed, icon, offered);
+        if (s_.mayStart && !s_.mayStart(object, line)) {
+            return false;
+        }
+        // A check tree hands back the line as it left it, so the line is copied here only without one.
+        if (line.test == 0) {
+            changed = line;
+            return true;
+        }
+        return s_.check(object, line, changed, icon, offered);
     }
 
     // The k-th candidate, best first, that passes its check, where k is 0 or, for residents, one of the
@@ -300,6 +414,15 @@ private:
     const bool visitor_;
     std::optional<ScoreCurves> curves_;  // this Sim's, while the search runs
     std::array<float, kMotiveCount> motives_{};
+    struct Influence {
+        double x, y;  // in tiles
+        std::int32_t level;
+        std::int16_t room;
+        float weight, start, end;
+        bool furious;
+    };
+    std::set<std::int16_t> furious_;  // neighbor ids
+    std::vector<Influence> influences_;
     float now_ = 0;
     std::uint32_t ageFlag_ = 0;
     const SimObject* origin_ = nullptr;
@@ -390,6 +513,20 @@ AutonomyTunings AutonomyTunings::from(const fcns::Tunings* tunings) {
     readCount("random selection count", t.randomSelection);
     readCount("random worst motive count", t.worstMotives);
     readCount("max check tree in fba count", t.maxChecks);
+    readCount("autonomy memory count", t.memoryCount);
+    readCount("max duration autonomy memory ", t.memoryDuration);
+    int biasOff = 0;
+    readCount("autonomy deactivate autonomy bias", biasOff);
+    t.biasOff = biasOff != 0;
+    read("autonomy bias positive tuning", t.biasPositive);
+    read("autonomy bias negative tuning", t.biasNegative);
+    read("autonomy overall furious tuning", t.furiousWeight);
+    read("autonomy preferred furious interaction tuning", t.preferredFurious);
+    read("autonomy furious falloff start distance", t.furiousStart);
+    read("autonomy furious falloff end distance", t.furiousEnd);
+    read("autonomy overall attraction tuning", t.attractionWeight);
+    read("autonomy attraction falloff start distance", t.attractionStart);
+    read("autonomy attraction falloff end distance", t.attractionEnd);
     read("autonomy floor to floor distance cost", t.floorCost);
     read("low attenuation", t.attenuation[0]);
     read("moderate attenuation", t.attenuation[1]);
@@ -422,8 +559,13 @@ std::optional<FoundInteraction> findBestInteraction(const InteractionSearch& sea
     if (me.personData[kSpeciesPersonData] != 0 || search.operands.size() < 4) {
         return std::nullopt;
     }
+    forgetOldPicks(me.autonomyMemory, tick, search.tunings.memoryCount);
     auto found = Search(search).run();
     if (found) {
+        if (const SimObject* object = search.world.find(found->object)) {
+            const auto until = tick + static_cast<std::uint64_t>(std::max(0, search.tunings.memoryDuration));
+            me.autonomyMemory.push_back({rememberedAs(*object), found->interaction, until});
+        }
         me.data[kTreeTableEntryField] = static_cast<std::int16_t>(found->interaction);
         me.personData[kLastAutonomyObjectPersonData] = found->object;
         me.foundIcon = found->icon;

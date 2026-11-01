@@ -2,6 +2,10 @@
 // it opens.
 #include "menu.hpp"
 #include "baby_name_dialog.hpp"
+#include "cheat_console.hpp"
+#include "dialog_box.hpp"
+#include "diagnostics.hpp"
+#include "paths/game_folders.hpp"
 #include "camera_height.hpp"
 #include "crash_handler.hpp"
 #include "click_gate.hpp"
@@ -54,11 +58,13 @@
 #include <future>
 #include <map>
 #include <memory>
+#include <fstream>
 #include <optional>
 #include <random>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 
 namespace pf = ts2::platform;
 
@@ -68,8 +74,12 @@ namespace {
 constexpr unsigned kMaxClosingSeconds = 30;
 
 constexpr std::uint32_t kScripts = 0xA99D8A11;
+constexpr std::size_t kLifeStage = 0x3A, kAgeDaysLeft = 0x5B;  // person data
 // Live text: a new baby's first name until it is named, a boy's and a girl's.
 constexpr std::uint32_t kLiveText = 0x7F96C284, kBabyBoyText = 0x00950001, kBabyGirlText = 0x00950002;  // string ids, leakcheck: ok
+// The Live text's name tables Make New Character names its Sims from: human male and female first
+// names and surnames, then the pets'.
+constexpr std::uint16_t kNameTables[] = {0x96, 0x97, 0x98, 0xCC, 0xEA, 0xEB, 0xEC, 0xED};
 constexpr std::uint32_t kMainMenu = 0x49001017;
 constexpr std::uint32_t kNeighborhoodTile = 0x49001018;
 // Windows of the main menu by id.
@@ -105,9 +115,11 @@ std::optional<ts2::tga::Pixels> readImage(const std::filesystem::path& path) {
 }
 
 // The Sims (object ids) the camera sees: their middle inside the view.
-std::vector<std::int16_t> simsInView(const ts2::scene::Scene& scene, const ts2::render::Camera& c, int width, int height) {
+// Kept between frames so the list reuses its storage.
+const std::vector<std::int16_t>& simsInView(const ts2::scene::Scene& scene, const ts2::render::Camera& c, int width, int height) {
     using ts2::render::Vec3;
-    std::vector<std::int16_t> seen;
+    thread_local std::vector<std::int16_t> seen;
+    seen.clear();
     if (width <= 0 || height <= 0) {
         return seen;
     }
@@ -229,10 +241,13 @@ void snapSide(float& a0, float& a1, float& t0, float& t1, bool joined0, bool joi
     a1 = b1;
 }
 
-// The UI's quads as sprites in window pixels, `scale` times their size in UI pixels.
-std::vector<ts2::render::Sprite> sprites(const ts2::ui::Screen& screen, double seconds, float scale) {
-    std::vector<ts2::render::Sprite> out;
-    for (const auto& q : screen.quads(seconds)) {
+// The UI's quads as sprites in window pixels, `scale` times their size in UI pixels, into `out`.
+void sprites(const ts2::ui::Screen& screen, double seconds, float scale, std::vector<ts2::render::Sprite>& out) {
+    // Kept between frames so it reuses its storage.
+    thread_local std::vector<ts2::ui::Quad> quads;
+    screen.quads(seconds, quads);
+    out.clear();
+    for (const auto& q : quads) {
         ts2::render::Sprite s;
         s.x0 = q.x0 * scale;
         s.y0 = q.y0 * scale;
@@ -252,7 +267,6 @@ std::vector<ts2::render::Sprite> sprites(const ts2::ui::Screen& screen, double s
         }
         out.push_back(s);
     }
-    return out;
 }
 
 // A neighborhood built in the background, then shown: its scene, camera and panel.
@@ -334,7 +348,16 @@ private:
     void openQuitBox(bool askSave = false);
     // Shows the baby naming dialog when the lot's scripts ask for names, and closes it when answered.
     void updateBabyNames();
+    // Shows the game's "Object Error" dialog for the oldest script error the lot holds for it.
+    void updateObjectErrors();
+    void answerObjectError(std::uint32_t button);
     void answerBabyNames();
+    // Typing goes on in the naming dialog after the cheat window closes over it.
+    void keepBabyNameTyping() {
+        if (!cheatConsole_.takesKeys() && babyNames_.isOpen()) {
+            ts2::platform::startTextInput();
+        }
+    }
     void closeQuitBox();
     void closeChooser();
     void lotClicked(float x, float y);
@@ -424,6 +447,11 @@ private:
     std::optional<ts2::scene::HoodDrift> hoodDrift_;  // the camera's drift while mouse and keys rest
     app::QuitBox quitBox_;  // the game's "Are you sure you want to quit?" box
     app::BabyNameDialog babyNames_;  // the game's "Set Baby Name" dialog
+    ts2::sim::CheatProperties cheats_;  // what the cheat window's boolProp set
+    app::CheatConsole cheatConsole_{cheats_};
+    bool mouseShift_ = false;  // Shift held at the last mouse move or press
+    app::DialogBox errorBox_;  // the game's "Object Error" dialog
+    std::optional<bool> pausedBeforeErrorBox_;  // the game stops while it is open
     std::optional<bool> pausedBeforeBabyNames_;  // the game pauses while it is open
     // Whether the lot was paused before the quit box paused it. None when the box didn't pause it
     // (no lot running when it opened).
@@ -891,6 +919,66 @@ void Game::updateBabyNames() {
     }
 }
 
+namespace {
+// The error dialog's buttons, in the game's order.
+constexpr std::uint32_t kErrorCancel = 1, kErrorReset = 2, kErrorDelete = 3;
+} // namespace
+
+void Game::updateObjectErrors() {
+    if (!lotLife_ || errorBox_.isOpen() || quitBox_.isOpen() || babyNames_.isOpen()) {
+        return;
+    }
+    auto& sim = lotLife_->simulation();
+    if (sim.objectErrors().empty()) {
+        return;
+    }
+    const auto& error = sim.objectErrors().front();
+    const auto* object = sim.world().find(error.object);
+    const std::string name = object != nullptr ? object->definition.name : std::string("?");
+    // The stack trace goes where the game puts its own, the Logs folder of the user folder, named alike.
+    // Its lines are the engine's own: the game's file also dumps every global and object.
+    const auto logs = openFolder_.parent_path().parent_path() / "Logs";
+    const auto file = logs / std::format("ObjectError_{}_t{}.txt", ts2::diag::utf8(openFolder_.filename()), error.tick);
+    std::ofstream out;
+    if (std::error_code made; !openFolder_.empty() && (std::filesystem::create_directories(logs, made), !made)) {
+        out.open(file);
+    }
+    out << "Build: " << app::buildVersion() << "\n\nObject id: " << error.object << "\nname: " << name << "\nError: " << error.text << "\n";
+    // An error from a tree another object ran on it carries only that error's text.
+    if (error.run.group != 0) {
+        const auto tree = sim.code().behavior(error.run.group, error.run.instance);
+        out << "Tree: id " << error.run.instance << " name '" << (tree ? tree->name : std::string()) << "' group "
+            << std::format("0x{:08X}", error.run.group) << "\nNode: " << error.run.pc << "\n";
+    }
+    if (!error.run.calls.empty()) {
+        out << "Stack from the bottom: " << error.run.calls << "\n";
+    }
+    const bool saved = out.is_open() && out.good();
+    out.close();
+    // The game's text: a first line from its program, the error, then where the trace went.
+    std::string body = std::format("An error occurred in object \"{}\" #{}, \nError: {}\n", name, error.object, error.text);
+    // The game writes the path with forward slashes.
+    std::string path = ts2::diag::utf8(file);
+    std::ranges::replace(path, '\\', '/');
+    body += saved ? std::format(" The stack trace is saved in \"{}\".", path) : std::string(" The stack trace could not be saved.");
+    errorBox_.open(screen_, uiWidth_, uiHeight_, "Object Error", body, {{kErrorCancel, "Cancel"}, {kErrorReset, "Reset"}, {kErrorDelete, "Delete"}});
+    endCameraDrag();
+    pausedBeforeErrorBox_ = lotLife_->paused();
+    lotLife_->setPaused(true);
+}
+
+void Game::answerObjectError(std::uint32_t button) {
+    using Answer = ts2::sim::LotSimulation::ErrorAnswer;
+    if (lotLife_) {
+        lotLife_->simulation().answerObjectError(button == kErrorReset ? Answer::Reset : button == kErrorDelete ? Answer::Delete : Answer::Cancel);
+        if (pausedBeforeErrorBox_) {
+            lotLife_->setPaused(*pausedBeforeErrorBox_);
+        }
+    }
+    pausedBeforeErrorBox_.reset();
+    errorBox_.close(screen_);
+}
+
 void Game::answerBabyNames() {
     if (lotLife_) {
         lotLife_->simulation().world().answerNames(true, babyNames_.names());
@@ -1109,8 +1197,10 @@ void Game::showLot(LotBuilt& built) {
     ts2::diag::info(std::format("lot {} shown after {:.1f} s", enteredLot_, secondsSince(lotLoadStarted_)));
 
     screen_.setVisible(hoodUi_.root(), false);
+    hoodUi_.showOptions(false);
     hoodUi_.showBin(app::NeighborhoodUi::Bin::None);
     hoodUi_.showTag(0, 0, 0);
+    lotUi_.setTestingCheats(cheats_.testingCheats());
     lotUi_.open();
     inNeighborhood_ = false;
     inLot_ = true;
@@ -1508,6 +1598,9 @@ void Game::freeCameraLook() {
 // ground, then the panels and the camera.
 void Game::lotMouse(const pf::Event& e, float x, float y) {
     const auto [ix, iy] = toUi(x, y);
+    if (e.type == pf::Event::Type::MouseMotion || e.type == pf::Event::Type::MouseDown) {
+        mouseShift_ = e.shift;
+    }
     if (babyNames_.isOpen() && !quitBox_.isOpen()) {
         cursors_.show(app::Cursors::kArrow);
         if (e.type == pf::Event::Type::MouseDown && e.button == pf::MouseButton::Left) {
@@ -1523,7 +1616,7 @@ void Game::lotMouse(const pf::Event& e, float x, float y) {
         }
         return;
     }
-    if (quitBox_.isOpen()) {
+    if (quitBox_.isOpen() || errorBox_.isOpen()) {
         cursors_.show(app::Cursors::kArrow);
         if (const auto clicked = screen_.mouse(ix, iy, down_, static_cast<double>(ts2::platform::ticksNs()) / 1e9)) {
             windowClicked(*clicked);
@@ -1549,7 +1642,7 @@ void Game::lotMouse(const pf::Event& e, float x, float y) {
     // A left click on the highlighted object opens its pie menu for the selected Sim.
     if (lotLife_ && hovered_ != 0 && leftDown && !screen_.over(ix, iy)) {
         const std::uint32_t part = lotLife_->partAt(hovered_, hoveredPoint_, lot_);
-        if (auto choices = lotLife_->pieMenu(part); !choices.empty()) {
+        if (auto choices = lotLife_->pieMenu(part, mouseShift_); !choices.empty()) {
             pieObject_ = part;
             pieMenu_.open(std::move(choices), ix, iy, uiWidth_, uiHeight_);
             showPieCursor();
@@ -1557,7 +1650,7 @@ void Game::lotMouse(const pf::Event& e, float x, float y) {
         }
     }
     // A left click on empty floor or ground opens the menu of a destination made there.
-    if (lotLife_ && hovered_ == 0 && leftDown && !screen_.over(ix, iy) && openGroundMenu(x, y)) {
+    if (lotLife_ && hovered_ == 0 && leftDown && !lotUi_.optionsShown() && !screen_.over(ix, iy) && openGroundMenu(x, y)) {
         showPieCursor();
         return;
     }
@@ -1607,6 +1700,7 @@ void Game::updateLot(std::uint64_t now) {
         lotView_.view.facing = freeCam_->facing();
     } else {
         puckCamera();
+        orbit_.keysTaken = cheatConsole_.takesKeys();
         app::orbitStep(orbit_, dt, width_, height_, [&] { cameraHeight_.apply(orbit_, lot_, lotVisible_, lotPlace_, lotView_.view.level); });
         lotView_.view.facing = orbit_.facing();
     }
@@ -1615,12 +1709,32 @@ void Game::updateLot(std::uint64_t now) {
     lotVisible_ = shown;
     renderer_.show(shown);
     lotUi_.showWallMode(lotView_.wallMode());
+    // The game reads testingCheatsEnabled each time it checks a line, so a change shows at once.
+    if (lotLife_) {
+        lotLife_->setTestingCheats(cheats_.testingCheats());
+    }
+    // The options menu is not live mode: nothing on the lot is hovered or clicked and the cursor is
+    // the arrow. Only the camera moves.
+    if (lotUi_.optionsShown()) {
+        hovered_ = 0;
+        hoveredSim_ = false;
+        liveCursor_ = app::Cursors::kArrow;
+        if (hoverAt_) {
+            cursors_.show(liveCursor_);
+            hoverAt_.reset();
+        }
+        if (spotTipObject_ != 0) {
+            spotTipObject_ = 0;
+            screen_.setSpotTip({});
+            spotTipShown_.reset();
+        }
+    }
     // The game looks for the object under the mouse as it moves with no button held.
     if (hoverAt_ && lotLife_ && !freeCam_) {
         const auto ray = screenRay(orbit_.camera(), width_, height_, (*hoverAt_)[0], (*hoverAt_)[1]);
         const auto hit = lotPicker_.pick(lot_, shown, orbit_.camera().eye, ray, &lotPose_);
         const std::uint32_t object = hit ? hit->object : 0;
-        hovered_ = lotLife_->hoverable(object) ? object : 0;
+        hovered_ = lotLife_->hoverable(object, mouseShift_) ? object : 0;
         if (hit) {
             const auto& eye = orbit_.camera().eye;
             hoveredPoint_ = {eye[0] + ray[0] * hit->distance, eye[1] + ray[1] * hit->distance, eye[2] + ray[2] * hit->distance};
@@ -1680,6 +1794,7 @@ void Game::updateLot(std::uint64_t now) {
         }
         lotUi_.showLife(*lotLife_);
         updateBabyNames();
+        updateObjectErrors();
         followSimStorey();
     }
     app::animateActors(lot_, lotLife_ ? lotLife_->seconds() : static_cast<double>(now - lotShown_) / 1e9, renderer_, lotPose_);
@@ -1693,8 +1808,14 @@ void Game::startLotLife() {
     if (auto sim = finished(lotSimBuilding_, "lot's simulation"); sim && *sim) {
         stepTaken_ = true;
         lotLife_ = std::make_unique<app::LotLife>(std::move(*sim), *assets_.get(), lotRouteModels_);
+        lotLife_->loadSimsInBackground(install_);
         lotLife_->simulation().world().setAsksNames(true);
         lotLife_->simulation().world().setBabyFirstNames(data_.text(kLiveText, kBabyBoyText), data_.text(kLiveText, kBabyGirlText));
+        std::map<std::uint16_t, std::vector<std::string>> nameTables;
+        for (const std::uint16_t table : kNameTables) {
+            nameTables[table] = data_.texts(kLiveText, table);
+        }
+        lotLife_->simulation().world().setNameTables(std::move(nameTables));
         lotLife_->traceIn(lot_, lotPose_, lotVisible_);
         // A lot opens paused, as in the game, after the game's 10 ticks of loading. Sims start
         // their main loop in them (Sims without turn-ons get theirs there). The ticks need the
@@ -1710,7 +1831,8 @@ void Game::startLotLife() {
 }
 
 // The household's thumbnails: Sims on the lot are drawn anew, as the game does. The others keep
-// their character file's portrait.
+// their character file's portrait. The oldest come first, which the skewer puts at the top: by life
+// stage (person data 0x3A), then by fewer days left in it (person data 0x5B), then by neighbor id.
 void Game::drawHousehold(std::uint64_t now) {
     householdShown_ = true;
     householdDrawn_ = lotLife_->household();
@@ -1720,6 +1842,13 @@ void Game::drawHousehold(std::uint64_t now) {
         auto portrait = app::drawPortrait(lot_, renderer_, lotLife_->animations(), static_cast<std::uint32_t>(id), poseRandom);
         members.push_back({id, portrait ? std::move(portrait) : lotLife_->portrait(id)});
     }
+    const auto age = [&](std::int16_t sim) {
+        const auto data = lotLife_->personData(sim);
+        const int stage = data.size() > kLifeStage ? data[kLifeStage] : 0;
+        const int daysLeft = data.size() > kAgeDaysLeft ? data[kAgeDaysLeft] : 0;
+        return std::tuple(-stage, daysLeft, lotLife_->neighborId(sim));
+    };
+    std::stable_sort(members.begin(), members.end(), [&](const auto& a, const auto& b) { return age(a.sim) < age(b.sim); });
     renderer_.show(ts2::scene::visibleInstances(lot_, lotView_.view));
     lotUi_.showHousehold(std::move(members));
     ts2::diag::step("household portraits drawn");
@@ -1741,6 +1870,9 @@ void Game::sendLotChanges() {
     }
     for (const std::size_t instance : lotLife_->relitInstances()) {
         renderer_.setLights(lot_, instance);
+    }
+    for (const std::size_t instance : lotLife_->shapeColored()) {
+        renderer_.setShapeColor(instance, lot_.instances[instance].shapeColor);
     }
     if (!lotLife_->changedMaterials().empty()) {
         renderer_.addMaterials(lot_);
@@ -1797,6 +1929,7 @@ void Game::run() {
         lotLeft_.releaseSome(32);
         // The lot's panels load while the lot does, in a frame of their own.
         if (loading(lotBuilding_)) {
+            lotUi_.setTestingCheats(cheats_.testingCheats());
             lotUi_.load();
         }
         if (auto done = finished(lotBuilding_, "lot")) {
@@ -1809,6 +1942,7 @@ void Game::run() {
         }
         cursors_.setBusy(loadingScene());
         cursors_.animate(static_cast<double>(now) / 1e9);
+        cheatConsole_.tick(screen_, now / 1'000'000);
         if (clickedTile_ && now - tileClickedAt_ > kDoubleClickNs) {
             chosen_ = *clickedTile_;
             clickedTile_.reset();
@@ -1818,6 +1952,7 @@ void Game::run() {
             updateLot(now);
         } else if (inNeighborhood_) {
             // A picture is taken without the drift, so the same view gives the same picture.
+            orbit_.keysTaken = cheatConsole_.takesKeys();
             app::orbitStep(orbit_, std::min(0.1f, static_cast<float>(now - lastFrame_) / 1e9f), width_, height_, [this] {
                 if (hoodDrift_ && options_.shot.empty()) {
                     app::applyDrift(orbit_, hoodDrift_->step(orbit_.target, 1.0f / 120));
@@ -1878,6 +2013,60 @@ void Game::handleEvent(const pf::Event& e) {
     if (e.type == pf::Event::Type::KeyUp && (key == pf::Key::Comma || key == pf::Key::Period)) {
         orbit_.turnKeys[key == pf::Key::Comma ? 0 : 1] = false;
     }
+    // Ctrl+Shift+C opens and closes the cheat window in the lot and the neighborhood ("Toggle Cheat
+    // Entry Window" in the game's keys for most modes). The window takes the keyboard while its text field has it.
+    if (e.type == pf::Event::Type::KeyDown && !e.repeat && e.key == pf::Key::C && e.ctrl && e.shift && !e.alt && (inLot_ || inNeighborhood_)) {
+        cheatConsole_.toggle(screen_, uiWidth_);
+        keepBabyNameTyping();
+        return;
+    }
+    // A mouse press anywhere takes the keyboard from the cheat window unless it is in its text field,
+    // and a press on its bar goes no further. While its scroll bar is held it takes the mouse.
+    if ((e.type == pf::Event::Type::MouseMotion || e.type == pf::Event::Type::MouseUp) && cheatConsole_.holdsMouse()) {
+        float mx = 0, my = 0;
+        pf::mousePosition(mx, my);
+        const auto [ux, uy] = toUi(mx, my);
+        if (e.type == pf::Event::Type::MouseMotion) {
+            cheatConsole_.mouseMove(screen_, ux, uy);
+        } else {
+            cheatConsole_.mouseUp(screen_, ux, uy);
+        }
+        return;
+    }
+    if (e.type == pf::Event::Type::MouseDown && cheatConsole_.isOpen()) {
+        float mx = 0, my = 0;
+        pf::mousePosition(mx, my);
+        const auto [ux, uy] = toUi(mx, my);
+        const bool onBar = cheatConsole_.mouseDown(screen_, ux, uy, e.button == pf::MouseButton::Left, ts2::platform::ticksNs() / 1'000'000);
+        keepBabyNameTyping();
+        if (onBar) {
+            return;
+        }
+    }
+    if (e.type == pf::Event::Type::MouseWheel && cheatConsole_.isOpen()) {
+        float mx = 0, my = 0;
+        pf::mousePosition(mx, my);
+        const auto [ux, uy] = toUi(mx, my);
+        // Three lines a notch, the wheel's usual step.
+        if (cheatConsole_.scroll(screen_, ux, uy, static_cast<int>(std::lround(e.wheel * 3)))) {
+            return;
+        }
+    }
+    if (cheatConsole_.takesKeys() && (e.type == pf::Event::Type::Text || e.type == pf::Event::Type::KeyDown || e.type == pf::Event::Type::KeyUp)) {
+        if (e.type == pf::Event::Type::Text) {
+            cheatConsole_.text(screen_, e.text);
+        } else if (e.type == pf::Event::Type::KeyDown) {
+            std::optional<ts2::sim::CheatLot> lot;
+            if (lotLife_) {
+                lot.emplace(lotLife_->simulation().world(), lotLife_->simulation().globals());
+            }
+            cheatConsole_.key(screen_, e.key, lot ? &*lot : nullptr);
+            keepBabyNameTyping();
+        } else if (freeCam_) {
+            freeCam_->key(e.scancode, false);
+        }
+        return;
+    }
     // The naming dialog takes the keyboard while it is open. Keys let go still stop the camera's
     // turn above and the free camera's moves, so none goes on after the dialog.
     if (babyNames_.isOpen() && e.type != pf::Event::Type::Quit && e.type != pf::Event::Type::MouseMotion &&
@@ -1909,8 +2098,13 @@ void Game::handleEvent(const pf::Event& e) {
         ts2::diag::step("window closed");
         running_ = false;
     } else if (e.type == pf::Event::Type::KeyDown && inLot_ && pieMenu_.isOpen()) {
-        // Any key, Escape too, closes an open pie menu. Escape does nothing else in the game.
-        pieMenu_.close();
+        // As in the game, Tab shows the next page as "More..." does, Shift does nothing, and any other
+        // key, Escape too, closes an open pie menu. Escape does nothing else there.
+        if (e.key == pf::Key::Tab) {
+            pieMenu_.tab();
+        } else if (e.key != pf::Key::Shift) {
+            pieMenu_.close();
+        }
     } else if (e.type == pf::Event::Type::KeyDown && !e.repeat && inNeighborhood_ && !neighborhoodCovered() && e.key == pf::Key::Q) {
         openQuitBox();  // Q asks to quit in the neighborhood too
     } else if (e.type == pf::Event::Type::KeyDown && inLot_) {
@@ -1963,6 +2157,10 @@ void Game::mouseEvent(const pf::Event& e) {
 }
 
 void Game::windowClicked(int window) {
+    if (const auto button = errorBox_.clicked(screen_, window)) {
+        answerObjectError(*button);
+        return;
+    }
     if (const auto answer = quitBox_.clicked(screen_, window)) {
         // On the save question No quits too, and Yes saves first in the game. Saving isn't done yet.
         const bool quit = *answer == app::QuitBox::Answer::Yes || (*answer == app::QuitBox::Answer::No && quitBox_.asksSave());
@@ -1996,7 +2194,8 @@ void Game::showSprites(double seconds, bool scene) {
     for (const int t : screen_.takeChangedTextures()) {
         unsent_.insert(t);
     }
-    auto shown = sprites(screen_, seconds, uiScale_);
+    thread_local std::vector<ts2::render::Sprite> shown;
+    sprites(screen_, seconds, uiScale_, shown);
     std::vector<int> send;
     for (const auto& sprite : shown) {
         if (unsent_.erase(sprite.texture)) {
@@ -2019,7 +2218,7 @@ void Game::showSprites(double seconds, bool scene) {
     }
     renderer_.setSprites(upload);
     renderer_.setSpriteScale(uiScale_);
-    renderer_.showSprites(std::move(shown), scene);
+    renderer_.showSprites(shown, scene);
 }
 
 // A frame that took long is what a tester sees as a stutter: where it happened, at most one line
@@ -2158,6 +2357,11 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
     ts2::diag::info("loading the game's UI");
     ts2::content::UiData data(install);
     ts2::ui::Fonts fonts(install);
+    // The cheat window's output asks Windows for a typewriter font, as the game's does. Lucida
+    // Console at 10 pixels has the game's character width.
+    if (const auto system = ts2::paths::systemFontsFolder(); !system.empty()) {
+        (void)fonts.addStyle("CheatConsole = \"Lucida Console\", \"10\", \"\", 0x00000000", system / "lucon.ttf");
+    }
     ts2::diag::info(std::format("{} UI and text packages, {} font faces", data.packageCount(), fonts.faceCount()));
 
     const int width = options.width, height = options.height;

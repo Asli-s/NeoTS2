@@ -75,7 +75,7 @@ Interaction readInteraction(BinaryReader& r, std::uint32_t version) {
     readSettings(r, in, version);
     if (version >= 0x45) in.value1 = r.u16();
     if (version >= 0x46) in.value2 = r.u32();
-    if (version > 0x49) in.value3 = r.f32();
+    if (version > 0x49) in.memoryMultiplier = r.f32();
     if (version > 0x4B) {
         in.iconGuid = r.u32();
         in.iconIndex = r.u32();

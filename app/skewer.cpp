@@ -55,6 +55,8 @@ void Skewer::attach(ts2::ui::Screen& screen, int puck) {
     moodGradient_ = screen.data().image(kImages, kMoodGradient).value_or(ts2::tga::Pixels{});
     backgroundShape_ = screen.data().image(kImages, kBackgroundPicture).value_or(ts2::tga::Pixels{});
     screen.setVisible(skewer_, false);
+    // The game takes the skewer out of the puck and shows it beside the puck, just under it.
+    screen.detach(skewer_, puck);
 }
 
 void Skewer::setHousehold(std::vector<Member> members) {
@@ -160,12 +162,12 @@ void Skewer::layout() {
     if (n == 0) {
         return;
     }
-    // The thumbnails stand in a column under the cap, the first one at the bottom.
+    // The thumbnails stand in a column under the cap, the first one at the top.
     const int capHeight = s.height(s.find(skewer_, kCap));
     const int step = s.height(thumbnails_[0].window) + spacer_;
     const int top = capHeight + topMargin_;
     for (int i = 0; i < n; ++i) {
-        s.move(thumbnails_[static_cast<std::size_t>(i)].window, offsetX_, top + (n - 1 - i) * step);
+        s.move(thumbnails_[static_cast<std::size_t>(i)].window, offsetX_, top + i * step);
     }
     // The tile runs behind them, the connector joins it to the puck.
     const int tile = s.find(skewer_, kTile);
@@ -179,7 +181,7 @@ void Skewer::layout() {
     const int height = tileBottom + s.height(connector);
     s.resize(skewer_, s.width(skewer_), height);
     const int anchor = s.find(puck_, kAnchor);
-    s.move(skewer_, s.x(anchor), s.y(anchor) + s.height(anchor) - height);
+    s.move(skewer_, s.x(puck_) + s.x(anchor), s.y(puck_) + s.y(anchor) + s.height(anchor) - height);
 }
 
 } // namespace app

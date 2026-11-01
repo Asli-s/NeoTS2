@@ -12,6 +12,10 @@ namespace ts2::sim {
 float compassHeading(int direction);
 // The compass direction nearest a heading, as the game rounds it.
 std::int16_t compassDirection(float heading);
+// The heading a standing or walking Sim is drawn at: the compass direction nearest its heading, an
+// exact half going to the lower one. The game turns a Sim's drawn place only in eighth turns, and
+// its walk and turn clips play turned by the rest, so the body still faces its own heading.
+float drawnHeading(float heading);
 // Into (-pi, pi].
 float wrapAngle(float angle);
 // To the nearest multiple of 45 degrees: where a turn ends.
@@ -59,7 +63,7 @@ struct WalkTurnClips {
 std::string stepInPlaceClip(std::int16_t lifeStage);
 
 // The walk a Sim plays while it routes, and the pose it ends in, by life stage (person data 0x3A)
-// and gender (0x41, 1 female): the plain walk of each age (elders take the adults' as for turns).
+// and gender (0x41, 1 female): the plain walk of each age. Elders have their own walks but take the adults' turns.
 // Empty for babies.
 std::string walkClip(std::int16_t lifeStage, std::int16_t gender);
 // The short walk loop mixed with it to shorten its stride (empty for babies).
@@ -68,7 +72,11 @@ std::string walkShortClip(std::int16_t lifeStage, std::int16_t gender);
 // the two plain walks, 2 sexy, 3 pregnant, 4 happy, 5 depressed, 6 angry, 7 skip, 8 sneak, 10 hot
 // sand. Toddlers have the plain walk only. Empty when the set has no such style.
 std::string walkStyleClip(std::int16_t lifeStage, std::int16_t gender, int style, bool shortOne);
+// The pose a walk settles into. Elders have their own, teens use the adults'.
 std::string walkPoseClip(std::int16_t lifeStage);
+// The adults' clip an elder's clip ("e-...") stands in for when the game has no elder one, as the
+// walk set falls back. Empty for any other name.
+std::string adultClipFor(const std::string& name);
 
 // A Turn Body Towards in progress (which instruction runs it, and its first steps).
 struct Turning {

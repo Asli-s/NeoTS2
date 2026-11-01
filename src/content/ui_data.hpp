@@ -30,6 +30,9 @@ public:
     // 1, of string table (value >> 16) in the text package with that group, in `language` (1 is US
     // English). Empty when there is none.
     std::string text(std::uint32_t group, std::uint32_t value, std::uint8_t language = 1);
+    // Every string of string table `instance` in the text package with that group, in `language`
+    // (US English when the table has none of it). Empty when there is no such table.
+    std::vector<std::string> texts(std::uint32_t group, std::uint32_t instance, std::uint8_t language = 1);
 
     std::size_t packageCount() const { return index_.packageCount(); }
 

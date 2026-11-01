@@ -106,6 +106,7 @@ struct Orbit {
     Vec3 keyOffset{0, 0, 0};
     bool keyScrolling = false;
     bool keysOn = true;  // off while a menu over the view takes the keys
+    bool keysTaken = false;  // a text box being typed into has the keyboard
     // Where the pitch sits between the rig's minimum and maximum pitch at this zoom (0 to 1), and
     // where it is easing to.
     float pitchBlend = 0, pitchBlendGoal = 0;
@@ -351,7 +352,7 @@ inline bool orbitEvent(Orbit& orbit, const ts2::platform::Event& e) {
 inline void orbitGameStep(Orbit& orbit, unsigned ms, int width, int height) {
     using ts2::platform::Key;
     using ts2::platform::keyHeld;
-    const auto held = [&](Key a, Key b) { return orbit.keysOn && (keyHeld(a) || keyHeld(b)); };
+    const auto held = [&](Key a, Key b) { return orbit.keysOn && !orbit.keysTaken && (keyHeld(a) || keyHeld(b)); };
     const int right = held(Key::D, Key::Right) - held(Key::A, Key::Left);
     const int down = held(Key::S, Key::Down) - held(Key::W, Key::Up);
     easeToward(orbit.keyOffset, {static_cast<float>(right) * orbit.keySpeed, static_cast<float>(down) * orbit.keySpeed, 0}, ms, orbit.keyPeriod,
@@ -364,7 +365,7 @@ inline void orbitGameStep(Orbit& orbit, unsigned ms, int width, int height) {
         orbit.keyScrolling = false;
     }
     const bool holdZoom = !orbit.lotKeys;
-    const int zoom = !orbit.keysOn ? 0 : (holdZoom && (keyHeld(Key::X) || keyHeld(Key::Minus) || keyHeld(Key::PadMinus))) -
+    const int zoom = !orbit.keysOn || orbit.keysTaken ? 0 : (holdZoom && (keyHeld(Key::X) || keyHeld(Key::Minus) || keyHeld(Key::PadMinus))) -
                      (keyHeld(Key::Equals) || (holdZoom && (keyHeld(Key::Z) || keyHeld(Key::PadPlus))));
     if (zoom != 0) {
         // What the main row's = does in the game, and the neighborhood camera's zoom keys, are not
@@ -378,7 +379,7 @@ inline void orbitGameStep(Orbit& orbit, unsigned ms, int width, int height) {
         orbit.freeZoom = true;
     }
     if (orbit.lotKeys) {
-        const int keys = orbit.keysOn ? orbit.turnKeys[1] - orbit.turnKeys[0] : 0;
+        const int keys = orbit.keysOn && !orbit.keysTaken ? orbit.turnKeys[1] - orbit.turnKeys[0] : 0;
         const int turn = std::clamp(keys + orbit.puckTurn, -1, 1);
         easeToward(orbit.turnKeyOffset, static_cast<float>(turn) * orbit.turnKeySpeed, ms, orbit.turnKeyPeriod, orbit.turnKeyMinChange);
         if (orbit.turnKeyOffset != 0) {
@@ -421,7 +422,9 @@ inline void orbitGameStep(Orbit& orbit, unsigned ms, int width, int height) {
     if (orbit.subject) {
         followSubject(orbit, width, height);
     }
-    easeToward(orbit.target, *orbit.goal, ms, 7, orbit.minChange);
+    // Smooth follow eases with no least step. The least step (2 cm in live mode) is more than a
+    // walking Sim moves in a step, so the camera would catch up in jumps and buzz.
+    easeToward(orbit.target, *orbit.goal, ms, 7, orbit.subject && orbit.smoothFollow ? 0.0f : orbit.minChange);
 }
 
 // Moves the camera by the keys held for `dt` seconds (WASD or arrows pan, Z/X or +/- zoom) and
@@ -447,7 +450,7 @@ inline void orbitStep(Orbit& orbit, float dt, int width = 0, int height = 0, con
         return;
     }
     using ts2::platform::Key;
-    using ts2::platform::keyHeld;
+    const auto keyHeld = [&](Key k) { return !orbit.keysTaken && ts2::platform::keyHeld(k); };
     const float step = orbit.distance * 0.8f * dt;
     const int right = (keyHeld(Key::D) || keyHeld(Key::Right)) - (keyHeld(Key::A) || keyHeld(Key::Left));
     const int up = (keyHeld(Key::W) || keyHeld(Key::Up)) - (keyHeld(Key::S) || keyHeld(Key::Down));

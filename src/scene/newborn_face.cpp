@@ -21,7 +21,8 @@ constexpr std::uint32_t kFaceRegion = 0x8C93BF6C, kFaceInfo = 0x46414345;
 constexpr std::uint32_t kShpe = 0xFC6EB1F7, kGmnd = 0x7BA3838C, kGmdc = 0xAC4F8687;
 constexpr std::uint32_t kBabyAgeFlag = 0x20;
 
-// The first mesh a shape draws.
+} // namespace
+
 std::optional<sg::Mesh> shapeMesh(Assets& assets, const sg::Link& link) {
     const auto shpe = assets.byKey(link);
     if (!shpe) {
@@ -46,16 +47,15 @@ std::optional<sg::Mesh> shapeMesh(Assets& assets, const sg::Link& link) {
     return std::nullopt;
 }
 
-// The baby face's region masks (face region property sets for babies), by region name. A mask
-// point's weight is its vertex colour's alpha.
-FaceMasks babyMasks(Assets& assets) {
+// A mask point's weight is its vertex colour's alpha.
+FaceMasks faceRegionMasks(Assets& assets, std::uint32_t age) {
     FaceMasks masks;
     assets.forEachSkinResource(kFaceRegion, [&](const sg::Link& key, const std::vector<std::uint8_t>& bytes) {
         try {
             const auto p = propset::parse(bytes);
             const auto name = p.find("name");
-            const auto age = p.find("age");
-            if (name == p.end() || age == p.end() || !(std::strtoul(age->second.c_str(), nullptr, 10) & kBabyAgeFlag) ||
+            const auto ages = p.find("age");
+            if (name == p.end() || ages == p.end() || !(std::strtoul(ages->second.c_str(), nullptr, 10) & age) ||
                 masks.contains(name->second)) {
                 return;
             }
@@ -75,11 +75,13 @@ FaceMasks babyMasks(Assets& assets) {
                 break;
             }
         } catch (const std::exception& ex) {
-            diag::warnOnce(std::string("newborn face: a face region that can't be read is left out: ") + ex.what());
+            diag::warnOnce(std::string("face: a face region that can't be read is left out: ") + ex.what());
         }
     });
     return masks;
 }
+
+namespace {
 
 // The face pairs, in the order the blend takes their regions (FaceInfo).
 std::vector<FacePair> facePairs(Assets& assets) {
@@ -111,7 +113,7 @@ void blend(Assets& assets, sg::Mesh& mesh, Blend& from) {
     }
     auto& data = *from.data;
     if (!data.masks) {
-        data.masks = babyMasks(assets);
+        data.masks = faceRegionMasks(assets, kBabyAgeFlag);
         data.pairs = facePairs(assets);
     }
     blendBabyFace(mesh, from.a, from.b, from.picks, *data.masks, data.pairs);

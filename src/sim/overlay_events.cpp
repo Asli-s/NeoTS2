@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -12,6 +13,19 @@ namespace ts2::sim {
 namespace {
 // Clips mark a handful of events. More than this in one clip is a broken file.
 constexpr std::size_t kMaxEventsPerClip = 64;
+const std::vector<AnimationEvent> kNoEvents;
+
+// Counts as told the marks a clip restored from a save had played past before it was loaded.
+void skipRestoredEvents(std::optional<double>& restoredAtMs, std::size_t& told, const std::vector<AnimationEvent>& marks,
+                        double startMs, double speed) {
+    if (!restoredAtMs) {
+        return;
+    }
+    while (told < marks.size() && startMs + marks[told].timeMs / speed <= *restoredAtMs) {
+        ++told;
+    }
+    restoredAtMs.reset();
+}
 } // namespace
 
 void tellOverlayEvents(World& world, Vm& vm, std::int16_t id, const std::function<void(const RunResult&)>& onStop, double now) {
@@ -36,19 +50,21 @@ void tellOverlayEvents(World& world, Vm& vm, std::int16_t id, const std::functio
             onStop(r);
         }
     };
-    // Events can start or drop overlays, so each overlay playing now is looked up again by its start
-    // and name before anything is done with it.
-    std::vector<std::pair<double, std::string>> playing;
-    for (const auto& o : object->overlays) {
-        playing.emplace_back(o.startMs, o.name);
+    // Events can start or drop overlays, so each overlay playing now is numbered and looked up again by
+    // its number before anything is done with it. Overlays started by an event are numbered 0.
+    // Kept between calls so it reuses its storage. Event trees don't tell events themselves.
+    thread_local std::vector<std::uint32_t> playing;
+    playing.clear();
+    for (auto& o : object->overlays) {
+        o.serial = static_cast<std::uint32_t>(playing.size() + 1);
+        playing.push_back(o.serial);
     }
-    auto find = [&](const std::pair<double, std::string>& key) -> PlayingOverlay* {
+    auto find = [&](std::uint32_t key) -> PlayingOverlay* {
         object = world.find(id);
         if (object == nullptr) {
             return nullptr;
         }
-        const auto it = std::find_if(object->overlays.begin(), object->overlays.end(),
-                                     [&](const PlayingOverlay& p) { return p.startMs == key.first && p.name == key.second; });
+        const auto it = std::find_if(object->overlays.begin(), object->overlays.end(), [&](const PlayingOverlay& p) { return p.serial == key; });
         return it != object->overlays.end() ? &*it : nullptr;
     };
     for (const auto& key : playing) {
@@ -69,13 +85,32 @@ void tellOverlayEvents(World& world, Vm& vm, std::int16_t id, const std::functio
         const double length = found->lengthMs;
         const auto percent = static_cast<std::int16_t>(length > 0 ? std::clamp(100.0 * played / length, 0.0, 100.0) : 100.0);
         const double blendOut = found->blendOutMs.value_or(kOverlayBlendMs);
-        if (!found->blendingOut && played >= length - blendOut) {
-            found->blendingOut = true;
-            tell(PlayingOverlay(*found), kBlendingOutEvent, percent, found->startMs + length - blendOut);
-            found = find(key);
-            if (found == nullptr) {
-                continue;
+        // The clip's own SimAntics events and the blending-out event, in the order they come, the clip's
+        // own first where two come at once. An overlay played more than once tells only its fades, as
+        // whether its clip's events come again each play is not known yet.
+        const auto& marks = found->plays == 1 && world.animationEvents() ? world.animationEvents()(found->name) : kNoEvents;
+        const double speed = std::abs(found->speed) > 0 ? std::abs(found->speed) : 1.0;
+        const double start = found->startMs;
+        skipRestoredEvents(found->restoredAtMs, found->eventsTold, marks, start, speed);
+        for (std::size_t told = 0; found != nullptr && told < kMaxEventsPerClip; ++told) {
+            constexpr double kNever = std::numeric_limits<double>::infinity();
+            const double markAt = found->eventsTold < marks.size() ? start + marks[found->eventsTold].timeMs / speed : kNever;
+            const double blendOutAt = found->blendingOut ? kNever : start + length - blendOut;
+            if (std::min(markAt, blendOutAt) > now) {
+                break;
             }
+            if (markAt <= blendOutAt) {
+                const auto event = static_cast<std::int16_t>(marks[found->eventsTold].id);
+                ++found->eventsTold;
+                tell(PlayingOverlay(*found), event, percent, markAt);
+            } else {
+                found->blendingOut = true;
+                tell(PlayingOverlay(*found), kBlendingOutEvent, percent, blendOutAt);
+            }
+            found = find(key);
+        }
+        if (found == nullptr) {
+            continue;
         }
         if (played >= length) {
             const PlayingOverlay ended = *found;
@@ -95,21 +130,33 @@ void tellAnimateSimEvents(World& world, Vm& vm, std::int16_t id, const std::func
         }
         // The clip that ended its wait plays on as it fades out, and its last events still come.
         PlayingAnimation* clip = nullptr;
-        std::vector<AnimationEvent> events;
+        std::int16_t event = 0;
         double at = 0;
         for (auto* candidate : {object->ending ? &*object->ending : nullptr, object->animation ? &*object->animation : nullptr}) {
             if (candidate == nullptr || candidate->eventTree == 0) {
                 continue;
             }
-            auto list = world.animationEvents()(candidate->name);
-            if (candidate->eventsTold >= list.size()) {
-                continue;
-            }
+            // Its next event, the clip's own marks first where two come at once.
+            const auto& list = world.animationEvents()(candidate->name);
             const double speed = std::abs(candidate->speed) > 0 ? std::abs(candidate->speed) : 1.0;
-            const double when = candidate->startMs + list[candidate->eventsTold].timeMs / speed;
+            const double end = candidate->startMs + candidate->lengthMs;
+            skipRestoredEvents(candidate->restoredAtMs, candidate->eventsTold, list, candidate->startMs, speed);
+            std::int16_t next = 0;
+            double when = std::numeric_limits<double>::infinity();
+            if (candidate->eventsTold < list.size()) {
+                next = static_cast<std::int16_t>(list[candidate->eventsTold].id);
+                when = candidate->startMs + list[candidate->eventsTold].timeMs / speed;
+            }
+            if (candidate->tellsEnd && candidate->endEventsTold == 0 && end - candidate->fadeOutMs < when) {
+                next = kBlendingOutEvent;
+                when = end - candidate->fadeOutMs;
+            } else if (candidate->tellsEnd && candidate->endEventsTold == 1 && end < when) {
+                next = kBlendedOutEvent;
+                when = end;
+            }
             if (when <= now) {
                 clip = candidate;
-                events = std::move(list);
+                event = next;
                 at = when;
                 break;
             }
@@ -118,19 +165,31 @@ void tellAnimateSimEvents(World& world, Vm& vm, std::int16_t id, const std::func
             return;
         }
         PlayingAnimation& a = *clip;
-        const AnimationEvent& e = events[a.eventsTold];
-        ++a.eventsTold;
+        if (event == kBlendingOutEvent) {
+            a.endEventsTold = 1;
+        } else if (event == kBlendedOutEvent) {
+            a.endEventsTold = 2;
+        } else {
+            ++a.eventsTold;
+        }
         const double played = now - a.startMs;
         const auto percent = static_cast<std::int16_t>(a.lengthMs > 0 ? std::clamp(100.0 * played / a.lengthMs, 0.0, 100.0) : 100.0);
-        const std::array<std::int16_t, 5> args{static_cast<std::int16_t>(e.id), a.eventStackObject, percent, 1, 0};
         const std::uint32_t owner = a.eventCodeOwner;
         const std::uint16_t tree = a.eventTree;
         const std::int16_t stackObject = a.eventStackObject;
-        world.setEventClock(std::min(at, now));
-        const RunResult r = vm.runEvent(*object, owner, tree, stackObject, args, true);
-        world.setEventClock(std::nullopt);
-        if (r.outcome != Outcome::True && r.outcome != Outcome::False) {
-            onStop(r);
+        // The end comes as two events, one after the other.
+        for (const std::int16_t sent : {event, event == kBlendedOutEvent ? kEndEvent : std::int16_t{0}}) {
+            object = world.find(id);
+            if (sent == 0 || object == nullptr) {
+                break;
+            }
+            const std::array<std::int16_t, 5> args{sent, stackObject, percent, 1, 0};
+            world.setEventClock(std::min(at, now));
+            const RunResult r = vm.runEvent(*object, owner, tree, stackObject, args, true);
+            world.setEventClock(std::nullopt);
+            if (r.outcome != Outcome::True && r.outcome != Outcome::False) {
+                onStop(r);
+            }
         }
     }
 }

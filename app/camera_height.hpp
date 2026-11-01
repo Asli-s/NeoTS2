@@ -50,14 +50,23 @@ public:
         const float share = farthest - nearest < 0.001f ? 0.0f : 1 - (zoom - nearest) / (farthest - nearest);
         float z = lotHeightAt(goal[0], goal[1], under_) * share;
         goal[2] = toWorldZ(goal[0], goal[1], z);
-        // The camera as it will be once it reaches its goals.
-        Orbit settled = orbit;
-        settled.previous.reset();
-        settled.target = goal;
-        settled.yaw = orbit.yawGoal;
-        settled.pitchBlend = orbit.pitchBlendGoal;
-        settled.zoomTo(orbit.distanceGoal);
-        const auto camera = settled.camera();
+        // The camera as it will be once it reaches its goals, worked out on the orbit itself and put
+        // back, as a copy would copy its camera settings every frame.
+        const auto previous = orbit.previous;
+        const Vec3 target = orbit.target;
+        const float yaw = orbit.yaw, pitchBlend = orbit.pitchBlend, distance = orbit.distance, pitch = orbit.pitch;
+        orbit.previous.reset();
+        orbit.target = goal;
+        orbit.yaw = orbit.yawGoal;
+        orbit.pitchBlend = orbit.pitchBlendGoal;
+        orbit.zoomTo(orbit.distanceGoal);
+        const auto camera = orbit.camera();
+        orbit.previous = previous;
+        orbit.target = target;
+        orbit.yaw = yaw;
+        orbit.pitchBlend = pitchBlend;
+        orbit.distance = distance;
+        orbit.pitch = pitch;
         Vec3 ahead = {goal[0] - camera.eye[0], goal[1] - camera.eye[1], goal[2] - camera.eye[2]};
         const float length = std::sqrt(ahead[0] * ahead[0] + ahead[1] * ahead[1] + ahead[2] * ahead[2]);
         if (length > 0) {

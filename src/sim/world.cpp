@@ -21,6 +21,7 @@ SimObject& World::create(std::uint32_t group, objd::ObjectDefinition definition,
     object->arrays.resize(object->definition.field(kObjectArrayCountField));
     object->arrayIterators.resize(object->arrays.size(), 0);
     object->slots.resize(containerSlots, 0);
+    object->data[kSlotCountField] = static_cast<std::int16_t>(std::min<std::size_t>(containerSlots, INT16_MAX));
 
     SimObject& ref = *object;
     objects_.emplace(ref.id, std::move(object));
@@ -66,6 +67,20 @@ SimObject* World::findIncludingRemoved(std::int16_t id) {
 }
 
 void World::remove(SimObject& object) {
+    removeOne(object);
+    const auto isPart = [](const SimObject& o) {
+        return o.definition.field(objd::field::kMultiTileMasterId) != 0 && !o.definition.isMultiTileMaster() && o.data[kLeadTileField] > 0;
+    };
+    if (!isPart(object)) {
+        return;
+    }
+    const std::int16_t lead = object.data[kLeadTileField];
+    for (const std::int16_t id : idsIncludingRemoved([&](const SimObject& o) { return !o.removed && isPart(o) && o.data[kLeadTileField] == lead; })) {
+        removeOne(*byId_[static_cast<std::size_t>(id)]);
+    }
+}
+
+void World::removeOne(SimObject& object) {
     if (object.keptUntilUnload) {
         object.keptUntilUnload = false;
         --keptCount_;
@@ -119,6 +134,23 @@ void World::markFootprintChanged(std::int16_t id) {
             other->data[kLeadField] == lead) {
             footprintChanges_.insert(otherId);
         }
+    }
+}
+
+std::uint32_t SimObject::OutfitChange::categoryFlag() const {
+    switch (category) {
+    case 1: return 0x80;
+    case 2: return 0x08;
+    case 3: return 0x200;
+    case 4: return 0x20;
+    case 5: return 0x10;
+    case 6: return 0x400;
+    case 8: return 0x100;
+    case 9: return 0x02;
+    case 10: return 0x04;
+    case 11: return 0x40;
+    case 13: return 0x1000;
+    default: return 0x01;
     }
 }
 
@@ -424,6 +456,19 @@ void World::showNextNames() {
     const auto next = std::ranges::find_if(nameRequests_, [](const NameRequest& r) { return r.state == NameRequest::State::Waiting; });
     if (next != nameRequests_.end()) {
         next->state = NameRequest::State::Shown;
+    }
+}
+
+void World::markShiftClick(SimObject& object, bool shift) {
+    object.shiftClicked = shift;
+    const std::int16_t lead = object.data[0x13];
+    if (lead == 0) {
+        return;
+    }
+    for (const auto& [id, other] : objects_) {
+        if (id == lead || other->data[0x13] == lead) {
+            other->shiftClicked = shift;
+        }
     }
 }
 

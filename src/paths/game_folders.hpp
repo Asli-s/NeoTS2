@@ -54,6 +54,9 @@ std::vector<std::filesystem::path> originalSaveFolderNames();
 // folders. Empty off Windows.
 std::filesystem::path eaGamesFolder();
 
+// The system's fonts folder, where the game's Windows fonts come from. Empty off Windows.
+std::filesystem::path systemFontsFolder();
+
 // The deepest folder that holds all of the given folders, or empty when they share none
 // (for example, folders on two drives).
 std::filesystem::path commonFolder(const std::vector<std::filesystem::path>& folders);

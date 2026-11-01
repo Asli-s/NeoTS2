@@ -294,6 +294,18 @@ std::optional<ts2::sim::PieChoice> PieMenuUi::mouse(int x, int y, Mouse what) {
     return std::nullopt;
 }
 
+void PieMenuUi::tab() {
+    if (!isOpen()) {
+        return;
+    }
+    if (!page_.more) {
+        close();
+        return;
+    }
+    levels_.back().first = page_.next;
+    show(levels_.back());
+}
+
 std::optional<std::size_t> PieMenuUi::entryOf(std::size_t item) const {
     if (page_.more && item == 0) {
         return std::nullopt;

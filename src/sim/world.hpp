@@ -60,6 +60,8 @@ constexpr std::size_t kObjectIdField = 0x0B;
 constexpr std::size_t kLeadTileField = 0x13;
 // Number of object arrays a new object has.
 constexpr std::size_t kObjectArrayCountField = objd::field::kObjectArrayCount;
+// Object data 0x43, the number of container slots the object has (a car's passenger seats count).
+constexpr std::size_t kSlotCountField = 0x43;
 constexpr std::uint16_t kPersonType = 2;
 
 struct Frame {
@@ -88,6 +90,9 @@ struct Frame {
     bool dialogOpen = false;
     // The Make New Character at pc made children and waits for them to be built.
     bool childrenPending = false;
+    // Ticks a Generic Sims Call 0x1D in this frame may still wait for a character to load, below 0 for
+    // no end. None until one first runs. Like the game's, it carries on to the next 0x1D in the frame.
+    std::optional<std::int16_t> characterWaits;
     // How far the Camera Control at pc has got (0 not started).
     std::uint8_t cameraStep = 0;
     // The frame runs the Sim's current interaction, which ends when it returns.
@@ -149,6 +154,14 @@ struct InteractionIcon {
     std::int16_t object = 0;
     std::uint32_t guid = 0;
     std::uint32_t index = 0;
+};
+
+// One of autonomy's picks a Sim remembers: the line `interaction` (its id) on `object` (a multi-tile
+// object's lead) until the tick `until`.
+struct AutonomyMemory {
+    std::int16_t object = 0;
+    std::uint16_t interaction = 0;
+    std::uint64_t until = 0;
 };
 
 // An interaction waiting in a Sim's queue: interaction `index` of an object's interaction table.
@@ -235,6 +248,9 @@ struct SimObject {
     std::string actionString;
     // Who the interaction it runs is with (see QueuedInteraction::partner). Not saved yet.
     std::int16_t interactionPartner = 0;
+    // Object flag 0x2000: Shift was held at the last hover or click on it (or another part with the same
+    // lead, object data 0x13). With testingCheatsEnabled on, its lines that start are only debug lines.
+    bool shiftClicked = false;
     std::uint32_t actionIconGuid = 0;
     std::uint32_t actionIconIndex = 0;
     std::int16_t actionIconObject = 0;
@@ -264,6 +280,8 @@ struct SimObject {
     bool inViewStale = true;
     // The tick a Sim last looked for something to do by itself (Find Best Interaction runs once a tick).
     std::optional<std::uint64_t> autonomyTick;
+    // Autonomy's recent picks (see findBestInteraction). Not saved yet.
+    std::vector<AutonomyMemory> autonomyMemory;
     // Script data tables (ObjectDataTable).
     DataTables dataTables;
     // The object's own token, which Manage Inventory copies tokens into and out of, and where the
@@ -287,13 +305,20 @@ struct SimObject {
     std::int32_t y = kOffLot;
     std::int32_t level = 1;  // 1 = ground
     ThreadState thread;
-    // The outfit Change Outfit last asked a Sim to wear: a category (in the scripts' numbering, as
-    // person data 0x08 "Current Outfit" keeps it) and, when given, the GUID of the outfit's source.
+    // The outfit Change Outfit last put on a Sim, for the scene to draw: a category (in the scripts'
+    // numbering, as person data 0x08 "Current Outfit" keeps it) and, when given, the GUID of the
+    // outfit's source.
     struct OutfitChange {
         std::int16_t category = 0;
         std::optional<std::uint32_t> sourceGuid;
+        // The category flag the game gives the outfit number, as age data keys its lists: 1
+        // everyday for 0, 7, 12 and any number it doesn't know.
+        std::uint32_t categoryFlag() const;
     };
     std::optional<OutfitChange> outfitChange;
+    // The age Age last gave a Sim, for the scene to build its new body: 1 toddler, 2 child, 4 teen,
+    // 8 adult, 0x10 elder, 0x40 young adult.
+    std::optional<std::uint32_t> newAge;
     // What Animate Sim or Animate Object last started on it, while it plays.
     std::optional<PlayingAnimation> animation;
     // The Animate Sim clip a Sim was playing when the lot was saved, with its rate and how far it had
@@ -350,6 +375,8 @@ struct SimObject {
     std::uint16_t lastTimerId = 0;
     // Why a tree another object ran on it at once failed. The simulation resets it on its next turn.
     std::optional<std::string> failedRun;
+    // Whether that was a primitive the engine doesn't run yet, which never asks the player.
+    bool failedRunGap = false;
     // Whether its scripts run on while the game is paused (the plumbob, which follows the selected
     // Sim). It is object data 0x3C as the object was last loaded or reset, so a script setting that
     // field later changes nothing until the next reset.
@@ -379,6 +406,14 @@ struct SavedNeighbor {
     std::int16_t faceParentA = 0, faceParentB = 0;
     FacePicks facePicks;
     std::uint32_t browDraw = 0;
+    // Made from a template during play (Make New Character): its age flag, gender (1 female, 2 male),
+    // the skin asked for (1 to 4 a tone, anything else drawn) and the GUID of the outfit object its
+    // clothes come from (0 for none).
+    struct MadeAs {
+        int age = 0, gender = 0, skin = 0;
+        std::uint32_t outfit = 0;
+    };
+    std::optional<MadeAs> madeAs;
 };
 
 struct SavedNeighborhood {
@@ -423,6 +458,8 @@ public:
     // seeing it at once, but findIncludingRemoved() still finds it by id, so code may keep using
     // its data until purge() frees removed objects at the end of the tick.
     SimObject* findIncludingRemoved(std::int16_t id);
+    // Removing any part of a multi-tile object removes all of its parts, as the game deletes the
+    // whole object through its lead.
     void remove(SimObject& object);
     // Marks an object removed for scripts, as remove() does, but leaves it on the lot: purge() keeps
     // it and it is still drawn. The game does this to a saved Placeholder or TemplatePerson as the
@@ -928,6 +965,14 @@ public:
     // in the same order, trimmed of spaces and tabs as the game trims them. A neighbor past the end of
     // `names`, and the 0 places, keep theirs. Cancel changes nothing.
     void answerNames(bool ok, const std::vector<std::string>& names);
+    // Marks a hover or click on `object` with or without Shift, on every part with its lead.
+    void markShiftClick(SimObject& object, bool shift);
+    // The testingCheatsEnabled cheat, which lets a Shift-clicked object start debug lines.
+    bool testingCheats = false;
+    // The outfit part lists that hold a part, each keyed (category << 16) | part, of Sims that aged
+    // on this lot, by the Sim's GUID. Their character files don't hold them yet. Change Outfit reads
+    // these in place of the file's, as aging changes the Sim's own age data at once.
+    std::map<std::uint32_t, std::set<std::uint32_t>> agedOutfitLists;
     // The answer to `asker`'s request once given (true for OK), which ends the request. Nothing while
     // it waits or shows. False when the asker has none, which only a broken caller can see.
     std::optional<bool> takeNamesAnswer(std::int16_t asker);
@@ -935,6 +980,13 @@ public:
     // 2), set by whoever has the game's texts. Without them a new baby has no first name.
     void setBabyFirstNames(std::string boy, std::string girl) { babyFirstNames_ = {std::move(boy), std::move(girl)}; }
     const std::string& babyFirstName(bool female) const { return babyFirstNames_[female ? 1 : 0]; }
+    // The game's name tables (string tables of the UI text) Make New Character names its Sims from, by
+    // table instance.
+    void setNameTables(std::map<std::uint16_t, std::vector<std::string>> tables) { nameTables_ = std::move(tables); }
+    const std::vector<std::string>* nameTable(std::uint16_t instance) const {
+        const auto it = nameTables_.find(instance);
+        return it != nameTables_.end() ? &it->second : nullptr;
+    }
     void setNeighborFirstName(std::int16_t id, std::string name) {
         firstNames_[id] = std::move(name);
         ++namesVersion_;
@@ -984,7 +1036,8 @@ public:
     void setAnimationEventTime(AnimationEventTime time) { animationEventTime_ = std::move(time); }
     const AnimationEventTime& animationEventTime() const { return animationEventTime_; }
     // An animation's SimAntics events in the order they come, empty when it has none.
-    using AnimationEvents = std::function<std::vector<AnimationEvent>(const std::string& name)>;
+    // The list stays valid while the world does, as it is read for every playing clip each tick.
+    using AnimationEvents = std::function<const std::vector<AnimationEvent>&(const std::string& name)>;
     void setAnimationEvents(AnimationEvents events) { animationEvents_ = std::move(events); }
     const AnimationEvents& animationEvents() const { return animationEvents_; }
     void setLocoClips(LocoClips clips) { locoClips_ = std::move(clips); }
@@ -1012,6 +1065,9 @@ public:
     // The generator the game draws babies' genes on, apart from the simulator's. Where its state
     // comes from is not known yet.
     SimRandom& geneticsRandom() { return geneticsRandom_; }
+    // The character factory's own generator, which names the Sims Make New Character makes. Where its
+    // state comes from is not known yet.
+    SimRandom& characterRandom() { return characterRandom_; }
     // The joint named `bone` (lower case) in an object's model, none without one. Without it, bone
     // slots are not known.
     using ModelBoneLookup = std::function<std::optional<ModelBone>(std::int16_t object, const std::string& bone)>;
@@ -1035,6 +1091,39 @@ public:
     using ObjectFits = std::function<bool(const SimObject& placed, float x, float y, std::int32_t level, std::int16_t direction)>;
     void setObjectFits(ObjectFits f) { objectFits_ = std::move(f); }
     const ObjectFits& objectFits() const { return objectFits_; }
+    // Whether another object or a Sim stands in the way of `placed` at (x, y) in tiles on `level` facing
+    // `direction`, by the part of the placement test that compares it with what is round it. Set by the
+    // simulation. Without it nothing is ever in the way.
+    using ObjectInTheWay = std::function<bool(const SimObject& placed, float x, float y, std::int32_t level, std::int16_t direction)>;
+    void setObjectInTheWay(ObjectInTheWay f) { objectInTheWay_ = std::move(f); }
+    const ObjectInTheWay& objectInTheWay() const { return objectInTheWay_; }
+    // Whether the character of neighbor `neighbor` is loaded, for Generic Sims Call 0x1D. Asking
+    // starts its load when it isn't. Nullopt when it has nothing to load. Set by the app, which loads
+    // Sims one at a time. Without it every character is loaded at once.
+    using CharacterLoad = std::function<std::optional<bool>(std::int16_t neighbor)>;
+    void setCharacterLoad(CharacterLoad f) { characterLoad_ = std::move(f); }
+    const CharacterLoad& characterLoad() const { return characterLoad_; }
+    // Builds a Sim's age data for a new age (Age's age flag: 1 toddler, 2 child, 4 teen, 8 adult,
+    // 0x10 elder, 0x40 young adult), as the game's Age does at once, and gives the keys of its part
+    // lists that hold a part (see agedOutfitLists). Nullopt when it can't be built. Set by the app.
+    using AgeDataBuild = std::function<std::optional<std::set<std::uint32_t>>(const SimObject& sim, std::uint32_t age)>;
+    void setAgeDataBuild(AgeDataBuild f) { ageDataBuild_ = std::move(f); }
+    const AgeDataBuild& ageDataBuild() const { return ageDataBuild_; }
+    // The working copy of a Sim's age data that Change Outfit dresses it from, as the game keeps one
+    // per Sim. `sourceGuid` (0 for none) is an object whose age data holds an outfit (a uniform) to
+    // put on the copy. `renew` makes the copy anew from the Sim's own age data first and `commit`
+    // writes it back into the Sim's own after. Set by the app.
+    struct OutfitBuildRequest {
+        std::uint32_t sourceGuid = 0;
+        bool renew = false, commit = false;
+    };
+    struct BuiltOutfit {
+        std::set<std::uint32_t> lists;  // the copy's part lists that hold a part (see agedOutfitLists)
+        bool sourceFound = false;  // an outfit of the source was put on
+    };
+    using OutfitBuild = std::function<std::optional<BuiltOutfit>(const SimObject& sim, const OutfitBuildRequest& request)>;
+    void setOutfitBuild(OutfitBuild f) { outfitBuild_ = std::move(f); }
+    const OutfitBuild& outfitBuild() const { return outfitBuild_; }
     // The id of the first Sim or object in the way of walking `sim` stepping to (x, y) in tiles on
     // `level`, 0 when the way is free. Set by the simulation. Without it no walk is ever blocked.
     using StepBlocker = std::function<std::int16_t(const SimObject& sim, float x, float y, std::int32_t level)>;
@@ -1205,6 +1294,8 @@ private:
     HasOutfit hasOutfit_;
     GeneticsCatalogSource geneticsCatalog_;
     SimRandom geneticsRandom_{0};
+    SimRandom characterRandom_{0};
+    std::map<std::uint16_t, std::vector<std::string>> nameTables_;
     ModelBoneLookup modelBones_;
     LocoClips locoClips_;
     SimScale simScale_;
@@ -1213,6 +1304,10 @@ private:
     SlotRouter slotRouter_;
     PlacementSpots placementSpots_;
     ObjectFits objectFits_;
+    ObjectInTheWay objectInTheWay_;
+    CharacterLoad characterLoad_;
+    AgeDataBuild ageDataBuild_;
+    OutfitBuild outfitBuild_;
     StepBlocker stepBlocker_;
     std::size_t removedCount_ = 0;
     std::size_t keptCount_ = 0;  // objects kept until the lot unloads
@@ -1227,6 +1322,7 @@ private:
     // check trees ask it thousands of times a tick, so it's kept until objects are added or removed.
     mutable std::map<std::uint32_t, std::int16_t> simOfNeighbor_;
     void objectsChanged() { simOfNeighbor_.clear(); }
+    void removeOne(SimObject& object);
 };
 
 } // namespace ts2::sim

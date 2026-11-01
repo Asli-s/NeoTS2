@@ -71,6 +71,7 @@ private:
     std::int16_t species_ = 0;
     std::vector<Thumbnail> collapsed_, expandedThumbs_;
     ts2::tga::Pixels gradient_, dailyFill_, lifetimeFill_, icons_, enemies_, contacts_;
+    ts2::tga::Pixels portraitShape_;  // the shape portraits are cut to
 };
 
 } // namespace app

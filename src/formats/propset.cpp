@@ -3,6 +3,7 @@
 #include "formats/binary_reader.hpp"
 
 #include <bit>
+#include <charconv>
 #include <string_view>
 #include <utility>
 
@@ -111,6 +112,22 @@ std::map<std::string, std::string> parse(std::span<const std::uint8_t> data) {
         pos = valueEnd;
     }
     return properties;
+}
+
+std::uint32_t number(const std::map<std::string, std::string>& properties, const std::string& key) {
+    const auto it = properties.find(key);
+    if (it == properties.end()) {
+        return 0;
+    }
+    std::string_view s = it->second;
+    int base = 10;
+    if (s.size() > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        s.remove_prefix(2);
+        base = 16;
+    }
+    std::uint32_t value = 0;
+    const auto [end, error] = std::from_chars(s.data(), s.data() + s.size(), value, base);
+    return error == std::errc{} ? value : 0;
 }
 
 } // namespace ts2::propset

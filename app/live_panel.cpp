@@ -9,6 +9,10 @@ namespace {
 
 constexpr std::uint32_t kScripts = 0xA99D8A11;
 constexpr std::uint32_t kWantsScript = 0x49064900, kNeedsScript = 0x49064905, kRelationshipsScript = 0x49065002;
+// The needs and simology panels' two backgrounds, one for the wants open and one for them closed.
+// The same two ids are used the other way round in each.
+constexpr std::uint32_t kNeedsBackgroundOpen = 0xA001, kNeedsBackgroundClosed = 0xA002;
+constexpr std::uint32_t kSimologyBackgroundClosed = 0xA001, kSimologyBackgroundOpen = 0xA002;
 constexpr std::uint32_t kJobScript = 0x49065003, kSimologyScript = 0x49064820, kRewardsScript = 0x49064800;
 
 // The frame's pieces: each comes in a version for wants closed and one for wants open.
@@ -121,6 +125,8 @@ void LivePanel::layout() {
     show(kWantsOpenOverlay, wantsOpen_);
     show(kWantsHolder, wantsOpen_);
     place(kWantsHolder, 333, 92);
+    // Each holder is as big as what it holds.
+    s.resize(s.find(panel_, kWantsHolder), s.width(wantsContent_), s.height(wantsContent_));
     // The tile is the wants' background, from the closed front cap's place to the open one.
     show(kWantsTile, wantsOpen_);
     place(kWantsTile, kClosedFrontX, kFrameY);
@@ -154,6 +160,10 @@ void LivePanel::layout() {
     s.setVisible(rewardsContent_, sub_ == Sub::Rewards);
     s.setVisible(jobContent_, sub_ == Sub::Job);
     job_.setExpanded(wantsOpen_);
+    s.setVisible(s.find(needsContent_, kNeedsBackgroundOpen), wantsOpen_);
+    s.setVisible(s.find(needsContent_, kNeedsBackgroundClosed), !wantsOpen_);
+    s.setVisible(s.find(simologyContent_, kSimologyBackgroundOpen), wantsOpen_);
+    s.setVisible(s.find(simologyContent_, kSimologyBackgroundClosed), !wantsOpen_);
     s.setVisible(relationshipsContent_, sub_ == Sub::Relationships);
     relationships_.setMaximized(wantsOpen_);
     simology_.setMaximized(wantsOpen_);
@@ -163,6 +173,7 @@ void LivePanel::layout() {
     place(kSubTile, start, kFrameY);
     if (content >= 0) {
         place(kSubHolder, start - 10, kPanelBottom - s.height(content));
+        s.resize(s.find(panel_, kSubHolder), s.width(content), s.height(content));
     }
     const std::uint32_t endCap = wantsOpen_ ? (content >= 0 ? kEndCapOpenSub : kEndCapOpen) : (content >= 0 ? kEndCapClosedSub : kEndCapClosed);
     for (const std::uint32_t cap : {kEndCapClosed, kEndCapClosedSub, kEndCapOpen, kEndCapOpenSub}) {
@@ -172,6 +183,8 @@ void LivePanel::layout() {
     place(endCap, endX, kFrameY);
     // The sub-panel's background tile runs up to its end cap.
     s.resize(s.find(panel_, kSubTile), endX - start, s.height(s.find(panel_, kSubTile)));
+    // The panel ends where its end cap does (406 wide closed, 587 with only the wants open).
+    s.resize(panel_, endX + s.width(s.find(panel_, endCap)), s.height(panel_));
 
     // The aspiration button shows the close arrow while wants are open.
     for (const int button : s.children(s.find(panel_, kAspirations))) {

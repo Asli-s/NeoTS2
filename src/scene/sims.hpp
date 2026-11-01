@@ -2,6 +2,7 @@
 
 #include "formats/anim.hpp"
 #include "formats/scenegraph.hpp"
+#include "scene/age_data.hpp"
 #include "scene/assets.hpp"
 #include "scene/builder.hpp"
 
@@ -9,6 +10,7 @@
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -51,7 +53,13 @@ struct SimLook {
     std::vector<SimPart> parts;
     std::vector<std::string> problems;
 };
-SimLook simLook(Assets& assets, const std::filesystem::path& characterFile);
+// `category` (a flag) picks the outfit, by default the one the file has active.
+SimLook simLook(Assets& assets, const std::filesystem::path& characterFile, std::optional<std::uint32_t> category = std::nullopt);
+// A character file's age data, nullopt when it has none. The file becomes the one in use.
+std::optional<AgeData> characterAgeData(Assets& assets, const std::filesystem::path& characterFile);
+// The same from age data held apart from the file, such as an aged Sim's. The Sim's character file
+// must be the one in use, for its own parts.
+SimLook simLook(Assets& assets, const AgeData& data, std::optional<std::uint32_t> category = std::nullopt);
 
 // A newborn before it has a character file: its gender (1 female, 2 male), the dominant values of
 // its skin, hair and eye genes, the draw that picks its eyebrows and the change that blends its
@@ -76,6 +84,12 @@ BabyCatalog readBabyCatalog(const std::vector<std::filesystem::path>& skinPackag
 // diaper). On the face, its eye colour and then eyebrows of its hair tone, one of the baby
 // eyebrows drawn by `browDraw`.
 SimLook newbornLook(Assets& assets, const BabyCatalog& catalog, const Newborn& baby);
+
+// What a Sim made by Make New Character wears in outfit category `category`, from its made look
+// (see makeLook): its age data's parts, its own face in every outfit (the bare skin outfit's face
+// changed into its face template's) and its eyebrows and eyes drawn on the face. Mesh overlays
+// (facial hair, glasses) aren't drawn yet.
+SimLook madeSimLook(Assets& assets, const OutfitCatalog& catalog, const MadeLook& made, std::uint32_t category);
 
 // Whether a Sim wears only the last entry of an outfit's list of this part (kHairPart...). A Sim
 // wears one hair, top, bottom and body each, so the game takes the last of those (a PlantSim's

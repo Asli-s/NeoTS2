@@ -23,10 +23,10 @@ std::shared_ptr<const RigAnimation> AnimationLibrary::bound(const std::shared_pt
     if (!rig) {
         return nullptr;
     }
-    const auto key = std::make_tuple(rig.get(), name, mirrored);
-    if (const auto it = bound_.find(key); it != bound_.end()) {
+    if (const auto it = bound_.find(std::tuple<const Rig*, const std::string&, bool>(rig.get(), name, mirrored)); it != bound_.end()) {
         return it->second;
     }
+    const auto key = std::make_tuple(rig.get(), name, mirrored);
     const auto animation = find(name);
     if (!animation) {
         return bound_[key] = nullptr;

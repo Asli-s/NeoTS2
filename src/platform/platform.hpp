@@ -24,7 +24,7 @@ void delayMs(std::uint32_t milliseconds);
 // The keys the game uses. A key it doesn't use is Unknown.
 enum class Key : std::uint8_t {
     Unknown,
-    A, D, E, P, Q, R, S, W, X, Y, Z,
+    A, C, D, E, P, Q, R, S, W, X, Y, Z,
     Num1, Num2, Num3,
     Pad0, Pad1, Pad2, Pad3, PadPlus, PadMinus,
     Comma, Period, Minus, Equals, Grave,
@@ -32,6 +32,7 @@ enum class Key : std::uint8_t {
     PageUp, PageDown, Home, End,
     F5,
     Up, Down, Left, Right,
+    Shift,  // either Shift key, as the game reads them
 };
 
 enum class MouseButton : std::uint8_t { Left, Middle, Right, Other };
@@ -44,7 +45,7 @@ struct Event {
     Key key = Key::Unknown;
     Key scancode = Key::Unknown;
     bool repeat = false;  // the key is held and this is not its first press
-    bool shift = false, ctrl = false, alt = false;  // for a key, the modifier keys held with it
+    bool shift = false, ctrl = false, alt = false;  // for a key or the mouse, the modifier keys held with it
     // A mouse event: the pointer in the window's own units, and for motion how far it moved.
     float x = 0, y = 0;
     float xrel = 0, yrel = 0;

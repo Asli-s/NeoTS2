@@ -9,6 +9,7 @@
 #include "formats/ttab.hpp"
 
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -75,6 +76,9 @@ public:
     // The master of a multi-tile object's part: the type in the same group with the same multi-tile
     // id whose sub-index (OBJD field 0x0B) is 0xFFFF. Null for other types or when it is missing.
     virtual const ObjectType* multiTileMaster(const ObjectType&) { return nullptr; }
+    // The parts of a multi-tile master in the order the game makes them: the lead (OBJD field 0x3F
+    // set) first, then the others in the order the types were read. Empty when there is no lead.
+    virtual std::vector<const ObjectType*> multiTileParts(const ObjectType&) { return {}; }
     // Every object type's GUID, once each, in the order they were read (Set to Next 0x26 walks them).
     virtual const std::vector<std::uint32_t>& objectTypeGuids() {
         static const std::vector<std::uint32_t> none;
@@ -84,6 +88,11 @@ public:
     virtual const std::map<std::string, std::string>* ageData(std::uint32_t) { return nullptr; }
     // Another resource of that type (instance 1) in a Sim's character group (an NPC's face shape), if any.
     virtual std::optional<std::vector<std::uint8_t>> characterResource(std::uint32_t, std::uint32_t) { return std::nullopt; }
+    // Every resource of a type in an object's group (an outfit object's age data), with its instance,
+    // in instance order.
+    virtual std::vector<std::pair<std::uint32_t, std::vector<std::uint8_t>>> groupResources(std::uint32_t, std::uint32_t) {
+        return {};
+    }
     // The game's named tuning values (FCNS instance 2 of the global group), if any.
     virtual const fcns::Tunings* tunings() { return nullptr; }
     // The global routing slots (the routing entries of SLOT 0x64 in the global group, in order), which
@@ -93,5 +102,20 @@ public:
         return none;
     }
 };
+
+// The container slots an object of `type` has when made or loaded. A Sim's follow the person it was
+// made from (OBJD 0x46-0x47, its original GUID) when that has more, as newer packs give the person
+// more slots than a Sim's own copy has.
+inline std::size_t containerSlotsOf(CodeSource& code, const ObjectType& type) {
+    constexpr std::uint16_t kPerson = 2;
+    constexpr std::size_t kOriginalGuidLow = 0x46, kOriginalGuidHigh = 0x47;
+    if (type.definition.field(objd::field::kType) != kPerson) {
+        return type.containerSlots;
+    }
+    const std::uint32_t guid = type.definition.field(kOriginalGuidLow) |
+                               static_cast<std::uint32_t>(type.definition.field(kOriginalGuidHigh)) << 16;
+    const ObjectType* original = guid != 0 ? code.objectType(guid) : nullptr;
+    return original != nullptr ? std::max(type.containerSlots, original->containerSlots) : type.containerSlots;
+}
 
 } // namespace ts2::sim

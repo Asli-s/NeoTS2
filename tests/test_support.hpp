@@ -217,6 +217,16 @@ public:
         const auto it = masters_.find(part.definition.guid());
         return it != masters_.end() ? objectType(it->second) : nullptr;
     }
+    void setMultiTileParts(std::uint32_t masterGuid, std::vector<std::uint32_t> partGuids) { parts_[masterGuid] = std::move(partGuids); }
+    std::vector<const ts2::sim::ObjectType*> multiTileParts(const ts2::sim::ObjectType& master) override {
+        std::vector<const ts2::sim::ObjectType*> out;
+        if (const auto it = parts_.find(master.definition.guid()); it != parts_.end()) {
+            for (const std::uint32_t guid : it->second) {
+                out.push_back(objectType(guid));
+            }
+        }
+        return out;
+    }
     void addFunctions(std::uint32_t group, std::vector<ts2::objf::Function> functions) {
         functions_[group] = std::move(functions);
     }
@@ -287,6 +297,7 @@ private:
     std::optional<ts2::fcns::Tunings> tunings_;
     std::map<std::uint32_t, std::vector<ts2::objf::Function>> functions_;
     std::map<std::uint32_t, std::uint32_t> masters_;
+    std::map<std::uint32_t, std::vector<std::uint32_t>> parts_;
     std::map<std::pair<std::uint32_t, std::uint16_t>, std::vector<std::string>> strings_;
     std::map<std::pair<std::uint32_t, std::uint16_t>, std::vector<std::string>> descriptions_;
     std::map<std::uint32_t, std::map<std::string, std::string>> ageData_;

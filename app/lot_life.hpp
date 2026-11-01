@@ -12,7 +12,9 @@
 #include "formats/tga.hpp"
 #include "sim/lot_simulation.hpp"
 #include "sim/pie_menu.hpp"
+#include "sim/speed_clock.hpp"
 #include "route_sources.hpp"
+#include "sim_loader.hpp"
 
 #include <array>
 #include <deque>
@@ -40,6 +42,11 @@ public:
     LotLife(std::unique_ptr<ts2::sim::LotSimulation> sim, ts2::scene::Assets& assets,
             std::shared_ptr<const RouteModelTable> routeModels = nullptr);
 
+    // Builds the Sims scripts wait for (Generic Sims Call 0x1D) in the background, one at a time, with
+    // an asset reader of its own for `install`. Without it they are ready at once and each new Sim is
+    // built as it appears.
+    void loadSimsInBackground(const std::filesystem::path& install);
+
     // Runs the simulation for `ms` of real time at its speed, then has each Sim's actor play what its
     // scripts animate. It runs whole ticks and the rest waits for the next call. Nothing runs while paused.
     void update(double ms, ts2::scene::Scene& scene);
@@ -63,7 +70,7 @@ public:
     void select(std::int16_t sim);
     // The household's Sims (object ids, in family order), and a Sim's portrait for its life stage
     // from its character file.
-    std::vector<std::int16_t> household() const { return sim_->household(); }
+    const std::vector<std::int16_t>& household() const { return sim_->household(); }
     [[nodiscard]] std::optional<ts2::tga::Pixels> portrait(std::int16_t sim);
     // A Sim's neighbor id (0 when it has none), and where a neighbor's portrait for its life stage
     // is: its character file and the picture's instance there (nullopt when unknown).
@@ -79,8 +86,8 @@ public:
     std::array<int, 16> motives(std::int16_t sim);
     int mood(std::int16_t sim);
     // A Sim's current wants and fears, and what a want is (null for an unknown one).
-    std::vector<ts2::swaf::Want> wants(std::int16_t sim);
-    std::vector<ts2::swaf::Want> fears(std::int16_t sim);
+    const std::vector<ts2::swaf::Want>& wants(std::int16_t sim);
+    const std::vector<ts2::swaf::Want>& fears(std::int16_t sim);
     ts2::swaf::Slots wantSlots(std::int16_t sim);
     const ts2::content::TuningCurve* influenceLevels() const { return sim_->world().influenceLevels(); }
     // Puts a hold on a Sim's want or fear (by its place in the list), or takes it off: the game's
@@ -157,15 +164,18 @@ public:
     // A Sim's aspiration score (person data 0xA0). 0 for a Sim that is gone.
     std::int16_t aspirationScore(std::int16_t sim);
     // Whether the mouse can use an object or a Sim (the selected Sim itself too): one on which the
-    // selected Sim's pie menu would offer something.
-    bool hoverable(std::uint32_t object);
+    // selected Sim's pie menu would offer something. The hover marks the object with whether `shift` is
+    // held, and with testingCheatsEnabled on a marked object counts only its debug lines.
+    bool hoverable(std::uint32_t object, bool shift = false);
     bool isSim(std::uint32_t object);
     // The object a click at a point of the scene on `object` picks, as the game does: for a
     // multi-tile object the part whose spot on its floor is nearest the point (the side of a double
     // bed clicked), for any other the object itself.
     std::uint32_t partAt(std::uint32_t object, const std::array<float, 3>& scenePoint, const ts2::scene::Scene& scene);
-    // The selected Sim's pie menu on an object. Empty when it offers nothing.
-    std::vector<ts2::sim::PieChoice> pieMenu(std::uint32_t object);
+    // The selected Sim's pie menu on an object, clicked with `shift` held or not. With testingCheatsEnabled
+    // on a Shift-click gives the debug lines alone. Empty when it offers nothing.
+    std::vector<ts2::sim::PieChoice> pieMenu(std::uint32_t object, bool shift = false);
+    void setTestingCheats(bool on) { sim_->world().testingCheats = on; }
     // A click on empty floor or ground at a point of the scene, on a storey (1 = ground): the game
     // makes a destination object there for the selected Sim and opens its pie menu. Object 0 when
     // none is made.
@@ -220,6 +230,8 @@ public:
     // The lot instances the last update lit anew because they moved into other light or shade (see
     // Renderer::setLights).
     const std::vector<std::size_t>& relitInstances() const { return relit_; }
+    // The lot instances whose shape colour the last update changed (see Renderer::setShapeColor).
+    const std::vector<std::size_t>& shapeColored() const { return shapeColored_; }
     // Lights every lot object again where it stands, after the scene's light changed (doors and
     // windows keep theirs). They join relitInstances.
     void relightAll(ts2::scene::Scene& scene);
@@ -231,6 +243,7 @@ private:
     void followClips(ts2::scene::Scene& scene);
     void animateObjects(ts2::scene::Scene& scene);
     void shadeHeld(ts2::scene::Scene& scene);
+    void shapeColors(ts2::scene::Scene& scene);
     void shadeCreated(ts2::scene::Scene& scene, std::size_t index, std::int16_t direction);
     void lookHeads(ts2::scene::Scene& scene, double nowMs);
     // What a Sim's current look aims at on the lot, worked out where the simulation may be read.
@@ -247,10 +260,27 @@ private:
     void addCreatedObjects(ts2::scene::Scene& scene, bool removeSims = true);
     // Puts a Sim created during play into the scene. False when it has no look to draw.
     bool addCreatedSim(ts2::scene::Scene& scene, const ts2::sim::SimObject& sim);
+    const ts2::scene::MadeLook* madeLook(std::int16_t neighbor, const ts2::sim::SavedNeighbor::MadeAs& as);
+    // Puts a Sim the loader built into the scene, with what it brought of meshes, materials and textures.
+    bool addLoadedSim(ts2::scene::Scene& scene, const ts2::sim::SimObject& sim, SimLoader::Built built);
+    // Whether a new Sim waits for the loader still, to be drawn once built.
+    bool simLoading(const ts2::sim::SimObject& sim) const;
+    void wearChangedOutfits(ts2::scene::Scene& scene);
+    void buildNewAges(ts2::scene::Scene& scene);
+    std::optional<std::set<std::uint32_t>> buildAgeData(const ts2::sim::SimObject& sim, std::uint32_t age);
+    // The age data of the object of `guid`, each with its parts, in instance order (an outfit object's).
+    std::vector<ts2::scene::AgeData> outfitAgeData(std::uint32_t guid);
+    std::optional<ts2::sim::World::BuiltOutfit> buildOutfit(const ts2::sim::SimObject& sim,
+                                                            const ts2::sim::World::OutfitBuildRequest& request);
+    // A Sim the game dresses from an outfit source as it loads (person data 0x77-0x78, a uniform)
+    // wears that outfit once drawn.
+    void dressFromSource(std::int16_t id);
     void relight(ts2::scene::Scene& scene, std::size_t index, const ts2::scene::Transform& inLot, int storey);
     ts2::scene::Assets& assets_;
     std::unique_ptr<ts2::sim::LotSimulation> sim_;
     ts2::scene::AnimationLibrary animations_;
+    // Each animation's SimAntics events, made once as the animations are.
+    std::map<std::string, std::vector<ts2::sim::AnimationEvent>, std::less<>> animationEvents_;
     ts2::scene::OutfitProperties outfits_;
     ObjectMaterials objectMaterials_;
     std::unique_ptr<ts2::scene::SceneRays> rays_;
@@ -259,7 +289,10 @@ private:
     std::map<std::int16_t, std::vector<ts2::sim::LookController::Change>> lookChanges_;
     std::optional<std::array<float, 3>> cameraEye_;
     ts2::scene::Transform lotFrame_;  // the lot's place in the scene
-    double pendingMs_ = 0;
+    ts2::sim::TickPacer pacer_;
+    double watchMs_ = 0;      // real ms the speed clock has run, which stops while paused
+    double frameTicksMs_ = 0;  // real ms the last frame's ticks took, already in watchMs_
+    bool wasPaused_ = false;
     double leadMs_ = 0;
     // Per object: its latest own animation (Animate Sim), kept after it ends so its last pose holds, and
     // the one before, fading out under it.
@@ -271,13 +304,18 @@ private:
             std::string name;
             double startMs = 0;
             ts2::scene::Transform place;
-            // While the Sim is carried: that place as seen from the bone it hangs at.
+            // While the Sim is carried or sits in an object's slot: that place as seen from the bone it
+            // hangs at, and which holder and slot that is.
             std::optional<ts2::scene::Transform> fromCarrier;
+            std::pair<std::int16_t, std::int16_t> carrierSlot{std::int16_t{0}, std::int16_t{-1}};
         };
         std::vector<Started> started;
         // Keeps where the Sim stands now as the start place of each of its clips that has none yet (its
-        // own animation unless it walks, and its overlays), and forgets the clips no longer drawn.
-        void noteStarts(const ts2::sim::SimObject& object, const ts2::scene::Transform& place, bool walks);
+        // own animation unless it walks, and its overlays), and forgets the clips no longer drawn. A
+        // clip started in a slot hangs from the slot's bone as it is now (`hung`), so a driver whose
+        // clip starts as the car drives in stays in the seat.
+        void noteStarts(const ts2::sim::SimObject& object, const ts2::scene::Transform& place, bool walks,
+                        const std::optional<ts2::scene::Transform>& hung, std::pair<std::int16_t, std::int16_t> holderSlot);
         // Where and on which storey its lights were last picked.
         std::array<float, 12> litPlace{};
         int litLevel = -1;
@@ -333,10 +371,23 @@ private:
     std::vector<std::size_t> freeSimInstances_;    // instances of removed Sims, for the next Sim drawn
     std::map<std::int16_t, std::vector<std::size_t>> createdSims_;  // Sims created during play: id -> instances
     std::shared_future<ts2::scene::BabyCatalog> babyCatalog_;  // read in the background from the start
+    std::shared_future<ts2::scene::OutfitCatalog> outfitCatalog_;  // the same, for aging Sims' new outfits and made Sims' looks
+    std::map<std::int16_t, ts2::scene::MadeLook> madeLooks_;      // by neighbor (see madeLook)
+    // The age data of Sims that aged on this lot or had an outfit written into it, by neighbor id. Their
+    // character files don't hold it yet.
+    std::map<std::int16_t, ts2::scene::AgeData> agedData_;
+    // Each Sim's working copy of its age data, which it is dressed from, by neighbor id (see buildOutfit).
+    std::map<std::int16_t, ts2::scene::AgeData> outfitData_;
+    bool loadedSimsDressed_ = false;
     std::shared_ptr<ts2::scene::NewbornFaceData> newbornFaces_ = std::make_shared<ts2::scene::NewbornFaceData>();
     std::set<std::int16_t> triedSims_;  // Sims already drawn or tried
+    std::unique_ptr<SimLoader> simLoader_;
+    std::set<std::int16_t> claimingSims_;  // Sims that took their loaded character (see SimLoader::claim)
+    // The loader's meshes, materials, images and cubes -> the scene's.
+    std::map<int, int> loadedMeshes_, loadedMaterials_, loadedImages_, loadedCubes_;
     std::vector<std::size_t> changedInstances_;
     std::vector<std::size_t> relit_;
+    std::vector<std::size_t> shapeColored_;
 };
 
 } // namespace app

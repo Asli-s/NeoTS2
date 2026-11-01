@@ -30,6 +30,16 @@ struct AutonomyTunings {
     // Low, moderate and high attenuation, for residents and for visitors.
     std::array<float, 3> attenuation{0.002f, 0.02f, 0.1f};
     std::array<float, 3> visitorAttenuation{0.002f, 0.02f, 0.1f};
+    int memoryCount = 7;        // autonomy memory count
+    int memoryDuration = 3600;  // "max duration autonomy memory " (with its space), in ticks
+    // The social bias (see socialBias in the source): "autonomy deactivate autonomy bias", the
+    // exponents for a positive and a negative sum ("autonomy bias positive/negative tuning"), and
+    // per kind of source its overall weight and falloff start and end in tiles.
+    bool biasOff = false;
+    float biasPositive = 4, biasNegative = 4;
+    float furiousWeight = 1, furiousStart = 1, furiousEnd = 4;
+    float preferredFurious = 2;  // autonomy preferred furious interaction tuning
+    float attractionWeight = 1, attractionStart = 1, attractionEnd = 4;
 
     static AutonomyTunings from(const fcns::Tunings* tunings);
 };
@@ -83,8 +93,15 @@ struct AutonomyOffer {
 // nothing was picked or fewer than `max check tree in fba count` check trees ran, until no motive
 // is left.
 //
-// Not yet: the rooms the Sim can reach, the interactions of other Sims it could join, autonomy
-// memory, ownership and social factors, and pets.
+// A Sim remembers its picks for `max duration autonomy memory` ticks. While it remembers one, the
+// same line on the same object scores times the line's memory multiplier. Each look first forgets
+// the picks whose time is up, keeping the latest `autonomy memory count`.
+//
+// Each score is also multiplied by the social bias: the pull of the places near Sims the Sim is
+// attracted to and the push away from Sims it is furious at (see socialBias in the source).
+//
+// Not yet: the rooms the Sim can reach, the interactions of other Sims it could join, ownership,
+// the social bias of groups on an outing, and pets.
 struct InteractionSearch {
     World& world;
     CodeSource& code;
@@ -103,6 +120,9 @@ struct InteractionSearch {
     std::function<bool(const SimObject& object, const ttab::Interaction& line)> checkFirst;
     // If set, receives every candidate scored, best first (for tests and debugging).
     std::vector<FoundInteraction>* scored = nullptr;
+    // If set, the checks a line gets before its check tree, every time it is checked (see
+    // mayStartLine): a line it refuses fails its check.
+    std::function<bool(const SimObject& object, const ttab::Interaction& line)> mayStart;
 };
 
 // Which check trees change the interaction they test, and so run before their line is scored: those

@@ -43,7 +43,8 @@ public:
 private:
     Assets& assets_;
     std::map<std::string, std::shared_ptr<const anim::Animation>> animations_;  // null: known missing
-    std::map<std::tuple<const Rig*, std::string, bool>, std::shared_ptr<const RigAnimation>> bound_;
+    // Looked up without copying the name, as clips are asked for every frame.
+    std::map<std::tuple<const Rig*, std::string, bool>, std::shared_ptr<const RigAnimation>, std::less<>> bound_;
 };
 
 } // namespace ts2::scene

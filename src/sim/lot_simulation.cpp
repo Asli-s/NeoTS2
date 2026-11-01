@@ -93,6 +93,7 @@ LotSimulation::LotSimulation(const std::filesystem::path& install, const std::fi
                          }).share();
     world_.setGeneticsCatalog([catalog] { return &catalog.get(); });
     world_.geneticsRandom().seed(seed ? *seed : clockSeed());
+    world_.characterRandom().seed(seed ? *seed : clockSeed());
     vm_.resetSim = [this](SimObject& sim) {
         if (const ObjectType* type = code_.objectType(sim.definition.guid())) {
             resetAfterFailure(sim, *type);
@@ -221,6 +222,10 @@ void LotSimulation::setRouteSources(RouteSources sources) {
     world_.setObjectFits([this](const SimObject& placed, float x, float y, std::int32_t level, std::int16_t direction) {
         return objectFits(placed, x, y, level, direction);
     });
+    world_.setObjectInTheWay([this](const SimObject& placed, float x, float y, std::int32_t level, std::int16_t direction) {
+        const ObjectType* type = code_.objectType(placed.definition.guid());
+        return type != nullptr && objectInTheWay(placed, *type, x, y, level, direction);
+    });
     world_.setStepBlocker([this](const SimObject& sim, float x, float y, std::int32_t level) { return stepBlocker(sim, x, y, level); });
 }
 
@@ -233,14 +238,14 @@ const RouteWorld* LotSimulation::routeWorld() {
             return nullptr;
         }
         RouteWorld built(*lot_, routeSources_->fenceBlocks, routeSources_->postFootprint);
-        built.addObjects(world_, code_, *lot_, routeSources_->models);
+        built.addObjects(world_, code_, objectModels_, routeSources_->models);
         routeWorld_ = std::move(built);
         world_.takeFootprintChanges();  // already as they are now
         lot_.reset();
         routeLinks_.clear();
     } else if (auto changed = world_.takeFootprintChanges(); !changed.empty()) {
         for (const int level : routeWorld_->updateObjects(world_, code_, routeSources_->models, changed)) {
-            routeLinks_.erase(level);
+            markLinksStale(level);
         }
     }
     return routeWorld_->levels() > 0 ? &*routeWorld_ : nullptr;
@@ -354,7 +359,7 @@ std::string LotSimulation::modelOf(const SimObject& object) {
 // bit 0x02 or 0x04, and Sims when the placed object has data 8 bit 0x04 or 0x10. Sims with data 8
 // bit 0x01 or data 0x28 bit 0x1000 are left out too (the game also asks another Sim flag there, not
 // known yet), and every Sim when the placed object has data 0x28 bit 0x4000 (the game then tests the
-// Sim's own footprint).
+// Sim's own footprint). A part of a multi-tile object is never in the way of another part of it.
 bool LotSimulation::objectInTheWay(const SimObject& placed, const ObjectType& type, float x, float y, std::int32_t level,
                                    std::int16_t direction) {
     constexpr std::size_t kContainerField = 2, kFlagsField = 8, kFlags2Field = 0x28, kPlacementFlagsField = 0x2A, kLeadField = 0x13;
@@ -366,7 +371,14 @@ bool LotSimulation::objectInTheWay(const SimObject& placed, const ObjectType& ty
         const std::string name = modelOf(o);
         return !name.empty() && routeSources_ && routeSources_->models ? routeSources_->models(name) : nullptr;
     };
-    const std::vector<RouteRect> mine = objectFootprintAt(placed, placed, type, model(placed), x, y, direction);
+    // A part of a multi-tile object takes its footprint from its lead's model and never meets its own parts.
+    const auto isPart = [](const SimObject& o) { return o.definition.field(objd::field::kMultiTileMasterId) != 0 && o.data[kLeadField] > 0; };
+    const auto partLead = [&](const SimObject& o) -> const SimObject* {
+        const SimObject* lead = isPart(o) ? world_.find(o.data[kLeadField]) : nullptr;
+        return lead != nullptr ? lead : &o;
+    };
+    const SimObject& placedLead = *partLead(placed);
+    const std::vector<RouteRect> mine = objectFootprintAt(placed, placedLead, type, model(placedLead), x, y, direction);
     if (mine.empty()) {
         return false;
     }
@@ -391,6 +403,9 @@ bool LotSimulation::objectInTheWay(const SimObject& placed, const ObjectType& ty
     };
     return world_.nextAfter(std::numeric_limits<std::int16_t>::min(), [&](const SimObject& o) {
         if (o.removed || o.id == placed.id || o.x == kOffLot || o.data[kContainerField] > 0 || !near(o)) {
+            return false;
+        }
+        if (isPart(placed) && isPart(o) && o.data[kLeadField] == placed.data[kLeadField]) {
             return false;
         }
         if (o.isPerson()) {
@@ -419,10 +434,7 @@ bool LotSimulation::objectInTheWay(const SimObject& placed, const ObjectType& ty
         if (otherType == kDoorType || otherType == kWindowType || passes(o)) {
             return false;
         }
-        const SimObject* lead = o.data[kLeadField] > 0 ? world_.find(o.data[kLeadField]) : nullptr;
-        if (lead == nullptr) {
-            lead = &o;
-        }
+        const SimObject* lead = partLead(o);
         const std::vector<RouteRect> theirs = objectFootprintAt(o, *lead, *other, model(*lead), static_cast<float>(o.x) / 65536.0f,
                                                                  static_cast<float>(o.y) / 65536.0f, o.data[1]);
         return std::ranges::any_of(theirs, [&](const RouteRect& t) {
@@ -485,13 +497,14 @@ std::optional<std::int16_t> LotSimulation::placeTest(const SimObject& sim, float
     return static_cast<std::int16_t>(*object);
 }
 
-// Whether `sim` may cross a stair, as the route planner asks once per plan: the check tree of the
-// Portal function (OBJf entry 15) of the stair's first part (else its other one) runs as the Sim, with
-// that part as stack object. False refuses the way. Crossing costs 1 + that part's data 0x35 / 100.
-// The Sim's temps are kept, as the router keeps them around a route.
-std::pair<bool, float> LotSimulation::stairCheck(const SimObject& sim, const StairPortal& stair) {
+// Whether `sim` may cross a stair or a door, as the route planner asks once per plan: the check tree
+// of the Portal function (OBJf entry 15) of the first of `parts` that has the function runs as the
+// Sim, with that part as stack object. False refuses the way. A door's lets residents and greeted
+// visitors through its outside doors. Crossing costs 1 + that part's data 0x35 / 100. The Sim's temps
+// are kept, as the router keeps them around a route. Not yet: the parameters the game passes the tree.
+std::pair<bool, float> LotSimulation::portalCheck(const SimObject& sim, std::initializer_list<std::int16_t> parts) {
     constexpr std::size_t kPortalFunction = 15, kCostField = 0x35;
-    for (const std::int16_t id : {stair.from.part, stair.to.part}) {
+    for (const std::int16_t id : parts) {
         SimObject* part = world_.find(id);
         const ObjectType* type = part != nullptr ? code_.objectType(part->definition.guid()) : nullptr;
         const auto* functions = type != nullptr ? code_.objectFunctions(*type) : nullptr;
@@ -553,7 +566,7 @@ void LotSimulation::ringSims(const SimObject& sim, std::int16_t target) {
     std::set<std::int16_t> seen;
     const auto ring = [this](std::int16_t id, const std::optional<RouteWorld::SimRings>& rings) {
         for (const int level : routeWorld_->ringSim(id, rings)) {
-            routeLinks_.erase(level);
+            markLinksStale(level);
         }
     };
     world_.nextAfter(std::numeric_limits<std::int16_t>::min(), [&](const SimObject& o) {
@@ -687,6 +700,8 @@ SlotRoute LotSimulation::routeToSlot(const SimObject& sim, const SimObject& owne
     auto links = routeLinks_.find(level);
     if (links == routeLinks_.end()) {
         links = routeLinks_.emplace(level, RouteLinks::build(*grid)).first;
+    } else if (links->second.stale) {
+        links->second.rebuild(*grid);
     }
     // Each door as the game reads it when a plan starts: its lead's data 0x35 and 0x16.
     std::vector<RouteDoorState> doors;
@@ -709,6 +724,7 @@ SlotRoute LotSimulation::routeToSlot(const SimObject& sim, const SimObject& owne
                 d.extra = 1.0f + 0.01f * o->data[0x35];
                 d.active[0] = (o->data[0x16] & 1) != 0;
                 d.active[1] = (o->data[0x16] & 2) != 0;
+                d.refused[0] = d.refused[1] = portalCheck(sim, {o->id}).first;
                 doors.push_back(d);
             }
         }
@@ -726,6 +742,8 @@ SlotRoute LotSimulation::routeToSlot(const SimObject& sim, const SimObject& owne
             auto found = routeLinks_.find(l);
             if (g != nullptr && found == routeLinks_.end()) {
                 found = routeLinks_.emplace(l, RouteLinks::build(*g)).first;
+            } else if (g != nullptr && found->second.stale) {
+                found->second.rebuild(*g);
             }
             levels.push_back({g, g != nullptr ? &found->second : nullptr});
         }
@@ -744,7 +762,7 @@ SlotRoute LotSimulation::routeToSlot(const SimObject& sim, const SimObject& owne
             r.y[1] = p.to.y;
             r.level[1] = p.to.level - 1;
             r.twoWay = p.twoWay;
-            const auto [refused, cost] = stairCheck(sim, p);
+            const auto [refused, cost] = portalCheck(sim, {p.from.part, p.to.part});
             r.refused = refused;
             r.cost = cost;
             portals.push_back(r);
@@ -820,19 +838,23 @@ void LotSimulation::findHousehold(const content::Neighborhood& hood, const std::
     }
 }
 
-std::vector<std::int16_t> LotSimulation::household() const {
+const std::vector<std::int16_t>& LotSimulation::household() const {
     const std::optional<std::uint32_t> family = world_.lotHousehold();
     if (!family) {
         return household_;
     }
-    std::vector<std::int16_t> out;
+    thread_local std::vector<std::int16_t> now;
+    now.clear();
     for (const std::uint32_t guid : world_.familyMemberGuids(*family)) {
         const SimObject* sim = world_.nextAfter(0, [&](const SimObject& o) { return o.isPerson() && o.definition.guid() == guid; });
         if (sim != nullptr) {
-            out.push_back(sim->id);
+            now.push_back(sim->id);
         }
     }
-    return out;
+    if (now != familyHousehold_) {
+        familyHousehold_ = now;
+    }
+    return familyHousehold_;
 }
 
 std::vector<std::uint8_t> LotSimulation::simImage(std::int16_t sim, std::uint32_t instance) {
@@ -928,7 +950,7 @@ void LotSimulation::startObjects() {
     for (const std::int16_t id : resetParts) {
         finishReset(id);
     }
-    world_.purge();
+    purgeRemoved();
 }
 
 // The Sim reset, then the Sim's Cleanup function run there and then. The running interaction drops
@@ -991,6 +1013,9 @@ void LotSimulation::note(const RunResult& r, std::int16_t object) {
             const auto bhav = code_.behavior(r.group, r.instance);
             diag::warning(std::format("simulation: object {} at tick {}: {}, in {} (0x{:08X} 0x{:04X}) at {}", object, ticks_, why,
                                       bhav ? bhav->name : std::string("?"), r.group, r.instance, r.pc));
+            if (!r.calls.empty()) {
+                diag::warning("simulation: the stack from the bottom: " + r.calls);
+            }
         }
     }
 }
@@ -1005,6 +1030,14 @@ void LotSimulation::stepObject(std::int16_t id) {
         failed.detail = *object->failedRun;
         note(failed, id);
         object->failedRun.reset();
+        // The dialog names the error of the tree that failed on it.
+        RunResult inner = failed;
+        inner.reason = failed.detail;
+        inner.detail.clear();
+        const bool gap = std::exchange(object->failedRunGap, false);
+        if (!gap && holdForDialog(*object, inner)) {
+            return;
+        }
         if (const ObjectType* type = code_.objectType(object->definition.guid())) {
             resetAfterFailure(*object, *type);
             return;
@@ -1031,15 +1064,35 @@ void LotSimulation::stepObject(std::int16_t id) {
         }
     }
     // An object whose script fails (an error, a loop that never yields, or a primitive we don't run
-    // yet) is reset and starts over.
+    // yet) is reset and starts over. With testingCheatsEnabled on, the game's errors wait for the
+    // player's answer in its "Object Error" dialog instead.
     if (r.outcome != Outcome::Error && r.outcome != Outcome::StepLimit && r.outcome != Outcome::Unsupported) {
         return;
     }
     SimObject* failed = world_.find(id);  // the run may have created or removed objects
     const ObjectType* type = failed != nullptr && !failed->removed ? code_.objectType(failed->definition.guid()) : nullptr;
+    // Primitives we don't run yet are the engine's gaps, not the game's errors, so they never ask.
+    if (type != nullptr && r.outcome != Outcome::Unsupported && holdForDialog(*failed, r)) {
+        return;
+    }
     if (type != nullptr) {
         resetAfterFailure(*failed, *type);
     }
+}
+
+// Frees removed objects. What the lot saved for each of them is dropped first: a new object can be
+// given the id and is made fresh.
+void LotSimulation::purgeRemoved() {
+    for (const std::int16_t id : world_.removedIds()) {
+        const auto key = static_cast<std::uint32_t>(id);
+        objectModels_.erase(key);
+        savedGuids_.erase(key);
+        savedJoints_.erase(key);
+        if (routeWorld_) {
+            routeWorld_->forgetModel(key);
+        }
+    }
+    world_.purge();
 }
 
 // The game's reset after a script error. An object with a Cleanup function runs it and starts Main
@@ -1070,6 +1123,43 @@ void LotSimulation::forgetRemoved() {
 void LotSimulation::forget(SimObject& sim, std::int16_t removed) {
     if (forgetObject(sim, removed)) {
         vm_.resetSim(sim);
+    }
+}
+
+bool LotSimulation::holdForDialog(const SimObject& object, const RunResult& r) {
+    // Far more than a player answers. Past it the errors reset the objects as with the cheat off.
+    constexpr std::size_t kMaxHeldErrors = 16;
+    if (!world_.testingCheats || objectErrors_.size() >= kMaxHeldErrors) {
+        return false;
+    }
+    // One question for an object at a time.
+    if (std::ranges::any_of(objectErrors_, [&](const ObjectError& e) { return e.object == object.id; })) {
+        return true;
+    }
+    std::string text = r.outcome == Outcome::StepLimit ? "Too many iterations." : r.reason;
+    if (r.outcome != Outcome::StepLimit && !r.detail.empty()) {
+        text += " " + r.detail;
+    }
+    objectErrors_.push_back({object.id, ticks_, std::move(text), r});
+    return true;
+}
+
+void LotSimulation::answerObjectError(ErrorAnswer answer) {
+    if (objectErrors_.empty()) {
+        return;
+    }
+    const ObjectError error = objectErrors_.front();
+    objectErrors_.pop_front();
+    SimObject* object = world_.find(error.object);
+    if (object == nullptr) {
+        return;
+    }
+    if (answer == ErrorAnswer::Delete) {
+        world_.remove(*object);
+    } else if (answer == ErrorAnswer::Reset) {
+        if (const ObjectType* type = code_.objectType(object->definition.guid())) {
+            resetAfterFailure(*object, *type);
+        }
     }
 }
 
@@ -1153,7 +1243,9 @@ void LotSimulation::runTimers(std::int16_t id) {
 void LotSimulation::tick() {
     diag::Timer timer("simulation tick");
     world_.advanceClock(kNormalTickMs);
-    std::vector<std::int16_t> ids;
+    // Kept between ticks so it reuses its storage.
+    thread_local std::vector<std::int16_t> ids;
+    ids.clear();
     world_.nextAfter(0, [&](const SimObject& o) {
         ids.push_back(o.id);
         return false;
@@ -1183,7 +1275,7 @@ void LotSimulation::tick() {
     }
     advanceClock(vm_.globals);
     forgetRemoved();
-    world_.purge();
+    purgeRemoved();
     world_.countTick();
     ++ticks_;
 }
@@ -1207,11 +1299,13 @@ void LotSimulation::pausedPass() {
         }
     }
     forgetRemoved();
-    world_.purge();
+    purgeRemoved();
 }
 
 void LotSimulation::tellAnimationEvents(double nowMs) {
-    std::vector<std::int16_t> ids;
+    // Kept between calls so it reuses its storage.
+    thread_local std::vector<std::int16_t> ids;
+    ids.clear();
     world_.nextAfter(0, [&](const SimObject& o) {
         ids.push_back(o.id);
         return false;

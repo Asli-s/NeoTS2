@@ -287,7 +287,10 @@ bool Execution::findBestInteraction(const bhav::Instruction& in) {
         [&](const SimObject& object, const ttab::Interaction& line) {
             return line.test != 0 && checkTreeKinds->changesLine(object.group, line.test);
         },
-        nullptr};
+        nullptr,
+        [&](const SimObject& object, const ttab::Interaction& line) {
+            return mayStartLine(line, sim, object, globals_[kParentalControlGlobal] != 0, true, false);
+        }};
     const auto found = ts2::sim::findBestInteraction(search);
     if (!found) {
         return false;
@@ -335,7 +338,8 @@ bool Execution::passesStartCheck(SimObject& sim, const SimObject& object, const 
         sim.data[field] = 0;
     }
     const bool autonomy = waiting.source == QueuedInteraction::Source::Autonomy;
-    if (!mayStartLine(*line, sim, object, globals_[kParentalControlGlobal] != 0, autonomy)) {
+    const bool debugOnly = !autonomy && object.shiftClicked && world_ != nullptr && world_->testingCheats;
+    if (!mayStartLine(*line, sim, object, globals_[kParentalControlGlobal] != 0, autonomy, debugOnly)) {
         return false;
     }
     if (line->test == 0) {

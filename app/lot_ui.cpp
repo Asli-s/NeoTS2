@@ -2,6 +2,7 @@
 
 #include "diagnostics.hpp"
 #include "content/ui_meters.hpp"
+#include "content/ui_queue.hpp"
 #include "content/ui_text.hpp"
 #include "content/wants.hpp"
 #include "diag/timing.hpp"
@@ -10,11 +11,19 @@
 #include <algorithm>
 #include <climits>
 #include <cstdlib>
+#include <functional>
 #include <string>
 
 namespace app {
 
 namespace {
+
+bool sameWants(const std::vector<ts2::swaf::Want>& a, const std::vector<ts2::swaf::Want>& b) {
+    return std::equal(a.begin(), a.end(), b.begin(), b.end(), [](const ts2::swaf::Want& x, const ts2::swaf::Want& y) {
+        return x.version == y.version && x.id == y.id && x.guid == y.guid && x.type == y.type && x.argument == y.argument &&
+               x.value == y.value && x.tail == y.tail && x.flags == y.flags;
+    });
+}
 
 constexpr std::uint32_t kScripts = 0xA99D8A11;
 constexpr std::uint32_t kPuck = 0x4905F85B, kLivePanel = 0x49060005, kOptionsMenu = 0x49060001;
@@ -75,7 +84,7 @@ constexpr std::size_t kRewardKind = 0x28;
 constexpr std::uint16_t kAspirationReward = 0x400, kCareerReward = 0x800;
 constexpr std::size_t kRewardPoints = 0xA1, kLifetimeLevels = 0xD9, kLifetimeLevelsSpent = 0xDA;
 constexpr std::uint32_t kFreeTime = 0x2000;
-constexpr std::uint32_t kPanelPortrait = 0x00000001, kPanelShadow = 0x00000002, kPanelStar = 0x4BDEFFAA;
+constexpr std::uint32_t kPanelPortrait = 0x00000001, kPanelShadow = 0x00000002, kPortraitConstants = 0x00000004, kPanelStar = 0x4BDEFFAA;
 // The options menu's windows.
 constexpr std::uint32_t kNeighborhood = 0x0000A210, kExitTutorial = 0x0000A211, kQuit = 0x0000A220;
 
@@ -121,6 +130,55 @@ ts2::tga::Pixels fitted(const ts2::tga::Pixels& image, std::uint32_t width, std:
     return ts2::content::scaled(image, width, height);
 }
 
+// The live panel's portrait windows as its script describes them: the portrait's picture (the shape
+// the selected Sim's portrait is cut to, with rounded corners and a curve at the bottom left by the
+// puck), its shadow's picture and how far the shadow is moved from the portrait, in the portrait's
+// pixels. The game moves it 5 and 5 when the script doesn't say.
+PortraitWindows portraitWindows(ts2::ui::Screen& screen) {
+    PortraitWindows out;
+    const auto script = screen.data().script(kScripts, kLivePanel);
+    if (!script) {
+        return out;
+    }
+    const std::function<const ts2::ui::Window*(const std::vector<ts2::ui::Window>&, std::uint32_t)> find =
+        [&](const std::vector<ts2::ui::Window>& windows, std::uint32_t id) -> const ts2::ui::Window* {
+        for (const auto& w : windows) {
+            if (w.number("id") == id) {
+                return &w;
+            }
+            if (const auto* inner = find(w.children, id)) {
+                return inner;
+            }
+        }
+        return nullptr;
+    };
+    const auto* holder = find(*script, kPortraitHolder);
+    if (holder == nullptr) {
+        return out;
+    }
+    const auto picture = [&](std::uint32_t id) {
+        const auto* window = find(holder->children, id);
+        const auto image = window ? window->list("image") : std::vector<std::int64_t>{};
+        if (image.size() < 2) {
+            return ts2::tga::Pixels{};
+        }
+        return screen.data()
+            .image(static_cast<std::uint32_t>(image[image.size() - 2]), static_cast<std::uint32_t>(image.back()))
+            .value_or(ts2::tga::Pixels{});
+    };
+    out.shape = picture(kPanelPortrait);
+    out.shadowShape = picture(kPanelShadow);
+    if (const auto* constants = find(holder->children, kPortraitConstants)) {
+        std::vector<std::string> lines;
+        for (const auto& w : constants->children) {
+            lines.push_back(w.text("caption"));
+        }
+        out.shadowX = ts2::content::uiConstant(lines, "kShadowOffsetX").value_or(out.shadowX);
+        out.shadowY = ts2::content::uiConstant(lines, "kShadowOffsetY").value_or(out.shadowY);
+    }
+    return out;
+}
+
 } // namespace
 
 LotUi::LotUi(ts2::ui::Screen& screen, int width, int height) : screen_(screen), width_(width), height_(height) {}
@@ -148,6 +206,7 @@ void LotUi::load() {
             screen_.setVisible(part, part == clock || part == pause || part == speeds);
         }
         panel_.attach(screen_, live_);
+        portraitWindows_ = portraitWindows(screen_);
         skewer_.attach(screen_, puck_);
         pauseFrame_.attach(screen_, width_, height_);
         queue_.attach(screen_);
@@ -170,9 +229,9 @@ void LotUi::load() {
 }
 
 void LotUi::setUpVersion() {
-    // The game shows its version here only with testingCheatsEnabled on, set up with the puck. There is
-    // no cheat console yet, so a release build never shows it and any other build always does.
-    if (releaseBuild()) {
+    // The game shows its version here only with testingCheatsEnabled on as the puck is set up. Turning
+    // it on later doesn't show it. Any build but a release shows it always.
+    if (releaseBuild() && !testingCheats_) {
         return;
     }
     version_ = screen_.findTop(kVersionText);
@@ -193,10 +252,11 @@ void LotUi::open() {
             screen_.setVisible(panel, true);
         }
     }
-    // The last lot's household goes. This one's comes with its simulation.
+    // The last lot's household goes. This one's comes with its simulation, and until then Live
+    // can't be used.
+    hasMembers_ = false;
     skewer_.setHousehold({});
     queue_.show({});
-    queue_.setVisible(true);
     showOptions(false);
 }
 
@@ -236,7 +296,6 @@ void LotUi::hideForFreeCamera(bool hide) {
         screen_.setVisible(live_, true);
     }
     showOptions(optionsWereShown_);
-    queue_.setVisible(true);
 }
 
 int LotUi::left(int window) const {
@@ -282,14 +341,20 @@ void LotUi::anchor(int panel) {
 }
 
 void LotUi::showOptions(bool show) {
+    // The options menu is not live mode, so the queue goes with the live panel.
+    queue_.setVisible(!show);
     if (options_ < 0) {
         return;
     }
     screen_.setVisible(options_, show);
-    screen_.setVisible(live_, !show);
+    // With nobody in the household, Live can't be used: its button is disabled and the live panel
+    // stays hidden.
+    screen_.setVisible(live_, !show && hasMembers_);
     skewer_.setLiveMode(!show);
     screen_.setChecked(screen_.find(puck_, kOptions), show);
-    screen_.setChecked(screen_.find(puck_, kLiveMode), !show);
+    const int live = screen_.find(puck_, kLiveMode);
+    screen_.setEnabled(live, hasMembers_);
+    screen_.setChecked(live, !show && hasMembers_);
 }
 
 bool LotUi::optionsShown() const { return options_ >= 0 && screen_.visible(options_); }
@@ -763,6 +828,7 @@ void LotUi::showHousehold(std::vector<Skewer::Member> members) {
     memoryPortraits_.clear();
     wantPopupPortraits_.clear();
     panel_.refreshWants();  // their pictures may be of the last household
+    wantsPending_ = true;  // the wants shown point at the pictures just cleared
     portraitShown_ = -1;
     for (auto& m : members) {
         // A broken character file could hold a huge picture. Portraits are 256 pixels.
@@ -773,7 +839,11 @@ void LotUi::showHousehold(std::vector<Skewer::Member> members) {
             portraits_[m.sim] = *m.portrait;
         }
     }
+    hasMembers_ = !members.empty();
     skewer_.setHousehold(std::move(members));
+    if (!hidden_) {
+        showOptions(optionsShown());
+    }
 }
 
 void LotUi::showLife(LotLife& life) {
@@ -786,15 +856,27 @@ void LotUi::showLife(LotLife& life) {
     memoryPortraits_.collect();
     wantPopupPortraits_.collect();
     queuePortraits_.collect();
-    // The live panel shows the selected Sim's whole portrait. Its shadow is not drawn yet.
+    // The live panel shows the selected Sim's portrait over its shadow.
     if (sim != portraitShown_ && live_ >= 0) {
         portraitShown_ = sim;
         const int holder = screen_.find(live_, kPortraitHolder);
         const auto it = portraits_.find(sim);
         screen_.setVisible(holder, it != portraits_.end());
         if (it != portraits_.end()) {
-            screen_.setImage(screen_.find(holder, kPanelPortrait), it->second);
-            screen_.setVisible(screen_.find(holder, kPanelShadow), false);
+            // The portrait is scaled to the window's picture and cut to its shape.
+            const auto& w = portraitWindows_;
+            screen_.setImage(screen_.find(holder, kPanelPortrait),
+                             w.shape.width > 0 ? ts2::content::masked(ts2::content::scaled(it->second, w.shape.width, w.shape.height), w.shape)
+                                               : it->second);
+            // The shadow is the portrait's silhouette moved down and right, then scaled and cut the same way.
+            const int shadow = screen_.find(holder, kPanelShadow);
+            const auto silhouette = ts2::content::portraitSilhouette(it->second);
+            const bool shadowShown = w.shadowShape.width > 0 && silhouette.width > 0;
+            if (shadowShown) {
+                const auto moved = ts2::content::placed(silhouette, silhouette.width, silhouette.height, w.shadowX, w.shadowY);
+                screen_.setImage(shadow, ts2::content::masked(ts2::content::scaled(moved, w.shadowShape.width, w.shadowShape.height), w.shadowShape));
+            }
+            screen_.setVisible(shadow, shadowShown);
         }
         starShown_.reset();
         showTracked(tracked_);
@@ -835,8 +917,23 @@ void LotUi::showLife(LotLife& life) {
         const auto data = life.personData(sim);
         panel_.setRelationships(panelRelationships(life, sim), data.size() > 0xBA ? data[0xBA] : 0);
     }
+    // The wants panel's texts and pictures are made again only when the wants change, a name may have
+    // changed or a target's portrait is still loading.
+    const auto& wants = life.wants(sim);
+    const auto& fears = life.fears(sim);
+    if (wantsPending_ || sim != wantsSim_ || life.namesVersion() != wantsNames_ || !sameWants(wants, wantsSaved_) ||
+        !sameWants(fears, fearsSaved_)) {
+        wantsShown_ = panelWants(life, wants);
+        fearsShown_ = panelWants(life, fears);
+        wantsSaved_ = wants;
+        fearsSaved_ = fears;
+        wantsSim_ = sim;
+        wantsNames_ = life.namesVersion();
+        const auto loading = [](const WantsPanel::Want& w) { return w.hasTarget && (!w.targetPicture || !w.popupTargetPicture); };
+        wantsPending_ = std::any_of(wantsShown_.begin(), wantsShown_.end(), loading) || std::any_of(fearsShown_.begin(), fearsShown_.end(), loading);
+    }
     const auto slots = life.wantSlots(sim);
-    panel_.setWants(panelWants(life, life.wants(sim)), panelWants(life, life.fears(sim)), slots.wants, slots.fears);
+    panel_.setWants(wantsShown_, fearsShown_, slots.wants, slots.fears);
     for (const std::int16_t member : life.household()) {
         skewer_.setMood(member, life.mood(member));
     }

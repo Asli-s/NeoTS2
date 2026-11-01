@@ -319,9 +319,10 @@ NeighborhoodUi::Content NeighborhoodUi::read(const fs::path& folder, const fs::p
 
 void NeighborhoodUi::open(const fs::path& folder, const std::string& name, Content content) {
     close();
-    // The panel's top left at the screen's, its puck in the bottom left corner (the game keeps the
-    // puck at the bottom of the panel, which it sizes to the screen).
+    // The panel covers the screen, and each time its size is set the game puts the puck in its
+    // bottom left corner.
     panel_ = screen_.load(kScripts, kPanel, 0, 0);
+    screen_.resize(panel_, width_, height_);
     puck_ = screen_.find(panel_, kPuck);
     screen_.move(puck_, 0, height_ - screen_.height(puck_));
     chooseVersions(screen_, puck_, folder);

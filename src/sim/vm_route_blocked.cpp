@@ -395,7 +395,7 @@ SimObject* Execution::makeDestination(SimObject& mover, const SimObject& other, 
     if (!slot || type == nullptr) {
         return nullptr;
     }
-    SimObject& made = world().create(type->group, type->definition, type->containerSlots);
+    SimObject& made = world().create(type->group, type->definition, containerSlotsOf(code_, *type));
     made.x = mover.x;
     made.y = mover.y;
     made.level = mover.level;

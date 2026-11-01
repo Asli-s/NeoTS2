@@ -717,7 +717,14 @@ bool Execution::turnOnTheSpot(SimObject& sim, Walking& walk, double now) {
 // The walk set's clips for my age and sex, as the planner reads them.
 std::optional<LocoClip> Execution::locoClip(const std::string& name) {
     const auto& clips = world().locoClips();
-    return clips && !name.empty() ? clips(name) : std::nullopt;
+    if (!clips || name.empty()) {
+        return std::nullopt;
+    }
+    if (auto clip = clips(name)) {
+        return clip;
+    }
+    const auto adult = adultClipFor(name);
+    return adult.empty() ? std::nullopt : clips(adult);
 }
 
 namespace {
@@ -1287,7 +1294,8 @@ std::optional<Execution::TurnStep> Execution::routeTree(const SimObject& sim, st
 // The goal check (OBJf entry 0x27) of the object my walking tree runs on, if it has one, to run on my
 // stack with that tree's stack object. It is given my route's slot as named and its goal's joint
 // (person data 0x25 and 0x26), a value not known yet (passed as 0, while the game's is an object some TVs' checks
-// look at), and the path still to walk in hundredths of a tile.
+// look at), and the path still to walk in hundredths of a tile. That path runs to the route's goal,
+// over every stair still ahead, measured flat. `remaining` is what is left of this stretch.
 std::optional<Execution::WalkStep> Execution::goalCheck(SimObject& sim, const Frame& f, float remaining) {
     const SimObject* on = world().find(f.runningOnId);
     if (on == nullptr || !sim.walking) {
@@ -1303,6 +1311,10 @@ std::optional<Execution::WalkStep> Execution::goalCheck(SimObject& sim, const Fr
     step.code = std::move(tree->code);
     step.codeOwner = on->group;
     step.stackObject = f.stackObjectId;
+    const Walking& walk = *sim.walking;
+    if (walk.ahead && !walk.route.points.empty()) {
+        remaining += distanceLeft(walk.ahead->points, 0, walk.route.points.back().first, walk.route.points.back().second);
+    }
     const auto hundredths = static_cast<std::int16_t>(std::clamp(remaining * 100.0f, 0.0f, 32767.0f));
     step.args = {sim.personData[kRouteSlotPersonData], sim.personData[kRouteJointPersonData], 0, hundredths};
     sim.walking->checking = true;

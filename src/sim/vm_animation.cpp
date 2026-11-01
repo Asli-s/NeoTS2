@@ -104,9 +104,9 @@ std::optional<bool> Execution::animateSim(const bhav::Instruction& in, Frame& f)
         name = specialAnimationName(sim, static_cast<std::uint16_t>(entry), &category);
     } else {
         const std::uint8_t ageList = content::ageAnimationList(a.list, sim.personData[kLifeStagePersonData]);
-        name = animationEntry(f, ageList, static_cast<std::uint16_t>(entry), false, &category);
+        name = animationEntry(f, ageList, static_cast<std::uint16_t>(entry), ageList == a.list, &category);
         if (!name && ageList != a.list) {
-            name = animationEntry(f, a.list, static_cast<std::uint16_t>(entry), false, &category);
+            name = animationEntry(f, a.list, static_cast<std::uint16_t>(entry), true, &category);
         }
     }
     if (!name) {
@@ -123,6 +123,11 @@ std::optional<bool> Execution::animateSim(const bhav::Instruction& in, Frame& f)
     const std::int16_t speed = a.speedFromTemp ? thread_.temps[2] : a.speed;
     if (speed == 0 && !resumed) {
         throw Stop{Outcome::Error, "Animation speed cannot be zero", ""};
+    }
+    // A name the game has no clip for plays nothing and the primitive is true at once. Hang Out
+    // names "-" for a pose change that has no clip.
+    if (const auto& lengths = world().animationLengths(); lengths && !lengths(*name)) {
+        return true;
     }
     PlayingAnimation play;
     play.name = *name;
@@ -290,6 +295,7 @@ void Execution::layOverlay(SimObject& sim, PlayingOverlay overlay) {
         diag::warnOnce("animation: more than 8 overlays at once drops the oldest");
         sim.overlays.erase(sim.overlays.begin());
     }
+    overlay.serial = 0;
     sim.overlays.push_back(std::move(overlay));
 }
 
@@ -330,6 +336,8 @@ std::string Execution::objectAnimationText(std::uint32_t owner, const SimObject*
 //   byte 2     flags: 0x01 flipped, 0x02 speed from temp 2, 0x04 entry in a param, 0x20 play count
 //              from temp 1, 0x40 no fade out, 0x80 no fade in
 //   byte 3     speed, in 32nds (32 = as authored)
+//   bytes 4-5  the tree told of the clip's events (0: none), from the running tree's code, run on
+//              the object that plays it (see tellAnimateSimEvents)
 //   byte 6, 7-8  the object that plays it (owner, data)
 //   byte 10    more flags: 0x01 flipped if temp 3, 0x02 the entry is for the Sim in temp 5 (see
 //              objectAnimationText), 0x20 the lists are the running tree's code, not the object's
@@ -403,6 +411,10 @@ bool Execution::animateObject(const bhav::Instruction& in, Frame& f) {
     play.fades = true;
     play.fadeInMs = fades.inMs;
     play.fadeOutMs = fades.outMs;
+    play.eventTree = static_cast<std::uint16_t>(o[4] | o[5] << 8);
+    play.eventCodeOwner = f.codeOwner;
+    play.eventStackObject = stackObject();
+    play.tellsEnd = true;
     // The clip it replaces plays on under it until it ends or the new one crossfades it.
     if (target->animation) {
         target->ending = std::move(target->animation);
@@ -512,6 +524,7 @@ bool Execution::animateStop(const bhav::Instruction& in, Frame& f) {
     if ((kind == 0 || kind == 2 || kind == 3 || kind >= kFirstCategoryKind) && target->animation &&
         matches(target->animation->name, target->animation->flipped, target->animation->layer, target->animation->category)) {
         target->animation->lengthMs = static_cast<float>(std::max(0.0, now - target->animation->startMs));
+        target->animation->endEventsTold = 2;
     }
     if ((kind == 0 || kind == 2 || kind == 3 || kind >= kFirstCategoryKind) && blendMs <= 0 && target->ending &&
         matches(target->ending->name, target->ending->flipped, target->ending->layer, target->ending->category)) {
@@ -820,7 +833,9 @@ bool Execution::reachTransfer(SimObject& sim, const Reaching& reach) {
 }
 
 // Look At (0x6E) turns the Sim's head toward an object, a slot of it or the camera, or with STOP
-// turns it back. It carries on at once (see LookController).
+// turns it back. It carries on at once (see LookController). STOP never reads its target, so a
+// STOP may name a variable that doesn't exist, as the chessboard's Practice/Join does with local 3
+// in a tree of 2 locals.
 bool Execution::lookAt(const bhav::Instruction& in, Frame& f) {
     constexpr float kRadiansPerDegree = 3.14159265358979f / 180;
     // What the latest looks look at, enough for the ones the controller may still tell of.
@@ -828,16 +843,16 @@ bool Execution::lookAt(const bhav::Instruction& in, Frame& f) {
     const LookAtOperands o = lookAtOperands(in.operands);
     SimObject& sim = me();
     const bool camera = (o.flags & 0x80) != 0;
-    const float towards = (o.flags & 0x08) ? static_cast<float>(thread_.temps[1]) : static_cast<float>(o.towards) * 2;
-    if (!(towards > 0)) {
-        throw Stop{Outcome::Error, "Look At turn speed must be above 0", std::to_string(towards)};
-    }
     std::int16_t target = -1;
-    if (!camera) {
+    if (!camera && !(o.flags & 0x01)) {
         target = read(o.owner, o.data, f);
         if (world().find(target) == nullptr) {
             throw Stop{Outcome::Error, "could not find object reference", std::to_string(target)};
         }
+    }
+    const float towards = (o.flags & 0x08) ? static_cast<float>(thread_.temps[1]) : static_cast<float>(o.towards) * 2;
+    if (!(towards > 0)) {
+        throw Stop{Outcome::Error, "Look At turn speed must be above 0", std::to_string(towards)};
     }
     const float away = (o.flags2 & 0x02)   ? static_cast<float>(thread_.temps[1])
                        : (o.flags2 & 0x01) ? static_cast<float>(thread_.temps[2])
