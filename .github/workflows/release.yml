@@ -36,9 +36,10 @@ jobs:
           function Get-Source([string[]]$urls, [string]$sha256) {
               $file = Join-Path $deps (Split-Path $urls[0] -Leaf)
               foreach ($url in $urls) {
+                  Write-Host "Downloading $url"
                   # curl gives up on a download that stalls (under 1 KB/s for 30 seconds) or takes over
-                  # five minutes, where Invoke-WebRequest's timeout only covers connecting.
-                  & "$env:SystemRoot\System32\curl.exe" -fsSL --retry 2 --connect-timeout 30 --max-time 300 `
+                  # two minutes, where Invoke-WebRequest's timeout only covers connecting.
+                  & "$env:SystemRoot\System32\curl.exe" -fsSL --retry 1 --connect-timeout 30 --max-time 120 `
                       --speed-limit 1024 --speed-time 30 -o $file $url
                   if ($LASTEXITCODE -eq 0) {
                       $hash = (Get-FileHash $file -Algorithm SHA256).Hash
@@ -50,8 +51,13 @@ jobs:
                   Remove-Item -Force $file -ErrorAction SilentlyContinue
               }
               if (-not (Test-Path $file)) { throw "Couldn't download $(Split-Path $file -Leaf) with SHA-256 $sha256." }
-              & "$env:SystemRoot\System32\tar.exe" -xf $file -C $deps
-              if ($LASTEXITCODE -ne 0) { throw "Couldn't unpack $file." }
+              # CMake unpacks .tar.xz itself, without the system's tar.
+              Write-Host "Unpacking $file"
+              Push-Location $deps
+              cmake -E tar xf $file
+              $unpacked = $LASTEXITCODE
+              Pop-Location
+              if ($unpacked -ne 0) { throw "Couldn't unpack $file." }
           }
           function Invoke-Native([string]$exe, [string[]]$arguments) {
               & $exe @arguments
@@ -68,8 +74,8 @@ jobs:
           Invoke-Native cmake @("--build", "$sdl\build")
           Invoke-Native cmake @("--install", "$sdl\build")
 
-          Get-Source @("https://download.savannah.gnu.org/releases/freetype/freetype-2.13.3.tar.xz",
-                       "https://downloads.sourceforge.net/project/freetype/freetype2/2.13.3/freetype-2.13.3.tar.xz") `
+          Get-Source @("https://downloads.sourceforge.net/project/freetype/freetype2/2.13.3/freetype-2.13.3.tar.xz",
+                       "https://download.savannah.gnu.org/releases/freetype/freetype-2.13.3.tar.xz") `
               "0550350666d427c74daeb85d5ac7bb353acba5f76956395995311a9c6f063289"
           $freetype = Join-Path $deps "freetype-2.13.3"
           Invoke-Native cmake @("-S", $freetype, "-B", "$freetype\build", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release",
