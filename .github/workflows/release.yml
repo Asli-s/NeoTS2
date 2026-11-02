@@ -11,6 +11,7 @@ jobs:
     if: github.repository == 'Asli-s/NeoTS2'
     name: Windows x64
     runs-on: windows-2022
+    timeout-minutes: 90
     defaults:
       run:
         shell: pwsh
@@ -25,12 +26,22 @@ jobs:
         run: |
           $deps = Join-Path $env:RUNNER_TEMP "deps"
           New-Item -ItemType Directory -Force $deps | Out-Null
-          function Get-Source([string]$url, [string]$sha256) {
-              $file = Join-Path $deps (Split-Path $url -Leaf)
-              Invoke-WebRequest $url -OutFile $file -MaximumRetryCount 3
-              $hash = (Get-FileHash $file -Algorithm SHA256).Hash
-              if ($hash -ne $sha256) { throw "$file has SHA-256 $hash, not $sha256." }
-              tar -xf $file -C $deps
+          # Each place is tried in turn, as a mirror can stall. Any copy with the right hash will do.
+          function Get-Source([string[]]$urls, [string]$sha256) {
+              $file = Join-Path $deps (Split-Path $urls[0] -Leaf)
+              foreach ($url in $urls) {
+                  try {
+                      Invoke-WebRequest $url -OutFile $file -TimeoutSec 120 -MaximumRetryCount 2
+                      $hash = (Get-FileHash $file -Algorithm SHA256).Hash
+                      if ($hash -eq $sha256) { break }
+                      Write-Warning "$url gave SHA-256 $hash, not $sha256."
+                  } catch {
+                      Write-Warning "$url failed: $_"
+                  }
+                  Remove-Item -Force $file -ErrorAction SilentlyContinue
+              }
+              if (-not (Test-Path $file)) { throw "Couldn't download $(Split-Path $file -Leaf) with SHA-256 $sha256." }
+              & "$env:SystemRoot\System32\tar.exe" -xf $file -C $deps
               if ($LASTEXITCODE -ne 0) { throw "Couldn't unpack $file." }
           }
           function Invoke-Native([string]$exe, [string[]]$arguments) {
@@ -47,7 +58,8 @@ jobs:
           Invoke-Native cmake @("--build", "$sdl\build", "--config", "Release", "--parallel")
           Invoke-Native cmake @("--install", "$sdl\build", "--config", "Release")
 
-          Get-Source "https://download.savannah.gnu.org/releases/freetype/freetype-2.13.3.tar.xz" `
+          Get-Source @("https://download.savannah.gnu.org/releases/freetype/freetype-2.13.3.tar.xz",
+                       "https://downloads.sourceforge.net/project/freetype/freetype2/2.13.3/freetype-2.13.3.tar.xz") `
               "0550350666d427c74daeb85d5ac7bb353acba5f76956395995311a9c6f063289"
           $freetype = Join-Path $deps "freetype-2.13.3"
           Invoke-Native cmake @("-S", $freetype, "-B", "$freetype\build", "-A", "x64", "-DFT_DISABLE_ZLIB=TRUE",
