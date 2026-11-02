@@ -36,13 +36,16 @@ jobs:
           function Get-Source([string[]]$urls, [string]$sha256) {
               $file = Join-Path $deps (Split-Path $urls[0] -Leaf)
               foreach ($url in $urls) {
-                  try {
-                      Invoke-WebRequest $url -OutFile $file -TimeoutSec 120 -MaximumRetryCount 2
+                  # curl gives up on a download that stalls (under 1 KB/s for 30 seconds) or takes over
+                  # five minutes, where Invoke-WebRequest's timeout only covers connecting.
+                  & "$env:SystemRoot\System32\curl.exe" -fsSL --retry 2 --connect-timeout 30 --max-time 300 `
+                      --speed-limit 1024 --speed-time 30 -o $file $url
+                  if ($LASTEXITCODE -eq 0) {
                       $hash = (Get-FileHash $file -Algorithm SHA256).Hash
                       if ($hash -eq $sha256) { break }
                       Write-Warning "$url gave SHA-256 $hash, not $sha256."
-                  } catch {
-                      Write-Warning "$url failed: $_"
+                  } else {
+                      Write-Warning "$url failed (curl exit code $LASTEXITCODE)."
                   }
                   Remove-Item -Force $file -ErrorAction SilentlyContinue
               }
