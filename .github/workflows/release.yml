@@ -1,14 +1,91 @@
-# Builds the Linux and macOS release downloads: on every v* tag, and by hand from the Actions page
-# (Run workflow) to try them before a release. The Windows zip is made locally by tools/release.ps1.
+# Builds the Windows, Linux and macOS release downloads. It runs only by hand, from the Actions page
+# (Run workflow), on the branch or tag chosen there.
 # Each job tests its build and keeps its download as the run's artifact, to attach to the release.
 name: release
 
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
 
 jobs:
+  windows:
+    if: github.repository == 'Asli-s/NeoTS2'
+    name: Windows x64
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # A release build names its commit and checks it against the release tags.
+          fetch-depth: 0
+      # SDL 3.4.16 with our Direct3D 12 fix (see third_party/sdl/README.md), and FreeType for the UI
+      # fonts. Each source download is checked against the hash of the one our releases were built from.
+      - name: Build SDL 3 and FreeType
+        run: |
+          $deps = Join-Path $env:RUNNER_TEMP "deps"
+          New-Item -ItemType Directory -Force $deps | Out-Null
+          function Get-Source([string]$url, [string]$sha256) {
+              $file = Join-Path $deps (Split-Path $url -Leaf)
+              Invoke-WebRequest $url -OutFile $file -MaximumRetryCount 3
+              $hash = (Get-FileHash $file -Algorithm SHA256).Hash
+              if ($hash -ne $sha256) { throw "$file has SHA-256 $hash, not $sha256." }
+              tar -xf $file -C $deps
+              if ($LASTEXITCODE -ne 0) { throw "Couldn't unpack $file." }
+          }
+          function Invoke-Native([string]$exe, [string[]]$arguments) {
+              & $exe @arguments
+              if ($LASTEXITCODE -ne 0) { throw "$exe $($arguments -join ' ') failed ($LASTEXITCODE)" }
+          }
+
+          Get-Source "https://github.com/libsdl-org/SDL/releases/download/release-3.4.16/SDL3-3.4.16.tar.gz" `
+              "7322236cd12090c3eb40b9728be4d49c76f66ad17d04369584d4ecad5cf77c68"
+          $sdl = Join-Path $deps "SDL3-3.4.16"
+          Invoke-Native git @("-C", $sdl, "apply", "$env:GITHUB_WORKSPACE\third_party\sdl\d3d12-descriptor-heap.patch")
+          Invoke-Native cmake @("-S", $sdl, "-B", "$sdl\build", "-A", "x64", "-DSDL_SHARED=ON", "-DSDL_STATIC=OFF",
+              "-DSDL_TESTS=OFF", "-DSDL_TEST_LIBRARY=OFF", "-DSDL_EXAMPLES=OFF", "-DCMAKE_INSTALL_PREFIX=$deps\sdl3")
+          Invoke-Native cmake @("--build", "$sdl\build", "--config", "Release", "--parallel")
+          Invoke-Native cmake @("--install", "$sdl\build", "--config", "Release")
+
+          Get-Source "https://download.savannah.gnu.org/releases/freetype/freetype-2.13.3.tar.xz" `
+              "0550350666d427c74daeb85d5ac7bb353acba5f76956395995311a9c6f063289"
+          $freetype = Join-Path $deps "freetype-2.13.3"
+          Invoke-Native cmake @("-S", $freetype, "-B", "$freetype\build", "-A", "x64", "-DFT_DISABLE_ZLIB=TRUE",
+              "-DFT_DISABLE_BZIP2=TRUE", "-DFT_DISABLE_PNG=TRUE", "-DFT_DISABLE_HARFBUZZ=TRUE", "-DFT_DISABLE_BROTLI=TRUE",
+              "-DCMAKE_INSTALL_PREFIX=$deps\freetype")
+          Invoke-Native cmake @("--build", "$freetype\build", "--config", "Release", "--parallel")
+          Invoke-Native cmake @("--install", "$freetype\build", "--config", "Release")
+      - name: Build
+        run: |
+          $deps = Join-Path $env:RUNNER_TEMP "deps"
+          cmake -S . -B build -A x64 -DNEOTS2_RELEASE=ON -DNEOTS2_STRICT=ON "-DSDL3_DIR=$deps\sdl3\cmake" `
+              "-Dfreetype_DIR=$deps\freetype\lib\cmake\freetype"
+          if ($LASTEXITCODE -ne 0) { throw "Configure failed." }
+          cmake --build build --config Release --target neots2 neots2-launcher vm_tests --parallel
+          if ($LASTEXITCODE -ne 0) { throw "Build failed." }
+      - name: Test
+        run: |
+          build\Release\vm_tests.exe
+          if ($LASTEXITCODE -ne 0) { throw "Tests failed." }
+      - name: Package
+        run: ./tools/package.ps1 -Build build\Release -Out build\download
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: build/download/NeoTS2-*
+          if-no-files-found: error
+      # Crash reports need the symbols of the very programs players run. Upload these with
+      # tools/upload_symbols.ps1 -Build <unpacked folder>\Release before the release goes out.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-symbols
+          path: |
+            build/Release/neots2.exe
+            build/Release/neots2-launcher.exe
+            build/Release/*.pdb
+            build/generated/neots2_version.hpp
+          if-no-files-found: error
+
   linux:
     if: github.repository == 'Asli-s/NeoTS2'
     name: Linux x86_64
