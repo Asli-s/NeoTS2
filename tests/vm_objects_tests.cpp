@@ -19,6 +19,35 @@ Instruction testObjectType(std::uint32_t guid, std::uint8_t idOwner, std::uint16
     return in;
 }
 
+// What only a Sim uses takes no room on an object that is not one: the person data is not made until it is written, and a walk, a running interaction and the like are
+// boxed. They read, write and copy as the plain arrays and optionals they replace.
+void aSimObjectKeepsWhatOnlySimsUseOnTheHeap() {
+    ts2::sim::World world;
+    auto& chair = world.create(kObjectGroup, typed(0x51515152));
+    const auto& readOnly = chair;
+    CHECK(readOnly.personData[0x3A] == 0 && readOnly.personData.size() == 256 && !chair.personData.allocated());  // a look is not a write
+    CHECK(!chair.walking && !chair.running && !chair.runningSub && !chair.turning && !chair.walkTail && !chair.postRoute && !chair.reaching);
+    chair.personData[0x3A] = 27;  // a write makes it
+    CHECK(chair.personData.allocated() && readOnly.personData[0x3A] == 27 && readOnly.personData[0x3B] == 0);
+    auto copy = chair;  // a copy has a copy of the values
+    copy.personData[0x3A] = 5;
+    CHECK(chair.personData[0x3A] == 27 && copy.personData[0x3A] == 5);
+    chair.running.emplace().object = 7;
+    CHECK(chair.running && chair.running->object == 7 && !chair.runningSub);
+    auto moved = chair;
+    chair.running->object = 8;
+    CHECK(moved.running->object == 7 && chair.running->object == 8);
+    chair.running = std::nullopt;
+    CHECK(!chair.running && moved.running);
+    moved.running.reset();
+    CHECK(!moved.running);
+    const ts2::sim::Boxed<int> empty;
+    CHECK(!empty.has_value() && empty.value_or(3) == 3 && empty == std::nullopt);
+    ts2::sim::Boxed<int> one = 4;
+    one = 9;
+    CHECK(*one == 9 && one.value_or(3) == 9 && one != std::nullopt);
+}
+
 // "My slot" / "stack object's slot" (owners 0x14 / 0x10): the object held in a container slot.
 void slotOwnersReadTheHeldObject() {
     MemoryCodeSource code;
@@ -2200,6 +2229,7 @@ std::vector<Test> vmObjectTests() {
         {"Removed objects keep their data until purge", removedObjectsKeepTheirDataUntilPurge},
         {"loaded Placeholders and TemplatePersons are kept until unload", loadedPlaceholdersAreKeptUntilUnload},
         {"removing me ends the run unless return immediately", removingMeEndsTheRunUnlessReturnImmediately},
+        {"A SimObject keeps what only Sims use on the heap", aSimObjectKeepsWhatOnlySimsUseOnTheHeap},
         {"Test Object Type compares GUIDs", testObjectTypeComparesGuids},
         {"Test Object Type on missing object is false", testObjectTypeOnMissingObjectIsFalse},
         {"Test Object Type can ask whether a GUID exists", testObjectTypeCanAskWhetherAGuidExists},

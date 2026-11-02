@@ -188,7 +188,7 @@ RunResult runAtOnce(Vm& vm, CodeSource& code, World& world, SimObject& sim, SimO
     }
     const std::int16_t priority = sim.personData[vm_detail::kPriorityPersonData];
     const std::int16_t autonomous = sim.personData[vm_detail::kInteractionAutonomousPersonData];
-    const std::optional<QueuedInteraction> running = sim.running;
+    const Boxed<QueuedInteraction> running = sim.running;
     sim.personData[vm_detail::kPriorityPersonData] = queued->priority;
     sim.personData[vm_detail::kInteractionAutonomousPersonData] = 0;
     if (sim.running) {

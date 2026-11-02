@@ -8,6 +8,7 @@
 #include "formats/swaf.hpp"
 #include "formats/weather.hpp"
 #include "sim/animation.hpp"
+#include "sim/boxed.hpp"
 #include "sim/idle_spot.hpp"
 #include "sim/look_at.hpp"
 #include "sim/data_tables.hpp"
@@ -224,7 +225,8 @@ struct SimObject {
     std::array<std::int16_t, kAttributeCount> attributes{};
     std::array<std::int16_t, kSemiAttributeCount> semiAttributes{};
     std::array<std::int16_t, kObjectDataCount> data{};
-    std::array<std::int16_t, kPersonDataCount> personData{};
+    // Only Sims use most of it: it takes no memory on an object until something writes it (see LazyArray).
+    LazyArray<std::int16_t, kPersonDataCount> personData;
     std::array<float, kMotiveCount> motives{};
     std::vector<MotiveChange> motiveChanges;
     // The tick a Sim's motives last decayed (they decay every 60 ticks). Not saved.
@@ -240,10 +242,10 @@ struct SimObject {
     std::int16_t actionIconObject = 0;
     // The interaction the Sim runs, from when Idle for Input or Gosub Found Action starts it until
     // its tree returns. Its icon is the action icon above. Not saved yet.
-    std::optional<QueuedInteraction> running;
+    Boxed<QueuedInteraction> running;
     // The one Idle for Input started at once (operand byte 4 bit 0) on top of it, until its tree
     // returns, with its own name and icon. Not saved yet.
-    std::optional<QueuedInteraction> runningSub;
+    Boxed<QueuedInteraction> runningSub;
     // The id the Sim's last queued interaction got.
     std::uint32_t nextInteractionId = 0;
     // The queue icon of autonomy's last pick, which Gosub Found Action gives the interaction it
@@ -304,7 +306,7 @@ struct SimObject {
         float speed = 1;
         double playedMs = 0;
     };
-    std::optional<ResumedClip> resumedClip;
+    Boxed<ResumedClip> resumedClip;
     // The Animate Sim clip it last finished, while that fades out (see PlayingAnimation::blendsOut).
     // For an object, the clip Animate Object last replaced. An instant Animate Stop removes it.
     std::optional<PlayingAnimation> ending;
@@ -317,8 +319,8 @@ struct SimObject {
     int looksStarted = 0;
     // A Sim's facing once it has turned (see turn.hpp). Before that, its direction (data 1).
     std::optional<float> heading;
-    std::optional<Turning> turning;
-    std::optional<Walking> walking;
+    Boxed<Turning> turning;
+    Boxed<Walking> walking;
     // When my last walk ended in its stop clip (clock ms) and the foot that stop began on: a walk
     // from standing begun soon after begins on that foot (see planWalkFor).
     struct WalkEnd {
@@ -334,17 +336,17 @@ struct SimObject {
         WalkPath path;       // the walk's path, which its clips play on to the end of
         std::int32_t level = 1;
     };
-    std::optional<WalkTail> walkTail;
+    Boxed<WalkTail> walkTail;
     // When my last interrupted or blocked walk settled (clock ms): the pose I was in fades out over
     // kSettlePoseMs while the walk pose fades in and out over kSettleWalkPoseMs. It only shows, so it
     // isn't saved.
     std::optional<double> walkSettledMs;
     // A routing slot this object was given in place of its type's slot 0 (see route_destinations.hpp).
-    std::optional<slot::Entry> ownRoutingSlot;
+    Boxed<slot::Entry> ownRoutingSlot;
     // The destinations a Sim's router made for it to make way, until nothing uses them.
     std::vector<std::int16_t> destinations;
-    std::optional<PostRouteWait> postRoute;
-    std::optional<Reaching> reaching;
+    Boxed<PostRouteWait> postRoute;
+    Boxed<Reaching> reaching;
     // Timers On Timer set on it, in the order they were set, and the last id given out.
     std::vector<ObjectTimer> timers;
     std::uint16_t lastTimerId = 0;

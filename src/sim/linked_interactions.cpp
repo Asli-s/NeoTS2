@@ -18,7 +18,7 @@ struct Found {
 };
 
 Found findOn(SimObject& sim, std::uint16_t id) {
-    const auto has = [id](const std::optional<QueuedInteraction>& q) { return q && q->linkId == id; };
+    const auto has = [id](const Boxed<QueuedInteraction>& q) { return q && q->linkId == id; };
     if (has(sim.running)) {
         return {&sim, &*sim.running, true};
     }
