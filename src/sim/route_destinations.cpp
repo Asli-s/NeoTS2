@@ -68,7 +68,7 @@ std::optional<slot::Entry> makeWaySlot(int mode, const SimObject& mover, const S
 
 void cleanUpDestinations(World& world, SimObject& owner, bool force) {
     const auto used = [&](std::int16_t id) {
-        const auto on = [id](const std::optional<QueuedInteraction>& q) { return q && q->object == id; };
+        const auto on = [id](const Boxed<QueuedInteraction>& q) { return q && q->object == id; };
         return on(owner.running) || on(owner.runningSub) ||
                std::ranges::any_of(owner.queue, [id](const QueuedInteraction& q) { return q.object == id; }) ||
                (owner.walking && (owner.walking->slotOwner == id || owner.walking->aside == id));

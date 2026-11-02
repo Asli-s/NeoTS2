@@ -1392,7 +1392,7 @@ void LotLife::update(double ms, ts2::scene::Scene& scene) {
                     // The walk drawn last handed back and this one started within the same update.
                     // Its clips play out their fade under this one, as when it handed back on an update of its own.
                     if (own.walking && object->walkTail && object->walkTail->startMs == own.walkStartMs) {
-                        own.tail = object->walkTail;
+                        own.tail = *object->walkTail;
                         own.tailHeading = own.endedHeading;
                         own.current.reset();
                     }
@@ -1426,7 +1426,7 @@ void LotLife::update(double ms, ts2::scene::Scene& scene) {
                     }
                     own.tail.reset();
                     if (object->walkTail && object->walkTail->startMs == own.walkStartMs) {
-                        own.tail = object->walkTail;
+                        own.tail = *object->walkTail;
                         own.tailHeading = own.endedHeading;
                     }
                 }

@@ -345,7 +345,7 @@ inline void noteSubQueue(SimObject& sim) {
     pd[kNextSubObjectPersonData] = first != sim.queue.end() ? first->object : 0;
     pd[kSubQueueMasterObjectPersonData] = sim.running ? sim.running->object : 0;
     pd[kSubQueueMasterIndexPersonData] = sim.running ? static_cast<std::int16_t>(sim.running->index) : 0;
-    const std::optional<QueuedInteraction>& shown = sim.runningSub ? sim.runningSub : sim.running;
+    const Boxed<QueuedInteraction>& shown = sim.runningSub ? sim.runningSub : sim.running;
     pd[kRunningIndexPersonData] = shown ? static_cast<std::int16_t>(shown->index) : 0;
     pd[kRunningObjectPersonData] = shown ? shown->object : 0;
 }

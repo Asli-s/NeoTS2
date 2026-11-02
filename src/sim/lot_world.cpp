@@ -33,6 +33,12 @@ bool copyInto(std::array<std::int16_t, N>& to, const std::vector<std::int16_t>& 
     return from.size() <= N;
 }
 
+template <std::size_t N>
+bool copyInto(LazyArray<std::int16_t, N>& to, const std::vector<std::int16_t>& from) {
+    std::copy_n(from.begin(), std::min(N, from.size()), to.begin());
+    return from.size() <= N;
+}
+
 std::optional<std::string> restoreStack(const content::Lot& lot, const content::LotObject& saved,
                                         SimObject& object, CodeSource& code) {
     if (!saved.state.tail) {
