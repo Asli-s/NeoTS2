@@ -21,11 +21,18 @@ constexpr std::uint32_t kPortraitGroup = 0x00001000, kPortrait = 0x00000001, kSh
 // colour fills.
 constexpr std::uint32_t kImages = 0x499DB772, kMoodGradient = 0xE9100002, kBackgroundPicture = 0xA9300115;
 constexpr std::uint32_t kFrame = 0x00002000;
-// Shown by the script but hidden in the game for a Sim at home: the platinum mood background and
-// the second frame.
-constexpr std::uint32_t kHiddenAtHome[] = {0x00009000, 0x00003000};
+// The frame a Sim's thumbnail shows in place of kFrame while the Sim is away (at work, at school and so on).
+constexpr std::uint32_t kAwayFrame = 0x00003000;
+// The platinum mood background, shown by the script but hidden in the game for a Sim at home.
+constexpr std::uint32_t kPlatinumBackground = 0x00009000;
 // The yellow star marking the Sim the camera tracks.
 constexpr std::uint32_t kTrackedMark = 0x00004000;
+// The away icons, one per bit of the UI icon flags (person data 0x34) from bit 0 up, 0 where a bit has
+// none: at work, at school, run away, sneaked out, none, on tour, hiking, jogging, banished by a witch
+// and roommate walkabout.
+constexpr std::uint32_t kAwayIcons[] = {0x5000, 0x6000, 0x7000, 0x8000, 0, 0x900A, 0xB00A, 0xA00A, 0xD00A, 0xD00B};
+// Shown in place of at work for a roommate.
+constexpr std::uint32_t kRoommateWork = 0xC00A;
 // The connector's top sits this far above the tile's bottom.
 constexpr int kSimConnectorOverlap = 9;
 
@@ -73,9 +80,7 @@ void Skewer::setHousehold(std::vector<Member> members) {
         if (thumbnail < 0) {
             break;
         }
-        for (const std::uint32_t id : kHiddenAtHome) {
-            s.setVisible(s.find(thumbnail, id), false);
-        }
+        s.setVisible(s.find(thumbnail, kPlatinumBackground), false);
         s.setVisible(s.find(thumbnail, kTrackedMark), m.sim == tracked_);
         const int group = s.find(thumbnail, kPortraitGroup);
         // Over the mood colour: the portrait's soft shadow, then the portrait (the script's own
@@ -95,6 +100,7 @@ void Skewer::select(std::int16_t sim) {
     selected_ = sim;
     for (const Thumbnail& t : thumbnails_) {
         screen_->setChecked(screen_->find(t.window, kFrame), t.sim == sim);
+        screen_->setChecked(screen_->find(t.window, kAwayFrame), t.sim == sim);
     }
 }
 
@@ -128,6 +134,24 @@ void Skewer::setMood(std::int16_t sim, int mood) {
             screen_->setImage(t.background, ts2::content::fillShape(backgroundShape_, ts2::content::pixel(moodGradient_, 0, static_cast<std::uint32_t>(row))));
             t.moodRow = row;
         }
+    }
+}
+
+void Skewer::setAwayIcons(std::int16_t sim, std::uint16_t flags, bool roommate) {
+    for (Thumbnail& t : thumbnails_) {
+        if (t.sim != sim || t.awayFlags == flags) {
+            continue;
+        }
+        t.awayFlags = flags;
+        for (std::size_t bit = 0; bit < std::size(kAwayIcons); ++bit) {
+            const bool on = (flags >> bit & 1) != 0;
+            if (kAwayIcons[bit] != 0) {
+                screen_->setVisible(screen_->find(t.window, kAwayIcons[bit]), on && !(bit == 0 && roommate));
+            }
+        }
+        screen_->setVisible(screen_->find(t.window, kRoommateWork), (flags & 1) != 0 && roommate);
+        screen_->setVisible(screen_->find(t.window, kFrame), flags == 0);
+        screen_->setVisible(screen_->find(t.window, kAwayFrame), flags != 0);
     }
 }
 

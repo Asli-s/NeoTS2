@@ -32,6 +32,9 @@ public:
     void setTracked(std::int16_t sim);
     // Colours a Sim's thumbnail background by its mood (-100..100).
     void setMood(std::int16_t sim, int mood);
+    // Shows the icons for where a Sim is away (person data 0x34, the UI icon flags, one icon per bit).
+    // `roommate` (person data 0x54 bit 0x800) shows the roommate work icon in place of at work.
+    void setAwayIcons(std::int16_t sim, std::uint16_t flags, bool roommate);
     // Sets the tip of a Sim's thumbnail, the Sim's name.
     void setName(std::int16_t sim, const std::string& name);
 
@@ -53,6 +56,7 @@ private:
         int window = -1;
         int background = -1;
         int moodRow = -1;  // the mood gradient row its background shows
+        int awayFlags = -1;  // the UI icon flags its icons show
     };
     std::vector<Thumbnail> thumbnails_;
     std::int16_t selected_ = 0;

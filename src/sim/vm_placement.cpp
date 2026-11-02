@@ -30,6 +30,12 @@ bool Execution::findLocationFor(const bhav::Instruction& in, Frame& f) {
     }
     if (o[0] == 1) {
         takeOutOfSlot(*placed);
+        // As the game takes an object out of the world, it clears object data 0x08 bits 0x20 and 0x100
+        // (what they mean is not known yet), sets its use count (object data 0x3E) to 0 and its room
+        // (object data 0x1D) to -1. At Work waits for that room before it marks a Sim as at work.
+        placed->data[8] &= static_cast<std::int16_t>(~0x120);
+        placed->data[0x3E] = 0;
+        placed->data[0x1D] = -1;
         placed->x = kOffLot;
         placed->y = kOffLot;
         placed->tile.reset();

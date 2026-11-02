@@ -934,8 +934,14 @@ void LotUi::showLife(LotLife& life) {
     }
     const auto slots = life.wantSlots(sim);
     panel_.setWants(wantsShown_, fearsShown_, slots.wants, slots.fears);
+    constexpr std::size_t kUiIconFlags = 0x34, kRoommateFlags = 0x54;
     for (const std::int16_t member : life.household()) {
         skewer_.setMood(member, life.mood(member));
+        const auto data = life.personData(member);
+        const auto memberPersonData = [&](std::size_t index) {
+            return index < data.size() ? static_cast<std::uint16_t>(data[index]) : std::uint16_t{0};
+        };
+        skewer_.setAwayIcons(member, memberPersonData(kUiIconFlags), (memberPersonData(kRoommateFlags) & 0x800) != 0);
     }
     showNames(life, sim);
     showQueue(life, sim);

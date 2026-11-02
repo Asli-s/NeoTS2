@@ -591,12 +591,12 @@ LotLife::LotLife(std::unique_ptr<ts2::sim::LotSimulation> sim, ts2::scene::Asset
         }
         return outfits_.hasOutfit(object.group, category);
     });
+    sim_->world().setAgeDataBuild([this](const ts2::sim::SimObject& sim, std::uint32_t age) { return buildAgeData(sim, age); });
 }
 
 void LotLife::traceIn(ts2::scene::Scene& scene, const ts2::scene::ScenePose& pose, const std::vector<std::uint8_t>& shown) {
     rays_ = std::make_unique<ts2::scene::SceneRays>(scene);
     pose_ = &pose;
-    sim_->world().setAgeDataBuild([this](const ts2::sim::SimObject& sim, std::uint32_t age) { return buildAgeData(sim, age); });
     sim_->world().setSimScale([&scene](std::int16_t object) {
         for (const auto& actor : scene.actors) {
             if (actor.object == static_cast<std::uint32_t>(object) && actor.rig) {
