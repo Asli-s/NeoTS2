@@ -23,7 +23,13 @@ jobs:
       # SDL 3.4.16 with our Direct3D 12 fix (see third_party/sdl/README.md), and FreeType for the UI
       # fonts. Each source download is checked against the hash of the one our releases were built from.
       - name: Build SDL 3 and FreeType
+        timeout-minutes: 30
         run: |
+          # Both are built with Ninja from Visual Studio's developer shell, which runs the compiler
+          # directly. Through MSBuild, a test compile in SDL's setup hung on GitHub's machines.
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments "-arch=x64 -host_arch=x64"
           $deps = Join-Path $env:RUNNER_TEMP "deps"
           New-Item -ItemType Directory -Force $deps | Out-Null
           # Each place is tried in turn, as a mirror can stall. Any copy with the right hash will do.
@@ -53,20 +59,21 @@ jobs:
               "7322236cd12090c3eb40b9728be4d49c76f66ad17d04369584d4ecad5cf77c68"
           $sdl = Join-Path $deps "SDL3-3.4.16"
           Invoke-Native git @("-C", $sdl, "apply", "$env:GITHUB_WORKSPACE\third_party\sdl\d3d12-descriptor-heap.patch")
-          Invoke-Native cmake @("-S", $sdl, "-B", "$sdl\build", "-A", "x64", "-DSDL_SHARED=ON", "-DSDL_STATIC=OFF",
-              "-DSDL_TESTS=OFF", "-DSDL_TEST_LIBRARY=OFF", "-DSDL_EXAMPLES=OFF", "-DCMAKE_INSTALL_PREFIX=$deps\sdl3")
-          Invoke-Native cmake @("--build", "$sdl\build", "--config", "Release", "--parallel")
-          Invoke-Native cmake @("--install", "$sdl\build", "--config", "Release")
+          Invoke-Native cmake @("-S", $sdl, "-B", "$sdl\build", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release",
+              "-DSDL_SHARED=ON", "-DSDL_STATIC=OFF", "-DSDL_TESTS=OFF", "-DSDL_TEST_LIBRARY=OFF", "-DSDL_EXAMPLES=OFF",
+              "-DCMAKE_INSTALL_PREFIX=$deps\sdl3")
+          Invoke-Native cmake @("--build", "$sdl\build")
+          Invoke-Native cmake @("--install", "$sdl\build")
 
           Get-Source @("https://download.savannah.gnu.org/releases/freetype/freetype-2.13.3.tar.xz",
                        "https://downloads.sourceforge.net/project/freetype/freetype2/2.13.3/freetype-2.13.3.tar.xz") `
               "0550350666d427c74daeb85d5ac7bb353acba5f76956395995311a9c6f063289"
           $freetype = Join-Path $deps "freetype-2.13.3"
-          Invoke-Native cmake @("-S", $freetype, "-B", "$freetype\build", "-A", "x64", "-DFT_DISABLE_ZLIB=TRUE",
-              "-DFT_DISABLE_BZIP2=TRUE", "-DFT_DISABLE_PNG=TRUE", "-DFT_DISABLE_HARFBUZZ=TRUE", "-DFT_DISABLE_BROTLI=TRUE",
-              "-DCMAKE_INSTALL_PREFIX=$deps\freetype")
-          Invoke-Native cmake @("--build", "$freetype\build", "--config", "Release", "--parallel")
-          Invoke-Native cmake @("--install", "$freetype\build", "--config", "Release")
+          Invoke-Native cmake @("-S", $freetype, "-B", "$freetype\build", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release",
+              "-DFT_DISABLE_ZLIB=TRUE", "-DFT_DISABLE_BZIP2=TRUE", "-DFT_DISABLE_PNG=TRUE", "-DFT_DISABLE_HARFBUZZ=TRUE",
+              "-DFT_DISABLE_BROTLI=TRUE", "-DCMAKE_INSTALL_PREFIX=$deps\freetype")
+          Invoke-Native cmake @("--build", "$freetype\build")
+          Invoke-Native cmake @("--install", "$freetype\build")
       - name: Build
         run: |
           $deps = Join-Path $env:RUNNER_TEMP "deps"
