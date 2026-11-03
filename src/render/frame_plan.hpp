@@ -11,6 +11,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace ts2::render {
@@ -58,6 +59,7 @@ struct FragmentUniforms {
     float emissive[4];  // added to the light before the texture (see scene::Material), w: 1 when on
     float uvTile[4];    // the texture coordinates times xy plus zw: one frame of a tiled texture
     float shadowReceiver[4];  // x: 1 when Sims' projected shadows fall on it, y: its level, z: 1 to fade them by the light map
+    float caustics[4];        // x: 1 for a pool floor, 2 for a pool wall, 3 for the caustics alone over a pond's ground, 0 for none (see scene::Material), yzw: the texture light
 };
 
 // The shaders' constant buffers pack in 16-byte rows, so these must match them field for field.
@@ -65,7 +67,8 @@ static_assert(sizeof(VertexUniforms) % 16 == 0 && offsetof(VertexUniforms, eye) 
 static_assert(offsetof(SkinnedUniforms, jointBase) == 720 && sizeof(SkinnedUniforms) % 16 == 0);
 static_assert(sizeof(FragmentUniforms) % 16 == 0 && offsetof(FragmentUniforms, lightMap) == 48 &&
               offsetof(FragmentUniforms, envCube) == 128 && offsetof(FragmentUniforms, emissive) == 192 &&
-              offsetof(FragmentUniforms, uvTile) == 208 && offsetof(FragmentUniforms, shadowReceiver) == 224);
+              offsetof(FragmentUniforms, uvTile) == 208 && offsetof(FragmentUniforms, shadowReceiver) == 224 &&
+              offsetof(FragmentUniforms, caustics) == 240);
 
 // The Sims' shadow pictures share one atlas, a square of tiles each simshadows::kResolution texels
 // wide.
@@ -79,8 +82,14 @@ struct ShadowUniforms {
     float shade[4];                        // rgb: what a shadow multiplies the ground by, w: how many casters
     // The lot objects' shadows: the grid's first tile (x, y) and its size in tiles (z by w, 0 for none).
     float objectGrid[4];
+    // The pools' caustics: world to the pool shadow map's texture coordinates and depth, world to
+    // the lot, and toward the sun.
+    float poolShadow[16];
+    float toLot[16];
+    float poolSun[4];
 };
-static_assert(sizeof(ShadowUniforms) % 16 == 0 && offsetof(ShadowUniforms, shade) == 1280 && offsetof(ShadowUniforms, objectGrid) == 1296);
+static_assert(sizeof(ShadowUniforms) % 16 == 0 && offsetof(ShadowUniforms, shade) == 1280 && offsetof(ShadowUniforms, objectGrid) == 1296 &&
+              offsetof(ShadowUniforms, poolShadow) == 1312 && offsetof(ShadowUniforms, poolSun) == 1440);
 
 // The lot objects' pictures from the sun: an atlas of kObjectTilesAcross square tiles of
 // simshadows::kResolution texels, each picture in the corner of its tile.
@@ -117,6 +126,65 @@ struct WaterUniforms {
     float screen[2];
     float offset, scale, speed, time, padding[2];
 };
+
+// What a pool's water surface is drawn with (see pool.vert.hlsl).
+struct PoolUniforms {
+    float viewProjection[16];
+    float model[16];
+    float eye[4];
+    float waveX[4];
+    float waveY[4];
+    float waveNormal[4];
+    float light[4];
+    float lightColor[4];
+    float night[4];
+    float time[4];
+    float tint[4];
+};
+static_assert(sizeof(PoolUniforms) == 272);
+
+// What the water in a lot's ponds is drawn with (see pond.vert.hlsl).
+struct PondUniforms {
+    float viewProjection[16];
+    float model[16];
+    float eye[4];
+    float light[4];   // rgb: the outdoors' texture light, which tints the sky's reflection
+    float ripple[4];  // x: seconds the lot has run unpaused, y: the slide's turn rate (radians a second), z: repeats per tile
+    float padding[4];
+};
+static_assert(sizeof(PondUniforms) == 192);
+
+// How far under a pool's water the lot is mirrored for its reflection.
+constexpr float kPoolMirrorDrop = 0.01f;
+
+// The pools' caustics tile and shadow map, in texels a side (the game's causticsTile and
+// poolRenderTarget).
+constexpr unsigned kCausticsTile = 64;
+constexpr unsigned kPoolShadowMap = 1024;
+
+// The sun's view of a pool, as the game fits it for the caustics: looking along the sun, across the
+// pool's box (see scene::Instance::poolBox) widened 2 tiles each way and raised 6, as deep as the
+// box is along the sun and as tall as that depth, hanging from the box's top. `clip` takes the
+// world to its clip space (depth 0 to 1), `texture` to the shadow map's texture coordinates and
+// depth, `toLot` to the lot.
+struct PoolLight {
+    Mat4 clip, texture, toLot;
+};
+PoolLight poolLight(const std::array<float, 12>& lotPlace, const std::array<float, 6>& box, const Vec3& toSun);
+
+// What draws the caustics tile: the flipbook's frame (column, row) out of 8 by 4, and its colour.
+struct CausticsUniforms {
+    float frame[4];  // xy: the frame's corner in the flipbook (0..1), zw: one frame's size
+    float color[4];
+};
+CausticsUniforms causticsFrame(float seconds, float brightness);
+
+// The view a pool's reflection is drawn with: `viewProjection` mirrored in the level plane at
+// height `plane`, then flipped left to right as the game flips it, which keeps triangles' winding.
+// Its depth is w minus the height above the plane, so nothing below the plane is drawn and the
+// lowest surface in front wins, as in the game's reflection. `keepBelow` draws that much under the
+// plane too (0 in the game).
+Mat4 poolMirror(const Mat4& viewProjection, float plane, float keepBelow = 0);
 
 enum class InView { Outside, Inside, Partly };
 
@@ -209,6 +277,15 @@ struct FramePlan {
                              std::vector<Draw>& layers, std::vector<Draw>& blended);
     // One draw's uniforms and textures: its place, the lights it is lit by, and its material.
     static DrawUniforms uniformsFor(const RendererState& state, const ResourceQuery& resources, const FrameView& f, const Draw& d, int blend);
+    // A pool's water surface's uniforms (see scene::Material::poolSurface).
+    static PoolUniforms poolUniformsFor(const RendererState& state, const FrameView& f, const Draw& d);
+    // The water in a lot's ponds' uniforms (see scene::Material::pondWater).
+    static PondUniforms pondUniformsFor(const RendererState& state, const FrameView& f, const Draw& d);
+    // The first pool water surface in `blended`, nullptr for none.
+    static const Draw* poolWater(const std::vector<Draw>& blended);
+    // What casts the pools' shadow for their caustics, as the game draws it: lot objects and Sims, and
+    // the pool's own floor and walls, wherever they reach the sun's view `clip`.
+    static void poolCasters(const RendererState& state, const ResourceQuery& resources, const Mat4& clip, std::vector<Draw>& out);
 
     // The Sims casting projected shadows this frame, at most kMaxShadowCasters (the rest cast none).
     // Each one's skinned primitives that can be drawn, in its tile's order.

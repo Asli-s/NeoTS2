@@ -75,6 +75,9 @@ protected:
     std::uint32_t highlightObject_ = 0;
     float highlightAmbient_ = 0;
     Shadows shadows_;
+    // This frame's pool caustics are drawn: its tile and shadow map are made (a renderer that draws
+    // them sets it).
+    bool poolCaustics_ = false;
 
     // What a frame plan reads (see frame_plan.hpp).
     friend struct FramePlan;

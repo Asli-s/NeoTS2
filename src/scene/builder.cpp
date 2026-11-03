@@ -477,6 +477,10 @@ int SceneBuilder::material(const std::string& name) {
         const std::string bump = property(m, "stdMatNormalMapTextureName");
         out.normalMap = normalMap(bump.empty() ? "reggrid-bump" : bump);
     }
+    // A pool's floor tiles (the FloorPool shader with floorCausticsPass) show the pools' caustics.
+    if (m.type == "FloorPool" && enabled("floorCausticsPass")) {
+        out.caustics = 1;
+    }
     // Floors bump-map like standard materials, through their incidence map.
     if (m.type == "Floor" && enabled("stdMatNormalMapTextureEnabled")) {
         const std::string bump = property(m, "stdMatNormalMapTextureName");
@@ -539,6 +543,78 @@ int SceneBuilder::blendedColorMaterial(const std::string& name, const std::array
     m.alpha = AlphaMode::Blend;
     m.layer = layer;
     m.unlit = true;
+    return addMaterial(key, std::move(m));
+}
+
+int SceneBuilder::poolSurfaceMaterial(const std::string& name, const std::string& bump, const std::string& caustics, int layer,
+                                      const std::array<float, 3>& tint, float murk) {
+    const std::string key = lower(name);
+    if (const auto it = materials_.find(key); it != materials_.end()) {
+        return it->second;
+    }
+    const int normals = normalMap(bump);
+    if (normals < 0) {
+        return -1;
+    }
+    Material m;
+    m.name = name;
+    m.alpha = AlphaMode::Blend;
+    m.layer = layer;
+    m.unlit = true;
+    m.normalMap = normals;
+    m.poolSurface = true;
+    m.color = {tint[0], tint[1], tint[2], std::clamp(murk, 0.0f, 1.0f)};
+    m.causticsImage = image(caustics);
+    return addMaterial(key, std::move(m));
+}
+
+int SceneBuilder::pondWaterMaterial(const std::string& name, const std::string& cube, const std::array<std::string, 2>& ripples,
+                                    int layer) {
+    const std::string key = lower(name);
+    if (const auto it = materials_.find(key); it != materials_.end()) {
+        return it->second;
+    }
+    Material m;
+    m.name = name;
+    m.alpha = AlphaMode::Blend;
+    m.layer = layer;
+    m.unlit = true;
+    m.doubleSided = true;
+    m.envCube = envCube(cube);
+    m.ripples = {normalMap(ripples[0]), normalMap(ripples[1])};
+    if (m.envCube < 0 || m.ripples[0] < 0 || m.ripples[1] < 0) {
+        return -1;
+    }
+    m.pondWater = true;
+    return addMaterial(key, std::move(m));
+}
+
+std::string SceneBuilder::poolWallMaterial(const std::string& name) {
+    const std::string key = lower(name) + "|pool wall";
+    if (materials_.contains(key)) {
+        return key;
+    }
+    const int base = material(name);
+    if (base < 0) {
+        return name;
+    }
+    Material m = scene_.materials[static_cast<std::size_t>(base)];
+    m.caustics = 2;
+    addMaterial(key, std::move(m));
+    return key;
+}
+
+int SceneBuilder::causticsOverlayMaterial(const std::string& name) {
+    const std::string key = lower(name);
+    if (const auto it = materials_.find(key); it != materials_.end()) {
+        return it->second;
+    }
+    Material m;
+    m.name = name;
+    // Black, summed: drawn without the caustics, it adds nothing.
+    m.color = {0, 0, 0, 1};
+    m.alpha = AlphaMode::Sum;
+    m.caustics = 3;
     return addMaterial(key, std::move(m));
 }
 

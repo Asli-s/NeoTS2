@@ -107,6 +107,20 @@ public:
     // A plain see-through color (its alpha last), unlit, blended over what lies behind it, on draw
     // layer `layer`.
     int blendedColorMaterial(const std::string& name, const std::array<float, 4>& color, int layer);
+    // A pool's water surface (see Material::poolSurface) waved by the bump map `bump`, on draw layer
+    // `layer`, `tint` added to it (the game's pools add 0, 0.25, 0.5). `murk` (0 to 1, 0 in the game)
+    // dims its mirror image and hides more of what is under it. -1 when the bump map is missing.
+    int poolSurfaceMaterial(const std::string& name, const std::string& bump, const std::string& caustics, int layer,
+                            const std::array<float, 3>& tint = {0, 0.25f, 0.5f}, float murk = 0);
+    // The water in a lot's ponds (see Material::pondWater), on draw layer `layer`, its ripples the
+    // normal maps of the bump maps `ripples`. -1 when its textures are missing.
+    int pondWaterMaterial(const std::string& name, const std::string& cube, const std::array<std::string, 2>& ripples, int layer);
+    // A pool wall's covering: the material `name`, lit by the pools' caustics. Returns the name to
+    // find it by, or `name` when that material is missing.
+    std::string poolWallMaterial(const std::string& name);
+    // The pools' floor caustics alone, added over what is below: the ground under ponds drawn like
+    // pools (not in the original game). Adds nothing when the pools' caustics aren't drawn.
+    int causticsOverlayMaterial(const std::string& name);
     // A particle sprite as the game's StandardParticlesMaterial draws it: the texture (clamped)
     // times `color`, unlit, from both sides, added over what lies behind it or blended, on draw
     // layer `layer`. -1 when the texture is missing.
@@ -135,6 +149,10 @@ public:
 
     // Whether models' shadows on walls are drawn too (the neighborhood draws all of its trees' shadows).
     void setDrawShadows(bool draw) { drawShadows_ = draw; }
+    // Whether lots' ponds are drawn like pools, with their surface, depth tint and caustics. Not in
+    // the original game, which draws them with its waterOnTerrain material.
+    void setPoolStylePonds(bool on) { poolStylePonds_ = on; }
+    bool poolStylePonds() const { return poolStylePonds_; }
 
     std::size_t missingModels = 0, missingMaterials = 0;
 
@@ -166,6 +184,7 @@ private:
     Assets& assets_;
     Scene scene_;
     bool drawShadows_ = false;
+    bool poolStylePonds_ = false;
     std::map<std::string, int> models_, materials_, images_, envCubes_;
     std::map<std::string, std::map<std::string, Transform>> bones_;
     std::map<std::string, std::string> followJoints_;  // see followJoint, by the name bone() takes

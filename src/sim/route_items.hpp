@@ -3,6 +3,7 @@
 #include "formats/array3d.hpp"
 #include "formats/fencepostlayer.hpp"
 #include "formats/stringmap.hpp"
+#include "formats/terrain.hpp"
 #include "formats/walllayer.hpp"
 #include "formats/wallgraph.hpp"
 #include "sim/route_grid.hpp"
@@ -43,9 +44,11 @@ std::vector<RouteItem> postRouteItems(const std::vector<fencepostlayer::Post>& p
 // counts from the ground storey (0). `lowestLevel` is the level the floor grid starts at (-1 on lots
 // with a level below the ground). `heights` (corner heights) and `surface` (grid 21) find the ground
 // tiles under a raised floor, which block as its foundation. Without them no tile is a foundation.
+// `water` (the water height at each corner) blocks a ground tile with a corner under water, as a
+// pond's are.
 std::vector<RouteItem> floorRouteItems(const array3d::Array3D& floors, const array3d::Array3D* heights, const array3d::Array3D* surface,
                                        const std::map<std::uint16_t, stringmap::Entry>& patterns, int level, int lowestLevel, int width,
-                                       int height);
+                                       int height, const terrain::Array2D* water = nullptr);
 
 // The rings the path search keeps round another Sim, filed under `owner` (the Sim's id): its
 // square grown by 0.1875 tiles at cost 7.5 and by 0.0625 at cost 10, and by 0.375 at cost 5 unless

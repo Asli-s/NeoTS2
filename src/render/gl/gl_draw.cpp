@@ -217,6 +217,11 @@ void GlRenderer::drawList(const FrameView& f, const std::vector<Draw>& list, int
         }
         const auto& p = *d.primitive;
         const scene::Material* m = d.material;
+        // A pool's water surface needs the lot's reflection, which this renderer doesn't draw, and the
+        // ponds' water has no shader here yet.
+        if (m && (m->poolSurface || m->pondWater)) {
+            continue;
+        }
         State state;
         state.blend = !blend || !m                          ? blend
                       : m->alpha == scene::AlphaMode::Add ? 2

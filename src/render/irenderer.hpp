@@ -154,7 +154,8 @@ public:
     // How objects are lit from the next frame on (see scene::Scene::objectLighting).
     virtual void setObjectLighting(std::optional<scene::ObjectLighting> lighting) = 0;
 
-    // The time animated surfaces (the neighborhood water) are drawn at, in seconds.
+    // The time animated surfaces are drawn at, in seconds: real time for the neighborhood water, and in a
+    // lot real time that stops while the lot is paused for its pools' water, as the game's runs at every speed.
     virtual void setTime(float seconds) = 0;
     // The lot's clock in seconds, which stops while the lot is paused: what animated textures
     // (candle flames) play on.

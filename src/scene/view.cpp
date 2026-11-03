@@ -63,6 +63,15 @@ std::vector<std::uint8_t> visibleInstances(const Scene& scene, const View& view)
     std::vector<std::uint8_t> visible(scene.instances.size());
     for (std::size_t i = 0; i < scene.instances.size(); ++i) {
         const Instance& instance = scene.instances[i];
+        if (instance.underside != Underside::None) {
+            // The storey above the one looked at shows them only with Toggle Ceiling on and the
+            // camera below its floor. The edges above walls show only with the toggle on, on the
+            // storeys below too.
+            const bool above = instance.level == view.level + 1 && view.ceilings && view.eyeHeight < instance.floorHeight;
+            visible[i] = instance.underside == Underside::Floor ? instance.level <= view.level || above
+                                                                : view.ceilings && (instance.level <= view.level || above);
+            continue;
+        }
         bool show = instance.part == Part::Other || instance.level <= view.level;
         switch (instance.part) {
         case Part::Roof:

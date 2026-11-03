@@ -88,6 +88,9 @@ private:
     void makeClipPipeline(const std::filesystem::path& shaders);
     void makeSkyPipeline(const std::filesystem::path& shaders);
     void makeWaterPipeline(const std::filesystem::path& shaders);
+    void makePoolPipeline(const std::filesystem::path& shaders);
+    void makePondPipeline(const std::filesystem::path& shaders);
+    void makeCausticsPipelines(const std::filesystem::path& shaders);
     void makeShadowPipelines(const std::filesystem::path& shaders);
     void destroy();
     void releaseSprites();
@@ -99,10 +102,19 @@ private:
     struct Frame;
     [[nodiscard]] bool reflectionReady(unsigned width, unsigned height);
     void drawReflection(const Frame& f);
-    void drawSky(const Frame& f, SDL_GPURenderPass* on, SDL_GPUTexture* cube, float up);
+    void drawSky(const Frame& f, SDL_GPURenderPass* on, SDL_GPUTexture* cube, const std::array<float, 12>& camera);
     void drawBoundary(const Frame& f);
     void drawTerrain(const Frame& f, SDL_GPURenderPass* on, const Mat4& viewProjection, bool reflected);
     void drawList(const Frame& f, const std::vector<Draw>& list, int blend);
+    // The pools' reflection: the lot mirrored in a pool's water (see poolMirror), drawn into
+    // poolReflection_. False when it couldn't be made.
+    [[nodiscard]] bool poolReflectionReady(unsigned width, unsigned height);
+    void drawPoolReflection(const Frame& f, float plane, float keepBelow);
+    void drawPoolSurface(const Frame& f, const Draw& d);
+    void drawPondWater(const Frame& f, const Draw& d);
+    // The pools' caustics tile and shadow map for the pool water draw `pool`, and the shadow
+    // uniforms they are read with. False when they couldn't be drawn (no sun or no flipbook).
+    [[nodiscard]] bool drawPoolCaustics(const Frame& f, const Draw& pool, ShadowUniforms& shadows);
     [[nodiscard]] std::size_t drawShadows(const Frame& f);
     void makeObjectShadowPipelines(const std::filesystem::path& shaders);
     // Makes the objects' pictures, list and grid again when the shadows' layout changed.
@@ -133,6 +145,9 @@ private:
     // Pipelines by [two-sided][blend]: opaque and alpha-tested surfaces write depth, blended ones don't.
     SDL_GPUGraphicsPipeline* pipelines_[2][4] = {};  // by two-sided, then opaque, blended, added or summed
     SDL_GPUGraphicsPipeline* skinnedPipelines_[2][4] = {};  // the same for skinned primitives
+    // The same two clipping depth instead of clamping it, for the pools' reflection.
+    SDL_GPUGraphicsPipeline* clippedPipelines_[2][4] = {};
+    SDL_GPUGraphicsPipeline* clippedSkinnedPipelines_[2][4] = {};
     SDL_GPUBuffer* jointBuffer_ = nullptr;  // jointData_ on the GPU
     std::size_t jointCapacity_ = 0;  // floats the buffer holds
 
@@ -153,6 +168,23 @@ private:
     SDL_GPUTexture* reflection_ = nullptr;
     SDL_GPUTexture* reflectionDepth_ = nullptr;
     unsigned reflectionWidth_ = 0, reflectionHeight_ = 0;
+
+    // The water in the lot's ponds.
+    SDL_GPUGraphicsPipeline* pondPipeline_ = nullptr;
+    // The pools' water surface, and the lot mirrored in it each frame a pool is in view.
+    SDL_GPUGraphicsPipeline* poolPipeline_ = nullptr;
+    SDL_GPUTexture* poolReflection_ = nullptr;
+    SDL_GPUTexture* poolReflectionDepth_ = nullptr;
+    unsigned poolReflectionWidth_ = 0, poolReflectionHeight_ = 0;
+    bool poolReflected_ = false;  // poolReflection_ holds this frame's picture
+    // The pools' caustics: the tile drawn from the flipbook each frame, and the shadow map from the
+    // sun (depth along the sun, with its depth buffer), made once.
+    SDL_GPUGraphicsPipeline* causticsPipeline_ = nullptr;
+    SDL_GPUGraphicsPipeline* poolShadowPipeline_ = nullptr;
+    SDL_GPUGraphicsPipeline* poolShadowSkinnedPipeline_ = nullptr;
+    SDL_GPUTexture* causticsTile_ = nullptr;
+    SDL_GPUTexture* poolShadow_ = nullptr;
+    SDL_GPUTexture* poolShadowDepth_ = nullptr;
 
     // The Sims' projected shadows: their pictures and the same blurred, an atlas each (see
     // kShadowTilesAcross), and how they are drawn and read.

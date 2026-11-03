@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -27,6 +28,8 @@ struct Array2D {
 
     // The first byte of the element at (x, y), or 0 outside the grid.
     std::uint8_t byte(std::int32_t x, std::int32_t y) const;
+    // The element at (x, y) read as a float, or none outside the grid or when elements aren't 4 bytes.
+    std::optional<float> f32(std::int32_t x, std::int32_t y) const;
 };
 
 Array2D parseArray2D(std::span<const std::uint8_t> data);

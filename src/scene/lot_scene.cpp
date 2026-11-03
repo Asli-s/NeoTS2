@@ -8,6 +8,7 @@
 #include "formats/resource_types.hpp"
 #include "scene/lot_parts.hpp"
 #include "scene/pool_water.hpp"
+#include "scene/terrain_water.hpp"
 #include "scene/rig.hpp"
 #include "scene/sim_builder.hpp"
 #include "scene/sims.hpp"
@@ -15,6 +16,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <set>
 #include <sstream>
 #include <string_view>
@@ -154,6 +156,7 @@ public:
         drawTerrain();
         drawFloors();
         drawPoolWater();
+        drawPondWater();
         placeRoofs();
         // The sky behind a lot by day, as the game's lot sky effect draws it (its plain-weather
         // skybox, seasons and weather pick others). Lighting the lot puts in its state's sky.
@@ -246,7 +249,11 @@ private:
                         return std::string();
                     }
                     const std::string material = assets_.patternMaterial(pattern->second.name, true);
-                    return b_.material(material) >= 0 ? material : std::string();
+                    if (b_.material(material) < 0) {
+                        return std::string();
+                    }
+                    // The pool's own walls show its caustics (the game names their material "PoolWall").
+                    return style != styles.end() && style->first == kPoolEdgeStyle ? b_.poolWallMaterial(material) : material;
                 };
                 t.left = t.leftCovering = side(covering->second->left);
                 t.right = t.rightCovering = side(covering->second->right);
@@ -306,6 +313,16 @@ private:
         auto& maps = lightMaps();
         const auto floors = lot_.grids.find(content::kFloorGridInstance);
         if (!maps.floors.empty() || floors == lot_.grids.end()) {
+            return;
+        }
+        // Each map has 8 texels per tile side, and each level a map and an incidence map. A lot larger
+        // than the lighting accepts gets none, so a broken grid size can't ask for gigabytes. In all
+        // the maps stay under 256 x 256 tiles over 4 levels, about 128 MB.
+        constexpr std::uint64_t kMaxTiles = 256, kMaxLevels = 64, kMaxTileLevels = 256 * 256 * 4;
+        const auto& grid = floors->second;
+        if (grid.width > kMaxTiles || grid.height > kMaxTiles || grid.levels > kMaxLevels ||
+            std::uint64_t{grid.width} * grid.height * grid.levels > kMaxTileLevels) {
+            diag::warnOnce("lot: a floor grid larger than lighting accepts is left unlit");
             return;
         }
         // Every level, from the lowest (a pool's storey under the ground one), as the lot is lit.
@@ -385,15 +402,25 @@ private:
                 log(object, "model not found", so.model);
                 continue;
             }
-            // Stair pieces (header value 4 names their staircase) keep their own height in value 3. Other
-            // objects stand on their storey's floor, raised by value 3 (the pieces of a stacked chimney).
+            // Stair pieces (header value 4 names their staircase) stand at the height in value 3, even
+            // when it is 0 and the floor under them is lower. Other objects stand on their storey's
+            // floor, raised by value 3 (the pieces of a stacked chimney).
             const int level = content::gridLevel(lot_, h.value1);
             const float floorZ = heights_.tile(level, x, y);
-            float z = h.value4 >= 0 ? (h.value3 != 0 ? h.value3 : floorZ) : floorZ + h.value3;
+            float z = h.value4 >= 0 ? h.value3 : floorZ + h.value3;
             // Another piece reaching down into the ground (a chimney's base) ends its full width at the
             // floor above, so that its tapered top tucks into the piece standing there.
             if (const auto range = heightRange(mesh); h.value4 < 0 && range[0] < -kLevelHeight) {
                 z = heights_.tile(level + 1, x, y) - range[2];
+            }
+            // Objects with placement flag 15 (object data 0x2A, as lily pads) float: on the ground, where
+            // the water stands above the floor, they sit on its surface with no offset.
+            if ((object.state.data[0x2A] & 0x4000) != 0 && level == content::groundGridLevel(lot_)) {
+                if (const auto water = lot_.flatGrids.find(content::kWaterHeightGridInstance); water != lot_.flatGrids.end()) {
+                    if (const auto surface = terrainwater::heightAt(water->second, x, y); surface && floorZ < *surface) {
+                        z = *surface;
+                    }
+                }
             }
             // Direction d faces 180 - 45d degrees (0 along -X, 6 along -Y). Models face +Y.
             const float angle = kPi / 2 - static_cast<float>(object.state.data[1]) * kPi / 4;
@@ -897,6 +924,38 @@ private:
             mesh.primitives.push_back(std::move(paint));
             ++stats_.terrainPaints;
         }
+        // Ponds drawn like pools (not in the original game): the ground under their water shows the
+        // pools' caustics, fading in from the waterline to full 0.75 under it (the first depth layer).
+        // Each vertex keeps its depth under the water in those units, negative above it, so the fade
+        // reaches 0 just where the ground, drawn kGroundDrop lower, meets the water.
+        const auto water = lot_.flatGrids.find(content::kWaterHeightGridInstance);
+        if (b_.poolStylePonds() && water != lot_.flatGrids.end()) {
+            constexpr float kFadeDepth = 0.75f;
+            Primitive caustics;
+            caustics.alphas.reserve(static_cast<std::size_t>(columns) * rows);
+            for (std::uint32_t i = 0; i < columns; ++i) {
+                for (std::uint32_t j = 0; j < rows; ++j) {
+                    const auto top = terrainwater::heightAt(water->second, static_cast<float>(i) * step, static_cast<float>(j) * step);
+                    caustics.alphas.push_back(top ? (*top - (height(i, j) - kGroundDrop)) / kFadeDepth : -1.0f);
+                }
+            }
+            for (std::uint32_t i = 0; i + 1 < columns; ++i) {
+                for (std::uint32_t j = 0; j + 1 < rows; ++j) {
+                    const std::uint32_t a = i * rows + j, b = (i + 1) * rows + j;
+                    if (std::max({caustics.alphas[a], caustics.alphas[a + 1], caustics.alphas[b], caustics.alphas[b + 1]}) > 0) {
+                        cell(caustics.indices, i, j);
+                    }
+                }
+            }
+            caustics.material = caustics.indices.empty() ? -1 : b_.causticsOverlayMaterial("pond caustics");
+            if (caustics.material >= 0) {
+                caustics.positions = canvas.positions;
+                caustics.normals = canvas.normals;
+                caustics.uvs = canvas.uvs;
+                caustics.lightUvs = canvas.lightUvs;
+                mesh.primitives.push_back(std::move(caustics));
+            }
+        }
         b_.scene().meshes.push_back(std::move(mesh));
         // Slightly under the floors standing on it.
         if (auto* instance = b_.place(static_cast<int>(b_.scene().meshes.size() - 1), "terrain", Transform::at(0, 0, -kGroundDrop, 0));
@@ -909,7 +968,29 @@ private:
         }
     }
 
-    // The tinted sheets under the pools' water that darken deeper water.
+    // The pools' box: their tiles out to their walls' outer faces, from the level below's lowest corner
+    // (their floor) to the ground storey's highest (their walls' top).
+    std::array<float, 6> poolBox(const std::vector<poolwater::Quarter>& quarters, int ground) {
+        constexpr float kHalfWall = kWallThickness / 2;
+        std::array<float, 6> box{std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
+                                 std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest()};
+        for (const auto& q : quarters) {
+            const float x = static_cast<float>(q.x), y = static_cast<float>(q.y);
+            box[0] = std::min(box[0], x - kHalfWall);
+            box[1] = std::min(box[1], y - kHalfWall);
+            box[3] = std::max(box[3], x + 1 + kHalfWall);
+            box[4] = std::max(box[4], y + 1 + kHalfWall);
+            for (const float cx : {x, x + 1}) {
+                for (const float cy : {y, y + 1}) {
+                    box[2] = std::min(box[2], heights_.corner(ground - 1, cx, cy));
+                    box[5] = std::max(box[5], heights_.corner(ground, cx, cy));
+                }
+            }
+        }
+        return box;
+    }
+
+    // The pools' water: its surface, and the tinted sheets under it that darken deeper water.
     void drawPoolWater() {
         const auto quarters = poolwater::waterQuarters(lot_);
         if (quarters.empty()) {
@@ -917,10 +998,26 @@ private:
         }
         const int ground = content::groundGridLevel(lot_);
         auto height = [&](float x, float y) {
-            return x == std::floor(x) && y == std::floor(y) ? heights_.corner(ground, x, y) : heights_.tile(ground, x, y);
+            const float below = x == std::floor(x) && y == std::floor(y) ? heights_.corner(ground - 1, x, y) : heights_.tile(ground - 1, x, y);
+            return poolwater::surfaceHeight(below);
         };
         Mesh mesh;
         mesh.name = "pool water";
+        if (auto s = poolwater::surface(quarters, height); !s.indices.empty()) {
+            Primitive p;
+            // The game's poolWater-1 material, on poolWaterLayer (5).
+            p.material = b_.poolSurfaceMaterial("poolWater-1", "poolShape-body-bump", "causticsTiled", 5);
+            if (p.material >= 0) {
+                p.positions = std::move(s.positions);
+                p.normals.resize(p.positions.size());
+                for (std::size_t i = 2; i < p.normals.size(); i += 3) {
+                    p.normals[i] = 1;
+                }
+                p.uvs.assign(p.positions.size() / 3 * 2, 0.0f);
+                p.indices = std::move(s.indices);
+                mesh.primitives.push_back(std::move(p));
+            }
+        }
         int n = 0;
         for (auto& layer : poolwater::depthLayers(quarters, height)) {
             Primitive p;
@@ -937,7 +1034,172 @@ private:
             mesh.primitives.push_back(std::move(p));
         }
         b_.scene().meshes.push_back(std::move(mesh));
-        b_.place(static_cast<int>(b_.scene().meshes.size() - 1), "pool water", Transform{}, Part::Floor, ground);
+        if (auto* water = b_.place(static_cast<int>(b_.scene().meshes.size() - 1), "pool water", Transform{}, Part::Floor, ground)) {
+            water->poolWater = true;
+            water->poolBox = poolBox(quarters, ground);
+        }
+    }
+
+    // The water standing in the lot's dug terrain, as the game's waterOnTerrain material draws it on
+    // its layer 1.
+    void drawPondWater() {
+        const auto water = lot_.flatGrids.find(content::kWaterHeightGridInstance);
+        if (water == lot_.flatGrids.end()) {
+            return;
+        }
+        const int ground = content::groundGridLevel(lot_);
+        auto terrain = [&](int x, int y) { return heights_.corner(ground, static_cast<float>(x), static_cast<float>(y)); };
+        auto built = terrainwater::build(water->second, terrain, assets_.waterAlphaCurve());
+        if (built.indices.empty()) {
+            return;
+        }
+        if (b_.poolStylePonds()) {
+            drawPondsAsPools(water->second, terrain, ground);
+            return;
+        }
+        Primitive p;
+        p.material = b_.pondWaterMaterial("waterOnTerrain", "reflectionoutdoorwater-envcube", {"water-1-bump", "water-2-bump"}, 1);
+        if (p.material < 0) {
+            return;
+        }
+        p.positions = std::move(built.positions);
+        p.normals.resize(p.positions.size());
+        for (std::size_t i = 2; i < p.normals.size(); i += 3) {
+            p.normals[i] = 1;
+        }
+        p.uvs = std::move(built.uvs);
+        p.alphas = std::move(built.alphas);
+        p.indices = std::move(built.indices);
+        Mesh mesh;
+        mesh.name = "pond water";
+        mesh.primitives.push_back(std::move(p));
+        b_.scene().meshes.push_back(std::move(mesh));
+        b_.place(static_cast<int>(b_.scene().meshes.size() - 1), "pond water", Transform{}, Part::Floor, ground);
+    }
+
+    // Not in the original game: the ponds' water drawn as the pools' is, the pools' surface and depth
+    // layers over every tile with water. It shares the pools' reflection and caustics, their box
+    // widened to take the ponds in.
+    void drawPondsAsPools(const terrain::Array2D& water, const std::function<float(int, int)>& terrain, int ground) {
+        std::vector<poolwater::Quarter> quarters;
+        std::array<float, 6> box{std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
+                                 std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest()};
+        for (int y = 0; y + 1 < static_cast<int>(water.height); ++y) {
+            for (int x = 0; x + 1 < static_cast<int>(water.width); ++x) {
+                bool wet = false;
+                for (const auto [dx, dy] : {std::pair{0, 0}, {1, 0}, {0, 1}, {1, 1}}) {
+                    const auto w = terrainwater::cornerHeight(water, x + dx, y + dy);
+                    const float t = terrain(x + dx, y + dy);
+                    if (w && t < *w) {
+                        wet = true;
+                        box[2] = std::min(box[2], t);
+                        box[5] = std::max(box[5], *w);
+                    }
+                }
+                if (!wet) {
+                    continue;
+                }
+                for (int q = 0; q < 4; ++q) {
+                    quarters.push_back({x, y, q});
+                }
+                box[0] = std::min(box[0], static_cast<float>(x));
+                box[1] = std::min(box[1], static_cast<float>(y));
+                box[3] = std::max(box[3], static_cast<float>(x + 1));
+                box[4] = std::max(box[4], static_cast<float>(y + 1));
+            }
+        }
+        if (quarters.empty()) {
+            return;
+        }
+        Mesh mesh;
+        mesh.name = "pond water";
+        // The water's level at a point: the highest of the corners under water around it. Dry corners
+        // hold a lower height of their own, which would bend the surface down at the shore and drop the
+        // mirror the pools' reflection is drawn about below the water.
+        auto height = [&](float x, float y) {
+            std::optional<float> level;
+            for (int cx = static_cast<int>(std::ceil(x)) - 1; cx <= static_cast<int>(std::floor(x)) + 1; ++cx) {
+                for (int cy = static_cast<int>(std::ceil(y)) - 1; cy <= static_cast<int>(std::floor(y)) + 1; ++cy) {
+                    if (const auto w = terrainwater::cornerHeight(water, cx, cy); w && terrain(cx, cy) < *w && (!level || *w > *level)) {
+                        level = *w;
+                    }
+                }
+            }
+            return level ? *level : terrainwater::heightAt(water, x, y).value_or(0.0f);
+        };
+        // The pools' finer surface mesh: the shader waves and lights it per vertex. Ponds take a darker,
+        // teal than a pool's blue and murk on the surface, and a murky teal in the depth layers.
+        constexpr std::array<float, 3> kPondTint{0.04f, 0.07f, 0.07f};
+        constexpr float kPondMurk = 0.55f;
+        constexpr std::array<float, 3> kPondDepth{0.06f, 0.1f, 0.1f};
+        Primitive p;
+        p.material = b_.poolSurfaceMaterial("pondWater-pool", "poolShape-body-bump", "causticsTiled", 5, kPondTint, kPondMurk);
+        if (auto s = poolwater::surface(quarters, height); p.material >= 0 && !s.indices.empty()) {
+            p.positions = std::move(s.positions);
+            p.normals.resize(p.positions.size());
+            for (std::size_t i = 2; i < p.normals.size(); i += 3) {
+                p.normals[i] = 1;
+            }
+            p.uvs.assign(p.positions.size() / 3 * 2, 0.0f);
+            p.indices = std::move(s.indices);
+            mesh.primitives.push_back(std::move(p));
+        }
+        // The ground under a point, across its tile's corners.
+        auto groundAt = [&](float x, float y) {
+            const float fx = x - std::floor(x), fy = y - std::floor(y);
+            const int ix = static_cast<int>(std::floor(x)), iy = static_cast<int>(std::floor(y));
+            const float low = terrain(ix, iy) * (1 - fx) + terrain(ix + 1, iy) * fx;
+            const float high = terrain(ix, iy + 1) * (1 - fx) + terrain(ix + 1, iy + 1) * fx;
+            return low * (1 - fy) + high * fy;
+        };
+        // A pool's sheets end on its walls. A pond's run into its banks, so each fades in over 0.75
+        // above the ground under it. Below the ground the value stays negative, so the fade reaches
+        // 0 about where the sheet meets the bank.
+        constexpr float kBankFade = 0.75f;
+        // Ponds are murky: their sheets are kMurk times as opaque as a pool's (at most 0.9), and a
+        // second three hang below the first (3, 3.75 and 4.5 down), so deep water clouds over further.
+        constexpr float kMurk = 6.0f, kMostOpaque = 0.9f, kDeeper = 2.25f;
+        std::vector<poolwater::Layer> layers;
+        for (const float shift : {0.0f, kDeeper}) {
+            for (auto& layer : poolwater::depthLayers(quarters, [&](float x, float y) { return height(x, y) - shift; })) {
+                layers.push_back(std::move(layer));
+            }
+        }
+        int n = 0;
+        for (auto& layer : layers) {
+            for (std::size_t i = 0; i < layer.alphas.size(); ++i) {
+                const float* at = &layer.positions[i * 3];
+                const float bank = std::min((at[2] - groundAt(at[0], at[1])) / kBankFade, 1.0f);
+                layer.alphas[i] = std::min(layer.alphas[i] * bank * layer.opacity * kMurk, kMostOpaque);
+            }
+            Primitive sheet;
+            sheet.material = b_.blendedColorMaterial("pondWaterLayer-" + std::to_string(++n), {kPondDepth[0], kPondDepth[1], kPondDepth[2], 1}, 5);
+            sheet.positions = std::move(layer.positions);
+            sheet.normals.resize(sheet.positions.size());
+            for (std::size_t i = 2; i < sheet.normals.size(); i += 3) {
+                sheet.normals[i] = 1;
+            }
+            sheet.uvs.assign(sheet.positions.size() / 3 * 2, 0.0f);
+            sheet.alphas = std::move(layer.alphas);
+            sheet.indices = std::move(layer.indices);
+            mesh.primitives.push_back(std::move(sheet));
+        }
+        b_.scene().meshes.push_back(std::move(mesh));
+        auto* pond = b_.place(static_cast<int>(b_.scene().meshes.size() - 1), "pond water", Transform{}, Part::Floor, ground);
+        if (pond == nullptr) {
+            return;
+        }
+        pond->poolWater = true;
+        pond->poolBox = box;
+        pond->poolMirrorKeep = 0.05f;
+        for (auto& instance : b_.scene().instances) {
+            if (instance.poolWater && &instance != pond) {
+                for (std::size_t i = 0; i < 3; ++i) {
+                    instance.poolBox[i] = pond->poolBox[i] = std::min(instance.poolBox[i], pond->poolBox[i]);
+                    instance.poolBox[i + 3] = pond->poolBox[i + 3] = std::max(instance.poolBox[i + 3], pond->poolBox[i + 3]);
+                }
+            }
+        }
     }
 
     // Floors: a pattern per quarter tile, each quarter the triangle from one tile edge to the tile's
@@ -1009,11 +1271,17 @@ private:
         stats_.floorPatterns = patterns.size();
 
         // The slab under each floored quarter tile above the ground: a ceiling underneath and a band down each
-        // edge where the floor stops, unless a wall below runs along it (the slab ends inside the wall,
-        // and a wall standing on the edge with none under it, as over a porch, still shows the slab).
-        // The bands are the game's FloorThickness material (floor-edge at diffuse 0.5), the texture
-        // once across each tile edge or half diagonal, left to right as seen from outside.
-        const int ceiling = b_.colorMaterial("ceiling", {0.92f, 0.91f, 0.88f});
+        // edge where the floor stops (see visibleInstances for when they show). A wall standing on the edge with none
+        // under it, as over a porch, still shows the slab. The bands are the game's FloorThickness
+        // material (floor-edge at diffuse 0.5), the texture once across each tile edge or half
+        // diagonal, left to right as seen from outside.
+        // Every ceiling takes the White Top Ceiling floor pattern, lit by the light map of the storey
+        // below. Where the game finds that pattern is not known yet.
+        const int ceiling = b_.material(assets_.patternMaterial("ceilingfuzzywhite", false));
+        std::array<float, 2> ceilingSpan{1, 1};
+        if (ceiling >= 0) {
+            ceilingSpan = b_.scene().materials[static_cast<std::size_t>(ceiling)].floorTiles;
+        }
         int floorEdge = b_.textureMaterial("floor-edge", 0.5f);
         if (floorEdge < 0) {
             floorEdge = edge_;
@@ -1028,11 +1296,12 @@ private:
         auto floored = [&](std::int32_t level, std::int32_t x, std::int32_t y, std::size_t e) {
             return g.contains(level, x, y) && g.i16(level, x, y, 3 - e % 4) != 0;
         };
-        const std::array<std::array<float, 2>, 4> noUv{};
         const std::array<std::array<float, 2>, 4> bandUv{{{0, 1}, {1, 1}, {1, 0}, {0, 0}}};
         constexpr float kHalf = 0.70710678f;  // a diagonal band's normal (1 / sqrt 2 each way)
         for (std::int32_t level = 1; level < static_cast<std::int32_t>(g.levels); ++level) {
-            Surfaces slabs, edges;
+            Surfaces ceilings, edges, wallEdgeBands;
+            // The storey's lowest floor, which the camera must be below to see its undersides.
+            float lowestFloor = std::numeric_limits<float>::max();
             for (std::int32_t x = 0; x < static_cast<std::int32_t>(g.width); ++x) {
                 for (std::int32_t y = 0; y < static_cast<std::int32_t>(g.height); ++y) {
                     const float fx = static_cast<float>(x), fy = static_cast<float>(y);
@@ -1044,9 +1313,10 @@ private:
                         middle += top[k] / 4;
                     }
                     const std::array<float, 2> centre{fx + 0.5f, fy + 0.5f};
-                    // A band from `a` (left, seen from outside) to `b`, facing `out`.
-                    auto band = [&](const std::array<float, 2>& a, float ta, const std::array<float, 2>& b, float tb, const std::array<float, 3>& out) {
-                        addQuad(edges[floorEdge], {{{a[0], a[1], ta - kFloorThickness}, {b[0], b[1], tb - kFloorThickness}, {b[0], b[1], tb}, {a[0], a[1], ta}}},
+                    // A band from `a` (left, seen from outside) to `b`, facing `out`, above a wall below or not.
+                    auto band = [&](const std::array<float, 2>& a, float ta, const std::array<float, 2>& b, float tb, const std::array<float, 3>& out,
+                                    bool overWall) {
+                        addQuad((overWall ? wallEdgeBands : edges)[floorEdge], {{{a[0], a[1], ta - kFloorThickness}, {b[0], b[1], tb - kFloorThickness}, {b[0], b[1], tb}, {a[0], a[1], ta}}},
                                 out, bandUv);
                     };
                     const int neighbor[4][2] = {{0, -1}, {1, 0}, {0, 1}, {-1, 0}};  // across edges c0-c1, c1-c2, ...
@@ -1057,37 +1327,53 @@ private:
                         const auto& a = c[e];
                         const auto& b = c[(e + 1) % 4];
                         const float ta = top[e], tb = top[(e + 1) % 4];
-                        addQuad(slabs[ceiling],
-                                {{{a[0], a[1], ta - kFloorThickness}, {b[0], b[1], tb - kFloorThickness},
-                                  {centre[0], centre[1], middle - kFloorThickness}, {centre[0], centre[1], middle - kFloorThickness}}},
-                                {0, 0, -1}, noUv);
-                        const std::array<float, 3> out{static_cast<float>(neighbor[e][0]), static_cast<float>(neighbor[e][1]), 0};
-                        if (!floored(level, x + neighbor[e][0], y + neighbor[e][1], e + 2) &&
-                            !wallEdges.contains(edgeKey(a[0], a[1], b[0], b[1], level - 1))) {
-                            band(a, ta, b, tb, out);
+                        lowestFloor = std::min({lowestFloor, ta, tb});
+                        // The ceiling's quarter, its texture along the tile axes as a floor's.
+                        auto& s = ceilings[ceiling];
+                        for (const auto& [p, t] : {std::pair{b, tb}, std::pair{a, ta}, std::pair{centre, middle}}) {
+                            addVertex(s, {p[0], p[1], t - kFloorThickness}, {0, 0, -1}, {p[1] / ceilingSpan[0], p[0] / ceilingSpan[1]});
+                            const auto uv = lightUv(level - 1, fx, fy, p[0] - fx, p[1] - fy);
+                            s.lightUvs.insert(s.lightUvs.end(), uv.begin(), uv.end());
                         }
-                        // Where only half the tile is floored, along the diagonal (a diagonal wall below
-                        // hides it as well). It faces the two unfloored quarters beyond it.
+                        const std::array<float, 3> out{static_cast<float>(neighbor[e][0]), static_cast<float>(neighbor[e][1]), 0};
+                        if (!floored(level, x + neighbor[e][0], y + neighbor[e][1], e + 2)) {
+                            band(a, ta, b, tb, out, wallEdges.contains(edgeKey(a[0], a[1], b[0], b[1], level - 1)));
+                        }
+                        // Where only half the tile is floored, along the diagonal. It faces the two
+                        // unfloored quarters beyond it.
                         const bool diagonalWall = wallEdges.contains(edgeKey(fx, fy, fx + 1, fy + 1, level - 1));
                         auto facing = [&](std::size_t p, std::size_t q) {
                             return std::array<float, 3>{kHalf * static_cast<float>(neighbor[p % 4][0] + neighbor[q % 4][0]),
                                                         kHalf * static_cast<float>(neighbor[p % 4][1] + neighbor[q % 4][1]), 0};
                         };
-                        if (!floored(level, x, y, e + 1) && !diagonalWall) {
-                            band(b, tb, centre, middle, facing(e + 1, e + 2));
+                        if (!floored(level, x, y, e + 1)) {
+                            band(b, tb, centre, middle, facing(e + 1, e + 2), diagonalWall);
                         }
-                        if (!floored(level, x, y, e + 3) && !diagonalWall) {
-                            band(centre, middle, a, ta, facing(e + 2, e + 3));
+                        if (!floored(level, x, y, e + 3)) {
+                            band(centre, middle, a, ta, facing(e + 2, e + 3), diagonalWall);
                         }
                     }
                 }
             }
-            b_.place(b_.addMesh("floor slabs", std::move(slabs)), "floor slabs", Transform{}, Part::Floor, level);
-            // Every floor edge on the lot is lit by the outdoor lights without the sun, even inside.
-            if (auto* instance = b_.place(b_.addMesh("floor edges", std::move(edges)), "floor edges", Transform{}, Part::Floor, level)) {
-                instance->litOutdoors = true;
-                instance->sunTest = SunTest::NoSun;
+            if (auto* instance = b_.place(b_.addMesh("ceilings", std::move(ceilings)), "ceilings", Transform{}, Part::Floor, level)) {
+                instance->underside = Underside::Floor;
+                instance->floorHeight = lowestFloor;
+                if (const auto below = static_cast<std::size_t>(level - 1); below < maps.floors.size()) {
+                    instance->lightMap = maps.floors[below];
+                    instance->incidenceMap = maps.floorIncidence[below];
+                }
             }
+            // Every floor edge on the lot is lit by the outdoor lights without the sun, even inside.
+            auto placeEdges = [&](const char* name, Surfaces&& surfaces, Underside underside) {
+                if (auto* instance = b_.place(b_.addMesh(name, std::move(surfaces)), name, Transform{}, Part::Floor, level)) {
+                    instance->litOutdoors = true;
+                    instance->sunTest = SunTest::NoSun;
+                    instance->underside = underside;
+                    instance->floorHeight = lowestFloor;
+                }
+            };
+            placeEdges("floor edges", std::move(edges), Underside::Floor);
+            placeEdges("wall edge bands", std::move(wallEdgeBands), Underside::OverWalls);
         }
     }
 

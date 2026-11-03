@@ -1,5 +1,7 @@
 #include "render/gl/gl_renderer.hpp"
 
+#include "diag/log.hpp"
+
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -11,7 +13,7 @@ namespace ts2::render {
 GLuint GlRenderer::compile(GLenum stage, const std::filesystem::path& file) {
     std::ifstream in(file, std::ios::binary);
     if (!in) {
-        throw std::runtime_error("can't read " + file.string());
+        throw std::runtime_error("can't read " + diag::utf8(file));
     }
     std::ostringstream text;
     text << in.rdbuf();
@@ -26,7 +28,7 @@ GLuint GlRenderer::compile(GLenum stage, const std::filesystem::path& file) {
         char log[2048] = {};
         gl_.GetShaderInfoLog(shader, sizeof(log) - 1, nullptr, log);
         gl_.DeleteShader(shader);
-        throw std::runtime_error(file.filename().string() + ": " + log);
+        throw std::runtime_error(diag::utf8(file.filename()) + ": " + log);
     }
     return shader;
 }

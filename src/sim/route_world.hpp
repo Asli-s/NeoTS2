@@ -55,11 +55,12 @@ std::vector<RouteRect> objectFootprintAt(const SimObject& object, const SimObjec
 
 // The route items of one object, as the game adds them: its footprint, each rectangle a blocking
 // core with a padded copy around it, or a single walk-through rectangle. None for objects the game
-// leaves out (Sims, objects off the lot or held by another, doors and windows, walk-through objects
-// without a cost). `lead` is the lead part of a multi-tile object (the object itself otherwise) and
-// `model` the lead's model.
+// leaves out (Sims, objects off the lot or held by another, windows, walk-through objects without a
+// cost). `lead` is the lead part of a multi-tile object (the object itself otherwise) and `model` the
+// lead's model. A door's lead makes all of the door's items: its swing areas and a doorway on each of
+// `doorWays`, the ways through it (see doorPortals), and its other parts make none.
 std::vector<RouteItem> objectRouteItems(const SimObject& object, const SimObject& lead, const ObjectType& type, CodeSource& code,
-                                        const RouteModel* model);
+                                        const RouteModel* model, std::span<const RouteDoor> doorWays = {});
 
 // A lot's route grids, one per level: walls, fences and their posts, floors, and the objects' footprints.
 class RouteWorld {
@@ -78,8 +79,8 @@ public:
     // Doors keep their items. The game adds those elsewhere. Returns the levels whose grid changed.
     std::vector<int> updateObjects(World& world, CodeSource& code, const RouteModelLookup& models, const std::set<std::int16_t>& objects);
 
-    // Where a Sim's rings go (see simRingItems): its level (0 = ground), its square there and whether
-    // it is the target of the route being planned.
+    // Where a Sim's rings go (see simRingItems): its level (0 = ground, -1 below it), its square there
+    // and whether it is the target of the route being planned.
     struct SimRings {
         int level = 0;
         RouteRect square;
@@ -92,11 +93,17 @@ public:
     // The Sims that have rings now.
     std::vector<std::int16_t> ringedSims() const;
 
+    // The lowest level with a grid: -1 on lots with a level below the ground (pools), else 0.
+    int lowest() const { return lowest_; }
+    // How many levels have a grid, from the lowest up.
     int levels() const { return static_cast<int>(grids_.size()); }
-    // Level `level` (0 = ground), or null past the top.
+    // Level `level` (0 = ground, -1 below it), or null when it has no grid.
     const RouteGrid* level(int level) const;
 
 private:
+    RouteGrid* grid(int level);
+
+    int lowest_ = 0;
     std::vector<RouteGrid> grids_;
     std::map<std::uint32_t, std::string> objectModels_;  // the lot's model name of each object id
     std::map<std::int16_t, SimRings> rings_;              // each ringed Sim's rings

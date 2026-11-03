@@ -49,6 +49,8 @@ constexpr int kEdgeType = 2;
 // The foundation under a raised floor: the tile itself and a margin around it.
 constexpr int kFoundationType = 7, kFoundationPaddingType = 6;
 constexpr float kFoundationMargin = 0.125f;
+// Ground under water: the tile and a margin around it, as wide as a foundation's.
+constexpr int kWaterType = 15, kWaterPaddingType = 14;
 // A floor above the ground is raised on a foundation where it stands less than a storey above it.
 constexpr float kStoreyHeight = 3.0f;
 constexpr float kHeightTolerance = 0.001f;
@@ -190,7 +192,7 @@ std::vector<RouteItem> postRouteItems(const std::vector<fencepostlayer::Post>& p
 
 std::vector<RouteItem> floorRouteItems(const array3d::Array3D& floors, const array3d::Array3D* heights, const array3d::Array3D* surface,
                                        const std::map<std::uint16_t, stringmap::Entry>& patterns, int level, int lowestLevel, int width,
-                                       int height) {
+                                       int height, const terrain::Array2D* water) {
     // Floor grid cells are indexed by the wall graph's x and y. Route tile (x, y) is grid (y, x).
     auto floored = [&](int floorLevel, int x, int y) {
         const int index = floorLevel - lowestLevel;
@@ -239,20 +241,38 @@ std::vector<RouteItem> floorRouteItems(const array3d::Array3D& floors, const arr
         return false;
     };
 
-    // The tiles that have floor: on the ground, every lot tile but those under a raised floor, where the
-    // foundation blocks instead.
+    // A ground tile is under water when the terrain at one of its corners lies below the water there.
+    auto underWater = [&](int x, int y) {
+        const int ground = -lowestLevel;
+        if (water == nullptr || heights == nullptr) {
+            return false;
+        }
+        for (const auto [dx, dy] : {std::pair{0, 0}, {1, 0}, {0, 1}, {1, 1}}) {
+            const int cx = y + dy, cy = x + dx;
+            const auto surfaceAt = water->f32(cx, cy);
+            if (surfaceAt && heights->contains(ground, cx, cy) && heights->f32(ground, cx, cy, 0) < *surfaceAt) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // The tiles that have floor: on the ground, every lot tile but those under water or a raised
+    // floor, which block instead (water first).
     std::set<std::pair<int, int>> tiles;
     std::vector<RouteItem> items;
     for (int x = 0; x < width; ++x) {
         for (int y = 0; y < height; ++y) {
             const bool hasFloor = floored(level, x, y);
-            const bool raised = level == 0 && raisedAbove(x, y);
-            const bool ground = level == 0 && !raised;
+            const bool wet = level == 0 && underWater(x, y);
+            const bool raised = level == 0 && !wet && raisedAbove(x, y);
+            const bool ground = level == 0 && !raised && !wet;
             const float fx = static_cast<float>(x), fy = static_cast<float>(y);
-            if (raised) {
+            if (raised || wet) {
                 const float m = kFoundationMargin;
-                items.push_back({{fx, fy, fx + 1, fy + 1}, kBlockedCost, kFoundationType, RouteItemKind::Floor, true, 0});
-                items.push_back({{fx - m, fy - m, fx + 1 + m, fy + 1 + m}, kFloorCost, kFoundationPaddingType, RouteItemKind::Floor, true, 0});
+                items.push_back({{fx, fy, fx + 1, fy + 1}, kBlockedCost, wet ? kWaterType : kFoundationType, RouteItemKind::Floor, true, 0});
+                items.push_back({{fx - m, fy - m, fx + 1 + m, fy + 1 + m}, kFloorCost, wet ? kWaterPaddingType : kFoundationPaddingType,
+                                 RouteItemKind::Floor, true, 0});
             }
             if (!hasFloor && !ground) {
                 continue;

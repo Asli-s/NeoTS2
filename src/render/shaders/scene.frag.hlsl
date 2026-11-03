@@ -25,6 +25,10 @@ COMBINED Texture2D<float4> objectPlaces : register(t8, space2);    // where each
 COMBINED SamplerState objectPlacesSampler : register(s8, space2);
 COMBINED Texture2D<float4> objectGridTexture : register(t9, space2);  // which places reach each tile
 COMBINED SamplerState objectGridSampler : register(s9, space2);
+COMBINED Texture2D<float4> causticsTexture : register(t10, space2);   // the pools' caustics tile
+COMBINED SamplerState causticsSampler : register(s10, space2);
+COMBINED Texture2D<float4> poolShadowTexture : register(t11, space2); // the pools' shadow map, depth along the sun
+COMBINED SamplerState poolShadowSampler : register(s11, space2);
 #endif
 
 cbuffer Material : register(b0, space3) {
@@ -49,6 +53,7 @@ cbuffer Material : register(b0, space3) {
     float4 emissive;  // rgb added to the light before the texture multiplies it, w: 1 when on
     float4 uvTile;    // the texture coordinates times xy plus zw: one frame of a tiled texture
     float4 shadowReceiver;  // x: 1 when Sims' projected shadows fall on it, y: its level, z: 1 to fade them by the light map
+    float4 caustics;        // x: 1 for a pool floor, 2 for a pool wall, 3 for the caustics alone over a pond's ground, 0 for none, yzw: the texture light
 };
 
 #ifndef GL2
@@ -58,6 +63,9 @@ cbuffer Shadows : register(b1, space3) {
     float4 shadowCasters[16];              // xy: the tile's corner in the atlas, z: the Sim's level
     float4 shadowShade;                    // rgb: what a shadow multiplies the ground by, w: how many Sims
     float4 objectGrid;                     // the objects' grid: its first tile (xy) and its size in tiles (zw)
+    row_major float4x4 poolShadow;         // world to the pool shadow map's texture coordinates and depth
+    row_major float4x4 toLot;              // world to the lot
+    float4 poolSun;                        // toward the sun
 };
 #endif
 
@@ -161,6 +169,66 @@ float3 normalMappedLight(Input input) {
     return sum;
 }
 
+#ifndef GL2
+// How much of the sun reaches a point of a pool's floor or wall past what the pool shadow map holds,
+// 0 to 1: sixteen texels around it, each counted with the game's weight when its depth lies beyond
+// the point's (less `bias`).
+float poolSunAt(float3 world, float bias) {
+    const float3 at = mul(poolShadow, float4(world, 1)).xyz;
+    const float depth = at.z - bias;
+    static const float kNear = 0.000244141, kFar = 0.000732422;
+    static const float4 kWeights[4] = {float4(0.0479224, 0.0615335, 0.0615335, 0.0479224), float4(0.0615335, 0.0790106, 0.0790106, 0.0615335),
+                                       float4(0.0615335, 0.0790106, 0.0790106, 0.0615335), float4(0.0479224, 0.0615335, 0.0615335, 0.0479224)};
+    static const float kSteps[4] = {-kFar, -kNear, kNear, kFar};
+    float sun = 0;
+    [unroll] for (int j = 0; j < 4; ++j) {
+        [unroll] for (int k = 0; k < 4; ++k) {
+            const float stored = poolShadowTexture.SampleLevel(poolShadowSampler, at.xy + float2(kSteps[j], kSteps[k]), 0).r;
+            sun += stored > depth ? kWeights[j][k] : 0;
+        }
+    }
+    return sun;
+}
+
+// A pool's floor or wall as the game's caustics shaders draw it: the texture lit by the light map
+// at night (by day by half, so as it is), most of it whatever the sun, the rest and the caustics
+// tile where the sun reaches. On walls only faces toward the sun get it, and the caustics fade
+// toward the wall's top.
+float4 poolCaustics(Input input, float4 texel, float3 map) {
+    const float3 base = hasTexture > 0.5 ? texel.rgb : color.rgb;
+    const float3 lightMapped = caustics.y < 0.5 ? map : float3(0.5, 0.5, 0.5);
+    const float3 result = base * saturate(lightMapped * 2);
+    const float3 lot = mul(toLot, float4(input.world, 1)).xyz;
+    const float3 textureLight = caustics.yzw;
+    if (caustics.x > 2.5) {
+        // The ground under a pond drawn like a pool (not in the original game): the floors' caustics
+        // alone, added over it. The pattern is cast along the sun, so it lies unbroken over the bottom
+        // and the banks, and fades softly to a third on banks turned from the sun.
+        const float3 toSun = normalize(mul((float3x3)toLot, poolSun.xyz));
+        const float3 across = normalize(cross(toSun, abs(toSun.z) < 0.99 ? float3(0, 0, 1) : float3(1, 0, 0)));
+        const float3 along = cross(toSun, across);
+        const float3 caustic = causticsTexture.Sample(causticsSampler, 0.3 * float2(dot(lot, across), dot(lot, along))).rgb;
+        const float facing = saturate(dot(normalize(mul((float3x3)toLot, input.normal)), toSun));
+        // The vertex alpha is the depth under the water over 0.75: 0 at the waterline, 1 at 0.75 down.
+        // The murky water dims them deeper down.
+        const float murk = exp(-0.45 * max(input.alpha, 0));
+        const float sun = poolSunAt(input.world, 0.003) * lerp(0.35, 1, sqrt(facing)) * saturate(input.alpha) * murk;
+        return float4(caustic * sun * textureLight, 1);
+    }
+    if (caustics.x < 1.5) {
+        const float2 uv = 0.3 * float2(lot.x - lot.y, lot.x + lot.y);
+        const float sun = poolSunAt(input.world, 0.003);
+        const float3 caustic = causticsTexture.Sample(causticsSampler, uv).rgb;
+        return float4(result * 0.9 + caustic * sun * textureLight + 0.1 * result * sun, texel.a);
+    }
+    const float2 uv = 0.3 * float2(lot.x - 2.5 * lot.y, lot.x + lot.y + lot.z);
+    const float facing = dot(input.normal, poolSun.xyz) > 0.11 ? 1 : 0;
+    const float sun = poolSunAt(input.world, 0.011) * facing;
+    const float3 caustic = causticsTexture.Sample(causticsSampler, uv).rgb;
+    return float4(result * 0.8 + caustic * textureLight * sun * input.uv.y + 0.2 * result * sun, texel.a);
+}
+#endif
+
 float4 shade(Input input) {
     float4 texel = hasTexture > 0.5 ? baseTexture.Sample(baseSampler, input.uv) : float4(1, 1, 1, 1);
     if (alphaReplicate > 0.5) {
@@ -182,6 +250,11 @@ float4 shade(Input input) {
             map = lerp(lightMapFromTexture.Sample(lightMapFromSampler, input.lightUv), map, lightMapFade);
         }
         const float3 lit = map.rgb;
+#ifndef GL2
+        if (caustics.x > 0.5) {
+            return poolCaustics(input, texel, lit);
+        }
+#endif
         const float3 shadow = simShadow(input.world, map.a);
         // A bump-mapped floor or wall: times how much the normal map faces the incidence map's
         // direction (where the light map grows brighter, straight out where it is even).

@@ -96,6 +96,44 @@ void boxesAgainstTheView() {
     CHECK(boxInView(f.viewProjection, {-1, -1, -1}, {500, 1, 1}) == InView::Partly);
 }
 
+// A pool's reflection: the view mirrored in the plane and flipped left to right, a point on the
+// plane at the near end of depth, one below it past it (not drawn).
+void aPoolMirrorsTheViewInItsPlane() {
+    const Camera camera = front();
+    const FrameView f = FrameView::make(camera, 1280, 800);
+    const Mat4 mirror = poolMirror(f.viewProjection, 0.5f);
+    auto clip = [](const Mat4& m, float x, float y, float z) {
+        std::array<float, 4> r{};
+        for (int i = 0; i < 4; ++i) {
+            r[i] = m.m[i * 4] * x + m.m[i * 4 + 1] * y + m.m[i * 4 + 2] * z + m.m[i * 4 + 3];
+        }
+        return r;
+    };
+    const auto mirrored = clip(mirror, 0.3f, 2, 1.5f), seen = clip(f.viewProjection, 0.3f, 2, -0.5f);
+    CHECK(std::fabs(mirrored[0] + seen[0]) < 1e-4f && std::fabs(mirrored[1] - seen[1]) < 1e-4f && std::fabs(mirrored[3] - seen[3]) < 1e-4f);
+    const auto onPlane = clip(mirror, 0.3f, 2, 0.5f), below = clip(mirror, 0.3f, 2, 0.4f);
+    CHECK(std::fabs(onPlane[2] - onPlane[3]) < 1e-4f && below[2] > below[3]);
+    CHECK(mirrored[2] < mirrored[3] && mirrored[2] > 0);
+}
+
+// The sun's view of an 11 by 7 tile pool, fitted as the game fits it, against the game's own: across and
+// in depth to a hundredth, up and down within 0.004 of the scale (0.04 of a tile).
+void aPoolsSunViewIsFittedAsTheGames() {
+    const std::array<float, 12> place{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+    const auto light = poolLight(place, {12.925f, 4.925f, -2.63f, 24.075f, 12.075f, 0.36f}, normalize({1.5f, 1.2f, 2}));
+    const std::array<float, 16> game{-0.06876f, 0.08595f, 0, 0.54147f, -0.05773f, -0.04618f, 0.07101f, 1.30939f,
+                                     -0.02772f, -0.02218f, -0.03697f, 1.27035f, 0, 0, 0, 1};
+    for (int i = 0; i < 16; ++i) {
+        const float tolerance = i == 7 ? 0.005f : 0.0015f;
+        CHECK(std::fabs(light.clip.m[i] - game[i]) < tolerance);
+    }
+    // The shadow map's texture coordinates: x from 0 to 1 across, y down.
+    CHECK(std::fabs(light.texture.m[3] - (0.5f * game[3] + 0.5f)) < 0.002f && std::fabs(light.texture.m[7] - (-0.5f * game[7] + 0.5f)) < 0.003f);
+    // A flipbook frame: the time's fraction picks the row (of 4), its fraction the column (of 8).
+    const auto frame = causticsFrame(10.40625f, 0.75f);
+    CHECK(frame.frame[0] == 5.0f / 8 && frame.frame[1] == 1.0f / 4 && frame.color[0] == 0.75f);
+}
+
 void aFrameViewTakesItsFovAndNearPlane() {
     Camera camera = front();
     FrameView f = FrameView::make(camera, 1000, 500);
@@ -256,6 +294,8 @@ void packedMeshesAreLaidOutInTheSharedBuffers() {
 std::vector<Test> renderPlanTests() {
     return {
         {"Boxes are tested against the view", boxesAgainstTheView},
+        {"A pool mirrors the view in its plane", aPoolMirrorsTheViewInItsPlane},
+        {"A pool's sun view is fitted as the game's", aPoolsSunViewIsFittedAsTheGames},
         {"A frame view takes its fov and near plane as the game does", aFrameViewTakesItsFovAndNearPlane},
         {"Draws are sorted as the game sorts them", drawsAreSortedAsTheGameSortsThem},
         {"A hidden material is not drawn", aMaterialSetToHiddenIsNotDrawn},

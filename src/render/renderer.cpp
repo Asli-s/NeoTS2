@@ -70,12 +70,12 @@ void SdlGpuRenderer::destroy() {
     }
     for (auto* p : {clipPipeline_, terrainPipeline_, skyPipeline_, waterPipeline_, roadPipeline_, imposterLightPipeline_, imposterTerrainPipeline_,
                     imposterWallPipeline_, imposterRoofPipeline_, shadowCasterPipeline_, shadowBlurPipeline_, objectCasterPipeline_,
-                    objectBlurPipeline_}) {
+                    objectBlurPipeline_, poolPipeline_, pondPipeline_, causticsPipeline_, poolShadowPipeline_, poolShadowSkinnedPipeline_}) {
         if (p) {
             SDL_ReleaseGPUGraphicsPipeline(device_, p);
         }
     }
-    for (auto* t : {reflection_, reflectionDepth_, shadowPictures_, shadowBlurred_, objectScratch_, objectPictures_, objectPlaces_, objectGrid_}) {
+    for (auto* t : {reflection_, reflectionDepth_, poolReflection_, poolReflectionDepth_, causticsTile_, poolShadow_, poolShadowDepth_, shadowPictures_, shadowBlurred_, objectScratch_, objectPictures_, objectPlaces_, objectGrid_}) {
         if (t) {
             SDL_ReleaseGPUTexture(device_, t);
         }
@@ -83,7 +83,7 @@ void SdlGpuRenderer::destroy() {
     if (spriteSampler_) {
         SDL_ReleaseGPUSampler(device_, spriteSampler_);
     }
-    for (auto* set : {&pipelines_, &skinnedPipelines_}) {
+    for (auto* set : {&pipelines_, &skinnedPipelines_, &clippedPipelines_, &clippedSkinnedPipelines_}) {
         for (auto& row : *set) {
             for (auto* p : row) {
                 if (p) {

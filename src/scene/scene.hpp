@@ -101,6 +101,22 @@ struct Material {
     // A lit standard material's emissive coefficient: added to its light before the texture
     // multiplies it, so it glows in its own colour.
     std::array<float, 3> emissive{0, 0, 0};
+    // A pool's water surface, drawn by the game's PoolWaterSurfaceMaterial: waved, with the lot
+    // mirrored in it, see-through by the view's angle, `color`'s rgb added to it and its alpha the
+    // water's murk (see SceneBuilder::poolSurfaceMaterial). `normalMap` is its bump map,
+    // `causticsImage` the flipbook its caustics play from (index into Scene::images, -1 for none).
+    bool poolSurface = false;
+    int causticsImage = -1;
+    // The water in a lot's ponds, drawn by the game's waterOnTerrain material: the sky cube `envCube`
+    // seen along the reflected view, see-through by each vertex's alpha, then the two ripple images
+    // multiplied and sliding against each other, over it at 0.3. The ripple images are bump maps the
+    // game turns into normal maps as it loads them, which tint the water blue.
+    bool pondWater = false;
+    std::array<int, 2> ripples{-1, -1};
+    // Lit by the pools' caustics as the game's pool floors (1) and pool walls (2) are, instead of
+    // their light map alone. 3 is the floors' caustics alone, added over what is below (see
+    // SceneBuilder::causticsOverlayMaterial). 0 for none.
+    int caustics = 0;
 };
 
 // Triangles sharing one material: per vertex a position, a normal, texture coordinates and,
@@ -158,6 +174,10 @@ enum class SunTest : std::uint8_t { BoxCentre, NodePosition, AboveBox, Never, No
 // ("sim:"), doors and windows ("wall:").
 enum class LightGroup : std::uint8_t { Props, Sims, Portals };
 
+// What of a storey's floor shows from below: its ceilings and the edges where it stops, or the edges
+// above the walls below it, where the slab ends inside the walls.
+enum class Underside { None, Floor, OverWalls };
+
 struct Instance {
     int mesh = -1;
     std::string name;
@@ -185,6 +205,17 @@ struct Instance {
     // (see lightLotSkirt).
     bool skirtRoad = false;
     std::array<float, 3> skirtScale{1, 1, 1};
+    // The pools' water: left out of their own reflection, its surface's highlight scaled by the
+    // time of day (see poolwater::lightPoolWater).
+    bool poolWater = false;
+    float poolNight = 0.75f;
+    // The pools' box in the lot, from their floor to their walls' top (low x, y, z, then high), which
+    // the sun's view for their caustics is fitted to.
+    std::array<float, 6> poolBox{};
+    // How far under the mirror the pools' reflection still draws the lot: 0 for pools, as the game
+    // draws them. Ponds drawn like pools (not in the original game) keep a little, so the mirrored
+    // bank meets the waved surface at the shore.
+    float poolMirrorKeep = 0;
     // Lot objects: where the buildings' shadow is tested for them, and how much of the sun's light
     // reaches each of their mesh's primitives (0..1, all of it when empty).
     SunTest sunTest = SunTest::BoxCentre;
@@ -192,6 +223,10 @@ struct Instance {
     // Walls that let light through (deck skirts) and floors' edges: lit by the outdoor lights and the sun the
     // buildings' shadow leaves, as lot objects outdoors are, instead of a light map.
     bool litOutdoors = false;
+    // Undersides of a storey's floors (see visibleInstances), and the height of the storey's lowest
+    // floor, which the camera must be below to see them from the storey beneath.
+    Underside underside = Underside::None;
+    float floorHeight = 0;
     LightGroup lightGroup = LightGroup::Props;
     // The lights it gets instead of the daylight (objects in rooms, and outdoors those a lamp or
     // window reaches): an index into Scene::lightSets.

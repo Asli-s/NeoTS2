@@ -80,6 +80,21 @@ FrameView FrameView::make(const Camera& camera, unsigned width, unsigned height)
     return f;
 }
 
+Mat4 poolMirror(const Mat4& viewProjection, float plane, float keepBelow) {
+    Mat4 mirror;
+    mirror.m[10] = -1;
+    mirror.m[11] = 2 * plane;
+    Mat4 r = viewProjection * mirror;
+    for (int c = 0; c < 4; ++c) {
+        r.m[c] = -r.m[c];
+    }
+    const std::array<float, 4> above{0, 0, 1, -(plane - keepBelow)};
+    for (int c = 0; c < 4; ++c) {
+        r.m[8 + c] = r.m[12 + c] - above[c];
+    }
+    return r;
+}
+
 std::array<float, 12> skyCamera(const FrameView& f, float up) {
     const Camera& camera = *f.camera;
     const Vec3 forward = normalize(sub(camera.target, camera.eye));
@@ -281,6 +296,12 @@ void FramePlan::setMaterial(const RendererState& s, const ResourceQuery& q, Draw
     fu.sunDirection[0] = f.sun[0];
     fu.sunDirection[1] = f.sun[1];
     fu.sunDirection[2] = f.sun[2];
+    // A pool's floor or wall takes the outdoors' texture light for its caustics.
+    if (m && m->caustics != 0 && s.poolCaustics_) {
+        fu.caustics[0] = static_cast<float>(m->caustics);
+        const auto light = s.objectLighting_ ? s.objectLighting_->textureLight : std::array<float, 3>{1, 1, 1};
+        std::copy(light.begin(), light.end(), fu.caustics + 1);
+    }
     TextureRef texture{TextureRef::Kind::White, 0};
     if (m && m->image >= 0 && q.hasImage(m->image)) {
         texture = {TextureRef::Kind::Image, m->image};
@@ -447,6 +468,165 @@ ShadowBlurUniforms FramePlan::shadowBlurUniforms() {
             u.weights[(across + r) * (2 * r + 1) + up + r][0] = static_cast<float>(scene::simshadows::blurWeight(across, up, r)) / 255;
         }
     }
+    return u;
+}
+
+PoolUniforms FramePlan::poolUniformsFor(const RendererState& s, const FrameView& f, const Draw& d) {
+    PoolUniforms u{};
+    std::copy(f.viewProjection.m.begin(), f.viewProjection.m.end(), u.viewProjection);
+    const auto& t = d.instance->transform.m;
+    const float model[16] = {t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10], t[11], 0, 0, 0, 1};
+    std::copy(std::begin(model), std::end(model), u.model);
+    std::copy(f.camera->eye.begin(), f.camera->eye.end(), u.eye);
+    // The poolWater-1 material: waves repeating 5 times a unit along x and 6 along y, 0.01 high,
+    // at speed 3, and the normal tilted by repeats times height.
+    constexpr float kRepeatX = 5, kRepeatY = 6, kWaveHeight = 0.01f, kSpeed = 3;
+    const float waveX[4] = {kRepeatX, 0, kWaveHeight, kSpeed}, waveY[4] = {0, kRepeatY, kWaveHeight, kSpeed};
+    std::copy(std::begin(waveX), std::end(waveX), u.waveX);
+    std::copy(std::begin(waveY), std::end(waveY), u.waveY);
+    u.waveNormal[0] = -kRepeatX * kWaveHeight;
+    u.waveNormal[1] = -kRepeatY * kWaveHeight;
+    // The highlight comes from the draw's first light, the sun outdoors.
+    if (s.objectLighting_ && !s.objectLighting_->lights.empty()) {
+        const auto& sun = s.objectLighting_->lights.front();
+        std::copy(sun.direction.begin(), sun.direction.end(), u.light);
+        std::copy(sun.color.begin(), sun.color.end(), u.lightColor);
+        u.lightColor[3] = 1;
+    }
+    const float night = d.instance->poolNight;
+    u.night[0] = u.night[1] = u.night[2] = night;
+    u.night[3] = 1;
+    u.time[0] = s.time_;
+    // The game builds the water 2.75 lower in its own frame than it shows it.
+    u.time[1] = -2.75f;
+    if (d.material) {
+        std::copy(d.material->color.begin(), d.material->color.end(), u.tint);
+    }
+    return u;
+}
+
+PondUniforms FramePlan::pondUniformsFor(const RendererState& s, const FrameView& f, const Draw& d) {
+    PondUniforms u{};
+    std::copy(f.viewProjection.m.begin(), f.viewProjection.m.end(), u.viewProjection);
+    const auto& t = d.instance->transform.m;
+    const float model[16] = {t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10], t[11], 0, 0, 0, 1};
+    std::copy(std::begin(model), std::end(model), u.model);
+    std::copy(f.camera->eye.begin(), f.camera->eye.end(), u.eye);
+    const auto light = s.objectLighting_ ? s.objectLighting_->textureLight : std::array<float, 3>{1, 1, 1};
+    std::copy(light.begin(), light.end(), u.light);
+    u.light[3] = 1;
+    // The waterOnTerrain material: the ripple images slide along u in a sine 0.04 times a second
+    // and repeat every 4 tiles ($waterbumpMapScale).
+    constexpr float kCyclesPerSecond = 0.04f, kTilesPerRepeat = 4;
+    u.ripple[0] = static_cast<float>(s.time_);
+    u.ripple[1] = 2 * 3.14159265f * kCyclesPerSecond;
+    u.ripple[2] = 1 / kTilesPerRepeat;
+    return u;
+}
+
+const Draw* FramePlan::poolWater(const std::vector<Draw>& blended) {
+    for (const auto& d : blended) {
+        if (d.material && d.material->poolSurface && d.primitive->hasBox) {
+            return &d;
+        }
+    }
+    return nullptr;
+}
+
+void FramePlan::poolCasters(const RendererState& s, const ResourceQuery& q, const Mat4& clip, std::vector<Draw>& out) {
+    const auto& meshes = q.meshes();
+    for (std::size_t i = 0; i < s.instances_.size(); ++i) {
+        const auto& instance = s.instances_[i];
+        const bool object = instance.part == scene::Part::Object;
+        if (instance.mesh < 0 || static_cast<std::size_t>(instance.mesh) >= meshes.size() ||
+            (!object && instance.part != scene::Part::Floor && instance.part != scene::Part::Wall)) {
+            continue;
+        }
+        Mat4 model;
+        std::copy_n(instance.transform.m.begin(), 12, model.m.begin());
+        const Mat4 toClip = clip * model;
+        for (const auto& p : meshes[static_cast<std::size_t>(instance.mesh)].primitives) {
+            int material = p.material;
+            if (i < s.instanceMaterials_.size() && p.source < s.instanceMaterials_[i].size()) {
+                material = s.instanceMaterials_[i][p.source];
+            }
+            if (material == scene::kHiddenMaterial || p.shadowGroup) {
+                continue;
+            }
+            const scene::Material* m = material >= 0 && static_cast<std::size_t>(material) < s.materials_.size()
+                                           ? &s.materials_[static_cast<std::size_t>(material)]
+                                           : nullptr;
+            // Of floors and walls only the pool's own, and nothing see-through.
+            if ((!object && (!m || m->caustics == 0)) || (m && (m->alpha == scene::AlphaMode::Blend || m->alpha == scene::AlphaMode::Add ||
+                                                                 m->alpha == scene::AlphaMode::Sum || m->poolSurface))) {
+                continue;
+            }
+            if (p.skinned && (i >= s.jointBase_.size() || s.jointBase_[i] < 0 || !q.skinReady(p.buffers))) {
+                continue;
+            }
+            if (p.hasBox && !p.skinned && boxInView(toClip, p.low, p.high) == InView::Outside) {
+                continue;
+            }
+            out.push_back({&p, &instance, m, 0, 0, 1});
+        }
+    }
+}
+
+PoolLight poolLight(const std::array<float, 12>& t, const std::array<float, 6>& box, const Vec3& toSun) {
+    // The sun in the lot's frame: the lot is only turned and moved into the world.
+    const Vec3 sun = normalize({t[0] * toSun[0] + t[4] * toSun[1] + t[8] * toSun[2], t[1] * toSun[0] + t[5] * toSun[1] + t[9] * toSun[2],
+                                t[2] * toSun[0] + t[6] * toSun[1] + t[10] * toSun[2]});
+    const Vec3 forward = scale(sun, -1);
+    Vec3 right = cross(forward, {0, 0, 1});
+    right = dot(right, right) > 1e-8f ? normalize(right) : Vec3{1, 0, 0};
+    const Vec3 up = cross(right, forward);
+    float l = std::numeric_limits<float>::max(), r = std::numeric_limits<float>::lowest();
+    float near = l, far = r, top = r;
+    for (int c = 0; c < 8; ++c) {
+        const Vec3 p{c & 1 ? box[3] + 2 : box[0] - 2, c & 2 ? box[4] + 2 : box[1] - 2, c & 4 ? box[5] + 6 : box[2]};
+        l = std::min(l, dot(right, p));
+        r = std::max(r, dot(right, p));
+        top = std::max(top, dot(up, p));
+        near = std::min(near, dot(forward, p));
+        far = std::max(far, dot(forward, p));
+    }
+    const float width = std::max(r - l, 1e-3f), depth = std::max(far - near, 1e-3f);
+    const float bottom = top - depth;
+    Mat4 lot;
+    lot.m = {2 / width * right[0], 2 / width * right[1], 2 / width * right[2], -(r + l) / width,
+             2 / depth * up[0],    2 / depth * up[1],    2 / depth * up[2],    -(top + bottom) / depth,
+             forward[0] / depth,   forward[1] / depth,   forward[2] / depth,   -near / depth,
+             0, 0, 0, 1};
+    // World to lot: the transpose of the lot's turn, then back by its place.
+    Mat4 toLot;
+    toLot.m = {t[0], t[4], t[8], -(t[0] * t[3] + t[4] * t[7] + t[8] * t[11]),
+               t[1], t[5], t[9], -(t[1] * t[3] + t[5] * t[7] + t[9] * t[11]),
+               t[2], t[6], t[10], -(t[2] * t[3] + t[6] * t[7] + t[10] * t[11]),
+               0, 0, 0, 1};
+    PoolLight out;
+    out.toLot = toLot;
+    out.clip = lot * toLot;
+    Mat4 toTexture;
+    toTexture.m = {0.5f, 0, 0, 0.5f, 0, -0.5f, 0, 0.5f, 0, 0, 1, 0, 0, 0, 0, 1};
+    out.texture = toTexture * out.clip;
+    return out;
+}
+
+CausticsUniforms causticsFrame(float seconds, float brightness) {
+    // The game's TiledTextureAnimShaderProgram (8, 4, speed 1): the time's fraction picks the row,
+    // the fraction of that the column.
+    constexpr float kAcross = 8, kDown = 4;
+    const float f = seconds - std::floor(seconds);
+    const float row = std::floor(f * kDown);
+    const float g = f * kDown - row;
+    const float column = std::floor(g * kAcross);
+    CausticsUniforms u{};
+    u.frame[0] = column / kAcross;
+    u.frame[1] = row / kDown;
+    u.frame[2] = 1 / kAcross;
+    u.frame[3] = 1 / kDown;
+    u.color[0] = u.color[1] = u.color[2] = brightness;
+    u.color[3] = 1;
     return u;
 }
 

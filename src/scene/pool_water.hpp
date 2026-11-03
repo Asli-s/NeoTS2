@@ -1,6 +1,7 @@
 #pragma once
 
 #include "content/lot.hpp"
+#include "scene/scene.hpp"
 
 #include <array>
 #include <cstdint>
@@ -29,7 +30,23 @@ struct Layer {
 
 // The game's three depth layers: per quarter the triangle between its outer tile edge and the tile's
 // centre, 0.75, 1.5 and 2.25 below the water's surface. Clear on the pool's edge, faint beside it.
-// `height(x, y)` is the ground's height at a tile corner or centre.
+// `height(x, y)` is the water's height at a tile corner or centre (see surfaceHeight).
 std::array<Layer, 3> depthLayers(const std::vector<Quarter>& quarters, const std::function<float(float x, float y)>& height);
+
+// The water's surface lies 2.75 above the level below the ground storey, a quarter of a tile under
+// the ground where storeys are 3 apart.
+float surfaceHeight(float levelBelow);
+
+// The water's surface, as the game's pool water material waves it: per quarter 8 triangles, its
+// outer edge split in four and its inner edges in two. The caller gives it normals straight up.
+struct Surface {
+    std::vector<float> positions;  // x, y, z per vertex
+    std::vector<std::uint32_t> indices;
+};
+Surface surface(const std::vector<Quarter>& quarters, const std::function<float(float x, float y)>& height);
+
+// Scales the pools' surface highlights for the time of day, as the pool water material does: 0.75
+// by day, 0.2 at night. Returns the instances changed.
+std::vector<std::size_t> lightPoolWater(Scene& scene, bool day);
 
 } // namespace ts2::scene::poolwater

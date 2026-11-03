@@ -2,6 +2,7 @@
 
 #include "content/build_scripts.hpp"
 #include "content/lighting.hpp"
+#include "scene/terrain_water.hpp"
 #include "content/resource_index.hpp"
 #include "formats/objd.hpp"
 #include "formats/scenegraph.hpp"
@@ -94,6 +95,9 @@ public:
 
     // The game's lighting settings (Lights/Lighting.txt of every product).
     const content::Lighting& lighting() const { return lighting_; }
+    // How see-through the water in a lot's ponds is by its depth (the newest product's
+    // Sys/Terrain.ini). Empty when no product has a readable one.
+    const terrainwater::AlphaCurve& waterAlphaCurve() const { return waterAlphaCurve_; }
 
     // Names of every material in the Sims3D packages (for finding doors' and windows' wall masks).
     const std::vector<std::string>& materialNames() const { return materialNames_; }
@@ -153,6 +157,7 @@ private:
     std::vector<std::string> materialNames_;
     content::BuildScripts scripts_;
     content::Lighting lighting_;
+    terrainwater::AlphaCurve waterAlphaCurve_;
     std::map<std::uint32_t, std::string> patternsByGuid_;
     std::map<std::uint32_t, Fence> fences_;
     std::map<std::uint32_t, RoofPattern> roofPatterns_;

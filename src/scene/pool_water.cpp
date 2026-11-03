@@ -115,4 +115,58 @@ std::array<Layer, 3> depthLayers(const std::vector<Quarter>& quarters, const std
     return layers;
 }
 
+float surfaceHeight(float levelBelow) {
+    return levelBelow + 2.75f;
+}
+
+Surface surface(const std::vector<Quarter>& quarters, const std::function<float(float, float)>& height) {
+    using V = std::array<float, 3>;
+    Surface out;
+    // Points shared by quarters are one vertex, found by x and y alone as the game finds them.
+    std::map<std::pair<float, float>, std::uint32_t> index;
+    auto vertex = [&](const V& v) {
+        const auto [it, added] = index.emplace(std::pair{v[0], v[1]}, static_cast<std::uint32_t>(out.positions.size() / 3));
+        if (added) {
+            out.positions.insert(out.positions.end(), v.begin(), v.end());
+        }
+        return it->second;
+    };
+    auto point = [&](const Point& p) {
+        const float x = static_cast<float>(p.first) / 2, y = static_cast<float>(p.second) / 2;
+        return V{x, y, height(x, y)};
+    };
+    // An edge's middle takes its first point's height, and every quarter point is halfway between a
+    // corner and the outer edge's middle, as the game builds them.
+    auto middle = [](const V& a, const V& b) { return V{(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, a[2]}; };
+    auto half = [](const V& a, const V& b) { return V{(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2}; };
+    static constexpr std::array<std::uint32_t, 24> kTriangles{0, 2, 7, 2, 1, 7, 7, 1, 8, 7, 8, 6, 1, 4, 8, 1, 5, 4, 4, 5, 3, 4, 6, 8};
+    for (const auto& q : quarters) {
+        const auto c = cornersOf(q);
+        const V a = point(c[0]), b = point(c[1]), centre = point(c[2]);
+        const V ab = middle(a, b);
+        const std::array<V, 9> v{a, ab, half(a, ab), b, middle(b, centre), half(b, ab), centre, middle(centre, a), half(centre, ab)};
+        std::array<std::uint32_t, 9> at{};
+        for (std::size_t k = 0; k < v.size(); ++k) {
+            at[k] = vertex(v[k]);
+        }
+        for (const auto k : kTriangles) {
+            out.indices.push_back(at[k]);
+        }
+    }
+    return out;
+}
+
+std::vector<std::size_t> lightPoolWater(Scene& scene, bool day) {
+    const float night = day ? 0.75f : 0.2f;
+    std::vector<std::size_t> changed;
+    for (std::size_t i = 0; i < scene.instances.size(); ++i) {
+        auto& instance = scene.instances[i];
+        if (instance.poolWater && instance.poolNight != night) {
+            instance.poolNight = night;
+            changed.push_back(i);
+        }
+    }
+    return changed;
+}
+
 } // namespace ts2::scene::poolwater

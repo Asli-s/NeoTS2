@@ -43,6 +43,10 @@ std::optional<LauncherSettings> parseLauncherSettings(std::string_view text) {
     if (text.size() > kMaxFileBytes) {
         return std::nullopt;
     }
+    // Some text editors put a UTF-8 byte order mark in front when they save.
+    if (text.starts_with("\xEF\xBB\xBF")) {
+        text.remove_prefix(3);
+    }
     LauncherSettings settings;
     bool first = true;
     while (!text.empty()) {
@@ -77,6 +81,10 @@ std::optional<LauncherSettings> parseLauncherSettings(std::string_view text) {
         }
         if (key == "smooth-follow") {
             settings.smoothFollow = line.substr(equals + 1) == "on";
+            continue;
+        }
+        if (key == "pool-style-ponds") {
+            settings.poolStylePonds = line.substr(equals + 1) == "on";
             continue;
         }
         if (key == "window-size") {
@@ -142,6 +150,9 @@ std::string formatLauncherSettings(const LauncherSettings& settings) {
     }
     if (settings.smoothFollow) {
         out += "smooth-follow=on\n";
+    }
+    if (settings.poolStylePonds) {
+        out += "pool-style-ponds=on\n";
     }
     if (const WindowSize* size = findWindowSize(settings.windowSize)) {
         out.append("window-size=").append(size->key).append("\n");

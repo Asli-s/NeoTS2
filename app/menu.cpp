@@ -43,6 +43,7 @@
 #include "scene/lot_scene.hpp"
 #include "scene/lot_skirt.hpp"
 #include "scene/pick.hpp"
+#include "scene/pool_water.hpp"
 #include "ui/fonts.hpp"
 #include "ui/screen.hpp"
 
@@ -465,6 +466,8 @@ private:
     // The lot's Sims, run by their own scripts and posed each frame (from when the lot was shown,
     // without a simulation).
     std::uint64_t lotShown_ = 0;
+    // Real seconds the lot has run unpaused: the pool water's clock, as the game's.
+    double lotRealSeconds_ = 0;
     std::future<std::unique_ptr<ts2::sim::LotSimulation>> lotSimBuilding_;  // built beside the lot's scene
     std::unique_ptr<app::LotLife> lotLife_;
     std::unique_ptr<app::LotDaylight> lotDaylight_;
@@ -1103,13 +1106,15 @@ void Game::enterLot(std::uint32_t id) {
     const std::string terrainType = hood_.stats.terrainType;
     lotSimBuilding_ = std::async(std::launch::async, [install = install_, file] { return app::loadSimulation(install, file); });
     lotUi_.setObjectThumbnails(openFolder_.parent_path().parent_path() / "Thumbnails" / "ObjectThumbnails.package");
-    lotBuilding_ = std::async(std::launch::async, [assets = assets_, file, install = install_, footprint, hoodScene, terrainType, &renderer = renderer_] {
+    lotBuilding_ = std::async(std::launch::async, [assets = assets_, file, install = install_, footprint, hoodScene, terrainType, &renderer = renderer_,
+                                                 poolStylePonds = options_.poolStylePonds] {
         LotBuilt built;
         // The lot's ground heights, which the skirt meets at the lot's edges.
         std::shared_ptr<const ts2::scene::Heights> lotHeights;
         int groundLevel = 0;
         {
             ts2::scene::SceneBuilder builder(*assets.get());
+            builder.setPoolStylePonds(poolStylePonds);
             const auto lot = ts2::content::loadLot(file);
             if (const ts2::scene::Heights heights(lot); heights.grid() != nullptr) {
                 lotHeights = std::make_shared<const ts2::scene::Heights>(std::make_shared<const ts2::array3d::Array3D>(*heights.grid()));
@@ -1154,6 +1159,7 @@ void Game::enterLot(std::uint32_t id) {
             built.place = footprint->place;
             built.camera.minFar = 2000;
         }
+        ts2::scene::poolwater::lightPoolWater(built.lot, ts2::content::stateTime(built.lightState) != ts2::content::StateTime::Night);
         built.gpu = renderer.prepare(built.lot);
         return built;
     });
@@ -1194,6 +1200,7 @@ void Game::showLot(LotBuilt& built) {
     spotTipShown_.reset();
     screen_.setSpotTip({});
     lotShown_ = ts2::platform::ticksNs();
+    lotRealSeconds_ = 0;
     ts2::diag::info(std::format("lot {} shown after {:.1f} s", enteredLot_, secondsSince(lotLoadStarted_)));
 
     screen_.setVisible(hoodUi_.root(), false);
@@ -1219,6 +1226,8 @@ void Game::leaveLot() {
         life.reset();
     });
     lot_ = {};
+    // Poses are kept by object id, and the next lot reuses ids.
+    lotPose_ = {};
     lotRouteModels_.reset();
     if (freeCam_) {
         freeCam_.reset();
@@ -1282,6 +1291,11 @@ void Game::lotAction(app::LotUi::Action action) {
     }
     if (action == Action::WallMode) {
         lotView_.setWallMode(lotUi_.pickedWallMode());
+        return;
+    }
+    if (action == Action::ToggleCeiling) {
+        lotView_.view.ceilings = !lotView_.view.ceilings;
+        ts2::diag::step(lotView_.view.ceilings ? "view: ceilings on" : "view: ceilings off");
         return;
     }
     if (!lotLife_) {
@@ -1705,6 +1719,12 @@ void Game::updateLot(std::uint64_t now) {
         lotView_.view.facing = orbit_.facing();
     }
     lotUi_.showTracked(orbit_.subject ? trackedSim_ : 0);
+    {
+        const auto eye = lotCamera().eye;
+        float at[3] = {eye[0], eye[1], eye[2]};
+        lotPlace_.rigidInverse().apply(at, true);
+        lotView_.view.eyeHeight = at[2];
+    }
     const auto shown = ts2::scene::visibleInstances(lot_, lotView_.view);
     lotVisible_ = shown;
     renderer_.show(shown);
@@ -1798,6 +1818,10 @@ void Game::updateLot(std::uint64_t now) {
         followSimStorey();
     }
     app::animateActors(lot_, lotLife_ ? lotLife_->seconds() : static_cast<double>(now - lotShown_) / 1e9, renderer_, lotPose_);
+    if (!lotLife_ || !lotLife_->paused()) {
+        lotRealSeconds_ += std::min(0.1, static_cast<double>(now - lastFrame_) / 1e9);
+    }
+    renderer_.setTime(static_cast<float>(lotRealSeconds_));
     if (lotLife_) {
         sendLotChanges();
     }
@@ -1861,6 +1885,11 @@ void Game::sendLotChanges() {
         renderer_.addMeshes(lot_);
         for (const std::size_t instance : lotLife_->changedInstances()) {
             renderer_.setInstance(lot_, instance);
+            // The scene keeps where a Sim or what it holds was loaded. It stays where this frame posed it.
+            const auto posed = std::find_if(lotPose_.places.begin(), lotPose_.places.end(), [&](const auto& p) { return p.first == instance; });
+            if (posed != lotPose_.places.end()) {
+                renderer_.setPlace(instance, posed->second);
+            }
             lotPicker_.update(lot_, instance);
         }
     }

@@ -2,6 +2,7 @@
 
 #include "formats/binary_reader.hpp"
 
+#include <cstring>
 #include <stdexcept>
 
 namespace ts2::terrain {
@@ -42,6 +43,19 @@ std::uint8_t Array2D::byte(std::int32_t x, std::int32_t y) const {
         return 0;
     }
     return elements[(static_cast<std::size_t>(y) * width + static_cast<std::size_t>(x)) * elementSize];
+}
+
+std::optional<float> Array2D::f32(std::int32_t x, std::int32_t y) const {
+    if (elementSize != 4 || x < 0 || y < 0 || static_cast<std::uint32_t>(x) >= width || static_cast<std::uint32_t>(y) >= height) {
+        return std::nullopt;
+    }
+    const std::size_t at = (static_cast<std::size_t>(y) * width + static_cast<std::size_t>(x)) * 4;
+    if (at + 4 > elements.size()) {
+        return std::nullopt;
+    }
+    float f;
+    std::memcpy(&f, &elements[at], 4);
+    return f;
 }
 
 namespace {

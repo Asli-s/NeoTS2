@@ -184,6 +184,7 @@ struct SdlGpuRenderer::Frame : FrameView {
     // alone, over a transparent background.
     bool extras = false;
     bool water = false;  // the neighborhood's water and its reflection
+    bool depthClip = false;  // drawn with the pipelines that clip depth (a pool's reflection)
 };
 
 } // namespace ts2::render

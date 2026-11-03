@@ -663,6 +663,83 @@ void simsAreDrawnAtTheNearestEighth() {
     }
 }
 
+// Assign Locomotion Animations pushes a walk set from the code owner's own, semi-global or global
+// string table 0x84, takes the newest off, or takes all off. The set's names find their clips as the
+// game's do: turns at each angle, poses alone, the walk with the gender, an elder's from the
+// adults', a name in brackets when the first finds none. The planner picks by clip category.
+void pushedWalkSetsWalkWithTheirClips() {
+    constexpr float kPi = 3.14159265f;
+    using ts2::sim::LocoClip;
+    const std::map<std::string, LocoClip> clips = {
+        {"a-swim-TurnInPlace-90", {"a-swim-TurnInPlace-90", 900, 0, 0, 0, 0, -kPi / 2, 128}},
+        {"a-swim-TurnInPlace-180", {"a-swim-TurnInPlace-180", 900, 0, 0, 0, 0, -kPi, 128}},
+        {"a-swimSlowTurnAndGoShort-0", {"a-swimSlowTurnAndGoShort-0", 866, 0.05f, 0.5f, 0, 0.0001f, 0, 96}},
+        {"a-swimSlowTurnAndGo-0", {"a-swimSlowTurnAndGo-0", 866, 0.1f, 0.5f, 0, 0.0001f, 0, 96}},
+        {"a-swimSlowTurnAndStop-0", {"a-swimSlowTurnAndStop-0", 1133, 0.7f, 0.5f, 0, 0.0006f, 0, 112}},
+        {"a-female-swimSlowShort", {"a-female-swimSlowShort", 1250, 1.7f, 0, 0, 0.0014f, 0, 176}},
+        {"a-female-swimSlow", {"a-female-swimSlow", 1250, 1.8f, 0, 0, 0.0014f, 0, 176}},
+        {"a-swimPose", {"a-swimPose", 0, 0, 0, 0, 0, 0, 16}},
+        {"a-uncategorized", {"a-uncategorized", 100, 0, 0, 0, 0, 0, 0}},
+    };
+    const ts2::sim::LocoClipLookup lookup = [&](const std::string& name) -> std::optional<LocoClip> {
+        const auto it = clips.find(name);
+        return it == clips.end() ? std::nullopt : std::optional<LocoClip>(it->second);
+    };
+    const ts2::sim::WalkSetLines swim = {"swim-TurnInPlace,swimSlowTurnAndGoShort,swimSlowTurnAndGo,swimSlowTurnAndStopShort,swimSlowTurnAndStop",
+                                         "swimSlowShort,swimSlow,swimPose", ""};
+    const auto elder = ts2::sim::walkSetClips(swim, 60, 1, lookup);
+    std::vector<std::string> names;
+    for (const auto& c : elder) {
+        names.push_back(c.name);
+    }
+    CHECK((names == std::vector<std::string>{"a-swim-TurnInPlace-90", "a-swim-TurnInPlace-180", "a-swimSlowTurnAndGoShort-0", "a-swimSlowTurnAndGo-0",
+                                             "a-swimSlowTurnAndStop-0", "a-female-swimSlowShort", "a-female-swimSlow", "a-swimPose"}));
+    const auto turn = ts2::sim::walkSetTurn(elder, 0, kPi / 2);
+    CHECK(turn && turn->name == "a-swim-TurnInPlace-90" && turn->mirrored);
+    CHECK(!ts2::sim::walkSetTurn(elder, 0, kPi / 4));
+    const auto start = ts2::sim::walkSetTurnClips(elder, ts2::sim::kStartCategory, 0, 0);
+    CHECK(start && start->shortOne == "a-swimSlowTurnAndGoShort-0" && start->full == "a-swimSlowTurnAndGo-0" && !start->mirrored);
+    CHECK(!ts2::sim::walkSetTurnClips(elder, ts2::sim::kStartCategory, 0, kPi / 2));
+    CHECK(ts2::sim::walkSetClip(elder, ts2::sim::kLoopCategory)->name == "a-female-swimSlowShort");
+    CHECK(ts2::sim::walkSetLongClip(elder, ts2::sim::kLoopCategory)->name == "a-female-swimSlow");
+    CHECK(ts2::sim::settlePose(&swim, 30, 1, lookup) == "a-swimPose" && ts2::sim::settlePose(nullptr, 30, 1, lookup) == "a-walkPose");
+    // The bracketed name stands in for one that finds no clip, and an uncategorized clip doesn't count.
+    const auto inBrackets = ts2::sim::walkSetClips({"missing(swimPose)@1.5,uncategorized", "", ""}, 30, 2, lookup);
+    CHECK(inBrackets.size() == 1 && inBrackets[0].name == "a-swimPose");
+
+    auto assign = [](std::uint8_t mode, std::uint8_t from) {
+        Instruction in;
+        in.opcode = 0x0072;
+        in.trueTarget = T;
+        in.falseTarget = F;
+        in.operands[0] = mode;
+        in.operands[2] = from;
+        return in;
+    };
+    MemoryCodeSource code;
+    code.add(kObjectGroup, 0x1100, bhav({assign(2, 0x02)}));
+    code.add(kObjectGroup, 0x1101, bhav({assign(3, 0)}));
+    code.add(kObjectGroup, 0x1102, bhav({assign(1, 0)}));
+    code.add(kObjectGroup, 0x1103, bhav({assign(0, 0)}));
+    code.addStrings(kSemiGroup, 0x84, {swim[0], swim[1], "", "run 0", "run 1", ""});
+    code.addStrings(kObjectGroup, 0x84, {"", "", "", "", "", "", "own walk", "", "", "", "", ""});
+    code.addObjectType(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(sim, kObjectGroup, 0x1100).outcome == Outcome::True);
+    CHECK(sim.walkSets.size() == 1 && sim.walkSets[0][0] == swim && sim.walkSets[0][1][0] == "run 0");
+    CHECK(vm.run(sim, kObjectGroup, 0x1101).outcome == Outcome::True);
+    CHECK(sim.walkSets.size() == 2 && sim.walkSets[1][0][0] == "own walk");
+    CHECK(vm.run(sim, kObjectGroup, 0x1102).outcome == Outcome::True && sim.walkSets.size() == 1);
+    CHECK(vm.run(sim, kObjectGroup, 0x1103).outcome == Outcome::True && sim.walkSets.empty());
+    CHECK(vm.run(sim, kObjectGroup, 0x1102).outcome == Outcome::Error);
+    for (int i = 0; i < 9; ++i) {
+        CHECK(vm.run(sim, kObjectGroup, 0x1100).outcome == Outcome::True);
+    }
+    CHECK(vm.run(sim, kObjectGroup, 0x1100).outcome == Outcome::Error && sim.walkSets.size() == 9);
+}
+
 void turnBodyTowardsTurnsWithItsClip() {
     constexpr float kPi = 3.14159265f;
     const auto left = ts2::sim::turnClip(0, kPi / 4, 30);
@@ -1381,6 +1458,7 @@ std::vector<Test> vmWalkingTests() {
         {"walks begun right after one keep its foot", walksBegunRightAfterOneKeepItsFoot},
         {"Sims are drawn at the nearest eighth", simsAreDrawnAtTheNearestEighth},
         {"Turn Body Towards turns with its clip", turnBodyTowardsTurnsWithItsClip},
+        {"pushed walk sets walk with their clips", pushedWalkSetsWalkWithTheirClips},
         {"Turn Body Towards faces slots and finds its target after the pre-route", turnBodyTowardsSlotsAndTargetAfterPreRoute},
         {"blocked routes ask a standing Sim to move", blockedRoutesAskAStandingSimToMove},
         {"blocked routes wait for a walking Sim, then fail", blockedRoutesWaitForAWalkingSimThenFail},

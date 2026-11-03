@@ -32,6 +32,7 @@ struct MenuOptions {
     double runSeconds = 0;       // the lot plays on this long after the clicks before its picture
     bool unpaused = false;       // the lot starts with time running (the game opens lots paused)
     bool smoothFollow = false;   // the camera glides after a followed Sim (see Orbit::smoothFollow)
+    bool poolStylePonds = false; // lots' ponds drawn like pools (see SceneBuilder::setPoolStylePonds)
     // The UI drawn this much larger, in percent: one of settings::kUiScales. The game has 100 only.
     // A window too small for it gets less, so the whole UI still fits.
     int uiScale = 100;

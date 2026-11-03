@@ -1,5 +1,6 @@
 #include "render/renderer.hpp"
 #include "render/renderer_internals.hpp"
+#include "diag/log.hpp"
 #include "scene/sim_shadows.hpp"
 
 #include <SDL3/SDL.h>
@@ -16,7 +17,7 @@ namespace {
 std::vector<std::uint8_t> readFile(const std::filesystem::path& path) {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
-        throw std::runtime_error("can't read " + path.string());
+        throw std::runtime_error("can't read " + diag::utf8(path));
     }
     return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
 }
@@ -73,15 +74,19 @@ void SdlGpuRenderer::create(const std::filesystem::path& shaderFolder) {
     makeClipPipeline(shaderFolder);
     makeSkyPipeline(shaderFolder);
     makeWaterPipeline(shaderFolder);
+    makePoolPipeline(shaderFolder);
+    makePondPipeline(shaderFolder);
     makeShadowPipelines(shaderFolder);
 }
 
-// The scene's pipelines, by skinned, two-sided and blending.
+// The scene's pipelines, by skinned, two-sided and blending, and again clipping depth for the pools'
+// reflection (see poolMirror).
 void SdlGpuRenderer::makeScenePipelines(const std::filesystem::path& shaders) {
     SDL_GPUShader* vertex = loadShader(device_, shaders, "scene.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0);
     SDL_GPUShader* skinnedVertex = loadShader(device_, shaders, "skinned.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, 1);
-    SDL_GPUShader* fragment = loadShader(device_, shaders, "scene.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 10, 2);
+    SDL_GPUShader* fragment = loadShader(device_, shaders, "scene.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 12, 2);
 
+    for (int clip = 0; clip < 2; ++clip)
     for (int skinned = 0; skinned < 2; ++skinned)
     for (int twoSided = 0; twoSided < 2; ++twoSided) {
         for (int blend = 0; blend < 4; ++blend) {
@@ -113,6 +118,7 @@ void SdlGpuRenderer::makeScenePipelines(const std::filesystem::path& shaders) {
             info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
             info.rasterizer_state.cull_mode = twoSided ? SDL_GPU_CULLMODE_NONE : SDL_GPU_CULLMODE_BACK;
             info.rasterizer_state.front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
+            info.rasterizer_state.enable_depth_clip = clip != 0;
             info.depth_stencil_state.enable_depth_test = true;
             info.depth_stencil_state.enable_depth_write = !blend;
             info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_GREATER_OR_EQUAL;
@@ -120,7 +126,7 @@ void SdlGpuRenderer::makeScenePipelines(const std::filesystem::path& shaders) {
             info.target_info.num_color_targets = 1;
             info.target_info.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
             info.target_info.has_depth_stencil_target = true;
-            auto& pipeline = (skinned ? skinnedPipelines_ : pipelines_)[twoSided][blend];
+            auto& pipeline = (clip ? (skinned ? clippedSkinnedPipelines_ : clippedPipelines_) : (skinned ? skinnedPipelines_ : pipelines_))[twoSided][blend];
             pipeline = SDL_CreateGPUGraphicsPipeline(device_, &info);
             if (pipeline == nullptr) {
                 throw sdlError("pipeline");
@@ -468,6 +474,164 @@ void SdlGpuRenderer::makeWaterPipeline(const std::filesystem::path& shaders) {
         if (waterPipeline_ == nullptr) {
             throw sdlError("water pipeline");
         }
+}
+
+// The water in a lot's ponds: the scene's positions, normals, texture coordinates and alphas,
+// blended (premultiplied) over what is below and writing depth, as the game's first water pass does.
+void SdlGpuRenderer::makePondPipeline(const std::filesystem::path& shaders) {
+    SDL_GPUShader* vertex = loadShader(device_, shaders, "pond.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0);
+    SDL_GPUShader* fragment = loadShader(device_, shaders, "pond.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 3, 1);
+    SDL_GPUVertexBufferDescription buffers[2]{};
+    SDL_GPUVertexAttribute attributes[9]{};
+    sceneVertexLayout(buffers, attributes);
+    SDL_GPUColorTargetDescription color{};
+    color.format = SDL_GetGPUSwapchainTextureFormat(device_, window_);
+    color.blend_state.enable_blend = true;
+    color.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    color.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+    color.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+    color.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    color.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+    color.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+    SDL_GPUGraphicsPipelineCreateInfo info{};
+    info.vertex_shader = vertex;
+    info.fragment_shader = fragment;
+    info.vertex_input_state.vertex_buffer_descriptions = buffers;
+    info.vertex_input_state.num_vertex_buffers = 1;
+    info.vertex_input_state.vertex_attributes = attributes;
+    info.vertex_input_state.num_vertex_attributes = 4;
+    info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+    info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+    info.depth_stencil_state.enable_depth_test = true;
+    info.depth_stencil_state.enable_depth_write = true;
+    info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_GREATER_OR_EQUAL;
+    info.target_info.color_target_descriptions = &color;
+    info.target_info.num_color_targets = 1;
+    info.target_info.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+    info.target_info.has_depth_stencil_target = true;
+    pondPipeline_ = SDL_CreateGPUGraphicsPipeline(device_, &info);
+    SDL_ReleaseGPUShader(device_, vertex);
+    SDL_ReleaseGPUShader(device_, fragment);
+    if (pondPipeline_ == nullptr) {
+        throw sdlError("pond pipeline");
+    }
+}
+
+// A pool's water surface: the scene's positions and normals, blended over what is below, testing
+// depth without writing it, as the game's pool water material does.
+void SdlGpuRenderer::makePoolPipeline(const std::filesystem::path& shaders) {
+    SDL_GPUShader* vertex = loadShader(device_, shaders, "pool.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0);
+    SDL_GPUShader* fragment = loadShader(device_, shaders, "pool.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 0);
+    SDL_GPUVertexBufferDescription buffers[2]{};
+    SDL_GPUVertexAttribute attributes[9]{};
+    sceneVertexLayout(buffers, attributes);
+    SDL_GPUColorTargetDescription color{};
+    color.format = SDL_GetGPUSwapchainTextureFormat(device_, window_);
+    color.blend_state.enable_blend = true;
+    color.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+    color.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+    color.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+    color.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    color.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+    color.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+    SDL_GPUGraphicsPipelineCreateInfo info{};
+    info.vertex_shader = vertex;
+    info.fragment_shader = fragment;
+    info.vertex_input_state.vertex_buffer_descriptions = buffers;
+    info.vertex_input_state.num_vertex_buffers = 1;
+    info.vertex_input_state.vertex_attributes = attributes;
+    info.vertex_input_state.num_vertex_attributes = 2;
+    info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+    info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_BACK;
+    info.rasterizer_state.front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
+    info.depth_stencil_state.enable_depth_test = true;
+    info.depth_stencil_state.enable_depth_write = false;
+    info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_GREATER_OR_EQUAL;
+    info.target_info.color_target_descriptions = &color;
+    info.target_info.num_color_targets = 1;
+    info.target_info.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+    info.target_info.has_depth_stencil_target = true;
+    poolPipeline_ = SDL_CreateGPUGraphicsPipeline(device_, &info);
+    SDL_ReleaseGPUShader(device_, vertex);
+    SDL_ReleaseGPUShader(device_, fragment);
+    if (poolPipeline_ == nullptr) {
+        throw sdlError("pool pipeline");
+    }
+    makeCausticsPipelines(shaders);
+}
+
+// The pools' caustics: the tile drawn over its whole target, and the shadow map, where the nearest
+// depth along the sun wins.
+void SdlGpuRenderer::makeCausticsPipelines(const std::filesystem::path& shaders) {
+    constexpr SDL_GPUTextureFormat kTile = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, kDepth = SDL_GPU_TEXTUREFORMAT_R32_FLOAT;
+    SDL_GPUShader* tileVertex = loadShader(device_, shaders, "sky.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0, 0);
+    SDL_GPUShader* tileFragment = loadShader(device_, shaders, "caustics.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
+    SDL_GPUColorTargetDescription tile{};
+    tile.format = kTile;
+    SDL_GPUGraphicsPipelineCreateInfo info{};
+    info.vertex_shader = tileVertex;
+    info.fragment_shader = tileFragment;
+    info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+    info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+    info.target_info.color_target_descriptions = &tile;
+    info.target_info.num_color_targets = 1;
+    causticsPipeline_ = SDL_CreateGPUGraphicsPipeline(device_, &info);
+
+    SDL_GPUShader* vertex = loadShader(device_, shaders, "scene.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0);
+    SDL_GPUShader* skinnedVertex = loadShader(device_, shaders, "skinned.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, 1);
+    SDL_GPUShader* depthFragment = loadShader(device_, shaders, "pool_shadow.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 0, 0);
+    SDL_GPUColorTargetDescription depth{};
+    depth.format = kDepth;
+    SDL_GPUVertexBufferDescription buffers[2]{};
+    SDL_GPUVertexAttribute attributes[9]{};
+    sceneVertexLayout(buffers, attributes);
+    for (int skinned = 0; skinned < 2; ++skinned) {
+        info = {};
+        info.vertex_shader = skinned ? skinnedVertex : vertex;
+        info.fragment_shader = depthFragment;
+        info.vertex_input_state.vertex_buffer_descriptions = buffers;
+        info.vertex_input_state.num_vertex_buffers = skinned ? 2 : 1;
+        info.vertex_input_state.vertex_attributes = attributes;
+        info.vertex_input_state.num_vertex_attributes = skinned ? 9 : 7;
+        info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+        info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+        info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+        info.rasterizer_state.enable_depth_clip = true;
+        info.depth_stencil_state.enable_depth_test = true;
+        info.depth_stencil_state.enable_depth_write = true;
+        info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS;
+        info.target_info.color_target_descriptions = &depth;
+        info.target_info.num_color_targets = 1;
+        info.target_info.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+        info.target_info.has_depth_stencil_target = true;
+        (skinned ? poolShadowSkinnedPipeline_ : poolShadowPipeline_) = SDL_CreateGPUGraphicsPipeline(device_, &info);
+    }
+    for (auto* s : {tileVertex, tileFragment, vertex, skinnedVertex, depthFragment}) {
+        SDL_ReleaseGPUShader(device_, s);
+    }
+    if (causticsPipeline_ == nullptr || poolShadowPipeline_ == nullptr || poolShadowSkinnedPipeline_ == nullptr) {
+        throw sdlError("caustics pipeline");
+    }
+    SDL_GPUTextureCreateInfo texture{};
+    texture.type = SDL_GPU_TEXTURETYPE_2D;
+    texture.layer_count_or_depth = 1;
+    texture.num_levels = 1;
+    texture.format = kTile;
+    texture.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    texture.width = texture.height = kCausticsTile;
+    causticsTile_ = SDL_CreateGPUTexture(device_, &texture);
+    texture.format = kDepth;
+    texture.width = texture.height = kPoolShadowMap;
+    poolShadow_ = SDL_CreateGPUTexture(device_, &texture);
+    texture.format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+    texture.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
+    poolShadowDepth_ = SDL_CreateGPUTexture(device_, &texture);
+    if (causticsTile_ == nullptr || poolShadow_ == nullptr || poolShadowDepth_ == nullptr) {
+        throw sdlError("caustics textures");
+    }
 }
 
 // The Sims' shadow pictures: each Sim drawn flat into its tile without depth, then the tiles blurred

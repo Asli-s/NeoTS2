@@ -17,6 +17,7 @@
 #include "scene/object_lights.hpp"
 #include "scene/object_shadow_picture.hpp"
 #include "scene/object_sun.hpp"
+#include "scene/pool_water.hpp"
 #include "scene/sim_shadows.hpp"
 #include "sim/clock.hpp"
 #include "sim/rooms.hpp"
@@ -435,7 +436,11 @@ PutLight putLotLight(ts2::scene::Scene& scene, const LotLight& light, const ts2:
             out.instances.push_back(i);
         }
     }
-    for (const std::size_t i : lightLotSkirt(scene, ts2::content::stateTime(light.state) != ts2::content::StateTime::Night)) {
+    const bool day = ts2::content::stateTime(light.state) != ts2::content::StateTime::Night;
+    for (const std::size_t i : lightLotSkirt(scene, day)) {
+        out.instances.push_back(i);
+    }
+    for (const std::size_t i : ts2::scene::poolwater::lightPoolWater(scene, day)) {
         out.instances.push_back(i);
     }
     return out;

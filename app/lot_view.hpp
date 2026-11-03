@@ -182,6 +182,14 @@ inline void appendScene(ts2::scene::Scene& out, ts2::scene::Scene add, const ts2
         if (m.normalMap >= 0) {
             m.normalMap += images;
         }
+        if (m.causticsImage >= 0) {
+            m.causticsImage += images;
+        }
+        for (int& ripple : m.ripples) {
+            if (ripple >= 0) {
+                ripple += images;
+            }
+        }
         if (m.envCube >= 0) {
             m.envCube += envCubes;
         }

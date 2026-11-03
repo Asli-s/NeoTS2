@@ -53,6 +53,9 @@ struct LauncherSettings {
     // The camera glides after a followed Sim instead of moving in the game's steps. Not in the
     // original game, so off unless the player turns it on.
     bool smoothFollow = false;
+    // Lots' ponds drawn like pools, with their surface, depth tint and caustics. Not in the original
+    // game, so off unless the player turns it on.
+    bool poolStylePonds = false;
     // The game window's size: a key of kWindowSizes, or empty for the game's own default.
     std::string windowSize;
     // The game's UI drawn larger, in percent: one of kUiScales. Not in the original game, so 100

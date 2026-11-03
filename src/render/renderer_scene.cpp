@@ -13,6 +13,20 @@ namespace ts2::render {
 
 using namespace render_detail;
 
+namespace {
+
+// Releases the textures made for an upload that failed. Its command buffer is cancelled, so they
+// were never filled and must not be drawn.
+void releaseUnfilled(SDL_GPUDevice* device, const std::vector<SDL_GPUTexture*>& textures) {
+    for (auto* t : textures) {
+        if (t) {
+            SDL_ReleaseGPUTexture(device, t);
+        }
+    }
+}
+
+} // namespace
+
 void SdlGpuRenderer::releaseSprites() {
     for (auto* t : spriteTextures_) {
         if (t) {
@@ -92,18 +106,24 @@ void SdlGpuRenderer::addMaterials(const scene::Scene& scene) {
     if (cmd == nullptr) {
         throw sdlError("GPU command buffer");
     }
-    std::vector<SDL_GPUTexture*> withMips;
-    {
+    std::vector<SDL_GPUTexture*> withMips, textures, cubes;
+    try {
         UploadPass pass(device_, cmd);
         for (std::size_t i = gpu_->textures.size(); i < scene.images.size(); ++i) {
             const auto& image = scene.images[i];
-            gpu_->textures.push_back(complete(image) ? uploadTexture(device_, pass, image, true, withMips) : nullptr);
+            textures.push_back(complete(image) ? uploadTexture(device_, pass, image, true, withMips) : nullptr);
         }
         for (std::size_t i = gpu_->envCubes.size(); i < scene.envCubes.size(); ++i) {
-            gpu_->envCubes.push_back(uploadCube(device_, pass, scene.envCubes[i]));
+            cubes.push_back(uploadCube(device_, pass, scene.envCubes[i]));
         }
         pass.end();
+    } catch (...) {
+        releaseUnfilled(device_, textures);
+        releaseUnfilled(device_, cubes);
+        throw;
     }
+    gpu_->textures.insert(gpu_->textures.end(), textures.begin(), textures.end());
+    gpu_->envCubes.insert(gpu_->envCubes.end(), cubes.begin(), cubes.end());
     for (auto* t : withMips) {
         SDL_GenerateMipmapsForGPUTexture(cmd, t);
     }
@@ -155,31 +175,39 @@ void SdlGpuRenderer::setImages(const scene::Scene& scene, const std::vector<int>
     if (cmd == nullptr) {
         throw sdlError("GPU command buffer");
     }
-    std::vector<SDL_GPUTexture*> withMips;
-    {
+    std::vector<SDL_GPUTexture*> withMips, made;
+    std::vector<int> madeFor;
+    try {
         UploadPass pass(device_, cmd);
         for (const int i : indexes) {
             const auto at = static_cast<std::size_t>(i);
             if (i < 0 || at >= scene.images.size() || at >= gpu_->textures.size() || !complete(scene.images[at])) {
                 continue;
             }
-            SDL_GPUTexture* fresh = uploadTexture(device_, pass, scene.images[at], false, withMips);
-            // SDL frees a released texture once the frames drawing with it are done.
-            SDL_GPUTexture* old = std::exchange(gpu_->textures[at], fresh);
-            auto& from = gpu_->fadingFrom[i];
-            if (fade && from == nullptr) {
-                from = old;  // the light seen when the fade began
-            } else if (old != nullptr) {
-                SDL_ReleaseGPUTexture(device_, old);
-            }
-            if (!fade && from != nullptr) {
-                SDL_ReleaseGPUTexture(device_, from);
-            }
-            if (!fade) {
-                gpu_->fadingFrom.erase(i);
-            }
+            made.push_back(uploadTexture(device_, pass, scene.images[at], false, withMips));
+            madeFor.push_back(i);
         }
         pass.end();
+    } catch (...) {
+        releaseUnfilled(device_, made);
+        throw;
+    }
+    for (std::size_t n = 0; n < made.size(); ++n) {
+        const int i = madeFor[n];
+        // SDL frees a released texture once the frames drawing with it are done.
+        SDL_GPUTexture* old = std::exchange(gpu_->textures[static_cast<std::size_t>(i)], made[n]);
+        auto& from = gpu_->fadingFrom[i];
+        if (fade && from == nullptr) {
+            from = old;  // the light seen when the fade began
+        } else if (old != nullptr) {
+            SDL_ReleaseGPUTexture(device_, old);
+        }
+        if (!fade && from != nullptr) {
+            SDL_ReleaseGPUTexture(device_, from);
+        }
+        if (!fade) {
+            gpu_->fadingFrom.erase(i);
+        }
     }
     SDL_SubmitGPUCommandBuffer(cmd);
 }

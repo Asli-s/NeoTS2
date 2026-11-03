@@ -7,6 +7,7 @@
 #include "scene/look_at.hpp"
 #include "sim/look_at.hpp"
 #include "scene/scene_ray.hpp"
+#include "scene/terrain_water.hpp"
 
 #include <cmath>
 #include <filesystem>
@@ -329,6 +330,37 @@ void sceneViewsShowStoreysWallsAndRoofs() {
     CHECK(visibleInstances(scene, view)[8] == 0);
 }
 
+// Floors' undersides, as the game shows the Curious brothers' rooftop platforms (floor 5.625, from
+// the deck one storey down): with Toggle Ceiling on, seen from a camera 4.25 high but not from 5.77
+// or 16.96, and never with the toggle off. The edges above walls show only with the toggle on.
+void floorUndersidesShowFromBelowWithToggleCeiling() {
+    using namespace ts2::scene;
+    Scene scene;
+    auto add = [&](Underside underside, int level) {
+        Instance i;
+        i.mesh = 0;
+        i.part = Part::Floor;
+        i.level = level;
+        i.underside = underside;
+        i.floorHeight = 5.625f;
+        scene.instances.push_back(i);
+    };
+    add(Underside::Floor, 2);      // 0 the platforms
+    add(Underside::OverWalls, 2);  // 1
+    add(Underside::Floor, 1);      // 2 the deck's own
+    add(Underside::OverWalls, 1);  // 3
+    View view;
+    view.level = 1;
+    view.eyeHeight = 4.25f;
+    CHECK((visibleInstances(scene, view) == std::vector<std::uint8_t>{0, 0, 1, 0}));
+    view.ceilings = true;
+    CHECK((visibleInstances(scene, view) == std::vector<std::uint8_t>{1, 1, 1, 1}));
+    view.eyeHeight = 5.77f;
+    CHECK((visibleInstances(scene, view) == std::vector<std::uint8_t>{0, 0, 1, 1}));
+    view.eyeHeight = 16.96f;
+    CHECK((visibleInstances(scene, view) == std::vector<std::uint8_t>{0, 0, 1, 1}));
+}
+
 // A stretched rig has every joint's rest translation scaled and its rotations kept.
 void stretchedRigScalesJointTranslations() {
     ts2::scene::Rig rig;
@@ -563,6 +595,59 @@ void groundIsOpenWhereItHasNoSurface() {
           !ts2::scene::surfaceOpen(surface, 0, std::nanf(""), 0.5f));
 }
 
+// The ponds' water as the game builds it on the Capps' lot: alpha 62 on a dry rim corner and 74 over
+// a corner 2.7 deep (Terrain.ini's curve). A centre takes the depth of its corners' averages.
+void pondWaterFollowsTheGamesCurve() {
+    using namespace ts2::scene::terrainwater;
+    const AlphaCurve curve = readAlphaCurve("[WaterRenderParameters]\r\nAlphaVsDepthCurve= .25,62,  10,110\r\n;AlphaVsDepthCurve= 0,128,  0.5,255\r\n");
+    CHECK(curve.points.size() == 2 && curve.alpha(-1) == 62 && curve.alpha(20) == 110);
+    CHECK(std::fabs(curve.alpha(2.7f) - 74.06f) < 0.01f);
+    CHECK(readAlphaCurve("AlphaVsDepthCurve= 1,2, 0,5").points.empty());   // depths falling
+    CHECK(readAlphaCurve("AlphaVsDepthCurve= 1,2, 3").points.empty());     // half a point
+    CHECK(readAlphaCurve("AlphaVsDepthCurve= 1,x").points.empty());
+    CHECK(readAlphaCurve(";AlphaVsDepthCurve= 1,2").points.empty());
+
+    // Three by three corners: the middle one dug 3 under the water at 1.2, the rest dry at 1.5.
+    ts2::terrain::Array2D water;
+    water.width = water.height = 3;
+    water.elementSize = 4;
+    water.elements.resize(3 * 3 * 4);
+    const float level = 1.2f;
+    for (std::size_t i = 0; i < 9; ++i) std::memcpy(&water.elements[i * 4], &level, 4);
+    const auto mesh = build(water, [](int x, int y) { return x == 1 && y == 1 ? -1.5f : 1.5f; }, curve);
+    // All four tiles touch the wet corner: 9 corners and 4 centres, 16 triangles.
+    CHECK(mesh.alphas.size() == 13 && mesh.indices.size() == 48);
+    auto alphaAt = [&](float x, float y) {
+        for (std::size_t i = 0; i < mesh.alphas.size(); ++i) {
+            if (mesh.positions[i * 3] == x && mesh.positions[i * 3 + 1] == y) return std::lround(mesh.alphas[i] * 255);
+        }
+        return -1L;
+    };
+    CHECK(alphaAt(1, 1) == 74 && alphaAt(0, 0) == 62 && alphaAt(0.5f, 0.5f) == 62);  // 0.45 deep at the centre
+    CHECK(mesh.positions[2] == level && mesh.uvs[0] == mesh.positions[0]);
+    // A dry lot has none, and nor does a broken grid.
+    CHECK(build(water, [](int, int) { return 2.0f; }, curve).indices.empty());
+    water.elementSize = 1;
+    CHECK(build(water, [](int, int) { return -2.0f; }, curve).indices.empty());
+}
+
+void floatingObjectsReadTheWaterByHalfTiles() {
+    using namespace ts2::scene::terrainwater;
+    // Corners (0, 0) 0, (1, 0) 1, (0, 1) 2 and (1, 1) 4.
+    ts2::terrain::Array2D water;
+    water.width = water.height = 2;
+    water.elementSize = 4;
+    water.elements.resize(2 * 2 * 4);
+    const float corners[4] = {0, 1, 2, 4};
+    std::memcpy(water.elements.data(), corners, sizeof(corners));
+    auto near = [](std::optional<float> h, float want) { return h && std::fabs(*h - want) < 1e-5f; };
+    CHECK(near(heightAt(water, 0.5f, 0.5f), 2));       // a centre: the diagonal's average
+    CHECK(near(heightAt(water, 0.25f, 0.75f), 2.0f));  // the half with (0, 1): 0 + 0.25 * 2 + 0.75 * 2
+    CHECK(near(heightAt(water, 0.75f, 0.25f), 1.5f));  // the half with (1, 0): 0 + 0.75 * 1 + 0.25 * 3
+    CHECK(near(heightAt(water, 1, 1), 4));              // the far corner reads the last tile
+    CHECK(!heightAt(water, 1.5f, 0) && !heightAt(water, -0.1f, 0));
+}
+
 void poolWaterHasTheGamesDepthLayers() {
     using namespace ts2::scene;
     // A one-tile pool: open ground over a floor on the level below.
@@ -603,6 +688,30 @@ void poolWaterHasTheGamesDepthLayers() {
     CHECK(alphaAt(layers[2], 0, 0) == 0.0f && alphaAt(layers[2], 0.5f, 0.5f) == 0.09f);
     CHECK(alphaAt(layers[2], 1.5f, 1.5f) == 0.27f && alphaAt(layers[2], 1, 1) == 0.27f);
     CHECK(layers[0].positions[2] == -0.75f && layers[2].positions[2] == -2.25f);
+}
+
+// The surface: per quarter 8 triangles on 9 points, shared points once. The water lies 2.75 above the
+// level below the ground: with the ground at 0.375, the water is at 0.125.
+void poolWaterHasTheGamesSurface() {
+    namespace poolwater = ts2::scene::poolwater;
+    CHECK(poolwater::surfaceHeight(-2.625f) == 0.125f);
+    const auto one = poolwater::surface({{0, 0, 0}}, [](float, float) { return 0.5f; });
+    CHECK(one.positions.size() == 9 * 3 && one.indices.size() == 24);
+    // The outer edge (x = 0, from y 1 to 0) in four steps, the centre, and every point at the water's height.
+    auto has = [&](float x, float y) {
+        for (std::size_t i = 0; i < one.positions.size(); i += 3) {
+            if (one.positions[i] == x && one.positions[i + 1] == y && one.positions[i + 2] == 0.5f) return true;
+        }
+        return false;
+    };
+    CHECK(has(0, 1) && has(0, 0.75f) && has(0, 0.5f) && has(0, 0.25f) && has(0, 0) && has(0.5f, 0.5f) && has(0.25f, 0.5f));
+    // The first triangle turns counter-clockwise seen from above.
+    auto at = [&](std::uint32_t i) { return std::array<float, 2>{one.positions[i * 3], one.positions[i * 3 + 1]}; };
+    const auto a = at(one.indices[0]), b = at(one.indices[1]), c = at(one.indices[2]);
+    CHECK((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]) > 0);
+    // A whole tile shares its corners and the centre between its quarters.
+    std::vector<poolwater::Quarter> tile{{0, 0, 0}, {0, 0, 1}, {0, 0, 2}, {0, 0, 3}};
+    CHECK(poolwater::surface(tile, [](float, float) { return 0.0f; }).positions.size() < 4 * 9 * 3);
 }
 
 // The packs are found in both installation layouts: the Ultimate Collection's folders named after
@@ -1442,9 +1551,13 @@ std::vector<Test> sceneTests() {
         {"scene grid roofs match the game", sceneGridRoofsMatchTheGame},
         {"scene cutaway cuts walls in front of rooms", sceneCutawayCutsWallsInFrontOfRooms},
         {"scene views show storeys, walls and roofs", sceneViewsShowStoreysWallsAndRoofs},
+        {"floor undersides show from below with Toggle Ceiling", floorUndersidesShowFromBelowWithToggleCeiling},
         {"ground is open where it has no surface", groundIsOpenWhereItHasNoSurface},
         {"effect tiles leave out the road row", effectTilesLeaveOutTheRoadRow},
         {"pool water has the game's depth layers", poolWaterHasTheGamesDepthLayers},
+        {"pond water follows the game's curve", pondWaterFollowsTheGamesCurve},
+        {"floating objects read the water by half tiles", floatingObjectsReadTheWaterByHalfTiles},
+        {"pool water has the game's surface", poolWaterHasTheGamesSurface},
         {"attic walls reach the roof's underside", atticWallsReachTheRoofsUnderside},
         {"picker finds the nearest shown triangle", pickerFindsTheNearestShownTriangle},
         {"picker hits posed Sims", pickerHitsPosedSims},

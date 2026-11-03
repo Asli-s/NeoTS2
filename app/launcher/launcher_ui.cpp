@@ -135,6 +135,7 @@ settings::LauncherSettings chosenSettings(const LauncherState& state) {
     out.backupReminderSeen = state.backupReminderSeen;
     out.renderer = state.renderer;
     out.smoothFollow = state.smoothFollow;
+    out.poolStylePonds = state.poolStylePonds;
     out.windowSize = state.windowSize;
     out.uiScale = state.uiScale;
     return out;
@@ -534,7 +535,7 @@ void startPlaying(LauncherState& state, bool addNeighborhoods) {
         return;
     }
     const settings::WindowSize* size = settings::findWindowSize(state.windowSize);
-    state.game = startGame(install.root, folder, addNeighborhoods, builtRenderer(state.renderer), state.smoothFollow, size ? size->width : 0,
+    state.game = startGame(install.root, folder, addNeighborhoods, builtRenderer(state.renderer), state.smoothFollow, state.poolStylePonds, size ? size->width : 0,
                            size ? size->height : 0, size && size->fitScreen, state.uiScale, state.message);
     state.folderNotes.clear();
 }
@@ -705,6 +706,7 @@ void findInstalls(LauncherState& state, const settings::LauncherSettings& rememb
     state.backupReminderSeen = remembered.backupReminderSeen;
     state.renderer = builtRenderer(remembered.renderer);
     state.smoothFollow = remembered.smoothFollow;
+    state.poolStylePonds = remembered.poolStylePonds;
     state.windowSize = remembered.windowSize;
     state.uiScale = remembered.uiScale;
     state.remembered = chosenSettings(state);
@@ -797,6 +799,10 @@ void drawChanges(LauncherState& state, const LauncherFonts& fonts) {
     ImGui::Checkbox("Smooth camera when following a Sim", &state.smoothFollow);
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("The game's camera follows in small steps. This makes it glide instead.");
+    }
+    ImGui::Checkbox("Pool-style ponds", &state.poolStylePonds);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Draws the ponds on lots like pools: their waves, blue depth and caustics.");
     }
     const auto scaleLabel = [](int scale) { return scale == 100 ? std::string("100% (original)") : std::to_string(scale) + "%"; };
     ImGui::AlignTextToFramePadding();

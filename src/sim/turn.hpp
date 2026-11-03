@@ -1,9 +1,14 @@
 #pragma once
 
+#include "sim/walk_plan.hpp"
+
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace ts2::sim {
 
@@ -12,6 +17,9 @@ namespace ts2::sim {
 float compassHeading(int direction);
 // The compass direction nearest a heading, as the game rounds it.
 std::int16_t compassDirection(float heading);
+// One of 8 directions for a vector, split at 22.5 degrees from each axis: 0 is -y, 2 +x, 4 +y,
+// 6 -x, with the diagonals between.
+std::int16_t octant(float dx, float dy);
 // The heading a standing or walking Sim is drawn at: the compass direction nearest its heading, an
 // exact half going to the lower one. The game turns a Sim's drawn place only in eighth turns, and
 // its walk and turn clips play turned by the rest, so the body still faces its own heading.
@@ -77,6 +85,36 @@ std::string walkPoseClip(std::int16_t lifeStage);
 // The adults' clip an elder's clip ("e-...") stands in for when the game has no elder one, as the
 // walk set falls back. Empty for any other name.
 std::string adultClipFor(const std::string& name);
+
+// A walk set as Assign Locomotion Animations pushes it from a string table (STR# 0x84): three lines
+// of comma-separated clip names. A name may carry "@" and a speed (not used yet), and a name in
+// brackets after it stands in when it finds no clip.
+using WalkSetLines = std::array<std::string, 3>;
+using LocoClipLookup = std::function<std::optional<LocoClip>(const std::string& name)>;
+
+// The clips a walk set names for a Sim of a life stage and gender, in the set's order, as the game
+// finds them. Turns and steps are looked for at 0, 45, 90, 135 and 180 degrees ("swim-TurnInPlace-90"),
+// poses and the step in place by name alone, and the rest with the gender ("a-male-swimSlow"). Each
+// name takes the age's prefix, and elders and teens fall back to the adults' clips. A clip of
+// category 0, or of category 100 without a speed, doesn't count.
+[[nodiscard]] std::vector<LocoClip> walkSetClips(const WalkSetLines& lines, std::int16_t lifeStage, std::int16_t gender,
+                                                 const LocoClipLookup& clip);
+// The set's first clip of a category (see anim::Animation::category).
+[[nodiscard]] std::optional<LocoClip> walkSetClip(const std::vector<LocoClip>& set, std::uint16_t category);
+// The set's second clip of a category, the long one a walk loop's first is mixed with.
+[[nodiscard]] std::optional<LocoClip> walkSetLongClip(const std::vector<LocoClip>& set, std::uint16_t category);
+// The pose a walk settles into: the newest pushed walk set's (`pushed`, its walk lines), else
+// walkPoseClip's. Empty when there is none.
+[[nodiscard]] std::string settlePose(const WalkSetLines* pushed, std::int16_t lifeStage, std::int16_t gender, const LocoClipLookup& clip);
+// As turnClip, from the set's turns in place.
+[[nodiscard]] std::optional<TurnClip> walkSetTurn(const std::vector<LocoClip>& set, float start, float end);
+// As walkStartClips, walkStopClips and stepClips, from the set's clips of a category (96 starts, 112
+// stops, 144 steps) that turn as far: the first is the short one, then the full one, then the two
+// that begin on the other foot. None when the set has no clip for that turn.
+[[nodiscard]] std::optional<WalkTurnClips> walkSetTurnClips(const std::vector<LocoClip>& set, std::uint16_t category, float from, float to);
+
+constexpr std::uint16_t kPoseCategory = 16, kStartCategory = 96, kStopCategory = 112, kStepCategory = 144,
+                        kStepInPlaceCategory = 160, kLoopCategory = 176;
 
 // A Turn Body Towards in progress (which instruction runs it, and its first steps).
 struct Turning {

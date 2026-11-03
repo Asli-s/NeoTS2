@@ -15,6 +15,7 @@
 #include "scene/outfit_catalog.hpp"
 
 #include <algorithm>
+#include <fstream>
 #include <cctype>
 #include <stdexcept>
 
@@ -57,6 +58,17 @@ Assets::Assets(const fs::path& install) : scripts_(content::loadBuildScripts(con
     const auto products = content::findProducts(install);
     skinCatalog_ = skinCatalogPackages(products);
     lighting_ = content::readLighting(products);
+    if (const auto ini = content::newestDataFile(products, "Sys/Terrain.ini")) {
+        // The shipped file is a few kilobytes. A larger one is not read.
+        constexpr std::streamsize kMostIniBytes = 1 << 20;
+        std::ifstream in(*ini, std::ios::binary);
+        std::string text(static_cast<std::size_t>(kMostIniBytes), '\0');
+        in.read(text.data(), kMostIniBytes);
+        if (in.gcount() < kMostIniBytes) {
+            text.resize(static_cast<std::size_t>(in.gcount()));
+            waterAlphaCurve_ = terrainwater::readAlphaCurve(text);
+        }
+    }
     std::set<fs::path> catalogFolders;
     for (const auto& objects : content::objectLoadOrder(products)) {
         objects_.addPackage(objects);
