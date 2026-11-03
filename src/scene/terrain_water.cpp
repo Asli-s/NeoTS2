@@ -1,8 +1,9 @@
 #include "scene/terrain_water.hpp"
 
+#include "parse_float.hpp"
+
 #include <algorithm>
 #include <array>
-#include <charconv>
 #include <cmath>
 #include <map>
 #include <string>
@@ -66,12 +67,11 @@ AlphaCurve readAlphaCurve(std::string_view ini) {
             }
             rest.remove_prefix(skip);
             const std::size_t length = std::min(rest.find_first_of(" \t,"), rest.size());
-            float value = 0;
-            const auto [ptr, error] = std::from_chars(rest.data(), rest.data() + length, value);
-            if (error != std::errc{} || ptr != rest.data() + length || !std::isfinite(value)) {
+            const auto value = parseFloat(rest.substr(0, length));
+            if (!value || !std::isfinite(*value)) {
                 return {};
             }
-            numbers.push_back(value);
+            numbers.push_back(*value);
             rest.remove_prefix(length);
         }
         if (numbers.empty() || numbers.size() % 2 != 0 || numbers.size() / 2 > kMostCurvePoints) {
