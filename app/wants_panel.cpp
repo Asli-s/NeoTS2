@@ -24,6 +24,12 @@ constexpr std::uint32_t kFirstWantSlot = 0xA001, kFirstFearSlot = 0xB001;
 // A want's icon script and its windows.
 constexpr std::uint32_t kIconScript = 0x49064901;
 constexpr std::uint32_t kWantBackground = 0x2000, kFearBackground = 0x3000;
+constexpr std::uint32_t kWantData = 0xA000;
+// Its animated bitmaps: the glow over a satisfied want, the wait before a dropped one goes, and the
+// spins that follow them (wants, fears). They play one after another, each ending in the next.
+constexpr std::uint32_t kAchieve = 0x4000, kChange = 0x5000, kWantSpin = 0x6000, kFearSpin = 0x7000;
+constexpr std::uint32_t kAnimations[] = {kAchieve, kChange, kWantSpin, kFearSpin};
+constexpr std::uint32_t kConstantsTable = 0x8D9DF6D4;
 constexpr std::uint32_t kBurst = 0xA, kPicture = 0xB, kBadge = 0xC, kLock = 0xD, kButton = 0xE, kInfluence = 0xF;
 // The icon sits 2 pixels in from the left of the 44 x 44 picture.
 constexpr std::uint32_t kPictureSize = 44;
@@ -69,7 +75,8 @@ void WantsPanel::attach(ts2::ui::Screen& screen, int content) {
     }
 }
 
-void WantsPanel::show(const std::vector<Want>& wants, const std::vector<Want>& fears, std::size_t wantSlots, std::size_t fearSlots) {
+void WantsPanel::show(const std::vector<Want>& wants, const std::vector<Want>& fears, std::size_t wantSlots, std::size_t fearSlots,
+                      const Refill& refill) {
     if (screen_ == nullptr || layouts_.empty()) {
         return;
     }
@@ -81,12 +88,15 @@ void WantsPanel::show(const std::vector<Want>& wants, const std::vector<Want>& f
             break;
         }
     }
+    // Another Sim or layout fills its slots at once.
+    const bool anew = pick != shown_ || refill.sim != sim_;
     if (pick != shown_) {
         for (std::size_t i = 0; i < layouts_.size(); ++i) {
             screen_->setVisible(layouts_[i].group, static_cast<int>(i) == pick);
         }
         shown_ = pick;
     }
+    sim_ = refill.sim;
     if (wants != wants_ || fears != fears_) {
         wants_ = wants;
         fears_ = fears;
@@ -110,11 +120,28 @@ void WantsPanel::show(const std::vector<Want>& wants, const std::vector<Want>& f
         }
     }
     Layout& layout = layouts_[static_cast<std::size_t>(pick)];
-    for (std::size_t i = 0; i < layout.wants.size(); ++i) {
-        fill(layout.wants[i], i < wants.size() ? &wants[i] : nullptr, false);
-    }
-    for (std::size_t i = 0; i < layout.fears.size(); ++i) {
-        fill(layout.fears[i], i < fears.size() ? &fears[i] : nullptr, true);
+    // A place with GUID 0 is empty.
+    for (const bool fear : {false, true}) {
+        auto& slots = fear ? layout.fears : layout.wants;
+        const auto& list = fear ? fears : wants;
+        for (std::size_t i = 0; i < slots.size(); ++i) {
+            const Want* want = i < list.size() && list[i].guid != 0 ? &list[i] : nullptr;
+            std::uint32_t satisfied = 0;
+            if (refill.satisfied != nullptr) {
+                const auto it = refill.satisfied->find(i + (fear ? 1000 : 0));
+                satisfied = it != refill.satisfied->end() ? it->second : 0;
+            }
+            Slot& slot = slots[i];
+            if (anew) {
+                stopAnimations(slot);
+                slot.target = want != nullptr ? std::optional<Want>(*want) : std::nullopt;
+                slot.satisfied = satisfied;
+                fill(slot, want, fear);
+            } else {
+                give(slot, want, fear, satisfied, refill.pending);
+            }
+            animate(slot, fear);
+        }
     }
     highlight();
 }
@@ -295,6 +322,7 @@ void WantsPanel::fill(Slot& slot, const Want* want, bool fear) {
     if (want == nullptr) {
         return;
     }
+    s.setVisible(s.find(slot.icon, kWantData), true);
     s.setVisible(s.find(slot.icon, kWantBackground), !fear);
     s.setVisible(s.find(slot.icon, kFearBackground), fear);
     s.setVisible(s.find(slot.icon, kBurst), want->power);
@@ -319,6 +347,98 @@ void WantsPanel::fill(Slot& slot, const Want* want, bool fear) {
     s.setVisible(badge, hasBadge);
     if (hasBadge) {
         s.setImage(badge, this->picture(want->secondaryIcon));
+    }
+}
+
+void WantsPanel::give(Slot& slot, const Want* want, bool fear, std::uint32_t satisfied, bool pending) {
+    if (want == nullptr) {
+        // A satisfied want's place stays as it was until the Sim's new wants come.
+        if (slot.target && pending) {
+            return;
+        }
+        stopAnimations(slot);
+        slot.target.reset();
+        fill(slot, nullptr, fear);
+        return;
+    }
+    const bool same = slot.target && slot.target->guid == want->guid && slot.target->argument == want->argument;
+    if (same) {
+        slot.target = *want;
+        slot.satisfied = satisfied;
+        if (slot.phase == Slot::Phase::None) {
+            fill(slot, want, fear);
+        }
+        return;
+    }
+    // A new want: the old one glows when it was satisfied, else it waits, and both end in a spin.
+    const bool had = slot.target.has_value();
+    const bool achieved = satisfied != slot.satisfied;
+    slot.target = *want;
+    slot.satisfied = satisfied;
+    stopAnimations(slot);
+    if (!had || !play(slot, achieved ? Slot::Phase::Achieve : Slot::Phase::Change, achieved ? kAchieve : kChange)) {
+        fill(slot, want, fear);
+    }
+}
+
+bool WantsPanel::play(Slot& slot, Slot::Phase phase, std::uint32_t id) {
+    auto& s = *screen_;
+    const int window = slot.icon >= 0 ? s.find(slot.icon, id) : -1;
+    if (window < 0) {
+        return false;
+    }
+    const auto constants = s.childTexts(s.find(window, kConstantsTable));
+    ts2::ui::AnimatedBitmap bitmap(constants, s.imageSize(window)[0], s.width(window));
+    if (!bitmap.play(static_cast<std::uint32_t>(random_()))) {
+        return false;
+    }
+    slot.phase = phase;
+    slot.animation = window;
+    slot.bitmap = std::move(bitmap);
+    slot.started = std::chrono::steady_clock::now();
+    s.setVisible(window, true);
+    return true;
+}
+
+void WantsPanel::animate(Slot& slot, bool fear) {
+    if (slot.phase == Slot::Phase::None || !slot.bitmap) {
+        return;
+    }
+    auto& s = *screen_;
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - slot.started).count();
+    const auto state = slot.bitmap->at(static_cast<std::uint32_t>(std::clamp<long long>(ms, 0, UINT32_MAX)));
+    if (slot.bitmap->type() == ts2::ui::AnimatedBitmap::Type::AlphaFade) {
+        s.setImageColor(slot.animation, {1, 1, 1, static_cast<float>(slot.bitmap->alpha(state.frame)) / 255.0f});
+    } else {
+        const int w = s.width(slot.animation);
+        s.setImagePart(slot.animation, {w * state.frame, 0, w * (state.frame + 1), s.imageSize(slot.animation)[1]});
+    }
+    if (!state.done) {
+        return;
+    }
+    // The glow or the wait ends in a spin with the want hidden, and the spin in the new want.
+    const auto phase = slot.phase;
+    stopAnimations(slot);
+    if (phase != Slot::Phase::Spin) {
+        s.setVisible(s.find(slot.icon, kWantData), false);
+        if (play(slot, Slot::Phase::Spin, fear ? kFearSpin : kWantSpin)) {
+            return;
+        }
+    }
+    fill(slot, slot.target ? &*slot.target : nullptr, fear);
+}
+
+void WantsPanel::stopAnimations(Slot& slot) {
+    // The want's picture may have been hidden for the spin.
+    slot.stale = slot.stale || slot.phase != Slot::Phase::None;
+    slot.phase = Slot::Phase::None;
+    slot.animation = -1;
+    slot.bitmap.reset();
+    if (slot.icon < 0) {
+        return;
+    }
+    for (const std::uint32_t id : kAnimations) {
+        screen_->setVisible(screen_->find(slot.icon, id), false);
     }
 }
 

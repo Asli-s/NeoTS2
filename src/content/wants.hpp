@@ -1,5 +1,8 @@
 #pragma once
 
+#include "formats/want_trees.hpp"
+
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -41,6 +44,15 @@ struct WantDefinition {
     // Its texts: string table (STR#) `stringSet` of Text\Wants.package. Rows 1 and 2 are its name
     // aimed at a male or female target, 3 its name without one, 4 its description.
     std::uint32_t stringSet = 0;
+    // A fear, not a want: the "isFear" property, else a negative score.
+    bool isFear = false;
+    // The trees run on the "Wants - Controller" object: checkTree decides whether the want may be
+    // offered, feedbackTree runs when it is satisfied. Empty for none.
+    std::string checkTree, feedbackTree;
+    // The packs the want needs (see content::installedPacksMask). The base game's 1 when not set.
+    std::uint32_t gameVersionFlags = 1;
+    // Whether the event that satisfies it names a Sim or an object.
+    bool eventRequiresSim = false, eventRequiresObject = false;
 };
 
 // A category of objects wants can be about (the objects' OBJD field 0x2F), with its pictures.
@@ -62,6 +74,8 @@ struct WantDefinitions {
     std::map<std::uint32_t, WantCategory> categories;  // by category id
     // The influence tuning curve inverted: influence level by influence points.
     std::optional<TuningCurve> influenceLevels;
+    // The aspiration score thresholds by age code (see sim::wantAgeCode), rock bottom to perfect.
+    std::map<int, std::array<std::int32_t, 7>> aspirationLevels;
     std::vector<std::string> problems;
 };
 
@@ -81,6 +95,18 @@ std::map<std::uint32_t, WantCategory> parseWantCategories(std::string_view tunin
 // Reads the influence curve of a WantTuning text (`<influenceTuning curve = "(0;0) (1;2000) ..."/>`,
 // points by level). None when it is missing or has a point it can't read.
 std::optional<TuningCurve> parseInfluenceCurve(std::string_view tuning);
+
+// The newest WantTrees.package of the install (cumulative like Wants.package), if any.
+[[nodiscard]] std::optional<std::filesystem::path> wantTreesPackage(const std::filesystem::path& installRoot);
+
+// Every want tree of a WantTrees package, in the package's order. Trees without a root are left
+// out, and a package that can't be read gives none.
+std::vector<want_trees::Tree> loadWantTrees(const std::filesystem::path& treesPackage);
+
+// Reads the aspiration score levels of a WantTuning text (`<levels>` with an `<age name=...>` per
+// age holding `<threshold name=... score=.../>` entries). Ages and thresholds it doesn't know are
+// skipped, and a threshold missing from an age is 0.
+std::map<int, std::array<std::int32_t, 7>> parseAspirationLevels(std::string_view tuning);
 
 // The text of a WantTuning package, empty when it can't be read.
 std::string loadWantTuning(const std::filesystem::path& tuningPackage);

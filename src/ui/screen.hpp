@@ -64,6 +64,8 @@ public:
     // Shows only the part of the window's image from (left, top) to (right, bottom) in pixels,
     // stretched over the window's area. An empty part shows the whole image again.
     void setImagePart(int window, const std::array<int, 4>& part);
+    // Multiplies the window's image by a colour (its alpha fades it).
+    void setImageColor(int window, const std::array<float, 4>& color);
     // Textures added or changed since the last call (a window's own picture or text keeps its
     // texture when it changes).
     std::vector<int> takeChangedTextures();
@@ -100,6 +102,8 @@ public:
     std::vector<std::string> childTexts(int window) const;
     int width(int window) const;
     int height(int window) const;
+    // The size of the window's image (0 x 0 for none).
+    std::array<int, 2> imageSize(int window) const;
 
     // The mouse moved or a button changed (at `seconds`, for tooltips). Returns the button released
     // over, if any.
@@ -150,6 +154,7 @@ private:
         bool ownImage = false;           // the texture is this window's own (not a shared UI image)
         std::array<int, 4> imageRect{};  // part of the image shown (imagerect), when set
         std::array<int, 4> part{};       // part of the image stretched over the window (setImagePart), when set
+        std::array<float, 4> imageColor{1, 1, 1, 1};
         bool edge = false;               // the image is stretched around its border (edgeimage)
         bool passive = false;            // shown only: the mouse goes through it to what is under it
         // How the window takes the mouse. A disabled window or one with winflag_ignoremouse lets it
@@ -161,6 +166,8 @@ private:
         // Drawn through a buffer whose magenta (255, 0, 255) shows through (winflag_pbufftrans), as
         // is everything inside it.
         bool keyed = false;
+        // Drawn through a buffer its own size (winflag_pbuff), so nothing in it shows outside its area.
+        bool buffered = false;
         bool toggle = false;             // a toggle button (style=toggle): pressed frame only while checked
         bool autosize = false;           // a button sized to its caption (autosize)
         bool checkBox = false;           // a check box or radio button (style=checkbox, radiobtn or radiocheck)
@@ -231,6 +238,7 @@ private:
     bool shown(int window) const;
     bool inside(int window, int root) const;
     void emit(int window, std::vector<Quad>& out) const;
+    static void clip(std::vector<Quad>& quads, std::size_t start, float x0, float y0, float x1, float y1);
 
     content::UiData& data_;
     Fonts& fonts_;

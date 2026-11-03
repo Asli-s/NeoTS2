@@ -128,6 +128,81 @@ std::map<std::uint32_t, WantCategory> parseWantCategories(std::string_view tunin
     return out;
 }
 
+std::map<int, std::array<std::int32_t, 7>> parseAspirationLevels(std::string_view tuning) {
+    static constexpr std::pair<std::string_view, int> kAges[] = {{"Baby", 13}, {"Toddler", 2}, {"Child", 1}, {"Teen", 3}, {"Adult", 0}, {"Elder", 4}};
+    static constexpr std::string_view kThresholds[] = {"rock bottom", "severe failure", "neutral", "bronze", "silver", "gold", "perfect"};
+    // The game keeps scores in this range.
+    constexpr std::int32_t kLowest = -327680, kHighest = 327670;
+    auto quoted = [](std::string_view tag, std::string_view name) -> std::string_view {
+        const std::string key = std::string(name) + "=\"";
+        const auto at = tag.find(key);
+        if (at == std::string_view::npos) {
+            return {};
+        }
+        const auto end = tag.find('"', at + key.size());
+        return end == std::string_view::npos ? std::string_view{} : tag.substr(at + key.size(), end - at - key.size());
+    };
+    std::map<int, std::array<std::int32_t, 7>> out;
+    const auto start = tuning.find("<levels>"), stop = tuning.find("</levels>");
+    if (start == std::string_view::npos || stop == std::string_view::npos || stop < start) {
+        return out;
+    }
+    const auto block = tuning.substr(start, stop - start);
+    std::array<std::int32_t, 7>* age = nullptr;
+    for (auto at = block.find('<', 1); at != std::string_view::npos; at = block.find('<', at + 1)) {
+        const auto end = block.find('>', at);
+        if (end == std::string_view::npos) {
+            break;
+        }
+        const auto tag = block.substr(at, end - at);
+        if (tag.starts_with("<age ")) {
+            age = nullptr;
+            for (const auto& [name, code] : kAges) {
+                if (quoted(tag, "name") == name) {
+                    age = &out[code];
+                    age->fill(0);
+                }
+            }
+        } else if (tag.starts_with("<threshold ") && age != nullptr) {
+            const auto name = quoted(tag, "name");
+            const auto score = quoted(tag, "score");
+            std::int32_t value = 0;
+            if (std::from_chars(score.data(), score.data() + score.size(), value).ec != std::errc{}) {
+                continue;
+            }
+            for (std::size_t i = 0; i < std::size(kThresholds); ++i) {
+                if (name == kThresholds[i]) {
+                    (*age)[i] = std::clamp(value, kLowest, kHighest);
+                }
+            }
+        }
+    }
+    return out;
+}
+
+std::optional<fs::path> wantTreesPackage(const fs::path& installRoot) { return newestWantsFile(installRoot, "wanttrees.package"); }
+
+std::vector<want_trees::Tree> loadWantTrees(const fs::path& treesPackage) {
+    std::vector<want_trees::Tree> trees;
+    try {
+        dbpf::Package package{treesPackage};
+        for (const auto& e : package.entries()) {
+            if (e.key.type != types::kWantTree) {
+                continue;
+            }
+            const auto data = package.read(e);
+            auto tree = want_trees::parse(std::string_view(reinterpret_cast<const char*>(data.data()), data.size()));
+            if (!tree.nodes.empty()) {
+                trees.push_back(std::move(tree));
+            }
+        }
+    } catch (const std::exception& ex) {
+        diag::warnOnce(std::string("wants: the want trees can't be read and are left out: ") + ex.what());
+        trees.clear();
+    }
+    return trees;
+}
+
 std::string loadWantTuning(const fs::path& tuningPackage) {
     try {
         dbpf::Package package{tuningPackage};
@@ -255,6 +330,14 @@ WantDefinitions loadWantDefinitions(const fs::path& wantsPackage) {
             if (const auto set = text("stringSet"); !set.empty()) {
                 d.stringSet = static_cast<std::uint32_t>(std::stoul(set, nullptr, 0));
             }
+            d.isFear = props.contains("isFear") ? text("isFear") == "True" : d.score < 0;
+            d.checkTree = text("checkTree");
+            d.feedbackTree = text("feedbackTree");
+            if (const auto flags = text("gameVersionFlags"); !flags.empty()) {
+                d.gameVersionFlags = static_cast<std::uint32_t>(std::stoul(flags, nullptr, 0));
+            }
+            d.eventRequiresSim = text("eventRequiresSim") == "True";
+            d.eventRequiresObject = text("eventRequiresObject") == "True";
             defs.byGuid[d.guid] = std::move(d);
         } catch (const std::exception& ex) {
             defs.problems.push_back("want definition " + std::to_string(e.key.instance) + ": " + ex.what());

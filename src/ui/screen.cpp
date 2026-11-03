@@ -99,6 +99,7 @@ int Screen::add(const ui::Window& source, int parent) {
         w.overChildren = clsid == "0x49495e7f" || clsid == "0x0c683787";
         w.seeThrough = source.flag("winflag_pbuff") && source.flag("winflag_premulalpha");
     }
+    w.buffered = source.flag("winflag_pbuff");
     w.keyed = source.flag("winflag_pbufftrans") ||
               (parent >= 0 && static_cast<std::size_t>(parent) < windows_.size() && windows_[static_cast<std::size_t>(parent)].keyed);
     const auto image = source.list("image");
@@ -506,6 +507,12 @@ void Screen::setImagePart(int window, const std::array<int, 4>& part) {
     windows_[static_cast<std::size_t>(window)].part = part;
 }
 
+void Screen::setImageColor(int window, const std::array<float, 4>& color) {
+    if (window >= 0 && static_cast<std::size_t>(window) < windows_.size()) {
+        windows_[static_cast<std::size_t>(window)].imageColor = color;
+    }
+}
+
 std::vector<int> Screen::takeChangedTextures() {
     std::vector<int> out;
     out.swap(changed_);
@@ -672,6 +679,14 @@ bool Screen::shown(int window) const {
         }
     }
     return true;
+}
+
+std::array<int, 2> Screen::imageSize(int window) const {
+    if (window < 0 || windows_[static_cast<std::size_t>(window)].image < 0) {
+        return {0, 0};
+    }
+    const auto& image = textures_[static_cast<std::size_t>(windows_[static_cast<std::size_t>(window)].image)];
+    return {static_cast<int>(image.width), static_cast<int>(image.height)};
 }
 
 std::uint32_t Screen::id(int window) const {
@@ -957,10 +972,12 @@ void Screen::emit(int index, std::vector<Quad>& out) const {
     if (!w.visible) {
         return;
     }
+    const std::size_t start = out.size();
     const auto at = origin(index);
     const float x0 = static_cast<float>(at[0]), y0 = static_cast<float>(at[1]);
     const float x1 = x0 + static_cast<float>(w.w), y1 = y0 + static_cast<float>(w.h);
     if (w.image >= 0 && w.paint) {
+        const std::size_t first = out.size();
         const auto& img = textures_[static_cast<std::size_t>(w.image)];
         const float iw = static_cast<float>(img.width), ih = static_cast<float>(img.height);
         if (w.kind == Kind::Button) {
@@ -994,6 +1011,9 @@ void Screen::emit(int index, std::vector<Quad>& out) const {
             out.push_back({x0, y0, x0 + iw, y0 + ih, 0, 0, 1, 1, w.image});
         } else {
             out.push_back({x0, y0, x1, y1, 0, 0, 1, 1, w.image});
+        }
+        for (std::size_t i = first; i < out.size(); ++i) {
+            out[i].color = w.imageColor;
         }
     }
     if (w.textImage >= 0 && !w.text.empty() && !w.lineWidths.empty()) {
@@ -1061,6 +1081,39 @@ void Screen::emit(int index, std::vector<Quad>& out) const {
     for (const int c : w.children) {
         emit(c, out);
     }
+    if (w.buffered) {
+        clip(out, start, x0, y0, x1, y1);
+    }
+}
+
+// Cuts the quads from `start` on to a rectangle, their pictures with them, and drops those outside it.
+void Screen::clip(std::vector<Quad>& quads, std::size_t start, float x0, float y0, float x1, float y1) {
+    std::size_t kept = start;
+    for (std::size_t i = start; i < quads.size(); ++i) {
+        Quad q = quads[i];
+        if (q.x1 <= x0 || q.x0 >= x1 || q.y1 <= y0 || q.y0 >= y1 || q.x1 <= q.x0 || q.y1 <= q.y0) {
+            continue;
+        }
+        const float du = (q.u1 - q.u0) / (q.x1 - q.x0), dv = (q.v1 - q.v0) / (q.y1 - q.y0);
+        if (q.x0 < x0) {
+            q.u0 += (x0 - q.x0) * du;
+            q.x0 = x0;
+        }
+        if (q.x1 > x1) {
+            q.u1 -= (q.x1 - x1) * du;
+            q.x1 = x1;
+        }
+        if (q.y0 < y0) {
+            q.v0 += (y0 - q.y0) * dv;
+            q.y0 = y0;
+        }
+        if (q.y1 > y1) {
+            q.v1 -= (q.y1 - y1) * dv;
+            q.y1 = y1;
+        }
+        quads[kept++] = q;
+    }
+    quads.resize(kept);
 }
 
 // A text window's lines as the game draws them. The text's area is the window inside its gutters,

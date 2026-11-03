@@ -207,6 +207,7 @@ void savedObjectReadsPlayingAnimations() {
 
     const auto saved = ts2::cobject::parse(d);
     CHECK(saved.classes == std::vector<std::string>({"cAnimatable", "cObject"}));
+    CHECK(saved.outerTag == 0x7D4F2BB8);
     CHECK(saved.joints.size() == 1 && saved.joints[0].name == "slot_chairdining_trans" && saved.joints[0].translation[1] == 0.373f &&
           saved.joints[0].rotation[3] == 1.0f);
     CHECK(saved.animations.size() == 1);
@@ -627,6 +628,70 @@ void wantSlotsFollowTheVersion() {
     CHECK(b.wants == 6 && b.fears == 4 && b.holds == 2);
     graduate.maxWants = 0xFFFFFFFF;
     CHECK(ts2::swaf::slots(graduate).wants == 64);
+}
+
+// A want tree's nodes nest as the file nests them, each with its properties, factors and children.
+// Nodes nested past the depth limit are left out with all they hold.
+void wantTreesAreRead() {
+    const std::string text = R"(<?xml version="1.0"?>
+<tree version="8">
+  <cGZPropertySetString>
+    <AnyUint32 key="id" type="0xeb61e4f7">0x6dce563c</AnyUint32>
+    <AnyString key="folder" type="0x0b8bea18">GU</AnyString>
+  </cGZPropertySetString>
+  <wantNode key="root">
+    <cGZPropertySetString>
+      <!--Want name is <odd> text-->
+      <AnyUint32 key="wantId" type="0xeb61e4f7">0xcdc2132e</AnyUint32>
+      <AnyBoolean key="visible" type="0xcba908e1">False</AnyBoolean>
+      <AnySint32 key="lifetime" type="0x0c264712">48</AnySint32>
+      <AnySint32 key="minScore" type="0x0c264712">-5</AnySint32>
+    </cGZPropertySetString>
+    <ads key="age" weight="17" superZero="True" locked="False">
+      <bool key="Baby" value="False" />
+      <bool key="Toddler" value="True" />
+    </ads>
+    <ads key="mood" weight="3" superZero="False" locked="False">
+      <range key="mood" min="-1" max="-25" index="4" />
+    </ads>
+    <children>
+      <wantNode key="node">
+        <cGZPropertySetString>
+          <AnyUint32 key="wantId" type="0xeb61e4f7">0x8da69c12</AnyUint32>
+          <AnyBoolean key="regeneration" type="0xcba908e1">True</AnyBoolean>
+          <AnySint32 key="scoreOverride" type="0x0c264712">-1000</AnySint32>
+        </cGZPropertySetString>
+        <children />
+      </wantNode>
+      <wantNode key="node">
+        <cGZPropertySetString>
+          <AnyUint32 key="wantId" type="0xeb61e4f7">0x2da69c01</AnyUint32>
+        </cGZPropertySetString>
+        <children />
+      </wantNode>
+    </children>
+  </wantNode>
+</tree>)";
+    const auto tree = ts2::want_trees::parse(text);
+    CHECK(tree.id == 0x6DCE563C && tree.folder == "GU" && tree.nodes.size() == 3);
+    const auto& root = tree.nodes[0];
+    CHECK(root.wantId == 0xCDC2132E && !root.visible && root.lifetime == 48 && root.minScore == -5 && root.parent == -1);
+    const auto& age = root.ads[static_cast<int>(ts2::want_trees::AdKind::Age)];
+    CHECK(age.weight == 17 && age.superZero && age.ticked == std::vector<std::string>{"Toddler"});
+    const auto& mood = root.ads[static_cast<int>(ts2::want_trees::AdKind::Mood)];
+    CHECK(mood.weight == 3 && mood.min == -1 && mood.max == -25 && mood.index == 4);
+    CHECK(root.children == (std::vector<std::int32_t>{1, 2}) && tree.nodes[2].parent == 0 && tree.nodes[2].wantId == 0x2DA69C01);
+    CHECK(tree.nodes[1].wantId == 0x8DA69C12 && tree.nodes[1].regeneration && tree.nodes[1].scoreOverride == -1000);
+
+    std::string deep;
+    for (std::size_t i = 0; i < ts2::want_trees::kMaxDepth + 5; ++i) {
+        deep += "<wantNode key=\"node\">";
+    }
+    for (std::size_t i = 0; i < ts2::want_trees::kMaxDepth + 5; ++i) {
+        deep += "</wantNode>";
+    }
+    deep += "<wantNode key=\"root\"></wantNode>";
+    CHECK(ts2::want_trees::parse(deep).nodes.size() == ts2::want_trees::kMaxDepth);
 }
 
 // Scripts and the queue name an interaction by its string index, not its line: the first line with it.
@@ -1614,6 +1679,7 @@ std::vector<Test> formatTests() {
         {"wall layer reads coverings per side", wallLayerReadsCoveringsPerSide},
         {"wants and fears parse", wantsAndFearsParse},
         {"want slots follow the version", wantSlotsFollowTheVersion},
+        {"want trees are read", wantTreesAreRead},
         {"interaction table parse", interactionTableParse},
         {"Sim description reads person data by version", simDescriptionReadsPersonDataByVersion},
         {"family record is read by version", familyRecordIsReadByVersion},
