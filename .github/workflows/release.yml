@@ -1,10 +1,19 @@
 # Builds the Windows, Linux and macOS release downloads. It runs only by hand, from the Actions page
 # (Run workflow), on the branch or tag chosen there.
 # Each job tests its build and keeps its download as the run's artifact, to attach to the release.
+# With "Upload the symbols" ticked, each job also uploads its symbols to BugSplat, so crash reports
+# from that build show function names. That needs the repository secrets BUGSPLAT_CLIENT_ID and
+# BUGSPLAT_CLIENT_SECRET (an OAuth client with the symbols scope). Tick it only for the run whose
+# downloads become the release, as BugSplat keeps one set of symbols per version.
 name: release
 
 on:
   workflow_dispatch:
+    inputs:
+      symbols:
+        description: Upload the symbols to BugSplat (only for the run that becomes the release)
+        type: boolean
+        default: false
 
 jobs:
   windows:
@@ -102,8 +111,8 @@ jobs:
           name: windows-x64
           path: build/download/NeoTS2-*
           if-no-files-found: error
-      # Crash reports need the symbols of the very programs players run. Upload these with
-      # tools/upload_symbols.ps1 -Build <unpacked folder>\Release before the release goes out.
+      # Crash reports need the symbols of the very programs players run. They go to BugSplat below
+      # with the box ticked, or by hand with tools/upload_symbols.ps1 -Build <unpacked folder>\Release.
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x64-symbols
@@ -113,6 +122,24 @@ jobs:
             build/Release/*.pdb
             build/generated/neots2_version.hpp
           if-no-files-found: error
+      # symbol-upload needs Node 22.12 or newer, newer than the runners' own.
+      - uses: actions/setup-node@v4
+        if: inputs.symbols
+        with:
+          node-version: 24
+      - name: Upload the symbols to BugSplat
+        if: inputs.symbols
+        env:
+          SYMBOL_UPLOAD_CLIENT_ID: ${{ secrets.BUGSPLAT_CLIENT_ID }}
+          SYMBOL_UPLOAD_CLIENT_SECRET: ${{ secrets.BUGSPLAT_CLIENT_SECRET }}
+        run: |
+          if (-not $env:SYMBOL_UPLOAD_CLIENT_ID) { throw "Add the repository secrets BUGSPLAT_CLIENT_ID and BUGSPLAT_CLIENT_SECRET." }
+          $header = Get-Content build/generated/neots2_version.hpp -Raw
+          if ($header -notmatch 'NEOTS2_VERSION "([^"]+)"') { throw "No version in the build." }
+          $version = $Matches[1]
+          if ($version -match '-dev|-modified') { throw "$version is not a release build." }
+          npx --yes @bugsplat/symbol-upload@11.0.1 -b NeoTS2 -a NeoTS2 -v $version -d build/Release -f "{neots2.exe,neots2.pdb}"
+          if ($LASTEXITCODE -ne 0) { throw "symbol-upload failed." }
 
   linux:
     if: github.repository == 'Asli-s/NeoTS2'
@@ -155,13 +182,28 @@ jobs:
           name: linux-x86_64
           path: build/NeoTS2-*-linux-x86_64.tar.gz
           if-no-files-found: error
-      # The programs with their debug info, for crash reports. Upload these with BugSplat's
-      # symbol-upload before the release goes out.
+      # The programs with their debug info, for crash reports. They go to BugSplat below with the
+      # box ticked, made into Crashpad's .sym files there (-m).
       - uses: actions/upload-artifact@v4
         with:
           name: linux-x86_64-symbols
           path: build/package/symbols
           if-no-files-found: error
+      # symbol-upload needs Node 22.12 or newer, newer than the runners' own.
+      - uses: actions/setup-node@v4
+        if: inputs.symbols
+        with:
+          node-version: 24
+      - name: Upload the symbols to BugSplat
+        if: inputs.symbols
+        env:
+          SYMBOL_UPLOAD_CLIENT_ID: ${{ secrets.BUGSPLAT_CLIENT_ID }}
+          SYMBOL_UPLOAD_CLIENT_SECRET: ${{ secrets.BUGSPLAT_CLIENT_SECRET }}
+        run: |
+          test -n "$SYMBOL_UPLOAD_CLIENT_ID" || { echo "Add the repository secrets BUGSPLAT_CLIENT_ID and BUGSPLAT_CLIENT_SECRET."; exit 1; }
+          version=$(sed -n 's/.*NEOTS2_VERSION "\([^"]*\)".*/\1/p' build/generated/neots2_version.hpp)
+          case "$version" in ""|*-dev*|*-modified*) echo "'$version' is not a release build."; exit 1;; esac
+          npx --yes @bugsplat/symbol-upload@11.0.1 -b NeoTS2 -a NeoTS2 -v "$version" -d build/package/symbols -f "{neots2,crashpad_handler}" -m
 
   macos:
     if: github.repository == 'Asli-s/NeoTS2'
@@ -186,10 +228,25 @@ jobs:
           name: macos-arm64
           path: build-macos/NeoTS2-*-macos-arm64.zip
           if-no-files-found: error
-      # The programs' .dSYM symbols, for crash reports. Upload these with BugSplat's symbol-upload
-      # before the release goes out.
+      # The programs' .dSYM symbols, for crash reports. They go to BugSplat below with the box
+      # ticked, made into Crashpad's .sym files there (-m).
       - uses: actions/upload-artifact@v4
         with:
           name: macos-arm64-symbols
           path: build-macos/symbols
           if-no-files-found: error
+      # symbol-upload needs Node 22.12 or newer, newer than the runners' own.
+      - uses: actions/setup-node@v4
+        if: inputs.symbols
+        with:
+          node-version: 24
+      - name: Upload the symbols to BugSplat
+        if: inputs.symbols
+        env:
+          SYMBOL_UPLOAD_CLIENT_ID: ${{ secrets.BUGSPLAT_CLIENT_ID }}
+          SYMBOL_UPLOAD_CLIENT_SECRET: ${{ secrets.BUGSPLAT_CLIENT_SECRET }}
+        run: |
+          test -n "$SYMBOL_UPLOAD_CLIENT_ID" || { echo "Add the repository secrets BUGSPLAT_CLIENT_ID and BUGSPLAT_CLIENT_SECRET."; exit 1; }
+          version=$(sed -n 's/.*NEOTS2_VERSION "\([^"]*\)".*/\1/p' build-macos/generated/neots2_version.hpp)
+          case "$version" in ""|*-dev*|*-modified*) echo "'$version' is not a release build."; exit 1;; esac
+          npx --yes @bugsplat/symbol-upload@11.0.1 -b NeoTS2 -a NeoTS2 -v "$version" -d build-macos/symbols -f "**/*.dSYM" -m
