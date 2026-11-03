@@ -22,6 +22,7 @@
 #include "sim/route_goals.hpp"
 #include "sim/route_portals.hpp"
 #include "sim/snap.hpp"
+#include "sim/want_refill.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -110,7 +111,8 @@ LotSimulation::LotSimulation(const std::filesystem::path& install, const std::fi
     });
     world_.setWalls(WallTiles::fromLot(saved));
     world_.setSightWalls(WallTiles::builtWalls(saved));
-    const content::BuildScripts buildScripts = content::loadBuildScripts(content::findProducts(install));
+    const auto products = content::findProducts(install);
+    const content::BuildScripts buildScripts = content::loadBuildScripts(products);
     std::vector<World::WallSection> sections;
     std::unordered_map<std::int32_t, const wallgraph::Wall*> walls;
     std::optional<wallgraph::PointIndex> points;
@@ -135,6 +137,23 @@ LotSimulation::LotSimulation(const std::filesystem::path& install, const std::fi
         sections.push_back(section);
     }
     world_.setWallSections(std::move(sections));
+    {
+        constexpr std::uint32_t kKeptOutStyles[] = {300, 301};
+        std::vector<WallPiece> pieces;
+        for (const auto& e : saved.wallCoverings) {
+            const auto wall = walls.find(static_cast<std::int32_t>(e.wall));
+            if (wall == walls.end() || !points || buildScripts.fenceArches.contains(e.type) ||
+                std::ranges::find(kKeptOutStyles, e.type) != std::end(kKeptOutStyles)) {
+                continue;
+            }
+            const auto* from = (*points)(wall->second->from);
+            const auto* to = (*points)(wall->second->to);
+            if (from != nullptr && to != nullptr) {
+                pieces.push_back({*from, *to, e.type});
+            }
+        }
+        world_.setWallOutline(std::make_shared<const WallOutline>(pieces), content::loadGreenhouseFences(products));
+    }
     if (const auto graph = saved.layerGraphs.find(content::kLayerGraphInstances[1]); graph != saved.layerGraphs.end()) {
         world_.setWeatherRegions(RoomMap(graph->second));
     }
@@ -150,6 +169,20 @@ LotSimulation::LotSimulation(const std::filesystem::path& install, const std::fi
                 return std::nullopt;
             }
             return static_cast<std::uint16_t>(grid->i16(static_cast<std::int32_t>(index), x, y, static_cast<std::size_t>(quarter)));
+        });
+    }
+    if (const auto locked = saved.grids.find(content::kLockedTileGridInstance); locked != saved.grids.end() && saved.worldBounds) {
+        // The game indexes the grid from the lot's first tile and lowest level.
+        const auto& b = *saved.worldBounds;
+        world_.setLockedTile([grid = std::make_shared<const array3d::Array3D>(locked->second), b](int level, int x, int y) -> std::optional<bool> {
+            const std::int64_t l = static_cast<std::int64_t>(level) - b.minLevel, gx = static_cast<std::int64_t>(x) - b.minX,
+                               gy = static_cast<std::int64_t>(y) - b.minY;
+            constexpr std::int64_t kMax = std::numeric_limits<std::int32_t>::max(), kMin = std::numeric_limits<std::int32_t>::min();
+            if (l < kMin || l > kMax || gx < kMin || gx > kMax || gy < kMin || gy > kMax || grid->elementSize == 0 ||
+                !grid->contains(static_cast<std::int32_t>(l), static_cast<std::int32_t>(gx), static_cast<std::int32_t>(gy))) {
+                return std::nullopt;
+            }
+            return grid->at(static_cast<std::int32_t>(l), static_cast<std::int32_t>(gx), static_cast<std::int32_t>(gy))[0] != 0;
         });
     }
     world_.setPlatformRegion(platformRegions(saved));
@@ -181,17 +214,22 @@ LotSimulation::LotSimulation(const std::filesystem::path& install, const std::fi
         }
         world_.weather() = loaded.weather.value_or(weather::Weather{});
         findCharacterFiles();
+        world_.setHasCharacterFile([this](std::int16_t neighbor) { return characterFile(neighbor).has_value(); });
     }
     if (const auto wants = content::wantsPackage(install)) {
         auto defs = std::make_shared<content::WantDefinitions>(content::loadWantDefinitions(*wants));
         if (const auto tuning = content::wantTuningPackage(install)) {
             const std::string text = content::loadWantTuning(*tuning);
             defs->categories = content::parseWantCategories(text);
+            defs->aspirationLevels = content::parseAspirationLevels(text);
             if (const auto influence = content::parseInfluenceCurve(text)) {
                 defs->influenceLevels = influence->inverse();
             }
         }
         world_.setWantDefinitions(std::move(defs));
+        if (const auto trees = content::wantTreesPackage(install)) {
+            world_.setWantTrees(std::make_shared<const std::vector<want_trees::Tree>>(content::loadWantTrees(*trees)));
+        }
     }
     world_.setScripts(loadScripts(install, code_));
     vm_.onStep = std::move(onLoadStep);
@@ -223,6 +261,9 @@ void LotSimulation::setRouteSources(RouteSources sources) {
         return objectFits(placed, x, y, level, direction);
     });
     world_.setObjectInTheWay([this](const SimObject& placed, float x, float y, std::int32_t level, std::int16_t direction) {
+        if (placed.isPerson()) {
+            return placeTest(placed, x, y, level, intersectionsFor(placed)).has_value();
+        }
         const ObjectType* type = code_.objectType(placed.definition.guid());
         return type != nullptr && objectInTheWay(placed, *type, x, y, level, direction);
     });
@@ -708,7 +749,7 @@ SlotRoute LotSimulation::routeToSlot(const SimObject& sim, const SimObject& owne
     std::set<std::uint32_t> doorOwners;
     const bool acrossLevels = sim.level != owner.level;
     std::vector<const RouteItem*> doorItems;
-    for (int l = 0; l < routes->levels(); ++l) {
+    for (int l = routes->lowest(); l < routes->lowest() + routes->levels(); ++l) {
         if (const RouteGrid* g = routes->level(l); g != nullptr && (acrossLevels || l == level)) {
             for (const RouteItem& item : g->items()) {
                 doorItems.push_back(&item);
@@ -729,7 +770,9 @@ SlotRoute LotSimulation::routeToSlot(const SimObject& sim, const SimObject& owne
             }
         }
     }
-    const RouteStart start[] = {{static_cast<float>(sim.x) / 65536.0f, static_cast<float>(sim.y) / 65536.0f, sim.level - 1}};
+    // The search counts levels from the lowest one with a grid.
+    const int lowest = routes->lowest();
+    const RouteStart start[] = {{static_cast<float>(sim.x) / 65536.0f, static_cast<float>(sim.y) / 65536.0f, sim.level - 1 - lowest}};
     std::optional<RoutePlan> plan;
     std::vector<StairPortal> stairs;
     if (!acrossLevels) {
@@ -737,7 +780,7 @@ SlotRoute LotSimulation::routeToSlot(const SimObject& sim, const SimObject& owne
     } else {
         // Every level, joined by the lot's stairs, each as this Sim may cross it.
         std::vector<RouteLevel> levels;
-        for (int l = 0; l < routes->levels(); ++l) {
+        for (int l = lowest; l < lowest + routes->levels(); ++l) {
             const RouteGrid* g = routes->level(l);
             auto found = routeLinks_.find(l);
             if (g != nullptr && found == routeLinks_.end()) {
@@ -749,7 +792,7 @@ SlotRoute LotSimulation::routeToSlot(const SimObject& sim, const SimObject& owne
         }
         std::vector<RouteGoal> onLevel(goals.begin(), goals.end());
         for (RouteGoal& g : onLevel) {
-            g.level = level;
+            g.level = level - lowest;
         }
         stairs = stairPortals(world_, code_);
         std::vector<RoutePortal> portals;
@@ -757,10 +800,10 @@ SlotRoute LotSimulation::routeToSlot(const SimObject& sim, const SimObject& owne
             RoutePortal r;
             r.x[0] = p.from.x;
             r.y[0] = p.from.y;
-            r.level[0] = p.from.level - 1;
+            r.level[0] = p.from.level - 1 - lowest;
             r.x[1] = p.to.x;
             r.y[1] = p.to.y;
-            r.level[1] = p.to.level - 1;
+            r.level[1] = p.to.level - 1 - lowest;
             r.twoWay = p.twoWay;
             const auto [refused, cost] = portalCheck(sim, {p.from.part, p.to.part});
             r.refused = refused;
@@ -960,7 +1003,7 @@ void LotSimulation::restartSim(SimObject& sim, const ObjectType& type) {
     if (sim.running) {
         dropLinkedInteractions(world_, *sim.running, &sim, {});
     }
-    resetSim(sim, type, code_);
+    resetSim(world_, sim, type, code_, vm_.rng);
     ++resets_;
     const auto* functions = code_.objectFunctions(type);
     if (functions != nullptr && kCleanup < functions->size() && (*functions)[kCleanup].action != 0) {
@@ -1273,7 +1316,10 @@ void LotSimulation::tick() {
             cleanUpDestinations(world_, *o, true);
         }
     }
+    // The wants manager steps once a tick. Where in the tick the game steps it is not known yet.
+    stepWants({world_, code_, vm_, installedPacks_});
     advanceClock(vm_.globals);
+    removeSlotContents(world_, vm_.resetSim);
     forgetRemoved();
     purgeRemoved();
     world_.countTick();
@@ -1298,6 +1344,7 @@ void LotSimulation::pausedPass() {
             cleanUpDestinations(world_, *after, true);
         }
     }
+    removeSlotContents(world_, vm_.resetSim);
     forgetRemoved();
     purgeRemoved();
 }

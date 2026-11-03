@@ -27,6 +27,8 @@ public:
     void setHousehold(std::vector<Member> members);
     // Shows the skewer in live mode only (the game hides it in the options menu).
     void setLiveMode(bool live);
+    // Hides it while the free camera is on, with the rest of the UI.
+    void setHidden(bool hidden);
     void select(std::int16_t sim);
     // Shows the star on the tracked Sim's thumbnail (0: on none).
     void setTracked(std::int16_t sim);
@@ -48,7 +50,7 @@ private:
 
     ts2::ui::Screen* screen_ = nullptr;
     int puck_ = -1, skewer_ = -1;
-    bool live_ = true;
+    bool live_ = true, hidden_ = false;
     // The skewer's constants table.
     int offsetX_ = 1, spacer_ = 1, topMargin_ = 0, bottomMargin_ = 2;
     struct Thumbnail {

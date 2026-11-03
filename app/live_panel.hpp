@@ -41,8 +41,8 @@ public:
     }
     // Shows the selected Sim's wants and fears in its want and fear slots.
     void setWants(const std::vector<WantsPanel::Want>& wants, const std::vector<WantsPanel::Want>& fears, std::size_t wantSlots,
-                  std::size_t fearSlots) {
-        wants_.show(wants, fears, wantSlots, fearSlots);
+                  std::size_t fearSlots, const WantsPanel::Refill& refill) {
+        wants_.show(wants, fears, wantSlots, fearSlots, refill);
     }
     // Shows the selected Sim's mood and aspiration score (person data 0xA0) on the mood meter.
     void setMood(int mood, int aspirationScore) { mood_.show(mood, aspirationScore); }

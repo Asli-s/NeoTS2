@@ -804,7 +804,7 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
     world.setAnimationCarries([&](const std::string& name) { return animations.hasTargetType(name, 2); });
     world.setLocoClips([&](const std::string& name) -> std::optional<ts2::sim::LocoClip> {
         const auto a = animations.find(name);
-        return a ? std::optional<ts2::sim::LocoClip>({name, a->duration, a->travel, a->loopPhase, a->match, a->speed, a->rootTurn}) : std::nullopt;
+        return a ? std::optional<ts2::sim::LocoClip>({name, a->duration, a->travel, a->loopPhase, a->match, a->speed, a->rootTurn, a->category}) : std::nullopt;
     });
     world.setAnimationEventTime([&](const std::string& name, int id) { return animations.eventTime(name, id); });
     // The world reads each clip's events in place, so they are kept for the whole run.

@@ -1,6 +1,7 @@
 // The platform layer on SDL 3.
 #include "platform/platform.hpp"
 
+#include "diag/log.hpp"
 #include "platform/sdl3/sdl3_window.hpp"
 #include "platform/sdl3/window_frame.hpp"
 
@@ -431,7 +432,7 @@ SystemInfo systemInfo() {
 bool savePng(const std::filesystem::path& path, const std::uint8_t* rgba, unsigned width, unsigned height) {
     SDL_Surface* surface = SDL_CreateSurfaceFrom(static_cast<int>(width), static_cast<int>(height), SDL_PIXELFORMAT_RGBA32,
                                                  const_cast<std::uint8_t*>(rgba), static_cast<int>(width * 4));
-    const bool saved = surface != nullptr && SDL_SavePNG(surface, path.string().c_str());
+    const bool saved = surface != nullptr && SDL_SavePNG(surface, diag::utf8(path).c_str());
     SDL_DestroySurface(surface);
     return saved;
 }

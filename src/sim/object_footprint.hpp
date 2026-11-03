@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace ts2::sim {
@@ -41,10 +42,13 @@ std::vector<RouteRect> footprintRects(const FootprintShape& shape);
 // when the model has no mask for that tile.
 std::vector<RouteRect> footprintTile(const scenegraph::DataValue& masks, int graphic, int tileX, int tileY);
 
-// The square on the wall in front of a door's tile (route +y, half a tile from its centre) that lets
-// Sims through, before turning. A door is a multi-tile object with a part each side of the wall.
-// Each part's mask is where the leaf swings on its side.
-RouteRect doorwayRect();
+// The tiles a model's masks for `graphic` name, along route x and y from the lead's tile before
+// turning. Names that are not "(x,y)", masks of the wrong size and tiles more than 64 tiles away are
+// left out.
+std::vector<std::pair<int, int>> footprintMaskTiles(const scenegraph::DataValue& footprint, int graphic);
+
+// A doorway square that lets Sims through a door's wall, centred on (`x`, `y`).
+RouteRect doorwaySquare(float x, float y);
 
 // Turns rectangles around an object's tile centre to face `direction` (object data 1, 0-7) and moves
 // them to the object's position (`x`, `y`), snapped to eighths.

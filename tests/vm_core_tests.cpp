@@ -336,11 +336,19 @@ void initObjectSetsDefaultsAndAttributesByParam() {
     code.add(kObjectGroup, 0x1001, bhav({
         expr(owner::kStackObjectAttributeByParam, 5, op::kAssign, owner::kLiteral, 7, T, E),  // no param 5
     }, 2));
+    // The stack object's semi-attribute picked by param 1, written and read back into my attribute 0.
+    code.add(kObjectGroup, 0x1002, bhav({
+        expr(owner::kStackObjectId, 0, op::kAssign, owner::kParam, 0, 1, E),
+        expr(owner::kStackObjectSemiAttributeByParam, 1, op::kAssign, owner::kLiteral, 9, 2, E),
+        expr(owner::kMyAttribute, 0, op::kAssign, owner::kStackObjectSemiAttributeByParam, 1, T, E),
+    }, 2));
     ts2::sim::World world;
     auto& me = world.create(kObjectGroup, definition("Me", 0));
     auto& other = world.create(kObjectGroup, definition("Other", 0));
     Vm vm(code, {}, &world);
     const std::int16_t args[] = {other.id, 3};
+    CHECK(vm.run(me, 0x1002, args).outcome == Outcome::True);
+    CHECK(other.semiAttributes[3] == 9 && me.attributes[0] == 9);
     CHECK(vm.run(me, 0x1000, args).outcome == Outcome::True);
     CHECK(me.data[0x04] == 1 && me.data[0x2A] == 3 && me.data[0x2B] == 0x0A && me.data[0x28] == 0x2020);
     CHECK(me.data[0x17] == 2 && me.data[0x31] == 1 && me.data[0x4E] == 5);
@@ -1070,7 +1078,7 @@ std::vector<Test> vmCoreTests() {
         {"unimplemented primitive stops with its opcode", unimplementedPrimitiveStopsWithItsOpcode},
         {"jump past the end is an error", jumpPastTheEndIsAnError},
         {"attributes belong to each object", attributesBelongToEachObject},
-        {"Init - Object sets defaults; attributes by param", initObjectSetsDefaultsAndAttributesByParam},
+        {"Init - Object sets defaults; attributes and semi-attributes by param", initObjectSetsDefaultsAndAttributesByParam},
         {"loading a character waits", loadingACharacterWaits},
         {"object id field matches the object", objectIdFieldMatchesTheObject},
         {"stack object is reached through its id", stackObjectIsReachedThroughItsId},

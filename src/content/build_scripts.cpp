@@ -1,9 +1,15 @@
 #include "content/build_scripts.hpp"
 
+#include "diag/log.hpp"
+#include "formats/dbpf.hpp"
+#include "formats/propset.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
+#include <map>
+#include <mutex>
 #include <set>
 #include <sstream>
 
@@ -105,6 +111,14 @@ void BuildScripts::addRoofPatterns(std::string_view text) {
     });
 }
 
+void BuildScripts::addFenceArches(std::string_view text) {
+    forEachLine(text, [&](const std::string& key, const std::string& value) {
+        if (key == "fenceArch") {
+            fenceArches.insert(static_cast<std::uint32_t>(std::strtoul(value.c_str(), nullptr, 10)));
+        }
+    });
+}
+
 BuildScripts loadBuildScripts(const std::vector<Product>& products) {
     BuildScripts scripts;
     std::set<std::filesystem::path> seen;
@@ -117,8 +131,61 @@ BuildScripts loadBuildScripts(const std::vector<Product>& products) {
         scripts.addPatterns(read(folder / "wallPatterns.txt"), true);
         scripts.addWallStyles(read(folder / "walls.txt"));
         scripts.addRoofPatterns(read(folder / "roofPatterns.txt"));
+        scripts.addFenceArches(read(folder / "fencearches.txt"));
     }
     return scripts;
+}
+
+std::set<std::uint32_t> loadGreenhouseFences(const std::vector<Product>& products) {
+    constexpr std::uint32_t kFenceProperties = 0x2CB230B8;
+    // A property's number, decimal or 0x hex, or a binary flag's "true".
+    const auto number = [](const std::string& text) -> unsigned long long {
+        if (text == "true") {
+            return 1;
+        }
+        return std::strtoull(text.c_str(), nullptr, text.starts_with("0x") ? 16 : 10);
+    };
+    std::set<std::filesystem::path> folders;
+    for (const auto& objects : objectLoadOrder(products)) {
+        folders.insert(objects.parent_path().parent_path() / "Catalog" / "Patterns");
+    }
+    // The catalog doesn't change while the game runs, so every lot after the first gets the same set.
+    static std::mutex cacheLock;
+    static std::map<std::set<std::filesystem::path>, std::set<std::uint32_t>> cache;
+    const std::lock_guard lock(cacheLock);
+    if (const auto it = cache.find(folders); it != cache.end()) {
+        return it->second;
+    }
+    std::set<std::uint32_t> greenhouse;
+    for (const auto& folder : folders) {
+        std::error_code ec;
+        for (std::filesystem::directory_iterator it(folder, ec), end; it != end; it.increment(ec)) {
+            if (it->path().extension() != ".package") {
+                continue;
+            }
+            try {
+                dbpf::Package package{it->path()};
+                for (const auto& e : package.entries()) {
+                    if (e.key.type != kFenceProperties) {
+                        continue;
+                    }
+                    try {
+                        const auto p = propset::parse(package.read(e));
+                        const auto guid = p.find("guid"), flag = p.find("isgreenhouse");
+                        if (guid != p.end() && flag != p.end() && number(flag->second) != 0) {
+                            greenhouse.insert(static_cast<std::uint32_t>(number(guid->second)));
+                        }
+                    } catch (const std::exception& ex) {
+                        diag::warnOnce(std::string("greenhouse walls: a fence that can't be read is left out: ") + ex.what());
+                    }
+                }
+            } catch (const std::exception& ex) {
+                diag::warnOnce("greenhouse walls: " + it->path().string() + " can't be read and is passed over: " + ex.what());
+            }
+        }
+    }
+    cache.emplace(folders, greenhouse);
+    return greenhouse;
 }
 
 } // namespace ts2::content

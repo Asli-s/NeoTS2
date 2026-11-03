@@ -889,6 +889,14 @@ void targaImagesDecode() {
     CHECK(!ts2::tga::decode(huge));
     huge[2] = 2;  // plain
     CHECK(!ts2::tga::decode(huge));
+    // 16384 x 16384 at the side limit, with enough run-length data to claim every pixel: refused by
+    // the pixel limit before gigabytes are set aside.
+    std::vector<std::uint8_t> big(18, 0);
+    big[2] = 10;
+    big[13] = big[15] = 0x40;
+    big[16] = 32;
+    big.resize(18 + (std::size_t{1} << 28) / 128 * 5, 0xFF);
+    CHECK(!ts2::tga::decode(big) && !ts2::image::decode(big));
 }
 
 // A neighborhood's moving picture: one 32 x 32 block, a pixel written out then runs of one color,

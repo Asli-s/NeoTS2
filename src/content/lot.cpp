@@ -1,5 +1,6 @@
 #include "content/lot.hpp"
 
+#include "formats/binary_reader.hpp"
 #include "formats/cobject.hpp"
 #include "formats/dbpf.hpp"
 #include "formats/resource_types.hpp"
@@ -12,6 +13,9 @@
 #include <exception>
 #include <map>
 #include <optional>
+#include <span>
+#include <stdexcept>
+#include <string>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
@@ -24,6 +28,27 @@ constexpr std::size_t kObjectIdField = 0x0B;
 constexpr std::uint32_t kRoomGraphInstance = 5;
 // The graph of the lot's actual walls and fences. The wall covering layer names its walls.
 constexpr std::uint32_t kWallGraphInstance = 24;
+
+// cWorldDB: the usual 64-byte name, class id, version and class name, then six ints. Versions from 7
+// add a flag and, when it is set, a string after them, which nothing reads.
+WorldBounds parseWorldBounds(std::span<const std::uint8_t> data) {
+    BinaryReader r(data);
+    r.skip(64);
+    r.u32();
+    r.u32();
+    const auto name = r.bytes(r.u8());
+    if (std::string(name.begin(), name.end()) != "cWorldDB") {
+        throw std::runtime_error("cWorldDB: unexpected class name");
+    }
+    WorldBounds b;
+    b.minX = r.i32();
+    b.minY = r.i32();
+    b.minLevel = r.i32();
+    b.maxX = r.i32();
+    b.maxY = r.i32();
+    b.maxLevel = r.i32();
+    return b;
+}
 
 xobj::RecordKind recordKind(std::uint32_t resourceType) {
     return resourceType == types::kSavedPerson               ? xobj::RecordKind::Person
@@ -100,6 +125,7 @@ Lot loadLot(const std::filesystem::path& path) {
     bool haveTypes = false;
     bool haveMap = false;
     std::map<std::uint32_t, std::vector<const dbpf::IndexEntry*>> records;
+    std::map<std::uint32_t, bool> personSceneRecords;  // whether each read scene record is a Sim's
     for (const auto& e : package.entries()) {
         if (e.key.type == types::kObjectTypeTable) {
             lot.types = objt::parse(package.read(e));
@@ -112,6 +138,12 @@ Lot loadLot(const std::filesystem::path& path) {
                 lot.objectGroups = objm::parseGroups(package.read(e));
             } catch (const std::exception& ex) {
                 lot.problems.push_back({e.key.instance, std::string("object groups: ") + ex.what()});
+            }
+        } else if (e.key.type == types::kWorldDatabase) {
+            try {
+                lot.worldBounds = parseWorldBounds(package.read(e));
+            } catch (const std::exception& ex) {
+                lot.problems.push_back({e.key.instance, std::string("world bounds: ") + ex.what()});
             }
         } else if (e.key.type == types::kWallGraph && e.key.instance == kRoomGraphInstance) {
             lot.roomGraph = wallgraph::parse(package.read(e));
@@ -130,6 +162,7 @@ Lot loadLot(const std::filesystem::path& path) {
                 lot.objectModels[e.key.instance] = scenegraph::parseSceneObject(data).model;
                 try {
                     auto saved = cobject::parse(data);
+                    personSceneRecords[e.key.instance] = saved.outerTag == cobject::kPersonTag;
                     if (!saved.animations.empty()) {
                         lot.savedAnimations.emplace(e.key.instance, std::move(saved.animations));
                     }
@@ -276,6 +309,17 @@ Lot loadLot(const std::filesystem::path& path) {
             continue;
         }
         lot.objects.push_back(std::move(*chosen));
+    }
+    // Ids are reused, so an object's scene record can be an older object's. A Sim's record under an
+    // object, or an object's under a Sim, gives it no saved model, joints or animations.
+    for (const auto& object : lot.objects) {
+        const auto record = personSceneRecords.find(object.id);
+        if (record != personSceneRecords.end() && object.type && record->second != (object.type->kind == objt::kPersonKind)) {
+            lot.objectModels.erase(object.id);
+            lot.savedJoints.erase(object.id);
+            lot.savedAnimations.erase(object.id);
+            ++lot.staleRecords;
+        }
     }
     for (const auto& [id, typeIndex] : lot.objectMap.typeIndexByObject) {
         if (!records.contains(id)) {

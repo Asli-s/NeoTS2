@@ -28,8 +28,6 @@ struct ObjectType {
     // Container slots a new object of this type has: the type-0 entries of its SLOT resource
     // (OBJD "slots id"), 0 without one.
     std::size_t containerSlots = 0;
-    // How high each container slot is above the object's floor (its SLOT entry's z), in tiles.
-    std::vector<float> containerSlotHeights;
     // Its routing slots (type-3 entries of the SLOT resource) in their order, which Snap numbers from 0.
     std::vector<slot::Entry> routingSlots;
     // Its container slots (type-0 entries of the SLOT resource) in their order.

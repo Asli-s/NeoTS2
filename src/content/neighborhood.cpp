@@ -31,7 +31,7 @@ fs::path neighborhoodOfLot(const fs::path& lotPackage) {
 }
 
 std::optional<std::int32_t> lotNumber(const fs::path& lotPackage) {
-    const std::string stem = lotPackage.stem().string();
+    const std::string stem = diag::utf8(lotPackage.stem());
     const auto at = stem.rfind("_Lot");
     if (at == std::string::npos || at + 4 >= stem.size() || stem.size() - at - 4 > 9) {
         return std::nullopt;
@@ -52,8 +52,10 @@ std::vector<fs::path> characterFiles(const fs::path& neighborhood) {
     if (!fs::is_directory(folder)) {
         return files;
     }
-    for (const auto& entry : fs::directory_iterator(folder)) {
-        if (!entry.is_regular_file() || entry.path().extension() != ".package") {
+    std::error_code ec;
+    for (fs::directory_iterator it(folder, ec), end; it != end; it.increment(ec)) {
+        const auto& entry = *it;
+        if (!entry.is_regular_file(ec) || entry.path().extension() != ".package") {
             continue;
         }
         // Finder writes AppleDouble metadata beside files copied to some volumes. It uses `._`
@@ -107,25 +109,25 @@ std::size_t addCharacters(ResourceIndex& index, const fs::path& neighborhood) {
 }
 
 fs::path neighborhoodPackage(const fs::path& neighborhood) {
-    return neighborhood / (neighborhood.filename().string() + "_Neighborhood.package");
+    // Joined as a path, since converting the folder name to text throws on Windows when it holds
+    // characters the system's code page lacks.
+    fs::path file = neighborhood.filename();
+    file += "_Neighborhood.package";
+    return neighborhood / file;
 }
 
 Neighborhood loadNeighborhood(const fs::path& neighborhoodPackage) {
     dbpf::Package package{neighborhoodPackage};
     Neighborhood hood;
     const fs::path lots = neighborhoodPackage.parent_path() / "Lots";
-    const std::string prefix = neighborhoodPackage.parent_path().filename().string() + "_Lot";
+    const std::string prefix = diag::utf8(neighborhoodPackage.parent_path().filename()) + "_Lot";
     std::error_code ec;
     for (fs::directory_iterator it(lots, ec), end; it != end; it.increment(ec)) {
-        // A file name the system can't convert to text is not a lot, so it is skipped.
-        try {
-            const std::string stem = it->path().stem().string();
-            if (it->path().extension() == ".package" && stem.rfind(prefix, 0) == 0) {
-                if (const auto n = lotNumber(it->path())) {
-                    hood.lotIds.insert(*n);
-                }
+        const std::string stem = diag::utf8(it->path().stem());
+        if (it->path().extension() == ".package" && stem.rfind(prefix, 0) == 0) {
+            if (const auto n = lotNumber(it->path())) {
+                hood.lotIds.insert(*n);
             }
-        } catch (const std::exception&) {
         }
     }
     for (const auto& e : package.entries()) {
@@ -226,9 +228,11 @@ std::vector<NeighborhoodEntry> listNeighborhoods(const fs::path& neighborhoods) 
     if (!fs::is_directory(neighborhoods)) {
         return out;
     }
-    for (const auto& item : fs::directory_iterator(neighborhoods)) {
+    std::error_code ec;
+    for (fs::directory_iterator it(neighborhoods, ec), end; it != end; it.increment(ec)) {
+        const auto& item = *it;
         const fs::path package = neighborhoodPackage(item.path());
-        if (!item.is_directory() || item.path().filename() == "Tutorial" || !fs::exists(package)) {
+        if (!item.is_directory(ec) || item.path().filename() == "Tutorial" || !fs::exists(package, ec)) {
             continue;
         }
         NeighborhoodEntry n;

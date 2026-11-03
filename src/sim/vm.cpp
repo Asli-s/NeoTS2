@@ -137,10 +137,10 @@ bool Execution::primitive(const bhav::Instruction& in, Frame& f) {
     case kAnimateStopOpcode:      return animateStop(in, f);
     case kAnimateObjectOpcode:    return animateObject(in, f);
     case kLookAtOpcode:           return lookAt(in, f);
-    // These start an effect, stop all of an object's sounds or pick a Sim's walk animations (Assign
-    // Locomotion Animations), and carry on at once. What they show or play isn't kept yet.
+    case kAssignLocomotionOpcode: return assignLocomotion(in, f);
+    // These start an effect or stop all of an object's sounds, and carry on at once. What they
+    // show or play isn't kept yet.
     case kStopAllSoundsOpcode:
-    case kAssignLocomotionOpcode:
     case kEffectOpcode:
         return true;
     // Debug only does something with the game's debug (cheat) setting on: console commands.

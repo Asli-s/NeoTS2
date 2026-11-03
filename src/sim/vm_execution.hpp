@@ -64,7 +64,6 @@ constexpr float kWalkSliver = 0.01f;
 // Facings closer than this (radians) need no turn. Route points closer than this (tiles) are one.
 constexpr float kSameHeading = 1e-4f;
 constexpr float kSamePoint = 1e-4f;
-constexpr std::size_t kGenderPersonData = 0x41;
 constexpr std::uint16_t kGetDistanceToOpcode = 0x000B;
 constexpr std::uint16_t kPushInteractionOpcode = 0x000D;
 constexpr std::uint16_t kAlterBudgetOpcode = 0x0019;
@@ -183,6 +182,7 @@ constexpr std::uint16_t kRoomOutside = 1;
 constexpr std::uint16_t kRoomLevel = 2;
 constexpr std::uint16_t kRoomArea = 3;
 constexpr std::uint16_t kRoomPool = 4;
+constexpr std::uint16_t kRoomGreenhouse = 6;
 constexpr std::uint16_t kRoomLayer1 = 7;
 constexpr std::uint8_t kRunInMyStack = 0x00;
 constexpr std::uint8_t kRunInStackObjectsStack = 0x01;
@@ -289,6 +289,7 @@ constexpr std::uint8_t kClearHairOverrideGenericCall = 0x2F;
 // nothing changes and it is true. Other skins are named by a text resource (not kept yet).
 constexpr std::uint8_t kSetSkinGenericCall = 0x3C;
 constexpr std::uint8_t kAddToFamilyGenericCall = 0x04;
+constexpr std::uint8_t kUnlinkCharacterGenericCall = 0x26;
 // Generic calls 0x0A and 0x0B turn Build and Buy mode off and back on for the object running them.
 // Always true.
 constexpr std::uint8_t kDisableBuildBuyGenericCall = 0x0A;
@@ -665,6 +666,7 @@ public:
     // Generic Sims Calls, family, new characters, relationships, motives and wants (vm_sims.cpp).
     bool genericSimsCall(const bhav::Instruction& in);
     bool addToFamily();
+    bool unlinkCharacter();
     bool fitsWithFootprint();
     bool outfitsInformation();
     std::uint32_t madeCharacterType(const ObjectType& from, std::uint32_t top);
@@ -773,6 +775,8 @@ public:
     std::optional<ModelBone> modelJoint(const SimObject& object, const std::string& name);
     bool snapInto(const bhav::Instruction& in, Frame& f);
     void takeOutOfSlot(SimObject& object);
+    // Out of its container's slot and off the lot.
+    void takeOutOfWorld(SimObject& object);
     void putInSlot(SimObject& object, SimObject& container, std::int16_t slot);
 
     // Animate Sim, Animate Overlay, Animate Stop and Reach/Put (vm_animation.cpp).
@@ -788,6 +792,7 @@ public:
     bool animateStop(const bhav::Instruction& in, Frame& f);
     bool animateObject(const bhav::Instruction& in, Frame& f);
     bool lookAt(const bhav::Instruction& in, Frame& f);
+    bool assignLocomotion(const bhav::Instruction& in, const Frame& f);
     ReachStep reachPut(const bhav::Instruction& in, Frame& f);
     std::string childClip(const SimObject& sim, const std::string& clip);
     void playReachStages(SimObject& sim, const SimObject& object, bool grab, bool flipped, std::uint16_t entry, float length,
@@ -831,6 +836,9 @@ public:
                                         std::int16_t stackObject, std::span<const std::int16_t> args);
     bool turnOnTheSpot(SimObject& sim, Walking& walk, double now);
     std::optional<LocoClip> locoClip(const std::string& name);
+    std::vector<LocoClip> pushedWalkSet(const SimObject& sim);
+    std::optional<TurnClip> turnClipFor(const SimObject& sim, float start, float end);
+    std::string walkPoseFor(const SimObject& sim);
     std::optional<LocoPair> locoPair(const std::optional<WalkTurnClips>& names);
     void planWalkFor(const SimObject& sim, Walking& walk);
     void followWalk(SimObject& sim, Walking& walk, float walked, double now);
@@ -849,7 +857,6 @@ public:
     std::optional<WalkStep> goalCheck(SimObject& sim, const Frame& f, float remaining);
     bool getDistanceTo(const bhav::Instruction& in, Frame& f);
     bool getDirectionTo(const bhav::Instruction& in, Frame& f);
-    static std::int16_t octant(float dx, float dy);
 
     // Interactions: action strings, Find Best Object/Interaction, Idle for Input, Push Interaction
     // (vm_interactions.cpp).

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
@@ -24,6 +25,7 @@ struct LocoClip {
     float match = 0;      // the value the planner matches start, stop and loop clips by (meaning not known yet)
     float speed = 0;      // tiles per millisecond the clip is made for
     float rootTurn = 0;   // radians
+    std::uint16_t category = 0;  // see anim::Animation::category
 };
 
 // A walk part's two clips: the short one and the long one it is mixed with (none: the short one alone).

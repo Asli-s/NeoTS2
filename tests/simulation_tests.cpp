@@ -356,6 +356,45 @@ void roomOnSideOfWallMatchesTheWallGraph() {
     CHECK(ts2::sim::roomOnSideOfWall(rooms, {0, 0, 0, 0}, {0, 0, 2, 0}) == 0);
 }
 
+// A 2 by 2 room at (offset, offset) on a side by side lot, its outline in unit pieces, the first
+// `greenhouse` of them of type kGreenhouseWall and the rest walls.
+constexpr std::uint32_t kGreenhouseWall = 0x924E0F6B;
+std::pair<ts2::wallgraph::WallGraph, std::vector<ts2::sim::WallPiece>> unitSquareRoom(int side, int offset, int greenhouse) {
+    ts2::wallgraph::WallGraph g;
+    g.width = side;
+    g.height = side;
+    g.levels = 1;
+    const float o = static_cast<float>(offset);
+    const std::vector<std::pair<float, float>> ring{{o, o}, {o + 1, o}, {o + 2, o}, {o + 2, o + 1}, {o + 2, o + 2},
+                                                    {o + 1, o + 2}, {o, o + 2}, {o, o + 1}};
+    for (std::int32_t i = 0; i < 8; ++i) {
+        g.points.push_back({i, ring[static_cast<std::size_t>(i)].first, ring[static_cast<std::size_t>(i)].second, 0});
+    }
+    std::vector<ts2::sim::WallPiece> pieces;
+    for (std::int32_t i = 0; i < 8; ++i) {
+        g.walls.push_back({i, i, 0, (i + 1) % 8, 5});
+        pieces.push_back({g.points[static_cast<std::size_t>(i)], g.points[static_cast<std::size_t>((i + 1) % 8)],
+                          i < greenhouse ? kGreenhouseWall : 1u});
+    }
+    return {g, pieces};
+}
+
+// Room field 6 is 1 when more than half of the outline round the room is greenhouse walls. A room
+// whose first tile has no piece on its edges or at its nearest corner gets 0.
+void greenhouseRoomsAreMostlyGreenhouseWalls() {
+    const std::set<std::uint32_t> greenhouse{kGreenhouseWall};
+    const auto [graph, five] = unitSquareRoom(6, 1, 5);
+    const ts2::sim::RoomMap rooms(graph);
+    CHECK(rooms.roomAt(0, 1.5f, 1.5f) == 5);
+    CHECK(ts2::sim::WallOutline(five).mostlyGreenhouse(rooms, 5, greenhouse));
+    CHECK(!ts2::sim::WallOutline(unitSquareRoom(6, 1, 4).second).mostlyGreenhouse(rooms, 5, greenhouse));
+    CHECK(!ts2::sim::WallOutline(five).mostlyGreenhouse(rooms, 5, {}));
+    const auto [farGraph, far] = unitSquareRoom(8, 3, 8);
+    const ts2::sim::RoomMap farRooms(farGraph);
+    CHECK(ts2::sim::WallOutline(far).mostlyGreenhouse(farRooms, 5, greenhouse));
+    CHECK(!ts2::sim::WallOutline(far).mostlyGreenhouse(farRooms, 0, greenhouse));
+}
+
 void roomsAreFilledBetweenWalls() {
     const ts2::sim::RoomMap rooms(squareRoom(false));
     CHECK(rooms.roomAt(0, 2.5f, 2.5f) == 5);
@@ -528,6 +567,7 @@ std::vector<Test> simulationTests() {
         {"ticks keep up with the speed clock", ticksKeepUpWithTheSpeedClock},
         {"rooms are filled between walls", roomsAreFilledBetweenWalls},
         {"the room on a side of a wall matches the wall graph", roomOnSideOfWallMatchesTheWallGraph},
+        {"greenhouse rooms are mostly greenhouse walls", greenhouseRoomsAreMostlyGreenhouseWalls},
         {"broken numbers are left out", brokenNumbersAreLeftOut},
         {"diagonal walls split tiles", diagonalWallsSplitTiles},
         {"saved room grid is read by quarter", savedRoomGridIsReadByQuarter},

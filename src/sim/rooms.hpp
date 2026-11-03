@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
+#include <tuple>
 #include <vector>
 
 namespace ts2::sim {
@@ -69,6 +71,50 @@ private:
     std::int32_t levelCount_ = 0;
     std::vector<std::int32_t> quarterRoom_;
     std::map<std::int32_t, RoomInfo> rooms_;
+};
+
+// A wall or fence segment and its wall layer type: a wall style, or a fence's GUID.
+struct WallPiece {
+    wallgraph::Point from, to;
+    std::uint32_t type = 0;
+};
+
+// The game's layer of the lot's walls and fences together (fence arches and the wall styles 300 and
+// 301 are kept out of it), as a planar graph whose faces are the areas they enclose.
+class WallOutline {
+public:
+    WallOutline() = default;
+    explicit WallOutline(const std::vector<WallPiece>& pieces);
+
+    // Room field 6: whether more than half of the outline round room `room` is greenhouse walls
+    // (fences whose GUID is in `greenhouse`). The outline is the face on the room's side of the
+    // segment nearest a point in the room's first tile (lowest level, then x, then y), looked for
+    // on that tile's edges and at its nearest corner, a level lower when none is there. Segments
+    // the game finds outside this layer are not known yet. Of two corner segments as near, the
+    // one the game takes is not known either.
+    bool mostlyGreenhouse(const RoomMap& rooms, std::int32_t room, const std::set<std::uint32_t>& greenhouse) const;
+
+private:
+    struct Vertex {
+        float x = 0, y = 0;
+        std::int32_t level = 0;
+        std::vector<std::size_t> out;  // half-edges leaving it, by angle
+    };
+    struct HalfEdge {
+        std::size_t from = 0, to = 0;
+        std::uint32_t type = 0;
+        float angle = 0;
+    };
+    std::optional<std::size_t> vertex(float x, float y, std::int32_t level) const;
+    std::optional<std::size_t> edge(std::size_t from, std::size_t to) const;
+    std::optional<std::pair<std::size_t, std::size_t>> nearest(const RoomMap& rooms, float x, float y,
+                                                               std::int32_t level) const;
+    // The next half-edge round the face on the right of `e`.
+    std::size_t next(std::size_t e) const;
+
+    std::vector<Vertex> vertices_;
+    std::vector<HalfEdge> edges_;  // the twin of half-edge i is i ^ 1
+    std::map<std::tuple<std::int32_t, std::int32_t, std::int32_t>, std::size_t> vertexAt_;
 };
 
 // The room on one side of the wall from `from` to `to` (wall graph points): the room of the quarter

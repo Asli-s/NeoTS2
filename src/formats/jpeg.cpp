@@ -9,9 +9,6 @@ namespace ts2::jpeg {
 
 namespace {
 
-// Pictures larger than this many pixels are refused, so broken sizes can't ask for huge memory.
-constexpr std::uint64_t kMaxPixels = 1u << 26;
-
 // Coefficient positions in the order they are stored, with spare entries so a broken block that
 // runs past the last coefficient lands on it harmlessly.
 constexpr std::array<int, 80> kNaturalOrder{0,  1,  8,  16, 9,  2,  3,  10, 17, 24, 32, 25, 18, 11, 4,  5,  12, 19, 26, 33,
@@ -335,7 +332,7 @@ std::optional<tga::Pixels> decode(std::span<const std::uint8_t> data, std::uint3
             width = be16(seg, 3);
             const int count = seg[5];
             if (width <= 0 || height <= 0 || static_cast<std::uint32_t>(width) > maxSide || static_cast<std::uint32_t>(height) > maxSide ||
-                static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height) > kMaxPixels || (count != 1 && count != 3) ||
+                static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height) > tga::kMaxPixels || (count != 1 && count != 3) ||
                 seg.size() < 6 + 3 * static_cast<std::size_t>(count)) {
                 return std::nullopt;
             }

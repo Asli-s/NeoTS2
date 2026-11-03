@@ -34,7 +34,8 @@ struct FunctionSearch {
     std::span<const std::int16_t> temps;
     // The object distances and "the room" are measured from: me, or the object of flag 0x08.
     SimObject& origin;
-    // Runs a candidate's check tree as me with the candidate as stack object. True when it passes.
+    // Runs a candidate's check tree as me on my temps, with my temps as its params and the candidate
+    // as stack object. True when it passes.
     std::function<bool(SimObject& candidate, std::uint16_t tree)> check;
 };
 

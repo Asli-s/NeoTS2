@@ -270,7 +270,8 @@ bool Execution::nextNeighborOfType(std::uint32_t guid, std::uint8_t targetOwner,
     auto step = [&](std::int16_t after) -> std::int16_t {
         for (auto it = ids->upper_bound(after); it != ids->end(); ++it) {
             const ObjectType* type = typeOf(*it);
-            if (type == nullptr || type->definition.field(objd::field::kType) != kFamilyTreeOnlyType) {
+            const bool familyTreeOnly = world().unlinkedNeighbor(*it) || (type != nullptr && type->definition.field(objd::field::kType) == kFamilyTreeOnlyType);
+            if (!familyTreeOnly) {
                 write(targetOwner, targetData, f, *it);
                 return *it;
             }

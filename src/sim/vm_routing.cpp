@@ -1,4 +1,5 @@
 #include "sim/vm_execution.hpp"
+#include "sim/turn.hpp"
 
 namespace ts2::sim::vm_detail {
 
@@ -683,7 +684,7 @@ bool Execution::turnOnTheSpot(SimObject& sim, Walking& walk, double now) {
     Walking::Turn& turn = *walk.turn;
     if (!turn.started) {
         turn.started = true;
-        const auto clip = turnClip(turn.from, turn.to, sim.personData[kLifeStagePersonData]);
+        const auto clip = turnClipFor(sim, turn.from, turn.to);
         const auto& lengths = world().animationLengths();
         const auto length = clip && lengths ? lengths(clip->name) : std::nullopt;
         if (!length) {
@@ -725,6 +726,64 @@ std::optional<LocoClip> Execution::locoClip(const std::string& name) {
     }
     const auto adult = adultClipFor(name);
     return adult.empty() ? std::nullopt : clips(adult);
+}
+
+// Assign Locomotion Animations. Operand word 0 takes all my pushed walk sets off (0), takes the
+// newest off (1), or pushes set n (2 and up): lines (n - 2) * 6 to (n - 2) * 6 + 5 of string table
+// 0x84, a walk's three and a run's. Operand byte 2 picks whose table: the code owner's semi-global
+// code (bit 1), the global code (bit 2), else the code owner's own. A Sim holds 9 pushed sets at most.
+bool Execution::assignLocomotion(const bhav::Instruction& in, const Frame& f) {
+    constexpr std::uint8_t kSemiGlobal = 0x02, kGlobal = 0x04;
+    constexpr std::size_t kMostPushed = 9, kLinesPerSet = 3;
+    constexpr std::uint16_t kWalkSetStrings = 0x84;
+    SimObject& sim = me();
+    if (!sim.isPerson()) {
+        throw Stop{Outcome::Error, "only a Sim has walk animations", hex(sim.definition.guid(), 8)};
+    }
+    const auto& o = in.operands;
+    const unsigned mode = o[0] | o[1] << 8;
+    if (mode == 0) {
+        sim.walkSets.clear();
+        return true;
+    }
+    if (mode == 1) {
+        if (sim.walkSets.empty()) {
+            throw Stop{Outcome::Error, "no pushed walk animations to take off", ""};
+        }
+        sim.walkSets.pop_back();
+        return true;
+    }
+    if (sim.walkSets.size() >= kMostPushed) {
+        throw Stop{Outcome::Error, "too many walk animations pushed", ""};
+    }
+    const std::uint32_t group = (o[2] & kSemiGlobal) ? code_.semiGlobalGroup(f.codeOwner) : (o[2] & kGlobal) ? kGlobalGroup : f.codeOwner;
+    const std::size_t first = (mode - 2) * 2 * kLinesPerSet;
+    std::array<WalkSetLines, 2> set;
+    for (std::size_t i = 0; i < 2 * kLinesPerSet; ++i) {
+        set[i / kLinesPerSet][i % kLinesPerSet] = code_.string(group, kWalkSetStrings, first + i).value_or("");
+    }
+    sim.walkSets.push_back(std::move(set));
+    return true;
+}
+
+// The clips of my newest pushed walk set's walk (see walkSetClips), none without one.
+std::vector<LocoClip> Execution::pushedWalkSet(const SimObject& sim) {
+    if (sim.walkSets.empty()) {
+        return {};
+    }
+    return walkSetClips(sim.walkSets.back()[0], sim.personData[kLifeStagePersonData], sim.personData[kGenderPersonData], world().locoClips());
+}
+
+// The turn-in-place clip for my turn, from my pushed walk set when I have one.
+std::optional<TurnClip> Execution::turnClipFor(const SimObject& sim, float start, float end) {
+    const auto set = pushedWalkSet(sim);
+    return set.empty() ? turnClip(start, end, sim.personData[kLifeStagePersonData]) : walkSetTurn(set, start, end);
+}
+
+// The pose my walk settles into, from my pushed walk set when I have one.
+std::string Execution::walkPoseFor(const SimObject& sim) {
+    return settlePose(sim.walkSets.empty() ? nullptr : &sim.walkSets.back()[0], sim.personData[kLifeStagePersonData],
+                      sim.personData[kGenderPersonData], world().locoClips());
 }
 
 namespace {
@@ -802,8 +861,13 @@ void Execution::planWalkFor(const SimObject& sim, Walking& walk) {
     if (way.size() == 1 && points.size() > 1) {
         way.push_back(points.back());
     }
+    // My pushed walk set's clips, else my own set's.
+    const auto set = pushedWalkSet(sim);
+    const auto stepsAt = [&](float angle) { return set.empty() ? stepClips(angle, lifeStage) : walkSetTurnClips(set, kStepCategory, 0, angle); };
+    const auto starts = [&](float from, float to) { return set.empty() ? walkStartClips(from, to, lifeStage) : walkSetTurnClips(set, kStartCategory, from, to); };
+    const auto stops = [&](float from, float to) { return set.empty() ? walkStopClips(from, to, lifeStage) : walkSetTurnClips(set, kStopCategory, from, to); };
     // Short routes may turn on the spot before or after the walk (see routeShape).
-    const auto stepNames = stepClips(0, lifeStage);
+    const auto stepNames = stepsAt(0);
     const bool hasSteps = stepNames && locoClip(stepNames->full);
     const RouteShape shape = routeShape(way, facing, walk.route.facing ? compassHeading(*walk.route.facing) : in, hasSteps);
     if (std::abs(wrapAngle(shape.turnTo - facing)) > kSameHeading) {
@@ -829,13 +893,14 @@ void Execution::planWalkFor(const SimObject& sim, Walking& walk) {
         const float dx = points.back().first - walk.fromX, dy = points.back().second - walk.fromY;
         if (takesStep(input.length, std::hypot(dx, dy), walk.endHeading - facingThen)) {
             const auto clipAt = [&](float angle) -> std::optional<StepClip> {
-                const auto names = stepClips(angle, stage);
+                const auto names = stepsAt(angle);
                 auto clips = locoPair(names);
                 return clips ? std::optional<StepClip>(StepClip{*clips, names->turn}) : std::nullopt;
             };
             const auto& scale = world().simScale();
             const float move = wrapAngle(std::atan2(-dy, dx) - facingThen);
-            if (auto step = planStep(input.length, move, scale ? scale(sim.id) : 1.0f, clipAt, locoClip(stepInPlaceClip(stage)))) {
+            const auto inPlace = set.empty() ? locoClip(stepInPlaceClip(stage)) : walkSetClip(set, kStepInPlaceCategory);
+            if (auto step = planStep(input.length, move, scale ? scale(sim.id) : 1.0f, clipAt, inPlace)) {
                 walk.plan = std::move(*step);
                 return;
             }
@@ -861,16 +926,24 @@ void Execution::planWalkFor(const SimObject& sim, Walking& walk) {
         }
         return turnClipsForFoot(clips, names->turn, foot);
     };
-    input.start = turnClips(walkStartClips(facingThen, onto, stage), foot);
-    const auto stopNames = walkStopClips(in, walk.endHeading, stage);
+    input.start = turnClips(starts(facingThen, onto), foot);
+    const auto stopNames = stops(in, walk.endHeading);
     input.stop = turnClips(stopNames, foot);
     input.stopOtherFoot = turnClips(stopNames, std::abs(foot - 0.5f));
-    const auto loopShort = locoClip(walkShortClip(stage, gender)), loop = locoClip(walkClip(stage, gender));
+    const auto loopShort = set.empty() ? locoClip(walkShortClip(stage, gender)) : walkSetClip(set, kLoopCategory);
+    const auto loop = set.empty() ? locoClip(walkClip(stage, gender)) : walkSetLongClip(set, kLoopCategory);
     // The walk loop's styles by their shares (see walkStyleShares). A style the set lacks for my age
-    // counts for nothing. The walk's speed is their long loops' together.
+    // counts for nothing. The walk's speed is their long loops' together. A pushed set's walk is its
+    // first loop pair alone (how the game picks among more of its loops is not known yet).
     const auto shares = walkStyleShares(sim);
     float loopSpeed = 0, counted = 0;
-    for (std::size_t style = 0; style < shares.size(); ++style) {
+    if (!set.empty() && loopShort) {
+        LoopStyle s{{*loopShort, loop, false}, 1};
+        input.loops.push_back(s);
+        loopSpeed = loop ? loop->speed : loopShort->speed;
+        counted = 1;
+    }
+    for (std::size_t style = 0; set.empty() && style < shares.size(); ++style) {
         if (style != 0 && !(shares[style] > 0)) {
             continue;
         }
@@ -890,7 +963,7 @@ void Execution::planWalkFor(const SimObject& sim, Walking& walk) {
     // The set's speeds: its fastest walk loop, and its fastest start or stop that doesn't turn.
     const float topLoop = topLoopSpeed(loopShort, loop);
     float topStraight = 0;
-    for (const auto& names : {walkStartClips(0, 0, stage), walkStopClips(0, 0, stage)}) {
+    for (const auto& names : {starts(0, 0), stops(0, 0)}) {
         if (names) {
             for (const auto& name : {names->shortOne, names->full}) {
                 if (const auto c = locoClip(name)) {
@@ -989,7 +1062,7 @@ void Execution::endWalk(SimObject& sim, const Walking& walk, double now) {
 
 // A walk's standing pose as my animation, as a walk without a stop ends.
 void Execution::standAfterWalk(SimObject& sim, double now) {
-    const std::string pose = walkPoseClip(sim.personData[kLifeStagePersonData]);
+    const std::string pose = walkPoseFor(sim);
     const auto& lengths = world().animationLengths();
     if (const auto length = !pose.empty() && lengths ? lengths(pose) : std::nullopt) {
         PlayingAnimation stand;
@@ -1024,9 +1097,11 @@ void Execution::interruptWalk(SimObject& sim, Walking& walk, double now) {
         return;
     }
     const auto& scale = world().simScale();
-    const auto stop = locoPair(walkStopClips(0, 0, sim.personData[kLifeStagePersonData]));
     const std::int16_t stage = sim.personData[kLifeStagePersonData], gender = sim.personData[kGenderPersonData];
-    const float topLoop = topLoopSpeed(locoClip(walkShortClip(stage, gender)), locoClip(walkClip(stage, gender)));
+    const auto set = pushedWalkSet(sim);
+    const auto stop = locoPair(set.empty() ? walkStopClips(0, 0, stage) : walkSetTurnClips(set, kStopCategory, 0, 0));
+    const float topLoop = set.empty() ? topLoopSpeed(locoClip(walkShortClip(stage, gender)), locoClip(walkClip(stage, gender)))
+                                      : topLoopSpeed(walkSetClip(set, kLoopCategory), walkSetLongClip(set, kLoopCategory));
     const auto ms = static_cast<float>(std::max(0.0, now - walk.startMs));
     switch (stopSoon(walk.plan, ms, stop, scale ? scale(sim.id) : 1.0f, topLoop)) {
     case StopSoon::Soon: walk.stopsSoon = true; break;
@@ -1166,7 +1241,7 @@ Execution::TurnStep Execution::turnBodyTowards(const bhav::Instruction& in, Fram
     Turning& turning = *sim.turning;
     turning.start = current;
     turning.end = snapHeading(*target);
-    const auto clip = turnClip(turning.start, turning.end, sim.personData[kLifeStagePersonData]);
+    const auto clip = turnClipFor(sim, turning.start, turning.end);
     const auto& lengths = world().animationLengths();
     const auto length = clip && lengths ? lengths(clip->name) : std::nullopt;
     if (!length) {
@@ -1380,23 +1455,5 @@ bool Execution::getDirectionTo(const bhav::Instruction& in, Frame& f) {
     return true;
 }
 
-// One of 8 directions for a vector, split at 22.5 degrees from each axis: 0 is -y, 2 +x, 4 +y,
-// 6 -x, with the diagonals between.
-std::int16_t Execution::octant(float dx, float dy) {
-    constexpr float kTan22_5 = 0.41421354f;
-    const float ax = std::fabs(dx);
-    const float ay = std::fabs(dy);
-    int direction = 2;
-    if (ax * kTan22_5 <= ay) {
-        direction = kTan22_5 * ay <= ax ? 3 : 4;
-    }
-    if (dx < 0) {
-        direction = direction == 2 ? 6 : direction == 3 ? 5 : direction;
-    }
-    if (dy < 0) {
-        direction = direction == 3 ? 1 : direction == 4 ? 0 : direction == 5 ? 7 : direction;
-    }
-    return static_cast<std::int16_t>(direction);
-}
 
 } // namespace ts2::sim::vm_detail

@@ -1,5 +1,6 @@
 // Primitives that find, make, compare and remove objects, neighbors and relationships.
 #include "sim/forget_object.hpp"
+#include "sim/object_reset.hpp"
 #include "sim/snap.hpp"
 #include "test_support.hpp"
 
@@ -130,6 +131,73 @@ void findLocationForOnLevelGroundClearsAPlacementBit() {
     sim.data[1] = 0;
     sim.data[0x17] = 2;  // a Sim that never faces diagonally: nowhere to go
     CHECK(vm.run(sim, 0x1001).outcome == Outcome::False && sim.data[0x2A] == 0x0181);
+}
+
+// A Sim reset leaves a standing Sim in its slot and moves a seated one out of it, keeping its
+// facing, to the first tile the search finds: its own when nothing is in the way, else the next.
+void aSimResetMovesASeatedSimOutOfItsSlot() {
+    SmallWorld w;
+    ts2::sim::SimObject& sim = *w.world.find(5);
+    ts2::sim::SimObject& chair = *w.world.find(3);
+    chair.slots.assign(1, 0);
+    chair.data[0x1C] = 1;  // capacity
+    const auto seat = [&] {
+        chair.slots[0] = sim.id;
+        sim.data[2] = chair.id;
+        sim.data[3] = 0;
+        sim.x = 3 * 65536 + 100;
+        sim.y = 4 * 65536 + 60000;
+        sim.level = 1;
+        sim.tile.reset();
+        sim.data[1] = 3;
+    };
+    ts2::sim::SimRandom rng{1};
+    seat();
+    ts2::sim::placeAfterReset(w.world, sim, rng);
+    CHECK(chair.slots[0] == sim.id && sim.data[2] == chair.id && sim.data[3] == 0 && sim.x == 3 * 65536 + 100);
+    seat();
+    sim.personData[0] = 1;  // Sitting?
+    ts2::sim::placeAfterReset(w.world, sim, rng);
+    CHECK(chair.slots[0] == 0 && sim.data[2] == 0 && sim.data[3] == -1);
+    CHECK(sim.x == 3 * 65536 + 32768 && sim.y == 4 * 65536 + 32768 && sim.tile && sim.data[1] == 3);
+    // A standing Sim that no longer fits the slot leaves it too, and the tile in the way is passed by.
+    w.world.setObjectInTheWay([](const ts2::sim::SimObject&, float x, float y, std::int32_t, std::int16_t) {
+        return static_cast<int>(x) == 3 && static_cast<int>(y) == 4;
+    });
+    seat();
+    sim.personData[0] = 0;
+    sim.data[0x1B] = 2;  // bigger than the chair holds
+    ts2::sim::placeAfterReset(w.world, sim, rng);
+    CHECK(chair.slots[0] == 0 && sim.data[2] == 0 && sim.tile && !(sim.tile->x == 3 && sim.tile->y == 4) && sim.data[1] == 3);
+}
+
+// A Sim who goes takes its head slot holder with it, and what the holder holds goes too. A Sim in
+// an NPC template's slot is taken out and reset instead.
+void removedObjectsTakeWhatTheirSlotsHold() {
+    SmallWorld w;
+    ts2::sim::SimObject& sim = *w.world.find(5);
+    ts2::sim::SimObject& holder = *w.world.find(2);
+    ts2::sim::SimObject& held = *w.world.find(4);
+    const auto put = [](ts2::sim::SimObject& object, ts2::sim::SimObject& container, std::int16_t slot) {
+        container.slots.resize(std::max<std::size_t>(container.slots.size(), static_cast<std::size_t>(slot) + 1), 0);
+        container.slots[static_cast<std::size_t>(slot)] = object.id;
+        object.data[2] = container.id;
+        object.data[3] = slot;
+    };
+    put(holder, sim, 2);
+    put(held, holder, 0);
+    int resets = 0;
+    const auto reset = [&](ts2::sim::SimObject&) { ++resets; };
+    w.world.remove(sim);
+    ts2::sim::removeSlotContents(w.world, reset);
+    CHECK(holder.removed && held.removed && !w.world.find(6)->removed && resets == 0);
+
+    ts2::sim::SimObject& npcTemplate = w.world.create(kObjectGroup, typed(0x10101010, 0x10));
+    ts2::sim::SimObject& other = *w.world.find(7);
+    put(other, npcTemplate, 0);
+    w.world.remove(npcTemplate);
+    ts2::sim::removeSlotContents(w.world, reset);
+    CHECK(!other.removed && other.data[2] == 0 && other.data[3] == -1 && npcTemplate.slots[0] == 0 && resets == 1);
 }
 
 // Johnny's drop: the stack object goes next to the Sim in local 0, whose own tile isn't empty.
@@ -1148,6 +1216,61 @@ void reachPutMovesTheObjectAtTheClipsEvent() {
     CHECK(vm.run(sim, 0x1001).outcome == Outcome::Sleeping);
     world.advanceClock(450);
     CHECK(vm.resume(sim).outcome == Outcome::False && sim.slots[0] == cup.id && cup.data[2] == sim.id);
+}
+
+// A glass on a tray on a bar is reached for at the height the bar's bone slot holds the tray, so a
+// standing Sim takes the counter reach and not the glass's own seated one.
+void reachPutMeasuresTheHeightThroughContainers() {
+    using namespace ts2::sim;
+    constexpr std::uint32_t kTrayGroup = 0x7F000088, kTrayGuid = 0x2B3C4D5E, kBarGroup = 0x7F000099, kBarGuid = 0x3C4D5E6F;
+    Instruction grab = primitiveCall(0x0074, T, F);
+    grab.operands[3] = owner::kStackObjectId;
+    MemoryCodeSource code;
+    code.add(kObjectGroup, 0x1000, bhav({grab}));
+    std::vector<std::string> clips(16);
+    clips[0] = "a2o-floor-get";
+    clips[3] = "a2o-counter-get";
+    code.addStrings(0x7FD46CD0, 0x92, clips);
+    code.addStrings(kLampGroup, 0x92, {"a2o-barstool-seated-get", "a2o-barstool-seated-put"});
+    code.addObjectType(kLampGroup, typed(kLampGuid));
+    ts2::slot::Entry onTray;
+    onTray.z = 0.02f;
+    code.addObjectType(kTrayGroup, typed(kTrayGuid), {}, {onTray});
+    ts2::slot::Entry counter;
+    counter.objectFlags = 0x20000;  // placed by a bone of the model
+    counter.bone = 0;
+    counter.z = 4.05f;              // as the shipped bar's, which the bone overrides
+    code.addObjectType(kBarGroup, typed(kBarGuid), {}, {counter});
+    code.addStrings(kBarGroup, 0x90, {"slot_counter"});
+    World world;
+    world.setAnimationLengths([](const std::string&) -> std::optional<float> { return 1000.0f; });
+    world.setAnimationEventTime([](const std::string& name, int id) -> std::optional<float> {
+        return id == 0 && name != "a2o-barstool-seated-get" ? std::optional<float>(400.0f) : std::nullopt;
+    });
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, kPersonType), 2);
+    auto& glass = world.create(kLampGroup, typed(kLampGuid));
+    auto& tray = world.create(kTrayGroup, typed(kTrayGuid), 1);
+    auto& bar = world.create(kBarGroup, typed(kBarGuid), 1);
+    const std::int16_t barId = bar.id;
+    world.setModelBones([barId](std::int16_t id, const std::string& name) -> std::optional<ModelBone> {
+        return id == barId && name == "slot_counter" ? std::optional<ModelBone>(ModelBone{0.3f, 0, 0, 0.95f}) : std::nullopt;
+    });
+    sim.x = 5 << 16;
+    sim.y = 5 << 16;
+    for (SimObject* o : {&bar, &tray, &glass}) {
+        o->x = 5 << 16;
+        o->y = (5 << 16) + 0x4000;
+        o->data[1] = 2;
+    }
+    bar.slots[0] = tray.id;
+    tray.data[2] = bar.id;
+    tray.data[3] = 0;
+    tray.slots[0] = glass.id;
+    glass.data[2] = tray.id;
+    glass.data[3] = 0;
+    sim.thread.stackObjectId = glass.id;
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::Sleeping && sim.animation && sim.animation->name == "a2o-counter-get");
 }
 
 void snapIntoPutsTheObjectInTheSlot() {
@@ -2436,6 +2559,26 @@ void removedObjectsKeepTheirDataUntilPurge() {
     CHECK(world.findIncludingRemoved(goneId) == nullptr);
 }
 
+// A removed object leaves its container's slot and the lot at once, so the hand it was in can take
+// the next object in the same tick (a stove swaps the food in a Sim's hand for a baking pan).
+void removedObjectsLeaveTheirSlotAtOnce() {
+    MemoryCodeSource code;
+    code.add(kObjectGroup, 0x1000, bhav({removeObject(1, 0x00, T, F)}));
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType), 1);
+    auto& food = world.create(kObjectGroup, typed(kFridgeGuid));
+    sim.slots[0] = food.id;
+    food.data[2] = sim.id;
+    food.data[3] = 0;
+    food.x = sim.x = 3 << 16;
+    food.y = sim.y = 4 << 16;
+    sim.thread.stackObjectId = food.id;
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::True);
+    CHECK(sim.slots[0] == 0 && food.data[2] == 0 && food.data[3] == -1);
+    CHECK(food.x == ts2::sim::kOffLot && food.data[0x1D] == -1);
+}
+
 // A saved Placeholder or TemplatePerson among the ids the object map's wait table covers is marked
 // for delete as the lot loads, as the game does. Purges keep it until a script removes it.
 void loadedPlaceholdersAreKeptUntilUnload() {
@@ -2518,7 +2661,7 @@ void roomFieldsAreReadThroughTempZero() {
         expr(owner::kTemp, 3, op::kAssign, owner::kRoomByTemp, 4, T, E),
     }));
     code.add(kObjectGroup, 0x1002, bhav({
-        expr(owner::kTemp, 3, op::kAssign, owner::kRoomByTemp, 6, T, E),
+        expr(owner::kTemp, 3, op::kAssign, owner::kRoomByTemp, 5, T, E),
     }));
     ts2::sim::World world;
     world.setRooms(ts2::sim::RoomMap(squareRoom(false)));
@@ -2571,6 +2714,8 @@ std::vector<Test> vmObjectTests() {
         {"room fields are read through temp 0", roomFieldsAreReadThroughTempZero},
         {"outside is region 0 in layer 0", outsideIsRegionZeroInLayerZero},
         {"Find Location For centres a Sim on its tile", findLocationForCentresASimOnItsTile},
+        {"a Sim reset moves a seated Sim out of its slot", aSimResetMovesASeatedSimOutOfItsSlot},
+        {"removed objects take what their slots hold", removedObjectsTakeWhatTheirSlotsHold},
         {"Find Location For starts in front of the reference", findLocationForStartsInFrontOfTheReference},
         {"Find Location For walks the reference's line", findLocationForWalksTheReferencesLine},
         {"Find Location For skips the Sim's own tile", findLocationForSkipsTheSimsTile},
@@ -2607,6 +2752,7 @@ std::vector<Test> vmObjectTests() {
         {"Sims forget a deleted object", simsForgetADeletedObject},
         {"Snap Into puts the object in the slot", snapIntoPutsTheObjectInTheSlot},
         {"Reach/Put moves the object at the clip's event", reachPutMovesTheObjectAtTheClipsEvent},
+        {"Reach/Put measures the height through containers", reachPutMeasuresTheHeightThroughContainers},
         {"Create Object starts its Main and passes temp 0", createObjectStartsItsMainAndPassesTemp0},
         {"Create Object passes my id and stack object", createObjectPassesMyIdAndStackObject},
         {"Create Object passes nothing to a Main without params", createObjectPassesNothingToMainWithoutParams},
@@ -2637,6 +2783,7 @@ std::vector<Test> vmObjectTests() {
         {"Alter Budget charges the funds", alterBudgetChargesTheFunds},
         {"new objects lead themselves", newObjectsLeadThemselves},
         {"Remove Object refuses protected objects", removeObjectRefusesProtectedObjects},
+        {"removed objects leave their slot at once", removedObjectsLeaveTheirSlotAtOnce},
         {"Removed objects keep their data until purge", removedObjectsKeepTheirDataUntilPurge},
         {"loaded Placeholders and TemplatePersons are kept until unload", loadedPlaceholdersAreKeptUntilUnload},
         {"a saved Idle for Input runs again after its interaction", savedIdleForInputRunsAgainAfterItsInteraction},

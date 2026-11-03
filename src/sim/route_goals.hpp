@@ -116,9 +116,20 @@ std::int16_t blockedStep(const Test& test, float x, float y, float hereX, float 
     return blocker && !test(hereX, hereY) ? *blocker : std::int16_t{0};
 }
 
-// Where the game measures goals around `owner` from: its place, or for an object in a container's
-// slot (a Sim on a sofa) the spot that slot holds it at, as Snap places it, through containers in
-// containers. The rest of `owner` is kept.
+// Where an object is: its place, or for an object in a container's slot (a Sim on a sofa, a glass on
+// a tray on a bar) the spot that slot holds it at, as Snap places it, through containers in
+// containers. The height counts up from its floor, a bone slot's from its joint in the container's
+// model and another slot's from its entry.
+struct HeldPlace {
+    std::int32_t x = 0, y = 0;  // 16.16 tiles
+    float height = 0;           // tiles
+};
+HeldPlace heldPlace(const World& world, CodeSource& code, const SimObject& object);
+
+// Where something put in slot `slot` of `container` goes (see heldPlace).
+HeldPlace slotPlace(const World& world, CodeSource& code, const SimObject& container, std::int16_t slot);
+
+// Where the game measures goals around `owner` from (see heldPlace). The rest of `owner` is kept.
 SimObject slotGoalBase(const World& world, CodeSource& code, const SimObject& owner);
 
 // The goals of bone slot `slot` of `owner`: one per joint, at the spot Snap would put the Sim for that

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <set>
 
 namespace ts2::sim {
 
@@ -155,6 +156,50 @@ void moveContents(World& world, const SimObject& container, int depth) {
     }
 }
 
+void takeOutOfSlot(World& world, SimObject& object) {
+    constexpr std::size_t kContainerField = 2, kSlotField = 3;
+    if (object.data[kContainerField] > 0) {
+        if (SimObject* old = world.findIncludingRemoved(object.data[kContainerField])) {
+            const auto oldSlot = static_cast<std::size_t>(object.data[kSlotField]);
+            if (oldSlot < old->slots.size() && old->slots[oldSlot] == object.id) {
+                old->slots[oldSlot] = 0;
+            }
+        }
+    }
+    object.data[kContainerField] = 0;
+    object.data[kSlotField] = -1;
+}
+
+void removeSlotContents(World& world, const std::function<void(SimObject&)>& resetSim) {
+    constexpr std::uint16_t kNpcTemplateType = 0x10, kFamilyTreeType = 0x11;
+    std::set<std::int16_t> done;
+    // Each pass takes the objects removed since the last one. A pass that removes nothing ends it.
+    while (true) {
+        std::vector<std::int16_t> removed = world.removedIds();
+        std::erase_if(removed, [&](std::int16_t id) { return !done.insert(id).second; });
+        if (removed.empty()) {
+            return;
+        }
+        for (const std::int16_t id : removed) {
+            const SimObject* container = world.findIncludingRemoved(id);
+            const auto type = container->definition.field(objd::field::kType);
+            const bool keepsSims = type == kNpcTemplateType || type == kFamilyTreeType;
+            for (const std::int16_t held : std::vector<std::int16_t>(container->slots)) {
+                SimObject* object = held > 0 ? world.find(held) : nullptr;
+                if (object == nullptr) {
+                    continue;
+                }
+                if (keepsSims && object->isPerson()) {
+                    takeOutOfSlot(world, *object);
+                    resetSim(*object);
+                } else {
+                    world.remove(*object);
+                }
+            }
+        }
+    }
+}
+
 std::vector<PartSpot> partSpots(const World& world, const SimObject& moved, const SnapTarget& at) {
     constexpr std::size_t kPartLevelField = 0x38;  // OBJD
     const auto& own = moved.definition;
@@ -213,7 +258,7 @@ void moveParts(World& world, const SimObject& moved) {
     }
 }
 
-std::optional<std::int16_t> placementCode(const World& world, const SimObject& object, const SnapTarget& target) {
+std::optional<std::int16_t> placementCode(const World& world, const SimObject& object, const SnapTarget& target, bool testSim) {
     constexpr std::int16_t kOffLotCode = 2, kInTheWayCode = 0x0C;
     const auto& test = world.objectInTheWay();
     const auto codeAt = [&](const SimObject& placed, std::int32_t x, std::int32_t y, std::int32_t level,
@@ -221,7 +266,7 @@ std::optional<std::int16_t> placementCode(const World& world, const SimObject& o
         if (x == kOffLot || y == kOffLot || !inLot(world, tiles(x), tiles(y), true)) {
             return kOffLotCode;
         }
-        if (test && !placed.isPerson() && test(placed, tiles(x), tiles(y), level, facing)) {
+        if (test && (testSim || !placed.isPerson()) && test(placed, tiles(x), tiles(y), level, facing)) {
             return kInTheWayCode;
         }
         return std::nullopt;

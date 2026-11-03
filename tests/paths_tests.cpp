@@ -198,6 +198,9 @@ void launcherSettingsRoundTrip() {
                                               "added-save-folder=" + absolute + "\r\n");
     CHECK(parsed && parsed->install.empty() && parsed->saveFolder.empty() && parsed->addedSaveFolders.size() == 1);
     CHECK(!parseLauncherSettings("") && !parseLauncherSettings("NeoTS2 launcher settings 2\n"));
+    // A byte order mark an editor added in front is skipped.
+    const auto marked = parseLauncherSettings("\xEF\xBB\xBFNeoTS2 launcher settings 1\nrenderer=sdlgpu\n");
+    CHECK(marked && marked->renderer == "sdlgpu");
     // Only the renderers there are are taken.
     const auto drawn = parseLauncherSettings("NeoTS2 launcher settings 1\nrenderer=sdlgpu\n");
     CHECK(drawn && drawn->renderer == "sdlgpu");
@@ -214,6 +217,12 @@ void launcherSettingsRoundTrip() {
     CHECK(kept && kept->smoothFollow);
     const auto other = parseLauncherSettings("NeoTS2 launcher settings 1\nsmooth-follow=yes\n");
     CHECK(other && !other->smoothFollow);
+    // Pool-style ponds too.
+    CHECK(drawn && !drawn->poolStylePonds);
+    LauncherSettings ponds;
+    ponds.poolStylePonds = true;
+    const auto keptPonds = parseLauncherSettings(formatLauncherSettings(ponds));
+    CHECK(keptPonds && keptPonds->poolStylePonds && !keptPonds->smoothFollow);
     // The window size is one the launcher offers, or the game's default.
     CHECK(drawn && drawn->windowSize.empty());
     LauncherSettings sized;

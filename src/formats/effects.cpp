@@ -80,9 +80,6 @@ std::uint16_t version(Reader& r, std::uint16_t lowest, std::uint16_t highest) {
     return v;
 }
 
-// Size, then two boxes and the ranges between them, shared by particles and metaparticles.
-void commonHead(Reader& r) { r.floats(21); }
-
 void pathPoints(Reader& r) {
     const std::size_t n = r.count(28);
     r.floats(7 * n);

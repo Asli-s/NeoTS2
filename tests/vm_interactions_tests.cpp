@@ -217,6 +217,44 @@ void removeFamilyTieEndsTheTieBothWays() {
     CHECK(vm.run(*w.controller, 0x1000).reason == "neighbor not found");
 }
 
+// Generic call 0x26 unlinks the neighbor in temp 0 when its Sim has a character file of its own:
+// its Sims on the lot go, it loses its relationships both ways and its family, and person data 0xA5
+// marks it. It is always true.
+void unlinkCharacterDeletesItsSims() {
+    MemoryCodeSource code;
+    Instruction unlink = call(0x0001, T, F);
+    unlink.operands[0] = 0x26;
+    code.add(kObjectGroup, 0x1000, bhav({unlink}));
+    SmallWorld w;  // Sims 5 and 7 are of type 0x51515151
+    auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
+    hood->neighborIds = {3, 4, 6};
+    hood->neighbors[3].guid = 0x51515151;
+    hood->neighbors[3].personData.assign(ts2::sim::kNeighborPersonDataCount, 0);
+    hood->neighbors[3].personData[0x3D] = 9;
+    hood->neighbors[4].guid = 0x42;
+    hood->neighbors[6].guid = 0x43;
+    const std::int16_t unlinked = 3, other = 4, third = 6;
+    hood->relationships[std::pair{unlinked, other}] = {1};
+    hood->relationships[std::pair{other, unlinked}] = {2};
+    hood->relationships[std::pair{other, third}] = {3};
+    w.world.setNeighborhood(hood);
+    w.world.neighborRelationship(6, 3) = {4};
+    w.world.setHasCharacterFile([](std::int16_t id) { return id != 4; });
+    Vm vm(code, {}, &w.world);
+    w.controller->thread.temps[0] = 4;
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::True);
+    CHECK(w.world.neighborRelationshipSize(4, 3) == 1 && !w.world.unlinkedNeighbor(4));
+    w.controller->thread.temps[0] = 3;
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::True);
+    CHECK(w.world.find(5) == nullptr && w.world.find(7) == nullptr && w.world.find(3) != nullptr);
+    CHECK(w.world.neighborRelationshipSize(3, 4) == 0 && w.world.neighborRelationshipSize(4, 3) == 0);
+    CHECK(w.world.neighborRelationshipSize(6, 3) == 0 && w.world.neighborRelationshipSize(4, 6) == 1);
+    CHECK(w.world.neighborPersonValue(3, 0xA5) == 1 && w.world.neighborPersonValue(3, 0x3D) == 0);
+    CHECK(w.world.unlinkedNeighbor(3) && hood->relationships.size() == 3);  // the saved record is untouched
+    w.controller->thread.temps[0] = 8;
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::True);
+}
+
 // Generic call 0x15 makes the neighbor in temp 0 the child of the neighbor in temp 1: the first
 // parent given is the father, who also makes his other children its siblings, the second the
 // mother, and a third is refused.
@@ -1885,6 +1923,14 @@ void runFunctionalTreeCallsTheObjectsTree() {
     sim.thread.stackObjectId = chair.id;
     CHECK(vm.run(sim, kObjectGroup, 0x1003).outcome == Outcome::True);
     CHECK(sim.actionIconObject == chair.id && sim.actionIconGuid == 0 && sim.actionIconIndex == 0);
+
+    // Without byte 2 bit 1 the tree's params are my temps: a stove's Cook reads the cook type in param 0.
+    code.add(kObjectGroup, 0x1001, bhav({
+        expr(owner::kStackObjectAttribute, 0, op::kAssign, owner::kParam, 0, T, E),
+    }, 1));
+    sim.thread.temps[0] = 6;
+    sim.thread.stackObjectId = chair.id;
+    CHECK(vm.run(sim, kObjectGroup, 0x1000).outcome == Outcome::True && chair.attributes[0] == 6);
 }
 
 // The pie menu: each interaction line the Sim's age allows whose check tree agrees, named from the
@@ -2108,6 +2154,39 @@ void choicesFlaggedToRunAtOnceSkipTheQueue() {
     CHECK(ts2::sim::runAtOnce(vm, code, world, sim, lamp, menu.choices[0]).outcome == ts2::sim::Outcome::False && lamp.data[1] == 0);
 }
 
+// A multi-tile part whose definition names table 0xFFFF offers its master's table, with the texts
+// of that table (a bed's foot shows "Relax" as its head does).
+void multiTilePartsUseTheirMastersTexts() {
+    constexpr std::uint32_t kPartGuid = 0x51515152;
+    MemoryCodeSource code;
+    auto headType = typed(kFridgeGuid);
+    headType.fields[ts2::objd::field::kInteractionTableId] = 0x80;
+    auto footType = typed(kPartGuid);
+    footType.fields[ts2::objd::field::kInteractionTableId] = 0xFFFF;
+    code.addObjectType(kObjectGroup, headType);
+    code.addObjectType(kObjectGroup, footType);
+    code.setMultiTileMaster(kPartGuid, kFridgeGuid);
+    ts2::ttab::InteractionTable table;
+    table.interactions.resize(1);
+    table.interactions[0].action = 0x1000;
+    table.interactions[0].flags = 0x40;
+    code.addInteractionTable(kObjectGroup, 0x80, table);
+    code.addInteractionStrings(kObjectGroup, 0x80, {"Relax"});
+    code.add(kObjectGroup, 0x1000, bhav({expr(owner::kTemp, 0, op::kAssign, owner::kLiteral, 1, T, E)}));
+
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    auto& head = world.create(kObjectGroup, headType);
+    auto& foot = world.create(kObjectGroup, footType);
+    sim.personData[0x3A] = 30;
+    Vm vm(code, {}, &world);
+    for (auto* part : {&head, &foot}) {
+        const auto menu = ts2::sim::pieMenu(vm, code, sim, *part);
+        CHECK(menu.choices.size() == 1 && menu.choices[0].name == "Relax");
+        CHECK(ts2::sim::interactionName(code, *part, 0) == "Relax");
+    }
+}
+
 // A check tree reads and changes the advertisement of the line it tests for the Sim's age group (a
 // copy: the table stays as it is). The stack object's functions and slots by temp are read too.
 void checkTreeOwnersReadTheTestedLine() {
@@ -2221,6 +2300,72 @@ Instruction wantSatisfy(std::uint32_t guid, std::uint8_t argOwner, std::uint16_t
     return in;
 }
 
+// The wants manager offers a Sim new wants from the want trees: a satisfied trigger want in the
+// history leads to its node's visible children. A child's want takes the first empty place with
+// its node's points, a Sim argument from the trigger, and a score between the node's least and most
+// times how far its lifetime has run. A trigger older than the child's lifetime offers nothing.
+void wantTreesOfferNewWants() {
+    constexpr std::uint32_t kSimGuid = 0x51515151, kTrigger = 0x0DDD0001, kChild = 0x0DDD0002;
+    MemoryCodeSource code;
+    ts2::sim::World world;
+    world.create(kObjectGroup, typed(kSimGuid, ts2::sim::kPersonType));
+    Vm vm(code, {}, &world);
+    auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
+    hood->neighborIds = {27, 31};
+    hood->neighbors[27].guid = kSimGuid;
+    hood->neighbors[31].guid = 0x52525252;
+    ts2::swaf::Want held;
+    held.id = 27;
+    held.guid = 0x0DDD0009;
+    held.flags = 1;
+    hood->wants[27] = {held};
+    ts2::swaf::Want trigger;
+    trigger.id = 27;
+    trigger.guid = kTrigger;
+    trigger.type = 1;
+    trigger.argument = 31;
+    trigger.tail = {1000, 0, 0};
+    hood->wantHistories[27].time = 1000;
+    hood->wantHistories[27].records[kTrigger] = {trigger};
+    world.setNeighborhood(hood);
+    auto defs = std::make_shared<ts2::content::WantDefinitions>();
+    using ts2::content::WantArgument;
+    using ts2::content::WantOperator;
+    defs->byGuid[kTrigger] = {kTrigger, "trigger", WantArgument::Sim, WantOperator::None, 0, ""};
+    defs->byGuid[kChild] = {kChild, "talk", WantArgument::Sim, WantOperator::None, 750, ""};
+    defs->byGuid[kChild].influence = 40;
+    defs->byGuid[0x0DDD0009] = {0x0DDD0009, "held", WantArgument::None, WantOperator::None, 100, ""};
+    world.setWantDefinitions(defs);
+    auto trees = std::make_shared<std::vector<ts2::want_trees::Tree>>(1);
+    auto& tree = trees->front();
+    tree.id = 0x6DCE563C;
+    tree.nodes.resize(2);
+    tree.nodes[0].wantId = kTrigger;
+    tree.nodes[0].children = {1};
+    tree.nodes[1].wantId = kChild;
+    tree.nodes[1].parent = 0;
+    tree.nodes[1].visible = true;
+    tree.nodes[1].inheritSubject = true;
+    tree.nodes[1].lifetime = 2;  // hours
+    tree.nodes[1].minScore = 10;
+    tree.nodes[1].maxScore = 50;
+    world.setWantTrees(trees);
+
+    ts2::sim::queueWantRefill(world, 27, 3);
+    ts2::sim::stepWants({world, code, vm, 1});
+    const auto& wants = world.neighborWants(27);
+    CHECK(wants.size() == 4 && wants[0].guid == 0x0DDD0009 && wants[1].guid == kChild);
+    CHECK(wants[1].type == 1 && wants[1].argument == 31 && wants[1].tail.size() == 3 && wants[1].tail[1] == 750 && wants[1].tail[2] == 40);
+    CHECK(wants[2].guid == 0 && world.wantsState().queue.empty() && world.wantsState().clock == 2);
+
+    // Two hours and more after the trigger, the child is past its lifetime.
+    world.neighborWants(27)[1] = {};
+    ts2::sim::wantHistory(world, 27).time = 1000 + 2 * 3600;
+    ts2::sim::queueWantRefill(world, 27, 3);
+    ts2::sim::stepWants({world, code, vm, 1});
+    CHECK(world.neighborWants(27)[1].guid == 0);
+}
+
 // Want Satisfy matches the stack object's Sim's current wants: by want GUID, then by argument
 // (0 in the want accepts any) and the definition's operator. Matched wants leave the list.
 void wantSatisfyMatchesCurrentWants() {
@@ -2282,7 +2427,15 @@ void wantSatisfyMatchesCurrentWants() {
     CHECK(vm.run(sim, 0x1000).outcome == Outcome::False);  // ...and gone from the list
     CHECK(vm.run(sim, 0x1001).outcome == Outcome::False);  // skill 15 but level 7, the want says 8
     CHECK(vm.run(sim, 0x1002).outcome == Outcome::True);   // 6 >= 5
-    CHECK(world.neighborWants(27).size() == 1 && hood->wants[27].size() == 3);
+    // Satisfied wants leave empty places (GUID 0) in the Sim's 4 slots, every satisfy goes into the
+    // history, and a satisfied want queues the Sim for new wants.
+    const auto filled = [](const std::vector<ts2::swaf::Want>& list) { return std::count_if(list.begin(), list.end(), [](const auto& w) { return w.guid != 0; }); };
+    CHECK(world.neighborWants(27).size() == 4 && filled(world.neighborWants(27)) == 1 && hood->wants[27].size() == 3);
+    CHECK(world.neighborWants(27)[1].guid == kSkillWant);
+    const auto& history = ts2::sim::wantHistory(world, 27).records;
+    CHECK(history.at(kAnySimWant).size() == 2 && history.at(kSkillWant).size() == 1 && history.at(kLevelWant).size() == 1);
+    CHECK(ts2::sim::recordTime(history.at(kAnySimWant)[0]) < ts2::sim::recordTime(history.at(kAnySimWant)[1]));
+    CHECK(history.at(kAnySimWant)[0].tail[1] == 0 && world.wantsState().queue.at(27) == 3);
     const RunResult unknown = vm.run(sim, 0x1003);
     CHECK(unknown.outcome == Outcome::Error && unknown.reason == "data number out of range");
     CHECK(vm.run(sim, 0x1004).outcome == Outcome::False);  // no Wants - Controller on the lot: no Sims
@@ -2315,6 +2468,10 @@ void wantSatisfyWithASimListSatisfiesTheListedSims() {
     auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
     hood->neighborIds = {27, 28, 29, 30};
     hood->neighbors[27].guid = kSimGuid;
+    // A Sim's wants are satisfied only when it has person data.
+    for (const std::int16_t id : {std::int16_t{28}, std::int16_t{29}, std::int16_t{30}}) {
+        hood->neighbors[id].guid = 0x52525200u + static_cast<std::uint32_t>(id);
+    }
     auto want = [](std::int16_t id) {
         ts2::swaf::Want w;
         w.id = static_cast<std::uint16_t>(id);
@@ -2334,8 +2491,9 @@ void wantSatisfyWithASimListSatisfiesTheListedSims() {
     Vm vm(code, {}, &world);
     CHECK(vm.run(sim, 0x1000).outcome == Outcome::False);
     CHECK(controller.thread.temps[1] == 27);  // the tree ran on the controller with the Sim as param 0
-    CHECK(world.neighborWants(28).empty() && world.neighborWants(29).empty());
-    CHECK(world.neighborWants(27).size() == 1 && world.neighborWants(30).size() == 1);
+    const auto filled = [](const std::vector<ts2::swaf::Want>& list) { return std::count_if(list.begin(), list.end(), [](const auto& w) { return w.guid != 0; }); };
+    CHECK(filled(world.neighborWants(28)) == 0 && filled(world.neighborWants(29)) == 0);
+    CHECK(filled(world.neighborWants(27)) == 1 && filled(world.neighborWants(30)) == 1);
 }
 
 void motivesAreClampedAndNeedAPerson() {
@@ -2370,6 +2528,7 @@ std::vector<Test> vmInteractionTests() {
         {"set skin to the Sim's own is true", setSkinToTheSimsOwnIsTrue},
         {"recalc wants and Debug carry on", recalcWantsAndDebugCarryOn},
         {"Remove Family Tie ends the tie both ways", removeFamilyTieEndsTheTieBothWays},
+        {"Unlink Character deletes its Sims", unlinkCharacterDeletesItsSims},
         {"Add Child ties the baby to its parents", addChildTiesTheBabyToItsParents},
         {"remapped neighbor id comes from the remap table", remappedNeighborIdComesFromTheRemapTable},
         {"Get Outfits Information asks the Sim's looks", outfitsInformationAsksTheSimsLooks},
@@ -2386,6 +2545,7 @@ std::vector<Test> vmInteractionTests() {
         {"check tree kinds find trees that change the line", checkTreeKindsFindTreesThatChangeTheLine},
         {"Find Best Interaction scores what check trees advertise", findBestInteractionScoresWhatCheckTreesAdvertise},
         {"Want Satisfy matches current wants", wantSatisfyMatchesCurrentWants},
+        {"want trees offer new wants", wantTreesOfferNewWants},
         {"Want Satisfy with a Sim list satisfies the listed Sims", wantSatisfyWithASimListSatisfiesTheListedSims},
         {"Push Interaction queues for the Sim", pushInteractionQueuesForTheSim},
         {"Push Interaction with no such partner has no icon", pushWithNoSuchPartnerHasNoIcon},
@@ -2408,6 +2568,7 @@ std::vector<Test> vmInteractionTests() {
         {"lot cheats set every Sim's motives and fields, and the hour", lotCheatsSetEverySim},
         {"debug lines start from Shift-clicked objects", debugLinesStartFromShiftClickedObjects},
         {"choices flagged to run at once skip the queue", choicesFlaggedToRunAtOnceSkipTheQueue},
+        {"multi-tile parts use their master's texts", multiTilePartsUseTheirMastersTexts},
         {"check tree owners read the tested line", checkTreeOwnersReadTheTestedLine},
         {"Run Tree by Name runs the stack object's tree", runTreeByNameRunsTheStackObjectsTree},
         {"Run Tree by Name takes false when the tree is missing", runTreeByNameTakesFalseWhenTheTreeIsMissing},

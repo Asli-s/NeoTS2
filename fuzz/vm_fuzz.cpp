@@ -220,7 +220,6 @@ private:
         d.fields[ts2::objd::field::kObjectArrayCount] %= 5;
         sim::ObjectType type{group, std::move(d)};
         type.containerSlots = in.byte() % 3;
-        type.containerSlotHeights.assign(type.containerSlots, 0.5f);
 
         std::vector<ts2::objf::Function> functions(0x30);
         functions[1].action = trees_.call(in);
@@ -322,7 +321,7 @@ private:
             return;
         }
         if (o->isPerson()) {
-            sim::resetSim(*o, *type, code_);
+            sim::resetSim(world_, *o, *type, code_, vm_.rng);
             return;
         }
         sim::resetObject(*o, *type, code_);

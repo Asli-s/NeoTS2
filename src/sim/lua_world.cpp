@@ -1,5 +1,7 @@
 #include "sim/lua_internals.hpp"
 
+#include "sim/snap.hpp"
+
 #include <cstring>
 
 namespace ts2::sim::lua_detail {
@@ -41,6 +43,17 @@ int hasSolidFloor(lua_State* L) {
     return 1;
 }
 
+// nWorld.HasSolidGround(x, y, level): as HasSolidFloor, except that the ground storey (level 0) is
+// always solid. Off any lot, no.
+int hasSolidGround(lua_State* L) {
+    const auto at = quarterTileArg(L);
+    if (at && at->level == 0) {
+        lua_pushboolean(L, true);
+        return 1;
+    }
+    return hasSolidFloor(L);
+}
+
 // nWorld.HasStage(x, y, level): whether the point's quarter is on a split-level interior foundation,
 // platform region 4. HasStageAny gives the same answer in the game: it loops over the tile's
 // quarters but asks about the point's own quarter each time.
@@ -54,6 +67,94 @@ int hasStage(lua_State* L) {
     }
     const auto region = c.world->platformRegion()(at->level, at->x, at->y, at->quarter);
     lua_pushboolean(L, region.has_value() && *region == kStageRegion);
+    return 1;
+}
+
+namespace {
+
+// One of the lot's edges or lengths on the game's axes, in tiles, from its cWorldDB bounds. A min
+// edge is the first tile's low side, a max edge the last tile's far side.
+int pushLotExtent(lua_State* L, const char* unsupported, double (*extent)(const World::TileBounds&)) {
+    const ScriptCall& c = call(L);
+    if (c.world == nullptr || !c.world->tileBounds()) {
+        return stopUnsupported(L, unsupported);
+    }
+    lua_pushnumber(L, static_cast<lua_Number>(extent(*c.world->tileBounds())));
+    return 1;
+}
+
+double minX(const World::TileBounds& b) { return b.minX; }
+double maxX(const World::TileBounds& b) { return static_cast<double>(b.maxX) + 1; }
+double minY(const World::TileBounds& b) { return b.minY; }
+double maxY(const World::TileBounds& b) { return static_cast<double>(b.maxY) + 1; }
+
+} // namespace
+
+// nWorld.GetMinX() / GetMaxX() / GetMinY() / GetMaxY(): the lot's edges. GetLotSizeX() and
+// GetLotSizeY(): its length on each axis, max minus min.
+int getMinX(lua_State* L) { return pushLotExtent(L, "nWorld.GetMinX without the lot's bounds", minX); }
+int getMaxX(lua_State* L) { return pushLotExtent(L, "nWorld.GetMaxX without the lot's bounds", maxX); }
+int getMinY(lua_State* L) { return pushLotExtent(L, "nWorld.GetMinY without the lot's bounds", minY); }
+int getMaxY(lua_State* L) { return pushLotExtent(L, "nWorld.GetMaxY without the lot's bounds", maxY); }
+int getLotSizeX(lua_State* L) {
+    return pushLotExtent(L, "nWorld.GetLotSizeX without the lot's bounds", [](const World::TileBounds& b) { return maxX(b) - minX(b); });
+}
+int getLotSizeY(lua_State* L) {
+    return pushLotExtent(L, "nWorld.GetLotSizeY without the lot's bounds", [](const World::TileBounds& b) { return maxY(b) - minY(b); });
+}
+
+// nWorld.GetMinLevel() / GetMaxLevel(): the lot's lowest and highest levels as its cWorldDB record
+// gives them. GetNumLevels(): how many there are, max minus min plus 1.
+int getMinLevel(lua_State* L) {
+    return pushLotExtent(L, "nWorld.GetMinLevel without the lot's bounds", [](const World::TileBounds& b) { return static_cast<double>(b.minLevel); });
+}
+int getMaxLevel(lua_State* L) {
+    return pushLotExtent(L, "nWorld.GetMaxLevel without the lot's bounds", [](const World::TileBounds& b) { return static_cast<double>(b.maxLevel); });
+}
+int getNumLevels(lua_State* L) {
+    return pushLotExtent(L, "nWorld.GetNumLevels without the lot's bounds",
+                         [](const World::TileBounds& b) { return static_cast<double>(b.maxLevel) - b.minLevel + 1; });
+}
+
+// nWorld.IsLocked(x, y, level): whether the lot's locked-tile grid marks the tile the point lies in
+// (x and y cut toward zero, level from 0). False off the grid, where the game doesn't check its bounds.
+int isLocked(lua_State* L) {
+    const ScriptCall& c = call(L);
+    const double x = lua_tonumber(L, 1), y = lua_tonumber(L, 2);
+    const std::int32_t level = argInt(L, 3);
+    constexpr double kLimit = 1 << 20;  // far beyond any lot, and safe to turn into an int
+    if (c.world == nullptr || !c.world->lockedTile() || !(std::fabs(x) < kLimit) || !(std::fabs(y) < kLimit)) {
+        lua_pushboolean(L, false);
+        return 1;
+    }
+    lua_pushboolean(L, c.world->lockedTile()(level, static_cast<int>(x), static_cast<int>(y)).value_or(false));
+    return 1;
+}
+
+// nWorld.MoveObjectToLocation(id, x, y, level[, facing]): moves the object to the point (x and y as
+// GetObjectLocation gives them, level from 0) when the placement test passes there, and says
+// whether it moved. It keeps its facing unless a fifth number gives one, in the scripts' own
+// numbering (10 minus it, remainder by 8, is the object's direction).
+int moveObjectToLocation(lua_State* L) {
+    SimObject& o = objectOrError(L, argShort(L, 1));
+    const double x = lua_tonumber(L, 2), y = lua_tonumber(L, 3);
+    const std::int32_t level = argInt(L, 4);
+    std::int16_t facing = o.data[1];
+    if (lua_gettop(L) == 5 && lua_type(L, 5) == LUA_TNUMBER) {
+        facing = static_cast<std::int16_t>((10 - static_cast<std::int32_t>(argShort(L, 5))) % 8);
+    }
+    constexpr double kLimit = 1 << 14;  // far beyond any lot, and safe in 1/65536 tiles
+    if (!(std::fabs(x) < kLimit) || !(std::fabs(y) < kLimit) || level < -kLimit || level > kLimit) {
+        lua_pushboolean(L, false);
+        return 1;
+    }
+    World& world = *call(L).world;
+    const SnapTarget target{static_cast<std::int32_t>(y * 65536.0), static_cast<std::int32_t>(x * 65536.0), level + 1, facing};
+    const bool fits = !placementCode(world, o, target, true);
+    if (fits) {
+        snapTo(world, o, target);
+    }
+    lua_pushboolean(L, fits);
     return 1;
 }
 

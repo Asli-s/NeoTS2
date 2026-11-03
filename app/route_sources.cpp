@@ -113,7 +113,7 @@ void modelBones(const sg::ResourceNode& tree, ts2::sim::RouteModel& model) {
         if (!node.name.empty()) {
             float origin[3] = {0, 0, 0};
             place.apply(origin, true);
-            bones.try_emplace(lower(node.name), ts2::sim::ModelBone{origin[0], origin[1], std::atan2(place.m[4], place.m[0])});
+            bones.try_emplace(lower(node.name), ts2::sim::ModelBone{origin[0], origin[1], std::atan2(place.m[4], place.m[0]), origin[2]});
         }
         const int here = static_cast<int>(model.nodes.size());
         model.nodes.push_back({node.name.empty() ? std::string() : lower(node.name), parentNode, node.translation, node.rotation});

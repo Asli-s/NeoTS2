@@ -91,7 +91,7 @@ std::optional<tga::Pixels> decode(std::span<const std::uint8_t> data, std::uint3
     } else {
         int w = 0, h = 0, n = 0;
         if (!stbi_info_from_memory(data.data(), static_cast<int>(data.size()), &w, &h, &n) || static_cast<std::uint32_t>(w) > maxSide ||
-            static_cast<std::uint32_t>(h) > maxSide) {
+            static_cast<std::uint32_t>(h) > maxSide || static_cast<std::uint64_t>(w) * static_cast<std::uint64_t>(h) > tga::kMaxPixels) {
             return std::nullopt;
         }
         // stb allocates the whole picture from its header and fills what the data lacks with zeros:

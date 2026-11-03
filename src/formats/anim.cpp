@@ -142,6 +142,7 @@ Animation parse(std::span<const std::uint8_t> data) {
     r.u8();
     const std::uint32_t header = r.u32();
     const std::uint32_t skeletonLength = header >> 24;
+    a.category = static_cast<std::uint16_t>(header >> 12 & 0xFFF);
     for (int i = 0; i < 4; ++i) {
         pointer(r);
     }

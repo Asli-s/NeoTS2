@@ -941,13 +941,44 @@ void numWallSectionsIsTheRoomWallCount() {
     CHECK(vm.run(object, 0x1000).outcome == Outcome::Unsupported);
 }
 
+// nWorld's lot edges and lengths come from the lot's cWorldDB bounds (the Smiths' lot: tiles 0-29
+// and 0-49). Without them the scripts stop.
+void lotSizeComesFromTheWorldBounds() {
+    auto runtime = std::make_shared<ts2::sim::LuaRuntime>();
+    runtime->load({}, {compileScript("Size", R"(
+        SetTemp(0, nWorld.GetLotSizeX())
+        SetTemp(1, nWorld.GetLotSizeY())
+        SetTemp(2, nWorld.GetMinX())
+        SetTemp(3, nWorld.GetMaxY())
+        SetTemp(4, nWorld.GetMinLevel())
+        SetTemp(5, nWorld.GetMaxLevel())
+        SetTemp(6, nWorld.GetNumLevels())
+    )")});
+    CHECK(runtime->problems.empty());
+    MemoryCodeSource code;
+    code.addStrings(ts2::sim::kGlobalGroup, 0x130, {"Size"});
+    code.add(kObjectGroup, 0x1000, bhav({luaScriptCall(1)}));
+    ts2::sim::World world;
+    world.setScripts(runtime);
+    auto& object = world.create(kObjectGroup, typed(kFridgeGuid));
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(object, 0x1000).outcome == Outcome::Unsupported);
+    world.setTileBounds(ts2::sim::World::TileBounds{0, 0, 29, 49, -1, 4});  // the Smiths' lot
+    CHECK(vm.run(object, 0x1000).outcome == Outcome::True);
+    CHECK(object.thread.temps[0] == 30 && object.thread.temps[1] == 50 && object.thread.temps[2] == 0 && object.thread.temps[3] == 50);
+    CHECK(object.thread.temps[4] == -1 && object.thread.temps[5] == 4 && object.thread.temps[6] == 6);
+}
+
 // nWorld.HasSolidFloor: whether the point's quarter of its tile (split along both diagonals) has a
-// floor pattern. Off the grid or without floors, no.
+// floor pattern. Off the grid or without floors, no. HasSolidGround is the same above the ground
+// storey, which is always solid.
 void hasSolidFloorReadsTheFloorQuarter() {
     auto runtime = std::make_shared<ts2::sim::LuaRuntime>();
     runtime->load({}, {compileScript("Floor", R"(
         SetTemp(0, (nWorld.HasSolidFloor(3, 4, 0) and 1 or 0) + (nWorld.HasSolidFloor(3.9, 4.5, 0) and 10 or 0) +
                    (nWorld.HasSolidFloor(3.5, 4.9, 0) and 100 or 0) + (nWorld.HasSolidFloor(99, 4, 0) and 1000 or 0))
+        SetTemp(2, (nWorld.HasSolidGround(3, 4, 0) and 1 or 0) + (nWorld.HasSolidGround(3.9, 4.5, 1) and 10 or 0) +
+                   (nWorld.HasSolidGround(3, 4, 1) and 100 or 0) + (nWorld.HasSolidGround(-1, 4, 0) and 1000 or 0))
         local x, y, level = nWorld.GetObjectTile(GetStackObjectId())
         local here = nWorld.GetObjectsOnTile(x, y, level)
         SetTemp(1, table.getn(here) * 100 + here[1])
@@ -961,7 +992,7 @@ void hasSolidFloorReadsTheFloorQuarter() {
     ts2::sim::World world;
     world.setScripts(runtime);
     world.setFloorPattern([](int level, int x, int y, int quarter) -> std::optional<std::uint16_t> {
-        if (level != 0 || x != 3 || y != 4) return std::nullopt;
+        if ((level != 0 && level != 1) || x != 3 || y != 4) return std::nullopt;
         return quarter == 0 ? std::uint16_t{0} : quarter == 2 ? std::uint16_t{7} : std::uint16_t{0};
     });
     auto& object = world.create(kObjectGroup, typed(kFridgeGuid));
@@ -975,7 +1006,7 @@ void hasSolidFloorReadsTheFloorQuarter() {
     object.thread.stackObjectId = other.id;
     Vm vm(code, {}, &world);
     CHECK(vm.run(object, 0x1000).outcome == Outcome::True && object.thread.temps[0] == 10);
-    CHECK(object.thread.temps[1] == 200 + object.id);
+    CHECK(object.thread.temps[1] == 200 + object.id && object.thread.temps[2] == 11);
 }
 
 // CachedPerson:isQueuedObjAdvertisingForX: true when an interaction in the Sim's queue advertises the
@@ -1162,6 +1193,46 @@ void cachedFamilyReadsTheSavedLots() {
     const auto& t = object.thread.temps;
     CHECK(t[0] == 3 && t[1] == 10 && t[2] == 12 && t[3] == 77);
     CHECK(scriptRaisesError(world, [&] { return vm.run(object, 0x1001); }));
+}
+
+// ObjectDefinition.new takes the GUID of an object type (error 0x7A for any other), and getField and
+// get32BitField both read its fields as GetObjectDefinitionField does (error 0x23 past them).
+void objectDefinitionReadsFields() {
+    auto runtime = std::make_shared<ts2::sim::LuaRuntime>();
+    runtime->load({}, {compileScript("Fields", R"(
+        local definition = ObjectDefinition.new(1817229926)
+        SetTemp(0, definition:getField(9))
+        SetTemp(1, definition:get32BitField(9))
+        SetTemp(2, definition:get32BitField(203) / 65536)
+        SetScriptReturnValue(true)
+    )"), compileScript("MissingType", "ObjectDefinition.new(5)"),
+           compileScript("BadField", "ObjectDefinition.new(1817229926):getField(108)")});
+    CHECK(runtime->problems.empty());
+    MemoryCodeSource code;
+    auto fridgeType = typed(kFridgeGuid);
+    fridgeType.fields[0x47] = 7;
+    code.addObjectType(kObjectGroup, fridgeType);
+    code.addStrings(ts2::sim::kGlobalGroup, 0x130, {"Fields", "MissingType", "BadField"});
+    Instruction in;
+    in.opcode = 0x007E;
+    in.operands[4] = 0x01;
+    in.trueTarget = T;
+    in.falseTarget = F;
+    in.operands[0] = 0x30;
+    in.operands[1] = 0x01;
+    for (std::uint8_t i = 1; i <= 3; ++i) {
+        in.operands[2] = i;
+        code.add(kObjectGroup, static_cast<std::uint16_t>(0x0FFF + i), bhav({in}));
+    }
+    ts2::sim::World world;
+    world.setScripts(runtime);
+    auto& object = world.create(kObjectGroup, fridgeType);
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(object, 0x1000).outcome == Outcome::True);
+    const auto& t = object.thread.temps;
+    CHECK(t[0] == 4 && t[1] == 4 && t[2] == 7);
+    CHECK(scriptRaisesError(world, [&] { return vm.run(object, 0x1001); }));
+    CHECK(scriptRaisesError(world, [&] { return vm.run(object, 0x1002); }));
 }
 
 // CachedFamily:getMembers lists the neighbor ids of the family's Sims in its order, without members
@@ -1384,6 +1455,46 @@ void objectManagerListsMultiTileParts() {
     CHECK(scriptRaisesError(world, [&] { return vm.run(me, 0x1001); }));
 }
 
+// getDirectionToObject gives one of 8 directions from the first object to the second, as Get
+// Direction To does. A missing object is an error.
+void objectManagerGivesTheDirectionToAnObject() {
+    auto runtime = std::make_shared<ts2::sim::LuaRuntime>();
+    runtime->load({}, {compileScript("Direction", R"(
+        local om = ObjectManager.new()
+        SetTemp(0, om:getDirectionToObject(1, 2) * 100 + om:getDirectionToObject(2, 1) * 10 + om:getDirectionToObject(1, 3))
+        SetScriptReturnValue(true)
+    )"), compileScript("Missing", "ObjectManager.new():getDirectionToObject(1, 9)")});
+    CHECK(runtime->problems.empty());
+    MemoryCodeSource code;
+    code.addStrings(ts2::sim::kGlobalGroup, 0x130, {"Direction", "Missing"});
+    Instruction in;
+    in.opcode = 0x007E;
+    in.operands[4] = 0x01;
+    in.trueTarget = T;
+    in.falseTarget = F;
+    in.operands[0] = 0x30;
+    in.operands[1] = 0x01;
+    for (std::uint8_t i = 1; i <= 2; ++i) {
+        in.operands[2] = i;
+        code.add(kObjectGroup, static_cast<std::uint16_t>(0x0FFF + i), bhav({in}));
+    }
+    ts2::sim::World world;
+    world.setScripts(runtime);
+    const auto place = [&](float x, float y) {
+        auto& o = world.create(kObjectGroup, typed(kFridgeGuid));
+        o.x = static_cast<std::int32_t>(x * 65536);
+        o.y = static_cast<std::int32_t>(y * 65536);
+        return &o;
+    };
+    auto& me = *place(4.5f, 4.5f);  // 1
+    place(7.5f, 4.5f);              // 2, along +x
+    place(5.5f, 5.5f);              // 3, between +x and +y
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(me, 0x1000).outcome == Outcome::True);
+    CHECK(me.thread.temps[0] == 263);
+    CHECK(scriptRaisesError(world, [&] { return vm.run(me, 0x1001); }));
+}
+
 // ObjectManager answers object and neighbor lookups. Id lists come back as Lua arrays in id order,
 // leaving out objects whose data 0x38 has 0x1 or 0x4 set unless the caller asks for them.
 void objectManagerScriptsFindObjects() {
@@ -1465,10 +1576,13 @@ std::vector<Test> vmScriptTests() {
         {"nWorld.HasSolidFloor reads the floor quarter", hasSolidFloorReadsTheFloorQuarter},
         {"nWorld.HasStage reads the platform region", hasStageReadsThePlatformRegion},
         {"nWorld.GetNumWallSections is the room wall count", numWallSectionsIsTheRoomWallCount},
+        {"nWorld's lot size comes from the world bounds", lotSizeComesFromTheWorldBounds},
         {"ObjectManager lists a multi-tile object's parts", objectManagerListsMultiTileParts},
+        {"ObjectManager gives the direction to an object", objectManagerGivesTheDirectionToAnObject},
         {"Neighborhood:isApartmentDoor tests the category and OBJD field 0x4B", apartmentDoorIsFalseOffApartmentLots},
         {"Neighborhood:isApartmentResident needs an apartment lot", apartmentResidentsAreSimsOfType8OnApartmentLots},
         {"CachedFamily reads the saved lots", cachedFamilyReadsTheSavedLots},
+        {"ObjectDefinition reads fields", objectDefinitionReadsFields},
         {"CachedFamily lists its members", cachedFamilyListsItsMembers},
         {"CachedPerson friends for promotion count token credits", friendsForPromotionCountTokenCredits},
         {"Neighborhood reads lot owners", neighborhoodReadsLotOwners},

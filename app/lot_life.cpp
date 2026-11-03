@@ -8,6 +8,7 @@
 #include "scene/look_at.hpp"
 #include "scene/newborn_face.hpp"
 #include "scene/object_lights.hpp"
+#include "scene/pool_water.hpp"
 #include "sim/motives.hpp"
 #include "sim/object_model.hpp"
 #include "sim/ground_click.hpp"
@@ -341,7 +342,7 @@ void playClips(ts2::scene::Actor& actor, const ts2::sim::SimObject& object, cons
 // A stopped walk that settled at `settledMs` (see SimObject::walkSettledMs): the pose the Sim
 // was in fades out, held where it stood then (`at`), while the walk pose fades in and out.
 void addSettleClips(ts2::scene::Actor& actor, const ts2::sim::SimObject& object, double settledMs, const std::optional<ts2::scene::Transform>& at,
-                    ts2::scene::AnimationLibrary& animations) {
+                    ts2::scene::AnimationLibrary& animations, const ts2::sim::LocoClipLookup& clips) {
     const double start = settledMs / 1000.0;
     auto& still = actor.clips.emplace_back();
     still.frozen = true;
@@ -350,7 +351,8 @@ void addSettleClips(ts2::scene::Actor& actor, const ts2::sim::SimObject& object,
     still.fadeIn = false;
     still.fadeOutSeconds = ts2::sim::kSettlePoseMs / 1000.0f;
     still.playedAt = at;
-    const std::string name = ts2::sim::walkPoseClip(object.personData[ts2::sim::kLifeStagePersonData]);
+    const std::string name = ts2::sim::settlePose(object.walkSets.empty() ? nullptr : &object.walkSets.back()[0],
+                                                  object.personData[ts2::sim::kLifeStagePersonData], object.personData[ts2::sim::kGenderPersonData], clips);
     if (auto bound = animations.bound(actor.rig, name, false)) {
         auto& pose = actor.clips.emplace_back();
         pose.animation = std::move(bound);
@@ -395,6 +397,16 @@ SimFrame simFrame(const ts2::sim::SimObject& sim, double nowMs) {
         }
     }
     return f;
+}
+
+// How high a Sim stands at (x, y) on its level: on the floor, or, swimming (person data 0x40), at
+// the pool water's surface, which the swim clips hang the body below.
+float standHeight(const ts2::scene::Actor& actor, const ts2::sim::SimObject& sim, std::int32_t level, float x, float y) {
+    constexpr std::int32_t kLevelBelowGround = 0;
+    if (sim.personData[ts2::sim::kSwimmingPersonData] != 0) {
+        return ts2::scene::poolwater::surfaceHeight(actor.floorHeight(kLevelBelowGround, x, y));
+    }
+    return actor.floorHeight(level, x, y);
 }
 
 // A Sim in an object's slot (a seat, a stair step) is drawn where the slot's bone is, turned as it
@@ -470,7 +482,7 @@ void placeSim(ts2::scene::Actor& actor, const ts2::sim::SimObject& sim, const Si
     }
     const float x = frame.y;  // the lot's x and y are the position's y and x
     const float y = frame.x;
-    actor.place = actor.lotFrame * ts2::scene::Transform::at(x, y, actor.floorHeight(sim.level, x, y), ts2::sim::drawnHeading(frame.heading));
+    actor.place = actor.lotFrame * ts2::scene::Transform::at(x, y, standHeight(actor, sim, sim.level, x, y), ts2::sim::drawnHeading(frame.heading));
 }
 
 // A Sim and what it holds are on the storey the simulation has the Sim on (1 = ground), so a view
@@ -560,7 +572,7 @@ LotLife::LotLife(std::unique_ptr<ts2::sim::LotSimulation> sim, ts2::scene::Asset
     sim_->world().setAnimationCarries([this](const std::string& name) { return animations_.hasTargetType(name, 2); });
     sim_->world().setLocoClips([this](const std::string& name) -> std::optional<ts2::sim::LocoClip> {
         const auto a = animations_.find(name);
-        return a ? std::optional<ts2::sim::LocoClip>({name, a->duration, a->travel, a->loopPhase, a->match, a->speed, a->rootTurn}) : std::nullopt;
+        return a ? std::optional<ts2::sim::LocoClip>({name, a->duration, a->travel, a->loopPhase, a->match, a->speed, a->rootTurn, a->category}) : std::nullopt;
     });
     sim_->world().setAnimationEventTime([this](const std::string& name, int id) { return animations_.eventTime(name, id); });
     sim_->world().setAnimationEvents([this](const std::string& name) -> const std::vector<ts2::sim::AnimationEvent>& {
@@ -853,6 +865,21 @@ const std::vector<ts2::swaf::Want>& LotLife::fears(std::int16_t sim) {
     return id ? sim_->world().neighborFears(id) : none;
 }
 
+bool LotLife::wantsRefilling(std::int16_t sim) {
+    const auto* object = sim_->world().find(sim);
+    const std::int16_t id = object ? sim_->world().neighborIdOf(*object) : 0;
+    return id && sim_->world().wantsState().queue.contains(id);
+}
+
+const std::map<std::size_t, std::uint32_t>& LotLife::satisfiedWantPlaces(std::int16_t sim) {
+    static const std::map<std::size_t, std::uint32_t> none;
+    const auto* object = sim_->world().find(sim);
+    const std::int16_t id = object ? sim_->world().neighborIdOf(*object) : 0;
+    const auto& satisfied = sim_->world().wantsState().satisfied;
+    const auto it = satisfied.find(id);
+    return it != satisfied.end() ? it->second : none;
+}
+
 ts2::swaf::Slots LotLife::wantSlots(std::int16_t sim) {
     const auto* object = sim_->world().find(sim);
     const std::int16_t id = object ? sim_->world().neighborIdOf(*object) : 0;
@@ -924,7 +951,7 @@ void LotLife::toggleHold(std::int16_t sim, std::size_t index, bool fear) {
     auto& wants = world.neighborWants(id);
     auto& fears = world.neighborFears(id);
     auto& list = fear ? fears : wants;
-    if (index >= list.size()) {
+    if (index >= list.size() || list[index].guid == 0) {
         return;
     }
     auto [order, fresh] = holds_.try_emplace(id);
@@ -1525,7 +1552,7 @@ void LotLife::update(double ms, ts2::scene::Scene& scene) {
                 if (actor.floorHeight) {
                     const auto at = own.tail->path.at(walked);
                     const float heading = at.heading && !own.tail->plan.keepsFacing ? *at.heading : own.tailHeading;
-                    tailPlace = actor.lotFrame * ts2::scene::Transform::at(at.y, at.x, actor.floorHeight(own.tail->level, at.y, at.x), heading);
+                    tailPlace = actor.lotFrame * ts2::scene::Transform::at(at.y, at.x, standHeight(actor, *object, own.tail->level, at.y, at.x), heading);
                 }
             }
             const auto* tailPoses = own.tail ? &tailPoses_ : nullptr;
@@ -1548,7 +1575,7 @@ void LotLife::update(double ms, ts2::scene::Scene& scene) {
                           startedAt, tailPlace);
             }
             if (own.settledMs && nowMs < *own.settledMs + ts2::sim::kSettleWalkPoseMs) {
-                addSettleClips(actor, *object, *own.settledMs, own.settledAt, animations_);
+                addSettleClips(actor, *object, *own.settledMs, own.settledAt, animations_, sim_->world().locoClips());
             }
             placeSim(
                 actor, *object, frame, scene, [&](const ts2::scene::PlacedObject& p, std::size_t slot) { return slotPlace(p, slot, scene); },

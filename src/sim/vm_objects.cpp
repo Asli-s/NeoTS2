@@ -12,7 +12,9 @@ std::int32_t Execution::sleepTicks(const bhav::Instruction& in, Frame& f) {
 // Operands:
 //   bytes 0-1  who (0 = me, 1 = stack object, 2 = nobody)
 //   byte 2     bit 0 return immediately, bit 1 clear = clean up all (what it changes isn't known yet)
-// A few object types can't be removed. Removing me without "return immediately" ends my run.
+// A few object types can't be removed. The object goes out of its container and off the lot at once
+// (see takeOutOfWorld), and the delete itself comes at the end of the tick. Removing me without
+// "return immediately" ends my run.
 // Removing a part of a multi-tile object removes the whole object.
 bool Execution::removeObject(const bhav::Instruction& in) {
     const auto& o = in.operands;
@@ -31,6 +33,11 @@ bool Execution::removeObject(const bhav::Instruction& in) {
         return false;
     }
     const bool meWasRemoved = me_->removed;
+    // The object leaves its container's slot and the world at once, so a Sim can take the next thing
+    // into the hand it emptied. What the game does here for multi-tile objects is not known yet.
+    if (object->definition.field(objd::field::kMultiTileMasterId) == 0) {
+        takeOutOfWorld(*object);
+    }
     world().remove(*object);
     // Another part of my multi-tile object removes me with it.
     const bool removesMe = object == me_ || (!meWasRemoved && me_->removed);

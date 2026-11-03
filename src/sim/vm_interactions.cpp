@@ -108,9 +108,9 @@ void Execution::setActionIcon(SimObject& self, std::uint16_t flags, std::int16_t
 
 // Run Functional Tree: calls the stack object's tree for an object function (bytes 0-1, see
 // objectFunctionEntry) from its OBJf: the action tree, or with byte 2 bit 2 the check tree, given
-// my params with bit 1. The call runs on my stack with the object as stack object. It is false when the
-// object has no such tree. With bit 0 the object becomes the queue icon (picture 0) of a Sim's running
-// sub-interaction, else of its running interaction.
+// my params with bit 1, else my temps. The call runs on my stack with the object as stack object.
+// It is false when the object has no such tree. With bit 0 the object becomes the queue icon
+// (picture 0) of a Sim's running sub-interaction, else of its running interaction.
 std::optional<Execution::NamedCall> Execution::functionalTree(const bhav::Instruction& in, const Frame& f) {
     const auto& o = in.operands;
     SimObject& object = stack();
@@ -134,8 +134,11 @@ std::optional<Execution::NamedCall> Execution::functionalTree(const bhav::Instru
     }
     call.codeOwner = object.group;
     call.stackObject = object.id;
+    // A stove's Cook reads the chosen cook type from param 0, which is my temp 0.
     if (o[2] & 0x02) {
         call.args = f.params;
+    } else {
+        call.args.assign(thread_.temps.begin(), thread_.temps.end());
     }
     if ((o[2] & 0x01) && me().isPerson()) {
         SimObject& self = me();
@@ -227,9 +230,13 @@ bool Execution::findBestObject(const bhav::Instruction& in, Frame& f) {
     if ((o[6] & 0x01) && world().find(thread_.temps[0]) == nullptr) {
         throw Stop{Outcome::Error, "could not find object reference", std::to_string(thread_.temps[0])};
     }
-    const FunctionSearch search{world(), code_, me(), in.operands, thread_.temps, *origin,
+    // The room filters use the temps as they were before the first check tree ran.
+    const auto temps = thread_.temps;
+    const FunctionSearch search{world(), code_, me(), in.operands, temps, *origin,
                                 [&](SimObject& candidate, std::uint16_t tree) {
-                                    const RunResult r = runNow(me(), candidate.group, tree, candidate.id, {});
+                                    // Food functions collect what each candidate offers in my temps
+                                    // (a counter's prep types in temp 2), so check trees run on them.
+                                    const RunResult r = runOnMe(candidate.group, tree, candidate.id, thread_.temps);
                                     if (r.outcome != Outcome::True && r.outcome != Outcome::False) {
                                         throw Stop{r.outcome, "function check tree: " + r.reason, r.detail};
                                     }

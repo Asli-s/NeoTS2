@@ -147,21 +147,51 @@ int getObjectIdInSlot(lua_State* L) {
     return 1;
 }
 
-// GetObjectDefinitionField(guid, field): a field of an object type's definition, numbered as
-// ObjectDefinition::scriptField numbers them.
-int getObjectDefinitionField(lua_State* L) {
+namespace {
+
+// Pushes field `field` of the definition of object type `guid`. An unknown GUID is error 0x7A and a
+// field the definition doesn't have is error 0x23.
+int pushDefinitionField(lua_State* L, std::uint32_t guid, int field) {
     ScriptCall& c = call(L);
-    const ObjectType* type = c.code ? c.code->objectType(argUnsigned(L, 1)) : nullptr;
+    const ObjectType* type = c.code ? c.code->objectType(guid) : nullptr;
     if (type == nullptr) {
         return gameError(L, kErrorBadGuid);
     }
-    const int field = argInt(L, 2);
     const auto value = field >= 0 ? type->definition.scriptField(static_cast<std::size_t>(field)) : std::nullopt;
     if (!value) {
         return gameError(L, kErrorDefinitionFieldOutOfRange);
     }
     lua_pushnumber(L, *value);
     return 1;
+}
+
+} // namespace
+
+// GetObjectDefinitionField(guid, field): a field of an object type's definition, numbered as
+// ObjectDefinition::scriptField numbers them.
+int getObjectDefinitionField(lua_State* L) {
+    return pushDefinitionField(L, argUnsigned(L, 1), argInt(L, 2));
+}
+
+// ObjectDefinition.new(guid): the definition of an object type. A GUID no object type has is
+// error 0x7A.
+int newObjectDefinition(lua_State* L) {
+    ScriptCall& c = call(L);
+    const std::uint32_t guid = argUnsigned(L, 1);
+    if (c.code == nullptr || c.code->objectType(guid) == nullptr) {
+        return gameError(L, kErrorBadGuid);
+    }
+    return pushInstance(L, "ObjectDefinition", static_cast<std::int32_t>(guid));
+}
+
+// ObjectDefinition:getField(field) and get32BitField(field), which are the same: what
+// GetObjectDefinitionField gives for the definition's GUID.
+int objectDefinitionField(lua_State* L) {
+    const auto* self = selfInstance(L);
+    if (self == nullptr) {
+        return gameError(L, kErrorBadGuid);
+    }
+    return pushDefinitionField(L, static_cast<std::uint32_t>(self->id), argInt(L, 2));
 }
 
 // Get/SetPersonMotive(id, motive[, value]): a Sim's motive 0-15, read as a whole number.
@@ -347,7 +377,7 @@ int cachedFamilyMembers(lua_State* L) {
     for (const std::uint32_t guid : selfFamilyMembers(L)) {
         const std::int16_t id = guid != 0 ? c.world->neighborIdWithGuid(guid) : 0;
         const SavedNeighbor* neighbor = id != 0 ? c.world->neighbor(id) : nullptr;
-        if (neighbor == nullptr || isFamilyTreeOnly(c, *neighbor)) {
+        if (neighbor == nullptr || isFamilyTreeOnly(c, id)) {
             continue;
         }
         lua_pushnumber(L, ++n);

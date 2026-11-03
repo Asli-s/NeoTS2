@@ -3,7 +3,9 @@
 #include "diag/log.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <limits>
 #include <unordered_map>
 
 namespace ts2::sim {
@@ -380,6 +382,191 @@ std::int32_t roomOnSideOfWall(const RoomMap& rooms, const wallgraph::Point& from
         return look(from.x, from.y, -kThird, 0);
     }
     return look(to.x - 1, to.y, kThird, 0);
+}
+
+} // namespace ts2::sim
+
+namespace ts2::sim {
+
+namespace {
+
+// Points are tile corners, so a key at 1/256 tile tells them apart.
+constexpr float kPointKeyScale = 256.0f;
+// More pieces than any lot holds. The rest of a broken file is left out.
+constexpr std::size_t kMaxWallPieces = 1u << 16;
+constexpr float kTwoPi = 6.2831853f;
+
+bool usablePoint(const wallgraph::Point& p) {
+    const auto limit = static_cast<float>(kMaxSide) * 2;
+    return std::isfinite(p.x) && std::isfinite(p.y) && std::abs(p.x) <= limit && std::abs(p.y) <= limit &&
+           std::abs(p.level) <= kMaxLevels;
+}
+
+std::tuple<std::int32_t, std::int32_t, std::int32_t> pointKey(float x, float y, std::int32_t level) {
+    return {static_cast<std::int32_t>(std::lround(x * kPointKeyScale)), static_cast<std::int32_t>(std::lround(y * kPointKeyScale)),
+            level};
+}
+
+} // namespace
+
+WallOutline::WallOutline(const std::vector<WallPiece>& pieces) {
+    if (pieces.size() > kMaxWallPieces) {
+        diag::warnOnce("rooms: more than 65536 wall pieces, the rest are left out of the wall outline");
+    }
+    auto vertexOf = [&](const wallgraph::Point& p) {
+        const auto [it, added] = vertexAt_.try_emplace(pointKey(p.x, p.y, p.level), vertices_.size());
+        if (added) {
+            vertices_.push_back({p.x, p.y, p.level, {}});
+        }
+        return it->second;
+    };
+    for (std::size_t i = 0; i < pieces.size() && i < kMaxWallPieces; ++i) {
+        const WallPiece& piece = pieces[i];
+        if (!usablePoint(piece.from) || !usablePoint(piece.to) || piece.from.level != piece.to.level) {
+            continue;
+        }
+        const std::size_t a = vertexOf(piece.from), b = vertexOf(piece.to);
+        if (a == b || edge(a, b)) {
+            continue;
+        }
+        const float dx = vertices_[b].x - vertices_[a].x, dy = vertices_[b].y - vertices_[a].y;
+        edges_.push_back({a, b, piece.type, std::atan2(dy, dx)});
+        edges_.push_back({b, a, piece.type, std::atan2(-dy, -dx)});
+        vertices_[a].out.push_back(edges_.size() - 2);
+        vertices_[b].out.push_back(edges_.size() - 1);
+    }
+    for (auto& v : vertices_) {
+        std::sort(v.out.begin(), v.out.end(), [&](std::size_t l, std::size_t r) { return edges_[l].angle < edges_[r].angle; });
+    }
+}
+
+std::optional<std::size_t> WallOutline::vertex(float x, float y, std::int32_t level) const {
+    const auto it = vertexAt_.find(pointKey(x, y, level));
+    return it != vertexAt_.end() ? std::optional(it->second) : std::nullopt;
+}
+
+std::optional<std::size_t> WallOutline::edge(std::size_t from, std::size_t to) const {
+    for (const std::size_t e : vertices_[from].out) {
+        if (edges_[e].to == to) {
+            return e;
+        }
+    }
+    return std::nullopt;
+}
+
+// Of the edges leaving the far end of `e`, the first counterclockwise from the way back. The way
+// back itself is taken only at a dead end.
+std::size_t WallOutline::next(std::size_t e) const {
+    const float back = edges_[e ^ 1].angle;
+    std::size_t best = e ^ 1;
+    float bestTurn = kTwoPi;
+    for (const std::size_t o : vertices_[edges_[e].to].out) {
+        float turn = edges_[o].angle - back;
+        while (turn <= 0) {
+            turn += kTwoPi;
+        }
+        if (o != (e ^ 1) && turn < bestTurn) {
+            bestTurn = turn;
+            best = o;
+        }
+    }
+    return best;
+}
+
+// The game's nearest-segment rule: the tile's six edges (four sides and two diagonals) that hold a
+// piece, then the pieces at the tile corner nearest the point. The first strictly nearest wins, by
+// squared distance to the segment, and it is turned so that the point is on its right.
+std::optional<std::pair<std::size_t, std::size_t>> WallOutline::nearest(const RoomMap& rooms, float x, float y,
+                                                                        std::int32_t level) const {
+    constexpr std::array<std::array<int, 4>, 6> kTileEdges{
+        {{1, 0, 0, 0}, {0, 0, 0, 1}, {0, 1, 1, 1}, {1, 1, 1, 0}, {0, 1, 1, 0}, {1, 1, 0, 0}}};
+    const bool onLot = x >= 0 && y >= 0 && x <= static_cast<float>(rooms.width()) && y <= static_cast<float>(rooms.height());
+    for (; onLot && level >= rooms.firstLevel() && level < rooms.firstLevel() + rooms.levelCount(); --level) {
+        std::vector<std::pair<std::size_t, std::size_t>> candidates;
+        const float tx = std::floor(x), ty = std::floor(y);
+        for (const auto& [ax, ay, bx, by] : kTileEdges) {
+            const auto a = vertex(tx + static_cast<float>(ax), ty + static_cast<float>(ay), level);
+            const auto b = vertex(tx + static_cast<float>(bx), ty + static_cast<float>(by), level);
+            if (a && b && edge(*a, *b)) {
+                candidates.emplace_back(*a, *b);
+            }
+        }
+        if (const auto corner = vertex(std::floor(x + 0.5f), std::floor(y + 0.5f), level)) {
+            for (const std::size_t e : vertices_[*corner].out) {
+                candidates.emplace_back(*corner, edges_[e].to);
+            }
+        }
+        float best = std::numeric_limits<float>::max();
+        std::optional<std::pair<std::size_t, std::size_t>> found;
+        for (const auto& [a, b] : candidates) {
+            const Vertex& va = vertices_[a];
+            const Vertex& vb = vertices_[b];
+            const float dx = vb.x - va.x, dy = vb.y - va.y;
+            const float ux = va.x - x, uy = va.y - y, wx = vb.x - x, wy = vb.y - y;
+            float distance = ux * ux + uy * uy;
+            if (dx * ux + dy * uy <= 0) {
+                if (0 <= wx * dx + wy * dy) {
+                    const float across = dx * uy - dy * ux;
+                    distance = across / (dx * dx + dy * dy) * across;
+                } else {
+                    distance = wx * wx + wy * wy;
+                }
+            }
+            if (distance < best) {
+                best = distance;
+                found = wx * uy - wy * ux < 0 ? std::pair(b, a) : std::pair(a, b);
+            }
+        }
+        if (found) {
+            return found;
+        }
+    }
+    return std::nullopt;
+}
+
+bool WallOutline::mostlyGreenhouse(const RoomMap& rooms, std::int32_t room, const std::set<std::uint32_t>& greenhouse) const {
+    constexpr float kThird = 1.0f / 3.0f;
+    for (std::int32_t l = 0; l < rooms.levelCount(); ++l) {
+        const std::int32_t level = l + rooms.firstLevel();
+        for (std::int32_t tx = 0; tx < rooms.width(); ++tx) {
+            for (std::int32_t ty = 0; ty < rooms.height(); ++ty) {
+                // The tile's quarters in the room, as the game's quarter bits: 1 left, 2 bottom,
+                // 4 right, 8 top. The point moves a third of a tile toward them.
+                unsigned mask = 0;
+                for (int q = 0; q < 4; ++q) {
+                    if (rooms.quarterRoom(level, tx, ty, q) == room) {
+                        mask |= 1u << (3 - q);
+                    }
+                }
+                if (mask == 0) {
+                    continue;
+                }
+                float dx = (mask & 1) != 0 ? -kThird : 0.0f;
+                float dy = (mask & 2) != 0 ? kThird : 0.0f;
+                if ((mask & 4) != 0) {
+                    dx += kThird;
+                }
+                if ((mask & 8) != 0) {
+                    dy -= kThird;
+                }
+                const auto segment = nearest(rooms, static_cast<float>(tx) + 0.5f + dx, static_cast<float>(ty) + 0.5f + dy, level);
+                const auto start = segment ? edge(segment->first, segment->second) : std::nullopt;
+                if (!start) {
+                    return false;
+                }
+                std::size_t total = 0, matches = 0;
+                std::size_t e = *start;
+                // Every half-edge lies on one face, so the walk is back at its start within them all.
+                do {
+                    ++total;
+                    matches += greenhouse.contains(edges_[e].type) ? 1 : 0;
+                    e = next(e);
+                } while (e != *start && total <= edges_.size());
+                return matches > total / 2;
+            }
+        }
+    }
+    return false;
 }
 
 } // namespace ts2::sim

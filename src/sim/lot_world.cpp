@@ -248,6 +248,10 @@ LotWorldReport buildWorld(const content::Lot& lot, CodeSource& code, World& worl
         }
     }
     world.setRooms(std::move(rooms));
+    if (lot.worldBounds) {
+        const auto& b = *lot.worldBounds;
+        world.setTileBounds(World::TileBounds{b.minX, b.minY, b.maxX, b.maxY, b.minLevel, b.maxLevel});
+    }
     for (const auto& saved : lot.objects) {
         const ObjectType* type = saved.type ? code.objectType(saved.type->guid) : nullptr;
         if (!type) {
@@ -418,6 +422,18 @@ std::shared_ptr<const SavedNeighborhood> savedNeighborhood(const content::Neighb
         saved->wantSlots[id] = slots;
         saved->wants[id].assign(w.wants.begin(), w.wants.begin() + static_cast<std::ptrdiff_t>(std::min<std::size_t>(w.wants.size(), slots.wants)));
         saved->fears[id].assign(w.fears.begin(), w.fears.begin() + static_cast<std::ptrdiff_t>(std::min<std::size_t>(w.fears.size(), slots.fears)));
+        // History version 2 saves its clock. Older ones take the latest record's time.
+        auto& history = saved->wantHistories[id];
+        history.records = w.history;
+        history.time = w.historyValue;
+        if (w.historyVersion < 2) {
+            history.time = 0;
+            for (const auto& [guid, records] : w.history) {
+                for (const auto& r : records) {
+                    history.time = std::max(history.time, recordTime(r));
+                }
+            }
+        }
     }
     saved->relationships = hood.relationships;
     for (const std::int16_t id : hood.neighborIds) {

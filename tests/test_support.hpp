@@ -9,6 +9,7 @@
 #include <limits>
 #include <cmath>
 #include "sim/clock.hpp"
+#include "sim/want_refill.hpp"
 #include "sim/advertisement.hpp"
 #include "sim/advertisers.hpp"
 #include "sim/happiness.hpp"
@@ -100,6 +101,7 @@
 #include "formats/neighborhood_id.hpp"
 #include "sim/lot_world.hpp"
 #include "formats/swaf.hpp"
+#include "formats/want_trees.hpp"
 #include "formats/ttab.hpp"
 #include "formats/tga.hpp"
 #include "formats/image.hpp"
@@ -191,7 +193,7 @@ public:
                        std::vector<ts2::slot::Entry> routingSlots = {}, std::vector<ts2::slot::Entry> containerSlots = {},
                        std::vector<ts2::slot::Entry> targetSlots = {}) {
         const std::uint32_t guid = definition.guid();
-        objectTypes_[guid] = ts2::sim::ObjectType{group, std::move(definition), 0, containerSlots.size(), {}, std::move(routingSlots),
+        objectTypes_[guid] = ts2::sim::ObjectType{group, std::move(definition), 0, containerSlots.size(), std::move(routingSlots),
                                                   std::move(containerSlots), std::move(targetSlots)};
     }
     void addInteractionTable(std::uint32_t group, std::uint16_t instance, ts2::ttab::InteractionTable table) {

@@ -185,7 +185,7 @@ std::optional<FoundLocation> findLocation(const World& world, const SimObject& p
         FoundLocation found{x * 65536 + 32768, y * 65536 + 32768, std::nullopt};
         // Each facing tried goes through Snap's placement test there, as the game tests every try.
         const auto fits = [&](std::int16_t facing) {
-            return !placementCode(world, placed, SnapTarget{found.x, found.y, search.level, facing});
+            return !placementCode(world, placed, SnapTarget{found.x, found.y, search.level, facing}, true);
         };
         if (search.allowedFacings != 0) {
             const int firstTurn = static_cast<int>((static_cast<std::uint64_t>(rng()) * 8) >> 32);

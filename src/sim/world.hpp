@@ -23,6 +23,7 @@
 #include "sim/turn.hpp"
 #include "sim/walk_plan.hpp"
 #include "sim/walking.hpp"
+#include "sim/want_history.hpp"
 #include "formats/slot.hpp"
 
 #include <algorithm>
@@ -50,6 +51,8 @@ constexpr std::size_t kSemiAttributeCount = 64;
 constexpr std::size_t kObjectDataCount = 128;
 constexpr std::size_t kPersonDataCount = 256;
 constexpr std::size_t kLifeStagePersonData = 0x3A;
+constexpr std::size_t kGenderPersonData = 0x41;  // 1 female
+constexpr std::size_t kSwimmingPersonData = 0x40;  // Is Swimming?
 // A neighbor's copy of its person data has exactly this many values in the game.
 constexpr std::size_t kNeighborPersonDataCount = 231;
 constexpr std::size_t kMotiveCount = 16;
@@ -122,12 +125,13 @@ struct ThreadState {
 // and the level, one byte each.
 class LuaRuntime;
 
-// A joint of an object's model at rest: its place in the model (model units are tiles) and its turn
-// about the vertical axis in radians.
+// A joint of an object's model at rest: its place in the model (model units are tiles), its turn
+// about the vertical axis in radians and its height above the model's origin.
 struct ModelBone {
     float x = 0;
     float y = 0;
     float yaw = 0;
+    float z = 0;
 };
 
 struct Tile {
@@ -353,6 +357,9 @@ struct SimObject {
         float foot = 0.5f;
     };
     std::optional<WalkEnd> lastWalkEnd;
+    // The walk sets Assign Locomotion Animations pushed, newest last: each a walk's lines and a run's.
+    // With none a Sim walks with its own set. They aren't saved yet.
+    std::vector<std::array<WalkSetLines, 2>> walkSets;
     // My last walk once its route handed back to its script: its clips play out their fade under
     // what I do next (see walkWeight). It only shows, so it isn't saved.
     struct WalkTail {
@@ -436,6 +443,7 @@ struct SavedNeighborhood {
     std::map<std::int16_t, std::vector<swaf::Want>> wants;  // each neighbor's current wants
     std::map<std::int16_t, std::vector<swaf::Want>> fears;  // and fears
     std::map<std::int16_t, swaf::Slots> wantSlots;          // and their slots and hold limit
+    std::map<std::int16_t, WantHistory> wantHistories;      // and their want histories
     std::shared_ptr<const ngbh::Neighborhood> record;      // inventories, null when not saved
     std::map<std::int16_t, DataTables> dataTables;         // each neighbor's script data tables
     std::optional<std::int32_t> id;                         // this neighborhood's id
@@ -518,6 +526,14 @@ public:
     // Rooms of the lot this world was built from (empty for worlds made in code).
     void setRooms(RoomMap rooms) { rooms_ = std::move(rooms); }
     const RoomMap& rooms() const { return rooms_; }
+    // The lot's walls and fences as the game layers them for room field 6, and the GUIDs of the
+    // catalog's greenhouse walls. Null until a lot sets them.
+    void setWallOutline(std::shared_ptr<const WallOutline> outline, std::set<std::uint32_t> greenhouse) {
+        wallOutline_ = std::move(outline);
+        greenhouseFences_ = std::move(greenhouse);
+    }
+    const WallOutline* wallOutline() const { return wallOutline_.get(); }
+    const std::set<std::uint32_t>& greenhouseFences() const { return greenhouseFences_; }
     // Object data 0x1D holds the room the object stands in. Scripts compare it right after a move,
     // so every move sets it again. A spot outside the room map leaves it as it was.
     void updateRoom(SimObject& object) const;
@@ -532,6 +548,11 @@ public:
     using FloorPattern = std::function<std::optional<std::uint16_t>(int level, int x, int y, int quarter)>;
     void setFloorPattern(FloorPattern f) { floorPattern_ = std::move(f); }
     const FloorPattern& floorPattern() const { return floorPattern_; }
+    // Whether the lot's locked-tile grid marks tile (x, y) of `level` (from 0, as scripts give it),
+    // none off the grid. Set by the simulation from the lot. Unset for worlds not built from a lot.
+    using LockedTile = std::function<std::optional<bool>(int level, int x, int y)>;
+    void setLockedTile(LockedTile f) { lockedTile_ = std::move(f); }
+    const LockedTile& lockedTile() const { return lockedTile_; }
     // The platform region of a quarter, from the lot's region grid (c3DArray instance 0x14), with the
     // same levels and quarters as the floor pattern. The regions are the same on every lot: 0 the
     // house's foundation, 1 and 2 decks, 3 and 5 pools, 4 split-level interior foundations ("stages").
@@ -575,8 +596,10 @@ public:
         neighborPersonData_.clear();
         neighborWants_.clear();
         neighborFears_.clear();
+        wants_ = {};
         neighborDataTables_.clear();
         inventories_.clear();
+        unlinkedNeighbors_.clear();
     }
     // Ids of the neighborhood's neighbors, null until a neighborhood is set.
     const std::set<std::int16_t>* neighbors() const { return hood_ ? &hood_->neighborIds : nullptr; }
@@ -622,6 +645,14 @@ public:
     };
     const LotShape& lotShape() const { return lotShape_; }
     void setLotShape(LotShape shape) { lotShape_ = shape; }
+    // The lot's first and last tile on each of the game's axes, from its cWorldDB record (see
+    // content::WorldBounds). Unset for worlds not built from a lot.
+    struct TileBounds {
+        std::int32_t minX = 0, minY = 0, maxX = 0, maxY = 0;
+        std::int32_t minLevel = 0, maxLevel = 0;
+    };
+    const std::optional<TileBounds>& tileBounds() const { return tileBounds_; }
+    void setTileBounds(std::optional<TileBounds> bounds) { tileBounds_ = bounds; }
     // The lot's full room walls: drawn, of a style that spans floor to floor (not fences, attic, deck
     // or stage walls), in the order of the lot's saved wall coverings. Scripts number them from 0
     // (nWorld.GetNumWallSections, GetRoomOnSideOfWall). Unset for worlds not built from a lot.
@@ -657,6 +688,13 @@ public:
     // tie to the other, of any type. Each gets an entry in the record if it had none. It lasts for
     // this run only, as nothing is saved yet.
     void removeFamilyTie(std::int16_t a, std::int16_t b);
+    // Unlinks neighbor `id`'s character (Generic Sims Call 0x26): it loses its relationships both
+    // ways and its family (person data 0x3D), person data 0xA5 marks it unlinked and its type
+    // becomes family-tree-only. Deleting its Sims is the caller's. It lasts for this run only, as
+    // nothing is saved yet.
+    void unlinkNeighbor(std::int16_t id);
+    // Whether neighbor `id` was unlinked during this run, which makes it family-tree-only.
+    bool unlinkedNeighbor(std::int16_t id) const { return unlinkedNeighbors_.contains(id); }
     // Makes neighbor `a` neighbor `b`'s `type` (father, mother, spouse, sibling or child), as the game's
     // family ties do, and returns whether every step took. See World::setFamilyTie.
     bool setFamilyTie(std::int16_t a, std::int16_t b, famt::TieType type);
@@ -857,6 +895,8 @@ public:
                     saved = s->second;
                 }
             }
+            // A list has a place for each slot, and an empty place is a want with GUID 0.
+            saved.resize(std::max<std::size_t>(saved.size(), wantSlots(id).wants));
             it = neighborWants_.emplace(id, std::move(saved)).first;
         }
         return it->second;
@@ -872,10 +912,27 @@ public:
                     saved = s->second;
                 }
             }
+            // A list has a place for each slot, and an empty place is a want with GUID 0.
+            saved.resize(std::max<std::size_t>(saved.size(), wantSlots(id).fears));
             it = neighborFears_.emplace(id, std::move(saved)).first;
         }
         return it->second;
     }
+
+    // The want history the neighborhood saved for a neighbor, null when none was.
+    const WantHistory* savedWantHistory(std::int16_t id) const {
+        if (hood_) {
+            if (const auto s = hood_->wantHistories.find(id); s != hood_->wantHistories.end()) {
+                return &s->second;
+            }
+        }
+        return nullptr;
+    }
+
+    // The wants manager's clock, queue and the histories in use (see sim/want_refill.hpp).
+    WantsState& wantsState() { return wants_; }
+    void setWantTrees(std::shared_ptr<const std::vector<want_trees::Tree>> trees) { wantTrees_ = std::move(trees); }
+    const std::vector<want_trees::Tree>* wantTrees() const { return wantTrees_.get(); }
 
     // A neighbor's want and fear slots and hold limit (the game's defaults if none were saved).
     swaf::Slots wantSlots(std::int16_t id) const {
@@ -1054,6 +1111,11 @@ public:
     using OutfitProperty = std::function<std::optional<std::int16_t>(std::int16_t neighbor, std::uint16_t category, std::uint16_t property)>;
     void setOutfitProperty(OutfitProperty f) { outfitProperty_ = std::move(f); }
     const OutfitProperty& outfitProperty() const { return outfitProperty_; }
+    // Whether a neighbor's Sim is defined in a character file of its own (the neighborhood's
+    // Characters folder), the only kind the game unlinks. Without it, none is.
+    using HasCharacterFile = std::function<bool(std::int16_t neighbor)>;
+    void setHasCharacterFile(HasCharacterFile f) { hasCharacterFile_ = std::move(f); }
+    const HasCharacterFile& hasCharacterFile() const { return hasCharacterFile_; }
     // Whether an object's looks have a whole outfit in an outfit category (a flag: everyday 1,
     // see scene::OutfitProperties::hasOutfit), none when its looks aren't found. Without it,
     // scripts that ask stop as unsupported.
@@ -1139,6 +1201,7 @@ public:
 
     void setWantDefinitions(std::shared_ptr<const content::WantDefinitions> defs) { wantDefs_ = std::move(defs); }
     bool hasWantDefinitions() const { return wantDefs_ != nullptr; }
+    const content::WantDefinitions* wantDefinitions() const { return wantDefs_.get(); }
     const content::WantDefinition* wantDefinition(std::uint32_t guid) const {
         if (!wantDefs_) {
             return nullptr;
@@ -1226,9 +1289,12 @@ private:
     std::map<std::int16_t, std::unique_ptr<SimObject>> objects_;
     std::map<std::pair<std::int16_t, std::int16_t>, std::vector<std::int16_t>> relationships_;
     RoomMap rooms_;
+    std::shared_ptr<const WallOutline> wallOutline_;
+    std::set<std::uint32_t> greenhouseFences_;
     std::shared_ptr<const SavedNeighborhood> hood_;
     std::shared_ptr<SavedNeighborhood> ownHood_;  // hood_ once something was added to it
     SavedNeighborhood& ownNeighborhood();
+    std::set<std::int16_t> unlinkedNeighbors_;
     std::uint8_t lotType_ = 0;
     std::int16_t nextNeighborId_ = 1;  // where the search for a new neighbor's id starts
     weather::Weather weather_;
@@ -1236,6 +1302,7 @@ private:
     std::optional<std::int32_t> lotNumber_;
     WallTiles walls_;
     LotShape lotShape_;
+    std::optional<TileBounds> tileBounds_;
     std::optional<std::vector<WallSection>> wallSections_;
     WallTiles sightWalls_;
     RoomMap weatherRegions_;
@@ -1259,6 +1326,8 @@ private:
     std::map<std::pair<InventoryKind, std::int32_t>, Inventory> inventories_;
     std::uint32_t lastArchiveId_ = 0;
     std::shared_ptr<const content::WantDefinitions> wantDefs_;
+    std::shared_ptr<const std::vector<want_trees::Tree>> wantTrees_;
+    WantsState wants_;
     std::shared_ptr<LuaRuntime> scripts_;
     double clockMs_ = 0;
     std::uint64_t ticks_ = 0;
@@ -1287,12 +1356,14 @@ private:
     RayQuery rayQuery_;
     CameraPoint cameraPoint_;
     FloorPattern floorPattern_;
+    LockedTile lockedTile_;
     PlatformRegion platformRegion_;
     std::optional<NeighborRemap> neighborRemap_;
     std::uint32_t guidCount_ = 0;
     bool neighborRemapUnread_ = false;
     AnimationTurns animationTurns_;
     OutfitProperty outfitProperty_;
+    HasCharacterFile hasCharacterFile_;
     HasOutfit hasOutfit_;
     GeneticsCatalogSource geneticsCatalog_;
     SimRandom geneticsRandom_{0};

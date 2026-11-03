@@ -12,8 +12,7 @@ namespace {
 
 constexpr std::size_t kLeadingBytes = 64;
 constexpr std::size_t kMaxClasses = 8;
-constexpr std::uint32_t kObjectTag = 0xFA1C39F7, kAnimatableTag = 0x7D4F2BB8, kLocomotableTag = 0xFD4F2EC7,
-                        kPersonTag = 0xFA34F3EB;
+constexpr std::uint32_t kObjectTag = 0xFA1C39F7, kAnimatableTag = 0x7D4F2BB8, kLocomotableTag = 0xFD4F2EC7;
 constexpr std::uint32_t kRequestTag = 0x09D0CE69, kRequestSubTag = 0x6C9EAF29, kInstanceTag = 0xC9DE69B6,
                         kInstanceBaseTag = 0x3AFF30DB, kCurveTag = 0x8B969D64, kAttachedTag = 0x2A6F2E97;
 constexpr std::size_t kTransformFloats = 7;  // position, then rotation as a quaternion
@@ -287,6 +286,7 @@ SavedObject parse(std::span<const std::uint8_t> data) {
             break;
         }
     }
+    saved.outerTag = headers.front().tag;
     const std::uint32_t objectVersion = headers.back().version;
     if (objectVersion < 0xC || objectVersion > 0x11) {
         fail("unknown cObject version");

@@ -1,10 +1,9 @@
 #include "sim/lua_internals.hpp"
+#include "sim/turn.hpp"
 
 namespace ts2::sim::lua_detail {
 
 namespace {
-
-SimObject& personOrError(lua_State* L, std::int16_t id);
 
 // ObjectManager methods (called as GlobalObjManager:method(...), so arguments start at 2).
 
@@ -126,6 +125,25 @@ int objectManagerGetObjectGuidFromObjectId(lua_State* L) {
     return 1;
 }
 
+// getDirectionToObject(from, to): one of 8 directions from the first object to the second, as Get
+// Direction To gives it (see octant).
+int objectManagerGetDirectionToObject(lua_State* L) {
+    const std::int16_t fromId = argShort(L, 2), toId = argShort(L, 3);
+    ScriptCall& c = call(L);
+    const SimObject* from = c.world != nullptr ? c.world->find(fromId) : nullptr;
+    if (from == nullptr) {
+        return scriptCheckError(L, "Could not find object: %d", static_cast<int>(fromId));
+    }
+    const SimObject* to = c.world->find(toId);
+    if (to == nullptr) {
+        return scriptCheckError(L, "Could not find object: %d", static_cast<int>(toId));
+    }
+    const float dx = static_cast<float>(to->x) / 65536.0f - static_cast<float>(from->x) / 65536.0f;
+    const float dy = static_cast<float>(to->y) / 65536.0f - static_cast<float>(from->y) / 65536.0f;
+    lua_pushnumber(L, octant(dx, dy));
+    return 1;
+}
+
 int objectManagerGetObjectIdFromGuid(lua_State* L) { return firstOfType(L, false); }
 
 int objectManagerGetPersonIdFromGuid(lua_State* L) { return firstOfType(L, true); }
@@ -183,12 +201,16 @@ int objectManagerGetObjectIds(lua_State* L) {
     }
 }
 
-// Whether a neighbor's object type is 0x11, a Sim who exists only in family trees. Scripts listing
-// neighbors leave these out.
-bool isFamilyTreeOnly(const ScriptCall& c, const SavedNeighbor& neighbor) {
+// Whether a neighbor's object type is 0x11, a Sim who exists only in family trees, as an unlinked
+// one's becomes. Scripts listing neighbors leave these out.
+bool isFamilyTreeOnly(const ScriptCall& c, std::int16_t id) {
     constexpr std::uint16_t kFamilyTreeOnlyType = 0x11;
-    const ObjectType* type = c.code != nullptr ? c.code->objectType(neighbor.guid) : nullptr;
-    return type != nullptr && type->definition.field(objd::field::kType) == kFamilyTreeOnlyType;
+    const SavedNeighbor* neighbor = c.world->neighbor(id);
+    if (neighbor == nullptr) {
+        return false;
+    }
+    const ObjectType* type = c.code != nullptr ? c.code->objectType(neighbor->guid) : nullptr;
+    return c.world->unlinkedNeighbor(id) || (type != nullptr && type->definition.field(objd::field::kType) == kFamilyTreeOnlyType);
 }
 
 // getNeighborIds([species mask]): the neighborhood's neighbor ids as an array, in the order the
@@ -206,8 +228,7 @@ int objectManagerGetNeighborIds(lua_State* L) {
     int n = 0;
     if (const auto* ids = c.world ? c.world->neighbors() : nullptr) {
         for (const std::int16_t id : *ids) {
-            const SavedNeighbor* saved = c.world->neighbor(id);
-            if (saved != nullptr && isFamilyTreeOnly(c, *saved)) {
+            if (isFamilyTreeOnly(c, id)) {
                 continue;
             }
             const auto species = static_cast<std::uint32_t>(c.world->neighborPersonValue(id, kSpeciesPersonData)) & 31;

@@ -179,10 +179,17 @@ void Skewer::setLiveMode(bool live) {
     }
 }
 
+void Skewer::setHidden(bool hidden) {
+    if (hidden != hidden_ && screen_ != nullptr) {
+        hidden_ = hidden;
+        layout();
+    }
+}
+
 void Skewer::layout() {
     auto& s = *screen_;
     const int n = static_cast<int>(thumbnails_.size());
-    s.setVisible(skewer_, n > 0 && live_);
+    s.setVisible(skewer_, n > 0 && live_ && !hidden_);
     if (n == 0) {
         return;
     }

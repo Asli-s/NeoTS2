@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -38,6 +39,9 @@ struct BuildScripts {
     // Roof patterns by the id lots save. The base game's script holds pattern 0, the default manor
     // roof, which has no catalog entry.
     std::map<std::uint32_t, RoofPatternTextures> roofPatterns;
+    // The wall layer types of fence arches (fencearches.txt), which the game keeps out of its layer
+    // of walls and fences.
+    std::set<std::uint32_t> fenceArches;
 
     // Whether a wall segment of this wall layer type is a full room wall: a drawn wall style spanning
     // floor to floor. Fences (types that are GUIDs) and unknown styles are not.
@@ -50,9 +54,14 @@ struct BuildScripts {
     void addPatterns(std::string_view text, bool walls);
     void addWallStyles(std::string_view text);
     void addRoofPatterns(std::string_view text);
+    void addFenceArches(std::string_view text);
 };
 
 // The scripts of every product, in load order.
 BuildScripts loadBuildScripts(const std::vector<Product>& products);
+
+// The GUIDs of the build catalog's greenhouse walls: the fences (XFNC resources in each product's
+// Catalog/Patterns packages) whose isgreenhouse is set. A fence that can't be read is left out.
+std::set<std::uint32_t> loadGreenhouseFences(const std::vector<Product>& products);
 
 } // namespace ts2::content

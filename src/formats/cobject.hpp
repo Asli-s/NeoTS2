@@ -12,6 +12,10 @@
 // joints and blends of cObject, then the animations cAnimatable was playing when the lot was saved.
 namespace ts2::cobject {
 
+// The class tag a Sim's record starts with. The game reads a record only through the reader of the
+// object's own outermost class, and each class's reader stops at a record that starts with another.
+constexpr std::uint32_t kPersonTag = 0xFA34F3EB;
+
 // One animation an object was playing.
 struct SavedAnimation {
     enum class Kind : std::uint32_t { Clip = 1, Attached = 2 };
@@ -43,6 +47,7 @@ struct SavedJoint {
 
 struct SavedObject {
     std::vector<std::string> classes;   // outermost first
+    std::uint32_t outerTag = 0;         // the outermost class's tag
     std::vector<SavedJoint> joints;     // left out of records older than version 0xF, whose layout isn't known
     std::vector<SavedAnimation> animations;
 };

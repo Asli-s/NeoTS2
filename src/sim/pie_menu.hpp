@@ -51,11 +51,13 @@ PieMenu pieMenu(Vm& vm, CodeSource& code, SimObject& sim, SimObject& object, con
                                 bool parentalControl, bool autonomy, bool debugOnly = false);
 
 // The interaction table an object's menu comes from: the one its definition names (field 7), from
-// its own group, else its semi-global group, returned with the group it was found in. A multi-tile part
-// whose definition names 0xFFFF uses its master's.
+// its own group, else its semi-global group, returned with the group it was found in and its instance
+// (its texts are the TTAs of the same instance). A multi-tile part whose definition names 0xFFFF uses
+// its master's.
 struct ObjectInteractions {
     std::shared_ptr<const ttab::InteractionTable> table;
     std::uint32_t group = 0;
+    std::uint16_t instance = 0;
 };
 ObjectInteractions interactionsOf(CodeSource& code, const SimObject& object);
 

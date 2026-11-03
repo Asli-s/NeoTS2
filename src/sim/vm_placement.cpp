@@ -29,17 +29,7 @@ bool Execution::findLocationFor(const bhav::Instruction& in, Frame& f) {
         throw Stop{Outcome::Error, "no object to place", std::to_string(placedId)};
     }
     if (o[0] == 1) {
-        takeOutOfSlot(*placed);
-        // As the game takes an object out of the world, it clears object data 0x08 bits 0x20 and 0x100
-        // (what they mean is not known yet), sets its use count (object data 0x3E) to 0 and its room
-        // (object data 0x1D) to -1. At Work waits for that room before it marks a Sim as at work.
-        placed->data[8] &= static_cast<std::int16_t>(~0x120);
-        placed->data[0x3E] = 0;
-        placed->data[0x1D] = -1;
-        placed->x = kOffLot;
-        placed->y = kOffLot;
-        placed->tile.reset();
-        world().markFootprintChanged(placed->id);
+        takeOutOfWorld(*placed);
         return true;
     }
     const bool bySlot = o[0] >= 5 && o[0] <= 8;
@@ -343,19 +333,23 @@ bool Execution::snapInto(const bhav::Instruction& in, Frame& f) {
     return true;
 }
 
+// As the game takes an object out of the world, it also clears object data 0x08 bits 0x20 and 0x100
+// (what they mean is not known yet), sets its use count (object data 0x3E) to 0 and its room
+// (object data 0x1D) to -1. At Work waits for that room before it marks a Sim as at work.
+void Execution::takeOutOfWorld(SimObject& object) {
+    takeOutOfSlot(object);
+    object.data[8] &= static_cast<std::int16_t>(~0x120);
+    object.data[0x3E] = 0;
+    object.data[0x1D] = -1;
+    object.x = kOffLot;
+    object.y = kOffLot;
+    object.tile.reset();
+    world().markFootprintChanged(object.id);
+}
+
 // Takes an object out of the slot it is in, if any.
 void Execution::takeOutOfSlot(SimObject& object) {
-    constexpr std::size_t kContainerField = 2, kSlotField = 3;
-    if (object.data[kContainerField] > 0) {
-        if (SimObject* old = world().find(object.data[kContainerField])) {
-            const auto oldSlot = static_cast<std::size_t>(object.data[kSlotField]);
-            if (oldSlot < old->slots.size() && old->slots[oldSlot] == object.id) {
-                old->slots[oldSlot] = 0;
-            }
-        }
-    }
-    object.data[kContainerField] = 0;
-    object.data[kSlotField] = -1;
+    sim::takeOutOfSlot(world(), object);
 }
 
 // Puts an object into a container's slot (checked by the caller): out of its old slot and the

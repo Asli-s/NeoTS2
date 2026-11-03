@@ -150,12 +150,13 @@ int objectManagerVerifyObjectId(lua_State* L);
 int objectManagerVerifyNeighborId(lua_State* L);
 int objectManagerIsValidObjectGuid(lua_State* L);
 int objectManagerGetObjectGuidFromObjectId(lua_State* L);
+int objectManagerGetDirectionToObject(lua_State* L);
 int objectManagerGetObjectIdFromGuid(lua_State* L);
 int objectManagerGetPersonIdFromGuid(lua_State* L);
 int objectManagerGetPersonIds(lua_State* L);
 int objectManagerGetObjectIds(lua_State* L);
 int objectManagerGetNeighborIds(lua_State* L);
-bool isFamilyTreeOnly(const ScriptCall& c, const SavedNeighbor& neighbor);
+bool isFamilyTreeOnly(const ScriptCall& c, std::int16_t id);
 
 template <typename... Args>
 [[noreturn]] int scriptCheckError(lua_State* L, const char* format, Args... args) {
@@ -206,6 +207,8 @@ int getObjectSemiAttribute(lua_State* L);
 int setObjectSemiAttribute(lua_State* L);
 int getObjectIdInSlot(lua_State* L);
 int getObjectDefinitionField(lua_State* L);
+int newObjectDefinition(lua_State* L);
+int objectDefinitionField(lua_State* L);
 int getPersonMotive(lua_State* L);
 int setPersonMotive(lua_State* L);
 int getNeighborPersonData(lua_State* L);
@@ -258,8 +261,20 @@ int cachedNeighborOutfitProperty(lua_State* L);
 
 // Floors, tiles, locations, weather and the camera (lua_world.cpp).
 int hasSolidFloor(lua_State* L);
+int hasSolidGround(lua_State* L);
 int hasStage(lua_State* L);
 int getNumWallSections(lua_State* L);
+int getMinX(lua_State* L);
+int getMaxX(lua_State* L);
+int getMinY(lua_State* L);
+int getMaxY(lua_State* L);
+int getLotSizeX(lua_State* L);
+int getLotSizeY(lua_State* L);
+int isLocked(lua_State* L);
+int getMinLevel(lua_State* L);
+int getMaxLevel(lua_State* L);
+int getNumLevels(lua_State* L);
+int moveObjectToLocation(lua_State* L);
 int getRoomOnSideOfWall(lua_State* L);
 int isBeachLocation(lua_State* L);
 int getObjectsOnTile(lua_State* L);

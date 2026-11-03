@@ -8,6 +8,8 @@ std::int16_t Execution::read(std::uint8_t owner, std::uint16_t data, Frame& f) {
     case owner::kStackObjectAttribute:     return slotAt(stackData().attributes, data, "attribute");
     case owner::kStackObjectAttributeByParam:
         return slotAt(stackData().attributes, slotAt(f.params, data, "param"), "attribute");
+    case owner::kStackObjectSemiAttributeByParam:
+        return slotAt(stackData().semiAttributes, slotAt(f.params, data, "param"), "semi-attribute");
     case owner::kMySemiAttribute:          return slotAt(me().semiAttributes, data, "semi-attribute");
     case owner::kStackObjectSemiAttribute: return slotAt(stackData().semiAttributes, data, "semi-attribute");
     case owner::kMyData:                   return slotAt(me().data, data, "object data");
@@ -62,7 +64,7 @@ std::int16_t Execution::read(std::uint8_t owner, std::uint16_t data, Frame& f) {
 }
 
 // Room fields: 0 ambient light, 1 outside, 2 level, 3 area (counted in quarter tiles), 4 pool,
-// 5 windows. Fields 1 and 7 are the room's region in room layers 0 and 1 (0 = outdoors).
+// 5 windows, 6 greenhouse. Fields 1 and 7 are the room's region in room layers 0 and 1 (0 = outdoors).
 std::int16_t Execution::roomField(std::int16_t roomId, std::uint16_t field) {
     // Room -1 (an object in no room) has no region in any layer, so it is never outside.
     if (roomId == -1 && (field == kRoomOutside || field == kRoomLayer1)) {
@@ -97,6 +99,14 @@ std::int16_t Execution::roomField(std::int16_t roomId, std::uint16_t field) {
             }
         }
         return 0;
+    }
+    case kRoomGreenhouse: {
+        // 1 when greenhouse walls make most of the outline round the room (see WallOutline).
+        const WallOutline* outline = world().wallOutline();
+        if (outline == nullptr) {
+            throw Stop{Outcome::Unsupported, "room field 6 needs the lot's walls", std::to_string(roomId)};
+        }
+        return outline->mostlyGreenhouse(world().rooms(), roomId, world().greenhouseFences()) ? 1 : 0;
     }
     default:
         throw Stop{Outcome::Unsupported, "room field not implemented", std::to_string(field)};
@@ -260,6 +270,9 @@ void Execution::write(std::uint8_t owner, std::uint16_t data, Frame& f, std::int
     case owner::kStackObjectAttribute:     slotAt(stackData().attributes, data, "attribute") = value; return;
     case owner::kStackObjectAttributeByParam:
         slotAt(stackData().attributes, slotAt(f.params, data, "param"), "attribute") = value;
+        return;
+    case owner::kStackObjectSemiAttributeByParam:
+        slotAt(stackData().semiAttributes, slotAt(f.params, data, "param"), "semi-attribute") = value;
         return;
     case owner::kMySemiAttribute:          slotAt(me().semiAttributes, data, "semi-attribute") = value; return;
     case owner::kStackObjectSemiAttribute: slotAt(stackData().semiAttributes, data, "semi-attribute") = value; return;

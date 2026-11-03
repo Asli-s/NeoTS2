@@ -388,6 +388,22 @@ void World::removeFamilyTie(std::int16_t a, std::int16_t b) {
     removeFirst(ties[b], a);
 }
 
+void World::unlinkNeighbor(std::int16_t id) {
+    constexpr std::size_t kFamilyPersonData = 0x3D, kUnlinkedPersonData = 0xA5;
+    std::vector<std::int16_t>* data = neighborPersonData(id);
+    if (data == nullptr) {
+        return;
+    }
+    const auto touches = [id](const auto& r) { return r.first.first == id || r.first.second == id; };
+    std::erase_if(neighborRelationships_, touches);
+    if (std::ranges::any_of(hood_->relationships, touches)) {
+        std::erase_if(ownNeighborhood().relationships, touches);
+    }
+    (*data)[kUnlinkedPersonData] = 1;
+    (*data)[kFamilyPersonData] = 0;
+    unlinkedNeighbors_.insert(id);
+}
+
 // A neighbor's ties are kept by type, in the order they were added within a type. A father, mother
 // or spouse tie replaces the one of its type. A child or sibling tie is added unless it is already
 // there. False when nothing was added.

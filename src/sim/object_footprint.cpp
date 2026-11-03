@@ -4,9 +4,13 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <string_view>
+#include <utility>
 
 namespace ts2::sim {
 
@@ -50,7 +54,51 @@ const scenegraph::DataValue* graphicMasks(const scenegraph::DataValue& footprint
     return first;
 }
 
+// A mask's name "(x,y)" as numbers, none for any other name.
+std::optional<std::pair<int, int>> maskTileName(std::string_view name) {
+    if (name.size() < 5 || name.front() != '(' || name.back() != ')') {
+        return std::nullopt;
+    }
+    const auto comma = name.find(',');
+    if (comma == std::string_view::npos) {
+        return std::nullopt;
+    }
+    int x = 0, y = 0;
+    const auto number = [](std::string_view text, int& out) {
+        const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), out);
+        return error == std::errc{} && end == text.data() + text.size();
+    };
+    if (!number(name.substr(1, comma - 1), x) || !number(name.substr(comma + 1, name.size() - comma - 2), y)) {
+        return std::nullopt;
+    }
+    return std::pair{x, y};
+}
+
 } // namespace
+
+std::vector<std::pair<int, int>> footprintMaskTiles(const scenegraph::DataValue& footprint, int graphic) {
+    // A door's masks name four tiles at most. Far more comes only from broken files.
+    constexpr std::size_t kMostTiles = 256;
+    std::vector<std::pair<int, int>> tiles;
+    const auto* masks = graphicMasks(footprint, graphic);
+    if (masks == nullptr) {
+        return tiles;
+    }
+    for (const auto& mask : masks->items) {
+        const auto tile = mask.bytes.size() == kMaskBytes ? maskTileName(mask.name) : std::nullopt;
+        if (!tile || tile->first < -kMaxTileOffset || tile->first > kMaxTileOffset || tile->second < -kMaxTileOffset ||
+            tile->second > kMaxTileOffset) {
+            continue;
+        }
+        if (tiles.size() == kMostTiles) {
+            diag::warnOnce("footprints: a model names more than 256 footprint tiles, the rest are left out");
+            break;
+        }
+        // Tiles are named in model coordinates, whose y runs against route y.
+        tiles.emplace_back(tile->first, -tile->second);
+    }
+    return tiles;
+}
 
 std::vector<RouteRect> footprintTile(const scenegraph::DataValue& footprint, int graphic, int tileX, int tileY) {
     std::vector<RouteRect> rects;
@@ -91,9 +139,9 @@ std::vector<RouteRect> footprintTile(const scenegraph::DataValue& footprint, int
     return rects;
 }
 
-RouteRect doorwayRect() {
-    constexpr float kHalf = 0.2f;  // a 0.4 square on the wall, half a tile from the door's centre
-    return {-kHalf, 0.5f - kHalf, kHalf, 0.5f + kHalf};
+RouteRect doorwaySquare(float x, float y) {
+    constexpr float kHalf = 0.2f;  // a 0.4 tile square
+    return {x - kHalf, y - kHalf, x + kHalf, y + kHalf};
 }
 
 std::vector<RouteRect> footprintRects(const FootprintShape& shape) {

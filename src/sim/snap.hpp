@@ -4,6 +4,7 @@
 #include "sim/world.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <vector>
 
@@ -51,6 +52,15 @@ void snapTo(World& world, SimObject& object, const SnapTarget& target);
 // level, as the game keeps a passenger at its car's place while the car drives.
 void moveContents(World& world, const SimObject& container, int depth = 0);
 
+// Takes an object out of the slot it is in, if any: the container's slot is emptied when it holds
+// the object, and the object's data 2 and 3 become 0 and -1. Its place stays.
+void takeOutOfSlot(World& world, SimObject& object);
+
+// Removes what the slots of each removed object hold, and what theirs hold, as the game's delete
+// does. A Sim in the slot of an NPC template or a family-tree-only Sim (OBJD types 0x10 and 0x11)
+// is taken out and given to `resetSim` instead.
+void removeSlotContents(World& world, const std::function<void(SimObject&)>& resetSim);
+
 // Where one part of a multi-tile object goes.
 struct PartSpot {
     std::int16_t id = 0;
@@ -71,8 +81,10 @@ void moveParts(World& world, const SimObject& moved);
 
 // The game's placement code when Snap's placement test refuses `object` at `target`, none when it
 // passes: every part of a multi-tile object is tested at its own spot, in turn. 2: the spot is off
-// the lot. 0x0C: another object or a Sim is in the way (Snap tests Sims by other rules, which aren't
-// run yet, so a Sim is never in the way of another Sim here).
-[[nodiscard]] std::optional<std::int16_t> placementCode(const World& world, const SimObject& object, const SnapTarget& target);
+// the lot. 0x0C: another object or a Sim is in the way. A placed Sim is tested only with `testSim`,
+// as a walking Sim's place is (see LotSimulation::placeTest), the way Find Location For's search and
+// the Sim reset test it. Snap tests Sims by other rules, which aren't run yet.
+[[nodiscard]] std::optional<std::int16_t> placementCode(const World& world, const SimObject& object, const SnapTarget& target,
+                                                        bool testSim = false);
 
 } // namespace ts2::sim

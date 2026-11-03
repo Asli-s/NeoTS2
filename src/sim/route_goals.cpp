@@ -277,7 +277,7 @@ std::optional<ModelBone> modelJoint(const World& world, const SimObject& object,
     alongY += tiles(lead->y) - tiles(object.y);
     alongX += tiles(lead->x) - tiles(object.x);
     const auto [x, y] = turned(alongY, alongX, object.data[1] & 7, -1);
-    return ModelBone{x, y, joint->yaw};
+    return ModelBone{x, y, joint->yaw, joint->z};
 }
 
 std::vector<std::optional<ModelBone>> slotJoints(const World& world, CodeSource& code, const SimObject& owner, const slot::Entry& entry,
@@ -294,28 +294,51 @@ std::vector<std::optional<ModelBone>> slotJoints(const World& world, CodeSource&
     return joints;
 }
 
-SimObject slotGoalBase(const World& world, CodeSource& code, const SimObject& owner) {
+namespace {
+
+// `place` moved from the place of object `containerId` to the spot its slot `slot` holds things at,
+// and on through the containers that one is in.
+HeldPlace climb(const World& world, CodeSource& code, HeldPlace place, std::int16_t containerId, std::int16_t slot) {
     constexpr std::size_t kContainerSlotField = 3;
     constexpr int kMostContainers = 8;  // broken data could make a loop of containers
-    SimObject base = owner;
-    const SimObject* held = &owner;
-    for (int depth = 0; depth < kMostContainers && held->data[kContainerField] != 0; ++depth) {
-        const SimObject* container = world.find(held->data[kContainerField]);
+    for (int depth = 0; depth < kMostContainers && containerId != 0; ++depth) {
+        const SimObject* container = world.find(containerId);
         const ObjectType* type = container != nullptr ? code.objectType(container->definition.guid()) : nullptr;
-        const auto slot = static_cast<std::size_t>(held->data[kContainerSlotField]);
-        if (type == nullptr || held->data[kContainerSlotField] < 0 || slot >= type->containerSlotEntries.size()) {
+        if (type == nullptr || slot < 0 || static_cast<std::size_t>(slot) >= type->containerSlotEntries.size()) {
             break;
         }
-        const slot::Entry& entry = type->containerSlotEntries[slot];
+        const slot::Entry& entry = type->containerSlotEntries[static_cast<std::size_t>(slot)];
         const auto joints = slotJoints(world, code, *container, entry, type->group);
         const auto spot = routingSlotTarget(*container, entry, joints.empty() ? std::nullopt : joints.front());
-        if (!spot) {
+        const float rise = spot && isBoneSlot(entry) ? joints.front()->z : entry.z;
+        if (!spot || !std::isfinite(rise)) {
             break;
         }
-        base.x = wrappedSum(base.x, spot->x, container->x);
-        base.y = wrappedSum(base.y, spot->y, container->y);
-        held = container;
+        place.x = wrappedSum(place.x, spot->x, container->x);
+        place.y = wrappedSum(place.y, spot->y, container->y);
+        place.height += rise;
+        containerId = container->data[kContainerField];
+        slot = container->data[kContainerSlotField];
     }
+    return place;
+}
+
+} // namespace
+
+HeldPlace heldPlace(const World& world, CodeSource& code, const SimObject& object) {
+    constexpr std::size_t kContainerSlotField = 3;
+    return climb(world, code, {object.x, object.y, 0}, object.data[kContainerField], object.data[kContainerSlotField]);
+}
+
+HeldPlace slotPlace(const World& world, CodeSource& code, const SimObject& container, std::int16_t slot) {
+    return climb(world, code, {container.x, container.y, 0}, container.id, slot);
+}
+
+SimObject slotGoalBase(const World& world, CodeSource& code, const SimObject& owner) {
+    SimObject base = owner;
+    const HeldPlace place = heldPlace(world, code, owner);
+    base.x = place.x;
+    base.y = place.y;
     return base;
 }
 

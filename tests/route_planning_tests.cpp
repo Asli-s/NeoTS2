@@ -5,6 +5,7 @@
 #include "sim/animation.hpp"
 #include "sim/ground_click.hpp"
 #include "sim/idle_spot.hpp"
+#include "sim/object_footprint.hpp"
 #include "sim/route_portals.hpp"
 #include "sim/walking.hpp"
 #include "sim/path_passes.hpp"
@@ -179,6 +180,22 @@ void floorRouteItemsFollowTheFloors() {
     holed.elements[((2 + 1) * 3 + 2) * 4 + 3] = 0;
     CHECK(!has(floorRouteItems(floors, &heights, &holed, patterns, 0, 0, 3, 2), {2, 1, 3, 2}, 7, kBlockedCost));
 
+    // A pond: the water stands above the terrain at one corner, so the four tiles round it block.
+    ts2::terrain::Array2D water;
+    water.width = 4;  // corners, along the grids' first axis
+    water.height = 3;
+    water.elementSize = 4;
+    water.elements.assign(4 * 3 * 4, 0);
+    const float surfaceHeight = 0.5f, below = -0.5f;
+    for (std::size_t i = 0; i < 12; ++i) std::memcpy(&water.elements[i * 4], &below, 4);
+    std::memcpy(&water.elements[(1 * 4 + 1) * 4], &surfaceHeight, 4);
+    const auto pond = floorRouteItems(floors, &heights, &surface, patterns, 0, 0, 3, 2, &water);
+    CHECK(has(pond, {1, 0, 2, 1}, 15, kBlockedCost) && !has(pond, {1, 0, 2, 1}, 0, 1.3f));
+    CHECK(has(pond, {0.875f, -0.125f, 2.125f, 1.125f}, 14, 1));
+    CHECK(has(pond, {0, 0, 1, 1}, 15, kBlockedCost));
+    CHECK(has(pond, {2, 0, 3, 1}, 0, 1.3f));
+    CHECK(!has(floorRouteItems(floors, &heights, &surface, patterns, 1, 0, 3, 2, &water), {1, 0, 2, 1}, 15, kBlockedCost));
+
     // On a lot whose grid starts a level below the ground, grid level 1 is the ground storey.
     const auto pool = floorRouteItems(floors, &heights, &surface, patterns, 0, -1, 3, 2);
     CHECK(has(pool, {2, 1, 3, 2}, 0, 1));
@@ -215,10 +232,51 @@ void objectRouteItemsFollowTheGameRules() {
     door.fields[ts2::objd::field::kType] = 8;
     door.fields[ts2::objd::field::kGuid1] = 1;
     code.addObjectType(kObjectGroup, door);
-    // A door (no model here): only the doorway square through its wall, half a tile in front of it.
-    const auto doorItems = objectRouteItems(table, table, *code.objectType(door.guid()), code, nullptr);
+    // A door (no model here) with no way through it adds nothing. A way gets a doorway square halfway
+    // between its ends.
+    const ObjectType& doorType = *code.objectType(door.guid());
+    CHECK(objectRouteItems(table, table, doorType, code, nullptr).empty());
+    const RouteDoor straight[] = {{3.5f, 4.5f, 3.5f, 5.5f}};
+    const auto doorItems = objectRouteItems(table, table, doorType, code, nullptr, straight);
     CHECK(doorItems.size() == 1 && doorItems[0].kind == RouteItemKind::Solid && doorItems[0].cost == 1);
     CHECK(std::abs(doorItems[0].rect.y0 - 4.8f) < 1e-4f && std::abs(doorItems[0].rect.y1 - 5.2f) < 1e-4f);
+    CHECK(doorItems.size() == 1 && doorItems[0].door == straight[0]);
+    // A diagonal way (the Pleasants' diagonal bedroom door) gets two more, a quarter tile either side
+    // along it. Another part of the door adds nothing.
+    const RouteDoor diagonal[] = {{15.146f, 17.854f, 15.854f, 17.146f}};
+    const auto diagonalItems = objectRouteItems(table, table, doorType, code, nullptr, diagonal);
+    const auto hasSquareAt = [&](float x, float y) {
+        return std::any_of(diagonalItems.begin(), diagonalItems.end(), [&](const RouteItem& i) {
+            return std::abs((i.rect.x0 + i.rect.x1) / 2 - x) < 1e-3f && std::abs((i.rect.y0 + i.rect.y1) / 2 - y) < 1e-3f &&
+                   std::abs(i.rect.x1 - i.rect.x0 - 0.4f) < 1e-4f;
+        });
+    };
+    CHECK(diagonalItems.size() == 3 && hasSquareAt(15.5f, 17.5f) && hasSquareAt(15.6768f, 17.3232f) && hasSquareAt(15.3232f, 17.6768f));
+    SimObject part = table;
+    part.id = 8;
+    CHECK(objectRouteItems(part, table, doorType, code, nullptr, diagonal).empty());
+}
+
+// A model's footprint masks name the tiles they cover as "(x,y)" in model coordinates, y against
+// route y. Other names and masks of the wrong size are left out.
+void footprintMaskTilesAreNamed() {
+    using ts2::scenegraph::DataValue;
+    DataValue graphic;
+    graphic.type = DataValue::Type::List;
+    graphic.name = "0";
+    for (const char* name : {"(0,0)", "(-1,-1)", "(1,x)", "minx", "(0,-1)"}) {
+        DataValue mask;
+        mask.type = DataValue::Type::Bytes;
+        mask.name = name;
+        mask.bytes.assign(32, 0xFF);
+        graphic.items.push_back(mask);
+    }
+    graphic.items.back().bytes.resize(4);
+    DataValue footprint;
+    footprint.type = DataValue::Type::List;
+    footprint.items.push_back(graphic);
+    const std::vector<std::pair<int, int>> tiles{{0, 0}, {-1, 1}};
+    CHECK(ts2::sim::footprintMaskTiles(footprint, 0) == tiles);
 }
 
 // Leaves by place, each with its items' values, for comparing two grids whatever their cell order.
@@ -485,6 +543,43 @@ void routeSearchCrossesLevelsOverStairs() {
 }
 
 // A stair slot pairs with the slot whose name has the opposite last suffix.
+// A lot with a level below the ground routes it too: a pool's tiles are floor there, as the game's
+// grid for that level holds them.
+void poolLevelsAreRouted() {
+    using namespace ts2::sim;
+    ts2::content::Lot lot;
+    lot.roomGraph.emplace();
+    lot.roomGraph->firstLevel = -1;
+    lot.roomGraph->levels = 2;
+    ts2::array3d::Array3D floors;
+    floors.width = floors.height = 1;
+    floors.levels = 2;
+    floors.elementSize = 8;
+    floors.elements = {1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0};  // a pool floor below, open ground above
+    lot.grids.emplace(ts2::content::kFloorGridInstance, floors);
+    const RouteWorld world(lot, [](std::uint32_t) { return false; }, [](std::uint32_t) { return std::nullopt; });
+    CHECK(world.lowest() == -1 && world.levels() == 2);
+    const RouteGrid* pool = world.level(-1);
+    const RouteGrid* ground = world.level(0);
+    CHECK(pool != nullptr && ground != nullptr && world.level(1) == nullptr && world.level(-2) == nullptr);
+    const auto floorTile = [](const RouteGrid* g, float cost) {
+        return g != nullptr && std::any_of(g->items().begin(), g->items().end(), [&](const RouteItem& i) {
+            return i.kind == RouteItemKind::Floor && i.type == 0 && i.cost == cost && i.rect.x0 == 0 && i.rect.y0 == 0 && i.rect.x1 == 1 &&
+                   i.rect.y1 == 1;
+        });
+    };
+    CHECK(floorTile(pool, 1));
+    CHECK(floorTile(ground, 1.3f));
+
+    // Without a level below, routing starts at the ground.
+    lot.roomGraph->firstLevel = 0;
+    lot.roomGraph->levels = 1;
+    lot.grids.at(ts2::content::kFloorGridInstance).levels = 1;
+    lot.grids.at(ts2::content::kFloorGridInstance).elements.resize(8);
+    const RouteWorld flat(lot, [](std::uint32_t) { return false; }, [](std::uint32_t) { return std::nullopt; });
+    CHECK(flat.lowest() == 0 && flat.levels() == 1 && flat.level(-1) == nullptr && flat.level(0) != nullptr);
+}
+
 void stairSlotsPairByName() {
     using ts2::sim::partnerSlotName;
     CHECK(partnerSlotName("route_modularstair_0_top") == "route_modularstair_0_bottom");
@@ -1657,6 +1752,7 @@ std::vector<Test> routePlanningTests() {
         {"post route items use the post footprint", postRouteItemsUseThePostFootprint},
         {"object footprints follow the model", objectFootprintsFollowTheModel},
         {"object route items follow the game rules", objectRouteItemsFollowTheGameRules},
+        {"footprint mask tiles are named", footprintMaskTilesAreNamed},
         {"route grid removal merges cells", routeGridRemovalMergesCells},
         {"route search walks around a wall", routeSearchWalksAroundAWall},
         {"wall joints follow the angle gaps", wallJointsFollowTheAngleGaps},
@@ -1665,6 +1761,7 @@ std::vector<Test> routePlanningTests() {
         {"path passes smooth a path", pathPassesSmoothAPath},
         {"route search escapes and refuses", routeSearchEscapesAndRefuses},
         {"route search crosses levels over stairs", routeSearchCrossesLevelsOverStairs},
+        {"pool levels are routed", poolLevelsAreRouted},
         {"stair slots pair by name", stairSlotsPairByName},
         {"stair routes are walked in stretches", stairRoutesAreWalkedInStretches},
         {"route search goes through doors", routeSearchGoesThroughDoors},

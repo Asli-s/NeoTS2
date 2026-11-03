@@ -89,6 +89,10 @@ public:
     const std::vector<ts2::swaf::Want>& wants(std::int16_t sim);
     const std::vector<ts2::swaf::Want>& fears(std::int16_t sim);
     ts2::swaf::Slots wantSlots(std::int16_t sim);
+    // Whether a Sim waits for new wants and fears, and how many times each of its places was
+    // satisfied on this lot (fears from 1000).
+    bool wantsRefilling(std::int16_t sim);
+    const std::map<std::size_t, std::uint32_t>& satisfiedWantPlaces(std::int16_t sim);
     const ts2::content::TuningCurve* influenceLevels() const { return sim_->world().influenceLevels(); }
     // Puts a hold on a Sim's want or fear (by its place in the list), or takes it off: the game's
     // right click. A held one keeps its place until fulfilled (want flags bit 0x01). Past the Sim's

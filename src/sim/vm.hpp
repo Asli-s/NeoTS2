@@ -58,6 +58,8 @@ constexpr std::uint8_t kStackObjectTemp = 0x0D;
 constexpr std::uint8_t kStackObjectDefinition = 0x15;
 // The stack object's attribute whose index is in a param of the frame (data = the param).
 constexpr std::uint8_t kStackObjectAttributeByParam = 0x16;
+// The same for the stack object's semi-attributes.
+constexpr std::uint8_t kStackObjectSemiAttributeByParam = 0x32;
 constexpr std::uint8_t kLocal = 0x19;
 constexpr std::uint8_t kMyPersonDataByTemp = 0x1E;
 // Table from data >> 3, index from temp [data & 7].
@@ -180,6 +182,13 @@ public:
     // Runs tree `tree` of `codeGroup` for `me` on a thread of its own until it ends, leaving `me`'s
     // own thread alone: how the game runs an object's Load and Init functions while a lot loads.
     RunResult runOnce(SimObject& me, std::uint32_t codeGroup, std::uint16_t tree, std::span<const std::int16_t> args = {});
+    // Runs tree `tree` of `codeGroup` to its end at once as `who`, on top of its own thread and on
+    // its temps, as a message handler runs: how the wants manager runs a want's checkTree on the
+    // wants controller.
+    RunResult runOnObjectNow(SimObject& who, std::uint32_t codeGroup, std::uint16_t tree, std::int16_t stackObject,
+                             std::span<const std::int16_t> args) {
+        return runOnTop(who.thread, &who, codeGroup, tree, stackObject, args);
+    }
     // Whether tree `tree` exists for code of `codeGroup` (global, the group's own or its semi-global).
     bool hasTree(std::uint32_t codeGroup, std::uint16_t tree);
 

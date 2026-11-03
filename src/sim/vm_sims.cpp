@@ -1,6 +1,9 @@
 #include "sim/vm_execution.hpp"
+#include "sim/want_refill.hpp"
 
 #include "formats/propset.hpp"
+
+#include <limits>
 
 namespace ts2::sim::vm_detail {
 
@@ -79,12 +82,26 @@ bool Execution::genericSimsCall(const bhav::Instruction& in) {
         return true;
     }
     if (call == kRecalcWantsGenericCall) {
-        if (thread_.temps[0] < 10) {
+        const std::int16_t mode = thread_.temps[0];
+        std::int16_t neighbor = 0, value = 0;
+        if (mode < 10) {
             if (!me().isPerson()) {
                 throw Stop{Outcome::Error, "not a person", ""};
             }
+            neighbor = world().neighborIdOf(me());
+            value = thread_.temps[1];
         } else if (const auto* ids = world().neighbors(); ids == nullptr || !ids->contains(thread_.temps[1])) {
             throw Stop{Outcome::Error, "neighbor not found", std::to_string(thread_.temps[1])};
+        } else {
+            neighbor = thread_.temps[1];
+            value = thread_.temps[2];
+        }
+        // Modes 0 and 10 queue the Sim for new wants, the value (0..3, else 0) saying how much goes.
+        // Mode 10 leaves a neighbor alone when none of its Sims is on the lot. The other modes are
+        // not done.
+        const bool onLot = mode < 10 || world().nextAfter(0, [&](const SimObject& o) { return o.isPerson() && world().neighborIdOf(o) == neighbor; }) != nullptr;
+        if ((mode == 0 || mode == 10) && onLot) {
+            queueWantRefill(world(), neighbor, value >= 0 && value <= 3 ? value : 0);
         }
         return true;
     }
@@ -132,10 +149,36 @@ bool Execution::genericSimsCall(const bhav::Instruction& in) {
     if (call == kAddToFamilyGenericCall) {
         return addToFamily();
     }
+    if (call == kUnlinkCharacterGenericCall) {
+        return unlinkCharacter();
+    }
     if (call == kSetSkinGenericCall && (!me().isPerson() || thread_.temps[0] == 0)) {
         return me().isPerson();
     }
     throw Stop{Outcome::Unsupported, "Generic Sims Call not implemented", hex(call, 2)};
+}
+
+// Generic Sims Call 0x26: the neighbor in temp 0 is unlinked from its character when its Sim has a
+// character file of its own and isn't unlinked yet (person data 0xA5). Every Sim of its type on the
+// lot is deleted, then World::unlinkNeighbor does the rest. The game also removes the character
+// file's resources, which waits for saving, and sends message 0x9E, whose readers are not known
+// yet. Always true, for an unknown neighbor too.
+bool Execution::unlinkCharacter() {
+    constexpr std::size_t kUnlinkedPersonData = 0xA5;
+    const std::int16_t id = thread_.temps[0];
+    const SavedNeighbor* neighbor = id >= 1 ? world().neighbor(id) : nullptr;
+    const auto& hasCharacterFile = world().hasCharacterFile();
+    if (neighbor == nullptr || !hasCharacterFile || !hasCharacterFile(id) || world().neighborPersonValue(id, kUnlinkedPersonData) != 0) {
+        return true;
+    }
+    const std::uint32_t guid = neighbor->guid;
+    const auto ofType = [guid](const SimObject& o) { return o.definition.guid() == guid; };
+    while (SimObject* sim = world().nextAfter(std::numeric_limits<std::int16_t>::min(), ofType)) {
+        takeOutOfWorld(*sim);
+        world().remove(*sim);
+    }
+    world().unlinkNeighbor(id);
+    return true;
 }
 
 // The outfit category number in temp 0 becomes the category's flag (0 and any number not listed
@@ -897,8 +940,10 @@ bool Execution::setMotiveChange(const bhav::Instruction& in, Frame& f) {
 //   byte 7, 8-9  argument (owner, data), what it is depends on the want
 //   byte 10, 11-12 value (owner, data)
 //   byte 13      flags: bit 0 the Sim is a neighbor id, bit 1 a Sim argument is a neighbor id
-// True when at least one want matched. Matched wants leave the Sim's list. The aspiration
-// points and memories they give are not implemented.
+// Every satisfy goes into the Sim's want history, which leads the want trees to new wants. True
+// when at least one of the Sim's wants (fears, for a fear) matched: each leaves an empty place and
+// the Sim is queued for new ones. The aspiration points and influence they give, the extra want
+// and the definition's feedbackTree are not implemented.
 bool Execution::wantSatisfy(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     if (!world().neighbors() || !world().hasWantDefinitions()) {
@@ -942,13 +987,44 @@ bool Execution::wantSatisfy(const bhav::Instruction& in, Frame& f) {
     }
 
     auto satisfyFor = [&](std::int16_t neighbor) {
+        // A pet (species not 0) has no wants, so nothing is recorded.
+        if (world().neighbor(neighbor) == nullptr || world().neighborPersonValue(neighbor, kSpeciesPersonData) != 0) {
+            return false;
+        }
         request.id = static_cast<std::uint16_t>(neighbor);
+        swaf::Want record = request;
+        record.version = 10;
+        record.tail = {0, 0, 0};
+        const bool queued = world().wantsState().queue.contains(neighbor);
         auto& wants = world().neighborWants(neighbor);
-        const auto matched = std::remove_if(wants.begin(), wants.end(), [&](const swaf::Want& w) {
-            return wantMatches(w, request, def->op);
-        });
-        const bool satisfied = matched != wants.end();
-        wants.erase(matched, wants.end());
+        auto& fears = world().neighborFears(neighbor);
+        bool satisfied = false;
+        auto& list = def->isFear ? fears : wants;
+        for (std::size_t at = 0; at < list.size(); ++at) {
+            swaf::Want& w = list[at];
+            if (w.guid == 0 || !wantMatches(w, request, def->op)) {
+                continue;
+            }
+            record.tail[1] += w.tail.size() > 1 ? w.tail[1] : 0;
+            record.tail[2] += w.tail.size() > 2 ? w.tail[2] : 0;
+            w = {};
+            forgetWantPlace(world(), neighbor, at, def->isFear);
+            ++world().wantsState().satisfied[neighbor][at + (def->isFear ? 1000 : 0)];
+            if (!satisfied && !queued) {
+                for (auto* each : {&wants, &fears}) {
+                    for (auto& other : *each) {
+                        if (!other.tail.empty()) {
+                            other.tail[0] = 0;
+                        }
+                    }
+                }
+            }
+            satisfied = true;
+        }
+        addWantHistory(world(), neighbor, std::move(record));
+        if (satisfied) {
+            queueWantRefill(world(), neighbor, 3);
+        }
         return satisfied;
     };
     if (def->simArrayTree.empty()) {
@@ -1027,56 +1103,10 @@ std::uint32_t Execution::objectGuid(std::int16_t id) {
 
 // Whether a Sim's want is satisfied by the request. An argument of 0 in the want accepts any.
 bool Execution::wantMatches(const swaf::Want& want, const swaf::Want& request, content::WantOperator op) const {
-    if (want.id != request.id || want.guid != request.guid) {
-        return false;
-    }
-    auto compare = [op](std::int32_t got, std::int32_t wanted) {
-        switch (op) {
-        case content::WantOperator::Equals:              return got == wanted;
-        case content::WantOperator::LessThan:            return got < wanted;
-        case content::WantOperator::GreaterThan:         return got > wanted;
-        case content::WantOperator::LessThanOrEquals:    return got <= wanted;
-        case content::WantOperator::GreaterThanOrEquals: return got >= wanted;
-        case content::WantOperator::None:                return true;
-        }
-        return true;
-    };
-    using content::WantArgument;
-    switch (static_cast<WantArgument>(want.type)) {
-    case WantArgument::None:
-        break;
-    case WantArgument::Sim:
-        if (want.argument != 0 && want.argument != request.argument) {
-            return false;
-        }
-        break;
-    case WantArgument::Object:
-        if (want.argument != 0 && request.argument != 0 && want.argument != request.argument) {
-            return false;
-        }
-        break;
-    case WantArgument::Category:
-        if (want.argument != 0) {
-            if (request.type == static_cast<std::uint8_t>(WantArgument::Object)) {
-                const ObjectType* type = code_.objectType(static_cast<std::uint32_t>(request.argument));
-                if (type == nullptr || type->definition.field(kWantCategoryField) != want.argument) {
-                    return false;
-                }
-            } else if (request.type == static_cast<std::uint8_t>(WantArgument::Category)) {
-                return want.argument == request.argument;
-            }
-        }
-        break;
-    case WantArgument::Skill:
-    case WantArgument::Career:
-    case WantArgument::Badge: {
-        const bool argumentOk = want.argument == 0 || want.argument == request.argument;
-        return want.value == 0 ? argumentOk : argumentOk && want.value == request.value;
-    }
-    default:
-        return false;
-    }
-    return compare(request.value, want.value);
+    return sim::wantMatches(want, request, op, [this](std::uint32_t guid) {
+        const ObjectType* type = code_.objectType(guid);
+        return type != nullptr ? static_cast<std::int32_t>(type->definition.field(kWantCategoryField)) : -1;
+    });
 }
 
 } // namespace ts2::sim::vm_detail

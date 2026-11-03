@@ -138,10 +138,10 @@ ObjectInteractions interactionsOf(CodeSource& code, const SimObject& object) {
         return {};
     }
     if (auto table = code.interactionTable(object.group, tableId)) {
-        return {std::move(table), object.group};
+        return {std::move(table), object.group, tableId};
     }
     const std::uint32_t semiGlobal = code.semiGlobalGroup(object.group);
-    return {code.interactionTable(semiGlobal, tableId), semiGlobal};
+    return {code.interactionTable(semiGlobal, tableId), semiGlobal, tableId};
 }
 
 std::optional<QueuedInteraction> queuedChoice(CodeSource& code, const World& world, const SimObject& object,
@@ -208,21 +208,20 @@ RunResult runAtOnce(Vm& vm, CodeSource& code, World& world, SimObject& sim, SimO
 }
 
 std::string interactionName(CodeSource& code, const SimObject& object, std::uint16_t index) {
-    const auto [table, tableGroup] = interactionsOf(code, object);
+    const auto [table, tableGroup, tableId] = interactionsOf(code, object);
     const ttab::Interaction* line = table ? ttab::find(*table, index) : nullptr;
     if (line == nullptr) {
         return "?" + std::to_string(index);
     }
-    return lineName(code, tableGroup, object.definition.field(objd::field::kInteractionTableId), *line, object.group);
+    return lineName(code, tableGroup, tableId, *line, object.group);
 }
 
 PieMenu pieMenu(Vm& vm, CodeSource& code, SimObject& sim, SimObject& object, const PieMenuOptions& options) {
     PieMenu menu;
-    const auto [table, tableGroup] = interactionsOf(code, object);
+    const auto [table, tableGroup, tableId] = interactionsOf(code, object);
     if (table == nullptr || objectOffersNothing(object)) {
         return menu;
     }
-    const auto tableId = object.definition.field(objd::field::kInteractionTableId);
 
     // Each check tree starts with the temps the one before left. The Sim gets its own back at the end.
     const auto temps = sim.thread.temps;

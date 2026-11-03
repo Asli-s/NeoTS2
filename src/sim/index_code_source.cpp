@@ -162,7 +162,6 @@ const ObjectType* IndexCodeSource::objectType(std::uint32_t guid) {
                 const std::uint32_t id = definition.guid();
                 std::size_t containerSlots = 0;
                 std::vector<slot::Entry> routingSlots;
-                std::vector<float> slotHeights;
                 std::vector<slot::Entry> containerEntries;
                 std::vector<slot::Entry> targetSlots;
                 const auto slotsId = definition.field(objd::field::kSlotsId);
@@ -175,7 +174,6 @@ const ObjectType* IndexCodeSource::objectType(std::uint32_t guid) {
                                 if (entry.type == slot::kRoutingSlot) {
                                     routingSlots.push_back(entry);
                                 } else if (entry.type == slot::kContainerSlot) {
-                                    slotHeights.push_back(entry.z);
                                     containerEntries.push_back(entry);
                                 } else if (entry.type == slot::kTargetSlot) {
                                     targetSlots.push_back(entry);
@@ -193,7 +191,7 @@ const ObjectType* IndexCodeSource::objectType(std::uint32_t guid) {
                     multiTilePartGuids_[static_cast<std::uint64_t>(r.entry.key.group) << 16 | multiTileId].push_back(id);
                 }
                 ObjectType type{r.entry.key.group, std::move(definition), static_cast<std::uint16_t>(r.entry.key.instance),
-                                containerSlots, std::move(slotHeights), std::move(routingSlots), std::move(containerEntries),
+                                containerSlots, std::move(routingSlots), std::move(containerEntries),
                                 std::move(targetSlots)};
                 if (type.definition.field(objd::field::kType) == kPersonType) {
                     simGroups_.insert(r.entry.key.group);

@@ -62,7 +62,7 @@ public:
     void hideForFreeCamera(bool hide);
 
     // What a released button asks for.
-    enum class Action { None, Neighborhood, Quit, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, RewardsOpened, RewardsClosed, SelectSim, TrackSim, FloorUp, FloorDown, WallMode };
+    enum class Action { None, Neighborhood, Quit, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, RewardsOpened, RewardsClosed, SelectSim, TrackSim, FloorUp, FloorDown, WallMode, ToggleCeiling };
     Action clicked(int window);
     // The puck's camera button held down under the mouse.
     enum class CameraButton { None, RotateLeft, RotateRight, ZoomIn, ZoomOut };

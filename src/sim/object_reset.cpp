@@ -1,5 +1,8 @@
 #include "sim/object_reset.hpp"
 
+#include "sim/find_location.hpp"
+#include "sim/snap.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -120,9 +123,75 @@ void notePausedRun(SimObject& object) {
     object.runsWhilePaused = object.data[kRunsWhilePausedField] != 0;
 }
 
-void resetSim(SimObject& sim, const ObjectType& type, CodeSource& code) {
+namespace {
+
+constexpr std::size_t kSittingPersonData = 0x00;
+
+// Whether `sim` may go back into slot `slot` of `container`, by the checks Snap Into makes. The
+// slot's allowed kinds and the container's own say are not checked yet, as in Snap Into.
+bool fitsSlot(const World& world, const SimObject& sim, const SimObject& container, std::int16_t slot) {
+    constexpr std::size_t kContainerField = 2, kCapacityField = 0x1C, kSizeField = 0x1B;
+    constexpr int kDepthLimit = 16;  // containers inside containers, and a broken save can make a loop
+    if (slot < 0 || static_cast<std::size_t>(slot) >= container.slots.size()) {
+        return false;
+    }
+    const std::int16_t held = container.slots[static_cast<std::size_t>(slot)];
+    if (held != 0 && held != sim.id) {
+        return false;
+    }
+    int depth = 0;
+    for (const SimObject* c = &container; c != nullptr && depth < kDepthLimit; ++depth) {
+        if (c->id == sim.id) {
+            return false;
+        }
+        c = c->data[kContainerField] > 0 ? world.find(c->data[kContainerField]) : nullptr;
+    }
+    return container.data[kCapacityField] >= sim.data[kSizeField];
+}
+
+} // namespace
+
+void placeAfterReset(World& world, SimObject& sim, SimRandom& rng) {
+    constexpr std::size_t kContainerField = 2, kSlotField = 3, kDirectionField = 1;
+    if (sim.removed || sim.x == kOffLot || sim.y == kOffLot) {
+        return;
+    }
+    const std::int16_t slot = sim.data[kSlotField];
+    SimObject* container = sim.data[kContainerField] > 0 ? world.find(sim.data[kContainerField]) : nullptr;
+    const bool heldBySlot = container != nullptr && slot >= 0 && static_cast<std::size_t>(slot) < container->slots.size() &&
+                            container->slots[static_cast<std::size_t>(slot)] == sim.id;
+    const SnapTarget here{sim.x, sim.y, sim.level, std::nullopt};
+    takeOutOfSlot(world, sim);
+    if (sim.personData[kSittingPersonData] == 0 && sim.personData[kSwimmingPersonData] == 0) {
+        if (container != nullptr && fitsSlot(world, sim, *container, slot)) {
+            sim.data[kContainerField] = container->id;
+            sim.data[kSlotField] = slot;
+            if (heldBySlot) {
+                container->slots[static_cast<std::size_t>(slot)] = sim.id;
+            }
+            return;
+        }
+        if (container == nullptr && !placementCode(world, sim, SnapTarget{sim.x, sim.y, sim.level, sim.data[kDirectionField]}, true)) {
+            return;
+        }
+    }
+    LocationSearch search;
+    search.startX = sim.x;
+    search.startY = sim.y;
+    search.level = sim.level;
+    search.preferEmpty = false;
+    std::optional<FoundLocation> found = findLocation(world, sim, search, rng);
+    if (!found) {
+        search.sameRoom = false;
+        found = findLocation(world, sim, search, rng);
+    }
+    snapTo(world, sim, found ? SnapTarget{found->x, found->y, sim.level, std::nullopt} : here);
+}
+
+void resetSim(World& world, SimObject& sim, const ObjectType& type, CodeSource& code, SimRandom& rng) {
     constexpr std::size_t kResetClearedField = 0x22;
-    constexpr std::size_t kSittingPersonData = 0x00, kSocialMenuObjectPersonData = 0x3B;
+    constexpr std::size_t kSocialMenuObjectPersonData = 0x3B;
+    placeAfterReset(world, sim, rng);
     sim.queue.clear();
     sim.actionString.clear();
     sim.actionIconGuid = 0;

@@ -36,7 +36,16 @@ struct LotProblem {
     std::string message;
 };
 
+// The lot's bounds from its cWorldDB record: first and last tile on each axis and the lowest and
+// highest level, in the game's own axes (its x is the engine's second coordinate, as
+// nWorld.GetObjectTile gives it) and levels counted from 0.
+struct WorldBounds {
+    std::int32_t minX = 0, minY = 0, minLevel = 0;
+    std::int32_t maxX = 0, maxY = 0, maxLevel = 0;
+};
+
 struct Lot {
+    std::optional<WorldBounds> worldBounds;
     objt::ObjectTypeTable types;
     objm::ObjectMap objectMap;
     objm::ObjectGroups objectGroups;  // ObjM instance 2
@@ -87,6 +96,9 @@ struct Lot {
 };
 
 constexpr std::uint32_t kRoomGridInstance = 9;
+// A byte per tile per level, from the lowest level up: not 0 on the tiles the game counts as locked
+// (nWorld.IsLocked).
+constexpr std::uint32_t kLockedTileGridInstance = 3;
 constexpr std::uint32_t kFirstPaintMapInstance = 0x5CBC;
 // Grids saved with a variable size per tile: up to three bytes (c2DArray) and a list of u32s
 // (c3DArray). What they hold is not known yet.
@@ -108,6 +120,9 @@ constexpr std::uint32_t kSurfaceGridInstance = 21;
 // Four 32-bit platform region ids per tile per level, in the floor grid's quarter order and from its
 // lowest level, -1 where no platform is (see World::platformRegion).
 constexpr std::uint32_t kPlatformRegionGridInstance = 0x14;
+// The water's height at each terrain corner (a float per corner, c2DArray). A ground corner whose
+// terrain lies below it is under water: ponds are dug below it.
+constexpr std::uint32_t kWaterHeightGridInstance = 0x3B76;
 
 // The covering layer names the walls of the wall graph (instance 24), whose ids the room graph shares
 // only on lots whose walls were never renumbered: this gives the coverings by room graph wall, matched

@@ -29,7 +29,7 @@ constexpr std::uint32_t kScripts = 0xA99D8A11;
 constexpr std::uint32_t kPuck = 0x4905F85B, kLivePanel = 0x49060005, kOptionsMenu = 0x49060001;
 // The puck's windows.
 constexpr std::uint32_t kLiveMode = 0x37D97B25, kOptions = 0x67D97B2F, kFunds = 0x00003000;
-constexpr std::uint32_t kFloorUp = 0x00002001, kFloorDown = 0x00002000;
+constexpr std::uint32_t kFloorUp = 0x00002001, kFloorDown = 0x00002000, kToggleCeiling = 0x00007000;
 // The camera buttons: rotate left and right, zoom in and out.
 constexpr std::uint32_t kCameraButtons[] = {0x00001001, 0x00001000, 0x00001002, 0x00001003};
 // One wall button per wall mode, in the same place. The one for the mode in use shows.
@@ -276,6 +276,7 @@ void LotUi::hideForFreeCamera(bool hide) {
         return;
     }
     hidden_ = hide;
+    skewer_.setHidden(hide);
     if (hide) {
         optionsWereShown_ = optionsShown();
         closeWallMenu();
@@ -433,6 +434,9 @@ LotUi::Action LotUi::clicked(int window) {
         if (id == kFloorDown) {
             return Action::FloorDown;
         }
+        if (id == kToggleCeiling) {
+            return Action::ToggleCeiling;
+        }
     }
     if (id == kOptions && screen_.parent(window) == puck_) {
         showOptions(!optionsShown());
@@ -547,6 +551,7 @@ std::vector<WantsPanel::Want> LotUi::panelWants(LotLife& life, const std::vector
     for (const auto& w : saved) {
         WantsPanel::Want p;
         p.guid = w.guid;
+        p.argument = w.argument;
         p.held = (w.flags & kHeldWant) != 0;
         if (const auto* d = life.wantDefinition(w.guid)) {
             wantPopupTexts(life, w, *d, p);
@@ -933,7 +938,7 @@ void LotUi::showLife(LotLife& life) {
         wantsPending_ = std::any_of(wantsShown_.begin(), wantsShown_.end(), loading) || std::any_of(fearsShown_.begin(), fearsShown_.end(), loading);
     }
     const auto slots = life.wantSlots(sim);
-    panel_.setWants(wantsShown_, fearsShown_, slots.wants, slots.fears);
+    panel_.setWants(wantsShown_, fearsShown_, slots.wants, slots.fears, {sim, life.wantsRefilling(sim), &life.satisfiedWantPlaces(sim)});
     constexpr std::size_t kUiIconFlags = 0x34, kRoommateFlags = 0x54;
     for (const std::int16_t member : life.household()) {
         skewer_.setMood(member, life.mood(member));

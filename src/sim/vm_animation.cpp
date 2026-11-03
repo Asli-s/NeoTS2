@@ -586,13 +586,11 @@ Execution::ReachStep Execution::reachPut(const bhav::Instruction& in, Frame& f) 
         throw Stop{Outcome::Error, "the Sim has no such hand slot", std::to_string(hand)};
     }
     Reaching reach{frame, f.group, f.instance, f.pc, mode};
-    float height = 0;
-    float x = static_cast<float>(sim.x) / 65536.0f, y = static_cast<float>(sim.y) / 65536.0f;
-    const auto slotHeight = [&](const SimObject& container, std::int16_t slot) {
-        const ObjectType* type = code_.objectType(container.definition.guid());
-        return type && slot >= 0 && static_cast<std::size_t>(slot) < type->containerSlotHeights.size()
-                   ? type->containerSlotHeights[static_cast<std::size_t>(slot)] : 0.0f;
-    };
+    // The reach is measured from me to where the object is, or to the slot it goes in: a glass on a
+    // tray on a bar is as high as the bar's slot holds the tray. Where the game measures a floor put
+    // to is not known yet, so it is measured to my own place.
+    const HeldPlace mine = heldPlace(world(), code_, sim);
+    HeldPlace there = mine;
     std::uint32_t clipGroup = kGlobalGroup;
     if (mode == Reaching::Mode::Grab) {
         if (target->data[kContainerField] == sim.id && target->data[kSlotField] == hand) {
@@ -600,11 +598,7 @@ Execution::ReachStep Execution::reachPut(const bhav::Instruction& in, Frame& f) 
         }
         reach.object = target->id;
         reach.slot = hand;
-        if (const SimObject* under = target->data[kContainerField] > 0 ? world().find(target->data[kContainerField]) : nullptr) {
-            height = slotHeight(*under, target->data[kSlotField]);
-        }
-        x = static_cast<float>(target->x) / 65536.0f;
-        y = static_cast<float>(target->y) / 65536.0f;
+        there = heldPlace(world(), code_, *target);
         clipGroup = target->group;
     } else {
         reach.object = sim.slots[static_cast<std::size_t>(hand)];
@@ -617,13 +611,12 @@ Execution::ReachStep Execution::reachPut(const bhav::Instruction& in, Frame& f) 
             if (reach.slot < 0 || static_cast<std::size_t>(reach.slot) >= target->slots.size()) {
                 throw Stop{Outcome::Error, "bad slot number", std::to_string(reach.slot)};
             }
-            height = slotHeight(*target, reach.slot);
-            x = static_cast<float>(target->x) / 65536.0f;
-            y = static_cast<float>(target->y) / 65536.0f;
+            there = slotPlace(world(), code_, *target, reach.slot);
             clipGroup = target->group;
         }
     }
-    const float distance = std::hypot(x - static_cast<float>(sim.x) / 65536.0f, y - static_cast<float>(sim.y) / 65536.0f);
+    const float height = there.height - mine.height;
+    const float distance = std::hypot(static_cast<float>(there.x - mine.x) / 65536.0f, static_cast<float>(there.y - mine.y) / 65536.0f);
     const int band = height < 0.4f ? 0 : height < 0.7f ? 1 : height < 0.9f ? 2 : 3;
     const auto entry = static_cast<std::uint16_t>(band + (distance > kFarReach ? 4 : 0) + (mode != Reaching::Mode::Grab ? 8 : 0));
     std::optional<std::string> clip;
@@ -660,15 +653,15 @@ Execution::ReachStep Execution::reachPut(const bhav::Instruction& in, Frame& f) 
     // or the floor spot reachTransfer puts it on, facing as it will.
     PlayingAnimation::IkObject ik;
     ik.level = static_cast<std::int16_t>(sim.level);
-    ik.height = height;
+    ik.height = there.height;
     if (mode == Reaching::Mode::PutOnFloor) {
         const FloorSpot spot = floorSpot(sim, *world().find(reach.object));
         ik.x = spot.x;
         ik.y = spot.y;
         ik.heading = compassHeading(spot.facing);
     } else {
-        ik.x = x;
-        ik.y = y;
+        ik.x = static_cast<float>(there.x) / 65536.0f;
+        ik.y = static_cast<float>(there.y) / 65536.0f;
         ik.level = static_cast<std::int16_t>(target->level);
         ik.heading = compassHeading(target->data[kDirectionField]);
     }
