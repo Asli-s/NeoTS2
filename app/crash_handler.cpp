@@ -1,6 +1,7 @@
 #include "crash_handler.hpp"
 
 #include "crash_dialog.hpp"
+#include "report_upload.hpp"
 
 #include "diag/log.hpp"
 #include "diag/report.hpp"
@@ -57,12 +58,6 @@ std::string utf8(const std::wstring& w) {
     std::string s(static_cast<std::size_t>(n > 0 ? n : 0), '\0');
     WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), s.data(), n, nullptr, nullptr);
     return s;
-}
-
-// The user's own folder, which reports don't name.
-std::string userFolder() {
-    wchar_t profile[MAX_PATH] = {};
-    return GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH) > 0 ? utf8(profile) : std::string();
 }
 
 // The module an address is in and the offset into it, and with symbols its function and line.
@@ -206,7 +201,11 @@ void writeReport() {
     if (symbols) {
         SymCleanup(process);
     }
-    writeFile(reportFolder + L"\\crash.txt", ts2::diag::withoutUserFolder(ts2::diag::crashText(report, recentLines()), userFolder()));
+    const ts2::diag::User user = ts2::diag::thisUser();
+    writeFile(reportFolder + L"\\crash.txt", ts2::diag::withoutUser(ts2::diag::crashText(report, recentLines()), user));
+    // The user's name in the dump's paths becomes underscores, in place. This comes last, so both
+    // files are already saved if it fails, and a report is masked again before it is sent.
+    ts2::diag::maskUserInFile(reportFolder + L"\\neots2.dmp", user, kMaxSentDump);
 }
 
 // Tells the tester, in plain words, and offers to send or show the report.
@@ -214,8 +213,8 @@ void ask() {
     ClipCursor(nullptr);  // the game may have held the mouse inside its window
     Message m;
     m.heading = "NeoTS2 had to close";
-    m.text = "Something went wrong inside NeoTS2. A report was saved on this computer. Sending it to us helps fix the "
-             "problem; nothing is sent unless you choose to.";
+    m.text = "Something went wrong inside NeoTS2.\nA report was saved on this computer.\n\n"
+             "Sending it to us helps fix the problem.\nNothing is sent unless you choose to.";
     m.details = report.kind + " at " + ts2::diag::describe(report.where) + "\nVersion: " + version + "\nSaved in: " +
                 utf8(reportFolder);
     m.folder = std::filesystem::path(reportFolder);
@@ -357,11 +356,37 @@ void test(std::string_view kind) {
 
 #else
 
+#include "crash_catcher.hpp"
+
+#include <chrono>
+#include <cstdlib>
+
 namespace app::crash {
 
-void install(const Settings&) {}
-void watchClosing(unsigned) {}
+// The crash catcher (Crashpad, see crash_catcher.hpp) writes the minidump. The run's marker stays,
+// so the next start finds the dump and asks the player what to do with it.
+void install(const Settings& settings) {
+    if (!hasCatcher() || settings.folder.empty()) {
+        return;
+    }
+    if (!startCatcher(settings.folder / kCatcherFolder, settings.version)) {
+        ts2::diag::warning("crash reports are off: the crash catcher couldn't start");
+    }
+}
+
+void watchClosing(unsigned seconds) {
+    if (!hasCatcher()) {
+        return;
+    }
+    std::thread([seconds] {
+        std::this_thread::sleep_for(std::chrono::seconds(seconds));
+        ts2::diag::error("closing has taken more than " + std::to_string(seconds) + " s: reported as stuck");
+        std::abort();  // the catcher saves a dump of where every thread is
+    }).detach();
+}
+
 void test(std::string_view kind) {
+    ts2::diag::step("crashing on purpose: " + std::string(kind));
     if (kind == "access") {
         volatile int* nowhere = nullptr;
         *nowhere = 1;
@@ -369,6 +394,13 @@ void test(std::string_view kind) {
         std::abort();
     } else if (kind == "terminate") {
         std::terminate();
+    } else if (kind == "throw") {
+        throw 42;  // nothing catches an int
+    } else if (kind == "thread") {
+        std::thread([] {
+            volatile int* nowhere = nullptr;
+            *nowhere = 2;
+        }).join();
     }
 }
 

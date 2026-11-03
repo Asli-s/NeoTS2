@@ -1,5 +1,7 @@
 #pragma once
 
+#include "diag/user.hpp"
+
 #include <cstddef>
 #include <filesystem>
 #include <string>
@@ -24,6 +26,9 @@ enum class Level { Info, Warning, Error, Step };
 [[nodiscard]] bool open(const std::filesystem::path& folder, std::string_view header, std::uintmax_t maxBytes = kMaxLogBytes);
 // The open log file, empty when none.
 std::filesystem::path file();
+// The user whose folder and name (see withoutUser) the header and every line from then on leave
+// out, so a log a player shares doesn't hold their user name. Call before open().
+void hideUser(User user);
 
 // A line of the log. Thread-safe.
 void write(Level level, std::string_view text);

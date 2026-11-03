@@ -63,6 +63,53 @@ for library in "$frameworks"/*.dylib; do
     install_name_tool -id "@executable_path/../Frameworks/$(basename "$library")" "$library"
 done
 
+# With crash reports (NEOTS2_CRASHPAD): the crash catcher's program goes beside the game, and the
+# dSYM symbols for BugSplat are kept in symbols/ beside the app (upload them with BugSplat's
+# symbol-upload) before the shipped programs are stripped. Their ids still match.
+crashpad=no
+if [ -f "$build/crashpad_handler" ]; then
+    crashpad=yes
+    cp "$build/crashpad_handler" "$resources"
+    rm -rf "$build/symbols"
+    mkdir -p "$build/symbols"
+    for program in neots2 crashpad_handler; do
+        dsymutil "$resources/$program" -o "$build/symbols/$program.dSYM"
+        strip -S "$resources/$program"
+    done
+    codesign --force --sign - "$resources/crashpad_handler"
+fi
+
+# NeoTS2's license and every library's, as their licenses ask when they are shipped.
+cp "$source/LICENSE" "$resources/LICENSE.txt"
+heading() {
+    rule="=============================================================================="
+    printf '\n%s\n%s\n%s\n\n' "$rule" "$1" "$rule"
+}
+notice() {
+    heading "$1"
+    cat "$2"
+}
+{
+    echo "NeoTS2 uses these libraries, and ships them inside its programs or beside them."
+    notice "SDL 3 (zlib License)" "$source/third_party/licenses/SDL3-LICENSE.txt"
+    notice "FreeType (The FreeType Project License). Portions of this software are copyright (c) 2024 The FreeType Project (www.freetype.org). All rights reserved." \
+        "$source/third_party/licenses/FreeType-FTL.txt"
+    notice "Dear ImGui (MIT License)" "$source/third_party/imgui/LICENSE.txt"
+    notice "Noto Sans (SIL Open Font License 1.1)" "$source/third_party/fonts/OFL.txt"
+    heading "stb_image (MIT License or public domain)"
+    # The last copy of the license text, at the end of the header.
+    awk '/This software is available under 2 licenses/ { text = "" } { text = text $0 "\n" } END { printf "%s", text }' \
+        "$source/third_party/stb/stb_image.h"
+    notice "Lua 5.0.3 (MIT License)" "$source/third_party/lua-5.0.3/COPYRIGHT"
+    if [ "$crashpad" = yes ]; then
+        licenses="$source/third_party/licenses/crashpad"
+        notice "Crashpad (Apache License 2.0), in crashpad_handler and neots2" "$licenses/Crashpad-LICENSE.txt"
+        notice "mini_chromium (BSD 3-Clause License), part of Crashpad" "$licenses/mini_chromium-LICENSE.txt"
+        notice "getopt (public domain), part of Crashpad" "$licenses/getopt-LICENSE.txt"
+        notice "MPack (MIT License), part of Crashpad" "$licenses/mpack-LICENSE.txt"
+    fi
+} > "$resources/THIRD-PARTY-NOTICES.txt"
+
 codesign --force --sign - "$resources/neots2" "$macos/neots2-launcher" "$frameworks"/*.dylib
 codesign --force --sign - "$app"
 codesign --verify --strict "$app"

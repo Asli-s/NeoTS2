@@ -7,7 +7,8 @@
 // Sending a saved crash report to BugSplat's NeoTS2 database, only when the tester picks "Send a
 // report". It is done by a fresh copy of NeoTS2 ("--send-report <folder>"), never by the program
 // that crashed (its memory may be damaged), which uploads the folder's minidump and crash.txt and
-// says how it went. Windows only for now.
+// says how it went. On Windows it goes through BugSplat's upload link, on Linux and macOS (with the
+// crash catcher, see crash_catcher.hpp) through its endpoint for the catcher's minidumps.
 namespace app::crash {
 
 // The largest crash dump that is sent. Bigger ones (Windows' own can be) stay on the computer.

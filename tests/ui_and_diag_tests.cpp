@@ -3,6 +3,7 @@
 
 #include "../app/click_gate.hpp"
 
+#include "ui/animated_bitmap.hpp"
 #include "ui/drag_arrow.hpp"
 #include "ui/scroll_bar.hpp"
 #include "ui/tip_layout.hpp"
@@ -183,6 +184,21 @@ void logKeepsItsLinesAndFiles() {
     char small[10];
     CHECK(ts2::diag::recentLines(small, sizeof small) == 9 && small[9] == '\0');
     ts2::diag::reset();
+
+    // The user's own folder is written as %USERPROFILE% in the header and the lines, and their
+    // name as a folder elsewhere as %USERNAME%.
+    ts2::diag::hideUser({"C:\\Users\\Sam", {"Sam"}});  // a made-up user, leakcheck: ok
+    CHECK(ts2::diag::open(folder, "command line: \"C:\\Users\\Sam\\NeoTS2\\neots2.exe\" \"D:\\SAM\\saves\""));  // leakcheck: ok
+    ts2::diag::info("save folder C:/users/sam/Documents/EA Games and C:\\Users\\Samantha");  // leakcheck: ok
+    {
+        std::ifstream in(ts2::diag::file());
+        text.assign(std::istreambuf_iterator<char>(in), {});
+    }
+    CHECK(text.find("Sam\\") == std::string::npos && text.find("sam/") == std::string::npos);
+    CHECK(text.find("\"%USERPROFILE%\\NeoTS2\\neots2.exe\" \"D:\\%USERNAME%\\saves\"") != std::string::npos &&
+          text.find("%USERPROFILE%/Documents/EA Games and C:\\Users\\Samantha") != std::string::npos);  // leakcheck: ok
+    CHECK(ts2::diag::recentLines().back().find("%USERPROFILE%/Documents") != std::string::npos);
+    ts2::diag::reset();
     std::error_code ec;
     fs::remove_all(folder, ec);
 }
@@ -195,6 +211,10 @@ void crashReportsSayWhatHappened() {
     CHECK(exceptionName(0x123) == "exception 0x123");
     CHECK(exceptionName(0xE0000005) == "closing took too long");
     CHECK(fileName("D:\\Profiles\\Me\\neots2.exe") == "neots2.exe" && fileName("a/b/c.cpp:3") == "c.cpp:3" && fileName("x") == "x");
+    // Message text is broken between words, keeping its own breaks. A long path keeps a line.
+    CHECK(wrapped("Something went wrong inside NeoTS2.", 16) == "Something went\nwrong inside\nNeoTS2.");
+    CHECK(wrapped("ab cd\n\nThe report:\n/home/sam/a-very-long-folder x", 10) == "ab cd\n\nThe\nreport:\n/home/sam/a-very-long-folder\nx");  // a made-up user, leakcheck: ok
+    CHECK(wrapped("\xC3\xA9\xC3\xA9\xC3\xA9 abc", 7) == "\xC3\xA9\xC3\xA9\xC3\xA9 abc" && wrapped("", 10).empty());
     CHECK(linkEncoded("a b&c/\xC3\xA9") == "a%20b%26c%2F%C3%A9");
     Crash crash;
     crash.version = "abc1234";
@@ -241,6 +261,14 @@ void unexpectedExitsSayWhatWindowsNoted() {
     exit.windows["ExceptionCode"] = "not hex";
     CHECK(crashOf(exit).code == 0);  // nonsense is left out, not thrown
     CHECK(issueLink(noted).find("Users") == std::string::npos);
+    // A crash the crash catcher caught (Linux and macOS) says it crashed, with its dump beside it.
+    UnexpectedExit caught;
+    caught.version = "abc1234";
+    caught.started = "2026-10-12 21:12:10";
+    caught.caught = true;
+    const std::string caughtText = unexpectedExitText(caught, {"21:12:10.142 step: lot opened"});
+    CHECK(crashOf(caught).kind == "crash" && caughtText.rfind("NeoTS2 had to close", 0) == 0);
+    CHECK(caughtText.find("Version: abc1234") != std::string::npos && caughtText.find("step: lot opened") != std::string::npos);
 }
 
 // The pieces of sending a report: a stored zip (checked against the standard CRC and its own
@@ -267,6 +295,12 @@ void reportUploadPieces() {
     const std::string form = formBody({{"appName", "NeoTS2"}, {"md5", "abc"}}, "XYZ");
     CHECK(form == "--XYZ\r\nContent-Disposition: form-data; name=\"appName\"\r\n\r\nNeoTS2\r\n"
                   "--XYZ\r\nContent-Disposition: form-data; name=\"md5\"\r\n\r\nabc\r\n--XYZ--\r\n");
+    // Files come after the fields, as bytes (a zero byte included).
+    const std::string withFile = formBody({{"product", "NeoTS2"}}, {{"upload_file_minidump", "neots2.dmp", {'M', 0, 'D'}}}, "XYZ");
+    CHECK(withFile == std::string("--XYZ\r\nContent-Disposition: form-data; name=\"product\"\r\n\r\nNeoTS2\r\n"
+                                  "--XYZ\r\nContent-Disposition: form-data; name=\"upload_file_minidump\"; filename=\"neots2.dmp\"\r\n"
+                                  "Content-Type: application/octet-stream\r\n\r\nM") +
+                          '\0' + "D\r\n--XYZ--\r\n");
 }
 
 // Reports write the user's own folder as %USERPROFILE%: any case, either slash, whole folder names
@@ -280,6 +314,41 @@ void reportsDontNameTheUser() {
     CHECK(withoutUserFolder("D:\\Profiles\\Sam2\\x and D:\\Profiles\\Sam.old", user) == "D:\\Profiles\\Sam2\\x and D:\\Profiles\\Sam.old");
     CHECK(withoutUserFolder("D:\\Profiles\\Sam\\", "D:\\Profiles\\Sam\\") == "%USERPROFILE%\\");  // given with a slash at its end
     CHECK(withoutUserFolder("C:\\Games", "C:") == "C:\\Games" && withoutUserFolder("text", "") == "text");
+
+    // Their name is left out where it is a whole folder name in a path, anywhere.
+    const ts2::diag::User sam{user, {"Sam"}};
+    CHECK(ts2::diag::withoutUser("E:\\sam\\NeoTS2 and /mnt/Sam and D:\\Profiles\\Sam\\x", sam) ==
+          "E:\\%USERNAME%\\NeoTS2 and /mnt/%USERNAME% and %USERPROFILE%\\x");
+    CHECK(ts2::diag::withoutUser("Sam's lot, E:\\Samantha\\x and E:\\Games\\Sam2", sam) == "Sam's lot, E:\\Samantha\\x and E:\\Games\\Sam2");
+
+    // In a dump, the name becomes underscores in 8-bit and UTF-16 paths, keeping every length.
+    std::vector<std::uint8_t> dump;
+    for (const char c : std::string_view("E:\\SAM\\neots2.exe|Sam|E:\\Samantha")) {
+        dump.push_back(static_cast<std::uint8_t>(c));
+    }
+    for (const char c : std::string_view("C:/sam/x")) {
+        dump.push_back(static_cast<std::uint8_t>(c));
+        dump.push_back(0);
+    }
+    const std::size_t size = dump.size();
+    CHECK(ts2::diag::maskUser(dump, sam) && dump.size() == size);
+    CHECK(std::string(dump.begin(), dump.begin() + 33) == "E:\\___\\neots2.exe|Sam|E:\\Samantha");
+    CHECK(dump[33 + 6] == '_' && dump[33 + 7] == 0 && dump[33 + 10] == '_' && dump[33 + 12] == '/');
+    CHECK(!ts2::diag::maskUser(dump, sam) && !ts2::diag::maskUser(dump, ts2::diag::User{}));
+
+    // A dump file is rewritten in place at its own size, and one over the limit is left alone.
+    namespace fs = std::filesystem;
+    const fs::path file = fs::temp_directory_path() / ("neots2-mask-test-" + std::to_string(std::random_device{}()) + ".dmp");
+    std::ofstream(file, std::ios::binary) << "D:\\Sam\\a" << std::string(100, '\0');
+    CHECK(!ts2::diag::maskUserInFile(file, sam, 10) && ts2::diag::maskUserInFile(file, sam, 1000));
+    std::string back;
+    {
+        std::ifstream in(file, std::ios::binary);
+        back.assign(std::istreambuf_iterator<char>(in), {});
+    }
+    CHECK(back.size() == 108 && back.substr(0, 8) == "D:\\___\\a");
+    std::error_code ec;
+    fs::remove(file, ec);
 }
 
 // A run's log file stops growing at its limit, with a line saying so. The recent lines go on.
@@ -402,6 +471,27 @@ void dragArrowTurnsAboutItsMiddle() {
     CHECK(turned.rgba[(2 * 32 + 5) * 4 + 3] == 0);
 }
 
+// A want icon's glow and spin as the game played them: the glow rose a frame every 33 ms from 33 ms,
+// held its last frame from 462 to about 1090 ms, fell back to its first frame by 1545 ms and ended at
+// 1914 ms. The spin turned a frame every 33 ms for 1.5 s from a random frame.
+void animatedBitmapsPlayAsTheGame() {
+    const std::vector<std::string> glow{"kType=kAlphaFade", "kFrameRate=30", "kFrameCount=15", "kLoopCount=1", "kPingPong=true",
+                                        "kLastFrameHold=600", "kFirstFrameHold=800", "kHideWhenDone=true"};
+    ts2::ui::AnimatedBitmap a(glow, 40, 40);
+    CHECK(a.play(0) && a.type() == ts2::ui::AnimatedBitmap::Type::AlphaFade && a.frames() == 15 && a.hideWhenDone());
+    CHECK(a.at(0).frame == 0 && a.at(32).frame == 0 && a.at(33).frame == 1 && a.at(483).frame == 14);
+    CHECK(a.at(1088).frame == 14 && a.at(1092).frame == 13 && a.at(1545).frame == 0);
+    CHECK(!a.at(1913).done && a.at(1914).done && a.at(1914).frame == 0);
+    CHECK(a.alpha(0) == 0 && a.alpha(7) == 127 && a.alpha(14) == 255);
+    const std::vector<std::string> spin{"kFrameRate=30", "kDuration=1500", "kRandomStartFrame=true",
+                                        "kAnimationSound=ui_wf_slotmachine_lp", "kEndSound=ui_wf_slotmachine_stop"};
+    ts2::ui::AnimatedBitmap b(spin, 800, 40);
+    CHECK(b.play(27) && b.frames() == 20 && b.at(0).frame == 7 && b.at(33).frame == 8 && b.at(429).frame == 0);
+    CHECK(!b.at(1499).done && b.at(1500).done && b.at(1500).frame == 12);
+    ts2::ui::AnimatedBitmap still({}, 40, 40);
+    CHECK(!still.play(0));
+}
+
 // The game's scroll bar as the cheat window's output had it in the game: 44 lines with 13 shown on
 // a bar 171 high, scrolled to the end, held its thumb at 139 with 31 positions and 4 pages.
 void scrollBarStepsAsTheGame() {
@@ -440,6 +530,7 @@ void scrollBarStepsAsTheGame() {
 std::vector<Test> uiAndDiagTests() {
     return {
         {"the drag arrow turns about its middle", dragArrowTurnsAboutItsMiddle},
+        {"animated bitmaps play as the game's", animatedBitmapsPlayAsTheGame},
         {"the scroll bar steps as the game's", scrollBarStepsAsTheGame},
         {"pie items go round the centre", pieItemsGoRoundTheCentre},
         {"clicks are dropped while loading", clicksAreDroppedWhileLoading},

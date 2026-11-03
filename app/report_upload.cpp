@@ -1,19 +1,22 @@
 #include "report_upload.hpp"
 
+#include "crash_catcher.hpp"
 #include "crash_dialog.hpp"
 #include "diag/report.hpp"
 #include "diag/upload.hpp"
+#include "diag/user.hpp"
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <fstream>
 #include <optional>
+#include <random>
 #include <string_view>
 #include <thread>
 #include <vector>
 
 #ifdef _WIN32
-
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -24,6 +27,11 @@
 #include <commctrl.h>
 #include <winhttp.h>
 // clang-format on
+#else
+#include <spawn.h>
+
+extern char** environ;
+#endif
 
 namespace app::crash {
 
@@ -32,18 +40,6 @@ namespace {
 namespace fs = std::filesystem;
 
 constexpr std::uintmax_t kMaxText = 4ull << 20;
-constexpr std::size_t kMaxResponse = 1 << 20;
-constexpr int kTimeoutMs = 30'000;
-
-std::wstring wide(const std::string& s) {
-    if (s.empty()) {
-        return {};
-    }
-    const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
-    std::wstring w(static_cast<std::size_t>(n > 0 ? n : 0), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), w.data(), n);
-    return w;
-}
 
 std::optional<std::vector<std::uint8_t>> readFile(const fs::path& file, std::uintmax_t most) {
     std::error_code ec;
@@ -57,6 +53,99 @@ std::optional<std::vector<std::uint8_t>> readFile(const fs::path& file, std::uin
         return std::nullopt;
     }
     return data;
+}
+
+// The version a crash.txt names ("Version: ..."), or `fallback`.
+std::string versionOf(const std::vector<std::uint8_t>& text, const std::string& fallback) {
+    const std::string s(text.begin(), text.end());
+    const auto at = s.find("\nVersion: ");
+    if (at == std::string::npos) {
+        return fallback;
+    }
+    const auto end = s.find_first_of("\r\n", at + 10);
+    const std::string v = s.substr(at + 10, end == std::string::npos ? std::string::npos : end - at - 10);
+    return v.empty() || v.size() > 64 ? fallback : v;
+}
+
+// BugSplat's number for the report, from its reply ("crashId":123 from the upload link's commit,
+// "crash_id":123 from the Crashpad endpoint). Empty when it isn't there.
+std::string crashIdOf(const std::string& reply) {
+    std::string id;
+    auto at = reply.find("\"crashId\"");
+    if (at == std::string::npos) {
+        at = reply.find("\"crash_id\"");
+    }
+    const auto colon = at == std::string::npos ? at : reply.find(':', at);
+    if (colon != std::string::npos) {
+        std::size_t i = colon + 1;
+        while (i < reply.size() && (reply[i] == ' ' || reply[i] == '"')) {
+            ++i;
+        }
+        for (; i < reply.size() && reply[i] >= '0' && reply[i] <= '9' && id.size() < 20; ++i) {
+            id += reply[i];
+        }
+    }
+    return id;
+}
+
+struct Sent {
+    bool ok = false;
+    bool reached = false;  // BugSplat answered (so a failure wasn't the connection)
+    std::string crashId;
+};
+
+// The report's files as they go out: the minidump and crash.txt, with the user's name masked in
+// both (reports saved before it was left out of them are masked here, before anything is sent).
+struct Report {
+    std::string version;
+    std::vector<std::uint8_t> dump;
+    std::optional<std::vector<std::uint8_t>> text;
+};
+
+std::optional<Report> readReport(const fs::path& folder, const std::string& fallbackVersion) {
+    auto dump = readFile(folder / "neots2.dmp", kMaxSentDump);
+    if (!dump) {
+        return std::nullopt;
+    }
+    Report r{fallbackVersion, std::move(*dump), readFile(folder / "crash.txt", kMaxText)};
+    if (r.text) {
+        r.version = versionOf(*r.text, fallbackVersion);
+    }
+    const ts2::diag::User user = ts2::diag::thisUser();
+    ts2::diag::maskUser(r.dump, user);
+    if (r.text) {
+        ts2::diag::maskUser(*r.text, user);
+    }
+    return r;
+}
+
+std::string issuePage(const std::string& title, const std::string& body) {
+    return std::string(ts2::diag::kIssuesPage) + "?title=" + ts2::diag::linkEncoded(title) + "&body=" + ts2::diag::linkEncoded(body);
+}
+
+// A report already sent keeps a note of it, so it isn't sent twice.
+const fs::path kSentNote = "sent.txt";
+
+// Sends on a worker thread, behind a small "Sending..." message. On Windows that message has
+// Cancel, which stops before the next step, so a cancelled report is never committed.
+struct Sending {
+    std::atomic<bool> done{false}, cancelled{false};
+    Sent sent;
+};
+
+#ifdef _WIN32
+
+constexpr std::size_t kMaxResponse = 1 << 20;
+constexpr int kTimeoutMs = 30'000;
+
+std::wstring wide(const std::string& s) {
+    if (s.empty()) {
+        return {};
+    }
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
+    std::wstring w(static_cast<std::size_t>(n > 0 ? n : 0), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), w.data(), n);
+    return w;
 }
 
 // Closes a WinHTTP handle when it goes.
@@ -168,36 +257,17 @@ std::string md5(const std::vector<std::uint8_t>& data) {
     return ok ? hex : std::string();
 }
 
-// The version a crash.txt names ("Version: ..."), or `fallback`.
-std::string versionOf(const std::vector<std::uint8_t>& text, const std::string& fallback) {
-    const std::string s(text.begin(), text.end());
-    const auto at = s.find("\nVersion: ");
-    if (at == std::string::npos) {
-        return fallback;
-    }
-    const auto end = s.find_first_of("\r\n", at + 10);
-    const std::string v = s.substr(at + 10, end == std::string::npos ? std::string::npos : end - at - 10);
-    return v.empty() || v.size() > 64 ? fallback : v;
-}
-
-struct Sent {
-    bool ok = false;
-    bool reached = false;  // BugSplat answered (so a failure wasn't the connection)
-    std::string crashId;
-};
-
 // The three steps BugSplat asks for: an upload link, the zip put there, then the upload committed.
 Sent send(const fs::path& folder, const std::string& fallbackVersion, const std::atomic<bool>& cancelled) {
     Sent sent;
-    auto dump = readFile(folder / "neots2.dmp", kMaxSentDump);
-    const auto text = readFile(folder / "crash.txt", kMaxText);
-    if (!dump) {
+    auto report = readReport(folder, fallbackVersion);
+    if (!report) {
         return sent;
     }
-    const std::string version = text ? versionOf(*text, fallbackVersion) : fallbackVersion;
-    std::vector<ts2::diag::ZipFile> files{{"neots2.dmp", std::move(*dump)}};
-    if (text) {
-        files.push_back({"crash.txt", *text});
+    const std::string version = report->version;
+    std::vector<ts2::diag::ZipFile> files{{"neots2.dmp", std::move(report->dump)}};
+    if (report->text) {
+        files.push_back({"crash.txt", std::move(*report->text)});
     }
     const auto zipped = ts2::diag::zip(files);
     if (zipped.empty()) {
@@ -241,28 +311,9 @@ Sent send(const fs::path& folder, const std::string& fallbackVersion, const std:
         return sent;
     }
     sent.ok = true;
-    // crashId is a number in the reply ("crashId":123). jsonString reads strings, so it's read here.
-    const std::string& reply = committed->body;
-    const auto at = reply.find("\"crashId\"");
-    const auto colon = at == std::string::npos ? at : reply.find(':', at);
-    if (colon != std::string::npos) {
-        std::size_t i = colon + 1;
-        while (i < reply.size() && (reply[i] == ' ' || reply[i] == '"')) {
-            ++i;
-        }
-        for (; i < reply.size() && reply[i] >= '0' && reply[i] <= '9' && sent.crashId.size() < 20; ++i) {
-            sent.crashId += reply[i];
-        }
-    }
+    sent.crashId = crashIdOf(committed->body);
     return sent;
 }
-
-// Sends on a worker thread behind a small "Sending..." message that closes itself when done.
-// Cancel stops before the next step, so a cancelled report is never committed.
-struct Sending {
-    std::atomic<bool> done{false}, cancelled{false};
-    Sent sent;
-};
 
 void sendShowingProgress(const fs::path& folder, const std::string& version, Sending& state) {
     std::thread worker([&] {
@@ -295,12 +346,58 @@ void sendShowingProgress(const fs::path& folder, const std::string& version, Sen
     worker.join();  // after a cancel this is quick: the request's handle was closed
 }
 
-std::string issuePage(const std::string& title, const std::string& body) {
-    return std::string(ts2::diag::kIssuesPage) + "?title=" + ts2::diag::linkEncoded(title) + "&body=" + ts2::diag::linkEncoded(body);
+#else
+
+// A boundary for the form that no file holds: 32 random hex digits.
+std::string randomBoundary() {
+    std::random_device random;
+    std::string boundary = "----NeoTS2Report";
+    for (int i = 0; i < 4; ++i) {
+        char part[9];
+        std::snprintf(part, sizeof part, "%08x", static_cast<unsigned>(random()));
+        boundary += part;
+    }
+    return boundary;
 }
 
-// A report already sent keeps a note of it, so it isn't sent twice.
-const fs::path kSentNote = "sent.txt";
+// One POST to BugSplat's endpoint for the crash catcher's minidumps, with crash.txt beside it.
+Sent send(const fs::path& folder, const std::string& fallbackVersion, const std::atomic<bool>&) {
+    Sent sent;
+    auto report = readReport(folder, fallbackVersion);
+    if (!report) {
+        return sent;
+    }
+    std::vector<ts2::diag::FormFile> files{{"upload_file_minidump", "neots2.dmp", std::move(report->dump)}};
+    if (report->text) {
+        files.push_back({"crash.txt", "crash.txt", std::move(*report->text)});
+    }
+    const std::string boundary = randomBoundary();
+    const std::string form = ts2::diag::formBody({{"database", std::string(ts2::diag::kReportDatabase)},
+                                                   {"product", std::string(ts2::diag::kReportApp)},
+                                                   {"version", report->version},
+                                                   {"format", "minidump"}},
+                                                  files, boundary);
+    files.clear();
+    const auto reply = post("https://" + std::string(ts2::diag::kReportDatabase) + ".bugsplat.com/post/bp/crash/crashpad.php",
+                            "multipart/form-data; boundary=" + boundary, form);
+    sent.reached = reply.has_value();
+    // A reply that names a status other than "success" didn't take it.
+    const std::string status = reply ? ts2::diag::jsonString(*reply, "status") : std::string();
+    sent.ok = reply.has_value() && (status.empty() || status == "success");
+    sent.crashId = reply ? crashIdOf(*reply) : std::string();
+    return sent;
+}
+
+void sendShowingProgress(const fs::path& folder, const std::string& version, Sending& state) {
+    std::thread worker([&] {
+        state.sent = send(folder, version, state.cancelled);
+        state.done = true;
+    });
+    showWhile("Sending the report", "This takes a few seconds.", state.done);
+    worker.join();
+}
+
+#endif
 
 } // namespace
 
@@ -311,6 +408,7 @@ bool canSend(const fs::path& folder) {
 }
 
 bool startSending(const fs::path& folder) {
+#ifdef _WIN32
     wchar_t exe[MAX_PATH] = {};
     if (GetModuleFileNameW(nullptr, exe, MAX_PATH) == 0) {
         return false;
@@ -325,6 +423,18 @@ bool startSending(const fs::path& folder) {
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
     return true;
+#else
+    const std::string exe = ownExecutable().string();
+    const std::string report = folder.string();
+    if (exe.empty() || !hasCatcher()) {
+        return false;  // without the catcher there is nothing to send this way
+    }
+    // The program itself with its arguments, no shell, so nothing in the folder's name is run.
+    std::string sendFlag = "--send-report";
+    std::vector<char*> args{const_cast<char*>(exe.c_str()), sendFlag.data(), const_cast<char*>(report.c_str()), nullptr};
+    pid_t child = 0;
+    return posix_spawn(&child, exe.c_str(), nullptr, nullptr, args.data(), environ) == 0;
+#endif
 }
 
 int sendAndTell(const fs::path& folder, const std::string& version) {
@@ -335,11 +445,11 @@ int sendAndTell(const fs::path& folder, const std::string& version) {
     }
     if (!canSend(folder)) {
         const int choice = choose("This report can't be sent from here",
-                                  "Its crash dump is missing or too big. It is still saved on this computer.",
+                                  "Its crash dump is missing or too big.\nIt is still saved on this computer.",
                                   {"Report on GitHub instead\nOpens a new report in your browser, and the saved files to add to it.", "Close"});
         if (choice == 0) {
-            open(wide(issuePage("Crash report", "**What I was doing:**\n\n\nPlease attach crash.txt from the folder that opened.\n")));
-            open(folder.wstring());
+            openLink(issuePage("Crash report", "**What I was doing:**\n\n\nPlease attach crash.txt from the folder that opened.\n"));
+            openFolder(folder);
         }
         return 1;
     }
@@ -349,24 +459,24 @@ int sendAndTell(const fs::path& folder, const std::string& version) {
         if (state.sent.ok) {
             std::ofstream(folder / kSentNote) << "crashId=" << state.sent.crashId << "\n";
             const std::string id = state.sent.crashId.empty() ? std::string() : " (report " + state.sent.crashId + ")";
-            const int choice = choose("Thank you", "The report was sent" + id + ". It helps fix the problem.",
+            const int choice = choose("Thank you", "The report was sent" + id + ".\nIt helps fix the problem.",
                                       {"Tell us more on GitHub\nOpens a page in your browser to say what you were doing. Optional.", "Close"});
             if (choice == 0) {
-                open(wide(issuePage("Crash" + id, "NeoTS2 sent a crash report" + id + ".\n\n**What I was doing:**\n\n")));
+                openLink(issuePage("Crash" + id, "NeoTS2 sent a crash report" + id + ".\n\n**What I was doing:**\n\n"));
             }
             return 0;
         }
         if (state.cancelled) {
             return 1;  // the tester chose not to send it
         }
-        const std::string why = state.sent.reached ? "The report service didn't take it just now; it may be busy."
+        const std::string why = state.sent.reached ? "The report service didn't take it just now. It may be busy."
                                                    : "Maybe there's no internet connection right now.";
-        const int choice = choose("The report couldn't be sent", why + " The report is still saved on this computer.",
+        const int choice = choose("The report couldn't be sent", why + "\nThe report is still saved on this computer.",
                                   {"Try again", "Report on GitHub instead\nOpens a new report in your browser, and the saved files to add to it.",
                                    "Close"});
         if (choice == 1) {
-            open(wide(issuePage("Crash report", "**What I was doing:**\n\n\nPlease attach crash.txt and neots2.dmp from the folder that opened.\n")));
-            open(folder.wstring());
+            openLink(issuePage("Crash report", "**What I was doing:**\n\n\nPlease attach crash.txt and neots2.dmp from the folder that opened.\n"));
+            openFolder(folder);
         }
         if (choice != 0) {
             return 1;
@@ -376,13 +486,3 @@ int sendAndTell(const fs::path& folder, const std::string& version) {
 }
 
 } // namespace app::crash
-
-#else
-
-namespace app::crash {
-bool canSend(const std::filesystem::path&) { return false; }
-bool startSending(const std::filesystem::path&) { return false; }
-int sendAndTell(const std::filesystem::path&, const std::string&) { return 1; }
-} // namespace app::crash
-
-#endif

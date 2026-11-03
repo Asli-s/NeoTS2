@@ -6,7 +6,9 @@
 # 1. Checks main: the release number in CMakeLists.txt is new and larger than the last release, and
 #    main matches its remote when there is one.
 # 2. Builds main's commit in a fresh copy of the repository (so local changes can't get in), as a
-#    release with warnings as errors, runs the tests and checks the version the exe carries.
+#    release with warnings as errors, runs the tests and checks the version the exe carries. The copy
+#    is made outside the user's folder (-Work), since the exe keeps the paths of its source files,
+#    and the shipped programs are checked for the user's folder name.
 # 3. Uploads the symbols to BugSplat (see upload_symbols.ps1) and keeps the exe and .pdb files in
 #    releases\v<number>, with the zip players download (see package.ps1). A rehearsal makes the zip
 #    too, in releases\rehearsal.
@@ -18,6 +20,7 @@ param(
     [string]$Next = "",
     [string]$Tool = "symbol-upload-windows.exe",
     [string]$Settings = "build",
+    [string]$Work = "C:\NeoTS2-build",
     [switch]$Rehearse
 )
 
@@ -112,7 +115,13 @@ if (-not $cmake) { throw "cmake not found." }
 "Releasing NeoTS2 $number from main ($short); the next number will be $Next."
 
 # 2. A fresh copy of main's commit, built as the release and tested.
-$copy = Join-Path ([IO.Path]::GetTempPath()) "neots2-release-$number"
+$work = [IO.Path]::GetFullPath($Work).TrimEnd('\')
+$profile = [IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\')
+if ($work -ieq $profile -or $work.StartsWith("$profile\", [StringComparison]::OrdinalIgnoreCase)) {
+    throw "-Work $work is inside the user's folder, whose name the programs would then carry."
+}
+New-Item -ItemType Directory -Force $work | Out-Null
+$copy = Join-Path $work "release-$number"
 if (Test-Path $copy) { Invoke-Native git @("worktree", "remove", "--force", $copy) }
 Invoke-Native git @("worktree", "add", "-q", "--detach", $copy, $commit)
 try {
@@ -129,6 +138,19 @@ try {
     $info = (Get-Item (Join-Path $build "Release\neots2.exe")).VersionInfo
     if ($info.ProductVersion -ne $expected -or $info.FileVersionRaw -ne [version]"$number.0") {
         throw "neots2.exe carries version $($info.ProductVersion) ($($info.FileVersionRaw)), not $expected."
+    }
+    # The user's folder name between path separators, in the programs that ship. UTF-16 text is
+    # found too, since the zero bytes are dropped before searching.
+    $userFolder = "[\\/]$([regex]::Escape((Split-Path -Leaf $profile)))[\\/]"
+    foreach ($name in "neots2.exe", "neots2-launcher.exe", "SDL3.dll") {
+        $bytes = [IO.File]::ReadAllBytes((Join-Path $build "Release\$name"))
+        $text = [Text.Encoding]::GetEncoding(28591).GetString($bytes).Replace([string][char]0, "")
+        $found = [regex]::Matches($text, $userFolder, "IgnoreCase")
+        if ($found.Count -gt 0) {
+            $from = [Math]::Max(0, $found[0].Index - 20)
+            $sample = $text.Substring($from, [Math]::Min(80, $text.Length - $from))
+            throw "$name holds the user's folder name $($found.Count) times, first in: $sample"
+        }
     }
     "Built and tested NeoTS2 $expected."
     if ($Rehearse) {

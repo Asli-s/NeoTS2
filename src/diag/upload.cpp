@@ -151,9 +151,20 @@ std::string jsonString(std::string_view json, std::string_view key) {
 }
 
 std::string formBody(const std::vector<std::pair<std::string, std::string>>& fields, std::string_view boundary) {
+    return formBody(fields, {}, boundary);
+}
+
+std::string formBody(const std::vector<std::pair<std::string, std::string>>& fields, const std::vector<FormFile>& files,
+                     std::string_view boundary) {
     std::string body;
     for (const auto& [name, value] : fields) {
         body += "--" + std::string(boundary) + "\r\nContent-Disposition: form-data; name=\"" + name + "\"\r\n\r\n" + value + "\r\n";
+    }
+    for (const auto& file : files) {
+        body += "--" + std::string(boundary) + "\r\nContent-Disposition: form-data; name=\"" + file.field + "\"; filename=\"" +
+                file.fileName + "\"\r\nContent-Type: application/octet-stream\r\n\r\n";
+        body.append(file.data.begin(), file.data.end());
+        body += "\r\n";
     }
     body += "--" + std::string(boundary) + "--\r\n";
     return body;

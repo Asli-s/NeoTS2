@@ -33,4 +33,14 @@ std::string jsonString(std::string_view json, std::string_view key);
 // A multipart/form-data body of plain fields, split by `boundary`.
 std::string formBody(const std::vector<std::pair<std::string, std::string>>& fields, std::string_view boundary);
 
+// The same with files after the fields, each sent as bytes under its field name and file name.
+// `boundary` must not appear in any file, so it should be random and long.
+struct FormFile {
+    std::string field;
+    std::string fileName;
+    std::vector<std::uint8_t> data;
+};
+std::string formBody(const std::vector<std::pair<std::string, std::string>>& fields, const std::vector<FormFile>& files,
+                     std::string_view boundary);
+
 } // namespace ts2::diag

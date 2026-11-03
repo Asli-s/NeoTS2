@@ -40,6 +40,20 @@ for program in "$stage/neots2" "$stage/neots2-launcher"; do
     patchelf --set-rpath '$ORIGIN/lib' "$program"
 done
 
+# With crash reports (NEOTS2_CRASHPAD): the crash catcher's program goes beside the game, and the
+# symbols for BugSplat are kept in package/symbols (upload them with BugSplat's symbol-upload) before
+# the shipped programs are stripped. Their build ids still match.
+crashpad=no
+if [ -f "$build/crashpad_handler" ]; then
+    crashpad=yes
+    cp "$build/crashpad_handler" "$stage"
+    mkdir -p "$build/package/symbols"
+    for program in neots2 crashpad_handler; do
+        cp "$stage/$program" "$build/package/symbols/$program"
+        strip --strip-debug "$stage/$program"
+    done
+fi
+
 cp "$source/LICENSE" "$stage/LICENSE.txt"
 
 # Every library's license, as their licenses ask when they are shipped.
@@ -63,6 +77,14 @@ notice() {
     awk '/This software is available under 2 licenses/ { text = "" } { text = text $0 "\n" } END { printf "%s", text }' \
         "$source/third_party/stb/stb_image.h"
     notice "Lua 5.0.3 (MIT License)" "$source/third_party/lua-5.0.3/COPYRIGHT"
+    if [ "$crashpad" = yes ]; then
+        licenses="$source/third_party/licenses/crashpad"
+        notice "Crashpad (Apache License 2.0), in crashpad_handler and neots2" "$licenses/Crashpad-LICENSE.txt"
+        notice "mini_chromium (BSD 3-Clause License), part of Crashpad" "$licenses/mini_chromium-LICENSE.txt"
+        notice "Linux Syscall Support (BSD 3-Clause License), part of Crashpad" "$licenses/linux-syscall-support-LICENSE.txt"
+        notice "getopt (public domain), part of Crashpad" "$licenses/getopt-LICENSE.txt"
+        notice "MPack (MIT License), part of Crashpad" "$licenses/mpack-LICENSE.txt"
+    fi
 } > "$stage/THIRD-PARTY-NOTICES.txt"
 
 cat > "$stage/Start here.txt" <<EOF

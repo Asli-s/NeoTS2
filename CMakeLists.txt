@@ -13,6 +13,9 @@ option(NEOTS2_STRICT "Treat compiler warnings as errors" OFF)
 option(NEOTS2_HARDEN "Build with Windows exploit protections (Control Flow Guard, CET shadow stacks)" ON)
 option(NEOTS2_ANALYZE "Run the compiler's code analysis on our code (MSVC; slow, for a separate check build)" OFF)
 option(NEOTS2_STL_CHECKS "Check every index into standard containers (vector, array, span, string...) in all builds" ON)
+# Crash reports on Linux and macOS need Crashpad, downloaded when CMake runs (and libcurl's headers on
+# Linux). On by default in release builds only, so other builds need neither.
+option(NEOTS2_CRASHPAD "Catch crashes on Linux and macOS with Crashpad, for crash reports" ${NEOTS2_RELEASE})
 
 # An index past a container's end stops the program at once instead of reading or writing memory
 # it shouldn't, so a bug a broken file reaches can't go further. Each standard library has its own switch.
@@ -67,7 +70,18 @@ endif()
 if(MSVC AND NOT NEOTS2_FUZZ AND NOT NEOTS2_ASAN AND NOT NEOTS2_COVERAGE)
     # /FS: several compilers (or builds) may write one .pdb at once.
     add_compile_options($<$<CONFIG:Release>:/Zi> $<$<CONFIG:Release>:/FS>)
-    add_link_options($<$<CONFIG:Release>:/DEBUG> $<$<CONFIG:Release>:/OPT:REF> $<$<CONFIG:Release>:/OPT:ICF>)
+    # /PDBALTPATH keeps only the .pdb's file name in the exe, not the build folder's path.
+    add_link_options($<$<CONFIG:Release>:/DEBUG> $<$<CONFIG:Release>:/OPT:REF> $<$<CONFIG:Release>:/OPT:ICF>
+                     $<$<CONFIG:Release>:/PDBALTPATH:%_PDB%>)
+endif()
+
+# The same on Linux and macOS when crashes are caught there: debug info, and on Linux a build id that
+# matches a crash dump to its symbols. The packaging scripts keep the symbols and strip the programs.
+if(NEOTS2_CRASHPAD AND NOT WIN32)
+    add_compile_options($<$<CONFIG:Release>:-g>)
+    if(NOT APPLE)
+        add_link_options(-Wl,--build-id)
+    endif()
 endif()
 
 add_library(project_warnings INTERFACE)
@@ -110,7 +124,7 @@ else()
 endif()
 
 # The run's log and the text of crash reports.
-add_library(ts2diag src/diag/log.cpp src/diag/report.cpp src/diag/timing.cpp src/diag/upload.cpp)
+add_library(ts2diag src/diag/log.cpp src/diag/report.cpp src/diag/timing.cpp src/diag/upload.cpp src/diag/user.cpp)
 target_include_directories(ts2diag PUBLIC src)
 target_link_libraries(ts2diag PRIVATE project_warnings)
 
@@ -136,6 +150,7 @@ add_library(ts2formats
     src/formats/fami.cpp
     src/formats/famt.cpp
     src/formats/swaf.cpp
+    src/formats/want_trees.cpp
     src/formats/propset.cpp
     src/formats/anim.cpp
     src/formats/face_shape.cpp
@@ -228,6 +243,7 @@ target_link_libraries(ts2content PUBLIC ts2formats ts2diag ts2paths PRIVATE proj
 add_library(ts2sim
     src/sim/index_code_source.cpp
     src/sim/lot_world.cpp
+    src/sim/want_refill.cpp
     src/sim/lot_simulation.cpp
     src/sim/look_at.cpp
     src/sim/ground_click.cpp
@@ -305,6 +321,7 @@ add_library(ts2scene
     src/scene/imposters.cpp
     src/scene/lot_skirt.cpp
     src/scene/pool_water.cpp
+    src/scene/terrain_water.cpp
     src/scene/object_sun.cpp
     src/scene/pick.cpp
     src/scene/object_lights.cpp
@@ -362,7 +379,7 @@ target_link_libraries(ts2renderplan PUBLIC ts2scene PRIVATE project_warnings)
 
 if(NEOTS2_FUZZ)
     foreach(target qfs_fuzz dbpf_fuzz cobject_fuzz bhav_fuzz str_fuzz bcon_fuzz fcns_fuzz glob_fuzz objd_fuzz
-                   objt_fuzz objm_fuzz xobj_fuzz wallgraph_fuzz array3d_fuzz srel_fuzz sdsc_fuzz fami_fuzz famt_fuzz slot_fuzz swaf_fuzz propset_fuzz ttab_fuzz luascript_fuzz ngbh_fuzz datatables_fuzz scenegraph_fuzz stringmap_fuzz walllayer_fuzz namemap_fuzz fencepostlayer_fuzz roofs_fuzz terrain_fuzz reia_fuzz
+                   objt_fuzz objm_fuzz xobj_fuzz wallgraph_fuzz array3d_fuzz srel_fuzz sdsc_fuzz fami_fuzz famt_fuzz slot_fuzz swaf_fuzz want_trees_fuzz propset_fuzz ttab_fuzz luascript_fuzz ngbh_fuzz datatables_fuzz scenegraph_fuzz stringmap_fuzz walllayer_fuzz namemap_fuzz fencepostlayer_fuzz roofs_fuzz terrain_fuzz reia_fuzz
                    anim_fuzz image_fuzz lot_description_fuzz nhood_objects_fuzz nhood_terrain_fuzz objf_fuzz reference_list_fuzz simi_fuzz weather_fuzz neighborhood_id_fuzz camera_config_fuzz nhood_paint_rules_fuzz ui_script_fuzz cursor_fuzz effects_fuzz
                    neighbor_remap_fuzz face_shape_fuzz)
         add_executable(${target} fuzz/${target}.cpp)
@@ -447,7 +464,7 @@ else()
         tests/vm_scripts_tests.cpp tests/simulation_tests.cpp tests/route_planning_tests.cpp tests/vm_walking_tests.cpp
         tests/vm_set_to_next_tests.cpp tests/vm_animation_tests.cpp tests/formats_tests.cpp
         tests/models_and_images_tests.cpp tests/scene_tests.cpp tests/assets_tests.cpp tests/lighting_tests.cpp tests/render_plan_tests.cpp tests/content_tests.cpp
-        tests/ui_and_diag_tests.cpp tests/paths_tests.cpp tests/fuzz_regressions_tests.cpp src/ui/pie_layout.cpp src/ui/tip_layout.cpp src/ui/font_metrics.cpp src/ui/drag_arrow.cpp src/ui/scroll_bar.cpp app/object_materials.cpp)
+        tests/ui_and_diag_tests.cpp tests/paths_tests.cpp tests/fuzz_regressions_tests.cpp src/ui/pie_layout.cpp src/ui/tip_layout.cpp src/ui/font_metrics.cpp src/ui/drag_arrow.cpp src/ui/scroll_bar.cpp src/ui/animated_bitmap.cpp app/object_materials.cpp)
     target_link_libraries(vm_tests PRIVATE ts2renderplan ts2sim ts2scene ts2paths ts2settings lua50 project_warnings)
     # Every fuzz target's entry point under its own name, so the tests replay the inputs kept in
     # fuzz/regressions/<target> through the same code the fuzzer ran.
@@ -568,7 +585,7 @@ else()
         # The shaders the OpenGL 2 renderer draws with (skinned ones are posed on the CPU there).
         set(gl2_shaders scene.vert scene.frag ui.vert ui.frag terrain.vert terrain.frag sky.vert sky.frag road.vert road.frag imposter.vert imposter.frag clip.vert clip.frag water.vert water.frag)
         if(sdlgpu_enabled)
-        foreach(shader scene.vert skinned.vert scene.frag ui.vert ui.frag terrain.vert terrain.frag sky.vert sky.frag water.vert water.frag road.vert road.frag imposter.vert imposter.frag clip.vert clip.frag shadow_caster.frag shadow_blur.frag object_blur.frag)
+        foreach(shader scene.vert skinned.vert scene.frag ui.vert ui.frag terrain.vert terrain.frag sky.vert sky.frag water.vert water.frag pool.vert pool.frag pond.vert pond.frag caustics.frag pool_shadow.frag road.vert road.frag imposter.vert imposter.frag clip.vert clip.frag shadow_caster.frag shadow_blur.frag object_blur.frag)
             if(shader MATCHES "vert$")
                 set(profile vs_6_0)
             else()
@@ -689,7 +706,7 @@ else()
             add_library(freetype INTERFACE IMPORTED)
             target_link_libraries(freetype INTERFACE Freetype::Freetype)
         endif()
-        add_library(ts2ui src/ui/fonts.cpp src/ui/font_metrics.cpp src/ui/screen.cpp src/ui/pie_layout.cpp src/ui/tip_layout.cpp src/ui/drag_arrow.cpp src/ui/scroll_bar.cpp)
+        add_library(ts2ui src/ui/fonts.cpp src/ui/font_metrics.cpp src/ui/screen.cpp src/ui/pie_layout.cpp src/ui/tip_layout.cpp src/ui/drag_arrow.cpp src/ui/scroll_bar.cpp src/ui/animated_bitmap.cpp)
         target_link_libraries(ts2ui PUBLIC ts2content PRIVATE freetype project_warnings)
         # Text layout is tested with our own small font (tests/data), so only where the UI builds.
         target_sources(vm_tests PRIVATE tests/text_layout_tests.cpp)
@@ -723,6 +740,33 @@ else()
         endif()
         if(WIN32)
             target_sources(neots2 PRIVATE app/icon/neots2.rc)
+        endif()
+        # The crash catcher (app/crash_catcher.cpp) is the only code that includes Crashpad's headers,
+        # as system headers, so its warnings and build settings stay out of ours.
+        add_library(neots2_catcher STATIC app/crash_catcher.cpp)
+        target_link_libraries(neots2_catcher PRIVATE ts2diag project_warnings)
+        target_link_libraries(neots2 PRIVATE neots2_catcher)
+        if(NEOTS2_CRASHPAD AND NOT WIN32 AND platform_name STREQUAL "sdl3")
+            # Sentry's copy of Crashpad (Apache-2.0), which builds with CMake, at a fixed commit.
+            include(FetchContent)
+            set(CRASHPAD_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+            set(CRASHPAD_ENABLE_INSTALL_DEV OFF CACHE BOOL "" FORCE)
+            FetchContent_Declare(crashpad GIT_REPOSITORY https://github.com/getsentry/crashpad.git
+                                 GIT_TAG db81331bc0dd5904cbf84de59f96e87e8366f182)
+            FetchContent_MakeAvailable(crashpad)
+            target_include_directories(neots2_catcher SYSTEM PRIVATE ${crashpad_SOURCE_DIR}
+                                       ${crashpad_SOURCE_DIR}/third_party/mini_chromium/mini_chromium)
+            target_compile_definitions(neots2_catcher PRIVATE NEOTS2_CRASHPAD=1
+                                       $<TARGET_PROPERTY:crashpad_interface,INTERFACE_COMPILE_DEFINITIONS>)
+            target_link_libraries(neots2_catcher PRIVATE crashpad::client crashpad::util)
+            target_compile_definitions(neots2 PRIVATE NEOTS2_CRASHPAD=1)
+            # The launcher's built-in Noto Sans (made below), for the window shown while a report is sent.
+            target_sources(neots2 PRIVATE ${CMAKE_BINARY_DIR}/generated/noto_sans_Regular.cpp
+                           ${CMAKE_BINARY_DIR}/generated/noto_sans_SemiBold.cpp)
+            # The handler program goes beside the game, where the catcher starts it from.
+            add_dependencies(neots2 crashpad_handler)
+            add_custom_command(TARGET neots2 POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:crashpad_handler> $<TARGET_FILE_DIR:neots2>)
         endif()
         # The app loads its shaders and SDL from beside itself (SDL 1.2 is linked in).
         add_custom_command(TARGET neots2 POST_BUILD

@@ -1,5 +1,6 @@
 #include "unexpected_exit.hpp"
 
+#include "crash_catcher.hpp"
 #include "crash_dialog.hpp"
 #include "diag/log.hpp"
 #include "report_upload.hpp"
@@ -10,6 +11,7 @@
 #include <cstdlib>
 #include <deque>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <string_view>
 #include <system_error>
@@ -21,6 +23,11 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <winevt.h>
+#else
+#include <cerrno>
+#include <csignal>
+#include <ctime>
+#include <unistd.h>
 #endif
 
 namespace app::crash {
@@ -102,12 +109,6 @@ std::string utf8(const std::wstring& w) {
     return s;
 }
 
-// The user's own folder, which reports don't name.
-std::string userFolder() {
-    wchar_t profile[MAX_PATH] = {};
-    return GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH) > 0 ? utf8(profile) : std::string();
-}
-
 std::string lower(std::string s) {
     for (char& c : s) {
         c = static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
@@ -169,6 +170,23 @@ fs::path windowsDump(std::uint32_t pid, std::uint64_t created) {
     return written >= created && size <= kMaxSentDump ? dump : fs::path();
 }
 
+#else
+
+// Whether the process a marker names is still running. A reused pid counts as running, which puts
+// its report and its dump off until the next start.
+bool stillRunning(std::uint32_t pid) {
+    return kill(static_cast<pid_t>(pid), 0) == 0 || errno == EPERM;
+}
+
+// "2026-10-12 20:02:25" in the computer's time zone.
+std::string localTime(std::time_t when) {
+    std::tm tm{};
+    localtime_r(&when, &tm);
+    char text[32];
+    std::strftime(text, sizeof text, "%Y-%m-%d %H:%M:%S", &tm);
+    return text;
+}
+
 #endif
 
 std::string localTimeName(std::string_view started) {
@@ -205,10 +223,17 @@ fs::path markRunning(const fs::path& folder, const std::string& version, const f
     std::atexit(removeMarker);
     return marker;
 #else
-    (void)folder;
-    (void)version;
-    (void)log;
-    return {};
+    marker = folder / ("running-" + std::to_string(getpid()) + ".txt");
+    std::ofstream out(marker);
+    const std::time_t now = std::time(nullptr);
+    out << "pid=" << getpid() << "\ncreated=" << now << "\nversion=" << version << "\nstarted=" << localTime(now)
+        << "\nlog=" << ts2::diag::utf8(log.filename()) << "\n";
+    if (!out) {
+        marker.clear();
+        return {};
+    }
+    std::atexit(removeMarker);
+    return marker;
 #endif
 }
 
@@ -223,6 +248,7 @@ std::vector<UnexpectedRun> findUnexpectedExits(const fs::path& folder) {
             markers.push_back(it->path());
         }
     }
+    const ts2::diag::User user = ts2::diag::thisUser();
     for (const auto& file : markers) {
         auto fields = readFields(file);
         std::uint32_t pid = 0;
@@ -249,16 +275,98 @@ std::vector<UnexpectedRun> findUnexpectedExits(const fs::path& folder) {
         // Only a log name of ours is read: anything else in a marker could point at another file.
         const std::string log = fields["log"];
         const auto lines = ts2::diag::isLogName(log) ? lastLines(folder / log) : std::vector<std::string>{};
-        std::ofstream(run.folder / "crash.txt") << ts2::diag::withoutUserFolder(ts2::diag::unexpectedExitText(run.exit, lines), userFolder());
+        std::ofstream(run.folder / "crash.txt") << ts2::diag::withoutUser(ts2::diag::unexpectedExitText(run.exit, lines), user);
         if (const fs::path dump = windowsDump(pid, created); !dump.empty()) {
-            fs::copy_file(dump, run.folder / "neots2.dmp", fs::copy_options::overwrite_existing, ec);
+            // The copy is ours to change, never the dump Windows keeps.
+            if (fs::copy_file(dump, run.folder / "neots2.dmp", fs::copy_options::overwrite_existing, ec)) {
+                ts2::diag::maskUserInFile(run.folder / "neots2.dmp", user, kMaxSentDump);
+            }
         }
         ts2::diag::warning("the run started " + run.exit.started + " ended unexpectedly; its report is in " + ts2::diag::utf8(run.folder));
         found.push_back(std::move(run));
     }
     std::sort(found.begin(), found.end(), [](const auto& a, const auto& b) { return a.exit.started < b.exit.started; });
 #else
-    (void)folder;
+    // Only runs the crash catcher saved a dump of are reported: anything else that ends a run here
+    // (killed, logged out, the power went) leaves nothing worth sending.
+    const fs::path catcher = folder / kCatcherFolder;
+    auto dumps = caughtDumps(catcher);
+    std::sort(dumps.begin(), dumps.end(), [](const CaughtDump& a, const CaughtDump& b) { return a.when < b.when; });
+    std::vector<bool> taken(dumps.size(), false);
+    const ts2::diag::User user = ts2::diag::thisUser();
+    std::error_code ec;
+    // A report folder with crash.txt and the dump, masked, which then leaves the catcher's folder.
+    auto save = [&](UnexpectedRun run, const std::string& name, const std::string& log, const CaughtDump& dump) {
+        run.exit.caught = true;
+        run.folder = folder / name;
+        fs::create_directories(run.folder, ec);
+        // Only a log name of ours is read: anything else in a marker could point at another file.
+        const auto lines = ts2::diag::isLogName(log) ? lastLines(folder / log) : std::vector<std::string>{};
+        std::ofstream(run.folder / "crash.txt") << ts2::diag::withoutUser(ts2::diag::unexpectedExitText(run.exit, lines), user);
+        if (fs::copy_file(dump.file, run.folder / "neots2.dmp", fs::copy_options::overwrite_existing, ec)) {
+            ts2::diag::maskUserInFile(run.folder / "neots2.dmp", user, kMaxSentDump);
+            forgetDump(catcher, dump.id);
+        }
+        ts2::diag::warning("the run started " + run.exit.started + " crashed; its report is in " + ts2::diag::utf8(run.folder));
+        found.push_back(std::move(run));
+    };
+    std::vector<std::pair<std::time_t, fs::path>> markers;
+    for (fs::directory_iterator it(folder, ec), end; it != end; it.increment(ec)) {
+        if (ts2::diag::isMarkerName(ts2::diag::utf8(it->path().filename()))) {
+            auto fields = readFields(it->path());
+            std::time_t created = 0;
+            try {
+                created = static_cast<std::time_t>(std::stoll(fields["created"]));
+            } catch (const std::exception&) {
+                // unreadable: its run's dump, if any, is reported without it
+            }
+            markers.emplace_back(created, it->path());
+        }
+    }
+    std::sort(markers.begin(), markers.end());
+    for (std::size_t m = 0; m < markers.size(); ++m) {
+        const auto& [created, file] = markers[m];
+        const std::time_t next = m + 1 < markers.size() ? markers[m + 1].first : std::numeric_limits<std::time_t>::max();
+        auto fields = readFields(file);
+        std::uint32_t pid = 0;
+        try {
+            pid = static_cast<std::uint32_t>(std::stoul(fields["pid"]));
+        } catch (const std::exception&) {
+            // unreadable: treated as gone
+        }
+        if (pid != 0 && stillRunning(pid)) {
+            // Another copy of NeoTS2, running now. Its dumps wait with it for the next start.
+            for (std::size_t i = 0; i < dumps.size(); ++i) {
+                taken[i] = taken[i] || (dumps[i].when >= created && dumps[i].when < next);
+            }
+            continue;
+        }
+        fs::remove(file, ec);
+        // Its dump is the first one saved after it started and before the next run started.
+        for (std::size_t i = 0; i < dumps.size(); ++i) {
+            if (!taken[i] && dumps[i].when >= created && dumps[i].when < next) {
+                taken[i] = true;
+                UnexpectedRun run;
+                run.exit.version = fields["version"];
+                run.exit.started = fields["started"];
+                save(std::move(run), "crash-" + localTimeName(localTime(dumps[i].when)) + "-unexpected-" + std::to_string(pid),
+                     fields["log"], dumps[i]);
+                break;
+            }
+        }
+    }
+    // Dumps whose run left no marker (it couldn't be written) are still reported.
+    for (std::size_t i = 0; i < dumps.size(); ++i) {
+        if (!taken[i]) {
+            UnexpectedRun run;
+            run.exit.version = "unknown";
+            run.exit.started = localTime(dumps[i].when);
+            // The dump's place in the list keeps two dumps saved in the same second apart.
+            const std::string name = "crash-" + localTimeName(run.exit.started) + "-" + std::to_string(i);
+            save(std::move(run), name, std::string(), dumps[i]);
+        }
+    }
+    std::sort(found.begin(), found.end(), [](const auto& a, const auto& b) { return a.exit.started < b.exit.started; });
 #endif
     return found;
 }
@@ -266,9 +374,15 @@ std::vector<UnexpectedRun> findUnexpectedExits(const fs::path& folder) {
 void tell(const UnexpectedRun& run) {
     const auto crash = ts2::diag::crashOf(run.exit);
     Message m;
-    m.heading = "NeoTS2 closed unexpectedly last time";
-    m.text = "If you closed it yourself, you can ignore this. What it noted before closing was saved on this computer. "
-             "Sending it to us helps fix the problem; nothing is sent unless you choose to.";
+    if (run.exit.caught) {
+        m.heading = "NeoTS2 had to close last time";
+        m.text = "Something went wrong inside NeoTS2.\nA report was saved on this computer.\n\n"
+                 "Sending it to us helps fix the problem.\nNothing is sent unless you choose to.";
+    } else {
+        m.heading = "NeoTS2 closed unexpectedly last time";
+        m.text = "If you closed it yourself, you can ignore this.\nWhat it noted before closing was saved on this computer.\n\n"
+                 "Sending it to us helps fix the problem.\nNothing is sent unless you choose to.";
+    }
     m.close = "Close and continue to the game";
     m.details = crash.kind + (crash.where.module.empty() ? std::string() : " at " + ts2::diag::describe(crash.where)) +
                 "\nVersion: " + run.exit.version + "\nStarted: " + run.exit.started + "\nSaved in: " + ts2::diag::utf8(run.folder);

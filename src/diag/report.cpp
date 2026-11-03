@@ -1,5 +1,6 @@
 #include "diag/report.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <stdexcept>
 
@@ -75,6 +76,46 @@ std::string crashText(const Crash& crash, const std::vector<std::string>& recent
          "              those stacks, which can include paths and names of files it had open.\n"
          "Nothing is sent anywhere by NeoTS2; attach them to a report only if you want to.\n";
     return t;
+}
+
+std::string wrapped(std::string_view text, std::size_t width) {
+    // Characters, not bytes: UTF-8 continuation bytes don't count.
+    auto length = [](std::string_view s) {
+        std::size_t n = 0;
+        for (const char c : s) {
+            n += (static_cast<unsigned char>(c) & 0xC0) != 0x80 ? 1 : 0;
+        }
+        return n;
+    };
+    std::string out;
+    std::size_t start = 0;
+    while (start <= text.size()) {
+        const std::size_t end = std::min(text.find('\n', start), text.size());
+        const std::string_view line = text.substr(start, end - start);
+        std::size_t used = 0;
+        std::size_t at = 0;
+        while (at < line.size()) {
+            const std::size_t space = std::min(line.find(' ', at), line.size());
+            const std::string_view word = line.substr(at, space - at);
+            const std::size_t n = length(word);
+            if (used > 0 && used + 1 + n > width) {
+                out += '\n';
+                used = 0;
+            } else if (used > 0) {
+                out += ' ';
+                ++used;
+            }
+            out += word;
+            used += n;
+            at = space + 1;
+        }
+        if (end == text.size()) {
+            break;
+        }
+        out += '\n';
+        start = end + 1;
+    }
+    return out;
 }
 
 std::string fileName(std::string_view path) {
@@ -183,7 +224,7 @@ Crash crashOf(const UnexpectedExit& exit) {
     Crash c;
     c.version = exit.version;
     c.time = exit.started;
-    c.kind = "closed unexpectedly";
+    c.kind = exit.caught ? "crash" : "closed unexpectedly";
     const auto field = [&](const char* name) {
         const auto it = exit.windows.find(name);
         return it != exit.windows.end() ? it->second : std::string();
@@ -203,7 +244,33 @@ Crash crashOf(const UnexpectedExit& exit) {
     return c;
 }
 
+namespace {
+
+// The crash.txt for a crash the crash catcher caught: the minidump beside it says what happened.
+std::string caughtCrashText(const UnexpectedExit& exit, const std::vector<std::string>& lastLines) {
+    std::string t = "NeoTS2 had to close\n\n";
+    t += "The run that started " + exit.started + " crashed. Its crash dump was saved, and this was\n"
+         "found when NeoTS2 started again.\n\n";
+    t += "Version: " + exit.version + "\n";
+    t += "\nLast lines of that run's log:\n";
+    for (const auto& line : lastLines) {
+        t += "  " + line + "\n";
+    }
+    t += "\nWhat these files hold, for you to decide what to send:\n"
+         "  crash.txt   this text. The log lines can name files and folders on your computer\n"
+         "              (your home folder is written as %USERPROFILE%, so not your user name).\n"
+         "  neots2.dmp  the crash dump: the program's threads, their stacks and some of its memory,\n"
+         "              which can include such paths too (your user name in those paths is overwritten).\n"
+         "Nothing is sent anywhere unless you choose to send it.\n";
+    return t;
+}
+
+} // namespace
+
 std::string unexpectedExitText(const UnexpectedExit& exit, const std::vector<std::string>& lastLines) {
+    if (exit.caught) {
+        return caughtCrashText(exit, lastLines);
+    }
     std::string t = "NeoTS2 closed unexpectedly\n\n";
     t += "The run that started " + exit.started + " ended without a word: Windows ended it at once (some\n"
          "crashes can't be caught from inside), or it was closed from outside (Task Manager, shutting\n"

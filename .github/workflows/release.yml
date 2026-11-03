@@ -132,7 +132,7 @@ jobs:
             libasound2-dev libpulse-dev libpipewire-0.3-dev libx11-dev libxext-dev libxrandr-dev \
             libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxtst-dev libxkbcommon-dev libwayland-dev \
             libdecor-0-dev libdrm-dev libgbm-dev libgl1-mesa-dev libegl1-mesa-dev libdbus-1-dev \
-            libibus-1.0-dev libudev-dev
+            libibus-1.0-dev libudev-dev libcurl4-openssl-dev
       # Ubuntu 24.04 has no SDL 3 package, so it is built here, the same version the Windows download ships.
       - name: Build SDL 3
         run: |
@@ -154,6 +154,13 @@ jobs:
         with:
           name: linux-x86_64
           path: build/NeoTS2-*-linux-x86_64.tar.gz
+          if-no-files-found: error
+      # The programs with their debug info, for crash reports. Upload these with BugSplat's
+      # symbol-upload before the release goes out.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64-symbols
+          path: build/package/symbols
           if-no-files-found: error
 
   macos:
@@ -178,4 +185,11 @@ jobs:
         with:
           name: macos-arm64
           path: build-macos/NeoTS2-*-macos-arm64.zip
+          if-no-files-found: error
+      # The programs' .dSYM symbols, for crash reports. Upload these with BugSplat's symbol-upload
+      # before the release goes out.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64-symbols
+          path: build-macos/symbols
           if-no-files-found: error

@@ -6,6 +6,7 @@
 //          [--shot <out.png>] [--seed n (the neighborhood ground's variants, so pictures repeat)]
 //          [--renderer sdlgpu|gl2 (what draws: SDL's GPU API, or OpenGL 2.1)]
 //          [--smooth-follow (the camera glides after a followed Sim, not in the original game)]
+//          [--pool-style-ponds (lots' ponds drawn like pools, not in the original game)]
 //          [--ui-scale 100|125|150|175|200 (the UI drawn larger, in percent, not in the original game)]
 //   neots2 <install folder> <lot.package> [--shot <out.png> [yaw pitch distance]]
 //          [--seed n (the lot's random draws when it has no saved random state, so runs repeat)]
@@ -188,7 +189,12 @@ std::string checkInstallFiles(const std::filesystem::path& install) {
         const auto products = ts2::content::findProducts(install);
         std::string list;
         for (const auto& product : products) {
-            std::filesystem::path folder = product.objectPackages.front().parent_path();
+            // A pack may hold only an objects bundle.
+            const auto& files = product.objectPackages.empty() ? product.objectBundles : product.objectPackages;
+            if (files.empty()) {
+                continue;
+            }
+            std::filesystem::path folder = files.front().parent_path();
             while (folder.has_relative_path() && ts2::paths::foldedName(folder.filename()) != "tsdata") {
                 folder = folder.parent_path();
             }
@@ -228,6 +234,7 @@ struct Options {
     std::optional<std::array<int, 2>> choose;
     bool bumpMapping = true;
     bool wallBumps = true;
+    bool poolStylePonds = false;  // lots' ponds drawn like pools (--pool-style-ponds)
     int bench = 0;  // frames to time before the shot (--bench)
     std::string lightState;  // a lighting state to light the lot with, in place of its clock's
     int hour = -1, minute = 0;  // the lot's clock to start from (--clock), -1 for the saved one
@@ -286,6 +293,8 @@ bool parseOptions(int argc, char** argv, Options& o) {
             i += 2;
         } else if (arg == "--light-state" && i + 1 < argc) {
             o.lightState = argv[++i];
+        } else if (arg == "--pool-style-ponds") {
+            o.poolStylePonds = true;
         } else if (arg == "--bumps" && i + 1 < argc && std::string_view(argv[i + 1]) == "off") {
             o.bumpMapping = false;
             ++i;
@@ -381,6 +390,8 @@ int main(int argc, char** argv) {
                 menu.unpaused = true;
             } else if (arg == "--smooth-follow") {
                 menu.smoothFollow = true;
+            } else if (arg == "--pool-style-ponds") {
+                menu.poolStylePonds = true;
             } else if (arg == "--timings") {
                 menu.timings = true;
             } else if (arg == "--size" && i + 2 < argc) {
@@ -484,6 +495,7 @@ int main(int argc, char** argv) {
         ts2::diag::info("loading the game's assets");
         ts2::scene::Assets assets(utf8Path(argv[1]));
         ts2::scene::SceneBuilder builder(assets);
+        builder.setPoolStylePonds(options.poolStylePonds);
         // A lot's Sims, run by their own scripts.
         std::unique_ptr<app::LotLife> life;
         // What the lot was lit with, for lighting it again as its clock moves on.
@@ -629,6 +641,7 @@ int main(int argc, char** argv) {
                     orbit.zoomTo(orbit.distance);
                 }
                 view.facing = orbit.facing();
+                view.eyeHeight = orbit.camera().eye[2];
                 renderer.show(ts2::scene::visibleInstances(scene, view));
                 auto camera = orbit.camera();
                 if (options.fov > 0) {
@@ -711,6 +724,7 @@ int main(int argc, char** argv) {
                 app::orbitStep(orbit, dt);
 
                 view.facing = orbit.facing();
+                view.eyeHeight = orbit.camera().eye[2];
                 renderer.show(ts2::scene::visibleInstances(scene, view));
                 if (life) {
                     life->setCamera(orbit.camera().eye);

@@ -9,7 +9,8 @@
 // Runs that ended without a word (Windows ended them at once, they were killed, the power went)
 // can't report themselves. Each run leaves a marker while it runs. At the next start, a marker whose
 // run is gone means it ended that way, and what it left behind (its log, what Windows noted) is
-// put together into a crash folder like any other.
+// put together into a crash folder like any other. On Linux and macOS every crash is reported this
+// way: the crash catcher saved its dump, and only runs with one are reported there.
 namespace app::crash {
 
 // Marks this run: "running-<pid>.txt" in `folder`, with its version, start and log file. It goes

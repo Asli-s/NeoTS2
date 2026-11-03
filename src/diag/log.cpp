@@ -1,5 +1,7 @@
 #include "diag/log.hpp"
 
+#include "diag/user.hpp"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -23,6 +25,7 @@ std::mutex mutex;  // guards the file and the order lines are added in
 std::ofstream out;
 std::uintmax_t fileBytes = 0, maxFileBytes = kMaxLogBytes;
 std::filesystem::path path;
+User user;  // not named in the log
 std::array<RecentLine, kRecentLines> recent;
 std::atomic<std::size_t> written{0};  // lines added so far, the next going to written % kRecentLines
 
@@ -90,8 +93,9 @@ bool open(const std::filesystem::path& folder, std::string_view header, std::uin
             path.clear();
             return false;
         }
-        out << header << '\n';
-        fileBytes = header.size() + 1;
+        const std::string shown = withoutUser(header, user);
+        out << shown << '\n';
+        fileBytes = shown.size() + 1;
         maxFileBytes = maxBytes;
         out.flush();
     }
@@ -104,9 +108,14 @@ std::filesystem::path file() {
     return path;
 }
 
-void write(Level level, std::string_view text) {
-    const std::string line = timeOfDay() + " " + name(level) + ": " + std::string(text);
+void hideUser(User who) {
     std::lock_guard lock(mutex);
+    user = std::move(who);
+}
+
+void write(Level level, std::string_view text) {
+    std::lock_guard lock(mutex);
+    const std::string line = withoutUser(timeOfDay() + " " + name(level) + ": " + std::string(text), user);
     std::fprintf(level == Level::Error || level == Level::Warning ? stderr : stdout, "%s\n", line.c_str());
     if (out && fileBytes + line.size() + 1 > maxFileBytes) {
         out << "(the log is full; later lines are only kept for crash reports)\n";
@@ -250,6 +259,7 @@ void reset() {
     out.close();
     out.clear();
     std::filesystem::path().swap(path);  // frees it too
+    user = User{};  // frees it too
     for (auto& line : recent) {
         line.text[0] = '\0';
     }

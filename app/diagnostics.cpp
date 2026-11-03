@@ -153,6 +153,7 @@ void startDiagnostics(int& argc, char** argv) {
     for (int i = 0; i < argc; ++i) {
         header += std::string(" \"") + argv[i] + "\"";
     }
+    ts2::diag::hideUser(ts2::diag::thisUser());
     if (folder.empty() || !ts2::diag::open(folder, header)) {
         ts2::diag::warning("no log file: its folder can't be written");
     }

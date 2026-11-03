@@ -45,6 +45,11 @@ std::string issueLink(const Crash& crash);
 // Text made safe for a link's query (UTF-8, everything but letters, digits and -_.~ escaped).
 std::string linkEncoded(std::string_view text);
 
+// The text with its lines broken between words to at most `width` characters, for message boxes
+// that don't wrap. Line breaks already there stay, and a word longer than a line (a path) gets a
+// line of its own, unbroken.
+std::string wrapped(std::string_view text, std::size_t width);
+
 // Only the file name of a path, whichever slashes it uses.
 std::string fileName(std::string_view path);
 
@@ -54,20 +59,22 @@ std::string fileName(std::string_view path);
 std::string withoutUserFolder(std::string_view text, std::string_view userFolder);
 
 // A run that ended without a word (Windows ended it at once, it was killed, the power went),
-// found at the next start from the marker it left.
+// found at the next start from the marker it left. On Linux and macOS crashes are reported this
+// way too: the crash catcher (Crashpad) saves a crash dump, and the next start finds it.
 struct UnexpectedExit {
     std::string version;
     std::string started;
     // What Windows noted of the crash in its event log ("Application Error"), by field name
     // ("ExceptionCode", "ModuleName", "FaultingOffset"...). Empty when it noted none.
     std::map<std::string, std::string> windows;
+    bool caught = false;  // the crash catcher saved a crash dump of it, so it crashed for sure
 };
 
 // The named fields of an event as Windows renders it in XML: each <Data Name="...">value</Data>.
 std::map<std::string, std::string> eventFields(std::string_view xml);
 
 // The crash an unexpected exit amounts to, for the issue link: what Windows noted when it noted
-// one ("closed unexpectedly" otherwise).
+// one, "crash" when the crash catcher caught it, "closed unexpectedly" otherwise.
 Crash crashOf(const UnexpectedExit& exit);
 
 // The crash.txt for an unexpected exit: what is known, the run's last log lines, what the files hold.
