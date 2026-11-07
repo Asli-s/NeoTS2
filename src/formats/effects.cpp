@@ -4,6 +4,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <cstdint>
+#include <iterator>
 #include <stdexcept>
 
 namespace ts2::effects {
@@ -49,6 +52,10 @@ public:
         }
         for (float& v : c.values) {
             v = f32();
+        }
+        // A packed curve always has its four values, those not stored being 0.
+        if (c.packed) {
+            c.values.resize(4);
         }
         return c;
     }
@@ -119,6 +126,35 @@ void wiggles(Reader& r, bool listed) {
     }
 }
 
+// A particle system's attractors. Those of type 0 are left out.
+std::vector<ParticleBlock::Attractor> attractors(Reader& r, bool listed, std::uint64_t flags) {
+    std::vector<ParticleBlock::Attractor> out;
+    const auto read = [&](std::uint8_t type) {
+        ParticleBlock::Attractor a;
+        a.type = type;
+        a.point = {r.f32(), r.f32(), r.f32()};
+        a.strength = r.curve();
+        a.range = r.f32();
+        if (listed) {
+            a.killRadius = r.f32();
+        }
+        if (a.type != 0) {
+            out.push_back(std::move(a));
+        }
+    };
+    if (!listed) {
+        read((flags & ParticleBlock::kOldAttractorPoint) ? 1 : 0);
+        return out;
+    }
+    r.u16();
+    const std::size_t n = r.count(23);
+    for (std::size_t i = 0; i < n; ++i) {
+        r.u16();
+        read(r.u8());
+    }
+    return out;
+}
+
 void emitList(Reader& r) {
     const std::size_t n = r.count(28);
     r.floats(7 * n);
@@ -140,20 +176,24 @@ ParticleBlock particles(Reader& r) {
     // the spawn box.
     b.life = {r.f32(), r.f32()};
     b.prewarm = r.f32();
-    r.floats(12);
+    b.delay = {r.f32(), r.f32()};
+    b.gap = {r.f32(), r.f32()};
+    b.directionLow = vec3(r);
+    b.directionHigh = vec3(r);
+    b.speed = {r.f32(), r.f32()};
     b.spawnLow = vec3(r);
     b.spawnHigh = vec3(r);
     if (v > 2) {
-        r.f32();
+        b.ring = r.f32();
     }
     b.count = r.curve();
     b.interval = r.f32();
     b.burstLimit = r.u16();
-    r.f32();
+    b.speedScale = r.f32();
     b.size = r.curve();
-    r.f32();
+    b.sizeVary = r.f32();
     b.aspect = r.curve();
-    r.f32();
+    b.aspectVary = r.f32();
     b.rotationAxis = vec3(r);
     r.floats(3);
     r.u8();
@@ -171,37 +211,47 @@ ParticleBlock particles(Reader& r) {
     b.rotation = r.curve();
     r.curve();
     if (v >= 5) {
-        r.vectors();
-        r.floats(3);
+        b.pivots = r.vectorList();
+        b.pivotVary = vec3(r);
     }
     b.alpha = r.curve();
-    r.f32();
+    b.alphaVary = r.f32();
     b.colours = r.vectorList();
-    r.floats(3);
+    b.colourVary = vec3(r);
     b.texture = r.string();
     b.atlasColumns = r.u8();
     b.atlasRows = r.u8();
     b.alignment = r.u8();
     b.blend = r.u8();
     b.layer = r.f32();
+    b.framesPerSecond = r.f32();
+    b.firstFrame = r.u8();
+    b.frameCycle = r.u8();
+    b.gravity = vec3(r);
+    b.windShare = r.f32();
+    b.blast = r.f32();
+    b.blastCentre = vec3(r);
+    b.drag = r.f32();
+    b.stretch = r.f32();
     r.f32();
-    r.u8();
-    r.u8();
-    r.floats(11);
     pathPoints(r);
-    r.floats(1);  // four bytes whose use is not known yet
+    b.screenEdge = {r.u8(), r.u8(), r.u8(), r.u8()};
     models(r);
     r.string();
     if (v >= 11) {
         r.floats(3);
     }
-    r.floats(16);
-    wiggles(r, v >= 8);
+    r.floats(10);
+    b.walk.retime = {r.f32(), r.f32()};
+    b.walk.speed = {r.f32(), r.f32()};
+    b.walk.turn = r.f32();
+    b.walk.leastTurn = r.f32();
+    b.attractors = attractors(r, v >= 8, b.flags);
     if (v >= 7) {
         emitter(r);
     }
     if (v >= 4) {
-        r.string();
+        b.deathEffect = r.string();
     }
     if (v >= 9) {
         r.f32();
@@ -222,32 +272,41 @@ MetaParticleBlock metaParticles(Reader& r) {
     MetaParticleBlock b;
     b.flags = r.flags64();
     b.life = {r.f32(), r.f32()};
-    r.floats(13);
+    b.prewarm = r.f32();
+    b.delay = {r.f32(), r.f32()};
+    b.gap = {r.f32(), r.f32()};
+    b.directionLow = vec3(r);
+    b.directionHigh = vec3(r);
+    b.speed = {r.f32(), r.f32()};
     b.spawnLow = vec3(r);
     b.spawnHigh = vec3(r);
     if (v > 1) {
-        r.f32();
+        b.ring = r.f32();
     }
-    r.curve();
-    r.f32();
-    r.u32();
+    b.count = r.curve();
+    b.interval = r.f32();
+    b.burstLimit = r.u32();
     b.size = r.curve();
-    r.f32();
+    b.sizeVary = r.f32();
     r.curve();
     r.f32();
-    r.curve();
-    r.floats(2);
-    r.vectors();
-    r.floats(3);
-    r.curve();
+    b.rotation = r.curve();
+    b.rotationVary = r.f32();
     r.f32();
+    b.colours = r.vectorList();
+    b.colourVary = vec3(r);
+    b.alpha = r.curve();
+    b.alphaVary = r.f32();
     b.effect = r.string();
-    r.u8();
-    r.floats(8);
+    b.alignment = r.u8();
+    b.gravity = vec3(r);
+    b.windShare = r.f32();
+    b.blast = r.f32();
+    b.blastCentre = vec3(r);
     b.damping = r.f32();
-    r.f32();
+    b.screw = r.f32();
     pathPoints(r);
-    r.floats(1);  // four bytes whose use is not known yet
+    b.screenEdge = {r.u8(), r.u8(), r.u8(), r.u8()};
     models(r);
     r.floats(10);
     for (auto& w : b.wander) {
@@ -260,9 +319,16 @@ MetaParticleBlock metaParticles(Reader& r) {
     r.floats(6);
     wiggles(r, v >= 4);
     if (v >= 3) {
-        emitter(r);
-    } else {
-        emitList(r);
+        r.u32();
+    }
+    b.path.resize(r.count(28));
+    for (MetaParticleBlock::PathPoint& point : b.path) {
+        point.position = vec3(r);
+        point.velocity = vec3(r);
+        point.time = r.f32();
+    }
+    if (v >= 3) {
+        r.u32();
     }
     r.f32();
     return b;
@@ -388,16 +454,18 @@ Component component(Reader& r, std::uint16_t effectVersion) {
     Component c;
     c.name = r.string();
     c.type = r.u8();
-    r.u32();
+    c.flags = r.u32();
     r.u8();
     c.scale = r.f32();
     for (float& v : c.orientation) {
         v = r.f32();
     }
     c.offset = {r.f32(), r.f32(), r.f32()};
-    r.u8();
-    r.u8();
-    r.floats(6);
+    c.lowestDetail = r.u8();
+    c.detailEnd = r.u8();
+    c.rateByDetail = {r.f32(), r.f32()};
+    c.sizeByDetail = {r.f32(), r.f32()};
+    c.alphaByDetail = {r.f32(), r.f32()};
     if (effectVersion >= 3) {
         c.state = r.u32();
         c.stateMask = r.u32();
@@ -407,7 +475,7 @@ Component component(Reader& r, std::uint16_t effectVersion) {
     }
     c.group = r.u16();
     c.weight = r.u16();
-    r.f32();
+    c.timeScale = r.f32();
     c.index = r.i32();
     return c;
 }
@@ -415,12 +483,8 @@ Component component(Reader& r, std::uint16_t effectVersion) {
 VisualEffect visualEffect(Reader& r, std::uint16_t effectVersion) {
     VisualEffect e;
     e.flags = r.u32() & 0x1FFFF;
-    r.u16();
-    if (effectVersion >= 3) {
-        r.u32();
-    } else {
-        r.u16();
-    }
+    e.level = r.u16();
+    e.stateBits = effectVersion >= 3 ? r.u32() : r.u16();
     r.floats(4);
     e.components.resize(r.count(104));
     for (auto& c : e.components) {
@@ -441,21 +505,78 @@ float Curve::at(float t) const {
     if (values.empty()) {
         return 0;
     }
-    if (packed || values.size() == 1 || !(t > 0)) {
-        return values.front();
+    if (packed) {
+        return values[0] * std::sin((t - values[2]) * values[1]) + values[3];
     }
-    if (t >= 1) {
-        return values.back();
+    if (!(t >= 0 && t <= 1)) {
+        return 0;
+    }
+    if (values.size() == 1) {
+        return values[0];
     }
     const float x = t * static_cast<float>(values.size() - 1);
     const auto i = static_cast<std::size_t>(x);
     const float f = x - static_cast<float>(i);
-    return i + 1 < values.size() ? values[i] + (values[i + 1] - values[i]) * f : values.back();
+    return f > 0 && i + 1 < values.size() ? values[i] + (values[i + 1] - values[i]) * f : values[i];
 }
 
-const VisualEffect* File::find(std::string_view name) const {
+const VisualEffect* File::find(std::string_view name, std::uint16_t level) const {
     const auto it = names.find(lower(name));
-    return it != names.end() && it->second < effects.size() ? &effects[it->second] : nullptr;
+    if (it == names.end()) {
+        return nullptr;
+    }
+    const VisualEffect* best = nullptr;
+    for (const std::uint32_t index : it->second) {
+        if (index < effects.size() && effects[index].level <= level && effects[index].level > (best ? best->level : 0)) {
+            best = &effects[index];
+        }
+    }
+    return best;
+}
+
+bool File::knows(std::string_view name) const {
+    return names.contains(lower(name));
+}
+
+void merge(File& into, File&& later) {
+    const auto oldEffects = static_cast<std::uint32_t>(into.effects.size());
+    for (VisualEffect& effect : later.effects) {
+        for (Component& c : effect.components) {
+            // Type 0 names another effect. A negative index points at nothing and must stay so.
+            if (c.index >= 0 && c.type >= 1 && c.type <= kBlockTypes) {
+                const std::int64_t moved = std::int64_t{c.index} + into.blockCounts[static_cast<std::size_t>(c.type - 1)];
+                c.index = moved <= INT32_MAX ? static_cast<std::int32_t>(moved) : -1;
+            }
+        }
+    }
+    auto append = [](auto& to, auto& from) { to.insert(to.end(), std::make_move_iterator(from.begin()), std::make_move_iterator(from.end())); };
+    for (std::size_t i = 0; i < into.blockCounts.size(); ++i) {
+        into.blockCounts[i] += later.blockCounts[i];
+    }
+    append(into.cameras, later.cameras);
+    append(into.sequences, later.sequences);
+    append(into.particles, later.particles);
+    append(into.metaParticles, later.metaParticles);
+    append(into.decals, later.decals);
+    append(into.screens, later.screens);
+    append(into.effects, later.effects);
+    for (auto& [name, indices] : later.names) {
+        auto& records = into.names[name];
+        for (const std::uint32_t index : indices) {
+            if (index >= into.effects.size() - oldEffects) {
+                continue;
+            }
+            const std::uint32_t moved = index + oldEffects;
+            const auto same = std::find_if(records.begin(), records.end(), [&](std::uint32_t old) {
+                return old < oldEffects && into.effects[old].level == into.effects[moved].level;
+            });
+            if (same != records.end()) {
+                *same = moved;
+            } else {
+                records.push_back(moved);
+            }
+        }
+    }
 }
 
 File parse(std::span<const std::uint8_t> data) {
@@ -505,7 +626,7 @@ File parse(std::span<const std::uint8_t> data) {
         if (name == "end" && index == 0xFFFFFFFF) {
             break;
         }
-        f.names.emplace(lower(name), index);
+        f.names[lower(name)].push_back(index);
     }
     // Two more lists follow in every file the game reads, both empty in the shipped files.
     if (r.remaining() > 0) {

@@ -2,6 +2,7 @@
 
 #include "object_materials.hpp"
 #include "scene/animation_library.hpp"
+#include "scene/object_effects.hpp"
 #include "scene/outfit_properties.hpp"
 #include "scene/scene.hpp"
 #include "scene/newborn_face.hpp"
@@ -221,6 +222,12 @@ public:
     // (all when empty). They must outlive this. Objects created or moved since the last update are
     // brought into the scene before each ray, as the game's are there at once.
     void traceIn(ts2::scene::Scene& scene, const ts2::scene::ScenePose& pose, const std::vector<std::uint8_t>& shown);
+
+    // Where an object's node, or a bone of it, is now, for its effects. An empty bone or "locator" is the node.
+    // Tells of the effects clips have reached since the last call, as commands.
+    void clipEffects(const ts2::scene::Scene& scene, const std::function<void(const ts2::sim::EffectCommand&)>& send);
+
+    ts2::scene::ObjectEffects::Where effectPlace(const ts2::scene::Scene& scene, const ts2::scene::ScenePose& pose, std::int16_t object, const std::string& bone, int highestLevelShown);
     // Where the camera's eye is in the scene, for Sims that turn to face it.
     void setCamera(const std::array<float, 3>& eye) { cameraEye_ = eye; }
 
@@ -244,6 +251,7 @@ private:
     // The lot object of a scene object id, null for none.
     ts2::sim::SimObject* lotObject(std::uint32_t id);
     void placeObjects(ts2::scene::Scene& scene);
+    void hideModels(ts2::scene::Scene& scene);
     void followClips(ts2::scene::Scene& scene);
     void animateObjects(ts2::scene::Scene& scene);
     void shadeHeld(ts2::scene::Scene& scene);
@@ -256,8 +264,13 @@ private:
         std::int16_t object = 0;  // the object looked at, the lead part for a multi-tile object
         bool objectSlot = false;  // an object's targeting or routing slot, placed by `local`
         std::optional<ts2::scene::Transform> local;  // none when the object has no such slot
+        // A slot at a bone: the object's model, its rig and the bone's joint, placed as drawn.
+        std::string model, joint;
+        std::shared_ptr<const ts2::scene::Rig> rig;
+        int node = -1;
     };
     LookAim lookAim(const ts2::sim::SimObject& sim, const ts2::scene::Scene& scene);
+    std::optional<ts2::scene::Transform> drawnJoint(const LookAim& aim, double nowMs);
     std::optional<ts2::scene::Transform> partSlot(std::int16_t part, std::size_t slot, const ts2::scene::Scene& scene);
     std::optional<ts2::scene::Transform> slotPlace(const ts2::scene::PlacedObject& placed, std::size_t slot, const ts2::scene::Scene& scene);
     const ts2::scene::Transform& standingPlace(const ts2::scene::PlacedObject& placed, const ts2::scene::Scene& scene) const;
@@ -285,6 +298,14 @@ private:
     ts2::scene::AnimationLibrary animations_;
     // Each animation's SimAntics events, made once as the animations are.
     std::map<std::string, std::vector<ts2::sim::AnimationEvent>, std::less<>> animationEvents_;
+    struct ClipEffect {
+        float ms = 0;
+        ts2::anim::EffectEvent event;
+    };
+    std::map<std::string, std::vector<ClipEffect>, std::less<>> clipEffects_;  // each clip's, by time
+    // How far each playing clip's effects have been told: by its object, start and name, in milliseconds on the clock.
+    std::map<std::tuple<std::int16_t, double, std::string>, double> clipEffectsTold_;
+    bool clipEffectsStarted_ = false;
     ts2::scene::OutfitProperties outfits_;
     ObjectMaterials objectMaterials_;
     std::unique_ptr<ts2::scene::SceneRays> rays_;
@@ -348,7 +369,14 @@ private:
         bool gone = false;
         bool operator==(const ObjectPlace&) const = default;
     };
-    std::map<std::uint32_t, ObjectPlace> objectPlaces_;
+    // By object id, read for every object each frame. Ids stop at INT16_MAX, so this stays small.
+    struct KnownPlace {
+        ObjectPlace place;
+        bool known = false;
+    };
+    std::vector<KnownPlace> objectPlaces_;
+    // The world's objects version when the created objects were last looked for (see addCreatedObjects).
+    std::optional<std::uint64_t> createdFor_;
     // Per scene instance moved by its object's clip (see followClips): where it stands without the clip.
     std::map<std::size_t, ts2::scene::Transform> clipBases_;
     // Per multi-tile part and container slot: where the slot's bone sits in its lead's model (see partSlot).

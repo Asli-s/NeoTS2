@@ -6,7 +6,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <exception>
+#include <format>
 #include <fstream>
 #include <set>
 #include <sstream>
@@ -81,39 +83,49 @@ EffectsFiles::EffectsFiles(const fs::path& installRoot) {
             paths_.push_back(std::move(file));
         }
     }
-    files_.resize(paths_.size());
-    read_.resize(paths_.size());
 }
 
-const effects::File* EffectsFiles::file(std::size_t index) {
-    if (!read_[index]) {
-        read_[index] = true;
+const effects::File* EffectsFiles::all() {
+    if (read_) {
+        return joined_ ? &*joined_ : nullptr;
+    }
+    read_ = true;
+    const auto start = std::chrono::steady_clock::now();
+    struct Read {
+        std::uint32_t instance = 0;
+        effects::File file;
+    };
+    std::vector<Read> files;
+    for (const auto& path : paths_) {
         try {
-            dbpf::Package package(paths_[index]);
+            dbpf::Package package(path);
             for (const auto& entry : package.entries()) {
                 if (entry.key.type == effects::kEffectsType) {
-                    files_[index] = effects::parse(package.read(entry));
-                    break;
+                    files.push_back({entry.key.instance, effects::parse(package.read(entry))});
                 }
             }
         } catch (const std::exception& ex) {
-            diag::warnOnce("effects: " + paths_[index].string() + " can't be read and is passed over: " + ex.what());
+            diag::warnOnce("effects: " + path.string() + " can't be read and is passed over: " + ex.what());
         }
     }
-    return files_[index] ? &*files_[index] : nullptr;
+    std::stable_sort(files.begin(), files.end(), [](const Read& a, const Read& b) { return a.instance < b.instance; });
+    for (auto& read : files) {
+        if (joined_) {
+            effects::merge(*joined_, std::move(read.file));
+        } else {
+            joined_ = std::move(read.file);
+        }
+    }
+    if (joined_) {
+        diag::info(std::format("effects: {} files, {} names, read in {:.0f} ms", files.size(), joined_->names.size(),
+                               std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count()));
+    }
+    return joined_ ? &*joined_ : nullptr;
 }
 
 const effects::File* EffectsFiles::with(std::string_view name) {
-    for (std::size_t i = 0; i < paths_.size(); ++i) {
-        if (const auto* f = file(i); f != nullptr && f->find(name) != nullptr) {
-            return f;
-        }
-    }
-    return nullptr;
-}
-
-const effects::File* EffectsFiles::newest() {
-    return paths_.empty() ? nullptr : file(0);
+    const auto* joined = all();
+    return joined != nullptr && joined->find(name) != nullptr ? joined : nullptr;
 }
 
 } // namespace ts2::content

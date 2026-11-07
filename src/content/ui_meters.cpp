@@ -324,6 +324,67 @@ tga::Pixels masked(const tga::Pixels& picture, const tga::Pixels& shape) {
     return out;
 }
 
+tga::Pixels headlineTextPicture(const tga::Pixels& text, int lineHeight) {
+    constexpr std::uint32_t kSide = 256;
+    constexpr std::uint8_t kWhite = 255;
+    tga::Pixels out;
+    if (complete(text) && text.width > 0 && text.height > 0) {
+        const std::uint32_t largest = std::max(text.width, static_cast<std::uint32_t>(std::max(lineHeight, 0)));
+        const bool shrink = largest > kSide;
+        const auto fit = [&](std::uint32_t side) { return std::max<std::uint32_t>(1, side * kSide / largest); };
+        const tga::Pixels drawn = shrink ? scaled(text, fit(text.width), fit(text.height)) : text;
+        const int height = shrink ? static_cast<int>(fit(static_cast<std::uint32_t>(lineHeight))) : lineHeight;
+        out = placed(drawn, kSide, kSide, 0, (static_cast<int>(kSide) - height) / 2);
+    } else {
+        out.width = out.height = kSide;
+        out.rgba.assign(std::size_t{kSide} * kSide * 4, 0);
+    }
+    for (std::size_t i = 0; i < out.rgba.size(); i += 4) {
+        out.rgba[i] = out.rgba[i + 1] = out.rgba[i + 2] = kWhite;
+    }
+    return out;
+}
+
+tga::Pixels wantBalloonPicture(const tga::Pixels& picture, const tga::Pixels& badge, std::uint32_t side) {
+    constexpr float kBadgeShare = 0.61f;
+    tga::Pixels out = complete(picture) && picture.width == side && picture.height == side ? picture : placed(tga::Pixels{}, side, side, 0, 0);
+    if (!complete(badge)) {
+        return out;
+    }
+    const auto badgeSide = static_cast<std::uint32_t>(std::lround(kBadgeShare * static_cast<float>(side)));
+    const tga::Pixels small = scaled(badge, badgeSide, badgeSide);
+    if (!complete(small)) {
+        return out;
+    }
+    const std::uint32_t corner = side - badgeSide;
+    for (std::uint32_t y = 0; y < badgeSide; ++y) {
+        for (std::uint32_t x = 0; x < badgeSide; ++x) {
+            const std::uint8_t* from = &small.rgba[(std::size_t{y} * badgeSide + x) * 4];
+            std::uint8_t* to = &out.rgba[(std::size_t{y + corner} * side + x + corner) * 4];
+            const int alpha = from[3];
+            for (int channel = 0; channel < 3; ++channel) {
+                to[channel] = static_cast<std::uint8_t>((from[channel] * alpha + to[channel] * (255 - alpha) + 127) / 255);
+            }
+            to[3] = static_cast<std::uint8_t>(alpha + (to[3] * (255 - alpha) + 127) / 255);
+        }
+    }
+    return out;
+}
+
+tga::Pixels fadedToShape(const tga::Pixels& picture, const tga::Pixels& shape) {
+    if (!complete(picture) || !complete(shape) || picture.width != shape.width || picture.height != shape.height) {
+        return picture;
+    }
+    tga::Pixels out = picture;
+    for (std::size_t i = 0; i < out.rgba.size(); i += 4) {
+        const int alpha = shape.rgba[i + 3];
+        for (std::size_t channel = 0; channel < 4; ++channel) {
+            out.rgba[i + channel] = static_cast<std::uint8_t>(out.rgba[i + channel] * alpha / 255);
+        }
+    }
+    return out;
+}
+
 tga::Pixels unpremultiplied(tga::Pixels picture) {
     if (!complete(picture)) {
         return picture;

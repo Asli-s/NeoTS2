@@ -1,3 +1,4 @@
+#include "diag/log.hpp"
 #include "sim/vm_execution.hpp"
 
 #include <format>
@@ -184,6 +185,233 @@ bool Execution::soundEvent(const bhav::Instruction& in, Frame& f) {
         }
     }
     events({*name, source, (o[4] & kSoundStop) != 0});
+    return true;
+}
+
+// Effect Stop/Start: starts or stops visual effects on an object. Always true, unless it is an error.
+// Operands:
+//   byte 0       mode: 0 start, 1 start hard, 2 stop, 3 stop hard, 4 stop all of the primitive's, 5 forget kind 7,
+//                6 play once, 7 list, 8 forget the primitive's, 9 forget all, 10-13 set state 0-3, 14 stop all,
+//                15 start, kept from stops of all
+//   byte 1, 2-3  the object (owner, data)
+//   bytes 4-5    the effect's entry of string table 0x8F, -1 for none
+//   byte 6       slot
+//   byte 9       which slots: 0 target, 1 routing, 2 container, others none. A slot's bone places the effect
+//   bytes 10-11  flags: 0x1 global names, 0x2 semi-global names, 0x8 the entry is temp 0, 0x40 temp 1 is its number.
+//                With a start, 0x80 waits its turn in the object's queue: temp 2 its priority, temp 3 how many ticks
+//                it may wait.
+//                After a start, one picture, the first of these that is set:
+//                0x1000 the score in temp 6 as text.
+//                0x4 an object's thumbnail: the object in bytes 12-14, or with 0x400 the GUID in temps 4 and 5, or
+//                with 0x100 the GUID of my token. A Sim's type shows its portrait. 0x200 shows a memory's own
+//                picture. 0x800 takes the thumbnail's image from temp 6, not the type's model number.
+//                0x20 a texture (byte 15) and an atlas frame (bytes 12-14).
+//                0x10 the portrait of the neighbor in bytes 12-14.
+//                0x2000 a want of the Sim in bytes 12-14: its fears when temp 4 isn't 0, temp 5 which.
+//   byte 12, 13-14  the atlas frame, object or neighbor (owner, data)
+//   byte 15      the texture's entry of string table 0x95: the object's own, its semi-global's or the global one
+// Lists and setting a state are not done yet. An object part of a bigger one plays on the lead object's node, with
+// the bones of its own slots.
+bool Execution::effectStopStart(const bhav::Instruction& in, Frame& f) {
+    constexpr std::uint16_t kEffectNames = 0x8F, kEffectTextures = 0x95;
+    constexpr std::uint16_t kFlagObjectPicture = 0x4, kFlagNeighborPicture = 0x10, kFlagTextureAndFrame = 0x20, kFlagToken = 0x100, kFlagMemoryPicture = 0x200,
+                            kFlagGuidInTemps = 0x400, kFlagImageInTemp = 0x800, kFlagText = 0x1000, kFlagWant = 0x2000;
+    constexpr std::size_t kModelNumberLow = 0x48, kModelNumberHigh = 0x49;
+    constexpr std::uint16_t kAnotherPersonType = 0x11;
+    constexpr std::uint16_t kFlagGlobal = 0x1, kFlagSemiGlobal = 0x2, kFlagIndexInTemp = 0x8, kFlagNumberInTemp = 0x40, kFlagQueue = 0x80;
+    constexpr std::size_t kLeadField = 0x0A;  // OBJD: which part of a bigger object this type is
+    constexpr std::uint16_t kBoneNames = 0x90;
+    constexpr std::uint32_t kSlotNamesBone = 0x20000;
+    constexpr int kStart = 0, kStartHard = 1, kStop = 2, kStopHard = 3, kStopPrimitive = 4, kForgetOther = 5, kOnce = 6, kList = 7, kForgetPrimitive = 8, kForgetAll = 9,
+                  kStateFirst = 10, kStateLast = 13, kStopEvery = 14, kStartKept = 15;
+    const auto& o = in.operands;
+    const int mode = o[0];
+    const std::int16_t objectId = read(o[1], static_cast<std::uint16_t>(o[2] | o[3] << 8), f);
+    const SimObject* object = world().find(objectId);
+    if (object == nullptr) {
+        throw Stop{Outcome::Error, "effect's object does not exist", std::to_string(objectId)};
+    }
+    const std::uint16_t flags = static_cast<std::uint16_t>(o[10] | o[11] << 8);
+    int index = (flags & kFlagIndexInTemp) ? thread_.temps[0] : static_cast<std::int16_t>(o[4] | o[5] << 8);
+    const bool setsState = mode >= kStateFirst && mode <= kStateLast;
+    std::string name;
+    if (index != -1 && !setsState) {
+        const std::uint32_t group = (flags & kFlagGlobal) ? kGlobalGroup : (flags & kFlagSemiGlobal) ? code_.semiGlobalGroup(f.codeOwner) : f.codeOwner;
+        name = group != 0 && index >= 0 ? code_.string(group, kEffectNames, static_cast<std::size_t>(index)).value_or(std::string()) : std::string();
+        if (name.empty()) {
+            throw Stop{Outcome::Error, "effect name is missing", std::to_string(index)};
+        }
+    }
+    std::int16_t nodeOwner = objectId;
+    if (object->definition.field(kLeadField) != 0) {
+        const auto lead = static_cast<std::int16_t>(object->data[kLeadTileField]);
+        if (world().find(lead) != nullptr) {
+            nodeOwner = lead;
+        }
+    }
+    std::string bone;
+    if (mode == kStart || mode == kStartHard || mode == kStop || mode == kStopHard || mode == kOnce || mode == kList || mode == kStartKept) {
+        const std::uint8_t slotKind = o[9];
+        if (slotKind <= 2) {
+            const ObjectType* type = code_.objectType(object->definition.guid());
+            const std::vector<slot::Entry>* slots = nullptr;
+            if (type != nullptr) {
+                slots = slotKind == 0 ? &type->targetSlots : slotKind == 1 ? &type->routingSlots : &type->containerSlotEntries;
+            }
+            if (slots == nullptr || o[6] >= slots->size()) {
+                throw Stop{Outcome::Error, "effect's slot does not exist", std::to_string(o[6])};
+            }
+            const slot::Entry& entry = (*slots)[o[6]];
+            if ((entry.objectFlags & kSlotNamesBone) && entry.bone >= 0) {
+                bone = code_.string(type->group, kBoneNames, static_cast<std::size_t>(entry.bone)).value_or(std::string());
+            }
+        }
+    }
+    const bool stopsAll = mode == kStopPrimitive || mode == kForgetOther || mode == kForgetPrimitive || mode == kForgetAll || mode == kStopEvery;
+    if (index == -1 && !stopsAll && mode <= kStartKept && !setsState) {
+        throw Stop{Outcome::Error, "effect name is missing", "-1"};
+    }
+    const auto& commands = world().effectCommands();
+    if (!commands || mode > kStartKept) {
+        return true;
+    }
+    const int number = (flags & kFlagNumberInTemp) ? thread_.temps[1] : 0;
+    EffectCommand c;
+    c.object = nodeOwner;
+    c.name = name;
+    c.bone = bone;
+    c.number = number;
+    const auto showPictureOf = [&](std::uint32_t guid, std::int16_t neighbor, std::uint32_t image) {
+        c.picture = std::format("BalloonEffectThumbnail_0x{:08x}", guid);
+        c.pictureGuid = guid;
+        c.pictureNeighbor = neighbor;
+        c.pictureIndex = image;
+    };
+    if ((mode == kStart || mode == kStartHard) && (flags & kFlagText)) {
+        c.pictureNumber = thread_.temps[6];
+    } else if (mode == kStart || mode == kStartHard) {
+        const auto value =[&] { return read(o[12], static_cast<std::uint16_t>(o[13] | o[14] << 8), f); };
+        if (flags & kFlagObjectPicture) {
+            const objd::ObjectDefinition* target = nullptr;
+            if (flags & kFlagToken) {
+                const ObjectType* type = code_.objectType(me().token.guid);
+                target = type != nullptr ? &type->definition : nullptr;
+            } else if (flags & kFlagGuidInTemps) {
+                const auto low = static_cast<std::uint16_t>(thread_.temps[4]), high = static_cast<std::uint16_t>(thread_.temps[5]);
+                const ObjectType* type = code_.objectType(static_cast<std::uint32_t>(high) << 16 | low);
+                target = type != nullptr ? &type->definition : nullptr;
+            } else {
+                const std::int16_t id = value();
+                const SimObject* shown = world().find(id);
+                if (shown == nullptr) {
+                    throw Stop{Outcome::Error, "effect picture's object does not exist", std::to_string(id)};
+                }
+                // A part of a bigger object shows the whole object's picture.
+                target = &shown->definition;
+                if (shown->definition.field(objd::field::kMultiTileMasterId) != 0) {
+                    const ObjectType* type = code_.objectType(shown->definition.guid());
+                    const ObjectType* master = type != nullptr ? code_.multiTileMaster(*type) : nullptr;
+                    target = master != nullptr ? &master->definition : nullptr;
+                }
+            }
+            if (target != nullptr) {
+                const std::uint16_t kind = target->field(objd::field::kType);
+                const std::int16_t neighbor = kind == kPersonType || kind == kAnotherPersonType ? world().neighborIdWithGuid(target->guid()) : std::int16_t{0};
+                const auto image = (flags & kFlagImageInTemp) ? static_cast<std::uint32_t>(thread_.temps[6])
+                                                               : static_cast<std::uint32_t>(target->field(kModelNumberLow)) | static_cast<std::uint32_t>(target->field(kModelNumberHigh)) << 16;
+                showPictureOf(target->guid(), neighbor, image);
+                c.pictureIsMemory = (flags & kFlagMemoryPicture) != 0;
+            }
+        } else if (flags & kFlagTextureAndFrame) {
+            c.firstFrame = value();
+            for (const std::uint32_t group : {f.codeOwner, code_.semiGlobalGroup(f.codeOwner), kGlobalGroup}) {
+                if (group != 0) {
+                    c.picture = code_.string(group, kEffectTextures, o[15]).value_or(std::string());
+                }
+                if (!c.picture.empty()) {
+                    break;
+                }
+            }
+        } else if (flags & kFlagNeighborPicture) {
+            const std::int16_t id = value();
+            if (const SavedNeighbor* n = world().neighbor(id)) {
+                showPictureOf(n->guid, id, 0);
+            }
+        } else if (flags & kFlagWant) {
+            const std::int16_t id = value();
+            const SimObject* shown = world().find(id);
+            if (shown == nullptr || !shown->isPerson()) {
+                throw Stop{Outcome::Error, "effect picture's object is not a Sim", std::to_string(id)};
+            }
+            const std::int16_t neighbor = world().neighborIdOf(*shown);
+            const auto& list = thread_.temps[4] == 0 ? world().neighborWants(neighbor) : world().neighborFears(neighbor);
+            const auto at = static_cast<std::uint16_t>(thread_.temps[5]);
+            if (at >= list.size()) {
+                throw Stop{Outcome::Error, "effect picture's want does not exist", std::to_string(thread_.temps[5])};
+            }
+            if (list[at].guid != 0) {
+                c.pictureWant = list[at];
+            }
+        }
+    }
+    using Do = EffectCommand::Do;
+    switch (mode) {
+    case kStart:
+    case kStartHard:
+    case kStartKept:
+        c.what = Do::Start;
+        c.hard = mode == kStartHard;
+        c.keep = mode == kStartKept;
+        if (flags & kFlagQueue) {
+            c.queued = true;
+            c.queuePriority = thread_.temps[2];
+            c.queueWait = thread_.temps[3];
+        }
+        break;
+    case kStop:
+        c.what = Do::Stop;
+        c.number = 0;
+        break;
+    case kStopHard:
+        c.what = Do::Stop;
+        c.hard = true;
+        c.number = 0;
+        break;
+    case kOnce:
+        c.what = Do::StartOnce;
+        break;
+    case kStopPrimitive:
+        c.what = Do::StopAll;
+        commands(c);
+        c.kind = 5;
+        break;
+    case kForgetOther:
+        c.what = Do::StopAll;
+        c.kind = 7;
+        c.hard = true;
+        break;
+    case kForgetPrimitive:
+        c.what = Do::StopAll;
+        c.hard = true;
+        c.clearsQueue = true;
+        break;
+    case kForgetAll:
+        c.what = Do::StopAll;
+        c.kind = 0;
+        c.hard = true;
+        break;
+    case kStopEvery:
+        c.what = Do::StopAll;
+        c.kind = 0;
+        break;
+    default:
+        // Lists and states.
+        if (setsState) {
+            diag::warnOnce("Effect Stop/Start: setting an effect's state isn't done yet");
+        }
+        return true;
+    }
+    commands(c);
     return true;
 }
 
@@ -526,6 +754,11 @@ bool Execution::createObject(const bhav::Instruction& in, Frame& f) {
     }
 
     SimObject& created = world().create(type->group, type->definition, containerSlotsOf(code_, *type));
+    // An object made out of the world is in no room, so its room (object data 0x1D) is -1. Scripts
+    // such as a Sim's motive checks skip their work while it is.
+    if (o[4] == kPlaceOutOfWorld) {
+        created.data[kRoomDataField] = -1;
+    }
     if (!fits) {
         if (startCreated) {
             startCreated(created, *type);
@@ -570,6 +803,7 @@ bool Execution::createParts(const ObjectType& master, std::uint8_t placement, st
     parts.reserve(types.size());
     for (const ObjectType* type : types) {
         parts.push_back(&world().create(type->group, type->definition, containerSlotsOf(code_, *type)));
+        parts.back()->data[kRoomDataField] = -1;  // made out of the world, so in no room
     }
     SimObject& lead = *parts.front();
     for (SimObject* part : parts) {
@@ -699,11 +933,25 @@ bool Execution::luaScript(const bhav::Instruction& in, Frame& f) {
     call.codeOwner = f.codeOwner;
     call.globals = globals_.data();
     call.globalCount = globals_.size();
+    call.testedLine = testedLine;
+    // What a tree run from the script can't run yet stops the caller as itself, not as a script error.
+    std::optional<Stop> treeStop;
+    call.runTree = [this, &treeStop](const std::string& tree, std::int16_t stack, std::span<const std::int16_t> args) {
+        try {
+            return scriptRunTree(tree, stack, args);
+        } catch (const Stop& stop) {
+            treeStop = stop;
+            return -1;
+        }
+    };
     const auto table = static_cast<std::uint16_t>(o[0] | o[1] << 8);
     const bool ran = (flags & 0x01) != 0
                          ? scripts->run(*name, call)
                          : scripts->runSource(std::format("{}_0x{:08x}", *name, group),
                                               code_.stringDescription(group, table, index - 1u).value_or(""), call);
+    if (treeStop) {
+        throw *treeStop;
+    }
     if (ran) {
         return call.returnValue;
     }
@@ -724,6 +972,37 @@ bool Execution::luaScript(const bhav::Instruction& in, Frame& f) {
         throw Stop{Outcome::Unsupported, "script function not implemented: " + call.luaError.substr(quote + 8, end - quote - 8), *name};
     }
     throw Stop{Outcome::Unsupported, "script error: " + call.luaError, *name};
+}
+
+int Execution::scriptRunTree(const std::string& name, std::int16_t stackObject, std::span<const std::int16_t> args) {
+    SimObject& self = me();
+    const ObjectType* type = code_.objectType(self.definition.guid());
+    if (type == nullptr) {
+        return 0;
+    }
+    std::optional<std::uint16_t> tree;
+    for (const std::uint32_t group : {type->group, code_.semiGlobalGroup(type->group), kGlobalGroup}) {
+        if ((tree = code_.behaviorByName(group, name))) {
+            break;
+        }
+    }
+    if (!tree) {
+        return 0;
+    }
+    const RunResult r = runOnMe(type->group, *tree, stackObject, args);
+    switch (r.outcome) {
+    case Outcome::True:
+        return 1;
+    case Outcome::False:
+        return 0;
+    case Outcome::Unsupported:
+    case Outcome::MissingCode:
+        throw Stop{r.outcome, "RunTree " + name + ": " + r.reason, r.detail};
+    default:
+        self.failedRun = (r.outcome == Outcome::Sleeping ? "a tree run on it waited" : r.reason + " " + r.detail) + " in " +
+                         hex(r.group, 8) + " " + hex(r.instance, 4) + " at " + std::to_string(r.pc);
+        return 0;
+    }
 }
 
 // Message: hands six values to objects' message handlers (OBJf entry 0x24), each run at once on my

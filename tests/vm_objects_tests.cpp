@@ -1,5 +1,6 @@
 // Primitives that find, make, compare and remove objects, neighbors and relationships.
 #include "sim/forget_object.hpp"
+#include "sim/object_model.hpp"
 #include "sim/object_reset.hpp"
 #include "sim/snap.hpp"
 #include "test_support.hpp"
@@ -1173,6 +1174,8 @@ void reachPutMovesTheObjectAtTheClipsEvent() {
     // The cup comes into my hand at the clip's event 0. The primitive is true when the clip ends.
     const double start = world.clockMs();
     CHECK(vm.run(sim, 0x1000).outcome == Outcome::Sleeping && sim.animation && sim.animation->name == "a2o-floor-get");
+    // The reach clip plays as a medium Sim animation, fading in and out over 233.33 ms each.
+    CHECK(sim.animation->layer == 2 && sim.animation->fades && sim.animation->fadeInMs == 233.33f && sim.animation->fadeOutMs == 233.33f);
     // The grasp fades in towards the event and hands over to the carry pose as the clip ends. The
     // carry stays until something stops it.
     CHECK(sim.overlays.size() == 2);
@@ -1564,6 +1567,54 @@ void createObjectStartsItsMainAndPassesTemp0() {
     CHECK(lamp->thread.frames.front().pc == 1);  // waiting in its Sleep
     CHECK(lamp->thread.frames.front().params[0] == 1019);
     CHECK(lamp->data[0x40] == 0);
+}
+
+// A new object's Init and Main count their own steps, so making objects with long ones doesn't stop
+// the tree that makes them. The step limit here is 1000, and each creation runs 1200 steps.
+void createdObjectsCountTheirOwnSteps() {
+    MemoryCodeSource code;
+    code.addObjectType(kLampGroup, typed(kLampGuid));
+    code.addFunctions(kLampGroup, {{0, 0x1000}, {0, 0x1001}});
+    code.add(kLampGroup, 0x1000, bhav({expr(owner::kTemp, 0, op::kIncrementAndLess, owner::kLiteral, 600, 0, T)}));
+    code.add(kLampGroup, 0x1001, bhav({
+        expr(owner::kTemp, 1, op::kIncrementAndLess, owner::kLiteral, 600, 0, 1),
+        expr(owner::kParam, 1, op::kAssign, owner::kLiteral, 5, 2, E),
+        sleepFor(1, 2),
+    }, 2));
+    code.add(kObjectGroup, 0x1000, bhav({
+        createObject(kLampGuid, 0x06, 0, 1, F),
+        createObject(kLampGuid, 0x06, 0, 2, F),
+        expr(owner::kTemp, 0, op::kIncrementAndLess, owner::kLiteral, 900, 2, T),
+    }));
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    Vm vm(code, {1000, 64}, &world);
+    const RunResult r = vm.run(sim, 0x1000);
+    CHECK(r.outcome == Outcome::True);
+    const ts2::sim::SimObject* lamp = world.find(sim.thread.stackObjectId);
+    CHECK(lamp != nullptr);
+    if (lamp == nullptr) {
+        return;
+    }
+    CHECK(!lamp->failedRun);
+    CHECK(lamp->thread.frames.size() == 1);
+    CHECK(!lamp->thread.frames.empty() && lamp->thread.frames.front().pc == 2);  // waiting in its Sleep
+}
+
+// An object made out of the world is in no room: its room (object data 0x1D) is -1 already while its
+// Init and Main first run.
+void createObjectOutOfWorldIsInNoRoom() {
+    MemoryCodeSource code;
+    code.addObjectType(kLampGroup, typed(kLampGuid));
+    code.addFunctions(kLampGroup, {{0, 0x1000}});
+    code.add(kLampGroup, 0x1000, bhav({expr(owner::kMyData, 0x40, op::kAssign, owner::kMyData, 0x1D, T, E)}));
+    code.add(kObjectGroup, 0x1000, bhav({createObject(kLampGuid, 0x06, 0, T, F)}));
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::True);
+    const ts2::sim::SimObject* lamp = world.find(sim.thread.stackObjectId);
+    CHECK(lamp != nullptr && lamp->data[0x1D] == -1 && lamp->data[0x40] == -1);
 }
 
 void createObjectPassesMyIdAndStackObject() {
@@ -2187,6 +2238,178 @@ void changeMaterialNamesAMaterialForAMeshGroup() {
     CHECK((changes == std::vector<Change>{{"", "other"}, {"frame", "metal"}}));
 }
 
+Instruction effectStopStart(std::uint8_t mode, std::int16_t name, std::uint8_t slot = 0xFF, std::uint8_t slotKind = 3, std::uint16_t flags = 0) {
+    Instruction in = primitiveCall(0x0070, T, F);
+    in.operands[0] = mode;
+    in.operands[1] = owner::kMyData;
+    in.operands[2] = 0x0B;  // my id
+    in.operands[4] = static_cast<std::uint8_t>(name);
+    in.operands[5] = static_cast<std::uint8_t>(static_cast<std::uint16_t>(name) >> 8);
+    in.operands[6] = slot;
+    in.operands[9] = slotKind;
+    in.operands[10] = static_cast<std::uint8_t>(flags);
+    in.operands[11] = static_cast<std::uint8_t>(flags >> 8);
+    return in;
+}
+
+void heldObjectsComeAlongWithTheirHolder() {
+    ts2::sim::World world;
+    ts2::objd::ObjectDefinition definition;
+    auto& sim = world.create(1, definition, 1);
+    auto& holder = world.create(1, definition, 1);
+    auto& held = world.create(1, definition);
+    sim.slots[0] = holder.id;
+    holder.slots[0] = held.id;
+    sim.x = 5 << 16;
+    sim.y = 6 << 16;
+    sim.level = 2;
+    sim.data[0x1D] = 14;
+    world.updateRoom(sim);
+    CHECK(held.x == sim.x && held.y == sim.y && held.level == 2 && held.data[0x1D] == 14);
+    CHECK(holder.x == sim.x && holder.level == 2 && holder.data[0x1D] == 14);
+    // A ring of slots in a broken save ends the walk.
+    held.slots.push_back(sim.id);
+    sim.level = 3;
+    world.updateRoom(sim);
+    CHECK(held.level == 3);
+}
+
+void effectStopStartAsksForEffects() {
+    using Do = ts2::sim::EffectCommand::Do;
+    MemoryCodeSource code;
+    code.addStrings(kObjectGroup, 0x8F, {"own_fx", "other_fx"});
+    code.addStrings(ts2::sim::kGlobalGroup, 0x8F, {"global_fx"});
+    SmallWorld w;
+    std::vector<ts2::sim::EffectCommand> asked;
+    w.world.setEffectCommands([&](const ts2::sim::EffectCommand& c) { asked.push_back(c); });
+    auto run = [&](const Instruction& in) {
+        code.add(kObjectGroup, 0x1000, bhav({in}));
+        Vm vm(code, {}, &w.world);
+        return vm.run(*w.controller, 0x1000).outcome;
+    };
+    const auto me = w.controller->id;
+    w.controller->data[0x0B] = me;
+    CHECK(run(effectStopStart(0, 1)) == Outcome::True);
+    CHECK(run(effectStopStart(1, 0, 0xFF, 3, 0x1)) == Outcome::True);  // global names
+    CHECK(run(effectStopStart(15, 0)) == Outcome::True);
+    w.controller->thread.temps[0] = 1;
+    w.controller->thread.temps[1] = 7;
+    CHECK(run(effectStopStart(0, 0, 0xFF, 3, 0x8 | 0x40)) == Outcome::True);  // the name in temp 0, the number in temp 1
+    CHECK(run(effectStopStart(2, 0)) == Outcome::True);
+    CHECK(run(effectStopStart(3, 1)) == Outcome::True);
+    CHECK(asked.size() == 6);
+    CHECK(asked[0].what == Do::Start && asked[0].name == "other_fx" && asked[0].object == me && !asked[0].hard && !asked[0].keep);
+    CHECK(asked[1].what == Do::Start && asked[1].name == "global_fx" && asked[1].hard);
+    CHECK(asked[2].keep);
+    CHECK(asked[3].name == "other_fx" && asked[3].number == 7);
+    CHECK(asked[4].what == Do::Stop && !asked[4].hard);
+    CHECK(asked[5].what == Do::Stop && asked[5].hard);
+
+    // Mode 4 asks for both of the primitive's kinds, softly. Mode 9 forgets all of them, with no name needed.
+    asked.clear();
+    CHECK(run(effectStopStart(4, -1)) == Outcome::True);
+    CHECK(run(effectStopStart(9, -1)) == Outcome::True);
+    CHECK(asked.size() == 3);
+    CHECK(asked[0].what == Do::StopAll && asked[0].kind == 2 && !asked[0].hard && asked[1].kind == 5);
+    CHECK(asked[2].what == Do::StopAll && asked[2].kind == 0 && asked[2].hard);
+
+    // These are errors: no name where one is needed, a name that isn't there and a slot that isn't there.
+    asked.clear();
+    CHECK(run(effectStopStart(0, -1)) == Outcome::Error);
+    CHECK(run(effectStopStart(0, 9)) == Outcome::Error);
+    CHECK(run(effectStopStart(0, 0, 3, 0)) == Outcome::Error);
+    CHECK(asked.empty());
+
+    // Pictures after a start: an object's thumbnail by its model number or temp 6, a Sim's portrait by object or
+    // neighbor. Without the object it is an error, and an unknown GUID or neighbor gives no picture.
+    auto withValue = [&](std::uint16_t flags, std::uint8_t ownerOfValue, std::uint8_t data, int mode = 0) {
+        Instruction in = effectStopStart(static_cast<std::uint8_t>(mode), 0, 0xFF, 3, flags);
+        in.operands[12] = ownerOfValue;
+        in.operands[13] = data;
+        return in;
+    };
+    constexpr std::uint8_t kTemps = owner::kTemp;
+    constexpr std::uint16_t kSim = 0x51515151 & 0xFFFF;
+    auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
+    hood->neighbors[9].guid = 0x51515151;
+    w.world.setNeighborhood(hood);
+    const std::int16_t simObject = [&] {
+        for (std::int16_t id = 1; id < 20; ++id) {
+            if (const auto* o = w.world.find(id); o != nullptr && o->isPerson()) {
+                return id;
+            }
+        }
+        return std::int16_t{0};
+    }();
+    w.controller->definition.fields[0x48] = 0x34;
+    w.controller->definition.fields[0x49] = 0x12;
+    auto& temps = w.controller->thread.temps;
+    temps[2] = me;
+    temps[3] = simObject;
+    temps[6] = 5;
+    temps[4] = kSim;
+    temps[5] = 0x5151;
+    temps[7] = 9;
+    CHECK(run(withValue(0x4, kTemps, 2)) == Outcome::True);
+    CHECK(asked.back().pictureGuid == 0x0BADF00D && asked.back().picture == "BalloonEffectThumbnail_0x0badf00d" && asked.back().pictureIndex == 0x120034 && asked.back().pictureNeighbor == 0);
+    CHECK(run(withValue(0x4 | 0x800, kTemps, 2, 1)) == Outcome::True);
+    CHECK(asked.back().pictureIndex == 5);
+    CHECK(run(withValue(0x4, kTemps, 3)) == Outcome::True);
+    CHECK(asked.back().pictureGuid == 0x51515151 && asked.back().pictureNeighbor == 9);
+    CHECK(run(withValue(0x10, kTemps, 7)) == Outcome::True);
+    CHECK(asked.back().pictureGuid == 0x51515151 && asked.back().pictureNeighbor == 9);
+    temps[7] = 99;
+    CHECK(run(withValue(0x10, kTemps, 7)) == Outcome::True);
+    CHECK(asked.back().picture.empty());
+    CHECK(run(withValue(0x4 | 0x400, kTemps, 2)) == Outcome::True);  // a type this code source doesn't have
+    CHECK(asked.back().picture.empty());
+    CHECK(run(withValue(0x4, kTemps, 2, 6)) == Outcome::True);  // only starts take pictures
+    CHECK(asked.back().picture.empty());
+    // Queued starts carry temp 2 and temp 3, and mode 8 also forgets the queue.
+    temps[2] = 7;
+    temps[3] = 100;
+    CHECK(run(effectStopStart(1, 0, 0xFF, 3, 0x80)) == Outcome::True);
+    CHECK(asked.back().queued && asked.back().hard && asked.back().queuePriority == 7 && asked.back().queueWait == 100);
+    CHECK(run(effectStopStart(8, -1)) == Outcome::True);
+    CHECK(asked.back().clearsQueue);
+    temps[2] = me;
+    temps[3] = simObject;
+    // A want or fear of a Sim by temp 4 and temp 5. An empty place shows nothing, and past the list it is an error.
+    w.world.neighborWants(9)[1].guid = kFridgeGuid;
+    temps[4] = 0;
+    temps[5] = 1;
+    CHECK(run(withValue(0x2000, kTemps, 3)) == Outcome::True);
+    CHECK(asked.back().pictureWant && asked.back().pictureWant->guid == kFridgeGuid);
+    temps[5] = 0;
+    CHECK(run(withValue(0x2000, kTemps, 3)) == Outcome::True);
+    CHECK(!asked.back().pictureWant);
+    temps[4] = 1;
+    temps[5] = 20;
+    CHECK(run(withValue(0x2000, kTemps, 3)) == Outcome::Error);
+    CHECK(run(withValue(0x2000, kTemps, 2)) == Outcome::Error);  // not a Sim
+    temps[4] = kSim;
+    temps[5] = 0x5151;
+    // A score from temp 6, which wins over the other pictures.
+    temps[6] = -1500;
+    CHECK(run(withValue(0x1000 | 0x4, kTemps, 2)) == Outcome::True);
+    CHECK(asked.back().pictureNumber == -1500 && asked.back().pictureGuid == 0);
+    CHECK(run(withValue(0x1000, kTemps, 2, 6)) == Outcome::True);
+    CHECK(!asked.back().pictureNumber);
+    // A memory's own picture, with its GUID in my token or the temps.
+    code.addObjectType(kObjectGroup, typed(kFridgeGuid));
+    w.controller->token.guid = kFridgeGuid;
+    CHECK(run(withValue(0x4 | 0x100 | 0x200, kTemps, 2)) == Outcome::True);
+    CHECK(asked.back().pictureGuid == kFridgeGuid && asked.back().pictureIsMemory);
+    temps[4] = static_cast<std::int16_t>(kFridgeGuid & 0xFFFF);
+    temps[5] = static_cast<std::int16_t>(kFridgeGuid >> 16);
+    CHECK(run(withValue(0x4 | 0x400 | 0x200, kTemps, 2)) == Outcome::True);
+    CHECK(asked.back().pictureGuid == kFridgeGuid && asked.back().pictureIsMemory);
+    CHECK(run(withValue(0x4 | 0x400, kTemps, 2)) == Outcome::True);
+    CHECK(asked.back().pictureGuid == kFridgeGuid && !asked.back().pictureIsMemory);
+    temps[2] = 999;
+    CHECK(run(withValue(0x4, kTemps, 2)) == Outcome::Error);
+}
+
 Instruction soundEvent(std::int16_t id, std::uint8_t flags, std::uint8_t indexOwner = 0, std::uint16_t indexData = 0) {
     Instruction in = primitiveCall(0x0017, T, F);
     in.operands[0] = static_cast<std::uint8_t>(id);
@@ -2579,6 +2802,17 @@ void removedObjectsLeaveTheirSlotAtOnce() {
     CHECK(food.x == ts2::sim::kOffLot && food.data[0x1D] == -1);
 }
 
+// Hidden Flags (object data 0x22) hide the model at bits 0x01 and 0x20 only. Bit 0x02 silences an
+// object and bit 0x04 leaves it drawn. A value of -1, as the plumbob and cars set, has them all.
+void hiddenFlagsHideTheModel() {
+    ts2::sim::SimObject object;
+    CHECK(!ts2::sim::modelHidden(object));
+    for (const auto& [flags, hidden] : {std::pair{0x01, true}, {0x20, true}, {0x21, true}, {0x02, false}, {0x04, false}, {0x10, false}, {-1, true}}) {
+        object.data[0x22] = static_cast<std::int16_t>(flags);
+        CHECK(ts2::sim::modelHidden(object) == hidden);
+    }
+}
+
 // A saved Placeholder or TemplatePerson among the ids the object map's wait table covers is marked
 // for delete as the lot loads, as the game does. Purges keep it until a script removes it.
 void loadedPlaceholdersAreKeptUntilUnload() {
@@ -2754,6 +2988,8 @@ std::vector<Test> vmObjectTests() {
         {"Reach/Put moves the object at the clip's event", reachPutMovesTheObjectAtTheClipsEvent},
         {"Reach/Put measures the height through containers", reachPutMeasuresTheHeightThroughContainers},
         {"Create Object starts its Main and passes temp 0", createObjectStartsItsMainAndPassesTemp0},
+        {"created objects count their own steps", createdObjectsCountTheirOwnSteps},
+        {"Create Object out of the world is in no room", createObjectOutOfWorldIsInNoRoom},
         {"Create Object passes my id and stack object", createObjectPassesMyIdAndStackObject},
         {"Create Object passes nothing to a Main without params", createObjectPassesNothingToMainWithoutParams},
         {"Create Object with unknown GUID returns false", createObjectWithUnknownGuidReturnsFalse},
@@ -2772,6 +3008,8 @@ std::vector<Test> vmObjectTests() {
         {"Change Light sets how strongly an object's lights shine", changeLightSetsLightStrength},
         {"Change Material names a material for a mesh group", changeMaterialNamesAMaterialForAMeshGroup},
         {"Play/Stop Sound Event names the sound and its source", soundEventNamesTheSoundAndItsSource},
+        {"held objects come along with their holder", heldObjectsComeAlongWithTheirHolder},
+        {"Effect Stop/Start asks for effects", effectStopStartAsksForEffects},
         {"Cinematic checks its actors and starts none", cinematicChecksItsActorsAndStartsNone},
         {"RayTrace rules judge the hits", rayTraceRulesJudgeTheHits},
         {"RayTrace asks the scene and writes temp 0", rayTraceAsksTheSceneAndWritesTemp0},
@@ -2785,6 +3023,7 @@ std::vector<Test> vmObjectTests() {
         {"Remove Object refuses protected objects", removeObjectRefusesProtectedObjects},
         {"removed objects leave their slot at once", removedObjectsLeaveTheirSlotAtOnce},
         {"Removed objects keep their data until purge", removedObjectsKeepTheirDataUntilPurge},
+        {"Hidden Flags hide the model", hiddenFlagsHideTheModel},
         {"loaded Placeholders and TemplatePersons are kept until unload", loadedPlaceholdersAreKeptUntilUnload},
         {"a saved Idle for Input runs again after its interaction", savedIdleForInputRunsAgainAfterItsInteraction},
         {"removing me ends the run unless return immediately", removingMeEndsTheRunUnlessReturnImmediately},

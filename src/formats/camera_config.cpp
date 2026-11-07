@@ -171,6 +171,21 @@ float pitchAt(const Config& config, float distance, float blend) {
     return least + (most - least) * blend;
 }
 
+float effectDetailAt(const Config& config, float distance) {
+    const auto& l = config.levels;
+    if (l.size() < 2) {
+        return 1;
+    }
+    std::size_t a = 0;
+    while (a < l.size() && l[a].distance > distance) {
+        ++a;
+    }
+    a = a > 0 ? a - 1 : 0;
+    const std::size_t b = std::min(a + 1, l.size() - 1);
+    const float t = l[a].distance == l[b].distance ? 0 : std::clamp((l[a].distance - distance) / (l[a].distance - l[b].distance), 0.0f, 1.0f);
+    return static_cast<float>(a) + t + 1;
+}
+
 float nearClipAt(const Config& config, float distance) {
     return atDistance(config, distance, [](const ZoomLevel& l) { return l.nearClip; });
 }

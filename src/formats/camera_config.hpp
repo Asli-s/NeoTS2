@@ -45,6 +45,9 @@ std::vector<Config> parse(std::string_view text);
 // it by distance, holding the end values beyond the first and last levels. `blend` (0 to 1) goes
 // from the levels' minimum pitch to their maximum.
 float pitchAt(const Config& config, float distance, float blend = 0);
+// The level of detail effects play at from a distance: 1 at the first (farthest) zoom level and one more
+// for each level closer, with the share of the way to the next. 1 for a camera with fewer than two levels.
+float effectDetailAt(const Config& config, float distance);
 // The near clip distance at a distance, blended between zoom levels the same way.
 float nearClipAt(const Config& config, float distance);
 // The zoom level a distance is at: the first level, farthest first, at or nearer than it, else the

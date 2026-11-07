@@ -87,6 +87,14 @@ int nearestZodiacSign(int outgoing, int nice, int playful, int neat, int active)
 // A picture placed at (x, y) on a transparent one of `width` x `height` (the parts outside are cut).
 tga::Pixels placed(const tga::Pixels& picture, std::uint32_t width, std::uint32_t height, int x, int y);
 
+// A score balloon's picture from its text drawn in a line `lineHeight` pixels high: the text on a clear white square
+// of 256 pixels, at its left and centred in height, shrunk when it doesn't fit.
+tga::Pixels headlineTextPicture(const tga::Pixels& text, int lineHeight);
+
+// A want balloon's picture: the want's picture, already at `side` pixels (empty for none), with its badge at 61% of
+// that in the bottom right corner, its own alpha showing what is under it.
+tga::Pixels wantBalloonPicture(const tga::Pixels& picture, const tga::Pixels& badge, std::uint32_t side);
+
 // The largest portrait the functions below work on (the game's are 256). Larger ones are refused.
 constexpr std::uint32_t kMaxPortraitSide = 1024;
 
@@ -108,6 +116,10 @@ tga::Pixels scaled(const tga::Pixels& picture, std::uint32_t width, std::uint32_
 // A picture cut to a shape of its size: its alpha times the shape's (the picture as it is when the
 // sizes differ).
 tga::Pixels masked(const tga::Pixels& picture, const tga::Pixels& shape);
+
+// A picture cut to a shape of its size as a balloon's portrait is: its colour and alpha both times the shape's
+// alpha, rounded down (the picture as it is when the sizes differ).
+tga::Pixels fadedToShape(const tga::Pixels& picture, const tga::Pixels& shape);
 
 // A picture in grey, as the game shows what can't be had: each pixel's grey is 0.3 of its red,
 // 0.6 of its green and 0.1 of its blue (alpha kept).

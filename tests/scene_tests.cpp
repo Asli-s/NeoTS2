@@ -1,9 +1,17 @@
 // Building and viewing scenes: lots, Sims, rigs, roofs, walls and views.
+#include "render/math.hpp"
 #include "test_support.hpp"
 
 #include "../app/object_materials.hpp"
+#include "scene/rig_layers.hpp"
+#include "scene/sim_builder.hpp"
 #include "scene/neighborhood_scene.hpp"
+#include "scene/prop_fade.hpp"
 #include "scene/hood_drift.hpp"
+#include "scene/effect_player.hpp"
+#include "scene/object_effects.hpp"
+#include "scene/particle_emitter.hpp"
+#include "scene/particle_quads.hpp"
 #include "scene/look_at.hpp"
 #include "sim/look_at.hpp"
 #include "scene/scene_ray.hpp"
@@ -15,6 +23,1394 @@
 #include <random>
 
 namespace {
+
+// A particle system of one cycle a second that starts its particles still, at the origin, with a life of 10.
+ts2::effects::ParticleBlock stillParticles(std::uint64_t flags, float count) {
+    ts2::effects::ParticleBlock b;
+    b.flags = flags;
+    b.life = {10, 10};
+    b.delay = {-1, -1};
+    b.gap = {-1, -1};
+    b.directionLow = b.directionHigh = {0, 0, 1};
+    b.count.values = {count};
+    b.interval = 1;
+    return b;
+}
+
+bool near(float a, float b, float within = 1e-4f) { return std::fabs(a - b) <= within; }
+
+// A part playing particle block `index`, facing along the axes.
+ts2::effects::Component particlePart(std::int32_t index) {
+    ts2::effects::Component c;
+    c.type = 1;
+    c.index = index;
+    c.orientation = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    return c;
+}
+
+// A file with one effect called `name`, as its levels' records.
+void addEffect(ts2::effects::File& file, const std::string& name, ts2::effects::VisualEffect effect) {
+    if (effect.level == 0) {
+        effect.level = 1;
+    }
+    file.names[name].push_back(static_cast<std::uint32_t>(file.effects.size()));
+    file.effects.push_back(std::move(effect));
+}
+
+std::size_t systemsPlaying(const ts2::scene::EffectPlayer& player) {
+    std::size_t n = 0;
+    player.forEachParticleSystem([&](const auto&, const auto& emitter, const auto&) { n += emitter.running(); });
+    return n;
+}
+
+void effectsFaceTheCamera() {
+    using namespace ts2;
+    effects::File file;
+    file.particles.push_back(stillParticles(effects::ParticleBlock::kHoldCount, 1));
+    effects::VisualEffect facing, turning;
+    facing.components = {particlePart(0)};
+    facing.flags = effects::VisualEffect::kViewRelative | effects::VisualEffect::kCameraFacing;
+    turning.components = {particlePart(0)};
+    turning.flags = effects::VisualEffect::kViewRelative;
+    addEffect(file, "facing", facing);
+    addEffect(file, "turning", turning);
+
+    const auto parentOf = [&](const char* name) {
+        scene::EffectPlayer player(file, 1);
+        player.setDetail(1);
+        player.setCamera({0, -10, 0}, {0, 1, 0}, {0, 0, 1});
+        auto effect = player.create(name);
+        effect->start(false);
+        player.update(0.1f, 0.1f);
+        player.update(0.1f, 0.1f);
+        // It keeps facing as the camera moves round to +x.
+        player.setCamera({10, 0, 0}, {-1, 0, 0}, {0, 0, 1});
+        player.update(0.1f, 0.1f);
+        scene::EmitterPlace parent;
+        player.forEachParticleSystem([&](const auto&, const auto&, const auto& p) { parent = p; });
+        return parent;
+    };
+    // The effect's x points at the camera, z stays up and y goes along the side.
+    const auto f = parentOf("facing");
+    CHECK(near(f.rotation[0], 1) && near(f.rotation[3], 0) && near(f.rotation[6], 0));
+    CHECK(near(f.rotation[2], 0) && near(f.rotation[5], 0) && near(f.rotation[8], 1));
+    CHECK(near(f.rotation[4], 1));
+    // viewRelative alone turns about the vertical by the camera's heading: looking along -x is half a turn.
+    const auto t = parentOf("turning");
+    CHECK(near(t.rotation[0], -1) && near(t.rotation[4], -1) && near(t.rotation[8], 1));
+}
+
+void effectsPickTheirRecordByLevel() {
+    using namespace ts2;
+    effects::File file;
+    file.particles.push_back(stillParticles(effects::ParticleBlock::kHoldCount, 1));
+    effects::VisualEffect low, high;
+    low.level = 1;
+    high.level = 3;
+    high.components = {particlePart(0), particlePart(0)};
+    low.components = {particlePart(0)};
+    addEffect(file, "smoke", low);
+    addEffect(file, "smoke", high);
+    effects::VisualEffect onlyHigh;
+    onlyHigh.level = 3;
+    onlyHigh.components = {particlePart(0)};
+    addEffect(file, "sparkle", onlyHigh);
+
+    scene::EffectPlayer player(file, 1);
+    player.setDetail(1);
+    CHECK(player.create("no such effect") == nullptr);
+    auto smoke = player.create("SMOKE");  // the game ignores case
+    smoke->start(false);
+    player.update(0.1f, 0.1f);
+    CHECK(systemsPlaying(player) == 2);
+    player.setLevel(1);
+    CHECK(systemsPlaying(player) == 1 && smoke->running());
+    // A name with no record at this level is taken, but never plays.
+    auto sparkle = player.create("sparkle");
+    sparkle->start(false);
+    player.update(0.1f, 0.1f);
+    CHECK(sparkle && !sparkle->running() && systemsPlaying(player) == 1);
+}
+
+void effectPartsFollowDetailAndState() {
+    using namespace ts2;
+    effects::File file;
+    file.particles.push_back(stillParticles(effects::ParticleBlock::kHoldCount, 1));
+    effects::VisualEffect e;
+    e.stateBits = 0x10;
+    auto always = particlePart(0);
+    auto near_ = particlePart(0);
+    near_.lowestDetail = 3;
+    auto snowing = particlePart(0);
+    snowing.state = 0x10;
+    snowing.stateMask = 0x10;
+    e.components = {always, near_, snowing};
+    addEffect(file, "e", e);
+
+    scene::EffectPlayer player(file, 1);
+    player.setDetail(1);
+    auto effect = player.create("e");
+    effect->start(false);
+    player.update(0.1f, 0.1f);
+    CHECK(systemsPlaying(player) == 1);
+    player.setDetail(3.5f);
+    CHECK(systemsPlaying(player) == 2);
+    player.setDetail(3.6f);
+    player.setState(0x10);
+    player.update(0.1f, 0.1f);
+    CHECK(systemsPlaying(player) == 3);
+    // A part no longer allowed finishes first: its one held particle has a life of 10.
+    player.setState(0);
+    player.update(0.1f, 0.1f);
+    CHECK(systemsPlaying(player) == 3);
+    player.update(11, 11);
+    CHECK(systemsPlaying(player) == 2);
+}
+
+void effectGroupsPlayOneOfTheirParts() {
+    using namespace ts2;
+    effects::File file;
+    file.particles.push_back(stillParticles(effects::ParticleBlock::kHoldCount, 1));
+    file.particles.push_back(stillParticles(effects::ParticleBlock::kHoldCount, 2));
+    effects::VisualEffect e;
+    auto a = particlePart(0);
+    a.group = 7;
+    a.weight = 0x7FFF;
+    auto b = particlePart(1);
+    b.group = 7;
+    b.weight = 0x7FFF;
+    e.components = {a, b};
+    addEffect(file, "either", e);
+
+    int firstPicked = 0, secondPicked = 0;
+    for (std::uint32_t seed = 1; seed <= 64; ++seed) {
+        scene::EffectPlayer player(file, seed * 7919);
+        player.setDetail(1);
+        auto effect = player.create("either");
+        effect->start(false);
+        player.update(0.1f, 0.1f);
+        CHECK(systemsPlaying(player) == 1);
+        player.forEachParticleSystem([&](const auto& block, const auto&, const auto&) { (block.count.values[0] == 1 ? firstPicked : secondPicked)++; });
+    }
+    CHECK(firstPicked > 8 && secondPicked > 8);
+}
+
+void effectsPlacePartsInsideThemselves() {
+    using namespace ts2;
+    effects::File file;
+    file.particles.push_back(stillParticles(effects::ParticleBlock::kHoldCount, 1));
+    auto part = particlePart(0);
+    part.offset = {1, 0, 0};
+    part.scale = 2;
+    effects::VisualEffect loose, rigid, detached;
+    loose.components = {part};
+    rigid.components = {part};
+    rigid.flags = effects::VisualEffect::kRigid;
+    detached.components = {part};
+    detached.flags = effects::VisualEffect::kDetach;
+    addEffect(file, "loose", loose);
+    addEffect(file, "rigid", rigid);
+    addEffect(file, "detached", detached);
+
+    scene::EmitterPlace where;
+    where.position = {10, 0, 0};
+    where.rotation = {0, -1, 0, 1, 0, 0, 0, 0, 1};  // a quarter turn, so the part's +x goes to +y
+    where.scale = 3;
+
+    {
+        scene::EffectPlayer player(file, 1);
+        player.setDetail(1);
+        auto effect = player.create("loose");
+        effect->place(where);
+        effect->start(false);
+        player.update(0.1f, 0.1f);
+        player.forEachParticleSystem([&](const auto&, const auto& emitter, const auto& parent) {
+            CHECK(near(emitter.where().position[0], 10) && near(emitter.where().position[1], 3) && near(emitter.where().scale, 6));
+            CHECK(near(emitter.where().rotation[1], -1));
+            CHECK(near(parent.position[0], 0) && near(parent.scale, 1));
+        });
+    }
+    {
+        scene::EffectPlayer player(file, 1);
+        player.setDetail(1);
+        auto effect = player.create("rigid");
+        effect->place(where);
+        effect->start(false);
+        player.update(0.1f, 0.1f);
+        player.forEachParticleSystem([&](const auto&, const auto& emitter, const auto& parent) {
+            CHECK(near(emitter.where().position[0], 1) && near(emitter.where().scale, 2));
+            CHECK(near(parent.position[0], 10) && near(parent.scale, 3));
+        });
+    }
+    {
+        scene::EffectPlayer player(file, 1);
+        player.setDetail(1);
+        auto effect = player.create("detached");
+        effect->start(false);
+        effect->place(where);
+        player.update(0.1f, 0.1f);
+        scene::EmitterPlace elsewhere;
+        elsewhere.position = {-50, 0, 0};
+        effect->place(elsewhere);
+        player.forEachParticleSystem([&](const auto&, const auto& emitter, const auto&) { CHECK(near(emitter.where().position[0], 10)); });
+    }
+}
+
+void effectsEndAsTheirKeywordsSay() {
+    using namespace ts2;
+    using Block = effects::ParticleBlock;
+    effects::File file;
+    auto once = stillParticles(Block::kBursts, 1);
+    once.life = {1, 1};
+    once.burstLimit = 1;
+    file.particles.push_back(once);
+    file.particles.push_back(stillParticles(Block::kHoldCount, 1));
+    effects::VisualEffect plain, endless, hard, side;
+    plain.components = {particlePart(0)};
+    endless.components = {particlePart(0)};
+    endless.flags = effects::VisualEffect::kNoAutoStop;
+    hard.components = {particlePart(1)};
+    hard.flags = effects::VisualEffect::kHardStop;
+    auto ignored = particlePart(1);
+    ignored.flags = effects::Component::kIgnoreLength;
+    side.components = {particlePart(0), ignored};
+    addEffect(file, "plain", plain);
+    addEffect(file, "endless", endless);
+    addEffect(file, "hard", hard);
+    addEffect(file, "side", side);
+
+    scene::EffectPlayer player(file, 1);
+    player.setDetail(1);
+    auto a = player.create("plain");
+    auto b = player.create("endless");
+    auto c = player.create("hard");
+    auto d = player.create("side");
+    a->start(false);
+    b->start(false);
+    c->start(false);
+    d->start(false);
+    player.update(0.1f, 0.1f);
+    CHECK(a->running() && b->running() && c->running() && d->running());
+    player.update(2, 2);
+    player.update(0.1f, 0.1f);
+    CHECK(!a->running());
+    CHECK(b->running());
+    // The held particle's part doesn't count, so this ends with the burst, and hard stops take that part too.
+    CHECK(!d->running());
+    c->stop(false);
+    CHECK(!c->running());
+    b->stop(false);
+    player.update(0.1f, 0.1f);
+    CHECK(!b->running());
+    // An effect nobody holds any more goes when finished, and one still playing stays.
+    const std::size_t before = player.effectCount();
+    a.reset();
+    player.update(0.1f, 0.1f);
+    CHECK(player.effectCount() == before - 1);
+}
+
+void effectsPlayOtherEffectsByName() {
+    using namespace ts2;
+    using Block = effects::ParticleBlock;
+    effects::File file;
+    auto dying = stillParticles(Block::kBursts, 1);
+    dying.life = {0.5f, 0.5f};
+    dying.burstLimit = 1;
+    dying.deathEffect = "puff";
+    file.particles.push_back(dying);
+    file.particles.push_back(stillParticles(Block::kHoldCount, 1));
+
+    effects::VisualEffect inner, outer, puff, loop;
+    inner.components = {particlePart(1)};
+    effects::Component named;
+    named.name = "inner";
+    named.orientation = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    named.offset = {0, 0, 5};
+    named.sizeByDetail = {2, 2};
+    outer.components = {named};
+    puff.components = {particlePart(1)};
+    effects::Component self;
+    self.name = "loop";
+    self.orientation = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    loop.components = {self};
+    effects::VisualEffect dies;
+    dies.components = {particlePart(0)};
+    addEffect(file, "inner", inner);
+    addEffect(file, "outer", outer);
+    addEffect(file, "puff", puff);
+    addEffect(file, "loop", loop);
+    addEffect(file, "dies", dies);
+
+    scene::EffectPlayer player(file, 1);
+    player.setDetail(1);
+    auto effect = player.create("outer");
+    effect->start(false);
+    player.update(0.1f, 0.1f);
+    player.update(0.1f, 0.1f);
+    CHECK(systemsPlaying(player) == 1);
+    player.forEachParticleSystem([&](const auto&, const auto& emitter, const auto& parent) {
+        CHECK(near(emitter.where().position[2], 5) && !emitter.particles().empty() && near(parent.scale, 2));
+    });
+    effect->stop(true);
+    player.update(0.1f, 0.1f);
+
+    // An effect that names itself stops at the nesting limit, over as many frames as it takes.
+    auto endless = player.create("loop");
+    endless->start(false);
+    for (int i = 0; i < 40; ++i) {
+        player.update(0.1f, 0.1f);
+    }
+    CHECK(player.effectCount() < 64);
+    endless->stop(true);
+
+    // A particle's death effect plays by itself where the particle died, with nobody holding it.
+    auto dying2 = player.create("dies");
+    dying2->start(false);
+    player.update(0.1f, 0.1f);
+    player.update(0.1f, 0.1f);
+    player.update(1, 1);
+    bool puffed = false;
+    player.forEachParticleSystem([&](const auto& block, const auto& emitter, const auto&) { puffed = puffed || (block.count.values[0] == 1 && emitter.running()); });
+    CHECK(puffed);
+}
+
+void metaParticlesPlayAnEffectEach() {
+    using namespace ts2;
+    using Meta = effects::MetaParticleBlock;
+    effects::File file;
+    file.particles.push_back(stillParticles(effects::ParticleBlock::kHoldCount, 1));
+    effects::VisualEffect spark;
+    spark.components = {particlePart(0)};
+    addEffect(file, "spark", spark);
+
+    Meta held;
+    held.flags = Meta::kHoldCount;
+    held.life = {0.5f, 0.5f};
+    held.delay = {-1, -1};
+    held.gap = {-1, -1};
+    held.directionLow = held.directionHigh = {0, 0, 1};
+    held.speed = {2, 2};
+    held.spawnLow = held.spawnHigh = {0, 0, 1};
+    held.count.values = {3};
+    held.interval = 1;
+    held.size.values = {2};
+    held.effect = "spark";
+    file.metaParticles.push_back(held);
+
+    effects::Component part;
+    part.type = 2;
+    part.index = 0;
+    part.orientation = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    part.offset = {5, 0, 0};
+    effects::VisualEffect swarm;
+    swarm.components = {part};
+    addEffect(file, "swarm", swarm);
+
+    scene::EffectPlayer player(file, 1);
+    player.setDetail(1);
+    auto effect = player.create("swarm");
+    effect->start(false);
+    player.update(0.1f, 0.1f);
+    player.update(0.1f, 0.1f);
+    player.update(0.1f, 0.1f);
+    int emitters = 0;
+    player.forEachParticleSystem([&](const auto&, const auto& emitter, const auto&) {
+        ++emitters;
+        // The particle started 1 up, at the part's place, and rises by its speed. The effect takes its size.
+        CHECK(near(emitter.where().position[0], 5) && emitter.where().position[2] > 1 && near(emitter.where().scale, 2));
+    });
+    CHECK(emitters == 3);
+    // Hiding the effect hides its particles' effects, and those it makes while hidden.
+    const auto showing = [&] {
+        int count = 0;
+        player.forEachParticleSystem([&](const auto&, const auto&, const auto&) { ++count; });
+        return count;
+    };
+    effect->setHidden(true);
+    CHECK(showing() == 0);
+    player.update(0.5f, 0.5f);  // the first three die and three more are made
+    player.update(0.1f, 0.1f);
+    CHECK(showing() == 0);
+    effect->setHidden(false);
+    CHECK(showing() >= 3);  // the three new ones, and the old ones' effects that are still finishing
+    // Each particle lives half a second, so a soft stop ends all of it once their effects finish.
+    effect->stop(false);
+    for (int i = 0; i < 12; ++i) {
+        player.update(1, 1);
+    }
+    CHECK(!effect->running());
+}
+
+void metaParticlesFollowTheirPath() {
+    using namespace ts2;
+    using Meta = effects::MetaParticleBlock;
+    effects::File file;
+    file.particles.push_back(stillParticles(effects::ParticleBlock::kHoldCount, 1));
+    effects::VisualEffect spark;
+    spark.components = {particlePart(0)};
+    addEffect(file, "spark", spark);
+
+    // Like a speech balloon's: it rises to its place, stays there, and is gone past the path's end.
+    Meta balloon;
+    balloon.flags = Meta::kBursts | Meta::kFollowsPath;
+    balloon.life = {10, 10};
+    balloon.delay = {-1, -1};
+    balloon.gap = {-1, -1};
+    balloon.count.values = {1};
+    balloon.interval = 100;
+    balloon.burstLimit = 1;
+    balloon.size.values = {1};
+    balloon.effect = "spark";
+    balloon.path = {{{0.2f, 0, 0.15f}, {}, 0}, {{0.2f, 0, 0.35f}, {}, 1}, {{0.2f, 0, 0.35f}, {}, 2}};
+    file.metaParticles.push_back(balloon);
+    effects::Component part;
+    part.type = 2;
+    part.index = 0;
+    part.orientation = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    effects::VisualEffect holder;
+    holder.components = {part};
+    addEffect(file, "balloon", holder);
+
+    scene::EffectPlayer player(file, 1);
+    player.setDetail(1);
+    auto effect = player.create("balloon");
+    scene::EmitterPlace at;
+    at.position = {10, 20, 30};
+    effect->place(at);
+    effect->start(false);
+    player.update(0.1f, 0.1f);
+    player.update(0.1f, 0.1f);
+    const auto where = [&] {
+        std::array<float, 3> found{};
+        player.forEachParticleSystem([&](const auto&, const auto& emitter, const auto&) { found = emitter.where().position; });
+        return found;
+    };
+    player.update(0.4f, 0.4f);  // half way along the first stretch of the path
+    player.update(0.1f, 0.1f);  // its effect is made by now
+    const auto rising = where();
+    CHECK(near(rising[0], 10.2f) && near(rising[1], 20) && rising[2] > 30.15f && rising[2] < 30.35f);
+    player.update(1, 1);
+    CHECK(near(where()[2], 30.35f));
+    // The path comes along when the effect moves.
+    at.position = {10, 20, 40};
+    effect->place(at);
+    player.update(0.1f, 0.1f);
+    CHECK(near(where()[2], 40.35f));
+    // Past the path's end the particle is gone, so its effect stays where it was left.
+    player.update(1, 1);
+    at.position = {10, 20, 50};
+    effect->place(at);
+    player.update(0.1f, 0.1f);
+    CHECK(near(where()[2], 40.35f));
+}
+
+void attractorsHoldParticlesInPlace() {
+    using namespace ts2;
+    using Block = effects::ParticleBlock;
+    // Like a thought balloon's little circles: a random push, drag, and a steady pull back to their place.
+    Block circle = stillParticles(Block::kBursts | Block::kRandomWalk | Block::kAttractor, 1);
+    circle.burstLimit = 1;
+    circle.life = {40, 40};
+    circle.drag = 3;
+    circle.walk.retime = {0.55f, 0.65f};
+    circle.walk.speed = {0.9f, 1.1f};
+    circle.walk.turn = 0.5f;
+    Block::Attractor back;
+    back.type = 1;
+    back.strength.values = {2};
+    back.range = 0;
+    circle.attractors = {back};
+    Block free = circle;
+    free.flags &= ~Block::kAttractor;
+    free.attractors.clear();
+
+    const auto furthest = [](const Block& block) {
+        scene::ParticleEmitter emitter(block, 1);
+        scene::EmitterPlace at;
+        at.position = {10, 20, 30};
+        emitter.place(at);
+        emitter.start(false);
+        scene::EffectConditions conditions;
+        float most = 0;
+        for (int i = 0; i < 300; ++i) {
+            emitter.update(0.1f, conditions);
+            for (const auto& p : emitter.particles()) {
+                const float dx = p.position[0] - 10, dy = p.position[1] - 20, dz = p.position[2] - 30;
+                most = std::max(most, std::sqrt(dx * dx + dy * dy + dz * dz));
+            }
+        }
+        return most;
+    };
+    // The pull is twice the push, so a circle stays close and comes back. With no pull it wanders away.
+    CHECK(furthest(circle) < 0.5f);
+    CHECK(furthest(free) > 1);
+
+    // A strength that runs over the range, the point moving with the emitter, and a kill radius.
+    Block fall = stillParticles(Block::kBursts | Block::kAttractor, 1);
+    fall.burstLimit = 1;
+    fall.life = {40, 40};
+    Block::Attractor point;
+    point.type = 1;
+    point.point = {0, 0, 1};
+    point.strength.values = {5};
+    point.killRadius = 0.2f;
+    fall.attractors = {point};
+    scene::ParticleEmitter emitter(fall, 1);
+    scene::EmitterPlace at;
+    at.scale = 2;
+    emitter.place(at);
+    emitter.start(false);
+    scene::EffectConditions conditions;
+    emitter.update(0.1f, conditions);
+    CHECK(emitter.particles().size() == 1 && emitter.particles()[0].velocity[2] > 0);
+    for (int i = 0; i < 40; ++i) {
+        emitter.update(0.1f, conditions);
+    }
+    CHECK(emitter.particles().empty());
+}
+
+void metaParticlesPassOnAPicture() {
+    using namespace ts2;
+    using Block = effects::ParticleBlock;
+    // Like a speech balloon: an effect whose metaparticle makes an effect holding an icon from a row of 16.
+    effects::File file;
+    Block icon = stillParticles(Block::kBursts | Block::kAcceptsPicture, 1);
+    icon.burstLimit = 1;
+    icon.life = {10, 10};
+    icon.texture = "shared01";
+    icon.atlasColumns = 16;
+    icon.frameCycle = 1;
+    Block plain = icon;
+    plain.flags &= ~Block::kAcceptsPicture;
+    plain.texture = "balloon";
+    file.particles = {icon, plain};
+    effects::VisualEffect bundle;
+    bundle.components = {particlePart(0), particlePart(1)};
+    addEffect(file, "bundle", bundle);
+
+    effects::MetaParticleBlock meta;
+    meta.flags = effects::MetaParticleBlock::kHoldCount;
+    meta.life = {10, 10};
+    meta.delay = {-1, -1};
+    meta.gap = {-1, -1};
+    meta.count.values = {1};
+    meta.interval = 1;
+    meta.size.values = {1};
+    meta.effect = "bundle";
+    file.metaParticles = {meta};
+    effects::Component metaPart;
+    metaPart.type = 2;
+    metaPart.index = 0;
+    metaPart.orientation = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    effects::VisualEffect balloonEffect;
+    balloonEffect.components = {metaPart};
+    addEffect(file, "balloon", balloonEffect);
+
+    scene::EffectPlayer player(file, 1);
+    player.setDetail(1);
+    const auto balloon = player.create("balloon");
+    CHECK(balloon != nullptr);
+    balloon->start(false);
+    balloon->setPicture("shared04");
+    balloon->setFirstFrame(9);
+    player.update(0.1f, 0.1f);
+    player.update(0.1f, 0.1f);
+    int seen = 0;
+    player.forEachParticleSystem([&](const Block& block, const scene::ParticleEmitter& emitter, const scene::EmitterPlace&) {
+        ++seen;
+        CHECK(emitter.texture() == (block.texture == "balloon" ? "balloon" : "shared04"));
+        CHECK(emitter.firstFrame() == 9);
+        for (const auto& p : emitter.particles()) {
+            CHECK(p.firstFrame == 9);
+        }
+    });
+    CHECK(seen == 2);
+}
+
+void aHardRestartLeavesNoGap() {
+    using namespace ts2;
+    effects::File file;
+    auto held = stillParticles(effects::ParticleBlock::kHoldCount, 1);
+    held.prewarm = 2.5f;
+    file.particles.push_back(held);
+    effects::VisualEffect glow;
+    glow.components = {particlePart(0)};
+    addEffect(file, "glow", glow);
+
+    scene::EffectPlayer player(file, 1);
+    player.setDetail(1);
+    const auto showing = [&] {
+        std::size_t n = 0;
+        player.forEachParticleSystem([&](const auto&, const auto& emitter, const auto&) { n += emitter.particles().size(); });
+        return n;
+    };
+    // As a plumbob's script does: a hard start, then later a hard stop and a new hard start between two updates.
+    auto first = player.create("glow");
+    first->start(true);
+    player.update(0.1f, 0.1f);
+    CHECK(showing() == 1);
+    first->stop(true);
+    auto second = player.create("glow");
+    second->start(true);
+    player.update(0.01f, 0.01f);
+    CHECK(showing() == 1);
+    // A hard start plays the prewarm, even with no time passing, and a soft start doesn't.
+    second->stop(true);
+    auto third = player.create("glow");
+    third->start(true);
+    player.update(0, 0);
+    CHECK(showing() == 1);
+    third->stop(true);
+    auto fourth = player.create("glow");
+    fourth->start(false);
+    player.update(0, 0);
+    CHECK(showing() == 0);
+}
+
+void sequencesPlayTheirItemsInTurn() {
+    using namespace ts2;
+    using Block = effects::ParticleBlock;
+    effects::File file;
+    file.particles.push_back(stillParticles(Block::kHoldCount, 1));
+    file.particles.push_back(stillParticles(Block::kHoldCount, 2));
+    effects::VisualEffect first, second;
+    first.components = {particlePart(0)};
+    second.components = {particlePart(1)};
+    addEffect(file, "first", first);
+    addEffect(file, "second", second);
+    effects::SequenceBlock block;
+    block.items = {{{1, 1}, "first"}, {{1, 1}, "second"}};
+    block.flags = effects::SequenceBlock::kLetFinish;
+    file.sequences.push_back(block);
+    effects::Component part;
+    part.type = 6;
+    part.index = 0;
+    part.orientation = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    effects::VisualEffect both;
+    both.components = {part};
+    addEffect(file, "both", both);
+
+    scene::EffectPlayer player(file, 1);
+    player.setDetail(1);
+    auto effect = player.create("both");
+    effect->start(false);
+    player.update(0.1f, 0.1f);
+    player.update(0.1f, 0.1f);
+    player.update(0.1f, 0.1f);
+    const auto playing = [&](float count) {
+        bool found = false;
+        player.forEachParticleSystem([&](const auto& b, const auto& emitter, const auto&) { found = found || (b.count.values[0] == count && emitter.running() && !emitter.particles().empty()); });
+        return found;
+    };
+    CHECK(playing(1) && !playing(2));
+    player.update(1, 1);  // time's up: the second starts
+    player.update(0.1f, 0.1f);
+    CHECK(playing(2));
+    // After the last item the sequence ends, here at once, its effect with it.
+    player.update(1, 1);
+    CHECK(!playing(2));
+    player.update(0.1f, 0.1f);
+    CHECK(!effect->running());
+}
+
+// A view's matrix and its inverse undo each other, as ambient occlusion finds places from depth with them.
+void matrixInverseUndoesIt() {
+    using ts2::render::Mat4;
+    Mat4 turn;
+    turn.m = {0, -1, 0, 3, 1, 0, 0, -2, 0, 0, 1, 5, 0, 0, 0, 1};
+    const Mat4 view = Mat4::perspective(0.8f, 1.6f, 0.5f, 900) * turn;
+    const Mat4 one = view * view.inverse();
+    for (int i = 0; i < 16; ++i) {
+        CHECK(std::abs(one.m[static_cast<std::size_t>(i)] - (i % 5 == 0 ? 1.0f : 0.0f)) < 0.001f);
+    }
+    // A view square on keeps a depth of 1 at the near plane and 0 at the far one.
+    const Mat4 square = Mat4::orthographic(-32, 32, -32, 32, 50, 150);
+    CHECK(std::abs(square.m[10] * -50 + square.m[11] - 1) < 0.001f && std::abs(square.m[10] * -150 + square.m[11]) < 0.001f);
+    CHECK(std::abs(square.m[0] * 32 + square.m[3] - 1) < 0.001f);
+    Mat4 flat;
+    flat.m.fill(0);
+    CHECK(flat.inverse().m[0] == 1 && flat.inverse().m[1] == 0);
+}
+
+// Over the particle target new particles thin out by target / count, and they come back as the count falls.
+void particleTargetThinsNewParticles() {
+    using namespace ts2;
+    effects::File file;
+    file.particles.push_back(stillParticles(effects::ParticleBlock::kHoldCount, 8));
+    effects::VisualEffect e;
+    e.components = {particlePart(0)};
+    addEffect(file, "smoke", e);
+    scene::EffectPlayer player(file, 1);
+    player.setDetail(1);
+    const auto effect = player.create("smoke");
+    effect->start(false);
+    player.update(0.1f, 0.1f);
+    player.update(0.1f, 0.1f);
+    CHECK(player.particleCount() == 8);
+    CHECK(near(player.conditions().density, 1));
+    player.setParticleTarget(4);
+    player.update(0.1f, 0.1f);
+    CHECK(near(player.conditions().density, 0.5f));
+    player.setParticleTarget(8);
+    player.update(0.1f, 0.1f);
+    CHECK(near(player.conditions().density, 0.5f));  // 8 * 0.5 is still below the 8 there are
+    player.setParticleTarget(100);
+    player.update(0.1f, 0.1f);
+    CHECK(near(player.conditions().density, 1));
+}
+
+// A queue plays one effect at a time, the highest priority next, and drops what has waited too long.
+void objectEffectsPlayAQueueInTurn() {
+    using namespace ts2;
+    using scene::ObjectEffects;
+    effects::File file;
+    file.particles.push_back(stillParticles(effects::ParticleBlock::kHoldCount, 1));
+    effects::VisualEffect e;
+    e.components = {particlePart(0)};
+    for (const char* name : {"first", "low", "high", "late", "cleared"}) {
+        addEffect(file, name, e);
+    }
+    scene::EffectPlayer player(file, 1);
+    player.setDetail(1);
+    ObjectEffects objects(player);
+    ObjectEffects::Where where;
+    where.state = ObjectEffects::Where::State::Here;
+    const auto placeOf = [&](std::int16_t, const std::string&) { return where; };
+    const auto ask = [&](const char* name, int priority, std::uint64_t expires) {
+        objects.startQueued(5, name, "", 0, false, false, priority, expires, "", 0, placeOf);
+    };
+    ask("first", 1, 100);
+    CHECK(objects.recordCount() == 1);  // nothing queued: it starts at once
+    ask("low", 1, 100);
+    ask("high", 9, 100);
+    ask("late", 5, 10);
+    CHECK(objects.recordCount() == 1);
+    objects.advanceQueues(50, placeOf);
+    CHECK(objects.recordCount() == 1);  // the first plays on
+
+    objects.stop(5, "first", "", 0, true);
+    objects.advanceQueues(50, placeOf);
+    objects.stop(5, "low", "", 0, true);  // not started yet: nothing to stop
+    CHECK(objects.recordCount() == 1);
+    objects.stop(5, "high", "", 0, true);
+    CHECK(objects.recordCount() == 0);
+    objects.advanceQueues(50, placeOf);  // "late" has waited too long, so "low" is next
+    CHECK(objects.recordCount() == 1);
+    objects.stop(5, "low", "", 0, true);
+    CHECK(objects.recordCount() == 0);
+    objects.advanceQueues(50, placeOf);
+
+    ask("first", 1, 100);
+    CHECK(objects.recordCount() == 1);
+    ask("cleared", 1, 100);
+    objects.clearQueue(5);
+    objects.stop(5, "first", "", 0, true);
+    objects.advanceQueues(50, placeOf);
+    CHECK(objects.recordCount() == 0);
+}
+
+void objectEffectsStartStopAndFollow() {
+    using namespace ts2;
+    using scene::ObjectEffects;
+    effects::File file;
+    file.particles.push_back(stillParticles(effects::ParticleBlock::kHoldCount, 1));
+    effects::VisualEffect e;
+    e.components = {particlePart(0)};
+    addEffect(file, "smoke", e);
+    addEffect(file, "steam", e);
+    scene::EffectPlayer player(file, 1);
+    player.setDetail(1);
+    ObjectEffects objects(player);
+
+    ObjectEffects::Where where;
+    where.state = ObjectEffects::Where::State::Here;
+    where.place.position = {1, 2, 3};
+    const auto placeOf = [&](std::int16_t, const std::string& bone) {
+        if (bone == "nothing") {
+            ObjectEffects::Where none;
+            none.state = ObjectEffects::Where::State::NoBone;
+            return none;
+        }
+        return where;
+    };
+    // A bone the object lacks starts nothing, and an unknown name neither.
+    objects.start(5, "smoke", "nothing", 0, ObjectEffects::Primitive, false, false, placeOf);
+    objects.start(5, "no such effect", "", 0, ObjectEffects::Primitive, false, false, placeOf);
+    CHECK(objects.recordCount() == 0);
+
+    objects.start(5, "smoke", "", 0, ObjectEffects::Primitive, false, false, placeOf);
+    objects.start(5, "steam", "", 0, ObjectEffects::AnyKind, true, false, placeOf);
+    objects.start(6, "smoke", "", 0, ObjectEffects::Primitive, false, false, placeOf);
+    CHECK(objects.recordCount() == 3);
+    player.update(0.1f, 0.1f);
+    CHECK(systemsPlaying(player) == 3);
+
+    // They follow their object.
+    where.place.position = {7, 8, 9};
+    objects.follow(placeOf);
+    player.forEachParticleSystem([&](const auto&, const auto& emitter, const auto&) { CHECK(near(emitter.where().position[0], 7)); });
+
+    // A hidden effect goes on but isn't shown.
+    where.hidden = true;
+    objects.follow(placeOf);
+    int shown = 0;
+    player.forEachParticleSystem([&](const auto&, const auto&, const auto&) { ++shown; });
+    CHECK(shown == 0);
+    where.hidden = false;
+    objects.follow(placeOf);
+
+    // Stopping one of a kind leaves those with the keep flag and other objects' alone, and a hard stop forgets them.
+    objects.stopAll(5, ObjectEffects::AnyKind, true);
+    CHECK(objects.recordCount() == 2);
+    objects.stop(5, "steam", "", 0, true);
+    CHECK(objects.recordCount() == 1);
+
+    // A gone object's effects end.
+    where.state = ObjectEffects::Where::State::Gone;
+    objects.follow(placeOf);
+    CHECK(objects.recordCount() == 0);
+
+    // Effects on an object still loading wait, unseen.
+    where.state = ObjectEffects::Where::State::NotReady;
+    objects.start(9, "smoke", "", 0, ObjectEffects::Primitive, false, false, placeOf);
+    CHECK(objects.recordCount() == 1);
+    objects.follow(placeOf);
+    CHECK(objects.recordCount() == 1);
+}
+
+void effectPartsScaleByDetail() {
+    using namespace ts2;
+    effects::File file;
+    auto flowing = stillParticles(0, 100);
+    file.particles.push_back(flowing);
+    auto part = particlePart(0);
+    part.lowestDetail = 1;
+    part.detailEnd = 5;
+    part.rateByDetail = {0, 1};  // none at detail 1, all at detail 5
+    part.timeScale = 2;
+    effects::VisualEffect e;
+    e.components = {part};
+    addEffect(file, "e", e);
+
+    auto madeAt = [&](float zoom) {
+        scene::EffectPlayer player(file, 1);
+        player.setDetail(zoom);
+        auto effect = player.create("e");
+        effect->start(false);
+        player.update(0.5f, 0.5f);
+        std::size_t n = 0;
+        player.forEachParticleSystem([&](const auto&, const auto& emitter, const auto&) { n += emitter.particles().size(); });
+        return n;
+    };
+    CHECK(madeAt(1) == 0);
+    // Detail 3 of the range 1 to 5 is half way: half of 100 a second, for one second of time scaled 2.
+    const std::size_t half = madeAt(3);
+    CHECK(half >= 48 && half <= 52);
+    // Between 3 and 4 it blends towards the next level's rate.
+    const std::size_t more = madeAt(3.5f);
+    CHECK(more >= 60 && more <= 65);
+}
+
+void heldParticlesAreReplacedWhenTheyDie() {
+    using Block = ts2::effects::ParticleBlock;
+    auto b = stillParticles(Block::kHoldCount, 1.2f);  // any part of a particle makes a whole one
+    b.life = {1, 1};
+    ts2::scene::ParticleEmitter e(b, 1);
+    e.start(false);
+    e.update(0.5f, {});
+    CHECK(e.particles().size() == 2 && near(e.particles()[0].age, 0.5f));
+    e.update(0.5f, {});
+    CHECK(e.particles().size() == 2 && near(e.particles()[1].age, 0.5f));
+    // The density setting has no say.
+    ts2::effects::ParticleBlock many = stillParticles(Block::kHoldCount, 50);
+    ts2::scene::ParticleEmitter held(many, 1);
+    held.start(false);
+    ts2::scene::EffectConditions thin;
+    thin.density = 0.1f;
+    held.update(0.1f, thin);
+    CHECK(held.particles().size() == 50);
+}
+
+void burstsComeEachCycleAgedByHowLateTheyAre() {
+    using Block = ts2::effects::ParticleBlock;
+    auto b = stillParticles(Block::kBursts, 3);
+    b.life = {5, 5};
+    b.interval = 2;
+    b.burstLimit = 2;
+    ts2::scene::ParticleEmitter e(b, 1);
+    e.start(false);
+    e.update(0.5f, {});
+    CHECK(e.particles().size() == 3 && near(e.particles()[0].age, 0.5f));
+    e.update(1.0f, {});
+    CHECK(e.particles().size() == 3);
+    e.update(0.5f, {});
+    CHECK(e.particles().size() == 6 && near(e.particles()[3].age, 0.0f) && near(e.particles()[0].age, 2.0f));
+    // The limit reached, it stops itself and ends when the last particle has gone.
+    CHECK(e.running());
+    e.update(3.0f, {});
+    CHECK(e.particles().size() == 3 && e.running());
+    e.update(2.0f, {});
+    CHECK(e.particles().empty() && !e.running());
+
+    // A burst of up to 20 is always played in full, a larger one follows the density.
+    ts2::scene::EffectConditions half;
+    half.density = 0.5f;
+    auto small = stillParticles(Block::kBursts, 20);
+    ts2::scene::ParticleEmitter full(small, 1);
+    full.start(false);
+    full.update(0.1f, half);
+    CHECK(full.particles().size() == 20);
+    auto large = stillParticles(Block::kBursts, 21);
+    ts2::scene::ParticleEmitter thinned(large, 1);
+    thinned.start(false);
+    thinned.update(0.1f, half);
+    CHECK(thinned.particles().size() == 11);
+}
+
+void flowingParticlesFollowTheRateOverACycle() {
+    using Block = ts2::effects::ParticleBlock;
+    auto b = stillParticles(0, 30);
+    b.life = {100, 100};
+    ts2::scene::ParticleEmitter e(b, 1);
+    e.start(false);
+    e.update(0.5f, {});
+    CHECK(e.particles().size() >= 14 && e.particles().size() <= 15);
+    ts2::scene::EffectConditions half;
+    half.density = 0.5f;
+    e.update(0.5f, half);
+    CHECK(e.particles().size() >= 21 && e.particles().size() <= 23);
+
+    // Once it has played its cycles it stops, unless it holds the last. A step of 1/15 second is a little
+    // over that as a float, so the 15th step already ends the cycle, before making its particles.
+    auto limited = b;
+    limited.burstLimit = 1;
+    ts2::scene::ParticleEmitter once(limited, 1);
+    once.start(false);
+    once.update(3.0f, {});
+    CHECK(once.particles().size() >= 27 && once.particles().size() <= 28);
+    limited.flags = Block::kSustain;
+    ts2::scene::ParticleEmitter kept(limited, 1);
+    kept.start(false);
+    kept.update(3.0f, {});
+    CHECK(kept.particles().size() >= 89 && kept.particles().size() <= 90);
+
+    // New particles spread back along the way the emitter moved, unless it jumped.
+    ts2::scene::ParticleEmitter moving(b, 1);
+    moving.start(false);
+    moving.place({{1, 0, 0, 0, 1, 0, 0, 0, 1}, 1, {0.9f, 0, 0}});
+    moving.update(1.0f, {});
+    float lowest = 1, highest = 0;
+    for (const auto& p : moving.particles()) {
+        lowest = std::min(lowest, p.position[0]);
+        highest = std::max(highest, p.position[0]);
+    }
+    CHECK(lowest < 0.1f && highest > 0.8f);
+    ts2::scene::ParticleEmitter jumping(b, 1);
+    jumping.start(false);
+    jumping.place({{1, 0, 0, 0, 1, 0, 0, 0, 1}, 1, {5, 0, 0}});
+    jumping.update(1.0f, {});
+    CHECK(!jumping.particles().empty() && near(jumping.particles().front().position[0], 5));
+}
+
+void particlesMoveAsTheGameMovesThem() {
+    using Block = ts2::effects::ParticleBlock;
+    // In one step: speed changes by the force and the drag, the position by the mean of the two speeds.
+    auto b = stillParticles(Block::kHoldCount, 1);
+    b.speed = {3, 3};
+    b.gravity = {0, 0, -2};
+    ts2::scene::ParticleEmitter fall(b, 1);
+    fall.start(false);
+    fall.update(1, {});
+    CHECK(near(fall.particles()[0].velocity[2], 1) && near(fall.particles()[0].position[2], 2));
+    fall.update(1, {});
+    CHECK(near(fall.particles()[0].velocity[2], -1) && near(fall.particles()[0].position[2], 2));
+
+    b.gravity = {};
+    b.drag = 0.02f;
+    ts2::scene::ParticleEmitter slowing(b, 1);
+    slowing.start(false);
+    slowing.update(1, {});
+    CHECK(near(slowing.particles()[0].velocity[2], 2.94f) && near(slowing.particles()[0].position[2], 2.97f));
+
+    // More than 5% of its speed lost in a step: steps of at most 1/15 second, position first.
+    b.drag = 0.9f;
+    ts2::scene::ParticleEmitter stepping(b, 1);
+    stepping.start(false);
+    stepping.update(0.1f, {});
+    CHECK(near(stepping.particles()[0].position[2], 0.294f) && near(stepping.particles()[0].velocity[2], 2.7354f));
+}
+
+void newParticlesStartWhereTheBlockAndPlaceSay() {
+    using Block = ts2::effects::ParticleBlock;
+    // The place turns, scales and moves the start, and only turns the speed.
+    auto b = stillParticles(Block::kHoldCount, 1);
+    b.spawnLow = b.spawnHigh = {1, 0, 0};
+    b.directionLow = b.directionHigh = {1, 0, 0};
+    b.speed = {1, 1};
+    ts2::scene::ParticleEmitter e(b, 1);
+    e.place({{0, -1, 0, 1, 0, 0, 0, 0, 1}, 2, {10, 0, 0}});
+    e.start(false);
+    e.update(1e-4f, {});
+    const auto& p = e.particles()[0];
+    CHECK(near(p.position[0], 10) && near(p.position[1], 2, 1e-3f) && near(p.velocity[1], 1) && near(p.velocity[0], 0));
+
+    // No direction at all flies along x.
+    auto still = stillParticles(Block::kHoldCount, 1);
+    still.directionLow = still.directionHigh = {0, 0, 0};
+    still.speed = {2, 2};
+    ts2::scene::ParticleEmitter along(still, 1);
+    along.start(false);
+    along.update(1e-4f, {});
+    CHECK(near(along.particles()[0].velocity[0], 2));
+
+    // A blast pushes away from its centre, on top of the speed.
+    still.speed = {0, 0};
+    still.spawnLow = still.spawnHigh = {3, 0, 0};
+    still.blast = 5;
+    ts2::scene::ParticleEmitter blasted(still, 1);
+    blasted.start(false);
+    blasted.update(1e-4f, {});
+    CHECK(near(blasted.particles()[0].velocity[0], 5));
+
+    // A particle flying from where it started heads away from the middle.
+    auto outward = stillParticles(Block::kHoldCount | Block::kDirectionIsSpawn, 1);
+    outward.spawnLow = outward.spawnHigh = {0, 4, 0};
+    outward.speed = {1, 1};
+    ts2::scene::ParticleEmitter away(outward, 1);
+    away.start(false);
+    away.update(1e-4f, {});
+    CHECK(near(away.particles()[0].velocity[1], 1));
+
+    // A ball and a torus fill the spawn box.
+    auto ball = stillParticles(Block::kHoldCount | Block::kBall, 300);
+    ball.spawnLow = {-1, -1, -1};
+    ball.spawnHigh = {1, 1, 1};
+    ts2::scene::ParticleEmitter inBall(ball, 1);
+    inBall.start(false);
+    inBall.update(1e-4f, {});
+    CHECK(inBall.particles().size() == 300);
+    for (const auto& q : inBall.particles()) {
+        CHECK(std::hypot(q.position[0], q.position[1], q.position[2]) <= 1.001f);
+    }
+    auto torus = stillParticles(Block::kHoldCount, 300);
+    torus.spawnLow = ball.spawnLow;
+    torus.spawnHigh = ball.spawnHigh;
+    torus.ring = 0.5f;
+    ts2::scene::ParticleEmitter inTorus(torus, 1);
+    inTorus.start(false);
+    inTorus.update(1e-4f, {});
+    for (const auto& q : inTorus.particles()) {
+        const float across = std::hypot(q.position[0], q.position[1]);
+        CHECK(across >= 0.499f && across <= 1.001f && std::fabs(q.position[2]) <= 0.5f);
+    }
+}
+
+void particleStopsFollowTheirKind() {
+    using Block = ts2::effects::ParticleBlock;
+    auto b = stillParticles(Block::kHoldCount, 2);
+    b.life = {1, 1};
+    b.deathEffect = "smoke";
+    // Soft: no new ones, the living finish and play their death effect.
+    ts2::scene::ParticleEmitter soft(b, 1);
+    soft.start(false);
+    soft.update(0.1f, {});
+    soft.stop(false);
+    soft.update(0.1f, {});
+    CHECK(soft.running() && soft.particles().size() == 2);
+    soft.update(1, {});
+    CHECK(!soft.running() && soft.takeDeaths().size() == 2 && soft.takeDeaths().empty());
+    // Hard: gone at once, with no death effects.
+    ts2::scene::ParticleEmitter hard(b, 1);
+    hard.start(false);
+    hard.update(0.1f, {});
+    hard.stop(true);
+    CHECK(!hard.running() && hard.particles().empty() && hard.takeDeaths().empty());
+    // A cycle that kills ends the last cycle's particles, death effects and all.
+    auto kills = stillParticles(Block::kBursts | Block::kCycleKill, 1);
+    kills.deathEffect = "smoke";
+    ts2::scene::ParticleEmitter cycles(kills, 1);
+    cycles.start(false);
+    cycles.update(1, {});
+    CHECK(cycles.particles().size() == 1 && cycles.takeDeaths().size() == 1);
+}
+
+void particleStartsWaitAndPrewarm() {
+    using Block = ts2::effects::ParticleBlock;
+    // Prewarm is played by the first update, with emission a little short of it.
+    auto b = stillParticles(Block::kHoldCount, 1);
+    b.life = {100, 100};
+    b.prewarm = 10;
+    ts2::scene::ParticleEmitter warm(b, 1);
+    warm.start(true);
+    warm.update(0.1f, {});
+    CHECK(near(warm.particles()[0].age, 9.99f, 1e-3f));
+    ts2::scene::ParticleEmitter cold(b, 1);
+    cold.start(false);
+    cold.update(0.1f, {});
+    CHECK(near(cold.particles()[0].age, 0.1f));
+    // A start with prewarm doesn't restart a block with a cycle limit.
+    auto limited = b;
+    limited.burstLimit = 1;
+    ts2::scene::ParticleEmitter refused(limited, 1);
+    refused.start(true);
+    CHECK(!refused.running());
+
+    auto waits = stillParticles(Block::kHoldCount, 1);
+    waits.delay = {1, 1};
+    ts2::scene::ParticleEmitter later(waits, 1);
+    later.start(false);
+    later.update(0.5f, {});
+    CHECK(later.particles().empty());
+    later.update(1, {});
+    CHECK(later.particles().size() == 1 && near(later.particles()[0].age, 0.5f));
+}
+
+void particleWalkPushesThemAbout() {
+    using Block = ts2::effects::ParticleBlock;
+    auto b = stillParticles(Block::kHoldCount | Block::kRandomWalk, 1);
+    b.walk.retime = {100, 100};
+    b.walk.speed = {2, 2};
+    ts2::scene::ParticleEmitter e(b, 7);
+    e.start(false);
+    e.update(1, {});
+    const auto& v = e.particles()[0].velocity;
+    CHECK(near(std::hypot(v[0], v[1], v[2]), 2));
+    // A retime of 0 in a broken file doesn't hang.
+    b.walk.retime = {0, 0};
+    ts2::scene::ParticleEmitter stuck(b, 7);
+    stuck.start(false);
+    stuck.update(1, {});
+    CHECK(stuck.particles().size() == 1);
+}
+
+// The six corners of one sprite of a block, with a camera looking along +y with z up.
+std::vector<ts2::scene::ParticleVertex> oneSprite(const ts2::effects::ParticleBlock& b, const ts2::scene::EmitterPlace& parent = {}) {
+    ts2::scene::ParticleEmitter e(b, 1);
+    e.start(false);
+    e.update(1e-5f, {});
+    std::vector<ts2::scene::ParticleVertex> out;
+    ts2::scene::appendParticleQuads(b, e, parent, {}, out);
+    return out;
+}
+
+ts2::effects::ParticleBlock spriteBlock(float size, float aspect = 1) {
+    using Block = ts2::effects::ParticleBlock;
+    auto b = stillParticles(Block::kHoldCount, 1);
+    b.size.values = {size};
+    b.aspect.values = {aspect};
+    b.alpha.values = {1};
+    return b;
+}
+
+bool cornerIs(const ts2::scene::ParticleVertex& v, float x, float y, float z) {
+    return near(v.position[0], x, 1e-3f) && near(v.position[1], y, 1e-3f) && near(v.position[2], z, 1e-3f);
+}
+
+void particleSpritesFaceAndSizeAsTheGame() {
+    using Block = ts2::effects::ParticleBlock;
+    // Size is the height, the aspect narrows the width. The texture's top is at the sprite's top.
+    auto sprite = oneSprite(spriteBlock(2, 0.5f));
+    CHECK(sprite.size() == 6);
+    CHECK(cornerIs(sprite[0], -0.5f, 0, 1) && sprite[0].uv == (std::array<float, 2>{0, 0}));
+    CHECK(cornerIs(sprite[1], -0.5f, 0, -1) && sprite[1].uv == (std::array<float, 2>{0, 1}));
+    CHECK(cornerIs(sprite[2], 0.5f, 0, -1) && sprite[2].uv == (std::array<float, 2>{1, 1}));
+    CHECK(cornerIs(sprite[5], 0.5f, 0, 1) && sprite[5].uv == (std::array<float, 2>{1, 0}));
+
+    // A quarter turn, in full turns: the top goes toward -x. The aspect narrows it first...
+    auto turning = spriteBlock(2, 0.5f);
+    turning.rotation.values = {0.25f};
+    auto turned = oneSprite(turning);
+    CHECK(cornerIs(turned[0], -0.5f, 0, -1));
+    CHECK(near(turned[5].position[0], turned[0].position[0], 1e-3f) && near(turned[5].position[2] - turned[0].position[2], 2));
+    // ...or after, along the turned width.
+    turning.flags |= Block::kAspectAfterTurn;
+    auto late = oneSprite(turning);
+    CHECK(near(std::fabs(late[5].position[2] - late[0].position[2]), 1));
+
+    // Pivots add to the middle, in shares of its size.
+    auto moved = spriteBlock(2);
+    moved.pivots = {{0.5f, 0, 0}};
+    auto pivoted = oneSprite(moved);
+    CHECK(cornerIs(pivoted[1], -2, 0, -1));
+
+    // A ground sprite's top runs along the direction particles leave in, flat.
+    auto ground = spriteBlock(2);
+    ground.alignment = Block::Ground;
+    ground.directionLow = ground.directionHigh = {1, 0, 0};
+    auto flat = oneSprite(ground);
+    CHECK(cornerIs(flat[0], 1, 1, 0) && cornerIs(flat[1], -1, 1, 0));
+
+    // A sprite that stretches runs along its flight, longer past the block's speed.
+    auto stretching = spriteBlock(1);
+    stretching.directionLow = stretching.directionHigh = {1, 0, 0};
+    stretching.speed = {4, 4};
+    stretching.stretch = 2;
+    auto long1 = oneSprite(stretching);
+    CHECK(near(long1[0].position[0] - long1[1].position[0], 2, 1e-3f) && near(long1[0].position[2], long1[1].position[2], 1e-3f));
+
+    // The parent's scale and place carry it.
+    auto carried = oneSprite(spriteBlock(2), {{1, 0, 0, 0, 1, 0, 0, 0, 1}, 2, {10, 0, 0}});
+    CHECK(cornerIs(carried[1], 8, 0, -2));
+
+    CHECK(ts2::scene::particleDrawLayer(spriteBlock(1)) == 17);
+    auto layered = spriteBlock(1);
+    layered.layer = 7;
+    CHECK(ts2::scene::particleDrawLayer(layered) == 73);
+    layered.layer = 3;
+    layered.flags |= Block::kDirectLayer;
+    CHECK(ts2::scene::particleDrawLayer(layered) == 13);
+    layered.layer = 0;
+    CHECK(ts2::scene::particleDrawLayer(layered) == 0);
+}
+
+void particleSpritesTakeTheirFrameAndColour() {
+    // Frames go along a row, then down, and wrap over the cycle from the first frame.
+    auto b = spriteBlock(1);
+    b.atlasColumns = 4;
+    b.atlasRows = 2;
+    b.framesPerSecond = 2;
+    b.firstFrame = 1;
+    ts2::scene::ParticleEmitter e(b, 1);
+    e.start(false);
+    e.update(2.5f, {});  // frame 2 * 2.5 + 1 = 6: the third of the second row
+    std::vector<ts2::scene::ParticleVertex> out;
+    ts2::scene::appendParticleQuads(b, e, {}, {}, out);
+    CHECK(near(out[0].uv[0], 0.5f) && near(out[0].uv[1], 0.5f) && near(out[2].uv[0], 0.75f) && near(out[2].uv[1], 1));
+    b.frameCycle = 3;
+    out.clear();
+    ts2::scene::appendParticleQuads(b, e, {}, {}, out);
+    CHECK(near(out[0].uv[0], 0.75f) && near(out[0].uv[1], 0));  // (6 - 1) % 3 + 1 = 3, the last of the first row
+
+    // Colour blends over the life, in 256ths kept below 256.
+    auto colour = spriteBlock(1);
+    colour.colours = {{1, 0, 0}, {0, 0, 1}};
+    colour.alpha.values = {0.5f};
+    ts2::scene::ParticleEmitter c(colour, 1);
+    c.start(false);
+    c.update(5, {});
+    out.clear();
+    ts2::scene::appendParticleQuads(colour, c, {}, {}, out);
+    CHECK((out[0].colour == std::array<std::uint8_t, 4>{128, 0, 128, 128}));
+
+    // Toward the screen's edge, by a slope and a base from the block.
+    auto fading = spriteBlock(2);
+    fading.screenEdge = {48, 51, 0, 255};
+    auto middle = oneSprite(fading);
+    CHECK(middle[0].colour[3] == 255);
+    fading.spawnLow = fading.spawnHigh = {5, 0, 0};
+    auto outside = oneSprite(fading);
+    CHECK(outside[0].colour[3] == 51);
+    CHECK(near(outside[0].position[2] - outside[1].position[2], 2));
+}
+
+void brokenParticleBlocksStayWithinLimits() {
+    using Block = ts2::effects::ParticleBlock;
+    auto notNumber = stillParticles(Block::kHoldCount, 1);
+    notNumber.life[0] = std::numeric_limits<float>::quiet_NaN();
+    ts2::scene::ParticleEmitter none(notNumber, 1);
+    none.start(false);
+    none.update(1, {});
+    CHECK(none.particles().empty());
+
+    auto flood = stillParticles(0, 1e30f);
+    ts2::scene::ParticleEmitter flowing(flood, 1);
+    flowing.start(false);
+    flowing.update(1, {});
+    CHECK(flowing.particles().size() <= 10000);
+
+    auto rapid = stillParticles(Block::kBursts, 1);
+    rapid.interval = 0;
+    rapid.life = {1e6f, 1e6f};
+    ts2::scene::ParticleEmitter bursting(rapid, 1);
+    bursting.start(false);
+    bursting.update(1000, {});
+    CHECK(bursting.particles().size() <= 10000);
+}
+
+// The Fade Distance's rule, as the game works it out each frame in lot view. Nothing fades while the
+// camera is over the lot (its far edges included). From beyond the lot, a prop fades when it is
+// nearer than the lot's middle, to (distance squared over Fade Distance squared) to the fourth.
+void propsFadeAsTheGameFadesThem() {
+    namespace propfade = ts2::scene::propfade;
+    const std::array<float, 2> lot{30, 40};
+    CHECK(!propfade::reach({0, 0, 15}, lot) && !propfade::reach({30, 40, 15}, lot) && !propfade::reach({12, 20, 15}, lot));
+    // South of the lot: only the distance along y to the lot's middle counts.
+    const std::array<float, 3> eye{10, -20, 15};
+    const auto reach = propfade::reach(eye, lot);
+    CHECK(reach && *reach == 1600);
+    if (!reach) {
+        return;
+    }
+    const float fade = 50.0f * 50.0f;
+    // To the box's middle on both axes (dx -4, dy 9), and the camera 11 above its 4 high top.
+    const propfade::Box bush{{5, -12, 0}, {7, -10, 4}};
+    const auto a = propfade::alpha(bush, eye, *reach, fade);
+    CHECK(a && std::fabs(*a - static_cast<float>(std::pow(218.0 / 2500.0, 4.0))) < 1e-9f);
+    // A camera within the box's span on an axis counts nothing along it. Below a tall prop's top
+    // its height is left out.
+    const propfade::Box tree{{8, -14, 0}, {12, -12, 25}};
+    const auto b = propfade::alpha(tree, eye, *reach, fade);
+    CHECK(b && std::fabs(*b - static_cast<float>(std::pow(49.0 / 2500.0, 4.0))) < 1e-9f);
+    // Nothing fades beyond the lot's middle or the Fade Distance, and a prop below the lot's level
+    // is left as it was.
+    CHECK(propfade::alpha({{5, 30, 0}, {7, 32, 4}}, eye, *reach, fade) == 1.0f);
+    CHECK(propfade::alpha({{5, -12, 0}, {7, -10, 4}}, eye, *reach, 100.0f) == 1.0f);
+    CHECK(!propfade::alpha({{5, -12, -3}, {7, -10, -1}}, eye, *reach, fade));
+    // The camera inside a prop's box makes it all but invisible.
+    CHECK(propfade::alpha({{9, -21, 10}, {11, -19, 16}}, eye, *reach, fade) == 0.0f);
+}
+
+// Lot view fades only the plants and decorations taller than 15 or with ground within 3 tiles of
+// the lot. These are the game's own trees around a 3 by 3 tile lot at tiles (56, 43): each side of a
+// ground rectangle less than 0.07 of a tile short of the next tile line counts as on it.
+void onlyPropsNearTheLotFade() {
+    namespace propfade = ts2::scene::propfade;
+    const std::array<int, 4> lot{56, 43, 59, 46};
+    const propfade::Box low{{0, 0, -9}, {1, 1, 1}};
+    // Its west side 0.06 short of line 63 starts there, past the area's last line (62).
+    CHECK((propfade::groundTiles({629.386f, 403.201f, 637.829f, 410.671f}) == std::array<int, 4>{63, 40, 64, 41}));
+    CHECK(!propfade::fadesInLotView(low, propfade::groundTiles({629.386f, 403.201f, 637.829f, 410.671f}), lot));
+    CHECK(propfade::fadesInLotView(low, propfade::groundTiles({628.413f, 442.495f, 638.112f, 451.117f}), lot));
+    // Its north side reaches line 40, the area's first.
+    CHECK(propfade::fadesInLotView(low, propfade::groundTiles({576.221f, 377.921f, 592.808f, 394.323f}), lot));
+    CHECK(!propfade::fadesInLotView(low, propfade::groundTiles({591.71f, 499.597f, 599.845f, 507.733f}), lot));
+    // A tall one fades wherever it stands.
+    CHECK(propfade::fadesInLotView({{0, 0, -9}, {1, 1, 16}}, propfade::groundTiles({0, 0, 10, 10}), lot));
+    CHECK(propfade::groundTiles({std::nanf(""), 0, 1e30f, -1e30f})[0] == 0);
+}
+
+// A neighbor's imposter fades by the same reach, from its distance with the camera's height above
+// the lot's level, less the camera's height under its top squared, at any height, curve squared.
+void imposterFadeIsSquared() {
+    namespace propfade = ts2::scene::propfade;
+    const std::array<float, 3> eye{10, -20, 15};
+    const float reach = 1600, fade = 50.0f * 50.0f;
+    // To the middle on both axes (dx -4, dy 9), the camera 15 up, 10 under the 25 high top: 16 + 81
+    // + 225 - 100.
+    const propfade::Box house{{5, -12, 0}, {7, -10, 25}};
+    const float a = propfade::imposterAlpha(house, eye, reach, fade);
+    CHECK(std::fabs(a - static_cast<float>(std::pow(222.0 / 2500.0, 2.0))) < 1e-7f);
+    CHECK(propfade::imposterAlpha({{5, 30, 0}, {7, 32, 4}}, eye, reach, fade) == 1.0f);
+    // Below the lot's level an imposter still fades.
+    CHECK(propfade::imposterAlpha({{5, -12, -3}, {7, -10, -1}}, eye, reach, fade) < 1.0f);
+}
+
+// A placed prop's box is its model's box turned and moved, and the box around that.
+void placedPropBoxesTurnWithTheProp() {
+    ts2::scene::Mesh mesh;
+    ts2::scene::Primitive p;
+    p.positions = {0, 0, 0, 2, 1, 3};
+    mesh.primitives.push_back(p);
+    const auto box = ts2::scene::propfade::placedBox(mesh, ts2::scene::Transform::at(10, 0, 0, ts2::scene::kPi / 2));
+    CHECK(box.has_value());
+    if (box) {
+        const std::array<float, 3> low{9, 0, 0}, high{10, 2, 3};
+        for (std::size_t k = 0; k < 3; ++k) {
+            CHECK(std::fabs(box->low[k] - low[k]) < 1e-5f && std::fabs(box->high[k] - high[k]) < 1e-5f);
+        }
+    }
+    CHECK(!ts2::scene::propfade::placedBox(ts2::scene::Mesh{}, {}));
+}
 
 // An attic wall's top is the underside of the roof it closes, below its own top or above it.
 void atticWallsReachTheRoofsUnderside() {
@@ -328,6 +1724,16 @@ void sceneViewsShowStoreysWallsAndRoofs() {
     view.walls = WallView::Up;
     view.level = 1;
     CHECK(visibleInstances(scene, view)[8] == 0);
+
+    // A model a script has hidden stays off in every view, and comes back when the script clears it.
+    CHECK(visibleInstances(scene, view)[1] == 1);
+    scene.instances[1].hidden = true;
+    CHECK(visibleInstances(scene, view)[1] == 0);
+    view.level = 2;
+    view.walls = WallView::Down;
+    CHECK(visibleInstances(scene, view)[1] == 0);
+    scene.instances[1].hidden = false;
+    CHECK(visibleInstances(scene, view)[1] == 1);
 }
 
 // Floors' undersides, as the game shows the Curious brothers' rooftop platforms (floor 5.625, from
@@ -361,14 +1767,197 @@ void floorUndersidesShowFromBelowWithToggleCeiling() {
     CHECK((visibleInstances(scene, view) == std::vector<std::uint8_t>{0, 0, 1, 1}));
 }
 
-// A stretched rig has every joint's rest translation scaled and its rotations kept.
+// A stretched rig scales each joint's rest translation on its bone data's stretch axis by its
+// weighted share, keeps rotations, and leaves joints marked unstretched alone. The numbers are the
+// adult skeleton's (auskel) and the teen meshes' own copies of it at 0.94.
 void stretchedRigScalesJointTranslations() {
-    ts2::scene::Rig rig;
-    rig.nodes.push_back({"", -1, {1, 1, 1}, {0, 0, 0, 1}});
-    rig.nodes.push_back({"r_calf", 0, {0, 0.5f, 0}, {0.1f, 0, 0, 0.995f}});
+    using ts2::scene::Rig;
+    Rig rig;
+    const auto joint = [&](const char* name, std::array<float, 3> t, int axis, float weight) {
+        Rig::Node n;
+        n.name = name;
+        n.parent = rig.nodes.empty() ? -1 : 0;
+        n.translation = t;
+        n.stretchAxis = axis;
+        n.stretchWeight = weight;
+        rig.nodes.push_back(n);
+    };
+    joint("", {1, 1, 1}, 1, 1);
+    joint("spine0", {0, 0.116f, -0.044f}, 1, 1);
+    joint("neck", {0, 0.16f, 0}, 1, 0.25f);
+    joint("r_clavicle", {-0.02f, 0.0826f, 0.0341f}, 1, 0.7f);
+    joint("r_thigh", {-0.066f, -0.11f, 0}, 0, 1);
+    joint("root_trans", {0, 0, 1.0122f}, 2, 1);
+    joint("pelvis", {0, 0.111f, 0}, Rig::kStretchNone, 1);
+    joint("all", {1, 2, 3}, Rig::kStretchAll, 1);
+    rig.nodes[1].rotation = {0.1f, 0, 0, 0.995f};
     const auto teen = ts2::scene::stretched(rig, 0.94f);
-    CHECK(teen.nodes[0].translation[0] == 1.0f);
-    CHECK(std::fabs(teen.nodes[1].translation[1] - 0.47f) < 1e-6f && teen.nodes[1].rotation == rig.nodes[1].rotation);
+    const auto near = [&](std::size_t i, std::array<float, 3> want) {
+        for (std::size_t k = 0; k < 3; ++k) {
+            if (std::fabs(teen.nodes[i].translation[k] - want[k]) > 1e-4f) {
+                return false;
+            }
+        }
+        return true;
+    };
+    CHECK(near(0, {1, 1, 1}));
+    CHECK(near(1, {0, 0.109f, -0.044f}) && teen.nodes[1].rotation == rig.nodes[1].rotation);
+    CHECK(near(2, {0, 0.1576f, 0}));
+    CHECK(near(3, {-0.02f, 0.0791f, 0.0341f}));
+    CHECK(near(4, {-0.062f, -0.11f, 0}));
+    CHECK(near(5, {0, 0, 0.9515f}));
+    CHECK(near(6, {0, 0.111f, 0}));
+    CHECK(near(7, {0.94f, 1.88f, 2.82f}));
+    CHECK(teen.stretch == 0.94f);
+    // Upper arms are unstretched in the skeleton, but a teen human's take the y stretch (0.1316 in game).
+    joint("r_upperarm", {0, 0.14f, 0}, Rig::kStretchNone, 1);
+    CHECK(std::fabs(ts2::scene::stretched(rig, 0.94f).nodes[8].translation[1] - 0.14f) < 1e-6f);
+    Rig teenArms = rig;
+    ts2::scene::stretchTeenArms(teenArms);
+    CHECK(std::fabs(ts2::scene::stretched(teenArms, 0.94f).nodes[8].translation[1] - 0.1316f) < 1e-6f);
+    // Stretching again works from the present stretch, so going back to 1 gives the adult rig.
+    const auto back = ts2::scene::stretched(teen, 1.0f);
+    CHECK(std::fabs(back.nodes[3].translation[1] - 0.0826f) < 1e-6f && back.stretch == 1.0f);
+}
+
+// Clips weigh a mesh's morphs by blend group and name, whatever the case, mixing as on a joint: a
+// full upper layer takes the morph whole. A morph no clip weighs keeps its weight.
+void clipsWeighMorphs() {
+    using ts2::scene::LayeredClip;
+    ts2::scene::Mesh mesh;
+    mesh.morphs = {{"faceblends", "y_nose"}, {"faceblends", "l_brow"}};
+    auto clipWith = [](const std::string& group, const std::string& name, float value) {
+        auto a = std::make_shared<ts2::anim::Animation>();
+        ts2::anim::Animation::MorphTarget target;
+        target.type = ts2::anim::kMorphTargetType;
+        target.group = group;
+        ts2::anim::Channel c;
+        c.name = name;
+        c.flags = 0x8000;
+        ts2::anim::Curve curve;
+        curve.keys.push_back({0, value, 0, 0});
+        c.components.push_back(curve);
+        target.channels.push_back(c);
+        a->morphTargets.push_back(target);
+        auto r = std::make_shared<ts2::scene::RigAnimation>();
+        r->animation = a;
+        return r;
+    };
+    const auto upper = clipWith("FaceBlends", "Y_Nose", 0.5f), lower = clipWith("*", "y_nose", 1.0f), brow = clipWith("other", "l_brow", 2.0f);
+    std::vector<float> weights;
+    std::vector<LayeredClip> clips(3);
+    clips[0].animation = upper.get();
+    clips[0].layer = 2;
+    clips[1].animation = lower.get();
+    clips[1].layer = 0;
+    clips[2].animation = brow.get();
+    ts2::scene::mixMorphWeights(mesh, clips, weights);
+    CHECK(weights.size() == 2 && weights[0] == 0.5f && weights[1] == 0);
+    // Half an upper layer leaves the other half to the one below.
+    clips[0].weight = 0.5f;
+    ts2::scene::mixMorphWeights(mesh, clips, weights);
+    CHECK(std::abs(weights[0] - 0.75f) < 1e-6f);
+    ts2::scene::mixMorphWeights(mesh, {}, weights);
+    CHECK(std::abs(weights[0] - 0.75f) < 1e-6f);
+    // Bound once per mesh and clip, with the same weights, and again for another mesh at that index.
+    ts2::scene::MorphBindings bindings;
+    std::vector<float> cached;
+    ts2::scene::mixMorphWeights(mesh, clips, cached, &bindings, 0);
+    ts2::scene::mixMorphWeights(mesh, clips, cached, &bindings, 0);
+    CHECK(bindings.entries.size() == 3 && std::abs(cached[0] - 0.75f) < 1e-6f);
+    ts2::scene::Mesh other;
+    other.morphs = {{"other", "l_brow"}};
+    cached.clear();
+    ts2::scene::mixMorphWeights(other, clips, cached, &bindings, 0);
+    CHECK(cached.size() == 1 && cached[0] == 2.0f);
+    // An eye target's channels give the eyes' direction (two values) and each eye's stretch.
+    auto eyes = std::make_shared<ts2::anim::Animation>();
+    ts2::anim::Animation::MorphTarget target;
+    target.type = ts2::anim::kEyeTargetType;
+    target.group = "*";
+    for (const auto& [name, values] : std::vector<std::pair<std::string, std::vector<float>>>{{"eyedirection", {0.05f, -0.02f}}, {"L_EyeStretch", {0.1f}}}) {
+        ts2::anim::Channel c;
+        c.name = name;
+        c.flags = 0x8000;
+        for (const float v : values) {
+            ts2::anim::Curve curve;
+            curve.keys.push_back({0, v, 0, 0});
+            c.components.push_back(curve);
+        }
+        target.channels.push_back(c);
+    }
+    eyes->morphTargets.push_back(target);
+    ts2::scene::RigAnimation looking;
+    looking.animation = eyes;
+    std::vector<LayeredClip> eyeClips(1);
+    eyeClips[0].animation = &looking;
+    std::array<float, 4> values{0, 0, 0, 0.3f};
+    ts2::scene::mixEyes(eyeClips, values);
+    CHECK(values[0] == 0.05f && values[1] == -0.02f && values[2] == 0.1f && values[3] == 0.3f);
+    // The morph mixing leaves eye targets alone.
+    mesh.morphs = {{"*", "eyedirection"}};
+    weights.clear();
+    ts2::scene::mixMorphWeights(mesh, eyeClips, weights);
+    CHECK(weights.size() == 1 && weights[0] == 0);
+}
+
+// A worn part's bone_adjust lists set its joints' rest places, the later entry winning. Entries
+// without a name or with values that aren't numbers are left out. Values from the teen body
+// tmBodyShorts, as read on a live teen.
+void partsAdjustJoints() {
+    using ts2::scenegraph::DataValue;
+    const auto value = [](const char* name, DataValue::Type type, std::vector<float> floats, std::string text = {}) {
+        DataValue v;
+        v.name = name;
+        v.type = type;
+        v.floats = std::move(floats);
+        v.text = std::move(text);
+        return v;
+    };
+    const auto entry = [&](const char* tag, std::vector<float> t, std::vector<float> q) {
+        DataValue list;
+        list.name = "bone_adjust";
+        list.type = DataValue::Type::List;
+        if (tag) {
+            list.items.push_back(value("bone_adjust_bone_tag", DataValue::Type::String, {}, tag));
+        }
+        list.items.push_back(value("bone_adjust_translation", DataValue::Type::Vector, std::move(t)));
+        if (!q.empty()) {
+            list.items.push_back(value("bone_adjust_rotation", DataValue::Type::Rotation, std::move(q)));
+        }
+        return list;
+    };
+    const std::vector<DataValue> lists = {
+        entry("l_shouldertarget_surface", {-0.05716f, 0.07715f, -0.00032f}, {-0.03657f, 0.06857f, -0.68218f, 0.72705f}),
+        entry("neck_grip", {0, -0.0011f, 0.07657f}, {}),
+        entry(nullptr, {1, 1, 1}, {}),
+        entry("neck_grip", {0, 0, std::nanf("")}, {}),
+        entry("no_such_joint", {1, 1, 1}, {}),
+    };
+    const auto adjusts = ts2::scene::jointAdjusts(lists);
+    CHECK(adjusts.size() == 3);
+    ts2::scene::Rig rig;
+    rig.nodes.push_back({"l_shouldertarget_surface", -1, {-0.034f, 0.077f, 0}, {0, 0, 0, 1}});
+    rig.nodes.push_back({"neck_grip", 0, {0, 0, 0.07f}, {0.1f, 0, 0, 0.995f}});
+    ts2::scene::adjustJoints(rig, adjusts);
+    CHECK((rig.nodes[0].translation == std::array<float, 3>{-0.05716f, 0.07715f, -0.00032f}));
+    CHECK(rig.nodes[0].rotation[3] == 0.72705f);
+    // An entry with no rotation keeps the joint's own.
+    CHECK(rig.nodes[1].translation[2] == 0.07657f && rig.nodes[1].rotation[0] == 0.1f);
+    const std::vector<ts2::scene::JointAdjust> later = {{"neck_grip", std::array<float, 3>{0, 0, 0.08f}, std::nullopt}};
+    ts2::scene::adjustJoints(rig, later);
+    CHECK(rig.nodes[1].translation[2] == 0.08f);
+    // Parts apply by part bit whatever their order in the look: a bottom's hip target wins over a
+    // top's. A joint the new parts don't name keeps what earlier parts gave it.
+    rig.nodes.push_back({"l_hiptarget_surface", 0, {0, 0, 0}, {0, 0, 0, 1}});
+    ts2::scene::SimLook look;
+    look.parts.resize(2);
+    look.parts[0].part = ts2::scene::kBottomPart;
+    look.parts[0].jointAdjusts = {{"l_hiptarget_surface", std::array<float, 3>{0.107f, 0, 0}, std::nullopt}};
+    look.parts[1].part = ts2::scene::kTopPart;
+    look.parts[1].jointAdjusts = {{"l_hiptarget_surface", std::array<float, 3>{0.2f, 0, 0}, std::nullopt}};
+    ts2::scene::wearPartJoints(rig, look);
+    CHECK(rig.nodes[2].translation[0] == 0.107f && rig.nodes[1].translation[2] == 0.08f);
 }
 
 // A joint's animation turn (its bone data rotation) comes before the angles an animation gives it.
@@ -593,6 +2182,22 @@ void groundIsOpenWhereItHasNoSurface() {
     CHECK(!ts2::scene::surfaceOpen(surface, 0, 0.5f, 0.1f) && !ts2::scene::surfaceOpen(surface, 1, 0.1f, 0.5f));
     CHECK(!ts2::scene::surfaceOpen(surface, 0, -1, 0.5f) && !ts2::scene::surfaceOpen(surface, 5, 0.1f, 0.5f) &&
           !ts2::scene::surfaceOpen(surface, 0, std::nanf(""), 0.5f));
+    CHECK(ts2::scene::surfaceQuarterOpen(surface, 0, 0, 0, 0) && !ts2::scene::surfaceQuarterOpen(surface, 0, 0, 0, 1));
+    CHECK(!ts2::scene::surfaceQuarterOpen(surface, 1, 0, 0, 0) && !ts2::scene::surfaceQuarterOpen(surface, 0, 1, 0, 0));
+    CHECK(!ts2::scene::surfaceQuarterOpen(surface, 0, 0, 0, 4) && !ts2::scene::surfaceQuarterOpen(surface, 5, 0, 0, 0));
+}
+
+// A counter top saved with a sink's hole keeps it whatever material a script gives that group.
+void savedCutoutStaysOnItsGroup() {
+    using ts2::scene::withSavedCutout;
+    const std::vector<ts2::scenegraph::MaterialOverride> saved{{"top_clean-cutout-sink-mask", "Counter_Top"}, {"wood", "frame"}};
+    CHECK(withSavedCutout("top_dirty", "counter_top", saved) == "top_dirty-cutout-sink-mask");
+    // A material already cut takes the group's own mask.
+    CHECK(withSavedCutout("top_dirty-CUTOUT-old", "counter_top", saved) == "top_dirty-cutout-sink-mask");
+    CHECK(withSavedCutout("oak", "frame", saved) == "oak");
+    CHECK(withSavedCutout("oak", "legs", saved) == "oak");
+    CHECK(withSavedCutout("oak", "", saved) == "oak");
+    CHECK(withSavedCutout("oak", "counter_top", {}) == "oak");
 }
 
 // The ponds' water as the game builds it on the Capps' lot: alpha 62 on a dry rim corner and 74 over
@@ -933,6 +2538,68 @@ void carriedSimsHangAtTheCarriersSlotBone() {
     scene.actors[1].carrier = 2;
     ts2::scene::poseActors(scene, 0, pose);
     CHECK(pose.nodes.size() == 2);
+}
+
+// A Sim with no clips takes no eye or morph values from the clips of the Sim posed before it, nor
+// from a lot shown before, whose clips are gone.
+void simsWithoutClipsKeepTheirOwnEyes() {
+    using ts2::scene::Transform;
+    auto rig = std::make_shared<ts2::scene::Rig>();
+    rig->nodes.push_back({"root", -1, {0, 0, 0}, {0, 0, 0, 1}});
+    ts2::scene::ScenePose pose;
+    const auto face = [](ts2::scene::Scene& scene) {
+        auto& mesh = scene.meshes.emplace_back();
+        mesh.primitives.emplace_back().eyeUvs = {0, 0};
+        mesh.morphs = {{"*", "y_nose"}};
+        scene.instances.emplace_back().mesh = static_cast<int>(scene.meshes.size() - 1);
+    };
+    {
+        auto looking = std::make_shared<ts2::anim::Animation>();
+        ts2::anim::Animation::MorphTarget eyes;
+        eyes.type = ts2::anim::kEyeTargetType;
+        eyes.group = "*";
+        ts2::anim::Animation::MorphTarget nose;
+        nose.type = ts2::anim::kMorphTargetType;
+        nose.group = "*";
+        for (const auto& [target, name] : {std::pair{&eyes, "eyedirection"}, std::pair{&nose, "y_nose"}}) {
+            ts2::anim::Channel c;
+            c.name = name;
+            c.flags = 0x8000;
+            ts2::anim::Curve curve;
+            curve.keys.push_back({0, 0.5f, 0, 0});
+            c.components.assign(2, curve);
+            target->channels.push_back(c);
+        }
+        looking->morphTargets = {eyes, nose};
+        auto clip = std::make_shared<ts2::scene::RigAnimation>();
+        clip->animation = looking;
+        ts2::scene::Scene first;
+        face(first);
+        face(first);
+        auto& withClip = first.actors.emplace_back();
+        withClip.object = 1;
+        withClip.rig = rig;
+        withClip.skinned.push_back({0, {}});
+        withClip.clips.push_back({clip});
+        withClip.clips.back().fadeIn = false;
+        auto& without = first.actors.emplace_back();
+        without.object = 2;
+        without.rig = rig;
+        without.skinned.push_back({1, {}});
+        ts2::scene::poseActors(first, 1, pose);
+        CHECK(pose.eyes.at(0)[0] == 0.5f && pose.morphs.at(0)[0] == 0.5f);
+        CHECK(pose.eyes.at(1)[0] == 0 && pose.morphs.at(1)[0] == 0);
+    }
+    // The next lot's first Sim has no clips, and the last lot's clip is freed.
+    ts2::scene::Scene second;
+    face(second);
+    auto& without = second.actors.emplace_back();
+    without.object = 3;
+    without.rig = rig;
+    without.skinned.push_back({0, {}});
+    pose = {};
+    ts2::scene::poseActors(second, 0, pose);
+    CHECK(pose.eyes.at(0)[0] == 0 && pose.morphs.at(0)[0] == 0);
 }
 
 // A clip played at a negative speed runs from its end back to its start (a chat's talk-to-idle
@@ -1306,10 +2973,11 @@ ts2::effects::File driftEffects() {
     File f;
     auto effect = [&f](const std::string& name, BlockType type) {
         VisualEffect e;
+        e.level = 1;
         Component c;
         c.type = static_cast<std::uint8_t>(type);
         e.components.push_back(c);
-        f.names[name] = static_cast<std::uint32_t>(f.effects.size());
+        f.names[name] = {static_cast<std::uint32_t>(f.effects.size())};
         f.effects.push_back(e);
     };
     effect("nhoodcam", BlockType::Sequence);
@@ -1530,6 +3198,8 @@ std::vector<Test> sceneTests() {
         {"composite layers use the mip level of their size", compositeLayersUseTheMipLevelOfTheirSize},
         {"composite layers blend as the game", compositeLayersBlendAsTheGame},
         {"Stretched rig scales joint translations", stretchedRigScalesJointTranslations},
+        {"Worn parts adjust joints", partsAdjustJoints},
+        {"Clips weigh morphs", clipsWeighMorphs},
         {"Layered clips mix like the game", layeredClipsMixLikeTheGame},
         {"Mirrored clips play on the other side", mirroredClipsPlayOnTheOtherSide},
         {"Clips turn to their own heading", clipsTurnToTheirOwnHeading},
@@ -1544,6 +3214,7 @@ std::vector<Test> sceneTests() {
         {"A lot object's actor poses every joint from its own rig", objectActorsPoseEveryJointFromTheirRig},
         {"Backward clips play from their end", backwardClipsPlayFromTheirEnd},
         {"Carried Sims hang at the carrier's slot bone", carriedSimsHangAtTheCarriersSlotBone},
+        {"Sims without clips keep their own eyes", simsWithoutClipsKeepTheirOwnEyes},
         {"scene transforms turn and move", sceneTransformsTurnAndMove},
         {"scene quads face their normal", sceneQuadsFaceTheirNormal},
         {"scene hip roof rises to its ridge", sceneHipRoofRisesToItsRidge},
@@ -1552,6 +3223,7 @@ std::vector<Test> sceneTests() {
         {"scene cutaway cuts walls in front of rooms", sceneCutawayCutsWallsInFrontOfRooms},
         {"scene views show storeys, walls and roofs", sceneViewsShowStoreysWallsAndRoofs},
         {"floor undersides show from below with Toggle Ceiling", floorUndersidesShowFromBelowWithToggleCeiling},
+        {"a saved cutout stays on its mesh group", savedCutoutStaysOnItsGroup},
         {"ground is open where it has no surface", groundIsOpenWhereItHasNoSurface},
         {"effect tiles leave out the road row", effectTilesLeaveOutTheRoadRow},
         {"pool water has the game's depth layers", poolWaterHasTheGamesDepthLayers},
@@ -1559,6 +3231,39 @@ std::vector<Test> sceneTests() {
         {"floating objects read the water by half tiles", floatingObjectsReadTheWaterByHalfTiles},
         {"pool water has the game's surface", poolWaterHasTheGamesSurface},
         {"attic walls reach the roof's underside", atticWallsReachTheRoofsUnderside},
+        {"held particles are replaced when they die", heldParticlesAreReplacedWhenTheyDie},
+        {"bursts come each cycle, aged by how late they are", burstsComeEachCycleAgedByHowLateTheyAre},
+        {"flowing particles follow the rate over a cycle", flowingParticlesFollowTheRateOverACycle},
+        {"particles move as the game moves them", particlesMoveAsTheGameMovesThem},
+        {"new particles start where the block and place say", newParticlesStartWhereTheBlockAndPlaceSay},
+        {"particle stops follow their kind", particleStopsFollowTheirKind},
+        {"particle starts wait and prewarm", particleStartsWaitAndPrewarm},
+        {"particle walk pushes them about", particleWalkPushesThemAbout},
+        {"effects face the camera", effectsFaceTheCamera},
+        {"effects pick their record by level", effectsPickTheirRecordByLevel},
+        {"effect parts follow detail and state", effectPartsFollowDetailAndState},
+        {"effect groups play one of their parts", effectGroupsPlayOneOfTheirParts},
+        {"effects place parts inside themselves", effectsPlacePartsInsideThemselves},
+        {"effects end as their keywords say", effectsEndAsTheirKeywordsSay},
+        {"effects play other effects by name", effectsPlayOtherEffectsByName},
+        {"effect parts scale by detail", effectPartsScaleByDetail},
+        {"object effects start, stop and follow", objectEffectsStartStopAndFollow},
+        {"metaparticles play an effect each", metaParticlesPlayAnEffectEach},
+        {"metaparticles follow their path", metaParticlesFollowTheirPath},
+        {"a hard restart leaves no gap", aHardRestartLeavesNoGap},
+        {"metaparticles pass on a picture", metaParticlesPassOnAPicture},
+        {"object effects play a queue in turn", objectEffectsPlayAQueueInTurn},
+        {"a particle target thins new particles", particleTargetThinsNewParticles},
+        {"a matrix's inverse undoes it", matrixInverseUndoesIt},
+        {"attractors hold particles in place", attractorsHoldParticlesInPlace},
+        {"sequences play their items in turn", sequencesPlayTheirItemsInTurn},
+        {"particle sprites face and size as the game", particleSpritesFaceAndSizeAsTheGame},
+        {"particle sprites take their frame and colour", particleSpritesTakeTheirFrameAndColour},
+        {"broken particle blocks stay within limits", brokenParticleBlocksStayWithinLimits},
+        {"props fade as the game fades them", propsFadeAsTheGameFadesThem},
+        {"placed prop boxes turn with the prop", placedPropBoxesTurnWithTheProp},
+        {"imposter fade is squared", imposterFadeIsSquared},
+        {"only props near the lot fade", onlyPropsNearTheLotFade},
         {"picker finds the nearest shown triangle", pickerFindsTheNearestShownTriangle},
         {"picker hits posed Sims", pickerHitsPosedSims},
         {"picker box keeps every posed hit", pickerBoxKeepsEveryPosedHit},

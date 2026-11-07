@@ -25,4 +25,10 @@ std::string createdModelName(const SimObject& object, const std::function<std::o
     return low.empty() || low == "nullmodel" || low == "nomodel" ? std::string{} : model;
 }
 
+bool modelHidden(const SimObject& object) {
+    constexpr std::size_t kHiddenFlags = 0x22;
+    constexpr std::int16_t kHidesModel = 0x21;
+    return (object.data[kHiddenFlags] & kHidesModel) != 0;
+}
+
 } // namespace ts2::sim

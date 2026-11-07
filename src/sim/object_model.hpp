@@ -15,4 +15,9 @@ struct SimObject;
 [[nodiscard]] std::string createdModelName(const SimObject& object,
                                            const std::function<std::optional<std::string>(std::size_t row)>& modelNames);
 
+// Whether scripts have hidden an object's or a Sim's model: bit 0x01 or 0x20 of object data 0x22, the
+// Hidden Flags. Emitters and thought balloons set it as they start, which is why their placeholder
+// models never show. A script shows the model again by clearing it. Effects play either way.
+[[nodiscard]] bool modelHidden(const SimObject& object);
+
 } // namespace ts2::sim

@@ -1,6 +1,8 @@
 // File formats: packages, object data, lot and neighborhood resources.
 #include "test_support.hpp"
 
+#include "content/lot.hpp"
+#include "formats/camera_config.hpp"
 #include "formats/face_shape.hpp"
 #include "formats/cursor.hpp"
 #include "formats/dbpf_writer.hpp"
@@ -14,6 +16,22 @@
 namespace {
 
 // A lot's floor pattern list (cStringMap): names by the id the floor grid stores.
+void effectDetailFollowsZoomLevels() {
+    ts2::camera::Config c;
+    c.levels.resize(5);
+    const float distances[5] = {60, 40, 30, 20, 10};
+    for (std::size_t i = 0; i < 5; ++i) {
+        c.levels[i].distance = distances[i];
+    }
+    CHECK(ts2::camera::effectDetailAt(c, 80) == 1);  // beyond the farthest it holds
+    CHECK(ts2::camera::effectDetailAt(c, 60) == 1);
+    CHECK(ts2::camera::effectDetailAt(c, 50) == 1.5f);
+    CHECK(ts2::camera::effectDetailAt(c, 20) == 4);
+    CHECK(ts2::camera::effectDetailAt(c, 10) == 5);
+    c.levels.resize(1);  // the free camera has none to go by
+    CHECK(ts2::camera::effectDetailAt(c, 10) == 1);
+}
+
 void patternMapReadsNamesById() {
     std::vector<std::uint8_t> d(64, 0);
     auto u32 = [&d](std::uint32_t v) {
@@ -1033,6 +1051,113 @@ void neighborhoodTerrainParses() {
 
 // A small effects file: one camera block (its yaw curve 0, 10), one sequence, one visual effect
 // whose component points at the camera, and the name it is started by.
+void effectsFileReads();
+
+// A particle block of the newest version, each float a new number, so a field read out of place shows.
+void particleBlockFieldsRead() {
+    std::vector<std::uint8_t> d;
+    auto u8 = [&d](std::uint8_t v) { d.push_back(v); };
+    auto u16 = [&d](std::uint16_t v) { d.push_back(static_cast<std::uint8_t>(v)); d.push_back(static_cast<std::uint8_t>(v >> 8)); };
+    auto u32 = [&d](std::uint32_t v) {
+        for (int i = 0; i < 4; ++i) d.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
+    };
+    float number = 0;
+    auto f32 = [&] { number += 1; u32(std::bit_cast<std::uint32_t>(number)); };
+    auto floats = [&](int n) { for (int i = 0; i < n; ++i) f32(); };
+    auto text = [&](const std::string& t) {
+        u32(static_cast<std::uint32_t>(t.size()));
+        d.insert(d.end(), t.begin(), t.end());
+    };
+    auto curve = [&](int n) {
+        u32(static_cast<std::uint32_t>(n));
+        floats(n);
+    };
+    auto vectors = [&](int n) {
+        u32(static_cast<std::uint32_t>(n));
+        floats(3 * n);
+    };
+    u16(0);
+    u32(1);
+    u16(11);
+    u32(1);  // the flags' high half
+    u32(0x80000002);
+    floats(21);  // life 1-2, prewarm 3, delay 4-5, gap 6-7, direction 8-13, speed 14-15, spawn 16-21
+    f32();       // ring 22
+    curve(1);    // count 23
+    f32();       // interval 24
+    u16(9);
+    f32();       // speedScale 25
+    curve(1);    // size 26
+    f32();       // sizeVary 27
+    curve(1);    // aspect 28
+    f32();       // aspectVary 29
+    floats(6);   // axes 30-35
+    u8(1);
+    floats(4);   // rotation scales 36-39
+    floats(2);   // offsets 40-41
+    curve(1);    // rotation 42
+    curve(1);    // second rotation 43
+    vectors(1);  // pivots 44-46
+    floats(3);   // pivotVary 47-49
+    curve(1);    // alpha 50
+    f32();       // alphaVary 51
+    vectors(1);  // colours 52-54
+    floats(3);   // colourVary 55-57
+    text("smoke");
+    u8(4);
+    u8(2);
+    u8(5);
+    u8(7);
+    f32();       // layer 58
+    f32();       // framesPerSecond 59
+    u8(3);
+    u8(6);
+    floats(11);  // gravity 60-62, windShare 63, blast 64, blastCentre 65-67, drag 68, stretch 69, screw 70
+    u32(0);      // no path points
+    for (const std::uint8_t b : std::array<std::uint8_t, 4>{11, 12, 13, 14}) u8(b);
+    u32(0);      // no models
+    text("");
+    floats(3);   // pin offset 71-73
+    floats(10);  // 74-83
+    floats(6);   // walk 84-89
+    u16(1);
+    u32(0);      // no wiggles
+    u32(0);
+    u32(0);      // no emit list
+    u32(0);
+    text("poof");
+    f32();       // 90
+    curve(1);    // 91
+    u8(0);
+    floats(2);   // 92-93
+    curve(1);    // 94
+    u8(0);
+    f32();       // 95
+    for (int type = 2; type <= 13; ++type) u32(0);
+    u16(3);
+    u32(0);
+    text("end");
+    u32(0xFFFFFFFF);
+    const auto f = ts2::effects::parse(d);
+    CHECK(f.particles.size() == 1);
+    if (f.particles.empty()) {
+        return;
+    }
+    const auto& b = f.particles[0];
+    CHECK(b.flags == 0x180000002 && b.life[1] == 2 && b.prewarm == 3 && b.delay[0] == 4 && b.gap[1] == 7);
+    CHECK(b.directionLow[0] == 8 && b.directionHigh[2] == 13 && b.speed[1] == 15 && b.spawnLow[0] == 16 && b.spawnHigh[2] == 21);
+    CHECK(b.ring == 22 && b.count.at(0) == 23 && b.interval == 24 && b.burstLimit == 9 && b.speedScale == 25);
+    CHECK(b.size.at(0) == 26 && b.sizeVary == 27 && b.aspect.at(0) == 28 && b.aspectVary == 29 && b.rotationAxis[0] == 30);
+    CHECK(b.rotationScale[0] == 36 && b.rotationOffset == 40 && b.rotation.at(0) == 42);
+    CHECK(b.pivots.size() == 1 && b.pivots[0][0] == 44 && b.pivotVary[2] == 49 && b.alpha.at(0) == 50 && b.alphaVary == 51);
+    CHECK(b.colours.size() == 1 && b.colours[0][2] == 54 && b.colourVary[0] == 55 && b.texture == "smoke");
+    CHECK(b.atlasColumns == 4 && b.atlasRows == 2 && b.alignment == 5 && b.blend == 7 && b.layer == 58);
+    CHECK(b.framesPerSecond == 59 && b.firstFrame == 3 && b.frameCycle == 6);
+    CHECK(b.gravity[0] == 60 && b.windShare == 63 && b.blast == 64 && b.blastCentre[2] == 67 && b.drag == 68 && b.stretch == 69);
+    CHECK((b.screenEdge == std::array<std::uint8_t, 4>{11, 12, 13, 14}));
+    CHECK(b.walk.retime[0] == 84 && b.walk.speed[1] == 87 && b.walk.turn == 88 && b.walk.leastTurn == 89 && b.deathEffect == "poof");
+}
+
 void effectsFileReads() {
     std::vector<std::uint8_t> d;
     auto u8 = [&d](std::uint8_t v) { d.push_back(v); };
@@ -1102,7 +1227,7 @@ void effectsFileReads() {
     u16(3);
     u32(1);
     u32(0x10);
-    u16(0);
+    u16(2);
     for (int k = 0; k < 5; ++k) u32(0);
     u32(1);
     text("motion");
@@ -1130,9 +1255,46 @@ void effectsFileReads() {
     u32(0);
     const auto f = ts2::effects::parse(d);
     CHECK(f.cameras.size() == 1 && f.cameras[0].flags == 0x1860 && f.cameras[0].length == 600);
-    // Curves blend their samples linearly over 0..1 and hold their ends.
+    // Curves blend their samples linearly over 0..1 and give 0 past either end.
     const auto& yaw = f.cameras[0].curves[5];
-    CHECK(yaw.at(0.5f) == 5 && yaw.at(-1) == 0 && yaw.at(2) == 10 && f.cameras[0].curves[8].at(0.3f) == 2 && ts2::effects::Curve{}.at(0.5f) == 0);
+    CHECK(yaw.at(0.5f) == 5 && yaw.at(1) == 10 && yaw.at(-1) == 0 && yaw.at(2) == 0 && f.cameras[0].curves[8].at(0.3f) == 2 && ts2::effects::Curve{}.at(0.5f) == 0);
+    // A packed curve is a sine, at any time.
+    const ts2::effects::Curve sine{{2, 3, 0.5f, 1}, true};
+    CHECK(std::abs(sine.at(0.5f) - 1) < 1e-5f && std::abs(sine.at(1.5f) - (2 * std::sin(3.0f) + 1)) < 1e-5f);
+    // A record plays from its own level up, and a name with no record at or below the level plays nothing.
+    CHECK(f.find("nhoodmotion", 2) && f.find("nhoodmotion", 3) && !f.find("nhoodmotion", 1));
+    ts2::effects::File levels;
+    levels.effects.resize(4);
+    levels.effects[0].level = 1;
+    levels.effects[1].level = 3;
+    levels.effects[2].level = 0;
+    levels.effects[3].level = 2;
+    levels.names["fx"] = {0, 1, 2};
+    levels.names["bad"] = {99};
+    CHECK(levels.find("FX", 1) == &levels.effects[0] && levels.find("fx", 2) == &levels.effects[0] && levels.find("fx") == &levels.effects[1]);
+    CHECK(!levels.find("fx", 0) && !levels.find("bad"));
+    // A later file replaces the same name and level, keeps other levels, and its components keep their blocks.
+    ts2::effects::File later;
+    later.blockCounts[0] = 1;
+    later.particles.resize(1);
+    later.effects.resize(2);
+    later.effects[0].level = 3;
+    later.effects[0].components.resize(3);
+    later.effects[0].components[0].type = 1;
+    later.effects[0].components[1].type = 1;
+    later.effects[0].components[1].index = -1;
+    later.effects[0].components[2].type = 0;
+    later.effects[0].components[2].index = 5;
+    later.effects[1].level = 1;
+    later.names["fx"] = {0};
+    later.names["new"] = {1, 77};
+    levels.blockCounts[0] = 7;
+    levels.particles.resize(7);
+    ts2::effects::merge(levels, std::move(later));
+    CHECK(levels.effects.size() == 6 && levels.particles.size() == 8 && levels.blockCounts[0] == 8);
+    CHECK(levels.find("fx") == &levels.effects[4] && levels.find("fx", 2) == &levels.effects[0] && levels.find("new", 1) == &levels.effects[5]);
+    CHECK(levels.effects[4].components[0].index == 7 && levels.effects[4].components[1].index == -1 && levels.effects[4].components[2].index == 5);
+    CHECK(levels.names["new"].size() == 1);
     CHECK(f.cameras[0].curves[5].values.size() == 2 && f.cameras[0].curves[5].values[1] == 10 && f.cameras[0].curves[8].values[0] == 2);
     CHECK(f.sequences.size() == 1 && f.sequences[0].items[0].effect == "other" && f.sequences[0].flags == 2);
     const auto* e = f.find("nhoodmotion");
@@ -1493,6 +1655,26 @@ void lotDescriptionParse() {
     CHECK(ts2::nhood::parseLotDescription(make(18, 11)).roomLightPercents.empty());
 }
 
+// The beach bands run from the beach side's edge, ends and the lot's far edges included.
+void beachLocationsLieInBandsOffTheBeachSide() {
+    const std::optional<std::uint8_t> side0{std::uint8_t{0}}, side1{std::uint8_t{1}};
+    // Tiles 0 to 19 along x and 0 to 29 along y, so the far edges are at 20 and 30.
+    const ts2::content::WorldBounds lot{0, 0, 0, 19, 29, 0};
+    auto beach = [&](std::optional<std::uint8_t> side, double x, double y, int mask) {
+        return ts2::content::isBeachLocation(lot, side, x, y, mask);
+    };
+    // Side 1: bands along y from 0.
+    CHECK(beach(side1, 5, 0, 1) && beach(side1, 5, 8, 1) && !beach(side1, 5, 8.5, 1));
+    CHECK(beach(side1, 5, 10, 2) && !beach(side1, 5, 10, 1) && beach(side1, 5, 20, 7));
+    CHECK(!beach(side1, 5, 20.5, 7));
+    // The far edge x = 20 is on the lot, past it is not.
+    CHECK(beach(side1, 20, 3, 1) && !beach(side1, 20.5, 3, 1));
+    // Side 0: bands along x back from the far edge.
+    CHECK(beach(side0, 20, 3, 1) && beach(side0, 12, 3, 1) && !beach(side0, 11, 3, 1));
+    // Not a beach lot.
+    CHECK(!beach(std::nullopt, 5, 0, 7));
+}
+
 // A wall graph's point index finds what WallGraph::point finds: the first of a repeated id, and
 // nothing for an id it lacks.
 void wallGraphPointIndexFindsTheFirstPoint() {
@@ -1644,6 +1826,7 @@ void packageRecognisesAppleDoubleMetadata() {
 std::vector<Test> formatTests() {
     return {
         {"a 3D array refuses element indexes past the element", array3dRefusesElementIndexesPastTheElement},
+        {"effect detail follows zoom levels", effectDetailFollowsZoomLevels},
         {"a package marks every copy of a compressed key", packageMarksEveryCopyOfACompressedKey},
         {"a package recognises AppleDouble metadata", packageRecognisesAppleDoubleMetadata},
         {"written packages read back", writtenPackagesReadBack},
@@ -1667,11 +1850,13 @@ std::vector<Test> formatTests() {
         {"roofs read every version", roofsReadEveryVersion},
         {"neighborhood terrain parses", neighborhoodTerrainParses},
         {"effects file reads", effectsFileReads},
+        {"particle block fields read", particleBlockFieldsRead},
         {"neighborhood camera reads", neighborhoodCameraReads},
         {"neighborhood paint rules read", neighborhoodPaintRulesRead},
         {"neighborhood roads parse", neighborhoodRoadsParse},
         {"wall coverings follow the wall graph", wallCoveringsFollowTheWallGraph},
         {"lot description parse", lotDescriptionParse},
+        {"beach locations lie in bands off the beach side", beachLocationsLieInBandsOffTheBeachSide},
         {"binary property sets and reference lists", binaryPropertySetsAndReferenceLists},
         {"face shapes read", faceShapesRead},
         {"fence post layer reads posts", fencePostLayerReadsPosts},
