@@ -291,6 +291,7 @@ void Execution::write(std::uint8_t owner, std::uint16_t data, Frame& f, std::int
         // Game code writes these (e.g. "Function - Load"). Each object keeps its own copy.
         slotAt(stackData().definition.fields, data, "object definition field") =
             static_cast<std::uint16_t>(value);
+        world().definitionWritten();
         return;
     case owner::kStackObjectTemp: stackTemp(data) = value; return;
     case owner::kStackObjectMasterDefinition:

@@ -390,6 +390,34 @@ void stackObjectIsReachedThroughItsId() {
     CHECK(sim.thread.stackObjectId == fridge.id);
 }
 
+void objectsVersionFollowsObjectsAndTheirTypes() {
+    MemoryCodeSource code;
+    code.add(kObjectGroup, 0x1000, bhav({
+        expr(owner::kStackObjectId, 0, op::kAssign, owner::kParam, 0, 1, E),
+        expr(owner::kStackObjectDefinition, ts2::objd::field::kGuid1, op::kAssign, owner::kLiteral, 7, T, E),
+    }, 1));
+    ts2::sim::World world;
+    auto version = world.objectsVersion();
+    auto& sim = world.create(kObjectGroup, definition("Sim", 0));
+    CHECK(world.objectsVersion() > version);
+    auto& fridge = world.create(kObjectGroup, definition("Fridge", 600));
+    version = world.objectsVersion();
+    fridge.x = 5;
+    fridge.data[1] = 3;
+    CHECK(world.objectsVersion() == version);
+    Vm vm(code, {}, &world);
+    const std::int16_t args[] = {fridge.id};
+    CHECK(vm.run(sim, 0x1000, args).outcome == Outcome::True);
+    CHECK(fridge.definition.field(ts2::objd::field::kGuid1) == 7);
+    CHECK(world.objectsVersion() > version);
+    version = world.objectsVersion();
+    world.remove(fridge);
+    CHECK(world.objectsVersion() > version);
+    version = world.objectsVersion();
+    world.keepUntilUnload(sim);
+    CHECK(world.objectsVersion() > version);
+}
+
 void eachFrameKeepsItsOwnStackObject() {
     MemoryCodeSource code;
     code.add(kObjectGroup, 0x1000, bhav({
@@ -1082,6 +1110,7 @@ std::vector<Test> vmCoreTests() {
         {"loading a character waits", loadingACharacterWaits},
         {"object id field matches the object", objectIdFieldMatchesTheObject},
         {"stack object is reached through its id", stackObjectIsReachedThroughItsId},
+        {"objects version follows objects and their types", objectsVersionFollowsObjectsAndTheirTypes},
         {"each frame keeps its own stack object", eachFrameKeepsItsOwnStackObject},
         {"missing stack object is an error", missingStackObjectIsAnError},
         {"definition writes change only that object's copy", definitionWritesChangeOnlyThatObjectsCopy},

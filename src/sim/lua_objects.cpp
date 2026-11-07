@@ -208,6 +208,58 @@ int setPersonMotive(lua_State* L) {
     return 0;
 }
 
+// MultiplyAdValues(multiplier[, motive]) scales the advertisements of the line the last check tree
+// tested, for the running Sim (see multiplyAdvertisements). The motive defaults to -1, every motive.
+// It returns 0. Other than one or two arguments is error 0x9F, a running object that is not a Sim
+// 0x1C, and no line tested yet 0xA0.
+int multiplyAdValues(lua_State* L) {
+    constexpr std::int16_t kErrorArgumentCount = 0x9F, kErrorNoTestedLine = 0xA0;
+    const int arguments = lua_gettop(L);
+    if (arguments < 1 || arguments > 2) {
+        return gameError(L, kErrorArgumentCount);
+    }
+    // Kept in single precision. A number beyond its range becomes infinite.
+    const double given = lua_tonumber(L, 1);
+    constexpr double kLargest = std::numeric_limits<float>::max();
+    const float multiplier = given > kLargest    ? std::numeric_limits<float>::infinity()
+                             : given < -kLargest ? -std::numeric_limits<float>::infinity()
+                                                 : static_cast<float>(given);
+    const std::int32_t motive = arguments > 1 ? argInt(L, 2) : -1;
+    SimObject& sim = personOrError(L, call(L).runningObject);
+    ttab::Interaction* line = call(L).testedLine;
+    if (line == nullptr) {
+        return gameError(L, kErrorNoTestedLine);
+    }
+    multiplyAdvertisements(*line, sim, multiplier, motive);
+    lua_pushnumber(L, 0);
+    return 1;
+}
+
+// RunTree(name[, stackObject, args...]) runs the tree of that name at once as the running object and
+// returns whether it ended true. The name is looked up in the object's own trees, then its
+// semi-global ones, then the global ones, and a name none has is false. Without a stack object the
+// tree gets the calling tree's. Up to eight arguments follow, the rest are 0.
+int runTree(lua_State* L) {
+    constexpr std::size_t kMaxArguments = 8;
+    ScriptCall& c = call(L);
+    const int arguments = lua_gettop(L);
+    const char* name = lua_tostring(L, 1);
+    std::array<std::int16_t, kMaxArguments> values{};
+    std::int16_t stackObject = c.stackObject;
+    if (arguments >= 2) {
+        stackObject = argShort(L, 2);
+        for (int i = 0; i < arguments - 2 && i < static_cast<int>(kMaxArguments); ++i) {
+            values[static_cast<std::size_t>(i)] = argShort(L, i + 3);
+        }
+    }
+    const int result = c.runTree && name != nullptr ? c.runTree(name, stackObject, values) : 0;
+    if (result < 0) {
+        return stopUnsupported(L, "RunTree");
+    }
+    lua_pushboolean(L, result);
+    return 1;
+}
+
 int getNeighborPersonData(lua_State* L) {
     auto& values = neighborPersonDataOrError(L, argShort(L, 1));
     lua_pushnumber(L, element(L, values, argShort(L, 2), kErrorPersonDataOutOfRange));

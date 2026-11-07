@@ -942,8 +942,8 @@ bool Execution::setMotiveChange(const bhav::Instruction& in, Frame& f) {
 //   byte 13      flags: bit 0 the Sim is a neighbor id, bit 1 a Sim argument is a neighbor id
 // Every satisfy goes into the Sim's want history, which leads the want trees to new wants. True
 // when at least one of the Sim's wants (fears, for a fear) matched: each leaves an empty place and
-// the Sim is queued for new ones. The aspiration points and influence they give, the extra want
-// and the definition's feedbackTree are not implemented.
+// the Sim is queued for new ones, and the Sim gets their aspiration points. The definition's
+// feedbackTree then shows the score. The influence they give and the extra want are not implemented.
 bool Execution::wantSatisfy(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     if (!world().neighbors() || !world().hasWantDefinitions()) {
@@ -1021,10 +1021,13 @@ bool Execution::wantSatisfy(const bhav::Instruction& in, Frame& f) {
             }
             satisfied = true;
         }
+        const swaf::Want satisfiedRecord = record;
         addWantHistory(world(), neighbor, std::move(record));
         if (satisfied) {
+            giveWantPoints(neighbor, satisfiedRecord.tail[1]);
             queueWantRefill(world(), neighbor, 3);
         }
+        runWantFeedback(*def, neighbor, satisfiedRecord, satisfied, value);
         return satisfied;
     };
     if (def->simArrayTree.empty()) {
@@ -1072,6 +1075,98 @@ std::vector<std::int16_t> Execution::wantSimList(const std::string& treeName, st
         return {};
     }
     return list->arrays[0];
+}
+
+// A satisfied want's aspiration points. The score (person data 0xA2, in tens) stays within the age's
+// levels, or -1000..16000 for an age without them, unless person data 0xC1 holds it. Person data 0xA0
+// follows as its level on -100..100. The lifetime total (person data 0xA1) stays within 0..32767.
+void Execution::giveWantPoints(std::int16_t neighbor, std::int32_t points) {
+    constexpr std::size_t kLifeStage = 0x3A, kLevel = 0xA0, kLifetime = 0xA1, kScore = 0xA2, kHeld = 0xC1;
+    constexpr std::int32_t kDefaultLowest = -1000, kDefaultHighest = 16000, kMostLifetime = 32767;
+    const auto give = [&](auto& values) {
+        if (values.size() <= kHeld) {
+            return;
+        }
+        if (values[kHeld] == 0) {
+            const auto& ages = world().wantDefinitions()->aspirationLevels;
+            const auto age = ages.find(wantAgeCode(values[kLifeStage]));
+            const std::int32_t lowest = age != ages.end() ? age->second.front() : kDefaultLowest;
+            const std::int32_t highest = age != ages.end() ? age->second.back() : kDefaultHighest;
+            const std::int32_t score = std::clamp(values[kScore] * 10 + points, lowest, highest) / 10;
+            values[kScore] = static_cast<std::int16_t>(score);
+            values[kLevel] = static_cast<std::int16_t>(age != ages.end() ? aspirationLevel(age->second, score * 10) : 0);
+        }
+        values[kLifetime] = static_cast<std::int16_t>(std::clamp(values[kLifetime] + points / 10, 0, kMostLifetime));
+    };
+    if (SimObject* sim = world().find(world().neighborData(neighbor, 0).value_or(0))) {
+        give(sim->personData);
+    } else if (auto* saved = world().neighborPersonData(neighbor)) {
+        give(*saved);
+    }
+}
+
+// Runs a want's feedbackTree, one of the "Wants - Check Trees" object's found by name, at once on the lot's
+// "Wants - Controller" for a Sim on the lot. It runs for every satisfy, and its params are:
+//   0     the Sim's neighbor id
+//   1, 2  the want's GUID, low then high
+//   3     the Sim it is about (neighbor id), 0 for other kinds
+//   4, 5  the object, career or badge GUID it is about, low then high
+//   6, 7  the record's argument and value
+//   8     1 when one of the Sim's wants matched
+//   9     its aspiration points
+//   10    not known yet
+//   11, 12  the score before the points and its level on -100..100
+//   13    the value the primitive was given
+//   14    its influence
+// A tree that fails only costs its feedback, so the satisfied want stands.
+void Execution::runWantFeedback(const content::WantDefinition& def, std::int16_t neighbor, const swaf::Want& record, bool satisfied, std::int16_t value) {
+    constexpr std::uint32_t kWantsControllerGuid = 0x6D9E58F0, kWantsCheckTreesGuid = 0x8D92DD2E;
+    constexpr std::size_t kLifeStage = 0x3A, kScore = 0xA2;
+    SimObject* sim = world().find(world().neighborData(neighbor, 0).value_or(0));
+    SimObject* controller = world().nextAfter(0, [](const SimObject& s) { return s.definition.guid() == kWantsControllerGuid; });
+    const ObjectType* checkTrees = code_.objectType(kWantsCheckTreesGuid);
+    if (def.feedbackTree.empty() || sim == nullptr || controller == nullptr || checkTrees == nullptr || sim->personData.size() <= kScore) {
+        return;
+    }
+    std::optional<std::uint16_t> tree;
+    for (const std::uint32_t g : {checkTrees->group, code_.semiGlobalGroup(checkTrees->group), kGlobalGroup}) {
+        if ((tree = code_.behaviorByName(g, def.feedbackTree))) {
+            break;
+        }
+    }
+    if (!tree) {
+        return;
+    }
+    const std::int32_t points = satisfied ? record.tail[1] : 0;
+    const std::int32_t influence = satisfied ? record.tail[2] : 0;
+    const std::int32_t before = sim->personData[kScore] * 10 - points;
+    const auto& ages = world().wantDefinitions()->aspirationLevels;
+    const auto age = ages.find(wantAgeCode(sim->personData[kLifeStage]));
+    const auto kind = static_cast<content::WantArgument>(record.type);
+    const bool longArgument = kind == content::WantArgument::Object || kind == content::WantArgument::Career || kind == content::WantArgument::Badge;
+    const auto low = [](std::int32_t v) { return static_cast<std::int16_t>(v & 0xFFFF); };
+    const auto high = [](std::int64_t v) { return static_cast<std::int16_t>(static_cast<std::uint32_t>(v) >> 16); };
+    const std::array<std::int16_t, 15> params{
+        neighbor,
+        low(static_cast<std::int32_t>(record.guid)),
+        high(record.guid),
+        kind == content::WantArgument::Sim ? low(record.argument) : std::int16_t{0},
+        longArgument ? low(record.argument) : std::int16_t{0},
+        longArgument ? high(record.argument) : std::int16_t{0},
+        low(record.argument),
+        record.value,
+        static_cast<std::int16_t>(satisfied ? 1 : 0),
+        low(points),
+        std::int16_t{0},
+        low(before / 10),
+        low(age != ages.end() ? aspirationLevel(age->second, before) : 0),
+        value,
+        low(influence),
+    };
+    const RunResult r = runOnObject(*controller, checkTrees->group, *tree, controller->id, params);
+    if (r.outcome != Outcome::True && r.outcome != Outcome::False) {
+        diag::warnOnce("a want's feedback tree stopped: " + def.feedbackTree + ": " + r.reason);
+    }
 }
 
 // A Sim reference as a neighbor id: an object id turned into its Sim's neighbor id, or a

@@ -60,7 +60,8 @@ public:
     [[nodiscard]] virtual std::optional<std::string> catalogString(std::uint32_t, std::uint16_t, std::size_t) { return std::nullopt; }
     // US English entry `index` of pie-menu string table (TTAs) `instance` in `group`, if any.
     [[nodiscard]] virtual std::optional<std::string> interactionString(std::uint32_t, std::uint16_t, std::size_t) { return std::nullopt; }
-    // Instance of the BHAV named `name` in `group` (lowest instance if several), if any.
+    // Instance of the BHAV named `name` in `group` (lowest instance if several), if any. A Sim's group
+    // without trees is searched as behavior() reads it: in the template it was made from.
     [[nodiscard]] virtual std::optional<std::uint16_t> behaviorByName(std::uint32_t group,
                                                         const std::string& name) = 0;
     // Interaction table (TTAB) `instance` of `group`, if any.

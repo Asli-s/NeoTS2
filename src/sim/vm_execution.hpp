@@ -234,7 +234,7 @@ constexpr int kWindowObjectType = 9;          // OBJD type
 constexpr std::uint16_t kSoundNameTable = 0x4132;
 constexpr std::uint8_t kSoundFromStackObject = 0x02;  // byte 4
 constexpr std::uint8_t kSoundStop = 0x40;
-constexpr std::size_t kHiddenFlags = 0x22;            // object data, bit 0x02 silences the object
+constexpr std::size_t kHiddenFlags = 0x22;            // object data, bit 0x02 silences the object (see modelHidden for its model)
 constexpr std::uint16_t kMaterialNameTable = 0x88;
 constexpr std::uint16_t kMeshGroupNameTable = 0x87;
 // Change Material flags (byte 2).
@@ -671,6 +671,8 @@ public:
     bool outfitsInformation();
     std::uint32_t madeCharacterType(const ObjectType& from, std::uint32_t top);
     std::vector<std::int16_t> wantSimList(const std::string& treeName, std::int16_t sim);
+    void giveWantPoints(std::int16_t neighbor, std::int32_t points);
+    void runWantFeedback(const content::WantDefinition& def, std::int16_t neighbor, const swaf::Want& record, bool satisfied, std::int16_t value);
     std::optional<bool> makeNewCharacter(const bhav::Instruction& in, Frame& f);
     void nameNewCharacter(std::int16_t id, const ObjectType& type, int species, int gender);
     std::optional<bool> loadCharacter(Frame& f);
@@ -714,6 +716,11 @@ public:
     bool randomNumber(const bhav::Instruction& in, Frame& f);
     bool refresh(const bhav::Instruction& in);
     bool luaScript(const bhav::Instruction& in, Frame& f);
+    // A script's RunTree: the tree named `name` in my own trees, then my semi-global ones, then the
+    // global ones, run at once as me on my stack. 1 when it ends true, 0 when false or no tree has the
+    // name. A tree that fails otherwise is false and leaves me to be reset. What the engine can't run
+    // yet is thrown.
+    int scriptRunTree(const std::string& name, std::int16_t stackObject, std::span<const std::int16_t> args);
     bool message(const bhav::Instruction& in, Frame& f);
     bool onTimer(const bhav::Instruction& in, Frame& f);
     bool cinematic(const bhav::Instruction& in, Frame& f);
@@ -772,6 +779,7 @@ public:
     bool snap(const bhav::Instruction& in, Frame& f);
     void leaveContainer(SimObject& object);
     std::optional<ModelBone> slotBone(const SimObject& object, std::uint32_t group, const slot::Entry& entry);
+    bool effectStopStart(const bhav::Instruction& in, Frame& f);
     std::optional<ModelBone> modelJoint(const SimObject& object, const std::string& name);
     bool snapInto(const bhav::Instruction& in, Frame& f);
     void takeOutOfSlot(SimObject& object);

@@ -106,13 +106,31 @@ void World::keepUntilUnload(SimObject& object) {
     }
 }
 
-void World::updateRoom(SimObject& object) const {
+void World::updateRoom(SimObject& object) {
     constexpr std::size_t kRoomField = 0x1D;
     const std::int32_t room = rooms_.roomAtPosition(object.level - 1, static_cast<float>(object.x) / 65536.0f,
                                             static_cast<float>(object.y) / 65536.0f);
     if (room != RoomMap::kNoRoom) {
         object.data[kRoomField] = static_cast<std::int16_t>(room);
     }
+    // A broken save can nest slots in a ring, so the walk stops at a depth no real stack of objects reaches.
+    constexpr int kDeepestSlots = 16;
+    const auto carry = [&](const auto& self, const SimObject& holder, int depth) -> void {
+        if (depth >= kDeepestSlots) {
+            return;
+        }
+        for (const std::int16_t id : holder.slots) {
+            SimObject* held = id != 0 && id != holder.id ? find(id) : nullptr;
+            if (held != nullptr) {
+                held->x = holder.x;
+                held->y = holder.y;
+                held->level = holder.level;
+                held->data[kRoomField] = holder.data[kRoomField];
+                self(self, *held, depth + 1);
+            }
+        }
+    };
+    carry(carry, object, 0);
 }
 
 void World::markFootprintChanged(std::int16_t id) {

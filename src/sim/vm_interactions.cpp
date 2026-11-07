@@ -297,7 +297,8 @@ bool Execution::findBestInteraction(const bhav::Instruction& in) {
         nullptr,
         [&](const SimObject& object, const ttab::Interaction& line) {
             return mayStartLine(line, sim, object, globals_[kParentalControlGlobal] != 0, true, false);
-        }};
+        },
+        globals_[global::kFreeWill] != 0};
     const auto found = ts2::sim::findBestInteraction(search);
     if (!found) {
         return false;

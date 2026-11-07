@@ -4,6 +4,7 @@
 #include "formats/swaf.hpp"
 #include "formats/want_trees.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -23,6 +24,10 @@ class CodeSource;
 // The want trees' code for a Sim's life stage (person data 0x3A): Baby 13, Toddler 2, Child 1,
 // Teen 3, Adult 0, Elder 4.
 int wantAgeCode(std::int16_t lifeStage);
+
+// An aspiration score (person data 0xA2 times 10) on -100..100 by its age's levels, rock bottom to perfect:
+// -100 at rock bottom, -50, 0 at neutral, 25, 50, 75 and 100 at perfect, straight between them.
+std::int32_t aspirationLevel(const std::array<std::int32_t, 7>& levels, std::int32_t score);
 
 // What a want record's argument and value are compared with: the operators of the definitions.
 bool wantCompare(content::WantOperator op, std::int32_t got, std::int32_t wanted);

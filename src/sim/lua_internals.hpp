@@ -211,6 +211,8 @@ int newObjectDefinition(lua_State* L);
 int objectDefinitionField(lua_State* L);
 int getPersonMotive(lua_State* L);
 int setPersonMotive(lua_State* L);
+int multiplyAdValues(lua_State* L);
+int runTree(lua_State* L);
 int getNeighborPersonData(lua_State* L);
 int setNeighborPersonData(lua_State* L);
 int getNeighborRelationship(lua_State* L);

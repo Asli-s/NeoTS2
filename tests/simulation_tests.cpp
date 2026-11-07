@@ -138,6 +138,76 @@ void advertisementsScaleByPersonality() {
     CHECK(ts2::sim::advertisedChange(line, sim, 7) == 0);
 }
 
+// MultiplyAdValues scales a human's minimum in its age group, cut toward zero. Without a motive it
+// leaves motives 2, 4 and 10-12 alone. A pet's value is the one its personality bits pick in each
+// record of its species and age group.
+void multipliedAdvertisementsFollowTheGame() {
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    sim.personData[0x3A] = 27;  // adult
+    ts2::ttab::Interaction line;
+    line.motives.resize(1);
+    line.motives[0].resize(16, {10, 30, 0});
+    ts2::sim::multiplyAdvertisements(line, sim, 2.5f, -1);
+    CHECK(line.motives[0][7].min == 25 && line.motives[0][7].delta == 30);
+    CHECK(line.motives[0][2].min == 10 && line.motives[0][4].min == 10 && line.motives[0][11].min == 10);
+    ts2::sim::multiplyAdvertisements(line, sim, -0.5f, 4);
+    CHECK(line.motives[0][4].min == -5 && line.motives[0][7].min == 25);
+    ts2::sim::multiplyAdvertisements(line, sim, 1.0e30f, 5);  // too large for the game's conversion
+    CHECK(line.motives[0][5].min == 0);
+    sim.personData[0x3A] = 60;  // an elder's group 4 is missing and stays missing
+    ts2::sim::multiplyAdvertisements(line, sim, 3.0f, -1);
+    CHECK(line.motives.size() == 1 && line.motives[0][7].min == 25);
+
+    auto& dog = world.create(kObjectGroup, typed(0x17DDADE2, ts2::sim::kPersonType));
+    dog.personData[0xBA] = 2;    // small dog
+    dog.personData[0x3A] = 27;   // adult: group 2
+    dog.personData[0xC7] = 0x9;  // first pair low bit, second pair high bit, third pair neither
+    ts2::ttab::Interaction petLine;
+    petLine.moreMotives.resize(3);
+    petLine.moreMotives[2].resize(8);
+    petLine.moreMotives[2][7] = {{10, 20, 30}, {10, 20, 30}, {10, 20, 30}};  // read as {min, range, type}
+    ts2::sim::multiplyAdvertisements(petLine, dog, 2.0f, 7);
+    const auto& r = petLine.moreMotives[2][7];
+    // The saved order is the first, second, third value: type, min, range as read here.
+    CHECK(r[0].type == 60 && r[0].min == 10 && r[0].delta == 20);
+    CHECK(r[1].type == 30 && r[1].min == 20 && r[1].delta == 20);
+    CHECK(r[2].type == 30 && r[2].min == 10 && r[2].delta == 40);
+}
+
+// A pet's advertisement adds up, over every record of its kind's list, the value its personality
+// bits pick, in thousandths. Motive 13 advertises nothing to pets. Its happiness counts motive 1
+// instead of 13.
+void petsAdvertiseByPersonality() {
+    ts2::sim::World world;
+    auto& dog = world.create(kObjectGroup, typed(0x17DDADE2, ts2::sim::kPersonType));
+    dog.personData[0xBA] = 2;    // small dog
+    dog.personData[0x3A] = 60;   // elder: kind 8, the table's pet group 3
+    dog.personData[0xC7] = 0x9;  // first record's low bit, second's high bit, the rest neither
+    CHECK(ts2::sim::petKind(dog) == std::optional<std::size_t>{8});
+    ts2::ttab::Interaction line;
+    line.moreMotives.resize(4);
+    line.moreMotives[3].resize(16);
+    // Six records: more than MultiplyAdValues reaches. Read as {min, range, type}, saved type first.
+    line.moreMotives[3][7].assign(6, ts2::ttab::MotiveEffect{20, 300, 1000});
+    line.moreMotives[3][13].assign(1, ts2::ttab::MotiveEffect{50, 50, 50});
+    line.moreMotives[3][1].assign(1, ts2::ttab::MotiveEffect{0, 5, 7});  // the low bit picks the first: 7
+    auto near = [](float a, float b) { return std::abs(a - b) < 1e-5f; };
+    CHECK(near(ts2::sim::advertisedChange(line, dog, 7), (1000 + 20 + 4 * 300) * 0.001f));
+    CHECK(ts2::sim::advertisedChange(line, dog, 13) == 0);
+    CHECK(near(ts2::sim::advertisedChange(line, dog, 1), 0.007f));
+    dog.personData[0x3A] = 27;  // adult: group 2, which this line doesn't have
+    CHECK(ts2::sim::advertisedChange(line, dog, 7) == 0);
+
+    ts2::sim::ScoreCurves curves;
+    curves.fill(ts2::sim::ScoreCurve::parse("(-100;-100) (100;100)"));
+    std::array<float, ts2::sim::kMotiveCount> levels{};
+    levels[1] = 50;
+    levels[13] = 100;
+    CHECK(near(ts2::sim::happiness(curves, levels, false), 5.0f));
+    CHECK(near(ts2::sim::happiness(curves, levels, true), 10.0f));
+}
+
 void typeSignaturesSumTheCallGraph() {
     using namespace ts2::sim;
     MemoryCodeSource code;
@@ -576,6 +646,8 @@ std::vector<Test> simulationTests() {
         {"motive changes stop at their limits", motiveChangesStopAtTheirLimits},
         {"mood is the weighted average of the motives", moodIsTheWeightedAverageOfTheMotives},
         {"advertisements scale by personality", advertisementsScaleByPersonality},
+        {"multiplied advertisements follow the game", multipliedAdvertisementsFollowTheGame},
+        {"pets advertise by personality", petsAdvertiseByPersonality},
         {"the Sim clock advances and reads", clockAdvancesAndReads},
         {"type signatures sum the call graph", typeSignaturesSumTheCallGraph},
         {"reset objects start over", resetObjectsStartOver},

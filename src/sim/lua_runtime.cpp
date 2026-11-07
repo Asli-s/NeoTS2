@@ -137,6 +137,8 @@ constexpr Function kFunctions[] = {
     {"GetObjectDefinitionField", getObjectDefinitionField},
     {"GetPersonMotive", getPersonMotive},
     {"SetPersonMotive", setPersonMotive},
+    {"MultiplyAdValues", multiplyAdValues},
+    {"RunTree", runTree},
     {"GetNeighborPersonData", getNeighborPersonData},
     {"SetNeighborPersonData", setNeighborPersonData},
     {"GetNeighborData", getNeighborData},
@@ -149,7 +151,7 @@ constexpr Function kFunctions[] = {
 
 // Functions the game registers that the engine doesn't implement yet.
 constexpr const char* kNotYetImplemented[] = {
-    "SetCacheable", "SetCacheableTemps", "RunTree", "RunTreeWithGuid", "MultiplyAdValues",
+    "SetCacheable", "SetCacheableTemps", "RunTreeWithGuid",
     "KissingPointsUnlock", "KissingPointsNumLeft", "ObjectError", "ObjectAssert", "GetString",
     "GetStringBySelector", "SetObjectDefinitionField", "GetCatalogName", "GetCatalogDescription",
     "SetNeighborRelationship", "GetMasterSelector",

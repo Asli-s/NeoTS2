@@ -382,10 +382,91 @@ void findBestInteractionPicksTheHappiestNearLine() {
     CHECK(sim.thread.temps[1] == near.id && sim.thread.temps[2] == 5 && sim.personData[0x50] == 0);
     sim.thread.stackObjectId = 0;
     CHECK(vm.run(sim, 0x1101).outcome == Outcome::Error);
-    CHECK(vm.run(sim, 0x1100).outcome == Outcome::False && sim.data[0x14] == 5);  // once a tick
+    CHECK(vm.run(sim, 0x1100).outcome == Outcome::False && sim.data[0x14] == -1);  // once a tick
     world.countTick();
     sim.motives[7] = 100;  // nothing left to gain
     CHECK(vm.run(sim, 0x1100).outcome == Outcome::False && sim.data[0x14] == -1);
+    // With Free Will off (global 0x1E) a selectable Sim of the household picks nothing, but one with
+    // bit 0x800 of person data 0x54 or that isn't selectable still does.
+    sim.motives[7] = -50;
+    vm.globals[ts2::sim::global::kFreeWill] = 0;
+    sim.personData[0x9E] = 1;
+    world.countTick();
+    CHECK(vm.run(sim, 0x1100).outcome == Outcome::False && sim.data[0x14] == -1);
+    sim.personData[0x54] = 0x800;
+    world.countTick();
+    CHECK(vm.run(sim, 0x1100).outcome == Outcome::True && sim.data[0x14] == 5);
+    sim.personData[0x54] = 0;
+    sim.personData[0x9E] = 0;
+    world.countTick();
+    CHECK(vm.run(sim, 0x1100).outcome == Outcome::True);
+    sim.personData[0x9E] = 1;
+    vm.globals[ts2::sim::global::kFreeWill] = 1;
+    world.countTick();
+    CHECK(vm.run(sim, 0x1100).outcome == Outcome::True);
+}
+
+// A pet searches with its own kind: lines with its kind's flag, its own advertisements and its
+// curves (small dogs 0x293). It likes lines on a Sim more when its relationship flags (value 1)
+// towards that Sim have bit 0x800: 1 + global constant 0x15B entry 11 / 100.
+void findBestInteractionWorksForPets() {
+    constexpr std::uint32_t kBowl = 0x0E0F0E0F, kOwner = 0x0D0D0D0D;
+    MemoryCodeSource code;
+    code.addStrings(ts2::sim::kGlobalGroup, 0x293, std::vector<std::string>(16, "(-100;0) (100;2000)"));
+    code.addConstants(ts2::sim::kGlobalGroup, 0x15B, std::vector<std::int16_t>(12, 100));
+    ts2::fcns::Tunings tunings;
+    tunings.values.push_back({"random selection count", 1.0f});
+    code.setTunings(tunings);
+    auto line = [](std::uint32_t id, std::uint32_t flags, std::size_t motive, std::int16_t value) {
+        ts2::ttab::Interaction l;
+        l.stringIndex = id;
+        l.action = static_cast<std::uint16_t>(0x1000 + id);
+        l.flags = flags;
+        l.autonomy = 50;
+        l.attenuationCode = 4;
+        l.motives.assign(1, std::vector<ts2::ttab::MotiveEffect>(16, {0, 5000, 0}));  // humans only
+        l.moreMotives.assign(3, std::vector<std::vector<ts2::ttab::MotiveEffect>>(16));
+        l.moreMotives[2][motive].assign(1, ts2::ttab::MotiveEffect{0, value, 0});  // no personality: the range
+        return l;
+    };
+    auto bowlType = typed(kBowl);
+    bowlType.fields[ts2::objd::field::kInteractionTableId] = 0x80;
+    code.addObjectType(kObjectGroup, bowlType);
+    ts2::ttab::InteractionTable bowlTable;
+    bowlTable.interactions.push_back(line(5, 0x40, 7, 9000));         // adult humans' flag
+    bowlTable.interactions.push_back(line(6, 0x10000000, 13, 9000));  // small dogs, motive 13: nothing
+    bowlTable.interactions.push_back(line(7, 0x10000000, 7, 1000));   // small dogs, hunger
+    code.addInteractionTable(kObjectGroup, 0x80, bowlTable);
+    auto ownerType = typed(kOwner, ts2::sim::kPersonType);
+    ownerType.fields[ts2::objd::field::kInteractionTableId] = 0x81;
+    code.addObjectType(kObjectGroup, ownerType);
+    ts2::ttab::InteractionTable ownerTable;
+    ownerTable.interactions.push_back(line(8, 0x10000000, 7, 600));
+    code.addInteractionTable(kObjectGroup, 0x81, ownerTable);
+    code.add(kObjectGroup, 0x1100, bhav({primitiveCall(0x0003, T, F)}));
+
+    ts2::sim::World world;
+    auto& dog = world.create(kObjectGroup, typed(0x17DDADE2, ts2::sim::kPersonType));
+    dog.personData[0xBA] = 2;  // small dog
+    dog.personData[0x3A] = 27;
+    dog.personData[0x24] = 100;
+    dog.personData[0x1F] = 1;
+    dog.motives.fill(50);
+    dog.motives[7] = -50;
+    dog.x = dog.y = 10 << 16;
+    auto& bowl = world.create(kObjectGroup, bowlType);
+    bowl.x = 11 << 16;
+    bowl.y = 10 << 16;
+    auto& owner = world.create(kObjectGroup, ownerType);
+    owner.personData[0x3A] = 27;
+    owner.personData[0x1F] = 2;
+    owner.x = 10 << 16;
+    owner.y = 11 << 16;
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(dog, 0x1100).outcome == Outcome::True && dog.data[0x14] == 7 && dog.thread.stackObjectId == bowl.id);
+    world.countTick();
+    world.neighborRelationship(1, 2) = {0, 0x800};
+    CHECK(vm.run(dog, 0x1100).outcome == Outcome::True && dog.data[0x14] == 8 && dog.thread.stackObjectId == owner.id);
 }
 
 // A visitor (person data 0x20 not 0) is refused every line without flag 0x01 when the line is
@@ -2441,6 +2522,77 @@ void wantSatisfyMatchesCurrentWants() {
     CHECK(vm.run(sim, 0x1004).outcome == Outcome::False);  // no Wants - Controller on the lot: no Sims
 }
 
+// A satisfied want gives the Sim its aspiration points, within its age's levels, and its feedbackTree runs on the
+// Wants - Controller with the Sim, the points and the score before them as params. It runs for a failed match too,
+// with nothing given, and a person data 0xC1 holds the score but not the lifetime total.
+void wantSatisfyGivesPointsAndRunsItsFeedback() {
+    constexpr std::uint32_t kSimGuid = 0x51515151, kControllerGuid = 0x6D9E58F0, kCheckTreesGuid = 0x8D92DD2E;
+    constexpr std::uint32_t kCheckTreesGroup = 0x7F739728, kWant = 0x0EEEEEEE;
+    constexpr std::size_t kLifeStage = 0x3A, kLevel = 0xA0, kLifetime = 0xA1, kScore = 0xA2, kHeld = 0xC1;
+    MemoryCodeSource code;
+    code.addObjectType(kCheckTreesGroup, typed(kCheckTreesGuid));
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(kSimGuid, ts2::sim::kPersonType));
+    auto& controller = world.create(kObjectGroup, typed(kControllerGuid));
+    sim.personData[kLifeStage] = 20;
+    sim.personData[kScore] = 100;
+    sim.personData[kLifetime] = 5;
+    Behavior tree = bhav({
+        expr(owner::kTemp, 0, op::kAssign, owner::kParam, 0, 1, E),
+        expr(owner::kTemp, 1, op::kAssign, owner::kParam, 8, 2, E),
+        expr(owner::kTemp, 2, op::kAssign, owner::kParam, 9, 3, E),
+        expr(owner::kTemp, 3, op::kAssign, owner::kParam, 11, 4, E),
+        expr(owner::kTemp, 4, op::kAssign, owner::kParam, 12, 5, E),
+        expr(owner::kTemp, 5, op::kAssign, owner::kParam, 14, T, E),
+    }, 15);
+    tree.name = "CT - Handle Feedback";
+    code.add(kCheckTreesGroup, 0x1003, tree);
+    code.add(kObjectGroup, 0x1000, bhav({
+        expr(owner::kStackObjectId, 0, op::kAssign, owner::kLiteral, 1, 1, E),
+        wantSatisfy(kWant, owner::kLiteral, 0, 0, T, F),
+    }));
+
+    auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
+    hood->neighborIds = {27};
+    hood->neighbors[27].guid = kSimGuid;
+    ts2::swaf::Want slot;
+    slot.id = 27;
+    slot.guid = kWant;
+    slot.tail = {0, 750, 40};
+    hood->wants[27] = {slot};
+    world.setNeighborhood(hood);
+    auto defs = std::make_shared<ts2::content::WantDefinitions>();
+    defs->byGuid[kWant] = {kWant, "want", ts2::content::WantArgument::None, ts2::content::WantOperator::None, 750, ""};
+    defs->byGuid[kWant].feedbackTree = "CT - Handle Feedback";
+    defs->aspirationLevels[ts2::sim::wantAgeCode(20)] = {-2000, -1000, 0, 500, 1000, 1500, 2000};
+    world.setWantDefinitions(defs);
+
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::True);
+    CHECK(sim.personData[kScore] == 175 && sim.personData[kLifetime] == 80);
+    CHECK(sim.personData[kLevel] == 88);  // 1750 is half way from 1500 (75) to 2000 (100)
+    const auto& t = controller.thread.temps;
+    CHECK(t[0] == 27 && t[1] == 1 && t[2] == 750 && t[3] == 100 && t[5] == 40);
+    CHECK(t[4] == 50);  // the level of the 1000 it had before
+
+    // Nothing left to match: nothing is given, and the tree is told so.
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::False);
+    CHECK(sim.personData[kScore] == 175 && t[1] == 0 && t[2] == 0);
+
+    // The score is held but the lifetime total still grows.
+    world.neighborWants(27)[0] = slot;
+    sim.personData[kHeld] = 1;
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::True);
+    CHECK(sim.personData[kScore] == 175 && sim.personData[kLifetime] == 155);
+
+    // The score stops at the age's highest level.
+    world.neighborWants(27)[0] = slot;
+    world.neighborWants(27)[0].tail[1] = 30000;
+    sim.personData[kHeld] = 0;
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::True);
+    CHECK(sim.personData[kScore] == 200 && sim.personData[kLevel] == 100);
+}
+
 // A want with a Sim list tree: the tree (a "Wants - Check Trees" one, by name) runs on the Wants -
 // Controller with the Sim as param 0 and leaves in temp 0 an object whose array 0 lists the Sims.
 // Each listed Sim's matching wants are satisfied, and the primitive is false.
@@ -2538,10 +2690,12 @@ std::vector<Test> vmInteractionTests() {
         {"multi-tile parts use their master's interaction table", multiTilePartsUseTheirMastersTable},
         {"advertisers list objects by motive", advertisersListObjectsByMotive},
         {"Find Best Interaction picks the happiest near line", findBestInteractionPicksTheHappiestNearLine},
+        {"Find Best Interaction works for pets", findBestInteractionWorksForPets},
         {"Find Best Interaction keeps visitors to their lines", findBestInteractionKeepsVisitorsToTheirLines},
         {"Find Best Interaction remembers its picks", findBestInteractionRemembersItsPicks},
         {"Find Best Interaction weighs the social bias", findBestInteractionWeighsTheSocialBias},
         {"Find Best Interaction weighs offered lines", findBestInteractionWeighsOfferedLines},
+        {"Want Satisfy gives points and runs its feedback", wantSatisfyGivesPointsAndRunsItsFeedback},
         {"check tree kinds find trees that change the line", checkTreeKindsFindTreesThatChangeTheLine},
         {"Find Best Interaction scores what check trees advertise", findBestInteractionScoresWhatCheckTreesAdvertise},
         {"Want Satisfy matches current wants", wantSatisfyMatchesCurrentWants},

@@ -1,5 +1,6 @@
 #include "sim/lua_internals.hpp"
 
+#include "content/lot.hpp"
 #include "sim/snap.hpp"
 
 #include <cstring>
@@ -192,52 +193,18 @@ int getRoomOnSideOfWall(lua_State* L) {
     return 1;
 }
 
-// nWorld.IsBeachLocation(x, y, mask): whether a point of the ground (level 0) lies in a band along a
-// beach lot's beach side (the lot description's flag 0x80 and side byte), measured from that side's
-// edge: mask 4 the band from 12 to 20 tiles, 2 from 8 to 12, 1 from 0 to 8. True when the point is in
-// any band asked for. False off the lot and on other lots.
+// nWorld.IsBeachLocation(x, y, mask): see content::isBeachLocation.
 int isBeachLocation(lua_State* L) {
     const ScriptCall& c = call(L);
     const double x = lua_tonumber(L, 1), y = lua_tonumber(L, 2);
     const std::int32_t mask = argInt(L, 3);
-    if (c.world == nullptr) {
+    if (c.world == nullptr || !c.world->tileBounds()) {
         lua_pushboolean(L, false);
         return 1;
     }
-    const auto& shape = c.world->lotShape();
-    const double sizeX = std::trunc(shape.sizeX), sizeY = std::trunc(shape.sizeY);
-    if (!std::isfinite(x) || !std::isfinite(y) || x < 0 || y < 0 || x >= shape.sizeX || y >= shape.sizeY || !shape.beachSide) {
-        lua_pushboolean(L, false);
-        return 1;
-    }
-    // A band from `from` to `from` + `width` tiles off the beach side's edge, ends included.
-    const auto band = [&](double from, double width) {
-        switch (*shape.beachSide) {
-        case 0: return sizeX - from - width <= x && x <= sizeX - from;
-        case 1: return from <= y && y <= from + width;
-        case 2: return from <= x && x <= from + width;
-        case 3: return sizeY - from - width <= y && y <= sizeY - from;
-        default: return false;
-        }
-    };
-    double from = 0, width = 0;
-    bool in = false;
-    if (mask & 4) {
-        from = 12;
-        width = 8;
-        in = band(from, width);
-    }
-    if (!in && (mask & 2)) {
-        from = 8;
-        width = 4;
-        in = band(from, width);
-    }
-    if (!in && (mask & 1)) {
-        from = 0;
-        width = 8;
-    }
-    // The game tests the last band asked for again (or the empty band with no mask) when none matched.
-    lua_pushboolean(L, in || band(from, width));
+    const auto& b = *c.world->tileBounds();
+    const content::WorldBounds bounds{b.minX, b.minY, b.minLevel, b.maxX, b.maxY, b.maxLevel};
+    lua_pushboolean(L, content::isBeachLocation(bounds, c.world->lotShape().beachSide, x, y, mask));
     return 1;
 }
 

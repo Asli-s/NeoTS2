@@ -460,27 +460,10 @@ private:
         return -1;
     }
 
-    // The aspiration score (person data 0xA2, in tens) on -100..100 by the age's levels: -100 at
-    // rock bottom, -50, 0 at neutral, 25, 50, 75 and 100 at perfect, straight between them.
     std::int32_t aspirationLevel() const {
-        static constexpr std::int32_t kLevels[7] = {-100, -50, 0, 25, 50, 75, 100};
         const auto& levels = world_.wantDefinitions()->aspirationLevels;
         const auto found = levels.find(wantAgeCode(personValue(kLifeStage)));
-        if (found == levels.end()) {
-            return 0;
-        }
-        const auto& t = found->second;
-        const std::int32_t s = std::clamp(static_cast<std::int32_t>(personValue(kAspirationScore)) * 10, -327680, 327670);
-        std::size_t band = 0;
-        for (std::size_t k = 1; k <= 5; ++k) {
-            if (s >= t[k]) {
-                band = k;
-            }
-        }
-        const std::int32_t span = t[band + 1] - t[band];
-        const float f = span != 0 ? std::clamp(static_cast<float>(s - t[band]) / static_cast<float>(span), 0.0f, 1.0f) : 0.0f;
-        const float value = static_cast<float>(kLevels[band]) + static_cast<float>(kLevels[band + 1] - kLevels[band]) * f;
-        return std::clamp(static_cast<std::int32_t>(std::lround(value)), -100, 100);
+        return found != levels.end() ? sim::aspirationLevel(found->second, static_cast<std::int32_t>(personValue(kAspirationScore)) * 10) : 0;
     }
 
     // A candidate's score: between the node's least and most by its weighted factors, times how far
@@ -742,6 +725,21 @@ private:
 };
 
 } // namespace
+
+std::int32_t aspirationLevel(const std::array<std::int32_t, 7>& levels, std::int32_t score) {
+    static constexpr std::int32_t kLevels[7] = {-100, -50, 0, 25, 50, 75, 100};
+    const std::int32_t s = std::clamp(score, -327680, 327670);
+    std::size_t band = 0;
+    for (std::size_t k = 1; k <= 5; ++k) {
+        if (s >= levels[k]) {
+            band = k;
+        }
+    }
+    const std::int32_t span = levels[band + 1] - levels[band];
+    const float f = span != 0 ? std::clamp(static_cast<float>(s - levels[band]) / static_cast<float>(span), 0.0f, 1.0f) : 0.0f;
+    const float value = static_cast<float>(kLevels[band]) + static_cast<float>(kLevels[band + 1] - kLevels[band]) * f;
+    return std::clamp(static_cast<std::int32_t>(std::lround(value)), -100, 100);
+}
 
 int wantAgeCode(std::int16_t lifeStage) {
     if (lifeStage <= 1) {

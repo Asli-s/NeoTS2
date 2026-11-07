@@ -2,6 +2,7 @@
 
 #include "diag/log.hpp"
 #include "formats/objd.hpp"
+#include "sim/advertisement.hpp"
 #include "sim/code_source.hpp"
 
 #include <algorithm>
@@ -30,10 +31,19 @@ constexpr std::size_t kSpeciesPersonData = 0xBA;
 constexpr std::uint16_t kElderCurves = 0x28A, kAdultCurves = 0x28B, kTeenCurves = 0x28C, kChildCurves = 0x28D,
                         kToddlerCurves = 0x28E, kBabyCurves = 0x28F;
 
-// The motives a human Sim's happiness is the mean of.
+// The motives a Sim's happiness is the mean of. Pets count motive 1 instead of 13.
 constexpr std::array<std::size_t, 10> kHappinessMotives{0, 3, 5, 6, 7, 8, 9, 13, 14, 15};
+constexpr std::array<std::size_t, 10> kPetHappinessMotives{0, 1, 3, 5, 6, 7, 8, 9, 14, 15};
+
+// The global curves of the pet kinds 5-12 (see petKind).
+constexpr std::array<std::uint16_t, 8> kPetCurves{0x291, 0x290, 0x293, 0x292, 0x296, 0x295, 0x294, 0x297};
 
 std::uint16_t ageCurves(const SimObject& sim) {
+    if (sim.personData[kSpeciesPersonData] != 0) {
+        // Another species counts as a human adult.
+        const auto kind = petKind(sim);
+        return kind ? kPetCurves[*kind - kFirstPetKind] : kAdultCurves;
+    }
     const std::int16_t age = sim.personData[kAgePersonData];
     if (age > 50) return kElderCurves;
     if (age > 18 || sim.personData[kYoungAdultPersonData] != 0) return kAdultCurves;
@@ -103,9 +113,6 @@ float ScoreCurve::operator()(float x) const {
 }
 
 std::optional<ScoreCurves> scoreCurves(CodeSource& code, const SimObject& sim, std::uint32_t simGroup) {
-    if (sim.personData.size() <= kSpeciesPersonData || sim.personData[kSpeciesPersonData] != 0) {
-        return std::nullopt;
-    }
     std::uint32_t group = kGlobalGroup;
     std::uint16_t instance = ageCurves(sim);
     if ((sim.personData[kCurveFlagsPersonData] & kSpecialCurvesFlag) != 0) {
@@ -133,9 +140,9 @@ std::array<float, kMotiveCount> scoredMotives(const SimObject& sim) {
     return levels;
 }
 
-float happiness(const ScoreCurves& curves, const std::array<float, kMotiveCount>& motives) {
+float happiness(const ScoreCurves& curves, const std::array<float, kMotiveCount>& motives, bool human) {
     float sum = 0;
-    for (const std::size_t m : kHappinessMotives) {
+    for (const std::size_t m : human ? kHappinessMotives : kPetHappinessMotives) {
         sum += curves[m](motives[m]);
     }
     return sum * (1.0f / static_cast<float>(kHappinessMotives.size()));

@@ -138,10 +138,9 @@ bool Execution::primitive(const bhav::Instruction& in, Frame& f) {
     case kAnimateObjectOpcode:    return animateObject(in, f);
     case kLookAtOpcode:           return lookAt(in, f);
     case kAssignLocomotionOpcode: return assignLocomotion(in, f);
-    // These start an effect or stop all of an object's sounds, and carry on at once. What they
-    // show or play isn't kept yet.
+    case kEffectOpcode:           return effectStopStart(in, f);
+    // This stops all of an object's sounds, and carries on at once. Nothing plays sounds yet.
     case kStopAllSoundsOpcode:
-    case kEffectOpcode:
         return true;
     // Debug only does something with the game's debug (cheat) setting on: console commands.
     case kDebugOpcode:
@@ -266,6 +265,20 @@ bool Vm::hasTree(std::uint32_t codeGroup, std::uint16_t tree) {
     return code_.behavior(group, tree) != nullptr;
 }
 
+namespace {
+
+// Gives a run its own step count from 0 and puts the caller's count back after, however the run ends.
+struct OwnStepCount {
+    std::size_t& steps;
+    std::size_t outer;
+    explicit OwnStepCount(std::size_t& count) : steps(count), outer(std::exchange(count, 0)) {}
+    OwnStepCount(const OwnStepCount&) = delete;
+    OwnStepCount& operator=(const OwnStepCount&) = delete;
+    ~OwnStepCount() { steps = outer; }
+};
+
+}  // namespace
+
 RunResult Vm::runOnce(SimObject& me, std::uint32_t codeGroup, std::uint16_t tree, std::span<const std::int16_t> args) {
     ThreadState scratch;
     scratch.codeGroup = codeGroup;
@@ -321,6 +334,8 @@ RunResult Vm::resume(ThreadState& thread, std::uint32_t objectGroup) {
 // The game gives a new object the reset an object gets when it loads with a changed type: data from
 // its OBJD, Main at the top of its stack, then (unless it is a multi-tile part) Init and the two
 // placement fields. Its Main then runs until it first waits. Failures are reported as the object's.
+// Init and Main each count their own steps, as the new object's own runs, so a new Sim's long Init
+// doesn't use up the step limit of the tree that made it.
 void Vm::startCreated(SimObject& created, const ObjectType& type) {
     constexpr std::uint16_t kInit = 0;  // OBJf entry
     if (nestedRuns_ >= kMaxNestedRuns) {
@@ -350,12 +365,14 @@ void Vm::startCreated(SimObject& created, const ObjectType& type) {
     if (!isMultiTilePart(type)) {
         const auto* functions = code_.objectFunctions(type);
         if (functions != nullptr && kInit < functions->size() && (*functions)[kInit].action != 0) {
+            const OwnStepCount own(stepsUsed_);
             note(runOnce(created, type.group, (*functions)[kInit].action));
         }
         finishSingleTileReset(created, type);
     }
     markVisitor(created);
     if (created.thread.isRunning()) {
+        const OwnStepCount own(stepsUsed_);
         note(resume(created));
     }
 }
@@ -412,12 +429,14 @@ void Vm::startCreatedParts(std::span<SimObject* const> parts) {
         const auto* functions = code_.objectFunctions(*type);
         if (functions != nullptr && kInit < functions->size() && (*functions)[kInit].action != 0 &&
             hasTree(type->group, (*functions)[kInit].action)) {
+            const OwnStepCount own(stepsUsed_);
             note(*part, runOnce(*part, type->group, (*functions)[kInit].action));
         }
         finishSingleTileReset(*part, *type);
     }
     SimObject& lead = *parts.front();
     if (lead.thread.isRunning()) {
+        const OwnStepCount own(stepsUsed_);
         note(lead, resume(lead));
     }
 }

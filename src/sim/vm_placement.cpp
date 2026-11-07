@@ -374,6 +374,7 @@ void Execution::putInSlot(SimObject& object, SimObject& container, std::int16_t 
         }
     }
     object.heading.reset();
+    world().updateRoom(object);
     world().markFootprintChanged(object.id);
 }
 

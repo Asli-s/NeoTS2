@@ -35,6 +35,9 @@ constexpr std::uint32_t kAgeFlags = 0x3F013E51;
 constexpr std::uint32_t kDebugLine = 0x80;
 constexpr std::uint32_t kOnSelf = 0x00100000;
 constexpr std::uint32_t kPreferredByFurious = 0x00800000;  // a flag bit, leakcheck: ok
+// The person data Free Will's check reads (see findBestInteraction).
+constexpr std::size_t kPersonTypePersonData = 0x20, kSelectionFlagsPersonData = 0x9E, kPersonFlagsData = 0x54;
+constexpr std::int16_t kSelectable = 0x01, kFreeWillCheckFlag = 0x800;
 // Tokens in a Sim's neighbor inventory that the social bias reads. "Token - Furious" holds the
 // other Sim's neighbor id in property 0 and how furious in property 2. "Token - Attraction Marker"
 // holds the attraction in property 0 and the other Sim's neighbor id in property 1.
@@ -57,9 +60,16 @@ struct Candidate {
     std::array<std::int16_t, 4> params{};
 };
 
-// A human Sim's age kind for the advertiser list (13 for babies, which nothing advertises to) and
-// the age flag its interaction lines need.
+// A Sim's age kind for the advertiser list (13 for babies, which nothing advertises to, pets 5-12)
+// and the age flag its interaction lines need. Another species counts as a human adult.
 std::pair<std::size_t, std::uint32_t> ageKind(const SimObject& sim) {
+    // The line flags of the pet kinds 5-12 (see petKind).
+    constexpr std::array<std::uint32_t, 8> kPetFlags{0x1000, 0x4000000, 0x10000000, 0x20000000,
+                                                     0x2000, 0x8000000, 0x1000000, 0x2000000};
+    if (sim.personData[kSpeciesPersonData] != 0) {
+        const auto kind = petKind(sim);
+        return kind ? std::pair{*kind, kPetFlags[*kind - kFirstPetKind]} : std::pair<std::size_t, std::uint32_t>{0, 0x40};
+    }
     const std::int16_t age = sim.personData[kAgePersonData];
     if (age > 50) return {4, 0x400};
     if (age > 18 || sim.personData[kYoungAdultPersonData] != 0) return {0, 0x40};
@@ -111,7 +121,8 @@ public:
         }
         motives_ = scoredMotives(me);
         noteInfluences();
-        now_ = happiness(*curves_, motives_);
+        human_ = me.personData[kSpeciesPersonData] == 0;
+        now_ = happiness(*curves_, motives_, human_);
         const auto [kind, ageFlag] = ageKind(me);
         ageFlag_ = ageFlag;
         origin_ = &me;
@@ -134,7 +145,7 @@ public:
                 break;
             }
             const std::uint16_t mask = automatic
-                ? worstMotives(motives_, true, counts, used, static_cast<std::size_t>(std::max(0, s_.tunings.worstMotives)))
+                ? worstMotives(motives_, human_, counts, used, static_cast<std::size_t>(std::max(0, s_.tunings.worstMotives)))
                 : given;
             if (mask == 0) {
                 break;
@@ -251,9 +262,9 @@ private:
 
     // Scores a candidate by `line`'s advertisements and keeps it when the score is high enough.
     void score(const SimObject& object, std::uint16_t id, const ttab::Interaction& line, Candidate c) {
-        const float after = happiness(*curves_, advertisedMotives(line, s_.me, motives_));
+        const float after = happiness(*curves_, advertisedMotives(line, s_.me, motives_), human_);
         const float fall = attenuationOf(line, s_.tunings, visitor_) * distance(*origin_, object, s_.tunings.floorCost) + 1.0f;
-        const float value = (after - now_) / fall * remembered(object, id, line) * socialBias(object, line);
+        const float value = (after - now_) / fall * remembered(object, id, line) * socialBias(object, line) * petBias(object);
         const float minimum = visitor_ ? s_.tunings.visitorMinimum : s_.tunings.familyMinimum;
         if (value >= minimum && value >= kLowestScore) {
             c.interaction = id;
@@ -261,6 +272,28 @@ private:
             c.after = after;
             candidates_.push_back(std::move(c));
         }
+    }
+
+    // How much more a pet likes a line on a Sim when its relationship with that Sim has more than one
+    // value and bit 0x800 of value 1 set: 1 + global constant 0x15B entry 11 / 100. Otherwise 1, also
+    // for humans and on objects that aren't Sims.
+    float petBias(const SimObject& object) const {
+        constexpr std::uint16_t kPetConstants = 0x15B;
+        constexpr std::size_t kPetBiasConstant = 11, kRelationshipFlags = 1;
+        constexpr std::int32_t kBiasFlag = 0x800;
+        if (human_ || !object.isPerson()) {
+            return 1.0f;
+        }
+        const auto* values = s_.world.neighborRelationshipValues(s_.me.personData[kNeighborIdPersonData],
+                                                                 object.personData[kNeighborIdPersonData]);
+        if (values == nullptr || values->size() <= kRelationshipFlags || ((*values)[kRelationshipFlags] & kBiasFlag) == 0) {
+            return 1.0f;
+        }
+        const auto* constants = s_.code.constants(kGlobalGroup, kPetConstants);
+        if (constants == nullptr || constants->size() <= kPetBiasConstant) {
+            return 1.0f;
+        }
+        return static_cast<float>(static_cast<double>((*constants)[kPetBiasConstant]) * static_cast<double>(0.01f) + 1.0);
     }
 
     // The Sims I am furious at and the places of those I'm furious at or attracted to, from the tokens
@@ -413,6 +446,7 @@ private:
     const InteractionSearch& s_;
     const bool visitor_;
     std::optional<ScoreCurves> curves_;  // this Sim's, while the search runs
+    bool human_ = true;                  // whether I am a human, not a pet
     std::array<float, kMotiveCount> motives_{};
     struct Influence {
         double x, y;  // in tiles
@@ -551,12 +585,18 @@ float attenuationOf(const ttab::Interaction& line, const AutonomyTunings& tuning
 std::optional<FoundInteraction> findBestInteraction(const InteractionSearch& search) {
     SimObject& me = search.me;
     const std::uint64_t tick = search.world.ticks();
-    if (me.autonomyTick == tick) {
+    me.data[kTreeTableEntryField] = -1;
+    // With Free Will off the game skips the search for a human Sim that is not an NPC (Person Type
+    // 0), is selectable (bit 1 of Selection Flags) and lacks bit 0x800 of person data 0x54, whose
+    // meaning is not known yet. Pets keep choosing for themselves.
+    const bool stoppedByFreeWill = !search.freeWill && me.personData[kPersonTypePersonData] == 0 &&
+                                   (me.personData[kSelectionFlagsPersonData] & kSelectable) != 0 &&
+                                   me.personData[kSpeciesPersonData] == 0 && (me.personData[kPersonFlagsData] & kFreeWillCheckFlag) == 0;
+    if (stoppedByFreeWill || me.autonomyTick == tick) {
         return std::nullopt;
     }
     me.autonomyTick = tick;
-    me.data[kTreeTableEntryField] = -1;
-    if (me.personData[kSpeciesPersonData] != 0 || search.operands.size() < 4) {
+    if (search.operands.size() < 4) {
         return std::nullopt;
     }
     forgetOldPicks(me.autonomyMemory, tick, search.tunings.memoryCount);

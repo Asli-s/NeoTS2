@@ -780,7 +780,8 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
            bool personData, bool overlays, bool motion, std::optional<std::int16_t> pieSim, std::optional<std::int16_t> pieTrace,
            std::optional<std::array<int, 3>> queueChoice, std::size_t queueTick, std::optional<std::size_t> queueAgainTick, std::optional<std::size_t> cancelTick,
            std::optional<std::array<float, 3>> groundAt, bool portals, std::optional<std::array<float, 4>> groundLater,
-           const std::vector<std::array<float, 5>>& goHere, std::optional<std::uint32_t> seed) {
+           const std::vector<std::array<float, 5>>& goHere, std::optional<std::uint32_t> seed,
+           const std::vector<std::array<float, 3>>& motives, std::optional<std::array<float, 2>> camera) {
     const auto primitives = editorTable(index, kPrimitiveNames);
     const auto owners = editorTable(index, kDataOwners);
     const auto genericCalls = editorTable(index, kGenericSimsCalls);
@@ -910,6 +911,18 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
     };
     if (queueChoice && queueTick == 0) {
         queuePieChoice();
+    }
+    // Where the camera is (x, y in tiles), for scripts that turn Sims towards it.
+    if (camera) {
+        world.setCameraPoint([camera]() -> std::optional<std::array<float, 2>> { return *camera; });
+    }
+    // Motives set before the first tick (Sim, motive, value), to bring on what low motives do.
+    for (const auto& [id, motive, value] : motives) {
+        auto* who = world.find(static_cast<std::int16_t>(id));
+        if (who != nullptr && motive >= 0 && motive < static_cast<float>(ts2::sim::kMotiveCount)) {
+            who->motives[static_cast<std::size_t>(motive)] = value;
+        }
+        std::printf("motive %d of Sim %d %s\n", static_cast<int>(motive), static_cast<int>(id), who != nullptr ? "set" : "not set: no such object");
     }
 
     // The queued Sim's running interaction as it changes, and the player's cancel of it at a tick.
@@ -1138,7 +1151,7 @@ int main(int argc, char** argv) {
                      "  simrun <install-folder> --progress [--hood <folder>] [--json <file>]\n"
                      "  simrun <install-folder | file.package> --run <group> <instance> [args...] [--trace]\n"
                      "  simrun <install-folder | file.package> --guid <hex-guid> [...]\n"
-                     "  simrun <install-folder> --lot <lot.package> [ticks [--trace-tick <tick>] [--trace-object <id>] [--on-screen] [--pie <sim> [--pie-trace <object>]] [--queue <sim> <object> <choice> [--queue-at <tick>] [--queue-again <tick>] [--cancel <tick>]] [--ground <x> <y> <level> [--ground-later <tick> <x> <y> <level>]] [--go-here <sim> <tick> <x> <y> <level>]... [--portals] [--seed <n>]]\n"
+                     "  simrun <install-folder> --lot <lot.package> [ticks [--trace-tick <tick>] [--trace-object <id>] [--on-screen] [--pie <sim> [--pie-trace <object>]] [--queue <sim> <object> <choice> [--queue-at <tick>] [--queue-again <tick>] [--cancel <tick>]] [--ground <x> <y> <level> [--ground-later <tick> <x> <y> <level>]] [--go-here <sim> <tick> <x> <y> <level>]... [--portals] [--seed <n>] [--motive <sim> <motive> <value>]... [--camera <x> <y>]]\n"
                      "  simrun <install-folder> --loco <clip>...\n"
                      "  simrun <install-folder> --wall-types <lot.package>\n"
                      "  simrun <install-folder> --wall-list <lot.package>\n"
@@ -1205,6 +1218,8 @@ int main(int argc, char** argv) {
             std::optional<std::array<float, 4>> groundLater;
             std::vector<std::array<float, 5>> goHere;
             std::optional<std::uint32_t> seed;
+            std::vector<std::array<float, 3>> motives;
+            std::optional<std::array<float, 2>> camera;
             for (int i = 5; i < argc; ++i) {
                 if (std::string_view(argv[i]) == "--trace-tick" && i + 1 < argc) {
                     traceTick = std::stoul(argv[++i]);
@@ -1237,6 +1252,12 @@ int main(int argc, char** argv) {
                 } else if (std::string_view(argv[i]) == "--go-here" && i + 5 < argc && goHere.size() < 64) {
                     goHere.push_back({std::stof(argv[i + 1]), std::stof(argv[i + 2]), std::stof(argv[i + 3]), std::stof(argv[i + 4]), std::stof(argv[i + 5])});
                     i += 5;
+                } else if (std::string_view(argv[i]) == "--motive" && i + 3 < argc && motives.size() < 64) {
+                    motives.push_back({std::stof(argv[i + 1]), std::stof(argv[i + 2]), std::stof(argv[i + 3])});
+                    i += 3;
+                } else if (std::string_view(argv[i]) == "--camera" && i + 2 < argc) {
+                    camera = std::array<float, 2>{std::stof(argv[i + 1]), std::stof(argv[i + 2])};
+                    i += 2;
                 } else if (std::string_view(argv[i]) == "--seed" && i + 1 < argc) {
                     seed = static_cast<std::uint32_t>(std::stoul(argv[++i]));
                 } else if (std::string_view(argv[i]) == "--portals") {
@@ -1249,7 +1270,7 @@ int main(int argc, char** argv) {
                 }
             }
             return runLot(index, std::filesystem::path(argv[1]), std::filesystem::path(argv[3]), ticks, traceTick, traceObject, onScreen,
-                          personData, overlays, motion, pieSim, pieTrace, queueChoice, queueTick, queueAgainTick, cancelTick, groundAt, portals, groundLater, goHere, seed);
+                          personData, overlays, motion, pieSim, pieTrace, queueChoice, queueTick, queueAgainTick, cancelTick, groundAt, portals, groundLater, goHere, seed, motives, camera);
         }
         if (mode == "--outside" && argc >= 4) {
             return printOutside(std::filesystem::path(argv[3]));

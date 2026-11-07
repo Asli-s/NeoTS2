@@ -47,6 +47,78 @@ ScriptEnd runScript(const char* source) {
     return r.outcome == Outcome::True ? ScriptEnd::True : ScriptEnd::False;
 }
 
+// MultiplyAdValues scales the line a check tree tests, for the Sim running it (the table keeps its
+// own values). Before any check tree, with no or too many arguments, or run by an object that is
+// not a Sim, it raises an object error.
+void scriptsMultiplyTheTestedAdvertisements() {
+    auto runtime = std::make_shared<ts2::sim::LuaRuntime>();
+    runtime->load({}, {compileScript("Double", "MultiplyAdValues(2, 7)"),
+                       compileScript("NoArguments", "MultiplyAdValues()"),
+                       compileScript("TooMany", "MultiplyAdValues(2, 7, 1)")});
+    CHECK(runtime->problems.empty());
+    MemoryCodeSource code;
+    code.addStrings(ts2::sim::kGlobalGroup, 0x130, {"Double", "NoArguments", "TooMany"});
+    for (std::uint8_t i = 1; i <= 3; ++i) {
+        code.add(kObjectGroup, static_cast<std::uint16_t>(0x0FFF + i), bhav({luaScriptCall(i)}));
+    }
+    ts2::sim::World world;
+    world.setScripts(runtime);
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    auto& fridge = world.create(kObjectGroup, typed(kFridgeGuid));
+    code.addObjectType(kObjectGroup, typed(kFridgeGuid));
+    sim.personData[0x3A] = 30;
+    ts2::ttab::Interaction line;
+    line.motives.resize(1);
+    line.motives[0].resize(8, {10, 30, 0});
+    Vm vm(code, {}, &world);
+    std::vector<ts2::sim::OfferedAction> offered;
+    CHECK(scriptRaisesError(world, [&] { return vm.run(sim, kObjectGroup, 0x1000); }));
+    CHECK(vm.runCheck(sim, kObjectGroup, 0x1000, fridge.id, {}, line, offered).outcome == Outcome::True);
+    CHECK(vm.testedLine() && vm.testedLine()->motives[0][7].min == 20 && vm.testedLine()->motives[0][6].min == 10);
+    CHECK(line.motives[0][7].min == 10);
+    CHECK(scriptRaisesError(world, [&] { return vm.runCheck(sim, kObjectGroup, 0x1001, fridge.id, {}, line, offered); }));
+    CHECK(scriptRaisesError(world, [&] { return vm.runCheck(sim, kObjectGroup, 0x1002, fridge.id, {}, line, offered); }));
+    CHECK(scriptRaisesError(world, [&] { return vm.runCheck(fridge, kObjectGroup, 0x1000, fridge.id, {}, line, offered); }));
+}
+
+// RunTree runs a tree found by name at once as the running object, on its temps, and returns its
+// result. The object's own trees come first, then its semi-global ones, then the global ones. A
+// missing name is false. Without a stack object the tree gets the calling tree's.
+void scriptsRunTreesByName() {
+    auto runtime = std::make_shared<ts2::sim::LuaRuntime>();
+    runtime->load({}, {compileScript("Calls", R"(
+        local a = RunTree("Own", 5, 42)
+        local b = RunTree("Semi")
+        local c = RunTree("Global", 3)
+        local d = RunTree("Missing")
+        RunTree("Shared")
+        SetTemp(4, (a and 1 or 0) + (b and 10 or 0) + (c and 100 or 0) + (d and 1000 or 0))
+    )")});
+    CHECK(runtime->problems.empty());
+    MemoryCodeSource code;
+    code.addStrings(ts2::sim::kGlobalGroup, 0x130, {"Calls"});
+    code.add(kObjectGroup, 0x1000, bhav({luaScriptCall(1)}));
+    auto named = [](const char* name, Behavior b) {
+        b.name = name;
+        return b;
+    };
+    code.add(kObjectGroup, 0x1001, named("Own", bhav({expr(owner::kTemp, 0, op::kAssign, owner::kParam, 0, T, F)}, 1)));
+    code.add(kSemiGroup, 0x2001, named("Semi", bhav({expr(owner::kTemp, 1, op::kAssign, owner::kStackObjectId, 0, F, F)})));
+    code.add(ts2::sim::kGlobalGroup, 0x0101, named("Global", bhav({expr(owner::kTemp, 2, op::kAssign, owner::kLiteral, 7, T, F)})));
+    code.add(kObjectGroup, 0x1002, named("Shared", bhav({expr(owner::kTemp, 3, op::kAssign, owner::kLiteral, 1, T, F)})));
+    code.add(ts2::sim::kGlobalGroup, 0x0102, named("Shared", bhav({expr(owner::kTemp, 3, op::kAssign, owner::kLiteral, 2, T, F)})));
+    ts2::sim::World world;
+    world.setScripts(runtime);
+    code.addObjectType(kObjectGroup, typed(kFridgeGuid));
+    auto& fridge = world.create(kObjectGroup, typed(kFridgeGuid));
+    world.create(kObjectGroup, typed(kFridgeGuid));
+    fridge.thread.stackObjectId = 2;
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(fridge, 0x1000).outcome == Outcome::True);
+    const auto& t = fridge.thread.temps;
+    CHECK(t[0] == 42 && t[1] == 2 && t[2] == 7 && t[3] == 1 && t[4] == 101);
+}
+
 // A script's result is true unless it says otherwise.
 void scriptsAreTrueUnlessTheySayOtherwise() {
     CHECK(runScript("SetTemp(0, 1)") == ScriptEnd::True);
@@ -1591,6 +1663,8 @@ std::vector<Test> vmScriptTests() {
         {"ObjectManager scripts find objects", objectManagerScriptsFindObjects},
         {"data table scripts keep values", dataTableScriptsKeepValues},
         {"object scripts read and write values", objectScriptsReadAndWriteValues},
+        {"scripts multiply the tested advertisements", scriptsMultiplyTheTestedAdvertisements},
+        {"scripts run trees by name", scriptsRunTreesByName},
         {"definition fields as scripts number them", definitionFieldsAsScriptsNumberThem},
         {"scripts subscribe objects to messages", scriptsSubscribeToMessages},
         {"message subscriptions are bounded", messageSubscriptionsAreBounded},

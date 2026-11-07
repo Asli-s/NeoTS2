@@ -5,8 +5,10 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <variant>
 #include <vector>
@@ -17,6 +19,13 @@ namespace ts2::sim {
 
 class World;
 class CodeSource;
+}  // namespace ts2::sim
+
+namespace ts2::ttab {
+struct Interaction;
+}  // namespace ts2::ttab
+
+namespace ts2::sim {
 
 // What a running script may read and change: set up by the Lua primitive for one call.
 struct ScriptCall {
@@ -33,6 +42,10 @@ struct ScriptCall {
     std::uint32_t codeOwner = 0;  // the group whose private constants the running tree uses
     std::int16_t* globals = nullptr;  // the simulator globals
     std::size_t globalCount = 0;
+    ttab::Interaction* testedLine = nullptr;  // the line a check tree is testing, while one runs
+    // Runs a tree, found by name, at once as the running object (RunTree). 1 when it ends true, 0 when
+    // false or not found, -1 when the engine can't run it and the script must stop.
+    std::function<int(const std::string& name, std::int16_t stackObject, std::span<const std::int16_t> args)> runTree;
 
     // Set by SetScriptReturnValue. A script that never calls it is true (PercentCalculate, which
     // every "Percentage" tree runs, is one).

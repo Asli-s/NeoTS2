@@ -55,8 +55,13 @@ std::uint32_t IndexCodeSource::privateCodeGroup(std::uint32_t group) {
         return group;
     }
     objectType(0);  // finds the Sims' groups the first time
-    if (!simGroups_.contains(group)) {
+    const auto sim = simGroups_.find(group);
+    if (sim == simGroups_.end()) {
         return group;
+    }
+    const ObjectType* original = sim->second != 0 ? objectType(sim->second) : nullptr;
+    if (original != nullptr && groupsWithTrees_.contains(original->group)) {
+        return original->group;
     }
     const ObjectType* templatePerson = objectType(kTemplatePersonGuid);
     return templatePerson != nullptr ? templatePerson->group : group;
@@ -194,7 +199,10 @@ const ObjectType* IndexCodeSource::objectType(std::uint32_t guid) {
                                 containerSlots, std::move(routingSlots), std::move(containerEntries),
                                 std::move(targetSlots)};
                 if (type.definition.field(objd::field::kType) == kPersonType) {
-                    simGroups_.insert(r.entry.key.group);
+                    constexpr std::size_t kOriginalGuidLow = 0x46, kOriginalGuidHigh = 0x47;
+                    simGroups_.try_emplace(r.entry.key.group,
+                                           type.definition.field(kOriginalGuidLow) |
+                                               static_cast<std::uint32_t>(type.definition.field(kOriginalGuidHigh)) << 16);
                 }
                 if (objectTypes_.try_emplace(id, std::move(type)).second) {
                     objectTypeGuids_.push_back(id);
@@ -387,6 +395,7 @@ std::optional<std::string> IndexCodeSource::interactionString(std::uint32_t grou
 
 std::optional<std::uint16_t> IndexCodeSource::behaviorByName(std::uint32_t group,
                                                              const std::string& name) {
+    group = privateCodeGroup(group);
     if (!behaviorNamesLoaded_) {
         behaviorNamesLoaded_ = true;
         for (const auto& r : index_.resources()) {

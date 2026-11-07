@@ -123,6 +123,9 @@ struct InteractionSearch {
     // If set, the checks a line gets before its check tree, every time it is checked (see
     // mayStartLine): a line it refuses fails its check.
     std::function<bool(const SimObject& object, const ttab::Interaction& line)> mayStart;
+    // Global 0x1E, Free Will. Off, a selectable Sim of the household picks nothing (see
+    // findBestInteraction).
+    bool freeWill = true;
 };
 
 // Which check trees change the interaction they test, and so run before their line is scored: those

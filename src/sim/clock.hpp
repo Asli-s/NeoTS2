@@ -21,6 +21,7 @@ constexpr std::size_t kBudgetLow = 0x0D;   // funds % 10000
 constexpr std::size_t kBudgetHigh = 0x0E;  // funds / 10000
 constexpr std::size_t kSpeed = 0x10;
 constexpr std::size_t kPaused = 0x11;
+constexpr std::size_t kFreeWill = 0x1E;  // 0 when the player turned Free Will off for the lot
 constexpr std::size_t kDayOfWeek = 0x22;  // 0 Monday
 constexpr std::size_t kCameraBusy = 0x34;
 } // namespace global

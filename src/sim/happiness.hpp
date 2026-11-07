@@ -32,15 +32,16 @@ using ScoreCurves = std::array<ScoreCurve, kMotiveCount>;
 
 // The curves a Sim scores interactions with: STR# 0x298 when bit 0x200 of its person data 0x54 is
 // set, else the STR# its object definition names in field 0x33, from its own group, else the global
-// curves for its age. Nothing for pets (their curves are not done yet) or a missing table.
+// curves for its age and species (pets 0x290-0x297). Nothing for a missing table.
 [[nodiscard]] std::optional<ScoreCurves> scoreCurves(CodeSource& code, const SimObject& sim, std::uint32_t simGroup);
 
 // The motive levels autonomy scores with: the Sim's motives, with motive 13 (environment) replaced
 // by person data 0x79 when that is not 0.
 std::array<float, kMotiveCount> scoredMotives(const SimObject& sim);
 
-// A human Sim's happiness for these motive levels: the mean of its curves over motives 0, 3, 5-9 and
-// 13-15. Find Best Interaction compares it before and after an interaction's advertisements.
-float happiness(const ScoreCurves& curves, const std::array<float, kMotiveCount>& motives);
+// A Sim's happiness for these motive levels: the mean of its curves over motives 0, 3, 5-9 and
+// 13-15, for pets 0, 1, 3, 5-9, 14 and 15. Find Best Interaction compares it before and after an
+// interaction's advertisements.
+float happiness(const ScoreCurves& curves, const std::array<float, kMotiveCount>& motives, bool human = true);
 
 } // namespace ts2::sim

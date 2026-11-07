@@ -350,11 +350,13 @@ struct SimObject {
     std::optional<float> heading;
     Boxed<Turning> turning;
     Boxed<Walking> walking;
-    // When my last walk ended in its stop clip (clock ms) and the foot that stop began on: a walk
-    // from standing begun soon after begins on that foot (see planWalkFor).
+    // When my last walk started fading out and when it would have played to its end (clock ms), and
+    // the foot its stop clip began on, if it had one. A walk begun soon after starts by them and on
+    // that foot (see walkStart). The next route's start uses it up.
     struct WalkEnd {
-        double ms = 0;
-        float foot = 0.5f;
+        double fadeOutMs = 0;
+        double playEndMs = 0;
+        std::optional<float> foot;
     };
     std::optional<WalkEnd> lastWalkEnd;
     // The walk sets Assign Locomotion Animations pushed, newest last: each a walk's lines and a run's.
@@ -402,6 +404,40 @@ struct SoundEvent {
     std::string name;
     std::int16_t source = 0;
     bool stop = false;
+};
+
+// What an Effect Stop/Start primitive asks of an object's effects.
+struct EffectCommand {
+    enum class Do : std::uint8_t {
+        Start,      // starts `name`, `hard` as said, `keep` protecting it from stops of all
+        StartOnce,  // plays `name` once, with no way to stop it
+        Stop,       // stops `name`, `hard` as said
+        StopAll,    // stops all of `kind` (0: every kind) but those with `keep`, `hard` as said
+    };
+    Do what = Do::Start;
+    std::int16_t object = 0;
+    std::string name;
+    std::string bone;  // empty: on the object's own node
+    int number = 0;    // a third name, for the same effect on the same bone several times over
+    int kind = 2;      // 2 the primitive's effects, 5 its queued ones, 7 a kind nothing is seen to start
+    bool hard = false;
+    bool keep = false;
+    // After a start, the texture to show instead of the effect's own and the atlas frame to start at, as balloons
+    // show a picture. No texture: none given.
+    std::string picture;
+    int firstFrame = 0;
+    // With a GUID, `picture` names a picture still to be made: that object type's thumbnail, using its image
+    // `pictureIndex`, or the portrait of neighbor `pictureNeighbor` when the type is a Sim's.
+    std::uint32_t pictureGuid = 0;
+    std::int16_t pictureNeighbor = 0;
+    std::uint32_t pictureIndex = 0;
+    bool pictureIsMemory = false;  // a type that isn't a Sim's shows its picture as a memory, or none if it isn't one
+    std::optional<int> pictureNumber;  // a score to show as text instead, drawn with its sign
+    std::optional<swaf::Want> pictureWant;  // a want or fear to show as its target or icon and its badge instead
+    // A start that waits its turn in the object's queue: the highest priority first, given up after `queueWait` ticks.
+    bool queued = false;
+    int queuePriority = 0, queueWait = 0;
+    bool clearsQueue = false;  // a stop that also forgets the object's queue
 };
 
 // A neighborhood's neighbors and relationships as saved. Relationship values are 32-bit, as the
@@ -475,6 +511,10 @@ public:
     // it and it is still drawn. The game does this to a saved Placeholder or TemplatePerson as the
     // lot loads. A later remove() deletes it at the end of that tick.
     void keepUntilUnload(SimObject& object);
+    // Goes up when an object comes or goes, or a script writes an object's own definition fields, which
+    // hold its GUID. What was worked out from the objects and their types stands until it changes.
+    std::uint64_t objectsVersion() const { return objectsVersion_; }
+    void definitionWritten() { ++objectsVersion_; }
     void purge();
     // The removed objects purge() has yet to free, by id.
     std::vector<std::int16_t> removedIds() const;
@@ -535,8 +575,9 @@ public:
     const WallOutline* wallOutline() const { return wallOutline_.get(); }
     const std::set<std::uint32_t>& greenhouseFences() const { return greenhouseFences_; }
     // Object data 0x1D holds the room the object stands in. Scripts compare it right after a move,
-    // so every move sets it again. A spot outside the room map leaves it as it was.
-    void updateRoom(SimObject& object) const;
+    // so every move sets it again. A spot outside the room map leaves it as it was. What is in the object's
+    // slots, and in theirs, comes along to its place, level and room.
+    void updateRoom(SimObject& object);
 
     // The neighborhood as saved, shared between worlds (a world keeps its own changes).
     // The regions of the lot's second room layer (wall graph instance 6): 0 where its walls enclose
@@ -638,9 +679,8 @@ public:
     // The lot's number in its neighborhood (Lots/<hood>_Lot<n>), if known.
     std::optional<std::int32_t> lotNumber() const { return lotNumber_; }
     void setLotNumber(std::int32_t number) { lotNumber_ = number; }
-    // This lot's size in tiles and, on a beach lot, its beach's side. Zero size when unknown.
+    // On a beach lot, its beach's side (the lot description's ownFacing, see content::isBeachLocation).
     struct LotShape {
-        float sizeX = 0, sizeY = 0;
         std::optional<std::uint8_t> beachSide;
     };
     const LotShape& lotShape() const { return lotShape_; }
@@ -1069,6 +1109,9 @@ public:
     }
 
     // Who plays the sounds scripts start and stop. Without it they go unheard.
+    using EffectCommands = std::function<void(const EffectCommand&)>;
+    void setEffectCommands(EffectCommands commands) { effectCommands_ = std::move(commands); }
+    const EffectCommands& effectCommands() const { return effectCommands_; }
     using SoundEvents = std::function<void(const SoundEvent&)>;
     void setSoundEvents(SoundEvents events) { soundEvents_ = std::move(events); }
     const SoundEvents& soundEvents() const { return soundEvents_; }
@@ -1335,6 +1378,7 @@ private:
     AnimationLengths animationLengths_;
     AnimationCarries animationCarries_;
     SoundEvents soundEvents_;
+    EffectCommands effectCommands_;
     std::vector<std::int16_t> notifications_;
     std::int16_t lastNotification_ = 0;
     bool runningAtOnce_ = false;
@@ -1394,7 +1438,11 @@ private:
     // The Sim each neighbor GUID is on this lot (0: none), as neighborData field 0 finds it. Social
     // check trees ask it thousands of times a tick, so it's kept until objects are added or removed.
     mutable std::map<std::uint32_t, std::int16_t> simOfNeighbor_;
-    void objectsChanged() { simOfNeighbor_.clear(); }
+    std::uint64_t objectsVersion_ = 0;
+    void objectsChanged() {
+        simOfNeighbor_.clear();
+        ++objectsVersion_;
+    }
     void removeOne(SimObject& object);
 };
 

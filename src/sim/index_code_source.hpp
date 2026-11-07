@@ -61,9 +61,11 @@ private:
     std::unordered_map<std::uint64_t, std::optional<std::vector<objf::Function>>> objectFunctions_;
     bool objectTypesLoaded_ = false;
     std::unordered_set<std::uint32_t> groupsWithTrees_;
-    std::unordered_set<std::uint32_t> simGroups_;  // groups of Sims' own types
+    // Groups of Sims' own types, each with the GUID of the template it was made from (OBJD 0x46-0x47).
+    std::unordered_map<std::uint32_t, std::uint32_t> simGroups_;
     // The group a type's own trees, constants and object functions are read from: its own, or for a
-    // Sim whose character file carries no trees, the template person's, as the game does.
+    // Sim whose character file carries no trees, the template it was made from, as the game does.
+    // A pet uses its species template. TemplatePerson stands in when that template has no trees.
     std::uint32_t privateCodeGroup(std::uint32_t group);
     const std::vector<std::string>& strings(std::uint32_t type, std::uint32_t group, std::uint16_t instance,
                                            bool descriptions = false);
