@@ -1373,9 +1373,10 @@ void LotLife::update(double ms, ts2::scene::Scene& scene) {
         frameTicksMs_ = taken();
         watchMs_ += frameTicksMs_;
     }
-    // Drawn at the speed clock's time, which runs within about a tick of the ticks: never behind the
-    // last tick and never past the next.
-    leadMs_ = std::clamp(static_cast<double>(pacer_.owedMs()), 0.0, LotSimulation::kNormalTickMs);
+    // Drawn at the speed clock's time, as the game plays clips by that clock. Ticks often run several
+    // behind it, so capping the lead at a tick would stall the drawing and make walks stutter. Never
+    // behind the last tick, as clips here are timed from the tick that started them.
+    leadMs_ = std::max(0.0, static_cast<double>(pacer_.owedMs()));
     if (leadMs_ > 0) {
         sim_->tellAnimationEvents(sim_->world().clockMs() + leadMs_);
     }
