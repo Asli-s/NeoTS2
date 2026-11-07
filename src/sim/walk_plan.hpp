@@ -4,6 +4,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ts2::sim {
@@ -146,6 +147,20 @@ constexpr float kWalkFadeMs = 233.33f;
 float walkFadeOutMs(const WalkPlan& plan);
 // The walk's weight `ms` after it started (0.001 to 1, as the game's fades start and end).
 float walkWeight(const WalkPlan& plan, float ms);
+
+// When a walk begun at `nowMs` starts, given the last walk's fade-out start and play end (clock
+// ms), and whether it carries that walk's foot. A walk begun within 140 ms of the last one's
+// fade-out start starts 70 ms after it. Otherwise one begun within 140 ms of the last one's play end
+// starts 70 ms before that end when it is still ahead. A short walk (see isShortWalk) skips the
+// first window and uses 40 ms for the second. Until its start a walk holds its first frame.
+struct WalkStart {
+    double ms = 0;
+    bool carriesFoot = false;
+};
+WalkStart walkStart(double nowMs, double lastFadeOutMs, double lastPlayEndMs, bool shortWalk);
+// Whether a walk along `points` from (x, y) is short: some length, 0.75 tiles at most, ending 0.5
+// tiles or less from where it starts.
+bool isShortWalk(const std::vector<std::pair<float, float>>& points, float x, float y);
 
 // An interrupted walk that moved settles once its clips have faded: the pose the Sim is in fades
 // out over kSettlePoseMs, and the walk set's walk pose (a clip with no length) plays for

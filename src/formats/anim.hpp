@@ -83,11 +83,22 @@ struct Event {
 };
 constexpr std::uint16_t kSimAnticsEvent = 1005;
 
+// An effect (event type 8) a clip starts or stops, by the keys in its text. Bones and names are as the clip
+// states them. `op` is softStart, hardStart, softStop or hardStop.
+struct EffectEvent {
+    std::string effect, bone, op;
+};
+constexpr std::uint16_t kEffectEvent = 8;
+
+// The effect an event names, nullopt for other events and ones with no name.
+std::optional<EffectEvent> effectEvent(const Event& event);
+
 // The N of a SimAntics event's "event=N" line, or nullopt for other events.
 std::optional<int> simAnticsEventId(const Event& event);
 
 // An animation (cAnimResourceConst, the game's memory image of it): the skeleton it is made for,
-// its channels, IK chains and events. Only the first target (the skeleton) is kept.
+// its channels, IK chains and events (from its first target, the skeleton, unless that drives morphs),
+// and its morph and eye targets.
 struct Animation {
     std::string name;
     std::string skeleton;
@@ -115,10 +126,24 @@ struct Animation {
     // The skeleton stretch the clip was made for, as its header states: 1 for adults, the teens'
     // 0.94 for teen clips.
     float bodyStretch = 1;
+    // The root's height the game fits the clip to another body size by (see scene::PlaceFit), as its
+    // header states: about 0.93 in adult clips, 0.60 in child ones.
+    float rootHeight = 0;
     std::vector<Channel> channels;
     std::vector<IkChain> chains;
     std::vector<Event> events;
+    // The morph and eye targets it drives. A morph target (type 7) names a model's blend group
+    // ("faceblends", "*" for any), its channels the morphs they weigh, one value each. Weights can be
+    // negative or above 1. An eye target (type 9, "*") moves a face's eyes: "eyedirection" (two
+    // values), "l_eyestretch" and "r_eyestretch".
+    struct MorphTarget {
+        std::uint16_t type = 0;
+        std::string group;
+        std::vector<Channel> channels;
+    };
+    std::vector<MorphTarget> morphTargets;
 };
+constexpr std::uint16_t kMorphTargetType = 7, kEyeTargetType = 9;
 
 Animation parse(std::span<const std::uint8_t> data);
 

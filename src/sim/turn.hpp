@@ -115,6 +115,8 @@ using LocoClipLookup = std::function<std::optional<LocoClip>(const std::string& 
 
 constexpr std::uint16_t kPoseCategory = 16, kStartCategory = 96, kStopCategory = 112, kStepCategory = 144,
                         kStepInPlaceCategory = 160, kLoopCategory = 176;
+// Each walk style's loops have their own category, 16 on from the style before (style 1's are 192).
+constexpr std::uint16_t kLoopStyleStep = 16;
 
 // A Turn Body Towards in progress (which instruction runs it, and its first steps).
 struct Turning {

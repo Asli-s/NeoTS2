@@ -1,11 +1,14 @@
 #pragma once
 
 #include "formats/anim.hpp"
+#include "formats/scenegraph.hpp"
 #include "scene/limb_ik.hpp"
 #include "scene/scene.hpp"
 
 #include <array>
+#include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <span>
@@ -32,7 +35,13 @@ struct Rig {
         // The axis (0 x, 1 y, 2 z) a clip's own heading turns the joint about (see turnedPlace), -1 for
         // none, as for joints without bone data. Only the root and the limb controls have one.
         int turnAxis = -1;
+        // How the body stretch sizes the joint's rest translation, from its bone data: one axis
+        // (0 x, 1 y, 2 z), kStretchAll or kStretchNone. Y without bone data.
+        int stretchAxis = 1;
+        // How much of the stretch the joint takes (1 all of it). The neck and head take a quarter.
+        float stretchWeight = 1;
     };
+    static constexpr int kStretchNone = 3, kStretchAll = 4;
     std::vector<Node> nodes;
     float stretch = 1;  // how much longer its bones are than the skeleton's own (see stretched)
 
@@ -43,17 +52,49 @@ struct Rig {
 // A skeleton's rig, from its model (e.g. "auskel"). Empty when the model is missing or unreadable.
 Rig loadRig(Assets& assets, const std::string& skeleton);
 
-// The rig with every joint's rest translation times `stretch`, rotations kept: how the game sizes a
-// Sim's skeleton by its age data's stretch (teens are the adult skeleton at 0.94).
+// The rig sized to a body stretch of `stretch`, rotations kept: how the game sizes a Sim's skeleton
+// by its age data's stretch (teens are the adult skeleton at 0.94). Each joint's rest translation is
+// scaled on its stretch axis by its weighted share of the change from the rig's present stretch:
+// ((stretch - 1) x weight + 1) / ((present - 1) x weight + 1).
 Rig stretched(Rig rig, float stretch);
 
-// Fits a clip made for one body size to `rig`'s (stretched) skeleton. A joint's translation moves
-// by its rest place's change between the two sizes (rest x (rig stretch - clip stretch)), so the
-// clip's moves keep their size: a teen's hips stand lower by as much as their rest pose does, and
-// a teen climbing a straight stair still rises a full storey, as in the game. Additive channels and
-// channels of joints the rig lacks are scaled by the stretch over the clip's instead.
-// Teens play adult clips this way.
-void fitToStretch(anim::Animation& clip, const Rig& rig);
+// One entry of a model's "bone_adjust" lists: the rest place a worn part gives a skeleton joint
+// (its surface targets, grips or hair joints), each value only when the entry has it.
+struct JointAdjust {
+    std::string joint;  // the joint's name, matched exactly
+    std::optional<std::array<float, 3>> translation;
+    std::optional<std::array<float, 4>> rotation;  // quaternion x, y, z, w
+};
+
+// The model's bone_adjust entries, in file order. Entries without a joint name or with values that
+// aren't finite numbers are left out.
+std::vector<JointAdjust> jointAdjusts(const std::vector<scenegraph::DataValue>& dataLists);
+
+// Sets each entry's values on the first joint of `rig` with its name. Entries naming no joint of
+// the rig change nothing. Later entries win, so parts are applied in the order the game attaches
+// them.
+void adjustJoints(Rig& rig, std::span<const JointAdjust> adjusts);
+
+// Gives the upper arms ("l_upperarm", "r_upperarm") the y stretch axis. The game does this for teen
+// humans before stretching, so their arms shorten with the body although the skeleton's bone data
+// leaves them unstretched.
+void stretchTeenArms(Rig& rig);
+
+// A joint's rest translation when its rig, now at `rig.stretch`, is sized to `stretch` instead.
+std::array<float, 3> stretchedPlace(const Rig& rig, const Rig::Node& node, float stretch);
+
+// How a clip made for one body size moves a joint on a skeleton of another: the game fits each
+// sampled translation on the joint's stretch axis by factor = skeleton stretch / ((clip stretch - 1)
+// x weight + 1). A value of the same sign as `height` moves by (factor - 1) x height, any other is
+// scaled by the factor. Only root_trans has a height (its clip's root height), so a teen's root stands
+// lower by the same amount all through a climb. Joints marked unstretched, or stretched on all three
+// axes, are left as the clip has them.
+struct PlaceFit {
+    int axis = -1;  // -1: the joint's places are kept
+    float factor = 1;
+    float height = -1;
+};
+std::array<float, 3> fittedPlace(const PlaceFit& fit, std::array<float, 3> t);
 
 // An animation bound to a rig: per node, the channel that rotates it and the one that moves it
 // (-1 for none, the last when an animation has more than one), and the limbs it reaches with IK.
@@ -63,6 +104,7 @@ void fitToStretch(anim::Animation& clip, const Rig& rig);
 struct RigAnimation {
     std::shared_ptr<const anim::Animation> animation;
     std::vector<int> rotation, translation;
+    std::vector<PlaceFit> placeFits;  // per node, for its translation channel (see PlaceFit)
     std::vector<LimbChain> limbs;
     // Per IK chain of the animation (anim::Animation::chains), the scalar channel giving its limb
     // weight (IkChain::extra), -1 for none.
@@ -70,6 +112,8 @@ struct RigAnimation {
     bool mirrored = false;
 };
 RigAnimation bindAnimation(const Rig& rig, std::shared_ptr<const anim::Animation> animation, bool mirrored = false);
+// The fit of node `node`'s translation channel in `animation`, none when it has no fit for it.
+PlaceFit placeFitAt(const RigAnimation& animation, std::size_t node);
 
 // The factor on a clip's weight for one of its joint channels at `ms`. A channel tagged with an IK
 // chain (anim::Channel::chain) gives way to the chain's solve: 1 minus the chain's limb weight, or
@@ -140,6 +184,22 @@ struct HeldJoint {
     std::array<float, 4> rotation{0, 0, 0, 1};
 };
 
+// Which morph of a mesh each morph channel of a clip weighs (see mixMorphWeights), found once per
+// mesh (by its index in the scene) and clip. Each entry holds its clip, so its key stays its own,
+// and the mesh's morphs it was found for, so it is found again for another mesh at that index.
+struct MorphBindings {
+    struct Binding {
+        std::uint16_t target = 0, channel = 0;
+        std::uint8_t morph = 0;  // an index into Mesh::morphs
+    };
+    struct Entry {
+        std::shared_ptr<const anim::Animation> animation;
+        std::vector<MorphName> morphs;
+        std::vector<Binding> bound;
+    };
+    std::map<std::pair<int, const anim::Animation*>, Entry> entries;
+};
+
 // Poses every actor of a scene at `seconds`, each animation looping from its start: the joint
 // matrices of each skinned instance and the place of each skinned and held instance, by instance,
 // and each Sim actor's rig nodes in its model's space, by actor.
@@ -160,6 +220,12 @@ struct ScenePose {
     std::unordered_map<std::uint32_t, Transform> drawnAt;
     // The rig each actor was last posed with, by object, so a pose kept from another rig is dropped.
     std::unordered_map<std::uint32_t, const Rig*> heldRig;
+    // Each skinned instance's morph weights (by Mesh::morphs), by instance. Kept between calls, as a
+    // morph no clip weighs keeps its weight.
+    std::unordered_map<std::size_t, std::vector<float>> morphs;
+    // Each instance with eyes' eye values (see mixEyes), by instance, kept the same way.
+    std::unordered_map<std::size_t, std::array<float, 4>> eyes;
+    MorphBindings morphBindings;  // kept between calls
 };
 void poseActors(const Scene& scene, double seconds, ScenePose& out);
 

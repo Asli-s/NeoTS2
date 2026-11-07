@@ -13,6 +13,7 @@
 #include "sim/turn.hpp"
 #include "sim/walk_path.hpp"
 #include "sim/walk_plan.hpp"
+#include <limits>
 #include <map>
 #include <random>
 
@@ -1460,6 +1461,39 @@ void walksArePlannedAsTheGamePlansThem() {
 // The game's picker chooses a turning stop by its turn and the foot it begins on: the clips that
 // turn that way on that foot, else the ones beginning on the other foot that turn the other way,
 // mirrored. A straight stop has no other-foot clips, so it is mirrored for the other foot.
+// A walk begun soon after the last one starts by that walk's end, as the game times it. One begun a
+// few ms after the last walk's fade-out start starts about 65 ms ahead of the clock.
+void walksBegunSoonStartByTheLastWalk() {
+    using ts2::sim::walkStart;
+    const double fadeOut = 10000, playEnd = 10117;
+    // Within 140 ms of the fade-out start: 70 ms after it, which can be before now.
+    auto s = walkStart(10005, fadeOut, playEnd, false);
+    CHECK(s.ms == 10070 && s.carriesFoot);
+    s = walkStart(10100, fadeOut, playEnd, false);
+    CHECK(s.ms == 10070 && s.carriesFoot);
+    // Past that window but within 140 ms of the play end: now, or 70 ms before the end still ahead.
+    s = walkStart(10200, fadeOut - 100, playEnd, false);
+    CHECK(s.ms == 10200 && s.carriesFoot);
+    s = walkStart(10000, fadeOut - 200, playEnd, false);
+    CHECK(s.ms == 10047 && s.carriesFoot);
+    s = walkStart(10300, fadeOut, playEnd, false);
+    CHECK(s.ms == 10300 && !s.carriesFoot);
+    // A short walk skips the first window and uses 40 ms for the second.
+    s = walkStart(10005, fadeOut, playEnd, true);
+    CHECK(s.ms == 10005 && !s.carriesFoot);
+    s = walkStart(10090, fadeOut, playEnd, true);
+    CHECK(s.ms == 10097 && s.carriesFoot);
+    s = walkStart(10005, fadeOut, std::numeric_limits<double>::quiet_NaN(), false);
+    CHECK(s.ms == 10005 && !s.carriesFoot);
+    // Short: some length, 0.75 at most, ending within 0.5 of the start.
+    using P = std::vector<std::pair<float, float>>;
+    CHECK(ts2::sim::isShortWalk(P{{1.0f, 1.0f}, {1.4f, 1.0f}}, 1, 1));
+    CHECK(ts2::sim::isShortWalk(P{{1.0f, 1.0f}, {1.3f, 1.0f}, {1.3f, 1.3f}}, 1, 1));
+    CHECK(!ts2::sim::isShortWalk(P{{1.0f, 1.0f}, {1.6f, 1.0f}}, 1, 1));
+    CHECK(!ts2::sim::isShortWalk(P{{1.0f, 1.0f}, {1.4f, 1.0f}, {1.4f, 1.4f}}, 1, 1));
+    CHECK(!ts2::sim::isShortWalk(P{{1.0f, 1.0f}, {1.0f, 1.0f}}, 1, 1) && !ts2::sim::isShortWalk(P{{1.0f, 1.0f}}, 1, 1));
+}
+
 void turnClipsArePickedByFoot() {
     using ts2::sim::LocoClip;
     constexpr float kEighth = 0.785398f;
@@ -1780,6 +1814,7 @@ std::vector<Test> routePlanningTests() {
         {"a bone slot's facing turns with its bone", boneSlotFacingTurnsWithTheBone},
         {"snap uses the slot's bone", snapUsesTheSlotsBone},
         {"walks are planned as the game plans them", walksArePlannedAsTheGamePlansThem},
+        {"walks begun soon start by the last walk", walksBegunSoonStartByTheLastWalk},
         {"turn clips are picked by foot", turnClipsArePickedByFoot},
         {"walks told to stop soon stop at the next foot", walksToldToStopSoonStopAtTheNextFoot},
         {"steps are planned as the game plans them", stepsArePlannedAsTheGamePlansThem},

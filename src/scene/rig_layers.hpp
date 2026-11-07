@@ -57,4 +57,16 @@ void poseRigLayered(const Rig& rig, std::span<const LayeredClip> clips, std::vec
                     std::vector<HeldJoint>* held = nullptr,
                     const std::function<std::optional<HeadLook>(const HeadPlace&)>* look = nullptr);
 
+// The weights the clips give a mesh's morphs (Mesh::morphs), one per morph into `weights`. A clip's
+// morph channel weighs the morph of its name in its target's blend group ("*" any), names matched
+// whatever their case, and a channel marked constant keeps its first value. The clips mix as they do
+// on a joint, layer by layer, a clip counting only above 0.00075 of the morph. A morph no clip weighs
+// keeps the weight it had, 0 at first.
+// With `bindings`, the channels are matched to the mesh (`meshIndex` in the scene) once per clip.
+void mixMorphWeights(const Mesh& mesh, std::span<const LayeredClip> clips, std::vector<float>& weights,
+                     MorphBindings* bindings = nullptr, int meshIndex = -1);
+// The clips' eye values, mixed the same way into `eyes`: the eyes' direction (x, y) and the left and
+// right eye's stretch, from their eye channels. A value no clip drives keeps what it had.
+void mixEyes(std::span<const LayeredClip> clips, std::array<float, 4>& eyes);
+
 } // namespace ts2::scene

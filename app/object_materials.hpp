@@ -50,7 +50,11 @@ public:
     void update(ts2::sim::World& world, ts2::scene::Scene& scene);
     // The next update sends the object's materials again if scripts changed them (its instance got
     // a new mesh).
-    void showAgain(std::int16_t object) { versions_.erase(object); }
+    void showAgain(std::int16_t object) {
+        if (object >= 0 && static_cast<std::size_t>(object) < versions_.size()) {
+            versions_[static_cast<std::size_t>(object)] = 0;
+        }
+    }
     // What the last update changed: scene instance and its materials (see Renderer::setMaterials).
     const std::vector<std::pair<std::size_t, std::vector<int>>>& changed() const { return changed_; }
 
@@ -70,7 +74,8 @@ private:
     std::map<std::string, std::shared_ptr<const ts2::scene::Rig>> rigs_;  // by lower-case model name
     std::vector<ts2::scene::Transform> poseScratch_;
 
-    std::vector<int> materialsOf(const ts2::sim::SimObject& object, const ts2::scene::Mesh& mesh, ts2::scene::Scene& scene);
+    std::vector<int> materialsOf(const ts2::sim::SimObject& object, const ts2::scene::Mesh& mesh,
+                                 const std::vector<ts2::scenegraph::MaterialOverride>& saved, ts2::scene::Scene& scene);
     // The scene's material of that name, added from the game's files on first use. -1 when the
     // game has no such material.
     int material(const std::string& name, ts2::scene::Scene& scene);
@@ -83,7 +88,7 @@ private:
     ts2::scene::SceneBuilder builder_;
     ts2::scene::RigLibrary simRigs_;
     std::map<int, int> simMeshes_;                   // builder mesh -> scene mesh, for Sims
-    std::map<std::int16_t, std::uint32_t> versions_;  // per object, the materialVersion shown
+    std::vector<std::uint32_t> versions_;            // by object id, the materialVersion shown
     std::map<std::string, int> materials_;           // lower-case name -> scene material
     bool lotMaterialsKnown_ = false;                 // the lot's own materials are in materials_
     std::map<int, int> images_;                      // builder image -> scene image

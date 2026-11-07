@@ -616,6 +616,37 @@ float walkWeight(const WalkPlan& plan, float ms) {
     return kLeast + (1 - kLeast) * std::min(in, out);
 }
 
+WalkStart walkStart(double nowMs, double lastFadeOutMs, double lastPlayEndMs, bool shortWalk) {
+    constexpr double kWindowMs = 140, kShortWindowMs = 40;
+    if (!std::isfinite(nowMs) || !std::isfinite(lastFadeOutMs) || !std::isfinite(lastPlayEndMs)) {
+        return {nowMs, false};
+    }
+    if (!shortWalk && std::abs(nowMs - lastFadeOutMs) < kWindowMs) {
+        return {lastFadeOutMs + kWindowMs / 2, true};
+    }
+    const double window = shortWalk ? kShortWindowMs : kWindowMs;
+    const double d = nowMs - lastPlayEndMs;
+    if (std::abs(d) < window) {
+        return {d < 0 ? lastPlayEndMs - window / 2 : nowMs, true};
+    }
+    return {nowMs, false};
+}
+
+bool isShortWalk(const std::vector<std::pair<float, float>>& points, float x, float y) {
+    constexpr float kShortLength = 0.75f, kMaxReach = 0.5f;
+    if (points.size() < 2) {
+        return false;
+    }
+    float length = 0, px = x, py = y;
+    for (std::size_t i = 1; i < points.size(); ++i) {
+        length += std::hypot(points[i].first - px, points[i].second - py);
+        px = points[i].first;
+        py = points[i].second;
+    }
+    const float reach = std::hypot(points.back().first - x, points.back().second - y);
+    return length > 0 && length <= kShortLength && reach <= kMaxReach;
+}
+
 float settleWalkPoseFadeMs() {
     // Fades that don't fit in a clip's play are cut by the same share to just under it.
     constexpr float kJustUnder = 0.9999f;

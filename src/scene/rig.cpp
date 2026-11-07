@@ -130,6 +130,12 @@ Rig loadRig(Assets& assets, const std::string& skeleton) {
                 // 3 is the game's value for none.
                 const std::uint32_t turn = tree.nodes[e].boneData->words[0];
                 n.turnAxis = turn < 3 ? static_cast<int>(turn) : -1;
+                // A stretch axis above 4 would make the game scale a value outside the translation.
+                // It is taken as none here, as is a weight that isn't a number.
+                const std::uint32_t stretchAxis = tree.nodes[e].boneData->words[2];
+                const float weight = tree.nodes[e].boneData->weight;
+                n.stretchAxis = stretchAxis <= Rig::kStretchAll ? static_cast<int>(stretchAxis) : Rig::kStretchNone;
+                n.stretchWeight = std::isfinite(weight) ? weight : 0;
             }
         }
         rig.nodes.push_back(std::move(n));
@@ -144,47 +150,122 @@ Rig loadRig(Assets& assets, const std::string& skeleton) {
     return rig;
 }
 
-Rig stretched(Rig rig, float stretch) {
-    for (auto& node : rig.nodes) {
-        if (!node.name.empty()) {
-            for (auto& t : node.translation) {
-                t *= stretch;
+std::array<float, 3> stretchedPlace(const Rig& rig, const Rig::Node& node, float stretch) {
+    auto t = node.translation;
+    const float w = node.stretchWeight;
+    const float factor = ((stretch - 1) * w + 1) / ((rig.stretch - 1) * w + 1);
+    if (node.name.empty() || !std::isfinite(factor)) {
+        return t;
+    }
+    if (node.stretchAxis == Rig::kStretchAll) {
+        for (auto& v : t) {
+            v *= factor;
+        }
+    } else if (node.stretchAxis >= 0 && node.stretchAxis < 3) {
+        t[static_cast<std::size_t>(node.stretchAxis)] *= factor;
+    }
+    return t;
+}
+
+std::vector<JointAdjust> jointAdjusts(const std::vector<scenegraph::DataValue>& dataLists) {
+    using Type = scenegraph::DataValue::Type;
+    const auto finite = [](const std::vector<float>& v) {
+        return std::all_of(v.begin(), v.end(), [](float f) { return std::isfinite(f); });
+    };
+    std::vector<JointAdjust> out;
+    for (const auto& list : dataLists) {
+        if (list.name != "bone_adjust" || list.type != Type::List) {
+            continue;
+        }
+        const auto* tag = list.find("bone_adjust_bone_tag");
+        if (tag == nullptr || tag->type != Type::String || tag->text.empty()) {
+            continue;
+        }
+        JointAdjust a;
+        a.joint = tag->text;
+        const auto* t = list.find("bone_adjust_translation");
+        const auto* q = list.find("bone_adjust_rotation");
+        if (t && t->type == Type::Vector && t->floats.size() == 3) {
+            if (!finite(t->floats)) {
+                continue;
             }
+            a.translation = std::array<float, 3>{t->floats[0], t->floats[1], t->floats[2]};
+        }
+        if (q && q->type == Type::Rotation && q->floats.size() == 4) {
+            if (!finite(q->floats)) {
+                continue;
+            }
+            a.rotation = std::array<float, 4>{q->floats[0], q->floats[1], q->floats[2], q->floats[3]};
+        }
+        out.push_back(std::move(a));
+    }
+    return out;
+}
+
+void adjustJoints(Rig& rig, std::span<const JointAdjust> adjusts) {
+    for (const auto& a : adjusts) {
+        const auto it = std::find_if(rig.nodes.begin(), rig.nodes.end(), [&](const Rig::Node& n) { return n.name == a.joint; });
+        if (it == rig.nodes.end()) {
+            continue;
+        }
+        if (a.translation) {
+            it->translation = *a.translation;
+        }
+        if (a.rotation) {
+            it->rotation = *a.rotation;
         }
     }
-    rig.stretch *= stretch;
+}
+
+void stretchTeenArms(Rig& rig) {
+    for (const char* name : {"l_upperarm", "r_upperarm"}) {
+        const int node = rig.find(name);
+        if (node >= 0) {
+            rig.nodes[static_cast<std::size_t>(node)].stretchAxis = 1;
+        }
+    }
+}
+
+Rig stretched(Rig rig, float stretch) {
+    if (!(stretch > 0) || !std::isfinite(stretch)) {
+        return rig;
+    }
+    for (auto& node : rig.nodes) {
+        node.translation = stretchedPlace(rig, node, stretch);
+    }
+    rig.stretch = stretch;
     return rig;
 }
 
-void fitToStretch(anim::Animation& clip, const Rig& rig) {
-    const float factor = rig.stretch / clip.bodyStretch;
-    if (!std::isfinite(factor) || std::abs(factor - 1) < 1e-4f || !(rig.stretch > 0)) {
-        return;
+std::array<float, 3> fittedPlace(const PlaceFit& fit, std::array<float, 3> t) {
+    if (fit.axis < 0 || fit.axis > 2) {
+        return t;
     }
-    for (auto& channel : clip.channels) {
-        if (channel.kind() != anim::ChannelKind::Translation) {
-            continue;
-        }
-        // A joint's move keeps its size: only the joint's rest place changes with the body.
-        const int node = rig.find(lower(channel.name));
-        if (node >= 0 && !channel.additive() && channel.components.size() == 3) {
-            const auto& rest = rig.nodes[static_cast<std::size_t>(node)].translation;
-            for (std::size_t k = 0; k < 3; ++k) {
-                const float shift = rest[k] / rig.stretch * (rig.stretch - clip.bodyStretch);
-                for (auto& key : channel.components[k].keys) {
-                    key.value += shift;
-                }
-            }
-            continue;
-        }
-        for (auto& component : channel.components) {
-            for (auto& key : component.keys) {
-                key.value *= factor;
-                key.in *= factor;
-                key.out *= factor;
-            }
-        }
+    float& v = t[static_cast<std::size_t>(fit.axis)];
+    v = fit.height * v > 0 ? v + (fit.factor - 1) * fit.height : v * fit.factor;
+    return t;
+}
+
+PlaceFit placeFitAt(const RigAnimation& animation, std::size_t node) {
+    return node < animation.placeFits.size() ? animation.placeFits[node] : PlaceFit{};
+}
+
+// The fit of a joint's translation channel when `clip` plays on `rig` (see PlaceFit).
+PlaceFit placeFitOf(const Rig& rig, const Rig::Node& node, const anim::Animation& clip) {
+    PlaceFit fit;
+    if (node.stretchAxis < 0 || node.stretchAxis > 2) {
+        return fit;
     }
+    const float factor = rig.stretch / ((clip.bodyStretch - 1) * node.stretchWeight + 1);
+    if (!std::isfinite(factor)) {
+        return fit;
+    }
+    fit.axis = node.stretchAxis;
+    fit.factor = factor;
+    if (node.name == "root_trans") {
+        fit.height = clip.rootHeight;
+    }
+    return fit;
 }
 
 std::string mirroredJointName(const std::string& name) {
@@ -235,14 +316,10 @@ std::array<float, 3> turnedPlace(const std::array<float, 3>& t, int axis, float 
 }
 
 RigAnimation bindAnimation(const Rig& rig, std::shared_ptr<const anim::Animation> animation, bool mirrored) {
-    if (animation && std::abs(rig.stretch / animation->bodyStretch - 1) >= 1e-4f) {
-        auto fitted = std::make_shared<anim::Animation>(*animation);
-        fitToStretch(*fitted, rig);
-        animation = std::move(fitted);
-    }
     RigAnimation r;
     r.rotation.assign(rig.nodes.size(), -1);
     r.translation.assign(rig.nodes.size(), -1);
+    r.placeFits.assign(rig.nodes.size(), PlaceFit{});
     if (animation) {
         for (std::size_t c = 0; c < animation->channels.size(); ++c) {
             const auto& channel = animation->channels[c];
@@ -257,6 +334,7 @@ RigAnimation bindAnimation(const Rig& rig, std::shared_ptr<const anim::Animation
                 r.rotation[static_cast<std::size_t>(node)] = static_cast<int>(c);
             } else if (channel.kind() == anim::ChannelKind::Translation) {
                 r.translation[static_cast<std::size_t>(node)] = static_cast<int>(c);
+                r.placeFits[static_cast<std::size_t>(node)] = placeFitOf(rig, rig.nodes[static_cast<std::size_t>(node)], *animation);
             }
         }
     }
@@ -306,7 +384,7 @@ void poseRig(const Rig& rig, const RigAnimation* animation, float ms, std::vecto
         if (channels) {
             if (const int c = animation->translation[i]; c >= 0 && channelShare(*animation, c, ms) >= 0) {
                 const auto& k = (*channels)[static_cast<std::size_t>(c)].components;
-                t = {k[0].sample(ms), k[1].sample(ms), k[2].sample(ms)};
+                t = fittedPlace(placeFitAt(*animation, i), {k[0].sample(ms), k[1].sample(ms), k[2].sample(ms)});
                 if (animation->mirrored) {
                     t = mirroredPlace(t, node.mirrorAxis);
                 }
@@ -520,6 +598,27 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
     thread_local std::vector<Transform> world;
     thread_local std::vector<LayeredClip> clips;
     thread_local std::vector<const RigAnimation*> playing;
+    // Each posed instance's morph weights as its clips give them now, from what they last were. An
+    // instance no longer posed gives up its weights.
+    std::unordered_map<std::size_t, std::vector<float>> morphs;
+    std::unordered_map<std::size_t, std::array<float, 4>> eyes;
+    const auto weighMorphs = [&](std::size_t instance, const Mesh& mesh) {
+        if (std::any_of(mesh.primitives.begin(), mesh.primitives.end(), [](const Primitive& p) { return !p.eyeUvs.empty(); })) {
+            auto& values = eyes.try_emplace(instance).first->second;
+            if (const auto was = out.eyes.find(instance); was != out.eyes.end()) {
+                values = was->second;
+            }
+            mixEyes(clips, values);
+        }
+        if (mesh.morphs.empty()) {
+            return;
+        }
+        auto& weights = morphs[instance];
+        if (const auto was = out.morphs.find(instance); was != out.morphs.end()) {
+            weights = std::move(was->second);
+        }
+        mixMorphWeights(mesh, clips, weights, &out.morphBindings, scene.instances[instance].mesh);
+    };
     // A Sim's bones as last posed: this call's pose for a Sim posed before the one asking, else the
     // last call's, each at the place it was posed at. A lot object's bones as this call posed them, as
     // objects are posed before Sims (a fridge's door handle), or as its clip placed them (a dining
@@ -632,6 +731,7 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
             }
             auto& joints = jointsFor(s.instance);
             skinMatrices(scene.meshes[static_cast<std::size_t>(mesh)], s.nodes, *actor.rig, playing, world, joints, true);
+            weighMorphs(s.instance, scene.meshes[static_cast<std::size_t>(mesh)]);
             // One a Sim holds is placed at the Sim's hand below.
             if (!isInHand(s.instance)) {
                 out.places.emplace_back(s.instance, actor.place);
@@ -714,6 +814,9 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
                 poseRigLayered(*actor.rig, clips, world);
             }
         } else {
+            // No clip weighs its morphs or eyes. The list still holds the last actor's clips, which
+            // may belong to a lot no longer shown.
+            clips.clear();
             playing.assign(1, actor.animation.get());
         }
         float ms = 0;
@@ -733,6 +836,7 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
             }
             auto& joints = jointsFor(s.instance);
             skinMatrices(scene.meshes[static_cast<std::size_t>(mesh)], s.nodes, *actor.rig, playing, world, joints);
+            weighMorphs(s.instance, scene.meshes[static_cast<std::size_t>(mesh)]);
             // The body goes where the actor stands now (it walks).
             out.places.emplace_back(s.instance, place);
         }
@@ -758,6 +862,8 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
     out.joints.resize(skinned);
     out.held = std::move(held);
     out.frozen = std::move(frozen);
+    out.morphs = std::move(morphs);
+    out.eyes = std::move(eyes);
     out.carried = std::move(carried);
     out.drawnAt = std::move(drawnAt);
 }

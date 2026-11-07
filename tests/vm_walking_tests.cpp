@@ -702,6 +702,12 @@ void pushedWalkSetsWalkWithTheirClips() {
     CHECK(!ts2::sim::walkSetTurnClips(elder, ts2::sim::kStartCategory, 0, kPi / 2));
     CHECK(ts2::sim::walkSetClip(elder, ts2::sim::kLoopCategory)->name == "a-female-swimSlowShort");
     CHECK(ts2::sim::walkSetLongClip(elder, ts2::sim::kLoopCategory)->name == "a-female-swimSlow");
+    // Another walk style's loops are found by that style's category (style 1's at 192).
+    const std::vector<LocoClip> styled{{"walk-youngAdult", 1000, 1, 0, 0, 0.001f, 0, 176}, {"walkShort-alt1-youngAdult", 800, 0.8f, 0, 0, 0.001f, 0, 192},
+                                       {"walk-alt1-youngAdult", 1000, 1, 0, 0, 0.001f, 0, 192}};
+    const auto style1 = static_cast<std::uint16_t>(ts2::sim::kLoopCategory + ts2::sim::kLoopStyleStep);
+    CHECK(ts2::sim::walkSetClip(styled, style1)->name == "walkShort-alt1-youngAdult" &&
+          ts2::sim::walkSetLongClip(styled, style1)->name == "walk-alt1-youngAdult");
     CHECK(ts2::sim::settlePose(&swim, 30, 1, lookup) == "a-swimPose" && ts2::sim::settlePose(nullptr, 30, 1, lookup) == "a-walkPose");
     // The bracketed name stands in for one that finds no clip, and an uncategorized clip doesn't count.
     const auto inBrackets = ts2::sim::walkSetClips({"missing(swimPose)@1.5,uncategorized", "", ""}, 30, 2, lookup);
@@ -1070,7 +1076,7 @@ void blockedRoutesAskAStandingSimToMove() {
         w.start();
         CHECK(w.last == Outcome::Sleeping && w.plansOfA == 1);
         // A foot left by an earlier walk's stop isn't carried past a block: the next walk begins on 0.5.
-        w.a->lastWalkEnd = ts2::sim::SimObject::WalkEnd{w.world.clockMs(), 0.0f};
+        w.a->lastWalkEnd = ts2::sim::SimObject::WalkEnd{w.world.clockMs(), w.world.clockMs(), 0.0f};
         CHECK(w.tickUntil([&] { return w.a->personData[0xF3] == 1; }));
         const std::uint64_t askedAt = w.world.ticks();
         const float d = std::hypot(w.a->x / 65536.0f - 5.0f, w.a->y / 65536.0f - 6.0f);

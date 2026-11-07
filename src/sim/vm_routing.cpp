@@ -7,6 +7,14 @@ namespace {
 
 float tiles(std::int32_t fixed) { return static_cast<float>(fixed) / 65536.0f; }
 
+// When my walk begun at `now` starts, by my last walk's end (see walkStart).
+WalkStart startAfterLastWalk(const SimObject& sim, const Walking& walk, double now) {
+    if (!sim.lastWalkEnd) {
+        return {now, false};
+    }
+    return walkStart(now, sim.lastWalkEnd->fadeOutMs, sim.lastWalkEnd->playEndMs, isShortWalk(walk.route.points, walk.fromX, walk.fromY));
+}
+
 } // namespace
 
 // Operands:
@@ -332,11 +340,16 @@ Execution::WalkStep Execution::goToRoutingSlot(const bhav::Instruction& in, Fram
         walk.startMs = now;
         walk.started = true;
         planWalkFor(sim, walk);
+        const WalkStart start = startAfterLastWalk(sim, walk, now);
+        sim.lastWalkEnd.reset();
         // A turn too small for a clip is made at once.
         if (walk.turn && turnOnTheSpot(sim, walk, now)) {
             walk.turn.reset();
         }
+        // A walk begun soon after my last one starts by its end. One that turns on the spot first
+        // starts once the turn is over.
         if (!walk.turn) {
+            walk.startMs = start.ms;
             followWalk(sim, walk, 0, now);
         }
         return WalkStep{WalkStep::Kind::Wait};
@@ -657,11 +670,11 @@ bool Execution::walkTo(SimObject& sim, Walking& walk, double now, std::int16_t& 
         followWalk(sim, walk, walked, now);
         return false;
     }
-    // The foot my stop clip began on stays for a walk begun right after (see planWalkFor).
-    sim.lastWalkEnd.reset();
+    // Its timing and the foot my stop clip began on stay for a walk begun right after (see walkStart).
+    sim.lastWalkEnd = SimObject::WalkEnd{walk.startMs + walkFadeOutMs(walk.plan), walk.startMs + walkMs(walk.plan)};
     if (!walk.plan.segments.empty() && walk.plan.segments.back().kind == WalkSegment::Kind::Stop) {
         const LocoPair& stop = walk.plan.segments.back().clips;
-        sim.lastWalkEnd = SimObject::WalkEnd{now, stop.mirrored ? std::fmod(stop.clip.loopPhase + 0.5f, 1.0f) : stop.clip.loopPhase};
+        sim.lastWalkEnd->foot = stop.mirrored ? std::fmod(stop.clip.loopPhase + 0.5f, 1.0f) : stop.clip.loopPhase;
     }
     // A walk cut short to stop soon ends where its stop does, facing along the path.
     if (!walk.stopsSoon) {
@@ -698,11 +711,17 @@ bool Execution::turnOnTheSpot(SimObject& sim, Walking& walk, double now) {
         play.lengthMs = *length / kTurnInPlaceSpeed;
         play.flipped = clip->mirrored;
         play.baseHeading = turn.from;
+        // It fades in and out over the walk's fades, cut to fit a short turn.
+        const AnimateFades fades = animateFades(play.lengthMs, true, true);
+        play.fades = true;
+        play.fadeInMs = fades.inMs;
+        play.fadeOutMs = fades.outMs;
         sim.animation = std::move(play);
         faceHeading(sim, turn.from);
         return false;
     }
-    if (!sim.animation || sim.animation->finished(now)) {
+    // Over as its clip starts fading out, as Turn Body Towards is. The clip fades out under what follows.
+    if (!sim.animation || sim.animation->fadingOut(now)) {
         faceHeading(sim, turn.to);
         return true;
     }
@@ -906,13 +925,12 @@ void Execution::planWalkFor(const SimObject& sim, Walking& walk) {
             }
         }
     }
-    // A walk from standing begins on foot 0.5 (see turnClipsForFoot), or, begun within 140 ms of my
-    // last walk's end in its stop clip, on the foot that stop began on. Its start is picked for that
-    // foot, and so is its stop, which is also picked for the other foot (see WalkPlanInput).
-    constexpr double kCarryFootMs = 140;
+    // A walk from standing begins on foot 0.5 (see turnClipsForFoot), or, begun soon after my last
+    // walk (see walkStart), on the foot that walk's stop began on. Its start is picked for that foot,
+    // and so is its stop, which is also picked for the other foot (see WalkPlanInput).
     float foot = 0.5f;
-    if (sim.lastWalkEnd && std::abs(world().clockMs() - sim.lastWalkEnd->ms) < kCarryFootMs) {
-        foot = sim.lastWalkEnd->foot;
+    if (sim.lastWalkEnd && sim.lastWalkEnd->foot && startAfterLastWalk(sim, walk, world().clockMs()).carriesFoot) {
+        foot = *sim.lastWalkEnd->foot;
     }
     const auto turnClips = [&](const std::optional<WalkTurnClips>& names, float foot) -> std::optional<LocoPair> {
         if (!names) {
@@ -933,22 +951,18 @@ void Execution::planWalkFor(const SimObject& sim, Walking& walk) {
     const auto loopShort = set.empty() ? locoClip(walkShortClip(stage, gender)) : walkSetClip(set, kLoopCategory);
     const auto loop = set.empty() ? locoClip(walkClip(stage, gender)) : walkSetLongClip(set, kLoopCategory);
     // The walk loop's styles by their shares (see walkStyleShares). A style the set lacks for my age
-    // counts for nothing. The walk's speed is their long loops' together. A pushed set's walk is its
-    // first loop pair alone (how the game picks among more of its loops is not known yet).
+    // counts for nothing. The walk's speed is their long loops' together. In a pushed set a style's
+    // loops are its clips of that style's category, the first the short one.
     const auto shares = walkStyleShares(sim);
     float loopSpeed = 0, counted = 0;
-    if (!set.empty() && loopShort) {
-        LoopStyle s{{*loopShort, loop, false}, 1};
-        input.loops.push_back(s);
-        loopSpeed = loop ? loop->speed : loopShort->speed;
-        counted = 1;
-    }
-    for (std::size_t style = 0; set.empty() && style < shares.size(); ++style) {
+    for (std::size_t style = 0; style < shares.size(); ++style) {
         if (style != 0 && !(shares[style] > 0)) {
             continue;
         }
         const int i = static_cast<int>(style);
-        const auto shortOne = locoClip(walkStyleClip(stage, gender, i, true)), longOne = locoClip(walkStyleClip(stage, gender, i, false));
+        const auto category = static_cast<std::uint16_t>(kLoopCategory + kLoopStyleStep * style);
+        const auto shortOne = set.empty() ? locoClip(walkStyleClip(stage, gender, i, true)) : walkSetClip(set, category);
+        const auto longOne = set.empty() ? locoClip(walkStyleClip(stage, gender, i, false)) : walkSetLongClip(set, category);
         if (!shortOne && !longOne) {
             continue;
         }

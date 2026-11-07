@@ -346,7 +346,7 @@ Mesh parseMesh(std::span<const std::uint8_t> data) {
     for (auto& e : m.elements) {
         e.count = r.u32();
         e.identity = r.u32();
-        r.u32();  // repetition
+        e.stream = r.u32();
         e.blockFormat = r.u32();
         e.setFormat = r.u32();
         const auto bytes = r.bytes(r.u32Count(1));
@@ -382,7 +382,15 @@ Mesh parseMesh(std::span<const std::uint8_t> data) {
             v = std::bit_cast<float>(r.u32());
         }
     }
-    // Blend group names, a bounding mesh and per-joint bounding hulls follow. They aren't read yet.
+    // The morphs its morph streams name (see Mesh::morphs). A bounding mesh and per-joint bounding
+    // hulls follow, which aren't read.
+    if (r.remaining() >= 4) {
+        m.morphs.resize(count(r, 2));
+        for (auto& morph : m.morphs) {
+            morph.group = r.varString();
+            morph.name = r.varString();
+        }
+    }
     return m;
 }
 

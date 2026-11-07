@@ -22,7 +22,8 @@ GpuMesh packMesh(const scene::Mesh& mesh, std::size_t materials, std::uint32_t b
         // A GPU buffer's size is 32-bit: a scene too big for that leaves out the rest of its primitives.
         constexpr std::size_t kMaxBytes = 0x7FFFFFFF;
         if ((data.vertices.size() + n * kVertexFloats) * sizeof(float) > kMaxBytes ||
-            (data.indices.size() + p.indices.size()) * sizeof(std::uint32_t) > kMaxBytes || (data.skin.size() + n * kSkinBytes) > kMaxBytes) {
+            (data.indices.size() + p.indices.size()) * sizeof(std::uint32_t) > kMaxBytes || (data.skin.size() + n * kSkinBytes) > kMaxBytes ||
+            (data.morphs.size() + n * kMorphVertexFloats) * sizeof(float) > kMaxBytes) {
             data.tooBig = true;
             continue;
         }
@@ -63,6 +64,7 @@ GpuMesh packMesh(const scene::Mesh& mesh, std::size_t materials, std::uint32_t b
         g.tangents = p.tangents.size() == n * 3 && p.uvs.size() == n * 2;
         g.source = static_cast<std::size_t>(&p - mesh.primitives.data());
         g.shadowGroup = scene::objectshadow::isShadowGroup(p.group);
+        g.alphaSort = p.alphaSort;
         g.low = {p.positions[0], p.positions[1], p.positions[2]};
         g.high = g.low;
         for (std::size_t i = 1; i < n; ++i) {
@@ -75,9 +77,37 @@ GpuMesh packMesh(const scene::Mesh& mesh, std::size_t materials, std::uint32_t b
             g.skinned = true;
             g.firstSkin = static_cast<std::uint32_t>(data.skin.size());
             data.skin.resize(data.skin.size() + n * kSkinBytes);
+            constexpr std::size_t streams = scene::Primitive::kMorphStreams;
+            const bool morphed = p.morphs.size() == n * streams && p.positionDeltas.size() == n * streams * 3 &&
+                                 p.normalDeltas.size() == n * streams * 3 && !mesh.morphs.empty();
             for (std::size_t i = 0; i < n; ++i) {
-                std::memcpy(&data.skin[g.firstSkin + i * kSkinBytes], &p.joints[i * 4], 4);
-                std::memcpy(&data.skin[g.firstSkin + i * kSkinBytes + 4], &p.weights[i * 4], 4 * sizeof(float));
+                std::uint8_t* at = &data.skin[g.firstSkin + i * kSkinBytes];
+                std::memcpy(at, &p.joints[i * 4], 4);
+                std::memcpy(at + 4, &p.weights[i * 4], 4 * sizeof(float));
+                // Only vertices a morph moves get morph data.
+                std::uint32_t morphVertex = kNoMorphVertex;
+                const bool moves = morphed && std::any_of(&p.morphs[i * streams], &p.morphs[i * streams] + streams, [&](std::uint8_t m) {
+                    return m < mesh.morphs.size();
+                });
+                if (moves && data.morphs.size() / kMorphVertexFloats < kNoMorphVertex) {
+                    morphVertex = static_cast<std::uint32_t>(data.morphs.size() / kMorphVertexFloats);
+                    for (std::size_t k = 0; k < streams; ++k) {
+                        const std::size_t s = i * streams + k;
+                        const bool used = p.morphs[s] < mesh.morphs.size();
+                        data.morphs.insert(data.morphs.end(), {used ? p.positionDeltas[s * 3] : 0.0f, used ? p.positionDeltas[s * 3 + 1] : 0.0f,
+                                                               used ? p.positionDeltas[s * 3 + 2] : 0.0f, used ? static_cast<float>(p.morphs[s]) : 0.0f});
+                    }
+                    for (std::size_t k = 0; k < streams; ++k) {
+                        const std::size_t s = i * streams + k;
+                        const bool used = p.morphs[s] < mesh.morphs.size();
+                        data.morphs.insert(data.morphs.end(), {used ? p.normalDeltas[s * 3] : 0.0f, used ? p.normalDeltas[s * 3 + 1] : 0.0f,
+                                                               used ? p.normalDeltas[s * 3 + 2] : 0.0f, 0.0f});
+                    }
+                }
+                std::memcpy(at + 4 + 4 * sizeof(float), &morphVertex, sizeof morphVertex);
+                if (p.eyeUvs.size() == n * 2) {
+                    std::memcpy(at + kSkinEyeOffset, &p.eyeUvs[i * 2], 2 * sizeof(float));
+                }
             }
         }
         const auto finite = [](const std::array<float, 3>& a) { return std::isfinite(a[0]) && std::isfinite(a[1]) && std::isfinite(a[2]); };

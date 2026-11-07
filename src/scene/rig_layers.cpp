@@ -5,7 +5,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
+#include <optional>
+#include <string_view>
 
 namespace ts2::scene {
 
@@ -297,7 +300,7 @@ void poseRigLayered(const Rig& rig, std::span<const LayeredClip> clips, std::vec
                 if (const float share = channelShare(*clip.animation, c, clip.ms); c >= 0 && share >= 0) {
                     const auto& channel = channels[static_cast<std::size_t>(c)];
                     const auto& k = channel.components;
-                    std::array<float, 3> t{k[0].sample(clip.ms), k[1].sample(clip.ms), k[2].sample(clip.ms)};
+                    std::array<float, 3> t = fittedPlace(placeFitAt(*clip.animation, i), {k[0].sample(clip.ms), k[1].sample(clip.ms), k[2].sample(clip.ms)});
                     if (clip.animation->mirrored) {
                         t = mirroredPlace(t, rig.nodes[i].mirrorAxis);
                     }
@@ -394,7 +397,7 @@ void poseRigLayered(const Rig& rig, std::span<const LayeredClip> clips, std::vec
             };
             if (const int c = channelOf(clip.animation->translation); c >= 0) {
                 const auto& k = channels[static_cast<std::size_t>(c)].components;
-                t = {k[0].sample(clip.ms), k[1].sample(clip.ms), k[2].sample(clip.ms)};
+                t = fittedPlace(placeFitAt(*clip.animation, static_cast<std::size_t>(i)), {k[0].sample(clip.ms), k[1].sample(clip.ms), k[2].sample(clip.ms)});
                 if (clip.animation->mirrored) {
                     t = mirroredPlace(t, node.mirrorAxis);
                 }
@@ -562,6 +565,166 @@ void poseRigLayered(const Rig& rig, std::span<const LayeredClip> clips, std::vec
             if (held != nullptr && held->size() == rig.nodes.size()) {
                 (*held)[h] = finiteOr(heldOf(local[h]), rig.nodes[h]);
             }
+        }
+    }
+}
+
+namespace {
+
+bool sameName(std::string_view a, std::string_view b) {
+    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+               return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
+           });
+}
+
+// One clip's value for a morph or an eye value.
+struct MixPart {
+    int layer;
+    float weight, value;
+};
+
+// The clips' values mixed as on a joint, layer by layer from the top, each counting only above
+// 0.00075. None when none counts.
+std::optional<float> mixLayered(std::vector<MixPart>& list) {
+    constexpr float kLeast = 0.00075f;  // the game's mixer leaves out a smaller share
+    std::stable_sort(list.begin(), list.end(), [](const MixPart& x, const MixPart& y) { return x.layer > y.layer; });
+    float sum = 0, total = 0, left = 1;
+    for (std::size_t i = 0; i < list.size() && left > 0;) {
+        const int layer = list[i].layer;
+        float layerWeight = 0;
+        std::size_t end = i;
+        for (; end < list.size() && list[end].layer == layer; ++end) {
+            layerWeight += list[end].weight;
+        }
+        const float scale = layerWeight >= 1 ? left / layerWeight : left;
+        for (; i < end; ++i) {
+            const float w = scale * list[i].weight;
+            if (w > kLeast) {
+                sum += w * list[i].value;
+                total += w;
+            }
+        }
+        left *= 1 - std::min(layerWeight, 1.0f);
+    }
+    return total > 0 ? std::optional<float>(sum / total) : std::nullopt;
+}
+
+// A channel's value of component `component` at `ms`: a constant channel keeps its first.
+float channelValue(const anim::Channel& channel, std::size_t component, float ms) {
+    constexpr std::uint32_t kConstant = 0x10000;
+    return channel.components[component].sample((channel.flags & kConstant) != 0 ? 0.0f : ms);
+}
+
+} // namespace
+
+namespace {
+
+// The morph channels of `a` that weigh a morph of `mesh`, each with that morph.
+std::vector<MorphBindings::Binding> bindMorphs(const Mesh& mesh, const anim::Animation& a) {
+    std::vector<MorphBindings::Binding> bound;
+    constexpr std::size_t kMost = 0xFFFF;
+    for (std::size_t t = 0; t < a.morphTargets.size() && t <= kMost; ++t) {
+        const auto& target = a.morphTargets[t];
+        if (target.type != anim::kMorphTargetType) {
+            continue;
+        }
+        const bool anyGroup = target.group == "*";
+        for (std::size_t c = 0; c < target.channels.size() && c <= kMost; ++c) {
+            const auto& channel = target.channels[c];
+            if (channel.additive() || channel.components.empty()) {
+                continue;
+            }
+            for (std::size_t m = 0; m < mesh.morphs.size() && m < Primitive::kNoMorph; ++m) {
+                if ((anyGroup || sameName(target.group, mesh.morphs[m].group)) && sameName(channel.name, mesh.morphs[m].name)) {
+                    bound.push_back({static_cast<std::uint16_t>(t), static_cast<std::uint16_t>(c), static_cast<std::uint8_t>(m)});
+                    break;
+                }
+            }
+        }
+    }
+    return bound;
+}
+
+} // namespace
+
+void mixMorphWeights(const Mesh& mesh, std::span<const LayeredClip> clips, std::vector<float>& weights, MorphBindings* bindings,
+                     int meshIndex) {
+    weights.resize(mesh.morphs.size(), 0.0f);
+    thread_local std::vector<std::vector<MixPart>> parts;
+    parts.assign(mesh.morphs.size(), {});
+    std::vector<MorphBindings::Binding> local;
+    for (const auto& clip : clips) {
+        const auto& shared = clip.animation != nullptr ? clip.animation->animation : nullptr;
+        if (!shared || !(clip.weight > 0) || shared->morphTargets.empty()) {
+            continue;
+        }
+        const std::vector<MorphBindings::Binding>* bound = nullptr;
+        if (bindings != nullptr && meshIndex >= 0) {
+            auto [entry, added] = bindings->entries.try_emplace({meshIndex, shared.get()});
+            if (added || entry->second.morphs != mesh.morphs) {
+                entry->second.animation = shared;
+                entry->second.morphs = mesh.morphs;
+                entry->second.bound = bindMorphs(mesh, *shared);
+            }
+            bound = &entry->second.bound;
+        } else {
+            local = bindMorphs(mesh, *shared);
+            bound = &local;
+        }
+        for (const auto& b : *bound) {
+            if (b.morph >= parts.size() || b.target >= shared->morphTargets.size() || b.channel >= shared->morphTargets[b.target].channels.size()) {
+                continue;
+            }
+            const float v = channelValue(shared->morphTargets[b.target].channels[b.channel], 0, clip.ms);
+            if (std::isfinite(v)) {
+                parts[b.morph].push_back({clip.layer, clip.weight, v});
+            }
+        }
+    }
+    for (std::size_t m = 0; m < parts.size(); ++m) {
+        if (const auto mixed = parts[m].empty() ? std::nullopt : mixLayered(parts[m])) {
+            weights[m] = *mixed;
+        }
+    }
+}
+
+void mixEyes(std::span<const LayeredClip> clips, std::array<float, 4>& eyes) {
+    std::array<std::vector<MixPart>, 4> parts;
+    for (const auto& clip : clips) {
+        const anim::Animation* a = clip.animation != nullptr ? clip.animation->animation.get() : nullptr;
+        if (a == nullptr || !(clip.weight > 0)) {
+            continue;
+        }
+        for (const auto& target : a->morphTargets) {
+            if (target.type != anim::kEyeTargetType) {
+                continue;
+            }
+            for (const auto& channel : target.channels) {
+                if (channel.additive() || channel.components.empty()) {
+                    continue;
+                }
+                const auto add = [&](std::size_t at, std::size_t component) {
+                    if (component < channel.components.size()) {
+                        const float v = channelValue(channel, component, clip.ms);
+                        if (std::isfinite(v)) {
+                            parts[at].push_back({clip.layer, clip.weight, v});
+                        }
+                    }
+                };
+                if (sameName(channel.name, "eyedirection")) {
+                    add(0, 0);
+                    add(1, 1);
+                } else if (sameName(channel.name, "l_eyestretch")) {
+                    add(2, 0);
+                } else if (sameName(channel.name, "r_eyestretch")) {
+                    add(3, 0);
+                }
+            }
+        }
+    }
+    for (std::size_t i = 0; i < parts.size(); ++i) {
+        if (const auto mixed = parts[i].empty() ? std::nullopt : mixLayered(parts[i])) {
+            eyes[i] = *mixed;
         }
     }
 }

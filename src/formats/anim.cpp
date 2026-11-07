@@ -147,7 +147,7 @@ Animation parse(std::span<const std::uint8_t> data) {
         pointer(r);
     }
     // Nine floats: the frame turn (radians), travel, loop phase, the planner's match value, one not
-    // known yet, speed, the root turn (radians), the body stretch and one not known yet.
+    // known yet, speed, the root turn (radians), the body stretch and the root height.
     a.frameTurn = finiteOr(r.f32(), 0);
     if (std::abs(a.frameTurn) > 8.0f) {
         a.frameTurn = 0;  // a broken file, as real ones are whole quarter turns
@@ -162,7 +162,7 @@ Animation parse(std::span<const std::uint8_t> data) {
     if (!std::isfinite(a.bodyStretch) || a.bodyStretch <= 0) {
         a.bodyStretch = 1;
     }
-    r.f32();
+    a.rootHeight = finiteOr(r.f32(), 0);
     a.skeleton = text(r, skeletonLength + 1u);
     text(r, userDataLength + 1u);
     r.bytes((skeletonLength + userDataLength + 2u) % 4);
@@ -188,8 +188,9 @@ Animation parse(std::span<const std::uint8_t> data) {
         pointer(r);
     }
     std::size_t total = 0;
+    std::vector<std::string> targetNames;
     for (const auto& t : ts) {
-        text(r, t.nameLength + 1u);
+        targetNames.push_back(text(r, t.nameLength + 1u));
         total += t.nameLength + 1u;
     }
     r.bytes(total % 4);
@@ -288,7 +289,14 @@ Animation parse(std::span<const std::uint8_t> data) {
             }
         }
     }
-    if (!channels.empty()) {
+    // Morph and eye targets can come first: a living chair's sit clips have only a morph target.
+    const auto drivesShape = [&](std::size_t t) { return a.targetTypes[t] == kMorphTargetType || a.targetTypes[t] == kEyeTargetType; };
+    for (std::size_t t = 0; t < channels.size(); ++t) {
+        if (drivesShape(t)) {
+            a.morphTargets.push_back({a.targetTypes[t], targetNames[t], std::move(channels[t])});
+        }
+    }
+    if (!channels.empty() && !drivesShape(0)) {
         a.channels = std::move(channels[0]);
         a.chains = std::move(chains[0]);
     }
@@ -317,6 +325,29 @@ Animation parse(std::span<const std::uint8_t> data) {
         }
     }
     return a;
+}
+
+std::optional<EffectEvent> effectEvent(const Event& event) {
+    if (event.type != kEffectEvent) {
+        return std::nullopt;
+    }
+    // Each key starts a line: key=value.
+    const auto value = [&](std::string_view key) -> std::string {
+        for (std::size_t at = event.text.find(key); at != std::string::npos; at = event.text.find(key, at + 1)) {
+            const std::size_t after = at + key.size();
+            const bool starts = at == 0 || std::isspace(static_cast<unsigned char>(event.text[at - 1])) || event.text[at - 1] == ';';
+            if (starts && after < event.text.size() && event.text[after] == '=') {
+                const std::size_t end = event.text.find_first_of(" \t\r\n;", after + 1);
+                return event.text.substr(after + 1, end == std::string::npos ? end : end - after - 1);
+            }
+        }
+        return {};
+    };
+    EffectEvent out{value("effectName"), value("boneName"), value("op")};
+    if (out.effect.empty()) {
+        return std::nullopt;
+    }
+    return out;
 }
 
 std::optional<int> simAnticsEventId(const Event& event) {

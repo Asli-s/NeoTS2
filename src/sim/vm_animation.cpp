@@ -641,10 +641,17 @@ Execution::ReachStep Execution::reachPut(const bhav::Instruction& in, Frame& f) 
     }
     reach.transferMs = now + *event;
     reach.endMs = now + *length;
+    // It plays as a Sim animation of medium priority, fading in and out over 233.33 ms each, or over
+    // half its length each when it is shorter than both.
+    constexpr float kReachFadeMs = 233.33f;
+    constexpr int kReachLayer = 2;
     PlayingAnimation play;
     play.name = *clip;
     play.startMs = now;
     play.lengthMs = *length;
+    play.layer = kReachLayer;
+    play.fades = true;
+    play.fadeInMs = play.fadeOutMs = std::min(kReachFadeMs, *length / 2);
     play.frame = frame;
     play.group = f.group;
     play.tree = f.instance;

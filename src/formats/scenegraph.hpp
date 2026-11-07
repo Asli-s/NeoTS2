@@ -35,6 +35,9 @@ struct Element {
     std::uint32_t identity = 0;     // what it holds: positions, normals, texture coordinates...
     std::uint32_t blockFormat = 0;  // 0 one float, 1 two, 2 three, 4 four bytes
     std::uint32_t setFormat = 0;
+    // Which one of the link's elements of this identity it is: a second set of texture coordinates
+    // is stream 1, and a morph's deltas are in streams 0-3.
+    std::uint32_t stream = 0;
     std::uint32_t count = 0;
     std::vector<std::uint8_t> data;
 };
@@ -45,6 +48,11 @@ constexpr std::uint32_t kColors = 0xDB830795;  // four bytes per vertex: blue, g
 constexpr std::uint32_t kBlendIndices = 0xFBD70111;
 constexpr std::uint32_t kBlendWeights = 0x3BD70105;
 constexpr std::uint32_t kTangents = 0x89D92BA0;  // three floats per vertex, for normal maps
+// Morphs: a vertex moves by up to four deltas, one per stream, each scaled by the weight of the morph
+// its stream's byte of the target indices names (an index into Mesh::morphs).
+constexpr std::uint32_t kPositionDeltas = 0x5CF2CFE1;  // three floats per vertex
+constexpr std::uint32_t kNormalDeltas = 0xCB6F3A6A;    // three floats per vertex, none on faces
+constexpr std::uint32_t kMorphIndices = 0xDCF2CFDC;    // four bytes per vertex, one per stream
 
 // The elements one part of the mesh draws from.
 struct ElementLink {
@@ -60,6 +68,8 @@ struct Group {
     std::uint32_t primitive = 0;  // 2: triangle list
     std::uint32_t link = 0;       // index into Mesh::links
     std::vector<std::uint16_t> indices;
+    // Called opacity in modding tools, but it orders the model's blended groups (see
+    // scene::Primitive::alphaSort). Signed: 0xFFFFFFFF is -1.
     std::uint32_t opacity = 0;
     // The joints its vertices are skinned to: a vertex's blend indices pick from this list, whose
     // entries index Mesh::inverseBinds.
@@ -81,6 +91,12 @@ struct Mesh {
         std::array<float, 3> translation{};
     };
     std::vector<InverseBind> inverseBinds;
+    // The morphs its morph streams can take, each by its blend group and name ("faceblends",
+    // "y_nose"), which clips name to weigh it. Many meshes list an empty pair first, for no morph.
+    struct Morph {
+        std::string group, name;
+    };
+    std::vector<Morph> morphs;
 
     // An element of the link with this identity, or null.
     const Element* find(const ElementLink& link, std::uint32_t identity) const;

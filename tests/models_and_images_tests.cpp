@@ -6,6 +6,23 @@
 namespace {
 
 // Data list values of type 1 (a flag byte, any non-zero is true) and 4 (two floats).
+void clipEffectEventsReadTheirKeys() {
+    using ts2::anim::Event;
+    Event e;
+    e.type = ts2::anim::kEffectEvent;
+    e.text = "effectName=cooking_steam boneName=l_hand op=softStart";
+    const auto found = ts2::anim::effectEvent(e);
+    CHECK(found && found->effect == "cooking_steam" && found->bone == "l_hand" && found->op == "softStart");
+    e.text = "op=softStart\nboneName=neck\neffectName=x\n";
+    const auto lines = ts2::anim::effectEvent(e);
+    CHECK(lines && lines->effect == "x" && lines->bone == "neck" && lines->op == "softStart");
+    e.text = "boneName=neck";
+    CHECK(!ts2::anim::effectEvent(e));
+    e.text = "effectName=x";
+    e.type = ts2::anim::kSimAnticsEvent;
+    CHECK(!ts2::anim::effectEvent(e));
+}
+
 void dataListReadsFlagsAndTwoFloatVectors() {
     std::vector<std::uint8_t> d;
     auto u32 = [&d](std::uint32_t v) {
@@ -195,7 +212,13 @@ void oldMeshVersionsParse() {
             indexList({3, 4});
         }
         u32(0);  // no joints
+        u32(2);  // two morphs: none, and a face morph
+        str("");
+        str("");
+        str("faceblends");
+        str("y_nose");
         const auto mesh = ts2::scenegraph::parseMesh(d);
+        CHECK(mesh.morphs.size() == 2 && mesh.morphs[0].group.empty() && mesh.morphs[1].group == "faceblends" && mesh.morphs[1].name == "y_nose");
         CHECK(mesh.version == version && mesh.links.size() == 1 && (mesh.links[0].elements == std::vector<std::uint16_t>{0}));
         CHECK(mesh.groups.size() == 1 && mesh.groups[0].name == "seat" && mesh.groups[0].indices.size() == 3);
         CHECK(mesh.groups[0].bones == (version > 1 ? std::vector<std::uint16_t>{3, 4} : std::vector<std::uint16_t>{}));
@@ -253,39 +276,107 @@ void oldTextureVersionsParse() {
     }
 }
 
-// A clip keeps the body stretch it was made for. On another skeleton a joint's translation moves by
-// the joint's rest place's change (a climb's 3-storey rise keeps its size, the hips stand lower by as
-// much as at rest), translations of joints the rig lacks are scaled, and rotations are left alone.
+// A clip made for one body size fits another as the game fits it: each sampled translation on the
+// joint's stretch axis by factor = skeleton stretch / ((clip stretch - 1) x weight + 1), the root
+// moved by (factor - 1) x the clip's root height while it is above the floor, other values scaled.
+// An adult clip on a teen puts the root 0.0557 lower all through a climb (live: 0.055 to 0.056).
 void clipsFitTheSkeletonsStretch() {
-    ts2::scene::Rig adultRig;
-    adultRig.nodes.push_back({"root_trans", -1, {0, 0, 1.0f}, {0, 0, 0, 1}});
-    const ts2::scene::Rig teenRig = ts2::scene::stretched(adultRig, 0.94f);
-    const auto clip = [](float bodyStretch, const char* joint) {
-        ts2::anim::Animation a;
-        a.bodyStretch = bodyStretch;
-        for (const auto kind : {ts2::anim::ChannelKind::Translation, ts2::anim::ChannelKind::Rotation}) {
+    using ts2::scene::Rig;
+    Rig adultRig;
+    adultRig.nodes.push_back({"root_trans", -1, {0, 0, 1.0122f}, {0, 0, 0, 1}});
+    adultRig.nodes[0].stretchAxis = 2;
+    adultRig.nodes.push_back({"pelvis", 0, {0, 0.111f, 0}, {0, 0, 0, 1}});
+    adultRig.nodes[1].stretchAxis = Rig::kStretchNone;
+    adultRig.nodes.push_back({"spine2", 1, {0, 0.16f, 0}, {0, 0, 0, 1}});
+    adultRig.nodes[2].stretchWeight = 0.9f;
+    const Rig teenRig = ts2::scene::stretched(adultRig, 0.94f);
+    const auto clip = [](float bodyStretch) {
+        auto a = std::make_shared<ts2::anim::Animation>();
+        a->bodyStretch = bodyStretch;
+        a->rootHeight = 0.9286f;
+        for (const char* joint : {"root_trans", "pelvis", "spine2", "no_such_joint"}) {
             ts2::anim::Channel c;
             c.name = joint;
-            c.flags = static_cast<std::uint32_t>(kind) << 22 | 0x8000;
+            c.flags = static_cast<std::uint32_t>(ts2::anim::ChannelKind::Translation) << 22 | 0x8000;
             for (int k = 0; k < 3; ++k) {
                 c.components.push_back({{{0, 4.0f, 0.5f, 0.5f}}});
             }
-            a.channels.push_back(c);
+            a->channels.push_back(c);
         }
         return a;
     };
-    auto adult = clip(1.0f, "root_trans");
-    ts2::scene::fitToStretch(adult, teenRig);
-    const auto& up = adult.channels[0].components[2].keys[0];
-    CHECK(std::fabs(up.value - 3.94f) < 1e-5f && up.in == 0.5f);
-    CHECK(adult.channels[0].components[0].keys[0].value == 4.0f);
-    CHECK(adult.channels[1].components[2].keys[0].value == 4.0f);
-    auto other = clip(1.0f, "no_such_joint");
-    ts2::scene::fitToStretch(other, teenRig);
-    CHECK(std::fabs(other.channels[0].components[0].keys[0].value - 3.76f) < 1e-5f);
-    auto teen = clip(0.94f, "root_trans");
-    ts2::scene::fitToStretch(teen, teenRig);
-    CHECK(teen.channels[0].components[2].keys[0].value == 4.0f);
+    const auto adult = ts2::scene::bindAnimation(teenRig, clip(1.0f));
+    const auto at = [&](const ts2::scene::RigAnimation& a, std::size_t node, std::array<float, 3> t) {
+        return ts2::scene::fittedPlace(ts2::scene::placeFitAt(a, node), t);
+    };
+    CHECK(std::fabs(at(adult, 0, {0, 0, 4})[2] - (4 - 0.06f * 0.9286f)) < 1e-5f);
+    CHECK(std::fabs(at(adult, 0, {0, 0, 0.9286f})[2] - 0.8729f) < 1e-4f);
+    CHECK((at(adult, 0, {1, 2, -0.5f}) == std::array<float, 3>{1, 2, -0.5f * 0.94f}));
+    CHECK((at(adult, 1, {0, 4, 0}) == std::array<float, 3>{0, 4, 0}));
+    // Joints other than the root have no height: positive values are scaled, by the unweighted
+    // skeleton stretch for an adult clip.
+    CHECK(std::fabs(at(adult, 2, {0, 4, 0})[1] - 3.76f) < 1e-5f);
+    const auto teen = ts2::scene::bindAnimation(teenRig, clip(0.94f));
+    CHECK((at(teen, 0, {0, 0, 4}) == std::array<float, 3>{0, 0, 4}));
+    // A teen clip on a teen body: spine2's weight 0.9 leaves a factor of 0.94 / 0.946.
+    CHECK(std::fabs(at(teen, 2, {0, 4, 0})[1] - 4 * 0.94f / 0.946f) < 1e-5f);
+}
+
+// Solving a limb places again only what hangs below it, which must come out as placing the whole rig does.
+void limbIkLeavesEveryJointPlaced() {
+    using ts2::anim::Animation;
+    const auto curve = [](float v) {
+        ts2::anim::Curve c;
+        c.keys.push_back({0, v, 0, 0});
+        return c;
+    };
+    const auto channel = [&](const std::string& name, ts2::anim::ChannelKind kind, std::vector<float> values) {
+        ts2::anim::Channel c;
+        c.name = name;
+        c.flags = 15u << 25 | static_cast<std::uint32_t>(kind) << 22 | 0x8000;  // of no IK chain
+        for (const float v : values) c.components.push_back(curve(v));
+        return c;
+    };
+    const auto h = [](const char* s) { return ts2::hash::crc32(s); };
+    ts2::scene::Rig rig;
+    rig.nodes.push_back({"skel", -1, {0, 0, 0}, {0, 0, 0, 1}});
+    rig.nodes.push_back({"a0", 0, {0, 1.0f, 0}, {0, 0, 0, 1}});
+    rig.nodes.push_back({"beside", 0, {0.5f, 0.5f, 0}, {0, 0, 0, 1}});
+    rig.nodes.push_back({"a1", 1, {0, 0.25f, 0}, {0, 0, 0, 1}});
+    rig.nodes.push_back({"a2", 3, {0, 0.25f, 0}, {0, 0, 0, 1}});
+    rig.nodes.push_back({"toe", 4, {0, 0.1f, 0}, {0, 0, 0, 1}});
+    rig.nodes.push_back({"besideEnd", 2, {0, 0.1f, 0}, {0, 0, 0, 1}});
+    auto animation = std::make_shared<Animation>();
+    animation->channels.push_back(channel("ctr", ts2::anim::ChannelKind::Translation, {0.2f, 1.3f, 0.1f}));
+    animation->channels.push_back(channel("ctr", ts2::anim::ChannelKind::Rotation, {0, 0, 90}));
+    animation->channels.push_back(channel("pole", ts2::anim::ChannelKind::Translation, {0, 1.4f, 1}));
+    ts2::anim::IkChain chain;
+    chain.strategy = ts2::anim::kLimbStrategy;
+    chain.begin = h("a0");
+    chain.end = h("a2");
+    chain.pole = h("pole");
+    ts2::anim::IkTarget target;
+    target.node = h("ctr");
+    target.position = h("ctr");
+    chain.targets.push_back(target);
+    animation->chains.push_back(chain);
+    const auto bound = ts2::scene::bindAnimation(rig, animation);
+    CHECK(bound.limbs.size() == 1);
+    for (const float share : {1.0f, 0.5f}) {
+        std::vector<ts2::scene::Transform> local, world(rig.nodes.size()), whole(rig.nodes.size());
+        for (const auto& node : rig.nodes) {
+            local.push_back(ts2::scene::Transform::of(node.translation, node.rotation));
+        }
+        ts2::scene::placeRig(rig, local, world);
+        const auto toeAtRest = world[5];
+        const std::vector<float> shares(rig.nodes.size(), share);
+        ts2::scene::solveLimbs(rig, *animation, bound.limbs, 0, local, world, &shares);
+        ts2::scene::placeRig(rig, local, whole);
+        for (std::size_t i = 0; i < world.size(); ++i) {
+            CHECK(world[i].m == whole[i].m);
+        }
+        CHECK(world[5].m != toeAtRest.m);
+    }
 }
 
 void limbIkReachesChannelTargets() {
@@ -1334,9 +1425,11 @@ void groundDecalsAreCutToTheirSquare() {
 
 std::vector<Test> modelAndImageTests() {
     return {
+        {"clip effect events read their keys", clipEffectEventsReadTheirKeys},
         {"ground decals are cut to their square", groundDecalsAreCutToTheirSquare},
         {"clips fit the skeleton's stretch", clipsFitTheSkeletonsStretch},
         {"Limb IK reaches channel targets", limbIkReachesChannelTargets},
+        {"Limb IK leaves every joint placed", limbIkLeavesEveryJointPlaced},
         {"Limb IK adds additive targets", limbIkAddsAdditiveTargets},
         {"Limb IK reaches bones of the IK object", limbIkReachesBonesOfTheIkObject},
         {"JPEG pictures decode as the game decodes them", jpegDecodesAsTheGame},

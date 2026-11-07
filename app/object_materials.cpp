@@ -1,5 +1,6 @@
 #include "object_materials.hpp"
 #include "formats/hash.hpp"
+#include "scene/lot_parts.hpp"
 
 #include <algorithm>
 #include <climits>
@@ -15,22 +16,25 @@ void ObjectMaterials::update(ts2::sim::World& world, ts2::scene::Scene& scene) {
         }
         const auto id = static_cast<std::int16_t>(placed.object);
         const auto* object = world.find(id);
-        if (object == nullptr || object->materialVersion == versions_[id]) {
+        if (placed.object >= versions_.size()) {
+            versions_.resize(std::size_t{placed.object} + 1, 0);
+        }
+        if (object == nullptr || object->materialVersion == versions_[placed.object]) {
             continue;
         }
-        versions_[id] = object->materialVersion;
+        versions_[placed.object] = object->materialVersion;
         const int mesh = scene.instances[placed.instance].mesh;
         if (mesh < 0 || static_cast<std::size_t>(mesh) >= scene.meshes.size()) {
             continue;
         }
-        changed_.emplace_back(placed.instance, materialsOf(*object, scene.meshes[static_cast<std::size_t>(mesh)], scene));
+        changed_.emplace_back(placed.instance, materialsOf(*object, scene.meshes[static_cast<std::size_t>(mesh)], placed.overrides, scene));
     }
 }
 
 // The mesh's own materials, then each change in order on the primitives of its mesh group (all of
 // them for the whole model). A "_null" material hides them, as it leaves groups out of a model.
 std::vector<int> ObjectMaterials::materialsOf(const ts2::sim::SimObject& object, const ts2::scene::Mesh& mesh,
-                                              ts2::scene::Scene& scene) {
+                                              const std::vector<ts2::scenegraph::MaterialOverride>& saved, ts2::scene::Scene& scene) {
     std::vector<int> out;
     out.reserve(mesh.primitives.size());
     for (const auto& p : mesh.primitives) {
@@ -39,7 +43,7 @@ std::vector<int> ObjectMaterials::materialsOf(const ts2::sim::SimObject& object,
     for (const auto& change : object.materialChanges) {
         const std::string group = ts2::scene::lower(change.group);
         const int m = ts2::scene::lower(change.material).find("_null") != std::string::npos ? ts2::scene::kHiddenMaterial
-                                                                                           : material(change.material, scene);
+                                                                                           : material(ts2::scene::withSavedCutout(change.material, group, saved), scene);
         if (m == -1) {
             continue;
         }

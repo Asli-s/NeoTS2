@@ -277,6 +277,27 @@ bool solvePosition(const LimbChain& limb, std::size_t split, const Vec& target, 
     return true;
 }
 
+// Places the limb's joints and what hangs below them again, the only nodes a solve moves. Every
+// node's parent comes before it in the rig.
+void placeLimb(const Rig& rig, const std::vector<int>& joints, const std::vector<Transform>& local, std::vector<Transform>& world) {
+    thread_local std::vector<std::uint8_t> moved;
+    moved.assign(rig.nodes.size(), 0);
+    std::size_t first = rig.nodes.size();
+    for (const int j : joints) {
+        moved[static_cast<std::size_t>(j)] = 1;
+        first = std::min(first, static_cast<std::size_t>(j));
+    }
+    for (std::size_t i = first; i < rig.nodes.size(); ++i) {
+        const int parent = rig.nodes[i].parent;
+        if (parent >= 0 && moved[static_cast<std::size_t>(parent)]) {
+            moved[i] = 1;
+        }
+        if (moved[i]) {
+            world[i] = parent >= 0 ? world[static_cast<std::size_t>(parent)] * local[i] : local[i];
+        }
+    }
+}
+
 // Turns the limb's end (foot, or wrist and hand) to the orientation `target` (in the rig's space).
 void solveOrientation(const LimbChain& limb, std::size_t split, const Mat& target, std::vector<Transform>& local,
                       const std::vector<Transform>& world, const Rig& rig) {
@@ -529,10 +550,10 @@ void solveLimbs(const Rig& rig, std::span<const LimbSource> sources, std::vector
         if (!solvePosition(*chain, split, target, pole, local, world, rig)) {
             continue;
         }
-        placeRig(rig, local, world);
+        placeLimb(rig, chain->joints, local, world);
         if (rotationWeight > 0) {
             solveOrientation(*chain, split, matOf(orientation), local, world, rig);
-            placeRig(rig, local, world);
+            placeLimb(rig, chain->joints, local, world);
         }
         // Each joint between the clips' own turn and the solved one, by the solved turn's share.
         if (shares != nullptr) {
@@ -548,7 +569,7 @@ void solveLimbs(const Rig& rig, std::span<const LimbSource> sources, std::vector
                 partly = true;
             }
             if (partly) {
-                placeRig(rig, local, world);
+                placeLimb(rig, chain->joints, local, world);
             }
         }
     }
