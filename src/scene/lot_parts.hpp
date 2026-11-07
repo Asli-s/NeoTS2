@@ -34,6 +34,13 @@ public:
     float corner(int level, float x, float y) const;
     // The average height of the four corners of the tile containing (x, y).
     float tile(int level, float x, float y) const;
+    // The heights the lot's ground is drawn through: `steps` points a tile each way, blended between
+    // the tile corners, by column then row ((width - 1) * steps + 1 columns). With `sea` (smooth lot
+    // skirts, not in the original game) the points under it or less than 0.6 above it are evened out
+    // with their neighbours, which rounds a steep drop of the sea bed into a curve. The outermost
+    // ring stays as it is, where the skirt meets the lot, and so does the ground above the water,
+    // where Sims and objects stand.
+    std::vector<float> drawnGrid(int level, std::uint32_t steps, std::optional<float> sea) const;
 
     const array3d::Array3D* grid() const { return grid_; }
 
@@ -47,6 +54,17 @@ private:
 // Whether a level of the surface grid (content::kSurfaceGridInstance) is open at (x, y): the
 // quarter of the tile holding the point has no surface there.
 bool surfaceOpen(const array3d::Array3D& surface, int level, float x, float y);
+
+// Whether one quarter of a tile has no surface. Quarters are in the grid's order: left, bottom,
+// right, top, as the floor grid stores its patterns.
+bool surfaceQuarterOpen(const array3d::Array3D& surface, int level, int x, int y, std::size_t quarter);
+
+// The name a script's material takes on a mesh group the lot's save cut a hole in. A counter top is
+// saved as "<top>-cutout-<mask>", and the mask stays with the group, so that a top turning from clean
+// to dirty keeps the sink's hole. Any other material or group keeps its name, as does a whole-model
+// change (an empty group).
+std::string withSavedCutout(const std::string& material, const std::string& group,
+                            const std::vector<scenegraph::MaterialOverride>& saved);
 
 // Whether a lot object is an extra tile of a multi-tile object. Its lead tile draws the whole model
 // and shines its lights, and a scene record filed under an extra tile's id is left over from an

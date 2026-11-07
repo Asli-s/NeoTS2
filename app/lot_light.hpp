@@ -18,6 +18,14 @@ struct Lot;
 
 namespace app {
 
+// What Graphics options change in a lot's light from the next time it is worked out: the buildings'
+// sun shadow over the lot (heightMapShadows, off with Shadows Off) and light through windows
+// (portalLighting, off at Low Lighting Quality).
+struct LotLightOptions {
+    bool sunShadow = true, portals = true;
+};
+void setLotLightOptions(const LotLightOptions& options);
+
 // What lighting a lot needs that does not change with the lighting state, kept from when the lot was
 // first lit so that it can be lit again in another state while it is played.
 struct LotLightBase;

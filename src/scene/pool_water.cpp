@@ -1,6 +1,7 @@
 #include "scene/pool_water.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <map>
 #include <set>
 #include <tuple>
@@ -154,6 +155,29 @@ Surface surface(const std::vector<Quarter>& quarters, const std::function<float(
         }
     }
     return out;
+}
+
+void sharePoolBoxes(Scene& scene) {
+    std::array<float, 6> all{std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
+                             std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest()};
+    bool any = false;
+    for (const auto& instance : scene.instances) {
+        if (instance.poolWater) {
+            any = true;
+            for (std::size_t k = 0; k < 3; ++k) {
+                all[k] = std::min(all[k], instance.poolBox[k]);
+                all[k + 3] = std::max(all[k + 3], instance.poolBox[k + 3]);
+            }
+        }
+    }
+    if (!any) {
+        return;
+    }
+    for (auto& instance : scene.instances) {
+        if (instance.poolWater) {
+            instance.poolBox = all;
+        }
+    }
 }
 
 std::vector<std::size_t> lightPoolWater(Scene& scene, bool day) {

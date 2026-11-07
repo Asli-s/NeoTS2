@@ -130,14 +130,71 @@ GroundNormals groundNormals(const lotshadow::Inputs& lot) {
     return out;
 }
 
-std::array<float, 3> GroundNormals::at(float x, float y) const {
-    if (width <= 0 || height <= 0 || corners.size() != static_cast<std::size_t>(width + 1) * static_cast<std::size_t>(height + 1) ||
+std::array<float, 3> underwaterNormal(const std::array<float, 3>& normal, float depth) {
+    constexpr float kFlatDepth = 1;
+    const float t = std::isfinite(depth) ? std::clamp(depth / kFlatDepth, 0.0f, 1.0f) : 0.0f;
+    const std::array<float, 3> n{normal[0] * (1 - t), normal[1] * (1 - t), normal[2] * (1 - t) + t};
+    const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    return len > 0 && std::isfinite(len) ? std::array<float, 3>{n[0] / len, n[1] / len, n[2] / len} : std::array<float, 3>{0, 0, 1};
+}
+
+GroundNormals groundNormals(const Scene::DrawnGround& drawn) {
+    constexpr std::uint32_t kMaxTiles = 256, kMaxSteps = 16;
+    GroundNormals out;
+    const std::uint32_t steps = drawn.steps, columns = drawn.columns, rows = drawn.rows;
+    if (steps == 0 || steps > kMaxSteps || columns < 2 || rows < 2 || (columns - 1) % steps != 0 || (rows - 1) % steps != 0 ||
+        (columns - 1) / steps > kMaxTiles || (rows - 1) / steps > kMaxTiles ||
+        drawn.heights.size() != static_cast<std::size_t>(columns) * static_cast<std::size_t>(rows)) {
+        return out;
+    }
+    out.width = static_cast<int>((columns - 1) / steps);
+    out.height = static_cast<int>((rows - 1) / steps);
+    out.steps = static_cast<int>(steps);
+    out.corners.resize(static_cast<std::size_t>(columns) * static_cast<std::size_t>(rows));
+    const auto height = [&](std::int64_t i, std::int64_t j) {
+        const auto ci = static_cast<std::size_t>(std::clamp<std::int64_t>(i, 0, columns - 1));
+        const auto cj = static_cast<std::size_t>(std::clamp<std::int64_t>(j, 0, rows - 1));
+        return drawn.heights[ci * rows + cj];
+    };
+    const float step = 1.0f / static_cast<float>(steps);
+    for (std::int64_t j = 0; j < rows; ++j) {
+        for (std::int64_t i = 0; i < columns; ++i) {
+            const float sx = (height(i + 1, j) - height(i - 1, j)) / (2 * step), sy = (height(i, j + 1) - height(i, j - 1)) / (2 * step);
+            const float len = std::sqrt(sx * sx + sy * sy + 1);
+            const bool usable = std::isfinite(len) && len > 0;
+            const std::array<float, 3> n = usable ? std::array<float, 3>{-sx / len, -sy / len, 1 / len} : std::array<float, 3>{0, 0, 1};
+            out.corners[static_cast<std::size_t>(j) * columns + static_cast<std::size_t>(i)] = underwaterNormal(n, drawn.sea - height(i, j));
+        }
+    }
+    return out;
+}
+
+float drawnHeight(const Scene::DrawnGround& drawn, float x, float y) {
+    const std::uint32_t columns = drawn.columns, rows = drawn.rows;
+    if (drawn.steps == 0 || columns < 2 || rows < 2 || drawn.heights.size() != static_cast<std::size_t>(columns) * static_cast<std::size_t>(rows) ||
         !std::isfinite(x) || !std::isfinite(y)) {
+        return 0;
+    }
+    const float u = std::clamp(x * static_cast<float>(drawn.steps), 0.0f, static_cast<float>(columns - 1));
+    const float v = std::clamp(y * static_cast<float>(drawn.steps), 0.0f, static_cast<float>(rows - 1));
+    const auto i = std::min(static_cast<std::uint32_t>(u), columns - 2), j = std::min(static_cast<std::uint32_t>(v), rows - 2);
+    const float fx = u - static_cast<float>(i), fy = v - static_cast<float>(j);
+    const auto at = [&](std::uint32_t c, std::uint32_t r) { return drawn.heights[static_cast<std::size_t>(c) * rows + r]; };
+    return (at(i, j) * (1 - fx) + at(i + 1, j) * fx) * (1 - fy) + (at(i, j + 1) * (1 - fx) + at(i + 1, j + 1) * fx) * fy;
+}
+
+std::array<float, 3> GroundNormals::at(float x, float y) const {
+    if (width <= 0 || height <= 0 || steps <= 0 ||
+        corners.size() != static_cast<std::size_t>(width * steps + 1) * static_cast<std::size_t>(height * steps + 1) || !std::isfinite(x) ||
+        !std::isfinite(y)) {
         return {0, 0, 1};
     }
-    const float tx = std::clamp(std::floor(x), 0.0f, static_cast<float>(width - 1)), ty = std::clamp(std::floor(y), 0.0f, static_cast<float>(height - 1));
+    x *= static_cast<float>(steps);
+    y *= static_cast<float>(steps);
+    const int across = width * steps, down = height * steps;
+    const float tx = std::clamp(std::floor(x), 0.0f, static_cast<float>(across - 1)), ty = std::clamp(std::floor(y), 0.0f, static_cast<float>(down - 1));
     const float u = std::clamp(x - tx, 0.0f, 1.0f), v = std::clamp(y - ty, 0.0f, 1.0f);
-    const auto at = [&](int cx, int cy) { return corners[static_cast<std::size_t>(cy) * static_cast<std::size_t>(width + 1) + static_cast<std::size_t>(cx)]; };
+    const auto at = [&](int cx, int cy) { return corners[static_cast<std::size_t>(cy) * static_cast<std::size_t>(across + 1) + static_cast<std::size_t>(cx)]; };
     const int ix = static_cast<int>(tx), iy = static_cast<int>(ty);
     const auto a = at(ix, iy), b = at(ix + 1, iy), c = at(ix, iy + 1), d = at(ix + 1, iy + 1);
     std::array<float, 3> n{};

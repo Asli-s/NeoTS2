@@ -41,6 +41,10 @@ struct Inputs {
     // level always counts.
     std::function<bool(int x, int y, int level, int quarter)> floorAt;
     std::vector<Wall> walls;
+    // The ground's height at a point when it is drawn other than between its saved corners (smooth
+    // lot skirts round its sea bed, not in the original game), so it casts and takes the sun's
+    // shadow where it is drawn. Empty otherwise.
+    std::function<float(float x, float y)> drawnGround;
 };
 
 struct Grid {

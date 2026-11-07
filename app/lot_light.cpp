@@ -22,6 +22,7 @@
 #include "sim/clock.hpp"
 #include "sim/rooms.hpp"
 
+#include <atomic>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -89,6 +90,9 @@ struct LotLight {
 
 namespace {
 
+// Read beside the game's thread, where light is worked out.
+std::atomic<bool> gSunShadow{true}, gPortals{true};
+
 // The state's projected shadows, their sun line turned by `place`.
 ts2::scene::Scene::ShadowLook shadowLook(const LotLight& light, const ts2::scene::Transform& place) {
     ts2::scene::Scene::ShadowLook look;
@@ -121,7 +125,9 @@ void workOut(LotLight& l, ts2::scene::Scene& target) {
     lotlighting::Inputs in;
     in.lot = &lot;
     in.lamps = l.found.lamps;
-    in.portals = l.found.portals;
+    if (gPortals.load()) {
+        in.portals = l.found.portals;
+    }
     // Fences (coverings past 0x10000) and wall styles that don't block light let it through.
     in.blocksLight = [&base](std::uint32_t covering) { return covering < 0x10000 && !base.clearWalls.contains(covering); };
     in.roomAt = base.roomAt;
@@ -144,7 +150,7 @@ void workOut(LotLight& l, ts2::scene::Scene& target) {
     // The buildings' sun shadow over the lot.
     const auto& shadowIn = base.shadowIn;
     const auto& sunDir = l.settings.outdoor.lights.empty() ? std::array<float, 3>{0, 0, 1} : l.settings.outdoor.lights.front().direction;
-    l.shadow = std::make_shared<const lotshadow::Grid>(lotshadow::build(shadowIn, sunDir));
+    l.shadow = gSunShadow.load() ? std::make_shared<const lotshadow::Grid>(lotshadow::build(shadowIn, sunDir)) : std::make_shared<const lotshadow::Grid>();
     const auto floorGrid = lot.grids.find(ts2::content::kFloorGridInstance);
     const int ground = ts2::content::groundGridLevel(lot);
     auto bareGround = [&](int x, int y) {
@@ -221,6 +227,13 @@ std::shared_ptr<LotLightBase> makeBase(ts2::scene::Assets& assets, const ts2::sc
         }
         return it->second;
     });
+    // A ground drawn other than saved (smooth lot skirts) casts and takes the sun's shadow where it
+    // is drawn.
+    if (!scene.drawnGround.heights.empty()) {
+        base->shadowIn.drawnGround = [drawn = std::make_shared<const ts2::scene::Scene::DrawnGround>(scene.drawnGround)](float x, float y) {
+            return lotlightmaps::drawnHeight(*drawn, x, y);
+        };
+    }
     const auto& shadowIn = base->shadowIn;
     const bool small = shadowIn.width > 0 && shadowIn.height > 0 && shadowIn.width <= kMaxCachedSide && shadowIn.height <= kMaxCachedSide;
     const auto floorGrid = lot.grids.find(ts2::content::kFloorGridInstance);
@@ -238,6 +251,10 @@ std::shared_ptr<LotLightBase> makeBase(ts2::scene::Assets& assets, const ts2::sc
         }
     }
     base->groundNormals = lotlightmaps::groundNormals(shadowIn);
+    // A ground drawn other than saved (smooth lot skirts) is shaded by the slope it is drawn with.
+    if (auto drawn = lotlightmaps::groundNormals(scene.drawnGround); drawn.width == shadowIn.width && drawn.height == shadowIn.height) {
+        base->groundNormals = std::move(drawn);
+    }
     // The light maps alone, numbered from 0 in the order lightMapImages gives.
     LightMaps maps = *scene.lightMaps;
     int next = 0;
@@ -263,6 +280,11 @@ std::string savedLightingState(const ts2::content::Lighting& lighting, const ts2
     // A lot saved without a clock starts at 8 am, as the game's simulator does.
     const int hour = saved.globals.empty() ? 8 : saved.globals[ts2::sim::global::kHour];
     return ts2::content::lotLightingState(lighting, static_cast<int>(ts2::sim::timeOfDay(hour)));
+}
+
+void setLotLightOptions(const LotLightOptions& options) {
+    gSunShadow = options.sunShadow;
+    gPortals = options.portals;
 }
 
 std::shared_ptr<LotLight> gatherLotLight(ts2::scene::Assets& assets, std::shared_ptr<LotLightBase> base, const std::string& stateName,

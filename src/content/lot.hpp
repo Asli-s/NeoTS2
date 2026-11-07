@@ -44,6 +44,13 @@ struct WorldBounds {
     std::int32_t maxX = 0, maxY = 0, maxLevel = 0;
 };
 
+// Whether a point of a lot's ground lies in a band along a beach lot's beach side (`beachSide`, the
+// lot description's ownFacing when its flag 0x80 is set). x and y are in tiles on the game's axes,
+// as `bounds` has them. The bands run from that side's edge: mask 4 from 12 to 20 tiles, 2 from 8 to
+// 12, 1 from 0 to 8, ends included. True when the point is in any band asked for. False off the lot,
+// whose far edges count as on it, and on lots that aren't beach lots.
+bool isBeachLocation(const WorldBounds& bounds, std::optional<std::uint8_t> beachSide, double x, double y, int mask);
+
 struct Lot {
     std::optional<WorldBounds> worldBounds;
     objt::ObjectTypeTable types;
@@ -141,6 +148,9 @@ int gridIndex(const Lot& lot, std::int64_t level);
 int gridLevel(const Lot& lot, std::int32_t storey);
 // The grid level of the ground storey, or 0 when the floor grid has no such level.
 int groundGridLevel(const Lot& lot);
+// The grid level of the highest storey the lot's saved world bounds reach, which can be above its
+// highest built storey. -1 when the lot has no bounds or the floor grid has no such level.
+int topGridLevel(const Lot& lot);
 // The lot from its ground storey up: its grids without the levels below the ground storey and its
 // wall graphs without their walls there, so that grid level 0 is the ground storey, as the lot
 // lighting counts levels.

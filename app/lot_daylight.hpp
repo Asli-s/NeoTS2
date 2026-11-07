@@ -39,7 +39,12 @@ public:
     void update(double seconds, std::span<const std::int16_t> globals, ts2::scene::Assets& assets, ts2::scene::Scene& scene,
                 ts2::render::IRenderer& renderer, LotLife& life);
 
+    // Works the light out again at the next update, for a Graphics option changed.
+    void lightAgain() { again_ = true; }
+
     // Waits for light being worked out and puts it in with its fade done (for pictures).
+    // The lighting state the lot is lit with, or being lit with.
+    const std::string& state() const { return state_; }
     void settle(ts2::scene::Scene& scene, ts2::render::IRenderer& renderer, LotLife& life);
 
 private:
@@ -53,6 +58,7 @@ private:
     // Empty and not read until the lot's scripts have run.
     std::vector<std::pair<std::uint32_t, float>> lamps_;
     bool lampsRead_ = false;
+    bool again_ = false;
     std::future<std::shared_ptr<LotLight>> working_;
     // The outdoor lights fading from one state's to the next's.
     ts2::scene::ObjectLighting from_, to_;

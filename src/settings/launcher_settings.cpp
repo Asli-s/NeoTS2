@@ -87,6 +87,14 @@ std::optional<LauncherSettings> parseLauncherSettings(std::string_view text) {
             settings.poolStylePonds = line.substr(equals + 1) == "on";
             continue;
         }
+        if (key == "pool-style-sea") {
+            settings.poolStyleSea = line.substr(equals + 1) == "on";
+            continue;
+        }
+        if (key == "smooth-lot-skirts") {
+            settings.smoothLotSkirts = line.substr(equals + 1) == "on";
+            continue;
+        }
         if (key == "window-size") {
             if (const WindowSize* size = findWindowSize(line.substr(equals + 1))) {
                 settings.windowSize = size->key;
@@ -153,6 +161,12 @@ std::string formatLauncherSettings(const LauncherSettings& settings) {
     }
     if (settings.poolStylePonds) {
         out += "pool-style-ponds=on\n";
+    }
+    if (settings.poolStyleSea) {
+        out += "pool-style-sea=on\n";
+    }
+    if (settings.smoothLotSkirts) {
+        out += "smooth-lot-skirts=on\n";
     }
     if (const WindowSize* size = findWindowSize(settings.windowSize)) {
         out.append("window-size=").append(size->key).append("\n");

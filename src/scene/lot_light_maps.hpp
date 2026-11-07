@@ -13,9 +13,15 @@ namespace ts2::scene::lotlightmaps {
 // The lot's ground normals as the game's terrain works them out. Each tile is two triangles split
 // from corner (x, y) to (x + 1, y + 1), and a corner's normal is the normalized sum of the normals
 // of the lot's triangles that touch it, so the lot's edges lean on nothing outside the lot.
+// A sloping ground's normal `depth` under the sea, turned toward straight up: fully 1 down, so a
+// steep sea bed is not shaded as a wall facing away from the sun (smooth lot skirts, not in the
+// original game).
+std::array<float, 3> underwaterNormal(const std::array<float, 3>& normal, float depth);
+
 struct GroundNormals {
     int width = 0, height = 0;                  // tiles
-    std::vector<std::array<float, 3>> corners;  // (width + 1) x (height + 1), row by row
+    int steps = 1;                              // points a tile each way
+    std::vector<std::array<float, 3>> corners;  // (width * steps + 1) x (height * steps + 1), row by row
 
     // The normal at a point of the ground: its tile's four corner normals blended bilinearly and
     // normalized. Straight up where there are none.
@@ -23,6 +29,13 @@ struct GroundNormals {
 };
 // None for a lot without ground heights or larger than 256 tiles.
 GroundNormals groundNormals(const lotshadow::Inputs& lot);
+// The normals of a lot's ground as drawn (see Scene::drawnGround), from each point's slope to its
+// neighbours. Under the sea they turn up toward straight up by depth (underwaterNormal), as the
+// light there is scattered. None when it is empty or malformed.
+GroundNormals groundNormals(const Scene::DrawnGround& drawn);
+// The drawn ground's height at a point (lot tiles), blended between its points. 0 when it is empty
+// or malformed.
+float drawnHeight(const Scene::DrawnGround& drawn, float x, float y);
 
 // The buildings' sun shadow for the outdoor sunlight: the lot's shadow grid and what it was made
 // from, the fade under the shadow (hmSunLightTransitionZone), which ground-level tiles are bare

@@ -1,9 +1,15 @@
 #include "scene/lot_skirt.hpp"
 
+#include "content/lot.hpp"
+#include "scene/lot_light_maps.hpp"
+
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
+#include <functional>
 #include <limits>
+#include <optional>
 #include <utility>
 
 namespace ts2::scene {
@@ -13,6 +19,260 @@ namespace {
 // The game draws the lot skirt, its fading edge and its roads on one layer before objects
 // ("Shaders for lot skirt": lotSkirtLayer -6, times 8).
 constexpr int kSkirtLayer = -48;
+
+// The sea around a lot: a flat sheet at the neighborhood's water level over each skirt tile with a
+// corner under the water, and over each one whose four corners all lie on a beach lot within 20 of
+// its tiles of its beach side, as low as the skirt's ground. Built in the lot's own coordinates,
+// as the game's waves and ripples run on them. A beach lot's is the game's lotSkirtSea, its first
+// texture coordinate 0.04 per unit of water over the ground (up to 15 deep). Others are its
+// lotSkirtSeaNoReflection: the neighborhood's sky cube seen along the reflected view times
+// (0.4, 0.6, 0.9), 0.4 opaque, unlit, on layer 1 (nhoodWaterLayer). `ground` is the skirt's ground
+// height at a grid point. Returns the tiles it covers.
+std::vector<std::array<int, 2>> addSkirtSea(SceneBuilder& builder, const PaintedTerrain& terrain, const LotFootprint& lot, const SkirtArea& area,
+                                            const content::WorldBounds* bounds, const std::function<float(int, int)>& ground) {
+    const bool beachLot = bounds && lot.beachSide;
+    const bool poolStyle = beachLot && builder.poolStyleSea();
+    constexpr std::array<float, 3> kSky{0.4f, 0.6f, 0.9f};
+    constexpr float kOpacity = 0.4f;
+    // The game draws lotSkirtSea one layer over the pools' water (poolWaterLayer 5).
+    const int material = beachLot ? builder.skirtSeaMaterial("lotSkirtSea", "poolShape-body-bump", "neighborhood-sky2-envcube", kSky, kOpacity, 6,
+                                                             poolStyle ? "causticsTiled" : "")
+                                  : builder.cubeReflectionMaterial("lotSkirtSeaNoReflection", "neighborhood-sky2-envcube", kSky, kOpacity, 1);
+    std::vector<std::array<int, 2>> cells;
+    if (material < 0) {
+        return cells;
+    }
+    const float tile = terrain.tileSize, z = terrain.waterLevel;
+    auto wet = [&](int x, int y) {
+        return terrain.heights[static_cast<std::size_t>(y) * terrain.columns + static_cast<std::size_t>(x)] < z;
+    };
+    const Transform toLot = lot.place.rigidInverse();
+    auto beach = [&](int x, int y) {
+        float p[3] = {static_cast<float>(x) * tile, static_cast<float>(y) * tile, 0};
+        toLot.apply(p, true);
+        constexpr int kAllBands = 7;
+        return content::isBeachLocation(*bounds, lot.beachSide, p[0], p[1], kAllBands);
+    };
+    Surfaces sea;
+    Primitive& p = sea[material];
+    for (int y = area.y0; y < area.y1; ++y) {
+        for (int x = area.x0; x < area.x1; ++x) {
+            const bool water = wet(x, y) || wet(x + 1, y) || wet(x + 1, y + 1) || wet(x, y + 1);
+            if (!water && !(beachLot && beach(x, y) && beach(x + 1, y) && beach(x + 1, y + 1) && beach(x, y + 1))) {
+                continue;
+            }
+            cells.push_back({x, y});
+            const auto base = static_cast<std::uint32_t>(p.positions.size() / 3);
+            for (const auto& [cx, cy] : {std::pair{x, y}, std::pair{x + 1, y}, std::pair{x + 1, y + 1}, std::pair{x, y + 1}}) {
+                float at[3] = {static_cast<float>(cx) * tile, static_cast<float>(cy) * tile, z};
+                toLot.apply(at, true);
+                p.positions.insert(p.positions.end(), {at[0], at[1], at[2]});
+                p.normals.insert(p.normals.end(), {0, 0, 1});
+                constexpr float kDeepest = 15, kPerUnit = 0.04f;
+                // A sea with a depth colour of its own (not in the original game) leaves its surface
+                // clear but for the view's reflection.
+                const float depth = poolStyle ? 0.0f : std::clamp(z - ground(cx, cy), 0.0f, kDeepest) * kPerUnit;
+                p.uvs.insert(p.uvs.end(), {depth, depth});
+                if (poolStyle) {
+                    // Fading out over the last half unit to the waterline, so it meets the sand unseen.
+                    constexpr float kShoreFade = 0.5f;
+                    p.alphas.push_back(std::clamp((z - ground(cx, cy)) / kShoreFade, 0.0f, 1.0f));
+                }
+            }
+            p.indices.insert(p.indices.end(), {base, base + 1, base + 2, base, base + 2, base + 3});
+        }
+    }
+    if (p.indices.empty()) {
+        return cells;
+    }
+    // A sea drawn with the pools' caustics (not in the original game) lights them as a pool does,
+    // over its box from the lowest ground under it to its surface, in the lot's coordinates.
+    std::array<float, 6> box{std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
+                             std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest()};
+    for (const auto& [x, y] : cells) {
+        for (const auto& [cx, cy] : {std::pair{x, y}, std::pair{x + 1, y}, std::pair{x + 1, y + 1}, std::pair{x, y + 1}}) {
+            for (const float h : {ground(cx, cy), z}) {
+                float at[3] = {static_cast<float>(cx) * tile, static_cast<float>(cy) * tile, h};
+                toLot.apply(at, true);
+                for (std::size_t k = 0; k < 3; ++k) {
+                    box[k] = std::min(box[k], at[k]);
+                    box[k + 3] = std::max(box[k + 3], at[k]);
+                }
+            }
+        }
+    }
+    if (auto* i = builder.place(builder.addMesh("lot skirt sea", std::move(sea)), "lot skirt sea",
+                                Transform::at(0, 0, -kGroundDrop, 0) * lot.place, Part::Other);
+        i != nullptr && poolStyle) {
+        i->poolWater = true;
+        i->poolBox = box;
+    }
+    return cells;
+}
+
+// Not in the original game: a beach sea with a depth colour and the pools' caustics under its own
+// surface. The ground under the water is hazed by how deep it lies: a light blue murk that thickens
+// fast over the first units, so the seabed barely shows, then a dark blue past 0.8 down. The pools'
+// caustics play on it, fading in over 1.5 from the waterline, the haze alone dimming them deeper
+// down. Both take the depth as the smaller of the real one and its average over 6 around, so a
+// sudden drop in the seabed (a sunken part of a lot's beach) shades in gradually instead of as a
+// band, and over the lot it counts half as deep (see depthAt). `groundAt` is the ground's height
+// at a point, in the neighborhood's coordinates. Built in the lot's coordinates as the sea is.
+void addPoolStyleSea(SceneBuilder& builder, const PaintedTerrain& terrain, const LotFootprint& lot, const std::vector<std::array<int, 2>>& cells,
+                     const std::function<float(float, float)>& groundAt) {
+    // Quads a neighborhood tile is split into each way: over and beside the lot four to a lot tile,
+    // on the points the lot's terrain is drawn through (its ground can drop steeply within a tile),
+    // 2 apart elsewhere.
+    constexpr int kLotSteps = 40, kSteps = 5;
+    // The caustics reach full strength this deep.
+    constexpr float kCausticsFade = 1.5f;
+    // The haze and the caustics lie this far off the ground, out along its normal, so they stay in
+    // front of it on steep faces too.
+    constexpr float kLift = 0.03f;
+    // The two hazes: colour, most opacity, the depth they start at and how deep they take to
+    // reach about two thirds of it.
+    struct Haze {
+        std::array<float, 3> color;
+        float most, from, scale;
+    };
+    constexpr std::array<Haze, 2> kHazes{{{{0.3f, 0.52f, 0.68f}, 0.9f, 0, 0.8f}, {{0.02f, 0.08f, 0.24f}, 0.95f, 0.8f, 2}}};
+    const float tile = terrain.tileSize, sea = terrain.waterLevel;
+    const Transform toLot = lot.place.rigidInverse();
+    Surfaces surfaces;
+    std::array<int, 2> hazeMaterials{};
+    for (std::size_t k = 0; k < kHazes.size(); ++k) {
+        // Under the sea's surface (layer 6), the deeper haze drawn over the shallower one.
+        const auto& c = kHazes[k].color;
+        hazeMaterials[k] = builder.blendedColorMaterial("seaHaze-" + std::to_string(k + 1), {c[0], c[1], c[2], 1}, 3 + 2 * static_cast<int>(k));
+    }
+    // As bright on steep faces as on the bottom (caustics 4, see scene::Material::caustics).
+    const int causticsMaterial = builder.causticsOverlayMaterial("sea caustics");
+    if (causticsMaterial >= 0) {
+        builder.scene().materials[static_cast<std::size_t>(causticsMaterial)].caustics = 4;
+    }
+    using Corners = std::array<std::array<float, 3>, 4>;
+    // Corners in order around the quad. Over the lot it is split as the lot's terrain splits its
+    // quarter tiles, from their low x and y corner to their high one in the lot's coordinates,
+    // elsewhere as the skirt splits its own, the same way in the neighborhood's.
+    auto addQuad = [&](int material, const Corners& corners, const std::array<float, 4>& alphas, const Corners& normals, bool onLot) {
+        Primitive& p = surfaces[material];
+        const auto base = static_cast<std::uint32_t>(p.positions.size() / 3);
+        std::array<std::array<float, 3>, 4> local{};
+        for (std::size_t c = 0; c < 4; ++c) {
+            float at[3] = {corners[c][0], corners[c][1], corners[c][2]};
+            toLot.apply(at, true);
+            local[c] = {at[0], at[1], at[2]};
+            float n[3] = {normals[c][0], normals[c][1], normals[c][2]};
+            toLot.apply(n, false);
+            p.positions.insert(p.positions.end(), {at[0], at[1], at[2]});
+            p.normals.insert(p.normals.end(), {n[0], n[1], n[2]});
+            p.uvs.insert(p.uvs.end(), {0, 0});
+            p.alphas.push_back(alphas[c]);
+        }
+        const bool across = onLot && std::abs((local[0][0] - local[0][1]) - (local[2][0] - local[2][1])) > 0.1f;
+        if (across) {
+            p.indices.insert(p.indices.end(), {base, base + 1, base + 3, base + 1, base + 2, base + 3});
+        } else {
+            p.indices.insert(p.indices.end(), {base, base + 1, base + 2, base, base + 2, base + 3});
+        }
+    };
+    auto depthAt = [&](float x, float y, float ground) {
+        constexpr float kAround = 6, kStep = 3;
+        float sum = 0;
+        int n = 0;
+        for (float dx = -kAround; dx <= kAround; dx += kStep) {
+            for (float dy = -kAround; dy <= kAround; dy += kStep) {
+                sum += std::max(sea - groundAt(x + dx, y + dy), 0.0f);
+                ++n;
+            }
+        }
+        // The water over the lot counts half as deep, back to its own depth 6 out from the lot's
+        // edge, so the lot's beach stays light where its ground drops away.
+        constexpr float kLotDepth = 0.5f, kLotEase = 6;
+        const float outside = std::max({lot.x0 - x, x - lot.x1, lot.y0 - y, y - lot.y1, 0.0f});
+        const float scale = kLotDepth + (1 - kLotDepth) * std::min(outside / kLotEase, 1.0f);
+        return std::min(sea - ground, sum / static_cast<float>(n)) * scale;
+    };
+    auto normalAt = [&](float x, float y) {
+        constexpr float d = 0.5f;
+        const float dx = groundAt(x + d, y) - groundAt(x - d, y), dy = groundAt(x, y + d) - groundAt(x, y - d);
+        const float length = std::sqrt(dx * dx + dy * dy + 4 * d * d);
+        return std::array<float, 3>{-dx / length, -dy / length, 2 * d / length};
+    };
+    for (const auto& [cx, cy] : cells) {
+        const float x0 = static_cast<float>(cx) * tile, y0 = static_cast<float>(cy) * tile;
+        const bool onLot = x0 < lot.x1 && x0 + tile > lot.x0 && y0 < lot.y1 && y0 + tile > lot.y0;
+        // Tiles beside the lot share its fine points along their common edge, so the two meet
+        // without a crack.
+        const bool byLot = x0 <= lot.x1 && x0 + tile >= lot.x0 && y0 <= lot.y1 && y0 + tile >= lot.y0;
+        const int steps = byLot ? kLotSteps : kSteps;
+        const float step = tile / static_cast<float>(steps);
+        // The tile's grid points, each worked out once for the four quads that share it.
+        struct Point {
+            float x, y, ground, depth;
+            std::array<float, 3> normal;
+        };
+        const auto side = static_cast<std::size_t>(steps) + 1;
+        std::vector<Point> points(side * side);
+        for (std::size_t i = 0; i < side; ++i) {
+            for (std::size_t j = 0; j < side; ++j) {
+                Point& point = points[i * side + j];
+                point.x = x0 + static_cast<float>(i) * step;
+                point.y = y0 + static_cast<float>(j) * step;
+                point.ground = groundAt(point.x, point.y);
+                point.depth = depthAt(point.x, point.y, point.ground);
+                point.normal = normalAt(point.x, point.y);
+            }
+        }
+        for (std::size_t i = 0; i + 1 < side; ++i) {
+            for (std::size_t j = 0; j + 1 < side; ++j) {
+                std::array<std::array<float, 2>, 4> xy{};
+                std::array<float, 4> ground{}, depth{};
+                std::array<std::array<float, 3>, 4> normals{};
+                for (std::size_t c = 0; c < 4; ++c) {
+                    const std::size_t di = c == 1 || c == 2 ? 1 : 0, dj = c >= 2 ? 1 : 0;
+                    const Point& point = points[(i + di) * side + j + dj];
+                    xy[c] = {point.x, point.y};
+                    ground[c] = point.ground;
+                    depth[c] = point.depth;
+                    normals[c] = point.normal;
+                }
+                for (std::size_t k = 0; k < kHazes.size(); ++k) {
+                    if (hazeMaterials[k] < 0) {
+                        continue;
+                    }
+                    const Haze& haze = kHazes[k];
+                    std::array<float, 4> alphas{};
+                    Corners corners{};
+                    for (std::size_t c = 0; c < 4; ++c) {
+                        alphas[c] = haze.most * (1 - std::exp(-std::max(depth[c] - haze.from, 0.0f) / haze.scale));
+                        corners[c] = {xy[c][0] + normals[c][0] * kLift, xy[c][1] + normals[c][1] * kLift, ground[c] + normals[c][2] * kLift};
+                    }
+                    if (*std::max_element(alphas.begin(), alphas.end()) > 0) {
+                        addQuad(hazeMaterials[k], corners, alphas, normals, onLot);
+                    }
+                }
+                if (causticsMaterial >= 0) {
+                    // The depth under the water over kCausticsFade, negative above it and at most 1, so
+                    // the shader's own dimming with depth (for murky ponds) stays at its first step.
+                    std::array<float, 4> alphas{};
+                    Corners corners{};
+                    for (std::size_t c = 0; c < 4; ++c) {
+                        alphas[c] = std::min(depth[c] / kCausticsFade, 1.0f);
+                        corners[c] = {xy[c][0] + normals[c][0] * kLift, xy[c][1] + normals[c][1] * kLift, ground[c] + normals[c][2] * kLift};
+                    }
+                    if (*std::max_element(alphas.begin(), alphas.end()) > 0) {
+                        addQuad(causticsMaterial, corners, alphas, normals, onLot);
+                    }
+                }
+            }
+        }
+    }
+    if (!surfaces.empty()) {
+        builder.place(builder.addMesh("lot skirt sea depth", std::move(surfaces)), "lot skirt sea depth",
+                      Transform::at(0, 0, -kGroundDrop, 0) * lot.place, Part::Other);
+    }
+}
 
 } // namespace
 
@@ -27,9 +287,23 @@ SkirtArea lotSkirtArea(const PaintedTerrain& terrain, const LotFootprint& lot, i
     return a;
 }
 
+LotGroundLook lotGroundLook(const content::Lot& lot) {
+    LotGroundLook look;
+    if (!lot.terrainTextures) {
+        return look;
+    }
+    look.canvas = lot.terrainTextures->canvas;
+    for (std::size_t n = 0; n < lot.terrainTextures->paints.size(); ++n) {
+        if (const auto map = lot.flatGrids.find(content::kFirstPaintMapInstance + static_cast<std::uint32_t>(n)); map != lot.flatGrids.end()) {
+            look.paints.emplace_back(lot.terrainTextures->paints[n], map->second);
+        }
+    }
+    return look;
+}
+
 void addLotSkirt(SceneBuilder& builder, const PaintedTerrain& terrain, const LotFootprint& lot, int margin,
                  const std::string& terrainType, const std::map<std::string, std::string>& roadTextures,
-                 const Heights* lotHeights, int groundLevel) {
+                 const Heights* lotHeights, int groundLevel, const content::WorldBounds* bounds, const LotGroundLook* look) {
     if (terrain.columns < 2 || terrain.rows < 2) {
         return;
     }
@@ -71,6 +345,103 @@ void addLotSkirt(SceneBuilder& builder, const PaintedTerrain& terrain, const Lot
         return 1.0f;
     };
 
+    // The lot's own ground at a point, in the neighborhood's coordinates: its terrain blends its tile
+    // corners' heights.
+    const bool lotGrid = lotHeights != nullptr && lotHeights->grid() != nullptr;
+    // Drawn through the same points as the lot's terrain (see Heights::drawnGrid), four to a tile.
+    constexpr std::uint32_t kLotSteps = 4;
+    std::optional<float> lotSea;
+    if (builder.smoothLotSkirts()) {
+        float w[3] = {0, 0, terrain.waterLevel};
+        toLot.apply(w, true);
+        lotSea = w[2];
+    }
+    const std::vector<float> drawn = lotGrid ? lotHeights->drawnGrid(groundLevel, kLotSteps, lotSea) : std::vector<float>{};
+    const std::uint32_t drawnColumns = lotGrid ? (lotHeights->grid()->width - 1) * kLotSteps + 1 : 0;
+    const std::uint32_t drawnRows = lotGrid ? (lotHeights->grid()->height - 1) * kLotSteps + 1 : 0;
+    auto lotGround = [&](float wx, float wy) {
+        float p[3] = {wx, wy, 0};
+        toLot.apply(p, true);
+        const float u = std::clamp(p[0] * kLotSteps, 0.0f, static_cast<float>(drawnColumns - 1));
+        const float v = std::clamp(p[1] * kLotSteps, 0.0f, static_cast<float>(drawnRows - 1));
+        const auto i0 = std::min(static_cast<std::uint32_t>(u), drawnColumns - 2), j0 = std::min(static_cast<std::uint32_t>(v), drawnRows - 2);
+        const float fx = u - static_cast<float>(i0), fy = v - static_cast<float>(j0);
+        auto at = [&](std::uint32_t i, std::uint32_t j) { return drawn[static_cast<std::size_t>(i) * drawnRows + j]; };
+        const float low = at(i0, j0) * (1 - fx) + at(i0 + 1, j0) * fx;
+        const float high = at(i0, j0 + 1) * (1 - fx) + at(i0 + 1, j0 + 1) * fx;
+        p[2] = low * (1 - fy) + high * fy;
+        lot.place.apply(p, true);
+        return p[2];
+    };
+    // The skirt's ground in tile (x, y) at a point: two triangles a tile, as the game builds it.
+    auto skirtTriangles = [&](int x, int y, float wx, float wy) {
+        const float fx = std::clamp(wx / tile - static_cast<float>(x), 0.0f, 1.0f), fy = std::clamp(wy / tile - static_cast<float>(y), 0.0f, 1.0f);
+        const float a = corner(x, y)[2], b = corner(x + 1, y)[2], c = corner(x + 1, y + 1)[2], d = corner(x, y + 1)[2];
+        return fx >= fy ? a + fx * (b - a) + fy * (c - b) : a + fy * (d - a) + fx * (c - d);
+    };
+    // Not in the original game: with smooth lot skirts, a skirt tile sharing an edge with the lot
+    // follows the lot's own ground along that edge, where the game's meets it only at its tile
+    // corners and leaves a sliver of skirt between them. The difference eases out across
+    // the tile, so its other edges and its corners stay the game's. The shared edge, and whether it
+    // runs along y, for tile (x, y), if it has one.
+    const bool joinLot = builder.smoothLotSkirts() && lotGrid;
+    struct SharedEdge {
+        bool alongY = false;
+        float at = 0;
+    };
+    auto sharedEdge = [&](int x, int y) -> std::optional<SharedEdge> {
+        if (!joinLot) {
+            return std::nullopt;
+        }
+        if (y >= ly0 && y < ly1 && (x == lx1 || x == lx0 - 1)) {
+            return SharedEdge{true, static_cast<float>(x == lx1 ? lx1 : lx0) * tile};
+        }
+        if (x >= lx0 && x < lx1 && (y == ly1 || y == ly0 - 1)) {
+            return SharedEdge{false, static_cast<float>(y == ly1 ? ly1 : ly0) * tile};
+        }
+        return std::nullopt;
+    };
+    auto tileGround = [&](int x, int y, float wx, float wy) {
+        float h = skirtTriangles(x, y, wx, wy);
+        if (const auto edge = sharedEdge(x, y)) {
+            const float ex = edge->alongY ? edge->at : wx, ey = edge->alongY ? wy : edge->at;
+            const float away = edge->alongY ? std::abs(wx - edge->at) : std::abs(wy - edge->at);
+            h += (lotGround(ex, ey) - skirtTriangles(x, y, ex, ey)) * std::max(0.0f, 1 - away / tile);
+        }
+        return h;
+    };
+    // The ground at a point: the lot's own on the lot, else the skirt's.
+    auto surfaceAt = [&](float wx, float wy) {
+        if (lotGrid && wx >= lot.x0 && wx <= lot.x1 && wy >= lot.y0 && wy <= lot.y1) {
+            return lotGround(wx, wy);
+        }
+        const int ix = std::clamp(static_cast<int>(std::floor(wx / tile)), 0, static_cast<int>(terrain.columns) - 2);
+        const int iy = std::clamp(static_cast<int>(std::floor(wy / tile)), 0, static_cast<int>(terrain.rows) - 2);
+        return tileGround(ix, iy, wx, wy);
+    };
+    // A tile's quads: the whole tile, or a tile joined to the lot in quarter-tile quads. Calls
+    // `add(fx, fy)` for each point (fractions across the tile, corners in order), then indexes them.
+    constexpr int kJoinSteps = 40;
+    auto tileQuads = [&](Primitive& p, int x, int y, const std::function<void(float, float)>& add) {
+        const int steps = sharedEdge(x, y) ? kJoinSteps : 1;
+        for (int i = 0; i < steps; ++i) {
+            for (int j = 0; j < steps; ++j) {
+                const auto base = static_cast<std::uint32_t>(p.positions.size() / 3);
+                const float f0 = static_cast<float>(i) / static_cast<float>(steps), f1 = static_cast<float>(i + 1) / static_cast<float>(steps);
+                const float g0 = static_cast<float>(j) / static_cast<float>(steps), g1 = static_cast<float>(j + 1) / static_cast<float>(steps);
+                add(f0, g0);
+                add(f1, g0);
+                add(f1, g1);
+                add(f0, g1);
+                p.indices.insert(p.indices.end(), {base, base + 1, base + 2, base, base + 2, base + 3});
+            }
+        }
+    };
+    // A value at a point in a tile from its four corners' values (in order around it).
+    auto blend = [](const std::array<float, 4>& v, float fx, float fy) {
+        return (v[0] * (1 - fx) + v[1] * fx) * (1 - fy) + (v[3] * (1 - fx) + v[2] * fx) * fy;
+    };
+
     // The ground: two triangles a tile, its texture once a tile (from the tile's grid position).
     // Tiles touching the fading rings are blended, the rest opaque.
     Surfaces ground;
@@ -95,18 +466,36 @@ void addLotSkirt(SceneBuilder& builder, const PaintedTerrain& terrain, const Lot
                 solid = solid && fade(cx, cy) >= 1.0f;
             }
             Primitive& p = ground[solid ? material : faded];
-            const auto base = static_cast<std::uint32_t>(p.positions.size() / 3);
-            for (const auto& [cx, cy] : c) {
-                const auto pos = corner(cx, cy);
-                const auto n = normal(cx, cy);
-                p.positions.insert(p.positions.end(), pos.begin(), pos.end());
-                p.normals.insert(p.normals.end(), n.begin(), n.end());
-                p.uvs.insert(p.uvs.end(), {static_cast<float>(cx), static_cast<float>(cy)});
-                if (!solid) {
-                    p.alphas.push_back(fade(cx, cy));
-                }
+            std::array<float, 4> fades{};
+            std::array<std::array<float, 3>, 4> normals{};
+            for (std::size_t k = 0; k < 4; ++k) {
+                fades[k] = fade(c[k][0], c[k][1]);
+                normals[k] = normal(c[k][0], c[k][1]);
             }
-            p.indices.insert(p.indices.end(), {base, base + 1, base + 2, base, base + 2, base + 3});
+            tileQuads(p, x, y, [&](float fx, float fy) {
+                const float wx = (static_cast<float>(x) + fx) * tile, wy = (static_cast<float>(y) + fy) * tile;
+                p.positions.insert(p.positions.end(), {wx, wy, tileGround(x, y, wx, wy)});
+                std::array<float, 3> n{};
+                if (sharedEdge(x, y)) {
+                    // A tile following the lot's edge is lit by its own slope, turned up under the
+                    // sea, as the lot's ground beside it is, so the two meet without a line of light
+                    // and shade.
+                    constexpr float d = 0.25f;
+                    const float sx = (surfaceAt(wx + d, wy) - surfaceAt(wx - d, wy)) / (2 * d);
+                    const float sy = (surfaceAt(wx, wy + d) - surfaceAt(wx, wy - d)) / (2 * d);
+                    const float length = std::sqrt(sx * sx + sy * sy + 1);
+                    n = lotlightmaps::underwaterNormal({-sx / length, -sy / length, 1 / length}, terrain.waterLevel - tileGround(x, y, wx, wy));
+                } else {
+                    for (std::size_t k = 0; k < 3; ++k) {
+                        n[k] = blend({normals[0][k], normals[1][k], normals[2][k], normals[3][k]}, fx, fy);
+                    }
+                }
+                p.normals.insert(p.normals.end(), n.begin(), n.end());
+                p.uvs.insert(p.uvs.end(), {static_cast<float>(x) + fx, static_cast<float>(y) + fy});
+                if (!solid) {
+                    p.alphas.push_back(blend(fades, fx, fy));
+                }
+            });
         }
     }
     // The boundary curtain (the game's lotSkirtBoundaryClip): from 200 below the lowest corner of the
@@ -120,7 +509,179 @@ void addLotSkirt(SceneBuilder& builder, const PaintedTerrain& terrain, const Lot
                                                lowest - 200, lot.z + 200};
 
     // As low as the lot's own ground, which meets it at the lot's edges.
-    builder.place(builder.addMesh("lot skirt", std::move(ground)), "lot skirt", Transform::at(0, 0, -kGroundDrop, 0), Part::Skirt);
+    if (auto* i = builder.place(builder.addMesh("lot skirt", std::move(ground)), "lot skirt", Transform::at(0, 0, -kGroundDrop, 0), Part::Skirt)) {
+        i->seaReflected = true;
+    }
+
+    // The sand over the ground by the water, as the skirt's two sand passes draw it: "lot-sand-02"
+    // from the water's level up to 2 above it, and "terrain-deepwatersand" from 20 below it up to 5
+    // below, each fading out along its height range and with the ground's edge fade. Both only
+    // where some point within 2 tiles has ground at or below the water (points off the neighborhood
+    // count as 0 high), except that the first covers all ground below the water.
+    const float sea = terrain.waterLevel;
+    const int cols = static_cast<int>(terrain.columns), rows = static_cast<int>(terrain.rows);
+    auto nearWater = [&](int x, int y) {
+        for (int dy = -2; dy <= 2; ++dy) {
+            for (int dx = -2; dx <= 2; ++dx) {
+                const int nx = x + dx, ny = y + dy;
+                const float z = nx >= 0 && ny >= 0 && nx < cols && ny < rows ? corner(nx, ny)[2] : 0.0f;
+                if (z <= sea) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+    // How much of each sand shows at a grid point (0 to 1), before the edge fade.
+    auto sandAt = [&](int x, int y) {
+        const float z = corner(x, y)[2];
+        const bool near = nearWater(x, y);
+        const float h = z - sea, deep = z - (sea - 20);
+        const float shallowRamp = h < 0 ? 0 : h < 2 && near ? h * 0.5f : 1;
+        const float deepRamp = deep < 0 ? 0 : deep < 15 && near ? deep / 15 : 1;
+        return std::array<float, 2>{1 - shallowRamp, 1 - deepRamp};
+    };
+    const std::array<const char*, 2> sandTextures{"lot-sand-02", "terrain-deepwatersand"};
+    for (std::size_t k = 0; k < sandTextures.size(); ++k) {
+        // Drawn after the ground, the deep water's sand last.
+        const int sandMaterial = builder.blendedTextureMaterial(sandTextures[k], kSkirtLayer + 1 + 2 * static_cast<int>(k));
+        if (sandMaterial < 0) {
+            continue;
+        }
+        Surfaces sand;
+        Primitive& p = sand[sandMaterial];
+        for (int y = area.y0; y < area.y1; ++y) {
+            for (int x = area.x0; x < area.x1; ++x) {
+                if (x >= lx0 && x < lx1 && y >= ly0 && y < ly1) {
+                    continue;
+                }
+                const std::array<std::array<int, 2>, 4> c{{{x, y}, {x + 1, y}, {x + 1, y + 1}, {x, y + 1}}};
+                std::array<float, 4> alphas{};
+                bool shows = false;
+                for (std::size_t i = 0; i < c.size(); ++i) {
+                    alphas[i] = sandAt(c[i][0], c[i][1])[k] * fade(c[i][0], c[i][1]);
+                    shows = shows || alphas[i] > 0;
+                }
+                if (!shows) {
+                    continue;
+                }
+                tileQuads(p, x, y, [&](float fx, float fy) {
+                    const float wx = (static_cast<float>(x) + fx) * tile, wy = (static_cast<float>(y) + fy) * tile;
+                    p.positions.insert(p.positions.end(), {wx, wy, tileGround(x, y, wx, wy)});
+                    p.normals.insert(p.normals.end(), {0, 0, 1});
+                    p.uvs.insert(p.uvs.end(), {static_cast<float>(x) + fx, static_cast<float>(y) + fy});
+                    p.alphas.push_back(blend(alphas, fx, fy));
+                });
+            }
+        }
+        if (p.indices.empty()) {
+            continue;
+        }
+        if (auto* i = builder.place(builder.addMesh(sandTextures[k], std::move(sand)), "lot skirt sand", Transform::at(0, 0, -kGroundDrop, 0))) {
+            i->skirtSand = static_cast<int>(k) + 1;
+            i->seaReflected = true;
+        }
+    }
+    // Not in the original game: with smooth lot skirts the lot's own ground, its canvas and paints,
+    // carries on over the skirt beside it and fades out 4 from the lot's edge, so the change from
+    // one to the other is soft. Each paint is as strong as at the nearest point of the lot's edge,
+    // taken one point in, as the lot's saved strength maps hold 0 along their last row and column.
+    if (joinLot && look != nullptr && !look->canvas.empty()) {
+        constexpr float kBlend = 4, kRepeat = 20, kShade = 0.9f, kLift = 0.01f;
+        constexpr int kDetailRepeats = 5;
+        // Lit as the skirt's own ground is, with the lot's texture.
+        auto blended = [&](int m, int layer) {
+            if (m < 0 || material < 0) {
+                return -1;
+            }
+            Material copy = builder.scene().materials[static_cast<std::size_t>(material)];
+            copy.image = builder.scene().materials[static_cast<std::size_t>(m)].image;
+            copy.name = builder.scene().materials[static_cast<std::size_t>(m)].name + " (skirt blend)";
+            copy.alpha = AlphaMode::Blend;
+            copy.layer = layer;
+            builder.scene().materials.push_back(std::move(copy));
+            return static_cast<int>(builder.scene().materials.size() - 1);
+        };
+        // Over the skirt's ground and sand, the canvas first, then each paint.
+        std::vector<int> layers{blended(builder.terrainMaterial(look->canvas, kDetailRepeats, kShade, false), kSkirtLayer + 4)};
+        for (std::size_t n = 0; n < look->paints.size(); ++n) {
+            layers.push_back(blended(builder.terrainMaterial(look->paints[n].first, kDetailRepeats, kShade, true), kSkirtLayer + 5 + static_cast<int>(n)));
+        }
+        const float lotX = static_cast<float>(lotHeights->grid()->width - 1), lotY = static_cast<float>(lotHeights->grid()->height - 1);
+        auto strength = [&](const ts2::terrain::Array2D& map, float lx, float ly) {
+            if (map.width < 2 || map.height < 2) {
+                return 0.0f;
+            }
+            const auto i = std::clamp(static_cast<std::int32_t>(std::lround(std::clamp(lx, 0.0f, lotX) * 4)), 0, static_cast<std::int32_t>(map.width) - 2);
+            const auto j = std::clamp(static_cast<std::int32_t>(std::lround(std::clamp(ly, 0.0f, lotY) * 4)), 0, static_cast<std::int32_t>(map.height) - 2);
+            return static_cast<float>(map.byte(i, j)) / 255;
+        };
+        Surfaces band;
+        for (int y = area.y0; y < area.y1; ++y) {
+            for (int x = area.x0; x < area.x1; ++x) {
+                if (x >= lx0 && x < lx1 && y >= ly0 && y < ly1) {
+                    continue;
+                }
+                const float tx0 = static_cast<float>(x) * tile, ty0 = static_cast<float>(y) * tile;
+                const float away = std::max({lot.x0 - (tx0 + tile), tx0 - lot.x1, lot.y0 - (ty0 + tile), ty0 - lot.y1, 0.0f});
+                if (away >= kBlend) {
+                    continue;
+                }
+                for (std::size_t k = 0; k < layers.size(); ++k) {
+                    if (layers[k] < 0) {
+                        continue;
+                    }
+                    Primitive& p = band[layers[k]];
+                    const auto before = p.indices.size();
+                    bool shows = false;
+                    constexpr int kSteps = 40;
+                    for (int i = 0; i < kSteps; ++i) {
+                        for (int j = 0; j < kSteps; ++j) {
+                            const auto base = static_cast<std::uint32_t>(p.positions.size() / 3);
+                            bool quad = false;
+                            for (const auto& [di, dj] : {std::pair{0, 0}, std::pair{1, 0}, std::pair{1, 1}, std::pair{0, 1}}) {
+                                const float wx = tx0 + static_cast<float>(i + di) * tile / kSteps, wy = ty0 + static_cast<float>(j + dj) * tile / kSteps;
+                                const float d = std::max({lot.x0 - wx, wx - lot.x1, lot.y0 - wy, wy - lot.y1, 0.0f});
+                                float l[3] = {wx, wy, 0};
+                                toLot.apply(l, true);
+                                const float fadeOut = std::clamp(1 - d / kBlend, 0.0f, 1.0f) * fade(x, y);
+                                const float alpha = k == 0 ? fadeOut : strength(look->paints[k - 1].second, l[0], l[1]) * fadeOut;
+                                quad = quad || alpha > 0;
+                                p.positions.insert(p.positions.end(), {wx, wy, tileGround(x, y, wx, wy) + kLift});
+                                p.normals.insert(p.normals.end(), {0, 0, 1});
+                                p.uvs.insert(p.uvs.end(), {l[0] / kRepeat, l[1] / kRepeat});
+                                p.alphas.push_back(alpha);
+                            }
+                            if (quad) {
+                                p.indices.insert(p.indices.end(), {base, base + 1, base + 2, base, base + 2, base + 3});
+                                shows = true;
+                            } else {
+                                p.positions.resize(p.positions.size() - 12);
+                                p.normals.resize(p.normals.size() - 12);
+                                p.uvs.resize(p.uvs.size() - 8);
+                                p.alphas.resize(p.alphas.size() - 4);
+                            }
+                        }
+                    }
+                    if (!shows) {
+                        p.indices.resize(before);
+                    }
+                }
+            }
+        }
+        std::erase_if(band, [](const auto& entry) { return entry.second.indices.empty(); });
+        if (!band.empty()) {
+            if (auto* i = builder.place(builder.addMesh("lot skirt blend", std::move(band)), "lot skirt blend", Transform::at(0, 0, -kGroundDrop, 0),
+                                        Part::Skirt)) {
+                i->seaReflected = true;
+            }
+        }
+    }
+    const auto seaCells = addSkirtSea(builder, terrain, lot, area, bounds, [&](int x, int y) { return corner(x, y)[2]; });
+    if (builder.poolStyleSea() && bounds && lot.beachSide && !seaCells.empty()) {
+        const std::function<float(float, float)> groundAt = surfaceAt;
+        addPoolStyleSea(builder, terrain, lot, seaCells, groundAt);
+    }
 
     // The roads in the area, with the lot view's road textures, blended over the ground.
     Surfaces roads;
@@ -139,7 +700,9 @@ void addLotSkirt(SceneBuilder& builder, const PaintedTerrain& terrain, const Lot
         // Lit, blended over the ground, the texture clamped (the game's LotSkirtRoadMaterialDefinition).
         const int m = builder.textureMaterial(texture->second, 1.0f, true);
         builder.scene().materials[static_cast<std::size_t>(m)].alpha = AlphaMode::Blend;
-        builder.scene().materials[static_cast<std::size_t>(m)].layer = kSkirtLayer;
+        // With smooth lot skirts (not in the original game) after the lot's ground blended over the
+        // skirt, which would otherwise cover them.
+        builder.scene().materials[static_cast<std::size_t>(m)].layer = joinLot && look != nullptr ? kSkirtLayer + 40 : kSkirtLayer;
         builder.scene().materials[static_cast<std::size_t>(m)].clamp = true;
         Primitive& r = roads[m];
         const auto base = static_cast<std::uint32_t>(r.positions.size() / 3);
@@ -168,9 +731,29 @@ std::vector<std::size_t> lightLotSkirt(Scene& scene, bool day) {
     constexpr std::array<float, 3> kDay{1, 1, 1};
     constexpr std::array<float, 3> kNightGround{0.96f, 0.96f, 0.96f};
     constexpr std::array<float, 3> kNightRoads{0.83f, 0.83f, 0.94f};
+    // Its sand passes: one scale by day, and at night a blue for the sand by the water and a grey
+    // for the deep water's sand.
+    constexpr std::array<float, 4> kSandDay{0.965f, 0.965f, 1, 1};
+    constexpr std::array<float, 4> kNightSand{0.3f, 0.3f, 0.7f, 1};
+    constexpr std::array<float, 4> kNightDeepSand{0.4f, 0.4f, 0.4f, 1};
     std::vector<std::size_t> changed;
     for (std::size_t i = 0; i < scene.instances.size(); ++i) {
         auto& instance = scene.instances[i];
+        if (instance.name == "lot skirt sea") {
+            if (instance.seaNight != !day) {
+                instance.seaNight = !day;
+                changed.push_back(i);
+            }
+            continue;
+        }
+        if (instance.skirtSand != 0) {
+            const auto& sand = day ? kSandDay : instance.skirtSand == 1 ? kNightSand : kNightDeepSand;
+            if (instance.shapeColor != sand) {
+                instance.shapeColor = sand;
+                changed.push_back(i);
+            }
+            continue;
+        }
         if (instance.part != Part::Skirt) {
             continue;
         }

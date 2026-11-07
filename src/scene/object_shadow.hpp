@@ -39,6 +39,18 @@ Kind requested(const Facts& facts);
 // The kind drawn for an object standing `outdoors` (in room 0).
 Kind resolved(Kind requested, bool outdoors, const Facts& facts);
 
+// The Shadows option's parts that decide object and Sim shadows (Graphics Rules' objectShadows, simShadows and guob).
+struct Options {
+    bool sims = true;     // Sims' projected shadows
+    bool objects = true;  // objects' sun pictures
+    bool groups = true;   // models' shadow groups
+};
+
+// The kind drawn with these options for an object whose kind at High is `kind`. Without sun pictures
+// an object asking for one gets its shadow groups by the usual outdoor rule, and without shadow
+// groups it gets nothing.
+Kind inForce(Kind kind, const Facts& facts, const Options& options);
+
 // Whether the model's shadow groups are drawn.
 inline bool showsShadowGroups(Kind kind) {
     return kind == Kind::Model || kind == Kind::Quad;

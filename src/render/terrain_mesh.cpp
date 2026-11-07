@@ -77,12 +77,19 @@ ImposterMesh imposterParts(const scene::PaintedTerrain& t) {
             continue;
         }
         ImposterMesh::Part draw{part.kind};
+        draw.lot = part.lot;
         draw.texture = part.texture;
         draw.lightMap = part.lightMap >= 0 && static_cast<std::size_t>(part.lightMap) < t.imposterTextures.size() ? part.lightMap : -1;
         draw.tint = part.lightMapTint;
         draw.firstIndex = static_cast<std::uint32_t>(m.mesh.indices.size());
         draw.indexCount = static_cast<std::uint32_t>(part.indices.size());
         draw.vertexOffset = static_cast<std::int32_t>(m.mesh.vertices.size() / kImposterFloats);
+        for (std::size_t v = 0; v + 3 <= part.vertices.size(); v += kImposterFloats) {
+            for (std::size_t k = 0; k < 3; ++k) {
+                draw.low[k] = v == 0 ? part.vertices[k] : std::min(draw.low[k], part.vertices[v + k]);
+                draw.high[k] = v == 0 ? part.vertices[k] : std::max(draw.high[k], part.vertices[v + k]);
+            }
+        }
         m.mesh.vertices.insert(m.mesh.vertices.end(), part.vertices.begin(), part.vertices.end());
         m.mesh.indices.insert(m.mesh.indices.end(), part.indices.begin(), part.indices.end());
         m.draws.push_back(draw);

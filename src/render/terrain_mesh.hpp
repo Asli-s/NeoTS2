@@ -42,11 +42,13 @@ struct ImposterMesh {
     IndexedMesh mesh;
     struct Part {
         scene::PaintedTerrain::ImposterPart::Kind kind;
+        std::uint32_t lot = 0;      // the lot it shows
         std::uint32_t texture = 0;  // index into the terrain's imposterTextures
         int lightMap = -1;          // likewise, -1 for none
         std::array<float, 3> tint{1, 1, 1};
         std::uint32_t firstIndex = 0, indexCount = 0;
         std::int32_t vertexOffset = 0;  // in vertices
+        std::array<float, 3> low{}, high{};  // the box around its vertices
     };
     std::vector<Part> draws;
 };

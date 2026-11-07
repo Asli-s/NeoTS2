@@ -45,6 +45,11 @@ struct Surface {
 };
 Surface surface(const std::vector<Quarter>& quarters, const std::function<float(float x, float y)>& height);
 
+// Widens every pool water instance's box (Instance::poolBox) to take in all of them, so one sun's
+// view for the caustics covers the lot's pools and a beach sea drawn with their caustics (not in
+// the original game).
+void sharePoolBoxes(Scene& scene);
+
 // Scales the pools' surface highlights for the time of day, as the pool water material does: 0.75
 // by day, 0.2 at night. Returns the instances changed.
 std::vector<std::size_t> lightPoolWater(Scene& scene, bool day);

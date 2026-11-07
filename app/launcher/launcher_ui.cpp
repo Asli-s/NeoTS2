@@ -136,6 +136,8 @@ settings::LauncherSettings chosenSettings(const LauncherState& state) {
     out.renderer = state.renderer;
     out.smoothFollow = state.smoothFollow;
     out.poolStylePonds = state.poolStylePonds;
+    out.poolStyleSea = state.poolStyleSea;
+    out.smoothLotSkirts = state.smoothLotSkirts;
     out.windowSize = state.windowSize;
     out.uiScale = state.uiScale;
     return out;
@@ -535,7 +537,8 @@ void startPlaying(LauncherState& state, bool addNeighborhoods) {
         return;
     }
     const settings::WindowSize* size = settings::findWindowSize(state.windowSize);
-    state.game = startGame(install.root, folder, addNeighborhoods, builtRenderer(state.renderer), state.smoothFollow, state.poolStylePonds, size ? size->width : 0,
+    state.game = startGame(install.root, folder, addNeighborhoods, builtRenderer(state.renderer), state.smoothFollow, state.poolStylePonds, state.poolStyleSea, state.smoothLotSkirts,
+                           size ? size->width : 0,
                            size ? size->height : 0, size && size->fitScreen, state.uiScale, state.message);
     state.folderNotes.clear();
 }
@@ -707,6 +710,8 @@ void findInstalls(LauncherState& state, const settings::LauncherSettings& rememb
     state.renderer = builtRenderer(remembered.renderer);
     state.smoothFollow = remembered.smoothFollow;
     state.poolStylePonds = remembered.poolStylePonds;
+    state.poolStyleSea = remembered.poolStyleSea;
+    state.smoothLotSkirts = remembered.smoothLotSkirts;
     state.windowSize = remembered.windowSize;
     state.uiScale = remembered.uiScale;
     state.remembered = chosenSettings(state);
@@ -803,6 +808,14 @@ void drawChanges(LauncherState& state, const LauncherFonts& fonts) {
     ImGui::Checkbox("Pool-style ponds", &state.poolStylePonds);
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Draws the ponds on lots like pools: their waves, blue depth and caustics.");
+    }
+    ImGui::Checkbox("Pool-style sea", &state.poolStyleSea);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Keeps a beach lot's sea and its waves, and adds a colour that deepens with the water and the pools' caustics under it.");
+    }
+    ImGui::Checkbox("Smooth lot skirts", &state.smoothLotSkirts);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Joins each lot to the ground around it without the game's thin seams along its edges.");
     }
     const auto scaleLabel = [](int scale) { return scale == 100 ? std::string("100% (original)") : std::to_string(scale) + "%"; };
     ImGui::AlignTextToFramePadding();

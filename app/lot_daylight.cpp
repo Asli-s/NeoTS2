@@ -95,9 +95,10 @@ void LotDaylight::update(double seconds, std::span<const std::int16_t> globals, 
             wanted = std::move(byClock);
         }
     }
-    if (wanted == state_ && !lampsChanged) {
+    if (wanted == state_ && !lampsChanged && !again_) {
         return;
     }
+    again_ = false;
     // The lot's lamps and windows are read here, where the game's files are. The rest runs beside.
     std::shared_ptr<LotLight> light;
     lamps_.clear();

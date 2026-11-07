@@ -72,7 +72,8 @@ struct Neighborhood {
     std::map<std::int32_t, std::uint8_t> lotTypes;
     // Each placed lot's owner (a neighbor id, 0 for none).
     std::map<std::int32_t, std::int32_t> lotOwners;
-    // Each placed lot's size in tiles and, on a beach lot (description flag 0x80), its beach's side.
+    // Each placed lot's size in neighborhood tiles (ten of its own tiles each) and, on a beach lot
+    // (description flag 0x80), its beach's side.
     struct LotShape {
         std::uint32_t width = 0, depth = 0;
         std::optional<std::uint8_t> beachSide;

@@ -395,4 +395,50 @@ int groundGridLevel(const Lot& lot) {
     return floors != lot.grids.end() && level >= 0 && static_cast<std::uint32_t>(level) < floors->second.levels ? level : 0;
 }
 
+int topGridLevel(const Lot& lot) {
+    if (!lot.worldBounds) {
+        return -1;
+    }
+    const int level = gridIndex(lot, lot.worldBounds->maxLevel);
+    const auto floors = lot.grids.find(kFloorGridInstance);
+    return floors != lot.grids.end() && level >= 0 && static_cast<std::uint32_t>(level) < floors->second.levels ? level : -1;
+}
+
+bool isBeachLocation(const WorldBounds& bounds, std::optional<std::uint8_t> beachSide, double x, double y, int mask) {
+    // The far edges are the last tiles' far sides.
+    const double minX = bounds.minX, minY = bounds.minY;
+    const double maxX = static_cast<double>(bounds.maxX) + 1, maxY = static_cast<double>(bounds.maxY) + 1;
+    if (!beachSide || !std::isfinite(x) || !std::isfinite(y) || x < minX || y < minY || x > maxX || y > maxY) {
+        return false;
+    }
+    // A band from `from` to `from` + `size` tiles off the beach side's edge, ends included.
+    const auto band = [&](double from, double size) {
+        switch (*beachSide) {
+        case 0: return std::trunc(maxX - from) - size <= x && x <= std::trunc(maxX - from);
+        case 1: return from <= y && y <= from + size;
+        case 2: return from <= x && x <= from + size;
+        case 3: return std::trunc(maxY - from) - size <= y && y <= std::trunc(maxY - from);
+        default: return false;
+        }
+    };
+    double from = 0, size = 0;
+    bool in = false;
+    if (mask & 4) {
+        from = 12;
+        size = 8;
+        in = band(from, size);
+    }
+    if (!in && (mask & 2)) {
+        from = 8;
+        size = 4;
+        in = band(from, size);
+    }
+    if (!in && (mask & 1)) {
+        from = 0;
+        size = 8;
+    }
+    // The game tests the last band asked for again (or the empty band with no mask) when none matched.
+    return in || band(from, size);
+}
+
 } // namespace ts2::content

@@ -87,8 +87,9 @@ Grid build(const Inputs& in, const std::array<float, 3>& sun) {
                             const float px = (static_cast<float>(kSamplesPerTile * tx + c) + 0.5f) * kCell;
                             const float py = (static_cast<float>(kSamplesPerTile * ty + r) + 0.5f) * kCell;
                             const std::size_t s = at(kSamplesPerTile * tx + c, kSamplesPerTile * ty + r);
-                            g.heights[s] = floorCorners.at(px, py);
-                            g.ground[s] = groundCorners.at(px, py);
+                            const float groundHere = in.drawnGround ? in.drawnGround(px, py) : groundCorners.at(px, py);
+                            g.heights[s] = level == 0 ? groundHere : floorCorners.at(px, py);
+                            g.ground[s] = groundHere;
                         }
                     }
                     break;

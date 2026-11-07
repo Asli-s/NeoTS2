@@ -39,6 +39,8 @@ struct LauncherState {
     std::string renderer;             // what the game is asked to draw with: "sdlgpu", "gl2", or empty for its own choice
     bool smoothFollow = false;        // see LauncherSettings::smoothFollow
     bool poolStylePonds = false;      // see LauncherSettings::poolStylePonds
+    bool poolStyleSea = false;        // see LauncherSettings::poolStyleSea
+    bool smoothLotSkirts = false;     // see LauncherSettings::smoothLotSkirts
     std::string windowSize;           // see LauncherSettings::windowSize
     int uiScale = 100;                // see LauncherSettings::uiScale
     std::array<char, 128> newFolderName{};  // what the player types for a new save folder (UTF-8)

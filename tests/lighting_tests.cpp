@@ -1469,6 +1469,45 @@ void groundNormalsUseTheLotsOwnTriangles() {
     CHECK(lotlightmaps::groundNormals(huge).corners.empty());
 }
 
+// A lot's ground drawn other than saved (smooth lot skirts) is shaded by its drawn slope, turned
+// straight up from 1 under the sea, and a malformed one gives none.
+void drawnGroundNormalsFollowTheDrawnSlope() {
+    using namespace ts2::scene;
+    // Two tiles by one, two points a tile, rising one a tile along x, the sea at 1.
+    Scene::DrawnGround ramp{2, 5, 3, {}, 1};
+    for (std::uint32_t i = 0; i < 5; ++i) {
+        for (std::uint32_t j = 0; j < 3; ++j) {
+            ramp.heights.push_back(static_cast<float>(i) / 2);
+        }
+    }
+    const auto normals = lotlightmaps::groundNormals(ramp);
+    CHECK(normals.width == 2 && normals.height == 1 && normals.steps == 2 && normals.corners.size() == 15);
+    // Above the sea it leans back along -x by 45 degrees.
+    const auto dry = normals.at(1.5f, 0.5f);
+    CHECK(std::abs(dry[0] + 0.70710678f) < 1e-5f && std::abs(dry[2] - 0.70710678f) < 1e-5f);
+    // 1 under the sea it faces straight up, and half way it leans less.
+    Scene::DrawnGround deep = ramp;
+    deep.sea = 10;
+    CHECK(std::abs(lotlightmaps::groundNormals(deep).at(1, 0.5f)[2] - 1) < 1e-5f);
+    const auto half = lotlightmaps::underwaterNormal({-0.70710678f, 0, 0.70710678f}, 0.5f);
+    CHECK(half[0] < 0 && half[0] > -0.70710678f && std::abs(half[0] * half[0] + half[2] * half[2] - 1) < 1e-5f);
+    // Heights that don't fill the grid give none.
+    Scene::DrawnGround broken = ramp;
+    broken.heights.pop_back();
+    CHECK(lotlightmaps::groundNormals(broken).corners.empty());
+    CHECK(lotlightmaps::groundNormals(Scene::DrawnGround{}).corners.empty());
+    // Its heights blend between its points, and the sun's shadow grid takes them for the ground.
+    CHECK(std::abs(lotlightmaps::drawnHeight(ramp, 1.25f, 0.5f) - 1.25f) < 1e-5f && lotlightmaps::drawnHeight(broken, 1, 1) == 0);
+    lotshadow::Inputs lot;
+    lot.width = 2;
+    lot.height = 1;
+    lot.levels = 1;
+    lot.corner = [](int, int, int) { return 5.0f; };
+    lot.drawnGround = [&](float x, float y) { return lotlightmaps::drawnHeight(ramp, x, y); };
+    const auto grid = lotshadow::build(lot, {0, 0, -1});
+    CHECK(grid.width > 0 && std::abs(grid.groundAt(0, 0) - lotlightmaps::drawnHeight(ramp, 0.5f * lotshadow::kCell, 0.5f * lotshadow::kCell)) < 1e-5f);
+}
+
 // A fence casts its shadow from the top of its post model, or its rail's when it has no post.
 void fencesCastFromTheirModelsTop() {
     using namespace ts2::scene;
@@ -1615,6 +1654,7 @@ std::vector<Test> lightingTests() {
         {"Sim shadows follow the game", simShadowsFollowTheGame},
         {"object shadows follow the game", objectShadowsFollowTheGame},
         {"ground normals use the lot's own triangles", groundNormalsUseTheLotsOwnTriangles},
+        {"drawn ground normals follow the drawn slope", drawnGroundNormalsFollowTheDrawnSlope},
         {"fences cast from their models' top", fencesCastFromTheirModelsTop},
     };
 }

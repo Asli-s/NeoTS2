@@ -62,4 +62,11 @@ Kind resolved(Kind requested, bool outdoors, const Facts& f) {
     }
 }
 
+Kind inForce(Kind kind, const Facts& facts, const Options& options) {
+    if (kind == Kind::Sun && !options.objects) {
+        kind = resolved(Kind::Quad, true, facts);
+    }
+    return showsShadowGroups(kind) && !options.groups ? Kind::None : kind;
+}
+
 } // namespace ts2::scene::objectshadow
