@@ -61,6 +61,9 @@ struct Material {
     int image = -1;  // index into Scene::images, -1 for none
     AlphaMode alpha = AlphaMode::Opaque;
     float alphaReference = 0.5f;  // Mask: drawn where alpha is at least this
+    // A Sim's hair in blend mode: blended, but it writes depth and drops alpha of 60 out of 255 and
+    // below, as the game's hair state does. Strands drawn first hide the ones behind them.
+    bool blendedHair = false;
     bool doubleSided = false;
     bool alphaReplicate = false;  // the texture's alpha stands in for its colour (stdMatBaseTextureAlphaReplicate)
     // A texture of `tiles` frames side by side, shown one at a time, `tileSpeed` frames a second on
@@ -72,6 +75,10 @@ struct Material {
     // (ObjectLighting::textureLight), as the game's standard material draws it.
     bool takesTextureLight = false;
     bool vertexColor = false;  // the game's VertexAlpha: colored and see-through by its vertices' colors
+    // Whether an instance's shape colour (Instance::shapeColor) draws it blended and times that
+    // colour. The game's TextureAlpha material has no shape colour, so a fading prop's ground
+    // shadow stays as it is.
+    bool takesShapeColor = true;
     bool clamp = false;  // its texture is clamped at the edges instead of repeating
     // The game's draw layer (its shader's -layer): lower layers are drawn first. Opaque materials
     // use even layers (0 by default), blended ones odd (17 by default).
@@ -88,12 +95,18 @@ struct Material {
     // meshes with tangents the first lights per pixel (through the normal map, or straight out
     // without one), each times 0.8 but not the diffuse.
     bool simLighting = false;
+    // A face's skin (SimSkin with eyeGizmoEnable): clips move its eyes by shifting their texture
+    // coordinates (see Primitive::eyeUvs).
+    bool eyes = false;
     // The standard material's environment cube reflection (stdMatEnvCube...): the cube (index into
     // Scene::envCubes, -1 for none) seen along the reflected view, times envCubeCoef, added to the
     // lit colour. Locked to the camera, it is looked up in the camera's space instead of the world's.
     int envCube = -1;
     std::array<float, 3> envCubeCoef{0, 0, 0};
     bool envCubeLocked = false;
+    // Whether the cube is dimmed by the light set's texture light, as the standard material's is.
+    // The lot skirt's sea keeps its colour by day and night.
+    bool envCubeTakesLight = true;
     // The standard material's specular: per vertex from each directional light, the reflected view
     // against the light to the power specPower, times specCoef. A power of 0 is none.
     std::array<float, 3> specCoef{0, 0, 0};
@@ -113,9 +126,16 @@ struct Material {
     // game turns into normal maps as it loads them, which tint the water blue.
     bool pondWater = false;
     std::array<int, 2> ripples{-1, -1};
+    // The sea around a beach lot, drawn by the game's lotSkirtSea material: the lot's sky, the skirt's
+    // ground and sand, the lot's terrain and the neighborhood's plants mirrored in it (see
+    // Instance::seaReflected), rippled by `normalMap`, a tint added, see-through by the view's angle
+    // plus each vertex's first texture coordinate (the water's depth). Where it can't be drawn the
+    // material's sky cube stands in, as the game's lotSkirtSeaNoReflection.
+    bool skirtSea = false;
     // Lit by the pools' caustics as the game's pool floors (1) and pool walls (2) are, instead of
     // their light map alone. 3 is the floors' caustics alone, added over what is below (see
-    // SceneBuilder::causticsOverlayMaterial). 0 for none.
+    // SceneBuilder::causticsOverlayMaterial). 4 is the same with faces turned from the sun lit as
+    // fully as the rest (a beach sea drawn with them, not in the original game). 0 for none.
     int caustics = 0;
 };
 
@@ -129,6 +149,9 @@ constexpr int kHiddenMaterial = -2;
 struct Primitive {
     int material = -1;  // index into Scene::materials, -1 for none
     std::string group;  // the model's mesh group it was made from (lower case), empty for others
+    // The mesh group's number that orders an object's blended surfaces of one layer, the lowest
+    // drawn first. A hair's outer strands have the highest.
+    int alphaSort = -1;
     std::vector<float> positions, normals, uvs, alphas;
     std::vector<float> tangents;  // x, y, z per vertex, for normal maps, empty for none
     std::vector<float> colors;  // rgb per vertex, multiplying the material's (white when empty)
@@ -137,6 +160,16 @@ struct Primitive {
     std::vector<std::uint32_t> indices;
     std::vector<std::uint8_t> joints;
     std::vector<float> weights;
+    // Its morphs, empty for none: per vertex four streams, each a position delta and a normal delta
+    // (x, y, z, zero where the stream moves nothing) and the morph the stream takes (an index into
+    // Mesh::morphs, kNoMorph for none). A vertex moves by each delta times its morph's weight.
+    std::vector<float> positionDeltas, normalDeltas;
+    std::vector<std::uint8_t> morphs;
+    // A face's second texture coordinates (two per vertex), with its material's eyes: u is 1 on the
+    // eyes' vertices, v how far each is stretched, below 1 on the right eye, above on the left.
+    std::vector<float> eyeUvs;
+    static constexpr std::uint8_t kNoMorph = 255;
+    static constexpr std::size_t kMorphStreams = 4;
     // Where the node of the model it belongs to sits in the model.
     std::array<float, 3> origin{0, 0, 0};
 };
@@ -153,10 +186,17 @@ struct SkinJoint {
     std::optional<Transform> rest;
 };
 
+// A morph a clip can weigh by its blend group and name (both lower case).
+struct MorphName {
+    std::string group, name;
+    bool operator==(const MorphName&) const = default;
+};
+
 struct Mesh {
     std::string name;
     std::vector<Primitive> primitives;
     std::vector<SkinJoint> skin;
+    std::vector<MorphName> morphs;  // the morphs its primitives take, by Primitive::morphs
 };
 
 // What a placed mesh is, for choosing what a view shows.
@@ -186,6 +226,11 @@ struct Instance {
     int level = 0;  // the storey it is on, as the lot's height grid counts them
     // Lot objects: the id of the game object it draws (0 for anything else).
     std::uint32_t object = 0;
+    // Lot objects and Sims: a script has hidden its model, on every storey and in every view.
+    bool hidden = false;
+    // Neighborhood plants and decorations: the ground they cover as their record stores it (x0, y0,
+    // x1, y1 in world units), which decides whether lot view fades them.
+    std::optional<std::array<float, 4>> ground;
     // Walls and hubs come in a full and a cut-down version (`cut`). `walls` (indexes into
     // Scene::walls) are a wall's own, the walls meeting at a hub, or those a door or window sits in.
     bool cut = false;
@@ -205,6 +250,13 @@ struct Instance {
     // (see lightLotSkirt).
     bool skirtRoad = false;
     std::array<float, 3> skirtScale{1, 1, 1};
+    // The lot skirt's sand over its ground: 1 the sand by the water, 2 the deep water's sand, 0 none.
+    // Its time-of-day scale is its shape colour (see lightLotSkirt).
+    int skirtSand = 0;
+    // Drawn into the beach sea's mirror image (see Material::skirtSea), and whether that sea is
+    // tinted for the night.
+    bool seaReflected = false;
+    bool seaNight = false;
     // The pools' water: left out of their own reflection, its surface's highlight scaled by the
     // time of day (see poolwater::lightPoolWater).
     bool poolWater = false;
@@ -238,6 +290,10 @@ struct Instance {
     // the lot does). Its materials then draw blended, without reflections, their colour and alpha
     // times this.
     std::optional<std::array<float, 4>> shapeColor;
+    // A neighbor's house drawn for real around the lot: lit once by day and tinted by the light the lots'
+    // imposters take (see IRenderer::setImposterLight), as it isn't lit again as the hours pass. Its
+    // ground takes the light of the ground around the lot instead.
+    bool neighborHouse = false;
     // Lot objects: what decides their shadow, and the shadow drawn (the kind they ask for until the
     // lot's lighting knows which room they stand in).
     objectshadow::Facts shadowFacts;
@@ -259,6 +315,32 @@ struct WallInfo {
     bool attic = false;
 };
 
+// Images a neighborhood and the lots shown in it use alike, kept once. They rarely change after
+// being made, and a change to images another scene also holds copies them first.
+class SharedImages {
+public:
+    SharedImages() = default;
+    SharedImages(std::vector<Image> images) : images_(std::make_shared<std::vector<Image>>(std::move(images))) {}
+    std::size_t size() const { return images_ ? images_->size() : 0; }
+    bool empty() const { return size() == 0; }
+    const Image& operator[](std::size_t i) const { return (*images_)[i]; }
+    const Image& front() const { return images_->front(); }
+    const Image* begin() const { return images_ ? images_->data() : nullptr; }
+    const Image* end() const { return images_ ? images_->data() + images_->size() : nullptr; }
+    void clear() { images_.reset(); }
+    void push_back(Image image) {
+        if (!images_) {
+            images_ = std::make_shared<std::vector<Image>>();
+        } else if (images_.use_count() > 1) {
+            images_ = std::make_shared<std::vector<Image>>(*images_);
+        }
+        images_->push_back(std::move(image));
+    }
+
+private:
+    std::shared_ptr<std::vector<Image>> images_;
+};
+
 // A neighborhood's painted terrain, drawn as the game draws it: each paint's texture times its
 // alpha map, added up. A vertex per tile corner, row by row. Its texture coordinates are its
 // column and row.
@@ -269,7 +351,7 @@ struct PaintedTerrain {
     std::vector<float> normals;          // x, y, z per vertex
     std::uint32_t alphaSize = 0;         // alpha maps are alphaSize square, a byte per texel
     std::vector<std::uint8_t> alphas;    // one map per paint, in paint order
-    std::vector<Image> textures;         // every paint's every variant, all the same size
+    SharedImages textures;               // every paint's every variant, all the same size
     float textureRepeat = 13;            // tiles a paint texture covers
     std::uint32_t cellTiles = 13, cellsX = 0, cellsY = 0;  // the variant grid
     std::vector<std::uint8_t> cellTextures;  // per paint, per cell (row by row): index into textures
@@ -302,7 +384,7 @@ struct PaintedTerrain {
         std::uint32_t piece = 0;                        // the road piece it shows
     };
     std::vector<RoadQuad> roads;
-    std::vector<Image> roadTextures;  // all the same size
+    SharedImages roadTextures;  // all the same size
 
     // The lots, each drawn as its imposter: flat models of its terrain, walls, object slices and
     // roofs, with textures rendered from the lot (so with alpha already multiplied in). As the
@@ -320,7 +402,7 @@ struct PaintedTerrain {
         std::vector<std::uint32_t> indices;
     };
     std::vector<ImposterPart> imposters;
-    std::vector<Image> imposterTextures;
+    SharedImages imposterTextures;
     float imposterLift = 0;  // how far the imposters are raised above their lots (the neighborhood view's)
     // Tiles left out of the terrain and water (under a lot shown in full), row by row. None when empty.
     std::vector<std::uint8_t> hiddenTiles;
@@ -549,8 +631,20 @@ struct Scene {
     std::function<std::optional<float>(int level, int x, int y)> floorCorner;
     // The level (see Instance::level) of a lot's ground storey.
     int groundLevel = 0;
+    // The level the lot's saved world bounds reach, where the view stops going up. -1 when unknown.
+    int boundsTopLevel = -1;
     // A lot's size in tiles along x and y, in its own coordinates from (0, 0). Zero when unknown.
     std::array<float, 2> lotSize{0, 0};
+    // A lot's ground as drawn when it differs from its saved heights (smooth lot skirts round its sea
+    // bed, not in the original game), so its light map is shaded by the drawn slope: heights at
+    // `steps` points a tile each way, by column then row, and the sea's level, in lot coordinates.
+    // Empty otherwise.
+    struct DrawnGround {
+        std::uint32_t steps = 0, columns = 0, rows = 0;
+        std::vector<float> heights;
+        float sea = 0;
+    };
+    DrawnGround drawnGround;
     // A lot's: the lights a thing or a Sim (`group`) standing at `inLot` (in the lot's own
     // coordinates) gets from the room there, one set per part of its mesh, none outdoors (see
     // objectlights::thingLights).

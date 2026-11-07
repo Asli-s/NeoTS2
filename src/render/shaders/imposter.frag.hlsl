@@ -9,8 +9,9 @@ COMBINED SamplerState imageSampler : register(s0, space2);
 cbuffer Part : register(b0, space3) {
     float3 tint;   // the terrain light map's tint
     float cutoff;  // drawn only where alpha is above this
-    float mode;    // 0 terrain light map (second coordinates, tinted), 1 texture, 2 roof (opaque)
+    float mode;    // 0 terrain light map (second coordinates, tinted), 1 texture, 2 roof
     float3 light;  // the texture light colour walls, roofs and slices are multiplied by
+    float alpha;   // a fading imposter's shape colour alpha (walls, roofs and slices), 1 for none
 };
 
 struct Input {
@@ -27,9 +28,8 @@ float4 main(Input input) : SV_Target {
     } else {
         color = image.Sample(imageSampler, input.uv);
         color.rgb *= light;
-        if (mode > 1.5) {
-            color.a = 1;
-        }
+        // A roof's alpha is the shape colour's, a wall's its texture's times it.
+        color.a = mode > 1.5 ? alpha : color.a * alpha;
     }
     if (color.a <= cutoff) {
         discard;

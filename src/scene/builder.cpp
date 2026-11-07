@@ -4,9 +4,11 @@
 #include "scene/texture_blend.hpp"
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -202,8 +204,18 @@ void addQuad(Primitive& p, const std::array<std::array<float, 3>, 4>& c, const s
     }
 }
 
-int SceneBuilder::model(const std::string& name, const std::vector<sg::MaterialOverride>& overrides, const MeshEdit* edit) {
-    std::string key = lower(name);
+namespace {
+
+// Keeps apart models of one name at different keys, as mods often clone a model without renaming it.
+std::string modelKeyText(const sg::Link* at) {
+    return at == nullptr ? std::string() : "|at=" + std::to_string(at->group) + ":" + std::to_string(at->instance) + ":" + std::to_string(at->instanceHigh);
+}
+
+} // namespace
+
+int SceneBuilder::model(const std::string& name, const std::vector<sg::MaterialOverride>& overrides, const MeshEdit* edit,
+                        const sg::Link* at, bool hair) {
+    std::string key = lower(name) + modelKeyText(at) + (hair ? "|hair" : "");
     if (edit != nullptr) {
         key += "|" + edit->key;
     }
@@ -213,7 +225,7 @@ int SceneBuilder::model(const std::string& name, const std::vector<sg::MaterialO
     if (const auto it = models_.find(key); it != models_.end()) {
         return it->second;
     }
-    return models_[key] = buildModel(name, overrides, nullptr, false, nullptr, {}, edit);
+    return models_[key] = buildModel(name, overrides, nullptr, false, nullptr, {}, edit, at, hair);
 }
 
 int SceneBuilder::posedModel(const std::string& name, const std::vector<sg::MaterialOverride>& overrides, const Pose& pose,
@@ -296,8 +308,9 @@ int SceneBuilder::savedPoseModel(const std::string& name, const std::vector<sg::
     return models_[key] = buildModel(name, overrides, nullptr, false, &places, boneKey);
 }
 
-int SceneBuilder::skinnedModel(const std::string& name, const std::vector<sg::MaterialOverride>& overrides, const MeshEdit* edit) {
-    std::string key = lower(name) + "|skinned";
+int SceneBuilder::skinnedModel(const std::string& name, const std::vector<sg::MaterialOverride>& overrides, const MeshEdit* edit,
+                               const sg::Link* at, bool hair) {
+    std::string key = lower(name) + modelKeyText(at) + (hair ? "|hair" : "") + "|skinned";
     if (edit != nullptr) {
         key += "|" + edit->key;
     }
@@ -307,7 +320,7 @@ int SceneBuilder::skinnedModel(const std::string& name, const std::vector<sg::Ma
     if (const auto it = models_.find(key); it != models_.end()) {
         return it->second;
     }
-    return models_[key] = buildModel(name, overrides, nullptr, true, nullptr, {}, edit);
+    return models_[key] = buildModel(name, overrides, nullptr, true, nullptr, {}, edit, at, hair);
 }
 
 const Transform* SceneBuilder::bone(const std::string& model, const std::string& node) const {
@@ -319,12 +332,17 @@ const Transform* SceneBuilder::bone(const std::string& model, const std::string&
     return b != m->second.end() ? &b->second : nullptr;
 }
 
-int SceneBuilder::material(const std::string& name) {
-    const std::string key = lower(name);
+int SceneBuilder::material(const std::string& name, bool hair) {
+    const std::string key = lower(name) + (hair ? "|hair" : "");
     if (const auto it = materials_.find(key); it != materials_.end()) {
         return it->second;
     }
     const auto data = assets_.byName(kTxmt, name + "_txmt");
+    // Only a file's SimStandardMaterial differs on a hair part. Anything else, such as the scalp's
+    // composited skin, is the material of that name.
+    if (hair && !data) {
+        return material(name);
+    }
     if (!data) {
         // A counter's top is named "<top>-cutout-<mask texture>" while something such as a sink sits
         // in it ("-cutout-0" for nothing): the top with the mask's hole cut out, made while playing.
@@ -343,6 +361,12 @@ int SceneBuilder::material(const std::string& name) {
         assets_.warnings.push_back("material " + name + ": " + ex.what());
         ++missingMaterials;
         return materials_[key] = -1;
+    }
+    if (hair && m.type != "SimStandardMaterial") {
+        return material(name);
+    }
+    if (hair) {
+        m.type = "SimHair";
     }
     const bool deprecated = asStandardMaterial(m);
     Material out;
@@ -370,6 +394,7 @@ int SceneBuilder::material(const std::string& name) {
         out.unlit = true;
         out.alpha = AlphaMode::Blend;
         out.layer = stdLayer * 18 + 17;
+        out.takesShapeColor = false;
         return addMaterial(key, std::move(out));
     }
     const auto c = diffuse(m);
@@ -492,7 +517,8 @@ int SceneBuilder::material(const std::string& name) {
     // The Sims' materials. Those not composited take their own normal map, as the Sim shader does
     // (a composited outfit's bump composite is not made yet).
     out.simLighting = m.type == "SimSkin" || m.type == "SimStandardMaterial" || m.type == "SimHair";
-    if (m.type == "SimStandardMaterial" && enabled("stdMatNormalMapTextureEnabled") && !out.unlit) {
+    out.eyes = m.type == "SimSkin" && enabled("eyeGizmoEnable");
+    if ((m.type == "SimStandardMaterial" || m.type == "SimHair") && enabled("stdMatNormalMapTextureEnabled") && !out.unlit) {
         const std::string bump = property(m, "stdMatNormalMapTextureName");
         out.normalMap = normalMap(bump.empty() ? "reggrid-bump" : bump);
     }
@@ -508,6 +534,7 @@ int SceneBuilder::material(const std::string& name) {
         }
     }
     out.doubleSided = property(m, "stdMatCullMode") == "none";
+    out.blendedHair = m.type == "SimHair" && property(m, "stdMatAlphaBlendMode") == "blend";
     // As the game's material scripts number it: a Sim's hair blends 3 above its opaque layer instead
     // of 17, so it is drawn before other blended surfaces of the same stdMatLayer. Every blend mode
     // counts, adding ones too.
@@ -615,6 +642,84 @@ int SceneBuilder::causticsOverlayMaterial(const std::string& name) {
     m.color = {0, 0, 0, 1};
     m.alpha = AlphaMode::Sum;
     m.caustics = 3;
+    return addMaterial(key, std::move(m));
+}
+
+int SceneBuilder::blendedTextureMaterial(const std::string& texture, int layer) {
+    const std::string key = lower(texture) + " blended " + std::to_string(layer);
+    if (const auto it = materials_.find(key); it != materials_.end()) {
+        return it->second;
+    }
+    Material m;
+    m.name = texture;
+    const std::string opaqueKey = "opaque|" + lower(texture);
+    if (const auto it = images_.find(opaqueKey); it != images_.end()) {
+        m.image = it->second;
+    } else if (auto img = assets_.texture(texture)) {
+        for (std::size_t i = 3; i < img->rgba.size(); i += 4) {
+            img->rgba[i] = 255;
+        }
+        for (auto& level : img->smallerLevels) {
+            for (std::size_t i = 3; i < level.size(); i += 4) {
+                level[i] = 255;
+            }
+        }
+        m.image = images_[opaqueKey] = addImage(std::move(*img));
+    }
+    if (m.image < 0) {
+        return -1;
+    }
+    m.alpha = AlphaMode::Blend;
+    m.layer = layer;
+    m.unlit = true;
+    return addMaterial(key, std::move(m));
+}
+
+int SceneBuilder::cubeReflectionMaterial(const std::string& name, const std::string& cube, const std::array<float, 3>& scale,
+                                         float alpha, int layer) {
+    const std::string key = lower(name);
+    if (const auto it = materials_.find(key); it != materials_.end()) {
+        return it->second;
+    }
+    Material m;
+    m.name = name;
+    // Black, so the cube alone gives the colour.
+    m.color = {0, 0, 0, alpha};
+    m.alpha = AlphaMode::Blend;
+    m.layer = layer;
+    m.unlit = true;
+    m.envCube = envCube(cube);
+    m.envCubeCoef = scale;
+    m.envCubeTakesLight = false;
+    if (m.envCube < 0) {
+        return -1;
+    }
+    return addMaterial(key, std::move(m));
+}
+
+int SceneBuilder::skirtSeaMaterial(const std::string& name, const std::string& bump, const std::string& cube,
+                                   const std::array<float, 3>& scale, float alpha, int layer, const std::string& caustics) {
+    const std::string key = lower(name);
+    if (const auto it = materials_.find(key); it != materials_.end()) {
+        return it->second;
+    }
+    Material m;
+    m.name = name;
+    m.color = {0, 0, 0, alpha};
+    m.alpha = AlphaMode::Blend;
+    m.layer = layer;
+    m.unlit = true;
+    m.envCube = envCube(cube);
+    m.envCubeCoef = scale;
+    m.envCubeTakesLight = false;
+    m.normalMap = normalMap(bump);
+    m.skirtSea = true;
+    if (!caustics.empty()) {
+        m.causticsImage = image(caustics);
+    }
+    if (m.envCube < 0 || m.normalMap < 0) {
+        return -1;
+    }
     return addMaterial(key, std::move(m));
 }
 
@@ -1045,6 +1150,74 @@ void skin(const sg::Mesh& mesh, const sg::ElementLink& link, const sg::Group& gr
     }
 }
 
+// Gives a mesh group's vertices their morphs (see Primitive::morphs): each stream's deltas, one per
+// vertex of the link, and the morph its target index names among the model's morph pairs, added to
+// `morphs` as needed. An empty pair, or an index past the pairs, takes none. Nothing when the link
+// has no target indices or position deltas, or the morphs would number more than a byte holds.
+void morphData(const sg::Mesh& mesh, const sg::ElementLink& link, std::vector<MorphName>& morphs, Primitive& p) {
+    const std::size_t vertices = p.positions.size() / 3;
+    const sg::Element* indices = mesh.find(link, sg::kMorphIndices);
+    if (indices == nullptr || indices->data.size() < vertices * Primitive::kMorphStreams) {
+        return;
+    }
+    std::array<const sg::Element*, Primitive::kMorphStreams> positions{}, normals{};
+    bool any = false;
+    for (const std::uint16_t i : link.elements) {
+        const sg::Element* e = i < mesh.elements.size() ? &mesh.elements[i] : nullptr;
+        if (e == nullptr || e->stream >= Primitive::kMorphStreams || e->blockFormat != 2 || e->data.size() < vertices * 3 * sizeof(float)) {
+            continue;
+        }
+        if (e->identity == sg::kPositionDeltas) {
+            positions[e->stream] = e;
+            any = true;
+        } else if (e->identity == sg::kNormalDeltas) {
+            normals[e->stream] = e;
+        }
+    }
+    if (!any) {
+        return;
+    }
+    // The slot of each of the model's pairs among the mesh's morphs.
+    std::vector<std::uint8_t> slots(mesh.morphs.size(), Primitive::kNoMorph);
+    for (std::size_t m = 0; m < mesh.morphs.size(); ++m) {
+        MorphName name{lower(mesh.morphs[m].group), lower(mesh.morphs[m].name)};
+        if (name.group.empty() && name.name.empty()) {
+            continue;
+        }
+        auto at = std::find(morphs.begin(), morphs.end(), name);
+        if (at == morphs.end()) {
+            if (morphs.size() >= Primitive::kNoMorph) {
+                return;
+            }
+            at = morphs.insert(morphs.end(), std::move(name));
+        }
+        slots[m] = static_cast<std::uint8_t>(at - morphs.begin());
+    }
+    const auto delta = [&](const sg::Element* e, std::size_t v, float* out) {
+        if (e != nullptr) {
+            std::memcpy(out, e->data.data() + v * 3 * sizeof(float), 3 * sizeof(float));
+            for (int k = 0; k < 3; ++k) {
+                out[k] = std::isfinite(out[k]) ? out[k] : 0.0f;
+            }
+        }
+    };
+    p.positionDeltas.assign(vertices * Primitive::kMorphStreams * 3, 0.0f);
+    p.normalDeltas.assign(vertices * Primitive::kMorphStreams * 3, 0.0f);
+    p.morphs.assign(vertices * Primitive::kMorphStreams, Primitive::kNoMorph);
+    for (std::size_t v = 0; v < vertices; ++v) {
+        for (std::size_t k = 0; k < Primitive::kMorphStreams; ++k) {
+            const std::size_t at = v * Primitive::kMorphStreams + k;
+            const std::uint8_t pair = indices->data[at];
+            if (positions[k] == nullptr || pair >= slots.size() || slots[pair] == Primitive::kNoMorph) {
+                continue;
+            }
+            p.morphs[at] = slots[pair];
+            delta(positions[k], v, &p.positionDeltas[at * 3]);
+            delta(normals[k], v, &p.normalDeltas[at * 3]);
+        }
+    }
+}
+
 // Gives a mesh group's vertices their joints and weights for skinning when drawn: up to four joints
 // each (three weights stored, the fourth what is left), as entries of the mesh's skin (`skin`,
 // added to as needed, `placement` is where the group's shape sits). Weights of joints the model
@@ -1139,8 +1312,9 @@ bool skinToNode(const std::string& node, const Transform& fromNode, std::vector<
 } // namespace
 
 int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::MaterialOverride>& overrides, const Pose* pose,
-                             bool skinned, const Pose* places, const std::string& boneKey, const MeshEdit* edit) {
-    const auto cres = assets_.byName(kCres, name + "_cres");
+                             bool skinned, const Pose* places, const std::string& boneKey, const MeshEdit* edit,
+                             const sg::Link* at, bool hair) {
+    const auto cres = at != nullptr ? assets_.byKey(*at) : assets_.byName(kCres, name + "_cres");
     // Each shape with where it sits in the model, the joint it follows (its own node when named, else
     // the nearest named one above, empty for none) and where it sits from that joint.
     struct Placement {
@@ -1323,20 +1497,18 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
                 const std::string lowGroup = lower(group.name);
                 const auto part = std::find_if(shape.parts.begin(), shape.parts.end(),
                                                [&](const sg::ShapePart& p) { return lower(p.group) == lowGroup; });
-                if (part == shape.parts.end() || (!drawShadows_ && isWallShadowGroup(lowGroup)) ||
+                // A part set may give a material to a group its shape doesn't list, as many custom
+                // hairs do for their strands.
+                const auto named = std::find_if(overrides.rbegin(), overrides.rend(), [&](const sg::MaterialOverride& o) { return lower(o.group) == lowGroup; });
+                if ((part == shape.parts.end() && named == overrides.rend()) || (!drawShadows_ && isWallShadowGroup(lowGroup)) ||
                     group.primitive != sg::kTriangleList || group.link >= data->links.size() || group.indices.empty()) {
                     continue;
                 }
-                std::string materialName = part->material;
-                for (const auto& o : overrides) {
-                    if (lower(o.group) == lowGroup) {
-                        materialName = o.material;
-                    }
-                }
+                std::string materialName = named != overrides.rend() ? named->material : part->material;
                 // A "_null" material hides its group. The one exception is blended glass with some
                 // opacity (a greenhouse roof's faint panes), drawn as its material says.
                 if (lower(materialName).find("_null") != std::string::npos) {
-                    const int m = material(materialName);
+                    const int m = material(materialName, hair);
                     const Material* glass = m >= 0 ? &scene_.materials[static_cast<std::size_t>(m)] : nullptr;
                     if (glass == nullptr || glass->alpha != AlphaMode::Blend || glass->color[3] <= 0) {
                         continue;
@@ -1345,6 +1517,7 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
                 const auto& link = data->links[group.link];
                 Primitive p;
                 p.group = lowGroup;
+                p.alphaSort = static_cast<std::int32_t>(group.opacity);
                 p.positions = sg::vertexFloats(*data, link, sg::kPositions);
                 const std::size_t vertices = p.positions.size() / 3;
                 const auto highest = *std::max_element(group.indices.begin(), group.indices.end());
@@ -1363,6 +1536,10 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
                 if (pose != nullptr) {
                     skin(*data, link, group, joints, *pose, p.positions, p.normals, p.tangents);
                 }
+                // Morphs move a vertex before its joints do, so a group posed here, to a fixed pose, keeps none.
+                if (pose == nullptr) {
+                    morphData(*data, link, mesh.morphs, p);
+                }
                 // A skinned group is placed by its joints' matrices when drawn.
                 bool placed = skinned && skinData(*data, link, group, joints, rests, xf, mesh.skin, p);
                 if (skinned && !placed && group.bones.empty() && !shapeNode.empty()) {
@@ -1371,6 +1548,10 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
                 if (!placed) {
                     for (std::size_t i = 0; i + 2 < p.positions.size(); i += 3) {
                         xf.apply(&p.positions[i], true);
+                    }
+                    for (std::size_t i = 0; i + 2 < p.positionDeltas.size(); i += 3) {
+                        xf.apply(&p.positionDeltas[i], false);
+                        xf.apply(&p.normalDeltas[i], false);
                     }
                 }
                 if (p.normals.size() == p.positions.size()) {
@@ -1388,9 +1569,16 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
                     p.uvs.clear();
                 }
                 p.indices.assign(group.indices.begin(), group.indices.end());
-                p.material = material(materialName);
+                p.material = material(materialName, hair);
                 if (p.material >= 0 && scene_.materials[static_cast<std::size_t>(p.material)].vertexColor) {
                     vertexColors(*data, link, vertices, p);
+                }
+                // The game moves the eyes only where there is a second set of texture coordinates.
+                if (p.material >= 0 && scene_.materials[static_cast<std::size_t>(p.material)].eyes) {
+                    p.eyeUvs = sg::vertexFloats(*data, link, sg::kTextureCoordinates, 1);
+                    if (p.eyeUvs.size() != vertices * 2) {
+                        p.eyeUvs.clear();
+                    }
                 }
                 p.origin = {xf.m[3], xf.m[7], xf.m[11]};
                 skinnedGroups = skinnedGroups || !group.bones.empty();

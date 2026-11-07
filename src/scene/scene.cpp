@@ -30,15 +30,17 @@ Transform Transform::rigidInverse() const {
 }
 
 Transform Transform::operator*(const Transform& b) const {
+    // Sims' skeletons do thousands of these a frame, so this skips the array's bounds checks. Starting from 0 keeps a sum of negative zeros at plain zero.
     Transform r;
-    for (int i = 0; i < 3; ++i) {
-        for (int j = 0; j < 4; ++j) {
-            float v = (j == 3 ? m[i * 4 + 3] : 0.0f);
-            for (int k = 0; k < 3; ++k) {
-                v += m[i * 4 + k] * b.m[k * 4 + j];
-            }
-            r.m[i * 4 + j] = v;
-        }
+    const float* const row = m.data();
+    const float* const c = b.m.data();
+    float* const out = r.m.data();
+    for (int i = 0; i < 12; i += 4) {
+        const float x = row[i], y = row[i + 1], z = row[i + 2];
+        out[i] = 0.0f + x * c[0] + y * c[4] + z * c[8];
+        out[i + 1] = 0.0f + x * c[1] + y * c[5] + z * c[9];
+        out[i + 2] = 0.0f + x * c[2] + y * c[6] + z * c[10];
+        out[i + 3] = row[i + 3] + x * c[3] + y * c[7] + z * c[11];
     }
     return r;
 }

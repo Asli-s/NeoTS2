@@ -74,7 +74,7 @@ GlRenderer::~GlRenderer() {
     releaseBuffer(streamVertices_);
     releaseBuffer(spriteVertices_);
     releaseBuffer(skyVertices_);
-    for (const Program* p : {&scene_, &ui_, &terrain_, &road_, &imposter_, &sky_, &clip_, &water_}) {
+    for (const Program* p : {&scene_, &ui_, &particle_, &terrain_, &road_, &imposter_, &sky_, &clip_, &water_}) {
         if (p->id != 0) {
             gl_.DeleteProgram(p->id);
         }

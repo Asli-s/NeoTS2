@@ -17,6 +17,8 @@
 
 namespace ts2::render::render_detail {
 
+// How open each pixel is, for ambient occlusion.
+constexpr SDL_GPUTextureFormat kOcclusionFormat = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
 constexpr std::uint32_t kSpriteFloats = 8;  // position, texture coordinates, color
 
 // Windows draws with Direct3D 12 and DXIL shaders, macOS with Metal and MSL shaders, other systems
@@ -78,6 +80,10 @@ private:
 
 // An upload buffer holding a copy of `size` bytes. Null when the GPU is out of memory.
 SDL_GPUTransferBuffer* filledUpload(SDL_GPUDevice* device, const void* data, Uint32 size);
+
+// Room for `size` bytes in an upload buffer kept between frames, to write and then unmap. Null when
+// the GPU is out of memory. The old contents are gone.
+void* mapStream(SDL_GPUDevice* device, StreamUpload& stream, Uint32 size);
 
 // A copy pass for uploading many pictures and buffers. If the upload stops with an error before
 // end(), the pass is closed and its command buffer cancelled. The upload buffers are released

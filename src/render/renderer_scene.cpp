@@ -6,6 +6,7 @@
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <cstring>
 #include <stdexcept>
 #include <utility>
 
@@ -161,6 +162,10 @@ void SdlGpuRenderer::addMeshes(const scene::Scene& scene) {
         if (!data.skin.empty()) {
             buffers.skin = filledBuffer(device_, pass, SDL_GPU_BUFFERUSAGE_VERTEX, data.skin.data(), static_cast<Uint32>(data.skin.size()));
         }
+        if (!data.morphs.empty()) {
+            buffers.morphs = filledBuffer(device_, pass, SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, data.morphs.data(),
+                                          static_cast<Uint32>(data.morphs.size() * sizeof(float)));
+        }
         pass.end();
         SDL_SubmitGPUCommandBuffer(cmd);
     }
@@ -261,33 +266,25 @@ void SdlGpuRenderer::uploadJoints(SDL_GPUCommandBuffer* cmd) {
     }
     // Out of GPU memory: the poses are sent again next frame.
     const auto bytes = static_cast<Uint32>(jointData_.size() * sizeof(float));
-    SDL_GPUTransferBuffer* tb = jointBuffer_ ? filledUpload(device_, jointData_.data(), bytes) : nullptr;
-    if (tb == nullptr) {
+    void* mapped = jointBuffer_ ? mapStream(device_, jointUpload_, bytes) : nullptr;
+    if (mapped == nullptr) {
         return;
     }
+    std::memcpy(mapped, jointData_.data(), bytes);
+    SDL_UnmapGPUTransferBuffer(device_, jointUpload_.buffer);
     jointsChanged_ = false;
     SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
-    SDL_GPUTransferBufferLocation from{tb, 0};
+    SDL_GPUTransferBufferLocation from{jointUpload_.buffer, 0};
     SDL_GPUBufferRegion to{jointBuffer_, 0, bytes};
     SDL_UploadToGPUBuffer(copy, &from, &to, true);
     SDL_EndGPUCopyPass(copy);
-    SDL_ReleaseGPUTransferBuffer(device_, tb);
 }
 
 void SdlGpuRenderer::uploadSpriteVertices(SDL_GPUCommandBuffer* cmd, unsigned, unsigned) {
     if (sprites_.empty()) {
         return;
     }
-    std::vector<float> v;
-    v.reserve(sprites_.size() * 6 * kSpriteFloats);
-    for (const auto& s : sprites_) {
-        const float corners[6][4] = {{s.x0, s.y0, s.u0, s.v0}, {s.x1, s.y0, s.u1, s.v0}, {s.x1, s.y1, s.u1, s.v1},
-                                     {s.x0, s.y0, s.u0, s.v0}, {s.x1, s.y1, s.u1, s.v1}, {s.x0, s.y1, s.u0, s.v1}};
-        for (const auto& c : corners) {
-            v.insert(v.end(), {c[0], c[1], c[2], c[3], s.color[0], s.color[1], s.color[2], s.color[3]});
-        }
-    }
-    const auto count = static_cast<unsigned>(v.size() / kSpriteFloats);
+    const auto count = static_cast<unsigned>(sprites_.size() * 6);
     if (count > spriteCapacity_) {
         if (spriteVertices_) {
             SDL_ReleaseGPUBuffer(device_, spriteVertices_);
@@ -301,17 +298,59 @@ void SdlGpuRenderer::uploadSpriteVertices(SDL_GPUCommandBuffer* cmd, unsigned, u
             spriteCapacity_ = 0;
         }
     }
-    const auto bytes = static_cast<Uint32>(v.size() * sizeof(float));
-    SDL_GPUTransferBuffer* tb = spriteVertices_ ? filledUpload(device_, v.data(), bytes) : nullptr;
-    if (tb == nullptr) {
+    const auto bytes = count * kSpriteFloats * static_cast<Uint32>(sizeof(float));
+    void* mapped = spriteVertices_ ? mapStream(device_, spriteUpload_, bytes) : nullptr;
+    if (mapped == nullptr) {
         return;
     }
+    auto* out = static_cast<float*>(mapped);
+    for (const auto& s : sprites_) {
+        const float corners[6][4] = {{s.x0, s.y0, s.u0, s.v0}, {s.x1, s.y0, s.u1, s.v0}, {s.x1, s.y1, s.u1, s.v1},
+                                     {s.x0, s.y0, s.u0, s.v0}, {s.x1, s.y1, s.u1, s.v1}, {s.x0, s.y1, s.u0, s.v1}};
+        for (const auto& c : corners) {
+            const float vertex[kSpriteFloats] = {c[0], c[1], c[2], c[3], s.color[0], s.color[1], s.color[2], s.color[3]};
+            std::memcpy(out, vertex, sizeof(vertex));
+            out += kSpriteFloats;
+        }
+    }
+    SDL_UnmapGPUTransferBuffer(device_, spriteUpload_.buffer);
     SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
-    SDL_GPUTransferBufferLocation from{tb, 0};
+    SDL_GPUTransferBufferLocation from{spriteUpload_.buffer, 0};
     SDL_GPUBufferRegion to{spriteVertices_, 0, bytes};
     SDL_UploadToGPUBuffer(copy, &from, &to, false);
     SDL_EndGPUCopyPass(copy);
-    SDL_ReleaseGPUTransferBuffer(device_, tb);
+}
+
+void SdlGpuRenderer::uploadParticleVertices(SDL_GPUCommandBuffer* cmd) {
+    if (particleVertices_.empty()) {
+        return;
+    }
+    const auto count = static_cast<std::uint32_t>(particleVertices_.size());
+    if (count > particleCapacity_) {
+        if (particleBuffer_) {
+            SDL_ReleaseGPUBuffer(device_, particleBuffer_);
+        }
+        particleCapacity_ = std::max(count, particleCapacity_ * 2);
+        SDL_GPUBufferCreateInfo info{};
+        info.usage = SDL_GPU_BUFFERUSAGE_VERTEX;
+        info.size = particleCapacity_ * static_cast<Uint32>(sizeof(scene::ParticleVertex));
+        particleBuffer_ = SDL_CreateGPUBuffer(device_, &info);
+        if (particleBuffer_ == nullptr) {
+            particleCapacity_ = 0;
+        }
+    }
+    const auto bytes = count * static_cast<Uint32>(sizeof(scene::ParticleVertex));
+    void* mapped = particleBuffer_ ? mapStream(device_, particleUpload_, bytes) : nullptr;
+    if (mapped == nullptr) {
+        return;
+    }
+    std::memcpy(mapped, particleVertices_.data(), bytes);
+    SDL_UnmapGPUTransferBuffer(device_, particleUpload_.buffer);
+    SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
+    SDL_GPUTransferBufferLocation from{particleUpload_.buffer, 0};
+    SDL_GPUBufferRegion to{particleBuffer_, 0, bytes};
+    SDL_UploadToGPUBuffer(copy, &from, &to, false);
+    SDL_EndGPUCopyPass(copy);
 }
 
 } // namespace ts2::render

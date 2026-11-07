@@ -2,6 +2,7 @@
 #include "render/gl/gl_renderer.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 
@@ -77,6 +78,10 @@ void GlRenderer::setState(const State& want) {
         case 6:  // added whatever its alpha
             gl_.Enable(GL_BLEND);
             gl_.BlendFuncSeparate(GL_ONE, GL_ONE, GL_ZERO, GL_ONE);
+            break;
+        case 7:  // what is there multiplied by it
+            gl_.Enable(GL_BLEND);
+            gl_.BlendFuncSeparate(GL_DST_COLOR, GL_ZERO, GL_ZERO, GL_ONE);
             break;
         default:  // summed
             gl_.Enable(GL_BLEND);
@@ -161,8 +166,9 @@ GlRenderer::Texture& GlRenderer::textureFor(const TextureRef& ref) {
     return gpu_->white;
 }
 
-// The vertices of a skinned primitive as its joints pose them, in the model's space: each follows up
-// to four joints, by their weights (see skinned.vert.hlsl, which does the same on the GPU).
+// The vertices of a skinned primitive as its morphs and joints pose them, in the model's space: each
+// is moved by its morphs, then follows up to four joints, by their weights (see skinned.vert.hlsl,
+// which does the same on the GPU).
 void GlRenderer::poseSkinned(const GpuPrimitive& p, const MeshBuffers& buffers, std::size_t instance) {
     scratch_.resize(static_cast<std::size_t>(p.vertices) * kVertexFloats);
     const float* source = &buffers.cpuVertices[static_cast<std::size_t>(p.firstVertex) * kVertexFloats];
@@ -171,11 +177,36 @@ void GlRenderer::poseSkinned(const GpuPrimitive& p, const MeshBuffers& buffers, 
     // The joint ids are the mesh file's: one past the joints there are is skipped, as 255 is.
     const std::size_t jointTotal = jointData_.size() / 12;
     const std::size_t base = instance < jointBase_.size() && jointBase_[instance] >= 0 ? static_cast<std::size_t>(jointBase_[instance]) : jointTotal;
+    const std::uint32_t morphs = morphRow(instance);
+    const std::array<float, 4> eyes = eyesOf(instance);
+    const std::size_t morphVertices = buffers.cpuMorphs.size() / kMorphVertexFloats;
     for (std::size_t v = 0; v < p.vertices; ++v) {
-        const float* in = source + v * kVertexFloats;
         float* out = &scratch_[v * kVertexFloats];
-        std::copy_n(in, kVertexFloats, out);
+        std::copy_n(source + v * kVertexFloats, kVertexFloats, out);
         const std::uint8_t* ids = skin + v * kSkinBytes;
+        std::uint32_t morphVertex = kNoMorphVertex;
+        std::memcpy(&morphVertex, ids + 4 + 4 * sizeof(float), sizeof morphVertex);
+        if (morphVertex < morphVertices && morphs != kNoMorphWeights) {
+            const float* m = &buffers.cpuMorphs[static_cast<std::size_t>(morphVertex) * kMorphVertexFloats];
+            for (std::size_t s = 0; s < scene::Primitive::kMorphStreams; ++s) {
+                const std::size_t at = static_cast<std::size_t>(morphs) * 4 + static_cast<std::size_t>(m[s * 4 + 3]);
+                const float weight = at < jointData_.size() ? jointData_[at] : 0.0f;
+                for (int r = 0; r < 3; ++r) {
+                    out[r] += weight * m[s * 4 + r];
+                    out[3 + r] += weight * m[(scene::Primitive::kMorphStreams + s) * 4 + r];
+                }
+            }
+        }
+        // A face's eye moves its texture coordinates (see eyeShift in skinned.vert.hlsl).
+        float eyeUv[2];
+        std::memcpy(eyeUv, ids + kSkinEyeOffset, sizeof eyeUv);
+        if (eyeUv[0] != 0) {
+            const float s = eyeUv[1] - 1;
+            const float stretch = s < 0 ? eyes[3] : eyes[2];
+            out[6] += (eyes[0] + std::abs(s) * stretch) * eyeUv[0];
+            out[7] += -eyes[1] * eyeUv[0];
+        }
+        const float* in = out;
         float weights[4];
         std::memcpy(weights, ids + 4, sizeof(weights));
         float position[3] = {}, normal[3] = {}, tangent[3] = {};
@@ -207,7 +238,7 @@ void GlRenderer::poseSkinned(const GpuPrimitive& p, const MeshBuffers& buffers, 
 }
 
 // Draws primitives with the scene program (`blend` 1 for the blending ones).
-void GlRenderer::drawList(const FrameView& f, const std::vector<Draw>& list, int blend) {
+void GlRenderer::drawList(const FrameView& f, std::span<const Draw> list, int blend) {
     useProgram(scene_);
     setAttributes(kSceneAttributes);
     for (const auto& d : list) {
@@ -228,7 +259,7 @@ void GlRenderer::drawList(const FrameView& f, const std::vector<Draw>& list, int
                       : m->alpha == scene::AlphaMode::Sum ? 6
                                                           : blend;
         state.cull = !(m && m->doubleSided);
-        state.depthWrite = blend == 0;
+        state.depthWrite = blend == 0 || (m && m->blendedHair);
         setState(state);
         const DrawUniforms u = FramePlan::uniformsFor(*this, *this, f, d, blend);
         gl_.Uniform4fv(scene_.vertex, static_cast<GLsizei>(sizeof(VertexUniforms) / 16), reinterpret_cast<const GLfloat*>(&u.vertex.frame));
@@ -310,6 +341,50 @@ void GlRenderer::drawSprites(unsigned width, unsigned height) {
     }
 }
 
+// How a particle draws among the other blended surfaces of its layer is not known yet, so they go after them.
+void GlRenderer::drawBlended(const FrameView& f, const std::vector<Draw>& blended) {
+    const std::span<const Draw> all(blended);
+    std::size_t done = 0;
+    for (const ParticleBatch& batch : particleBatches_) {
+        const std::size_t end = FramePlan::endOfLayer(all, done, batch.layer);
+        drawList(f, all.subspan(done, end - done), 1);
+        done = end;
+        drawParticles(f, batch);
+    }
+    drawList(f, all.subspan(done), 1);
+}
+
+void GlRenderer::drawParticles(const FrameView& f, const ParticleBatch& batch) {
+    using Block = effects::ParticleBlock;
+    const auto drawn = static_cast<std::uint64_t>(batch.firstVertex) + batch.vertices;
+    if (!hasImage(batch.image) || drawn > particleVertices_.size()) {
+        return;
+    }
+    useProgram(particle_);
+    gl_.Uniform4fv(particle_.vertex, 4, f.viewProjection.m.data());
+    const float reference[4] = {FramePlan::particleAlphaReference(batch.draw), 0, 0, 0};
+    gl_.Uniform4fv(particle_.fragment, 1, reference);
+    gl_.BindBuffer(GL_ARRAY_BUFFER, spriteVertices_);
+    arrayBuffer_ = spriteVertices_;
+    gl_.BufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(batch.vertices * sizeof(scene::ParticleVertex)), particleVertices_.data() + batch.firstVertex, GL_STREAM_DRAW);
+    setAttributes(kSpriteAttributes);
+    constexpr GLsizei stride = sizeof(scene::ParticleVertex);
+    gl_.VertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, offset(offsetof(scene::ParticleVertex, position)));
+    gl_.VertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, stride, offset(offsetof(scene::ParticleVertex, uv)));
+    gl_.VertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, stride, offset(offsetof(scene::ParticleVertex, colour)));
+    const bool added = batch.draw == Block::Additive || batch.draw == Block::AdditiveInvertDepth || batch.draw == Block::AdditiveIgnoreDepth;
+    const bool inverted = batch.draw == Block::DecalInvertDepth || batch.draw == Block::AdditiveInvertDepth;
+    State state;
+    state.blend = batch.draw == Block::Modulate ? 7 : added ? 2 : 1;
+    state.cull = false;
+    state.depthTest = batch.draw != Block::DecalIgnoreDepth && batch.draw != Block::AdditiveIgnoreDepth;
+    state.depthWrite = batch.draw == Block::DepthDecal;
+    state.depthFunc = inverted ? GL_LESS : GL_GEQUAL;
+    setState(state);
+    bindTexture(0, textureFor({TextureRef::Kind::Image, batch.image}), GL_CLAMP_TO_EDGE);
+    gl_.DrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(batch.vertices));
+}
+
 // Records and draws one frame into the framebuffer bound now. False when it couldn't.
 bool GlRenderer::render(unsigned width, unsigned height, const Camera& camera) {
     diag::Timer timer("record frame");
@@ -362,7 +437,11 @@ bool GlRenderer::render(unsigned width, unsigned height, const Camera& camera) {
     if (water) {
         drawWater(f, width, height);
     }
-    drawList(f, blended, 1);
+    if (extras) {
+        drawBlended(f, blended);
+    } else {
+        drawList(f, blended, 1);
+    }
     if (!instancesOnly_ && !sprites_.empty()) {
         drawSprites(width, height);
     }

@@ -3,6 +3,11 @@
 #include "test_support.hpp"
 #include "render/frame_plan.hpp"
 #include "render/mesh_pack.hpp"
+#include "render/terrain_mesh.hpp"
+
+#include <algorithm>
+#include <iterator>
+#include <random>
 
 namespace {
 
@@ -19,6 +24,7 @@ public:
     bool uploaded() override { return true; }
     void setSprites(const std::vector<std::pair<int, const scene::Image*>>&) override {}
     bool draw(const Camera&) override { return true; }
+    void setWaitForScreen(bool) override {}
     bool drawToFile(const Camera&, unsigned, unsigned, const std::filesystem::path&) override { return true; }
     std::optional<scene::Image> drawInstancesToImage(const Camera&, unsigned, unsigned, const scene::ObjectLighting&) override { return {}; }
     std::string backend() const override { return "none"; }
@@ -29,6 +35,7 @@ public:
     void setImages(const scene::Scene&, const std::vector<int>&, bool) override {}
     void setLightMapFade(float) override {}
     void setSkybox(const std::vector<scene::Image>&) override {}
+    void setSurroundings(const scene::Scene&) override {}
 
     // Takes the scene as an upload would: its CPU state, and its meshes laid out.
     void load(const scene::Scene& s) {
@@ -94,6 +101,54 @@ void boxesAgainstTheView() {
     // Behind the camera.
     CHECK(boxInView(f.viewProjection, {-1, -30, -1}, {1, -20, 1}) == InView::Outside);
     CHECK(boxInView(f.viewProjection, {-1, -1, -1}, {500, 1, 1}) == InView::Partly);
+    // Both answer as every corner taken against every side does, across boxes of all sizes and places.
+    std::minstd_rand random(12345);
+    const auto place = [&](float reach) { return static_cast<float>(random() % 2001) / 1000.0f * reach - reach; };
+    const auto& m = f.viewProjection.m;
+    int seen[3] = {};
+    for (int i = 0; i < 20000; ++i) {
+        const float reach = i % 3 == 0 ? 5.0f : i % 3 == 1 ? 60.0f : 500.0f;
+        const std::array<float, 3> low{place(reach), place(reach), place(reach)};
+        const float size = reach * (static_cast<float>(random() % 100) / 100.0f);
+        const std::array<float, 3> high{low[0] + size, low[1] + size / 2, low[2] + size * 2};
+        int outside[6] = {};
+        for (int c = 0; c < 8; ++c) {
+            const float x = c & 1 ? high[0] : low[0], y = c & 2 ? high[1] : low[1], z = c & 4 ? high[2] : low[2];
+            float p[4];
+            for (int r = 0; r < 4; ++r) {
+                p[r] = m[r * 4] * x + m[r * 4 + 1] * y + m[r * 4 + 2] * z + m[r * 4 + 3];
+            }
+            outside[0] += p[0] < -p[3];
+            outside[1] += p[0] > p[3];
+            outside[2] += p[1] < -p[3];
+            outside[3] += p[1] > p[3];
+            outside[4] += p[2] < 0;
+            outside[5] += p[2] > p[3];
+        }
+        const bool out = std::any_of(std::begin(outside), std::end(outside), [](int n) { return n == 8; });
+        const bool in = std::all_of(std::begin(outside), std::end(outside), [](int n) { return n == 0; });
+        const InView view = boxInView(f.viewProjection, low, high);
+        CHECK(view == (out ? InView::Outside : in ? InView::Inside : InView::Partly));
+        CHECK(boxOutside(f.viewProjection, low, high) == out);
+        ++seen[static_cast<int>(view)];
+    }
+    CHECK(seen[0] > 100);
+    CHECK(seen[1] > 100);
+    CHECK(seen[2] > 100);
+}
+
+// An imposter part's box holds all its positions, not its texture coordinates.
+void imposterPartBoxes() {
+    scene::PaintedTerrain t;
+    t.imposterTextures.push_back({});
+    scene::PaintedTerrain::ImposterPart part;
+    part.vertices = {1, -2, 3, 90, 91, 92, 93, -4, 5, 0, 94, 95, 96, 97};
+    part.indices = {0, 1, 0};
+    t.imposters.push_back(part);
+    const ImposterMesh mesh = imposterParts(t);
+    CHECK(mesh.draws.size() == 1);
+    CHECK((mesh.draws[0].low == std::array<float, 3>{-4, -2, 0}));
+    CHECK((mesh.draws[0].high == std::array<float, 3>{1, 5, 3}));
 }
 
 // A pool's reflection: the view mirrored in the plane and flipped left to right, a point on the
@@ -114,6 +169,40 @@ void aPoolMirrorsTheViewInItsPlane() {
     const auto onPlane = clip(mirror, 0.3f, 2, 0.5f), below = clip(mirror, 0.3f, 2, 0.4f);
     CHECK(std::fabs(onPlane[2] - onPlane[3]) < 1e-4f && below[2] > below[3]);
     CHECK(mirrored[2] < mirrored[3] && mirrored[2] > 0);
+}
+
+// Only the part of a pool's mirror image that its surface reads is drawn. The surface's corners,
+// moved as far as the ripples move what they read, fall inside it, flipped left to right. The
+// narrowed view stretches that part over the clip volume and keeps depth.
+void aPoolMirrorIsDrawnOnlyWhereRead() {
+    const Camera camera = front();
+    const FrameView f = FrameView::make(camera, 1280, 800);
+    CHECK((poolMirrorArea(f, {}, 1280, 800) == std::array<float, 4>{-1, 1, -1, 1}));
+    GpuPrimitive p;
+    p.hasBox = true;
+    p.low = {-0.2f, 1.8f, -0.5f};
+    p.high = {0.2f, 2.2f, -0.5f};
+    scene::Material m;
+    m.poolSurface = true;
+    const scene::Instance instance;
+    const Draw d{&p, &instance, &m, 0, 0, 1};
+    const auto area = poolMirrorArea(f, std::span(&d, 1), 1280, 800);
+    CHECK(area[1] - area[0] < 2 && area[3] - area[2] < 2);
+    const Mat4 narrow = narrowedTo(f.viewProjection, area);
+    for (int c = 0; c < 4; ++c) {
+        const float x = c & 1 ? p.high[0] : p.low[0], y = c & 2 ? p.high[1] : p.low[1], z = p.low[2];
+        const float* v = f.viewProjection.m.data();
+        const float w = v[12] * x + v[13] * y + v[14] * z + v[15];
+        const float sx = -(v[0] * x + v[1] * y + v[2] * z + v[3]) / w, sy = (v[4] * x + v[5] * y + v[6] * z + v[7]) / w;
+        const float shift = 0.2f / w;
+        CHECK(sx - shift >= area[0] && sx + shift <= area[1] && sy - shift >= area[2] && sy + shift <= area[3]);
+        const float* n = narrow.m.data();
+        const float nx = (n[0] * x + n[1] * y + n[2] * z + n[3]) / w;
+        CHECK(std::fabs(nx - (-2 * sx - (area[0] + area[1])) / (area[1] - area[0])) < 1e-4f);
+    }
+    for (int k = 8; k < 16; ++k) {
+        CHECK(narrow.m[k] == f.viewProjection.m[k]);
+    }
 }
 
 // The sun's view of an 11 by 7 tile pool, fitted as the game fits it, against the game's own: across and
@@ -245,6 +334,32 @@ void textureLightScalesOnlyTheMaterialsThatTakeIt() {
     CHECK(b.fragment.color[0] == 1.0f);
 }
 
+// A shape colour blends a standard material and scales its colour and alpha, as the game's standard
+// material script draws one. The TextureAlpha material script has none, so it draws as it is.
+void shapeColourOnlyChangesTheMaterialsThatTakeIt() {
+    scene::Scene s;
+    scene::Material standard, groundShadow;
+    groundShadow.alpha = scene::AlphaMode::Blend;
+    groundShadow.takesShapeColor = false;
+    s.materials = {standard, groundShadow};
+    scene::Mesh tree = quad(0);
+    tree.primitives.push_back(quad(1).primitives[0]);
+    s.meshes = {tree};
+    s.instances = {at(0, 0, 0, 0)};
+    StateOnly r;
+    r.load(s);
+    r.setShapeColor(0, std::array<float, 4>{1, 1, 1, 0.25f});
+    const Camera camera = front();
+    const FrameView f = FrameView::make(camera, 1280, 800);
+    std::vector<Draw> draws, layers, blended;
+    FramePlan::collectDraws(r, r, f, draws, layers, blended);
+    CHECK(draws.empty() && blended.size() == 2);
+    for (const Draw& d : blended) {
+        const float alpha = FramePlan::uniformsFor(r, r, f, d, 0).fragment.color[3];
+        CHECK(alpha == (d.material->takesShapeColor ? 0.25f : 1.0f));
+    }
+}
+
 // A candle flame's texture holds 4 frames side by side, shown 10 a second on the lot's clock, left to
 // right and over again, as the game steps it. Its colour is added whatever its alpha, so nothing of
 // it is cut away.
@@ -274,6 +389,89 @@ void tiledTexturesStepThroughTheirFrames() {
     CHECK(FramePlan::uniformsFor(r, r, f, blended[0], 1).fragment.uvTile[2] == 0);
 }
 
+// The game's hair state keeps only alpha above 60 out of 255, where other blended surfaces keep
+// nearly everything.
+void blendedHairDropsLowAlpha() {
+    scene::Scene s;
+    scene::Material hair;
+    hair.alpha = scene::AlphaMode::Blend;
+    hair.blendedHair = true;
+    scene::Material glass;
+    glass.alpha = scene::AlphaMode::Blend;
+    s.materials = {hair, glass};
+    s.meshes = {quad(0), quad(1)};
+    s.instances = {at(0, 0, 0, 0), at(1, 0, 0, 0)};
+    StateOnly r;
+    r.load(s);
+    const Camera camera = front();
+    const FrameView f = FrameView::make(camera, 1280, 800);
+    std::vector<Draw> draws, layers, blended;
+    FramePlan::collectDraws(r, r, f, draws, layers, blended);
+    CHECK(blended.size() == 2);
+    for (const Draw& d : blended) {
+        const float cutoff = FramePlan::uniformsFor(r, r, f, d, 1).fragment.alphaCutoff;
+        CHECK(cutoff == (d.material->blendedHair ? 60.5f / 255 : 0.01f));
+    }
+}
+
+// A hair's groups may lie in the model in any order. The sort numbers decide, the lowest first and
+// -1 before all, wherever each group is.
+void blendedGroupsDrawByTheirSortNumbers() {
+    scene::Scene s;
+    scene::Material hair;
+    hair.alpha = scene::AlphaMode::Blend;
+    s.materials = {hair};
+    scene::Mesh m = quad(0);
+    const scene::Primitive first = m.primitives[0];
+    m.primitives.clear();
+    for (const int number : {-1, 1, 2, 4, 3}) {
+        scene::Primitive p = first;
+        p.alphaSort = number;
+        m.primitives.push_back(p);
+    }
+    s.meshes = {m};
+    s.instances = {at(0, 0, 0, 0)};
+    StateOnly r;
+    r.load(s);
+    const Camera camera = front();
+    const FrameView f = FrameView::make(camera, 1280, 800);
+    std::vector<Draw> draws, layers, blended;
+    FramePlan::collectDraws(r, r, f, draws, layers, blended);
+    std::vector<int> order;
+    for (const Draw& d : blended) {
+        order.push_back(d.primitive->alphaSort);
+    }
+    CHECK((order == std::vector<int>{-1, 1, 2, 3, 4}));
+}
+
+// Opaque surfaces sharing a material draw together, so textures are bound less often. Roofs come
+// first in the order placed, and a lower layer stays before a higher one.
+void opaqueDrawsGroupByMaterial() {
+    scene::Scene s;
+    s.materials.resize(3);
+    s.materials[2].layer = -18;
+    s.meshes = {quad(1), quad(0), quad(1), quad(0), quad(1), quad(2)};
+    for (int m = 0; m < 6; ++m) {
+        s.instances.push_back(at(m, static_cast<float>(m), 0, 0));
+    }
+    s.instances[0].part = scene::Part::Roof;
+    s.instances[1].part = scene::Part::Roof;
+    for (std::size_t i = 2; i < 6; ++i) {
+        s.instances[i].part = scene::Part::Object;
+    }
+    StateOnly r;
+    r.load(s);
+    const Camera camera = front();
+    const FrameView f = FrameView::make(camera, 1280, 800);
+    std::vector<Draw> draws, layers, blended;
+    FramePlan::collectDraws(r, r, f, draws, layers, blended);
+    std::vector<int> order;
+    for (const Draw& d : draws) {
+        order.push_back(static_cast<int>(d.instance->transform.m[3]));
+    }
+    CHECK((order == std::vector<int>{5, 0, 1, 3, 2, 4}));
+}
+
 void packedMeshesAreLaidOutInTheSharedBuffers() {
     scene::Mesh m = quad(0);
     scene::Mesh bad = quad(0);
@@ -294,14 +492,20 @@ void packedMeshesAreLaidOutInTheSharedBuffers() {
 std::vector<Test> renderPlanTests() {
     return {
         {"Boxes are tested against the view", boxesAgainstTheView},
+        {"An imposter part's box holds its positions", imposterPartBoxes},
         {"A pool mirrors the view in its plane", aPoolMirrorsTheViewInItsPlane},
+        {"A pool's mirror image is drawn only where read", aPoolMirrorIsDrawnOnlyWhereRead},
         {"A pool's sun view is fitted as the game's", aPoolsSunViewIsFittedAsTheGames},
         {"A frame view takes its fov and near plane as the game does", aFrameViewTakesItsFovAndNearPlane},
         {"Draws are sorted as the game sorts them", drawsAreSortedAsTheGameSortsThem},
         {"A hidden material is not drawn", aMaterialSetToHiddenIsNotDrawn},
         {"Texture references follow what is uploaded", textureReferencesFollowWhatIsUploaded},
         {"The texture light scales only the materials that take it", textureLightScalesOnlyTheMaterialsThatTakeIt},
+        {"A shape colour only changes the materials that take it", shapeColourOnlyChangesTheMaterialsThatTakeIt},
         {"Tiled textures step through their frames", tiledTexturesStepThroughTheirFrames},
+        {"Blended hair drops low alpha", blendedHairDropsLowAlpha},
+        {"Opaque draws group by material", opaqueDrawsGroupByMaterial},
+        {"Blended groups draw by their sort numbers", blendedGroupsDrawByTheirSortNumbers},
         {"Packed meshes share their buffers", packedMeshesAreLaidOutInTheSharedBuffers},
     };
 }

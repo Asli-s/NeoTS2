@@ -105,6 +105,14 @@ struct Orbit {
     // step it reaches zero stops the scroll.
     Vec3 keyOffset{0, 0, 0};
     bool keyScrolling = false;
+    // Which way the scroll keys ask for along each axis (-1, 0 or 1), and which of them were held at
+    // the last step: D, Right, A, Left, S, Down, W, Up.
+    std::array<float, 2> keyGoal{0, 0};
+    std::array<bool, 8> scrollKeysHeld{};
+    // The window's pixels in one of the game's. The system shows the game, which doesn't know about
+    // display scaling, a scaled-down window. The scroll keys' offset and the mouse's turn count those
+    // pixels, so they keep the game's speed at any display scale.
+    float gamePixel = 1;
     bool keysOn = true;  // off while a menu over the view takes the keys
     bool keysTaken = false;  // a text box being typed into has the keyboard
     // Where the pitch sits between the rig's minimum and maximum pitch at this zoom (0 to 1), and
@@ -117,6 +125,26 @@ struct Orbit {
     // the pointer is put back to after each move. Moves between frames are added up, as Windows
     // merges them before the game sees one.
     std::array<float, 2> turnMove{0, 0};
+    // That movement still to be turned by, in pixels, and how much of it each step takes. A frame
+    // holds one step or two, so taking it all in a frame's first step would make a steady drag
+    // move the view unevenly.
+    std::array<float, 2> turnLeft{0, 0}, turnRate{0, 0};
+    // What the steps took and no turn has used yet. The game ignores the mouse move after each turn,
+    // the one putting the pointer back causes, so it turns at most every second step, each time by
+    // the movement since the last.
+    std::array<float, 2> turnGathered{0, 0};
+    bool turnSkipStep = false;
+    // The yaw a step before `previous`. The view is drawn by the average of two steps, as a slow turn
+    // taken every second step would otherwise move in stairs.
+    float yawBeforePrevious = 0;
+    // The last frames' lengths in seconds. A camera with a goal moves by their average, as the time
+    // between frames can swing widely while the screen still shows them evenly.
+    std::array<float, 8> recentFrames = [] {
+        std::array<float, 8> frames{};
+        frames.fill(1.0f / 60);
+        return frames;
+    }();
+    std::size_t nextRecentFrame = 0;
     // Added to the yaw where the camera stands, by the neighborhood camera's drift.
     float yawOffset = 0;
     // Where the zoom distance is easing to, for a camera with a goal.
@@ -128,11 +156,12 @@ struct Orbit {
     // out, and the main row's - does nothing. Comma and period turn while held. Other cameras zoom
     // while those zoom keys are held and don't turn by key.
     bool lotKeys = false;
-    // Comma and period held, by what is printed on them. Their turn offset eases toward the
+    // Which way comma and period ask to turn: -1 comma, 1 period, by what is printed on them. As in
+    // the game, the last pressed wins and letting go of either stops the turn. Their offset eases toward the
     // keyboardrotation speed each way a key is held (0 when let go) and is sent each step as a
     // middle-button turn of that many pixels, so the turn eases in and out. The defaults are the
     // Live camera's settings.
-    std::array<bool, 2> turnKeys{false, false};
+    int turnKey = 0;
     float turnKeyOffset = 0;
     // The puck's zoom button held: -1 in, 1 out, 0 none. Each step it moves the zoom goal by 0.04 of
     // (zoom + 10), as a free zoom, as the game's puck does while held.
@@ -195,7 +224,8 @@ struct Orbit {
             for (std::size_t k = 0; k < 3; ++k) {
                 at[k] = p.target[k] + (at[k] - p.target[k]) * t;
             }
-            turn = p.yaw + yawOffset + std::remainder(turn - p.yaw - yawOffset, 2 * kPi) * t;
+            const float last = std::remainder(yaw - p.yaw, 2 * kPi), before = std::remainder(yawBeforePrevious - p.yaw, 2 * kPi);
+            turn = p.yaw + yawOffset + before / 2 + (last - before) / 2 * t;
             tilt = p.pitch + (tilt - p.pitch) * t;
             away = p.distance + (away - p.distance) * t;
         }
@@ -301,7 +331,7 @@ inline void followSubject(Orbit& orbit, int width, int height) {
     const auto camera = orbit.camera();
     const auto goal = screenPoint(camera, width, height, *orbit.goal);
     const auto subject = screenPoint(camera, width, height, floor);
-    if (orbit.smoothFollow || std::hypot(subject[0] - goal[0], subject[1] - goal[1]) > kDeadZone) {
+    if (orbit.smoothFollow || std::hypot(subject[0] - goal[0], subject[1] - goal[1]) > kDeadZone * orbit.gamePixel) {
         (*orbit.goal)[0] = floor[0];
         (*orbit.goal)[1] = floor[1];
         if (orbit.limitGoal) {
@@ -352,13 +382,26 @@ inline bool orbitEvent(Orbit& orbit, const ts2::platform::Event& e) {
 inline void orbitGameStep(Orbit& orbit, unsigned ms, int width, int height) {
     using ts2::platform::Key;
     using ts2::platform::keyHeld;
-    const auto held = [&](Key a, Key b) { return orbit.keysOn && !orbit.keysTaken && (keyHeld(a) || keyHeld(b)); };
-    const int right = held(Key::D, Key::Right) - held(Key::A, Key::Left);
-    const int down = held(Key::S, Key::Down) - held(Key::W, Key::Up);
-    easeToward(orbit.keyOffset, {static_cast<float>(right) * orbit.keySpeed, static_cast<float>(down) * orbit.keySpeed, 0}, ms, orbit.keyPeriod,
-               orbit.keyMinChange);
+    // As the game's keys: along each axis the last key pressed wins, and letting go of any key stops
+    // that axis, even with the opposite key still held.
+    struct ScrollKey {
+        Key key;
+        std::size_t axis;
+        float way;
+    };
+    static constexpr std::array<ScrollKey, 8> kScrollKeys{{{Key::D, 0, 1}, {Key::Right, 0, 1}, {Key::A, 0, -1}, {Key::Left, 0, -1},
+                                                           {Key::S, 1, 1}, {Key::Down, 1, 1}, {Key::W, 1, -1}, {Key::Up, 1, -1}}};
+    for (std::size_t i = 0; i < kScrollKeys.size(); ++i) {
+        const ScrollKey& k = kScrollKeys[i];
+        const bool held = orbit.keysOn && !orbit.keysTaken && keyHeld(k.key);
+        if (held != orbit.scrollKeysHeld[i]) {
+            orbit.scrollKeysHeld[i] = held;
+            orbit.keyGoal[k.axis] = held ? k.way : 0;
+        }
+    }
+    easeToward(orbit.keyOffset, {orbit.keyGoal[0] * orbit.keySpeed, orbit.keyGoal[1] * orbit.keySpeed, 0}, ms, orbit.keyPeriod, orbit.keyMinChange);
     if (orbit.keyOffset[0] != 0 || orbit.keyOffset[1] != 0) {
-        orbit.scrollBy(orbit.keyOffset[0], orbit.keyOffset[1], width, height);
+        orbit.scrollBy(orbit.keyOffset[0] * orbit.gamePixel, orbit.keyOffset[1] * orbit.gamePixel, width, height);
         orbit.keyScrolling = true;
     } else if (orbit.keyScrolling) {
         orbit.dragSpeed = {0, 0};
@@ -379,18 +422,27 @@ inline void orbitGameStep(Orbit& orbit, unsigned ms, int width, int height) {
         orbit.freeZoom = true;
     }
     if (orbit.lotKeys) {
-        const int keys = orbit.keysOn && !orbit.keysTaken ? orbit.turnKeys[1] - orbit.turnKeys[0] : 0;
+        const int keys = orbit.keysOn && !orbit.keysTaken ? orbit.turnKey : 0;
         const int turn = std::clamp(keys + orbit.puckTurn, -1, 1);
         easeToward(orbit.turnKeyOffset, static_cast<float>(turn) * orbit.turnKeySpeed, ms, orbit.turnKeyPeriod, orbit.turnKeyMinChange);
         if (orbit.turnKeyOffset != 0) {
             orbit.yawGoal = wrapAngle(orbit.yaw + std::clamp(orbit.turnKeyOffset * 0.003f, -3.0f, 3.0f));
         }
     }
-    if (orbit.turnMove[0] != 0 || orbit.turnMove[1] != 0) {
-        // As the game's lot camera: the larger of the two moves wins, 0.003 radians of turn (at
-        // most 3) and 0.005 of the pitch range a pixel.
-        float dx = std::round(orbit.turnMove[0]), dy = std::round(orbit.turnMove[1]);
-        orbit.turnMove = {0, 0};
+    for (std::size_t k = 0; k < 2; ++k) {
+        const float taken = std::min(std::abs(orbit.turnLeft[k]), orbit.turnRate[k]);
+        const float signedTaken = orbit.turnLeft[k] < 0 ? -taken : taken;
+        orbit.turnLeft[k] -= signedTaken;
+        orbit.turnGathered[k] += signedTaken;
+    }
+    if (orbit.turnSkipStep) {
+        orbit.turnSkipStep = false;
+    } else if (orbit.turnGathered[0] != 0 || orbit.turnGathered[1] != 0) {
+        // As the game's lot camera: the larger of the two moves wins, 0.003 radians of turn (at most
+        // 3) and 0.005 of the pitch range a pixel.
+        float dx = orbit.turnGathered[0], dy = orbit.turnGathered[1];
+        orbit.turnGathered = {0, 0};
+        orbit.turnSkipStep = true;
         if (dx != 0 && dy != 0) {
             const float ratio = std::abs(dx / dy);
             if (ratio > 1) {
@@ -427,18 +479,61 @@ inline void orbitGameStep(Orbit& orbit, unsigned ms, int width, int height) {
     easeToward(orbit.target, *orbit.goal, ms, 7, orbit.subject && orbit.smoothFollow ? 0.0f : orbit.minChange);
 }
 
+// The average length of the last frames with this one, `dt` seconds, added. Over time it adds up to
+// the same as the frames themselves.
+inline float averageFrameTime(Orbit& orbit, float dt) {
+    orbit.recentFrames[orbit.nextRecentFrame] = dt;
+    orbit.nextRecentFrame = (orbit.nextRecentFrame + 1) % orbit.recentFrames.size();
+    float sum = 0;
+    for (const float frame : orbit.recentFrames) {
+        sum += frame;
+    }
+    return sum / static_cast<float>(orbit.recentFrames.size());
+}
+
+// Takes this frame's mouse turn, to be spread over the camera steps of `stepSeconds` each at the
+// speed it arrived at. Once the mouse stops, what the skipped step held is lost, as the game sees no
+// later move to carry it. What is left goes on top of the goal, as a new goal set from where the
+// camera is now would cut short the turn still easing there.
+inline void takeMouseTurn(Orbit& orbit, float frameTime, float stepSeconds) {
+    // Movement too small for one of the game's pixels waits for more, so a slow drag loses nothing.
+    const std::array<float, 2> move{std::round(orbit.turnMove[0] / orbit.gamePixel), std::round(orbit.turnMove[1] / orbit.gamePixel)};
+    orbit.turnMove[0] -= move[0] * orbit.gamePixel;
+    orbit.turnMove[1] -= move[1] * orbit.gamePixel;
+    const float share = std::min(1.0f, stepSeconds / std::max(frameTime, stepSeconds));
+    for (std::size_t k = 0; k < 2; ++k) {
+        if (move[k] != 0) {
+            continue;
+        }
+        orbit.turnGathered[k] = 0;
+        if (k == 0) {
+            orbit.yawGoal = wrapAngle(orbit.yawGoal + std::clamp(orbit.turnLeft[0] * 0.003f, -3.0f, 3.0f));
+        } else {
+            orbit.pitchBlendGoal = std::clamp(orbit.pitchBlendGoal - orbit.turnLeft[1] * 0.005f, 0.0f, 1.0f);
+        }
+        orbit.turnLeft[k] = 0;
+    }
+    for (std::size_t k = 0; k < 2; ++k) {
+        orbit.turnLeft[k] += move[k];
+        orbit.turnRate[k] = std::abs(move[k]) * share;
+    }
+}
+
 // Moves the camera by the keys held for `dt` seconds (WASD or arrows pan, Z/X or +/- zoom) and
 // eases quarter turns along. A camera with a goal moves as the game's lot camera does, in steps
 // 120 times a second on a `width` x `height` view, `beforeStep` running before each.
 inline void orbitStep(Orbit& orbit, float dt, int width = 0, int height = 0, const std::function<void()>& beforeStep = {}) {
     if (orbit.goal) {
         constexpr float kStep = 1.0f / 120;
-        orbit.stepTime += dt;
+        const float frameTime = averageFrameTime(orbit, dt);
+        takeMouseTurn(orbit, frameTime, kStep);
+        orbit.stepTime += frameTime;
         while (orbit.stepTime >= kStep) {
             orbit.stepTime -= kStep;
             if (beforeStep) {
                 beforeStep();
             }
+            orbit.yawBeforePrevious = orbit.previous ? orbit.previous->yaw : orbit.yaw;
             orbit.previous = Orbit::Pose{orbit.target, orbit.yaw, orbit.pitch, orbit.distance};
             // The game eases by whole milliseconds. The rest carries to the next step.
             orbit.easeCarry += 1000.0 / 120;
@@ -468,6 +563,10 @@ inline void orbitStep(Orbit& orbit, float dt, int width = 0, int height = 0, con
 inline void applyDrift(Orbit& orbit, const ts2::scene::HoodDrift::Step& step) {
     if (step.foldSway) {
         orbit.yaw = wrapAngle(orbit.yaw + orbit.yawOffset);
+        orbit.yawBeforePrevious = wrapAngle(orbit.yawBeforePrevious + orbit.yawOffset);
+        if (orbit.previous) {
+            orbit.previous->yaw = wrapAngle(orbit.previous->yaw + orbit.yawOffset);
+        }
         orbit.yawGoal = wrapAngle(orbit.yawGoal + orbit.yawOffset);
         orbit.yawOffset = 0;
     }

@@ -47,6 +47,60 @@ float Heights::corner(int level, float x, float y) const {
     return at(level, static_cast<int>(std::lround(x)), static_cast<int>(std::lround(y)), found);
 }
 
+std::vector<float> Heights::drawnGrid(int level, std::uint32_t steps, std::optional<float> sea) const {
+    if (grid_ == nullptr || grid_->width < 2 || grid_->height < 2 || steps == 0) {
+        return {};
+    }
+    const std::uint32_t columns = (grid_->width - 1) * steps + 1, rows = (grid_->height - 1) * steps + 1;
+    std::vector<float> h(static_cast<std::size_t>(columns) * rows);
+    for (std::uint32_t i = 0; i < columns; ++i) {
+        for (std::uint32_t j = 0; j < rows; ++j) {
+            const std::uint32_t x = i / steps, y = j / steps;
+            const float fx = static_cast<float>(i % steps) / static_cast<float>(steps), fy = static_cast<float>(j % steps) / static_cast<float>(steps);
+            bool found = false;
+            const auto at = [&](std::uint32_t cx, std::uint32_t cy) {
+                return this->at(level, static_cast<int>(std::min(cx, grid_->width - 1)), static_cast<int>(std::min(cy, grid_->height - 1)), found);
+            };
+            const float top = at(x, y) * (1 - fx) + at(x + 1, y) * fx;
+            const float bottom = at(x, y + 1) * (1 - fx) + at(x + 1, y + 1) * fx;
+            h[static_cast<std::size_t>(i) * rows + j] = top * (1 - fy) + bottom * fy;
+        }
+    }
+    if (!sea || columns < 3 || rows < 3) {
+        return h;
+    }
+    // A few passes of each point taking its neighbours' average, about a tile and a half across.
+    constexpr int kPasses = 24;
+    constexpr float kAboveSea = 0.6f;
+    std::vector<char> moves(h.size(), 0);
+    for (std::uint32_t i = 1; i + 1 < columns; ++i) {
+        for (std::uint32_t j = 1; j + 1 < rows; ++j) {
+            moves[static_cast<std::size_t>(i) * rows + j] = h[static_cast<std::size_t>(i) * rows + j] < *sea + kAboveSea;
+        }
+    }
+    std::vector<float> next = h;
+    for (int pass = 0; pass < kPasses; ++pass) {
+        for (std::uint32_t i = 1; i + 1 < columns; ++i) {
+            for (std::uint32_t j = 1; j + 1 < rows; ++j) {
+                const std::size_t k = static_cast<std::size_t>(i) * rows + j;
+                if (!moves[k]) {
+                    continue;
+                }
+                float sum = 0;
+                for (int di = -1; di <= 1; ++di) {
+                    for (int dj = -1; dj <= 1; ++dj) {
+                        sum += h[static_cast<std::size_t>(static_cast<int>(i) + di) * rows + static_cast<std::size_t>(static_cast<int>(j) + dj)];
+                    }
+                }
+                next[k] = sum / 9;
+            }
+        }
+        h.swap(next);
+        next = h;
+    }
+    return h;
+}
+
 float Heights::tile(int level, float x, float y) const {
     float sum = 0;
     int n = 0;
@@ -83,6 +137,30 @@ bool surfaceOpen(const array3d::Array3D& surface, int level, float x, float y) {
     const std::array<float, 4> distance{u, 1 - v, 1 - u, v};
     const auto q = static_cast<std::size_t>(std::min_element(distance.begin(), distance.end()) - distance.begin());
     return quarters[q] == 0;
+}
+
+bool surfaceQuarterOpen(const array3d::Array3D& surface, int level, int x, int y, std::size_t quarter) {
+    const auto quarters = surface.at(level, x, y);
+    return surface.elementSize == 4 && quarters.size() == 4 && quarter < 4 && quarters[quarter] == 0;
+}
+
+std::string withSavedCutout(const std::string& material, const std::string& group,
+                            const std::vector<scenegraph::MaterialOverride>& saved) {
+    static constexpr std::string_view kCutout = "-cutout-";
+    if (group.empty()) {
+        return material;
+    }
+    const std::string low = lower(group);
+    const auto named = std::find_if(saved.rbegin(), saved.rend(),
+                                    [&](const scenegraph::MaterialOverride& o) { return lower(o.group) == low; });
+    if (named == saved.rend()) {
+        return material;
+    }
+    const auto mask = lower(named->material).find(kCutout);
+    if (mask == std::string::npos) {
+        return material;
+    }
+    return material.substr(0, lower(material).find(kCutout)) + named->material.substr(mask);
 }
 
 namespace {
@@ -133,6 +211,7 @@ public:
         const int groundLevel = content::gridLevel(lot_, 1);
         b_.scene().floorHeight = [kept, groundLevel](int storey, float x, float y) { return kept->tile(storey - 1 + groundLevel, x, y); };
         b_.scene().groundLevel = groundLevel;
+        b_.scene().boundsTopLevel = content::topGridLevel(lot_);
         if (const auto floors = lot_.grids.find(content::kFloorGridInstance); floors != lot_.grids.end() && floors->second.elementSize == 8) {
             const auto grid = std::make_shared<const std::remove_cvref_t<decltype(floors->second)>>(floors->second);
             b_.scene().floorCorner = [kept, grid](int level, int x, int y) -> std::optional<float> {
@@ -831,17 +910,11 @@ private:
         constexpr int kDetailRepeats = 5;  // detail every 4 tiles
         const std::uint32_t columns = (g->width - 1) * kSteps + 1, rows = (g->height - 1) * kSteps + 1;
         const int ground = g->contains(content::groundGridLevel(lot_), 0, 0) ? content::groundGridLevel(lot_) : 0;
-        auto corner = [&](std::uint32_t x, std::uint32_t y) {
-            return g->f32(ground, static_cast<std::int32_t>(std::min(x, g->width - 1)), static_cast<std::int32_t>(std::min(y, g->height - 1)), 0);
-        };
+        std::vector<float> drawn = heights_.drawnGrid(ground, kSteps, b_.edgeSea());
         auto height = [&](std::int64_t i, std::int64_t j) {
-            const auto ci = static_cast<std::uint32_t>(std::clamp<std::int64_t>(i, 0, columns - 1));
-            const auto cj = static_cast<std::uint32_t>(std::clamp<std::int64_t>(j, 0, rows - 1));
-            const std::uint32_t x = ci / kSteps, y = cj / kSteps;
-            const float fx = static_cast<float>(ci % kSteps) / kSteps, fy = static_cast<float>(cj % kSteps) / kSteps;
-            const float top = corner(x, y) * (1 - fx) + corner(x + 1, y) * fx;
-            const float bottom = corner(x, y + 1) * (1 - fx) + corner(x + 1, y + 1) * fx;
-            return top * (1 - fy) + bottom * fy;
+            const auto ci = static_cast<std::size_t>(std::clamp<std::int64_t>(i, 0, columns - 1));
+            const auto cj = static_cast<std::size_t>(std::clamp<std::int64_t>(j, 0, rows - 1));
+            return drawn[ci * rows + cj];
         };
 
         // The ground is lit by the ground level's floor light map, as the game lights it.
@@ -916,9 +989,15 @@ private:
             paint.normals = canvas.normals;
             paint.uvs = canvas.uvs;
             paint.lightUvs = canvas.lightUvs;
+            // A lot's saved strength maps can hold 0 along their last row and column, so each paint fades
+            // out over the lot's last quarter tile there and the canvas shows as a thin line. Lots
+            // with smooth skirts (not in the original game) take the row and column before instead.
+            const bool smooth = b_.smoothLotSkirts();
             for (std::uint32_t i = 0; i < columns; ++i) {
                 for (std::uint32_t j = 0; j < rows; ++j) {
-                    paint.alphas.push_back(static_cast<float>(strength.byte(static_cast<std::int32_t>(i), static_cast<std::int32_t>(j))) / 255);
+                    const std::uint32_t si = smooth && i + 1 == columns && i > 0 ? i - 1 : i;
+                    const std::uint32_t sj = smooth && j + 1 == rows && j > 0 ? j - 1 : j;
+                    paint.alphas.push_back(static_cast<float>(strength.byte(static_cast<std::int32_t>(si), static_cast<std::int32_t>(sj))) / 255);
                 }
             }
             mesh.primitives.push_back(std::move(paint));
@@ -957,9 +1036,15 @@ private:
             }
         }
         b_.scene().meshes.push_back(std::move(mesh));
+        if (b_.edgeSea()) {
+            b_.scene().drawnGround = {kSteps, columns, rows, std::move(drawn), *b_.edgeSea()};
+        }
         // Slightly under the floors standing on it.
-        if (auto* instance = b_.place(static_cast<int>(b_.scene().meshes.size() - 1), "terrain", Transform::at(0, 0, -kGroundDrop, 0));
-            instance && -lightMaps().lowest >= 0 && static_cast<std::size_t>(-lightMaps().lowest) < lightMaps().floors.size()) {
+        auto* instance = b_.place(static_cast<int>(b_.scene().meshes.size() - 1), "terrain", Transform::at(0, 0, -kGroundDrop, 0));
+        if (instance) {
+            instance->seaReflected = true;
+        }
+        if (instance && -lightMaps().lowest >= 0 && static_cast<std::size_t>(-lightMaps().lowest) < lightMaps().floors.size()) {
             // The game's lot terrain: its paint times twice its diffuse (0.9) times the light map, at most 1.
             instance->lightMap = lightMaps().floors[static_cast<std::size_t>(-lightMaps().lowest)];
             instance->lightMapGain = 1.8f;
@@ -1218,6 +1303,7 @@ private:
         auto& maps = lightMaps();
         const float mapWidth = static_cast<float>(g.width), mapHeight = static_cast<float>(g.height);
         const int ground = content::groundGridLevel(lot_);
+        const auto surface = lot_.grids.find(content::kSurfaceGridInstance);
         auto lightUv = [&](std::int32_t level, float tileX, float tileY, float fx, float fy) {
             if (level == ground) {
                 return std::array<float, 2>{(tileX + fx) / mapWidth, (tileY + fy) / mapHeight};
@@ -1240,6 +1326,11 @@ private:
                         const auto id = static_cast<std::uint16_t>(g.i16(level, x, y, 3 - q));
                         const auto pattern = lot_.floorPatterns.find(id);
                         if (id == 0 || pattern == lot_.floorPatterns.end()) {
+                            continue;
+                        }
+                        // A quarter with no surface draws no floor on any storey, as the game gives it
+                        // an empty pattern: a hot tub's basin stands below it.
+                        if (surface != lot_.grids.end() && surfaceQuarterOpen(surface->second, level, x, y, 3 - q)) {
                             continue;
                         }
                         const int material = b_.material(assets_.patternMaterial(pattern->second.name, false));
@@ -1328,12 +1419,15 @@ private:
                         const auto& b = c[(e + 1) % 4];
                         const float ta = top[e], tb = top[(e + 1) % 4];
                         lowestFloor = std::min({lowestFloor, ta, tb});
-                        // The ceiling's quarter, its texture along the tile axes as a floor's.
-                        auto& s = ceilings[ceiling];
-                        for (const auto& [p, t] : {std::pair{b, tb}, std::pair{a, ta}, std::pair{centre, middle}}) {
-                            addVertex(s, {p[0], p[1], t - kFloorThickness}, {0, 0, -1}, {p[1] / ceilingSpan[0], p[0] / ceilingSpan[1]});
-                            const auto uv = lightUv(level - 1, fx, fy, p[0] - fx, p[1] - fy);
-                            s.lightUvs.insert(s.lightUvs.end(), uv.begin(), uv.end());
+                        // The ceiling's quarter, its texture along the tile axes as a floor's. A quarter
+                        // with no surface has none, as it has no floor.
+                        if (surface == lot_.grids.end() || !surfaceQuarterOpen(surface->second, level, x, y, 3 - e)) {
+                            auto& s = ceilings[ceiling];
+                            for (const auto& [p, t] : {std::pair{b, tb}, std::pair{a, ta}, std::pair{centre, middle}}) {
+                                addVertex(s, {p[0], p[1], t - kFloorThickness}, {0, 0, -1}, {p[1] / ceilingSpan[0], p[0] / ceilingSpan[1]});
+                                const auto uv = lightUv(level - 1, fx, fy, p[0] - fx, p[1] - fy);
+                                s.lightUvs.insert(s.lightUvs.end(), uv.begin(), uv.end());
+                            }
                         }
                         const std::array<float, 3> out{static_cast<float>(neighbor[e][0]), static_cast<float>(neighbor[e][1]), 0};
                         if (!floored(level, x + neighbor[e][0], y + neighbor[e][1], e + 2)) {

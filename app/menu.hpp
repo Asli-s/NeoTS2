@@ -33,11 +33,14 @@ struct MenuOptions {
     bool unpaused = false;       // the lot starts with time running (the game opens lots paused)
     bool smoothFollow = false;   // the camera glides after a followed Sim (see Orbit::smoothFollow)
     bool poolStylePonds = false; // lots' ponds drawn like pools (see SceneBuilder::setPoolStylePonds)
+    bool poolStyleSea = false;   // a beach sea with a depth colour and caustics (see SceneBuilder::setPoolStyleSea)
+    bool smoothLotSkirts = false; // lots joined to the ground around them without seams (see SceneBuilder::setSmoothLotSkirts)
     // The UI drawn this much larger, in percent: one of settings::kUiScales. The game has 100 only.
     // A window too small for it gets less, so the whole UI still fits.
     int uiScale = 100;
     bool bumpMapping = true;     // the game's bump mapping (High Material Detail)
     bool wallBumps = true;       // and of floors and walls (High Lighting Quality)
+    bool sizeGiven = false;      // --size was given, so the window doesn't take the saved one
     ts2::render::Backend backend = ts2::render::defaultBackend();  // what draws (--renderer)
     bool timings = false;        // write the timing report (diag/timing.hpp) to the log every 10 seconds
     std::optional<std::uint32_t> seed;  // fixes a neighborhood's ground variants, so its pictures repeat

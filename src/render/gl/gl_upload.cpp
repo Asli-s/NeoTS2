@@ -208,6 +208,7 @@ GlRenderer::MeshBuffers GlRenderer::uploadMeshBuffers(MeshData& data) {
     if (!data.skin.empty()) {
         b.cpuVertices = std::move(data.vertices);
         b.cpuSkin = std::move(data.skin);
+        b.cpuMorphs = std::move(data.morphs);
     }
     return b;
 }

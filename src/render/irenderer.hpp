@@ -30,6 +30,7 @@ struct Capabilities {
     bool offscreen = true;                 // drawToFile and drawInstancesToImage can draw off-screen
     bool projectedShadows = true;          // Sims' projected shadows (setShadows)
     int maxTextureSize = 8192;
+    int mostSmoothEdgeSamples = 1;         // what setSmoothEdges can do on this card, 1 for nothing
 };
 
 class IRenderer {
@@ -97,6 +98,9 @@ public:
     // What to draw over the scene, in order, from the next frame on, and whether to draw the scene.
     // Takes the sprites and hands back the last ones in `sprites`, so the caller reuses their storage.
     virtual void showSprites(std::vector<Sprite>& sprites, bool scene = true) = 0;
+    // The particles to draw from the next frame on, in order of their layers. Takes the lists and hands back the
+    // last ones, so the caller reuses their storage.
+    virtual void showParticles(std::vector<scene::ParticleVertex>& vertices, std::vector<ParticleBatch>& batches) = 0;
     // How many times larger than their pictures the sprites are drawn (the UI's size, 1 as the game
     // draws it). Above 1 their pictures are enlarged sharply.
     virtual void setSpriteScale(float scale) = 0;
@@ -124,6 +128,12 @@ public:
     // The joint matrices a skinned instance is drawn with from the next frame on (see
     // scene::Mesh::skin). Skinned instances without them aren't drawn.
     virtual void setJoints(std::size_t instance, const std::vector<scene::Transform>& joints) = 0;
+    // The weights a skinned instance's morphs are drawn with from the next frame on, one per morph of
+    // its scene mesh (see scene::Mesh::morphs). Without them its morphs move nothing.
+    virtual void setMorphWeights(std::size_t instance, const std::vector<float>& weights) = 0;
+    // A face instance's eye values from the next frame on (see scene::mixEyes): direction x and y,
+    // the left and right eye's stretch. Without them its eyes stay as modelled.
+    virtual void setEyes(std::size_t instance, const std::array<float, 4>& eyes) = 0;
     // Moves an uploaded instance.
     virtual void setPlace(std::size_t instance, const scene::Transform& transform) = 0;
     // Draws an uploaded instance with these materials, one per primitive of its scene mesh (indexes
@@ -148,9 +158,20 @@ public:
     // Draws a lot's sky with these six faces from the next frame on (see scene::Scene::skybox). None
     // when they are not six faces of one size.
     virtual void setSkybox(const std::vector<scene::Image>& faces) = 0;
+    // Uploads the scene's lot imposters and boundary curtain again, in place of the uploaded ones:
+    // lot view's surroundings at another View Distance.
+    virtual void setSurroundings(const scene::Scene& scene) = 0;
     // The light lot imposters' walls, roofs and slices are drawn with from the next frame on: the
     // lighting state's environment colour in lot view, white in the neighborhood.
     virtual void setImposterLight(const std::array<float, 3>& light) = 0;
+    // Whether the lots' imposters are drawn, from the next frame on (lot view's Neighbors option). On
+    // by default.
+    virtual void setImpostersShown(bool shown) = 0;
+    // The shape colour alpha a lot's imposter is drawn with from the next frame on (by lot id), as
+    // lot view's Fade Distance fades it: its walls and roofs drawn blended without writing depth, and
+    // its slices' alpha scaled.
+    // 1, the default, draws it as it is.
+    virtual void setImposterAlpha(std::uint32_t lot, float alpha) = 0;
     // How objects are lit from the next frame on (see scene::Scene::objectLighting).
     virtual void setObjectLighting(std::optional<scene::ObjectLighting> lighting) = 0;
 
@@ -161,6 +182,28 @@ public:
     // (candle flames) play on.
     virtual void setLotTime(double seconds) = 0;
 
+    // Which shadows draw from the next frame on (the game's Shadows option). All by default.
+    virtual void setShadowOptions(const scene::objectshadow::Options& options) = 0;
+    // Whether the pools' and the neighborhood water's mirror images are drawn, and a beach sea's. Off,
+    // the water shows no reflection (the game's Reflections option). On by default.
+    virtual void setReflections(bool on) = 0;
+    // How many samples each pixel of the main view takes to smooth the edges of what is drawn: 1, 2, 4 or
+    // 8. The next frame draws with it.
+    virtual void setSmoothEdges(int samples) { (void)samples; }
+    // The lots of neighbors drawn as real houses (x0, x1, y0, y1 in the world), which bring their own ground
+    // in place of the ground around the lot. The first kMaxNeighborGrounds count.
+    virtual void setNeighborGrounds(const std::vector<std::array<float, 4>>& lots) { (void)lots; }
+    // Darkens corners and contacts in the main view, not in the original game. `strength` is the power
+    // how open a pixel is gets raised to, with 0 for none.
+    virtual void setAmbientOcclusion(float strength) { (void)strength; }
+    // Whether a lot's sea shows them too (enableOceanReflection in Graphics Rules).
+    virtual void setSeaReflections(bool on) = 0;
+    // Whether materials show specular highlights (the game's specHighlights, off at its Low
+    // Lighting Quality). On by default.
+    virtual void setSpecularHighlights(bool on) = 0;
+    // Whether a frame waits for the screen's refresh. Without waiting, frames go out as fast as they
+    // are drawn. On by default.
+    virtual void setWaitForScreen(bool on) = 0;
     // Whether materials with a normal map are drawn with it (the game's bumpMapping, on at its High
     // Material Detail). On by default.
     virtual void setBumpMapping(bool on) = 0;

@@ -66,8 +66,11 @@ public:
 
     // The mesh of a model with these material overrides, built on first use. -1 when it has nothing
     // to draw. Each shape is placed where its reference sits in the model's transform tree. With
-    // `edit`, the model's mesh data is changed first, as skinnedModel() does.
-    int model(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides, const MeshEdit* edit = nullptr);
+    // `edit`, the model's mesh data is changed first, as skinnedModel() does. With `at`, the model is
+    // the resource at that key, whatever its name, as a part's reference list names it. With `hair`,
+    // the model is a Sim's hair part (see material()).
+    int model(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides, const MeshEdit* edit = nullptr,
+              const scenegraph::Link* at = nullptr, bool hair = false);
     // The same with its meshes skinned to a pose (named `poseName`, for sharing): each vertex follows
     // its joints, from the bind pose to where `pose` has them.
     int posedModel(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides, const Pose& pose,
@@ -85,7 +88,7 @@ public:
     // With `edit`, the model's mesh data is changed first (a newborn's blended face). Models built
     // with different edits are kept apart by the edit's key.
     int skinnedModel(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides,
-                     const MeshEdit* edit = nullptr);
+                     const MeshEdit* edit = nullptr, const scenegraph::Link* at = nullptr, bool hair = false);
 
     // Where a named node of a model sits in it, once the model has been built.
     const Transform* bone(const std::string& model, const std::string& node) const;
@@ -93,8 +96,9 @@ public:
     // whole drawn model moves with it (a dining chair's seat joint). Null for other models.
     const std::string* followJoint(const std::string& model) const;
 
-    // A material by name, -1 when there is no such material.
-    int material(const std::string& name);
+    // A material by name, -1 when there is no such material. With `hair`, for a Sim's hair part: the
+    // game draws that part's SimStandardMaterial materials as SimHair.
+    int material(const std::string& name, bool hair = false);
 
     // A game material (by name) whose texture is drawn over other textures (`under`, bottom first),
     // as one image: a Sim's clothing over its skin. Known afterwards as `name`.
@@ -121,6 +125,19 @@ public:
     // The pools' floor caustics alone, added over what is below: the ground under ponds drawn like
     // pools (not in the original game). Adds nothing when the pools' caustics aren't drawn.
     int causticsOverlayMaterial(const std::string& name);
+    // A texture shown as it is, unlit, blended over what lies behind it by each vertex's alpha alone
+    // (the texture's own alpha left out), on draw layer `layer`. -1 when the texture is missing.
+    int blendedTextureMaterial(const std::string& texture, int layer);
+    // The cube texture `cube` seen along the reflected view in the world, times `scale`, unlit,
+    // `alpha` see-through, on draw layer `layer`. -1 when the cube is missing.
+    int cubeReflectionMaterial(const std::string& name, const std::string& cube, const std::array<float, 3>& scale, float alpha,
+                               int layer);
+    // A beach lot's sea (see Material::skirtSea), rippled by the bump map `bump`, on draw layer
+    // `layer`, with cubeReflectionMaterial's look where it can't be drawn. With `caustics`, the
+    // flipbook the pools' caustics play from, for a sea drawn with them (not in the original game).
+    // -1 when the bump map or the cube is missing.
+    int skirtSeaMaterial(const std::string& name, const std::string& bump, const std::string& cube, const std::array<float, 3>& scale,
+                         float alpha, int layer, const std::string& caustics = {});
     // A particle sprite as the game's StandardParticlesMaterial draws it: the texture (clamped)
     // times `color`, unlit, from both sides, added over what lies behind it or blended, on draw
     // layer `layer`. -1 when the texture is missing.
@@ -153,6 +170,20 @@ public:
     // the original game, which draws them with its waterOnTerrain material.
     void setPoolStylePonds(bool on) { poolStylePonds_ = on; }
     bool poolStylePonds() const { return poolStylePonds_; }
+    // Whether a beach lot's sea gets a colour that deepens with the water and the pools' caustics on
+    // the ground under it, its surface left clear but for its reflection. Not in the original game.
+    void setPoolStyleSea(bool on) { poolStyleSea_ = on; }
+    bool poolStyleSea() const { return poolStyleSea_; }
+    // Whether lots are joined to the ground around them without the game's seams: the skirt follows
+    // the lot's edge between its tile corners, and the lot's paints reach its far edges, where saved
+    // strength maps can hold 0. Not in the original game.
+    void setSmoothLotSkirts(bool on) { smoothLotSkirts_ = on; }
+    bool smoothLotSkirts() const { return smoothLotSkirts_; }
+    // The neighborhood's water level in the lot's own heights, when the lot lies in a neighborhood
+    // with water. With smooth lot skirts the lot's sea bed is rounded below it (see Heights::drawnGrid).
+    void setLotSea(std::optional<float> z) { lotSea_ = z; }
+    // The water level that rounds the lot's drawn sea bed: only with smooth lot skirts.
+    std::optional<float> edgeSea() const { return smoothLotSkirts_ ? lotSea_ : std::nullopt; }
 
     std::size_t missingModels = 0, missingMaterials = 0;
 
@@ -165,7 +196,7 @@ private:
     // savedPoseModel), its bones then known as `boneKey`.
     int buildModel(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides, const Pose* pose,
                    bool skinned = false, const Pose* places = nullptr, const std::string& boneKey = {},
-                   const MeshEdit* edit = nullptr);
+                   const MeshEdit* edit = nullptr, const scenegraph::Link* at = nullptr, bool hair = false);
     int image(const std::string& texture);
     // A bump map's normal map (see Assets::normalMap), -1 when it is missing.
     int normalMap(const std::string& texture);
@@ -185,6 +216,9 @@ private:
     Scene scene_;
     bool drawShadows_ = false;
     bool poolStylePonds_ = false;
+    bool poolStyleSea_ = false;
+    bool smoothLotSkirts_ = false;
+    std::optional<float> lotSea_;
     std::map<std::string, int> models_, materials_, images_, envCubes_;
     std::map<std::string, std::map<std::string, Transform>> bones_;
     std::map<std::string, std::string> followJoints_;  // see followJoint, by the name bone() takes

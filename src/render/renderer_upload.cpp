@@ -36,6 +36,22 @@ SDL_GPUTransferBuffer* filledUpload(SDL_GPUDevice* device, const void* data, Uin
     return buffer;
 }
 
+void* mapStream(SDL_GPUDevice* device, StreamUpload& stream, Uint32 size) {
+    if (size > stream.capacity) {
+        if (stream.buffer != nullptr) {
+            SDL_ReleaseGPUTransferBuffer(device, stream.buffer);
+        }
+        SDL_GPUTransferBufferCreateInfo info{};
+        info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+        info.size = std::max(size, stream.capacity * 2);
+        stream.buffer = SDL_CreateGPUTransferBuffer(device, &info);
+        stream.capacity = stream.buffer != nullptr ? info.size : 0;
+    }
+    // Cycling hands out spare memory while the GPU still reads the last frame's copy, so a new frame
+    // neither waits for it nor needs a new buffer.
+    return stream.buffer != nullptr ? SDL_MapGPUTransferBuffer(device, stream.buffer, true) : nullptr;
+}
+
 SDL_GPUBuffer* filledBuffer(SDL_GPUDevice* device, UploadPass& pass, SDL_GPUBufferUsageFlags usage, const void* data, Uint32 size) {
     SDL_GPUBufferCreateInfo info{};
     info.usage = usage;
@@ -154,7 +170,7 @@ void SdlGpuRenderer::SceneGpu::release(SDL_GPUDevice* device) {
         white = nullptr;
     }
     for (const auto& set : meshBuffers) {
-        for (auto* b : {set.vertices, set.indices, set.skin}) {
+        for (auto* b : {set.vertices, set.indices, set.skin, set.morphs}) {
             if (b) {
                 SDL_ReleaseGPUBuffer(device, b);
             }
@@ -422,6 +438,9 @@ void SdlGpuRenderer::SceneGpu::uploadMeshes(Copy& c, const scene::Scene& scene) 
     if (!data.skin.empty()) {
         meshBuffers[0].skin = c.buffer(SDL_GPU_BUFFERUSAGE_VERTEX, data.skin.data(), static_cast<Uint32>(data.skin.size()));
     }
+    if (!data.morphs.empty()) {
+        meshBuffers[0].morphs = c.buffer(SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, data.morphs.data(), static_cast<Uint32>(data.morphs.size() * sizeof(float)));
+    }
 }
 
 // The neighborhood terrain's grid of points and its tiles.
@@ -542,16 +561,57 @@ void SdlGpuRenderer::SceneGpu::uploadImposters(Copy& c, const scene::PaintedTerr
     const auto& ii = parts.mesh.indices;
     for (const auto& part : parts.draws) {
         ImposterDraw draw{part.kind};
+        draw.lot = part.lot;
         draw.texture = imposterTextures[part.texture];
         draw.lightMap = part.lightMap >= 0 ? imposterTextures[static_cast<std::size_t>(part.lightMap)] : nullptr;
         std::copy(part.tint.begin(), part.tint.end(), draw.tint);
         draw.firstIndex = part.firstIndex;
         draw.indexCount = part.indexCount;
         draw.vertexOffset = part.vertexOffset;
+        draw.low = part.low;
+        draw.high = part.high;
         imposterDraws.push_back(draw);
     }
     imposterVertices = c.buffer(SDL_GPU_BUFFERUSAGE_VERTEX, iv.data(), static_cast<Uint32>(iv.size() * sizeof(float)));
     imposterIndices = c.buffer(SDL_GPU_BUFFERUSAGE_INDEX, ii.data(), static_cast<Uint32>(ii.size() * sizeof(std::uint32_t)));
+}
+
+void SdlGpuRenderer::setSurroundings(const scene::Scene& scene) {
+    if (!gpu_) {
+        return;
+    }
+    SceneGpu& g = *gpu_;
+    // SDL frees what a frame in flight still uses once that frame is done.
+    for (auto** b : {&g.imposterVertices, &g.imposterIndices, &g.clipVertices, &g.clipIndices}) {
+        if (*b) {
+            SDL_ReleaseGPUBuffer(device_, *b);
+            *b = nullptr;
+        }
+    }
+    for (auto* t : g.imposterTextures) {
+        SDL_ReleaseGPUTexture(device_, t);
+    }
+    g.imposterTextures.clear();
+    g.imposterDraws.clear();
+    const bool imposters = scene.terrain && !scene.terrain->imposters.empty();
+    if (!imposters && !scene.clip) {
+        return;
+    }
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+    if (cmd == nullptr) {
+        throw sdlError("GPU command buffer");
+    }
+    std::vector<SDL_GPUTexture*> withMips;
+    UploadPass pass(device_, cmd);
+    SceneGpu::Copy c{device_, pass, withMips};
+    if (imposters) {
+        g.uploadImposters(c, *scene.terrain);
+    }
+    if (scene.clip) {
+        g.uploadBoundary(c, scene);
+    }
+    pass.end();
+    SDL_SubmitGPUCommandBuffer(cmd);
 }
 
 // A lot skirt's boundary curtain: a wall on each edge, facing inwards.

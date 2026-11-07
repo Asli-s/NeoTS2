@@ -8,6 +8,7 @@
 #include "scene/neighborhood_scene.hpp"
 #include "scene/object_lights.hpp"
 #include "scene/object_shadow_picture.hpp"
+#include "scene/pool_water.hpp"
 #include "scene/rig.hpp"
 #include "scene/scene.hpp"
 #include "scene/view.hpp"
@@ -59,10 +60,15 @@ struct LotView {
         orbit = {};
         frameScene(scene, orbit);
         view = {};
-        top = ts2::scene::topLevel(scene);
+        const int built = ts2::scene::topLevel(scene);
         ground = ts2::scene::groundLevel(scene);
-        view.level = top;
+        // As in the game, the view can go up to where the lot's saved bounds end, even past what is built.
+        top = std::max({built, ground, scene.boundsTopLevel});
+        view.level = built;
     }
+
+    bool canGoUp() const { return view.level < top; }
+    bool canGoDown() const { return view.level > ground; }
 
     void changeLevel(int delta, Orbit& orbit) {
         const int level = std::clamp(view.level + delta, ground, top);
@@ -111,7 +117,7 @@ struct LotView {
         switch (key) {
         case Key::Comma:
         case Key::Period:
-            orbit.turnKeys[key == Key::Comma ? 0 : 1] = true;
+            orbit.turnKey = key == Key::Comma ? -1 : 1;
             return true;
         case Key::Z:
         case Key::X:
@@ -256,6 +262,9 @@ inline void appendScene(ts2::scene::Scene& out, ts2::scene::Scene add, const ts2
     if (out.lotSize[0] <= 0) {
         out.lotSize = add.lotSize;
     }
+    if (out.drawnGround.heights.empty()) {
+        out.drawnGround = std::move(add.drawnGround);
+    }
     if (add.lightMaps && !out.lightMaps) {
         auto& maps = out.lightMaps.emplace(std::move(*add.lightMaps));
         for (auto* list : {&maps.floors, &maps.floorIncidence}) {
@@ -315,9 +324,12 @@ inline void appendScene(ts2::scene::Scene& out, ts2::scene::Scene add, const ts2
 // A lot shown as the game's lot view shows it: the lot itself where its imposter stood, and around
 // it, within the skirt's area, the ground around a lot (`skirt`, in world coordinates), the other
 // lots' imposters and the neighborhood's plants. The neighborhood's own far-view ground, water and
-// roads are not drawn.
+// roads are not drawn. The neighborhood's plants and decorations are the scene's first instances
+// and the skirt's follow them: `decorations` receives how many the first are, `surroundings` how
+// many both are.
 inline ts2::scene::Scene lotInNeighborhood(const ts2::scene::Scene& hood, ts2::scene::Scene lot, ts2::scene::Scene skirt,
-                                           const ts2::scene::LotFootprint& where, const ts2::scene::SkirtArea& area) {
+                                           const ts2::scene::LotFootprint& where, const ts2::scene::SkirtArea& area,
+                                           std::size_t* decorations = nullptr, std::size_t* surroundings = nullptr) {
     using namespace ts2::scene;
     Scene out;
     out.terrain = hood.terrain;
@@ -336,14 +348,27 @@ inline ts2::scene::Scene lotInNeighborhood(const ts2::scene::Scene& hood, ts2::s
         return x < ax0 || x > ax1 || y < ay0 || y > ay1 || i.name == ts2::scene::kNeighborhoodPlumbobName;
     });
     // They are lit as lot objects outdoors are, always in the sun: the lot's buildings shade nothing
-    // beyond the lot.
+    // beyond the lot. The beach sea mirrors them, as the game's sea reflection draws the
+    // neighborhood's props.
     for (auto& i : plants.instances) {
+        i.seaReflected = true;
         i.litOutdoors = true;
         i.sunTest = SunTest::Never;
     }
+    if (decorations != nullptr) {
+        *decorations = plants.instances.size();
+    }
     appendScene(out, std::move(plants), Transform{});
+    // A beach sea drawn with the pools' caustics (not in the original game) is the skirt's only pool water.
+    const bool poolStyleSea = std::any_of(skirt.instances.begin(), skirt.instances.end(), [](const Instance& i) { return i.poolWater; });
     appendScene(out, std::move(skirt), Transform{});
+    if (surroundings != nullptr) {
+        *surroundings = out.instances.size();
+    }
     appendScene(out, std::move(lot), where.place);
+    if (poolStyleSea) {
+        ts2::scene::poolwater::sharePoolBoxes(out);
+    }
     if (out.terrain) {
         auto& t = *out.terrain;
         // Other lots' imposters within the area, not this lot's. In lot view the game stands them on
@@ -417,6 +442,12 @@ inline void animateActors(const ts2::scene::Scene& scene, double seconds, ts2::r
     ts2::scene::poseActors(scene, seconds, pose);
     for (const auto& [instance, joints] : pose.joints) {
         renderer.setJoints(instance, joints);
+    }
+    for (const auto& [instance, weights] : pose.morphs) {
+        renderer.setMorphWeights(instance, weights);
+    }
+    for (const auto& [instance, eyes] : pose.eyes) {
+        renderer.setEyes(instance, eyes);
     }
     for (const auto& [instance, place] : pose.places) {
         renderer.setPlace(instance, place);

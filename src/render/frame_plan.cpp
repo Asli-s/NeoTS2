@@ -29,33 +29,64 @@ const scene::ObjectLighting& simLightingFor(const scene::ObjectLighting& lightin
 
 } // namespace
 
-InView boxInView(const Mat4& clip, const std::array<float, 3>& low, const std::array<float, 3>& high) {
-    // The low corner in clip space, and the box's three edges from it.
-    float base[4], edge[3][4];
-    for (int r = 0; r < 4; ++r) {
-        const float* row = &clip.m[static_cast<std::size_t>(r) * 4];
-        base[r] = row[0] * low[0] + row[1] * low[1] + row[2] * low[2] + row[3];
-        for (int k = 0; k < 3; ++k) {
-            edge[k][r] = row[k] * (high[k] - low[k]);
+namespace {
+
+// A box in clip space: its low corner, and its three edges from there, each either not walked or
+// walked. Every object takes this each frame, so it skips the arrays' bounds checks.
+struct ClipBox {
+    float base[4];
+    float edge[3][2][4] = {};
+
+    ClipBox(const Mat4& clip, const std::array<float, 3>& low, const std::array<float, 3>& high) {
+        const float* const rows = clip.m.data();
+        const float lx = low.data()[0], ly = low.data()[1], lz = low.data()[2];
+        const float sizes[3] = {high.data()[0] - lx, high.data()[1] - ly, high.data()[2] - lz};
+        for (int r = 0; r < 4; ++r) {
+            const float* row = rows + r * 4;
+            base[r] = row[0] * lx + row[1] * ly + row[2] * lz + row[3];
+            for (int k = 0; k < 3; ++k) {
+                edge[k][1][r] = row[k] * sizes[k];
+            }
         }
     }
-    int outside[6] = {};
-    for (int c = 0; c < 8; ++c) {
+
+    // One bit for each side of the clip volume corner `c` is outside of.
+    unsigned sidesOutside(int c) const {
+        const float(&x)[4] = edge[0][c & 1];
+        const float(&y)[4] = edge[1][(c >> 1) & 1];
+        const float(&z)[4] = edge[2][(c >> 2) & 1];
         float p[4];
         for (int r = 0; r < 4; ++r) {
-            p[r] = base[r] + (c & 1 ? edge[0][r] : 0) + (c & 2 ? edge[1][r] : 0) + (c & 4 ? edge[2][r] : 0);
+            p[r] = base[r] + x[r] + y[r] + z[r];
         }
-        outside[0] += p[0] < -p[3];
-        outside[1] += p[0] > p[3];
-        outside[2] += p[1] < -p[3];
-        outside[3] += p[1] > p[3];
-        outside[4] += p[2] < 0;
-        outside[5] += p[2] > p[3];
+        return unsigned{p[0] < -p[3]} | unsigned{p[0] > p[3]} << 1 | unsigned{p[1] < -p[3]} << 2 | unsigned{p[1] > p[3]} << 3 |
+               unsigned{p[2] < 0} << 4 | unsigned{p[2] > p[3]} << 5;
     }
-    if (std::any_of(std::begin(outside), std::end(outside), [](int n) { return n == 8; })) {
-        return InView::Outside;
+};
+
+} // namespace
+
+InView boxInView(const Mat4& clip, const std::array<float, 3>& low, const std::array<float, 3>& high) {
+    const ClipBox box(clip, low, high);
+    unsigned onAll = 63, onAny = 0;
+    for (int c = 0; c < 8; ++c) {
+        const unsigned sides = box.sidesOutside(c);
+        onAll &= sides;
+        onAny |= sides;
+        if (onAll == 0 && onAny != 0) {
+            return InView::Partly;
+        }
     }
-    return std::all_of(std::begin(outside), std::end(outside), [](int n) { return n == 0; }) ? InView::Inside : InView::Partly;
+    return onAll != 0 ? InView::Outside : InView::Inside;
+}
+
+bool boxOutside(const Mat4& clip, const std::array<float, 3>& low, const std::array<float, 3>& high) {
+    const ClipBox box(clip, low, high);
+    unsigned onAll = 63;
+    for (int c = 0; c < 8 && onAll != 0; ++c) {
+        onAll &= box.sidesOutside(c);
+    }
+    return onAll != 0;
 }
 
 float nearestDepth(const Mat4& clip, const std::array<float, 3>& low, const std::array<float, 3>& high, float nearZ) {
@@ -74,8 +105,10 @@ FrameView FrameView::make(const Camera& camera, unsigned width, unsigned height)
     f.aspect = height ? static_cast<float>(width) / static_cast<float>(height) : 1.0f;
     f.fovY = camera.fovX > 0 ? 2 * std::atan(std::tan(camera.fovX / 2) / f.aspect) : camera.fovY;
     f.nearZ = camera.nearPlane > 0 ? camera.nearPlane : camera.farPlane / 10000;
-    f.viewProjection = Mat4::perspective(f.fovY, f.aspect, f.nearZ, camera.farPlane) *
-                       Mat4::lookAt(camera.eye, camera.target, {0, 0, 1});
+    const auto& box = camera.orthographic;
+    f.viewProjection = (box[1] > box[0] ? Mat4::orthographic(box[0], box[1], box[2], box[3], f.nearZ, camera.farPlane)
+                                        : Mat4::perspective(f.fovY, f.aspect, f.nearZ, camera.farPlane)) *
+                       Mat4::lookAt(camera.eye, camera.target, camera.up);
     f.sun = normalize({0.4f, -0.5f, 0.75f});
     return f;
 }
@@ -91,6 +124,77 @@ Mat4 poolMirror(const Mat4& viewProjection, float plane, float keepBelow) {
     const std::array<float, 4> above{0, 0, 1, -(plane - keepBelow)};
     for (int c = 0; c < 4; ++c) {
         r.m[8 + c] = r.m[12 + c] - above[c];
+    }
+    return r;
+}
+
+namespace {
+
+// The poolWater-1 material's waves: 5 and 6 repeats a unit along x and y, each 0.01 high, at speed 3.
+constexpr float kPoolRepeatX = 5, kPoolRepeatY = 6, kPoolWaveHeight = 0.01f, kPoolWaveSpeed = 3;
+// The most the ripples move where a pool surface reads its mirror image, in texture units times w
+// (see pool.frag.hlsl).
+constexpr float kPoolRippleShift = 0.1f;
+// The most murky water's blur reaches, in texture units, at full murk.
+constexpr float kPoolMurkReach = 0.016f;
+
+} // namespace
+
+std::array<float, 4> poolMirrorArea(const FrameView& f, std::span<const Draw> blended, unsigned width, unsigned height) {
+    constexpr std::array<float, 4> kWhole{-1, 1, -1, 1};
+    float x0 = 1, x1 = -1, y0 = 1, y1 = -1, nearest = std::numeric_limits<float>::max(), murk = 0;
+    bool any = false;
+    for (const Draw& d : blended) {
+        if (!d.material || !d.material->poolSurface) {
+            continue;
+        }
+        const GpuPrimitive& p = *d.primitive;
+        if (!p.hasBox || width == 0 || height == 0) {
+            return kWhole;
+        }
+        Mat4 model;
+        std::copy_n(d.instance->transform.m.begin(), 12, model.m.begin());
+        const Mat4 clip = f.viewProjection * model;
+        const float lift = 2 * kPoolWaveHeight;
+        for (int c = 0; c < 8; ++c) {
+            const float x = c & 1 ? p.high[0] : p.low[0], y = c & 2 ? p.high[1] : p.low[1], z = c & 4 ? p.high[2] + lift : p.low[2] - lift;
+            const float* m = clip.m.data();
+            const float w = m[12] * x + m[13] * y + m[14] * z + m[15];
+            // A corner near or behind the camera can land anywhere on the screen.
+            if (!(w >= f.nearZ)) {
+                return kWhole;
+            }
+            const float sx = (m[0] * x + m[1] * y + m[2] * z + m[3]) / w, sy = (m[4] * x + m[5] * y + m[6] * z + m[7]) / w;
+            x0 = std::min(x0, sx);
+            x1 = std::max(x1, sx);
+            y0 = std::min(y0, sy);
+            y1 = std::max(y1, sy);
+            nearest = std::min(nearest, w);
+        }
+        murk = std::max(murk, std::clamp(d.material->color[3], 0.0f, 1.0f));
+        any = true;
+    }
+    if (!any) {
+        return kWhole;
+    }
+    // Clip space is twice texture units. Two pixels more cover filtering and rounding.
+    const float margin = 2 * kPoolRippleShift / nearest + 2 * kPoolMurkReach * murk + 4.0f / static_cast<float>(std::min(width, height));
+    // The mirror is flipped left to right.
+    return {std::max(-1.0f, -x1 - margin), std::min(1.0f, -x0 + margin), std::max(-1.0f, y0 - margin), std::min(1.0f, y1 + margin)};
+}
+
+Mat4 narrowedTo(const Mat4& viewProjection, const std::array<float, 4>& area) {
+    Mat4 r = viewProjection;
+    const float* m = viewProjection.m.data();
+    for (int axis = 0; axis < 2; ++axis) {
+        const float low = area[static_cast<std::size_t>(axis * 2)], high = area[static_cast<std::size_t>(axis * 2 + 1)];
+        if (!(high - low > 1e-6f)) {
+            continue;
+        }
+        const float scale = 2 / (high - low), shift = (low + high) / (high - low);
+        for (int c = 0; c < 4; ++c) {
+            r.m[static_cast<std::size_t>(axis * 4 + c)] = scale * m[axis * 4 + c] - shift * m[12 + c];
+        }
     }
     return r;
 }
@@ -126,10 +230,11 @@ void FramePlan::collectDraws(const RendererState& s, const ResourceQuery& q, con
                 continue;
             }
             if (p.cullable && meshInView != InView::Inside &&
-                (meshInView == InView::Outside || boxInView(clip, p.low, p.high) == InView::Outside)) {
+                (meshInView == InView::Outside || boxOutside(clip, p.low, p.high))) {
                 continue;
             }
-            if (p.shadowGroup && objectShadows && !scene::objectshadow::showsShadowGroups(instance.shadow)) {
+            if (p.shadowGroup && (objectShadows ? !scene::objectshadow::showsShadowGroups(scene::objectshadow::inForce(instance.shadow, instance.shadowFacts, s.shadowOptions_))
+                                                : !s.shadowOptions_.groups)) {
                 continue;
             }
             int material = p.material;
@@ -143,19 +248,24 @@ void FramePlan::collectDraws(const RendererState& s, const ResourceQuery& q, con
                                            ? &s.materials_[static_cast<std::size_t>(material)]
                                            : nullptr;
             const auto alpha = m ? m->alpha : scene::AlphaMode::Opaque;
-            // A shape colour draws every material blended, as the game turns standard materials to blend mode.
+            // A shape colour draws the materials that take it blended, as the game turns standard materials to blend mode.
             const bool blends = alpha == scene::AlphaMode::Blend || alpha == scene::AlphaMode::Add || alpha == scene::AlphaMode::Sum ||
-                                instance.shapeColor.has_value();
+                                (instance.shapeColor.has_value() && (!m || m->takesShapeColor));
             const float sortDepth = blends && p.hasBox ? nearestDepth(clip, p.low, p.high, f.nearZ) : clip.m[15];
             (blends ? blended : alpha == scene::AlphaMode::Layer ? layers : opaque)
                 .push_back({&p, &instance, m, m ? m->layer : 0, sortDepth, p.source < instance.sun.size() ? instance.sun[p.source] : 1.0f});
         }
-        // The game draws an object's blended surfaces of one layer from its model's last to its first
-        // (a Sim's hair underside first, the outer strands last): their depths are handed out again,
-        // the farthest to the first, so they keep that order among other objects' surfaces.
+        // The game draws an object's blended surfaces of one layer by their groups' sort numbers, the
+        // lowest first, and those with the same number from the farthest. A Sim's hair needs this, as
+        // its strands write depth. Their depths are handed out again, the farthest to the first, so
+        // they keep that order among other objects' surfaces.
         const auto own = blended.begin() + static_cast<std::ptrdiff_t>(firstBlended);
-        std::reverse(own, blended.end());
-        std::stable_sort(own, blended.end(), [](const Draw& a, const Draw& b) { return a.layer < b.layer; });
+        std::stable_sort(own, blended.end(), [](const Draw& a, const Draw& b) {
+            if (a.layer != b.layer) {
+                return a.layer < b.layer;
+            }
+            return a.primitive->alphaSort != b.primitive->alphaSort ? a.primitive->alphaSort < b.primitive->alphaSort : a.depth > b.depth;
+        });
         for (auto run = own; run != blended.end();) {
             const auto end = std::find_if(run, blended.end(), [&](const Draw& d) { return d.layer != run->layer; });
             depths.clear();
@@ -168,7 +278,25 @@ void FramePlan::collectDraws(const RendererState& s, const ResourceQuery& q, con
             }
         }
     }
-    std::stable_sort(opaque.begin(), opaque.end(), [](const Draw& a, const Draw& b) { return a.layer < b.layer; });
+    // Within a layer, surfaces sharing a material go together, as binding textures again costs more
+    // than the sort. The game also sorts by shader and geometry. A lot's roofs go first in the order
+    // placed, as their pieces can lie in one plane, where whichever comes last shows.
+    std::stable_sort(opaque.begin(), opaque.end(), [](const Draw& a, const Draw& b) {
+        if (a.layer != b.layer) {
+            return a.layer < b.layer;
+        }
+        const bool aRoof = a.instance->part == scene::Part::Roof, bRoof = b.instance->part == scene::Part::Roof;
+        if (aRoof || bRoof) {
+            return aRoof && !bRoof;
+        }
+        if (a.primitive->skinned != b.primitive->skinned) {
+            return b.primitive->skinned;
+        }
+        if (a.material != b.material) {
+            return std::less<>{}(a.material, b.material);
+        }
+        return a.primitive->buffers != b.primitive->buffers ? a.primitive->buffers < b.primitive->buffers : a.primitive->firstIndex < b.primitive->firstIndex;
+    });
     std::stable_sort(blended.begin(), blended.end(),
                      [](const Draw& a, const Draw& b) { return a.layer != b.layer ? a.layer < b.layer : a.depth > b.depth; });
 }
@@ -181,12 +309,13 @@ DrawUniforms FramePlan::uniformsFor(const RendererState& s, const ResourceQuery&
     const float model[16] = {t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10], t[11], 0, 0, 0, 1};
     std::copy(std::begin(model), std::end(model), vu.frame.model);
     std::copy(f.camera->eye.begin(), f.camera->eye.end(), vu.frame.eye);
-    if (const scene::Material* lit = d.material; lit && lit->specPower > 0 && !lit->simLighting) {
+    if (const scene::Material* lit = d.material; s.specularHighlights_ && lit && lit->specPower > 0 && !lit->simLighting) {
         std::copy(lit->specCoef.begin(), lit->specCoef.end(), vu.frame.specular);
         vu.frame.specular[3] = lit->specPower;
     }
     const scene::Material* m = d.material;
-    const bool skirt = d.instance->part == scene::Part::Skirt;
+    // A neighbor's real ground takes the same light, so that the two meet at any hour.
+    const bool skirt = d.instance->part == scene::Part::Skirt || (d.instance->neighborHouse && d.instance->lightMapMultiply);
     const scene::ObjectLighting* lighting = s.objectLighting_ ? &*s.objectLighting_ : nullptr;
     const auto& parts = d.instance->partLightSets;
     const int set = d.primitive->source < parts.size() ? parts[d.primitive->source] : d.instance->lightSet;
@@ -213,6 +342,9 @@ DrawUniforms FramePlan::uniformsFor(const RendererState& s, const ResourceQuery&
     }
     if (d.primitive->skinned) {
         vu.jointBase = static_cast<std::uint32_t>(s.jointBase_[static_cast<std::size_t>(d.instance - s.instances_.data())]);
+        vu.morphRow = s.morphRow(static_cast<std::size_t>(d.instance - s.instances_.data()));
+        const auto eyes = s.eyesOf(static_cast<std::size_t>(d.instance - s.instances_.data()));
+        std::copy(eyes.begin(), eyes.end(), vu.eyes);
     }
     setMaterial(s, q, u, f, d, blend, normalMap, lighting);
     return u;
@@ -223,10 +355,13 @@ void FramePlan::setLights(const RendererState& s, DrawUniforms& u, const Draw& d
     SkinnedUniforms& vu = u.vertex;
     const scene::Material* m = d.material;
     for (std::size_t k = 0; k < 3; ++k) {
-        // The skirt's and roofs' ambient: a quarter of it as a byte (the device's ambient),
-        // times the material's ambient (the skirt's own, a roof's four times its diffuse).
-        const float device = std::round(std::clamp(l.ambient[k] / 4, 0.0f, 1.0f) * 255) / 255;
-        vu.frame.ambient[k] = skirt ? device * d.instance->skirtAmbient : roof ? device * 4 : l.ambient[k];
+        vu.frame.ambient[k] = l.ambient[k];
+        if (skirt || roof) {
+            // The skirt's and roofs' ambient: a quarter of it as a byte (the device's ambient),
+            // times the material's ambient (the skirt's own, a roof's four times its diffuse).
+            const float device = std::round(std::clamp(l.ambient[k] / 4, 0.0f, 1.0f) * 255) / 255;
+            vu.frame.ambient[k] = skirt ? device * d.instance->skirtAmbient : device * 4;
+        }
     }
     if (s.highlightObject_ != 0 && d.instance->part == scene::Part::Object && d.instance->object == s.highlightObject_) {
         for (std::size_t k = 0; k < 3; ++k) {
@@ -257,23 +392,35 @@ void FramePlan::setLights(const RendererState& s, DrawUniforms& u, const Draw& d
         }
     }
     for (std::size_t i = 0; i < kObjectLights && i < l.lights.size(); ++i) {
-        std::copy(l.lights[i].direction.begin(), l.lights[i].direction.end(), vu.frame.lightDirections[i]);
-        if (l.lights[i].point) {
-            vu.frame.lightDirections[i][3] = l.lights[i].range * l.lights[i].range;
-            std::copy(l.lights[i].position.begin(), l.lights[i].position.end(), vu.frame.lightPositions[i]);
-            vu.frame.lightPositions[i][3] = l.lights[i].falloff;
-            if (l.lights[i].spot) {
-                const float width = l.lights[i].coneInner - l.lights[i].coneOuter;
-                vu.frame.lightCones[i][0] = l.lights[i].coneOuter;
+        const auto& light = l.lights[i];
+        std::copy(light.direction.begin(), light.direction.end(), vu.frame.lightDirections[i]);
+        if (light.point) {
+            vu.frame.lightDirections[i][3] = light.range * light.range;
+            std::copy(light.position.begin(), light.position.end(), vu.frame.lightPositions[i]);
+            vu.frame.lightPositions[i][3] = light.falloff;
+            if (light.spot) {
+                const float width = light.coneInner - light.coneOuter;
+                vu.frame.lightCones[i][0] = light.coneOuter;
                 vu.frame.lightCones[i][1] = width > 1e-6f ? 1 / width : 1e6f;
                 vu.frame.lightCones[i][2] = 1;
             }
         }
-        const float share = l.lights[i].sun && !skirt ? d.sun : 1.0f;
+        const float share = light.sun && !skirt ? d.sun : 1.0f;
         for (std::size_t k = 0; k < 3; ++k) {
-            vu.frame.lightColors[i][k] = l.lights[i].color[k] * share;
+            vu.frame.lightColors[i][k] = light.color[k] * share;
         }
     }
+}
+
+std::size_t FramePlan::endOfLayer(std::span<const Draw> blended, std::size_t from, int layer) {
+    while (from < blended.size() && blended[from].layer <= layer) {
+        ++from;
+    }
+    return from;
+}
+
+float FramePlan::particleAlphaReference(std::uint8_t draw) {
+    return (draw == effects::ParticleBlock::DepthDecal ? 128.0f : 1.0f) / 255;
 }
 
 void FramePlan::setMaterial(const RendererState& s, const ResourceQuery& q, DrawUniforms& u, const FrameView& f, const Draw& d, int blend,
@@ -288,7 +435,16 @@ void FramePlan::setMaterial(const RendererState& s, const ResourceQuery& q, Draw
             fu.color[i] *= lighting->textureLight[i];
         }
     }
-    if (const auto& shape = d.instance->shapeColor) {
+    if (d.instance->part == scene::Part::Skirt) {
+        fu.neighborLight[3] = 2;
+    }
+    if (d.instance->neighborHouse) {
+        fu.neighborLight[0] = s.imposterLight_[0];
+        fu.neighborLight[1] = s.imposterLight_[1];
+        fu.neighborLight[2] = s.imposterLight_[2];
+        fu.neighborLight[3] = d.instance->lightMapMultiply ? 3.0f : 1.0f;
+    }
+    if (const auto& shape = d.instance->shapeColor; shape && (!m || m->takesShapeColor)) {
         for (std::size_t i = 0; i < 4; ++i) {
             fu.color[i] *= (*shape)[i];
         }
@@ -312,6 +468,7 @@ void FramePlan::setMaterial(const RendererState& s, const ResourceQuery& q, Draw
                      : m->alpha == scene::AlphaMode::Layer ? 10.0f / 255  // as the game's terrain paint
                      : m->alpha == scene::AlphaMode::Add   ? 1.0f / 255   // as the game's particles
                      : m->alpha == scene::AlphaMode::Sum   ? 0.0f         // its alpha plays no part
+                     : m->blendedHair                      ? 60.5f / 255  // the game keeps alpha above 60
                      : blend                               ? 0.01f
                                                            : 0.0f;
     fu.unlit = m && m->unlit ? 1.0f : 0.0f;
@@ -370,10 +527,10 @@ void FramePlan::setMaterial(const RendererState& s, const ResourceQuery& q, Draw
     // The environment cube, black for materials without one so the binding rarely changes. A shape
     // colour turns reflections off, as the game's material scripts do.
     TextureRef cube{TextureRef::Kind::BlackCube, 0};
-    if (m && m->envCube >= 0 && q.hasEnvCube(m->envCube) && !d.instance->shapeColor) {
+    if (m && m->envCube >= 0 && q.hasEnvCube(m->envCube) && !(d.instance->shapeColor && m->takesShapeColor)) {
         cube = {TextureRef::Kind::EnvCube, m->envCube};
         std::copy(m->envCubeCoef.begin(), m->envCubeCoef.end(), fu.envCube);
-        if (lighting) {
+        if (lighting && m->envCubeTakesLight) {
             for (std::size_t i = 0; i < 3; ++i) {
                 fu.envCube[i] *= lighting->textureLight[i];
             }
@@ -440,12 +597,18 @@ SkinnedUniforms FramePlan::shadowCasterUniforms(const RendererState& s, const Dr
     const float model[16] = {t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10], t[11], 0, 0, 0, 1};
     std::copy(std::begin(model), std::end(model), u.frame.model);
     u.jointBase = static_cast<std::uint32_t>(s.jointBase_[static_cast<std::size_t>(d.instance - s.instances_.data())]);
+    u.morphRow = s.morphRow(static_cast<std::size_t>(d.instance - s.instances_.data()));
     return u;
 }
 
 ShadowUniforms FramePlan::shadowUniforms(const RendererState& s, std::size_t casters) {
     ShadowUniforms u{};
     casters = std::min({casters, s.shadows_.casters.size(), kMaxShadowCasters});
+    const std::size_t grounds = std::min(s.neighborGrounds_.size(), kMaxNeighborGrounds);
+    for (std::size_t i = 0; i < grounds; ++i) {
+        std::copy(s.neighborGrounds_[i].begin(), s.neighborGrounds_[i].end(), u.neighborGround[i]);
+    }
+    u.neighborGrounds[0] = static_cast<float>(grounds);
     for (std::size_t i = 0; i < casters; ++i) {
         const auto& caster = s.shadows_.casters[i];
         const auto camera = scene::simshadows::camera(s.shadows_.toSun, caster.root);
@@ -478,14 +641,12 @@ PoolUniforms FramePlan::poolUniformsFor(const RendererState& s, const FrameView&
     const float model[16] = {t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10], t[11], 0, 0, 0, 1};
     std::copy(std::begin(model), std::end(model), u.model);
     std::copy(f.camera->eye.begin(), f.camera->eye.end(), u.eye);
-    // The poolWater-1 material: waves repeating 5 times a unit along x and 6 along y, 0.01 high,
-    // at speed 3, and the normal tilted by repeats times height.
-    constexpr float kRepeatX = 5, kRepeatY = 6, kWaveHeight = 0.01f, kSpeed = 3;
-    const float waveX[4] = {kRepeatX, 0, kWaveHeight, kSpeed}, waveY[4] = {0, kRepeatY, kWaveHeight, kSpeed};
+    // The normal is tilted by repeats times height.
+    const float waveX[4] = {kPoolRepeatX, 0, kPoolWaveHeight, kPoolWaveSpeed}, waveY[4] = {0, kPoolRepeatY, kPoolWaveHeight, kPoolWaveSpeed};
     std::copy(std::begin(waveX), std::end(waveX), u.waveX);
     std::copy(std::begin(waveY), std::end(waveY), u.waveY);
-    u.waveNormal[0] = -kRepeatX * kWaveHeight;
-    u.waveNormal[1] = -kRepeatY * kWaveHeight;
+    u.waveNormal[0] = -kPoolRepeatX * kPoolWaveHeight;
+    u.waveNormal[1] = -kPoolRepeatY * kPoolWaveHeight;
     // The highlight comes from the draw's first light, the sun outdoors.
     if (s.objectLighting_ && !s.objectLighting_->lights.empty()) {
         const auto& sun = s.objectLighting_->lights.front();
@@ -525,8 +686,37 @@ PondUniforms FramePlan::pondUniformsFor(const RendererState& s, const FrameView&
 }
 
 const Draw* FramePlan::poolWater(const std::vector<Draw>& blended) {
+    // The lot's own pool sets the mirror, and a neighbor's real house only without one.
+    const Draw* found = nullptr;
     for (const auto& d : blended) {
         if (d.material && d.material->poolSurface && d.primitive->hasBox) {
+            if (!d.instance->neighborHouse) {
+                return &d;
+            }
+            found = found ? found : &d;
+        }
+    }
+    return found;
+}
+
+SeaUniforms FramePlan::seaUniformsFor(const RendererState& s, const FrameView& f, const Draw& d) {
+    SeaUniforms u{};
+    std::copy(f.viewProjection.m.begin(), f.viewProjection.m.end(), u.viewProjection);
+    const auto& t = d.instance->transform.m;
+    const float model[16] = {t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10], t[11], 0, 0, 0, 1};
+    std::copy(std::begin(model), std::end(model), u.model);
+    std::copy(f.camera->eye.begin(), f.camera->eye.end(), u.eye);
+    u.time[0] = s.time_;
+    // The lotSkirtSea material's waterTint by day and at night.
+    constexpr std::array<float, 3> kDay{-0.3f, 0.1f, 0.1f}, kNight{-0.3f, -0.2f, -0.1f};
+    const auto& tint = d.instance->seaNight ? kNight : kDay;
+    std::copy(tint.begin(), tint.end(), u.tint);
+    return u;
+}
+
+const Draw* FramePlan::skirtSea(const std::vector<Draw>& blended) {
+    for (const auto& d : blended) {
+        if (d.material && d.material->skirtSea && d.primitive->hasBox) {
             return &d;
         }
     }
@@ -564,7 +754,7 @@ void FramePlan::poolCasters(const RendererState& s, const ResourceQuery& q, cons
             if (p.skinned && (i >= s.jointBase_.size() || s.jointBase_[i] < 0 || !q.skinReady(p.buffers))) {
                 continue;
             }
-            if (p.hasBox && !p.skinned && boxInView(toClip, p.low, p.high) == InView::Outside) {
+            if (p.hasBox && !p.skinned && boxOutside(toClip, p.low, p.high)) {
                 continue;
             }
             out.push_back({&p, &instance, m, 0, 0, 1});

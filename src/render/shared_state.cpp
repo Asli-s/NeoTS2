@@ -33,6 +33,41 @@ void RendererState::setJoints(std::size_t instance, const std::vector<scene::Tra
     jointsChanged_ = true;
 }
 
+void RendererState::setMorphWeights(std::size_t instance, const std::vector<float>& weights) {
+    if (instance >= morphBase_.size() || weights.empty()) {
+        return;
+    }
+    // Room for them in whole matrices' worth of floats, kept while they fit, as for joints.
+    const int room = static_cast<int>((weights.size() + 11) / 12 * 12);
+    if (morphBase_[instance] < 0 || morphRoom_[instance] < room) {
+        morphBase_[instance] = static_cast<int>(jointData_.size() / 12);
+        morphRoom_[instance] = room;
+        jointData_.resize(jointData_.size() + static_cast<std::size_t>(room));
+    }
+    float* out = &jointData_[static_cast<std::size_t>(morphBase_[instance]) * 12];
+    std::fill_n(out, morphRoom_[instance], 0.0f);
+    std::copy(weights.begin(), weights.end(), out);
+    jointsChanged_ = true;
+}
+
+void RendererState::setEyes(std::size_t instance, const std::array<float, 4>& eyes) {
+    if (instance >= instances_.size()) {
+        return;
+    }
+    if (eyes_.size() <= instance) {
+        eyes_.resize(instance + 1, std::array<float, 4>{});
+    }
+    eyes_[instance] = eyes;
+}
+
+std::array<float, 4> RendererState::eyesOf(std::size_t instance) const {
+    return instance < eyes_.size() ? eyes_[instance] : std::array<float, 4>{};
+}
+
+std::uint32_t RendererState::morphRow(std::size_t instance) const {
+    return instance < morphBase_.size() && morphBase_[instance] >= 0 ? static_cast<std::uint32_t>(morphBase_[instance]) * 3 : kNoMorphWeights;
+}
+
 void RendererState::setPlace(std::size_t instance, const scene::Transform& transform) {
     if (instance < instances_.size()) {
         instances_[instance].transform = transform;
@@ -59,6 +94,8 @@ void RendererState::setInstance(const scene::Scene& scene, std::size_t index) {
         instances_.push_back(instance);
         jointBase_.push_back(-1);
         jointCount_.push_back(0);
+        morphBase_.push_back(-1);
+        morphRoom_.push_back(0);
     } else {
         instances_[index] = instance;
     }
@@ -76,6 +113,10 @@ void RendererState::setLights(const scene::Scene& scene, std::size_t index) {
     instances_[index].partLightSets = scene.instances[index].partLightSets;
     instances_[index].sun = scene.instances[index].sun;
     instances_[index].skirtScale = scene.instances[index].skirtScale;
+    instances_[index].seaNight = scene.instances[index].seaNight;
+    if (scene.instances[index].skirtSand != 0) {
+        instances_[index].shapeColor = scene.instances[index].shapeColor;
+    }
 }
 
 void RendererState::addLightSets(const scene::Scene& scene) {
@@ -100,7 +141,10 @@ void RendererState::swapScene(PreparedBase& prepared) {
     visible_.clear();
     jointBase_.assign(instances_.size(), -1);
     jointCount_.assign(instances_.size(), 0);
+    morphBase_.assign(instances_.size(), -1);
+    morphRoom_.assign(instances_.size(), 0);
     jointData_.clear();
+    eyes_.clear();
     shadows_ = {};
 }
 

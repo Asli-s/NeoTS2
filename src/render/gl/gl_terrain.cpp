@@ -153,6 +153,38 @@ void GlRenderer::drawSky(const FrameView& f, const Texture& cube, float up) {
     gl_.DrawArrays(GL_TRIANGLES, 0, 3);
 }
 
+void GlRenderer::setSurroundings(const scene::Scene& scene) {
+    if (!gpu_) {
+        return;
+    }
+    SceneGpu& gpu = *gpu_;
+    for (auto& t : gpu.imposterTextures) {
+        release(t);
+    }
+    gpu.imposterTextures.clear();
+    gpu.imposterDraws.clear();
+    for (GLuint* b : {&gpu.imposterVertices, &gpu.imposterIndices, &gpu.curtainVertices, &gpu.curtainIndices}) {
+        releaseBuffer(*b);
+    }
+    forgetBindings();
+    if (scene.terrain && !scene.terrain->imposters.empty()) {
+        const auto& t = *scene.terrain;
+        const scene::Image white{1, 1, {255, 255, 255, 255}, {}};
+        for (const auto& image : t.imposterTextures) {
+            gpu.imposterTextures.push_back(uploadTexture(complete(image) ? image : white, false));
+        }
+        const ImposterMesh parts = imposterParts(t);
+        gpu.imposterVertices = uploadBuffer(GL_ARRAY_BUFFER, parts.mesh.vertices.data(), parts.mesh.vertices.size() * sizeof(float));
+        gpu.imposterIndices = uploadBuffer(GL_ELEMENT_ARRAY_BUFFER, parts.mesh.indices.data(), parts.mesh.indices.size() * sizeof(std::uint32_t));
+        gpu.imposterDraws = parts.draws;
+    }
+    if (scene.clip) {
+        const IndexedMesh curtain = boundaryCurtain(*scene.clip);
+        gpu.curtainVertices = uploadBuffer(GL_ARRAY_BUFFER, curtain.vertices.data(), curtain.vertices.size() * sizeof(float));
+        gpu.curtainIndices = uploadBuffer(GL_ELEMENT_ARRAY_BUFFER, curtain.indices.data(), curtain.indices.size() * sizeof(std::uint32_t));
+    }
+}
+
 // The boundary curtain, into depth only: nothing beyond it shows from inside.
 void GlRenderer::drawBoundary(const FrameView& f) {
     useProgram(clip_);
@@ -244,7 +276,7 @@ void GlRenderer::drawRoads(const FrameView& f) {
 
 void GlRenderer::drawImposters(const FrameView& f) {
     SceneGpu& g = *gpu_;
-    if (g.imposterDraws.empty()) {
+    if (g.imposterDraws.empty() || !impostersShown_) {
         return;
     }
     using Kind = scene::PaintedTerrain::ImposterPart::Kind;
@@ -259,11 +291,13 @@ void GlRenderer::drawImposters(const FrameView& f) {
     struct PartUniforms {
         float tint[3];
         float cutoff, mode, light[3];
+        float alpha, unused[3];
     };
-    auto draw = [&](const State& state, const ImposterMesh::Part& d, int texture, GLint wrap, bool nearest, float cutoff, float mode) {
+    auto draw = [&](const State& state, const ImposterMesh::Part& d, int texture, GLint wrap, bool nearest, float cutoff, float mode,
+                    float alpha = 1) {
         setState(state);
-        const PartUniforms u{{d.tint[0], d.tint[1], d.tint[2]}, cutoff, mode, {imposterLight_[0], imposterLight_[1], imposterLight_[2]}};
-        gl_.Uniform4fv(imposter_.fragment, 2, reinterpret_cast<const GLfloat*>(&u));
+        const PartUniforms u{{d.tint[0], d.tint[1], d.tint[2]}, cutoff, mode, {imposterLight_[0], imposterLight_[1], imposterLight_[2]}, alpha, {}};
+        gl_.Uniform4fv(imposter_.fragment, 3, reinterpret_cast<const GLfloat*>(&u));
         bindTexture(0, g.imposterTextures[static_cast<std::size_t>(texture)], wrap, nearest);
         // OpenGL 2 has no base vertex to draw with, so the attributes start at the part's.
         const std::size_t start = static_cast<std::size_t>(d.vertexOffset) * stride;
@@ -274,8 +308,9 @@ void GlRenderer::drawImposters(const FrameView& f) {
     };
     // Terrain: its light map multiplies what is under it, then its texture (alpha premultiplied)
     // goes over. Neither writes depth. Walls and slices: premultiplied, writing depth. Roofs:
-    // opaque and two-sided.
-    State light, terrain, wall, roof;
+    // opaque and two-sided. A fading imposter's walls and roofs blend by their alpha without writing
+    // depth, as the game's imposter scripts draw them with a shape colour.
+    State light, terrain, wall, roof, fadedWall, fadedRoof;
     light.blend = 3;
     light.cull = true;
     light.depthWrite = false;
@@ -284,9 +319,14 @@ void GlRenderer::drawImposters(const FrameView& f) {
     terrain.depthWrite = false;
     wall.blend = 4;
     wall.cull = true;
+    fadedWall.blend = 1;
+    fadedWall.cull = true;
+    fadedWall.depthWrite = false;
+    fadedRoof.blend = 1;
+    fadedRoof.depthWrite = false;
     // The terrain first (its shader layer comes before the others'): light map, then texture.
     for (const auto& d : g.imposterDraws) {
-        if (d.kind != Kind::Terrain) {
+        if (d.kind != Kind::Terrain || boxOutside(f.viewProjection, d.low, d.high)) {
             continue;
         }
         if (d.lightMap >= 0) {
@@ -294,16 +334,22 @@ void GlRenderer::drawImposters(const FrameView& f) {
         }
         draw(terrain, d, static_cast<int>(d.texture), GL_CLAMP_TO_EDGE, false, 0, 1);
     }
+    // A fading imposter's walls, roofs and slices take its alpha, its terrain doesn't. Slices keep their
+    // blend and depth writes, so their alpha test drops more of them as they fade.
     for (const auto& d : g.imposterDraws) {
+        if (d.kind == Kind::Terrain || boxOutside(f.viewProjection, d.low, d.high)) {
+            continue;
+        }
+        const float alpha = imposterAlpha(d.lot);
         switch (d.kind) {
         case Kind::Wall:
-            draw(wall, d, static_cast<int>(d.texture), GL_REPEAT, true, 64.0f / 255, 1);
+            draw(alpha < 1 ? fadedWall : wall, d, static_cast<int>(d.texture), GL_REPEAT, true, 64.0f / 255, 1, alpha);
             break;
         case Kind::Slice:
-            draw(wall, d, static_cast<int>(d.texture), GL_REPEAT, true, 127.0f / 255, 1);
+            draw(wall, d, static_cast<int>(d.texture), GL_REPEAT, true, 127.0f / 255, 1, alpha);
             break;
         case Kind::Roof:
-            draw(roof, d, static_cast<int>(d.texture), GL_CLAMP_TO_EDGE, false, -1, 2);
+            draw(alpha < 1 ? fadedRoof : roof, d, static_cast<int>(d.texture), GL_CLAMP_TO_EDGE, false, -1, 2, alpha);
             break;
         case Kind::Terrain:
             break;

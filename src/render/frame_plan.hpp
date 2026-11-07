@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <vector>
 
 namespace ts2::render {
@@ -35,7 +36,9 @@ struct VertexUniforms {
 struct SkinnedUniforms {
     VertexUniforms frame;
     std::uint32_t jointBase;
-    std::uint32_t padding[3];
+    std::uint32_t morphRow;  // see RendererState::morphRow
+    std::uint32_t padding[2];
+    float eyes[4];  // see RendererState::eyesOf
 };
 
 struct FragmentUniforms {
@@ -60,6 +63,7 @@ struct FragmentUniforms {
     float uvTile[4];    // the texture coordinates times xy plus zw: one frame of a tiled texture
     float shadowReceiver[4];  // x: 1 when Sims' projected shadows fall on it, y: its level, z: 1 to fade them by the light map
     float caustics[4];        // x: 1 for a pool floor, 2 for a pool wall, 3 for the caustics alone over a pond's ground, 0 for none (see scene::Material), yzw: the texture light
+    float neighborLight[4];   // rgb: what a neighbor's real house is tinted by, w: 1 when it is one, 2 for the ground around the lot, 3 for its ground
 };
 
 // The shaders' constant buffers pack in 16-byte rows, so these must match them field for field.
@@ -75,6 +79,10 @@ static_assert(sizeof(FragmentUniforms) % 16 == 0 && offsetof(FragmentUniforms, l
 constexpr int kShadowTilesAcross = 4;
 constexpr std::size_t kMaxShadowCasters = kShadowTilesAcross * kShadowTilesAcross;
 
+// The most neighbors drawn as real houses whose lots the ground around a lot leaves out. The scene
+// shader's neighborGround array holds as many.
+constexpr std::size_t kMaxNeighborGrounds = 6;
+
 // What the scene's fragment shader is given once a frame about the Sims' projected shadows.
 struct ShadowUniforms {
     float cameras[kMaxShadowCasters][16];  // each caster's picture camera (see simshadows::camera)
@@ -87,6 +95,11 @@ struct ShadowUniforms {
     float poolShadow[16];
     float toLot[16];
     float poolSun[4];
+    float ambientOcclusion[4];  // x: 1 when the surfaces drawn are multiplied by it
+    // The lots of the neighbors drawn as real houses (x0, x1, y0, y1 in the world), which the ground around
+    // the lot leaves out, and how many there are (the first number).
+    float neighborGround[kMaxNeighborGrounds][4];
+    float neighborGrounds[4];
 };
 static_assert(sizeof(ShadowUniforms) % 16 == 0 && offsetof(ShadowUniforms, shade) == 1280 && offsetof(ShadowUniforms, objectGrid) == 1296 &&
               offsetof(ShadowUniforms, poolShadow) == 1312 && offsetof(ShadowUniforms, poolSun) == 1440);
@@ -143,6 +156,17 @@ struct PoolUniforms {
 };
 static_assert(sizeof(PoolUniforms) == 272);
 
+// What a beach lot's sea is drawn with (see sea.vert.hlsl).
+struct SeaUniforms {
+    float viewProjection[16];
+    float model[16];
+    float eye[4];
+    float time[4];
+    float tint[4];
+    float padding[4];
+};
+static_assert(sizeof(SeaUniforms) == 192);
+
 // What the water in a lot's ponds is drawn with (see pond.vert.hlsl).
 struct PondUniforms {
     float viewProjection[16];
@@ -192,6 +216,8 @@ enum class InView { Outside, Inside, Partly };
 // outside when all eight corners are outside the same side of the clip volume (-w <= x, y <= w,
 // 0 <= z <= w), so none of its triangles can show, and inside when no corner is outside any side.
 InView boxInView(const Mat4& clip, const std::array<float, 3>& low, const std::array<float, 3>& high);
+// The same answer as boxInView giving Outside, cheaper as most boxes on screen settle at their first corner.
+bool boxOutside(const Mat4& clip, const std::array<float, 3>& low, const std::array<float, 3>& high);
 
 // How the game sorts a blended surface: the view depth of its box's nearest corner, a corner at or
 // behind the camera counting as on the near plane. `clip`'s last row gives the view depth (the
@@ -263,6 +289,15 @@ struct Draw {
     float sun;    // how much of the sun reaches it
 };
 
+// The part of a pool's mirror image (see poolMirror) that the pool surfaces among `blended` read, as
+// x0, x1, y0, y1 in the mirror's clip space (-1..1). It allows for the waves, the ripples' shift,
+// murky water's blur and filtering, so nothing outside it is ever seen. The whole image when a
+// surface can't be bounded.
+std::array<float, 4> poolMirrorArea(const FrameView& f, std::span<const Draw> blended, unsigned width, unsigned height);
+// `viewProjection` with that area stretched over the whole clip space, to cull what lies outside it.
+// Depth is unchanged, so blended surfaces sort as before.
+Mat4 narrowedTo(const Mat4& viewProjection, const std::array<float, 4>& area);
+
 // What one draw pushes and binds.
 struct DrawUniforms {
     SkinnedUniforms vertex{};
@@ -275,6 +310,10 @@ struct FramePlan {
     // and in the game's order: by layer, and blended surfaces of a layer from the farthest to the nearest.
     static void collectDraws(const RendererState& state, const ResourceQuery& resources, const FrameView& f, std::vector<Draw>& opaque,
                              std::vector<Draw>& layers, std::vector<Draw>& blended);
+    // Where the surfaces of layers up to `layer` end in `blended`, searching from `from`.
+    static std::size_t endOfLayer(std::span<const Draw> blended, std::size_t from, int layer);
+    // The least alpha a particle's pixel is drawn with: more for the kind that writes depth.
+    static float particleAlphaReference(std::uint8_t draw);
     // One draw's uniforms and textures: its place, the lights it is lit by, and its material.
     static DrawUniforms uniformsFor(const RendererState& state, const ResourceQuery& resources, const FrameView& f, const Draw& d, int blend);
     // A pool's water surface's uniforms (see scene::Material::poolSurface).
@@ -283,6 +322,10 @@ struct FramePlan {
     static PondUniforms pondUniformsFor(const RendererState& state, const FrameView& f, const Draw& d);
     // The first pool water surface in `blended`, nullptr for none.
     static const Draw* poolWater(const std::vector<Draw>& blended);
+    // A beach lot's sea's uniforms (see scene::Material::skirtSea).
+    static SeaUniforms seaUniformsFor(const RendererState& state, const FrameView& f, const Draw& d);
+    // The first beach sea in `blended`, nullptr for none.
+    static const Draw* skirtSea(const std::vector<Draw>& blended);
     // What casts the pools' shadow for their caustics, as the game draws it: lot objects and Sims, and
     // the pool's own floor and walls, wherever they reach the sun's view `clip`.
     static void poolCasters(const RendererState& state, const ResourceQuery& resources, const Mat4& clip, std::vector<Draw>& out);

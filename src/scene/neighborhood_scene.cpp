@@ -283,6 +283,10 @@ NeighborhoodSceneStats addNeighborhood(SceneBuilder& builder, const std::filesys
         stats.lotFootprints.push_back({lot.id, static_cast<float>(lot.x) * kTile, static_cast<float>(lot.y) * kTile,
                                        (static_cast<float>(lot.x) + w) * kTile, (static_cast<float>(lot.y) + d) * kTile, lot.elevation,
                                        lot.elevation, place, lot.texture});
+        constexpr std::uint32_t kBeachLot = 0x80;
+        if ((lot.flags & kBeachLot) != 0) {
+            stats.lotFootprints.back().beachSide = lot.ownFacing;
+        }
         const auto rect = effectTiles(lot);
         stats.lotFootprints.back().effectAnchor = {static_cast<float>(rect[0] + rect[2]) * kTile / 2,
                                                    static_cast<float>(rect[1] + rect[3]) * kTile / 2, lot.elevation + kEffectAboveLot};
@@ -328,7 +332,8 @@ NeighborhoodSceneStats addNeighborhood(SceneBuilder& builder, const std::filesys
             }
             const int mesh = builder.model(type->second.model, {});
             const float angle = item.angle * 3.14159265358979f / 180.0f;
-            if (builder.place(mesh, type->second.model, Transform::at(item.position[0], item.position[1], item.position[2], angle))) {
+            if (Instance* placed = builder.place(mesh, type->second.model, Transform::at(item.position[0], item.position[1], item.position[2], angle))) {
+                placed->ground = item.bounds;
                 ++shown;
             }
         }

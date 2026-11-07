@@ -19,7 +19,7 @@ namespace ts2::render {
 using namespace render_detail;
 
 void SdlGpuRenderer::drawImposters(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass, const Mat4& viewProjection) {
-    if (gpu_->imposterDraws.empty()) {
+    if (gpu_->imposterDraws.empty() || !impostersShown_) {
         return;
     }
     using Kind = scene::PaintedTerrain::ImposterPart::Kind;
@@ -28,39 +28,50 @@ void SdlGpuRenderer::drawImposters(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass*
     struct PartUniforms {
         float tint[3];
         float cutoff, mode, light[3];
+        float alpha, unused[3];
     };
+    SDL_BindGPUIndexBuffer(pass, &indices, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+    SDL_GPUGraphicsPipeline* bound = nullptr;
     auto draw = [&](SDL_GPUGraphicsPipeline* pipeline, const ImposterDraw& d, SDL_GPUTexture* texture, SDL_GPUSampler* sampler,
-                    float cutoff, float mode) {
-        SDL_BindGPUGraphicsPipeline(pass, pipeline);
-        SDL_PushGPUVertexUniformData(cmd, 0, viewProjection.m.data(), 16 * sizeof(float));
-        const PartUniforms u{{d.tint[0], d.tint[1], d.tint[2]}, cutoff, mode, {imposterLight_[0], imposterLight_[1], imposterLight_[2]}};
+                    float cutoff, float mode, float alpha = 1) {
+        if (pipeline != bound) {
+            SDL_BindGPUGraphicsPipeline(pass, pipeline);
+            SDL_PushGPUVertexUniformData(cmd, 0, viewProjection.m.data(), 16 * sizeof(float));
+            SDL_BindGPUVertexBuffers(pass, 0, &vertices, 1);
+            bound = pipeline;
+        }
+        const PartUniforms u{{d.tint[0], d.tint[1], d.tint[2]}, cutoff, mode, {imposterLight_[0], imposterLight_[1], imposterLight_[2]}, alpha, {}};
         SDL_PushGPUFragmentUniformData(cmd, 0, &u, sizeof(u));
         SDL_GPUTextureSamplerBinding binding{texture, sampler};
         SDL_BindGPUFragmentSamplers(pass, 0, &binding, 1);
-        SDL_BindGPUVertexBuffers(pass, 0, &vertices, 1);
-        SDL_BindGPUIndexBuffer(pass, &indices, SDL_GPU_INDEXELEMENTSIZE_32BIT);
         SDL_DrawGPUIndexedPrimitives(pass, d.indexCount, 1, d.firstIndex, d.vertexOffset, 0);
     };
     // The terrain first (its shader layer comes before the others'): light map, then texture.
     for (const auto& d : gpu_->imposterDraws) {
-        if (d.kind != Kind::Terrain) {
+        if (d.kind != Kind::Terrain || boxOutside(viewProjection, d.low, d.high)) {
             continue;
         }
         if (d.lightMap) {
-            draw(imposterLightPipeline_, d, d.lightMap, sampler_, 0, 0);
+            draw(drawing_->imposterLight, d, d.lightMap, sampler_, 0, 0);
         }
-        draw(imposterTerrainPipeline_, d, d.texture, clampedMips_, 0, 1);
+        draw(drawing_->imposterTerrain, d, d.texture, clampedMips_, 0, 1);
     }
+    // A fading imposter's walls, roofs and slices take its alpha, its terrain doesn't. Slices keep their
+    // blend and depth writes, so their alpha test drops more of them as they fade.
     for (const auto& d : gpu_->imposterDraws) {
+        if (d.kind == Kind::Terrain || boxOutside(viewProjection, d.low, d.high)) {
+            continue;
+        }
+        const float alpha = imposterAlpha(d.lot);
         switch (d.kind) {
         case Kind::Wall:
-            draw(imposterWallPipeline_, d, d.texture, pointSampler_, 64.0f / 255, 1);
+            draw(alpha < 1 ? drawing_->imposterFadedWall : drawing_->imposterWall, d, d.texture, pointSampler_, 64.0f / 255, 1, alpha);
             break;
         case Kind::Slice:
-            draw(imposterWallPipeline_, d, d.texture, pointSampler_, 127.0f / 255, 1);
+            draw(drawing_->imposterWall, d, d.texture, pointSampler_, 127.0f / 255, 1, alpha);
             break;
         case Kind::Roof:
-            draw(imposterRoofPipeline_, d, d.texture, clampedMips_, -1, 2);
+            draw(alpha < 1 ? drawing_->imposterFadedRoof : drawing_->imposterRoof, d, d.texture, clampedMips_, -1, 2, alpha);
             break;
         case Kind::Terrain:
             break;
@@ -205,15 +216,46 @@ SDL_GPUTexture* SdlGpuRenderer::depthFor(DepthBuffer& depth, unsigned width, uns
     return depth.texture;
 }
 
+// A multisampled target for the main view. Null when it can't be made (out of video memory).
+SDL_GPUTexture* SdlGpuRenderer::smoothTarget(DepthBuffer& buffer, bool isDepth, unsigned width, unsigned height) {
+    if (buffer.texture == nullptr || buffer.width != width || buffer.height != height) {
+        if (buffer.texture) {
+            SDL_ReleaseGPUTexture(device_, buffer.texture);
+        }
+        SDL_GPUTextureCreateInfo info{};
+        info.type = SDL_GPU_TEXTURETYPE_2D;
+        info.format = isDepth ? SDL_GPU_TEXTUREFORMAT_D32_FLOAT : SDL_GetGPUSwapchainTextureFormat(device_, window_);
+        info.usage = isDepth ? SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET : SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+        info.width = width;
+        info.height = height;
+        info.layer_count_or_depth = 1;
+        info.num_levels = 1;
+        info.sample_count = smoothSamples_ >= 8 ? SDL_GPU_SAMPLECOUNT_8 : smoothSamples_ >= 4 ? SDL_GPU_SAMPLECOUNT_4 : SDL_GPU_SAMPLECOUNT_2;
+        buffer.texture = SDL_CreateGPUTexture(device_, &info);
+        buffer.width = buffer.texture ? width : 0;
+        buffer.height = buffer.texture ? height : 0;
+    }
+    return buffer.texture;
+}
+
 bool SdlGpuRenderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, unsigned width, unsigned height,
                       const Camera& camera) {
     diag::Timer timer("record frame");
-    SDL_GPUTexture* depthTexture = depthFor(instancesOnly_ ? portraitDepth_ : windowDepth_, width, height);
+    // Everything before the main view's pass is drawn with one sample.
+    drawing_ = &single_;
+    occlusionBound_ = noOcclusion_;
+    bool smooth = smoothSamples_ > 1 && !instancesOnly_;
+    if (smooth && (smoothTarget(smoothColor_, false, width, height) == nullptr || smoothTarget(smoothDepth_, true, width, height) == nullptr)) {
+        diag::warnOnce("smooth edges: no video memory for its targets, so edges stay as they are");
+        smooth = false;
+    }
+    SDL_GPUTexture* depthTexture = smooth ? smoothDepth_.texture : depthFor(instancesOnly_ ? portraitDepth_ : windowDepth_, width, height);
     if (depthTexture == nullptr) {
         return false;
     }
 
     uploadSpriteVertices(cmd, width, height);
+    uploadParticleVertices(cmd);
     uploadJoints(cmd);
 
     Frame f;
@@ -243,29 +285,56 @@ bool SdlGpuRenderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, u
     blended.clear();
     FramePlan::collectDraws(*this, *this, f, opaque, layers, blended);
     const Draw* pool = f.extras ? FramePlan::poolWater(blended) : nullptr;
-    poolCaustics_ = pool != nullptr && drawPoolCaustics(f, *pool, shadows);
+    const Draw* sea = f.extras ? FramePlan::skirtSea(blended) : nullptr;
+    // A beach sea drawn with the pools' caustics (not in the original game) plays them where no
+    // pool does.
+    const Draw* caustics = pool != nullptr ? pool : sea != nullptr && sea->material->causticsImage >= 0 ? sea : nullptr;
+    poolCaustics_ = caustics != nullptr && drawPoolCaustics(f, *caustics, shadows);
     SDL_PushGPUFragmentUniformData(cmd, 1, &shadows, sizeof(shadows));
     poolReflected_ = false;
-    if (pool != nullptr && poolReflectionReady(width, height)) {
-        drawPoolReflection(f, pool->instance->transform.m[11] + pool->primitive->low[2] - kPoolMirrorDrop, pool->instance->poolMirrorKeep);
+    if (pool != nullptr && single_.pool != nullptr && mirrorReady(poolReflection_, width, height)) {
+        if (reflections_) {
+            drawMirror(f, pool->instance->transform.m[11] + pool->primitive->low[2] - kPoolMirrorDrop, pool->instance->poolMirrorKeep,
+                       poolReflection_, Mirrored::Pool, poolMirrorArea(f, blended, width, height));
+        } else {
+            clearMirror(f, poolReflection_);
+        }
         poolReflected_ = true;
+    }
+    // The beach sea's mirror image, at the sea's own height. The game redraws it only when the
+    // camera moves, which shows the same picture.
+    seaReflected_ = false;
+    if (reflections_ && seaReflections_ && sea != nullptr && single_.sea != nullptr && mirrorReady(seaReflection_, width, height)) {
+        drawMirror(f, sea->instance->transform.m[11] + sea->primitive->low[2], 0, seaReflection_, Mirrored::Sea, {-1, 1, -1, 1});
+        seaReflected_ = true;
+    }
+
+    const bool occluded = f.extras && occlusionReady(width, height);
+    if (occluded) {
+        drawOcclusion(f, opaque);
+        occlusionBound_ = occlusion_.blurred;
+        shadows.ambientOcclusion[0] = 1;
+        SDL_PushGPUFragmentUniformData(cmd, 1, &shadows, sizeof(shadows));
     }
 
     SDL_GPUColorTargetInfo color{};
-    color.texture = target;
+    color.texture = smooth ? smoothColor_.texture : target;
+    color.resolve_texture = smooth ? target : nullptr;
     color.clear_color = instancesOnly_ ? SDL_FColor{0, 0, 0, 0} : SDL_FColor{clear_[0], clear_[1], clear_[2], 1.0f};
     color.load_op = SDL_GPU_LOADOP_CLEAR;
-    color.store_op = SDL_GPU_STOREOP_STORE;
+    color.store_op = smooth ? SDL_GPU_STOREOP_RESOLVE : SDL_GPU_STOREOP_STORE;
     SDL_GPUDepthStencilTargetInfo depth{};
     depth.texture = depthTexture;
     depth.clear_depth = 0;
     depth.load_op = SDL_GPU_LOADOP_CLEAR;
-    depth.store_op = SDL_GPU_STOREOP_DONT_CARE;
+    // The main view's depth stays in its buffer after the pass, for tools that read it, such as ReShade.
+    depth.store_op = instancesOnly_ ? SDL_GPU_STOREOP_DONT_CARE : SDL_GPU_STOREOP_STORE;
     depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
     depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+    drawing_ = smooth ? &smooth_ : &single_;
     f.pass = SDL_BeginGPURenderPass(cmd, &color, 1, &depth);
     // A lot's sky, behind everything (the game's skybox screen effect).
-    if (f.extras && gpu_->skybox != nullptr) {
+    if (f.extras && gpu_->skybox != nullptr && camera.orthographic[1] <= camera.orthographic[0]) {
         drawSky(f, f.pass, gpu_->skybox, skyCamera(f, 1));
     }
     if (f.extras && gpu_->clipVertices != nullptr) {
@@ -283,10 +352,19 @@ bool SdlGpuRenderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, u
         drawImposters(cmd, f.pass, f.viewProjection);
     }
     drawList(f, layers, 1);
+    // What is blended over the surfaces wasn't in the occlusion's depth pass.
+    if (occluded) {
+        shadows.ambientOcclusion[0] = 0;
+        SDL_PushGPUFragmentUniformData(cmd, 1, &shadows, sizeof(shadows));
+    }
     if (f.water) {
         drawWater(f);
     }
-    drawList(f, blended, 1);
+    if (f.extras) {
+        drawBlended(f, blended);
+    } else {
+        drawList(f, blended, 1);
+    }
     if (!instancesOnly_ && !sprites_.empty() && spriteVertices_) {
         drawSprites(f);
     }
@@ -339,6 +417,11 @@ void SdlGpuRenderer::drawReflection(const Frame& f) {
     SDL_GPURenderPass* mirror = SDL_BeginGPURenderPass(f.cmd, &rc, 1, &rd);
     // The sky, by each pixel's ray mirrored in the water.
     drawSky(f, mirror, gpu_->skyCube, skyCamera(f, -1));
+    // With the Reflections option off the game's water shows only the sky.
+    if (!reflections_) {
+        SDL_EndGPURenderPass(mirror);
+        return;
+    }
     // The terrain, mirrored about the water's surface.
     Mat4 flip;
     flip.m = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 2 * gpu_->waterLevel, 0, 0, 0, 1};
@@ -346,20 +429,16 @@ void SdlGpuRenderer::drawReflection(const Frame& f) {
     SDL_EndGPURenderPass(mirror);
 }
 
-// Makes the pools' reflection textures at the size drawn at, as the game's reflection is the
-// screen's size. False when they couldn't be made, to be tried again next frame.
-bool SdlGpuRenderer::poolReflectionReady(unsigned width, unsigned height) {
-    if (poolPipeline_ == nullptr) {
-        return false;
-    }
-    if (poolReflection_ == nullptr || poolReflectionDepth_ == nullptr || poolReflectionWidth_ != width || poolReflectionHeight_ != height) {
-        for (auto** t : {&poolReflection_, &poolReflectionDepth_}) {
+// Makes a mirror image's textures at the size drawn at.
+bool SdlGpuRenderer::mirrorReady(MirrorTarget& target, unsigned width, unsigned height) {
+    if (target.color == nullptr || target.depth == nullptr || target.width != width || target.height != height) {
+        for (auto** t : {&target.color, &target.depth}) {
             if (*t) {
                 SDL_ReleaseGPUTexture(device_, *t);
                 *t = nullptr;
             }
         }
-        poolReflectionWidth_ = poolReflectionHeight_ = 0;
+        target.width = target.height = 0;
         SDL_GPUTextureCreateInfo info{};
         info.type = SDL_GPU_TEXTURETYPE_2D;
         info.format = SDL_GetGPUSwapchainTextureFormat(device_, window_);
@@ -368,22 +447,34 @@ bool SdlGpuRenderer::poolReflectionReady(unsigned width, unsigned height) {
         info.height = height;
         info.layer_count_or_depth = 1;
         info.num_levels = 1;
-        poolReflection_ = SDL_CreateGPUTexture(device_, &info);
+        target.color = SDL_CreateGPUTexture(device_, &info);
         info.format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
         info.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
-        poolReflectionDepth_ = SDL_CreateGPUTexture(device_, &info);
-        if (poolReflection_ && poolReflectionDepth_) {
-            poolReflectionWidth_ = width;
-            poolReflectionHeight_ = height;
+        target.depth = SDL_CreateGPUTexture(device_, &info);
+        if (target.color && target.depth) {
+            target.width = width;
+            target.height = height;
         }
     }
-    return poolReflection_ && poolReflectionDepth_;
+    return target.color && target.depth;
 }
 
-// The lot mirrored in a pool's water, as the game draws its pool reflection: the sky and everything
-// above the plane but the pools' water itself, drawn as in the main view. Other lots' imposters
-// are left out.
-void SdlGpuRenderer::drawPoolReflection(const Frame& f, float plane, float keepBelow) {
+// A mirror image with nothing in it, for water with the Reflections option off.
+void SdlGpuRenderer::clearMirror(const Frame& f, const MirrorTarget& target) {
+    SDL_GPUColorTargetInfo color{};
+    color.texture = target.color;
+    color.load_op = SDL_GPU_LOADOP_CLEAR;
+    color.store_op = SDL_GPU_STOREOP_STORE;
+    SDL_EndGPURenderPass(SDL_BeginGPURenderPass(f.cmd, &color, 1, nullptr));
+}
+
+// The lot mirrored in water: the sky and what lies above the plane, drawn as in the main view. A
+// pool's shows everything but the pools' and ponds' water itself, as the game's pool reflection
+// does. The beach sea's shows only what the game's sea reflection draws: the skirt's ground and
+// sand, the lot's terrain and the neighborhood's plants (see scene::Instance::seaReflected). Other
+// lots' imposters are left out of both. Only `area` of it is drawn (see poolMirrorArea).
+void SdlGpuRenderer::drawMirror(const Frame& f, float plane, float keepBelow, const MirrorTarget& target, Mirrored what,
+                                const std::array<float, 4>& area) {
     Camera mirrored = *f.camera;
     mirrored.eye[2] = 2 * plane - mirrored.eye[2];
     mirrored.target[2] = 2 * plane - mirrored.target[2];
@@ -396,24 +487,38 @@ void SdlGpuRenderer::drawPoolReflection(const Frame& f, float plane, float keepB
     opaque.clear();
     layers.clear();
     blended.clear();
-    FramePlan::collectDraws(*this, *this, r, opaque, layers, blended);
+    Frame culled = r;
+    culled.viewProjection = narrowedTo(r.viewProjection, area);
+    FramePlan::collectDraws(*this, *this, culled, opaque, layers, blended);
     for (auto* list : {&opaque, &layers, &blended}) {
-        std::erase_if(*list, [](const Draw& d) { return d.instance->poolWater || (d.material && d.material->pondWater); });
+        if (what == Mirrored::Sea) {
+            std::erase_if(*list, [](const Draw& d) { return !d.instance->seaReflected; });
+        } else {
+            std::erase_if(*list, [](const Draw& d) { return d.instance->poolWater || (d.material && d.material->pondWater); });
+        }
     }
 
     SDL_GPUColorTargetInfo color{};
-    color.texture = poolReflection_;
+    color.texture = target.color;
     color.clear_color = SDL_FColor{0, 0, 0, 1};
     color.load_op = SDL_GPU_LOADOP_CLEAR;
     color.store_op = SDL_GPU_STOREOP_STORE;
     SDL_GPUDepthStencilTargetInfo depth{};
-    depth.texture = poolReflectionDepth_;
+    depth.texture = target.depth;
     depth.clear_depth = 0;
     depth.load_op = SDL_GPU_LOADOP_CLEAR;
     depth.store_op = SDL_GPU_STOREOP_DONT_CARE;
     depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
     depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
     r.pass = SDL_BeginGPURenderPass(f.cmd, &color, 1, &depth);
+    // Clip space y runs up, the target's rows down.
+    const auto pixel = [](float at, unsigned size) { return std::clamp(static_cast<int>((at + 1) / 2 * static_cast<float>(size)), 0, static_cast<int>(size)); };
+    const int left = pixel(area[0], f.width), right = pixel(area[1], f.width) + 1, top = static_cast<int>(f.height) - pixel(area[3], f.height) - 1,
+              bottom = static_cast<int>(f.height) - pixel(area[2], f.height);
+    const SDL_Rect scissor{std::max(left, 0), std::max(top, 0), std::min(right, static_cast<int>(f.width)) - std::max(left, 0),
+                           std::min(bottom, static_cast<int>(f.height)) - std::max(top, 0)};
+    SDL_SetGPUScissor(r.pass, &scissor);
+    // Both show the lot's own sky (the game's $skyboxCubeMap in lot view).
     if (gpu_->skybox != nullptr) {
         // Each pixel shows the main view's ray at the other side of the screen, mirrored.
         auto sky = skyCamera(f, -1);
@@ -494,10 +599,12 @@ bool SdlGpuRenderer::drawPoolCaustics(const Frame& f, const Draw& pool, ShadowUn
         SDL_BindGPUIndexBuffer(pass, &indices, SDL_GPU_INDEXELEMENTSIZE_32BIT);
         if (skinned) {
             u.jointBase = static_cast<std::uint32_t>(jointBase_[static_cast<std::size_t>(d.instance - instances_.data())]);
+            u.morphRow = morphRow(static_cast<std::size_t>(d.instance - instances_.data()));
             SDL_PushGPUVertexUniformData(f.cmd, 0, &u, sizeof(u));
             const SDL_GPUBufferBinding vertices[2] = {{buffers.vertices, p.firstVertex * kVertexFloats * static_cast<Uint32>(sizeof(float))},
                                                       {buffers.skin, p.firstSkin}};
             SDL_BindGPUVertexBuffers(pass, 0, vertices, 2);
+            bindSkinStorage(pass, buffers);
         } else {
             SDL_PushGPUVertexUniformData(f.cmd, 0, &u.frame, sizeof(u.frame));
             const SDL_GPUBufferBinding vertices{buffers.vertices, 0};
@@ -517,9 +624,24 @@ bool SdlGpuRenderer::drawPoolCaustics(const Frame& f, const Draw& pool, ShadowUn
 void SdlGpuRenderer::drawPoolSurface(const Frame& f, const Draw& d) {
     const MeshBuffers& buffers = gpu_->meshBuffers[d.primitive->buffers];
     const PoolUniforms u = FramePlan::poolUniformsFor(*this, f, d);
-    SDL_BindGPUGraphicsPipeline(f.pass, poolPipeline_);
+    SDL_BindGPUGraphicsPipeline(f.pass, drawing_->pool);
     SDL_PushGPUVertexUniformData(f.cmd, 0, &u, sizeof(u));
-    const SDL_GPUTextureSamplerBinding samplers[2] = {{poolReflection_, clampedSampler_},
+    const SDL_GPUTextureSamplerBinding samplers[2] = {{poolReflection_.color, clampedSampler_},
+                                                      {textureFor({TextureRef::Kind::Image, d.material->normalMap}), sampler_}};
+    SDL_BindGPUFragmentSamplers(f.pass, 0, samplers, 2);
+    const SDL_GPUBufferBinding vertices{buffers.vertices, 0};
+    SDL_BindGPUVertexBuffers(f.pass, 0, &vertices, 1);
+    const auto& p = *d.primitive;
+    SDL_DrawGPUIndexedPrimitives(f.pass, p.count, 1, p.firstIndex, static_cast<Sint32>(p.firstVertex), 0);
+}
+
+// A beach lot's sea over its mirror image (see sea.vert.hlsl).
+void SdlGpuRenderer::drawSkirtSea(const Frame& f, const Draw& d) {
+    const MeshBuffers& buffers = gpu_->meshBuffers[d.primitive->buffers];
+    const SeaUniforms u = FramePlan::seaUniformsFor(*this, f, d);
+    SDL_BindGPUGraphicsPipeline(f.pass, drawing_->sea);
+    SDL_PushGPUVertexUniformData(f.cmd, 0, &u, sizeof(u));
+    const SDL_GPUTextureSamplerBinding samplers[2] = {{seaReflection_.color, clampedSampler_},
                                                       {textureFor({TextureRef::Kind::Image, d.material->normalMap}), sampler_}};
     SDL_BindGPUFragmentSamplers(f.pass, 0, samplers, 2);
     const SDL_GPUBufferBinding vertices{buffers.vertices, 0};
@@ -532,7 +654,7 @@ void SdlGpuRenderer::drawPoolSurface(const Frame& f, const Draw& d) {
 void SdlGpuRenderer::drawPondWater(const Frame& f, const Draw& d) {
     const MeshBuffers& buffers = gpu_->meshBuffers[d.primitive->buffers];
     const PondUniforms u = FramePlan::pondUniformsFor(*this, f, d);
-    SDL_BindGPUGraphicsPipeline(f.pass, pondPipeline_);
+    SDL_BindGPUGraphicsPipeline(f.pass, drawing_->pond);
     SDL_PushGPUVertexUniformData(f.cmd, 0, &u, sizeof(u));
     SDL_PushGPUFragmentUniformData(f.cmd, 0, u.light, sizeof(u.light));
     const scene::Material& m = *d.material;
@@ -548,7 +670,7 @@ void SdlGpuRenderer::drawPondWater(const Frame& f, const Draw& d) {
 
 // A sky cube map behind everything, looked up by each pixel's ray (see skyCamera).
 void SdlGpuRenderer::drawSky(const Frame& f, SDL_GPURenderPass* on, SDL_GPUTexture* cube, const std::array<float, 12>& camera) {
-    SDL_BindGPUGraphicsPipeline(on, skyPipeline_);
+    SDL_BindGPUGraphicsPipeline(on, drawing_->sky);
     SDL_PushGPUFragmentUniformData(f.cmd, 0, camera.data(), sizeof(camera));
     SDL_GPUTextureSamplerBinding skyBinding{cube, sampler_};
     SDL_BindGPUFragmentSamplers(on, 0, &skyBinding, 1);
@@ -557,7 +679,7 @@ void SdlGpuRenderer::drawSky(const Frame& f, SDL_GPURenderPass* on, SDL_GPUTextu
 
 // The boundary curtain, into depth only: nothing beyond it shows from inside.
 void SdlGpuRenderer::drawBoundary(const Frame& f) {
-    SDL_BindGPUGraphicsPipeline(f.pass, clipPipeline_);
+    SDL_BindGPUGraphicsPipeline(f.pass, drawing_->clip);
     SDL_PushGPUVertexUniformData(f.cmd, 0, f.viewProjection.m.data(), 16 * sizeof(float));
     SDL_GPUBufferBinding vertices{gpu_->clipVertices, 0};
     SDL_BindGPUVertexBuffers(f.pass, 0, &vertices, 1);
@@ -567,7 +689,7 @@ void SdlGpuRenderer::drawBoundary(const Frame& f) {
 }
 
 void SdlGpuRenderer::drawTerrain(const Frame& f, SDL_GPURenderPass* on, const Mat4& viewProjection, bool reflected) {
-    SDL_BindGPUGraphicsPipeline(on, terrainPipeline_);
+    SDL_BindGPUGraphicsPipeline(on, drawing_->terrain);
     SDL_PushGPUVertexUniformData(f.cmd, 0, viewProjection.m.data(), 16 * sizeof(float));
     TerrainUniforms u = gpu_->terrainUniforms;
     u.reflected = reflected ? 1.0f : 0.0f;
@@ -585,11 +707,11 @@ void SdlGpuRenderer::drawTerrain(const Frame& f, SDL_GPURenderPass* on, const Ma
 }
 
 // Draws primitives with the scene pipelines (`blend` 1 for the blending ones).
-void SdlGpuRenderer::drawList(const Frame& f, const std::vector<Draw>& list, int blend) {
+void SdlGpuRenderer::drawList(const Frame& f, std::span<const Draw> list, int blend) {
     // Each binding SDL is given takes new GPU descriptors, so textures and joints are bound only when
     // they change (and again after a pipeline switch).
     SDL_GPUGraphicsPipeline* bound = nullptr;
-    std::array<SDL_GPUTextureSamplerBinding, 12> boundSamplers{};
+    std::array<SDL_GPUTextureSamplerBinding, 13> boundSamplers{};
     bool jointsBound = false;
     const MeshBuffers* boundBuffers = nullptr;
     for (const auto& d : list) {
@@ -612,6 +734,14 @@ void SdlGpuRenderer::drawList(const Frame& f, const std::vector<Draw>& list, int
             }
             continue;
         }
+        // Without its mirror image the beach sea is drawn as below, with its sky cube.
+        if (m && m->skirtSea && seaReflected_ && f.pass != nullptr && m->normalMap >= 0 && hasImage(m->normalMap)) {
+            drawSkirtSea(f, d);
+            bound = nullptr;
+            boundSamplers = {};
+            jointsBound = false;
+            continue;
+        }
         if (m && m->poolSurface) {
             if (poolReflected_ && f.pass != nullptr && m->normalMap >= 0 && hasImage(m->normalMap)) {
                 drawPoolSurface(f, d);
@@ -625,8 +755,9 @@ void SdlGpuRenderer::drawList(const Frame& f, const std::vector<Draw>& list, int
         const int kind = !blend || !m                          ? blend
                          : m->alpha == scene::AlphaMode::Add ? 2
                          : m->alpha == scene::AlphaMode::Sum ? 3
+                         : m->blendedHair                    ? 4
                                                              : blend;
-        const auto& set = f.depthClip ? (skinned ? clippedSkinnedPipelines_ : clippedPipelines_) : (skinned ? skinnedPipelines_ : pipelines_);
+        const auto& set = f.depthClip ? (skinned ? clippedSkinnedPipelines_ : clippedPipelines_) : (skinned ? drawing_->skinnedScene : drawing_->scene);
         SDL_GPUGraphicsPipeline* pipeline = set[m && m->doubleSided ? 1 : 0][kind];
         if (pipeline != bound) {
             SDL_BindGPUGraphicsPipeline(f.pass, pipeline);
@@ -639,7 +770,7 @@ void SdlGpuRenderer::drawList(const Frame& f, const std::vector<Draw>& list, int
             jointsBound = true;
         }
         const DrawUniforms u = FramePlan::uniformsFor(*this, *this, f, d, blend);
-        std::array<SDL_GPUTextureSamplerBinding, 12> samplers;
+        std::array<SDL_GPUTextureSamplerBinding, 13> samplers;
         for (std::size_t k = 0; k < u.samplers.size(); ++k) {
             samplers[k] = {textureFor(u.samplers[k].texture), samplerFor(u.samplers[k].sampler)};
         }
@@ -649,6 +780,7 @@ void SdlGpuRenderer::drawList(const Frame& f, const std::vector<Draw>& list, int
         samplers[u.samplers.size() + 3] = {objectGrid_, shadowPoint_};
         samplers[u.samplers.size() + 4] = {causticsTile_, sampler_};
         samplers[u.samplers.size() + 5] = {poolShadow_, shadowPoint_};
+        samplers[u.samplers.size() + 6] = {occlusionBound_, shadowPoint_};
         if (skinned) {
             SDL_PushGPUVertexUniformData(f.cmd, 0, &u.vertex, sizeof(u.vertex));
         } else {
@@ -669,12 +801,42 @@ void SdlGpuRenderer::drawList(const Frame& f, const std::vector<Draw>& list, int
             const SDL_GPUBufferBinding vertices[2] = {{buffers.vertices, p.firstVertex * kVertexFloats * static_cast<Uint32>(sizeof(float))},
                                                       {buffers.skin, p.firstSkin}};
             SDL_BindGPUVertexBuffers(f.pass, 0, vertices, 2);
+            bindSkinStorage(f.pass, buffers);
         } else {
             const SDL_GPUBufferBinding vertices{buffers.vertices, 0};
             SDL_BindGPUVertexBuffers(f.pass, 0, &vertices, 1);
         }
         SDL_DrawGPUIndexedPrimitives(f.pass, p.count, 1, p.firstIndex, skinned ? 0 : static_cast<Sint32>(p.firstVertex), 0);
     }
+}
+
+// How a particle draws among the other blended surfaces of its layer is not known yet, so they go after them.
+void SdlGpuRenderer::drawBlended(const Frame& f, const std::vector<Draw>& blended) {
+    const std::span<const Draw> all(blended);
+    std::size_t done = 0;
+    for (const ParticleBatch& batch : particleBatches_) {
+        const std::size_t end = FramePlan::endOfLayer(all, done, batch.layer);
+        drawList(f, all.subspan(done, end - done), 1);
+        done = end;
+        drawParticles(f, batch);
+    }
+    drawList(f, all.subspan(done), 1);
+}
+
+void SdlGpuRenderer::drawParticles(const Frame& f, const ParticleBatch& batch) {
+    const auto drawn = static_cast<std::uint64_t>(batch.firstVertex) + batch.vertices;
+    if (particleBuffer_ == nullptr || !hasImage(batch.image) || drawn > particleVertices_.size() || batch.draw >= drawing_->particles.size()) {
+        return;
+    }
+    SDL_BindGPUGraphicsPipeline(f.pass, drawing_->particles[batch.draw]);
+    SDL_PushGPUVertexUniformData(f.cmd, 0, f.viewProjection.m.data(), sizeof(f.viewProjection.m));
+    const float reference[4] = {FramePlan::particleAlphaReference(batch.draw), 0, 0, 0};
+    SDL_PushGPUFragmentUniformData(f.cmd, 0, reference, sizeof(reference));
+    const SDL_GPUBufferBinding vertices{particleBuffer_, 0};
+    SDL_BindGPUVertexBuffers(f.pass, 0, &vertices, 1);
+    const SDL_GPUTextureSamplerBinding binding{textureFor({TextureRef::Kind::Image, batch.image}), samplerFor(SamplerKind::Clamped)};
+    SDL_BindGPUFragmentSamplers(f.pass, 0, &binding, 1);
+    SDL_DrawGPUPrimitives(f.pass, batch.vertices, 1, batch.firstVertex, 0);
 }
 
 // The Sims' shadow pictures: each Sim drawn from the sun into its tile, then every tile blurred.
@@ -712,6 +874,7 @@ std::size_t SdlGpuRenderer::drawShadows(const Frame& f) {
             const SDL_GPUBufferBinding vertices[2] = {{buffers.vertices, p.firstVertex * kVertexFloats * static_cast<Uint32>(sizeof(float))},
                                                       {buffers.skin, p.firstSkin}};
             SDL_BindGPUVertexBuffers(pass, 0, vertices, 2);
+            bindSkinStorage(pass, buffers);
             SDL_DrawGPUIndexedPrimitives(pass, p.count, 1, p.firstIndex, 0, 0);
         }
     }
@@ -749,6 +912,11 @@ bool SdlGpuRenderer::hasFadeFrom(int index) const {
     return from != gpu_->fadingFrom.end() && from->second != nullptr;
 }
 
+void SdlGpuRenderer::bindSkinStorage(SDL_GPURenderPass* pass, const MeshBuffers& buffers) {
+    SDL_GPUBuffer* const storage[2] = {jointBuffer_, buffers.morphs != nullptr ? buffers.morphs : noMorphs_};
+    SDL_BindGPUVertexStorageBuffers(pass, 0, storage, 2);
+}
+
 bool SdlGpuRenderer::skinReady(std::uint32_t buffers) const {
     return jointBuffer_ != nullptr && gpu_->meshBuffers[buffers].skin != nullptr;
 }
@@ -771,7 +939,7 @@ SDL_GPUTexture* SdlGpuRenderer::textureFor(const TextureRef& ref) const {
 }
 
 void SdlGpuRenderer::drawRoads(const Frame& f) {
-    SDL_BindGPUGraphicsPipeline(f.pass, roadPipeline_);
+    SDL_BindGPUGraphicsPipeline(f.pass, drawing_->road);
     SDL_PushGPUVertexUniformData(f.cmd, 0, f.viewProjection.m.data(), 16 * sizeof(float));
     const float road[4] = {gpu_->lightMapSize, 0, 0, 0};
     SDL_PushGPUFragmentUniformData(f.cmd, 0, road, sizeof(road));
@@ -785,12 +953,20 @@ void SdlGpuRenderer::drawRoads(const Frame& f) {
 }
 
 void SdlGpuRenderer::drawWater(const Frame& f) {
-    SDL_BindGPUGraphicsPipeline(f.pass, waterPipeline_);
+    SDL_BindGPUGraphicsPipeline(f.pass, drawing_->water);
     SDL_PushGPUVertexUniformData(f.cmd, 0, f.viewProjection.m.data(), 16 * sizeof(float));
     WaterUniforms w = gpu_->waterUniforms;
     w.screen[0] = static_cast<float>(f.width);
     w.screen[1] = static_cast<float>(f.height);
     w.time = time_;
+    // The game's water material without a reflection: the sky at this tint and strength, unrippled.
+    if (!reflections_) {
+        w.tint[0] = 0.4f;
+        w.tint[1] = 0.6f;
+        w.tint[2] = 0.9f;
+        w.tint[3] = 0.6f;
+        w.offset = 0;
+    }
     SDL_PushGPUFragmentUniformData(f.cmd, 0, &w, sizeof(w));
     SDL_GPUTextureSamplerBinding bindings[2] = {{reflection_, spriteSampler_}, {gpu_->ripples, sampler_}};
     SDL_BindGPUFragmentSamplers(f.pass, 0, bindings, 2);
@@ -803,7 +979,7 @@ void SdlGpuRenderer::drawWater(const Frame& f) {
 
 // Sprites in order, one draw per run of the same texture.
 void SdlGpuRenderer::drawSprites(const Frame& f) {
-    SDL_BindGPUGraphicsPipeline(f.pass, spritePipeline_);
+    SDL_BindGPUGraphicsPipeline(f.pass, drawing_->sprite);
     const float screen[4] = {static_cast<float>(f.width), static_cast<float>(f.height), 0, 0};
     SDL_PushGPUVertexUniformData(f.cmd, 0, screen, sizeof(screen));
     SDL_GPUBufferBinding vertices{spriteVertices_, 0};

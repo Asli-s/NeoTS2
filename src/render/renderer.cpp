@@ -12,6 +12,17 @@
 
 namespace ts2::render {
 
+void SdlGpuRenderer::setWaitForScreen(bool on) {
+    // Without waiting, a frame replaces the one not shown yet where the system can do that, which doesn't tear.
+    SDL_GPUPresentMode mode = SDL_GPU_PRESENTMODE_VSYNC;
+    if (!on && SDL_WindowSupportsGPUPresentMode(device_, window_, SDL_GPU_PRESENTMODE_MAILBOX)) {
+        mode = SDL_GPU_PRESENTMODE_MAILBOX;
+    } else if (!on && SDL_WindowSupportsGPUPresentMode(device_, window_, SDL_GPU_PRESENTMODE_IMMEDIATE)) {
+        mode = SDL_GPU_PRESENTMODE_IMMEDIATE;
+    }
+    SDL_SetGPUSwapchainParameters(device_, window_, SDL_GPU_SWAPCHAINCOMPOSITION_SDR, mode);
+}
+
 using namespace render_detail;
 
 SdlGpuRenderer::SdlGpuRenderer(SDL_Window* window, const std::filesystem::path& shaderFolder) : window_(window) {
@@ -60,22 +71,28 @@ void SdlGpuRenderer::destroy() {
     if (spriteVertices_) {
         SDL_ReleaseGPUBuffer(device_, spriteVertices_);
     }
-    if (spritePipeline_) {
-        SDL_ReleaseGPUGraphicsPipeline(device_, spritePipeline_);
+    if (particleBuffer_) {
+        SDL_ReleaseGPUBuffer(device_, particleBuffer_);
     }
+    for (const StreamUpload* stream : {&jointUpload_, &spriteUpload_, &particleUpload_}) {
+        if (stream->buffer) {
+            SDL_ReleaseGPUTransferBuffer(device_, stream->buffer);
+        }
+    }
+    releasePassPipelines(single_);
+    releasePassPipelines(smooth_);
+    releaseOcclusion();
     for (auto* s : {clampedMips_, pointSampler_, clampedSampler_, shadowSampler_, shadowPoint_}) {
         if (s) {
             SDL_ReleaseGPUSampler(device_, s);
         }
     }
-    for (auto* p : {clipPipeline_, terrainPipeline_, skyPipeline_, waterPipeline_, roadPipeline_, imposterLightPipeline_, imposterTerrainPipeline_,
-                    imposterWallPipeline_, imposterRoofPipeline_, shadowCasterPipeline_, shadowBlurPipeline_, objectCasterPipeline_,
-                    objectBlurPipeline_, poolPipeline_, pondPipeline_, causticsPipeline_, poolShadowPipeline_, poolShadowSkinnedPipeline_}) {
+    for (auto* p : {shadowCasterPipeline_, shadowBlurPipeline_, objectCasterPipeline_, objectBlurPipeline_, causticsPipeline_, poolShadowPipeline_, poolShadowSkinnedPipeline_}) {
         if (p) {
             SDL_ReleaseGPUGraphicsPipeline(device_, p);
         }
     }
-    for (auto* t : {reflection_, reflectionDepth_, poolReflection_, poolReflectionDepth_, causticsTile_, poolShadow_, poolShadowDepth_, shadowPictures_, shadowBlurred_, objectScratch_, objectPictures_, objectPlaces_, objectGrid_}) {
+    for (auto* t : {noOcclusion_, reflection_, reflectionDepth_, poolReflection_.color, poolReflection_.depth, seaReflection_.color, seaReflection_.depth, causticsTile_, poolShadow_, poolShadowDepth_, shadowPictures_, shadowBlurred_, objectScratch_, objectPictures_, objectPlaces_, objectGrid_}) {
         if (t) {
             SDL_ReleaseGPUTexture(device_, t);
         }
@@ -83,7 +100,7 @@ void SdlGpuRenderer::destroy() {
     if (spriteSampler_) {
         SDL_ReleaseGPUSampler(device_, spriteSampler_);
     }
-    for (auto* set : {&pipelines_, &skinnedPipelines_, &clippedPipelines_, &clippedSkinnedPipelines_}) {
+    for (auto* set : {&clippedPipelines_, &clippedSkinnedPipelines_}) {
         for (auto& row : *set) {
             for (auto* p : row) {
                 if (p) {
@@ -95,10 +112,13 @@ void SdlGpuRenderer::destroy() {
     if (jointBuffer_) {
         SDL_ReleaseGPUBuffer(device_, jointBuffer_);
     }
+    if (noMorphs_) {
+        SDL_ReleaseGPUBuffer(device_, noMorphs_);
+    }
     if (sampler_) {
         SDL_ReleaseGPUSampler(device_, sampler_);
     }
-    for (const DepthBuffer* d : {&windowDepth_, &portraitDepth_}) {
+    for (const DepthBuffer* d : {&windowDepth_, &portraitDepth_, &smoothColor_, &smoothDepth_}) {
         if (d->texture) {
             SDL_ReleaseGPUTexture(device_, d->texture);
         }

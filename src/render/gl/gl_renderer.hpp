@@ -56,6 +56,7 @@ public:
     void setImages(const scene::Scene& scene, const std::vector<int>& indexes, bool fade = false) override;
     void setLightMapFade(float fade) override;
     void setSkybox(const std::vector<scene::Image>& faces) override;
+    void setSurroundings(const scene::Scene& scene) override;
 
 private:
     // What the frame plan asks about the uploaded scene (see ResourceQuery).
@@ -87,6 +88,7 @@ private:
         GLuint indices = 0;
         std::vector<float> cpuVertices;
         std::vector<std::uint8_t> cpuSkin;
+        std::vector<float> cpuMorphs;  // see MeshData::morphs
     };
     // What a scene is drawn with on the GPU.
     struct SceneGpu {
@@ -195,7 +197,9 @@ private:
 
     // Frames (gl_draw.cpp).
     [[nodiscard]] bool render(unsigned width, unsigned height, const Camera& camera);
-    void drawList(const FrameView& f, const std::vector<Draw>& list, int blend);
+    void drawList(const FrameView& f, std::span<const Draw> list, int blend);
+    void drawBlended(const FrameView& f, const std::vector<Draw>& blended);
+    void drawParticles(const FrameView& f, const ParticleBatch& batch);
     void drawSprites(unsigned width, unsigned height);
     void bindTexture(unsigned unit, Texture& texture, GLint wrap, bool nearest = false);
     void drawSky(const FrameView& f, const Texture& cube, float up);
@@ -234,6 +238,13 @@ private:
     void releaseTarget();
 
     platform::Window* window_ = nullptr;
+public:
+    void setWaitForScreen(bool on) override {
+        if (window_ != nullptr) {
+            window_->setSwapInterval(on ? 1 : 0);
+        }
+    }
+private:
     platform::GlContextPtr context_;
     std::thread::id drawingThread_;
     mutable std::mutex poolLock_;
@@ -244,7 +255,7 @@ private:
     std::shared_ptr<Graveyard> graveyard_ = std::make_shared<Graveyard>();
     std::string vendor_, renderer_, version_;
 
-    Program scene_, ui_, terrain_, road_, imposter_, sky_, clip_, water_;
+    Program scene_, ui_, particle_, terrain_, road_, imposter_, sky_, clip_, water_;
     GLuint skyVertices_ = 0;  // the corners of the sky's triangle
     GLuint streamVertices_ = 0;  // a posed skinned primitive's vertices
     GLuint spriteVertices_ = 0;

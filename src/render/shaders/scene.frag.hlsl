@@ -29,6 +29,8 @@ COMBINED Texture2D<float4> causticsTexture : register(t10, space2);   // the poo
 COMBINED SamplerState causticsSampler : register(s10, space2);
 COMBINED Texture2D<float4> poolShadowTexture : register(t11, space2); // the pools' shadow map, depth along the sun
 COMBINED SamplerState poolShadowSampler : register(s11, space2);
+COMBINED Texture2D<float> occlusionTexture : register(t12, space2);   // how open each pixel of the view is
+COMBINED SamplerState occlusionSampler : register(s12, space2);
 #endif
 
 cbuffer Material : register(b0, space3) {
@@ -53,7 +55,8 @@ cbuffer Material : register(b0, space3) {
     float4 emissive;  // rgb added to the light before the texture multiplies it, w: 1 when on
     float4 uvTile;    // the texture coordinates times xy plus zw: one frame of a tiled texture
     float4 shadowReceiver;  // x: 1 when Sims' projected shadows fall on it, y: its level, z: 1 to fade them by the light map
-    float4 caustics;        // x: 1 for a pool floor, 2 for a pool wall, 3 for the caustics alone over a pond's ground, 0 for none, yzw: the texture light
+    float4 caustics;        // x: 1 for a pool floor, 2 for a pool wall, 3 for the caustics alone over a pond's ground, 4 the same over a beach sea's, 0 for none, yzw: the texture light
+    float4 neighborLight;   // rgb: what a neighbor's real house is tinted by, w: 1 when it is one, 2 for the ground around the lot, 3 for its ground
 };
 
 #ifndef GL2
@@ -66,6 +69,9 @@ cbuffer Shadows : register(b1, space3) {
     row_major float4x4 poolShadow;         // world to the pool shadow map's texture coordinates and depth
     row_major float4x4 toLot;              // world to the lot
     float4 poolSun;                        // toward the sun
+    float4 ambientOcclusion;               // x: 1 when these surfaces are multiplied by it (not in the original game)
+    float4 neighborGround[6];              // the lots of neighbors drawn as real houses: x0, x1, y0, y1 (kMaxNeighborGrounds of them)
+    float4 neighborGrounds;                // x: how many
 };
 #endif
 
@@ -212,7 +218,9 @@ float4 poolCaustics(Input input, float4 texel, float3 map) {
         // The vertex alpha is the depth under the water over 0.75: 0 at the waterline, 1 at 0.75 down.
         // The murky water dims them deeper down.
         const float murk = exp(-0.45 * max(input.alpha, 0));
-        const float sun = poolSunAt(input.world, 0.003) * lerp(0.35, 1, sqrt(facing)) * saturate(input.alpha) * murk;
+        // A beach sea's (4) light steep faces as fully as the bottom.
+        const float turned = caustics.x > 3.5 ? 1 : lerp(0.35, 1, sqrt(facing));
+        const float sun = poolSunAt(input.world, 0.003) * turned * saturate(input.alpha) * murk;
         return float4(caustic * sun * textureLight, 1);
     }
     if (caustics.x < 1.5) {
@@ -240,6 +248,13 @@ float4 shade(Input input) {
     if (albedo.a < alphaCutoff) {
         discard;
     }
+#ifndef GL2
+    // The pools' caustics alone over ground with no light map of its own (a beach sea drawn with
+    // them, not in the original game).
+    if (caustics.x > 2.5 && lightMap.x <= 0) {
+        return poolCaustics(input, texel, float3(0, 0, 0));
+    }
+#endif
     // A lot's floor or wall, as the game draws it: its texture (floors: times the material's diffuse,
     // walls: alone) times the light map times 2, and no other light. The game draws walls and floors
     // with its own light-mapped material, so a pattern whose material is unlit is light-mapped too.
@@ -300,8 +315,27 @@ float4 shade(Input input) {
 // The specular, then the environment cube, are added over the lit colour, leaving its alpha. The
 // cube's colour scale already holds the texture light.
 float4 main(Input input) : SV_Target {
+#ifndef GL2
+    // A neighbor drawn as a real house brings its own ground.
+    if (neighborLight.w > 1.5 && neighborLight.w < 2.5) {
+        const int count = (int)neighborGrounds.x;
+        for (int i = 0; i < count; ++i) {
+            const float4 lot = neighborGround[i];
+            if (input.world.x > lot.x && input.world.x < lot.y && input.world.y > lot.z && input.world.y < lot.w) {
+                discard;
+            }
+        }
+    }
+#endif
     input.uv = input.uv * uvTile.xy + uvTile.zw;
     float4 lit = shade(input);
+#ifndef GL2
+    // Not on Sims, who still darken what is around them. Their low-poly arms sit so close to their bodies
+    // that those sides would read as fully enclosed, and turn black and speckled.
+    if (ambientOcclusion.x > 0.5 && simLighting < 0.5) {
+        lit.rgb *= occlusionTexture.Load(int3(input.position.xy, 0));
+    }
+#endif
     if (emissive.w > 0.5) {
         lit.rgb += emissive.rgb * (hasTexture > 0.5 ? baseTexture.Sample(baseSampler, input.uv).rgb : float3(1, 1, 1)) * input.color;
     }
@@ -312,6 +346,12 @@ float4 main(Input input) : SV_Target {
             r = float3(dot(r, cameraRight.xyz), dot(r, cameraUp.xyz), dot(r, cameraForward.xyz));
         }
         lit.rgb += envCubeTexture.Sample(envCubeSampler, r).rgb * envCube.rgb;
+    }
+    if (neighborLight.w > 0.5 && neighborLight.w < 1.5) {
+        lit.rgb *= neighborLight.rgb;
+    } else if (neighborLight.w > 2.5) {
+        // Its light map keeps the day's shadows, and the light is the hour's, as on the ground around the lot.
+        lit.rgb *= input.light.rgb;
     }
     return lit;
 }
