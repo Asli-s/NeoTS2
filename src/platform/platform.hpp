@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace ts2::platform {
 
@@ -132,6 +133,26 @@ private:
 
 // The window the pointer is over, if it is one of the game's.
 [[nodiscard]] Window* mouseFocus();
+// True while the first window the game opened is minimized.
+[[nodiscard]] bool firstWindowMinimized();
+// The first window's size in its own units.
+void firstWindowSize(int& width, int& height);
+// How much the system scales things on the first window's display: 1.5 at 150%.
+[[nodiscard]] float firstWindowDisplayScale();
+// Gives the first window this size, in the middle of the screen, or the screen's whole free area
+// when it wouldn't fit there.
+void resizeFirstWindow(int width, int height);
+// Whether the first window covers its whole screen, without a frame. Nothing changes where the
+// system can't do it.
+void setFirstWindowFullscreen(bool on);
+// A size the first window's screen can show.
+struct DisplayMode {
+    int width = 0, height = 0;
+};
+// The sizes its screen offers, each once, smallest first. Empty where the system can't say.
+[[nodiscard]] std::vector<DisplayMode> firstWindowDisplayModes();
+// Waits until the system has an event for the game, at most `ms` milliseconds.
+void waitForEvent(int ms);
 // An OpenGL function of the current context, null if there is none by that name.
 [[nodiscard]] void* glProcAddress(const char* name);
 

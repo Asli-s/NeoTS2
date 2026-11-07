@@ -1,6 +1,8 @@
 #pragma once
 
 #include "content/ui_data.hpp"
+#include "game_options_panel.hpp"
+#include "graphics_options_panel.hpp"
 #include "ui/screen.hpp"
 
 #include <cstdint>
@@ -46,7 +48,11 @@ public:
     void showOptions(bool show);
     // Hides every neighborhood panel (under the neighborhood chooser), or shows them again as they were.
     void hideAll(bool hide);
-    enum class Action { None, MainMenu, EnterLot, Quit };
+    GameOptionsPanel& gameOptions() { return gameOptions_; }
+    GraphicsOptionsPanel& graphicsOptions() { return graphicsOptions_; }
+    // The screen has a new size: what sits at its bottom edge moves with it.
+    void setSize(int width, int height);
+    enum class Action { None, MainMenu, EnterLot, Quit, GameOptionChanged, GraphicsOptionChanged };
     // A button released: what the player asked for.
     Action clicked(int window);
 
@@ -76,6 +82,9 @@ private:
     ts2::content::UiData& data_;
     int width_, height_;
     int panel_ = -1, families_ = -1, lots_ = -1, card_ = -1, options_ = -1;
+    OptionsMenu optionsMenu_{screen_};
+    GameOptionsPanel gameOptions_{screen_, optionsMenu_};
+    GraphicsOptionsPanel graphicsOptions_{screen_, optionsMenu_};
     std::vector<std::pair<int, bool>> hidden_;  // the panels hideAll hid, and whether each was shown
     int tag_ = -1, tagIcon_ = -1, tagText_ = -1;
     std::uint32_t tagLot_ = 0;

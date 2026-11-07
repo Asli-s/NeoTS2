@@ -32,6 +32,14 @@ void PauseFrame::attach(ts2::ui::Screen& screen, int width, int height) {
             return;
         }
     }
+    layout(width, height);
+}
+
+void PauseFrame::layout(int width, int height) {
+    if (screen_ == nullptr || pieces_[Sign] < 0) {
+        return;
+    }
+    ts2::ui::Screen& screen = *screen_;
     auto w = [&](Piece p) { return screen.width(pieces_[p]); };
     auto h = [&](Piece p) { return screen.height(pieces_[p]); };
     // The game lays the frame out only when the corners fit on the screen.

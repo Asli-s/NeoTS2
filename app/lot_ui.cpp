@@ -202,6 +202,8 @@ void LotUi::load() {
         // influence and aspiration meters) isn't built yet.
         const int clock = screen_.find(live_, kClock), pause = screen_.find(live_, kPause);
         const int speeds = screen_.parent(screen_.find(live_, kNormal));
+        clock_ = clock;
+        speedButtons_ = {pause, screen_.find(live_, kNormal), screen_.find(live_, kHigh), screen_.find(live_, kUltra)};
         for (const int part : screen_.children(live_)) {
             screen_.setVisible(part, part == clock || part == pause || part == speeds);
         }
@@ -224,7 +226,28 @@ void LotUi::load() {
         }
         wallMenu_ = child(screen_, puck_, kWallMenu);
         screen_.setVisible(wallMenu_, false);
+        optionsMenu_.setMenu(options_);
+        gameOptions_.load(GameOptionsPanel::Place::Lot);
+        graphicsOptions_.load(GraphicsOptionsPanel::Place::Lot);
         setUpVersion();
+    }
+}
+
+void LotUi::setSize(int width, int height) {
+    const int down = height - height_;
+    width_ = width;
+    height_ = height;
+    if (loaded_ < 2) {
+        return;
+    }
+    for (const int panel : {puck_, live_, options_}) {
+        if (panel >= 0) {
+            screen_.move(panel, screen_.x(panel), screen_.y(panel) + down);
+        }
+    }
+    pauseFrame_.layout(width, height);
+    if (version_ >= 0) {
+        screen_.move(version_, width_ - screen_.width(version_) - kVersionInset, kVersionInset);
     }
 }
 
@@ -348,6 +371,9 @@ void LotUi::showOptions(bool show) {
         return;
     }
     screen_.setVisible(options_, show);
+    if (!show) {
+        optionsMenu_.close();
+    }
     // With nobody in the household, Live can't be used: its button is disabled and the live panel
     // stays hidden.
     screen_.setVisible(live_, !show && hasMembers_);
@@ -404,6 +430,19 @@ void LotUi::showWallMode(int mode) {
     }
 }
 
+void LotUi::showStoreyLimits(bool canGoUp, bool canGoDown) {
+    if (puck_ >= 0) {
+        screen_.setEnabled(child(screen_, puck_, kFloorUp), canGoUp);
+        screen_.setEnabled(child(screen_, puck_, kFloorDown), canGoDown);
+    }
+}
+
+void LotUi::showCeilings(bool on) {
+    if (puck_ >= 0) {
+        screen_.setChecked(child(screen_, puck_, kToggleCeiling), on);
+    }
+}
+
 LotUi::CameraButton LotUi::heldCameraButton() const {
     for (std::size_t i = 0; i < cameraButtons_.size(); ++i) {
         if (screen_.held(cameraButtons_[i])) {
@@ -441,6 +480,12 @@ LotUi::Action LotUi::clicked(int window) {
     if (id == kOptions && screen_.parent(window) == puck_) {
         showOptions(!optionsShown());
         return optionsShown() ? Action::OptionsOpened : Action::OptionsClosed;
+    }
+    if (graphicsOptions_.clicked(window)) {
+        return graphicsOptions_.takeChanged() ? Action::GraphicsOptionChanged : Action::None;
+    }
+    if (gameOptions_.clicked(window)) {
+        return gameOptions_.takeChanged() ? Action::GameOptionChanged : Action::None;
     }
     if (id == kLiveMode && screen_.parent(window) == puck_ && optionsShown()) {
         showOptions(false);
@@ -500,7 +545,7 @@ void LotUi::show(const std::string& clock, ts2::sim::Speed speed, bool paused, s
     if (live_ < 0) {
         return;
     }
-    screen_.setText(screen_.find(live_, kClock), clock);
+    screen_.setText(clock_, clock);
     screen_.setText(funds_, fundsText(funds));
     using ts2::sim::Speed;
     // The chosen speed stays pressed while paused. The pause button flips every half second.
@@ -510,10 +555,10 @@ void LotUi::show(const std::string& clock, ts2::sim::Speed speed, bool paused, s
         pauseBlink_ = now;
     }
     wasPaused_ = paused;
-    screen_.setChecked(screen_.find(live_, kPause), paused && pauseLit_);
-    screen_.setChecked(screen_.find(live_, kNormal), speed == Speed::Normal);
-    screen_.setChecked(screen_.find(live_, kHigh), speed == Speed::High);
-    screen_.setChecked(screen_.find(live_, kUltra), speed == Speed::Ultra);
+    screen_.setChecked(speedButtons_[0], paused && pauseLit_);
+    screen_.setChecked(speedButtons_[1], speed == Speed::Normal);
+    screen_.setChecked(speedButtons_[2], speed == Speed::High);
+    screen_.setChecked(speedButtons_[3], speed == Speed::Ultra);
     pauseFrame_.show(paused);
     // Unpausing while the inventory and rewards panel has the game paused closes the panel.
     if (panel_.sub() == LivePanel::Sub::Rewards) {
@@ -643,8 +688,7 @@ void LotUi::wantPopupTexts(LotLife& life, const ts2::swaf::Want& w, const ts2::c
     p.description = row(4);
 }
 
-const ts2::tga::Pixels* LotUi::objectPicture(LotLife& life, std::uint32_t guid, std::uint32_t width, std::uint32_t height,
-                                             std::uint32_t named) {
+std::optional<ts2::tga::Pixels> LotUi::objectImage(LotLife& life, std::uint32_t guid, std::uint32_t named) {
     // The game's thumbnail service: image (the one named, else OBJD field 0x32, else the model's
     // index, else 1) of the object's group. Objects without that image are rendered in 3D. We only
     // use the drawings the game cached, filed by the object's model name (list 0x85 entry at the
@@ -652,32 +696,102 @@ const ts2::tga::Pixels* LotUi::objectPicture(LotLife& life, std::uint32_t guid, 
     constexpr std::size_t kThumbnailField = 0x32, kModelIndexLow = 0x48, kModelIndexHigh = 0x49;
     constexpr std::uint16_t kModelNames = 0x85;
     constexpr std::uint32_t kMaxPictureSide = 512;
+    auto& code = life.simulation().code();
+    const auto* type = code.objectType(guid);
+    if (type == nullptr) {
+        return std::nullopt;
+    }
+    const auto& d = type->definition;
+    const std::uint32_t model = d.field(kModelIndexLow) | static_cast<std::uint32_t>(d.field(kModelIndexHigh)) << 16;
+    const std::uint32_t instance = named != 0 ? named : d.field(kThumbnailField) != 0 ? d.field(kThumbnailField) : model != 0 ? model : 1;
+    auto image = code.image(type->group, instance, kMaxPictureSide);
+    if (!image) {
+        if (!objectThumbnails_) {
+            objectThumbnails_.emplace(objectThumbnailsFile_);
+        }
+        if (const auto name = code.string(type->group, kModelNames, named != 0 ? named : model)) {
+            image = objectThumbnails_->picture(type->group, *name, kMaxPictureSide);
+        }
+    }
+    return image;
+}
+
+const ts2::tga::Pixels* LotUi::objectPicture(LotLife& life, std::uint32_t guid, std::uint32_t width, std::uint32_t height,
+                                             std::uint32_t named) {
     height = height == 0 ? width : height;
     const std::uint32_t key = width << 16 | height;
     auto it = objectPictures_.find({guid, key, named});
     if (it == objectPictures_.end()) {
         std::optional<ts2::tga::Pixels> picture;
-        auto& code = life.simulation().code();
-        if (const auto* type = code.objectType(guid)) {
-            const auto& d = type->definition;
-            const std::uint32_t model = d.field(kModelIndexLow) | static_cast<std::uint32_t>(d.field(kModelIndexHigh)) << 16;
-            const std::uint32_t instance = named != 0 ? named : d.field(kThumbnailField) != 0 ? d.field(kThumbnailField) : model != 0 ? model : 1;
-            auto image = code.image(type->group, instance, kMaxPictureSide);
-            if (!image) {
-                if (!objectThumbnails_) {
-                    objectThumbnails_.emplace(objectThumbnailsFile_);
-                }
-                if (const auto name = code.string(type->group, kModelNames, named != 0 ? named : model)) {
-                    image = objectThumbnails_->picture(type->group, *name, kMaxPictureSide);
-                }
-            }
-            if (image) {
-                picture = fitted(*image, width, height);
-            }
+        if (const auto image = objectImage(life, guid, named)) {
+            picture = fitted(*image, width, height);
         }
         it = objectPictures_.emplace(std::tuple{guid, key, named}, std::move(picture)).first;
     }
     return it->second ? &*it->second : nullptr;
+}
+
+// Balloons turn on the thumbnail service's scaling, so their pictures fill the 128 pixels whatever their size.
+std::optional<ts2::tga::Pixels> LotUi::balloonObjectPicture(LotLife& life, std::uint32_t guid, std::uint32_t index) {
+    const auto image = objectImage(life, guid, index);
+    return image ? std::optional(ts2::content::scaled(*image, kBalloonPictureSide, kBalloonPictureSide)) : std::nullopt;
+}
+
+std::optional<ts2::tga::Pixels> LotUi::balloonMemoryPicture(LotLife& life, std::uint32_t guid) {
+    constexpr std::uint16_t kMemoryType = 0x0F;
+    constexpr std::uint32_t kPicture = 1, kMaxPictureSide = 256;
+    auto& code = life.simulation().code();
+    const auto* type = code.objectType(guid);
+    if (type == nullptr || type->definition.field(ts2::objd::field::kType) != kMemoryType) {
+        return std::nullopt;
+    }
+    const auto image = code.image(type->group, kPicture, kMaxPictureSide);
+    return image ? std::optional(ts2::content::scaled(*image, kBalloonPictureSide, kBalloonPictureSide)) : std::nullopt;
+}
+
+LotUi::BalloonWant LotUi::balloonWant(LotLife& life, const ts2::swaf::Want& want) {
+    using ts2::content::WantArgument;
+    constexpr std::uint32_t kImages = 0x499DB772;
+    const auto shown = panelWants(life, {want});
+    if (shown.empty()) {
+        return {};
+    }
+    const WantsPanel::Want& p = shown.front();
+    BalloonWant out;
+    const auto kind = static_cast<WantArgument>(want.type);
+    if (kind == WantArgument::Sim && p.hasTarget) {
+        out.neighbor = static_cast<std::int16_t>(want.argument);
+        const auto* neighbor = life.simulation().world().neighbor(out.neighbor);
+        out.name = std::format("BalloonEffectThumbnail_WantFear_0x{:08x}", neighbor != nullptr ? neighbor->guid : 0);
+    } else if (p.hasTarget) {
+        const auto guid = static_cast<std::uint32_t>(want.argument);
+        if (const auto image = objectImage(life, guid, 0)) {
+            out.picture = ts2::content::scaled(*image, kBalloonPictureSide, kBalloonPictureSide);
+        }
+        out.name = std::format("BalloonEffectThumbnail_WantFear_0x{:08x}", guid);
+    } else {
+        if (const auto image = screen_.data().image(kImages, p.primaryIcon)) {
+            out.picture = ts2::content::scaled(*image, kBalloonPictureSide, kBalloonPictureSide);
+        }
+        out.name = std::format("BalloonEffectThumbnail_WantFear_0x{:08x}_0x{:08x}", kImages, p.primaryIcon);
+    }
+    if (const auto badge = screen_.data().image(kImages, p.secondaryIcon)) {
+        out.badge = *badge;
+        out.name += std::format("_0x{:08x}_0x{:08x}", kImages, p.secondaryIcon);
+    }
+    return out;
+}
+
+std::optional<ts2::tga::Pixels> LotUi::balloonPortrait(LotLife& life, std::int16_t neighbor) {
+    constexpr std::uint32_t kImages = 0x499DB772, kBalloonShape = 0x4BBD01B6;
+    const auto* picture = targetPicture(balloonPortraits_, life, neighbor);
+    if (picture == nullptr) {
+        return std::nullopt;
+    }
+    if (!balloonShape_) {
+        balloonShape_ = screen_.data().image(kImages, kBalloonShape).value_or(ts2::tga::Pixels{});
+    }
+    return ts2::content::fadedToShape(*picture, *balloonShape_);
 }
 
 const ts2::tga::Pixels* LotUi::careerIcon(LotLife& life, std::uint32_t guid) {
@@ -832,6 +946,7 @@ void LotUi::showHousehold(std::vector<Skewer::Member> members) {
     relationshipPictures_.clear();
     memoryPortraits_.clear();
     wantPopupPortraits_.clear();
+    balloonPortraits_.clear();
     panel_.refreshWants();  // their pictures may be of the last household
     wantsPending_ = true;  // the wants shown point at the pictures just cleared
     portraitShown_ = -1;
@@ -861,6 +976,7 @@ void LotUi::showLife(LotLife& life) {
     memoryPortraits_.collect();
     wantPopupPortraits_.collect();
     queuePortraits_.collect();
+    balloonPortraits_.collect();
     // The live panel shows the selected Sim's portrait over its shadow.
     if (sim != portraitShown_ && live_ >= 0) {
         portraitShown_ = sim;

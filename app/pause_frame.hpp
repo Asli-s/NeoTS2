@@ -12,6 +12,8 @@ namespace app {
 class PauseFrame {
 public:
     void attach(ts2::ui::Screen& screen, int width, int height);
+    // Lays the frame out for a screen of this size.
+    void layout(int width, int height);
     void show(bool shown);
 
 private:

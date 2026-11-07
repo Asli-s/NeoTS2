@@ -30,6 +30,7 @@ public:
 
     // The game's UI scripts, pictures and texts the windows come from.
     content::UiData& data() { return data_; }
+    Fonts& fonts() { return fonts_; }
 
     // Adds a script's windows. The top window's area is moved to (x, y) (inside `parent`'s area when
     // given). Returns the top window, or -1 when the script is missing.
@@ -49,6 +50,7 @@ public:
     bool visible(int window) const;
     void setEnabled(int window, bool enabled);  // a disabled button shows its disabled frame and can't be pressed
     void setChecked(int window, bool checked);  // a checked button shows its pressed frame
+    bool checked(int window) const;
     // Only the buttons of this window and the windows inside it respond to the mouse (-1: all).
     void setModal(int window) { modal_ = window; }
     int modal() const { return modal_; }
@@ -76,6 +78,8 @@ public:
     // Takes a window out of the one it is in and makes it a top window drawn just under `under`, at
     // the same place on screen.
     void detach(int window, int under);
+    // Draws a window just under one of its sibling windows.
+    void placeUnder(int window, int sibling);
     // Takes a window and the windows inside it off the screen for good, freeing their pictures and
     // text. Their numbers are given to windows added later.
     void remove(int window);
@@ -131,6 +135,7 @@ public:
 
     // The screen's size, which tooltips stay inside (0: no limits).
     void setSize(int width, int height) { size_ = {width, height}; }
+    std::array<int, 2> size() const { return size_; }
 
     // What to draw. A tooltip shows once the mouse has rested on a button for a while (at `seconds`).
     std::vector<Quad> quads(double seconds = 0) const;
@@ -171,6 +176,7 @@ private:
         bool toggle = false;             // a toggle button (style=toggle): pressed frame only while checked
         bool autosize = false;           // a button sized to its caption (autosize)
         bool checkBox = false;           // a check box or radio button (style=checkbox, radiobtn or radiocheck)
+        bool radioCheck = false;         // a radio button drawn from an 8-frame picture (style=radiocheck)
         std::string text, font;
         HAlign hAlign = HAlign::Left;  // the text's place in the window (align)
         VAlign vAlign = VAlign::Top;

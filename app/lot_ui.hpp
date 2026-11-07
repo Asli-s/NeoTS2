@@ -1,5 +1,7 @@
 #pragma once
 
+#include "game_options_panel.hpp"
+#include "graphics_options_panel.hpp"
 #include "live_panel.hpp"
 #include "lot_life.hpp"
 #include "pause_frame.hpp"
@@ -44,6 +46,33 @@ public:
     // Loads the panels, hidden, a part per call. open() loads what is left. Loading them all takes a
     // while, so it is spread over the frames a lot loads in rather than done in the frame it shows.
     void load();
+    // Where Game Options reads its settings and saves its choices.
+    void setFolders(ts2::content::UiData& data, const std::filesystem::path& install, const std::filesystem::path& userFolder) {
+        gameOptions_.readSettings(install, userFolder);
+        graphicsOptions_.readSettings(data, install, userFolder);
+    }
+    GraphicsOptionsPanel& graphicsOptions() { return graphicsOptions_; }
+    // The screen has a new size: what sits at its bottom and right edges moves with them.
+    void setSize(int width, int height);
+    const GameOptionsPanel& gameOptions() const { return gameOptions_; }
+    GameOptionsPanel& gameOptions() { return gameOptions_; }
+    std::optional<bool> takeFreeWill() { return gameOptions_.takeFreeWill(); }
+    void setFreeWill(bool on) { gameOptions_.setFreeWill(on); }
+    // A balloon's picture of an object, using its image `index`. None when the object has no picture.
+    std::optional<ts2::tga::Pixels> balloonObjectPicture(LotLife& life, std::uint32_t guid, std::uint32_t index);
+    // A balloon's picture of a memory, its object's own picture. None when the GUID isn't a memory's.
+    std::optional<ts2::tga::Pixels> balloonMemoryPicture(LotLife& life, std::uint32_t guid);
+    // What a want or fear shows in a balloon: a picture's name and either the picture or the Sim whose portrait it
+    // is, and its badge. No name when the want shows nothing.
+    struct BalloonWant {
+        std::string name;
+        std::int16_t neighbor = 0;
+        ts2::tga::Pixels picture, badge;
+    };
+    BalloonWant balloonWant(LotLife& life, const ts2::swaf::Want& want);
+    // A balloon's portrait of a Sim, cut to the balloon's shape. None until its character file is read, and none at all
+    // for a Sim without a portrait.
+    std::optional<ts2::tga::Pixels> balloonPortrait(LotLife& life, std::int16_t neighbor);
     // The user folder's cache of object pictures the game drew (Thumbnails/ObjectThumbnails.package).
     void setObjectThumbnails(std::filesystem::path file) {
         objectThumbnailsFile_ = std::move(file);
@@ -57,12 +86,13 @@ public:
     void close();
     // Whether testingCheatsEnabled is on. The version text only looks at it while the panels load.
     void setTestingCheats(bool on) { testingCheats_ = on; }
+    static constexpr std::uint32_t kBalloonPictureSide = 128;
     // Hides every panel but the pause frame while the free camera is on, and brings them back as
     // they were.
     void hideForFreeCamera(bool hide);
 
     // What a released button asks for.
-    enum class Action { None, Neighborhood, Quit, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, RewardsOpened, RewardsClosed, SelectSim, TrackSim, FloorUp, FloorDown, WallMode, ToggleCeiling };
+    enum class Action { None, Neighborhood, Quit, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, GameOptionChanged, GraphicsOptionChanged, RewardsOpened, RewardsClosed, SelectSim, TrackSim, FloorUp, FloorDown, WallMode, ToggleCeiling };
     Action clicked(int window);
     // The puck's camera button held down under the mouse.
     enum class CameraButton { None, RotateLeft, RotateRight, ZoomIn, ZoomOut };
@@ -85,6 +115,10 @@ public:
     void mouseButton(int x, int y, bool down, LotLife& life);
     // Shows the wall mode in use on the puck's wall button.
     void showWallMode(int mode);
+    // Greys the puck's storey buttons when the view can't go further that way.
+    void showStoreyLimits(bool canGoUp, bool canGoDown);
+    // Shows the puck's Toggle Ceiling button lit while the ceilings are on.
+    void showCeilings(bool on);
 
     // Shows or hides the options menu (it replaces the live panel while open).
     void showOptions(bool show);
@@ -121,6 +155,10 @@ private:
                                           std::uint32_t named = 0);
     // The icon of the career a career reward comes from. Null when none.
     const ts2::tga::Pixels* careerIcon(LotLife& life, std::uint32_t guid);
+    // An object's picture at its own size, the image `named` when not 0.
+    std::optional<ts2::tga::Pixels> objectImage(LotLife& life, std::uint32_t guid, std::uint32_t named);
+    ts2::content::TargetPictures balloonPortraits_{ts2::content::readCharacterPortrait, kBalloonPictureSide};
+    std::optional<ts2::tga::Pixels> balloonShape_;  // read when first needed
     // The rewards panel's view of the selected Sim.
     RewardsPanel::Sim rewardsOf(LotLife& life, std::int16_t sim);
     // The selected Sim's memories as the memories page shows them.
@@ -139,10 +177,15 @@ private:
     int puck_ = -1, live_ = -1, options_ = -1;
     int version_ = -1;  // the version text, -1 when it isn't shown
     int loaded_ = 0;  // parts of the panels loaded (see load), 2 when all are
-    int funds_ = -1, wallMenu_ = -1;
+    int funds_ = -1, wallMenu_ = -1, clock_ = -1;
+    // The pause, normal, high and ultra speed buttons, set each frame.
+    std::array<int, 4> speedButtons_{-1, -1, -1, -1};
     std::array<int, 4> cameraButtons_{-1, -1, -1, -1};  // in CameraButton's order, from RotateLeft
     int wallMode_ = 2, pickedWallMode_ = 2;
     LivePanel panel_;
+    OptionsMenu optionsMenu_{screen_};
+    GameOptionsPanel gameOptions_{screen_, optionsMenu_};
+    GraphicsOptionsPanel graphicsOptions_{screen_, optionsMenu_};
     Skewer skewer_;
     PauseFrame pauseFrame_;
     QueuePanel queue_;

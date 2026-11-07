@@ -17,6 +17,10 @@ namespace {
 // Which frame of a button's four-frame image strip each state shows (as the game's main menu
 // shows them: idle, hovered and pressed). Disabled takes the one left, a bare outline.
 constexpr int kButtonFrame[4] = {1, 3, 2, 0};  // normal, hover, pressed, disabled
+// A radio button's frame pair for each look (normal, hover, pressed, disabled). The game's art runs
+// dark, light, green and grey. Normal is the dark pair, and the others are taken in the art's order.
+constexpr int kRadioFrame[4] = {0, 1, 2, 3};
+constexpr float kRadioFrames = 8;
 
 // Part of an image (u0..u1 of an iw x ih image) drawn over a window in thirds: corners kept, edges
 // and middle stretched. The corners are always drawn whole, overlapping in a window narrower or
@@ -131,12 +135,14 @@ int Screen::add(const ui::Window& source, int parent) {
     const auto style = source.text("style");
     w.toggle = style == "toggle";
     w.checkBox = style == "checkbox" || style == "radiobtn" || style == "radiocheck";
+    w.radioCheck = style == "radiocheck";
     w.autosize = source.flag("autosize");
     const auto res = source.list("captionres");
     if (res.size() == 2 && res[0] != 0) {
         w.text = data_.text(static_cast<std::uint32_t>(res[0]), static_cast<std::uint32_t>(res[1]));
-    } else if (w.kind == Kind::Text || w.kind == Kind::Rect) {
-        // A flat rectangle's caption isn't drawn. Some name the window their panel anchors to.
+    } else if (w.kind == Kind::Text || w.kind == Kind::Rect || w.kind == Kind::Generic) {
+        // A flat rectangle's or generic window's caption isn't drawn. Some name the window their
+        // panel anchors to, and the options panels name a settings group's setting.
         w.text = source.text("caption");
     } else if (w.kind == Kind::TextEdit) {
         w.text = source.text("initvalue");
@@ -267,10 +273,11 @@ void Screen::layoutText(int index) {
     }
 }
 
-// A window's text as lines. Wrapped text breaks between words to fit the area inside the gutters,
+// A window's text as lines. Wrapped text, and a button caption with wrapcaption, breaks between
+// words to fit the area inside the gutters,
 // each paragraph (a line break in the text) on its own, and loses its blank lines at the end.
 std::vector<std::string> Screen::wrapLines(const Window& w, const FontStyle& style) const {
-    if (!w.wrapped) {
+    if (!w.wrapped && !w.wrapCaption) {
         return {w.text};
     }
     // A scroll bar inside the window takes its share of the width.
@@ -379,6 +386,10 @@ void Screen::setChecked(int window, bool checked) {
     }
 }
 
+bool Screen::checked(int window) const {
+    return window >= 0 && windows_[static_cast<std::size_t>(window)].checked;
+}
+
 void Screen::remove(int window) {
     // A handle removed before stays free, or two later windows would share its slot.
     if (window < 0 || std::find(freeWindows_.begin(), freeWindows_.end(), window) != freeWindows_.end()) {
@@ -426,8 +437,13 @@ bool Screen::visible(int window) const {
 }
 
 void Screen::setEnabled(int window, bool enabled) {
-    if (window >= 0) {
-        windows_[static_cast<std::size_t>(window)].state = enabled ? ButtonState::Normal : ButtonState::Disabled;
+    if (window < 0) {
+        return;
+    }
+    // Only a change counts, so setting it every frame leaves a button's hover and pressed looks alone.
+    ButtonState& state = windows_[static_cast<std::size_t>(window)].state;
+    if (enabled == (state == ButtonState::Disabled)) {
+        state = enabled ? ButtonState::Normal : ButtonState::Disabled;
     }
 }
 
@@ -546,6 +562,15 @@ void Screen::raise(int window) {
         roots_.erase(at);
         roots_.push_back(window);
     }
+}
+
+void Screen::placeUnder(int window, int sibling) {
+    if (window < 0 || sibling < 0 || window == sibling || parent(window) < 0 || parent(window) != parent(sibling)) {
+        return;
+    }
+    auto& list = windows_[static_cast<std::size_t>(parent(window))].children;
+    std::erase(list, window);
+    list.insert(std::find(list.begin(), list.end(), sibling), window);
 }
 
 void Screen::detach(int window, int under) {
@@ -980,7 +1005,15 @@ void Screen::emit(int index, std::vector<Quad>& out) const {
         const std::size_t first = out.size();
         const auto& img = textures_[static_cast<std::size_t>(w.image)];
         const float iw = static_cast<float>(img.width), ih = static_cast<float>(img.height);
-        if (w.kind == Kind::Button) {
+        if (w.kind == Kind::Button && w.radioCheck) {
+            // A radio button's picture holds 8 frames, a chosen and an unchosen one for each look,
+            // drawn at their own size at the button's top left with the caption after them.
+            const int pair = kRadioFrame[static_cast<int>(w.state)];
+            const int frame = pair * 2 + (w.checked ? 0 : 1);
+            const float fw = iw / kRadioFrames;
+            out.push_back({x0, y0, x0 + fw, y0 + ih, static_cast<float>(frame) / kRadioFrames, 0,
+                           static_cast<float>(frame + 1) / kRadioFrames, 1, w.image});
+        } else if (w.kind == Kind::Button) {
             // Holding a toggle button down shows it hovered. It looks pressed only while checked.
             ButtonState look = w.toggle && w.state == ButtonState::Pressed ? ButtonState::Hover : w.state;
             if (w.checked && look != ButtonState::Disabled) {
@@ -1003,9 +1036,10 @@ void Screen::emit(int index, std::vector<Quad>& out) const {
             out.push_back({x0, y0, x1, y1, static_cast<float>(w.part[0]) / iw, static_cast<float>(w.part[1]) / ih,
                            static_cast<float>(w.part[2]) / iw, static_cast<float>(w.part[3]) / ih, w.image});
         } else if (w.imageRect[2] > w.imageRect[0]) {
-            // Part of the image (one frame of the plumbob's animation strip), drawn at the window's size
-            // from the image's top left: not known yet.
-            out.push_back({x0, y0, x1, y1, 0, 0, static_cast<float>(w.w) / iw, static_cast<float>(w.h) / ih, w.image});
+            // Part of the image, such as one icon of the options panels' title strip, drawn at the
+            // window's size from the part's top left.
+            const float u0 = static_cast<float>(w.imageRect[0]), v0 = static_cast<float>(w.imageRect[1]);
+            out.push_back({x0, y0, x1, y1, u0 / iw, v0 / ih, (u0 + static_cast<float>(w.w)) / iw, (v0 + static_cast<float>(w.h)) / ih, w.image});
         } else if (w.kind == Kind::Bitmap && !w.ownImage) {
             // A script's bitmap is drawn at its own size, whatever the window's size.
             out.push_back({x0, y0, x0 + iw, y0 + ih, 0, 0, 1, 1, w.image});
@@ -1023,7 +1057,9 @@ void Screen::emit(int index, std::vector<Quad>& out) const {
         const float tw = static_cast<float>(t.width), th = static_cast<float>(t.height);
         const float gx = static_cast<float>(w.gutters[0]), gy = static_cast<float>(w.gutters[1]);
         float tx = x0 + gx;
-        if (w.hAlign == HAlign::Centre) {
+        if (w.kind == Kind::Button && w.radioCheck && w.image >= 0) {
+            tx = x0 + gx + static_cast<float>(textures_[static_cast<std::size_t>(w.image)].width) / kRadioFrames;
+        } else if (w.hAlign == HAlign::Centre) {
             tx = std::floor((x0 + x1 - tw) / 2);
         } else if (w.hAlign == HAlign::Right) {
             tx = x1 - gx - tw;

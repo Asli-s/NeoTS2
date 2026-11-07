@@ -17,7 +17,7 @@ struct LightingConditions {
     // the spring and autumn states. What those kinds are is not known yet.
     bool vacation = false;
     int vacationLotKind = 0;
-    // The game's portal lighting (off at the Medium lighting option uses the "...NoPortals" states).
+    // The game's portal lighting (off at the Low lighting option uses the "...NoPortals" states).
     bool portalLighting = true;
 };
 

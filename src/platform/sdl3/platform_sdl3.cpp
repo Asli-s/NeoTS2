@@ -361,6 +361,68 @@ Window* mouseFocus() {
     return nullptr;
 }
 
+bool firstWindowMinimized() {
+    return !windows().empty() && windows().front()->minimized();
+}
+
+void firstWindowSize(int& width, int& height) {
+    width = height = 0;
+    if (!windows().empty()) {
+        windows().front()->size(width, height);
+    }
+}
+
+float firstWindowDisplayScale() {
+    const float scale = windows().empty() ? 0.0f : SDL_GetWindowDisplayScale(windows().front()->impl().window);
+    return scale > 0 ? scale : 1.0f;
+}
+
+void resizeFirstWindow(int width, int height) {
+    if (windows().empty()) {
+        return;
+    }
+    SDL_Window* window = sdlWindow(*windows().front());
+    SDL_Rect usable{};
+    int top = 0, left = 0, bottom = 0, right = 0;
+    if (SDL_GetDisplayUsableBounds(SDL_GetDisplayForWindow(window), &usable) && SDL_GetWindowBordersSize(window, &top, &left, &bottom, &right) &&
+        (width > usable.w - left - right || height > usable.h - top - bottom)) {
+        fitScreen(window);
+        return;
+    }
+    SDL_SetWindowSize(window, width, height);
+    SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+    SDL_SyncWindow(window);
+}
+
+void setFirstWindowFullscreen(bool on) {
+    if (windows().empty()) {
+        return;
+    }
+    SDL_Window* window = sdlWindow(*windows().front());
+    SDL_SetWindowFullscreen(window, on);
+    SDL_SyncWindow(window);
+}
+
+std::vector<DisplayMode> firstWindowDisplayModes() {
+    std::vector<DisplayMode> modes;
+    if (windows().empty()) {
+        return modes;
+    }
+    int count = 0;
+    SDL_DisplayMode** found = SDL_GetFullscreenDisplayModes(SDL_GetDisplayForWindow(sdlWindow(*windows().front())), &count);
+    for (int i = 0; found != nullptr && i < count; ++i) {
+        modes.push_back({found[i]->w, found[i]->h});
+    }
+    SDL_free(found);
+    std::sort(modes.begin(), modes.end(), [](const DisplayMode& a, const DisplayMode& b) { return a.width != b.width ? a.width < b.width : a.height < b.height; });
+    modes.erase(std::unique(modes.begin(), modes.end(), [](const DisplayMode& a, const DisplayMode& b) { return a.width == b.width && a.height == b.height; }), modes.end());
+    return modes;
+}
+
+void waitForEvent(int ms) {
+    SDL_WaitEventTimeout(nullptr, ms);
+}
+
 void* glProcAddress(const char* name) {
     return reinterpret_cast<void*>(SDL_GL_GetProcAddress(name));
 }

@@ -31,6 +31,7 @@ constexpr std::uint32_t kPuckFamilies = 0x2be6f563, kPuckLots = 0x4be6f571, kPuc
 // The neighborhood's own options menu and its Main Menu and Quit buttons. A hidden 1x1 window in it
 // is its anchor, whose caption names the puck window it goes on ("aabbccdd:tl").
 constexpr std::uint32_t kOptionsMenu = 0x49001028, kOptionsMainMenu = 0x0000a221, kOptionsQuit = 0x0000a220;
+constexpr std::uint32_t kOptionsButtons = 0x0000a200;  // the frame holding the menu's buttons
 // The top bar's background ends this far past the neighborhood's name (its text's left edge, 2 in
 // from the name's window, plus its width).
 constexpr int kNameToBarEnd = 2 + 23;
@@ -421,14 +422,40 @@ void NeighborhoodUi::open(const fs::path& folder, const std::string& name, Conte
             }
         }
         screen_.setVisible(options_, false);
+        // The script's area stops short of the buttons. The game shows the menu out to the right end
+        // of the frame holding them, so they all take the mouse.
+        if (const int buttons = screen_.find(options_, kOptionsButtons); buttons >= 0) {
+            screen_.resize(options_, screen_.x(buttons) + screen_.width(buttons), screen_.height(options_));
+        }
+        optionsMenu_.setMenu(options_);
+        gameOptions_.load(GameOptionsPanel::Place::Neighborhood);
+        graphicsOptions_.load(GraphicsOptionsPanel::Place::Neighborhood);
     }
     // The puck and top bar are drawn over the bins and the options.
     screen_.raise(panel_);
     bin_ = Bin::None;
 }
 
+void NeighborhoodUi::setSize(int width, int height) {
+    const int down = height - height_;
+    width_ = width;
+    height_ = height;
+    if (panel_ < 0) {
+        return;
+    }
+    screen_.resize(panel_, width_, height_);
+    for (const int window : {puck_, families_, lots_, options_}) {
+        if (window >= 0) {
+            screen_.move(window, screen_.x(window), screen_.y(window) + down);
+        }
+    }
+}
+
 void NeighborhoodUi::close() {
     // Removed rather than hidden: the next neighborhood loads its own panel and bins.
+    gameOptions_.remove();
+    graphicsOptions_.remove();
+    optionsMenu_.setMenu(-1);
     for (const int w : {panel_, families_, lots_, card_, tag_, options_}) {
         screen_.remove(w);
     }
@@ -458,6 +485,12 @@ void NeighborhoodUi::showBin(Bin bin) {
 }
 
 NeighborhoodUi::Action NeighborhoodUi::clicked(int window) {
+    if (graphicsOptions_.clicked(window)) {
+        return graphicsOptions_.takeChanged() ? Action::GraphicsOptionChanged : Action::None;
+    }
+    if (gameOptions_.clicked(window)) {
+        return gameOptions_.takeChanged() ? Action::GameOptionChanged : Action::None;
+    }
     const std::uint32_t id = screen_.id(window);
     if (id == kMainMenu) {
         return Action::MainMenu;
@@ -502,6 +535,8 @@ void NeighborhoodUi::showOptions(bool show) {
     }
     if (show) {
         showBin(Bin::None);
+    } else {
+        optionsMenu_.close();
     }
     screen_.setVisible(options_, show);
     screen_.setChecked(screen_.find(puck_, kPuckOptions), show);

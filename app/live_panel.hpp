@@ -100,6 +100,8 @@ private:
 
     ts2::ui::Screen* screen_ = nullptr;
     int panel_ = -1;
+    // The aspiration buttons' windows by Aspiration flag, shown or hidden each frame.
+    std::array<int, 9> aspirationButtons_{};
     int wantsContent_ = -1, needsContent_ = -1, relationshipsContent_ = -1, jobContent_ = -1, simologyContent_ = -1,
         rewardsContent_ = -1;
     // The first lot opens with the wants and the needs open, as in the game. Later lots keep the

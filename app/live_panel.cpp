@@ -56,6 +56,9 @@ void LivePanel::attach(ts2::ui::Screen& screen, int panel) {
     needsContent_ = screen.load(kScripts, kNeedsScript, 0, 0, screen.find(panel, kSubHolder));
     needs_.attach(screen, needsContent_);
     mood_.attach(screen, panel);
+    for (std::size_t bit = 0; bit < aspirationButtons_.size(); ++bit) {
+        aspirationButtons_[bit] = kAspirationButtons[bit] != 0 ? screen.find(panel, kAspirationButtons[bit]) : -1;
+    }
     aspirationBars_.attach(screen, panel);
     age_.attach(screen, panel);
     relationshipsContent_ = screen.load(kScripts, kRelationshipsScript, 0, 0, screen.find(panel, kSubHolder));
@@ -107,9 +110,9 @@ void LivePanel::setAspiration(std::int16_t aspiration) {
     if (screen_ == nullptr) {
         return;
     }
-    for (int bit = 0; bit < 9; ++bit) {
-        if (kAspirationButtons[bit] != 0) {
-            screen_->setVisible(screen_->find(panel_, kAspirationButtons[bit]), (aspiration & (1 << bit)) != 0);
+    for (std::size_t bit = 0; bit < aspirationButtons_.size(); ++bit) {
+        if (aspirationButtons_[bit] >= 0) {
+            screen_->setVisible(aspirationButtons_[bit], (aspiration & (1 << bit)) != 0);
         }
     }
 }

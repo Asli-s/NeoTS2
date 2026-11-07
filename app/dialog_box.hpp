@@ -59,6 +59,7 @@ public:
             buttons_.push_back(b.id);
         }
         root_ = screen.addWindows({frame}, (width - w) / 2, (height - h) / 2);
+        body_ = screen.find(root_, kBodyId);
         // A button takes its caption from a text resource only, so the texts are set once it is made.
         for (const Button& b : buttons) {
             if (const int made = screen.find(root_, b.id); made >= 0) {
@@ -79,6 +80,20 @@ public:
     }
 
     bool isOpen() const { return root_ >= 0; }
+
+    // Puts the open box back in the middle of a `width` x `height` screen.
+    void centre(ts2::ui::Screen& screen, int width, int height) {
+        if (root_ >= 0) {
+            screen.move(root_, (width - screen.width(root_)) / 2, (height - screen.height(root_)) / 2);
+        }
+    }
+
+    // Changes the text of the open box, which keeps its size.
+    void setBody(ts2::ui::Screen& screen, const std::string& body) {
+        if (root_ >= 0) {
+            screen.setText(body_, body);
+        }
+    }
 
     // The id of a released button, nothing for any other window.
     std::optional<std::uint32_t> clicked(const ts2::ui::Screen& screen, int window) const {
@@ -127,8 +142,11 @@ private:
         return {bodyW, lines};
     }
 
+    // The body text's id in the box.
+    static constexpr std::uint32_t kBodyId = 0xB0D1;
+
     static ts2::ui::Window text(const std::string& font, const std::string& caption, int x, int y, int w, int h, bool wrapped = false) {
-        return {{{"iid", "IGZWinText"}, {"winflag_visible", "yes"}, {"area", area(x, y, w, h)}, {"caption", caption}, {"font", font},
+        return {{{"iid", "IGZWinText"}, {"id", font == kBodyFont ? std::format("0x{:08x}", kBodyId) : "0"}, {"winflag_visible", "yes"}, {"area", area(x, y, w, h)}, {"caption", caption}, {"font", font},
                  {"forecolor", kTextColor}, {"gutters", "(5,5)"}, {"wrapped", wrapped ? "yes" : "no"}},
                 {}};
     }
@@ -141,6 +159,7 @@ private:
     }
 
     int root_ = -1;
+    int body_ = -1;
     int modalBefore_ = -1;
     std::vector<std::uint32_t> buttons_;  // the buttons' ids
 };

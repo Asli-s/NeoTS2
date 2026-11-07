@@ -352,6 +352,22 @@ void Window::swapBuffers() {
 
 void Window::setSwapInterval(int) {}
 
+void firstWindowSize(int& width, int& height) {
+    width = height = 0;
+}
+
+float firstWindowDisplayScale() {
+    return 1;
+}
+
+void resizeFirstWindow(int, int) {}
+
+void setFirstWindowFullscreen(bool) {}
+
+std::vector<DisplayMode> firstWindowDisplayModes() {
+    return {};
+}
+
 void GlContextDeleter::operator()(GlContext* context) const {
     if (context == gContext) {
         gContext = nullptr;
@@ -362,6 +378,16 @@ void GlContextDeleter::operator()(GlContext* context) const {
 
 Window* mouseFocus() {
     return (SDL_GetAppState() & SDL_APPMOUSEFOCUS) != 0 ? gWindow : nullptr;
+}
+
+bool firstWindowMinimized() {
+    return gWindow != nullptr && gWindow->minimized();
+}
+
+void waitForEvent(int ms) {
+    // SDL 1.2 has no wait with a time limit, so the game sleeps for it and the next poll takes
+    // whatever came.
+    SDL_Delay(static_cast<Uint32>(ms));
 }
 
 void* glProcAddress(const char* name) {
