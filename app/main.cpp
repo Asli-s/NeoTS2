@@ -1,12 +1,14 @@
 // NeoTS2: opens a saved lot in a window, or shows the game's main menu.
 //   neots2 <install folder> --menu [--user <user folder>] [--size w h | --fit-screen] [--preview n]
-//          [--play n [--bin families|lots|options|chooser|quit] [--lot id] [--click x y] [--card x y]]
+//          [--play n [--bin families|lots|options|gameoptions|chooser|quit] [--lot id] [--click x y] [--card x y]]
 //          [--hover x y (on the neighborhood, or the lot before the picture)] [--ui-click x y | --ui-right-click x y | --ui-hover x y
 //          (on the lot's panels before the picture, repeatable)]
 //          [--shot <out.png>] [--seed n (the neighborhood ground's variants, so pictures repeat)]
 //          [--renderer sdlgpu|gl2 (what draws: SDL's GPU API, or OpenGL 2.1)]
 //          [--smooth-follow (the camera glides after a followed Sim, not in the original game)]
 //          [--pool-style-ponds (lots' ponds drawn like pools, not in the original game)]
+//          [--pool-style-sea (a beach sea with a depth colour and caustics, not in the original game)]
+//          [--smooth-lot-skirts (lots joined to the ground around them without seams, not in the original game)]
 //          [--ui-scale 100|125|150|175|200 (the UI drawn larger, in percent, not in the original game)]
 //   neots2 <install folder> <lot.package> [--shot <out.png> [yaw pitch distance]]
 //          [--seed n (the lot's random draws when it has no saved random state, so runs repeat)]
@@ -19,6 +21,7 @@
 // comma/period turn a quarter, Z/X or +/- zoom, Page Up/Down change storey, 1/2/3 or Tab walls
 // up/cutaway/down, R roofs on/off. --shot draws one frame to a file and exits.
 #include "content/cameras.hpp"
+#include "content/downloads.hpp"
 #include "content/install.hpp"
 #include "content/lighting.hpp"
 #include "content/lighting_state.hpp"
@@ -28,6 +31,7 @@
 #include "diag/log.hpp"
 #include "diag/timing.hpp"
 #include "diagnostics.hpp"
+#include "formats/hash.hpp"
 #include "formats/nhood_paint_rules.hpp"
 #include "menu.hpp"
 #include "message_box.hpp"
@@ -239,6 +243,8 @@ struct Options {
     std::string lightState;  // a lighting state to light the lot with, in place of its clock's
     int hour = -1, minute = 0;  // the lot's clock to start from (--clock), -1 for the saved one
     std::optional<std::uint32_t> seed;  // the neighborhood ground's variants (--seed), random when empty
+    bool topDown = false;  // the shot looks straight down on the 64 tiles square a lot imposter's ground shows
+    float ambientOcclusion = 0;  // how dark corners and contacts are drawn (--ambient-occlusion), 0 for not at all
     ts2::render::Backend backend = ts2::render::defaultBackend();  // what draws (--renderer)
 };
 
@@ -254,6 +260,10 @@ bool parseOptions(int argc, char** argv, Options& o) {
                 o.distance = std::stof(argv[i + 3]);
                 i += 3;
             }
+        } else if (arg == "--top-down") {
+            o.topDown = true;
+        } else if (arg == "--ambient-occlusion" && i + 1 < argc) {
+            o.ambientOcclusion = std::stof(argv[++i]);
         } else if (arg == "--numbers" && i + 1 < argc) {
             o.numbers = argv[++i];
         } else if (arg == "--walls" && i + 1 < argc) {
@@ -392,9 +402,14 @@ int main(int argc, char** argv) {
                 menu.smoothFollow = true;
             } else if (arg == "--pool-style-ponds") {
                 menu.poolStylePonds = true;
+            } else if (arg == "--pool-style-sea") {
+                menu.poolStyleSea = true;
+            } else if (arg == "--smooth-lot-skirts") {
+                menu.smoothLotSkirts = true;
             } else if (arg == "--timings") {
                 menu.timings = true;
             } else if (arg == "--size" && i + 2 < argc) {
+                menu.sizeGiven = true;
                 menu.width = std::stoi(argv[i + 1]);
                 menu.height = std::stoi(argv[i + 2]);
                 i += 2;
@@ -458,6 +473,13 @@ int main(int argc, char** argv) {
                         app::showMessage(app::MessageKind::Warning, message);
                     }
                 }
+            }
+            // After the save folder is filled, as what it holds now counts too. One index file per
+            // save folder, among NeoTS2's own data, so nothing is added to the save folder.
+            if (lock) {
+                const std::filesystem::path data = ts2::platform::prefPath("NeoTS2");
+                const std::string name = "downloads-" + std::to_string(ts2::hash::groupId(ts2::paths::utf8Text(lock->folder()))) + ".index";
+                ts2::content::loadDownloads(lock->folder(), data.empty() ? std::filesystem::path{} : data / name);
             }
             result = runMenu(utf8Path(argv[1]), shaderFolder(), menu);
         } catch (const std::exception& ex) {
@@ -553,6 +575,7 @@ int main(int argc, char** argv) {
         {
             const auto rendererOwner = app::openRenderer(window, options.backend, windowOptions, shaders, shot);
             ts2::render::IRenderer& renderer = *rendererOwner;
+            renderer.setAmbientOcclusion(options.ambientOcclusion);
             renderer.setBumpMapping(options.bumpMapping);
             renderer.setFloorAndWallNormalMapping(options.wallBumps);
             ts2::diag::info("drawing with " + renderer.device());
@@ -647,6 +670,14 @@ int main(int argc, char** argv) {
                 if (options.fov > 0) {
                     camera.fovX = 0;
                     camera.fovY = options.fov * kPi / 180;
+                }
+                if (options.topDown) {
+                    camera.eye = {32, 32, 100};
+                    camera.target = {32, 32, 0};
+                    camera.up = {0, 1, 0};
+                    camera.orthographic = {-32, 32, -32, 32};
+                    camera.nearPlane = 50;
+                    camera.farPlane = 150;
                 }
                 if (options.bench > 0) {
                     renderer.benchmark(camera, options.shotWidth, options.shotHeight, options.bench);

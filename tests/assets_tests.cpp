@@ -64,8 +64,75 @@ void assetsFindResourcesByName() {
         CHECK(assets.byName(testres::kCres, "square_cres").has_value());
         CHECK(assets.byName(testres::kCres, "SQUARE_CRES").has_value());  // names are found in any case
         CHECK(!assets.byName(testres::kCres, "other_cres").has_value());
+        // A group named with one or two hashes is taken as written. What follows the first '!' is the name.
+        CHECK(assets.byName(testres::kCres, "#0x1C0532FA!square_cres").has_value());
+        CHECK(assets.byName(testres::kCres, "##0x1C0532FA!square_cres").has_value());
+        CHECK(!assets.byName(testres::kCres, "##0x5F000000!square_cres").has_value());
+        CHECK(!assets.byName(testres::kCres, "##0x1C0532FA!##0x1C0532FA!square_cres").has_value());
         CHECK(!assets.texture("missing").has_value());
         CHECK(!assets.warnings.empty());
+    }
+    std::filesystem::remove_all(root);
+}
+
+// A custom mesh is often kept in another group than its bare name leads to. A part's reference list
+// gives its key, and that finds it.
+void aModelIsFoundAtItsKey() {
+    auto resources = testres::squareModel("mod");
+    resources[0].key.group = 0x1C050000;
+    const sg::Link at = resources[0].key;
+    const auto root = testres::gameFolder("neots2-model-key-test", resources);
+    {
+        ts2::scene::Assets assets(root);
+        ts2::scene::SceneBuilder builder(assets);
+        CHECK(builder.model("mod", {}) < 0);
+        CHECK(builder.model("mod", {}, nullptr, &at) >= 0);
+        CHECK(builder.skinnedModel("mod", {}, nullptr, &at) >= 0);
+    }
+    std::filesystem::remove_all(root);
+}
+
+// A part set may name a group its shape leaves out, and that group is drawn. A group nothing names is not.
+void aPartSetDrawsAGroupItsShapeLeavesOut() {
+    auto resources = testres::squareModel("strands");
+    // The shape lists another group than the mesh's "square".
+    for (auto& r : resources) {
+        if (r.key.type == testres::kShpe) {
+            r.data = testres::shape("strands_shpe", "strands_tslocator_gmnd", "other", "strands_material");
+        }
+    }
+    const auto root = testres::gameFolder("neots2-part-group-test", resources);
+    {
+        ts2::scene::Assets assets(root);
+        ts2::scene::SceneBuilder builder(assets);
+        CHECK(builder.model("strands", {}) < 0);
+        CHECK(builder.model("strands", {{"strands_material", "square"}}) >= 0);
+    }
+    std::filesystem::remove_all(root);
+}
+
+// No hair's strands are typed SimHair in the files. The game draws a hair part's SimStandardMaterial
+// as SimHair: before other blended surfaces, writing depth. Its SimSkin scalp stays as it is.
+void aHairPartDrawsItsStrandsAsSimHair() {
+    const auto root = testres::gameFolder(
+        "neots2-hair-material-test",
+        {{testres::keyOf(testres::kTxmt, "strands_txmt"), testres::material("strands_txmt", "SimStandardMaterial", {{"stdMatAlphaBlendMode", "blend"}})},
+         {testres::keyOf(testres::kTxmt, "scalp_txmt"), testres::material("scalp_txmt", "SimSkin", {{"stdMatAlphaBlendMode", "blend"}})}});
+    {
+        ts2::scene::Assets assets(root);
+        ts2::scene::SceneBuilder builder(assets);
+        const int plain = builder.material("strands");
+        const int hair = builder.material("strands", true);
+        const int scalp = builder.material("scalp", true);
+        CHECK(plain >= 0 && hair >= 0 && scalp >= 0 && plain != hair);
+        CHECK(scalp == builder.material("scalp"));
+        CHECK(builder.material("nothing", true) == -1);
+        if (plain >= 0 && hair >= 0 && scalp >= 0) {
+            const auto& materials = builder.scene().materials;
+            CHECK(materials[static_cast<std::size_t>(plain)].layer == 17 && !materials[static_cast<std::size_t>(plain)].blendedHair);
+            CHECK(materials[static_cast<std::size_t>(hair)].layer == 3 && materials[static_cast<std::size_t>(hair)].blendedHair);
+            CHECK(materials[static_cast<std::size_t>(scalp)].layer == 17 && !materials[static_cast<std::size_t>(scalp)].blendedHair);
+        }
     }
     std::filesystem::remove_all(root);
 }
@@ -357,6 +424,34 @@ void modelsAreBuiltFromTheirResources() {
     std::filesystem::remove_all(root);
 }
 
+// A model's morph streams come with its primitives: each vertex's delta and the morph its target index
+// names, the model's empty pair taking none. The mesh lists the morphs by blend group and name.
+void modelsKeepTheirMorphs() {
+    auto resources = testres::squareModel("square");
+    testres::MeshMorph morph;
+    morph.positionDeltas = {0, 0, 0.5f, 0, 0, 1, 0, 0, 0, 0, 0, 0};
+    morph.indices = {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    morph.pairs = {{"", ""}, {"FaceBlends", "Y_Nose"}};
+    resources[3].data = testres::mesh("square_tslocator_gmdc", "square", {0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0}, {0, 1, 1, 1, 1, 0, 0, 0},
+                                      {0, 1, 2, 0, 2, 3}, &morph);
+    const auto root = testres::gameFolder("neots2-builder-morph-test", resources);
+    {
+        ts2::scene::Assets assets(root);
+        ts2::scene::SceneBuilder builder(assets);
+        const int model = builder.model("square", {});
+        CHECK(model >= 0);
+        if (model >= 0) {
+            const auto& mesh = builder.scene().meshes[static_cast<std::size_t>(model)];
+            CHECK(mesh.morphs.size() == 1 && mesh.morphs[0].group == "faceblends" && mesh.morphs[0].name == "y_nose");
+            const auto& p = mesh.primitives.front();
+            using P = ts2::scene::Primitive;
+            CHECK(p.morphs.size() == 4 * P::kMorphStreams && p.morphs[0] == 0 && p.morphs[1] == P::kNoMorph && p.morphs[4] == P::kNoMorph);
+            CHECK(p.positionDeltas.size() == 4 * P::kMorphStreams * 3 && p.positionDeltas[2] == 0.5f && p.positionDeltas[14] == 0);
+        }
+    }
+    std::filesystem::remove_all(root);
+}
+
 // A shape is drawn where its reference node sits in the model's tree.
 void shapesSitWhereTheirNodePutsThem() {
     auto resources = testres::squareModel("square");
@@ -539,6 +634,9 @@ std::vector<Test> assetTests() {
     return {
         {"hand-made resources read back", handMadeResourcesReadBack},
         {"assets find resources by name", assetsFindResourcesByName},
+        {"a model is found at its key", aModelIsFoundAtItsKey},
+        {"a part set draws a group its shape leaves out", aPartSetDrawsAGroupItsShapeLeavesOut},
+        {"a hair part draws its strands as SimHair", aHairPartDrawsItsStrandsAsSimHair},
         {"character files find their session group names", characterFilesFindTheirSessionGroupNames},
         {"plant skin lies between skin and clothes", plantSkinLiesBetweenSkinAndClothes},
         {"sims wear the last hair, top, bottom and body", simsWearTheLastHairTopBottomAndBody},
@@ -549,6 +647,7 @@ std::vector<Test> assetTests() {
         {"outfits are picked and put on", outfitsArePickedAndPutOn},
         {"face templates move the face", faceTemplatesMoveTheFace},
         {"models are built from their resources", modelsAreBuiltFromTheirResources},
+        {"models keep their morphs", modelsKeepTheirMorphs},
         {"models with missing parts are handled", modelsWithMissingPartsAreHandled},
         {"saved joints move the model", savedJointsMoveTheModel},
         {"shapes sit where their node puts them", shapesSitWhereTheirNodePutsThem},

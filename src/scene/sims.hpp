@@ -5,6 +5,7 @@
 #include "scene/age_data.hpp"
 #include "scene/assets.hpp"
 #include "scene/builder.hpp"
+#include "scene/rig.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -27,8 +28,12 @@ constexpr std::uint32_t kHairPart = 1, kFacePart = 2, kTopPart = 4, kBodyPart = 
 struct SimPart {
     std::uint32_t part = 0;  // one of the kinds above
     std::string model;       // resource node name, without "_cres"
+    // Where the part's reference list says the model is. Custom meshes are rarely where their name
+    // alone would lead. Empty for a model inside the character file, found by its name.
+    std::optional<scenegraph::Link> modelKey;
     std::vector<scenegraph::MaterialOverride> overrides;
     std::shared_ptr<const MeshEdit> meshEdit;  // a change to its mesh first, or none
+    std::vector<JointAdjust> jointAdjusts;     // the rest places its model gives the Sim's joints
 };
 
 // What a Sim wears, from its character file: the parts its age data (AGED) lists for the outfit
@@ -39,7 +44,8 @@ struct SimLook {
     std::uint32_t category = 0;
     std::uint32_t age = 0;     // one of the age flags below
     std::uint32_t gender = 0;  // 1 female, 2 male
-    std::string skinTone;      // e.g. "00000004-0000-0000-0000-000000000000"
+    std::uint32_t species = 1; // 1 human (also when the age data says 0)
+    std::string skinTone;     // e.g. "00000004-0000-0000-0000-000000000000"
     // The materials of its bald head, bare top and bottom, and a toddler's bare body (its skin
     // outfit), e.g. "emtopnaked_nude_s5", "pubodynaked_nude_s1".
     std::string skinHair, skinTop, skinBottom, skinBody;

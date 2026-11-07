@@ -55,9 +55,14 @@ class Package {
 public:
     explicit Package(const std::filesystem::path& path);
     explicit Package(std::span<const std::uint8_t> bytes);
+    // A package whose index is already known. It holds no entries, and touches the file only when
+    // read with an entry from that index.
+    Package(const std::filesystem::path& path, std::uintmax_t fileSize);
 
     const Header& header() const { return header_; }
     const std::vector<IndexEntry>& entries() const { return entries_; }
+    // Lets go of the entries once something else holds them. Reading takes the entry it is given.
+    void forgetEntries() { std::vector<IndexEntry>{}.swap(entries_); }
     bool appleDouble() const { return appleDouble_; }
 
     std::vector<std::uint8_t> readRaw(const IndexEntry& entry);

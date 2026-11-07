@@ -1,5 +1,6 @@
 #include "scene/sims.hpp"
 
+#include "content/downloads.hpp"
 #include "content/animation_lists.hpp"
 #include "diag/log.hpp"
 #include "formats/dbpf.hpp"
@@ -140,9 +141,13 @@ std::optional<SimPart> readPart(Assets& assets, const sg::Link& set, std::uint32
     }
     SimPart part;
     part.part = kind;
+    if (links[resource].group != kLocalGroup) {
+        part.modelKey = links[resource];
+    }
     try {
         const auto tree = sg::parseResourceNode(*cres);
         part.model = tree.nodes.empty() ? std::string() : resourceName(tree.nodes[0].name, "_cres");
+        part.jointAdjusts = jointAdjusts(sg::parseDataLists(*cres));
     } catch (const std::exception& ex) {
         problems.push_back(ex.what());
         return std::nullopt;
@@ -197,6 +202,10 @@ SimLook simLook(Assets& assets, const AgeData& data, std::optional<std::uint32_t
     look.category = category.value_or(number(age, "activecat"));
     look.age = number(age, "age");
     look.gender = number(age, "gender");
+    look.species = number(age, "species");
+    if (look.species == 0) {
+        look.species = 1;
+    }
     if (const auto it = age.find("skincolor"); it != age.end()) {
         look.skinTone = it->second;
     }
@@ -349,6 +358,7 @@ BabyCatalog readBabyCatalog(const std::vector<std::filesystem::path>& skinPackag
             diag::warnOnce(std::string("skins: a package that can't be read is left out: ") + ex.what());
         }
     }
+    content::addDownloads(index);
     for (const auto& r : index.resources()) {
         if (r.entry.key.type != kPartProperties && r.entry.key.type != kTextureOverlay) {
             continue;

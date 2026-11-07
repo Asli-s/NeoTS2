@@ -1,8 +1,12 @@
 // Content found in the install: products, neighborhoods, UI data and lot lists.
 #include "test_support.hpp"
+#include "test_resources.hpp"
 
+#include "content/download_index.hpp"
+#include "content/downloads.hpp"
 #include "content/resource_index.hpp"
 #include "content/save_folder.hpp"
+#include "content/graphics_options.hpp"
 #include "content/user_props.hpp"
 #include "content/ui_queue.hpp"
 #include "formats/dbpf_writer.hpp"
@@ -124,6 +128,14 @@ void objectsStandOnTheirStoreyWhenGridsStartBelowTheGround() {
     floors.elements.assign(3 * 8, 0);
     lot.grids.emplace(ts2::content::kFloorGridInstance, floors);
     CHECK(ts2::content::groundGridLevel(lot) == 1);
+    // The top storey comes from the saved bounds, counted from the ground storey.
+    CHECK(ts2::content::topGridLevel(lot) == -1);
+    lot.worldBounds.emplace();
+    lot.worldBounds->maxLevel = 1;
+    CHECK(ts2::content::topGridLevel(lot) == 2);
+    lot.worldBounds->maxLevel = 2;  // past the grid in a broken save
+    CHECK(ts2::content::topGridLevel(lot) == -1);
+    lot.worldBounds.reset();
     const auto shadowIn = ts2::scene::lotshadow::fromLot(lot, {});
     CHECK(shadowIn.levels == 2 && shadowIn.corner(0, 0, 0) == 0.0f && shadowIn.corner(0, 0, 1) == 0.75f);
     // The lighting's view starts at the ground storey: no grid levels or walls below it.
@@ -302,6 +314,221 @@ void objectDaylightMatchesTheGame() {
         CHECK(near(sims.lights[0].color, {0.94f, 0.88f, 0.66f}) && near(sims.lights[1].color, {0.875f, 0.7875f, 0.6825f}));
         CHECK(near(sims.lights[2].color, {0.25f, 0.225f, 0.195f}) && near(sims.lights[3].color, {0.25f, 0.15f, 0.2f}));
     }
+}
+
+// Packages shared between indexes act as if each index had added them itself: the same resources in
+// the same order, the same overrides either way, and each index reading the files on its own.
+void sharedPackagesActLikeAddedOnes() {
+    namespace fs = std::filesystem;
+    using ts2::content::ResourceIndex;
+    const fs::path root = fs::temp_directory_path() / ("neots2-shared-test-" + std::to_string(std::random_device{}()));
+    fs::create_directories(root);
+    constexpr std::uint32_t kType = 0x53545223, kGroup = 0x7FA7DC7C, kOwnGroup = 0x12345;
+    auto write = [&](const char* name, std::vector<std::pair<std::pair<std::uint32_t, std::uint32_t>, std::uint8_t>> items) {
+        std::vector<testres::Resource> resources;
+        for (const auto& [where, mark] : items) {
+            resources.push_back({{kType, where.first, where.second, 0}, {mark}});
+        }
+        const auto bytes = testres::package(resources);
+        std::ofstream(root / name, std::ios::binary).write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        return root / name;
+    };
+    const fs::path base = write("base.package", {{{kGroup, 1}, 10}, {{kGroup, 2}, 11}, {{kGroup, 3}, 12}});
+    const fs::path modA = write("a.package", {{{kGroup, 2}, 20}, {{kGroup, 4}, 21}, {{0xFFFFFFFF, 5}, 22}});
+    const fs::path modB = write("b.package", {{{kGroup, 4}, 30}, {{kGroup, 6}, 31}});
+    const fs::path later = write("later.package", {{{kGroup, 6}, 40}, {{kGroup, 7}, 41}, {{kGroup, 2}, 42}});
+
+    auto mods = std::make_shared<ResourceIndex::SharedPackages>();
+    ResourceIndex added, shared, second;
+    added.addPackage(base);
+    shared.addPackage(base);
+    for (const fs::path& mod : {modA, modB}) {
+        const ts2::dbpf::Package file(mod);
+        added.addIndexed(mod, fs::file_size(mod), file.entries(), kOwnGroup);
+        mods->add(mod, fs::file_size(mod), file.entries(), kOwnGroup);
+    }
+    shared.addShared(mods);
+    second.addShared(mods);
+    added.addPackage(later);
+    shared.addPackage(later);
+
+    CHECK(shared.packageCount() == added.packageCount());
+    CHECK(shared.stats().entriesSeen == added.stats().entriesSeen && shared.stats().overridden == added.stats().overridden);
+    const auto& expected = added.resources();
+    const auto& got = shared.resources();
+    CHECK(expected.size() == 7 && got.size() == expected.size());
+    if (got.size() == expected.size()) {
+        for (std::size_t i = 0; i < got.size(); ++i) {
+            CHECK(got[i].entry.key == expected[i].entry.key);
+            CHECK(shared.read(got[i]) == added.read(expected[i]));
+            CHECK(shared.packagePath(got[i].package) == added.packagePath(expected[i].package));
+            const auto* found = shared.find(got[i].entry.key);
+            CHECK(found != nullptr && shared.read(*found) == shared.read(got[i]));
+        }
+    }
+    // Mods override what came before, and what comes after overrides them. A package's own resources
+    // take the group it was given.
+    const auto mark = [&](ResourceIndex& index, std::uint32_t group, std::uint32_t instance) {
+        const auto* found = index.find({kType, group, instance, 0});
+        return found != nullptr ? static_cast<int>(index.read(*found).at(0)) : -1;
+    };
+    CHECK(mark(shared, kGroup, 2) == 42 && mark(shared, kGroup, 4) == 30 && mark(shared, kGroup, 6) == 40 && mark(shared, kOwnGroup, 5) == 22);
+    CHECK(mark(shared, 0xFFFFFFFF, 5) == -1 && mark(shared, kGroup, 99) == -1);
+    // Another index taking the same packages doesn't see what the first added.
+    CHECK(mark(second, kGroup, 6) == 31 && mark(second, kGroup, 2) == 20 && mark(second, kGroup, 1) == -1 && second.resources().size() == 4);
+
+    // More packages than may stay open at once still read.
+    auto many = std::make_shared<ResourceIndex::SharedPackages>();
+    for (std::uint32_t i = 0; i < 40; ++i) {
+        const std::string name = "many" + std::to_string(i) + ".package";
+        const fs::path file = write(name.c_str(), {{{kGroup, 100 + i}, static_cast<std::uint8_t>(i)}});
+        const ts2::dbpf::Package read(file);
+        many->add(file, fs::file_size(file), read.entries(), kOwnGroup);
+    }
+    ResourceIndex wide;
+    wide.addShared(many);
+    bool all = true;
+    for (int round = 0; round < 2; ++round) {
+        for (std::uint32_t i = 0; i < 40; ++i) {
+            all = all && mark(wide, kGroup, 100 + i) == static_cast<int>(i);
+        }
+    }
+    CHECK(all);
+    std::error_code ignored;
+    wide = ResourceIndex{};
+    added = ResourceIndex{};
+    shared = ResourceIndex{};
+    second = ResourceIndex{};
+    fs::remove_all(root, ignored);
+}
+
+// A save folder's Downloads load as the game loads them: by name, files and folders together, the
+// last one winning, with their own resources filed under the group of their file name.
+void downloadsLoadInTheGamesOrder() {
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() / ("neots2-downloads-test-" + std::to_string(std::random_device{}()));
+    fs::path downloads = root / "Downloads";
+    constexpr std::uint32_t kType = 0x53545223, kUiText = 0x7FA7DC7C;
+    auto write = [&](const fs::path& relative, std::uint32_t group, std::uint8_t mark) {
+        fs::create_directories((downloads / relative).parent_path());
+        const auto bytes = testres::package({{{kType, group, 0x99, 0}, {mark}}});
+        std::ofstream(downloads / relative, std::ios::binary).write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    };
+    write("mmm_root.package", kUiText, 2);
+    write("AAA_folder/in_a.PACKAGE", kUiText, 1);
+    write("zzz_folder/deep/in_z.package", kUiText, 3);
+    write("Thumbnails/left_out.package", kUiText, 9);
+    write("skins.files/left_out.package", kUiText, 9);
+    write("skins.sgfiles/left_out.package", kUiText, 9);
+    fs::create_directories(downloads / "notes");
+    std::ofstream(downloads / "notes" / "readme.txt") << "not a package";
+
+    const auto packages = ts2::content::downloadPackages(root);
+    CHECK(packages.size() == 3);
+    if (packages.size() == 3) {
+        CHECK(packages[0].filename() == "in_a.PACKAGE" && packages[1].filename() == "mmm_root.package" && packages[2].filename() == "in_z.package");
+    }
+
+    ts2::content::useDownloads(packages);
+    ts2::content::ResourceIndex index;
+    CHECK(ts2::content::addDownloads(index) == 3);
+    const auto* found = index.find({kType, kUiText, 0x99, 0});
+    CHECK(found != nullptr && index.read(*found) == std::vector<std::uint8_t>{3});
+
+    // A package's own resources join the group its file name gives, whatever the letter case.
+    CHECK(ts2::content::packageNameGroup("Downloads/UIText.package") == kUiText);
+    CHECK(ts2::content::packageNameGroup("uitext.bundle.package") == kUiText);
+    write("uitext.package", 0xFFFFFFFF, 4);
+    ts2::content::useDownloads({downloads / "uitext.package"});
+    ts2::content::ResourceIndex own;
+    CHECK(ts2::content::addDownloads(own) == 1);
+    const auto* mine = own.find({kType, kUiText, 0x99, 0});
+    CHECK(mine != nullptr && own.read(*mine) == std::vector<std::uint8_t>{4});
+
+    // The game refuses a package with index minor version 0. It is left out, and the rest load.
+    auto refused = testres::package({{{kType, kUiText, 0x99, 0}, {5}}});
+    refused[60] = 0;
+    std::ofstream(downloads / "refused.package", std::ios::binary).write(reinterpret_cast<const char*>(refused.data()), static_cast<std::streamsize>(refused.size()));
+    ts2::content::useDownloads({downloads / "mmm_root.package", downloads / "refused.package"});
+    ts2::content::ResourceIndex rest;
+    CHECK(ts2::content::addDownloads(rest) == 1);
+    const auto* kept = rest.find({kType, kUiText, 0x99, 0});
+    CHECK(kept != nullptr && rest.read(*kept) == std::vector<std::uint8_t>{2});
+
+    CHECK(ts2::content::downloadPackages(root / "no such folder").empty());
+
+    // The game walks the whole save folder, leaving out these folder names at any depth.
+    {
+        const fs::path keptDownloads = downloads;
+        downloads = root / "whole";
+        write("Collections/set.package", kUiText, 6);
+        write("Downloads/mod.package", kUiText, 6);
+        write("Downloads/Lots/left_out.package", kUiText, 9);
+        write("Downloads/Characters/left_out.package", kUiText, 9);
+        write("LotCatalog/left_out.package", kUiText, 9);
+        write("Neighborhoods/N001/N001_Neighborhood.package", kUiText, 6);
+        write("Neighborhoods/N001/Characters/left_out.package", kUiText, 9);
+        write("Neighborhoods/N001/Lots/left_out.package", kUiText, 9);
+        write("Neighborhoods/N001/Thumbnails/left_out.package", kUiText, 9);
+        write("SavedSims/part.package", kUiText, 6);
+        const auto whole = ts2::content::downloadPackages(downloads);
+        CHECK(whole.size() == 4);
+        if (whole.size() == 4) {
+            CHECK(whole[0].filename() == "set.package" && whole[1].filename() == "mod.package" &&
+                  whole[2].filename() == "N001_Neighborhood.package" && whole[3].filename() == "part.package");
+        }
+        downloads = keptDownloads;
+    }
+
+    // A saved index gives the same result without reading a package again, and only a package
+    // that changed is read anew.
+    const fs::path indexFile = root / "data" / "downloads.index";
+    const fs::path other = root / "second";
+    downloads = other / "Downloads";
+    write("a.package", kUiText, 6);
+    write("b.package", kUiText, 7);
+    ts2::content::loadDownloads(other, indexFile);
+    ts2::content::ResourceIndex first;
+    CHECK(ts2::content::addDownloads(first) == 2 && fs::exists(indexFile));
+    // A file's own content is not looked at while its size and time match: this one is damaged.
+    const auto bTime = fs::last_write_time(downloads / "b.package");
+    const auto bSize = fs::file_size(downloads / "b.package");
+    {
+        std::ofstream broken(downloads / "b.package", std::ios::binary);
+        broken << std::string(static_cast<std::size_t>(bSize), 'x');
+    }
+    fs::last_write_time(downloads / "b.package", bTime);
+    ts2::content::loadDownloads(other, indexFile);
+    ts2::content::ResourceIndex second;
+    CHECK(ts2::content::addDownloads(second) == 2);
+    // Once its time changes it is read, refused and left out, and the saved index remembers.
+    fs::last_write_time(downloads / "b.package", bTime + std::chrono::hours(1));
+    ts2::content::loadDownloads(other, indexFile);
+    ts2::content::ResourceIndex third;
+    CHECK(ts2::content::addDownloads(third) == 1);
+    const auto* left = third.find({kType, kUiText, 0x99, 0});
+    CHECK(left != nullptr && third.read(*left) == std::vector<std::uint8_t>{6});
+
+    // A damaged saved index only means the packages are read again.
+    {
+        std::ofstream(indexFile, std::ios::binary | std::ios::trunc) << "NDLI damaged";
+    }
+    ts2::content::loadDownloads(other, indexFile);
+    ts2::content::ResourceIndex fourth;
+    CHECK(ts2::content::addDownloads(fourth) == 1);
+
+    const ts2::content::IndexedPackage saved{"folder/x.package", 100, -5, true, {{{1, 2, 3, 4}, 96, 4, true, 8}}};
+    const auto bytes = ts2::content::writeDownloadIndex(std::span(&saved, 1));
+    const auto back = ts2::content::readDownloadIndex(bytes);
+    CHECK(back.size() == 1 && back[0].path == saved.path && back[0].size == 100 && back[0].modified == -5 && back[0].usable);
+    CHECK(back.size() == 1 && back[0].entries.size() == 1 && back[0].entries[0].key == saved.entries[0].key && back[0].entries[0].compressed && back[0].entries[0].uncompressedSize == 8);
+    for (std::size_t cut = 0; cut < bytes.size(); ++cut) {
+        CHECK(ts2::content::readDownloadIndex(std::span(bytes).first(cut)).empty());
+    }
+
+    ts2::content::useDownloads({});
+    std::error_code ignored;
+    fs::remove_all(root, ignored);
 }
 
 void installedPacksAreFound() {
@@ -824,14 +1051,17 @@ void resourceIndexLeavesOutAppleDoubleSidecars() {
     std::filesystem::remove_all(root, error);
 }
 
-// A Sim whose character file carries no trees runs its own trees from the template person, as the
-// Greenmans' files do in the game. Other objects without trees get none.
-void simsWithoutTreesUseTheTemplatePersonsTrees() {
+// A Sim whose character file carries no trees runs the trees of the template it was made from
+// (OBJD 0x46-0x47), as the game does for people, pets and NPCs. TemplatePerson stands in when that
+// template has none. Other objects without trees get none.
+void simsWithoutTreesUseTheirTemplatesTrees() {
     const std::filesystem::path root = std::filesystem::temp_directory_path() / ("neots2-person-trees-" + std::to_string(std::random_device{}()));
     std::filesystem::create_directories(root);
     constexpr std::uint32_t kTemplate = 0x7FEDFE16, kSim = 0x7F1A1C8E, kChair = 0x7F000123;
-    const auto definition = [](std::uint32_t guid, std::uint16_t type) {
-        std::vector<std::uint8_t> bytes(64 + 2 * 0x40, 0);
+    constexpr std::uint32_t kDogTemplate = 0x7F593B25, kDog = 0x7F1A1C8F, kLoneSim = 0x7F1A1C90;
+    constexpr std::uint32_t kTemplatePersonGuid = 0x7FD96B54, kSmallDogGuid = 0x111D8FFF;
+    const auto definition = [](std::uint32_t guid, std::uint16_t type, std::uint32_t original) {
+        std::vector<std::uint8_t> bytes(64 + 2 * 0x48, 0);
         const auto set = [&](std::size_t field, std::uint16_t v) {
             bytes[64 + 2 * field] = static_cast<std::uint8_t>(v);
             bytes[64 + 2 * field + 1] = static_cast<std::uint8_t>(v >> 8);
@@ -839,6 +1069,8 @@ void simsWithoutTreesUseTheTemplatePersonsTrees() {
         set(ts2::objd::field::kType, type);
         set(ts2::objd::field::kGuid1, static_cast<std::uint16_t>(guid));
         set(ts2::objd::field::kGuid2, static_cast<std::uint16_t>(guid >> 16));
+        set(0x46, static_cast<std::uint16_t>(original));
+        set(0x47, static_cast<std::uint16_t>(original >> 16));
         return bytes;
     };
     std::vector<std::uint8_t> tree(64 + 12, 0);
@@ -847,10 +1079,14 @@ void simsWithoutTreesUseTheTemplatePersonsTrees() {
     {
         std::ofstream out(root / "objects.package", std::ios::binary);
         ts2::dbpf::PackageWriter writer(out);
-        writer.add({ts2::types::kObjectDefinition, kTemplate, 0x80, 0}, definition(0x7FD96B54, 2), false, 0);
+        writer.add({ts2::types::kObjectDefinition, kTemplate, 0x80, 0}, definition(kTemplatePersonGuid, 16, 0), false, 0);
         writer.add({ts2::types::kBehavior, kTemplate, 0x1000, 0}, tree, false, 0);
-        writer.add({ts2::types::kObjectDefinition, kSim, 0x80, 0}, definition(0xB263764F, 2), false, 0);
-        writer.add({ts2::types::kObjectDefinition, kChair, 0x80, 0}, definition(0x12345678, 4), false, 0);
+        writer.add({ts2::types::kObjectDefinition, kDogTemplate, 0x80, 0}, definition(kSmallDogGuid, 16, 0), false, 0);
+        writer.add({ts2::types::kBehavior, kDogTemplate, 0x1002, 0}, tree, false, 0);
+        writer.add({ts2::types::kObjectDefinition, kSim, 0x80, 0}, definition(0xB263764F, 2, kTemplatePersonGuid), false, 0);
+        writer.add({ts2::types::kObjectDefinition, kDog, 0x80, 0}, definition(0x17DDADE2, 2, kSmallDogGuid), false, 0);
+        writer.add({ts2::types::kObjectDefinition, kLoneSim, 0x80, 0}, definition(0x17DDADE3, 2, 0x12340000), false, 0);
+        writer.add({ts2::types::kObjectDefinition, kChair, 0x80, 0}, definition(0x12345678, 4, 0), false, 0);
         writer.finish(0);
     }
     {
@@ -858,6 +1094,10 @@ void simsWithoutTreesUseTheTemplatePersonsTrees() {
         CHECK(index.addPackage(root / "objects.package"));
         ts2::sim::IndexCodeSource code(index);
         CHECK(code.behavior(kSim, 0x1000) != nullptr);
+        CHECK(code.behavior(kSim, 0x1002) == nullptr);
+        CHECK(code.behavior(kDog, 0x1002) != nullptr);
+        CHECK(code.behavior(kDog, 0x1000) == nullptr);
+        CHECK(code.behavior(kLoneSim, 0x1000) != nullptr);
         CHECK(code.behavior(kChair, 0x1000) == nullptr);
         CHECK(code.behavior(kSim, 0x1001) == nullptr);
     }
@@ -1135,6 +1375,29 @@ void thumbnailPicturesAreScaledAndMasked() {
     const auto straight = ts2::content::unpremultiplied(ts2::tga::Pixels{2, 1, {50, 25, 0, 128, 7, 7, 7, 0}});
     CHECK(straight.rgba == (std::vector<std::uint8_t>{100, 50, 0, 128, 7, 7, 7, 0}));
     CHECK(ts2::content::masked(two, ts2::tga::Pixels{1, 1, {0, 0, 0, 0}}).rgba == two.rgba);  // sizes differ: as it is
+    const auto faded = ts2::content::fadedToShape(ts2::tga::Pixels{3, 1, {10, 20, 30, 255, 100, 200, 51, 255, 10, 20, 30, 255}},
+                                                  ts2::tga::Pixels{3, 1, {0, 0, 0, 255, 0, 0, 0, 128, 0, 0, 0, 0}});
+    CHECK(faded.rgba == (std::vector<std::uint8_t>{10, 20, 30, 255, 50, 100, 25, 128, 0, 0, 0, 0}));
+    CHECK(ts2::content::fadedToShape(two, ts2::tga::Pixels{1, 1, {0, 0, 0, 0}}).rgba == two.rgba);
+    // A want's badge covers the bottom right corner of its picture, by its alpha.
+    const ts2::tga::Pixels wantBase{100, 100, std::vector<std::uint8_t>(100 * 100 * 4, 200)};
+    const ts2::tga::Pixels wantBadge{1, 1, {10, 20, 30, 255}};
+    const auto wanted = ts2::content::wantBalloonPicture(wantBase, wantBadge, 100);
+    CHECK(wanted.rgba[(38 * 100 + 38) * 4] == 200 && wanted.rgba[(38 * 100 + 38) * 4 + 3] == 200);
+    CHECK(wanted.rgba[(39 * 100 + 38) * 4] == 200);
+    CHECK(wanted.rgba[(39 * 100 + 39) * 4] == 10 && wanted.rgba[(99 * 100 + 99) * 4 + 3] == 255);
+    const auto wantedAlone = ts2::content::wantBalloonPicture(ts2::tga::Pixels{}, ts2::tga::Pixels{}, 8);
+    CHECK(wantedAlone.width == 8 && wantedAlone.rgba[3] == 0);
+    // A score's text sits at the left, centred in height, on a clear white square.
+    const auto score = ts2::content::headlineTextPicture(ts2::tga::Pixels{1, 2, {9, 9, 9, 200, 9, 9, 9, 100}}, 2);
+    const auto scoreAt = [&](std::size_t x, std::size_t y, std::size_t channel) { return score.rgba[(y * 256 + x) * 4 + channel]; };
+    CHECK(score.width == 256 && score.height == 256);
+    CHECK(scoreAt(0, 127, 3) == 200 && scoreAt(0, 128, 3) == 100 && scoreAt(0, 127, 0) == 255);
+    CHECK(scoreAt(0, 126, 3) == 0 && scoreAt(1, 127, 3) == 0 && scoreAt(1, 127, 1) == 255);
+    const ts2::tga::Pixels wide{512, 1, std::vector<std::uint8_t>(512 * 4, 255)};
+    const auto shrunk = ts2::content::headlineTextPicture(wide, 2);
+    CHECK(shrunk.width == 256 && shrunk.rgba[(127 * 256 + 255) * 4 + 3] != 0);
+    CHECK(ts2::content::headlineTextPicture(ts2::tga::Pixels{}, 70).width == 256);
 }
 
 void numbersAreReadWholeOrFromTheStart() {
@@ -1166,12 +1429,120 @@ void userOptionsAreReadAsTheGameSavesThem() {
     CHECK(ts2::content::readUserProps("no such folder").values.empty());
 }
 
+void neoTs2SettingsKeepToTheirOwnFile() {
+    const auto folder = std::filesystem::temp_directory_path() / "neots2-props-test";
+    std::error_code error;
+    std::filesystem::remove_all(folder, error);
+    CHECK(ts2::content::saveNeoProps(folder, {{"fullscreen", {"true", true}}, {"frameLimit", {"60", false}}}));
+    const auto own = ts2::content::readNeoProps(folder);
+    CHECK(own.flag("fullscreen") == true && own.values.at("frameLimit") == "60");
+    // A later change edits the one setting in place, and the game's file isn't touched.
+    CHECK(ts2::content::saveNeoProps(folder, {{"frameLimit", {"30", false}}}));
+    const auto changed = ts2::content::readNeoProps(folder);
+    CHECK(changed.flag("fullscreen") == true && changed.values.at("frameLimit") == "30");
+    CHECK(!std::filesystem::exists(folder / "Config" / "userProps.xml"));
+    std::filesystem::remove_all(folder, error);
+}
+
+void graphicsOptionButtonsPickTheGamesSettings() {
+    using ts2::content::buttonForSetting;
+    using ts2::content::GraphicsGroup;
+    const auto group = [](std::string_view option) -> const GraphicsGroup& {
+        return *std::find_if(std::begin(ts2::content::kGraphicsGroups), std::end(ts2::content::kGraphicsGroups),
+                             [&](const GraphicsGroup& g) { return g.option == option; });
+    };
+    CHECK(buttonForSetting(group("Shadows"), 1) == 0x91u && buttonForSetting(group("Shadows"), 3) == 0x93u);
+    // Sim/Object Detail's Low is the rules' Medium, and UI Transparency On is OpaqueUI Off.
+    CHECK(buttonForSetting(group("ObjectDetail"), 2) == 0x61u);
+    CHECK(buttonForSetting(group("OpaqueUI"), 0) == 0x22u && buttonForSetting(group("OpaqueUI"), 1) == 0x21u);
+    // A number from a broken file shows no button.
+    CHECK(buttonForSetting(group("Shadows"), 9) == 0u && buttonForSetting(group("Reflection"), -1) == 0u);
+    // A saved Smooth Edges choice is a level, or off.
+    using ts2::content::savedSmoothEdges;
+    CHECK(savedSmoothEdges("1") == 1 && savedSmoothEdges("2") == 2 && savedSmoothEdges("4") == 4 && savedSmoothEdges("8") == 8);
+    using ts2::content::savedAmbientOcclusion;
+    CHECK(savedAmbientOcclusion("0") == 0 && savedAmbientOcclusion("3") == 3);
+    CHECK(savedAmbientOcclusion("4") == 0 && savedAmbientOcclusion("-1") == 0 && savedAmbientOcclusion("x") == 0 && savedAmbientOcclusion("") == 0);
+    CHECK(savedSmoothEdges("3") == 1 && savedSmoothEdges("16") == 1 && savedSmoothEdges("-4") == 1 && savedSmoothEdges("4x") == 1 && savedSmoothEdges("") == 1);
+}
+
+void optionCaptionsAreReadAsTheGameReadsThem() {
+    using Kind = ts2::content::OptionControl::Kind;
+    // Captions as the Game Options panel writes them.
+    const auto edge = ts2::content::parseOptionCaption("radio:edgeScrolling:bool:0:1");
+    CHECK(edge && edge->kind == Kind::Radio && edge->isBool && edge->savedKey() == "edgeScrolling");
+    CHECK(edge->savedValue(1) == "false" && edge->savedValue(2) == "true" && edge->savedValue(3).empty());
+    CHECK(edge->buttonFor("true") == 2u && edge->buttonFor("false") == 1u && !edge->buttonFor("1"));
+    const auto skirt = ts2::content::parseOptionCaption("radioOption:LotSkirtSizeIncrease:int:0:1:2:3");
+    CHECK(skirt && skirt->kind == Kind::RadioOption && skirt->savedKey() == "optionLotSkirtSizeIncrease");
+    CHECK(skirt->savedValue(4) == "3" && skirt->buttonFor("2") == 3u);
+    const auto neighbors = ts2::content::parseOptionCaption("radioOption:EnableLotImpostersInLot:bool:0:1");
+    CHECK(neighbors && neighbors->savedValue(2) == "1" && neighbors->buttonFor("1") == 2u);
+    const auto fade = ts2::content::parseOptionCaption("radio:neighborhoodPropFadeDistance:int:0:25:50:100:500");
+    CHECK(fade && !fade->isBool && fade->buttonFor("50") == 3u && fade->savedValue(5) == "500" && !fade->buttonFor("x"));
+    // Other captions, and ones that could put markup into the saved file, are left out.
+    CHECK(!ts2::content::parseOptionCaption("Lot View Options") && !ts2::content::parseOptionCaption("radio:a:bool"));
+    CHECK(!ts2::content::parseOptionCaption("check:a:bool:0:1") && !ts2::content::parseOptionCaption("radio:a:float:0:1"));
+    CHECK(!ts2::content::parseOptionCaption("radio:a\"b:bool:0:1") && !ts2::content::parseOptionCaption("radio:a:int:0:<x>"));
+    CHECK(!ts2::content::parseOptionCaption("radio:a:int:0:1:2:3:4:5:6:7:8:9:10:11:12:13:14:15:16"));
+}
+
+void graphicsRulesOptionsGiveTheirSettingsProps() {
+    // Laid out as the game's Graphics Rules.sgr writes them.
+    const std::string_view rules = "seti Off 0\nseti On  1\n"
+                                   "option EnableLotImpostersInLot\n        setting $On\n                boolProp enableLotImpostersInLot true\n"
+                                   "        setting $Off\n                boolProp enableLotImpostersInLot false\nend\n\n"
+                                   "option LotSkirtSizeIncrease\n        setting 0\n                uintProp lotSkirtSizeIncrease 5   # small\n"
+                                   "        setting 1\n                uintProp lotSkirtSizeIncrease 9\nend\n";
+    CHECK(ts2::content::graphicsOptionProps(rules, "LotSkirtSizeIncrease", 0).at("lotSkirtSizeIncrease") == "5");
+    CHECK(ts2::content::graphicsOptionProps(rules, "LotSkirtSizeIncrease", 1).at("lotSkirtSizeIncrease") == "9");
+    CHECK(ts2::content::graphicsOptionProps(rules, "EnableLotImpostersInLot", 0).at("enableLotImpostersInLot") == "false");
+    CHECK(ts2::content::graphicsOptionProps(rules, "LotSkirtSizeIncrease", 7).empty());
+    CHECK(ts2::content::graphicsOptionProps(rules, "Missing", 0).empty());
+    ts2::content::UserProps saved;
+    CHECK(!ts2::content::savedOptionProp(saved, rules, "LotSkirtSizeIncrease", "lotSkirtSizeIncrease"));
+    saved.values["optionLotSkirtSizeIncrease"] = "1";
+    saved.values["optionEnableLotImpostersInLot"] = "99999999999999999999";
+    CHECK(ts2::content::savedOptionProp(saved, rules, "LotSkirtSizeIncrease", "lotSkirtSizeIncrease") == "9");
+    CHECK(!ts2::content::savedOptionProp(saved, rules, "EnableLotImpostersInLot", "enableLotImpostersInLot"));
+}
+
+void userOptionsAreSavedKeepingTheRestOfTheFile() {
+    std::string xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<cGZPropertySetString>\r\n"
+                      "  <AnyBoolean key=\"edgeScrolling\" type=\"0xcba908e1\">true</AnyBoolean>\r\n"
+                      "  <AnyStringSet key=\"visitedNeighborhoods\" type=\"0xad9a861e\">\r\n    <Element>N001_Neighborhood</Element>\r\n  </AnyStringSet>\r\n"
+                      "  <AnyUint32 key=\"optionLotSkirtSizeIncrease\" type=\"0xeb61e4f7\">0</AnyUint32>\r\n</cGZPropertySetString>\r\n";
+    const std::string before = xml;
+    CHECK(ts2::content::setUserProp(xml, "edgeScrolling", "false", true));
+    CHECK(ts2::content::setUserProp(xml, "optionLotSkirtSizeIncrease", "2", false));
+    CHECK(ts2::content::setUserProp(xml, "rotateCameraSims1Mode", "true", true));
+    auto expected = before;
+    expected.replace(expected.find(">true<") + 1, 4, "false");
+    expected.replace(expected.find(">0</AnyUint32>") + 1, 1, "2");
+    expected.insert(expected.rfind("</cGZ"), "  <AnyBoolean key=\"rotateCameraSims1Mode\" type=\"0xcba908e1\">true</AnyBoolean>\r\n");
+    CHECK(xml == expected);
+    const auto props = ts2::content::parseUserProps(xml);
+    CHECK(props.flag("edgeScrolling") == false && props.flag("rotateCameraSims1Mode") == true);
+    CHECK(props.values.at("optionLotSkirtSizeIncrease") == "2");
+    // Nothing that isn't a plain word goes in, and a file without its list is left alone.
+    CHECK(!ts2::content::setUserProp(xml, "edgeScrolling", "<x>", true) && !ts2::content::setUserProp(xml, "a b", "1", false));
+    std::string broken = "<cGZPropertySetString>";
+    CHECK(!ts2::content::setUserProp(broken, "a", "1", false) && broken == "<cGZPropertySetString>");
+}
+
 } // namespace
 
 std::vector<Test> contentTests() {
     return {
         {"Animate Sim uses its age's list", animateSimUsesItsAgesList},
+        {"option captions are read as the game reads them", optionCaptionsAreReadAsTheGameReadsThem},
+        {"graphics option buttons pick the game settings", graphicsOptionButtonsPickTheGamesSettings},
+        {"NeoTS2 settings keep to their own file", neoTs2SettingsKeepToTheirOwnFile},
+        {"user options are saved keeping the rest of the file", userOptionsAreSavedKeepingTheRestOfTheFile},
+        {"Graphics Rules options give their settings' properties", graphicsRulesOptionsGiveTheirSettingsProps},
         {"Installed packs are found", installedPacksAreFound},
+        {"Downloads load in the game's order", downloadsLoadInTheGamesOrder},
+        {"Shared packages act like added ones", sharedPackagesActLikeAddedOnes},
         {"Objects' daylight matches the game", objectDaylightMatchesTheGame},
         {"Light files are read as the game reads them", lightFilesAreReadAsTheGame},
         {"objects stand on their storey when grids start below the ground", objectsStandOnTheirStoreyWhenGridsStartBelowTheGround},
@@ -1179,7 +1550,7 @@ std::vector<Test> contentTests() {
         {"lot number comes from the package name", lotNumberComesFromThePackageName},
         {"character files leave out AppleDouble sidecars", characterFilesIgnoreAppleDoubleSidecars},
         {"a resource index leaves out AppleDouble sidecars", resourceIndexLeavesOutAppleDoubleSidecars},
-        {"Sims without trees use the template person's", simsWithoutTreesUseTheTemplatePersonsTrees},
+        {"Sims without trees use their template's", simsWithoutTreesUseTheirTemplatesTrees},
         {"portrait image is the life stage flag", portraitImageIsTheLifeStageFlag},
         {"needs bar rows match the game", needsBarRowsMatchTheGame},
         {"mood rows match the game", moodRowsMatchTheGame},

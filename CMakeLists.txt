@@ -232,6 +232,8 @@ add_library(ts2content
     src/content/wants.cpp
     src/content/scripts.cpp
     src/content/resource_index.cpp
+    src/content/downloads.cpp
+    src/content/download_index.cpp
     src/content/ui_data.cpp
     src/content/ui_meters.cpp
     src/content/ui_queue.cpp
@@ -321,6 +323,7 @@ add_library(ts2scene
     src/scene/imposters.cpp
     src/scene/lot_skirt.cpp
     src/scene/pool_water.cpp
+    src/scene/prop_fade.cpp
     src/scene/terrain_water.cpp
     src/scene/object_sun.cpp
     src/scene/pick.cpp
@@ -348,6 +351,11 @@ add_library(ts2scene
     src/scene/ground_decal.cpp
     src/scene/neighborhood_decals.cpp
     src/scene/neighborhood_plumbobs.cpp
+    src/scene/effect_player.cpp
+    src/scene/meta_particles.cpp
+    src/scene/object_effects.cpp
+    src/scene/particle_emitter.cpp
+    src/scene/particle_quads.cpp
     src/scene/neighborhood_paint.cpp
     src/scene/neighborhood_lighting.cpp
     src/scene/floor_light.cpp
@@ -388,6 +396,8 @@ if(NEOTS2_FUZZ)
     # Engine code that is not a file reader but takes values from lots and objects.
     add_executable(ground_decal_fuzz fuzz/ground_decal_fuzz.cpp src/scene/ground_decal.cpp)
     target_link_libraries(ground_decal_fuzz PRIVATE ts2formats project_warnings)
+    add_executable(download_index_fuzz fuzz/download_index_fuzz.cpp src/content/download_index.cpp)
+    target_link_libraries(download_index_fuzz PRIVATE ts2formats project_warnings)
     add_executable(hood_drift_fuzz fuzz/hood_drift_fuzz.cpp src/scene/hood_drift.cpp)
     target_link_libraries(hood_drift_fuzz PRIVATE ts2formats project_warnings)
     add_executable(floorlight_fuzz fuzz/floorlight_fuzz.cpp src/scene/floor_light.cpp)
@@ -583,9 +593,9 @@ else()
         set(shader_dir ${CMAKE_CURRENT_BINARY_DIR}/shaders)
         set(shader_outputs)
         # The shaders the OpenGL 2 renderer draws with (skinned ones are posed on the CPU there).
-        set(gl2_shaders scene.vert scene.frag ui.vert ui.frag terrain.vert terrain.frag sky.vert sky.frag road.vert road.frag imposter.vert imposter.frag clip.vert clip.frag water.vert water.frag)
+        set(gl2_shaders scene.vert scene.frag ui.vert ui.frag particle.vert particle.frag terrain.vert terrain.frag sky.vert sky.frag road.vert road.frag imposter.vert imposter.frag clip.vert clip.frag water.vert water.frag)
         if(sdlgpu_enabled)
-        foreach(shader scene.vert skinned.vert scene.frag ui.vert ui.frag terrain.vert terrain.frag sky.vert sky.frag water.vert water.frag pool.vert pool.frag pond.vert pond.frag caustics.frag pool_shadow.frag road.vert road.frag imposter.vert imposter.frag clip.vert clip.frag shadow_caster.frag shadow_blur.frag object_blur.frag)
+        foreach(shader ao_depth.frag ao.frag ao_blur.frag scene.vert skinned.vert scene.frag ui.vert ui.frag particle.vert particle.frag terrain.vert terrain.frag sky.vert sky.frag water.vert water.frag pool.vert pool.frag sea.vert sea.frag pond.vert pond.frag caustics.frag pool_shadow.frag road.vert road.frag imposter.vert imposter.frag clip.vert clip.frag shadow_caster.frag shadow_blur.frag object_blur.frag)
             if(shader MATCHES "vert$")
                 set(profile vs_6_0)
             else()
@@ -685,7 +695,7 @@ else()
         target_link_libraries(ts2render PUBLIC ts2renderplan ts2platform PRIVATE project_warnings)
         if(sdlgpu_enabled)
             target_sources(ts2render PRIVATE src/render/renderer.cpp src/render/renderer_pipelines.cpp src/render/renderer_scene.cpp
-                           src/render/renderer_upload.cpp src/render/renderer_draw.cpp src/render/renderer_object_shadows.cpp)
+                           src/render/renderer_upload.cpp src/render/renderer_draw.cpp src/render/renderer_object_shadows.cpp src/render/renderer_occlusion.cpp)
             target_link_libraries(ts2render PUBLIC SDL3::SDL3)
             target_compile_definitions(ts2render PUBLIC NEOTS2_SDLGPU=1)
         endif()
@@ -713,7 +723,7 @@ else()
         target_link_libraries(vm_tests PRIVATE ts2ui)
         target_compile_definitions(vm_tests PRIVATE NEOTS2_TEXT_LAYOUT_TESTS)
 
-        add_executable(neots2 app/main.cpp app/menu.cpp app/neighborhood.cpp app/neighborhood_ui.cpp app/lot_life.cpp app/pose_numbers.cpp app/object_materials.cpp app/sim_loader.cpp app/lot_light.cpp app/lot_daylight.cpp app/route_sources.cpp app/lot_ui.cpp app/live_panel.cpp app/job_panel.cpp app/memories_page.cpp app/age_meter.cpp app/queue_panel.cpp app/pie_menu_ui.cpp app/mood_meter.cpp app/aspiration_bars.cpp app/pause_frame.cpp app/baby_name_dialog.cpp app/cheat_console.cpp app/needs_panel.cpp app/personality_page.cpp app/relationships_panel.cpp app/rewards_panel.cpp app/simology_panel.cpp app/interests_page.cpp app/hobbies_page.cpp app/chemistry_page.cpp app/meter_bar.cpp app/skewer.cpp app/wants_panel.cpp app/portraits.cpp app/cursors.cpp
+        add_executable(neots2 app/main.cpp app/menu.cpp app/neighborhood.cpp app/neighborhood_ui.cpp app/lot_life.cpp app/pose_numbers.cpp app/object_materials.cpp app/sim_loader.cpp app/lot_light.cpp app/lot_daylight.cpp app/route_sources.cpp app/lot_ui.cpp app/game_options_panel.cpp app/graphics_options_panel.cpp app/options_list.cpp app/live_panel.cpp app/job_panel.cpp app/memories_page.cpp app/age_meter.cpp app/queue_panel.cpp app/pie_menu_ui.cpp app/mood_meter.cpp app/aspiration_bars.cpp app/pause_frame.cpp app/baby_name_dialog.cpp app/cheat_console.cpp app/needs_panel.cpp app/personality_page.cpp app/relationships_panel.cpp app/rewards_panel.cpp app/simology_panel.cpp app/interests_page.cpp app/hobbies_page.cpp app/chemistry_page.cpp app/meter_bar.cpp app/skewer.cpp app/wants_panel.cpp app/portraits.cpp app/cursors.cpp
                        app/diagnostics.cpp app/crash_handler.cpp app/crash_dialog.cpp app/unexpected_exit.cpp app/report_upload.cpp app/message_box.cpp app/open_renderer.cpp)
         target_link_libraries(neots2 PRIVATE ts2render ts2ui ts2sim ts2diag project_warnings)
         add_dependencies(neots2 neots2_version)

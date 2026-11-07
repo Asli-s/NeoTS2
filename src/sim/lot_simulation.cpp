@@ -1,4 +1,6 @@
 #include "sim/lot_simulation.hpp"
+
+#include "content/downloads.hpp"
 #include "sim/forget_object.hpp"
 #include "sim/linked_interactions.hpp"
 #include "sim/object_model.hpp"
@@ -54,12 +56,13 @@ constexpr std::size_t kMaxStepsPerRun = 100000;
 constexpr std::size_t kMaxLoggedStops = 32;
 constexpr std::size_t kMaxLoggedStarts = 5000;  // a long play session's worth. The log file has its own cap too
 
-// The install's object packages and the lot's neighborhood's character files.
+// The install's object packages, the save folder's Downloads and the lot's neighborhood's character files.
 content::ResourceIndex loadCode(const std::filesystem::path& install, const std::filesystem::path& lot) {
     content::ResourceIndex index;
     for (const auto& path : content::objectLoadOrder(content::findProducts(install))) {
         index.addPackage(path);
     }
+    content::addDownloads(index);
     content::addCharacters(index, content::neighborhoodOfLot(lot));
     return index;
 }
@@ -210,7 +213,7 @@ LotSimulation::LotSimulation(const std::filesystem::path& install, const std::fi
         }
         if (const auto number = content::lotNumber(lot); number && loaded.lotShapes.contains(*number)) {
             const auto& shape = loaded.lotShapes.at(*number);
-            world_.setLotShape({static_cast<float>(shape.width), static_cast<float>(shape.depth), shape.beachSide});
+            world_.setLotShape({shape.beachSide});
         }
         world_.weather() = loaded.weather.value_or(weather::Weather{});
         findCharacterFiles();

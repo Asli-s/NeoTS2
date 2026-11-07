@@ -1,5 +1,6 @@
 #include "scene/outfit_catalog.hpp"
 
+#include "content/downloads.hpp"
 #include "content/resource_index.hpp"
 #include "diag/log.hpp"
 #include "formats/propset.hpp"
@@ -119,6 +120,7 @@ OutfitCatalog readOutfitCatalog(const std::vector<std::filesystem::path>& packag
             diag::warnOnce(std::string("skin catalog: a package that can't be read is left out: ") + ex.what());
         }
     }
+    content::addDownloads(index);
     OutfitCatalog catalog;
     const auto listOf = [&](std::uint32_t type) -> std::vector<CatalogPart>* {
         switch (type) {

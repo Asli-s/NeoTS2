@@ -37,6 +37,8 @@ Package::Package(std::span<const std::uint8_t> bytes)
     load();
 }
 
+Package::Package(const std::filesystem::path& path, std::uintmax_t fileSize) : path_(path), fileSize_(fileSize) {}
+
 void Package::close() {
     if (!path_.empty()) {
         stream_.reset();
@@ -112,6 +114,12 @@ void Package::readHeader() {
     }
     if (header_.indexMajorVersion != 7) {
         fail("unsupported index version " + std::to_string(header_.indexMajorVersion));
+    }
+    // The game treats a version 1.0 file's index as minor 1, and refuses a later file with minor 0.
+    if (header_.minorVersion == 0) {
+        header_.indexMinorVersion = 1;
+    } else if (header_.indexMinorVersion == 0) {
+        fail("index minor version 0: the game refuses this package");
     }
 }
 

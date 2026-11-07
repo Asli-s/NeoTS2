@@ -33,8 +33,9 @@ public:
     explicit Assets(const std::filesystem::path& install);
 
     // A scenegraph resource by name (e.g. "fridgeCheap_cres") or by a link from another resource.
-    // A name may name its group ("#0x7f93b1db!age3_0_gmdc"). While a character file is in use, its
-    // own resources are found too: by name, and by links into the file (group 0xFFFFFFFF).
+    // A name may name its group ("#0x7f93b1db!age3_0_gmdc", or with "##" as custom content writes it).
+    // While a character file is in use, its own resources are found too: by name, and by links into
+    // the file (group 0xFFFFFFFF).
     [[nodiscard]] std::optional<std::vector<std::uint8_t>> byName(std::uint32_t type, const std::string& name);
     [[nodiscard]] std::optional<std::vector<std::uint8_t>> byKey(const scenegraph::Link& link);
 
@@ -155,6 +156,8 @@ private:
     std::optional<std::uint32_t> characterGroup_;  // the object group in use as a character
     std::set<std::filesystem::path> added_;
     std::vector<std::string> materialNames_;
+    // Adds the save folder's Downloads over the install's objects, models and catalog.
+    void addDownloads();
     content::BuildScripts scripts_;
     content::Lighting lighting_;
     terrainwater::AlphaCurve waterAlphaCurve_;

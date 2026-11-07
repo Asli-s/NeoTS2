@@ -126,19 +126,28 @@ inline std::vector<std::uint8_t> material(const std::string& name, const std::st
     return b.out;
 }
 
+// One morph stream of a test mesh: a position delta per vertex (three floats), its target indices
+// (four bytes per vertex) and the morph pairs (blend group, name) they pick from.
+struct MeshMorph {
+    std::vector<float> positionDeltas;
+    std::vector<std::uint8_t> indices;
+    std::vector<std::pair<std::string, std::string>> pairs;
+};
+
 // A mesh (GMDC, version 4) of one triangle-list group: positions (three floats per vertex), and
-// texture coordinates (two per vertex) when given.
+// texture coordinates (two per vertex) when given, and a morph stream when given.
 inline std::vector<std::uint8_t> mesh(const std::string& name, const std::string& group, const std::vector<float>& positions,
-                                      const std::vector<float>& uvs, const std::vector<std::uint16_t>& indices) {
+                                      const std::vector<float>& uvs, const std::vector<std::uint16_t>& indices,
+                                      const MeshMorph* morph = nullptr) {
     Bytes b;
     container(b, {}, {kGmdc});
     blockHeader(b, "cGeometryDataContainer", 4);
     sgResource(b, name);
     const std::uint32_t vertices = static_cast<std::uint32_t>(positions.size() / 3);
-    auto element = [&](std::uint32_t identity, std::uint32_t blockFormat, const std::vector<float>& values) {
+    auto element = [&](std::uint32_t identity, std::uint32_t blockFormat, const std::vector<float>& values, std::uint32_t stream = 1) {
         b.u32(vertices);
         b.u32(identity);
-        b.u32(1);  // repetition
+        b.u32(stream);
         b.u32(blockFormat);
         b.u32(0);
         b.u32(static_cast<std::uint32_t>(values.size() * 4));
@@ -148,19 +157,32 @@ inline std::vector<std::uint8_t> mesh(const std::string& name, const std::string
         b.u32(0);  // its index list
     };
     const bool withUvs = !uvs.empty();
-    b.u32(withUvs ? 2 : 1);
+    const std::uint32_t elements = (withUvs ? 2 : 1) + (morph != nullptr ? 2 : 0);
+    b.u32(elements);
     element(ts2::scenegraph::kPositions, 2, positions);
     if (withUvs) {
         element(ts2::scenegraph::kTextureCoordinates, 1, uvs);
     }
+    if (morph != nullptr) {
+        element(ts2::scenegraph::kPositionDeltas, 2, morph->positionDeltas, 0);
+        b.u32(vertices);
+        b.u32(ts2::scenegraph::kMorphIndices);
+        b.u32(0);
+        b.u32(4);
+        b.u32(0);
+        b.u32(static_cast<std::uint32_t>(morph->indices.size()));
+        for (const auto i : morph->indices) {
+            b.u8(i);
+        }
+        b.u32(0);
+    }
     b.u32(1);  // links
-    b.u32(withUvs ? 2 : 1);
-    b.u16(0);
-    if (withUvs) {
-        b.u16(1);
+    b.u32(elements);
+    for (std::uint32_t e = 0; e < elements; ++e) {
+        b.u16(static_cast<std::uint16_t>(e));
     }
     b.u32(vertices);
-    b.u32(withUvs ? 2 : 1);
+    b.u32(elements);
     for (int alias = 0; alias < 3; ++alias) {
         b.u32(0);
     }
@@ -175,6 +197,13 @@ inline std::vector<std::uint8_t> mesh(const std::string& name, const std::string
     b.u32(0xFFFFFFFF);  // opacity
     b.u32(0);           // bones
     b.u32(0);           // inverse binds
+    if (morph != nullptr) {
+        b.u32(static_cast<std::uint32_t>(morph->pairs.size()));
+        for (const auto& [blendGroup, morphName] : morph->pairs) {
+            b.text(blendGroup);
+            b.text(morphName);
+        }
+    }
     return b.out;
 }
 

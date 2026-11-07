@@ -1,5 +1,6 @@
 #include "scene/assets.hpp"
 
+#include "content/downloads.hpp"
 #include "content/install.hpp"
 #include "content/neighborhood.hpp"
 #include "diag/log.hpp"
@@ -101,16 +102,39 @@ Assets::Assets(const fs::path& install) : scripts_(content::loadBuildScripts(con
             }
         }
     }
+    addDownloads();
     readCatalog();
 }
 
+void Assets::addDownloads() {
+    content::addDownloads(objects_);
+    content::addDownloads(catalog_);
+    const std::size_t firstMod = models_.packageCount();
+    content::addDownloads(models_);
+    for (const auto& r : models_.resources()) {
+        if (r.package >= firstMod && r.entry.key.type == types::kNameMap && r.entry.key.instance == kTxmt) {
+            try {
+                for (auto& n : namemap::parse(models_.read(r))) {
+                    materialNames_.push_back(std::move(n.name));
+                }
+            } catch (const std::exception& ex) {
+                diag::warnOnce(std::string("downloads: a name map that can't be read is left out: ") + ex.what());
+            }
+        }
+    }
+}
+
 std::optional<std::vector<std::uint8_t>> Assets::byName(std::uint32_t type, const std::string& name) {
-    if (name.size() > 12 && name.starts_with("#0x") && name[11] == '!') {
-        const auto group = number(name.substr(3, 8), 16);
+    // A group named as "#0x...!" or "##0x...!", the form most custom content uses. What follows the
+    // first '!' is the name, even when it names another group itself.
+    const std::size_t digits = name.starts_with("##0x") ? 4 : name.starts_with("#0x") ? 3 : 0;
+    const std::size_t mark = digits > 0 ? name.find('!', digits) : std::string::npos;
+    if (mark != std::string::npos) {
+        const auto group = number(name.substr(digits, mark - digits), 16);
         if (!group) {
             return std::nullopt;
         }
-        const auto key = hash::scenegraphKey(name.substr(12));
+        const auto key = hash::scenegraphKey(name.substr(mark + 1));
         // A 0x6F group is the number the game gave a package in the session that saved the file,
         // so it means nothing later. Inside a character file it names the file's own resources.
         const bool sessionGroup = (*group >> 24) == 0x6F && localGroup_ && !characterGroup_;
@@ -162,6 +186,7 @@ void Assets::readSkins() {
         for (const auto& p : skinPackages()) {
             skins_.addPackage(p);
         }
+        content::addDownloads(skins_);
     }
 }
 

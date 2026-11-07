@@ -1,5 +1,7 @@
 #include "content/ui_data.hpp"
 
+#include "content/downloads.hpp"
+
 #include "content/install.hpp"
 #include "formats/hash.hpp"
 #include "formats/image.hpp"
@@ -107,6 +109,7 @@ UiData::UiData(const fs::path& install) {
             }
         }
     }
+    addDownloads(index_);
 }
 
 std::optional<std::vector<ui::Window>> UiData::script(std::uint32_t group, std::uint32_t instance) {
