@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstring>  // stb_dxt calls memcpy without including it
 
 #define STB_DXT_IMPLEMENTATION
 #define STB_DXT_STATIC
