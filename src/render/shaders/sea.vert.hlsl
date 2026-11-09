@@ -6,8 +6,9 @@ cbuffer Sea : register(b0, space1) {
     row_major float4x4 viewProjection;  // applied to column vectors
     row_major float4x4 model;
     float4 eye;   // xyz: the camera's position
-    float4 time;  // x: real seconds the lot has run unpaused
+    float4 time;  // x: real seconds the lot has run unpaused, y: how much the ripples blur the mirror image (not in the original game)
     float4 tint;  // rgb: the colour added to the water
+    float4 scale; // rgb: what the mirror image is multiplied by, a: opacity added (not in the original game)
 };
 
 #include "sdl_gpu.hlsli"
@@ -27,6 +28,8 @@ struct Output {
     float3 eye : TEXCOORD3;     // toward the camera, in the surface's tangent space
     float4 tint : TEXCOORD4;
     float fade : TEXCOORD5;
+    float4 scale : TEXCOORD6;
+    float blur : TEXCOORD7;
 };
 
 // The material's waves: repeats along the axis, height and speed (wmXRepeat 5, wmYRepeat 6,
@@ -65,5 +68,7 @@ Output main(Input input) {
     // material's negative parts add nothing.
     output.tint = float4(saturate(tint.rgb), input.depth.x);
     output.fade = input.alpha;
+    output.scale = scale;
+    output.blur = time.y;
     return output;
 }

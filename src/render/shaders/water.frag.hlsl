@@ -1,8 +1,8 @@
 // The neighborhood water as the game's reflective water material draws it: the reflection where
 // the pixel is on screen and again a little off, both tinted, mixed by the ripple map's alpha
 // (scaled and sliding along u over time), blended over what is below at the reflection strength.
-// The game's reflection image is mirrored left to right (ours is not), so its offset to the right
-// is an offset to the left here.
+// The reflection image is mirrored left to right, as the game's is, so each pixel reads it at the
+// other side of the screen.
 
 #include "sdl_gpu.hlsli"
 
@@ -27,13 +27,13 @@ struct Input {
 };
 
 float4 main(Input input) : SV_Target {
-    const float2 at = input.position.xy / screen;
+    const float2 at = float2(1 - input.position.x / screen.x, input.position.y / screen.y);
     const float3 first = reflection.Sample(reflectionSampler, at).rgb * tint.rgb;
 #ifdef GL2
     // OpenGL's window y runs up where the others' runs down, so the second sample's shift is flipped to match.
-    const float3 second = reflection.Sample(reflectionSampler, at + float2(-offset, -offset)).rgb * tint.rgb;
+    const float3 second = reflection.Sample(reflectionSampler, at + float2(offset, -offset)).rgb * tint.rgb;
 #else
-    const float3 second = reflection.Sample(reflectionSampler, at + float2(-offset, offset)).rgb * tint.rgb;
+    const float3 second = reflection.Sample(reflectionSampler, at + float2(offset, offset)).rgb * tint.rgb;
 #endif
     const float slide = frac(time * speed / scale) * scale;
     const float a = ripples.Sample(rippleSampler, input.tiles * scale + float2(slide, 0)).a;

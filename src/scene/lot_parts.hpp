@@ -34,12 +34,10 @@ public:
     float corner(int level, float x, float y) const;
     // The average height of the four corners of the tile containing (x, y).
     float tile(int level, float x, float y) const;
-    // The heights the lot's ground is drawn through: `steps` points a tile each way, blended between
-    // the tile corners, by column then row ((width - 1) * steps + 1 columns). With `sea` (smooth lot
-    // skirts, not in the original game) the points under it or less than 0.6 above it are evened out
-    // with their neighbours, which rounds a steep drop of the sea bed into a curve. The outermost
-    // ring stays as it is, where the skirt meets the lot, and so does the ground above the water,
-    // where Sims and objects stand.
+    // The heights the lot's ground is drawn through: `steps` points a tile each way, blended between tile
+    // corners, by column then row ((width - 1) * steps + 1 columns). With `sea` (smooth lot skirts, not in
+    // the game) points under it or less than 0.6 above are evened with their neighbours, rounding a steep
+    // sea bed drop. The outermost ring, where the skirt meets, and ground 0.6 or more above it stay put.
     std::vector<float> drawnGrid(int level, std::uint32_t steps, std::optional<float> sea) const;
 
     const array3d::Array3D* grid() const { return grid_; }

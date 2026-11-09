@@ -22,18 +22,26 @@ struct LotGroundLook {
 };
 LotGroundLook lotGroundLook(const content::Lot& lot);
 
-// The ground around a lot in lot view, as the game's lot skirt: the neighborhood's terrain points
-// `margin` tiles around the lot at the neighborhood's heights, less the lot's own tiles, showing the
-// lot's terrain texture once per neighborhood tile, and the neighborhood's road tiles there with the
-// lot view's road textures (`roadTextures`: texture by material "lotSkirtRoad_<terrain type>_<piece>").
-// Points on the lot's boundary take the lot's own ground height there (grid level `groundLevel` of
-// `lotHeights`), as the game's skirt does, so the two meet where a lot's edge differs from the
-// neighborhood. Added in world coordinates, with the sea around the lot (`bounds`: the lot's own,
-// for its beach). With smooth lot skirts, `look` is blended onto the skirt beside the lot.
+// The ground around a lot in lot view, as the game's lot skirt: the neighborhood's terrain `margin` tiles
+// around the lot, less its own tiles, with the lot's terrain texture once per tile and road tiles in the
+// lot view's road textures (`roadTextures`, by material "lotSkirtRoad_<terrain type>_<piece>"). Boundary
+// points take the lot's ground height (level `groundLevel` of `lotHeights`) as the game's do, so the two
+// meet. Added in world coordinates with the sea (`bounds`: the lot's own, for its beach). With smooth lot
+// skirts, `look` is blended onto the skirt beside the lot.
 void addLotSkirt(SceneBuilder& builder, const PaintedTerrain& terrain, const LotFootprint& lot, int margin,
                  const std::string& terrainType, const std::map<std::string, std::string>& roadTextures,
                  const Heights* lotHeights = nullptr, int groundLevel = 0, const content::WorldBounds* bounds = nullptr,
                  const LotGroundLook* look = nullptr);
+
+// The names of the neighborhood view's pool-style sea and its depth haze (see addNeighborhoodSea).
+inline constexpr const char* kNeighborhoodSeaName = "neighborhood sea";
+inline constexpr const char* kNeighborhoodSeaDepthName = "neighborhood sea depth";
+
+// Not in the original game: the neighborhood view's sea drawn as a pool-style sea, in place of its water
+// sheet. Its surface over each wet tile, rippled and clear but for the reflection, and under it the
+// ground hazed by depth and lit by the pools' caustics, as around a lot. `night` picks its tint. False
+// when it couldn't be added, and the water sheet stays.
+bool addNeighborhoodSea(SceneBuilder& builder, const PaintedTerrain& terrain, bool night);
 
 // Sets the skirt's colour scales for day or night, as the game's lot skirt materials pick them
 // (summer by day, as the engine knows no seasons or clouds yet), and its sea's tint. Returns the
