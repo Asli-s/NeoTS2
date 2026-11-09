@@ -23,9 +23,9 @@ std::vector<Product> findProducts(const std::filesystem::path& installRoot);
 // the object packages also have keeps theirs (which one the game keeps is not known yet).
 std::vector<std::filesystem::path> objectLoadOrder(const std::vector<Product>& products);
 
-// The game's mask of installed expansion and stuff packs (what scripts test with
-// nGameState.IsEPInstalled): one bit per pack in the order of the game's "EPsInstalled" registry
-// list (EP1 = bit 0 ... Mansion & Garden = bit 16), plus bit 12, which the game always sets.
+// The game's mask of installed products (what scripts test with
+// nGameState.IsEPInstalled): one bit per product in the order of the game's "EPsInstalled" registry
+// list. The base game is bit 0, EP1 bit 1 and Mansion & Garden bit 17. Bit 12 is always set.
 std::uint32_t installedPacksMask(const std::vector<Product>& products);
 
 // The products as the game numbers them: the base game, then the packs in the order of its

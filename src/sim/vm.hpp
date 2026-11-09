@@ -202,13 +202,10 @@ public:
     RunResult runEvent(SimObject& me, std::uint32_t codeOwner, std::uint16_t tree, std::int16_t stackObject,
                        std::span<const std::int16_t> args, bool keepTemps = false);
 
-    // Runs an interaction's check tree as the pie menu does: as `me`, with `stackObject` as its stack
-    // object, on a thread of its own sharing `me`'s temps. Each Add/Change the Action String it runs
-    // adds a line to `offered` instead of naming my action.
-    // The check tree works on a copy of the interaction `line` it tests (see owner::kCheckTreeAdMin).
-    // With `icon` the tree checks a candidate (a pie menu line, a line autonomy weighs): Add/Change
-    // the Action String then offers lines into `offered` and sets the candidate's queue icon in
-    // `icon`. Without it, it changes the Sim's running interaction as anywhere else.
+    // Runs an interaction's check tree as `me` on a thread of its own sharing `me`'s temps, on a copy
+    // of `line` (see owner::kCheckTreeAdMin). With `icon` it checks a candidate (a pie menu line or one
+    // autonomy weighs): Add/Change the Action String offers lines into `offered` and sets the queue icon
+    // in `icon`. Without it, that primitive changes the Sim's running interaction as anywhere else.
     RunResult runCheck(SimObject& me, std::uint32_t codeOwner, std::uint16_t tree, std::int16_t stackObject,
                        std::span<const std::int16_t> args, const ttab::Interaction& line, std::vector<OfferedAction>& offered,
                        InteractionIcon* icon = nullptr);

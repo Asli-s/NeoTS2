@@ -21,13 +21,11 @@ std::optional<std::size_t> petKind(const SimObject& sim);
 // 3 teen, 4 elder. Babies read the adults'.
 std::size_t advertisementGroup(const SimObject& sim);
 
-// How much an interaction advertises it changes one of a Sim's motives, in motive points, for
-// autonomy. A human's entry has a minimum, a range and a type: type 0 advertises (minimum + range) /
-// 1000. Any other type scales the range by one of the Sim's personality traits or interests (person
-// data, 0-1000, some types inverted): (minimum + range * value / 1000) / 1000. Motives 1, 2, 4 and
-// 10-12 advertise nothing to humans. A pet's advertisement adds up a value from each record of its
-// kind's list, picked by its personality (person data 0xC7), in thousandths. Motives 2, 4 and 10-13
-// advertise nothing to pets. Entries the table doesn't have advertise nothing.
+// How much an interaction advertises it changes a Sim's motive, in motive points. Human type 0 gives
+// (minimum + range) / 1000, other types scale the range by a trait or interest (person data, 0-1000,
+// some inverted): (minimum + range * value / 1000) / 1000. A pet adds up one value per record of its
+// kind's list, picked by its personality (person data 0xC7), in thousandths. Motives 1, 2, 4 and
+// 10-12 advertise nothing to humans, 2, 4 and 10-13 nothing to pets, and missing entries nothing.
 float advertisedChange(const ttab::Interaction& interaction, const SimObject& sim, std::size_t motive);
 
 // Scales the advertisements a check tree is testing, as the script function MultiplyAdValues does:

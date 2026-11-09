@@ -176,9 +176,12 @@ std::uint32_t installedPacksMask(const std::vector<Product>& products) {
     constexpr std::uint32_t kAlwaysSet = 0x1000;
     std::uint32_t mask = kAlwaysSet;
     for (const auto& product : products) {
-        for (std::size_t bit = 0; bit < std::size(kGameOrder); ++bit) {
-            if (product.code == kGameOrder[bit]) {
-                mask |= 1u << bit;
+        if (product.code == "base") {
+            mask |= 1u;
+        }
+        for (std::size_t i = 0; i < std::size(kGameOrder); ++i) {
+            if (product.code == kGameOrder[i]) {
+                mask |= 1u << (i + 1);
             }
         }
     }

@@ -323,15 +323,12 @@ std::vector<std::pair<float, float>> LotSimulation::placementSpots(const SimObje
     return spots;
 }
 
-// The game's object placement test, for an object of one tile. The spot must be on the lot and on a
-// routed level, and the tile must have floor: the ground always has, a tile above it needs a floor
-// pattern on every quarter or an object with data 0x62 bit 0 on it (unless placement flags data 0x2A
-// has 0x200 or data 0x52 has 4). Room placement data 0x1E 1 needs the spot outdoors, 2 indoors. No
-// object or Sim may be in the way (see objectInTheWay), and allowed heights data 4 must allow the
-// floor (bit 0).
-// Not run yet: the game's second floor flag, the pool below, terrain, pool, slope, floor-or-ground
-// (data 0x2A bits 0 and 1), lot edge, roof, ceiling and wall tests, and its rules for objects on the
-// same tile and near doors. Multi-tile objects always pass.
+// The game's placement test for a one-tile object. The spot must be on a routed level of the lot.
+// Above the ground the tile needs a floor pattern on every quarter or an object with data 0x62 bit 0
+// (unless data 0x2A has 0x200 or data 0x52 has 4). Data 0x1E 1 needs outdoors, 2 indoors. Nothing may
+// be in the way (see objectInTheWay), and allowed heights data 4 must have bit 0, the floor.
+// Not run yet: the second floor flag, pool below, terrain, pool, slope, floor-or-ground (data 0x2A
+// bits 0 and 1), lot edge, roof, ceiling, wall, same-tile and door rules. Multi-tile objects pass.
 bool LotSimulation::objectFits(const SimObject& placed, float x, float y, std::int32_t level, std::int16_t direction) {
     constexpr std::size_t kHeightsField = 4, kRoomPlacementField = 0x1E, kPlacementFlagsField = 0x2A, kFlags3Field = 0x52;
     constexpr std::size_t kFloorStandInField = 0x62, kMultiTileIdDefinitionField = 0x0A;
@@ -388,22 +385,20 @@ bool LotSimulation::isSaved(const SimObject& object) const {
 
 std::string LotSimulation::modelOf(const SimObject& object) {
     constexpr std::uint16_t kModelNames = 0x85;
-    if (isSaved(object)) {
+    if (isSaved(object) && object.model.empty()) {
         const auto name = objectModels_.find(static_cast<std::uint32_t>(object.id));
         return name != objectModels_.end() ? name->second : std::string();
     }
     return createdModelName(object, [&](std::size_t row) { return code_.string(object.group, kModelNames, row); });
 }
 
-// Whether something stands in the way of `placed` at (x, y) facing `direction`, as the game's
-// placement test finds it. Objects on the tiles round the spot count when their footprints overlap
-// the placed one's, Sims when they stand within 0.3 tiles of it. Left out: objects in a slot or a
-// hand, doors and windows, pairs that either one's "allow intersection" function (OBJf entry 5) lets
-// through, pairs whose data 0x2A bit 0x1000 differs, other objects when either one has object data 8
-// bit 0x02 or 0x04, and Sims when the placed object has data 8 bit 0x04 or 0x10. Sims with data 8
-// bit 0x01 or data 0x28 bit 0x1000 are left out too (the game also asks another Sim flag there, not
-// known yet), and every Sim when the placed object has data 0x28 bit 0x4000 (the game then tests the
-// Sim's own footprint). A part of a multi-tile object is never in the way of another part of it.
+// Whether something stands in the way of `placed` at (x, y) facing `direction` in the placement test.
+// Objects on nearby tiles count when their footprints overlap, Sims within 0.3 tiles. Left out:
+// objects in a slot or a hand, doors and windows, pairs either one's "allow intersection" (OBJf entry
+// 5) lets through, pairs whose data 0x2A bit 0x1000 differs, parts of one multi-tile object, objects
+// when either has data 8 bit 0x02 or 0x04, and Sims when the placed object has data 8 bit 0x04 or 0x10.
+// Sims with data 8 bit 0x01 or data 0x28 bit 0x1000 are left out too (one more Sim flag is not known
+// yet), and every Sim when the placed object has data 0x28 bit 0x4000 (the game then tests footprints).
 bool LotSimulation::objectInTheWay(const SimObject& placed, const ObjectType& type, float x, float y, std::int32_t level,
                                    std::int16_t direction) {
     constexpr std::size_t kContainerField = 2, kFlagsField = 8, kFlags2Field = 0x28, kPlacementFlagsField = 0x2A, kLeadField = 0x13;

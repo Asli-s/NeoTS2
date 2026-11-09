@@ -13,10 +13,6 @@
 
 namespace ts2::sim {
 
-// A route for Go To Routing Slot, as the simulation plans it: the points a Sim walks from its spot
-// to the goal (route coordinates, which are the position's, in tiles) and the direction it faces
-// at the end when the slot says one. With no points, `failure` is the game's route result (person
-// data 0x3E): 2 path not found, 6 no valid goals, 7 the destination occupied.
 // A stair on the way: the Sim walks to points[at] (its entry), the stair's Portal tree climbs it, and
 // the walk goes on from points[at + 1] (its exit). Levels count from 1 (the ground).
 struct StairCrossing {
@@ -27,6 +23,9 @@ struct StairCrossing {
     std::optional<std::int16_t> entryFacing;  // the entry slot's facing, which the walk there ends in
 };
 
+// A route for Go To Routing Slot: the points from the Sim's spot to the goal (route coordinates, in
+// tiles) and the end facing when the slot gives one. With no points, `failure` is the route result
+// (person data 0x3E): 2 path not found, 6 no valid goals, 7 destination occupied.
 struct SlotRoute {
     std::vector<std::pair<float, float>> points;
     std::vector<StairCrossing> stairs;  // in the order they are crossed

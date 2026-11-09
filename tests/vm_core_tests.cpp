@@ -944,6 +944,28 @@ void createObjectMakesItTheStackObject() {
     CHECK(lamp != nullptr && lamp->group == kLampGroup && lamp->attributes[2] == 9);
 }
 
+// A new object is born at the game clock, which food reads to tell its age.
+void createObjectStampsTheBirthDate() {
+    MemoryCodeSource code;
+    code.addObjectType(kLampGroup, typed(kLampGuid));
+    code.add(kObjectGroup, 0x1000, bhav({
+        createObject(kLampGuid, 0x06, 0x00, 1, F),
+        expr(owner::kStackObjectAttribute, 2, op::kAssign, owner::kLiteral, 9, T, E),
+    }));
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    Vm vm(code, {}, &world);
+    vm.globals[ts2::sim::global::kYear] = 1997;
+    vm.globals[ts2::sim::global::kMonth] = 6;
+    vm.globals[ts2::sim::global::kDayOfMonth] = 21;
+    vm.globals[ts2::sim::global::kHour] = 10;
+    vm.globals[ts2::sim::global::kMinute] = 39;
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::True);
+    const ts2::sim::SimObject* lamp = world.find(sim.thread.stackObjectId);
+    CHECK(lamp != nullptr && lamp->data[0x2D] == 1997 && lamp->data[0x2E] == 6 && lamp->data[0x2F] == 21);
+    CHECK(lamp != nullptr && lamp->data[0x18] == 10 && lamp->data[0x15] == 39);
+}
+
 // Get Direction To: from the object in temp 1 to the stack object, as 8 directions or in degrees.
 void getDirectionToMeasuresTowardsStackObject() {
     auto direction = [](bool degrees) {
@@ -1124,6 +1146,7 @@ std::vector<Test> vmCoreTests() {
         {"Get Direction To measures towards the stack object", getDirectionToMeasuresTowardsStackObject},
         {"Set to Next without target flag uses stack object", setToNextWithoutTargetFlagUsesStackObject},
         {"Create Object makes it the stack object", createObjectMakesItTheStackObject},
+        {"Create Object stamps the birth date", createObjectStampsTheBirthDate},
         {"Constants [temp] index with a temp", constantsByTempIndexWithATemp},
         {"Remove Object removes the stack object", removeObjectRemovesTheStackObject},
         {"Random Number stays in range", randomNumberStaysInRange},

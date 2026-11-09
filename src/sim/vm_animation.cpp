@@ -11,6 +11,21 @@ float fadeShare(double ms, float fadeMs) {
     return fadeMs > 0 ? static_cast<float>(std::clamp(ms / fadeMs, 0.0, 1.0)) : 1.0f;
 }
 
+// Stops an overlay at `now`: it falls from the weight its fades give it then to none over `blendMs`,
+// as Animate Stop and a put's end of the carry poses both fade it.
+void stopOverlay(PlayingOverlay& overlay, double now, float blendMs) {
+    const double played = std::max(0.0, now - overlay.startMs);
+    const float fadedIn = overlay.blendsIn ? fadeShare(played, overlay.blendInMs.value_or(kOverlayBlendMs)) : 1.0f;
+    const float fadedOut = overlay.blendsOut && overlay.plays >= 0
+                               ? fadeShare(overlay.lengthMs - played, overlay.blendOutMs.value_or(kOverlayBlendMs))
+                               : 1.0f;
+    overlay.stoppedAt = fadedIn * fadedOut;
+    overlay.stopped = true;
+    overlay.plays = 1;
+    overlay.lengthMs = static_cast<float>(played + blendMs);
+    overlay.blendOutMs = blendMs;
+}
+
 } // namespace
 
 // The animation entry [entry] of string list [list] names, from the frame's code owner, its
@@ -341,10 +356,9 @@ std::string Execution::objectAnimationText(std::uint32_t owner, const SimObject*
 //   byte 6, 7-8  the object that plays it (owner, data)
 //   byte 10    more flags: 0x01 flipped if temp 3, 0x02 the entry is for the Sim in temp 5 (see
 //              objectAnimationText), 0x20 the lists are the running tree's code, not the object's
-// The clip plays once, or temp 1 times (-1: until Animate Stop, 0 or below -1 is an error). The
-// primitive carries on at once and the object keeps the clip's last pose once it has played. A
-// clip the game doesn't have plays nothing. Calls on Sims and with other byte 10 flags show nothing
-// yet (AN-23).
+// It plays once, or temp 1 times (-1: until Animate Stop, 0 or below -1 is an error), carries on at
+// once and leaves the last pose. A missing clip plays nothing. Sims and other byte 10 flags show
+// nothing yet (AN-23).
 bool Execution::animateObject(const bhav::Instruction& in, Frame& f) {
     constexpr std::uint8_t kFlipFromTemp3 = 0x01, kForSimInTemp5 = 0x02, kRefresh = 0x10, kRunningTreeCode = 0x20,
                            kPlaysFromTemp1 = 0x20;
@@ -431,10 +445,9 @@ bool Execution::animateObject(const bhav::Instruction& in, Frame& f) {
 //   byte 6     list, for stopping by name (0x80 named as Animate Overlay names it)
 //   byte 7     what stops: 0 by name, 1 overlays, 2 full-body animations, 3 all, 4-11 by category
 //              (carry, idle, gesture, reaction, normal, facial, facial idle, receptivity, see
-//              content::animationCategory). An entry without a kind is a carry pose or a normal
-//              animation by its clip, see entryCategory.
+//              content::animationCategory and entryCategory)
 //   byte 8     priority: 0 any, else layers 2p-2 and 2p-1
-// Animations stop at once (or start fading out) and the primitive carries on.
+// Animations stop or start fading out at once, and the primitive carries on.
 bool Execution::animateStop(const bhav::Instruction& in, Frame& f) {
     constexpr float kBlendMs = 233.33f, kShortBlendMs = 70.0f;
     const auto& o = in.operands;
@@ -510,14 +523,7 @@ bool Execution::animateStop(const bhav::Instruction& in, Frame& f) {
                 it = target->overlays.erase(it);
                 continue;
             }
-            const double played = std::max(0.0, now - it->startMs);
-            const float fadedIn = it->blendsIn ? fadeShare(played, it->blendInMs.value_or(kOverlayBlendMs)) : 1.0f;
-            const float fadedOut = it->blendsOut && it->plays >= 0 ? fadeShare(it->lengthMs - played, it->blendOutMs.value_or(kOverlayBlendMs)) : 1.0f;
-            it->stoppedAt = fadedIn * fadedOut;
-            it->stopped = true;
-            it->plays = 1;
-            it->lengthMs = static_cast<float>(std::max(0.0, now - it->startMs) + blendMs);
-            it->blendOutMs = blendMs;
+            stopOverlay(*it, now, blendMs);
             ++it;
         }
     }
@@ -536,14 +542,16 @@ bool Execution::animateStop(const bhav::Instruction& in, Frame& f) {
 // Reach/Put (Sims only). Operands:
 //   byte 3, 4-5  the object (owner, data): what to grab, or a put's target
 //   byte 6       a put's target slot, or with flag bit 0 my temp 0
-//   byte 9       flags: bit 0 see above, bit 1 the hand from temp 3 (non-zero: hand 1)
+//   byte 9       flags: bit 0 see above, bit 1 the hand from temp 3 (non-zero: hand 1), bit 0x10
+//                the object's clip is "o-generic-resetToZero-pose" instead of bytes 13-14
 //   byte 10      0 grab into my hand, 1 put what I hold into the target's slot, 2 put it on the floor
-// Grabbing what I already hold in that hand is true at once. Putting with an empty hand is false.
-// Otherwise I play the reach clip of STR# 0x92 for the height (floor, coffee table, table,
-// counter), reach (more than 0.8 tiles away) and grab or put, and the object changes hands at
-// its event 0. The primitive waits and is true when the clip ends. Bytes 11-12 name the grasp and
-// carry poses laid over it (see playReachStages). Not yet: the object's animation of bytes 13-14,
-// the trees the game runs on the events, and the placement test of a floor put (PR-29).
+//   bytes 13-14  the entry of the moved object's animation list (0x86) it plays as it changes hands
+// Grabbing what that hand holds is true at once, putting with an empty hand false. Otherwise I play
+// STR# 0x92's clip for the height (floor, coffee table, table, counter), reach (over 0.8 tiles) and
+// grab or put, the object changes hands at event 0 (see runHandOffTrees), and it is true when the
+// clip ends. Bytes 11-12 name the grasp and carry poses laid over it (see playReachStages).
+// Not yet: byte 9 bit 0x04 (where the object's clip is looked up first) and a floor put's placement
+// test (PR-29).
 Execution::ReachStep Execution::reachPut(const bhav::Instruction& in, Frame& f) {
     constexpr std::size_t kContainerField = 2, kSlotField = 3;
     constexpr std::uint8_t kReachList = 0x92;
@@ -562,9 +570,16 @@ Execution::ReachStep Execution::reachPut(const bhav::Instruction& in, Frame& f) 
         Reaching& reach = *sim.reaching;
         if (!reach.transferred && now >= reach.transferMs) {
             reach.transferred = true;
-            if (!reachTransfer(sim, reach)) {
+            const Reaching handOff = reach;
+            const bool moved = reachTransfer(sim, handOff);
+            runHandOffTrees(handOff, moved);
+            if (!moved) {
                 sim.reaching.reset();
                 return ReachStep{ReachStep::Kind::Done, false};
+            }
+            playHandOffClip(handOff);
+            if (!sim.reaching) {
+                return ReachStep{ReachStep::Kind::Done, true};
             }
         }
         if (now < reach.endMs) {
@@ -586,6 +601,7 @@ Execution::ReachStep Execution::reachPut(const bhav::Instruction& in, Frame& f) 
         throw Stop{Outcome::Error, "the Sim has no such hand slot", std::to_string(hand)};
     }
     Reaching reach{frame, f.group, f.instance, f.pc, mode};
+    reach.stackObject = f.stackObjectId;
     // The reach is measured from me to where the object is, or to the slot it goes in: a glass on a
     // tray on a bar is as high as the bar's slot holds the tray. Where the game measures a floor put
     // to is not known yet, so it is measured to my own place.
@@ -598,6 +614,7 @@ Execution::ReachStep Execution::reachPut(const bhav::Instruction& in, Frame& f) 
         }
         reach.object = target->id;
         reach.slot = hand;
+        reach.source = std::max<std::int16_t>(target->data[kContainerField], 0);
         there = heldPlace(world(), code_, *target);
         clipGroup = target->group;
     } else {
@@ -641,6 +658,13 @@ Execution::ReachStep Execution::reachPut(const bhav::Instruction& in, Frame& f) 
     }
     reach.transferMs = now + *event;
     reach.endMs = now + *length;
+    // The object's clip is named now and played at the hand-off: a tray set down drops its carry pose.
+    constexpr std::uint8_t kResetClipFlag = 0x10;
+    if (const SimObject* moved = world().find(reach.object); moved != nullptr) {
+        const std::string text = (flags & kResetClipFlag) ? std::string("o-generic-resettozero-pose")
+                                                          : objectAnimationText(moved->group, nullptr, static_cast<std::uint16_t>(o[13] | o[14] << 8));
+        reach.objectClip = content::animationName(text);
+    }
     // It plays as a Sim animation of medium priority, fading in and out over 233.33 ms each, or over
     // half its length each when it is shorter than both.
     constexpr float kReachFadeMs = 233.33f;
@@ -657,20 +681,20 @@ Execution::ReachStep Execution::reachPut(const bhav::Instruction& in, Frame& f) 
     play.tree = f.instance;
     play.pc = f.pc;
     // The hand reaches for the object grabbed, or for where the held one goes: the target's slot,
-    // or the floor spot reachTransfer puts it on, facing as it will.
+    // or the floor spot reachTransfer puts it on. The hand's target doesn't turn with that spot. It
+    // faces the way I face now, turned by the reach clip's root turn (see PlayingAnimation::IkObject).
     PlayingAnimation::IkObject ik;
+    ik.heading = sim.heading ? *sim.heading : compassHeading(sim.data[kDirectionField]);
     ik.level = static_cast<std::int16_t>(sim.level);
     ik.height = there.height;
     if (mode == Reaching::Mode::PutOnFloor) {
         const FloorSpot spot = floorSpot(sim, *world().find(reach.object));
         ik.x = spot.x;
         ik.y = spot.y;
-        ik.heading = compassHeading(spot.facing);
     } else {
         ik.x = static_cast<float>(there.x) / 65536.0f;
         ik.y = static_cast<float>(there.y) / 65536.0f;
         ik.level = static_cast<std::int16_t>(target->level);
-        ik.heading = compassHeading(target->data[kDirectionField]);
     }
     play.ikObject = ik;
     sim.animation = std::move(play);
@@ -680,6 +704,69 @@ Execution::ReachStep Execution::reachPut(const bhav::Instruction& in, Frame& f) 
         playReachStages(sim, *named, mode == Reaching::Mode::Grab, hand != 0, static_cast<std::uint16_t>(o[11] | o[12] << 8), *length, *event, now);
     }
     return ReachStep{ReachStep::Kind::Wait};
+}
+
+// Right after the hand-off at the reach clip's event 0, worked or not, the game runs two trees by
+// name at once on my stack, each in its own object's code with that object as stack object. First
+// "CT - Reach - Events" of the container (the one grabbed from or put into, none on the floor),
+// then the moved object's "CT - Grab" after a grab that worked, else its "CT - Put". Each gets the
+// event (0) and the stack object of the tree that ran Reach/Put. A name the code doesn't have runs
+// nothing. This is how a serving bowl's hidden portion shows as a Sim takes it.
+// Not known yet: params 2-4 (no shipped tree of these names reads them, so they stay 0) and what
+// the game does with a tree that waits or fails (the result is not used).
+void Execution::runHandOffTrees(const Reaching& reach, bool moved) {
+    constexpr std::size_t kSavedTemps = 8;
+    const std::int16_t container = reach.mode == Reaching::Mode::Grab ? reach.source : reach.container;
+    const std::array<std::int16_t, 5> args{0, reach.stackObject, 0, 0, 0};
+    const auto run = [&](std::int16_t id, const char* name) {
+        const SimObject* owner = id > 0 ? world().find(id) : nullptr;
+        if (owner == nullptr || owner->removed) {
+            return;
+        }
+        const std::uint32_t group = owner->group;
+        for (const std::uint32_t inGroup : {group, code_.semiGlobalGroup(group), kGlobalGroup}) {
+            const auto tree = inGroup != 0 ? code_.behaviorByName(inGroup, name) : std::nullopt;
+            if (!tree) {
+                continue;
+            }
+            // The game keeps my first eight temps across the run.
+            std::array<std::int16_t, kSavedTemps> temps{};
+            std::copy_n(thread_.temps.begin(), kSavedTemps, temps.begin());
+            const RunResult r = runOnMe(group, *tree, id, args);
+            std::copy_n(temps.begin(), kSavedTemps, thread_.temps.begin());
+            if (r.outcome == Outcome::Unsupported || r.outcome == Outcome::MissingCode) {
+                throw Stop{r.outcome, std::string(name) + ": " + r.reason, r.detail};
+            }
+            return;
+        }
+    };
+    run(container, "CT - Reach - Events");
+    run(reach.object, moved && reach.mode == Reaching::Mode::Grab ? "CT - Grab" : "CT - Put");
+}
+
+// The clip a reach names for the object it moves starts on that object as it changes hands and
+// replaces the object's own clip. How the game blends it is not known yet, so it plays once with
+// Animate Object's usual fades. A clip the game doesn't have plays nothing.
+void Execution::playHandOffClip(const Reaching& reach) {
+    SimObject* object = world().find(reach.object);
+    const auto& lengths = world().animationLengths();
+    const auto length = lengths && !reach.objectClip.empty() ? lengths(reach.objectClip) : std::nullopt;
+    if (object == nullptr || !length) {
+        return;
+    }
+    PlayingAnimation play;
+    play.name = reach.objectClip;
+    play.startMs = world().eventClockMs();
+    play.speed = 1;
+    play.lengthMs = *length;
+    const AnimateFades fades = animateFades(play.lengthMs, play.blendsIn, play.blendsOut);
+    play.fades = true;
+    play.fadeInMs = fades.inMs;
+    play.fadeOutMs = fades.outMs;
+    if (object->animation) {
+        object->ending = std::move(object->animation);
+    }
+    object->animation = std::move(play);
 }
 
 // Children take the children's clips ("c2o-" for "a2o-", assumed from the game's age prefixes).
@@ -692,13 +779,11 @@ std::string Execution::childClip(const SimObject& sim, const std::string& clip) 
     return clip;
 }
 
-// The overlays Reach/Put lays over its reach clip (`length` ms, its event at `event` ms), named by
-// the entry of the object's STR# 0x81 that bytes 11-12 pick: "grasp,carry". A grab fades the grasp
-// in towards the event and, as the reach clip ends, crossfades it into the carry pose, which stays
-// until something stops it (Animate Stop of carry poses, or a put). A put plays the grasp around
-// the event and fades out every carry pose of that hand. Both are mirrored for the second hand.
-// Not yet: the grasp's "-iktransjig" clip the game also plays around the event, because its timing
-// depends on a value of that clip not known yet.
+// The overlays Reach/Put lays over its reach clip (`length` ms, event at `event` ms), from the
+// object's STR# 0x81 entry bytes 11-12 pick: "grasp,carry". A grab fades the grasp in towards the
+// event, then crossfades it into the carry pose, which stays until Animate Stop or a put. A put plays
+// the grasp around the event and fades out that hand's carry poses. The second hand is mirrored.
+// Not yet: the grasp's "-iktransjig" clip, whose timing hangs on a value not known yet.
 void Execution::playReachStages(SimObject& sim, const SimObject& object, bool grab, bool flipped, std::uint16_t entry, float length,
                      float event, double now) {
     constexpr std::uint8_t kStageList = 0x81;
@@ -707,10 +792,7 @@ void Execution::playReachStages(SimObject& sim, const SimObject& object, bool gr
     if (!grab) {
         for (auto& overlay : sim.overlays) {
             if (!overlay.stopped && overlay.category == cat::kCarry && overlay.flipped == flipped) {
-                overlay.stopped = true;
-                overlay.plays = 1;
-                overlay.lengthMs = static_cast<float>(std::max(0.0, now - overlay.startMs) + kBlendMs);
-                overlay.blendOutMs = kBlendMs;
+                stopOverlay(overlay, now, kBlendMs);
             }
         }
     }

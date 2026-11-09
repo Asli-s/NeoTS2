@@ -3,6 +3,7 @@
 #include "diag/log.hpp"
 #include "sim/advertisement.hpp"
 #include "sim/advertisers.hpp"
+#include "sim/game_sort.hpp"
 #include "sim/happiness.hpp"
 #include "sim/pie_menu.hpp"
 
@@ -409,8 +410,8 @@ private:
     // best `random selection count` at random. Residents draw even when only one can come up, as the
     // game does. Checks not run yet run now, for the candidates up to the pick.
     std::optional<std::size_t> choose(bool firstPass) {
-        std::stable_sort(candidates_.begin(), candidates_.end(),
-                         [](const Candidate& a, const Candidate& b) { return a.score > b.score; });
+        gameQsort(candidates_.begin(), candidates_.end(),
+                  [](const Candidate& a, const Candidate& b) { return compareChoiceScores(a.score, b.score); });
         std::size_t k = 0;
         const auto n = std::min<std::size_t>(candidates_.size(), static_cast<std::size_t>(std::max(0, s_.tunings.randomSelection)));
         if (!visitor_ && !candidates_.empty()) {
@@ -483,6 +484,12 @@ bool assigns(std::uint8_t op) {
 }
 
 } // namespace
+
+int compareChoiceScores(float a, float b) {
+    const double difference = static_cast<double>(b) - static_cast<double>(a);
+    constexpr double kTolerance = static_cast<double>(1.0e-7f);
+    return difference > kTolerance ? 1 : (difference < -kTolerance ? -1 : 0);
+}
 
 bool CheckTreeKinds::visit(std::uint32_t codeOwner, std::uint16_t tree, int depth) {
     constexpr std::uint16_t kExpression = 0x0002;

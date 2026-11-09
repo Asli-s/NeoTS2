@@ -3,6 +3,7 @@
 #include "diag/log.hpp"
 #include "sim/clock.hpp"
 #include "sim/code_source.hpp"
+#include "sim/game_sort.hpp"
 #include "sim/motives.hpp"
 #include "sim/vm.hpp"
 #include "sim/want_history.hpp"
@@ -206,24 +207,37 @@ float ramp(std::int32_t low, std::int32_t high, std::int32_t x) {
 // The Sim whose wants are being made, and what the scores read about it.
 class Refill {
 public:
-    Refill(const WantContext& context, std::int16_t neighbor)
-        : c_(context), world_(context.world), neighbor_(neighbor), history_(wantHistory(world_, neighbor)) {
-        sim_ = world_.nextAfter(0, [&](const SimObject& o) { return o.isPerson() && world_.neighborIdOf(o) == neighbor; });
-        now_ = historyNow(history_, world_.wantsState().clock, 0);
+    // Picks the Sim: the candidates' ages are taken at this time.
+    Refill(const WantContext& context, std::int16_t neighbor) : world_(context.world), neighbor_(neighbor) {
+        use(context);
+        now_ = historyNow(*history_, world_.wantsState().clock, 0);
     }
 
-    void run(int level) {
-        if (world_.wantTrees() == nullptr || !world_.hasWantDefinitions()) {
-            return;
-        }
-        makeCandidates();
+    // The refill runs over several ticks, so each stage finds the Sim and its history again.
+    void use(const WantContext& context) {
+        c_ = &context;
+        history_ = &wantHistory(world_, neighbor_);
+        sim_ = world_.nextAfter(0, [&](const SimObject& o) { return o.isPerson() && world_.neighborIdOf(o) == neighbor_; });
+    }
+
+    bool hasTrees() const { return world_.wantTrees() != nullptr && world_.hasWantDefinitions(); }
+
+    void build() { makeCandidates(); }
+
+    // The scores' lockouts are taken at this time, a tick after the pick.
+    void sort() {
+        scoreNow_ = historyNow(*history_, world_.wantsState().clock, 0);
         for (Candidate& candidate : candidates_) {
             candidate.score = score(candidate.item);
         }
-        std::stable_sort(candidates_.begin(), candidates_.end(), [](const Candidate& a, const Candidate& b) { return b.score < a.score; });
+        gameSort(candidates_.begin(), candidates_.end(), [](const Candidate& a, const Candidate& b) { return b.score < a.score; });
+    }
+
+    // Fills the empty places from the best candidates. A want offered again goes back to its place
+    // in the saved lists when that place is empty.
+    void fill(int level, const std::vector<swaf::Want>& oldWants, const std::vector<swaf::Want>& oldFears) {
         auto& wants = world_.neighborWants(neighbor_);
         auto& fears = world_.neighborFears(neighbor_);
-        const auto oldWants = wants, oldFears = fears;
         std::size_t wantCount = keep(wants, level <= 1);
         std::size_t fearCount = keep(fears, level <= 2);
         for (const Candidate& candidate : candidates_) {
@@ -277,12 +291,12 @@ private:
     void events(const Node& node, std::vector<const swaf::Want*>& out) const {
         out.clear();
         const WantDefinition* def = world_.wantDefinition(node.wantId);
-        const auto found = history_.records.find(node.wantId);
-        if (def == nullptr || found == history_.records.end()) {
+        const auto found = history_->records.find(node.wantId);
+        if (def == nullptr || found == history_->records.end()) {
             return;
         }
         for (const auto& record : found->second) {
-            if (!(record.flags & kSkippedRecord) && nodeMatches(node, *def, record, c_.code)) {
+            if (!(record.flags & kSkippedRecord) && nodeMatches(node, *def, record, c_->code)) {
                 out.push_back(&record);
             }
         }
@@ -474,7 +488,7 @@ private:
         if (item.parent >= 0) {
             const swaf::Want& from = items_[static_cast<std::size_t>(item.parent)].want;
             if (recordTime(from) != 0) {
-                const std::int64_t elapsed = std::int64_t{now_} - recordTime(from);
+                const std::int64_t elapsed = std::int64_t{scoreNow_} - recordTime(from);
                 const auto [life, frequency] = lifeAndFrequency(node);
                 if (life > 0 && elapsed > life) {
                     lockout = 0;
@@ -490,11 +504,14 @@ private:
         for (std::size_t i = 0; i < want_trees::kAdCount; ++i) {
             const want_trees::Ad& ad = node.ads[i];
             const float f = factor(static_cast<AdKind>(i), node, item.want);
-            if (ad.superZero && !(f > 0)) {
+            // A factor that is not a finite number comes only from broken data. The want then scores
+            // nothing, which also keeps NaN out of the sort.
+            if ((ad.superZero && !(f > 0)) || !std::isfinite(f)) {
                 return 0;
             }
-            // The game adds up the weighted factors as whole numbers.
-            sum = static_cast<std::int64_t>(static_cast<double>(ad.weight) * f + static_cast<double>(sum));
+            // The game adds up the weighted factors as whole numbers. The clamp keeps the cast defined.
+            constexpr double kLimit = 9.0e18;
+            sum = static_cast<std::int64_t>(std::clamp(static_cast<double>(ad.weight) * f + static_cast<double>(sum), -kLimit, kLimit));
             weights += ad.weight;
         }
         const float t = weights > 0 ? static_cast<float>(sum) / static_cast<float>(weights) : 1.0f;
@@ -524,7 +541,7 @@ private:
     // object worth its value, and its definition's checkTree (if any) is true for it.
     bool valid(const swaf::Want& want) {
         const WantDefinition* def = world_.wantDefinition(want.guid);
-        if (def == nullptr || (def->gameVersionFlags & c_.installedPacks) == 0) {
+        if (def == nullptr || (def->gameVersionFlags & c_->installedPacks) == 0) {
             return false;
         }
         if (want.type == static_cast<std::uint8_t>(WantArgument::Category)) {
@@ -547,8 +564,8 @@ private:
         auto& values = world_.wantsState().categoryValues;
         if (!values) {
             values.emplace();
-            for (const std::uint32_t guid : c_.code.objectTypeGuids()) {
-                const ObjectType* type = c_.code.objectType(guid);
+            for (const std::uint32_t guid : c_->code.objectTypeGuids()) {
+                const ObjectType* type = c_->code.objectType(guid);
                 if (type == nullptr) {
                     continue;
                 }
@@ -577,13 +594,13 @@ private:
             }
         }
         SimObject* controller = world_.nextAfter(0, [](const SimObject& s) { return s.definition.guid() == kWantsControllerGuid; });
-        const ObjectType* checkTrees = c_.code.objectType(kWantsCheckTreesGuid);
+        const ObjectType* checkTrees = c_->code.objectType(kWantsCheckTreesGuid);
         if (controller == nullptr || checkTrees == nullptr) {
             return true;
         }
         std::optional<std::uint16_t> tree;
-        for (const std::uint32_t g : {checkTrees->group, c_.code.semiGlobalGroup(checkTrees->group), kGlobalGroup}) {
-            if ((tree = c_.code.behaviorByName(g, def.checkTree))) {
+        for (const std::uint32_t g : {checkTrees->group, c_->code.semiGlobalGroup(checkTrees->group), kGlobalGroup}) {
+            if ((tree = c_->code.behaviorByName(g, def.checkTree))) {
                 break;
             }
         }
@@ -602,7 +619,7 @@ private:
                                                  static_cast<std::int16_t>(static_cast<std::uint32_t>(longArgument) >> 16),
                                                  static_cast<std::int16_t>(want.argument),
                                                  want.value};
-        const RunResult r = c_.vm.runOnObjectNow(*controller, checkTrees->group, *tree, controller->id, params);
+        const RunResult r = c_->vm.runOnObjectNow(*controller, checkTrees->group, *tree, controller->id, params);
         const bool result = r.outcome == Outcome::True;
         checked_.emplace_back(want, result);
         return result;
@@ -625,7 +642,7 @@ private:
             auto match = same;
             if (!found) {
                 match = std::find_if(list.begin(), list.end(), [&](const swaf::Want& s) {
-                    return s.guid != 0 && wantMatches(s, want, op, [&](std::uint32_t g) { return categoryOf(c_.code, g); });
+                    return s.guid != 0 && wantMatches(s, want, op, [&](std::uint32_t g) { return categoryOf(c_->code, g); });
                 });
             }
             if (match != list.end()) {
@@ -713,12 +730,13 @@ private:
         slotNodes()[slotKey(list, at)] = {item.tree->id, depthOf(item)};
     }
 
-    const WantContext& c_;
+    const WantContext* c_ = nullptr;
     World& world_;
     std::int16_t neighbor_;
-    WantHistory& history_;
+    WantHistory* history_ = nullptr;
     const SimObject* sim_ = nullptr;
     std::int32_t now_ = 0;
+    std::int32_t scoreNow_ = 0;
     std::vector<Item> items_;
     std::vector<Candidate> candidates_;
     std::vector<std::pair<swaf::Want, bool>> checked_;
@@ -855,6 +873,28 @@ void forgetWantPlace(World& world, std::int16_t neighbor, std::size_t place, boo
     }
 }
 
+struct RefillWork {
+    enum class Stage { Build, Sort, Fill, Done };
+    Refill refill;
+    std::int16_t neighbor;
+    int level;
+    std::vector<swaf::Want> oldWants, oldFears;
+    Stage stage = Stage::Build;
+};
+
+void saveWantsForRefill(World& world, std::int16_t neighbor) {
+    auto& wants = world.neighborWants(neighbor);
+    auto& fears = world.neighborFears(neighbor);
+    world.wantsState().savedLists[neighbor] = {wants, fears};
+    for (auto* list : {&wants, &fears}) {
+        for (auto& want : *list) {
+            if (!want.tail.empty()) {
+                want.tail[0] = 0;
+            }
+        }
+    }
+}
+
 void queueWantRefill(World& world, std::int16_t neighbor, int level) {
     if (neighbor == 0) {
         return;
@@ -862,12 +902,42 @@ void queueWantRefill(World& world, std::int16_t neighbor, int level) {
     auto [it, fresh] = world.wantsState().queue.try_emplace(neighbor, level);
     if (!fresh) {
         it->second = std::min(it->second, level);
+    } else if (level == 0 || level == 1) {
+        world.wantsState().savedLists[neighbor] = {world.neighborWants(neighbor), world.neighborFears(neighbor)};
     }
+}
+
+bool wantRefillWaiting(World& world, std::int16_t neighbor) {
+    const WantsState& state = world.wantsState();
+    return state.queue.contains(neighbor) ||
+           (state.refill && state.refill->neighbor == neighbor && state.refill->stage != RefillWork::Stage::Done);
 }
 
 void stepWants(const WantContext& context) {
     WantsState& state = context.world.wantsState();
     state.clock += 2;
+    if (state.refill) {
+        RefillWork& work = *state.refill;
+        work.refill.use(context);
+        switch (work.stage) {
+        case RefillWork::Stage::Build:
+            work.refill.build();
+            work.stage = RefillWork::Stage::Sort;
+            break;
+        case RefillWork::Stage::Sort:
+            work.refill.sort();
+            work.stage = RefillWork::Stage::Fill;
+            break;
+        case RefillWork::Stage::Fill:
+            work.refill.fill(work.level, work.oldWants, work.oldFears);
+            work.stage = RefillWork::Stage::Done;
+            break;
+        case RefillWork::Stage::Done:
+            state.refill.reset();
+            break;
+        }
+        return;
+    }
     if (state.queue.empty()) {
         return;
     }
@@ -882,7 +952,12 @@ void stepWants(const WantContext& context) {
     if (context.world.neighbor(neighbor) == nullptr) {
         return;
     }
-    Refill(context, neighbor).run(level);
+    Refill refill(context, neighbor);
+    if (!refill.hasTrees()) {
+        return;
+    }
+    const auto& saved = state.savedLists[neighbor];
+    state.refill = std::make_shared<RefillWork>(RefillWork{std::move(refill), neighbor, level, saved.first, saved.second});
 }
 
 } // namespace ts2::sim

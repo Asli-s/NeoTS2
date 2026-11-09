@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -25,6 +26,8 @@ struct WantHistory {
 // A record's time (sim seconds on its history's clock), 0 when it has none.
 inline std::int32_t recordTime(const swaf::Want& record) { return record.tail.empty() ? 0 : record.tail[0]; }
 
+struct RefillWork;
+
 // The wants manager's state on a lot.
 struct WantsState {
     // Sim seconds: 2 more every tick the game runs.
@@ -33,6 +36,11 @@ struct WantsState {
     // 1 drop every want and fear not held, 2 every fear not held and the wants no longer valid, 3
     // only those no longer valid.
     std::map<std::int16_t, int> queue;
+    // Each Sim's wants and fears as they were when it was last queued while not queued yet, for 0
+    // or 1 or a satisfied want. A refill puts a want it offers again back in its place here.
+    std::map<std::int16_t, std::pair<std::vector<swaf::Want>, std::vector<swaf::Want>>> savedLists;
+    // The refill in progress. It moves on one stage a tick (see stepWants).
+    std::shared_ptr<RefillWork> refill;
     // Each Sim's history in use on this lot, by neighbor id.
     std::map<std::int16_t, WantHistory> histories;
     // The highest OBJD field 0x12 among the catalog objects of each want category (field 0x2F),

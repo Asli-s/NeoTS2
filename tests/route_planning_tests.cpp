@@ -19,12 +19,6 @@
 
 namespace {
 
-// The Sim clock: two seconds a tick, carried into minutes, hours, the date and the day of the week,
-// shown with the Day Of Week global, as the game shows it.
-// The route grid splits leaves along an item's edges down to an eighth of a tile, and a leaf's passage
-// follows its items: floor walks, walls block, joints cost, a doorway's solid square overrides a wall.
-// Floor route items: one tile per floored tile with roads costing more, bare ground on the ground
-// level, a foundation under raised floors, and strips along floor edges.
 // A fence post routes as its post's footprint around the post's point (route axes swap the wall
 // graph's), padded by an eighth of a tile. Fences that don't stop Sims give nothing.
 void postRouteItemsUseThePostFootprint() {
@@ -115,6 +109,8 @@ void objectFootprintsFollowTheModel() {
     CHECK(huge.items().size() == 1 && huge.cells().size() < 100000);
 }
 
+// One route tile per floored tile with roads costing more, bare ground on the ground level, a
+// foundation under raised floors, and strips along floor edges.
 void floorRouteItemsFollowTheFloors() {
     using namespace ts2::sim;
     // A 3 x 2 lot (route tiles) with two levels. The floor grid is indexed (level, y, x) in route terms.
@@ -1282,6 +1278,8 @@ void snapUsesTheSlotsBone() {
     CHECK(me.x == 405012 && me.y == 1515323 && me.data[1] == 5);
 }
 
+// Leaves split along item edges down to an eighth of a tile. Floor walks, walls block, joints cost,
+// and a doorway's solid square overrides a wall.
 void routeGridSplitsAndPasses() {
     using namespace ts2::sim;
     RouteGrid grid(2, 2);
@@ -1456,13 +1454,8 @@ void walksArePlannedAsTheGamePlansThem() {
     }
 }
 
-// Short straight moves that keep the facing are steps, checked against the game's own steps: their
-// clips, mixes and weights, and the speed the game moved the Sim at.
-// The game's picker chooses a turning stop by its turn and the foot it begins on: the clips that
-// turn that way on that foot, else the ones beginning on the other foot that turn the other way,
-// mirrored. A straight stop has no other-foot clips, so it is mirrored for the other foot.
-// A walk begun soon after the last one starts by that walk's end, as the game times it. One begun a
-// few ms after the last walk's fade-out start starts about 65 ms ahead of the clock.
+// A walk begun soon after the last one starts by that walk's end. One begun a few ms after the last
+// walk's fade-out start starts about 65 ms ahead of the clock.
 void walksBegunSoonStartByTheLastWalk() {
     using ts2::sim::walkStart;
     const double fadeOut = 10000, playEnd = 10117;
@@ -1494,6 +1487,8 @@ void walksBegunSoonStartByTheLastWalk() {
     CHECK(!ts2::sim::isShortWalk(P{{1.0f, 1.0f}, {1.0f, 1.0f}}, 1, 1) && !ts2::sim::isShortWalk(P{{1.0f, 1.0f}}, 1, 1));
 }
 
+// A turning stop takes the clips turning that way on that foot, else the other foot's turning the
+// other way, mirrored. A straight stop has no other-foot clips, so it is mirrored for the other foot.
 void turnClipsArePickedByFoot() {
     using ts2::sim::LocoClip;
     constexpr float kEighth = 0.785398f;
@@ -1610,6 +1605,8 @@ void walksToldToStopSoonStopAtTheNextFoot() {
     }
 }
 
+// Short straight moves that keep the facing are steps, matching the game's clips, mixes, weights
+// and speed.
 void stepsArePlannedAsTheGamePlansThem() {
     using ts2::sim::LocoClip;
     const std::map<std::string, LocoClip> clips = {

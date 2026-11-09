@@ -13,10 +13,9 @@ std::int32_t Execution::sleepTicks(const bhav::Instruction& in, Frame& f) {
 // Operands:
 //   bytes 0-1  who (0 = me, 1 = stack object, 2 = nobody)
 //   byte 2     bit 0 return immediately, bit 1 clear = clean up all (what it changes isn't known yet)
-// A few object types can't be removed. The object goes out of its container and off the lot at once
-// (see takeOutOfWorld), and the delete itself comes at the end of the tick. Removing me without
-// "return immediately" ends my run.
-// Removing a part of a multi-tile object removes the whole object.
+// A few object types can't be removed. Others leave their container and the lot at once (see
+// takeOutOfWorld) and are deleted at the end of the tick, a multi-tile part taking its whole object.
+// Removing me without "return immediately" ends my run.
 bool Execution::removeObject(const bhav::Instruction& in) {
     const auto& o = in.operands;
     const auto who = static_cast<std::int16_t>(o[0] | o[1] << 8);
@@ -54,8 +53,7 @@ bool Execution::removeObject(const bhav::Instruction& in) {
 //   bytes 5-6  fade time in ticks (0..300, else 10)
 //   byte 7     intensity in percent (0..100, else 50)
 //   byte 8     the light: 0xFF all, else an entry of the stack object's light name table
-// Sets how strongly all of the object's lights shine. The light named and the fade time don't
-// change what the game does with it.
+// Sets the strength of all the object's lights. The game ignores the light named and the fade time.
 bool Execution::changeLight(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     const std::int16_t id = read(o[2], static_cast<std::uint16_t>(o[3] | o[4] << 8), f);
@@ -88,11 +86,11 @@ bool Execution::changeLight(const bhav::Instruction& in, Frame& f) {
 //   byte 2      flags (kMeshGroupFromSource ... kMeshGroupSemiGlobal)
 //   bytes 3-4   mesh group: entry of string table 0x87 (or my temp 1, flag 0x20, -1 = whole model)
 //   byte 5, 6-7 the object to change
-//   byte 8, 9-10 the source object whose tables flags 0x01 and 0x08 read, otherwise the tree's owner's
-//               (an own material comes from the target's or source's recolor first, see materialNames)
-//   byte 13     0x01 the material is a TV channel (its video isn't played yet). Snapshot, portrait
-//               and painting modes (0x02-0x20) are not done yet
-// A mesh group name that is missing or empty means the whole model. Always true.
+//   byte 8, 9-10 the source object whose tables flags 0x01 and 0x08 read, else the tree owner's (an
+//               own material is looked up in the recolor first, see materialNames)
+//   byte 13     0x01 a TV channel (its video isn't played yet), 0x02-0x20 snapshot, portrait and
+//               painting modes, not done yet
+// A missing or empty mesh group name means the whole model. Always true.
 bool Execution::changeMaterial(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     if (o[13] & ~kMaterialIsTvChannel) {
@@ -188,8 +186,7 @@ bool Execution::soundEvent(const bhav::Instruction& in, Frame& f) {
     return true;
 }
 
-// Effect Stop/Start: starts or stops visual effects on an object. Always true, unless it is an error.
-// Operands:
+// Effect Stop/Start: starts or stops visual effects on an object. True unless an error. Operands:
 //   byte 0       mode: 0 start, 1 start hard, 2 stop, 3 stop hard, 4 stop all of the primitive's, 5 forget kind 7,
 //                6 play once, 7 list, 8 forget the primitive's, 9 forget all, 10-13 set state 0-3, 14 stop all,
 //                15 start, kept from stops of all
@@ -210,8 +207,7 @@ bool Execution::soundEvent(const bhav::Instruction& in, Frame& f) {
 //                0x2000 a want of the Sim in bytes 12-14: its fears when temp 4 isn't 0, temp 5 which.
 //   byte 12, 13-14  the atlas frame, object or neighbor (owner, data)
 //   byte 15      the texture's entry of string table 0x95: the object's own, its semi-global's or the global one
-// Lists and setting a state are not done yet. An object part of a bigger one plays on the lead object's node, with
-// the bones of its own slots.
+// A multi-tile part plays on the lead object's node, with its own slots' bones. Lists and states are not done yet.
 bool Execution::effectStopStart(const bhav::Instruction& in, Frame& f) {
     constexpr std::uint16_t kEffectNames = 0x8F, kEffectTextures = 0x95;
     constexpr std::uint16_t kFlagObjectPicture = 0x4, kFlagNeighborPicture = 0x10, kFlagTextureAndFrame = 0x20, kFlagToken = 0x100, kFlagMemoryPicture = 0x200,
@@ -415,16 +411,14 @@ bool Execution::effectStopStart(const bhav::Instruction& in, Frame& f) {
     return true;
 }
 
-// Cinematic: asks the camera to play a cinematic with the actors listed in object array 0 of an
-// object, usually a "Temp Array" object. True when the cinematic starts, and it never waits.
-// Operands:
+// Cinematic: plays a camera cinematic with the actors in object array 0 of an object (usually a
+// "Temp Array"). True when it starts, and it never waits. Operands:
 //   bytes 0-1   cinematic: entry (counted from 1) of string table 0x97, or with byte 5 bit 0x10
 //               the variable in bytes 6, 7-8
 //   byte 5      flags: 0x20 the global names, 0x40 the semi-global ones, else the tree's own
 //   byte 9      the variable holding the actors' object, data in bytes 10-11
-// An object that doesn't exist or has no object arrays is an error. The engine plays no cinematics
-// yet, so none starts and this is false. The scripts then go on without one (a wedding shows the
-// Sim in a picture-in-picture instead).
+// A missing object or one without object arrays is an error. No cinematics play yet, so it is false
+// and scripts go on without one (a wedding shows a picture-in-picture instead).
 bool Execution::cinematic(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     const std::int16_t actorsId = read(o[9], static_cast<std::uint16_t>(o[10] | o[11] << 8), f);
@@ -441,12 +435,11 @@ bool Execution::cinematic(const bhav::Instruction& in, Frame& f) {
     return false;
 }
 
-// Dialog. Operands: byte 5 the type, byte 7 bit 0: show it and go on, bits 4-6: the temp holding a
-// notification's id (or a yes-no-cancel answer). Text notifications get a new id in that temp and
-// go on. Stop is true when the notification was shown (and removes it), Modify and Append when it
-// is shown. Tutorial popups and hints go on. "Set Baby Name" waits for the player when someone shows
-// it (see babyNameDialog). Other dialogs wait a tick and are answered with their first button
-// (true). Pickers need the stack object to have object arrays. Nothing else is shown yet.
+// Dialog. Byte 5 is the type, byte 7 bit 0 shows it and goes on, bits 4-6 name the temp holding a
+// notification's id (or a yes-no-cancel answer). A text notification puts a new id there and goes on.
+// Stop is true when it was shown (and removes it), Modify and Append when it is shown. Tutorial popups
+// and hints go on. "Set Baby Name" waits for the player when shown (see babyNameDialog). Others wait a
+// tick and answer their first button (true). Pickers need the stack object to have object arrays.
 std::optional<bool> Execution::dialog(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     const std::uint8_t type = o[5];
@@ -628,31 +621,29 @@ std::optional<Execution::CreateSpot> Execution::tileInFront(const SimObject* ref
                       Tile{static_cast<std::uint8_t>(x), static_cast<std::uint8_t>(y), static_cast<std::uint8_t>(ref->level)}};
 }
 
-// Operands:
-//   bytes 0-3  GUID
-//   byte 4     where to create the object
-//   byte 5     flags
-//   byte 6     local
-//   byte 9     slot
-//   byte 10    more flags
-// With flag 0x04 the object is the Sim of the neighbor whose id is in the stack object (the GUID
-// and flags 0x40 and 0x80 are not used). The new object becomes the stack object.
-// Placements:
-// - 1 "on top of me" and 2 "in my hand": both into my slot 0, the game treats them alike, and my
-//   tile must pass the tile tests.
-// - 4 and 0xA: into slot byte 9 of the stack object or of the object in temp 0 (false when there
-//   is none, its tile must pass the tile tests).
-// - 3: in front of the stack object (see tileInFront).
-// - 9: next to me (see tileBeside, the turn in local byte 10).
+// A new object is born at the game clock: object data 0x2D year, 0x2E month, 0x2F day, 0x18 hour and 0x15 minute.
+// Food reads them to tell how old it is, and the object reset keeps them.
+void Execution::stampBirth(SimObject& created) const {
+    created.data[0x2D] = globals_[global::kYear];
+    created.data[0x2E] = globals_[global::kMonth];
+    created.data[0x2F] = globals_[global::kDayOfMonth];
+    created.data[0x18] = globals_[global::kHour];
+    created.data[0x15] = globals_[global::kMinute];
+}
+
+// Create New Object Instance. Bytes 0-3 GUID, byte 4 where, byte 5 flags, byte 6 local, byte 9 slot,
+// byte 10 more flags. With flag 0x04 it is the Sim of the neighbor id in the stack object (GUID and
+// flags 0x40 and 0x80 unused). The new object becomes the stack object. Placements (byte 4):
+// - 1 "on top of me" and 2 "in my hand": both into my slot 0.
+// - 4 and 0xA: into slot byte 9 of the stack object or the object in temp 0 (false without one).
+// - 3: in front of the stack object (see tileInFront). 9: next to me (see tileBeside, turn in local
+//   byte 10). 5 "underneath me": my exact place and level, not supported off the lot.
+// - "below object in local" or "in param 0": that object's exact place, false without one.
 // - "out of world".
-// - "below object in local" or "in param 0": at the exact place of the object whose id is there,
-//   false when there is none.
-// - 5 "underneath me": at my exact place and level. Off the lot it is not supported.
-// The spot's tile must pass the tile tests (see tileRefuses).
-// A slot that is missing or already holds something fails the game's fit test: the object is made
-// and started, then deleted, and the primitive is false.
-// Not done yet: the rest of the game's fit test (at the spot, and in a slot its size, nesting, the
-// slot's kinds and the container's own test), and placement 9's wall test.
+// The spot's tile, or the container's, must pass the tile tests (see tileRefuses). A missing or full
+// slot fails the fit test: the object is made, started, deleted, and the primitive is false.
+// Not done yet: the rest of the fit test (at the spot, and a slot's size, nesting, kinds and the
+// container's own test), and placement 9's wall test.
 bool Execution::createObject(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     const std::uint8_t flags = o[5];
@@ -754,6 +745,7 @@ bool Execution::createObject(const bhav::Instruction& in, Frame& f) {
     }
 
     SimObject& created = world().create(type->group, type->definition, containerSlotsOf(code_, *type));
+    stampBirth(created);
     // An object made out of the world is in no room, so its room (object data 0x1D) is -1. Scripts
     // such as a Sim's motive checks skip their work while it is.
     if (o[4] == kPlaceOutOfWorld) {
@@ -803,6 +795,7 @@ bool Execution::createParts(const ObjectType& master, std::uint8_t placement, st
     parts.reserve(types.size());
     for (const ObjectType* type : types) {
         parts.push_back(&world().create(type->group, type->definition, containerSlotsOf(code_, *type)));
+        stampBirth(*parts.back());
         parts.back()->data[kRoomDataField] = -1;  // made out of the world, so in no room
     }
     SimObject& lead = *parts.front();
@@ -896,12 +889,10 @@ bool Execution::refresh(const bhav::Instruction& in) {
     return true;
 }
 
-// Runs a Lua script. Entry [bytes 2-3] (counted from 1) of string table 0x130 names it, looked up
-// in the code owner's group when byte 4 bit 1 is set, else in its semi-global group with bit 2,
-// else in the global group. With byte 4 bit 0 the script is the one of that name. Without it the
-// entry's description is the script's Lua source (kept as "<name>_0x<group>" once compiled). With
-// byte 4 bit 3 the script gets three parameters (owner, data) from bytes 6-8, 9-11 and 12-14. The
-// primitive's result is the script's return value. The other bits of byte 4 and byte 5 are not used.
+// Runs a Lua script, returning its result. Entry bytes 2-3 (from 1) of the string table in bytes 0-1
+// (0x130) names it, in the code owner's group with byte 4 bit 1, its semi-global group with bit 2,
+// else global. Bit 0: the script of that name, else the entry's description is the Lua source (kept
+// as "<name>_0x<group>"). Bit 3: three parameters (owner, data) from bytes 6-8, 9-11 and 12-14.
 bool Execution::luaScript(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     LuaRuntime* scripts = world().scripts();
@@ -1005,9 +996,8 @@ int Execution::scriptRunTree(const std::string& name, std::int16_t stackObject, 
     }
 }
 
-// Message: hands six values to objects' message handlers (OBJf entry 0x24), each run at once on my
-// stack, as me, with the receiver as stack object and the message as its args. The handlers'
-// results don't count. Operands:
+// Message: runs objects' message handlers (OBJf entry 0x24) at once on my stack, with the receiver as
+// stack object and six values as args. Their results don't count. Operands:
 //   byte 15, 1-2  message value 0 (owner, data), value 1 is my stack object, 2 is byte 8,
 //                 3 and 4 are (byte 9, 10-11) and (byte 12, 13-14), 5 is my temp 0
 //   byte 4        flags: bit 1 one receiver, the object (byte 5, 6-7), true. Bit 0 the room
@@ -1092,7 +1082,8 @@ bool Execution::message(const bhav::Instruction& in, Frame& f) {
     return sent;
 }
 
-// On Timer: sets, changes or removes a timer on the stack object (see object_timer.hpp). Operands:
+// On Timer: sets, changes or removes a timer on the stack object (see object_timer.hpp). Always
+// true. Operands:
 //   bytes 0-1    ticks until it runs out (or my temp 1 with flag bit 3)
 //   bytes 3-4    the tree it runs
 //   byte 5       flags: bit 0 the timer gets this tree's params instead of the three values,
@@ -1100,7 +1091,6 @@ bool Execution::message(const bhav::Instruction& in, Frame& f) {
 //   byte 6, 7-8 / 9, 10-11 / 12, 13-14  the three values (owner, data)
 //   byte 15      0 set (the new timer's id goes to my temp 0), 1 change, else remove the
 //                timer whose id is in my temp 0
-// Always true.
 bool Execution::onTimer(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     const std::uint8_t flags = o[5];
@@ -1184,8 +1174,8 @@ bool Execution::notifyOutOfIdle() {
 //   bytes 4-5  object id (data), byte 6 its owner
 //   byte 7     flags: 0x04 "does this GUID exist", 0x02 neighbor id, 0x01 compare the GUID the
 //              object's type was cloned from (OBJD fields 0x46-0x47) instead of its own
-// A part of a multi-tile object that doesn't match is also true when its master's GUID matches,
-// so a test for the sunken hot tub takes any of its seats. A missing object is false, not an error.
+// A multi-tile part is also true when its master's GUID matches (any seat of the sunken hot tub).
+// A missing object is false, not an error.
 bool Execution::testObjectType(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     const std::uint32_t guid = readGuid(o);

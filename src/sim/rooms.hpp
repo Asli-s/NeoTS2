@@ -86,12 +86,10 @@ public:
     WallOutline() = default;
     explicit WallOutline(const std::vector<WallPiece>& pieces);
 
-    // Room field 6: whether more than half of the outline round room `room` is greenhouse walls
-    // (fences whose GUID is in `greenhouse`). The outline is the face on the room's side of the
-    // segment nearest a point in the room's first tile (lowest level, then x, then y), looked for
-    // on that tile's edges and at its nearest corner, a level lower when none is there. Segments
-    // the game finds outside this layer are not known yet. Of two corner segments as near, the
-    // one the game takes is not known either.
+    // Room field 6: whether over half of room `room`'s outline is greenhouse fences (GUIDs in
+    // `greenhouse`). The outline starts at the segment nearest the room's first tile (lowest level,
+    // then x, then y), on its edges or nearest corner, else a level lower. Not known yet: segments
+    // outside this layer, and which of two equally near corner segments the game takes.
     bool mostlyGreenhouse(const RoomMap& rooms, std::int32_t room, const std::set<std::uint32_t>& greenhouse) const;
 
 private:

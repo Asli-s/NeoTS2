@@ -20,13 +20,11 @@ namespace ts2::sim {
 // may walk over (flowerbed edging) don't.
 using FenceBlocks = std::function<bool(std::uint32_t guid)>;
 
-// The route items of one level's walls, from the room wall graph and its coverings, as the game adds
-// them: per wall piece a thin solid core and a padded copy grown on every side (fences use their own
-// pair of types), and a costly square at every wall end and at every point where the walls leave a gap
-// wider than 1.05 pi between neighbours in angle order. A diagonal piece is a row of small
-// squares corner to corner across its tile, each with its padded copy. Diagonal pieces are kept only
-// on the lot's `width` by `height` tiles (route x and y), one per tile and direction, so a broken file
-// can't make millions of them.
+// The route items of one level's walls: per piece a thin solid core and a padded copy (fences have
+// their own pair of types), and a costly square at each wall end and where neighbouring walls leave a
+// gap wider than 1.05 pi. A diagonal piece is a row of small squares across its tile, each padded.
+// Diagonals are kept only on the lot's `width` by `height` tiles, one per tile and direction, so a
+// broken file can't make millions of them.
 std::vector<RouteItem> wallRouteItems(const wallgraph::WallGraph& rooms, const std::vector<walllayer::Entry>& coverings, int level,
                                       const FenceBlocks& fenceBlocks, int width, int height);
 
@@ -37,15 +35,12 @@ using PostFootprint = std::function<std::optional<RouteRect>(std::uint32_t fence
 // The route items of one level's fence posts: the post's footprint and a padded copy around it.
 std::vector<RouteItem> postRouteItems(const std::vector<fencepostlayer::Post>& posts, int level, const PostFootprint& footprint);
 
-// The route items of one level's floors: a tile for each floored tile (on the ground level, every lot
-// tile, bare ground costing a little more and roads more still), and a thin strip along each floor
-// edge that keeps Sims back from it. `floors` is the lot's floor grid (pattern ids per quarter tile)
-// and `patterns` its pattern names. `width` and `height` are the lot's size in route tiles. `level`
-// counts from the ground storey (0). `lowestLevel` is the level the floor grid starts at (-1 on lots
-// with a level below the ground). `heights` (corner heights) and `surface` (grid 21) find the ground
-// tiles under a raised floor, which block as its foundation. Without them no tile is a foundation.
-// `water` (the water height at each corner) blocks a ground tile with a corner under water, as a
-// pond's are.
+// The route items of one level's floors: a tile per floored tile (every lot tile on the ground, bare
+// ground costing a little more and roads more still), and a strip along each floor edge keeping Sims
+// back. `floors` holds pattern ids per quarter tile, `patterns` their names, and `level` counts from
+// the ground storey (0), the grid starting at `lowestLevel` (-1 with a basement). `heights` (corner
+// heights) and `surface` (grid 21) find ground tiles under a raised floor, which block as foundation.
+// `water` (height per corner) blocks a ground tile with a corner under water, as a pond's are.
 std::vector<RouteItem> floorRouteItems(const array3d::Array3D& floors, const array3d::Array3D* heights, const array3d::Array3D* surface,
                                        const std::map<std::uint16_t, stringmap::Entry>& patterns, int level, int lowestLevel, int width,
                                        int height, const terrain::Array2D* water = nullptr);

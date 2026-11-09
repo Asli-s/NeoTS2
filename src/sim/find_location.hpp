@@ -29,12 +29,10 @@ struct FoundLocation {
     std::optional<std::int16_t> facing;  // none: the object keeps its own
 };
 
-// The game's walk: ring by ring out from the start tile, the first tile passing the checks. With a
-// start direction the walk goes round from that side, and moves to the tile in front of the start
-// point when the start tile isn't that way. With a line direction it walks that line instead. With
-// allowed facings, every tile that passes the other checks draws a random number 0-7, where its
-// facing tries begin, and each try goes through the placement test (see placementCode), which tests
-// a placed Sim as a walking Sim's place is.
+// The first tile passing the checks, ring by ring out from the start tile. A start direction starts
+// the rings on that side (from the tile in front when the start tile isn't that way), a line direction
+// walks that line instead. With allowed facings, each passing tile draws 0-7 for its first facing try,
+// and each try runs the placement test (see placementCode), which tests a Sim as a walking Sim.
 // Not checked yet: blocked tiles and tiles the player can't edit.
 [[nodiscard]] std::optional<FoundLocation> findLocation(const World& world, const SimObject& placed,
                                                         const LocationSearch& search, SimRandom& rng);

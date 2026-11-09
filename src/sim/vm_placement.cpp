@@ -2,14 +2,13 @@
 
 namespace ts2::sim::vm_detail {
 
-// Operands:
-//   byte 0     mode: 1 takes the object out of its container's slot and out of the world and is
-//              true (a Sim getting on a school bus goes this way, the game does more for multi-tile
-//              objects and Sims, not known yet), 0 searches the reference's room,
-//              then any room, 2 only the room, 3 the line the reference faces, in its room, 4 the
-//              same turned a quarter, 7 by the reference's routing slot, 8 by a global slot (bytes
-//              10-11), 5 and 6 by the reference's routing slot whose number is in the param (5) or
-//              local (6) that bytes 10-11 name. Any other mode is not kept yet
+// Find Location For. Operands:
+//   byte 0     mode: 0 the reference's room, then any room, 1 out of its slot and the world and true
+//              (a Sim boarding the school bus, more for multi-tile objects and Sims not known yet),
+//              2 only the room, 3 the line the reference faces, in its room, 4 the same turned a
+//              quarter, 7 by the reference's routing slot, 8 by a global slot (bytes 10-11), 5 and 6
+//              by the reference's routing slot numbered in the param (5) or local (6) bytes 10-11
+//              name. Other modes are not kept yet
 //   byte 1     local holding the reference object (flag 0x01)
 //   byte 2     flags: 0x01 reference from the local, 0x02 don't prefer empty tiles, 0x04 tiles the
 //              player can edit (not checked yet), 0x08 both objects from bytes 4-9 (else the stack
@@ -159,17 +158,15 @@ bool Execution::placeBySlot(const std::array<std::uint8_t, 16>& o, std::int16_t 
     return false;
 }
 
-// Operands:
+// Snap: moves me to the stack object's routing slot (from 0) and is true. Operands:
 //   bytes 0-1    the slot number, or (mode 0) the param holding it
 //   bytes 2-3    mode: 0 slot number in a param, 3 slot number (from temp 0 with byte 4 bit 3),
-//                4 a global slot numbered the same way, while 1 into the stack object and 2 in front of
+//                4 a global slot numbered the same way. 1 into the stack object and 2 in front of
 //                it are not kept yet
 //   byte 4       0x02 ask a Sim in the way to move, 0x08 slot number in temp 0, 0x10 test only
-//   bytes 10-11  1: put my own slot (temp 1) there instead of me (not kept yet)
-// Moves me to a routing slot of the stack object, its routing slots counted from 0, and is true.
-// It is false when a check refuses, my object data 0x34 then saying why (2: not the same room, 4: off
-// the lot, as a car reaching the lot's edge finds, 14: something in the way). Moving takes me out of
-// what I was in: a Sim standing up from a seat is no longer in it (data 2).
+//   bytes 10-11  1: check as if I stood at the stack object's routing slot in temp 1
+// False when a check refuses, my object data 0x34 saying why (2 not the same room, 4 off the lot as a
+// car at the lot's edge, 14 something in the way). Moving takes me out of my container (data 2).
 bool Execution::snap(const bhav::Instruction& in, Frame& f) {
     constexpr std::uint8_t kSlotInTemp0 = 0x08, kTestOnly = 0x10;
     const auto& o = in.operands;
@@ -280,12 +277,10 @@ std::optional<ModelBone> Execution::modelJoint(const SimObject& object, const st
 //   byte 3, 4-5  the container (owner, data)
 //   byte 6       the slot, or with flag bit 0 my temp 0
 //   byte 11      flags: bit 0 see above, bit 1 only test, bit 2 reset the object's root bones
-// False when it can't go there, my data 0x34 then saying why (the game's code + 2): 0x11 a
-// multi-tile object, 0x0E no such slot, 0x0C the slot holds another object or the object holds
-// the container, 0x0F container data 0x1C below object data 0x1B. Not run yet: the slot's
-// height mask (0x25), the container's own say (its OBJf entry 0x34) and the bone reset (PR-27).
-// The object leaves its old slot and the world's tiles, and takes the container's place,
-// level and facing. Data 2 and 3 name the container and slot.
+// The object leaves its old slot and tiles and takes the container's place, level and facing, data
+// 2 and 3 naming container and slot. False when it can't, my data 0x34 saying why (code + 2): 0x11
+// multi-tile, 0x0E no such slot, 0x0C slot taken or the object holds the container, 0x0F container
+// data 0x1C below object data 0x1B. Not run yet: slot height mask (0x25), OBJf entry 0x34, bone reset (PR-27).
 bool Execution::snapInto(const bhav::Instruction& in, Frame& f) {
     constexpr std::size_t kSnapResultField = 0x34, kSnapOtherField = 0x36;
     constexpr std::size_t kContainerField = 2, kCapacityField = 0x1C, kSizeField = 0x1B;

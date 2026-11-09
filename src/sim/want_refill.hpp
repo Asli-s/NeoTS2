@@ -47,11 +47,20 @@ struct WantContext {
 };
 
 // Queues the Sim (a neighbor id) for new wants and fears. A Sim already queued keeps the lowest
-// level asked for (see WantsState::queue).
+// level asked for (see WantsState::queue). A Sim not queued yet has its lists saved for levels 0 and 1.
 void queueWantRefill(World& world, std::int16_t neighbor, int level);
 
-// The wants manager's step each tick: its clock moves on 2 sim seconds, and one queued Sim gets
-// its new wants and fears (the selected Sim first, then by neighbor id).
+// Saves the Sim's wants and fears for its next refill and sets their times to 0. A satisfied want
+// does this for a Sim not queued yet, before the want leaves its place.
+void saveWantsForRefill(World& world, std::int16_t neighbor);
+
+// Whether the Sim waits for new wants and fears: queued, or its refill has not filled them yet.
+bool wantRefillWaiting(World& world, std::int16_t neighbor);
+
+// The wants manager's step each tick: its clock moves on 2 sim seconds and the refill moves on one
+// stage. A refill takes a queued Sim (the selected Sim first, then by neighbor id), then makes the
+// candidates, scores and sorts them, fills the empty places, and ends a tick later, so the next Sim
+// is taken on the tick after that.
 void stepWants(const WantContext& context);
 
 // Forgets which tree node filled a place of the Sim's wants (or fears) once the place empties.

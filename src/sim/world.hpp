@@ -237,6 +237,9 @@ struct SimObject {
     // Its recolor's materials, entry n + 1 standing in for entry n of its material names (string
     // table 0x88) when not empty. Read from the lot's save.
     std::vector<std::string> materialNames;
+    // The model a script last gave it by changing its graphic (object data 0), as its model names
+    // (string table 0x85) give it. Empty until then, and the saved or created model shows. Not saved yet.
+    std::string model;
     std::uint32_t group = 0;
     objd::ObjectDefinition definition;
     std::array<std::int16_t, kAttributeCount> attributes{};
@@ -511,10 +514,12 @@ public:
     // it and it is still drawn. The game does this to a saved Placeholder or TemplatePerson as the
     // lot loads. A later remove() deletes it at the end of that tick.
     void keepUntilUnload(SimObject& object);
-    // Goes up when an object comes or goes, or a script writes an object's own definition fields, which
-    // hold its GUID. What was worked out from the objects and their types stands until it changes.
+    // Goes up when an object comes or goes, a script writes an object's own definition fields, which
+    // hold its GUID, or gives it another model. What was worked out from the objects and their types
+    // stands until it changes.
     std::uint64_t objectsVersion() const { return objectsVersion_; }
     void definitionWritten() { ++objectsVersion_; }
+    void modelChanged() { ++objectsVersion_; }
     void purge();
     // The removed objects purge() has yet to free, by id.
     std::vector<std::int16_t> removedIds() const;

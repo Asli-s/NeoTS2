@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <cstdlib>
 #include <exception>
 #include <system_error>
 #include <utility>
@@ -148,6 +149,8 @@ std::map<int, std::array<std::int32_t, 7>> parseAspirationLevels(std::string_vie
         return out;
     }
     const auto block = tuning.substr(start, stop - start);
+    // An age with an unknown name keeps the previous age's table, so its thresholds go into that one. An age that
+    // appears twice goes on with the values it already has.
     std::array<std::int32_t, 7>* age = nullptr;
     for (auto at = block.find('<', 1); at != std::string_view::npos; at = block.find('<', at + 1)) {
         const auto end = block.find('>', at);
@@ -156,25 +159,32 @@ std::map<int, std::array<std::int32_t, 7>> parseAspirationLevels(std::string_vie
         }
         const auto tag = block.substr(at, end - at);
         if (tag.starts_with("<age ")) {
-            age = nullptr;
             for (const auto& [name, code] : kAges) {
                 if (quoted(tag, "name") == name) {
                     age = &out[code];
-                    age->fill(0);
+                }
+            }
+        } else if (tag.starts_with("</age") && age != nullptr) {
+            // Each threshold ends up above the one before it.
+            for (std::size_t i = 0; i + 1 < age->size(); ++i) {
+                if ((*age)[i + 1] <= (*age)[i]) {
+                    (*age)[i + 1] = (*age)[i] + 1;
                 }
             }
         } else if (tag.starts_with("<threshold ") && age != nullptr) {
-            const auto name = quoted(tag, "name");
-            const auto score = quoted(tag, "score");
-            std::int32_t value = 0;
-            if (std::from_chars(score.data(), score.data() + score.size(), value).ec != std::errc{}) {
-                continue;
-            }
+            // A threshold without a known name is stored as the first one. A missing or unreadable score counts
+            // as the lowest score, and the number may be written in decimal, hex or octal.
+            std::size_t index = 0;
             for (std::size_t i = 0; i < std::size(kThresholds); ++i) {
-                if (name == kThresholds[i]) {
-                    (*age)[i] = std::clamp(value, kLowest, kHighest);
+                if (quoted(tag, "name") == kThresholds[i]) {
+                    index = i;
                 }
             }
+            long value = kLowest;
+            if (tag.find("score=\"") != std::string_view::npos) {
+                value = std::strtol(std::string(quoted(tag, "score")).c_str(), nullptr, 0);
+            }
+            (*age)[index] = static_cast<std::int32_t>(std::clamp<long>(value, kLowest, kHighest));
         }
     }
     return out;

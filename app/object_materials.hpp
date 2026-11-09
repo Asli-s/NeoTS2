@@ -58,12 +58,10 @@ public:
     // What the last update changed: scene instance and its materials (see Renderer::setMaterials).
     const std::vector<std::pair<std::size_t, std::vector<int>>>& changed() const { return changed_; }
 
-    // Where joint `joint` (lower case) of the object's model `model` sits at `nowMs` as the object's
-    // clip moves it, in the model's space. Joints the clip doesn't move are where the object was last
-    // drawn with them (`held`, see ScenePose::held), else at rest. Nullopt when it
-    // plays none or the model has no such joint. The clips name a skeleton of their own ("chairdining"
-    // for every dining chair), but drive the joints of the model that plays them. `bones` gets every
-    // named joint as posed, in the model's space, by its name's hash.
+    // Where `joint` (lower case) of model `model` sits at `nowMs` as the object's clip moves it, in model
+    // space. Joints the clip doesn't move stay as last drawn (`held`, see ScenePose::held), else at rest.
+    // Nullopt when no clip plays or the joint is missing. Clips name their own skeleton ("chairdining" for
+    // every dining chair) but drive the playing model's joints. `bones` gets every named joint's pose by name hash.
     std::optional<ts2::scene::Transform> jointPose(const ts2::sim::SimObject& object, double nowMs,
                                                    ts2::scene::AnimationLibrary& animations, const std::string& model,
                                                    const std::string& joint,

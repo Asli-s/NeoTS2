@@ -9,13 +9,10 @@
 
 namespace ts2::sim {
 
-// How the game plans a Sim's walk along a path, and where the Sim is along it at a moment.
-//
-// A walk is a start clip, a walk loop and a stop clip laid along the path by distance. Each part
-// mixes a short and a long clip so that its travel fits the distance it covers, and each clip's
-// time follows the distance walked, not the clock, so the feet never slide. The Sim moves along
-// the path by a speed curve: the start clip's own speed, a ramp up to the walk's speed, a hold, a
-// ramp down, and the stop clip's own speed. Distances are in tiles, times in milliseconds.
+// A walk is a start clip, a walk loop and a stop clip laid along the path by distance, each mixing a
+// short and a long clip to fit its distance. Clip time follows distance walked, so feet never slide.
+// Speed runs: the start clip's own, a ramp to the walk's speed, a hold, a ramp down, the stop clip's.
+// Distances are in tiles, times in milliseconds.
 
 // What the planner reads from a locomotion clip's header.
 struct LocoClip {
@@ -124,12 +121,10 @@ struct StepClip {
 };
 using StepClipAt = std::function<std::optional<StepClip>(float angle)>;
 
-// Plans a step of `length` tiles in the direction `angle` off the facing, as the game does: the
-// step clip for that direction, mixed with the next one 45 degrees on when the direction lies
-// between them, each clip's short and full lengths mixed to cover the move (with the step on the
-// spot, `inPlace`, for moves shorter than the short one). `scale` is the Sim's size against its
-// skeleton's own (teens 0.94), which shortens how far the clips carry it. The Sim moves at a
-// constant speed. None when no step clip reaches that far (the move is walked instead).
+// Plans a step of `length` tiles at `angle` off the facing, at a constant speed: that direction's step
+// clip, mixed with the next 45 degrees on when between, short and full lengths mixed to cover the
+// move (with `inPlace` below the short one). `scale` (teens 0.94) shortens the clips' travel. None
+// when no step clip reaches that far, and the move is walked instead.
 std::optional<WalkPlan> planStep(float length, float angle, float scale, const StepClipAt& clipAt, const std::optional<LocoClip>& inPlace);
 
 // How long the walk lasts, how far along the path it is after `ms` (up to its length), and how
@@ -171,14 +166,11 @@ constexpr float kSettleWalkPoseMs = 186;
 // How long the walk pose fades in, and out, when it settles a walk.
 float settleWalkPoseFadeMs();
 
-// Stops a walk soon, `ms` into it, as the game does when the walk's route is interrupted. The part
-// playing goes on to the next half of the walk cycle (a start plays to its end). From there the walk
-// set's straight stop clips (`straightStop`, unmirrored) play on the foot that comes down next,
-// mirrored when they start on the other foot. Their short and long clips are mixed to match the walk
-// loop's mix. Their travel is shortened by the Sim's `scale`, unlike a planned walk's stop.
-// The Sim keeps its speed up to the stop, then slows to the stop's own speed, which is scaled
-// against `topLoopSpeed` as the walk's is. Without a stop clip for that foot, the planned stop is
-// dropped and the walk loop plays on to its end.
+// Stops a walk soon, `ms` into it, when its route is interrupted. The playing part goes on to the next
+// half cycle (a start to its end), then `straightStop` plays on the next foot down, mirrored for the
+// other foot, mixed as the loop is, its travel shortened by `scale` (unlike a planned stop). Speed
+// holds to the stop, then falls to the stop's own, scaled against `topLoopSpeed`. Without a stop clip
+// for that foot the planned stop is dropped and the loop plays on to its end.
 enum class StopSoon {
     Soon,       // the walk now ends as above
     AsPlanned,  // it goes on as planned: already in its stop, or a step

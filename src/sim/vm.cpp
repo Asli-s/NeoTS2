@@ -7,15 +7,13 @@ namespace ts2::sim {
 
 namespace vm_detail {
 
-// Run Tree by Name. The tree name is an entry of string table 0x12F, counted from 1 (byte 4, plus
-// 0x100 with flag 0x40). Modes (byte 5):
-//   0 run in my stack, 2 push onto my stack as an action: one of the stack object's trees
-//   3: one of the trees of the object type whose GUID is in temps 0 (low) and 1 (high), run
-//      with the stack object (or me, without one) as its stack object
-// The name comes from the global table (flag 0x01), the code owner's semi-global one (0x02) or its
-// own. The tree is looked up in the object's group, then its semi-global group (unless flag 0x08),
-// then the global one (unless flag 0x04).
-// Modes 0 and 1 run the tree to its end at once, as me or as the stack object (see runAtOnce).
+// Run Tree by Name. Byte 4 is the name's entry in string table 0x12F, from 1 (plus 0x100 with flag
+// 0x40), in the global table (flag 0x01), the code owner's semi-global one (0x02) or its own.
+// Mode (byte 5) 0 and 1 run the tree to its end at once, as me or as the stack object (see
+// runAtOnce), and 2 pushes it onto my stack as an action. These look in the running tree's group.
+// Mode 3 runs a tree of the object type whose GUID is in temps 0 (low) and 1 (high), with the stack
+// object (or me, without one) as stack object. The group's semi-global group comes next (unless
+// flag 0x08), then the global one (unless 0x04).
 std::optional<Execution::NamedCall> Execution::namedTree(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     const std::uint8_t mode = o[5];

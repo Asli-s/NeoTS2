@@ -80,6 +80,8 @@ int ObjectMaterials::builderMaterial(int index, ts2::scene::Scene& scene) {
     ts2::scene::Material m = builder_.scene().materials[static_cast<std::size_t>(index)];
     m.image = image(m.image, scene);
     m.normalMap = image(m.normalMap, scene);
+    m.mask = image(m.mask, scene);
+    m.detail = image(m.detail, scene);
     m.envCube = envCube(m.envCube, scene);
     scene.materials.push_back(std::move(m));
     return builderMaterials_[index] = static_cast<int>(scene.materials.size() - 1);

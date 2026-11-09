@@ -41,12 +41,11 @@ struct Seat {
     std::vector<SeatSlot> slots;  // its routing slots, in order
 };
 
-// How a goal spot is kept clear of objects, as the game tests it:
-// - Square: the Sim's square there (0.2 tiles across, its edges snapped as footprints are) must not
-//   overlap an object's footprint (seat and bone-slot goals, and sweeps no wider than a quarter tile).
-// - Clearance: the spot must lie more than 0.3 tiles from every footprint (wider sweeps), or with
-//   object data 0x28 bit 0x4000 the Square test.
-// - Point: no object's padded footprint covers the spot (placing objects).
+// How a goal spot is kept clear of objects:
+// - Square: the Sim's 0.2-tile square, snapped as footprints are, overlaps no footprint (seat and
+//   bone-slot goals, and sweeps no wider than a quarter tile).
+// - Clearance: over 0.3 tiles from every footprint (wider sweeps), or Square with data 0x28 bit 0x4000.
+// - Point: no padded footprint covers the spot (placing objects).
 enum class GoalFit { Square, Clearance, Point };
 
 // What the goal score reads from around the slot's owner.
@@ -132,12 +131,11 @@ HeldPlace slotPlace(const World& world, CodeSource& code, const SimObject& conta
 // Where the game measures goals around `owner` from (see heldPlace). The rest of `owner` is kept.
 SimObject slotGoalBase(const World& world, CodeSource& code, const SimObject& owner);
 
-// The goals of bone slot `slot` of `owner`: one per joint, at the spot Snap would put the Sim for that
-// joint (`joints` in the order of slotJointNames, and a joint the model lacks gives no goal), in route
-// coordinates. Scored 100, + 25 unless the goal lies toward a walled side of the owner's tile, + 20 at
-// the Sim's own spot, - 10 near a wall, - 5 with a door on the goal's tile, and a random -10 to 10 when
-// the slot asks, - 30 with another Sim on the spot. A goal behind a wall, right against one or where
-// the Sim can't stand is left out, and noted in `misses`.
+// The goals of bone slot `slot` of `owner`, in route coordinates: one per joint the model has
+// (`joints` in slotJointNames order), where Snap would put the Sim. Score: 100, + 25 unless toward a
+// walled side of the owner's tile, + 20 at the Sim's spot, - 10 near a wall, - 5 with a door on the
+// tile, - 30 with another Sim there, and a random -10 to 10 when the slot asks. Goals behind or right
+// against a wall, or where the Sim can't stand, are left out and noted in `misses`.
 std::vector<RouteGoal> boneSlotGoals(const SimObject& owner, const slot::Entry& slot, std::span<const std::optional<ModelBone>> joints,
                                      const SimObject& sim, const SlotGoalWorld& world, RouteRandom& random,
                                      GoalMisses* misses = nullptr);
@@ -156,27 +154,23 @@ std::vector<RouteGoal> pointSlotGoal(const SimObject& owner, const slot::Entry& 
 std::optional<int> slotGoalFacing(const SimObject& owner, const slot::Entry& slot, float x, float y);
 
 // The goals of a routing slot that isn't a bone slot (an object's own, or a global slot used with
-// `owner`), in route coordinates, in two groups: spots to stand on (weight 10 x the larger of the
-// slot's first and third numbers, 10 when all three are 0) and seats (weight 10 x its second number). The
-// group with the larger weight goes first (seats on a tie), trying at most 100 spots and keeping 48.
-// The other then shares 16 more of each.
-// Standing spots: the game sweeps around the owner in each direction the slot allows (turned with the
-// owner's facing unless the slot's are absolute), from the slot's optimal distance outward by its step
-// within its minimum and maximum, and sideways within 22.5 degrees. Each is scored 100 - 16 x weight x
-// its distance from the optimal - 0.001 x weight x how far sideways, + the standing weight, + 25
-// unless the last direction swept is a walled side of the owner's tile, + 20 at the Sim's own spot, a
-// random -10 to 10 when the slot asks, and the wall, door and Sim terms of boneSlotGoals (the owner
-// counting as any Sim).
-// Seats: the same sweep in whole tiles with a tile of slack offers the objects on each spot's tile.
-// A seat must have a Sit tree, face back along the direction swept, not be for sale or shop stock
-// (object data 0x6A, the for-sale flags, at 0), not be disabled (data 0x57 above 0 or data 0x52 flag
-// 0x04), and hold nobody else in container slot 0 (else `seatTaken` is set). Its first bone slot naming two or more joints gives a goal per joint
-// (twice over, as the game lists them) when the seat also has a Stand tree and the joint lies in the
-// direction's 22.5 degree wedge. Each scores as a bone slot goal from the seat (always + 25, + 20 when
-// the Sim already sits there), then + the seat weight - the straight test's costs from the owner -
-// 16 x weight x its distance from the optimal - 0.01 x weight x how far sideways, and carries the seat
-// when seats outweigh standing.
-// Over the limit the game keeps every seat goal and a random sample of the rest.
+// `owner`), in route coordinates, in two groups: standing spots (weight 10 x the larger of the slot's
+// first and third numbers, 10 when all three are 0) and seats (weight 10 x its second number). The
+// heavier group goes first (seats on a tie), trying at most 100 spots and keeping 48, and the other
+// then shares 16 more. Over the limit every seat goal is kept and a random sample of the rest.
+// Standing: a sweep in each direction the slot allows (turned with the owner unless absolute), from
+// the optimal distance outward by the step within min and max, and sideways within 22.5 degrees.
+// Score: 100 - 16 x weight x distance from optimal - 0.001 x weight x sideways + standing weight,
+// + 25 unless the last direction swept is a walled side of the owner's tile, + 20 at the Sim's spot,
+// a random -10 to 10 when the slot asks, and boneSlotGoals' wall, door and Sim terms.
+// Seats: the same sweep in whole tiles with a tile of slack offers the objects on each tile. A seat
+// needs a Sit tree, faces back along the sweep, has object data 0x6A (for sale) at 0, is not disabled
+// (data 0x57 above 0 or data 0x52 flag 0x04), and holds nobody else in container slot 0 (else
+// `seatTaken` is set). With a Stand tree, its first bone slot of two or more joints gives a goal per
+// joint in the direction's 22.5 degree wedge, listed twice as the game does. Each scores as a bone slot
+// goal from the seat (always + 25, + 20 when the Sim sits there) + seat weight - the straight test's
+// costs from the owner - 16 x weight x distance from optimal - 0.01 x weight x sideways, and carries
+// the seat when seats outweigh standing.
 std::vector<RouteGoal> sweptSlotGoals(const SimObject& owner, const slot::Entry& slot, const SimObject& sim, const SlotGoalWorld& world,
                                       RouteRandom& random, bool* seatTaken = nullptr);
 

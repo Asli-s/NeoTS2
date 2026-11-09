@@ -1,0 +1,83 @@
+#pragma once
+
+#include <cstdint>
+
+// Choice lists of autonomous Sims as the game held them before and after its sort. Each list gives the score bits
+// of every choice in the order the game made them, and the order the game left them in as positions in that list.
+namespace ts2::test_data {
+
+struct SortedChoices {
+    const std::uint32_t* scores;
+    const int* after;
+    int count;
+};
+
+inline constexpr std::uint32_t kScores268[] = {
+    0x39596d6eu, 0x3990c060u, 0x3c76e000u, 0x38e90941u, 0x397e2112u, 0x38b57dabu, 0x396e2e8bu, 0x38e5b564u,
+    0x39c989d9u, 0x3789dc07u, 0x37a2edbfu, 0x37860433u, 0x379ef9e3u, 0x378aabc5u, 0x373b1a81u, 0x376abe36u,
+    0x37a21ce8u, 0x37a21ce8u, 0x379779bcu, 0x3754728bu, 0x379a2762u, 0x373cf070u, 0x3755288cu, 0x379cbf3fu,
+    0x374454d9u, 0x37a0c82eu, 0x376bb76fu, 0x3794bc39u, 0x3789dc07u, 0x37a0c82eu, 0x3749fe61u, 0x37a3341du,
+    0x379fbdf6u, 0x39280000u, 0x39580000u, 0x39480000u, 0x39280000u, 0x39580000u, 0x39480000u, 0x39280000u,
+    0x39580000u, 0x39480000u, 0x391f560eu, 0x39c15c6fu, 0x39dcbf39u, 0x393340d0u, 0x39b83b81u, 0x394dcf28u,
+    0x385472beu, 0x39685d80u, 0x39a02a81u, 0x398d1432u, 0x394c2643u, 0x3984c7b7u, 0x39650bb5u, 0x3a00bab7u,
+    0x3a12f61fu, 0x396eac96u, 0x39eb5bf7u, 0x3992f61fu, 0x388d6fc1u, 0x399ab23bu, 0x39d0d703u, 0x39bbd86cu,
+    0x398d6fc1u, 0x39bbd86cu, 0x399ab23bu, 0x394f3df9u, 0x396c980eu, 0x38c01f15u, 0x38ead0a7u, 0x37e3b30fu,
+    0x391489cfu, 0x391d6ecdu, 0x39081604u, 0x38c1e67bu, 0x390e4fe9u, 0x38d577deu, 0x39e20019u, 0x3a010128u,
+    0x38784f37u, 0x392166f7u, 0x39384302u, 0x3895a047u, 0x38bf305au, 0x37b155a9u, 0x38cfd062u, 0x3902ec3eu,
+    0x38eb85c4u, 0x38ddab13u, 0x38c1f5b1u, 0x39d3d174u, 0x39f1d174u, 0x3868ba2eu, 0x38a85607u, 0x394c4866u,
+    0x3969372fu, 0x38bd60c8u, 0x38f57d75u, 0x37e072b4u, 0x38f03ac5u, 0x3917ad84u, 0x390c47b0u, 0x38d7ae39u,
+    0x3a333b14u, 0x3a4c9d8au, 0x39a62763u, 0x3a287628u, 0x39bec4edu, 0x38c4ec4fu, 0x39e22763u, 0x3a116276u,
+    0x3a007628u, 0x3a0cc4ecu, 0x39bd3b14u, 0x391f560eu, 0x395b1654u, 0x381d2791u, 0x38391acfu, 0x391fc7fcu,
+    0x392ab88cu, 0x38391acfu, 0x395427a2u, 0x3991db3fu, 0x389082d5u, 0x381630d8u, 0x37e7cf27u, 0x380469ceu,
+    0x38aac64bu, 0x38ead0a7u, 0x38020851u, 0x3816f8dbu, 0x381630d8u, 0x37c50d9au, 0x380469ceu, 0x3885003fu,
+    0x38b6e056u, 0x37dc601cu, 0x37ddfedeu, 0x3843ef6bu, 0x388e1bbcu, 0x388e1bbcu, 0x388e1bbcu, 0x37ed4cc3u,
+    0x39820000u, 0x38ba9b82u, 0x38ba9b82u, 0x381eea03u, 0x399e0197u, 0x38a85607u, 0x38e7764au, 0x381f64d4u,
+    0x3820bcacu, 0x3993b13bu, 0x39cb13b1u, 0x379d0be8u, 0x3789dc07u, 0x37860433u, 0x378aabc5u, 0x376abe36u,
+    0x37a21ce8u, 0x37971bd9u, 0x3754728bu, 0x3755288cu, 0x37a0c82eu, 0x376bb76fu, 0x3797578cu, 0x3789dc07u,
+    0x3751ca30u, 0x376d4d0eu, 0x37909b1au, 0x38c72b92u, 0x38c72b92u, 0x38c72b92u, 0x38c72b92u, 0x38c72b92u,
+    0x39120ee3u, 0x39120ee3u, 0x39120ee3u, 0x39120ee3u, 0x39120ee3u, 0x3986709cu, 0x398d1432u, 0x398d1432u,
+    0x398d1432u, 0x390498c5u, 0x390498c5u, 0x390498c5u, 0x390498c5u, 0x390498c5u, 0x394279a9u, 0x394279a9u,
+    0x394279a9u, 0x394279a9u, 0x394279a9u, 0x39b30170u, 0x39dcfe9eu, 0x39dcfe9eu, 0x39dcfe9eu, 0x385577deu,
+    0x385577deu, 0x385577deu, 0x385577deu, 0x385577deu, 0x389c8b1au, 0x389c8b1au, 0x389c8b1au, 0x389c8b1au,
+    0x389c8b1au, 0x3910174fu, 0x392ba9feu, 0x392ba9feu, 0x392ba9feu, 0x3826404eu, 0x3826404eu, 0x3826404eu,
+    0x3826404eu, 0x3826404eu, 0x3873d5c8u, 0x3873d5c8u, 0x3873d5c8u, 0x3873d5c8u, 0x3873d5c8u, 0x38e0706au,
+    0x38fac321u, 0x38fac321u, 0x38fac321u, 0x38526b89u, 0x38526b89u, 0x38526b89u, 0x38526b89u, 0x38526b89u,
+    0x389a4edcu, 0x389a4edcu, 0x389a4edcu, 0x389a4edcu, 0x389a4edcu, 0x390e0896u, 0x391b2f4eu, 0x391b2f4eu,
+    0x391b2f4eu, 0x39389d8au, 0x39389d8au, 0x39389d8au, 0x39389d8au, 0x39389d8au, 0x39876276u, 0x39876276u,
+    0x39876276u, 0x39876276u, 0x39876276u, 0x39f93b14u, 0x39947628u, 0x39947628u, 0x39947628u, 0x37f524d5u,
+    0x38300000u, 0x380249f0u, 0x381af000u, 0x380f706du, 0x388b460fu, 0x388b460fu, 0x388b460fu, 0x37ac27dbu,
+    0x37c8cd20u, 0x37bf02feu, 0x37e372d1u, 0x38230937u,
+};
+inline constexpr int kAfter268[] = {
+    2, 105, 104, 107, 56, 111, 113, 79, 55, 112, 251, 92, 58, 110, 78, 198,
+    197, 196, 44, 91, 62, 154, 8, 43, 108, 114, 65, 63, 46, 195, 106, 50,
+    148, 61, 66, 252, 254, 253, 153, 59, 123, 1, 64, 182, 183, 184, 51, 246,
+    247, 250, 249, 248, 181, 53, 144, 4, 57, 6, 68, 96, 49, 54, 116, 0,
+    40, 37, 34, 122, 67, 47, 95, 52, 35, 41, 38, 193, 192, 191, 194, 190,
+    245, 241, 243, 244, 242, 82, 45, 211, 212, 210, 120, 39, 36, 33, 81, 119,
+    42, 115, 73, 239, 238, 240, 101, 72, 180, 178, 176, 177, 179, 209, 76, 237,
+    102, 74, 188, 187, 186, 185, 189, 87, 225, 224, 226, 98, 100, 88, 70, 129,
+    3, 150, 7, 223, 89, 103, 77, 86, 171, 174, 172, 175, 173, 109, 90, 75,
+    69, 84, 97, 146, 145, 136, 5, 128, 94, 149, 206, 207, 205, 204, 208, 233,
+    234, 232, 236, 235, 83, 124, 142, 140, 141, 60, 261, 260, 262, 135, 80, 219,
+    222, 220, 221, 218, 93, 200, 199, 203, 202, 201, 48, 230, 231, 228, 227, 229,
+    139, 118, 121, 256, 215, 214, 217, 213, 216, 267, 152, 151, 147, 117, 258, 131,
+    125, 132, 259, 134, 127, 257, 130, 255, 143, 126, 71, 266, 99, 138, 137, 264,
+    133, 265, 85, 263, 16, 10, 17, 160, 31, 25, 164, 29, 12, 32, 155, 23,
+    20, 166, 161, 18, 27, 170, 28, 13, 158, 9, 156, 167, 11, 157, 165, 169,
+    159, 26, 15, 22, 162, 19, 163, 168, 30, 24, 21, 14,
+};
+
+inline constexpr std::uint32_t kScores5[] = {
+    0x3c567000u, 0x3c567000u, 0x3c59c000u, 0x39a1b8a0u, 0x390ef83fu,
+};
+inline constexpr int kAfter5[] = {
+    2, 1, 0, 3, 4,
+};
+
+inline constexpr SortedChoices kSortedChoices[] = {
+    {kScores268, kAfter268, 268},
+    {kScores5, kAfter5, 5},
+};
+
+}  // namespace ts2::test_data

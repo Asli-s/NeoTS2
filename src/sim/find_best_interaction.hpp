@@ -49,6 +49,10 @@ struct AutonomyTunings {
 // other code gives 0.02.
 float attenuationOf(const ttab::Interaction& line, const AutonomyTunings& tunings, bool visitor);
 
+// The order gameQsort puts two choices' scores in, best first: 1 when b goes first, -1 when a does,
+// 0 when they are within a ten millionth of each other.
+int compareChoiceScores(float a, float b);
+
 // A candidate Find Best Interaction scored.
 struct FoundInteraction {
     std::int16_t object = 0;
@@ -77,31 +81,20 @@ struct AutonomyOffer {
 //   bytes 0-1  the motives to look for (bit n = motive n), 0 for the Sim's lowest motives
 //   byte 3     0x01 the motives given are for the first pass only, then the lowest motives follow,
 //              0x02 only objects in the room in temp 0, 0x20 distances from the object in temp 1
-//
-// It runs at most once a tick. Each pass takes motives (the Sim's `random worst motive count`
-// lowest that some object advertises, unless given) and looks at the objects advertising them: those
-// placed, not in use (lockouts, interactions disabled, placement flag 2 bit 4) and not skipped by
-// object data 0x38. Each of their advertising lines the Sim's age may use, not a debug line and
-// with an autonomy level up to the Sim's (person data 0x24), becomes a candidate, named by its id
-// (string index). A line on the Sim itself needs flag 0x100000. A candidate's score is how much
-// happier its advertisements would make the Sim, divided by (attenuation * distance + 1), distance
-// in tiles with a floor counting as `floor cost`. Scores below the Sim's minimum (or 0.00001) are
-// dropped. Check trees that change the line run before scoring. Others run only when the candidate
-// comes up for the pick. The lines a check tree offers before scoring (see AutonomyOffer) are scored
-// after each pass's candidates, all of them again in every pass. The pick is the first of the best
-// that passes its check (one of the best `random selection count`, at random). Passes go on while
-// nothing was picked or fewer than `max check tree in fba count` check trees ran, until no motive
-// is left.
-//
-// A Sim remembers its picks for `max duration autonomy memory` ticks. While it remembers one, the
-// same line on the same object scores times the line's memory multiplier. Each look first forgets
-// the picks whose time is up, keeping the latest `autonomy memory count`.
-//
-// Each score is also multiplied by the social bias: the pull of the places near Sims the Sim is
-// attracted to and the push away from Sims it is furious at (see socialBias in the source).
-//
-// Not yet: the rooms the Sim can reach, the interactions of other Sims it could join, ownership,
-// the social bias of groups on an outing, and pets.
+// It runs at most once a tick. Each pass takes motives (the Sim's `random worst motive count` lowest
+// that some object advertises, unless given) and the objects advertising them that are placed, not in
+// use (lockouts, interactions disabled, placement flag 2 bit 4) and not skipped by object data 0x38.
+// Each line the Sim's age may use, not a debug line, with an autonomy level up to the Sim's (person
+// data 0x24), is a candidate. A line on the Sim itself needs flag 0x100000. Its score is the happiness
+// gained / (attenuation * distance + 1), distance in tiles with a floor counting as `floor cost`,
+// times the social bias (see socialBias). Scores below the Sim's minimum (or 0.00001) are dropped.
+// Check trees that change the line run before scoring, others only when the candidate comes up. Lines
+// a check tree offers (see AutonomyOffer) are scored after each pass's candidates, in every pass.
+// The pick is the first of a random best `random selection count` that passes its check. Passes go on
+// while nothing was picked or fewer than `max check tree in fba count` check trees ran.
+// Picks are remembered for `max duration autonomy memory` ticks (the latest `autonomy memory count`),
+// and the same line on the same object then scores times the line's memory multiplier.
+// Not yet: reachable rooms, joining other Sims, ownership, outing groups' social bias, and pets.
 struct InteractionSearch {
     World& world;
     CodeSource& code;

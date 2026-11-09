@@ -385,42 +385,65 @@ bool Execution::expression(const bhav::Instruction& in, Frame& f) {
         }
         return value;
     };
-
-    switch (x.op) {
-    case op::kGreater:             return lhs() > rhs();
-    case op::kLess:                return lhs() < rhs();
-    case op::kEquals:              return lhs() == rhs();
-    case op::kGreaterOrEqual:      return lhs() >= rhs();
-    case op::kLessOrEqual:         return lhs() <= rhs();
-    case op::kNotEqual:            return lhs() != rhs();
-    case op::kAdd:                 set(lhs() + rhs()); return true;
-    case op::kSubtract:            set(lhs() - rhs()); return true;
-    case op::kAssign:              set(rhs()); return true;
-    case op::kMultiply:            set(lhs() * rhs()); return true;
-    case op::kDivide:              { const auto d = nonZero(rhs()); set(lhs() / d); return true; }
-    case op::kModulo:              { const auto d = nonZero(rhs()); set(lhs() % d); return true; }
-    case op::kAnd:                 set(lhs() & rhs()); return true;
-    case op::kOr:                  set(lhs() | rhs()); return true;
-    case op::kXor:                 set(lhs() ^ rhs()); return true;
-    case op::kAbs:                 set(std::abs(rhs())); return true;
-    case op::kIsFlagSet:           return (lhs() & flagBit(rhs())) != 0;
-    case op::kSetFlag:             set(lhs() | flagBit(rhs())); return true;
-    case op::kClearFlag:           set(lhs() & ~flagBit(rhs())); return true;
-    case op::kIncrementAndLess:    return set(lhs() + 1) < rhs();
-    case op::kDecrementAndGreater: return set(lhs() - 1) > rhs();
-    case op::kAssign32:            assign32(x, f); return true;
-    default:
-        throw Stop{Outcome::Unsupported, "expression operator not implemented", hex(x.op, 2)};
+    const auto evaluate = [&]() -> bool {
+        switch (x.op) {
+        case op::kGreater:             return lhs() > rhs();
+        case op::kLess:                return lhs() < rhs();
+        case op::kEquals:              return lhs() == rhs();
+        case op::kGreaterOrEqual:      return lhs() >= rhs();
+        case op::kLessOrEqual:         return lhs() <= rhs();
+        case op::kNotEqual:            return lhs() != rhs();
+        case op::kAdd:                 set(lhs() + rhs()); return true;
+        case op::kSubtract:            set(lhs() - rhs()); return true;
+        case op::kAssign:              set(rhs()); return true;
+        case op::kMultiply:            set(lhs() * rhs()); return true;
+        case op::kDivide:              { const auto d = nonZero(rhs()); set(lhs() / d); return true; }
+        case op::kModulo:              { const auto d = nonZero(rhs()); set(lhs() % d); return true; }
+        case op::kAnd:                 set(lhs() & rhs()); return true;
+        case op::kOr:                  set(lhs() | rhs()); return true;
+        case op::kXor:                 set(lhs() ^ rhs()); return true;
+        case op::kAbs:                 set(std::abs(rhs())); return true;
+        case op::kIsFlagSet:           return (lhs() & flagBit(rhs())) != 0;
+        case op::kSetFlag:             set(lhs() | flagBit(rhs())); return true;
+        case op::kClearFlag:           set(lhs() & ~flagBit(rhs())); return true;
+        case op::kIncrementAndLess:    return set(lhs() + 1) < rhs();
+        case op::kDecrementAndGreater: return set(lhs() - 1) > rhs();
+        case op::kAssign32:            assign32(x, f); return true;
+        default:
+            throw Stop{Outcome::Unsupported, "expression operator not implemented", hex(x.op, 2)};
+        }
+    };
+    // An expression with my or the stack object's graphic (object data 0) on its left gives that
+    // object the model its new graphic names, once the expression has changed it.
+    constexpr std::uint16_t kGraphicField = 0;
+    SimObject* shown = nullptr;
+    if ((x.lhsOwner == owner::kMyData || x.lhsOwner == owner::kStackObjectData) && x.lhsData == kGraphicField) {
+        shown = x.lhsOwner == owner::kMyData ? &me() : &stackData();
     }
+    const std::int16_t graphicBefore = shown != nullptr ? shown->data[kGraphicField] : 0;
+    const bool result = evaluate();
+    if (shown != nullptr && shown->data[kGraphicField] != graphicBefore) {
+        showGraphic(*shown);
+    }
+    return result;
 }
 
-// Operands:
-//   byte 1      operation
-//   byte 2      whose arrays (0 = mine, else the stack object's)
-//   bytes 3-4   array
-//   byte 5, 6-7 value (owner, data)
-//   byte 8, 9-10 iterator (owner, data)
-// Only "find" can return false.
+// The model of an object's graphic is its row of the object's model names (string table 0x85). An
+// empty or missing row leaves the model as it was. The objects in its slots stay in them.
+void Execution::showGraphic(SimObject& object) {
+    constexpr std::uint16_t kModelNames = 0x85;
+    const std::int16_t graphic = object.data[0];
+    const auto name = graphic >= 0 ? code_.string(object.group, kModelNames, static_cast<std::size_t>(graphic)) : std::nullopt;
+    if (!name || name->empty() || *name == object.model) {
+        return;
+    }
+    object.model = *name;
+    world().modelChanged();
+}
+
+// Object array operations. Only "find" can return false. Byte 1 is the operation, byte 2 whose arrays
+// (0 mine, else the stack object's), bytes 3-4 the array, then (owner, data) of the value at byte 5,
+// 6-7 and of the iterator at byte 8, 9-10.
 bool Execution::arrayOperation(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     SimObject* object = &me();

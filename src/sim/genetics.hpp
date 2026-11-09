@@ -28,25 +28,21 @@ constexpr std::uint32_t kHairGene = 1, kSkinAllelesGene = 2, kEyeGene = 3, kFace
 // its recessive value. Other keys are left out.
 Genome genomeFromProperties(const std::map<std::string, std::string>& properties);
 
-// The genes a human baby inherits from parents `a` (the one who carried it) and `b`, drawn as the
-// game draws them on its genetics generator.
-// - Every gene 1-15 either parent has: one allele from each parent, its dominant or recessive
-//   value half the time each, `a` first.
-// - Hair and eyes: the allele whose colour is more dominant (lower "genetic") leads, a tie or an
-//   unknown colour leads by a coin.
-// - Skin: the alleles come from gene 6. Gene 2 keeps them. Gene 6 shows one random catalog skin
-//   whose genetic value lies between theirs, twice. When either value is 0 nothing is blended:
-//   a parent whose two skin values match and who passed a 0 skin leads (a coin when both or
-//   neither do), and gene 6 is that pair too.
-// - Genes 7-15 other than 11 keep both alleles in a random order. Genes 4 and 11 aren't given to the
-//   baby here.
-// - Face regions nose, brow, mouth, eyes, jaw, ears: a region only `b` passes dominant stays
-//   dominant two times in three. Otherwise each parent gives it half the time, dominant when that
-//   parent has it dominant. Gene 5 lists the dominant ones. `facePicks` gets which parent gave each.
 // The face regions a baby's face is blended from, in the order drawn, each from parent `a` (true)
 // or `b`: nose, brow, mouth, cheek, eyes, cheekbones, jaw, ears.
 using FacePicks = std::vector<std::pair<std::string, bool>>;
 
+// The genes a human baby inherits from `a` (the parent who carried it) and `b`, on the game's
+// genetics random generator.
+// - Genes 1-15 either parent has: one allele from each, dominant or recessive by a coin, `a` first.
+// - Hair and eyes: the more dominant colour (lower "genetic") leads, a tie or unknown by a coin.
+// - Skin: gene 2 keeps gene 6's alleles. Gene 6 shows a random catalog skin whose genetic value lies
+//   between theirs, drawn twice. When either value is 0 nothing is blended: a parent with matching
+//   skin values who passed a 0 skin leads (a coin when both or neither do), and gene 6 is that pair.
+// - Genes 7-15 other than 11 keep both alleles in a random order. Genes 4 and 11 aren't given here.
+// - Face regions nose, brow, mouth, eyes, jaw, ears: one only `b` passes dominant stays dominant two
+//   times in three. Otherwise a coin picks the parent, dominant when theirs is. Gene 5 lists the
+//   dominant ones, and `facePicks` gets which parent gave each.
 Genome childGenome(const Genome& a, const Genome& b, const content::GeneticsCatalog& catalog, SimRandom& random,
                    FacePicks* facePicks = nullptr);
 

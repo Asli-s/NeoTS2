@@ -81,18 +81,17 @@ bool takesTheAsk(const World& world, const SimObject& sim, const SimObject& bloc
 
 } // namespace
 
-// A step of my walk is blocked by `blocker`: what the router does next, by these rules. Each block
-// counts. A new blocker, or one met after I have moved half a tile since the last block, starts
-// the count at 1 again. "Moved" means the blocker stands elsewhere than when my route was planned.
-// An object fails the route (result 15). For another Sim partway through a route, when we block each
-// other and this is my only route: up to 2 blocks I step aside, once per route. When it is stepping
-// aside itself, the block doesn't count and the blocked animation plays. Up to 4 blocks I plan again
-// if it has moved, else play "CT - Route Blocked Animation" and plan again. Otherwise the first
-// block plays the animation, a second plans again if it has moved, and later ones are the last
-// resort. For a Sim that stands: one whose Sleep state is below 0 has the first block plan again and
-// later ones fail. Otherwise the first block plans again if it has moved, and up to 3 I ask it to
-// move and wait, when I'm not waiting on a Sim already. When it refuses, I step aside, once per
-// route. After that comes the last resort.
+// What the router does when `blocker` blocks a step of my walk. Blocks are counted, restarting at 1
+// for a new blocker or after I moved half a tile. "Moved" means the blocker stands elsewhere than
+// when my route was planned.
+// - An object fails the route (result 15).
+// - A walking Sim, when we block each other on my only route: up to 2 blocks I step aside, once per
+//   route (if it is stepping aside the block doesn't count and "CT - Route Blocked Animation" plays).
+//   Up to 4 I plan again, after the animation unless it moved. Otherwise the first block plays the
+//   animation, a second plans again if it moved, and later ones are the last resort.
+// - A standing Sim with Sleep state below 0: the first block plans again, later ones fail. Others:
+//   the first plans again if it moved, up to 3 I ask it to move and wait (unless already waiting on
+//   a Sim), and on a refusal I step aside once per route. Then comes the last resort.
 Execution::BlockedStep Execution::routeBlocked(SimObject& sim, Walking& walk, std::int16_t blocker, int depth) {
     RouteBlock& b = walk.block;
     b.step = RouteBlock::Step::None;
@@ -214,12 +213,11 @@ Execution::BlockedStep Execution::blockedAnimation(SimObject& sim, Walking& walk
     return {true, {}};
 }
 
-// Waiting for the Sim I asked to move. The ask is "CT - Route Ask To Move Animation" (global 0x01BC)
-// with that Sim as stack object. Then, while fewer than 126 ticks have passed (420 when its object
-// data 8 has bit 0x40), "CT - Route Waiting Animation" (global 0x01BD) runs, at most once a tick,
-// given how many have run and the distance left to 1.25 tiles in 24ths (at least 1). The route is
-// planned again once that Sim's route in the interaction it was given ends, when either of us leaves
-// the lot, or when we are more than 1.25 tiles apart. When the time is up the router decides again.
+// Waiting for the Sim I asked to move ("CT - Route Ask To Move Animation", global 0x01BC, that Sim as
+// stack object). For up to 126 ticks (420 with its object data 8 bit 0x40), "CT - Route Waiting
+// Animation" (global 0x01BD) runs at most once a tick, given its run count and the distance short of
+// 1.25 tiles in 24ths (at least 1). I plan again when that Sim's given route ends, either of us
+// leaves the lot, or we are over 1.25 tiles apart. When time is up the router decides again.
 Execution::BlockedStep Execution::askToMove(SimObject& sim, Walking& walk, int depth) {
     RouteBlock& b = walk.block;
     const SimObject* other = world().find(b.waitingOn);
@@ -493,13 +491,11 @@ SweepPlace Execution::sweepPlace(const SimObject& who, double ms) {
     return place;
 }
 
-// The look-ahead for other Sims along my walk, run each tick before my step: from the last check to
-// ten sweep steps past now (see sweepStepMs), cut at the walk's end, each other Sim on my level that
-// can reach me in that time moves along its own walk, or stands. The first one I touch (see
-// sweepContact) blocks me. One I already touch at the start is left out while we move apart.
-// A Sim in a container (object data 2 not 0) or with object data 8 bit 0x04 or 0x10 set, on either
-// side, doesn't count. The game also leaves out Sims with a person flag not known yet, and its sizes
-// for pets are not known yet. 0 when the way is clear.
+// The look-ahead for other Sims, run each tick before my step, returning the first Sim I touch (see
+// sweepContact) or 0. It covers from the last check to ten sweep steps past now (see sweepStepMs),
+// cut at the walk's end, moving each Sim on my level that can reach me along its walk. One I touch at
+// the start is left out while we move apart. Sims in a container (data 2) or with data 8 bit 0x04 or
+// 0x10, on either side, don't count. Not known yet: one more person flag left out, and pet sizes.
 std::int16_t Execution::sweepBlocker(SimObject& sim, Walking& walk, double now) {
     constexpr std::size_t kContainerField = 2;
     constexpr std::int16_t kPassFlags = 0x14;

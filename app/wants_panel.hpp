@@ -15,12 +15,10 @@
 
 namespace app {
 
-// The live panel's wants and fears: an icon per want in the layout that fits the Sim's wants and
-// fears. An icon shows the want's picture with its small badge, a burst behind Power wants and the
-// influence mark on wants worth influence. A slot is refilled only when its want changes. A click on
-// a want shows its popup above the panel: picture, name with its values, description and the hold hint.
-// A slot that gets a new want keeps its old one while it animates: a glow over a satisfied want (or a
-// 2.5 second wait for one dropped), then a slot machine spin, then the new want.
+// The live panel's wants and fears, in the layout that fits how many the Sim has. An icon shows the
+// want's picture and badge, a burst behind Power wants and the influence mark on wants worth influence.
+// A click shows the want's popup above the panel. A slot whose want changes keeps the old one while it
+// animates: a glow over a satisfied want (or 2.5 seconds for a dropped one), a slot machine spin, the new want.
 class WantsPanel {
 public:
     struct Want {

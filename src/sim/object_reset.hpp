@@ -6,14 +6,10 @@
 
 namespace ts2::sim {
 
-// Resets an object as the game does when the object's type changed since the lot was saved (see
-// typeChangedSinceSave): its object data is cleared except for what places it (direction, room,
-// container and slot, its multi-tile lead...), some fields are set from its OBJD, and its script
-// stack is replaced by its Main tree, which starts from the top on the next tick. Sims are not
-// handled here: the game also clears their person data and refills it from elsewhere.
-//
-// For an object that isn't part of a multi-tile one, the game then runs its Init function and
-// finishes with finishSingleTileReset.
+// Resets an object whose type changed since the lot was saved (see typeChangedSinceSave): object
+// data is cleared except what places it (direction, room, container and slot, multi-tile lead...),
+// some fields come from its OBJD, and its stack restarts at Main. Not for Sims, whose person data the
+// game also refills. A single-tile object then runs Init and finishes with finishSingleTileReset.
 void resetObject(SimObject& object, const ObjectType& type, CodeSource& code);
 void finishSingleTileReset(SimObject& object, const ObjectType& type);
 

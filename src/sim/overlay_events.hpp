@@ -9,23 +9,19 @@
 
 namespace ts2::sim {
 
-// Tells the event trees of an object's overlays how far each has played, as the game does: each
-// SimAntics event ("event=N") its clip has played past, when it starts blending out (its fade out
-// before its end) and when it is gone, each event run on the object with (event, the overlay's stack
-// object, percent played, 1, 0). Finished overlays are dropped. `onStop` hears of event trees that
-// end other than true or false. `nowMs` is the time on the animation clock (the game tells events as
-// animations play, between simulation ticks).
+// Runs each overlay's event tree on the object with (event, the overlay's stack object, percent
+// played, 1, 0) for each "event=N" its clip passed, its blend-out start and its end, then drops
+// finished overlays. `onStop` hears of trees that end other than true or false. `nowMs` is on the
+// animation clock, since the game tells events between simulation ticks.
 void tellOverlayEvents(World& world, Vm& vm, std::int16_t object, const std::function<void(const RunResult&)>& onStop, double nowMs);
 inline void tellOverlayEvents(World& world, Vm& vm, std::int16_t object, const std::function<void(const RunResult&)>& onStop) {
     tellOverlayEvents(world, vm, object, onStop, world.clockMs());
 }
 
-// Tells the event tree of the object's Animate Sim each SimAntics event ("event=N") its clip has
-// played past, in order, as the game does: run on the object with (N, the stack object the Animate
-// Sim had, percent played, 1, 0), its temps put back after. A clip still fading out after its
-// Animate Sim went on (SimObject::ending) tells its last events too. An Animate Object clip does the
-// same and also tells when it starts fading out and when it ends, as an overlay does. `onStop` and
-// `nowMs` as for tellOverlayEvents.
+// Runs the Animate Sim's event tree on the object with (N, its stack object, percent played, 1, 0)
+// for each "event=N" its clip passed, in order, its temps put back after. A clip still fading out
+// (SimObject::ending) tells its last events too. An Animate Object clip also tells its blend-out
+// start and end, as an overlay does. `onStop` and `nowMs` as for tellOverlayEvents.
 void tellAnimateSimEvents(World& world, Vm& vm, std::int16_t object, const std::function<void(const RunResult&)>& onStop, double nowMs);
 
 // Runs the look_state trees of a Sim's looks for each state they took, in order, as the game does:

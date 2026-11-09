@@ -50,12 +50,8 @@ bool Execution::jobObject(std::uint8_t targetOwner, std::uint16_t targetData, Fr
     return true;
 }
 
-// Operands:
-//   bytes 0-3    GUID
-//   byte 4       search type, bit 0x80 = explicit target
-//   byte 5, 7    target (owner, index)
-//   byte 8       filter flags
-//   bytes 9-10   object data field that must equal bytes 11-12 (with flag bit 1)
+// Set to Next. Bytes 0-3 GUID, byte 4 search type (bit 0x80: explicit target), bytes 5, 7 the target
+// (owner, index), byte 8 filter flags. With flag bit 1, object data field bytes 9-10 must equal 11-12.
 bool Execution::setToNext(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     const std::uint32_t guid = readGuid(o);

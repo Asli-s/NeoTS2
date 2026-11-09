@@ -53,12 +53,10 @@ struct RouteSources {
 std::vector<RouteRect> objectFootprintAt(const SimObject& object, const SimObject& lead, const ObjectType& type,
                                          const RouteModel* model, float x, float y, std::int16_t direction);
 
-// The route items of one object, as the game adds them: its footprint, each rectangle a blocking
-// core with a padded copy around it, or a single walk-through rectangle. None for objects the game
-// leaves out (Sims, objects off the lot or held by another, windows, walk-through objects without a
-// cost). `lead` is the lead part of a multi-tile object (the object itself otherwise) and `model` the
-// lead's model. A door's lead makes all of the door's items: its swing areas and a doorway on each of
-// `doorWays`, the ways through it (see doorPortals), and its other parts make none.
+// The route items of one object: each footprint rectangle as a blocking core with a padded copy, or
+// one walk-through rectangle. None for Sims, objects off the lot or held, windows, and walk-through
+// objects without a cost. `lead` is a multi-tile object's lead part (else the object) and `model` its
+// model. A door's lead makes all its items, swing areas and a doorway per `doorWays` (see doorPortals).
 std::vector<RouteItem> objectRouteItems(const SimObject& object, const SimObject& lead, const ObjectType& type, CodeSource& code,
                                         const RouteModel* model, std::span<const RouteDoor> doorWays = {});
 

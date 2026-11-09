@@ -234,6 +234,8 @@ void SimLoader::collect(Built& built, std::size_t first) {
             const ts2::scene::Material& material = scene.materials[static_cast<std::size_t>(p.material)];
             sendImage(material.image);
             sendImage(material.normalMap);
+            sendImage(material.mask);
+            sendImage(material.detail);
             const int cube = material.envCube;
             if (cube >= 0 && static_cast<std::size_t>(cube) < scene.envCubes.size() && sentCubes_.insert(cube).second) {
                 built.envCubes.emplace_back(cube, std::move(scene.envCubes[static_cast<std::size_t>(cube)]));

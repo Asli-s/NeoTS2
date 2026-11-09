@@ -119,7 +119,6 @@ public:
     std::uint32_t namesVersion() const { return sim_->world().namesVersion(); }
     // An object's catalog name (its catalog strings' first line). Empty when unknown.
     std::string objectName(std::uint32_t guid);
-    // Whether the neighborhood has this neighbor.
     bool knowsNeighbor(std::int16_t id) const { return sim_->world().neighbor(id) != nullptr; }
     const ts2::content::WantCategory* wantCategory(std::uint32_t id) const { return sim_->world().wantCategory(id); }
     // A Sim's person data (until the simulation next runs). Empty for a Sim that is gone.
@@ -210,7 +209,7 @@ public:
 
     // The time the actors are posed at, in seconds on the simulation's clock: animations go on
     // smoothly between ticks, so this runs ahead of the last tick by the time since it.
-    double seconds() const { return (sim_->world().clockMs() + leadMs_) / 1000.0; }
+    double seconds() const { return drawnMs() / 1000.0; }
 
     ts2::sim::LotSimulation& simulation() { return *sim_; }
     ts2::scene::AnimationLibrary& animations() { return animations_; }
@@ -223,10 +222,10 @@ public:
     // brought into the scene before each ray, as the game's are there at once.
     void traceIn(ts2::scene::Scene& scene, const ts2::scene::ScenePose& pose, const std::vector<std::uint8_t>& shown);
 
-    // Where an object's node, or a bone of it, is now, for its effects. An empty bone or "locator" is the node.
     // Tells of the effects clips have reached since the last call, as commands.
     void clipEffects(const ts2::scene::Scene& scene, const std::function<void(const ts2::sim::EffectCommand&)>& send);
-
+    // Where an object's node, or a bone of it, is now, for its effects. An empty bone or "locator" is
+    // the node. Effects hide on storeys above `highestLevelShown`.
     ts2::scene::ObjectEffects::Where effectPlace(const ts2::scene::Scene& scene, const ts2::scene::ScenePose& pose, std::int16_t object, const std::string& bone, int highestLevelShown);
     // Where the camera's eye is in the scene, for Sims that turn to face it.
     void setCamera(const std::array<float, 3>& eye) { cameraEye_ = eye; }
@@ -248,15 +247,28 @@ public:
     void relightAll(ts2::scene::Scene& scene);
 
 private:
+    // The clock's time the actors are posed at, in milliseconds (see seconds).
+    double drawnMs() const { return sim_->world().clockMs() + leadMs_; }
+    // A scene point as a route position on the lot (x and y, see SimObject::x).
+    std::array<float, 2> routePoint(const std::array<float, 3>& scenePoint) const;
     // The lot object of a scene object id, null for none.
     ts2::sim::SimObject* lotObject(std::uint32_t id);
+    // A Sim's own inventory, null for a Sim that is gone or has none.
+    const ts2::sim::Inventory* ownInventory(std::int16_t sim);
+    // Poses one Sim's actor for this frame: what it plays, where it stands and its lights.
+    void poseSim(ts2::scene::Actor& actor, const ts2::sim::SimObject& object, ts2::scene::Scene& scene);
     void placeObjects(ts2::scene::Scene& scene);
+    // One pass of placeObjects: the objects that moved since the last frame (on the first pass) and those
+    // in `movedContainers`, placed in the pass before. `placedNow` gets the ones it places.
+    void placeObjectsOnce(ts2::scene::Scene& scene, const std::set<std::uint32_t>& movedContainers, bool firstPass,
+                          std::set<std::uint32_t>& placedNow);
     void hideModels(ts2::scene::Scene& scene);
     void followClips(ts2::scene::Scene& scene);
     void animateObjects(ts2::scene::Scene& scene);
+    void hangInAnimated(ts2::scene::Scene& scene);
     void shadeHeld(ts2::scene::Scene& scene);
     void shapeColors(ts2::scene::Scene& scene);
-    void shadeCreated(ts2::scene::Scene& scene, std::size_t index, std::int16_t direction);
+    void shadeCreated(ts2::scene::Scene& scene, std::size_t index, const ts2::scene::Transform& inLot, std::int16_t direction);
     void lookHeads(ts2::scene::Scene& scene, double nowMs);
     // What a Sim's current look aims at on the lot, worked out where the simulation may be read.
     struct LookAim {
@@ -293,6 +305,11 @@ private:
     // wears that outfit once drawn.
     void dressFromSource(std::int16_t id);
     void relight(ts2::scene::Scene& scene, std::size_t index, const ts2::scene::Transform& inLot, int storey);
+    // A Sim's scene instance draws nothing from now on and goes to the next Sim drawn.
+    void freeSimInstance(ts2::scene::Scene& scene, std::size_t index);
+    // Marks a Sim's parts for the renderer. A Sim drawn during play keeps them to free when it goes:
+    // `drawnNow` for one drawn this frame, else they replace those it had.
+    void keepSimParts(std::int16_t id, const ts2::scene::Actor& actor, bool drawnNow);
     ts2::scene::Assets& assets_;
     std::unique_ptr<ts2::sim::LotSimulation> sim_;
     ts2::scene::AnimationLibrary animations_;
@@ -398,6 +415,9 @@ private:
     // The type (GUID) of the object each id was drawn for, the lot's objects and those created since.
     // A freed id goes to the next object created, which may be of another type.
     std::map<std::int16_t, std::uint32_t> drawnTypes_;
+    // The model scripts had given each created object when it was drawn (see SimObject::model). An
+    // object a script gives another model is drawn again, a lot object too.
+    std::map<std::int16_t, std::string> drawnModels_;
     std::map<std::int16_t, std::size_t> created_;  // created objects in the scene: id -> instance
     std::vector<std::size_t> freeInstances_;       // instances of removed created objects, for reuse
     std::vector<std::size_t> freeSimInstances_;    // instances of removed Sims, for the next Sim drawn

@@ -10,22 +10,17 @@
 
 namespace ts2::sim {
 
-// Find Best Object for Function (0x0E): the object on the lot that best serves one of the game's
-// object functions (prepare food, sit, awareness...) for a Sim. Operands:
+// Find Best Object for Function (0x0E): the lot's object that best serves an object function
+// (prepare food, sit, awareness...) for a Sim, made the stack object. Operands:
 //   bytes 0-1  the function
 //   byte 2     flags: 0x01 outside only, 0x02 inside only, 0x04 in the room only, 0x08 relative to an
 //              object (bytes 3, 4-5: owner, data), 0x10 in line of sight, 0x20 not in the room only,
 //              0x40 only the room in temp 0, 0x80 ignoring lockout
 //   byte 6     bit 0: only rooms in an array (object in temp 0, array in temp 1)
-//
-// Each object with the function's entry in its OBJf is a candidate. Its rating is the object data
-// field the function names (or 50 when it names none), written to the Sim's object data 0x42
-// ("function score"). A candidate with no rating, or whose check tree fails, is skipped. Its score
-// is the rating halved every 5 tiles away: rating / (distance / 5 + 1). The best becomes the
-// stack object.
-//
-// Not yet: whether the Sim can route to the object's room, line of sight, lockouts and objects in
-// use, and two per-Sim factors the game multiplies the score by.
+// Candidates have the function's OBJf entry. The rating is the object data field the function names
+// (50 when none), written to the Sim's object data 0x42 ("function score"). No rating or a failed
+// check tree skips it. Score: rating / (distance in tiles / 5 + 1).
+// Not yet: routability to the room, line of sight, lockouts, objects in use, and two per-Sim factors.
 struct FunctionSearch {
     World& world;
     CodeSource& code;

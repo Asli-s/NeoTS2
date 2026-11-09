@@ -392,13 +392,11 @@ void Execution::nameNewCharacter(std::int16_t id, const ObjectType& type, int sp
     }
 }
 
-// Make New Character for babies of two parents (flag 0x01). Parent 1 is bytes 6, 7-8 and parent 2
-// bytes 3, 4-5 (owner, data), each a neighbor id with flag 0x02 or 0x04, else an object whose Sim
-// names its neighbor. Temp 0 says how many babies, 1 to 10. The parents must be one species, though
-// a large and a small dog may mix. The babies' neighbor ids go into the stack object's object array 0.
-// The instruction then waits for them to be built and is true. How many ticks the game's build takes
-// is not known yet, it waits one. The game also posts a message (0xAD90F890) unless byte 15 bit 0 is
-// set, which nothing receives yet.
+// Make New Character for babies of two parents (flag 0x01). Parents are bytes 6, 7-8 and 3, 4-5
+// (owner, data), a neighbor id with flag 0x02 or 0x04, else an object whose Sim names its neighbor.
+// Temp 0 is how many, 1 to 10. The parents must be one species, though large and small dogs mix. The
+// babies' neighbor ids go into the stack object's array 0, then it waits a tick (the game's build
+// time is not known yet) and is true. Message 0xAD90F890, posted unless byte 15 bit 0, is not sent yet.
 std::optional<bool> Execution::makeChildren(const bhav::Instruction& in, Frame& f, SimObject& holder,
                                             std::optional<std::uint32_t> templateGuid) {
     constexpr std::int16_t kMaxChildren = 10;
@@ -451,10 +449,9 @@ std::optional<bool> Execution::makeChildren(const bhav::Instruction& in, Frame& 
 }
 
 // Generic Sims Call 0x1D: true once the character of the neighbor in temp 0 is loaded, or when there
-// is none. Until then it starts the load and waits a tick at a time, for up to temp 1 ticks (no end
-// below 0), and is true when they run out. Loads take as long as they take, so Sims made one after
-// the other appear one after the other, as the game's cars do. The game skips the wait in some state
-// that isn't known yet.
+// is none. Until then it starts the load and waits up to temp 1 ticks (below 0: no end), so Sims
+// appear one after another as the game's car arrivals do. The game skips the wait in a state not
+// known yet.
 std::optional<bool> Execution::loadCharacter(Frame& f) {
     if (!f.characterWaits) {
         f.characterWaits = thread_.temps[1];
@@ -484,14 +481,12 @@ std::int16_t Execution::speciesFlag(std::int16_t neighbor) {
     return species == 1 ? 2 : species == 2 ? 4 : species == 3 ? 8 : 1;
 }
 
-// One baby of two neighbors as the game's factory makes it, or nothing when it can't. Without a
-// template it takes the species of a parent picked at random, and that species' template. With a
-// template given it is human. The baby is 1 (a baby) with skin data 0x52 = 500 and 0x51 = 0. When
-// exactly one parent has person data 0xA5 set, the baby's gender is the other parent's opposite.
-// Otherwise it is drawn 50/50. It is named "Baby Boy" or "Baby Girl" until the player names it,
-// and takes the first parent's surname (a birth gives the one who carried it first). A
-// human baby inherits its genes (see childGenome) from both parents, the first given first. When
-// exactly one parent has person data 0xA5 set, the other stands for both. Its look is not made yet.
+// One baby of two neighbors, or nothing when it can't be made. Without a template it takes a random
+// parent's species and template, with one it is human. Age 1, skin data 0x52 = 500 and 0x51 = 0.
+// When exactly one parent has person data 0xA5 set, the other parent stands for both in the genes
+// (see childGenome, first parent first) and the gender is that parent's opposite, else 50/50. It is
+// "Baby Boy" or "Baby Girl" with the first parent's surname (a birth gives the carrier first). Its
+// look is not made yet.
 std::optional<std::int16_t> Execution::makeChild(std::int16_t parent1, std::int16_t parent2,
                                                  std::optional<std::uint32_t> templateGuid) {
     constexpr std::size_t kMarkPersonData = 0xA5, kSkinPersonData = 0x51, kSkinShadePersonData = 0x52;
@@ -636,14 +631,13 @@ std::int16_t Execution::newCharacterAge(int flag) {
     }
 }
 
-// Operands:
+// Relationship. Missing variables are created unless flag 0x01 is set. Operands:
 //   byte 0     variable
 //   byte 1     flags: 0x01 fail if the variable doesn't exist, 0x02 neighbor ids, 0x04 write,
 //              0x08 only A is an object (B, such as a neighbor id, just picks A's list)
 //   bytes 2-4  object A (owner, data)
 //   bytes 5-7  object B
 //   bytes 8-10 value
-// Missing variables are created unless flag 0x01 is set.
 bool Execution::relationship(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     const std::uint8_t variable = o[0];
@@ -713,15 +707,13 @@ bool Execution::relationship(const bhav::Instruction& in, Frame& f) {
     return foundNeighbor != nullptr ? access(*foundNeighbor) : access(*found);
 }
 
-// Operands: byte 0 holds flags. Owner byte 9 / data 10-11 name the Sim. Byte 8 is the outfit category, or with
-// flag 0x04 the value of owner byte 1 / data 2-3. The outfit's source GUID: flag 0x01 the stack
-// object's type, 0x02 bytes 4-7, 0x40 temps 0 (low) and 1 (high). Flag 0x20 clears person data
-// 0x77-0x78 (the source GUID). A Sim with age data is dressed from its working copy of it: flag
-// 0x10 makes the copy anew from the Sim's own (and clears the source GUID), and a source's outfit is
-// put on the copy, the source GUID kept unless it is the Sim's own. The Sim gets the outfit when the
-// copy's lists have a top and a bottom, or a full body, for the category: person data 0x08 takes the
-// outfit number and the scene draws it. Flag 0x08 then writes the copy back into the Sim's own age
-// data. Always true.
+// Change Outfit. Always true. Byte 0 is flags, owner byte 9 / data 10-11 the Sim, byte 8 the outfit
+// category (flag 0x04: owner byte 1 / data 2-3). The source GUID: flag 0x01 the stack object's type,
+// 0x02 bytes 4-7, 0x40 temps 0 (low) and 1 (high). Flag 0x20 clears it (person data 0x77-0x78).
+// A Sim with age data dresses from a working copy: flag 0x10 renews it from the Sim's own (clearing
+// the source GUID), a source's outfit goes onto it, and the source GUID is kept unless the Sim's own.
+// With a top and bottom or a full body for the category, person data 0x08 takes the outfit number.
+// Flag 0x08 then writes the copy back into the Sim's age data.
 bool Execution::changeOutfit(const bhav::Instruction& in, Frame& f) {
     constexpr std::uint8_t kFromStackObject = 0x01, kGuidInOperands = 0x02, kCategoryFromValue = 0x04, kCommit = 0x08,
                            kRenewCopy = 0x10, kClearSource = 0x20, kGuidFromTemps = 0x40;
@@ -794,14 +786,11 @@ bool Execution::changeOutfit(const bhav::Instruction& in, Frame& f) {
     return true;
 }
 
-// Age (operand 0, a life stage) makes me that age at once: 0 adult, 1 child, 2 toddler, 3 teen,
-// 4 elder, 0x0D baby, 0x0E young adult. Any other value does nothing. Person data 0x3A gets the
-// age in years the game gives each stage (young adults count as 19, with person data 0xAF set),
-// and the outfit source GUID (0x77-0x78) is cleared. Everything in my slots comes out and goes
-// back into the same slot on the new body. The new age's data is built at once, and the scene
-// builds the new body from it. Always true.
-// Not done yet: the walk and run sets for the new age, the scripts the slot moves run, a pet's new
-// routing size (PR-62).
+// Age makes me operand 0's life stage at once and is true: 0 adult, 1 child, 2 toddler, 3 teen,
+// 4 elder, 0x0D baby, 0x0E young adult (19 years with person data 0xAF), others nothing. Person data
+// 0x3A gets the stage's years and 0x77-0x78 (outfit source GUID) is cleared. What my slots hold goes
+// back into the same slots on the new body, built from the new age's data.
+// Not done yet: the new walk and run sets, the slot moves' scripts, a pet's routing size (PR-62).
 bool Execution::age(const bhav::Instruction& in) {
     constexpr std::size_t kOutfitSourceLow = 0x77, kOutfitSourceHigh = 0x78;
     if (!me().isPerson()) {
@@ -940,10 +929,10 @@ bool Execution::setMotiveChange(const bhav::Instruction& in, Frame& f) {
 //   byte 7, 8-9  argument (owner, data), what it is depends on the want
 //   byte 10, 11-12 value (owner, data)
 //   byte 13      flags: bit 0 the Sim is a neighbor id, bit 1 a Sim argument is a neighbor id
-// Every satisfy goes into the Sim's want history, which leads the want trees to new wants. True
-// when at least one of the Sim's wants (fears, for a fear) matched: each leaves an empty place and
-// the Sim is queued for new ones, and the Sim gets their aspiration points. The definition's
-// feedbackTree then shows the score. The influence they give and the extra want are not implemented.
+// Every satisfy goes into the want history the want trees read. True when a want (a fear, for a
+// fear) matched: each leaves an empty place, the Sim is queued for new ones and gets their
+// aspiration points, and the definition's feedbackTree shows the score. Not done: influence and the
+// extra want.
 bool Execution::wantSatisfy(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     if (!world().neighbors() || !world().hasWantDefinitions()) {
@@ -1005,20 +994,14 @@ bool Execution::wantSatisfy(const bhav::Instruction& in, Frame& f) {
             if (w.guid == 0 || !wantMatches(w, request, def->op)) {
                 continue;
             }
+            if (!satisfied && !queued) {
+                saveWantsForRefill(world(), neighbor);
+            }
             record.tail[1] += w.tail.size() > 1 ? w.tail[1] : 0;
             record.tail[2] += w.tail.size() > 2 ? w.tail[2] : 0;
             w = {};
             forgetWantPlace(world(), neighbor, at, def->isFear);
             ++world().wantsState().satisfied[neighbor][at + (def->isFear ? 1000 : 0)];
-            if (!satisfied && !queued) {
-                for (auto* each : {&wants, &fears}) {
-                    for (auto& other : *each) {
-                        if (!other.tail.empty()) {
-                            other.tail[0] = 0;
-                        }
-                    }
-                }
-            }
             satisfied = true;
         }
         const swaf::Want satisfiedRecord = record;
@@ -1105,20 +1088,12 @@ void Execution::giveWantPoints(std::int16_t neighbor, std::int32_t points) {
     }
 }
 
-// Runs a want's feedbackTree, one of the "Wants - Check Trees" object's found by name, at once on the lot's
-// "Wants - Controller" for a Sim on the lot. It runs for every satisfy, and its params are:
-//   0     the Sim's neighbor id
-//   1, 2  the want's GUID, low then high
-//   3     the Sim it is about (neighbor id), 0 for other kinds
-//   4, 5  the object, career or badge GUID it is about, low then high
-//   6, 7  the record's argument and value
-//   8     1 when one of the Sim's wants matched
-//   9     its aspiration points
-//   10    not known yet
-//   11, 12  the score before the points and its level on -100..100
-//   13    the value the primitive was given
-//   14    its influence
-// A tree that fails only costs its feedback, so the satisfied want stands.
+// Runs a want's feedbackTree (a "Wants - Check Trees" tree, by name) at once on the lot's "Wants -
+// Controller" for a Sim on the lot, on every satisfy. A failing tree only loses its feedback. Params:
+// 0 the Sim's neighbor id, 1-2 the want GUID (low, high), 3 the Sim it is about (neighbor id, else 0),
+// 4-5 the object, career or badge GUID it is about, 6-7 the record's argument and value, 8 1 when a
+// want matched, 9 its aspiration points, 10 not known yet, 11-12 the score before the points and its
+// level on -100..100, 13 the primitive's value, 14 its influence.
 void Execution::runWantFeedback(const content::WantDefinition& def, std::int16_t neighbor, const swaf::Want& record, bool satisfied, std::int16_t value) {
     constexpr std::uint32_t kWantsControllerGuid = 0x6D9E58F0, kWantsCheckTreesGuid = 0x8D92DD2E;
     constexpr std::size_t kLifeStage = 0x3A, kScore = 0xA2;

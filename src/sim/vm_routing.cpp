@@ -7,6 +7,15 @@ namespace {
 
 float tiles(std::int32_t fixed) { return static_cast<float>(fixed) / 65536.0f; }
 
+// Person data 0x3E's reason when a goal check fails the route.
+constexpr std::int16_t kGoalNotAvailable = 13;
+// Slot numbers from 1000 up name global slots, slot n - 1000.
+constexpr std::int16_t kFirstGlobalSlot = 1000;
+// A stair's Portal tree sets my data 0x44 flag 0x40 to have the route planned again past it. A
+// stair that fails the route gives reason 0x10, interrupted by the tree.
+constexpr std::size_t kRouteFlagsField = 0x44;
+constexpr std::int16_t kPlanAgain = 0x40, kStairFailed = 0x10;
+
 // When my walk begun at `now` starts, by my last walk's end (see walkStart).
 WalkStart startAfterLastWalk(const SimObject& sim, const Walking& walk, double now) {
     if (!sim.lastWalkEnd) {
@@ -17,7 +26,7 @@ WalkStart startAfterLastWalk(const SimObject& sim, const Walking& walk, double n
 
 } // namespace
 
-// Operands:
+// RayTrace. Operands:
 //   byte 0         0 to the target, 1 straight ahead from the source, others fail
 //   byte 1, 2-3    the source object
 //   byte 4, 5      where on it: 0 three quarters up its middle, 1 targeting, 2 routing, 3 containment
@@ -91,32 +100,63 @@ bool Execution::rayTrace(const bhav::Instruction& in, Frame& f) {
     return result.clear;
 }
 
-// Operands:
+// Go To Routing Slot (and Go To Relative Position, with `relative` as the slot). Operands:
 //   bytes 0-1  the slot number, or the param or local holding it
 //   bytes 2-3  where it comes from: 0 a param, 1 the number (temp 0 with byte 4 bit 1), 2 a global
 //              slot, 3 a local. From a param, the number or a local, 1000 and up is global slot n - 1000
 //   byte 4     bit 0: no failure feedback tree. Bit 3: flag 0x8000, "allow different altitudes"
-//              (its effect is not known yet). These replace the slot's own flags 0x4000 and 0x8000.
-// Walks me to a routing slot of the stack object and is true, or false when there is no route, my
-// person data 0x3E then saying why. Waits a tick at a time while I walk. My pre-route tree runs
-// before the walk and my post-route tree after it (it sits me in a seat the route reached). A step
-// blocked by another Sim or an object stops me where I am, and the router decides what next (see
-// routeBlocked). The trees along the route are not run yet.
-// With `relative`, the slot is that one on the stack object instead of one my operands name (Go
-// To Relative Position).
+//              (effect not known yet). These replace the slot's own flags 0x4000 and 0x8000.
+// Walks me to the stack object's slot, waiting a tick at a time, and is true, or false with no route
+// (person data 0x3E says why). My pre-route tree runs before and my post-route tree after (it seats
+// me). A blocked step stops me and routeBlocked decides what next. Along-route trees are not run yet.
 Execution::WalkStep Execution::goToRoutingSlot(const bhav::Instruction& in, Frame& f, const slot::Entry* relative) {
-    constexpr std::int16_t kGoalNotAvailable = 13;
-    constexpr std::uint8_t kNoFeedback = 0x01, kSlotFromTemp0 = 0x02, kAnyLevel = 0x08;
-    constexpr std::uint32_t kFailureTrees = 0x4000, kOtherLevels = 0x8000;
-    constexpr std::int16_t kFirstGlobal = 1000;
     SimObject& sim = me();
     if (!sim.isPerson()) {
         throw Stop{Outcome::Error, "Go To Routing Slot on an object that is not a person", ""};
     }
-    const std::size_t frame = thread_.frames.size() - 1;
-    // Waiting for my post-route or failure feedback tree here: it has returned, and the route is
-    // over (false when the tree said so, or after the feedback). A wait at this depth or deeper for
-    // another instruction is left over from a tree left some other way.
+    SlotRouteCall call{in, f, relative, thread_.frames.size() - 1, std::nullopt};
+    if (auto returned = postRouteReturned(sim, f, call.frame)) {
+        return *returned;
+    }
+    // A route started inside my post-route or failure feedback tree is nested in that route.
+    const bool nested = sim.postRoute && !sim.postRoute->result && call.frame > sim.postRoute->frame;
+    if (sim.walking && !(sim.walking->frame == call.frame && sim.walking->group == f.group && sim.walking->tree == f.instance &&
+                         sim.walking->pc == f.pc)) {
+        dropWalk(sim);
+    }
+    if (!sim.walking) {
+        if (auto step = startSlotRoute(sim, call, nested)) {
+            return *step;
+        }
+    }
+    if (!sim.walking->started) {
+        return setOffOnRoute(sim, call);
+    }
+    Walking& walk = *sim.walking;
+    const double now = world().clockMs();
+    // Waiting on a Sim asked to move, or after the blocked animation, an interruption ends the route.
+    if (walk.block.step != RouteBlock::Step::None) {
+        const bool waits = walk.block.step == RouteBlock::Step::AskToMove || walk.block.step == RouteBlock::Step::Animation;
+        if (waits && interruptPending(sim)) {
+            return routeInterrupted(sim);
+        }
+        return nextAfterBlock(sim, walk, call, blockedTreeReturned(sim, walk), now);
+    }
+    if (walk.climbing) {
+        if (auto step = afterStair(sim, walk, call, now)) {
+            return *step;
+        }
+    }
+    if (auto step = walkRouteStep(sim, walk, call, now)) {
+        return *step;
+    }
+    return arriveOnRoute(sim, walk, f, call.frame);
+}
+
+// Waiting for my post-route or failure feedback tree here: it has returned, and the route is over
+// (false when the tree said so, or after the feedback). A wait at this depth or deeper for another
+// instruction is left over from a tree left some other way.
+std::optional<Execution::WalkStep> Execution::postRouteReturned(SimObject& sim, const Frame& f, std::size_t frame) {
     if (sim.postRoute && sim.postRoute->frame >= frame) {
         const bool here = sim.postRoute->frame == frame && sim.postRoute->group == f.group && sim.postRoute->tree == f.instance &&
                           sim.postRoute->pc == f.pc;
@@ -124,334 +164,326 @@ Execution::WalkStep Execution::goToRoutingSlot(const bhav::Instruction& in, Fram
             sim.postRoute.reset();
         }
     }
-    if (sim.postRoute && sim.postRoute->frame == frame) {
-        const bool done = !sim.postRoute->failed && sim.postRoute->result.value_or(true);
-        if (!done && !sim.postRoute->failed) {
-            sim.personData[kRouteResultPersonData] = kPostRouteFailed;
-        }
-        sim.postRoute.reset();
-        return WalkStep{WalkStep::Kind::Done, done};
+    if (!sim.postRoute || sim.postRoute->frame != frame) {
+        return std::nullopt;
     }
-    // A route started inside my post-route or failure feedback tree is nested in that route.
-    const bool nested = sim.postRoute && !sim.postRoute->result && frame > sim.postRoute->frame;
-    if (sim.walking && !(sim.walking->frame == frame && sim.walking->group == f.group && sim.walking->tree == f.instance &&
-                         sim.walking->pc == f.pc)) {
-        dropWalk(sim);
+    const bool done = !sim.postRoute->failed && sim.postRoute->result.value_or(true);
+    if (!done && !sim.postRoute->failed) {
+        sim.personData[kRouteResultPersonData] = kPostRouteFailed;
     }
-    // The route to the slot my operands name, planned from where I stand, none when there is none
-    // (my person data 0x3E then says why).
-    struct Planned {
-        SlotRoute route;
-        std::int16_t owner = 0, named = 0, value = 0;
-        bool global = false;
-        bool feedback = true;
-    };
-    // Set when the last plan found no route: the route's failure feedback flag.
-    std::optional<bool> noRoute;
-    // With `again`, the slot is the one the walk's first plan chose. Otherwise my operands name it.
-    const auto plan = [&](const Walking* again) -> std::optional<Planned> {
-        noRoute.reset();
-        const auto& o = in.operands;
-        const SimObject* owner = world().find(again ? again->slotOwner : stackObject());
-        if (owner == nullptr || owner->x == kOffLot || owner->y == kOffLot) {
-            return std::nullopt;
-        }
-        if (relative != nullptr) {
-            if (!world().slotRouter()) {
-                throw Stop{Outcome::Unsupported, "routing needs the lot's route grid", ""};
-            }
-            Planned planned{world().slotRouter()(sim, *owner, *relative, {})};
-            planned.feedback = (relative->routingFlags & kFailureTrees) != 0;
-            sim.personData[kRouteResultPersonData] = planned.route.points.empty() ? planned.route.failure : 0;
-            if (planned.route.points.empty()) {
-                noRoute = planned.feedback;
-                return std::nullopt;
-            }
-            planned.owner = owner->id;
-            planned.named = -1;
-            planned.value = -1;
-            return planned;
-        }
-        std::int16_t value = 0;
-        bool global = false;
-        if (again) {
-            value = again->slotNumber;
-            global = again->slotGlobal;
-        } else {
-            const auto number = static_cast<std::int16_t>(o[0] | o[1] << 8);
-            const auto source = static_cast<std::int16_t>(o[2] | o[3] << 8);
-            global = source == 2;
-            switch (source) {
-            case 0: value = slotAt(f.params, number, "param"); break;
-            case 1: value = (o[4] & kSlotFromTemp0) ? thread_.temps[0] : number; break;
-            case 2: value = number; break;
-            case 3: value = slotAt(f.locals, number, "local"); break;
-            default: throw Stop{Outcome::Error, "invalid routing slot specified", std::to_string(source)};
-            }
-            if (!global && value >= kFirstGlobal) {
-                global = true;
-                value = static_cast<std::int16_t>(value - kFirstGlobal);
-            }
-        }
-        const ObjectType* type = global ? nullptr : code_.objectType(owner->definition.guid());
-        const auto& slots = global ? code_.globalSlots() : (type ? type->routingSlots : code_.globalSlots());
-        // An object given a routing slot of its own uses it as its slot 0.
-        const bool own = !global && value == 0 && owner->ownRoutingSlot;
-        if ((!global && type == nullptr) || value < 0 || (!own && static_cast<std::size_t>(value) >= slots.size())) {
-            throw Stop{Outcome::Error, "invalid routing slot specified", std::to_string(value)};
-        }
-        slot::Entry entry = own ? *owner->ownRoutingSlot : slots[static_cast<std::size_t>(value)];
-        entry.routingFlags = (entry.routingFlags & ~(kFailureTrees | kOtherLevels)) | ((o[4] & kNoFeedback) ? 0 : kFailureTrees) |
-                             ((o[4] & kAnyLevel) ? kOtherLevels : 0);
+    sim.postRoute.reset();
+    return WalkStep{WalkStep::Kind::Done, done};
+}
+
+// The route to the slot my operands name, planned from where I stand, none when there is none (my
+// person data 0x3E then says why). With `again`, the slot is the one the walk's first plan chose.
+std::optional<Execution::SlotPlan> Execution::planSlotRoute(SimObject& sim, SlotRouteCall& call, const Walking* again) {
+    constexpr std::uint8_t kNoFeedback = 0x01, kSlotFromTemp0 = 0x02, kAnyLevel = 0x08;
+    constexpr std::uint32_t kFailureTrees = 0x4000, kOtherLevels = 0x8000;
+    call.noRoute.reset();
+    const auto& o = call.in.operands;
+    const SimObject* owner = world().find(again ? again->slotOwner : stackObject());
+    if (owner == nullptr || owner->x == kOffLot || owner->y == kOffLot) {
+        return std::nullopt;
+    }
+    if (call.relative != nullptr) {
         if (!world().slotRouter()) {
             throw Stop{Outcome::Unsupported, "routing needs the lot's route grid", ""};
         }
-        const auto joints = slotJoints(*owner, entry, global ? kGlobalGroup : type->group);
-        Planned planned{world().slotRouter()(sim, *owner, entry, joints)};
-        planned.feedback = (entry.routingFlags & kFailureTrees) != 0;
-        SlotRoute& route = planned.route;
-        sim.personData[kRouteResultPersonData] = route.points.empty() ? route.failure : 0;
-        if (route.points.empty()) {
-            noRoute = planned.feedback;
+        SlotPlan planned{world().slotRouter()(sim, *owner, *call.relative, {})};
+        planned.feedback = (call.relative->routingFlags & kFailureTrees) != 0;
+        sim.personData[kRouteResultPersonData] = planned.route.points.empty() ? planned.route.failure : 0;
+        if (planned.route.points.empty()) {
+            call.noRoute = planned.feedback;
             return std::nullopt;
         }
-        planned.named = static_cast<std::int16_t>(global ? value + kFirstGlobal : value);
         planned.owner = owner->id;
-        planned.global = global;
-        planned.value = value;
-        sim.personData[kRouteOwnerPersonData] = owner->id;
-        sim.personData[kRouteSlotPersonData] = planned.named;
-        sim.personData[kRouteJointPersonData] = route.goalToken;
+        planned.named = -1;
+        planned.value = -1;
         return planned;
-    };
-    // A plan that found no route fails the route as a block does (see routeFailed), with the reason
-    // the planner gave (1, unknown, when it gave none) and no blocker. A missing or off-lot slot
-    // owner just makes the primitive false.
-    const auto unplanned = [&](Walking& walk) -> WalkStep {
-        constexpr std::int16_t kUnknownReason = 1;
-        if (!noRoute) {
-            dropWalk(sim);
-            return WalkStep{WalkStep::Kind::Done, false};
-        }
-        walk.feedback = *noRoute;
-        const std::int16_t reason = sim.personData[kRouteResultPersonData];
-        return routeFailed(sim, walk, reason != 0 ? reason : kUnknownReason, 0).step;
-    };
-    // While I should be interrupted (see interruptPending) no route is planned: it ends interrupted.
-    if (!sim.walking) {
-        if (interruptPending(sim)) {
-            return routeInterrupted(sim);
-        }
-        auto planned = plan(nullptr);
-        if (!planned) {
-            Walking walk{frame, f.group, f.instance, f.pc, {}};
-            walk.nested = nested;
-            return unplanned(walk);
-        }
-        const SimObject* owner = world().find(planned->owner);
-        const bool global = planned->global;
-        const std::int16_t value = planned->value, named = planned->named;
-        Walking walk{frame, f.group, f.instance, f.pc, std::move(planned->route)};
-        walk.nested = nested;
-        walk.feedback = planned->feedback;
-        walk.slotOwner = planned->owner;
-        walk.slotNumber = value;
-        walk.slotGlobal = global;
-        walk.fromX = static_cast<float>(sim.x) / 65536.0f;
-        walk.fromY = static_cast<float>(sim.y) / 65536.0f;
-        cutAtStair(walk);
-        const float length = distanceLeft(walk.route.points, 1, walk.fromX, walk.fromY);
-        // Already there: the route ends at once, with no pre- or post-route tree and no walk. When
-        // the goal gives a facing I don't face yet, I first turn to it on the spot, as the game turns
-        // a Sim ordered back into the bed it just got out of. Whether the game runs the route trees
-        // around that turn is not known yet. None are run.
-        if (!(length > 0) && !walk.ahead) {
-            const float facing = sim.heading ? *sim.heading : compassHeading(sim.data[kDirectionField]);
-            if (!walk.route.facing || std::abs(wrapAngle(compassHeading(*walk.route.facing) - facing)) <= kSameHeading) {
-                return WalkStep{WalkStep::Kind::Done, true};
-            }
-            walk.turn = Walking::Turn{facing, compassHeading(*walk.route.facing)};
-            walk.turnOnly = walk.started = walk.arrived = walk.startChecked = true;
-            walk.preRoute = true;
-            walk.startMs = world().clockMs();
-            sim.walking = std::move(walk);
-            return WalkStep{WalkStep::Kind::Wait};
-        }
-        rememberSims(walk);
-        sim.walking = std::move(walk);
-        // My pre-route tree runs first (it stops my idles and decides whether I run), given the
-        // object, the slot as named and its number (-1 for a global slot), and the route's length
-        // rounded to a tile. What the game passes as the third value (0 or 1) and why the fourth
-        // is sometimes another object isn't known yet. 0 and the object are passed.
-        if (auto pre = routeTree(sim, kPreRouteEntry)) {
-            WalkStep step{WalkStep::Kind::PreRoute};
-            step.group = pre->group;
-            step.instance = pre->instance;
-            step.code = std::move(pre->code);
-            const auto rounded = static_cast<std::int16_t>(std::clamp(std::lround(length), 0L, 32767L));
-            step.args = {owner->id, named, 0, owner->id, static_cast<std::int16_t>(global ? -1 : value), rounded, 0};
-            return step;
-        }
-        sim.walking->preRoute = true;
     }
-    // Once my pre-route tree has returned: false gives up the walk, as it gives up a turn.
-    if (!sim.walking->started) {
-        Walking& walk = *sim.walking;
-        if (!walk.preRoute || !*walk.preRoute) {
-            dropWalk(sim);
-            return WalkStep{WalkStep::Kind::Done, false};
+    std::int16_t value = 0;
+    bool global = false;
+    if (again) {
+        value = again->slotNumber;
+        global = again->slotGlobal;
+    } else {
+        const auto number = static_cast<std::int16_t>(o[0] | o[1] << 8);
+        const auto source = static_cast<std::int16_t>(o[2] | o[3] << 8);
+        global = source == 2;
+        switch (source) {
+        case 0: value = slotAt(call.f.params, number, "param"); break;
+        case 1: value = (o[4] & kSlotFromTemp0) ? thread_.temps[0] : number; break;
+        case 2: value = number; break;
+        case 3: value = slotAt(call.f.locals, number, "local"); break;
+        default: throw Stop{Outcome::Error, "invalid routing slot specified", std::to_string(source)};
         }
-        // When my pre-route tree has moved me (a seated Sim stands up), the route is planned again
-        // from where I stand, as the game's router does after a move of more than 0.01 tiles. It
-        // doesn't run my pre-route tree again.
-        const float x = static_cast<float>(sim.x) / 65536.0f, y = static_cast<float>(sim.y) / 65536.0f;
-        constexpr float kMovedSquared = 1e-4f;
-        if ((x - walk.fromX) * (x - walk.fromX) + (y - walk.fromY) * (y - walk.fromY) > kMovedSquared) {
-            auto again = plan(&walk);
-            if (!again) {
-                return unplanned(walk);
-            }
-            walk.route = std::move(again->route);
-            rememberSims(walk);
-            cutAtStair(walk);
-            walk.fromX = x;
-            walk.fromY = y;
-            if (!(distanceLeft(walk.route.points, 1, x, y) > 0) && !walk.ahead) {
-                dropWalk(sim);
-                return WalkStep{WalkStep::Kind::Done, true};
-            }
+        if (!global && value >= kFirstGlobalSlot) {
+            global = true;
+            value = static_cast<std::int16_t>(value - kFirstGlobalSlot);
         }
-        // The goal check runs before I set off. False fails the route, the goal not available.
-        if (!walk.startChecked) {
-            walk.startChecked = true;
-            if (auto check = goalCheck(sim, f, distanceLeft(walk.route.points, 1, x, y))) {
-                return *check;
-            }
+    }
+    const ObjectType* type = global ? nullptr : code_.objectType(owner->definition.guid());
+    const auto& slots = global ? code_.globalSlots() : (type ? type->routingSlots : code_.globalSlots());
+    // An object given a routing slot of its own uses it as its slot 0.
+    const bool own = !global && value == 0 && owner->ownRoutingSlot;
+    if ((!global && type == nullptr) || value < 0 || (!own && static_cast<std::size_t>(value) >= slots.size())) {
+        throw Stop{Outcome::Error, "invalid routing slot specified", std::to_string(value)};
+    }
+    slot::Entry entry = own ? *owner->ownRoutingSlot : slots[static_cast<std::size_t>(value)];
+    entry.routingFlags = (entry.routingFlags & ~(kFailureTrees | kOtherLevels)) | ((o[4] & kNoFeedback) ? 0 : kFailureTrees) |
+                         ((o[4] & kAnyLevel) ? kOtherLevels : 0);
+    if (!world().slotRouter()) {
+        throw Stop{Outcome::Unsupported, "routing needs the lot's route grid", ""};
+    }
+    const auto joints = slotJoints(*owner, entry, global ? kGlobalGroup : type->group);
+    SlotPlan planned{world().slotRouter()(sim, *owner, entry, joints)};
+    planned.feedback = (entry.routingFlags & kFailureTrees) != 0;
+    SlotRoute& route = planned.route;
+    sim.personData[kRouteResultPersonData] = route.points.empty() ? route.failure : 0;
+    if (route.points.empty()) {
+        call.noRoute = planned.feedback;
+        return std::nullopt;
+    }
+    planned.named = static_cast<std::int16_t>(global ? value + kFirstGlobalSlot : value);
+    planned.owner = owner->id;
+    planned.global = global;
+    planned.value = value;
+    sim.personData[kRouteOwnerPersonData] = owner->id;
+    sim.personData[kRouteSlotPersonData] = planned.named;
+    sim.personData[kRouteJointPersonData] = route.goalToken;
+    return planned;
+}
+
+// A plan that found no route fails the route as a block does (see routeFailed), with the reason the
+// planner gave (1, unknown, when it gave none) and no blocker. A missing or off-lot slot owner just
+// makes the primitive false.
+Execution::WalkStep Execution::slotRouteMissing(SimObject& sim, Walking& walk, const SlotRouteCall& call) {
+    constexpr std::int16_t kUnknownReason = 1;
+    if (!call.noRoute) {
+        dropWalk(sim);
+        return WalkStep{WalkStep::Kind::Done, false};
+    }
+    walk.feedback = *call.noRoute;
+    const std::int16_t reason = sim.personData[kRouteResultPersonData];
+    return routeFailed(sim, walk, reason != 0 ? reason : kUnknownReason, 0).step;
+}
+
+// Plans the route and starts it: my pre-route tree to run, a turn on the spot when I am already
+// there, or none when the walk can set off at once (nothing to wait for).
+std::optional<Execution::WalkStep> Execution::startSlotRoute(SimObject& sim, SlotRouteCall& call, bool nested) {
+    const Frame& f = call.f;
+    // While I should be interrupted (see interruptPending) no route is planned: it ends interrupted.
+    if (interruptPending(sim)) {
+        return routeInterrupted(sim);
+    }
+    auto planned = planSlotRoute(sim, call, nullptr);
+    if (!planned) {
+        Walking walk{call.frame, f.group, f.instance, f.pc, {}};
+        walk.nested = nested;
+        return slotRouteMissing(sim, walk, call);
+    }
+    const SimObject* owner = world().find(planned->owner);
+    const bool global = planned->global;
+    const std::int16_t value = planned->value, named = planned->named;
+    Walking walk{call.frame, f.group, f.instance, f.pc, std::move(planned->route)};
+    walk.nested = nested;
+    walk.feedback = planned->feedback;
+    walk.slotOwner = planned->owner;
+    walk.slotNumber = value;
+    walk.slotGlobal = global;
+    walk.fromX = tiles(sim.x);
+    walk.fromY = tiles(sim.y);
+    cutAtStair(walk);
+    const float length = distanceLeft(walk.route.points, 1, walk.fromX, walk.fromY);
+    // Already there: the route ends at once, with no pre- or post-route tree and no walk. When
+    // the goal gives a facing I don't face yet, I first turn to it on the spot, as the game turns
+    // a Sim ordered back into the bed it just got out of. Whether the game runs the route trees
+    // around that turn is not known yet. None are run.
+    if (!(length > 0) && !walk.ahead) {
+        const float facing = sim.heading ? *sim.heading : compassHeading(sim.data[kDirectionField]);
+        if (!walk.route.facing || std::abs(wrapAngle(compassHeading(*walk.route.facing) - facing)) <= kSameHeading) {
+            return WalkStep{WalkStep::Kind::Done, true};
         }
-        if (walk.checking) {
-            walk.checking = false;
-            if (!walk.goalCheck.value_or(true)) {
-                return routeFailed(sim, walk, kGoalNotAvailable, 0).step;
-            }
-        }
-        // The walk is planned as the game plans it (see walk_plan.hpp): start, walk loop and
-        // stop clips laid along the route, and the speed that carries me along it.
-        const double now = world().clockMs();
-        walk.startMs = now;
-        walk.started = true;
-        planWalkFor(sim, walk);
-        const WalkStart start = startAfterLastWalk(sim, walk, now);
-        sim.lastWalkEnd.reset();
-        // A turn too small for a clip is made at once.
-        if (walk.turn && turnOnTheSpot(sim, walk, now)) {
-            walk.turn.reset();
-        }
-        // A walk begun soon after my last one starts by its end. One that turns on the spot first
-        // starts once the turn is over.
-        if (!walk.turn) {
-            walk.startMs = start.ms;
-            followWalk(sim, walk, 0, now);
-        }
+        walk.turn = Walking::Turn{facing, compassHeading(*walk.route.facing)};
+        walk.turnOnly = walk.started = walk.arrived = walk.startChecked = true;
+        walk.preRoute = true;
+        walk.startMs = world().clockMs();
+        sim.walking = std::move(walk);
         return WalkStep{WalkStep::Kind::Wait};
     }
+    rememberSims(walk);
+    sim.walking = std::move(walk);
+    // My pre-route tree runs first (it stops my idles and decides whether I run), given the
+    // object, the slot as named and its number (-1 for a global slot), and the route's length
+    // rounded to a tile. What the game passes as the third value (0 or 1) and why the fourth
+    // is sometimes another object isn't known yet. 0 and the object are passed.
+    if (auto pre = routeTree(sim, kPreRouteEntry)) {
+        WalkStep step{WalkStep::Kind::PreRoute};
+        step.group = pre->group;
+        step.instance = pre->instance;
+        step.code = std::move(pre->code);
+        const auto rounded = static_cast<std::int16_t>(std::clamp(std::lround(length), 0L, 32767L));
+        step.args = {owner->id, named, 0, owner->id, static_cast<std::int16_t>(global ? -1 : value), rounded, 0};
+        return step;
+    }
+    sim.walking->preRoute = true;
+    return std::nullopt;
+}
+
+// Once my pre-route tree has returned: false gives up the walk, as it gives up a turn. Otherwise
+// the goal check runs and I set off.
+Execution::WalkStep Execution::setOffOnRoute(SimObject& sim, SlotRouteCall& call) {
     Walking& walk = *sim.walking;
-    const double now = world().clockMs();
-    // After a block, the route is planned again from where I stand: during a step-aside to its spot,
-    // else to the slot the first plan chose. A step-aside with no way to its spot, or already there,
-    // is over, and the route it stepped aside from is planned again.
-    const auto planAgain = [&]() -> WalkStep {
-        if (interruptPending(sim)) {
-            return routeInterrupted(sim);
+    if (!walk.preRoute || !*walk.preRoute) {
+        dropWalk(sim);
+        return WalkStep{WalkStep::Kind::Done, false};
+    }
+    // When my pre-route tree has moved me (a seated Sim stands up), the route is planned again
+    // from where I stand, as the game's router does after a move of more than 0.01 tiles. It
+    // doesn't run my pre-route tree again.
+    const float x = tiles(sim.x), y = tiles(sim.y);
+    constexpr float kMovedSquared = 1e-4f;
+    if ((x - walk.fromX) * (x - walk.fromX) + (y - walk.fromY) * (y - walk.fromY) > kMovedSquared) {
+        auto again = planSlotRoute(sim, call, &walk);
+        if (!again) {
+            return slotRouteMissing(sim, walk, call);
         }
-        std::optional<SlotRoute> route = walk.aside != 0 ? stepAsideRoute(sim, walk) : std::nullopt;
-        if (walk.aside != 0 && (!route || !(distanceLeft(route->points, 1, tiles(sim.x), tiles(sim.y)) > 0))) {
-            endAside(walk);
-            route.reset();
-        }
-        if (walk.aside == 0) {
-            auto again = plan(&walk);
-            if (!again) {
-                return unplanned(walk);
-            }
-            route = std::move(again->route);
-        }
-        walk.route = std::move(*route);
+        walk.route = std::move(again->route);
         rememberSims(walk);
-        walk.ahead.reset();
         cutAtStair(walk);
-        walk.fromX = tiles(sim.x);
-        walk.fromY = tiles(sim.y);
-        walk.arrived = false;
-        walk.turn.reset();
-        walk.turnAfter.reset();
-        if (!(distanceLeft(walk.route.points, 1, walk.fromX, walk.fromY) > 0) && !walk.ahead) {
+        walk.fromX = x;
+        walk.fromY = y;
+        if (!(distanceLeft(walk.route.points, 1, x, y) > 0) && !walk.ahead) {
             dropWalk(sim);
             return WalkStep{WalkStep::Kind::Done, true};
         }
-        walk.startMs = now;
-        walk.checkAt = 1;
-        planWalkFor(sim, walk);
-        if (walk.turn && turnOnTheSpot(sim, walk, now)) {
-            walk.turn.reset();
-        }
-        if (!walk.turn) {
-            followWalk(sim, walk, 0, now);
-        }
-        return WalkStep{WalkStep::Kind::Wait};
-    };
-    const auto next = [&](BlockedStep step) { return step.planAgain ? planAgain() : std::move(step.step); };
-    // Waiting on a Sim asked to move, or after the blocked animation, an interruption ends the route.
-    if (walk.block.step != RouteBlock::Step::None) {
-        const bool waits = walk.block.step == RouteBlock::Step::AskToMove || walk.block.step == RouteBlock::Step::Animation;
-        if (waits && interruptPending(sim)) {
-            return routeInterrupted(sim);
-        }
-        return next(blockedTreeReturned(sim, walk));
     }
-    // Back from a stair's Portal tree: false fails the route, interrupted by the tree (0x10). My data
-    // 0x44 flag 0x40 set by the tree plans it again from where I stand. Otherwise the walk goes on
-    // from the stair's exit.
-    if (walk.climbing) {
-        constexpr std::size_t kRouteFlagsField = 0x44;
-        constexpr std::int16_t kPlanAgain = 0x40, kStairFailed = 0x10;
-        walk.climbing = false;
-        const bool climbed = walk.climbed.value_or(false);
-        walk.climbed.reset();
-        if (!climbed) {
-            return next(routeFailed(sim, walk, kStairFailed, 0));
+    // The goal check runs before I set off. False fails the route, the goal not available.
+    if (!walk.startChecked) {
+        walk.startChecked = true;
+        if (auto check = goalCheck(sim, call.f, distanceLeft(walk.route.points, 1, x, y))) {
+            return *check;
         }
-        if (sim.data[kRouteFlagsField] & kPlanAgain) {
-            sim.data[kRouteFlagsField] = static_cast<std::int16_t>(sim.data[kRouteFlagsField] & ~kPlanAgain);
-            auto again = plan(&walk);
-            if (!again) {
-                return unplanned(walk);
-            }
-            walk.route = std::move(again->route);
-            rememberSims(walk);
-        } else if (walk.ahead) {
-            walk.route = std::move(*walk.ahead);
+    }
+    if (walk.checking) {
+        walk.checking = false;
+        if (!walk.goalCheck.value_or(true)) {
+            return routeFailed(sim, walk, kGoalNotAvailable, 0).step;
         }
-        walk.ahead.reset();
-        cutAtStair(walk);
-        walk.fromX = static_cast<float>(sim.x) / 65536.0f;
-        walk.fromY = static_cast<float>(sim.y) / 65536.0f;
-        walk.arrived = false;
+    }
+    // The walk is planned as the game plans it (see walk_plan.hpp): start, walk loop and
+    // stop clips laid along the route, and the speed that carries me along it.
+    const double now = world().clockMs();
+    walk.startMs = now;
+    walk.started = true;
+    planWalkFor(sim, walk);
+    const WalkStart start = startAfterLastWalk(sim, walk, now);
+    sim.lastWalkEnd.reset();
+    // A turn too small for a clip is made at once.
+    if (walk.turn && turnOnTheSpot(sim, walk, now)) {
         walk.turn.reset();
-        walk.turnAfter.reset();
-        if (distanceLeft(walk.route.points, 1, walk.fromX, walk.fromY) > 0) {
-            walk.startMs = now;
-            walk.checkAt = 1;
-            planWalkFor(sim, walk);
-            if (walk.turn && turnOnTheSpot(sim, walk, now)) {
-                walk.turn.reset();
-            }
-            if (!walk.turn) {
-                followWalk(sim, walk, 0, now);
-            }
-            return WalkStep{WalkStep::Kind::Wait};
-        }
-        walk.arrived = true;
     }
+    // A walk begun soon after my last one starts by its end. One that turns on the spot first
+    // starts once the turn is over.
+    if (!walk.turn) {
+        walk.startMs = start.ms;
+        followWalk(sim, walk, 0, now);
+    }
+    return WalkStep{WalkStep::Kind::Wait};
+}
+
+// Sets off again on a route planned anew, turning on the spot first when the route asks.
+Execution::WalkStep Execution::setOffAgain(SimObject& sim, Walking& walk, double now) {
+    walk.startMs = now;
+    walk.checkAt = 1;
+    planWalkFor(sim, walk);
+    if (walk.turn && turnOnTheSpot(sim, walk, now)) {
+        walk.turn.reset();
+    }
+    if (!walk.turn) {
+        followWalk(sim, walk, 0, now);
+    }
+    return WalkStep{WalkStep::Kind::Wait};
+}
+
+// After a block, the route is planned again from where I stand: during a step-aside to its spot,
+// else to the slot the first plan chose. A step-aside with no way to its spot, or already there,
+// is over, and the route it stepped aside from is planned again.
+Execution::WalkStep Execution::planRouteAgain(SimObject& sim, Walking& walk, SlotRouteCall& call, double now) {
+    if (interruptPending(sim)) {
+        return routeInterrupted(sim);
+    }
+    std::optional<SlotRoute> route = walk.aside != 0 ? stepAsideRoute(sim, walk) : std::nullopt;
+    if (walk.aside != 0 && (!route || !(distanceLeft(route->points, 1, tiles(sim.x), tiles(sim.y)) > 0))) {
+        endAside(walk);
+        route.reset();
+    }
+    if (walk.aside == 0) {
+        auto again = planSlotRoute(sim, call, &walk);
+        if (!again) {
+            return slotRouteMissing(sim, walk, call);
+        }
+        route = std::move(again->route);
+    }
+    walk.route = std::move(*route);
+    rememberSims(walk);
+    walk.ahead.reset();
+    cutAtStair(walk);
+    walk.fromX = tiles(sim.x);
+    walk.fromY = tiles(sim.y);
+    walk.arrived = false;
+    walk.turn.reset();
+    walk.turnAfter.reset();
+    if (!(distanceLeft(walk.route.points, 1, walk.fromX, walk.fromY) > 0) && !walk.ahead) {
+        dropWalk(sim);
+        return WalkStep{WalkStep::Kind::Done, true};
+    }
+    return setOffAgain(sim, walk, now);
+}
+
+Execution::WalkStep Execution::nextAfterBlock(SimObject& sim, Walking& walk, SlotRouteCall& call, BlockedStep step, double now) {
+    return step.planAgain ? planRouteAgain(sim, walk, call, now) : std::move(step.step);
+}
+
+// Back from a stair's Portal tree: false fails the route, interrupted by the tree (0x10). My data
+// 0x44 flag 0x40 set by the tree plans it again from where I stand. Otherwise the walk goes on from
+// the stair's exit. None when the stair's exit is the route's end.
+std::optional<Execution::WalkStep> Execution::afterStair(SimObject& sim, Walking& walk, SlotRouteCall& call, double now) {
+    walk.climbing = false;
+    const bool climbed = walk.climbed.value_or(false);
+    walk.climbed.reset();
+    if (!climbed) {
+        return nextAfterBlock(sim, walk, call, routeFailed(sim, walk, kStairFailed, 0), now);
+    }
+    if (sim.data[kRouteFlagsField] & kPlanAgain) {
+        sim.data[kRouteFlagsField] = static_cast<std::int16_t>(sim.data[kRouteFlagsField] & ~kPlanAgain);
+        auto again = planSlotRoute(sim, call, &walk);
+        if (!again) {
+            return slotRouteMissing(sim, walk, call);
+        }
+        walk.route = std::move(again->route);
+        rememberSims(walk);
+    } else if (walk.ahead) {
+        walk.route = std::move(*walk.ahead);
+    }
+    walk.ahead.reset();
+    cutAtStair(walk);
+    walk.fromX = tiles(sim.x);
+    walk.fromY = tiles(sim.y);
+    walk.arrived = false;
+    walk.turn.reset();
+    walk.turnAfter.reset();
+    if (distanceLeft(walk.route.points, 1, walk.fromX, walk.fromY) > 0) {
+        return setOffAgain(sim, walk, now);
+    }
+    walk.arrived = true;
+    return std::nullopt;
+}
+
+// One step of the walk: interruptions, turns on the spot, goal checks each tile, the look-ahead for
+// other Sims and the step itself. None once the walk has got there and the post-route tree is next.
+std::optional<Execution::WalkStep> Execution::walkRouteStep(SimObject& sim, Walking& walk, SlotRouteCall& call, double now) {
     // Interrupted as I walk (see interruptPending), the walk stops soon (see interruptWalk) and the
     // route then ends interrupted, with no goal checks, look-ahead or post-route tree.
     if (!walk.interrupted && interruptPending(sim)) {
@@ -480,7 +512,7 @@ Execution::WalkStep Execution::goToRoutingSlot(const bhav::Instruction& in, Fram
     if (walk.checking) {
         walk.checking = false;
         if (!walk.interrupted && !walk.goalCheck.value_or(true)) {
-            return next(routeFailed(sim, walk, kGoalNotAvailable, 0));
+            return nextAfterBlock(sim, walk, call, routeFailed(sim, walk, kGoalNotAvailable, 0), now);
         }
     }
     if (!walk.arrived && !walk.interrupted) {
@@ -489,7 +521,7 @@ Execution::WalkStep Execution::goToRoutingSlot(const bhav::Instruction& in, Fram
             while (walk.checkAt <= walked) {
                 walk.checkAt += 1;
             }
-            if (auto check = goalCheck(sim, f, walk.plan.length - walked)) {
+            if (auto check = goalCheck(sim, call.f, walk.plan.length - walked)) {
                 return *check;
             }
         }
@@ -498,7 +530,7 @@ Execution::WalkStep Execution::goToRoutingSlot(const bhav::Instruction& in, Fram
     if (!walk.arrived && !walk.interrupted) {
         if (const std::int16_t ahead = sweepBlocker(sim, walk, now)) {
             stopWalk(sim, walk, now);
-            return next(routeBlocked(sim, walk, ahead));
+            return nextAfterBlock(sim, walk, call, routeBlocked(sim, walk, ahead), now);
         }
     }
     if (!walk.arrived) {
@@ -506,7 +538,7 @@ Execution::WalkStep Execution::goToRoutingSlot(const bhav::Instruction& in, Fram
         const bool there = walkTo(sim, walk, now, blocker);
         if (blocker != 0) {
             stopWalk(sim, walk, now);
-            return walk.interrupted ? routeInterrupted(sim) : next(routeBlocked(sim, walk, blocker));
+            return walk.interrupted ? routeInterrupted(sim) : nextAfterBlock(sim, walk, call, routeBlocked(sim, walk, blocker), now);
         }
         if (!there) {
             return WalkStep{WalkStep::Kind::Wait};
@@ -529,14 +561,18 @@ Execution::WalkStep Execution::goToRoutingSlot(const bhav::Instruction& in, Fram
     // A step-aside that got there is over: the route it stepped aside from goes on from here.
     if (walk.aside != 0) {
         endAside(walk);
-        return planAgain();
+        return planRouteAgain(sim, walk, call, now);
     }
     // At a stair's entry its Portal tree climbs it.
     if (walk.ahead) {
         return climbStair(sim, walk);
     }
-    // My post-route tree then runs, after a walk my pre-route tree let start, given the seat
-    // reached (which it sits me in) and the route's result.
+    return std::nullopt;
+}
+
+// My post-route tree then runs, after a walk my pre-route tree let start, given the seat reached
+// (which it sits me in) and the route's result.
+Execution::WalkStep Execution::arriveOnRoute(SimObject& sim, Walking& walk, const Frame& f, std::size_t frame) {
     const bool nestedWalk = walk.nested || walk.turnOnly;
     const std::int16_t seat = walk.route.goalObject;
     dropWalk(sim);
@@ -556,8 +592,8 @@ Execution::WalkStep Execution::goToRoutingSlot(const bhav::Instruction& in, Fram
 // entry, with the entry part as stack object. It is given the rooms at the entry and the exit, their
 // levels, parts and slots, and 1 (walking). The tree clears my data 0x44 flag 0x40 first.
 Execution::WalkStep Execution::climbStair(SimObject& sim, Walking& walk) {
-    constexpr std::size_t kPortalFunction = 15, kRouteFlagsField = 0x44;
-    constexpr std::int16_t kPlanAgain = 0x40, kStairFailed = 0x10, kWalking = 1;
+    constexpr std::size_t kPortalFunction = 15;
+    constexpr std::int16_t kWalking = 1;
     const StairCrossing& stair = walk.route.stairs.front();
     const SimObject* entry = world().find(stair.entryPart);
     const SimObject* exit = world().find(stair.exitPart);
@@ -600,8 +636,7 @@ Execution::WalkStep Execution::climbStair(SimObject& sim, Walking& walk) {
     return step;
 }
 
-// Go To Relative Position 0x1B: walks me to a spot by the stack object as Go To Routing Slot walks
-// to a slot, the spot given as a routing slot made from the operands:
+// Go To Relative Position 0x1B: Go To Routing Slot to a slot by the stack object made from operands:
 //   byte 2  where: -2 on top of the object (its own spot), -1 anywhere near, 0-7 a side (0 in
 //           front, 2 right, 4 behind, 6 left, odd ones both neighbouring sides)
 //   byte 3  my facing at the end: -2 facing the object, -1 any, 0-7 relative to its facing
@@ -637,12 +672,11 @@ Execution::WalkStep Execution::goToRelativePosition(const bhav::Instruction& in,
     return goToRoutingSlot(in, f, &entry);
 }
 
-// Moves me as far along the route as the walk's speed has carried me, facing the route's way
-// there. True once there: from when the walk starts fading out I am on the route's last point
-// exactly (its goal, which later goals compare with my spot), facing the way the walk ends in and
-// holding the stop's last pose (else the walk's standing pose), while its clips play out. A walk cut short to stop soon ends where its stop does. Each step
-// must be free, as the game tests a walking Sim's place every tick: when a Sim or an object is in
-// the way, `blocker` is its id and I stay where I am.
+// Moves me as far along the route as the walk's speed has carried me, facing the route's way.
+// True once there: from the walk's fade-out I stand exactly on its last point (its goal), facing its
+// end and holding the stop's last pose (else the standing pose) while the clips play out. A walk cut
+// short ends where its stop does. Each step must be free: when a Sim or object is in the way,
+// `blocker` is its id and I stay put.
 bool Execution::walkTo(SimObject& sim, Walking& walk, double now, std::int16_t& blocker) {
     const float ms = static_cast<float>(std::max(0.0, now - walk.startMs));
     const float walked = walkedAt(walk.plan, ms);
@@ -1153,13 +1187,11 @@ Execution::WalkStep Execution::routeInterrupted(SimObject& sim) {
 //   19, 20 and 21 a target, routing or container slot (byte 5) of the object in byte 2 (owner) and
 //   bytes 3-4 (data), 22-24 the same slots faced away from,
 //   25 the compass direction in temp 0, 26 temp 0 plus my direction (both read once, as the turn starts).
-// Within 22.5 degrees it is true at once. Otherwise my pre-route tree runs first (a false return
-// fails the turn). Then the target is found again from where I am and the turn-in-place clip plays
-// (see turnClip), my facing following the clip's root a tick at a time. The turn ends on the nearest
-// 45 degrees once the clip starts its last 233 ms fade out. My post-route tree then runs, given 0
-// and 1, and the turn is true unless the object to face is gone by then. A failed turn is false for
-// modes 1-3, else true. The object being gone once the pre-route tree has returned true fails the
-// turn after the post-route tree.
+// Within 22.5 degrees it is true at once. Otherwise my pre-route tree runs (false fails the turn),
+// the target is found again and the turn-in-place clip plays (see turnClip), my facing following its
+// root each tick. It ends on the nearest 45 degrees as the clip's last 233 ms fade out starts, and my
+// post-route tree runs, given 0 and 1. The object to face being gone by then fails the turn. A failed
+// turn is false for modes 1-3, else true.
 Execution::TurnStep Execution::turnBodyTowards(const bhav::Instruction& in, Frame& f) {
     SimObject& sim = me();
     if (!sim.isPerson()) {

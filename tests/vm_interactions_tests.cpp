@@ -3,6 +3,12 @@
 
 #include "content/animation_lists.hpp"
 #include "sim/cheats.hpp"
+#include "sim/find_best_interaction.hpp"
+#include "sim/game_sort.hpp"
+#include "sorted_choices_data.hpp"
+#include "sorted_wants_data.hpp"
+
+#include <bit>
 
 namespace {
 
@@ -2432,19 +2438,56 @@ void wantTreesOfferNewWants() {
     tree.nodes[1].maxScore = 50;
     world.setWantTrees(trees);
 
+    // One stage a tick: the pick, the candidates, the scores, the fill, then the end.
     ts2::sim::queueWantRefill(world, 27, 3);
-    ts2::sim::stepWants({world, code, vm, 1});
     const auto& wants = world.neighborWants(27);
+    for (int tick = 1; tick <= 3; ++tick) {
+        ts2::sim::stepWants({world, code, vm, 1});
+        CHECK((wants.size() < 2 || wants[1].guid == 0) && world.wantsState().queue.empty() && ts2::sim::wantRefillWaiting(world, 27));
+    }
+    ts2::sim::stepWants({world, code, vm, 1});
     CHECK(wants.size() == 4 && wants[0].guid == 0x0DDD0009 && wants[1].guid == kChild);
     CHECK(wants[1].type == 1 && wants[1].argument == 31 && wants[1].tail.size() == 3 && wants[1].tail[1] == 750 && wants[1].tail[2] == 40);
-    CHECK(wants[2].guid == 0 && world.wantsState().queue.empty() && world.wantsState().clock == 2);
+    CHECK(wants[2].guid == 0 && !ts2::sim::wantRefillWaiting(world, 27) && world.wantsState().clock == 8);
+    // The next Sim is taken a tick after the fill.
+    ts2::sim::queueWantRefill(world, 27, 3);
+    ts2::sim::stepWants({world, code, vm, 1});
+    CHECK(world.wantsState().queue.size() == 1 && !world.wantsState().refill);
 
     // Two hours and more after the trigger, the child is past its lifetime.
     world.neighborWants(27)[1] = {};
     ts2::sim::wantHistory(world, 27).time = 1000 + 2 * 3600;
-    ts2::sim::queueWantRefill(world, 27, 3);
-    ts2::sim::stepWants({world, code, vm, 1});
+    for (int tick = 0; tick < 5; ++tick) {
+        ts2::sim::stepWants({world, code, vm, 1});
+    }
     CHECK(world.neighborWants(27)[1].guid == 0);
+}
+
+// A want offered again goes back to its place in the lists saved when the Sim was queued, even when
+// the lists changed since. Only a Sim not queued yet has them saved, and only for levels 0 and 1.
+void wantRefillUsesTheSavedLists() {
+    ts2::sim::World world;
+    std::vector<ts2::swaf::Want> wants(4), fears(3);
+    ts2::swaf::Want w;
+    w.id = 27;
+    w.guid = 0x0DDD0001;
+    w.tail = {500, 0, 0};
+    wants[2] = w;
+    world.neighborWants(27) = wants;
+    world.neighborFears(27) = fears;
+    ts2::sim::queueWantRefill(world, 27, 3);
+    CHECK(!world.wantsState().savedLists.contains(27));
+    world.wantsState().queue.clear();
+    ts2::sim::queueWantRefill(world, 27, 1);
+    CHECK(world.wantsState().savedLists.at(27).first[2].guid == 0x0DDD0001);
+    world.neighborWants(27)[2] = {};
+    ts2::sim::queueWantRefill(world, 27, 0);
+    CHECK(world.wantsState().savedLists.at(27).first[2].guid == 0x0DDD0001 && world.wantsState().queue.at(27) == 0);
+
+    world.wantsState().queue.clear();
+    world.neighborWants(27)[0] = w;
+    ts2::sim::saveWantsForRefill(world, 27);
+    CHECK(world.wantsState().savedLists.at(27).first[0].tail[0] == 500 && world.neighborWants(27)[0].tail[0] == 0);
 }
 
 // Want Satisfy matches the stack object's Sim's current wants: by want GUID, then by argument
@@ -2520,6 +2563,170 @@ void wantSatisfyMatchesCurrentWants() {
     const RunResult unknown = vm.run(sim, 0x1003);
     CHECK(unknown.outcome == Outcome::Error && unknown.reason == "data number out of range");
     CHECK(vm.run(sim, 0x1004).outcome == Outcome::False);  // no Wants - Controller on the lot: no Sims
+}
+
+// The age levels of the want tuning: an age with an unknown name goes on with the previous age's table, a threshold
+// with no known name is stored as the first one, a missing score is the lowest score, scores keep to the game's range
+// and every table ends strictly increasing.
+void wantTuningLevelsFollowTheGamesLoader() {
+    const auto levels = ts2::content::parseAspirationLevels(
+        "<levels><age name=\"Adult\">"
+        "<threshold name=\"rock bottom\" score=\"-9999999\"/><threshold name=\"severe failure\" score=\"0x10\"/>"
+        "<threshold name=\"neutral\" score=\"5\"/><threshold name=\"bronze\" score=\"3000\"/>"
+        "<threshold name=\"silver\" score=\"4000\"/><threshold name=\"gold\" score=\"9999999\"/>"
+        "<threshold name=\"perfect\" score=\"9999999\"/></age>"
+        "<age name=\"Nobody\"><threshold name=\"neutral\" score=\"50\"/><threshold name=\"odd\" score=\"-4000\"/>"
+        "<threshold name=\"perfect\"/></age></levels>");
+    const auto& adult = levels.at(0);
+    CHECK(adult[0] == -4000);  // the first threshold, then the unnamed one
+    CHECK(adult[1] == 16 && adult[2] == 50 && adult[3] == 3000 && adult[4] == 4000);
+    CHECK(adult[5] == 327670 && adult[6] == 327671);  // the range's top, then one above it
+    CHECK(levels.size() == 1);
+
+    // An age named twice keeps what its first element stored.
+    const auto twice = ts2::content::parseAspirationLevels(
+        "<levels><age name=\"Teen\"><threshold name=\"gold\" score=\"900\"/></age>"
+        "<age name=\"Teen\"><threshold name=\"bronze\" score=\"100\"/></age></levels>");
+    CHECK(twice.at(3)[3] == 100 && twice.at(3)[5] == 900);
+}
+
+// The game's sort puts the best scores first and keeps its own order for equal scores. Twenty equal scores come out
+// in the reverse order, as the first split swaps the two ends inwards and the insertion sort leaves equals alone.
+// Ranges of 16 or fewer keep the order of equal scores.
+void gameSortKeepsTheGamesOrderOfEqualScores() {
+    struct Entry {
+        float score;
+        int id;
+    };
+    const auto better = [](const Entry& a, const Entry& b) { return b.score < a.score; };
+
+    std::vector<Entry> equal;
+    for (int i = 0; i < 20; ++i) {
+        equal.push_back({5.0f, i});
+    }
+    ts2::sim::gameSort(equal.begin(), equal.end(), better);
+    bool reversed = true;
+    for (int i = 0; i < 20; ++i) {
+        reversed = reversed && equal[static_cast<std::size_t>(i)].id == 19 - i;
+    }
+    CHECK(reversed);
+
+    // A list of 491 want candidates as the game held it, 441 of them with a score another one has, and the order the
+    // game's own sort left them in.
+    std::vector<Entry> captured;
+    for (std::size_t i = 0; i < std::size(ts2::test_data::kWantScores); ++i) {
+        captured.push_back({std::bit_cast<float>(ts2::test_data::kWantScores[i]), static_cast<int>(i)});
+    }
+    ts2::sim::gameSort(captured.begin(), captured.end(), better);
+    bool sameAsGame = captured.size() == std::size(ts2::test_data::kWantsAfter);
+    for (std::size_t i = 0; sameAsGame && i < captured.size(); ++i) {
+        sameAsGame = captured[i].id == ts2::test_data::kWantsAfter[i];
+    }
+    CHECK(sameAsGame);
+
+    std::vector<Entry> small;
+    for (int i = 0; i < 16; ++i) {
+        small.push_back({static_cast<float>(i % 3), i});
+    }
+    ts2::sim::gameSort(small.begin(), small.end(), better);
+    bool stable = true;
+    for (std::size_t i = 1; i < small.size(); ++i) {
+        stable = stable && small[i - 1].score >= small[i].score &&
+                 (small[i - 1].score != small[i].score || small[i - 1].id < small[i].id);
+    }
+    CHECK(stable);
+
+    // Any size and any ties: sorted, nothing lost, and the same input gives the same order.
+    std::uint32_t seed = 12345;
+    for (int size : {0, 1, 2, 17, 33, 100, 500, 3000}) {
+        std::vector<Entry> list;
+        for (int i = 0; i < size; ++i) {
+            seed = seed * 1664525u + 1013904223u;
+            list.push_back({static_cast<float>((seed >> 16) % 7), i});
+        }
+        auto again = list;
+        ts2::sim::gameSort(list.begin(), list.end(), better);
+        ts2::sim::gameSort(again.begin(), again.end(), better);
+        bool sorted = true, same = true;
+        std::vector<int> seen(static_cast<std::size_t>(size), 0);
+        for (std::size_t i = 0; i < list.size(); ++i) {
+            sorted = sorted && (i == 0 || list[i - 1].score >= list[i].score);
+            same = same && list[i].id == again[i].id;
+            ++seen[static_cast<std::size_t>(list[i].id)];
+        }
+        CHECK(sorted && same && std::count(seen.begin(), seen.end(), 1) == size);
+    }
+}
+
+// The sort of an autonomous Sim's choices is the game's quicksort. Three equal scores come out as 1, 2, 0, as it moves
+// the last-going one to the end each time. Nine equal scores stay as they are, as it finds nothing to swap.
+void gameQsortKeepsTheGamesOrderOfEqualScores() {
+    struct Entry {
+        float score;
+        int id;
+    };
+    const auto order = [](const Entry& a, const Entry& b) { return ts2::sim::compareChoiceScores(a.score, b.score); };
+    const auto ids = [](const std::vector<Entry>& list) {
+        std::vector<int> out;
+        for (const Entry& e : list) {
+            out.push_back(e.id);
+        }
+        return out;
+    };
+
+    std::vector<Entry> three = {{2.0f, 0}, {2.0f, 1}, {2.0f, 2}};
+    ts2::sim::gameQsort(three.begin(), three.end(), order);
+    CHECK(ids(three) == (std::vector<int>{1, 2, 0}));
+
+    std::vector<Entry> nine;
+    for (int i = 0; i < 9; ++i) {
+        nine.push_back({2.0f, i});
+    }
+    ts2::sim::gameQsort(nine.begin(), nine.end(), order);
+    CHECK(ids(nine) == (std::vector<int>{0, 1, 2, 3, 4, 5, 6, 7, 8}));
+
+    // Two lists as the game held them, with their order after the game's own sort.
+    for (const auto& captured : ts2::test_data::kSortedChoices) {
+        std::vector<Entry> list;
+        for (int i = 0; i < captured.count; ++i) {
+            list.push_back({std::bit_cast<float>(captured.scores[i]), i});
+        }
+        ts2::sim::gameQsort(list.begin(), list.end(), order);
+        bool sameAsGame = true;
+        for (int i = 0; i < captured.count; ++i) {
+            sameAsGame = sameAsGame && list[static_cast<std::size_t>(i)].id == captured.after[i];
+        }
+        CHECK(sameAsGame);
+    }
+
+    // Scores within a ten millionth count as equal, and the best come first otherwise.
+    CHECK(ts2::sim::compareChoiceScores(0.0f, 5.0e-8f) == 0);
+    CHECK(ts2::sim::compareChoiceScores(0.0f, 2.0e-7f) == 1);
+    CHECK(ts2::sim::compareChoiceScores(2.0e-7f, 0.0f) == -1);
+    std::vector<Entry> close = {{1.0f, 0}, {5.0f, 1}, {1.0f, 2}};
+    ts2::sim::gameQsort(close.begin(), close.end(), order);
+    CHECK(close[0].id == 1);
+
+    // Any size and any ties: best first, nothing lost, and the same input gives the same order.
+    std::uint32_t seed = 777;
+    for (int size : {0, 1, 2, 8, 9, 17, 100, 700, 5000}) {
+        std::vector<Entry> list;
+        for (int i = 0; i < size; ++i) {
+            seed = seed * 1664525u + 1013904223u;
+            list.push_back({static_cast<float>((seed >> 16) % 9), i});
+        }
+        auto again = list;
+        ts2::sim::gameQsort(list.begin(), list.end(), order);
+        ts2::sim::gameQsort(again.begin(), again.end(), order);
+        bool sorted = true, same = true;
+        std::vector<int> seen(static_cast<std::size_t>(size), 0);
+        for (std::size_t i = 0; i < list.size(); ++i) {
+            sorted = sorted && (i == 0 || list[i - 1].score >= list[i].score);
+            same = same && list[i].id == again[i].id;
+            ++seen[static_cast<std::size_t>(list[i].id)];
+        }
+        CHECK(sorted && same && std::count(seen.begin(), seen.end(), 1) == size);
+    }
 }
 
 // A satisfied want gives the Sim its aspiration points, within its age's levels, and its feedbackTree runs on the
@@ -2696,9 +2903,13 @@ std::vector<Test> vmInteractionTests() {
         {"Find Best Interaction weighs the social bias", findBestInteractionWeighsTheSocialBias},
         {"Find Best Interaction weighs offered lines", findBestInteractionWeighsOfferedLines},
         {"Want Satisfy gives points and runs its feedback", wantSatisfyGivesPointsAndRunsItsFeedback},
+        {"Want tuning levels follow the game's loader", wantTuningLevelsFollowTheGamesLoader},
+        {"The game's sort keeps its order of equal scores", gameSortKeepsTheGamesOrderOfEqualScores},
+        {"The game's quicksort keeps its order of equal scores", gameQsortKeepsTheGamesOrderOfEqualScores},
         {"check tree kinds find trees that change the line", checkTreeKindsFindTreesThatChangeTheLine},
         {"Find Best Interaction scores what check trees advertise", findBestInteractionScoresWhatCheckTreesAdvertise},
         {"Want Satisfy matches current wants", wantSatisfyMatchesCurrentWants},
+        {"want refills use the saved lists", wantRefillUsesTheSavedLists},
         {"want trees offer new wants", wantTreesOfferNewWants},
         {"Want Satisfy with a Sim list satisfies the listed Sims", wantSatisfyWithASimListSatisfiesTheListedSims},
         {"Push Interaction queues for the Sim", pushInteractionQueuesForTheSim},

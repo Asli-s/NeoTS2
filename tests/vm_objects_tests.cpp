@@ -555,12 +555,11 @@ void babyGenesDrawInTheGamesOrder() {
     CHECK(read.size() == 2 && read.at(1) == (ts2::sim::Gene{"x", "y"}) && read.at(5).dominant == "mouth,");
 }
 
-// Make New Character for babies of two parents (flag 0x01, both parents neighbor ids): temp 0 babies
-// go into array 0, the instruction waits a tick and is then true. Each is a baby of the parents'
-// species. With only the mother marked (person data 0xA5) a baby takes the opposite of the father's
-// gender, and is named "Baby Girl" or "Baby Boy" by it. It takes the first parent's surname, the
-// one that parent took while playing or else its character's. The unmarked father then stands for
-// both parents' genes. A count outside 1-10 and parents of two species are errors.
+// Make New Character with two neighbor-id parents: temp 0 babies of their species go into array 0,
+// then it waits a tick and is true. With only the mother marked (person data 0xA5) the unmarked
+// father stands for both in the genes and the baby takes his opposite gender and its name by it.
+// It takes the first parent's surname, the played one or else its character's. A count outside 1-10
+// and parents of two species are errors.
 void makeNewCharacterMakesBabiesOfTwoParents() {
     MemoryCodeSource code;
     code.addObjectType(kObjectGroup, typed(0x7FD96B54, 0x10));
@@ -1143,17 +1142,32 @@ void reachPutMovesTheObjectAtTheClipsEvent() {
         return in;
     };
     MemoryCodeSource code;
-    code.add(kObjectGroup, 0x1000, bhav({reach(0)}));
-    code.add(kObjectGroup, 0x1001, bhav({reach(2)}));
+    // The grab names the reset pose by its flag, the put the cup's list entry 2, which the cup plays
+    // as it changes hands.
+    Instruction grab = reach(0), put = reach(2);
+    grab.operands[9] = 0x10;
+    put.operands[13] = 2;
+    code.add(kObjectGroup, 0x1000, bhav({grab}));
+    code.add(kObjectGroup, 0x1001, bhav({put}));
+    code.addStrings(kLampGroup, 0x86, {"o2a-cup-carry", "", "o-generic-resetToZero-pose"});
     std::vector<std::string> clips(16);
     clips[0] = "a2o-floor-get";
     clips[8] = "a2o-floor-put";
     code.addStrings(0x7FD46CD0, 0x92, clips);
     code.addStrings(kLampGroup, 0x81, {"a2o-cup-grasp,a2o-cup-carry"});
     code.addObjectType(kLampGroup, typed(kLampGuid));
+    // At the hand-off the cup's "CT - Grab" (after a grab) or "CT - Put" runs with the cup as stack
+    // object: the grab shows the cup and keeps param 1, the put marks data 0x31.
+    Behavior handGrab = bhav({expr(owner::kStackObjectData, 0x22, op::kAssign, owner::kLiteral, 0, 1, F),
+                              expr(owner::kStackObjectData, 0x30, op::kAssign, owner::kParam, 1, T, F)}, 5);
+    handGrab.name = "CT - Grab";
+    Behavior handPut = bhav({expr(owner::kStackObjectData, 0x31, op::kAssign, owner::kLiteral, 7, T, F)}, 5);
+    handPut.name = "CT - Put";
+    code.add(kLampGroup, 0x1002, std::move(handGrab));
+    code.add(kLampGroup, 0x1003, std::move(handPut));
     World world;
     world.setAnimationLengths([](const std::string& name) -> std::optional<float> {
-        if (name == "a2o-cup-grasp" || name == "a2o-cup-carry") {
+        if (name == "a2o-cup-grasp" || name == "a2o-cup-carry" || name == "o-generic-resettozero-pose" || name == "o-generic-resetToZero-pose") {
             return 0.0f;
         }
         return name == "a2o-floor-get" || name == "a2o-floor-put" ? std::optional<float>(1000.0f) : std::nullopt;
@@ -1169,6 +1183,7 @@ void reachPutMovesTheObjectAtTheClipsEvent() {
     cup.x = 5 << 16;
     cup.y = (5 << 16) + 0x8000;
     sim.thread.stackObjectId = cup.id;
+    cup.data[0x22] = 1;  // hidden until grabbed
     Vm vm(code, {}, &world);
 
     // The cup comes into my hand at the clip's event 0. The primitive is true when the clip ends.
@@ -1187,6 +1202,8 @@ void reachPutMovesTheObjectAtTheClipsEvent() {
     CHECK(carry.category == ts2::content::animation_category::kCarry && std::abs(carry.startMs - (start + 1000 - 466.66)) < 0.01);
     world.advanceClock(450);
     CHECK(vm.resume(sim).outcome == Outcome::Sleeping && sim.slots[0] == cup.id && cup.data[2] == sim.id && cup.data[3] == 0);
+    CHECK(cup.animation && cup.animation->name == "o-generic-resettozero-pose");
+    CHECK(cup.data[0x22] == 0 && cup.data[0x30] == cup.id && cup.data[0x31] == 0);
     world.advanceClock(600);
     CHECK(vm.resume(sim).outcome == Outcome::True);
     // Grabbing it again is true at once.
@@ -1195,17 +1212,24 @@ void reachPutMovesTheObjectAtTheClipsEvent() {
     // one step on by facing rule 4.
     cup.data[0x17] = 4;
     CHECK(vm.run(sim, 0x1001).outcome == Outcome::Sleeping && sim.animation->name == "a2o-floor-put");
-    // The hand aims at that spot.
+    // The hand aims at that spot, facing the way I face rather than the way the spot does.
     const auto& aim = sim.animation->ikObject;
-    CHECK(aim && aim->x == 5.5f && aim->y == 5.5f && aim->heading == compassHeading(7));
+    CHECK(aim && aim->x == 5.5f && aim->y == 5.5f && aim->heading == compassHeading(sim.data[1]) && aim->heading != compassHeading(7));
     // A put plays the grasp again and fades the carry out.
     const auto named = [&](const char* name, bool stopped) {
         return std::ranges::any_of(sim.overlays, [&](const PlayingOverlay& o) { return o.name == name && o.stopped == stopped; });
     };
     CHECK(named("a2o-cup-carry", true) && !named("a2o-cup-carry", false));
+    // From its full weight down to none over 233.33 ms, as Animate Stop fades it.
+    const auto stoppedCarry = std::ranges::find_if(sim.overlays, [](const PlayingOverlay& o) { return o.name == "a2o-cup-carry"; });
+    CHECK(stoppedCarry->stoppedAt && *stoppedCarry->stoppedAt == 1.0f && stoppedCarry->blendOutMs && std::fabs(*stoppedCarry->blendOutMs - 233.33f) < 0.01f);
     CHECK(sim.overlays.back().name == "a2o-cup-grasp" && sim.overlays.back().startMs == world.clockMs());
+    cup.animation->name = "o2a-cup-carry";
     world.advanceClock(1000);
     CHECK(vm.resume(sim).outcome == Outcome::True && sim.slots[0] == 0 && cup.data[2] == 0);
+    // The put's clip replaces the carry clip the cup played in hand.
+    CHECK(cup.animation && cup.animation->name == "o-generic-resetToZero-pose" && cup.ending && cup.ending->name == "o2a-cup-carry");
+    CHECK(cup.data[0x31] == 7);
     CHECK(cup.x == (5 << 16) + 0x8000 && cup.y == (5 << 16) + 0x8000 && cup.data[1] == 7);
     // With nothing in hand there is nothing to put.
     CHECK(vm.run(sim, 0x1001).outcome == Outcome::False);
@@ -1798,17 +1822,9 @@ void relationshipWithFlag8NeedsOnlyA() {
     CHECK(vm.run(a, 0x1001).outcome == Outcome::Error);
 }
 
-// With flag 0x02, A and B are neighbor ids and the variables are A's saved list towards B.
-// Change Outfit puts on a Sim (owner byte 9 / data 10-11) an outfit: byte 8, or with flag 0x04 a
-// value, in person data 0x08's numbering (8 pajamas, 2 formal). The game wears it only when the Sim's
-// age data lists a top and a bottom, or a full body, for that category, and then sets person data
-// 0x08. A Sim that aged on the lot is checked in its new age's lists. Flags 0x20 and 0x10 clear the
-// outfit source GUID (0x77-0x78). An outfit from a source (the
-// stack object 0x01, the operands 0x02, temps 0x40) isn't worn yet. A Sim without age data keeps
-// everything but the 0x20 clear. A missing object or one that isn't a Sim is an error.
-// With the app's working copy of the Sim's age data, Change Outfit is told the source, flag 0x10 and
-// flag 0x08, and checks the copy's lists. A source's outfit put on keeps its GUID in person data
-// 0x77-0x78 unless it is the Sim's own.
+// With the working copy of the Sim's age data, Change Outfit is told the source and flags 0x10 and
+// 0x08, and checks the copy's lists. A source's outfit keeps its GUID in person data 0x77-0x78
+// unless it is the Sim's own.
 void changeOutfitDressesFromTheWorkingCopy() {
     auto changeOutfit = [](std::uint8_t flags, std::uint8_t category) {
         Instruction in;
@@ -1846,6 +1862,12 @@ void changeOutfitDressesFromTheWorkingCopy() {
     CHECK(!sim.outfitChange && sim.personData[0x08] == 0 && sim.personData[0x77] == static_cast<std::int16_t>(0xDF67));
 }
 
+// Change Outfit dresses the Sim in owner byte 9 / data 10-11 in byte 8's outfit (flag 0x04: a
+// value), numbered as person data 0x08 (8 pajamas, 2 formal). It is worn, setting 0x08, only when
+// the age data lists a top and bottom or a full body for it, a Sim aged on the lot checked in its new
+// age's lists. Flags 0x20 and 0x10 clear the source GUID (0x77-0x78). A source's outfit (flags 0x01,
+// 0x02, 0x40) isn't worn yet. Without age data only the 0x20 clear happens. A missing object or a
+// non-Sim is an error.
 void changeOutfitAsksTheSim() {
     auto changeOutfit = [](std::uint8_t flags, std::uint8_t category, std::uint8_t simOwner, std::uint16_t simData) {
         Instruction in;
@@ -1982,6 +2004,7 @@ void createdSimsAreTheirNeighbor() {
     CHECK(npc->personData[0x20] == 644);  // Init saw the id
 }
 
+// With flag 0x02, A and B are neighbor ids and the variables are A's saved list towards B.
 void relationshipWithNeighborIdsUsesTheNeighborhood() {
     MemoryCodeSource code;
     code.add(kObjectGroup, 0x1000, bhav({
@@ -2813,6 +2836,39 @@ void hiddenFlagsHideTheModel() {
     }
 }
 
+// Food changes its model as it is cooked by writing its graphic (object data 0): the object takes
+// that row of its model names at once, and the drawn model follows. An empty row keeps the model. A
+// script setting a temp or comparing the graphic changes nothing.
+void graphicWritesChangeTheModel() {
+    MemoryCodeSource code;
+    code.addStrings(kObjectGroup, 0x85, {"", "nullModel", "foodPrepSpaghetti", "foodCookSpaghetti", ""});
+    code.add(kObjectGroup, 0x1000, bhav({
+        expr(owner::kStackObjectData, 0, op::kAssign, owner::kLiteral, 2, 1, E),
+        expr(owner::kStackObjectData, 0, op::kEquals, owner::kLiteral, 2, 2, E),
+        expr(owner::kTemp, 0, op::kAssign, owner::kLiteral, 3, T, E),
+    }));
+    code.add(kObjectGroup, 0x1001, bhav({expr(owner::kMyData, 0, op::kAssign, owner::kLiteral, 3, T, E)}));
+    code.add(kObjectGroup, 0x1002, bhav({expr(owner::kMyData, 0, op::kAssign, owner::kLiteral, 4, T, E)}));
+    code.add(kObjectGroup, 0x1003, bhav({expr(owner::kMyData, 0, op::kAssign, owner::kLiteral, 1, T, E)}));
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType), 1);
+    auto& food = world.create(kObjectGroup, typed(kFridgeGuid));
+    sim.thread.stackObjectId = food.id;
+    Vm vm(code, {}, &world);
+    const auto names = [&](std::size_t row) { return code.string(kObjectGroup, 0x85, row); };
+    auto version = world.objectsVersion();
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::True);
+    CHECK(food.model == "foodPrepSpaghetti" && sim.model.empty() && world.objectsVersion() > version);
+    CHECK(ts2::sim::createdModelName(food, names) == "foodPrepSpaghetti");
+    CHECK(vm.run(food, 0x1001).outcome == Outcome::True && food.model == "foodCookSpaghetti");
+    version = world.objectsVersion();
+    CHECK(vm.run(food, 0x1002).outcome == Outcome::True && food.data[0] == 4 && food.model == "foodCookSpaghetti");
+    CHECK(world.objectsVersion() == version);
+    // nullModel is a model that draws nothing.
+    CHECK(vm.run(food, 0x1003).outcome == Outcome::True && food.model == "nullModel");
+    CHECK(ts2::sim::createdModelName(food, names).empty());
+}
+
 // A saved Placeholder or TemplatePerson among the ids the object map's wait table covers is marked
 // for delete as the lot loads, as the game does. Purges keep it until a script removes it.
 void loadedPlaceholdersAreKeptUntilUnload() {
@@ -3024,6 +3080,7 @@ std::vector<Test> vmObjectTests() {
         {"removed objects leave their slot at once", removedObjectsLeaveTheirSlotAtOnce},
         {"Removed objects keep their data until purge", removedObjectsKeepTheirDataUntilPurge},
         {"Hidden Flags hide the model", hiddenFlagsHideTheModel},
+        {"graphic writes change the model", graphicWritesChangeTheModel},
         {"loaded Placeholders and TemplatePersons are kept until unload", loadedPlaceholdersAreKeptUntilUnload},
         {"a saved Idle for Input runs again after its interaction", savedIdleForInputRunsAgainAfterItsInteraction},
         {"removing me ends the run unless return immediately", removingMeEndsTheRunUnlessReturnImmediately},

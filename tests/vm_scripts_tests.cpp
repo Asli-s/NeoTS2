@@ -815,10 +815,10 @@ void neighborhoodManagerReadsNeighborhoods() {
     ts2::nhoodid::NeighborhoodId suburb = university, otherSuburb = university, elsewhere = university;
     suburb.id = 12;
     suburb.type = 4;
-    suburb.value2 = 6;
+    suburb.pack = 6;
     otherSuburb.id = 13;
     otherSuburb.type = 4;
-    otherSuburb.value2 = 7;
+    otherSuburb.pack = 7;
     elsewhere.id = 9;
     elsewhere.prefix = "N001";
     ts2::sim::World world;

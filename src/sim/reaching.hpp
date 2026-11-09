@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 namespace ts2::sim {
 
@@ -16,9 +17,13 @@ struct Reaching {
     std::int16_t object = 0;     // what moves: grabbed, or held and put down
     std::int16_t container = 0;  // a put's target object
     std::int16_t slot = 0;       // the hand to grab into, or the target's slot
+    std::int16_t source = 0;     // a grab's: the object it is in as the reach starts, 0 for none
+    std::int16_t stackObject = 0;  // the stack object of the tree that ran Reach/Put
     double transferMs = 0;       // the reach clip's event 0: the object changes hands
     double endMs = 0;            // the reach clip's end
     bool transferred = false;
+    // The clip the object plays once as it changes hands (Reach/Put bytes 13-14). Empty for none.
+    std::string objectClip;
 };
 
 } // namespace ts2::sim

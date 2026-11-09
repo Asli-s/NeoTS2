@@ -9,9 +9,7 @@
 
 namespace ts2::sim {
 
-// The Animate primitives' operands, as the game reads them.
-//
-// Animate Sim (0x6A) plays an animation on the Sim running it and waits until it ends:
+// The Animate primitives' operands. Animate Sim (0x6A) plays on the Sim running it and waits:
 //   bytes 0-1  animation: an entry of the animation list, or (flag 0x04) the parameter holding it
 //   byte 2     flags: 0x01 flipped, 0x02 speed from temp 2, 0x04 entry from a parameter,
 //              0x08 interruptible, 0x10 start at the tag in temp 0, 0x20 back to idle after,
@@ -69,12 +67,14 @@ struct PlayingAnimation {
     // where a turn in place starts, the path's heading for a walk's clips). None for other clips.
     std::optional<float> baseHeading;
     // Where the clip's IK object stands, for its limb targets on that object (a reach clip's: the
-    // object grabbed, or where the held one goes): route coordinates, level, height above that
-    // level's floor and heading. None: such targets are in the Sim's own space.
+    // object grabbed, or where the held one goes): route coordinates, level and height above that
+    // level's floor. None: such targets are in the Sim's own space.
     struct IkObject {
         float x = 0, y = 0;
         std::int16_t level = 1;
         float height = 0;
+        // The Sim's heading as the clip started. The targets face that way turned by the clip's root
+        // turn (header), whichever way the object faces: a half turn for a counter, none for the floor.
         float heading = 0;
     };
     std::optional<IkObject> ikObject;
@@ -123,22 +123,19 @@ struct AnimateFades {
 };
 AnimateFades animateFades(float lengthMs, bool fadesIn, bool fadesOut);
 
-// An animation laid over a Sim or an object by Animate Overlay (0x6B). It plays on its own while
-// scripts go on. Its event tree hears when it starts blending out (kBlendingOutEvent), then when it
-// is gone (kBlendedOutEvent and kEndEvent), with the percent of it played.
+// An animation laid over a Sim or an object by Animate Overlay (0x6B), playing while scripts go on.
+// Its event tree hears kBlendingOutEvent, then kBlendedOutEvent and kEndEvent, with the percent played.
 //   bytes 0-1  the entry of the animation list, or with byte 2 flag 0x04 the parameter holding it
 //   byte 2     flags: 0x01 flipped, 0x04 entry from a parameter, 0x20 times to play from temp 1,
 //              0x40 no blending out, 0x80 no blending in
 //   byte 3     speed, in 32nds
 //   bytes 4-5  the tree told of its events (0: none)
-//   byte 6, 7-8  the object it plays on (owner, data), mostly "my object id". A bed's tree lays its
-//              own clip on the bed this way while the Sim's clip plays on the Sim.
+//   byte 6, 7-8  the object it plays on (owner, data), mostly "my object id" (a bed's own clip)
 //   byte 9     the animation list (0x81 adult animations...)
 //   byte 10    weight, in hundredths (outside 0-100: whole)
 //   byte 11    priority 0-4 (low, medium, high, highest, under everything)
-//   byte 15    flags: 0x01 flipped if temp 3 (in place of byte 2's flag), so a bed's clip plays on
-//              the side the Sim gets in on, as the Sim's own clip does, 0x08 its IK object is the
-//              one temp 6 names (a child's dance on an older Sim's feet reaches for that Sim's hands)
+//   byte 15    flags: 0x01 flipped if temp 3 (in place of byte 2's flag), 0x08 the IK object is the
+//              one temp 6 names
 struct PlayingOverlay {
     std::string name;
     double startMs = 0;   // on the world's clock

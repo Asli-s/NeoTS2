@@ -1,19 +1,10 @@
 #include "lot_life.hpp"
+#include "lot_life_clips.hpp"
 
-#include "content/neighborhood.hpp"
 #include "diag/log.hpp"
-#include "formats/hash.hpp"
-#include "formats/image.hpp"
-#include "formats/propset.hpp"
-#include "formats/reference_list.hpp"
 #include "scene/look_at.hpp"
-#include "scene/newborn_face.hpp"
-#include "scene/object_lights.hpp"
 #include "scene/pool_water.hpp"
-#include "sim/motives.hpp"
 #include "sim/object_model.hpp"
-#include "sim/ground_click.hpp"
-#include "sim/pie_menu.hpp"
 #include "sim/route_goals.hpp"
 #include "sim/snap.hpp"
 #include "sim/turn.hpp"
@@ -22,12 +13,9 @@
 #include <chrono>
 #include <climits>
 #include <cmath>
-#include <limits>
-#include <functional>
-#include <cstdio>
-#include <ctime>
 #include <exception>
 #include <format>
+#include <functional>
 #include <set>
 #include <string>
 
@@ -35,58 +23,19 @@ namespace app {
 
 namespace {
 
+// Object data 2 and 3: the object something is held by and its slot there.
+constexpr std::size_t kContainerField = 2, kSlotField = 3;
+
 // How many times real time the speed clock runs at each speed.
 float clockRate(ts2::sim::Speed speed) {
     return speed == ts2::sim::Speed::Ultra ? 21.0f : speed == ts2::sim::Speed::High ? 3.0f : 1.0f;
 }
 
-// The layers overlays play on by priority, as the game ranks them: an object's own animation (layer 0)
-// below every overlay but the underlay (priority 4).
-constexpr int kOverlayLayers[] = {1, 3, 5, 7, 0};
-// A Sim starts in its standing pose. After that, a joint no clip moves keeps where it last was.
-constexpr int kBasePoseLayer = -1;
 // How far ahead a walk's way is read where the Sim hasn't moved yet (route slivers shorter than this don't turn it).
 constexpr float kRouteAhead = 0.01f;
 
-// An Animate Sim clip's weight as the game gives it: in over its fade in from its start, out over
-// its fade out to its end, each clip on its own whatever plays after it. One without a fade out
-// plays at full weight to its end and is gone there, the joints it drove keeping their last pose
-// until another clip moves them.
-void fadeAsAnimateSim(ts2::scene::Actor::Clip& clip, const ts2::sim::PlayingAnimation& a) {
-    clip.end = (a.startMs + std::max(0.0f, a.lengthMs)) / 1000.0;
-    clip.fadeIn = a.fadeInMs > 0;
-    clip.fadeInSeconds = a.fadeInMs / 1000.0f;
-    clip.fadeOut = true;
-    clip.fadeOutSeconds = a.fadeOutMs / 1000.0f;
-}
-
-// Whether `previous` is an Animate Sim clip still playing as `latest` starts. One that has played
-// out is gone, as the game drops each Animate Sim clip at its end.
-bool stillPlaying(const ts2::sim::PlayingAnimation& previous, const ts2::sim::PlayingAnimation& latest) {
-    return previous.fades && previous.startMs + previous.lengthMs > latest.startMs;
-}
-
-// What the game reads from an object to choose its shadow (see objectshadow), as the lot scene reads
-// it for the lot's own objects.
-ts2::scene::objectshadow::Facts shadowFacts(const ts2::sim::SimObject& o, const std::string& model, int mesh,
-                                            const ts2::scene::Scene& scene) {
-    ts2::scene::objectshadow::Facts f;
-    f.type = o.definition.field(ts2::objd::field::kType);
-    f.data8 = o.data[8];
-    f.data13 = o.data[0x0D];
-    f.data68 = o.data[0x44];
-    if (mesh >= 0 && static_cast<std::size_t>(mesh) < scene.meshes.size()) {
-        const auto& primitives = scene.meshes[static_cast<std::size_t>(mesh)].primitives;
-        f.drawable = !primitives.empty() && ts2::scene::lower(model) != "nullmodel";
-        f.hasShadowGroups = std::ranges::any_of(primitives, [](const ts2::scene::Primitive& p) {
-            return ts2::scene::objectshadow::isShadowGroup(p.group);
-        });
-    }
-    return f;
-}
-
-// Sets `held` to the scene instances of the objects Sims hold. It is made again only when they
-// change, as it is asked for every frame.
+// Sets `held` to the scene instances of the objects Sims hold, with what hangs in their slots (see
+// LotLife::hangInAnimated). It is made again only when they change, as it is asked for every frame.
 void heldInstances(const ts2::scene::Scene& scene, std::set<std::size_t>& held) {
     thread_local std::vector<std::size_t> now;
     now.clear();
@@ -95,254 +44,29 @@ void heldInstances(const ts2::scene::Scene& scene, std::set<std::size_t>& held) 
             now.push_back(h.instance);
         }
     }
+    // Objects nest a few deep at most (food in a bowl in the hand). The cap stops a broken lot's
+    // containers that hold each other.
+    constexpr int kMaxNesting = 8;
+    for (int depth = 0; depth < kMaxNesting; ++depth) {
+        const std::size_t found = now.size();
+        for (const auto& actor : scene.objectActors) {
+            const bool inHand = std::any_of(actor.skinned.begin(), actor.skinned.end(), [&](const ts2::scene::Actor::Skinned& s) {
+                return std::find(now.begin(), now.end(), s.instance) != now.end();
+            });
+            for (const auto& h : actor.held) {
+                if (inHand && std::find(now.begin(), now.end(), h.instance) == now.end()) {
+                    now.push_back(h.instance);
+                }
+            }
+        }
+        if (now.size() == found) {
+            break;
+        }
+    }
     std::sort(now.begin(), now.end());
     now.erase(std::unique(now.begin(), now.end()), now.end());
     if (!std::equal(now.begin(), now.end(), held.begin(), held.end())) {
         held = std::set<std::size_t>(now.begin(), now.end());
-    }
-}
-
-// Whether `previous` is an Animate Sim clip still fading out as `latest` starts.
-bool stillFading(const ts2::sim::PlayingAnimation& previous, const ts2::sim::PlayingAnimation& latest) {
-    return previous.fades && previous.fadeOutMs > 0 && previous.startMs + previous.lengthMs > latest.startMs;
-}
-
-// Whether `latest` crossfades `previous`, still fading, as the game does between two Animate Sim
-// clips that move the body (both have a body target): the latest fades in, and the previous one may
-// fade out and has a fade's length or less left. The previous one then keeps the weight it has as
-// the latest starts and falls from there to none over a fade, whatever its own fade had left.
-bool crossfades(const ts2::sim::PlayingAnimation& previous, const ts2::sim::PlayingAnimation& latest, ts2::scene::AnimationLibrary& animations) {
-    constexpr std::uint16_t kBodyTarget = 1;
-    return stillFading(previous, latest) && latest.fades && previous.blendsOut && latest.blendsIn &&
-           previous.startMs + previous.lengthMs - latest.startMs <= ts2::sim::kAnimateFadeMs &&
-           animations.hasTargetType(previous.name, kBodyTarget) && animations.hasTargetType(latest.name, kBodyTarget);
-}
-
-// An Animate Sim clip's weight `ms` on the world's clock, by its fades.
-float animateSimWeight(const ts2::sim::PlayingAnimation& a, double ms) {
-    const double t = ms - a.startMs;
-    const double in = a.fadeInMs > 0 ? std::clamp(t / a.fadeInMs, 0.0, 1.0) : 1.0;
-    const double out = a.fadeOutMs > 0 ? std::clamp((a.lengthMs - t) / a.fadeOutMs, 0.0, 1.0) : 1.0;
-    return static_cast<float>(std::min(in, out));
-}
-
-// When the animation before `latest` is gone: one still fading at its end, or a fade after the
-// latest starts when the latest crossfades it. Others are gone as the latest starts, as the game
-// fades an older clip only by its own fades or that crossfade.
-double previousGoneMs(const ts2::sim::PlayingAnimation& previous, const ts2::sim::PlayingAnimation& latest,
-                      ts2::scene::AnimationLibrary& animations) {
-    if (crossfades(previous, latest, animations)) {
-        return latest.startMs + ts2::sim::kAnimateFadeMs;
-    }
-    if (stillPlaying(previous, latest)) {
-        return previous.startMs + previous.lengthMs;
-    }
-    return latest.startMs;
-}
-
-// Where the Sim stood as a clip started, by the clip's name and start, if known.
-using StartedAt = std::function<std::optional<ts2::scene::Transform>(const std::string& name, double startMs)>;
-
-// What an object plays, as the actor's clips: its own animation and its overlays, or while a Sim
-// walks, the walk's clips at the moments the distance walked gives them and at their weights (`walk`),
-// over `previous`. `walkFade` rises from 0 to 1 over a fade from the walk's start. A locomotion
-// clip plays turned from the heading the Sim is placed at (`frameHeading`) to its own base heading
-// (see PlayingAnimation::baseHeading). Any other clip
-// with a root joint plays on where the Sim stood as it started (`startedAt`), as the game places
-// each clip: snapping the Sim to a slot or walking it off leaves such a clip where it was.
-void playClips(ts2::scene::Actor& actor, const ts2::sim::SimObject& object, const std::optional<ts2::sim::PlayingAnimation>& own,
-               const std::optional<ts2::sim::PlayingAnimation>& previous, float frameHeading, ts2::scene::AnimationLibrary& animations,
-               const std::vector<ts2::sim::WalkPose>* walk = nullptr, float walkFade = 1, float walkStartHeading = 0,
-               const std::vector<ts2::sim::WalkPose>* endedWalk = nullptr, float endedHeading = 0, const StartedAt& startedAt = {},
-               const std::optional<ts2::scene::Transform>& endedPlace = std::nullopt) {
-    actor.clips.clear();
-    const int rootJoint = actor.rig ? actor.rig->find("root_trans") : -1;
-    const auto placeFrom = [&](ts2::scene::Actor::Clip& clip, const std::string& name, double startMs) {
-        const auto has = [&](const std::vector<int>& channels) {
-            return rootJoint >= 0 && static_cast<std::size_t>(rootJoint) < channels.size() && channels[static_cast<std::size_t>(rootJoint)] >= 0;
-        };
-        if (startedAt && (has(clip.animation->translation) || has(clip.animation->rotation))) {
-            clip.playedAt = startedAt(name, startMs);
-        }
-    };
-    // A turn's route holds where the turn started, facing its base heading, so its clip plays from
-    // there while it fades out. Without a start place it fades out without its root's place
-    // (`leaveOut`).
-    const auto placeTurn = [&](ts2::scene::Actor::Clip& clip, const ts2::sim::PlayingAnimation& a, bool& leaveOut) {
-        const auto at = startedAt ? startedAt(a.name, a.startMs) : std::nullopt;
-        if (!at || !a.baseHeading) {
-            leaveOut = true;
-            return;
-        }
-        const auto inLot = actor.lotFrame.rigidInverse() * *at;
-        clip.turn = ts2::sim::wrapAngle(*a.baseHeading - std::atan2(inLot.m[4], inLot.m[0]));
-        clip.playedAt = at;
-    };
-    // Where an animation's IK object stands in the world (the lot's x and y are the position's y and x).
-    const auto objectPlace = [&](const ts2::sim::PlayingAnimation& a) -> std::optional<ts2::scene::Transform> {
-        if (!a.ikObject || !actor.floorHeight) {
-            return std::nullopt;
-        }
-        const auto& ik = *a.ikObject;
-        return actor.lotFrame * ts2::scene::Transform::at(ik.y, ik.x, actor.floorHeight(ik.level, ik.y, ik.x) + ik.height, ik.heading);
-    };
-    const auto add = [&](const std::string& name, double startMs, double lengthMs, float speed, bool flipped,
-                         std::optional<float> baseHeading = std::nullopt) -> ts2::scene::Actor::Clip* {
-        auto bound = animations.bound(actor.rig, name, flipped);
-        if (!bound) {
-            return nullptr;
-        }
-        auto& clip = actor.clips.emplace_back();
-        clip.animation = std::move(bound);
-        clip.start = startMs / 1000.0;
-        clip.end = (startMs + std::max(0.0, lengthMs)) / 1000.0;
-        clip.speed = speed;
-        clip.turn = baseHeading ? ts2::sim::wrapAngle(*baseHeading - frameHeading) : 0.0f;
-        return &clip;
-    };
-    if (!actor.basePose.empty()) {
-        // While a walk fades in, the standing pose keeps the facing the Sim had, as the body does.
-        const std::optional<float> base = walk && walkFade < 1 ? std::optional<float>(walkStartHeading) : std::nullopt;
-        if (auto* clip = add(actor.basePose, 0, 0, 1, false, base)) {
-            clip->layer = kBasePoseLayer;
-            clip->fadeIn = false;
-            clip->fadeOut = false;
-        }
-    }
-    if (walk) {
-        // A clip before the walk with fades of its own plays them out under it and is gone at its end.
-        // The walk fades nothing else: the game's walk cuts no clip but a running route's.
-        if (previous && previous->fades) {
-            if (auto* clip = add(previous->name, previous->startMs, previous->lengthMs, previous->speed, previous->flipped, previous->baseHeading)) {
-                clip->layer = previous->layer;
-                fadeAsAnimateSim(*clip, *previous);
-                clip->repeats = previous->loops;
-                if (previous->baseHeading) {
-                    placeTurn(*clip, *previous, clip->noRootMove);
-                } else {
-                    placeFrom(*clip, previous->name, previous->startMs);
-                }
-            }
-        }
-        for (const auto& pose : *walk) {
-            if (auto* clip = add(pose.clip->name, 0, pose.clip->lengthMs, 1, pose.mirrored)) {
-                clip->weight = pose.weight;
-                clip->atMs = pose.phase * pose.clip->lengthMs;
-                clip->turn = pose.turn;
-                clip->fadeIn = clip->fadeOut = false;
-            }
-        }
-    }
-    // An Animate Sim clip still fading out as the latest starts plays out its own fades under it, or
-    // the latest's crossfade (see crossfades), its root blended with the latest's. Any other is gone
-    // as the latest starts, its joints held where they were until the latest moves them. A turn plays
-    // on from where it started, facing its base heading. Any other plays on where it started, so a
-    // stair step's clip stays a step down as the Sim snaps a step on, and getting into bed keeps its
-    // elbows still as lying there places the Sim 0.92 m on.
-    const bool crossfade = previous && own && crossfades(*previous, *own, animations);
-    if (!walk && previous && own && (crossfade || stillPlaying(*previous, *own))) {
-        if (auto* clip = add(previous->name, previous->startMs, previous->lengthMs, previous->speed, previous->flipped, previous->baseHeading)) {
-            clip->layer = previous->layer;
-            clip->objectPlace = objectPlace(*previous);
-            clip->ikActor = static_cast<std::uint32_t>(std::max<std::int16_t>(previous->ikTarget, 0));
-            if (crossfade) {
-                clip->weight = animateSimWeight(*previous, own->startMs);
-                clip->end = (own->startMs + ts2::sim::kAnimateFadeMs) / 1000.0;
-                clip->fadeIn = false;
-                clip->fadeOut = true;
-                clip->fadeOutSeconds = ts2::sim::kAnimateFadeMs / 1000.0f;
-            } else {
-                // A clip with fades of its own plays them out under the latest.
-                fadeAsAnimateSim(*clip, *previous);
-            }
-            if (previous->baseHeading) {
-                placeTurn(*clip, *previous, clip->bodyOnly);
-            } else {
-                placeFrom(*clip, previous->name, previous->startMs);
-            }
-        }
-    }
-    // A walk that has handed back plays on under what follows, a new walk too, on its own layer, until
-    // its fade is over. Its clips play where the walk has got to on its path (`endedPlace`), as the
-    // game's route goes on to the path's end and holds there. Without that place they keep only the
-    // body's joints, their limb controls turned to the heading the walk ended on.
-    if (endedWalk) {
-        for (const auto& pose : *endedWalk) {
-            if (auto* clip = add(pose.clip->name, 0, pose.clip->lengthMs, 1, pose.mirrored)) {
-                clip->weight = pose.weight;
-                clip->atMs = pose.phase * pose.clip->lengthMs;
-                clip->fadeIn = clip->fadeOut = false;
-                if (endedPlace) {
-                    clip->turn = pose.turn;
-                    clip->playedAt = endedPlace;
-                } else {
-                    clip->turn = pose.turn + ts2::sim::wrapAngle(endedHeading - frameHeading);
-                    clip->bodyOnly = true;
-                }
-            }
-        }
-    }
-    // A clip without fades of its own (the pose a walk leaves) shows at full once it starts. It waits
-    // while a walk that has handed back plays out, as the game keeps no such clip and the walk's
-    // clips play out alone.
-    if (!walk && own && (own->fades || endedWalk == nullptr)) {
-        if (auto* clip = add(own->name, own->startMs, own->lengthMs, own->speed, own->flipped, own->baseHeading)) {
-            clip->layer = own->layer;
-            clip->objectPlace = objectPlace(*own);
-            clip->ikActor = static_cast<std::uint32_t>(std::max<std::int16_t>(own->ikTarget, 0));
-            if (own->fades) {
-                fadeAsAnimateSim(*clip, *own);
-            } else {
-                clip->fadeIn = clip->fadeOut = false;
-            }
-            clip->repeats = own->loops;
-            if (!own->baseHeading) {
-                placeFrom(*clip, own->name, own->startMs);
-            }
-        }
-    }
-    for (const auto& overlay : object.overlays) {
-        auto* clip = add(overlay.name, overlay.startMs, overlay.plays < 0 ? 0.0 : overlay.lengthMs, overlay.speed, overlay.flipped);
-        if (clip) {
-            clip->weight = overlay.weight;
-            clip->layer = kOverlayLayers[std::min<std::size_t>(overlay.priority, 4)];
-            clip->ikActor = static_cast<std::uint32_t>(std::max<std::int16_t>(overlay.ikTarget, 0));
-            clip->repeats = overlay.plays != 1;
-            clip->fadeIn = overlay.blendsIn;
-            clip->fadeOut = overlay.blendsOut;
-            clip->fadeInSeconds = overlay.blendInMs.value_or(ts2::sim::kOverlayBlendMs) / 1000.0f;
-            clip->fadeOutSeconds = overlay.blendOutMs.value_or(ts2::sim::kOverlayBlendMs) / 1000.0f;
-            if (overlay.stoppedAt) {
-                // Stopped: from the weight it had then down to none over the stop's blend.
-                clip->weight *= *overlay.stoppedAt;
-                clip->fadeIn = false;
-                clip->fadeOut = true;
-            }
-            placeFrom(*clip, overlay.name, overlay.startMs);
-        }
-    }
-}
-
-// A stopped walk that settled at `settledMs` (see SimObject::walkSettledMs): the pose the Sim
-// was in fades out, held where it stood then (`at`), while the walk pose fades in and out.
-void addSettleClips(ts2::scene::Actor& actor, const ts2::sim::SimObject& object, double settledMs, const std::optional<ts2::scene::Transform>& at,
-                    ts2::scene::AnimationLibrary& animations, const ts2::sim::LocoClipLookup& clips) {
-    const double start = settledMs / 1000.0;
-    auto& still = actor.clips.emplace_back();
-    still.frozen = true;
-    still.start = start;
-    still.end = start + ts2::sim::kSettlePoseMs / 1000.0;
-    still.fadeIn = false;
-    still.fadeOutSeconds = ts2::sim::kSettlePoseMs / 1000.0f;
-    still.playedAt = at;
-    const std::string name = ts2::sim::settlePose(object.walkSets.empty() ? nullptr : &object.walkSets.back()[0],
-                                                  object.personData[ts2::sim::kLifeStagePersonData], object.personData[ts2::sim::kGenderPersonData], clips);
-    if (auto bound = animations.bound(actor.rig, name, false)) {
-        auto& pose = actor.clips.emplace_back();
-        pose.animation = std::move(bound);
-        pose.start = start;
-        pose.end = start + ts2::sim::kSettleWalkPoseMs / 1000.0;
-        pose.fadeInSeconds = pose.fadeOutSeconds = ts2::sim::settleWalkPoseFadeMs() / 1000.0f;
     }
 }
 
@@ -393,17 +117,15 @@ float standHeight(const ts2::scene::Actor& actor, const ts2::sim::SimObject& sim
     return actor.floorHeight(level, x, y);
 }
 
-// A Sim in an object's slot (a seat, a stair step) is drawn where the slot's bone is, turned as it
-// is, as the game draws it: a stair's slots stand a step higher each and face up or down the stair.
-// `slotAt` gives where an object's slot is (see LotLife::slotPlace). A slot of a multi-tile part
-// drawn by its lead (the far side of a double bed) is placed by `partSlot`. A Sim in another Sim's
-// slot is carried: posing hangs it at that Sim's slot bone (see Actor::carrier), and until then it
-// stands where it was last posed (`pose`), else at its carrier's place.
+// Draws a Sim in an object's slot (a seat, a stair step) at the slot's bone and turned as it is, as the
+// game does, so a stair's slots stand a step higher each. `slotAt` places an object's slot (see
+// LotLife::slotPlace) and `partSlot` one of a multi-tile part drawn by its lead (a double bed's far side).
+// A Sim carried in another Sim's slot hangs at that slot's bone once posed (see Actor::carrier), and
+// until then stands at its last pose (`pose`), else at its carrier's place.
 void placeSim(ts2::scene::Actor& actor, const ts2::sim::SimObject& sim, const SimFrame& frame, const ts2::scene::Scene& scene,
               const std::function<std::optional<ts2::scene::Transform>(const ts2::scene::PlacedObject&, std::size_t slot)>& slotAt,
               const std::function<std::optional<ts2::scene::Transform>(std::int16_t part, std::size_t slot)>& partSlot,
               const ts2::scene::ScenePose* pose) {
-    constexpr std::size_t kContainerField = 2, kSlotField = 3;
     actor.carrier = 0;
     if (sim.x == ts2::sim::kOffLot || sim.y == ts2::sim::kOffLot) {
         // Out of the world (a Sim gone onto a school bus): not drawn, as an unplaced object isn't.
@@ -483,17 +205,6 @@ void setSimStorey(ts2::scene::Scene& scene, const ts2::scene::Actor& actor, int 
             scene.instances[held.instance].level = storey;
         }
     }
-}
-
-// The model a created object is drawn with (see createdModelName). An extra tile of a multi-tile
-// object draws none, as on a saved lot: its lead draws the whole model.
-std::string modelName(ts2::scene::Assets& assets, const ts2::sim::SimObject& object) {
-    constexpr std::uint32_t kModelNames = 0x85;
-    const std::int16_t lead = object.data[ts2::sim::kLeadTileField];
-    if (object.definition.field(ts2::objd::field::kMultiTileMasterId) != 0 && lead > 0 && lead != object.id) {
-        return {};
-    }
-    return ts2::sim::createdModelName(object, [&](std::size_t row) { return assets.objectString(object.group, kModelNames, row); });
 }
 
 } // namespace
@@ -632,184 +343,17 @@ void LotLife::traceIn(ts2::scene::Scene& scene, const ts2::scene::ScenePose& pos
         if (!cameraEye_) {
             return std::nullopt;
         }
-        // Into the lot's frame (a turn and a move, so the turn's transpose undoes it).
-        const auto& m = lotFrame_.m;
-        const float d[3] = {(*cameraEye_)[0] - m[3], (*cameraEye_)[1] - m[7], (*cameraEye_)[2] - m[11]};
-        const float lotX = m[0] * d[0] + m[4] * d[1] + m[8] * d[2];
-        const float lotY = m[1] * d[0] + m[5] * d[1] + m[9] * d[2];
-        return std::array<float, 2>{lotY, lotX};  // the lot's x and y are the position's y and x
+        return routePoint(*cameraEye_);
     });
 }
 
-namespace {
-
-// A mirrored clip's effect goes on the other side: a leading l_ and r_ swap, in either case.
-std::string otherSide(std::string name) {
-    if (name.size() >= 2 && name[1] == '_') {
-        if (name[0] == 'l' || name[0] == 'L') {
-            name.replace(0, 2, "r_");
-        } else if (name[0] == 'r' || name[0] == 'R') {
-            name.replace(0, 2, "l_");
-        }
-    }
-    return name;
-}
-
-} // namespace
-
-// Each object's clip and overlays, from the time each was last seen. Clips already playing as the lot opens have told
-// theirs. Only a clip's first play tells, as whether its events come again when it repeats is not known yet.
-void LotLife::clipEffects(const ts2::scene::Scene& scene, const std::function<void(const ts2::sim::EffectCommand&)>& send) {
-    const double now = sim_->world().eventClockMs();
-    std::map<std::tuple<std::int16_t, double, std::string>, double> seen;
-    const auto play = [&](std::int16_t id, const std::string& name, double startMs, double speed, bool flipped) {
-        auto key = std::make_tuple(id, startMs, name);
-        const auto told = clipEffectsTold_.find(key);
-        const bool isNew = told == clipEffectsTold_.end();
-        // A new clip's first moment counts too.
-        const double from = !isNew ? told->second : clipEffectsStarted_ ? startMs - 1 : now;
-        seen.emplace(std::move(key), now);
-        auto effects = clipEffects_.find(name);
-        if (effects == clipEffects_.end()) {
-            std::vector<ClipEffect> list;
-            if (const auto clip = animations_.find(name)) {
-                for (const auto& event : clip->events) {
-                    if (auto effect = ts2::anim::effectEvent(event)) {
-                        list.push_back({static_cast<float>(event.timeMs), std::move(*effect)});
-                    }
-                }
-                std::stable_sort(list.begin(), list.end(), [](const ClipEffect& a, const ClipEffect& b) { return a.ms < b.ms; });
-            }
-            effects = clipEffects_.emplace(name, std::move(list)).first;
-        }
-        for (const ClipEffect& e : effects->second) {
-            const double at = startMs + e.ms / speed;
-            if (at <= from || at > now) {
-                continue;
-            }
-            ts2::sim::EffectCommand c;
-            using Do = ts2::sim::EffectCommand::Do;
-            const std::string& op = e.event.op;
-            const auto is = [&](std::string_view word) {
-                return op.size() == word.size() && std::equal(op.begin(), op.end(), word.begin(), [](char a, char b) {
-                    return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
-                });
-            };
-            if (is("softStart") || is("hardStart")) {
-                c.what = Do::Start;
-                c.hard = is("hardStart");
-            } else if (is("softStop") || is("hardStop")) {
-                c.what = Do::Stop;
-                c.hard = is("hardStop");
-            } else {
-                continue;
-            }
-            c.object = id;
-            c.name = flipped ? otherSide(e.event.effect) : e.event.effect;
-            c.bone = flipped ? otherSide(e.event.bone) : e.event.bone;
-            c.kind = 0;
-            send(c);
-        }
-    };
-    const auto clipsOf = [&](std::int16_t id) {
-        const auto* object = sim_->world().find(id);
-        if (object == nullptr) {
-            return;
-        }
-        if (object->animation) {
-            play(id, object->animation->name, object->animation->startMs, std::max(0.001f, std::abs(object->animation->speed)), object->animation->flipped);
-        }
-        for (const auto& overlay : object->overlays) {
-            play(id, overlay.name, overlay.startMs, std::max(0.001f, std::abs(overlay.speed)), overlay.flipped);
-        }
-    };
-    for (const auto& actor : scene.actors) {
-        clipsOf(static_cast<std::int16_t>(actor.object));
-    }
-    for (const auto& placed : scene.placedObjects) {
-        if (placed.object <= static_cast<std::uint32_t>(INT16_MAX)) {
-            clipsOf(static_cast<std::int16_t>(placed.object));
-        }
-    }
-    clipEffectsTold_ = std::move(seen);
-    clipEffectsStarted_ = true;
-}
-
-ts2::scene::ObjectEffects::Where LotLife::effectPlace(const ts2::scene::Scene& scene, const ts2::scene::ScenePose& pose, std::int16_t id, const std::string& bone, int highestLevelShown) {
-    using Where = ts2::scene::ObjectEffects::Where;
-    constexpr std::size_t kRoomField = 0x1D;  // object data 0x1D, its room
-    Where where;
-    const auto* object = sim_->world().find(id);
-    if (object == nullptr || object->removed) {
-        where.state = Where::State::Gone;
-        return where;
-    }
-    // An object in no room is out of the world, like one in an inventory. Effects also hide on the
-    // storeys above the view, and those below it keep playing.
-    where.hidden = object->data[kRoomField] == -1 || object->level > highestLevelShown;
-    const std::string joint = ts2::scene::lower(bone);
-    const bool onNode = joint.empty() || joint == "locator";
-    const auto drawn = pose.drawnAt.find(static_cast<std::uint32_t>(id));
-    std::optional<ts2::scene::Transform> found;
-    if (object->isPerson()) {
-        const auto actor = std::find_if(scene.actors.begin(), scene.actors.end(), [&](const ts2::scene::Actor& a) { return a.object == static_cast<std::uint32_t>(id) && a.rig; });
-        if (actor == scene.actors.end()) {
-            return where;
-        }
-        const ts2::scene::Transform place = drawn != pose.drawnAt.end() ? drawn->second : actor->place;
-        if (onNode) {
-            found = place;
-        } else {
-            const int node = actor->rig->find(joint);
-            const auto index = static_cast<std::size_t>(actor - scene.actors.begin());
-            const auto nodes = std::find_if(pose.nodes.begin(), pose.nodes.end(), [&](const auto& n) { return n.first == index; });
-            if (nodes == pose.nodes.end()) {
-                return where;
-            }
-            if (node >= 0 && static_cast<std::size_t>(node) < nodes->second.size()) {
-                found = place * nodes->second[static_cast<std::size_t>(node)];
-            }
-        }
-    } else {
-        const auto placed = std::find_if(scene.placedObjects.begin(), scene.placedObjects.end(), [&](const ts2::scene::PlacedObject& p) { return p.object == static_cast<std::uint32_t>(id); });
-        if (placed == scene.placedObjects.end() || placed->instance >= scene.instances.size()) {
-            return where;
-        }
-        const ts2::scene::Transform place = drawn != pose.drawnAt.end() ? drawn->second : scene.instances[placed->instance].transform;
-        if (onNode) {
-            found = place;
-        } else if (const auto moved = std::find_if(placed->bones.begin(), placed->bones.end(), [&](const auto& b) { return b.first == ts2::hash::crc32(joint); });
-                   moved != placed->bones.end()) {
-            found = moved->second;
-        } else if (const auto rig = objectMaterials_.objectRig(placed->model, placed->savedJoints)) {
-            // The bone at rest, through its parents.
-            const int node = rig->find(joint);
-            if (node >= 0) {
-                ts2::scene::Transform rest;
-                for (int at = node; at >= 0; at = rig->nodes[static_cast<std::size_t>(at)].parent) {
-                    const auto& n = rig->nodes[static_cast<std::size_t>(at)];
-                    rest = ts2::scene::Transform::of(n.translation, n.rotation) * rest;
-                }
-                found = place * rest;
-            }
-        }
-    }
-    if (!found) {
-        where.state = Where::State::NoBone;
-        return where;
-    }
-    where.state = Where::State::Here;
-    // Effects take a node's place and turn, and never its size.
-    const auto& m = found->m;
-    for (std::size_t column = 0; column < 3; ++column) {
-        const float length = std::sqrt(m[column] * m[column] + m[4 + column] * m[4 + column] + m[8 + column] * m[8 + column]);
-        const float k = length > 0 ? 1 / length : 0;
-        where.place.rotation[column] = m[column] * k;
-        where.place.rotation[3 + column] = m[4 + column] * k;
-        where.place.rotation[6 + column] = m[8 + column] * k;
-    }
-    where.place.position = {m[3], m[7], m[11]};
-    return where;
+std::array<float, 2> LotLife::routePoint(const std::array<float, 3>& scenePoint) const {
+    // Into the lot's frame (a turn and a move, so the turn's transpose undoes it).
+    const auto& m = lotFrame_.m;
+    const float d[3] = {scenePoint[0] - m[3], scenePoint[1] - m[7], scenePoint[2] - m[11]};
+    const float lotX = m[0] * d[0] + m[4] * d[1] + m[8] * d[2];
+    const float lotY = m[1] * d[0] + m[5] * d[1] + m[9] * d[2];
+    return {lotY, lotX};  // the lot's x and y are the position's y and x
 }
 
 ts2::sim::Speed LotLife::speed() {
@@ -826,12 +370,6 @@ void LotLife::setSpeed(ts2::sim::Speed speed) {
     setPaused(false);
 }
 
-std::int16_t LotLife::aspiration() {
-    constexpr std::size_t kAspiration = 46;
-    const auto* sim = sim_->world().find(sim_->globals()[ts2::sim::global::kSelectedPerson]);
-    return sim ? sim->personData[kAspiration] : 0;
-}
-
 std::int16_t LotLife::selected() { return sim_->globals()[ts2::sim::global::kSelectedPerson]; }
 
 void LotLife::select(std::int16_t sim) {
@@ -839,531 +377,6 @@ void LotLife::select(std::int16_t sim) {
         ts2::diag::step(std::format("selected Sim {}", sim));
     }
     sim_->globals()[ts2::sim::global::kSelectedPerson] = sim;
-}
-
-namespace {
-constexpr std::size_t kLifeStage = 0x3A, kAspirationScore = 0xA0, kAgeDaysLeft = 0x5B, kAgeDuration = 0x9C;
-} // namespace
-
-ts2::sim::SimObject* LotLife::lotObject(std::uint32_t id) {
-    return id > 0 && id <= static_cast<std::uint32_t>(INT16_MAX) ? sim_->world().find(static_cast<std::int16_t>(id)) : nullptr;
-}
-
-bool LotLife::hoverable(std::uint32_t object, bool shift) {
-    auto* found = lotObject(object);
-    auto* actor = sim_->world().find(selected());
-    if (found == nullptr || actor == nullptr) {
-        return false;
-    }
-    sim_->world().markShiftClick(*found, shift);
-    const bool debug = found->shiftClicked && sim_->world().testingCheats;
-    return !ts2::sim::pieMenu(sim_->vm(), sim_->code(), *actor, *found, {.debug = debug, .firstOnly = true}).choices.empty();
-}
-
-bool LotLife::isSim(std::uint32_t object) {
-    const auto* found = lotObject(object);
-    return found != nullptr && found->isPerson();
-}
-
-std::uint32_t LotLife::partAt(std::uint32_t object, const std::array<float, 3>& scenePoint, const ts2::scene::Scene& scene) {
-    const auto* found = lotObject(object);
-    const auto multiTile = [](const ts2::sim::SimObject& o) { return o.definition.field(ts2::objd::field::kMultiTileMasterId) != 0; };
-    if (found == nullptr || !multiTile(*found) || !scene.floorHeight) {
-        return object;
-    }
-    const std::int16_t lead = found->data[ts2::sim::kLeadTileField];
-    std::uint32_t best = object;
-    float nearest = std::numeric_limits<float>::max();
-    sim_->world().nextAfter(0, [&](const ts2::sim::SimObject& o) {
-        if (o.data[ts2::sim::kLeadTileField] != lead || !multiTile(o) || o.removed || o.x == ts2::sim::kOffLot || o.y == ts2::sim::kOffLot) {
-            return false;
-        }
-        const float x = static_cast<float>(o.y) / 65536.0f;  // the lot's x and y are the position's y and x
-        const float y = static_cast<float>(o.x) / 65536.0f;
-        float spot[3] = {x, y, scene.floorHeight(o.level, x, y)};
-        lotFrame_.apply(spot, true);
-        const float dx = spot[0] - scenePoint[0], dy = spot[1] - scenePoint[1], dz = spot[2] - scenePoint[2];
-        const float d = dx * dx + dy * dy + dz * dz;
-        if (d < nearest) {
-            nearest = d;
-            best = static_cast<std::uint32_t>(o.id);
-        }
-        return false;
-    });
-    return best;
-}
-
-std::vector<ts2::sim::PieChoice> LotLife::pieMenu(std::uint32_t object, bool shift) {
-    auto* found = lotObject(object);
-    auto* actor = sim_->world().find(selected());
-    if (found == nullptr || actor == nullptr) {
-        return {};
-    }
-    sim_->world().markShiftClick(*found, shift);
-    const bool debug = found->shiftClicked && sim_->world().testingCheats;
-    return ts2::sim::pieMenu(sim_->vm(), sim_->code(), *actor, *found, {.debug = debug}).choices;
-}
-
-LotLife::GroundMenu LotLife::groundPieMenu(const std::array<float, 3>& scenePoint, int storey) {
-    const auto* actor = sim_->world().find(selected());
-    if (actor == nullptr) {
-        return {};
-    }
-    // Into the lot's frame, where the lot's x and y are the scene's y and x.
-    const auto& m = lotFrame_.m;
-    const float d[3] = {scenePoint[0] - m[3], scenePoint[1] - m[7], scenePoint[2] - m[11]};
-    const float sceneX = m[0] * d[0] + m[4] * d[1] + m[8] * d[2];
-    const float sceneY = m[1] * d[0] + m[5] * d[1] + m[9] * d[2];
-    auto* made = ts2::sim::groundDestination(sim_->vm(), sim_->world(), actor, {sceneY, sceneX, storey});
-    if (made == nullptr) {
-        return {};
-    }
-    ts2::diag::step(std::format("ground clicked at {:.2f} {:.2f} level {}: destination {}", made->x / 65536.0, made->y / 65536.0, made->level,
-                                made->id));
-    return {static_cast<std::uint32_t>(made->id), ts2::sim::pieMenu(sim_->vm(), sim_->code(), *sim_->world().find(selected()), *made).choices};
-}
-
-void LotLife::choose(std::uint32_t object, const ts2::sim::PieChoice& choice) {
-    auto* found = lotObject(object);
-    auto* actor = sim_->world().find(selected());
-    if (found == nullptr || actor == nullptr) {
-        return;
-    }
-    if (ts2::sim::runsAtOnce(sim_->code(), *found, choice)) {
-        ts2::diag::step(std::format("Sim {} does \"{}\" on {} {} at once", actor->id, choice.name, found->definition.name, found->id));
-        const auto r = ts2::sim::runAtOnce(sim_->vm(), sim_->code(), sim_->world(), *actor, *found, choice);
-        if (r.outcome != ts2::sim::Outcome::True && r.outcome != ts2::sim::Outcome::False) {
-            ts2::diag::warning(std::format("simulation: \"{}\" stopped: {} {}", choice.name, r.reason, r.detail));
-        }
-        return;
-    }
-    if (const auto queued = ts2::sim::queuedChoice(sim_->code(), sim_->world(), *found, choice)) {
-        ts2::diag::step(std::format("Sim {} is told to \"{}\" on {} {}", actor->id, choice.name, found->definition.name, found->id));
-        ts2::sim::queueInteraction(*actor, *queued);
-    }
-}
-
-std::vector<LotLife::QueuedAction> LotLife::queue(std::int16_t sim) {
-    // A part of a multi-tile object shows its lead (object data 0x13). With no picture named, an
-    // object whose OBJD field 0x37 is 0 shows the picture its object data 0 names.
-    constexpr std::size_t kLeadField = 0x13, kGraphicField = 0x00, kGraphicPictureField = 0x37;
-    std::vector<QueuedAction> out;
-    const auto* person = sim_->world().find(sim);
-    if (person == nullptr) {
-        return out;
-    }
-    auto add = [&](const ts2::sim::QueuedInteraction& q, bool running, std::int16_t object, std::uint32_t guid, std::uint32_t index,
-                   const std::string& name) {
-        QueuedAction a{q.id, running, q.cancelled, q.nested, 0, index, 0, name};
-        if (a.name.empty()) {
-            const auto* target = sim_->world().find(q.object);
-            a.name = target ? ts2::sim::interactionName(sim_->code(), *target, q.index) : std::string();
-        }
-        if (guid != 0 && guid != UINT32_MAX) {
-            a.guid = guid;
-        } else if (const auto* icon = sim_->world().find(object)) {
-            if (icon->isPerson()) {
-                a.neighbor = sim_->world().neighborIdOf(*icon);
-            } else {
-                const auto* lead = icon->data[kLeadField] != 0 ? sim_->world().find(icon->data[kLeadField]) : nullptr;
-                const auto& shown = lead ? *lead : *icon;
-                a.guid = shown.definition.guid();
-                if (a.index == 0 && shown.definition.field(kGraphicPictureField) == 0) {
-                    a.index = static_cast<std::uint16_t>(shown.data[kGraphicField]);
-                }
-            }
-        } else {
-            return;  // no icon: the queue leaves it out
-        }
-        out.push_back(a);
-    };
-    // The running interaction's icon is lit when it is a top-level one, its sub-interaction's when
-    // it is nested.
-    if (person->running) {
-        add(*person->running, !person->running->nested, person->actionIconObject, person->actionIconGuid, person->actionIconIndex, person->actionString);
-    }
-    if (person->runningSub) {
-        add(*person->runningSub, person->runningSub->nested, person->runningSub->icon(), person->runningSub->iconGuid, person->runningSub->iconIndex,
-            person->runningSub->name);
-    }
-    for (const auto& q : person->queue) {
-        add(q, false, q.icon(), q.iconGuid, q.iconIndex, q.name);
-    }
-    return out;
-}
-
-bool LotLife::cancelInteraction(std::int16_t sim, std::uint32_t id) {
-    auto* person = sim_->world().find(sim);
-    if (person == nullptr || !ts2::sim::cancelInteraction(sim_->world(), *person, id)) {
-        return false;
-    }
-    ts2::diag::step(std::format("Sim {} is told to stop interaction {}", sim, id));
-    return true;
-}
-
-ts2::content::AgeProgress LotLife::ageProgress(std::int16_t sim) {
-    const auto* object = sim_->world().find(sim);
-    return object ? ts2::content::ageProgress(object->personData[kAgeDuration], object->personData[kAgeDaysLeft]) : ts2::content::AgeProgress{};
-}
-
-const std::vector<ts2::swaf::Want>& LotLife::wants(std::int16_t sim) {
-    static const std::vector<ts2::swaf::Want> none;
-    const auto* object = sim_->world().find(sim);
-    const std::int16_t id = object ? sim_->world().neighborIdOf(*object) : 0;
-    return id ? sim_->world().neighborWants(id) : none;
-}
-
-const std::vector<ts2::swaf::Want>& LotLife::fears(std::int16_t sim) {
-    static const std::vector<ts2::swaf::Want> none;
-    const auto* object = sim_->world().find(sim);
-    const std::int16_t id = object ? sim_->world().neighborIdOf(*object) : 0;
-    return id ? sim_->world().neighborFears(id) : none;
-}
-
-bool LotLife::wantsRefilling(std::int16_t sim) {
-    const auto* object = sim_->world().find(sim);
-    const std::int16_t id = object ? sim_->world().neighborIdOf(*object) : 0;
-    return id && sim_->world().wantsState().queue.contains(id);
-}
-
-const std::map<std::size_t, std::uint32_t>& LotLife::satisfiedWantPlaces(std::int16_t sim) {
-    static const std::map<std::size_t, std::uint32_t> none;
-    const auto* object = sim_->world().find(sim);
-    const std::int16_t id = object ? sim_->world().neighborIdOf(*object) : 0;
-    const auto& satisfied = sim_->world().wantsState().satisfied;
-    const auto it = satisfied.find(id);
-    return it != satisfied.end() ? it->second : none;
-}
-
-ts2::swaf::Slots LotLife::wantSlots(std::int16_t sim) {
-    const auto* object = sim_->world().find(sim);
-    const std::int16_t id = object ? sim_->world().neighborIdOf(*object) : 0;
-    return id ? sim_->world().wantSlots(id) : ts2::swaf::Slots{};
-}
-
-std::optional<LotLife::NeighborName> LotLife::neighborName(std::int16_t id) {
-    constexpr std::size_t kGender = 0x41;
-    auto& world = sim_->world();
-    const auto* neighbor = world.neighbor(id);
-    if (neighbor == nullptr) {
-        return std::nullopt;
-    }
-    auto& code = sim_->code();
-    NeighborName name;
-    name.female = world.neighborPersonValue(id, kGender) == 1;
-    if (const auto* type = code.objectType(neighbor->guid)) {
-        const auto set = static_cast<std::uint16_t>(type->definition.field(ts2::objd::field::kCatalogStringsId));
-        name.first = code.catalogString(type->group, set, 0).value_or("");
-        name.last = code.catalogString(type->group, set, 2).value_or("");
-    }
-    if (auto given = world.neighborFirstName(id)) {
-        name.first = std::move(*given);
-    }
-    if (auto taken = world.neighborSurname(id)) {
-        name.last = std::move(*taken);
-    }
-    return name;
-}
-
-LotLife::SimName LotLife::simName(std::int16_t sim) {
-    constexpr std::size_t kTitle = 0xE6;
-    auto& world = sim_->world();
-    const auto* object = world.find(sim);
-    if (object == nullptr) {
-        return {};
-    }
-    SimName name;
-    const std::int16_t neighbor = world.neighborIdOf(*object);
-    if (auto known = neighborName(neighbor)) {
-        name.first = std::move(known->first);
-        name.last = std::move(known->last);
-    } else if (const auto* type = sim_->code().objectType(object->definition.guid())) {
-        const auto set = static_cast<std::uint16_t>(type->definition.field(ts2::objd::field::kCatalogStringsId));
-        name.first = sim_->code().catalogString(type->group, set, 0).value_or("");
-    }
-    name.title = kTitle < object->personData.size() ? object->personData[kTitle] : world.neighborPersonValue(neighbor, kTitle);
-    return name;
-}
-
-std::string LotLife::objectName(std::uint32_t guid) {
-    auto& code = sim_->code();
-    const auto* type = code.objectType(guid);
-    if (type == nullptr) {
-        return {};
-    }
-    const auto set = static_cast<std::uint16_t>(type->definition.field(ts2::objd::field::kCatalogStringsId));
-    return code.catalogString(type->group, set, 0).value_or("");
-}
-
-void LotLife::toggleHold(std::int16_t sim, std::size_t index, bool fear) {
-    constexpr std::uint8_t kHeld = 0x01;
-    const auto* object = sim_->world().find(sim);
-    const std::int16_t id = object ? sim_->world().neighborIdOf(*object) : 0;
-    if (id == 0) {
-        return;
-    }
-    auto& world = sim_->world();
-    auto& wants = world.neighborWants(id);
-    auto& fears = world.neighborFears(id);
-    auto& list = fear ? fears : wants;
-    if (index >= list.size() || list[index].guid == 0) {
-        return;
-    }
-    auto [order, fresh] = holds_.try_emplace(id);
-    if (fresh) {
-        for (const bool f : {false, true}) {
-            for (const auto& w : f ? fears : wants) {
-                if (w.flags & kHeld) {
-                    order->second.push_back({f, w.guid});
-                }
-            }
-        }
-    }
-    auto& held = order->second;
-    auto& want = list[index];
-    want.flags = static_cast<std::uint8_t>(want.flags ^ kHeld);
-    const Hold hold{fear, want.guid};
-    // Holds on wants fulfilled or gone since no longer count.
-    std::erase_if(held, [&](const Hold& h) {
-        const auto& from = h.fear ? fears : wants;
-        return h == hold || std::none_of(from.begin(), from.end(), [&](const auto& w) { return w.guid == h.guid && (w.flags & kHeld); });
-    });
-    if (want.flags & kHeld) {
-        held.push_back(hold);
-        while (held.size() > world.wantSlots(id).holds) {
-            auto& from = held.front().fear ? fears : wants;
-            for (auto& w : from) {
-                if (w.guid == held.front().guid) {
-                    w.flags = static_cast<std::uint8_t>(w.flags & ~kHeld);
-                }
-            }
-            held.pop_front();
-            ts2::diag::step("released the oldest hold");
-        }
-    }
-    ts2::diag::step(std::string(want.flags & kHeld ? "held " : "released ") + (fear ? "a fear" : "a want"));
-}
-
-std::int16_t LotLife::aspirationScore(std::int16_t sim) {
-    const auto* object = sim_->world().find(sim);
-    return object ? object->personData[kAspirationScore] : 0;
-}
-
-std::span<const std::int16_t> LotLife::personData(std::int16_t sim) {
-    const auto* object = sim_->world().find(sim);
-    return object ? std::span<const std::int16_t>(object->personData) : std::span<const std::int16_t>{};
-}
-
-std::vector<LotLife::Relationship> LotLife::relationships(std::int16_t sim) {
-    constexpr std::size_t kFamily = 0x3D, kSpecies = 0xBA, kGender = 0x41, kHidden = 0x44;
-    auto& world = sim_->world();
-    const auto* object = world.find(sim);
-    const std::int16_t self = object ? world.neighborIdOf(*object) : 0;
-    if (self == 0 || object->personData[kFamily] == 0) {
-        return {};
-    }
-    std::set<std::int16_t> household, onLot;
-    for (const std::int16_t member : sim_->household()) {
-        if (const auto* m = world.find(member)) {
-            household.insert(world.neighborIdOf(*m));
-        }
-    }
-    for (const auto* p = world.nextAfter(0, [](const auto& o) { return o.isPerson(); }); p != nullptr;
-         p = world.nextAfter(p->id, [](const auto& o) { return o.isPerson(); })) {
-        onLot.insert(world.neighborIdOf(*p));
-    }
-    std::vector<Relationship> out;
-    for (const std::int16_t other : world.neighborRelationshipTargets(self)) {
-        if (other == self || world.neighbor(other) == nullptr) {
-            continue;
-        }
-        auto value = [&](std::size_t i) { return world.neighborRelationshipValue(self, other, i); };
-        auto person = [&](std::size_t i) { return world.neighborPersonValue(other, i); };
-        Relationship r;
-        r.neighbor = other;
-        r.daily = value(0);
-        r.flags = value(1);
-        r.lifetime = value(2);
-        r.familyTie = value(3) != 0;
-        r.coins = (value(9) & 1) != 0;
-        r.species = person(kSpecies);
-        r.lifeStage = person(kLifeStage);
-        r.female = person(kGender) == 1;
-        r.skip = (person(kHidden) & 1) != 0;
-        r.household = household.contains(other);
-        r.onLot = onLot.contains(other);
-        out.push_back(r);
-    }
-    return out;
-}
-
-std::vector<LotLife::InventoryObject> LotLife::inventoryObjects(std::int16_t sim) {
-    auto& world = sim_->world();
-    const auto* object = world.find(sim);
-    const std::int16_t self = object ? world.neighborIdOf(*object) : 0;
-    const auto* inventory = self ? world.inventory(ts2::sim::InventoryKind::Neighbor, self) : nullptr;
-    std::vector<InventoryObject> out;
-    if (inventory == nullptr) {
-        return out;
-    }
-    for (const auto& token : inventory->singular) {
-        if ((token->flags & 0x7) != 0x1) {
-            continue;
-        }
-        const auto same = std::find_if(out.begin(), out.end(), [&](const InventoryObject& o) { return o.guid == token->guid; });
-        if (same != out.end()) {
-            ++same->count;
-        } else {
-            out.push_back({token->guid, 1});
-        }
-    }
-    return out;
-}
-
-std::optional<std::int16_t> LotLife::inventoryValue(std::int16_t sim, std::uint32_t guid) {
-    auto& world = sim_->world();
-    const auto* object = world.find(sim);
-    const std::int16_t self = object ? world.neighborIdOf(*object) : 0;
-    const auto* inventory = self ? world.inventory(ts2::sim::InventoryKind::Neighbor, self) : nullptr;
-    if (inventory == nullptr) {
-        return std::nullopt;
-    }
-    for (const auto* list : {&inventory->singular, &inventory->counted}) {
-        for (const auto& token : *list) {
-            if (token->guid == guid && !token->properties.empty()) {
-                return token->properties[0];
-            }
-        }
-    }
-    return std::nullopt;
-}
-
-std::vector<std::int16_t> LotLife::inventoryValues(std::int16_t sim, std::uint32_t guid) {
-    auto& world = sim_->world();
-    const auto* object = world.find(sim);
-    const std::int16_t self = object ? world.neighborIdOf(*object) : 0;
-    const auto* inventory = self ? world.inventory(ts2::sim::InventoryKind::Neighbor, self) : nullptr;
-    if (inventory == nullptr) {
-        return {};
-    }
-    for (const auto* list : {&inventory->singular, &inventory->counted}) {
-        for (const auto& token : *list) {
-            if (token->guid == guid) {
-                return token->properties;
-            }
-        }
-    }
-    return {};
-}
-
-bool LotLife::hasCountedToken(std::int16_t sim, std::uint32_t guid) {
-    auto& world = sim_->world();
-    const auto* object = world.find(sim);
-    const std::int16_t self = object ? world.neighborIdOf(*object) : 0;
-    const auto* inventory = self ? world.inventory(ts2::sim::InventoryKind::Neighbor, self) : nullptr;
-    return inventory != nullptr &&
-           std::any_of(inventory->counted.begin(), inventory->counted.end(), [&](const auto& token) { return token->guid == guid; });
-}
-
-std::vector<LotLife::Memory> LotLife::memories(std::int16_t sim) {
-    // A memory token: flags 0x1 (visible) and 0x2 (memory), at least 12 values. Value 0 is the kind
-    // (4 to 6 bad), values 6:5 the subject's GUID. The memory object must be of type 0x0F.
-    constexpr std::uint16_t kMemoryFlags = 0x3;
-    constexpr std::size_t kMemoryValues = 12;
-    constexpr std::uint16_t kMemoryType = 0x0F;
-    constexpr std::size_t kGender = 0x41;
-    auto& world = sim_->world();
-    auto& code = sim_->code();
-    const auto* object = world.find(sim);
-    const std::int16_t self = object ? world.neighborIdOf(*object) : 0;
-    const auto* inventory = self ? world.inventory(ts2::sim::InventoryKind::Neighbor, self) : nullptr;
-    if (inventory == nullptr) {
-        return {};
-    }
-    // Line `line` of an object's catalog strings (0 its name, 1 its description, and for a Sim 2 its
-    // last name), the women's set (the next string table) when asked for and not empty.
-    auto catalog = [&](const ts2::sim::ObjectType& type, std::size_t line, bool female) {
-        const auto set = static_cast<std::uint16_t>(type.definition.field(ts2::objd::field::kCatalogStringsId));
-        std::string text = female ? code.catalogString(type.group, static_cast<std::uint16_t>(set + 1), line).value_or("") : "";
-        return text.empty() ? code.catalogString(type.group, set, line).value_or("") : text;
-    };
-    auto putSubject = [](std::string text, const std::string& subject) {
-        for (std::size_t at = text.find("$Subject"); at != std::string::npos; at = text.find("$Subject", at + subject.size())) {
-            text.replace(at, 8, subject);
-        }
-        return text;
-    };
-    std::vector<Memory> out;
-    for (auto it = inventory->singular.rbegin(); it != inventory->singular.rend(); ++it) {
-        const auto& token = **it;
-        if ((token.flags & kMemoryFlags) != kMemoryFlags || token.properties.size() < kMemoryValues) {
-            continue;
-        }
-        const auto* type = code.objectType(token.guid);
-        if (type == nullptr || type->definition.field(ts2::objd::field::kType) != kMemoryType) {
-            continue;
-        }
-        Memory m;
-        m.guid = token.guid;
-        m.subject = static_cast<std::uint32_t>(static_cast<std::uint16_t>(token.properties[6])) << 16 | static_cast<std::uint16_t>(token.properties[5]);
-        m.good = token.properties[0] < 4 || token.properties[0] > 6;
-        m.pictureGroup = type->group;
-        // The text follows the subject's gender. "$Subject" becomes the subject's name.
-        const auto* subject = m.subject ? code.objectType(m.subject) : nullptr;
-        bool female = false;
-        if (subject != nullptr && subject->definition.field(ts2::objd::field::kType) == ts2::sim::kPersonType) {
-            m.subjectNeighbor = world.neighborIdWithGuid(m.subject);
-            female = m.subjectNeighbor != 0 && world.neighborPersonValue(m.subjectNeighbor, kGender) == 1;
-            m.subjectFullName = catalog(*subject, 0, false) + " " + catalog(*subject, 2, false);
-        }
-        const std::string subjectName = subject ? catalog(*subject, 0, false) : "";
-        m.name = putSubject(catalog(*type, 0, female), subjectName);
-        m.description = putSubject(catalog(*type, 1, female), subjectName);
-        out.push_back(std::move(m));
-    }
-    return out;
-}
-
-std::int16_t LotLife::lifeStage(std::int16_t sim) {
-    const auto* object = sim_->world().find(sim);
-    return object ? object->personData[kLifeStage] : 0;
-}
-
-std::array<int, 16> LotLife::motives(std::int16_t sim) {
-    std::array<int, 16> out{};
-    if (const auto* object = sim_->world().find(sim)) {
-        for (std::size_t i = 0; i < out.size(); ++i) {
-            out[i] = ts2::sim::wholeMotive(*object, i);
-        }
-    }
-    return out;
-}
-
-int LotLife::mood(std::int16_t sim) {
-    const auto* object = sim_->world().find(sim);
-    return object ? ts2::sim::wholeMotive(*object, ts2::sim::motive::kMood) : 0;
-}
-
-std::optional<ts2::tga::Pixels> LotLife::portrait(std::int16_t sim) {
-    const auto* object = sim_->world().find(sim);
-    const auto image = object ? ts2::content::portraitImage(object->personData[kLifeStage]) : std::nullopt;
-    const auto data = image ? sim_->simImage(sim, *image) : std::vector<std::uint8_t>{};
-    return data.empty() ? std::nullopt : ts2::image::decode(data);
-}
-
-std::int16_t LotLife::neighborId(std::int16_t sim) {
-    const auto* object = sim_->world().find(sim);
-    return object ? sim_->world().neighborIdOf(*object) : 0;
-}
-
-std::optional<LotLife::PortraitFile> LotLife::neighborPortrait(std::int16_t neighbor) {
-    const auto* n = sim_->world().neighbor(neighbor);
-    if (n == nullptr || n->personData.size() <= kLifeStage) {
-        return std::nullopt;
-    }
-    const auto image = ts2::content::portraitImage(n->personData[kLifeStage]);
-    auto file = image ? sim_->characterFile(neighbor) : std::nullopt;
-    return file ? std::optional<PortraitFile>(PortraitFile{std::move(*file), *image}) : std::nullopt;
 }
 
 bool LotLife::paused() { return sim_->globals()[ts2::sim::global::kPaused] != 0; }
@@ -1565,7 +578,7 @@ void LotLife::update(double ms, ts2::scene::Scene& scene) {
     // behind the last tick, as clips here are timed from the tick that started them.
     leadMs_ = std::max(0.0, static_cast<double>(pacer_.owedMs()));
     if (leadMs_ > 0) {
-        sim_->tellAnimationEvents(sim_->world().clockMs() + leadMs_);
+        sim_->tellAnimationEvents(drawnMs());
     }
     buildNewAges(scene);
     if (!loadedSimsDressed_) {
@@ -1582,199 +595,7 @@ void LotLife::update(double ms, ts2::scene::Scene& scene) {
     placeObjects(scene);
     for (auto& actor : scene.actors) {
         if (const auto* object = actor.object ? sim_->world().find(static_cast<std::int16_t>(actor.object)) : nullptr) {
-            auto& own = ownAnimations_[actor.object];
-            const auto& now = object->animation;
-            const double nowMs = sim_->world().clockMs() + leadMs_;
-            const bool walking = object->walking && ts2::sim::alongPlan(*object->walking);
-            const auto tailOver = [&own](double ms) {
-                return own.tail && ms - own.tail->startMs >= ts2::sim::walkFadeOutMs(own.tail->plan) + ts2::sim::kWalkFadeMs;
-            };
-            // A stopped walk that settled: what the Sim held is gone.
-            if (object->walkSettledMs && own.settledMs != object->walkSettledMs) {
-                own.settledMs = object->walkSettledMs;
-                own.settledAt = actor.place;
-                own.current.reset();
-                own.previous.reset();
-                own.held.reset();
-                own.tail.reset();
-            }
-            if (walking) {
-                // The walk is drawn from its plan. What the Sim did before stays, to fade out under it.
-                // A walk that has handed back plays out its own fade under the new one, in place of
-                // its last pose.
-                if (!own.walking || own.walkStartMs != object->walking->startMs) {
-                    // The walk drawn last handed back and this one started within the same update.
-                    // Its clips play out their fade under this one, as when it handed back on an update of its own.
-                    if (own.walking && object->walkTail && object->walkTail->startMs == own.walkStartMs) {
-                        own.tail = *object->walkTail;
-                        own.tailHeading = own.endedHeading;
-                        own.current.reset();
-                    }
-                    own.walking = true;
-                    own.walkStartMs = object->walking->startMs;
-                    if (tailOver(own.walkStartMs)) {
-                        own.tail.reset();
-                    }
-                    own.previous = own.current ? std::move(own.current) : own.tail ? std::nullopt : std::move(own.held);
-                    // An Animate Sim clip that has played out is gone.
-                    if (own.previous && own.previous->fades && own.previous->finished(object->walking->startMs)) {
-                        own.previous.reset();
-                    }
-                    own.held.reset();
-                }
-                if (tailOver(nowMs)) {
-                    own.tail.reset();
-                }
-                own.current = now;
-            } else {
-                if (own.walking) {
-                    // The walk's route has handed back. Its clips play out their fade, and the Sim
-                    // then keeps its last pose, which the simulation's animation holds when it has
-                    // played (a stop's last pose). A walk without a stop ends in a standing clip.
-                    own.walking = false;
-                    own.previous.reset();
-                    own.current.reset();
-                    own.held.reset();
-                    if (now && now->finished(sim_->world().clockMs())) {
-                        own.held = now;
-                    }
-                    own.tail.reset();
-                    if (object->walkTail && object->walkTail->startMs == own.walkStartMs) {
-                        own.tail = *object->walkTail;
-                        own.tailHeading = own.endedHeading;
-                    }
-                }
-                if (tailOver(nowMs)) {
-                    own.tail.reset();
-                }
-                const auto same = [&](const std::optional<ts2::sim::PlayingAnimation>& a) {
-                    return a && a->startMs == now->startMs && a->name == now->name;
-                };
-                if (now && !same(own.current) && !same(own.held)) {
-                    // A new animation fades in over the one before it, or over the last pose of one
-                    // that has played out, as the game's play clips follow one another. One starting
-                    // as a walk ends fades in over the walk's clips instead.
-                    own.previous = own.tail ? std::nullopt : own.current ? std::move(own.current) : std::move(own.held);
-                    // An Animate Sim clip is gone at its end, so one that has played out can't come back.
-                    if (own.previous && own.previous->fades && !stillPlaying(*own.previous, *now)) {
-                        own.previous.reset();
-                    }
-                    own.current = *now;
-                    own.held.reset();
-                }
-                if (own.previous && own.current) {
-                    if (nowMs > previousGoneMs(*own.previous, *own.current, animations_)) {
-                        own.previous.reset();
-                    }
-                }
-                // An Animate Sim clip that has played and that nothing followed fades out, then is gone
-                // (locomotion clips aside). One that doesn't blend out (Animate Sim byte 2 flag 0x40)
-                // holds its last pose until the next animation takes over, as the game's does.
-                if (!now && own.current && !own.current->loops && !own.current->baseHeading && own.current->blendsOut &&
-                    (own.current->fades ? own.current->fadingOut(nowMs) : own.current->finished(nowMs))) {
-                    const double endMs = own.current->startMs + own.current->lengthMs;
-                    const bool fading = object->ending && object->ending->startMs == own.current->startMs && object->ending->name == own.current->name;
-                    // A clip fades within its own length, and one without fades is dropped at its end.
-                    if (!fading || nowMs >= endMs) {
-                        own.held = std::move(own.current);
-                        own.current.reset();
-                        own.previous.reset();
-                    }
-                }
-            }
-            const SimFrame frame = simFrame(*object, nowMs);
-            // As the game places each clip, one playing as the Sim snaps into a carrier's or an object's slot
-            // stays where it was in the world, and from then on hangs from the slot's bone with the Sim: its
-            // start place is kept as seen from the bone, taken once per slot, and follows the bone (a
-            // carpool passenger's seated clips drive off with the car).
-            constexpr std::size_t kContainerField = 2, kSlotField = 3;
-            std::optional<ts2::scene::Transform> hung;
-            const std::pair<std::int16_t, std::int16_t> holderSlot{object->data[kContainerField], object->data[kSlotField]};
-            if (pose_ != nullptr && holderSlot.first > 0) {
-                if (const auto found = pose_->carried.find(actor.object); found != pose_->carried.end()) {
-                    hung = found->second;
-                }
-            }
-            if (!hung && holderSlot.first > 0 && holderSlot.second >= 0) {
-                const auto container = std::find_if(scene.placedObjects.begin(), scene.placedObjects.end(), [&](const ts2::scene::PlacedObject& c) {
-                    return c.object == static_cast<std::uint32_t>(holderSlot.first);
-                });
-                if (container != scene.placedObjects.end() && container->instance < scene.instances.size()) {
-                    hung = slotPlace(*container, static_cast<std::size_t>(holderSlot.second), scene);
-                }
-            }
-            for (auto& s : own.started) {
-                if (!hung) {
-                    s.fromCarrier.reset();
-                    continue;
-                }
-                if (!s.fromCarrier || s.carrierSlot != holderSlot) {
-                    s.fromCarrier = hung->rigidInverse() * s.place;
-                    s.carrierSlot = holderSlot;
-                }
-                s.place = *hung * *s.fromCarrier;
-            }
-            const StartedAt startedAt = [&own](const std::string& name, double startMs) -> std::optional<ts2::scene::Transform> {
-                for (const auto& s : own.started) {
-                    if (s.startMs == startMs && s.name == name) {
-                        return s.place;
-                    }
-                }
-                return std::nullopt;
-            };
-            // A walk that handed back plays on along its plan and path, its clips weighed by the walk's
-            // fade, facing the way the path runs there (a step keeps the facing it walked with).
-            std::optional<ts2::scene::Transform> tailPlace;
-            if (own.tail) {
-                const float sinceStart = static_cast<float>(nowMs - own.tail->startMs);
-                const float walked = ts2::sim::walkedAt(own.tail->plan, sinceStart);
-                ts2::sim::walkPoses(own.tail->plan, walked, tailPoses_, false);
-                const float weight = ts2::sim::walkWeight(own.tail->plan, sinceStart);
-                for (auto& pose : tailPoses_) {
-                    pose.weight *= weight;
-                }
-                if (actor.floorHeight) {
-                    const auto at = own.tail->path.at(walked);
-                    const float heading = at.heading && !own.tail->plan.keepsFacing ? *at.heading : own.tailHeading;
-                    tailPlace = actor.lotFrame * ts2::scene::Transform::at(at.y, at.x, standHeight(actor, *object, own.tail->level, at.y, at.x), heading);
-                }
-            }
-            const auto* tailPoses = own.tail ? &tailPoses_ : nullptr;
-            const float drawn = ts2::sim::drawnHeading(frame.heading);
-            if (walking) {
-                // The walk's clips weigh by the walk's own fades, half as it starts (see walkWeight).
-                // Drawn at the nearest eighth, they turn by the rest of the walk's heading.
-                ts2::sim::walkPoses(object->walking->plan, frame.walked, walkPoses_, false);
-                const float weight = ts2::sim::walkWeight(object->walking->plan, static_cast<float>(nowMs - object->walking->startMs));
-                for (auto& pose : walkPoses_) {
-                    pose.weight *= weight;
-                    pose.turn += ts2::sim::wrapAngle(frame.heading - drawn);
-                }
-                own.endedHeading = frame.heading;
-                const double fade = std::clamp((nowMs - object->walking->startMs) / ts2::sim::kWalkFadeMs, 0.0, 1.0);
-                playClips(actor, *object, std::nullopt, own.previous, drawn, animations_, &walkPoses_, static_cast<float>(fade), object->walking->startHeading,
-                          tailPoses, own.tailHeading, startedAt, tailPlace);
-            } else {
-                playClips(actor, *object, own.current, own.previous, drawn, animations_, nullptr, 1, 0, tailPoses, own.tailHeading,
-                          startedAt, tailPlace);
-            }
-            if (own.settledMs && nowMs < *own.settledMs + ts2::sim::kSettleWalkPoseMs) {
-                addSettleClips(actor, *object, *own.settledMs, own.settledAt, animations_, sim_->world().locoClips());
-            }
-            placeSim(
-                actor, *object, frame, scene, [&](const ts2::scene::PlacedObject& p, std::size_t slot) { return slotPlace(p, slot, scene); },
-                [&](std::int16_t part, std::size_t slot) { return partSlot(part, slot, scene); }, pose_);
-            own.noteStarts(*object, actor.place, walking, hung, holderSlot);
-            setSimStorey(scene, actor, object->level);
-            // The game picks a Sim's lights afresh as it moves.
-            if (actor.place.m != own.litPlace || object->level != own.litLevel) {
-                own.litPlace = actor.place.m;
-                own.litLevel = object->level;
-                const auto inLot = actor.lotFrame.rigidInverse() * actor.place;
-                for (const auto& skinned : actor.skinned) {
-                    relight(scene, skinned.instance, inLot, object->level - 1);
-                }
-            }
+            poseSim(actor, *object, scene);
         }
     }
     addCreatedObjects(scene);
@@ -1783,6 +604,7 @@ void LotLife::update(double ms, ts2::scene::Scene& scene) {
     heldInstances(scene, heldNow_);
     followClips(scene);
     animateObjects(scene);
+    hangInAnimated(scene);
     shadeHeld(scene);
     shapeColors(scene);
     for (auto* list : {&changedInstances_, &relit_}) {
@@ -1790,1153 +612,203 @@ void LotLife::update(double ms, ts2::scene::Scene& scene) {
         list->erase(std::unique(list->begin(), list->end()), list->end());
     }
     objectMaterials_.update(sim_->world(), scene);
-    lookHeads(scene, sim_->world().clockMs() + leadMs_);
+    lookHeads(scene, drawnMs());
 }
 
-// An object a script moved goes where the simulation has it: into a Sim's hand (where the Sim's pose
-// carries it), onto another object's slot, or onto its storey's floor, facing its direction. One a
-// script removed is no longer drawn. Objects that haven't moved keep the place the lot gave them.
-void LotLife::placeObjects(ts2::scene::Scene& scene) {
-    for (const auto& placed : scene.placedObjects) {
-        if (placed.object > static_cast<std::uint32_t>(INT16_MAX) || placed.instance >= scene.instances.size()) {
-            continue;
-        }
-        // An object the lot keeps until it unloads is still drawn.
-        const auto* object = sim_->world().findIncludingRemoved(static_cast<std::int16_t>(placed.object));
-        ObjectPlace now;
-        if (object == nullptr || (object->removed && !object->keptUntilUnload)) {
-            now.gone = true;
-        } else {
-            now = {object->x, object->y, object->level, object->data[1], object->data[2], object->data[3], false};
-        }
-        if (placed.object >= objectPlaces_.size()) {
-            objectPlaces_.resize(std::size_t{placed.object} + 1);
-        }
-        KnownPlace& last = objectPlaces_[placed.object];
-        if (!last.known || last.place == now) {
-            last = {now, true};
-            continue;
-        }
-        last.place = now;
-        for (auto& actor : scene.actors) {
-            std::erase_if(actor.held, [&](const ts2::scene::Actor::Held& h) { return h.instance == placed.instance; });
-        }
-        ts2::scene::Transform place;
-        if (now.gone) {
-            place.m.fill(0.0f);
-        } else if (now.container > 0) {
-            // Through holders with no model of their own (the head slots holder the plumbob sits in), an
-            // object held by a Sim goes to the bone of the Sim's slot the outermost holder is in, as
-            // the lot scene places it. Their own slot offsets aren't known.
-            constexpr int kMaxDepth = 8;
-            std::int16_t holderId = now.container, holderSlot = now.slot;
-            auto holder = scene.actors.end();
-            for (int depth = 0; depth <= kMaxDepth; ++depth) {
-                holder = std::find_if(scene.actors.begin(), scene.actors.end(),
-                                      [&](const ts2::scene::Actor& a) { return a.object == static_cast<std::uint32_t>(holderId); });
-                const auto* outer = sim_->world().find(holderId);
-                if (holder != scene.actors.end() || outer == nullptr || outer->removed || outer->isPerson() || outer->data[2] <= 0) {
-                    break;
-                }
-                holderSlot = outer->data[3];
-                holderId = outer->data[2];
-            }
-            if (holder != scene.actors.end()) {
-                const auto at = static_cast<std::size_t>(holderSlot);
-                holder->held.push_back({placed.instance, at < holder->slotNodes.size() ? holder->slotNodes[at] : -1});
-                continue;
-            }
-            const auto container = std::find_if(scene.placedObjects.begin(), scene.placedObjects.end(),
-                                                [&](const ts2::scene::PlacedObject& c) { return c.object == static_cast<std::uint32_t>(now.container); });
-            if (container == scene.placedObjects.end() || container->instance >= scene.instances.size()) {
-                continue;
-            }
-            place = slotPlace(*container, static_cast<std::size_t>(now.slot), scene).value_or(standingPlace(*container, scene));
-        } else if (now.x == ts2::sim::kOffLot || now.y == ts2::sim::kOffLot || !scene.floorHeight) {
-            continue;
-        } else {
-            const float x = static_cast<float>(now.y) / 65536.0f;  // the lot's x and y are the position's y and x
-            const float y = static_cast<float>(now.x) / 65536.0f;
-            place = placed.lotFrame * ts2::scene::Transform::at(x, y, scene.floorHeight(now.level, x, y), ts2::sim::compassHeading(now.direction));
-        }
-        if (!now.gone) {
-            // An object in a slot is on its container's storey, as the simulation keeps it.
-            scene.instances[placed.instance].level = scene.groundLevel + now.level - 1;
-        }
-        scene.instances[placed.instance].transform = place;
-        clipBases_.erase(placed.instance);
-        moved_.emplace_back(placed.instance, place);
-        relight(scene, placed.instance, placed.lotFrame.rigidInverse() * place, now.level - 1);
-        if (!now.gone && unshaded_.erase(placed.instance) > 0) {
-            shadeCreated(scene, placed.instance, now.direction);
-        }
-    }
-}
 
-// Models go as scripts hide them and come back as scripts show them (see modelHidden). Whether what
-// a hidden Sim holds goes with it is not known yet, so each object answers for its own model.
-void LotLife::hideModels(ts2::scene::Scene& scene) {
-    const auto& world = sim_->world();
-    const auto hiddenId = [&](std::uint32_t id) {
-        const auto* object = id <= static_cast<std::uint32_t>(INT16_MAX) ? world.find(static_cast<std::int16_t>(id)) : nullptr;
-        return object != nullptr && ts2::sim::modelHidden(*object);
+void LotLife::poseSim(ts2::scene::Actor& actor, const ts2::sim::SimObject& object, ts2::scene::Scene& scene) {
+    auto& own = ownAnimations_[actor.object];
+    const auto& now = object.animation;
+    const double nowMs = drawnMs();
+    const bool walking = object.walking && ts2::sim::alongPlan(*object.walking);
+    const auto tailOver = [&own](double ms) {
+        return own.tail && ms - own.tail->startMs >= ts2::sim::walkFadeOutMs(own.tail->plan) + ts2::sim::kWalkFadeMs;
     };
-    for (const auto& placed : scene.placedObjects) {
-        if (placed.instance < scene.instances.size()) {
-            scene.instances[placed.instance].hidden = hiddenId(placed.object);
-        }
+    // A stopped walk that settled: what the Sim held is gone.
+    if (object.walkSettledMs && own.settledMs != object.walkSettledMs) {
+        own.settledMs = object.walkSettledMs;
+        own.settledAt = actor.place;
+        own.current.reset();
+        own.previous.reset();
+        own.held.reset();
+        own.tail.reset();
     }
-    for (const auto& actor : scene.actors) {
-        const bool hidden = hiddenId(actor.object);
-        for (const auto& part : actor.skinned) {
-            if (part.instance < scene.instances.size()) {
-                scene.instances[part.instance].hidden = hidden;
+    if (walking) {
+        // The walk is drawn from its plan. What the Sim did before stays, to fade out under it.
+        // A walk that has handed back plays out its own fade under the new one, in place of
+        // its last pose.
+        if (!own.walking || own.walkStartMs != object.walking->startMs) {
+            // The walk drawn last handed back and this one started within the same update.
+            // Its clips play out their fade under this one, as when it handed back on an update of its own.
+            if (own.walking && object.walkTail && object.walkTail->startMs == own.walkStartMs) {
+                own.tail = *object.walkTail;
+                own.tailHeading = own.endedHeading;
+                own.current.reset();
+            }
+            own.walking = true;
+            own.walkStartMs = object.walking->startMs;
+            if (tailOver(own.walkStartMs)) {
+                own.tail.reset();
+            }
+            own.previous = own.current ? std::move(own.current) : own.tail ? std::nullopt : std::move(own.held);
+            // An Animate Sim clip that has played out is gone.
+            if (own.previous && own.previous->fades && own.previous->finished(object.walking->startMs)) {
+                own.previous.reset();
+            }
+            own.held.reset();
+        }
+        if (tailOver(nowMs)) {
+            own.tail.reset();
+        }
+        own.current = now;
+    } else {
+        if (own.walking) {
+            // The walk's route has handed back. Its clips play out their fade, and the Sim
+            // then keeps its last pose, which the simulation's animation holds when it has
+            // played (a stop's last pose). A walk without a stop ends in a standing clip.
+            own.walking = false;
+            own.previous.reset();
+            own.current.reset();
+            own.held.reset();
+            if (now && now->finished(sim_->world().clockMs())) {
+                own.held = now;
+            }
+            own.tail.reset();
+            if (object.walkTail && object.walkTail->startMs == own.walkStartMs) {
+                own.tail = *object.walkTail;
+                own.tailHeading = own.endedHeading;
             }
         }
-    }
-}
-
-// A created object's shadow, chosen where it is first placed out of a Sim's hands, as a lot object's
-// is where the lot has it: its shadow groups indoors or its sun picture outdoors, as it asks.
-void LotLife::shadeCreated(ts2::scene::Scene& scene, std::size_t index, std::int16_t direction) {
-    using namespace ts2::scene;
-    auto& instance = scene.instances[index];
-    const auto asked = objectshadow::requested(instance.shadowFacts);
-    const int storey = objectlights::lightStorey(scene.floorHeight, instance.transform, instance.level - scene.groundLevel);
-    const bool outdoors = scene.roomAt && scene.roomAt(storey, instance.transform.m[3], instance.transform.m[7]) == 0;
-    instance.shadow = objectshadow::resolved(asked, outdoors, instance.shadowFacts);
-    if (asked == objectshadow::Kind::Sun) {
-        instance.shadowMesh = instance.mesh;
-        instance.shadowFacing = static_cast<std::uint8_t>((2 - direction) & 7);
-    }
-    // A shadow it had before a Sim took it gives way to this one.
-    heldShadows_.erase(index);
-}
-
-// Where container slot `slot` of a multi-tile part without a model of its own holds what is in it:
-// at the bone of the part's slot in its lead's model, as the lead draws the whole object. None for
-// other objects, and when the lead's model has no such bone.
-std::optional<ts2::scene::Transform> LotLife::partSlot(std::int16_t part, std::size_t slot, const ts2::scene::Scene& scene) {
-    const auto* object = sim_->world().find(part);
-    if (object == nullptr || object->data[ts2::sim::kLeadTileField] == part) {
-        return std::nullopt;
-    }
-    const auto lead = std::find_if(scene.placedObjects.begin(), scene.placedObjects.end(), [&](const ts2::scene::PlacedObject& p) {
-        return p.object == static_cast<std::uint32_t>(object->data[ts2::sim::kLeadTileField]);
-    });
-    if (lead == scene.placedObjects.end() || lead->model.empty() || lead->instance >= scene.instances.size()) {
-        return std::nullopt;
-    }
-    const auto key = std::pair<std::int16_t, std::size_t>(part, slot);
-    auto [it, first] = partSlots_.try_emplace(key);
-    if (first) {
-        const std::string bone = assets_.slotBone(object->definition.guid(), slot);
-        const auto rig = bone.empty() ? nullptr : objectMaterials_.objectRig(lead->model, lead->savedJoints);
-        const int node = rig ? rig->find(ts2::scene::lower(bone)) : -1;
-        if (node >= 0) {
-            std::vector<ts2::scene::Transform> rest;
-            ts2::scene::poseRig(*rig, nullptr, 0, rest);
-            it->second = rest[static_cast<std::size_t>(node)];
+        if (tailOver(nowMs)) {
+            own.tail.reset();
         }
-    }
-    if (!it->second) {
-        return std::nullopt;
-    }
-    return standingPlace(*lead, scene) * *it->second;
-}
-
-// Where a lot object's container slot `slot` is in the world, none when its model has no such bone.
-// A slot hangs under bones of the object's own, which its clip poses: a dining chair's getting-in
-// clip holds the seat still as the chair slides out and back, and one that leaves the chair out
-// takes the seat out with it.
-std::optional<ts2::scene::Transform> LotLife::slotPlace(const ts2::scene::PlacedObject& placed, std::size_t slot, const ts2::scene::Scene& scene) {
-    if (slot >= placed.slots.size() || !placed.slots[slot]) {
-        return std::nullopt;
-    }
-    const auto& base = standingPlace(placed, scene);
-    // An object playing a clip carries its slots with the bones they sit at: a carpool's passenger
-    // seat drives off with the car.
-    const auto* object = placed.object <= static_cast<std::uint32_t>(INT16_MAX) ? sim_->world().find(static_cast<std::int16_t>(placed.object))
-                                                                               : nullptr;
-    if (object != nullptr && !object->removed && object->animation) {
-        const std::string bone = ts2::scene::lower(assets_.slotBone(object->definition.guid(), slot));
-        const double nowMs = sim_->world().clockMs() + leadMs_;
-        // The joints its clip leaves alone are where the object was last drawn with them.
-        const std::vector<ts2::scene::HeldJoint>* heldJoints = nullptr;
-        if (pose_ != nullptr) {
-            if (const auto held = pose_->held.find(static_cast<std::uint32_t>(object->id)); held != pose_->held.end()) {
-                heldJoints = &held->second;
-            }
-        }
-        if (const auto posed = bone.empty() ? std::nullopt
-                                            : objectMaterials_.jointPose(*object, nowMs, animations_, placed.model, bone, nullptr, heldJoints)) {
-            return base * *posed;
-        }
-    }
-    return base * *placed.slots[slot];
-}
-
-// Where a lot object stands without its clip, which moves its model from there (see followClips).
-const ts2::scene::Transform& LotLife::standingPlace(const ts2::scene::PlacedObject& placed, const ts2::scene::Scene& scene) const {
-    const auto base = clipBases_.find(placed.instance);
-    return base != clipBases_.end() ? base->second : scene.instances[placed.instance].transform;
-}
-
-// An object playing a clip (Animate Object) whose whole drawn model hangs under one joint moves
-// with that joint, from where it stands: a dining chair sliding in under its table or out again.
-// It keeps the clip's last pose once the clip has played.
-void LotLife::followClips(ts2::scene::Scene& scene) {
-    const double nowMs = sim_->world().clockMs() + leadMs_;
-    for (auto& placed : scene.placedObjects) {
-        if (placed.followJoint.empty() || placed.object > static_cast<std::uint32_t>(INT16_MAX) ||
-            placed.instance >= scene.instances.size() || heldNow_.contains(placed.instance)) {
-            continue;
-        }
-        const auto* object = sim_->world().find(static_cast<std::int16_t>(placed.object));
-        if (object == nullptr || object->removed || !object->animation) {
-            continue;
-        }
-        // One drawn skinned for its morphs is posed by animateObjects instead.
-        if (std::any_of(scene.objectActors.begin(), scene.objectActors.end(), [&](const ts2::scene::Actor& a) { return a.object == placed.object; })) {
-            continue;
-        }
-        const auto joint = objectMaterials_.jointPose(*object, nowMs, animations_, placed.model, placed.followJoint, &placed.bones);
-        if (!joint) {
-            continue;
-        }
-        auto& instance = scene.instances[placed.instance];
-        const auto base = clipBases_.try_emplace(placed.instance, instance.transform).first;
-        for (auto& bone : placed.bones) {
-            bone.second = base->second * bone.second;
-        }
-        const ts2::scene::Transform place = base->second * *joint * placed.followRest.rigidInverse();
-        if (place.m != instance.transform.m) {
-            instance.transform = place;
-            moved_.emplace_back(placed.instance, place);
-        }
-    }
-}
-
-// Any other object whose clips move its model is drawn skinned to the model's joints from its first
-// clip on, as a Sim is: its own clip (Animate Object) and the overlays laid on it. A bed's covers
-// fold back as a Sim gets in and a fridge's doors swing open. One a Sim holds hangs from the Sim's
-// hand (see poseActors) while its clip moves its joints: a snack bag tips as the Sim eats.
-void LotLife::animateObjects(ts2::scene::Scene& scene) {
-    const double nowMs = sim_->world().clockMs() + leadMs_;
-    for (const auto& placed : scene.placedObjects) {
-        if (placed.model.empty() || placed.object > static_cast<std::uint32_t>(INT16_MAX) || placed.instance >= scene.instances.size()) {
-            continue;
-        }
-        const auto* object = sim_->world().find(static_cast<std::int16_t>(placed.object));
-        auto actor = std::find_if(scene.objectActors.begin(), scene.objectActors.end(),
-                                  [&](const ts2::scene::Actor& a) { return a.object == placed.object; });
-        // A model that hangs under one joint moves whole with it (see followClips), unless it has
-        // morphs, which only a skinned model draws: a living chair's cushions dent as a Sim sits.
-        if (!placed.followJoint.empty() && !heldNow_.contains(placed.instance) && actor == scene.objectActors.end()) {
-            const bool playing = object != nullptr && (object->animation || !object->overlays.empty());
-            const int mesh = playing ? objectMaterials_.skinnedModel(placed.model, placed.overrides, scene) : -1;
-            if (mesh < 0 || scene.meshes[static_cast<std::size_t>(mesh)].morphs.empty()) {
-                continue;
-            }
-        }
-        // One a script removed is no longer drawn (placeObjects gave its instance no place).
-        if (object == nullptr || object->removed || object->isPerson()) {
-            if (actor != scene.objectActors.end()) {
-                actor->place = scene.instances[placed.instance].transform;
-                actor->clips.clear();
-            }
-            continue;
-        }
-        if (actor == scene.objectActors.end()) {
-            if ((!object->animation && object->overlays.empty()) || unskinned_.contains(placed.object)) {
-                continue;
-            }
-            const int mesh = objectMaterials_.skinnedModel(placed.model, placed.overrides, scene);
-            auto rig = mesh >= 0 ? objectMaterials_.objectRig(placed.model, placed.savedJoints) : nullptr;
-            if (!rig || rig->nodes.empty()) {
-                unskinned_.insert(placed.object);
-                continue;
-            }
-            ts2::scene::Actor added;
-            added.object = placed.object;
-            added.skinned.push_back({placed.instance, ts2::scene::skinNodes(scene.meshes[static_cast<std::size_t>(mesh)], *rig)});
-            added.rig = std::move(rig);
-            for (std::size_t slot = 0; slot < placed.slots.size(); ++slot) {
-                const std::string bone = ts2::scene::lower(assets_.slotBone(object->definition.guid(), slot));
-                added.slotNodes.push_back(!bone.empty() ? added.rig->find(bone) : -1);
-            }
-            scene.instances[placed.instance].mesh = mesh;
-            changedInstances_.push_back(placed.instance);
-            objectMaterials_.showAgain(object->id);
-            scene.objectActors.push_back(std::move(added));
-            actor = scene.objectActors.end() - 1;
-        }
-        actor->place = standingPlace(placed, scene);
-        // The clip its latest replaced plays on under it while the game keeps it: until the latest
-        // has crossfaded it, else to its own end.
-        const auto& own = object->animation;
-        const auto& replaced = object->ending;
-        const bool under = own && replaced && (crossfades(*replaced, *own, animations_) || stillPlaying(*replaced, *own));
-        playClips(*actor, *object, own, under ? replaced : std::nullopt, 0, animations_);
-        // A latest that doesn't move the object's root leaves it where the clip it replaced did: at
-        // that clip's last frame once it has played out, however few of its frames were drawn (a bus's
-        // drive clip, done between two frames at ultra speed, leaves the bus where it stopped before
-        // its door opens). One that moves the root places the object itself.
-        const auto movesRoot = [&](const ts2::sim::PlayingAnimation& a) {
-            const auto bound = animations_.bound(actor->rig, a.name, a.flipped);
-            const int root = actor->rig->find("root_trans");
-            return bound && root >= 0 && static_cast<std::size_t>(root) < bound->translation.size() &&
-                   bound->translation[static_cast<std::size_t>(root)] >= 0;
+        const auto same = [&](const std::optional<ts2::sim::PlayingAnimation>& a) {
+            return a && a->startMs == now->startMs && a->name == now->name;
         };
-        if (own && replaced && !under && replaced->startMs + replaced->lengthMs <= own->startMs && !movesRoot(*own)) {
-            if (auto bound = animations_.bound(actor->rig, replaced->name, replaced->flipped); bound && bound->animation) {
-                auto& held = actor->clips.emplace_back();
-                held.animation = std::move(bound);
-                held.layer = own->layer;
-                held.start = replaced->startMs / 1000.0;
-                held.end = held.start;
-                held.fadeIn = held.fadeOut = false;
-                held.atMs = clipMs(*replaced, held.animation->animation->duration, replaced->startMs + replaced->lengthMs);
+        if (now && !same(own.current) && !same(own.held)) {
+            // A new animation fades in over the one before it, or over the last pose of one
+            // that has played out, as the game's play clips follow one another. One starting
+            // as a walk ends fades in over the walk's clips instead.
+            own.previous = own.tail ? std::nullopt : own.current ? std::move(own.current) : std::move(own.held);
+            // An Animate Sim clip is gone at its end, so one that has played out can't come back.
+            if (own.previous && own.previous->fades && !stillPlaying(*own.previous, *now)) {
+                own.previous.reset();
+            }
+            own.current = *now;
+            own.held.reset();
+        }
+        if (own.previous && own.current) {
+            if (nowMs > previousGoneMs(*own.previous, *own.current, animations_)) {
+                own.previous.reset();
             }
         }
-        // A stopped clip holds the pose it was stopped at, in full, however few of its frames were
-        // drawn (a car's stop clip, played out within a few frames at ultra speed).
-        if (own && nowMs - own->startMs >= own->lengthMs) {
-            const std::string ownName = ts2::scene::lower(own->name);
-            for (auto& clip : actor->clips) {
-                if (clip.layer == own->layer && clip.animation && clip.animation->animation &&
-                    ts2::scene::lower(clip.animation->animation->name) == ownName) {
-                    clip.atMs = clipMs(*own, clip.animation->animation->duration, nowMs);
-                    clip.fadeOut = false;
-                }
+        // An Animate Sim clip that has played and that nothing followed fades out, then is gone
+        // (locomotion clips aside). One that doesn't blend out (Animate Sim byte 2 flag 0x40)
+        // holds its last pose until the next animation takes over, as the game's does.
+        if (!now && own.current && !own.current->loops && !own.current->baseHeading && own.current->blendsOut &&
+            (own.current->fades ? own.current->fadingOut(nowMs) : own.current->finished(nowMs))) {
+            const double endMs = own.current->startMs + own.current->lengthMs;
+            const bool fading = object.ending && object.ending->startMs == own.current->startMs && object.ending->name == own.current->name;
+            // A clip fades within its own length, and one without fades is dropped at its end.
+            if (!fading || nowMs >= endMs) {
+                own.held = std::move(own.current);
+                own.current.reset();
+                own.previous.reset();
             }
         }
     }
-}
-
-// An object a Sim holds that asks for a sun picture draws no shadow indoors, as the game's do. Outdoors
-// the game may give it another kind of shadow, not known yet, so none is drawn there either. Put
-// down, it has its own again.
-void LotLife::shadeHeld(ts2::scene::Scene& scene) {
-    using ts2::scene::objectshadow::Kind;
-    for (const auto& placed : scene.placedObjects) {
-        if (placed.instance >= scene.instances.size()) {
+    const SimFrame frame = simFrame(object, nowMs);
+    // As the game places each clip, one playing as the Sim snaps into a carrier's or an object's slot
+    // stays where it was in the world, and from then on hangs from the slot's bone with the Sim: its
+    // start place is kept as seen from the bone, taken once per slot, and follows the bone (a
+    // carpool passenger's seated clips drive off with the car).
+    std::optional<ts2::scene::Transform> hung;
+    const std::pair<std::int16_t, std::int16_t> holderSlot{object.data[kContainerField], object.data[kSlotField]};
+    if (pose_ != nullptr && holderSlot.first > 0) {
+        if (const auto found = pose_->carried.find(actor.object); found != pose_->carried.end()) {
+            hung = found->second;
+        }
+    }
+    if (!hung && holderSlot.first > 0 && holderSlot.second >= 0) {
+        const auto container = std::find_if(scene.placedObjects.begin(), scene.placedObjects.end(), [&](const ts2::scene::PlacedObject& c) {
+            return c.object == static_cast<std::uint32_t>(holderSlot.first);
+        });
+        if (container != scene.placedObjects.end() && container->instance < scene.instances.size()) {
+            hung = slotPlace(*container, static_cast<std::size_t>(holderSlot.second), scene);
+        }
+    }
+    for (auto& s : own.started) {
+        if (!hung) {
+            s.fromCarrier.reset();
             continue;
         }
-        auto& instance = scene.instances[placed.instance];
-        const auto was = heldShadows_.find(placed.instance);
-        if (!heldNow_.contains(placed.instance)) {
-            if (was != heldShadows_.end()) {
-                instance.shadow = was->second;
-                heldShadows_.erase(was);
+        if (!s.fromCarrier || s.carrierSlot != holderSlot) {
+            s.fromCarrier = hung->rigidInverse() * s.place;
+            s.carrierSlot = holderSlot;
+        }
+        s.place = *hung * *s.fromCarrier;
+    }
+    const StartedAt startedAt = [&own](const std::string& name, double startMs) -> std::optional<ts2::scene::Transform> {
+        for (const auto& s : own.started) {
+            if (s.startMs == startMs && s.name == name) {
+                return s.place;
             }
-        } else if (was == heldShadows_.end() && ts2::scene::objectshadow::requested(instance.shadowFacts) == Kind::Sun) {
-            heldShadows_.emplace(placed.instance, instance.shadow);
-            instance.shadow = Kind::None;
+        }
+        return std::nullopt;
+    };
+    // A walk that handed back plays on along its plan and path, its clips weighed by the walk's
+    // fade, facing the way the path runs there (a step keeps the facing it walked with).
+    std::optional<ts2::scene::Transform> tailPlace;
+    if (own.tail) {
+        const float sinceStart = static_cast<float>(nowMs - own.tail->startMs);
+        const float walked = ts2::sim::walkedAt(own.tail->plan, sinceStart);
+        ts2::sim::walkPoses(own.tail->plan, walked, tailPoses_, false);
+        const float weight = ts2::sim::walkWeight(own.tail->plan, sinceStart);
+        for (auto& pose : tailPoses_) {
+            pose.weight *= weight;
+        }
+        if (actor.floorHeight) {
+            const auto at = own.tail->path.at(walked);
+            const float heading = at.heading && !own.tail->plan.keepsFacing ? *at.heading : own.tailHeading;
+            tailPlace = actor.lotFrame * ts2::scene::Transform::at(at.y, at.x, standHeight(actor, object, own.tail->level, at.y, at.x), heading);
         }
     }
-}
-
-// The game's shape colour on an object in its fading draw style (object data 0x47, the draw style, at
-// 4, as a car leaving the lot is): red, green and blue from object data 0x49, 0x4A and 0x4B, alpha
-// the lower of data 0x39 and 0x48, each the low byte in 255ths.
-void LotLife::shapeColors(ts2::scene::Scene& scene) {
-    constexpr std::size_t kDrawStyleField = 0x47, kAlphaField = 0x48, kRedField = 0x49, kGreenField = 0x4A, kBlueField = 0x4B,
-                          kOtherAlphaField = 0x39;
-    constexpr std::int16_t kFadingStyle = 4;
-    for (const auto& placed : scene.placedObjects) {
-        if (placed.object > static_cast<std::uint32_t>(INT16_MAX) || placed.instance >= scene.instances.size()) {
-            continue;
+    const auto* tailPoses = own.tail ? &tailPoses_ : nullptr;
+    const float drawn = ts2::sim::drawnHeading(frame.heading);
+    if (walking) {
+        // The walk's clips weigh by the walk's own fades, half as it starts (see walkWeight).
+        // Drawn at the nearest eighth, they turn by the rest of the walk's heading.
+        ts2::sim::walkPoses(object.walking->plan, frame.walked, walkPoses_, false);
+        const float weight = ts2::sim::walkWeight(object.walking->plan, static_cast<float>(nowMs - object.walking->startMs));
+        for (auto& pose : walkPoses_) {
+            pose.weight *= weight;
+            pose.turn += ts2::sim::wrapAngle(frame.heading - drawn);
         }
-        const auto* object = sim_->world().find(static_cast<std::int16_t>(placed.object));
-        std::optional<std::array<float, 4>> color;
-        if (object != nullptr && !object->removed && object->data[kDrawStyleField] == kFadingStyle) {
-            const auto byte = [](std::int16_t value) { return static_cast<float>(static_cast<std::uint8_t>(value)) / 255.0f; };
-            const std::int16_t alpha = std::min(object->data[kOtherAlphaField], object->data[kAlphaField]);
-            color = std::array<float, 4>{byte(object->data[kRedField]), byte(object->data[kGreenField]), byte(object->data[kBlueField]), byte(alpha)};
-        }
-        auto& instance = scene.instances[placed.instance];
-        if (instance.shapeColor != color) {
-            instance.shapeColor = color;
-            shapeColored_.push_back(placed.instance);
-        }
+        own.endedHeading = frame.heading;
+        const double fade = std::clamp((nowMs - object.walking->startMs) / ts2::sim::kWalkFadeMs, 0.0, 1.0);
+        playClips(actor, object, std::nullopt, own.previous, drawn, animations_, &walkPoses_, static_cast<float>(fade), object.walking->startHeading,
+                  tailPoses, own.tailHeading, startedAt, tailPlace);
+    } else {
+        playClips(actor, object, own.current, own.previous, drawn, animations_, nullptr, 1, 0, tailPoses, own.tailHeading,
+                  startedAt, tailPlace);
     }
-}
-
-void LotLife::relightAll(ts2::scene::Scene& scene) {
-    for (const auto& placed : scene.placedObjects) {
-        if (placed.instance >= scene.instances.size()) {
-            continue;
-        }
-        const auto& instance = scene.instances[placed.instance];
-        if (std::all_of(instance.transform.m.begin(), instance.transform.m.end(), [](float v) { return v == 0; })) {
-            continue;  // removed by a script
-        }
-        relight(scene, placed.instance, placed.lotFrame.rigidInverse() * instance.transform, instance.level - scene.groundLevel);
+    if (own.settledMs && nowMs < *own.settledMs + ts2::sim::kSettleWalkPoseMs) {
+        addSettleClips(actor, object, *own.settledMs, own.settledAt, animations_, sim_->world().locoClips());
     }
-    for (const auto& actor : scene.actors) {
+    placeSim(
+        actor, object, frame, scene, [&](const ts2::scene::PlacedObject& p, std::size_t slot) { return slotPlace(p, slot, scene); },
+        [&](std::int16_t part, std::size_t slot) { return partSlot(part, slot, scene); }, pose_);
+    own.noteStarts(object, actor.place, walking, hung, holderSlot);
+    setSimStorey(scene, actor, object.level);
+    // The game picks a Sim's lights afresh as it moves.
+    if (actor.place.m != own.litPlace || object.level != own.litLevel) {
+        own.litPlace = actor.place.m;
+        own.litLevel = object.level;
         const auto inLot = actor.lotFrame.rigidInverse() * actor.place;
         for (const auto& skinned : actor.skinned) {
-            if (skinned.instance < scene.instances.size()) {
-                relight(scene, skinned.instance, inLot, scene.instances[skinned.instance].level - scene.groundLevel);
-            }
+            relight(scene, skinned.instance, inLot, object.level - 1);
         }
     }
-    std::sort(relit_.begin(), relit_.end());
-    relit_.erase(std::unique(relit_.begin(), relit_.end()), relit_.end());
-}
-
-// An object takes the sun that reaches it under the buildings' shadow where it stands now, and a
-// thing or a Sim the lights of the room it is in (doors and windows keep theirs).
-void LotLife::relight(ts2::scene::Scene& scene, std::size_t index, const ts2::scene::Transform& inLot, int storey) {
-    // Light sets only ever grow. Past this a thing keeps the light it has.
-    constexpr std::size_t kMaxLightSets = 4096;
-    if (index >= scene.instances.size()) {
-        return;
-    }
-    auto& instance = scene.instances[index];
-    if (scene.thingSun && instance.part == ts2::scene::Part::Object) {
-        ts2::scene::Instance placed = instance;
-        placed.transform = inLot;
-        if (auto sun = scene.thingSun(scene, placed); sun != instance.sun) {
-            instance.sun = std::move(sun);
-            relit_.push_back(index);
-        }
-    }
-    if (!scene.thingLights || instance.lightGroup == ts2::scene::LightGroup::Portals || instance.mesh < 0 ||
-        static_cast<std::size_t>(instance.mesh) >= scene.meshes.size()) {
-        return;
-    }
-    std::vector<int> parts;
-    for (auto& set : scene.thingLights(scene.meshes[static_cast<std::size_t>(instance.mesh)], inLot,
-                                       ts2::scene::objectlights::lightStorey(scene.floorHeight, inLot, storey), instance.lightGroup)) {
-        const auto same = std::find(scene.lightSets.begin(), scene.lightSets.end(), set);
-        if (same == scene.lightSets.end() && scene.lightSets.size() >= kMaxLightSets) {
-            return;
-        }
-        parts.push_back(static_cast<int>(same - scene.lightSets.begin()));
-        if (same == scene.lightSets.end()) {
-            scene.lightSets.push_back(std::move(set));
-        }
-    }
-    int whole = -1;
-    if (!parts.empty() && std::all_of(parts.begin(), parts.end(), [&](int set) { return set == parts[0]; })) {
-        whole = parts[0];
-        parts.clear();
-    }
-    if (whole != instance.lightSet || parts != instance.partLightSets) {
-        instance.lightSet = whole;
-        instance.partLightSets = std::move(parts);
-        relit_.push_back(index);
-    }
-}
-
-void LotLife::loadSimsInBackground(const std::filesystem::path& install) {
-    simLoader_ = std::make_unique<SimLoader>(install);
-    sim_->world().setCharacterLoad([this](std::int16_t neighbor) -> std::optional<bool> {
-        const auto file = sim_->characterFile(neighbor);
-        if (!file) {
-            return std::nullopt;
-        }
-        // A Sim made from the loaded character since it was last asked for takes it.
-        auto& world = sim_->world();
-        std::erase_if(claimingSims_, [&](std::int16_t id) {
-            const auto* o = world.find(id);
-            return o == nullptr || o->removed || !o->isPerson();
-        });
-        world.nextAfter(0, [&](const ts2::sim::SimObject& o) {
-            if (o.isPerson() && !o.removed && world.neighborIdOf(o) == neighbor && claimingSims_.insert(o.id).second) {
-                simLoader_->claim(neighbor);
-            }
-            return false;
-        });
-        return simLoader_->load(neighbor, *file, lotFrame_);
-    });
-}
-
-bool LotLife::simLoading(const ts2::sim::SimObject& sim) const {
-    const std::int16_t neighbor = simLoader_ ? sim_->world().neighborIdOf(sim) : std::int16_t{0};
-    return neighbor != 0 && simLoader_->loading(neighbor);
-}
-
-bool LotLife::addLoadedSim(ts2::scene::Scene& scene, const ts2::sim::SimObject& sim, SimLoader::Built built) {
-    for (const auto& problem : built.problems) {
-        ts2::diag::warnOnce(std::format("Sim {}: {}", sim.id, problem));
-    }
-    if (!built.drawn) {
-        return false;
-    }
-    const auto mapped = [](const std::map<int, int>& map, int index) {
-        const auto it = map.find(index);
-        return it != map.end() ? it->second : -1;
-    };
-    for (auto& [index, image] : built.images) {
-        loadedImages_[index] = static_cast<int>(scene.images.size());
-        scene.images.push_back(std::move(image));
-    }
-    for (auto& [index, cube] : built.envCubes) {
-        loadedCubes_[index] = static_cast<int>(scene.envCubes.size());
-        scene.envCubes.push_back(std::move(cube));
-    }
-    for (auto& [index, material] : built.materials) {
-        material.image = mapped(loadedImages_, material.image);
-        material.normalMap = mapped(loadedImages_, material.normalMap);
-        material.envCube = mapped(loadedCubes_, material.envCube);
-        loadedMaterials_[index] = static_cast<int>(scene.materials.size());
-        scene.materials.push_back(std::move(material));
-    }
-    for (auto& [index, mesh] : built.meshes) {
-        for (auto& p : mesh.primitives) {
-            p.material = p.material >= 0 ? mapped(loadedMaterials_, p.material) : p.material;
-        }
-        loadedMeshes_[index] = static_cast<int>(scene.meshes.size());
-        scene.meshes.push_back(std::move(mesh));
-    }
-    // Into the scene's instances, taking the places removed Sims left first.
-    std::vector<std::size_t> placed;
-    for (auto& instance : built.instances) {
-        instance.mesh = mapped(loadedMeshes_, instance.mesh);
-        instance.level = scene.groundLevel + sim.level - 1;
-        if (!freeSimInstances_.empty() && freeSimInstances_.back() < scene.instances.size()) {
-            placed.push_back(freeSimInstances_.back());
-            freeSimInstances_.pop_back();
-            scene.instances[placed.back()] = std::move(instance);
-        } else {
-            placed.push_back(scene.instances.size());
-            scene.instances.push_back(std::move(instance));
-        }
-    }
-    ts2::scene::Actor actor = std::move(built.actor);
-    for (auto& s : actor.skinned) {
-        s.instance = placed.at(s.instance);
-    }
-    for (auto& h : actor.held) {
-        h.instance = placed.at(h.instance);
-    }
-    actor.object = static_cast<std::uint32_t>(sim.id);
-    actor.lotFrame = lotFrame_;
-    actor.floorHeight = scene.floorHeight;
-    for (const auto& bone : built.slotBones) {
-        actor.slotNodes.push_back(actor.rig && !bone.empty() ? actor.rig->find(bone) : -1);
-    }
-    for (const auto& bone : built.targetBones) {
-        actor.targetNodes.push_back(actor.rig && !bone.empty() ? actor.rig->find(bone) : -1);
-    }
-    auto& instances = createdSims_[sim.id];
-    for (const auto& s : actor.skinned) {
-        instances.push_back(s.instance);
-        changedInstances_.push_back(s.instance);
-    }
-    scene.actors.push_back(std::move(actor));
-    return true;
-}
-
-// The looks drawn for aging Sims' outfits and for Sims Make New Character makes come from the game's
-// own generator, seeded once a run from the time since the run started, as the game seeds it.
-namespace {
-ts2::scene::OutfitRandom& lookRandom() {
-    static ts2::scene::OutfitRandom random(static_cast<std::uint32_t>(std::clock()));
-    return random;
-}
-} // namespace
-
-// The look of a Sim Make New Character made, drawn once for its neighbor and kept, as the game
-// writes it into the Sim's new character file. Its clothes come from the outfit object's age data
-// of the Sim's age and gender (or of none), one of them drawn by a generator seeded from the clock
-// when there are several.
-const ts2::scene::MadeLook* LotLife::madeLook(std::int16_t neighbor, const ts2::sim::SavedNeighbor::MadeAs& as) {
-    if (const auto it = madeLooks_.find(neighbor); it != madeLooks_.end()) {
-        return &it->second;
-    }
-    std::vector<ts2::scene::AgeData> outfits;
-    if (as.outfit != 0) {
-        std::vector<ts2::scene::AgeData> fitting;
-        for (auto& data : outfitAgeData(as.outfit)) {
-            const std::uint32_t age = ts2::propset::number(data.properties, "age");
-            const std::uint32_t gender = ts2::propset::number(data.properties, "gender");
-            if ((age == 0 || (age & static_cast<std::uint32_t>(as.age))) && (gender == 0 || (gender & static_cast<std::uint32_t>(as.gender)))) {
-                fitting.push_back(std::move(data));
-            }
-        }
-        if (fitting.size() > 1) {
-            ts2::scene::OutfitRandom draw(static_cast<std::uint32_t>(std::clock()));
-            outfits.push_back(std::move(fitting[draw.below(static_cast<std::uint32_t>(fitting.size()))]));
-        } else {
-            outfits = std::move(fitting);
-        }
-    }
-    const ts2::scene::NewCharacter who{static_cast<std::uint32_t>(as.age), static_cast<std::uint32_t>(as.gender), as.skin};
-    return &madeLooks_.emplace(neighbor, ts2::scene::makeLook(who, outfits, outfitCatalog_.get(), lookRandom())).first->second;
-}
-
-// A Sim created during play (a visitor) is drawn in what its character file has it wear,
-// standing idle as the lot's Sims start. It is placed with the others on the next update. A newborn
-// has no character file yet: it wears what the game picks for its genes, and has no slots. A Sim the
-// loader built is taken from it. A Sim Make New Character made wears the look drawn for it.
-bool LotLife::addCreatedSim(ts2::scene::Scene& scene, const ts2::sim::SimObject& sim) {
-    constexpr std::int16_t kBabyLifeStage = 1;
-    constexpr std::size_t kSpeciesPersonData = 0xBA;  // 0 human
-    constexpr std::size_t kGenderPersonData = 0x41;  // 1 female
-    const std::int16_t neighbor = sim_->world().neighborIdOf(sim);
-    const auto file = neighbor != 0 ? sim_->characterFile(neighbor) : std::nullopt;
-    if (!scene.floorHeight) {
-        return false;
-    }
-    // A Sim the loader couldn't build is built here, in case its trouble was the loader's own.
-    if (auto built = simLoader_ && file ? simLoader_->take(neighbor, *file) : std::nullopt; built && built->drawn) {
-        return addLoadedSim(scene, sim, std::move(*built));
-    }
-    std::optional<ts2::scene::Assets::CharacterInUse> inUse;
-    ts2::scene::SimLook look;
-    if (file) {
-        inUse.emplace(assets_, *file);
-        look = ts2::scene::simLook(assets_, *file);
-    } else if (const auto* made = neighbor != 0 ? sim_->world().neighbor(neighbor) : nullptr;
-               made != nullptr && sim.personData[ts2::sim::kLifeStagePersonData] == kBabyLifeStage) {
-        // A newborn has no character file yet: it wears what the game picks for its skin gene.
-        const auto skin = made->genes.find(ts2::sim::kSkinGene);
-        if (skin == made->genes.end() || skin->second.dominant.empty()) {
-            return false;
-        }
-        ts2::scene::Newborn baby;
-        baby.gender = sim.personData[kGenderPersonData] == 1 ? 1 : 2;
-        baby.skinTone = skin->second.dominant;
-        const auto gene = [&](std::uint32_t number) {
-            const auto it = made->genes.find(number);
-            return it != made->genes.end() ? it->second.dominant : std::string();
-        };
-        baby.hairTone = gene(ts2::sim::kHairGene);
-        baby.eyeColour = gene(ts2::sim::kEyeGene);
-        baby.browDraw = made->browDraw;
-        const auto shape = [&](std::int16_t parent) -> std::optional<ts2::faceshape::FaceShape> {
-            if (const auto parentFile = parent != 0 ? sim_->characterFile(parent) : std::nullopt) {
-                return ts2::scene::faceShapeOf(*parentFile);
-            }
-            // A Sim with no character file (an NPC such as the alien) keeps its face shape with its object.
-            const auto* saved = sim_->world().neighbor(parent);
-            const auto* type = saved != nullptr ? sim_->code().objectType(saved->guid) : nullptr;
-            const auto bytes = type != nullptr ? sim_->code().characterResource(ts2::faceshape::kType, type->group) : std::nullopt;
-            try {
-                return bytes ? std::optional(ts2::faceshape::parse(*bytes)) : std::nullopt;
-            } catch (const std::exception& ex) {
-                ts2::diag::warnOnce(std::string("newborn face: a parent's face shape can't be read: ") + ex.what());
-                return std::nullopt;
-            }
-        };
-        // The blend depends only on the parents and the picks, so babies alike share one face mesh
-        // and a neighbor id given again later can't bring back an earlier baby's face.
-        std::string key = std::format("newborn face {} {}", made->faceParentA, made->faceParentB);
-        for (const auto& [region, fromA] : made->facePicks) {
-            key += std::format(" {}={}", region, fromA ? 'a' : 'b');
-        }
-        baby.face = std::make_shared<const ts2::scene::MeshEdit>(ts2::scene::newbornFaceEdit(
-            assets_, newbornFaces_, std::move(key), shape(made->faceParentA), shape(made->faceParentB), made->facePicks));
-        look = ts2::scene::newbornLook(assets_, babyCatalog_.get(), baby);
-    } else if (const auto* fromTemplate = neighbor != 0 ? sim_->world().neighbor(neighbor) : nullptr;
-               fromTemplate != nullptr && fromTemplate->madeAs && fromTemplate->personData.size() > kSpeciesPersonData &&
-               fromTemplate->personData[kSpeciesPersonData] == 0) {
-        // A human made from a template during play: its look drawn as Make New Character draws it.
-        constexpr std::uint32_t kEveryday = 1;
-        look = ts2::scene::madeSimLook(assets_, outfitCatalog_.get(), *madeLook(neighbor, *fromTemplate->madeAs), kEveryday);
-    }
-    for (const auto& problem : look.problems) {
-        ts2::diag::warnOnce(std::format("Sim {}: {}", sim.id, problem));
-    }
-    if (look.parts.empty()) {
-        return false;
-    }
-    ts2::scene::Actor actor = objectMaterials_.sim(look, std::to_string(sim.id), lotFrame_, scene.groundLevel + sim.level - 1,
-                                                   ts2::scene::standingIdle(assets_, look.age), scene, freeSimInstances_);
-    actor.object = static_cast<std::uint32_t>(sim.id);
-    actor.basePose = ts2::scene::standingPose(assets_, look.age);
-    actor.lotFrame = lotFrame_;
-    actor.floorHeight = scene.floorHeight;
-    for (const auto& bone : file ? ts2::scene::simSlotBones(assets_, *file) : std::vector<std::string>{}) {
-        actor.slotNodes.push_back(actor.rig && !bone.empty() ? actor.rig->find(bone) : -1);
-    }
-    for (const auto& bone : file ? ts2::scene::simSlotBones(assets_, *file, true) : std::vector<std::string>{}) {
-        actor.targetNodes.push_back(actor.rig && !bone.empty() ? actor.rig->find(bone) : -1);
-    }
-    auto& instances = createdSims_[sim.id];
-    for (const auto& s : actor.skinned) {
-        instances.push_back(s.instance);
-        changedInstances_.push_back(s.instance);
-    }
-    scene.actors.push_back(std::move(actor));
-    return true;
-}
-
-// Builds the age data of `sim` for a new age as Age runs, and keeps it for the new body and the
-// Sim's later outfit changes. Gives the keys of its part lists that hold a part.
-std::optional<std::set<std::uint32_t>> LotLife::buildAgeData(const ts2::sim::SimObject& sim, std::uint32_t age) {
-    const std::int16_t neighbor = sim_->world().neighborIdOf(sim);
-    const auto file = neighbor != 0 ? sim_->characterFile(neighbor) : std::nullopt;
-    if (!file) {
-        ts2::diag::warnOnce("Age: a Sim without a character file keeps its body");
-        return std::nullopt;
-    }
-    try {
-        const ts2::scene::Assets::CharacterInUse inUse(assets_, *file);
-        const auto aged = agedData_.find(neighbor);
-        const auto old = aged != agedData_.end() ? std::optional(aged->second) : ts2::scene::characterAgeData(assets_, *file);
-        if (!old) {
-            return std::nullopt;
-        }
-        auto made = ts2::scene::ageUp(*old, age, ts2::scene::characterParts(*file), outfitCatalog_.get(), lookRandom());
-        if (!made) {
-            ts2::diag::warnOnce("Age: a baby's, a pet's or a new young adult's body isn't built yet (PR-62)");
-            return std::nullopt;
-        }
-        std::set<std::uint32_t> filled;
-        for (const auto& [key, parts] : made->lists) {
-            if (!parts.empty()) {
-                filled.insert(key);
-            }
-        }
-        agedData_[neighbor] = std::move(*made);
-        // The working copy is dropped, as Age drops it, and made again from the new age data.
-        outfitData_.erase(neighbor);
-        return filled;
-    } catch (const std::exception& ex) {
-        ts2::diag::warning(std::format("Sim {}: its new age can't be built: {}", sim.id, ex.what()));
-        return std::nullopt;
-    }
-}
-
-std::vector<ts2::scene::AgeData> LotLife::outfitAgeData(std::uint32_t guid) {
-    constexpr std::uint32_t kAgeData = 0xAC598EAC;
-    std::vector<ts2::scene::AgeData> outfits;
-    const auto* type = sim_->code().objectType(guid);
-    if (type == nullptr) {
-        return outfits;
-    }
-    // Each age data's parts are named by the reference list of the same instance.
-    std::map<std::uint32_t, std::vector<std::uint8_t>> references;
-    for (auto& [instance, bytes] : sim_->code().groupResources(ts2::reflist::kType, type->group)) {
-        references[instance] = std::move(bytes);
-    }
-    for (const auto& [instance, bytes] : sim_->code().groupResources(kAgeData, type->group)) {
-        try {
-            const auto refs = references.find(instance);
-            outfits.push_back(ts2::scene::readAgeData(ts2::propset::parse(bytes), refs != references.end()
-                                                                                     ? ts2::reflist::parse(refs->second)
-                                                                                     : std::vector<ts2::scenegraph::Link>{}));
-        } catch (const std::exception& ex) {
-            ts2::diag::warnOnce(std::format("an outfit of 0x{:08X} can't be read: {}", guid, ex.what()));
-        }
-    }
-    return outfits;
-}
-
-// Change Outfit's work on a Sim's working copy of its age data. The copy is made from the Sim's own
-// age data at the Sim's first outfit change (the game makes it as the Sim loads) or when asked anew.
-// A source's age data is listed in instance order, though the game lists it package by package in
-// each package's own order (PR-63).
-std::optional<ts2::sim::World::BuiltOutfit> LotLife::buildOutfit(const ts2::sim::SimObject& sim,
-                                                                 const ts2::sim::World::OutfitBuildRequest& request) {
-    const std::int16_t neighbor = sim_->world().neighborIdOf(sim);
-    const auto file = neighbor != 0 ? sim_->characterFile(neighbor) : std::nullopt;
-    if (!file) {
-        return std::nullopt;
-    }
-    try {
-        auto working = outfitData_.find(neighbor);
-        if (working == outfitData_.end() || request.renew) {
-            const ts2::scene::Assets::CharacterInUse inUse(assets_, *file);
-            const auto aged = agedData_.find(neighbor);
-            auto own = aged != agedData_.end() ? std::optional(aged->second) : ts2::scene::characterAgeData(assets_, *file);
-            if (!own) {
-                return std::nullopt;
-            }
-            working = outfitData_.insert_or_assign(neighbor, std::move(*own)).first;
-        }
-        ts2::scene::AgeData& data = working->second;
-        ts2::sim::World::BuiltOutfit built;
-        if (request.sourceGuid != 0 && (request.sourceGuid & 0x7FFF) == request.sourceGuid) {
-            ts2::diag::warnOnce("Change Outfit: an outfit numbered in the neighborhood's age data isn't worn yet (PR-63)");
-        } else if (request.sourceGuid != 0) {
-            const auto outfits = outfitAgeData(request.sourceGuid);
-            const std::uint32_t age = ts2::propset::number(data.properties, "age");
-            const std::uint32_t gender = ts2::propset::number(data.properties, "gender");
-            if (const auto* outfit = ts2::scene::pickOutfit(outfits, age, gender, sim.definition.guid())) {
-                for (const auto& problem : ts2::scene::putOn(data, *outfit)) {
-                    ts2::diag::warnOnce(std::format("Change Outfit: {}", problem));
-                }
-                built.sourceFound = true;
-            }
-        }
-        if (request.commit) {
-            agedData_[neighbor] = data;
-        }
-        for (const auto& [key, parts] : data.lists) {
-            if (!parts.empty()) {
-                built.lists.insert(key);
-            }
-        }
-        return built;
-    } catch (const std::exception& ex) {
-        ts2::diag::warning(std::format("Sim {}: its outfit can't be built: {}", sim.id, ex.what()));
-        return std::nullopt;
-    }
-}
-
-void LotLife::dressFromSource(std::int16_t id) {
-    constexpr std::size_t kCurrentOutfit = 0x08, kDefaultSource = 0x69, kSourceGuidLow = 0x77, kSourceGuidHigh = 0x78;
-    auto* sim = sim_->world().find(id);
-    if (sim == nullptr || !sim->isPerson() || sim->personData.size() <= kSourceGuidHigh) {
-        return;
-    }
-    const std::uint32_t guid = static_cast<std::uint16_t>(sim->personData[kSourceGuidLow]) |
-                               static_cast<std::uint32_t>(static_cast<std::uint16_t>(sim->personData[kSourceGuidHigh])) << 16;
-    if (guid == 0) {
-        if (sim->personData[kDefaultSource] != 0) {
-            ts2::diag::warnOnce("a Sim's default outfit source (person data 0x69) isn't worn yet (PR-63)");
-        }
-        return;
-    }
-    if (const auto built = buildOutfit(*sim, {guid, false, false}); built && built->sourceFound) {
-        sim->outfitChange = ts2::sim::SimObject::OutfitChange{sim->personData[kCurrentOutfit], guid};
-    }
-}
-
-// A Sim that Age made older gets the new age's body at once, built from the age data Age made, on
-// the new age's skeleton, wearing its current outfit. Its animations stop, as the game stops them.
-void LotLife::buildNewAges(ts2::scene::Scene& scene) {
-    constexpr std::size_t kCurrentOutfit = 0x08;
-    auto& world = sim_->world();
-    for (auto& actor : scene.actors) {
-        auto* sim = actor.object != 0 && actor.object <= static_cast<std::uint32_t>(INT16_MAX)
-                        ? world.find(static_cast<std::int16_t>(actor.object))
-                        : nullptr;
-        if (sim == nullptr || !sim->newAge) {
-            continue;
-        }
-        sim->newAge.reset();
-        const std::int16_t neighbor = world.neighborIdOf(*sim);
-        const auto file = neighbor != 0 ? sim_->characterFile(neighbor) : std::nullopt;
-        const auto made = agedData_.find(neighbor);
-        if (!file || !actor.rig || made == agedData_.end()) {
-            continue;
-        }
-        try {
-            const ts2::scene::Assets::CharacterInUse inUse(assets_, *file);
-            const auto category = ts2::sim::SimObject::OutfitChange{sim->personData[kCurrentOutfit], std::nullopt}.categoryFlag();
-            const ts2::scene::SimLook look = ts2::scene::simLook(assets_, made->second, category);
-            for (const auto& problem : look.problems) {
-                ts2::diag::warnOnce(std::format("Sim {}: {}", sim->id, problem));
-            }
-            if (look.parts.empty()) {
-                continue;
-            }
-            ts2::scene::Actor built = objectMaterials_.sim(look, std::to_string(sim->id), actor.place, scene.groundLevel + sim->level - 1,
-                                                           ts2::scene::standingIdle(assets_, look.age), scene, freeSimInstances_);
-            if (!built.rig) {
-                for (const auto& s : built.skinned) {
-                    scene.instances[s.instance] = ts2::scene::Instance{};
-                    changedInstances_.push_back(s.instance);
-                    freeSimInstances_.push_back(s.instance);
-                }
-                continue;
-            }
-            for (const auto& s : actor.skinned) {
-                scene.instances[s.instance] = ts2::scene::Instance{};
-                changedInstances_.push_back(s.instance);
-                freeSimInstances_.push_back(s.instance);
-            }
-            // What the Sim holds stays at the same bone of the new skeleton.
-            for (auto& h : actor.held) {
-                const auto& nodes = actor.rig->nodes;
-                h.node = h.node >= 0 && static_cast<std::size_t>(h.node) < nodes.size() ? built.rig->find(nodes[static_cast<std::size_t>(h.node)].name)
-                                                                                         : -1;
-            }
-            actor.age = built.age;
-            actor.gender = built.gender;
-            actor.rig = built.rig;
-            actor.animation = built.animation;
-            actor.clips.clear();
-            actor.skinned = std::move(built.skinned);
-            actor.basePose = ts2::scene::standingPose(assets_, look.age);
-            actor.slotNodes.clear();
-            for (const auto& bone : ts2::scene::simSlotBones(assets_, *file)) {
-                actor.slotNodes.push_back(!bone.empty() ? actor.rig->find(bone) : -1);
-            }
-            actor.targetNodes.clear();
-            for (const auto& bone : ts2::scene::simSlotBones(assets_, *file, true)) {
-                actor.targetNodes.push_back(!bone.empty() ? actor.rig->find(bone) : -1);
-            }
-            const auto created = createdSims_.find(sim->id);
-            if (created != createdSims_.end()) {
-                created->second.clear();
-            }
-            for (const auto& s : actor.skinned) {
-                changedInstances_.push_back(s.instance);
-                if (created != createdSims_.end()) {
-                    created->second.push_back(s.instance);
-                }
-            }
-            ownAnimations_.erase(actor.object);
-        } catch (const std::exception& ex) {
-            ts2::diag::warning(std::format("Sim {} keeps its body: its new age can't be built: {}", sim->id, ex.what()));
-        }
-    }
-}
-
-// A Sim that Change Outfit dressed wears the new outfit at once. Only its parts change: its rig,
-// clips and place stay, as the game keeps the skeleton and the animations playing. The outfit comes
-// from the Sim's working copy of its age data, else its character file, so a Sim without one keeps
-// what it wears.
-void LotLife::wearChangedOutfits(ts2::scene::Scene& scene) {
-    auto& world = sim_->world();
-    const auto sameRig = [](const ts2::scene::Rig& a, const ts2::scene::Rig& b) {
-        return a.stretch == b.stretch && std::ranges::equal(a.nodes, b.nodes, [](const auto& x, const auto& y) {
-                   return x.name == y.name && x.parent == y.parent;
-               });
-    };
-    for (auto& actor : scene.actors) {
-        auto* sim = actor.object != 0 && actor.object <= static_cast<std::uint32_t>(INT16_MAX)
-                        ? world.find(static_cast<std::int16_t>(actor.object))
-                        : nullptr;
-        if (sim == nullptr || !sim->outfitChange) {
-            continue;
-        }
-        const std::uint32_t category = sim->outfitChange->categoryFlag();
-        sim->outfitChange.reset();
-        const std::int16_t neighbor = world.neighborIdOf(*sim);
-        const auto file = neighbor != 0 ? sim_->characterFile(neighbor) : std::nullopt;
-        if (!file || !actor.rig) {
-            ts2::diag::warnOnce("Change Outfit: a Sim without a character file keeps what it wears");
-            continue;
-        }
-        try {
-            const ts2::scene::Assets::CharacterInUse inUse(assets_, *file);
-            const auto working = outfitData_.find(neighbor);
-            const auto aged = agedData_.find(neighbor);
-            const ts2::scene::SimLook look = working != outfitData_.end() ? ts2::scene::simLook(assets_, working->second, category)
-                                             : aged != agedData_.end()    ? ts2::scene::simLook(assets_, aged->second, category)
-                                                                          : ts2::scene::simLook(assets_, *file, category);
-            for (const auto& problem : look.problems) {
-                ts2::diag::warnOnce(std::format("Sim {}: {}", sim->id, problem));
-            }
-            if (look.parts.empty()) {
-                continue;
-            }
-            ts2::scene::Actor dressed = objectMaterials_.sim(look, std::to_string(sim->id), actor.place, scene.groundLevel + sim->level - 1,
-                                                             std::string(), scene, freeSimInstances_);
-            // The parts' skin follows the new rig's nodes, so they fit only a rig made the same way.
-            const bool fits = dressed.rig && sameRig(*dressed.rig, *actor.rig);
-            auto& gone = fits ? actor.skinned : dressed.skinned;
-            for (const auto& s : gone) {
-                scene.instances[s.instance] = ts2::scene::Instance{};
-                changedInstances_.push_back(s.instance);
-                freeSimInstances_.push_back(s.instance);
-            }
-            if (!fits) {
-                ts2::diag::warnOnce("Change Outfit: an outfit on another skeleton isn't worn yet (PR-62)");
-                continue;
-            }
-            actor.skinned = std::move(dressed.skinned);
-            // The new parts set their joints on the skeleton as it is. Joints they don't name keep
-            // what the outfit before gave them, as the game keeps its skeleton through a change.
-            auto rig = std::make_shared<ts2::scene::Rig>(*actor.rig);
-            ts2::scene::wearPartJoints(*rig, look);
-            actor.rig = std::move(rig);
-            const auto created = createdSims_.find(sim->id);
-            if (created != createdSims_.end()) {
-                created->second.clear();
-            }
-            for (const auto& s : actor.skinned) {
-                changedInstances_.push_back(s.instance);
-                if (created != createdSims_.end()) {
-                    created->second.push_back(s.instance);
-                }
-            }
-            // The new parts are lit where the Sim stands as it is posed next.
-            ownAnimations_[actor.object].litLevel = -1;
-        } catch (const std::exception& ex) {
-            ts2::diag::warning(std::format("Sim {} keeps what it wears: the outfit can't be read: {}", sim->id, ex.what()));
-        }
-    }
-}
-
-// Objects scripts create after the lot was loaded are drawn as the lot draws its objects: their model
-// (see modelName) placed by placeObjects, which finds them moved from nowhere. One without a model gets
-// an instance drawing nothing, so that RayTrace can still start or end on it: the game's point on an
-// object is the middle of its model's bounds, which always hold its origin, so on a model with nothing
-// in it the point is where the object stands. A removed one's instance draws nothing again and goes
-// to the next object created. New objects take the lowest free id, so they are looked for among all
-// ids, and an id now held by an object of another type than the one drawn there is drawn anew.
-// Removed Sims are taken out only with `removeSims`: the frame's pose finds Sims by their place in the
-// actor list and their instances by number, so a ray query between frames leaves both as they are.
-void LotLife::addCreatedObjects(ts2::scene::Scene& scene, bool removeSims) {
-    // A lot that keeps creating objects can't grow the scene past this.
-    constexpr std::size_t kMaxCreated = 4096;
-    constexpr std::size_t kMaxSlots = 16;  // as the lot scene reads them
-    auto& world = sim_->world();
-    // What is drawn for `id` is taken out: a created object's instance goes to the next one created,
-    // a lot object's draws nothing from now on.
-    const auto undraw = [&](std::int16_t id) {
-        const auto created = created_.find(id);
-        std::vector<std::size_t> indices;
-        for (const auto& p : scene.placedObjects) {
-            if (p.object == static_cast<std::uint32_t>(id)) {
-                indices.push_back(p.instance);
-            }
-        }
-        for (const std::size_t index : indices) {
-            if (created != created_.end()) {
-                scene.instances[index] = ts2::scene::Instance{};
-                freeInstances_.push_back(index);
-            } else {
-                scene.instances[index].transform.m.fill(0.0f);
-            }
-            for (auto& actor : scene.actors) {
-                std::erase_if(actor.held, [&](const ts2::scene::Actor::Held& h) { return h.instance == index; });
-            }
-            std::erase_if(moved_, [&](const auto& m) { return m.first == index; });
-            heldShadows_.erase(index);
-            unshaded_.erase(index);
-            changedInstances_.push_back(index);
-        }
-        std::erase_if(scene.objectActors, [&](const ts2::scene::Actor& a) { return a.object == static_cast<std::uint32_t>(id); });
-        std::erase_if(scene.placedObjects, [&](const ts2::scene::PlacedObject& p) { return p.object == static_cast<std::uint32_t>(id); });
-        if (static_cast<std::size_t>(id) < objectPlaces_.size()) {
-            objectPlaces_[static_cast<std::size_t>(id)] = {};
-        }
-        drawnTypes_.erase(id);
-        // What was known of the old object's model goes with it, so the next one at this id starts afresh.
-        unskinned_.erase(static_cast<std::uint32_t>(id));
-        objectMaterials_.showAgain(id);
-        if (created != created_.end()) {
-            created_.erase(created);
-        }
-    };
-    // Objects only change this way when the world's objects version does, and this runs every frame.
-    const bool objectsSame = createdFor_ == world.objectsVersion();
-    if (!objectsSame) {
-        std::vector<std::int16_t> gone;
-        for (const auto& [id, index] : created_) {
-            const auto* object = world.find(id);
-            if (object == nullptr || object->removed) {
-                gone.push_back(id);
-            }
-        }
-        for (const std::int16_t id : gone) {
-            undraw(id);
-        }
-    }
-    for (auto it = createdSims_.begin(); it != createdSims_.end();) {
-        const auto* sim = world.find(it->first);
-        if (!removeSims || (sim != nullptr && !sim->removed)) {
-            ++it;
-            continue;
-        }
-        // Its instances draw nothing from now on and go to the next Sim drawn.
-        for (const std::size_t index : it->second) {
-            scene.instances[index] = ts2::scene::Instance{};
-            changedInstances_.push_back(index);
-            freeSimInstances_.push_back(index);
-        }
-        std::erase_if(scene.actors, [&](const ts2::scene::Actor& a) { return a.object == static_cast<std::uint32_t>(it->first); });
-        triedSims_.erase(it->first);
-        it = createdSims_.erase(it);
-    }
-    // A Sim the lot was loaded with goes the same way once removed, so a new Sim given its id is drawn
-    // as itself.
-    std::erase_if(scene.actors, [&](const ts2::scene::Actor& a) {
-        if (!removeSims || a.object == 0 || a.object > static_cast<std::uint32_t>(INT16_MAX)) {
-            return false;
-        }
-        const auto* sim = world.findIncludingRemoved(static_cast<std::int16_t>(a.object));
-        if (sim != nullptr && (!sim->removed || sim->keptUntilUnload)) {
-            return false;
-        }
-        for (const auto& s : a.skinned) {
-            if (s.instance < scene.instances.size()) {
-                scene.instances[s.instance] = ts2::scene::Instance{};
-                changedInstances_.push_back(s.instance);
-                freeSimInstances_.push_back(s.instance);
-            }
-        }
-        triedSims_.erase(static_cast<std::int16_t>(a.object));
-        return true;
-    });
-    // New objects take the lowest free id, so Sims are looked for among all of them. Each is tried once.
-    world.nextAfter(0, [&](const ts2::sim::SimObject& o) {
-        // A Sim the loader is building is drawn once it is built.
-        if (!o.isPerson() || o.removed || simLoading(o) || !triedSims_.insert(o.id).second ||
-            std::any_of(scene.actors.begin(), scene.actors.end(), [&](const ts2::scene::Actor& a) { return a.object == static_cast<std::uint32_t>(o.id); })) {
-            return false;
-        }
-        try {
-            if (!addCreatedSim(scene, o)) {
-                ts2::diag::warning(std::format("Sim {} (neighbor {}) is not drawn: it has no look yet", o.id, world.neighborIdOf(o)));
-            } else {
-                dressFromSource(o.id);
-            }
-        } catch (const std::exception& ex) {
-            ts2::diag::warning(std::format("Sim {} is not drawn: its look can't be read: {}", o.id, ex.what()));
-        }
-        return false;
-    });
-    if (objectsSame) {
-        return;
-    }
-    world.nextAfter(0, [&](const ts2::sim::SimObject& o) {
-        if (o.isPerson() || o.removed) {
-            return false;
-        }
-        if (const auto drawn = drawnTypes_.find(o.id); drawn != drawnTypes_.end()) {
-            if (drawn->second == o.definition.guid()) {
-                return false;
-            }
-            undraw(o.id);
-        }
-        if (created_.size() >= kMaxCreated) {
-            ts2::diag::warning(std::format("object {} is not drawn: {} created objects already are", o.id, kMaxCreated));
-            return false;
-        }
-        const std::string model = modelName(assets_, o);
-        ts2::scene::Instance instance;
-        instance.mesh = model.empty() ? -1 : objectMaterials_.model(model, scene);
-        instance.name = std::format("{} {}", o.id, model);
-        instance.part = ts2::scene::Part::Object;
-        instance.object = static_cast<std::uint32_t>(o.id);
-        instance.transform.m.fill(0.0f);
-        // Its shadow is what it asks for until it is first placed (see shadeCreated).
-        instance.shadowFacts = shadowFacts(o, model, instance.mesh, scene);
-        instance.shadow = ts2::scene::objectshadow::requested(instance.shadowFacts);
-        std::size_t index = scene.instances.size();
-        if (!freeInstances_.empty()) {
-            index = freeInstances_.back();
-            freeInstances_.pop_back();
-            scene.instances[index] = std::move(instance);
-        } else {
-            scene.instances.push_back(std::move(instance));
-        }
-        ts2::scene::PlacedObject placed{static_cast<std::uint32_t>(o.id), index, lotFrame_, {}};
-        placed.model = model;
-        for (std::size_t slot = 0; slot < kMaxSlots && !model.empty(); ++slot) {
-            const std::string bone = assets_.slotBone(o.definition.guid(), slot);
-            const ts2::scene::Transform* at = bone.empty() ? nullptr : objectMaterials_.bone(model, bone);
-            placed.slots.push_back(at ? std::optional<ts2::scene::Transform>(*at) : std::nullopt);
-        }
-        while (!placed.slots.empty() && !placed.slots.back()) {
-            placed.slots.pop_back();
-        }
-        scene.placedObjects.push_back(std::move(placed));
-        created_[o.id] = index;
-        unshaded_.insert(index);
-        drawnTypes_[o.id] = o.definition.guid();
-        // Never placed yet, so placeObjects places it.
-        const auto slot = static_cast<std::size_t>(o.id);
-        if (slot >= objectPlaces_.size()) {
-            objectPlaces_.resize(slot + 1);
-        }
-        objectPlaces_[slot] = {ObjectPlace{.gone = true}, true};
-        changedInstances_.push_back(index);
-        return false;
-    });
-    createdFor_ = world.objectsVersion();
 }
 
 } // namespace app

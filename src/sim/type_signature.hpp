@@ -7,12 +7,9 @@
 
 namespace ts2::sim {
 
-// What the game saves with a lot about an object type's code, to notice on load that it changed (a
-// patch, an expansion or a mod): objects of a changed type are reset instead of resuming.
-//
-// The signature of tree `tree` as run by objects of `objectGroup`: the tree's version in the high
-// 16 bits, plus the sum of the versions of the tree and every tree it can call, each counted once.
-// Missing trees count nothing. 0 for tree 0 (none).
+// A lot saves these to notice on load that an object type's code changed (a patch, expansion or mod).
+// The signature of `tree` run by `objectGroup`: its version in the high 16 bits, plus the versions of
+// it and every tree it can call, each once. Missing trees count nothing, and tree 0 gives 0.
 std::uint32_t treeSignature(CodeSource& code, std::uint32_t objectGroup, std::uint16_t tree);
 
 // Whether an installed object type differs from what a lot saved about it (its entry in the lot's

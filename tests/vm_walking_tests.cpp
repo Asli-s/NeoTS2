@@ -1057,13 +1057,11 @@ struct BlockedWalk {
     ts2::sim::RouteBlock::Step step() const { return a->walking ? a->walking->block.step : ts2::sim::RouteBlock::Step::None; }
 };
 
-// A Sim standing in the way is asked to move: a Go Here destination is made where it stands, with
-// the sidestep slot (the asker's goal is far from it), and the destination's "Move" is queued on it
-// with the asker's priority less 1. The block ends the asker's walk where it stands. The asker
-// runs "CT - Route Ask To Move Animation" with it as stack object, then "CT - Route Waiting Animation"
-// once a tick, given the count so far and the distance left to 1.25 tiles in 24ths. The wait ends
-// when the blocker's route in "Move" ends, when it goes farther than 1.25 tiles, or after 126 ticks
-// (420 when its object data 8 has bit 0x40). Then, still waiting on it, the asker doesn't ask again but takes the last resort.
+// A standing blocker is asked to move: a Go Here destination with the sidestep slot is made where it
+// stands, and its "Move" is queued on it at the asker's priority less 1. The asker stops and runs the
+// ask and waiting trees (see askToMove) until the blocker's "Move" route ends, it is over 1.25 tiles
+// away, or 126 ticks pass (420 with its object data 8 bit 0x40). Still waiting on it, the asker then
+// takes the last resort instead of asking again.
 void blockedRoutesAskAStandingSimToMove() {
     using Step = ts2::sim::RouteBlock::Step;
     enum class End { RouteEnds, MovesAway, TimeUp, LongTimeUp };

@@ -595,12 +595,9 @@ public:
     struct WalkStep {
         enum class Kind { Done, Wait, PreRoute, PostRoute, Stair, GoalCheck, RouteTree } kind = Kind::Done;
         bool result = false;
-        // For PreRoute and PostRoute: my pre- or post-route tree and what it is given, run on my stack
-        // before the instruction runs again. For Stair: a stair's Portal tree, run the same way with the
-        // stair's entry part as stack object and the stair's code. For GoalCheck: the goal check of
-        // the object my walking tree runs on, with that tree's stack object and the object's code. For
-        // RouteTree: one of the trees a blocked or failed route runs (see RouteBlock), the same way with
-        // its own stack object.
+        // The tree run on my stack before the instruction runs again: my pre- or post-route tree, a
+        // stair's Portal tree (its entry part as stack object), the walking tree's object's goal check
+        // (that tree's stack object), or a blocked or failed route's tree (see RouteBlock).
         std::uint32_t group = 0;
         std::uint16_t instance = 0;
         std::shared_ptr<const bhav::Behavior> code;
@@ -660,6 +657,9 @@ public:
     std::int16_t& neighborPersonData(std::uint16_t data);
     void write(std::uint8_t owner, std::uint16_t data, Frame& f, std::int16_t value);
     bool expression(const bhav::Instruction& in, Frame& f);
+    void showGraphic(SimObject& object);
+    void playHandOffClip(const Reaching& reach);
+    void runHandOffTrees(const Reaching& reach, bool moved);
     void assign32(const bhav::ExpressionOperands& x, Frame& f);
     bool arrayOperation(const bhav::Instruction& in, Frame& f);
 
@@ -711,6 +711,7 @@ public:
     std::optional<CreateSpot> tileInFront(const SimObject* ref);
     bool createObject(const bhav::Instruction& in, Frame& f);
     bool createParts(const ObjectType& master, std::uint8_t placement, std::uint8_t flags);
+    void stampBirth(SimObject& created) const;
     void passToMain(SimObject& created, std::uint8_t flags);
     bool breakPoint(const bhav::Instruction& in, Frame& f);
     bool randomNumber(const bhav::Instruction& in, Frame& f);
@@ -811,6 +812,31 @@ public:
     // Routing, walking and turning, distances, directions and Ray Trace (vm_routing.cpp).
     bool rayTrace(const bhav::Instruction& in, Frame& f);
     WalkStep goToRoutingSlot(const bhav::Instruction& in, Frame& f, const slot::Entry* relative = nullptr);
+    // Go To Routing Slot's steps, in the order a route runs them.
+    struct SlotPlan {
+        SlotRoute route;
+        std::int16_t owner = 0, named = 0, value = 0;  // the slot's owner, the slot as named and its number
+        bool global = false;
+        bool feedback = true;  // the route runs the failure feedback tree when it fails
+    };
+    // The instruction a route runs for, with the stack frame it waits in.
+    struct SlotRouteCall {
+        const bhav::Instruction& in;
+        Frame& f;
+        const slot::Entry* relative;
+        std::size_t frame;
+        std::optional<bool> noRoute;  // set when the last plan found no route: the route's failure feedback flag
+    };
+    std::optional<WalkStep> postRouteReturned(SimObject& sim, const Frame& f, std::size_t frame);
+    std::optional<SlotPlan> planSlotRoute(SimObject& sim, SlotRouteCall& call, const Walking* again);
+    WalkStep slotRouteMissing(SimObject& sim, Walking& walk, const SlotRouteCall& call);
+    std::optional<WalkStep> startSlotRoute(SimObject& sim, SlotRouteCall& call, bool nested);
+    WalkStep setOffOnRoute(SimObject& sim, SlotRouteCall& call);
+    WalkStep setOffAgain(SimObject& sim, Walking& walk, double now);
+    WalkStep planRouteAgain(SimObject& sim, Walking& walk, SlotRouteCall& call, double now);
+    std::optional<WalkStep> afterStair(SimObject& sim, Walking& walk, SlotRouteCall& call, double now);
+    std::optional<WalkStep> walkRouteStep(SimObject& sim, Walking& walk, SlotRouteCall& call, double now);
+    WalkStep arriveOnRoute(SimObject& sim, Walking& walk, const Frame& f, std::size_t frame);
     WalkStep climbStair(SimObject& sim, Walking& walk);
     WalkStep goToRelativePosition(const bhav::Instruction& in, Frame& f);
     bool walkTo(SimObject& sim, Walking& walk, double now, std::int16_t& blocker);
@@ -825,6 +851,8 @@ public:
     BlockedStep blockedAnimation(SimObject& sim, Walking& walk);
     BlockedStep askToMove(SimObject& sim, Walking& walk, int depth);
     BlockedStep lastResort(SimObject& sim, Walking& walk);
+    // A blocked walk's next move for Go To Routing Slot: the step, or the route planned again.
+    WalkStep nextAfterBlock(SimObject& sim, Walking& walk, SlotRouteCall& call, BlockedStep step, double now);
     BlockedStep routeFailed(SimObject& sim, Walking& walk, std::int16_t reason, std::int16_t object);
     // A route that ends while it waits on a Sim it asked to move cancels the interaction it gave
     // that Sim, as the game's router does whenever it drops a route. dropWalk ends my walk and every

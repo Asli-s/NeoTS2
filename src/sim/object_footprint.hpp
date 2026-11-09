@@ -10,15 +10,13 @@
 
 namespace ts2::sim {
 
-// Where an object stops Sims, as rectangles in route coordinates. Route coordinates mirror the
-// model's: route x is model x, route y is model -y.
-//
-// What an object's footprint is made from:
-//  - a square: object data 8 bit 0x80 (stair pieces, flower beds). It is `squareSize` tiles wide
+// Where an object stops Sims, as rectangles in route coordinates (route x is model x, route y is
+// model -y). The footprint is, in order of choice:
+//  - a square with object data 8 bit 0x80 (stair pieces, flower beds), `squareSize` tiles wide
 //    (OBJD field 0x43 in 1/16 tile, 0 for a whole tile), less the OBJD 0x4D insets.
-//  - otherwise its model's "footprint" data list: one list per graphic (object data 9), in it a
-//    16x16 bit mask for each tile the model covers, named "(x,y)".
-//  - otherwise the model's extent, cut to the tile.
+//  - the model's "footprint" data list for its graphic (object data 9): a 16x16 bit mask per tile
+//    covered, named "(x,y)".
+//  - the model's extent, cut to the tile.
 struct FootprintShape {
     bool square = false;
     float squareSize = 1;

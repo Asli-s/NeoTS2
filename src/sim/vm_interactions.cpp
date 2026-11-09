@@ -25,15 +25,14 @@ void Execution::offerAction(const std::string& name, std::uint16_t flags, const 
     offered->push_back(std::move(line));
 }
 
-// Add/Change the Action String: the name and icon the queue shows for my running interaction,
-// or for the candidate a check tree checks (see Vm::runCheck). Always true.
-// Byte 9 zero sets the text: entry [bytes 14-15] (byte 2 bit 4: [temp 0]), counted from 1, of string table
-// 0x12E, from the code owner's group, then its semi-global group, then the global one (byte 2
-// bit 2: only the global one, bit 3: only the semi-global one). A missing text is an error.
-// Otherwise it sets the icon: of the object (owner byte 11, data bytes 12-13), or with byte 2
-// bit 5 of the object type with GUID bytes 5-8 (bit 6: temps 2 and 3), and its index (byte 10,
-// bit 7: temp 1). Byte 3 bit 4 (text) and bit 5 (icon) set them on the running sub-interaction
-// when there is one. The text's tokens are not used.
+// Add/Change the Action String: the queue's name and icon for my running interaction, or for the
+// candidate a check tree checks (see Vm::runCheck). Always true.
+// Byte 9 zero sets the text: entry bytes 14-15 (byte 2 bit 4: temp 0), from 1, of string table 0x12E
+// in the code owner's group, its semi-global group, then global (byte 2 bit 2: global only, bit 3:
+// semi-global only). A missing text is an error. Otherwise it sets the icon: of the object (owner byte
+// 11, data bytes 12-13), or with byte 2 bit 5 of the type with GUID bytes 5-8 (bit 6: temps 2 and 3),
+// index byte 10 (bit 7: temp 1). Byte 3 bits 4 (text) and 5 (icon) set them on a running
+// sub-interaction. The text's tokens are not used.
 bool Execution::actionString(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     SimObject& self = me();
@@ -409,19 +408,16 @@ void Execution::dropLinked(QueuedInteraction& ended, const SimObject* skip) {
 //   bytes 0-1  the parameter that counts down the ticks left to wait
 //   bytes 2-3  non-zero: a waiting interaction may start
 //   byte 4     bit 0: don't wait, just start the first waiting sub-interaction if there is one
-// The game keeps sub-interactions (interaction table flag 0x8000) in a queue of their own. Here they
-// wait in the one queue, marked nested, and each branch takes the first of its own kind.
-// Waiting: with nothing pending (see interruptPending) the count goes down by one each tick and
-// the primitive is true at 0. With something pending it sets bit 0x40 of my object data 8 and
-// starts the first waiting interaction, or is true when none may start or none waits: that is
-// how a cancelled interaction's loop learns to finish. A started interaction runs its action
-// tree on my stack with its object as stack object, and the count becomes 0. When it ends the
-// primitive runs again, so a continuation pushed meanwhile starts at once and anything else waits
-// for the next call.
-// Each interaction leaves the queue when its turn comes and is tested again (see passesStartCheck).
-// One whose object is gone or which fails the test is dropped. Failing the test also drops the
-// interactions linked with it and runs its object's Queue Skipped function. Then a sub-interaction
-// is true, and an interaction waits a tick.
+// Sub-interactions (interaction table flag 0x8000), a queue of their own in the game, wait here in
+// the one queue marked nested.
+// With nothing pending (see interruptPending) the count drops each tick and it is true at 0. With
+// something pending it sets object data 8 bit 0x40 and starts the first waiting interaction, or is
+// true when none may start or waits, which tells a cancelled loop to finish. A started interaction's
+// action tree runs on my stack with its object as stack object, and the count becomes 0. Afterwards
+// the primitive runs again, so only a continuation pushed meanwhile starts at once.
+// An interaction is tested again as it leaves the queue (see passesStartCheck). A gone object or a
+// failed test drops it, and a failed test also drops its linked interactions and runs Queue Skipped.
+// Then a sub-interaction is true, and an interaction waits a tick.
 Execution::IdleResult Execution::idleForInput(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     SimObject& sim = me();
@@ -488,9 +484,9 @@ Execution::IdleResult Execution::idleForInput(const bhav::Instruction& in, Frame
     if (!mayStart || first == sim.queue.end()) {
         return IdleResult{};
     }
-    // Run again after an interaction it started, it starts only a continuation, and only while
-    // the Sim carries nothing. The game also checks a flag that a few social pushes set (Push
-    // Interaction byte 14 bit 4) on an interaction the Sim keeps, which one is not known yet.
+    // Run again after an interaction it started, it starts only a continuation, and only while the
+    // Sim carries nothing. The game also checks a flag some social pushes set (Push Interaction byte
+    // 14 bit 4), on an interaction not known yet.
     if (f.idleStarted && (!first->continuation || sim.semiAttributes[kCarryFlagsSemiAttribute] != 0)) {
         return IdleResult{};
     }
@@ -509,7 +505,7 @@ Execution::IdleResult Execution::idleForInput(const bhav::Instruction& in, Frame
 //                bytes 7-8, 0x08 the amount is temp 2 x 10000 + temp 3
 //   byte 6       the kind of transaction, 0-10 (not kept)
 //   bytes 7-8    the multiplier (0 counts as 1)
-// False when the family can't pay. Otherwise the funds change (unless only testing) and it is true.
+// False when the family can't pay, else true and the funds change unless only testing.
 bool Execution::alterBudget(const bhav::Instruction& in, Frame& f) {
     constexpr std::uint8_t kTestOnly = 0x01, kIncome = 0x02, kTimesTemp2 = 0x04, kFromTemps = 0x08;
     constexpr std::uint8_t kLastTransaction = 10;
@@ -597,19 +593,18 @@ void Execution::runPushedAtOnce(SimObject& sim, const SimObject& object, const Q
 //   byte 0       interaction number (byte 3 bit 4: from owner byte 5, data bytes 6-7)
 //   byte 1       the param (byte 3 bit 1: the local) holding the object
 //   byte 2       priority: 0 my own ("Priority" person data), 1 high (100), 2 low (20), 3 medium (50)
-//   byte 3       bit 0: the Sim it is with (its queue icon) is the object in local [byte 4]. With
-//                no such object and no icon GUID (byte 14 bit 2) the queue leaves it out. Bit 3: it is
-//                autonomous (person data 0xA6 while it runs). Bit 2 makes it a continuation,
-//                which isn't held back by the queue limit. Bit 6 links it with the interaction
-//                whose link number is the value of owner byte 8, data bytes 9-10. Bit 7 writes its
-//                own link number to owner byte 11, data bytes 12-13 (see linked_interactions.hpp)
-//   byte 14     bit 0: pass my parameters as its arguments. Bit 1: take the object and the number
-//                from autonomy's choice (my person data 0x35, my object data 0x14). Bit 2: its
-//                queue icon is the object type with GUID temp 5 << 16 | temp 4. Bit 3: that
-//                icon's index is temp 6 instead of byte 15
-// On failure my object data 0x34 says why: 1 no priority, 2 the test tree said no, 3 the queue
-// is full, 4 the sub-queue is full, 6 a sub-interaction the Sim can't take now or a line with flag
-// 0x4 that couldn't run at once. Byte 3 bit 5 and byte 14 bit 4 are not implemented.
+//   byte 3       bit 0: the Sim it is with (its queue icon) is the object in local byte 4, and the
+//                queue leaves it out without one or an icon GUID (byte 14 bit 2). Bit 2: a
+//                continuation, not held back by the queue limit. Bit 3: autonomous (person data
+//                0xA6 while it runs). Bit 6: linked with the link number in owner byte 8, data
+//                bytes 9-10. Bit 7: its link number goes to owner byte 11, data bytes 12-13
+//                (see linked_interactions.hpp)
+//   byte 14      bit 0: my parameters are its arguments. Bit 1: object and number from autonomy's
+//                choice (person data 0x35, object data 0x14). Bit 2: the queue icon is the type
+//                with GUID temp 5 << 16 | temp 4. Bit 3: the icon's index is temp 6, not byte 15
+// On failure my object data 0x34 says why: 1 no priority, 2 the test tree said no, 3 queue full,
+// 4 sub-queue full, 6 a sub-interaction the Sim can't take now or a flag 0x4 line that couldn't run
+// at once. Byte 3 bit 5 and byte 14 bit 4 are not implemented.
 bool Execution::pushInteraction(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     SimObject& self = me();
