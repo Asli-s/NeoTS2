@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -136,8 +137,11 @@ Container parseContainer(std::span<const std::uint8_t> data);
 // references and light references, each with a local transform. Shapes are drawn and lights shine
 // at their reference's place in the tree (a light is known by its node's name). Nodes are indexed
 // by block, and other blocks are kept as empty nodes.
+struct DataValue;
 struct SceneNode {
-    enum class Kind { Other, Root, Transform, ShapeRef, LightRef };
+    // ModelRef: a resource node inside the tree, naming another model ("<name>_cres") drawn at its
+    // place. DataList: a data list extension (see DataValue).
+    enum class Kind { Other, Root, Transform, ShapeRef, LightRef, ModelRef, DataList };
     Kind kind = Kind::Other;
     std::string name;
     std::vector<std::uint32_t> children;  // block indices
@@ -145,7 +149,7 @@ struct SceneNode {
     std::array<float, 4> rotation{0, 0, 0, 1};  // quaternion x, y, z, w
     std::int32_t joint = -1;                    // a transform node's joint index, -1 for none
     std::vector<std::uint32_t> shapeLinks;     // indices into the container's links
-    std::vector<std::uint32_t> extensions;     // a transform node's extension blocks (block indices)
+    std::vector<std::uint32_t> extensions;     // a transform or model node's extension blocks (block indices)
     // A bone data extension block (cBoneDataExtension): three words, a weight and a rotation.
     struct BoneData {
         std::array<std::uint32_t, 3> words{};
@@ -153,6 +157,7 @@ struct SceneNode {
         std::array<float, 4> rotation{0, 0, 0, 1};  // quaternion x, y, z, w
     };
     std::optional<BoneData> boneData;
+    std::shared_ptr<const DataValue> dataList;  // a DataList node's list
 };
 struct ResourceNode {
     Container container;
@@ -245,6 +250,9 @@ struct LightResource {
     float coneAngle = 0, conePenumbra = 0;  // spot lights, in radians
 };
 LightResource parseLight(std::span<const std::uint8_t> data);
+
+// The bytes a texture level of this size and format takes in the file. Throws for an unknown format.
+std::size_t textureBytes(std::uint32_t width, std::uint32_t height, std::uint32_t format);
 
 // Decodes a mip level of the given size and format to 8-bit RGBA.
 std::vector<std::uint8_t> decodeRgba(std::span<const std::uint8_t> data, std::uint32_t width, std::uint32_t height,

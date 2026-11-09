@@ -19,6 +19,10 @@ namespace ts2::render::render_detail {
 
 // How open each pixel is, for ambient occlusion.
 constexpr SDL_GPUTextureFormat kOcclusionFormat = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
+constexpr SDL_GPUTextureFormat kHalfDepthFormat = SDL_GPU_TEXTUREFORMAT_R32_FLOAT;
+// The scene pipelines' kind for opaque surfaces drawn over ambient occlusion's depth: they test it
+// without writing it, so the card shades only what shows.
+constexpr int kOpaqueOverDepth = 5;
 constexpr std::uint32_t kSpriteFloats = 8;  // position, texture coordinates, color
 
 // Windows draws with Direct3D 12 and DXIL shaders, macOS with Metal and MSL shaders, other systems

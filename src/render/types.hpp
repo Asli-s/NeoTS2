@@ -48,8 +48,12 @@ struct ParticleBatch {
 // A Sim casting the game's projected shadow onto the ground under it (see scene/sim_shadows.hpp).
 struct ShadowCaster {
     std::vector<std::size_t> instances;  // its skinned instances
-    Vec3 root{};                         // its root joint, in world coordinates
+    Vec3 root{};                         // its root joint, in world coordinates (indoors at the height of its feet)
     int level = 0;                       // the storey it stands on, as scene::Instance::level counts them
+    // Indoors (not in room 0) the shadow looks straight down and lies on a quad under the Sim (see
+    // simshadows::indoorCamera), turned with its model's +y axis.
+    bool indoor = false;
+    Vec3 forward{0, 1, 0};
 };
 
 // The projected shadows drawn from the next frame on.

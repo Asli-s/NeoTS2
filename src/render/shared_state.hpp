@@ -47,6 +47,8 @@ public:
             imposterAlphas_[lot] = alpha;
         }
     }
+    void setImpostersLeftOut(std::set<std::uint32_t> lots) override { impostersLeftOut_ = std::move(lots); }
+    bool imposterLeftOut(std::uint32_t lot) const { return impostersLeftOut_.contains(lot); }
     // A lot's imposter's alpha (see setImposterAlpha).
     float imposterAlpha(std::uint32_t lot) const {
         const auto it = imposterAlphas_.find(lot);
@@ -87,6 +89,19 @@ protected:
     static void copyScene(PreparedBase& to, const scene::Scene& scene);
     // Swaps the drawn scene's share with a prepared one's, and starts the instances' state over.
     void swapScene(PreparedBase& prepared);
+    // What the drawn scene keeps of its instances beside its share: which are shown, and how they are
+    // posed and shadowed.
+    struct InstanceState {
+        std::vector<std::uint8_t> visible;
+        std::vector<std::vector<int>> instanceMaterials;
+        std::vector<int> jointBase, jointCount, morphBase, morphRoom;
+        std::vector<std::array<float, 4>> eyes;
+        std::vector<float> jointData;
+        Shadows shadows;
+    };
+    // Swaps the drawn scene's share and instance state with a prepared scene's share and `kept`, so
+    // that the prepared scene is drawn for a moment. Doing it again puts both back as they were.
+    void lendScene(PreparedBase& prepared, InstanceState& kept);
 
     std::vector<scene::Material> materials_;
     std::vector<scene::Instance> instances_;
@@ -96,6 +111,7 @@ protected:
     std::vector<std::array<float, 4>> neighborGrounds_;
     bool impostersShown_ = true;
     std::map<std::uint32_t, float> imposterAlphas_;  // the imposters that fade, by lot id
+    std::set<std::uint32_t> impostersLeftOut_;        // see setImpostersLeftOut
     std::vector<scene::ObjectLighting> lightSets_;  // objects lit by their room
     std::vector<std::uint8_t> visible_;
 
@@ -114,7 +130,8 @@ protected:
     std::vector<scene::ParticleVertex> particleVertices_;
     std::vector<ParticleBatch> particleBatches_;
     bool drawScene_ = true;
-    bool instancesOnly_ = false;  // while drawing a portrait (see drawInstancesToImage)
+    bool instancesOnly_ = false;  // while drawing only the instances (see drawInstancesToImage)
+    bool ownLights_ = false;      // and lighting all of them with the lighting given there
     float clear_[3] = {0.17f, 0.18f, 0.19f};
     float time_ = 0;
     double lotTime_ = 0;

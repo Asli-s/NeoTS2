@@ -44,14 +44,20 @@ struct Image {
     // The smaller mip levels' pixels, each half the size of the one before (at least 1), when the
     // image brings its own. Otherwise the renderer makes them.
     std::vector<std::vector<std::uint8_t>> smallerLevels;
+    // The texture as the game's file stores it, for an image used unchanged: its DXT format (4 DXT1,
+    // 5 DXT3, 8 DXT5, 0 for none) and every level from the largest down to 1 x 1, each in 4 x 4
+    // blocks. The GPU draws these as the game's does, at a quarter of the memory or less.
+    std::uint32_t blockFormat = 0;
+    std::vector<std::vector<std::uint8_t>> blockLevels;
 };
 
-// Layer: blended onto the opaque surface it lies on (same vertices), right after opaque surfaces
-// and in the order placed, as terrain paint is.
-// Add: blended by adding the colour times its alpha, as the game's additive particles
-// (stdPMAdditive) are drawn.
-// Sum: blended by adding the colour whatever its alpha (stdMatAlphaBlendMode addNoSrcAlphaScale,
-// candle flames).
+// Image::blockFormat's DXT formats, numbered as the game's texture files number them.
+constexpr std::uint32_t kDxt1 = 4, kDxt3 = 5, kDxt5 = 8;
+
+// Layer: blended onto the opaque surface it lies on (same vertices), right after opaque surfaces in
+// the order placed, as terrain paint is. Add: adds the colour times its alpha, as the game's additive
+// particles (stdPMAdditive). Sum: adds the colour whatever its alpha (stdMatAlphaBlendMode
+// addNoSrcAlphaScale, candle flames).
 enum class AlphaMode { Opaque, Mask, Blend, Layer, Add, Sum };
 
 // How a surface looks: a color, optionally times an image, and how its alpha is used.
@@ -61,6 +67,27 @@ struct Material {
     int image = -1;  // index into Scene::images, -1 for none
     AlphaMode alpha = AlphaMode::Opaque;
     float alphaReference = 0.5f;  // Mask: drawn where alpha is at least this
+    // A wall's door or window mask (index into Scene::images, -1 for none), as the game's walls take
+    // it: drawn only where its alpha is at least half, read clamped at the wall's texture coordinates,
+    // with u running the other way when `maskMirrored`. The covering's own alpha cuts nothing.
+    int mask = -1;
+    bool maskMirrored = false;
+    // Drawn as the game's lot terrain shaders draw a canvas or paint: the texture's own alpha plays
+    // no part, and its detail texture (index into Scene::images, -1 for none), repeating
+    // `detailRepeats` times over it, is laid over it by the detail's alpha.
+    bool terrain = false;
+    // Darkened below the neighborhood's water by its underwater gradient, as the ground under the
+    // water is. The game's material script does this for the rocks, bridge sides, buoys and the
+    // plesiosaur, and only in the neighborhood view.
+    bool partlyUnderwater = false;
+    // Not in the original game: the pool-style sea's haze or caustics on the ground under it, left out
+    // when what lies under that sea is hazed (see poolSeaHaze in scene.frag).
+    bool seaDepthOverlay = false;
+    int detail = -1;
+    float detailRepeats = 1;
+    // Lot terrain: the canvas, or a paint of a lot texture (named "lottexture", but beach and cliff),
+    // which the game leaves out of lot imposters' terrain (its "GroundCanvas" layer).
+    bool terrainCanvas = false;
     // A Sim's hair in blend mode: blended, but it writes depth and drops alpha of 60 out of 255 and
     // below, as the game's hair state does. Strands drawn first hide the ones behind them.
     bool blendedHair = false;
@@ -226,6 +253,11 @@ struct Instance {
     int level = 0;  // the storey it is on, as the lot's height grid counts them
     // Lot objects: the id of the game object it draws (0 for anything else).
     std::uint32_t object = 0;
+    // Lot objects: their object definition's type (field 0x09): 8 doors and gates, 9 windows, 10 to
+    // 12 stairs.
+    std::uint16_t objectType = 0;
+    // Lot floors: they stand on a stage (a split-level platform, region 4 of the platform region grid).
+    bool onStage = false;
     // Lot objects and Sims: a script has hidden its model, on every storey and in every view.
     bool hidden = false;
     // Neighborhood plants and decorations: the ground they cover as their record stores it (x0, y0,
@@ -253,8 +285,8 @@ struct Instance {
     // The lot skirt's sand over its ground: 1 the sand by the water, 2 the deep water's sand, 0 none.
     // Its time-of-day scale is its shape colour (see lightLotSkirt).
     int skirtSand = 0;
-    // Drawn into the beach sea's mirror image (see Material::skirtSea), and whether that sea is
-    // tinted for the night.
+    // Drawn into the beach sea's mirror image (see Material::skirtSea) and the neighborhood water's,
+    // and whether that sea is tinted for the night.
     bool seaReflected = false;
     bool seaNight = false;
     // The pools' water: left out of their own reflection, its surface's highlight scaled by the
@@ -294,6 +326,9 @@ struct Instance {
     // imposters take (see IRenderer::setImposterLight), as it isn't lit again as the hours pass. Its
     // ground takes the light of the ground around the lot instead.
     bool neighborHouse = false;
+    // An object a lot's imposter carries as a model (see ImposterObject): its lot, which it shows and
+    // hides with.
+    std::optional<std::uint32_t> imposterLot;
     // Lot objects: what decides their shadow, and the shadow drawn (the kind they ask for until the
     // lot's lighting knows which room they stand in).
     objectshadow::Facts shadowFacts;
@@ -369,6 +404,9 @@ struct PaintedTerrain {
     std::vector<std::uint8_t> waterTiles;  // per tile, row by row: 1 where the water sheet is
     Image ripples;                         // neighborhood-water-1
     Image underwaterGradient;              // neighborhood-underwater-gradient, top row at the surface
+    // Not in the original game: the sea is the scene's pool-style sea (see addNeighborhoodSea), drawn
+    // in place of the water sheet with the sheet's reflection.
+    bool poolStyleSea = false;
     std::vector<Image> sky;                // neighborhood-sky2-envcube's six faces, z up
     std::array<float, 3> reflectionTint{0.55f, 0.6f, 0.65f};  // nhoodWaterReflColour
     float reflectionStrength = 0.75f;      // nhoodWaterReflStrength (the sheet's opacity)
@@ -478,7 +516,11 @@ struct Actor {
     struct Held {
         std::size_t instance = 0;
         int node = -1;  // the rig node it is held at
+        // Where it sits from that node: the slots of the objects it is in, as a bowl in the hand
+        // holds its food. None when it is in the Sim's slot itself.
+        Transform offset;
     };
+    // What a Sim holds, or what hangs in a lot object's slots from their bones as posed.
     std::vector<Held> held;
     Transform place;  // where the rig stands in the world
     // A Sim's: the lot's frame it stands in (its place is this times where it stands on the lot),

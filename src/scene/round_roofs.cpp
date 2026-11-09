@@ -5,12 +5,11 @@
 #include <algorithm>
 #include <cmath>
 
-// Round roofs as the game builds them: cones (type 7), domes (8) and octagonal spires (9) are rings
-// of points rising from the eaves, each ring one course of shingles. The first two rings hang under
-// the eave line and make the edge board's two bands (trim, then edges). The rings above are the
-// shingled top, and the underside is a fan from the top down to the lowest ring. Texture coordinates
-// are in 511ths of the roof texture. Each course is a third of a texture cell high, the three
-// courses taking turns, and runs one cell per tile around the roof.
+// Round roofs as the game builds them: cones (type 7), domes (8) and octagonal spires (9) are rings of
+// points rising from the eaves, a ring per course of shingles. The first two hang under the eave line as
+// the edge board's bands (trim, then edges), the rest are the shingled top, and the underside is a fan
+// from the top to the lowest ring. Texture coordinates are in 511ths. Each course is a third of a texture
+// cell high, the three taking turns, and runs one cell per tile around the roof.
 
 namespace ts2::scene {
 

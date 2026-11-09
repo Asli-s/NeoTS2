@@ -7,6 +7,7 @@
 #include "scene/assets.hpp"
 #include "scene/builder.hpp"
 #include "scene/face_blend.hpp"
+#include "scene/imposters.hpp"
 #include "scene/lot_skirt.hpp"
 #include "scene/outfit_catalog.hpp"
 #include "scene/sims.hpp"
@@ -75,6 +76,31 @@ void assetsFindResourcesByName() {
     std::filesystem::remove_all(root);
 }
 
+// A DXT texture drawn unchanged keeps the file's levels, largest first and down to 1 x 1, beside its
+// decoded pixels. A plain texture, a raw one or one whose levels stop early keeps none.
+void assetsKeepDxtLevelsAsStored() {
+    std::vector<std::vector<std::uint8_t>> levels;
+    for (std::uint32_t side = 8; side >= 1; side /= 2) {
+        levels.push_back(std::vector<std::uint8_t>(sg::textureBytes(side, side, 4), static_cast<std::uint8_t>(side)));
+    }
+    auto resources = testres::squareModel("square");
+    resources.push_back({testres::keyOf(testres::kTxtr, "dxt_txtr"), testres::blockTexture("dxt_txtr", 8, 8, 4, levels)});
+    resources.push_back({testres::keyOf(testres::kTxtr, "short_txtr"), testres::blockTexture("short_txtr", 8, 8, 4, {levels[0], levels[1]})});
+    const auto root = testres::gameFolder("neots2-dxt-test", resources);
+    {
+        ts2::scene::Assets assets(root);
+        const auto stored = assets.textureAsStored("dxt");
+        CHECK(stored && stored->blockFormat == 4 && stored->blockLevels == levels && stored->rgba.size() == 8 * 8 * 4);
+        const auto plain = assets.texture("dxt");
+        CHECK(plain && plain->blockLevels.empty() && plain->rgba == stored->rgba);
+        const auto cut = assets.textureAsStored("short");
+        CHECK(cut && cut->blockFormat == 0 && cut->blockLevels.empty());
+        const auto raw = assets.textureAsStored("square_texture");
+        CHECK(raw && raw->blockFormat == 0 && raw->blockLevels.empty());
+    }
+    std::filesystem::remove_all(root);
+}
+
 // A custom mesh is often kept in another group than its bare name leads to. A part's reference list
 // gives its key, and that finds it.
 void aModelIsFoundAtItsKey() {
@@ -132,6 +158,73 @@ void aHairPartDrawsItsStrandsAsSimHair() {
             CHECK(materials[static_cast<std::size_t>(plain)].layer == 17 && !materials[static_cast<std::size_t>(plain)].blendedHair);
             CHECK(materials[static_cast<std::size_t>(hair)].layer == 3 && materials[static_cast<std::size_t>(hair)].blendedHair);
             CHECK(materials[static_cast<std::size_t>(scalp)].layer == 17 && !materials[static_cast<std::size_t>(scalp)].blendedHair);
+        }
+    }
+    std::filesystem::remove_all(root);
+}
+
+// A wall cut by a door's mask keeps its covering's texture as it is (shared with the uncut wall) and
+// takes the mask as its own texture, as the game's walls do.
+void aWallMaskStaysItsOwnTexture() {
+    std::vector<testres::Resource> resources;
+    for (const std::string name : {"plain", "door_mask"}) {
+        resources.push_back({testres::keyOf(testres::kTxmt, name + "_txmt"),
+                             testres::material(name + "_txmt", "StandardMaterial",
+                                               {{"stdMatBaseTextureName", name + "_tex"}, {"stdMatBaseTextureEnabled", "true"}})});
+    }
+    resources.push_back({testres::keyOf(testres::kTxtr, "plain_tex_txtr"), testres::texture("plain_tex_txtr", 1, 1, {200, 100, 50, 255})});
+    resources.push_back({testres::keyOf(testres::kTxtr, "door_mask_tex_txtr"),
+                         testres::texture("door_mask_tex_txtr", 2, 1, {0, 0, 0, 0, 255, 255, 255, 255})});
+    const auto root = testres::gameFolder("neots2-wall-mask-test", resources);
+    {
+        ts2::scene::Assets assets(root);
+        ts2::scene::SceneBuilder builder(assets);
+        const int cut = builder.maskedMaterial("plain", "door_mask", true);
+        const int other = builder.maskedMaterial("plain", "door_mask", false);
+        CHECK(cut >= 0 && other >= 0 && cut != other);
+        CHECK(builder.maskedMaterial("plain", "nothing", false) == -1);
+        if (cut >= 0 && other >= 0) {
+            const auto& m = builder.scene().materials[static_cast<std::size_t>(cut)];
+            const auto& n = builder.scene().materials[static_cast<std::size_t>(other)];
+            const int plain = m.image;
+            CHECK(plain >= 0 && n.image == plain && m.mask >= 0 && m.mask != plain && n.mask == m.mask);
+            CHECK(m.maskMirrored && !n.maskMirrored);
+            CHECK(m.alpha == ts2::scene::AlphaMode::Opaque);
+            const auto& base = builder.scene().images[static_cast<std::size_t>(plain)];
+            CHECK(base.width == 1 && base.rgba.size() == 4 && base.rgba[3] == 255);
+            if (m.mask >= 0) {
+                const auto& mask = builder.scene().images[static_cast<std::size_t>(m.mask)];
+                CHECK(mask.width == 2 && mask.rgba.size() == 8 && mask.rgba[3] == 0 && mask.rgba[7] == 255);
+            }
+        }
+    }
+    std::filesystem::remove_all(root);
+}
+
+// A terrain paint names its texture and its "_detail" texture as they are, for the shader to lay
+// one over the other as the game's lot terrain does.
+void terrainKeepsItsDetailTexture() {
+    std::vector<testres::Resource> resources;
+    resources.push_back({testres::keyOf(testres::kTxtr, "grass_txtr"), testres::texture("grass_txtr", 1, 1, {10, 200, 10, 0})});
+    resources.push_back({testres::keyOf(testres::kTxtr, "grass_detail_txtr"), testres::texture("grass_detail_txtr", 1, 1, {0, 0, 0, 128})});
+    resources.push_back({testres::keyOf(testres::kTxtr, "sand_txtr"), testres::texture("sand_txtr", 1, 1, {200, 200, 100, 255})});
+    const auto root = testres::gameFolder("neots2-terrain-detail-test", resources);
+    {
+        ts2::scene::Assets assets(root);
+        ts2::scene::SceneBuilder builder(assets);
+        const int grass = builder.terrainMaterial("grass", 5, 0.9f, true);
+        const int sand = builder.terrainMaterial("sand", 5, 0.9f, false);
+        CHECK(grass >= 0 && sand >= 0 && builder.terrainMaterial("nothing", 5, 0.9f, false) == -1);
+        if (grass >= 0 && sand >= 0) {
+            const auto& g = builder.scene().materials[static_cast<std::size_t>(grass)];
+            const auto& s = builder.scene().materials[static_cast<std::size_t>(sand)];
+            CHECK(g.terrain && g.image >= 0 && g.detail >= 0 && g.detail != g.image && g.detailRepeats == 5);
+            CHECK(g.alpha == ts2::scene::AlphaMode::Layer && g.color[0] == 0.9f);
+            CHECK(s.terrain && s.detail == -1 && s.alpha == ts2::scene::AlphaMode::Opaque);
+            if (g.image >= 0) {
+                const auto& image = builder.scene().images[static_cast<std::size_t>(g.image)];
+                CHECK(image.width == 1 && image.rgba.size() == 4 && image.rgba[1] == 200);
+            }
         }
     }
     std::filesystem::remove_all(root);
@@ -452,6 +545,87 @@ void modelsKeepTheirMorphs() {
     std::filesystem::remove_all(root);
 }
 
+// A lot imposter's resource node as the game saves it: the root, a transform moving an object to
+// (12, 34, 1.5) turned a quarter, and under it the object's model node with its colour choice.
+std::vector<std::uint8_t> imposterResourceNode() {
+    constexpr std::uint32_t kResourceNodeBlock = 0xE519C933, kTransformBlock = 0x65246462, kDataListBlock = 0x6A836D56;
+    testres::Bytes b;
+    testres::container(b, {testres::keyOf(testres::kCres, "treeWillowLOD90_cres")},
+                       {kResourceNodeBlock, kTransformBlock, kResourceNodeBlock, kDataListBlock});
+    auto header = [&](const std::string& className, std::uint32_t id, std::uint32_t version) {
+        b.text(className);
+        b.u32(id);
+        b.u32(version);
+    };
+    auto graphNode = [&](const std::string& nodeName, const std::vector<std::uint32_t>& extensions) {
+        header("cObjectGraphNode", 0, 4);
+        b.u32(static_cast<std::uint32_t>(extensions.size()));
+        for (const auto e : extensions) {
+            b.u8(1);
+            b.u8(0);
+            b.u32(e);
+        }
+        b.text(nodeName);
+    };
+    auto compositionTree = [&](const std::string& nodeName, const std::vector<std::uint32_t>& children) {
+        header("cCompositionTreeNode", 0, 11);
+        graphNode(nodeName, {});
+        b.u32(static_cast<std::uint32_t>(children.size()));
+        for (const auto c : children) {
+            b.u8(1);
+            b.u8(0);
+            b.u32(c);
+        }
+    };
+    header("cResourceNode", kResourceNodeBlock, 7);
+    b.u8(1);
+    testres::sgResource(b, "N001_Lot11!imposter_cres");
+    compositionTree("imposter", {1});
+    header("cTransformNode", kTransformBlock, 7);
+    compositionTree("", {2});
+    for (const float v : {12.0f, 34.0f, 1.5f, 0.0f, 0.0f, 0.70710678f, 0.70710678f}) {
+        b.f32(v);
+    }
+    b.u32(0x7FFFFFFF);
+    header("cResourceNode", kResourceNodeBlock, 7);
+    b.u8(0);
+    graphNode("treeWillowLOD90_cres", {3});
+    b.u8(1);
+    b.u8(1);
+    b.u8(1);
+    b.u32(0);  // the container's link 0
+    header("cDataListExtension", kDataListBlock, 1);
+    header("cExtension", 0, 3);
+    b.u8(7);  // a list
+    b.text("DesignModes");
+    b.u32(1);
+    b.u8(6);  // a string: the subset, then its material
+    b.text("leavesLOD90");
+    b.text("treewillow_leavesLOD90_autumn");
+    return b.out;
+}
+
+// A lot imposter's objects are read from its resource node: each model node with the transforms
+// above it, its name without "_cres" and its colour choices.
+void imposterObjectsComeFromItsResourceNode() {
+    const auto data = imposterResourceNode();
+    const auto tree = sg::parseResourceNode(data);
+    CHECK(tree.nodes.size() == 4 && tree.nodes[2].kind == sg::SceneNode::Kind::ModelRef && tree.nodes[3].kind == sg::SceneNode::Kind::DataList);
+    const auto bytes = testres::package({{testres::keyOf(testres::kCres, "N001_Lot11!imposter_cres"), data}});
+    ts2::dbpf::Package package(bytes);
+    std::vector<std::string> warnings;
+    const auto objects = ts2::scene::readImposterObjects(package, warnings);
+    CHECK(objects.size() == 1 && warnings.empty());
+    if (objects.size() == 1) {
+        const auto& o = objects[0];
+        CHECK(o.model == "treeWillowLOD90");
+        CHECK(o.overrides.size() == 1 && o.overrides[0].group == "leavesLOD90" && o.overrides[0].material == "treewillow_leavesLOD90_autumn");
+        float p[3] = {1, 0, 0};
+        o.place.apply(p, true);
+        CHECK(std::abs(p[0] - 12) < 1e-4f && std::abs(p[1] - 35) < 1e-4f && std::abs(p[2] - 1.5f) < 1e-4f);
+    }
+}
+
 // A shape is drawn where its reference node sits in the model's tree.
 void shapesSitWhereTheirNodePutsThem() {
     auto resources = testres::squareModel("square");
@@ -634,6 +808,9 @@ std::vector<Test> assetTests() {
     return {
         {"hand-made resources read back", handMadeResourcesReadBack},
         {"assets find resources by name", assetsFindResourcesByName},
+        {"assets keep a DXT texture's levels as stored", assetsKeepDxtLevelsAsStored},
+        {"a wall mask stays its own texture", aWallMaskStaysItsOwnTexture},
+        {"terrain keeps its detail texture", terrainKeepsItsDetailTexture},
         {"a model is found at its key", aModelIsFoundAtItsKey},
         {"a part set draws a group its shape leaves out", aPartSetDrawsAGroupItsShapeLeavesOut},
         {"a hair part draws its strands as SimHair", aHairPartDrawsItsStrandsAsSimHair},
@@ -651,6 +828,7 @@ std::vector<Test> assetTests() {
         {"models with missing parts are handled", modelsWithMissingPartsAreHandled},
         {"saved joints move the model", savedJointsMoveTheModel},
         {"shapes sit where their node puts them", shapesSitWhereTheirNodePutsThem},
+        {"imposter objects come from its resource node", imposterObjectsComeFromItsResourceNode},
         {"env cube reflection turns on as the game's", envCubeReflectionTurnsOnAsTheGames},
         {"specular turns on as the game's", specularTurnsOnAsTheGames},
         {"lot skirt meets the lot's edges", lotSkirtMeetsTheLotsEdges},

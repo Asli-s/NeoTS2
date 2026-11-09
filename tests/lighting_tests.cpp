@@ -1587,6 +1587,35 @@ void objectShadowsFollowTheGame() {
     ts2::scene::Mesh huge;
     huge.primitives.emplace_back().positions = {-1e5f, -1e5f, 0, 1e5f, 1e5f, 1e5f};
     CHECK(!picture(huge, 0, 0, {-0.5570860f, -0.3713907f, 0.7427813f}).has_value());
+
+    // The pictures fall only on outdoor floor quarters: a porch takes them, the room behind its wall
+    // doesn't. Here a room fills x below 2 on the ground storey, cut along the diagonal of tile (1, 1).
+    CHECK(quarterOf(0.1f, 0.5f) == 0 && quarterOf(0.5f, 0.1f) == 1 && quarterOf(0.9f, 0.5f) == 2 && quarterOf(0.5f, 0.9f) == 3);
+    ts2::scene::Scene lot;
+    lot.meshes.push_back(pinballBox);
+    lot.lotSize = {4, 3};
+    lot.groundLevel = 1;
+    lot.roomAt = [](int storey, float x, float y) -> std::int16_t {
+        return storey == 0 && (x < 1 || (x < 2 && y < 1) || (x < 2 && x - 1 < y - 1)) ? 1 : 0;
+    };
+    auto& plant = lot.instances.emplace_back();
+    plant.shadow = Kind::Sun;
+    plant.shadowMesh = 0;
+    plant.level = 1;
+    plant.transform = ts2::scene::Transform::at(3.5f, 1.5f, 0, 0);
+    const Layout laid = layout(lot, {-0.5570860f, -0.3713907f, 0.7427813f});
+    const auto& floors = laid.floors;
+    const bool sized = laid.places.size() == 1 && floors.width == 4 && floors.height == 3 && floors.firstLevel == 1 && floors.levels == 1 &&
+                       floors.quarters.size() == 12;
+    CHECK(sized);
+    if (sized) {
+        CHECK(floors.quarters[0] == 0 && floors.quarters[3] == 0x0F && floors.quarters[2] == 0x0F);
+        // Tile (1, 1): the quarters below its diagonal (y-low, x-high) are outdoors.
+        CHECK(floors.quarters[5] == 0x06);
+    }
+    // No rooms known: no mask, and every floor takes the pictures.
+    lot.roomAt = nullptr;
+    CHECK(layout(lot, {-0.5570860f, -0.3713907f, 0.7427813f}).floors.levels == 0);
 }
 
 // Sims' projected shadows: the blur shares 255 between its taps, the colour is the game's by day and
@@ -1624,6 +1653,20 @@ void simShadowsFollowTheGame() {
     CHECK(std::abs(at(10, 20, 1, 0)) < 1e-5f && std::abs(at(10, 20, 1, 1) + 0.2205f) < 1e-3f && std::abs(at(10, 20, 1, 2) - 8.0f / 9) < 1e-5f);
     CHECK(std::abs(at(10, 20, 2, 1) - at(10, 20, 1, 1) - 0.4387f) < 1e-3f);
     CHECK(std::abs(at(10 - 1.5f * 8 / l, 20 - 8 / l, 1 + 2 * 8 / l, 2)) < 1e-5f);
+
+    // Indoors: the game's quad reaches 0.953 across and 0.596 ahead of its middle (its size short of
+    // the 3-texel blur at each edge), and the picture looks straight down, turned with the Sim.
+    CHECK(std::abs(simshadows::kQuadWidth / 2 * simshadows::kQuadShown - 0.953f) < 1e-3f);
+    CHECK(std::abs(simshadows::kQuadDepth / 2 * simshadows::kQuadShown - 0.596f) < 1e-3f);
+    const auto quad = simshadows::indoorQuad({10, 20, 1}, {-2, 0, 0});  // a Sim facing -x
+    auto onQuad = [&](float x, float y, int r) { return quad[r * 4] * x + quad[r * 4 + 1] * y + quad[r * 4 + 3]; };
+    CHECK(std::abs(onQuad(10 - 0.125f, 20, 0)) < 1e-5f && std::abs(onQuad(10 - 0.125f, 20, 1)) < 1e-5f);
+    CHECK(std::abs(onQuad(10 - 0.125f - 0.625f, 20 + 1, 0) - 1) < 1e-5f && std::abs(onQuad(10 - 0.125f - 0.625f, 20 + 1, 1) - 1) < 1e-5f);
+    const auto down = simshadows::indoorCamera({10, 20, 1}, {-2, 0, 0});
+    auto inPicture = [&](float x, float y, float z, int r) { return down[r * 4] * x + down[r * 4 + 1] * y + down[r * 4 + 2] * z + down[r * 4 + 3]; };
+    CHECK(std::abs(inPicture(10 - 0.125f, 20, 1.005f, 0)) < 1e-5f && std::abs(inPicture(10 - 0.125f, 20, 1.005f, 1)) < 1e-5f);
+    CHECK(std::abs(inPicture(10 - 0.125f - 0.7f, 20 + 0.7f, 1, 0) - 1) < 1e-5f && std::abs(inPicture(10 - 0.125f - 0.7f, 20 + 0.7f, 1, 1) - 1) < 1e-5f);
+    CHECK(std::abs(inPicture(10, 20, 9.005f, 2)) < 1e-5f && std::abs(inPicture(10, 20, 0.005f, 2) - 1) < 1e-5f);
 }
 
 std::vector<Test> lightingTests() {

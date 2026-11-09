@@ -871,11 +871,11 @@ void neighborhoodIdIsRead() {
         0, 0, 0, 0, 0x11, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 3, 0, 2, 3};
     const auto n = ts2::nhoodid::parse(university);
     CHECK(n.prefix == "N002" && n.id == 0x1B && n.type == 2 && n.subPrefix == "U001" && n.requiredProducts == 0x11);
-    CHECK(n.value2 == 1 && n.flags == 0 && (n.seasons == std::array<std::int32_t, 4>{3, 0, 2, 3}));
+    CHECK(n.pack == 1 && n.flags == 0 && (n.seasons == std::array<std::int32_t, 4>{3, 0, 2, 3}));
     const std::vector<std::uint8_t> older = {7, 0, 0, 0, 1, 0, 0, 0, 'D', 9, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0,
                                              5, 0, 0, 0, 0, 0, 0, 0};
     const auto o = ts2::nhoodid::parse(older);
-    CHECK(o.id == 9 && o.type == 3 && o.value2 == 2 && (o.seasons == std::array<std::int32_t, 4>{1, 2, 3, 0}));
+    CHECK(o.id == 9 && o.type == 3 && o.pack == 2 && (o.seasons == std::array<std::int32_t, 4>{1, 2, 3, 0}));
     bool threw = false;
     try {
         ts2::nhoodid::parse(std::vector<std::uint8_t>{0x0a, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0x7F});

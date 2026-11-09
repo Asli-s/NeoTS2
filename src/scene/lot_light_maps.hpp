@@ -10,12 +10,8 @@
 
 namespace ts2::scene::lotlightmaps {
 
-// The lot's ground normals as the game's terrain works them out. Each tile is two triangles split
-// from corner (x, y) to (x + 1, y + 1), and a corner's normal is the normalized sum of the normals
-// of the lot's triangles that touch it, so the lot's edges lean on nothing outside the lot.
-// A sloping ground's normal `depth` under the sea, turned toward straight up: fully 1 down, so a
-// steep sea bed is not shaded as a wall facing away from the sun (smooth lot skirts, not in the
-// original game).
+// A sloping ground's normal `depth` under the sea, turned toward straight up, fully at 1 down, so a
+// steep sea bed isn't shaded as a wall facing away from the sun (smooth lot skirts, not in the game).
 std::array<float, 3> underwaterNormal(const std::array<float, 3>& normal, float depth);
 
 struct GroundNormals {
@@ -27,7 +23,9 @@ struct GroundNormals {
     // normalized. Straight up where there are none.
     std::array<float, 3> at(float x, float y) const;
 };
-// None for a lot without ground heights or larger than 256 tiles.
+// The lot's ground normals as the game's terrain works them out. Each tile is two triangles split from
+// corner (x, y) to (x + 1, y + 1), and a corner's normal is the normalized sum of its lot triangles'
+// normals, so the edges lean on nothing outside. None for a lot without ground heights or over 256 tiles.
 GroundNormals groundNormals(const lotshadow::Inputs& lot);
 // The normals of a lot's ground as drawn (see Scene::drawnGround), from each point's slope to its
 // neighbours. Under the sea they turn up toward straight up by depth (underwaterNormal), as the

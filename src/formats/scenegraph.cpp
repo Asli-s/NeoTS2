@@ -157,13 +157,65 @@ std::optional<std::size_t> findBlock(std::span<const std::uint8_t> data, std::si
 
 } // namespace
 
+namespace {
+
+// Limits for data lists, which files nest and size freely: how deep lists may nest (each level is a
+// call), and how many values one resource may hold in all (each costs far more memory than its bytes).
+constexpr int kMaxDataListDepth = 16;
+constexpr std::size_t kMaxDataValues = 1u << 16;
+
+DataValue dataValue(BinaryReader& r, int depth, std::size_t& budget) {
+    if (depth > kMaxDataListDepth) {
+        fail("data list too deep");
+    }
+    if (budget == 0) {
+        fail("too many data values");
+    }
+    --budget;
+    DataValue v;
+    v.type = static_cast<DataValue::Type>(r.u8());
+    v.name = r.varString();
+    auto floats = [&](int n) {
+        for (int i = 0; i < n; ++i) {
+            v.floats.push_back(std::bit_cast<float>(r.u32()));
+        }
+    };
+    switch (v.type) {
+    case DataValue::Type::Bool: v.integer = r.u8() != 0 ? 1 : 0; break;
+    case DataValue::Type::Int: v.integer = static_cast<std::int32_t>(r.u32()); break;
+    case DataValue::Type::Float: floats(1); break;
+    case DataValue::Type::Vector2: floats(2); break;
+    case DataValue::Type::Vector: floats(3); break;
+    case DataValue::Type::Rotation: floats(4); break;
+    case DataValue::Type::String: v.text = r.varString(); break;
+    case DataValue::Type::Bytes: {
+        const auto bytes = r.bytes(r.u32Count(1));
+        v.bytes.assign(bytes.begin(), bytes.end());
+        break;
+    }
+    case DataValue::Type::List: {
+        const std::size_t n = count(r, 3);  // the smallest value (an empty string) takes 3 bytes
+        v.items.reserve(std::min(n, budget));
+        for (std::size_t i = 0; i < n; ++i) {
+            v.items.push_back(dataValue(r, depth + 1, budget));
+        }
+        break;
+    }
+    default: fail("unknown data value type " + std::to_string(static_cast<int>(v.type)));
+    }
+    return v;
+}
+
+} // namespace
+
 ResourceNode parseResourceNode(std::span<const std::uint8_t> data) {
     constexpr std::uint32_t kResourceNode = 0xE519C933, kTransformNode = 0x65246462, kShapeRefNode = 0x65245517, kLightRefNode = 0x253D2018,
-                            kBoneData = 0xE9075BC5;
+                            kBoneData = 0xE9075BC5, kDataList = 0x6A836D56;
     BinaryReader header(data);
     ResourceNode rn;
     rn.container = readContainer(header);
     std::size_t at = data.size() - header.remaining();
+    std::size_t budget = kMaxDataValues;
     for (const std::uint32_t type : rn.container.blockTypes) {
         SceneNode node;
         const auto start = findBlock(data, at, type);
@@ -173,12 +225,32 @@ ResourceNode parseResourceNode(std::span<const std::uint8_t> data) {
         BinaryReader r(data.subspan(*start));
         try {
             if (type == kResourceNode) {
-                node.kind = SceneNode::Kind::Root;
                 blockHeader(r, "cResourceNode");
-                r.u8();
-                node.name = sgResource(r);
-                std::string ignored;
-                node.children = compositionTree(r, &ignored);
+                if (r.u8() != 0) {
+                    node.kind = SceneNode::Kind::Root;
+                    node.name = sgResource(r);
+                    std::string ignored;
+                    node.children = compositionTree(r, &ignored);
+                } else {
+                    // A resource node inside the tree: its extensions and the model it names. What
+                    // follows the name isn't needed.
+                    node.kind = SceneNode::Kind::ModelRef;
+                    const BlockHeader graph = blockHeader(r, "cObjectGraphNode");
+                    const std::size_t extensions = count(r, 6);
+                    for (std::size_t i = 0; i < extensions; ++i) {
+                        r.u8();
+                        r.u8();
+                        node.extensions.push_back(r.u32());
+                    }
+                    if (graph.version >= 4) {
+                        node.name = r.varString();
+                    }
+                }
+            } else if (type == kDataList) {
+                node.kind = SceneNode::Kind::DataList;
+                blockHeader(r, "cDataListExtension");
+                blockHeader(r, "cExtension");
+                node.dataList = std::make_shared<const DataValue>(dataValue(r, 0, budget));
             } else if (type == kTransformNode) {
                 node.kind = SceneNode::Kind::Transform;
                 transformNode(r, node);
@@ -230,57 +302,6 @@ ResourceNode parseResourceNode(std::span<const std::uint8_t> data) {
     }
     return rn;
 }
-
-namespace {
-
-// Limits for data lists, which files nest and size freely: how deep lists may nest (each level is a
-// call), and how many values one resource may hold in all (each costs far more memory than its bytes).
-constexpr int kMaxDataListDepth = 16;
-constexpr std::size_t kMaxDataValues = 1u << 16;
-
-DataValue dataValue(BinaryReader& r, int depth, std::size_t& budget) {
-    if (depth > kMaxDataListDepth) {
-        fail("data list too deep");
-    }
-    if (budget == 0) {
-        fail("too many data values");
-    }
-    --budget;
-    DataValue v;
-    v.type = static_cast<DataValue::Type>(r.u8());
-    v.name = r.varString();
-    auto floats = [&](int n) {
-        for (int i = 0; i < n; ++i) {
-            v.floats.push_back(std::bit_cast<float>(r.u32()));
-        }
-    };
-    switch (v.type) {
-    case DataValue::Type::Bool: v.integer = r.u8() != 0 ? 1 : 0; break;
-    case DataValue::Type::Int: v.integer = static_cast<std::int32_t>(r.u32()); break;
-    case DataValue::Type::Float: floats(1); break;
-    case DataValue::Type::Vector2: floats(2); break;
-    case DataValue::Type::Vector: floats(3); break;
-    case DataValue::Type::Rotation: floats(4); break;
-    case DataValue::Type::String: v.text = r.varString(); break;
-    case DataValue::Type::Bytes: {
-        const auto bytes = r.bytes(r.u32Count(1));
-        v.bytes.assign(bytes.begin(), bytes.end());
-        break;
-    }
-    case DataValue::Type::List: {
-        const std::size_t n = count(r, 3);  // the smallest value (an empty string) takes 3 bytes
-        v.items.reserve(std::min(n, budget));
-        for (std::size_t i = 0; i < n; ++i) {
-            v.items.push_back(dataValue(r, depth + 1, budget));
-        }
-        break;
-    }
-    default: fail("unknown data value type " + std::to_string(static_cast<int>(v.type)));
-    }
-    return v;
-}
-
-} // namespace
 
 const DataValue* DataValue::find(std::string_view itemName) const {
     for (const auto& item : items) {

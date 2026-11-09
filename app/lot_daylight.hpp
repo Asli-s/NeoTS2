@@ -18,13 +18,11 @@ namespace app {
 
 class LotLife;
 
-// Keeps a played lot lit for its time of day. When the lighting state the game's clock picks
-// changes (7 am and 7 pm as shipped), the lot's light is worked out again in the background and put
-// in with the state's sky and the ground around the lot's colours, and the outdoor lights on
-// objects and the light maps fade to the new ones over a few real seconds, as the game's do. The
-// lights of things in rooms change at once (whether the game fades them too is not known yet).
-// The lot is lit again the same way when its scripts switch a lamp on or off or dim it (Change
-// Light), and the first time it is played, as the lamps are off until its scripts have run.
+// Keeps a played lot lit for its time of day. When the clock's lighting state changes (7 am and 7 pm as
+// shipped), the light is worked out again in the background with the new sky and skirt colours, and
+// outdoor object lights and light maps fade to it over a few real seconds, as the game's do. Lights in
+// rooms change at once (whether the game fades them is not known yet). The lot is relit the same way
+// when a script changes a lamp (Change Light) and on its first play, as lamps are off until scripts run.
 class LotDaylight {
 public:
     // `state` is what the lot was lit with (with `environment`, its environment colour), `place`

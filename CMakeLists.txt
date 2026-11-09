@@ -202,8 +202,9 @@ add_library(ts2formats
 )
 target_include_directories(ts2formats PUBLIC src)
 # stb_image (third-party, public domain / MIT) decodes the UI's PNG and bitmap images; jpeg.cpp
-# decodes JPEGs as the game does, stb taking the kinds it does not read.
-add_library(stb_image STATIC src/formats/image.cpp src/formats/jpeg.cpp)
+# decodes JPEGs as the game does, stb taking the kinds it does not read. stb_dxt (the same) compresses
+# High lot imposter pictures.
+add_library(stb_image STATIC src/formats/image.cpp src/formats/jpeg.cpp src/formats/dxt_encode.cpp)
 target_include_directories(stb_image PRIVATE src third_party/stb)
 target_link_libraries(ts2formats PUBLIC stb_image)
 # image.cpp calls tga::decode, which is in ts2formats. The two static libraries need each other, so
@@ -315,13 +316,21 @@ add_library(ts2scene
     src/scene/hood_drift.cpp
     src/scene/assets.cpp
     src/scene/builder.cpp
+    src/scene/instance_merge.cpp
     src/scene/lot_scene.cpp
+    src/scene/lot_scene_floors.cpp
+    src/scene/lot_scene_objects.cpp
+    src/scene/lot_scene_roofs.cpp
+    src/scene/lot_scene_water.cpp
     src/scene/walls.cpp
     src/scene/roofs.cpp
     src/scene/roof_grid.cpp
     src/scene/round_roofs.cpp
     src/scene/imposters.cpp
+    src/scene/imposter_bake.cpp
+    src/scene/imposter_cache.cpp
     src/scene/lot_skirt.cpp
+    src/scene/sky_looks.cpp
     src/scene/pool_water.cpp
     src/scene/prop_fade.cpp
     src/scene/terrain_water.cpp
@@ -349,6 +358,8 @@ add_library(ts2scene
     src/scene/animation_library.cpp
     src/scene/neighborhood_scene.cpp
     src/scene/ground_decal.cpp
+    src/scene/effect_models.cpp
+    src/scene/effect_terrain.cpp
     src/scene/neighborhood_decals.cpp
     src/scene/neighborhood_plumbobs.cpp
     src/scene/effect_player.cpp
@@ -595,7 +606,7 @@ else()
         # The shaders the OpenGL 2 renderer draws with (skinned ones are posed on the CPU there).
         set(gl2_shaders scene.vert scene.frag ui.vert ui.frag particle.vert particle.frag terrain.vert terrain.frag sky.vert sky.frag road.vert road.frag imposter.vert imposter.frag clip.vert clip.frag water.vert water.frag)
         if(sdlgpu_enabled)
-        foreach(shader ao_depth.frag ao.frag ao_blur.frag scene.vert skinned.vert scene.frag ui.vert ui.frag particle.vert particle.frag terrain.vert terrain.frag sky.vert sky.frag water.vert water.frag pool.vert pool.frag sea.vert sea.frag pond.vert pond.frag caustics.frag pool_shadow.frag road.vert road.frag imposter.vert imposter.frag clip.vert clip.frag shadow_caster.frag shadow_blur.frag object_blur.frag)
+        foreach(shader ao_depth.frag ao_solid.frag ao.frag ao_blur.frag ao_halfdepth.frag ao_upsample.frag scene.vert skinned.vert scene.frag ui.vert ui.frag particle.vert particle.frag terrain.vert terrain.frag sky.vert sky.frag water.vert water.frag pool.vert pool.frag sea.vert sea.frag pond.vert pond.frag caustics.frag pool_shadow.frag road.vert road.frag imposter.vert imposter.frag clip.vert clip.frag shadow_caster.frag shadow_blur.frag object_blur.frag)
             if(shader MATCHES "vert$")
                 set(profile vs_6_0)
             else()
@@ -723,7 +734,7 @@ else()
         target_link_libraries(vm_tests PRIVATE ts2ui)
         target_compile_definitions(vm_tests PRIVATE NEOTS2_TEXT_LAYOUT_TESTS)
 
-        add_executable(neots2 app/main.cpp app/menu.cpp app/neighborhood.cpp app/neighborhood_ui.cpp app/lot_life.cpp app/pose_numbers.cpp app/object_materials.cpp app/sim_loader.cpp app/lot_light.cpp app/lot_daylight.cpp app/route_sources.cpp app/lot_ui.cpp app/game_options_panel.cpp app/graphics_options_panel.cpp app/options_list.cpp app/live_panel.cpp app/job_panel.cpp app/memories_page.cpp app/age_meter.cpp app/queue_panel.cpp app/pie_menu_ui.cpp app/mood_meter.cpp app/aspiration_bars.cpp app/pause_frame.cpp app/baby_name_dialog.cpp app/cheat_console.cpp app/needs_panel.cpp app/personality_page.cpp app/relationships_panel.cpp app/rewards_panel.cpp app/simology_panel.cpp app/interests_page.cpp app/hobbies_page.cpp app/chemistry_page.cpp app/meter_bar.cpp app/skewer.cpp app/wants_panel.cpp app/portraits.cpp app/cursors.cpp
+        add_executable(neots2 app/main.cpp app/menu.cpp app/game_effects.cpp app/game_surroundings.cpp app/game_graphics.cpp app/neighborhood.cpp app/neighborhood_ui.cpp app/lot_life.cpp app/lot_life_clips.cpp app/lot_life_effects.cpp app/lot_life_panels.cpp app/lot_life_objects.cpp app/lot_life_sims.cpp app/pose_numbers.cpp app/object_materials.cpp app/sim_loader.cpp app/lot_light.cpp app/imposter_baker.cpp app/lot_daylight.cpp app/route_sources.cpp app/lot_ui.cpp app/game_options_panel.cpp app/graphics_options_panel.cpp app/options_list.cpp app/live_panel.cpp app/job_panel.cpp app/memories_page.cpp app/age_meter.cpp app/queue_panel.cpp app/pie_menu_ui.cpp app/mood_meter.cpp app/aspiration_bars.cpp app/pause_frame.cpp app/baby_name_dialog.cpp app/description_box.cpp app/cheat_console.cpp app/needs_panel.cpp app/personality_page.cpp app/relationships_panel.cpp app/rewards_panel.cpp app/simology_panel.cpp app/interests_page.cpp app/hobbies_page.cpp app/chemistry_page.cpp app/meter_bar.cpp app/skewer.cpp app/wants_panel.cpp app/portraits.cpp app/cursors.cpp
                        app/diagnostics.cpp app/crash_handler.cpp app/crash_dialog.cpp app/unexpected_exit.cpp app/report_upload.cpp app/message_box.cpp app/open_renderer.cpp)
         target_link_libraries(neots2 PRIVATE ts2render ts2ui ts2sim ts2diag project_warnings)
         add_dependencies(neots2 neots2_version)

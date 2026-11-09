@@ -26,7 +26,7 @@ public:
     bool draw(const Camera&) override { return true; }
     void setWaitForScreen(bool) override {}
     bool drawToFile(const Camera&, unsigned, unsigned, const std::filesystem::path&) override { return true; }
-    std::optional<scene::Image> drawInstancesToImage(const Camera&, unsigned, unsigned, const scene::ObjectLighting&) override { return {}; }
+    std::optional<scene::Image> drawInstancesToImage(const Camera&, unsigned, unsigned, std::optional<scene::ObjectLighting>) override { return {}; }
     std::string backend() const override { return "none"; }
     std::string device() const override { return "none"; }
     void benchmark(const Camera&, unsigned, unsigned, int) override {}
@@ -35,6 +35,8 @@ public:
     void setImages(const scene::Scene&, const std::vector<int>&, bool) override {}
     void setLightMapFade(float) override {}
     void setSkybox(const std::vector<scene::Image>&) override {}
+    void setTerrainLightMap(const scene::Image&) override {}
+    void setNeighborhoodSky(const std::vector<scene::Image>&) override {}
     void setSurroundings(const scene::Scene&) override {}
 
     // Takes the scene as an upload would: its CPU state, and its meshes laid out.

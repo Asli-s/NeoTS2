@@ -550,7 +550,8 @@ void installedPacksAreFound() {
         pack(folder);
     }
     CHECK(codes() == "base ep4 sp8 sp9 ");
-    CHECK((ts2::content::installedPacksMask(ts2::content::findProducts(root)) & (1u << 16)) != 0);  // Mansion & Garden
+    // Base game, Pets (ep4, bit 6), IKEA Home Stuff (sp8, bit 15), Mansion & Garden (sp9, bit 17) and the always-set bit 12.
+    CHECK(ts2::content::installedPacksMask(ts2::content::findProducts(root)) == (1u | 1u << 6 | 1u << 15 | 1u << 17 | 0x1000u));
     fs::remove_all(root);
     for (const char* folder : {"Double Deluxe/Base", "Fun with Pets/SP9", "Seasons"}) {
         pack(folder);

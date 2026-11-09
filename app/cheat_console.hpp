@@ -14,16 +14,11 @@
 
 namespace app {
 
-// The game's cheat window, opened and closed with Ctrl+Shift+C ("Toggle Cheat Entry Window"). It
-// has a line to type into and an output part, closed at first. Enter runs the line and writes it to
-// the output after a ">". After an unknown command, bad arguments or help the output part opens.
-// After any other line the window closes, unless the output part was open already. Escape closes
-// the window. Up and Down step through the lines run before. A mouse press anywhere else leaves it
-// open but takes the keyboard away from it, until a press in its text field. The output opens above
-// the text field and scrolls with the mouse wheel and the game's scroll bar, drawn from the game's
-// own scroll bar picture. The window is laid out as the game's. The game asks Windows for Lucida
-// Sans Typewriter, and the output here uses Lucida Console when the system has it, which matches
-// the game's character width.
+// The game's cheat window, toggled with Ctrl+Shift+C. Enter runs the line and writes it after a ">"
+// to the output part above the text field, which opens after an unknown command, bad arguments or
+// help. After any other line the window closes, unless the output was open already. Escape closes it,
+// Up and Down recall earlier lines, and a press elsewhere takes the keyboard until a press in its field.
+// The output uses Lucida Console when present, which has the width of the game's Lucida Sans Typewriter.
 class CheatConsole {
 public:
     explicit CheatConsole(ts2::sim::CheatProperties& properties) : properties_(properties) {}

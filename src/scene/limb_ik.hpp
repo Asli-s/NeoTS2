@@ -105,12 +105,10 @@ float weighLimbJoint(std::span<const LimbJointLayer> layers, std::span<float> sc
 // scales of weighLimbJoint): none below the least weight that counts, all of it with no clip turns.
 float solvedShare(float ikWeight, float turns);
 
-// Turns each limb's joints so that its end reaches its target, bending toward its pole, and its end
-// takes the target's orientation. `local` and `world` are the rig's pose, updated in place. A limb
-// reaches for the weighted average of all its targets in all the animations, each weighted by how
-// much its animation shows, as the game feeds them into one chain. `shares` gives, per rig node,
-// the share of the solved turn in the joint (solvedShare), the rest staying with the turn it has in
-// `local`. Null: the solved turns whole.
+// Turns each limb's joints so its end reaches its target with the target's orientation, bending toward
+// its pole. `local` and `world` are the rig's pose, updated in place. A limb reaches for the average of
+// its targets in all animations, weighted by how much each shows, as the game feeds them into one chain.
+// `shares` gives per rig node the solved turn's share (solvedShare) over `local`'s, null for all of it.
 void solveLimbs(const Rig& rig, std::span<const LimbSource> sources, std::vector<Transform>& local, std::vector<Transform>& world,
                 const std::vector<float>* shares = nullptr);
 

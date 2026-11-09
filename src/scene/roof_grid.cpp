@@ -3,14 +3,12 @@
 #include <algorithm>
 #include <cmath>
 
-// Roofs as the game builds them: heights on a grid of points half a tile apart, covering the roof's
-// rectangle and its overhang. Three layers of that grid make a slab (the shingled top, the edge
-// board's two bands and the underside). Each grid cell is split into two triangles, its diagonal
-// alternating like a checkerboard, and each top triangle shows one cell of the roof texture's
-// 5 x 5 grid of pieces, chosen from what its corners touch: the ridge (the roof's highest points),
-// the hips (the diagonals rising from a hipped roof's corners) and other roofs meeting it at the
-// same height. Roof types 1 to 6 differ only in their heights and where the ridge and hips run
-// (and type 6 leaves its flat top open).
+// Roofs as the game builds them: heights on a grid of points half a tile apart over the roof's rectangle
+// and overhang, three layers of it making a slab (shingled top, the edge board's two bands, underside).
+// Cells split into two triangles with checkerboard diagonals, and each top triangle shows one of the
+// roof texture's 5 x 5 pieces, chosen by what its corners touch: the ridge, the hips (diagonals rising
+// from a hipped roof's corners) and other roofs meeting it at the same height. Types 1 to 6 differ only
+// in heights and where ridge and hips run, and type 6 leaves its flat top open.
 
 namespace ts2::scene {
 

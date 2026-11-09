@@ -132,6 +132,31 @@ void RendererState::copyScene(PreparedBase& to, const scene::Scene& scene) {
     to.lightSets = scene.lightSets;
 }
 
+void RendererState::lendScene(PreparedBase& prepared, InstanceState& kept) {
+    std::swap(materials_, prepared.materials);
+    std::swap(instances_, prepared.instances);
+    std::swap(objectLighting_, prepared.objectLighting);
+    std::swap(lightSets_, prepared.lightSets);
+    std::swap(visible_, kept.visible);
+    std::swap(instanceMaterials_, kept.instanceMaterials);
+    std::swap(jointBase_, kept.jointBase);
+    std::swap(jointCount_, kept.jointCount);
+    std::swap(morphBase_, kept.morphBase);
+    std::swap(morphRoom_, kept.morphRoom);
+    std::swap(eyes_, kept.eyes);
+    std::swap(jointData_, kept.jointData);
+    std::swap(shadows_, kept.shadows);
+    // A scene lent for the first time starts with no pose. Either scene's poses go to the GPU again,
+    // as the other's were there.
+    if (jointBase_.size() != instances_.size()) {
+        jointBase_.assign(instances_.size(), -1);
+        jointCount_.assign(instances_.size(), 0);
+        morphBase_.assign(instances_.size(), -1);
+        morphRoom_.assign(instances_.size(), 0);
+    }
+    jointsChanged_ = true;
+}
+
 void RendererState::swapScene(PreparedBase& prepared) {
     std::swap(materials_, prepared.materials);
     std::swap(instances_, prepared.instances);

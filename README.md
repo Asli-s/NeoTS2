@@ -107,6 +107,7 @@ app, choose **Open**, then choose **Open** again.
 | DXC, from the Windows SDK | compiling the HLSL shaders |
 | [FreeType](https://freetype.org/) 2.13 | drawing the game's fonts |
 | [stb_image](https://github.com/nothings/stb) 2.30 (included) | reading PNG, JPEG and BMP images |
+| [stb_dxt](https://github.com/nothings/stb) 1.12 (included) | compressing High lot imposter pictures |
 | [Lua](https://www.lua.org/) 5.0.3 (included) | the scripting language the game's expansions use |
 
 ## Building

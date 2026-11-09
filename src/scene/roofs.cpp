@@ -5,12 +5,12 @@
 #include <map>
 #include <string_view>
 
-// Roofs: the roof list's type is the roofs.txt id plus one (1 gable shed, 2 hipped shed, 3 tall
-// gable, 4 gable, 5 hipped, 6 mansard...). A roof's surface is the lowest of the planes rising from
-// its sloped edges, so each face is the part of the rectangle where its plane is lowest. Sloped
-// edges reach out by the overhang, with a fascia under them. A shed's high side (toward the second
-// corner, across the shorter span) has no eave and meets the wall there. Gable ends are left to the
-// walls under them, which carry on up to the roof. Mansards and dormers are drawn as hipped.
+// Roofs: the roof list's type is the roofs.txt id plus one (1 gable shed, 2 hipped shed, 3 tall gable,
+// 4 gable, 5 hipped, 6 mansard...). A roof's surface is the lowest of the planes rising from its sloped
+// edges, which reach out by the overhang with a fascia under them. A shed's high side (toward the second
+// corner, across the shorter span) has no eave and meets the wall. Gable ends are left to the walls,
+// which carry on up to the roof. Types 1 to 6 are built on the roof grid instead (roof_grid.cpp), so
+// this shapes the greenhouse roof (for its walls) and draws any other type as hipped.
 
 namespace ts2::scene {
 

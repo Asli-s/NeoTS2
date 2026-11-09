@@ -27,6 +27,7 @@ using namespace render_detail;
 
 SdlGpuRenderer::SdlGpuRenderer(SDL_Window* window, const std::filesystem::path& shaderFolder) : window_(window) {
     device_ = SDL_CreateGPUDevice(kShaderFormat, false, nullptr);
+    transferPool_->device = device_;
     if (device_ == nullptr) {
         // SDL's own reason goes to the log only: it means little to players.
         diag::error(std::string("no GPU device: ") + SDL_GetError());
@@ -81,6 +82,7 @@ void SdlGpuRenderer::destroy() {
     }
     releasePassPipelines(single_);
     releasePassPipelines(smooth_);
+    releasePassPipelines(picture_);
     releaseOcclusion();
     for (auto* s : {clampedMips_, pointSampler_, clampedSampler_, shadowSampler_, shadowPoint_}) {
         if (s) {
@@ -92,7 +94,7 @@ void SdlGpuRenderer::destroy() {
             SDL_ReleaseGPUGraphicsPipeline(device_, p);
         }
     }
-    for (auto* t : {noOcclusion_, reflection_, reflectionDepth_, poolReflection_.color, poolReflection_.depth, seaReflection_.color, seaReflection_.depth, causticsTile_, poolShadow_, poolShadowDepth_, shadowPictures_, shadowBlurred_, objectScratch_, objectPictures_, objectPlaces_, objectGrid_}) {
+    for (auto* t : {noOcclusion_, reflection_, reflectionDepth_, poolReflection_.color, poolReflection_.depth, seaReflection_.color, seaReflection_.depth, causticsTile_, poolShadow_, poolShadowDepth_, shadowPictures_, shadowBlurred_, objectScratch_, objectPictures_, objectPlaces_, objectGrid_, objectFloors_}) {
         if (t) {
             SDL_ReleaseGPUTexture(device_, t);
         }
@@ -123,6 +125,12 @@ void SdlGpuRenderer::destroy() {
             SDL_ReleaseGPUTexture(device_, d->texture);
         }
     }
+    for (auto& [side, square] : pictureTargets_) {
+        SDL_ReleaseGPUTexture(device_, square.color);
+        SDL_ReleaseGPUTexture(device_, square.depth.texture);
+    }
+    pictureTargets_.clear();
+    transferPool_->releaseAll(true);
     SDL_ReleaseWindowFromGPUDevice(device_, window_);
     SDL_DestroyGPUDevice(device_);
     device_ = nullptr;

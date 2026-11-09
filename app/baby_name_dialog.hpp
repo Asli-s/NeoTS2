@@ -10,12 +10,10 @@
 
 namespace app {
 
-// The game's "Set Baby Name" dialog (UI script 0x2D91050A) for human babies: the baby panel, or the
-// twins panel for two, each baby's girl or boy icon and a box holding its first name, and OK. Every
-// box starts with its whole name selected and the first box has the keyboard. Only the box with the
-// keyboard shows its selection and caret. A click puts the caret there, dragging selects, and typing
-// replaces the selection. The other panels in the script (pets, robots, renaming an older Sim) aren't
-// shown yet, and the caret doesn't blink yet.
+// The game's "Set Baby Name" dialog (UI script 0x2D91050A) for human babies: the baby or twins panel,
+// each baby's girl or boy icon and first-name box, and OK. Every box starts fully selected, and only
+// the box with the keyboard (the first at the start) shows its selection and caret. The script's other
+// panels (pets, robots, renaming an older Sim) and the caret's blink aren't done yet.
 class BabyNameDialog {
 public:
     struct Baby {

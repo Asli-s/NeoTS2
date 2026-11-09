@@ -76,9 +76,26 @@ struct Place {
     int level = 0;                    // the storey it falls on, as the lot's height grid counts them
 };
 
+// The floor quarters the pictures may fall on. The game lays them only on outdoor floors (room 0),
+// so a porch takes an object's shadow and the room behind its wall doesn't. The terrain takes them
+// wherever they fall.
+struct OutdoorFloors {
+    int width = 0, height = 0;       // the lot's tiles along its own x and y
+    int firstLevel = 0, levels = 0;  // the levels held, as Place::level counts them (0 levels: no rooms known)
+    // A byte per tile, by level, then y, then x: bit k set when quarter k (see quarterOf) is outdoors.
+    std::vector<std::uint8_t> quarters;
+    // The scene's frame to the lot's own, three rows of a rigid transform.
+    std::array<float, 12> toLot{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+};
+
+// The quarter of a tile a point at (fx, fy) inside it (0..1 each) lies in: the triangle from the
+// tile's centre to its x-low edge 0, y-low 1, x-high 2, y-high 3.
+int quarterOf(float fx, float fy);
+
 struct Layout {
     std::vector<Picture> pictures;
     std::vector<Place> places;
+    OutdoorFloors floors;
 };
 
 } // namespace ts2::scene::objectshadow

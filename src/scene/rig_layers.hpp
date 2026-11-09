@@ -44,25 +44,22 @@ struct LayeredClip {
     const std::vector<HeldJoint>* pose = nullptr;
 };
 
-// Poses a rig from several animations as the game mixes them, joint by joint: the highest layer
-// that moves the joint takes it by its clips' summed weights, the layer below gets what it leaves
-// (1 minus that sum), and so on. A layer whose clips weigh 1 or more takes all that is left, shared
-// by their weights. A joint no clip moves stays at rest. Limbs reach for the targets of all the clips, each
-// clip weighted as a joint's mix weighs it.
-// With `held` (one per joint, or empty at first) a joint no clip moves keeps what it held instead,
-// as the game leaves a joint nothing drives. Clips below layer 0 (the pose the rig starts in) count
-// only while it holds nothing yet. `held` is then set to this pose. `look` is asked where the head
-// looks once the clips are mixed: the head turns toward its target on a layer above every clip.
+// Poses a rig from several animations as the game mixes them, joint by joint: the highest layer moving a
+// joint takes it by its clips' summed weights, the layer below gets 1 minus that, and so on. A layer whose
+// clips weigh 1 or more takes all that's left, shared by weight. Limbs reach for all clips' targets,
+// weighted as the joint mix weighs them. A joint no clip moves stays at rest, or with `held` (one per
+// joint, empty at first) keeps what it held, as in the game. Clips below layer 0 (the starting pose)
+// count only while nothing is held yet, and `held` is then set to this pose. `look` gives where the head
+// looks after mixing, and it turns there on a layer above every clip.
 void poseRigLayered(const Rig& rig, std::span<const LayeredClip> clips, std::vector<Transform>& world,
                     std::vector<HeldJoint>* held = nullptr,
                     const std::function<std::optional<HeadLook>(const HeadPlace&)>* look = nullptr);
 
 // The weights the clips give a mesh's morphs (Mesh::morphs), one per morph into `weights`. A clip's
-// morph channel weighs the morph of its name in its target's blend group ("*" any), names matched
-// whatever their case, and a channel marked constant keeps its first value. The clips mix as they do
-// on a joint, layer by layer, a clip counting only above 0.00075 of the morph. A morph no clip weighs
-// keeps the weight it had, 0 at first.
-// With `bindings`, the channels are matched to the mesh (`meshIndex` in the scene) once per clip.
+// morph channel weighs the morph of its name, case ignored, in its target's blend group ("*" any), and a
+// constant channel keeps its first value. Clips mix layer by layer as on a joint, each counting only
+// above 0.00075. A morph no clip weighs keeps its weight, 0 at first. With `bindings` the channels are
+// matched to the mesh (`meshIndex` in the scene) once per clip.
 void mixMorphWeights(const Mesh& mesh, std::span<const LayeredClip> clips, std::vector<float>& weights,
                      MorphBindings* bindings = nullptr, int meshIndex = -1);
 // The clips' eye values, mixed the same way into `eyes`: the eyes' direction (x, y) and the left and

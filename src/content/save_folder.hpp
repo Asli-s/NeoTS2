@@ -17,14 +17,11 @@ struct SaveFolderFill {
     std::string problem;
 };
 
-// Fills a new save folder as the game does on its first start with it: each pack's UserData
-// folders copied as the install holds them (the newest pack's copy of a shared file kept), the
-// Thumbnails packages merged and the shipped lots imported into the lot catalog.
-//
-// Only a missing or empty folder is filled, never an original game's own folder
-// (paths::isOriginalGamesFolder) or one paths::saveFolderRefusal refuses. Links and junctions are
-// never followed. The copy is built beside the folder and moved into place in one step, so a fill
-// that stops leaves the folder as it was. The caller holds the folder's lock.
+// Fills a new save folder as the game does on its first start: each pack's UserData folders copied
+// (the newest pack's copy of a shared file kept), Thumbnails packages merged and shipped lots imported
+// into the lot catalog. Only a missing or empty folder is filled, never an original game's
+// (paths::isOriginalGamesFolder) or one paths::saveFolderRefusal refuses, and links are never followed.
+// The copy is built beside the folder and moved in at once, so a fill that stops changes nothing.
 SaveFolderFill fillNewSaveFolder(const std::filesystem::path& installRoot, const paths::SaveFolderLock& lock);
 
 // Adds the install's shipped neighborhoods to a save folder that holds files but no neighborhoods

@@ -21,13 +21,11 @@ struct NewbornFaceData {
     std::vector<FacePair> pairs;
 };
 
-// The change that turns the base baby face (buFace) into a newborn's face blended from its parents'
-// face shapes. Without picks, or when either parent's shape has no baby face, the base face stays as
-// it is, as in the game. Each region is
-// taken from parent `a` (true) or `b` as `picks` say, in the order of the face pairs the game reads
-// (FaceInfo), a region missing from `picks` from `a`. Copied vertices move toward the parent's by
-// the region's mask weight. The hair and neck stay as the base has them, normals are made again
-// from the new triangles except where the base's are kept. `key` names the result.
+// The change that turns the base baby face (buFace) into a newborn's face blended from its parents'.
+// Without picks, or when a parent's shape has no baby face, the base face stays, as in the game. Each
+// region comes from parent `a` (true) or `b` as `picks` say, in the game's face pair order (FaceInfo),
+// missing ones from `a`, its vertices moved toward the parent's by the region's mask weight. Hair and
+// neck stay as the base has them, and normals are remade except where the base's are kept.
 MeshEdit newbornFaceEdit(Assets& assets, std::shared_ptr<NewbornFaceData> data, std::string key, std::optional<faceshape::FaceShape> a,
                          std::optional<faceshape::FaceShape> b, std::vector<std::pair<std::string, bool>> picks);
 

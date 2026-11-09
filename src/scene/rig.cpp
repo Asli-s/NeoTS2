@@ -638,9 +638,12 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
     thread_local std::vector<std::size_t> inHand;  // sorted
     posedNow.clear();
     inHand.clear();
-    for (const auto& actor : scene.actors) {
-        for (const auto& h : actor.held) {
-            inHand.push_back(h.instance);
+    // With what hangs in a lot object's slots, which is placed from that object's bones below.
+    for (const auto* list : {&scene.actors, &scene.objectActors}) {
+        for (const auto& actor : *list) {
+            for (const auto& h : actor.held) {
+                inHand.push_back(h.instance);
+            }
         }
     }
     std::sort(inHand.begin(), inHand.end());
@@ -849,7 +852,7 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
         drawnAt[actor.object] = place;
         for (const auto& h : actor.held) {
             const bool known = h.node >= 0 && static_cast<std::size_t>(h.node) < world.size();
-            const Transform at = known ? place * world[static_cast<std::size_t>(h.node)] : place;
+            const Transform at = (known ? place * world[static_cast<std::size_t>(h.node)] : place) * h.offset;
             out.places.emplace_back(h.instance, at);
             for (const auto& o : scene.objectActors) {
                 if (std::any_of(o.skinned.begin(), o.skinned.end(), [&](const Actor::Skinned& s) { return s.instance == h.instance; })) {
@@ -858,6 +861,48 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
             }
         }
     }
+    // What hangs in a lot object's slots goes to the slot's bone as the object's clips posed it, at
+    // the place the object is drawn now: in a Sim's hand, or in a slot of another such object.
+    // Objects nest a few deep at most, and the cap stops a broken lot's containers that hold each other.
+    constexpr int kMaxNesting = 8;
+    thread_local std::vector<std::pair<std::size_t, Transform>> hung;
+    hung.clear();
+    for (int depth = 0; depth < kMaxNesting; ++depth) {
+        bool changed = false;
+        const auto objectsEnd = objectNodes.begin() + static_cast<std::ptrdiff_t>(objectsPosed);
+        for (auto o = objectNodes.begin(); o != objectsEnd; ++o) {
+            const Actor& actor = *o->first;
+            if (actor.held.empty()) {
+                continue;
+            }
+            const auto drawn = drawnAt.find(actor.object);
+            const Transform& base = drawn != drawnAt.end() ? drawn->second : actor.place;
+            for (const auto& h : actor.held) {
+                if (h.node < 0 || static_cast<std::size_t>(h.node) >= o->second.size()) {
+                    continue;
+                }
+                const Transform at = base * o->second[static_cast<std::size_t>(h.node)] * h.offset;
+                auto was = std::find_if(hung.begin(), hung.end(), [&](const auto& p) { return p.first == h.instance; });
+                if (was == hung.end()) {
+                    hung.emplace_back(h.instance, at);
+                } else if (was->second.m != at.m) {
+                    was->second = at;
+                } else {
+                    continue;
+                }
+                changed = true;
+                for (const auto& inner : scene.objectActors) {
+                    if (std::any_of(inner.skinned.begin(), inner.skinned.end(), [&](const Actor::Skinned& s) { return s.instance == h.instance; })) {
+                        drawnAt[inner.object] = at;
+                    }
+                }
+            }
+        }
+        if (!changed) {
+            break;
+        }
+    }
+    out.places.insert(out.places.end(), hung.begin(), hung.end());
     out.nodes.resize(posed);
     out.joints.resize(skinned);
     out.held = std::move(held);

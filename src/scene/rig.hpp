@@ -83,12 +83,11 @@ void stretchTeenArms(Rig& rig);
 // A joint's rest translation when its rig, now at `rig.stretch`, is sized to `stretch` instead.
 std::array<float, 3> stretchedPlace(const Rig& rig, const Rig::Node& node, float stretch);
 
-// How a clip made for one body size moves a joint on a skeleton of another: the game fits each
-// sampled translation on the joint's stretch axis by factor = skeleton stretch / ((clip stretch - 1)
-// x weight + 1). A value of the same sign as `height` moves by (factor - 1) x height, any other is
-// scaled by the factor. Only root_trans has a height (its clip's root height), so a teen's root stands
-// lower by the same amount all through a climb. Joints marked unstretched, or stretched on all three
-// axes, are left as the clip has them.
+// How a clip made for one body size moves a joint of another skeleton: the game fits each sampled
+// translation on the joint's stretch axis by factor = skeleton stretch / ((clip stretch - 1) x weight + 1).
+// A value of `height`'s sign moves by (factor - 1) x height, any other is scaled. Only root_trans has a
+// height (its clip's root height), so a teen's root stands equally lower all through a climb. Joints
+// marked unstretched, or stretched on all three axes, are left as the clip has them.
 struct PlaceFit {
     int axis = -1;  // -1: the joint's places are kept
     float factor = 1;

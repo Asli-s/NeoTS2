@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <optional>
 #include <regex>
 
 namespace ts2::scene {
@@ -22,27 +23,52 @@ std::array<float, 2> meet(float px, float py, float dx, float dy, float nx, floa
     return {px + h * nx + s * dx, py + h * ny + s * dy};
 }
 
-// The spans of a face (as fractions of the segment across its texture) where its material's texture is a
+// A face material's wall mask (see Material::mask), read in the face's own direction.
+struct FaceMask {
+    const Image* image = nullptr;
+    bool mirrored = false;
+
+    int width() const { return static_cast<int>(image->width); }
+    int height() const { return static_cast<int>(image->height); }
+    // Whether column c (counted along the face) at row r is a hole.
+    bool hole(int c, int r) const {
+        const int x = mirrored ? width() - 1 - c : c;
+        return image->rgba[(static_cast<std::size_t>(r) * image->width + static_cast<std::size_t>(x)) * 4 + 3] < 128;
+    }
+};
+
+std::optional<FaceMask> faceMask(SceneBuilder& builder, const std::string& material) {
+    const int m = material.empty() ? -1 : builder.material(material);
+    if (m < 0) {
+        return std::nullopt;
+    }
+    const auto& mat = builder.scene().materials[static_cast<std::size_t>(m)];
+    if (mat.mask < 0) {
+        return std::nullopt;
+    }
+    const Image& image = builder.scene().images[static_cast<std::size_t>(mat.mask)];
+    if (image.width == 0 || image.height == 0 || image.rgba.size() < static_cast<std::size_t>(image.width) * image.height * 4) {
+        return std::nullopt;
+    }
+    return FaceMask{&image, mat.maskMirrored};
+}
+
+// The spans of a face (as fractions of the segment across its texture) where its material's mask is a
 // hole all the way from texture row v0 down to v1: a doorway through a cut-down wall.
 std::vector<std::array<float, 2>> holes(SceneBuilder& builder, const std::string& material, float v0, float v1) {
     std::vector<std::array<float, 2>> spans;
-    const int m = material.empty() ? -1 : builder.material(material);
-    if (m < 0) {
+    const auto mask = faceMask(builder, material);
+    if (!mask) {
         return spans;
     }
-    const auto& mat = builder.scene().materials[static_cast<std::size_t>(m)];
-    if (mat.alpha != AlphaMode::Mask || mat.image < 0) {
-        return spans;
-    }
-    const Image& image = builder.scene().images[static_cast<std::size_t>(mat.image)];
-    const auto w = static_cast<int>(image.width), h = static_cast<int>(image.height);
+    const int w = mask->width(), h = mask->height();
     const int r0 = std::clamp(static_cast<int>(v0 * static_cast<float>(h)), 0, h - 1);
     const int r1 = std::clamp(static_cast<int>(std::ceil(v1 * static_cast<float>(h))) - 1, r0, h - 1);
     int start = -1;
     for (int c = 0; c <= w; ++c) {
         bool hole = c < w;
         for (int r = r0; hole && r <= r1; ++r) {
-            hole = image.rgba[(static_cast<std::size_t>(r) * image.width + static_cast<std::size_t>(c)) * 4 + 3] < 128;
+            hole = mask->hole(c, r);
         }
         if (hole && start < 0) {
             start = c;
@@ -54,27 +80,19 @@ std::vector<std::array<float, 2>> holes(SceneBuilder& builder, const std::string
     return spans;
 }
 
-// The rows (as fractions down the texture) where a face's texture is a hole in its first or last
+// The rows (as fractions down the texture) where a face's mask is a hole in its first or last
 // column: a window or door running on past that end of the segment into the next.
 std::vector<std::array<float, 2>> endHoles(SceneBuilder& builder, const std::string& material, bool last) {
     std::vector<std::array<float, 2>> spans;
-    const int m = material.empty() ? -1 : builder.material(material);
-    if (m < 0) {
+    const auto mask = faceMask(builder, material);
+    if (!mask) {
         return spans;
     }
-    const auto& mat = builder.scene().materials[static_cast<std::size_t>(m)];
-    if (mat.alpha != AlphaMode::Mask || mat.image < 0) {
-        return spans;
-    }
-    const Image& image = builder.scene().images[static_cast<std::size_t>(mat.image)];
-    if (image.width == 0 || image.height == 0) {
-        return spans;
-    }
-    const std::size_t c = last ? image.width - 1 : 0;
-    const auto h = static_cast<int>(image.height);
+    const int c = last ? mask->width() - 1 : 0;
+    const int h = mask->height();
     int start = -1;
     for (int r = 0; r <= h; ++r) {
-        const bool hole = r < h && image.rgba[(static_cast<std::size_t>(r) * image.width + c) * 4 + 3] < 128;
+        const bool hole = r < h && mask->hole(c, r);
         if (hole && start < 0) {
             start = r;
         } else if (!hole && start >= 0) {

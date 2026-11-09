@@ -8,12 +8,10 @@
 
 namespace ts2::content {
 
-// The .package files in a save folder, in the order the game loads them. Downloads has no load of
-// its own: the game walks the whole folder, so Body Shop parts in SavedSims count too. Files and
-// folders are sorted together by name, ignoring case, each folder walked where it falls. A later
-// package overrides an earlier one, and all of them override the install. Folders named
-// Characters, Lots, LotCatalog or Thumbnails are left out at any depth, as are .files and .sgfiles
-// folders.
+// The .package files in a save folder in the game's load order. The game walks the whole folder, not
+// just Downloads, so Body Shop parts in SavedSims count too. Files and folders sort together by name,
+// ignoring case. Later packages override earlier ones and all override the install. Characters, Lots,
+// LotCatalog, Thumbnails, .files and .sgfiles folders are left out at any depth.
 [[nodiscard]] std::vector<std::filesystem::path> downloadPackages(const std::filesystem::path& saveFolder);
 
 // The group of a package's own resources, those saved in group 0xFFFFFFFF: from its file name up

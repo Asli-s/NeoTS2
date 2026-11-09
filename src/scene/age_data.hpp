@@ -40,12 +40,11 @@ private:
     std::uint32_t state_;
 };
 
-// The age data a Sim gets on reaching `age` (an age flag: 1 toddler, 2 child, 4 teen, 8 adult,
-// 0x10 elder, 0x40 young adult), as the game makes it: the old data copied, faces of exactly the
-// new age from the Sim's own parts (`ownParts`, its character file's part property sets), default
-// skin outfits from the catalog, each hair turned into the new age's hair of its family (elders go
-// grey), new clothes drawn at random, and the PlantSim parts kept or swapped for the new age's.
-// Nullopt for what isn't known yet: a baby, a pet, and a teen becoming a young adult with no
+// The age data a Sim gets on reaching `age` (age flag: 1 toddler, 2 child, 4 teen, 8 adult, 0x10 elder,
+// 0x40 young adult), as the game makes it: the old data copied, faces of exactly the new age from the
+// Sim's own parts (`ownParts`, its character file's part property sets), default skin outfits, each hair
+// turned into the new age's of its family (elders go grey), clothes at random and PlantSim parts kept or
+// swapped. Nullopt for what isn't known yet: a baby, a pet, or a teen becoming a young adult with no
 // young adult face of its own.
 std::optional<AgeData> ageUp(const AgeData& old, std::uint32_t age, const std::vector<CatalogPart>& ownParts,
                              const OutfitCatalog& catalog, OutfitRandom& random);
@@ -66,12 +65,11 @@ struct MadeLook {
     std::vector<std::string> problems;
 };
 
-// The look Make New Character gives a human made from a template. The catalog is drawn from twice:
-// clothes of flag 4 first, then everything but the skin among parts without flags 1 or 8 (hair
-// colour, hair, eyebrows, eyes, facial hair 74 times in 100 for males past childhood, glasses 9 times
-// in 100, a face template and clothes). Then the skin, unless the Sim has a tone of its own. Then
-// `outfits` (the outfit object's age data) of exactly the Sim's age, gender and species put on what
-// their "validparts" names: a uniform replaces the outfits it has a list for.
+// The look Make New Character gives a human made from a template. The catalog is drawn from for clothes
+// of flag 4, then for all but the skin among parts without flags 1 or 8 (hair colour, hair, eyebrows,
+// eyes, facial hair 74 in 100 for males past childhood, glasses 9 in 100, a face template, clothes), then
+// for the skin unless the Sim has its own tone. Last, `outfits` (the outfit object's age data) of exactly
+// its age, gender and species go on what their "validparts" name, a uniform replacing the outfits it lists.
 MadeLook makeLook(const NewCharacter& who, const std::vector<AgeData>& outfits, const OutfitCatalog& catalog, OutfitRandom& random);
 
 // The one of an outfit object's age data (`outfits`, in the order listed) a Sim of `age` and

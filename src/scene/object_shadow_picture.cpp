@@ -92,6 +92,56 @@ void setRow(std::array<float, 16>& m, int row, const Vec& axis, float scale, flo
     m[static_cast<std::size_t>(row * 4 + 3)] = offset;
 }
 
+// The renderer's mask holds lots up to this size, more than the biggest lot the game makes.
+constexpr int kMostTiles = 256;
+constexpr int kMostLevels = 8;
+
+// The lot's outdoor floor quarters on the levels the places fall on, from its rooms. Each quarter's
+// room is the one at the middle of its triangle.
+OutdoorFloors outdoorFloors(const Scene& scene, const std::vector<Place>& places, const Transform& toLot) {
+    OutdoorFloors f;
+    std::copy(toLot.m.begin(), toLot.m.begin() + 12, f.toLot.begin());
+    if (!scene.roomAt || places.empty()) {
+        return f;
+    }
+    const float w = std::ceil(scene.lotSize[0]), h = std::ceil(scene.lotSize[1]);
+    if (!(w >= 1) || !(h >= 1) || w > kMostTiles || h > kMostTiles) {
+        if (w > kMostTiles || h > kMostTiles) {
+            diag::warnOnce("object shadows: a lot over 256 tiles across lays them on every floor");
+        }
+        return f;
+    }
+    int low = places.front().level, high = low;
+    for (const auto& p : places) {
+        low = std::min(low, p.level);
+        high = std::max(high, p.level);
+    }
+    if (high - low >= kMostLevels) {
+        diag::warnOnce("object shadows: levels past 8 above the lowest shadow lay them on every floor");
+        high = low + kMostLevels - 1;
+    }
+    f.width = static_cast<int>(w);
+    f.height = static_cast<int>(h);
+    f.firstLevel = low;
+    f.levels = high - low + 1;
+    f.quarters.assign(static_cast<std::size_t>(f.width) * static_cast<std::size_t>(f.height) * static_cast<std::size_t>(f.levels), 0);
+    static constexpr float kMiddle[4][2] = {{1.0f / 6, 0.5f}, {0.5f, 1.0f / 6}, {5.0f / 6, 0.5f}, {0.5f, 5.0f / 6}};
+    std::size_t i = 0;
+    for (int level = low; level <= high; ++level) {
+        for (int y = 0; y < f.height; ++y) {
+            for (int x = 0; x < f.width; ++x, ++i) {
+                for (int q = 0; q < 4; ++q) {
+                    const float px = static_cast<float>(x) + kMiddle[q][0], py = static_cast<float>(y) + kMiddle[q][1];
+                    if (scene.roomAt(level - scene.groundLevel, px, py) == 0) {
+                        f.quarters[i] = static_cast<std::uint8_t>(f.quarters[i] | (1u << q));
+                    }
+                }
+            }
+        }
+    }
+    return f;
+}
+
 } // namespace
 
 std::optional<Picture> picture(const Mesh& mesh, int meshIndex, int facing, const Vec& toSun) {
@@ -238,6 +288,7 @@ Layout layout(const Scene& scene, const Vec& toSun, const Transform& place) {
         laid.level = storey + scene.groundLevel;
         out.places.push_back(laid);
     }
+    out.floors = outdoorFloors(scene, out.places, toLot);
     return out;
 }
 

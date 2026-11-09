@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
 #include <string_view>
 
 namespace ts2::scene::objectshadow {
@@ -60,6 +61,14 @@ Kind resolved(Kind requested, bool outdoors, const Facts& f) {
     default:
         return requested;
     }
+}
+
+int quarterOf(float fx, float fy) {
+    const float dx = fx - 0.5f, dy = fy - 0.5f;
+    if (std::abs(dx) >= std::abs(dy)) {
+        return dx < 0 ? 0 : 2;
+    }
+    return dy < 0 ? 1 : 3;
 }
 
 Kind inForce(Kind kind, const Facts& facts, const Options& options) {

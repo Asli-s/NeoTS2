@@ -10,6 +10,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <vector>
@@ -89,6 +90,37 @@ public:
     // with different edits are kept apart by the edit's key.
     int skinnedModel(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides,
                      const MeshEdit* edit = nullptr, const scenegraph::Link* at = nullptr, bool hair = false);
+    // A model's shape with where it sits in the model, the joint it follows (its own node when named,
+    // else the nearest named one above, empty for none) and where it sits from that joint.
+    struct ModelShape {
+        scenegraph::Shape shape;
+        Transform place;
+        std::string node;
+        Transform fromNode;
+    };
+    // A model's shapes and its joints: by the index meshes skin to, each one's rest place in the
+    // model, and the joints that nodes drawing shapes follow.
+    struct ModelShapes {
+        std::vector<ModelShape> shapes;
+        std::map<int, std::string> joints;
+        Pose rests;
+        std::set<std::string> shapeJoints;
+    };
+    // What a buildModel call asks for, as its parts read it.
+    struct ModelRequest {
+        const std::string& name;
+        const std::vector<scenegraph::MaterialOverride>& overrides;
+        const Pose* pose;
+        bool skinned;
+        bool hair;
+    };
+    std::optional<ModelShapes> readModelShapes(const std::string& name, const Pose* places, const std::string& boneKey,
+                                               const scenegraph::Link* at);
+    std::optional<scenegraph::Mesh> readShapeMesh(const scenegraph::Shape& shape, std::size_t item, const std::string& name, const MeshEdit* edit);
+    std::optional<Primitive> groupPrimitive(const ModelRequest& request, const ModelShapes& model, const ModelShape& placed,
+                                            const scenegraph::Mesh& data, const scenegraph::Group& group, Mesh& mesh);
+    int composedFace(const scenegraph::Material& m);
+    void readMaps(const scenegraph::Material& m, bool deprecated, Material& out);
 
     // Where a named node of a model sits in it, once the model has been built.
     const Transform* bone(const std::string& model, const std::string& node) const;
@@ -152,11 +184,17 @@ public:
     int textureRegionMaterial(const std::string& texture, double u0, double v0, double u1, double v1, std::uint32_t width,
                               std::uint32_t height, const std::array<float, 3>& color);
     // A terrain texture with its detail texture ("<name>_detail", `repeats` times across it) laid
-    // over by the detail's alpha, as one image, tinted by `shade`. Canvas (opaque) or paint (a layer).
+    // over by the detail's alpha (see Material::terrain), tinted by `shade`. Canvas (opaque) or paint
+    // (a layer).
     int terrainMaterial(const std::string& texture, int repeats, float shade, bool paint);
     // A wall covering with a door or window's wall mask cut out of it: alpha below half in the mask
-    // is a hole. `mirrored` when the mask runs right to left across the face. -1 when either is missing.
+    // is a hole (see Material::mask). `mirrored` when the mask runs right to left across the face. -1
+    // when either is missing.
     int maskedMaterial(const std::string& covering, const std::string& mask, bool mirrored);
+    // Each of the scene's images by what it was made from (a texture's name, or a name and how it was
+    // made), empty for images made for this scene alone such as light maps. Builders on the same
+    // assets make the same image from the same key, so scenes joined later can share them.
+    std::vector<std::string> imageKeys() const;
 
     // Adds the collected surfaces as a mesh. -1 when there is nothing in them.
     int addMesh(const std::string& name, Surfaces surfaces);
@@ -170,7 +208,7 @@ public:
     // the original game, which draws them with its waterOnTerrain material.
     void setPoolStylePonds(bool on) { poolStylePonds_ = on; }
     bool poolStylePonds() const { return poolStylePonds_; }
-    // Whether a beach lot's sea gets a colour that deepens with the water and the pools' caustics on
+    // Whether the sea around a lot gets a colour that deepens with the water and the pools' caustics on
     // the ground under it, its surface left clear but for its reflection. Not in the original game.
     void setPoolStyleSea(bool on) { poolStyleSea_ = on; }
     bool poolStyleSea() const { return poolStyleSea_; }
@@ -204,9 +242,9 @@ private:
     int wallNormalMap(const scenegraph::Material& m);
     // Textures drawn one over another by their alpha, bottom first, at the smallest one's size, opaque.
     int layeredImage(const std::vector<std::string>& textures);
-    // A material's texture with alpha below half in `cut` as holes (see maskedMaterial). -1 when
+    // A wall covering's material with `maskTexture` as its wall mask (see maskedMaterial). -1 when
     // either is missing.
-    int cutMaterial(const std::string& name, const std::string& covering, const std::optional<Image>& cut, bool mirrored);
+    int cutMaterial(const std::string& name, const std::string& covering, const std::string& maskTexture, bool mirrored);
     // A cube texture's index in Scene::envCubes, loaded once per name. -1 when it is missing or broken.
     int envCube(const std::string& texture);
     int addImage(Image image);

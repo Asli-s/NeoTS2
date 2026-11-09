@@ -108,6 +108,35 @@ inline std::vector<std::uint8_t> texture(const std::string& name, std::uint32_t 
     return b.out;
 }
 
+// A texture (TXTR, version 9) in a DXT format (4, 5 or 8) with these levels, given largest first and
+// stored smallest first, as the game stores them.
+inline std::vector<std::uint8_t> blockTexture(const std::string& name, std::uint32_t width, std::uint32_t height, std::uint32_t format,
+                                              const std::vector<std::vector<std::uint8_t>>& levels) {
+    Bytes b;
+    container(b, {}, {kTxtr});
+    blockHeader(b, "cImageData", 9);
+    sgResource(b, name);
+    b.u32(width);
+    b.u32(height);
+    b.u32(format);
+    b.u32(static_cast<std::uint32_t>(levels.size()));
+    b.f32(1);
+    b.u32(1);  // textures
+    b.u32(0);
+    b.text("");
+    b.u32(static_cast<std::uint32_t>(levels.size()));
+    for (auto level = levels.rbegin(); level != levels.rend(); ++level) {
+        b.u8(0);  // inline
+        b.u32(static_cast<std::uint32_t>(level->size()));
+        for (const std::uint8_t byte : *level) {
+            b.u8(byte);
+        }
+    }
+    b.u32(0);  // colour
+    b.f32(1);  // bump amplitude
+    return b.out;
+}
+
 // A material (TXMT) of a type with name-value properties.
 inline std::vector<std::uint8_t> material(const std::string& name, const std::string& type,
                                           const std::vector<std::pair<std::string, std::string>>& properties) {

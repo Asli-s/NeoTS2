@@ -4,6 +4,7 @@
 #include "content/install.hpp"
 #include "content/neighborhood.hpp"
 #include "diag/log.hpp"
+#include "scene/sky_looks.hpp"
 #include "formats/dbpf.hpp"
 #include "formats/hash.hpp"
 #include "formats/namemap.hpp"
@@ -302,6 +303,30 @@ public:
         return level == 0 ? std::move(firstBytes_) : bytes(first_ + level);
     }
 
+    // Every level of a DXT texture as stored, from the largest down to 1 x 1, each cut to its exact size.
+    // Empty for other formats, or when a level is missing or short (broken custom content).
+    std::vector<std::vector<std::uint8_t>> blockLevels() {
+        const std::uint32_t format = image_.format;
+        if (format != 4 && format != 5 && format != 8) {
+            return {};
+        }
+        std::vector<std::vector<std::uint8_t>> out;
+        for (std::size_t level = 0; level < count(); ++level) {
+            const std::uint32_t w = width(level), h = height(level);
+            auto data = level == 0 ? firstBytes_ : bytes(first_ + level);
+            const std::size_t size = sg::textureBytes(w, h, format);
+            if (data.size() < size) {
+                return {};
+            }
+            data.resize(size);
+            out.push_back(std::move(data));
+            if (w == 1 && h == 1) {
+                return out;
+            }
+        }
+        return {};
+    }
+
 private:
     TextureLevels(Assets& assets, std::string name, sg::Image image)
         : assets_(assets), name_(std::move(name)), image_(std::move(image)) {}
@@ -340,6 +365,20 @@ bool powerOfTwo(std::uint32_t n) {
 std::optional<Image> Assets::texture(const std::string& name) {
     auto t = TextureLevels::read(*this, name);
     return t ? t->decode(0) : std::nullopt;
+}
+
+std::optional<Image> Assets::textureAsStored(const std::string& name) {
+    auto t = TextureLevels::read(*this, name);
+    if (!t) {
+        return std::nullopt;
+    }
+    auto blocks = t->blockLevels();
+    auto image = t->decode(0);
+    if (image && !blocks.empty()) {
+        image->blockFormat = t->format();
+        image->blockLevels = std::move(blocks);
+    }
+    return image;
 }
 
 std::optional<std::pair<std::uint32_t, std::uint32_t>> Assets::textureSize(const std::string& name) {
@@ -428,6 +467,9 @@ std::vector<Image> Assets::textureFaces(const std::string& name) {
                 return {};
             }
             out.push_back(Image{img.width, img.height, sg::decodeRgba(face.back().data, img.width, img.height, img.format)});
+        }
+        if (realisticSky_) {
+            recolourRealisticSky(name, out);
         }
     } catch (const std::exception& ex) {
         warnings.push_back("texture " + name + ": " + ex.what());

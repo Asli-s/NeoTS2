@@ -8,6 +8,7 @@
 #include "formats/scenegraph.hpp"
 #include "scene/scene.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -82,6 +83,9 @@ public:
 
     // The largest mip level of a texture, decoded. Empty when it is missing or unreadable.
     [[nodiscard]] std::optional<Image> texture(const std::string& name);
+    // The same, also keeping the file's DXT levels (Image::blockLevels) when it has them all the way
+    // down, for a texture drawn unchanged.
+    [[nodiscard]] std::optional<Image> textureAsStored(const std::string& name);
     // The size of a texture's largest mip level that is there. Empty when it is missing or unreadable.
     [[nodiscard]] std::optional<std::pair<std::uint32_t, std::uint32_t>> textureSize(const std::string& name);
     // A texture's own mip level of exactly this size, decoded: the largest level halved (rounding
@@ -92,7 +96,10 @@ public:
     // is missing or unreadable.
     [[nodiscard]] std::optional<Image> normalMap(const std::string& name);
     // Every face of a texture (six for a cube map, in the file's order), the largest mip level each.
+    // The game's skies come recoloured while the Realistic sky is chosen (see recolourRealisticSky).
     std::vector<Image> textureFaces(const std::string& name);
+    // Whether the skies read from now on are the Realistic ones, not in the original game.
+    void setRealisticSky(bool on) { realisticSky_ = on; }
 
     // The game's lighting settings (Lights/Lighting.txt of every product).
     const content::Lighting& lighting() const { return lighting_; }
@@ -141,6 +148,7 @@ public:
     std::vector<std::string> warnings;
 
 private:
+    std::atomic<bool> realisticSky_ = false;
     void readMaterialNames(const std::filesystem::path& path);
     void readCatalog();
 

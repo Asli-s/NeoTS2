@@ -430,12 +430,10 @@ void limbIkReachesChannelTargets() {
         CHECK(std::fabs(end[4] - 1.0f) < 1e-4f);
     }
 
-    // Two targets weighted half and half: the leg reaches between them. With the chain's weight at 0
-    // it keeps the animation's own pose (here the rest pose, its end at y 1.5). At half weight it still
-    // reaches fully, as no clip turns its joints. With the clip turning its first joint (to rest) it
-    // goes only part of the way. A turn of the clip's own counts in full against the limb's weight
-    // on the joint (the larger of its targets' 0.5 and its pole's 0.5), so the joint takes a third of
-    // the solved turn. A turn tagged with the chain counts by 1 minus the chain's weight: half.
+    // Two half-weighted targets: the leg reaches between them. Chain weight 0 keeps the clip's pose
+    // (rest, end at y 1.5). Half weight still reaches fully when no clip turns the joints. A clip turn
+    // of the first joint counts in full against the limb's weight there (0.5), so the joint takes a
+    // third of the solved turn. A turn tagged with the chain counts by 1 minus the chain weight: half.
     float solvedAngle = 0;
     for (const float chainWeight : {1.0f, 0.5f, 0.0f}) {
       for (const int clipTurns : {0, 1, 2}) {
@@ -1376,9 +1374,9 @@ void bumpHeightsBecomeTheGamesNormals() {
     CHECK(ts2::scene::bumpNormals({}, 0, 0).empty());
 }
 
-// A ground decal lies on the terrain's own triangles, cut to its turned square, its texture across
-// the square only.
-void groundDecalsAreCutToTheirSquare() {
+// A ground decal covers the terrain tiles its turned rectangle reaches, whole, its texture spanning
+// the rectangle.
+void groundDecalsCoverTheTilesTheyReach() {
     ts2::scene::PaintedTerrain t;
     t.columns = t.rows = 4;
     t.tileSize = 10;
@@ -1389,22 +1387,27 @@ void groundDecalsAreCutToTheirSquare() {
     }
     const auto p = ts2::scene::groundDecal(t, {15, 15}, 10, 0.125f, 0);
     CHECK(!p.indices.empty() && p.indices.size() % 3 == 0);
-    double area = 0;
-    for (std::size_t i = 0; i + 2 < p.indices.size(); i += 3) {
-        const float* a = &p.positions[p.indices[i] * 3];
-        const float* b = &p.positions[p.indices[i + 1] * 3];
-        const float* c = &p.positions[p.indices[i + 2] * 3];
-        area += std::abs((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])) / 2;
-    }
-    CHECK(std::abs(area - 100) < 1e-3);
-    bool onGround = true, inside = true;
+    // Whole tiles on the terrain's own corners, the middle tile among them.
+    bool onCorners = true, middle = false;
     for (std::size_t v = 0; v * 3 < p.positions.size(); ++v) {
         const float x = p.positions[v * 3], y = p.positions[v * 3 + 1], z = p.positions[v * 3 + 2];
-        onGround = onGround && std::abs(z - (300 + 0.5f * x + 0.25f * y)) < 1e-3f;
-        const float u = p.uvs[v * 2], w = p.uvs[v * 2 + 1];
-        inside = inside && u > -1e-4f && u < 1 + 1e-4f && w > -1e-4f && w < 1 + 1e-4f;
+        onCorners = onCorners && std::fmod(x, 10.0f) == 0 && std::fmod(y, 10.0f) == 0 && std::abs(z - (300 + 0.5f * x + 0.25f * y)) < 1e-3f;
+        middle = middle || (x == 20 && y == 20);
     }
-    CHECK(onGround && inside);
+    CHECK(onCorners && middle);
+    // A rectangle half as deep as wide, unturned, reaches only the middle tile: its texture runs from
+    // 0 to 1 across and from -0.5 to 1.5 down the tile.
+    const auto r = ts2::scene::groundDecal(t, {15, 15}, 10, 0, 0, 0.5f);
+    float lowU = 9, highU = -9, lowV = 9, highV = -9;
+    for (std::size_t v = 0; v + 1 < r.uvs.size(); v += 2) {
+        lowU = std::min(lowU, r.uvs[v]);
+        highU = std::max(highU, r.uvs[v]);
+        lowV = std::min(lowV, r.uvs[v + 1]);
+        highV = std::max(highV, r.uvs[v + 1]);
+    }
+    CHECK(std::abs(lowU) < 1e-4f && std::abs(highU - 1) < 1e-4f && std::abs(lowV + 0.5f) < 1e-4f && std::abs(highV - 1.5f) < 1e-4f);
+    CHECK(ts2::scene::groundDecal(t, {15, 15}, 10, 0, 0, 0).indices.empty());
+    CHECK(ts2::scene::groundDecal(t, {15, 15}, 10, 0, 0, std::numeric_limits<float>::quiet_NaN()).indices.empty());
     // Past the terrain's edge nothing is left, and broken values give nothing.
     CHECK(ts2::scene::groundDecal(t, {-50, -50}, 10, 0, 0).indices.empty());
     const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
@@ -1426,7 +1429,7 @@ void groundDecalsAreCutToTheirSquare() {
 std::vector<Test> modelAndImageTests() {
     return {
         {"clip effect events read their keys", clipEffectEventsReadTheirKeys},
-        {"ground decals are cut to their square", groundDecalsAreCutToTheirSquare},
+        {"ground decals cover the tiles they reach", groundDecalsCoverTheTilesTheyReach},
         {"clips fit the skeleton's stretch", clipsFitTheSkeletonsStretch},
         {"Limb IK reaches channel targets", limbIkReachesChannelTargets},
         {"Limb IK leaves every joint placed", limbIkLeavesEveryJointPlaced},

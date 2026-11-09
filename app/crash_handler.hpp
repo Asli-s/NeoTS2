@@ -4,13 +4,11 @@
 #include <string>
 #include <string_view>
 
-// Turns a crash into a report testers can send: a folder "crash-<date>-<time>" with crash.txt (what
-// happened, the stack, the last log lines) and neots2.dmp (a small minidump), then a message offering
-// to send it or show the files. That is on Windows. On Linux and macOS the crash catcher (see
-// crash_catcher.hpp) saves the minidump, and the next start makes the folder and asks (see
-// unexpected_exit.hpp). Without the catcher install() does nothing there.
-// Failures Windows ends at once (__fastfail: Control Flow Guard or /GS stack cookie violations) can't
-// be caught from inside the program. The next start reports those (see unexpected_exit.hpp).
+// On Windows, turns a crash into a report testers can send: a folder "crash-<date>-<time>" with crash.txt
+// (what happened, the stack, the last log lines) and the minidump neots2.dmp, then offers to send it.
+// On Linux and macOS the crash catcher (crash_catcher.hpp) saves the minidump and the next start makes
+// the report (unexpected_exit.hpp), and without the catcher install() does nothing. Failures Windows
+// ends at once (__fastfail, such as Control Flow Guard or /GS) can't be caught and are reported on the next start.
 namespace app::crash {
 
 struct Settings {

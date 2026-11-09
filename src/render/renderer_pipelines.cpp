@@ -84,6 +84,8 @@ void SdlGpuRenderer::create(const std::filesystem::path& shaderFolder) {
     shaderFolder_ = shaderFolder;
     makeSamplers();
     makePassPipelines(single_, 1);
+    makeScenePipelines(shaderFolder_, picture_, 1, true);
+    makePoolPipeline(shaderFolder_, picture_, 1, true);
     makeCausticsPipelines(shaderFolder);
     makeShadowPipelines(shaderFolder);
     SDL_GPUTextureCreateInfo blank{};
@@ -174,23 +176,23 @@ void SdlGpuRenderer::setSmoothEdges(int samples) {
 
 // The scene's pipelines, by skinned, two-sided and blending, and again clipping depth for the pools'
 // reflection (see poolMirror).
-void SdlGpuRenderer::makeScenePipelines(const std::filesystem::path& shaders, PassPipelines& out, int samples) {
+void SdlGpuRenderer::makeScenePipelines(const std::filesystem::path& shaders, PassPipelines& out, int samples, bool gameAlpha) {
     SDL_GPUShader* vertex = loadShader(device_, shaders, "scene.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0);
     SDL_GPUShader* skinnedVertex = loadShader(device_, shaders, "skinned.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, 2);
-    SDL_GPUShader* fragment = loadShader(device_, shaders, "scene.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 13, 2);
+    SDL_GPUShader* fragment = loadShader(device_, shaders, "scene.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 16, 2);
 
     // Only a mirror image clips depth, and those are always drawn with one sample.
-    for (int clip = 0; clip < (samples > 1 ? 1 : 2); ++clip)
+    for (int clip = 0; clip < (samples > 1 || gameAlpha ? 1 : 2); ++clip)
     for (int skinned = 0; skinned < 2; ++skinned)
     for (int twoSided = 0; twoSided < 2; ++twoSided) {
-        for (int blend = 0; blend < 5; ++blend) {
+        for (int blend = 0; blend < (clip == 0 && samples <= 1 && !gameAlpha ? kOpaqueOverDepth + 1 : kOpaqueOverDepth); ++blend) {
             SDL_GPUVertexBufferDescription buffers[2]{};
             SDL_GPUVertexAttribute attributes[11]{};
             sceneVertexLayout(buffers, attributes);
 
             SDL_GPUColorTargetDescription color{};
             color.format = SDL_GetGPUSwapchainTextureFormat(device_, window_);
-            if (blend) {
+            if (blend && blend != kOpaqueOverDepth) {
                 color.blend_state.enable_blend = true;
                 const bool adds = blend == 2 || blend == 3;
                 color.blend_state.src_color_blendfactor = blend == 3 ? SDL_GPU_BLENDFACTOR_ONE : SDL_GPU_BLENDFACTOR_SRC_ALPHA;
@@ -199,6 +201,10 @@ void SdlGpuRenderer::makeScenePipelines(const std::filesystem::path& shaders, Pa
                 color.blend_state.src_alpha_blendfactor = adds ? SDL_GPU_BLENDFACTOR_ZERO : SDL_GPU_BLENDFACTOR_ONE;
                 color.blend_state.dst_alpha_blendfactor = adds ? SDL_GPU_BLENDFACTOR_ONE : SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
                 color.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+                if (gameAlpha) {
+                    color.blend_state.src_alpha_blendfactor = color.blend_state.src_color_blendfactor;
+                    color.blend_state.dst_alpha_blendfactor = color.blend_state.dst_color_blendfactor;
+                }
             }
 
             SDL_GPUGraphicsPipelineCreateInfo info{};
@@ -687,7 +693,7 @@ void SdlGpuRenderer::makePondPipeline(const std::filesystem::path& shaders, Pass
 
 // A pool's water surface: the scene's positions and normals, blended over what is below, testing
 // depth without writing it, as the game's pool water material does.
-void SdlGpuRenderer::makePoolPipeline(const std::filesystem::path& shaders, PassPipelines& out, int samples) {
+void SdlGpuRenderer::makePoolPipeline(const std::filesystem::path& shaders, PassPipelines& out, int samples, bool gameAlpha) {
     SDL_GPUShader* vertex = loadShader(device_, shaders, "pool.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0);
     SDL_GPUShader* fragment = loadShader(device_, shaders, "pool.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 0);
     SDL_GPUVertexBufferDescription buffers[2]{};
@@ -699,7 +705,7 @@ void SdlGpuRenderer::makePoolPipeline(const std::filesystem::path& shaders, Pass
     color.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
     color.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
     color.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
-    color.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    color.blend_state.src_alpha_blendfactor = gameAlpha ? SDL_GPU_BLENDFACTOR_SRC_ALPHA : SDL_GPU_BLENDFACTOR_ONE;
     color.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
     color.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
     SDL_GPUGraphicsPipelineCreateInfo info{};
@@ -778,10 +784,13 @@ void SdlGpuRenderer::makeOcclusionPipelines() {
     const std::filesystem::path& shaders = shaderFolder_;
     SDL_GPUShader* vertex = loadShader(device_, shaders, "scene.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0);
     SDL_GPUShader* skinnedVertex = loadShader(device_, shaders, "skinned.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, 2);
-    SDL_GPUShader* depthFragment = loadShader(device_, shaders, "ao_depth.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
+    SDL_GPUShader* depthFragment = loadShader(device_, shaders, "ao_depth.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 2);
+    SDL_GPUShader* solidFragment = loadShader(device_, shaders, "ao_solid.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 0, 0);
     SDL_GPUShader* screenVertex = loadShader(device_, shaders, "sky.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0, 0);
     SDL_GPUShader* occlusionFragment = loadShader(device_, shaders, "ao.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
     SDL_GPUShader* blurFragment = loadShader(device_, shaders, "ao_blur.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 0);
+    SDL_GPUShader* upsampleFragment = loadShader(device_, shaders, "ao_upsample.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 3, 0);
+    SDL_GPUShader* halfDepthFragment = loadShader(device_, shaders, "ao_halfdepth.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 0);
 
     SDL_GPUVertexBufferDescription buffers[2]{};
     SDL_GPUVertexAttribute attributes[11]{};
@@ -805,6 +814,8 @@ void SdlGpuRenderer::makeOcclusionPipelines() {
             info.target_info.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
             info.target_info.has_depth_stencil_target = true;
             occlusion_.depthPipelines[skinned][twoSided] = SDL_CreateGPUGraphicsPipeline(device_, &info);
+            info.fragment_shader = solidFragment;
+            occlusion_.solidPipelines[skinned][twoSided] = SDL_CreateGPUGraphicsPipeline(device_, &info);
         }
     }
     SDL_GPUColorTargetDescription color{};
@@ -820,12 +831,20 @@ void SdlGpuRenderer::makeOcclusionPipelines() {
     occlusion_.occlusionPipeline = SDL_CreateGPUGraphicsPipeline(device_, &info);
     info.fragment_shader = blurFragment;
     occlusion_.blurPipeline = SDL_CreateGPUGraphicsPipeline(device_, &info);
-    for (auto* s : {vertex, skinnedVertex, depthFragment, screenVertex, occlusionFragment, blurFragment}) {
+    info.fragment_shader = upsampleFragment;
+    occlusion_.upsamplePipeline = SDL_CreateGPUGraphicsPipeline(device_, &info);
+    color.format = kHalfDepthFormat;
+    info.fragment_shader = halfDepthFragment;
+    occlusion_.halfDepthPipeline = SDL_CreateGPUGraphicsPipeline(device_, &info);
+    for (auto* s : {vertex, skinnedVertex, depthFragment, solidFragment, screenVertex, occlusionFragment, blurFragment, upsampleFragment, halfDepthFragment}) {
         SDL_ReleaseGPUShader(device_, s);
     }
-    bool all = occlusion_.occlusionPipeline != nullptr && occlusion_.blurPipeline != nullptr;
-    for (const auto& row : occlusion_.depthPipelines) {
-        all = all && row[0] != nullptr && row[1] != nullptr;
+    bool all = occlusion_.occlusionPipeline != nullptr && occlusion_.blurPipeline != nullptr && occlusion_.upsamplePipeline != nullptr &&
+               occlusion_.halfDepthPipeline != nullptr;
+    for (auto* rows : {occlusion_.depthPipelines, occlusion_.solidPipelines}) {
+        for (int skinned = 0; skinned < 2; ++skinned) {
+            all = all && rows[skinned][0] != nullptr && rows[skinned][1] != nullptr;
+        }
     }
     if (!all) {
         throw sdlError("ambient occlusion pipeline");
@@ -1034,7 +1053,11 @@ void SdlGpuRenderer::makeObjectShadowPipelines(const std::filesystem::path& shad
     texture.width = 2 * kMaxObjectGrid;
     texture.height = kMaxObjectGrid;
     objectGrid_ = SDL_CreateGPUTexture(device_, &texture);
-    if (objectScratch_ == nullptr || objectPictures_ == nullptr || objectPlaces_ == nullptr || objectGrid_ == nullptr) {
+    texture.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    texture.width = kMaxObjectFloorTiles;
+    texture.height = kMaxObjectFloorTiles * kMaxObjectFloorLevels;
+    objectFloors_ = SDL_CreateGPUTexture(device_, &texture);
+    if (objectScratch_ == nullptr || objectPictures_ == nullptr || objectPlaces_ == nullptr || objectGrid_ == nullptr || objectFloors_ == nullptr) {
         throw sdlError("object shadow pictures");
     }
 }

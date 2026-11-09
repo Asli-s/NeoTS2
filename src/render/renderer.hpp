@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -52,6 +53,7 @@ public:
     }
     void setSmoothEdges(int samples) override;
     void setAmbientOcclusion(float strength) override;
+    void setAmbientOcclusionHalfSize(bool half) override;
     [[nodiscard]] Prepared prepare(const scene::Scene& scene) const override;
     void upload(Prepared prepared) override;
     [[nodiscard]] Prepared swap(Prepared prepared) override;
@@ -60,16 +62,26 @@ public:
     [[nodiscard]] bool draw(const Camera& camera) override;
     [[nodiscard]] bool drawToFile(const Camera& camera, unsigned width, unsigned height, const std::filesystem::path& path) override;
     [[nodiscard]] std::optional<scene::Image> drawInstancesToImage(const Camera& camera, unsigned width, unsigned height,
-                                                                   const scene::ObjectLighting& lighting) override;
+                                                                   std::optional<scene::ObjectLighting> lighting) override;
+    [[nodiscard]] bool makePreparedLevels(Prepared& scene, std::size_t textures) override;
+    void releasePictureTargets() override;
+    [[nodiscard]] Pictures startPreparedImages(Prepared& scene, const std::vector<PreparedShot>& shots) override;
+    [[nodiscard]] std::optional<std::vector<scene::Image>> takePreparedImages(PicturesBase& pictures) override;
     std::string backend() const override;
     std::string device() const override;
     void benchmark(const Camera& camera, unsigned width, unsigned height, int frames) override;
     void addMaterials(const scene::Scene& scene) override;
     void addMeshes(const scene::Scene& scene) override;
+    [[nodiscard]] Addition prepareAddition(const scene::Scene& add, const std::vector<int>& shared) const override;
+    void addPrepared(const scene::Scene& scene, Addition addition) override;
     void setImages(const scene::Scene& scene, const std::vector<int>& indexes, bool fade = false) override;
     void setLightMapFade(float fade) override;
     void setSkybox(const std::vector<scene::Image>& faces) override;
+    void setTerrainLightMap(const scene::Image& lightMap) override;
+    void setNeighborhoodSky(const std::vector<scene::Image>& faces) override;
     void setSurroundings(const scene::Scene& scene) override;
+    [[nodiscard]] ImposterTextures prepareImposterTextures(const scene::SharedImages& images) const override;
+    void addImposters(const scene::Scene& scene, ImposterTextures ahead = {}) override;
 
 private:
     // What the frame plan asks about the uploaded scene (see ResourceQuery).
@@ -101,10 +113,11 @@ private:
     // What the main view is drawn with. A pipeline only works on targets of its own sample count, so
     // smoothing edges needs a second set of them.
     struct PassPipelines {
-        // By two-sided, then opaque, blended, added, summed or blended hair. Opaque and alpha-tested
-        // surfaces write depth, blended ones don't, except a Sim's blended hair.
-        SDL_GPUGraphicsPipeline* scene[2][5] = {};
-        SDL_GPUGraphicsPipeline* skinnedScene[2][5] = {};  // the same for skinned primitives
+        // By two-sided, then opaque, blended, added, summed, blended hair or opaque over a depth drawn
+        // already. Opaque and alpha-tested surfaces write depth, blended ones don't, except a Sim's
+        // blended hair. The last kind is only made with one sample (see kOpaqueOverDepth).
+        SDL_GPUGraphicsPipeline* scene[2][6] = {};
+        SDL_GPUGraphicsPipeline* skinnedScene[2][6] = {};  // the same for skinned primitives
         std::array<SDL_GPUGraphicsPipeline*, 8> particles{};  // by effects::ParticleBlock::Draw
         SDL_GPUGraphicsPipeline* sprite = nullptr;
         SDL_GPUGraphicsPipeline* terrain = nullptr;
@@ -129,7 +142,9 @@ private:
     void makePassPipelines(PassPipelines& out, int samples);
     void releasePassPipelines(PassPipelines& pipelines);
     int mostSmoothEdgeSamples() const;
-    void makeScenePipelines(const std::filesystem::path& shaders, PassPipelines& out, int samples);
+    // With `gameAlpha`, blending takes the colour's factors for alpha too, as Direct3D 9 blends
+    // without a separate alpha blend, and no depth-clipped pipelines are made.
+    void makeScenePipelines(const std::filesystem::path& shaders, PassPipelines& out, int samples, bool gameAlpha = false);
     void makeSpritePipeline(const std::filesystem::path& shaders, PassPipelines& out, int samples);
     void makeParticlePipelines(const std::filesystem::path& shaders, PassPipelines& out, int samples);
     void makeSamplers();
@@ -139,7 +154,7 @@ private:
     void makeClipPipeline(const std::filesystem::path& shaders, PassPipelines& out, int samples);
     void makeSkyPipeline(const std::filesystem::path& shaders, PassPipelines& out, int samples);
     void makeWaterPipeline(const std::filesystem::path& shaders, PassPipelines& out, int samples);
-    void makePoolPipeline(const std::filesystem::path& shaders, PassPipelines& out, int samples);
+    void makePoolPipeline(const std::filesystem::path& shaders, PassPipelines& out, int samples, bool gameAlpha = false);
     void makeSeaPipeline(const std::filesystem::path& shaders, PassPipelines& out, int samples);
     void makePondPipeline(const std::filesystem::path& shaders, PassPipelines& out, int samples);
     void makeCausticsPipelines(const std::filesystem::path& shaders);
@@ -157,7 +172,9 @@ private:
     void drawSky(const Frame& f, SDL_GPURenderPass* on, SDL_GPUTexture* cube, const std::array<float, 12>& camera);
     void drawBoundary(const Frame& f);
     void drawTerrain(const Frame& f, SDL_GPURenderPass* on, const Mat4& viewProjection, bool reflected);
-    void drawList(const Frame& f, std::span<const Draw> list, int blend);
+    // `ready` is each draw's uniforms when they were made already, or empty.
+    // `overDepth` draws opaque surfaces whose depth is in the target already, without writing it.
+    void drawList(const Frame& f, std::span<const Draw> list, int blend, std::span<const DrawUniforms> ready = {}, bool overDepth = false);
     // The blended surfaces and the particles together, by layer.
     void drawBlended(const Frame& f, const std::vector<Draw>& blended);
     void drawParticles(const Frame& f, const ParticleBatch& batch);
@@ -171,9 +188,10 @@ private:
     // Makes `target`'s textures at the size drawn at. False when they couldn't be made, to be tried
     // again next frame.
     [[nodiscard]] bool mirrorReady(MirrorTarget& target, unsigned width, unsigned height);
-    // What a mirror image shows: the lot for a pool's, the beach sea's own list for the sea's.
-    enum class Mirrored { Pool, Sea };
-    // The lot mirrored in the plane at height `plane` (see poolMirror) into `target`, only within
+    // What a mirror image shows: the lot for a pool's, the beach sea's own list for the sea's, and
+    // the neighborhood water's for the neighborhood's.
+    enum class Mirrored { Pool, Sea, Neighborhood };
+    // The scene mirrored in the plane at height `plane` (see poolMirror) into `target`, only within
     // `area` of its clip space.
     void clearMirror(const Frame& f, const MirrorTarget& target);
     void drawMirror(const Frame& f, float plane, float keepBelow, const MirrorTarget& target, Mirrored what, const std::array<float, 4>& area);
@@ -182,7 +200,8 @@ private:
     void drawPondWater(const Frame& f, const Draw& d);
     // The pools' caustics tile and shadow map for the pool water draw `pool`, and the shadow
     // uniforms they are read with. False when they couldn't be drawn (no sun or no flipbook).
-    [[nodiscard]] bool drawPoolCaustics(const Frame& f, const Draw& pool, ShadowUniforms& shadows);
+    // Without `passes` the caustics tile and the pool's shadow map are taken as they were drawn last.
+    [[nodiscard]] bool drawPoolCaustics(const Frame& f, const Draw& pool, ShadowUniforms& shadows, bool passes = true);
     [[nodiscard]] std::size_t drawShadows(const Frame& f);
     void makeObjectShadowPipelines(const std::filesystem::path& shaders);
     // Makes the objects' pictures, list and grid again when the shadows' layout changed.
@@ -197,7 +216,7 @@ private:
     void makeOcclusionPipelines();
     void releaseOcclusion();
     [[nodiscard]] bool occlusionReady(unsigned width, unsigned height);
-    void drawOcclusion(const Frame& f, std::span<const Draw> opaque);
+    void drawOcclusion(const Frame& f, std::span<const Draw> opaque, std::span<const DrawUniforms> uniforms);
     // Draws one frame into a new texture and reads it back as RGBA.
     [[nodiscard]] bool drawOffscreen(const Camera& camera, unsigned width, unsigned height, scene::Image& out);
     static constexpr unsigned kMaxOffscreen = 8192;
@@ -225,12 +244,16 @@ private:
     // Mirror images, shots of Sims and everything else keep one sample. The main view's pass uses
     // `smooth_` when it has more, and `drawing_` is the set of the pass being recorded.
     PassPipelines single_, smooth_;
+    // Prepared scenes' pictures (see startPreparedImages) are drawn with only its scene and pool
+    // pipelines, which blend alpha as the game's pictures were blended.
+    PassPipelines picture_;
+    bool picturing_ = false;  // while a prepared scene's pictures are drawn
     const PassPipelines* drawing_ = &single_;
     SDL_GPUSampler* sampler_ = nullptr;
     SDL_GPUSampler* clampedSampler_ = nullptr;  // sampler_, clamped at the edges
     // The scene's pipelines clipping depth instead of clamping it, for the pools' reflection.
-    SDL_GPUGraphicsPipeline* clippedPipelines_[2][5] = {};
-    SDL_GPUGraphicsPipeline* clippedSkinnedPipelines_[2][5] = {};
+    SDL_GPUGraphicsPipeline* clippedPipelines_[2][6] = {};
+    SDL_GPUGraphicsPipeline* clippedSkinnedPipelines_[2][6] = {};
     SDL_GPUBuffer* jointBuffer_ = nullptr;
     SDL_GPUBuffer* noMorphs_ = nullptr;  // bound in place of a mesh set's morph deltas when it has none  // jointData_ on the GPU
     std::size_t jointCapacity_ = 0;  // floats the buffer holds
@@ -255,9 +278,15 @@ private:
     // The lot mirrored in the pools' water, each frame a pool is in view.
     MirrorTarget poolReflection_;
     bool poolReflected_ = false;  // poolReflection_ holds this frame's picture
+    // While a prepared scene's picture is drawn: its pools (see PreparedShot::pools), none for none.
+    const std::vector<std::uint8_t>* picturePools_ = nullptr;
+    // The prepared scene whose pictures' caustics tile and pool shadow map were drawn last (see
+    // GpuPrepared::serial), as they don't change from one picture of it to the next.
+    std::uint64_t pictureScene_ = 0, pictureCausticsScene_ = 0;
     // A beach lot's sea mirror image, each frame the sea is in view.
     MirrorTarget seaReflection_;
     bool seaReflected_ = false;  // seaReflection_ holds this frame's picture
+    bool seaFromWater_ = false;  // the sea shows the water sheet's reflection (a neighborhood's pool-style sea)
     // The pools' caustics: the tile drawn from the flipbook each frame, and the shadow map from the
     // sun (depth along the sun, with its depth buffer), made once.
     SDL_GPUGraphicsPipeline* causticsPipeline_ = nullptr;
@@ -284,22 +313,34 @@ private:
     SDL_GPUTexture* objectPictures_ = nullptr;
     SDL_GPUTexture* objectPlaces_ = nullptr;
     SDL_GPUTexture* objectGrid_ = nullptr;
+    SDL_GPUTexture* objectFloors_ = nullptr;
     std::shared_ptr<const scene::objectshadow::Layout> objectLayout_;
     std::array<float, 4> objectGridArea_{};  // see ShadowUniforms::objectGrid
+    std::array<float, 16> objectFloorsArea_{};  // see ShadowUniforms::objectFloorsToLot and objectFloors
 
-    // Ambient occlusion: its pipelines while it is on (depth by skinned, then two-sided), and its
+    // Ambient occlusion: its pipelines while it is on (depth by skinned, then two-sided, for surfaces
+    // with holes and then without), and its
     // targets at the size drawn at: the depth pass, how open each pixel is, and the same blurred.
     struct Occlusion {
         SDL_GPUGraphicsPipeline* depthPipelines[2][2] = {};
+        SDL_GPUGraphicsPipeline* solidPipelines[2][2] = {};
         SDL_GPUGraphicsPipeline* occlusionPipeline = nullptr;
         SDL_GPUGraphicsPipeline* blurPipeline = nullptr;
+        SDL_GPUGraphicsPipeline* upsamplePipeline = nullptr;
+        SDL_GPUGraphicsPipeline* halfDepthPipeline = nullptr;
         SDL_GPUTexture* depth = nullptr;
+        // At half size it is worked out from halfDepth and blurred into raw and soft, then brought up
+        // to the view's size in blurred. At full size halfDepth and soft aren't made.
+        SDL_GPUTexture* halfDepth = nullptr;
         SDL_GPUTexture* raw = nullptr;
+        SDL_GPUTexture* soft = nullptr;
         SDL_GPUTexture* blurred = nullptr;
         unsigned width = 0, height = 0;
+        bool half = false;
     };
     Occlusion occlusion_;
     float occlusionStrength_ = 0;
+    bool occlusionHalf_ = true;
     SDL_GPUTexture* noOcclusion_ = nullptr;  // bound when there is none, as the scene shader asks for a texture
     SDL_GPUTexture* occlusionBound_ = nullptr;  // what the scene shader reads this frame
 
@@ -334,8 +375,10 @@ private:
         void uploadTerrainGrid(Copy& c, const scene::PaintedTerrain& t);
         void uploadTerrainTextures(Copy& c, const scene::PaintedTerrain& t);
         void uploadWater(Copy& c, const scene::PaintedTerrain& t);
+        static SDL_GPUTexture* uploadSkyCube(Copy& c, const std::vector<scene::Image>& sky);
         void uploadRoads(Copy& c, const scene::PaintedTerrain& t);
         void uploadImposters(Copy& c, const scene::PaintedTerrain& t);
+        static SDL_GPUTexture* uploadImposterTexture(Copy& c, const scene::Image& image);
         void uploadBoundary(Copy& c, const scene::Scene& scene);
         void release(SDL_GPUDevice* device);
         // Releases up to `count` textures. True when none are left.
@@ -355,6 +398,9 @@ private:
         SDL_GPUTexture* terrainLight = nullptr;
         SDL_GPUTexture* terrainGradient = nullptr;
         TerrainUniforms terrainUniforms{};
+        // The underwater gradient as the scene shader is given it (see ShadowUniforms::underwater).
+        std::array<float, 4> underwater{};
+        std::array<std::array<float, 4>, kUnderwaterRows> underwaterRows{};
         // Its water: the sheet, the sky cube map and the ripple map.
         SDL_GPUBuffer* waterVertices = nullptr;
         SDL_GPUBuffer* waterIndices = nullptr;
@@ -362,6 +408,7 @@ private:
         SDL_GPUTexture* skyCube = nullptr;
         SDL_GPUTexture* ripples = nullptr;
         float waterLevel = 0;
+        bool poolStyleSea = false;  // see PaintedTerrain::poolStyleSea
         WaterUniforms waterUniforms{};
         SDL_GPUTexture* skybox = nullptr;  // a lot's sky
         // Materials' environment cubes (scene::Scene::envCubes, null where broken), and a black one
@@ -391,6 +438,56 @@ private:
     SDL_GPUFence* uploadFence_ = nullptr;  // until the last upload is done
 
     // A scene uploaded but not drawn yet (see prepare).
+    // Buffers pictures of prepared scenes are read back into, kept by the side of the square they
+    // hold for the next pictures (see startPreparedImages). Pictures may be let go on any thread.
+    struct TransferPool {
+        std::mutex lock;
+        SDL_GPUDevice* device = nullptr;  // none once the device is gone
+        std::map<unsigned, std::vector<SDL_GPUTransferBuffer*>> free;
+        SDL_GPUTransferBuffer* take(unsigned side);
+        void giveBack(unsigned side, SDL_GPUTransferBuffer* buffer);
+        // Lets go of the buffers kept, and with `forever` takes no more back (the device is going).
+        void releaseAll(bool forever);
+    };
+    std::shared_ptr<TransferPool> transferPool_ = std::make_shared<TransferPool>();
+    // The targets they are drawn into, a square of each power-of-two side, used by one picture after
+    // another, and the depth buffer render() uses instead of its own while one is drawn.
+    struct PictureTarget {
+        SDL_GPUTexture* color = nullptr;
+        DepthBuffer depth;
+    };
+    std::map<unsigned, PictureTarget> pictureTargets_;
+    DepthBuffer* pictureDepth_ = nullptr;
+    // Imposter textures uploaded ahead, let go unless taken.
+    struct GpuImposterTextures final : ImposterTexturesBase {
+        ~GpuImposterTextures() override;
+        SDL_GPUDevice* device = nullptr;
+        std::vector<SDL_GPUTexture*> textures;
+    };
+    // Pictures being drawn: a buffer to read each back into, done with the fence.
+    struct GpuPictures final : PicturesBase {
+        ~GpuPictures() override;
+        SDL_GPUDevice* device = nullptr;
+        SDL_GPUFence* fence = nullptr;
+        std::shared_ptr<TransferPool> pool;
+        bool swapRedBlue = false;
+        struct Target {
+            SDL_GPUTransferBuffer* transfer = nullptr;
+            unsigned side = 0;  // of the square the buffer holds
+            unsigned width = 0, height = 0;
+        };
+        std::vector<Target> targets;
+    };
+    struct GpuAddition final : AdditionBase {
+        ~GpuAddition() override { release(); }
+        void release();
+        SDL_GPUDevice* device = nullptr;
+        std::vector<SDL_GPUTexture*> textures, cubes;
+        std::vector<SDL_GPUTexture*> withMips;  // their smaller levels are made in addPrepared
+        MeshBuffers buffers;
+        std::vector<GpuMesh> meshes;  // their primitives name the scene's materials from 0 and buffer set 0
+        std::size_t materials = 0;    // how many materials the scene brought
+    };
     struct GpuPrepared final : PreparedBase {
         ~GpuPrepared() override { release(); }
         void releaseSome(std::size_t textures) override;
@@ -398,6 +495,7 @@ private:
         SDL_GPUDevice* device = nullptr;
         std::unique_ptr<SceneGpu> gpu;
         std::vector<SDL_GPUTexture*> withMips;  // their smaller levels are made in upload
+        std::uint64_t serial = 0;               // a number no other prepared scene has
     };
 };
 

@@ -61,9 +61,12 @@ struct FragmentUniforms {
     float cameraForward[4];
     float emissive[4];  // added to the light before the texture (see scene::Material), w: 1 when on
     float uvTile[4];    // the texture coordinates times xy plus zw: one frame of a tiled texture
-    float shadowReceiver[4];  // x: 1 when Sims' projected shadows fall on it, y: its level, z: 1 to fade them by the light map
+    float shadowReceiver[4];  // x: 1 when Sims' projected shadows fall on it, y: its level, z: 1 to fade them by the light map, w: 1 for a floor
     float caustics[4];        // x: 1 for a pool floor, 2 for a pool wall, 3 for the caustics alone over a pond's ground, 0 for none (see scene::Material), yzw: the texture light
     float neighborLight[4];   // rgb: what a neighbor's real house is tinted by, w: 1 when it is one, 2 for the ground around the lot, 3 for its ground
+    float wallMask[4];        // x: 1 when a wall mask cuts it, y: 1 when the mask runs the other way along u (see scene::Material::mask)
+    float terrainTexture[4];  // x: 1 for terrain, y: 1 with a detail texture, z: its repeats (see scene::Material::terrain)
+    float underwaterShade[4];  // x: 1 when darkened below the water (see scene::Material::partlyUnderwater), y: 1 when hazed under a pool-style sea
 };
 
 // The shaders' constant buffers pack in 16-byte rows, so these must match them field for field.
@@ -81,12 +84,15 @@ constexpr std::size_t kMaxShadowCasters = kShadowTilesAcross * kShadowTilesAcros
 
 // The most neighbors drawn as real houses whose lots the ground around a lot leaves out. The scene
 // shader's neighborGround array holds as many.
-constexpr std::size_t kMaxNeighborGrounds = 6;
+constexpr std::size_t kMaxNeighborGrounds = 32;
+// The most rows of the neighborhood's underwater gradient the scene shader is given (the game's has 64).
+constexpr std::size_t kUnderwaterRows = 64;
 
 // What the scene's fragment shader is given once a frame about the Sims' projected shadows.
 struct ShadowUniforms {
-    float cameras[kMaxShadowCasters][16];  // each caster's picture camera (see simshadows::camera)
-    float casters[kMaxShadowCasters][4];   // x, y: its tile's corner in the atlas (0..1), z: its level
+    // Each caster's picture camera (see simshadows::camera), indoors its quad (simshadows::indoorQuad).
+    float cameras[kMaxShadowCasters][16];
+    float casters[kMaxShadowCasters][4];   // x, y: its tile's corner in the atlas (0..1), z: its level, w: 1 indoors
     float shade[4];                        // rgb: what a shadow multiplies the ground by, w: how many casters
     // The lot objects' shadows: the grid's first tile (x, y) and its size in tiles (z by w, 0 for none).
     float objectGrid[4];
@@ -100,6 +106,16 @@ struct ShadowUniforms {
     // the lot leaves out, and how many there are (the first number).
     float neighborGround[kMaxNeighborGrounds][4];
     float neighborGrounds[4];
+    // The neighborhood's underwater gradient: x the water's height, y the depth the gradient spans,
+    // z how many of its rows are given (0 for none, outside the neighborhood view), and the rows
+    // from the surface down.
+    float underwater[4];
+    float underwaterGradient[kUnderwaterRows][4];
+    // The lot's outdoor floor quarters, the only floor the objects' pictures fall on: the scene's
+    // frame to the lot's (three rows), and the mask's tiles along x and y, its first level and how
+    // many levels it holds (0 for none, when every floor takes them).
+    float objectFloorsToLot[3][4];
+    float objectFloors[4];
 };
 static_assert(sizeof(ShadowUniforms) % 16 == 0 && offsetof(ShadowUniforms, shade) == 1280 && offsetof(ShadowUniforms, objectGrid) == 1296 &&
               offsetof(ShadowUniforms, poolShadow) == 1312 && offsetof(ShadowUniforms, poolSun) == 1440);
@@ -115,16 +131,22 @@ constexpr std::size_t kMaxObjectPlaces = 1024;
 // The grid over the lot: up to kObjectGridSlots places per tile, two texels of four each.
 constexpr int kObjectGridSlots = 8;
 constexpr int kMaxObjectGrid = 256;
+// The outdoor floor mask: a texel per lot tile and level, a channel per quarter.
+constexpr int kMaxObjectFloorTiles = 256;
+constexpr int kMaxObjectFloorLevels = 8;
 
 // What an object's picture is blurred into its tile with.
 struct ObjectBlurUniforms {
-    float weights[25][4];  // x only, as ShadowBlurUniforms
+    float weights[25][4];  // x only, see FramePlan::outdoorBlurWeights
     float tile[4];         // x, y: the tile's corner in the atlas (texels), z: the picture's size (texels)
 };
 
 // What the blur shader is given: each tap's weight (see simshadows::blurWeight), across then up.
 struct ShadowBlurUniforms {
-    float weights[25][4];  // x only
+    // The taps' weights out to 3 texels, x by (across + 3) * 7 + (up + 3), for the outdoor blur
+    // (index 0, nothing past 2) and the indoor one (index 1).
+    float weights[2][49][4];
+    float indoor[kMaxShadowCasters][4];  // x: 1 when the caster in that tile is indoors
 };
 
 // A neighborhood's painted terrain (see scene::PaintedTerrain).
@@ -161,9 +183,9 @@ struct SeaUniforms {
     float viewProjection[16];
     float model[16];
     float eye[4];
-    float time[4];
+    float time[4];  // x: seconds, y: how much the ripples blur the mirror image
     float tint[4];
-    float padding[4];
+    float scale[4];  // rgb: what the mirror image is multiplied by, a: opacity added
 };
 static_assert(sizeof(SeaUniforms) == 192);
 
@@ -279,6 +301,9 @@ struct FrameView {
 // forward's w being `up`: 1, or -1 for the rays mirrored in the water.
 std::array<float, 12> skyCamera(const FrameView& f, float up);
 
+// skyCamera's mirrored rays, also flipped left to right as a mirror image drawn with poolMirror is.
+std::array<float, 12> mirroredSkyCamera(const FrameView& f);
+
 // A primitive to draw, with what its draw needs.
 struct Draw {
     const GpuPrimitive* primitive;
@@ -302,7 +327,7 @@ Mat4 narrowedTo(const Mat4& viewProjection, const std::array<float, 4>& area);
 struct DrawUniforms {
     SkinnedUniforms vertex{};
     FragmentUniforms fragment{};
-    std::array<SamplerBinding, 6> samplers{};
+    std::array<SamplerBinding, 8> samplers{};
 };
 
 struct FramePlan {
@@ -337,7 +362,10 @@ struct FramePlan {
     static SkinnedUniforms shadowCasterUniforms(const RendererState& state, const Draw& d, std::size_t caster);
     // The shadows' camera and colour for the scene's fragment shader, for `casters` casters.
     static ShadowUniforms shadowUniforms(const RendererState& state, std::size_t casters);
-    static ShadowBlurUniforms shadowBlurUniforms();
+    // The blur's weights, and which casters are indoors.
+    static ShadowBlurUniforms shadowBlurUniforms(const RendererState& state);
+    // The outdoor blur's 5 x 5 weights, x by (across + 2) * 5 + (up + 2), as the objects' pictures take them.
+    static std::array<std::array<float, 4>, 25> outdoorBlurWeights();
 
 private:
     static void setLights(const RendererState& state, DrawUniforms& u, const Draw& d, const scene::ObjectLighting& l, bool skirt, bool roof,

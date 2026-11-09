@@ -29,6 +29,7 @@ void SdlGpuRenderer::updateObjectShadows(const Frame& f) {
         return;
     }
     objectGridArea_ = {};
+    objectFloorsArea_ = {};
     // The pictures wait for their models to reach the GPU (the scene's meshes upload in the background).
     if (shadows_.objects) {
         for (const auto& picture : shadows_.objects->pictures) {
@@ -50,8 +51,10 @@ void SdlGpuRenderer::updateObjectShadows(const Frame& f) {
 void SdlGpuRenderer::drawObjectPictures(const Frame& f, const scene::objectshadow::Layout& layout) {
     const auto& gpuMeshes = meshes();
     ObjectBlurUniforms blur{};
-    const ShadowBlurUniforms weights = FramePlan::shadowBlurUniforms();
-    std::copy(&weights.weights[0][0], &weights.weights[0][0] + 25 * 4, &blur.weights[0][0]);
+    const auto weights = FramePlan::outdoorBlurWeights();
+    for (std::size_t i = 0; i < weights.size(); ++i) {
+        std::copy(weights[i].begin(), weights[i].end(), blur.weights[i]);
+    }
     const std::size_t count = std::min(layout.pictures.size(), kMaxObjectPictures);
     for (std::size_t i = 0; i < count; ++i) {
         const auto& picture = layout.pictures[i];
@@ -184,11 +187,47 @@ bool SdlGpuRenderer::uploadObjectPlaces(const Frame& f, const scene::objectshado
         SDL_UploadToGPUTexture(pass.copy(), &from, &to, false);
         return true;
     };
-    const bool done = upload(objectPlaces_, places, kObjectPlaceTexels, static_cast<Uint32>(rects.size())) &&
-                      upload(objectGrid_, grid, static_cast<Uint32>(2 * width), static_cast<Uint32>(height));
+    bool done = upload(objectPlaces_, places, kObjectPlaceTexels, static_cast<Uint32>(rects.size())) &&
+                upload(objectGrid_, grid, static_cast<Uint32>(2 * width), static_cast<Uint32>(height));
+    // The outdoor floor mask, a channel per quarter. A mask too big for its texture (never from the
+    // layout) is left out, and every floor takes the pictures.
+    const auto& floors = layout.floors;
+    const bool fits = floors.levels > 0 && floors.width > 0 && floors.height > 0 && floors.width <= kMaxObjectFloorTiles &&
+                      floors.height <= kMaxObjectFloorTiles && floors.levels <= kMaxObjectFloorLevels &&
+                      floors.quarters.size() == static_cast<std::size_t>(floors.width) * static_cast<std::size_t>(floors.height) * static_cast<std::size_t>(floors.levels);
+    if (done && fits) {
+        std::vector<std::uint8_t> texels(floors.quarters.size() * 4);
+        for (std::size_t i = 0; i < floors.quarters.size(); ++i) {
+            for (std::size_t q = 0; q < 4; ++q) {
+                texels[i * 4 + q] = (floors.quarters[i] >> q) & 1 ? 255 : 0;
+            }
+        }
+        const SDL_GPUTransferBufferLocation at = pass.stage(texels.data(), static_cast<Uint32>(texels.size()));
+        done = at.transfer_buffer != nullptr;
+        if (done) {
+            SDL_GPUTextureTransferInfo from{};
+            from.transfer_buffer = at.transfer_buffer;
+            from.offset = at.offset;
+            from.pixels_per_row = static_cast<Uint32>(floors.width);
+            from.rows_per_layer = static_cast<Uint32>(floors.height * floors.levels);
+            SDL_GPUTextureRegion to{};
+            to.texture = objectFloors_;
+            to.w = static_cast<Uint32>(floors.width);
+            to.h = static_cast<Uint32>(floors.height * floors.levels);
+            to.d = 1;
+            SDL_UploadToGPUTexture(pass.copy(), &from, &to, false);
+        }
+    }
     pass.end();
     if (done) {
         objectGridArea_ = {static_cast<float>(x0), static_cast<float>(y0), static_cast<float>(width), static_cast<float>(height)};
+        if (fits) {
+            std::copy(floors.toLot.begin(), floors.toLot.end(), objectFloorsArea_.begin());
+            objectFloorsArea_[12] = static_cast<float>(floors.width);
+            objectFloorsArea_[13] = static_cast<float>(floors.height);
+            objectFloorsArea_[14] = static_cast<float>(floors.firstLevel);
+            objectFloorsArea_[15] = static_cast<float>(floors.levels);
+        }
     }
     return done;
 }

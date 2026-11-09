@@ -407,7 +407,8 @@ PutLight putLotLight(ts2::scene::Scene& scene, const LotLight& light, const ts2:
     const auto points = objectlights::pointLights(light.light.portals, light.found.lampLights, light.rangeCutoff);
     for (std::size_t i = 0; i < scene.instances.size(); ++i) {
         auto& instance = scene.instances[i];
-        if (instance.part != Part::Object && !instance.litOutdoors) {
+        // A neighbor's real house keeps the light it was built with (see neighborHouse).
+        if ((instance.part != Part::Object && !instance.litOutdoors) || instance.neighborHouse) {
             continue;
         }
         Instance inLot = instance;

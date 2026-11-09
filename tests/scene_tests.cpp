@@ -8,6 +8,7 @@
 #include "scene/neighborhood_scene.hpp"
 #include "scene/prop_fade.hpp"
 #include "scene/hood_drift.hpp"
+#include "scene/effect_models.hpp"
 #include "scene/effect_player.hpp"
 #include "scene/object_effects.hpp"
 #include "scene/particle_emitter.hpp"
@@ -16,9 +17,13 @@
 #include "sim/look_at.hpp"
 #include "scene/scene_ray.hpp"
 #include "scene/terrain_water.hpp"
+#include "scene/instance_merge.hpp"
+#include "scene/imposter_bake.hpp"
+#include "scene/imposter_cache.hpp"
 
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <random>
 
@@ -61,6 +66,176 @@ std::size_t systemsPlaying(const ts2::scene::EffectPlayer& player) {
     std::size_t n = 0;
     player.forEachParticleSystem([&](const auto&, const auto& emitter, const auto&) { n += emitter.running(); });
     return n;
+}
+
+// A model part shows from its start until it is stopped, where its effect is, tinted by the effect's
+// messages times its block's colour and alpha.
+void effectModelsShowUntilStopped() {
+    using namespace ts2;
+    effects::File file;
+    file.models.push_back({"boat_cres", 1, {1, 0.5f, 1}, 1});
+    effects::Component part;
+    part.type = static_cast<std::uint8_t>(effects::BlockType::Model);
+    part.orientation = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    part.offset = {0, 0, 2};
+    effects::VisualEffect boat;
+    boat.components = {part};
+    addEffect(file, "boat", boat);
+
+    scene::EffectPlayer player(file, 1);
+    player.setDetail(1);
+    auto effect = player.create("boat");
+    scene::EmitterPlace where;
+    where.position = {10, 20, 30};
+    where.rotation = {0, -1, 0, 1, 0, 0, 0, 0, 1};  // a quarter turn about z
+    effect->place(where);
+    const auto shown = [&] {
+        std::vector<std::pair<scene::EmitterPlace, std::array<float, 4>>> out;
+        player.forEachModel([&](const effects::ModelBlock& b, const scene::EmitterPlace& p, const std::array<float, 4>& c) {
+            CHECK(b.model == "boat_cres");
+            out.emplace_back(p, c);
+        });
+        return out;
+    };
+    CHECK(shown().empty());
+    effect->start(false);
+    effect->setMessages(0.5f, {1, 1, 0.5f});
+    player.update(0.1f, 0.1f);
+    auto now = shown();
+    CHECK(now.size() == 1);
+    CHECK(near(now[0].first.position[0], 10) && near(now[0].first.position[1], 20) && near(now[0].first.position[2], 32));
+    CHECK(near(now[0].second[1], 0.5f) && near(now[0].second[2], 0.5f) && near(now[0].second[3], 0.5f));
+    const auto q = scene::modelTurn(now[0].first);
+    CHECK(near(q[2], std::sqrt(0.5f)) && near(q[3], std::sqrt(0.5f)) && near(q[0], 0) && near(q[1], 0));
+    effect->stop(false);
+    CHECK(shown().empty());
+}
+
+// A file whose effect "fleet" holds `count` metaparticles in a 100 wide box, each showing the model of
+// effect "boat".
+ts2::effects::File fleetFile(std::uint64_t flags, float count) {
+    using namespace ts2;
+    effects::File file;
+    file.models.push_back({"boat_cres", 1, {1, 1, 1}, 1});
+    effects::Component model;
+    model.type = static_cast<std::uint8_t>(effects::BlockType::Model);
+    model.orientation = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    effects::VisualEffect boat;
+    boat.components = {model};
+    addEffect(file, "boat", boat);
+    effects::MetaParticleBlock meta;
+    meta.flags = effects::MetaParticleBlock::kHoldCount | flags;
+    meta.life = {100, 100};
+    meta.delay = {-1, -1};
+    meta.gap = {-1, -1};
+    meta.spawnLow = {-50, -50, 2};
+    meta.spawnHigh = {50, 50, 2};
+    meta.count.values = {count};
+    meta.interval = 1;
+    meta.size.values = {1};
+    meta.effect = "boat";
+    meta.terrain[8] = -15;
+    meta.terrain[9] = -10;
+    file.metaParticles.push_back(meta);
+    effects::Component part;
+    part.type = 2;
+    part.orientation = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    effects::VisualEffect fleet;
+    fleet.components = {part};
+    addEffect(file, "fleet", fleet);
+    return file;
+}
+
+// Metaparticles that start on the water at a depth sit at the water's level plus the spawn box's height, only
+// where the ground lies between the two depths below it.
+void metaParticlesStartOnTheWater() {
+    using namespace ts2;
+    const auto file = fleetFile(0x8000 | 0x10000, 20);
+    scene::EffectTerrain terrain;
+    terrain.width = terrain.depth = 1000;
+    terrain.waterLevel = 300;
+    terrain.height = [](float x, float) { return 300 - (x - 450) * 0.25f; };  // 15 deep at x 510, 10 deep at x 490
+    terrain.normal = [](float, float) { return std::array<float, 3>{0, 0, 1}; };
+    scene::EffectConditions conditions;
+    conditions.terrain = &terrain;
+    scene::EffectPlayer player(file, 3);
+    player.setConditions(conditions);
+    player.setDetail(1);
+    auto effect = player.create("fleet");
+    scene::EmitterPlace where;
+    where.position = {500, 500, 300};
+    effect->place(where);
+    effect->start(false);
+    for (int i = 0; i < 20; ++i) {
+        player.update(0.05f, 0.05f);
+    }
+    int boats = 0;
+    player.forEachModel([&](const effects::ModelBlock&, const scene::EmitterPlace& p, const std::array<float, 4>&) {
+        ++boats;
+        CHECK(near(p.position[2], 302) && p.position[0] >= 490 - 1e-3f && p.position[0] <= 510 + 1e-3f);
+    });
+    CHECK(boats > 0);
+
+    // Without a terrain they start where the box puts them.
+    scene::EffectPlayer plain(file, 3);
+    plain.setDetail(1);
+    auto other = plain.create("fleet");
+    other->place(where);
+    other->start(false);
+    plain.update(0.05f, 0.05f);
+    int anywhere = 0;
+    plain.forEachModel([&](const effects::ModelBlock&, const scene::EmitterPlace& p, const std::array<float, 4>&) {
+        anywhere += near(p.position[2], 302);
+    });
+    CHECK(anywhere == 20);
+}
+
+// A metaparticle aligned along y turns its effect so y follows its flight. With smoothing it turns about the
+// vertical only, a share of the way each update.
+void metaParticlesAlignAlongTheirFlight() {
+    using namespace ts2;
+    for (const float smoothing : {0.0f, 2.0f}) {
+        auto file = fleetFile(0, 1);
+        auto& meta = file.metaParticles[0];
+        meta.alignment = 3;
+        meta.alignSmoothing = smoothing;
+        meta.directionLow = meta.directionHigh = {1, 0, 0};
+        meta.speed = {1, 1};
+        scene::EffectPlayer player(file, 3);
+        player.setDetail(1);
+        auto effect = player.create("fleet");
+        effect->start(false);
+        player.update(0.05f, 0.05f);
+        int boats = 0;
+        player.forEachModel([&](const effects::ModelBlock&, const scene::EmitterPlace& p, const std::array<float, 4>&) {
+            ++boats;
+            // y turned onto +x: a quarter turn clockwise about z.
+            CHECK(near(p.rotation[1], 1) && near(p.rotation[3], -1) && near(p.rotation[8], 1));
+        });
+        CHECK(boats == 1);
+    }
+}
+
+// A metaparticle block's waves move where its particles' effects are drawn, by the seconds it has played.
+void metaParticlesBobOnTheirWaves() {
+    using namespace ts2;
+    auto file = fleetFile(0, 1);
+    file.metaParticles[0].spawnLow = file.metaParticles[0].spawnHigh = {0, 0, 0};
+    file.metaParticles[0].waves = {{1.2f, {0, 0, 0}, {0, 0.1f, 0.6f}}};
+    scene::EffectPlayer player(file, 3);
+    player.setDetail(1);
+    auto effect = player.create("fleet");
+    effect->start(false);
+    for (int i = 0; i < 10; ++i) {
+        player.update(0.1f, 0.1f);
+    }
+    int boats = 0;
+    player.forEachModel([&](const effects::ModelBlock&, const scene::EmitterPlace& p, const std::array<float, 4>&) {
+        ++boats;
+        const float s = std::sin(1.2f * 1.0f);
+        CHECK(near(p.position[0], 0) && near(p.position[1], 0.1f * s, 1e-3f) && near(p.position[2], 0.6f * s, 1e-3f));
+    });
+    CHECK(boats == 1);
 }
 
 void effectsFaceTheCamera() {
@@ -2510,6 +2685,49 @@ void objectActorsPoseEveryJointFromTheirRig() {
     CHECK(std::abs(p[1]) < 1e-5f && std::abs(p[2] - 2) < 1e-5f);
 }
 
+// What hangs in a lot object's slot goes to the slot's bone as the object is posed, from where the
+// object is drawn: food in a bowl in a Sim's hand, under the joint that lifts the bowl.
+void objectsHangFromTheirContainersPosedSlotBone() {
+    using ts2::scene::Transform;
+    auto bowlRig = std::make_shared<ts2::scene::Rig>();
+    bowlRig->nodes.push_back({"root", -1, {0, 0, 0}, {0, 0, 0, 1}});
+    bowlRig->nodes.push_back({"bowl_trans", 0, {0, 0, 0.5f}, {0, 0, 0, 1}});
+    bowlRig->nodes.push_back({"slot_bowl_0", 1, {0, 0, 0.1f}, {0, 0, 0, 1}});
+    ts2::scene::Scene scene;
+    scene.instances.resize(2);
+    auto& bowl = scene.objectActors.emplace_back();
+    bowl.object = 7;
+    bowl.rig = bowlRig;
+    bowl.skinned.push_back({0, {}});
+    bowl.place = Transform::at(1, 2, 3, 0);
+    bowl.held.push_back({1, 2, {}});
+    ts2::scene::ScenePose pose;
+    ts2::scene::poseActors(scene, 0, pose);
+    const auto placeOf = [&](std::size_t instance) {
+        std::optional<Transform> found;
+        for (const auto& [i, place] : pose.places) {
+            if (i == instance) {
+                CHECK(!found);
+                found = place;
+            }
+        }
+        return found;
+    };
+    const auto food = placeOf(1);
+    CHECK(food && std::abs(food->m[3] - 1) < 1e-5f && std::abs(food->m[7] - 2) < 1e-5f && std::abs(food->m[11] - 3.6f) < 1e-5f);
+    auto simRig = std::make_shared<ts2::scene::Rig>();
+    simRig->nodes.push_back({"root", -1, {0, 0, 0}, {0, 0, 0, 1}});
+    simRig->nodes.push_back({"r_hand_grip", 0, {0.25f, 0, 1}, {0, 0, 0, 1}});
+    auto& sim = scene.actors.emplace_back();
+    sim.object = 1;
+    sim.rig = simRig;
+    sim.place = Transform::at(5, 0, 0, 0);
+    sim.held.push_back({0, 1, {}});
+    ts2::scene::poseActors(scene, 0, pose);
+    const auto inHand = placeOf(1);
+    CHECK(inHand && std::abs(inHand->m[3] - 5.25f) < 1e-5f && std::abs(inHand->m[7]) < 1e-5f && std::abs(inHand->m[11] - 1.6f) < 1e-5f);
+}
+
 // A carried Sim hangs at the bone of its carrier's slot as the carrier is posed in the same call,
 // even when it comes first in the scene. Carriers that carry each other still get posed.
 void carriedSimsHangAtTheCarriersSlotBone() {
@@ -3062,7 +3280,231 @@ void hoodDriftInterruptRestartsFromTheCamera() {
     CHECK(step.goal && std::abs((*step.goal)[0] - 900) < 2 && std::abs((*step.goal)[1] - 100) < 2);
 }
 
+// A lot's imposter is drawn again square on to each of its rectangles: a wall from 5 tiles in front
+// of the side its texture faces, seeing half a tile either way, and a floor slice from the top
+// camera's height onto its slab. The quads are a fence and a pool floor cell of the Smiths' lot.
+void imposterShotsFollowTheGameLayout() {
+    using namespace ts2::scene;
+    using Kind = PaintedTerrain::ImposterPart::Kind;
+    LotImposter imposter;
+    LotImposter::Part fence;
+    fence.kind = Kind::Wall;
+    fence.texture = "walls_12";
+    // Both sides of one fence, each with its own rectangle.
+    fence.vertices = {29, 40, 0, 0.0078125f, 0.1328125f, 0, 0,       17, 40, 0, 0.7578125f, 0.1328125f, 0, 0,
+                      17, 40, 1.11174f, 0.7578125f, 0.0078125f, 0, 0, 29, 40, 1.11174f, 0.0078125f, 0.0078125f, 0, 0,
+                      17, 40, 0, 0.0078125f, 0.2734375f, 0, 0,       29, 40, 0, 0.7578125f, 0.2734375f, 0, 0,
+                      29, 40, 1.11174f, 0.7578125f, 0.1484375f, 0, 0, 17, 40, 1.11174f, 0.0078125f, 0.1484375f, 0, 0};
+    fence.indices = {0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7};
+    LotImposter::Part slice;
+    slice.kind = Kind::Slice;
+    slice.texture = "slices_0";
+    slice.vertices = {12, 12, -2.625f, 0.0078125f, 0.0703125f, 0, 0, 16, 12, -2.625f, 0.0703125f, 0.0703125f, 0, 0,
+                      16, 16, -2.625f, 0.0703125f, 0.0078125f, 0, 0, 12, 16, -2.625f, 0.0078125f, 0.0078125f, 0, 0};
+    slice.indices = {0, 1, 2, 0, 2, 3};
+    imposter.parts = {fence, slice};
+
+    const auto heights = imposterSliceHeights(imposter);
+    CHECK(heights.size() == 1 && heights[0] == -2.625f);
+    const auto shots = imposterShots(imposter, {-2.625f, -2.375f});
+    CHECK(shots.size() == 3);
+    if (shots.size() != 3) {
+        return;
+    }
+    const auto close = [](float a, float b) { return std::abs(a - b) < 1e-3f; };
+    // The outer side faces away from the lot (+y), the inner side into it.
+    CHECK(shots[0].layer == ImposterShot::Layer::Walls && close(shots[0].eye[1], 45) && close(shots[0].target[0], 23));
+    CHECK(close(shots[0].rect[2], 0.7578125f) && close(shots[0].rect[3], 0.1328125f));
+    CHECK(close(shots[0].orthographic[1], 6) && close(shots[0].orthographic[3], 0.55587f) && close(shots[0].up[2], 1));
+    CHECK(close(shots[0].nearPlane, 4.5f) && close(shots[0].farPlane, 5.5f));
+    CHECK(close(shots[1].eye[1], 35));
+    // The slice's slab reaches 0.5 down and half the way up to the next height.
+    CHECK(shots[2].layer == ImposterShot::Layer::Floors && close(shots[2].eye[0], 14) && close(shots[2].eye[2], 100));
+    CHECK(close(shots[2].orthographic[1], 2) && close(shots[2].up[1], 1));
+    CHECK(close(shots[2].nearPlane, 100 - (-2.625f + 0.125f)) && close(shots[2].farPlane, 100 - (-2.625f - 0.5f)));
+}
+
+// High imposter pictures come back from the cache only for the lot package they were made from, and
+// a broken file gives none.
+void imposterCacheKeepsPicturesForTheirPackage() {
+    namespace fs = std::filesystem;
+    using namespace ts2::scene;
+    const fs::path root = fs::temp_directory_path() / ("neots2-imposter-cache-test-" + std::to_string(std::random_device{}()));
+    const fs::path file = imposterCacheFile(root, fs::path("N002_Lot10.package"));
+    CHECK(file.filename() == "N002_Lot10.neoimposter");
+    Image page{8, 4, std::vector<std::uint8_t>(8 * 4 * 4, 0)};
+    for (std::size_t i = 0; i < page.rgba.size(); i += 4) {
+        page.rgba[i] = 200;
+        page.rgba[i + 3] = 255;
+    }
+    auto pictures = compressedImposterPictures({{"walls_0", page}});
+    CHECK(pictures.at("walls_0").blockFormat == 8 && pictures.at("walls_0").blockLevels.at(0).size() == 2 * 16 && pictures.at("walls_0").rgba.empty());
+    const ImposterCacheKey key{1234, 5678};
+    CHECK(writeImposterCache(file, key, pictures));
+    const auto read = readImposterCache(file, key);
+    CHECK(read && read->size() == 1 && read->at("walls_0").width == 8 && read->at("walls_0").blockLevels == pictures.at("walls_0").blockLevels);
+    // Made from another state of the package.
+    CHECK(!readImposterCache(file, {1234, 5679}));
+    // Cut short.
+    fs::resize_file(file, fs::file_size(file) - 1);
+    CHECK(!readImposterCache(file, key));
+    // Asking for a huge picture.
+    {
+        std::ofstream out(file, std::ios::binary | std::ios::trunc);
+        out.write("NEOIMPST", 8);
+        const std::uint32_t version = 4, count = 1;
+        out.write(reinterpret_cast<const char*>(&version), 4);
+        out.write(reinterpret_cast<const char*>(&key.packageSize), 8);
+        out.write(reinterpret_cast<const char*>(&key.packageTime), 8);
+        out.write(reinterpret_cast<const char*>(&count), 4);
+        const std::uint8_t length = 1;
+        const std::uint32_t side = 0x10000, format = 8, size = 0xFFFFFFFF;
+        out.write(reinterpret_cast<const char*>(&length), 1);
+        out.write("t", 1);
+        for (const std::uint32_t v : {side, side, format, size}) {
+            out.write(reinterpret_cast<const char*>(&v), 4);
+        }
+    }
+    CHECK(!readImposterCache(file, key));
+    std::error_code error;
+    fs::remove_all(root, error);
+}
+
+// The imposter layers take the parts of a lot as the game tags them.
+void imposterLayersTakeTheGamesParts() {
+    using namespace ts2::scene;
+    using L = ImposterShot::Layer;
+    Instance terrain;
+    Instance groundFloor;
+    groundFloor.part = Part::Floor;
+    groundFloor.level = 1;
+    Instance stage = groundFloor;
+    stage.onStage = true;
+    Instance pool = groundFloor;
+    pool.poolWater = true;
+    Instance upstairs = groundFloor;
+    upstairs.level = 2;
+    Instance ceiling = upstairs;
+    ceiling.underside = Underside::Floor;
+    Instance door;
+    door.part = Part::Object;
+    door.objectType = 8;
+    Instance stairs = door;
+    stairs.objectType = 10;
+    Instance sim = door;
+    sim.objectType = 0;
+    sim.lightGroup = LightGroup::Sims;
+    CHECK(inImposterLayer(terrain, L::Ground, 1) && inImposterLayer(groundFloor, L::Ground, 1));
+    CHECK(!inImposterLayer(groundFloor, L::Floors, 1) && inImposterLayer(stage, L::Floors, 1) && !inImposterLayer(stage, L::Ground, 1));
+    CHECK(inImposterLayer(pool, L::Ground, 1) && !inImposterLayer(pool, L::Floors, 1) && inImposterLayer(upstairs, L::Floors, 1));
+    CHECK(!inImposterLayer(ceiling, L::Floors, 1) && !inImposterLayer(ceiling, L::Ground, 1));
+    CHECK(inImposterLayer(door, L::Walls, 1) && !inImposterLayer(stairs, L::Walls, 1) && !inImposterLayer(sim, L::Walls, 1));
+    door.hidden = true;
+    CHECK(!inImposterLayer(door, L::Walls, 1));
+}
+
+// Imposter textures are filled from their shots averaged down, wall rectangles padded by their
+// repeated edges, and the terrain and its light map faded over 4 rings at the lot's edge for every
+// 128 texels, the light map doubled from the lot's.
+void imposterPagesFinishAsTheGamesDo() {
+    using namespace ts2::scene;
+    ImposterPages pages(256);
+    ImposterShot wall;
+    wall.layer = ImposterShot::Layer::Walls;
+    wall.texture = "walls_0";
+    wall.rect = {16 / 256.0f, 16 / 256.0f, 20 / 256.0f, 18 / 256.0f};
+    // 4 x 2 texels drawn at 2x: each texel averages a 2 x 2 block of 0 and 200.
+    Image picture{8, 4, {}};
+    for (unsigned i = 0; i < 8 * 4; ++i) {
+        const std::uint8_t v = (i % 2) ? 200 : 0;
+        picture.rgba.insert(picture.rgba.end(), {v, v, v, 255});
+    }
+    pages.put(wall, picture, 2);
+    pages.put(wall, Image{3, 3, std::vector<std::uint8_t>(36, 9)}, 2);  // the wrong size, left out
+    ImposterShot terrain;
+    terrain.layer = ImposterShot::Layer::Ground;
+    terrain.texture = "terrain";
+    terrain.rect = {0, 0, 1, 1};
+    pages.put(terrain, Image{512, 512, std::vector<std::uint8_t>(512 * 512 * 4, 255)}, 2);
+    // A lot light map 8 texels a tile, 8 by 8 tiles, all 100.
+    const Image lotLight{64, 64, std::vector<std::uint8_t>(64 * 64 * 4, 100)};
+    auto done = pages.finish(&lotLight, 10, 20);
+    const auto at = [&](const std::string& name, int x, int y, int c) {
+        return int(done[name].rgba[(std::size_t(y) * 256 + std::size_t(x)) * 4 + std::size_t(c)]);
+    };
+    CHECK(at("walls_0", 16, 16, 0) == 100 && at("walls_0", 19, 17, 3) == 255);
+    // Padded by 2 texels at 256, corners too, and no further.
+    CHECK(at("walls_0", 14, 14, 0) == 100 && at("walls_0", 21, 19, 3) == 255 && at("walls_0", 13, 16, 3) == 0);
+    // The lot is 40 by 80 texels at the bottom left. Its outer ring is clear, then 1/8, 2/8 and on.
+    CHECK(at("terrain", 0, 255, 3) == 0 && at("terrain", 1, 200, 3) == 32 && at("terrain", 7, 200, 3) == 223);
+    CHECK(at("terrain", 8, 200, 3) == 255 && at("terrain", 20, 176, 3) == 0 && at("terrain", 20, 175, 3) == 255);
+    CHECK(at("terrain", 20, 254, 3) == 32);
+    // The light map is the lot's doubled where the lot's covers, and clear beside the lot.
+    CHECK(at("terrainLmap", 12, 240, 0) == 200 && at("terrainLmap", 41, 250, 3) == 0 && at("terrainLmap", 0, 250, 0) == 0);
+}
+
 // The sway follows the camera block's curve over its 600 s, in radians, and then holds.
+// Instances drawn alike join into one per square, placed as they were. Blended surfaces and
+// instances lit by another light set keep apart.
+void alikeInstancesJoin() {
+    using namespace ts2::scene;
+    Scene scene;
+    scene.materials.resize(2);
+    scene.materials[1].alpha = AlphaMode::Blend;
+    Mesh mesh;
+    Primitive solid;
+    solid.material = 0;
+    solid.positions = {0, 0, 0, 1, 0, 0, 0, 1, 0};
+    solid.normals = {0, 0, 1, 0, 0, 1, 0, 0, 1};
+    solid.indices = {0, 1, 2};
+    Primitive glass = solid;
+    glass.material = 1;
+    mesh.primitives = {solid, glass};
+    scene.meshes.push_back(mesh);
+    for (const auto& [x, set] : {std::pair{1.0f, -1}, std::pair{2.0f, -1}, std::pair{40.0f, -1}, std::pair{3.0f, 5}}) {
+        Instance i;
+        i.mesh = 0;
+        i.transform = Transform::at(x, 0, 0, 0);
+        i.lightSet = set;
+        scene.instances.push_back(i);
+    }
+    CHECK(mergeAlike(scene, 16) == 4);
+    // The four glass parts stay, and three joined instances: two near the origin, the far one, the other light.
+    CHECK(scene.instances.size() == 7);
+    std::size_t joined = 0;
+    for (const Instance& i : scene.instances) {
+        CHECK(i.mesh >= 0 && static_cast<std::size_t>(i.mesh) < scene.meshes.size());
+        if (i.mesh < 0 || static_cast<std::size_t>(i.mesh) >= scene.meshes.size()) {
+            continue;
+        }
+        const Mesh& m = scene.meshes[static_cast<std::size_t>(i.mesh)];
+        CHECK(m.primitives.size() == 1);
+        if (m.primitives.empty() || m.primitives[0].material != 0) {
+            continue;
+        }
+        ++joined;
+        const Primitive& p = m.primitives[0];
+        if (p.positions.size() == 18) {
+            CHECK(i.lightSet == -1 && i.transform.m[3] == 0);
+            CHECK(p.positions[0] == 1 && p.positions[3] == 2 && p.positions[9] == 2 && p.positions[12] == 3);
+            CHECK((p.indices == std::vector<std::uint32_t>{0, 1, 2, 3, 4, 5}) && p.normals.size() == 18);
+        } else {
+            CHECK(p.positions.size() == 9 && (i.lightSet == 5 || p.positions[0] == 40));
+        }
+    }
+    CHECK(joined == 3);
+    // The original mesh is no longer placed, so it is gone.
+    CHECK(scene.meshes.size() == 7);
+
+    Scene withSims;
+    withSims.meshes.push_back(mesh);
+    withSims.materials.resize(2);
+    withSims.instances.resize(2);
+    withSims.instances[0].mesh = withSims.instances[1].mesh = 0;
+    withSims.actors.emplace_back();
+    CHECK(mergeAlike(withSims, 16) == 0 && withSims.instances.size() == 2);
+}
+
 void hoodDriftSwaysAlongItsCurve() {
     auto drift = ts2::scene::HoodDrift::load(driftEffects(), 7);
     CHECK(drift);
@@ -3214,6 +3656,7 @@ std::vector<Test> sceneTests() {
         {"A lot object's actor poses every joint from its own rig", objectActorsPoseEveryJointFromTheirRig},
         {"Backward clips play from their end", backwardClipsPlayFromTheirEnd},
         {"Carried Sims hang at the carrier's slot bone", carriedSimsHangAtTheCarriersSlotBone},
+        {"Objects hang from their container's posed slot bone", objectsHangFromTheirContainersPosedSlotBone},
         {"Sims without clips keep their own eyes", simsWithoutClipsKeepTheirOwnEyes},
         {"scene transforms turn and move", sceneTransformsTurnAndMove},
         {"scene quads face their normal", sceneQuadsFaceTheirNormal},
@@ -3239,6 +3682,10 @@ std::vector<Test> sceneTests() {
         {"particle stops follow their kind", particleStopsFollowTheirKind},
         {"particle starts wait and prewarm", particleStartsWaitAndPrewarm},
         {"particle walk pushes them about", particleWalkPushesThemAbout},
+        {"effect models show until stopped", effectModelsShowUntilStopped},
+        {"metaparticles start on the water", metaParticlesStartOnTheWater},
+        {"metaparticles align along their flight", metaParticlesAlignAlongTheirFlight},
+        {"metaparticles bob on their waves", metaParticlesBobOnTheirWaves},
         {"effects face the camera", effectsFaceTheCamera},
         {"effects pick their record by level", effectsPickTheirRecordByLevel},
         {"effect parts follow detail and state", effectPartsFollowDetailAndState},
@@ -3274,6 +3721,11 @@ std::vector<Test> sceneTests() {
         {"scene rays meet what is drawn", sceneRaysMeetWhatIsDrawn},
         {"neighborhood drift starts after rest and wait", hoodDriftStartsAfterRestAndWait},
         {"neighborhood drift restarts from the camera", hoodDriftInterruptRestartsFromTheCamera},
+        {"instances drawn alike join", alikeInstancesJoin},
+        {"imposter shots follow the game layout", imposterShotsFollowTheGameLayout},
+        {"imposter layers take the game's parts", imposterLayersTakeTheGamesParts},
+        {"imposter pages finish as the game's do", imposterPagesFinishAsTheGamesDo},
+        {"imposter cache keeps pictures for their package", imposterCacheKeepsPicturesForTheirPackage},
         {"neighborhood drift sways along its curve", hoodDriftSwaysAlongItsCurve},
         {"neighborhood drift wanders within its pulls", hoodDriftWandersWithinItsPulls},
         {"neighborhood drift refuses unusable effects", hoodDriftRefusesUnusableEffects},

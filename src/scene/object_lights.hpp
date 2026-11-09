@@ -48,14 +48,11 @@ struct PointLight {
 // their light falls to `rangeCutoff`. Lights too weak to reach anything are left out.
 std::vector<PointLight> pointLights(const std::vector<lotlighting::PortalLight>& portals, const std::vector<LampLight>& lamps, float rangeCutoff);
 
-// Gives every lot object standing in a room the lights the room gives its group, in place of the
-// daylight. Doors' and windows' parts go by the room their node stands in (Instance::partLightSets).
-// Each part also gets the point lights of the windows and doors lighting its room (`portals`) and of
-// the lamps in it (`lamps`), their reach ending where their light falls to `rangeCutoff`, up to
-// eight lights in all by the game's scores. Outdoors is room 0: a part there picks from the daylight
-// (`outdoor`) and the lamps and windows lighting outdoors, and keeps the plain daylight when none
-// reaches it. `groundLevel` is the grid level of the ground storey (Instance::level counts grid
-// levels).
+// Gives every lot object in a room the lights the room gives its group in place of daylight, doors' and
+// windows' parts by the room their node stands in (Instance::partLightSets). Each part also gets the
+// point lights of the windows and doors lighting its room (`portals`) and of its lamps, reaching to where
+// they fall to `rangeCutoff`, up to eight by the game's scores. Outdoors (room 0) a part picks from
+// `outdoor` and the lights reaching outdoors, else keeps plain daylight. `groundLevel` is the ground storey's grid level.
 void light(Scene& scene, const std::map<std::int16_t, lotlighting::Room>& rooms, const ObjectLighting& outdoor,
            const std::vector<lotlighting::PortalLight>& portals, const std::vector<LampLight>& lamps, float rangeCutoff, const RoomAt& roomAt,
            int groundLevel);

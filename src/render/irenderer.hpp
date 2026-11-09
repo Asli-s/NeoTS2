@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -112,10 +113,52 @@ public:
     // Draws one frame off-screen and saves it as a PNG.
     [[nodiscard]] virtual bool drawToFile(const Camera& camera, unsigned width, unsigned height, const std::filesystem::path& path) = 0;
     // Draws only the shown instances off-screen over a clear (transparent) background, without the
-    // sky, ground, water or sprites, objects lit by `lighting`, and returns the picture (rows from
-    // the top). Nullopt when it can't be drawn. For Sim portraits.
+    // sky, ground, water or sprites, and returns the picture (rows from the top). Everything is lit
+    // by `lighting` (Sim portraits), or without it as the scene is (lot imposter pictures). Nullopt
+    // when it can't be drawn.
     [[nodiscard]] virtual std::optional<scene::Image> drawInstancesToImage(const Camera& camera, unsigned width, unsigned height,
-                                                                            const scene::ObjectLighting& lighting) = 0;
+                                                                            std::optional<scene::ObjectLighting> lighting) = 0;
+    // A picture of a prepared scene: from where, how big, and which of its instances it shows. With
+    // `pools`, the pool water it names lights the pools' floors and walls with its caustics whether or
+    // not the picture shows it, and pool water shown is drawn over the mirror image of the sky and of
+    // the instances `pools` names, as the game's imposter pictures show them.
+    struct PreparedShot {
+        Camera camera;
+        unsigned width = 0, height = 0;
+        std::vector<std::uint8_t> shown;
+        std::vector<std::uint8_t> pools;
+    };
+    // Makes the smaller levels of up to `textures` of a prepared scene's textures that still need
+    // them, on the drawing thread, so that a big scene's are spread over frames. True once none are
+    // left (startPreparedImages makes any left first).
+    [[nodiscard]] virtual bool makePreparedLevels(Prepared& scene, std::size_t textures) {
+        (void)scene;
+        (void)textures;
+        return true;
+    }
+    // Lets go of what drawing prepared scenes' pictures keeps for the next ones, once none are drawn
+    // for a while.
+    virtual void releasePictureTargets() {}
+    // Pictures of a prepared scene the GPU is drawing (see startPreparedImages).
+    class PicturesBase {
+    public:
+        virtual ~PicturesBase() = default;
+    };
+    using Pictures = std::unique_ptr<PicturesBase>;
+    // Starts drawing pictures of a scene prepared but not drawn, each as drawInstancesToImage draws
+    // the drawn scene's lit as it is, without waiting for the GPU, and leaves the drawn scene as it
+    // was. Null when the renderer can't draw a prepared scene. For High lot imposters.
+    [[nodiscard]] virtual Pictures startPreparedImages(Prepared& scene, const std::vector<PreparedShot>& shots) {
+        (void)scene;
+        (void)shots;
+        return {};
+    }
+    // The pictures once the GPU has drawn them, in the shots' order, empty for a shot it couldn't
+    // draw. Nullopt until then.
+    [[nodiscard]] virtual std::optional<std::vector<scene::Image>> takePreparedImages(PicturesBase& pictures) {
+        (void)pictures;
+        return std::vector<scene::Image>{};
+    }
 
     // The name of the graphics API in use (e.g. "direct3d12").
     virtual std::string backend() const = 0;
@@ -144,6 +187,30 @@ public:
     virtual void addMaterials(const scene::Scene& scene) = 0;
     // The same for its meshes (after their materials).
     virtual void addMeshes(const scene::Scene& scene) = 0;
+
+    // A scene's images and meshes uploaded ahead, to be added to the drawn scene (see prepareAddition).
+    class AdditionBase {
+    public:
+        virtual ~AdditionBase() = default;
+    };
+    using Addition = std::unique_ptr<AdditionBase>;
+    // Uploads the images, cubes and meshes `add` brings, leaving out the images that `shared` names
+    // one of the drawn scene's for (an index of 0 or more). A renderer whose
+    // capabilities().threadedPrepare is set can do it on another thread. Null when it can't upload
+    // ahead.
+    [[nodiscard]] virtual Addition prepareAddition(const scene::Scene& add, const std::vector<int>& shared) const {
+        (void)add;
+        (void)shared;
+        return {};
+    }
+    // After the prepared scene's images (but the shared ones), materials and meshes were added to the
+    // end of the drawn scene's, draws them from now on as addMaterials and addMeshes would. An
+    // addition that doesn't match what the scene gained is dropped and the scene's new parts uploaded now.
+    virtual void addPrepared(const scene::Scene& scene, Addition addition) {
+        (void)addition;
+        addMaterials(scene);
+        addMeshes(scene);
+    }
     // Replaces an uploaded instance with the scene's, or adds it as the next one. Its materials are
     // its mesh's own again. Light sets the scene has gained are taken too.
     virtual void setInstance(const scene::Scene& scene, std::size_t index) = 0;
@@ -158,9 +225,36 @@ public:
     // Draws a lot's sky with these six faces from the next frame on (see scene::Scene::skybox). None
     // when they are not six faces of one size.
     virtual void setSkybox(const std::vector<scene::Image>& faces) = 0;
+    // Uploads a new light map for the neighborhood's painted terrain and roads in place of the one
+    // uploaded with it. Nothing happens without an uploaded terrain or with a broken image.
+    virtual void setTerrainLightMap(const scene::Image& lightMap) = 0;
+    // Uploads a new sky cube for the neighborhood's water and its reflection, in place of the one
+    // uploaded with it. Nothing happens without an uploaded sky or when the faces are not six squares
+    // of one size.
+    virtual void setNeighborhoodSky(const std::vector<scene::Image>& faces) = 0;
     // Uploads the scene's lot imposters and boundary curtain again, in place of the uploaded ones:
     // lot view's surroundings at another View Distance.
     virtual void setSurroundings(const scene::Scene& scene) = 0;
+    // Imposter textures uploaded ahead (see prepareImposterTextures).
+    class ImposterTexturesBase {
+    public:
+        virtual ~ImposterTexturesBase() = default;
+    };
+    using ImposterTextures = std::unique_ptr<ImposterTexturesBase>;
+    // Uploads imposter textures ahead of addImposters. A renderer whose capabilities().threadedPrepare
+    // is set can do it on another thread. Null when it can't upload ahead.
+    [[nodiscard]] virtual ImposterTextures prepareImposterTextures(const scene::SharedImages& images) const {
+        (void)images;
+        return {};
+    }
+    // Uploads the imposter textures the scene's terrain has gained since and draws its imposters
+    // anew, keeping the textures uploaded before. For imposters replaced a lot at a time (see
+    // scene::replaceImposter). Textures uploaded ahead are taken for the gained ones when they are
+    // as many.
+    virtual void addImposters(const scene::Scene& scene, ImposterTextures ahead = {}) {
+        (void)ahead;
+        setSurroundings(scene);
+    }
     // The light lot imposters' walls, roofs and slices are drawn with from the next frame on: the
     // lighting state's environment colour in lot view, white in the neighborhood.
     virtual void setImposterLight(const std::array<float, 3>& light) = 0;
@@ -172,6 +266,9 @@ public:
     // its slices' alpha scaled.
     // 1, the default, draws it as it is.
     virtual void setImposterAlpha(std::uint32_t lot, float alpha) = 0;
+    // The lots (by id) whose imposters are left out from the next frame on, such as neighbors drawn
+    // as real houses. Their imposters stay uploaded, to show again at once.
+    virtual void setImpostersLeftOut(std::set<std::uint32_t> lots) = 0;
     // How objects are lit from the next frame on (see scene::Scene::objectLighting).
     virtual void setObjectLighting(std::optional<scene::ObjectLighting> lighting) = 0;
 
@@ -196,6 +293,9 @@ public:
     // Darkens corners and contacts in the main view, not in the original game. `strength` is the power
     // how open a pixel is gets raised to, with 0 for none.
     virtual void setAmbientOcclusion(float strength) { (void)strength; }
+    // Whether ambient occlusion is worked out at half the view's size, which costs less and is a little
+    // softer, or at its full size. Half by default.
+    virtual void setAmbientOcclusionHalfSize(bool half) { (void)half; }
     // Whether a lot's sea shows them too (enableOceanReflection in Graphics Rules).
     virtual void setSeaReflections(bool on) = 0;
     // Whether materials show specular highlights (the game's specHighlights, off at its Low

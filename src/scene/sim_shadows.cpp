@@ -46,6 +46,42 @@ std::array<float, 16> camera(const Vec& toSun, const Vec& root) {
     return {x[0], x[1], x[2], x[3], y[0], y[1], y[2], y[3], z[0], z[1], z[2], z[3], 0, 0, 0, 1};
 }
 
+namespace {
+
+// The Sim's turn across the ground: its model's +y and +x axes laid flat.
+struct Turn {
+    Vec ahead, across;
+};
+
+Turn turnOf(const Vec& forward) {
+    const Vec a = unit({forward[0], forward[1], 0}, {0, 1, 0});
+    return {a, {a[1], -a[0], 0}};
+}
+
+} // namespace
+
+std::array<float, 16> indoorCamera(const Vec& feet, const Vec& forward) {
+    const Turn t = turnOf(forward);
+    const Vec at{feet[0] + t.ahead[0] * kQuadAhead, feet[1] + t.ahead[1] * kQuadAhead, feet[2] + kQuadRaise};
+    const Vec down{0, 0, -1};
+    const float ax = 1 / kWidth, ay = 1 / kWidth, az = 1 / (kFar - kNear), bz = -kNear * az;
+    auto row = [&](const Vec& axis, float scale, float offset) {
+        return std::array<float, 4>{axis[0] * scale, axis[1] * scale, axis[2] * scale, offset - dot(axis, at) * scale};
+    };
+    const auto x = row(t.across, ax, 0), y = row(t.ahead, ay, 0), z = row(down, az, bz);
+    return {x[0], x[1], x[2], x[3], y[0], y[1], y[2], y[3], z[0], z[1], z[2], z[3], 0, 0, 0, 1};
+}
+
+std::array<float, 16> indoorQuad(const Vec& feet, const Vec& forward) {
+    const Turn t = turnOf(forward);
+    const Vec at{feet[0] + t.ahead[0] * kQuadAhead, feet[1] + t.ahead[1] * kQuadAhead, 0};
+    const float ax = 2 / kQuadWidth, ay = 2 / kQuadDepth;
+    return {t.across[0] * ax, t.across[1] * ax, 0, -dot(t.across, at) * ax,
+            t.ahead[0] * ay,  t.ahead[1] * ay,  0, -dot(t.ahead, at) * ay,
+            0, 0, 0, 0,
+            0, 0, 0, 1};
+}
+
 int blurWeight(int across, int up, int radius) {
     radius = std::clamp(radius, 0, 8);
     if (std::abs(across) > radius || std::abs(up) > radius) {

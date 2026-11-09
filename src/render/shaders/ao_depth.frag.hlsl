@@ -5,8 +5,10 @@
 
 COMBINED Texture2D<float4> baseTexture : register(t0, space2);
 COMBINED SamplerState baseSampler : register(s0, space2);
+COMBINED Texture2D<float4> maskTexture : register(t1, space2);
+COMBINED SamplerState maskSampler : register(s1, space2);
 
-// The start of the scene shader's Material, field for field.
+// The scene shader's Material, field for field.
 cbuffer Material : register(b0, space3) {
     float4 color;
     float4 sunDirection;
@@ -26,6 +28,11 @@ cbuffer Material : register(b0, space3) {
     float4 cameraForward;
     float4 emissive;
     float4 uvTile;
+    float4 shadowReceiver;
+    float4 caustics;
+    float4 neighborLight;
+    float4 wallMask;
+    float4 terrainTexture;
 };
 
 // What the scene's vertex shaders give the scene shader.
@@ -46,8 +53,12 @@ struct Input {
 };
 
 void main(Input input) {
+    const float2 uv = input.uv * uvTile.xy + uvTile.zw;
+    if (wallMask.x > 0.5 && maskTexture.Sample(maskSampler, float2(wallMask.y > 0.5 ? 1 - uv.x : uv.x, uv.y)).a < 0.5) {
+        discard;
+    }
     if (alphaCutoff > 0) {
-        const float texel = hasTexture > 0.5 ? baseTexture.Sample(baseSampler, input.uv * uvTile.xy + uvTile.zw).a : 1;
+        const float texel = hasTexture > 0.5 && terrainTexture.x < 0.5 ? baseTexture.Sample(baseSampler, uv).a : 1;
         if (color.a * texel * input.alpha < alphaCutoff) {
             discard;
         }

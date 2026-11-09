@@ -332,6 +332,107 @@ const Transform* SceneBuilder::bone(const std::string& model, const std::string&
     return b != m->second.end() ? &b->second : nullptr;
 }
 
+namespace {
+
+// Whether a material's switch is on ("true" or "1").
+bool enabled(const sg::Material& m, const char* key) {
+    const std::string v = property(m, key);
+    return v == "true" || v == "1";
+}
+
+// How a standard material blends or masks: "additive" adds the colour times its alpha,
+// "addNoSrcAlphaScale" the colour alone, and the other modes are drawn as blending. Its alpha
+// multiplier, and without a texture the material's own alpha standing in for the texture's (window
+// glass is half see-through this way).
+void readAlpha(const sg::Material& m, Material& out) {
+    if (const std::string blend = property(m, "stdMatAlphaBlendMode"); blend == "additive") {
+        out.alpha = AlphaMode::Add;
+    } else if (blend == "addNoSrcAlphaScale") {
+        out.alpha = AlphaMode::Sum;
+    } else if (!blend.empty() && blend != "none") {
+        out.alpha = AlphaMode::Blend;
+    } else if (enabled(m, "stdMatAlphaTestEnabled")) {
+        out.alpha = AlphaMode::Mask;
+        // The game keeps alpha at least the reference out of 255. Half a step under it, so an alpha
+        // that is 255 in the texture but a hair under 1 once interpolated still passes a 255
+        // reference (a crib's bedding, a grill).
+        if (const auto ref = parseFloats(property(m, "stdMatAlphaRefValue")); !ref.empty()) {
+            out.alphaReference = (ref[0] - 0.5f) / 255.0f;
+        }
+    }
+    if (const auto multiplier = parseFloats(property(m, "stdMatAlphaMultiplier")); !multiplier.empty()) {
+        out.color[3] = multiplier[0];
+    }
+    out.alphaReplicate = enabled(m, "stdMatBaseTextureAlphaReplicate");
+    if (out.image < 0) {
+        if (const auto alpha = parseFloats(property(m, "stdMatUntexturedDiffAlpha")); !alpha.empty()) {
+            out.color[3] *= alpha[0];
+        }
+    }
+}
+
+// A texture stepping through a row of frames. Only a single row is read. How the game steps
+// through more rows is not known yet.
+void readTileAnimation(const sg::Material& m, Material& out) {
+    if (property(m, "stdMatTextureCoordAnimMode") != "tile" || out.image < 0) {
+        return;
+    }
+    const auto tiles = parseFloats(property(m, "stdMatTextureCoordAnimNumTiles"));
+    const auto speed = parseFloats(property(m, "stdMatTextureCoordTileAnimSpeed"));
+    constexpr float kMaxTiles = 64;  // more is a broken file
+    const bool wholeRow = tiles.size() >= 2 && tiles[1] == 1 && tiles[0] >= 2 && tiles[0] <= kMaxTiles && tiles[0] == std::floor(tiles[0]);
+    if (wholeRow && !speed.empty() && speed[0] > 0 && std::isfinite(speed[0])) {
+        out.tiles = static_cast<int>(tiles[0]);
+        out.tileSpeed = speed[0];
+    }
+}
+
+// The game's floor shader takes 0.125 to 64 tiles a repeat.
+void readFloorTiles(const sg::Material& m, Material& out) {
+    for (std::size_t i = 0; i < 2; ++i) {
+        if (const auto tiles = parseFloats(property(m, i == 0 ? "floorMaterialScaleU" : "floorMaterialScaleV")); !tiles.empty()) {
+            out.floorTiles[i] = std::isfinite(tiles[0]) ? std::clamp(tiles[0], 0.125f, 64.0f) : 1.0f;
+        }
+    }
+}
+
+// Without lighting the colour is the diffuse, plus the emissive colour on a texture, clamped to 1
+// as the game's pixel shader clamps it.
+void readUnlit(const sg::Material& m, const std::string& name, Material& out) {
+    if (const std::string lighting = property(m, "stdMatLightingEnabled"); lighting != "0" && lighting != "false") {
+        return;
+    }
+    out.unlit = true;
+    const std::string anim = property(m, "stdMatTextureCoordAnimMode");
+    const auto glow = parseFloats(property(m, "stdMatEmissiveCoef"));
+    for (std::size_t i = 0; i < 3; ++i) {
+        const float add = out.image >= 0 && i < glow.size() && std::isfinite(glow[i]) ? glow[i] : 0.0f;
+        out.color[i] = std::clamp(std::isfinite(out.color[i]) ? out.color[i] + add : 1.0f, 0.0f, 1.0f);
+    }
+    // The standard material scales such a texture by the room's or the outdoors' light, unless
+    // its texture moves, it glows or it is a lamp's: the game counts a material whose name holds
+    // "lighting" (exact case) as a light material, as every lamp's is named.
+    out.takesTextureLight = out.image >= 0 && (anim.empty() || anim == "none") && std::none_of(glow.begin(), glow.end(), [](float c) { return c > 0; }) &&
+                            name.find("lighting") == std::string::npos;
+}
+
+// Which faces show and the layer the material is drawn on. As the game's material scripts number
+// it, a Sim's hair blends 3 above its opaque layer instead of 17, so it is drawn before other
+// blended surfaces of the same stdMatLayer. Every blend mode counts, adding ones too.
+void readLayer(const sg::Material& m, Material& out) {
+    const int stdLayer = intProperty(m, "stdMatLayer");
+    out.doubleSided = property(m, "stdMatCullMode") == "none";
+    out.blendedHair = m.type == "SimHair" && property(m, "stdMatAlphaBlendMode") == "blend";
+    const bool blends = out.alpha == AlphaMode::Blend || out.alpha == AlphaMode::Add || out.alpha == AlphaMode::Sum;
+    if (m.type == "SimHair") {
+        out.layer = stdLayer * 18 + (blends ? 3 : 0);
+    } else {
+        out.layer = stdLayer * 18 + intProperty(m, "stdMatAddLayer") + (blends ? 17 : 0);
+    }
+}
+
+} // namespace
+
 int SceneBuilder::material(const std::string& name, bool hair) {
     const std::string key = lower(name) + (hair ? "|hair" : "");
     if (const auto it = materials_.find(key); it != materials_.end()) {
@@ -348,7 +449,7 @@ int SceneBuilder::material(const std::string& name, bool hair) {
         // in it ("-cutout-0" for nothing): the top with the mask's hole cut out, made while playing.
         if (const auto cut = key.find("-cutout-"); cut != std::string::npos) {
             const std::string top = name.substr(0, cut), mask = name.substr(cut + 8);
-            const int m = mask == "0" ? -1 : cutMaterial(name, top, assets_.texture(mask), false);
+            const int m = mask == "0" ? -1 : cutMaterial(name, top, mask, false);
             return materials_[key] = m >= 0 ? m : material(top);
         }
         ++missingMaterials;
@@ -404,93 +505,48 @@ int SceneBuilder::material(const std::string& name, bool hair) {
         out.image = image(texture);
         baseTextures_[key] = texture;
     }
-    // A Sim's face: its textures (skin, eyes, brows, beard...) drawn one over another, as the game
-    // composites them. Each layer is a property of its own, so a count past the material's
-    // properties (a broken file) can't name more.
+    if (const int face = composedFace(m); face >= 0) {
+        out.image = face;
+    }
+    readAlpha(m, out);
+    readTileAnimation(m, out);
+    readFloorTiles(m, out);
+    readUnlit(m, name, out);
+    readMaps(m, deprecated, out);
+    readLayer(m, out);
+    return addMaterial(key, std::move(out));
+}
+
+// A Sim's face: its textures (skin, eyes, brows, beard...) drawn one over another, as the game
+// composites them. Each layer is a property of its own, so a count past the material's properties
+// (a broken file) can't name more. -1 for a material with no layers.
+int SceneBuilder::composedFace(const sg::Material& m) {
     const long layerCount = std::strtol(property(m, "numTexturesToComposite").c_str(), nullptr, 10);
-    if (const std::size_t layers = std::min(static_cast<std::size_t>(std::max(layerCount, 0L)), m.properties.size());
-        layers > 0) {
-        std::vector<std::string> textures;
-        for (std::size_t i = 0; i < layers; ++i) {
-            if (std::string t = property(m, ("baseTexture" + std::to_string(i)).c_str()); !t.empty()) {
-                textures.push_back(std::move(t));
-            }
-        }
-        if (const int composite = layeredImage(textures); composite >= 0) {
-            out.image = composite;
+    const std::size_t layers = std::min(static_cast<std::size_t>(std::max(layerCount, 0L)), m.properties.size());
+    if (layers == 0) {
+        return -1;
+    }
+    std::vector<std::string> textures;
+    for (std::size_t i = 0; i < layers; ++i) {
+        if (std::string t = property(m, ("baseTexture" + std::to_string(i)).c_str()); !t.empty()) {
+            textures.push_back(std::move(t));
         }
     }
-    auto enabled = [&](const char* key) {
-        const std::string v = property(m, key);
-        return v == "true" || v == "1";
-    };
-    // "additive" adds the colour times its alpha, "addNoSrcAlphaScale" the colour alone. The other
-    // modes are drawn as blending.
-    if (const std::string blend = property(m, "stdMatAlphaBlendMode"); blend == "additive") {
-        out.alpha = AlphaMode::Add;
-    } else if (blend == "addNoSrcAlphaScale") {
-        out.alpha = AlphaMode::Sum;
-    } else if (!blend.empty() && blend != "none") {
-        out.alpha = AlphaMode::Blend;
-    } else if (enabled("stdMatAlphaTestEnabled")) {
-        out.alpha = AlphaMode::Mask;
-        // The game keeps alpha at least the reference out of 255. Half a step under it, so an alpha
-        // that is 255 in the texture but a hair under 1 once interpolated still passes a 255
-        // reference (a crib's bedding, a grill).
-        if (const auto ref = parseFloats(property(m, "stdMatAlphaRefValue")); !ref.empty()) {
-            out.alphaReference = (ref[0] - 0.5f) / 255.0f;
-        }
-    }
-    if (const auto multiplier = parseFloats(property(m, "stdMatAlphaMultiplier")); !multiplier.empty()) {
-        out.color[3] = multiplier[0];
-    }
-    out.alphaReplicate = enabled("stdMatBaseTextureAlphaReplicate");
-    if (property(m, "stdMatTextureCoordAnimMode") == "tile" && out.image >= 0) {
-        // Only a single row of frames is read. How the game steps through more rows is not known yet.
-        const auto tiles = parseFloats(property(m, "stdMatTextureCoordAnimNumTiles"));
-        const auto speed = parseFloats(property(m, "stdMatTextureCoordTileAnimSpeed"));
-        constexpr float kMaxTiles = 64;  // more is a broken file
-        const bool wholeRow = tiles.size() >= 2 && tiles[1] == 1 && tiles[0] >= 2 && tiles[0] <= kMaxTiles && tiles[0] == std::floor(tiles[0]);
-        if (wholeRow && !speed.empty() && speed[0] > 0 && std::isfinite(speed[0])) {
-            out.tiles = static_cast<int>(tiles[0]);
-            out.tileSpeed = speed[0];
-        }
-    }
-    // Without a texture the material's own alpha stands in for the texture's (window glass is half
-    // see-through this way).
-    if (out.image < 0) {
-        if (const auto alpha = parseFloats(property(m, "stdMatUntexturedDiffAlpha")); !alpha.empty()) {
-            out.color[3] *= alpha[0];
-        }
-    }
-    // The game's floor shader takes 0.125 to 64 tiles a repeat.
-    for (std::size_t i = 0; i < 2; ++i) {
-        if (const auto tiles = parseFloats(property(m, i == 0 ? "floorMaterialScaleU" : "floorMaterialScaleV")); !tiles.empty()) {
-            out.floorTiles[i] = std::isfinite(tiles[0]) ? std::clamp(tiles[0], 0.125f, 64.0f) : 1.0f;
-        }
-    }
-    // Without lighting the colour is the diffuse, plus the emissive colour on a texture, clamped to
-    // 1 as the game's pixel shader clamps it.
-    if (const std::string lighting = property(m, "stdMatLightingEnabled"); lighting == "0" || lighting == "false") {
-        out.unlit = true;
-        const std::string anim = property(m, "stdMatTextureCoordAnimMode");
-        const auto glow = parseFloats(property(m, "stdMatEmissiveCoef"));
-        for (std::size_t i = 0; i < 3; ++i) {
-            const float add = out.image >= 0 && i < glow.size() && std::isfinite(glow[i]) ? glow[i] : 0.0f;
-            out.color[i] = std::clamp(std::isfinite(out.color[i]) ? out.color[i] + add : 1.0f, 0.0f, 1.0f);
-        }
-        // The standard material scales such a texture by the room's or the outdoors' light, unless
-        // its texture moves, it glows or it is a lamp's: the game counts a material whose name holds
-        // "lighting" (exact case) as a light material, as every lamp's is named.
-        out.takesTextureLight = out.image >= 0 && (anim.empty() || anim == "none") && std::none_of(glow.begin(), glow.end(), [](float c) { return c > 0; }) &&
-                                name.find("lighting") == std::string::npos;
-    }
+    return layeredImage(textures);
+}
+
+// A material's normal map, glow, caustics, environment cube and highlights, by its type.
+void SceneBuilder::readMaps(const sg::Material& m, bool deprecated, Material& out) {
     // As the game's standard material: a normal map only when lit (the scripts' default bump map is
     // reggrid-bump). The Sims' own material types bump-map through other scripts, not drawn yet.
     const bool standard = m.type == "StandardMaterial" || m.type == "PhongTextureBump" || m.type == "PhongTextureMaskBump";
     // A model drawn by an effect (a plumbob): its material script lights it as the standard material
     // does, with its emissive, its specular and a pass adding its environment cube.
     const bool particleModel = m.type == "StandardParticleModelMaterial";
+    const auto bumpMap = [&] {
+        const std::string bump = property(m, "stdMatNormalMapTextureName");
+        return normalMap(bump.empty() ? "reggrid-bump" : bump);
+    };
     // A lit standard material glows by its emissive colour (a lit lamp's glass and shade).
     if ((m.type == "StandardMaterial" || deprecated || particleModel) && !out.unlit) {
         const auto glow = parseFloats(property(m, "stdMatEmissiveCoef"));
@@ -498,18 +554,16 @@ int SceneBuilder::material(const std::string& name, bool hair) {
             out.emissive[i] = std::isfinite(glow[i]) ? std::clamp(glow[i], 0.0f, 4.0f) : 0.0f;
         }
     }
-    if (standard && enabled("stdMatNormalMapTextureEnabled") && !out.unlit) {
-        const std::string bump = property(m, "stdMatNormalMapTextureName");
-        out.normalMap = normalMap(bump.empty() ? "reggrid-bump" : bump);
+    if (standard && enabled(m, "stdMatNormalMapTextureEnabled") && !out.unlit) {
+        out.normalMap = bumpMap();
     }
     // A pool's floor tiles (the FloorPool shader with floorCausticsPass) show the pools' caustics.
-    if (m.type == "FloorPool" && enabled("floorCausticsPass")) {
+    if (m.type == "FloorPool" && enabled(m, "floorCausticsPass")) {
         out.caustics = 1;
     }
     // Floors bump-map like standard materials, through their incidence map.
-    if (m.type == "Floor" && enabled("stdMatNormalMapTextureEnabled")) {
-        const std::string bump = property(m, "stdMatNormalMapTextureName");
-        out.normalMap = normalMap(bump.empty() ? "reggrid-bump" : bump);
+    if (m.type == "Floor" && enabled(m, "stdMatNormalMapTextureEnabled")) {
+        out.normalMap = bumpMap();
     }
     if (m.type == "Wallpaper" || m.type == "WallpaperBump") {
         out.normalMap = wallNormalMap(m);
@@ -517,10 +571,14 @@ int SceneBuilder::material(const std::string& name, bool hair) {
     // The Sims' materials. Those not composited take their own normal map, as the Sim shader does
     // (a composited outfit's bump composite is not made yet).
     out.simLighting = m.type == "SimSkin" || m.type == "SimStandardMaterial" || m.type == "SimHair";
-    out.eyes = m.type == "SimSkin" && enabled("eyeGizmoEnable");
-    if ((m.type == "SimStandardMaterial" || m.type == "SimHair") && enabled("stdMatNormalMapTextureEnabled") && !out.unlit) {
-        const std::string bump = property(m, "stdMatNormalMapTextureName");
-        out.normalMap = normalMap(bump.empty() ? "reggrid-bump" : bump);
+    // The game's material script defines these materials by name as partly under water, whatever
+    // their own type.
+    static constexpr std::string_view kPartlyUnderwater[] = {"cliff_boulder_material", "bridge_sides", "neighborhood_bouyside_material",
+                                                             "plesiosaur_skin_material"};
+    out.partlyUnderwater = std::find(std::begin(kPartlyUnderwater), std::end(kPartlyUnderwater), lower(out.name)) != std::end(kPartlyUnderwater);
+    out.eyes = m.type == "SimSkin" && enabled(m, "eyeGizmoEnable");
+    if ((m.type == "SimStandardMaterial" || m.type == "SimHair") && enabled(m, "stdMatNormalMapTextureEnabled") && !out.unlit) {
+        out.normalMap = bumpMap();
     }
     if (standard || particleModel) {
         if (const auto cube = envCubeSettings(m); cube) {
@@ -533,18 +591,6 @@ int SceneBuilder::material(const std::string& name, bool hair) {
             out.specPower = spec->power;
         }
     }
-    out.doubleSided = property(m, "stdMatCullMode") == "none";
-    out.blendedHair = m.type == "SimHair" && property(m, "stdMatAlphaBlendMode") == "blend";
-    // As the game's material scripts number it: a Sim's hair blends 3 above its opaque layer instead
-    // of 17, so it is drawn before other blended surfaces of the same stdMatLayer. Every blend mode
-    // counts, adding ones too.
-    const bool blends = out.alpha == AlphaMode::Blend || out.alpha == AlphaMode::Add || out.alpha == AlphaMode::Sum;
-    if (m.type == "SimHair") {
-        out.layer = stdLayer * 18 + (blends ? 3 : 0);
-    } else {
-        out.layer = stdLayer * 18 + intProperty(m, "stdMatAddLayer") + (blends ? 17 : 0);
-    }
-    return addMaterial(key, std::move(out));
 }
 
 int SceneBuilder::colorMaterial(const std::string& name, const std::array<float, 3>& color, bool doubleSided) {
@@ -791,64 +837,28 @@ int SceneBuilder::textureRegionMaterial(const std::string& texture, double u0, d
     return addMaterial(key, std::move(m));
 }
 
-namespace {
-
-// The color of an image at fractions (u, v) of its size, repeating, between its pixels.
-std::array<float, 4> sampleRepeating(const Image& image, double u, double v) {
-    const double x = (u - std::floor(u)) * image.width - 0.5, y = (v - std::floor(v)) * image.height - 0.5;
-    const double fx = x - std::floor(x), fy = y - std::floor(y);
-    auto wrap = [](double c, std::uint32_t n) {
-        const auto i = static_cast<std::int64_t>(std::floor(c)) % static_cast<std::int64_t>(n);
-        return static_cast<std::size_t>(i < 0 ? i + n : i);
-    };
-    const std::size_t x0 = wrap(x, image.width), x1 = wrap(x + 1, image.width);
-    const std::size_t y0 = wrap(y, image.height), y1 = wrap(y + 1, image.height);
-    std::array<float, 4> c{};
-    for (std::size_t k = 0; k < 4; ++k) {
-        auto at = [&](std::size_t px, std::size_t py) { return static_cast<double>(image.rgba[(py * image.width + px) * 4 + k]); };
-        const double top = at(x0, y0) * (1 - fx) + at(x1, y0) * fx, bottom = at(x0, y1) * (1 - fx) + at(x1, y1) * fx;
-        c[k] = static_cast<float>(top * (1 - fy) + bottom * fy);
-    }
-    return c;
-}
-
-} // namespace
-
 int SceneBuilder::terrainMaterial(const std::string& texture, int repeats, float shade, bool paint) {
     const std::string key = lower(texture) + " terrain " + std::to_string(repeats) + " " + std::to_string(shade) + (paint ? " paint" : "");
     if (const auto it = materials_.find(key); it != materials_.end()) {
         return it->second;
     }
-    const auto base = assets_.texture(texture);
-    if (!base || base->width == 0 || base->height == 0) {
+    const int base = image(texture);
+    if (base < 0 || scene_.images[static_cast<std::size_t>(base)].width == 0 || scene_.images[static_cast<std::size_t>(base)].height == 0) {
         return -1;
-    }
-    const auto detail = assets_.texture(texture + "_detail");
-    constexpr std::uint32_t kSize = 1024;
-    Image baked{kSize, kSize, std::vector<std::uint8_t>(static_cast<std::size_t>(kSize) * kSize * 4)};
-    for (std::uint32_t y = 0; y < kSize; ++y) {
-        for (std::uint32_t x = 0; x < kSize; ++x) {
-            const double u = (x + 0.5) / kSize, v = (y + 0.5) / kSize;
-            auto c = sampleRepeating(*base, u, v);
-            if (detail && detail->width > 0 && detail->height > 0) {
-                const auto d = sampleRepeating(*detail, u * repeats, v * repeats);
-                const float a = d[3] / 255;
-                for (std::size_t k = 0; k < 3; ++k) {
-                    c[k] = d[k] * a + c[k] * (1 - a);
-                }
-            }
-            auto* out = &baked.rgba[(static_cast<std::size_t>(y) * kSize + x) * 4];
-            for (std::size_t k = 0; k < 3; ++k) {
-                out[k] = static_cast<std::uint8_t>(std::clamp(c[k] + 0.5f, 0.0f, 255.0f));
-            }
-            out[3] = 255;
-        }
     }
     Material m;
     m.name = texture + " terrain";
     m.color = {shade, shade, shade, 1};
-    m.image = addImage(std::move(baked));
+    m.image = base;
+    m.terrain = true;
+    if (const int detail = image(texture + "_detail");
+        detail >= 0 && scene_.images[static_cast<std::size_t>(detail)].width > 0 && scene_.images[static_cast<std::size_t>(detail)].height > 0) {
+        m.detail = detail;
+        m.detailRepeats = static_cast<float>(repeats);
+    }
     m.alpha = paint ? AlphaMode::Layer : AlphaMode::Opaque;
+    const std::string low = lower(texture);
+    m.terrainCanvas = !paint || (low.find("lottexture") != std::string::npos && low.find("beach") == std::string::npos && low.find("cliff") == std::string::npos);
     return addMaterial(key, std::move(m));
 }
 
@@ -858,69 +868,47 @@ int SceneBuilder::maskedMaterial(const std::string& covering, const std::string&
     if (const auto it = materials_.find(key); it != materials_.end()) {
         return it->second;
     }
-    std::optional<Image> cut;
+    std::string texture;
     if (const auto data = assets_.byName(kTxmt, mask + "_txmt")) {
         try {
-            const std::string texture = property(sg::parseMaterial(*data), "stdMatBaseTextureName");
-            if (!texture.empty()) {
-                cut = assets_.texture(texture);
-            }
+            texture = property(sg::parseMaterial(*data), "stdMatBaseTextureName");
         } catch (const std::exception& ex) {
             diag::warnOnce(std::string("walls: a cutout material that can't be read is left out: ") + ex.what());
         }
     }
-    return materials_[key] = cutMaterial(name, covering, cut, mirrored);
+    return materials_[key] = cutMaterial(name, covering, texture, mirrored);
 }
 
-int SceneBuilder::cutMaterial(const std::string& name, const std::string& covering, const std::optional<Image>& cut,
+int SceneBuilder::cutMaterial(const std::string& name, const std::string& covering, const std::string& maskTexture,
                               bool mirrored) {
     std::array<float, 3> color{1, 1, 1};
-    std::optional<Image> base;
-    int normals = -1;
+    int base = -1, normals = -1;
     if (const auto data = assets_.byName(kTxmt, covering + "_txmt")) {
         try {
             const auto m = sg::parseMaterial(*data);
             color = diffuse(m);
             normals = wallNormalMap(m);
-            const std::string texture = property(m, "stdMatBaseTextureName");
-            if (!texture.empty()) {
-                base = assets_.texture(texture);
+            if (const std::string texture = property(m, "stdMatBaseTextureName"); !texture.empty()) {
+                base = image(texture);
             }
         } catch (const std::exception& ex) {
             diag::warnOnce(std::string("walls: a wall covering material that can't be read is left out: ") + ex.what());
         }
     }
-    if (!base || !cut || cut->width == 0 || cut->height == 0 || base->width == 0 || base->height == 0) {
+    const int mask = maskTexture.empty() ? -1 : image(maskTexture);
+    auto empty = [&](int i) {
+        const Image& im = scene_.images[static_cast<std::size_t>(i)];
+        return im.width == 0 || im.height == 0;
+    };
+    if (base < 0 || mask < 0 || empty(base) || empty(mask)) {
         return -1;
-    }
-    // At least as fine as the mask, so that small textures (a painted wall's is 4 pixels square)
-    // keep the hole's shape.
-    if (base->width < cut->width || base->height < cut->height) {
-        const std::uint32_t w = std::max(base->width, cut->width), h = std::max(base->height, cut->height);
-        Image finer{w, h, std::vector<std::uint8_t>(static_cast<std::size_t>(w) * h * 4)};
-        for (std::uint32_t y = 0; y < h; ++y) {
-            for (std::uint32_t x = 0; x < w; ++x) {
-                const auto c = sampleRepeating(*base, (x + 0.5) / w, (y + 0.5) / h);
-                for (std::size_t k = 0; k < 4; ++k) {
-                    finer.rgba[(static_cast<std::size_t>(y) * w + x) * 4 + k] = static_cast<std::uint8_t>(std::clamp(c[k] + 0.5f, 0.0f, 255.0f));
-                }
-            }
-        }
-        base = std::move(finer);
-    }
-    for (std::uint32_t y = 0; y < base->height; ++y) {
-        for (std::uint32_t x = 0; x < base->width; ++x) {
-            const std::uint32_t mx = (mirrored ? base->width - 1 - x : x) * cut->width / base->width;
-            const std::uint32_t my = y * cut->height / base->height;
-            base->rgba[(static_cast<std::size_t>(y) * base->width + x) * 4 + 3] =
-                cut->rgba[(static_cast<std::size_t>(my) * cut->width + mx) * 4 + 3] < 128 ? 0 : 255;
-        }
     }
     Material m;
     m.name = name;
     m.color = {color[0], color[1], color[2], 1};
-    m.image = addImage(std::move(*base));
-    m.alpha = AlphaMode::Mask;
+    m.image = base;
+    m.mask = mask;
+    m.maskMirrored = mirrored;
     m.normalMap = normals;
     return addMaterial(lower(name), std::move(m));
 }
@@ -960,7 +948,7 @@ int SceneBuilder::image(const std::string& texture) {
     if (const auto it = images_.find(key); it != images_.end()) {
         return it->second;
     }
-    auto img = assets_.texture(texture);
+    auto img = assets_.textureAsStored(texture);
     return images_[key] = img ? addImage(std::move(*img)) : -1;
 }
 
@@ -1053,6 +1041,16 @@ int SceneBuilder::layeredMaterial(const std::string& name, const std::string& ma
         }
     }
     return addMaterial(key, std::move(m));
+}
+
+std::vector<std::string> SceneBuilder::imageKeys() const {
+    std::vector<std::string> keys(scene_.images.size());
+    for (const auto& [key, index] : images_) {
+        if (index >= 0 && static_cast<std::size_t>(index) < keys.size()) {
+            keys[static_cast<std::size_t>(index)] = key;
+        }
+    }
+    return keys;
 }
 
 int SceneBuilder::addImage(Image image) {
@@ -1314,30 +1312,73 @@ bool skinToNode(const std::string& node, const Transform& fromNode, std::vector<
 int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::MaterialOverride>& overrides, const Pose* pose,
                              bool skinned, const Pose* places, const std::string& boneKey, const MeshEdit* edit,
                              const sg::Link* at, bool hair) {
+    const auto model = readModelShapes(name, places, boneKey, at);
+    if (!model) {
+        return -1;
+    }
+    const ModelRequest request{name, overrides, pose, skinned, hair};
+    Mesh mesh;
+    mesh.name = name;
+    bool skinnedGroups = false;
+    for (const auto& placed : model->shapes) {
+        const sg::Shape& shape = placed.shape;
+        // With object detail on High the game draws level of detail 0, or the next one a shape has
+        // (LODConfig.txt, Graphics Rules "lodOverride 0").
+        std::uint32_t detail = UINT32_MAX;
+        for (std::size_t i = 0; i < shape.geometryNodes.size(); ++i) {
+            detail = std::min(detail, i < shape.detailLevels.size() ? shape.detailLevels[i] : 0u);
+        }
+        for (std::size_t item = 0; item < shape.geometryNodes.size(); ++item) {
+            if ((item < shape.detailLevels.size() ? shape.detailLevels[item] : 0u) != detail) {
+                continue;
+            }
+            // A mirror's bounding box only bounds its reflection and isn't drawn.
+            if (lower(shape.geometryNodes[item]).find("boundingbox") != std::string::npos) {
+                continue;
+            }
+            const auto data = readShapeMesh(shape, item, name, edit);
+            if (!data) {
+                continue;
+            }
+            for (const auto& group : data->groups) {
+                if (auto p = groupPrimitive(request, *model, placed, *data, group, mesh)) {
+                    skinnedGroups = skinnedGroups || !group.bones.empty();
+                    mesh.primitives.push_back(std::move(*p));
+                }
+            }
+        }
+    }
+    if (mesh.primitives.empty()) {
+        return -1;
+    }
+    if (!skinnedGroups && model->shapeJoints.size() == 1 && !model->shapeJoints.begin()->empty()) {
+        followJoints_.try_emplace(boneKey.empty() ? lower(name) : boneKey, *model->shapeJoints.begin());
+    }
+    scene_.meshes.push_back(std::move(mesh));
+    return static_cast<int>(scene_.meshes.size() - 1);
+}
+
+// A model's shapes, each with where it sits in the model, and its joints. Effects name a shape
+// itself (e.g. "..._shpe"), drawn where the effect places it. A model whose tree places no shape
+// draws the first shape it links to, untransformed. The model's bones are kept for bone() as
+// `boneKey` (its name when empty). None, counted as missing, when no shape can be read.
+std::optional<SceneBuilder::ModelShapes> SceneBuilder::readModelShapes(const std::string& name, const Pose* places, const std::string& boneKey,
+                                                                      const sg::Link* at) {
     const auto cres = at != nullptr ? assets_.byKey(*at) : assets_.byName(kCres, name + "_cres");
-    // Each shape with where it sits in the model, the joint it follows (its own node when named, else
-    // the nearest named one above, empty for none) and where it sits from that joint.
-    struct Placement {
-        sg::Shape shape;
-        Transform place;
-        std::string node;
-        Transform fromNode;
-    };
-    std::vector<Placement> placements;
+    ModelShapes model;
     sg::ResourceNode tree;
     if (!cres) {
-        // Effects name a shape itself (e.g. "..._shpe"), drawn where the effect places it.
         const auto shpe = assets_.byName(kShpe, name);
         if (!shpe) {
             ++missingModels;
-            return -1;
+            return std::nullopt;
         }
         try {
-            placements.push_back({sg::parseShape(*shpe), Transform{}, {}});
+            model.shapes.push_back({sg::parseShape(*shpe), Transform{}, {}});
         } catch (const std::exception& ex) {
             assets_.warnings.push_back("shape " + name + ": " + ex.what());
             ++missingModels;
-            return -1;
+            return std::nullopt;
         }
     } else {
         try {
@@ -1345,23 +1386,18 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
         } catch (const std::exception& ex) {
             assets_.warnings.push_back("model " + name + ": " + ex.what());
             ++missingModels;
-            return -1;
+            return std::nullopt;
         }
     }
-    // The model's joints by the index meshes skin to, and each joint's rest place in the model.
-    std::map<int, std::string> joints;
-    std::map<std::string, Transform> rests;
     for (const auto& n : tree.nodes) {
         if ((n.kind == sg::SceneNode::Kind::Transform || n.kind == sg::SceneNode::Kind::ShapeRef) && n.joint >= 0 &&
             n.joint < 0x7FFFFFFF) {
-            joints.emplace(n.joint, lower(n.name));
-            rests.try_emplace(lower(n.name), Transform::of(n.translation, n.rotation));
+            model.joints.emplace(n.joint, lower(n.name));
+            model.rests.try_emplace(lower(n.name), Transform::of(n.translation, n.rotation));
         }
     }
     std::vector<Transform> world(tree.nodes.size());
     std::vector<bool> seen(tree.nodes.size(), false);
-    // The joint each node that draws shapes follows: itself when named, else the nearest named one above.
-    std::set<std::string> shapeJoints;
     std::map<std::string, Transform> jointPlaces;  // where each named node sits in the model
     auto walk = [&](auto&& self, std::uint32_t index, const Transform& parent, const std::string& under, int depth) -> void {
         if (index >= tree.nodes.size() || seen[index] || depth > 64) {
@@ -1389,13 +1425,13 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
             const auto joint = jointPlaces.find(next);
             const Transform fromNode = joint != jointPlaces.end() ? joint->second.rigidInverse() * world[index] : Transform{};
             if (!node.shapeLinks.empty()) {
-                shapeJoints.insert(next);
+                model.shapeJoints.insert(next);
             }
             for (const auto l : node.shapeLinks) {
                 if (l < tree.container.links.size() && tree.container.links[l].type == kShpe) {
                     if (const auto data = assets_.byKey(tree.container.links[l])) {
                         try {
-                            placements.push_back({sg::parseShape(*data), world[index], next, fromNode});
+                            model.shapes.push_back({sg::parseShape(*data), world[index], next, fromNode});
                         } catch (const std::exception& ex) {
                             diag::warnOnce(std::string("models: a shape that can't be read is left out: ") + ex.what());
                         }
@@ -1430,13 +1466,12 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
             }
         }
     }
-    if (placements.empty()) {
-        // No usable tree: draw the first shape the model links to, untransformed.
+    if (model.shapes.empty()) {
         for (const auto& link : tree.container.links) {
             if (link.type == kShpe) {
                 if (const auto data = assets_.byKey(link)) {
                     try {
-                        placements.push_back({sg::parseShape(*data), Transform{}, {}});
+                        model.shapes.push_back({sg::parseShape(*data), Transform{}, {}});
                         break;
                     } catch (const std::exception& ex) {
                         diag::warnOnce(std::string("models: a shape that can't be read is left out: ") + ex.what());
@@ -1445,155 +1480,137 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
             }
         }
     }
-    if (placements.empty()) {
+    if (model.shapes.empty()) {
         ++missingModels;
-        return -1;
+        return std::nullopt;
     }
-    Mesh mesh;
-    mesh.name = name;
-    bool skinnedGroups = false;
-    for (const auto& [shape, xf, shapeNode, fromNode] : placements) {
-        // With object detail on High the game draws level of detail 0, or the next one a shape has
-        // (LODConfig.txt, Graphics Rules "lodOverride 0").
-        std::uint32_t detail = UINT32_MAX;
-        for (std::size_t i = 0; i < shape.geometryNodes.size(); ++i) {
-            detail = std::min(detail, i < shape.detailLevels.size() ? shape.detailLevels[i] : 0u);
-        }
-        for (std::size_t item = 0; item < shape.geometryNodes.size(); ++item) {
-            const std::string& nodeName = shape.geometryNodes[item];
-            if ((item < shape.detailLevels.size() ? shape.detailLevels[item] : 0u) != detail) {
-                continue;
-            }
-            // A mirror's bounding box only bounds its reflection and isn't drawn.
-            if (lower(nodeName).find("boundingbox") != std::string::npos) {
-                continue;
-            }
-            const auto linked = item < shape.geometryLinks.size() ? shape.geometryLinks[item] : std::nullopt;
-            const auto gmnd = !linked                                  ? assets_.byName(kGmnd, nodeName)
-                              : *linked < shape.container.links.size() ? assets_.byKey(shape.container.links[*linked])
-                                                                       : std::nullopt;
-            if (!gmnd) {
-                continue;
-            }
-            std::optional<sg::Mesh> data;
-            try {
-                for (const auto& link : sg::parseContainer(*gmnd).links) {
-                    if (link.type == kGmdc) {
-                        if (const auto bytes = assets_.byKey(link)) {
-                            data = sg::parseMesh(*bytes);
-                            if (edit != nullptr && edit->apply) {
-                                edit->apply(*data);
-                            }
-                        }
+    return model;
+}
+
+// The mesh of a shape's geometry node `item`, with `edit` applied. None when it is missing or can't
+// be read.
+std::optional<sg::Mesh> SceneBuilder::readShapeMesh(const sg::Shape& shape, std::size_t item, const std::string& name, const MeshEdit* edit) {
+    const std::string& nodeName = shape.geometryNodes[item];
+    const auto linked = item < shape.geometryLinks.size() ? shape.geometryLinks[item] : std::nullopt;
+    const auto gmnd = !linked                                  ? assets_.byName(kGmnd, nodeName)
+                      : *linked < shape.container.links.size() ? assets_.byKey(shape.container.links[*linked])
+                                                               : std::nullopt;
+    if (!gmnd) {
+        return std::nullopt;
+    }
+    std::optional<sg::Mesh> data;
+    try {
+        for (const auto& link : sg::parseContainer(*gmnd).links) {
+            if (link.type == kGmdc) {
+                if (const auto bytes = assets_.byKey(link)) {
+                    data = sg::parseMesh(*bytes);
+                    if (edit != nullptr && edit->apply) {
+                        edit->apply(*data);
                     }
                 }
-            } catch (const std::exception& ex) {
-                assets_.warnings.push_back("mesh of " + name + ": " + ex.what());
-            }
-            if (!data) {
-                continue;
-            }
-            for (const auto& group : data->groups) {
-                const std::string lowGroup = lower(group.name);
-                const auto part = std::find_if(shape.parts.begin(), shape.parts.end(),
-                                               [&](const sg::ShapePart& p) { return lower(p.group) == lowGroup; });
-                // A part set may give a material to a group its shape doesn't list, as many custom
-                // hairs do for their strands.
-                const auto named = std::find_if(overrides.rbegin(), overrides.rend(), [&](const sg::MaterialOverride& o) { return lower(o.group) == lowGroup; });
-                if ((part == shape.parts.end() && named == overrides.rend()) || (!drawShadows_ && isWallShadowGroup(lowGroup)) ||
-                    group.primitive != sg::kTriangleList || group.link >= data->links.size() || group.indices.empty()) {
-                    continue;
-                }
-                std::string materialName = named != overrides.rend() ? named->material : part->material;
-                // A "_null" material hides its group. The one exception is blended glass with some
-                // opacity (a greenhouse roof's faint panes), drawn as its material says.
-                if (lower(materialName).find("_null") != std::string::npos) {
-                    const int m = material(materialName, hair);
-                    const Material* glass = m >= 0 ? &scene_.materials[static_cast<std::size_t>(m)] : nullptr;
-                    if (glass == nullptr || glass->alpha != AlphaMode::Blend || glass->color[3] <= 0) {
-                        continue;
-                    }
-                }
-                const auto& link = data->links[group.link];
-                Primitive p;
-                p.group = lowGroup;
-                p.alphaSort = static_cast<std::int32_t>(group.opacity);
-                p.positions = sg::vertexFloats(*data, link, sg::kPositions);
-                const std::size_t vertices = p.positions.size() / 3;
-                const auto highest = *std::max_element(group.indices.begin(), group.indices.end());
-                if (vertices == 0 || highest >= vertices) {
-                    continue;
-                }
-                p.normals = sg::vertexFloats(*data, link, sg::kNormals);
-                // Tangents are stored one per vertex, not through the link's aliases (in every mesh of the
-                // game their count is the link's vertex count).
-                if (const sg::Element* t = data->find(link, sg::kTangents); t != nullptr && t->blockFormat == 2) {
-                    p.tangents = sg::floats(*t);
-                    if (p.tangents.size() != p.positions.size()) {
-                        p.tangents.clear();
-                    }
-                }
-                if (pose != nullptr) {
-                    skin(*data, link, group, joints, *pose, p.positions, p.normals, p.tangents);
-                }
-                // Morphs move a vertex before its joints do, so a group posed here, to a fixed pose, keeps none.
-                if (pose == nullptr) {
-                    morphData(*data, link, mesh.morphs, p);
-                }
-                // A skinned group is placed by its joints' matrices when drawn.
-                bool placed = skinned && skinData(*data, link, group, joints, rests, xf, mesh.skin, p);
-                if (skinned && !placed && group.bones.empty() && !shapeNode.empty()) {
-                    placed = skinToNode(shapeNode, fromNode, mesh.skin, p);
-                }
-                if (!placed) {
-                    for (std::size_t i = 0; i + 2 < p.positions.size(); i += 3) {
-                        xf.apply(&p.positions[i], true);
-                    }
-                    for (std::size_t i = 0; i + 2 < p.positionDeltas.size(); i += 3) {
-                        xf.apply(&p.positionDeltas[i], false);
-                        xf.apply(&p.normalDeltas[i], false);
-                    }
-                }
-                if (p.normals.size() == p.positions.size()) {
-                    for (std::size_t i = 0; !placed && i + 2 < p.normals.size(); i += 3) {
-                        xf.apply(&p.normals[i], false);
-                    }
-                } else {
-                    p.normals.clear();
-                }
-                for (std::size_t i = 0; !placed && i + 2 < p.tangents.size(); i += 3) {
-                    xf.apply(&p.tangents[i], false);
-                }
-                p.uvs = sg::vertexFloats(*data, link, sg::kTextureCoordinates);
-                if (p.uvs.size() / 2 != vertices) {
-                    p.uvs.clear();
-                }
-                p.indices.assign(group.indices.begin(), group.indices.end());
-                p.material = material(materialName, hair);
-                if (p.material >= 0 && scene_.materials[static_cast<std::size_t>(p.material)].vertexColor) {
-                    vertexColors(*data, link, vertices, p);
-                }
-                // The game moves the eyes only where there is a second set of texture coordinates.
-                if (p.material >= 0 && scene_.materials[static_cast<std::size_t>(p.material)].eyes) {
-                    p.eyeUvs = sg::vertexFloats(*data, link, sg::kTextureCoordinates, 1);
-                    if (p.eyeUvs.size() != vertices * 2) {
-                        p.eyeUvs.clear();
-                    }
-                }
-                p.origin = {xf.m[3], xf.m[7], xf.m[11]};
-                skinnedGroups = skinnedGroups || !group.bones.empty();
-                mesh.primitives.push_back(std::move(p));
             }
         }
+    } catch (const std::exception& ex) {
+        assets_.warnings.push_back("mesh of " + name + ": " + ex.what());
     }
-    if (mesh.primitives.empty()) {
-        return -1;
+    return data;
+}
+
+// One mesh group drawn with the material its shape or the request's overrides give it, posed,
+// morphed or skinned as asked and placed in the model. Morphs and skin joints it needs are added
+// to `mesh`. None for a group not drawn.
+std::optional<Primitive> SceneBuilder::groupPrimitive(const ModelRequest& request, const ModelShapes& model, const ModelShape& placed,
+                                                      const sg::Mesh& data, const sg::Group& group, Mesh& mesh) {
+    const sg::Shape& shape = placed.shape;
+    const Transform& xf = placed.place;
+    const std::string lowGroup = lower(group.name);
+    const auto part = std::find_if(shape.parts.begin(), shape.parts.end(), [&](const sg::ShapePart& p) { return lower(p.group) == lowGroup; });
+    // A part set may give a material to a group its shape doesn't list, as many custom hairs do for
+    // their strands.
+    const auto& overrides = request.overrides;
+    const auto named = std::find_if(overrides.rbegin(), overrides.rend(), [&](const sg::MaterialOverride& o) { return lower(o.group) == lowGroup; });
+    if ((part == shape.parts.end() && named == overrides.rend()) || (!drawShadows_ && isWallShadowGroup(lowGroup)) ||
+        group.primitive != sg::kTriangleList || group.link >= data.links.size() || group.indices.empty()) {
+        return std::nullopt;
     }
-    if (!skinnedGroups && shapeJoints.size() == 1 && !shapeJoints.begin()->empty()) {
-        followJoints_.try_emplace(boneKey.empty() ? lower(name) : boneKey, *shapeJoints.begin());
+    std::string materialName = named != overrides.rend() ? named->material : part->material;
+    // A "_null" material hides its group. The one exception is blended glass with some opacity (a
+    // greenhouse roof's faint panes), drawn as its material says.
+    if (lower(materialName).find("_null") != std::string::npos) {
+        const int m = material(materialName, request.hair);
+        const Material* glass = m >= 0 ? &scene_.materials[static_cast<std::size_t>(m)] : nullptr;
+        if (glass == nullptr || glass->alpha != AlphaMode::Blend || glass->color[3] <= 0) {
+            return std::nullopt;
+        }
     }
-    scene_.meshes.push_back(std::move(mesh));
-    return static_cast<int>(scene_.meshes.size() - 1);
+    const auto& link = data.links[group.link];
+    Primitive p;
+    p.group = lowGroup;
+    p.alphaSort = static_cast<std::int32_t>(group.opacity);
+    p.positions = sg::vertexFloats(data, link, sg::kPositions);
+    const std::size_t vertices = p.positions.size() / 3;
+    const auto highest = *std::max_element(group.indices.begin(), group.indices.end());
+    if (vertices == 0 || highest >= vertices) {
+        return std::nullopt;
+    }
+    p.normals = sg::vertexFloats(data, link, sg::kNormals);
+    // Tangents are stored one per vertex, not through the link's aliases (in every mesh of the game
+    // their count is the link's vertex count).
+    if (const sg::Element* t = data.find(link, sg::kTangents); t != nullptr && t->blockFormat == 2) {
+        p.tangents = sg::floats(*t);
+        if (p.tangents.size() != p.positions.size()) {
+            p.tangents.clear();
+        }
+    }
+    if (request.pose != nullptr) {
+        skin(data, link, group, model.joints, *request.pose, p.positions, p.normals, p.tangents);
+    }
+    // Morphs move a vertex before its joints do, so a group posed here, to a fixed pose, keeps none.
+    if (request.pose == nullptr) {
+        morphData(data, link, mesh.morphs, p);
+    }
+    // A skinned group is placed by its joints' matrices when drawn.
+    bool skinnedHere = request.skinned && skinData(data, link, group, model.joints, model.rests, xf, mesh.skin, p);
+    if (request.skinned && !skinnedHere && group.bones.empty() && !placed.node.empty()) {
+        skinnedHere = skinToNode(placed.node, placed.fromNode, mesh.skin, p);
+    }
+    if (!skinnedHere) {
+        for (std::size_t i = 0; i + 2 < p.positions.size(); i += 3) {
+            xf.apply(&p.positions[i], true);
+        }
+        for (std::size_t i = 0; i + 2 < p.positionDeltas.size(); i += 3) {
+            xf.apply(&p.positionDeltas[i], false);
+            xf.apply(&p.normalDeltas[i], false);
+        }
+    }
+    if (p.normals.size() == p.positions.size()) {
+        for (std::size_t i = 0; !skinnedHere && i + 2 < p.normals.size(); i += 3) {
+            xf.apply(&p.normals[i], false);
+        }
+    } else {
+        p.normals.clear();
+    }
+    for (std::size_t i = 0; !skinnedHere && i + 2 < p.tangents.size(); i += 3) {
+        xf.apply(&p.tangents[i], false);
+    }
+    p.uvs = sg::vertexFloats(data, link, sg::kTextureCoordinates);
+    if (p.uvs.size() / 2 != vertices) {
+        p.uvs.clear();
+    }
+    p.indices.assign(group.indices.begin(), group.indices.end());
+    p.material = material(materialName, request.hair);
+    if (p.material >= 0 && scene_.materials[static_cast<std::size_t>(p.material)].vertexColor) {
+        vertexColors(data, link, vertices, p);
+    }
+    // The game moves the eyes only where there is a second set of texture coordinates.
+    if (p.material >= 0 && scene_.materials[static_cast<std::size_t>(p.material)].eyes) {
+        p.eyeUvs = sg::vertexFloats(data, link, sg::kTextureCoordinates, 1);
+        if (p.eyeUvs.size() != vertices * 2) {
+            p.eyeUvs.clear();
+        }
+    }
+    p.origin = {xf.m[3], xf.m[7], xf.m[11]};
+    return p;
 }
 
 const std::string* SceneBuilder::followJoint(const std::string& model) const {

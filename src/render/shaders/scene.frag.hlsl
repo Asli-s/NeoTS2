@@ -16,21 +16,27 @@ COMBINED Texture2D<float4> lightMapFromTexture : register(t4, space2);  // the l
 COMBINED SamplerState lightMapFromSampler : register(s4, space2);
 COMBINED TextureCube<float4> envCubeTexture : register(t5, space2);
 COMBINED SamplerState envCubeSampler : register(s5, space2);
+COMBINED Texture2D<float4> maskTexture : register(t6, space2);  // a wall's door or window mask
+COMBINED SamplerState maskSampler : register(s6, space2);
+COMBINED Texture2D<float4> detailTexture : register(t7, space2);  // a terrain texture's detail texture
+COMBINED SamplerState detailSampler : register(s7, space2);
 #ifndef GL2
-COMBINED Texture2D<float4> shadowTexture : register(t6, space2);  // the Sims' blurred shadow pictures
-COMBINED SamplerState shadowSampler : register(s6, space2);
-COMBINED Texture2D<float4> objectPictures : register(t7, space2);  // the lot objects' pictures from the sun
-COMBINED SamplerState objectPicturesSampler : register(s7, space2);
-COMBINED Texture2D<float4> objectPlaces : register(t8, space2);    // where each object lays its picture
-COMBINED SamplerState objectPlacesSampler : register(s8, space2);
-COMBINED Texture2D<float4> objectGridTexture : register(t9, space2);  // which places reach each tile
-COMBINED SamplerState objectGridSampler : register(s9, space2);
-COMBINED Texture2D<float4> causticsTexture : register(t10, space2);   // the pools' caustics tile
-COMBINED SamplerState causticsSampler : register(s10, space2);
-COMBINED Texture2D<float4> poolShadowTexture : register(t11, space2); // the pools' shadow map, depth along the sun
-COMBINED SamplerState poolShadowSampler : register(s11, space2);
-COMBINED Texture2D<float> occlusionTexture : register(t12, space2);   // how open each pixel of the view is
-COMBINED SamplerState occlusionSampler : register(s12, space2);
+COMBINED Texture2D<float4> shadowTexture : register(t8, space2);  // the Sims' blurred shadow pictures
+COMBINED SamplerState shadowSampler : register(s8, space2);
+COMBINED Texture2D<float4> objectPictures : register(t9, space2);  // the lot objects' pictures from the sun
+COMBINED SamplerState objectPicturesSampler : register(s9, space2);
+COMBINED Texture2D<float4> objectPlaces : register(t10, space2);    // where each object lays its picture
+COMBINED SamplerState objectPlacesSampler : register(s10, space2);
+COMBINED Texture2D<float4> objectGridTexture : register(t11, space2);  // which places reach each tile
+COMBINED SamplerState objectGridSampler : register(s11, space2);
+COMBINED Texture2D<float4> causticsTexture : register(t12, space2);   // the pools' caustics tile
+COMBINED SamplerState causticsSampler : register(s12, space2);
+COMBINED Texture2D<float4> poolShadowTexture : register(t13, space2); // the pools' shadow map, depth along the sun
+COMBINED SamplerState poolShadowSampler : register(s13, space2);
+COMBINED Texture2D<float> occlusionTexture : register(t14, space2);   // how open each pixel of the view is
+COMBINED SamplerState occlusionSampler : register(s14, space2);
+COMBINED Texture2D<float4> objectFloorsTexture : register(t15, space2); // the lot's outdoor floor quarters, a channel each
+COMBINED SamplerState objectFloorsSampler : register(s15, space2);
 #endif
 
 cbuffer Material : register(b0, space3) {
@@ -54,9 +60,12 @@ cbuffer Material : register(b0, space3) {
     float4 cameraForward;
     float4 emissive;  // rgb added to the light before the texture multiplies it, w: 1 when on
     float4 uvTile;    // the texture coordinates times xy plus zw: one frame of a tiled texture
-    float4 shadowReceiver;  // x: 1 when Sims' projected shadows fall on it, y: its level, z: 1 to fade them by the light map
+    float4 shadowReceiver;  // x: 1 when Sims' projected shadows fall on it, y: its level, z: 1 to fade them by the light map, w: 1 for a floor
     float4 caustics;        // x: 1 for a pool floor, 2 for a pool wall, 3 for the caustics alone over a pond's ground, 4 the same over a beach sea's, 0 for none, yzw: the texture light
     float4 neighborLight;   // rgb: what a neighbor's real house is tinted by, w: 1 when it is one, 2 for the ground around the lot, 3 for its ground
+    float4 wallMask;        // x: 1 when a wall mask cuts it, y: 1 when the mask runs the other way along u
+    float4 terrainTexture;  // x: 1 for terrain (the texture's alpha plays no part), y: 1 with a detail texture, z: how many times it repeats over the texture
+    float4 underwaterShade; // x: 1 when darkened below the water by the underwater gradient, y: 1 when hazed under a pool-style sea
 };
 
 #ifndef GL2
@@ -70,17 +79,63 @@ cbuffer Shadows : register(b1, space3) {
     row_major float4x4 toLot;              // world to the lot
     float4 poolSun;                        // toward the sun
     float4 ambientOcclusion;               // x: 1 when these surfaces are multiplied by it (not in the original game)
-    float4 neighborGround[6];              // the lots of neighbors drawn as real houses: x0, x1, y0, y1 (kMaxNeighborGrounds of them)
+    float4 neighborGround[32];             // the lots of neighbors drawn as real houses: x0, x1, y0, y1 (kMaxNeighborGrounds of them)
     float4 neighborGrounds;                // x: how many
+    float4 underwater;                     // x: the water's height, y: the depth the gradient spans, z: its rows (0: none), w: 1 under a pool-style sea
+    float4 underwaterGradient[64];         // the neighborhood's underwater gradient, from the surface down
+    float4 objectFloorsToLot[3];           // the scene's frame to the lot's, for the outdoor floor mask
+    float4 objectFloors;                   // the mask's tiles along x and y, its first level and its levels (0: none)
 };
+
+// Not in the original game: `color` seen `depth` under a neighborhood's pool-style sea, hazed as the
+// ground under it is (see addPoolStyleSea): a light blue murk thickening fast, dark blue past 0.8
+// down, both coming in over the first unit.
+float3 poolSeaHaze(float3 color, float depth) {
+    const float fadeIn = saturate(depth);
+    const float light = 0.9 * (1 - exp(-max(depth, 0.0) / 0.8)) * fadeIn;
+    const float deep = 0.95 * (1 - exp(-max(depth - 0.8, 0.0) / 2)) * fadeIn;
+    return lerp(lerp(color, float3(0.3, 0.52, 0.68), light), float3(0.02, 0.08, 0.24), deep);
+}
+
+// The underwater gradient at height `z`, read as the game reads its texture: clamped, and blended
+// between the two nearest rows.
+float3 underwaterAt(float z) {
+    const float rows = underwater.z;
+    const float at = clamp(saturate((underwater.x - z) / underwater.y) * rows - 0.5, 0, rows - 1);
+    const int row = (int)floor(at);
+    return lerp(underwaterGradient[row].rgb, underwaterGradient[min(row + 1, (int)rows - 1)].rgb, at - row);
+}
 #endif
 
 #ifndef GL2
+// Whether a floor's point is on an outdoor quarter of its tile, the only floor the objects' pictures
+// fall on. True off the mask (no rooms known, or a level or tile it doesn't hold).
+bool outdoorFloorAt(float3 world) {
+    const int level = (int)round(shadowReceiver.y - objectFloors.z);
+    if (objectFloors.w < 0.5 || level < 0 || level >= (int)objectFloors.w) {
+        return true;
+    }
+    const float4 w = float4(world, 1);
+    const float2 lot = float2(dot(objectFloorsToLot[0], w), dot(objectFloorsToLot[1], w));
+    const int2 tile = int2(floor(lot));
+    if (tile.x < 0 || tile.y < 0 || tile.x >= (int)objectFloors.x || tile.y >= (int)objectFloors.y) {
+        return true;
+    }
+    // The quarter as objectshadow::quarterOf numbers them.
+    const float2 d = lot - tile - 0.5;
+    const int quarter = abs(d.x) >= abs(d.y) ? (d.x < 0 ? 0 : 2) : (d.y < 0 ? 1 : 3);
+    return objectFloorsTexture.Load(int3(tile.x, tile.y + level * (int)objectFloors.y, 0))[quarter] > 0.5;
+}
+
 // Whether a lot object on the receiver's storey lays its picture from the sun over this point: its
-// picture holds more than 100/255 there. The grid over the lot's tiles names the objects to look at.
+// picture holds more than 100/255 there, and on a floor the point is outdoors. The grid over the
+// lot's tiles names the objects to look at.
 bool objectShadowAt(float3 world) {
     const int2 tile = int2(floor(world.xy - objectGrid.xy));
     if (tile.x < 0 || tile.y < 0 || tile.x >= (int)objectGrid.z || tile.y >= (int)objectGrid.w) {
+        return false;
+    }
+    if (shadowReceiver.w > 0.5 && !outdoorFloorAt(world)) {
         return false;
     }
     [unroll] for (int half = 0; half < 2; ++half) {
@@ -112,35 +167,46 @@ bool objectShadowAt(float3 world) {
 }
 #endif
 
-// What a Sim's or a lot object's projected shadow multiplies this point of a floor or the terrain
-// by: its colour where a caster on the same storey has a blurred picture holding more than 100/255.
-// On the ground storey it fades to none where the buildings' shadow already takes the sun (`sun`,
-// the light map's alpha). Shadows don't add up.
+// What Sims' and lot objects' projected shadows multiply this floor or terrain point by. Outdoors it is
+// the colour where a caster on the same storey has a blurred picture over 100/255, without adding up,
+// and on the ground storey fades out where the buildings' shadow already takes the sun (`sun`, the light
+// map's alpha). Indoors each Sim's quad multiplies by its picture's colour, white where it doesn't
+// cover, as the game means it (the original draws a black square on today's graphics cards).
 float3 simShadow(float3 world, float sun) {
 #ifndef GL2
     if (shadowReceiver.x < 0.5) {
         return float3(1, 1, 1);
     }
-    if (objectShadowAt(world)) {
-        return lerp(float3(1, 1, 1), shadowShade.rgb, shadowReceiver.z > 0.5 ? sun : 1);
-    }
+    const float3 casterColor = float3(0.63, 0.63, 0.85);
+    const float shown = (128.0 - 6) / 128;  // the indoor quad stops short of the blur's reach
     const int count = (int)shadowShade.w;
+    float3 indoors = float3(1, 1, 1);
+    bool outdoors = false;
     [loop] for (int i = 0; i < count; ++i) {
         if (abs(shadowCasters[i].z - shadowReceiver.y) > 0.5) {
             continue;
         }
         const float4 p = mul(shadowCameras[i], float4(world, 1));
-        if (abs(p.x) > 1 || abs(p.y) > 1) {
+        const bool indoor = shadowCasters[i].w > 0.5;
+        if (abs(p.x) > (indoor ? shown : 1) || abs(p.y) > (indoor ? shown : 1)) {
             continue;
         }
         // Kept half a texel inside the tile, so the filter never reaches the next one.
         const float2 inTile = clamp(float2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5), 0.5 / 128, 1 - 0.5 / 128);
-        if (shadowTexture.SampleLevel(shadowSampler, shadowCasters[i].xy + inTile * 0.25, 0).a > 100.0 / 255) {
-            return lerp(float3(1, 1, 1), shadowShade.rgb, shadowReceiver.z > 0.5 ? sun : 1);
+        const float a = shadowTexture.SampleLevel(shadowSampler, shadowCasters[i].xy + inTile * 0.25, 0).a;
+        if (indoor) {
+            indoors *= lerp(float3(1, 1, 1), casterColor, a);
+        } else if (a > 100.0 / 255) {
+            outdoors = true;
         }
     }
-#endif
+    if (outdoors || objectShadowAt(world)) {
+        return indoors * lerp(float3(1, 1, 1), shadowShade.rgb, shadowReceiver.z > 0.5 ? sun : 1);
+    }
+    return indoors;
+#else
     return float3(1, 1, 1);
+#endif
 }
 
 struct Input {
@@ -238,7 +304,22 @@ float4 poolCaustics(Input input, float4 texel, float3 map) {
 #endif
 
 float4 shade(Input input) {
+    // As the game's walls: a hole where the mask's alpha is below half.
+    if (wallMask.x > 0.5) {
+        const float2 maskUv = float2(wallMask.y > 0.5 ? 1 - input.uv.x : input.uv.x, input.uv.y);
+        if (maskTexture.Sample(maskSampler, maskUv).a < 0.5) {
+            discard;
+        }
+    }
     float4 texel = hasTexture > 0.5 ? baseTexture.Sample(baseSampler, input.uv) : float4(1, 1, 1, 1);
+    // As the game's lot terrain: the detail over the texture by the detail's alpha.
+    if (terrainTexture.x > 0.5) {
+        if (terrainTexture.y > 0.5) {
+            const float4 detail = detailTexture.Sample(detailSampler, input.uv * terrainTexture.z);
+            texel.rgb = detail.a * detail.rgb + (1 - detail.a) * texel.rgb;
+        }
+        texel.a = 1;
+    }
     if (alphaReplicate > 0.5) {
         texel.rgb = texel.aaa;
     }
@@ -339,6 +420,16 @@ float4 main(Input input) : SV_Target {
     if (emissive.w > 0.5) {
         lit.rgb += emissive.rgb * (hasTexture > 0.5 ? baseTexture.Sample(baseSampler, input.uv).rgb : float3(1, 1, 1)) * input.color;
     }
+#ifndef GL2
+    // The game's fallback shader leaves this darkening out, as OpenGL 2 does here.
+    if (underwaterShade.x > 0.5 && underwater.z > 0.5) {
+        lit.rgb *= underwaterAt(input.world.z);
+    }
+    // Under a neighborhood's pool-style sea everything is hazed as the ground is, whatever its material.
+    if (underwater.w > 0.5 && underwaterShade.y > 0.5) {
+        lit.rgb = poolSeaHaze(lit.rgb, underwater.x - input.world.z);
+    }
+#endif
     lit.rgb += input.specular;
     if (envCube.w > 0.5) {
         float3 r = input.reflection;

@@ -202,10 +202,25 @@ Mat4 narrowedTo(const Mat4& viewProjection, const std::array<float, 4>& area) {
 std::array<float, 12> skyCamera(const FrameView& f, float up) {
     const Camera& camera = *f.camera;
     const Vec3 forward = normalize(sub(camera.target, camera.eye));
-    const Vec3 s = normalize(cross(forward, {0, 0, 1}));
+    // A camera looking straight up or down takes its own up for the screen's sides.
+    Vec3 side = cross(forward, {0, 0, 1});
+    if (dot(side, side) < 1e-8f) {
+        side = cross(forward, camera.up);
+    }
+    const Vec3 s = normalize(side);
     const Vec3 u = cross(s, forward);
-    const float ty = std::tan(f.fovY / 2), tx = ty * f.aspect;
+    // A square-on view's rays all run the same way.
+    const bool square = camera.orthographic[1] != camera.orthographic[0];
+    const float ty = square ? 0 : std::tan(f.fovY / 2), tx = ty * f.aspect;
     return {s[0] * tx, s[1] * tx, s[2] * tx, 0, u[0] * ty, u[1] * ty, u[2] * ty, 0, forward[0], forward[1], forward[2], up};
+}
+
+std::array<float, 12> mirroredSkyCamera(const FrameView& f) {
+    auto sky = skyCamera(f, -1);
+    for (int k = 0; k < 3; ++k) {
+        sky[static_cast<std::size_t>(k)] = -sky[static_cast<std::size_t>(k)];
+    }
+    return sky;
 }
 
 void FramePlan::collectDraws(const RendererState& s, const ResourceQuery& q, const FrameView& f, std::vector<Draw>& opaque,
@@ -320,7 +335,7 @@ DrawUniforms FramePlan::uniformsFor(const RendererState& s, const ResourceQuery&
     const auto& parts = d.instance->partLightSets;
     const int set = d.primitive->source < parts.size() ? parts[d.primitive->source] : d.instance->lightSet;
     // A portrait lights everything it draws with its own lights, not the room's.
-    if (!s.instancesOnly_ && set >= 0 && static_cast<std::size_t>(set) < s.lightSets_.size()) {
+    if (!s.ownLights_ && set >= 0 && static_cast<std::size_t>(set) < s.lightSets_.size()) {
         lighting = &s.lightSets_[static_cast<std::size_t>(set)];
     }
     // A Sim outdoors also gets the lighting state's Sim-only lights.
@@ -495,6 +510,7 @@ void FramePlan::setMaterial(const RendererState& s, const ResourceQuery& q, Draw
             fu.shadowReceiver[0] = 1;
             fu.shadowReceiver[1] = static_cast<float>(level);
             fu.shadowReceiver[2] = level == s.shadows_.groundLevel ? 1.0f : 0.0f;
+            fu.shadowReceiver[3] = d.instance->part == scene::Part::Floor && !d.instance->lightMapMultiply ? 1.0f : 0.0f;
         }
         // A floor's or wall's normal map, against its light map's incidence map.
         const int k = d.instance->incidenceMap;
@@ -550,12 +566,31 @@ void FramePlan::setMaterial(const RendererState& s, const ResourceQuery& q, Draw
         }
     }
     const TextureRef normal = normalMap >= 0 ? TextureRef{TextureRef::Kind::Image, normalMap} : TextureRef{};
+    TextureRef mask{TextureRef::Kind::White, 0};
+    if (m && m->mask >= 0 && q.hasImage(m->mask)) {
+        mask = {TextureRef::Kind::Image, m->mask};
+        fu.wallMask[0] = 1;
+        fu.wallMask[1] = m->maskMirrored ? 1.0f : 0.0f;
+    }
+    fu.underwaterShade[0] = m && m->partlyUnderwater ? 1.0f : 0.0f;
+    fu.underwaterShade[1] = m && m->seaDepthOverlay ? 0.0f : 1.0f;
+    TextureRef detail{TextureRef::Kind::White, 0};
+    if (m && m->terrain) {
+        fu.terrainTexture[0] = 1;
+        if (m->detail >= 0 && q.hasImage(m->detail)) {
+            detail = {TextureRef::Kind::Image, m->detail};
+            fu.terrainTexture[1] = 1;
+            fu.terrainTexture[2] = m->detailRepeats;
+        }
+    }
     u.samplers = {{{texture, m && m->clamp ? SamplerKind::Clamped : SamplerKind::Repeat},
                    {lightMap, SamplerKind::Clamped},
                    {normal, SamplerKind::Repeat},
                    {incidence, SamplerKind::Clamped},
                    {lightMapFrom ? *lightMapFrom : lightMap, SamplerKind::Clamped},
-                   {cube, SamplerKind::Clamped}}};
+                   {cube, SamplerKind::Clamped},
+                   {mask, SamplerKind::Clamped},
+                   {detail, SamplerKind::Repeat}}};
 }
 
 std::vector<std::vector<Draw>> FramePlan::shadowCasters(const RendererState& s, const ResourceQuery& q) {
@@ -591,7 +626,8 @@ std::vector<std::vector<Draw>> FramePlan::shadowCasters(const RendererState& s, 
 
 SkinnedUniforms FramePlan::shadowCasterUniforms(const RendererState& s, const Draw& d, std::size_t caster) {
     SkinnedUniforms u{};
-    const auto camera = scene::simshadows::camera(s.shadows_.toSun, s.shadows_.casters[caster].root);
+    const auto& c = s.shadows_.casters[caster];
+    const auto camera = c.indoor ? scene::simshadows::indoorCamera(c.root, c.forward) : scene::simshadows::camera(s.shadows_.toSun, c.root);
     std::copy(camera.begin(), camera.end(), u.frame.viewProjection);
     const auto& t = d.instance->transform.m;
     const float model[16] = {t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10], t[11], 0, 0, 0, 1};
@@ -611,25 +647,45 @@ ShadowUniforms FramePlan::shadowUniforms(const RendererState& s, std::size_t cas
     u.neighborGrounds[0] = static_cast<float>(grounds);
     for (std::size_t i = 0; i < casters; ++i) {
         const auto& caster = s.shadows_.casters[i];
-        const auto camera = scene::simshadows::camera(s.shadows_.toSun, caster.root);
+        const auto camera = caster.indoor ? scene::simshadows::indoorQuad(caster.root, caster.forward) : scene::simshadows::camera(s.shadows_.toSun, caster.root);
         std::copy(camera.begin(), camera.end(), u.cameras[i]);
         u.casters[i][0] = static_cast<float>(i % kShadowTilesAcross) / kShadowTilesAcross;
         u.casters[i][1] = static_cast<float>(i / kShadowTilesAcross) / kShadowTilesAcross;
         u.casters[i][2] = static_cast<float>(caster.level);
+        u.casters[i][3] = caster.indoor ? 1.0f : 0.0f;
     }
     std::copy(s.shadows_.shade.begin(), s.shadows_.shade.end(), u.shade);
     u.shade[3] = static_cast<float>(casters);
     return u;
 }
 
-ShadowBlurUniforms FramePlan::shadowBlurUniforms() {
+std::array<std::array<float, 4>, 25> FramePlan::outdoorBlurWeights() {
     constexpr int r = scene::simshadows::kOutdoorBlur;
-    static_assert(r == 2, "the blur shader takes 5 x 5 taps");
-    ShadowBlurUniforms u{};
+    static_assert(r == 2, "the object blur shader takes 5 x 5 taps");
+    std::array<std::array<float, 4>, 25> w{};
     for (int across = -r; across <= r; ++across) {
         for (int up = -r; up <= r; ++up) {
-            u.weights[(across + r) * (2 * r + 1) + up + r][0] = static_cast<float>(scene::simshadows::blurWeight(across, up, r)) / 255;
+            w[static_cast<std::size_t>((across + r) * (2 * r + 1) + up + r)][0] = static_cast<float>(scene::simshadows::blurWeight(across, up, r)) / 255;
         }
+    }
+    return w;
+}
+
+ShadowBlurUniforms FramePlan::shadowBlurUniforms(const RendererState& s) {
+    constexpr int kReach = 3;
+    static_assert(scene::simshadows::kOutdoorBlur <= kReach && scene::simshadows::kIndoorBlur == kReach, "the blur shader takes 7 x 7 taps");
+    ShadowBlurUniforms u{};
+    const int radii[2] = {scene::simshadows::kOutdoorBlur, scene::simshadows::kIndoorBlur};
+    for (int k = 0; k < 2; ++k) {
+        for (int across = -kReach; across <= kReach; ++across) {
+            for (int up = -kReach; up <= kReach; ++up) {
+                u.weights[k][(across + kReach) * 7 + up + kReach][0] = static_cast<float>(scene::simshadows::blurWeight(across, up, radii[k])) / 255;
+            }
+        }
+    }
+    const std::size_t casters = std::min(s.shadows_.casters.size(), kMaxShadowCasters);
+    for (std::size_t i = 0; i < casters; ++i) {
+        u.indoor[i][0] = s.shadows_.casters[i].indoor ? 1.0f : 0.0f;
     }
     return u;
 }
@@ -711,6 +767,7 @@ SeaUniforms FramePlan::seaUniformsFor(const RendererState& s, const FrameView& f
     constexpr std::array<float, 3> kDay{-0.3f, 0.1f, 0.1f}, kNight{-0.3f, -0.2f, -0.1f};
     const auto& tint = d.instance->seaNight ? kNight : kDay;
     std::copy(tint.begin(), tint.end(), u.tint);
+    u.scale[0] = u.scale[1] = u.scale[2] = 1;
     return u;
 }
 
