@@ -253,6 +253,8 @@ void PlayingEffect::setMessages(float alpha, const std::array<float, 3>& colour)
             part.child->setMessages(alpha, colour);
         } else if (part.meta) {
             part.meta->setAlpha(alpha);
+        } else if (part.model) {
+            part.setModelMessages(alpha, colour);
         }
     }
 }
@@ -306,6 +308,8 @@ void EffectPart::start(bool prewarm) {
         sequence->start(prewarm);
     } else if (child) {
         child->start(prewarm);
+    } else if (model) {
+        modelShown = true;
     }
 }
 
@@ -318,6 +322,9 @@ void EffectPart::stop(bool hard) {
         sequence->stop(hard);
     } else if (child) {
         child->stop(hard);
+    } else if (model) {
+        // Soft or hard, a model goes at once.
+        modelShown = false;
     }
 }
 
@@ -330,6 +337,9 @@ bool EffectPart::running() const {
     }
     if (sequence) {
         return sequence->running();
+    }
+    if (model) {
+        return modelShown;
     }
     return child && child->running();
 }
@@ -344,7 +354,13 @@ void EffectPart::setPlace(const EmitterPlace& own, const EmitterPlace& parentPla
         sequence->place(own, parentPlace);
     } else if (child) {
         child->placeIn(own, parentPlace);
+    } else if (model) {
+        parent = inside(parentPlace, own);
     }
+}
+
+void EffectPart::setModelMessages(float messageAlpha, const std::array<float, 3>& colour) {
+    modelColour = {model->colour[0] * colour[0], model->colour[1] * colour[1], model->colour[2] * colour[2], model->alpha * messageAlpha};
 }
 
 EffectSequence::EffectSequence(const effects::SequenceBlock& block, EffectPlayer& player, std::uint32_t seed, int nesting)
@@ -602,6 +618,21 @@ void EffectPlayer::makePart(PlayingEffect& effect, const Component& c, bool forc
         }
         part.sequence = std::make_unique<EffectSequence>(file_.sequences[static_cast<std::size_t>(c.index)], *this, randomBits(), effect.nesting_);
         part.sequence->setHidden(effect.hidden_);
+    } else if (c.type == static_cast<std::uint8_t>(effects::BlockType::Model)) {
+        if (static_cast<std::size_t>(c.index) >= file_.models.size()) {
+            return;
+        }
+        const effects::ModelBlock& block = file_.models[static_cast<std::size_t>(c.index)];
+        if (block.size != 1) {
+            diag::warnOnce("effects: a model of another size isn't played yet (" + block.model + ")");
+            return;
+        }
+        part.model = &block;
+        if (c.flags & Component::kIgnoreParams) {
+            part.setModelMessages(1, {1, 1, 1});
+        } else {
+            part.setModelMessages(effect.messageAlpha_, effect.messageColour_);
+        }
     } else {
         diag::warnOnce("effects: a part of block type " + std::to_string(c.type) + " isn't played yet (" + effect.name_ + ")");
         return;
@@ -690,7 +721,6 @@ void EffectPlayer::rebuild(PlayingEffect& effect, bool force, std::uint32_t chan
             makePart(effect, c, force, prewarm);
         }
         if ((c.flags & Component::kStateList) && !effect.parts_.empty()) {
-            effect.parts_.back().states.push_back(static_cast<std::uint32_t>(i));
             inStateList = !(c.flags & Component::kEndsStateList);
         }
     }
@@ -764,6 +794,19 @@ void EffectPlayer::forEachParticleSystem(const ParticleVisitor& visit) const {
         for (const EffectPart& part : effect->parts_) {
             if (part.emitter) {
                 visit(file_.particles[static_cast<std::size_t>(part.component->index)], *part.emitter, part.parent);
+            }
+        }
+    }
+}
+
+void EffectPlayer::forEachModel(const ModelVisitor& visit) const {
+    for (const auto& effect : effects_) {
+        if (effect->hidden_) {
+            continue;
+        }
+        for (const EffectPart& part : effect->parts_) {
+            if (part.model && part.modelShown) {
+                visit(*part.model, part.parent, part.modelColour);
             }
         }
     }

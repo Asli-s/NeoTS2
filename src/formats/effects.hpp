@@ -89,6 +89,9 @@ struct ParticleBlock {
     static constexpr std::uint64_t kCycleKill = 0x40000000;   // each new cycle kills the live particles
     static constexpr std::uint64_t kDirectLayer = 0x80000000;  // `layer` is the material's layer as it stands
     static constexpr std::uint64_t kAspectAfterTurn = 0x100000000;  // the aspect narrows the turned sprite
+    // Its speed range is 0. A still shape that isn't turned to the camera then lines up along a second
+    // random direction instead of its flight. Sprites aren't changed by it.
+    static constexpr std::uint64_t kNoSpeed = 0x2000000000;
 
     // Ways to line up a sprite (the effect script's align).
     enum Alignment : std::uint8_t { Camera = 0, Ground = 1, Source = 5, ZPole = 6 };
@@ -210,12 +213,25 @@ struct MetaParticleBlock {
     Curve alpha;
     float alphaVary = 0;
     std::uint8_t alignment = 0;  // the effect script's align
+    // Above 0, a particle aligned along its flight turns about the vertical only, easing toward its
+    // heading by 1 / (15 * alignSmoothing) of the way each update.
+    float alignSmoothing = 0;
+    float alignSpin = 0;  // not 0: a turn of the particle's own is added, whose source is not known yet
     std::array<float, 3> gravity{};
     float windShare = 0;
     float blast = 0;  // pushes away from `blastCentre`
     std::array<float, 3> blastCentre{};
     float screw = 0;  // above 0: motion not played yet
+    // Waves that move where each particle's effect is drawn, not the particle itself: each adds
+    // amplitude * sin(t * frequency + phase . (position - the effect's place)), t the block's interval
+    // times the seconds it has played, so particles close together move in step.
+    struct Wave {
+        float frequency = 0;  // radians per second
+        std::array<float, 3> phase{}, amplitude{};
+    };
+    std::vector<Wave> waves;
     std::array<std::uint8_t, 4> screenEdge{};  // the effect script's screenBloom bytes
+    std::array<float, 10> terrain{};  // how particles meet the terrain, see meta_particles.cpp
     std::array<Wander, 2> wander;
     std::string effect;
     // Where a particle should be and how it should move at a time in its life, in seconds. Time 0 on the last
@@ -264,6 +280,16 @@ struct ScreenBlock {
     Curve strength;
     float length = 0, delay = 0;
     std::string texture;
+};
+
+// Shows a model from its start until it is stopped, where its effect places it. Its colour and
+// alpha are times the effect's colour and alpha, and the model is drawn tinted and see-through by
+// them unless all four are 1. How `size` scales a model is not known yet.
+struct ModelBlock {
+    std::string model;  // the model's resource name, "_cres" included
+    float size = 1;
+    std::array<float, 3> colour{1, 1, 1};
+    float alpha = 1;
 };
 
 // One part of a visual effect: a block, by its type and its place in that type's list, placed by
@@ -323,6 +349,7 @@ struct File {
     std::vector<ParticleBlock> particles;
     std::vector<MetaParticleBlock> metaParticles;
     std::vector<DecalBlock> decals;
+    std::vector<ModelBlock> models;
     std::vector<ScreenBlock> screens;
     std::vector<VisualEffect> effects;
     // Lower-case name -> effect indices. A name can have one record per level.

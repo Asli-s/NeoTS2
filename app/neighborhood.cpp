@@ -10,10 +10,12 @@
 #include "diag/log.hpp"
 #include "formats/dbpf.hpp"
 #include "formats/fami.hpp"
+#include "formats/neighborhood_id.hpp"
 #include "formats/nhood_paint_rules.hpp"
 #include "formats/propset.hpp"
 #include "orbit.hpp"
 #include "scene/lot_scene.hpp"
+#include "scene/lot_skirt.hpp"
 #include "scene/neighborhood_decals.hpp"
 
 #include <algorithm>
@@ -31,9 +33,107 @@ namespace app {
 namespace {
 
 constexpr std::uint32_t kFamilyType = 0x46414D49;
+// The effect the game plays when a neighborhood opens: its sky and weather.
+constexpr std::string_view kSkyEffect = "neighborhoodfxdaynight";
+constexpr int kMostSkyNesting = 8;
+constexpr std::uint8_t kSkyboxMode = 5;
 constexpr std::uint32_t kFirstGameFamily = 0x7FE0;
 
+// Whether the neighborhood was saved at night (its Neighborhood ID). Day when it can't be read.
+bool savedAtNight(const std::filesystem::path& folder) {
+    try {
+        ts2::dbpf::Package package{ts2::content::neighborhoodPackage(folder)};
+        for (const auto& e : package.entries()) {
+            if (e.key.type == ts2::nhoodid::kType) {
+                return ts2::nhoodid::parse(package.read(e)).night != 0;
+            }
+        }
+    } catch (const std::exception& ex) {
+        ts2::diag::warnOnce(std::string("neighborhood: its identity can't be read, it shows by day: ") + ex.what());
+    }
+    return false;
+}
+
+// The look a lighting state gives the neighborhood, none when the state or its light map image is
+// missing. `base` holds the terrain settings that don't depend on the state.
+std::optional<NeighborhoodTime> neighborhoodTime(const ts2::content::Lighting& lighting, const std::vector<ts2::content::Product>& products,
+                                                 const std::string& name, const ts2::scene::NeighborhoodLight& base) {
+    const auto state = lighting.states.find(name);
+    if (state == lighting.states.end() || !state->second.lightMap) {
+        return std::nullopt;
+    }
+    NeighborhoodTime time;
+    time.terrain = base;
+    if (const auto sun = state->second.lights.find("sun"); sun != state->second.lights.end()) {
+        const auto& d = sun->second.direction;
+        const double len = std::sqrt(double(d[0]) * d[0] + double(d[1]) * d[1] + double(d[2]) * d[2]);
+        if (std::isfinite(len) && len > 0) {
+            time.terrain.sun = {float(d[0] / len), float(d[1] / len), float(d[2] / len)};
+        }
+    }
+    time.terrain.tint = state->second.lightMapTint;
+    auto image = ts2::content::lightingImage(products, *state->second.lightMap);
+    if (!image) {
+        return std::nullopt;
+    }
+    time.terrain.lookup = {image->width, image->height, std::move(image->rgba)};
+    time.imposters = state->second.environment;
+    // The game lights the neighborhood's objects with the state's "NoPortals" copy where there is
+    // one, as outdoor objects on a lot are lit.
+    const auto* objects = ts2::content::findState(lighting, name + "NoPortals");
+    if (objects == nullptr) {
+        objects = ts2::content::findState(lighting, name);
+    }
+    if (objects != nullptr) {
+        time.objects = ts2::scene::outdoorLighting(*objects);
+        // Unlit materials, such as the trees', take the named state's environment.
+        // That is white by day and a dim blue at night.
+        time.objects->textureLight = state->second.environment;
+    }
+    return time;
+}
+
+// The texture of the first skybox screen layer `name` plays in `state`, or empty.
+std::string skyboxTexture(const ts2::effects::File& file, std::string_view name, std::uint32_t state, int nesting) {
+    const ts2::effects::VisualEffect* effect = nesting < kMostSkyNesting ? file.find(std::string(name)) : nullptr;
+    if (effect == nullptr) {
+        return {};
+    }
+    for (const auto& c : effect->components) {
+        if ((state & c.stateMask) != c.state) {
+            continue;
+        }
+        if (c.type == 0) {
+            if (auto texture = skyboxTexture(file, c.name, state, nesting + 1); !texture.empty()) {
+                return texture;
+            }
+        } else if (c.type == static_cast<std::uint8_t>(ts2::effects::BlockType::Screen) && c.index >= 0 &&
+                   static_cast<std::size_t>(c.index) < file.screens.size()) {
+            const auto& screen = file.screens[static_cast<std::size_t>(c.index)];
+            if (screen.mode == kSkyboxMode && !screen.texture.empty()) {
+                return screen.texture;
+            }
+        }
+    }
+    return {};
+}
+
+// The sky cube's faces the neighborhood's sky effect shows by day or at night, or none.
+std::vector<ts2::scene::Image> neighborhoodSky(ts2::scene::SceneBuilder& builder, ts2::content::EffectsFiles& effects, bool night) {
+    const ts2::effects::File* file = effects.with(kSkyEffect);
+    if (file == nullptr) {
+        return {};
+    }
+    const std::string texture = skyboxTexture(*file, kSkyEffect, neighborhoodEffectState(night), 0);
+    return texture.empty() ? std::vector<ts2::scene::Image>{} : builder.assets().textureFaces(texture);
+}
+
 } // namespace
+
+std::uint32_t neighborhoodEffectState(bool night) {
+    constexpr std::uint32_t kAlways = 0x800 | 0x2000;
+    return kAlways | (night ? 0u : 0x1u);
+}
 
 int lotSkirtMargin(const std::filesystem::path& install) {
     const auto file = ts2::content::newestDataFile(ts2::content::findProducts(install), "Res/Config/globalProps.xml");
@@ -83,11 +183,6 @@ void addPlumbobs(ts2::scene::SceneBuilder& builder, ts2::content::EffectsFiles& 
         ts2::diag::warnOnce("neighborhood: no effects file has the plumbob, lots show none");
         return;
     }
-    // The game lights the neighborhood's objects with the "neighbourhoodNoPortals" state's lights,
-    // as outdoor objects on a lot are lit (the ground's light map uses "neighbourhood").
-    if (const auto* state = ts2::content::findState(builder.assets().lighting(), "neighbourhoodNoPortals")) {
-        builder.scene().objectLighting = ts2::scene::outdoorLighting(*state);
-    }
     if (plumbobs.add(builder, *file, kPlumbob, anchors) == 0) {
         ts2::diag::warnOnce("neighborhood: the plumbob effect plays nothing that can be shown yet");
     }
@@ -96,9 +191,10 @@ void addPlumbobs(ts2::scene::SceneBuilder& builder, ts2::content::EffectsFiles& 
 namespace {
 
 // The effects of the decorations from the catalog's effects section, as each one's model names
-// them at its slots, the game's state without snow. Only their ground decals are played so far.
+// them at its slots, the game's state without snow: their ground decals laid here, and each slot's
+// effect kept in `stats` to play the rest.
 void addDecorationEffects(ts2::scene::SceneBuilder& builder, ts2::content::EffectsFiles& effects,
-                          const ts2::scene::NeighborhoodSceneStats& stats, std::optional<std::uint32_t> seed) {
+                          ts2::scene::NeighborhoodSceneStats& stats, std::optional<std::uint32_t> seed) {
     std::map<std::string, std::vector<ts2::scene::EffectSlot>> slots;
     std::mt19937 random{seed ? *seed : std::random_device{}()};
     for (const auto& decoration : stats.effectDecorations) {
@@ -117,6 +213,8 @@ void addDecorationEffects(ts2::scene::SceneBuilder& builder, ts2::content::Effec
                 float at[3] = {slot.offset[0], slot.offset[1], slot.offset[2]};
                 place.apply(at, true);
                 ts2::scene::addGroundDecals(builder, *file, slot.effect, {at[0], at[1], at[2]}, turn, ts2::scene::kNoSnowState, random);
+                stats.slotEffects.push_back({slot.effect, {at[0], at[1], at[2]}, turn});
+                stats.effectModels.reserve(builder, *file, slot.effect);
             }
         }
     }
@@ -126,7 +224,8 @@ void addDecorationEffects(ts2::scene::SceneBuilder& builder, ts2::content::Effec
 
 ts2::scene::NeighborhoodSceneStats buildNeighborhood(ts2::scene::SceneBuilder& builder, const std::filesystem::path& install,
                                                      const std::filesystem::path& folder, ts2::content::EffectsFiles& effects,
-                                                     std::optional<std::uint32_t> variantSeed) {
+                                                     std::optional<std::uint32_t> variantSeed, NeighborhoodTimes* times,
+                                                     const std::filesystem::path& highImposters) {
     // The paint rules, from the newest product's NeighborhoodTerrain.ini.
     const auto ini = ts2::content::newestDataFile(ts2::content::findProducts(install), "Sys/NeighborhoodTerrain.ini");
     if (!ini) {
@@ -141,24 +240,15 @@ ts2::scene::NeighborhoodSceneStats buildNeighborhood(ts2::scene::SceneBuilder& b
     light.shadowStrength = lighting.number("hmNHoodShadowStrength", light.shadowStrength);
     light.boxWidening = lighting.number("hmBlobWidthModifier", light.boxWidening);
     light.boxHeightScale = lighting.number("hmBlobHeightModifier", light.boxHeightScale);
-    if (const auto state = lighting.states.find("neighbourhood"); state != lighting.states.end()) {
-        if (const auto sun = state->second.lights.find("sun"); sun != state->second.lights.end()) {
-            const auto& d = sun->second.direction;
-            const double len = std::sqrt(double(d[0]) * d[0] + double(d[1]) * d[1] + double(d[2]) * d[2]);
-            if (std::isfinite(len) && len > 0) {
-                light.sun = {float(d[0] / len), float(d[1] / len), float(d[2] / len)};
-            }
-        }
-        light.tint = state->second.lightMapTint;
-        if (state->second.lightMap) {
-            if (auto image = ts2::content::lightingImage(products, *state->second.lightMap)) {
-                light.lookup = {image->width, image->height, std::move(image->rgba)};
-            }
-        }
-    }
-    if (light.lookup.width == 0) {
+    auto day = neighborhoodTime(lighting, products, "neighbourhood", light);
+    if (!day || day->terrain.lookup.width == 0) {
         throw std::runtime_error("the neighborhood light map image was not found");
     }
+    NeighborhoodTimes looks{std::move(*day), neighborhoodTime(lighting, products, "neighborhoodnight", light), savedAtNight(folder)};
+    if (looks.atNight && !looks.night) {
+        ts2::diag::warnOnce("neighborhood: the lighting has no usable neighborhoodnight state, it shows by day");
+    }
+    light = looks.now().terrain;
     // How far lot imposters are lifted above the terrain, from the newest Neighborhood.ini.
     float imposterZOffset = 0;
     if (const auto tunables = ts2::content::newestDataFile(products, "Sys/Neighborhood.ini")) {
@@ -172,8 +262,24 @@ ts2::scene::NeighborhoodSceneStats buildNeighborhood(ts2::scene::SceneBuilder& b
     }
     auto stats = ts2::scene::addNeighborhood(builder, folder, ts2::nhood::parsePaintRules(text), light,
                                             ts2::content::neighborhoodRoadTextures(products), imposterZOffset,
-                                            ts2::content::neighborhoodObjectTypes(products), variantSeed);
+                                            ts2::content::neighborhoodObjectTypes(products), variantSeed, highImposters);
     addDecorationEffects(builder, effects, stats, variantSeed);
+    looks.day.sky = neighborhoodSky(builder, effects, false);
+    if (looks.night) {
+        looks.night->sky = neighborhoodSky(builder, effects, true);
+    }
+    if (auto& terrain = builder.scene().terrain; terrain && looks.now().sky.size() == 6) {
+        terrain->sky = looks.now().sky;
+    }
+    builder.scene().objectLighting = looks.now().objects;
+    // A pool-style sea (not in the original game) takes the water sheet's place. The underwater
+    // gradient still darkens what is under it, as the game's does.
+    if (auto& terrain = builder.scene().terrain; terrain && builder.poolStyleSea() && ts2::scene::addNeighborhoodSea(builder, *terrain, looks.atNight)) {
+        terrain->poolStyleSea = true;
+    }
+    if (times != nullptr) {
+        *times = std::move(looks);
+    }
     return stats;
 }
 
@@ -195,6 +301,7 @@ void neighborhoodCamera(Orbit& orbit, const std::filesystem::path& install, cons
         orbit.zoomTo(levels[static_cast<std::size_t>(std::clamp(orbit.rig->defaultZoom, 0, static_cast<int>(levels.size()) - 1))].distance);
     }
     orbit.useRigEasing();
+    orbit.levelKeys = true;
     orbit.goal = orbit.target;
     orbit.distanceGoal = orbit.distance;
     if (const auto margins = orbit.rig->constrain) {

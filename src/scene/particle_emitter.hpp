@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 namespace ts2::scene {
@@ -30,10 +31,20 @@ struct EmitterScales {
 };
 
 // What all effects share, from the Graphic Effects setting and the weather.
+// The ground and water effects meet, in the world: the neighborhood's terrain, from its corner at 0.
+struct EffectTerrain {
+    float width = 0, depth = 0;
+    float waterLevel = 0;
+    std::function<float(float x, float y)> height;
+    std::function<std::array<float, 3>(float x, float y)> normal;  // unit, pointing up
+};
+
 struct EffectConditions {
     float density = 1;        // particleDensity in Graphics Rules, lowered while over the particle target
     float particleScale = 1;  // particleScale in Graphics Rules
     std::array<float, 3> wind{};  // pushes in proportion to a block's windShare
+    // None on a lot yet. The game gives a lot its ground too, with the water at 0.
+    const EffectTerrain* terrain = nullptr;
 };
 
 struct Particle {

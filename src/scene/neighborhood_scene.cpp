@@ -6,6 +6,7 @@
 #include "formats/lot_description.hpp"
 #include "formats/nhood_objects.hpp"
 #include "formats/nhood_terrain.hpp"
+#include "scene/imposter_cache.hpp"
 #include "scene/imposters.hpp"
 #include "scene/neighborhood_paint.hpp"
 
@@ -84,7 +85,7 @@ NeighborhoodSceneStats addNeighborhood(SceneBuilder& builder, const std::filesys
                                        const nhood::PaintRules& rules, const NeighborhoodLight& light,
                                        const std::map<std::string, std::string>& roadTextures, float imposterZOffset,
                                        const std::map<std::uint32_t, content::NeighborhoodObjectType>& objectTypes,
-                                       std::optional<std::uint32_t> variantSeed) {
+                                       std::optional<std::uint32_t> variantSeed, const std::filesystem::path& highImposters) {
     dbpf::Package package{content::neighborhoodPackage(neighborhood)};
     std::optional<nhood::Terrain> terrain;
     std::optional<nhood::SavedCamera> camera;
@@ -267,8 +268,11 @@ NeighborhoodSceneStats addNeighborhood(SceneBuilder& builder, const std::filesys
 
     // The lots, as their imposters.
     out.imposterLift = imposterZOffset;
+    stats.imposterZOffset = imposterZOffset;
     const std::string hood = neighborhood.filename().string();
     stats.lots = lots.size();
+    std::vector<ImposterObject> imposterObjects;
+    std::vector<std::uint32_t> imposterObjectLots;  // each object's lot
     for (const auto& lot : lots) {
         // The tiles it covers: its width along x unless placed a quarter turn from how it was built.
         const bool turned = ((static_cast<unsigned>(lot.facing) - lot.ownFacing) & 1) != 0;
@@ -296,9 +300,17 @@ NeighborhoodSceneStats addNeighborhood(SceneBuilder& builder, const std::filesys
         }
         try {
             float top = -std::numeric_limits<float>::infinity();
-            if (addImposter(out, file, lot, imposterZOffset, assets.warnings, &top)) {
+            std::optional<std::map<std::string, Image>> pictures;
+            if (!highImposters.empty()) {
+                if (const auto key = imposterCacheKey(file)) {
+                    pictures = readImposterCache(imposterCacheFile(highImposters, file), *key);
+                }
+            }
+            if (addImposter(out, file, lot, imposterZOffset, assets.warnings, &top, pictures ? &*pictures : nullptr, &imposterObjects)) {
                 ++stats.imposters;
+                stats.imposterLots.push_back({lot, file, pictures.has_value()});
                 stats.lotFootprints.back().hasImposter = true;
+                imposterObjectLots.resize(imposterObjects.size(), lot.id);
                 // An imposter with no usable vertex keeps the lot's own height.
                 if (std::isfinite(top)) {
                     stats.lotFootprints.back().top = top;
@@ -311,11 +323,23 @@ NeighborhoodSceneStats addNeighborhood(SceneBuilder& builder, const std::filesys
     }
     builder.scene().terrain = std::move(out);
 
+    // The objects the lots' imposters carry as models (trees, stairs, chimneys...), with their colours.
+    for (std::size_t k = 0; k < imposterObjects.size() && k < imposterObjectLots.size(); ++k) {
+        const auto& object = imposterObjects[k];
+        const int mesh = builder.model(object.model, object.overrides);
+        if (Instance* placed = builder.place(mesh, object.model, object.place)) {
+            placed->litOutdoors = true;
+            placed->imposterLot = imposterObjectLots[k];
+            ++stats.imposterObjectsShown;
+        }
+    }
+    stats.imposterObjects = imposterObjects.size();
+
     // The plants and decorations: their catalog entry's model, standing at their position, turned by
-    // their angle. Entries of the "effects" section (surf, birds, wild flowers...) are kept for their
-    // effects instead. Their model is only a test-textured stand-in with slots the effects play at.
+    // their angle. Entries of the "effects" section (surf, birds, wild flowers...) are also kept for
+    // their effects, which play at their model's slots.
     builder.setDrawShadows(true);
-    auto placeAll = [&](const std::vector<nhood::PlacedObject>& list) {
+    auto placeAll = [&](const std::vector<nhood::PlacedObject>& list, bool effects) {
         std::size_t shown = 0;
         for (const auto& item : list) {
             const auto type = objectTypes.find(item.type);
@@ -327,22 +351,29 @@ NeighborhoodSceneStats addNeighborhood(SceneBuilder& builder, const std::filesys
                 continue;
             }
             if (type->second.sort == "effects") {
-                stats.effectDecorations.push_back({type->second.model, item.position, item.angle});
-                continue;
+                // Only decorations play their effects, not entries of the plants list. The model is
+                // drawn too: over water it shows as the small rock the game draws there.
+                if (effects) {
+                    stats.effectDecorations.push_back({type->second.model, item.position, item.angle});
+                }
             }
             const int mesh = builder.model(type->second.model, {});
             const float angle = item.angle * 3.14159265358979f / 180.0f;
             if (Instance* placed = builder.place(mesh, type->second.model, Transform::at(item.position[0], item.position[1], item.position[2], angle))) {
                 placed->ground = item.bounds;
+                // Lit by the lighting state's lights as outdoor objects on a lot are, and mirrored
+                // in the water as the game mirrors them.
+                placed->litOutdoors = true;
+                placed->seaReflected = true;
                 ++shown;
             }
         }
         return shown;
     };
     stats.plants = objects.flora.size();
-    stats.plantsShown = placeAll(objects.flora);
+    stats.plantsShown = placeAll(objects.flora, false);
     stats.decorations = objects.decorations.size();
-    stats.decorationsShown = placeAll(objects.decorations);
+    stats.decorationsShown = placeAll(objects.decorations, true);
 
     // The bridges: each piece's model at its tile's centre, turned by its rotation.
     for (const auto& bridge : objects.bridges) {
@@ -360,7 +391,10 @@ NeighborhoodSceneStats addNeighborhood(SceneBuilder& builder, const std::filesys
             diag::warnOnce(std::string("neighborhood: bridge piece ") + name + " is missing");
             continue;
         }
-        if (builder.place(mesh, name, Transform::of(bridge.road.center, q))) {
+        if (Instance* placed = builder.place(mesh, name, Transform::of(bridge.road.center, q))) {
+            // Lit by the same lights as the trees and decorations, by day and at night.
+            placed->litOutdoors = true;
+            placed->seaReflected = true;
             ++stats.bridgesShown;
         }
     }

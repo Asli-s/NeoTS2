@@ -305,10 +305,17 @@ MetaParticleBlock metaParticles(Reader& r) {
     b.blastCentre = vec3(r);
     b.damping = r.f32();
     b.screw = r.f32();
-    pathPoints(r);
+    b.waves.resize(r.count(28));
+    for (MetaParticleBlock::Wave& wave : b.waves) {
+        wave.frequency = r.f32();
+        wave.phase = vec3(r);
+        wave.amplitude = vec3(r);
+    }
     b.screenEdge = {r.u8(), r.u8(), r.u8(), r.u8()};
     models(r);
-    r.floats(10);
+    for (float& setting : b.terrain) {
+        setting = r.f32();
+    }
     for (auto& w : b.wander) {
         w.retime = {r.f32(), r.f32()};
         w.speed = {r.f32(), r.f32()};
@@ -316,7 +323,10 @@ MetaParticleBlock metaParticles(Reader& r) {
         w.leastTurn = r.f32();
         w.upward = r.f32();
     }
-    r.floats(6);
+    r.floats(3);
+    b.alignSmoothing = r.f32();
+    b.alignSpin = r.f32();
+    r.f32();
     wiggles(r, v >= 4);
     if (v >= 3) {
         r.u32();
@@ -390,6 +400,16 @@ CameraBlock camera(Reader& r) {
     return b;
 }
 
+ModelBlock model(Reader& r) {
+    version(r, 1, 1);
+    ModelBlock b;
+    b.model = r.string();
+    b.size = r.f32();
+    b.colour = {r.f32(), r.f32(), r.f32()};
+    b.alpha = r.f32();
+    return b;
+}
+
 ScreenBlock screen(Reader& r) {
     version(r, 1, 1);
     ScreenBlock b;
@@ -423,10 +443,6 @@ void skipBlock(Reader& r, int type) {
         break;
     case 9:
         r.floats(4);
-        break;
-    case 10:  // a model, by name
-        r.string();
-        r.floats(5);
         break;
     case 12:
         if (r.u32() & 1) {
@@ -605,6 +621,9 @@ File parse(std::span<const std::uint8_t> data) {
                 break;
             case 8:
                 f.cameras.push_back(camera(r));
+                break;
+            case 10:
+                f.models.push_back(model(r));
                 break;
             case 11:
                 f.screens.push_back(screen(r));

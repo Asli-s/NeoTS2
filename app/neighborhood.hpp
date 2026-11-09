@@ -2,9 +2,12 @@
 
 #include "content/cameras.hpp"
 #include "scene/builder.hpp"
+#include "scene/neighborhood_lighting.hpp"
 #include "scene/neighborhood_plumbobs.hpp"
 #include "scene/neighborhood_scene.hpp"
+#include "scene/scene.hpp"
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -20,13 +23,33 @@ std::vector<std::uint32_t> livedInLots(const std::filesystem::path& folder);
 // lotSkirtSizeIncrease (Res/Config/globalProps.xml), or 9 when it isn't set.
 int lotSkirtMargin(const std::filesystem::path& install);
 
-// Adds a neighborhood (its folder in the user's Neighborhoods) to the scene, with the game's paint
-// rules, lighting, road materials, lot imposter lift and object catalog from the install, and its
-// decorations' ground decals. `variantSeed` fixes the ground's texture variants and the decals'
-// random picks (see scene::addNeighborhood).
+// How the neighborhood looks by day or by night, from the lighting state the game picks for each:
+// "neighbourhood" by day, "neighborhoodnight" by night.
+struct NeighborhoodTime {
+    ts2::scene::NeighborhoodLight terrain;  // what the terrain's light map is made with
+    std::optional<ts2::scene::ObjectLighting> objects;
+    std::array<float, 3> imposters{1, 1, 1};  // the state's environment colour, which lot imposters take
+    std::vector<ts2::scene::Image> sky;      // the sky cube's six faces, empty to keep the one built
+};
+struct NeighborhoodTimes {
+    NeighborhoodTime day;
+    std::optional<NeighborhoodTime> night;  // none when the install's lighting has no night state
+    bool atNight = false;                   // the neighborhood's saved Day/Night Toggle
+    const NeighborhoodTime& now() const { return atNight && night ? *night : day; }
+};
+
+// The effect state bits the neighborhood plays its effects with: bit 0 by day, and the bits a lot
+// always sets. Snow and weather bits stay clear.
+std::uint32_t neighborhoodEffectState(bool night);
+
+// Adds a neighborhood (its folder in the user's Neighborhoods) to the scene with the install's paint
+// rules, lighting, road materials, imposter lift and object catalog, and its decorations' ground decals.
+// `variantSeed` fixes the ground's texture variants and decal picks. It is lit by day or night as saved,
+// and `times` gets both looks. Imposters take the High pictures kept in `highImposters` when given.
 ts2::scene::NeighborhoodSceneStats buildNeighborhood(ts2::scene::SceneBuilder& builder, const std::filesystem::path& install,
                                                      const std::filesystem::path& folder, ts2::content::EffectsFiles& effects,
-                                                     std::optional<std::uint32_t> variantSeed = std::nullopt);
+                                                     std::optional<std::uint32_t> variantSeed = std::nullopt,
+                                                     NeighborhoodTimes* times = nullptr, const std::filesystem::path& highImposters = {});
 
 // Adds the green plumbob the game shows over each lot a household lives on (the effect
 // fxNeighborhoodPlumbob) to `plumbobs`. Lots without an imposter get none.

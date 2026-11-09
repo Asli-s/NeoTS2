@@ -161,6 +161,7 @@ std::size_t NeighborhoodPlumbobs::add(SceneBuilder& builder, const effects::File
             if (Instance* placed = builder.place(s.mesh, kNeighborhoodPlumbobName, Transform::at(at[0], at[1], at[2], 0)); placed != nullptr) {
                 // Shapes are lit as outdoor objects (the scene's object lighting), sprites aren't lit.
                 placed->litOutdoors = (blocks_[s.block].flags & effects::ParticleBlock::kModel) != 0;
+                placed->seaReflected = true;
                 parts_.push_back({instances.size() - 1, s.block, at, s.scale});
             }
         }

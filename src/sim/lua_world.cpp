@@ -301,7 +301,7 @@ int neighborhoodManagerIsValid(lua_State* L) {
 
 // NeighborhoodManager:getNumNeighborhoodsOfType(typeName, [value]): how many sub-neighborhoods of the
 // current neighborhood have that type (any type for an unknown name) and, when a number is given,
-// that value (NeighborhoodId::value2).
+// that value (NeighborhoodId::pack).
 int neighborhoodManagerCountOfType(lua_State* L) {
     const ScriptCall& c = call(L);
     const std::int32_t type = typeOfName(lua_tostring(L, 2));
@@ -313,7 +313,7 @@ int neighborhoodManagerCountOfType(lua_State* L) {
     if (current != nullptr && all != nullptr) {
         for (const auto& [id, n] : *all) {
             if (n.prefix == current->prefix && !n.subPrefix.empty() && (type == 0 || n.type == type) &&
-                (!value || n.value2 == *value)) {
+                (!value || n.pack == *value)) {
                 ++count;
             }
         }

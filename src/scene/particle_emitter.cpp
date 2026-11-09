@@ -37,7 +37,7 @@ constexpr std::uint64_t kSmallStepFlags = 0x8 | 0x10 | 0x8000 | 0x20000 | 0x4000
 
 // Flags for behaviour not played yet: those above but attractors, offsetting by the stretch (0x20), sticking to the
 // terrain (0x10000), dying off it (0x40000), pinning to it (0x80000), and screw and path motion (the high bits).
-constexpr std::uint64_t kNotPlayedFlags = (kSmallStepFlags & ~Block::kAttractor) | 0x20 | 0x10000 | 0x40000 | 0x80000 | 0x600000000ull | 0x2000000000ull;
+constexpr std::uint64_t kNotPlayedFlags = (kSmallStepFlags & ~Block::kAttractor) | 0x20 | 0x10000 | 0x40000 | 0x80000 | 0x600000000ull;
 
 // Limits that keep a broken file from taking over the game. The first is the particle target of Graphic
 // Effects at High, which all effects together aim for. The second allows a 30000 second prewarm, the longest
@@ -88,7 +88,8 @@ ParticleEmitter::ParticleEmitter(const Block& block, std::uint32_t seed)
     if (!playable_) {
         diag::warnOnce("effects: a particle system with values out of range makes no particles (" + block.texture + ")");
     }
-    if (block.flags & kNotPlayedFlags) {
+    const bool stillShape = (block.flags & Block::kNoSpeed) && (block.flags & Block::kModel) && block.alignment != Block::Camera;
+    if ((block.flags & kNotPlayedFlags) || stillShape) {
         diag::warnOnce("effects: a particle system uses motion not played yet (" + block.texture + ")");
     }
 }

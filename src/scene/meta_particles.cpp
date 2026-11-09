@@ -24,10 +24,36 @@ constexpr float kOneStepDrag = 0.05f;  // a particle moves in one step unless it
 // Blocks with these flags need small steps.
 constexpr std::uint64_t kSmallStepFlags = 0x29000360;
 
-// Flags for behaviour not played yet: spawn balls (0x800), box sizes from the terrain (0x1000, 0x2000), starts on
-// the terrain (0x7C000), a head start along the flight (0x10) and the small step flags other than wandering. A
-// block that follows a path takes no small steps.
-constexpr std::uint64_t kNotPlayedFlags = (kSmallStepFlags & ~Block::kWanderEach) | 0x800 | 0x1000 | 0x2000 | 0x7C000 | 0x10;
+// How particles meet the terrain. The block's terrain values are named by their place in its list.
+constexpr std::uint64_t kStayAboveGround = 0x40;  // a particle below the ground comes back up to it
+constexpr std::uint64_t kOnGround = 0x80;         // with kStayAboveGround: it always lies on the ground
+constexpr std::uint64_t kAvoidShallows = 0x100;   // it steers away from ground ahead
+constexpr std::uint64_t kStayInside = 0x200;      // it dies at the terrain's edge
+constexpr std::uint64_t kPinned = 0x400;          // it lies on the ground
+constexpr std::uint64_t kStartOnGround = 0x4000;
+constexpr std::uint64_t kStartOnWater = 0x8000;   // with kStartOnGround: on whichever is higher
+constexpr std::uint64_t kStartAtDepth = 0x10000;  // only where the ground lies between two depths below the water
+constexpr std::uint64_t kStartsOnTerrain = 0x7C000;
+constexpr std::uint64_t kTerrainFlags = kStayAboveGround | kOnGround | kAvoidShallows | kStayInside | kPinned | kStartsOnTerrain;
+constexpr std::size_t kBounce = 0;       // not 0: a particle back up from the ground bounces off it by this much
+constexpr std::size_t kAvoidHeight = 1;  // ground ahead closer below than this pushes it away
+constexpr std::size_t kAvoidStrength = 2;
+constexpr std::size_t kLookAhead = 3;    // how far ahead it looks, in seconds of its flight
+constexpr std::size_t kAvoidUpward = 4;  // the share of the push that goes up
+constexpr std::size_t kDeathHeight = 5;  // ground ahead closer below than this kills it
+constexpr std::size_t kBounceDeath = 6;  // the chance a bounce kills it
+constexpr float kLeastPull = 0.001f;   // a weaker pull isn't steered
+constexpr std::size_t kLowestDepth = 8, kHighestDepth = 9;  // with kStartAtDepth, the ground's height minus the water's
+
+// Flags for behaviour not played yet: spawn balls (0x800), box sizes from the terrain (0x1000, 0x2000), a head
+// start along the flight (0x10) and the small step flags other than wandering and the terrain's. A block that
+// follows a path takes no small steps.
+constexpr std::uint64_t kNotPlayedFlags =
+    (kSmallStepFlags & ~(Block::kWanderEach | kStayAboveGround | kAvoidShallows | kStayInside)) | 0x800 | 0x1000 | 0x2000 | 0x10;
+
+// The effect script's align values for a particle's effect turned along its flight, by the axis that follows it.
+constexpr std::uint8_t kAlignX = 2, kAlignY = 3, kAlignZ = 4;
+constexpr float kAlignEase = 1.0f / 15.0f;  // times 1 / alignSmoothing, the share of the way eased each update
 
 // Every particle starts an effect, so a broken file must not ask for too many. The game's files keep far fewer.
 constexpr std::size_t kMostParticles = 2000;
@@ -49,7 +75,9 @@ bool playable(const Block& b) {
            finite(b.speed) && finite(b.spawnLow) && finite(b.spawnHigh) && finite(b.count) && finite(std::array<float, 1>{b.interval}) && finite(b.gravity) &&
            finite(std::array<float, 3>{b.windShare, b.blast, b.damping}) && finite(std::array<float, 3>{b.sizeVary, b.rotationVary, b.alphaVary}) && finite(b.colourVary) &&
            std::abs(b.prewarm) <= kLongest && std::abs(b.life[0]) <= kLongest && std::abs(b.life[1]) <= kLongest &&
-           std::all_of(b.path.begin(), b.path.end(), [](const Block::PathPoint& p) { return finite(p.position) && finite(p.velocity) && std::isfinite(p.time); });
+           std::all_of(b.path.begin(), b.path.end(), [](const Block::PathPoint& p) { return finite(p.position) && finite(p.velocity) && std::isfinite(p.time); }) &&
+           std::all_of(b.waves.begin(), b.waves.end(), [](const Block::Wave& w) { return std::isfinite(w.frequency) && finite(w.phase) && finite(w.amplitude); }) &&
+           finite(b.terrain) && std::isfinite(b.alignSmoothing);
 }
 
 float lengthSquared(const Vec3& v) { return v[0] * v[0] + v[1] * v[1] + v[2] * v[2]; }
@@ -95,7 +123,8 @@ MetaParticleEmitter::MetaParticleEmitter(const Block& block, EffectPlayer& playe
     : block_(block), player_(player), nesting_(nesting), playable_(playable(block) && player.knows(block.effect)), randomState_(seed == 0 ? 1 : seed) {
     clockRate_ = 1.0 / std::max(block.interval, kShortestCycle);
     const std::uint64_t notPlayed = (block.flags & Block::kFollowsPath) ? kNotPlayedFlags & ~kSmallStepFlags : kNotPlayedFlags;
-    if (block.flags & notPlayed || block.screw != 0 || (block.alignment >= 2 && block.alignment <= 4) || block.screenEdge[0] != 0 || block.screenEdge[2] != 0) {
+    if (block.flags & notPlayed || block.screw != 0 || block.alignment == kAlignX || block.alignment == kAlignZ || block.alignSpin != 0 ||
+        block.screenEdge[0] != 0 || block.screenEdge[2] != 0) {
         diag::warnOnce("effects: metaparticles use motion not played yet (" + block.effect + ")");
     }
 }
@@ -273,7 +302,55 @@ Vec3 MetaParticleEmitter::randomSpawnPoint() {
     return out;
 }
 
-// Makes a particle that started `agedBy` seconds ago, and starts its effect. False when none was made.
+Vec3 MetaParticleEmitter::toWorld(const Vec3& at) const {
+    const Vec3 turnedAt = turnToWorld(at);
+    return {turnedAt[0] + parent_.position[0], turnedAt[1] + parent_.position[1], turnedAt[2] + parent_.position[2]};
+}
+
+Vec3 MetaParticleEmitter::fromWorld(const Vec3& at) const {
+    return turnFromWorld({at[0] - parent_.position[0], at[1] - parent_.position[1], at[2] - parent_.position[2]});
+}
+
+Vec3 MetaParticleEmitter::turnToWorld(const Vec3& direction) const {
+    const Vec3 out = turned(direction, parent_.rotation);
+    return {out[0] * parent_.scale, out[1] * parent_.scale, out[2] * parent_.scale};
+}
+
+Vec3 MetaParticleEmitter::turnFromWorld(const Vec3& direction) const {
+    const auto& r = parent_.rotation;
+    const float k = parent_.scale != 0 ? 1 / parent_.scale : 0;
+    const Vec3 out{r[0] * direction[0] + r[3] * direction[1] + r[6] * direction[2], r[1] * direction[0] + r[4] * direction[1] + r[7] * direction[2],
+                   r[2] * direction[0] + r[5] * direction[1] + r[8] * direction[2]};
+    return {out[0] * k, out[1] * k, out[2] * k};
+}
+
+// Where a new particle starts by the terrain: false where it may not start (off the terrain, or at the wrong
+// depth). On the ground or the water, it is raised by a random height from the spawn box.
+bool MetaParticleEmitter::onTerrain(Particle& p) {
+    const Block& b = block_;
+    Vec3 w = toWorld(p.position);
+    if (!(w[0] >= 0 && w[1] >= 0 && w[0] < terrain_->width && w[1] < terrain_->depth)) {
+        return false;
+    }
+    const float ground = terrain_->height(w[0], w[1]);
+    const float depth = ground - terrain_->waterLevel;
+    if ((b.flags & kStartAtDepth) && !(depth >= b.terrain[kLowestDepth] && depth <= b.terrain[kHighestDepth])) {
+        return false;
+    }
+    if (b.flags & (kStartOnGround | kStartOnWater)) {
+        if (b.flags & kStartOnGround) {
+            w[2] = (b.flags & kStartOnWater) ? std::max(ground, terrain_->waterLevel) : ground;
+        } else {
+            w[2] = terrain_->waterLevel;
+        }
+        w[2] += random(b.spawnLow[2], b.spawnHigh[2]);
+        p.position = fromWorld(w);
+    }
+    return true;
+}
+
+// Makes a particle that started `agedBy` seconds ago, and starts its effect. False when none was made. A
+// particle the terrain doesn't let start counts as made.
 bool MetaParticleEmitter::spawn(float agedBy) {
     if (particles_.size() >= kMostParticles) {
         diag::warnOnce("effects: metaparticles reached the most particles one may have (" + block_.effect + ")");
@@ -307,6 +384,9 @@ bool MetaParticleEmitter::spawn(float agedBy) {
         p.position[i] = p.position[i] * own_.scale + own_.position[i];
     }
     p.velocity = turned(p.velocity, own_.rotation);
+    if ((b.flags & kStartsOnTerrain) && terrain_ && !onTerrain(p)) {
+        return true;
+    }
 
     p.size = random(1 - b.sizeVary, 1 + b.sizeVary) * sizeByDetail_;
     if (b.flags & Block::kScaleParticles) {
@@ -394,7 +474,75 @@ bool MetaParticleEmitter::step(Particle& p, float seconds) {
         for (float& v : p.velocity) {
             v *= keep;
         }
+        if (terrain_ && (block_.flags & kTerrainFlags) && !meetTerrain(p, h)) {
+            return false;
+        }
         seconds -= h;
+    }
+    return true;
+}
+
+// One small step's meeting with the terrain. False when the particle dies of it.
+bool MetaParticleEmitter::meetTerrain(Particle& p, float seconds) {
+    const Block& b = block_;
+    Vec3 w = toWorld(p.position);
+    if ((b.flags & kStayInside) && !(w[0] > 0 && w[1] > 0 && w[0] < terrain_->width && w[1] < terrain_->depth)) {
+        return false;
+    }
+    if (b.flags & kAvoidShallows) {
+        // Looks along its flight, a fixed share of its speed when it is slow.
+        const float speed = std::sqrt(lengthSquared(p.velocity));
+        const float k = b.terrain[kLookAhead] * (speed > 10 ? 1 / speed : 0.1f);
+        const Vec3 ahead = toWorld({p.position[0] + p.velocity[0] * k, p.position[1] + p.velocity[1] * k, p.position[2] + p.velocity[2] * k});
+        // Off the terrain there is nothing ahead to steer from.
+        const bool inside = ahead[0] > 0 && ahead[1] > 0 && ahead[0] < terrain_->width && ahead[1] < terrain_->depth;
+        const float clear = inside ? ahead[2] - terrain_->height(ahead[0], ahead[1]) : 0;
+        if (inside && clear < b.terrain[kDeathHeight]) {
+            return false;
+        }
+        if (inside && clear < b.terrain[kAvoidHeight]) {
+            const Vec3 n = terrain_->normal(ahead[0], ahead[1]);
+            const float push = (b.terrain[kAvoidHeight] - clear) * (b.terrain[kAvoidHeight] - clear) * seconds * b.terrain[kAvoidStrength];
+            const Vec3 force = turnFromWorld({n[0] * push, n[1] * push, n[2] * b.terrain[kAvoidUpward] * push});
+            if (b.flags & Block::kWanderEach) {
+                // It turns its first pull's heading instead of being pushed.
+                Pull& pull = p.pulls[0];
+                if (pull.flatStrength > kLeastPull) {
+                    pull.yaw = std::atan2(std::sin(pull.yaw) + force[1] / pull.flatStrength, std::cos(pull.yaw) + force[0] / pull.flatStrength);
+                }
+                if (pull.upwardStrength > kLeastPull) {
+                    diag::warnOnce("effects: metaparticles steering their climb from the ground aren't played yet (" + b.effect + ")");
+                }
+            } else {
+                for (std::size_t i = 0; i < 3; ++i) {
+                    p.velocity[i] += force[i];
+                }
+            }
+        }
+    }
+    if (b.flags & (kStayAboveGround | kPinned)) {
+        const float ground = terrain_->height(w[0], w[1]);
+        const bool comesUp = (b.flags & kStayAboveGround) && (w[2] < ground || (b.flags & kOnGround));
+        if (comesUp || (b.flags & kPinned)) {
+            w[2] = ground;
+            p.position = fromWorld(w);
+        }
+        if (comesUp) {
+            const Vec3 n = turnFromWorld(terrain_->normal(w[0], w[1]));
+            const float into = p.velocity[0] * n[0] + p.velocity[1] * n[1] + p.velocity[2] * n[2];
+            if (b.terrain[kBounce] != 0) {
+                for (std::size_t i = 0; i < 3; ++i) {
+                    p.velocity[i] -= n[i] * (1 + b.terrain[kBounce]) * into;
+                }
+                if (b.terrain[kBounceDeath] > 0 && random(0, 1) < b.terrain[kBounceDeath]) {
+                    return false;
+                }
+            } else if (into < 0) {
+                for (std::size_t i = 0; i < 3; ++i) {
+                    p.velocity[i] -= n[i] * into;
+                }
+            }
+        }
     }
     return true;
 }
@@ -603,6 +751,47 @@ void MetaParticleEmitter::emit(float seconds) {
     }
 }
 
+// Turns a particle's effect so its y axis points along its flight, with x level and z the rest. With
+// smoothing it only turns about the vertical, easing toward its heading by a share of the way each update
+// (not each second). A particle at rest points nowhere and keeps x along y and z along x.
+void MetaParticleEmitter::alignAlongFlight(Particle& p, std::array<float, 9>& r) const {
+    const Vec3& v = p.velocity;
+    if (block_.alignSmoothing > 0) {
+        const float toward = std::atan2(-v[0], v[1]) / kTwoPi;
+        float& turn = p.alignTurn;
+        if (turn == kNoAlignTurn) {
+            turn = toward;
+        } else {
+            if (toward - turn > 0.5f) {
+                turn += 1;
+            } else if (toward - turn < -0.5f) {
+                turn -= 1;
+            }
+            turn += (toward - turn) / block_.alignSmoothing * kAlignEase;
+            if (turn > 0.5f) {
+                turn -= 1;
+            } else if (turn < -0.5f) {
+                turn += 1;
+            }
+        }
+        r = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+        turnAboutVertical(r, kTwoPi * turn);
+        return;
+    }
+    Vec3 y = v;
+    if (const float length = std::sqrt(lengthSquared(v)); length > 0) {
+        for (float& c : y) {
+            c /= length;
+        }
+    }
+    Vec3 x{0, 1, 0}, z{1, 0, 0};
+    if (const float flat = std::sqrt(y[0] * y[0] + y[1] * y[1]); flat > 0) {
+        x = {y[1] / flat, -y[0] / flat, 0};
+        z = {x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]};
+    }
+    r = {x[0], y[0], z[0], x[1], y[1], z[1], x[2], y[2], z[2]};
+}
+
 // Each living particle's effect goes where the particle is, turned and sized for its age.
 void MetaParticleEmitter::moveEffects() {
     for (Particle& p : particles_) {
@@ -612,8 +801,23 @@ void MetaParticleEmitter::moveEffects() {
         const float t = p.age / p.life;
         EmitterPlace at;
         at.position = p.position;
+        const float waveTime = static_cast<float>(block_.interval * played_);
+        for (const Block::Wave& wave : block_.waves) {
+            float angle = waveTime * wave.frequency;
+            for (std::size_t i = 0; i < 3; ++i) {
+                angle += wave.phase[i] * (p.position[i] - own_.position[i]);
+            }
+            const float s = std::sin(angle);
+            for (std::size_t i = 0; i < 3; ++i) {
+                at.position[i] += wave.amplitude[i] * s;
+            }
+        }
         at.scale = block_.size.at(t) * p.size;
-        turnAboutVertical(at.rotation, kTwoPi * p.heading);
+        if (block_.alignment == kAlignY) {
+            alignAlongFlight(p, at.rotation);
+        } else {
+            turnAboutVertical(at.rotation, kTwoPi * p.heading);
+        }
         turnAboutVertical(at.rotation, block_.rotation.at(t) * p.rotation * kTwoPi);
         const Vec3 colour = colourAt(block_.colours, t);
         p.effect->setMessages(block_.alpha.at(t) * alpha_ * p.alpha, {colour[0] * p.colour[0], colour[1] * p.colour[1], colour[2] * p.colour[2]});
@@ -630,6 +834,11 @@ void MetaParticleEmitter::update(float seconds, const EffectConditions& conditio
         prewarmNext_ = false;
     }
     budget_ = kMostStepsAnUpdate;
+    played_ += seconds;
+    terrain_ = conditions.terrain;
+    if (!terrain_ && (block_.flags & kTerrainFlags)) {
+        diag::warnOnce("effects: metaparticles meet the ground only in the neighborhood so far (" + block_.effect + ")");
+    }
     for (std::size_t i = 0; i < 3; ++i) {
         acceleration_[i] = block_.gravity[i] + conditions.wind[i] * block_.windShare;
     }

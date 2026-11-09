@@ -16,7 +16,7 @@ namespace ts2::scene {
 
 // Plays visual effects by name: it picks the record for the Graphic Effects level, makes the parts the
 // level of detail and the game's state allow, places them and ends the effect when they finish.
-// Played parts: particle systems, metaparticles, sequences and other effects by name. Other block types play
+// Played parts: particle systems, metaparticles, sequences, models and other effects by name. Other block types play
 // without those parts and say so in the log, and so do effects attached to the camera or the cursor, or kept to a
 // size on the screen.
 
@@ -128,9 +128,11 @@ struct EffectPart {
     std::unique_ptr<MetaParticleEmitter> meta;
     std::unique_ptr<EffectSequence> sequence;
     std::shared_ptr<PlayingEffect> child;
-    EmitterPlace parent;  // the emitter's parent place, which carries its particles
+    const effects::ModelBlock* model = nullptr;
+    bool modelShown = false;  // from its start until it is stopped
+    EmitterPlace parent;  // the emitter's parent place, which carries its particles, or a model's place in the world
+    std::array<float, 4> modelColour{1, 1, 1, 1};  // red, green, blue and alpha
     std::array<float, 2> rate{1, 1}, size{1, 1}, alpha{1, 1};  // by level of detail: this level's and the next's
-    std::vector<std::uint32_t> states;  // components it can switch to, for state changes
 
     void start(bool prewarm);
     void stop(bool hard);
@@ -138,6 +140,8 @@ struct EffectPart {
     void setPlace(const EmitterPlace& own, const EmitterPlace& parentPlace);
     void setPicture(const std::string& name);
     void setFirstFrame(int frame);
+    // A model's colour and alpha: its block's times the effect's messages.
+    void setModelMessages(float messageAlpha, const std::array<float, 3>& colour);
 };
 
 class EffectPlayer {
@@ -187,6 +191,10 @@ public:
     // Calls `visit` for each particle system with its block, and the parent place to draw its particles by.
     using ParticleVisitor = std::function<void(const effects::ParticleBlock&, const ParticleEmitter&, const EmitterPlace&)>;
     void forEachParticleSystem(const ParticleVisitor& visit) const;
+
+    // Calls `visit` for each model shown with its block, where it is and its colour and alpha (all 1 for none).
+    using ModelVisitor = std::function<void(const effects::ModelBlock&, const EmitterPlace&, const std::array<float, 4>&)>;
+    void forEachModel(const ModelVisitor& visit) const;
 
     std::size_t effectCount() const { return effects_.size(); }
 

@@ -50,7 +50,7 @@ bool usableVary(float vary) {
 bool drawable(const effects::DecalBlock& d) {
     using effects::DecalBlock;
     return d.draw == DecalBlock::Draw::Decal && (d.flags & ~DecalBlock::kStatic) == 0 && !d.texture.empty() &&
-           constant(d.rotation) && constant(d.size) && constant(d.alpha) && constant(d.aspect) && d.aspect.at(0) == 1 &&
+           constant(d.rotation) && constant(d.size) && constant(d.alpha) && constant(d.aspect) &&
            d.colours.size() <= 1 && usableVary(d.alphaVary) && usableVary(d.sizeVary) && usableVary(d.rotationVary) &&
            std::all_of(d.colours.begin(), d.colours.end(), [](const auto& c) {
                return std::isfinite(c[0]) && std::isfinite(c[1]) && std::isfinite(c[2]);
@@ -193,13 +193,30 @@ private:
             diag::warnOnce("neighborhood decals: " + d.texture + " is missing");
             return false;
         }
-        Primitive p = groundDecal(*builder_.scene().terrain, {place.at[0], place.at[1]}, size, turns, material);
+        // Its colour is times the lighting state's environment, a dim blue at night.
+        builder_.scene().materials[static_cast<std::size_t>(material)].takesTextureLight = true;
+        // Its depth is its width times its aspect and its texture's height over width: the beach's
+        // 128 by 64 strips lie half as deep as their aspect alone gives.
+        float aspect = d.aspect.values.empty() ? 1.0f : d.aspect.values.front();
+        const int image = builder_.scene().materials[static_cast<std::size_t>(material)].image;
+        if (image >= 0 && static_cast<std::size_t>(image) < builder_.scene().images.size()) {
+            const Image& picture = builder_.scene().images[static_cast<std::size_t>(image)];
+            if (picture.width > 0 && picture.height > 0) {
+                aspect *= static_cast<float>(picture.height) / static_cast<float>(picture.width);
+            }
+        }
+        Primitive p = groundDecal(*builder_.scene().terrain, {place.at[0], place.at[1]}, size, turns, material, aspect);
         if (p.indices.empty()) {
             return false;
         }
         Surfaces s;
         s.emplace(material, std::move(p));
-        return builder_.place(builder_.addMesh("decal " + d.texture, std::move(s)), "decal", Transform{}) != nullptr;
+        // Decals are effects, which the neighborhood water mirrors.
+        Instance* placed = builder_.place(builder_.addMesh("decal " + d.texture, std::move(s)), "decal", Transform{});
+        if (placed != nullptr) {
+            placed->seaReflected = true;
+        }
+        return placed != nullptr;
     }
 
     SceneBuilder& builder_;

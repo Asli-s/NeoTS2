@@ -9,12 +9,10 @@
 
 namespace ts2::scene {
 
-// The neighborhood camera's slow drift, as the game plays it. Once mouse and keys have rested for
-// more than 30 of the game's updates (a quarter second at its 120 a second, counted here in
-// seconds so the frame rate doesn't change it), it starts the "nhoodcam" effect where the camera
-// looks. The effect's sequence waits, then a wandering particle carries a camera block whose
-// position becomes the camera's goal and whose curve sways the camera's yaw. Any mouse movement,
-// click, wheel turn or key press ends it, leaving the sway where it was until the next drift begins.
+// The neighborhood camera's slow drift, as the game plays it. After mouse and keys rest for more than 30
+// game updates (a quarter second, counted in seconds here so frame rate doesn't matter), the "nhoodcam"
+// effect starts where the camera looks. It waits, then a wandering particle carries a camera block that
+// sets the camera's goal and sways its yaw. Any input ends it, the sway staying until the next drift.
 class HoodDrift {
 public:
     // What one step asks of the camera.

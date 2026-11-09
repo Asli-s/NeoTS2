@@ -28,23 +28,23 @@ NeighborhoodId parse(std::span<const std::uint8_t> data) {
         n.subPrefix = lengthText(r);
     }
     if (n.version >= 6) {
-        n.value1 = r.i32();
+        n.night = r.i32();
     } else if (n.type == 3) {
-        n.value1 = 1;
+        n.night = 1;
     }
     if (n.version > 6) {
         n.requiredProducts = r.u32();
     }
     if (n.version >= 8) {
-        n.value2 = r.i32();
+        n.pack = r.i32();
     } else {
         switch (n.type) {
-        case 2: n.value2 = 1; break;
-        case 3: n.value2 = 2; break;
+        case 2: n.pack = 1; break;
+        case 3: n.pack = 2; break;
         case 5:
         case 6:
-        case 7: n.value2 = 10; break;
-        default: n.value2 = 0; break;
+        case 7: n.pack = 10; break;
+        default: n.pack = 0; break;
         }
     }
     if (n.version > 8) {
