@@ -101,15 +101,6 @@ std::optional<LauncherSettings> parseLauncherSettings(std::string_view text) {
             }
             continue;
         }
-        if (key == "ui-scale") {
-            const std::string_view value = line.substr(equals + 1);
-            for (const int scale : kUiScales) {
-                if (value == std::to_string(scale)) {
-                    settings.uiScale = scale;
-                }
-            }
-            continue;
-        }
         const auto path = pathFrom(line.substr(equals + 1));
         if (!path) {
             continue;
@@ -170,9 +161,6 @@ std::string formatLauncherSettings(const LauncherSettings& settings) {
     }
     if (const WindowSize* size = findWindowSize(settings.windowSize)) {
         out.append("window-size=").append(size->key).append("\n");
-    }
-    if (settings.uiScale != 100 && isUiScale(settings.uiScale)) {
-        out.append("ui-scale=").append(std::to_string(settings.uiScale)).append("\n");
     }
     for (std::size_t i = 0; i < settings.addedInstalls.size() && i < kMaxAdded; ++i) {
         line("added-install", settings.addedInstalls[i]);

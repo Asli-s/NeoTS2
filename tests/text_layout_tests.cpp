@@ -113,6 +113,30 @@ void textLinesSitOnTheGameBaseline() {
     CHECK(!s.rows.empty() && s.rows.back() == 2 + 3 + measures(22).ascent - 1);
 }
 
+// A wrapped text box breaks its text between words where a line would get too wide, keeping it as
+// typed, and a click finds the place nearest to it on the line under it, counting the box's scroll.
+void textBoxesKeepTheirLines() {
+    Rig rig("Plain = \"NeoTS2 Test\", \"20\", \"bold\"\n");
+    const std::string text = "HH HH HH\nHHHH";
+    // Room inside the gutters for "HH HH" and half of another "HH".
+    const int hh = rig.fonts.width(rig.fonts.style("Plain"), "HH");
+    const int room = rig.fonts.width(rig.fonts.style("Plain"), "HH HH") + hh / 2;
+    const std::string area = "(0,0," + std::to_string(room + 4) + ",40)";
+    const int box = rig.screen.addWindows({window("IGZWinTextEdit", area, "Plain", "lefttop", text, true)}, 0, 0);
+    rig.screen.setText(box, text);
+    CHECK(hh > 0);
+    const auto starts = rig.screen.lineStarts(box);
+    CHECK((starts == std::vector<std::size_t>{0, 6, 9}));
+    const int step = rig.screen.lineHeight(box);
+    CHECK(step > 0);
+    CHECK(rig.screen.textIndexAt(box, 2, 2) == 0);
+    CHECK(rig.screen.textIndexAt(box, 2 + hh, 2 + step) == 8);
+    rig.screen.setTopLine(box, 1);
+    CHECK(rig.screen.textIndexAt(box, 2, 2) == 6);
+    rig.screen.setTopLine(box, 9);
+    CHECK(rig.screen.topLine(box) == 2);
+}
+
 // Lines step by the font's line height plus its spacing, and each is centred on its own: half the
 // area's width less half the line's (trailing spaces not counted), each half rounded toward zero.
 void textLinesStepAndCentreOneByOne() {
@@ -300,6 +324,7 @@ std::vector<Test> textLayoutTests() {
     return {
         {"text lines sit on the game baseline", textLinesSitOnTheGameBaseline},
         {"text lines step and centre one by one", textLinesStepAndCentreOneByOne},
+        {"text boxes keep their lines", textBoxesKeepTheirLines},
         {"text centres and sinks as the game", textCentresAndSinksAsTheGame},
         {"button captions take the line spacing", buttonCaptionsTakeTheLineSpacing},
         {"font styles share their font", fontStylesShareTheirFont},

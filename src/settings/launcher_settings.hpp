@@ -28,18 +28,6 @@ inline const WindowSize* findWindowSize(std::string_view key) {
     return nullptr;
 }
 
-// The sizes of the game's UI the launcher offers, in percent. The game draws its UI at 100% only.
-inline constexpr int kUiScales[] = {100, 125, 150, 175, 200};
-
-// True for a size in kUiScales.
-inline bool isUiScale(int percent) {
-    for (const int scale : kUiScales) {
-        if (scale == percent) {
-            return true;
-        }
-    }
-    return false;
-}
 
 // What the launcher remembers between starts. Every path is absolute.
 struct LauncherSettings {
@@ -56,8 +44,8 @@ struct LauncherSettings {
     // Lots' ponds drawn like pools, with their surface, depth tint and caustics. Not in the original
     // game, so off unless the player turns it on.
     bool poolStylePonds = false;
-    // A beach lot's sea drawn with a colour that deepens with the water and the pools' caustics under
-    // its own waves. Not in the original game, so off unless the player turns it on.
+    // The sea drawn with a colour that deepens with the water and the pools' caustics under its waves,
+    // around every lot. Not in the original game, so off unless the player turns it on.
     bool poolStyleSea = false;
     // Lots joined to the ground around them without the game's seams: the skirt follows the lot's
     // edge between its tile corners, and the lot's paints reach its far edges. Not in the original
@@ -65,9 +53,6 @@ struct LauncherSettings {
     bool smoothLotSkirts = false;
     // The game window's size: a key of kWindowSizes, or empty for the game's own default.
     std::string windowSize;
-    // The game's UI drawn larger, in percent: one of kUiScales. Not in the original game, so 100
-    // unless the player chooses another.
-    int uiScale = 100;
 
     bool operator==(const LauncherSettings&) const = default;
 };

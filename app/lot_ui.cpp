@@ -38,6 +38,18 @@ constexpr int kWallModes = 4;
 // The wall menu: buttons 1 to 4 pick walls down, cutaway, walls up and roofs. It closes once the
 // mouse leaves its hidden area window.
 constexpr std::uint32_t kWallMenu = 0x00004000, kWallMenuArea = 0x00000005;
+// Advanced Neighborhood Options: a panel at (0, 40) with a button that opens and closes a strip of
+// neighborhood buttons ending in the neighborhood's name. The name takes the first of its three
+// texts (large, medium, small) no wider than 200, the small one when none is, at least 50 wide, and
+// the strip's background ends 20 past it. Each chooser keeps the versions its script shows, so the
+// unattached one (the plus) is drawn over the attached one.
+constexpr std::uint32_t kHoodOptions = 0x0BB40010, kHoodStrip = 0x46BE0001, kHoodButtonHolder = 0x46BE0000, kHoodButton = 0x46000005;
+constexpr std::uint32_t kHoodBackground = 0x00000001, kHoodReturn = 0x00000005, kHoodMainMenu = 0x00000002;
+// The open and close button's tip: Advanced Neighborhood Options while the strip is closed, Minimize
+// while it is open (UI Text 0xBB41).
+constexpr std::uint32_t kUiText = 0x7FA7DC7C, kHoodOpenTip = 0xBB41004B, kHoodCloseTip = 0xBB41004C;  // string ids, leakcheck: ok
+constexpr std::uint32_t kHoodNames[] = {0x00000003, 0x000000b3, 0x000000a3};
+constexpr int kHoodPanelY = 40, kHoodNameWidest = 200, kHoodNameNarrowest = 50, kHoodNameToEnd = 20;
 // The puck script's second top window: the version text, hidden until set up (see setUpVersion).
 constexpr std::uint32_t kVersionText = 0x12345678;
 // It sits this far in from the screen's top right corner.
@@ -188,6 +200,10 @@ void LotUi::load() {
         puck_ = screen_.load(kScripts, kPuck, 0, 0);
         live_ = screen_.load(kScripts, kLivePanel, 0, 0);
         options_ = screen_.load(kScripts, kOptionsMenu, 0, 0);
+        hoodPanel_ = screen_.load(kScripts, kHoodOptions, 0, kHoodPanelY);
+        hoodStrip_ = screen_.find(hoodPanel_, kHoodStrip);
+        hoodButtonHolder_ = screen_.find(hoodPanel_, kHoodButtonHolder);
+        hoodReturnTip_ = screen_.tip(screen_.find(hoodStrip_, kHoodReturn));
         close();
         // Without all three there is nothing more to set up.
         loaded_ = puck_ < 0 || live_ < 0 || options_ < 0 ? 2 : 1;
@@ -292,6 +308,58 @@ void LotUi::close() {
             screen_.setVisible(panel, false);
         }
     }
+    showHoodPanel(false);
+}
+
+void LotUi::setNeighborhood(const std::string& name) {
+    if (hoodStrip_ < 0) {
+        return;
+    }
+    // Return to %s names the neighborhood.
+    if (std::string tip = hoodReturnTip_; tip.find("%s") != std::string::npos) {
+        screen_.setTip(screen_.find(hoodStrip_, kHoodReturn), tip.replace(tip.find("%s"), 2, name));
+    }
+    int picked = -1, smallest = -1;
+    for (const std::uint32_t id : kHoodNames) {
+        const int text = screen_.find(hoodStrip_, id);
+        if (text < 0) {
+            continue;
+        }
+        smallest = text;
+        screen_.setText(text, name);
+        screen_.fitToText(text);
+        if (picked < 0 && screen_.width(text) <= kHoodNameWidest) {
+            picked = text;
+        }
+    }
+    if (picked < 0) {
+        picked = smallest;
+    }
+    for (const std::uint32_t id : kHoodNames) {
+        const int text = screen_.find(hoodStrip_, id);
+        screen_.setVisible(text, text == picked);
+    }
+    if (picked < 0) {
+        return;
+    }
+    screen_.resize(picked, std::max(screen_.width(picked), kHoodNameNarrowest), screen_.height(picked));
+    const int background = screen_.find(hoodStrip_, kHoodBackground);
+    screen_.resize(background, screen_.x(picked) + screen_.width(picked) + kHoodNameToEnd - screen_.x(background), screen_.height(background));
+}
+
+// The panel shows while the options menu and the puck do, and it always opens with its strip closed.
+void LotUi::showHoodPanel(bool show) {
+    if (hoodPanel_ < 0) {
+        return;
+    }
+    screen_.setVisible(hoodPanel_, show);
+    screen_.setVisible(hoodButtonHolder_, true);
+    showHoodStrip(false);
+}
+
+void LotUi::showHoodStrip(bool show) {
+    screen_.setVisible(hoodStrip_, show);
+    screen_.setTip(screen_.find(hoodButtonHolder_, kHoodButton), screen_.data().text(kUiText, show ? kHoodCloseTip : kHoodOpenTip));
 }
 
 void LotUi::hideForFreeCamera(bool hide) {
@@ -309,6 +377,7 @@ void LotUi::hideForFreeCamera(bool hide) {
                 screen_.setVisible(panel, false);
             }
         }
+        showHoodPanel(false);
         return;
     }
     for (const int panel : {puck_, version_}) {
@@ -374,6 +443,7 @@ void LotUi::showOptions(bool show) {
     if (!show) {
         optionsMenu_.close();
     }
+    showHoodPanel(show && puck_ >= 0 && screen_.visible(puck_));
     // With nobody in the household, Live can't be used: its button is disabled and the live panel
     // stays hidden.
     screen_.setVisible(live_, !show && hasMembers_);
@@ -476,6 +546,16 @@ LotUi::Action LotUi::clicked(int window) {
         if (id == kToggleCeiling) {
             return Action::ToggleCeiling;
         }
+    }
+    // Advanced Neighborhood Options opens and closes its strip. In the strip, Return goes back to the
+    // neighborhood as the Neighborhood button does, and Main Menu opens the neighborhood chooser. The
+    // choosers don't act yet.
+    if (id == kHoodButton && hoodButtonHolder_ >= 0 && screen_.parent(window) == hoodButtonHolder_) {
+        showHoodStrip(!screen_.visible(hoodStrip_));
+        return Action::None;
+    }
+    if (hoodStrip_ >= 0 && screen_.parent(window) == hoodStrip_) {
+        return id == kHoodReturn ? Action::Neighborhood : id == kHoodMainMenu ? Action::MainMenu : Action::None;
     }
     if (id == kOptions && screen_.parent(window) == puck_) {
         showOptions(!optionsShown());

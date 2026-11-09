@@ -7,7 +7,7 @@
 //          [--renderer sdlgpu|gl2 (what draws: SDL's GPU API, or OpenGL 2.1)]
 //          [--smooth-follow (the camera glides after a followed Sim, not in the original game)]
 //          [--pool-style-ponds (lots' ponds drawn like pools, not in the original game)]
-//          [--pool-style-sea (a beach sea with a depth colour and caustics, not in the original game)]
+//          [--pool-style-sea (the sea with a depth colour and caustics, not in the original game)]
 //          [--smooth-lot-skirts (lots joined to the ground around them without seams, not in the original game)]
 //          [--ui-scale 100|125|150|175|200 (the UI drawn larger, in percent, not in the original game)]
 //   neots2 <install folder> <lot.package> [--shot <out.png> [yaw pitch distance]]
@@ -22,6 +22,7 @@
 // up/cutaway/down, R roofs on/off. --shot draws one frame to a file and exits.
 #include "content/cameras.hpp"
 #include "content/downloads.hpp"
+#include "content/graphics_options.hpp"
 #include "content/install.hpp"
 #include "content/lighting.hpp"
 #include "content/lighting_state.hpp"
@@ -52,7 +53,6 @@
 #include "scene/lot_scene.hpp"
 #include "scene/neighborhood_scene.hpp"
 #include "scene/view.hpp"
-#include "settings/launcher_settings.hpp"
 #include "sim/clock.hpp"
 
 #include "platform/entry.hpp"
@@ -245,6 +245,7 @@ struct Options {
     std::optional<std::uint32_t> seed;  // the neighborhood ground's variants (--seed), random when empty
     bool topDown = false;  // the shot looks straight down on the 64 tiles square a lot imposter's ground shows
     float ambientOcclusion = 0;  // how dark corners and contacts are drawn (--ambient-occlusion), 0 for not at all
+    bool occlusionFullSize = false;  // ambient occlusion at the view's full size (--full-size-occlusion), not half
     ts2::render::Backend backend = ts2::render::defaultBackend();  // what draws (--renderer)
 };
 
@@ -264,6 +265,8 @@ bool parseOptions(int argc, char** argv, Options& o) {
             o.topDown = true;
         } else if (arg == "--ambient-occlusion" && i + 1 < argc) {
             o.ambientOcclusion = std::stof(argv[++i]);
+        } else if (arg == "--full-size-occlusion") {
+            o.occlusionFullSize = true;
         } else if (arg == "--numbers" && i + 1 < argc) {
             o.numbers = argv[++i];
         } else if (arg == "--walls" && i + 1 < argc) {
@@ -416,8 +419,9 @@ int main(int argc, char** argv) {
             } else if (arg == "--fit-screen") {
                 menu.fitScreen = true;
             } else if (arg == "--ui-scale" && i + 1 < argc) {
-                if (const int scale = std::stoi(argv[++i]); ts2::settings::isUiScale(scale)) {
+                if (const int scale = std::stoi(argv[++i]); ts2::content::isUiScale(scale)) {
                     menu.uiScale = scale;
+                    menu.uiScaleGiven = true;
                 }
             }
         }
@@ -576,6 +580,7 @@ int main(int argc, char** argv) {
             const auto rendererOwner = app::openRenderer(window, options.backend, windowOptions, shaders, shot);
             ts2::render::IRenderer& renderer = *rendererOwner;
             renderer.setAmbientOcclusion(options.ambientOcclusion);
+            renderer.setAmbientOcclusionHalfSize(!options.occlusionFullSize);
             renderer.setBumpMapping(options.bumpMapping);
             renderer.setFloorAndWallNormalMapping(options.wallBumps);
             ts2::diag::info("drawing with " + renderer.device());

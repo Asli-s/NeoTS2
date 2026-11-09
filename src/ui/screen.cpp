@@ -201,11 +201,32 @@ int Screen::add(const ui::Window& source, int parent) {
 
 void Screen::layoutText(int index) {
     Window& w = windows_[static_cast<std::size_t>(index)];
+    w.lineStarts.clear();
     if (w.text.empty() || !(w.kind == Kind::Text || w.kind == Kind::TextEdit || (w.kind == Kind::Button && w.showCaption))) {
         return;
     }
     const FontStyle& style = fonts_.style(w.font);
-    std::vector<std::string> lines = wrapLines(w, style);
+    std::vector<std::string> lines;
+    if (w.kind == Kind::TextEdit && w.wrapped) {
+        // A wrapped text box keeps its text as typed, so that a place in it can be found on its lines.
+        w.lineStarts = wrapStarts(w, style);
+        w.lineHeight = std::max(1, fonts_.lineHeight(style));
+        // Only the whole lines that fit from the one at the top are drawn, so the last one's
+        // descenders show below it and nothing of the next line does.
+        w.topLine = std::clamp(w.topLine, 0, static_cast<int>(w.lineStarts.size()) - 1);
+        const std::size_t first = static_cast<std::size_t>(w.topLine);
+        const std::size_t last = std::min(w.lineStarts.size(), first + static_cast<std::size_t>(visibleLines(index)));
+        for (std::size_t i = first; i < last; ++i) {
+            const std::size_t end = i + 1 < w.lineStarts.size() ? w.lineStarts[i + 1] : w.text.size();
+            std::string line = w.text.substr(w.lineStarts[i], end - w.lineStarts[i]);
+            while (!line.empty() && (line.back() == ' ' || line.back() == '\n')) {
+                line.pop_back();
+            }
+            lines.push_back(std::move(line));
+        }
+    } else {
+        lines = wrapLines(w, style);
+    }
     // Text windows and button captions in a Type 1 font are placed as the game places them. A text
     // window is then drawn line by line (see emitLines), from an image that holds one band per
     // line, each line at the band's left edge.
@@ -231,6 +252,10 @@ void Screen::layoutText(int index) {
     lines.resize(drawn.size());
     const int lineHeight = game ? static_cast<int>(band) : step;
     block.height = static_cast<std::uint32_t>(std::max(1, lineHeight * static_cast<int>(lines.size()) + (game ? 0 : 2)));
+    // A wrapped text box's last line keeps its descenders whole.
+    if (!w.lineStarts.empty() && !lines.empty()) {
+        block.height = std::max(block.height, static_cast<std::uint32_t>(lineHeight * static_cast<int>(lines.size() - 1)) + band);
+    }
     block.rgba.assign(static_cast<std::size_t>(block.width) * block.height * 4, 0);
     const bool centered = !game && w.hAlign == HAlign::Centre;
     const bool right = !game && w.hAlign == HAlign::Right;
@@ -289,6 +314,45 @@ std::vector<std::string> Screen::wrapLines(const Window& w, const FontStyle& sty
         }
     }
     return wrapAt(w.text, style, room);
+}
+
+std::vector<std::size_t> Screen::wrapStarts(const Window& w, const FontStyle& style) const {
+    // A limit for a broken file's text: past it the rest stays on the last line.
+    constexpr std::size_t kMostLines = 4096;
+    int room = w.w - 2 * w.gutters[0];
+    for (const int c : w.children) {
+        const Window& child = windows_[static_cast<std::size_t>(c)];
+        if (child.kind == Kind::Other && child.x > 0) {
+            room = std::min(room, child.x - 2 * w.gutters[0]);
+        }
+    }
+    const std::string& text = w.text;
+    std::vector<std::size_t> starts{0};
+    std::size_t line = 0;  // where the current line starts
+    std::size_t i = 0;
+    while (i < text.size() && starts.size() < kMostLines) {
+        if (text[i] == '\n') {
+            line = i + 1;
+            starts.push_back(line);
+            ++i;
+            continue;
+        }
+        if (text[i] == ' ') {
+            ++i;
+            continue;
+        }
+        // A word: it moves to a new line when the line it would end can't hold it.
+        std::size_t end = i;
+        while (end < text.size() && text[end] != ' ' && text[end] != '\n') {
+            ++end;
+        }
+        if (i > line && fonts_.width(style, text.substr(line, end - line)) > room) {
+            line = i;
+            starts.push_back(line);
+        }
+        i = end;
+    }
+    return starts;
 }
 
 std::vector<std::string> Screen::wrapAt(const std::string& text, const FontStyle& style, int room) const {
@@ -492,6 +556,76 @@ std::size_t Screen::textIndexAt(int window, int x) {
             continue;
         }
         const int distance = std::abs(fonts_.width(style, w.text.substr(0, i)) - local);
+        if (distance < bestDistance) {
+            best = i;
+            bestDistance = distance;
+        }
+    }
+    return best;
+}
+
+int Screen::lineCount(int window) const {
+    return window < 0 ? 0 : static_cast<int>(windows_[static_cast<std::size_t>(window)].lineStarts.size());
+}
+
+int Screen::lineHeight(int window) const {
+    return window < 0 ? 0 : windows_[static_cast<std::size_t>(window)].lineHeight;
+}
+
+int Screen::visibleLines(int window) const {
+    if (window < 0) {
+        return 1;
+    }
+    const Window& w = windows_[static_cast<std::size_t>(window)];
+    return std::max(1, (w.h - w.gutters[1] - w.gutters[3]) / std::max(1, w.lineHeight));
+}
+
+std::vector<std::size_t> Screen::lineStarts(int window) const {
+    return window < 0 ? std::vector<std::size_t>{} : windows_[static_cast<std::size_t>(window)].lineStarts;
+}
+
+void Screen::setTopLine(int window, int line) {
+    if (window >= 0) {
+        Window& w = windows_[static_cast<std::size_t>(window)];
+        const int top = std::clamp(line, 0, std::max(0, static_cast<int>(w.lineStarts.size()) - 1));
+        if (top != w.topLine) {
+            w.topLine = top;
+            layoutText(window);
+        }
+    }
+}
+
+int Screen::topLine(int window) const {
+    return window < 0 ? 0 : windows_[static_cast<std::size_t>(window)].topLine;
+}
+
+std::size_t Screen::textIndexAt(int window, int x, int y) {
+    if (window < 0) {
+        return 0;
+    }
+    const Window& w = windows_[static_cast<std::size_t>(window)];
+    if (w.lineStarts.empty() || w.lineHeight <= 0) {
+        return textIndexAt(window, x);
+    }
+    const int local = y - origin(window)[1] - w.gutters[1];
+    const int line = std::clamp(w.topLine + (local < 0 ? -1 : local / w.lineHeight), 0, static_cast<int>(w.lineStarts.size()) - 1);
+    const std::size_t begin = w.lineStarts[static_cast<std::size_t>(line)];
+    const std::size_t end = static_cast<std::size_t>(line) + 1 < w.lineStarts.size() ? w.lineStarts[static_cast<std::size_t>(line) + 1] : w.text.size();
+    const FontStyle& style = fonts_.style(w.font);
+    const int across = x - origin(window)[0] - w.gutters[0];
+    // The boundary on that line whose left part is nearest in width to the click. A line that
+    // wrapped ends before the space it broke at.
+    std::size_t last = end;
+    while (last > begin && (w.text[last - 1] == ' ' || w.text[last - 1] == '\n') && end != w.text.size()) {
+        --last;
+    }
+    std::size_t best = begin;
+    int bestDistance = std::abs(across);
+    for (std::size_t i = begin + 1; i <= last; ++i) {
+        if (i < w.text.size() && (static_cast<unsigned char>(w.text[i]) & 0xC0) == 0x80) {
+            continue;
+        }
+        const int distance = std::abs(fonts_.width(style, w.text.substr(begin, i - begin)) - across);
         if (distance < bestDistance) {
             best = i;
             bestDistance = distance;
@@ -720,6 +854,10 @@ std::uint32_t Screen::id(int window) const {
 
 int Screen::parent(int window) const {
     return window >= 0 ? windows_[static_cast<std::size_t>(window)].parent : -1;
+}
+
+std::string Screen::tip(int window) const {
+    return window >= 0 ? windows_[static_cast<std::size_t>(window)].tip : std::string();
 }
 
 void Screen::setTip(int window, const std::string& text) {
@@ -1028,7 +1166,10 @@ void Screen::emit(int index, std::vector<Quad>& out) const {
             if ((!w.autosize || w.showCaption) && !w.checkBox && static_cast<float>(w.w) != fw) {
                 pushThirds(out, w.image, x0, y0, x1, y1, u0, u1, iw, ih);
             } else {
-                out.push_back({x0, y0, x1, y1, u0, 0, u1, 1, w.image});
+                // Otherwise the frame is drawn at its own size from the button's top left, cut to the
+                // button, so a button taller than its picture doesn't stretch it.
+                const float dw = std::min(static_cast<float>(w.w), fw), dh = std::min(static_cast<float>(w.h), ih);
+                out.push_back({x0, y0, x0 + dw, y0 + dh, u0, 0, u0 + dw / iw, dh / ih, w.image});
             }
         } else if (w.edge) {
             pushThirds(out, w.image, x0, y0, x1, y1, 0, 1, iw, ih);
@@ -1088,7 +1229,7 @@ void Screen::emit(int index, std::vector<Quad>& out) const {
             const std::array<float, 4> color = w.state == ButtonState::Disabled && w.disabledTextColor ? *w.disabledTextColor : w.textColor;
             // A text box's selection is a highlighted stretch with its text in the selected colour.
             float sx0 = cx1, sx1 = cx1;
-            if (w.kind == Kind::TextEdit && w.selectionEnd > w.selectionBegin) {
+            if (w.kind == Kind::TextEdit && w.lineStarts.empty() && w.selectionEnd > w.selectionBegin) {
                 const FontStyle& style = fonts_.style(w.font);
                 sx0 = std::clamp(tx + static_cast<float>(fonts_.width(style, w.text.substr(0, w.selectionBegin))), cx0, cx1);
                 sx1 = std::clamp(tx + static_cast<float>(fonts_.width(style, w.text.substr(0, w.selectionEnd))), cx0, cx1);
@@ -1105,7 +1246,21 @@ void Screen::emit(int index, std::vector<Quad>& out) const {
             part(sx0, sx1, w.selectedTextColor);
             part(sx1, cx1, color);
         }
-        if (w.caret) {
+        if (w.caret && !w.lineStarts.empty()) {
+            // On the line it is on, cut off with the text.
+            const std::size_t caretAt = std::min(*w.caret, w.text.size());
+            const auto after = std::upper_bound(w.lineStarts.begin(), w.lineStarts.end(), caretAt);
+            const std::size_t line = static_cast<std::size_t>(after - w.lineStarts.begin()) - 1;
+            const std::size_t begin = w.lineStarts[line];
+            const float before = static_cast<float>(fonts_.width(fonts_.style(w.font), w.text.substr(begin, caretAt - begin)));
+            const float cx = std::min(tx + before, x1 - gx - 1);
+            const float lineTop = ty + static_cast<float>((static_cast<int>(line) - w.topLine) * w.lineHeight);
+            const float c0 = std::max(lineTop, top), c1 = std::min(lineTop + static_cast<float>(w.lineHeight), bottom);
+            const int shownLine = static_cast<int>(line) - w.topLine;
+            if (c1 > c0 && shownLine >= 0 && shownLine < visibleLines(index)) {
+                out.push_back({cx, c0, cx + 1, c1, 0, 0, 1, 1, white_, w.caretColor});
+            }
+        } else if (w.caret) {
             const float before = static_cast<float>(fonts_.width(fonts_.style(w.font), w.text.substr(0, std::min(*w.caret, w.text.size()))));
             const float cx = std::min(tx + before, x1 - gx - 1);
             out.push_back({cx, cy0, cx + 1, cy1, 0, 0, 1, 1, white_, w.caretColor});

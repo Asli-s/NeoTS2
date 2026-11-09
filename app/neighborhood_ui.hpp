@@ -48,13 +48,22 @@ public:
     void showOptions(bool show);
     // Hides every neighborhood panel (under the neighborhood chooser), or shows them again as they were.
     void hideAll(bool hide);
+    // Hides the puck in the lower left corner while the free camera is on, or shows it again.
+    void hidePuck(bool hide) {
+        if (puck_ >= 0) {
+            screen_.setVisible(puck_, !hide);
+        }
+    }
     GameOptionsPanel& gameOptions() { return gameOptions_; }
     GraphicsOptionsPanel& graphicsOptions() { return graphicsOptions_; }
     // The screen has a new size: what sits at its bottom edge moves with it.
     void setSize(int width, int height);
-    enum class Action { None, MainMenu, EnterLot, Quit, GameOptionChanged, GraphicsOptionChanged };
+    enum class Action { None, MainMenu, EnterLot, Quit, GameOptionChanged, GraphicsOptionChanged, DayNight };
     // A button released: what the player asked for.
     Action clicked(int window);
+    // The puck's camera button held down. They turn and zoom while held, as the lot puck's do.
+    enum class CameraButton { None, RotateLeft, RotateRight, ZoomIn, ZoomOut };
+    CameraButton heldCameraButton() const;
 
     // Whether a click on a lot opens its card: lived-in lots always, community lots only while the
     // lots bin is open.

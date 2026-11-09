@@ -1,6 +1,7 @@
 // The game's main menu (the neighborhood chooser), built from its UI script, and the neighborhood
 // it opens.
 #include "menu.hpp"
+#include "game.hpp"
 #include "baby_name_dialog.hpp"
 #include "cheat_console.hpp"
 #include "dialog_box.hpp"
@@ -26,7 +27,9 @@
 #include "portraits.hpp"
 
 #include "content/cameras.hpp"
+#include "imposter_baker.hpp"
 #include "render/frame_plan.hpp"
+#include "scene/imposters.hpp"
 #include "scene/object_effects.hpp"
 #include "content/install.hpp"
 #include "content/lighting_state.hpp"
@@ -44,6 +47,7 @@
 #include "render/make_renderer.hpp"
 #include "scene/assets.hpp"
 #include "scene/builder.hpp"
+#include "scene/instance_merge.hpp"
 #include "scene/lot_scene.hpp"
 #include "scene/lot_skirt.hpp"
 #include "scene/pick.hpp"
@@ -64,7 +68,6 @@
 #include <future>
 #include <map>
 #include <memory>
-#include <fstream>
 #include <optional>
 #include <random>
 #include <set>
@@ -95,6 +98,9 @@ constexpr std::uint32_t kTilePicture = 0x000000a1, kTileName = 0x000000a5;
 constexpr std::uint32_t kTileButton = 0x000000a2;
 // The tile's tooltip, which the game sets itself: "Click for Preview of Neighborhood".
 constexpr std::uint32_t kNeighborhoodText = 0x7F3A262A, kTileTip = 0x0086003F;  // a string id, leakcheck: ok
+// The preview shows a neighborhood without a description this text instead, as if it were one:
+// "Enter a neighborhood description here . . . ".
+constexpr std::uint32_t kNoDescription = 0x00860034;  // a string id, leakcheck: ok
 // A second click on a lot within this long enters it instead of opening its card.
 constexpr std::uint64_t kDoubleClickNs = 250000000;
 // The square marking where a camera drag started (a 15 x 15 picture), from the UI scripts.
@@ -106,6 +112,28 @@ constexpr std::uint32_t kTurnMarkGroup = 0x499DB772, kTurnMark = 0xCF092010, kTu
 constexpr std::uint32_t kPreview = 0x49001021;
 constexpr std::uint32_t kPreviewPicture = 0x00002001, kPreviewDescription = 0x00002002, kPreviewName = 0x00002003, kPreviewPlay = 0x000000b2,
                         kPreviewClose = 0x000000b3;
+// The preview's sub-neighborhood buttons: each pack's number, its button and the neighborhood type
+// it lists (the game's constants table 0x70881521). A vacation button counts every vacation type.
+struct SubHoodButton {
+    int pack;
+    std::uint32_t id;
+    std::int32_t type;
+};
+constexpr std::size_t kDescriptionCharacters = 1000;  // the description box's maxtext
+constexpr SubHoodButton kSubHoodButtons[] = {{1, 0x00002007, 2}, {2, 0x00002008, 3}, {3, 0x00002009, 4}, {10, 0x00002010, 5}};
+
+// The last window inside `parent` with this id that its script shows: each sub-neighborhood button
+// comes twice, a hidden copy standing for a pack that isn't installed, and the picture's frame
+// before them shares the shopping button's id. Found while the parent is hidden too.
+int shownChild(const ts2::ui::Screen& screen, int parent, std::uint32_t id) {
+    int found = -1;
+    for (const int c : screen.children(parent)) {
+        if (screen.id(c) == id && screen.visible(c)) {
+            found = c;
+        }
+    }
+    return found;
+}
 constexpr std::uint32_t kConstants = 0x4dc1dce2, kUpperLeftSim = 0x000000e1, kLowerRightSim = 0x000000e3;
 // The menu's buttons at the start (Quit) and when opened from a neighborhood (Close, Quit).
 constexpr std::uint32_t kStartButtons = 0x8dc06b6a, kNeighborhoodButtons = 0x00003000, kChooserClose = 0x000000a3,
@@ -159,8 +187,8 @@ ts2::render::Vec3 screenRay(const ts2::render::Camera& c, int width, int height,
     return {f[0] + s[0] * nx * tx + u[0] * ny * ty, f[1] + s[1] * nx * tx + u[1] * ny * ty, f[2] + s[2] * nx * tx + u[2] * ny * ty};
 }
 
-// Where a point of the scene shows on the screen, none behind the camera.
-std::optional<std::array<int, 2>> screenPoint(const ts2::render::Camera& c, int width, int height, const ts2::render::Vec3& point) {
+// The window pixel a point of the scene shows at, none behind the camera.
+std::optional<std::array<int, 2>> screenPixel(const ts2::render::Camera& c, int width, int height, const ts2::render::Vec3& point) {
     using ts2::render::Vec3;
     const float aspect = static_cast<float>(width) / static_cast<float>(height);
     const float tx = c.fovX > 0 ? std::tan(c.fovX / 2) : std::tan(c.fovY / 2) * aspect;
@@ -275,462 +303,13 @@ void sprites(const ts2::ui::Screen& screen, double seconds, float scale, std::ve
     }
 }
 
-// A neighborhood built in the background, then shown: its scene, camera and panel.
-struct Built {
-    ts2::scene::Scene scene;
-    ts2::scene::NeighborhoodSceneStats stats;
-    app::Orbit camera;
-    std::optional<ts2::scene::HoodDrift> drift;
-    ts2::scene::NeighborhoodPlumbobs plumbobs;
-    app::NeighborhoodUi::Content panel;
-    ts2::render::IRenderer::Prepared gpu;
-};
-
-// A lot built in the background, then shown.
-// What the ground around a lot is built from, kept so that a new View Distance can build it again
-// while the lot is open.
-struct SkirtSource {
-    std::shared_ptr<ts2::scene::Assets> assets;
-    const ts2::scene::Scene* hood = nullptr;  // the neighborhood's scene, open for as long as the lot is
-    ts2::scene::LotFootprint footprint;
-    std::string terrainType;
-    std::map<std::string, std::string> roadTextures;
-    std::shared_ptr<const ts2::scene::Heights> lotHeights;
-    int groundLevel = 0;
-    std::optional<ts2::content::WorldBounds> worldBounds;
-    ts2::scene::LotGroundLook groundLook;
-    bool poolStyleSea = false, smoothLotSkirts = false;
-    int defaultMargin = 9;  // globalProps.xml's lotSkirtSizeIncrease
-};
-
-// The ground around the lot `margin` tiles out, and that area.
-std::pair<ts2::scene::Scene, ts2::scene::SkirtArea> makeSkirt(const SkirtSource& s, int margin) {
-    const auto area = ts2::scene::lotSkirtArea(*s.hood->terrain, s.footprint, margin);
-    ts2::scene::SceneBuilder builder(*s.assets);
-    builder.setPoolStyleSea(s.poolStyleSea);
-    builder.setSmoothLotSkirts(s.smoothLotSkirts);
-    ts2::scene::addLotSkirt(builder, *s.hood->terrain, s.footprint, margin, s.terrainType, s.roadTextures, s.lotHeights.get(), s.groundLevel,
-                            s.worldBounds ? &*s.worldBounds : nullptr, &s.groundLook);
-    return {std::move(builder.scene()), area};
-}
-
-// A lot's surroundings built again at another View Distance: the neighborhood's decorations (the
-// scene's first `decorations` instances) and the skirt, with the imposters and boundary of that area.
-struct SurroundingsBuilt {
-    int margin = 0;
-    ts2::scene::Scene scene;
-    std::size_t decorations = 0;
-};
-
-// A neighbor's house built for lot view, with the reader of the game's files its builds use, as the
-// one the game runs on is used on the main thread meanwhile.
-struct NeighborBuilt {
-    std::uint32_t id = 0;
-    ts2::scene::Scene scene;
-    std::shared_ptr<ts2::scene::Assets> assets;
-    bool failed = false;  // its imposter stays, and it isn't tried again
-};
-
-// Builds a neighbor's lot as it looks from outside. It is lit once by day, as a played lot is by day so that
-// its ground meets the ground around it, keeps what shows with its walls up and its roofs on, and takes no
-// part in the lot's views.
-ts2::scene::Scene neighborHouse(ts2::scene::Assets& assets, const std::filesystem::path& file) {
-    using namespace ts2::scene;
-    SceneBuilder builder(assets);
-    const auto lot = ts2::content::loadLot(file);
-    addLot(builder, lot, file);
-    app::lightLot(assets, builder.scene(), lot, file, "day");
-    Scene scene = std::move(builder.scene());
-    View view;
-    view.level = topLevel(scene);
-    view.walls = WallView::Up;
-    const auto visible = visibleInstances(scene, view);
-    std::vector<Instance> kept;
-    kept.reserve(scene.instances.size());
-    for (std::size_t i = 0; i < scene.instances.size(); ++i) {
-        if (visible[i]) {
-            Instance& instance = scene.instances[i];
-            instance.part = Part::Other;
-            instance.underside = Instance{}.underside;
-            instance.walls.clear();
-            instance.neighborHouse = true;
-            kept.push_back(std::move(instance));
-        }
-    }
-    scene.instances = std::move(kept);
-    scene.walls.clear();
-    scene.actors.clear();
-    scene.placedObjects.clear();
-    scene.clip.reset();
-    return scene;
-}
-
-struct LotBuilt {
-    ts2::scene::Scene lot;  // in its neighborhood when it has one
-    app::LotView view;
-    app::Orbit camera;
-    ts2::render::IRenderer::Prepared gpu;
-    std::shared_ptr<const app::RouteModelTable> routeModels;
-    // For lighting it again as its clock moves on.
-    std::shared_ptr<app::LotLightBase> light;
-    std::string lightState;
-    ts2::scene::Transform place;
-    std::optional<ts2::camera::Config> freeRig;  // the free camera's settings
-    std::size_t decorations = 0;  // the scene's first instances: the neighborhood's plants and decorations
-    std::size_t surroundings = 0;  // those and the skirt's instances after them
-    std::shared_ptr<const SkirtSource> skirt;  // none for a lot shown without its neighborhood
-    int margin = 0;                            // the skirt's View Distance, in tiles
-};
-
-// A neighborhood tile's moving picture.
-struct Playing {
-    ts2::reia::Video video;
-    ts2::tga::Pixels picture;
-    std::size_t frame = 0;
-    int window = -1;
-};
-
-// Whether a background job is still running (a finished one can be replaced without waiting).
-template <typename Job>
-bool loading(const Job& job) {
-    return job.valid() && job.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
-}
-
 double secondsSince(std::uint64_t started) {
     return static_cast<double>(ts2::platform::ticksNs() - started) / 1e9;
 }
 
-// The game in its window: the main menu, a neighborhood opened from it, and a lot entered from
-// that neighborhood.
-class Game {
-public:
-    Game(ts2::content::UiData& data, ts2::ui::Fonts& fonts, ts2::render::IRenderer& renderer, const std::filesystem::path& install,
-         const MenuOptions& options);
-    Game(const Game&) = delete;
-    Game& operator=(const Game&) = delete;
+} // namespace
 
-    // Shows the menu, or what the options ask for, until the window is closed or the picture taken.
-    void run();
-
-private:
-    // The main menu.
-    void setUpMenu();
-    void pickMenuSims();
-    void setUpTiles();
-    void showPage();
-    void showPreview();
-    void playVideos();
-    void menuClicked(int window, std::uint32_t id);
-
-    // The neighborhood.
-    void openNeighborhood();
-    void showNeighborhood(Built built);
-    void showChooser();
-    bool chooserOpen() const { return inNeighborhood_ && menu_ >= 0 && screen_.visible(menu_); }
-    // A box or menu over the neighborhood that takes the mouse and keys: lots can't be clicked and
-    // the camera only drifts behind it.
-    bool neighborhoodCovered() const { return chooserOpen() || quitBox_.isOpen(); }
-    // Whether the lot has something to save: as in the game, once time has run unpaused since the
-    // lot loaded. The game's other reasons are not known yet.
-    bool lotChanged() const { return lotRan_; }
-    void openQuitBox(bool askSave = false);
-    // Shows the baby naming dialog when the lot's scripts ask for names, and closes it when answered.
-    void updateBabyNames();
-    // Shows the game's "Object Error" dialog for the oldest script error the lot holds for it.
-    void updateObjectErrors();
-    void answerObjectError(std::uint32_t button);
-    void answerBabyNames();
-    // Typing goes on in the naming dialog after the cheat window closes over it.
-    void keepBabyNameTyping() {
-        if (!cheatConsole_.takesKeys() && babyNames_.isOpen()) {
-            ts2::platform::startTextInput();
-        }
-    }
-    void closeQuitBox();
-    void closeChooser();
-    void lotClicked(float x, float y);
-    void showLotCard(std::uint32_t lot);
-    void showLotTag();
-    void placePlumbobs(std::uint64_t now);
-
-    // The lot.
-    void enterLot(std::uint32_t id);
-    void showLot(LotBuilt& built);
-    void leaveLot();
-    app::LotUi::Action lotKey(pf::Key key);
-    void lotAction(app::LotUi::Action action);
-    void trackSim(std::int16_t sim);
-    bool centreOnSim(std::int16_t sim);
-    void showSimStorey(const ts2::sim::SimObject& object);
-    void followSimStorey();
-    std::optional<ts2::render::Vec3> simRoot(std::int16_t sim) const;
-    bool openGroundMenu(float x, float y);
-    void toggleFreeCamera();
-    void freeCameraMouse(const pf::Event& e);
-    void freeCameraLook();
-    std::function<void(app::Vec3&)> keepNearLot(float inset) const;
-    ts2::render::Camera lotCamera() const { return freeCam_ ? freeCam_->camera() : orbit_.camera(); }
-    void showPieCursor();
-    void lotMouse(const pf::Event& e, float x, float y);
-    void cameraDrag(const pf::Event& e, float x, float y);
-    void endCameraDrag();
-    void updateLot(std::uint64_t now);
-    void puckCamera();
-    void startLotLife();
-    void drawHousehold(std::uint64_t now);
-    void sendLotChanges();
-    // The lot's instances shown this frame: those its view shows, less the neighborhood's
-    // decorations when the Decorations option is off.
-    std::vector<std::uint8_t> lotShown() const;
-    // Shows or hides the neighbors' lots and the neighborhood's decorations around the lot at once,
-    // as the game does when a Lot View Option changes.
-    void applyLotViewOptions();
-    void startNeighborHouses();
-    void applyNeighborHouses();
-    void showNeighborHouses();
-    void buildNextNeighborHouse();
-    void addNeighborHouse(NeighborBuilt built);
-    void fadeNeighborHouses(const std::array<float, 3>& eye);
-    // Shows the surroundings built for this View Distance, building them first when there are none.
-    void showMargin(int margin);
-    // Adds surroundings that finished building to the lot and shows them if they are still wanted.
-    void addSurroundings(SurroundingsBuilt built);
-    // Fades the neighborhood's props and the neighbors' lot imposters shown around the lot for the
-    // camera at `eye` (in the lot's coordinates), as the game does each frame with the Fade Distance.
-    void fadeProps(const std::array<float, 3>& eye);
-    // Draws every neighbor's imposter as it is again.
-    void unfadeImposters();
-
-    // Every screen.
-    // A neighborhood, a lot or the lot's Sims are still loading. The game covers this time with its
-    // loading screens, which show the hourglass and take no clicks. The engine has no loading screens
-    // yet and keeps the last screen up instead, so it shows the hourglass and drops clicks itself.
-    bool loadingScene() const { return building_.valid() || lotBuilding_.valid() || loading(lotSimBuilding_); }
-    bool blockedWhileLoading(const pf::Event& e);
-    void tickGraphicsOptions(std::uint64_t ms);
-    void applyGraphicsOptions();
-    void applyEffectOptions();
-    void applyDisplayOptions();
-    void takeWindowSize();
-    void paceFrame();
-    app::GraphicsOptionsPanel& openGraphicsOptions() { return inLot_ ? lotUi_.graphicsOptions() : hoodUi_.graphicsOptions(); }
-    std::uint64_t frameDueNs_ = 0;  // when the next frame may start under a frame rate limit
-    int frameLimit_ = 0;
-    void startFromOptions();
-    void handleEvent(const pf::Event& e);
-    void mouseEvent(const pf::Event& e);
-    void windowClicked(int window);
-    void showSprites(double seconds, bool scene);
-    // A point of the window in the UI's pixels.
-    std::array<int, 2> toUi(float x, float y) const { return {static_cast<int>(x / uiScale_), static_cast<int>(y / uiScale_)}; }
-    void reportFrame(std::uint64_t now);
-    template <typename T>
-    std::optional<T> finished(std::future<T>& job, const char* what);
-
-    // The picture the options ask for.
-    bool takePicture();
-    void clickPanels();
-
-    ts2::content::UiData& data_;
-    ts2::render::IRenderer& renderer_;
-    const std::filesystem::path install_;
-    const MenuOptions& options_;
-    int width_, height_;  // the window's, which the scene is drawn and picked at
-    // The UI is laid out in pixels of its own, uiScale_ window pixels each, so it fills a screen
-    // uiWidth_ x uiHeight_ of them (see MenuOptions::uiScale).
-    float uiScale_;
-    int uiWidth_, uiHeight_;
-    ts2::ui::Screen screen_;
-    int menu_ = -1;
-    int menuX_ = 0, menuY_ = 0;  // where the menu is
-    int preview_ = -1;
-
-    // The main menu's neighborhood tiles, kPerPage to a page.
-    std::vector<ts2::content::NeighborhoodEntry> hoods_;
-    std::vector<int> tiles_;
-    std::vector<std::shared_future<std::vector<std::uint8_t>>> videos_;
-    std::vector<Playing> playing_;
-    int page_ = 0;
-    int pages_ = 1;
-    std::uint64_t pageShown_ = 0;
-
-    // The game's 3D assets, read in the background from the start so a neighborhood opens quickly.
-    std::shared_future<std::shared_ptr<ts2::scene::Assets>> assets_;
-    std::future<Built> building_;
-    bool inNeighborhood_ = false;
-    // The neighborhood kept while a lot is shown, to go back to it (its GPU scene too). Then the lot
-    // being built, then shown.
-    Built hood_;
-    app::Orbit hoodOrbit_;
-    std::optional<ts2::scene::HoodDrift> hoodDrift_;  // the camera's drift while mouse and keys rest
-    app::QuitBox quitBox_;  // the game's "Are you sure you want to quit?" box
-    app::BabyNameDialog babyNames_;  // the game's "Set Baby Name" dialog
-    ts2::sim::CheatProperties cheats_;  // what the cheat window's boolProp set
-    app::CheatConsole cheatConsole_{cheats_};
-    bool mouseShift_ = false;  // Shift held at the last mouse move or press
-    app::DialogBox errorBox_;  // the game's "Object Error" dialog
-    std::optional<bool> pausedBeforeErrorBox_;  // the game stops while it is open
-    std::optional<bool> pausedBeforeBabyNames_;  // the game pauses while it is open
-    // Whether the lot was paused before the quit box paused it. None when the box didn't pause it
-    // (no lot running when it opened).
-    std::optional<bool> pausedBeforeQuitBox_;
-    bool lotRan_ = false;  // time has run unpaused on this lot
-    std::future<LotBuilt> lotBuilding_;
-    ts2::scene::Scene lot_;
-    std::shared_ptr<const app::RouteModelTable> lotRouteModels_;
-    bool inLot_ = false;
-    app::LotView lotView_;
-    // The lot's Sims, run by their own scripts and posed each frame (from when the lot was shown,
-    // without a simulation).
-    std::uint64_t lotShown_ = 0;
-    // Real seconds the lot has run unpaused: the pool water's clock, as the game's.
-    double lotRealSeconds_ = 0;
-    std::future<std::unique_ptr<ts2::sim::LotSimulation>> lotSimBuilding_;  // built beside the lot's scene
-    std::unique_ptr<app::LotLife> lotLife_;
-    // What plays visual effects on the lot, kept while the lot is open. The file stays for the next lot.
-    std::unique_ptr<ts2::content::EffectsFiles> effectsFiles_;
-    std::unique_ptr<ts2::scene::EffectPlayer> lotEffectPlayer_;
-    std::unique_ptr<ts2::scene::ObjectEffects> lotEffects_;
-    std::map<std::string, int> effectImages_;  // the scene's image of each effect texture, negative for none
-    // Pictures waiting for a Sim's portrait, and a want's badge to go on it.
-    struct EffectPortrait {
-        std::int16_t neighbor = 0;
-        ts2::tga::Pixels badge;
-    };
-    std::map<std::string, EffectPortrait> effectPortraits_;
-    double lotEffectsSeconds_ = 0;
-    std::vector<ts2::scene::ParticleVertex> effectVertices_;
-    std::vector<ts2::render::ParticleBatch> effectBatches_;
-    void startLotEffects();
-    void updateLotEffects(float realSeconds);
-    void stopLotEffects();
-    void updateLotEffectConditions();
-    void doEffectCommand(const ts2::sim::EffectCommand& c);
-    bool makeEffectPicture(const ts2::sim::EffectCommand& c);
-    std::string makeEffectScore(int score);
-    std::string makeEffectWant(const ts2::swaf::Want& want);
-    ts2::scene::ObjectEffects::PlaceOf effectPlaces();
-    std::unique_ptr<app::LotDaylight> lotDaylight_;
-    app::LotLightOptions lotLight_;  // as last given to the lot's light
-    bool householdShown_ = false;
-    std::vector<std::int16_t> householdDrawn_;  // whose portraits the household shows
-    // A lot left behind: its scene and simulation are freed in the background, its GPU textures a
-    // few a frame (SDL destroys what is given back in the next frame, which took 50 ms for all).
-    std::future<void> lotFreeing_;
-    ts2::render::IRenderer::Prepared lotLeft_;
-    ts2::scene::ScenePose lotPose_;
-    std::int16_t trackedSim_ = 0;  // the Sim the camera tracks while orbit_ has a subject
-    std::vector<std::uint8_t> lotVisible_;  // the lot's instances shown this frame, for RayTrace
-    // The ground, neighbors' lots and decorations around the lot for each View Distance built while
-    // it is open (in tiles): the scene's instances [first, first + count), the first `decorations` of
-    // them the neighborhood's, and the imposters and boundary that go with them. Only the one for
-    // `margin_` shows. The game builds them anew on each change. Keeping them keeps the lot's own
-    // instances where the Sims' code knows them.
-    struct Surroundings {
-        std::size_t first = 0, count = 0, decorations = 0;
-        std::vector<ts2::scene::PaintedTerrain::ImposterPart> imposters;
-        std::optional<ts2::scene::Scene::BoundaryClip> clip;
-        // The boxes of the neighborhood's props in the lot's coordinates, for the Fade Distance.
-        // Worked out when first needed.
-        std::vector<std::optional<ts2::scene::propfade::Box>> propBoxes;
-        // The neighbors' lot imposters' boxes, by lot id, likewise.
-        std::optional<std::map<std::uint32_t, ts2::scene::propfade::Box>> imposterBoxes;
-    };
-    std::map<std::uint32_t, float> imposterAlphas_;  // the neighbors' imposters drawn faded, by lot id
-    std::map<int, Surroundings> surroundings_;
-    std::vector<ts2::scene::PaintedTerrain::ImposterPart> impostersShown(const Surroundings& around) const;
-    int margin_ = 0;
-    std::shared_ptr<const SkirtSource> skirtSource_;
-    std::future<SurroundingsBuilt> surroundingsBuilding_;
-    // The neighbors around the lot drawn as real houses, with the Lot Imposters setting: the scene's
-    // instances [first, first + count), kept after the lot's own so that the Sims' code still knows those.
-    struct NeighborHouse {
-        std::uint32_t id = 0;
-        std::size_t first = 0, count = 0;
-        std::array<float, 4> ground{};  // its lot in the neighborhood: x0, x1, y0, y1
-        ts2::scene::propfade::Box box;  // in the lot's coordinates, for the Fade Distance
-        float alpha = 1;
-    };
-    std::vector<NeighborHouse> neighborHouses_;
-    std::vector<std::array<float, 4>> neighborGrounds_;  // their lots in the neighborhood
-    std::vector<ts2::scene::LotFootprint> neighborsToBuild_;  // the farthest first
-    std::future<NeighborBuilt> neighborBuilding_;
-    std::shared_ptr<ts2::scene::Assets> neighborAssets_;
-    app::GameOptionsPanel::LotView lotViewOptions_;  // the Lot View Options as they stand
-    // The object under the mouse, highlighted while the selected Sim could use it (0: none).
-    ts2::scene::Picker lotPicker_;
-    std::uint32_t hovered_ = 0;
-    bool hoveredSim_ = false;  // the game never highlights a Sim
-    std::array<float, 3> hoveredPoint_{};  // where the mouse's ray hit it, in the scene
-    std::optional<std::array<float, 2>> hoverAt_;  // where the mouse moved to since the last frame
-    // The tip over a Sim in the world: the object the mouse last came to (a Sim or not), where the
-    // ray hit it in the scene and when its tip showed (ns).
-    std::uint32_t spotTipObject_ = 0;
-    std::array<float, 3> spotTipPoint_{};
-    std::optional<std::uint64_t> spotTipShown_;
-    // The live-mode panels over the lot. The options menu pauses the game while it's open.
-    app::LotUi lotUi_;
-    // The pie menu of the object clicked. The object stays highlighted while it is open.
-    app::PieMenuUi pieMenu_;
-    std::uint32_t pieObject_ = 0;
-    bool pausedBeforeOptions_ = false, pausedBeforeRewards_ = false;
-    float downX_ = 0, downY_ = 0;
-    std::optional<std::array<float, 2>> dragFrom_;  // where a camera drag (right button) started
-    int pressMark_ = -1;              // the square at that point
-    // A middle-button turn of the camera: where it started in the window, and the picture there.
-    std::optional<std::array<float, 2>> turnFrom_;
-    int turnMark_ = -1;
-    // The cursors for what the mouse was last over, on the lot and on the neighborhood.
-    std::uint32_t liveCursor_ = app::Cursors::kArrow;
-    std::uint32_t hoodCursor_ = app::Cursors::kArrow;
-    // A lot clicked once on the neighborhood: its card opens unless a second click comes in time.
-    std::uint32_t clickedLot_ = 0;
-    std::uint64_t clickedAt_ = 0;
-    app::Orbit orbit_;
-    // The game's Camera Rotation option set to Sims 1 Style, which turns the middle-button drag and
-    // comma and period the other way.
-    bool sims1Turn_ = false;
-    app::CameraHeight cameraHeight_;
-    // The free camera while it is on (Tab), and its settings.
-    std::optional<app::FreeCamera> freeCam_;
-    std::optional<ts2::camera::Config> freeRig_;
-    std::optional<std::array<float, 2>> freeMouse_;  // where the pointer moved to since the last frame
-    ts2::scene::Transform lotPlace_;  // where the lot shown stands in its neighborhood
-    app::NeighborhoodUi hoodUi_;
-    app::Cursors cursors_{install_, data_};
-    std::string openName_;
-    std::filesystem::path openFolder_;
-    std::size_t chosen_ = 0;
-    // A neighborhood tile clicked once, waiting for a second click, and when.
-    std::optional<std::size_t> clickedTile_;
-    std::uint64_t tileClickedAt_ = 0;
-
-    // Textures added or changed go to the GPU when a sprite draws them, and the others a few a
-    // frame: panels load many pictures they keep hidden, and making a GPU texture for each at
-    // once took a third of a second.
-    std::vector<ts2::scene::Image> staged_;
-    std::set<int> unsent_;
-    // When the neighborhood and lot being loaded were asked for, for their load times in the log.
-    std::uint64_t hoodLoadStarted_ = 0, lotLoadStarted_ = 0;
-    std::uint64_t hoodShownAt_ = 0;  // when the neighborhood was shown, the plumbobs' clock
-    std::vector<std::pair<std::size_t, ts2::scene::Transform>> plumbobPlaces_;
-    std::uint32_t enteredLot_ = 0;
-
-    bool running_ = true;
-    bool down_ = false;
-    app::ClickGate loadingGate_;  // drops clicks while a scene loads (see loadingScene)
-    std::uint64_t lastFrame_ = 0;
-    std::uint64_t lastSlowFrame_ = 0, lastTimings_ = 0;  // 0: no slow frame yet
-    // The slow steps of showing a lot (the lot, its simulation, the household's portraits) take a
-    // frame each, so no frame waits for two. A picture being taken waits for all.
-    bool stepTaken_ = false;
-    // A picture's clicks are made once, then the lot plays on for --run seconds.
-    bool uiClicked_ = false;
-    bool groundClicked_ = false;
-    bool lotHovered_ = false;
-    std::uint8_t mouseHeld_ = 0;  // one bit for each MouseButton held
-    std::optional<std::uint64_t> runStarted_;
-};
+namespace app {
 
 Game::Game(ts2::content::UiData& data, ts2::ui::Fonts& fonts, ts2::render::IRenderer& renderer, const std::filesystem::path& install,
            const MenuOptions& options)
@@ -747,6 +326,11 @@ Game::Game(ts2::content::UiData& data, ts2::ui::Fonts& fonts, ts2::render::IRend
     // picture, and Play.
     preview_ = screen_.load(kScripts, kPreview, menuX_, menuY_);
     screen_.setVisible(preview_, false);
+    description_.attach(screen_, screen_.find(preview_, kPreviewDescription), kDescriptionCharacters);
+    installedPacks_ = ts2::content::installedPacksMask(ts2::content::findProducts(install));
+    for (const auto& button : kSubHoodButtons) {
+        subHoodTips_.push_back(screen_.tip(shownChild(screen_, preview_, button.id)));
+    }
     sims1Turn_ = ts2::content::readUserProps(options.user).flag("rotateCameraSims1Mode").value_or(false);
     lotUi_.setFolders(data, install, options.user);
     hoodUi_.gameOptions().takeSettings(lotUi_.gameOptions());
@@ -754,6 +338,10 @@ Game::Game(ts2::content::UiData& data, ts2::ui::Fonts& fonts, ts2::render::IRend
     applyGraphicsOptions();
     lotUi_.graphicsOptions().setWindowSize(width_, height_);
     hoodUi_.graphicsOptions().setWindowSize(width_, height_);
+    uiPercent_ = options.uiScale;
+    for (auto* panel : {&lotUi_.graphicsOptions(), &hoodUi_.graphicsOptions()}) {
+        panel->setUiScale(uiPercent_);
+    }
     frameLimit_ = lotUi_.graphicsOptions().display().frameLimit;
     renderer_.setWaitForScreen(frameLimit_ == app::GraphicsOptionsPanel::kWaitForScreen);
     const int mostSamples = renderer_.capabilities().mostSmoothEdgeSamples;
@@ -761,6 +349,7 @@ Game::Game(ts2::content::UiData& data, ts2::ui::Fonts& fonts, ts2::render::IRend
     hoodUi_.graphicsOptions().setMostSmoothEdges(mostSamples);
     renderer_.setSmoothEdges(lotUi_.graphicsOptions().display().smoothEdges);
     renderer_.setAmbientOcclusion(ts2::content::kAmbientOcclusionStrengths[static_cast<std::size_t>(lotUi_.graphicsOptions().display().ambientOcclusion)]);
+    renderer_.setAmbientOcclusionHalfSize(lotUi_.graphicsOptions().display().occlusionHalfSize);
 }
 
 void Game::setUpMenu() {
@@ -865,9 +454,34 @@ void Game::showPage() {
 void Game::showPreview() {
     const auto& hood = hoods_[chosen_];
     screen_.setText(screen_.find(preview_, kPreviewName), hood.name);
-    screen_.setText(screen_.find(preview_, kPreviewDescription), hood.description);
+    description_.setText(screen_, hood.description.empty() ? data_.text(kNeighborhoodText, kNoDescription) : hood.description);
     if (auto picture = readImage(hood.thumbnail)) {
         screen_.setImage(screen_.find(preview_, kPreviewPicture), std::move(*picture));
+    }
+    // A pack's button greys out until the neighborhood has a sub-neighborhood of its kind from that
+    // pack. Then its tip names the neighborhood.
+    const auto ids = ts2::content::neighborhoodIds(options_.user / "Neighborhoods");
+    const std::string prefix = hood.folder.filename().string();
+    for (std::size_t b = 0; b < std::size(kSubHoodButtons); ++b) {
+        const auto& button = kSubHoodButtons[b];
+        const int window = shownChild(screen_, preview_, button.id);
+        if (window < 0 || (installedPacks_ & (1u << button.pack)) == 0) {
+            continue;
+        }
+        const bool vacation = button.type == 5;
+        const auto count = std::count_if(ids.begin(), ids.end(), [&](const auto& entry) {
+            const auto& n = entry.second;
+            const bool kind = vacation ? n.type >= 5 && n.type <= 7 : n.type == button.type;
+            return n.prefix == prefix && !n.subPrefix.empty() && kind && n.pack == button.pack;
+        });
+        screen_.setEnabled(window, count > 0);
+        if (count > 0 && b < subHoodTips_.size()) {
+            std::string tip = subHoodTips_[b];
+            if (const auto at = tip.find("%s"); at != std::string::npos) {
+                tip.replace(at, 2, hood.name);
+            }
+            screen_.setTip(window, tip);
+        }
     }
     screen_.setVisible(preview_, true);
     screen_.setModal(preview_);
@@ -905,15 +519,27 @@ void Game::playVideos() {
 void Game::menuClicked(int window, std::uint32_t id) {
     const auto tile = std::find(tiles_.begin(), tiles_.end(), screen_.parent(window));
     if (screen_.visible(preview_)) {
+        // Closing or playing keeps what the description box holds, unless it was emptied.
+        if ((id == kPreviewClose || id == kPreviewPlay) && chosen_ < hoods_.size()) {
+            if (!description_.text().empty()) {
+                hoods_[chosen_].description = description_.text();
+            }
+            description_.unfocus(screen_);
+        }
         if (id == kPreviewClose) {
             screen_.setVisible(preview_, false);
             screen_.setModal(-1);
+        } else if (id == kPreviewPlay && inLot_) {
+            screen_.setVisible(preview_, false);
+            screen_.setModal(-1);
+            closeChooser();
+            askToLeave(chosen_);
         } else if (id == kPreviewPlay) {
             openNeighborhood();
         }
-    } else if (id == kChooserClose && inNeighborhood_) {
+    } else if (id == kChooserClose && chooserOpen()) {
         closeChooser();
-    } else if (id == kChooserQuit && inNeighborhood_) {
+    } else if (id == kChooserQuit && chooserOpen()) {
         // As in the game: the chooser closes and the quit box asks.
         closeChooser();
         openQuitBox();
@@ -934,6 +560,11 @@ void Game::menuClicked(int window, std::uint32_t id) {
         const std::uint64_t now = ts2::platform::ticksNs();
         if (clickedTile_ == index && now - tileClickedAt_ <= kDoubleClickNs) {
             clickedTile_.reset();
+            if (inLot_) {
+                closeChooser();
+                askToLeave(index);
+                return;
+            }
             chosen_ = index;
             openNeighborhood();
         } else {
@@ -949,19 +580,26 @@ void Game::openNeighborhood() {
         return;
     }
     const auto folder = hoods_[chosen_].folder;
+    openHood_ = chosen_;
     openName_ = hoods_[chosen_].name;
     openFolder_ = folder;
     ts2::diag::step("opening neighborhood " + ts2::diag::utf8(folder.filename()));
     hoodLoadStarted_ = ts2::platform::ticksNs();
+    const auto highImposters = hoodUi_.gameOptions().lotView().highImposters ? imposterCache(folder) : std::filesystem::path{};
     building_ = std::async(std::launch::async, [assets = assets_, install = install_, folder, user = options_.user, seed = options_.seed,
+                                                highImposters, poolStyleSea = options_.poolStyleSea, realisticSky = app::GameOptionsPanel::savedRealisticSky(options_.user),
                                                 &renderer = renderer_] {
+        assets.get()->setRealisticSky(realisticSky);
         ts2::scene::SceneBuilder builder(*assets.get());
+        builder.setPoolStyleSea(poolStyleSea);
         Built b;
-        ts2::content::EffectsFiles effects(install);
-        b.stats = app::buildNeighborhood(builder, install, folder, effects, seed);
+        b.effects = std::make_unique<ts2::content::EffectsFiles>(install);
+        auto& effects = *b.effects;
+        b.stats = app::buildNeighborhood(builder, install, folder, effects, seed, &b.times, highImposters);
         app::addPlumbobs(builder, effects, folder, b.stats, b.plumbobs);
         b.scene = std::move(builder.scene());
         app::neighborhoodCamera(b.camera, install, b.stats);
+        b.freeRig = ts2::content::findCamera(install, "CameraManNH");
         if (const auto* file = effects.all()) {
             b.drift = ts2::scene::HoodDrift::load(*file, static_cast<std::uint32_t>(ts2::platform::ticksNs()));
             if (!b.drift) {
@@ -976,17 +614,25 @@ void Game::openNeighborhood() {
 
 // Shows a neighborhood that finished building with its panel, the menu put away.
 void Game::showNeighborhood(Built built) {
+    // The last neighborhood's effects play from its effects file, which goes with it.
+    hoodEffectPlayer_.reset();
+    // The last neighborhood's baking stops.
+    freeImposterBaker();
     hood_ = std::move(built);
     // Nothing else uses the assets now (no lot loads while a neighborhood does), so the
     // problems noted while loading the last neighborhood can go.
     assets_.get()->warnings.clear();
-    ts2::diag::info(std::format("neighborhood {} x {} tiles, {} lots, {} plants, {} decorations, built in {:.1f} s", hood_.stats.width,
-                                hood_.stats.height, hood_.stats.imposters, hood_.stats.plantsShown, hood_.stats.decorationsShown,
+    ts2::diag::info(std::format("neighborhood {} x {} tiles, {} lots, {} plants, {} decorations, {} of {} lot imposter objects, built in {:.1f} s",
+                                hood_.stats.width, hood_.stats.height, hood_.stats.imposters, hood_.stats.plantsShown,
+                                hood_.stats.decorationsShown, hood_.stats.imposterObjectsShown, hood_.stats.imposterObjects,
                                 secondsSince(hoodLoadStarted_)));
     renderer_.upload(std::move(hood_.gpu));
+    renderer_.setImposterLight(hood_.times.now().imposters);
+    startHoodEffects();
     hoodShownAt_ = ts2::platform::ticksNs();
     orbit_ = hood_.camera;
     hoodDrift_ = hood_.drift;
+    hoodFreeRig_ = std::move(hood_.freeRig);
     hoodUi_.open(openFolder_, openName_, std::move(hood_.panel));
     if (options_.bin == "families") {
         hoodUi_.showBin(app::NeighborhoodUi::Bin::Families);
@@ -1012,6 +658,7 @@ void Game::showNeighborhood(Built built) {
     }
     renderer_.setClearColor(0, 0, 0);
     inNeighborhood_ = true;
+    startImposterBaker(hoodUi_.gameOptions().lotView().highImposters);
     if (options_.lot > 0) {
         enterLot(static_cast<std::uint32_t>(options_.lot));
     } else if (options_.clickX >= 0) {
@@ -1030,16 +677,21 @@ void Game::showNeighborhood(Built built) {
     }
 }
 
-// Main Menu in the neighborhood (top bar or options) shows the neighborhood chooser over the
-// neighborhood, as the game does: no backdrop, and the "from neighborhood" buttons, Close and Quit,
-// in place of the start's Quit. Picking a neighborhood there opens it as at the start.
+// Main Menu in the neighborhood (top bar or options) or in a lot (Advanced Neighborhood Options)
+// shows the neighborhood chooser over it, as the game does: no backdrop, and the "from neighborhood"
+// buttons, Close and Quit, in place of the start's Quit. The panels under it hide until it closes.
+// Picking a neighborhood there opens it as at the start, and from a lot it first leaves the lot.
 void Game::showChooser() {
     endCameraDrag();
     screen_.setVisible(screen_.find(menu_, kBackdrop), false);
     screen_.setVisible(screen_.find(menu_, kStartButtons), false);
     screen_.setVisible(screen_.find(menu_, kNeighborhoodButtons), true);
-    hoodUi_.hideAll(true);
-    hoodUi_.showTag(0, 0, 0);
+    if (inLot_) {
+        lotUi_.hideForFreeCamera(true);
+    } else {
+        hoodUi_.hideAll(true);
+        hoodUi_.showTag(0, 0, 0);
+    }
     orbit_.keysOn = false;
     cursors_.show(app::Cursors::kArrow);
     screen_.setVisible(menu_, true);
@@ -1052,13 +704,17 @@ void Game::closeChooser() {
     clickedTile_.reset();  // a tile clicked just before has no preview to open now
     screen_.setVisible(menu_, false);
     screen_.setModal(-1);
-    hoodUi_.hideAll(false);
+    if (inLot_) {
+        lotUi_.hideForFreeCamera(false);
+    } else {
+        hoodUi_.hideAll(false);
+    }
     orbit_.keysOn = true;
 }
 
 // The quit box, with any tile click still waiting for its second click dropped, so no preview
 // opens over the box. The camera takes no input while it is open.
-void Game::openQuitBox(bool askSave) {
+void Game::openQuitBox(bool askSave, bool leaving) {
     clickedTile_.reset();
     clickedLot_ = 0;
     // The box takes the mouse, so a camera drag or turn under way ends here, as its button coming
@@ -1074,7 +730,7 @@ void Game::openQuitBox(bool askSave) {
         pausedBeforeQuitBox_ = lotLife_->paused();
         lotLife_->setPaused(true);
     }
-    quitBox_.open(screen_, data_, uiWidth_, uiHeight_, askSave);
+    quitBox_.open(screen_, data_, uiWidth_, uiHeight_, askSave, leaving);
 }
 
 // The game asks for names when a baby is born, and pauses while it asks. OK puts the speed back as it
@@ -1189,6 +845,23 @@ void Game::answerBabyNames() {
     babyNames_.close(screen_);
 }
 
+void Game::askToLeave(std::optional<std::size_t> hood) {
+    if (!lotChanged()) {
+        leaveFor(hood);
+        return;
+    }
+    leaveTo_ = hood;
+    openQuitBox(true, true);
+}
+
+void Game::leaveFor(std::optional<std::size_t> hood) {
+    leaveLot();
+    if (hood && *hood != openHood_ && *hood < hoods_.size()) {
+        chosen_ = *hood;
+        openNeighborhood();
+    }
+}
+
 void Game::closeQuitBox() {
     if (inLot_ && lotLife_ && quitBox_.isOpen() && pausedBeforeQuitBox_) {
         lotLife_->setPaused(*pausedBeforeQuitBox_);
@@ -1287,6 +960,9 @@ void Game::showLotCard(std::uint32_t lot) {
 
 // Builds a lot of the open neighborhood in the background. It shows once built.
 void Game::enterLot(std::uint32_t id) {
+    if (freeCam_ && hoodOrbitBefore_) {
+        toggleFreeCamera();
+    }
     enteredLot_ = id;
     const auto file = openFolder_ / "Lots" / (openFolder_.filename().u8string() + u8"_Lot" + std::u8string(reinterpret_cast<const char8_t*>(std::to_string(id).c_str())) + u8".package");
     ts2::diag::step(std::format("entering lot {}", id));
@@ -1306,7 +982,8 @@ void Game::enterLot(std::uint32_t id) {
     lotBuilding_ = std::async(std::launch::async, [assets = assets_, file, install = install_, footprint, hoodScene, terrainType, &renderer = renderer_,
                                                  lotViewOptions,
                                                  poolStylePonds = options_.poolStylePonds, poolStyleSea = options_.poolStyleSea,
-                                                 smoothLotSkirts = options_.smoothLotSkirts] {
+                                                 smoothLotSkirts = options_.smoothLotSkirts, realisticSky = app::GameOptionsPanel::savedRealisticSky(options_.user)] {
+        assets.get()->setRealisticSky(realisticSky);
         LotBuilt built;
         // The lot's ground heights, which the skirt meets at the lot's edges.
         std::shared_ptr<const ts2::scene::Heights> lotHeights;
@@ -1334,6 +1011,7 @@ void Game::enterLot(std::uint32_t id) {
             ts2::scene::addLot(builder, lot, file);
             built.lightState = app::savedLightingState(assets.get()->lighting(), lot);
             built.light = app::lightLot(*assets.get(), builder.scene(), lot, file, built.lightState);
+            built.imageKeys = builder.imageKeys();
             built.lot = std::move(builder.scene());
         }
         built.routeModels = app::readRouteModels(*assets.get(), file);
@@ -1348,7 +1026,7 @@ void Game::enterLot(std::uint32_t id) {
             built.camera.pitchBlend = built.camera.pitchBlendGoal = 0.15f;
             built.camera.zoomTo(built.camera.distance);
             built.camera.distanceGoal = built.camera.distance;
-            built.camera.lotKeys = true;
+            built.camera.levelKeys = built.camera.lotKeys = true;
         }
         built.freeRig = ts2::content::findCamera(install, "CameraMan");
         // Shown in its neighborhood, where its imposter was.
@@ -1374,7 +1052,7 @@ void Game::enterLot(std::uint32_t id) {
                 built.skirt = std::move(source);
             }
             built.lot = app::lotInNeighborhood(*hoodScene, std::move(built.lot), std::move(skirt), *footprint, area, &built.decorations,
-                                               &built.surroundings);
+                                               &built.surroundings, &built.firstImage);
             ts2::scene::lightLotSkirt(built.lot, ts2::content::stateTime(built.lightState) != ts2::content::StateTime::Night);
             app::placeCamera(built.camera, *footprint);
             built.place = footprint->place;
@@ -1390,6 +1068,12 @@ void Game::enterLot(std::uint32_t id) {
 void Game::showLot(LotBuilt& built) {
     endCameraDrag();
     lot_ = std::move(built.lot);
+    sharedImages_.clear();
+    for (std::size_t i = 0; i < built.imageKeys.size(); ++i) {
+        if (!built.imageKeys[i].empty() && built.firstImage + i < lot_.images.size()) {
+            sharedImages_.emplace(built.imageKeys[i], static_cast<int>(built.firstImage + i));
+        }
+    }
     lotRouteModels_ = std::move(built.routeModels);
     {
         // Imposters around the lot take the lighting state's environment colour.
@@ -1447,6 +1131,7 @@ void Game::showLot(LotBuilt& built) {
     hoodUi_.showTag(0, 0, 0);
     lotUi_.setTestingCheats(cheats_.testingCheats());
     lotUi_.open();
+    lotUi_.setNeighborhood(openName_);
     inNeighborhood_ = false;
     inLot_ = true;
 }
@@ -1466,8 +1151,10 @@ void Game::leaveLot() {
         neighborBuilding_ = {};
     }
     neighborHouses_.clear();
+    sharedImages_.clear();
     neighborGrounds_.clear();
     renderer_.setNeighborGrounds(neighborGrounds_);
+    renderer_.setImpostersLeftOut({});
     surroundings_.clear();
     skirtSource_.reset();
     unfadeImposters();
@@ -1501,12 +1188,16 @@ void Game::leaveLot() {
     spotTipShown_.reset();
     screen_.setSpotTip({});
     renderer_.setHighlight(0, 0);
-    renderer_.setImposterLight({1, 1, 1});
+    renderer_.setImposterLight(hood_.times.now().imposters);
     renderer_.setImpostersShown(true);
     orbit_ = hoodOrbit_;
     orbit_.dragSpeed = {0, 0};
     screen_.setVisible(hoodUi_.root(), true);
     inNeighborhood_ = true;
+    // Lot Imposters may have changed in the lot.
+    if (hoodUi_.gameOptions().lotView().highImposters != highImposters_) {
+        startImposterBaker(!highImposters_);
+    }
 }
 
 // The game's live-mode keys. P, Pause, ` or 0 on the number pad pause. 1, 2 and 3 pick a
@@ -1535,7 +1226,11 @@ app::LotUi::Action Game::lotKey(pf::Key key) {
 void Game::lotAction(app::LotUi::Action action) {
     using Action = app::LotUi::Action;
     if (action == Action::Neighborhood) {
-        leaveLot();
+        askToLeave(std::nullopt);
+        return;
+    }
+    if (action == Action::MainMenu) {
+        showChooser();
         return;
     }
     if (action == Action::Quit) {
@@ -1577,6 +1272,8 @@ void Game::lotAction(app::LotUi::Action action) {
     case Action::GameOptionChanged:
         sims1Turn_ = lotUi_.gameOptions().flag("rotateCameraSims1Mode", sims1Turn_);
         hoodUi_.gameOptions().takeSettings(lotUi_.gameOptions());
+        // Skies read from now on, such as the next time of day's, take the Sky chosen.
+        assets_.get()->setRealisticSky(app::GameOptionsPanel::savedRealisticSky(options_.user));
         applyLotViewOptions();
         applyNeighborHouses();
         renderer_.show(lotShown());
@@ -1818,8 +1515,32 @@ std::function<void(app::Vec3&)> Game::keepNearLot(float inset) const {
 
 // Tab (or Y) in a lot turns the free camera on, and Tab, Y or Escape off. On, the pointer hides and
 // is held in the middle of the window, where the mouse looks round from. Off, the lot camera takes
-// over from its view.
+// over from its view. In the neighborhood Tab turns its own free camera on, Tab or Escape off,
+// and the neighborhood camera comes back where it was.
 void Game::toggleFreeCamera() {
+    if (freeCam_ && hoodOrbitBefore_) {
+        freeCam_.reset();
+        freeMouse_.reset();
+        orbit_ = std::move(*hoodOrbitBefore_);
+        hoodOrbitBefore_.reset();
+        hoodUi_.hidePuck(false);
+        pf::showCursor();
+        return;
+    }
+    if (!freeCam_ && inNeighborhood_) {
+        if (!hoodFreeRig_ || !orbit_.rig) {
+            return;
+        }
+        endCameraDrag();
+        hoodOrbitBefore_ = orbit_;
+        freeCam_.emplace(*hoodFreeRig_);
+        freeCam_->enter(orbit_);
+        hoodUi_.showTag(0, 0, 0);
+        // Only the puck hides, as in the game. The top bar stays.
+        hoodUi_.hidePuck(true);
+        pf::hideCursor();
+        return;
+    }
     if (freeCam_) {
         auto toLot = [this](const app::Vec3& p) {
             float at[3] = {p[0], p[1], p[2]};
@@ -1853,6 +1574,24 @@ void Game::toggleFreeCamera() {
     // Only the pause frame stays on screen, as in the game.
     lotUi_.hideForFreeCamera(true);
     pf::hideCursor();
+}
+
+// The neighborhood free camera's ground: the terrain, or the water's surface where that is higher,
+// kept between -200 and 10000.
+std::function<float(float, float, std::array<float, 4>&, unsigned&)> Game::hoodFreeGround() const {
+    return [this](float x, float y, std::array<float, 4>&, unsigned&) {
+        const float terrain = hoodEffectTerrain_.height ? hoodEffectTerrain_.height(x, y) : hoodEffectTerrain_.waterLevel;
+        return std::clamp(std::max(terrain, hoodEffectTerrain_.waterLevel), -200.0f, 10000.0f);
+    };
+}
+
+// It stays over the neighborhood's area.
+std::function<void(app::Vec3&)> Game::hoodFreeBounds() const {
+    const float width = static_cast<float>(hood_.stats.width) * 10, depth = static_cast<float>(hood_.stats.height) * 10;
+    return [width, depth](app::Vec3& goal) {
+        goal[0] = std::clamp(goal[0], 0.0f, width);
+        goal[1] = std::clamp(goal[1], 0.0f, depth);
+    };
 }
 
 // The mouse while the free camera is on: where the pointer went, for the next frame.
@@ -1959,18 +1698,53 @@ void Game::lotMouse(const pf::Event& e, float x, float y) {
         cursors_.show(app::Cursors::kArrow);
     }
     if (const auto clicked = screen_.mouse(ix, iy, down_, static_cast<double>(ts2::platform::ticksNs()) / 1e9)) {
-        lotAction(lotUi_.clicked(*clicked));
+        if (chooserOpen()) {
+            menuClicked(*clicked, screen_.id(*clicked));
+        } else {
+            lotAction(lotUi_.clicked(*clicked));
+        }
     }
 }
 
-// The puck's camera buttons turn and zoom while held. Sims 1 Style swaps the arrows, as it does
-// comma and period.
+// The neighborhood's Day/Night Toggle: the other lighting state's terrain light map, object light
+// and imposter colour. The game saves the choice with the neighborhood. Saving isn't done yet.
+void Game::toggleNight() {
+    auto& times = hood_.times;
+    if (!times.night) {
+        return;
+    }
+    times.atNight = !times.atNight;
+    ts2::diag::step(times.atNight ? "neighborhood: night" : "neighborhood: day");
+    const auto& now = times.now();
+    if (auto& terrain = hood_.scene.terrain; terrain && terrain->columns > 1 && terrain->rows > 1) {
+        terrain->lightMap = ts2::scene::neighborhoodLightMap(terrain->columns, terrain->rows, terrain->heights, terrain->normals,
+                                                             terrain->tileSize, now.terrain);
+        renderer_.setTerrainLightMap(terrain->lightMap);
+    }
+    renderer_.setObjectLighting(now.objects);
+    renderer_.setImposterLight(now.imposters);
+    if (!now.sky.empty()) {
+        renderer_.setNeighborhoodSky(now.sky);
+    }
+    updateHoodEffectState();
+}
+
+// The lot or neighborhood puck's camera buttons turn and zoom while held. Sims 1 Style swaps the
+// arrows, as it does comma and period.
 void Game::puckCamera() {
-    using Button = app::LotUi::CameraButton;
-    const Button held = lotUi_.heldCameraButton();
-    const int turn = held == Button::RotateLeft ? -1 : held == Button::RotateRight ? 1 : 0;
+    int turn = 0;
+    if (inLot_) {
+        using Button = app::LotUi::CameraButton;
+        const Button held = lotUi_.heldCameraButton();
+        turn = held == Button::RotateLeft ? -1 : held == Button::RotateRight ? 1 : 0;
+        orbit_.puckZoom = held == Button::ZoomIn ? -1 : held == Button::ZoomOut ? 1 : 0;
+    } else {
+        using Button = app::NeighborhoodUi::CameraButton;
+        const Button held = hoodUi_.heldCameraButton();
+        turn = held == Button::RotateLeft ? -1 : held == Button::RotateRight ? 1 : 0;
+        orbit_.puckZoom = held == Button::ZoomIn ? -1 : held == Button::ZoomOut ? 1 : 0;
+    }
     orbit_.puckTurn = sims1Turn_ ? -turn : turn;
-    orbit_.puckZoom = held == Button::ZoomIn ? -1 : held == Button::ZoomOut ? 1 : 0;
 }
 
 // A frame of the lot: the camera, the object under the mouse, the Sims and what they changed.
@@ -1994,7 +1768,7 @@ void Game::updateLot(std::uint64_t now) {
     }
     lotUi_.showTracked(orbit_.subject ? trackedSim_ : 0);
     {
-        const auto eye = lotCamera().eye;
+        const auto eye = viewCamera().eye;
         float at[3] = {eye[0], eye[1], eye[2]};
         lotPlace_.rigidInverse().apply(at, true);
         lotView_.view.eyeHeight = at[2];
@@ -2058,7 +1832,7 @@ void Game::updateLot(std::uint64_t now) {
     }
     // It points at the same spot of the scene however the camera moves.
     if (spotTipShown_) {
-        const auto at = screenPoint(orbit_.camera(), width_, height_, spotTipPoint_);
+        const auto at = screenPixel(orbit_.camera(), width_, height_, spotTipPoint_);
         if (at) {
             const auto [tipX, tipY] = toUi(static_cast<float>((*at)[0]), static_cast<float>((*at)[1]));
             screen_.moveSpotTip(tipX, tipY);
@@ -2081,8 +1855,8 @@ void Game::updateLot(std::uint64_t now) {
         drawHousehold(now);
     }
     if (lotLife_) {
-        lotLife_->markOnScreen(simsInView(lot_, lotCamera(), width_, height_));
-        lotLife_->setCamera(lotCamera().eye);
+        lotLife_->markOnScreen(simsInView(lot_, viewCamera(), width_, height_));
+        lotLife_->setCamera(viewCamera().eye);
         lotLife_->update(std::min(100.0, static_cast<double>(now - lastFrame_) / 1e6), lot_);
         lotRan_ = lotRan_ || !lotLife_->paused();
         if (lotDaylight_) {
@@ -2103,215 +1877,6 @@ void Game::updateLot(std::uint64_t now) {
     if (lotLife_) {
         sendLotChanges();
     }
-}
-
-ts2::scene::ObjectEffects::PlaceOf Game::effectPlaces() {
-    // Objects count levels from 1 at the ground storey.
-    return [this](std::int16_t object, const std::string& bone) { return lotLife_->effectPlace(lot_, lotPose_, object, bone, lotView_.view.level - lotView_.ground + 1); };
-}
-
-// Scripts start effects from the simulation's first tick on.
-void Game::startLotEffects() {
-    if (!effectsFiles_) {
-        effectsFiles_ = std::make_unique<ts2::content::EffectsFiles>(install_);
-    }
-    const ts2::effects::File* file = effectsFiles_->all();
-    if (!file) {
-        return;
-    }
-    lotEffectPlayer_ = std::make_unique<ts2::scene::EffectPlayer>(*file, static_cast<std::uint32_t>(lastFrame_) | 1);
-    lotEffects_ = std::make_unique<ts2::scene::ObjectEffects>(*lotEffectPlayer_);
-    applyEffectOptions();
-    // The sea's look is chosen as a lot opens, so a change waits for the next lot.
-    renderer_.setSeaReflections(lotUi_.graphicsOptions().propOn("EffectsQuality", "enableOceanReflection"));
-    lotEffectsSeconds_ = lotLife_->seconds();
-    updateLotEffectConditions();
-    lotEffectPlayer_->update(0, 0);  // takes the state at once, so the first effects are built for it
-    lotLife_->simulation().world().setEffectCommands([this](const ts2::sim::EffectCommand& c) { doEffectCommand(c); });
-}
-
-void Game::doEffectCommand(const ts2::sim::EffectCommand& c) {
-    using Do = ts2::sim::EffectCommand::Do;
-    const auto kind = static_cast<ts2::scene::ObjectEffects::Kind>(c.kind);
-    switch (c.what) {
-    case Do::Start: {
-        std::string picture;
-        if (c.pictureNumber) {
-            picture = makeEffectScore(*c.pictureNumber);
-        } else if (c.pictureWant) {
-            picture = makeEffectWant(*c.pictureWant);
-        } else if (!c.picture.empty() && (c.pictureGuid == 0 || makeEffectPicture(c))) {
-            picture = c.picture;
-        }
-        if (c.queued) {
-            const auto now = static_cast<std::int64_t>(lotLife_->simulation().world().ticks());
-            const std::int64_t expires = std::max<std::int64_t>(now + c.queueWait, 0);
-            lotEffects_->startQueued(c.object, c.name, c.bone, c.number, c.keep, c.hard, c.queuePriority, static_cast<std::uint64_t>(expires), picture, c.firstFrame, effectPlaces());
-            break;
-        }
-        lotEffects_->start(c.object, c.name, c.bone, c.number, kind, c.keep, c.hard, effectPlaces());
-        if (!picture.empty()) {
-            lotEffects_->setPicture(c.object, c.name, c.bone, c.number, picture, c.firstFrame);
-        }
-        break;
-    }
-    case Do::StartOnce: lotEffects_->startOnce(c.object, c.name, c.bone, effectPlaces()); break;
-    case Do::Stop: lotEffects_->stop(c.object, c.name, c.bone, c.number, c.hard); break;
-    case Do::StopAll:
-        lotEffects_->stopAll(c.object, kind, c.hard);
-        if (c.clearsQueue) {
-            lotEffects_->clearQueue(c.object);
-        }
-        break;
-    }
-}
-
-// A score's picture is made the first time that score is shown, and kept under its text. Gives the picture's name.
-std::string Game::makeEffectScore(int score) {
-    constexpr const char* kFont = "HeadlineEffectTextureText";
-    const std::string text = (score < 0 ? "-" : "+") + ts2::content::groupedNumber(std::abs(score));
-    std::string name = "HeadlineEffectTextTexture_" + text;
-    if (!effectImages_.contains(name)) {
-        auto& fonts = screen_.fonts();
-        const auto& style = fonts.style(kFont);
-        auto picture = ts2::content::headlineTextPicture(fonts.draw(style, text).pixels, fonts.lineHeight(style));
-        effectImages_[name] = static_cast<int>(lot_.images.size());
-        lot_.images.push_back({picture.width, picture.height, std::move(picture.rgba)});
-        renderer_.addMaterials(lot_);
-    }
-    return name;
-}
-
-// A want's picture is made the first time it is shown and kept under its name, as an object's is. A Sim's portrait
-// comes later. Gives the picture's name, empty when the want shows nothing.
-std::string Game::makeEffectWant(const ts2::swaf::Want& want) {
-    auto shown = lotUi_.balloonWant(*lotLife_, want);
-    if (shown.name.empty() || effectImages_.contains(shown.name)) {
-        return shown.name;
-    }
-    if (shown.neighbor != 0) {
-        effectPortraits_[shown.name] = {shown.neighbor, std::move(shown.badge)};
-        return shown.name;
-    }
-    auto picture = ts2::content::wantBalloonPicture(shown.picture, shown.badge, app::LotUi::kBalloonPictureSide);
-    effectImages_[shown.name] = static_cast<int>(lot_.images.size());
-    lot_.images.push_back({picture.width, picture.height, std::move(picture.rgba)});
-    renderer_.addMaterials(lot_);
-    return shown.name;
-}
-
-// A picture of an object or a Sim gets its image the first time it is asked for, and keeps it under its name. A Sim's
-// portrait comes later, once its character file is read. False when there is no picture, so the effect keeps its own.
-bool Game::makeEffectPicture(const ts2::sim::EffectCommand& c) {
-    const auto known = effectImages_.find(c.picture);
-    if (known != effectImages_.end()) {
-        return known->second >= 0 || effectPortraits_.contains(c.picture);
-    }
-    if (c.pictureNeighbor != 0) {
-        effectPortraits_[c.picture] = {c.pictureNeighbor, {}};
-        return true;
-    }
-    int& image = effectImages_[c.picture];
-    image = -1;
-    if (auto picture = c.pictureIsMemory ? lotUi_.balloonMemoryPicture(*lotLife_, c.pictureGuid) : lotUi_.balloonObjectPicture(*lotLife_, c.pictureGuid, c.pictureIndex)) {
-        image = static_cast<int>(lot_.images.size());
-        lot_.images.push_back({picture->width, picture->height, std::move(picture->rgba)});
-        renderer_.addMaterials(lot_);
-    }
-    return image >= 0;
-}
-
-void Game::stopLotEffects() {
-    effectPortraits_.clear();
-    effectVertices_.clear();
-    effectBatches_.clear();
-    renderer_.showParticles(effectVertices_, effectBatches_);
-    lotEffects_.reset();
-    lotEffectPlayer_.reset();
-    effectImages_.clear();
-}
-
-// The level of detail goes with the camera's zoom, and the state bits say the time of day (bits 0 and 1). Bit 11 is
-// the camera being outside a room, which it is taken to be for now. Bit 13 is the season's. The bits of
-// weather are not set yet, so none of its effects play.
-void Game::updateLotEffectConditions() {
-    lotEffectPlayer_->setDetail(!freeCam_ && orbit_.rig ? ts2::camera::effectDetailAt(*orbit_.rig, orbit_.distance) : 1.0f);
-    constexpr std::uint32_t kAlways = 0x800 | 0x2000;
-    std::uint32_t time = 0x1;
-    if (lotDaylight_) {
-        using ts2::content::StateTime;
-        switch (ts2::content::stateTime(lotDaylight_->state())) {
-        case StateTime::Morning: time = 0x2; break;
-        case StateTime::Day: time = 0x1; break;
-        case StateTime::Evening: time = 0x3; break;
-        case StateTime::Night: time = 0; break;
-        }
-    }
-    lotEffectPlayer_->setState(kAlways | time);
-}
-
-// Effects follow their objects, play on and hand their sprites to the renderer.
-void Game::updateLotEffects(float realSeconds) {
-    if (!lotEffectPlayer_ || !lotLife_) {
-        return;
-    }
-    updateLotEffectConditions();
-    {
-        const auto camera = lotCamera();
-        const auto ahead = ts2::render::normalize(ts2::render::sub(camera.target, camera.eye));
-        const auto beside = ts2::render::normalize(ts2::render::cross(ahead, {0, 0, 1}));
-        const auto over = ts2::render::cross(beside, ahead);
-        lotEffectPlayer_->setCamera({camera.eye[0], camera.eye[1], camera.eye[2]}, {ahead[0], ahead[1], ahead[2]}, {over[0], over[1], over[2]});
-    }
-    lotLife_->clipEffects(lot_, [this](const ts2::sim::EffectCommand& c) { doEffectCommand(c); });
-    if (!lotLife_->paused()) {
-        lotEffects_->advanceQueues(lotLife_->simulation().world().ticks(), effectPlaces());
-    }
-    lotEffects_->follow(effectPlaces());
-    const double seconds = lotLife_->seconds();
-    lotEffectPlayer_->update(static_cast<float>(std::clamp(seconds - lotEffectsSeconds_, 0.0, 1.0)), realSeconds);
-    lotEffectsSeconds_ = seconds;
-
-    const auto camera = lotCamera();
-    const auto view = ts2::render::FrameView::make(camera, width_, height_);
-    ts2::scene::ParticleView sprites;
-    const auto towards = ts2::render::normalize(ts2::render::sub(camera.target, camera.eye));
-    const auto side = ts2::render::normalize(ts2::render::cross(towards, {0, 0, 1}));
-    sprites.forward = {towards[0], towards[1], towards[2]};
-    sprites.right = {side[0], side[1], side[2]};
-    const auto top = ts2::render::cross(side, towards);
-    sprites.up = {top[0], top[1], top[2]};
-    std::copy(view.viewProjection.m.begin(), view.viewProjection.m.end(), sprites.clip.begin());
-
-    effectVertices_.clear();
-    effectBatches_.clear();
-    bool newImages = false;
-    ts2::scene::appendEffectSprites(*lotEffectPlayer_, sprites, [&](const std::string& name) {
-        const auto [known, isNew] = effectImages_.try_emplace(name, -1);
-        const auto portrait = effectPortraits_.find(name);
-        if (portrait != effectPortraits_.end()) {
-            if (auto picture = lotUi_.balloonPortrait(*lotLife_, portrait->second.neighbor)) {
-                if (portrait->second.badge.width > 0) {
-                    *picture = ts2::content::wantBalloonPicture(*picture, portrait->second.badge, app::LotUi::kBalloonPictureSide);
-                }
-                known->second = static_cast<int>(lot_.images.size());
-                lot_.images.push_back({picture->width, picture->height, std::move(picture->rgba)});
-                newImages = true;
-                effectPortraits_.erase(portrait);
-            }
-        } else if (isNew) {
-            if (const auto image = assets_.get()->texture(name)) {
-                known->second = static_cast<int>(lot_.images.size());
-                lot_.images.push_back(*image);
-                newImages = true;
-            }
-        }
-        return known->second;
-    }, effectVertices_, effectBatches_);
-    if (newImages) {
-        renderer_.addMaterials(lot_);
-    }
-    renderer_.showParticles(effectVertices_, effectBatches_);
 }
 
 // The Sims come to life once their simulation is built.
@@ -2366,345 +1931,6 @@ void Game::drawHousehold(std::uint64_t now) {
     renderer_.show(lotShown());
     lotUi_.showHousehold(std::move(members));
     ts2::diag::step("household portraits drawn");
-}
-
-std::vector<std::uint8_t> Game::lotShown() const {
-    auto shown = ts2::scene::visibleInstances(lot_, lotView_.view);
-    const auto hide = [&](std::size_t first, std::size_t count) {
-        for (std::size_t i = first; i < first + count && i < shown.size(); ++i) {
-            shown[i] = 0;
-        }
-    };
-    for (const auto& [margin, around] : surroundings_) {
-        if (margin != margin_) {
-            hide(around.first, around.count);
-        } else if (!lotViewOptions_.decorations) {
-            hide(around.first, around.decorations);
-        }
-    }
-    if (!lotViewOptions_.realHouses) {
-        for (const NeighborHouse& house : neighborHouses_) {
-            hide(house.first, house.count);
-        }
-    }
-    return shown;
-}
-
-void Game::applyLotViewOptions() {
-    lotViewOptions_ = lotUi_.gameOptions().lotView();
-    renderer_.setImpostersShown(lotViewOptions_.neighbors);
-    if (skirtSource_) {
-        showMargin(lotViewOptions_.skirtMargin.value_or(skirtSource_->defaultMargin));
-    }
-}
-
-// With Real Houses, the nearest neighbors around the lot start to build, one at a time. Their imposters
-// show until each is ready. Each costs about 200 MB of video memory and 400 MB of memory, so only the
-// nearest are built. A house already built stays, ready to show again.
-void Game::startNeighborHouses() {
-    // No more than the renderer can leave out of the ground around the lot.
-    constexpr std::size_t kMostHouses = ts2::render::kMaxNeighborGrounds;
-    neighborsToBuild_.clear();
-    const auto around = surroundings_.find(margin_);
-    if (around == surroundings_.end() || !lotViewOptions_.realHouses) {
-        return;
-    }
-    const float x = lotPlace_.m[3], y = lotPlace_.m[7];
-    std::set<std::uint32_t> ids;
-    for (const auto& part : around->second.imposters) {
-        ids.insert(part.lot);
-    }
-    for (const auto& footprint : hood_.stats.lotFootprints) {
-        const bool built = std::any_of(neighborHouses_.begin(), neighborHouses_.end(), [&](const NeighborHouse& house) { return house.id == footprint.id; });
-        if (ids.contains(footprint.id) && !built) {
-            neighborsToBuild_.push_back(footprint);
-        }
-    }
-    const auto away = [&](const ts2::scene::LotFootprint& f) {
-        const float dx = (f.x0 + f.x1) / 2 - x, dy = (f.y0 + f.y1) / 2 - y;
-        return dx * dx + dy * dy;
-    };
-    std::sort(neighborsToBuild_.begin(), neighborsToBuild_.end(), [&](const auto& a, const auto& b) { return away(a) < away(b); });
-    const std::size_t room = kMostHouses - std::min(kMostHouses, neighborHouses_.size());
-    if (neighborsToBuild_.size() > room) {
-        neighborsToBuild_.resize(room);
-    }
-    std::reverse(neighborsToBuild_.begin(), neighborsToBuild_.end());
-    ts2::diag::info(std::format("lot view: {} neighbors to build as real houses", neighborsToBuild_.size()));
-}
-
-// The neighbors' imposters of a View Distance, less those with a real house showing.
-std::vector<ts2::scene::PaintedTerrain::ImposterPart> Game::impostersShown(const Surroundings& around) const {
-    auto parts = around.imposters;
-    if (lotViewOptions_.realHouses) {
-        std::erase_if(parts, [&](const ts2::scene::PaintedTerrain::ImposterPart& part) {
-            return std::any_of(neighborHouses_.begin(), neighborHouses_.end(), [&](const NeighborHouse& house) { return house.id == part.lot; });
-        });
-    }
-    return parts;
-}
-
-// Real Houses in force: any left to build start, and what is built shows.
-void Game::applyNeighborHouses() {
-    showNeighborHouses();
-    startNeighborHouses();
-}
-
-// The houses or their imposters show, and the ground around the lot makes room for the houses.
-void Game::showNeighborHouses() {
-    const auto around = surroundings_.find(margin_);
-    if (lot_.terrain && around != surroundings_.end()) {
-        lot_.terrain->imposters = impostersShown(around->second);
-        for (const auto& [lot, alpha] : imposterAlphas_) {
-            renderer_.setImposterAlpha(lot, 1);
-        }
-        imposterAlphas_.clear();
-        renderer_.setSurroundings(lot_);
-    }
-    neighborGrounds_.clear();
-    for (const NeighborHouse& house : neighborHouses_) {
-        if (lotViewOptions_.realHouses) {
-            neighborGrounds_.push_back(house.ground);
-        }
-    }
-    renderer_.setNeighborGrounds(neighborGrounds_);
-}
-
-void Game::buildNextNeighborHouse() {
-    if (!inLot_ || neighborsToBuild_.empty() || neighborBuilding_.valid()) {
-        return;
-    }
-    const std::uint32_t id = neighborsToBuild_.back().id;
-    const auto file = openFolder_ / "Lots" / (openFolder_.filename().u8string() + u8"_Lot" + std::u8string(reinterpret_cast<const char8_t*>(std::to_string(id).c_str())) + u8".package");
-    neighborBuilding_ = std::async(std::launch::async, [install = install_, assets = neighborAssets_, file, id]() mutable {
-        NeighborBuilt built;
-        built.id = id;
-        try {
-            built.assets = assets ? std::move(assets) : std::make_shared<ts2::scene::Assets>(install);
-            built.scene = neighborHouse(*built.assets, file);
-        } catch (const std::exception& ex) {
-            ts2::diag::error(std::format("couldn't build neighbor's house, lot {}: {}", id, ex.what()));
-            built.failed = true;
-        }
-        return built;
-    });
-}
-
-void Game::addNeighborHouse(NeighborBuilt built) {
-    neighborAssets_ = std::move(built.assets);
-    const auto where = std::find_if(neighborsToBuild_.begin(), neighborsToBuild_.end(), [&](const ts2::scene::LotFootprint& f) { return f.id == built.id; });
-    if (!inLot_ || where == neighborsToBuild_.end()) {
-        return;
-    }
-    const ts2::scene::LotFootprint footprint = *where;
-    neighborsToBuild_.erase(where);
-    if (built.failed) {
-        return;
-    }
-    NeighborHouse house;
-    house.id = footprint.id;
-    house.first = lot_.instances.size();
-    house.count = built.scene.instances.size();
-    const std::size_t firstImage = lot_.images.size();
-    app::appendScene(lot_, std::move(built.scene), footprint.place);
-    renderer_.addMaterials(lot_);
-    renderer_.addMeshes(lot_);
-    for (std::size_t i = house.first; i < house.first + house.count; ++i) {
-        renderer_.setInstance(lot_, i);
-    }
-    // The pictures now on the GPU are never read again, unlike the lot's own light maps.
-    for (std::size_t i = firstImage; i < lot_.images.size(); ++i) {
-        lot_.images[i].rgba = {};
-        lot_.images[i].smallerLevels = {};
-    }
-    house.ground = {footprint.x0, footprint.x1, footprint.y0, footprint.y1};
-    const ts2::scene::Transform toLot = lotPlace_.rigidInverse();
-    float low[3] = {footprint.x0, footprint.y0, footprint.z}, high[3] = {footprint.x1, footprint.y1, footprint.top};
-    toLot.apply(low, true);
-    toLot.apply(high, true);
-    for (std::size_t c = 0; c < 3; ++c) {
-        house.box.low[c] = std::min(low[c], high[c]);
-        house.box.high[c] = std::max(low[c], high[c]);
-    }
-    neighborHouses_.push_back(house);
-    showNeighborHouses();
-    renderer_.show(lotShown());
-    ts2::diag::info(std::format("lot view: lot {} shows as a real house ({} instances)", footprint.id, house.count));
-}
-
-// A house between the camera and the lot fades as its imposter would.
-void Game::fadeNeighborHouses(const std::array<float, 3>& eye) {
-    namespace propfade = ts2::scene::propfade;
-    const float fade = lotViewOptions_.fadeSquared;
-    const auto reach = fade > 0 ? propfade::reach(eye, lot_.lotSize) : std::nullopt;
-    for (NeighborHouse& house : neighborHouses_) {
-        const float alpha = reach ? propfade::imposterAlpha(house.box, eye, *reach, fade) : 1.0f;
-        if (alpha == house.alpha) {
-            continue;
-        }
-        house.alpha = alpha;
-        const std::optional<std::array<float, 4>> color = alpha == 1.0f ? std::nullopt : std::optional(std::array<float, 4>{1, 1, 1, alpha});
-        for (std::size_t i = house.first; i < house.first + house.count && i < lot_.instances.size(); ++i) {
-            lot_.instances[i].shapeColor = color;
-            renderer_.setShapeColor(i, color);
-        }
-    }
-}
-
-void Game::showMargin(int margin) {
-    if (margin == margin_ || !skirtSource_) {
-        return;
-    }
-    const auto built = surroundings_.find(margin);
-    if (built == surroundings_.end()) {
-        // One build at a time. The one that finishes looks for the margin wanted then.
-        if (!surroundingsBuilding_.valid()) {
-            surroundingsBuilding_ = std::async(std::launch::async, [source = skirtSource_, margin] {
-                auto [skirt, area] = makeSkirt(*source, margin);
-                SurroundingsBuilt out;
-                out.margin = margin;
-                out.scene = app::lotInNeighborhood(*source->hood, ts2::scene::Scene{}, std::move(skirt), source->footprint, area, &out.decorations);
-                return out;
-            });
-        }
-        return;
-    }
-    margin_ = margin;
-    if (lot_.terrain) {
-        lot_.terrain->imposters = impostersShown(built->second);
-    }
-    lot_.clip = built->second.clip;
-    renderer_.setSurroundings(lot_);
-}
-
-void Game::addSurroundings(SurroundingsBuilt built) {
-    if (!inLot_ || !skirtSource_ || surroundings_.contains(built.margin)) {
-        return;
-    }
-    Surroundings around;
-    around.first = lot_.instances.size();
-    around.count = built.scene.instances.size();
-    around.decorations = built.decorations;
-    if (built.scene.terrain) {
-        around.imposters = std::move(built.scene.terrain->imposters);
-    }
-    around.clip = built.scene.clip;
-    app::appendScene(lot_, std::move(built.scene), ts2::scene::Transform{});
-    // Lit for the time of day the lot is lit for now, as the rest of its skirt.
-    const bool day = !lotDaylight_ || ts2::content::stateTime(lotDaylight_->state()) != ts2::content::StateTime::Night;
-    ts2::scene::lightLotSkirt(lot_, day);
-    ts2::scene::poolwater::lightPoolWater(lot_, day);
-    renderer_.addMaterials(lot_);
-    renderer_.addMeshes(lot_);
-    for (std::size_t i = around.first; i < around.first + around.count; ++i) {
-        renderer_.setInstance(lot_, i);
-        lotPicker_.update(lot_, i);
-    }
-    ts2::diag::info(std::format("lot view: the ground {} tiles around the lot built ({} instances)", built.margin, around.count));
-    surroundings_.emplace(built.margin, std::move(around));
-    showMargin(lotViewOptions_.skirtMargin.value_or(skirtSource_->defaultMargin));
-}
-
-void Game::fadeProps(const std::array<float, 3>& eye) {
-    namespace propfade = ts2::scene::propfade;
-    fadeNeighborHouses(eye);
-    const auto around = surroundings_.find(margin_);
-    if (around == surroundings_.end()) {
-        return;
-    }
-    Surroundings& shown = around->second;
-    if (shown.propBoxes.size() != shown.decorations) {
-        const ts2::scene::Transform toLot = lotPlace_.rigidInverse();
-        // The lot's tiles in the neighborhood. Its record places it on whole tiles.
-        std::array<int, 4> lotTiles{};
-        if (skirtSource_) {
-            const auto& f = skirtSource_->footprint;
-            lotTiles = {static_cast<int>(std::lround(f.x0 / 10)), static_cast<int>(std::lround(f.y0 / 10)), static_cast<int>(std::lround(f.x1 / 10)),
-                        static_cast<int>(std::lround(f.y1 / 10))};
-        }
-        // Only the plants and decorations the game puts on its fade list get a box (see
-        // fadesInLotView), and the rest are drawn as they are. Whether the game fades bridges is not
-        // known yet, so they don't fade.
-        shown.propBoxes.clear();
-        for (std::size_t i = shown.first; i < shown.first + shown.decorations; ++i) {
-            const auto* instance = i < lot_.instances.size() ? &lot_.instances[i] : nullptr;
-            std::optional<propfade::Box> box;
-            if (skirtSource_ && instance && instance->ground && instance->mesh >= 0 && static_cast<std::size_t>(instance->mesh) < lot_.meshes.size()) {
-                box = propfade::placedBox(lot_.meshes[static_cast<std::size_t>(instance->mesh)], toLot * instance->transform);
-                if (box && !propfade::fadesInLotView(*box, propfade::groundTiles(*instance->ground), lotTiles)) {
-                    box.reset();
-                }
-            }
-            shown.propBoxes.push_back(box);
-        }
-    }
-    // With the Fade Distance off, or the camera over the lot, every prop is drawn as it is.
-    const float fade = lotViewOptions_.fadeSquared;
-    const auto reach = fade > 0 ? propfade::reach(eye, lot_.lotSize) : std::nullopt;
-    for (std::size_t k = 0; k < shown.propBoxes.size(); ++k) {
-        std::optional<float> alpha = 1.0f;
-        if (reach && shown.propBoxes[k]) {
-            alpha = propfade::alpha(*shown.propBoxes[k], eye, *reach, fade);
-        }
-        if (!alpha) {
-            continue;
-        }
-        const std::optional<std::array<float, 4>> color =
-            *alpha == 1.0f ? std::nullopt : std::optional(std::array<float, 4>{1, 1, 1, *alpha});
-        const std::size_t i = shown.first + k;
-        if (i < lot_.instances.size() && lot_.instances[i].shapeColor != color) {
-            lot_.instances[i].shapeColor = color;
-            renderer_.setShapeColor(i, color);
-        }
-    }
-
-    // The neighbors' imposters: each a box around all of its parts, its ground among them.
-    if (!shown.imposterBoxes) {
-        const ts2::scene::Transform toLot = lotPlace_.rigidInverse();
-        constexpr std::size_t kVertexFloats = 7;  // x, y, z, u, v, then the second set's u, v
-        auto& boxes = shown.imposterBoxes.emplace();
-        for (const auto& part : shown.imposters) {
-            for (std::size_t v = 0; v + 2 < part.vertices.size(); v += kVertexFloats) {
-                float at[3] = {part.vertices[v], part.vertices[v + 1], part.vertices[v + 2]};
-                if (!std::isfinite(at[0]) || !std::isfinite(at[1]) || !std::isfinite(at[2])) {
-                    continue;
-                }
-                toLot.apply(at, true);
-                const auto [it, added] = boxes.try_emplace(part.lot, propfade::Box{{at[0], at[1], at[2]}, {at[0], at[1], at[2]}});
-                for (std::size_t c = 0; c < 3 && !added; ++c) {
-                    it->second.low[c] = std::min(it->second.low[c], at[c]);
-                    it->second.high[c] = std::max(it->second.high[c], at[c]);
-                }
-            }
-        }
-    }
-    std::map<std::uint32_t, float> alphas;
-    if (reach) {
-        for (const auto& [lot, box] : *shown.imposterBoxes) {
-            if (const float a = propfade::imposterAlpha(box, eye, *reach, fade); a != 1.0f) {
-                alphas.emplace(lot, a);
-            }
-        }
-    }
-    for (const auto& [lot, a] : imposterAlphas_) {
-        if (!alphas.contains(lot)) {
-            renderer_.setImposterAlpha(lot, 1);
-        }
-    }
-    for (const auto& [lot, a] : alphas) {
-        const auto was = imposterAlphas_.find(lot);
-        if (was == imposterAlphas_.end() || was->second != a) {
-            renderer_.setImposterAlpha(lot, a);
-        }
-    }
-    imposterAlphas_ = std::move(alphas);
-}
-
-void Game::unfadeImposters() {
-    for (const auto& [lot, a] : imposterAlphas_) {
-        renderer_.setImposterAlpha(lot, 1);
-    }
-    imposterAlphas_.clear();
 }
 
 // What the Sims changed on the lot this frame goes to the GPU and the picker.
@@ -2825,8 +2051,12 @@ void Game::run() {
         }
         if (inLot_) {
             updateLot(now);
+        } else if (inNeighborhood_ && freeCam_) {
+            freeCameraLook();
+            freeCam_->run(std::min(0.1f, static_cast<float>(now - lastFrame_) / 1e9f), hoodFreeGround(), hoodFreeBounds());
         } else if (inNeighborhood_) {
             // A picture is taken without the drift, so the same view gives the same picture.
+            puckCamera();
             orbit_.keysTaken = cheatConsole_.takesKeys();
             orbit_.gamePixel = pf::firstWindowDisplayScale();
             app::orbitStep(orbit_, std::min(0.1f, static_cast<float>(now - lastFrame_) / 1e9f), width_, height_, [this] {
@@ -2834,17 +2064,26 @@ void Game::run() {
                     app::applyDrift(orbit_, hoodDrift_->step(orbit_.target, 1.0f / 120));
                 }
             });
-            showLotTag();
+        }
+        if (inNeighborhood_) {
+            if (!freeCam_) {
+                showLotTag();
+            }
             if (clickedLot_ != 0 && now - clickedAt_ > kDoubleClickNs) {
                 showLotCard(clickedLot_);
                 clickedLot_ = 0;
             }
             renderer_.setTime(static_cast<float>(static_cast<double>(now) / 1e9));
             placePlumbobs(now);
+            updateHoodEffects(std::min(0.1f, static_cast<float>(now - lastFrame_) / 1e9f));
+            stepImposterBaker();
         }
-        // The chooser's tiles play their videos over the neighborhood too.
-        if (!inLot_ && (!inNeighborhood_ || chooserOpen())) {
+        // The chooser's tiles play their videos over the neighborhood and over a lot too.
+        if (chooserOpen() || (!inLot_ && !inNeighborhood_)) {
             playVideos();
+        }
+        if (screen_.visible(preview_)) {
+            description_.tick(screen_, ts2::platform::ticksNs() / 1'000'000);
         }
         lastFrame_ = now;
         showSprites(static_cast<double>(ts2::platform::ticksNs()) / 1e9, inNeighborhood_ || inLot_);
@@ -2854,61 +2093,23 @@ void Game::run() {
             if (takePicture()) {
                 running_ = false;
             }
-        } else if (!renderer_.draw(inLot_ ? lotCamera() : inNeighborhood_ ? orbit_.camera() : ts2::render::Camera{})) {
+        } else if (!renderer_.draw(inLot_ || inNeighborhood_ ? viewCamera() : ts2::render::Camera{})) {
             ts2::platform::delayMs(16);
         }
         paceFrame();
     }
 }
 
-// The keep-these-settings box counts down wherever it is open, and may put the settings back.
-void Game::tickGraphicsOptions(std::uint64_t ms) {
-    auto& lot = lotUi_.graphicsOptions();
-    auto& hood = hoodUi_.graphicsOptions();
-    lot.tick(ms);
-    hood.tick(ms);
-    if (lot.takeChanged()) {
-        hood.takeSettings(lot);
-        applyGraphicsOptions();
-        applyDisplayOptions();
-    }
-    if (hood.takeChanged()) {
-        lot.takeSettings(hood);
-        applyGraphicsOptions();
-        applyDisplayOptions();
-    }
-}
-
-// Puts the display choices in force to work, once after they change.
-void Game::applyDisplayOptions() {
-    auto& lot = lotUi_.graphicsOptions();
-    auto& hood = hoodUi_.graphicsOptions();
-    const bool lotChanged = lot.takeDisplayChanged(), hoodChanged = hood.takeDisplayChanged();
-    if (!lotChanged && !hoodChanged) {
-        return;
-    }
-    const auto display = (lotChanged ? lot : hood).display();
-    ts2::platform::setFirstWindowFullscreen(display.fullscreen);
-    if (!display.fullscreen) {
-        ts2::platform::resizeFirstWindow(display.width, display.height);
-    }
-    takeWindowSize();
-    frameLimit_ = display.frameLimit;
-    renderer_.setWaitForScreen(frameLimit_ == app::GraphicsOptionsPanel::kWaitForScreen);
-    renderer_.setSmoothEdges(display.smoothEdges);
-    renderer_.setAmbientOcclusion(ts2::content::kAmbientOcclusionStrengths[static_cast<std::size_t>(display.ambientOcclusion)]);
-}
-
 // Lays the game out for the window's size when it has changed.
-void Game::takeWindowSize() {
+void Game::takeWindowSize(bool force) {
     int width = 0, height = 0;
     ts2::platform::firstWindowSize(width, height);
-    if (width <= 0 || height <= 0 || (width == width_ && height == height_)) {
+    if (width <= 0 || height <= 0 || (!force && width == width_ && height == height_)) {
         return;
     }
     width_ = width;
     height_ = height;
-    uiScale_ = uiScaleFor(options_.uiScale, width_, height_);
+    uiScale_ = uiScaleFor(uiPercent_, width_, height_);
     uiWidth_ = static_cast<int>(static_cast<float>(width_) / uiScale_);
     uiHeight_ = static_cast<int>(static_cast<float>(height_) / uiScale_);
     screen_.setSize(uiWidth_, uiHeight_);
@@ -2923,53 +2124,6 @@ void Game::takeWindowSize() {
     for (auto* panel : {&lotUi_.graphicsOptions(), &hoodUi_.graphicsOptions()}) {
         panel->setWindowSize(width_, height_);
         panel->centreBox();
-    }
-}
-
-// Waits out what is left of the frame under a frame rate limit.
-void Game::paceFrame() {
-    if (frameLimit_ <= 0) {
-        return;
-    }
-    const std::uint64_t now = ts2::platform::ticksNs();
-    if (frameDueNs_ > now) {
-        // The last millisecond is waited in a spin, as a sleep may overshoot it.
-        const std::uint64_t left = frameDueNs_ - now;
-        if (left > 2'000'000) {
-            ts2::platform::delayMs(static_cast<std::uint32_t>(left / 1'000'000 - 1));
-        }
-        while (ts2::platform::ticksNs() < frameDueNs_) {
-        }
-    }
-    frameDueNs_ = std::max(frameDueNs_, now) + 1'000'000'000ull / static_cast<std::uint64_t>(frameLimit_);
-}
-
-// Graphic Effects: which of an effect's versions play, and how many particles they try to stay under.
-void Game::applyEffectOptions() {
-    constexpr int kHighestLevel = 3, kMostParticles = 10000;
-    if (lotEffectPlayer_) {
-        const auto& graphics = lotUi_.graphicsOptions();
-        lotEffectPlayer_->setLevel(static_cast<std::uint16_t>(std::max(graphics.propNumber("EffectsQuality", "effectPriorityLevel", kHighestLevel), 0)));
-        lotEffectPlayer_->setParticleTarget(static_cast<std::uint32_t>(std::max(graphics.propNumber("EffectsQuality", "maxParticlesTarget", kMostParticles), 0)));
-    }
-}
-
-// The Graphics options in force, unless the command line turned a feature off.
-void Game::applyGraphicsOptions() {
-    const auto& graphics = lotUi_.graphicsOptions();
-    applyEffectOptions();
-    renderer_.setBumpMapping(options_.bumpMapping && graphics.propOn("MaterialDetail", "bumpMapping"));
-    renderer_.setFloorAndWallNormalMapping(options_.wallBumps && graphics.propOn("LightingQuality", "floorAndWallNormalMapping"));
-    renderer_.setSpecularHighlights(graphics.propOn("LightingQuality", "specHighlights"));
-    renderer_.setShadowOptions({graphics.propOn("Shadows", "simShadows"), graphics.propOn("Shadows", "objectShadows"), graphics.propOn("Shadows", "guob")});
-    renderer_.setReflections(graphics.propOn("Reflection", "reflectionWithExtraViewer"));
-    const app::LotLightOptions light{graphics.propOn("Shadows", "heightMapShadows"), graphics.propOn("LightingQuality", "portalLighting")};
-    if (light.sunShadow != lotLight_.sunShadow || light.portals != lotLight_.portals) {
-        lotLight_ = light;
-        app::setLotLightOptions(light);
-        if (lotDaylight_) {
-            lotDaylight_->lightAgain();
-        }
     }
 }
 
@@ -3077,6 +2231,43 @@ void Game::handleEvent(const pf::Event& e) {
         }
         return;
     }
+    // The neighborhood preview: its description box takes the mouse on it and the keyboard once
+    // clicked, and, as in the game, Enter plays and Escape closes.
+    if (screen_.visible(preview_) && !quitBox_.isOpen()) {
+        float mx = 0, my = 0;
+        pf::mousePosition(mx, my);
+        const auto [ux, uy] = toUi(mx, my);
+        const bool left = e.button == pf::MouseButton::Left;
+        if (e.type == pf::Event::Type::MouseDown && left && description_.mouseDown(screen_, ux, uy, ts2::platform::ticksNs() / 1'000'000)) {
+            return;
+        }
+        if (e.type == pf::Event::Type::MouseMotion) {
+            const bool held = description_.holdsMouse();
+            description_.mouseMove(screen_, ux, uy);
+            if (held) {
+                return;
+            }
+        }
+        if (e.type == pf::Event::Type::MouseUp && left) {
+            description_.mouseUp(screen_, ux, uy);
+        }
+        if (e.type == pf::Event::Type::MouseWheel && description_.wheel(screen_, ux, uy, static_cast<int>(std::lround(e.wheel * 120)))) {
+            return;
+        }
+        if (e.type == pf::Event::Type::KeyDown && !e.repeat && (e.key == pf::Key::Return || e.key == pf::Key::Escape)) {
+            const std::uint32_t id = e.key == pf::Key::Return ? kPreviewPlay : kPreviewClose;
+            menuClicked(screen_.findShown(preview_, id), id);
+            return;
+        }
+        if (description_.focused() && (e.type == pf::Event::Type::Text || e.type == pf::Event::Type::KeyDown)) {
+            if (e.type == pf::Event::Type::Text) {
+                description_.type(screen_, e.text);
+            } else {
+                description_.key(screen_, e.key);
+            }
+            return;
+        }
+    }
     // The naming dialog takes the keyboard while it is open. Keys let go still stop the camera's
     // turn above and the free camera's moves, so none goes on after the dialog.
     if (babyNames_.isOpen() && e.type != pf::Event::Type::Quit && e.type != pf::Event::Type::MouseMotion &&
@@ -3090,8 +2281,10 @@ void Game::handleEvent(const pf::Event& e) {
         }
         return;
     }
-    const bool freeToggle = e.type == pf::Event::Type::KeyDown && !e.repeat && inLot_ && !quitBox_.isOpen() &&
-                            (e.scancode == pf::Key::Tab || e.scancode == pf::Key::Y || (freeCam_ && e.scancode == pf::Key::Escape));
+    // The neighborhood has no Y for its free camera.
+    const bool freeToggle = e.type == pf::Event::Type::KeyDown && !e.repeat && !quitBox_.isOpen() &&
+                            ((inLot_ && (e.scancode == pf::Key::Tab || e.scancode == pf::Key::Y || (freeCam_ && e.scancode == pf::Key::Escape))) ||
+                             (inNeighborhood_ && !neighborhoodCovered() && (e.scancode == pf::Key::Tab || (freeCam_ && e.scancode == pf::Key::Escape))));
     if (freeToggle) {
         toggleFreeCamera();
     } else if (freeCam_ && (e.type == pf::Event::Type::KeyDown || e.type == pf::Event::Type::KeyUp) &&
@@ -3117,13 +2310,21 @@ void Game::handleEvent(const pf::Event& e) {
         }
     } else if (e.type == pf::Event::Type::KeyDown && !e.repeat && inNeighborhood_ && !neighborhoodCovered() && e.key == pf::Key::Q) {
         openQuitBox();  // Q asks to quit in the neighborhood too
+    } else if (e.type == pf::Event::Type::KeyDown && !e.repeat && inNeighborhood_ && !neighborhoodCovered() && e.key == pf::Key::L) {
+        toggleNight();
+    } else if (e.type == pf::Event::Type::KeyDown && inNeighborhood_ && !neighborhoodCovered() &&
+               (key == pf::Key::Comma || key == pf::Key::Period || key == pf::Key::Z || key == pf::Key::X)) {
+        // The neighborhood camera's turn and zoom keys work as the lot camera's.
+        if (!e.repeat || (key != pf::Key::Comma && key != pf::Key::Period)) {
+            lotView_.key(key, orbit_);
+        }
     } else if (e.type == pf::Event::Type::KeyDown && inLot_) {
         if (const auto action = lotKey(e.key); action != app::LotUi::Action::None) {
             lotAction(action);
         } else if (!e.repeat || (key != pf::Key::Comma && key != pf::Key::Period)) {
             lotView_.key(key, orbit_);
         }
-    } else if (e.type == pf::Event::Type::MouseWheel && (inNeighborhood_ || inLot_) && !neighborhoodCovered()) {
+    } else if (e.type == pf::Event::Type::MouseWheel && (inNeighborhood_ || inLot_) && !neighborhoodCovered() && !(inNeighborhood_ && freeCam_)) {
         app::orbitEvent(orbit_, e);
     } else if (e.type == pf::Event::Type::MouseMotion || e.type == pf::Event::Type::MouseDown || e.type == pf::Event::Type::MouseUp) {
         mouseEvent(e);
@@ -3131,6 +2332,11 @@ void Game::handleEvent(const pf::Event& e) {
 }
 
 void Game::mouseEvent(const pf::Event& e) {
+    // The neighborhood's free camera takes the mouse: nothing is clicked or dragged meanwhile.
+    if (inNeighborhood_ && freeCam_) {
+        freeCameraMouse(e);
+        return;
+    }
     float x = 0, y = 0;
     pf::mousePosition(x, y);
     if (e.type == pf::Event::Type::MouseDown && e.button == pf::MouseButton::Left) {
@@ -3174,7 +2380,16 @@ void Game::windowClicked(int window) {
     if (const auto answer = quitBox_.clicked(screen_, window)) {
         // On the save question No quits too, and Yes saves first in the game. Saving isn't done yet.
         const bool quit = *answer == app::QuitBox::Answer::Yes || (*answer == app::QuitBox::Answer::No && quitBox_.asksSave());
+        const bool leaving = quitBox_.leaving();
         closeQuitBox();
+        if (leaving) {
+            // The same for leaving the lot: Yes and No leave, Cancel stays.
+            if (quit && inLot_) {
+                leaveFor(leaveTo_);
+            }
+            leaveTo_.reset();
+            return;
+        }
         if (quit) {
             ts2::diag::step("quitting (quit box)");
             running_ = false;
@@ -3188,6 +2403,8 @@ void Game::windowClicked(int window) {
         const auto action = hoodUi_.clicked(window);
         if (action == app::NeighborhoodUi::Action::Quit) {
             openQuitBox();
+        } else if (action == app::NeighborhoodUi::Action::DayNight) {
+            toggleNight();
         } else if (action == app::NeighborhoodUi::Action::GraphicsOptionChanged) {
             lotUi_.graphicsOptions().takeSettings(hoodUi_.graphicsOptions());
             applyGraphicsOptions();
@@ -3196,6 +2413,10 @@ void Game::windowClicked(int window) {
             // A lot reads the Lot View Options when it opens. Camera Rotation turns the camera the new way at once.
             lotUi_.gameOptions().takeSettings(hoodUi_.gameOptions());
             sims1Turn_ = lotUi_.gameOptions().flag("rotateCameraSims1Mode", sims1Turn_);
+            assets_.get()->setRealisticSky(app::GameOptionsPanel::savedRealisticSky(options_.user));
+            if (hoodUi_.gameOptions().lotView().highImposters != highImposters_) {
+                startImposterBaker(!highImposters_);
+            }
         } else if (action == app::NeighborhoodUi::Action::MainMenu && !lotBuilding_.valid()) {
             showChooser();
         } else if (action == app::NeighborhoodUi::Action::EnterLot && !lotBuilding_.valid() && !loading(lotSimBuilding_)) {
@@ -3316,13 +2537,22 @@ bool Game::takePicture() {
         }
         showSprites(static_cast<double>(ts2::platform::ticksNs()) / 1e9, true);
     }
-    if (inLot_ && options_.runSeconds > 0) {
+    // The asked view holds while the scene runs, so effects turned to the camera face it in the picture.
+    if (options_.view) {
+        orbit_.yaw = orbit_.yawGoal = (*options_.view)[0];
+        orbit_.pitch = (*options_.view)[1];
+        orbit_.distance = (*options_.view)[2];
+        orbit_.previous.reset();  // drawn exactly there, not blended from the last step
+    }
+    if ((inLot_ || inNeighborhood_) && options_.runSeconds > 0) {
         if (!runStarted_) {
             runStarted_ = ts2::platform::ticksNs();
         }
         if (secondsSince(*runStarted_) < options_.runSeconds) {
             return false;
         }
+    }
+    if (inLot_ && options_.runSeconds > 0) {
         // The mouse rests where it was asked to again, as if for a second, so tips of what the
         // lot shows by now are in the picture.
         const double nowSeconds = static_cast<double>(ts2::platform::ticksNs()) / 1e9;
@@ -3335,18 +2565,12 @@ bool Game::takePicture() {
         }
         showSprites(nowSeconds, true);
     }
-    if (options_.view) {
-        orbit_.yaw = orbit_.yawGoal = (*options_.view)[0];
-        orbit_.pitch = (*options_.view)[1];
-        orbit_.distance = (*options_.view)[2];
-        orbit_.previous.reset();  // drawn exactly there, not blended from the last step
-    }
     // The water's ripples and the plumbobs move with time: a picture shows them at time 0, so it repeats.
     renderer_.setTime(0);
     if (inNeighborhood_) {
         placePlumbobs(hoodShownAt_);
     }
-    if (!renderer_.drawToFile(orbit_.camera(), static_cast<unsigned>(width_), static_cast<unsigned>(height_), options_.shot)) {
+    if (!renderer_.drawToFile(viewCamera(), static_cast<unsigned>(width_), static_cast<unsigned>(height_), options_.shot)) {
         throw std::runtime_error("couldn't save the picture");
     }
     ts2::diag::info("wrote " + ts2::diag::utf8(options_.shot));
@@ -3368,7 +2592,13 @@ void Game::clickPanels() {
         } else {
             screen_.mouse(cx, cy, true, 0);
             if (const auto clicked = screen_.mouse(cx, cy, false, 0)) {
-                lotAction(lotUi_.clicked(*clicked));
+                if (quitBox_.isOpen()) {
+                    windowClicked(*clicked);
+                } else if (chooserOpen()) {
+                    menuClicked(*clicked, screen_.id(*clicked));
+                } else {
+                    lotAction(lotUi_.clicked(*clicked));
+                }
             }
             if (lotLife_) {
                 lotUi_.mouseButton(cx, cy, true, *lotLife_);
@@ -3384,7 +2614,7 @@ void Game::clickPanels() {
     }
 }
 
-} // namespace
+} // namespace app
 
 int runMenu(const std::filesystem::path& install, const std::filesystem::path& shaders, const MenuOptions& options) {
     ts2::diag::info("loading the game's UI");
@@ -3416,6 +2646,9 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
         // Unless told otherwise, the window opens as the Graphics options last left it.
         if (options.shot.empty()) {
             const auto saved = app::GraphicsOptionsPanel::savedDisplay(options.user);
+            if (!options.uiScaleGiven) {
+                sized.uiScale = saved.uiScale;
+            }
             if (saved.fullscreen) {
                 ts2::platform::setFirstWindowFullscreen(true);
             } else if (saved.width > 0 && !options.sizeGiven && !options.fitScreen) {
@@ -3434,7 +2667,7 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
         // What shows around the menu: the game's dark blue (as the game shows it).
         renderer.setClearColor(1 / 255.f, 35 / 255.f, 62 / 255.f);
         {
-            Game game(data, fonts, renderer, install, sized);
+            app::Game game(data, fonts, renderer, install, sized);
             game.run();
             // Loads still running are waited for as the game goes. The window goes first so that
             // quitting doesn't look frozen meanwhile. Normal closing takes a second or two.

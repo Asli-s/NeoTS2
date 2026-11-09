@@ -28,6 +28,9 @@ constexpr std::uint32_t kScripts = 0xA99D8A11;
 constexpr std::uint32_t kPanel = 0x49000000, kMainMenu = 0x00000002, kCityName = 0x00000003;
 constexpr std::uint32_t kPuck = 0x4be6ed7d, kTopBar = 0x4be6ed7e, kTopBarBackground = 0x00000001;
 constexpr std::uint32_t kPuckFamilies = 0x2be6f563, kPuckLots = 0x4be6f571, kPuckOptions = 0x2bf08bec;
+// The puck's camera buttons in CameraButton's order, from the left Rotate.
+constexpr std::uint32_t kCameraButtons[] = {0x2be6fb52, 0x2be6fb57, 0x2be6fb48, 0x2be6fb4e};
+constexpr std::uint32_t kDayNight = 0x0fb31a16;
 // The neighborhood's own options menu and its Main Menu and Quit buttons. A hidden 1x1 window in it
 // is its anchor, whose caption names the puck window it goes on ("aabbccdd:tl").
 constexpr std::uint32_t kOptionsMenu = 0x49001028, kOptionsMainMenu = 0x0000a221, kOptionsQuit = 0x0000a220;
@@ -484,6 +487,18 @@ void NeighborhoodUi::showBin(Bin bin) {
     screen_.setChecked(screen_.find(puck_, kPuckLots), bin == Bin::Lots);
 }
 
+NeighborhoodUi::CameraButton NeighborhoodUi::heldCameraButton() const {
+    if (puck_ < 0) {
+        return CameraButton::None;
+    }
+    for (std::size_t i = 0; i < std::size(kCameraButtons); ++i) {
+        if (const int button = screen_.find(puck_, kCameraButtons[i]); button >= 0 && screen_.held(button)) {
+            return static_cast<CameraButton>(i + 1);
+        }
+    }
+    return CameraButton::None;
+}
+
 NeighborhoodUi::Action NeighborhoodUi::clicked(int window) {
     if (graphicsOptions_.clicked(window)) {
         return graphicsOptions_.takeChanged() ? Action::GraphicsOptionChanged : Action::None;
@@ -497,6 +512,8 @@ NeighborhoodUi::Action NeighborhoodUi::clicked(int window) {
     }
     if (screen_.parent(window) == puck_ && id == kPuckOptions) {
         showOptions(!screen_.visible(options_));
+    } else if (screen_.parent(window) == puck_ && id == kDayNight) {
+        return Action::DayNight;
     } else if (options_ >= 0 && window == screen_.find(options_, kOptionsQuit)) {
         return Action::Quit;
     } else if (options_ >= 0 && window == screen_.find(options_, kOptionsMainMenu)) {

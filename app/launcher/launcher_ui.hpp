@@ -42,7 +42,6 @@ struct LauncherState {
     bool poolStyleSea = false;        // see LauncherSettings::poolStyleSea
     bool smoothLotSkirts = false;     // see LauncherSettings::smoothLotSkirts
     std::string windowSize;           // see LauncherSettings::windowSize
-    int uiScale = 100;                // see LauncherSettings::uiScale
     std::array<char, 128> newFolderName{};  // what the player types for a new save folder (UTF-8)
     std::string newFolderProblem;           // why the last one couldn't be made
     PickedFolder picked;

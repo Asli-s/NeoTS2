@@ -152,9 +152,11 @@ struct Orbit {
     // Set by the wheel, which leaves the zoom between the rig's levels. A step in then only clears
     // it, a step out clears it and steps, as in the game.
     bool freeZoom = false;
-    // The lot camera's keys. Z and keypad + step one zoom level in a press, X and keypad - one level
-    // out, and the main row's - does nothing. Comma and period turn while held. Other cameras zoom
-    // while those zoom keys are held and don't turn by key.
+    // The lot and neighborhood cameras' keys. Z steps one zoom level in a press, X one level out,
+    // and comma and period turn while held. Other cameras zoom while Z and X are held and don't turn by key.
+    bool levelKeys = false;
+    // The lot camera's keypad + and - step zoom levels as Z and X do, and the main row's - does
+    // nothing. What they do over the neighborhood is not known yet.
     bool lotKeys = false;
     // Which way comma and period ask to turn: -1 comma, 1 period, by what is printed on them. As in
     // the game, the last pressed wins and letting go of either stops the turn. Their offset eases toward the
@@ -163,9 +165,11 @@ struct Orbit {
     // Live camera's settings.
     int turnKey = 0;
     float turnKeyOffset = 0;
-    // The puck's zoom button held: -1 in, 1 out, 0 none. Each step it moves the zoom goal by 0.04 of
-    // (zoom + 10), as a free zoom, as the game's puck does while held.
+    // The puck's zoom button held: -1 in, 1 out, 0 none. Each step it moves the zoom goal by
+    // `puckZoomShare` of (zoom + 10), as a free zoom, as the game's puck does while held. The share
+    // is 0.02 times the camera file's keyboardzoomscale: 0.04 on a lot, 0.06 over the neighborhood.
     int puckZoom = 0;
+    float puckZoomShare = 0.04f;
     // The puck's arrow held: -1 the left one, 1 the right one, 0 none. They turn as comma and period
     // do, the left one as comma.
     int puckTurn = 0;
@@ -204,6 +208,8 @@ struct Orbit {
             turnKeySpeed = rig->param("keyboardrotationspeed", turnKeySpeed);
             turnKeyPeriod = std::max(1.0f, rig->param("keyboardrotationlerpsteps", turnKeyPeriod));
             turnKeyMinChange = std::max(0.0f, rig->param("keyboardrotationlerpminchange", turnKeyMinChange));
+            // A broken file's scale is kept from 0 to 50, so the zoom buttons never turn around.
+            puckZoomShare = std::clamp(rig->param("keyboardzoomscale", puckZoomShare / 0.02f), 0.0f, 50.0f) * 0.02f;
         }
     }
 
@@ -407,26 +413,29 @@ inline void orbitGameStep(Orbit& orbit, unsigned ms, int width, int height) {
         orbit.dragSpeed = {0, 0};
         orbit.keyScrolling = false;
     }
-    const bool holdZoom = !orbit.lotKeys;
-    const int zoom = !orbit.keysOn || orbit.keysTaken ? 0 : (holdZoom && (keyHeld(Key::X) || keyHeld(Key::Minus) || keyHeld(Key::PadMinus))) -
-                     (keyHeld(Key::Equals) || (holdZoom && (keyHeld(Key::Z) || keyHeld(Key::PadPlus))));
+    const bool holdZ = !orbit.levelKeys, holdPad = !orbit.lotKeys;
+    const int zoom = !orbit.keysOn || orbit.keysTaken
+                         ? 0
+                         : ((holdZ && keyHeld(Key::X)) || (holdPad && (keyHeld(Key::Minus) || keyHeld(Key::PadMinus)))) -
+                               (keyHeld(Key::Equals) || (holdZ && keyHeld(Key::Z)) || (holdPad && keyHeld(Key::PadPlus)));
     if (zoom != 0) {
-        // What the main row's = does in the game, and the neighborhood camera's zoom keys, are not
-        // known yet. These move the goal the eased zoom follows.
+        // What the main row's = does in the game, and the keypad's + and - over the neighborhood,
+        // are not known yet. These move the goal the eased zoom follows.
         orbit.distanceGoal = std::clamp(orbit.distanceGoal * std::exp(static_cast<float>(zoom) * 1.5f * static_cast<float>(ms) / 1000),
                                         orbit.minDistance, orbit.maxDistance);
     }
     if (orbit.puckZoom != 0) {
         const float z = orbit.distanceGoal;
-        orbit.distanceGoal = std::clamp(z + static_cast<float>(orbit.puckZoom) * 0.04f * (z + 10), orbit.minDistance, orbit.maxDistance);
+        orbit.distanceGoal = std::clamp(z + static_cast<float>(orbit.puckZoom) * orbit.puckZoomShare * (z + 10), orbit.minDistance, orbit.maxDistance);
         orbit.freeZoom = true;
     }
-    if (orbit.lotKeys) {
+    if (orbit.levelKeys) {
         const int keys = orbit.keysOn && !orbit.keysTaken ? orbit.turnKey : 0;
         const int turn = std::clamp(keys + orbit.puckTurn, -1, 1);
         easeToward(orbit.turnKeyOffset, static_cast<float>(turn) * orbit.turnKeySpeed, ms, orbit.turnKeyPeriod, orbit.turnKeyMinChange);
-        if (orbit.turnKeyOffset != 0) {
-            orbit.yawGoal = wrapAngle(orbit.yaw + std::clamp(orbit.turnKeyOffset * 0.003f, -3.0f, 3.0f));
+        // The turn goes in whole pixels, the offset's fraction dropped.
+        if (const float pixels = std::trunc(orbit.turnKeyOffset); pixels != 0) {
+            orbit.yawGoal = wrapAngle(orbit.yaw + std::clamp(pixels * 0.003f, -3.0f, 3.0f));
         }
     }
     for (std::size_t k = 0; k < 2; ++k) {

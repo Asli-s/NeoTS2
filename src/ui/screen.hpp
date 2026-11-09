@@ -61,6 +61,17 @@ public:
     void setCaret(int window, std::optional<std::size_t> at);
     // The place in a window's text (a byte index between characters) nearest to screen x.
     std::size_t textIndexAt(int window, int x);
+    // A wrapped text box's lines: how many it has, the step between them in pixels, where each
+    // starts in its text, and the line shown at its top (kept within its lines).
+    int lineCount(int window) const;
+    int lineHeight(int window) const;
+    // How many whole lines fit inside the window's gutters, at least 1.
+    int visibleLines(int window) const;
+    std::vector<std::size_t> lineStarts(int window) const;
+    void setTopLine(int window, int line);
+    int topLine(int window) const;
+    // The place in a wrapped text box's text nearest to screen (x, y), as it is scrolled.
+    std::size_t textIndexAt(int window, int x, int y);
     void setTextColor(int window, const std::array<float, 4>& color);
     void setImage(int window, tga::Pixels pixels);  // drawn over the window's whole area
     // Shows only the part of the window's image from (left, top) to (right, bottom) in pixels,
@@ -124,6 +135,7 @@ public:
     bool over(int x, int y) const;
     // A window's tooltip text (empty: none).
     void setTip(int window, const std::string& text);
+    std::string tip(int window) const;
     // A tip pointing at a spot rather than a window, as the game's tip over a Sim in the world: one
     // line in the Default style, shown at once at the spot set by moveSpotTip. Empty text takes it
     // away.
@@ -209,6 +221,10 @@ private:
         std::size_t selectionBegin = 0, selectionEnd = 0;
         std::optional<std::size_t> caret;
         std::array<float, 4> highlightColor{0, 0, 1, 1}, selectedTextColor{1, 1, 1, 1}, caretColor{0, 0, 0, 1};
+        // A wrapped text box: each line's first byte in its text, the step between its lines, and
+        // the line shown at its top.
+        std::vector<std::size_t> lineStarts;
+        int lineHeight = 0, topLine = 0;
     };
 
     int add(const ui::Window& w, int parent);
@@ -217,6 +233,8 @@ private:
     void layoutText(int window);
     std::vector<std::string> wrapLines(const Window& w, const FontStyle& style) const;
     std::vector<std::string> wrapAt(const std::string& text, const FontStyle& style, int room) const;
+    // Where each line of a wrapped text box's text starts, breaking between words as wrapAt does.
+    std::vector<std::size_t> wrapStarts(const Window& w, const FontStyle& style) const;
     void emitLines(const Window& w, float x0, float y0, std::vector<Quad>& out) const;
     // Draws a window's tooltip text into an image, if it has a tip and none is drawn yet.
     void drawTip(Window& window);

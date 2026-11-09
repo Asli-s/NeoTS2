@@ -26,6 +26,7 @@ constexpr KeyInfo kKeys[] = {
     {Key::C, SDLK_c},
     {Key::D, SDLK_d},
     {Key::E, SDLK_e},
+    {Key::L, SDLK_l},
     {Key::P, SDLK_p},
     {Key::Q, SDLK_q},
     {Key::R, SDLK_r},

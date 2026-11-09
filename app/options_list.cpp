@@ -49,6 +49,10 @@ int addScrollBarParts(ts2::ui::Screen& screen, int bar) {
 void OptionsList::attach(ts2::ui::Screen& screen, int list) {
     screen_ = &screen;
     list_ = list;
+    // Rows made for an earlier list went with it, and their handles may now name other windows.
+    rows_.clear();
+    picked_ = -1;
+    top_ = 0;
     width_ = screen.width(list);
     height_ = screen.height(list);
     visible_ = height_ / kRowHeight;

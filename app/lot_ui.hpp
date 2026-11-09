@@ -28,17 +28,16 @@
 
 namespace app {
 
-// The game's live-mode panels over a lot, placed as the game places them: the puck in the bottom left
-// corner with the household's thumbnails above it, the live panel beside it (the selected Sim, the
-// clock, the speed buttons) and the options menu the puck's Options button opens in the live panel's
-// place. The puck's wall button opens a small menu of the four wall modes. It closes when one is
-// picked or the mouse leaves the area around it.
 // The live panel's portrait windows as its script describes them (see portraitWindows).
 struct PortraitWindows {
     ts2::tga::Pixels shape, shadowShape;
     int shadowX = 5, shadowY = 5;
 };
 
+// The game's live-mode panels over a lot, placed as the game places them: the puck bottom left with the
+// household's thumbnails above it, the live panel beside it (selected Sim, clock, speed buttons) and the
+// options menu the puck's Options button opens in its place. The puck's wall button opens a menu of the
+// four wall modes, which closes on a pick or when the mouse leaves the area around it.
 class LotUi {
 public:
     LotUi(ts2::ui::Screen& screen, int width, int height);
@@ -54,6 +53,9 @@ public:
     GraphicsOptionsPanel& graphicsOptions() { return graphicsOptions_; }
     // The screen has a new size: what sits at its bottom and right edges moves with them.
     void setSize(int width, int height);
+    // The name of the neighborhood the lot is in, for the Advanced Neighborhood Options panel the
+    // options menu shows in the top left corner.
+    void setNeighborhood(const std::string& name);
     const GameOptionsPanel& gameOptions() const { return gameOptions_; }
     GameOptionsPanel& gameOptions() { return gameOptions_; }
     std::optional<bool> takeFreeWill() { return gameOptions_.takeFreeWill(); }
@@ -92,7 +94,7 @@ public:
     void hideForFreeCamera(bool hide);
 
     // What a released button asks for.
-    enum class Action { None, Neighborhood, Quit, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, GameOptionChanged, GraphicsOptionChanged, RewardsOpened, RewardsClosed, SelectSim, TrackSim, FloorUp, FloorDown, WallMode, ToggleCeiling };
+    enum class Action { None, Neighborhood, Quit, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, GameOptionChanged, GraphicsOptionChanged, RewardsOpened, RewardsClosed, SelectSim, TrackSim, FloorUp, FloorDown, WallMode, ToggleCeiling, MainMenu };
     Action clicked(int window);
     // The puck's camera button held down under the mouse.
     enum class CameraButton { None, RotateLeft, RotateRight, ZoomIn, ZoomOut };
@@ -182,6 +184,12 @@ private:
     std::array<int, 4> speedButtons_{-1, -1, -1, -1};
     std::array<int, 4> cameraButtons_{-1, -1, -1, -1};  // in CameraButton's order, from RotateLeft
     int wallMode_ = 2, pickedWallMode_ = 2;
+    // The Advanced Neighborhood Options panel, its strip of neighborhood buttons and the window
+    // holding the button that opens and closes the strip.
+    int hoodPanel_ = -1, hoodStrip_ = -1, hoodButtonHolder_ = -1;
+    std::string hoodReturnTip_;  // the Return button's tip as loaded, with %s for the neighborhood
+    void showHoodPanel(bool show);
+    void showHoodStrip(bool show);
     LivePanel panel_;
     OptionsMenu optionsMenu_{screen_};
     GameOptionsPanel gameOptions_{screen_, optionsMenu_};

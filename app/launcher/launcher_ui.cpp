@@ -139,7 +139,6 @@ settings::LauncherSettings chosenSettings(const LauncherState& state) {
     out.poolStyleSea = state.poolStyleSea;
     out.smoothLotSkirts = state.smoothLotSkirts;
     out.windowSize = state.windowSize;
-    out.uiScale = state.uiScale;
     return out;
 }
 
@@ -539,7 +538,7 @@ void startPlaying(LauncherState& state, bool addNeighborhoods) {
     const settings::WindowSize* size = settings::findWindowSize(state.windowSize);
     state.game = startGame(install.root, folder, addNeighborhoods, builtRenderer(state.renderer), state.smoothFollow, state.poolStylePonds, state.poolStyleSea, state.smoothLotSkirts,
                            size ? size->width : 0,
-                           size ? size->height : 0, size && size->fitScreen, state.uiScale, state.message);
+                           size ? size->height : 0, size && size->fitScreen, state.message);
     state.folderNotes.clear();
 }
 
@@ -713,7 +712,6 @@ void findInstalls(LauncherState& state, const settings::LauncherSettings& rememb
     state.poolStyleSea = remembered.poolStyleSea;
     state.smoothLotSkirts = remembered.smoothLotSkirts;
     state.windowSize = remembered.windowSize;
-    state.uiScale = remembered.uiScale;
     state.remembered = chosenSettings(state);
 }
 
@@ -811,27 +809,11 @@ void drawChanges(LauncherState& state, const LauncherFonts& fonts) {
     }
     ImGui::Checkbox("Pool-style sea", &state.poolStyleSea);
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Keeps a beach lot's sea and its waves, and adds a colour that deepens with the water and the pools' caustics under it.");
+        ImGui::SetTooltip("Draws the sea around every lot with waves, a colour that deepens with the water and the pools' caustics under it.");
     }
     ImGui::Checkbox("Smooth lot skirts", &state.smoothLotSkirts);
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Joins each lot to the ground around it without the game's thin seams along its edges.");
-    }
-    const auto scaleLabel = [](int scale) { return scale == 100 ? std::string("100% (original)") : std::to_string(scale) + "%"; };
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted("Interface size");
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9);
-    if (ImGui::BeginCombo("##uiScale", scaleLabel(state.uiScale).c_str())) {
-        for (const int scale : settings::kUiScales) {
-            if (ImGui::Selectable(scaleLabel(scale).c_str(), state.uiScale == scale)) {
-                state.uiScale = scale;
-            }
-        }
-        ImGui::EndCombo();
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("The game draws its panels and menus at one size. This makes them larger, for big screens.");
     }
 }
 

@@ -25,7 +25,7 @@ void delayMs(std::uint32_t milliseconds);
 // The keys the game uses. A key it doesn't use is Unknown.
 enum class Key : std::uint8_t {
     Unknown,
-    A, C, D, E, P, Q, R, S, W, X, Y, Z,
+    A, C, D, E, L, P, Q, R, S, W, X, Y, Z,
     Num1, Num2, Num3,
     Pad0, Pad1, Pad2, Pad3, PadPlus, PadMinus,
     Comma, Period, Minus, Equals, Grave,

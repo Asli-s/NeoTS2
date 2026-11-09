@@ -9,6 +9,7 @@
 #include <format>
 
 #include <iterator>
+#include <string_view>
 
 namespace app {
 
@@ -50,7 +51,12 @@ constexpr unsigned long kMaxFadeDistance = 65535;
 constexpr std::uint32_t kNeighborsGroup = 0xA7, kOriginalRow = 1, kHighRow = 2, kRealHousesRow = 3;
 constexpr int kImposterX = 118, kImposterY = 76, kImposterWidth = 170, kImposterHeight = 68;
 constexpr int kImposterRowTop = 18, kImposterRowStep = 16, kImposterRowWidth = 110, kImposterRowHeight = 15;
+// Sky, not in the original game, in the free room under Catalogs Display Custom Content: level with
+// Force 12hr clock, in Sim While Minimized's column, and made like those groups.
+constexpr std::uint32_t kClassicRow = 1, kRealisticRow = 2;
+const std::string kRealisticSkyKey = "realisticSky";
 const std::string kRealHousesKey = "lotRealHouses";
+const std::string kHighImpostersKey = "lotHighImposters";
 
 const std::string kNotWorking = "Not working in NeoTS2 yet. The choice is saved, but changes nothing.";
 const std::string kButtonNotWorking = "Not working in NeoTS2 yet.";
@@ -60,7 +66,11 @@ const std::string kButtonNotWorking = "Not working in NeoTS2 yet.";
 void GameOptionsPanel::readSettings(const std::filesystem::path& install, const std::filesystem::path& userFolder) {
     userFolder_ = userFolder;
     saved_ = ts2::content::readUserProps(userFolder).values;
-    realHouses_ = ts2::content::readNeoProps(userFolder).flag(kRealHousesKey).value_or(false);
+    const auto neo = ts2::content::readNeoProps(userFolder);
+    imposters_ = neo.flag(kRealHousesKey).value_or(false)      ? LotImposters::RealHouses
+                 : neo.flag(kHighImpostersKey).value_or(false) ? LotImposters::High
+                                                               : LotImposters::Original;
+    realisticSky_ = neo.flag(kRealisticSkyKey).value_or(false);
     defaults_.clear();
     if (const auto file = ts2::content::newestDataFile(ts2::content::findProducts(install), "Res/Config/globalProps.xml")) {
         defaults_ = ts2::content::readPropsFile(*file).values;
@@ -70,12 +80,17 @@ void GameOptionsPanel::readSettings(const std::filesystem::path& install, const 
     freeWill_ = flag("freeWill", true);
 }
 
+bool GameOptionsPanel::savedRealisticSky(const std::filesystem::path& userFolder) {
+    return ts2::content::readNeoProps(userFolder).flag(kRealisticSkyKey).value_or(false);
+}
+
 void GameOptionsPanel::takeSettings(const GameOptionsPanel& other) {
     userFolder_ = other.userFolder_;
     saved_ = other.saved_;
     defaults_ = other.defaults_;
     graphicsRules_ = other.graphicsRules_;
-    realHouses_ = other.realHouses_;
+    imposters_ = other.imposters_;
+    realisticSky_ = other.realisticSky_;
     showChoices();
 }
 
@@ -104,6 +119,7 @@ void GameOptionsPanel::load(Place place) {
         }
     }
     addImposterGroup();
+    addSkyGroup();
     for (const std::uint32_t id : {kCustomContentList, kGiftCodes, kDefaultSettings}) {
         screen_.setTip(screen_.find(panel_, id), kButtonNotWorking);
     }
@@ -141,20 +157,90 @@ void GameOptionsPanel::addImposterGroup() {
                                   {}};
         screen_.setText(screen_.addWindows({row}, 0, top, imposterGroup_), rows[id - kOriginalRow]);
     }
-    const int high = screen_.find(imposterGroup_, kHighRow);
-    screen_.setEnabled(high, false);
-    screen_.setTip(high, kButtonNotWorking);
+    screen_.setTip(screen_.find(imposterGroup_, kHighRow), "Every lot's imposter is drawn again from the lot, four times sharper, while the neighborhood is open. "
+                                                           "The pictures are kept in the NeoTS2 Cache folder.");
     screen_.setTip(screen_.find(imposterGroup_, kRealHousesRow), "The nearest neighbors around a lot are real houses instead of flat imposters. It takes much more memory.");
 }
 
-void GameOptionsPanel::chooseRealHouses(bool on) {
-    if (on == realHouses_) {
+void GameOptionsPanel::addSkyGroup() {
+    const auto find = [&](std::string_view key) {
+        const auto g = std::find_if(groups_.begin(), groups_.end(), [&](const Group& group) { return group.control.key == key; });
+        return g == groups_.end() ? -1 : g->window;
+    };
+    const int clock = find("force12HrTime"), column = find("simInBackground");
+    if (clock < 0 || column < 0 || screen_.parent(clock) != screen_.parent(column)) {
         return;
     }
-    realHouses_ = on;
+    // The group above Sky in its column (Catalogs Display Custom Content) moves up until its two-line
+    // title starts level with the one-line title of the group above Force 12hr clock (Edge Scrolling),
+    // its buttons a line lower than that group's, so its title doesn't crowd Sky's.
+    const auto above = [&](int under) {
+        int found = -1;
+        for (const Group& g : groups_) {
+            if (screen_.parent(g.window) == screen_.parent(under) && screen_.x(g.window) == screen_.x(under) && screen_.y(g.window) < screen_.y(under) &&
+                (found < 0 || screen_.y(g.window) > screen_.y(found))) {
+                found = g.window;
+            }
+        }
+        return found;
+    };
+    const int catalogs = above(column), edge = above(clock);
+    if (catalogs >= 0 && edge >= 0 && screen_.find(catalogs, 1) >= 0 && screen_.find(edge, 1) >= 0) {
+        constexpr int kTitleLine = 11;  // a line of the panel's OptionsText titles, in UI pixels
+        const int shift = screen_.y(edge) + screen_.y(screen_.find(edge, 1)) + kTitleLine - screen_.y(catalogs) - screen_.y(screen_.find(catalogs, 1));
+        if (shift < 0 && screen_.y(catalogs) + shift >= 0) {
+            screen_.move(catalogs, screen_.x(catalogs), screen_.y(catalogs) + shift);
+        }
+    }
+    const int x = screen_.x(column), y = screen_.y(clock), width = screen_.width(column);
+    const ts2::ui::Window group{{{"iid", "IGZWinGen"}, {"winflag_visible", "yes"}, {"area", std::format("({},{},{},{})", x, y, x + width, y + screen_.height(clock))}}, {}};
+    skyGroup_ = screen_.addWindows({group}, x, y, screen_.parent(clock));
+    // The title and the rows go where Force 12hr clock has its own.
+    const int firstRow = screen_.find(clock, kClassicRow);
+    const int titleTop = firstRow >= 0 ? std::max(screen_.y(firstRow) - kImposterRowTop, 0) : 0;
+    const ts2::ui::Window title{{{"iid", "IGZWinBtn"}, {"area", std::format("(0,{},{},{})", titleTop, width, titleTop + 20)}, {"winflag_visible", "yes"}, {"winflag_ignoremouse", "yes"},
+                                 {"font", "OptionsText"}, {"colorfontnormal", "(5,6,113)"}, {"showcaption", "yes"}, {"gutters", "(2,0,0,0)"}, {"align", "left"}},
+                                {}};
+    screen_.setText(screen_.addWindows({title}, 0, titleTop, skyGroup_), "Sky");
+    const char* const rows[] = {"Classic", "Realistic"};
+    for (std::uint32_t id = kClassicRow; id <= kRealisticRow; ++id) {
+        const int button = screen_.find(clock, id);
+        const int top = button >= 0 ? screen_.y(button) : kImposterRowTop + static_cast<int>(id - kClassicRow) * kImposterRowStep;
+        const int left = button >= 0 ? screen_.x(button) : 0;
+        const int rowWidth = button >= 0 ? screen_.width(button) : kImposterRowWidth;
+        const int rowHeight = button >= 0 ? screen_.height(button) : kImposterRowHeight;
+        const ts2::ui::Window row{{{"iid", "IGZWinBtn"}, {"id", std::format("0x{:08x}", id)},
+                                   {"area", std::format("({},{},{},{})", left, top, left + rowWidth, top + rowHeight)},
+                                   {"winflag_visible", "yes"}, {"winflag_enabled", "yes"}, {"winflag_alphablend", "yes"}, {"image", "{499db772,ac76e165}"},
+                                   {"font", "OptionsText"}, {"colorfontnormal", "(5,6,113)"}, {"colorfontdisabled", "(84,85,105)"}, {"colorfonthilited", "(204,214,255)"}, {"showcaption", "yes"},
+                                   {"fill", "yes"}, {"style", "radiocheck"}, {"gutters", "(0,2,0,2)"}, {"align", "center"}, {"btnclicksnd", "{00000000,ff391ba9}"}},
+                                  {}};
+        screen_.setText(screen_.addWindows({row}, left, top, skyGroup_), rows[id - kClassicRow]);
+    }
+    screen_.setTip(screen_.find(skyGroup_, kRealisticRow), "The game's skies recoloured, not in the original game. It shows the next time a lot or neighborhood opens.");
+}
+
+void GameOptionsPanel::chooseSky(bool realistic) {
+    if (realistic == realisticSky_) {
+        return;
+    }
+    realisticSky_ = realistic;
     changed_ = true;
-    if (!ts2::content::saveNeoProps(userFolder_, {{kRealHousesKey, {on ? "true" : "false", true}}})) {
-        ts2::diag::warnOnce("game options: Real Houses could not be saved");
+    if (!ts2::content::saveNeoProps(userFolder_, {{kRealisticSkyKey, {realistic ? "true" : "false", true}}})) {
+        ts2::diag::warnOnce("game options: Sky could not be saved");
+    }
+}
+
+void GameOptionsPanel::chooseImposters(LotImposters kind) {
+    if (kind == imposters_) {
+        return;
+    }
+    imposters_ = kind;
+    changed_ = true;
+    const auto flag = [](bool on) { return std::pair<std::string, bool>{on ? "true" : "false", true}; };
+    if (!ts2::content::saveNeoProps(userFolder_, {{kRealHousesKey, flag(kind == LotImposters::RealHouses)},
+                                                  {kHighImpostersKey, flag(kind == LotImposters::High)}})) {
+        ts2::diag::warnOnce("game options: Lot Imposters could not be saved");
     }
 }
 
@@ -182,6 +268,7 @@ void GameOptionsPanel::remove() {
     }
     panel_ = -1;
     imposterGroup_ = -1;
+    skyGroup_ = -1;
     groups_.clear();
 }
 
@@ -213,8 +300,13 @@ void GameOptionsPanel::showChoices() {
         }
     }
     if (panel_ >= 0 && imposterGroup_ >= 0) {
-        screen_.setChecked(screen_.find(imposterGroup_, kOriginalRow), !realHouses_);
-        screen_.setChecked(screen_.find(imposterGroup_, kRealHousesRow), realHouses_);
+        screen_.setChecked(screen_.find(imposterGroup_, kOriginalRow), imposters_ == LotImposters::Original);
+        screen_.setChecked(screen_.find(imposterGroup_, kHighRow), imposters_ == LotImposters::High);
+        screen_.setChecked(screen_.find(imposterGroup_, kRealHousesRow), imposters_ == LotImposters::RealHouses);
+    }
+    if (panel_ >= 0 && skyGroup_ >= 0) {
+        screen_.setChecked(screen_.find(skyGroup_, kClassicRow), !realisticSky_);
+        screen_.setChecked(screen_.find(skyGroup_, kRealisticRow), realisticSky_);
     }
 }
 
@@ -227,10 +319,18 @@ bool GameOptionsPanel::clicked(int window) {
         show(!shown());
         return true;
     }
+    if (skyGroup_ >= 0 && screen_.parent(window) == skyGroup_) {
+        const std::uint32_t row = screen_.id(window);
+        if (row == kClassicRow || row == kRealisticRow) {
+            chooseSky(row == kRealisticRow);
+            showChoices();
+        }
+        return true;
+    }
     if (imposterGroup_ >= 0 && screen_.parent(window) == imposterGroup_) {
         const std::uint32_t row = screen_.id(window);
-        if (row == kOriginalRow || row == kRealHousesRow) {
-            chooseRealHouses(row == kRealHousesRow);
+        if (row == kOriginalRow || row == kHighRow || row == kRealHousesRow) {
+            chooseImposters(row == kRealHousesRow ? LotImposters::RealHouses : row == kHighRow ? LotImposters::High : LotImposters::Original);
             showChoices();
         }
         return true;
@@ -298,7 +398,8 @@ GameOptionsPanel::LotView GameOptionsPanel::lotView() const {
     }
     out.neighbors = prop("EnableLotImpostersInLot", "enableLotImpostersInLot").value_or("true") != "false";
     out.decorations = prop("EnableNeighborhoodOccupantsInLot", "enableNeighborhoodOccupantsInLot").value_or("true") != "false";
-    out.realHouses = realHouses_ && out.neighbors;
+    out.realHouses = imposters_ == LotImposters::RealHouses && out.neighbors;
+    out.highImposters = imposters_ == LotImposters::High;
     // Saved as the distance itself. Without one, the game starts from 50.
     for (const auto* values : {&saved_, &defaults_}) {
         if (const auto it = values->find("neighborhoodPropFadeDistance"); it != values->end()) {

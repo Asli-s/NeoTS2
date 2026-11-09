@@ -45,6 +45,9 @@ constexpr std::uint32_t kFrameRateTitle = 0xAD7FAA35;
 constexpr std::uint32_t kSmoothEdgesGroup = 0xC0, kSmoothEdgesBar = 0xECD97AFE, kSmoothEdgesLess = 0x2E10C53D, kSmoothEdgesMore = 0x2E10C541;
 constexpr std::uint32_t kFirstSmoothEdgeRow = 0xC8;
 constexpr std::uint32_t kFirstOcclusionRow = 0xCC;
+// Ambient Occlusion's Full Size and Half Size, beside its levels.
+constexpr std::uint32_t kOcclusionFullSize = 0xD0, kOcclusionHalfSize = 0xD1;
+constexpr int kOcclusionSizeLeft = 80;
 constexpr int kSmoothEdgeRowTop = 15, kOcclusionTitleTop = 86, kOcclusionRowTop = 110, kRowHeight = 16, kRowWidth = 83;
 constexpr int kGroupWidth = 163, kGroupHeight = 180;
 // How much taller the panel is than its script. It is four rows of the Screen Size list, which gains them.
@@ -56,7 +59,12 @@ constexpr std::uint32_t kPictureWidth = 681, kPictureHeight = 430, kBandTop = 30
 const std::string kPanelPicture = "{499db772,dafe9000}";
 constexpr std::uint32_t kOffText = 0x00800003;  // string id, leakcheck: ok
 constexpr std::uint32_t kMediumText = 0x00800005;  // string id, leakcheck: ok
-const std::string kSmoothEdgesKey = "smoothEdges", kOcclusionKey = "ambientOcclusion";
+// UI Size, not in the original game, in the free room under the Frame Rate list: the sizes in two
+// columns of rows, the first three on the left.
+constexpr std::uint32_t kUiSizeGroup = 0xD7, kFirstUiSizeRow = 0xD8;
+constexpr int kUiSizeGap = 4, kUiSizeHeight = 72, kUiSizeColumn = 3;
+const std::string kUiScaleKey = "uiScale";
+const std::string kSmoothEdgesKey = "smoothEdges", kOcclusionKey = "ambientOcclusion", kOcclusionSizeKey = "ambientOcclusionHalfSize";
 
 // The keep-these-settings box: its text, numbered within the Options text's string table 0x80, and
 // the title, Yes and No it shares with the quit box.
@@ -125,6 +133,14 @@ GraphicsOptionsPanel::Display GraphicsOptionsPanel::savedDisplay(const std::file
     if (const auto saved = own.values.find(kOcclusionKey); saved != own.values.end()) {
         out.ambientOcclusion = ts2::content::savedAmbientOcclusion(saved->second);
     }
+    out.occlusionHalfSize = own.flag(kOcclusionSizeKey).value_or(true);
+    if (const auto saved = own.values.find(kUiScaleKey); saved != own.values.end()) {
+        int scale = 0;
+        const char* end = saved->second.data() + saved->second.size();
+        if (std::from_chars(saved->second.data(), end, scale).ptr == end && ts2::content::isUiScale(scale)) {
+            out.uiScale = scale;
+        }
+    }
     return out;
 }
 
@@ -172,6 +188,7 @@ void GraphicsOptionsPanel::load(Place place) {
     frameRates_.setRows(rates);
     listScreenSizes();
     addSmoothEdgeRows();
+    addUiSizeRows();
     for (const GraphicsGroup& group : kGraphicsGroups) {
         const int window = screen_.find(panel_, group.window);
         const bool bumps = group.option == "MaterialDetail";
@@ -226,16 +243,39 @@ void GraphicsOptionsPanel::addGroupTitle(int group, int top, const std::string& 
     screen_.setText(screen_.addWindows({title}, 0, top, group), text);
 }
 
-int GraphicsOptionsPanel::addRadioRow(int group, std::uint32_t id, int top, const std::string& text) {
+int GraphicsOptionsPanel::addRadioRow(int group, std::uint32_t id, int top, const std::string& text, int left) {
     // As the panel's other radio buttons are in its script.
-    const ts2::ui::Window row{{{"iid", "IGZWinBtn"}, {"id", std::format("0x{:08x}", id)}, {"area", std::format("(0,{},{},{})", top, kRowWidth, top + kRowHeight)},
+    const ts2::ui::Window row{{{"iid", "IGZWinBtn"}, {"id", std::format("0x{:08x}", id)}, {"area", std::format("({},{},{},{})", left, top, left + kRowWidth, top + kRowHeight)},
                                {"winflag_visible", "yes"}, {"winflag_enabled", "yes"}, {"winflag_alphablend", "yes"}, {"image", "{499db772,ac76e165}"},
                                {"font", "OptionsText"}, {"colorfontnormal", "(5,6,113)"}, {"colorfontdisabled", "(84,85,105)"}, {"colorfonthilited", "(204,214,255)"}, {"showcaption", "yes"},
                                {"fill", "yes"}, {"style", "radiocheck"}, {"gutters", "(0,2,0,2)"}, {"align", "center"}, {"btnclicksnd", "{00000000,ff391ba9}"}},
                               {}};
-    const int window = screen_.addWindows({row}, 0, top, group);
+    const int window = screen_.addWindows({row}, left, top, group);
     screen_.setText(window, text);
     return window;
+}
+
+void GraphicsOptionsPanel::addUiSizeRows() {
+    const int list = screen_.find(panel_, kFrameRateList);
+    if (list < 0) {
+        return;
+    }
+    // Just under the list, in the panel's own pixels.
+    int left = 0, top = screen_.height(list);
+    for (int w = list; w >= 0 && w != panel_; w = screen_.parent(w)) {
+        left += screen_.x(w);
+        top += screen_.y(w);
+    }
+    const ts2::ui::Window window{{{"iid", "IGZWinGen"}, {"id", std::format("0x{:08x}", kUiSizeGroup)}, {"winflag_visible", "yes"},
+                                  {"area", std::format("(0,0,{},{})", kGroupWidth, kUiSizeHeight)}},
+                                 {}};
+    const int group = screen_.addWindows({window}, left, top + kUiSizeGap, panel_);
+    addGroupTitle(group, 0, "UI Size");
+    for (std::size_t i = 0; i < std::size(ts2::content::kUiScales); ++i) {
+        const int column = static_cast<int>(i) / kUiSizeColumn, row = static_cast<int>(i) % kUiSizeColumn;
+        addRadioRow(group, kFirstUiSizeRow + static_cast<std::uint32_t>(i), kOcclusionRowTop - kOcclusionTitleTop + row * kRowHeight,
+                    std::format("{}%", ts2::content::kUiScales[i]), column * kOcclusionSizeLeft);
+    }
 }
 
 void GraphicsOptionsPanel::addSmoothEdgeRows() {
@@ -253,6 +293,8 @@ void GraphicsOptionsPanel::addSmoothEdgeRows() {
     for (std::size_t i = 0; i < std::size(levels); ++i) {
         addRadioRow(group, kFirstOcclusionRow + static_cast<std::uint32_t>(i), kOcclusionRowTop + static_cast<int>(i) * kRowHeight, levels[i]);
     }
+    addRadioRow(group, kOcclusionFullSize, kOcclusionRowTop, "Full Size", kOcclusionSizeLeft);
+    addRadioRow(group, kOcclusionHalfSize, kOcclusionRowTop + kRowHeight, "Half Size", kOcclusionSizeLeft);
 }
 
 void GraphicsOptionsPanel::remove() {
@@ -370,6 +412,12 @@ void GraphicsOptionsPanel::showDisplay() {
     for (int i = 0; i < static_cast<int>(ts2::content::kAmbientOcclusionStrengths.size()); ++i) {
         screen_.setChecked(screen_.find(group, kFirstOcclusionRow + static_cast<std::uint32_t>(i)), i == display_.ambientOcclusion);
     }
+    screen_.setChecked(screen_.find(group, kOcclusionFullSize), !display_.occlusionHalfSize);
+    screen_.setChecked(screen_.find(group, kOcclusionHalfSize), display_.occlusionHalfSize);
+    const int sizes = screen_.find(panel_, kUiSizeGroup);
+    for (std::size_t i = 0; i < std::size(ts2::content::kUiScales); ++i) {
+        screen_.setChecked(screen_.find(sizes, kFirstUiSizeRow + static_cast<std::uint32_t>(i)), ts2::content::kUiScales[i] == display_.uiScale);
+    }
 }
 
 void GraphicsOptionsPanel::setMostSmoothEdges(int samples) {
@@ -403,12 +451,26 @@ GraphicsOptionsPanel::Display GraphicsOptionsPanel::pickedDisplay() const {
             out.ambientOcclusion = i;
         }
     }
+    out.occlusionHalfSize = screen_.checked(screen_.find(group, kOcclusionHalfSize));
+    const int sizes = screen_.find(panel_, kUiSizeGroup);
+    for (std::size_t i = 0; i < std::size(ts2::content::kUiScales); ++i) {
+        if (screen_.checked(screen_.find(sizes, kFirstUiSizeRow + static_cast<std::uint32_t>(i)))) {
+            out.uiScale = ts2::content::kUiScales[i];
+        }
+    }
     return out;
 }
 
 void GraphicsOptionsPanel::setWindowSize(int width, int height) {
     display_.width = width;
     display_.height = height;
+    if (panel_ >= 0 && shown()) {
+        showDisplay();
+    }
+}
+
+void GraphicsOptionsPanel::setUiScale(int percent) {
+    display_.uiScale = percent;
     if (panel_ >= 0 && shown()) {
         showDisplay();
     }
@@ -541,11 +603,14 @@ void GraphicsOptionsPanel::keep() {
         }
     }
     if (display_.fullscreen != displayBefore_.fullscreen || display_.frameLimit != displayBefore_.frameLimit || display_.smoothEdges != displayBefore_.smoothEdges ||
-        display_.ambientOcclusion != displayBefore_.ambientOcclusion) {
+        display_.ambientOcclusion != displayBefore_.ambientOcclusion || display_.occlusionHalfSize != displayBefore_.occlusionHalfSize ||
+        display_.uiScale != displayBefore_.uiScale) {
         if (!ts2::content::saveNeoProps(userFolder_, {{kFullscreenKey, {display_.fullscreen ? "true" : "false", true}},
                                                       {kFrameLimitKey, {std::to_string(display_.frameLimit), false}},
                                                       {kSmoothEdgesKey, {std::to_string(display_.smoothEdges), false}},
-                                                      {kOcclusionKey, {std::to_string(display_.ambientOcclusion), false}}})) {
+                                                      {kOcclusionKey, {std::to_string(display_.ambientOcclusion), false}},
+                                                      {kOcclusionSizeKey, {display_.occlusionHalfSize ? "true" : "false", true}},
+                                                      {kUiScaleKey, {std::to_string(display_.uiScale), false}}})) {
             ts2::diag::warnOnce("graphics options: the display choices could not be saved");
         }
     }
@@ -618,6 +683,14 @@ bool GraphicsOptionsPanel::clicked(int window) {
     } else if (screen_.parent(window) == screen_.find(panel_, kSmoothEdgesGroup) && id >= kFirstOcclusionRow && id < kFirstOcclusionRow + ts2::content::kAmbientOcclusionStrengths.size()) {
         for (std::size_t i = 0; i < ts2::content::kAmbientOcclusionStrengths.size(); ++i) {
             const int row = screen_.find(screen_.parent(window), kFirstOcclusionRow + static_cast<std::uint32_t>(i));
+            screen_.setChecked(row, row == window);
+        }
+    } else if (screen_.parent(window) == screen_.find(panel_, kSmoothEdgesGroup) && (id == kOcclusionFullSize || id == kOcclusionHalfSize)) {
+        screen_.setChecked(screen_.find(screen_.parent(window), kOcclusionFullSize), id == kOcclusionFullSize);
+        screen_.setChecked(screen_.find(screen_.parent(window), kOcclusionHalfSize), id == kOcclusionHalfSize);
+    } else if (screen_.parent(window) == screen_.find(panel_, kUiSizeGroup) && id >= kFirstUiSizeRow && id < kFirstUiSizeRow + std::size(ts2::content::kUiScales)) {
+        for (std::size_t i = 0; i < std::size(ts2::content::kUiScales); ++i) {
+            const int row = screen_.find(screen_.parent(window), kFirstUiSizeRow + static_cast<std::uint32_t>(i));
             screen_.setChecked(row, row == window);
         }
     } else if (!screenSizes_.clicked(window) && !frameRates_.clicked(window)) {

@@ -64,6 +64,19 @@ inline int savedSmoothEdges(std::string_view text) {
 
 // The levels of NeoTS2's Ambient Occlusion, by the number saved: off, then ever darker. Each is the power
 // how open a pixel is gets raised to.
+// The sizes the UI can be drawn at, in percent. Not in the original game, which draws it at 100% only.
+inline constexpr int kUiScales[] = {100, 125, 150, 175, 200};
+
+// True for a size in kUiScales.
+inline bool isUiScale(int percent) {
+    for (const int scale : kUiScales) {
+        if (scale == percent) {
+            return true;
+        }
+    }
+    return false;
+}
+
 inline constexpr std::array<float, 4> kAmbientOcclusionStrengths{0.0f, 0.6f, 1.4f, 2.0f};
 
 // The level a saved Ambient Occlusion choice asks for, off for anything that isn't a level.

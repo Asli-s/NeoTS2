@@ -4,13 +4,10 @@
 
 namespace ts2::ui {
 
-// The game's upright scroll bar with arrows, as its text windows use it. An arrow cell 16 high at
-// each end, the track between them and a thumb cell 16 high on it. Its value runs 0..1 and gives
-// the position, the top line shown, from 0 to the last line that can be on top.
-//
-// A press on an arrow moves one line, and a press on the track above or below the thumb moves one
-// page. Held, the press repeats each time more than 200 ms have passed while the mouse stays on
-// that part. The thumb follows the mouse, centred on it, while it is dragged.
+// The game's upright scroll bar as its text windows use it: a 16-high arrow cell at each end and a
+// 16-high thumb on the track between. Its value runs 0..1, from the top line at 0 to the last line that
+// can be on top. An arrow press moves a line and a track press a page, repeating every 200 ms while held
+// on that part. A dragged thumb stays centred on the mouse.
 class ScrollBar {
 public:
     enum class Part { None, Up, Down, PageUp, PageDown, Thumb };

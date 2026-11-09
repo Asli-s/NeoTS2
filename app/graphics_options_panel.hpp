@@ -56,12 +56,19 @@ public:
         int smoothEdges = 1;
         // How dark Ambient Occlusion is, an index into content::kAmbientOcclusionStrengths.
         int ambientOcclusion = 0;
+        // Ambient Occlusion worked out at half the view's size, which costs less and is a little softer.
+        bool occlusionHalfSize = true;
+        // The UI drawn this much larger, in percent: one of content::kUiScales. Not in the original
+        // game, so 100 unless the player picks another.
+        int uiScale = 100;
         bool operator==(const Display&) const = default;
     };
     static constexpr int kWaitForScreen = 0, kNoLimit = -1;
     const Display& display() const { return display_; }
     // The window's real size, which may differ from the one asked for.
     void setWindowSize(int width, int height);
+    // The UI Size in force, which --ui-scale may have given instead of the saved one.
+    void setUiScale(int percent);
     // True once after the display choices in force have changed.
     bool takeDisplayChanged();
     // Reads the saved display choices without a panel, for the game's start.
@@ -100,7 +107,8 @@ private:
     void makeTaller();
     // Replaces the game's slider with radio buttons for its levels, and adds Ambient Occlusion's under them.
     void addSmoothEdgeRows();
-    int addRadioRow(int group, std::uint32_t id, int top, const std::string& text);
+    void addUiSizeRows();
+    int addRadioRow(int group, std::uint32_t id, int top, const std::string& text, int left = 0);
     void addGroupTitle(int group, int top, const std::string& text);
 
     ts2::ui::Screen& screen_;
