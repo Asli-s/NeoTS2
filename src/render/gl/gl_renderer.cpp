@@ -207,16 +207,23 @@ bool GlRenderer::drawToFile(const Camera& camera, unsigned width, unsigned heigh
 }
 
 std::optional<scene::Image> GlRenderer::drawInstancesToImage(const Camera& camera, unsigned width, unsigned height,
-                                                             const scene::ObjectLighting& lighting) {
+                                                             std::optional<scene::ObjectLighting> lighting) {
     // Back to the scene's own drawing afterwards, even if drawing throws.
     struct Restore {
         GlRenderer& r;
-        std::optional<scene::ObjectLighting> lighting;
+        std::optional<std::optional<scene::ObjectLighting>> lighting;
         ~Restore() {
-            r.objectLighting_ = std::move(lighting);
+            if (lighting) {
+                r.objectLighting_ = std::move(*lighting);
+            }
             r.instancesOnly_ = false;
+            r.ownLights_ = false;
         }
-    } restore{*this, std::exchange(objectLighting_, lighting)};
+    } restore{*this, {}};
+    if (lighting) {
+        restore.lighting = std::exchange(objectLighting_, std::move(lighting));
+        ownLights_ = true;
+    }
     instancesOnly_ = true;
     scene::Image image;
     const bool drawn = drawOffscreen(camera, width, height, image);

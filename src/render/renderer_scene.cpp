@@ -172,6 +172,113 @@ void SdlGpuRenderer::addMeshes(const scene::Scene& scene) {
     gpu_->meshes.insert(gpu_->meshes.end(), std::make_move_iterator(added.begin()), std::make_move_iterator(added.end()));
 }
 
+void SdlGpuRenderer::GpuAddition::release() {
+    for (auto* list : {&textures, &cubes}) {
+        for (auto* t : *list) {
+            if (t) {
+                SDL_ReleaseGPUTexture(device, t);
+            }
+        }
+        list->clear();
+    }
+    for (auto** b : {&buffers.vertices, &buffers.indices, &buffers.skin, &buffers.morphs}) {
+        if (*b) {
+            SDL_ReleaseGPUBuffer(device, *b);
+            *b = nullptr;
+        }
+    }
+    withMips.clear();
+    meshes.clear();
+}
+
+IRenderer::Addition SdlGpuRenderer::prepareAddition(const scene::Scene& add, const std::vector<int>& shared) const {
+    auto a = std::make_unique<GpuAddition>();
+    a->device = device_;
+    a->materials = add.materials.size();
+    MeshData data;
+    for (const auto& mesh : add.meshes) {
+        a->meshes.push_back(packMesh(mesh, add.materials.size(), 0, data));
+    }
+    if (data.tooBig) {
+        diag::warning("renderer: added meshes are too big for one GPU buffer; some are left out");
+    }
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+    if (cmd == nullptr) {
+        throw sdlError("GPU command buffer");
+    }
+    UploadPass pass(device_, cmd);
+    for (std::size_t i = 0; i < add.images.size(); ++i) {
+        if (i < shared.size() && shared[i] >= 0) {
+            continue;
+        }
+        const auto& image = add.images[i];
+        a->textures.push_back(complete(image) ? uploadTexture(device_, pass, image, true, a->withMips) : nullptr);
+    }
+    for (const auto& cube : add.envCubes) {
+        a->cubes.push_back(uploadCube(device_, pass, cube));
+    }
+    if (!data.indices.empty()) {
+        a->buffers.vertices = filledBuffer(device_, pass, SDL_GPU_BUFFERUSAGE_VERTEX, data.vertices.data(),
+                                           static_cast<Uint32>(data.vertices.size() * sizeof(float)));
+        a->buffers.indices = filledBuffer(device_, pass, SDL_GPU_BUFFERUSAGE_INDEX, data.indices.data(),
+                                          static_cast<Uint32>(data.indices.size() * sizeof(std::uint32_t)));
+        if (!data.skin.empty()) {
+            a->buffers.skin = filledBuffer(device_, pass, SDL_GPU_BUFFERUSAGE_VERTEX, data.skin.data(), static_cast<Uint32>(data.skin.size()));
+        }
+        if (!data.morphs.empty()) {
+            a->buffers.morphs = filledBuffer(device_, pass, SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, data.morphs.data(),
+                                             static_cast<Uint32>(data.morphs.size() * sizeof(float)));
+        }
+    }
+    pass.end();
+    SDL_SubmitGPUCommandBuffer(cmd);
+    return a;
+}
+
+void SdlGpuRenderer::addPrepared(const scene::Scene& scene, Addition addition) {
+    auto* a = dynamic_cast<GpuAddition*>(addition.get());
+    // It fits only when what it brings is exactly what the scene has gained past what is drawn.
+    const bool fits = a != nullptr && gpu_ && a->device == device_ && gpu_->textures.size() + a->textures.size() == scene.images.size() &&
+                      gpu_->envCubes.size() + a->cubes.size() == scene.envCubes.size() &&
+                      gpu_->meshes.size() + a->meshes.size() == scene.meshes.size() && scene.materials.size() >= a->materials &&
+                      materials_.size() <= scene.materials.size() - a->materials;
+    if (!fits) {
+        addition.reset();
+        addMaterials(scene);
+        addMeshes(scene);
+        return;
+    }
+    gpu_->textures.insert(gpu_->textures.end(), a->textures.begin(), a->textures.end());
+    gpu_->envCubes.insert(gpu_->envCubes.end(), a->cubes.begin(), a->cubes.end());
+    a->textures.clear();
+    a->cubes.clear();
+    const auto firstMaterial = static_cast<int>(scene.materials.size() - a->materials);
+    materials_.insert(materials_.end(), scene.materials.begin() + static_cast<std::ptrdiff_t>(materials_.size()), scene.materials.end());
+    const auto set = static_cast<std::uint32_t>(gpu_->meshBuffers.size());
+    gpu_->meshBuffers.push_back(a->buffers);
+    a->buffers = {};
+    for (auto& mesh : a->meshes) {
+        for (auto& p : mesh.primitives) {
+            p.buffers = set;
+            if (p.material >= 0) {
+                p.material += firstMaterial;
+            }
+        }
+    }
+    gpu_->meshes.insert(gpu_->meshes.end(), std::make_move_iterator(a->meshes.begin()), std::make_move_iterator(a->meshes.end()));
+    a->meshes.clear();
+    // SDL makes mip levels with pipelines it keeps without a lock: only here, on the drawing thread.
+    if (!a->withMips.empty()) {
+        if (SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_)) {
+            for (auto* t : a->withMips) {
+                SDL_GenerateMipmapsForGPUTexture(cmd, t);
+            }
+            SDL_SubmitGPUCommandBuffer(cmd);
+        }
+        a->withMips.clear();
+    }
+}
+
 void SdlGpuRenderer::setImages(const scene::Scene& scene, const std::vector<int>& indexes, bool fade) {
     if (indexes.empty()) {
         return;

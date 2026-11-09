@@ -483,6 +483,28 @@ void GlRenderer::setSkybox(const std::vector<scene::Image>& faces) {
     gpu_->skybox = fresh;
 }
 
+void GlRenderer::setNeighborhoodSky(const std::vector<scene::Image>& faces) {
+    if (gpu_->skyCube.id == 0) {
+        return;
+    }
+    Texture fresh = uploadCube(faces, true);
+    if (fresh.id == 0) {
+        return;
+    }
+    release(gpu_->skyCube);
+    gpu_->skyCube = fresh;
+}
+
+void GlRenderer::setTerrainLightMap(const scene::Image& lightMap) {
+    if (gpu_->terrainLight.id == 0 || !complete(lightMap)) {
+        return;
+    }
+    // Wrapping and one level, as the terrain's first light map was uploaded.
+    Texture fresh = uploadTexture(lightMap, false);
+    release(gpu_->terrainLight);
+    gpu_->terrainLight = fresh;
+}
+
 void GlRenderer::releaseSprites() {
     for (auto& t : spriteTextures_) {
         release(t);

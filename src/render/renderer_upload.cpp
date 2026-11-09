@@ -8,6 +8,7 @@
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <functional>
@@ -66,8 +67,65 @@ SDL_GPUBuffer* filledBuffer(SDL_GPUDevice* device, UploadPass& pass, SDL_GPUBuff
     return b.keep();
 }
 
+namespace {
+
+// The GPU's compressed format for an image's DXT levels, or none when the GPU can't sample it. The
+// largest level's sides must be whole blocks.
+SDL_GPUTextureFormat blockFormat(SDL_GPUDevice* device, const scene::Image& image) {
+    if (image.blockLevels.empty() || image.width % 4 != 0 || image.height % 4 != 0) {
+        return SDL_GPU_TEXTUREFORMAT_INVALID;
+    }
+    const SDL_GPUTextureFormat format = image.blockFormat == scene::kDxt1   ? SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM
+                                        : image.blockFormat == scene::kDxt3 ? SDL_GPU_TEXTUREFORMAT_BC2_RGBA_UNORM
+                                        : image.blockFormat == scene::kDxt5 ? SDL_GPU_TEXTUREFORMAT_BC3_RGBA_UNORM
+                                                                 : SDL_GPU_TEXTUREFORMAT_INVALID;
+    if (format == SDL_GPU_TEXTUREFORMAT_INVALID || !SDL_GPUTextureSupportsFormat(device, format, SDL_GPU_TEXTURETYPE_2D, SDL_GPU_TEXTUREUSAGE_SAMPLER)) {
+        return SDL_GPU_TEXTUREFORMAT_INVALID;
+    }
+    return format;
+}
+
+// An image drawn from its DXT levels as the file stores them, every level its own.
+SDL_GPUTexture* uploadBlocks(SDL_GPUDevice* device, UploadPass& pass, const scene::Image& image, SDL_GPUTextureFormat format) {
+    const auto levels = static_cast<Uint32>(image.blockLevels.size());
+    SDL_GPUTextureCreateInfo info{};
+    info.type = SDL_GPU_TEXTURETYPE_2D;
+    info.format = format;
+    info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    info.width = image.width;
+    info.height = image.height;
+    info.layer_count_or_depth = 1;
+    info.num_levels = levels;
+    Filling<SDL_GPUTexture> texture(device, SDL_CreateGPUTexture(device, &info), "GPU texture");
+    for (Uint32 level = 0; level < levels; ++level) {
+        const auto& blocks = image.blockLevels[level];
+        const SDL_GPUTransferBufferLocation at = pass.stage(blocks.data(), static_cast<Uint32>(blocks.size()));
+        if (at.transfer_buffer == nullptr) {
+            throw sdlError("GPU upload buffer");
+        }
+        SDL_GPUTextureTransferInfo from{};
+        from.transfer_buffer = at.transfer_buffer;
+        from.offset = at.offset;
+        from.pixels_per_row = std::max(1u, image.width >> level);
+        from.rows_per_layer = std::max(1u, image.height >> level);
+        SDL_GPUTextureRegion to{};
+        to.texture = texture.get();
+        to.mip_level = level;
+        to.w = from.pixels_per_row;
+        to.h = from.rows_per_layer;
+        to.d = 1;
+        SDL_UploadToGPUTexture(pass.copy(), &from, &to, false);
+    }
+    return texture.keep();
+}
+
+} // namespace
+
 SDL_GPUTexture* uploadTexture(SDL_GPUDevice* device, UploadPass& pass, const scene::Image& image, bool mips,
                               std::vector<SDL_GPUTexture*>& withMips) {
+    if (const SDL_GPUTextureFormat format = mips ? blockFormat(device, image) : SDL_GPU_TEXTUREFORMAT_INVALID; format != SDL_GPU_TEXTUREFORMAT_INVALID) {
+        return uploadBlocks(device, pass, image, format);
+    }
     const bool own = mips && ownLevels(image);
     const Uint32 levels = mips ? static_cast<Uint32>(std::floor(std::log2(std::max(image.width, image.height)))) + 1 : 1;
     SDL_GPUTextureCreateInfo info{};
@@ -207,8 +265,10 @@ void SdlGpuRenderer::SceneGpu::release(SDL_GPUDevice* device) {
 }
 
 IRenderer::Prepared SdlGpuRenderer::prepare(const scene::Scene& scene) const {
+    static std::atomic<std::uint64_t> serials{0};
     auto p = std::make_unique<GpuPrepared>();
     p->device = device_;
+    p->serial = ++serials;
     p->gpu = std::make_unique<SceneGpu>();
     p->gpu->upload(device_, scene, p->withMips);
     copyScene(*p, scene);
@@ -487,6 +547,17 @@ void SdlGpuRenderer::SceneGpu::uploadTerrainTextures(Copy& c, const scene::Paint
                        static_cast<float>(t.cellsX), static_cast<float>(t.cellsY), t.lightMap.width ? t.lightMapScale : 1.0f, t.litFrom,
                        t.gradientDepth, 0, 0, 0};
     terrainGradient = c.plain(t.underwaterGradient.width ? t.underwaterGradient : c.whiteImage, false);
+    // Its first column, row by row, for the objects darkened below the water.
+    const scene::Image& g = t.underwaterGradient;
+    const std::size_t rows = complete(g) && g.width > 0 ? std::min<std::size_t>(g.height, kUnderwaterRows) : 0;
+    for (std::size_t r = 0; r < rows; ++r) {
+        for (std::size_t k = 0; k < 4; ++k) {
+            underwaterRows[r][k] = g.rgba[r * g.width * 4 + k] / 255.0f;
+        }
+    }
+    const bool usable = rows > 0 && std::isfinite(t.litFrom) && std::isfinite(t.gradientDepth) && t.gradientDepth > 0;
+    poolStyleSea = t.poolStyleSea;
+    underwater = {t.litFrom, t.gradientDepth, usable ? static_cast<float>(rows) : 0.0f, poolStyleSea ? 1.0f : 0.0f};
 }
 
 // The water sheet: a quad per wet tile at the water level, texture coordinates in tiles, with its
@@ -503,8 +574,14 @@ void SdlGpuRenderer::SceneGpu::uploadWater(Copy& c, const scene::PaintedTerrain&
     waterIndexCount = static_cast<unsigned>(wi.size());
     waterLevel = t.waterLevel;
     ripples = c.plain(t.ripples, true);
-    // The sky cube map: six faces of one size.
-    const auto& face = t.sky.front();
+    skyCube = uploadSkyCube(c, t.sky);
+    waterUniforms = {{t.reflectionTint[0], t.reflectionTint[1], t.reflectionTint[2], t.reflectionStrength}, {0, 0},
+                     t.reflectionOffset, t.rippleScale, t.rippleSpeed, 0, {0, 0}};
+}
+
+// The neighborhood's sky cube map with its mip levels: six faces of one size.
+SDL_GPUTexture* SdlGpuRenderer::SceneGpu::uploadSkyCube(Copy& c, const std::vector<scene::Image>& sky) {
+    const auto& face = sky.front();
     const Uint32 skyLevels = static_cast<Uint32>(std::floor(std::log2(std::max(face.width, face.height)))) + 1;
     SDL_GPUTextureCreateInfo info{};
     info.type = SDL_GPU_TEXTURETYPE_CUBE;
@@ -514,10 +591,10 @@ void SdlGpuRenderer::SceneGpu::uploadWater(Copy& c, const scene::PaintedTerrain&
     info.height = face.height;
     info.layer_count_or_depth = 6;
     info.num_levels = skyLevels;
-    skyCube = made(SDL_CreateGPUTexture(c.device, &info), "GPU texture");
+    SDL_GPUTexture* skyCube = made(SDL_CreateGPUTexture(c.device, &info), "GPU texture");
     for (Uint32 l = 0; l < 6; ++l) {
         SDL_GPUTextureTransferInfo from{};
-        c.stage(from, t.sky[l].rgba.data(), static_cast<Uint32>(t.sky[l].rgba.size()));
+        c.stage(from, sky[l].rgba.data(), static_cast<Uint32>(sky[l].rgba.size()));
         from.pixels_per_row = face.width;
         from.rows_per_layer = face.height;
         SDL_GPUTextureRegion to{};
@@ -529,8 +606,7 @@ void SdlGpuRenderer::SceneGpu::uploadWater(Copy& c, const scene::PaintedTerrain&
         SDL_UploadToGPUTexture(c.pass.copy(), &from, &to, false);
     }
     c.withMips.push_back(skyCube);
-    waterUniforms = {{t.reflectionTint[0], t.reflectionTint[1], t.reflectionTint[2], t.reflectionStrength}, {0, 0},
-                     t.reflectionOffset, t.rippleScale, t.rippleSpeed, 0, {0, 0}};
+    return skyCube;
 }
 
 // The roads: a quad per tile, split like the terrain's tiles.
@@ -551,14 +627,26 @@ void SdlGpuRenderer::SceneGpu::uploadRoads(Copy& c, const scene::PaintedTerrain&
     lightMapSize = t.lightMapScale * t.tileSize;
 }
 
-// The lot imposters: all parts in one buffer, each drawn with its own texture.
+// The lot imposters: all parts in one buffer, each drawn with its own texture. Textures already
+// uploaded are kept.
+SDL_GPUTexture* SdlGpuRenderer::SceneGpu::uploadImposterTexture(Copy& c, const scene::Image& image) {
+    // High's pictures bring only their DXT5 blocks, a level each.
+    if (const SDL_GPUTextureFormat format = image.rgba.empty() && image.blockLevels.size() == 1 ? blockFormat(c.device, image) : SDL_GPU_TEXTUREFORMAT_INVALID;
+        format != SDL_GPU_TEXTUREFORMAT_INVALID) {
+        return uploadBlocks(c.device, c.pass, image, format);
+    }
+    scene::Image decoded;
+    return c.plain(withPixels(image, decoded), false);
+}
+
 void SdlGpuRenderer::SceneGpu::uploadImposters(Copy& c, const scene::PaintedTerrain& t) {
-    for (const auto& image : t.imposterTextures) {
-        imposterTextures.push_back(c.plain(image, false));
+    for (std::size_t i = imposterTextures.size(); i < t.imposterTextures.size(); ++i) {
+        imposterTextures.push_back(uploadImposterTexture(c, t.imposterTextures[i]));
     }
     const ImposterMesh parts = imposterParts(t);
     const auto& iv = parts.mesh.vertices;
     const auto& ii = parts.mesh.indices;
+    imposterDraws.clear();
     for (const auto& part : parts.draws) {
         ImposterDraw draw{part.kind};
         draw.lot = part.lot;
@@ -574,6 +662,64 @@ void SdlGpuRenderer::SceneGpu::uploadImposters(Copy& c, const scene::PaintedTerr
     }
     imposterVertices = c.buffer(SDL_GPU_BUFFERUSAGE_VERTEX, iv.data(), static_cast<Uint32>(iv.size() * sizeof(float)));
     imposterIndices = c.buffer(SDL_GPU_BUFFERUSAGE_INDEX, ii.data(), static_cast<Uint32>(ii.size() * sizeof(std::uint32_t)));
+}
+
+SdlGpuRenderer::GpuImposterTextures::~GpuImposterTextures() {
+    for (auto* t : textures) {
+        SDL_ReleaseGPUTexture(device, t);
+    }
+}
+
+IRenderer::ImposterTextures SdlGpuRenderer::prepareImposterTextures(const scene::SharedImages& images) const {
+    auto ahead = std::make_unique<GpuImposterTextures>();
+    ahead->device = device_;
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+    if (cmd == nullptr) {
+        return {};
+    }
+    std::vector<SDL_GPUTexture*> withMips;
+    UploadPass pass(device_, cmd);
+    SceneGpu::Copy c{device_, pass, withMips};
+    for (const auto& image : images) {
+        ahead->textures.push_back(SceneGpu::uploadImposterTexture(c, image));
+    }
+    pass.end();
+    SDL_SubmitGPUCommandBuffer(cmd);
+    return ahead;
+}
+
+void SdlGpuRenderer::addImposters(const scene::Scene& scene, ImposterTextures ahead) {
+    if (!gpu_ || !scene.terrain || scene.terrain->imposterTextures.size() < gpu_->imposterTextures.size()) {
+        setSurroundings(scene);
+        return;
+    }
+    SceneGpu& g = *gpu_;
+    // Textures uploaded ahead stand for the gained ones, so that only the parts go up now.
+    if (auto* given = dynamic_cast<GpuImposterTextures*>(ahead.get());
+        given != nullptr && given->device == device_ && g.imposterTextures.size() + given->textures.size() == scene.terrain->imposterTextures.size()) {
+        g.imposterTextures.insert(g.imposterTextures.end(), given->textures.begin(), given->textures.end());
+        given->textures.clear();
+    }
+    for (auto** b : {&g.imposterVertices, &g.imposterIndices}) {
+        if (*b) {
+            SDL_ReleaseGPUBuffer(device_, *b);
+            *b = nullptr;
+        }
+    }
+    g.imposterDraws.clear();
+    if (scene.terrain->imposters.empty()) {
+        return;
+    }
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+    if (cmd == nullptr) {
+        throw sdlError("GPU command buffer");
+    }
+    std::vector<SDL_GPUTexture*> withMips;
+    UploadPass pass(device_, cmd);
+    SceneGpu::Copy c{device_, pass, withMips};
+    g.uploadImposters(c, *scene.terrain);
+    pass.end();
+    SDL_SubmitGPUCommandBuffer(cmd);
 }
 
 void SdlGpuRenderer::setSurroundings(const scene::Scene& scene) {
@@ -621,6 +767,52 @@ void SdlGpuRenderer::SceneGpu::uploadBoundary(Copy& c, const scene::Scene& scene
     const auto& ci = curtain.indices;
     clipVertices = c.buffer(SDL_GPU_BUFFERUSAGE_VERTEX, cv.data(), static_cast<Uint32>(cv.size() * sizeof(float)));
     clipIndices = c.buffer(SDL_GPU_BUFFERUSAGE_INDEX, ci.data(), static_cast<Uint32>(ci.size() * sizeof(std::uint32_t)));
+}
+
+void SdlGpuRenderer::setTerrainLightMap(const scene::Image& lightMap) {
+    if (gpu_->terrainLight == nullptr || !complete(lightMap)) {
+        return;
+    }
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+    if (cmd == nullptr) {
+        throw sdlError("GPU command buffer");
+    }
+    SDL_GPUTexture* fresh = nullptr;
+    {
+        std::vector<SDL_GPUTexture*> withMips;
+        UploadPass pass(device_, cmd);
+        SceneGpu::Copy c{device_, pass, withMips};
+        fresh = c.array(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, lightMap.width, lightMap.height, 1, 1, 4,
+                        [&](Uint32) { return lightMap.rgba.data(); });
+        pass.end();
+    }
+    SDL_SubmitGPUCommandBuffer(cmd);
+    // SDL frees a released texture once the frames drawing with it are done.
+    SDL_ReleaseGPUTexture(device_, std::exchange(gpu_->terrainLight, fresh));
+}
+
+void SdlGpuRenderer::setNeighborhoodSky(const std::vector<scene::Image>& faces) {
+    if (gpu_->skyCube == nullptr || faces.size() != 6 || faces.front().width == 0 || faces.front().width != faces.front().height ||
+        !std::all_of(faces.begin(), faces.end(), [&](const scene::Image& f) {
+            return f.width == faces.front().width && f.height == faces.front().height && complete(f);
+        })) {
+        return;
+    }
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+    if (cmd == nullptr) {
+        throw sdlError("GPU command buffer");
+    }
+    SDL_GPUTexture* fresh = nullptr;
+    {
+        std::vector<SDL_GPUTexture*> withMips;
+        UploadPass pass(device_, cmd);
+        SceneGpu::Copy c{device_, pass, withMips};
+        fresh = SceneGpu::uploadSkyCube(c, faces);
+        pass.end();
+    }
+    SDL_GenerateMipmapsForGPUTexture(cmd, fresh);
+    SDL_SubmitGPUCommandBuffer(cmd);
+    SDL_ReleaseGPUTexture(device_, std::exchange(gpu_->skyCube, fresh));
 }
 
 } // namespace ts2::render

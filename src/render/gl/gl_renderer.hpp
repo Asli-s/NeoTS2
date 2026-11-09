@@ -25,13 +25,10 @@
 
 namespace ts2::render {
 
-// Draws a Scene with OpenGL 2.1 (and a few common extensions), for systems that have no more.
-// Shaders are GLSL 1.20 made from the same HLSL the SDL GPU renderer uses (see CMakeLists.txt).
-//
-// A context is current on one thread at a time, and only the thread that draws makes calls on its own.
-// Where the driver can share objects between contexts, prepare() makes its textures and buffers in
-// a context of its own on the thread it is called from. Where it can't, prepare() only gathers what to
-// upload and swap() uploads it. Everything else that touches the GPU is on the drawing thread.
+// Draws a Scene with OpenGL 2.1 (and a few common extensions) for systems that have no more, with
+// GLSL 1.20 shaders made from the SDL GPU renderer's HLSL (see CMakeLists.txt). All GPU work is on the
+// drawing thread, except that where the driver shares objects between contexts, prepare() uploads in a
+// context of its own on its caller's thread. Elsewhere prepare() only gathers uploads for swap().
 class GlRenderer final : public RendererState, private ResourceQuery {
 public:
     GlRenderer(platform::Window& window, const std::filesystem::path& shaderFolder);
@@ -47,7 +44,7 @@ public:
     [[nodiscard]] bool draw(const Camera& camera) override;
     [[nodiscard]] bool drawToFile(const Camera& camera, unsigned width, unsigned height, const std::filesystem::path& path) override;
     [[nodiscard]] std::optional<scene::Image> drawInstancesToImage(const Camera& camera, unsigned width, unsigned height,
-                                                                   const scene::ObjectLighting& lighting) override;
+                                                                   std::optional<scene::ObjectLighting> lighting) override;
     std::string backend() const override { return "opengl"; }
     std::string device() const override;
     void benchmark(const Camera& camera, unsigned width, unsigned height, int frames) override;
@@ -56,6 +53,8 @@ public:
     void setImages(const scene::Scene& scene, const std::vector<int>& indexes, bool fade = false) override;
     void setLightMapFade(float fade) override;
     void setSkybox(const std::vector<scene::Image>& faces) override;
+    void setTerrainLightMap(const scene::Image& lightMap) override;
+    void setNeighborhoodSky(const std::vector<scene::Image>& faces) override;
     void setSurroundings(const scene::Scene& scene) override;
 
 private:

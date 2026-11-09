@@ -123,7 +123,7 @@ struct LotView {
         case Key::X:
         case Key::PadPlus:
         case Key::PadMinus:
-            if (!orbit.lotKeys) {
+            if (!((key == Key::Z || key == Key::X) ? orbit.levelKeys : orbit.lotKeys)) {
                 return false;
             }
             // Each press, and each repeat while held, is one zoom level.
@@ -171,30 +171,37 @@ inline void placeLights(ts2::scene::ObjectLighting& lighting, const ts2::scene::
 }
 
 // Moves a scene's images, materials, meshes, instances, walls, light maps and object lighting into
-// another, its instances moved by `place`.
-inline void appendScene(ts2::scene::Scene& out, ts2::scene::Scene add, const ts2::scene::Transform& place) {
+// another, its instances moved by `place`. `imageAt`, when given, names for each of its images one
+// already in `out` to use instead (-1 to move it in as well).
+inline void appendScene(ts2::scene::Scene& out, ts2::scene::Scene add, const ts2::scene::Transform& place,
+                        const std::vector<int>* imageAt = nullptr) {
     using namespace ts2::scene;
-    const int images = static_cast<int>(out.images.size()), materials = static_cast<int>(out.materials.size());
+    const int materials = static_cast<int>(out.materials.size());
     const int meshes = static_cast<int>(out.meshes.size()), walls = static_cast<int>(out.walls.size());
     const std::size_t instances = out.instances.size();
     const int lightSets = static_cast<int>(out.lightSets.size());
     const int envCubes = static_cast<int>(out.envCubes.size());
     out.envCubes.insert(out.envCubes.end(), std::make_move_iterator(add.envCubes.begin()), std::make_move_iterator(add.envCubes.end()));
-    out.images.insert(out.images.end(), std::make_move_iterator(add.images.begin()), std::make_move_iterator(add.images.end()));
+    std::vector<int> imageWhere(add.images.size());
+    for (std::size_t i = 0; i < add.images.size(); ++i) {
+        const int there = imageAt != nullptr && i < imageAt->size() ? (*imageAt)[i] : -1;
+        if (there >= 0 && static_cast<std::size_t>(there) < out.images.size()) {
+            imageWhere[i] = there;
+        } else {
+            imageWhere[i] = static_cast<int>(out.images.size());
+            out.images.push_back(std::move(add.images[i]));
+        }
+    }
+    // An image index of the added scene in `out` (-1 stays none).
+    auto image = [&](int i) { return i >= 0 && static_cast<std::size_t>(i) < imageWhere.size() ? imageWhere[static_cast<std::size_t>(i)] : -1; };
     for (Material& m : add.materials) {
-        if (m.image >= 0) {
-            m.image += images;
-        }
-        if (m.normalMap >= 0) {
-            m.normalMap += images;
-        }
-        if (m.causticsImage >= 0) {
-            m.causticsImage += images;
-        }
+        m.image = image(m.image);
+        m.normalMap = image(m.normalMap);
+        m.causticsImage = image(m.causticsImage);
+        m.mask = image(m.mask);
+        m.detail = image(m.detail);
         for (int& ripple : m.ripples) {
-            if (ripple >= 0) {
-                ripple += images;
-            }
+            ripple = image(ripple);
         }
         if (m.envCube >= 0) {
             m.envCube += envCubes;
@@ -216,12 +223,8 @@ inline void appendScene(ts2::scene::Scene& out, ts2::scene::Scene add, const ts2
         if (i.shadowMesh >= 0) {
             i.shadowMesh += meshes;
         }
-        if (i.lightMap >= 0) {
-            i.lightMap += images;
-        }
-        if (i.incidenceMap >= 0) {
-            i.incidenceMap += images;
-        }
+        i.lightMap = image(i.lightMap);
+        i.incidenceMap = image(i.incidenceMap);
         i.transform = place * i.transform;
         for (auto& w : i.walls) {
             w += walls;
@@ -269,15 +272,11 @@ inline void appendScene(ts2::scene::Scene& out, ts2::scene::Scene add, const ts2
         auto& maps = out.lightMaps.emplace(std::move(*add.lightMaps));
         for (auto* list : {&maps.floors, &maps.floorIncidence}) {
             for (auto& f : *list) {
-                if (f >= 0) {
-                    f += images;
-                }
+                f = image(f);
             }
         }
         for (auto* one : {&maps.walls, &maps.wallIncidence}) {
-            if (*one >= 0) {
-                *one += images;
-            }
+            *one = image(*one);
         }
     }
     if (add.objectLighting && !out.objectLighting) {
@@ -321,15 +320,15 @@ inline void appendScene(ts2::scene::Scene& out, ts2::scene::Scene add, const ts2
     }
 }
 
-// A lot shown as the game's lot view shows it: the lot itself where its imposter stood, and around
-// it, within the skirt's area, the ground around a lot (`skirt`, in world coordinates), the other
-// lots' imposters and the neighborhood's plants. The neighborhood's own far-view ground, water and
-// roads are not drawn. The neighborhood's plants and decorations are the scene's first instances
-// and the skirt's follow them: `decorations` receives how many the first are, `surroundings` how
-// many both are.
+// A lot as the game's lot view shows it: the lot where its imposter stood and, within the skirt's area,
+// the ground around it (`skirt`, world coordinates), other lots' imposters and the neighborhood's plants,
+// but not the far-view ground, water and roads. The neighborhood's plants and decorations come first in
+// the scene, then the skirt's. `decorations` gets how many the first are, `surroundings` how many both
+// are, and `lotFirstImage` where the lot's own images start.
 inline ts2::scene::Scene lotInNeighborhood(const ts2::scene::Scene& hood, ts2::scene::Scene lot, ts2::scene::Scene skirt,
                                            const ts2::scene::LotFootprint& where, const ts2::scene::SkirtArea& area,
-                                           std::size_t* decorations = nullptr, std::size_t* surroundings = nullptr) {
+                                           std::size_t* decorations = nullptr, std::size_t* surroundings = nullptr,
+                                           std::size_t* lotFirstImage = nullptr) {
     using namespace ts2::scene;
     Scene out;
     out.terrain = hood.terrain;
@@ -343,27 +342,42 @@ inline ts2::scene::Scene lotInNeighborhood(const ts2::scene::Scene& hood, ts2::s
     Scene plants = hood;
     plants.terrain.reset();
     plants.objectLighting.reset();  // the lot's lighting state lights everything in lot view
+    // The lot's own imposter objects go with its imposter.
     std::erase_if(plants.instances, [&](const Instance& i) {
         const float x = i.transform.m[3], y = i.transform.m[7];
-        return x < ax0 || x > ax1 || y < ay0 || y > ay1 || i.name == ts2::scene::kNeighborhoodPlumbobName;
+        return x < ax0 || x > ax1 || y < ay0 || y > ay1 || i.name == ts2::scene::kNeighborhoodPlumbobName || i.imposterLot == where.id ||
+               i.name == ts2::scene::kNeighborhoodSeaName || i.name == ts2::scene::kNeighborhoodSeaDepthName;
     });
     // They are lit as lot objects outdoors are, always in the sun: the lot's buildings shade nothing
     // beyond the lot. The beach sea mirrors them, as the game's sea reflection draws the
-    // neighborhood's props.
+    // neighborhood's props. Other lots' imposter objects stand on their lots as their imposters do,
+    // without the neighborhood view's lift.
+    const float lift = hood.terrain ? hood.terrain->imposterLift : 0.0f;
     for (auto& i : plants.instances) {
-        i.seaReflected = true;
         i.litOutdoors = true;
         i.sunTest = SunTest::Never;
+        if (i.imposterLot) {
+            i.transform.m[11] -= lift;
+        } else {
+            i.seaReflected = true;
+        }
+    }
+    // The game darkens its partly underwater materials below the water only in the neighborhood view.
+    for (auto& m : plants.materials) {
+        m.partlyUnderwater = false;
     }
     if (decorations != nullptr) {
         *decorations = plants.instances.size();
     }
     appendScene(out, std::move(plants), Transform{});
-    // A beach sea drawn with the pools' caustics (not in the original game) is the skirt's only pool water.
+    // A sea drawn with the pools' caustics (not in the original game) is the skirt's only pool water.
     const bool poolStyleSea = std::any_of(skirt.instances.begin(), skirt.instances.end(), [](const Instance& i) { return i.poolWater; });
     appendScene(out, std::move(skirt), Transform{});
     if (surroundings != nullptr) {
         *surroundings = out.instances.size();
+    }
+    if (lotFirstImage != nullptr) {
+        *lotFirstImage = out.images.size();
     }
     appendScene(out, std::move(lot), where.place);
     if (poolStyleSea) {
@@ -371,6 +385,8 @@ inline ts2::scene::Scene lotInNeighborhood(const ts2::scene::Scene& hood, ts2::s
     }
     if (out.terrain) {
         auto& t = *out.terrain;
+        // The neighborhood view's pool-style sea isn't drawn in lot view, where the skirt brings its own.
+        t.poolStyleSea = false;
         // Other lots' imposters within the area, not this lot's. In lot view the game stands them on
         // their lots, without the neighborhood view's lift.
         std::erase_if(t.imposters, [&](const PaintedTerrain::ImposterPart& p) {
@@ -393,8 +409,8 @@ inline ts2::scene::Scene lotInNeighborhood(const ts2::scene::Scene& hood, ts2::s
     return out;
 }
 
-// The projected shadows of a lot's Sims as just posed: those standing outdoors cast one, centred on
-// their root joint. None without the lot's shadow look.
+// The projected shadows of a lot's Sims as just posed, centred on their root joint: outdoors cast
+// along the sun, indoors straight down onto a quad under them. None without the lot's shadow look.
 inline ts2::render::Shadows simShadows(const ts2::scene::Scene& scene, const ts2::scene::ScenePose& pose) {
     using namespace ts2::scene;
     ts2::render::Shadows out;
@@ -419,9 +435,6 @@ inline ts2::render::Shadows simShadows(const ts2::scene::Scene& scene, const ts2
         }
         const Transform inLot = actor.lotFrame.rigidInverse() * actor.place;
         const int storey = objectlights::lightStorey(scene.floorHeight, inLot, scene.instances[actor.skinned[0].instance].level - scene.groundLevel);
-        if (scene.roomAt(storey, inLot.m[3], inLot.m[7]) != 0) {
-            continue;
-        }
         auto& caster = out.casters.emplace_back();
         for (const auto& s : actor.skinned) {
             caster.instances.push_back(s.instance);
@@ -429,6 +442,12 @@ inline ts2::render::Shadows simShadows(const ts2::scene::Scene& scene, const ts2
         const Transform at = actor.place * nodes[static_cast<std::size_t>(root)];
         caster.root = {at.m[3], at.m[7], at.m[11]};
         caster.level = storey + scene.groundLevel;
+        // Indoors the shadow lies under the root joint at the height the Sim stands at.
+        if (scene.roomAt(storey, inLot.m[3], inLot.m[7]) != 0) {
+            caster.indoor = true;
+            caster.root[2] = actor.place.m[11];
+            caster.forward = {actor.place.m[1], actor.place.m[5], actor.place.m[9]};
+        }
     }
     return out;
 }

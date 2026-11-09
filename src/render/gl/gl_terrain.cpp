@@ -112,7 +112,9 @@ void GlRenderer::uploadTerrain(SceneGpu& gpu, const scene::PaintedTerrain& t) {
         gpu.lightMapSize = t.lightMapScale * t.tileSize;
     }
     if (!t.imposters.empty()) {
-        for (const auto& image : t.imposterTextures) {
+        for (const auto& given : t.imposterTextures) {
+            scene::Image decoded;
+            const scene::Image& image = withPixels(given, decoded);
             gpu.imposterTextures.push_back(uploadTexture(complete(image) ? image : white, false));
         }
         const ImposterMesh parts = imposterParts(t);
@@ -136,7 +138,7 @@ void GlRenderer::uploadTerrain(SceneGpu& gpu, const scene::PaintedTerrain& t) {
 }
 
 // A sky cube map behind everything, looked up by each pixel's ray. `up` is -1 for the rays mirrored
-// in the water.
+// in the water, which are also flipped left to right as the water's mirror image is.
 void GlRenderer::drawSky(const FrameView& f, const Texture& cube, float up) {
     useProgram(sky_);
     State state;
@@ -144,7 +146,7 @@ void GlRenderer::drawSky(const FrameView& f, const Texture& cube, float up) {
     state.depthWrite = false;
     setState(state);
     bindTexture(0, const_cast<Texture&>(cube), GL_CLAMP_TO_EDGE);
-    const std::array<float, 12> camera = skyCamera(f, up);
+    const std::array<float, 12> camera = up < 0 ? mirroredSkyCamera(f) : skyCamera(f, up);
     gl_.Uniform4fv(sky_.fragment, 3, camera.data());
     gl_.BindBuffer(GL_ARRAY_BUFFER, skyVertices_);
     arrayBuffer_ = skyVertices_;
@@ -170,7 +172,9 @@ void GlRenderer::setSurroundings(const scene::Scene& scene) {
     if (scene.terrain && !scene.terrain->imposters.empty()) {
         const auto& t = *scene.terrain;
         const scene::Image white{1, 1, {255, 255, 255, 255}, {}};
-        for (const auto& image : t.imposterTextures) {
+        for (const auto& given : t.imposterTextures) {
+            scene::Image decoded;
+            const scene::Image& image = withPixels(given, decoded);
             gpu.imposterTextures.push_back(uploadTexture(complete(image) ? image : white, false));
         }
         const ImposterMesh parts = imposterParts(t);
@@ -326,7 +330,7 @@ void GlRenderer::drawImposters(const FrameView& f) {
     fadedRoof.depthWrite = false;
     // The terrain first (its shader layer comes before the others'): light map, then texture.
     for (const auto& d : g.imposterDraws) {
-        if (d.kind != Kind::Terrain || boxOutside(f.viewProjection, d.low, d.high)) {
+        if (d.kind != Kind::Terrain || imposterLeftOut(d.lot) || boxOutside(f.viewProjection, d.low, d.high)) {
             continue;
         }
         if (d.lightMap >= 0) {
@@ -337,7 +341,7 @@ void GlRenderer::drawImposters(const FrameView& f) {
     // A fading imposter's walls, roofs and slices take its alpha, its terrain doesn't. Slices keep their
     // blend and depth writes, so their alpha test drops more of them as they fade.
     for (const auto& d : g.imposterDraws) {
-        if (d.kind == Kind::Terrain || boxOutside(f.viewProjection, d.low, d.high)) {
+        if (d.kind == Kind::Terrain || imposterLeftOut(d.lot) || boxOutside(f.viewProjection, d.low, d.high)) {
             continue;
         }
         const float alpha = imposterAlpha(d.lot);
@@ -432,7 +436,8 @@ bool GlRenderer::reflectionReady(unsigned width, unsigned height) {
     return true;
 }
 
-// The neighborhood water's reflection: the sky and the terrain above the water, mirrored in it.
+// The neighborhood water's reflection: the sky and the terrain above the water, mirrored in it and
+// flipped left to right as the game flips it (see poolMirror).
 void GlRenderer::drawReflection(const FrameView& f, unsigned width, unsigned height) {
     const GLuint before = framebuffer_;
     bindFramebuffer(reflectionFramebuffer_);
@@ -448,7 +453,11 @@ void GlRenderer::drawReflection(const FrameView& f, unsigned width, unsigned hei
     // The terrain, mirrored about the water's surface.
     Mat4 flip;
     flip.m = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 2 * gpu_->waterLevel, 0, 0, 0, 1};
-    drawTerrain(f, f.viewProjection * flip, true);
+    Mat4 mirrored = f.viewProjection * flip;
+    for (int c = 0; c < 4; ++c) {
+        mirrored.m[static_cast<std::size_t>(c)] = -mirrored.m[static_cast<std::size_t>(c)];
+    }
+    drawTerrain(f, mirrored, true);
     bindFramebuffer(before);
     state_.reset();
 }
