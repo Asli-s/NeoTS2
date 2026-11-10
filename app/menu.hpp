@@ -13,6 +13,7 @@
 struct MenuOptions {
     int width = 1280, height = 800;
     bool fitScreen = false;      // the window fills the screen's free area instead (see WindowOptions::fitScreen)
+    bool fullscreen = false;     // the game uses the display's fullscreen mode
     std::filesystem::path shot;  // draw one frame to this file and stop
     std::filesystem::path user;  // the game's user folder (Neighborhoods, Downloads, ...)
     bool addNeighborhoods = false;  // add the install's neighborhoods to a user folder with none

@@ -234,6 +234,9 @@ void launcherSettingsRoundTrip() {
     sized.windowSize = "fit-screen";
     const auto fitKept = parseLauncherSettings(formatLauncherSettings(sized));
     CHECK(fitKept && fitKept->windowSize == "fit-screen" && findWindowSize("fit-screen")->fitScreen);
+    sized.windowSize = "fullscreen";
+    const auto fullscreenKept = parseLauncherSettings(formatLauncherSettings(sized));
+    CHECK(fullscreenKept && fullscreenKept->windowSize == "fullscreen" && findWindowSize("fullscreen")->fullscreen);
     sized.windowSize = "800x600";
     CHECK(formatLauncherSettings(sized).find("window-size") == std::string::npos);
     // The UI's size is chosen in the game now, so an older file's ui-scale line is skipped.

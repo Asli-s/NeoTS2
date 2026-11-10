@@ -281,6 +281,11 @@ std::unique_ptr<Window> Window::create(const WindowOptions& options) {
             SDL_ShowWindow(made);
         }
     }
+    if (options.fullscreen && !SDL_SetWindowFullscreen(made, true)) {
+        const std::string error = SDL_GetError();
+        SDL_DestroyWindow(made);
+        throw std::runtime_error(error);
+    }
     std::unique_ptr<Window> window(new Window);
     window->impl_->window = made;
     windows().push_back(window.get());

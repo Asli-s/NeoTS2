@@ -14,9 +14,13 @@ struct WindowSize {
     int width, height;
     // The window fills the screen's free area (all but the taskbar or dock) instead of taking a size.
     bool fitScreen = false;
+    // The game uses the display in macOS fullscreen mode rather than making a window.
+    bool fullscreen = false;
 };
 inline constexpr WindowSize kWindowSizes[] = {
-    {"1280x720", 1280, 720}, {"1920x1080", 1920, 1080}, {"2560x1440", 2560, 1440}, {"fit-screen", 0, 0, true}};
+    {"1280x720", 1280, 720}, {"1920x1080", 1920, 1080}, {"2560x1440", 2560, 1440}, {"fit-screen", 0, 0, true},
+    // The launcher's macOS choices use the 16:10 aspect ratio common to Mac displays.
+    {"1440x900", 1440, 900}, {"1680x1050", 1680, 1050}, {"1920x1200", 1920, 1200}, {"2560x1600", 2560, 1600}, {"fullscreen", 0, 0, false, true}};
 
 // The offered size with this key, null for any other text.
 inline const WindowSize* findWindowSize(std::string_view key) {

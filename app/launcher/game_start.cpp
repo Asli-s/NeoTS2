@@ -26,7 +26,7 @@ std::optional<std::string> exactUtf8(const std::filesystem::path& path) {
 } // namespace
 
 SDL_Process* startGame(const std::filesystem::path& install, const std::filesystem::path& saveFolder, bool addNeighborhoods,
-                       const std::string& renderer, bool smoothFollow, bool poolStylePonds, bool poolStyleSea, bool smoothLotSkirts, int width, int height, bool fitScreen,
+                       const std::string& renderer, bool smoothFollow, bool poolStylePonds, bool poolStyleSea, bool smoothLotSkirts, int width, int height, bool fitScreen, bool fullscreen,
                        std::string& error) {
     const char* base = SDL_GetBasePath();
     const auto baseFolder = base ? paths::pathFromUtf8(base) : std::nullopt;
@@ -79,6 +79,9 @@ SDL_Process* startGame(const std::filesystem::path& install, const std::filesyst
     }
     if (fitScreen) {
         args.push_back("--fit-screen");
+    }
+    if (fullscreen) {
+        args.push_back("--fullscreen");
     }
     args.push_back(nullptr);
     SDL_Process* process = SDL_CreateProcess(args.data(), false);

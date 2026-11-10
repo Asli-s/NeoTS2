@@ -2636,6 +2636,7 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
     windowOptions.highDensity = false;
     windowOptions.hidden = !options.shot.empty();
     windowOptions.fitScreen = options.fitScreen && options.shot.empty();
+    windowOptions.fullscreen = options.fullscreen && options.shot.empty();
     std::unique_ptr<pf::Window> window;
     {
         const auto rendererOwner = app::openRenderer(window, options.backend, windowOptions, shaders, !options.shot.empty());
@@ -2649,7 +2650,7 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
             if (!options.uiScaleGiven) {
                 sized.uiScale = saved.uiScale;
             }
-            if (saved.fullscreen) {
+            if (options.fullscreen || saved.fullscreen) {
                 ts2::platform::setFirstWindowFullscreen(true);
             } else if (saved.width > 0 && !options.sizeGiven && !options.fitScreen) {
                 ts2::platform::resizeFirstWindow(saved.width, saved.height);

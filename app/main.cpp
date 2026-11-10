@@ -1,5 +1,5 @@
 // NeoTS2: opens a saved lot in a window, or shows the game's main menu.
-//   neots2 <install folder> --menu [--user <user folder>] [--size w h | --fit-screen] [--preview n]
+//   neots2 <install folder> --menu [--user <user folder>] [--size w h | --fit-screen | --fullscreen] [--preview n]
 //          [--play n [--bin families|lots|options|gameoptions|chooser|quit] [--lot id] [--click x y] [--card x y]]
 //          [--hover x y (on the neighborhood, or the lot before the picture)] [--ui-click x y | --ui-right-click x y | --ui-hover x y
 //          (on the lot's panels before the picture, repeatable)]
@@ -418,6 +418,8 @@ int main(int argc, char** argv) {
                 i += 2;
             } else if (arg == "--fit-screen") {
                 menu.fitScreen = true;
+            } else if (arg == "--fullscreen") {
+                menu.fullscreen = true;
             } else if (arg == "--ui-scale" && i + 1 < argc) {
                 if (const int scale = std::stoi(argv[++i]); ts2::content::isUiScale(scale)) {
                     menu.uiScale = scale;

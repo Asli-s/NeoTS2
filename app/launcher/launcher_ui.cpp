@@ -538,7 +538,7 @@ void startPlaying(LauncherState& state, bool addNeighborhoods) {
     const settings::WindowSize* size = settings::findWindowSize(state.windowSize);
     state.game = startGame(install.root, folder, addNeighborhoods, builtRenderer(state.renderer), state.smoothFollow, state.poolStylePonds, state.poolStyleSea, state.smoothLotSkirts,
                            size ? size->width : 0,
-                           size ? size->height : 0, size && size->fitScreen, state.message);
+                           size ? size->height : 0, size && size->fitScreen, size && size->fullscreen, state.message);
     state.folderNotes.clear();
 }
 
@@ -761,20 +761,32 @@ void drawRenderer(LauncherState& state, const LauncherFonts& fonts) {
         }
         ImGui::EndCombo();
     }
-    // The window sizes are offered here until the game has its own display settings.
+    // The window sizes are offered here until the game has its own display settings. Mac displays
+    // are normally 16:10, so keep their choices separate from the 16:9 choices on other systems.
     static constexpr const char* kDefaultSize = "Window 1280 x 800 (default)";
-    static constexpr const char* kSizeLabels[] = {"Window 1280 x 720 (720p)", "Window 1920 x 1080 (1080p)", "Window 2560 x 1440 (1440p)",
-                                                  "Fit the screen (windowed)"};
-    static_assert(std::size(kSizeLabels) == std::size(settings::kWindowSizes));
+    struct SizeChoice {
+        const settings::WindowSize* size;
+        const char* label;
+    };
+#ifdef __APPLE__
+    static constexpr SizeChoice kSizeChoices[] = {{&settings::kWindowSizes[4], "Window 1440 x 900"}, {&settings::kWindowSizes[5], "Window 1680 x 1050"},
+                                                   {&settings::kWindowSizes[6], "Window 1920 x 1200"}, {&settings::kWindowSizes[7], "Window 2560 x 1600"},
+                                                   {&settings::kWindowSizes[8], "Full screen"}};
+#else
+    static constexpr SizeChoice kSizeChoices[] = {{&settings::kWindowSizes[0], "Window 1280 x 720 (720p)"},
+                                                   {&settings::kWindowSizes[1], "Window 1920 x 1080 (1080p)"},
+                                                   {&settings::kWindowSizes[2], "Window 2560 x 1440 (1440p)"},
+                                                   {&settings::kWindowSizes[3], "Fit the screen (windowed)"}};
+#endif
 #ifdef _WIN32
     constexpr bool kFitScreenWorks = true;
 #else
     constexpr bool kFitScreenWorks = false;  // the game can't measure its title bar here yet
 #endif
     const char* currentSize = kDefaultSize;
-    for (std::size_t i = 0; i < std::size(kSizeLabels); ++i) {
-        if (state.windowSize == settings::kWindowSizes[i].key) {
-            currentSize = kSizeLabels[i];
+    for (const SizeChoice& choice : kSizeChoices) {
+        if (state.windowSize == choice.size->key) {
+            currentSize = choice.label;
         }
     }
     label("Window size");
@@ -783,12 +795,12 @@ void drawRenderer(LauncherState& state, const LauncherFonts& fonts) {
         if (ImGui::Selectable(kDefaultSize, state.windowSize.empty())) {
             state.windowSize.clear();
         }
-        for (std::size_t i = 0; i < std::size(kSizeLabels); ++i) {
-            const auto& size = settings::kWindowSizes[i];
+        for (const SizeChoice& choice : kSizeChoices) {
+            const auto& size = *choice.size;
             if (size.fitScreen && !kFitScreenWorks) {
                 continue;
             }
-            if (ImGui::Selectable(kSizeLabels[i], state.windowSize == size.key)) {
+            if (ImGui::Selectable(choice.label, state.windowSize == size.key)) {
                 state.windowSize = size.key;
             }
         }

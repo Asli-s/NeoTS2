@@ -85,6 +85,8 @@ struct WindowOptions {
     // taking width and height. Where the system can't say where that area is or how tall the title
     // bar is (so far everywhere but Windows), width and height are kept.
     bool fitScreen = false;
+    // Use the system's fullscreen mode instead of a titled window.
+    bool fullscreen = false;
     std::optional<GlRequest> gl;  // a window to draw in with OpenGL
 };
 
