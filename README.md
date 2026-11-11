@@ -32,10 +32,10 @@ NeoTS2 is in early development and is not yet a complete engine. Currently worki
 Saving is not supported yet.
 
 | Main menu | Neighborhood |
-| --- | --- |
-| ![The main menu](assets/screenshots/main-menu.jpg) | ![Pleasantview with its lots panel](assets/screenshots/neighborhood.webp) |
+| :---: | :---: |
+| ![The main menu](assets/screenshots/main-menu.webp) | ![Veronaville with its families bin](assets/screenshots/neighborhood.webp) |
 | **Lot** | **Sims** |
-| ![A lot with its Sims and live panel](assets/screenshots/lot.webp) | ![The Smiths at home](assets/screenshots/sims.webp) |
+| ![A lot at night with its live panel](assets/screenshots/lot.webp) | ![The Smiths at home](assets/screenshots/sims.webp) |
 
 ## Getting started
 
