@@ -57,6 +57,41 @@ float sunVisible(float depth, float zone) {
     return std::max(1.0f - depth * zone, 0.0f);
 }
 
+Inputs around(const Inputs& in, int margin) {
+    Inputs out;
+    if (margin <= 0 || !in.corner || in.width <= 0 || in.height <= 0 || in.width > kMaxTiles || in.height > kMaxTiles) {
+        return out;
+    }
+    const int w = in.width, h = in.height;
+    out.width = w + 2 * margin;
+    out.height = h + 2 * margin;
+    out.levels = in.levels;
+    out.corner = [corner = in.corner, margin, w, h](int x, int y, int level) {
+        return corner(std::clamp(x - margin, 0, w), std::clamp(y - margin, 0, h), level);
+    };
+    if (in.floorAt) {
+        out.floorAt = [floorAt = in.floorAt, margin, w, h](int x, int y, int level, int quarter) {
+            x -= margin;
+            y -= margin;
+            return x >= 0 && y >= 0 && x < w && y < h && floorAt(x, y, level, quarter);
+        };
+    }
+    out.walls = in.walls;
+    for (auto& wall : out.walls) {
+        wall.x0 += margin;
+        wall.y0 += margin;
+        wall.x1 += margin;
+        wall.y1 += margin;
+    }
+    if (in.drawnGround) {
+        const float m = static_cast<float>(margin), fw = static_cast<float>(w), fh = static_cast<float>(h);
+        out.drawnGround = [drawn = in.drawnGround, m, fw, fh](float x, float y) {
+            return drawn(std::clamp(x - m, 0.0f, fw), std::clamp(y - m, 0.0f, fh));
+        };
+    }
+    return out;
+}
+
 Grid build(const Inputs& in, const std::array<float, 3>& sun) {
     Grid g;
     if (in.width <= 0 || in.height <= 0 || in.width > kMaxTiles || in.height > kMaxTiles || in.levels <= 0 || in.levels > 16 || !in.corner) {

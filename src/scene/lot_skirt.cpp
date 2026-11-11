@@ -2,11 +2,16 @@
 
 #include "content/lot.hpp"
 #include "scene/lot_light_maps.hpp"
+#include "scene/lot_parts.hpp"
+#include "scene/pool_water.hpp"
+#include "scene/terrain_water.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
+#include <string>
 #include <functional>
 #include <limits>
 #include <optional>
@@ -21,23 +26,37 @@ namespace {
 constexpr int kSkirtLayer = -48;
 
 // Not in the original game: a pool-style sea's surface over neighborhood tile (x, y), at the water level,
-// clear but for the view's reflection. It fades out over the last 2 units to the waterline at its
-// corners, so the shallows stay light and it meets the sand unseen. `ground` is the ground's height at a grid point and `toLocal`
-// turns neighborhood coordinates into the mesh's own.
-void addPoolStyleSurface(Primitive& p, const PaintedTerrain& terrain, int x, int y, const std::function<float(int, int)>& ground,
-                         const std::function<void(float (&)[3])>& toLocal) {
-    constexpr float kShoreFade = 2.0f;
+// clear but for the view's reflection, split into `steps` by `steps` quads. It fades out over the last
+// `shoreFade` units of depth to the waterline, so it meets the sand unseen. Each point keeps its depth
+// over that fade past 0 and 1 (the shader clamps it), so the fade follows the waterline across a quad
+// instead of spreading over the whole of it. `groundAt` is the ground's height at a point in
+// neighborhood coordinates and `toLocal` turns those into the mesh's own.
+void addPoolStyleSurface(Primitive& p, const PaintedTerrain& terrain, int x, int y, const std::function<float(float, float)>& groundAt,
+                         const std::function<void(float (&)[3])>& toLocal, float shoreFade, int steps) {
     const float tile = terrain.tileSize, z = terrain.waterLevel;
     const auto base = static_cast<std::uint32_t>(p.positions.size() / 3);
-    for (const auto& [cx, cy] : {std::pair{x, y}, std::pair{x + 1, y}, std::pair{x + 1, y + 1}, std::pair{x, y + 1}}) {
-        float at[3] = {static_cast<float>(cx) * tile, static_cast<float>(cy) * tile, z};
-        toLocal(at);
-        p.positions.insert(p.positions.end(), {at[0], at[1], at[2]});
-        p.normals.insert(p.normals.end(), {0, 0, 1});
-        p.uvs.insert(p.uvs.end(), {0, 0});
-        p.alphas.push_back(std::clamp((z - ground(cx, cy)) / kShoreFade, 0.0f, 1.0f));
+    const auto row = static_cast<std::uint32_t>(steps + 1);
+    for (int j = 0; j <= steps; ++j) {
+        for (int i = 0; i <= steps; ++i) {
+            const float px = (static_cast<float>(x) + static_cast<float>(i) / static_cast<float>(steps)) * tile;
+            const float py = (static_cast<float>(y) + static_cast<float>(j) / static_cast<float>(steps)) * tile;
+            float at[3] = {px, py, z};
+            toLocal(at);
+            p.positions.insert(p.positions.end(), {at[0], at[1], at[2]});
+            p.normals.insert(p.normals.end(), {0, 0, 1});
+            p.uvs.insert(p.uvs.end(), {0, 0});
+            // Kept within a few fades either way, so a cliff beside the water doesn't pull the fade far
+            // across a quad.
+            constexpr float kFurthest = 4;
+            p.alphas.push_back(std::clamp((z - groundAt(px, py)) / shoreFade, -kFurthest, kFurthest));
+        }
     }
-    p.indices.insert(p.indices.end(), {base, base + 1, base + 2, base, base + 2, base + 3});
+    for (std::uint32_t j = 0; j < static_cast<std::uint32_t>(steps); ++j) {
+        for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(steps); ++i) {
+            const std::uint32_t a = base + j * row + i;
+            p.indices.insert(p.indices.end(), {a, a + 1, a + row + 1, a, a + row + 1, a + row});
+        }
+    }
 }
 
 // The sea around a lot: a flat sheet at the neighborhood's water level over each skirt tile with a corner
@@ -46,9 +65,11 @@ void addPoolStyleSurface(Primitive& p, const PaintedTerrain& terrain, int x, int
 // beach lot's uses lotSkirtSea, its first texture coordinate 0.04 per unit of water depth (up to 15).
 // Others use lotSkirtSeaNoReflection: the sky cube along the reflected view times (0.4, 0.6, 0.9), 0.4
 // opaque, unlit, on layer 1 (nhoodWaterLayer). A pool-style sea (not in the original game) uses
-// lotSkirtSea on every lot. `ground` is the skirt's height at a grid point. Returns the tiles covered.
+// lotSkirtSea on every lot. `ground` is the skirt's height at a grid point and `surfaceAt` the ground's
+// drawn height at a point, both in neighborhood coordinates. Returns the tiles covered.
 std::vector<std::array<int, 2>> addSkirtSea(SceneBuilder& builder, const PaintedTerrain& terrain, const LotFootprint& lot, const SkirtArea& area,
-                                            const content::WorldBounds* bounds, const std::function<float(int, int)>& ground) {
+                                            const content::WorldBounds* bounds, const std::function<float(int, int)>& ground,
+                                            const std::function<float(float, float)>& surfaceAt) {
     const bool beachLot = bounds && lot.beachSide;
     const bool poolStyle = builder.poolStyleSea();
     constexpr std::array<float, 3> kSky{0.4f, 0.6f, 0.9f};
@@ -83,7 +104,17 @@ std::vector<std::array<int, 2>> addSkirtSea(SceneBuilder& builder, const Painted
             }
             cells.push_back({x, y});
             if (poolStyle) {
-                addPoolStyleSurface(p, terrain, x, y, ground, toLocal);
+                // Seen close up in lot view, it fades in over the first 1.5 units of depth, so the
+                // bank goes under the water softly. Tiles by the shore are split
+                // finer, so its edge follows the drawn ground's own waterline instead of running
+                // straight from corner to corner.
+                constexpr float kLotShoreFade = 1.5f, kShallow = 2;
+                constexpr int kShoreSteps = 8;
+                bool shore = false;
+                for (const auto& [cx, cy] : {std::pair{x, y}, std::pair{x + 1, y}, std::pair{x + 1, y + 1}, std::pair{x, y + 1}}) {
+                    shore = shore || z - ground(cx, cy) < kShallow;
+                }
+                addPoolStyleSurface(p, terrain, x, y, surfaceAt, toLocal, kLotShoreFade, shore ? kShoreSteps : 1);
                 continue;
             }
             const auto base = static_cast<std::uint32_t>(p.positions.size() / 3);
@@ -127,45 +158,27 @@ std::vector<std::array<int, 2>> addSkirtSea(SceneBuilder& builder, const Painted
     return cells;
 }
 
-// Not in the original game: a lot's sea with a depth colour and the pools' caustics. Ground under water
-// is hazed by depth, a light blue murk thickening fast so the seabed barely shows, dark blue past 0.8
-// down, both fading in over the first unit from the waterline so the shore stays light. Caustics fade
-// in over 1.5 from the waterline and only the haze dims them deeper. Both use the
-// smaller of the real depth and its average over 6 around, so a sudden drop shades in gradually, and
-// over the lot depth counts half (see depthAt). `groundAt` takes neighborhood coordinates. Built in the
-// lot's coordinates as the sea is. Without a lot it is the neighborhood view's sea, built in the
-// neighborhood's coordinates, a quad to a tile on the terrain's own points.
+// Not in the original game: the pools' caustics on the ground under a pool-style sea. They fade in over
+// 1.5 from the waterline, by the smaller of the real depth and its average over 6 around, so a sudden
+// drop shades in gradually, and over the lot depth counts half (see depthAt). The haze over the ground
+// is drawn with the ground itself (scene.frag's poolSeaHaze and terrain.frag), which dims them deeper.
+// `groundAt` takes neighborhood coordinates. Built in the lot's coordinates as the sea is. Without a
+// lot it is the neighborhood view's sea, built in the neighborhood's coordinates, a quad to a tile on
+// the terrain's own points.
 void addPoolStyleSea(SceneBuilder& builder, const PaintedTerrain& terrain, const LotFootprint* lot, const std::vector<std::array<int, 2>>& cells,
                      const std::function<float(float, float)>& groundAt) {
     // Quads a neighborhood tile is split into each way: over and beside the lot four to a lot tile,
     // on the points the lot's terrain is drawn through (its ground can drop steeply within a tile),
     // 2 apart elsewhere.
     constexpr int kLotSteps = 40, kSteps = 5;
-    // The caustics reach full strength this deep, and the haze is fully there this deep.
-    constexpr float kCausticsFade = 1.5f, kHazeFade = 1;
-    // The haze and the caustics lie this far off the ground, out along its normal, so they stay in
-    // front of it on steep faces too.
+    // The caustics reach full strength this deep.
+    constexpr float kCausticsFade = 1.5f;
+    // The caustics lie this far off the ground, out along its normal, so they stay in front of it on
+    // steep faces too.
     constexpr float kLift = 0.03f;
-    // The two hazes: colour, most opacity, the depth they start at and how deep they take to
-    // reach about two thirds of it. scene.frag's poolSeaHaze hazes objects in the neighborhood view
-    // the same way, so keep the two alike.
-    struct Haze {
-        std::array<float, 3> color;
-        float most, from, scale;
-    };
-    constexpr std::array<Haze, 2> kHazes{{{{0.3f, 0.52f, 0.68f}, 0.9f, 0, 0.8f}, {{0.02f, 0.08f, 0.24f}, 0.95f, 0.8f, 2}}};
     const float tile = terrain.tileSize, sea = terrain.waterLevel;
     const Transform toLot = lot ? lot->place.rigidInverse() : Transform{};
     Surfaces surfaces;
-    std::array<int, 2> hazeMaterials{};
-    for (std::size_t k = 0; k < kHazes.size(); ++k) {
-        // Under the sea's surface (layer 6), the deeper haze drawn over the shallower one.
-        const auto& c = kHazes[k].color;
-        hazeMaterials[k] = builder.blendedColorMaterial("seaHaze-" + std::to_string(k + 1), {c[0], c[1], c[2], 1}, 3 + 2 * static_cast<int>(k));
-        if (hazeMaterials[k] >= 0) {
-            builder.scene().materials[static_cast<std::size_t>(hazeMaterials[k])].seaDepthOverlay = true;
-        }
-    }
     // As bright on steep faces as on the bottom (caustics 4, see scene::Material::caustics).
     const int causticsMaterial = builder.causticsOverlayMaterial("sea caustics");
     if (causticsMaterial >= 0) {
@@ -300,22 +313,6 @@ void addPoolStyleSea(SceneBuilder& builder, const PaintedTerrain& terrain, const
                 std::array<float, 4> wet{};
                 for (std::size_t c = 0; c < 4; ++c) {
                     wet[c] = sea - ground[c];
-                }
-                for (std::size_t k = 0; k < kHazes.size(); ++k) {
-                    if (hazeMaterials[k] < 0) {
-                        continue;
-                    }
-                    const Haze& haze = kHazes[k];
-                    std::array<float, 4> alphas{};
-                    Corners corners{};
-                    for (std::size_t c = 0; c < 4; ++c) {
-                        alphas[c] = haze.most * (1 - std::exp(-std::max(depth[c] - haze.from, 0.0f) / haze.scale)) *
-                                    std::clamp(depth[c] / kHazeFade, 0.0f, 1.0f);
-                        corners[c] = {xy[c][0] + normals[c][0] * kLift, xy[c][1] + normals[c][1] * kLift, ground[c] + normals[c][2] * kLift};
-                    }
-                    if (*std::max_element(alphas.begin(), alphas.end()) > 0) {
-                        addQuad(hazeMaterials[k], corners, alphas, normals, wet, onLot);
-                    }
                 }
                 if (causticsMaterial >= 0) {
                     // The depth under the water over kCausticsFade, negative above it and at most 1, so
@@ -863,11 +860,65 @@ void addLotSkirt(SceneBuilder& builder, const PaintedTerrain& terrain, const Lot
         addLotGroundBlend(builder, g, *look, material);
     }
     const auto surfaceAt = [&](float x, float y) { return g.surfaceAt(x, y); };
-    const auto seaCells = addSkirtSea(builder, terrain, lot, g.area, bounds, [&](int x, int y) { return g.corner(x, y)[2]; });
+    const auto seaCells = addSkirtSea(builder, terrain, lot, g.area, bounds, [&](int x, int y) { return g.corner(x, y)[2]; }, surfaceAt);
     if (builder.poolStyleSea() && !seaCells.empty()) {
         addPoolStyleSea(builder, terrain, &lot, seaCells, surfaceAt);
     }
     addSkirtRoads(builder, g, terrainType, roadTextures, blendLot);
+}
+
+void bakeSeaDepth(PaintedTerrain& terrain, const LotFootprint& lot, const Heights* lotHeights, int groundLevel, bool smoothLotSkirts) {
+    terrain.seaDepthMap.clear();
+    terrain.seaDepthSize = {0, 0};
+    if (terrain.columns < 2 || terrain.rows < 2 || terrain.heights.size() < static_cast<std::size_t>(terrain.columns) * terrain.rows) {
+        return;
+    }
+    constexpr int kMarginTiles = 8;
+    const SkirtArea area = lotSkirtArea(terrain, lot, kMarginTiles);
+    const SkirtGround g(terrain, lot, area, lotHeights, groundLevel, smoothLotSkirts);
+    const float tile = terrain.tileSize;
+    const float x0 = static_cast<float>(area.x0) * tile, y0 = static_cast<float>(area.y0) * tile;
+    const float x1 = static_cast<float>(area.x1) * tile, y1 = static_cast<float>(area.y1) * tile;
+    // A point a unit. A lot is at most 64 units a side, so with the margin the map stays under 300 a
+    // side. A larger one from a broken neighborhood is left out.
+    constexpr int kMostPoints = 512;
+    const int w = static_cast<int>(std::lround(x1 - x0)) + 1, h = static_cast<int>(std::lround(y1 - y0)) + 1;
+    if (w < 2 || h < 2 || w > kMostPoints || h > kMostPoints) {
+        return;
+    }
+    const float stepX = (x1 - x0) / static_cast<float>(w - 1), stepY = (y1 - y0) / static_cast<float>(h - 1);
+    const float sea = terrain.waterLevel;
+    std::vector<float> wet(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
+    for (int j = 0; j < h; ++j) {
+        for (int i = 0; i < w; ++i) {
+            const float x = x0 + static_cast<float>(i) * stepX, y = y0 + static_cast<float>(j) * stepY;
+            wet[static_cast<std::size_t>(j) * static_cast<std::size_t>(w) + static_cast<std::size_t>(i)] = std::max(sea - g.surfaceAt(x, y), 0.0f);
+        }
+    }
+    // Averaged over 6 around, 3 apart, as far as the map reaches.
+    constexpr int kAround = 6, kStep = 3;
+    constexpr float kLotDepth = 0.5f, kOutDepth = 2, kEase = 6;
+    terrain.seaDepthMap.resize(wet.size() * 2);
+    for (int j = 0; j < h; ++j) {
+        for (int i = 0; i < w; ++i) {
+            float sum = 0;
+            int n = 0;
+            for (int dy = -kAround; dy <= kAround; dy += kStep) {
+                for (int dx = -kAround; dx <= kAround; dx += kStep) {
+                    const int si = std::clamp(i + dx, 0, w - 1), sj = std::clamp(j + dy, 0, h - 1);
+                    sum += wet[static_cast<std::size_t>(sj) * static_cast<std::size_t>(w) + static_cast<std::size_t>(si)];
+                    ++n;
+                }
+            }
+            const float x = x0 + static_cast<float>(i) * stepX, y = y0 + static_cast<float>(j) * stepY;
+            const float outside = std::max({lot.x0 - x, x - lot.x1, lot.y0 - y, y - lot.y1, 0.0f});
+            const std::size_t at = (static_cast<std::size_t>(j) * static_cast<std::size_t>(w) + static_cast<std::size_t>(i)) * 2;
+            terrain.seaDepthMap[at] = sum / static_cast<float>(n);
+            terrain.seaDepthMap[at + 1] = kLotDepth + (kOutDepth - kLotDepth) * std::min(outside / kEase, 1.0f);
+        }
+    }
+    terrain.seaDepthSize = {w, h};
+    terrain.seaDepthArea = {x0, y0, x1, y1};
 }
 
 bool addNeighborhoodSea(SceneBuilder& builder, const PaintedTerrain& terrain, bool night) {
@@ -896,7 +947,13 @@ bool addNeighborhoodSea(SceneBuilder& builder, const PaintedTerrain& terrain, bo
                 continue;
             }
             cells.push_back({static_cast<int>(x), static_cast<int>(y)});
-            addPoolStyleSurface(p, terrain, static_cast<int>(x), static_cast<int>(y), corner, same);
+            // Seen from far off, the neighborhood's fades over more, so the shallows stay light, one
+            // quad to a tile from its corners' heights.
+            constexpr float kHoodShoreFade = 2.0f;
+            const auto cornerAt = [&](float px, float py) {
+                return corner(static_cast<int>(std::lround(px / tile)), static_cast<int>(std::lround(py / tile)));
+            };
+            addPoolStyleSurface(p, terrain, static_cast<int>(x), static_cast<int>(y), cornerAt, same, kHoodShoreFade, 1);
             for (std::uint32_t dy = 0; dy < 2; ++dy) {
                 for (std::uint32_t dx = 0; dx < 2; ++dx) {
                     const float h = terrain.heights[static_cast<std::size_t>(y + dy) * terrain.columns + x + dx];
@@ -922,6 +979,109 @@ bool addNeighborhoodSea(SceneBuilder& builder, const PaintedTerrain& terrain, bo
     i->seaNight = night;
     addPoolStyleSea(builder, terrain, nullptr, cells, groundAt);
     return true;
+}
+
+void addNeighborhoodPonds(SceneBuilder& builder, const PaintedTerrain& terrain, const std::vector<LotFootprint>& lots,
+                          const std::filesystem::path& neighborhood, bool night, bool highPictures) {
+    constexpr std::array<float, 3> kSky{0.4f, 0.6f, 0.9f};
+    constexpr float kOpacity = 0.4f;
+    const int material = builder.skirtSeaMaterial("lotSkirtSea", "poolShape-body-bump", "neighborhood-sky2-envcube", kSky, kOpacity, 6, "causticsTiled");
+    if (material < 0) {
+        return;
+    }
+    const int poolMaterial = builder.skirtSeaMaterial("neighborhoodPoolWater", "poolShape-body-bump", "neighborhood-sky2-envcube", kSky, kOpacity, 6, "");
+    if (poolMaterial >= 0) {
+        builder.scene().materials[static_cast<std::size_t>(poolMaterial)].seaPoolWater = true;
+    }
+    // A lot is at most 64 tiles a side. A larger water grid in a broken file is left out.
+    constexpr std::uint32_t kMostCorners = 65;
+    // The surface fades in over this depth at the banks, and grows less see-through with depth as the
+    // sea's own does, so the imposter's picture of the pond barely shows through deep water.
+    constexpr float kShoreFade = 0.5f, kPerUnit = 0.04f, kDeepest = 15;
+    const std::string hood = neighborhood.filename().string();
+    auto toWorld = [&](const LotFootprint& lot, float x, float y, float z) {
+        float at[3] = {x, y, z};
+        lot.place.apply(at, true);
+        return std::array<float, 3>{at[0], at[1], at[2] + terrain.imposterLift};
+    };
+    for (const LotFootprint& lot : lots) {
+        if (!lot.hasImposter) {
+            continue;
+        }
+        const auto file = neighborhood / "Lots" / (hood + "_Lot" + std::to_string(lot.id) + ".package");
+        std::error_code missing;
+        if (!std::filesystem::exists(file, missing)) {
+            continue;
+        }
+        content::Lot ground;
+        try {
+            ground = content::loadLotGround(file);
+        } catch (const std::exception&) {
+            continue;
+        }
+        const Heights heights(ground);
+        const int level = content::groundGridLevel(ground);
+        // Each lot's water is an instance of its own, so that lot view can leave out its own lot's.
+        Surfaces ponds;
+        // The pools: their surface where the lot's own is, see-through over the imposter's pool.
+        if (const auto quarters = poolwater::waterQuarters(ground); poolMaterial >= 0 && !quarters.empty() && quarters.size() <= kMostCorners * kMostCorners * 4) {
+            auto height = [&](float x, float y) {
+                const float below = x == std::floor(x) && y == std::floor(y) ? heights.corner(level - 1, x, y) : heights.tile(level - 1, x, y);
+                return poolwater::surfaceHeight(below);
+            };
+            const auto s = poolwater::surface(quarters, height);
+            Primitive& pool = ponds[poolMaterial];
+            const auto base = static_cast<std::uint32_t>(pool.positions.size() / 3);
+            for (std::size_t v = 0; v + 2 < s.positions.size(); v += 3) {
+                const auto at = toWorld(lot, s.positions[v], s.positions[v + 1], s.positions[v + 2]);
+                pool.positions.insert(pool.positions.end(), at.begin(), at.end());
+                pool.normals.insert(pool.normals.end(), {0, 0, 1});
+                pool.uvs.insert(pool.uvs.end(), {0, 0});
+                pool.alphas.push_back(1);
+            }
+            for (const std::uint32_t i : s.indices) {
+                pool.indices.push_back(base + i);
+            }
+        }
+        const auto water = ground.flatGrids.find(content::kWaterHeightGridInstance);
+        const bool hasWater = water != ground.flatGrids.end() && water->second.width <= kMostCorners && water->second.height <= kMostCorners;
+        Primitive& p = ponds[highPictures && poolMaterial >= 0 ? poolMaterial : material];
+        auto groundAt = [&](int x, int y) { return heights.corner(level, static_cast<float>(x), static_cast<float>(y)); };
+        for (int y = 0; hasWater && y + 1 < static_cast<int>(water->second.height); ++y) {
+            for (int x = 0; x + 1 < static_cast<int>(water->second.width); ++x) {
+                // The water's level over the tile: the highest of its corners under water.
+                std::optional<float> top;
+                for (const auto& [dx, dy] : {std::pair{0, 0}, std::pair{1, 0}, std::pair{1, 1}, std::pair{0, 1}}) {
+                    if (const auto w = terrainwater::cornerHeight(water->second, x + dx, y + dy); w && groundAt(x + dx, y + dy) < *w && (!top || *w > *top)) {
+                        top = *w;
+                    }
+                }
+                if (!top) {
+                    continue;
+                }
+                const auto base = static_cast<std::uint32_t>(p.positions.size() / 3);
+                for (const auto& [cx, cy] : {std::pair{x, y}, std::pair{x + 1, y}, std::pair{x + 1, y + 1}, std::pair{x, y + 1}}) {
+                    const auto at = toWorld(lot, static_cast<float>(cx), static_cast<float>(cy), *top);
+                    p.positions.insert(p.positions.end(), at.begin(), at.end());
+                    p.normals.insert(p.normals.end(), {0, 0, 1});
+                    const float depth = *top - groundAt(cx, cy);
+                    const float opacity = highPictures ? 0.0f : std::clamp(depth, 0.0f, kDeepest) * kPerUnit;
+                    p.uvs.insert(p.uvs.end(), {opacity, opacity});
+                    p.alphas.push_back(std::clamp(depth / kShoreFade, 0.0f, 1.0f));
+                }
+                p.indices.insert(p.indices.end(), {base, base + 1, base + 2, base, base + 2, base + 3});
+            }
+        }
+        std::erase_if(ponds, [](const auto& entry) { return entry.second.indices.empty(); });
+        if (ponds.empty()) {
+            continue;
+        }
+        const std::string mesh = std::string(kNeighborhoodPondsName) + " " + std::to_string(lot.id);
+        if (auto* i = builder.place(builder.addMesh(mesh, std::move(ponds)), kNeighborhoodPondsName, Transform{}, Part::Other); i != nullptr) {
+            i->seaNight = night;
+            i->imposterLot = lot.id;
+        }
+    }
 }
 
 std::vector<std::size_t> lightLotSkirt(Scene& scene, bool day) {

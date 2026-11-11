@@ -118,6 +118,26 @@ std::vector<walllayer::Entry> coveringsOfRoomWalls(const wallgraph::WallGraph& r
     return out;
 }
 
+Lot loadLotGround(const std::filesystem::path& path) {
+    dbpf::Package package{path};
+    Lot lot;
+    for (const auto& e : package.entries()) {
+        try {
+            if (e.key.type == types::kWallGraph && e.key.instance == kRoomGraphInstance) {
+                lot.roomGraph = wallgraph::parse(package.read(e));
+            } else if (e.key.type == types::kArray3D &&
+                       (e.key.instance == kFloorGridInstance || e.key.instance == kFloorHeightGridInstance || e.key.instance == kSurfaceGridInstance)) {
+                lot.grids.emplace(e.key.instance, array3d::parse(package.read(e)));
+            } else if (e.key.type == types::kArray2D && e.key.instance == kWaterHeightGridInstance) {
+                lot.flatGrids.emplace(e.key.instance, terrain::parseArray2D(package.read(e)));
+            }
+        } catch (const std::exception& ex) {
+            lot.problems.push_back({e.key.instance, std::string("ground: ") + ex.what()});
+        }
+    }
+    return lot;
+}
+
 Lot loadLot(const std::filesystem::path& path) {
     dbpf::Package package{path};
     Lot lot;
@@ -152,6 +172,24 @@ Lot loadLot(const std::filesystem::path& path) {
                 wallGraph = wallgraph::parse(package.read(e));
             } catch (const std::exception& ex) {
                 lot.problems.push_back({e.key.instance, std::string("wall graph: ") + ex.what()});
+            }
+        } else if (e.key.type == types::kWallGraph && e.key.instance == kStageWallGraphInstance) {
+            try {
+                lot.stageWalls = wallgraph::parse(package.read(e));
+            } catch (const std::exception& ex) {
+                lot.problems.push_back({e.key.instance, std::string("stage wall graph: ") + ex.what()});
+            }
+        } else if (e.key.type == types::kWallLayer && e.key.instance == kStageWallLayerInstance) {
+            try {
+                lot.stageWallCoverings = walllayer::parse(package.read(e));
+            } catch (const std::exception& ex) {
+                lot.problems.push_back({e.key.instance, std::string("stage wall layer: ") + ex.what()});
+            }
+        } else if (e.key.type == types::kPatternMap && e.key.instance == kStageWallPatternMapInstance) {
+            try {
+                lot.stageWallPatterns = stringmap::parse(package.read(e));
+            } catch (const std::exception& ex) {
+                lot.problems.push_back({e.key.instance, std::string("stage pattern map: ") + ex.what()});
             }
         } else if (e.key.type == types::kWallGraph &&
                    std::ranges::find(kLayerGraphInstances, e.key.instance) != std::end(kLayerGraphInstances)) {
@@ -384,6 +422,9 @@ Lot fromGroundStorey(const Lot& lot) {
     }
     for (auto& [instance, graph] : view.layerGraphs) {
         dropLevelsBelowGround(graph);
+    }
+    if (view.stageWalls) {
+        dropLevelsBelowGround(*view.stageWalls);
     }
     std::erase_if(view.fencePosts, [](const fencepostlayer::Post& p) { return p.level < 0; });
     return view;

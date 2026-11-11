@@ -232,17 +232,20 @@ void LotSceneBuilder::drawFloors() {
                     }
                     const int material = b_.material(assets_.patternMaterial(pattern->second.name, false));
                     patterns.insert(material);
-                    auto& s = onStage(level, x, y, 3 - q) ? stageSurfaces[material] : surfaces[material];
+                    const bool stage = onStage(level, x, y, 3 - q);
+                    auto& s = stage ? stageSurfaces[material] : surfaces[material];
                     const std::size_t n = (q + 1) % 4;
+                    // The game adds a stage's height to its floor as it draws it. The saved heights don't hold it.
+                    const float lift = stage ? kStageHeight : 0.0f;
                     // Textures run along the game's own tile axes (world y, x here), a repeat
                     // spanning the material's tiles.
                     std::array<float, 2> span{1, 1};
                     if (material >= 0) {
                         span = b_.scene().materials[static_cast<std::size_t>(material)].floorTiles;
                     }
-                    addVertex(s, {corners[q][0], corners[q][1], h[q]}, {0, 0, 1}, {corners[q][1] / span[0], corners[q][0] / span[1]});
-                    addVertex(s, {corners[n][0], corners[n][1], h[n]}, {0, 0, 1}, {corners[n][1] / span[0], corners[n][0] / span[1]});
-                    addVertex(s, {fx + 0.5f, fy + 0.5f, center}, {0, 0, 1}, {(fy + 0.5f) / span[0], (fx + 0.5f) / span[1]});
+                    addVertex(s, {corners[q][0], corners[q][1], h[q] + lift}, {0, 0, 1}, {corners[q][1] / span[0], corners[q][0] / span[1]});
+                    addVertex(s, {corners[n][0], corners[n][1], h[n] + lift}, {0, 0, 1}, {corners[n][1] / span[0], corners[n][0] / span[1]});
+                    addVertex(s, {fx + 0.5f, fy + 0.5f, center + lift}, {0, 0, 1}, {(fy + 0.5f) / span[0], (fx + 0.5f) / span[1]});
                     for (const auto& c : {corners[q], corners[n], std::array<float, 2>{fx + 0.5f, fy + 0.5f}}) {
                         const auto uv = lightUv(level, fx, fy, c[0] - fx, c[1] - fy);
                         s.lightUvs.insert(s.lightUvs.end(), uv.begin(), uv.end());

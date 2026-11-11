@@ -33,6 +33,7 @@ struct Shown {
     std::size_t instance = 0;  // index into the scene's instances once placed
     std::string boneModel;     // the name the builder knows its posed model's bones by
     std::vector<scenegraph::MaterialOverride> overrides;
+    std::vector<scenegraph::MaterialOverride> chosen;  // see PlacedObject::chosen
 };
 
 // Lot object data: 1 its facing, 2 the object it is held by, 3 its slot there, 0x13 a multi-tile
@@ -60,6 +61,7 @@ public:
 private:
     // Walls, fences and light maps (lot_scene.cpp).
     void collectWalls();
+    void collectStageSides();
     void placeFencePosts();
     LightMaps& lightMaps();
     int addIncidence(const Image& lightMap);

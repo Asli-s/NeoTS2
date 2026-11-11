@@ -44,11 +44,20 @@ struct Sunlight {
     float zone = 1;
     std::function<bool(int tileX, int tileY)> terrain;
     std::function<std::array<float, 3>(float x, float y)> terrainNormal;
+    // The shadow with the ground around the lot (lotshadow::around), for the lot skirt.
+    const lotshadow::Grid* around = nullptr;
 };
 // Fills a lot scene's light maps (Scene::lightMaps, laid out by addLot) with the lot's worked-out
 // light, texel for texel as the game's lighting manager writes its textures: the floors of each
 // level and each wall face, with the unlit room light and the outdoor sunlight added (shaded by
 // `sunlight`'s shadow when given). Faces and tiles the light does not reach keep what they hold.
 void fill(Scene& scene, const lotlighting::Result& light, const lotlighting::Settings& settings, const Sunlight* sunlight = nullptr);
+
+// The lamps' and windows' light and the buildings' sun shadow past the lot's edge, onto the lot
+// skirt, which the game leaves unlit and unshadowed by them. addSkirtLamps gives a lit lot scene its black skirt lamp image (fill fills it).
+// linkSkirtLamps points the scene's skirt ground and roads at it, once the skirt is added, the
+// lot standing at `place` in the scene.
+void addSkirtLamps(Scene& scene);
+void linkSkirtLamps(Scene& scene, const Transform& place);
 
 } // namespace ts2::scene::lotlightmaps

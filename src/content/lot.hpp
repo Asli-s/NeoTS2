@@ -72,6 +72,11 @@ struct Lot {
     std::map<std::uint16_t, stringmap::Entry> floorPatterns, wallPatterns;
     // The coverings of the room graph's wall segments (wall layer instance 4).
     std::vector<walllayer::Entry> wallCoverings;
+    // The sides of the lot's stages (split-level platforms): their own wall graph (instance 0x1C),
+    // coverings (wall layer 0x1D, by that graph's wall ids) and wall patterns (pattern map 0x1E).
+    std::optional<wallgraph::WallGraph> stageWalls;
+    std::vector<walllayer::Entry> stageWallCoverings;
+    std::map<std::uint16_t, stringmap::Entry> stageWallPatterns;
     // Fence posts (fence rails are wall segments whose wall layer type is the fence's GUID).
     std::vector<fencepostlayer::Post> fencePosts;
     std::vector<roofs::Roof> roofs;
@@ -118,6 +123,7 @@ constexpr std::uint32_t kFloorGridInstance = 0;
 constexpr std::uint32_t kFloorPatternMapInstance = 0xE;
 constexpr std::uint32_t kWallPatternMapInstance = 0xD;
 constexpr std::uint32_t kWallCoveringLayerInstance = 4;
+constexpr std::uint32_t kStageWallGraphInstance = 0x1C, kStageWallLayerInstance = 0x1D, kStageWallPatternMapInstance = 0x1E;
 // Corner heights per level, as floats, from the lot's lowest level up (one more corner than tiles
 // along each side). On most lots grid level 0 is the terrain.
 constexpr std::uint32_t kFloorHeightGridInstance = 1;
@@ -140,6 +146,10 @@ std::vector<walllayer::Entry> coveringsOfRoomWalls(const wallgraph::WallGraph& r
 // Loads the objects saved in a lot package (Neighborhoods/<hood>/Lots/<hood>_Lot<n>.package).
 // Like the game, the objects are those the object map (ObjM) lists, read with the map's version.
 Lot loadLot(const std::filesystem::path& path);
+// Only a lot's ground: its room graph (for its lowest level), floor, floor height and surface grids
+// and its water height grid, for what is drawn of it without opening it, such as its ponds and pools
+// in the neighborhood view.
+Lot loadLotGround(const std::filesystem::path& path);
 
 // The index into the lot's grids of a level as walls, fences and roofs save it (0 = the ground
 // storey). Grids start at the lot's lowest level, the room graph's firstLevel.

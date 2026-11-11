@@ -74,6 +74,11 @@ struct Corners {
 };
 Corners cornersOf(const Inputs& in, int x, int y, int level);
 
+// The same lot with `margin` tiles of open ground around it each way, that ground at the height of
+// the lot's nearest edge, so the shadow can be followed past the lot's edge onto the lot skirt (the
+// game's stops at the edge). The returned inputs read `in`'s, as those read the lot.
+Inputs around(const Inputs& in, int margin);
+
 // `sun` points toward the sun, normalized. Lots larger than 256 tiles a side give nothing.
 Grid build(const Inputs& in, const std::array<float, 3>& sun);
 

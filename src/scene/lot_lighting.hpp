@@ -99,7 +99,14 @@ struct Result {
     std::map<std::int16_t, Room> rooms;
     std::vector<PortalLight> portals;
     bool complete = true;                   // false when a pass stopped at its safety limit
+    // The ground storey with aroundMargin tiles of ground around the lot, lit by the lamps and windows
+    // and left unlit, for their light on the lot skirt. The game stops their light at the lot's edge.
+    floorlight::Grid around, aroundUnlit;
 };
+
+// How many tiles of ground around a lot its lamps and windows light: 16, less on a lot so large that
+// the ground around it would pass the 256 tiles a light grid holds.
+int aroundMargin(int width, int height);
 
 Result compute(const Inputs& in, const Settings& settings);
 

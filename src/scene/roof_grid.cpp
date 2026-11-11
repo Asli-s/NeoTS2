@@ -1,7 +1,10 @@
 #include "scene/lot_parts.hpp"
 
+#include "scene/roof_meeting.hpp"
+
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 // Roofs as the game builds them: heights on a grid of points half a tile apart over the roof's rectangle
 // and overhang, three layers of it making a slab (shingled top, the edge board's two bands, underside).
@@ -28,7 +31,7 @@ std::array<float, 2> texturePoint(int entry) {
 }
 
 // One top triangle's corner flags.
-constexpr int kRidge = 1, kJunction = 4;
+constexpr int kRidge = kCornerRidge, kJunction = kCornerJunction;
 
 // The four triangle kinds: corners (row, column offsets in the cell) in emitted order, the corner
 // pair one test looks at, the texture corners used by facing (x down, x up, y down, y up), and
@@ -123,7 +126,7 @@ void handle(int kind, int facing, Piece& p, int ridges, int joins, bool pair, in
 
 // Triangles with corners on a hip have their own pieces. These are the game's rules as they stand,
 // per kind. Flags as above (kHip marks a corner on a hip), the rest as for handle().
-constexpr int kHip = 2;
+constexpr int kHip = kCornerHip;
 
 void oneOnHip(int kind, const std::array<float, 2>& g, Piece& p, int ridges, int joins, bool pair, int other,
               const std::array<int, 3>& flags) {
@@ -356,9 +359,14 @@ std::optional<RoofGrid> RoofGrid::of(const roofs::Roof& roof, float eave) {
     default: return std::nullopt;  // not built this way yet
     }
     g.type = static_cast<int>(roof.type);
+    g.id = roof.id;
     g.level = roof.level0;
     const float lx = std::min(roof.x0, roof.x1), hx = std::max(roof.x0, roof.x1);
     const float ly = std::min(roof.y0, roof.y1), hy = std::max(roof.y0, roof.y1);
+    g.rectMinX = lx;
+    g.rectMinY = ly;
+    g.rectMaxX = hx;
+    g.rectMaxY = hy;
     const float dx = std::abs(roof.x1 - roof.x0), dy = std::abs(roof.y1 - roof.y0);
     // A gable's ridge runs along the longer side (type 3: across it).
     g.ridgeAlongX = g.type == 3 ? dx < dy : dy <= dx;
@@ -500,14 +508,25 @@ std::optional<float> RoofGrid::pointHeight(float x, float y) const {
     return z(static_cast<int>(ri), static_cast<int>(ci), 0);
 }
 
-std::optional<float> RoofGrid::coveringHeight(float x, float y, int fromLevel) const {
-    // Over a roof on a lower level its overhang does not count. Over one on its own level it does.
+float RoofGrid::heightFrom(float x, float y, int fromLevel) const {
     const float lo = fromLevel < level ? kOverhang : 0.0f;
-    if (!(minX + lo < x && x <= minX + static_cast<float>(nx - 1) * kStep - lo && minY + lo < y &&
-          y <= minY + static_cast<float>(ny - 1) * kStep - lo)) {
-        return std::nullopt;
+    if (!(minX + lo <= x && x <= maxX() - lo && minY + lo <= y && y <= maxY() - lo)) {
+        return std::numeric_limits<float>::lowest();
     }
     return surface(x, y);
+}
+
+bool RoofGrid::inGrid(float x, float y) const {
+    return minX <= x && x <= maxX() && minY <= y && y <= maxY();
+}
+
+bool RoofGrid::inOverhang(float x, float y) const {
+    return inGrid(x, y) && !(rectMinX <= x && x <= rectMaxX && rectMinY <= y && y <= rectMaxY);
+}
+
+bool roofWithinReach(int level, int otherLevel, int lowestLevel) {
+    const std::int64_t from = std::int64_t{level} - lowestLevel;
+    return otherLevel >= std::max<std::int64_t>(from - 1, 0) && otherLevel <= from + 2;
 }
 
 void addRoofGrid(Surfaces& surfaces, const RoofGrid& roof, const std::vector<const RoofGrid*>& others, const RoofLook& look) {
@@ -517,68 +536,30 @@ void addRoofGrid(Surfaces& surfaces, const RoofGrid& roof, const std::vector<con
         const auto p = at(r, c);
         return std::array<float, 3>{p[0], p[1], roof.z(r, c, layer)};
     };
-    // Another roof covers a point when its surface is above this one's there.
-    auto covered = [&](float x, float y) {
-        const float own = roof.surface(x, y);
-        for (const auto* o : others) {
-            if (const auto h = o->coveringHeight(x, y, roof.level); h && *h > own + 1e-4f) {
-                return true;
-            }
-        }
-        return false;
-    };
-    // A triangle's corner flags: on the ridge, on a hip, and joining another roof. Another roof joins
-    // at a corner where it is at the same height there, unless that point is on its ridge or a hip
-    // bordering the way the triangle faces. Such a roof joins none of the triangle's corners. When
-    // all three corners meet other roofs, those meeting all three do not join.
-    auto cornerFlags = [&](const std::array<std::array<int, 2>, 3>& pts, const std::array<float, 2>& g) {
-        std::array<std::array<float, 3>, 3> w{};
-        for (std::size_t i = 0; i < 3; ++i) {
-            const auto p = at(pts[i][0], pts[i][1]);
-            w[i] = {p[0], p[1], roof.z(pts[i][0], pts[i][1], 0)};
-        }
-        const int face = facingBits(g);
-        struct Touch {
-            const RoofGrid* roof;
-            int masks;  // its ridge and hip masks at the point
-        };
-        std::array<std::vector<Touch>, 3> touches;
-        std::array<int, 3> flags{};
-        int touched = 0;
+    // The roofs within reach, this one included, as the game's cover and meeting tests see them.
+    std::vector<const RoofGrid*> roofs = others;
+    roofs.push_back(&roof);
+    auto covered = [&](float x, float y) { return roofCoveredAt(roof, x, y, roof.level, roofs); };
+    // A triangle's corners: its own ridge and hip flags, and the other roofs at the same height
+    // there with their ridge and hip masks at the point.
+    auto cornersOf = [&](const std::array<std::array<int, 2>, 3>& pts) {
+        TriangleCorners t;
         for (std::size_t i = 0; i < 3; ++i) {
             const int r = pts[i][0], c = pts[i][1];
-            flags[i] = (roof.ridgeMask(r, c) ? kRidge : 0) | (roof.hipMask(r, c) ? kHip : 0);
+            const auto p = at(r, c);
+            const float z = roof.z(r, c, 0);
+            t.flags[i] = (roof.ridgeMask(r, c) ? kRidge : 0) | (roof.hipMask(r, c) ? kHip : 0);
             for (const auto* o : others) {
-                const auto h = o->pointHeight(w[i][0], w[i][1]);
-                if (h && std::abs(*h - w[i][2]) < 1e-4f) {
-                    const int oc = static_cast<int>(std::lround((w[i][0] - o->minX) / kStep));
-                    const int orow = static_cast<int>(std::lround((w[i][1] - o->minY) / kStep));
-                    touches[i].push_back({o, o->ridgeMask(orow, oc) | o->hipMask(orow, oc)});
-                }
-            }
-            touched += touches[i].empty() ? 0 : 1;
-        }
-        auto touchesAll = [&](const RoofGrid* o) {
-            return std::all_of(touches.begin(), touches.end(), [&](const auto& t) {
-                return std::any_of(t.begin(), t.end(), [&](const Touch& x) { return x.roof == o; });
-            });
-        };
-        auto excluded = [&](const RoofGrid* o) {
-            if (touched == 3) {
-                return touchesAll(o);
-            }
-            return std::any_of(touches.begin(), touches.end(), [&](const auto& t) {
-                return std::any_of(t.begin(), t.end(), [&](const Touch& x) { return x.roof == o && (x.masks & face); });
-            });
-        };
-        for (std::size_t i = 0; i < 3; ++i) {
-            for (const Touch& t : touches[i]) {
-                if (!(t.masks & face) && !excluded(t.roof)) {
-                    flags[i] |= kJunction;
+                const auto h = o->pointHeight(p[0], p[1]);
+                if (h && std::abs(*h - z) < 1e-4f) {
+                    const int oc = static_cast<int>(std::lround((p[0] - o->minX) / kStep));
+                    const int orow = static_cast<int>(std::lround((p[1] - o->minY) / kStep));
+                    t.meeting[i].push_back({o, o->ridgeMask(orow, oc), o->hipMask(orow, oc)});
+                    t.flags[i] |= kJunction;
                 }
             }
         }
-        return flags;
+        return t;
     };
     auto triangle = [&](Primitive& prim, const std::array<std::array<float, 3>, 3>& v, const std::array<std::array<float, 2>, 3>& uv) {
         const std::array<float, 3> a{v[1][0] - v[0][0], v[1][1] - v[0][1], v[1][2] - v[0][2]};
@@ -623,12 +604,19 @@ void addRoofGrid(Surfaces& surfaces, const RoofGrid& roof, const std::vector<con
                 case 2: tri.slope = {-(h(0, 1) - h(0, 0)), -(h(1, 0) - h(0, 0))}; break;
                 default: tri.slope = {-(h(1, 1) - h(1, 0)), (h(0, 1) - h(1, 0)) - (h(1, 1) - h(1, 0))}; break;
                 }
-                tri.flags = cornerFlags(pts, tri.slope);
+                // A covered triangle has no corner flags, and counts as joining nothing for its
+                // neighbour's piece.
+                if (covered(cx, cy)) {
+                    continue;
+                }
+                TriangleCorners corners = cornersOf(pts);
+                const bool leftOut = settleMeeting(corners, roof, facingBits(tri.slope), {cx, cy}, roofs);
+                tri.flags = corners.flags;
                 for (const int f : tri.flags) {
                     tri.joins += (f & kJunction) ? 1 : 0;
                 }
                 // A flat-topped hip leaves its flat top open.
-                tri.keep = !covered(cx, cy) && !(roof.kind == RoofGrid::Kind::flatHip && facing(tri.slope) < 0);
+                tri.keep = !leftOut && !(roof.kind == RoofGrid::Kind::flatHip && facing(tri.slope) < 0);
             }
             for (int t = 0; t < 2; ++t) {
                 const Tri& tri = tris[static_cast<std::size_t>(t)];

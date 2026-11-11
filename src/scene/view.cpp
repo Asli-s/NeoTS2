@@ -29,6 +29,14 @@ int topLevel(const Scene& scene) {
     return top;
 }
 
+int everyLevel(const Scene& scene) {
+    int top = 0;
+    for (const auto& instance : scene.instances) {
+        top = std::max(top, instance.level);
+    }
+    return top + 1;
+}
+
 int groundLevel(const Scene& scene) {
     return scene.groundLevel;
 }
@@ -58,8 +66,6 @@ std::vector<std::uint8_t> visibleInstances(const Scene& scene, const View& view)
         cut[i] = cutDown(scene.walls[i], view);
     }
     auto isCut = [&](int wall) { return wall >= 0 && static_cast<std::size_t>(wall) < cut.size() && cut[static_cast<std::size_t>(wall)]; };
-    const int top = topLevel(scene);
-    const bool roofs = view.roofs && view.walls == WallView::Up && view.level >= top;
     std::vector<std::uint8_t> visible(scene.instances.size());
     for (std::size_t i = 0; i < scene.instances.size(); ++i) {
         const Instance& instance = scene.instances[i];
@@ -78,14 +84,16 @@ std::vector<std::uint8_t> visibleInstances(const Scene& scene, const View& view)
         bool show = instance.part == Part::Other || instance.level <= view.level;
         switch (instance.part) {
         case Part::Roof:
-            // With the walls up, roofs of the storeys below the one looked at stay on.
-            show = show && view.roofs && view.walls == WallView::Up && (instance.level < view.level || roofs);
+            // With the walls up, a roof shows once the storey its eaves rest on is looked at, as
+            // the game turns each saved level on. Dormer roofs a storey up stay off until then, and
+            // the holes the main roof keeps under them show the rooms there.
+            show = show && view.roofs && view.walls == WallView::Up && instance.level < view.level;
             break;
         case Part::Wall:
         case Part::WallHub: {
             // The cut version shows when all its walls are cut, the full one otherwise.
             const bool allCut = !instance.walls.empty() && std::all_of(instance.walls.begin(), instance.walls.end(), isCut);
-            show = (show || (roofs && attic(scene, instance))) && instance.cut == allCut;
+            show = show && instance.cut == allCut;
             break;
         }
         case Part::Object:

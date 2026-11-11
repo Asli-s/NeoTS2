@@ -38,9 +38,10 @@ std::string savedLightingState(const ts2::content::Lighting& lighting, const ts2
 // Works out a lot's light the way the game does in lighting state `state` (lamps off until the
 // lot's own scripts switch them, see LotDaylight) and fills the scene's floor and wall light maps
 // and its objects' lights with it. `saved` is the lot as loaded from `lotPackage`. Returns what lighting the lot again
-// needs, or null when the lot gives nothing to light.
+// needs, or null when the lot gives nothing to light. With `skirt` the lamps' light and the sun's
+// shadow past the lot's edge are worked out too, for a lot shown with its lot skirt.
 std::shared_ptr<LotLightBase> lightLot(ts2::scene::Assets& assets, ts2::scene::Scene& scene, const ts2::content::Lot& saved,
-                                       const std::filesystem::path& lotPackage, const std::string& state);
+                                       const std::filesystem::path& lotPackage, const std::string& state, bool skirt = true);
 
 // Lighting the lot again in another state, in three steps. First the lot's lamps, windows and doors
 // in `state`, read from the game's files (on the thread that uses `assets`), or null without that state.

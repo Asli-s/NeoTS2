@@ -20,6 +20,8 @@ constexpr float kPi = 3.14159265358979f;
 constexpr float kLevelHeight = 3.0f;      // storey height, used where a lot has no height grid
 constexpr float kWallThickness = 0.15f;   // walls with thickness
 constexpr float kFloorThickness = 0.15f;  // the slab under floors above the ground
+constexpr float kHalfWallHeight = 1.025f;  // a half wall's painted part, from the floor at each end
+constexpr float kStageHeight = 0.75f;  // a stage (split-level platform, region 4) above its storey's floor
 // How high the walls-down view leaves cut walls (the game's, and cutaway is taken to cut them the same).
 constexpr float kCutWallHeight = 0.2f;
 
@@ -81,10 +83,14 @@ struct RoofGrid {
     enum class Kind { gable, hip, shed, slope, flatHip };
     int type = 0;
     Kind kind = Kind::gable;
+    // The saved roof id. Of two roofs meeting at the same height, the lower id keeps its top.
+    std::uint32_t id = 0;
     float minX = 0, minY = 0;  // the first grid point
     int nx = 0, ny = 0;        // grid points along x and y
     float maxX() const;        // the last grid point
     float maxY() const;
+    // The saved rectangle, the grid without its overhang.
+    float rectMinX = 0, rectMinY = 0, rectMaxX = 0, rectMaxY = 0;
     float scale = 0.5f;        // rise per grid step (the saved slope)
     float eave = 0;            // the height of the eaves' storey
     int level = 0;             // the level the roof is saved on
@@ -110,9 +116,20 @@ struct RoofGrid {
     float surface(float x, float y) const;
     // The top's height at a grid point (none elsewhere or outside the grid).
     [[nodiscard]] std::optional<float> pointHeight(float x, float y) const;
-    // The top's height where it covers a roof on fromLevel (for a lower level, only within the walls).
-    [[nodiscard]] std::optional<float> coveringHeight(float x, float y, int fromLevel) const;
+    // The top's height as a roof on fromLevel sees it: for a lower level only within the walls, for
+    // its own level or above out to the overhang's edge. The lowest float elsewhere.
+    float heightFrom(float x, float y, int fromLevel) const;
+    // Whether a point is on the grid, edges included.
+    bool inGrid(float x, float y) const;
+    // Whether a point is on the grid but outside the saved rectangle.
+    bool inOverhang(float x, float y) const;
 };
+
+// Whether a roof on otherLevel can cover or meet one on `level`. The game looks among the roofs
+// saved from one level below to two above `level` counted up from the lot's lowest level, while it
+// files roofs by their saved level. So on a lot with a level below the ground, a roof never sees the
+// roofs one level down.
+bool roofWithinReach(int level, int otherLevel, int lowestLevel);
 
 // Whether a saved roof's corners and slope are real numbers on a lot-sized area. A broken file's
 // roof is left out rather than built huge.
@@ -144,7 +161,8 @@ struct RoofShape {
 
 
 // An attic wall (the wall style the game adds under a roof's gable end) reaches from its floor to the
-// underside of the roofs it closes, above or below its own top. With none it keeps its own top.
+// underside of the roofs it closes (the higher one where it closes two), above or below its own top.
+// With none it keeps its own top.
 struct WallCeiling {
     std::vector<const RoofShape*> gables;
 
@@ -160,6 +178,16 @@ struct ThickWall {
     std::array<std::int32_t, 2> points{};  // wall graph point ids at (x0, y0) and (x1, y1)
     int level = 0;
     bool thick = true;  // wall styles without thickness (deck skirts) are a single plane
+    float halfThickness = kWallThickness / 2;  // a stage's sides are thinner than other walls
+    // The covering runs a full storey up from the wall's bottom instead of down from its top. A
+    // stage's sides and half walls show the foot of their paint, with its baseboard.
+    bool coveringFromBottom = false;
+    // A free end shows the paint of the side it is on the left of, as seen from that side, instead of
+    // the top's material (half walls).
+    bool coveredEnds = false;
+    // A side looking outdoors (as the lot's light counts it) takes the outdoor light for its facing,
+    // flat and without shadows, instead of the lot's wall light (half walls, which it leaves out).
+    bool flatOutdoorLight = false;
     bool cuttable = true;  // the wall style may be cut down in views (foundations and deck skirts not)
     // The style lets light through (walls.txt blocksLight false, but not the pool's edge): the game
     // draws it with its pattern's own material, lit as things outdoors, without a light map.

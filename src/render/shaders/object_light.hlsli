@@ -17,6 +17,7 @@ struct Output {
     float3 lightVector2 : TEXCOORD9;
     float3 reflection : TEXCOORD10;  // the view reflected about the normal, in the world
     float3 specular : TEXCOORD11;
+    float3 skirtSun : TEXCOORD12;  // a lot skirt's light from the sun (see skirtSunLight)
 };
 
 // The direction toward the camera from `world` reflected about the normal, per vertex as the
@@ -76,6 +77,29 @@ float4 gameLight(float3 normal, float3 world) {
         return float4(2 * saturate(sum * thumbnail.rgb * thumbnail.w), 2);
     }
     return float4(sum, 1);
+}
+
+// The share of a lot skirt's light (gameLight) the sun gives it, which the buildings' shadow takes
+// away where it falls past the lot. thumbnail.w holds a bit for each light that is a sun. None for
+// anything but a skirt.
+float3 skirtSunLight(float3 normal, float3 world) {
+    if (ambient.w < 2.5 || thumbnail.w < 0.5) {
+        return float3(0, 0, 0);
+    }
+    const float3 n = normalize(normal);
+    const int suns = (int)thumbnail.w;
+    float3 sum = ambient.rgb;
+    float3 sun = float3(0, 0, 0);
+    [unroll] for (int i = 0; i < 8; ++i) {
+        if (!perPixel(i)) {
+            float reach;
+            const float3 l = towardLight(i, world, reach);
+            const float3 c = max(0, dot(n, l) * reach) * lightColors[i].rgb;
+            sum += c;
+            sun += ((suns >> i) & 1) != 0 ? c : float3(0, 0, 0);
+        }
+    }
+    return (saturate(sum) - saturate(sum - sun)) * thumbnail.rgb;
 }
 
 // The standard material's specular at a vertex lit as the game lights objects (`lit` 1): each

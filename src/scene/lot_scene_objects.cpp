@@ -72,6 +72,19 @@ void LotSceneBuilder::placeObjects() {
             log(object, "no model", so.model);
             continue;
         }
+        // The material chosen for each group, kept in the object's own saved list, goes on after the
+        // scene record's, as the game sets it again when the lot loads. A counter top's hole mask
+        // from the scene record goes with it. A sink saved dirty in its scene record but cleaned
+        // since shows clean.
+        std::vector<scenegraph::MaterialOverride> chosen;
+        if (object.state.tail) {
+            for (const auto& m : object.state.tail->materials) {
+                if (!m.subset.empty() && !m.material.empty()) {
+                    chosen.push_back({withSavedCutout(m.material, lower(m.subset), so.overrides), m.subset});
+                }
+            }
+        }
+        so.overrides.insert(so.overrides.end(), chosen.begin(), chosen.end());
         // Its joints as the lot saved them: a dining chair pushed under a table is drawn that way.
         const auto saved = lot_.savedJoints.find(object.id);
         std::string boneModel;
@@ -105,7 +118,7 @@ void LotSceneBuilder::placeObjects() {
             }
         }
         const float angle = facingAngle(object.state.data[kFacingData]);
-        shown_.push_back({&object, mesh, so.model, Transform::at(x, y, z, angle), angle, 0, boneModel, so.overrides});
+        shown_.push_back({&object, mesh, so.model, Transform::at(x, y, z, angle), angle, 0, boneModel, so.overrides, std::move(chosen)});
         byId[object.id] = shown_.size() - 1;
         log(object, "placed", so.model);
     }
@@ -160,6 +173,7 @@ void LotSceneBuilder::placeObjects() {
             PlacedObject record{shown_[i].object->id, shown_[i].instance, Transform{}, {}};
             record.model = shown_[i].model;
             record.overrides = shown_[i].overrides;
+            record.chosen = shown_[i].chosen;
             if (const auto saved = lot_.savedJoints.find(shown_[i].object->id); saved != lot_.savedJoints.end()) {
                 record.savedJoints = saved->second;
             }

@@ -38,6 +38,12 @@ Heights::Heights(std::shared_ptr<const array3d::Array3D> grid) : kept_(std::move
 float Heights::at(int level, int x, int y, bool& found) const {
     found = grid_ != nullptr && grid_->contains(level, x, y);
     if (!found) {
+        // Past the saved storeys (the top of an attic wall under the roof), a storey up from the
+        // highest saved floor, so a window's hole in that wall lines up with the window.
+        const int highest = grid_ != nullptr ? static_cast<int>(grid_->levels) - 1 : -1;
+        if (highest >= 0 && level > highest && grid_->contains(highest, x, y)) {
+            return grid_->f32(highest, x, y, 0) + static_cast<float>(level - highest) * kLevelHeight;
+        }
         return static_cast<float>(level) * kLevelHeight;
     }
     return grid_->f32(level, x, y, 0);
@@ -244,27 +250,44 @@ void LotSceneBuilder::collectWalls() {
             continue;
         }
         // A fence rail is a wall segment whose type is the fence's GUID: one tile of rail from a to b.
-        if (const auto* fence = assets_.fence(covering->second->type)) {
+        const auto* fence = assets_.fence(covering->second->type);
+        if (fence != nullptr) {
             const float dx = b->x - a->x, dy = b->y - a->y;
             const std::string& model = dx != 0 && dy != 0 ? fence->diagonalRail : fence->rail;
             if (const int mesh = model.empty() ? -1 : b_.model(model, {}); mesh >= 0) {
-                if (auto* rail = b_.place(mesh, "rail " + model, Transform::at(a->x, a->y, heights_.corner(level, a->x, a->y), std::atan2(dy, dx)),
-                                          Part::Object, level)) {
+                // On a slope the game shears the rail rather than tilting it, so the pickets stay upright.
+                // Each vertex rises by the slope times its distance along the rail.
+                const float za = heights_.corner(level, a->x, a->y);
+                Transform place = Transform::at(a->x, a->y, za, std::atan2(dy, dx));
+                // A broken file can give a segment no length, which gets no slope.
+                const float length = std::sqrt(dx * dx + dy * dy);
+                place.m[8] = length > 0 ? (heights_.corner(level, b->x, b->y) - za) / length : 0.0f;
+                if (auto* rail = b_.place(mesh, "rail " + model, place, Part::Object, level)) {
                     rail->sunTest = SunTest::AboveBox;
                 }
                 ++stats_.fenceRails;
             }
-            continue;
+            if (!fence->halfWall) {
+                continue;
+            }
         }
         // The game adds attic walls under gable ends, often with the outdoors on both sides.
-        const auto style = styles.find(covering->second->type);
+        const auto style = fence != nullptr ? styles.end() : styles.find(covering->second->type);
         const bool toRoof = style != styles.end() && style->second.toRoof;
-        if ((w.leftRoom == w.rightRoom && !toRoof) || (onBorder(a) && onBorder(b))) {
+        // A half wall stands wherever it is built, also with the outdoors on both sides.
+        if ((w.leftRoom == w.rightRoom && !toRoof && fence == nullptr) || (onBorder(a) && onBorder(b))) {
             continue;
         }
         ThickWall t;
         t.q = {a->x, a->y, b->x, b->y, heights_.corner(level, a->x, a->y), heights_.corner(level + 1, a->x, a->y),
                heights_.corner(level, b->x, b->y), heights_.corner(level + 1, b->x, b->y)};
+        if (fence != nullptr) {
+            t.q.top0 = t.q.bottom0 + kHalfWallHeight;
+            t.q.top1 = t.q.bottom1 + kHalfWallHeight;
+            t.coveringFromBottom = true;
+            t.coveredEnds = true;
+            t.flatOutdoorLight = true;
+        }
         t.points = {w.from, w.to};
         t.level = level;
         t.toRoof = toRoof;
@@ -302,12 +325,66 @@ void LotSceneBuilder::collectWalls() {
         ++stats_.coveredWalls;
         walls_.push_back(std::move(t));
     }
+    collectStageSides();
     stats_.walls = walls_.size();
     wallBase_ = static_cast<int>(b_.scene().walls.size());
     for (std::size_t i = 0; i < walls_.size(); ++i) {
         const auto& t = walls_[i];
         b_.scene().walls.push_back({t.q.x0, t.q.y0, t.q.x1, t.q.y1, t.level, t.roomLeft, t.roomRight, t.cuttable, t.toRoof});
         wallAt_[edgeKey(t.q.x0, t.q.y0, t.q.x1, t.q.y1, t.level)] = i;
+    }
+}
+
+// A stage's (split-level platform's) sides are walls of their own graph, 0.1 thick, from just under
+// the storey's floor to just under the stage's. A side with no covering shows the stage wall
+// style's own pattern.
+void LotSceneBuilder::collectStageSides() {
+    constexpr std::uint32_t kStageWallStyle = 301;
+    constexpr float kStageSideHalfThickness = 0.05f;
+    constexpr float kStageSideDrop = 0.01f;  // how far under each floor the sides' bottom and top lie
+    const auto& styles = assets_.buildScripts().wallStyles;
+    const auto style = styles.find(kStageWallStyle);
+    if (!lot_.stageWalls || style == styles.end()) {
+        return;
+    }
+    const auto& graph = *lot_.stageWalls;
+    std::map<std::int32_t, const walllayer::Entry*> coverings;
+    for (const auto& c : lot_.stageWallCoverings) {
+        coverings[static_cast<std::int32_t>(c.wall)] = &c;
+    }
+    const std::string fallback = assets_.patternMaterial(style->second.defaultPattern, true);
+    auto side = [&](std::uint16_t id) {
+        const auto pattern = lot_.stageWallPatterns.find(id);
+        const std::string material = id != 0 && pattern != lot_.stageWallPatterns.end() ? assets_.patternMaterial(pattern->second.name, true) : fallback;
+        return b_.material(material) >= 0 ? material : std::string();
+    };
+    // Points off the lot (or not numbers, in a broken file) make no side.
+    auto onLot = [](const wallgraph::Point* p) { return p->x >= -1 && p->x <= 257 && p->y >= -1 && p->y <= 257; };
+    // The sides' corners get ids below zero, apart from the other walls' corners where they join.
+    auto pointId = [](std::int32_t id) { return -1 - (id & 0x3FFFFFFF); };
+    const wallgraph::PointIndex pointById(graph);
+    for (const auto& w : graph.walls) {
+        const auto* a = pointById(w.from);
+        const auto* b = pointById(w.to);
+        if (a == nullptr || b == nullptr || !onLot(a) || !onLot(b)) {
+            continue;
+        }
+        const int level = content::gridIndex(lot_, a->level);
+        const float za = heights_.corner(level, a->x, a->y), zb = heights_.corner(level, b->x, b->y);
+        ThickWall t;
+        t.q = {a->x, a->y, b->x, b->y, za - kStageSideDrop, za + kStageHeight - kStageSideDrop, zb - kStageSideDrop, zb + kStageHeight - kStageSideDrop};
+        t.points = {pointId(w.from), pointId(w.to)};
+        t.level = level;
+        t.thick = style->second.thick;
+        t.halfThickness = kStageSideHalfThickness;
+        t.coveringFromBottom = true;
+        t.cuttable = style->second.cutAway;
+        t.clear = !style->second.blocksLight;
+        t.roomLeft = t.roomRight = true;
+        const auto covering = coverings.find(w.id);
+        t.left = t.leftCovering = side(covering != coverings.end() ? covering->second->left : 0);
+        t.right = t.rightCovering = side(covering != coverings.end() ? covering->second->right : 0);
+        walls_.push_back(std::move(t));
     }
 }
 
@@ -468,6 +545,9 @@ void LotSceneBuilder::drawWalls() {
                 const int i = static_cast<int>(maps.wallRects.size());
                 const int x0 = (i % kPerRow) * kRectWidth, y0 = (i / kPerRow) * kRectHeight;
                 maps.wallRects[key] = {x0, y0, x0 + kRectWidth, y0 + kRectHeight};
+            }
+            if (w.flatOutdoorLight) {
+                maps.outdoorFaces.push_back(key);
             }
         }
     }

@@ -41,12 +41,13 @@ namespace {
 constexpr int kMaxCachedSide = 256;
 
 // A scene's light-map images in the order putLotLight lays them out: floors, the floors'
-// incidence maps, walls, the walls' incidence map.
+// incidence maps, walls, the walls' incidence map, the lamps' light on the lot skirt.
 std::vector<int> lightMapImages(const ts2::scene::LightMaps& maps) {
     std::vector<int> out(maps.floors.begin(), maps.floors.end());
     out.insert(out.end(), maps.floorIncidence.begin(), maps.floorIncidence.end());
     out.push_back(maps.walls);
     out.push_back(maps.wallIncidence);
+    out.push_back(maps.skirtLamps);
     return out;
 }
 
@@ -84,6 +85,7 @@ struct LotLight {
     // Worked out:
     ts2::scene::lotlighting::Result light;
     std::shared_ptr<const ts2::scene::lotshadow::Grid> shadow;
+    ts2::scene::lotshadow::Grid shadowAround;  // the same past the lot's edge, for the lot skirt
     ts2::scene::Scene maps;  // the base's light maps with this light in them
     bool done = false;
 };
@@ -151,6 +153,9 @@ void workOut(LotLight& l, ts2::scene::Scene& target) {
     const auto& shadowIn = base.shadowIn;
     const auto& sunDir = l.settings.outdoor.lights.empty() ? std::array<float, 3>{0, 0, 1} : l.settings.outdoor.lights.front().direction;
     l.shadow = gSunShadow.load() ? std::make_shared<const lotshadow::Grid>(lotshadow::build(shadowIn, sunDir)) : std::make_shared<const lotshadow::Grid>();
+    if (gSunShadow.load() && target.lightMaps && target.lightMaps->skirtLamps >= 0) {
+        l.shadowAround = lotshadow::build(lotshadow::around(shadowIn, lotlighting::aroundMargin(shadowIn.width, shadowIn.height)), sunDir);
+    }
     const auto floorGrid = lot.grids.find(ts2::content::kFloorGridInstance);
     const int ground = ts2::content::groundGridLevel(lot);
     auto bareGround = [&](int x, int y) {
@@ -162,6 +167,7 @@ void workOut(LotLight& l, ts2::scene::Scene& target) {
     };
     lotlightmaps::Sunlight sunlight;
     sunlight.shadow = l.shadow.get();
+    sunlight.around = &l.shadowAround;
     sunlight.lot = &shadowIn;
     sunlight.zone = l.zone;
     sunlight.terrain = [&](int x, int y) {
@@ -270,6 +276,7 @@ std::shared_ptr<LotLightBase> makeBase(ts2::scene::Assets& assets, const ts2::sc
     for (auto& f : maps.floorIncidence) take(f);
     take(maps.walls);
     take(maps.wallIncidence);
+    take(maps.skirtLamps);
     base->maps.lightMaps = std::move(maps);
     return base;
 }
@@ -322,8 +329,11 @@ void workOutLotLight(LotLight& light) {
 }
 
 std::shared_ptr<LotLightBase> lightLot(ts2::scene::Assets& assets, ts2::scene::Scene& scene, const ts2::content::Lot& saved,
-                                       const std::filesystem::path& lotPackage, const std::string& state) {
+                                       const std::filesystem::path& lotPackage, const std::string& state, bool skirt) {
     using namespace ts2::scene;
+    if (skirt) {
+        lotlightmaps::addSkirtLamps(scene);
+    }
     auto base = makeBase(assets, scene, saved, lotPackage);
     const auto light = gatherLotLight(assets, base, state);
     if (!light) {

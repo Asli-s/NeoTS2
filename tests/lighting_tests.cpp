@@ -1097,6 +1097,50 @@ void lotLightingIsWorkedOutAsTheGame() {
     lotlightmaps::fill(scene, lotlighting::Result{}, *s);  // nothing worked out: nothing changes
     CHECK(scene.images[0].rgba == floorMap);
 
+    // The lamps' light on the ground around the lot: a lamp outdoors lights the skirt beside the lot
+    // more than 16 tiles out, and the skirt ground (not the sea) reads it from the lot's place.
+    {
+        CHECK(lotlighting::aroundMargin(2, 1) == 16 && lotlighting::aroundMargin(250, 10) == 3 && lotlighting::aroundMargin(300, 1) == 0);
+        lotlighting::Inputs outdoors = in;
+        LightSource porch = lamp;
+        porch.room = 0;
+        outdoors.lamps = {porch};
+        outdoors.roomAt = [](int, float, float) { return std::int16_t{0}; };
+        outdoors.quarterRoom = [](int, int, int, int) { return std::int16_t{0}; };
+        const auto lit = lotlighting::compute(outdoors, *s);
+        Scene around;
+        around.images.resize(1);
+        around.images[0].width = 16;
+        around.images[0].height = 8;
+        around.images[0].rgba.assign(16 * 8 * 4, 128);
+        around.lightMaps.emplace();
+        around.lightMaps->floors = {0};
+        lotlightmaps::addSkirtLamps(around);
+        CHECK(around.lightMaps->skirtLamps == 1 && around.lightMaps->skirtMargin == 16);
+        CHECK(around.images.size() == 2 && around.images[1].width == 272 && around.images[1].height == 264);
+        lotlightmaps::fill(around, lit, *s);
+        const auto& lamps = around.images[1];
+        const auto red = [&](std::size_t x, std::size_t y) { return lamps.rgba[(y * lamps.width + x) * 4]; };
+        CHECK(red(124, 132) > red(0, 132) && red(124, 132) > 0);  // half a tile left of the lot, then the far edge
+        // Just past the lot's far edge the skirt starts from the lot's own light there, held flat to its edge.
+        const auto lotMap = lightmaptexels::floorTexels(lit.floors[0], {0, 0, 0, 255});
+        const auto unlitMap = lightmaptexels::floorTexels(lit.aroundUnlit, {0, 0, 0, 255});
+        const int edgeShare = lotMap.at(15, 4)->r - unlitMap.at(128 + 15, 132)->r;
+        CHECK(edgeShare > 0 && red(143, 132) == edgeShare && std::abs(red(144, 132) - edgeShare) <= edgeShare / 4);
+        Instance skirt;
+        skirt.part = Part::Skirt;
+        around.instances.push_back(skirt);
+        skirt.name = "lot skirt sea";
+        around.instances.push_back(skirt);
+        lotlightmaps::linkSkirtLamps(around, Transform::at(100, 0, 0, 0));
+        const auto& linked = around.instances[0];
+        CHECK(linked.lightMap == 1 && linked.skirtLampGain == 1.8f && around.instances[1].lightMap == -1);
+        // The lot's corner, at (100, 0) in the scene, is the margin into the image.
+        const float u = linked.skirtLampMap[0][0] * 100 + linked.skirtLampMap[0][3];
+        const float v = linked.skirtLampMap[1][3];
+        CHECK(std::abs(u - 16.0f / 34) < 1e-5f && std::abs(v - 16.0f / 33) < 1e-5f);
+    }
+
     // No lot, or no floors: nothing.
     CHECK(lotlighting::compute(lotlighting::Inputs{}, *s).floors.empty());
     ts2::content::Lot bare;
@@ -1188,6 +1232,11 @@ void lotSunShadowIsCastAsTheGame() {
     // ... and its shadow falls that way, sinking a sixth of a unit a sample (0.125 x 2 / 1.5).
     CHECK(std::abs(g.shadowAt(1.5f, 1.6f) - (3.0f - 0.16667f * 3)) < 0.01f);
     CHECK(g.shadowAt(2.6f, 1.6f) <= 0.0f && g.shadowAt(-1, 0) == -1000.0f);  // the sunny side: no higher than the ground
+    // With ground around the lot the same shadow goes on past the lot's edge, and stays the same on the lot.
+    const auto wide = lotshadow::build(lotshadow::around(in, 4), sun);
+    CHECK(wide.width == 96 && wide.height == 96);
+    CHECK(wide.shadowAt(3.9f, 5.6f) > 0.0f && std::abs(wide.shadowAt(5.5f, 5.6f) - g.shadowAt(1.5f, 1.6f)) < 1e-5f);
+    CHECK(lotshadow::around(in, 0).width == 0);
     // Under the shadow the sun fades over a unit. Above it, all of it.
     CHECK(lotshadow::sunVisible(-1, 1) == 1 && lotshadow::sunVisible(0.25f, 1) == 0.75f && lotshadow::sunVisible(2, 1) == 0);
     // The topmost floor over a quarter is its height, and the ground stays below.

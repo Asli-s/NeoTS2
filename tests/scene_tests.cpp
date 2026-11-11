@@ -1,4 +1,5 @@
 // Building and viewing scenes: lots, Sims, rigs, roofs, walls and views.
+#include <cstring>
 #include "render/math.hpp"
 #include "test_support.hpp"
 
@@ -1598,6 +1599,27 @@ void atticWallsReachTheRoofsUnderside() {
     CHECK(ceiling.at(1, 0, 6) == 6);
     ceiling.gables.push_back(&roof);
     CHECK(ceiling.at(1, 0, 6) == 3.5f && ceiling.at(5, 0, 6) == 7.5f);
+    // A lower cross gable ending on the same line leaves the wall at the higher roof's underside.
+    ts2::scene::RoofShape cross = roof;
+    cross.planes = {{4, 0, 1, 0}};  // rising along x from x = 4
+    ceiling.gables.push_back(&cross);
+    CHECK(ceiling.at(5, 0, 6) == 7.5f);
+}
+
+// Past the saved storeys, a floor is a storey up from the highest saved one (an attic wall's top over
+// a 0.75 foundation is 6.75, so its window's hole lines up with the window).
+void heightsPastTheSavedStoreys() {
+    auto grid = std::make_shared<ts2::array3d::Array3D>();
+    grid->width = grid->height = 1;
+    grid->levels = 2;
+    grid->elementSize = 4;
+    for (const float h : {0.75f, 3.75f}) {
+        std::uint8_t bytes[4];
+        std::memcpy(bytes, &h, 4);
+        grid->elements.insert(grid->elements.end(), bytes, bytes + 4);
+    }
+    const ts2::scene::Heights heights(grid);
+    CHECK(heights.corner(1, 0, 0) == 3.75f && heights.corner(2, 0, 0) == 6.75f && heights.corner(3, 0, 0) == 9.75f);
 }
 
 // Transforms: a quarter turn about z takes +x to +y, then the translation applies.
@@ -1839,7 +1861,7 @@ void sceneCutawayCutsWallsInFrontOfRooms() {
     CHECK(!cutDown(inner, view));
 }
 
-// What a view shows: nothing above its storey, roofs only with walls up on the top storey, a wall's
+// What a view shows: nothing above its storey, roofs with walls up once their eaves' storey is looked at, a wall's
 // cut version in place of the full one, and a window gone with the wall it sits in.
 void sceneViewsShowStoreysWallsAndRoofs() {
     using namespace ts2::scene;
@@ -1868,7 +1890,10 @@ void sceneViewsShowStoreysWallsAndRoofs() {
     scene.groundLevel = 0;
     CHECK(topLevel(scene) == 2 && groundLevel(scene) == 0);
     View view;
+    // The roof's eaves rest on storey 3, so the top built storey shows it off and the storey above on.
     view.level = 2;
+    CHECK((visibleInstances(scene, view) == std::vector<std::uint8_t>{1, 1, 1, 0, 1, 0, 1}));
+    view.level = 3;
     CHECK((visibleInstances(scene, view) == std::vector<std::uint8_t>{1, 1, 1, 1, 1, 0, 1}));
     view.level = 1;
     CHECK((visibleInstances(scene, view) == std::vector<std::uint8_t>{1, 1, 0, 0, 1, 0, 1}));
@@ -1877,7 +1902,8 @@ void sceneViewsShowStoreysWallsAndRoofs() {
     view.level = 2;
     CHECK((visibleInstances(scene, view) == std::vector<std::uint8_t>{1, 1, 1, 0, 1, 0, 1}));
 
-    // An attic wall a storey above the top one (the Smiths' dormer gables) shows with the roofs only.
+    // An attic wall a storey above the top one (the Smiths' dormer gables) shows with its storey,
+    // the one the roof's eaves rest on, as the roof does.
     WallInfo gable;
     gable.level = 3;
     gable.attic = true;
@@ -1885,12 +1911,15 @@ void sceneViewsShowStoreysWallsAndRoofs() {
     add(Part::Wall, 3, false, {1});        // 7
     CHECK(topLevel(scene) == 2);
     view.walls = WallView::Up;
-    CHECK(visibleInstances(scene, view)[7] == 1);
-    view.roofs = false;
-    CHECK(visibleInstances(scene, view)[7] == 0);
+    CHECK(visibleInstances(scene, view)[7] == 0 && visibleInstances(scene, view)[3] == 0);
+    view.level = 3;
+    CHECK(visibleInstances(scene, view)[7] == 1 && visibleInstances(scene, view)[3] == 1);
+    // An imposter or a house next door shows every storey, the attic and its roofs too.
+    view.level = everyLevel(scene);
+    CHECK(view.level == 4 && visibleInstances(scene, view)[7] == 1 && visibleInstances(scene, view)[3] == 1);
 
-    // A porch roof over the ground floor stays on while the floor above is looked at with the walls up,
-    // not in cutaway.
+    // A porch roof over the ground floor stays on while the floors above are looked at with the walls
+    // up, not in cutaway.
     add(Part::Roof, 1);                    // 8
     view.roofs = true;
     CHECK(visibleInstances(scene, view)[8] == 1 && visibleInstances(scene, view)[3] == 1);
@@ -3109,6 +3138,58 @@ void portraitPoseAndCamera() {
     CHECK(std::abs(lit.lights[1].direction[2] + 1) < 1e-4f);
 }
 
+// A portrait takes its pose's face as well as its joints: the morph weights of each face part that
+// has morphs (a smile's mouth corners) and the eye values of each part with eyes. Parts without
+// either get none.
+void portraitsTakeTheirPosesFace() {
+    using namespace ts2::scene;
+    auto rig = std::make_shared<Rig>();
+    rig->nodes.push_back({"root", -1, {0, 0, 0}, {0, 0, 0, 1}});
+    rig->nodes.push_back({"head", 0, {0, 0, 1.6f}, {0, 0, 0, 1}});
+    Scene scene;
+    auto& face = scene.meshes.emplace_back();
+    face.skin.push_back({"head", Transform{}, Transform{}, Transform{}});
+    face.morphs = {{"faceblends", "l_ycorner"}, {"faceblends", "y_nose"}};
+    face.primitives.emplace_back().eyeUvs = {0, 0};
+    auto& body = scene.meshes.emplace_back();
+    body.skin.push_back({"root", Transform{}, Transform{}, Transform{}});
+    scene.instances.emplace_back().mesh = 0;
+    scene.instances.emplace_back().mesh = 1;
+    Actor actor;
+    actor.rig = rig;
+    actor.skinned.push_back({0, {1}});
+    actor.skinned.push_back({1, {0}});
+    auto a = std::make_shared<ts2::anim::Animation>();
+    const auto target = [&](std::uint16_t type, const std::string& group, const std::string& name, std::vector<float> values) {
+        ts2::anim::Animation::MorphTarget t;
+        t.type = type;
+        t.group = group;
+        ts2::anim::Channel c;
+        c.name = name;
+        c.flags = 0x8000;
+        for (const float v : values) {
+            ts2::anim::Curve curve;
+            curve.keys.push_back({0, v, 0, 0});
+            c.components.push_back(curve);
+        }
+        t.channels.push_back(c);
+        a->morphTargets.push_back(t);
+    };
+    target(ts2::anim::kMorphTargetType, "faceblends", "l_ycorner", {0.933f});
+    target(ts2::anim::kEyeTargetType, "*", "eyedirection", {0.05f, -0.02f});
+    const RigAnimation pose = bindAnimation(*rig, a);
+    PortraitShot shot;
+    CHECK(portraitShot(scene, actor, &pose, shot));
+    CHECK(shot.joints.size() == 2);
+    CHECK(shot.morphs.size() == 1 && shot.morphs[0].first == 0 && shot.morphs[0].second.size() == 2);
+    CHECK(std::abs(shot.morphs[0].second[0] - 0.933f) < 1e-6f && shot.morphs[0].second[1] == 0);
+    CHECK(shot.eyes.size() == 1 && shot.eyes[0].first == 0 && shot.eyes[0].second[0] == 0.05f && shot.eyes[0].second[1] == -0.02f);
+    // At rest the face is still and the eyes look ahead.
+    CHECK(portraitShot(scene, actor, nullptr, shot));
+    CHECK(shot.morphs.size() == 1 && shot.morphs[0].second == (std::vector<float>{0, 0}));
+    CHECK(shot.eyes.size() == 1 && shot.eyes[0].second == (std::array<float, 4>{0, 0, 0, 0}));
+}
+
 void compositeLayersBlendAsTheGame() {
     using namespace ts2::scene::textureblend;
     CHECK(weight(0) == 0 && weight(127) == 127 && weight(128) == 129 && weight(255) == 256);
@@ -3674,6 +3755,7 @@ std::vector<Test> sceneTests() {
         {"floating objects read the water by half tiles", floatingObjectsReadTheWaterByHalfTiles},
         {"pool water has the game's surface", poolWaterHasTheGamesSurface},
         {"attic walls reach the roof's underside", atticWallsReachTheRoofsUnderside},
+        {"heights past the saved storeys", heightsPastTheSavedStoreys},
         {"held particles are replaced when they die", heldParticlesAreReplacedWhenTheyDie},
         {"bursts come each cycle, aged by how late they are", burstsComeEachCycleAgedByHowLateTheyAre},
         {"flowing particles follow the rate over a cycle", flowingParticlesFollowTheRateOverACycle},
@@ -3715,6 +3797,7 @@ std::vector<Test> sceneTests() {
         {"picker hits posed Sims", pickerHitsPosedSims},
         {"picker box keeps every posed hit", pickerBoxKeepsEveryPosedHit},
         {"portrait pose and camera", portraitPoseAndCamera},
+        {"portraits take their pose's face", portraitsTakeTheirPosesFace},
         {"animated rotation turns first", animatedRotationTurnsFirst},
         {"channel turns take the short way", channelTurnsTakeTheShortWay},
         {"object materials follow Change Material", objectMaterialsFollowChanges},

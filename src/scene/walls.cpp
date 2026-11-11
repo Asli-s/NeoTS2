@@ -127,7 +127,6 @@ std::map<std::string, std::vector<WallMask>> wallMasks(const std::vector<std::st
 
 std::vector<WallHub> joinWalls(std::vector<ThickWall>& walls) {
     std::vector<WallHub> hubs;
-    const float h = kWallThickness / 2;
     std::map<std::int32_t, std::vector<std::pair<std::size_t, int>>> atPoint;
     for (std::size_t i = 0; i < walls.size(); ++i) {
         auto& w = walls[i];
@@ -164,6 +163,7 @@ std::vector<WallHub> joinWalls(std::vector<ThickWall>& walls) {
             const Arm& next = arms[(k + 1) % arms.size()];
             const Arm& prev = arms[(k + arms.size() - 1) % arms.size()];
             ThickWall& w = walls[a.wall];
+            const float h = w.halfThickness;
             w.joined[static_cast<std::size_t>(a.end)] = arms.size() > 1;
             const float px = a.end == 0 ? w.q.x0 : w.q.x1, py = a.end == 0 ? w.q.y0 : w.q.y1;
             // The counterclockwise side of an arm is the wall's right side at its start and its
@@ -196,9 +196,11 @@ float WallCeiling::at(float x, float y, float top) const {
     if (gables.empty()) {
         return top;
     }
-    float z = 1e9f;
+    // Closing the gable ends of two roofs (a cross gable meeting the main roof's end), it reaches the
+    // higher underside, so neither gable is left open.
+    float z = -1e9f;
     for (const auto* g : gables) {
-        z = std::min(z, g->height(x, y) - g->thickness);  // up to the roof's underside
+        z = std::max(z, g->height(x, y) - g->thickness);
     }
     return z;
 }
@@ -217,6 +219,7 @@ std::vector<float> WallCeiling::bends(const std::array<float, 2>& p, const std::
 // Coverings run left to right as seen from their side, once along each segment (a tile, or a tile's
 // diagonal) and once over a full storey down from the wall's own top, so short walls such as a
 // deck's skirt show the top of it, and the covering carries on where the wall is cut down or raised.
+// Walls marked coveringFromBottom (a stage's sides) run it up from their bottom instead.
 void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w, int topMaterial, float cutHeight,
                   const std::array<std::optional<LightRect>, 2>* lightRects) {
     const WallQuad& q = w.q;
@@ -225,7 +228,7 @@ void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w,
         return;
     }
     const float ux = dx / len, uy = dy / len;
-    const float h = kWallThickness / 2;
+    const float h = w.halfThickness;
     auto along = [&](const std::array<float, 2>& c) { return (c[0] - q.x0) * ux + (c[1] - q.y0) * uy; };
     auto across = [&](float a, float side) {
         return std::array<float, 2>{q.x0 + ux * a + side * uy * h, q.y0 + uy * a - side * ux * h};
@@ -238,7 +241,9 @@ void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w,
         const float own = ownTopAt(c);
         return cut ? std::min(own, bottomAt(c) + cutHeight) : std::max(bottomAt(c), w.ceiling.at(c[0], c[1], own));
     };
-    auto v = [&](const std::array<float, 2>& c, float z) { return (ownTopAt(c) - z) / kLevelHeight; };
+    auto v = [&](const std::array<float, 2>& c, float z) {
+        return w.coveringFromBottom ? 1 - (z - bottomAt(c)) / kLevelHeight : (ownTopAt(c) - z) / kLevelHeight;
+    };
     // Positions along the wall where its top bends (as distances along it).
     std::vector<float> bends;
     if (!cut) {
@@ -315,6 +320,20 @@ void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w,
                 light(prim, first);
             }
         }
+        // The free end on this side's left: the last thickness of the paint, ending at this side.
+        const std::size_t end = left ? 0 : 1;
+        if (w.coveredEnds && w.thick && !w.joined[end]) {
+            const auto& p = left ? w.rightA : w.leftB;
+            const auto& n = left ? w.leftA : w.rightB;
+            const float out = left ? -1.0f : 1.0f;
+            auto& prim = surfaces[m];
+            const std::size_t first = prim.positions.size() / 3;
+            const float u0 = 1 - 2 * h;
+            addQuad(prim, {{{p[0], p[1], bottomAt(p)}, {n[0], n[1], bottomAt(n)}, {n[0], n[1], topAt(n)}, {p[0], p[1], topAt(p)}}},
+                    {out * ux, out * uy, 0},
+                    {{{u0, v(p, bottomAt(p))}, {1, v(n, bottomAt(n))}, {1, v(n, topAt(n))}, {u0, v(p, topAt(p))}}});
+            light(prim, first);
+        }
     }
     if (!w.thick) {
         return;
@@ -390,7 +409,7 @@ void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w,
             // Where another wall joins, it covers the end up to the height walls are cut down to. Only
             // above it can the end show (when the other wall is cut down and this one isn't).
             const bool joined = atEnd && w.joined[out < 0 ? 0 : 1];
-            if (joined && cut) {
+            if ((joined && cut) || (atEnd && !joined && w.coveredEnds)) {
                 continue;
             }
             // Where a window or door runs on past the segment's end, the end stays open over its rows
@@ -415,7 +434,7 @@ void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w,
                 }
                 // With the top's material (the game builds a wall's sides and its top piece only).
                 addQuad(surfaces[topMaterial], {{{lp[0], lp[1], lb}, {rp[0], rp[1], rb}, {rp[0], rp[1], rt}, {lp[0], lp[1], lt}}},
-                        {out * ux, out * uy, 0}, {{{0, lb}, {kWallThickness, rb}, {kWallThickness, rt}, {0, lt}}});
+                        {out * ux, out * uy, 0}, {{{0, lb}, {2 * h, rb}, {2 * h, rt}, {0, lt}}});
             };
             constexpr float kAll = 1000;  // far past the wall's top and bottom
             float row = -kAll;

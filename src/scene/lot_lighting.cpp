@@ -166,6 +166,61 @@ bool lightPass(Result& r, const Settings& s, const std::vector<LightSource>& sou
     return ok;
 }
 
+// Lights the ground storey with the ground around the lot added, as open outdoor ground with no
+// walls, and the same grid unlit, so the lamps' and windows' share of the light is known there too.
+void lightAround(Result& r, const Inputs& in, const Settings& s, const std::vector<wallruns::Wall>& walls,
+                 const std::vector<LightSource>& sources, const FloorStops& stops) {
+    const auto lot = lightgrid::fromLot(*in.lot, 0, walls);
+    const int m = aroundMargin(lot.width, lot.height);
+    if (m <= 0) {
+        return;
+    }
+    lightgrid::LevelInput around;
+    around.width = lot.width + 2 * m;
+    around.height = lot.height + 2 * m;
+    const std::size_t tiles = static_cast<std::size_t>(around.width) * static_cast<std::size_t>(around.height);
+    around.floor.assign(tiles, 1);
+    around.walls.assign(tiles, 0);
+    for (int y = 0; y < lot.height; ++y) {
+        for (int x = 0; x < lot.width; ++x) {
+            const std::size_t from = static_cast<std::size_t>(y) * static_cast<std::size_t>(lot.width) + static_cast<std::size_t>(x);
+            const std::size_t to = static_cast<std::size_t>(y + m) * static_cast<std::size_t>(around.width) + static_cast<std::size_t>(x + m);
+            around.floor[to] = lot.floor[from];
+            around.walls[to] = lot.walls[from];
+        }
+    }
+    const float shift = static_cast<float>(m);
+    const float width = static_cast<float>(lot.width), height = static_cast<float>(lot.height);
+    around.roomAt = [&in, shift, width, height](float x, float y) -> std::int16_t {
+        x -= shift;
+        y -= shift;
+        return in.roomAt && x >= 0 && y >= 0 && x < width && y < height ? in.roomAt(0, x, y) : std::int16_t{0};
+    };
+    r.around = lightgrid::build(around);
+    if (!r.around.fits()) {
+        return;
+    }
+    r.around.outsideAmbient = {s.outsideColor[0] * s.outsideFloorAmbient, s.outsideColor[1] * s.outsideFloorAmbient,
+                               s.outsideColor[2] * s.outsideFloorAmbient};
+    r.around.insideAmbient = {s.insideColor[0] * s.insideFloorAmbient, s.insideColor[1] * s.insideFloorAmbient, s.insideColor[2] * s.insideFloorAmbient};
+    r.around.falloffScale = s.floorThreshold;
+    r.around.steps = s.steps;
+    r.around.dimOutside = s.dimOutside;
+    r.aroundUnlit = r.around;
+    std::vector<LightSource> shifted = sources;
+    for (auto& source : shifted) {
+        source.x0 += shift;
+        source.x1 += shift;
+        source.y0 += shift;
+        source.y1 += shift;
+    }
+    const auto stopsAt = [&](int x, int y, int level) {
+        return stops(level, static_cast<float>(x) * 0.5f - shift, static_cast<float>(y) * 0.5f - shift);
+    };
+    r.complete = floorlight::light(r.around, shifted, stopsAt) && r.complete;
+    r.complete = floorlight::light(r.aroundUnlit, {}, stopsAt) && r.complete;
+}
+
 wallruns::Key portalKey(const windowlight::Portal& p) {
     return wallruns::keyOf(static_cast<int>(p.height), static_cast<int>(std::lround(p.x0)), static_cast<int>(std::lround(p.y0)),
                            static_cast<int>(std::lround(p.x1)), static_cast<int>(std::lround(p.y1)));
@@ -242,6 +297,14 @@ std::optional<Settings> settingsFor(const content::Lighting& l, const std::strin
     return s;
 }
 
+int aroundMargin(int width, int height) {
+    constexpr int kMargin = 16, kMaxTiles = 256;
+    if (width <= 0 || height <= 0 || width > kMaxTiles || height > kMaxTiles) {
+        return 0;
+    }
+    return std::min(kMargin, (kMaxTiles - std::max(width, height)) / 2);
+}
+
 Result compute(const Inputs& in, const Settings& s) {
     Result r;
     if (!in.lot) {
@@ -304,6 +367,7 @@ Result compute(const Inputs& in, const Settings& s) {
     // Lamps and windows together, then the corners.
     r.walls.runs = r.layout.runs;
     r.complete = lightPass(r, s, sources, stops) && r.complete;
+    lightAround(r, in, s, walls, sources, stops);
     lightcorners::blendWalls(r.walls);
     std::vector<std::vector<lightcorners::Tile>> tiles;
     for (const auto& keys : r.layout.keys) {

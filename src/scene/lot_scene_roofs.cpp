@@ -74,6 +74,7 @@ void LotSceneBuilder::shapeRoofs() {
         r.valley = look.valley;
     }
     // Grid roofs are built once all are known, as each is cut by and meets the others.
+    const int lowestLevel = lot_.roomGraph ? lot_.roomGraph->firstLevel : 0;
     std::vector<const RoofGrid*> grids;
     for (const auto& r : roofs_) {
         if (r.shape.grid) {
@@ -84,9 +85,9 @@ void LotSceneBuilder::shapeRoofs() {
         if (!r.shape.grid) {
             continue;
         }
-        // Only roofs whose grid overlaps this one's can cover or meet it: their heights are
-        // none outside their own grid. Leaving the rest out keeps a lot of many roofs from
-        // costing roofs x roofs x points.
+        // Only roofs within reach of this one's level whose grid overlaps its own can cover or
+        // meet it: their heights are none outside their own grid. Leaving the rest out keeps a
+        // lot of many roofs from costing roofs x roofs x points.
         const RoofGrid& own = *r.shape.grid;
         auto overlaps = [&own](const RoofGrid& g) {
             constexpr float kSlack = 1e-3f;
@@ -95,7 +96,7 @@ void LotSceneBuilder::shapeRoofs() {
         };
         std::vector<const RoofGrid*> others;
         for (const auto* g : grids) {
-            if (g != &own && overlaps(*g)) {
+            if (g != &own && overlaps(*g) && roofWithinReach(own.level, g->level, lowestLevel)) {
                 others.push_back(g);
             }
         }

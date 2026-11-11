@@ -205,6 +205,63 @@ std::array<float, 3> GroundNormals::at(float x, float y) const {
     return len > 0 && std::isfinite(len) ? std::array<float, 3>{n[0] / len, n[1] / len, n[2] / len} : std::array<float, 3>{0, 0, 1};
 }
 
+// Writes the lamps' and windows' share of the ground's light around the lot: the lit ground less the
+// unlit, in the light maps' scale and texel for texel with them. The lot's own grid ends at its edge,
+// so its light map holds the edge's light flat there. Past the edge the fade is scaled to start from
+// the lot's own light at the nearest edge texel, so the skirt meets the lot without a step. The alpha
+// is how much of the sun reaches each texel under the buildings' shadow, all of it without one.
+void fillSkirtLamps(Image& target, const lotlighting::Result& light, const Sunlight* sunlight) {
+    const int ground = -light.lowest;
+    if (ground < 0 || static_cast<std::size_t>(ground) >= light.floors.size()) {
+        return;
+    }
+    const auto lot = lightmaptexels::floorTexels(light.floors[static_cast<std::size_t>(ground)], {0, 0, 0, 255});
+    const auto lit = lightmaptexels::floorTexels(light.around, {0, 0, 0, 255});
+    const auto unlit = lightmaptexels::floorTexels(light.aroundUnlit, {0, 0, 0, 255});
+    if (lot.width <= 0 || lot.height <= 0 || lit.width != unlit.width || lit.height != unlit.height || lit.width != static_cast<int>(target.width) ||
+        lit.height != static_cast<int>(target.height) || lit.width < lot.width || lit.height < lot.height) {
+        return;
+    }
+    // Where the lot's texels start in the image: the margin, as many texels on each side.
+    const int x0 = (lit.width - lot.width) / 2, y0 = (lit.height - lot.height) / 2;
+    const auto share = [](std::uint8_t a, std::uint8_t b) { return std::max(0, a - b); };
+    const lotshadow::Grid* shadow = sunlight && sunlight->around && sunlight->around->width == lit.width && sunlight->around->height == lit.height &&
+                                            sunlight->around->shadow.size() == lit.texels.size() && sunlight->around->ground.size() == lit.texels.size()
+                                        ? sunlight->around
+                                        : nullptr;
+    for (int y = 0; y < lit.height; ++y) {
+        for (int x = 0; x < lit.width; ++x) {
+            const int lx = std::clamp(x - x0, 0, lot.width - 1), ly = std::clamp(y - y0, 0, lot.height - 1);
+            const bool inside = lx == x - x0 && ly == y - y0;
+            const auto* at = lit.at(x, y);
+            const auto* off = unlit.at(x, y);
+            const auto* edge = lit.at(lx + x0, ly + y0);
+            const auto* edgeOff = unlit.at(lx + x0, ly + y0);
+            const auto* own = lot.at(lx, ly);
+            const auto channel = [](const walllight::Pixel& p, std::size_t c) { return c == 0 ? p.r : c == 1 ? p.g : p.b; };
+            std::array<std::uint8_t, 3> out{};
+            for (std::size_t c = 0; c < 3; ++c) {
+                const int ownShare = share(channel(*own, c), channel(*edgeOff, c));
+                if (inside) {
+                    out[c] = static_cast<std::uint8_t>(ownShare);
+                    continue;
+                }
+                const int here = share(channel(*at, c), channel(*off, c)), atEdge = share(channel(*edge, c), channel(*edgeOff, c));
+                const int scaled = atEdge > 0 ? here * ownShare / atEdge : here;
+                out[c] = static_cast<std::uint8_t>(std::clamp(scaled, 0, 255));
+            }
+            std::uint8_t sun = 255;
+            if (shadow) {
+                // The shadow grid's rows run as the light map's texels do, 8 a tile.
+                const std::size_t s = static_cast<std::size_t>(y) * static_cast<std::size_t>(lit.width) + static_cast<std::size_t>(x);
+                const float visible = lotshadow::sunVisible(shadow->shadow[s] - shadow->ground[s], sunlight->zone);
+                sun = static_cast<std::uint8_t>(std::clamp(std::lround(255.0f * visible), 0L, 255L));
+            }
+            put(target, static_cast<std::size_t>(x), static_cast<std::size_t>(y), {out[0], out[1], out[2], sun});
+        }
+    }
+}
+
 void fill(Scene& scene, const lotlighting::Result& light, const lotlighting::Settings& settings, const Sunlight* sunlight) {
     if (!scene.lightMaps) {
         return;
@@ -213,6 +270,9 @@ void fill(Scene& scene, const lotlighting::Result& light, const lotlighting::Set
     auto image = [&](int index) -> Image* {
         return index >= 0 && static_cast<std::size_t>(index) < scene.images.size() ? &scene.images[static_cast<std::size_t>(index)] : nullptr;
     };
+    if (Image* skirt = image(maps.skirtLamps)) {
+        fillSkirtLamps(*skirt, light, sunlight);
+    }
     auto roomAdd = [&](std::int16_t room) {
         const auto it = light.rooms.find(room);
         return room <= 0 || it == light.rooms.end() ? walllight::Pixel{} : lightmaptexels::roomAdd(settings.unlit.color, it->second.unlitShare);
@@ -303,8 +363,90 @@ void fill(Scene& scene, const lotlighting::Result& light, const lotlighting::Set
             }
         }
     }
+    for (const auto& key : maps.outdoorFaces) {
+        const auto rect = maps.wallRects.find(key);
+        const float dx = static_cast<float>(key[3] - key[1]), dy = static_cast<float>(key[4] - key[2]);
+        const float len = std::sqrt(dx * dx + dy * dy);
+        if (rect == maps.wallRects.end() || len <= 0) continue;
+        // Outdoors where the half tile in front of the face's middle is (a quarter tile out).
+        const float nx = dy / len, ny = -dx / len;
+        const float px = (key[1] + key[3]) / 2.0f + nx / 4, py = (key[2] + key[4]) / 2.0f + ny / 4;
+        const int level = key[0] - light.lowest;
+        if (level < 0 || static_cast<std::size_t>(level) >= light.floors.size()) continue;
+        const auto* cell = light.floors[static_cast<std::size_t>(level)].at(static_cast<int>(std::floor(2 * px)), static_cast<int>(std::floor(2 * py)));
+        if (cell == nullptr || !cell->halves[0].outside) continue;
+        auto add = lightmaptexels::outdoorAdd(settings.outdoor, {nx, ny, 0});
+        add.a = 255;
+        const auto& r = rect->second;
+        for (int y = r.y0; y < r.y1; ++y) {
+            for (int x = r.x0; x < r.x1; ++x) {
+                put(*walls, static_cast<std::size_t>(x), static_cast<std::size_t>(y), add);
+            }
+        }
+    }
     // Walls take 0.8 for the height clamp.
     putIncidence(image(maps.wallIncidence), before, settings, 0.8f);
+}
+
+void addSkirtLamps(Scene& scene) {
+    if (!scene.lightMaps || scene.lightMaps->skirtLamps >= 0) {
+        return;
+    }
+    auto& maps = *scene.lightMaps;
+    const int ground = -maps.lowest;
+    if (ground < 0 || static_cast<std::size_t>(ground) >= maps.floors.size()) {
+        return;
+    }
+    const int index = maps.floors[static_cast<std::size_t>(ground)];
+    if (index < 0 || static_cast<std::size_t>(index) >= scene.images.size()) {
+        return;
+    }
+    // The floor light maps hold 8 texels a tile.
+    const int width = static_cast<int>(scene.images[static_cast<std::size_t>(index)].width / 8);
+    const int height = static_cast<int>(scene.images[static_cast<std::size_t>(index)].height / 8);
+    const int margin = lotlighting::aroundMargin(width, height);
+    if (margin <= 0) {
+        return;
+    }
+    Image lamps;
+    lamps.width = static_cast<std::uint32_t>(8 * (width + 2 * margin));
+    lamps.height = static_cast<std::uint32_t>(8 * (height + 2 * margin));
+    lamps.rgba.assign(static_cast<std::size_t>(lamps.width) * lamps.height * 4, 0);
+    maps.skirtLamps = static_cast<int>(scene.images.size());
+    maps.skirtMargin = margin;
+    scene.images.push_back(std::move(lamps));
+}
+
+void linkSkirtLamps(Scene& scene, const Transform& place) {
+    if (!scene.lightMaps || scene.lightMaps->skirtLamps < 0 || static_cast<std::size_t>(scene.lightMaps->skirtLamps) >= scene.images.size()) {
+        return;
+    }
+    const auto& maps = *scene.lightMaps;
+    const auto& image = scene.images[static_cast<std::size_t>(maps.skirtLamps)];
+    if (image.width == 0 || image.height == 0) {
+        return;
+    }
+    // From the scene to the lot (tiles), moved by the margin and scaled to the image.
+    const float margin = static_cast<float>(maps.skirtMargin);
+    const Transform toLot = place.rigidInverse();
+    const std::array<float, 2> scale{8.0f / static_cast<float>(image.width), 8.0f / static_cast<float>(image.height)};
+    std::array<std::array<float, 4>, 2> rows{};
+    for (std::size_t r = 0; r < 2; ++r) {
+        for (std::size_t c = 0; c < 4; ++c) {
+            rows[r][c] = toLot.m[r * 4 + c] * scale[r];
+        }
+        rows[r][3] += margin * scale[r];
+    }
+    for (auto& instance : scene.instances) {
+        if (instance.part != Part::Skirt || instance.name == "lot skirt sea") {
+            continue;
+        }
+        instance.lightMap = maps.skirtLamps;
+        instance.skirtLampMap = rows;
+        // As the lot's terrain takes its light map: times twice the material's diffuse (half its
+        // skirt ambient), the ground's 0.9 and the roads' 1.
+        instance.skirtLampGain = instance.skirtAmbient / 2;
+    }
 }
 
 } // namespace ts2::scene::lotlightmaps

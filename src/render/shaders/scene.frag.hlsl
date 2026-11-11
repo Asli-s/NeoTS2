@@ -3,6 +3,7 @@
 // sun, unless unlit.
 
 #include "sdl_gpu.hlsli"
+#include "pool_sea.hlsli"
 
 COMBINED Texture2D<float4> baseTexture : register(t0, space2);
 COMBINED SamplerState baseSampler : register(s0, space2);
@@ -62,10 +63,11 @@ cbuffer Material : register(b0, space3) {
     float4 uvTile;    // the texture coordinates times xy plus zw: one frame of a tiled texture
     float4 shadowReceiver;  // x: 1 when Sims' projected shadows fall on it, y: its level, z: 1 to fade them by the light map, w: 1 for a floor
     float4 caustics;        // x: 1 for a pool floor, 2 for a pool wall, 3 for the caustics alone over a pond's ground, 4 the same over a beach sea's, 0 for none, yzw: the texture light
-    float4 neighborLight;   // rgb: what a neighbor's real house is tinted by, w: 1 when it is one, 2 for the ground around the lot, 3 for its ground
+    float4 neighborLight;   // rgb: what a neighbor's real house is tinted by, w: 1 when it is one, 2 for the ground around the lot
     float4 wallMask;        // x: 1 when a wall mask cuts it, y: 1 when the mask runs the other way along u
     float4 terrainTexture;  // x: 1 for terrain (the texture's alpha plays no part), y: 1 with a detail texture, z: how many times it repeats over the texture
-    float4 underwaterShade; // x: 1 when darkened below the water by the underwater gradient, y: 1 when hazed under a pool-style sea
+    float4 underwaterShade; // x: 1 when darkened below the water by the underwater gradient, y: 1 when hazed under a pool-style sea, z: 1 for the ground lot view hazes
+    float4 skirtLamps[3];   // a lot skirt's lamp light from the light map: the rows giving its coordinates, then x the gain (0: none)
 };
 
 #ifndef GL2
@@ -81,20 +83,43 @@ cbuffer Shadows : register(b1, space3) {
     float4 ambientOcclusion;               // x: 1 when these surfaces are multiplied by it (not in the original game)
     float4 neighborGround[32];             // the lots of neighbors drawn as real houses: x0, x1, y0, y1 (kMaxNeighborGrounds of them)
     float4 neighborGrounds;                // x: how many
-    float4 underwater;                     // x: the water's height, y: the depth the gradient spans, z: its rows (0: none), w: 1 under a pool-style sea
+    float4 underwater;                     // x: the water's height, y: the depth the gradient spans, z: its rows (0: none), w: how a pool-style sea hazes (see seaHazeMode)
     float4 underwaterGradient[64];         // the neighborhood's underwater gradient, from the surface down
     float4 objectFloorsToLot[3];           // the scene's frame to the lot's, for the outdoor floor mask
     float4 objectFloors;                   // the mask's tiles along x and y, its first level and its levels (0: none)
+    float4 seaLevel;                       // x: the pool-style sea's surface, which its haze is deepened from, yz: its depth map's points (0 for none), w: how bright its haze is
+    float4 seaDepthArea;                   // the depth map's area: x0, y0, x1, y1
 };
 
-// Not in the original game: `color` seen `depth` under a neighborhood's pool-style sea, hazed as the
-// ground under it is (see addPoolStyleSea): a light blue murk thickening fast, dark blue past 0.8
-// down, both coming in over the first unit.
-float3 poolSeaHaze(float3 color, float depth) {
-    const float fadeIn = saturate(depth);
-    const float light = 0.9 * (1 - exp(-max(depth, 0.0) / 0.8)) * fadeIn;
-    const float deep = 0.95 * (1 - exp(-max(depth - 0.8, 0.0) / 2)) * fadeIn;
-    return lerp(lerp(color, float3(0.3, 0.52, 0.68), light), float3(0.02, 0.08, 0.24), deep);
+// The sea's depth smoothed around the lot in lot view: two values a point (see
+// scene::PaintedTerrain::seaDepthMap).
+StructuredBuffer<float2> seaDepthMap : register(t16, space2);
+
+// The depth the pool-style sea's haze takes at `world` (x), and the depth it comes in over (y): the
+// water's own depth there, in both views, so lot view's skirt and the neighborhood's ground around it
+// (terrain.frag) haze alike and meet without a seam.
+float2 seaHazeDepth(float3 world) {
+    const float own = seaLevel.x - world.z;
+    return float2(own, own);
+}
+
+// Not in the original game: the pool-style sea's haze over what lies `depth` under it (see
+// pool_sea.hlsli), coming in over the first unit of `fade` in the neighborhood view (underwater.w 1)
+// and over LOT_FADE in lot view, and as bright as the sea's light now (seaLevel.w). terrain.frag
+// hazes the neighborhood's ground the same way.
+PoolSeaHaze poolSeaCover(float depth, float fade) {
+    const bool hood = underwater.w < 1.5;
+    return poolSeaHazeAt(depth, saturate(hood ? fade : fade / LOT_FADE), seaLevel.w, hood ? 1.0 : LOT_STRETCH);
+}
+
+float3 poolSeaHaze(float3 color, float depth, float fade) {
+    const PoolSeaHaze h = poolSeaCover(depth, fade);
+    return color * h.scale + h.added;
+}
+
+// How much of a light added under that sea still shows through its haze.
+float poolSeaClear(float depth, float fade) {
+    return poolSeaCover(depth, fade).clear;
 }
 
 // The underwater gradient at height `z`, read as the game reads its texture: clamped, and blended
@@ -223,6 +248,7 @@ struct Input {
     float3 lightVector2 : TEXCOORD9;
     float3 reflection : TEXCOORD10;
     float3 specular : TEXCOORD11;
+    float3 skirtSun : TEXCOORD12;
     bool front : SV_IsFrontFace;
 };
 
@@ -333,7 +359,17 @@ float4 shade(Input input) {
     // The pools' caustics alone over ground with no light map of its own (a beach sea drawn with
     // them, not in the original game).
     if (caustics.x > 2.5 && lightMap.x <= 0) {
-        return poolCaustics(input, texel, float3(0, 0, 0));
+        float4 added = poolCaustics(input, texel, float3(0, 0, 0));
+        // Under a pool-style sea the ground is hazed as it is drawn, so the sea's caustics are dimmed
+        // by the haze over them. In lot view they darken with depth first, as the ground does.
+        if (underwater.w > 0.5 && caustics.x > 3.5) {
+            if (underwater.w > 1.5 && underwater.z > 0.5) {
+                added.rgb *= underwaterAt(input.world.z);
+            }
+            const float2 depth = seaHazeDepth(input.world);
+            added.rgb *= poolSeaClear(depth.x, depth.y);
+        }
+        return added;
     }
 #endif
     // A lot's floor or wall, as the game draws it: its texture (floors: times the material's diffuse,
@@ -381,7 +417,22 @@ float4 shade(Input input) {
             const float3 base = (hasTexture > 0.5 ? texel.rgb : color.rgb) * input.color;
             return float4(base * (input.light.rgb * color.rgb * 0.8 + pixel * 0.8), albedo.a);
         }
-        return float4(albedo.rgb * (input.light.rgb + pixel), albedo.a);
+        float3 light = input.light.rgb + pixel;
+#ifndef GL2
+        // A lot skirt: the lot's lamps and windows light it past the lot's edge, at most to full light
+        // as on the lot's terrain, and the buildings' shadow takes the sun's share of its light away
+        // by how little of the sun gets through (the alpha).
+        if (skirtLamps[2].x > 0) {
+            const float4 w = float4(input.world, 1);
+            const float2 at = float2(dot(skirtLamps[0], w), dot(skirtLamps[1], w));
+            float4 map = lightMapTexture.Sample(lightMapSampler, at);
+            if (lightMapFade < 1) {
+                map = lerp(lightMapFromTexture.Sample(lightMapFromSampler, at), map, lightMapFade);
+            }
+            light = saturate(light - (1 - map.a) * input.skirtSun + map.rgb * skirtLamps[2].x);
+        }
+#endif
+        return float4(albedo.rgb * light, albedo.a);
     }
     float3 n = normalize(input.normal);
     if (!input.front) {
@@ -425,9 +476,15 @@ float4 main(Input input) : SV_Target {
     if (underwaterShade.x > 0.5 && underwater.z > 0.5) {
         lit.rgb *= underwaterAt(input.world.z);
     }
-    // Under a neighborhood's pool-style sea everything is hazed as the ground is, whatever its material.
-    if (underwater.w > 0.5 && underwaterShade.y > 0.5) {
-        lit.rgb = poolSeaHaze(lit.rgb, underwater.x - input.world.z);
+    // Under a neighborhood's pool-style sea everything is hazed as the ground is, whatever its
+    // material. Under lot view's only the skirt ground is (the lot's pools and ponds may lie below),
+    // darkened with depth by the underwater gradient first, as the neighborhood's ground around it is.
+    if (underwater.w > 0.5 && underwaterShade.y > 0.5 && (underwater.w < 1.5 || underwaterShade.z > 0.5)) {
+        if (underwater.w > 1.5 && underwater.z > 0.5) {
+            lit.rgb *= underwaterAt(input.world.z);
+        }
+        const float2 depth = seaHazeDepth(input.world);
+        lit.rgb = poolSeaHaze(lit.rgb, depth.x, depth.y);
     }
 #endif
     lit.rgb += input.specular;
@@ -438,11 +495,9 @@ float4 main(Input input) : SV_Target {
         }
         lit.rgb += envCubeTexture.Sample(envCubeSampler, r).rgb * envCube.rgb;
     }
+    // A neighbor's real house, its ground too, takes the hour's light as the game's imposter of it does.
     if (neighborLight.w > 0.5 && neighborLight.w < 1.5) {
         lit.rgb *= neighborLight.rgb;
-    } else if (neighborLight.w > 2.5) {
-        // Its light map keeps the day's shadows, and the light is the hour's, as on the ground around the lot.
-        lit.rgb *= input.light.rgb;
     }
     return lit;
 }

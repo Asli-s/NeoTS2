@@ -83,6 +83,9 @@ struct Material {
     // Not in the original game: the pool-style sea's haze or caustics on the ground under it, left out
     // when what lies under that sea is hazed (see poolSeaHaze in scene.frag).
     bool seaDepthOverlay = false;
+    // Not in the original game: a lot's pool water in the neighborhood view, drawn by the pool-style
+    // sea's shader but see-through over the imposter's own pool, so the pool keeps its colour.
+    bool seaPoolWater = false;
     int detail = -1;
     float detailRepeats = 1;
     // Lot terrain: the canvas, or a paint of a lot texture (named "lottexture", but beach and cliff),
@@ -282,6 +285,10 @@ struct Instance {
     // (see lightLotSkirt).
     bool skirtRoad = false;
     std::array<float, 3> skirtScale{1, 1, 1};
+    // A lot skirt's lamp light, its `lightMap` the lot's skirt lamp image: the image's coordinates
+    // at a point, each a row times (x, y, z, 1), and the gain on it (0 for none).
+    std::array<std::array<float, 4>, 2> skirtLampMap{};
+    float skirtLampGain = 0;
     // The lot skirt's sand over its ground: 1 the sand by the water, 2 the deep water's sand, 0 none.
     // Its time-of-day scale is its shape colour (see lightLotSkirt).
     int skirtSand = 0;
@@ -407,6 +414,20 @@ struct PaintedTerrain {
     // Not in the original game: the sea is the scene's pool-style sea (see addNeighborhoodSea), drawn
     // in place of the water sheet with the sheet's reflection.
     bool poolStyleSea = false;
+    // How bright that sea's haze and surface are now: the flat ground's light at this time over its
+    // light by day (1 by day, less at night). See flatGroundLight.
+    float seaLight = 1;
+    // Not in the original game: in lot view, the skirt's ground and the lot's terrain under the
+    // skirt's pool-style sea are hazed by their depth as they are drawn, as the neighborhood view's
+    // pool-style sea hazes everything under it.
+    bool seaHazesGround = false;
+    // And the sea's depth around the lot smoothed, which that haze takes in place of each point's own
+    // depth so that it doesn't show every fold and step of the ground (see bakeSeaDepth):
+    // seaDepthSize[0] by seaDepthSize[1] points spread evenly over seaDepthArea (x0, y0, x1, y1), rows
+    // along +y, each the depth and how many times deeper the haze takes it. Empty for none.
+    std::vector<float> seaDepthMap;
+    std::array<int, 2> seaDepthSize{0, 0};
+    std::array<float, 4> seaDepthArea{0, 0, 0, 0};
     std::vector<Image> sky;                // neighborhood-sky2-envcube's six faces, z up
     std::array<float, 3> reflectionTint{0.55f, 0.6f, 0.65f};  // nhoodWaterReflColour
     float reflectionStrength = 0.75f;      // nhoodWaterReflStrength (the sheet's opacity)
@@ -551,6 +572,9 @@ struct PlacedObject {
     // Its model, the materials the lot put on it and its joints as the lot saved them.
     std::string model;
     std::vector<scenegraph::MaterialOverride> overrides;
+    // The material chosen for each of its groups, from its own saved list, a counter top's hole mask
+    // with it. The game sets these again when it gives the object a new model.
+    std::vector<scenegraph::MaterialOverride> chosen;
     std::vector<cobject::SavedJoint> savedJoints;
     // The joint its whole drawn model moves with when it plays a clip, empty for none, and where that
     // joint sits in the model as drawn.
@@ -628,6 +652,13 @@ struct LightMaps {
         int x0 = 0, y0 = 0, x1 = 0, y1 = 0;  // texels, rows from the top
     };
     std::map<std::array<int, 5>, Rect> wallRects;  // by level, x0, y0, x1, y1
+    // Faces the lot's light leaves out (half walls). Where one looks outdoors, the outdoor light for
+    // its facing alone lights it, the same over the whole face. Keys as wallRects.
+    std::vector<std::array<int, 5>> outdoorFaces;
+    // The lamps' and windows' light on the ground around the lot (see lotlightmaps::addSkirtLamps):
+    // an image of 8 texels a tile, as the floor light maps, reaching `skirtMargin` tiles past the lot each way.
+    int skirtLamps = -1;
+    int skirtMargin = 0;
 };
 
 // See Scene::thingLights. `storey` counts from the ground storey (0).
