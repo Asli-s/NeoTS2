@@ -235,6 +235,51 @@ void prepareImposterScene(Scene& scene) {
     }
 }
 
+void keepImposterCanvas(Scene& scene, const std::function<bool(int, int)>& kept) {
+    for (const auto& instance : scene.instances) {
+        if (instance.part != Part::Other || instance.mesh < 0 || static_cast<std::size_t>(instance.mesh) >= scene.meshes.size()) {
+            continue;
+        }
+        auto& primitives = scene.meshes[static_cast<std::size_t>(instance.mesh)].primitives;
+        const std::size_t count = primitives.size();
+        for (std::size_t n = 0; n < count; ++n) {
+            const int material = primitives[n].material;
+            if (material < 0 || static_cast<std::size_t>(material) >= scene.materials.size() || !scene.materials[static_cast<std::size_t>(material)].terrainCanvas) {
+                continue;
+            }
+            Primitive bed = primitives[n];
+            bed.indices.clear();
+            const auto& p = primitives[n];
+            for (std::size_t i = 0; i + 2 < p.indices.size(); i += 3) {
+                float x = 0, y = 0;
+                bool inside = true;
+                for (std::size_t k = 0; k < 3; ++k) {
+                    const std::size_t v = static_cast<std::size_t>(p.indices[i + k]) * 3;
+                    inside = inside && v + 1 < p.positions.size();
+                    if (inside) {
+                        x += p.positions[v] / 3;
+                        y += p.positions[v + 1] / 3;
+                    }
+                }
+                if (inside && kept(static_cast<int>(std::floor(x)), static_cast<int>(std::floor(y)))) {
+                    bed.indices.insert(bed.indices.end(), p.indices.begin() + static_cast<std::ptrdiff_t>(i), p.indices.begin() + static_cast<std::ptrdiff_t>(i) + 3);
+                }
+            }
+            if (bed.indices.empty()) {
+                continue;
+            }
+            // A copy of the canvas's material that prepareImposterScene keeps.
+            Material copy = scene.materials[static_cast<std::size_t>(material)];
+            copy.terrainCanvas = false;
+            scene.materials.push_back(std::move(copy));
+            bed.material = static_cast<int>(scene.materials.size() - 1);
+            // Drawn first, under the paints, as the canvas is.
+            primitives.insert(primitives.begin(), std::move(bed));
+            return;
+        }
+    }
+}
+
 TexelRect texelRect(const ImposterShot& shot, unsigned side) {
     const float s = static_cast<float>(side);
     const auto texel = [&](float f) { return static_cast<int>(std::lround(std::clamp(f, 0.0f, 1.0f) * s)); };
@@ -366,6 +411,24 @@ void ImposterPages::put(const ImposterShot& shot, const Image& picture, unsigned
     }
     if (shot.layer == ImposterShot::Layer::Walls || shot.layer == ImposterShot::Layer::Floors) {
         padded_.emplace_back(shot.texture, r);
+    }
+}
+
+void ImposterPages::makeTerrainOpaque(const std::function<bool(int, int)>& opaque) {
+    const auto terrain = pages_.find("terrain");
+    if (terrain == pages_.end()) {
+        return;
+    }
+    // As the terrain light map lies: rows from the top, along -y.
+    const float tilesPerTexel = kTopSide / static_cast<float>(side_);
+    for (unsigned j = 0; j < side_; ++j) {
+        for (unsigned i = 0; i < side_; ++i) {
+            const float x = (static_cast<float>(i) + 0.5f) * tilesPerTexel;
+            const float y = kTopSide - (static_cast<float>(j) + 0.5f) * tilesPerTexel;
+            if (opaque(static_cast<int>(std::floor(x)), static_cast<int>(std::floor(y)))) {
+                texelAt(terrain->second, static_cast<int>(i), static_cast<int>(j))[3] = 255;
+            }
+        }
     }
 }
 

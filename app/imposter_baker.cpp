@@ -8,6 +8,8 @@
 #include "scene/assets.hpp"
 #include "scene/builder.hpp"
 #include "scene/imposters.hpp"
+#include "scene/lot_parts.hpp"
+#include "scene/terrain_water.hpp"
 #include "scene/lot_scene.hpp"
 #include "scene/view.hpp"
 
@@ -40,11 +42,44 @@ render::Camera cameraOf(const scene::ImposterShot& shot) {
     return camera;
 }
 
+// The lot's tiles with water over any corner, as ponds drawn like pools take them, by tile x then y
+// in a square of `side` tiles. Empty when the lot has no water.
+std::vector<std::uint8_t> wetTiles(const content::Lot& lot, int& side) {
+    side = 0;
+    const auto water = lot.flatGrids.find(content::kWaterHeightGridInstance);
+    // A lot is at most 64 tiles a side. A larger water grid in a broken file is left out.
+    constexpr std::uint32_t kMostCorners = 65;
+    if (water == lot.flatGrids.end() || water->second.width > kMostCorners || water->second.height > kMostCorners) {
+        return {};
+    }
+    const scene::Heights heights(lot);
+    const int level = content::groundGridLevel(lot);
+    side = static_cast<int>(kMostCorners);
+    std::vector<std::uint8_t> out(static_cast<std::size_t>(side) * static_cast<std::size_t>(side), 0);
+    bool any = false;
+    for (int y = 0; y + 1 < static_cast<int>(water->second.height); ++y) {
+        for (int x = 0; x + 1 < static_cast<int>(water->second.width); ++x) {
+            for (const auto& [dx, dy] : {std::pair{0, 0}, std::pair{1, 0}, std::pair{1, 1}, std::pair{0, 1}}) {
+                const auto w = scene::terrainwater::cornerHeight(water->second, x + dx, y + dy);
+                if (w && heights.corner(level, static_cast<float>(x + dx), static_cast<float>(y + dy)) < *w) {
+                    out[static_cast<std::size_t>(y) * static_cast<std::size_t>(side) + static_cast<std::size_t>(x)] = 1;
+                    any = true;
+                }
+            }
+        }
+    }
+    if (!any) {
+        side = 0;
+        out.clear();
+    }
+    return out;
+}
+
 } // namespace
 
 ImposterBaker::ImposterBaker(std::filesystem::path install, render::IRenderer& renderer, std::filesystem::path cacheFolder, std::vector<Lot> lots,
-                             float zOffset, bool high)
-    : install_(std::move(install)), renderer_(renderer), cacheFolder_(std::move(cacheFolder)), zOffset_(zOffset), high_(high) {
+                             float zOffset, bool high, bool poolStylePonds)
+    : install_(std::move(install)), renderer_(renderer), cacheFolder_(std::move(cacheFolder)), zOffset_(zOffset), high_(high), poolStylePonds_(poolStylePonds) {
     if (renderer_.capabilities().threadedPrepare || !high_) {
         waiting_.assign(std::make_move_iterator(lots.begin()), std::make_move_iterator(lots.end()));
     }
@@ -100,13 +135,20 @@ std::unique_ptr<ImposterBaker::Job> ImposterBaker::build(const Lot& lot) {
     }
     // Lit as the game lights a lot it draws an imposter from, walls up and every storey shown.
     scene::SceneBuilder builder(*assets_);
+    builder.setPoolStylePonds(poolStylePonds_);
     const auto saved = content::loadLot(lot.file);
     scene::addLot(builder, saved, lot.file);
-    lightLot(*assets_, builder.scene(), saved, lot.file, kImposterLighting);
+    lightLot(*assets_, builder.scene(), saved, lot.file, kImposterLighting, false);
     scene::Scene& lotScene = builder.scene();
+    if (poolStylePonds_) {
+        job->wet = wetTiles(saved, job->wetSide);
+        if (job->wetSide > 0) {
+            scene::keepImposterCanvas(lotScene, [&job = *job](int x, int y) { return job.isWet(x, y); });
+        }
+    }
     scene::prepareImposterScene(lotScene);
     scene::View view;
-    view.level = scene::topLevel(lotScene);
+    view.level = scene::everyLevel(lotScene);
     view.walls = scene::WallView::Up;
     const auto visible = scene::visibleInstances(lotScene, view);
     job->pools = visible;
@@ -137,6 +179,9 @@ ImposterBaker::Baked ImposterBaker::finish(std::unique_ptr<Job> job) {
     // Without a ground light map the bake has no terrain light map, as the game's drops it when the
     // lot's floor light map is missing.
     const scene::Image* groundLightMap = job->groundLightMap.width ? &job->groundLightMap : nullptr;
+    if (job->wetSide > 0) {
+        job->pages.makeTerrainOpaque([&job = *job](int x, int y) { return job.isWet(x, y); });
+    }
     auto pictures = scene::compressedImposterPictures(job->pages.finish(groundLightMap, job->lotWidth, job->lotDepth));
     if (!scene::writeImposterCache(scene::imposterCacheFile(cacheFolder_, job->lot.file), job->key, pictures)) {
         diag::warnOnce("High lot imposters: pictures could not be kept in " + diag::utf8(cacheFolder_));

@@ -17,6 +17,12 @@
 
 namespace ts2::render::render_detail {
 
+// How the scene shader hazes what lies under a pool-style sea (see ShadowUniforms::underwater): 1 for
+// everything (the neighborhood view's), 2 for the ground only (lot view's), 0 for nothing.
+inline float seaHazeMode(const scene::PaintedTerrain& t) {
+    return t.poolStyleSea ? 1.0f : t.seaHazesGround ? 2.0f : 0.0f;
+}
+
 // How open each pixel is, for ambient occlusion.
 constexpr SDL_GPUTextureFormat kOcclusionFormat = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
 constexpr SDL_GPUTextureFormat kHalfDepthFormat = SDL_GPU_TEXTUREFORMAT_R32_FLOAT;

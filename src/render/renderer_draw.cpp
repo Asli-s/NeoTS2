@@ -3,6 +3,7 @@
 
 #include "diag/log.hpp"
 #include "diag/timing.hpp"
+#include "scene/lot_skirt.hpp"
 #include "scene/sim_shadows.hpp"
 
 #include <SDL3/SDL.h>
@@ -80,6 +81,7 @@ void SdlGpuRenderer::drawImposters(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass*
 }
 
 bool SdlGpuRenderer::draw(const Camera& camera) {
+    keptShown_ = false;
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
     if (cmd == nullptr) {
         return false;
@@ -90,9 +92,67 @@ bool SdlGpuRenderer::draw(const Camera& camera) {
         SDL_SubmitGPUCommandBuffer(cmd);
         return false;
     }
-    const bool drawn = render(cmd, target, width, height, camera);
+    SDL_GPUTexture* kept = keepFrames_ ? keptTarget(width, height) : nullptr;
+    const bool drawn = render(cmd, kept ? kept : target, width, height, camera);
+    keptShown_ = drawn && kept;
+    if (keptShown_) {
+        showKept(cmd, target);
+    }
     SDL_SubmitGPUCommandBuffer(cmd);
     return drawn;
+}
+
+bool SdlGpuRenderer::showAgain() {
+    if (!keptShown_) {
+        return false;
+    }
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+    if (cmd == nullptr) {
+        return false;
+    }
+    SDL_GPUTexture* target = nullptr;
+    Uint32 width = 0, height = 0;
+    const bool shown = SDL_WaitAndAcquireGPUSwapchainTexture(cmd, window_, &target, &width, &height) && target != nullptr &&
+                       width == kept_.width && height == kept_.height;
+    if (shown) {
+        showKept(cmd, target);
+    }
+    SDL_SubmitGPUCommandBuffer(cmd);
+    return shown;
+}
+
+// A target of the window's size and format that can be copied from. Null when it can't be made.
+SDL_GPUTexture* SdlGpuRenderer::keptTarget(unsigned width, unsigned height) {
+    if (kept_.texture == nullptr || kept_.width != width || kept_.height != height) {
+        if (kept_.texture) {
+            SDL_ReleaseGPUTexture(device_, kept_.texture);
+        }
+        SDL_GPUTextureCreateInfo info{};
+        info.type = SDL_GPU_TEXTURETYPE_2D;
+        info.format = SDL_GetGPUSwapchainTextureFormat(device_, window_);
+        info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+        info.width = width;
+        info.height = height;
+        info.layer_count_or_depth = 1;
+        info.num_levels = 1;
+        kept_.texture = SDL_CreateGPUTexture(device_, &info);
+        kept_.width = kept_.texture ? width : 0;
+        kept_.height = kept_.texture ? height : 0;
+    }
+    return kept_.texture;
+}
+
+void SdlGpuRenderer::showKept(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* screen) {
+    SDL_GPUBlitInfo blit{};
+    blit.source.texture = kept_.texture;
+    blit.source.w = kept_.width;
+    blit.source.h = kept_.height;
+    blit.destination.texture = screen;
+    blit.destination.w = kept_.width;
+    blit.destination.h = kept_.height;
+    blit.load_op = SDL_GPU_LOADOP_DONT_CARE;
+    blit.filter = SDL_GPU_FILTER_NEAREST;
+    SDL_BlitGPUTexture(cmd, &blit);
 }
 
 bool SdlGpuRenderer::drawToFile(const Camera& camera, unsigned width, unsigned height, const std::filesystem::path& path) {
@@ -524,6 +584,11 @@ bool SdlGpuRenderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, u
     }
     if (gpu_ && gpu_->terrainVertices) {
         std::copy(gpu_->underwater.begin(), gpu_->underwater.end(), shadows.underwater);
+        shadows.seaLevel[0] = gpu_->seaLevel;
+        shadows.seaLevel[1] = gpu_->seaDepth ? gpu_->seaDepthSize[0] : 0;
+        shadows.seaLevel[2] = gpu_->seaDepth ? gpu_->seaDepthSize[1] : 0;
+        shadows.seaLevel[3] = gpu_->seaLight;
+        std::copy(gpu_->seaDepthArea.begin(), gpu_->seaDepthArea.end(), shadows.seaDepthArea);
         for (std::size_t r = 0; r < kUnderwaterRows; ++r) {
             std::copy(gpu_->underwaterRows[r].begin(), gpu_->underwaterRows[r].end(), shadows.underwaterGradient[r]);
         }
@@ -639,9 +704,11 @@ bool SdlGpuRenderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, u
     depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
     drawing_ = smooth ? &smooth_ : picturing_ ? &picture_ : &single_;
     f.pass = SDL_BeginGPURenderPass(cmd, &color, 1, &depth);
-    // A lot's sky, behind everything (the game's skybox screen effect).
-    if (f.extras && gpu_->skybox != nullptr && camera.orthographic[1] <= camera.orthographic[0]) {
-        drawSky(f, f.pass, gpu_->skybox, skyCamera(f, 1));
+    // The sky behind everything, as the game's skybox screen effects draw it: a lot's own, or in the
+    // neighborhood the sky its sky effect gives, which its water reflects too.
+    SDL_GPUTexture* const sky = gpu_->skybox != nullptr ? gpu_->skybox : gpu_->terrainIndexCount > 0 ? gpu_->skyCube : nullptr;
+    if (f.extras && sky != nullptr && camera.orthographic[1] <= camera.orthographic[0]) {
+        drawSky(f, f.pass, sky, skyCamera(f, 1));
     }
     if (f.extras && gpu_->clipVertices != nullptr) {
         drawBoundary(f);
@@ -953,13 +1020,26 @@ void SdlGpuRenderer::drawPoolSurface(const Frame& f, const Draw& d) {
 void SdlGpuRenderer::drawSkirtSea(const Frame& f, const Draw& d) {
     const MeshBuffers& buffers = gpu_->meshBuffers[d.primitive->buffers];
     SeaUniforms u = FramePlan::seaUniformsFor(*this, f, d);
-    // A neighborhood's pool-style sea (not in the original game) is made more opaque, so what lies deep
-    // is barely seen as under the game's water sheet, and its mirror image darkened so it keeps the
-    // pool-style blue. Its waves still show as its opacity changes with them, and they shift and blur
-    // its mirror image as murky ponds drawn like pools do.
+    // A neighborhood's pool-style sea (not in the original game) is made a little clearer than lot
+    // view's, so its haze shows what lies under it fading with depth, and its mirror image darkened
+    // toward a calm grey teal. Its waves still show as its opacity changes with them, and they shift
+    // and blur its mirror image as murky ponds drawn like pools do.
+    // A lot's pool there (see scene::Material::seaPoolWater) adds no opacity, so its own colour and
+    // tiles show through.
+    constexpr float kHoodSea[4] = {0.56f, 0.63f, 0.6f, -0.06f};
+    // A lot's pool-style sea takes the neighborhood's colour and clearness over its own mirror image.
+    if (!seaFromWater_ && d.instance && d.instance->poolWater) {
+        std::copy(kHoodSea, kHoodSea + 4, u.scale);
+        std::fill(u.tint, u.tint + 3, 0.0f);
+    }
     if (seaFromWater_) {
-        constexpr float kHoodSea[4] = {0.55f, 0.7f, 0.64f, 0.2f};
-        std::copy(std::begin(kHoodSea), std::end(kHoodSea), u.scale);
+        constexpr float kHoodPool[4] = {0.8f, 1.0f, 1.0f, 0.0f};
+        // The lots' ponds a little bluer than the sea, as their imposters' own water under them is green.
+        constexpr float kHoodPond[4] = {0.48f, 0.66f, 0.9f, 0.2f};
+        const bool pool = d.material && d.material->seaPoolWater;
+        const bool pond = !pool && d.instance && d.instance->name == scene::kNeighborhoodPondsName;
+        const float* scale = pool ? kHoodPool : pond ? kHoodPond : kHoodSea;
+        std::copy(scale, scale + 4, u.scale);
         std::fill(u.tint, u.tint + 3, 0.0f);
         u.time[1] = 1;
     }
@@ -1016,6 +1096,9 @@ void SdlGpuRenderer::drawTerrain(const Frame& f, SDL_GPURenderPass* on, const Ma
     SDL_BindGPUGraphicsPipeline(on, drawing_->terrain);
     SDL_PushGPUVertexUniformData(f.cmd, 0, viewProjection.m.data(), 16 * sizeof(float));
     TerrainUniforms u = gpu_->terrainUniforms;
+    if (terrainTiles_ > 0) {
+        u.textureRepeat = terrainTiles_;
+    }
     u.reflected = reflected ? 1.0f : 0.0f;
     SDL_PushGPUFragmentUniformData(f.cmd, 0, &u, sizeof(u));
     // The light map wraps: the game's lighting stage sets no addressing, leaving D3D's default.
@@ -1123,6 +1206,9 @@ void SdlGpuRenderer::drawList(const Frame& f, std::span<const Draw> list, int bl
         };
         if (!std::equal(samplers.begin(), samplers.end(), boundSamplers.begin(), same)) {
             SDL_BindGPUFragmentSamplers(f.pass, 0, samplers.data(), static_cast<Uint32>(samplers.size()));
+            // The sea's depth map, or a stand-in the shader leaves unread.
+            SDL_GPUBuffer* const seaDepth = gpu_ && gpu_->seaDepth ? gpu_->seaDepth : noMorphs_;
+            SDL_BindGPUFragmentStorageBuffers(f.pass, 0, &seaDepth, 1);
             boundSamplers = samplers;
         }
         // A skinned primitive's two vertex streams start where its own part of each buffer does. The

@@ -329,8 +329,7 @@ DrawUniforms FramePlan::uniformsFor(const RendererState& s, const ResourceQuery&
         vu.frame.specular[3] = lit->specPower;
     }
     const scene::Material* m = d.material;
-    // A neighbor's real ground takes the same light, so that the two meet at any hour.
-    const bool skirt = d.instance->part == scene::Part::Skirt || (d.instance->neighborHouse && d.instance->lightMapMultiply);
+    const bool skirt = d.instance->part == scene::Part::Skirt;
     const scene::ObjectLighting* lighting = s.objectLighting_ ? &*s.objectLighting_ : nullptr;
     const auto& parts = d.instance->partLightSets;
     const int set = d.primitive->source < parts.size() ? parts[d.primitive->source] : d.instance->lightSet;
@@ -386,6 +385,15 @@ void FramePlan::setLights(const RendererState& s, DrawUniforms& u, const Draw& d
     vu.frame.ambient[3] = skirt ? 3.0f : 1.0f;
     if (skirt) {
         std::copy(d.instance->skirtScale.begin(), d.instance->skirtScale.end(), vu.frame.thumbnail);
+        // Which lights are suns, a bit each, for the shadow past the lot's edge. While the light fades
+        // into a new state both states' suns are there.
+        int suns = 0;
+        for (std::size_t i = 0; i < kObjectLights && i < l.lights.size(); ++i) {
+            if (l.lights[i].sun) {
+                suns |= 1 << i;
+            }
+        }
+        vu.frame.thumbnail[3] = static_cast<float>(suns);
     } else if (roof) {
         // The vertex colour clamped, then doubled by the texture stage: the same as a thumbnail.
         vu.frame.thumbnail[0] = m->color[0];
@@ -457,7 +465,7 @@ void FramePlan::setMaterial(const RendererState& s, const ResourceQuery& q, Draw
         fu.neighborLight[0] = s.imposterLight_[0];
         fu.neighborLight[1] = s.imposterLight_[1];
         fu.neighborLight[2] = s.imposterLight_[2];
-        fu.neighborLight[3] = d.instance->lightMapMultiply ? 3.0f : 1.0f;
+        fu.neighborLight[3] = 1;
     }
     if (const auto& shape = d.instance->shapeColor; shape && (!m || m->takesShapeColor)) {
         for (std::size_t i = 0; i < 4; ++i) {
@@ -521,6 +529,18 @@ void FramePlan::setMaterial(const RendererState& s, const ResourceQuery& q, Draw
             fu.lightMap[3] = 1;
         }
     }
+    // A lot skirt: the lamps' light around the lot, added to its light.
+    if (const int i = d.instance->lightMap; d.instance->part == scene::Part::Skirt && d.instance->skirtLampGain > 0 && i >= 0 && q.hasImage(i)) {
+        lightMap = {TextureRef::Kind::Image, i};
+        if (q.hasFadeFrom(i)) {
+            lightMapFrom = TextureRef{TextureRef::Kind::FadeFrom, i};
+            fu.lightMapFade = q.lightMapFade();
+        }
+        for (std::size_t r = 0; r < 2; ++r) {
+            std::copy(d.instance->skirtLampMap[r].begin(), d.instance->skirtLampMap[r].end(), fu.skirtLamps[r]);
+        }
+        fu.skirtLamps[2][0] = d.instance->skirtLampGain;
+    }
     fu.pixelLightCount = static_cast<float>(vu.frame.pixelLights[0]);
     fu.normalMapped = normalMap >= 0 ? 1.0f : 0.0f;
     fu.simLighting = m && m->simLighting && lighting && d.instance->part == scene::Part::Object && vu.frame.thumbnail[3] <= 0 ? 1.0f : 0.0f;
@@ -574,6 +594,8 @@ void FramePlan::setMaterial(const RendererState& s, const ResourceQuery& q, Draw
     }
     fu.underwaterShade[0] = m && m->partlyUnderwater ? 1.0f : 0.0f;
     fu.underwaterShade[1] = m && m->seaDepthOverlay ? 0.0f : 1.0f;
+    fu.underwaterShade[2] =
+        d.instance && (d.instance->part == scene::Part::Skirt || d.instance->skirtSand != 0 || d.instance->name == "terrain") ? 1.0f : 0.0f;
     TextureRef detail{TextureRef::Kind::White, 0};
     if (m && m->terrain) {
         fu.terrainTexture[0] = 1;

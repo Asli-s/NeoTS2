@@ -63,10 +63,11 @@ struct FragmentUniforms {
     float uvTile[4];    // the texture coordinates times xy plus zw: one frame of a tiled texture
     float shadowReceiver[4];  // x: 1 when Sims' projected shadows fall on it, y: its level, z: 1 to fade them by the light map, w: 1 for a floor
     float caustics[4];        // x: 1 for a pool floor, 2 for a pool wall, 3 for the caustics alone over a pond's ground, 0 for none (see scene::Material), yzw: the texture light
-    float neighborLight[4];   // rgb: what a neighbor's real house is tinted by, w: 1 when it is one, 2 for the ground around the lot, 3 for its ground
+    float neighborLight[4];   // rgb: what a neighbor's real house is tinted by, w: 1 when it is one (its ground too), 2 for the ground around the lot
     float wallMask[4];        // x: 1 when a wall mask cuts it, y: 1 when the mask runs the other way along u (see scene::Material::mask)
     float terrainTexture[4];  // x: 1 for terrain, y: 1 with a detail texture, z: its repeats (see scene::Material::terrain)
-    float underwaterShade[4];  // x: 1 when darkened below the water (see scene::Material::partlyUnderwater), y: 1 when hazed under a pool-style sea
+    float underwaterShade[4];  // x: 1 when darkened below the water (see scene::Material::partlyUnderwater), y: 1 when hazed under a pool-style sea, z: 1 for the ground lot view hazes
+    float skirtLamps[3][4];    // a lot skirt's lamp light from the light map: its coordinates' rows, then x the gain (see scene::Instance::skirtLampMap)
 };
 
 // The shaders' constant buffers pack in 16-byte rows, so these must match them field for field.
@@ -116,6 +117,8 @@ struct ShadowUniforms {
     // many levels it holds (0 for none, when every floor takes them).
     float objectFloorsToLot[3][4];
     float objectFloors[4];
+    float seaLevel[4];      // x: the pool-style sea's surface, which its haze is deepened from, yz: its depth map's points (0 for none), w: how bright its haze is (see scene::PaintedTerrain::seaLight)
+    float seaDepthArea[4];  // the depth map's area: x0, y0, x1, y1 (see scene::PaintedTerrain::seaDepthMap)
 };
 static_assert(sizeof(ShadowUniforms) % 16 == 0 && offsetof(ShadowUniforms, shade) == 1280 && offsetof(ShadowUniforms, objectGrid) == 1296 &&
               offsetof(ShadowUniforms, poolShadow) == 1312 && offsetof(ShadowUniforms, poolSun) == 1440);
@@ -153,7 +156,11 @@ struct ShadowBlurUniforms {
 struct TerrainUniforms {
     float alphaSize, textureRepeat, cellTiles, layers, cellsX, cellsY, lightMapScale, litFrom;
     float gradientDepth, reflected;
-    float slice, passAlpha;  // OpenGL 2 draws a pass per paint texture (see terrain.frag.hlsl); unused elsewhere
+    float slice, passAlpha;  // OpenGL 2 draws a pass per paint texture (see terrain.frag.hlsl), unused elsewhere
+    float seaHaze;           // 1 under the neighborhood view's pool-style sea, 2 around the lot in lot view's
+    float seaLevel;          // its surface, which its haze is deepened from
+    float seaLight;          // how bright its haze is now (see scene::PaintedTerrain::seaLight)
+    float unused;
 };
 
 struct WaterUniforms {

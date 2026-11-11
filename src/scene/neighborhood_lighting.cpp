@@ -140,4 +140,16 @@ Image neighborhoodLightMap(std::uint32_t columns, std::uint32_t rows, const std:
     return out;
 }
 
+std::array<float, 3> flatGroundLight(const NeighborhoodLight& light) {
+    const std::vector<float> heights(4, 0.0f);
+    const std::vector<float> normals{0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1};
+    NeighborhoodLight overhead = light;
+    overhead.sun = {0, 0, 1};
+    const Image texel = neighborhoodLightMap(2, 2, heights, normals, 1, overhead);
+    if (texel.rgba.size() < 3) {
+        return {1, 1, 1};
+    }
+    return {texel.rgba[0] / 255.0f, texel.rgba[1] / 255.0f, texel.rgba[2] / 255.0f};
+}
+
 } // namespace ts2::scene

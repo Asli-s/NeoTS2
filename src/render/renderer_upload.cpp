@@ -236,7 +236,7 @@ void SdlGpuRenderer::SceneGpu::release(SDL_GPUDevice* device) {
     }
     meshBuffers.clear();
     for (auto** b : {&terrainVertices, &terrainIndices, &waterVertices, &waterIndices, &roadVertices, &roadIndices,
-                     &imposterVertices, &imposterIndices, &clipVertices, &clipIndices}) {
+                     &imposterVertices, &imposterIndices, &clipVertices, &clipIndices, &seaDepth}) {
         if (*b) {
             SDL_ReleaseGPUBuffer(device, *b);
             *b = nullptr;
@@ -473,6 +473,7 @@ void SdlGpuRenderer::SceneGpu::uploadImages(Copy& c, const scene::Scene& scene) 
         for (const int i : scene.lightMaps->floorIncidence) lightMaps.insert(static_cast<std::size_t>(i));
         lightMaps.insert(static_cast<std::size_t>(scene.lightMaps->walls));
         lightMaps.insert(static_cast<std::size_t>(scene.lightMaps->wallIncidence));
+        lightMaps.insert(static_cast<std::size_t>(scene.lightMaps->skirtLamps));
     }
     for (std::size_t i = 0; i < scene.images.size(); ++i) {
         const auto& image = scene.images[i];
@@ -545,7 +546,7 @@ void SdlGpuRenderer::SceneGpu::uploadTerrainTextures(Copy& c, const scene::Paint
                            [&](Uint32) { return light.rgba.data(); });
     terrainUniforms = {static_cast<float>(t.alphaSize), t.textureRepeat, static_cast<float>(t.cellTiles), static_cast<float>(paints),
                        static_cast<float>(t.cellsX), static_cast<float>(t.cellsY), t.lightMap.width ? t.lightMapScale : 1.0f, t.litFrom,
-                       t.gradientDepth, 0, 0, 0};
+                       t.gradientDepth, 0, 0, 0, seaHazeMode(t), t.waterLevel, std::isfinite(t.seaLight) ? t.seaLight : 1.0f, 0};
     terrainGradient = c.plain(t.underwaterGradient.width ? t.underwaterGradient : c.whiteImage, false);
     // Its first column, row by row, for the objects darkened below the water.
     const scene::Image& g = t.underwaterGradient;
@@ -557,7 +558,14 @@ void SdlGpuRenderer::SceneGpu::uploadTerrainTextures(Copy& c, const scene::Paint
     }
     const bool usable = rows > 0 && std::isfinite(t.litFrom) && std::isfinite(t.gradientDepth) && t.gradientDepth > 0;
     poolStyleSea = t.poolStyleSea;
-    underwater = {t.litFrom, t.gradientDepth, usable ? static_cast<float>(rows) : 0.0f, poolStyleSea ? 1.0f : 0.0f};
+    seaLevel = t.waterLevel;
+    seaLight = std::isfinite(t.seaLight) ? t.seaLight : 1.0f;
+    if (!t.seaDepthMap.empty() && t.seaDepthMap.size() == static_cast<std::size_t>(t.seaDepthSize[0]) * static_cast<std::size_t>(t.seaDepthSize[1]) * 2) {
+        seaDepth = c.buffer(SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, t.seaDepthMap.data(), static_cast<Uint32>(t.seaDepthMap.size() * sizeof(float)));
+        seaDepthSize = {static_cast<float>(t.seaDepthSize[0]), static_cast<float>(t.seaDepthSize[1])};
+        seaDepthArea = t.seaDepthArea;
+    }
+    underwater = {t.litFrom, t.gradientDepth, usable ? static_cast<float>(rows) : 0.0f, seaHazeMode(t)};
 }
 
 // The water sheet: a quad per wet tile at the water level, texture coordinates in tiles, with its
@@ -727,6 +735,10 @@ void SdlGpuRenderer::setSurroundings(const scene::Scene& scene) {
         return;
     }
     SceneGpu& g = *gpu_;
+    // Lot view's ground around the lot may now lie under a sea of the other style.
+    if (scene.terrain) {
+        g.underwater[3] = seaHazeMode(*scene.terrain);
+    }
     // SDL frees what a frame in flight still uses once that frame is done.
     for (auto** b : {&g.imposterVertices, &g.imposterIndices, &g.clipVertices, &g.clipIndices}) {
         if (*b) {
@@ -767,6 +779,13 @@ void SdlGpuRenderer::SceneGpu::uploadBoundary(Copy& c, const scene::Scene& scene
     const auto& ci = curtain.indices;
     clipVertices = c.buffer(SDL_GPU_BUFFERUSAGE_VERTEX, cv.data(), static_cast<Uint32>(cv.size() * sizeof(float)));
     clipIndices = c.buffer(SDL_GPU_BUFFERUSAGE_INDEX, ci.data(), static_cast<Uint32>(ci.size() * sizeof(std::uint32_t)));
+}
+
+void SdlGpuRenderer::setSeaLight(float light) {
+    if (gpu_ && std::isfinite(light)) {
+        gpu_->seaLight = light;
+        gpu_->terrainUniforms.seaLight = light;
+    }
 }
 
 void SdlGpuRenderer::setTerrainLightMap(const scene::Image& lightMap) {

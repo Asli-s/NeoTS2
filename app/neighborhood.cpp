@@ -276,11 +276,23 @@ ts2::scene::NeighborhoodSceneStats buildNeighborhood(ts2::scene::SceneBuilder& b
     // gradient still darkens what is under it, as the game's does.
     if (auto& terrain = builder.scene().terrain; terrain && builder.poolStyleSea() && ts2::scene::addNeighborhoodSea(builder, *terrain, looks.atNight)) {
         terrain->poolStyleSea = true;
+        terrain->seaLight = seaLight(looks);
+        // With pool-style ponds too, the lots' ponds are drawn live as the sea is, over their imposters.
+        if (builder.poolStylePonds()) {
+            ts2::scene::addNeighborhoodPonds(builder, *terrain, stats.lotFootprints, folder, looks.atNight, !highImposters.empty());
+        }
     }
     if (times != nullptr) {
         *times = std::move(looks);
     }
     return stats;
+}
+
+float seaLight(const NeighborhoodTimes& times) {
+    const auto day = ts2::scene::flatGroundLight(times.day.terrain);
+    const auto now = ts2::scene::flatGroundLight(times.now().terrain);
+    auto brightness = [](const std::array<float, 3>& c) { return 0.299f * c[0] + 0.587f * c[1] + 0.114f * c[2]; };
+    return brightness(day) > 0 ? std::clamp(brightness(now) / brightness(day), 0.0f, 1.0f) : 1.0f;
 }
 
 void neighborhoodCamera(Orbit& orbit, const std::filesystem::path& install, const ts2::scene::NeighborhoodSceneStats& stats) {

@@ -3,9 +3,13 @@
 // what is above the water by the light map. This does it in one pass. Alpha and light maps are
 // sampled at grid / size (so a vertex falls between two texels, as in the game). Paint textures
 // repeat every few tiles, each cell of the variant grid showing one variant per paint. In the
-// water's reflection only what is above the water is drawn, without the gradient.
+// water's reflection only what is above the water is drawn, without the gradient. Under a pool-style
+// sea (not in the original game) the ground is hazed by its depth too, as scene.frag's poolSeaHaze
+// hazes objects, and the light map lights it under the water as well, since that sea fades out at
+// the shore where the game's water sheet would hide the unlit ground.
 
 #include "sdl_gpu.hlsli"
+#include "pool_sea.hlsli"
 
 #ifdef GL2
 // OpenGL 2 has no texture arrays, so the terrain is drawn in one pass per paint texture, added
@@ -57,7 +61,20 @@ cbuffer Terrain : register(b0, space3) {
 #else
     float2 padding;
 #endif
+    float seaHaze;       // 1 under the neighborhood view's pool-style sea, 2 around the lot in lot view's
+    float seaLevel;      // its surface, which its haze is deepened from
+    float seaLight;      // how bright its haze is now: 1 by day, less at night
+    float unused;
 };
+
+// The pool-style sea's haze at `depth` under it (see pool_sea.hlsli): coming in over its first unit
+// in the neighborhood view, as lot view's skirt hazes it in lot view (see scene.frag's poolSeaCover).
+PoolSeaHaze seaHazeAt(float depth) {
+    if (seaHaze > 1.5) {
+        return poolSeaHazeAt(depth, saturate(depth / LOT_FADE), seaLight, LOT_STRETCH);
+    }
+    return poolSeaHazeAt(depth, saturate(depth), seaLight, 1.0);
+}
 
 struct Input {
     float4 position : SV_Position;
@@ -80,6 +97,14 @@ float4 main(Input input) : SV_Target {
     float3 color = paint.Sample(paintSampler, input.grid / textureRepeat).rgb * weight;
     if (reflected < 0.5) {
         color *= gradient.Sample(gradientSampler, float2(0.5, (litFrom - input.height) / gradientDepth)).rgb;
+        // The passes add up, so the haze's own colour goes in once, with the pass that replaces.
+        if (seaHaze > 0.5) {
+            const PoolSeaHaze haze = seaHazeAt(seaLevel - input.height);
+            if (input.height < litFrom && seaHaze < 1.5) {
+                color *= lightMap.Sample(lightSampler, input.grid / lightMapScale).rgb;
+            }
+            color = color * haze.scale + haze.added * passAlpha;
+        }
     }
     if (input.height >= litFrom) {
         color *= lightMap.Sample(lightSampler, input.grid / lightMapScale).rgb;
@@ -100,6 +125,13 @@ float4 main(Input input) : SV_Target {
     }
     if (reflected < 0.5) {
         color *= gradient.Sample(gradientSampler, float2(0.5, (litFrom - input.height) / gradientDepth)).rgb;
+        if (seaHaze > 0.5) {
+            const PoolSeaHaze haze = seaHazeAt(seaLevel - input.height);
+            if (input.height < litFrom && seaHaze < 1.5) {
+                color *= lightMap.Sample(lightSampler, input.grid / lightMapScale).rgb;
+            }
+            color = color * haze.scale + haze.added;
+        }
     }
     if (input.height >= litFrom) {
         color *= lightMap.Sample(lightSampler, input.grid / lightMapScale).rgb;

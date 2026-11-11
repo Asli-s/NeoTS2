@@ -51,6 +51,10 @@ ts2::scene::NeighborhoodSceneStats buildNeighborhood(ts2::scene::SceneBuilder& b
                                                      std::optional<std::uint32_t> variantSeed = std::nullopt,
                                                      NeighborhoodTimes* times = nullptr, const std::filesystem::path& highImposters = {});
 
+// Not in the original game: how bright the pool-style sea is in the look shown now, by day 1 and less
+// at night, from how the light map lights flat ground (see scene::PaintedTerrain::seaLight).
+float seaLight(const NeighborhoodTimes& times);
+
 // Adds the green plumbob the game shows over each lot a household lives on (the effect
 // fxNeighborhoodPlumbob) to `plumbobs`. Lots without an imposter get none.
 void addPlumbobs(ts2::scene::SceneBuilder& builder, ts2::content::EffectsFiles& effects, const std::filesystem::path& folder,

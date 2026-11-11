@@ -24,6 +24,7 @@ public:
         particleBatches_.swap(batches);
     }
     void setSpriteScale(float scale) override { spriteScale_ = scale; }
+    void setTerrainTiles(float tiles) override { terrainTiles_ = tiles; }
     void setJoints(std::size_t instance, const std::vector<scene::Transform>& joints) override;
     void setMorphWeights(std::size_t instance, const std::vector<float>& weights) override;
     void setEyes(std::size_t instance, const std::array<float, 4>& eyes) override;
@@ -127,6 +128,7 @@ protected:
 
     std::vector<Sprite> sprites_;
     float spriteScale_ = 1;
+    float terrainTiles_ = 0;  // see setTerrainTiles
     std::vector<scene::ParticleVertex> particleVertices_;
     std::vector<ParticleBatch> particleBatches_;
     bool drawScene_ = true;

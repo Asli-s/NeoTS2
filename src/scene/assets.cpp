@@ -636,7 +636,7 @@ void Assets::readCatalog() {
             }
             const auto id = *parsed;
             if (type == kFenceProperties) {
-                fences_[id] = {p["rail"], p["diagrail"], p["post"], p["maywalkover"] == "1"};
+                fences_[id] = {p["rail"], p["diagrail"], p["post"], p["maywalkover"] == "1", p["ishalfwall"] == "1"};
             } else if (type == kRoofProperties) {
                 roofPatterns_[id] = {p["texturetop"], p["textureunder"], p["textureedges"], p["texturetrim"]};
             } else if (const auto material = p.find("material"); material != p.end()) {

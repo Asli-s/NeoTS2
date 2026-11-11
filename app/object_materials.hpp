@@ -33,6 +33,8 @@ public:
     // The scene mesh of a game model (e.g. "puddle_cres"), added with its materials on first use.
     // -1 when it has nothing to draw.
     int model(const std::string& name, ts2::scene::Scene& scene);
+    // The same with the given materials on its groups, as a lot object keeps its own through a new model.
+    int model(const std::string& name, const std::vector<ts2::scenegraph::MaterialOverride>& overrides, ts2::scene::Scene& scene);
     // The scene mesh of a lot object's model with the materials the lot put on it, skinned to the
     // model's joints. -1 when it has nothing to draw or follows no joint.
     int skinnedModel(const std::string& name, const std::vector<ts2::scenegraph::MaterialOverride>& overrides, ts2::scene::Scene& scene);

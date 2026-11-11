@@ -23,6 +23,26 @@ void SdlGpuRenderer::setWaitForScreen(bool on) {
     SDL_SetGPUSwapchainParameters(device_, window_, SDL_GPU_SWAPCHAINCOMPOSITION_SDR, mode);
 }
 
+double SdlGpuRenderer::screenRefreshRate() const {
+    const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window_));
+    if (mode == nullptr) {
+        return 0;
+    }
+    if (mode->refresh_rate_denominator > 0) {
+        return static_cast<double>(mode->refresh_rate_numerator) / mode->refresh_rate_denominator;
+    }
+    return mode->refresh_rate;
+}
+
+void SdlGpuRenderer::setKeepFrames(bool on) {
+    keepFrames_ = on;
+    keptShown_ = false;
+    if (!on && kept_.texture) {
+        SDL_ReleaseGPUTexture(device_, kept_.texture);
+        kept_ = {};
+    }
+}
+
 using namespace render_detail;
 
 SdlGpuRenderer::SdlGpuRenderer(SDL_Window* window, const std::filesystem::path& shaderFolder) : window_(window) {
@@ -120,7 +140,7 @@ void SdlGpuRenderer::destroy() {
     if (sampler_) {
         SDL_ReleaseGPUSampler(device_, sampler_);
     }
-    for (const DepthBuffer* d : {&windowDepth_, &portraitDepth_, &smoothColor_, &smoothDepth_}) {
+    for (const DepthBuffer* d : {&windowDepth_, &portraitDepth_, &smoothColor_, &smoothDepth_, &kept_}) {
         if (d->texture) {
             SDL_ReleaseGPUTexture(device_, d->texture);
         }

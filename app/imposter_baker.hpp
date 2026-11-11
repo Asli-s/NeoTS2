@@ -24,7 +24,8 @@ namespace app {
 // Bakes lots' High pictures one lot at a time: a lot is built and lit on another thread, its shots
 // are drawn a batch between frames, and its pictures are finished, kept in the cache folder and
 // handed back on that thread again. With `high` off it hands back the lots' imposters with the
-// game's own pictures instead.
+// game's own pictures instead. With `poolStylePonds` the pictures show the lots' ponds drawn like
+// pools, as lot view draws them with Water Realistic (see scene::addNeighborhoodPonds).
 class ImposterBaker {
 public:
     struct Lot {
@@ -41,7 +42,7 @@ public:
 
     // Nothing is baked by a renderer that can't upload on another thread.
     ImposterBaker(std::filesystem::path install, ts2::render::IRenderer& renderer, std::filesystem::path cacheFolder, std::vector<Lot> lots,
-                  float zOffset, bool high = true);
+                  float zOffset, bool high = true, bool poolStylePonds = false);
     ~ImposterBaker();
     ImposterBaker(const ImposterBaker&) = delete;
     ImposterBaker& operator=(const ImposterBaker&) = delete;
@@ -71,6 +72,12 @@ private:
         ts2::render::IRenderer::Prepared gpu;
         ts2::scene::Image groundLightMap;
         int lotWidth = 0, lotDepth = 0;
+        // With ponds drawn like pools, the tiles under their water, wetSide a row, for their bed.
+        std::vector<std::uint8_t> wet;
+        int wetSide = 0;
+        bool isWet(int x, int y) const {
+            return x >= 0 && y >= 0 && x < wetSide && y < wetSide && wet[static_cast<std::size_t>(y) * static_cast<std::size_t>(wetSide) + static_cast<std::size_t>(x)] != 0;
+        }
         std::size_t next = 0;  // the next shot to draw
         ts2::scene::ImposterPages pages{ts2::scene::kHighImposterSide};
         std::optional<Baked> cached;  // when its pictures were already kept
@@ -97,6 +104,7 @@ private:
     std::filesystem::path cacheFolder_;
     float zOffset_ = 0;
     bool high_ = true;
+    bool poolStylePonds_ = false;
     std::deque<Lot> waiting_;
     std::unique_ptr<ts2::scene::Assets> assets_;  // used on the worker thread only
     std::future<std::unique_ptr<Job>> building_;

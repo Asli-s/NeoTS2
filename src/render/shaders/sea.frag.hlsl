@@ -15,7 +15,7 @@ struct Input {
     float4 waves23 : TEXCOORD2;
     float3 eye : TEXCOORD3;
     float4 tint : TEXCOORD4;  // rgb: added to the water, a: added to its opacity
-    float fade : TEXCOORD5;   // scales its opacity: 1, but less for a sea fading at the shore (not in the original game)
+    float fade : TEXCOORD5;   // scales its opacity, clamped to 0..1: 1, but less for a sea fading at the shore (not in the original game)
     float4 scale : TEXCOORD6; // rgb: what the mirror image is multiplied by, a: opacity added (not in the original game)
     float blur : TEXCOORD7;   // how much the ripples shift and blur the mirror image across the screen (not in the original game)
 };
@@ -45,6 +45,6 @@ float4 main(Input input) : SV_Target {
     const float facing = 1 - max(dot(eye, ripple), 0);
     color.a = max(0.1 + 0.9 * pow(facing, 0.5), 0) * 0.5;
     color = saturate(color + input.tint);
-    color.a = saturate(color.a + input.scale.a) * input.fade;
+    color.a = saturate(color.a + input.scale.a) * saturate(input.fade);
     return color;
 }

@@ -247,6 +247,7 @@ add_library(ts2sim
     src/sim/index_code_source.cpp
     src/sim/lot_world.cpp
     src/sim/want_refill.cpp
+    src/sim/selection.cpp
     src/sim/lot_simulation.cpp
     src/sim/look_at.cpp
     src/sim/ground_click.cpp
@@ -266,6 +267,7 @@ add_library(ts2sim
     src/sim/vm_values.cpp
     src/sim/vm_sims.cpp
     src/sim/vm_objects.cpp
+    src/sim/vm_notifications.cpp
     src/sim/vm_inventory.cpp
     src/sim/vm_set_to_next.cpp
     src/sim/vm_placement.cpp
@@ -325,6 +327,7 @@ add_library(ts2scene
     src/scene/walls.cpp
     src/scene/roofs.cpp
     src/scene/roof_grid.cpp
+    src/scene/roof_meeting.cpp
     src/scene/round_roofs.cpp
     src/scene/imposters.cpp
     src/scene/imposter_bake.cpp
@@ -631,6 +634,7 @@ else()
                     COMMAND ${NEOTS2_SHADER_COMPILER} -x hlsl -DNEOTS2_SPIRV=1 -fshader-stage=${stage} -fentry-point=main --target-env=vulkan1.1 -o ${output} ${source}
                     DEPENDS ${source} ${CMAKE_CURRENT_SOURCE_DIR}/src/render/shaders/object_light.hlsli
                             ${CMAKE_CURRENT_SOURCE_DIR}/src/render/shaders/sdl_gpu.hlsli
+                            ${CMAKE_CURRENT_SOURCE_DIR}/src/render/shaders/pool_sea.hlsli
                     COMMENT "Compiling ${shader}.hlsl")
             else()
                 add_custom_command(OUTPUT ${output}
@@ -638,6 +642,7 @@ else()
                     COMMAND ${NEOTS2_SHADER_COMPILER} -nologo ${shader_target} -T ${profile} -E main -Fo ${output} ${source}
                     DEPENDS ${source} ${CMAKE_CURRENT_SOURCE_DIR}/src/render/shaders/object_light.hlsli
                             ${CMAKE_CURRENT_SOURCE_DIR}/src/render/shaders/sdl_gpu.hlsli
+                            ${CMAKE_CURRENT_SOURCE_DIR}/src/render/shaders/pool_sea.hlsli
                     COMMENT "Compiling ${shader}.hlsl")
             endif()
             list(APPEND shader_outputs ${output})
@@ -689,6 +694,7 @@ else()
                             -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/glsl_shader.cmake
                     DEPENDS ${source} ${CMAKE_CURRENT_SOURCE_DIR}/src/render/shaders/object_light.hlsli
                             ${CMAKE_CURRENT_SOURCE_DIR}/src/render/shaders/sdl_gpu.hlsli
+                            ${CMAKE_CURRENT_SOURCE_DIR}/src/render/shaders/pool_sea.hlsli
                             ${CMAKE_CURRENT_SOURCE_DIR}/cmake/glsl_shader.cmake
                     COMMENT "Making GLSL for ${shader}.hlsl")
                 list(APPEND gl_shader_outputs ${output})
@@ -734,7 +740,7 @@ else()
         target_link_libraries(vm_tests PRIVATE ts2ui)
         target_compile_definitions(vm_tests PRIVATE NEOTS2_TEXT_LAYOUT_TESTS)
 
-        add_executable(neots2 app/main.cpp app/menu.cpp app/game_effects.cpp app/game_surroundings.cpp app/game_graphics.cpp app/neighborhood.cpp app/neighborhood_ui.cpp app/lot_life.cpp app/lot_life_clips.cpp app/lot_life_effects.cpp app/lot_life_panels.cpp app/lot_life_objects.cpp app/lot_life_sims.cpp app/pose_numbers.cpp app/object_materials.cpp app/sim_loader.cpp app/lot_light.cpp app/imposter_baker.cpp app/lot_daylight.cpp app/route_sources.cpp app/lot_ui.cpp app/game_options_panel.cpp app/graphics_options_panel.cpp app/options_list.cpp app/live_panel.cpp app/job_panel.cpp app/memories_page.cpp app/age_meter.cpp app/queue_panel.cpp app/pie_menu_ui.cpp app/mood_meter.cpp app/aspiration_bars.cpp app/pause_frame.cpp app/baby_name_dialog.cpp app/description_box.cpp app/cheat_console.cpp app/needs_panel.cpp app/personality_page.cpp app/relationships_panel.cpp app/rewards_panel.cpp app/simology_panel.cpp app/interests_page.cpp app/hobbies_page.cpp app/chemistry_page.cpp app/meter_bar.cpp app/skewer.cpp app/wants_panel.cpp app/portraits.cpp app/cursors.cpp
+        add_executable(neots2 app/main.cpp app/menu.cpp app/game_effects.cpp app/game_surroundings.cpp app/game_graphics.cpp app/neighborhood.cpp app/neighborhood_ui.cpp app/lot_life.cpp app/lot_life_clips.cpp app/lot_life_effects.cpp app/lot_life_panels.cpp app/lot_life_objects.cpp app/lot_life_sims.cpp app/pose_numbers.cpp app/object_materials.cpp app/sim_loader.cpp app/lot_light.cpp app/imposter_baker.cpp app/lot_daylight.cpp app/route_sources.cpp app/lot_ui.cpp app/game_options_panel.cpp app/graphics_options_panel.cpp app/options_list.cpp app/list_box_rows.cpp app/live_panel.cpp app/job_panel.cpp app/memories_page.cpp app/age_meter.cpp app/queue_panel.cpp app/pie_menu_ui.cpp app/mood_meter.cpp app/aspiration_bars.cpp app/pause_frame.cpp app/baby_name_dialog.cpp app/phone_book_dialog.cpp app/type_picker_dialog.cpp app/notification_stack.cpp app/dialog_fills.cpp app/description_box.cpp app/cheat_console.cpp app/needs_panel.cpp app/personality_page.cpp app/relationships_panel.cpp app/rewards_panel.cpp app/simology_panel.cpp app/interests_page.cpp app/hobbies_page.cpp app/chemistry_page.cpp app/meter_bar.cpp app/skewer.cpp app/wants_panel.cpp app/portraits.cpp app/cursors.cpp
                        app/diagnostics.cpp app/crash_handler.cpp app/crash_dialog.cpp app/unexpected_exit.cpp app/report_upload.cpp app/message_box.cpp app/open_renderer.cpp)
         target_link_libraries(neots2 PRIVATE ts2render ts2ui ts2sim ts2diag project_warnings)
         add_dependencies(neots2 neots2_version)

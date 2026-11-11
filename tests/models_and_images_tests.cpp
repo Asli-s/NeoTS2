@@ -307,7 +307,7 @@ void clipsFitTheSkeletonsStretch() {
     };
     const auto adult = ts2::scene::bindAnimation(teenRig, clip(1.0f));
     const auto at = [&](const ts2::scene::RigAnimation& a, std::size_t node, std::array<float, 3> t) {
-        return ts2::scene::fittedPlace(ts2::scene::placeFitAt(a, node), t);
+        return ts2::scene::fittedPlace(ts2::scene::placeFitAt(a, node), t, 0);
     };
     CHECK(std::fabs(at(adult, 0, {0, 0, 4})[2] - (4 - 0.06f * 0.9286f)) < 1e-5f);
     CHECK(std::fabs(at(adult, 0, {0, 0, 0.9286f})[2] - 0.8729f) < 1e-4f);
@@ -320,6 +320,19 @@ void clipsFitTheSkeletonsStretch() {
     CHECK((at(teen, 0, {0, 0, 4}) == std::array<float, 3>{0, 0, 4}));
     // A teen clip on a teen body: spine2's weight 0.9 leaves a factor of 0.94 / 0.946.
     CHECK(std::fabs(at(teen, 2, {0, 4, 0})[1] - 4 * 0.94f / 0.946f) < 1e-5f);
+    // The clip's weight channel for root_trans (a chair's seated clips hold it at 1) takes the fit back
+    // in proportion: at 1 the root keeps the clip's place, at 0.5 it moves half as far.
+    auto seated = clip(1.0f);
+    ts2::anim::Channel weight;
+    weight.name = "root_trans";
+    weight.flags = static_cast<std::uint32_t>(ts2::anim::ChannelKind::Scalar) << 22 | 0x8000;
+    weight.components.push_back({{{0, 0.0f, 0, 0}, {1000, 1.0f, 0, 0}}});
+    seated->channels.push_back(weight);
+    const auto sits = ts2::scene::bindAnimation(teenRig, seated);
+    const auto fitAt = [&](float ms) { return ts2::scene::fittedPlace(ts2::scene::placeFitAt(sits, 0), {0, 0, 0.5f}, ms)[2]; };
+    CHECK(std::fabs(fitAt(0) - (0.5f - 0.06f * 0.9286f)) < 1e-5f);
+    CHECK(std::fabs(fitAt(500) - (0.5f - 0.03f * 0.9286f)) < 1e-5f);
+    CHECK(fitAt(1000) == 0.5f && fitAt(2000) == 0.5f);
 }
 
 // Solving a limb places again only what hangs below it, which must come out as placing the whole rig does.

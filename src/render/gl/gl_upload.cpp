@@ -227,6 +227,7 @@ std::unique_ptr<GlRenderer::Staged> GlRenderer::stage(const scene::Scene& scene,
         for (const int i : scene.lightMaps->floorIncidence) s->noMips.insert(static_cast<std::size_t>(i));
         s->noMips.insert(static_cast<std::size_t>(scene.lightMaps->walls));
         s->noMips.insert(static_cast<std::size_t>(scene.lightMaps->wallIncidence));
+        s->noMips.insert(static_cast<std::size_t>(scene.lightMaps->skirtLamps));
     }
     for (const auto& mesh : scene.meshes) {
         s->meshes.push_back(packMesh(mesh, scene.materials.size(), 0, s->meshData));

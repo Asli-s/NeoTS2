@@ -3,6 +3,7 @@
 #include "diag/log.hpp"
 #include "orbit.hpp"
 #include "render/irenderer.hpp"
+#include "scene/lot_light_maps.hpp"
 #include "scene/lot_skirt.hpp"
 #include "scene/neighborhood_plumbobs.hpp"
 #include "scene/neighborhood_scene.hpp"
@@ -275,7 +276,7 @@ inline void appendScene(ts2::scene::Scene& out, ts2::scene::Scene add, const ts2
                 f = image(f);
             }
         }
-        for (auto* one : {&maps.walls, &maps.wallIncidence}) {
+        for (auto* one : {&maps.walls, &maps.wallIncidence, &maps.skirtLamps}) {
             *one = image(*one);
         }
     }
@@ -342,10 +343,13 @@ inline ts2::scene::Scene lotInNeighborhood(const ts2::scene::Scene& hood, ts2::s
     Scene plants = hood;
     plants.terrain.reset();
     plants.objectLighting.reset();  // the lot's lighting state lights everything in lot view
-    // The lot's own imposter objects go with its imposter.
+    // The lot's own imposter objects go with its imposter. Other lots' live ponds stay, as their High
+    // imposters leave the ponds' water out. Their instances stand at the origin, so where they stand
+    // isn't tested.
     std::erase_if(plants.instances, [&](const Instance& i) {
         const float x = i.transform.m[3], y = i.transform.m[7];
-        return x < ax0 || x > ax1 || y < ay0 || y > ay1 || i.name == ts2::scene::kNeighborhoodPlumbobName || i.imposterLot == where.id ||
+        const bool pond = i.name == ts2::scene::kNeighborhoodPondsName;
+        return (!pond && (x < ax0 || x > ax1 || y < ay0 || y > ay1)) || i.name == ts2::scene::kNeighborhoodPlumbobName || i.imposterLot == where.id ||
                i.name == ts2::scene::kNeighborhoodSeaName || i.name == ts2::scene::kNeighborhoodSeaDepthName;
     });
     // They are lit as lot objects outdoors are, always in the sun: the lot's buildings shade nothing
@@ -380,6 +384,7 @@ inline ts2::scene::Scene lotInNeighborhood(const ts2::scene::Scene& hood, ts2::s
         *lotFirstImage = out.images.size();
     }
     appendScene(out, std::move(lot), where.place);
+    ts2::scene::lotlightmaps::linkSkirtLamps(out, where.place);
     if (poolStyleSea) {
         ts2::scene::poolwater::sharePoolBoxes(out);
     }
@@ -387,6 +392,7 @@ inline ts2::scene::Scene lotInNeighborhood(const ts2::scene::Scene& hood, ts2::s
         auto& t = *out.terrain;
         // The neighborhood view's pool-style sea isn't drawn in lot view, where the skirt brings its own.
         t.poolStyleSea = false;
+        t.seaHazesGround = poolStyleSea;
         // Other lots' imposters within the area, not this lot's. In lot view the game stands them on
         // their lots, without the neighborhood view's lift.
         std::erase_if(t.imposters, [&](const PaintedTerrain::ImposterPart& p) {

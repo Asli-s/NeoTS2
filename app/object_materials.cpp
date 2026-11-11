@@ -105,6 +105,30 @@ int ObjectMaterials::model(const std::string& name, ts2::scene::Scene& scene) {
     return models_[key] = static_cast<int>(scene.meshes.size() - 1);
 }
 
+int ObjectMaterials::model(const std::string& name, const std::vector<ts2::scenegraph::MaterialOverride>& overrides,
+                           ts2::scene::Scene& scene) {
+    if (overrides.empty()) {
+        return model(name, scene);
+    }
+    std::string key = ts2::scene::lower(name);
+    for (const auto& o : overrides) {
+        key += "|" + ts2::scene::lower(o.group) + "=" + ts2::scene::lower(o.material);
+    }
+    if (const auto it = models_.find(key); it != models_.end()) {
+        return it->second;
+    }
+    const int built = builder_.model(name, overrides);
+    if (built < 0) {
+        return models_[key] = -1;
+    }
+    ts2::scene::Mesh mesh = builder_.scene().meshes[static_cast<std::size_t>(built)];
+    for (auto& p : mesh.primitives) {
+        p.material = builderMaterial(p.material, scene);
+    }
+    scene.meshes.push_back(std::move(mesh));
+    return models_[key] = static_cast<int>(scene.meshes.size() - 1);
+}
+
 int ObjectMaterials::skinnedModel(const std::string& name, const std::vector<ts2::scenegraph::MaterialOverride>& overrides,
                                   ts2::scene::Scene& scene) {
     std::string key = ts2::scene::lower(name);

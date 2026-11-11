@@ -241,6 +241,9 @@ void GlRenderer::drawTerrain(const FrameView& f, const Mat4& viewProjection, boo
         state.depthWrite = pass == 0;
         setState(state);
         TerrainUniforms u = g.terrainUniforms;
+        if (terrainTiles_ > 0) {
+            u.textureRepeat = terrainTiles_;
+        }
         u.reflected = reflected ? 1.0f : 0.0f;
         u.slice = static_cast<float>(slice);
         u.passAlpha = pass == 0 ? 1.0f : 0.0f;

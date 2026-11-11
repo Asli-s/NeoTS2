@@ -235,6 +235,28 @@ IRenderer::Addition SdlGpuRenderer::prepareAddition(const scene::Scene& add, con
     return a;
 }
 
+void SdlGpuRenderer::leaveOutPrepared(Addition& addition, const std::vector<std::size_t>& positions) const {
+    auto* a = dynamic_cast<GpuAddition*>(addition.get());
+    if (a == nullptr) {
+        return;
+    }
+    std::vector<std::size_t> sorted = positions;
+    std::sort(sorted.begin(), sorted.end());
+    sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+    // From the last, so the positions before stay where they are.
+    for (auto it = sorted.rbegin(); it != sorted.rend(); ++it) {
+        if (*it >= a->textures.size()) {
+            continue;
+        }
+        const auto at = a->textures.begin() + static_cast<std::ptrdiff_t>(*it);
+        if (SDL_GPUTexture* t = *at) {
+            std::erase(a->withMips, t);
+            SDL_ReleaseGPUTexture(device_, t);
+        }
+        a->textures.erase(at);
+    }
+}
+
 void SdlGpuRenderer::addPrepared(const scene::Scene& scene, Addition addition) {
     auto* a = dynamic_cast<GpuAddition*>(addition.get());
     // It fits only when what it brings is exactly what the scene has gained past what is drawn.

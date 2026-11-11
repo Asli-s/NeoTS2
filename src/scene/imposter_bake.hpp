@@ -5,6 +5,7 @@
 #include "scene/imposters.hpp"
 
 #include <array>
+#include <functional>
 #include <map>
 #include <string>
 #include <utility>
@@ -48,6 +49,11 @@ bool inImposterLayer(const Instance& instance, ImposterShot::Layer layer, int gr
 // shows through the rest).
 void prepareImposterScene(Scene& scene);
 
+// Not in the original game: keeps the terrain's canvas paint on the tiles `kept` (by tile x and y)
+// through prepareImposterScene, as the bed under ponds drawn like pools. The ground under such a pond
+// then shows the lot's own ground, and its banks hide the water's surface where it runs into them.
+void keepImposterCanvas(Scene& scene, const std::function<bool(int, int)>& kept);
+
 // The side of every imposter texture the game makes, and of High's, in texels.
 constexpr unsigned kImposterSide = 128;
 constexpr unsigned kHighImposterSide = 512;
@@ -78,6 +84,10 @@ public:
     // (`groundLightMap`, 8 texels a tile, rows along +y, none for no light map), and the terrain and
     // its light map fade out at the edge of the lot, `lotWidth` by `lotDepth` tiles.
     std::map<std::string, Image> finish(const Image* groundLightMap, int lotWidth, int lotDepth);
+    // Makes the terrain texture opaque over the tiles `opaque` (by tile x and y), where the ground is
+    // drawn whole (see keepImposterCanvas). The water blended over it lowers its alpha as Direct3D 9
+    // blends, which would let the neighborhood's ground show through.
+    void makeTerrainOpaque(const std::function<bool(int, int)>& opaque);
 
 private:
     unsigned side_;

@@ -13,7 +13,7 @@ namespace {
 
 constexpr std::array<char, 8> kMagic{'N', 'E', 'O', 'I', 'M', 'P', 'S', 'T'};
 // Raised whenever the bake draws differently, so that older pictures are made again.
-constexpr std::uint32_t kVersion = 4;
+constexpr std::uint32_t kVersion = 6;
 // Limits that keep a broken file from asking for much: more textures than a lot's imposter has,
 // longer names, or sides past what High draws.
 constexpr std::uint32_t kMostTextures = 512;

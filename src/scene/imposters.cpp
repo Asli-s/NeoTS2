@@ -3,6 +3,8 @@
 #include "formats/dbpf.hpp"
 #include "formats/hash.hpp"
 #include "formats/scenegraph.hpp"
+#include "content/lot.hpp"
+#include "scene/terrain_water.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -294,6 +296,121 @@ std::vector<ImposterObject> readImposterObjects(dbpf::Package& package, std::vec
     return out;
 }
 
+namespace {
+
+// Not in the original game: a lot imposter's ground drawn through every corner of the lot's tiles at
+// the lot's own heights. The game saves it through a corner every 10 tiles, each at that one corner's
+// height, so a dip at one of those corners slopes the ground for 10 tiles around it and leaves what
+// stands there floating. Where the lot has water the ground lies just under the water's surface, as
+// its picture shows the water there and not the bed under it. The picture keeps its place: each
+// corner takes the texture coordinates the saved ground has there. `vertices` (x, y, z, u, v, u, v)
+// and `indices` are the saved ground's, in the lot's own coordinates. Left as they are when the
+// heights don't cover it.
+void followLotGround(std::vector<float>& vertices, std::vector<std::uint32_t>& indices, const content::Lot& lot) {
+    const auto grid = lot.grids.find(content::kFloorHeightGridInstance);
+    // The game saves a few dozen triangles. More than this comes from a broken file and is left as it is.
+    constexpr std::size_t kMostTriangles = 4096;
+    if (grid == lot.grids.end() || grid->second.elementSize != 4 || vertices.size() < 21 || indices.size() < 3 ||
+        indices.size() / 3 > kMostTriangles) {
+        return;
+    }
+    const int level = content::groundGridLevel(lot);
+    const auto water = lot.flatGrids.find(content::kWaterHeightGridInstance);
+    // Under the water, this far below its surface, so the water drawn over it shows on top.
+    constexpr float kUnderWater = 0.1f;
+    float x0 = vertices[0], y0 = vertices[1], x1 = x0, y1 = y0;
+    for (std::size_t v = 0; v + 6 < vertices.size(); v += 7) {
+        if (!std::all_of(vertices.begin() + static_cast<std::ptrdiff_t>(v), vertices.begin() + static_cast<std::ptrdiff_t>(v + 7),
+                         [](float f) { return std::isfinite(f); })) {
+            return;
+        }
+        x0 = std::min(x0, vertices[v]);
+        y0 = std::min(y0, vertices[v + 1]);
+        x1 = std::max(x1, vertices[v]);
+        y1 = std::max(y1, vertices[v + 1]);
+    }
+    // A lot is at most 64 tiles a side. Saved ground wider than that, off the lot or not at a number in
+    // a broken file is left as it is.
+    constexpr float kMostTiles = 64;
+    const auto onLot = [](float v) { return v >= -kMostTiles && v <= 2 * kMostTiles; };
+    if (!(onLot(x0) && onLot(y0) && onLot(x1) && onLot(y1) && x1 - x0 <= kMostTiles && y1 - y0 <= kMostTiles)) {
+        return;
+    }
+    const int ix0 = static_cast<int>(std::ceil(x0)), iy0 = static_cast<int>(std::ceil(y0));
+    const int ix1 = static_cast<int>(std::floor(x1)), iy1 = static_cast<int>(std::floor(y1));
+    const int columns = ix1 - ix0 + 1, rows = iy1 - iy0 + 1;
+    if (columns < 2 || rows < 2) {
+        return;
+    }
+    // Each corner's texture coordinates, from the saved triangle it lies in. Empty off the saved ground.
+    std::vector<std::optional<std::array<float, 5>>> corners(static_cast<std::size_t>(columns) * static_cast<std::size_t>(rows));
+    for (int iy = iy0; iy <= iy1; ++iy) {
+        for (int ix = ix0; ix <= ix1; ++ix) {
+            const float px = static_cast<float>(ix), py = static_cast<float>(iy);
+            for (std::size_t i = 0; i + 2 < indices.size(); i += 3) {
+                const float* a = &vertices[static_cast<std::size_t>(indices[i]) * 7];
+                const float* b = &vertices[static_cast<std::size_t>(indices[i + 1]) * 7];
+                const float* c = &vertices[static_cast<std::size_t>(indices[i + 2]) * 7];
+                const float det = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
+                if (std::abs(det) < 1e-6f) {
+                    continue;
+                }
+                const float wa = ((b[1] - c[1]) * (px - c[0]) + (c[0] - b[0]) * (py - c[1])) / det;
+                const float wb = ((c[1] - a[1]) * (px - c[0]) + (a[0] - c[0]) * (py - c[1])) / det;
+                const float wc = 1 - wa - wb;
+                constexpr float kEdge = -1e-4f;
+                if (wa < kEdge || wb < kEdge || wc < kEdge) {
+                    continue;
+                }
+                std::array<float, 5> out{};
+                out[0] = a[2] * wa + b[2] * wb + c[2] * wc;
+                for (std::size_t k = 0; k < 4; ++k) {
+                    out[k + 1] = a[3 + k] * wa + b[3 + k] * wb + c[3 + k] * wc;
+                }
+                if (grid->second.contains(level, ix, iy)) {
+                    out[0] = grid->second.f32(level, ix, iy, 0);
+                    if (water != lot.flatGrids.end()) {
+                        if (const auto w = terrainwater::cornerHeight(water->second, ix, iy); w && out[0] < *w) {
+                            out[0] = *w - kUnderWater;
+                        }
+                    }
+                }
+                corners[static_cast<std::size_t>(iy - iy0) * static_cast<std::size_t>(columns) + static_cast<std::size_t>(ix - ix0)] = out;
+                break;
+            }
+        }
+    }
+    std::vector<float> fine;
+    std::vector<std::uint32_t> fineIndices;
+    std::vector<std::uint32_t> at(corners.size(), UINT32_MAX);
+    auto corner = [&](int cx, int cy) {
+        const std::size_t n = static_cast<std::size_t>(cy) * static_cast<std::size_t>(columns) + static_cast<std::size_t>(cx);
+        if (at[n] == UINT32_MAX) {
+            const auto& c = *corners[n];
+            at[n] = static_cast<std::uint32_t>(fine.size() / 7);
+            fine.insert(fine.end(), {static_cast<float>(ix0 + cx), static_cast<float>(iy0 + cy), c[0], c[1], c[2], c[3], c[4]});
+        }
+        return at[n];
+    };
+    for (int cy = 0; cy + 1 < rows; ++cy) {
+        for (int cx = 0; cx + 1 < columns; ++cx) {
+            const auto has = [&](int x, int y) { return corners[static_cast<std::size_t>(y) * static_cast<std::size_t>(columns) + static_cast<std::size_t>(x)].has_value(); };
+            if (!has(cx, cy) || !has(cx + 1, cy) || !has(cx, cy + 1) || !has(cx + 1, cy + 1)) {
+                continue;
+            }
+            // Split from the tile's low x and y corner to its high one, as the lot's terrain is.
+            const std::uint32_t a = corner(cx, cy), b = corner(cx + 1, cy), d = corner(cx, cy + 1), e = corner(cx + 1, cy + 1);
+            fineIndices.insert(fineIndices.end(), {a, b, e, a, e, d});
+        }
+    }
+    if (!fineIndices.empty()) {
+        vertices = std::move(fine);
+        indices = std::move(fineIndices);
+    }
+}
+
+} // namespace
+
 bool addImposter(PaintedTerrain& out, const std::filesystem::path& lotPackage, const nhood::LotDescription& lot,
                  float zOffset, std::vector<std::string>& warnings, float* top, const std::map<std::string, Image>* pictures,
                  std::vector<ImposterObject>* objects) {
@@ -324,6 +441,15 @@ bool addImposter(PaintedTerrain& out, const std::filesystem::path& lotPackage, c
     const float ty = (static_cast<float>(lot.y) + offsets[k][1]) * kTile;
     const float tz = lot.elevation + zOffset;
 
+    // The lot's own heights, for its ground (see followLotGround).
+    std::optional<content::Lot> ground;
+    if (std::any_of(imposter->parts.begin(), imposter->parts.end(), [](const auto& part) { return part.kind == PaintedTerrain::ImposterPart::Kind::Terrain; })) {
+        try {
+            ground = content::loadLotGround(lotPackage);
+        } catch (const std::exception&) {
+            ground.reset();
+        }
+    }
     for (const auto& part : imposter->parts) {
         const auto picture = texture(part.texture);
         if (!picture) {
@@ -340,6 +466,10 @@ bool addImposter(PaintedTerrain& out, const std::filesystem::path& lotPackage, c
             }
         }
         p.vertices = part.vertices;
+        p.indices = part.indices;
+        if (part.kind == PaintedTerrain::ImposterPart::Kind::Terrain && ground) {
+            followLotGround(p.vertices, p.indices, *ground);
+        }
         for (std::size_t v = 0; v + 6 < p.vertices.size(); v += 7) {
             const float x = p.vertices[v], y = p.vertices[v + 1], z = p.vertices[v + 2];
             p.vertices[v] = x * c - y * s + tx;
@@ -349,7 +479,6 @@ bool addImposter(PaintedTerrain& out, const std::filesystem::path& lotPackage, c
                 *top = std::max(*top, z + tz);
             }
         }
-        p.indices = part.indices;
         out.imposters.push_back(std::move(p));
     }
     if (objects != nullptr) {

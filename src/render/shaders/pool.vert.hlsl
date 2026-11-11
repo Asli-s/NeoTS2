@@ -50,8 +50,10 @@ Output main(Input input) {
     // A lot is only turned and moved into place, so its turn's transpose brings directions back.
     const float3x3 toLocal = transpose((float3x3)model);
     const float3 toEye = mul(toLocal, normalize(eye.xyz - world));
-    // As the game has it, the y wave's slope tilts the normal both ways.
-    const float3 normal = normalize(input.normal + float3(cos(phaseY) * waveNormal.xy, 0));
+    // As the game has it, the y wave's slope tilts the normal both ways. Murky water (ponds drawn like
+    // pools, not in the original game) leaves the tilt out: across a pond's breadth it shows as stripes.
+    const float2 tilt = tint.a > 0 ? float2(0, 0) : waveNormal.xy;
+    const float3 normal = normalize(input.normal + float3(cos(phaseY) * tilt, 0));
     const float3 half_ = normalize(toEye + mul(toLocal, light.xyz));
     // The size of the base, as the game's vertex shader model raises it.
     output.specular = saturate(lightColor * pow(abs(dot(normal, half_)), 50) * night * lightColor * 0.5);

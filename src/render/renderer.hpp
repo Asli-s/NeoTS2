@@ -73,11 +73,13 @@ public:
     void addMaterials(const scene::Scene& scene) override;
     void addMeshes(const scene::Scene& scene) override;
     [[nodiscard]] Addition prepareAddition(const scene::Scene& add, const std::vector<int>& shared) const override;
+    void leaveOutPrepared(Addition& addition, const std::vector<std::size_t>& positions) const override;
     void addPrepared(const scene::Scene& scene, Addition addition) override;
     void setImages(const scene::Scene& scene, const std::vector<int>& indexes, bool fade = false) override;
     void setLightMapFade(float fade) override;
     void setSkybox(const std::vector<scene::Image>& faces) override;
     void setTerrainLightMap(const scene::Image& lightMap) override;
+    void setSeaLight(float light) override;
     void setNeighborhoodSky(const std::vector<scene::Image>& faces) override;
     void setSurroundings(const scene::Scene& scene) override;
     [[nodiscard]] ImposterTextures prepareImposterTextures(const scene::SharedImages& images) const override;
@@ -225,6 +227,9 @@ private:
     SDL_Window* window_ = nullptr;
 public:
     void setWaitForScreen(bool on) override;
+    [[nodiscard]] double screenRefreshRate() const override;
+    void setKeepFrames(bool on) override;
+    [[nodiscard]] bool showAgain() override;
 private:
     SDL_GPUDevice* device_ = nullptr;
     // A depth buffer, remade only when the size drawn at changes: one for the window (and shots),
@@ -239,6 +244,12 @@ private:
     // pass ends. Remade when the size drawn at changes.
     SDL_GPUTexture* smoothTarget(DepthBuffer& buffer, bool isDepth, unsigned width, unsigned height);
     DepthBuffer smoothColor_, smoothDepth_;
+    // While frames are kept (see setKeepFrames), the window's frame is drawn here and copied to the
+    // screen. `keptShown_` is whether it holds the last frame drawn.
+    SDL_GPUTexture* keptTarget(unsigned width, unsigned height);
+    void showKept(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* screen);
+    DepthBuffer kept_;
+    bool keepFrames_ = false, keptShown_ = false;
     int smoothSamples_ = 1;  // of the main view: 1, or 2, 4 or 8 when smoothing edges
     std::filesystem::path shaderFolder_;
     // Mirror images, shots of Sims and everything else keep one sample. The main view's pass uses
@@ -400,6 +411,12 @@ private:
         TerrainUniforms terrainUniforms{};
         // The underwater gradient as the scene shader is given it (see ShadowUniforms::underwater).
         std::array<float, 4> underwater{};
+        float seaLevel = 0;  // see PaintedTerrain::waterLevel
+        float seaLight = 1;  // see PaintedTerrain::seaLight
+        // PaintedTerrain::seaDepthMap, its points along x and y (0 for none) and its area.
+        SDL_GPUBuffer* seaDepth = nullptr;
+        std::array<float, 2> seaDepthSize{};
+        std::array<float, 4> seaDepthArea{};
         std::array<std::array<float, 4>, kUnderwaterRows> underwaterRows{};
         // Its water: the sheet, the sky cube map and the ripple map.
         SDL_GPUBuffer* waterVertices = nullptr;

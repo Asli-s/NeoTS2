@@ -129,10 +129,12 @@ public:
     std::string patternMaterial(const std::string& name, bool wall) const;
 
     // A fence's models: one tile of rail along +x, the same diagonally (1.41 long), and a post, and
-    // whether Sims may walk over it (flowerbed edging).
+    // whether Sims may walk over it (flowerbed edging). A half wall (XFNC ishalfwall) also has a
+    // painted wall under its rail, and its models sit on top of that wall.
     struct Fence {
         std::string rail, diagonalRail, post;
         bool mayWalkOver = false;
+        bool halfWall = false;
     };
     const Fence* fence(std::uint32_t guid) const;
 

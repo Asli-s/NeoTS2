@@ -179,7 +179,7 @@ void SdlGpuRenderer::setSmoothEdges(int samples) {
 void SdlGpuRenderer::makeScenePipelines(const std::filesystem::path& shaders, PassPipelines& out, int samples, bool gameAlpha) {
     SDL_GPUShader* vertex = loadShader(device_, shaders, "scene.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0);
     SDL_GPUShader* skinnedVertex = loadShader(device_, shaders, "skinned.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0, 1, 2);
-    SDL_GPUShader* fragment = loadShader(device_, shaders, "scene.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 16, 2);
+    SDL_GPUShader* fragment = loadShader(device_, shaders, "scene.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 16, 2, 1);
 
     // Only a mirror image clips depth, and those are always drawn with one sample.
     for (int clip = 0; clip < (samples > 1 || gameAlpha ? 1 : 2); ++clip)

@@ -203,6 +203,12 @@ public:
         (void)shared;
         return {};
     }
+    // Frees images uploaded ahead that the drawn scene has come to share since, so the addition holds
+    // only the others. `positions` count the images it uploaded, in order, from 0.
+    virtual void leaveOutPrepared(Addition& addition, const std::vector<std::size_t>& positions) const {
+        (void)addition;
+        (void)positions;
+    }
     // After the prepared scene's images (but the shared ones), materials and meshes were added to the
     // end of the drawn scene's, draws them from now on as addMaterials and addMeshes would. An
     // addition that doesn't match what the scene gained is dropped and the scene's new parts uploaded now.
@@ -228,6 +234,9 @@ public:
     // Uploads a new light map for the neighborhood's painted terrain and roads in place of the one
     // uploaded with it. Nothing happens without an uploaded terrain or with a broken image.
     virtual void setTerrainLightMap(const scene::Image& lightMap) = 0;
+    // Sets how bright the neighborhood's pool-style sea is now (see scene::PaintedTerrain::seaLight).
+    // Renderers that don't draw that sea leave it.
+    virtual void setSeaLight(float) {}
     // Uploads a new sky cube for the neighborhood's water and its reflection, in place of the one
     // uploaded with it. Nothing happens without an uploaded sky or when the faces are not six squares
     // of one size.
@@ -296,6 +305,9 @@ public:
     // Whether ambient occlusion is worked out at half the view's size, which costs less and is a little
     // softer, or at its full size. Half by default.
     virtual void setAmbientOcclusionHalfSize(bool half) { (void)half; }
+    // Not in the original game: how many tiles one picture of the neighborhood ground's paints covers,
+    // fewer for sharper ground, or 0 for the ground's own (13). The next frame draws with it.
+    virtual void setTerrainTiles(float tiles) { (void)tiles; }
     // Whether a lot's sea shows them too (enableOceanReflection in Graphics Rules).
     virtual void setSeaReflections(bool on) = 0;
     // Whether materials show specular highlights (the game's specHighlights, off at its Low
@@ -304,6 +316,13 @@ public:
     // Whether a frame waits for the screen's refresh. Without waiting, frames go out as fast as they
     // are drawn. On by default.
     virtual void setWaitForScreen(bool on) = 0;
+    // The refresh rate of the screen the window is on, in Hz. 0 when it isn't known.
+    [[nodiscard]] virtual double screenRefreshRate() const { return 0; }
+    // Whether each frame drawn is kept, so that showAgain can show it for another refresh.
+    virtual void setKeepFrames(bool on) { (void)on; }
+    // Shows the frame drawn last again, waiting for the screen as a frame does. False when there is
+    // no kept frame of the window's size, or the window can't be drawn to (minimized).
+    [[nodiscard]] virtual bool showAgain() { return false; }
     // Whether materials with a normal map are drawn with it (the game's bumpMapping, on at its High
     // Material Detail). On by default.
     virtual void setBumpMapping(bool on) = 0;
