@@ -276,11 +276,12 @@ std::optional<ModelBone> Execution::modelJoint(const SimObject& object, const st
 //   byte 0, 1-2  the object (owner, data)
 //   byte 3, 4-5  the container (owner, data)
 //   byte 6       the slot, or with flag bit 0 my temp 0
-//   byte 11      flags: bit 0 see above, bit 1 only test, bit 2 reset the object's root bones
+//   byte 11      flags: bit 0 see above, bit 1 only test, bit 2 reset the object's pose (see
+//                resetObjectPose)
 // The object leaves its old slot and tiles and takes the container's place, level and facing, data
 // 2 and 3 naming container and slot. False when it can't, my data 0x34 saying why (code + 2): 0x11
 // multi-tile, 0x0E no such slot, 0x0C slot taken or the object holds the container, 0x0F container
-// data 0x1C below object data 0x1B. Not run yet: slot height mask (0x25), OBJf entry 0x34, bone reset (PR-27).
+// data 0x1C below object data 0x1B. Not run yet: slot height mask (0x25) and OBJf entry 0x34.
 bool Execution::snapInto(const bhav::Instruction& in, Frame& f) {
     constexpr std::size_t kSnapResultField = 0x34, kSnapOtherField = 0x36;
     constexpr std::size_t kContainerField = 2, kCapacityField = 0x1C, kSizeField = 0x1B;
@@ -325,6 +326,10 @@ bool Execution::snapInto(const bhav::Instruction& in, Frame& f) {
         return true;
     }
     putInSlot(*object, *container, slot);
+    constexpr std::uint8_t kResetPose = 0x04;
+    if (flags & kResetPose) {
+        resetObjectPose(*object);
+    }
     return true;
 }
 

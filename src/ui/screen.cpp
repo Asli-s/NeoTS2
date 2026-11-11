@@ -101,7 +101,7 @@ int Screen::add(const ui::Window& source, int parent) {
         std::string clsid = source.text("clsid");
         std::transform(clsid.begin(), clsid.end(), clsid.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         w.overChildren = clsid == "0x49495e7f" || clsid == "0x0c683787";
-        w.seeThrough = source.flag("winflag_pbuff") && source.flag("winflag_premulalpha");
+        w.seeThrough = source.flag("winflag_pbuff") && (source.flag("winflag_pbufftrans") || source.flag("winflag_premulalpha"));
     }
     w.buffered = source.flag("winflag_pbuff");
     w.keyed = source.flag("winflag_pbufftrans") ||
@@ -607,12 +607,13 @@ std::size_t Screen::textIndexAt(int window, int x, int y) {
     if (w.lineStarts.empty() || w.lineHeight <= 0) {
         return textIndexAt(window, x);
     }
+    // A point above the text is the start of the top line shown.
     const int local = y - origin(window)[1] - w.gutters[1];
-    const int line = std::clamp(w.topLine + (local < 0 ? -1 : local / w.lineHeight), 0, static_cast<int>(w.lineStarts.size()) - 1);
+    const int line = std::clamp(w.topLine + std::max(0, local) / w.lineHeight, 0, static_cast<int>(w.lineStarts.size()) - 1);
     const std::size_t begin = w.lineStarts[static_cast<std::size_t>(line)];
     const std::size_t end = static_cast<std::size_t>(line) + 1 < w.lineStarts.size() ? w.lineStarts[static_cast<std::size_t>(line) + 1] : w.text.size();
     const FontStyle& style = fonts_.style(w.font);
-    const int across = x - origin(window)[0] - w.gutters[0];
+    const int across = local < 0 ? 0 : x - origin(window)[0] - w.gutters[0];
     // The boundary on that line whose left part is nearest in width to the click. A line that
     // wrapped ends before the space it broke at.
     std::size_t last = end;
@@ -744,6 +745,22 @@ int Screen::textHeight(int window) const {
         return static_cast<int>(w.lineWidths.size()) * w.lineStep;
     }
     return image >= 0 && !w.text.empty() ? static_cast<int>(textures_[static_cast<std::size_t>(image)].height) : 0;
+}
+
+int Screen::textLineStep(int window) const {
+    if (window < 0) {
+        return 0;
+    }
+    const Window& w = windows_[static_cast<std::size_t>(window)];
+    return !w.lineWidths.empty() ? w.lineStep : textHeight(window);
+}
+
+std::vector<std::size_t> Screen::wrappedLineStarts(int window) {
+    if (window < 0) {
+        return {};
+    }
+    const Window& w = windows_[static_cast<std::size_t>(window)];
+    return w.wrapped ? wrapStarts(w, fonts_.style(w.font)) : std::vector<std::size_t>{0};
 }
 
 void Screen::fitHeightToText(int window) {
@@ -1223,28 +1240,59 @@ void Screen::emit(int index, std::vector<Quad>& out) const {
             top = y0;
             bottom = y1;
         }
+        // A text box's lines are cut off at the window's top and bottom, past its gutters, so a
+        // descender in the bottom gutter shows. Their sides stop at the side gutters.
+        if (w.kind == Kind::TextEdit) {
+            top = y0;
+            bottom = y1;
+        }
         // Other text is cut off inside the window's gutters.
         const float cx0 = std::max(tx, x0 + gx), cy0 = std::max(ty, top), cx1 = std::min(tx + tw, x1 - gx), cy1 = std::min(ty + th, bottom);
         if (cx1 > cx0 && cy1 > cy0) {
             const std::array<float, 4> color = w.state == ButtonState::Disabled && w.disabledTextColor ? *w.disabledTextColor : w.textColor;
-            // A text box's selection is a highlighted stretch with its text in the selected colour.
-            float sx0 = cx1, sx1 = cx1;
-            if (w.kind == Kind::TextEdit && w.lineStarts.empty() && w.selectionEnd > w.selectionBegin) {
-                const FontStyle& style = fonts_.style(w.font);
-                sx0 = std::clamp(tx + static_cast<float>(fonts_.width(style, w.text.substr(0, w.selectionBegin))), cx0, cx1);
-                sx1 = std::clamp(tx + static_cast<float>(fonts_.width(style, w.text.substr(0, w.selectionEnd))), cx0, cx1);
-            }
-            auto part = [&](float a, float b, const std::array<float, 4>& c) {
-                if (b > a) {
-                    out.push_back({a, cy0, b, cy1, (a - tx) / tw, (cy0 - ty) / th, (b - tx) / tw, (cy1 - ty) / th, w.textImage, c});
+            auto part = [&](float a, float b, float c0, float c1, const std::array<float, 4>& c) {
+                if (b > a && c1 > c0) {
+                    out.push_back({a, c0, b, c1, (a - tx) / tw, (c0 - ty) / th, (b - tx) / tw, (c1 - ty) / th, w.textImage, c});
                 }
             };
-            if (sx1 > sx0) {
-                out.push_back({sx0, cy0, sx1, cy1, 0, 0, 1, 1, white_, w.highlightColor});
+            part(cx0, cx1, cy0, cy1, color);
+            // A text box's selection is a highlighted stretch on each line it covers, from the
+            // line's text start to its text end at most (an empty line gets none), as tall as a
+            // line, with its text in the selected colour.
+            if (w.kind == Kind::TextEdit && w.selectionEnd > w.selectionBegin) {
+                const FontStyle& style = fonts_.style(w.font);
+                auto span = [&](std::size_t begin, std::size_t end, float lineTop, float lineBottom) {
+                    const std::size_t a = std::max(begin, w.selectionBegin), b = std::min(end, w.selectionEnd);
+                    if (b <= a) {
+                        return;
+                    }
+                    const float sx0 = std::clamp(tx + static_cast<float>(fonts_.width(style, w.text.substr(begin, a - begin))), cx0, cx1);
+                    const float sx1 = std::clamp(tx + static_cast<float>(fonts_.width(style, w.text.substr(begin, b - begin))), cx0, cx1);
+                    const float s0 = std::max(lineTop, cy0), s1 = std::min(lineBottom, bottom);
+                    if (sx1 > sx0 && s1 > s0) {
+                        out.push_back({sx0, s0, sx1, s1, 0, 0, 1, 1, white_, w.highlightColor});
+                        part(sx0, sx1, std::max(s0, cy0), std::min(s1, cy1), w.selectedTextColor);
+                    }
+                };
+                if (w.lineStarts.empty()) {
+                    span(0, w.text.size(), cy0, cy1);
+                } else {
+                    const int shown = visibleLines(index);
+                    for (int i = 0; i < shown; ++i) {
+                        const auto line = static_cast<std::size_t>(w.topLine + i);
+                        if (line >= w.lineStarts.size()) {
+                            break;
+                        }
+                        const std::size_t begin = w.lineStarts[line];
+                        std::size_t end = line + 1 < w.lineStarts.size() ? w.lineStarts[line + 1] : w.text.size();
+                        if (end > begin && w.text[end - 1] == '\n') {
+                            --end;
+                        }
+                        const float lineTop = ty + static_cast<float>(i * w.lineHeight);
+                        span(begin, end, lineTop, lineTop + static_cast<float>(w.lineHeight));
+                    }
+                }
             }
-            part(cx0, sx0, color);
-            part(sx0, sx1, w.selectedTextColor);
-            part(sx1, cx1, color);
         }
         if (w.caret && !w.lineStarts.empty()) {
             // On the line it is on, cut off with the text.

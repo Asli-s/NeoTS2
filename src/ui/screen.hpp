@@ -100,6 +100,10 @@ public:
     void setWrapped(int window, bool wrapped);
     // The height of the window's text as laid out (0 without text).
     int textHeight(int window) const;
+    // The step between a wrapped window's text lines in pixels (its whole text height when it isn't
+    // broken into lines), and where each of its lines starts in its text.
+    int textLineStep(int window) const;
+    std::vector<std::size_t> wrappedLineStarts(int window);
     // Makes the window as high as its text plus its top and bottom gutters (autosize). Our text image
     // is 2 pixels taller than its lines, so the last line's descenders aren't cut.
     void fitHeightToText(int window);
@@ -178,7 +182,8 @@ private:
         // through, and buttons are enabled by their state instead. A container (winflag_container)
         // takes it only over a shown child, and so do generic windows and flat rectangles of the
         // classes 0x49495e7f and 0x0c683787 with winflag_mousetrans. A buffered window with
-        // winflag_mousetrans and winflag_premulalpha lets it through where nothing it draws shows.
+        // winflag_mousetrans lets it through where nothing it draws shows, when its buffer has a key
+        // colour (winflag_pbufftrans) or winflag_premulalpha.
         bool enabled = true, ignoresMouse = false, container = false, overChildren = false, seeThrough = false;
         // Drawn through a buffer whose magenta (255, 0, 255) shows through (winflag_pbufftrans), as
         // is everything inside it.

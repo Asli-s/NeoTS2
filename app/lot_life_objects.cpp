@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <climits>
 #include <format>
+#include <iterator>
 
 namespace app {
 
@@ -684,11 +685,32 @@ void LotLife::addCreatedObjects(ts2::scene::Scene& scene, bool removeSims) {
         if (o.isPerson() || o.removed) {
             return false;
         }
+        // A lot object keeps its chosen materials through a new model: the game (with Seasons, as
+        // every install that runs NeoTS2 has) sets each group's chosen material again on the new
+        // model by group name, a counter top's hole mask with it (see PlacedObject::chosen).
+        std::vector<ts2::scenegraph::MaterialOverride> kept, masks;
         if (const auto drawn = drawnTypes_.find(o.id); drawn != drawnTypes_.end()) {
             const auto drawnModel = drawnModels_.find(o.id);
             const bool sameModel = drawnModel != drawnModels_.end() ? drawnModel->second == o.model : o.model.empty();
             if (drawn->second == o.definition.guid() && sameModel) {
                 return false;
+            }
+            // A script giving a lot object the model the lot already shows for it changes nothing. A
+            // chimney's pieces set their graphics as the lot starts, and they keep the heights the
+            // lot saved for them.
+            const auto shown = std::find_if(scene.placedObjects.begin(), scene.placedObjects.end(),
+                                            [&](const ts2::scene::PlacedObject& p) { return p.object == static_cast<std::uint32_t>(o.id); });
+            if (drawn->second == o.definition.guid() && !created_.contains(o.id) && shown != scene.placedObjects.end() &&
+                !o.model.empty() && ts2::scene::lower(shown->model) == ts2::scene::lower(o.model)) {
+                drawnModels_[o.id] = o.model;
+                return false;
+            }
+            if (shown != scene.placedObjects.end()) {
+                kept = shown->chosen;
+                // The hole masks stay with the object apart from them, for scripts that set its top later.
+                std::copy_if(shown->overrides.begin(), shown->overrides.end(), std::back_inserter(masks), [](const ts2::scenegraph::MaterialOverride& m) {
+                    return ts2::scene::lower(m.material).find("-cutout-") != std::string::npos;
+                });
             }
             undraw(o.id);
         }
@@ -698,7 +720,7 @@ void LotLife::addCreatedObjects(ts2::scene::Scene& scene, bool removeSims) {
         }
         const std::string model = modelName(assets_, o);
         ts2::scene::Instance instance;
-        instance.mesh = model.empty() ? -1 : objectMaterials_.model(model, scene);
+        instance.mesh = model.empty() ? -1 : objectMaterials_.model(model, kept, scene);
         instance.name = std::format("{} {}", o.id, model);
         instance.part = ts2::scene::Part::Object;
         instance.object = static_cast<std::uint32_t>(o.id);
@@ -716,6 +738,9 @@ void LotLife::addCreatedObjects(ts2::scene::Scene& scene, bool removeSims) {
         }
         ts2::scene::PlacedObject placed{static_cast<std::uint32_t>(o.id), index, lotFrame_, {}};
         placed.model = model;
+        placed.chosen = kept;
+        masks.insert(masks.end(), kept.begin(), kept.end());
+        placed.overrides = std::move(masks);
         for (std::size_t slot = 0; slot < kMaxSlots && !model.empty(); ++slot) {
             const std::string bone = assets_.slotBone(o.definition.guid(), slot);
             const ts2::scene::Transform* at = bone.empty() ? nullptr : objectMaterials_.bone(model, bone);

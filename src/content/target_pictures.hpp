@@ -30,6 +30,7 @@ public:
     static constexpr std::uint32_t kPictureSize = 44;
     static constexpr std::size_t kMaxLoading = 4;
 
+    // Size 0 keeps each portrait whole at its own size instead of its middle at `size`.
     explicit TargetPictures(PortraitReader reader = readCharacterPortrait, std::uint32_t size = kPictureSize)
         : reader_(std::move(reader)), size_(size) {}
     // Never waits: loads still running finish on their own.

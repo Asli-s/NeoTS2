@@ -15,8 +15,9 @@ public:
     enum class Type { Strip = 0, PixelStrip = 1, AlphaFade = 2 };
 
     // `pictureWidth` and `frameWidth` give the strip's frame count when the table has none.
-    // Settings it doesn't know are skipped.
-    AnimatedBitmap(std::span<const std::string> constants, int pictureWidth, int frameWidth);
+    // `frameRate` is the window's own, its wparam 0x0300F9A4 (30 without one), which the table's
+    // kFrameRate replaces. Settings it doesn't know are skipped.
+    AnimatedBitmap(std::span<const std::string> constants, int pictureWidth, int frameWidth, std::uint32_t frameRate = 30);
 
     // Starts it. `random` (0..2^31) picks the first frame when kRandomStartFrame is set. False when
     // it has fewer than 2 frames: the game then leaves it hidden and it never ends.

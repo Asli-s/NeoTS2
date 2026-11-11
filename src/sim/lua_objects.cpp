@@ -525,6 +525,50 @@ int neighborhoodGetLotOwner(lua_State* L) {
     return 1;
 }
 
+// Neighborhood:getLotType(lotId): the lot's type from its description.
+int neighborhoodGetLotType(lua_State* L) {
+    const ScriptCall& c = call(L);
+    const std::int32_t id = argInt(L, 2);
+    const auto type = c.world ? c.world->placedLotType(id) : std::nullopt;
+    if (!type) {
+        return missingLot(L, id);
+    }
+    lua_pushnumber(L, *type);
+    return 1;
+}
+
+// Neighborhood:getLotIdsInAllNeighborhoods(): a table of the ids of every lot this neighborhood and
+// its sub-neighborhoods place, keyed 1, 2, 3 and on. The game lists them in its lot list's order,
+// which is not known yet. Here they come ascending.
+int neighborhoodGetLotIdsInAllNeighborhoods(lua_State* L) {
+    const ScriptCall& c = call(L);
+    lua_newtable(L);
+    if (c.world == nullptr) {
+        return 1;
+    }
+    int key = 0;
+    for (const std::int32_t id : c.world->placedLotIds()) {
+        lua_pushnumber(L, ++key);
+        lua_pushnumber(L, id);
+        lua_settable(L, -3);
+    }
+    return 1;
+}
+
+// Neighborhood:getNeighborhoodIdFromLotId(lotId): the id of the neighborhood that places the lot.
+int neighborhoodGetNeighborhoodIdFromLotId(lua_State* L) {
+    const ScriptCall& c = call(L);
+    const std::int32_t id = argInt(L, 2);
+    const auto hood = c.world ? c.world->placedLotNeighborhood(id) : std::nullopt;
+    if (!hood) {
+        char message[80];
+        std::snprintf(message, sizeof message, "Unable to find associated neighborhood for lot %d!", static_cast<int>(id));
+        gameError(L, kErrorScriptCheck, message);
+    }
+    lua_pushnumber(L, *hood);
+    return 1;
+}
+
 // Neighborhood:getWitchLotType(): 0 unless the current lot is of type 10, whose answer is not read yet.
 int neighborhoodGetWitchLotType(lua_State* L) {
     constexpr std::uint8_t kWitchLot = 10;

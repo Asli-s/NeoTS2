@@ -28,6 +28,12 @@ std::optional<ts2::tga::Pixels> drawPortrait(const ts2::scene::Scene& lot, ts2::
         visible[instance] = 1;
         renderer.setJoints(instance, joints);
     }
+    for (const auto& [instance, weights] : shot.morphs) {
+        renderer.setMorphWeights(instance, weights);
+    }
+    for (const auto& [instance, eyes] : shot.eyes) {
+        renderer.setEyes(instance, eyes);
+    }
     renderer.show(std::move(visible));
     ts2::render::Camera camera;
     camera.eye = shot.camera.eye;

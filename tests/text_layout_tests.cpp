@@ -135,6 +135,11 @@ void textBoxesKeepTheirLines() {
     CHECK(rig.screen.textIndexAt(box, 2, 2) == 6);
     rig.screen.setTopLine(box, 9);
     CHECK(rig.screen.topLine(box) == 2);
+    // A wrapped text window breaks the same way, and its lines step evenly.
+    const int plain = rig.screen.addWindows({window("IGZWinText", area, "Plain", "lefttop", text, true)}, 0, 0);
+    CHECK((rig.screen.wrappedLineStarts(plain) == std::vector<std::size_t>{0, 6, 9}));
+    const int lineStep = rig.screen.textLineStep(plain);
+    CHECK(lineStep > 0 && rig.screen.textHeight(plain) == 3 * lineStep);
 }
 
 // Lines step by the font's line height plus its spacing, and each is centred on its own: half the
@@ -282,26 +287,31 @@ void windowsKeepTheMouseAsInTheGame() {
     CHECK(rig.screen.buttonAt(10, 10) == button);
 }
 
-// A buffered window with winflag_mousetrans and winflag_premulalpha lets the mouse through where its
-// picture is see-through.
+// A buffered window with winflag_mousetrans and winflag_premulalpha, or a key colour
+// (winflag_pbufftrans), lets the mouse through where its picture is see-through. Without either it
+// takes the mouse all over.
 void seeThroughWindowsLetTheMouseThrough() {
-    Rig rig("Button = \"NeoTS2 Test\", \"20\", \"bold\"\n");
-    const int button = rig.screen.addWindows({window("IGZWinBtn", "(0,0,100,34)", "Button", "center", "")}, 0, 0);
-    ts2::ui::Window w{{{"iid", "IGZWinBMP"}, {"winflag_visible", "yes"}, {"area", "(0,0,100,100)"}, {"winflag_pbuff", "yes"},
-                       {"winflag_mousetrans", "yes"}, {"winflag_premulalpha", "yes"}},
-                      {}};
-    const int picture = rig.screen.addWindows({w}, 0, 0);
-    ts2::tga::Pixels half;
-    half.width = 100;
-    half.height = 100;
-    half.rgba.assign(std::size_t{100} * 100 * 4, 255);
-    for (std::size_t y = 0; y < 100; ++y) {
-        for (std::size_t x = 0; x < 50; ++x) {
-            half.rgba[(y * 100 + x) * 4 + 3] = 0;
+    for (const char* flag : {"winflag_premulalpha", "winflag_pbufftrans", "winflag_alphablend"}) {
+        Rig rig("Button = \"NeoTS2 Test\", \"20\", \"bold\"\n");
+        const int button = rig.screen.addWindows({window("IGZWinBtn", "(0,0,100,34)", "Button", "center", "")}, 0, 0);
+        ts2::ui::Window w{{{"iid", "IGZWinBMP"}, {"winflag_visible", "yes"}, {"area", "(0,0,100,100)"}, {"winflag_pbuff", "yes"},
+                           {"winflag_mousetrans", "yes"}, {flag, "yes"}},
+                          {}};
+        const int picture = rig.screen.addWindows({w}, 0, 0);
+        ts2::tga::Pixels half;
+        half.width = 100;
+        half.height = 100;
+        half.rgba.assign(std::size_t{100} * 100 * 4, 255);
+        for (std::size_t y = 0; y < 100; ++y) {
+            for (std::size_t x = 0; x < 50; ++x) {
+                half.rgba[(y * 100 + x) * 4 + 3] = 0;
+            }
         }
+        rig.screen.setImage(picture, std::move(half));
+        const bool through = std::string_view(flag) != "winflag_alphablend";
+        CHECK(rig.screen.mouseWindow(60, 10) == picture);
+        CHECK((rig.screen.buttonAt(10, 10) == button) == through);
     }
-    rig.screen.setImage(picture, std::move(half));
-    CHECK(rig.screen.buttonAt(10, 10) == button && rig.screen.mouseWindow(60, 10) == picture);
 }
 
 // A detached window keeps its place on screen and is drawn just under the window given.

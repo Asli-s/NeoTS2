@@ -675,6 +675,57 @@ void setToNextFindsTheJobObjectOfTheSim() {
     CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::Error);
 }
 
+// Search 0x0F finds the job object of a neighbor by id: false with the target kept for an unknown
+// job, otherwise true with the first object of the job's type or 0. A missing neighbor is an error.
+void setToNextFindsTheJobObjectOfANeighbor() {
+    MemoryCodeSource code;
+    addSmallWorldTypes(code);
+    Instruction search = setToNext(0x0F, owner::kLocal, 1, 0, T, F);
+    search.operands[4] &= 0x7F;
+    code.add(kObjectGroup, 0x1000, bhav({search}, 0, 2));
+    SmallWorld w;
+    auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
+    hood->neighborIds = {9};
+    hood->neighbors[9].personData.assign(0x60, 0);
+    w.world.setNeighborhood(hood);
+    Vm vm(code, {}, &w.world);
+    std::int16_t& target = w.controller->thread.stackObjectId;
+    target = 9;
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::False && target == 9);
+    hood->neighbors[9].personData[0x5A] = static_cast<std::int16_t>(kFridgeGuid >> 16);
+    hood->neighbors[9].personData[0x59] = static_cast<std::int16_t>(kFridgeGuid & 0xFFFF);
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::True && target == 2);
+    target = 8;
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::Error);
+}
+
+// Search 0x0B walks the lot descriptions' ids upward: 0 gives the lowest, the last or an id with
+// no description gives 0 and false.
+void setToNextWalksTheLotIds() {
+    MemoryCodeSource code;
+    addSmallWorldTypes(code);
+    Instruction search = setToNext(0x0B, owner::kLocal, 1, 0, T, F);
+    search.operands[4] &= 0x7F;
+    code.add(kObjectGroup, 0x1000, bhav({search}, 0, 2));
+    SmallWorld w;
+    Vm vm(code, {}, &w.world);
+    std::int16_t& target = w.controller->thread.stackObjectId;
+    target = 0;
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::False && target == 0);
+    auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
+    hood->lotTypes[29] = 1;
+    hood->lotTypes[3] = 0;
+    hood->lotTypes[10] = 0;
+    w.world.setNeighborhood(hood);
+    std::vector<std::int16_t> walked;
+    while (vm.run(*w.controller, 0x1000).outcome == Outcome::True) {
+        walked.push_back(target);
+    }
+    CHECK((walked == std::vector<std::int16_t>{3, 10, 29}) && target == 0);
+    target = 7;
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::False && target == 0);
+}
+
 void findWorstMotivesWritesTheFiveLowest() {
     MemoryCodeSource code;
     code.add(kObjectGroup, 0x1000, bhav({primitiveCall(0x0021, T, E)}));
@@ -1154,6 +1205,8 @@ std::vector<Test> vmCoreTests() {
         {"Random Number with zero range writes 0", randomNumberWithZeroRangeWritesZero},
         {"simulator random numbers step as the game's do", simRandomStepsAsTheGameDoes},
         {"Set to Next 0x0E finds the Sim's job object", setToNextFindsTheJobObjectOfTheSim},
+        {"Set to Next 0x0B walks the lot ids", setToNextWalksTheLotIds},
+        {"Set to Next 0x0F finds a neighbor's job object", setToNextFindsTheJobObjectOfANeighbor},
         {"Find 5 Worst Motives writes the five lowest", findWorstMotivesWritesTheFiveLowest},
         {"Break Point ignored in release continues", breakPointIgnoredInReleaseContinues},
         {"Break Point with false condition continues", breakPointWithFalseConditionContinues},

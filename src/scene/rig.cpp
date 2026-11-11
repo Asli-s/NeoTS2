@@ -237,12 +237,17 @@ Rig stretched(Rig rig, float stretch) {
     return rig;
 }
 
-std::array<float, 3> fittedPlace(const PlaceFit& fit, std::array<float, 3> t) {
+std::array<float, 3> fittedPlace(const PlaceFit& fit, std::array<float, 3> t, float ms) {
     if (fit.axis < 0 || fit.axis > 2) {
         return t;
     }
+    float factor = fit.factor;
+    if (fit.weight != nullptr) {
+        const float taken = std::clamp(fit.weight->sample(ms), 0.0f, 1.0f);
+        factor = (factor - 1) * (1 - taken) + 1;
+    }
     float& v = t[static_cast<std::size_t>(fit.axis)];
-    v = fit.height * v > 0 ? v + (fit.factor - 1) * fit.height : v * fit.factor;
+    v = fit.height * v > 0 ? v + (factor - 1) * fit.height : v * factor;
     return t;
 }
 
@@ -264,6 +269,12 @@ PlaceFit placeFitOf(const Rig& rig, const Rig::Node& node, const anim::Animation
     fit.factor = factor;
     if (node.name == "root_trans") {
         fit.height = clip.rootHeight;
+        for (const auto& channel : clip.channels) {
+            if (channel.name == node.name && channel.kind() == anim::ChannelKind::Scalar && !channel.components.empty()) {
+                fit.weight = &channel.components.front();
+                break;
+            }
+        }
     }
     return fit;
 }
@@ -384,7 +395,7 @@ void poseRig(const Rig& rig, const RigAnimation* animation, float ms, std::vecto
         if (channels) {
             if (const int c = animation->translation[i]; c >= 0 && channelShare(*animation, c, ms) >= 0) {
                 const auto& k = (*channels)[static_cast<std::size_t>(c)].components;
-                t = fittedPlace(placeFitAt(*animation, i), {k[0].sample(ms), k[1].sample(ms), k[2].sample(ms)});
+                t = fittedPlace(placeFitAt(*animation, i), {k[0].sample(ms), k[1].sample(ms), k[2].sample(ms)}, ms);
                 if (animation->mirrored) {
                     t = mirroredPlace(t, node.mirrorAxis);
                 }

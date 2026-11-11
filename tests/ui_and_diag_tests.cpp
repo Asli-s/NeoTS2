@@ -490,6 +490,10 @@ void animatedBitmapsPlayAsTheGame() {
     CHECK(!b.at(1499).done && b.at(1500).done && b.at(1500).frame == 12);
     ts2::ui::AnimatedBitmap still({}, 40, 40);
     CHECK(!still.play(0));
+    // The menu's plumbob has no table: 31 frames of its window's width, 30 a second, over and over.
+    ts2::ui::AnimatedBitmap plumbob({}, 2635, 85);
+    CHECK(plumbob.play(0) && plumbob.frames() == 31 && plumbob.at(32).frame == 0 && plumbob.at(33).frame == 1);
+    CHECK(plumbob.at(30 * 33).frame == 30 && plumbob.at(31 * 33).frame == 0 && !plumbob.at(100000).done);
 }
 
 // The game's scroll bar as the cheat window's output had it in the game: 44 lines with 13 shown on

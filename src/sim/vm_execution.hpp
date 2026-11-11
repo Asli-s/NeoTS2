@@ -226,7 +226,9 @@ constexpr std::uint16_t kCameraControlOpcode = 0x0023;
 // Dialog types (byte 5).
 constexpr std::uint8_t kTextNotification = 0x08, kStopNotification = 0x09, kModifyNotification = 0x0A,
                        kAppendNotification = 0x1C, kTutorialTasks = 0x12, kTutorialNext = 0x16, kTutorialNextModal = 0x19,
-                       kHint = 0x39, kSetBabyName = 0x17;
+                       kHint = 0x39, kSetBabyName = 0x17, kPhoneInvite = 0x06, kObjectTypePicker = 0x34,
+                       kMessage = 0x00, kYesNo = 0x01, kYesNoCancel = 0x02, kMessageNoTimeout = 0x04;
+constexpr std::uint8_t kCloseBox = 0x80;  // byte 7: a close box in place of OK (not shown yet)
 // Pickers, which list the stack object's object arrays.
 constexpr std::uint8_t kPickerDialogs[] = {0x05, 0x06, 0x07, 0x0B, 0x0C, 0x0D, 0x0F, 0x21, 0x33, 0x34, 0x46};
 constexpr std::size_t kContainerData = 2;    // object data: the object it is held by
@@ -297,6 +299,9 @@ constexpr std::uint8_t kEnableBuildBuyGenericCall = 0x0B;
 // Generic call 0x0D "abort interactions": every Sim but the stack object forgets the stack object,
 // as when it is deleted, and drops or resets what it was doing with it. Always true.
 constexpr std::uint8_t kAbortInteractionsGenericCall = 0x0D;
+// Generic call 0x1B "Count Community Lots": temp 0 becomes the number of the neighborhood's lots
+// whose description says type 1, a community lot. Always true.
+constexpr std::uint8_t kCountCommunityLotsGenericCall = 0x1B;
 // Generic call 0x30 "Get Remapped Neighbor Id": temp 1 becomes what the lot's neighbor id remap
 // table maps the neighbor id in temp 0 to (its low 16 bits), or -1. Always true.
 constexpr std::uint8_t kRemappedNeighborIdGenericCall = 0x30;
@@ -466,6 +471,10 @@ constexpr std::uint8_t kSearchObjectOwner = 0x20;
 // 0x59 (low).
 constexpr std::uint8_t kSearchJobObject = 0x0E;
 constexpr std::size_t kJobGuidHighPersonData = 0x5A, kJobGuidLowPersonData = 0x59;
+// Search 0x0B: the next lot id (see nextLot).
+constexpr std::uint8_t kSearchLot = 0x0B;
+// Search 0x0F: the job object of the neighbor in the target (see neighborJobObject).
+constexpr std::uint8_t kSearchNeighborJobObject = 0x0F;
 constexpr std::size_t kRelationshipFlagsVariable = 1;
 constexpr std::size_t kRoomDataField = 0x1D;
 // Search 0x18: the objects in my view (objectsInView), with my temp 0 as the range. Sims only.
@@ -660,6 +669,7 @@ public:
     void showGraphic(SimObject& object);
     void playHandOffClip(const Reaching& reach);
     void runHandOffTrees(const Reaching& reach, bool moved);
+    void resetObjectPose(SimObject& object);
     void assign32(const bhav::ExpressionOperands& x, Frame& f);
     bool arrayOperation(const bhav::Instruction& in, Frame& f);
 
@@ -703,6 +713,20 @@ public:
     bool soundEvent(const bhav::Instruction& in, Frame& f);
     std::optional<bool> dialog(const bhav::Instruction& in, Frame& f);
     std::optional<bool> babyNameDialog(Frame& f);
+    std::optional<bool> phoneBookDialog(const bhav::Instruction& in, Frame& f);
+    std::optional<bool> typePickerDialog(const bhav::Instruction& in, Frame& f);
+    std::optional<bool> messageDialog(const bhav::Instruction& in, Frame& f, std::int16_t& answerTemp);
+    bool textNotification(const bhav::Instruction& in, Frame& f, std::int16_t& id);
+    // The picture a notification's text names, a neighbor's Sim or an object type (0 for none).
+    struct TokenPicture {
+        std::int16_t neighbor = 0;
+        std::uint32_t objectType = 0;
+    };
+    TokenPicture pictureOf(const SimObject& object);
+    std::string expandTokens(std::string text, Frame& f, TokenPicture& picture);
+    std::optional<std::string> expandToken(std::string_view token, int a, int b, Frame& f, TokenPicture& picture);
+    std::string catalogName(std::uint32_t guid);
+    std::optional<std::array<std::string, 2>> neighborNames(std::int16_t id);
     std::optional<bool> cameraControl(const bhav::Instruction& in, Frame& f);
     static void setMaterial(SimObject& object, MaterialChange change);
     std::optional<CreateSpot> tileBeside(const SimObject& sim, std::int16_t turn);
@@ -749,6 +773,8 @@ public:
     // Set To Next and its searches (vm_set_to_next.cpp).
     bool nextObjectTypeByFields(std::uint8_t targetOwner, std::uint16_t targetData, Frame& f);
     bool jobObject(std::uint8_t targetOwner, std::uint16_t targetData, Frame& f);
+    bool nextLot(std::uint8_t targetOwner, std::uint16_t targetData, Frame& f);
+    bool neighborJobObject(std::uint8_t targetOwner, std::uint16_t targetData, Frame& f);
     bool setToNext(const bhav::Instruction& in, Frame& f);
     template <typename Filters>
     bool nextInView(const Filters& passesFilters, std::uint8_t targetOwner, std::uint16_t targetData, Frame& f);

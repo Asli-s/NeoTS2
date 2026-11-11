@@ -116,6 +116,60 @@ fs::path neighborhoodPackage(const fs::path& neighborhood) {
     return neighborhood / file;
 }
 
+// Reads a lot description into the neighborhood's lot tables. False when it can't be read.
+bool addLot(Neighborhood& hood, dbpf::Package& package, const dbpf::IndexEntry& e) {
+    constexpr std::uint32_t kBeachLot = 0x80;
+    try {
+        const auto description = nhood::parseLotDescription(package.read(e));
+        const auto id = static_cast<std::int32_t>(e.key.instance);
+        hood.lotTypes[id] = description.type;
+        hood.lotOwners[id] = description.owner;
+        hood.lotShapes[id] = {description.width, description.depth,
+                              (description.flags & kBeachLot) != 0 ? std::optional<std::uint8_t>(description.ownFacing) : std::nullopt};
+        return true;
+    } catch (const std::exception& ex) {
+        hood.problems.push_back("lot " + std::to_string(e.key.instance) + ": " + ex.what());
+        return false;
+    }
+}
+
+// Adds the lots each sub-neighborhood package of the folder places (<folder>_Suburb001.package and
+// the like), each tied to the neighborhood that package names.
+void addSubNeighborhoodLots(Neighborhood& hood, const fs::path& mainPackage) {
+    const fs::path folder = mainPackage.parent_path();
+    const std::string prefix = diag::utf8(folder.filename()) + "_";
+    std::error_code ec;
+    std::vector<fs::path> packages;
+    for (fs::directory_iterator it(folder, ec), end; it != end; it.increment(ec)) {
+        const std::string stem = diag::utf8(it->path().stem());
+        if (it->path().extension() == ".package" && stem.rfind(prefix, 0) == 0 && it->path() != mainPackage) {
+            packages.push_back(it->path());
+        }
+    }
+    std::sort(packages.begin(), packages.end());
+    for (const auto& path : packages) {
+        try {
+            dbpf::Package package{path};
+            std::vector<std::int32_t> lots;
+            std::optional<std::int32_t> id;
+            for (const auto& e : package.entries()) {
+                if (e.key.type == nhood::kLotDescriptionType && addLot(hood, package, e)) {
+                    lots.push_back(static_cast<std::int32_t>(e.key.instance));
+                } else if (e.key.type == nhoodid::kType) {
+                    id = nhoodid::parse(package.read(e)).id;
+                }
+            }
+            for (const std::int32_t lot : lots) {
+                if (id) {
+                    hood.lotNeighborhoods[lot] = *id;
+                }
+            }
+        } catch (const std::exception& ex) {
+            hood.problems.push_back(diag::utf8(path.filename()) + ": " + ex.what());
+        }
+    }
+}
+
 Neighborhood loadNeighborhood(const fs::path& neighborhoodPackage) {
     dbpf::Package package{neighborhoodPackage};
     Neighborhood hood;
@@ -130,6 +184,7 @@ Neighborhood loadNeighborhood(const fs::path& neighborhoodPackage) {
             }
         }
     }
+    std::vector<std::int32_t> mainLots;
     for (const auto& e : package.entries()) {
         if (e.key.type == types::kSimDescription) {
             const auto id = static_cast<std::int16_t>(e.key.instance);
@@ -160,16 +215,8 @@ Neighborhood loadNeighborhood(const fs::path& neighborhoodPackage) {
                                         ": " + ex.what());
             }
         } else if (e.key.type == nhood::kLotDescriptionType) {
-            try {
-                constexpr std::uint32_t kBeachLot = 0x80;
-                const auto description = nhood::parseLotDescription(package.read(e));
-                const auto id = static_cast<std::int32_t>(e.key.instance);
-                hood.lotTypes[id] = description.type;
-                hood.lotOwners[id] = description.owner;
-                hood.lotShapes[id] = {description.width, description.depth,
-                                      (description.flags & kBeachLot) != 0 ? std::optional<std::uint8_t>(description.ownFacing) : std::nullopt};
-            } catch (const std::exception& ex) {
-                hood.problems.push_back("lot " + std::to_string(e.key.instance) + ": " + ex.what());
+            if (addLot(hood, package, e)) {
+                mainLots.push_back(static_cast<std::int32_t>(e.key.instance));
             }
         } else if (e.key.type == nhoodid::kType) {
             try {
@@ -220,6 +267,12 @@ Neighborhood loadNeighborhood(const fs::path& neighborhoodPackage) {
             }
         }
     }
+    if (hood.identity) {
+        for (const std::int32_t lot : mainLots) {
+            hood.lotNeighborhoods[lot] = hood.identity->id;
+        }
+    }
+    addSubNeighborhoodLots(hood, neighborhoodPackage);
     return hood;
 }
 

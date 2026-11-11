@@ -1,6 +1,10 @@
 #include "scene/portrait.hpp"
 
+#include "scene/rig_layers.hpp"
+
+#include <algorithm>
 #include <cmath>
+#include <span>
 
 namespace ts2::scene {
 
@@ -83,6 +87,8 @@ PortraitCamera portraitCamera(const Transform& place, const std::array<float, 3>
 
 bool portraitShot(const Scene& scene, const Actor& actor, const RigAnimation* pose, PortraitShot& out) {
     out.joints.clear();
+    out.morphs.clear();
+    out.eyes.clear();
     if (!actor.rig) {
         return false;
     }
@@ -95,6 +101,9 @@ bool portraitShot(const Scene& scene, const Actor& actor, const RigAnimation* po
     const auto& m = world[static_cast<std::size_t>(head)].m;
     out.camera = portraitCamera(actor.place, {m[3], m[7], m[11]});
     out.lighting = portraitLighting(out.camera);
+    LayeredClip clip;
+    clip.animation = pose;
+    const std::span<const LayeredClip> clips(&clip, pose != nullptr ? 1 : 0);
     for (const auto& s : actor.skinned) {
         if (s.instance >= scene.instances.size()) {
             continue;
@@ -103,8 +112,15 @@ bool portraitShot(const Scene& scene, const Actor& actor, const RigAnimation* po
         if (mesh < 0 || static_cast<std::size_t>(mesh) >= scene.meshes.size()) {
             continue;
         }
+        const Mesh& model = scene.meshes[static_cast<std::size_t>(mesh)];
         auto& joints = out.joints.emplace_back(s.instance, std::vector<Transform>{}).second;
-        skinMatrices(scene.meshes[static_cast<std::size_t>(mesh)], s.nodes, *actor.rig, pose, world, joints);
+        skinMatrices(model, s.nodes, *actor.rig, pose, world, joints);
+        if (!model.morphs.empty()) {
+            mixMorphWeights(model, clips, out.morphs.emplace_back(s.instance, std::vector<float>{}).second);
+        }
+        if (std::any_of(model.primitives.begin(), model.primitives.end(), [](const Primitive& p) { return !p.eyeUvs.empty(); })) {
+            mixEyes(clips, out.eyes.emplace_back(s.instance, std::array<float, 4>{}).second);
+        }
     }
     return !out.joints.empty();
 }

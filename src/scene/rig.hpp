@@ -92,8 +92,11 @@ struct PlaceFit {
     int axis = -1;  // -1: the joint's places are kept
     float factor = 1;
     float height = -1;
+    // root_trans only: the clip's weight channel for it (0-1), which takes the fit back as it rises.
+    // At 1 the root keeps the clip's place: a seated teen sits as high as the clip has it.
+    const anim::Curve* weight = nullptr;
 };
-std::array<float, 3> fittedPlace(const PlaceFit& fit, std::array<float, 3> t);
+std::array<float, 3> fittedPlace(const PlaceFit& fit, std::array<float, 3> t, float ms);
 
 // An animation bound to a rig: per node, the channel that rotates it and the one that moves it
 // (-1 for none, the last when an animation has more than one), and the limbs it reaches with IK.

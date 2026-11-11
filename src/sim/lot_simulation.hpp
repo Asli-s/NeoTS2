@@ -67,6 +67,10 @@ public:
 
     World& world() { return world_; }
     CodeSource& code() { return code_; }
+    // See IndexCodeSource::setTextTables.
+    void setTextTables(std::function<std::vector<std::string>(std::uint32_t group, std::uint16_t instance)> lookup) {
+        code_.setTextTables(std::move(lookup));
+    }
     // The installed packs, one bit each as nGameState.IsEPInstalled tests them.
     std::uint32_t installedPacks() const { return installedPacks_; }
 

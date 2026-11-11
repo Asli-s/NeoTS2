@@ -3,8 +3,10 @@
 #include "content/resource_index.hpp"
 #include "sim/code_source.hpp"
 
+#include <functional>
 #include <map>
 #include <optional>
+#include <string>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
@@ -45,9 +47,16 @@ public:
     const std::unordered_map<std::uint32_t, std::uint32_t>& semiGlobalGroups() const {
         return semiGlobals_;
     }
+    // Where string tables the object packages lack are looked for next: the game's text packages,
+    // whose Live and UI texts scripts' tokens name (the day names, for one). It gives a table's
+    // US English lines, none when it has no such table.
+    void setTextTables(std::function<std::vector<std::string>(std::uint32_t group, std::uint16_t instance)> lookup) {
+        textTables_ = std::move(lookup);
+    }
 
 private:
     content::ResourceIndex& index_;
+    std::function<std::vector<std::string>(std::uint32_t, std::uint16_t)> textTables_;
     std::unordered_map<std::uint64_t, std::shared_ptr<const bhav::Behavior>> behaviors_;
     std::unordered_map<std::uint64_t, std::shared_ptr<const ttab::InteractionTable>> interactionTables_;
     std::unordered_map<std::uint64_t, std::optional<std::vector<std::int16_t>>> constants_;

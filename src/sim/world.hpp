@@ -12,6 +12,7 @@
 #include "sim/idle_spot.hpp"
 #include "sim/look_at.hpp"
 #include "sim/data_tables.hpp"
+#include "sim/dialog_queue.hpp"
 #include "sim/genetics.hpp"
 #include "sim/inventory.hpp"
 #include "sim/message_subscriptions.hpp"
@@ -67,6 +68,8 @@ constexpr std::size_t kObjectArrayCountField = objd::field::kObjectArrayCount;
 // Object data 0x43, the number of container slots the object has (a car's passenger seats count).
 constexpr std::size_t kSlotCountField = 0x43;
 constexpr std::uint16_t kPersonType = 2;
+// The code group of "Controller - Ingame Help", which shows the Game Tips.
+constexpr std::uint32_t kGameTipsGroup = 0x7FE066DD;
 
 struct Frame {
     std::shared_ptr<const bhav::Behavior> code;
@@ -443,6 +446,24 @@ struct EffectCommand {
     bool clearsQueue = false;  // a stop that also forgets the object's queue
 };
 
+// A text notification (Dialog type 8), the message bubble at the top right of live mode. Style 0
+// shows a Sim's bubble, 1 the system's, 2 the system's with Ignore and Learn More buttons. The
+// picture is a neighbor's Sim or an object type, and `extra` names an object shown beside the text
+// (0 for none). Priority puts it before lower ones, and it closes itself after `timeout` seconds of
+// unpaused real time (0: only when closed). `version` changes whenever its text, picture, priority
+// or timeout does, which starts its countdown again.
+struct Notification {
+    std::int16_t id = 0;
+    std::uint8_t style = 0;
+    std::string text;
+    std::int16_t neighbor = 0;
+    std::uint32_t objectType = 0;
+    std::int16_t extra = 0;
+    std::uint8_t priority = 0;
+    std::uint8_t timeout = 0;
+    std::uint32_t version = 0;
+};
+
 // A neighborhood's neighbors and relationships as saved. Relationship values are 32-bit, as the
 // game keeps them. The Relationship primitive moves their low 16 bits.
 struct SavedNeighbor {
@@ -470,6 +491,7 @@ struct SavedNeighborhood {
     std::set<std::int32_t> lotIds;
     std::map<std::int32_t, std::uint8_t> lotTypes;    // each placed lot's type (its description)
     std::map<std::int32_t, std::int32_t> lotOwners;   // and its owner, a neighbor id
+    std::map<std::int32_t, std::int32_t> lotNeighborhoods;  // and the id of the neighborhood placing it
     std::map<std::uint32_t, std::int32_t> familyLots;  // each family's home lot (FAMI instance -> lot, 0 for none)
     std::map<std::uint32_t, std::int32_t> familyCurrentLots;   // and the two other lots its FAMI saves
     std::map<std::uint32_t, std::int32_t> familyVacationLots;
@@ -658,6 +680,33 @@ public:
         }
         const auto it = hood_->lotTypes.find(id);
         return it != hood_->lotTypes.end() ? std::optional(it->second) : std::nullopt;
+    }
+    // Ids of the placed lots, those of this neighborhood and of its sub-neighborhoods, ascending.
+    std::vector<std::int32_t> placedLotIds() const {
+        std::vector<std::int32_t> ids;
+        if (hood_) {
+            for (const auto& lot : hood_->lotTypes) {
+                ids.push_back(lot.first);
+            }
+        }
+        return ids;
+    }
+    // The id of the neighborhood that places a lot, if known.
+    std::optional<std::int32_t> placedLotNeighborhood(std::int32_t id) const {
+        if (!hood_) {
+            return std::nullopt;
+        }
+        const auto it = hood_->lotNeighborhoods.find(id);
+        return it != hood_->lotNeighborhoods.end() ? std::optional(it->second) : std::nullopt;
+    }
+    // How many placed lots are community lots (type 1), 0 without a neighborhood.
+    std::int16_t communityLotCount() const {
+        constexpr std::uint8_t kCommunityLot = 1;
+        if (!hood_) {
+            return 0;
+        }
+        const auto n = std::ranges::count_if(hood_->lotTypes, [](const auto& lot) { return lot.second == kCommunityLot; });
+        return static_cast<std::int16_t>(std::min<std::ptrdiff_t>(n, INT16_MAX));
     }
     std::int32_t placedLotOwner(std::int32_t id) const {
         if (!hood_) {
@@ -1026,19 +1075,51 @@ public:
     std::uint64_t ticks() const { return ticks_; }
     void countTick() { ++ticks_; }
 
-    // Text notifications (Dialog) shown now, by the ids the game hands out. The oldest go when too
-    // many are shown.
-    std::int16_t showNotification() {
+    // Text notifications (Dialog) shown now, oldest first, by the ids the game hands out. The oldest
+    // go when a broken script shows too many.
+    std::int16_t showNotification(Notification n) {
         constexpr std::size_t kMostShown = 64;
         if (notifications_.size() >= kMostShown) {
             notifications_.erase(notifications_.begin());
         }
         lastNotification_ = static_cast<std::int16_t>(lastNotification_ == INT16_MAX ? 1 : lastNotification_ + 1);
-        notifications_.push_back(lastNotification_);
+        n.id = lastNotification_;
+        n.version = ++notificationsVersion_;
+        notifications_.push_back(std::move(n));
         return lastNotification_;
     }
-    bool notificationShown(std::int16_t id) const { return std::find(notifications_.begin(), notifications_.end(), id) != notifications_.end(); }
-    bool hideNotification(std::int16_t id) { return std::erase(notifications_, id) != 0; }
+    bool notificationShown(std::int16_t id) const { return findNotification(id) != nullptr; }
+    bool hideNotification(std::int16_t id) {
+        const bool removed = std::erase_if(notifications_, [&](const Notification& n) { return n.id == id; }) != 0;
+        notificationsVersion_ += removed ? 1 : 0;
+        return removed;
+    }
+    // Gives a shown notification new text (added to the old with `append`), picture and extra.
+    // False when it isn't shown.
+    bool modifyNotification(std::int16_t id, std::string text, std::int16_t neighbor, std::uint32_t objectType, std::int16_t extra, bool append) {
+        Notification* n = findNotification(id);
+        if (n == nullptr) {
+            return false;
+        }
+        n->text = append ? n->text + text : std::move(text);
+        n->neighbor = neighbor;
+        n->objectType = objectType;
+        n->extra = extra;
+        n->version = ++notificationsVersion_;
+        return true;
+    }
+    // Sets a shown notification's timeout and priority. Only a change counts as one.
+    void setNotificationTiming(std::int16_t id, std::uint8_t timeout, std::uint8_t priority) {
+        Notification* n = findNotification(id);
+        if (n != nullptr && (n->timeout != timeout || n->priority != priority)) {
+            n->timeout = timeout;
+            n->priority = priority;
+            n->version = ++notificationsVersion_;
+        }
+    }
+    const std::vector<Notification>& notifications() const { return notifications_; }
+    // Changes whenever a notification is shown, changed or removed.
+    std::uint32_t notificationsVersion() const { return notificationsVersion_; }
 
     // Whether an interaction with line flag 0x4 is running at once. Only one can at a time.
     bool runningAtOnce() const { return runningAtOnce_; }
@@ -1069,6 +1150,75 @@ public:
     // in the same order, trimmed of spaces and tabs as the game trims them. A neighbor past the end of
     // `names`, and the 0 places, keep theirs. Cancel changes nothing.
     void answerNames(bool ok, const std::vector<std::string>& names);
+    // The phone book (Dialog "Phone Invite", the Personal Phonebook): a list of neighbors to pick
+    // one from. Whoever shows it turns asking on. With asking off the dialog waits a tick and is
+    // true, as OK on the first neighbor would be. Requests wait in the order made, one per asking
+    // object, and are shown one at a time.
+    struct PhoneBookRequest {
+        std::int16_t asker = 0;
+        std::vector<std::int16_t> neighbors;  // the stack object's object array 0, in its order
+        // Where its texts come from: the string table 0x12D of this group, the title and the
+        // caption above the picked Sim ("Call %s") numbered from 1, 0 for none.
+        std::uint32_t textGroup = 0;
+        std::uint16_t title = 0, caption = 0;
+    };
+    // The Game Tips controller asks "Do you want Game Tips?" when a lot opens, and its script turns
+    // the tips off for No. Until the player can answer that question, the engine answers it Yes, or
+    // No when this is set.
+    void setDeclinesGameTips(bool declines) { declinesGameTips_ = declines; }
+    bool declinesGameTips() const { return declinesGameTips_; }
+    void setAsksPhoneBook(bool asks) { asksPhoneBook_ = asks; }
+    bool asksPhoneBook() const { return asksPhoneBook_; }
+    // Asks anew for the asker, closing its earlier request. One still waiting or answered is kept.
+    void askPhoneBook(PhoneBookRequest request) { phoneBooks_.ask(std::move(request)); }
+    // The request shown, null when none is.
+    const PhoneBookRequest* phoneBookAsked() const { return phoneBooks_.shown(); }
+    // Answers the shown request with the neighbor picked, or nothing for Cancel, and shows the next.
+    void answerPhoneBook(std::optional<std::int16_t> picked) { phoneBooks_.answer(picked.value_or(0)); }
+    // The asker's answer once given: the neighbor picked, or 0 for Cancel. Nothing while it waits.
+    // 0 too when the asker has none, which only a broken caller can see.
+    std::optional<std::int16_t> takePhoneBookAnswer(std::int16_t asker) { return phoneBooks_.take(asker, 0); }
+    // The object type picker (Dialog type 0x34, "Call Sim Options" and the service phone book):
+    // object types listed by catalog name, to pick one from. Asking and the order of requests work
+    // as for the phone book. With asking off the dialog waits a tick and is true.
+    struct TypePickerRequest {
+        std::int16_t asker = 0;
+        std::vector<std::uint32_t> types;  // GUIDs, from the stack object's object array 0 in its order
+        // Where its texts come from: the string table 0x12D of this group, the title and the
+        // caption numbered from 1, 0 for none.
+        std::uint32_t textGroup = 0;
+        std::uint16_t title = 0, caption = 0;
+    };
+    void setAsksTypePicker(bool asks) { asksTypePicker_ = asks; }
+    bool asksTypePicker() const { return asksTypePicker_; }
+    void askTypePicker(TypePickerRequest request) { typePickers_.ask(std::move(request)); }
+    const TypePickerRequest* typePickerAsked() const { return typePickers_.shown(); }
+    // Answers the shown request with the GUID picked, or nothing for Cancel.
+    void answerTypePicker(std::optional<std::uint32_t> picked) { typePickers_.answer(picked.value_or(0)); }
+    // The asker's answer once given: the GUID picked, or 0 for Cancel (and for an asker with none).
+    std::optional<std::uint32_t> takeTypePickerAnswer(std::int16_t asker) { return typePickers_.take(asker, 0); }
+    // The game's message box (Dialog types 0, 1, 2 and 4, the newspaper's job offer among them): a
+    // title over a text, and buttons that answer it. Asking and the order of requests work as for the
+    // phone book. With asking off the dialog waits a tick and answers its first button.
+    struct MessageRequest {
+        std::int16_t asker = 0;
+        std::uint8_t type = 0;
+        // Its texts with their tokens filled. An empty button text is the button's usual one
+        // (OK, Yes, No or Cancel), and an empty title shows none.
+        std::string title, message;
+        std::vector<std::string> buttons;  // the first button, then the second and third, as the type has them
+        // Its picture: a neighbor's portrait, else an object type's picture, else none.
+        std::int16_t pictureNeighbor = 0;
+        std::uint32_t pictureType = 0;
+    };
+    void setAsksMessages(bool asks) { asksMessages_ = asks; }
+    bool asksMessages() const { return asksMessages_; }
+    void askMessage(MessageRequest request) { messages_.ask(std::move(request)); }
+    const MessageRequest* messageAsked() const { return messages_.shown(); }
+    // Answers the shown request with the button pressed, counted from 0.
+    void answerMessage(std::uint8_t button) { messages_.answer(button); }
+    // The asker's answer once given: the button pressed (0 too for an asker with none).
+    std::optional<std::uint8_t> takeMessageAnswer(std::int16_t asker) { return messages_.take(asker, 0); }
     // Marks a hover or click on `object` with or without Shift, on every part with its lead.
     void markShiftClick(SimObject& object, bool shift);
     // The testingCheatsEnabled cheat, which lets a Shift-clicked object start debug lines.
@@ -1384,8 +1534,14 @@ private:
     AnimationCarries animationCarries_;
     SoundEvents soundEvents_;
     EffectCommands effectCommands_;
-    std::vector<std::int16_t> notifications_;
+    Notification* findNotification(std::int16_t id) {
+        const auto it = std::find_if(notifications_.begin(), notifications_.end(), [&](const Notification& n) { return n.id == id; });
+        return it != notifications_.end() ? &*it : nullptr;
+    }
+    const Notification* findNotification(std::int16_t id) const { return const_cast<World*>(this)->findNotification(id); }
+    std::vector<Notification> notifications_;
     std::int16_t lastNotification_ = 0;
+    std::uint32_t notificationsVersion_ = 0;
     bool runningAtOnce_ = false;
     std::uint16_t lastLinkId_ = 0;
     bool asksNames_ = false;
@@ -1397,6 +1553,10 @@ private:
         State state = State::Waiting;
     };
     std::vector<NameRequest> nameRequests_;  // in the order asked
+    bool asksPhoneBook_ = false, asksTypePicker_ = false, asksMessages_ = false, declinesGameTips_ = false;
+    DialogQueue<PhoneBookRequest, std::int16_t> phoneBooks_;     // answers: the neighbor, 0 for Cancel
+    DialogQueue<TypePickerRequest, std::uint32_t> typePickers_;  // answers: the GUID, 0 for Cancel
+    DialogQueue<MessageRequest, std::uint8_t> messages_;         // answers: the button, from 0
     // Shows the first waiting request when none is shown.
     void showNextNames();
     std::map<std::int16_t, std::string> firstNames_;

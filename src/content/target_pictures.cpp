@@ -12,12 +12,13 @@ namespace ts2::content {
 
 namespace {
 
-// The middle of a portrait at `size`, or nullopt for a broken or oversized one.
+// The middle of a portrait at `size` (size 0: the whole portrait as it is), or nullopt for a broken
+// or oversized one.
 std::optional<tga::Pixels> picture(const tga::Pixels& portrait, std::uint32_t size) {
     if (portrait.width > kMaxPortraitSide || portrait.height > kMaxPortraitSide) {
         return std::nullopt;
     }
-    auto out = scaled(portraitCrop(portrait), size, size);
+    auto out = size == 0 ? portrait : scaled(portraitCrop(portrait), size, size);
     return out.rgba.empty() ? std::nullopt : std::optional<tga::Pixels>(std::move(out));
 }
 

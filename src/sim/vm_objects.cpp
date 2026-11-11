@@ -1,6 +1,8 @@
 #include "diag/log.hpp"
 #include "sim/vm_execution.hpp"
 
+#include <array>
+#include <bit>
 #include <format>
 
 namespace ts2::sim::vm_detail {
@@ -436,19 +438,21 @@ bool Execution::cinematic(const bhav::Instruction& in, Frame& f) {
 }
 
 // Dialog. Byte 5 is the type, byte 7 bit 0 shows it and goes on, bits 4-6 name the temp holding a
-// notification's id (or a yes-no-cancel answer). A text notification puts a new id there and goes on.
-// Stop is true when it was shown (and removes it), Modify and Append when it is shown. Tutorial popups
-// and hints go on. "Set Baby Name" waits for the player when shown (see babyNameDialog). Others wait a
-// tick and answer their first button (true). Pickers need the stack object to have object arrays.
+// notification's id (or a yes-no-cancel answer). A text notification puts a new id there and goes on
+// (see textNotification). Stop is true when it was shown (and removes it). Tutorial popups
+// and hints go on. "Set Baby Name", the phone book, the type picker and the message box wait for the
+// player when shown (see babyNameDialog and messageDialog). Others wait a tick and answer their
+// first button (true), except the Game Tips question when the world declines them (false). Pickers
+// need the stack object to have object arrays.
 std::optional<bool> Execution::dialog(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     const std::uint8_t type = o[5];
     std::int16_t& id = thread_.temps[(o[7] >> 4) & 0x07];
     switch (type) {
-    case kTextNotification:   id = world().showNotification(); return true;
-    case kStopNotification:   return world().hideNotification(id);
+    case kTextNotification:
     case kModifyNotification:
-    case kAppendNotification: return world().notificationShown(id);
+    case kAppendNotification: return textNotification(in, f, id);
+    case kStopNotification:   return world().hideNotification(id);
     case kHint:
     case kTutorialNext:
     case kTutorialNextModal:  return true;
@@ -460,9 +464,20 @@ std::optional<bool> Execution::dialog(const bhav::Instruction& in, Frame& f) {
     if (type == kSetBabyName && world().asksNames()) {
         return babyNameDialog(f);
     }
+    if (type == kPhoneInvite && world().asksPhoneBook()) {
+        return phoneBookDialog(in, f);
+    }
+    if (type == kObjectTypePicker && world().asksTypePicker()) {
+        return typePickerDialog(in, f);
+    }
+    const bool message = type == kMessage || type == kYesNo || type == kYesNoCancel || type == kMessageNoTimeout;
+    const bool declined = world().declinesGameTips() && f.group == kGameTipsGroup;
+    if (message && world().asksMessages() && !declined && (o[7] & kCloseBox) == 0) {
+        return messageDialog(in, f, id);
+    }
     if (f.dialogOpen) {
         f.dialogOpen = false;
-        return true;
+        return !declined;
     }
     if (type == kTutorialTasks) {
         return true;
@@ -497,6 +512,135 @@ std::optional<bool> Execution::babyNameDialog(Frame& f) {
         return true;
     }
     world().askNames(me().id, std::move(neighbors));
+    f.dialogOpen = true;
+    return std::nullopt;
+}
+
+// "Phone Invite" (the Personal Phonebook) lists the neighbors in the stack object's object array 0
+// and waits for the pick: true for OK, false for Cancel. OK leaves only the picked neighbor in
+// array 0, which the script then reads at index 0. Byte 6 numbers the caption and bytes 13-14 the
+// title, from 1, in string table 0x12D of the code's owner, its semi-global group with byte 8 bit 0,
+// or the globals with bit 6.
+std::optional<bool> Execution::phoneBookDialog(const bhav::Instruction& in, Frame& f) {
+    SimObject* stack = world().find(stackObject());
+    if (f.dialogOpen) {
+        const std::optional<std::int16_t> answer = world().takePhoneBookAnswer(me().id);
+        if (!answer) {
+            return std::nullopt;
+        }
+        f.dialogOpen = false;
+        if (*answer == 0) {
+            return false;
+        }
+        if (stack != nullptr && !stack->arrays.empty()) {
+            stack->arrays[0] = {*answer};
+        }
+        return true;
+    }
+    if (stack == nullptr || stack->arrays.empty()) {
+        throw Stop{Outcome::Error, "bad object array", "Dialog picker"};
+    }
+    const auto& o = in.operands;
+    const std::uint32_t owner = f.codeOwner;
+    const std::uint32_t textGroup = (o[8] & 0x01) ? code_.semiGlobalGroup(owner) : (o[8] & 0x40) ? kGlobalGroup : owner;
+    world().askPhoneBook({me().id, stack->arrays[0], textGroup, static_cast<std::uint16_t>(o[13] | o[14] << 8), o[6]});
+    f.dialogOpen = true;
+    return std::nullopt;
+}
+
+// The object type picker (type 0x34) lists the object types whose GUIDs the stack object's object
+// array 0 holds, each as its low then its high half, and waits for the pick: false for Cancel. OK
+// empties the array and puts the picked GUID there, low half then high, and is true. Byte 6 numbers
+// its title and bytes 13-14 its caption, in the string table the phone book's texts come from.
+std::optional<bool> Execution::typePickerDialog(const bhav::Instruction& in, Frame& f) {
+    SimObject* stack = world().find(stackObject());
+    if (f.dialogOpen) {
+        const std::optional<std::uint32_t> answer = world().takeTypePickerAnswer(me().id);
+        if (!answer) {
+            return std::nullopt;
+        }
+        f.dialogOpen = false;
+        if (*answer == 0) {
+            return false;
+        }
+        if (stack != nullptr && !stack->arrays.empty()) {
+            stack->arrays[0] = {static_cast<std::int16_t>(*answer & 0xFFFF), static_cast<std::int16_t>(*answer >> 16)};
+        }
+        return true;
+    }
+    if (stack == nullptr || stack->arrays.empty()) {
+        throw Stop{Outcome::Error, "bad object array", "Dialog picker"};
+    }
+    const auto& list = stack->arrays[0];
+    std::vector<std::uint32_t> types;
+    for (std::size_t i = 0; i + 1 < list.size(); i += 2) {
+        types.push_back(static_cast<std::uint16_t>(list[i]) | static_cast<std::uint32_t>(static_cast<std::uint16_t>(list[i + 1])) << 16);
+    }
+    const auto& o = in.operands;
+    const std::uint32_t owner = f.codeOwner;
+    const std::uint32_t textGroup = (o[8] & 0x01) ? code_.semiGlobalGroup(owner) : (o[8] & 0x40) ? kGlobalGroup : owner;
+    world().askTypePicker({me().id, std::move(types), textGroup, o[6], static_cast<std::uint16_t>(o[13] | o[14] << 8)});
+    f.dialogOpen = true;
+    return std::nullopt;
+}
+
+// The message box (types 0, 1, 2 and 4) shows a title over a text with OK, Yes and No, or Yes, No
+// and Cancel, and waits for a button. Its texts are entries of string table 0x12D, from 1: the text
+// bytes 13-14, the title byte 6 (none for 0), the buttons bytes 3, 4 and 0 (with byte 2 as the high
+// byte). They come from the running tree's group, its code owner's semi-global group with byte 8
+// bit 0, or the globals with bit 6. Byte 8 bits 1-5 take the text, the buttons and the title from
+// temps 0-4 instead. A text that is missing leaves the button its usual caption. Tokens are filled
+// in every text. Byte 7 bits 1-3 at 0 show a picture: what the text's tokens name, else the stack
+// object (a Sim's portrait, a multi-tile object's lead). The first button is true and the others
+// false. For type 2 the second puts 0 and the third 1 in the temp byte 7 names.
+std::optional<bool> Execution::messageDialog(const bhav::Instruction& in, Frame& f, std::int16_t& answerTemp) {
+    const auto& o = in.operands;
+    const std::uint8_t type = o[5];
+    if (f.dialogOpen) {
+        const std::optional<std::uint8_t> button = world().takeMessageAnswer(me().id);
+        if (!button) {
+            return std::nullopt;
+        }
+        f.dialogOpen = false;
+        if (type == kYesNoCancel && *button > 0) {
+            answerTemp = *button == 1 ? 0 : 1;
+        }
+        return *button == 0;
+    }
+    const std::uint8_t flags = o[8];
+    const std::uint32_t textGroup = (flags & 0x01) ? code_.semiGlobalGroup(f.codeOwner) : (flags & 0x40) ? kGlobalGroup : f.group;
+    auto number = [&](int fromTemp, std::uint16_t operand) {
+        return (flags & fromTemp) ? static_cast<std::uint16_t>(thread_.temps[static_cast<std::size_t>(std::countr_zero(static_cast<unsigned>(fromTemp)) - 1)])
+                                  : operand;
+    };
+    TokenPicture picture;
+    auto text = [&](std::uint16_t n) {
+        constexpr std::uint16_t kDialogTexts = 0x12D;
+        auto found = n != 0 ? code_.string(textGroup, kDialogTexts, n - 1u) : std::nullopt;
+        picture = {};
+        return found ? expandTokens(std::move(*found), f, picture) : std::string{};
+    };
+    World::MessageRequest request;
+    request.asker = me().id;
+    request.type = type;
+    const std::size_t buttons = type == kYesNoCancel ? 3 : type == kYesNo ? 2 : 1;
+    const std::array<std::uint16_t, 3> buttonNumbers{number(0x04, o[3]), number(0x08, o[4]), number(0x20, static_cast<std::uint16_t>(o[0] | o[2] << 8))};
+    for (std::size_t i = 0; i < buttons; ++i) {
+        request.buttons.push_back(text(buttonNumbers[i]));
+    }
+    request.title = text(number(0x10, o[6]));
+    request.message = text(number(0x02, static_cast<std::uint16_t>(o[13] | o[14] << 8)));
+    constexpr std::uint8_t kPictureMode = 0x0E;
+    if ((o[7] & kPictureMode) == 0) {
+        if (picture.neighbor == 0 && picture.objectType == 0) {
+            if (const SimObject* stack = world().find(stackObject())) {
+                picture = pictureOf(*stack);
+            }
+        }
+        request.pictureNeighbor = picture.neighbor;
+        request.pictureType = picture.objectType;
+    }
+    world().askMessage(std::move(request));
     f.dialogOpen = true;
     return std::nullopt;
 }

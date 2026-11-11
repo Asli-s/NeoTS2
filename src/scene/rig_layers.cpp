@@ -300,7 +300,7 @@ void poseRigLayered(const Rig& rig, std::span<const LayeredClip> clips, std::vec
                 if (const float share = channelShare(*clip.animation, c, clip.ms); c >= 0 && share >= 0) {
                     const auto& channel = channels[static_cast<std::size_t>(c)];
                     const auto& k = channel.components;
-                    std::array<float, 3> t = fittedPlace(placeFitAt(*clip.animation, i), {k[0].sample(clip.ms), k[1].sample(clip.ms), k[2].sample(clip.ms)});
+                    std::array<float, 3> t = fittedPlace(placeFitAt(*clip.animation, i), {k[0].sample(clip.ms), k[1].sample(clip.ms), k[2].sample(clip.ms)}, clip.ms);
                     if (clip.animation->mirrored) {
                         t = mirroredPlace(t, rig.nodes[i].mirrorAxis);
                     }
@@ -397,7 +397,7 @@ void poseRigLayered(const Rig& rig, std::span<const LayeredClip> clips, std::vec
             };
             if (const int c = channelOf(clip.animation->translation); c >= 0) {
                 const auto& k = channels[static_cast<std::size_t>(c)].components;
-                t = fittedPlace(placeFitAt(*clip.animation, static_cast<std::size_t>(i)), {k[0].sample(clip.ms), k[1].sample(clip.ms), k[2].sample(clip.ms)});
+                t = fittedPlace(placeFitAt(*clip.animation, static_cast<std::size_t>(i)), {k[0].sample(clip.ms), k[1].sample(clip.ms), k[2].sample(clip.ms)}, clip.ms);
                 if (clip.animation->mirrored) {
                     t = mirroredPlace(t, node.mirrorAxis);
                 }

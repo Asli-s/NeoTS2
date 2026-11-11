@@ -70,6 +70,9 @@ struct Neighborhood {
     // Each placed lot's type from its description (LTXT, instance = lot id): 0 a house, 1 a
     // community lot, 8 an apartment building, 9 one of its apartments.
     std::map<std::int32_t, std::uint8_t> lotTypes;
+    // The id of the neighborhood whose package places each lot: this one or one of its
+    // sub-neighborhoods, whose lots are read with this one's.
+    std::map<std::int32_t, std::int32_t> lotNeighborhoods;
     // Each placed lot's owner (a neighbor id, 0 for none).
     std::map<std::int32_t, std::int32_t> lotOwners;
     // Each placed lot's size in neighborhood tiles (ten of its own tiles each) and, on a beach lot

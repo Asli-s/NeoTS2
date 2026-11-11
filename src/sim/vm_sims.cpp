@@ -140,6 +140,10 @@ bool Execution::genericSimsCall(const bhav::Instruction& in) {
         thread_.temps[1] = result;
         return true;
     }
+    if (call == kCountCommunityLotsGenericCall) {
+        thread_.temps[0] = world().communityLotCount();
+        return true;
+    }
     if (call == kFitsWithFootprintGenericCall) {
         return fitsWithFootprint();
     }

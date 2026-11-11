@@ -769,6 +769,26 @@ void Execution::playHandOffClip(const Reaching& reach) {
     object->animation = std::move(play);
 }
 
+// The object takes "o-generic-resetToZero-pose" at once in place of its own clip, its joints back at
+// rest with no fade: Snap Into's reset flag lays a served bowl flat as it goes from the hand to the
+// table. What the game does for a Sim here is not known yet, so a Sim keeps its clips.
+void Execution::resetObjectPose(SimObject& object) {
+    static const std::string kResetPose = "o-generic-resettozero-pose";
+    const auto& lengths = world().animationLengths();
+    const auto length = lengths ? lengths(kResetPose) : std::nullopt;
+    if (object.isPerson() || !length) {
+        return;
+    }
+    PlayingAnimation play;
+    play.name = kResetPose;
+    play.startMs = world().eventClockMs();
+    play.speed = 1;
+    play.lengthMs = *length;
+    play.fades = false;
+    object.ending.reset();
+    object.animation = std::move(play);
+}
+
 // Children take the children's clips ("c2o-" for "a2o-", assumed from the game's age prefixes).
 std::string Execution::childClip(const SimObject& sim, const std::string& clip) {
     const std::int16_t stage = sim.personData[kLifeStagePersonData];

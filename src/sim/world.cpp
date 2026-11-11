@@ -91,6 +91,10 @@ void World::removeOne(SimObject& object) {
         // Its namings are cancelled and no names change.
         std::erase_if(nameRequests_, [&](const NameRequest& r) { return r.asker == object.id; });
         showNextNames();
+        // So are its phone book, object type picker and message box.
+        phoneBooks_.forget(object.id);
+        typePickers_.forget(object.id);
+        messages_.forget(object.id);
         objectsChanged();
         ++removedCount_;
         footprintChanges_.insert(object.id);

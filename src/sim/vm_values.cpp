@@ -66,8 +66,10 @@ std::int16_t Execution::read(std::uint8_t owner, std::uint16_t data, Frame& f) {
 // Room fields: 0 ambient light, 1 outside, 2 level, 3 area (counted in quarter tiles), 4 pool,
 // 5 windows, 6 greenhouse. Fields 1 and 7 are the room's region in room layers 0 and 1 (0 = outdoors).
 std::int16_t Execution::roomField(std::int16_t roomId, std::uint16_t field) {
-    // Room -1 (an object in no room) has no region in any layer, so it is never outside.
-    if (roomId == -1 && (field == kRoomOutside || field == kRoomLayer1)) {
+    // Room -1 (an object in no room) has no region in any layer, so it is never outside. The game
+    // keeps no tiles for it either, so its level and area are 0 and it is not a pool.
+    if (roomId == -1 && (field == kRoomOutside || field == kRoomLayer1 || field == kRoomLevel || field == kRoomArea ||
+                         field == kRoomPool)) {
         return 0;
     }
     const RoomInfo* room = world().rooms().room(roomId);

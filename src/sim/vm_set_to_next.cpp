@@ -50,6 +50,47 @@ bool Execution::jobObject(std::uint8_t targetOwner, std::uint16_t targetData, Fr
     return true;
 }
 
+// Search 0x0F: as 0x0E, for the neighbor whose id the target holds, who needn't be on the lot. Its
+// job's type unknown is false and keeps the target. Otherwise the target becomes the first object
+// of that type on the lot, or 0, and it is true either way.
+bool Execution::neighborJobObject(std::uint8_t targetOwner, std::uint16_t targetData, Frame& f) {
+    const auto* ids = world().neighbors();
+    if (ids == nullptr) {
+        throw Stop{Outcome::Unsupported, "Set to Next needs the neighborhood", hex(kSearchNeighborJobObject, 2)};
+    }
+    const std::int16_t neighbor = read(targetOwner, targetData, f);
+    if (!ids->contains(neighbor)) {
+        throw Stop{Outcome::Error, "neighbor not found", std::to_string(neighbor)};
+    }
+    const std::uint32_t job =
+        static_cast<std::uint32_t>(static_cast<std::uint16_t>(world().neighborPersonValue(neighbor, kJobGuidHighPersonData))) << 16 |
+        static_cast<std::uint16_t>(world().neighborPersonValue(neighbor, kJobGuidLowPersonData));
+    if (code_.objectType(job) == nullptr) {
+        return false;
+    }
+    const SimObject* first = world().nextAfter(0, [job](const SimObject& s) { return s.definition.guid() == job; });
+    write(targetOwner, targetData, f, first != nullptr ? first->id : std::int16_t{0});
+    return true;
+}
+
+// Search 0x0B: the target (a lot id) becomes the next lot id up among the neighborhood's lot
+// descriptions, those of its sub-neighborhoods included. A target of 0 gives the lowest id, and the
+// last id or an id with no description gives 0. True when the new target isn't 0. The filters don't
+// apply.
+bool Execution::nextLot(std::uint8_t targetOwner, std::uint16_t targetData, Frame& f) {
+    const std::int32_t current = read(targetOwner, targetData, f);
+    const std::vector<std::int32_t> ids = world().placedLotIds();
+    std::int32_t next = 0;
+    if (current == 0) {
+        next = ids.empty() ? 0 : ids.front();
+    } else if (const auto it = std::ranges::lower_bound(ids, current); it != ids.end() && *it == current) {
+        next = it + 1 != ids.end() ? *(it + 1) : 0;
+    }
+    // A variable holds 16 bits, so an id above 32767 keeps its low 16 bits (see LO-24).
+    write(targetOwner, targetData, f, static_cast<std::int16_t>(next));
+    return read(targetOwner, targetData, f) != 0;
+}
+
 // Set to Next. Bytes 0-3 GUID, byte 4 search type (bit 0x80: explicit target), bytes 5, 7 the target
 // (owner, index), byte 8 filter flags. With flag bit 1, object data field bytes 9-10 must equal 11-12.
 bool Execution::setToNext(const bhav::Instruction& in, Frame& f) {
@@ -98,6 +139,10 @@ bool Execution::setToNext(const bhav::Instruction& in, Frame& f) {
         return nextObjectTypeByFields(targetOwner, targetData, f);
     case kSearchJobObject:
         return jobObject(targetOwner, targetData, f);
+    case kSearchLot:
+        return nextLot(targetOwner, targetData, f);
+    case kSearchNeighborJobObject:
+        return neighborJobObject(targetOwner, targetData, f);
     case kSearchNeighborOfType:
         return nextNeighborOfType(guid, targetOwner, targetData, f);
     case kSearchParents:

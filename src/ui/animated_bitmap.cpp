@@ -18,7 +18,8 @@ bool sameText(std::string_view a, std::string_view b) {
 
 } // namespace
 
-AnimatedBitmap::AnimatedBitmap(std::span<const std::string> constants, int pictureWidth, int frameWidth) {
+AnimatedBitmap::AnimatedBitmap(std::span<const std::string> constants, int pictureWidth, int frameWidth, std::uint32_t frameRate)
+    : frameRate_(frameRate) {
     frames_ = frameWidth > 0 ? pictureWidth / frameWidth : 0;
     for (const std::string& line : constants) {
         const auto equals = line.find('=');
@@ -58,8 +59,8 @@ AnimatedBitmap::AnimatedBitmap(std::span<const std::string> constants, int pictu
             startOffset_ = number;
         }
     }
-    // A step lasts 1000 / kFrameRate ms, cut to whole ms. What the game does without a frame rate
-    // is not known yet. Here the timeline stays on the step it started on.
+    // A step lasts 1000 / kFrameRate ms, cut to whole ms. A rate of 0 keeps the timeline on the step
+    // it started on.
     stepMs_ = frameRate_ > 0 ? static_cast<std::uint32_t>(std::floor(1000.0f / static_cast<float>(frameRate_))) : 0;
     if (stepMs_ > 0) {
         firstSteps_ = firstHold_ / stepMs_;

@@ -5,6 +5,7 @@
 #include "sim/ground_click.hpp"
 #include "sim/idle_spot.hpp"
 #include "sim/route_portals.hpp"
+#include "sim/selection.hpp"
 #include "sim/walking.hpp"
 #include "sim/path_passes.hpp"
 #include "sim/route_world.hpp"
@@ -40,6 +41,51 @@ void scoreCurvesInterpolateAndClamp() {
     CHECK(ts2::sim::happiness(curves, levels) == 10);
     levels[7] = 100;
     CHECK(std::abs(ts2::sim::happiness(curves, levels) - 11) < 1e-5f);
+}
+
+// With no Sim selected, as in a household just moved in, control goes to the first selectable Sim:
+// humans before pets, then the oldest, then by catalog name. A selected Sim that can't be selected
+// any more passes control on to the next one after it.
+void selectionPassesToTheNextSelectableSim() {
+    using ts2::sim::SimObject;
+    MemoryCodeSource code;
+    ts2::sim::World world;
+    auto person = [&](std::uint32_t guid, std::int16_t stage, std::int16_t species, std::uint16_t names) -> SimObject& {
+        auto d = typed(guid, ts2::sim::kPersonType);
+        d.fields[ts2::objd::field::kCatalogStringsId] = names;
+        SimObject& s = world.create(kObjectGroup, d);
+        s.personData[0x3A] = stage;
+        s.personData[0xBA] = species;
+        s.personData[0x9E] = 1;
+        return s;
+    };
+    code.addCatalogStrings(kObjectGroup, 1, {"Zoe"});
+    code.addCatalogStrings(kObjectGroup, 2, {"adam"});
+    world.create(kObjectGroup, typed(kFridgeGuid));
+    const SimObject& child = person(0x100, 8, 0, 1);
+    const SimObject& dog = person(0x101, 32, 1, 1);
+    const SimObject& zoe = person(0x102, 32, 0, 1);
+    const SimObject& adam = person(0x103, 32, 0, 2);
+    SimObject& visitor = person(0x104, 64, 0, 1);
+    visitor.personData[0x9E] = 0;
+    CHECK((ts2::sim::selectionOrder(world, code) == std::vector<std::int16_t>{adam.id, zoe.id, child.id, dog.id}));
+
+    std::vector<std::int16_t> globals(0x20, 0);
+    ts2::sim::keepSelection(world, code, globals);
+    CHECK(globals[3] == adam.id);
+    ts2::sim::keepSelection(world, code, globals);
+    CHECK(globals[3] == adam.id);
+    // Selection Flags bit 1 is passed over, as is a Sim no longer selectable.
+    world.find(adam.id)->personData[0x9E] = 3;
+    world.find(zoe.id)->personData[0x9E] = 3;
+    ts2::sim::keepSelection(world, code, globals);
+    CHECK(globals[3] == child.id);
+    world.find(child.id)->personData[0x9E] = 0;
+    ts2::sim::keepSelection(world, code, globals);
+    CHECK(globals[3] == dog.id);
+    world.find(dog.id)->personData[0x9E] = 2;
+    ts2::sim::keepSelection(world, code, globals);
+    CHECK(globals[3] == 0);
 }
 
 // Motives move by their daily rate / 720 each update. A decaying one is slowed by its modifier
@@ -642,6 +688,7 @@ std::vector<Test> simulationTests() {
         {"diagonal walls split tiles", diagonalWallsSplitTiles},
         {"saved room grid is read by quarter", savedRoomGridIsReadByQuarter},
         {"score curves interpolate and clamp", scoreCurvesInterpolateAndClamp},
+        {"selection passes to the next selectable Sim", selectionPassesToTheNextSelectableSim},
         {"motives decay by their rates", motivesDecayByTheirRates},
         {"motive changes stop at their limits", motiveChangesStopAtTheirLimits},
         {"mood is the weighted average of the motives", moodIsTheWeightedAverageOfTheMotives},

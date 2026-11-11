@@ -1,12 +1,13 @@
 #include "lot_ui.hpp"
 
-#include "diagnostics.hpp"
 #include "content/ui_meters.hpp"
 #include "content/ui_queue.hpp"
 #include "content/ui_text.hpp"
 #include "content/wants.hpp"
 #include "diag/timing.hpp"
+#include "diagnostics.hpp"
 #include "formats/hash.hpp"
+#include "names.hpp"
 
 #include <algorithm>
 #include <climits>
@@ -277,7 +278,13 @@ void LotUi::setUpVersion() {
     if (version_ < 0) {
         return;
     }
-    screen_.setText(version_, std::string("v") + buildVersion());
+    // A release shows only its number, as each number is released from one commit. Other builds show
+    // the commit too.
+    std::string version = buildVersion();
+    if (releaseBuild()) {
+        version = version.substr(0, version.find('+'));
+    }
+    screen_.setText(version_, "v" + version);
     screen_.fitToText(version_);
     screen_.move(version_, width_ - screen_.width(version_) - kVersionInset, kVersionInset);
 }
@@ -300,6 +307,7 @@ void LotUi::open() {
 }
 
 void LotUi::close() {
+    notifications_.clear(screen_);
     closeWallMenu();
     pauseFrame_.show(false);
     queue_.setVisible(false);
@@ -524,6 +532,17 @@ LotUi::CameraButton LotUi::heldCameraButton() const {
 
 LotUi::Action LotUi::clicked(int window) {
     const std::uint32_t id = screen_.id(window);
+    if (const auto click = notifications_.clicked(screen_, window)) {
+        if (click->close) {
+            closedNotification_ = click->close;
+            return Action::CloseNotification;
+        }
+        if (click->neighbor) {
+            clickedNeighbor_ = *click->neighbor;
+            return Action::CentreOnNeighbor;
+        }
+        return Action::None;
+    }
     if (wallMenu_ >= 0 && screen_.parent(window) == wallMenu_) {
         if (id >= 1 && id <= static_cast<std::uint32_t>(kWallModes)) {
             pickedWallMode_ = static_cast<int>(id) - 1;
@@ -648,6 +667,51 @@ void LotUi::show(const std::string& clock, ts2::sim::Speed speed, bool paused, s
             rewardsPaused_ = false;
             panel_.closeSub();
         }
+    }
+}
+
+void LotUi::showNotifications(LotLife& life, double realSeconds) {
+    notificationPortraits_.collect();
+    notificationSmallPortraits_.collect();
+    NotificationStack::Look look;
+    look.portrait = [&](std::int16_t neighbor, int side) {
+        return targetPicture(side == 0 ? notificationPortraits_ : notificationSmallPortraits_, life, neighbor);
+    };
+    look.objectPicture = [&](std::uint32_t guid, int side) { return objectPicture(life, guid, static_cast<std::uint32_t>(side)); };
+    look.neighborName = [&](std::int16_t neighbor) {
+        const auto name = life.neighborName(neighbor);
+        if (!name) {
+            return std::string();
+        }
+        return app::fullName(name->first, name->last);
+    };
+    look.objectName = [&](std::uint32_t guid) { return life.objectName(guid); };
+    look.neighborOf = [&](std::int16_t object) { return life.neighborId(object); };
+    look.typeOf = [&](std::int16_t object) {
+        const auto* o = life.simulation().world().find(object);
+        return o != nullptr ? o->definition.guid() : 0u;
+    };
+    auto& world = life.simulation().world();
+    for (const std::int16_t id : notifications_.update(screen_, world.notifications(), realSeconds, life.paused(), look)) {
+        world.hideNotification(id);
+    }
+}
+
+std::optional<ts2::tga::Pixels> LotUi::messagePicture(LotLife& life, std::int16_t neighbor, std::uint32_t objectType) {
+    constexpr std::uint32_t kSide = 40;
+    const ts2::tga::Pixels* found = neighbor != 0 ? targetPicture(notificationSmallPortraits_, life, neighbor)
+                                    : objectType != 0 ? objectPicture(life, objectType, kSide)
+                                                      : nullptr;
+    if (found == nullptr || found->width == 0 || found->height == 0) {
+        return std::nullopt;
+    }
+    return found->width == kSide && found->height == kSide ? *found : ts2::content::scaled(*found, kSide, kSide);
+}
+
+void LotUi::closeClickedNotification(LotLife& life) {
+    if (closedNotification_) {
+        life.simulation().world().hideNotification(*closedNotification_);
+        closedNotification_.reset();
     }
 }
 
@@ -1024,6 +1088,7 @@ void LotUi::showHousehold(std::vector<Skewer::Member> members) {
     portraits_.clear();
     targets_.clear();
     relationshipPictures_.clear();
+    phoneBookPortraits_.clear();
     memoryPortraits_.clear();
     wantPopupPortraits_.clear();
     balloonPortraits_.clear();
@@ -1056,6 +1121,7 @@ void LotUi::showLife(LotLife& life) {
     memoryPortraits_.collect();
     wantPopupPortraits_.collect();
     queuePortraits_.collect();
+    phoneBookPortraits_.collect();
     balloonPortraits_.collect();
     // The live panel shows the selected Sim's portrait over its shadow.
     if (sim != portraitShown_ && live_ >= 0) {

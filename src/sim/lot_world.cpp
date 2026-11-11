@@ -398,6 +398,7 @@ std::shared_ptr<const SavedNeighborhood> savedNeighborhood(const content::Neighb
     saved->lotIds = hood.lotIds;
     saved->lotTypes = hood.lotTypes;
     saved->lotOwners = hood.lotOwners;
+    saved->lotNeighborhoods = hood.lotNeighborhoods;
     for (const auto& [instance, family] : hood.families) {
         saved->familyLots[instance] = family.lot;
         saved->familyCurrentLots[instance] = family.currentLot;

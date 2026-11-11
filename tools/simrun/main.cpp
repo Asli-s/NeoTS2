@@ -3,6 +3,7 @@
 #include "content/lot.hpp"
 #include "content/neighborhood.hpp"
 #include "content/scripts.hpp"
+#include "content/ui_data.hpp"
 #include "content/wants.hpp"
 #include "scene/animation_library.hpp"
 #include "scene/outfit_properties.hpp"
@@ -775,6 +776,9 @@ void printPieMenus(ts2::sim::LotSimulation& sim, ts2::sim::SimObject& actor, std
     }
 }
 
+// With --messages, each message box a script asks is printed and answered with its first button.
+bool showMessages = false;
+
 int runLot(ResourceIndex& index, const std::filesystem::path& install, const std::filesystem::path& lotPath,
            std::size_t ticks, std::optional<std::size_t> traceTick, std::optional<std::int16_t> traceObject, bool onScreen,
            bool personData, bool overlays, bool motion, std::optional<std::int16_t> pieSim, std::optional<std::int16_t> pieTrace,
@@ -797,6 +801,11 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
     }
     ts2::sim::LotSimulation sim(install, lotPath, traceLoad, seed);
     auto& world = sim.world();
+    std::optional<ts2::content::UiData> ui;
+    if (showMessages) {
+        ui.emplace(install);
+        sim.setTextTables([&](std::uint32_t group, std::uint16_t instance) { return ui->texts(group, instance); });
+    }
     ts2::scene::Assets assets(install);
     ts2::scene::AnimationLibrary animations(assets);
     // Routing as the app has it: the lot's route grid from the objects' models.
@@ -986,7 +995,17 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
             sim.markOnScreen(sims);
         }
         const std::size_t resetsBefore = sim.resets();
+        world.setAsksMessages(showMessages);
         sim.tick();
+        if (const auto* asked = world.messageAsked()) {
+            std::printf("tick %zu: message box for %d (picture: neighbor %d, type 0x%08X): [%s] %s", tick, asked->asker, asked->pictureNeighbor,
+                        asked->pictureType, asked->title.c_str(), asked->message.c_str());
+            for (const std::string& b : asked->buttons) {
+                std::printf(" <%s>", b.c_str());
+            }
+            std::printf("\n");
+            world.answerMessage(0);
+        }
         if (sim.resets() != resetsBefore && motion) {
             std::printf("motion tick %zu: %zu Sim resets\n", tick, sim.resets() - resetsBefore);
         }
@@ -1041,8 +1060,9 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
         running += o.thread.isRunning();
         return false;
     });
-    std::printf("after %zu ticks (%02d:%02d): %zu threads still running\n", ticks, sim.globals()[ts2::sim::global::kHour],
-                sim.globals()[ts2::sim::global::kMinute], running);
+    std::printf("after %zu ticks (%02d:%02d): %zu threads still running, Sim %d selected\n", ticks,
+                sim.globals()[ts2::sim::global::kHour], sim.globals()[ts2::sim::global::kMinute], running,
+                sim.globals()[ts2::sim::global::kSelectedPerson]);
     // Where each Sim's script is.
     world.nextAfter(0, [&](const ts2::sim::SimObject& o) {
         if (o.isPerson()) {
@@ -1133,7 +1153,9 @@ int lookupGuids(ResourceIndex& index, int count, char** guids) {
     for (int i = 0; i < count; ++i) {
         const auto guid = static_cast<std::uint32_t>(std::stoul(guids[i], nullptr, 16));
         if (const auto* type = code.objectType(guid)) {
-            std::printf("0x%08X  group 0x%08X  %s\n", guid, type->group, type->definition.name.c_str());
+            const auto* master = code.multiTileMaster(*type);
+            std::printf("0x%08X  group 0x%08X  master 0x%08X  %s\n", guid, type->group, master != nullptr ? master->definition.guid() : 0u,
+                        type->definition.name.c_str());
         } else {
             std::printf("0x%08X  not found\n", guid);
         }
@@ -1233,6 +1255,8 @@ int main(int argc, char** argv) {
                     overlays = true;
                 } else if (std::string_view(argv[i]) == "--motion") {
                     motion = true;
+                } else if (std::string_view(argv[i]) == "--messages") {
+                    showMessages = true;
                 } else if (std::string_view(argv[i]) == "--pie" && i + 1 < argc) {
                     pieSim = static_cast<std::int16_t>(std::stoi(argv[++i]));
                 } else if (std::string_view(argv[i]) == "--pie-trace" && i + 1 < argc) {

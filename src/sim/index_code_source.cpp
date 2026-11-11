@@ -355,6 +355,8 @@ const std::vector<std::string>& IndexCodeSource::strings(std::uint32_t type, std
                 diag::warning(std::format("strings 0x{:08X} 0x{:08X} 0x{:04X} can't be read: {}",
                                           type, group, instance, ex.what()));
             }
+        } else if (type == types::kStringTable && !descriptions && textTables_) {
+            values = textTables_(group, instance);
         }
         it = cache.emplace(key, std::move(values)).first;
     }

@@ -1315,7 +1315,11 @@ void snapIntoPutsTheObjectInTheSlot() {
     code.add(kObjectGroup, 0x1000, bhav({snapInto(18, 0)}));
     code.add(kObjectGroup, 0x1001, bhav({snapInto(18, 0x02)}));
     code.add(kObjectGroup, 0x1002, bhav({snapInto(30, 0)}));
+    code.add(kObjectGroup, 0x1003, bhav({snapInto(19, 0x04)}));
     World world;
+    world.setAnimationLengths([](const std::string& name) -> std::optional<float> {
+        return name == "o-generic-resettozero-pose" ? std::optional<float>(0.0f) : std::nullopt;
+    });
     auto& sim = world.create(kObjectGroup, typed(0x51515151, kPersonType), 20);
     auto& cup = world.create(kLampGroup, typed(kLampGuid));
     auto& other = world.create(kLampGroup, typed(kLampGuid));
@@ -1336,6 +1340,12 @@ void snapIntoPutsTheObjectInTheSlot() {
     CHECK(vm.run(sim, 0x1001).outcome == Outcome::False && sim.data[0x34] == 0x0C + 2);
     CHECK(vm.run(sim, 0x1002).outcome == Outcome::False && sim.data[0x34] == 0x0E + 2);
     CHECK(other.data[2] == 0);
+    // With bit 2 the placed object drops its clip for the reset pose at once, with no fade.
+    other.animation = PlayingAnimation{};
+    other.animation->name = "o2a-table-foodServe-servedPlate-animation";
+    other.ending = other.animation;
+    CHECK(vm.run(sim, 0x1003).outcome == Outcome::True && sim.slots[19] == other.id);
+    CHECK(other.animation && other.animation->name == "o-generic-resettozero-pose" && !other.animation->fades && !other.ending);
 }
 
 // Placements 1 "on top of me" and 2 "in my hand" both put the new object in my slot 0, at my place.
@@ -2666,6 +2676,15 @@ void dialogsAnswerAsTheGameDoesHeadless() {
     CHECK(run(dialog(0x01, 0x01)) == Outcome::True);   // shown without waiting
     CHECK(run(dialog(0x01, 0x00)) == Outcome::Sleeping);
     CHECK(vm.resume(*w.controller).outcome == Outcome::True);
+    // The Game Tips question is answered No when the world declines the tips.
+    code.add(ts2::sim::kGameTipsGroup, 0x1000, bhav({dialog(0x01, 0x00)}));
+    w.world.setDeclinesGameTips(true);
+    w.controller->thread = {};
+    CHECK(vm.run(*w.controller, ts2::sim::kGameTipsGroup, 0x1000).outcome == Outcome::Sleeping);
+    CHECK(vm.resume(*w.controller).outcome == Outcome::False);
+    CHECK(run(dialog(0x01, 0x00)) == Outcome::Sleeping);
+    CHECK(vm.resume(*w.controller).outcome == Outcome::True);
+    w.world.setDeclinesGameTips(false);
     code.add(kObjectGroup, 0x1000, bhav({dialog(0x06, 0x00)}));
     w.world.find(3)->arrays.clear();
     w.controller->thread = {};
@@ -2675,6 +2694,55 @@ void dialogsAnswerAsTheGameDoesHeadless() {
     w.controller->thread = {};
     w.controller->thread.stackObjectId = 3;
     CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::Sleeping);
+}
+
+// A text notification's text is string table 0x12D's line bytes 13-14 with its tokens filled in,
+// found without regard to case. $Neighbor and $FullName also make the neighbor its picture. Tokens
+// the engine can't fill stay as written. Append adds to the shown text, and a style the game has
+// no bubble for is false.
+void textNotificationsFillTheirTokens() {
+    MemoryCodeSource code;
+    code.addStrings(kObjectGroup, 0x12D, {"Hi $neighbor of $Family!", " Bye $FullName, $LastName."});
+    SmallWorld w;
+    auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
+    hood->neighborIds = {9};
+    hood->neighbors[9].personData.assign(0xE7, 0);
+    w.world.setNeighborhood(hood);
+    w.world.setNeighborFirstName(9, "Mary");
+    w.world.setNeighborSurname(9, "Sue");
+    Vm vm(code, {}, &w.world);
+    auto run = [&](std::uint8_t type, std::uint16_t line, std::uint8_t style) {
+        Instruction in = dialog(type, 0x30);
+        in.operands[9] = 3;
+        in.operands[10] = 0x14;
+        in.operands[12] = style;
+        in.operands[13] = static_cast<std::uint8_t>(line);
+        code.add(kObjectGroup, 0x1000, bhav({in}));
+        const std::int16_t id = w.controller->thread.temps[3];
+        w.controller->thread = {};
+        w.controller->thread.temps[3] = id;
+        w.controller->thread.stackObjectId = 9;
+        return vm.run(*w.controller, 0x1000).outcome;
+    };
+    CHECK(run(0x08, 1, 0) == Outcome::True);
+    const auto& shown = w.world.notifications();
+    CHECK(shown.size() == 1 && shown[0].id == w.controller->thread.temps[3]);
+    CHECK(shown[0].text == "Hi Mary of $Family!" && shown[0].neighbor == 9 && shown[0].extra == 0);
+    CHECK(shown[0].priority == 3 && shown[0].timeout == 0x14 && shown[0].style == 0);
+    CHECK(run(0x1C, 2, 0) == Outcome::True);
+    CHECK(w.world.notifications()[0].text == "Hi Mary of $Family! Bye Mary Sue, Sue.");
+    CHECK(run(0x08, 1, 3) == Outcome::False);
+    CHECK(w.world.notifications().size() == 1);
+    // A text naming no picture shows the stack object's own type, with the object as the extra.
+    code.addStrings(kObjectGroup, 0x12D, {"Hi $neighbor of $Family!", " Bye $FullName, $LastName.", "Plain."});
+    Instruction plain = dialog(0x08, 0x30);
+    plain.operands[13] = 3;
+    code.add(kObjectGroup, 0x1000, bhav({plain}));
+    w.controller->thread = {};
+    w.controller->thread.stackObjectId = 3;
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::True);
+    const auto& last = w.world.notifications().back();
+    CHECK(last.text == "Plain." && last.neighbor == 0 && last.objectType == kChairGuid && last.extra == 3);
 }
 
 // "Set Baby Name" asks to name the neighbors in temps 0-3 and waits for the answer once someone shows
@@ -2734,6 +2802,133 @@ void setBabyNameWaitsForTheNames() {
     w.world.remove(*w.world.find(3));
     CHECK(w.world.namesAsked().empty());
     CHECK(start(0, 0) == Outcome::True);  // none to name
+}
+
+// "Phone Invite" (the Personal Phonebook) asks for a pick among the stack object's array 0 once
+// someone shows it, with the title and caption numbers from bytes 13-14 and 6 and the code owner's
+// texts. OK is true and leaves only the pick in the array, Cancel is false and leaves the array. Without
+// anyone showing it the dialog waits a tick and is true.
+void phoneInviteWaitsForThePick() {
+    MemoryCodeSource code;
+    Instruction in = dialog(0x06, 0x00);
+    in.operands[6] = 0x12;
+    in.operands[13] = 0x15;
+    code.add(kObjectGroup, 0x1000, bhav({in}));
+    SmallWorld w;
+    Vm vm(code, {}, &w.world);
+    w.world.find(3)->arrays = {{195, 194, 55, 54, 48}};
+    auto start = [&] {
+        w.controller->thread = {};
+        w.controller->thread.stackObjectId = 3;
+        return vm.run(*w.controller, 0x1000).outcome;
+    };
+    CHECK(start() == Outcome::Sleeping);
+    CHECK(vm.resume(*w.controller).outcome == Outcome::True);  // nobody shows it
+    w.world.setAsksPhoneBook(true);
+    CHECK(start() == Outcome::Sleeping);
+    const auto* asked = w.world.phoneBookAsked();
+    CHECK(asked != nullptr && asked->asker == w.controller->id);
+    CHECK((asked->neighbors == std::vector<std::int16_t>{195, 194, 55, 54, 48}));
+    CHECK(asked->title == 0x15 && asked->caption == 0x12 && asked->textGroup == kObjectGroup);
+    CHECK(vm.resume(*w.controller).outcome == Outcome::Sleeping);
+    w.world.answerPhoneBook(std::int16_t{55});
+    CHECK(vm.resume(*w.controller).outcome == Outcome::True);
+    CHECK((w.world.find(3)->arrays[0] == std::vector<std::int16_t>{55}));
+    CHECK(w.world.phoneBookAsked() == nullptr);
+    CHECK(start() == Outcome::Sleeping);
+    w.world.answerPhoneBook(std::nullopt);
+    CHECK(vm.resume(*w.controller).outcome == Outcome::False);  // Cancel
+    CHECK((w.world.find(3)->arrays[0] == std::vector<std::int16_t>{55}));
+    // Requests show one at a time, and a removed asker's request goes.
+    w.world.askPhoneBook({3, {1}, 0, 0, 0});
+    CHECK(start() == Outcome::Sleeping && w.world.phoneBookAsked()->asker == 3);  // waits its turn
+    w.world.remove(*w.world.find(3));
+    CHECK(w.world.phoneBookAsked() != nullptr && w.world.phoneBookAsked()->asker == w.controller->id);
+}
+
+// The object type picker (type 0x34, "Call Sim Options") lists the GUIDs array 0 holds in halves,
+// title from byte 6 and caption from bytes 13-14. OK leaves only the picked GUID's halves in the
+// array, Cancel is false and leaves the array. Without anyone showing it the dialog is true.
+void typePickerWaitsForThePick() {
+    MemoryCodeSource code;
+    Instruction in = dialog(0x34, 0x00);
+    in.operands[6] = 0x20;
+    in.operands[13] = 0x21;
+    code.add(kObjectGroup, 0x1000, bhav({in}));
+    SmallWorld w;
+    Vm vm(code, {}, &w.world);
+    // Just Talk 0xB1A6C732, Invite Household 0xB1A6C74E, Invite Over 0x71A6C717, as the game held them.
+    const std::vector<std::int16_t> options{-14542, -20058, -14514, -20058, -14569, 29094};
+    w.world.find(3)->arrays = {options};
+    auto start = [&] {
+        w.controller->thread = {};
+        w.controller->thread.stackObjectId = 3;
+        return vm.run(*w.controller, 0x1000).outcome;
+    };
+    CHECK(start() == Outcome::Sleeping);
+    CHECK(vm.resume(*w.controller).outcome == Outcome::True);  // nobody shows it
+    w.world.setAsksTypePicker(true);
+    CHECK(start() == Outcome::Sleeping);
+    const auto* asked = w.world.typePickerAsked();
+    CHECK(asked != nullptr && asked->asker == w.controller->id);
+    CHECK((asked->types == std::vector<std::uint32_t>{0xB1A6C732, 0xB1A6C74E, 0x71A6C717}));
+    CHECK(asked->title == 0x20 && asked->caption == 0x21 && asked->textGroup == kObjectGroup);
+    w.world.answerTypePicker(std::nullopt);
+    CHECK(vm.resume(*w.controller).outcome == Outcome::False);  // Cancel
+    CHECK(w.world.find(3)->arrays[0] == options);
+    CHECK(start() == Outcome::Sleeping);
+    w.world.answerTypePicker(0xB1A6C732u);
+    CHECK(vm.resume(*w.controller).outcome == Outcome::True);
+    CHECK((w.world.find(3)->arrays[0] == std::vector<std::int16_t>{-14542, -20058}));
+    CHECK(w.world.typePickerAsked() == nullptr);
+}
+
+// The message box as the newspaper's job offer asks it: type 2 with the title, text and three
+// buttons from string table 0x12D, tokens filled. Take Job is true, Look Again false with 0 in the
+// temp byte 7 names, End Search false with 1. A missing button text is left empty for the usual one.
+void messageBoxWaitsForAButton() {
+    MemoryCodeSource code;
+    Instruction in = dialog(0x02, 0x48);  // temp 4
+    in.operands[6] = 1;
+    in.operands[13] = 2;
+    in.operands[3] = 10;
+    in.operands[4] = 11;
+    in.operands[0] = 12;
+    code.add(kObjectGroup, 0x1000, bhav({expr(owner::kLocal, 1, op::kAssign, owner::kLiteral, 2, 1, E), in}, 0, 2));
+    std::vector<std::string> texts(12);
+    texts[0] = "SimCity Times";
+    texts[1] = "An opening for $Local:0 days as a $JobTitle:0:1.";
+    texts[9] = "Take Job";
+    texts[10] = "Look Again";
+    code.addStrings(kObjectGroup, 0x12D, texts);
+    code.addStrings(kObjectGroup, 0x93, {"Unemployed", "File Clerk"});
+    SmallWorld w;
+    Vm vm(code, {}, &w.world);
+    auto start = [&] {
+        w.controller->thread = {};
+        return vm.run(*w.controller, 0x1000).outcome;
+    };
+    CHECK(start() == Outcome::Sleeping);
+    CHECK(vm.resume(*w.controller).outcome == Outcome::True);  // nobody shows it
+    w.world.setAsksMessages(true);
+    CHECK(start() == Outcome::Sleeping);
+    const auto* asked = w.world.messageAsked();
+    CHECK(asked != nullptr && asked->asker == w.controller->id && asked->type == 2);
+    CHECK(asked->title == "SimCity Times" && asked->message == "An opening for 0 days as a Unemployed.");
+    CHECK((asked->buttons == std::vector<std::string>{"Take Job", "Look Again", ""}));
+    w.world.answerMessage(1);
+    CHECK(vm.resume(*w.controller).outcome == Outcome::False && w.controller->thread.temps[4] == 0);
+    CHECK(start() == Outcome::Sleeping);
+    w.world.answerMessage(2);
+    CHECK(vm.resume(*w.controller).outcome == Outcome::False && w.controller->thread.temps[4] == 1);
+    CHECK(start() == Outcome::Sleeping);
+    w.world.answerMessage(0);
+    CHECK(vm.resume(*w.controller).outcome == Outcome::True);
+    CHECK(w.world.messageAsked() == nullptr);
+    // An asker removed from the lot takes its box with it.
+    CHECK(start() == Outcome::Sleeping);
+    w.world.remove(*w.controller);
+    CHECK(w.world.messageAsked() == nullptr);
 }
 
 // New objects lead themselves (object data 0x13), as every saved single-tile object does, so code
@@ -2953,6 +3148,12 @@ void roomFieldsAreReadThroughTempZero() {
     code.add(kObjectGroup, 0x1002, bhav({
         expr(owner::kTemp, 3, op::kAssign, owner::kRoomByTemp, 5, T, E),
     }));
+    code.add(kObjectGroup, 0x1003, bhav({
+        expr(owner::kTemp, 0, op::kAssign, owner::kLiteral, 0xFFFF, 1, E),
+        expr(owner::kTemp, 1, op::kAssign, owner::kRoomByTemp, 2, 2, E),
+        expr(owner::kTemp, 2, op::kAssign, owner::kRoomByTemp, 3, 3, E),
+        expr(owner::kTemp, 3, op::kAssign, owner::kRoomByTemp, 4, T, E),
+    }));
     ts2::sim::World world;
     world.setRooms(ts2::sim::RoomMap(squareRoom(false)));
     auto& me = world.create(kObjectGroup, definition("Me", 0));
@@ -2964,6 +3165,9 @@ void roomFieldsAreReadThroughTempZero() {
     CHECK(vm.run(me, 0x1001).outcome == Outcome::True && me.thread.temps[3] == 0);
     const RunResult unknown = vm.run(me, 0x1002);
     CHECK(unknown.outcome == Outcome::Unsupported && unknown.reason == "room field not implemented");
+    // Room -1, an object in no room, has level 0, area 0 and no pool, as the game keeps no tiles for it.
+    CHECK(vm.run(me, 0x1003).outcome == Outcome::True);
+    CHECK(me.thread.temps[1] == 0 && me.thread.temps[2] == 0 && me.thread.temps[3] == 0);
 }
 
 // "Outside" (field 1) is 1 when the room's region in layer 0 is 0 (not enclosed), else 0. Field 7
@@ -3002,6 +3206,7 @@ void outsideIsRegionZeroInLayerZero() {
 std::vector<Test> vmObjectTests() {
     return {
         {"room fields are read through temp 0", roomFieldsAreReadThroughTempZero},
+        {"text notifications fill their tokens", textNotificationsFillTheirTokens},
         {"outside is region 0 in layer 0", outsideIsRegionZeroInLayerZero},
         {"Find Location For centres a Sim on its tile", findLocationForCentresASimOnItsTile},
         {"a Sim reset moves a seated Sim out of its slot", aSimResetMovesASeatedSimOutOfItsSlot},
@@ -3071,6 +3276,9 @@ std::vector<Test> vmObjectTests() {
         {"RayTrace asks the scene and writes temp 0", rayTraceAsksTheSceneAndWritesTemp0},
         {"dialogs answer as the game does headless", dialogsAnswerAsTheGameDoesHeadless},
         {"set baby name waits for the names", setBabyNameWaitsForTheNames},
+        {"phone invite waits for the pick", phoneInviteWaitsForThePick},
+        {"object type picker waits for the pick", typePickerWaitsForThePick},
+        {"message box waits for a button", messageBoxWaitsForAButton},
         {"baby genes follow the game's rules", babyGenesFollowTheGameRules},
         {"baby genes draw in the game's order", babyGenesDrawInTheGamesOrder},
         {"Camera Control waits while the camera moves", cameraControlWaitsWhileTheCameraMoves},

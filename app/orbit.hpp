@@ -115,6 +115,7 @@ struct Orbit {
     float gamePixel = 1;
     bool keysOn = true;  // off while a menu over the view takes the keys
     bool keysTaken = false;  // a text box being typed into has the keyboard
+    bool cameraHeld = false;  // a dialog is open: the camera's keys, the wheel and drags do nothing
     // Where the pitch sits between the rig's minimum and maximum pitch at this zoom (0 to 1), and
     // where it is easing to.
     float pitchBlend = 0, pitchBlendGoal = 0;
@@ -399,7 +400,7 @@ inline void orbitGameStep(Orbit& orbit, unsigned ms, int width, int height) {
                                                            {Key::S, 1, 1}, {Key::Down, 1, 1}, {Key::W, 1, -1}, {Key::Up, 1, -1}}};
     for (std::size_t i = 0; i < kScrollKeys.size(); ++i) {
         const ScrollKey& k = kScrollKeys[i];
-        const bool held = orbit.keysOn && !orbit.keysTaken && keyHeld(k.key);
+        const bool held = orbit.keysOn && !orbit.keysTaken && !orbit.cameraHeld && keyHeld(k.key);
         if (held != orbit.scrollKeysHeld[i]) {
             orbit.scrollKeysHeld[i] = held;
             orbit.keyGoal[k.axis] = held ? k.way : 0;
@@ -414,7 +415,7 @@ inline void orbitGameStep(Orbit& orbit, unsigned ms, int width, int height) {
         orbit.keyScrolling = false;
     }
     const bool holdZ = !orbit.levelKeys, holdPad = !orbit.lotKeys;
-    const int zoom = !orbit.keysOn || orbit.keysTaken
+    const int zoom = !orbit.keysOn || orbit.keysTaken || orbit.cameraHeld
                          ? 0
                          : ((holdZ && keyHeld(Key::X)) || (holdPad && (keyHeld(Key::Minus) || keyHeld(Key::PadMinus)))) -
                                (keyHeld(Key::Equals) || (holdZ && keyHeld(Key::Z)) || (holdPad && keyHeld(Key::PadPlus)));
@@ -430,7 +431,7 @@ inline void orbitGameStep(Orbit& orbit, unsigned ms, int width, int height) {
         orbit.freeZoom = true;
     }
     if (orbit.levelKeys) {
-        const int keys = orbit.keysOn && !orbit.keysTaken ? orbit.turnKey : 0;
+        const int keys = orbit.keysOn && !orbit.keysTaken && !orbit.cameraHeld ? orbit.turnKey : 0;
         const int turn = std::clamp(keys + orbit.puckTurn, -1, 1);
         easeToward(orbit.turnKeyOffset, static_cast<float>(turn) * orbit.turnKeySpeed, ms, orbit.turnKeyPeriod, orbit.turnKeyMinChange);
         // The turn goes in whole pixels, the offset's fraction dropped.

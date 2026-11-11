@@ -23,6 +23,7 @@
 #include "sim/route_destinations.hpp"
 #include "sim/route_goals.hpp"
 #include "sim/route_portals.hpp"
+#include "sim/selection.hpp"
 #include "sim/snap.hpp"
 #include "sim/want_refill.hpp"
 
@@ -1320,6 +1321,7 @@ void LotSimulation::tick() {
     removeSlotContents(world_, vm_.resetSim);
     forgetRemoved();
     purgeRemoved();
+    keepSelection(world_, code_, vm_.globals);
     world_.countTick();
     ++ticks_;
 }

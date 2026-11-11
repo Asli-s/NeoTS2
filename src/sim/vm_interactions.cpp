@@ -32,7 +32,8 @@ void Execution::offerAction(const std::string& name, std::uint16_t flags, const 
 // semi-global only). A missing text is an error. Otherwise it sets the icon: of the object (owner byte
 // 11, data bytes 12-13), or with byte 2 bit 5 of the type with GUID bytes 5-8 (bit 6: temps 2 and 3),
 // index byte 10 (bit 7: temp 1). Byte 3 bits 4 (text) and 5 (icon) set them on a running
-// sub-interaction. The text's tokens are not used.
+// sub-interaction. The text's tokens are filled in as a text notification's are ($Object, $Local:0
+// and the rest), from this tree's locals and stack object.
 bool Execution::actionString(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     SimObject& self = me();
@@ -48,14 +49,16 @@ bool Execution::actionString(const bhav::Instruction& in, Frame& f) {
             groups = {f.codeOwner, code_.semiGlobalGroup(f.codeOwner), kGlobalGroup};
         }
         for (const auto group : groups) {
-            const auto text = index > 0 ? code_.string(group, kActionStringTable, index - 1u) : std::nullopt;
-            if (text && !text->empty()) {
+            const auto found = index > 0 ? code_.string(group, kActionStringTable, index - 1u) : std::nullopt;
+            if (found && !found->empty()) {
+                TokenPicture unused;
+                const std::string text = expandTokens(*found, f, unused);
                 if (offered != nullptr) {
-                    offerAction(*text, flags, f);
+                    offerAction(text, flags, f);
                 } else if (self.isPerson() && (flags & 0x1000) && self.runningSub) {
-                    self.runningSub->name = *text;
+                    self.runningSub->name = text;
                 } else if (self.isPerson() && self.running) {
-                    self.actionString = *text;
+                    self.actionString = text;
                 }
                 return true;
             }

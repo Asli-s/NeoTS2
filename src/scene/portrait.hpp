@@ -35,10 +35,12 @@ PortraitCamera portraitCamera(const Transform& place, const std::array<float, 3>
 ObjectLighting portraitLighting(const PortraitCamera& camera);
 
 // A Sim posed for its portrait: `pose` at its first frame (at rest when null). Gives each skinned
-// instance's joint matrices, the camera and the lighting. False when the actor has no rig or no
-// head joint.
+// instance's joint matrices, the face's morph weights and eye values the pose gives (its smile, brows
+// and gaze), the camera and the lighting. False when the actor has no rig or no head joint.
 struct PortraitShot {
     std::vector<std::pair<std::size_t, std::vector<Transform>>> joints;
+    std::vector<std::pair<std::size_t, std::vector<float>>> morphs;  // by Mesh::morphs, 0 where the pose weighs none
+    std::vector<std::pair<std::size_t, std::array<float, 4>>> eyes;  // see mixEyes
     PortraitCamera camera;
     ObjectLighting lighting;
 };

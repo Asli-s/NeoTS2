@@ -1487,6 +1487,44 @@ void neighborhoodReadsLotOwners() {
     CHECK(!runtime->run("Owner", witch) && !witch.unsupported.empty());
 }
 
+// Neighborhood:getLotIdsInAllNeighborhoods lists the lots of the neighborhood and its
+// sub-neighborhoods from key 1, getLotType gives a lot's type and getNeighborhoodIdFromLotId the
+// neighborhood that places it. A lot without either is error 0x9B. The phone's "Count Community Lots"
+// (Generic Sims Call 0x1B) counts the lots of type 1.
+void neighborhoodListsLotsOfAllNeighborhoods() {
+    auto runtime = std::make_shared<ts2::sim::LuaRuntime>();
+    runtime->load({}, {compileScript("Lots", R"(
+        local n = Neighborhood.new()
+        local ids = n:getLotIdsInAllNeighborhoods()
+        SetTemp(0, table.getn(ids))
+        SetTemp(1, ids[1] * 100 + ids[3])
+        SetTemp(2, n:getLotType(29))
+        SetTemp(3, n:getNeighborhoodIdFromLotId(40))
+        SetScriptReturnValue(true)
+    )"), compileScript("NoType", "Neighborhood.new():getLotType(99)"),
+                       compileScript("NoHood", "Neighborhood.new():getNeighborhoodIdFromLotId(10)")});
+    CHECK(runtime->problems.empty());
+    auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
+    hood->lotTypes[10] = 0;
+    hood->lotTypes[29] = 1;
+    hood->lotTypes[40] = 1;
+    hood->lotNeighborhoods = {{29, 2}, {40, 7}};
+    ts2::sim::World world;
+    world.setNeighborhood(hood);
+    std::array<std::int16_t, 8> temps{};
+    ts2::sim::ScriptCall call;
+    call.world = &world;
+    call.temps = &temps;
+    CHECK(runtime->run("Lots", call));
+    CHECK(temps[0] == 3 && temps[1] == 1040 && temps[2] == 1 && temps[3] == 7);
+    for (const char* name : {"NoType", "NoHood"}) {
+        ts2::sim::ScriptCall missing;
+        missing.world = &world;
+        CHECK(!runtime->run(name, missing) && missing.errorCode == 0x9B);
+    }
+    CHECK(world.communityLotCount() == 2);
+}
+
 // kQuery_ForPartsofMultiTileObject lists every part of the given object's multi-tile object (they
 // share the lead's id in object data 0x13), highest id first. An object that isn't multi-tile is an error.
 void objectManagerListsMultiTileParts() {
@@ -1658,6 +1696,7 @@ std::vector<Test> vmScriptTests() {
         {"CachedFamily lists its members", cachedFamilyListsItsMembers},
         {"CachedPerson friends for promotion count token credits", friendsForPromotionCountTokenCredits},
         {"Neighborhood reads lot owners", neighborhoodReadsLotOwners},
+        {"neighborhood lists the lots of all its neighborhoods", neighborhoodListsLotsOfAllNeighborhoods},
         {"neighbor relationships read as saved", neighborRelationshipsReadAsSaved},
         {"Lua script primitive runs scripts", luaScriptPrimitiveRunsScripts},
         {"ObjectManager scripts find objects", objectManagerScriptsFindObjects},

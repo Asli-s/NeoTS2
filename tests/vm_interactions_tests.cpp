@@ -2366,6 +2366,13 @@ void actionStringSetsTextAndIcon() {
     std::vector<ts2::sim::OfferedAction> offered;
     CHECK(vm.runCheck(sim, kObjectGroup, 0x1004, 0, {}, ts2::ttab::Interaction{}, offered, &icon).outcome == Outcome::True);
     CHECK(icon.object == 2 && icon.guid == 0 && icon.index == 1 && sim.actionIconObject == 0);
+    // The text's tokens are filled in from the tree, also for a line a check tree offers.
+    code.addStrings(kObjectGroup, 0x12E, {"", "Snack", "Eat $Local:0 $Unknown"});
+    code.add(kObjectGroup, 0x1006, bhav({text(3, 0)}, 0, 1));
+    CHECK(vm.run(sim, kObjectGroup, 0x1006).outcome == Outcome::True && sim.actionString == "Eat 0 $Unknown");
+    offered.clear();
+    CHECK(vm.runCheck(sim, kObjectGroup, 0x1006, 0, {}, ts2::ttab::Interaction{}, offered, &icon).outcome == Outcome::True);
+    CHECK(offered.size() == 1 && offered[0].name == "Eat 0 $Unknown");
 }
 
 Instruction wantSatisfy(std::uint32_t guid, std::uint8_t argOwner, std::uint16_t arg, std::uint16_t value,

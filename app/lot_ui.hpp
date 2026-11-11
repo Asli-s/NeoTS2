@@ -4,6 +4,7 @@
 #include "graphics_options_panel.hpp"
 #include "live_panel.hpp"
 #include "lot_life.hpp"
+#include "notification_stack.hpp"
 #include "pause_frame.hpp"
 
 #include "queue_panel.hpp"
@@ -94,7 +95,7 @@ public:
     void hideForFreeCamera(bool hide);
 
     // What a released button asks for.
-    enum class Action { None, Neighborhood, Quit, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, GameOptionChanged, GraphicsOptionChanged, RewardsOpened, RewardsClosed, SelectSim, TrackSim, FloorUp, FloorDown, WallMode, ToggleCeiling, MainMenu };
+    enum class Action { None, Neighborhood, Quit, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, GameOptionChanged, GraphicsOptionChanged, RewardsOpened, RewardsClosed, SelectSim, TrackSim, CentreOnNeighbor, CloseNotification, FloorUp, FloorDown, WallMode, ToggleCeiling, MainMenu };
     Action clicked(int window);
     // The puck's camera button held down under the mouse.
     enum class CameraButton { None, RotateLeft, RotateRight, ZoomIn, ZoomOut };
@@ -137,6 +138,19 @@ public:
     // Shows the lot's life: the clock, speed and funds, the selected Sim (its aspiration and needs)
     // and every household Sim's mood.
     void showLife(LotLife& life);
+
+    // Shows the simulation's text notifications at the top right, and removes those whose time ran out.
+    void showNotifications(LotLife& life, double realSeconds);
+    // The neighbor whose notification picture was clicked (for CentreOnNeighbor).
+    std::int16_t clickedNeighbor() const { return clickedNeighbor_; }
+    // Removes the notification whose X was clicked.
+    void closeClickedNotification(LotLife& life);
+
+    // A neighbor's portrait as the Personal Phonebook shows it, null while it loads.
+    const ts2::tga::Pixels* phoneBookPicture(LotLife& life, std::int16_t neighbor) { return targetPicture(phoneBookPortraits_, life, neighbor); }
+    // A message box's picture, 40 x 40: the middle of a neighbor's portrait, else an object type's
+    // picture. None while it loads or when there is none.
+    std::optional<ts2::tga::Pixels> messagePicture(LotLife& life, std::int16_t neighbor, std::uint32_t objectType);
 
 private:
     // Sets the Sims' names as the tips of their thumbnails and the live panel's portrait.
@@ -207,6 +221,11 @@ private:
     bool hidden_ = false, optionsWereShown_ = false;
     bool hasMembers_ = false;  // the household is known and has anyone in it
     std::int16_t clickedSim_ = 0;
+    std::int16_t clickedNeighbor_ = 0;
+    std::optional<std::int16_t> closedNotification_;
+    NotificationStack notifications_;
+    ts2::content::TargetPictures notificationPortraits_{ts2::content::readCharacterPortrait, 0};  // whole portraits
+    ts2::content::TargetPictures notificationSmallPortraits_{ts2::content::readCharacterPortrait, 40};
     // Each household Sim's portrait, and whose the live panel shows (-1: none yet).
     std::map<std::int16_t, ts2::tga::Pixels> portraits_;
     int portraitShown_ = -1;
@@ -230,6 +249,7 @@ private:
     ts2::content::TargetPictures memoryPortraits_{ts2::content::readCharacterPortrait, 64};
     ts2::content::TargetPictures wantPopupPortraits_{ts2::content::readCharacterPortrait, 46};  // the want popup's picture size
     ts2::content::TargetPictures queuePortraits_{ts2::content::readCharacterPortrait, 40};  // a queue icon's picture size
+    ts2::content::TargetPictures phoneBookPortraits_{ts2::content::readCharacterPortrait, 46};  // a phone book cell's picture size
     // By GUID, width << 16 | height and the picture named.
     std::map<std::tuple<std::uint32_t, std::uint32_t, std::uint32_t>, std::optional<ts2::tga::Pixels>> objectPictures_;
     std::map<std::uint32_t, std::optional<ts2::tga::Pixels>> careerIcons_;  // by the reward's GUID
