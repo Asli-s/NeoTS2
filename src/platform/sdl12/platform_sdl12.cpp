@@ -365,6 +365,8 @@ void resizeFirstWindow(int, int) {}
 
 void setFirstWindowFullscreen(bool) {}
 
+void showFirstWindow() {}
+
 std::vector<DisplayMode> firstWindowDisplayModes() {
     return {};
 }

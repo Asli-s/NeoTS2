@@ -83,22 +83,12 @@ std::optional<LauncherSettings> parseLauncherSettings(std::string_view text) {
             settings.smoothFollow = line.substr(equals + 1) == "on";
             continue;
         }
-        if (key == "pool-style-ponds") {
-            settings.poolStylePonds = line.substr(equals + 1) == "on";
-            continue;
-        }
-        if (key == "pool-style-sea") {
-            settings.poolStyleSea = line.substr(equals + 1) == "on";
-            continue;
-        }
         if (key == "smooth-lot-skirts") {
             settings.smoothLotSkirts = line.substr(equals + 1) == "on";
             continue;
         }
-        if (key == "window-size") {
-            if (const WindowSize* size = findWindowSize(line.substr(equals + 1))) {
-                settings.windowSize = size->key;
-            }
+        if (key == "no-game-tips") {
+            settings.noGameTips = line.substr(equals + 1) == "on";
             continue;
         }
         const auto path = pathFrom(line.substr(equals + 1));
@@ -150,17 +140,11 @@ std::string formatLauncherSettings(const LauncherSettings& settings) {
     if (settings.smoothFollow) {
         out += "smooth-follow=on\n";
     }
-    if (settings.poolStylePonds) {
-        out += "pool-style-ponds=on\n";
-    }
-    if (settings.poolStyleSea) {
-        out += "pool-style-sea=on\n";
-    }
     if (settings.smoothLotSkirts) {
         out += "smooth-lot-skirts=on\n";
     }
-    if (const WindowSize* size = findWindowSize(settings.windowSize)) {
-        out.append("window-size=").append(size->key).append("\n");
+    if (settings.noGameTips) {
+        out += "no-game-tips=on\n";
     }
     for (std::size_t i = 0; i < settings.addedInstalls.size() && i < kMaxAdded; ++i) {
         line("added-install", settings.addedInstalls[i]);

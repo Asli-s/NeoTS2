@@ -29,11 +29,17 @@ struct MenuOptions {
     std::optional<std::array<float, 3>> view;  // the picture's camera: yaw, pitch (radians), distance
     // A point of the lot clicked before its picture (x, y) and the menu choice made (-1: left open).
     std::optional<std::array<int, 3>> groundClick;
+    // An object's menu choice made for the selected Sim once the lot comes to life: object id and the
+    // choice's place in its menu.
+    std::optional<std::array<int, 2>> choose;
     double runSeconds = 0;       // the lot plays on this long after the clicks before its picture
     bool unpaused = false;       // the lot starts with time running (the game opens lots paused)
+    bool noGameTips = false;     // the Game Tips question is answered No (see World::setDeclinesGameTips)
     bool smoothFollow = false;   // the camera glides after a followed Sim (see Orbit::smoothFollow)
-    bool poolStylePonds = false; // lots' ponds drawn like pools (see SceneBuilder::setPoolStylePonds)
-    bool poolStyleSea = false;   // the sea with a depth colour and caustics (see SceneBuilder::setPoolStyleSea)
+    // Realistic ponds and sea whatever the Graphics options keep (see
+    // SceneBuilder::setPoolStylePonds and setPoolStyleSea).
+    bool poolStylePonds = false;
+    bool poolStyleSea = false;
     bool smoothLotSkirts = false; // lots joined to the ground around them without seams (see SceneBuilder::setSmoothLotSkirts)
     // The UI drawn this much larger, in percent: one of content::kUiScales. The game has 100 only.
     // A window too small for it gets less, so the whole UI still fits.

@@ -96,6 +96,9 @@ constexpr std::uint32_t kBackdrop = 0x0da36c7d, kThumbs = 0x00001006, kQuit = 0x
 // Windows of a neighborhood tile by id.
 constexpr std::uint32_t kTilePicture = 0x000000a1, kTileName = 0x000000a5;
 constexpr std::uint32_t kTileButton = 0x000000a2;
+constexpr std::size_t kTileNameCharacters = 30;  // the name box's maxtext
+// The plumbob above the menu's logo, an animated bitmap, and the table that could set it up.
+constexpr std::uint32_t kPlumbob = 0x00000abc, kAnimationConstants = 0x8d9df6d4;
 // The tile's tooltip, which the game sets itself: "Click for Preview of Neighborhood".
 constexpr std::uint32_t kNeighborhoodText = 0x7F3A262A, kTileTip = 0x0086003F;  // a string id, leakcheck: ok
 // The preview shows a neighborhood without a description this text instead, as if it were one:
@@ -339,15 +342,19 @@ Game::Game(ts2::content::UiData& data, ts2::ui::Fonts& fonts, ts2::render::IRend
     lotUi_.graphicsOptions().setWindowSize(width_, height_);
     hoodUi_.graphicsOptions().setWindowSize(width_, height_);
     uiPercent_ = options.uiScale;
+    realisticPonds_ = options.poolStylePonds || lotUi_.graphicsOptions().display().realisticWater;
+    realisticSea_ = options.poolStyleSea || lotUi_.graphicsOptions().display().realisticWater;
+    realisticSky_ = lotUi_.graphicsOptions().display().realisticSky;
     for (auto* panel : {&lotUi_.graphicsOptions(), &hoodUi_.graphicsOptions()}) {
         panel->setUiScale(uiPercent_);
     }
     frameLimit_ = lotUi_.graphicsOptions().display().frameLimit;
-    renderer_.setWaitForScreen(frameLimit_ == app::GraphicsOptionsPanel::kWaitForScreen);
+    applyFrameLimit();
     const int mostSamples = renderer_.capabilities().mostSmoothEdgeSamples;
     lotUi_.graphicsOptions().setMostSmoothEdges(mostSamples);
     hoodUi_.graphicsOptions().setMostSmoothEdges(mostSamples);
     renderer_.setSmoothEdges(lotUi_.graphicsOptions().display().smoothEdges);
+    renderer_.setTerrainTiles(app::GraphicsOptionsPanel::terrainTiles(lotUi_.graphicsOptions().display().terrainDetail));
     renderer_.setAmbientOcclusion(ts2::content::kAmbientOcclusionStrengths[static_cast<std::size_t>(lotUi_.graphicsOptions().display().ambientOcclusion)]);
     renderer_.setAmbientOcclusionHalfSize(lotUi_.graphicsOptions().display().occlusionHalfSize);
 }
@@ -362,11 +369,65 @@ void Game::setUpMenu() {
     menuX_ = (uiWidth_ - screen_.width(menu_)) / 2;
     menuY_ = (uiHeight_ - screen_.height(menu_)) / 2;
     screen_.move(menu_, menuX_, menuY_);
-    // At start the blurred neighborhood picture shows behind the menu, in the middle of the
-    // screen (as the game shows it).
+    // At start the blurred neighborhood picture shows behind the menu.
+    screen_.setVisible(screen_.find(menu_, kBackdrop), true);
+    fitBackdrop();
+    plumbob_ = screen_.find(menu_, kPlumbob);
+    playPlumbob();
+}
+
+// The game shows the picture at its own size in the middle of the screen, which leaves a border
+// around it on screens larger than those of its day. Here it is scaled to cover the whole screen,
+// keeping its shape, and still centred, so a little of it may be cut off at two sides. The picture
+// is 1024 x 768 inside a clear border 10 wide, which is left out with one pixel more, so that the
+// smoothing of the stretched picture doesn't blend the border into its edges.
+void Game::fitBackdrop() {
+    constexpr int kBorder = 11;
     const int backdrop = screen_.find(menu_, kBackdrop);
-    screen_.setVisible(backdrop, true);
-    screen_.move(backdrop, (uiWidth_ - screen_.width(backdrop)) / 2 - menuX_, (uiHeight_ - screen_.height(backdrop)) / 2 - menuY_);
+    const auto [iw, ih] = screen_.imageSize(backdrop);
+    if (backdrop < 0 || iw <= 2 * kBorder || ih <= 2 * kBorder) {
+        return;
+    }
+    const int pw = iw - 2 * kBorder, ph = ih - 2 * kBorder;
+    const double scale = std::max(static_cast<double>(uiWidth_) / pw, static_cast<double>(uiHeight_) / ph);
+    const int w = static_cast<int>(std::ceil(pw * scale)), h = static_cast<int>(std::ceil(ph * scale));
+    screen_.resize(backdrop, w, h);
+    screen_.setImagePart(backdrop, {kBorder, kBorder, iw - kBorder, ih - kBorder});
+    screen_.move(backdrop, (uiWidth_ - w) / 2 - menuX_, (uiHeight_ - h) / 2 - menuY_);
+}
+
+// The game plays it once the menu is made, 31 frames at its 30 a second over and over, by the
+// clock, not the game's speed. Once it or the menu is hidden it stops where it is.
+void Game::playPlumbob() {
+    plumbobFrames_.reset();
+    if (plumbob_ < 0) {
+        return;
+    }
+    ts2::ui::AnimatedBitmap frames(screen_.childTexts(screen_.find(plumbob_, kAnimationConstants)), screen_.imageSize(plumbob_)[0],
+                                   screen_.width(plumbob_));
+    if (!frames.play(0)) {
+        return;
+    }
+    plumbobFrames_ = std::move(frames);
+    plumbobStart_ = ts2::platform::ticksNs() / 1'000'000;
+    showPlumbob();
+}
+
+void Game::showPlumbob() {
+    if (!plumbobFrames_) {
+        return;
+    }
+    for (int w = plumbob_; w >= 0; w = screen_.parent(w)) {
+        if (!screen_.visible(w)) {
+            plumbobFrames_.reset();
+            return;
+        }
+    }
+    const auto ms = ts2::platform::ticksNs() / 1'000'000 - plumbobStart_;
+    const int frame = plumbobFrames_->at(static_cast<std::uint32_t>(std::min<std::uint64_t>(ms, UINT32_MAX))).frame;
+    // Each frame is drawn as it is, from the picture's top.
+    const int w = screen_.width(plumbob_);
+    screen_.setImagePart(plumbob_, {w * frame, 0, w * (frame + 1), std::min(screen_.height(plumbob_), screen_.imageSize(plumbob_)[1])});
 }
 
 // A Sim in the upper left and one in the lower right, each one of the pictures listed in the
@@ -406,6 +467,7 @@ void Game::setUpTiles() {
     const int thumbs = screen_.find(menu_, kThumbs);
     for (int i = 0; i < kPerPage; ++i) {
         tiles_.push_back(screen_.load(kScripts, kNeighborhoodTile, 0, 0, thumbs));
+        tileNames_.emplace_back().attach(screen_, screen_.find(tiles_.back(), kTileName), kTileNameCharacters, true);
     }
     const int tileWidth = screen_.width(tiles_[0]), tileHeight = screen_.height(tiles_[0]);
     const int left = (screen_.width(thumbs) - (kPerPage * tileWidth + (kPerPage - 1) * kTileGap)) / 2;
@@ -436,7 +498,7 @@ void Game::showPage() {
         if (n >= hoods_.size()) {
             continue;
         }
-        screen_.setText(screen_.find(tile, kTileName), hoods_[n].name);
+        tileNames_[static_cast<std::size_t>(i)].setText(screen_, hoods_[n].name);
         screen_.setTip(screen_.find(tile, kTileButton), data_.text(kNeighborhoodText, kTileTip));
         p.window = screen_.find(tile, kTilePicture);
         p.video = ts2::reia::parse(videos_[n].get());
@@ -452,6 +514,9 @@ void Game::showPage() {
 }
 
 void Game::showPreview() {
+    for (auto& name : tileNames_) {
+        name.unfocus(screen_);
+    }
     const auto& hood = hoods_[chosen_];
     screen_.setText(screen_.find(preview_, kPreviewName), hood.name);
     description_.setText(screen_, hood.description.empty() ? data_.text(kNeighborhoodText, kNoDescription) : hood.description);
@@ -585,13 +650,19 @@ void Game::openNeighborhood() {
     openFolder_ = folder;
     ts2::diag::step("opening neighborhood " + ts2::diag::utf8(folder.filename()));
     hoodLoadStarted_ = ts2::platform::ticksNs();
-    const auto highImposters = hoodUi_.gameOptions().lotView().highImposters ? imposterCache(folder) : std::filesystem::path{};
-    building_ = std::async(std::launch::async, [assets = assets_, install = install_, folder, user = options_.user, seed = options_.seed,
-                                                highImposters, poolStyleSea = options_.poolStyleSea, realisticSky = app::GameOptionsPanel::savedRealisticSky(options_.user),
+    building_ = startNeighborhoodBuild(folder);
+}
+
+std::future<Game::Built> Game::startNeighborhoodBuild(const std::filesystem::path& folder) {
+    const auto highImposters =
+        hoodHighImposters() ? imposterCache(folder, liveHoodPonds(realisticSea_, realisticPonds_)) : std::filesystem::path{};
+    return std::async(std::launch::async, [assets = assets_, install = install_, folder, user = options_.user, seed = options_.seed,
+                                                highImposters, poolStyleSea = realisticSea_, poolStylePonds = realisticPonds_, realisticSky = realisticSky_,
                                                 &renderer = renderer_] {
         assets.get()->setRealisticSky(realisticSky);
         ts2::scene::SceneBuilder builder(*assets.get());
         builder.setPoolStyleSea(poolStyleSea);
+        builder.setPoolStylePonds(poolStylePonds);
         Built b;
         b.effects = std::make_unique<ts2::content::EffectsFiles>(install);
         auto& effects = *b.effects;
@@ -600,6 +671,8 @@ void Game::openNeighborhood() {
         b.scene = std::move(builder.scene());
         app::neighborhoodCamera(b.camera, install, b.stats);
         b.freeRig = ts2::content::findCamera(install, "CameraManNH");
+        b.realisticSea = poolStyleSea;
+        b.realisticPonds = poolStylePonds;
         if (const auto* file = effects.all()) {
             b.drift = ts2::scene::HoodDrift::load(*file, static_cast<std::uint32_t>(ts2::platform::ticksNs()));
             if (!b.drift) {
@@ -633,6 +706,8 @@ void Game::showNeighborhood(Built built) {
     orbit_ = hood_.camera;
     hoodDrift_ = hood_.drift;
     hoodFreeRig_ = std::move(hood_.freeRig);
+    hoodSea_ = hood_.realisticSea;
+    hoodPonds_ = hood_.realisticPonds;
     hoodUi_.open(openFolder_, openName_, std::move(hood_.panel));
     if (options_.bin == "families") {
         hoodUi_.showBin(app::NeighborhoodUi::Bin::Families);
@@ -658,7 +733,7 @@ void Game::showNeighborhood(Built built) {
     }
     renderer_.setClearColor(0, 0, 0);
     inNeighborhood_ = true;
-    startImposterBaker(hoodUi_.gameOptions().lotView().highImposters);
+    startImposterBaker(hoodHighImposters());
     if (options_.lot > 0) {
         enterLot(static_cast<std::uint32_t>(options_.lot));
     } else if (options_.clickX >= 0) {
@@ -695,6 +770,8 @@ void Game::showChooser() {
     orbit_.keysOn = false;
     cursors_.show(app::Cursors::kArrow);
     screen_.setVisible(menu_, true);
+    // Opened again, the plumbob plays from its start. Whether the game's does is not known yet.
+    playPlumbob();
     screen_.raise(menu_);
     screen_.raise(preview_);  // the preview a tile opens stays over the chooser
     screen_.setModal(menu_);
@@ -702,6 +779,9 @@ void Game::showChooser() {
 
 void Game::closeChooser() {
     clickedTile_.reset();  // a tile clicked just before has no preview to open now
+    for (auto& name : tileNames_) {
+        name.unfocus(screen_);
+    }
     screen_.setVisible(menu_, false);
     screen_.setModal(-1);
     if (inLot_) {
@@ -780,7 +860,8 @@ constexpr std::uint32_t kErrorCancel = 1, kErrorReset = 2, kErrorDelete = 3;
 } // namespace
 
 void Game::updateObjectErrors() {
-    if (!lotLife_ || errorBox_.isOpen() || quitBox_.isOpen() || babyNames_.isOpen()) {
+    if (!lotLife_ || errorBox_.isOpen() || quitBox_.isOpen() || babyNames_.isOpen() || phoneBook_.isOpen() || typePicker_.isOpen() ||
+        messageBox_.isOpen()) {
         return;
     }
     auto& sim = lotLife_->simulation();
@@ -843,6 +924,245 @@ void Game::answerBabyNames() {
     }
     pausedBeforeBabyNames_.reset();
     babyNames_.close(screen_);
+}
+
+// The Personal Phonebook lists the Sims the phone call's script put in its object array, with the
+// caller's relationship marks, and gives the script the Sim picked. The game pauses while it is
+// open, and closing it puts the pause back as it was.
+void Game::updatePhoneBook() {
+    constexpr std::uint16_t kDialogTexts = 0x12D;
+    auto& world = lotLife_->simulation().world();
+    const auto* asked = world.phoneBookAsked();
+    if (asked == nullptr) {
+        closePhoneBook();
+        return;
+    }
+    auto pictureOf = [&](std::int16_t neighbor) { return lotUi_.phoneBookPicture(*lotLife_, neighbor); };
+    if (phoneBook_.isOpen()) {
+        phoneBook_.updatePictures(screen_, pictureOf);
+        return;
+    }
+    // The caller's relationship records towards each Sim: friend or best friend (bits 4 and 5),
+    // enemy (7), love (1) and crush (0), and daily plus lifetime for the relationship sort.
+    std::map<std::int16_t, app::LotLife::Relationship> relationships;
+    for (const auto& r : lotLife_->relationships(asked->asker)) {
+        relationships[r.neighbor] = r;
+    }
+    std::vector<app::PhoneBookDialog::Entry> entries;
+    for (const std::int16_t id : asked->neighbors) {
+        app::PhoneBookDialog::Entry e;
+        e.neighbor = id;
+        if (const auto name = lotLife_->neighborName(id)) {
+            e.first = name->first;
+            e.last = name->last;
+        }
+        e.picture = pictureOf(id);
+        if (const auto it = relationships.find(id); it != relationships.end()) {
+            const int flags = it->second.flags;
+            e.friendMark = (flags & 0x30) != 0;
+            e.enemy = (flags & 0x80) != 0;
+            e.love = (flags & 0x02) != 0;
+            e.crush = (flags & 0x01) != 0;
+            e.relationship = it->second.daily + it->second.lifetime;
+        }
+        entries.push_back(std::move(e));
+    }
+    auto& code = lotLife_->simulation().code();
+    auto text = [&](std::uint16_t number) {
+        return number == 0 ? std::string{} : code.string(asked->textGroup, kDialogTexts, number - 1u).value_or(std::string{});
+    };
+    if (phoneBook_.open(screen_, uiWidth_, uiHeight_, text(asked->title), text(asked->caption), std::move(entries))) {
+        endCameraDrag();  // the dialog takes the mouse, as the quit box does
+        pausedBeforePhoneBook_ = lotLife_->paused();
+        lotLife_->setPaused(true);
+    } else {
+        ts2::diag::warnOnce("phone book: its UI script is missing, the first Sim is called");
+        world.answerPhoneBook(asked->neighbors.empty() ? std::nullopt : std::optional<std::int16_t>(asked->neighbors.front()));
+    }
+}
+
+void Game::answerPhoneBook(std::optional<std::int16_t> picked) {
+    if (lotLife_) {
+        lotLife_->simulation().world().answerPhoneBook(picked);
+    }
+    closePhoneBook();
+}
+
+void Game::closePhoneBook() {
+    if (lotLife_ && pausedBeforePhoneBook_) {
+        lotLife_->setPaused(*pausedBeforePhoneBook_);
+    }
+    pausedBeforePhoneBook_.reset();
+    phoneBook_.close(screen_);
+}
+
+// The object type picker (Dialog type 0x34) lists object types by catalog name, "Call Sim Options"
+// among them, and gives the script the type picked. The game pauses while it is open, and closing
+// it puts the pause back as it was.
+void Game::updateTypePicker() {
+    constexpr std::uint16_t kDialogTexts = 0x12D;
+    constexpr std::uint32_t kGroupPicture = 1;  // the caption's icon, the code owner's picture 1 (UI-57)
+    constexpr std::uint32_t kIconSide = 64;
+    auto& world = lotLife_->simulation().world();
+    const auto* asked = world.typePickerAsked();
+    if (asked == nullptr) {
+        closeTypePicker();
+        return;
+    }
+    if (typePicker_.isOpen()) {
+        return;
+    }
+    auto& code = lotLife_->simulation().code();
+    std::vector<app::TypePickerDialog::Option> options;
+    for (const std::uint32_t guid : asked->types) {
+        const auto* type = code.objectType(guid);
+        if (type == nullptr) {
+            ts2::diag::warnOnce("object type picker: an unknown object type is left out of the list (UI-57)");
+            continue;
+        }
+        const auto set = static_cast<std::uint16_t>(type->definition.field(ts2::objd::field::kCatalogStringsId));
+        options.push_back({guid, code.catalogString(type->group, set, 0).value_or(std::string{})});
+    }
+    auto text = [&](std::uint16_t number) {
+        return number == 0 ? std::string{} : code.string(asked->textGroup, kDialogTexts, number - 1u).value_or(std::string{});
+    };
+    const auto icon = code.image(asked->textGroup, kGroupPicture, kIconSide);
+    if (typePicker_.open(screen_, uiWidth_, uiHeight_, text(asked->title), text(asked->caption), std::move(options), icon ? &*icon : nullptr)) {
+        endCameraDrag();  // the dialog takes the mouse, as the quit box does
+        pausedBeforeTypePicker_ = lotLife_->paused();
+        lotLife_->setPaused(true);
+    } else {
+        ts2::diag::warnOnce("object type picker: its UI script is missing, the first type is picked");
+        world.answerTypePicker(asked->types.empty() ? std::nullopt : std::optional<std::uint32_t>(asked->types.front()));
+    }
+}
+
+void Game::answerTypePicker(std::optional<std::uint32_t> picked) {
+    if (lotLife_) {
+        lotLife_->simulation().world().answerTypePicker(picked);
+    }
+    closeTypePicker();
+}
+
+void Game::closeTypePicker() {
+    if (lotLife_ && pausedBeforeTypePicker_) {
+        lotLife_->setPaused(*pausedBeforeTypePicker_);
+    }
+    pausedBeforeTypePicker_.reset();
+    typePicker_.close(screen_);
+}
+
+// The message box's buttons by the game's ids, the first button 2. A button with no text of its
+// own reads OK (type 0 and 4), Yes, No or Cancel from the UI texts. The game pauses while it is
+// open, and the box stays until a button is pressed.
+void Game::updateMessage() {
+    constexpr std::uint32_t kUiText = 0x7FA7DC7C;
+    constexpr std::uint32_t kOkText = 0x008E0001, kCancelText = 0x008E0002, kYesText = 0x008E0003, kNoText = 0x008E0004;  // string ids, leakcheck: ok
+    constexpr std::uint32_t kFirstButton = 2;
+    auto& world = lotLife_->simulation().world();
+    const auto* asked = world.messageAsked();
+    if (asked == nullptr) {
+        closeMessage();
+        return;
+    }
+    // Another request in the shown one's place (its asker left the lot, or asked anew) shows in its own box.
+    if (messageBox_.isOpen() && (asked->asker != messageAsker_ || asked->message != messageText_)) {
+        closeMessage();
+    }
+    if (messageBox_.isOpen()) {
+        // Unanswered, a box presses its last button once its time is up, the game paused or not.
+        if (messageTimeoutNs_ != 0 && ts2::platform::ticksNs() >= messageTimeoutNs_) {
+            answerMessage(static_cast<std::uint8_t>(asked->buttons.empty() ? 0 : asked->buttons.size() - 1));
+        }
+        return;
+    }
+    std::optional<ts2::tga::Pixels> picture;
+    if (asked->pictureNeighbor != 0 || asked->pictureType != 0) {
+        // A Sim shows the middle of its portrait, its head and shoulders.
+        picture = framedPicture(lotUi_.messagePicture(*lotLife_, asked->pictureNeighbor, asked->pictureType));
+        // The box waits a moment for a portrait still being read.
+        constexpr std::uint64_t kMostWaitNs = 2'000'000'000;
+        const std::uint64_t now = ts2::platform::ticksNs();
+        if (!picture && messageAskedAt_ == 0) {
+            messageAskedAt_ = now;
+        }
+        if (!picture && now - messageAskedAt_ < kMostWaitNs) {
+            return;
+        }
+    }
+    messageAskedAt_ = 0;
+    const bool yesNo = asked->buttons.size() > 1;
+    const std::array<std::uint32_t, 3> usual{yesNo ? kYesText : kOkText, kNoText, kCancelText};
+    std::vector<app::DialogBox::Button> buttons;
+    for (std::size_t i = 0; i < asked->buttons.size() && i < usual.size(); ++i) {
+        const std::string& own = asked->buttons[i];
+        buttons.push_back({kFirstButton + static_cast<std::uint32_t>(i), own.empty() ? data_.text(kUiText, usual[i]) : own});
+    }
+    messageBox_.open(screen_, uiWidth_, uiHeight_, asked->title, asked->message, buttons, picture ? &*picture : nullptr);
+    messageAsker_ = asked->asker;
+    messageText_ = asked->message;
+    // Every type but 4 has a time limit: 13 seconds and a quarter second for each letter of its text.
+    constexpr std::uint64_t kTimeoutNs = 13'000'000'000, kTimeoutPerLetterNs = 250'000'000;
+    constexpr std::uint8_t kMessageNoTimeout = 4;
+    const auto letters = static_cast<std::uint64_t>(std::ranges::count_if(asked->message, [](char c) { return (static_cast<unsigned char>(c) & 0xC0) != 0x80; }));
+    messageTimeoutNs_ = asked->type == kMessageNoTimeout ? 0 : ts2::platform::ticksNs() + kTimeoutNs + letters * kTimeoutPerLetterNs;
+    endCameraDrag();  // the dialog takes the mouse, as the quit box does
+    pausedBeforeMessage_ = lotLife_->paused();
+    lotLife_->setPaused(true);
+}
+
+// A message box's 40 x 40 picture in its frame, 44 x 44: the UI's background picture, the picture
+// in its middle, the frame over both, and the shape picture's alpha cutting the corners. None when
+// there is no picture or the UI pictures are missing.
+std::optional<ts2::tga::Pixels> Game::framedPicture(const std::optional<ts2::tga::Pixels>& picture) {
+    constexpr std::uint32_t kBackground = 0xE9000005, kFrame = 0xE9000006, kShape = 0xE9000007;
+    if (!picture) {
+        return std::nullopt;
+    }
+    auto out = screen_.data().image(kImages, kBackground);
+    const auto frame = screen_.data().image(kImages, kFrame);
+    const auto shape = screen_.data().image(kImages, kShape);
+    if (!out || !frame || !shape || frame->width != out->width || frame->height != out->height || shape->width != out->width ||
+        shape->height != out->height || picture->width > out->width || picture->height > out->height) {
+        ts2::diag::warnOnce("message box: its picture frame is missing, the picture is left out");
+        return std::nullopt;
+    }
+    // Draws `top` over `out` at (x, y) by its alpha.
+    auto over = [&](const ts2::tga::Pixels& top, std::uint32_t x, std::uint32_t y) {
+        for (std::uint32_t ty = 0; ty < top.height; ++ty) {
+            for (std::uint32_t tx = 0; tx < top.width; ++tx) {
+                const std::size_t from = (static_cast<std::size_t>(ty) * top.width + tx) * 4;
+                const std::size_t to = (static_cast<std::size_t>(ty + y) * out->width + tx + x) * 4;
+                const int a = top.rgba[from + 3];
+                for (int c = 0; c < 3; ++c) {
+                    out->rgba[to + c] = static_cast<std::uint8_t>((top.rgba[from + c] * a + out->rgba[to + c] * (255 - a) + 127) / 255);
+                }
+            }
+        }
+    };
+    over(*picture, (out->width - picture->width) / 2, (out->height - picture->height) / 2);
+    over(*frame, 0, 0);
+    for (std::size_t i = 3; i < out->rgba.size(); i += 4) {
+        out->rgba[i] = shape->rgba[i];
+    }
+    return out;
+}
+
+void Game::answerMessage(std::uint8_t button) {
+    if (lotLife_) {
+        lotLife_->simulation().world().answerMessage(button);
+    }
+    closeMessage();
+}
+
+void Game::closeMessage() {
+    if (lotLife_ && pausedBeforeMessage_) {
+        lotLife_->setPaused(*pausedBeforeMessage_);
+    }
+    pausedBeforeMessage_.reset();
+    messageAskedAt_ = 0;
+    messageTimeoutNs_ = 0;
+    messageBox_.close(screen_);
 }
 
 void Game::askToLeave(std::optional<std::size_t> hood) {
@@ -979,10 +1299,18 @@ void Game::enterLot(std::uint32_t id) {
     lotSimBuilding_ = std::async(std::launch::async, [install = install_, file] { return app::loadSimulation(install, file); });
     lotUi_.setObjectThumbnails(openFolder_.parent_path().parent_path() / "Thumbnails" / "ObjectThumbnails.package");
     const app::GameOptionsPanel::LotView lotViewOptions = lotUi_.gameOptions().lotView();
+    for (HouseWorker& worker : houseWorkers_) {
+        if (lotViewOptions.realHouses && !worker.assets && !worker.opening.valid()) {
+            worker.opening = std::async(std::launch::async, [install = install_] {
+                ts2::diag::Timer timer("house: open assets");
+                return std::make_shared<ts2::scene::Assets>(install);
+            });
+        }
+    }
     lotBuilding_ = std::async(std::launch::async, [assets = assets_, file, install = install_, footprint, hoodScene, terrainType, &renderer = renderer_,
                                                  lotViewOptions,
-                                                 poolStylePonds = options_.poolStylePonds, poolStyleSea = options_.poolStyleSea,
-                                                 smoothLotSkirts = options_.smoothLotSkirts, realisticSky = app::GameOptionsPanel::savedRealisticSky(options_.user)] {
+                                                 poolStylePonds = realisticPonds_, poolStyleSea = realisticSea_,
+                                                 smoothLotSkirts = options_.smoothLotSkirts, realisticSky = realisticSky_] {
         assets.get()->setRealisticSky(realisticSky);
         LotBuilt built;
         // The lot's ground heights, which the skirt meets at the lot's edges.
@@ -1053,6 +1381,9 @@ void Game::enterLot(std::uint32_t id) {
             }
             built.lot = app::lotInNeighborhood(*hoodScene, std::move(built.lot), std::move(skirt), *footprint, area, &built.decorations,
                                                &built.surroundings, &built.firstImage);
+            if (built.lot.terrain) {
+                ts2::scene::bakeSeaDepth(*built.lot.terrain, *footprint, lotHeights.get(), groundLevel, smoothLotSkirts);
+            }
             ts2::scene::lightLotSkirt(built.lot, ts2::content::stateTime(built.lightState) != ts2::content::StateTime::Night);
             app::placeCamera(built.camera, *footprint);
             built.place = footprint->place;
@@ -1084,7 +1415,7 @@ void Game::showLot(LotBuilt& built) {
     }
     surroundings_.clear();
     skirtSource_ = built.skirt;
-    margin_ = built.margin;
+    margin_ = surroundingsKey(built.margin, skirtSource_ && skirtSource_->poolStyleSea);
     if (skirtSource_) {
         Surroundings& first = surroundings_[margin_];
         first.count = built.surroundings;
@@ -1146,9 +1477,16 @@ void Game::leaveLot() {
         surroundingsBuilding_ = {};
     }
     neighborsToBuild_.clear();
-    if (neighborBuilding_.valid()) {
-        neighborBuilding_.wait();
-        neighborBuilding_ = {};
+    std::vector<std::shared_ptr<ts2::scene::Assets>> houseAssets;
+    std::vector<std::future<std::shared_ptr<ts2::scene::Assets>>> houseAssetsOpening;
+    for (HouseWorker& worker : houseWorkers_) {
+        if (worker.building.valid()) {
+            worker.building.wait();
+            worker.building = {};
+        }
+        houseAssets.push_back(std::move(worker.assets));
+        houseAssetsOpening.push_back(std::move(worker.opening));
+        worker = {};
     }
     neighborHouses_.clear();
     sharedImages_.clear();
@@ -1161,13 +1499,14 @@ void Game::leaveLot() {
     // Freeing all of the lot at once took a fifth of a second.
     lotLeft_ = renderer_.swap(std::move(hood_.gpu));
     stopLotEffects();
-    lotFreeing_ = std::async(std::launch::async, [scene = std::move(lot_), life = std::move(lotLife_), daylight = std::move(lotDaylight_), neighborAssets = std::move(neighborAssets_)]() mutable {
+    lotFreeing_ = std::async(std::launch::async, [scene = std::move(lot_), life = std::move(lotLife_), daylight = std::move(lotDaylight_), houseAssets = std::move(houseAssets),
+                                                 houseAssetsOpening = std::move(houseAssetsOpening)]() mutable {
         daylight.reset();
         scene = {};
         life.reset();
-        neighborAssets.reset();
+        houseAssets.clear();
+        houseAssetsOpening.clear();
     });
-    neighborAssets_.reset();
     lot_ = {};
     // Poses are kept by object id, and the next lot reuses ids.
     lotPose_ = {};
@@ -1182,6 +1521,12 @@ void Game::leaveLot() {
     pieMenu_.close();
     babyNames_.close(screen_);
     pausedBeforeBabyNames_.reset();
+    pausedBeforePhoneBook_.reset();
+    phoneBook_.close(screen_);
+    pausedBeforeTypePicker_.reset();
+    typePicker_.close(screen_);
+    pausedBeforeMessage_.reset();
+    messageBox_.close(screen_);
     hovered_ = 0;
     hoveredSim_ = false;
     spotTipObject_ = 0;
@@ -1195,19 +1540,77 @@ void Game::leaveLot() {
     screen_.setVisible(hoodUi_.root(), true);
     inNeighborhood_ = true;
     // Lot Imposters may have changed in the lot.
-    if (hoodUi_.gameOptions().lotView().highImposters != highImposters_) {
+    if (hoodHighImposters() != highImposters_) {
         startImposterBaker(!highImposters_);
+    }
+    // So may Water.
+    if (hoodWaterStale()) {
+        refreshNeighborhood();
+    }
+}
+
+void Game::refreshNeighborhood() {
+    if (building_.valid() || hoodRefreshing_.valid() || !inNeighborhood_) {
+        return;
+    }
+    hoodRefreshFolder_ = openFolder_;
+    hoodRefreshing_ = startNeighborhoodBuild(openFolder_);
+}
+
+void Game::showRefreshedNeighborhood(Built built) {
+    // Built for a neighborhood that is no longer the one shown, or while a lot opened: not wanted.
+    if (!inNeighborhood_ || hoodRefreshFolder_ != openFolder_) {
+        return;
+    }
+    hoodEffectPlayer_.reset();
+    freeImposterBaker();
+    const bool atNight = hood_.times.atNight;
+    hood_.scene = std::move(built.scene);
+    hood_.stats = std::move(built.stats);
+    hood_.plumbobs = std::move(built.plumbobs);
+    hood_.times = std::move(built.times);
+    hood_.effects = std::move(built.effects);
+    hoodSea_ = built.realisticSea;
+    hoodPonds_ = built.realisticPonds;
+    renderer_.upload(std::move(built.gpu));
+    renderer_.setImposterLight(hood_.times.now().imposters);
+    // The time of day it was shown at.
+    if (hood_.times.atNight != atNight) {
+        toggleNight();
+    }
+    startHoodEffects();
+    startImposterBaker(hoodHighImposters());
+    ts2::diag::info("neighborhood: built again for the new Water");
+    if (hoodWaterStale()) {
+        refreshNeighborhood();
+    }
+}
+
+void Game::applySeaWater() {
+    if (inLot_ && skirtSource_ && skirtSource_->poolStyleSea != realisticSea_) {
+        auto source = std::make_shared<SkirtSource>(*skirtSource_);
+        source->poolStyleSea = realisticSea_;
+        skirtSource_ = std::move(source);
+        showMargin(lotViewOptions_.skirtMargin.value_or(skirtSource_->defaultMargin));
+    }
+    if (inNeighborhood_ && hoodWaterStale()) {
+        refreshNeighborhood();
     }
 }
 
 // The game's live-mode keys. P, Pause, ` or 0 on the number pad pause. 1, 2 and 3 pick a
 // speed. F5 opens the options. Q asks to quit, as in most of the game's modes.
-app::LotUi::Action Game::lotKey(pf::Key key) {
+app::LotUi::Action Game::lotKey(const pf::Event& e) {
     using Action = app::LotUi::Action;
-    switch (key) {
+    // The game's ` is the Windows key code 0xC0, which other layouts put on another key (" on a
+    // Turkish keyboard). Other systems take the key left of 1.
+    constexpr std::uint16_t kGraveSystemKey = 0xC0;
+    if (e.systemKey != 0 ? e.systemKey == kGraveSystemKey : e.scancode == pf::Key::Grave) {
+        return Action::Pause;
+    }
+    switch (e.key) {
     case pf::Key::P:
     case pf::Key::Pause:
-    case pf::Key::Grave:
     case pf::Key::Pad0: return Action::Pause;
     case pf::Key::Num1:
     case pf::Key::Pad1: return Action::Normal;
@@ -1272,8 +1675,6 @@ void Game::lotAction(app::LotUi::Action action) {
     case Action::GameOptionChanged:
         sims1Turn_ = lotUi_.gameOptions().flag("rotateCameraSims1Mode", sims1Turn_);
         hoodUi_.gameOptions().takeSettings(lotUi_.gameOptions());
-        // Skies read from now on, such as the next time of day's, take the Sky chosen.
-        assets_.get()->setRealisticSky(app::GameOptionsPanel::savedRealisticSky(options_.user));
         applyLotViewOptions();
         applyNeighborHouses();
         renderer_.show(lotShown());
@@ -1297,6 +1698,14 @@ void Game::lotAction(app::LotUi::Action action) {
         }
         break;
     case Action::TrackSim: trackSim(lotUi_.clickedSim()); break;
+    case Action::CloseNotification: lotUi_.closeClickedNotification(*lotLife_); break;
+    case Action::CentreOnNeighbor:
+        // A notification's Sim picture centres the camera on that Sim when it is on the lot.
+        if (const auto sim = lotLife_->simulation().world().neighborData(lotUi_.clickedNeighbor(), 0); sim && *sim > 0) {
+            orbit_.subject = nullptr;
+            centreOnSim(*sim);
+        }
+        break;
     default: break;
     }
 }
@@ -1649,6 +2058,33 @@ void Game::lotMouse(const pf::Event& e, float x, float y) {
         }
         return;
     }
+    if (phoneBook_.isOpen()) {
+        cursors_.show(app::Cursors::kArrow);
+        std::optional<std::int16_t> picked;
+        if (const auto clicked = screen_.mouse(ix, iy, down_, static_cast<double>(ts2::platform::ticksNs()) / 1e9);
+            clicked && phoneBook_.clicked(screen_, *clicked, picked)) {
+            answerPhoneBook(picked);
+        }
+        return;
+    }
+    if (messageBox_.isOpen()) {
+        cursors_.show(app::Cursors::kArrow);
+        if (const auto clicked = screen_.mouse(ix, iy, down_, static_cast<double>(ts2::platform::ticksNs()) / 1e9)) {
+            if (const auto button = messageBox_.clicked(screen_, *clicked)) {
+                answerMessage(static_cast<std::uint8_t>(*button - 2));
+            }
+        }
+        return;
+    }
+    if (typePicker_.isOpen()) {
+        cursors_.show(app::Cursors::kArrow);
+        std::optional<std::uint32_t> picked;
+        if (const auto clicked = screen_.mouse(ix, iy, down_, static_cast<double>(ts2::platform::ticksNs()) / 1e9);
+            clicked && typePicker_.clicked(screen_, *clicked, picked)) {
+            answerTypePicker(picked);
+        }
+        return;
+    }
     if (pieMenu_.isOpen()) {
         using Mouse = app::PieMenuUi::Mouse;
         const bool leftButton = e.type != pf::Event::Type::MouseMotion && e.button == pf::MouseButton::Left;
@@ -1720,6 +2156,10 @@ void Game::toggleNight() {
         terrain->lightMap = ts2::scene::neighborhoodLightMap(terrain->columns, terrain->rows, terrain->heights, terrain->normals,
                                                              terrain->tileSize, now.terrain);
         renderer_.setTerrainLightMap(terrain->lightMap);
+        if (terrain->poolStyleSea) {
+            terrain->seaLight = app::seaLight(times);
+            renderer_.setSeaLight(terrain->seaLight);
+        }
     }
     renderer_.setObjectLighting(now.objects);
     renderer_.setImposterLight(now.imposters);
@@ -1762,6 +2202,7 @@ void Game::updateLot(std::uint64_t now) {
     } else {
         puckCamera();
         orbit_.keysTaken = cheatConsole_.takesKeys();
+        orbit_.cameraHeld = dialogOpen();
         orbit_.gamePixel = pf::firstWindowDisplayScale();
         app::orbitStep(orbit_, dt, width_, height_, [&] { cameraHeight_.apply(orbit_, lot_, lotVisible_, lotPlace_, lotView_.view.level); });
         lotView_.view.facing = orbit_.facing();
@@ -1864,7 +2305,11 @@ void Game::updateLot(std::uint64_t now) {
                                  *lotLife_);
         }
         lotUi_.showLife(*lotLife_);
+        lotUi_.showNotifications(*lotLife_, static_cast<double>(now - lastFrame_) / 1e9);
         updateBabyNames();
+        updatePhoneBook();
+        updateTypePicker();
+        updateMessage();
         updateObjectErrors();
         followSimStorey();
     }
@@ -1888,6 +2333,11 @@ void Game::startLotLife() {
         // As the game's simulator starts, Free Will takes the lot's own saved choice.
         lotUi_.setFreeWill(lotLife_->simulation().globals()[ts2::sim::global::kFreeWill] != 0);
         lotLife_->simulation().world().setAsksNames(true);
+        lotLife_->simulation().world().setAsksPhoneBook(true);
+        lotLife_->simulation().world().setAsksTypePicker(true);
+        lotLife_->simulation().world().setAsksMessages(true);
+        lotLife_->simulation().setTextTables([this](std::uint32_t group, std::uint16_t instance) { return data_.texts(group, instance); });
+        lotLife_->simulation().world().setDeclinesGameTips(options_.noGameTips);
         lotLife_->simulation().world().setBabyFirstNames(data_.text(kLiveText, kBabyBoyText), data_.text(kLiveText, kBabyGirlText));
         std::map<std::uint16_t, std::vector<std::string>> nameTables;
         for (const std::uint16_t table : kNameTables) {
@@ -2019,6 +2469,9 @@ void Game::run() {
         if (auto opened = finished(building_, "neighborhood")) {
             showNeighborhood(std::move(*opened));
         }
+        if (auto refreshed = finished(hoodRefreshing_, "neighborhood")) {
+            showRefreshedNeighborhood(std::move(*refreshed));
+        }
         lotLeft_.releaseSome(32);
         // The lot's panels load while the lot does, in a frame of their own.
         if (loading(lotBuilding_)) {
@@ -2031,8 +2484,10 @@ void Game::run() {
         if (auto around = finished(surroundingsBuilding_, "lot surroundings")) {
             addSurroundings(std::move(*around));
         }
-        if (auto house = finished(neighborBuilding_, "neighbor's house")) {
-            addNeighborHouse(std::move(*house));
+        for (HouseWorker& worker : houseWorkers_) {
+            if (auto house = finished(worker.building, "neighbor's house")) {
+                addNeighborHouse(std::move(*house));
+            }
         }
         buildNextNeighborHouse();
         const std::uint64_t now = ts2::platform::ticksNs();
@@ -2044,6 +2499,12 @@ void Game::run() {
         cursors_.animate(static_cast<double>(now) / 1e9);
         cheatConsole_.tick(screen_, now / 1'000'000);
         tickGraphicsOptions(now / 1'000'000);
+        if (phoneBook_.isOpen()) {
+            phoneBook_.list().tick(now / 1'000'000);
+        }
+        if (typePicker_.isOpen()) {
+            typePicker_.list().tick(now / 1'000'000);
+        }
         if (clickedTile_ && now - tileClickedAt_ > kDoubleClickNs) {
             chosen_ = *clickedTile_;
             clickedTile_.reset();
@@ -2058,6 +2519,7 @@ void Game::run() {
             // A picture is taken without the drift, so the same view gives the same picture.
             puckCamera();
             orbit_.keysTaken = cheatConsole_.takesKeys();
+        orbit_.cameraHeld = dialogOpen();
             orbit_.gamePixel = pf::firstWindowDisplayScale();
             app::orbitStep(orbit_, std::min(0.1f, static_cast<float>(now - lastFrame_) / 1e9f), width_, height_, [this] {
                 if (hoodDrift_ && options_.shot.empty()) {
@@ -2085,6 +2547,7 @@ void Game::run() {
         if (screen_.visible(preview_)) {
             description_.tick(screen_, ts2::platform::ticksNs() / 1'000'000);
         }
+        showPlumbob();
         lastFrame_ = now;
         showSprites(static_cast<double>(ts2::platform::ticksNs()) / 1e9, inNeighborhood_ || inLot_);
         // Clicks on the lot's panels wait for the household to be in them.
@@ -2093,8 +2556,15 @@ void Game::run() {
             if (takePicture()) {
                 running_ = false;
             }
-        } else if (!renderer_.draw(inLot_ || inNeighborhood_ ? viewCamera() : ts2::render::Camera{})) {
-            ts2::platform::delayMs(16);
+        } else {
+            const bool drawn = renderer_.draw(inLot_ || inNeighborhood_ ? viewCamera() : ts2::render::Camera{});
+            if (!windowShown_) {
+                ts2::platform::showFirstWindow();
+                windowShown_ = true;
+            }
+            if (!drawn) {
+                ts2::platform::delayMs(16);
+            }
         }
         paceFrame();
     }
@@ -2119,8 +2589,7 @@ void Game::takeWindowSize(bool force) {
     menuY_ = (uiHeight_ - screen_.height(menu_)) / 2;
     screen_.move(menu_, menuX_, menuY_);
     screen_.move(preview_, menuX_, menuY_);
-    const int backdrop = screen_.find(menu_, kBackdrop);
-    screen_.move(backdrop, (uiWidth_ - screen_.width(backdrop)) / 2 - menuX_, (uiHeight_ - screen_.height(backdrop)) / 2 - menuY_);
+    fitBackdrop();
     for (auto* panel : {&lotUi_.graphicsOptions(), &hoodUi_.graphicsOptions()}) {
         panel->setWindowSize(width_, height_);
         panel->centreBox();
@@ -2163,24 +2632,53 @@ void Game::handleEvent(const pf::Event& e) {
         keepBabyNameTyping();
         return;
     }
+    // The open phone book's or type picker's list takes the wheel over it, a press on its scroll bar,
+    // and the mouse while the bar is held.
+    if (app::ListBoxRows* list = phoneBook_.isOpen() ? &phoneBook_.list() : typePicker_.isOpen() ? &typePicker_.list() : nullptr) {
+        float mx = 0, my = 0;
+        pf::mousePosition(mx, my);
+        const auto [ux, uy] = toUi(mx, my);
+        if (e.type == pf::Event::Type::MouseMotion) {
+            const bool held = list->holdsMouse();
+            list->mouseMove(ux, uy);
+            if (held) {
+                return;
+            }
+        }
+        if (list->holdsMouse() && e.type == pf::Event::Type::MouseUp) {
+            list->mouseUp(ux, uy);
+            return;
+        }
+        if (e.type == pf::Event::Type::MouseDown && e.button == pf::MouseButton::Left &&
+            list->mouseDown(ux, uy, ts2::platform::ticksNs() / 1'000'000)) {
+            return;
+        }
+        if (e.type == pf::Event::Type::MouseWheel && e.wheel != 0 && list->wheel(ux, uy, e.wheel < 0 ? -1 : 1)) {
+            return;
+        }
+    }
     // The scroll bars of the Graphics options' lists take the mouse while held.
     if (inLot_ || inNeighborhood_) {
         float mx = 0, my = 0;
         pf::mousePosition(mx, my);
         const auto [ux, uy] = toUi(mx, my);
         auto& graphics = openGraphicsOptions();
-        if (graphics.holdsMouse() && e.type == pf::Event::Type::MouseMotion) {
-            graphics.mouseMove(uy);
-            return;
+        // Every move lights the thumbs up under the mouse.
+        if (e.type == pf::Event::Type::MouseMotion) {
+            const bool held = graphics.holdsMouse();
+            graphics.mouseMove(ux, uy);
+            if (held) {
+                return;
+            }
         }
         if (graphics.holdsMouse() && e.type == pf::Event::Type::MouseUp) {
-            graphics.mouseUp();
+            graphics.mouseUp(ux, uy);
             return;
         }
         if (e.type == pf::Event::Type::MouseDown && e.button == pf::MouseButton::Left && graphics.mouseDown(ux, uy)) {
             return;
         }
-        if (e.type == pf::Event::Type::MouseWheel && graphics.wheel(ux, uy, static_cast<int>(std::lround(e.wheel)))) {
+        if (e.type == pf::Event::Type::MouseWheel && e.wheel != 0 && graphics.wheel(ux, uy, e.wheel < 0 ? -1 : 1)) {
             return;
         }
     }
@@ -2238,7 +2736,7 @@ void Game::handleEvent(const pf::Event& e) {
         pf::mousePosition(mx, my);
         const auto [ux, uy] = toUi(mx, my);
         const bool left = e.button == pf::MouseButton::Left;
-        if (e.type == pf::Event::Type::MouseDown && left && description_.mouseDown(screen_, ux, uy, ts2::platform::ticksNs() / 1'000'000)) {
+        if (e.type == pf::Event::Type::MouseDown && left && description_.mouseDown(screen_, ux, uy, ts2::platform::ticksNs() / 1'000'000, e.shift)) {
             return;
         }
         if (e.type == pf::Event::Type::MouseMotion) {
@@ -2263,9 +2761,51 @@ void Game::handleEvent(const pf::Event& e) {
             if (e.type == pf::Event::Type::Text) {
                 description_.type(screen_, e.text);
             } else {
-                description_.key(screen_, e.key);
+                description_.key(screen_, e.key, e.shift, e.ctrl);
             }
             return;
+        }
+    }
+    // The chooser's neighborhood names are text boxes too: one takes the mouse on it and the
+    // keyboard once clicked. A changed name isn't kept, as what the game does with it is not known yet.
+    if (menu_ >= 0 && screen_.visible(menu_) && !screen_.visible(preview_) && !quitBox_.isOpen()) {
+        float mx = 0, my = 0;
+        pf::mousePosition(mx, my);
+        const auto [ux, uy] = toUi(mx, my);
+        const bool left = e.button == pf::MouseButton::Left;
+        if (e.type == pf::Event::Type::MouseDown && left) {
+            for (auto& name : tileNames_) {
+                if (name.mouseDown(screen_, ux, uy, ts2::platform::ticksNs() / 1'000'000, e.shift)) {
+                    for (auto& other : tileNames_) {
+                        if (&other != &name) {
+                            other.unfocus(screen_);
+                        }
+                    }
+                    // Unfocusing the box typed in before stops the keyboard for every box.
+                    if (name.focused()) {
+                        ts2::platform::startTextInput();
+                    }
+                    return;
+                }
+            }
+        }
+        for (auto& name : tileNames_) {
+            if (e.type == pf::Event::Type::MouseMotion && name.holdsMouse()) {
+                name.mouseMove(screen_, ux, uy);
+                return;
+            }
+            if (e.type == pf::Event::Type::MouseUp && left && name.holdsMouse()) {
+                name.mouseUp(screen_, ux, uy);
+                return;
+            }
+            if (name.focused() && e.type == pf::Event::Type::Text) {
+                name.type(screen_, e.text);
+                return;
+            }
+            if (name.focused() && e.type == pf::Event::Type::KeyDown && e.key != pf::Key::Escape && e.key != pf::Key::Return) {
+                name.key(screen_, e.key, e.shift, e.ctrl);
+                return;
+            }
         }
     }
     // The naming dialog takes the keyboard while it is open. Keys let go still stop the camera's
@@ -2297,6 +2837,11 @@ void Game::handleEvent(const pf::Event& e) {
         if (e.key == pf::Key::Escape && !e.repeat && !e.shift && !e.ctrl && !e.alt && mouseHeld_ == 0) {
             closeQuitBox();
         }
+    } else if (e.type == pf::Event::Type::KeyDown && inLot_ && messageBox_.isOpen() && lotLife_ &&
+               (e.key == pf::Key::Return || e.key == pf::Key::Escape) && !e.repeat) {
+        // Enter presses the first button and Escape the last, as in the game's message box.
+        const auto* asked = lotLife_->simulation().world().messageAsked();
+        answerMessage(e.key == pf::Key::Return || asked == nullptr ? 0 : static_cast<std::uint8_t>(asked->buttons.size() - 1));
     } else if (e.type == pf::Event::Type::Quit) {
         ts2::diag::step("window closed");
         running_ = false;
@@ -2313,18 +2858,28 @@ void Game::handleEvent(const pf::Event& e) {
     } else if (e.type == pf::Event::Type::KeyDown && !e.repeat && inNeighborhood_ && !neighborhoodCovered() && e.key == pf::Key::L) {
         toggleNight();
     } else if (e.type == pf::Event::Type::KeyDown && inNeighborhood_ && !neighborhoodCovered() &&
-               (key == pf::Key::Comma || key == pf::Key::Period || key == pf::Key::Z || key == pf::Key::X)) {
+               (key == pf::Key::Comma || key == pf::Key::Period || key == pf::Key::Z || key == pf::Key::X) && !dialogOpen()) {
         // The neighborhood camera's turn and zoom keys work as the lot camera's.
         if (!e.repeat || (key != pf::Key::Comma && key != pf::Key::Period)) {
             lotView_.key(key, orbit_);
         }
     } else if (e.type == pf::Event::Type::KeyDown && inLot_) {
-        if (const auto action = lotKey(e.key); action != app::LotUi::Action::None) {
-            lotAction(action);
+        using Action = app::LotUi::Action;
+        if (const auto action = lotKey(e); action != Action::None) {
+            // The game ignores the pause and speed keys while the Personal Phonebook is open. The
+            // message box keeps the game paused the same way.
+            const bool speedKey = action == Action::Pause || action == Action::Normal || action == Action::High || action == Action::Ultra;
+            if (!(speedKey && (phoneBook_.isOpen() || messageBox_.isOpen()))) {
+                lotAction(action);
+            }
+        } else if (dialogOpen() && (key == pf::Key::Z || key == pf::Key::X || key == pf::Key::PadPlus || key == pf::Key::PadMinus ||
+                                    key == pf::Key::Comma || key == pf::Key::Period)) {
+            // The camera stays put while a dialog is open.
         } else if (!e.repeat || (key != pf::Key::Comma && key != pf::Key::Period)) {
             lotView_.key(key, orbit_);
         }
-    } else if (e.type == pf::Event::Type::MouseWheel && (inNeighborhood_ || inLot_) && !neighborhoodCovered() && !(inNeighborhood_ && freeCam_)) {
+    } else if (e.type == pf::Event::Type::MouseWheel && (inNeighborhood_ || inLot_) && !neighborhoodCovered() && !(inNeighborhood_ && freeCam_) &&
+               !dialogOpen()) {
         app::orbitEvent(orbit_, e);
     } else if (e.type == pf::Event::Type::MouseMotion || e.type == pf::Event::Type::MouseDown || e.type == pf::Event::Type::MouseUp) {
         mouseEvent(e);
@@ -2348,7 +2903,7 @@ void Game::mouseEvent(const pf::Event& e) {
         // A click (not a drag) on the neighborhood enters the lot under it.
         // Not while a lot (or the last one's Sims) is still loading.
         const auto [ux, uy] = toUi(x, y);
-        if (inNeighborhood_ && !neighborhoodCovered() && !lotBuilding_.valid() && !loading(lotSimBuilding_) && std::abs(x - downX_) < 4 && std::abs(y - downY_) < 4 &&
+        if (inNeighborhood_ && !neighborhoodCovered() && !lotBuilding_.valid() && !loading(lotSimBuilding_) && !hoodRefreshing_.valid() && std::abs(x - downX_) < 4 && std::abs(y - downY_) < 4 &&
             !screen_.over(ux, uy)) {
             lotClicked(x, y);
         }
@@ -2358,13 +2913,13 @@ void Game::mouseEvent(const pf::Event& e) {
         return;
     }
     if (inLot_) {
-        if (!quitBox_.isOpen() && !babyNames_.isOpen()) {
+        if (!dialogOpen()) {
             cameraDrag(e, x, y);
         }
         lotMouse(e, x, y);
         return;
     }
-    if (inNeighborhood_ && !neighborhoodCovered()) {
+    if (inNeighborhood_ && !neighborhoodCovered() && !dialogOpen()) {
         cameraDrag(e, x, y);
     }
     if (const auto [ux, uy] = toUi(x, y); const auto clicked = screen_.mouse(ux, uy, down_, static_cast<double>(ts2::platform::ticksNs()) / 1e9)) {
@@ -2413,13 +2968,12 @@ void Game::windowClicked(int window) {
             // A lot reads the Lot View Options when it opens. Camera Rotation turns the camera the new way at once.
             lotUi_.gameOptions().takeSettings(hoodUi_.gameOptions());
             sims1Turn_ = lotUi_.gameOptions().flag("rotateCameraSims1Mode", sims1Turn_);
-            assets_.get()->setRealisticSky(app::GameOptionsPanel::savedRealisticSky(options_.user));
-            if (hoodUi_.gameOptions().lotView().highImposters != highImposters_) {
+            if (hoodHighImposters() != highImposters_) {
                 startImposterBaker(!highImposters_);
             }
         } else if (action == app::NeighborhoodUi::Action::MainMenu && !lotBuilding_.valid()) {
             showChooser();
-        } else if (action == app::NeighborhoodUi::Action::EnterLot && !lotBuilding_.valid() && !loading(lotSimBuilding_)) {
+        } else if (action == app::NeighborhoodUi::Action::EnterLot && !lotBuilding_.valid() && !loading(lotSimBuilding_) && !hoodRefreshing_.valid()) {
             const std::uint32_t lot = hoodUi_.cardLot();
             hoodUi_.hideCard();
             enterLot(lot);
@@ -2509,6 +3063,10 @@ bool Game::takePicture() {
         }
         showSprites(static_cast<double>(ts2::platform::ticksNs()) / 1e9, true);
     }
+    // A neighborhood being built again (a new Water) is waited for.
+    if (hoodRefreshing_.valid()) {
+        return false;
+    }
     if (inLot_ && !options_.uiClicks.empty() && !uiClicked_) {
         uiClicked_ = true;
         clickPanels();
@@ -2536,6 +3094,18 @@ bool Game::takePicture() {
             pieMenu_.close();
         }
         showSprites(static_cast<double>(ts2::platform::ticksNs()) / 1e9, true);
+    }
+    // The object menu choice waits for the Sims to come to life too.
+    if (inLot_ && options_.choose && !menuChoiceMade_) {
+        if (!lotLife_) {
+            return false;
+        }
+        menuChoiceMade_ = true;
+        const auto object = static_cast<std::uint32_t>((*options_.choose)[0]);
+        const auto choices = lotLife_->pieMenu(object);
+        if (const auto at = static_cast<std::size_t>((*options_.choose)[1]); (*options_.choose)[1] >= 0 && at < choices.size()) {
+            lotLife_->choose(object, choices[at]);
+        }
     }
     // The asked view holds while the scene runs, so effects turned to the camera face it in the picture.
     if (options_.view) {
@@ -2634,7 +3204,9 @@ int runMenu(const std::filesystem::path& install, const std::filesystem::path& s
     windowOptions.height = height;
     windowOptions.resizable = false;
     windowOptions.highDensity = false;
-    windowOptions.hidden = !options.shot.empty();
+    // Shown once it has its saved size and a first frame drawn (see Game::run), so it never flashes
+    // at its first size.
+    windowOptions.hidden = true;
     windowOptions.fitScreen = options.fitScreen && options.shot.empty();
     std::unique_ptr<pf::Window> window;
     {

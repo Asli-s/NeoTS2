@@ -11,9 +11,27 @@
 #include <stdexcept>
 #include <vector>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 namespace ts2::platform {
 
 namespace {
+
+// The virtual-key code the current keyboard layout gives a Windows scan code (0xE0xx for an
+// extended key), 0 off Windows.
+std::uint16_t systemKeyOf([[maybe_unused]] Uint16 raw) {
+#ifdef _WIN32
+    return static_cast<std::uint16_t>(MapVirtualKeyExW(raw, MAPVK_VSC_TO_VK_EX, GetKeyboardLayout(0)));
+#else
+    return 0;
+#endif
+}
 
 // Sizes and places a window to fill its screen's free area, title bar and borders included. The
 // window is left as it is when the system can't say where that area is or how tall its title bar is.
@@ -178,6 +196,7 @@ bool pollEvent(Event& out) {
             out.type = e.type == SDL_EVENT_KEY_DOWN ? Event::Type::KeyDown : Event::Type::KeyUp;
             out.key = keyOf(e.key.key);
             out.scancode = keyOf(e.key.scancode);
+            out.systemKey = systemKeyOf(e.key.raw);
             out.repeat = e.key.repeat;
             out.shift = (e.key.mod & SDL_KMOD_SHIFT) != 0;
             out.ctrl = (e.key.mod & SDL_KMOD_CTRL) != 0;
@@ -402,6 +421,12 @@ void setFirstWindowFullscreen(bool on) {
     SDL_Window* window = sdlWindow(*windows().front());
     SDL_SetWindowFullscreen(window, on);
     SDL_SyncWindow(window);
+}
+
+void showFirstWindow() {
+    if (!windows().empty()) {
+        SDL_ShowWindow(sdlWindow(*windows().front()));
+    }
 }
 
 std::vector<DisplayMode> firstWindowDisplayModes() {

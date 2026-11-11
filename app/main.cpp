@@ -378,6 +378,9 @@ int main(int argc, char** argv) {
             } else if (arg == "--ui-click" && i + 2 < argc) {
                 menu.uiClicks.push_back({std::stoi(argv[i + 1]), std::stoi(argv[i + 2]), 0});
                 i += 2;
+            } else if (arg == "--choose" && i + 2 < argc) {
+                menu.choose = std::array<int, 2>{std::stoi(argv[i + 1]), std::stoi(argv[i + 2])};
+                i += 2;
             } else if (arg == "--ground-click" && i + 3 < argc) {
                 menu.groundClick = std::array<int, 3>{std::stoi(argv[i + 1]), std::stoi(argv[i + 2]), std::stoi(argv[i + 3])};
                 i += 3;
@@ -401,6 +404,8 @@ int main(int argc, char** argv) {
                 menu.runSeconds = std::stod(argv[++i]);
             } else if (arg == "--unpaused") {
                 menu.unpaused = true;
+            } else if (arg == "--no-game-tips") {
+                menu.noGameTips = true;
             } else if (arg == "--smooth-follow") {
                 menu.smoothFollow = true;
             } else if (arg == "--pool-style-ponds") {

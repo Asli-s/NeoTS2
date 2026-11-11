@@ -135,10 +135,8 @@ settings::LauncherSettings chosenSettings(const LauncherState& state) {
     out.backupReminderSeen = state.backupReminderSeen;
     out.renderer = state.renderer;
     out.smoothFollow = state.smoothFollow;
-    out.poolStylePonds = state.poolStylePonds;
-    out.poolStyleSea = state.poolStyleSea;
     out.smoothLotSkirts = state.smoothLotSkirts;
-    out.windowSize = state.windowSize;
+    out.noGameTips = state.noGameTips;
     return out;
 }
 
@@ -535,10 +533,8 @@ void startPlaying(LauncherState& state, bool addNeighborhoods) {
         state.message = "NeoTS2 is already playing with this save folder.";
         return;
     }
-    const settings::WindowSize* size = settings::findWindowSize(state.windowSize);
-    state.game = startGame(install.root, folder, addNeighborhoods, builtRenderer(state.renderer), state.smoothFollow, state.poolStylePonds, state.poolStyleSea, state.smoothLotSkirts,
-                           size ? size->width : 0,
-                           size ? size->height : 0, size && size->fitScreen, state.message);
+    state.game = startGame(install.root, folder, addNeighborhoods, builtRenderer(state.renderer), state.smoothFollow, state.smoothLotSkirts,
+                           state.noGameTips, state.message);
     state.folderNotes.clear();
 }
 
@@ -708,10 +704,8 @@ void findInstalls(LauncherState& state, const settings::LauncherSettings& rememb
     state.backupReminderSeen = remembered.backupReminderSeen;
     state.renderer = builtRenderer(remembered.renderer);
     state.smoothFollow = remembered.smoothFollow;
-    state.poolStylePonds = remembered.poolStylePonds;
-    state.poolStyleSea = remembered.poolStyleSea;
     state.smoothLotSkirts = remembered.smoothLotSkirts;
-    state.windowSize = remembered.windowSize;
+    state.noGameTips = remembered.noGameTips;
     state.remembered = chosenSettings(state);
 }
 
@@ -761,39 +755,6 @@ void drawRenderer(LauncherState& state, const LauncherFonts& fonts) {
         }
         ImGui::EndCombo();
     }
-    // The window sizes are offered here until the game has its own display settings.
-    static constexpr const char* kDefaultSize = "Window 1280 x 800 (default)";
-    static constexpr const char* kSizeLabels[] = {"Window 1280 x 720 (720p)", "Window 1920 x 1080 (1080p)", "Window 2560 x 1440 (1440p)",
-                                                  "Fit the screen (windowed)"};
-    static_assert(std::size(kSizeLabels) == std::size(settings::kWindowSizes));
-#ifdef _WIN32
-    constexpr bool kFitScreenWorks = true;
-#else
-    constexpr bool kFitScreenWorks = false;  // the game can't measure its title bar here yet
-#endif
-    const char* currentSize = kDefaultSize;
-    for (std::size_t i = 0; i < std::size(kSizeLabels); ++i) {
-        if (state.windowSize == settings::kWindowSizes[i].key) {
-            currentSize = kSizeLabels[i];
-        }
-    }
-    label("Window size");
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18);
-    if (ImGui::BeginCombo("##windowSize", currentSize)) {
-        if (ImGui::Selectable(kDefaultSize, state.windowSize.empty())) {
-            state.windowSize.clear();
-        }
-        for (std::size_t i = 0; i < std::size(kSizeLabels); ++i) {
-            const auto& size = settings::kWindowSizes[i];
-            if (size.fitScreen && !kFitScreenWorks) {
-                continue;
-            }
-            if (ImGui::Selectable(kSizeLabels[i], state.windowSize == size.key)) {
-                state.windowSize = size.key;
-            }
-        }
-        ImGui::EndCombo();
-    }
 }
 
 // Choices that change the game from the original, all off unless the player turns them on.
@@ -803,17 +764,13 @@ void drawChanges(LauncherState& state, const LauncherFonts& fonts) {
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("The game's camera follows in small steps. This makes it glide instead.");
     }
-    ImGui::Checkbox("Pool-style ponds", &state.poolStylePonds);
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Draws the ponds on lots like pools: their waves, blue depth and caustics.");
-    }
-    ImGui::Checkbox("Pool-style sea", &state.poolStyleSea);
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Draws the sea around every lot with waves, a colour that deepens with the water and the pools' caustics under it.");
-    }
     ImGui::Checkbox("Smooth lot skirts", &state.smoothLotSkirts);
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Joins each lot to the ground around it without the game's thin seams along its edges.");
+    }
+    ImGui::Checkbox("No Game Tips", &state.noGameTips);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Answers the game's \"Do you want Game Tips?\" question No when a lot opens.");
     }
 }
 

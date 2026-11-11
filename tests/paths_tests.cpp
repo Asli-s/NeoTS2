@@ -217,25 +217,20 @@ void launcherSettingsRoundTrip() {
     CHECK(kept && kept->smoothFollow);
     const auto other = parseLauncherSettings("NeoTS2 launcher settings 1\nsmooth-follow=yes\n");
     CHECK(other && !other->smoothFollow);
-    // Pool-style ponds too.
-    CHECK(drawn && !drawn->poolStylePonds);
-    LauncherSettings ponds;
-    ponds.poolStylePonds = true;
-    const auto keptPonds = parseLauncherSettings(formatLauncherSettings(ponds));
-    CHECK(keptPonds && keptPonds->poolStylePonds && !keptPonds->smoothFollow);
-    // The window size is one the launcher offers, or the game's default.
-    CHECK(drawn && drawn->windowSize.empty());
-    LauncherSettings sized;
-    sized.windowSize = "1920x1080";
-    const auto sizeKept = parseLauncherSettings(formatLauncherSettings(sized));
-    CHECK(sizeKept && sizeKept->windowSize == "1920x1080");
-    const auto oddSize = parseLauncherSettings("NeoTS2 launcher settings 1\nwindow-size=99999x99999\n");
-    CHECK(oddSize && oddSize->windowSize.empty());
-    sized.windowSize = "fit-screen";
-    const auto fitKept = parseLauncherSettings(formatLauncherSettings(sized));
-    CHECK(fitKept && fitKept->windowSize == "fit-screen" && findWindowSize("fit-screen")->fitScreen);
-    sized.windowSize = "800x600";
-    CHECK(formatLauncherSettings(sized).find("window-size") == std::string::npos);
+    // No Game Tips is off unless the file turns it on, and is kept when saved.
+    CHECK(drawn && !drawn->noGameTips);
+    LauncherSettings noTips;
+    noTips.noGameTips = true;
+    const auto keptTips = parseLauncherSettings(formatLauncherSettings(noTips));
+    CHECK(keptTips && keptTips->noGameTips);
+    // Pond and sea water are chosen in the game now, so an older file's lines for them are skipped.
+    const auto oldWater = parseLauncherSettings("NeoTS2 launcher settings 1\npool-style-ponds=on\npool-style-sea=on\nsmooth-follow=on\n");
+    CHECK(oldWater && oldWater->smoothFollow);
+    CHECK(oldWater && formatLauncherSettings(*oldWater).find("pool-style") == std::string::npos);
+    // The window's size is chosen in the game now, so an older file's window-size line is skipped.
+    const auto oldSize = parseLauncherSettings("NeoTS2 launcher settings 1\nwindow-size=1920x1080\nsmooth-follow=on\n");
+    CHECK(oldSize && oldSize->smoothFollow);
+    CHECK(oldSize && formatLauncherSettings(*oldSize).find("window-size") == std::string::npos);
     // The UI's size is chosen in the game now, so an older file's ui-scale line is skipped.
     const auto oldScale = parseLauncherSettings("NeoTS2 launcher settings 1\nui-scale=150\nsmooth-follow=on\n");
     CHECK(oldScale && oldScale->smoothFollow);

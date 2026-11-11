@@ -8,27 +8,6 @@
 
 namespace ts2::settings {
 
-// The game window's sizes the launcher offers until the game has its own display settings.
-struct WindowSize {
-    std::string_view key;  // as the settings file keeps it
-    int width, height;
-    // The window fills the screen's free area (all but the taskbar or dock) instead of taking a size.
-    bool fitScreen = false;
-};
-inline constexpr WindowSize kWindowSizes[] = {
-    {"1280x720", 1280, 720}, {"1920x1080", 1920, 1080}, {"2560x1440", 2560, 1440}, {"fit-screen", 0, 0, true}};
-
-// The offered size with this key, null for any other text.
-inline const WindowSize* findWindowSize(std::string_view key) {
-    for (const auto& size : kWindowSizes) {
-        if (size.key == key) {
-            return &size;
-        }
-    }
-    return nullptr;
-}
-
-
 // What the launcher remembers between starts. Every path is absolute.
 struct LauncherSettings {
     std::filesystem::path install;     // the chosen install, empty for the first one found
@@ -41,18 +20,13 @@ struct LauncherSettings {
     // The camera glides after a followed Sim instead of moving in the game's steps. Not in the
     // original game, so off unless the player turns it on.
     bool smoothFollow = false;
-    // Lots' ponds drawn like pools, with their surface, depth tint and caustics. Not in the original
-    // game, so off unless the player turns it on.
-    bool poolStylePonds = false;
-    // The sea drawn with a colour that deepens with the water and the pools' caustics under its waves,
-    // around every lot. Not in the original game, so off unless the player turns it on.
-    bool poolStyleSea = false;
     // Lots joined to the ground around them without the game's seams: the skirt follows the lot's
     // edge between its tile corners, and the lot's paints reach its far edges. Not in the original
     // game, so off unless the player turns it on.
     bool smoothLotSkirts = false;
-    // The game window's size: a key of kWindowSizes, or empty for the game's own default.
-    std::string windowSize;
+    // The game's "Do you want Game Tips?" question is answered No. NeoTS2 can't ask it yet and
+    // otherwise answers Yes.
+    bool noGameTips = false;
 
     bool operator==(const LauncherSettings&) const = default;
 };

@@ -49,18 +49,13 @@ public:
     // it (nothing for the install's default), whether the neighbors' lots and the neighborhood's
     // decorations (its plants among them) show, whether the nearest neighbors are real houses instead of
     // imposters or the imposters are drawn sharper (Lot Imposters, not in the original game and saved
-    // in neots2Props.xml), and the Fade Distance squared, 0 for no fading.
+    // in neots2Props.xml), and the Fade Distance squared, 0 for no fading and with real houses.
     struct LotView {
         std::optional<int> skirtMargin;
         bool neighbors = true, decorations = true, realHouses = false, highImposters = false;
         float fadeSquared = 50.0f * 50.0f;
     };
     LotView lotView() const;
-    // Whether the Sky is Realistic, not in the original game and saved in neots2Props.xml: the game's
-    // skies recoloured (see ts2::scene::recolourRealisticSky). Classic is the game's own.
-    bool realisticSky() const { return realisticSky_; }
-    // The saved Sky choice, read without a panel, for scenes built while no panel has read it yet.
-    static bool savedRealisticSky(const std::filesystem::path& userFolder);
     // A saved true or false setting, else globalProps.xml's, else `fallback`.
     bool flag(const std::string& key, bool fallback) const;
 
@@ -72,8 +67,6 @@ private:
     void showChoices();
     void showFreeWill();
     void addImposterGroup();
-    void addSkyGroup();
-    void chooseSky(bool realistic);
     enum class LotImposters : std::uint8_t { Original, High, RealHouses };
     void chooseImposters(LotImposters kind);
 
@@ -89,8 +82,6 @@ private:
     bool freeWill_ = true;
     LotImposters imposters_ = LotImposters::Original;
     int imposterGroup_ = -1;
-    bool realisticSky_ = false;
-    int skyGroup_ = -1;
     std::optional<bool> pickedFreeWill_;
 };
 

@@ -45,6 +45,9 @@ struct Event {
     // where it is (so W is above S on every layout). The same where the system doesn't tell them apart.
     Key key = Key::Unknown;
     Key scancode = Key::Unknown;
+    // The Windows virtual-key code the keyboard layout gives the key, which the game's keys are
+    // matched by. 0 on other systems or when the layout gives none.
+    std::uint16_t systemKey = 0;
     bool repeat = false;  // the key is held and this is not its first press
     bool shift = false, ctrl = false, alt = false;  // for a key or the mouse, the modifier keys held with it
     // A mouse event: the pointer in the window's own units, and for motion how far it moved.
@@ -145,6 +148,8 @@ void resizeFirstWindow(int width, int height);
 // Whether the first window covers its whole screen, without a frame. Nothing changes where the
 // system can't do it.
 void setFirstWindowFullscreen(bool on);
+// Shows the first window if it was made hidden.
+void showFirstWindow();
 // A size the first window's screen can show.
 struct DisplayMode {
     int width = 0, height = 0;
