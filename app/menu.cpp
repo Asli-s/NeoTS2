@@ -2354,7 +2354,7 @@ void Game::startLotLife() {
                 if (sim == nullptr || !sim->isPerson()) {
                     return std::nullopt;
                 }
-                constexpr std::size_t kNeighborId = 0x1F, kYoungAdult = 0xAF;
+                constexpr std::size_t kVoiceType = 0x58, kYoungAdult = 0xAF;
                 const std::int16_t age = sim->personData[ts2::sim::kLifeStagePersonData];
                 ts2::audio::SimVoice v;
                 using Age = ts2::audio::SimVoice::Age;
@@ -2365,9 +2365,11 @@ void Game::startLotLife() {
                         : age == 2                                           ? Age::Toddler
                                                                              : Age::Baby;
                 v.female = sim->personData[ts2::sim::kGenderPersonData] == 1;
-                // Where the game keeps an adult's voice (a or b) isn't known yet: each Sim keeps one,
-                // chosen by its neighbor id.
-                v.voice = (sim->personData[kNeighborId] & 1) != 0 ? 'b' : 'a';
+                // The Sim's "Voice Type" (the game's label for person data 0x58) is a number set when
+                // the Sim is made; adults have two voices, a for an even number and b for an odd one
+                // (how the game turns the number into a letter isn't in the decompilation: the
+                // number's parity is assumed).
+                v.voice = (sim->personData[kVoiceType] & 1) != 0 ? 'b' : 'a';
                 return v;
             });
         }
