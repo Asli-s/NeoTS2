@@ -22,7 +22,7 @@ namespace ts2::sim {
 struct AutonomyTunings {
     float familyMinimum = 0.2f;   // min autonomy score for family
     float visitorMinimum = 0.05f; // min autonomy score for visitors
-    float sittingMinimum = 0.1f;  // min autonomy score for sitting
+    float sittingMinimum = 0.2f;  // min autonomy score for sitting
     int randomSelection = 10;     // random selection count
     int worstMotives = 3;         // random worst motive count
     int maxChecks = 200;          // max check tree in fba count
@@ -139,5 +139,14 @@ private:
 
 // The pick, or nullopt when the Sim already looked this tick or nothing qualifies.
 [[nodiscard]] std::optional<FoundInteraction> findBestInteraction(const InteractionSearch& search);
+
+// How long autonomy leaves an interaction alone after it stopped on an engine gap: 6 Sim hours.
+constexpr std::uint64_t kEngineGapAvoidTicks = 6 * 1800;
+
+// After `sim`'s run stopped on a primitive the engine doesn't run yet, autonomy skips the interaction
+// it was running (on that object, or any part of it) for kEngineGapAvoidTicks from `tick`. The player
+// can still choose it. Without this a Sim picks it again at once, resets again, and loops. Returns
+// whether there was an interaction to avoid.
+bool avoidEngineGap(SimObject& sim, const World& world, std::uint64_t tick);
 
 } // namespace ts2::sim

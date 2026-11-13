@@ -263,6 +263,9 @@ private:
 
     // Scores a candidate by `line`'s advertisements and keeps it when the score is high enough.
     void score(const SimObject& object, std::uint16_t id, const ttab::Interaction& line, Candidate c) {
+        if (avoidedForEngineGap(object, id)) {
+            return;
+        }
         const float after = happiness(*curves_, advertisedMotives(line, s_.me, motives_), human_);
         const float fall = attenuationOf(line, s_.tunings, visitor_) * distance(*origin_, object, s_.tunings.floorCost) + 1.0f;
         const float value = (after - now_) / fall * remembered(object, id, line) * socialBias(object, line) * petBias(object);
@@ -368,6 +371,14 @@ private:
             return factor * static_cast<float>(std::pow(sum + 1.0, t.biasPositive));
         }
         return std::max(0.0001f, factor * static_cast<float>(std::pow(1.0 / (1.0 - sum), t.biasNegative)));
+    }
+
+    // Whether the line on this object last stopped on an engine gap and is still left alone.
+    bool avoidedForEngineGap(const SimObject& object, std::uint16_t id) const {
+        const std::int16_t key = rememberedAs(object);
+        const std::uint64_t tick = s_.world.ticks();
+        return std::ranges::any_of(s_.me.engineGapPicks,
+                                   [&](const AutonomyMemory& m) { return m.object == key && m.interaction == id && tick < m.until; });
     }
 
     // The line's memory multiplier while I remember picking it on this object, else 1.
@@ -607,6 +618,7 @@ std::optional<FoundInteraction> findBestInteraction(const InteractionSearch& sea
         return std::nullopt;
     }
     forgetOldPicks(me.autonomyMemory, tick, search.tunings.memoryCount);
+    std::erase_if(me.engineGapPicks, [tick](const AutonomyMemory& m) { return m.until <= tick; });
     auto found = Search(search).run();
     if (found) {
         if (const SimObject* object = search.world.find(found->object)) {
@@ -620,6 +632,27 @@ std::optional<FoundInteraction> findBestInteraction(const InteractionSearch& sea
         me.foundParams = found->params;
     }
     return found;
+}
+
+bool avoidEngineGap(SimObject& sim, const World& world, std::uint64_t tick) {
+    if (!sim.isPerson() || !sim.running) {
+        return false;
+    }
+    const SimObject* object = world.find(sim.running->object);
+    if (object == nullptr) {
+        return false;
+    }
+    const std::int16_t key = rememberedAs(*object);
+    const std::uint16_t interaction = sim.running->index;
+    const std::uint64_t until = tick + kEngineGapAvoidTicks;
+    for (AutonomyMemory& m : sim.engineGapPicks) {
+        if (m.object == key && m.interaction == interaction) {
+            m.until = until;
+            return true;
+        }
+    }
+    sim.engineGapPicks.push_back({key, interaction, until});
+    return true;
 }
 
 } // namespace ts2::sim

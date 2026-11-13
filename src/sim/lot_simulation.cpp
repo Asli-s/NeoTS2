@@ -1080,12 +1080,22 @@ void LotSimulation::stepObject(std::int16_t id) {
         if (!gap && holdForDialog(*object, inner)) {
             return;
         }
+        if (gap) {
+            avoidEngineGap(*object, world_, ticks_);
+        }
         if (const ObjectType* type = code_.objectType(object->definition.guid())) {
             resetAfterFailure(*object, *type);
             return;
         }
         world_.releaseUses(object->thread.frames);
         object->thread.frames.clear();
+    }
+    // A reset Abort Interactions asked for while the Sim's own code ran (see Vm::tellSimsObjectGoes).
+    if (object != nullptr && std::exchange(object->resetPending, false)) {
+        if (const ObjectType* type = code_.objectType(object->definition.guid())) {
+            resetAfterFailure(*object, *type);
+            return;
+        }
     }
     if (object == nullptr || !object->thread.isRunning()) {
         return;
@@ -1116,6 +1126,9 @@ void LotSimulation::stepObject(std::int16_t id) {
     // Primitives we don't run yet are the engine's gaps, not the game's errors, so they never ask.
     if (type != nullptr && r.outcome != Outcome::Unsupported && holdForDialog(*failed, r)) {
         return;
+    }
+    if (type != nullptr && r.outcome == Outcome::Unsupported) {
+        avoidEngineGap(*failed, world_, ticks_);
     }
     if (type != nullptr) {
         resetAfterFailure(*failed, *type);

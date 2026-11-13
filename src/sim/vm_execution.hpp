@@ -78,6 +78,11 @@ constexpr std::uint16_t kAnimateOverlayOpcode = 0x006B;
 constexpr std::uint16_t kAnimateStopOpcode = 0x006C;
 constexpr std::uint16_t kLookAtOpcode = 0x006E;
 constexpr std::uint16_t kStopAllSoundsOpcode = 0x0030;
+// The tutorial primitive: the game's describer only names operand byte 0 from STR# 0xEE.
+constexpr std::uint16_t kTutorialOpcode = 0x000A;
+// UI Effect: presses, enables, disables, shows or hides controls of the game's UI, plays effects on
+// them, or hangs event trees on them (the describer's names).
+constexpr std::uint16_t kUiEffectOpcode = 0x0022;
 constexpr std::uint16_t kAssignLocomotionOpcode = 0x0072;
 constexpr std::uint16_t kDebugOpcode = 0x0073;
 constexpr std::uint16_t kEffectOpcode = 0x0070;
@@ -190,6 +195,7 @@ constexpr std::uint8_t kPushOntoMyStack = 0x02;
 constexpr std::uint8_t kRunTypeTreeFromTemps = 0x03;
 constexpr std::uint16_t kTreeNameTable = 0x12F;
 
+constexpr std::uint8_t kPlaceInFrontOfMe = 0x00;
 constexpr std::uint8_t kPlaceOnTopOfMe = 0x01;
 constexpr std::uint8_t kPlaceInMyHand = 0x02;
 constexpr std::uint8_t kPlaceInFrontOfStackObject = 0x03;

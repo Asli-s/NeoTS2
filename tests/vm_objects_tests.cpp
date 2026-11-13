@@ -1398,6 +1398,27 @@ void createObjectGoesUnderneathMe() {
     CHECK(made->tile && made->tile->x == 4 && made->tile->y == 6 && made->tile->level == 2);
 }
 
+// Placement 0 "in front of me": the centre of the tile in front of me along my facing, on my level,
+// as placement 3 is for the stack object. Off the lot it is false.
+void createObjectGoesInFrontOfMe() {
+    MemoryCodeSource code;
+    code.addObjectType(kLampGroup, typed(kLampGuid));
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    sim.x = 5 << 16 | 0x8000;
+    sim.y = 5 << 16 | 0x8000;
+    sim.level = 2;
+    sim.data[1] = 2;  // facing
+    code.add(kObjectGroup, 0x1000, bhav({createObject(kLampGuid, 0x00, 0, T, F)}));
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::True);
+    const ts2::sim::SimObject* made = world.find(sim.thread.stackObjectId);
+    CHECK(made != nullptr && made->id != sim.id && made->x == (6 << 16 | 0x8000) && made->y == (5 << 16 | 0x8000) && made->level == 2);
+    sim.thread = {};
+    sim.x = sim.y = ts2::sim::kOffLot;
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::False);
+}
+
 // Placements 4 and 0xA put the new object in slot byte 9 of the stack object or of the object in
 // temp 0, at its place. No such object is false, and so is a missing or full slot (the fit test).
 void createObjectGoesInAnotherObjectsSlot() {
@@ -3242,6 +3263,7 @@ std::vector<Test> vmObjectTests() {
         {"Create Object goes in my hand", createObjectGoesInMyHand},
         {"Create Object goes in another object's slot", createObjectGoesInAnotherObjectsSlot},
         {"Create Object goes underneath me", createObjectGoesUnderneathMe},
+        {"Create Object goes in front of me", createObjectGoesInFrontOfMe},
         {"removed objects leave their slot", removedObjectsLeaveTheirSlot},
         {"use count follows interaction frames", useCountFollowsInteractionFrames},
         {"Sims forget a deleted object", simsForgetADeletedObject},

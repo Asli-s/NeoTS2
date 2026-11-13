@@ -780,7 +780,7 @@ void Execution::stampBirth(SimObject& created) const {
 // flags 0x40 and 0x80 unused). The new object becomes the stack object. Placements (byte 4):
 // - 1 "on top of me" and 2 "in my hand": both into my slot 0.
 // - 4 and 0xA: into slot byte 9 of the stack object or the object in temp 0 (false without one).
-// - 3: in front of the stack object (see tileInFront). 9: next to me (see tileBeside, turn in local
+// - 0 "in front of me" and 3 in front of the stack object (see tileInFront). 9: next to me (see tileBeside, turn in local
 //   byte 10). 5 "underneath me": my exact place and level, not supported off the lot.
 // - "below object in local" or "in param 0": that object's exact place, false without one.
 // - "out of world".
@@ -845,8 +845,8 @@ bool Execution::createObject(const bhav::Instruction& in, Frame& f) {
         spot = CreateSpot{container->x, container->y, container->level,
                           Tile{static_cast<std::uint8_t>(container->x >> 16), static_cast<std::uint8_t>(container->y >> 16),
                                static_cast<std::uint8_t>(container->level)}};
-    } else if (o[4] == kPlaceInFrontOfStackObject) {
-        spot = tileInFront(world().find(stackObject()));
+    } else if (o[4] == kPlaceInFrontOfMe || o[4] == kPlaceInFrontOfStackObject) {
+        spot = tileInFront(o[4] == kPlaceInFrontOfMe ? &me() : world().find(stackObject()));
         if (!spot) {
             return false;
         }

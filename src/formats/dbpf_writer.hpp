@@ -23,8 +23,9 @@ public:
     void add(const ResourceKey& key, std::span<const std::uint8_t> stored, bool compressed, std::uint32_t uncompressedSize);
 
     // Writes the compression directory, the index and the header. `headerWord40` goes in the
-    // header's 4 bytes at 0x40.
-    void finish(std::uint32_t headerWord40);
+    // header's 4 bytes at 0x40. The index has instance-high fields (7.2) when a resource needs one
+    // or `instanceHigh` asks for them, as when a package that had them is written again.
+    void finish(std::uint32_t headerWord40, bool instanceHigh = false);
 
 private:
     void write(std::span<const std::uint8_t> bytes);

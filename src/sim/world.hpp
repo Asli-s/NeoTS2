@@ -294,6 +294,10 @@ struct SimObject {
     std::optional<std::uint64_t> autonomyTick;
     // Autonomy's recent picks (see findBestInteraction). Not saved yet.
     std::vector<AutonomyMemory> autonomyMemory;
+    // NeoTS2's own, not the game's: interactions whose run stopped on a primitive the engine doesn't
+    // run yet, which autonomy leaves alone until `until` so the Sim doesn't pick, reset and pick them
+    // again (see avoidEngineGap). Never saved.
+    std::vector<AutonomyMemory> engineGapPicks;
     // Script data tables (ObjectDataTable).
     DataTables dataTables;
     // The object's own token, which Manage Inventory copies tokens into and out of, and where the
@@ -394,6 +398,10 @@ struct SimObject {
     std::optional<std::string> failedRun;
     // Whether that was a primitive the engine doesn't run yet, which never asks the player.
     bool failedRunGap = false;
+    // A Sim told to abort its interaction on an object that goes (Generic Sims Call Abort
+    // Interactions) while its own code was running. The simulation resets it at the start of its
+    // next turn, once the run that told it has finished, instead of stopping that run.
+    bool resetPending = false;
     // Whether its scripts run on while the game is paused (the plumbob, which follows the selected
     // Sim). It is object data 0x3C as the object was last loaded or reset, so a script setting that
     // field later changes nothing until the next reset.

@@ -60,8 +60,7 @@ void PackageWriter::add(const ResourceKey& key, std::span<const std::uint8_t> st
     entries_.push_back(entry);
 }
 
-void PackageWriter::finish(std::uint32_t headerWord40) {
-    bool instanceHigh = false;
+void PackageWriter::finish(std::uint32_t headerWord40, bool instanceHigh) {
     for (const IndexEntry& entry : entries_) {
         instanceHigh = instanceHigh || entry.key.instanceHigh != 0;
     }

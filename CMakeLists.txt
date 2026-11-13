@@ -218,6 +218,7 @@ add_library(ts2content
     src/content/save_folder.cpp
     src/content/thumbnail_merge.cpp
     src/content/lot_import.cpp
+    src/content/package_rewrite.cpp
     src/content/cameras.cpp
     src/content/user_props.cpp
     src/content/lighting.cpp
@@ -461,6 +462,10 @@ else()
 
     add_executable(dbpfdump tools/dbpfdump/main.cpp)
     target_link_libraries(dbpfdump PRIVATE ts2formats lua50 project_warnings)
+
+    # Saving's first step on real files: writes packages again unchanged and checks them.
+    add_executable(pkgrewrite tools/pkgrewrite/main.cpp)
+    target_link_libraries(pkgrewrite PRIVATE ts2content project_warnings)
 
 
     add_executable(lotview tools/lotview/main.cpp)

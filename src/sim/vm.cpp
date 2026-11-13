@@ -143,6 +143,12 @@ bool Execution::primitive(const bhav::Instruction& in, Frame& f) {
     // Debug only does something with the game's debug (cheat) setting on: console commands.
     case kDebugOpcode:
         return true;
+    // Both only change the game's UI (the tutorial's steps, and controls of its panels), which
+    // NeoTS2's UI doesn't take orders from yet, so they carry on at once. Stopping here instead reset
+    // the object or Sim running them. Event trees hung on controls don't run.
+    case kTutorialOpcode:
+    case kUiEffectOpcode:
+        return true;
     default:
         throw Stop{Outcome::Unsupported, "primitive not implemented", hex(in.opcode, 4)};
     }
@@ -450,12 +456,15 @@ void Vm::tellSimsObjectGoes(std::int16_t object) {
         if (sim == nullptr || !forgetObject(*sim, object)) {
             continue;
         }
-        const bool busy = std::ranges::any_of(running_, [&](const auto& run) { return run.first == &sim->thread || run.second == sim; });
-        if (busy) {
-            throw Stop{Outcome::Unsupported, "a Sim reset while its own code runs", std::to_string(id)};
-        }
         if (!resetSim) {
             throw Stop{Outcome::Unsupported, "a Sim reset needs the lot simulation", std::to_string(id)};
+        }
+        // Its own code runs now (often the very tree that removes the object), so resetting it here
+        // would pull the frames out from under that run. It is reset on its next turn instead.
+        const bool busy = std::ranges::any_of(running_, [&](const auto& run) { return run.first == &sim->thread || run.second == sim; });
+        if (busy) {
+            sim->resetPending = true;
+            continue;
         }
         resetSim(*sim);
     }

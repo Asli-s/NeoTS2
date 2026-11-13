@@ -3,6 +3,7 @@
 #include "test_resources.hpp"
 
 #include "content/download_index.hpp"
+#include "content/package_rewrite.hpp"
 #include "content/downloads.hpp"
 #include "content/resource_index.hpp"
 #include "content/save_folder.hpp"
@@ -798,6 +799,85 @@ void moddedInstallsAreCopiedAsTheyAre() {
 // thumbnail is filed under group 0xFFFFFFFF. A later pack's thumbnail replaces an earlier one with
 // the same type and instance when their high instances match or one is 0, and the stored bytes and
 // compression stay as shipped.
+// Saving's first step. A package written again keeps every resource as stored (compressed ones
+// too), in order, with the header's word at 0x40 and an index with instance-high fields. The first
+// rewrite keeps the original as .neots2bak, later ones leave that alone. Changes replace or add
+// resources. A package that can't be read is left as it was, with nothing beside it.
+void packagesAreRewrittenSafely() {
+    using namespace savefolder;
+    using Key = ts2::dbpf::ResourceKey;
+    const fs::path root = fs::temp_directory_path() / ("neots2-rewrite-test-" + std::to_string(std::random_device{}()));
+    fs::create_directories(root);
+    const fs::path lot = root / "N001_Lot1.package";
+    const Key a{0x584F424A, 0x7FD7A2DA, 1, 0}, b{0x4F626A4D, 0x7FD7A2DA, 2, 0}, c{0x53494D49, 0x7FD7A2DA, 3, 0},
+        d{0x6F626A74, 0x7FD7A2DA, 4, 0};
+    const auto bytes = [](const std::string& s) { return std::vector<std::uint8_t>(s.begin(), s.end()); };
+    {
+        std::ofstream out(lot, std::ios::binary);
+        ts2::dbpf::PackageWriter writer(out);
+        writer.add(a, bytes("object a"), false, 0);
+        writer.add(b, bytes("packed b"), true, 50);  // kept as stored, never unpacked
+        writer.add(c, bytes("sim info"), false, 0);
+        writer.finish(0x00010005, true);
+    }
+    const std::string original = read(lot);
+
+    auto report = ts2::content::rewritePackage(lot);
+    CHECK(report.copied == 3 && report.replaced == 0 && report.added == 0 && report.madeBackup);
+    CHECK(read(report.backup) == original);
+    CHECK(!fs::exists(fs::path(lot) += ".neots2-new"));
+    {
+        ts2::dbpf::Package again(lot);
+        CHECK(again.header().indexMinorVersion == 2 && again.header().majorVersion == 1 && again.header().minorVersion == 2);
+        std::vector<Key> keys;
+        for (const auto& e : again.entries()) {
+            if (e.key.type != ts2::types::kDirectory) {
+                keys.push_back(e.key);
+            }
+        }
+        CHECK((keys == std::vector<Key>{a, b, c}));
+        CHECK(read(lot).substr(0x40, 4) == original.substr(0x40, 4));
+        for (const auto& e : again.entries()) {
+            if (e.key == b) {
+                CHECK(e.compressed && e.uncompressedSize == 50 && again.readRaw(e) == bytes("packed b"));
+            }
+        }
+    }
+
+    const std::vector<ts2::content::ReplacedResource> changes = {{a, bytes("object a, changed")}, {d, bytes("new table")}};
+    report = ts2::content::rewritePackage(lot, changes);
+    CHECK(report.copied == 2 && report.replaced == 1 && report.added == 1 && !report.madeBackup);
+    CHECK(read(report.backup) == original);
+    {
+        ts2::dbpf::Package again(lot);
+        std::map<std::uint32_t, std::string> found;
+        for (const auto& e : again.entries()) {
+            if (e.key.type != ts2::types::kDirectory) {
+                const auto raw = again.readRaw(e);
+                found[e.key.instance] = std::string(raw.begin(), raw.end());
+            }
+        }
+        CHECK(found[1] == "object a, changed" && found[2] == "packed b" && found[3] == "sim info" && found[4] == "new table");
+    }
+    const auto throws = [](auto&& run) {
+        try {
+            run();
+        } catch (const std::exception&) {
+            return true;
+        }
+        return false;
+    };
+    CHECK(throws([&] { (void)ts2::content::rewritePackage(lot, std::vector<ts2::content::ReplacedResource>{{a, {}}, {a, {}}}); }));
+
+    const fs::path broken = root / "broken.package";
+    write(broken, "not a package at all, not even close to a header");
+    CHECK(throws([&] { (void)ts2::content::rewritePackage(broken); }));
+    CHECK(read(broken) == "not a package at all, not even close to a header");
+    CHECK(!fs::exists(fs::path(broken) += ".neots2-new") && !fs::exists(fs::path(broken) += ".neots2bak"));
+    std::error_code error;
+    fs::remove_all(root, error);
+}
+
 void thumbnailsAreMergedAsTheGame() {
     using namespace savefolder;
     const fs::path root = fs::temp_directory_path() / ("neots2-save-test-" + std::to_string(std::random_device{}()));
@@ -1576,6 +1656,7 @@ std::vector<Test> contentTests() {
         {"stopped or broken fills leave the folder alone", stoppedOrBrokenFillsLeaveTheFolderAlone},
         {"modded installs are copied as they are", moddedInstallsAreCopiedAsTheyAre},
         {"one NeoTS2 per save folder", oneNeoTS2PerSaveFolder},
+        {"packages are rewritten safely", packagesAreRewrittenSafely},
         {"thumbnails are merged as the game", thumbnailsAreMergedAsTheGame},
         {"lot catalog is imported as the game", lotCatalogIsImportedAsTheGame},
         {"neighborhoods are added only when missing", neighborhoodsAreAddedOnlyWhenMissing},

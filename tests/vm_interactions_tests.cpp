@@ -113,7 +113,8 @@ void buildBuyCallsListTheRunningObject() {
 }
 
 // Generic call 0x0D makes every other Sim forget the stack object at once: queued interactions on it
-// go, and a Sim whose current interaction object it is gets reset.
+// go, and a Sim whose current interaction object it is gets reset (on its next turn, if it is the
+// one running the call).
 void abortInteractionsTellsEverySim() {
     MemoryCodeSource code;
     Instruction abort = call(0x0001, T, F);
@@ -141,8 +142,13 @@ void abortInteractionsTellsEverySim() {
     CHECK(vm.runEvent(*w.controller, kObjectGroup, 0x1000, 2, {}).outcome == Outcome::True);
     CHECK(queuer.queue.size() == 1 && queuer.queue[0].object == 4 && queuer.data[0x5A] == 0);
     CHECK((reset == std::vector<std::int16_t>{7}));
-    // A Sim that would need a reset while its own code runs stops instead.
-    CHECK(vm.runEvent(user, kObjectGroup, 0x1000, 2, {}).outcome == Outcome::Unsupported);
+    // A Sim that would need a reset while its own code runs finishes the run, and is marked for a
+    // reset on its next turn instead of being reset under it.
+    reset.clear();
+    CHECK(!user.resetPending);
+    CHECK(vm.runEvent(user, kObjectGroup, 0x1000, 2, {}).outcome == Outcome::True);
+    CHECK(reset.empty());
+    CHECK(user.resetPending);
     CHECK(vm.runEvent(*w.controller, kObjectGroup, 0x1000, 99, {}).outcome == Outcome::Error);
 }
 
@@ -567,6 +573,69 @@ void findBestInteractionRemembersItsPicks() {
         world.countTick();
     }
     CHECK(vm.run(sim, 0x1100).outcome == Outcome::True && sim.personData[0x35] == near.id);
+}
+
+// NeoTS2's own: after an interaction stopped on an engine gap, autonomy leaves that line on that
+// object alone for kEngineGapAvoidTicks, then picks it again. The same line elsewhere still counts.
+void findBestInteractionAvoidsEngineGaps() {
+    constexpr std::uint32_t kSnack = 0x0E0F0E0F;
+    MemoryCodeSource code;
+    code.addStrings(ts2::sim::kGlobalGroup, 0x28B, std::vector<std::string>(16, "(-100;0) (100;2000)"));
+    ts2::fcns::Tunings tunings;
+    tunings.values.push_back({"random selection count", 1.0f});
+    tunings.values.push_back({"max duration autonomy memory ", 0.0f});  // no memory multiplier
+    code.setTunings(tunings);
+    auto snackType = typed(kSnack);
+    snackType.fields[ts2::objd::field::kInteractionTableId] = 0x80;
+    code.addObjectType(kObjectGroup, snackType);
+    ts2::ttab::InteractionTable table;
+    ts2::ttab::Interaction line;
+    line.stringIndex = 5;
+    line.action = 0x1005;
+    line.flags = 0x40;  // adults
+    line.autonomy = 50;
+    line.attenuationCode = 4;
+    line.motives.assign(1, std::vector<ts2::ttab::MotiveEffect>(16));
+    line.motives[0][7] = {0, 1000, 0};
+    table.interactions.push_back(line);
+    code.addInteractionTable(kObjectGroup, 0x80, table);
+    code.add(kObjectGroup, 0x1100, bhav({primitiveCall(0x0003, T, F)}));
+
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    sim.personData[0x3A] = 27;   // adult
+    sim.personData[0x24] = 100;  // autonomy level
+    sim.motives.fill(50);
+    sim.motives[7] = -50;
+    sim.x = sim.y = 10 << 16;
+    auto& near = world.create(kObjectGroup, snackType);
+    near.x = 11 << 16;
+    near.y = 10 << 16;
+    auto& far = world.create(kObjectGroup, snackType);
+    far.x = 13 << 16;
+    far.y = 10 << 16;
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(sim, 0x1100).outcome == Outcome::True && sim.personData[0x35] == near.id);
+
+    // Nothing running: nothing to avoid.
+    CHECK(!ts2::sim::avoidEngineGap(sim, world, world.ticks()));
+    ts2::sim::QueuedInteraction running;
+    running.object = near.id;
+    running.index = 5;
+    sim.running = running;
+    CHECK(ts2::sim::avoidEngineGap(sim, world, world.ticks()));
+    CHECK(ts2::sim::avoidEngineGap(sim, world, world.ticks()) && sim.engineGapPicks.size() == 1);  // renewed, not added
+    sim.running = std::nullopt;
+    world.countTick();
+    CHECK(vm.run(sim, 0x1100).outcome == Outcome::True && sim.personData[0x35] == far.id);
+    for (std::uint64_t i = 0; i < ts2::sim::kEngineGapAvoidTicks; ++i) {
+        world.countTick();
+    }
+    CHECK(vm.run(sim, 0x1100).outcome == Outcome::True && sim.personData[0x35] == near.id);
+    CHECK(sim.engineGapPicks.empty());
+    // Objects don't keep a list.
+    near.running = running;
+    CHECK(!ts2::sim::avoidEngineGap(near, world, world.ticks()));
 }
 
 // The social bias: a Sim keeps away from the places near a Sim it is furious at and is drawn to
@@ -2907,6 +2976,7 @@ std::vector<Test> vmInteractionTests() {
         {"Find Best Interaction works for pets", findBestInteractionWorksForPets},
         {"Find Best Interaction keeps visitors to their lines", findBestInteractionKeepsVisitorsToTheirLines},
         {"Find Best Interaction remembers its picks", findBestInteractionRemembersItsPicks},
+        {"Find Best Interaction avoids engine gaps for a while", findBestInteractionAvoidsEngineGaps},
         {"Find Best Interaction weighs the social bias", findBestInteractionWeighsTheSocialBias},
         {"Find Best Interaction weighs offered lines", findBestInteractionWeighsOfferedLines},
         {"Want Satisfy gives points and runs its feedback", wantSatisfyGivesPointsAndRunsItsFeedback},
