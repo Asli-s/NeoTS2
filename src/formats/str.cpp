@@ -1,6 +1,7 @@
 #include "formats/str.hpp"
 
 #include "formats/binary_reader.hpp"
+#include "formats/binary_writer.hpp"
 
 #include <algorithm>
 #include <stdexcept>
@@ -80,6 +81,65 @@ StringTable parse(std::span<const std::uint8_t> data) {
         t.entries.push_back(std::move(e));
     }
     return t;
+}
+
+namespace {
+
+// Where the game sorts a language among the others.
+int languageOrder(std::uint8_t language) {
+    return static_cast<std::int8_t>(static_cast<std::uint8_t>(language - 1));
+}
+
+void putText(BinaryWriter& w, const std::string& text) {
+    if (text.find('\0') != std::string::npos) {
+        fail("a text with a zero byte cannot be written");
+    }
+    for (const char c : text) {
+        w.u8(static_cast<std::uint8_t>(c));
+    }
+    w.u8(0);
+}
+
+} // namespace
+
+std::optional<Record> readRecord(std::span<const std::uint8_t> data) {
+    try {
+        const StringTable table = parse(data);
+        Record record{table.name, table.entries};
+        if (!table.supported || table.format != kWrittenFormat ||
+            writeRecord(record) != std::vector<std::uint8_t>(data.begin(), data.end())) {
+            return std::nullopt;
+        }
+        return record;
+    } catch (const std::runtime_error&) {
+        return std::nullopt;
+    }
+}
+
+std::vector<std::uint8_t> writeRecord(const Record& record) {
+    if (record.name.size() > kNameSize || record.name.find('\0') != std::string::npos) {
+        fail("a name the game cannot write");
+    }
+    if (record.entries.size() > 0xFFFF) {
+        fail("too many entries to write");
+    }
+    BinaryWriter w;
+    for (const char c : record.name) {
+        w.u8(static_cast<std::uint8_t>(c));
+    }
+    w.zeros(kNameSize - record.name.size());
+    w.u16(kWrittenFormat);
+    w.u16(static_cast<std::uint16_t>(record.entries.size()));
+    for (std::size_t i = 0; i < record.entries.size(); ++i) {
+        const Entry& e = record.entries[i];
+        if (i > 0 && languageOrder(e.language) < languageOrder(record.entries[i - 1].language)) {
+            fail("entries out of the game's language order");
+        }
+        w.u8(e.language);
+        putText(w, e.value);
+        putText(w, e.description);
+    }
+    return w.take();
 }
 
 } // namespace ts2::str

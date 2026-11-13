@@ -78,6 +78,7 @@ std::optional<Frame> startFrame(CodeSource& code, const ObjectType& type, std::u
 
 void restartMain(SimObject& object, const ObjectType& type, CodeSource& code) {
     object.thread.frames.clear();
+    object.runDepths.clear();
     object.thread.pendingResult.reset();
     object.thread.sleepTicks = 0;
     object.thread.stackObjectId = 0;

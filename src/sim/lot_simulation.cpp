@@ -942,8 +942,11 @@ void LotSimulation::startObjects() {
     constexpr std::uint16_t kLoad = 2, kInit = 0, kReset = 0x2B;  // OBJf entries
     const std::set<std::int16_t> changed(report_.changedType.begin(), report_.changedType.end());
     std::vector<std::int16_t> ids;
-    world_.nextAfter(0, [&](const SimObject& o) {
+    world_.nextAfter(0, [&](SimObject& o) {
         ids.push_back(o.id);
+        if (o.isPerson() && o.currentInteraction == SimObject::CurrentInteraction::None) {
+            o.currentInteraction = SimObject::CurrentInteraction::Blank;
+        }
         return false;
     });
     // Runs object function `entry` of object `id`, if it still exists and has one. A function whose
@@ -1086,6 +1089,7 @@ void LotSimulation::stepObject(std::int16_t id) {
         }
         world_.releaseUses(object->thread.frames);
         object->thread.frames.clear();
+        object->runDepths.clear();
     }
     if (object == nullptr || !object->thread.isRunning()) {
         return;
@@ -1209,6 +1213,7 @@ void LotSimulation::resetAfterFailure(SimObject& object, const ObjectType& type)
     constexpr std::uint16_t kInit = 0, kCleanup = 3;  // OBJf entries
     world_.releaseUses(object.thread.frames);
     object.thread.frames.clear();
+    object.runDepths.clear();
     if (object.isPerson()) {
         restartSim(object, type);
         return;

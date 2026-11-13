@@ -31,4 +31,44 @@ Relationship parse(std::span<const std::uint8_t> data) {
     return rel;
 }
 
+std::optional<Record> readRecord(std::span<const std::uint8_t> data) {
+    try {
+        BinaryReader r(data);
+        if (r.i32() != kWrittenVersion) {
+            return std::nullopt;
+        }
+        const std::uint32_t count = r.u32();
+        if (count > kMaxValues || r.remaining() != std::size_t{count} * 4) {
+            return std::nullopt;
+        }
+        Record record;
+        record.values.reserve(count);
+        for (std::uint32_t i = 0; i < count; ++i) {
+            record.values.push_back(r.i32());
+        }
+        return record;
+    } catch (const std::runtime_error&) {
+        return std::nullopt;
+    }
+}
+
+std::vector<std::uint8_t> writeRecord(const Record& record) {
+    if (record.values.size() > kMaxValues) {
+        throw std::runtime_error("srel: too many values to write");
+    }
+    std::vector<std::uint8_t> out;
+    out.reserve(8 + 4 * record.values.size());
+    const auto put = [&out](std::uint32_t v) {
+        for (int shift = 0; shift < 32; shift += 8) {
+            out.push_back(static_cast<std::uint8_t>(v >> shift));
+        }
+    };
+    put(kWrittenVersion);
+    put(static_cast<std::uint32_t>(record.values.size()));
+    for (const std::int32_t v : record.values) {
+        put(static_cast<std::uint32_t>(v));
+    }
+    return out;
+}
+
 } // namespace ts2::srel

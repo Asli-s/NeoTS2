@@ -39,6 +39,19 @@ bool copyInto(LazyArray<std::int16_t, N>& to, const std::vector<std::int16_t>& f
     return from.size() <= N;
 }
 
+// A Sim's saved runs (the trees started on its stack as runs of their own) and whether its running
+// interaction was a blank one, as the game loads them with the stack.
+void restoreRuns(const xobj::PersonState& saved, SimObject& object) {
+    for (const auto& run : saved.runs) {
+        // Only a broken save holds a negative depth. That run is left out.
+        if (run.depth >= 0) {
+            object.runDepths.push_back(static_cast<std::size_t>(run.depth));
+        }
+    }
+    object.currentInteraction =
+        xobj::isBlank(saved.running) ? SimObject::CurrentInteraction::Blank : SimObject::CurrentInteraction::Started;
+}
+
 std::optional<std::string> restoreStack(const content::Lot& lot, const content::LotObject& saved,
                                         SimObject& object, CodeSource& code) {
     if (!saved.state.tail) {
@@ -322,6 +335,8 @@ LotWorldReport buildWorld(const content::Lot& lot, CodeSource& code, World& worl
         }
         if (auto problem = restoreStack(lot, saved, object, code)) {
             report.problems.push_back({saved.id, *problem});
+        } else if (state.person) {
+            restoreRuns(state.person->state, object);
         }
         restoreOverlays(lot, saved.id, object, code, world.clockMs());
         restoreSimClip(lot, saved.id, object);

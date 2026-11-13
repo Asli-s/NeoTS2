@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -22,5 +23,28 @@ struct SimulatorState {
 };
 
 SimulatorState parse(std::span<const std::uint8_t> data);
+
+// The version the game writes. It reads older ones and saves them as this.
+constexpr std::uint32_t kWrittenVersion = 0xD8;
+constexpr std::size_t kRecordSize = 498;
+
+// The whole record of the version the game writes, every byte kept, to be written back. Fields
+// whose meaning is not known yet are kept as their bytes.
+struct Record {
+    std::array<std::uint8_t, 64> name{};
+    std::array<std::int16_t, kGlobalCount> globals{};
+    std::array<std::uint8_t, 10> beforeRandomStates{};
+    std::uint32_t tickRandomState = 0;   // the state the simulator's ticks draw from
+    std::uint32_t otherRandomState = 0;  // the state draws outside the ticks use
+    // Five values, then six blocks of a version (2) and ten values.
+    std::array<std::uint8_t, 284> rest{};
+};
+
+// Reads a record of the version the game writes. Empty for any other version, a wrong magic or
+// size, or a reserved word that is not 0 (the game always writes 0 there).
+std::optional<Record> readRecord(std::span<const std::uint8_t> data);
+
+// Writes the record as the game writes it, kRecordSize bytes.
+std::vector<std::uint8_t> writeRecord(const Record& record);
 
 } // namespace ts2::simi

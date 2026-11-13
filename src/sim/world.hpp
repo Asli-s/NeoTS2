@@ -274,6 +274,17 @@ struct SimObject {
     Boxed<QueuedInteraction> runningSub;
     // The id the Sim's last queued interaction got.
     std::uint32_t nextInteractionId = 0;
+    // The depths of the trees started on a Sim's own stack as runs of their own (Run Tree by Name
+    // modes 2 and 3, Run Functional Tree, Idle for Input, Gosub Found Action, a walk's or a turn's
+    // trees), each until it returns.
+    std::vector<std::size_t> runDepths;
+    // The Sim's current interaction as the game keeps it beside the queue: none yet, a blank one
+    // while the Sim has nothing to do, or the interaction it started last. Each time a Sim's runs
+    // all return with a blank one, the blank one is replaced by a new one with the next id from
+    // the simulator's id counter. A Sim loaded with the lot keeps the runs and the kind of current
+    // interaction it was saved with, or starts with a blank one.
+    enum class CurrentInteraction : std::uint8_t { None, Blank, Started };
+    CurrentInteraction currentInteraction = CurrentInteraction::None;
     // The queue icon of autonomy's last pick, which Gosub Found Action gives the interaction it
     // starts. Not saved yet.
     InteractionIcon foundIcon;
@@ -387,9 +398,8 @@ struct SimObject {
     std::vector<std::int16_t> destinations;
     Boxed<PostRouteWait> postRoute;
     Boxed<Reaching> reaching;
-    // Timers On Timer set on it, in the order they were set, and the last id given out.
+    // Timers On Timer set on it, in the order they were set.
     std::vector<ObjectTimer> timers;
-    std::uint16_t lastTimerId = 0;
     // Why a tree another object ran on it at once failed. The simulation resets it on its next turn.
     std::optional<std::string> failedRun;
     // Whether that was a primitive the engine doesn't run yet, which never asks the player.

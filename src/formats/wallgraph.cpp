@@ -1,6 +1,7 @@
 #include "formats/wallgraph.hpp"
 
 #include "formats/binary_reader.hpp"
+#include "formats/binary_writer.hpp"
 
 #include <stdexcept>
 
@@ -72,6 +73,41 @@ WallGraph parse(std::span<const std::uint8_t> data) {
         throw std::runtime_error("cWallGraph: data left after the walls");
     }
     return g;
+}
+
+std::vector<std::uint8_t> write(const WallGraph& graph) {
+    BinaryWriter w;
+    w.recordHeader(kType, kWrittenVersion, "cWallGraph");
+    for (const std::int32_t v : graph.unknown) {
+        w.i32(v);
+    }
+    w.i32(graph.firstLevel);
+    w.i32(graph.width);
+    w.i32(graph.height);
+    w.i32(graph.levels);
+    for (const std::int32_t v : graph.counters) {
+        w.i32(v);
+    }
+    w.count(graph.points.size());
+    for (const Point& p : graph.points) {
+        w.i32(p.id);
+        w.f32(p.x);
+        w.f32(p.y);
+        w.i32(p.level);
+    }
+    w.count(graph.rooms.size());
+    for (const std::int32_t room : graph.rooms) {
+        w.i32(room);
+    }
+    w.count(graph.walls.size());
+    for (const Wall& wall : graph.walls) {
+        w.i32(wall.id);
+        w.i32(wall.from);
+        w.i32(wall.leftRoom);
+        w.i32(wall.to);
+        w.i32(wall.rightRoom);
+    }
+    return w.take();
 }
 
 } // namespace ts2::wallgraph

@@ -1,6 +1,7 @@
 #include "formats/fami.hpp"
 
 #include "formats/binary_reader.hpp"
+#include "formats/binary_writer.hpp"
 
 #include <stdexcept>
 
@@ -50,6 +51,122 @@ Family parse(std::span<const std::uint8_t> data) {
     f.funds2 = f.version >= 0x51 ? r.i32() : f.funds;
     f.extraBytes = r.remaining();
     return f;
+}
+
+std::vector<std::uint8_t> write(const Family& family) {
+    BinaryWriter w;
+    w.u32(kMagic);
+    w.u32(kWrittenVersion);
+    w.u32(family.unknown0);
+    w.i32(family.lot);
+    w.i32(family.currentLot);
+    w.i32(family.vacationLot);
+    w.i32(family.value4);
+    w.i32(family.funds);
+    w.i32(family.value6);
+    w.u32(family.flags);
+    w.count(family.members.size());
+    for (const std::uint32_t guid : family.members) {
+        w.u32(guid);
+    }
+    w.u32(family.id7);
+    w.u32(family.value8);
+    w.i32(family.funds2);
+    return w.take();
+}
+
+namespace {
+constexpr std::uint32_t kHistoryVersion = 0x55;
+constexpr std::size_t kHistoryZeroShorts = 5;
+} // namespace
+
+std::optional<History> readHistory(std::span<const std::uint8_t> data) {
+    try {
+        BinaryReader r(data);
+        if (r.u32() != kHistoryType || r.u32() != kHistoryVersion || r.u32() != 0 || r.u8() != 0) {
+            return std::nullopt;
+        }
+        History h;
+        // Each item takes at least 83 bytes.
+        h.items.resize(r.u32Count(83));
+        for (HistoryItem& item : h.items) {
+            for (std::uint16_t& v : item.shorts1) {
+                v = r.u16();
+            }
+            for (std::int32_t& v : item.values1) {
+                v = r.i32();
+            }
+            for (std::uint16_t& v : item.shorts2) {
+                v = r.u16();
+            }
+            for (std::size_t i = 0; i < kHistoryZeroShorts; ++i) {
+                if (r.u16() != 0) {
+                    return std::nullopt;
+                }
+            }
+            for (std::int32_t& v : item.values2) {
+                v = r.i32();
+            }
+            for (std::uint16_t& v : item.shorts3) {
+                v = r.u16();
+            }
+            for (bool& flag : item.flags) {
+                const std::uint8_t b = r.u8();
+                if (b > 1) {
+                    return std::nullopt;
+                }
+                flag = b == 1;
+            }
+            item.texts.resize(r.u32Count(4));
+            for (std::string& text : item.texts) {
+                const auto bytes = r.bytes(r.u32());
+                text.assign(bytes.begin(), bytes.end());
+            }
+        }
+        if (r.remaining() != 0) {
+            return std::nullopt;
+        }
+        return h;
+    } catch (const std::runtime_error&) {
+        return std::nullopt;
+    }
+}
+
+std::vector<std::uint8_t> writeHistory(const History& history) {
+    BinaryWriter w;
+    w.u32(kHistoryType);
+    w.u32(kHistoryVersion);
+    w.u32(0);
+    w.u8(0);
+    w.count(history.items.size());
+    for (const HistoryItem& item : history.items) {
+        for (const std::uint16_t v : item.shorts1) {
+            w.u16(v);
+        }
+        for (const std::int32_t v : item.values1) {
+            w.i32(v);
+        }
+        for (const std::uint16_t v : item.shorts2) {
+            w.u16(v);
+        }
+        for (std::size_t i = 0; i < kHistoryZeroShorts; ++i) {
+            w.u16(0);
+        }
+        for (const std::int32_t v : item.values2) {
+            w.i32(v);
+        }
+        for (const std::uint16_t v : item.shorts3) {
+            w.u16(v);
+        }
+        for (const bool flag : item.flags) {
+            w.u8(flag ? 1 : 0);
+        }
+        w.count(item.texts.size());
+        for (const std::string& text : item.texts) {
+            w.fullText(text);
+        }
+    }
+    return w.take();
 }
 
 } // namespace ts2::fami

@@ -18,4 +18,9 @@ struct Post {
 // cFencePostLayer (resource type 0xAB4BA572).
 std::vector<Post> parse(std::span<const std::uint8_t> data);
 
+constexpr std::uint32_t kType = 0xAB4BA572;
+
+// The layer as the game writes it (version 1). Throws std::runtime_error for a list too long to write.
+std::vector<std::uint8_t> write(const std::vector<Post>& posts);
+
 } // namespace ts2::fencepostlayer

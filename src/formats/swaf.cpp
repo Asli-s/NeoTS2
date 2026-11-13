@@ -1,6 +1,7 @@
 #include "formats/swaf.hpp"
 
 #include "formats/binary_reader.hpp"
+#include "formats/binary_writer.hpp"
 
 #include <algorithm>
 #include <iterator>
@@ -135,6 +136,144 @@ WantsAndFears parse(std::span<const std::uint8_t> data) {
     }
     s.extraBytes = r.remaining();
     return s;
+}
+
+namespace {
+
+// A want as the game writes it now: the argument and value by the argument's kind.
+void writeWant(BinaryWriter& w, const Want& want) {
+    w.u32(kWrittenWantVersion);
+    w.u16(want.id);
+    w.u32(want.guid);
+    w.u8(want.type);
+    switch (want.type) {
+    case 0:
+        break;
+    case 1:
+    case 4:
+        w.u16(static_cast<std::uint16_t>(want.argument));
+        break;
+    case 2:
+    case 3:
+    case 5:
+    case 6:
+        w.i32(want.argument);
+        break;
+    default:
+        throw std::runtime_error("swaf: a want type the game does not write");
+    }
+    w.u16(static_cast<std::uint16_t>(want.value));
+    if (want.tail.size() != 3) {
+        throw std::runtime_error("swaf: a want without its three numbers");
+    }
+    for (const std::int32_t v : want.tail) {
+        w.i32(v);
+    }
+    w.u8(want.flags);
+}
+
+void writeWantList(BinaryWriter& w, const std::vector<Want>& wants) {
+    w.count(wants.size());
+    for (const Want& want : wants) {
+        writeWant(w, want);
+    }
+}
+
+// Reads a want written now, empty for another version or an argument outside the bits it is
+// written with.
+std::optional<Want> readCurrentWant(BinaryReader& r) {
+    Want w = readWant(r);
+    const bool shortArgument = w.type == 1 || w.type == 4;
+    if (w.version != kWrittenWantVersion || (shortArgument && w.argument != static_cast<std::int16_t>(w.argument))) {
+        return std::nullopt;
+    }
+    return w;
+}
+
+bool readCurrentWants(BinaryReader& r, std::vector<Want>& out) {
+    // A want takes at least 26 bytes.
+    for (std::size_t n = r.u32Count(26); n > 0; --n) {
+        auto w = readCurrentWant(r);
+        if (!w) {
+            return false;
+        }
+        out.push_back(std::move(*w));
+    }
+    return true;
+}
+
+} // namespace
+
+std::optional<Record> readRecord(std::span<const std::uint8_t> data, std::size_t* leftOver) {
+    try {
+        BinaryReader r(data);
+        if (r.u32() != kWrittenVersion) {
+            return std::nullopt;
+        }
+        Record record;
+        const std::uint32_t hasExtra = r.u32();
+        if (hasExtra > 1) {
+            return std::nullopt;
+        }
+        if (hasExtra == 1) {
+            record.extra = readCurrentWant(r);
+            if (!record.extra) {
+                return std::nullopt;
+            }
+        }
+        record.maxWants = r.u32();
+        if (!readCurrentWants(r, record.wants)) {
+            return std::nullopt;
+        }
+        record.maxFears = r.u32();
+        if (!readCurrentWants(r, record.fears)) {
+            return std::nullopt;
+        }
+        const std::int32_t last = r.i32();
+        if (last != static_cast<std::int16_t>(last) || r.u32() != kWrittenHistoryVersion) {
+            return std::nullopt;
+        }
+        record.lastValue = static_cast<std::int16_t>(last);
+        record.historyValue = r.i32();
+        for (std::size_t n = r.u32Count(8); n > 0; --n) {
+            const std::uint32_t guid = r.u32();
+            std::vector<Want> wants;
+            if (!readCurrentWants(r, wants)) {
+                return std::nullopt;
+            }
+            record.history.emplace_back(guid, std::move(wants));
+        }
+        if (leftOver) {
+            *leftOver = r.remaining();
+        } else if (r.remaining() != 0) {
+            return std::nullopt;
+        }
+        return record;
+    } catch (const std::runtime_error&) {
+        return std::nullopt;
+    }
+}
+
+std::vector<std::uint8_t> writeRecord(const Record& record) {
+    BinaryWriter w;
+    w.u32(kWrittenVersion);
+    w.u32(record.extra ? 1 : 0);
+    if (record.extra) {
+        writeWant(w, *record.extra);
+    }
+    w.u32(record.maxWants);
+    writeWantList(w, record.wants);
+    w.u32(record.maxFears);
+    writeWantList(w, record.fears);
+    w.i32(record.lastValue);
+    w.u32(kWrittenHistoryVersion);
+    w.i32(record.historyValue);
+    w.count(record.history.size());
+    for (const auto& [guid, wants] : record.history) {
+        w.u32(guid);
+        writeWantList(w, wants);
+    }
+    return w.take();
 }
 
 } // namespace ts2::swaf

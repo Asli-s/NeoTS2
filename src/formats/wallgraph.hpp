@@ -60,4 +60,12 @@ private:
 
 WallGraph parse(std::span<const std::uint8_t> data);
 
+constexpr std::uint32_t kType = 0x0A284D0B;
+// The game writes version 3. Graphs of version 2 come from older games.
+constexpr std::uint32_t kWrittenVersion = 3;
+
+// The graph as the game writes it, at version 3. Throws std::runtime_error for a list too long to
+// write.
+std::vector<std::uint8_t> write(const WallGraph& graph);
+
 } // namespace ts2::wallgraph

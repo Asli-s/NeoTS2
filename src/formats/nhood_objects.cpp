@@ -1,6 +1,7 @@
 #include "formats/nhood_objects.hpp"
 
 #include "formats/binary_reader.hpp"
+#include "formats/binary_writer.hpp"
 
 #include <stdexcept>
 #include <string>
@@ -152,6 +153,178 @@ Objects parseObjects(std::span<const std::uint8_t> data) {
         placedTail(r, version, kDecorationLayout, f);
     }
     return out;
+}
+
+namespace {
+
+constexpr std::uint8_t kTileVersion = 2;
+constexpr std::uint8_t kPlacedVersion = 8, kRoadVersion = 3, kBridgeVersion = 3;
+constexpr std::uint16_t kPlacedListVersion = 8, kRoadListVersion = 3, kBridgeListVersion = 3;
+// The fewest bytes of each entry: a tile, then a plant or decoration, a road, a road part.
+constexpr std::size_t kTileBytes = 29, kPlacedBytes = kTileBytes + 9, kRoadRecordBytes = kTileBytes + 95, kRoadPartBytes = 64;
+
+// Any part that does not match what the game writes now.
+struct NotWritten {};
+
+template <std::size_t N>
+void readFloats(BinaryReader& r, std::array<float, N>& out) {
+    for (float& v : out) {
+        v = r.f32();
+    }
+}
+
+template <std::size_t N>
+void writeFloats(BinaryWriter& w, const std::array<float, N>& values) {
+    for (const float v : values) {
+        w.f32(v);
+    }
+}
+
+void expect8(BinaryReader& r, std::uint8_t value) {
+    if (r.u8() != value) {
+        throw NotWritten{};
+    }
+}
+
+std::size_t listCount(BinaryReader& r, std::uint16_t version, std::size_t entryBytes) {
+    if (r.u16() != version) {
+        throw NotWritten{};
+    }
+    return r.u32Count(entryBytes);
+}
+
+void readTile(BinaryReader& r, std::array<float, 3>& center, std::array<float, 4>& bounds) {
+    expect8(r, kTileVersion);
+    readFloats(r, center);
+    readFloats(r, bounds);
+}
+
+void writeTile(BinaryWriter& w, const std::array<float, 3>& center, const std::array<float, 4>& bounds) {
+    w.u8(kTileVersion);
+    writeFloats(w, center);
+    writeFloats(w, bounds);
+}
+
+RoadRecord readRoad(BinaryReader& r) {
+    RoadRecord road;
+    readTile(r, road.center, road.bounds);
+    expect8(r, kRoadVersion);
+    for (auto& corner : road.corners) {
+        readFloats(r, corner);
+    }
+    road.piece = r.u32();
+    road.value = r.u32();
+    road.flags1 = r.u8();
+    road.flags2 = r.u8();
+    road.parts.resize(r.u32Count(kRoadPartBytes));
+    for (RoadPart& part : road.parts) {
+        part.value = r.u32();
+        for (auto& corner : part.corners) {
+            readFloats(r, corner);
+        }
+    }
+    return road;
+}
+
+void writeRoad(BinaryWriter& w, const RoadRecord& road) {
+    writeTile(w, road.center, road.bounds);
+    w.u8(kRoadVersion);
+    for (const auto& corner : road.corners) {
+        writeFloats(w, corner);
+    }
+    w.u32(road.piece);
+    w.u32(road.value);
+    w.u8(road.flags1);
+    w.u8(road.flags2);
+    w.count(road.parts.size());
+    for (const RoadPart& part : road.parts) {
+        w.u32(part.value);
+        for (const auto& corner : part.corners) {
+            writeFloats(w, corner);
+        }
+    }
+}
+
+} // namespace
+
+std::optional<ObjectsRecord> readObjectsRecord(std::span<const std::uint8_t> data) {
+    try {
+        BinaryReader r(data);
+        if (r.u32() != kObjectsWrittenVersion) {
+            return std::nullopt;
+        }
+        ObjectsRecord out;
+        out.flora.resize(listCount(r, kPlacedListVersion, kPlacedBytes));
+        for (PlacedRecord& f : out.flora) {
+            readTile(r, f.position, f.bounds);
+            expect8(r, kPlacedVersion);
+            f.angle = r.f32();
+            f.type = r.u32();
+        }
+        out.roads.resize(listCount(r, kRoadListVersion, kRoadRecordBytes));
+        for (RoadRecord& road : out.roads) {
+            road = readRoad(r);
+        }
+        out.bridges.resize(listCount(r, kBridgeListVersion, kRoadRecordBytes + 41));
+        for (BridgeRecord& bridge : out.bridges) {
+            bridge.road = readRoad(r);
+            expect8(r, kBridgeVersion);
+            readFloats(r, bridge.start);
+            readFloats(r, bridge.rotation);
+            readFloats(r, bridge.end);
+        }
+        out.decorations.resize(listCount(r, kPlacedListVersion, kPlacedBytes));
+        for (PlacedRecord& f : out.decorations) {
+            readTile(r, f.position, f.bounds);
+            expect8(r, kPlacedVersion);
+            f.type = r.u32();
+            f.angle = r.f32();
+        }
+        if (r.remaining() != 0) {
+            return std::nullopt;
+        }
+        return out;
+    } catch (const NotWritten&) {
+        return std::nullopt;
+    } catch (const std::runtime_error&) {
+        return std::nullopt;
+    }
+}
+
+std::vector<std::uint8_t> writeObjectsRecord(const ObjectsRecord& record) {
+    BinaryWriter w;
+    w.u32(kObjectsWrittenVersion);
+    w.u16(kPlacedListVersion);
+    w.count(record.flora.size());
+    for (const PlacedRecord& f : record.flora) {
+        writeTile(w, f.position, f.bounds);
+        w.u8(kPlacedVersion);
+        w.f32(f.angle);
+        w.u32(f.type);
+    }
+    w.u16(kRoadListVersion);
+    w.count(record.roads.size());
+    for (const RoadRecord& road : record.roads) {
+        writeRoad(w, road);
+    }
+    w.u16(kBridgeListVersion);
+    w.count(record.bridges.size());
+    for (const BridgeRecord& bridge : record.bridges) {
+        writeRoad(w, bridge.road);
+        w.u8(kBridgeVersion);
+        writeFloats(w, bridge.start);
+        writeFloats(w, bridge.rotation);
+        writeFloats(w, bridge.end);
+    }
+    w.u16(kPlacedListVersion);
+    w.count(record.decorations.size());
+    for (const PlacedRecord& f : record.decorations) {
+        writeTile(w, f.position, f.bounds);
+        w.u8(kPlacedVersion);
+        w.u32(f.type);
+        w.f32(f.angle);
+    }
+    return w.take();
 }
 
 } // namespace ts2::nhood

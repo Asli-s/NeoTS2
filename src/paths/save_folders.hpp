@@ -7,12 +7,16 @@
 namespace ts2::paths {
 
 // The ends of the names NeoTS2 gives what it makes beside a save folder while it works: the copy
-// made for a new save folder, the copy of neighborhoods being added, the lock file, and the mark
-// file that says a copy folder is NeoTS2's own.
+// made for a new save folder, the copy of neighborhoods being added, the lock file, the mark
+// file that says a copy folder is NeoTS2's own, and a save's journal. A save also puts its new and
+// old packages beside each target while it swaps them.
 inline constexpr std::u8string_view kStagingSuffix = u8".neots2-setup";
 inline constexpr std::u8string_view kNeighborhoodsStagingSuffix = u8".neots2-neighborhoods";
 inline constexpr std::u8string_view kLockSuffix = u8".neots2-lock";
 inline constexpr std::u8string_view kMarkSuffix = u8".neots2-mark";
+inline constexpr std::u8string_view kSaveJournalSuffix = u8".neots2-journal";
+inline constexpr std::u8string_view kSaveNewSuffix = u8".neots2-new";
+inline constexpr std::u8string_view kSaveOldSuffix = u8".neots2-old";
 
 // True when a name ends like one of those. No save folder may be named so, or NeoTS2 could take a
 // player's folder for its own leftovers.

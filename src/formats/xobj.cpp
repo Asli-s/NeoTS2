@@ -2,6 +2,8 @@
 
 #include "formats/binary_reader.hpp"
 
+#include <algorithm>
+#include <bit>
 #include <stdexcept>
 
 namespace ts2::xobj {
@@ -119,7 +121,16 @@ Slots readSlots(BinaryReader& r) {
     return s;
 }
 
-Tail readTail(BinaryReader& r, std::uint32_t version, RecordKind kind) {
+// Texts with 32-bit lengths inside an object archive, with 7-bit lengths elsewhere.
+std::string readText(BinaryReader& r, bool fullLengths) {
+    if (!fullLengths) {
+        return r.varString();
+    }
+    const auto bytes = r.bytes(r.u32());
+    return std::string(bytes.begin(), bytes.end());
+}
+
+Tail readTail(BinaryReader& r, std::uint32_t version, RecordKind kind, bool fullLengths) {
     Tail t;
     t.token = readToken(r, version);
 
@@ -131,12 +142,12 @@ Tail readTail(BinaryReader& r, std::uint32_t version, RecordKind kind) {
     t.value1 = r.i32();
     const std::size_t stringCount = r.checkedCount(r.i16(), 1);
     for (std::size_t i = 0; i < stringCount; ++i) {
-        t.strings.push_back(r.varString());
+        t.strings.push_back(readText(r, fullLengths));
     }
     t.value2 = r.u16();
 
     const std::size_t frames = r.checkedCount(r.i32(), 14);
-    r.i32();
+    t.stackValue = r.i32();
     for (std::size_t i = 0; i < frames; ++i) {
         t.stack.push_back(readFrame(r, version));
     }
@@ -153,7 +164,8 @@ Tail readTail(BinaryReader& r, std::uint32_t version, RecordKind kind) {
 
     t.slots = readSlots(r);
 
-    if (r.i16() != 0) {
+    t.effectFlag = r.i16();
+    if (t.effectFlag != 0) {
         t.effectVersion = r.u16();
         if (t.effectVersion != 1 && t.effectVersion != 2) {
             throw std::runtime_error("XOBJ: effect list version not supported");
@@ -161,8 +173,8 @@ Tail readTail(BinaryReader& r, std::uint32_t version, RecordKind kind) {
         const std::size_t effects = r.checkedCount(r.i32(), 10);
         for (std::size_t i = 0; i < effects; ++i) {
             Effect e;
-            e.name = r.varString();
-            e.slot = r.varString();
+            e.name = readText(r, fullLengths);
+            e.slot = readText(r, fullLengths);
             e.value1 = r.u32();
             e.value2 = r.u32();
             if (t.effectVersion >= 2) {
@@ -176,9 +188,9 @@ Tail readTail(BinaryReader& r, std::uint32_t version, RecordKind kind) {
         const std::size_t materials = r.checkedCount(r.i16(), 3);
         for (std::size_t i = 0; i < materials; ++i) {
             MaterialOverride m;
-            m.resource = r.varString();
-            m.subset = r.varString();
-            m.material = r.varString();
+            m.resource = readText(r, fullLengths);
+            m.subset = readText(r, fullLengths);
+            m.material = readText(r, fullLengths);
             t.materials.push_back(std::move(m));
         }
     }
@@ -207,6 +219,106 @@ Tail readTail(BinaryReader& r, std::uint32_t version, RecordKind kind) {
     return t;
 }
 
+// Lists of saved interactions and runs each hold at least this many bytes per entry.
+constexpr std::size_t kMinInteractionSize = 50;
+constexpr std::size_t kRunSize = 7;
+constexpr std::size_t kValueEntrySize = 12;
+
+SavedInteraction readInteraction(BinaryReader& r, std::uint32_t version) {
+    SavedInteraction i;
+    i.value1 = r.i32();
+    i.number = r.i32();
+    i.actor = r.i16();
+    i.target = r.i16();
+    i.iconObject = r.i16();
+    if (version >= 0xA6) {
+        i.value2 = r.u16();
+    }
+    i.index = r.i32();
+    for (auto& v : i.values) {
+        v = r.u16();
+    }
+    i.priority = r.i32();
+    i.tree = r.u16();
+    i.value5 = r.f32();
+    i.flags = r.i32();
+    i.lineFlag3 = r.u16();
+    i.lineFlag1 = r.u16();
+    i.lineFlag2 = r.u16();
+    i.id = r.i16();
+    i.linkId = r.i16();
+    if (version >= 0x97) {
+        i.name = r.varString();
+        i.iconGuid = r.i32();
+        i.iconIndex = r.i32();
+    }
+    if (version >= 0xBB) {
+        i.value6 = r.u16();
+    }
+    return i;
+}
+
+std::vector<SavedInteraction> readInteractions(BinaryReader& r, std::uint32_t version) {
+    std::vector<SavedInteraction> list(r.i32Count(kMinInteractionSize));
+    for (auto& i : list) {
+        i = readInteraction(r, version);
+    }
+    return list;
+}
+
+// The Sim's interactions, read for versions 0x93 and later (the only ones whose person part is read).
+PersonState readPersonState(BinaryReader& r, std::uint32_t version) {
+    PersonState s;
+    r.i32();  // not used, and written as 0
+    s.running = readInteraction(r, version);
+    s.interrupted = readInteraction(r, version);
+    s.queue = readInteractions(r, version);
+    s.runs.resize(r.i32Count(kRunSize));
+    for (auto& run : s.runs) {
+        run.object = r.i16();
+        run.depth = static_cast<std::int16_t>(r.i32());
+        run.flag = r.u8() != 0;
+    }
+    s.entries.resize(r.i32Count(kValueEntrySize));
+    for (auto& e : s.entries) {
+        e.key = static_cast<std::int16_t>(r.i32());
+        e.value1 = r.f32();
+        e.value2 = r.f32();
+    }
+    if (version >= 0x9B) {
+        s.subStartCount = r.u16();
+    }
+    if (version >= 0x9E) {
+        s.value1 = r.u16();
+    }
+    if (r.i32() != 0) {
+        s.runningSub = readInteraction(r, version);
+    }
+    s.subQueue = readInteractions(r, version);
+    if (version >= 0x9D) {
+        s.text = r.varString();
+    }
+    if (version >= 0xA9) {
+        s.pickedIconIndex = r.i32();
+        s.pickedIconGuid = r.i32();
+        s.pickedIconObject = r.i32();
+        for (auto& v : s.values) {
+            v = r.u16();
+        }
+    }
+    if (version >= 0xB4) {
+        s.value2 = r.i32();
+    }
+    if (version >= 0xB5) {
+        s.list = readInteractions(r, version);
+    }
+    if (version >= 0xCD) {
+        s.value3 = r.u32();
+        s.value4 = r.u32();
+    }
+    return s;
+}
+
 PersonPart readPerson(BinaryReader& r, std::uint32_t version) {
     PersonPart p;
     if (r.u32() != kPersonMarker) {
@@ -223,10 +335,16 @@ PersonPart readPerson(BinaryReader& r, std::uint32_t version) {
         m = r.f32();
     }
     p.personData = readShorts(r, personDataCountForVersion(version));
+    p.state = readPersonState(r, version);
     return p;
 }
 
 } // namespace
+
+bool isBlank(const SavedInteraction& i) {
+    return i.priority == 0 && i.tree == 0 && i.index == -1 && i.iconObject == -1 && i.number == 0 && i.actor <= 0 &&
+           i.target <= 0;
+}
 
 Token readToken(BinaryReader& r, std::uint32_t version) {
     Token t;
@@ -275,7 +393,7 @@ namespace {
 
 // Reads one saved object from the reader's position. With `toEnd`, it must be the last thing in
 // the data (a resource of its own). Otherwise it may be followed by more.
-SavedObject readObject(BinaryReader& r, std::uint32_t version, RecordKind kind, bool toEnd) {
+SavedObject readObject(BinaryReader& r, std::uint32_t version, RecordKind kind, bool toEnd, bool fullLengths = false) {
     SavedObject o;
     o.version = version;
     readHeader(r, version, o.header);
@@ -310,7 +428,7 @@ SavedObject readObject(BinaryReader& r, std::uint32_t version, RecordKind kind, 
     }
 
     if (version >= kFirstDecodedTailVersion) {
-        o.tail = readTail(r, version, kind);
+        o.tail = readTail(r, version, kind, fullLengths);
         if (kind == RecordKind::Person) {
             o.person = readPerson(r, version);
         } else if (toEnd && r.remaining() != 0) {
@@ -329,8 +447,10 @@ SavedObject readObject(BinaryReader& r, std::uint32_t version, RecordKind kind, 
 
 SavedObject parse(std::span<const std::uint8_t> data, std::uint32_t version, RecordKind kind) {
     BinaryReader r(data);
-    r.skip(64);
-    return readObject(r, version, kind, true);
+    const auto name = r.bytes(64);
+    SavedObject o = readObject(r, version, kind, true);
+    std::copy(name.begin(), name.end(), o.name.begin());
+    return o;
 }
 
 SavedObject parseEmbedded(std::span<const std::uint8_t> data, std::uint32_t version, RecordKind kind,
@@ -343,6 +463,328 @@ SavedObject parseEmbedded(std::span<const std::uint8_t> data, std::uint32_t vers
     SavedObject o = readObject(r, version, kind, false);
     consumed = data.size() - r.remaining();
     return o;
+}
+
+namespace {
+
+class Writer {
+public:
+    void u8(std::uint8_t v) { out.push_back(v); }
+    void u16(std::uint16_t v) {
+        out.push_back(static_cast<std::uint8_t>(v));
+        out.push_back(static_cast<std::uint8_t>(v >> 8));
+    }
+    void i16(std::int16_t v) { u16(static_cast<std::uint16_t>(v)); }
+    void u32(std::uint32_t v) {
+        for (int shift = 0; shift < 32; shift += 8) {
+            out.push_back(static_cast<std::uint8_t>(v >> shift));
+        }
+    }
+    void i32(std::int32_t v) { u32(static_cast<std::uint32_t>(v)); }
+    void f32(float v) { u32(std::bit_cast<std::uint32_t>(v)); }
+    void text(const std::string& t) {
+        if (fullLengths) {
+            if (t.size() > 0x7FFFFFFF) {
+                throw std::runtime_error("XOBJ: a text is too long to write");
+            }
+            u32(static_cast<std::uint32_t>(t.size()));
+            out.insert(out.end(), t.begin(), t.end());
+            return;
+        }
+        std::size_t length = t.size();
+        do {
+            const auto low = static_cast<std::uint8_t>(length & 0x7F);
+            length >>= 7;
+            out.push_back(static_cast<std::uint8_t>(low | (length != 0 ? 0x80 : 0)));
+        } while (length != 0);
+        out.insert(out.end(), t.begin(), t.end());
+    }
+    bool fullLengths = false;
+    // A count the record keeps in 32 bits.
+    void count32(std::size_t n) {
+        if (n > 0x7FFFFFFF) {
+            throw std::runtime_error("XOBJ: a list is too long to write");
+        }
+        u32(static_cast<std::uint32_t>(n));
+    }
+    // A count the record keeps in 16 bits.
+    void count16(std::size_t n) {
+        if (n > 0x7FFF) {
+            throw std::runtime_error("XOBJ: a list is too long to write");
+        }
+        u16(static_cast<std::uint16_t>(n));
+    }
+    template <typename Values>
+    void shorts(const Values& values) {
+        for (const std::int16_t v : values) {
+            i16(v);
+        }
+    }
+    template <typename Values>
+    void countedShorts(const Values& values) {
+        count16(values.size());
+        shorts(values);
+    }
+
+    std::vector<std::uint8_t> out;
+};
+
+void writeToken(Writer& w, const Token& t) {
+    w.u32(t.guid);
+    w.u16(t.flags);
+    w.u16(t.value1);
+    w.u32(t.value2);
+    w.u16(t.value3);
+    w.i32(static_cast<std::int32_t>(t.properties.size()));
+    w.shorts(t.properties);
+}
+
+void writeFrame(Writer& w, const StackFrame& f) {
+    if (f.locals.size() > 0xFF || f.params.size() > 0xFF) {
+        throw std::runtime_error("XOBJ: a stack frame has too many values to write");
+    }
+    w.i16(f.objectId);
+    w.i16(f.treeId);
+    w.u16(f.node);
+    w.u8(static_cast<std::uint8_t>(f.locals.size()));
+    w.u8(static_cast<std::uint8_t>(f.params.size()));
+    w.i16(f.value1);
+    w.i16(f.value2);
+    w.shorts(f.params);
+    w.shorts(f.locals);
+    w.i32(f.value3);
+    w.i16(f.codeOwner);
+}
+
+void writeSlots(Writer& w, const Slots& s) {
+    w.i16(s.marker);
+    if (s.marker < 0) {
+        if (s.marker == -100) {
+            w.i16(s.extra);
+        }
+        w.countedShorts(s.values);
+    } else if (s.marker > 0) {
+        if (s.values.size() != static_cast<std::size_t>(s.marker) * 2) {
+            throw std::runtime_error("XOBJ: slot values do not match their marker");
+        }
+        w.shorts(s.values);
+    }
+}
+
+void writeTail(Writer& w, const Tail& t, RecordKind kind) {
+    writeToken(w, t.token);
+    w.count16(t.arrays.size());
+    for (const auto& array : t.arrays) {
+        w.countedShorts(array);
+    }
+    w.countedShorts(t.shorts);
+    w.i32(t.value1);
+    w.count16(t.strings.size());
+    for (const auto& s : t.strings) {
+        w.text(s);
+    }
+    w.u16(t.value2);
+
+    w.i32(static_cast<std::int32_t>(t.stack.size()));
+    w.i32(t.stackValue);
+    for (const auto& frame : t.stack) {
+        writeFrame(w, frame);
+    }
+
+    if (t.relationshipVersion != 2 && t.relationshipVersion != 3) {
+        throw std::runtime_error("XOBJ: relationship block version not supported");
+    }
+    w.i32(t.relationshipVersion);
+    w.u32(static_cast<std::uint32_t>(t.relationshipIds.size()));
+    for (const std::uint32_t id : t.relationshipIds) {
+        w.u32(id);
+    }
+
+    writeSlots(w, t.slots);
+
+    w.i16(t.effectFlag);
+    if (t.effectFlag != 0) {
+        w.u16(t.effectVersion);
+        w.i32(static_cast<std::int32_t>(t.effects.size()));
+        for (const Effect& e : t.effects) {
+            w.text(e.name);
+            w.text(e.slot);
+            w.u32(e.value1);
+            w.u32(e.value2);
+            if (t.effectVersion >= 2) {
+                w.u8(e.value3);
+            }
+        }
+    }
+
+    w.count16(t.materials.size());
+    for (const MaterialOverride& m : t.materials) {
+        w.text(m.resource);
+        w.text(m.subset);
+        w.text(m.material);
+    }
+
+    w.u32(static_cast<std::uint32_t>(t.timers.size()));
+    for (const TimerEntry& e : t.timers) {
+        w.u32(e.value1);
+        w.u32(e.value2);
+        w.u16(e.value3);
+        w.u32(e.value4);
+        w.i32(e.value5);
+        w.i32(e.value6);
+        w.shorts(e.values);
+    }
+
+    if (kind == RecordKind::ObjectWithMaterial) {
+        if (t.materialBlock.size() != kMaterialBlockSize) {
+            throw std::runtime_error("XOBJ: material block of the wrong size");
+        }
+        w.out.insert(w.out.end(), t.materialBlock.begin(), t.materialBlock.end());
+    }
+}
+
+void writeInteraction(Writer& w, const SavedInteraction& i) {
+    w.i32(i.value1);
+    w.i32(i.number);
+    w.i16(i.actor);
+    w.i16(i.target);
+    w.i16(i.iconObject);
+    w.u16(i.value2);
+    w.i32(i.index);
+    for (const std::uint16_t v : i.values) {
+        w.u16(v);
+    }
+    w.i32(i.priority);
+    w.u16(i.tree);
+    w.f32(i.value5);
+    w.i32(i.flags);
+    w.u16(i.lineFlag3);
+    w.u16(i.lineFlag1);
+    w.u16(i.lineFlag2);
+    w.i16(i.id);
+    w.i16(i.linkId);
+    w.text(i.name);
+    w.i32(i.iconGuid);
+    w.i32(i.iconIndex);
+    w.u16(i.value6);
+}
+
+void writeInteractions(Writer& w, const std::vector<SavedInteraction>& list) {
+    w.count32(list.size());
+    for (const auto& i : list) {
+        writeInteraction(w, i);
+    }
+}
+
+void writePersonState(Writer& w, const PersonState& s) {
+    w.i32(0);
+    writeInteraction(w, s.running);
+    writeInteraction(w, s.interrupted);
+    writeInteractions(w, s.queue);
+    w.count32(s.runs.size());
+    for (const auto& run : s.runs) {
+        w.i16(run.object);
+        w.i32(run.depth);
+        w.u8(run.flag ? 1 : 0);
+    }
+    w.count32(s.entries.size());
+    for (const auto& e : s.entries) {
+        w.i32(e.key);
+        w.f32(e.value1);
+        w.f32(e.value2);
+    }
+    w.u16(s.subStartCount);
+    w.u16(s.value1);
+    w.i32(s.runningSub ? 1 : 0);
+    if (s.runningSub) {
+        writeInteraction(w, *s.runningSub);
+    }
+    writeInteractions(w, s.subQueue);
+    w.text(s.text);
+    w.i32(s.pickedIconIndex);
+    w.i32(s.pickedIconGuid);
+    w.i32(s.pickedIconObject);
+    for (const std::uint16_t v : s.values) {
+        w.u16(v);
+    }
+    w.i32(s.value2);
+    writeInteractions(w, s.list);
+    w.u32(s.value3);
+    w.u32(s.value4);
+}
+
+void writeBody(Writer& w, const SavedObject& o, RecordKind kind) {
+    if (o.version != kWrittenVersion || !o.tail || (kind == RecordKind::Person) != o.person.has_value()) {
+        throw std::runtime_error("XOBJ: only a whole record of the version the game writes can be written");
+    }
+    const Header& h = o.header;
+    for (const float f : h.reserved) {
+        w.f32(f);
+    }
+    for (const float f : h.location) {
+        w.f32(f);
+    }
+    w.i32(h.value1);
+    w.i16(h.value2);
+    w.f32(h.value3);
+    w.i32(h.value4);
+    w.i16(h.value5);
+    w.f32(h.value6);
+    w.countedShorts(o.attributes);
+    w.countedShorts(o.semiAttributes);
+    w.shorts(o.temps);
+    w.shorts(o.data);
+    w.shorts(o.tokenSource);
+    writeTail(w, *o.tail, kind);
+    if (kind == RecordKind::Person) {
+        const PersonPart& p = *o.person;
+        if (p.personData.size() != personDataCountForVersion(o.version)) {
+            throw std::runtime_error("XOBJ: person data of the wrong size");
+        }
+        w.u32(kPersonMarker);
+        w.i32(p.version);
+        for (const float m : p.motives) {
+            w.f32(m);
+        }
+        for (const float m : p.motives2) {
+            w.f32(m);
+        }
+        w.shorts(p.personData);
+        writePersonState(w, p.state);
+    }
+    w.out.insert(w.out.end(), o.rest.begin(), o.rest.end());
+}
+
+} // namespace
+
+std::vector<std::uint8_t> write(const SavedObject& o, RecordKind kind) {
+    Writer w;
+    w.out.assign(o.name.begin(), o.name.end());
+    writeBody(w, o, kind);
+    return w.out;
+}
+
+SavedObject parseArchived(std::span<const std::uint8_t> data, RecordKind kind, std::size_t& consumed) {
+    if (kind == RecordKind::Person) {
+        throw std::runtime_error("XOBJ: archived record of unknown length");
+    }
+    BinaryReader r(data);
+    SavedObject o = readObject(r, kWrittenVersion, kind, false, true);
+    consumed = data.size() - r.remaining();
+    return o;
+}
+
+std::vector<std::uint8_t> writeArchived(const SavedObject& o, RecordKind kind) {
+    Writer w;
+    w.fullLengths = true;
+    writeBody(w, o, kind);
+    return w.out;
+}
+
+std::vector<std::uint8_t> writeToken(const Token& token) {
+    Writer w;
+    writeToken(w, token);
+    return std::move(w.out);
 }
 
 } // namespace ts2::xobj

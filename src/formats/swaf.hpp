@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <utility>
 #include <optional>
 #include <span>
 #include <vector>
@@ -49,5 +50,33 @@ struct Slots {
     std::uint32_t holds = 1;
 };
 Slots slots(const WantsAndFears& saved);
+
+constexpr std::uint32_t kType = 0xCD95548E;
+constexpr std::uint32_t kWrittenVersion = 6;
+constexpr std::uint32_t kWrittenWantVersion = 10;
+constexpr std::uint32_t kWrittenHistoryVersion = 2;
+
+// Every byte of a Sim's wants and fears as the game writes them now (version 6, each want version 10,
+// the history version 2), to be written back. The history keeps its groups in the game's order (by
+// want GUID).
+struct Record {
+    std::optional<Want> extra;
+    std::uint32_t maxWants = 0;
+    std::vector<Want> wants;
+    std::uint32_t maxFears = 0;
+    std::vector<Want> fears;
+    std::int16_t lastValue = 0;  // the game keeps it in 16 bits and writes it widened
+    std::int32_t historyValue = 0;
+    std::vector<std::pair<std::uint32_t, std::vector<Want>>> history;
+};
+
+// Empty for another version of the record, a want or the history, a want type the game does not
+// write, a value outside the bits the game keeps, or bytes cut short or left over. With `leftOver`,
+// bytes after the history are allowed and their count is given there: the game's reader stops at
+// the history's count, and some saves keep bytes after it whose origin is not known yet.
+std::optional<Record> readRecord(std::span<const std::uint8_t> data, std::size_t* leftOver = nullptr);
+
+// Throws std::runtime_error for a want type the game does not write or a list too long to write.
+std::vector<std::uint8_t> writeRecord(const Record& record);
 
 } // namespace ts2::swaf

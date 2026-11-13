@@ -30,4 +30,11 @@ struct FamilyTies {
 
 FamilyTies parse(std::span<const std::uint8_t> data);
 
+constexpr std::uint32_t kType = 0x8C870743;
+constexpr std::uint32_t kWrittenVersion = 1;
+
+// The ties as the game writes them, at version 1, the Sims in the order given (the game's map keeps
+// them by neighbor id). Throws std::runtime_error for a list too long to write.
+std::vector<std::uint8_t> write(const FamilyTies& ties);
+
 } // namespace ts2::famt

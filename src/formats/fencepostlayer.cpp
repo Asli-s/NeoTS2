@@ -1,6 +1,7 @@
 #include "formats/fencepostlayer.hpp"
 
 #include "formats/binary_reader.hpp"
+#include "formats/binary_writer.hpp"
 
 #include <bit>
 #include <stdexcept>
@@ -29,6 +30,19 @@ std::vector<Post> parse(std::span<const std::uint8_t> data) {
         p.fence = r.u32();
     }
     return posts;
+}
+
+std::vector<std::uint8_t> write(const std::vector<Post>& posts) {
+    BinaryWriter w;
+    w.recordHeader(kType, 1, "cFencePostLayer");
+    w.count(posts.size());
+    for (const Post& p : posts) {
+        w.i32(p.level);
+        w.f32(p.x);
+        w.f32(p.y);
+        w.u32(p.fence);
+    }
+    return w.take();
 }
 
 } // namespace ts2::fencepostlayer

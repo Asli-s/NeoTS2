@@ -769,10 +769,15 @@ int search(ResourceIndex& index, std::string_view text) {
 }
 
 // Lists every expression whose left side is object data `field` (the object's own or the stack
-// object's), or person data with `person`, to find which scripts set a flag.
-int writes(ResourceIndex& index, std::uint16_t field, bool person) {
-    constexpr std::uint8_t kMyData = 0x03, kStackData = 0x04, kMyPersonData = 0x12, kStackPersonData = 0x13;
-    const std::uint8_t mine = person ? kMyPersonData : kMyData, stacks = person ? kStackPersonData : kStackData;
+// object's), person data with "person" or a simulator global with "global", to find which scripts
+// set a flag.
+int writes(ResourceIndex& index, std::uint16_t field, std::string_view scope) {
+    constexpr std::uint8_t kMyData = 0x03, kStackData = 0x04, kMyPersonData = 0x12, kStackPersonData = 0x13, kGlobal = 0x06;
+    const bool person = scope == "person";
+    std::uint8_t mine = person ? kMyPersonData : kMyData, stacks = person ? kStackPersonData : kStackData;
+    if (scope == "global") {
+        mine = stacks = kGlobal;
+    }
     const Catalog catalog = buildCatalog(index);
     std::size_t hits = 0;
     for (const auto& r : index.resources()) {
@@ -886,7 +891,7 @@ int main(int argc, char** argv) {
                      "  bhavdump <file.package | install-folder> --survey | --expr-survey\n"
                      "  bhavdump <file.package | install-folder> --search <text>\n"
                      "  bhavdump <file.package | install-folder> --callers <opcode>\n"
-                     "  bhavdump <file.package | install-folder> --writes <field> [person]\n"
+                     "  bhavdump <file.package | install-folder> --writes <field> [person | global]\n"
                      "  bhavdump <file.package | install-folder> --show <group> <instance>\n");
         return 1;
     }
@@ -922,8 +927,7 @@ int main(int argc, char** argv) {
             return search(index, argv[3]);
         }
         if (mode == "--writes" && argc >= 4) {
-            return writes(index, static_cast<std::uint16_t>(std::stoul(argv[3], nullptr, 0)),
-                          argc >= 5 && std::string_view(argv[4]) == "person");
+            return writes(index, static_cast<std::uint16_t>(std::stoul(argv[3], nullptr, 0)), argc >= 5 ? argv[4] : "");
         }
         if (mode == "--callers" && argc >= 4) {
             return callers(index, static_cast<std::uint16_t>(std::stoul(argv[3], nullptr, 0)));

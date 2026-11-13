@@ -17,4 +17,9 @@ struct Entry {
 // cWallLayer (resource type 0x8A84D7B0).
 std::vector<Entry> parse(std::span<const std::uint8_t> data);
 
+constexpr std::uint32_t kType = 0x8A84D7B0;
+
+// The layer as the game writes it (version 1). Throws std::runtime_error for a list too long to write.
+std::vector<std::uint8_t> write(const std::vector<Entry>& entries);
+
 } // namespace ts2::walllayer

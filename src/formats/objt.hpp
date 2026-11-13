@@ -33,4 +33,9 @@ struct ObjectTypeTable {
 
 ObjectTypeTable parse(std::span<const std::uint8_t> data);
 
+constexpr std::uint32_t kWrittenVersion = 0x55;
+
+// The table as the game writes it, at version 0x55, ending with a zero GUID.
+std::vector<std::uint8_t> write(const ObjectTypeTable& table);
+
 } // namespace ts2::objt

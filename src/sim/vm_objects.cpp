@@ -1,4 +1,5 @@
 #include "diag/log.hpp"
+#include "sim/simulator_ids.hpp"
 #include "sim/vm_execution.hpp"
 
 #include <array>
@@ -1279,12 +1280,7 @@ bool Execution::onTimer(const bhav::Instruction& in, Frame& f) {
         timer.args[1] = read(o[9], static_cast<std::uint16_t>(o[10] | o[11] << 8), f);
         timer.args[2] = read(o[12], static_cast<std::uint16_t>(o[13] | o[14] << 8), f);
     }
-    // Ids are handed out in turn, skipping 0 and any still in use (the game's source of ids is
-    // not known yet: PR-25).
-    do {
-        ++target.lastTimerId;
-    } while (target.lastTimerId == 0 || std::any_of(timers.begin(), timers.end(), [&](const ObjectTimer& t) { return t.id == target.lastTimerId; }));
-    timer.id = target.lastTimerId;
+    timer.id = nextSimulatorId(globals_);
     timers.push_back(timer);
     thread_.temps[0] = static_cast<std::int16_t>(timer.id);
     return true;

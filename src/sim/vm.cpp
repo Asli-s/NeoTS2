@@ -2,6 +2,7 @@
 #include "sim/vm_execution.hpp"
 #include "sim/forget_object.hpp"
 #include "sim/linked_interactions.hpp"
+#include "sim/simulator_ids.hpp"
 
 namespace ts2::sim {
 
@@ -592,6 +593,10 @@ private:
     void push(std::uint32_t group, std::shared_ptr<const bhav::Behavior> code, std::uint16_t instance,
               std::span<const std::int16_t> callArgs, std::uint32_t codeOwner);
     void pushCall(Execution::NamedCall& call);
+    // A tree just pushed as a run of its own on a Sim's own stack, and a frame just returned there.
+    void noteRunStarted();
+    void noteFrameReturned();
+    std::size_t simStackDepth() const;
     bool followBranch(bool branch);
     bool runAtOnce(const Execution::NamedCall& call);
 
@@ -668,6 +673,37 @@ void Vm::RunState::pushCall(Execution::NamedCall& call) {
     push(call.group, std::move(call.code), call.instance, call.args, call.codeOwner);
 }
 
+// How deep a Sim's own stack is. A tree the game runs at once for a Sim (an object function, a
+// timer) runs on top of the Sim's own frames, so it counts them too.
+std::size_t Vm::RunState::simStackDepth() const {
+    return frames_.size() + (&thread_ == &me_->thread ? 0 : me_->thread.frames.size());
+}
+
+void Vm::RunState::noteRunStarted() {
+    if (me_ != nullptr && me_->isPerson()) {
+        me_->runDepths.push_back(simStackDepth());
+    }
+}
+
+// The game checks each return on a Sim's own stack: once the Sim's runs have all returned, a blank
+// current interaction gives way to a new one with the next id, and any other turns blank.
+void Vm::RunState::noteFrameReturned() {
+    if (me_ == nullptr || !me_->isPerson() || me_->runDepths.empty()) {
+        return;
+    }
+    if (simStackDepth() < me_->runDepths.back()) {
+        me_->runDepths.pop_back();
+    }
+    if (!me_->runDepths.empty()) {
+        return;
+    }
+    if (me_->currentInteraction == SimObject::CurrentInteraction::Blank) {
+        nextSimulatorId(vm_.globals);
+    } else {
+        me_->currentInteraction = SimObject::CurrentInteraction::Blank;
+    }
+}
+
 // Follows the exit of the current instruction, unwinding returns. True when the run ended.
 bool Vm::RunState::followBranch(bool branch) {
     const bhav::Instruction& done = frames_.back().code->instructions[frames_.back().pc];
@@ -709,6 +745,7 @@ bool Vm::RunState::followBranch(bool branch) {
         vm_.spares_.keep(std::move(frames_.back().params));
         vm_.spares_.keep(std::move(frames_.back().locals));
         frames_.pop_back();
+        noteFrameReturned();
         if (frames_.empty()) {
             result_.outcome = returned ? Outcome::True : Outcome::False;
             return true;
@@ -922,6 +959,7 @@ Vm::RunState::Next Vm::RunState::runTreeByName(const bhav::Instruction& in, Fram
         return branch(runAtOnce(*call));
     }
     pushCall(*call);
+    noteRunStarted();
     if (call->stackObject) {
         frames_.back().stackObjectId = *call->stackObject;
     }
@@ -934,6 +972,8 @@ Vm::RunState::Next Vm::RunState::gosubFoundAction(const bhav::Instruction& in) {
         return branch(false);
     }
     pushCall(*call);
+    noteRunStarted();
+    me_->currentInteraction = SimObject::CurrentInteraction::Started;
     frames_.back().stackObjectId = *call->stackObject;
     frames_.back().runningOnId = *call->runningOn;
     frames_.back().runsInteraction = true;
@@ -955,6 +995,7 @@ Vm::RunState::Next Vm::RunState::runFunctionalTree(const bhav::Instruction& in, 
         return branch(false);
     }
     pushCall(*call);
+    noteRunStarted();
     frames_.back().stackObjectId = *call->stackObject;
     return Next::Continue;
 }
@@ -974,6 +1015,7 @@ Vm::RunState::Next Vm::RunState::idleForInput(const bhav::Instruction& in, Frame
     }
     auto [group, code] = resolve(started.action, started.group);
     push(group, std::move(code), started.action, started.args, started.group);
+    noteRunStarted();
     frames_.back().stackObjectId = started.object;
     frames_.back().runningOnId = started.object;
     if (me_ != nullptr) {
@@ -990,6 +1032,7 @@ Vm::RunState::Next Vm::RunState::idleForInput(const bhav::Instruction& in, Frame
             me_->personData[kSubQueueObjectPersonData] = started.object;
             noteSubQueue(*me_);
         } else {
+            me_->currentInteraction = SimObject::CurrentInteraction::Started;
             noteCurrentInteraction(*me_, static_cast<std::int16_t>(started.index), started.object);
             notePriority(*me_, &started);
             startRunning(*me_, started);
@@ -1025,6 +1068,7 @@ Vm::RunState::Next Vm::RunState::walk(const bhav::Instruction& in, Frame& f) {
     if (walk.kind == Execution::WalkStep::Kind::PreRoute || walk.kind == Execution::WalkStep::Kind::PostRoute) {
         checkDepth();
         push(walk.group, std::move(walk.code), walk.instance, walk.args, me_->group);
+        noteRunStarted();
         frames_.back().stackObjectId = me_->id;
         frames_.back().callerReruns = true;
         return Next::Continue;
@@ -1033,6 +1077,7 @@ Vm::RunState::Next Vm::RunState::walk(const bhav::Instruction& in, Frame& f) {
         walk.kind == Execution::WalkStep::Kind::RouteTree) {
         checkDepth();
         push(walk.group, std::move(walk.code), walk.instance, walk.args, walk.codeOwner);
+        noteRunStarted();
         frames_.back().stackObjectId = walk.stackObject;
         frames_.back().callerReruns = true;
         return Next::Continue;
@@ -1056,6 +1101,7 @@ Vm::RunState::Next Vm::RunState::turn(const bhav::Instruction& in, Frame& f) {
         const bool pre = step.kind == Execution::TurnStep::Kind::PreRoute;
         push(step.group, std::move(step.code), step.instance,
              pre ? std::span<const std::int16_t>(kPreRouteArgs) : std::span<const std::int16_t>(kPostRouteArgs), me_->group);
+        noteRunStarted();
         frames_.back().stackObjectId = me_->id;
         frames_.back().callerReruns = true;
         return Next::Continue;

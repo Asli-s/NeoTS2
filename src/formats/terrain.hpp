@@ -19,6 +19,12 @@ struct LotTexture {
 
 LotTexture parseLotTexture(std::span<const std::uint8_t> data);
 
+constexpr std::uint32_t kLotTextureWrittenVersion = 7;
+
+// The lot texture as the game writes it, at version 7. Throws std::runtime_error for a list too long
+// to write.
+std::vector<std::uint8_t> writeLotTexture(const LotTexture& texture);
+
 // c2DArray (resource type 0x6B943B43): a grid of fixed-size elements, stored row by row.
 struct Array2D {
     std::uint32_t version = 0;

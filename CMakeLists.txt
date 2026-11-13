@@ -150,6 +150,7 @@ add_library(ts2formats
     src/formats/fami.cpp
     src/formats/famt.cpp
     src/formats/swaf.cpp
+    src/formats/object_archive.cpp
     src/formats/want_trees.cpp
     src/formats/propset.cpp
     src/formats/anim.cpp
@@ -193,12 +194,17 @@ add_library(ts2formats
     src/formats/nhood_terrain.cpp
     src/formats/camera_config.cpp
     src/formats/cobject.cpp
+    src/formats/cobject_record.cpp
+    src/formats/lot_grid.cpp
+    src/formats/world_db.cpp
+    src/formats/lot_records.cpp
     src/formats/nhood_paint_rules.cpp
     src/formats/lot_description.cpp
     src/formats/nhood_objects.cpp
     src/formats/effects.cpp
     src/formats/ui_script.cpp
     src/formats/cursor.cpp
+    src/formats/saved_camera.cpp
 )
 target_include_directories(ts2formats PUBLIC src)
 # stb_image (third-party, public domain / MIT) decodes the UI's PNG and bitmap images; jpeg.cpp
@@ -216,6 +222,7 @@ add_library(ts2content
     src/content/animation_lists.cpp
     src/content/install.cpp
     src/content/save_folder.cpp
+    src/content/save_writer.cpp
     src/content/thumbnail_merge.cpp
     src/content/lot_import.cpp
     src/content/cameras.cpp
@@ -251,6 +258,7 @@ add_library(ts2sim
     src/sim/want_refill.cpp
     src/sim/selection.cpp
     src/sim/lot_simulation.cpp
+    src/sim/lot_save.cpp
     src/sim/look_at.cpp
     src/sim/ground_click.cpp
     src/sim/route_portals.cpp

@@ -3,13 +3,43 @@
 
 #include "content/lot.hpp"
 #include "formats/camera_config.hpp"
+#include "formats/cobject.hpp"
+#include "formats/cobject_record.hpp"
 #include "formats/face_shape.hpp"
 #include "formats/cursor.hpp"
 #include "formats/dbpf_writer.hpp"
 #include "formats/effects.hpp"
+#include "formats/lot_description.hpp"
+#include "formats/objm.hpp"
+#include "formats/qfs.hpp"
+#include "formats/nhood_objects.hpp"
+#include "formats/nhood_terrain.hpp"
+#include "formats/saved_camera.hpp"
 #include "formats/simi.hpp"
+#include "formats/srel.hpp"
+#include "formats/lot_grid.hpp"
+#include "formats/lot_records.hpp"
+#include "formats/sdsc.hpp"
+#include "formats/fami.hpp"
+#include "formats/famt.hpp"
+#include "formats/ngbh.hpp"
+#include "formats/swaf.hpp"
+#include "formats/str.hpp"
+#include "formats/object_archive.hpp"
+#include "formats/propset.hpp"
+#include "formats/world_db.hpp"
+#include "formats/objt.hpp"
+#include "formats/roofs.hpp"
+#include "formats/stringmap.hpp"
+#include "formats/fencepostlayer.hpp"
+#include "formats/walllayer.hpp"
+#include "formats/wallgraph.hpp"
+#include "formats/array3d.hpp"
+#include "formats/terrain.hpp"
 
 #include <bit>
+#include <initializer_list>
+#include <utility>
 #include <limits>
 #include <sstream>
 
@@ -1823,8 +1853,1095 @@ void packageRecognisesAppleDoubleMetadata() {
     CHECK(package.appleDouble() && package.entries().empty());
 }
 
+// Data for the QFS tests: words with stray bytes, repeating at many distances as saved records do.
+std::vector<std::uint8_t> sampleData(std::size_t size, std::uint32_t seed) {
+    static const std::vector<std::string> words = {"the ", "sim ", "lot ", "house ", "garden ", "family ", "plumbob ",
+                                                   "neighborhood ", std::string("\x00\x01\x02\x03", 4), "\xff\xfe"};
+    std::vector<std::uint8_t> out;
+    std::uint32_t x = seed;
+    while (out.size() < size) {
+        x = x * 1103515245u + 12345u;
+        if ((x >> 24) < 16) {
+            out.push_back(static_cast<std::uint8_t>(x >> 8));
+        } else {
+            const std::string& word = words[(x >> 16) % words.size()];
+            out.insert(out.end(), word.begin(), word.end());
+        }
+    }
+    out.resize(size);
+    return out;
+}
+
+std::uint64_t fnv1a(std::span<const std::uint8_t> bytes) {
+    std::uint64_t h = 0xCBF29CE484222325ull;
+    for (const std::uint8_t b : bytes) {
+        h = (h ^ b) * 0x100000001B3ull;
+    }
+    return h;
+}
+
+std::vector<std::uint8_t> fromHex(std::string_view hex) {
+    std::vector<std::uint8_t> out;
+    for (std::size_t i = 0; i + 1 < hex.size(); i += 2) {
+        out.push_back(static_cast<std::uint8_t>(std::stoi(std::string(hex.substr(i, 2)), nullptr, 16)));
+    }
+    return out;
+}
+
+// The expected bytes come from the game's coder (re-encoding 8863 resources of real saves gave
+// their stored bytes exactly). Over 250,000 bytes the faster search gives a different stream.
+void qfsCompressesAsTheGameDoes() {
+    const std::pair<std::string, std::string_view> small[] = {
+        {"", "0a00000010fb000000fc"},
+        {"a", "0b00000010fb000001fd61"},
+        {"ab", "0c00000010fb000002fe6162"},
+        {"abc", "0d00000010fb000003ff616263"},
+        {"aaaa", "0d00000010fb000004010061fc"},
+        {"abcdabcdabcdabcd", "1200000010fb000010e061626364880003fc"},
+    };
+    for (const auto& [text, hex] : small) {
+        const std::vector<std::uint8_t> in(text.begin(), text.end());
+        const std::vector<std::uint8_t> packed = ts2::qfs::compress(in);
+        CHECK(packed == fromHex(hex));
+        CHECK(ts2::qfs::decompress(packed) == in);
+    }
+    const std::tuple<std::size_t, std::uint32_t, std::size_t, std::uint64_t> large[] = {
+        {2000, 1, 547, 0xf02b183306782e73ull},
+        {200000, 3, 35961, 0x17d6041ee4d6c9cbull},  // longer than the 0x1FFFF window
+        {300000, 5, 60368, 0x9d6c992468ea4210ull},  // the faster search
+    };
+    for (const auto& [size, seed, packedSize, hash] : large) {
+        const std::vector<std::uint8_t> in = sampleData(size, seed);
+        const std::vector<std::uint8_t> packed = ts2::qfs::compress(in);
+        CHECK(packed.size() == packedSize);
+        CHECK(fnv1a(packed) == hash);
+        CHECK(ts2::qfs::decompress(packed) == in);
+    }
+}
+
+// Every input packs and unpacks to itself, whatever its bytes: runs, noise, long matches.
+void qfsRoundTripsAnyData() {
+    std::uint32_t x = 99;
+    for (int round = 0; round < 60; ++round) {
+        const std::size_t size = static_cast<std::size_t>(round) * round * 37 % 9000;
+        std::vector<std::uint8_t> in(size);
+        for (std::size_t i = 0; i < size; ++i) {
+            x = x * 1664525u + 1013904223u;
+            const int kind = round % 4;
+            in[i] = kind == 0 ? static_cast<std::uint8_t>(x >> 24) : kind == 1 ? static_cast<std::uint8_t>(i % 3) :
+                    kind == 2 ? static_cast<std::uint8_t>((x >> 28) & 1) : static_cast<std::uint8_t>(i < size / 2 ? 7 : x >> 24);
+        }
+        CHECK(ts2::qfs::decompress(ts2::qfs::compress(in)) == in);
+    }
+    const std::vector<std::uint8_t> run(5000, 0x41);  // matches longer than the 0x404 limit
+    CHECK(ts2::qfs::decompress(ts2::qfs::compress(run)) == run);
+    bool refused = false;
+    try {
+        ts2::qfs::compress(std::vector<std::uint8_t>(ts2::qfs::kMaxInput + 1, 0));
+    } catch (const std::exception&) {
+        refused = true;
+    }
+    CHECK(refused);
+}
+
+// The game keeps a resource compressed only from 50 bytes up and when it shrinks below 0.8.
+void resourcesAreStoredAsTheGameStoresThem() {
+    const ts2::dbpf::ResourceKey key{0x584F424A, 0xFFFFFFFF, 7, 0};
+    const auto shortOne = ts2::dbpf::storeResource(key, std::vector<std::uint8_t>(49, 0));
+    CHECK(!shortOne.compressed && shortOne.bytes.size() == 49 && shortOne.uncompressedSize == 49);
+    const auto fifty = ts2::dbpf::storeResource(key, std::vector<std::uint8_t>(50, 0));
+    CHECK(fifty.compressed && ts2::qfs::decompress(fifty.bytes) == std::vector<std::uint8_t>(50, 0));
+    std::vector<std::uint8_t> noise(4000);
+    std::uint32_t x = 5;
+    for (std::uint8_t& b : noise) {
+        x = x * 1664525u + 1013904223u;
+        b = static_cast<std::uint8_t>(x >> 24);
+    }
+    const auto noisy = ts2::dbpf::storeResource(key, noise);
+    CHECK(!noisy.compressed && noisy.bytes == noise);
+    const auto words = ts2::dbpf::storeResource(key, sampleData(3000, 2));
+    CHECK(words.compressed && words.uncompressedSize == 3000);
+    // Packing to exactly 0.8 of the size is not smaller, as the game takes the share in single
+    // precision.
+    std::vector<std::uint8_t> edge;
+    for (int rep = 0; rep < 6; ++rep) {
+        for (char c = 'a'; c < 'a' + 15; ++c) {
+            edge.push_back(static_cast<std::uint8_t>(c));
+        }
+    }
+    for (std::size_t i = 0; i < edge.size(); i += 7) {
+        edge[i] ^= 1;
+    }
+    CHECK(edge.size() == 90 && ts2::qfs::compress(edge).size() == 72);
+    CHECK(!ts2::dbpf::storeResource(key, edge).compressed);
+}
+
+ts2::dbpf::PackageImage sampleImage(bool instanceHigh) {
+    ts2::dbpf::PackageImage image;
+    image.header[0x40] = 0x00;
+    image.header[0x42] = 0x01;  // a word the game keeps, as family thumbnails carry
+    image.header[0x18] = 0x2A;  // a date field, kept as it was
+    for (std::uint32_t i = 0; i < 5; ++i) {
+        const ts2::dbpf::ResourceKey key{0x584F424A + i % 2, 0xFFFFFFFF, 100 - i, instanceHigh && i == 3 ? 0xFF00u : 0u};
+        image.resources.push_back(ts2::dbpf::storeResource(key, sampleData(40 + 300 * i, i + 1)));
+    }
+    image.dataOrder = {3, 0, 4, 1, 2};
+    image.directoryIndexPosition = 2;
+    image.directoryDataPosition = 1;
+    return image;
+}
+
+// A package written from an image reads back as the same resources and writes back to the same
+// bytes, as the game's own packed saves do when they are repacked.
+void packageImagesWriteBackExactly() {
+    for (const bool instanceHigh : {false, true}) {
+        const ts2::dbpf::PackageImage image = sampleImage(instanceHigh);
+        const std::vector<std::uint8_t> bytes = ts2::dbpf::writeImage(image);
+        ts2::dbpf::verifyImage(bytes, image);
+        ts2::dbpf::Package package{std::span<const std::uint8_t>(bytes)};
+        const auto& h = package.header();
+        CHECK(h.majorVersion == 1 && h.minorVersion == 2 && h.indexMajorVersion == 7 && h.holeCount == 0);
+        CHECK(h.indexMinorVersion == (instanceHigh ? 2u : 1u));
+        CHECK(bytes[0x42] == 0x01 && bytes[0x18] == 0x2A);
+        CHECK(package.entries().size() == 6 && package.entries()[2].key.type == ts2::types::kDirectory);
+        CHECK(package.entries()[0].offset > package.entries()[4].offset);  // data in the image's order
+        CHECK(package.entries()[4].offset == 96);
+        const ts2::dbpf::PackageImage again = ts2::dbpf::readImage(bytes);
+        CHECK(ts2::dbpf::writeImage(again) == bytes);
+        for (std::size_t i = 0; i < image.resources.size(); ++i) {
+            CHECK(package.read(package.entries()[i < 2 ? i : i + 1]) ==
+                  (image.resources[i].compressed ? ts2::qfs::decompress(image.resources[i].bytes) : image.resources[i].bytes));
+        }
+    }
+    // Without compressed resources there is no directory.
+    ts2::dbpf::PackageImage plain;
+    plain.resources.push_back(ts2::dbpf::storeResource({1, 2, 3, 0}, std::vector<std::uint8_t>(10, 1)));
+    plain.dataOrder = {0};
+    const std::vector<std::uint8_t> bytes = ts2::dbpf::writeImage(plain);
+    ts2::dbpf::verifyImage(bytes, plain);
+    CHECK(ts2::dbpf::Package{std::span<const std::uint8_t>(bytes)}.entries().size() == 1);
+}
+
+// Broken images are refused, and a written package that differs from its image fails the check.
+void packageImagesRefuseMistakes() {
+    auto refused = [](auto&& action) {
+        try {
+            action();
+        } catch (const std::exception&) {
+            return true;
+        }
+        return false;
+    };
+    ts2::dbpf::PackageImage twice = sampleImage(false);
+    twice.resources[1].key = twice.resources[0].key;
+    CHECK(refused([&] { ts2::dbpf::writeImage(twice); }));
+    ts2::dbpf::PackageImage badOrder = sampleImage(false);
+    badOrder.dataOrder = {0, 0, 1, 2, 3};
+    CHECK(refused([&] { ts2::dbpf::writeImage(badOrder); }));
+    ts2::dbpf::PackageImage notPacked = sampleImage(false);
+    notPacked.resources[4].compressed = true;
+    notPacked.resources[4].bytes = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+    CHECK(refused([&] { ts2::dbpf::writeImage(notPacked); }));
+
+    const ts2::dbpf::PackageImage image = sampleImage(false);
+    std::vector<std::uint8_t> bytes = ts2::dbpf::writeImage(image);
+    ts2::dbpf::PackageImage other = image;
+    other.resources[2].bytes.back() ^= 1;
+    CHECK(refused([&] { ts2::dbpf::verifyImage(bytes, other); }));
+    bytes[bytes.size() / 2] ^= 0x55;  // a byte damaged on the way to the disk
+    CHECK(refused([&] { ts2::dbpf::verifyImage(bytes, image); }));
+    CHECK(refused([&] { ts2::dbpf::readImage(std::vector<std::uint8_t>(40, 0)); }));
+}
+
+// A simulator state record of the version the game writes reads back to every byte, and its fields
+// sit where the reader of older saves finds them.
+void simulatorStateRecordsWriteBack() {
+    std::vector<std::uint8_t> bytes(ts2::simi::kRecordSize, 0);
+    for (std::size_t i = 0x4C; i < bytes.size(); ++i) {
+        bytes[i] = static_cast<std::uint8_t>(i * 7 + 3);
+    }
+    auto put = [&bytes](std::size_t at, std::uint32_t v) {
+        for (int i = 0; i < 4; ++i) bytes[at + static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(v >> (8 * i));
+    };
+    put(0x40, ts2::simi::kType);
+    put(0x44, ts2::simi::kWrittenVersion);
+    put(0xCE, 0xBC598883);
+    put(0xD2, 0x4EE46106);
+    const auto record = ts2::simi::readRecord(bytes);
+    CHECK(record && ts2::simi::writeRecord(*record) == bytes);
+    CHECK(record->tickRandomState == 0xBC598883 && record->otherRandomState == 0x4EE46106);
+    const ts2::simi::SimulatorState state = ts2::simi::parse(bytes);
+    CHECK(state.randomState == record->tickRandomState);
+    CHECK(std::equal(state.globals.begin(), state.globals.end(), record->globals.begin()));
+
+    auto changed = bytes;
+    put(0x44, 0xD2);  // an older version, written by the game only after its upgrade
+    CHECK(!ts2::simi::readRecord(bytes));
+    bytes = changed;
+    CHECK(!ts2::simi::readRecord(std::span(bytes).first(ts2::simi::kRecordSize - 1)));
+    changed[0x48] = 1;  // the reserved word the game always writes as 0
+    CHECK(!ts2::simi::readRecord(changed));
+}
+
+// A lot info record of the version the game writes reads back to every byte. Texts take a 7-bit
+// length, two bytes from 128 characters.
+void lotInfoRecordsWriteBack() {
+    const std::string description(200, 'd');
+    std::vector<std::uint8_t> bytes(64, 0);
+    auto u32 = [&bytes](std::uint32_t v) {
+        for (int i = 0; i < 4; ++i) bytes.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
+    };
+    bytes.push_back(11);
+    bytes.push_back(0);
+    u32(3);
+    u32(5);
+    bytes.insert(bytes.end(), {0, 2, 1});
+    u32(0x2023);
+    bytes.push_back(8);
+    for (const char c : std::string("Test Lot")) bytes.push_back(static_cast<std::uint8_t>(c));
+    bytes.insert(bytes.end(), {0xC8, 0x01});  // 200
+    bytes.insert(bytes.end(), description.begin(), description.end());
+    u32(2);
+    u32(std::bit_cast<std::uint32_t>(1.3125f));
+    u32(std::bit_cast<std::uint32_t>(0.9375f));
+    for (int i = 0; i < 22; ++i) bytes.push_back(static_cast<std::uint8_t>(i + 1));
+
+    const auto record = ts2::nhood::readLotInfo(bytes);
+    CHECK(record && ts2::nhood::writeLotInfo(*record) == bytes);
+    CHECK(record->width == 3 && record->depth == 5 && record->roadSides == 2 && record->ownFacing == 1 && record->flags == 0x2023);
+    CHECK(record->name == "Test Lot" && record->description == description && record->values.size() == 2);
+
+    auto older = bytes;
+    older[64] = 8;
+    CHECK(!ts2::nhood::readLotInfo(older));
+    auto longer = bytes;
+    longer.push_back(0);
+    CHECK(!ts2::nhood::readLotInfo(longer));
+    CHECK(!ts2::nhood::readLotInfo(std::span(bytes).first(bytes.size() - 1)));
+    auto padded = bytes;  // the name's length 8 written in two bytes
+    padded[81] = 0x88;
+    padded.insert(padded.begin() + 82, 0x00);
+    CHECK(!ts2::nhood::readLotInfo(padded));
+}
+
+// The neighborhood's lot descriptions and Sim descriptions write back as the game writes them, and
+// the readers find their fields.
+void neighborhoodRecordsWriteBack() {
+    ts2::nhood::LotDescriptionRecord lot;
+    lot.own.width = 3;
+    lot.own.depth = 4;
+    lot.own.name = "13 Dead End Lane";
+    lot.own.values = {1, 2};
+    lot.x = 82;
+    lot.y = 47;
+    lot.elevation = std::bit_cast<std::uint32_t>(356.625f);
+    lot.id = 2;
+    lot.facing = 1;
+    lot.texture = "lottexture-canvas-desert";
+    lot.owner = 5;
+    lot.entries = {{1, 2, 3, 4}};
+    lot.roomLights = {{std::uint16_t{3}, std::uint16_t{50}}, {std::uint16_t{7}, std::uint16_t{25}}};
+    const std::vector<std::uint8_t> lotBytes = ts2::nhood::writeLotDescriptionRecord(lot);
+    const ts2::nhood::LotDescription seen = ts2::nhood::parseLotDescription(lotBytes);
+    CHECK(seen.version == 0x12 && seen.name == "13 Dead End Lane" && seen.x == 82 && seen.elevation == 356.625f);
+    CHECK(seen.id == 2 && seen.texture == "lottexture-canvas-desert" && seen.owner == 5 && seen.roomLightPercent(7) == 25);
+    const auto lotAgain = ts2::nhood::readLotDescriptionRecord(lotBytes);
+    CHECK(lotAgain && ts2::nhood::writeLotDescriptionRecord(*lotAgain) == lotBytes);
+
+    ts2::sdsc::Record sim;
+    sim.personData[0] = 7;
+    sim.personData[230] = -3;
+    sim.neighborId = 12;
+    sim.guid = 0xDEADBEEF;
+    sim.relationships = {0x5A, 0x1F7};
+    sim.value2 = 9;
+    const std::vector<std::uint8_t> simBytes = ts2::sdsc::writeRecord(sim);
+    const ts2::sdsc::SimDescription simSeen = ts2::sdsc::parse(simBytes);
+    CHECK(simSeen.version == 0x71 && simSeen.personData.size() == 231 && simSeen.personData[230] == -3);
+    CHECK(simSeen.neighborId == 12 && simSeen.guid == 0xDEADBEEF);
+    const auto simAgain = ts2::sdsc::readRecord(simBytes);
+    CHECK(simAgain && simAgain->relationships.size() == 2 && ts2::sdsc::writeRecord(*simAgain) == simBytes);
+    auto broken = simBytes;
+    broken[simBytes.size() - 9] = 1;  // the byte the game writes as 0
+    CHECK(!ts2::sdsc::readRecord(broken));
+    CHECK(!ts2::sdsc::readRecord(std::span(simBytes).first(simBytes.size() - 1)));
+}
+
+// The small lot records write back as the game writes them.
+void smallLotRecordsWriteBack() {
+    using namespace ts2::lotrecords;
+    const std::vector<std::uint8_t> house = writeHouse({0, ""});
+    CHECK(house.size() == 77 && house[64] == 'S' && house[68] == 0x55);
+    const auto houseSeen = readHouse(house);
+    CHECK(houseSeen && writeHouse(*houseSeen) == house);
+
+    PairTable numbers;
+    numbers.value = 0x59D1;
+    numbers.numbers = {{1, 0x6D0B2B38}, {3, 0x6D0B2B38}};
+    const std::vector<std::uint8_t> numberBytes = writePairTable(numbers);
+    const auto numbersSeen = readPairTable(numberBytes, false);
+    CHECK(numbersSeen && numbersSeen->numbers.size() == 2 && writePairTable(*numbersSeen) == numberBytes);
+    PairTable texts;
+    texts.texts = true;
+    texts.textPairs = {{"156eb748", "floor_tile"}};
+    const std::vector<std::uint8_t> textBytes = writePairTable(texts);
+    const auto textsSeen = readPairTable(textBytes, true);
+    CHECK(textsSeen && textsSeen->textPairs[0].second == "floor_tile" && writePairTable(*textsSeen) == textBytes);
+    CHECK(!readPairTable(textBytes, false));
+
+    WordTable table;
+    table.type = kNineWordTableType;
+    table.words = {5, 0x41500000, 0x40A00000, 0, 11, 0, 0, 0, 0};
+    const std::vector<std::uint8_t> tableBytes = writeWordTable(table);
+    CHECK(tableBytes.size() == 112);
+    const auto tableSeen = readWordTable(tableBytes);
+    CHECK(tableSeen && tableSeen->words == table.words && writeWordTable(*tableSeen) == tableBytes);
+
+    const std::vector<Vertex> vertices = {{1, 0x41200000, 0x41300000, 7}};
+    const std::vector<std::uint8_t> layer = writeVertexLayer(vertices);
+    const auto layerSeen = readVertexLayer(layer);
+    CHECK(layerSeen && layerSeen->size() == 1 && (*layerSeen)[0].value == 7 && writeVertexLayer(*layerSeen) == layer);
+
+    const std::vector<std::uint8_t> flag = writeFlagRecord({true, 1, 1});
+    CHECK(flag.size() == 80 && flag[64] == 3);
+    const auto flagSeen = readFlagRecord(flag);
+    CHECK(flagSeen && flagSeen->flag && writeFlagRecord(*flagSeen) == flag);
+    auto broken = flag;
+    broken[68] = 2;  // a flag the game never writes
+    CHECK(!readFlagRecord(broken));
+    broken = house;
+    broken.push_back(0);
+    CHECK(!readHouse(broken));
+
+    RoutingAggregate aggregate;
+    aggregate.packed = 0x10015;
+    aggregate.list = {0x15};
+    const std::vector<std::uint8_t> aggregateBytes = writeRoutingAggregate(aggregate);
+    const auto aggregateSeen = readRoutingAggregate(aggregateBytes);
+    CHECK(aggregateSeen && aggregateSeen->list.size() == 1 && writeRoutingAggregate(*aggregateSeen) == aggregateBytes);
+    aggregate.objects = 1;
+    aggregate.objectBytes = {3, 0, 0, 0, 0x72, 0};
+    aggregate.extra = std::array<std::uint16_t, 4>{1, 2, 3, 4};
+    const std::vector<std::uint8_t> withObject = writeRoutingAggregate(aggregate);
+    const auto withObjectSeen = readRoutingAggregate(withObject);
+    CHECK(withObjectSeen && withObjectSeen->extra && (*withObjectSeen->extra)[3] == 4 && withObjectSeen->objectBytes.size() == 6);
+    CHECK(writeRoutingAggregate(*withObjectSeen) == withObject);
+    broken = aggregateBytes;
+    broken.push_back(0);  // bytes with no object to hold them
+    CHECK(!readRoutingAggregate(broken));
+
+    SgSystem system;
+    system.values = {0x2BBB28, 0x17FF, 2};
+    system.pairs = {{1, 2}, {3, 4}};
+    const std::vector<std::uint8_t> systemBytes = writeSgSystem(system);
+    const auto systemSeen = readSgSystem(systemBytes);
+    CHECK(systemSeen && systemSeen->pairs.size() == 2 && writeSgSystem(*systemSeen) == systemBytes);
+    CHECK(!readSgSystem(std::span(systemBytes).first(systemBytes.size() - 4)));
+
+    const std::vector<std::uint8_t> counter = writeArchiveCounter(1002);
+    CHECK(counter.size() == 8 && counter[0] == 4 && readArchiveCounter(counter) == 1002u);
+    NeighborhoodInfo info;
+    info.id = "E001";
+    info.value1 = 6;
+    info.value2 = 1;
+    info.products = 0x11;
+    info.value4 = 0x10;
+    info.bytes = {1, 2, 3, 0};
+    const std::vector<std::uint8_t> infoBytes = writeNeighborhoodInfo(info);
+    CHECK(infoBytes.size() == 44 && infoBytes[0] == 10 && infoBytes[4] == 4 && infoBytes[8] == 'E');
+    const auto infoSeen = readNeighborhoodInfo(infoBytes);
+    CHECK(infoSeen && infoSeen->id == "E001" && infoSeen->products == 0x11 && writeNeighborhoodInfo(*infoSeen) == infoBytes);
+    const std::vector<std::uint8_t> shortRecord = writeShortRecord(0x300);
+    CHECK(shortRecord.size() == 14 && readShortRecord(shortRecord) == std::uint16_t{0x300});
+    KeyedLists keyed;
+    keyed.lists = {{0x02596F39, {1, 2, 3}}, {7, {}}};
+    const std::vector<std::uint8_t> keyedBytes = writeKeyedLists(keyed);
+    const auto keyedSeen = readKeyedLists(keyedBytes);
+    CHECK(keyedSeen && keyedSeen->lists.size() == 2 && keyedSeen->lists[0].second.size() == 3 && writeKeyedLists(*keyedSeen) == keyedBytes);
+    ts2::fami::Family family;
+    family.lot = 10;
+    family.currentLot = 10;
+    family.funds = 20000;
+    family.flags = 0x10;
+    family.members = {0xAABBCCDD, 0x11223344};
+    family.funds2 = 20000;
+    const std::vector<std::uint8_t> familyBytes = ts2::fami::write(family);
+    const ts2::fami::Family familySeen = ts2::fami::parse(familyBytes);
+    CHECK(familySeen.version == 0x55 && familySeen.funds == 20000 && familySeen.members.size() == 2 && familySeen.extraBytes == 0);
+    CHECK(ts2::fami::write(familySeen) == familyBytes);
+    ts2::fami::History history;
+    ts2::fami::HistoryItem item;
+    item.shorts1[0] = 3;
+    item.values2[7] = -1;
+    item.flags[1] = true;
+    item.texts = {"Married", ""};
+    history.items = {item, item};
+    const std::vector<std::uint8_t> historyBytes = ts2::fami::writeHistory(history);
+    const auto historySeen = ts2::fami::readHistory(historyBytes);
+    CHECK(historySeen && historySeen->items.size() == 2 && historySeen->items[1].texts[0] == "Married");
+    CHECK(historySeen && ts2::fami::writeHistory(*historySeen) == historyBytes);
+    ts2::famt::FamilyTies ties;
+    ties.version = 1;
+    ts2::famt::SimTies simTies;
+    simTies.sim = 12;
+    simTies.ties = {{2, 13}, {4, -1}};
+    ties.sims = {simTies};
+    const std::vector<std::uint8_t> tiesBytes = ts2::famt::write(ties);
+    const ts2::famt::FamilyTies tiesSeen = ts2::famt::parse(tiesBytes);
+    CHECK(tiesSeen.version == 1 && tiesSeen.sims.size() == 1 && tiesSeen.sims[0].ties[1].other == -1 && tiesSeen.extraBytes == 0);
+    CHECK(ts2::famt::write(tiesSeen) == tiesBytes);
+    ts2::ngbh::Record hood;
+    hood.terrain = "Desert";
+    hood.values[15] = 7;
+    ts2::xobj::Token counted;
+    counted.guid = 0xF0A9D3DD;
+    counted.properties = {1, 0};
+    ts2::xobj::Token single;
+    single.guid = 0x1438C1DF;
+    hood.global.version = ts2::ngbh::kInventoryVersion;
+    hood.global.counted = {counted};
+    hood.global.singular = {single};
+    hood.neighbors = {{std::int16_t{11}, hood.global}, {std::int16_t{-2}, hood.global}};
+    hood.flag = 1;
+    hood.value3 = 9;
+    const std::vector<std::uint8_t> hoodBytes = ts2::ngbh::writeRecord(hood);
+    const ts2::ngbh::Neighborhood hoodSeen = ts2::ngbh::parse(hoodBytes);
+    CHECK(hoodSeen.version == 0xCB && hoodSeen.terrain == "Desert" && hoodSeen.values.size() == 16 && hoodSeen.extraBytes == 0);
+    CHECK(hoodSeen.global.counted.size() == 1 && hoodSeen.neighbors.size() == 2 && hoodSeen.neighbors.at(-2).singular[0].guid == 0x1438C1DF);
+    const auto hoodAgain = ts2::ngbh::readRecord(hoodBytes);
+    CHECK(hoodAgain && hoodAgain->neighbors[1].first == -2 && ts2::ngbh::writeRecord(*hoodAgain) == hoodBytes);
+    ts2::swaf::Record wantsRecord;
+    ts2::swaf::Want want;
+    want.version = 10;
+    want.id = 12;
+    want.guid = 0x0F6FDE39;
+    want.type = 4;
+    want.argument = -3;
+    want.value = 250;
+    want.tail = {1, 2, 3};
+    want.flags = 1;
+    ts2::swaf::Want plain = want;
+    plain.type = 0;
+    plain.argument = 0;
+    wantsRecord.maxWants = 4;
+    wantsRecord.wants = {want, plain};
+    wantsRecord.maxFears = 3;
+    wantsRecord.lastValue = -1;
+    wantsRecord.history = {{0x0F6FDE39, {want}}};
+    const std::vector<std::uint8_t> wantsBytes = ts2::swaf::writeRecord(wantsRecord);
+    const ts2::swaf::WantsAndFears wantsSeen = ts2::swaf::parse(wantsBytes);
+    CHECK(wantsSeen.version == 6 && wantsSeen.wants.size() == 2 && wantsSeen.wants[0].argument == -3 && wantsSeen.wants[1].value == 250);
+    CHECK(wantsSeen.history.size() == 1 && wantsSeen.extraBytes == 0);
+    const auto wantsAgain = ts2::swaf::readRecord(wantsBytes);
+    CHECK(wantsAgain && wantsAgain->lastValue == -1 && ts2::swaf::writeRecord(*wantsAgain) == wantsBytes);
+    std::vector<ts2::propset::Property> props(5);
+    props[0] = {ts2::propset::kUintType, "binidx", 1, {}, {}};
+    props[1] = {ts2::propset::kStringType, "creatorid", 0, "00000000-0000-0000-0000-000000000000", {}};
+    props[2] = {ts2::propset::kBoolType, "flag", 1, {}, {}};
+    props[3] = {ts2::propset::kFloatType, "scale", std::bit_cast<std::uint32_t>(0.5f), {}, {}};
+    props[4] = {ts2::propset::kStringListType, "names", 0, {}, {"a", "bc"}};
+    const std::vector<std::uint8_t> propBytes = ts2::propset::writeBinary(props);
+    const auto propText = ts2::propset::parse(propBytes);
+    CHECK(propText.at("binidx") == "1" && propText.at("creatorid").size() == 36 && propText.at("flag") == "true");
+    const auto propAgain = ts2::propset::readBinary(propBytes);
+    CHECK(propAgain && propAgain->size() == 5 && (*propAgain)[4].texts[1] == "bc" && ts2::propset::writeBinary(*propAgain) == propBytes);
+    const std::vector<std::uint8_t> dnaIndex = ts2::lotrecords::writeDnaIndex({0x18, 0x1C, 0x10000006});
+    CHECK(dnaIndex.size() == 20 && dnaIndex[0] == 1 && dnaIndex[4] == 3 && dnaIndex[8] == 0x18);
+    CHECK(ts2::lotrecords::readDnaIndex(dnaIndex) == std::vector<std::uint32_t>({0x18, 0x1C, 0x10000006}));
+    auto dnaUnsorted = dnaIndex;
+    std::swap(dnaUnsorted[8], dnaUnsorted[12]);
+    CHECK(!ts2::lotrecords::readDnaIndex(dnaUnsorted));
+
+    ts2::nhood::TerrainRecord terrain;
+    terrain.width = terrain.height = 1;
+    terrain.seaLevel = 312.5f;
+    terrain.type = "Temperate";
+    terrain.heightColumns = terrain.heightRows = 2;
+    terrain.heights = {310.0f, 311.0f, 312.0f, 313.0f};
+    terrain.extraColumns = terrain.extraRows = 2;
+    terrain.extra = {0, 1, 2, 3};
+    const std::vector<std::uint8_t> terrainBytes = ts2::nhood::writeTerrainRecord(terrain);
+    CHECK(terrainBytes.size() == 33 + (28 + 16) + (28 + 4));
+    const ts2::nhood::Terrain terrainSeen = ts2::nhood::parseTerrain(terrainBytes);
+    CHECK(terrainSeen.version == 4 && terrainSeen.type == "Temperate" && terrainSeen.heights[3] == 313.0f && terrainSeen.extra[2] == 2);
+    const auto terrainAgain = ts2::nhood::readTerrainRecord(terrainBytes);
+    CHECK(terrainAgain && ts2::nhood::writeTerrainRecord(*terrainAgain) == terrainBytes);
+
+    ts2::nhood::ObjectsRecord hoodObjects;
+    hoodObjects.flora = {{{1, 2, 3}, {0, 0, 4, 4}, 90.0f, 0x1234}};
+    ts2::nhood::RoadRecord road;
+    road.center = {5, 6, 7};
+    road.piece = 0x00010002;
+    // The older reader skips road parts, so the first write has none.
+    hoodObjects.roads = {road};
+    hoodObjects.bridges = {ts2::nhood::BridgeRecord{road, {1, 1, 1}, {0, 0, 0.5f, 0.5f}, {2, 2, 2}}};
+    hoodObjects.decorations = {{{8, 9, 10}, {}, 45.0f, 0x5678}};
+    const std::vector<std::uint8_t> objectsBytes = ts2::nhood::writeObjectsRecord(hoodObjects);
+    const ts2::nhood::Objects objectsSeen = ts2::nhood::parseObjects(objectsBytes);
+    CHECK(objectsSeen.version == 0xCB && objectsSeen.flora.size() == 1 && objectsSeen.flora[0].type == 0x1234 && objectsSeen.flora[0].angle == 90.0f);
+    CHECK(objectsSeen.decorations.size() == 1 && objectsSeen.decorations[0].type == 0x5678 && objectsSeen.decorations[0].angle == 45.0f);
+    hoodObjects.roads[0].parts = {ts2::nhood::RoadPart{9, {}}};
+    const auto objectsAgain = ts2::nhood::readObjectsRecord(ts2::nhood::writeObjectsRecord(hoodObjects));
+    CHECK(objectsAgain && objectsAgain->roads[0].parts.size() == 1 && objectsAgain->bridges[0].rotation[3] == 0.5f &&
+          ts2::nhood::writeObjectsRecord(*objectsAgain) == ts2::nhood::writeObjectsRecord(hoodObjects));
+
+    ts2::archive::Record archive;
+    archive.keys = {{0x49596978, 2, 0}};
+    ts2::archive::Object archived;
+    archived.guid = 0x2C258FE8;
+    archived.value = 7;
+    ts2::archive::Part archivedPart;
+    archivedPart.state.version = ts2::xobj::kWrittenVersion;
+    archivedPart.state.tail.emplace();
+    archivedPart.state.tail->relationshipVersion = 3;
+    ts2::archive::NamedValues sales;
+    sales.key = 1;
+    sales.name = "Sales Info";
+    ts2::archive::Value nested;
+    nested.type = 5;
+    nested.pairs = {ts2::archive::Value{2, 9, {}, {}}, ts2::archive::Value{3, 1, {}, {}}};
+    sales.pairs = {ts2::archive::Value{1, 3, {}, {}}, ts2::archive::Value{4, 0, "Grimoire", {}}, ts2::archive::Value{0, 0, {}, {}}, nested};
+    archivedPart.values = {sales};
+    archived.parts = {archivedPart, archivedPart};
+    archive.objects = {archived, archived};
+    const std::vector<std::uint8_t> archiveBytes = ts2::archive::writeRecord(archive);
+    CHECK(archiveBytes.size() > 40 && archiveBytes[0] == 4 && archiveBytes[4] == 0xD8 && archiveBytes[8] == 1);
+    const auto archiveAgain = ts2::archive::readRecord(archiveBytes);
+    CHECK(archiveAgain && archiveAgain->objects.size() == 2 && archiveAgain->objects[1].parts.size() == 2);
+    CHECK(archiveAgain && archiveAgain->objects[0].parts[1].values[0].pairs[1].text == "Grimoire" &&
+          archiveAgain->objects[0].parts[0].values[0].pairs[3].pairs[0].word == 9);
+    auto archiveGuid = archiveBytes;
+    archiveGuid[24] ^= 1;  // the first object's GUID in the list no longer matches
+    CHECK(!ts2::archive::readRecord(archiveGuid));
+    ts2::str::Record strRecord;
+    strRecord.name = "Sim";
+    strRecord.entries = {{0xC8, "z", ""}, {0, "none", ""}, {1, "Ilia", "d"}, {1, "", ""}, {2, "Ilia", ""}};
+    const std::vector<std::uint8_t> strBytes = ts2::str::writeRecord(strRecord);
+    CHECK(strBytes.size() == 68 + 4 + 7 + 8 + 3 + 7 && strBytes[3] == 0 && strBytes[64] == 0xFD && strBytes[65] == 0xFF && strBytes[66] == 5);
+    const auto strAgain = ts2::str::readRecord(strBytes);
+    CHECK(strAgain && strAgain->name == "Sim" && strAgain->entries.size() == 5 && strAgain->entries[2].description == "d");
+    CHECK(ts2::str::parse(strBytes).forLanguage(1).size() == 2);
+    auto strOutOfOrder = strRecord;
+    std::swap(strOutOfOrder.entries[0], strOutOfOrder.entries[4]);
+    bool strRefused = false;
+    try {
+        ts2::str::writeRecord(strOutOfOrder);
+    } catch (const std::runtime_error&) {
+        strRefused = true;
+    }
+    CHECK(strRefused);
+    auto strTail = strBytes;
+    strTail.push_back(0);
+    CHECK(!ts2::str::readRecord(strTail));
+    std::vector<ts2::propset::Property> xmlProps(6);
+    xmlProps[0] = {ts2::propset::kStringType, "a<&>\"'", 0, "x&y", {}};
+    xmlProps[1] = {ts2::propset::kUintType, "u", 4000000000u, {}, {}};
+    xmlProps[2] = {ts2::propset::kIntType, "i", static_cast<std::uint32_t>(-7), {}, {}};
+    xmlProps[3] = {ts2::propset::kFloatType, "f", std::bit_cast<std::uint32_t>(0.94f), {}, {}};
+    xmlProps[4] = {ts2::propset::kBoolType, "b", 1, {}, {}};
+    xmlProps[5] = {ts2::propset::kStringListType, "s", 0, {}, {"p", ""}};
+    const std::vector<std::uint8_t> xmlBytes = ts2::propset::writeXml(xmlProps);
+    const std::string xmlText(xmlBytes.begin(), xmlBytes.end());
+    CHECK(xmlText == "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<cGZPropertySetString>"
+                     "\n  <AnyString key=\"a&lt;&amp;&gt;&quot;&apos;\" type=\"0x0b8bea18\">x&amp;y</AnyString>"
+                     "\n  <AnyUint32 key=\"u\" type=\"0xeb61e4f7\">4000000000</AnyUint32>"
+                     "\n  <AnySint32 key=\"i\" type=\"0x0c264712\">-7</AnySint32>"
+                     "\n  <AnyFloat32 key=\"f\" type=\"0xabc78708\">0.9399999976</AnyFloat32>"
+                     "\n  <AnyBoolean key=\"b\" type=\"0xcba908e1\">true</AnyBoolean>"
+                     "\n  <AnyStringSet key=\"s\" type=\"0xad9a861e\">\n    <Element>p</Element>\n    <Element></Element>\n  </AnyStringSet>"
+                     "\n</cGZPropertySetString>");
+    const auto xmlAgain = ts2::propset::readXml(xmlBytes);
+    CHECK(xmlAgain && xmlAgain->size() == 6 && (*xmlAgain)[0].name == "a<&>\"'" && (*xmlAgain)[2].word == static_cast<std::uint32_t>(-7));
+    CHECK(ts2::propset::parse(xmlBytes).at("f") == "0.9399999976");
+    const std::vector<std::uint8_t> xmlEmpty = ts2::propset::writeXml({});
+    CHECK(std::string(xmlEmpty.begin(), xmlEmpty.end()).ends_with("<cGZPropertySetString/>") && ts2::propset::readXml(xmlEmpty));
+    auto xmlSpaced = xmlBytes;
+    xmlSpaced.insert(xmlSpaced.end() - 24, ' ');
+    CHECK(!ts2::propset::readXml(xmlSpaced));
+    std::vector<ts2::propset::Property> floats(1, {ts2::propset::kFloatType, "f", 0, {}, {}});
+    for (const auto& [value, text] : std::initializer_list<std::pair<float, const char*>>{
+             {0.0f, "0"}, {1.0f, "1"}, {-0.5f, "-0.5"}, {0.1f, "0.1000000014"}, {1e-12f, "0.0000000000009999999960"},
+             {123456.5f, "123456.5"}, {-2.25f, "-2.25"}}) {
+        floats[0].word = std::bit_cast<std::uint32_t>(value);
+        const auto bytes = ts2::propset::writeXml(floats);
+        CHECK(ts2::propset::parse(bytes).at("f") == text);
+    }
+    floats[0].word = std::bit_cast<std::uint32_t>(1e7f);
+    bool floatRefused = false;
+    try {
+        ts2::propset::writeXml(floats);
+    } catch (const std::runtime_error&) {
+        floatRefused = true;
+    }
+    CHECK(floatRefused);
+    auto historyBroken = historyBytes;
+    historyBroken[12] = 1;  // the byte the game writes as 0
+    CHECK(!ts2::fami::readHistory(historyBroken));
+    auto counterBroken = counter;
+    counterBroken[0] = 3;
+    CHECK(!readArchiveCounter(counterBroken));
+}
+
+// String maps, roofs, the lot texture, the object type table and the world database write back as
+// the game writes them, and their readers find the fields.
+void lotWideRecordsWriteBack() {
+    std::map<std::uint16_t, ts2::stringmap::Entry> patterns;
+    patterns[3] = {"15cbf1f5", 4};
+    patterns[1] = {"blank", 0};
+    const std::vector<std::uint8_t> map = ts2::stringmap::write(patterns);
+    const auto mapSeen = ts2::stringmap::parse(map);
+    CHECK(mapSeen.size() == 2 && mapSeen.at(3).name == "15cbf1f5" && mapSeen.at(3).uses == 4);
+    CHECK(ts2::stringmap::write(mapSeen) == map);
+    // The game orders them by name ignoring case, and keeps names that differ only in case as one.
+    patterns[0] = {"Zeta", 1};
+    patterns[2] = {"alpha", 1};
+    const std::vector<std::uint8_t> sorted = ts2::stringmap::write(patterns);
+    CHECK(sorted[64 + 8 + 11 + 4 + 1] == '1' && sorted[64 + 8 + 11 + 4 + 1 + 8 + 6 + 1] == 'a');
+    patterns[4] = {"ZETA", 1};
+    bool refused = false;
+    try {
+        ts2::stringmap::write(patterns);
+    } catch (const std::runtime_error&) {
+        refused = true;
+    }
+    CHECK(refused);
+
+    ts2::roofs::Roof roof;
+    roof.id = 9;
+    roof.x0 = 21.0f;
+    roof.level1 = 2;
+    roof.slope = 0.5f;
+    roof.extra = 7;
+    const std::vector<std::uint8_t> roofs = ts2::roofs::write({roof});
+    const auto roofsSeen = ts2::roofs::parse(roofs);
+    CHECK(roofs.size() == 64 + 12 + 44 && roofsSeen.size() == 1 && roofsSeen[0].x0 == 21.0f && roofsSeen[0].extra == 7);
+    CHECK(ts2::roofs::write(roofsSeen) == roofs);
+
+    ts2::terrain::LotTexture texture;
+    texture.width = 30;
+    texture.height = 50;
+    texture.canvas = "lottexture-canvas-grass";
+    texture.paints = {"lottexture-dirt", "lottexture-sand"};
+    const std::vector<std::uint8_t> textureBytes = ts2::terrain::writeLotTexture(texture);
+    const auto textureSeen = ts2::terrain::parseLotTexture(textureBytes);
+    CHECK(textureSeen.version == 7 && textureSeen.height == 50 && textureSeen.paints.size() == 2 && textureSeen.paints[1] == "lottexture-sand");
+    CHECK(ts2::terrain::writeLotTexture(textureSeen) == textureBytes);
+
+    ts2::objt::ObjectTypeTable table;
+    ts2::objt::Entry entry;
+    entry.guid = 0xB03F156F;
+    entry.index = 5;
+    entry.kind = ts2::objt::kPersonKind;
+    entry.name = "Person";
+    entry.flag = 1;
+    entry.secondGuid = entry.guid;
+    table.entries.push_back(entry);
+    const std::vector<std::uint8_t> tableBytes = ts2::objt::write(table);
+    const auto tableSeen = ts2::objt::parse(tableBytes);
+    CHECK(tableSeen.version == 0x55 && tableSeen.entries.size() == 1 && tableSeen.find(5) && tableSeen.find(5)->name == "Person");
+    CHECK(ts2::objt::write(tableSeen) == tableBytes);
+
+    ts2::worlddb::Record world;
+    world.values = {0, 0, -1, 29, 3, 4};
+    const std::vector<std::uint8_t> worldBytes = ts2::worlddb::writeRecord(world);
+    const auto worldSeen = ts2::worlddb::readRecord(worldBytes);
+    CHECK(worldSeen && worldSeen->values[3] == 29 && !worldSeen->text && ts2::worlddb::writeRecord(*worldSeen) == worldBytes);
+    world.text = "name";
+    const std::vector<std::uint8_t> withText = ts2::worlddb::writeRecord(world);
+    const auto withTextSeen = ts2::worlddb::readRecord(withText);
+    CHECK(withTextSeen && withTextSeen->text == "name" && ts2::worlddb::writeRecord(*withTextSeen) == withText);
+    auto broken = worldBytes;
+    broken[68] = 6;  // an older version
+    CHECK(!ts2::worlddb::readRecord(broken));
+    broken = worldBytes;
+    broken.back() = 2;  // a flag the game never writes
+    CHECK(!ts2::worlddb::readRecord(broken));
+}
+
+// The wall graph, wall layers and fence posts write back as the game writes them.
+void wallRecordsWriteBack() {
+    ts2::wallgraph::WallGraph graph;
+    graph.unknown = {1, 2};
+    graph.firstLevel = -1;
+    graph.width = 64;
+    graph.height = 64;
+    graph.levels = 3;
+    graph.counters = {5, 6};
+    graph.points = {{1, 10.0f, 12.5f, 0}, {2, 14.0f, 12.5f, 0}};
+    graph.rooms = {0, 3};
+    graph.walls = {{7, 1, 3, 2, 0}};
+    const std::vector<std::uint8_t> bytes = ts2::wallgraph::write(graph);
+    const ts2::wallgraph::WallGraph seen = ts2::wallgraph::parse(bytes);
+    CHECK(seen.classId == ts2::wallgraph::kType && seen.version == 3 && seen.firstLevel == -1 && seen.counters[1] == 6);
+    CHECK(seen.points.size() == 2 && seen.points[1].x == 14.0f && seen.walls.size() == 1 && seen.walls[0].leftRoom == 3);
+    CHECK(ts2::wallgraph::write(seen) == bytes);
+
+    const std::vector<ts2::walllayer::Entry> coverings = {{7, 0x12345678, 2, 9}};
+    const std::vector<std::uint8_t> layer = ts2::walllayer::write(coverings);
+    const auto coveringsSeen = ts2::walllayer::parse(layer);
+    CHECK(layer.size() == 64 + 8 + 11 + 4 + 12 && coveringsSeen.size() == 1 && coveringsSeen[0].right == 9);
+    CHECK(ts2::walllayer::write(coveringsSeen) == layer);
+
+    const std::vector<ts2::fencepostlayer::Post> posts = {{1, 3.0f, 4.0f, 0xABCDEF01}};
+    const std::vector<std::uint8_t> postBytes = ts2::fencepostlayer::write(posts);
+    const auto postsSeen = ts2::fencepostlayer::parse(postBytes);
+    CHECK(postsSeen.size() == 1 && postsSeen[0].y == 4.0f && postsSeen[0].fence == 0xABCDEF01);
+    CHECK(ts2::fencepostlayer::write(postsSeen) == postBytes);
+}
+
+// Lot grids write back as the game writes them, and the grid readers find their cells.
+void lotGridsWriteBack() {
+    using namespace ts2::lotgrid;
+    Grid grid;
+    grid.width = 2;
+    grid.height = 3;
+    grid.levels = 2;
+    for (std::uint8_t i = 0; i < 2 * 3 * 2 * 2; ++i) {
+        grid.cells.push_back(i);
+    }
+    const std::vector<std::uint8_t> bytes = writeGrid(grid);
+    const ts2::array3d::Array3D seen = ts2::array3d::parse(bytes);
+    CHECK(seen.classId == k3DType && seen.version == 1 && seen.levels == 2 && seen.elementSize == 2);
+    CHECK(seen.i16(1, 1, 2, 0) == (22 | 23 << 8));
+    const auto again = readGrid(bytes);
+    CHECK(again && again->threeD && writeGrid(*again) == bytes);
+
+    Grid flat;
+    flat.threeD = false;
+    flat.width = 2;
+    flat.height = 2;
+    flat.cells = {1, 2, 3, 4};
+    const std::vector<std::uint8_t> flatBytes = writeGrid(flat);
+    const ts2::terrain::Array2D flatSeen = ts2::terrain::parseArray2D(flatBytes);
+    CHECK(flatSeen.width == 2 && flatSeen.elementSize == 1);
+    const auto flatAgain = readGrid(flatBytes);
+    CHECK(flatAgain && !flatAgain->threeD && flatAgain->levels == 1 && writeGrid(*flatAgain) == flatBytes);
+
+    auto broken = bytes;
+    broken[68] = 2;  // a version the game does not write
+    CHECK(!readGrid(broken));
+    broken = bytes;
+    broken[10] = 1;  // the name the game writes as zeros
+    CHECK(!readGrid(broken));
+    broken = bytes;
+    broken[73] = 'C';  // another class name
+    CHECK(!readGrid(broken));
+    CHECK(!readGrid(std::span(bytes).first(80)));
+}
+
+// Relationships write back as the game writes them: version 2, the count, then the values.
+void relationshipRecordsWriteBack() {
+    using namespace ts2::srel;
+    const Record record{{48, -20, 3}};
+    const std::vector<std::uint8_t> bytes = writeRecord(record);
+    CHECK(bytes.size() == 20 && bytes[0] == 2 && bytes[4] == 3);
+    const Relationship seen = parse(bytes);
+    CHECK(seen.version == 2 && seen.values == record.values && seen.extraBytes == 0);
+    const auto again = readRecord(bytes);
+    CHECK(again && writeRecord(*again) == bytes);
+    auto broken = bytes;
+    broken[0] = 3;  // an older game's version
+    CHECK(!readRecord(broken));
+    broken = bytes;
+    broken.push_back(0);  // bytes after the values, which the game never writes
+    CHECK(!readRecord(broken));
+    CHECK(!readRecord(std::span(bytes).first(bytes.size() - 1)));
+}
+
+// Saved scene records write back as the game writes them, and the scene reader finds the joints and
+// animations in what the writer gives.
+void sceneRecordsWriteBack() {
+    using namespace ts2::cobject;
+    Record record;
+    record.chain = Chain::Person;
+    record.object.model = "afbodyhairup_cres";
+    record.object.materials.push_back({"body", 7, {{"top", "red"}, {"bottom", "blue"}}});
+    record.object.place[6] = std::bit_cast<std::uint32_t>(1.0f);
+    PosedJoint joint;
+    joint.name = "seat";
+    joint.place = {std::bit_cast<std::uint32_t>(0.5f), 0, 0, 0, 0, 0, std::bit_cast<std::uint32_t>(1.0f)};
+    record.object.joints.push_back(joint);
+    record.object.blends.push_back({"smile", "face", std::bit_cast<std::uint32_t>(0.25f)});
+    record.animatable.scale = std::bit_cast<std::uint32_t>(1.0f);
+    record.animatable.places.emplace();
+
+    Animation clip;
+    clip.kind = Animation::Kind::Clip;
+    clip.request.flags = 1;
+    clip.request.name = "a-idle-neutral";
+    clip.request.type = "ovl";
+    clip.request.category = 3;
+    clip.request.eventObject = -2;
+    clip.request.eventTree = 0x2000;
+    clip.request.rate = std::bit_cast<std::uint32_t>(1.0f);
+    clip.request.eventObjectGuid = 0x7F05CC2C;
+    clip.request.part.emplace(-5, 9);
+    clip.instance.state = 1;
+    clip.instance.startTick = 100;
+    clip.instance.savedTick = 350;
+    clip.instance.layer = 2;
+    clip.instance.weight = std::bit_cast<std::uint32_t>(1.0f);
+    Curve curve;
+    curve.segments.push_back({0, {}, std::bit_cast<std::uint32_t>(200.0f)});
+    curve.segments.push_back({1, {}, std::bit_cast<std::uint32_t>(600.0f)});
+    clip.instance.curve = curve;
+    clip.resource = "a-idle-neutral_anim";
+    record.animatable.animations.push_back(clip);
+    record.animatable.animations.push_back(Animation{});
+    Animation attached = clip;
+    attached.kind = Animation::Kind::Attached;
+    attached.request.part.reset();
+    attached.instance.curve.reset();
+    attached.resource = "hand";
+    attached.attached[11] = 4;
+    record.animatable.animations.push_back(attached);
+    record.locomotable.sets.push_back({3, {{"walk", std::bit_cast<std::uint32_t>(0.5f)}}});
+
+    const std::vector<std::uint8_t> bytes = writeRecord(record);
+    const SavedObject seen = parse(bytes);
+    CHECK(seen.outerTag == kPersonTag && seen.classes.size() == 4 && seen.classes[3] == "cObject");
+    CHECK(seen.joints.size() == 1 && seen.joints[0].name == "seat" && seen.joints[0].translation[0] == 0.5f);
+    CHECK(seen.animations.size() == 2 && seen.animations[0].name == "a-idle-neutral" && seen.animations[0].flipped);
+    CHECK(seen.animations[0].type == "ovl" && seen.animations[0].category == 3 && seen.animations[0].eventObject == -2);
+    CHECK(seen.animations[0].eventTree == 0x2000 && seen.animations[0].eventObjectGuid == 0x7F05CC2C);
+    CHECK(seen.animations[0].fadeInMs == 200.0f && seen.animations[0].lengthMs == 800.0f && seen.animations[0].startedMsAgo == 250);
+    CHECK(seen.animations[1].kind == SavedAnimation::Kind::Attached && !seen.animations[1].lengthMs);
+    const auto again = readRecord(bytes);
+    CHECK(again && writeRecord(*again) == bytes && again->animatable.animations[1].kind == Animation::Kind::None);
+
+    Record plain;
+    plain.object.model = "chair";
+    const std::vector<std::uint8_t> plainBytes = writeRecord(plain);
+    CHECK(parse(plainBytes).classes.size() == 1);
+    const auto plainAgain = readRecord(plainBytes);
+    CHECK(plainAgain && plainAgain->chain == Chain::Object && writeRecord(*plainAgain) == plainBytes);
+
+    auto broken = plainBytes;
+    broken[68] = 0x10;  // a cObject version the game no longer writes
+    CHECK(!readRecord(broken));
+    broken = plainBytes;
+    broken[3] = 1;  // the name the game writes as zeros
+    CHECK(!readRecord(broken));
+    broken = plainBytes;
+    broken.push_back(0);
+    CHECK(!readRecord(broken));
+    CHECK(!readRecord(std::span(plainBytes).first(plainBytes.size() - 1)));
+    // The model's name length written in two bytes, which the game never does. It follows the
+    // four class headers.
+    constexpr std::size_t modelAt = 64 + 16 + 21 + 20 + 16;
+    CHECK(bytes[modelAt] == record.object.model.size());
+    std::vector<std::uint8_t> longLength = bytes;
+    longLength[modelAt] |= 0x80;
+    longLength.insert(longLength.begin() + static_cast<std::ptrdiff_t>(modelAt) + 1, 0);
+    CHECK(!readRecord(longLength));
+}
+
+// Saved camera views write back as the game writes them: a used slot of an orbiting camera takes 43
+// bytes, of the free camera 41, an empty one 1. The neighborhood's reader finds its fields there.
+void savedCameraRecordsWriteBack() {
+    using namespace ts2::savedcamera;
+    Record orbit;
+    OrbitView view;
+    view.zoomStep = 2;
+    view.byte1 = 1;
+    view.distance = std::bit_cast<std::uint32_t>(650.0f);
+    view.orientation = 3;
+    view.byte2 = 1;
+    view.yaw = std::bit_cast<std::uint32_t>(1.5f);
+    view.angle = std::bit_cast<std::uint32_t>(0.25f);
+    view.target = {std::bit_cast<std::uint32_t>(10.0f), std::bit_cast<std::uint32_t>(20.0f), std::bit_cast<std::uint32_t>(3.0f)};
+    view.value1 = 1;
+    view.value2 = -4;
+    orbit.orbit[0] = view;
+    std::vector<std::uint8_t> bytes = writeRecord(orbit);
+    CHECK(bytes.size() == 115 && bytes[64] == kOrbitKind && bytes[65] == kSlots && bytes[66] == 1);
+    const auto hood = ts2::nhood::parseSavedCamera(bytes);
+    CHECK(hood && hood->distance == 650.0f && hood->yaw == 1.5f && hood->target[1] == 20.0f);
+    orbit.orbit[3] = view;
+    bytes = writeRecord(orbit);
+    CHECK(bytes.size() == 64 + 2 + 43 * 2 + 5);
+    const auto again = readRecord(bytes);
+    CHECK(again && writeRecord(*again) == bytes && again->orbit[3] && !again->orbit[1]);
+
+    Record free;
+    free.kind = kFreeKind;
+    FreeView f;
+    f.position = {1, 2, 3};
+    f.rotation = {4, 5, 6, 7};
+    f.value = 8;
+    f.value1 = 9;
+    f.value2 = 10;
+    free.free[1] = f;
+    const std::vector<std::uint8_t> freeBytes = writeRecord(free);
+    CHECK(freeBytes.size() == 64 + 2 + 41 + 6);
+    const auto freeAgain = readRecord(freeBytes);
+    CHECK(freeAgain && writeRecord(*freeAgain) == freeBytes && freeAgain->free[1]->rotation[3] == 7);
+
+    auto broken = bytes;
+    broken[64] = 2;  // another kind
+    CHECK(!readRecord(broken));
+    broken = bytes;
+    broken[65] = 6;
+    CHECK(!readRecord(broken));
+    broken = bytes;
+    broken[66] = 2;  // a used byte the game never writes
+    CHECK(!readRecord(broken));
+    broken = bytes;
+    broken[5] = 1;  // the name the game writes as zeros
+    CHECK(!readRecord(broken));
+    broken = bytes;
+    broken.push_back(0);
+    CHECK(!readRecord(broken));
+    CHECK(!readRecord(std::span(bytes).first(bytes.size() - 1)));
+}
+
+// The object map's two records write back as the game writes them, and the reader of saves finds
+// the same objects and waits in instance 1.
+void objectMapRecordsWriteBack() {
+    using namespace ts2::objm;
+    MapRecord map;
+    map.objects = {{3, 0}, {1, 2}, {7, 1}};
+    map.waits = {5, 0, 0x00010009, 0, 0, 0, 2};
+    map.waitsWithObject = 3;
+    map.buildBuyBlockers = {7, 7};
+    map.subscriptions = {{0xACFD5984, {{3, "Test - Tree"}}}, {0x709AE21B, {}}};
+    const std::vector<std::uint8_t> bytes = writeMapRecord(map);
+    const auto again = readMapRecord(bytes);
+    CHECK(again && writeMapRecord(*again) == bytes);
+    CHECK(again->subscriptions[0].subscribers[0].tree == "Test - Tree" && again->buildBuyBlockers.size() == 2);
+    const ObjectMap parsed = parse(bytes);
+    CHECK(parsed.version == kWrittenVersion && parsed.typeIndexByObject.at(1) == 2 && parsed.typeIndexByObject.at(7) == 1);
+    CHECK(parsed.waitTicks.size() == 7 && parsed.waitTicks[0] == 5 && parsed.waitTicks[2] == 9);
+
+    auto broken = bytes;
+    broken[68] = 0xD2;  // an older version
+    CHECK(!readMapRecord(broken));
+    broken = bytes;
+    broken[64] = 1;  // the first word the game writes as 0
+    CHECK(!readMapRecord(broken));
+    broken = bytes;
+    broken.push_back(0);
+    CHECK(!readMapRecord(broken));
+    CHECK(!readMapRecord(std::span(bytes).first(bytes.size() - 1)));
+
+    GroupsRecord groups;
+    groups.groups = {{5, {1, 2, 3}}, {-1, {}}, {2, {9}}};
+    const std::vector<std::uint8_t> groupBytes = writeGroupsRecord(groups);
+    const auto groupsAgain = readGroupsRecord(groupBytes);
+    CHECK(groupsAgain && writeGroupsRecord(*groupsAgain) == groupBytes);
+    const ObjectGroups parsedGroups = parseGroups(groupBytes);
+    CHECK(parsedGroups.version == 2 && parsedGroups.objectsByKey.at(5).size() == 3);
+    auto oldGroups = groupBytes;
+    oldGroups[64] = 1;
+    CHECK(!readGroupsRecord(oldGroups));
+}
+
+// Saved objects of the version the game writes read back to the same record and the same bytes,
+// for plain objects, objects with a material block and Sims.
+void savedObjectsWriteBack() {
+    using namespace ts2::xobj;
+    SavedObject o;
+    o.version = kWrittenVersion;
+    o.header.location = {12.5f, 30.0f};
+    o.header.value1 = 2;
+    o.header.value2 = 1;
+    o.header.value4 = 77;
+    o.attributes = {1, -2, 3};
+    o.semiAttributes = {4};
+    o.temps = {1, 2, 3, 4, 5, 6, 7, 8};
+    o.data[0x19] = 600;
+    o.tokenSource = {9, 9, 9, 9, 9, 9, 9, 9};
+    Tail t;
+    t.token.guid = 0x12345678;
+    t.token.properties = {5, 6};
+    t.arrays = {{1, 2}, {}};
+    t.shorts = {3};
+    t.strings = {"one", std::string(130, 'x')};
+    t.stackValue = 1;
+    StackFrame f;
+    f.objectId = 3;
+    f.treeId = 0x1001;
+    f.params = {1, 2, 3, 4};
+    f.locals = {9};
+    f.codeOwner = 2;
+    t.stack = {f, f};
+    t.relationshipVersion = 3;
+    t.relationshipIds = {10, 11};
+    t.slots.marker = -101;
+    t.slots.values = {0, 5};
+    t.effectFlag = 1;
+    t.effectVersion = 2;
+    t.effects = {{"glow", "slot", 1, 2, 3}};
+    t.materials = {{"res", "subset", "mat"}};
+    TimerEntry timer;
+    timer.value3 = 4;
+    t.timers = {timer};
+    o.tail = t;
+    for (const RecordKind kind : {RecordKind::Object, RecordKind::ObjectWithMaterial, RecordKind::Person}) {
+        SavedObject k = o;
+        if (kind == RecordKind::ObjectWithMaterial) {
+            k.tail->materialBlock.assign(26, 0x5A);
+        }
+        if (kind == RecordKind::Person) {
+            PersonPart p;
+            p.version = 2;
+            p.motives[0] = 50.0f;
+            p.personData.assign(personDataCountForVersion(kWrittenVersion), 3);
+            k.person = p;
+            SavedInteraction running;
+            running.number = 41;
+            running.id = 7;
+            running.name = "Eat";
+            k.person->state.running = running;
+            k.person->state.queue = {running, running};
+            k.person->state.runs = {{12, 3, true}};
+            k.person->state.entries = {{2, 0.5f, -1.0f}};
+            k.person->state.runningSub = running;
+            k.person->state.text = "text";
+            k.person->state.value4 = 9;
+        }
+        const std::vector<std::uint8_t> bytes = write(k, kind);
+        const SavedObject again = parse(bytes, kWrittenVersion, kind);
+        CHECK(write(again, kind) == bytes);
+        if (kind == RecordKind::Person) {
+            const PersonState& s = again.person->state;
+            CHECK(again.rest.empty() && s.queue.size() == 2 && s.queue[1].name == "Eat" && s.running.number == 41);
+            CHECK(s.runs.size() == 1 && s.runs[0].object == 12 && s.runs[0].depth == 3 && s.runs[0].flag);
+            CHECK(s.runningSub && s.runningSub->id == 7 && s.text == "text" && s.value4 == 9 && s.entries[0].value2 == -1.0f);
+        }
+        CHECK(again.tail->stack.size() == 2 && again.tail->stack[1].params.size() == 4 && again.tail->stackValue == 1);
+        CHECK(again.tail->strings[1].size() == 130 && again.data[0x19] == 600 && again.header.location[1] == 30.0f);
+    }
+    bool refused = false;
+    try {
+        SavedObject older = o;
+        older.version = 0xD2;
+        write(older, RecordKind::Object);
+    } catch (const std::exception&) {
+        refused = true;
+    }
+    CHECK(refused);
+}
+
 std::vector<Test> formatTests() {
     return {
+        {"saved objects write back", savedObjectsWriteBack},
+        {"object map records write back", objectMapRecordsWriteBack},
+        {"saved camera records write back", savedCameraRecordsWriteBack},
+        {"scene records write back", sceneRecordsWriteBack},
+        {"relationship records write back", relationshipRecordsWriteBack},
+        {"lot grids write back", lotGridsWriteBack},
+        {"wall records write back", wallRecordsWriteBack},
+        {"lot-wide records write back", lotWideRecordsWriteBack},
+        {"small lot records write back", smallLotRecordsWriteBack},
+        {"neighborhood records write back", neighborhoodRecordsWriteBack},
+        {"simulator state records write back", simulatorStateRecordsWriteBack},
+        {"lot info records write back", lotInfoRecordsWriteBack},
+        {"QFS compresses as the game does", qfsCompressesAsTheGameDoes},
+        {"QFS round-trips any data", qfsRoundTripsAnyData},
+        {"resources are stored as the game stores them", resourcesAreStoredAsTheGameStoresThem},
+        {"package images write back exactly", packageImagesWriteBackExactly},
+        {"package images refuse mistakes", packageImagesRefuseMistakes},
         {"a 3D array refuses element indexes past the element", array3dRefusesElementIndexesPastTheElement},
         {"effect detail follows zoom levels", effectDetailFollowsZoomLevels},
         {"a package marks every copy of a compressed key", packageMarksEveryCopyOfACompressedKey},

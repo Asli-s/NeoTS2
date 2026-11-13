@@ -26,4 +26,11 @@ struct Roof {
 // The lot's roofs (resource type 0xAB9406AA, versions 1 to 3).
 std::vector<Roof> parse(std::span<const std::uint8_t> data);
 
+constexpr std::uint32_t kType = 0xAB9406AA;
+constexpr std::uint32_t kWrittenVersion = 3;
+
+// The roofs as the game writes them, at version 3. Throws std::runtime_error for a list too long to
+// write.
+std::vector<std::uint8_t> write(const std::vector<Roof>& roofs);
+
 } // namespace ts2::roofs

@@ -66,7 +66,8 @@ fs::path lockFileFor(const fs::path& folder) {
 
 bool isWorkName(const fs::path& name) {
     const std::string folded = foldedName(name);
-    for (const std::u8string_view suffix : {kStagingSuffix, kNeighborhoodsStagingSuffix, kLockSuffix, kMarkSuffix}) {
+    for (const std::u8string_view suffix : {kStagingSuffix, kNeighborhoodsStagingSuffix, kLockSuffix, kMarkSuffix, kSaveJournalSuffix,
+                                            kSaveNewSuffix, kSaveOldSuffix}) {
         if (folded.ends_with(std::string_view(reinterpret_cast<const char*>(suffix.data()), suffix.size()))) {
             return true;
         }

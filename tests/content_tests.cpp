@@ -6,6 +6,7 @@
 #include "content/downloads.hpp"
 #include "content/resource_index.hpp"
 #include "content/save_folder.hpp"
+#include "content/save_writer.hpp"
 #include "content/graphics_options.hpp"
 #include "content/user_props.hpp"
 #include "content/ui_queue.hpp"
@@ -1531,10 +1532,240 @@ void userOptionsAreSavedKeepingTheRestOfTheFile() {
     CHECK(!ts2::content::setUserProp(broken, "a", "1", false) && broken == "<cGZPropertySetString>");
 }
 
+namespace saves {
+
+namespace fs = std::filesystem;
+
+std::vector<std::uint8_t> package(std::uint32_t instance, std::size_t size, std::uint8_t fill) {
+    ts2::dbpf::PackageImage image;
+    std::vector<std::uint8_t> body(size, fill);
+    for (std::size_t i = 0; i < size; i += 7) {
+        body[i] = static_cast<std::uint8_t>(i);
+    }
+    image.resources.push_back(ts2::dbpf::storeResource({0x584F424A, 0xFFFFFFFF, instance, 0}, body));
+    image.dataOrder = {0};
+    return ts2::dbpf::writeImage(image);
+}
+
+std::vector<std::uint8_t> bytesOf(const fs::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+
+void put(const fs::path& path, std::span<const std::uint8_t> bytes) {
+    std::ofstream(path, std::ios::binary).write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+}
+
+void put(const fs::path& path, std::string_view text) {
+    std::ofstream(path, std::ios::binary) << text;
+}
+
+// Any save work file left anywhere under the folder, or beside it.
+bool workFilesLeft(const fs::path& folder) {
+    for (const auto& entry : fs::recursive_directory_iterator(folder)) {
+        if (ts2::paths::isWorkName(entry.path().filename())) {
+            return true;
+        }
+    }
+    return fs::exists(ts2::content::saveJournalPath(folder));
+}
+
+struct Folder {
+    fs::path root = fs::temp_directory_path() / ("neots2-save-writer-test-" + std::to_string(std::random_device{}()));
+    fs::path saves = root / "saves";
+    fs::path lot = saves / "Neighborhoods/N001/Lots/N001_Lot1.package";
+    fs::path sim = saves / "Neighborhoods/N001/Characters/N001_User00001.package";
+    std::vector<std::uint8_t> oldLot = package(1, 900, 3);
+    std::vector<std::uint8_t> newLot = package(1, 1200, 4);
+    std::vector<std::uint8_t> oldSim = package(2, 300, 5);
+    std::vector<std::uint8_t> newSim = package(2, 500, 6);
+
+    Folder() {
+        fs::create_directories(lot.parent_path());
+        fs::create_directories(sim.parent_path());
+        put(lot, oldLot);
+        put(sim, oldSim);
+    }
+    ~Folder() {
+        std::error_code error;
+        fs::remove_all(root, error);
+    }
+};
+
+} // namespace saves
+
+namespace fs = std::filesystem;
+
+// A save replaces and makes packages only inside the save folder's Neighborhoods, and leaves no
+// work files behind.
+void saveWriterReplacesItsTargets() {
+    saves::Folder f;
+    const fs::path newSim = f.saves / "Neighborhoods/N001/Characters/N001_User00002.package";
+    {
+        const ts2::paths::SaveFolderLock lock(f.saves);
+        ts2::content::SaveWriter writer(lock);
+        writer.add(f.lot, f.newLot, ts2::content::SaveTarget::Replace);
+        writer.add(f.sim, f.newSim, ts2::content::SaveTarget::Replace);
+        writer.add(newSim, f.oldSim, ts2::content::SaveTarget::Create);
+        writer.commit();
+    }
+    CHECK(saves::bytesOf(f.lot) == f.newLot);
+    CHECK(saves::bytesOf(f.sim) == f.newSim);
+    CHECK(saves::bytesOf(newSim) == f.oldSim);
+    CHECK(!saves::workFilesLeft(f.saves));
+}
+
+// Anything a save shouldn't touch is refused before a byte is written.
+void saveWriterRefusesWrongTargets() {
+    saves::Folder f;
+    const ts2::paths::SaveFolderLock lock(f.saves);
+    ts2::content::SaveWriter writer(lock);
+    auto refused = [&](const fs::path& target, std::span<const std::uint8_t> bytes, ts2::content::SaveTarget kind) {
+        try {
+            writer.add(target, std::vector<std::uint8_t>(bytes.begin(), bytes.end()), kind);
+        } catch (const ts2::content::SaveError&) {
+            return true;
+        }
+        return false;
+    };
+    using ts2::content::SaveTarget;
+    saves::put(f.saves / "Outside.package", f.oldLot);
+    saves::put(f.saves / "Neighborhoods/N001/notes.txt", "notes");
+    saves::put(f.saves / "Neighborhoods/N001/Text.package", "not a package");
+    CHECK(refused(f.saves / "Outside.package", f.newLot, SaveTarget::Replace));                     // outside Neighborhoods
+    CHECK(refused(f.saves / "Neighborhoods/../Outside.package", f.newLot, SaveTarget::Replace));     // led outside
+    CHECK(refused(f.root / "N001_Lot1.package", f.newLot, SaveTarget::Create));                       // outside the save folder
+    CHECK(refused(f.saves / "Neighborhoods/N001/notes.txt", f.newLot, SaveTarget::Replace));          // not a package name
+    CHECK(refused(f.saves / "Neighborhoods/N001/Text.package", f.newLot, SaveTarget::Replace));       // not a package inside
+    CHECK(refused(f.saves / "Neighborhoods/N001/Lots/N001_Lot2.package", f.newLot, SaveTarget::Replace));  // missing
+    CHECK(refused(f.lot, f.newLot, SaveTarget::Create));                                              // already there
+    CHECK(refused(f.saves / "Neighborhoods/N009/N009_Neighborhood.package", f.newLot, SaveTarget::Create));  // no such folder
+    const std::vector<std::uint8_t> broken(f.newLot.begin(), f.newLot.end() - 3);
+    CHECK(refused(f.lot, broken, SaveTarget::Replace));                                               // not a whole package
+    CHECK(!refused(f.lot, f.newLot, SaveTarget::Replace));
+    CHECK(refused(f.lot, f.newLot, SaveTarget::Replace));                                             // twice in one save
+    {
+        const ts2::paths::SaveFolderLock second(f.saves);  // another NeoTS2: busy, not held
+        ts2::content::SaveWriter other(second);
+        bool notHeld = false;
+        try {
+            other.add(f.sim, f.newSim, SaveTarget::Replace);
+        } catch (const ts2::content::SaveError&) {
+            notHeld = true;
+        }
+        CHECK(!second.held() && notHeld);
+    }
+    CHECK(saves::bytesOf(f.saves / "Outside.package") == f.oldLot);
+    CHECK(saves::bytesOf(f.lot) == f.oldLot);
+}
+
+// A save that fails at any of its moves puts every target back as it was.
+void saveWriterUndoesAFailedSave() {
+    for (int failAt = 1; failAt <= 4; ++failAt) {
+        saves::Folder f;
+        bool failed = false;
+        {
+            const ts2::paths::SaveFolderLock lock(f.saves);
+            ts2::content::SaveWriter writer(lock);
+            writer.add(f.lot, f.newLot, ts2::content::SaveTarget::Replace);
+            writer.add(f.sim, f.newSim, ts2::content::SaveTarget::Replace);
+            writer.failAtMoveForTests(failAt);
+            try {
+                writer.commit();
+            } catch (const ts2::content::SaveError&) {
+                failed = true;
+            }
+        }
+        CHECK(failed);
+        CHECK(saves::bytesOf(f.lot) == f.oldLot);
+        CHECK(saves::bytesOf(f.sim) == f.oldSim);
+        CHECK(!saves::workFilesLeft(f.saves));
+    }
+}
+
+// After a crash part way through a save, the next start puts every target back as it was, or keeps
+// the new save once the journal says it was done. A journal it can't trust leaves everything alone.
+void interruptedSavesAreUndone() {
+    using ts2::content::newPackagePath;
+    using ts2::content::oldPackagePath;
+    const std::string listed = "NeoTS2 save journal 1\nreplace N001/Lots/N001_Lot1.package\nreplace N001/Characters/N001_User00001.package\n";
+    auto recover = [](const saves::Folder& f) {
+        const ts2::paths::SaveFolderLock lock(f.saves);
+        return ts2::content::recoverInterruptedSave(lock);
+    };
+    {  // stopped between the two moves of the first target
+        saves::Folder f;
+        fs::rename(f.lot, oldPackagePath(f.lot));
+        saves::put(newPackagePath(f.lot), f.newLot);
+        saves::put(newPackagePath(f.sim), f.newSim);
+        saves::put(ts2::content::saveJournalPath(f.saves), listed + "end\n");
+        const auto r = recover(f);
+        CHECK(r.problem.empty() && r.restored == 1);
+        CHECK(saves::bytesOf(f.lot) == f.oldLot && saves::bytesOf(f.sim) == f.oldSim && !saves::workFilesLeft(f.saves));
+    }
+    {  // stopped after both targets were swapped, before the journal was marked done
+        saves::Folder f;
+        fs::rename(f.lot, oldPackagePath(f.lot));
+        saves::put(f.lot, f.newLot);
+        fs::rename(f.sim, oldPackagePath(f.sim));
+        saves::put(f.sim, f.newSim);
+        saves::put(ts2::content::saveJournalPath(f.saves), listed + "end\n");
+        const auto r = recover(f);
+        CHECK(r.problem.empty() && r.restored == 2);
+        CHECK(saves::bytesOf(f.lot) == f.oldLot && saves::bytesOf(f.sim) == f.oldSim && !saves::workFilesLeft(f.saves));
+    }
+    {  // stopped after the journal was marked done: the new save stays
+        saves::Folder f;
+        fs::rename(f.lot, oldPackagePath(f.lot));
+        saves::put(f.lot, f.newLot);
+        saves::put(ts2::content::saveJournalPath(f.saves), listed + "end\ndone\n");
+        const auto r = recover(f);
+        CHECK(r.problem.empty() && r.restored == 0);
+        CHECK(saves::bytesOf(f.lot) == f.newLot && saves::bytesOf(f.sim) == f.oldSim && !saves::workFilesLeft(f.saves));
+    }
+    {  // stopped while the journal was being written: no move had started
+        saves::Folder f;
+        saves::put(newPackagePath(f.lot), f.newLot);
+        saves::put(ts2::content::saveJournalPath(f.saves), "NeoTS2 save journal 1\nreplace N001/Lots/N0");
+        const auto r = recover(f);
+        CHECK(r.problem.empty() && saves::bytesOf(f.lot) == f.oldLot && !saves::workFilesLeft(f.saves));
+    }
+    {  // stopped before the journal: only new packages beside the targets
+        saves::Folder f;
+        saves::put(newPackagePath(f.sim), f.newSim);
+        const auto r = recover(f);
+        CHECK(r.problem.empty() && r.cleaned == 1 && saves::bytesOf(f.sim) == f.oldSim && !saves::workFilesLeft(f.saves));
+    }
+    for (const std::string journal : {std::string("not a journal\n"), std::string("NeoTS2 save journal 1\nreplace ../../Other.package\nend\n"),
+                                      std::string("NeoTS2 save journal 1\nreplace N001/Lots/notes.txt\nend\n")}) {
+        saves::Folder f;
+        fs::rename(f.lot, oldPackagePath(f.lot));
+        saves::put(f.lot, f.newLot);
+        saves::put(ts2::content::saveJournalPath(f.saves), journal);
+        const auto r = recover(f);
+        CHECK(!r.problem.empty());
+        CHECK(saves::bytesOf(f.lot) == f.newLot && saves::bytesOf(oldPackagePath(f.lot)) == f.oldLot);  // untouched
+        const ts2::paths::SaveFolderLock lock(f.saves);
+        ts2::content::SaveWriter writer(lock);
+        writer.add(f.sim, f.newSim, ts2::content::SaveTarget::Replace);
+        bool refused = false;
+        try {
+            writer.commit();
+        } catch (const ts2::content::SaveError&) {
+            refused = true;
+        }
+        CHECK(refused && saves::bytesOf(f.sim) == f.oldSim);
+    }
+}
+
 } // namespace
 
 std::vector<Test> contentTests() {
     return {
+        {"save writer replaces its targets", saveWriterReplacesItsTargets},
+        {"save writer refuses wrong targets", saveWriterRefusesWrongTargets},
+        {"save writer undoes a failed save", saveWriterUndoesAFailedSave},
+        {"interrupted saves are undone", interruptedSavesAreUndone},
         {"Animate Sim uses its age's list", animateSimUsesItsAgesList},
         {"option captions are read as the game reads them", optionCaptionsAreReadAsTheGameReadsThem},
         {"graphics option buttons pick the game settings", graphicsOptionButtonsPickTheGamesSettings},

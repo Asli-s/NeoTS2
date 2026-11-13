@@ -2,6 +2,10 @@
 
 #include "formats/binary_reader.hpp"
 
+#include <algorithm>
+#include <exception>
+#include <stdexcept>
+
 namespace ts2::nhood {
 
 namespace {
@@ -116,6 +120,204 @@ std::int16_t LotDescription::roomLightPercent(std::int16_t room) const {
     }
     const auto it = roomLightPercents.find(room);
     return it == roomLightPercents.end() ? std::int16_t{100} : it->second;
+}
+
+namespace {
+
+void putU32(std::vector<std::uint8_t>& out, std::uint32_t value) {
+    for (int shift = 0; shift < 32; shift += 8) {
+        out.push_back(static_cast<std::uint8_t>(value >> shift));
+    }
+}
+
+void putVarLength(std::vector<std::uint8_t>& out, std::size_t length) {
+    do {
+        const auto low = static_cast<std::uint8_t>(length & 0x7F);
+        length >>= 7;
+        out.push_back(static_cast<std::uint8_t>(low | (length != 0 ? 0x80 : 0)));
+    } while (length != 0);
+}
+
+void putVarString(std::vector<std::uint8_t>& out, const std::string& text) {
+    putVarLength(out, text.size());
+    out.insert(out.end(), text.begin(), text.end());
+}
+
+// Reads a text and checks its length was written the shortest way, so it writes back the same.
+bool readVarString(BinaryReader& r, std::string& text) {
+    const std::size_t before = r.remaining();
+    text = r.varString();
+    std::vector<std::uint8_t> length;
+    putVarLength(length, text.size());
+    return before - r.remaining() == length.size() + text.size();
+}
+
+// The lot package writes text lengths in 7-bit groups, the neighborhood package as 32 bits.
+enum class Lengths { Short, Full };
+
+bool readText(BinaryReader& r, std::string& text, Lengths lengths) {
+    if (lengths == Lengths::Short) {
+        return readVarString(r, text);
+    }
+    const auto bytes = r.bytes(r.u32());
+    text.assign(bytes.begin(), bytes.end());
+    return true;
+}
+
+void putText(std::vector<std::uint8_t>& out, const std::string& text, Lengths lengths) {
+    if (lengths == Lengths::Short) {
+        putVarString(out, text);
+        return;
+    }
+    if (text.size() > 0xFFFFFFFFu) {
+        throw std::runtime_error("lot description: a text is too long to write");
+    }
+    putU32(out, static_cast<std::uint32_t>(text.size()));
+    out.insert(out.end(), text.begin(), text.end());
+}
+
+void putU16(std::vector<std::uint8_t>& out, std::uint16_t value) {
+    out.push_back(static_cast<std::uint8_t>(value));
+    out.push_back(static_cast<std::uint8_t>(value >> 8));
+}
+
+void putCount(std::vector<std::uint8_t>& out, std::size_t n) {
+    if (n > 0x7FFFFFFF) {
+        throw std::runtime_error("lot description: a list is too long to write");
+    }
+    putU32(out, static_cast<std::uint32_t>(n));
+}
+
+// The lot info block from its version on, the same in both packages but for the text lengths.
+bool readInfoBlock(BinaryReader& r, LotInfoRecord& out, Lengths lengths) {
+    if (r.u16() != kLotInfoWrittenVersion) {
+        return false;
+    }
+    out.width = r.u32();
+    out.depth = r.u32();
+    out.type = r.u8();
+    out.roadSides = r.u8();
+    out.ownFacing = r.u8();
+    out.flags = r.u32();
+    if (!readText(r, out.name, lengths) || !readText(r, out.description, lengths)) {
+        return false;
+    }
+    out.values.resize(r.u32Count(4));
+    for (std::uint32_t& v : out.values) {
+        v = r.u32();
+    }
+    const auto rest = r.bytes(out.rest.size());
+    std::copy(rest.begin(), rest.end(), out.rest.begin());
+    return true;
+}
+
+void putInfoBlock(std::vector<std::uint8_t>& out, const LotInfoRecord& record, Lengths lengths) {
+    putU16(out, kLotInfoWrittenVersion);
+    putU32(out, record.width);
+    putU32(out, record.depth);
+    out.push_back(record.type);
+    out.push_back(record.roadSides);
+    out.push_back(record.ownFacing);
+    putU32(out, record.flags);
+    putText(out, record.name, lengths);
+    putText(out, record.description, lengths);
+    putCount(out, record.values.size());
+    for (const std::uint32_t v : record.values) {
+        putU32(out, v);
+    }
+    out.insert(out.end(), record.rest.begin(), record.rest.end());
+}
+
+} // namespace
+
+std::optional<LotInfoRecord> readLotInfo(std::span<const std::uint8_t> data) {
+    try {
+        BinaryReader r(data);
+        LotInfoRecord out;
+        const auto header = r.bytes(out.header.size());
+        std::copy(header.begin(), header.end(), out.header.begin());
+        if (!readInfoBlock(r, out, Lengths::Short) || r.remaining() != 0) {
+            return std::nullopt;
+        }
+        return out;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+std::vector<std::uint8_t> writeLotInfo(const LotInfoRecord& record) {
+    std::vector<std::uint8_t> out(record.header.begin(), record.header.end());
+    putInfoBlock(out, record, Lengths::Short);
+    return out;
+}
+
+std::optional<LotDescriptionRecord> readLotDescriptionRecord(std::span<const std::uint8_t> data) {
+    try {
+        BinaryReader r(data);
+        LotDescriptionRecord out;
+        if (r.u16() != kLotDescriptionWrittenVersion || !readInfoBlock(r, out.own, Lengths::Full)) {
+            return std::nullopt;
+        }
+        out.x = r.u32();
+        out.y = r.u32();
+        out.elevation = r.u32();
+        out.id = r.i32();
+        out.facing = r.u8();
+        if (!readText(r, out.texture, Lengths::Full) || r.u8() != 0) {
+            return std::nullopt;
+        }
+        out.owner = r.i32();
+        out.value1 = r.i32();
+        out.flag = r.u8();
+        out.value2 = r.i32();
+        out.value3 = r.i32();
+        out.entries.resize(r.i32Count(16));
+        for (auto& entry : out.entries) {
+            for (std::uint32_t& v : entry) {
+                v = r.u32();
+            }
+        }
+        for (std::size_t n = r.i32Count(4); n > 0; --n) {
+            const std::uint16_t room = r.u16();
+            out.roomLights.emplace_back(room, r.u16());
+        }
+        if (r.remaining() != 0) {
+            return std::nullopt;
+        }
+        return out;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+std::vector<std::uint8_t> writeLotDescriptionRecord(const LotDescriptionRecord& record) {
+    std::vector<std::uint8_t> out;
+    putU16(out, kLotDescriptionWrittenVersion);
+    putInfoBlock(out, record.own, Lengths::Full);
+    putU32(out, record.x);
+    putU32(out, record.y);
+    putU32(out, record.elevation);
+    putU32(out, static_cast<std::uint32_t>(record.id));
+    out.push_back(record.facing);
+    putText(out, record.texture, Lengths::Full);
+    out.push_back(0);
+    putU32(out, static_cast<std::uint32_t>(record.owner));
+    putU32(out, static_cast<std::uint32_t>(record.value1));
+    out.push_back(record.flag);
+    putU32(out, static_cast<std::uint32_t>(record.value2));
+    putU32(out, static_cast<std::uint32_t>(record.value3));
+    putCount(out, record.entries.size());
+    for (const auto& entry : record.entries) {
+        for (const std::uint32_t v : entry) {
+            putU32(out, v);
+        }
+    }
+    putCount(out, record.roomLights.size());
+    for (const auto& [room, percent] : record.roomLights) {
+        putU16(out, room);
+        putU16(out, percent);
+    }
+    return out;
 }
 
 } // namespace ts2::nhood

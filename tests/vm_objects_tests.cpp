@@ -3133,6 +3133,24 @@ void savedIdleForInputRunsAgainAfterItsInteraction() {
     CHECK(sim != nullptr && sim->thread.frames.size() == 2);
     Vm vm(code, {}, &world);
     CHECK(sim != nullptr && vm.resume(*sim).outcome == Outcome::True);
+
+    // The Sim's saved runs come back with its stack, and a running interaction that isn't blank
+    // counts as one it started.
+    ts2::xobj::PersonPart person;
+    person.state.runs = {{1, 1, false}, {1, 2, false}, {1, -3, false}};
+    person.state.running.index = 4;
+    lot.objects.back().state.person = person;
+    ts2::sim::World again;
+    ts2::sim::buildWorld(lot, code, again);
+    const auto* loaded = again.find(1);
+    CHECK((loaded != nullptr && loaded->runDepths == std::vector<std::size_t>{1, 2}));
+    CHECK(loaded != nullptr && loaded->currentInteraction == ts2::sim::SimObject::CurrentInteraction::Started);
+    person.state.running.index = -1;
+    person.state.running.iconObject = -1;
+    lot.objects.back().state.person = person;
+    ts2::sim::World blank;
+    ts2::sim::buildWorld(lot, code, blank);
+    CHECK(blank.find(1) != nullptr && blank.find(1)->currentInteraction == ts2::sim::SimObject::CurrentInteraction::Blank);
 }
 
 void roomFieldsAreReadThroughTempZero() {

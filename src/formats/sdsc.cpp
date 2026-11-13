@@ -1,6 +1,7 @@
 #include "formats/sdsc.hpp"
 
 #include "formats/binary_reader.hpp"
+#include "formats/binary_writer.hpp"
 
 #include <array>
 #include <stdexcept>
@@ -60,6 +61,65 @@ SimDescription parse(std::span<const std::uint8_t> data) {
     const auto rest = r.bytes(r.remaining());
     s.rest.assign(rest.begin(), rest.end());
     return s;
+}
+
+namespace {
+// The version of the relationship list block, written by the same code as a saved object's.
+constexpr std::int32_t kRelationshipListVersion = 3;
+} // namespace
+
+std::optional<Record> readRecord(std::span<const std::uint8_t> data) {
+    try {
+        BinaryReader r(data);
+        if (r.u32() != kWrittenVersion || r.i32() != kWrittenPersonDataVersion || r.i32() != kWrittenPersonDataVersion) {
+            return std::nullopt;
+        }
+        Record record;
+        for (std::int16_t& v : record.personData) {
+            v = r.i16();
+        }
+        record.neighborId = r.i16();
+        record.guid = r.u32();
+        if (r.i32() != kRelationshipListVersion) {
+            return std::nullopt;
+        }
+        record.relationships.resize(r.u32Count(4));
+        for (std::uint32_t& id : record.relationships) {
+            id = r.u32();
+        }
+        if (r.u8() != 0) {
+            return std::nullopt;
+        }
+        record.value1 = r.u32();
+        record.value2 = r.u32();
+        if (r.remaining() != 0) {
+            return std::nullopt;
+        }
+        return record;
+    } catch (const std::runtime_error&) {
+        return std::nullopt;
+    }
+}
+
+std::vector<std::uint8_t> writeRecord(const Record& record) {
+    BinaryWriter w;
+    w.u32(kWrittenVersion);
+    w.i32(kWrittenPersonDataVersion);
+    w.i32(kWrittenPersonDataVersion);
+    for (const std::int16_t v : record.personData) {
+        w.u16(static_cast<std::uint16_t>(v));
+    }
+    w.u16(static_cast<std::uint16_t>(record.neighborId));
+    w.u32(record.guid);
+    w.i32(kRelationshipListVersion);
+    w.count(record.relationships.size());
+    for (const std::uint32_t id : record.relationships) {
+        w.u32(id);
+    }
+    w.u8(0);
+    w.u32(record.value1);
+    w.u32(record.value2);
+    return w.take();
 }
 
 } // namespace ts2::sdsc

@@ -4,6 +4,8 @@
 #include "sim/animation.hpp"
 #include "sim/ground_click.hpp"
 #include "sim/idle_spot.hpp"
+#include "sim/lot_save.hpp"
+#include "sim/simulator_ids.hpp"
 #include "sim/route_portals.hpp"
 #include "sim/selection.hpp"
 #include "sim/walking.hpp"
@@ -675,10 +677,37 @@ void ticksKeepUpWithTheSpeedClock() {
     CHECK(ran == 3);
 }
 
+void simulatorIdsCountUpAndSkipZero() {
+    std::array<std::int16_t, 256> globals{};
+    CHECK(ts2::sim::nextSimulatorId(globals) == 1 && ts2::sim::nextSimulatorId(globals) == 2 && globals[0x24] == 3);
+    globals[0x24] = -28498;  // as saved: the counter goes negative past 0x7FFF
+    CHECK(ts2::sim::nextSimulatorId(globals) == 0x90AE && globals[0x24] == -28497);
+    globals[0x24] = -1;
+    CHECK(ts2::sim::nextSimulatorId(globals) == 0xFFFF && globals[0x24] == 0 && ts2::sim::nextSimulatorId(globals) == 1);
+}
+
+void simulatorRecordTakesTheSimulationsGlobalsAndTickState() {
+    ts2::simi::Record loaded;
+    loaded.globals[0] = 8;
+    loaded.globals[0x2B] = 1;
+    loaded.tickRandomState = 1;
+    loaded.otherRandomState = 7;
+    loaded.rest[3] = 9;
+    std::array<std::int16_t, 256> globals{};
+    globals[0] = 9;
+    globals[0x3B] = 5;
+    globals[0x3C] = 6;  // past the 60 the record saves
+    const ts2::simi::Record saved = ts2::sim::simulatorRecord(loaded, globals, 0x1234);
+    CHECK(saved.globals[0] == 9 && saved.globals[0x2B] == 0 && saved.globals[0x3B] == 5 && saved.tickRandomState == 0x1234);
+    CHECK(saved.otherRandomState == 7 && saved.rest[3] == 9);
+}
+
 } // namespace
 
 std::vector<Test> simulationTests() {
     return {
+        {"the simulator record takes the simulation's globals and tick state", simulatorRecordTakesTheSimulationsGlobalsAndTickState},
+        {"simulator ids count up and skip zero", simulatorIdsCountUpAndSkipZero},
         {"the speed clock moves at most 200 ms an update", speedClockMovesAtMost200MsAnUpdate},
         {"ticks keep up with the speed clock", ticksKeepUpWithTheSpeedClock},
         {"rooms are filled between walls", roomsAreFilledBetweenWalls},

@@ -14,8 +14,10 @@
 #include "content/resource_index.hpp"
 #include "formats/objd.hpp"
 #include "formats/resource_types.hpp"
+#include "formats/simi.hpp"
 #include "formats/str.hpp"
 #include "sim/index_code_source.hpp"
+#include "sim/lot_save.hpp"
 #include "sim/lot_simulation.hpp"
 #include "sim/lot_world.hpp"
 #include "sim/pie_menu.hpp"
@@ -41,6 +43,8 @@ namespace {
 
 // --list-objects: list every object but the Sims when a lot run ends.
 bool listObjects = false;
+// A lot package the game saved, to compare with what NeoTS2 would save after the run.
+std::optional<std::filesystem::path> saveCompare;
 
 using ts2::content::ResourceIndex;
 using ts2::sim::Outcome;
@@ -51,6 +55,7 @@ constexpr std::uint32_t kPrimitiveNames = 0x8B;
 constexpr std::uint32_t kDataOwners = 0x84;
 constexpr std::uint32_t kGenericSimsCalls = 0xDC;
 constexpr std::uint32_t kSearchTypes = 0xA4;
+constexpr std::uint32_t kGlobalNames = 0x81;
 
 std::vector<std::string> editorTable(ResourceIndex& index, std::uint32_t instance,
                                      std::uint32_t group = kEditorStringsGroup) {
@@ -779,6 +784,48 @@ void printPieMenus(ts2::sim::LotSimulation& sim, ts2::sim::SimObject& actor, std
 // With --messages, each message box a script asks is printed and answered with its first button.
 bool showMessages = false;
 
+std::optional<ts2::simi::Record> simulatorRecordOf(const std::filesystem::path& lot) {
+    ts2::dbpf::Package package{lot};
+    for (const auto& e : package.entries()) {
+        if (e.key.type == ts2::simi::kType) {
+            return ts2::simi::readRecord(package.read(e));
+        }
+    }
+    return std::nullopt;
+}
+
+// Prints where the records NeoTS2 would save now differ from those the game saved in `gameLot`,
+// with the values the lot was loaded with.
+void compareSave(ResourceIndex& index, ts2::sim::LotSimulation& sim, const std::filesystem::path& lotPath,
+                 const std::filesystem::path& gameLot) {
+    const auto loaded = simulatorRecordOf(lotPath);
+    const auto game = simulatorRecordOf(gameLot);
+    if (!loaded || !game) {
+        std::printf("save compare: SIMI not readable in %s\n", loaded ? "the game's lot" : "the loaded lot");
+        return;
+    }
+    const auto names = editorTable(index, kGlobalNames);
+    const ts2::simi::Record ours = ts2::sim::simulatorRecord(*loaded, sim);
+    std::size_t differences = 0;
+    for (std::size_t i = 0; i < ours.globals.size(); ++i) {
+        if (ours.globals[i] != game->globals[i]) {
+            ++differences;
+            std::printf("save compare: SIMI global 0x%02zX %s: ours %d, game %d, loaded %d\n", i, i < names.size() ? names[i].c_str() : "",
+                        ours.globals[i], game->globals[i], loaded->globals[i]);
+        }
+    }
+    if (ours.tickRandomState != game->tickRandomState) {
+        ++differences;
+        std::printf("save compare: SIMI tick random state: ours 0x%08X, game 0x%08X, loaded 0x%08X\n", ours.tickRandomState,
+                    game->tickRandomState, loaded->tickRandomState);
+    }
+    if (ts2::simi::writeRecord(ours) != ts2::simi::writeRecord(*game) && differences == 0) {
+        ++differences;
+        std::printf("save compare: SIMI differs in values NeoTS2 keeps as loaded\n");
+    }
+    std::printf("save compare: SIMI %s\n", differences == 0 ? "the same" : "differs");
+}
+
 int runLot(ResourceIndex& index, const std::filesystem::path& install, const std::filesystem::path& lotPath,
            std::size_t ticks, std::optional<std::size_t> traceTick, std::optional<std::int16_t> traceObject, bool onScreen,
            bool personData, bool overlays, bool motion, std::optional<std::int16_t> pieSim, std::optional<std::int16_t> pieTrace,
@@ -1135,6 +1182,9 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
     for (const auto& [n, why] : sorted) {
         std::printf("  %5zu  %s\n         e.g. %s\n", n, why.c_str(), stops[why].second.c_str());
     }
+    if (saveCompare) {
+        compareSave(index, sim, lotPath, *saveCompare);
+    }
     if (listObjects) {
         // Every object but the Sims: where it is, its direction (data 1) and its lead (data 0x13).
         world.nextAfter(0, [&](const ts2::sim::SimObject& o) {
@@ -1286,6 +1336,8 @@ int main(int argc, char** argv) {
                     seed = static_cast<std::uint32_t>(std::stoul(argv[++i]));
                 } else if (std::string_view(argv[i]) == "--portals") {
                     portals = true;
+                } else if (std::string_view(argv[i]) == "--save-compare" && i + 1 < argc) {
+                    saveCompare = std::filesystem::path(argv[++i]);
                 } else if (std::string_view(argv[i]) == "--list-objects") {
                     listObjects = true;
                 } else if (std::string_view(argv[i]) == "--ground" && i + 3 < argc) {

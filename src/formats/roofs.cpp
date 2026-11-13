@@ -1,6 +1,7 @@
 #include "formats/roofs.hpp"
 
 #include "formats/binary_reader.hpp"
+#include "formats/binary_writer.hpp"
 
 #include <bit>
 #include <stdexcept>
@@ -41,6 +42,28 @@ std::vector<Roof> parse(std::span<const std::uint8_t> data) {
         }
     }
     return roofs;
+}
+
+std::vector<std::uint8_t> write(const std::vector<Roof>& roofs) {
+    BinaryWriter w;
+    w.zeros(64);
+    w.u32(kType);
+    w.u32(kWrittenVersion);
+    w.count(roofs.size());
+    for (const Roof& f : roofs) {
+        w.u32(f.id);
+        w.f32(f.x0);
+        w.f32(f.y0);
+        w.i32(f.level0);
+        w.f32(f.x1);
+        w.f32(f.y1);
+        w.i32(f.level1);
+        w.u32(f.type);
+        w.u32(f.pattern);
+        w.f32(f.slope);
+        w.u32(f.extra);
+    }
+    return w.take();
 }
 
 } // namespace ts2::roofs

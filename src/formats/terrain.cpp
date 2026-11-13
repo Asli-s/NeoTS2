@@ -1,6 +1,7 @@
 #include "formats/terrain.hpp"
 
 #include "formats/binary_reader.hpp"
+#include "formats/binary_writer.hpp"
 
 #include <cstring>
 #include <stdexcept>
@@ -27,15 +28,30 @@ LotTexture parseLotTexture(std::span<const std::uint8_t> data) {
     t.version = r.u32();
     t.width = r.u32();
     t.height = r.u32();
-    t.canvas = shortString(r);
+    t.canvas = r.varString();
     const std::uint32_t count = r.u32();
     if (count > kMaxPaints) {
         throw std::runtime_error("lot texture: too many paints");
     }
     for (std::uint32_t i = 0; i < count; ++i) {
-        t.paints.push_back(shortString(r));
+        t.paints.push_back(r.varString());
     }
     return t;
+}
+
+std::vector<std::uint8_t> writeLotTexture(const LotTexture& texture) {
+    BinaryWriter w;
+    w.zeros(64);
+    w.u32(0x4B58975B);
+    w.u32(kLotTextureWrittenVersion);
+    w.u32(texture.width);
+    w.u32(texture.height);
+    w.text(texture.canvas);
+    w.count(texture.paints.size());
+    for (const std::string& paint : texture.paints) {
+        w.text(paint);
+    }
+    return w.take();
 }
 
 std::uint8_t Array2D::byte(std::int32_t x, std::int32_t y) const {
