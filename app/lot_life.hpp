@@ -8,6 +8,7 @@
 #include "scene/newborn_face.hpp"
 #include "scene/scene_ray.hpp"
 #include "scene/sims.hpp"
+#include "sim/catalog.hpp"
 #include "sim/clock.hpp"
 #include "content/ui_meters.hpp"
 #include "formats/tga.hpp"
@@ -190,6 +191,47 @@ public:
     GroundMenu groundPieMenu(const std::array<float, 3>& scenePoint, int storey);
     // Queues a choice of that menu for the selected Sim.
     void choose(std::uint32_t object, const ts2::sim::PieChoice& choice);
+
+    // Buy mode (app/lot_life_buy.cpp). Every object Buy mode can sell, the cheapest first, read once.
+    const std::vector<ts2::sim::catalog::Item>& buyItems();
+    // An item's catalog name and description (its catalog strings' lines 0 and 1).
+    std::string catalogText(const ts2::sim::catalog::Item& item, std::size_t line);
+    // Makes an object of type `guid` off the lot and starts it, for Buy mode to place. 0 when it
+    // can't be made.
+    std::int16_t makeForBuying(std::uint32_t guid);
+    // Whether an object may stand on the floor (data 4 bit 0, set by its own start-up code). Buy mode
+    // places only those yet: objects that go on surfaces or walls can't be placed.
+    bool standsOnFloor(std::int16_t object);
+    // Where an object held in Buy mode would go for a point of the scene on a storey: the middle of
+    // that tile.
+    struct BuySpot {
+        std::int32_t x = 0, y = 0, level = 1;  // 1/65536 tiles, as objects keep their place
+        bool operator==(const BuySpot&) const = default;
+    };
+    BuySpot buySpot(const std::array<float, 3>& scenePoint, int storey) const;
+    // Moves a held object to a spot facing `direction` (0, 2, 4 or 6) and says whether it may stay
+    // there by the game's placement test.
+    bool holdAt(std::int16_t object, const BuySpot& spot, std::int16_t direction);
+    // Where an object stands and which way it faces, to put it back after a move is cancelled.
+    // None for an object that is gone or off the lot.
+    struct Placed {
+        BuySpot spot;
+        std::int16_t direction = 0;
+    };
+    std::optional<Placed> placed(std::int16_t object);
+    void putBack(std::int16_t object, const Placed& where);
+    // Whether the hand tool may pick an object up: one Buy mode sells (see catalog::isBuyItem) of one
+    // tile, standing on the lot, not a Sim and not one the game refuses to remove.
+    bool movable(std::int16_t object);
+    // An object's current value (object data 0x29), what selling it gives back, and setting it.
+    std::int32_t currentValue(std::int16_t object);
+    void setCurrentValue(std::int16_t object, std::int32_t value);
+    // The object's type (its GUID). 0 for one that is gone.
+    std::uint32_t typeOf(std::int16_t object);
+    // Takes an object off the lot for good (bought then cancelled, or sold). The Sims forget it.
+    void removeObject(std::int16_t object);
+    // Adds to the household's funds (less for a negative amount).
+    void addFunds(std::int32_t amount);
     // An interaction as the queue shows it, and what its icon pictures: picture `index` of the
     // object type `guid` (0: its usual one) or, when `neighbor` is set, that Sim.
     struct QueuedAction {
@@ -447,6 +489,7 @@ private:
     std::vector<std::size_t> changedInstances_;
     std::vector<std::size_t> relit_;
     std::vector<std::size_t> shapeColored_;
+    std::optional<std::vector<ts2::sim::catalog::Item>> buyItems_;  // read when Buy mode first opens
 };
 
 } // namespace app

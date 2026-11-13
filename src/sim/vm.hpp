@@ -223,6 +223,10 @@ public:
     // known yet.
     SimRandom rng{0x5132};
 
+    // Every Sim but `object` forgets it at once (Generic Sims Call 0x0D), as when it is deleted or sold.
+    // Resetting a Sim whose code is running right now is not supported, so needing that stops.
+    void tellSimsObjectGoes(std::int16_t object);
+
 private:
     // entryGroup: where the entry tree is, when it isn't where its number says.
     RunResult execute(ThreadState& thread, std::uint32_t objectGroup, SimObject* me,
@@ -233,9 +237,6 @@ private:
     void markVisitor(SimObject& created);
     // Starts the parts of a multi-tile object made the same way, lead first.
     void startCreatedParts(std::span<SimObject* const> parts);
-    // Every Sim but `object` forgets it at once (Generic Sims Call 0x0D). Resetting a Sim whose code
-    // is running right now is not supported, so needing that stops.
-    void tellSimsObjectGoes(std::int16_t object);
     // A check tree run by a primitive, as Vm::runCheck runs it, with the step limit to itself. The line
     // it tests is put back afterwards. `offered` (if set) receives the lines it offers.
     RunResult checkFromTree(SimObject& who, std::uint32_t codeOwner, std::uint16_t tree, std::int16_t stackObject,

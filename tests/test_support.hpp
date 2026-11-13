@@ -193,9 +193,14 @@ public:
                        std::vector<ts2::slot::Entry> routingSlots = {}, std::vector<ts2::slot::Entry> containerSlots = {},
                        std::vector<ts2::slot::Entry> targetSlots = {}) {
         const std::uint32_t guid = definition.guid();
+        if (!objectTypes_.contains(guid)) {
+            guids_.push_back(guid);
+        }
         objectTypes_[guid] = ts2::sim::ObjectType{group, std::move(definition), 0, containerSlots.size(), std::move(routingSlots),
                                                   std::move(containerSlots), std::move(targetSlots)};
     }
+    // The types added, in the order they were added.
+    const std::vector<std::uint32_t>& objectTypeGuids() override { return guids_; }
     void addInteractionTable(std::uint32_t group, std::uint16_t instance, ts2::ttab::InteractionTable table) {
         tables_[{group, instance}] = std::make_shared<const ts2::ttab::InteractionTable>(std::move(table));
     }
@@ -306,6 +311,7 @@ private:
     std::map<std::pair<std::uint32_t, std::uint16_t>, std::vector<std::string>> interactionStrings_;
     std::map<std::pair<std::uint32_t, std::uint16_t>, std::vector<std::string>> catalogStrings_;
     std::map<std::uint32_t, ts2::sim::ObjectType> objectTypes_;
+    std::vector<std::uint32_t> guids_;
     std::map<std::pair<std::uint32_t, std::uint16_t>, std::shared_ptr<const ts2::ttab::InteractionTable>> tables_;
     std::map<std::pair<std::uint32_t, std::uint16_t>, std::shared_ptr<const Behavior>> behaviors_;
     std::map<std::pair<std::uint32_t, std::uint16_t>, std::vector<std::int16_t>> constants_;
@@ -509,3 +515,4 @@ std::vector<Test> textLayoutTests();
 std::vector<Test> pathsTests();
 std::vector<Test> fuzzRegressionTests();
 std::vector<Test> audioTests();
+std::vector<Test> catalogTests();

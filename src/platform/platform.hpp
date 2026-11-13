@@ -40,7 +40,7 @@ enum class Key : std::uint8_t {
     Comma, Period, Minus, Equals, Grave,
     Tab, Escape, Pause, Backspace, Delete, Return,
     PageUp, PageDown, Home, End,
-    F5,
+    F1, F2, F5,
     Up, Down, Left, Right,
     Shift,  // either Shift key, as the game reads them
 };

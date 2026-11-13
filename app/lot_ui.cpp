@@ -30,6 +30,8 @@ constexpr std::uint32_t kScripts = 0xA99D8A11;
 constexpr std::uint32_t kPuck = 0x4905F85B, kLivePanel = 0x49060005, kOptionsMenu = 0x49060001;
 // The puck's windows.
 constexpr std::uint32_t kLiveMode = 0x37D97B25, kOptions = 0x67D97B2F, kFunds = 0x00003000;
+// Buy mode: the puck's Buy button and the Buy panel's script.
+constexpr std::uint32_t kBuyMode = 0x67D97B2A, kBuyPanel = 0x49060004;
 constexpr std::uint32_t kFloorUp = 0x00002001, kFloorDown = 0x00002000, kToggleCeiling = 0x00007000;
 // The camera buttons: rotate left and right, zoom in and out.
 constexpr std::uint32_t kCameraButtons[] = {0x00001001, 0x00001000, 0x00001002, 0x00001003};
@@ -201,6 +203,7 @@ void LotUi::load() {
         puck_ = screen_.load(kScripts, kPuck, 0, 0);
         live_ = screen_.load(kScripts, kLivePanel, 0, 0);
         options_ = screen_.load(kScripts, kOptionsMenu, 0, 0);
+        buy_ = screen_.load(kScripts, kBuyPanel, 0, 0);
         hoodPanel_ = screen_.load(kScripts, kHoodOptions, 0, kHoodPanelY);
         hoodStrip_ = screen_.find(hoodPanel_, kHoodStrip);
         hoodButtonHolder_ = screen_.find(hoodPanel_, kHoodButtonHolder);
@@ -214,6 +217,8 @@ void LotUi::load() {
         screen_.move(puck_, 0, height_ - screen_.height(puck_));
         anchor(live_);
         anchor(options_);
+        anchor(buy_);
+        buyPanel_.attach(screen_, buy_);
         screen_.raise(puck_);
         // The clock and speed buttons, and the frame the live panel lays out. The rest (portrait,
         // influence and aspiration meters) isn't built yet.
@@ -257,7 +262,7 @@ void LotUi::setSize(int width, int height) {
     if (loaded_ < 2) {
         return;
     }
-    for (const int panel : {puck_, live_, options_}) {
+    for (const int panel : {puck_, live_, options_, buy_}) {
         if (panel >= 0) {
             screen_.move(panel, screen_.x(panel), screen_.y(panel) + down);
         }
@@ -311,7 +316,7 @@ void LotUi::close() {
     closeWallMenu();
     pauseFrame_.show(false);
     queue_.setVisible(false);
-    for (const int panel : {puck_, live_, options_, version_}) {
+    for (const int panel : {puck_, live_, options_, buy_, version_}) {
         if (panel >= 0) {
             screen_.setVisible(panel, false);
         }
@@ -378,9 +383,10 @@ void LotUi::hideForFreeCamera(bool hide) {
     skewer_.setHidden(hide);
     if (hide) {
         optionsWereShown_ = optionsShown();
+        buyWasShown_ = buyShown();
         closeWallMenu();
         queue_.setVisible(false);
-        for (const int panel : {puck_, live_, options_, version_}) {
+        for (const int panel : {puck_, live_, options_, buy_, version_}) {
             if (panel >= 0) {
                 screen_.setVisible(panel, false);
             }
@@ -397,6 +403,9 @@ void LotUi::hideForFreeCamera(bool hide) {
         screen_.setVisible(live_, true);
     }
     showOptions(optionsWereShown_);
+    if (buyWasShown_) {
+        showBuy(true);
+    }
 }
 
 int LotUi::left(int window) const {
@@ -442,7 +451,11 @@ void LotUi::anchor(int panel) {
 }
 
 void LotUi::showOptions(bool show) {
-    // The options menu is not live mode, so the queue goes with the live panel.
+    // The options menu is not live mode, so the queue goes with the live panel. It takes Buy mode's place.
+    if (show && buy_ >= 0) {
+        screen_.setVisible(buy_, false);
+        screen_.setChecked(screen_.find(puck_, kBuyMode), false);
+    }
     queue_.setVisible(!show);
     if (options_ < 0) {
         return;
@@ -463,6 +476,41 @@ void LotUi::showOptions(bool show) {
 }
 
 bool LotUi::optionsShown() const { return options_ >= 0 && screen_.visible(options_); }
+
+void LotUi::showBuy(bool show) {
+    if (buy_ < 0) {
+        return;
+    }
+    if (show) {
+        if (optionsShown()) {
+            showOptions(false);
+        }
+        buyPanel_.reset();
+    }
+    screen_.setVisible(buy_, show);
+    // Buy mode isn't live mode: the live panel and the queue give way, as they do to the options.
+    queue_.setVisible(!show);
+    screen_.setVisible(live_, !show && hasMembers_);
+    skewer_.setLiveMode(!show);
+    screen_.setChecked(screen_.find(puck_, kBuyMode), show);
+    const int live = screen_.find(puck_, kLiveMode);
+    screen_.setEnabled(live, hasMembers_);
+    screen_.setChecked(live, !show && hasMembers_);
+    screen_.raise(puck_);
+}
+
+bool LotUi::buyShown() const { return buy_ >= 0 && screen_.visible(buy_); }
+
+void LotUi::refreshBuy(LotLife& life) {
+    if (!buyShown()) {
+        return;
+    }
+    BuyPanel::Source source;
+    source.items = &life.buyItems();
+    source.picture = [&](const ts2::sim::catalog::Item& item) { return objectPicture(life, item.guid, kSmallRewardPicture); };
+    source.name = [&](const ts2::sim::catalog::Item& item) { return life.catalogText(item, 0); };
+    buyPanel_.refresh(source);
+}
 
 void LotUi::openWallMenu() {
     if (wallMenu_ < 0 || screen_.visible(wallMenu_)) {
@@ -579,6 +627,27 @@ LotUi::Action LotUi::clicked(int window) {
     if (id == kOptions && screen_.parent(window) == puck_) {
         showOptions(!optionsShown());
         return optionsShown() ? Action::OptionsOpened : Action::OptionsClosed;
+    }
+    // Buy mode: its puck button opens it (with nobody in the household too), Live closes it, and a
+    // catalog item clicked is bought.
+    if (id == kBuyMode && screen_.parent(window) == puck_) {
+        if (buyShown()) {
+            return Action::None;
+        }
+        buyFromOptions_ = optionsShown();
+        showBuy(true);
+        return Action::BuyOpened;
+    }
+    if (id == kLiveMode && screen_.parent(window) == puck_ && buyShown()) {
+        showBuy(false);
+        return Action::BuyClosed;
+    }
+    if (const auto click = buyPanel_.clicked(window); click.panel) {
+        if (click.buy) {
+            pickedBuyItem_ = *click.buy;
+            return Action::BuyItem;
+        }
+        return Action::None;
     }
     if (graphicsOptions_.clicked(window)) {
         return graphicsOptions_.takeChanged() ? Action::GraphicsOptionChanged : Action::None;

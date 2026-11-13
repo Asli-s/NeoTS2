@@ -264,6 +264,14 @@ private:
     void followSimStorey();
     std::optional<ts2::render::Vec3> simRoot(std::int16_t sim) const;
     bool openGroundMenu(float x, float y);
+    // The floor or ground under a window point, looking through every object: the point in the
+    // scene and its storey (1 = ground). None when the mouse is off the lot.
+    struct LotFloorPoint {
+        std::array<float, 3> at{};
+        int storey = 1;
+    };
+    std::optional<LotFloorPoint> lotFloorAt(float x, float y);
+    std::vector<std::uint8_t> floorsShown_;  // lotFloorAt's mask: the floors and terrain shown
     void toggleFreeCamera();
     std::function<float(float, float, std::array<float, 4>&, unsigned&)> hoodFreeGround() const;
     std::function<void(app::Vec3&)> hoodFreeBounds() const;
@@ -555,6 +563,35 @@ private:
     app::PieMenuUi pieMenu_;
     std::uint32_t pieObject_ = 0;
     bool pausedBeforeOptions_ = false, pausedBeforeRewards_ = false;
+    // Buy mode (app/game_buy.cpp). It pauses the game while open. The hand holds one object at a
+    // time: one just bought from the catalog (paid for once placed) or one picked up from the lot.
+    bool buyActive_ = false, pausedBeforeBuy_ = false;
+    struct BuyHeld {
+        std::int16_t object = 0;
+        bool fromCatalog = false;                     // bought now, not placed yet
+        std::int32_t price = 0;                       // its catalog price (from the catalog)
+        std::optional<app::LotLife::Placed> from;     // where it stood (picked up from the lot)
+        std::int16_t direction = 0;                   // which way it faces: 0, 2, 4 or 6
+        std::optional<app::LotLife::BuySpot> spot;    // where it is held now, none until over the lot
+        bool fits = false;                            // whether it may be put down there
+    };
+    std::optional<BuyHeld> buyHeld_;
+    // What each object bought in this visit to Buy mode cost: selling it before leaving gives all of it back.
+    std::map<std::int16_t, std::int32_t> boughtThisVisit_;
+    std::optional<std::array<float, 2>> buyMouseAt_;  // where the mouse last was over the lot, in the window
+    void enterBuy();
+    void leaveBuy(bool restorePause);
+    void buyItem(std::uint32_t guid);
+    // Buy mode's share of the mouse on the lot: true when it took the event.
+    bool buyMouse(const ts2::platform::Event& e, float x, float y);
+    // Buy mode's keys: true when it took the key.
+    bool buyKey(const ts2::platform::Event& e);
+    void holdUnderMouse(float x, float y);
+    void placeHeld();
+    void cancelHeld();
+    void sellHeld();
+    // A short message at the mouse, as the game's tip in the world (empty: none).
+    void buyTip(const std::string& text);
     float downX_ = 0, downY_ = 0;
     std::optional<std::array<float, 2>> dragFrom_;  // where a camera drag (right button) started
     int pressMark_ = -1;              // the square at that point

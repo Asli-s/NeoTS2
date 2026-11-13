@@ -1474,6 +1474,8 @@ void Game::showLot(LotBuilt& built) {
 // Back to the neighborhood, as it was.
 void Game::leaveLot() {
     ts2::diag::step("back to the neighborhood");
+    // What Buy mode's hand holds is let go; what was bought stays with the lot until it is gone.
+    leaveBuy(false);
     endCameraDrag();
     inLot_ = false;
     if (surroundingsBuilding_.valid()) {
@@ -1628,6 +1630,24 @@ app::LotUi::Action Game::lotKey(const pf::Event& e) {
     case pf::Key::F5:
         lotUi_.showOptions(!lotUi_.optionsShown());
         return lotUi_.optionsShown() ? Action::OptionsOpened : Action::OptionsClosed;
+    // F1 is Live mode and F2 Buy mode.
+    case pf::Key::F1:
+        if (lotUi_.buyShown()) {
+            lotUi_.showBuy(false);
+            return Action::BuyClosed;
+        }
+        if (lotUi_.optionsShown()) {
+            lotUi_.showOptions(false);
+            return Action::OptionsClosed;
+        }
+        return Action::None;
+    case pf::Key::F2:
+        if (lotUi_.buyShown()) {
+            return Action::None;
+        }
+        lotUi_.setBuyOpenedFromOptions(lotUi_.optionsShown());
+        lotUi_.showBuy(true);
+        return Action::BuyOpened;
     case pf::Key::Q: return Action::Quit;
     default: return Action::None;
     }
@@ -1669,9 +1689,18 @@ void Game::lotAction(app::LotUi::Action action) {
     case Action::High: lotLife_->setSpeed(ts2::sim::Speed::High); break;
     case Action::Ultra: lotLife_->setSpeed(ts2::sim::Speed::Ultra); break;
     case Action::OptionsOpened:
-        pausedBeforeOptions_ = lotLife_->paused();
+        // From Buy mode, the options keep the pause from before Buy mode.
+        if (buyActive_) {
+            pausedBeforeOptions_ = pausedBeforeBuy_;
+            leaveBuy(false);
+        } else {
+            pausedBeforeOptions_ = lotLife_->paused();
+        }
         lotLife_->setPaused(true);
         break;
+    case Action::BuyOpened: enterBuy(); break;
+    case Action::BuyClosed: leaveBuy(true); break;
+    case Action::BuyItem: buyItem(lotUi_.pickedBuyItem()); break;
     case Action::OptionsClosed: lotLife_->setPaused(pausedBeforeOptions_); break;
     case Action::GraphicsOptionChanged:
         hoodUi_.graphicsOptions().takeSettings(lotUi_.graphicsOptions());
@@ -1818,6 +1847,29 @@ bool Game::openGroundMenu(float x, float y) {
     const auto [ux, uy] = toUi(x, y);
     pieMenu_.open(std::move(ground.choices), ux, uy, uiWidth_, uiHeight_);
     return true;
+}
+
+std::optional<Game::LotFloorPoint> Game::lotFloorAt(float x, float y) {
+    // Only floors (not pool water) and the terrain take the ray, so objects and walls in front of
+    // the floor don't stop it.
+    floorsShown_.assign(lot_.instances.size(), 0);
+    for (std::size_t i = 0; i < lot_.instances.size(); ++i) {
+        const auto& instance = lot_.instances[i];
+        const bool shown = i >= lotVisible_.size() || lotVisible_[i] != 0;
+        const bool floor = instance.part == ts2::scene::Part::Floor && instance.name != "pool water";
+        floorsShown_[i] = shown && instance.object == 0 && (floor || instance.name == "terrain") ? 1 : 0;
+    }
+    const auto ray = screenRay(orbit_.camera(), width_, height_, x, y);
+    const auto& eye = orbit_.camera().eye;
+    const auto hit = lotPicker_.pick(lot_, floorsShown_, eye, ray, &lotPose_);
+    if (!hit) {
+        return std::nullopt;
+    }
+    const auto& instance = lot_.instances[hit->instance];
+    LotFloorPoint out;
+    out.storey = instance.name == "terrain" ? 1 : instance.level - lot_.groundLevel + 1;
+    out.at = {eye[0] + ray[0] * hit->distance, eye[1] + ray[1] * hit->distance, eye[2] + ray[2] * hit->distance};
+    return out;
 }
 
 // The right button held from a press on the lot or neighborhood drags the camera: a small square
@@ -2107,9 +2159,13 @@ void Game::lotMouse(const pf::Event& e, float x, float y) {
         }
         return;
     }
+    // Buy mode takes clicks on the lot: putting down what the hand holds, or picking an object up.
+    if (buyMouse(e, x, y)) {
+        return;
+    }
     const bool leftDown = e.type == pf::Event::Type::MouseDown && e.button == pf::MouseButton::Left;
     // A left click on the highlighted object opens its pie menu for the selected Sim.
-    if (lotLife_ && hovered_ != 0 && leftDown && !screen_.over(ix, iy)) {
+    if (lotLife_ && hovered_ != 0 && leftDown && !buyActive_ && !screen_.over(ix, iy)) {
         const std::uint32_t part = lotLife_->partAt(hovered_, hoveredPoint_, lot_);
         if (auto choices = lotLife_->pieMenu(part, mouseShift_); !choices.empty()) {
             pieObject_ = part;
@@ -2119,7 +2175,7 @@ void Game::lotMouse(const pf::Event& e, float x, float y) {
         }
     }
     // A left click on empty floor or ground opens the menu of a destination made there.
-    if (lotLife_ && hovered_ == 0 && leftDown && !lotUi_.optionsShown() && !screen_.over(ix, iy) && openGroundMenu(x, y)) {
+    if (lotLife_ && hovered_ == 0 && leftDown && !lotUi_.optionsShown() && !buyActive_ && !screen_.over(ix, iy) && openGroundMenu(x, y)) {
         showPieCursor();
         return;
     }
@@ -2253,17 +2309,20 @@ void Game::updateLot(std::uint64_t now) {
         const auto ray = screenRay(orbit_.camera(), width_, height_, (*hoverAt_)[0], (*hoverAt_)[1]);
         const auto hit = lotPicker_.pick(lot_, shown, orbit_.camera().eye, ray, &lotPose_);
         const std::uint32_t object = hit ? hit->object : 0;
-        hovered_ = lotLife_->hoverable(object, mouseShift_) ? object : 0;
+        // In Buy mode the hand highlights what it can pick up (nothing while it holds something).
+        hovered_ = buyActive_ ? (!buyHeld_ && lotLife_->movable(static_cast<std::int16_t>(object)) ? object : 0)
+                              : (lotLife_->hoverable(object, mouseShift_) ? object : 0);
         if (hit) {
             const auto& eye = orbit_.camera().eye;
             hoveredPoint_ = {eye[0] + ray[0] * hit->distance, eye[1] + ray[1] * hit->distance, eye[2] + ray[2] * hit->distance};
         }
         hoveredSim_ = hovered_ != 0 && lotLife_->isSim(hovered_);
-        liveCursor_ = liveCursor(hit ? &lot_.instances[hit->instance] : nullptr, hovered_ != 0, hoveredSim_);
+        liveCursor_ = buyActive_ ? app::Cursors::kArrow : liveCursor(hit ? &lot_.instances[hit->instance] : nullptr, hovered_ != 0, hoveredSim_);
         cursors_.show(liveCursor_);
         // A Sim the mouse comes to shows its name at once, pointing at where the ray hit it. Moving
-        // over the same Sim changes nothing, and the tip goes when the mouse leaves it.
-        if (object != spotTipObject_) {
+        // over the same Sim changes nothing, and the tip goes when the mouse leaves it. Buy mode uses
+        // the tip for its own messages.
+        if (object != spotTipObject_ && !buyActive_) {
             spotTipObject_ = object;
             spotTipPoint_ = hoveredPoint_;
             const bool sim = object != 0 && lotLife_->isSim(object);
@@ -2312,6 +2371,7 @@ void Game::updateLot(std::uint64_t now) {
                                  *lotLife_);
         }
         lotUi_.showLife(*lotLife_);
+        lotUi_.refreshBuy(*lotLife_);
         lotUi_.showNotifications(*lotLife_, static_cast<double>(now - lastFrame_) / 1e9);
         updateBabyNames();
         updatePhoneBook();
@@ -2911,6 +2971,8 @@ void Game::handleEvent(const pf::Event& e) {
         if (!e.repeat || (key != pf::Key::Comma && key != pf::Key::Period)) {
             lotView_.key(key, orbit_);
         }
+    } else if (e.type == pf::Event::Type::KeyDown && inLot_ && buyKey(e)) {
+        // Buy mode's keys for what the hand holds: turn it, let it go or sell it.
     } else if (e.type == pf::Event::Type::KeyDown && inLot_) {
         using Action = app::LotUi::Action;
         if (const auto action = lotKey(e); action != Action::None) {

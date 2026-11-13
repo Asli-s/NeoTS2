@@ -1,5 +1,6 @@
 #pragma once
 
+#include "buy_panel.hpp"
 #include "game_options_panel.hpp"
 #include "graphics_options_panel.hpp"
 #include "live_panel.hpp"
@@ -95,7 +96,7 @@ public:
     void hideForFreeCamera(bool hide);
 
     // What a released button asks for.
-    enum class Action { None, Neighborhood, Quit, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, GameOptionChanged, GraphicsOptionChanged, RewardsOpened, RewardsClosed, SelectSim, TrackSim, CentreOnNeighbor, CloseNotification, FloorUp, FloorDown, WallMode, ToggleCeiling, MainMenu };
+    enum class Action { None, Neighborhood, Quit, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, GameOptionChanged, GraphicsOptionChanged, RewardsOpened, RewardsClosed, SelectSim, TrackSim, CentreOnNeighbor, CloseNotification, FloorUp, FloorDown, WallMode, ToggleCeiling, MainMenu, BuyOpened, BuyClosed, BuyItem };
     Action clicked(int window);
     // The puck's camera button held down under the mouse.
     enum class CameraButton { None, RotateLeft, RotateRight, ZoomIn, ZoomOut };
@@ -126,6 +127,17 @@ public:
     // Shows or hides the options menu (it replaces the live panel while open).
     void showOptions(bool show);
     bool optionsShown() const;
+    // Shows or hides the Buy mode panel, which replaces the live panel (and the options menu) while
+    // open, as the puck's Buy button and F2 open it and its Live button and F1 close it.
+    void showBuy(bool show);
+    bool buyShown() const;
+    // The object type a click on the Buy catalog picked (for BuyItem).
+    std::uint32_t pickedBuyItem() const { return pickedBuyItem_; }
+    // Whether Buy mode last opened in place of the options menu (for BuyOpened).
+    bool buyOpenedFromOptions() const { return buyFromOptions_; }
+    void setBuyOpenedFromOptions(bool from) { buyFromOptions_ = from; }
+    // Shows the Buy catalog's page (its pictures and names) for the lot.
+    void refreshBuy(LotLife& life);
 
     // Shows the simulation's clock, speed and funds.
     void show(const std::string& clock, ts2::sim::Speed speed, bool paused, std::int32_t funds);
@@ -190,7 +202,10 @@ private:
     ts2::ui::Screen& screen_;
     int width_, height_;
     bool testingCheats_ = false;
-    int puck_ = -1, live_ = -1, options_ = -1;
+    int puck_ = -1, live_ = -1, options_ = -1, buy_ = -1;
+    BuyPanel buyPanel_;
+    std::uint32_t pickedBuyItem_ = 0;
+    bool buyFromOptions_ = false, buyWasShown_ = false;
     int version_ = -1;  // the version text, -1 when it isn't shown
     int loaded_ = 0;  // parts of the panels loaded (see load), 2 when all are
     int funds_ = -1, wallMenu_ = -1, clock_ = -1;
