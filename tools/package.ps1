@@ -28,7 +28,7 @@ if ($launcherVersion -and $launcherVersion -ne $version) {
 # The C++ runtime files of the Visual Studio that built the programs. Microsoft allows shipping them
 # beside the programs, so players need no separate runtime install.
 $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
-$vs = if (Test-Path $vswhere) { & $vswhere -latest -property installationPath } else { "C:\Program Files\Microsoft Visual Studio\2022\Community" }
+$vs = if (Test-Path $vswhere) { & $vswhere -latest -products * -property installationPath } else { "C:\Program Files\Microsoft Visual Studio\2022\Community" }
 $redist = Get-ChildItem (Join-Path $vs "VC\Redist\MSVC") -Directory -ErrorAction SilentlyContinue |
           Where-Object { $_.Name -match '^\d+\.\d+\.\d+$' } | Sort-Object { [version]$_.Name } | Select-Object -Last 1
 $crt = if ($redist) { Get-ChildItem (Join-Path $redist.FullName "x64") -Directory -Filter "Microsoft.VC*.CRT" | Select-Object -First 1 }
