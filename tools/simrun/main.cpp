@@ -45,6 +45,8 @@ namespace {
 bool listObjects = false;
 // A lot package the game saved, to compare with what NeoTS2 would save after the run.
 std::optional<std::filesystem::path> saveCompare;
+// --last-hood <id>: the neighborhood shown before the lot's own, as the game gives it to the lot.
+std::optional<std::int16_t> lastHood;
 
 using ts2::content::ResourceIndex;
 using ts2::sim::Outcome;
@@ -846,7 +848,7 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
             }
         };
     }
-    ts2::sim::LotSimulation sim(install, lotPath, traceLoad, seed);
+    ts2::sim::LotSimulation sim(install, lotPath, traceLoad, seed, lastHood);
     auto& world = sim.world();
     std::optional<ts2::content::UiData> ui;
     if (showMessages) {
@@ -1338,6 +1340,8 @@ int main(int argc, char** argv) {
                     portals = true;
                 } else if (std::string_view(argv[i]) == "--save-compare" && i + 1 < argc) {
                     saveCompare = std::filesystem::path(argv[++i]);
+                } else if (std::string_view(argv[i]) == "--last-hood" && i + 1 < argc) {
+                    lastHood = static_cast<std::int16_t>(std::stoi(argv[++i]));
                 } else if (std::string_view(argv[i]) == "--list-objects") {
                     listObjects = true;
                 } else if (std::string_view(argv[i]) == "--ground" && i + 3 < argc) {

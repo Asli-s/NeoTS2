@@ -84,6 +84,11 @@ if(NEOTS2_CRASHPAD AND NOT WIN32)
     endif()
 endif()
 
+# /MP compiles a project's files side by side. Without it Visual Studio builds them one at a time.
+if(MSVC)
+    add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/MP>)
+endif()
+
 add_library(project_warnings INTERFACE)
 if(MSVC)
     # /sdl: extra security checks and warnings in our own code (third-party code is left as it is).
@@ -249,6 +254,11 @@ add_library(ts2content
     src/content/target_pictures.cpp
     src/audio/xa.cpp
     src/audio/bank.cpp
+    src/audio/names.cpp
+    src/audio/track.cpp
+    src/audio/mix.cpp
+    src/audio/audio_config.cpp
+    src/audio/manager.cpp
 )
 target_link_libraries(ts2content PUBLIC ts2formats ts2diag ts2paths PRIVATE project_warnings)
 
@@ -418,6 +428,10 @@ if(NEOTS2_FUZZ)
         target_link_libraries(${target} PRIVATE ts2formats project_warnings)
     endforeach()
     # Engine code that is not a file reader but takes values from lots and objects.
+    add_executable(xa_fuzz fuzz/xa_fuzz.cpp src/audio/xa.cpp)
+    target_link_libraries(xa_fuzz PRIVATE ts2formats project_warnings)
+    add_executable(sound_data_fuzz fuzz/sound_data_fuzz.cpp src/audio/audio_config.cpp src/audio/names.cpp src/audio/track.cpp)
+    target_link_libraries(sound_data_fuzz PRIVATE ts2formats project_warnings)
     add_executable(ground_decal_fuzz fuzz/ground_decal_fuzz.cpp src/scene/ground_decal.cpp)
     target_link_libraries(ground_decal_fuzz PRIVATE ts2formats project_warnings)
     add_executable(download_index_fuzz fuzz/download_index_fuzz.cpp src/content/download_index.cpp)

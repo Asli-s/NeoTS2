@@ -38,8 +38,11 @@ public:
     // Loads the code from the install's object packages and the lot from its package. `onLoadStep`
     // watches the scripts objects run as the lot loads. `seed` stands in for the clock where the game
     // seeds its random draws from it, so runs repeat. A lot's saved random state still comes first.
+    // `lastNeighborhood` is the id of the neighborhood shown before the current one (-1 when there was
+    // none), which the game gives the lot as global 0x2B. Without it the lot keeps its saved value.
     LotSimulation(const std::filesystem::path& install, const std::filesystem::path& lot,
-                  std::function<void(const StepInfo&)> onLoadStep = {}, std::optional<std::uint32_t> seed = std::nullopt);
+                  std::function<void(const StepInfo&)> onLoadStep = {}, std::optional<std::uint32_t> seed = std::nullopt,
+                  std::optional<std::int16_t> lastNeighborhood = std::nullopt);
 
     // Runs one tick: sleeping scripts wait out their ticks and the others run until they sleep, end
     // or stop. Then the Sim clock moves on. The world's clock (animation time) moves on a normal tick.

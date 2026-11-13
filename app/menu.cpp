@@ -357,12 +357,12 @@ Game::Game(ts2::content::UiData& data, ts2::ui::Fonts& fonts, ts2::render::IRend
     renderer_.setTerrainTiles(app::GraphicsOptionsPanel::terrainTiles(lotUi_.graphicsOptions().display().terrainDetail));
     renderer_.setAmbientOcclusion(ts2::content::kAmbientOcclusionStrengths[static_cast<std::size_t>(lotUi_.graphicsOptions().display().ambientOcclusion)]);
     renderer_.setAmbientOcclusionHalfSize(lotUi_.graphicsOptions().display().occlusionHalfSize);
-    if (!options_.playSound.empty()) {
-        ensureAudio();
-        (void)audio_->playName(options_.playSound);
-    }
     // Index the sound packages beside the menu, so a lot opened later can play at once.
     ensureAudio();
+    screen_.setPressHandler([this](int window) { playPressSound(window); });
+    if (!options_.playSound.empty()) {
+        (void)audio_->playName(options_.playSound);
+    }
 }
 
 void Game::setUpMenu() {
@@ -686,6 +686,7 @@ std::future<Game::Built> Game::startNeighborhoodBuild(const std::filesystem::pat
             }
         }
         b.panel = app::NeighborhoodUi::read(folder, user);
+        b.id = app::neighborhoodId(folder);
         b.gpu = renderer.prepare(b.scene);
         return b;
     });
@@ -698,6 +699,12 @@ void Game::showNeighborhood(Built built) {
     // The last neighborhood's baking stops.
     freeImposterBaker();
     hood_ = std::move(built);
+    // Showing another neighborhood makes the one shown before it the last one. Showing the same one
+    // again changes neither.
+    if (hood_.id && static_cast<std::int16_t>(*hood_.id) != currentHoodId_) {
+        lastHoodId_ = currentHoodId_;
+        currentHoodId_ = static_cast<std::int16_t>(*hood_.id);
+    }
     // Nothing else uses the assets now (no lot loads while a neighborhood does), so the
     // problems noted while loading the last neighborhood can go.
     assets_.get()->warnings.clear();
@@ -1302,7 +1309,9 @@ void Game::enterLot(std::uint32_t id) {
     }
     const ts2::scene::Scene* hoodScene = &hood_.scene;
     const std::string terrainType = hood_.stats.terrainType;
-    lotSimBuilding_ = std::async(std::launch::async, [install = install_, file] { return app::loadSimulation(install, file); });
+    lotSimBuilding_ = std::async(std::launch::async, [install = install_, file, last = lastHoodId_] {
+        return app::loadSimulation(install, file, std::nullopt, last);
+    });
     lotUi_.setObjectThumbnails(openFolder_.parent_path().parent_path() / "Thumbnails" / "ObjectThumbnails.package");
     const app::GameOptionsPanel::LotView lotViewOptions = lotUi_.gameOptions().lotView();
     for (HouseWorker& worker : houseWorkers_) {
@@ -1776,13 +1785,17 @@ void Game::followSimStorey() {
     }
 }
 
-// Where a Sim's root_trans joint is in the world as last posed, none for a Sim not on the lot.
-std::optional<ts2::render::Vec3> Game::simRoot(std::int16_t sim) const {
+// Where a Sim's joint (root_trans unless named) is in the world as last posed, none for a Sim not on
+// the lot. A rig without that joint gives its root_trans.
+std::optional<ts2::render::Vec3> Game::simRoot(std::int16_t sim, const char* joint) const {
     for (const auto& [actor, nodes] : lotPose_.nodes) {
         if (actor >= lot_.actors.size() || lot_.actors[actor].object != static_cast<std::uint32_t>(sim) || !lot_.actors[actor].rig) {
             continue;
         }
-        const int root = lot_.actors[actor].rig->find("root_trans");
+        int root = lot_.actors[actor].rig->find(joint);
+        if (root < 0) {
+            root = lot_.actors[actor].rig->find("root_trans");
+        }
         if (root < 0 || static_cast<std::size_t>(root) >= nodes.size()) {
             return std::nullopt;
         }
@@ -1790,31 +1803,6 @@ std::optional<ts2::render::Vec3> Game::simRoot(std::int16_t sim) const {
         float at[3] = {0, 0, 0};
         place.apply(at, true);
         return ts2::render::Vec3{at[0], at[1], at[2]};
-    }
-    return std::nullopt;
-}
-
-std::optional<ts2::render::Vec3> Game::objectRoot(std::int16_t object) const {
-    const auto find = [this](std::int16_t id) -> std::optional<ts2::render::Vec3> {
-        for (const auto& instance : lot_.instances) {
-            if (instance.object == static_cast<std::uint32_t>(id)) {
-                const auto& m = instance.transform.m;
-                return ts2::render::Vec3{m[3], m[7], m[11]};
-            }
-        }
-        return std::nullopt;
-    };
-    if (const auto at = find(object)) {
-        return at;
-    }
-    // A multi-tile part has no instance of its own: it stands at its lead tile's.
-    if (lotLife_) {
-        if (const auto* part = lotLife_->simulation().world().find(object)) {
-            const std::int16_t lead = part->data[0x13];  // object data 0x13: lead tile
-            if (lead != 0 && lead != object) {
-                return find(lead);
-            }
-        }
     }
     return std::nullopt;
 }
@@ -2081,7 +2069,6 @@ void Game::lotMouse(const pf::Event& e, float x, float y) {
         }
         if (const auto clicked = screen_.mouse(ix, iy, down_, static_cast<double>(ts2::platform::ticksNs()) / 1e9);
             clicked && babyNames_.clickedOk(screen_, *clicked)) {
-            playUiClick(*clicked);
             answerBabyNames();
         }
         return;
@@ -2098,7 +2085,6 @@ void Game::lotMouse(const pf::Event& e, float x, float y) {
         std::optional<std::int16_t> picked;
         if (const auto clicked = screen_.mouse(ix, iy, down_, static_cast<double>(ts2::platform::ticksNs()) / 1e9);
             clicked && phoneBook_.clicked(screen_, *clicked, picked)) {
-            playUiClick(*clicked);
             answerPhoneBook(picked);
         }
         return;
@@ -2107,8 +2093,7 @@ void Game::lotMouse(const pf::Event& e, float x, float y) {
         cursors_.show(app::Cursors::kArrow);
         if (const auto clicked = screen_.mouse(ix, iy, down_, static_cast<double>(ts2::platform::ticksNs()) / 1e9)) {
             if (const auto button = messageBox_.clicked(screen_, *clicked)) {
-                playUiClick(*clicked);
-                answerMessage(static_cast<std::uint8_t>(*button - 2));
+                    answerMessage(static_cast<std::uint8_t>(*button - 2));
             }
         }
         return;
@@ -2118,7 +2103,6 @@ void Game::lotMouse(const pf::Event& e, float x, float y) {
         std::optional<std::uint32_t> picked;
         if (const auto clicked = screen_.mouse(ix, iy, down_, static_cast<double>(ts2::platform::ticksNs()) / 1e9);
             clicked && typePicker_.clicked(screen_, *clicked, picked)) {
-            playUiClick(*clicked);
             answerTypePicker(picked);
         }
         return;
@@ -2172,7 +2156,6 @@ void Game::lotMouse(const pf::Event& e, float x, float y) {
         cursors_.show(app::Cursors::kArrow);
     }
     if (const auto clicked = screen_.mouse(ix, iy, down_, static_cast<double>(ts2::platform::ticksNs()) / 1e9)) {
-        playUiClick(*clicked);
         if (chooserOpen()) {
             menuClicked(*clicked, screen_.id(*clicked));
         } else {
@@ -2217,11 +2200,13 @@ void Game::puckCamera() {
         const Button held = lotUi_.heldCameraButton();
         turn = held == Button::RotateLeft ? -1 : held == Button::RotateRight ? 1 : 0;
         orbit_.puckZoom = held == Button::ZoomIn ? -1 : held == Button::ZoomOut ? 1 : 0;
+        playPuckSounds(held == Button::ZoomIn, held == Button::ZoomOut, turn != 0);
     } else {
         using Button = app::NeighborhoodUi::CameraButton;
         const Button held = hoodUi_.heldCameraButton();
         turn = held == Button::RotateLeft ? -1 : held == Button::RotateRight ? 1 : 0;
         orbit_.puckZoom = held == Button::ZoomIn ? -1 : held == Button::ZoomOut ? 1 : 0;
+        playPuckSounds(held == Button::ZoomIn, held == Button::ZoomOut, turn != 0);
     }
     orbit_.puckTurn = sims1Turn_ ? -turn : turn;
 }
@@ -2337,35 +2322,7 @@ void Game::updateLot(std::uint64_t now) {
     if (lotLife_) {
         lotLife_->markOnScreen(simsInView(lot_, viewCamera(), width_, height_));
         lotLife_->setCamera(viewCamera().eye);
-        if (audio_) {
-            auto* world = &lotLife_->simulation().world();
-            audio_->pruneSources([world](std::int16_t id) { return world->find(id) != nullptr; });
-            const auto camera = viewCamera();
-            const auto& eye = camera.eye;
-            const auto& target = camera.target;
-            const auto& up = camera.up;
-            // The listener sits halfway from the pivot to the eye, so zooming out quiets the lot
-            // while panning still moves it.
-            const std::array<float, 3> at{(eye[0] + target[0]) * 0.5f, (eye[1] + target[1]) * 0.5f,
-                                          (eye[2] + target[2]) * 0.5f};
-            const float fx = target[0] - eye[0], fy = target[1] - eye[1], fz = target[2] - eye[2];
-            // The camera's right vector, which puts a source on the side of the screen it is drawn.
-            const std::array<float, 3> right{fy * up[2] - fz * up[1], fz * up[0] - fx * up[2], fx * up[1] - fy * up[0]};
-            audio_->setListener(at, right);
-            audio_->setPaused(lotLife_->paused());
-        }
         lotLife_->update(std::min(100.0, static_cast<double>(now - lastFrame_) / 1e6), lot_);
-        if (audio_) {
-            audio_->updatePositions([this](std::int16_t id) -> std::optional<std::array<float, 3>> {
-                if (const auto root = simRoot(id)) {
-                    return std::array<float, 3>{(*root)[0], (*root)[1], (*root)[2]};
-                }
-                if (const auto place = objectRoot(id)) {
-                    return std::array<float, 3>{(*place)[0], (*place)[1], (*place)[2]};
-                }
-                return std::nullopt;
-            });
-        }
         lotRan_ = lotRan_ || !lotLife_->paused();
         if (lotDaylight_) {
             lotDaylight_->update(static_cast<double>(now - lastFrame_) / 1e9, lotLife_->simulation().globals(), *assets_.get(), lot_, renderer_,
@@ -2412,11 +2369,10 @@ void Game::startLotLife() {
         }
         lotLife_->simulation().world().setNameTables(std::move(nameTables));
         ensureAudio();
+        audio_->setPerformanceLevel(lotUi_.gameOptions().audioPerformance());
         lotLife_->simulation().world().setSoundEvents([this](const ts2::sim::SoundEvent& event) { onSoundEvent(event); });
-        lotLife_->simulation().world().setSoundStopAll([this](std::int16_t source) { audio_->stopSource(source); });
-        lotLife_->simulation().world().setAnimationSound([this](std::int16_t object, const std::string& name) {
-            onSoundEvent({name, object, false});
-        });
+        lotLife_->simulation().world().setSoundStopAll([this](std::int16_t object) { audio_->stopObject(object); });
+        lotLife_->simulation().world().setAnimationSound([this](std::int16_t object, const std::string& name) { onAnimationSound(object, name); });
         lotLife_->traceIn(lot_, lotPose_, lotVisible_);
         startLotEffects();
         // A lot opens paused, as in the game, after the game's 10 ticks of loading. Sims start
@@ -2583,6 +2539,7 @@ void Game::run() {
             clickedTile_.reset();
             showPreview();
         }
+        updateAudio();
         if (inLot_) {
             updateLot(now);
         } else if (inNeighborhood_ && freeCam_) {
@@ -2943,8 +2900,9 @@ void Game::handleEvent(const pf::Event& e) {
             // message box keeps the game paused the same way.
             const bool speedKey = action == Action::Pause || action == Action::Normal || action == Action::High || action == Action::Ultra;
             if (!(speedKey && (phoneBook_.isOpen() || messageBox_.isOpen()))) {
-                playUiAction(action);
+                const bool wasPaused = lotLife_ && lotLife_->paused();
                 lotAction(action);
+                playKeySound(action, wasPaused);
             }
         } else if (dialogOpen() && (key == pf::Key::Z || key == pf::Key::X || key == pf::Key::PadPlus || key == pf::Key::PadMinus ||
                                     key == pf::Key::Comma || key == pf::Key::Period)) {
@@ -3002,10 +2960,6 @@ void Game::mouseEvent(const pf::Event& e) {
 }
 
 void Game::windowClicked(int window) {
-    if (audio_ && window >= 0) {
-        const std::string sound = screen_.clickSound(window);
-        audio_->playUi(sound.empty() ? "ui_primary_button" : sound);
-    }
     if (const auto button = errorBox_.clicked(screen_, window)) {
         answerObjectError(*button);
         return;
@@ -3243,11 +3197,9 @@ void Game::clickPanels() {
                 if (quitBox_.isOpen()) {
                     windowClicked(*clicked);
                 } else if (chooserOpen()) {
-                    playUiClick(*clicked);
-                    menuClicked(*clicked, screen_.id(*clicked));
+                            menuClicked(*clicked, screen_.id(*clicked));
                 } else {
-                    playUiClick(*clicked);
-                    lotAction(lotUi_.clicked(*clicked));
+                            lotAction(lotUi_.clicked(*clicked));
                 }
             }
             if (lotLife_) {

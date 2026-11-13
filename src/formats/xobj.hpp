@@ -198,6 +198,8 @@ struct PersonPart {
     std::array<float, kMotiveCount> motives2{};
     std::vector<std::int16_t> personData;
     PersonState state;
+    // True when the saved interactions didn't read. Their bytes are then kept in the object's rest.
+    bool stateUnread = false;
 };
 
 struct SavedObject {

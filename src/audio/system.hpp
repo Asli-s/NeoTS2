@@ -1,6 +1,11 @@
 #pragma once
 
-#include <array>
+// Plays the install's sounds through the system's audio device, by the game's sound manager rules
+// (see manager.hpp). One per game, owned by the app and driven from its main loop.
+
+#include "audio/mix.hpp"
+#include "audio/names.hpp"
+
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -11,21 +16,15 @@
 
 namespace ts2::audio {
 
-// What a sound event knows about where it plays: the object's quality and surfaces, and a Sim's
-// age, sex and voice for the vox suffix. Missing values are simply not tried.
-struct Context {
-    bool person = false;
-    std::int16_t age = 0;
-    std::int16_t gender = 0;
-    std::int16_t voice = 0;
-    std::int16_t ghost = 0;
-    std::string quality;
-    std::string destSurface;
-    std::string sourceSurface;
-    std::string shoe;
+// A sound event of the simulation: a Play Sound primitive or an animation's sound mark.
+struct Event {
+    std::string name;
+    std::int16_t object = 0;
+    bool stop = false;
+    NameInputs inputs;
+    std::optional<Vec3> position;  // the object's place, none for no place
 };
 
-// Plays the install's sounds through the system's audio device. One per game, owned by the app.
 class System {
 public:
     System();
@@ -33,35 +32,38 @@ public:
     System(const System&) = delete;
     System& operator=(const System&) = delete;
 
-    // Indexes the install's sound packages. Adding the same install again does nothing.
+    // Indexes the install's sound packages on a low priority thread. Only the first call does
+    // anything. Sounds asked for before it finishes are dropped.
     void addInstall(const std::filesystem::path& installRoot);
+    [[nodiscard]] bool ready() const;
 
-    // Plays a sound event. With `stop`, stops the voices that event started on that object instead.
-    // `position` (lot coordinates, z up) makes it positional; without one it plays centred.
-    void play(std::string_view name, std::int16_t source, bool stop, const Context& context,
-              std::optional<std::array<float, 3>> position = std::nullopt);
-    // Stops everything that is playing.
+    // The sound quality option's AudioPerformance (0 low, 1 medium, 2 high), which sets the voice limits.
+    void setPerformanceLevel(int level);
+
+    void play(const Event& event);
+    // Stops every sound of one object, as Stop All Sounds does.
+    void stopObject(std::int16_t object);
     void stopAll();
-    // Stops the voices of one object, as Stop All Sounds asks.
-    void stopSource(std::int16_t source);
-    // Pauses loops with the simulation; one-shots finish.
+    // The game's pause and the simulator's speed index (2 normal, 3 fast, 4 fastest).
     void setPaused(bool paused);
-    // Drops voices whose object is gone; `alive` says whether an id is still on the lot.
-    void pruneSources(const std::function<bool(std::int16_t)>& alive);
-    // Moves voices to their objects' current positions. `positionOf` returns none for sources that
-    // do not move (static objects), which keep the position they started with.
-    void updatePositions(const std::function<std::optional<std::array<float, 3>>(std::int16_t source)>& positionOf);
-    // Where the listener is (the camera's target) and its right vector, for distance and pan.
-    void setListener(std::array<float, 3> at, std::array<float, 3> right);
+    void setSpeed(int index);
+    // The camera the listener follows, in the same frame as the sounds' positions.
+    void setListener(const Vec3& eye, const Vec3& target, const Vec3& up);
+    // Moves each playing object sound to where `positionOf` says its object is now. Objects it
+    // has no place for keep their last.
+    void updatePositions(const std::function<std::optional<Vec3>(std::int16_t object)>& positionOf);
+    // Once a frame: applies the rules, hands decoded samples to the mixer and drops ended sounds.
+    void update();
 
-    // Plays a track by the name the game files it under, without modifiers, and returns its
-    // length in seconds (0 when there is no such track). For --play-sound.
-    [[nodiscard]] double playName(std::string_view name);
-    // Plays a UI sound by name, centred, without the per-click log. False before indexing finishes
-    // or when the name does not resolve.
-    bool playUi(std::string_view name);
-    // The track name an event resolves to, empty when none exists.
-    [[nodiscard]] std::string resolve(std::string_view name, const Context& context);
+    // A UI sound by name, or by the track id a UI script names (btnclicksnd). Its id, 0 when it
+    // does not play.
+    std::uint32_t playUi(std::string_view name);
+    std::uint32_t playUiId(std::uint32_t id);
+    void stop(std::uint32_t id);
+
+    // Plays a track by name, waiting for indexing first and for the sound to end, for
+    // --play-sound. Its length in seconds, 0 when nothing played.
+    double playName(std::string_view name);
 
 private:
     struct Impl;

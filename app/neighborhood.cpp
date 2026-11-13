@@ -54,6 +54,24 @@ bool savedAtNight(const std::filesystem::path& folder) {
     return false;
 }
 
+} // namespace
+
+std::optional<std::int32_t> neighborhoodId(const std::filesystem::path& folder) {
+    try {
+        ts2::dbpf::Package package{ts2::content::neighborhoodPackage(folder)};
+        for (const auto& e : package.entries()) {
+            if (e.key.type == ts2::nhoodid::kType) {
+                return ts2::nhoodid::parse(package.read(e)).id;
+            }
+        }
+    } catch (const std::exception& ex) {
+        ts2::diag::warnOnce(std::string("neighborhood: its identity can't be read: ") + ex.what());
+    }
+    return std::nullopt;
+}
+
+namespace {
+
 // The look a lighting state gives the neighborhood, none when the state or its light map image is
 // missing. `base` holds the terrain settings that don't depend on the state.
 std::optional<NeighborhoodTime> neighborhoodTime(const ts2::content::Lighting& lighting, const std::vector<ts2::content::Product>& products,

@@ -319,7 +319,7 @@ PersonState readPersonState(BinaryReader& r, std::uint32_t version) {
     return s;
 }
 
-PersonPart readPerson(BinaryReader& r, std::uint32_t version) {
+PersonPart readPerson(BinaryReader& r, std::uint32_t version, bool toEnd) {
     PersonPart p;
     if (r.u32() != kPersonMarker) {
         throw std::runtime_error("XOBJ: person part without its marker (old layout not supported)");
@@ -335,7 +335,20 @@ PersonPart readPerson(BinaryReader& r, std::uint32_t version) {
         m = r.f32();
     }
     p.personData = readShorts(r, personDataCountForVersion(version));
-    p.state = readPersonState(r, version);
+    // In a record that ends with the Sim, saved interactions that don't read stay as bytes after the
+    // person part, so a damaged or unusual Sim still loads without them.
+    if (!toEnd) {
+        p.state = readPersonState(r, version);
+        return p;
+    }
+    BinaryReader probe = r;
+    try {
+        p.state = readPersonState(probe, version);
+        r = probe;
+    } catch (const std::exception&) {
+        p.state = {};
+        p.stateUnread = true;
+    }
     return p;
 }
 
@@ -430,7 +443,7 @@ SavedObject readObject(BinaryReader& r, std::uint32_t version, RecordKind kind, 
     if (version >= kFirstDecodedTailVersion) {
         o.tail = readTail(r, version, kind, fullLengths);
         if (kind == RecordKind::Person) {
-            o.person = readPerson(r, version);
+            o.person = readPerson(r, version, toEnd);
         } else if (toEnd && r.remaining() != 0) {
             throw std::runtime_error("XOBJ: data left after the record");
         }
@@ -750,7 +763,9 @@ void writeBody(Writer& w, const SavedObject& o, RecordKind kind) {
             w.f32(m);
         }
         w.shorts(p.personData);
-        writePersonState(w, p.state);
+        if (!p.stateUnread) {
+            writePersonState(w, p.state);
+        }
     }
     w.out.insert(w.out.end(), o.rest.begin(), o.rest.end());
 }

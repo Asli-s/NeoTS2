@@ -2,6 +2,7 @@
 
 #include "diag/log.hpp"
 #include "formats/dbpf_writer.hpp"
+#include "paths/names.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -58,11 +59,11 @@ bool isPlainFile(const fs::path& path) {
 std::vector<std::uint8_t> readWhole(const fs::path& path) {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
-        throw SaveError("could not open " + path.filename().string() + " to read it");
+        throw SaveError("could not open " + paths::utf8Text(path.filename()) + " to read it");
     }
     std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     if (in.bad()) {
-        throw SaveError("could not read " + path.filename().string());
+        throw SaveError("could not read " + paths::utf8Text(path.filename()));
     }
     return bytes;
 }
@@ -79,7 +80,7 @@ void writeNewFile(const fs::path& path, std::span<const std::uint8_t> bytes) {
 #ifdef _WIN32
     HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
-        throw SaveError("could not make " + path.filename().string() + " (error " + std::to_string(GetLastError()) + ")");
+        throw SaveError("could not make " + paths::utf8Text(path.filename()) + " (error " + std::to_string(GetLastError()) + ")");
     }
     bool ok = true;
     std::size_t done = 0;
@@ -94,7 +95,7 @@ void writeNewFile(const fs::path& path, std::span<const std::uint8_t> bytes) {
 #else
     const int file = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0644);
     if (file < 0) {
-        throw SaveError("could not make " + path.filename().string() + " (error " + std::to_string(errno) + ")");
+        throw SaveError("could not make " + paths::utf8Text(path.filename()) + " (error " + std::to_string(errno) + ")");
     }
     bool ok = true;
     std::size_t done = 0;
@@ -114,7 +115,7 @@ void writeNewFile(const fs::path& path, std::span<const std::uint8_t> bytes) {
     if (!ok) {
         std::error_code error;
         fs::remove(path, error);
-        throw SaveError("could not write " + path.filename().string() + " to the disk");
+        throw SaveError("could not write " + paths::utf8Text(path.filename()) + " to the disk");
     }
 }
 
@@ -196,7 +197,7 @@ std::string journalText(const fs::path& neighborhoods, const std::vector<Journal
 }
 
 bool nameIsPackage(const fs::path& path) {
-    const std::string name = lower(path.filename().string());
+    const std::string name = lower(paths::utf8Text(path.filename()));
     return name.size() > 8 && name.ends_with(".package") && name[0] != '.';
 }
 
@@ -323,7 +324,7 @@ int removeLeftovers(const fs::path& neighborhoods) {
         if (!it->is_regular_file(error)) {
             continue;
         }
-        const std::string name = lower(it->path().filename().string());
+        const std::string name = lower(paths::utf8Text(it->path().filename()));
         const bool work = name.ends_with(lower(std::string(reinterpret_cast<const char*>(paths::kSaveNewSuffix.data()), paths::kSaveNewSuffix.size()))) ||
                           name.ends_with(lower(std::string(reinterpret_cast<const char*>(paths::kSaveOldSuffix.data()), paths::kSaveOldSuffix.size())));
         if (work && removeFile(it->path())) {
@@ -364,7 +365,7 @@ SaveRecovery recoverInterruptedSave(const paths::SaveFolderLock& lock) {
         const JournalState state = isPlainFile(journal) ? readJournal(journal, neighborhoods, entries) : JournalState::Broken;
         if (state == JournalState::Broken) {
             out.problem = "A save that stopped part way left a journal NeoTS2 can't read, so nothing was changed.";
-            diag::error("save recovery: the journal " + journal.filename().string() + " can't be read, nothing changed");
+            diag::error("save recovery: the journal " + paths::utf8Text(journal.filename()) + " can't be read, nothing changed");
             return out;
         }
         if (state == JournalState::Listed) {
@@ -372,7 +373,7 @@ SaveRecovery recoverInterruptedSave(const paths::SaveFolderLock& lock) {
             for (auto it = entries.rbegin(); it != entries.rend(); ++it) {
                 if (!restoreTarget(*it, out.restored, out.cleaned)) {
                     ok = false;
-                    diag::error("save recovery: could not put back " + it->target.filename().string());
+                    diag::error("save recovery: could not put back " + paths::utf8Text(it->target.filename()));
                 }
             }
             if (!ok) {
@@ -403,7 +404,7 @@ void SaveWriter::add(const fs::path& target, std::vector<std::uint8_t> bytes, Sa
         throw SaveError("NeoTS2 does not hold the save folder");
     }
     const fs::path named = paths::saveFolderPath(target);
-    const std::string shown = named.filename().string();
+    const std::string shown = paths::utf8Text(named.filename());
     std::error_code error;
     if (named.empty() || !nameIsPackage(named) || paths::isWorkName(named.filename())) {
         throw SaveError("not a package a save can write: " + shown);
@@ -420,7 +421,7 @@ void SaveWriter::add(const fs::path& target, std::vector<std::uint8_t> bytes, Sa
         throw SaveError(shown + " already exists");
     }
     for (const Item& item : items_) {
-        if (lower(item.target.filename().string()) == lower(shown) && paths::isWithin(item.target.parent_path(), named.parent_path()) &&
+        if (lower(paths::utf8Text(item.target.filename())) == lower(shown) && paths::isWithin(item.target.parent_path(), named.parent_path()) &&
             paths::isWithin(named.parent_path(), item.target.parent_path())) {
             throw SaveError(shown + " is in this save twice");
         }
@@ -435,7 +436,7 @@ void SaveWriter::add(const fs::path& target, std::vector<std::uint8_t> bytes, Sa
 
 void SaveWriter::move(const fs::path& from, const fs::path& to) {
     if (++moves_ == failAtMove_ || !moveNoReplace(from, to)) {
-        throw SaveError("could not move " + from.filename().string() + " to " + to.filename().string());
+        throw SaveError("could not move " + paths::utf8Text(from.filename()) + " to " + paths::utf8Text(to.filename()));
     }
 }
 
@@ -475,7 +476,7 @@ void SaveWriter::commit() {
     for (const Item& item : items_) {
         const bool there = present(item.target);
         if ((item.kind == SaveTarget::Replace) != there || present(newPackagePath(item.target)) || present(oldPackagePath(item.target))) {
-            throw SaveError(item.target.filename().string() + " changed since the save began");
+            throw SaveError(paths::utf8Text(item.target.filename()) + " changed since the save began");
         }
     }
 
@@ -487,7 +488,7 @@ void SaveWriter::commit() {
             writeNewFile(fresh, item.bytes);
             ++written;
             if (readWhole(fresh) != item.bytes) {
-                throw SaveError(fresh.filename().string() + " reads back differently from what was written");
+                throw SaveError(paths::utf8Text(fresh.filename()) + " reads back differently from what was written");
             }
         }
         std::vector<JournalEntry> entries;
@@ -497,7 +498,7 @@ void SaveWriter::commit() {
         const std::string text = journalText(neighborhoods_, entries);
         writeNewFile(journal, std::span(reinterpret_cast<const std::uint8_t*>(text.data()), text.size()));
         syncFolder(journal.parent_path());
-    } catch (const SaveError&) {
+    } catch (...) {
         for (std::size_t i = 0; i < written; ++i) {
             removeFile(newPackagePath(items_[i].target));
         }
@@ -517,7 +518,7 @@ void SaveWriter::commit() {
         }
         for (const Item& item : items_) {
             if (readWhole(item.target) != item.bytes) {
-                throw SaveError(item.target.filename().string() + " reads back differently after the swap");
+                throw SaveError(paths::utf8Text(item.target.filename()) + " reads back differently after the swap");
             }
         }
     } catch (const std::exception& e) {
@@ -538,7 +539,7 @@ void SaveWriter::commit() {
     syncFolder(journal.parent_path());
     for (const Item& item : items_) {
         if (item.kind == SaveTarget::Replace && !removeFile(oldPackagePath(item.target))) {
-            diag::warning("save: an old package could not be removed: " + oldPackagePath(item.target).filename().string());
+            diag::warning("save: an old package could not be removed: " + paths::utf8Text(oldPackagePath(item.target).filename()));
         }
     }
     diag::info("saved " + std::to_string(items_.size()) + " packages");

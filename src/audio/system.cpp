@@ -1,21 +1,24 @@
 #include "audio/system.hpp"
 
 #include "audio/bank.hpp"
+#include "audio/manager.hpp"
 #include "audio/xa.hpp"
 #include "diag/log.hpp"
 
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
-#include <cctype>
+#include <chrono>
 #include <cmath>
-#include <format>
-#include <future>
-#include <map>
+#include <condition_variable>
+#include <deque>
 #include <mutex>
-#include <random>
 #include <set>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace ts2::audio {
@@ -24,425 +27,523 @@ namespace {
 
 constexpr int kOutputRate = 48000;
 constexpr int kOutputChannels = 2;
-constexpr std::size_t kMaxVoices = 32;
+// The mixer's voices. The data's limits keep far fewer playing, this only guards a broken file.
+constexpr std::size_t kMaxVoices = 64;
+// Frames mixed per pass of the device callback.
+constexpr std::size_t kMixFrames = 1024;
 constexpr std::size_t kMaxCacheBytes = 64u << 20;
+constexpr std::size_t kMaxDecodeJobs = 256;
 
-std::string lower(std::string_view text) {
-    std::string out(text);
-    for (char& c : out) {
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    }
-    return out;
+std::uint64_t sampleId(SampleKey key) {
+    return mapKey(key.instance, key.instanceHigh);
 }
 
-// The vox suffix the game appends: age letter, and for children up the voice, for teens and older
-// the sex too. Ghosts speak with the ghost voice.
-std::string voxSuffix(const Context& context) {
-    const int age = context.age;
-    char letter = 'a';
-    if (age < 2) {
-        letter = 'b';
-    } else if (age == 2) {
-        letter = 'p';
-    } else if (age < 16) {
-        letter = 'c';
-    } else if (age < 19) {
-        letter = 't';
-    } else if (age > 50) {
-        letter = 'e';
+std::chrono::steady_clock::time_point now() {
+    return std::chrono::steady_clock::now();
+}
+
+// The sound group an event plays in, by its name.
+Group eventGroup(std::string_view name) {
+    return name.starts_with("vox") ? Group::Voice : name.starts_with("cine") ? Group::Cinematic : Group::Sfx;
+}
+
+// One voice as the device callback sees it. Gains move from the last pass's to this one's across a
+// pass, so a change is never a click.
+struct MixVoice {
+    const Pcm* pcm = nullptr;
+    std::uint32_t id = 0;
+    double position = 0;  // in sample frames
+    double step = 1;
+    bool loop = false;
+    bool advancing = true;
+    bool ended = false;
+    std::array<EarGains, 3> gains{};  // mono, stereo left channel, stereo right channel
+    std::array<EarGains, 3> lastGains{};
+};
+
+EarGains lerp(const EarGains& a, const EarGains& b, float t) {
+    return {a.left + (b.left - a.left) * t, a.right + (b.right - a.right) * t};
+}
+
+// Mixes `frames` of one voice into `out` (interleaved left, right). Marks it ended at its end.
+void mixVoice(MixVoice& v, float* out, std::size_t frames) {
+    const Pcm& pcm = *v.pcm;
+    const std::size_t channels = pcm.channels;
+    const std::size_t length = pcm.samples.size() / channels;
+    if (length == 0) {
+        v.ended = true;
+        return;
     }
-    if (age < 3) {
-        return {letter};
+    for (std::size_t i = 0; i < frames; ++i) {
+        if (v.position >= static_cast<double>(length)) {
+            if (!v.loop) {
+                v.ended = true;
+                break;
+            }
+            v.position = std::fmod(v.position, static_cast<double>(length));
+        }
+        const auto a = static_cast<std::size_t>(v.position);
+        const std::size_t b = a + 1 < length ? a + 1 : v.loop ? 0 : a;
+        const auto t = static_cast<float>(v.position - static_cast<double>(a));
+        const float ramp = static_cast<float>(i) / static_cast<float>(frames);
+        const auto sample = [&](std::size_t frame, std::size_t channel) {
+            return static_cast<float>(pcm.samples[frame * channels + channel]);
+        };
+        if (channels == 1) {
+            const float s = sample(a, 0) + (sample(b, 0) - sample(a, 0)) * t;
+            const EarGains g = lerp(v.lastGains[0], v.gains[0], ramp);
+            out[i * 2] += s * g.left;
+            out[i * 2 + 1] += s * g.right;
+        } else {
+            const float l = sample(a, 0) + (sample(b, 0) - sample(a, 0)) * t;
+            const float r = sample(a, 1) + (sample(b, 1) - sample(a, 1)) * t;
+            const EarGains gl = lerp(v.lastGains[1], v.gains[1], ramp);
+            const EarGains gr = lerp(v.lastGains[2], v.gains[2], ramp);
+            out[i * 2] += l * gl.left + r * gr.left;
+            out[i * 2 + 1] += l * gl.right + r * gr.right;
+        }
+        v.position += v.step;
     }
-    const int voiceCount = age >= 19 && age <= 50 ? 2 : 1;
-    char voice = (context.ghost & 1) != 0 ? 'g' : static_cast<char>('a' + std::max<int>(0, context.voice) % voiceCount);
-    if (age < 19) {
-        return {letter, voice};
-    }
-    return {letter, context.gender == 1 ? 'f' : 'm', voice};
+    v.lastGains = v.gains;
 }
 
 } // namespace
 
 struct System::Impl {
-    struct Voice {
-        std::shared_ptr<const Pcm> pcm;
-        std::string name;      // the event's own name, before modifiers
-        std::string resolved;  // the track it was played as
-        std::int16_t source = 0;
-        double position = 0;  // in source frames
-        double step = 1;
-        bool loop = false;
-        std::optional<std::array<float, 3>> at;  // lot position; none: centred
-    };
-
     Bank bank;
-    bool installStarted = false;
-    std::future<void> installing;
-    std::atomic<bool> ready{false};
-    SDL_AudioStream* stream = nullptr;
-    std::mutex mutex;
-    std::vector<Voice> voices;
-    std::map<std::string, std::shared_ptr<const Pcm>> cache;
+    Manager manager;
+    std::thread loader;
+    std::atomic<bool> loaded{false};
+    bool started = false;  // set on the main thread once loading is seen done
+    int performanceLevel = 1;
+
+    // The decoder thread: samples asked for, and samples done (empty for one that failed).
+    std::thread decoder;
+    std::mutex decodeMutex;
+    std::condition_variable decodeWake;
+    std::deque<SampleKey> jobs;
+    std::vector<std::pair<std::uint64_t, std::shared_ptr<const Pcm>>> decoded;
+    bool quit = false;
+
+    // Main thread only.
+    std::unordered_map<std::uint64_t, std::shared_ptr<const Pcm>> cache;
     std::size_t cacheBytes = 0;
-    std::mt19937 random{0x5132};
+    std::unordered_set<std::uint64_t> pending;
+    std::unordered_set<std::uint64_t> failed;
+    std::array<std::shared_ptr<const Pcm>, kMaxVoices> slotPcm;
+    std::unordered_map<std::uint32_t, std::size_t> slotOf;
     std::set<std::string> missed;
-    std::map<std::string, std::string> aliases;
-    std::array<float, 3> listener{};
-    std::array<float, 3> right{1, 0, 0};
-    bool paused = false;
+    std::chrono::steady_clock::time_point lastUpdate = now();
+    std::chrono::steady_clock::time_point startTime = now();
 
-    [[nodiscard]] bool openDevice();
-    void mix(int frames, std::int16_t* out);
+    // Shared with the device callback.
+    SDL_AudioStream* stream = nullptr;
+    bool deviceFailed = false;
+    std::mutex mixMutex;
+    std::array<MixVoice, kMaxVoices> voices;
+    std::array<float, kMixFrames * kOutputChannels> mixBuffer{};
+    std::array<std::int16_t, kMixFrames * kOutputChannels> outBuffer{};
+
+    ~Impl();
+    double nowMs() const { return std::chrono::duration<double, std::milli>(now() - startTime).count(); }
+    void openDevice();
+    void startDecoder();
+    void decodeLoop();
+    void askDecode(SampleKey key);
+    void takeDecoded();
+    void trimCache();
+    void syncMixer(const std::vector<Manager::Output>& outputs);
+    std::uint32_t startTrack(const Request& request, std::string_view name);
     static void SDLCALL feed(void* userdata, SDL_AudioStream* stream, int additional, int total);
-
-    [[nodiscard]] std::shared_ptr<const Pcm> load(const SampleLocation& location);
-    [[nodiscard]] double playResolved(const std::string& resolved, std::string_view name, std::int16_t source,
-                                      std::optional<std::array<float, 3>> at = std::nullopt, bool quiet = false);
 };
 
-bool System::Impl::openDevice() {
-    if (stream != nullptr) {
-        return true;
+System::Impl::~Impl() {
+    if (loader.joinable()) {
+        loader.join();
     }
-    if (!SDL_Init(SDL_INIT_AUDIO)) {
-        ts2::diag::warnOnce(std::string("no audio device: ") + SDL_GetError());
-        return false;
+    {
+        std::lock_guard lock(decodeMutex);
+        quit = true;
+    }
+    decodeWake.notify_all();
+    if (decoder.joinable()) {
+        decoder.join();
+    }
+    if (stream != nullptr) {
+        SDL_DestroyAudioStream(stream);
+    }
+}
+
+void System::Impl::openDevice() {
+    if (stream != nullptr || deviceFailed) {
+        return;
+    }
+    if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+        diag::warnOnce(std::string("no audio device: ") + SDL_GetError());
+        deviceFailed = true;
+        return;
     }
     const SDL_AudioSpec spec{SDL_AUDIO_S16, kOutputChannels, kOutputRate};
     stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, &Impl::feed, this);
     if (stream == nullptr) {
-        ts2::diag::warnOnce(std::string("no audio device: ") + SDL_GetError());
-        return false;
+        diag::warnOnce(std::string("no audio device: ") + SDL_GetError());
+        deviceFailed = true;
+        return;
     }
     SDL_ResumeAudioStreamDevice(stream);
-    return true;
 }
 
 void System::Impl::feed(void* userdata, SDL_AudioStream* stream, int additional, int) {
-    if (additional <= 0) {
-        return;
-    }
     auto* self = static_cast<Impl*>(userdata);
-    // The callback asks for a block; anything beyond one mix pass is fed as silence rather than
-    // allocating in the audio thread.
-    std::vector<std::int16_t> buffer(static_cast<std::size_t>(additional) / sizeof(std::int16_t));
-    const int frames = additional / (kOutputChannels * static_cast<int>(sizeof(std::int16_t)));
-    if (frames > 0) {
-        self->mix(frames, buffer.data());
+    std::lock_guard lock(self->mixMutex);
+    auto frames = static_cast<std::size_t>(std::max(additional, 0)) / (kOutputChannels * sizeof(std::int16_t));
+    while (frames > 0) {
+        const std::size_t pass = std::min(frames, kMixFrames);
+        std::fill_n(self->mixBuffer.begin(), pass * kOutputChannels, 0.0f);
+        for (MixVoice& voice : self->voices) {
+            if (voice.pcm != nullptr && !voice.ended && voice.advancing) {
+                mixVoice(voice, self->mixBuffer.data(), pass);
+            }
+        }
+        for (std::size_t i = 0; i < pass * kOutputChannels; ++i) {
+            self->outBuffer[i] = static_cast<std::int16_t>(std::clamp(self->mixBuffer[i], -32768.0f, 32767.0f));
+        }
+        SDL_PutAudioStreamData(stream, self->outBuffer.data(), static_cast<int>(pass * kOutputChannels * sizeof(std::int16_t)));
+        frames -= pass;
     }
-    SDL_PutAudioStreamData(stream, buffer.data(), additional);
 }
 
-void System::Impl::mix(int frames, std::int16_t* out) {
-    std::lock_guard lock(mutex);
-    std::fill_n(out, static_cast<std::size_t>(frames) * kOutputChannels, std::int16_t{0});
-    for (auto it = voices.begin(); it != voices.end();) {
-        Voice& voice = *it;
-        const Pcm& pcm = *voice.pcm;
-        const std::size_t pcmFrames = pcm.samples.size() / pcm.channels;
-        if (pcmFrames == 0) {
-            it = voices.erase(it);
-            continue;
-        }
-        if (paused && voice.loop) {
-            ++it;
-            continue;
-        }
-        // Distance and pan from the listener (the camera's target): full volume within five tiles,
-        // then (5/d)^1.2, and pan by the side of the camera the source is on.
-        float gain = 1, pan = 0;
-        if (voice.at) {
-            const float dx = (*voice.at)[0] - listener[0];
-            const float dy = (*voice.at)[1] - listener[1];
-            const float dz = (*voice.at)[2] - listener[2];
-            const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-            constexpr float kMinDistance = 5;
-            constexpr float kRolloff = 1.2f;
-            gain = distance <= kMinDistance ? 1 : std::pow(kMinDistance / distance, kRolloff);
-            const float flat = std::hypot(dx, dy);
-            const float side = flat > 1e-4f ? (dx * right[0] + dy * right[1]) / flat : 0;
-            pan = side * std::min(1.0f, flat / kMinDistance) * 0.8f;
-        }
-        // Loops sit under the one-shots: an aquarium running all day must not drown the toilet.
-        const float base = voice.loop ? 0.4f : 0.7f;
-        const float leftGain = base * gain * (1 - std::max(0.0f, pan));
-        const float rightGain = base * gain * (1 + std::min(0.0f, pan));
-        for (int i = 0; i < frames; ++i) {
-            const auto pos = static_cast<std::size_t>(voice.position);
-            if (pos >= pcmFrames) {
-                if (!voice.loop) {
-                    break;
-                }
-                voice.position = std::fmod(voice.position, static_cast<double>(pcmFrames));
+void System::Impl::startDecoder() {
+    decoder = std::thread([this] { decodeLoop(); });
+}
+
+void System::Impl::decodeLoop() {
+    for (;;) {
+        SampleKey key;
+        {
+            std::unique_lock lock(decodeMutex);
+            decodeWake.wait(lock, [this] { return quit || !jobs.empty(); });
+            if (quit) {
+                return;
             }
-            const auto a = static_cast<std::size_t>(voice.position);
-            const auto b = a + 1 < pcmFrames ? a + 1 : (voice.loop ? 0 : a);
-            const float t = static_cast<float>(voice.position - static_cast<double>(a));
-            const float leftA = pcm.samples[a * pcm.channels];
-            const float rightA = pcm.channels > 1 ? pcm.samples[a * pcm.channels + 1] : leftA;
-            const float leftB = pcm.samples[b * pcm.channels];
-            const float rightB = pcm.channels > 1 ? pcm.samples[b * pcm.channels + 1] : leftB;
-            const float leftSample = leftA + (leftB - leftA) * t;
-            const float rightSample = rightA + (rightB - rightA) * t;
-            auto& l = out[i * kOutputChannels];
-            auto& r = out[i * kOutputChannels + 1];
-            l = static_cast<std::int16_t>(std::clamp<int>(l + static_cast<int>(leftSample * leftGain), -32768, 32767));
-            r = static_cast<std::int16_t>(std::clamp<int>(r + static_cast<int>(rightSample * rightGain), -32768, 32767));
-            voice.position += voice.step;
+            key = jobs.front();
+            jobs.pop_front();
         }
-        if (!voice.loop && voice.position >= static_cast<double>(pcmFrames)) {
-            it = voices.erase(it);
+        std::shared_ptr<const Pcm> pcm;
+        const auto bytes = bank.readSample(key);
+        if (bytes.size() >= 2 && bytes[0] == 'X' && bytes[1] == 'A') {
+            try {
+                pcm = std::make_shared<const Pcm>(decodeXa(bytes));
+            } catch (const std::exception& ex) {
+                diag::warnOnce(std::string("sound sample: ") + ex.what());
+            }
+        } else if (!bytes.empty()) {
+            diag::warnOnce("sound sample format not supported yet");
+        }
+        std::lock_guard lock(decodeMutex);
+        decoded.emplace_back(sampleId(key), std::move(pcm));
+    }
+}
+
+void System::Impl::askDecode(SampleKey key) {
+    const std::uint64_t id = sampleId(key);
+    if (cache.contains(id) || failed.contains(id) || !pending.insert(id).second) {
+        return;
+    }
+    {
+        std::lock_guard lock(decodeMutex);
+        if (jobs.size() >= kMaxDecodeJobs) {
+            pending.erase(id);
+            return;
+        }
+        jobs.push_back(key);
+    }
+    decodeWake.notify_one();
+}
+
+void System::Impl::takeDecoded() {
+    std::vector<std::pair<std::uint64_t, std::shared_ptr<const Pcm>>> done;
+    {
+        std::lock_guard lock(decodeMutex);
+        done.swap(decoded);
+    }
+    for (auto& [id, pcm] : done) {
+        pending.erase(id);
+        if (!pcm || pcm->samples.empty() || pcm->channels == 0) {
+            failed.insert(id);
+            continue;
+        }
+        cacheBytes += pcm->samples.size() * sizeof(std::int16_t);
+        cache[id] = std::move(pcm);
+    }
+    trimCache();
+}
+
+void System::Impl::trimCache() {
+    // Samples no voice plays go first, the cache is only kept to start a sound again at once.
+    for (auto it = cache.begin(); it != cache.end() && cacheBytes > kMaxCacheBytes;) {
+        if (it->second.use_count() == 1) {
+            cacheBytes -= it->second->samples.size() * sizeof(std::int16_t);
+            it = cache.erase(it);
         } else {
             ++it;
         }
     }
 }
 
-std::shared_ptr<const Pcm> System::Impl::load(const SampleLocation& location) {
-    const std::string key = std::to_string(location.instance) + ":" + std::to_string(location.instanceHigh);
-    if (const auto it = cache.find(key); it != cache.end()) {
-        return it->second;
+void System::Impl::syncMixer(const std::vector<Manager::Output>& outputs) {
+    std::unordered_map<std::uint32_t, const Manager::Output*> byId;
+    for (const auto& output : outputs) {
+        byId.emplace(output.id, &output);
     }
-    const auto bytes = bank.read(location);
-    if (bytes.empty()) {
-        return nullptr;
-    }
-    if (bytes.size() < 2 || bytes[0] != 'X' || bytes[1] != 'A') {
-        ts2::diag::warnOnce("sound sample format not supported yet");
-        return nullptr;
-    }
-    try {
-        auto pcm = std::make_shared<const Pcm>(decodeXa(bytes));
-        if (pcm->samples.empty()) {
-            return nullptr;
+    std::vector<std::shared_ptr<const Pcm>> released;
+    std::vector<std::uint32_t> ended;
+    std::vector<std::pair<std::uint32_t, double>> played;
+    {
+        std::lock_guard lock(mixMutex);
+        for (std::size_t slot = 0; slot < kMaxVoices; ++slot) {
+            MixVoice& voice = voices[slot];
+            if (voice.pcm == nullptr) {
+                continue;
+            }
+            const auto it = byId.find(voice.id);
+            if (it == byId.end() || voice.ended) {
+                if (voice.ended) {
+                    ended.push_back(voice.id);
+                }
+                slotOf.erase(voice.id);
+                voice = MixVoice{};
+                released.push_back(std::move(slotPcm[slot]));
+                continue;
+            }
+            const Manager::Output& output = *it->second;
+            voice.gains = {output.mono, output.stereo[0], output.stereo[1]};
+            voice.advancing = output.advancing;
+            voice.step = static_cast<double>(voice.pcm->sampleRate) / kOutputRate * output.pitch;
+            played.emplace_back(voice.id, voice.position * 1000.0 / voice.pcm->sampleRate);
         }
-        if (cacheBytes + pcm->samples.size() * sizeof(std::int16_t) > kMaxCacheBytes) {
-            cache.clear();
-            cacheBytes = 0;
+        // New voices whose sample is decoded.
+        for (const auto& output : outputs) {
+            // A sound that just ended is still among the outputs until the manager hears of it.
+            if (slotOf.contains(output.id) || std::find(ended.begin(), ended.end(), output.id) != ended.end()) {
+                continue;
+            }
+            const Manager::Instance* instance = manager.find(output.id);
+            const auto cached = instance != nullptr ? cache.find(sampleId(instance->sample)) : cache.end();
+            if (cached == cache.end()) {
+                continue;
+            }
+            const auto free = std::find_if(voices.begin(), voices.end(), [](const MixVoice& v) { return v.pcm == nullptr; });
+            if (free == voices.end()) {
+                ended.push_back(output.id);
+                continue;
+            }
+            const auto slot = static_cast<std::size_t>(free - voices.begin());
+            slotPcm[slot] = cached->second;
+            MixVoice& voice = *free;
+            voice.pcm = slotPcm[slot].get();
+            voice.id = output.id;
+            voice.loop = instance->settings.looping;
+            voice.gains = voice.lastGains = {output.mono, output.stereo[0], output.stereo[1]};
+            voice.advancing = output.advancing;
+            voice.step = static_cast<double>(voice.pcm->sampleRate) / kOutputRate * output.pitch;
+            slotOf.emplace(output.id, slot);
         }
-        cacheBytes += pcm->samples.size() * sizeof(std::int16_t);
-        cache.emplace(key, pcm);
-        return pcm;
-    } catch (const std::exception& ex) {
-        ts2::diag::warnOnce(std::string("sound sample: ") + ex.what());
-        return nullptr;
+    }
+    for (const auto& [id, ms] : played) {
+        manager.setPlayed(id, ms);
+    }
+    for (const std::uint32_t id : ended) {
+        manager.stop(id);
     }
 }
 
-double System::Impl::playResolved(const std::string& resolved, std::string_view name, std::int16_t source,
-                                  std::optional<std::array<float, 3>> at, bool quiet) {
-    const bool loop = bank.loops(resolved);
-    if (loop) {
-        // One loop per object and track: a script that asks again while it plays is not a second
-        // voice, even when a different event name resolves to the same track.
-        std::lock_guard lock(mutex);
-        for (const Voice& voice : voices) {
-            if (voice.loop && voice.source == source && voice.resolved == resolved) {
-                return 0;
-            }
+std::uint32_t System::Impl::startTrack(const Request& request, std::string_view name) {
+    const Bank::Track* track = bank.track(request.track);
+    if (track == nullptr) {
+        if (missed.size() < 4096 && missed.insert(std::string(name)).second) {
+            diag::info("audio: no track for " + std::string(name));
         }
-    }
-    const auto locations = bank.samplesOf(resolved);
-    if (locations.empty()) {
         return 0;
     }
-    const auto pcm = load(locations[random() % locations.size()]);
-    if (!pcm) {
+    const auto id = manager.start(request, track->settings, bank.samples(*track), nowMs());
+    if (!id) {
         return 0;
     }
-    if (!quiet) {
-        const std::string where = at ? std::format(" at {:.2f},{:.2f},{:.2f}", (*at)[0], (*at)[1], (*at)[2])
-                                     : std::string(" centred");
-        ts2::diag::info(std::format("audio: playing {} ({:.2f} s, {} Hz){} on object {}{}", resolved, pcm->seconds(),
-                                    pcm->sampleRate, bank.loops(resolved) ? ", looping" : "", source, where));
-    }
-    Voice voice;
-    voice.pcm = pcm;
-    voice.name = std::string(name);
-    voice.resolved = resolved;
-    voice.source = source;
-    voice.step = static_cast<double>(pcm->sampleRate) / kOutputRate;
-    voice.loop = loop;
-    voice.at = at;
-    std::lock_guard lock(mutex);
-    if (voices.size() >= kMaxVoices) {
-        voices.erase(voices.begin());
-    }
-    voices.push_back(std::move(voice));
-    return pcm->seconds();
+    const Manager::Instance* instance = manager.find(*id);
+    askDecode(instance->sample);
+    return *id;
 }
 
 System::System() : impl_(std::make_unique<Impl>()) {}
-
-System::~System() {
-    if (impl_->installing.valid()) {
-        impl_->installing.wait();
-    }
-    if (impl_->stream != nullptr) {
-        SDL_DestroyAudioStream(impl_->stream);
-    }
-}
+System::~System() = default;
 
 void System::addInstall(const std::filesystem::path& installRoot) {
-    if (impl_->installStarted) {
+    if (impl_->loader.joinable() || impl_->loaded) {
         return;
     }
-    impl_->installStarted = true;
-    // Indexing the sound packages takes a while (250 packages, every index read), so it runs beside
-    // the menu. Events before it finishes are dropped; --play-sound waits.
-    impl_->installing = std::async(std::launch::async, [impl = impl_.get(), installRoot] {
-        impl->bank.addInstall(installRoot);
-        for (const auto& [key, value] : impl->bank.propertySet("aliases")) {
-            impl->aliases[lower(key)] = value;
+    // Indexing reads about 40,000 small resources, so it runs beside the menu at low priority.
+    impl_->loader = std::thread([impl = impl_.get(), installRoot] {
+        SDL_SetCurrentThreadPriority(SDL_THREAD_PRIORITY_LOW);
+        try {
+            impl->bank.load(installRoot);
+        } catch (const std::exception& ex) {
+            diag::warnOnce(std::string("sound packages: ") + ex.what());
         }
-        impl->ready = true;
-        ts2::diag::info("audio: indexed the install's sound packages");
+        impl->loaded = true;
     });
 }
 
-std::string System::resolve(std::string_view name, const Context& context) {
-    if (name.empty() || !impl_->ready) {
-        return {};
-    }
-    const std::string base = lower(name);
-    std::vector<std::string> candidates;
-    const auto add = [&](std::string suffix) {
-        std::string candidate = base;
-        if (!suffix.empty()) {
-            candidate += "_";
-            candidate += suffix;
-        }
-        if (std::find(candidates.begin(), candidates.end(), candidate) == candidates.end()) {
-            candidates.push_back(std::move(candidate));
-        }
-    };
-    // Most specific first: the game appends every modifier it knows, then drops from the end until
-    // a track exists.
-    std::string quality = context.quality, dest = context.destSurface, source = context.sourceSurface, shoe = context.shoe;
-    std::string full;
-    if (!quality.empty()) full += "_" + quality;
-    if (!dest.empty()) full += "_" + dest;
-    if (!source.empty()) full += "_" + source;
-    if (!shoe.empty()) full += "_" + shoe;
-    if (!full.empty()) add(full.substr(1));
-    if (!quality.empty() && !dest.empty()) add(quality + "_" + dest);
-    if (!dest.empty() && !quality.empty()) add(dest + "_" + quality);
-    if (!dest.empty() && !source.empty()) add(dest + "_" + source);
-    if (!quality.empty()) add(quality);
-    if (!dest.empty()) add(dest);
-    if (!source.empty()) add(source);
-    if (base.starts_with("vox") && context.person) add(voxSuffix(context));
-    add({});
-
-    for (const auto& candidate : candidates) {
-        if (const auto alias = impl_->aliases.find(candidate); alias != impl_->aliases.end()) {
-            if (impl_->bank.hasTrack(alias->second)) {
-                return alias->second;
-            }
-        }
-        if (impl_->bank.hasTrack(candidate)) {
-            return candidate;
-        }
-    }
-    return {};
+bool System::ready() const {
+    return impl_->started;
 }
 
-void System::play(std::string_view name, std::int16_t source, bool stop, const Context& context,
-                  std::optional<std::array<float, 3>> position) {
-    if (!impl_->ready) {
-        return;
-    }
-    if (stop) {
-        std::lock_guard lock(impl_->mutex);
-        std::erase_if(impl_->voices, [&](const Impl::Voice& voice) {
-            return voice.source == source && (voice.name == name || voice.resolved == name);
-        });
-        return;
-    }
-    if (!impl_->openDevice()) {
-        return;
-    }
-    const std::string resolved = resolve(name, context);
-    if (resolved.empty()) {
-        if (impl_->missed.insert(std::string(name)).second) {
-            ts2::diag::warning("audio: no track for sound event " + std::string(name));
-        }
-        return;
-    }
-    (void)impl_->playResolved(resolved, name, source, std::move(position));
+void System::setPerformanceLevel(int level) {
+    impl_->performanceLevel = level;
+    impl_->manager.setPerformanceLevel(level);
 }
 
-void System::setListener(std::array<float, 3> at, std::array<float, 3> right) {
-    const float length = std::hypot(right[0], right[1]);
-    std::lock_guard lock(impl_->mutex);
-    impl_->listener = at;
-    if (length > 1e-6f) {
-        impl_->right = {right[0] / length, right[1] / length, right[2] / length};
+void System::play(const Event& event) {
+    if (!impl_->started || event.name.empty()) {
+        return;
     }
+    const std::string_view name = event.name;
+    // A start of "stop_<name>" stops, under the full name as written.
+    if (event.stop || name.starts_with("stop_")) {
+        impl_->manager.stopEvent(soundKey(name), event.object);
+        return;
+    }
+    if (name == "startmusicdipping" || name == "stopmusicdipping" || name == "stopallsounds") {
+        return;
+    }
+    const std::uint32_t mask = eventMask(name, impl_->bank.listedMask(name));
+    const std::string track = trackName(name, mask, event.inputs, impl_->bank.aliases());
+    Request request;
+    request.track = soundKey(track);
+    request.event = soundKey(name);
+    request.object = event.object;
+    request.group = eventGroup(name);
+    request.position = event.position;
+    (void)impl_->startTrack(request, track);
+}
+
+void System::stopObject(std::int16_t object) {
+    impl_->manager.stopObject(object);
 }
 
 void System::stopAll() {
-    std::lock_guard lock(impl_->mutex);
-    impl_->voices.clear();
-}
-
-void System::stopSource(std::int16_t source) {
-    std::lock_guard lock(impl_->mutex);
-    std::erase_if(impl_->voices, [source](const Impl::Voice& voice) { return voice.source == source; });
+    impl_->manager.stopAll();
 }
 
 void System::setPaused(bool paused) {
-    std::lock_guard lock(impl_->mutex);
-    impl_->paused = paused;
+    impl_->manager.setGamePaused(paused);
 }
 
-void System::pruneSources(const std::function<bool(std::int16_t)>& alive) {
-    std::lock_guard lock(impl_->mutex);
-    std::erase_if(impl_->voices, [&](const Impl::Voice& voice) { return voice.source != 0 && !alive(voice.source); });
+void System::setSpeed(int index) {
+    impl_->manager.setSpeedIndex(index);
 }
 
-void System::updatePositions(const std::function<std::optional<std::array<float, 3>>(std::int16_t)>& positionOf) {
-    std::lock_guard lock(impl_->mutex);
-    std::map<std::int16_t, std::optional<std::array<float, 3>>> seen;
-    for (auto& voice : impl_->voices) {
-        if (voice.source == 0) {
-            continue;
-        }
-        const auto [it, inserted] = seen.try_emplace(voice.source, std::nullopt);
-        if (inserted) {
-            it->second = positionOf(voice.source);
-        }
-        if (it->second) {
-            voice.at = it->second;
+void System::setListener(const Vec3& eye, const Vec3& target, const Vec3& up) {
+    if (!impl_->started) {
+        return;
+    }
+    const Tuning& tuning = impl_->bank.tuning();
+    impl_->manager.setListener(cameraListener(eye, target, up, tuning.listenerMinHeight, tuning.listenerToCameraOffset,
+                                              tuning.attenuationPositionsScalar));
+}
+
+void System::updatePositions(const std::function<std::optional<Vec3>(std::int16_t)>& positionOf) {
+    std::set<std::int16_t> objects;
+    for (const auto& instance : impl_->manager.instances()) {
+        if (instance.request.object != 0 && instance.request.position) {
+            objects.insert(instance.request.object);
         }
     }
+    for (const std::int16_t object : objects) {
+        if (const auto at = positionOf(object)) {
+            impl_->manager.moveObject(object, *at);
+        }
+    }
+}
+
+void System::update() {
+    Impl& impl = *impl_;
+    if (!impl.started) {
+        if (!impl.loaded) {
+            return;
+        }
+        impl.loader.join();
+        impl.manager.setTuning(impl.bank.tuning());
+        impl.manager.setPerformanceLevel(impl.performanceLevel);
+        impl.startDecoder();
+        impl.openDevice();
+        impl.started = true;
+        diag::info("audio: indexed " + std::to_string(impl.bank.trackCount()) + " sound tracks");
+    }
+    const auto at = now();
+    const double elapsed = std::chrono::duration<double, std::milli>(at - impl.lastUpdate).count();
+    impl.lastUpdate = at;
+    impl.takeDecoded();
+    // Sounds whose sample cannot be decoded never start.
+    for (const auto& instance : impl.manager.instances()) {
+        if (impl.failed.contains(sampleId(instance.sample))) {
+            impl.manager.stop(instance.id);
+        } else if (instance.lengthMs == 0) {
+            if (const auto it = impl.cache.find(sampleId(instance.sample)); it != impl.cache.end()) {
+                impl.manager.setLength(instance.id, it->second->seconds() * 1000);
+            } else {
+                impl.askDecode(instance.sample);
+            }
+        }
+    }
+    impl.syncMixer(impl.manager.update(elapsed));
+}
+
+std::uint32_t System::playUi(std::string_view name) {
+    if (!impl_->started) {
+        return 0;
+    }
+    Request request;
+    request.track = soundKey(name);
+    request.event = request.track;
+    request.group = Group::Ui;
+    return impl_->startTrack(request, name);
+}
+
+std::uint32_t System::playUiId(std::uint32_t id) {
+    if (!impl_->started || id == 0) {
+        return 0;
+    }
+    Request request;
+    request.track = {id, 0};
+    request.event = request.track;
+    request.group = Group::Ui;
+    return impl_->startTrack(request, "UI sound " + std::to_string(id));
+}
+
+void System::stop(std::uint32_t id) {
+    impl_->manager.stop(id);
 }
 
 double System::playName(std::string_view name) {
-    if (impl_->installing.valid()) {
-        impl_->installing.wait();
+    while (!impl_->started && (impl_->loader.joinable() || impl_->loaded)) {
+        update();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    if (!impl_->openDevice()) {
-        return 0;
+    const std::uint32_t id = playUi(name);
+    double seconds = 0;
+    // A loop plays for 10 s, then stops.
+    const auto until = now() + std::chrono::seconds(10);
+    while (id != 0 && impl_->manager.find(id) != nullptr && now() < until) {
+        update();
+        if (const auto* instance = impl_->manager.find(id); instance != nullptr && instance->lengthMs > 0) {
+            seconds = instance->lengthMs / 1000;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    const std::string resolved = resolve(name, Context{});
-    if (resolved.empty()) {
-        ts2::diag::warning("audio: no track named " + std::string(name));
-        return 0;
-    }
-    return impl_->playResolved(resolved, name, 0);
-}
-
-bool System::playUi(std::string_view name) {
-    if (!impl_->ready) {
-        return false;
-    }
-    const std::string resolved = resolve(name, Context{});
-    if (resolved.empty()) {
-        return false;
-    }
-    return impl_->playResolved(resolved, name, 0, std::nullopt, true) > 0;
+    stop(id);
+    update();
+    return seconds;
 }
 
 } // namespace ts2::audio

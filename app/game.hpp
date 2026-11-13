@@ -92,6 +92,7 @@ private:
         ts2::render::IRenderer::Prepared gpu;
         app::NeighborhoodTimes times;  // its look by day and by night
         std::unique_ptr<ts2::content::EffectsFiles> effects;  // what its decorations play
+        std::optional<std::int32_t> id;                        // its neighborhood id
     };
 
     // What the ground around a lot is built from, kept so that a new View Distance can build it again
@@ -256,15 +257,17 @@ private:
     void leaveFor(std::optional<std::size_t> hood);
     std::optional<std::size_t> leaveTo_;  // where the open leave question goes on Yes or No
     std::size_t openHood_ = 0;            // the neighborhood shown, as an index into hoods_
+    // The ids of the neighborhood shown and of the one shown before it, as the game keeps them for
+    // global 0x2B. -1 until a neighborhood shows.
+    std::int16_t currentHoodId_ = -1;
+    std::int16_t lastHoodId_ = -1;
     app::LotUi::Action lotKey(const ts2::platform::Event& e);
     void lotAction(app::LotUi::Action action);
     void trackSim(std::int16_t sim);
     bool centreOnSim(std::int16_t sim);
     void showSimStorey(const ts2::sim::SimObject& object);
     void followSimStorey();
-    std::optional<ts2::render::Vec3> simRoot(std::int16_t sim) const;
-    // A lot object's place from the scene, for sounds from objects that are not Sims.
-    std::optional<ts2::render::Vec3> objectRoot(std::int16_t object) const;
+    std::optional<ts2::render::Vec3> simRoot(std::int16_t sim, const char* joint = "root_trans") const;
     bool openGroundMenu(float x, float y);
     void toggleFreeCamera();
     std::function<float(float, float, std::array<float, 4>&, unsigned&)> hoodFreeGround() const;
@@ -282,13 +285,22 @@ private:
     void puckCamera();
     void toggleNight();
     void startLotLife();
-    // The app's one sound system: made on the first sound or --play-sound, then kept.
+    // The app's one sound system: made with the menu, its packages indexed beside it.
     void ensureAudio();
     void onSoundEvent(const ts2::sim::SoundEvent& event);
-    // Plays the click a UI window names, or the primary click, when the audio is up.
-    void playUiClick(int window);
-    // The click a live-mode key shortcut stands for (pause, speed, floor, walls, options).
-    void playUiAction(app::LotUi::Action action);
+    // An animation's sound mark on an object. Hidden objects make no sound.
+    void onAnimationSound(std::int16_t object, const std::string& name);
+    // Where an object's sounds play from: a Sim's root_rot joint, else the object's own place at
+    // its storey's floor height. None for an object not on the lot.
+    std::optional<ts2::audio::Vec3> soundPlace(std::int16_t object) const;
+    // The press sound a UI button names (btnclicksnd). A button that names none is silent.
+    void playPressSound(int window);
+    // The sound a live-mode key plays: only the pause and speed keys make one.
+    void playKeySound(app::LotUi::Action action, bool wasPaused);
+    // The puck's zoom buttons play once when pressed, its turn buttons loop while held.
+    void playPuckSounds(bool zoomIn, bool zoomOut, bool turning);
+    // Once a frame: the listener, pause and speed from the lot, then the sound system's update.
+    void updateAudio();
     void drawHousehold(std::uint64_t now);
     void sendLotChanges();
     // The lot's instances shown this frame: those its view shows, less the neighborhood's
@@ -364,6 +376,9 @@ private:
     const std::filesystem::path install_;
     const MenuOptions& options_;
     std::unique_ptr<ts2::audio::System> audio_;
+    // The puck buttons held at the last frame, and the turn loop playing (0 none).
+    bool puckZoomIn_ = false, puckZoomOut_ = false;
+    std::uint32_t puckTurnSound_ = 0;
     int width_, height_;  // the window's, which the scene is drawn and picked at
     // The UI is laid out in pixels of its own, uiScale_ window pixels each, so it fills a screen
     // uiWidth_ x uiHeight_ of them (see MenuOptions::uiScale).

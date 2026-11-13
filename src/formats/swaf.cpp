@@ -151,6 +151,10 @@ void writeWant(BinaryWriter& w, const Want& want) {
         break;
     case 1:
     case 4:
+        // These wants keep a 16-bit argument, and a larger one would read back as another value.
+        if (want.argument < INT16_MIN || want.argument > INT16_MAX) {
+            throw std::runtime_error("SWAF: a want's argument does not fit its 16 bits");
+        }
         w.u16(static_cast<std::uint16_t>(want.argument));
         break;
     case 2:

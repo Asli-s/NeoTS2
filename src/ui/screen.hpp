@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -117,8 +118,10 @@ public:
     int y(int window) const;
     // A window's caption (its text).
     const std::string& text(int window) const;
-    // The UI sound the window's script names for a click (btnclicksnd), empty when it names none.
-    std::string clickSound(int window) const;
+    // The track id of the sound the window's script names for a press (btnclicksnd), 0 for none.
+    std::uint32_t clickSound(int window) const;
+    // Called with the button the mouse presses down on, as the game plays a button's press sound then.
+    void setPressHandler(std::function<void(int window)> handler) { onPress_ = std::move(handler); }
     // The texts of a window's children (a script's table of constants, written as captions).
     std::vector<std::string> childTexts(int window) const;
     int width(int window) const;
@@ -197,8 +200,7 @@ private:
         bool checkBox = false;           // a check box or radio button (style=checkbox, radiobtn or radiocheck)
         bool radioCheck = false;         // a radio button drawn from an 8-frame picture (style=radiocheck)
         std::string text, font;
-        // The UI sound a click on it plays (btnclicksnd), empty when the script names none.
-        std::string clickSound;
+        std::uint32_t clickSound = 0;  // btnclicksnd's track id
         HAlign hAlign = HAlign::Left;  // the text's place in the window (align)
         VAlign vAlign = VAlign::Top;
         std::array<float, 4> textColor{1, 1, 1, 1};
@@ -281,6 +283,7 @@ private:
     std::map<std::uint64_t, int> images_;  // texture by image key
     std::map<std::uint64_t, int> keyedImages_;  // the same with their magenta made transparent
     int pressed_ = -1;
+    std::function<void(int window)> onPress_;
     int modal_ = -1;
     std::array<int, 2> size_{0, 0};
     int hover_ = -1;          // the button with a tip, or else the window with a tip, the mouse is over

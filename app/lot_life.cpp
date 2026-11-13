@@ -236,9 +236,10 @@ void LotLife::OwnAnimations::noteStarts(const ts2::sim::SimObject& object, const
 }
 
 std::unique_ptr<ts2::sim::LotSimulation> loadSimulation(const std::filesystem::path& install, const std::filesystem::path& lot,
-                                                        std::optional<std::uint32_t> seed) {
+                                                        std::optional<std::uint32_t> seed,
+                                                        std::optional<std::int16_t> lastNeighborhood) {
     try {
-        return std::make_unique<ts2::sim::LotSimulation>(install, lot, nullptr, seed);
+        return std::make_unique<ts2::sim::LotSimulation>(install, lot, nullptr, seed, lastNeighborhood);
     } catch (const std::exception& ex) {
         ts2::diag::error(std::string("the lot's Sims won't come to life: ") + ex.what());
         return nullptr;

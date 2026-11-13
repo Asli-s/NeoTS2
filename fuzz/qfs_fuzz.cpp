@@ -10,6 +10,9 @@
 // Any bytes compress and unpack to themselves, and any compressed stream that unpacks does so again
 // after it is compressed anew.
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size) {
+    if (size > ts2::qfs::kMaxInput) {
+        return 0;
+    }
     const std::span<const std::uint8_t> input(data, size);
     if (ts2::qfs::decompress(ts2::qfs::compress(input)) != std::vector<std::uint8_t>(input.begin(), input.end())) {
         std::abort();

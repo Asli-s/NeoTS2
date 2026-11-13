@@ -33,7 +33,8 @@ namespace app {
 
 // A lot's simulation, or null (saying why) when it can't be built.
 std::unique_ptr<ts2::sim::LotSimulation> loadSimulation(const std::filesystem::path& install, const std::filesystem::path& lot,
-                                                        std::optional<std::uint32_t> seed = std::nullopt);
+                                                        std::optional<std::uint32_t> seed = std::nullopt,
+                                                        std::optional<std::int16_t> lastNeighborhood = std::nullopt);
 
 // A lot's Sims driven by their own scripts: the lot's simulation, run in step with real time, and
 // each Sim's actor playing the animation its scripts started last (its idle loop until then).

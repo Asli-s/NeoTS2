@@ -440,6 +440,9 @@ struct SaveCheck {
 // empty when none applies, and sets `same` when the bytes match or `skipped` for an unhandled version.
 // Wants records that read but keep bytes after their history, counted apart.
 std::size_t leftOverRecords = 0;
+// Sims read at their lot's version whose saved interactions did not read, and all Sims read.
+std::size_t unreadSimStates = 0;
+std::size_t readSims = 0;
 
 std::string checkRecord(std::uint32_t type, std::span<const std::uint8_t> body, std::uint32_t lotVersion, bool& same, bool& skipped) {
     // Saved objects take their layout from the lot's version in its object map.
@@ -451,6 +454,17 @@ std::string checkRecord(std::uint32_t type, std::span<const std::uint8_t> body, 
             continue;
         }
         skipped = lotVersion != ts2::xobj::kWrittenVersion;
+        if (kind == ts2::xobj::RecordKind::Person) {
+            try {
+                const auto person = ts2::xobj::parse(body, lotVersion, kind);
+                ++readSims;
+                if (person.person && person.person->stateUnread) {
+                    ++unreadSimStates;
+                    std::printf("  a Sim's saved interactions did not read (lot version 0x%X)\n", lotVersion);
+                }
+            } catch (const std::exception&) {
+            }
+        }
         if (!skipped) {
             try {
                 const auto object = ts2::xobj::parse(body, lotVersion, kind);
@@ -897,6 +911,7 @@ int saveCheck(const std::filesystem::path& root, const std::filesystem::path& pr
                     counts[0], counts[1], counts[2], counts[3]);
         recordsSame = recordsSame && counts[1] == 0;
     }
+    std::printf("%zu of %zu Sims read with saved interactions that did not read\n", unreadSimStates, readSims);
     if (leftOverRecords != 0) {
         std::printf("%zu wants records keep bytes after their history (counted as other versions)\n", leftOverRecords);
     }

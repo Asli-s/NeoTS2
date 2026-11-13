@@ -85,8 +85,11 @@ Pcm decodeXa(std::span<const std::uint8_t> data) {
 
     const std::size_t blockBytes = kBlockBytes * channels;
     const std::size_t body = data.size() - kHeaderSize;
-    const std::size_t blocks = (body + blockBytes - 1) / blockBytes;
     const std::size_t wanted = pcmBytes / 2;  // samples over all channels
+    // Blocks past the header's size are not decoded, so a long body cannot ask for more memory
+    // than the header's own limit allows.
+    const std::size_t blockSamples = kBlockSamples * channels;
+    const std::size_t blocks = std::min((body + blockBytes - 1) / blockBytes, (wanted + blockSamples - 1) / blockSamples);
 
     Pcm pcm;
     pcm.sampleRate = sampleRate;
@@ -109,7 +112,7 @@ Pcm decodeXa(std::span<const std::uint8_t> data) {
         }
     }
 
-    // The header's size is what the game plays; the last block may carry more.
+    // The header's size is what the game plays. The last block may carry more.
     if (wanted < pcm.samples.size()) {
         pcm.samples.resize(wanted - wanted % channels);
     }

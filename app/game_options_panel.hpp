@@ -56,6 +56,9 @@ public:
         float fadeSquared = 50.0f * 50.0f;
     };
     LotView lotView() const;
+    // The sound quality's AudioPerformance (0 low, 1 medium, 2 high): the saved setting through
+    // Graphics Rules, else globalProps.xml's value, else medium.
+    int audioPerformance() const;
     // A saved true or false setting, else globalProps.xml's, else `fallback`.
     bool flag(const std::string& key, bool fallback) const;
 

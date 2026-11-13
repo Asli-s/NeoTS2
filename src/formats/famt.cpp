@@ -43,10 +43,16 @@ FamilyTies parse(std::span<const std::uint8_t> data) {
 std::vector<std::uint8_t> write(const FamilyTies& ties) {
     BinaryWriter w;
     w.u32(kWrittenVersion);
+    if (ties.sims.size() > kMaxCount) {
+        throw std::runtime_error("FAMT: more Sims than a family ties record can hold");
+    }
     w.count(ties.sims.size());
     for (const SimTies& s : ties.sims) {
         w.u16(static_cast<std::uint16_t>(s.sim));
         w.u32(s.value);
+        if (s.ties.size() > kMaxCount) {
+            throw std::runtime_error("FAMT: more ties than a family ties record can hold");
+        }
         w.count(s.ties.size());
         for (const Tie& t : s.ties) {
             w.u32(t.type);

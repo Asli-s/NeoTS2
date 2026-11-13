@@ -291,6 +291,17 @@ bool GameOptionsPanel::takeChanged() {
     return changed;
 }
 
+int GameOptionsPanel::audioPerformance() const {
+    const ts2::content::UserProps saved{saved_};
+    std::optional<std::string> value = ts2::content::savedOptionProp(saved, graphicsRules_, "SoundQuality", "AudioPerformance");
+    if (!value) {
+        if (const auto it = defaults_.find("AudioPerformance"); it != defaults_.end()) {
+            value = it->second;
+        }
+    }
+    return value ? std::clamp(std::atoi(value->c_str()), 0, 2) : 1;
+}
+
 GameOptionsPanel::LotView GameOptionsPanel::lotView() const {
     // The game sets these properties from the options' saved settings through Graphics Rules, and
     // without a saved setting globalProps.xml's values stand.

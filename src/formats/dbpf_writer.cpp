@@ -236,6 +236,15 @@ PackageImage readImage(std::span<const std::uint8_t> file) {
     const std::vector<IndexEntry>& entries = package.entries();
     std::vector<std::size_t> resourceOf(entries.size(), 0);
     bool haveDirectory = false;
+    // Every resource's bytes are kept, so resources sharing bytes could ask for far more memory than
+    // the file holds. A package the game writes never shares them.
+    std::uint64_t kept = 0;
+    for (const IndexEntry& entry : entries) {
+        kept += entry.size;
+    }
+    if (kept > file.size()) {
+        fail("resources share bytes");
+    }
     for (std::size_t i = 0; i < entries.size(); ++i) {
         const IndexEntry& entry = entries[i];
         if (entry.key.type == types::kDirectory) {

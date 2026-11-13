@@ -83,7 +83,8 @@ std::shared_ptr<LuaRuntime> loadScripts(const std::filesystem::path& install, Co
 } // namespace
 
 LotSimulation::LotSimulation(const std::filesystem::path& install, const std::filesystem::path& lot,
-                             std::function<void(const StepInfo&)> onLoadStep, std::optional<std::uint32_t> seed)
+                             std::function<void(const StepInfo&)> onLoadStep, std::optional<std::uint32_t> seed,
+                             std::optional<std::int16_t> lastNeighborhood)
     : index_(loadCode(install, lot)), code_(index_), vm_(code_, {kMaxStepsPerRun, 64}, &world_),
       installedPacks_(content::installedPacksMask(content::findProducts(install))), motiveUpdate_(code_, installedPacks_) {
     vm_.onInteractionStart = [this](const SimObject& sim, const QueuedInteraction& started) { logInteractionStart(sim, started); };
@@ -196,6 +197,10 @@ LotSimulation::LotSimulation(const std::filesystem::path& install, const std::fi
     // A lot saved without a random state starts from the clock, as the game seeds its generator.
     vm_.rng.seed(saved.randomState ? *saved.randomState : seed ? *seed : clockSeed());
     updateTimeOfDay(vm_.globals);
+    constexpr std::size_t kLastNeighborhoodGlobal = 0x2B;
+    if (lastNeighborhood && kLastNeighborhoodGlobal < vm_.globals.size()) {
+        vm_.globals[kLastNeighborhoodGlobal] = *lastNeighborhood;
+    }
     const auto hood = content::neighborhoodPackage(content::neighborhoodOfLot(lot));
     if (std::filesystem::exists(hood)) {
         const content::Neighborhood loaded = content::loadNeighborhood(hood);

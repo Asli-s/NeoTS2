@@ -12,26 +12,26 @@ System::System() : impl_(std::make_unique<Impl>()) {}
 System::~System() = default;
 
 void System::addInstall(const std::filesystem::path&) {
-    ts2::diag::warnOnce("this build has no audio: sounds are silent (audio needs SDL 3)");
+    diag::warnOnce("this build has no audio: sounds are silent (audio needs SDL 3)");
 }
 
-void System::play(std::string_view, std::int16_t, bool, const Context&, std::optional<std::array<float, 3>>) {}
+bool System::ready() const { return false; }
+void System::setPerformanceLevel(int) {}
+void System::play(const Event&) {}
+void System::stopObject(std::int16_t) {}
 void System::stopAll() {}
-void System::stopSource(std::int16_t) {}
 void System::setPaused(bool) {}
-void System::pruneSources(const std::function<bool(std::int16_t)>&) {}
-void System::updatePositions(const std::function<std::optional<std::array<float, 3>>(std::int16_t)>&) {}
-void System::setListener(std::array<float, 3>, std::array<float, 3>) {}
+void System::setSpeed(int) {}
+void System::setListener(const Vec3&, const Vec3&, const Vec3&) {}
+void System::updatePositions(const std::function<std::optional<Vec3>(std::int16_t)>&) {}
+void System::update() {}
+std::uint32_t System::playUi(std::string_view) { return 0; }
+std::uint32_t System::playUiId(std::uint32_t) { return 0; }
+void System::stop(std::uint32_t) {}
 
 double System::playName(std::string_view) {
-    ts2::diag::warnOnce("this build has no audio: sounds are silent (audio needs SDL 3)");
+    diag::warnOnce("this build has no audio: sounds are silent (audio needs SDL 3)");
     return 0;
-}
-
-bool System::playUi(std::string_view) { return false; }
-
-std::string System::resolve(std::string_view, const Context&) {
-    return {};
 }
 
 } // namespace ts2::audio

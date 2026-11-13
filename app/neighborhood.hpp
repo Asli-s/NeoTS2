@@ -42,6 +42,9 @@ struct NeighborhoodTimes {
 // always sets. Snow and weather bits stay clear.
 std::uint32_t neighborhoodEffectState(bool night);
 
+// A neighborhood's id from its identity record, none when it can't be read.
+std::optional<std::int32_t> neighborhoodId(const std::filesystem::path& folder);
+
 // Adds a neighborhood (its folder in the user's Neighborhoods) to the scene with the install's paint
 // rules, lighting, road materials, imposter lift and object catalog, and its decorations' ground decals.
 // `variantSeed` fixes the ground's texture variants and decal picks. It is lit by day or night as saved,
