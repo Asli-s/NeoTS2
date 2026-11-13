@@ -82,6 +82,8 @@ private:
     // The terrain and the floors (lot_scene_floors.cpp).
     void drawTerrain();
     void drawFloors();
+    // The slab under each floored quarter tile above the ground (its ceiling and edge bands).
+    void drawFloorSlabs(const array3d::Array3D& floors, int ground, const array3d::Array3D* surface);
 
     // Pool and pond water (lot_scene_water.cpp).
     std::array<float, 6> poolBox(const std::vector<poolwater::Quarter>& quarters, int ground);

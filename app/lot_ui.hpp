@@ -1,5 +1,6 @@
 #pragma once
 
+#include "build_panel.hpp"
 #include "buy_panel.hpp"
 #include "game_options_panel.hpp"
 #include "graphics_options_panel.hpp"
@@ -96,7 +97,7 @@ public:
     void hideForFreeCamera(bool hide);
 
     // What a released button asks for.
-    enum class Action { None, Neighborhood, Quit, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, GameOptionChanged, GraphicsOptionChanged, RewardsOpened, RewardsClosed, SelectSim, TrackSim, CentreOnNeighbor, CloseNotification, FloorUp, FloorDown, WallMode, ToggleCeiling, MainMenu, BuyOpened, BuyClosed, BuyItem, BuildOpened, BuildClosed, StoryOpened, StoryClosed };
+    enum class Action { None, Neighborhood, Quit, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, GameOptionChanged, GraphicsOptionChanged, RewardsOpened, RewardsClosed, SelectSim, TrackSim, CentreOnNeighbor, CloseNotification, FloorUp, FloorDown, WallMode, ToggleCeiling, MainMenu, BuyOpened, BuyClosed, BuyItem, BuildOpened, BuildClosed, BuildItem, BuildHand, StoryOpened, StoryClosed };
     Action clicked(int window);
     // The puck's camera button held down under the mouse.
     enum class CameraButton { None, RotateLeft, RotateRight, ZoomIn, ZoomOut };
@@ -138,9 +139,13 @@ public:
     bool modeOpenedFromOptions() const { return modeFromOptions_; }
     void setModeOpenedFromOptions(bool from) { modeFromOptions_ = from; }
     // Shows or hides the Build mode panel, as the puck's Build button and F3 open it and its Live
-    // button and F1 close it. Its tools aren't built yet, so they are greyed.
+    // button and F1 close it. Of its tools only the floors are built; the others are greyed.
     void showBuild(bool show);
     bool buildShown() const;
+    // The floor a click on the Build catalog picked (for BuildItem), by GUID.
+    std::uint32_t pickedFloor() const { return pickedFloor_; }
+    // Shows the Build catalog's page (its floors' pictures) for the lot.
+    void refreshBuild(LotLife& life);
     // Shows or hides Story mode's story editor, as the puck's Story button and F4 open it and its
     // close button, the puck's Live button and F1 close it. Albums aren't read yet: it shows none.
     void showStory(bool show);
@@ -186,8 +191,7 @@ private:
     void hideModesBut(int keep);
     // The mode panel showing, -1 when none.
     int shownMode() const;
-    // Sets up the Build panel and the story editor with only what works yet usable.
-    void setUpBuildPanel();
+    // Sets up the story editor with only what works yet usable.
     void setUpStoryPanel();
     // Keeps the story editor in the middle of the screen.
     void centreStory();
@@ -225,6 +229,9 @@ private:
     bool testingCheats_ = false;
     int puck_ = -1, live_ = -1, options_ = -1, buy_ = -1, build_ = -1, story_ = -1;
     BuyPanel buyPanel_;
+    BuildPanel buildPanel_;
+    std::uint32_t pickedFloor_ = 0;
+    std::map<std::uint32_t, std::optional<ts2::tga::Pixels>> floorPictures_;  // by floor GUID, made once
     std::uint32_t pickedBuyItem_ = 0;
     bool modeFromOptions_ = false;
     int modeWasShown_ = -1;  // the mode's panel shown before the free camera hid the panels, -1: none

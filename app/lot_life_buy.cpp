@@ -11,6 +11,8 @@
 #include <cmath>
 #include <format>
 #include <iterator>
+#include <limits>
+#include <memory>
 
 namespace app {
 
@@ -326,6 +328,20 @@ void LotLife::removeObject(std::int16_t object) {
 void LotLife::addFunds(std::int32_t amount) {
     auto globals = sim_->globals();
     ts2::sim::setFunds(globals, static_cast<std::int64_t>(ts2::sim::funds(globals)) + amount);
+}
+
+void LotLife::setFloors(const ts2::array3d::Array3D& floors, int ground) {
+    // As the simulation was given the saved floors (see LotSimulation): a copy of its own.
+    sim_->world().setFloorPattern([grid = std::make_shared<const ts2::array3d::Array3D>(floors), ground](int level, int x, int y,
+                                                                                                         int quarter) -> std::optional<std::uint16_t> {
+        constexpr int kQuarters = 4;
+        const auto index = static_cast<std::int64_t>(level) + ground;
+        if (quarter < 0 || quarter >= kQuarters || index < 0 || index > std::numeric_limits<std::int32_t>::max() ||
+            !grid->contains(static_cast<std::int32_t>(index), x, y)) {
+            return std::nullopt;
+        }
+        return static_cast<std::uint16_t>(grid->i16(static_cast<std::int32_t>(index), x, y, static_cast<std::size_t>(quarter)));
+    });
 }
 
 } // namespace app

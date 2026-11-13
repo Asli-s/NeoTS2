@@ -128,6 +128,20 @@ public:
     // scripts, or a catalog pattern by its GUID in hex.
     std::string patternMaterial(const std::string& name, bool wall) const;
 
+    // A floor or wall covering the Build mode catalog sells (a pattern properties entry of the
+    // Catalog/Patterns packages): its GUID, English name and description, price per tile, sub-sort
+    // (lowercase: for floors brick, carpet, lino, other, poured, stone, tile or wood) and material.
+    struct CatalogPattern {
+        std::uint32_t guid = 0;
+        std::string name, description;
+        std::int32_t price = 0;
+        std::string subsort, material;
+    };
+    // The catalog's floors, cheapest first.
+    const std::vector<CatalogPattern>& floorCatalog() const { return floorCatalog_; }
+    // A material's base texture (stdMatBaseTextureName), empty when it has none or can't be read.
+    std::string materialTexture(const std::string& material);
+
     // A fence's models: one tile of rail along +x, the same diagonally (1.41 long), and a post, and
     // whether Sims may walk over it (flowerbed edging). A half wall (XFNC ishalfwall) also has a
     // painted wall under its rail, and its models sit on top of that wall.
@@ -172,6 +186,7 @@ private:
     content::Lighting lighting_;
     terrainwater::AlphaCurve waterAlphaCurve_;
     std::map<std::uint32_t, std::string> patternsByGuid_;
+    std::vector<CatalogPattern> floorCatalog_;
     std::map<std::uint32_t, Fence> fences_;
     std::map<std::uint32_t, RoofPattern> roofPatterns_;
     // Object types by GUID: their group and SLOT instance, read on first use.

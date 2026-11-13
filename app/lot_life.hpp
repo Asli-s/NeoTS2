@@ -66,6 +66,7 @@ public:
     // The Sim clock as the live panel shows it, and the household's funds.
     std::string clockText() { return ts2::sim::clockText(sim_->globals()); }
     std::int32_t funds() { return ts2::sim::funds(sim_->globals()); }
+    ts2::scene::Assets& assets() { return assets_; }
     // The selected Sim's Aspiration person data (0 when no Sim is selected).
     std::int16_t aspiration();
     // The selected Sim's object id (0: none), and picking another Sim.
@@ -258,6 +259,10 @@ public:
     void removeObject(std::int16_t object);
     // Adds to the household's funds (less for a negative amount).
     void addFunds(std::int32_t amount);
+    // Build mode: the scene material of a floor pattern, and the floors the simulation sees (its
+    // scripts read floor patterns) after Build mode changed them: grid level `ground` is storey 1.
+    int floorMaterial(const std::string& pattern, ts2::scene::Scene& scene) { return objectMaterials_.floorMaterial(pattern, scene); }
+    void setFloors(const ts2::array3d::Array3D& floors, int ground);
     // An interaction as the queue shows it, and what its icon pictures: picture `index` of the
     // object type `guid` (0: its usual one) or, when `neighbor` is set, that Sim.
     struct QueuedAction {

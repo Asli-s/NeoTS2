@@ -48,6 +48,10 @@ public:
     // Where a named node of a model sits in it, once model() has added it. Null for none.
     const ts2::scene::Transform* bone(const std::string& model, const std::string& node) const { return builder_.bone(model, node); }
 
+    // The scene material of a lot floor pattern (a name from the lot's pattern list), added from the
+    // game's files on first use. -1 when the game has no such material.
+    int floorMaterial(const std::string& pattern, ts2::scene::Scene& scene) { return material(assets_.patternMaterial(pattern, false), scene); }
+
     // Looks for objects whose materials changed since the last update.
     void update(ts2::sim::World& world, ts2::scene::Scene& scene);
     // The next update sends the object's materials again if scripts changed them (its instance got

@@ -1,0 +1,248 @@
+#include "build_panel.hpp"
+
+#include "content/ui_meters.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cstdlib>
+
+namespace app {
+
+namespace {
+
+constexpr std::uint32_t kScripts = 0xA99D8A11, kImages = 0x499DB772;
+// The tools: the hand (lit), the Build Mode tab (lit), and the others (not done).
+constexpr std::uint32_t kHand = 0x000000A5, kBuildTab = 0x000000A6;
+constexpr std::array<std::uint32_t, 8> kToolsNotDone = {0xA1, 0xA2, 0xA3, 0xA4, 0xAA, 0xAB, 0xAE, 0xAF};
+// The category buttons' group, the Floors button, and its sub-category panel with Back.
+constexpr std::uint32_t kCategories = 0x0000A000, kFloors = 0x0000A400, kFloorSorts = 0x0000B400, kBack = 0x0000B410;
+// The floor sub-category buttons and the catalog's sub-sorts.
+struct SortButton {
+    std::uint32_t id;
+    const char* subsort;
+};
+constexpr std::array<SortButton, 8> kFloorButtons = {{{0xB420, "stone"},
+                                                      {0xB430, "brick"},
+                                                      {0xB440, "wood"},
+                                                      {0xB450, "carpet"},
+                                                      {0xB460, "tile"},
+                                                      {0xB470, "lino"},
+                                                      {0xB480, "poured"},
+                                                      {0xB490, "other"}}};
+constexpr std::uint32_t kAllFloors = 0xB4A0;
+// The catalog and the auto roof options beside the panel; in the catalog its normal view (the
+// others aren't done), and there the item area, its mark, the page buttons, scrollbar, Expand,
+// Organize Items and the custom content buttons. The catalog's info text.
+constexpr std::uint32_t kCatalog = 0xAD502BBF, kAutoRoofOptions = 0x000000AC;
+constexpr std::uint32_t kNormal = 0x1000, kExpanded = 0x2000, kWholesale = 0x3300, kWholesaleExpanded = 0x5500, kInfo = 0x4000;
+constexpr std::uint32_t kArea = 0x1006, kAreaMark = 0x1007, kPrevious = 0x1004, kNext = 0x1005, kScrollbar = 0x1008, kExpand = 0x1009,
+                        kCustomContent = 0x100A, kOrganize = 0x3001;
+// A catalog item, as in Buy mode: the game's thumbnail made smaller, four across and two down.
+constexpr std::uint32_t kThumbnail = 0xFEEDEABE, kThumbBackground = 0xA001, kThumbPicture = 0xA002, kThumbOverlay = 0xA003;
+constexpr std::uint32_t kThumbMask = 0x000B0357;
+constexpr int kColumns = 4, kRows = 2, kItemSide = 44, kPictureInset = 3;
+
+// "§1,234".
+std::string priceText(std::int32_t price) {
+    std::string digits = std::to_string(std::abs(static_cast<long long>(price)));
+    for (int i = static_cast<int>(digits.size()) - 3; i > 0; i -= 3) {
+        digits.insert(static_cast<std::size_t>(i), ",");
+    }
+    return "\xC2\xA7" + digits;
+}
+
+} // namespace
+
+void BuildPanel::attach(ts2::ui::Screen& screen, int content) {
+    screen_ = &screen;
+    content_ = content;
+    if (content < 0) {
+        return;
+    }
+    auto& s = screen;
+    s.setVisible(s.find(content, kAutoRoofOptions), false);
+    s.setChecked(s.find(content, kHand), true);
+    s.setChecked(s.find(content, kBuildTab), true);
+    for (const std::uint32_t id : kToolsNotDone) {
+        s.setEnabled(s.find(content, id), false);
+    }
+    // Of the categories only Floors is done.
+    categories_ = s.find(content, kCategories);
+    if (categories_ >= 0) {
+        for (const int category : s.children(categories_)) {
+            s.setEnabled(category, s.id(category) == kFloors);
+        }
+    }
+    floorSorts_ = s.find(content, kFloorSorts);
+    catalog_ = s.find(content, kCatalog);
+    for (const std::uint32_t id : {kExpanded, kWholesale, kWholesaleExpanded, kInfo}) {
+        s.setVisible(s.find(catalog_, id), false);
+    }
+    const int normal = s.find(catalog_, kNormal);
+    s.setVisible(normal, true);
+    area_ = s.find(normal, kArea);
+    s.setVisible(area_, true);
+    s.setVisible(s.find(normal, kAreaMark), false);
+    s.setVisible(s.find(normal, kScrollbar), false);
+    s.setVisible(s.find(normal, kCustomContent), false);
+    s.setEnabled(s.find(normal, kOrganize), false);
+    s.setEnabled(s.find(normal, kExpand), false);
+    previous_ = s.find(normal, kPrevious);
+    next_ = s.find(normal, kNext);
+    mask_ = s.data().image(kImages, kThumbMask).value_or(ts2::tga::Pixels{});
+    if (area_ >= 0) {
+        const int cellWidth = s.width(area_) / kColumns, cellHeight = s.height(area_) / kRows;
+        for (int i = 0; i < kColumns * kRows; ++i) {
+            const int x = (i % kColumns) * cellWidth + (cellWidth - kItemSide) / 2;
+            const int y = (i / kColumns) * cellHeight + (cellHeight - kItemSide) / 2;
+            const int slot = s.load(kScripts, kThumbnail, x, y, area_);
+            if (slot < 0) {
+                break;
+            }
+            s.resize(slot, kItemSide, kItemSide);
+            for (const std::uint32_t id : {kThumbBackground, kThumbOverlay}) {
+                const int part = s.find(slot, id);
+                s.move(part, 0, 0);
+                s.resize(part, kItemSide, kItemSide);
+            }
+            const int picture = s.find(slot, kThumbPicture);
+            s.move(picture, kPictureInset, kPictureInset);
+            s.resize(picture, kItemSide - 2 * kPictureInset, kItemSide - 2 * kPictureInset);
+            s.setVisible(slot, false);
+            slots_.push_back(slot);
+            slotGuids_.push_back(0);
+        }
+    }
+    reset();
+}
+
+void BuildPanel::reset() {
+    floors_ = false;
+    subsortButton_ = 0;
+    page_ = 0;
+    dirty_ = true;
+    if (screen_ != nullptr && content_ >= 0) {
+        showView();
+    }
+}
+
+void BuildPanel::showView() {
+    auto& s = *screen_;
+    // The categories until Floors is chosen, then its sub-categories and the catalog.
+    s.setVisible(categories_, !floors_);
+    s.setVisible(floorSorts_, floors_);
+    s.setVisible(catalog_, floors_);
+    for (const auto& b : kFloorButtons) {
+        s.setChecked(s.find(floorSorts_, b.id), floors_ && subsortButton_ == b.id);
+    }
+    s.setChecked(s.find(floorSorts_, kAllFloors), floors_ && subsortButton_ == 0);
+}
+
+std::string BuildPanel::floorSubsort(std::uint32_t button) {
+    const auto it = std::find_if(kFloorButtons.begin(), kFloorButtons.end(), [&](const SortButton& b) { return b.id == button; });
+    return it != kFloorButtons.end() ? it->subsort : std::string();
+}
+
+std::vector<BuildPanel::Floor> BuildPanel::listed(const std::vector<Floor>& all, const std::string& subsort) {
+    std::vector<Floor> out;
+    for (const auto& floor : all) {
+        if (subsort.empty() || floor.subsort == subsort) {
+            out.push_back(floor);
+        }
+    }
+    return out;
+}
+
+BuildPanel::Click BuildPanel::clicked(int window) {
+    Click out;
+    if (screen_ == nullptr || content_ < 0) {
+        return out;
+    }
+    auto& s = *screen_;
+    bool inside = false;
+    for (int w = window; w >= 0 && !inside; w = s.parent(w)) {
+        inside = w == content_;
+    }
+    if (!inside) {
+        return out;
+    }
+    out.panel = true;
+    for (std::size_t i = 0; i < slots_.size(); ++i) {
+        for (int w = window; w >= 0; w = s.parent(w)) {
+            if (w == slots_[i]) {
+                if (slotGuids_[i] != 0) {
+                    out.floor = slotGuids_[i];
+                }
+                return out;
+            }
+        }
+    }
+    const std::uint32_t id = s.id(window);
+    if (id == kHand) {
+        s.setChecked(window, true);
+        out.hand = true;
+        return out;
+    }
+    if (id == kFloors && s.parent(window) == categories_) {
+        floors_ = true;
+        subsortButton_ = 0;
+        page_ = 0;
+    } else if (id == kBack && s.parent(window) == floorSorts_) {
+        floors_ = false;
+        page_ = 0;
+    } else if (s.parent(window) == floorSorts_ && (id == kAllFloors || !floorSubsort(id).empty())) {
+        subsortButton_ = id == kAllFloors || subsortButton_ == id ? 0 : id;  // clicked again, all show
+        page_ = 0;
+    } else if (window == previous_) {
+        page_ = std::max(0, page_ - 1);
+    } else if (window == next_) {
+        ++page_;
+    } else {
+        return out;
+    }
+    dirty_ = true;
+    showView();
+    return out;
+}
+
+void BuildPanel::refresh(const Source& source) {
+    if (screen_ == nullptr || content_ < 0 || source.floors == nullptr || !floors_) {
+        return;
+    }
+    if (dirty_) {
+        listed_ = listed(*source.floors, floorSubsort(subsortButton_));
+    }
+    auto& s = *screen_;
+    const std::size_t pageSize = std::max<std::size_t>(1, slots_.size());
+    std::size_t first = static_cast<std::size_t>(page_) * pageSize;
+    while (first != 0 && first >= listed_.size()) {
+        --page_;
+        first -= pageSize;
+    }
+    for (std::size_t i = 0; i < slots_.size(); ++i) {
+        const bool shown = first + i < listed_.size();
+        s.setVisible(slots_[i], shown);
+        if (!shown) {
+            slotGuids_[i] = 0;
+            continue;
+        }
+        const auto& floor = listed_[first + i];
+        const int picture = s.find(slots_[i], kThumbPicture);
+        if (slotGuids_[i] != floor.guid || !s.visible(picture)) {
+            const ts2::tga::Pixels* pixels = source.picture ? source.picture(floor) : nullptr;
+            s.setVisible(picture, pixels != nullptr);
+            if (pixels != nullptr) {
+                s.setImage(picture, mask_.width > 0 ? ts2::content::masked(*pixels, mask_) : *pixels);
+            }
+        }
+        if (slotGuids_[i] != floor.guid) {
+            slotGuids_[i] = floor.guid;
+            s.setTip(s.find(slots_[i], kThumbOverlay), (floor.name.empty() ? std::string() : floor.name + "\n") + priceText(floor.price));
+        }
+    }
+    s.setVisible(previous_, page_ != 0);
+    s.setVisible(next_, first + pageSize < listed_.size());
+    dirty_ = false;
+}
+
+} // namespace app

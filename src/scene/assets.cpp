@@ -622,6 +622,7 @@ void Assets::readCatalog() {
     for (const auto& [id, p] : scripts_.roofPatterns) {
         roofPatterns_[id] = {p.top, p.under, p.edges, p.trim};
     }
+    std::map<std::uint32_t, CatalogPattern> floorsByGuid;
     for (const auto& r : catalog_.resources()) {
         const auto type = r.entry.key.type;
         if (type != kPatternProperties && type != kFenceProperties && type != kRoofProperties) {
@@ -641,10 +642,43 @@ void Assets::readCatalog() {
                 roofPatterns_[id] = {p["texturetop"], p["textureunder"], p["textureedges"], p["texturetrim"]};
             } else if (const auto material = p.find("material"); material != p.end()) {
                 patternsByGuid_[id] = material->second;
+                // Floors Build mode sells: those shown in the catalog and not retired. A later
+                // product's entry replaces an earlier one's.
+                if (p["type"] == "floor" && p["showincatalog"] == "1" && p["deprecated"] != "1") {
+                    CatalogPattern floor;
+                    floor.guid = id;
+                    floor.name = p["name"];
+                    floor.description = p["description"];
+                    floor.price = static_cast<std::int32_t>(number(p["cost"], 10).value_or(0));
+                    floor.subsort = lower(p["subsort"]);
+                    floor.material = material->second;
+                    floorsByGuid[id] = std::move(floor);
+                }
             }
         } catch (const std::exception& ex) {
             diag::warnOnce(std::string("catalog: a build or buy catalog entry that can't be read is left out: ") + ex.what());
         }
+    }
+    floorCatalog_.clear();
+    for (auto& [guid, floor] : floorsByGuid) {
+        floorCatalog_.push_back(std::move(floor));
+    }
+    // Cheapest first, as Buy mode's catalog lists objects.
+    std::stable_sort(floorCatalog_.begin(), floorCatalog_.end(), [](const CatalogPattern& a, const CatalogPattern& b) { return a.price < b.price; });
+}
+
+std::string Assets::materialTexture(const std::string& material) {
+    const auto data = byName(kTxmt, material + "_txmt");
+    if (!data) {
+        return {};
+    }
+    try {
+        const auto m = scenegraph::parseMaterial(*data);
+        const auto it = m.properties.find("stdMatBaseTextureName");
+        return it != m.properties.end() ? it->second : std::string();
+    } catch (const std::exception& ex) {
+        diag::warnOnce(std::string("catalog: a material that can't be read has no picture: ") + ex.what());
+        return {};
     }
 }
 

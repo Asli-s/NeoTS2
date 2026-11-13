@@ -179,78 +179,18 @@ void LotSceneBuilder::drawFloors() {
     }
     const auto& g = floors->second;
     std::set<int> patterns;
-    // Light-map coordinates: the ground level's tiles run on into each other. Above it each tile
-    // keeps to its own texels, its edges on their centres, as the game's light-map slots do.
     makeFloorLightMaps();
     auto& maps = lightMaps();
-    const float mapWidth = static_cast<float>(g.width), mapHeight = static_cast<float>(g.height);
     const int ground = content::groundGridLevel(lot_);
     const auto surface = lot_.grids.find(content::kSurfaceGridInstance);
-    // A quarter on a stage (a split-level platform, region 4) is its own instance: imposters
-    // draw it with the floors above the ground.
-    const auto regions = lot_.grids.find(content::kPlatformRegionGridInstance);
-    const auto onStage = [&](std::int32_t level, std::int32_t x, std::int32_t y, std::size_t quarter) {
-        constexpr std::int32_t kStage = 4;
-        if (regions == lot_.grids.end() || regions->second.elementSize != 16) {
-            return false;
-        }
-        const auto cell = regions->second.at(level, x, y);
-        std::int32_t region = -1;
-        if (cell.size() == 16 && quarter < 4) {
-            std::memcpy(&region, cell.data() + quarter * sizeof region, sizeof region);
-        }
-        return region == kStage;
-    };
-    auto lightUv = [&](std::int32_t level, float tileX, float tileY, float fx, float fy) {
-        if (level == ground) {
-            return std::array<float, 2>{(tileX + fx) / mapWidth, (tileY + fy) / mapHeight};
-        }
-        return std::array<float, 2>{(tileX + (0.5f + 7 * fx) / 8) / mapWidth, (tileY + (0.5f + 7 * fy) / 8) / mapHeight};
-    };
+    const auto material = [&](const std::string& pattern) { return b_.material(assets_.patternMaterial(pattern, false)); };
     for (std::int32_t level = 0; level < static_cast<std::int32_t>(g.levels); ++level) {
-        Surfaces surfaces, stageSurfaces;
-        for (std::int32_t x = 0; x < static_cast<std::int32_t>(g.width); ++x) {
-            for (std::int32_t y = 0; y < static_cast<std::int32_t>(g.height); ++y) {
-                const float fx = static_cast<float>(x), fy = static_cast<float>(y);
-                const std::array<std::array<float, 2>, 4> corners{{{fx, fy}, {fx + 1, fy}, {fx + 1, fy + 1}, {fx, fy + 1}}};
-                std::array<float, 4> h{};
-                float center = 0;
-                for (std::size_t c = 0; c < 4; ++c) {
-                    h[c] = heights_.corner(level, corners[c][0], corners[c][1]) + 0.004f;
-                    center += h[c] / 4;
-                }
-                for (std::size_t q = 0; q < 4; ++q) {
-                    const auto id = static_cast<std::uint16_t>(g.i16(level, x, y, 3 - q));
-                    const auto pattern = lot_.floorPatterns.find(id);
-                    if (id == 0 || pattern == lot_.floorPatterns.end()) {
-                        continue;
-                    }
-                    // A quarter with no surface draws no floor on any storey, as the game gives it
-                    // an empty pattern: a hot tub's basin stands below it.
-                    if (surface != lot_.grids.end() && surfaceQuarterOpen(surface->second, level, x, y, 3 - q)) {
-                        continue;
-                    }
-                    const int material = b_.material(assets_.patternMaterial(pattern->second.name, false));
-                    patterns.insert(material);
-                    const bool stage = onStage(level, x, y, 3 - q);
-                    auto& s = stage ? stageSurfaces[material] : surfaces[material];
-                    const std::size_t n = (q + 1) % 4;
-                    // The game adds a stage's height to its floor as it draws it. The saved heights don't hold it.
-                    const float lift = stage ? kStageHeight : 0.0f;
-                    // Textures run along the game's own tile axes (world y, x here), a repeat
-                    // spanning the material's tiles.
-                    std::array<float, 2> span{1, 1};
-                    if (material >= 0) {
-                        span = b_.scene().materials[static_cast<std::size_t>(material)].floorTiles;
-                    }
-                    addVertex(s, {corners[q][0], corners[q][1], h[q] + lift}, {0, 0, 1}, {corners[q][1] / span[0], corners[q][0] / span[1]});
-                    addVertex(s, {corners[n][0], corners[n][1], h[n] + lift}, {0, 0, 1}, {corners[n][1] / span[0], corners[n][0] / span[1]});
-                    addVertex(s, {fx + 0.5f, fy + 0.5f, center + lift}, {0, 0, 1}, {(fy + 0.5f) / span[0], (fx + 0.5f) / span[1]});
-                    for (const auto& c : {corners[q], corners[n], std::array<float, 2>{fx + 0.5f, fy + 0.5f}}) {
-                        const auto uv = lightUv(level, fx, fy, c[0] - fx, c[1] - fy);
-                        s.lightUvs.insert(s.lightUvs.end(), uv.begin(), uv.end());
-                    }
-                }
+        auto drawnLevel = floorSurfaces(lot_, heights_, level, material, b_.scene().materials);
+        auto& surfaces = drawnLevel.floors;
+        auto& stageSurfaces = drawnLevel.stage;
+        for (const auto* drawn : {&surfaces, &stageSurfaces}) {
+            for (const auto& [m, p] : *drawn) {
+                patterns.insert(m);
             }
         }
         for (const bool stage : {false, true}) {
@@ -269,6 +209,111 @@ void LotSceneBuilder::drawFloors() {
         }
     }
     stats_.floorPatterns = patterns.size();
+    drawFloorSlabs(g, ground, surface == lot_.grids.end() ? nullptr : &surface->second);
+}
+
+} // namespace ts2::scene::lotscene
+
+namespace ts2::scene {
+
+std::array<float, 2> floorLightUv(const array3d::Array3D& g, int ground, std::int32_t level, float tileX, float tileY, float fx, float fy) {
+    // Light-map coordinates: the ground level's tiles run on into each other. Above it each tile
+    // keeps to its own texels, its edges on their centres, as the game's light-map slots do.
+    const float mapWidth = static_cast<float>(g.width), mapHeight = static_cast<float>(g.height);
+    if (level == ground) {
+        return std::array<float, 2>{(tileX + fx) / mapWidth, (tileY + fy) / mapHeight};
+    }
+    return std::array<float, 2>{(tileX + (0.5f + 7 * fx) / 8) / mapWidth, (tileY + (0.5f + 7 * fy) / 8) / mapHeight};
+}
+
+FloorSurfaces floorSurfaces(const content::Lot& lot, const Heights& heights, int level,
+                            const std::function<int(const std::string& pattern)>& materialOf, const std::vector<Material>& materials) {
+    FloorSurfaces out;
+    const auto floors = lot.grids.find(content::kFloorGridInstance);
+    if (floors == lot.grids.end() || floors->second.elementSize != 8 || level < 0 || level >= static_cast<int>(floors->second.levels)) {
+        return out;
+    }
+    const auto& g = floors->second;
+    const int ground = content::groundGridLevel(lot);
+    const auto surface = lot.grids.find(content::kSurfaceGridInstance);
+    std::map<std::uint16_t, int> materialById;
+    // A quarter on a stage (a split-level platform, region 4) is its own instance: imposters
+    // draw it with the floors above the ground.
+    const auto regions = lot.grids.find(content::kPlatformRegionGridInstance);
+    const auto onStage = [&](std::int32_t level, std::int32_t x, std::int32_t y, std::size_t quarter) {
+        constexpr std::int32_t kStage = 4;
+        if (regions == lot.grids.end() || regions->second.elementSize != 16) {
+            return false;
+        }
+        const auto cell = regions->second.at(level, x, y);
+        std::int32_t region = -1;
+        if (cell.size() == 16 && quarter < 4) {
+            std::memcpy(&region, cell.data() + quarter * sizeof region, sizeof region);
+        }
+        return region == kStage;
+    };
+    std::set<int> drawn;
+    for (std::int32_t x = 0; x < static_cast<std::int32_t>(g.width); ++x) {
+        for (std::int32_t y = 0; y < static_cast<std::int32_t>(g.height); ++y) {
+            const float fx = static_cast<float>(x), fy = static_cast<float>(y);
+            const std::array<std::array<float, 2>, 4> corners{{{fx, fy}, {fx + 1, fy}, {fx + 1, fy + 1}, {fx, fy + 1}}};
+            std::array<float, 4> h{};
+            float center = 0;
+            for (std::size_t c = 0; c < 4; ++c) {
+                h[c] = heights.corner(level, corners[c][0], corners[c][1]) + 0.004f;
+                center += h[c] / 4;
+            }
+            for (std::size_t q = 0; q < 4; ++q) {
+                const auto id = static_cast<std::uint16_t>(g.i16(level, x, y, 3 - q));
+                const auto pattern = lot.floorPatterns.find(id);
+                if (id == 0 || pattern == lot.floorPatterns.end()) {
+                    continue;
+                }
+                // A quarter with no surface draws no floor on any storey, as the game gives it
+                // an empty pattern: a hot tub's basin stands below it.
+                if (surface != lot.grids.end() && surfaceQuarterOpen(surface->second, level, x, y, 3 - q)) {
+                    continue;
+                }
+                auto known = materialById.find(id);
+                if (known == materialById.end()) {
+                    known = materialById.emplace(id, materialOf(pattern->second.name)).first;
+                }
+                const int material = known->second;
+                drawn.insert(material);
+                const bool stage = onStage(level, x, y, 3 - q);
+                auto& s = stage ? out.stage[material] : out.floors[material];
+                const std::size_t n = (q + 1) % 4;
+                // The game adds a stage's height to its floor as it draws it. The saved heights don't hold it.
+                const float lift = stage ? kStageHeight : 0.0f;
+                // Textures run along the game's own tile axes (world y, x here), a repeat
+                // spanning the material's tiles.
+                std::array<float, 2> span{1, 1};
+                if (material >= 0 && static_cast<std::size_t>(material) < materials.size()) {
+                    span = materials[static_cast<std::size_t>(material)].floorTiles;
+                }
+                addVertex(s, {corners[q][0], corners[q][1], h[q] + lift}, {0, 0, 1}, {corners[q][1] / span[0], corners[q][0] / span[1]});
+                addVertex(s, {corners[n][0], corners[n][1], h[n] + lift}, {0, 0, 1}, {corners[n][1] / span[0], corners[n][0] / span[1]});
+                addVertex(s, {fx + 0.5f, fy + 0.5f, center + lift}, {0, 0, 1}, {(fy + 0.5f) / span[0], (fx + 0.5f) / span[1]});
+                for (const auto& c : {corners[q], corners[n], std::array<float, 2>{fx + 0.5f, fy + 0.5f}}) {
+                    const auto uv = floorLightUv(g, ground, level, fx, fy, c[0] - fx, c[1] - fy);
+                    s.lightUvs.insert(s.lightUvs.end(), uv.begin(), uv.end());
+                }
+            }
+        }
+    }
+    out.patterns = drawn.size();
+    return out;
+}
+
+} // namespace ts2::scene
+
+namespace ts2::scene::lotscene {
+
+void LotSceneBuilder::drawFloorSlabs(const array3d::Array3D& g, int ground, const array3d::Array3D* surfaceGrid) {
+    auto& maps = lightMaps();
+    auto lightUv = [&](std::int32_t level, float tileX, float tileY, float fx, float fy) {
+        return floorLightUv(g, ground, level, tileX, tileY, fx, fy);
+    };
 
     // The slab under each floored quarter tile above the ground: a ceiling under it and a band down each
     // edge where the floor stops (see visibleInstances), shown even under a wall with none under it, as
@@ -328,7 +373,7 @@ void LotSceneBuilder::drawFloors() {
                     lowestFloor = std::min({lowestFloor, ta, tb});
                     // The ceiling's quarter, its texture along the tile axes as a floor's. A quarter
                     // with no surface has none, as it has no floor.
-                    if (surface == lot_.grids.end() || !surfaceQuarterOpen(surface->second, level, x, y, 3 - e)) {
+                    if (surfaceGrid == nullptr || !surfaceQuarterOpen(*surfaceGrid, level, x, y, 3 - e)) {
                         auto& s = ceilings[ceiling];
                         for (const auto& [p, t] : {std::pair{b, tb}, std::pair{a, ta}, std::pair{centre, middle}}) {
                             addVertex(s, {p[0], p[1], t - kFloorThickness}, {0, 0, -1}, {p[1] / ceilingSpan[0], p[0] / ceilingSpan[1]});

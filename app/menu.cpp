@@ -30,6 +30,7 @@
 #include "imposter_baker.hpp"
 #include "render/frame_plan.hpp"
 #include "scene/imposters.hpp"
+#include "scene/lot_parts.hpp"
 #include "scene/object_effects.hpp"
 #include "content/install.hpp"
 #include "content/lighting_state.hpp"
@@ -1341,6 +1342,17 @@ void Game::enterLot(std::uint32_t id) {
                 groundLevel = ts2::content::groundGridLevel(lot);
             }
             ts2::scene::addLot(builder, lot, file);
+            // What Build mode's floor tool needs of the lot, kept as the rest is let go.
+            built.floors = std::make_shared<ts2::content::Lot>();
+            built.floors->worldBounds = lot.worldBounds;
+            built.floors->roomGraph = lot.roomGraph;
+            built.floors->floorPatterns = lot.floorPatterns;
+            for (const std::uint32_t grid : {ts2::content::kFloorGridInstance, ts2::content::kFloorHeightGridInstance,
+                                             ts2::content::kSurfaceGridInstance, ts2::content::kPlatformRegionGridInstance}) {
+                if (const auto it = lot.grids.find(grid); it != lot.grids.end()) {
+                    built.floors->grids.emplace(grid, it->second);
+                }
+            }
             built.lightState = app::savedLightingState(assets.get()->lighting(), lot);
             built.light = app::lightLot(*assets.get(), builder.scene(), lot, file, built.lightState);
             built.imageKeys = builder.imageKeys();
@@ -1410,6 +1422,7 @@ void Game::showLot(LotBuilt& built) {
         }
     }
     lotRouteModels_ = std::move(built.routeModels);
+    buildLot_ = std::move(built.floors);
     {
         // Imposters around the lot take the lighting state's environment colour.
         const auto* state = ts2::content::findState(assets_.get()->lighting(), built.lightState);
@@ -1477,6 +1490,8 @@ void Game::leaveLot() {
     // What Buy mode's hand holds is let go; what was bought stays with the lot until it is gone.
     leaveBuy(false);
     leavePanelMode(false);
+    dropFloorTool();
+    buildLot_.reset();
     endCameraDrag();
     inLot_ = false;
     if (surroundingsBuilding_.valid()) {
@@ -1720,6 +1735,8 @@ void Game::lotAction(app::LotUi::Action action) {
     case Action::BuyClosed: leaveBuy(true); break;
     case Action::BuildOpened: enterPanelMode(true); break;
     case Action::StoryOpened: enterPanelMode(false); break;
+    case Action::BuildItem: pickFloor(lotUi_.pickedFloor()); break;
+    case Action::BuildHand: dropFloorTool(); break;
     case Action::BuildClosed:
     case Action::StoryClosed: leavePanelMode(true); break;
     case Action::BuyItem: buyItem(lotUi_.pickedBuyItem()); break;
@@ -1892,6 +1909,46 @@ std::optional<Game::LotFloorPoint> Game::lotFloorAt(float x, float y) {
     out.storey = instance.name == "terrain" ? 1 : instance.level - lot_.groundLevel + 1;
     out.at = {eye[0] + ray[0] * hit->distance, eye[1] + ray[1] * hit->distance, eye[2] + ray[2] * hit->distance};
     return out;
+}
+
+std::optional<std::array<std::int32_t, 2>> Game::buildTileAt(float x, float y) {
+    if (!buildLot_) {
+        return std::nullopt;
+    }
+    const auto grid = buildLot_->grids.find(ts2::content::kFloorGridInstance);
+    if (grid == buildLot_->grids.end()) {
+        return std::nullopt;
+    }
+    const auto& floors = grid->second;
+    // The ray in the lot's own space, met with the floor of the storey in view: its height is found
+    // at the lot's middle, then where the ray meets that height, twice over.
+    const ts2::scene::Transform toLot = lotPlace_.rigidInverse();
+    const auto ray = screenRay(orbit_.camera(), width_, height_, x, y);
+    std::array<float, 3> eye{orbit_.camera().eye[0], orbit_.camera().eye[1], orbit_.camera().eye[2]};
+    std::array<float, 3> direction{ray[0], ray[1], ray[2]};
+    toLot.apply(eye.data(), true);
+    toLot.apply(direction.data(), false);
+    if (std::abs(direction[2]) < 1e-5f) {
+        return std::nullopt;
+    }
+    const int level = lotView_.view.level;
+    const ts2::scene::Heights heights(*buildLot_);
+    float px = static_cast<float>(floors.width) / 2, py = static_cast<float>(floors.height) / 2;
+    for (int pass = 0; pass < 3; ++pass) {
+        const float z = heights.tile(level, std::clamp(px, 0.0f, static_cast<float>(floors.width) - 0.5f),
+                                     std::clamp(py, 0.0f, static_cast<float>(floors.height) - 0.5f));
+        const float t = (z - eye[2]) / direction[2];
+        if (t < 0) {
+            return std::nullopt;
+        }
+        px = eye[0] + direction[0] * t;
+        py = eye[1] + direction[1] * t;
+    }
+    const auto tx = static_cast<std::int32_t>(std::floor(px)), ty = static_cast<std::int32_t>(std::floor(py));
+    if (!floors.contains(level, tx, ty)) {
+        return std::nullopt;
+    }
+    return std::array<std::int32_t, 2>{tx, ty};
 }
 
 std::uint32_t Game::lotObjectAt(float x, float y, const std::vector<std::int16_t>& ignore) {
@@ -2195,7 +2252,7 @@ void Game::lotMouse(const pf::Event& e, float x, float y) {
         return;
     }
     // Buy mode takes clicks on the lot: putting down what the hand holds, or picking an object up.
-    if (buyMouse(e, x, y)) {
+    if (buyMouse(e, x, y) || buildMouse(e, x, y)) {
         return;
     }
     const bool leftDown = e.type == pf::Event::Type::MouseDown && e.button == pf::MouseButton::Left;
@@ -2409,6 +2466,7 @@ void Game::updateLot(std::uint64_t now) {
         }
         lotUi_.showLife(*lotLife_);
         lotUi_.refreshBuy(*lotLife_);
+        lotUi_.refreshBuild(*lotLife_);
         lotUi_.showNotifications(*lotLife_, static_cast<double>(now - lastFrame_) / 1e9);
         updateBabyNames();
         updatePhoneBook();
@@ -3008,7 +3066,7 @@ void Game::handleEvent(const pf::Event& e) {
         if (!e.repeat || (key != pf::Key::Comma && key != pf::Key::Period)) {
             lotView_.key(key, orbit_);
         }
-    } else if (e.type == pf::Event::Type::KeyDown && inLot_ && buyKey(e)) {
+    } else if (e.type == pf::Event::Type::KeyDown && inLot_ && (buyKey(e) || buildKey(e))) {
         // Buy mode's keys for what the hand holds: turn it, let it go or sell it.
     } else if (e.type == pf::Event::Type::KeyDown && inLot_) {
         using Action = app::LotUi::Action;

@@ -32,13 +32,8 @@ constexpr std::uint32_t kPuck = 0x4905F85B, kLivePanel = 0x49060005, kOptionsMen
 constexpr std::uint32_t kLiveMode = 0x37D97B25, kOptions = 0x67D97B2F, kFunds = 0x00003000;
 // Buy mode: the puck's Buy button and the Buy panel's script.
 constexpr std::uint32_t kBuyMode = 0x67D97B2A, kBuyPanel = 0x49060004;
-// Build mode: the puck's Build button and the Build panel's script. In the panel: the hand (lit),
-// the Build Mode tab (lit), the other tools, the group of category buttons, the catalog and the
-// auto roof options, which show once a category is picked.
+// Build mode: the puck's Build button and the Build panel's script.
 constexpr std::uint32_t kBuildMode = 0x77D97B28, kBuildPanel = 0x49060003;
-constexpr std::uint32_t kBuildHand = 0x000000A5, kBuildTab = 0x000000A6, kBuildCategories = 0x0000A000, kBuildCatalog = 0xAD502BBF,
-                        kAutoRoofOptions = 0x000000AC;
-constexpr std::array<std::uint32_t, 8> kBuildToolsNotDone = {0xA1, 0xA2, 0xA3, 0xA4, 0xAA, 0xAB, 0xAE, 0xAF};
 // Story mode: the puck's Album button (F4, Set Album Mode) and the story editor's script, with its
 // close button, its views (organize, story and blog), the story view's no-entries text, and the
 // album's name. The story view's buttons and the editor's other buttons aren't built yet.
@@ -237,7 +232,7 @@ void LotUi::load() {
         anchor(buy_);
         anchor(build_);
         buyPanel_.attach(screen_, buy_);
-        setUpBuildPanel();
+        buildPanel_.attach(screen_, build_);
         setUpStoryPanel();
         screen_.raise(puck_);
         // The clock and speed buttons, and the frame the live panel lays out. The rest (portrait,
@@ -555,7 +550,12 @@ void LotUi::showBuy(bool show) {
 
 bool LotUi::buyShown() const { return buy_ >= 0 && screen_.visible(buy_); }
 
-void LotUi::showBuild(bool show) { showMode(build_, kBuildMode, show); }
+void LotUi::showBuild(bool show) {
+    if (show && build_ >= 0) {
+        buildPanel_.reset();
+    }
+    showMode(build_, kBuildMode, show);
+}
 
 bool LotUi::buildShown() const { return build_ >= 0 && screen_.visible(build_); }
 
@@ -567,26 +567,6 @@ void LotUi::showStory(bool show) {
 }
 
 bool LotUi::storyShown() const { return story_ >= 0 && screen_.visible(story_); }
-
-void LotUi::setUpBuildPanel() {
-    if (build_ < 0) {
-        return;
-    }
-    // Until a category is picked the catalog and the roof options don't show.
-    screen_.setVisible(screen_.find(build_, kBuildCatalog), false);
-    screen_.setVisible(screen_.find(build_, kAutoRoofOptions), false);
-    screen_.setChecked(screen_.find(build_, kBuildHand), true);
-    screen_.setChecked(screen_.find(build_, kBuildTab), true);
-    for (const std::uint32_t id : kBuildToolsNotDone) {
-        screen_.setEnabled(screen_.find(build_, id), false);
-    }
-    // No Build mode tool is built yet: walls, floors, doors and windows, terrain and the rest.
-    if (const int categories = screen_.find(build_, kBuildCategories); categories >= 0) {
-        for (const int category : screen_.children(categories)) {
-            screen_.setEnabled(category, false);
-        }
-    }
-}
 
 void LotUi::setUpStoryPanel() {
     if (story_ < 0) {
@@ -615,6 +595,30 @@ void LotUi::centreStory() {
     if (story_ >= 0) {
         screen_.move(story_, (width_ - screen_.width(story_)) / 2, (height_ - screen_.height(story_)) / 2);
     }
+}
+
+void LotUi::refreshBuild(LotLife& life) {
+    if (!buildShown()) {
+        return;
+    }
+    auto& assets = life.assets();
+    BuildPanel::Source source;
+    source.floors = &assets.floorCatalog();
+    // A floor's picture is its material's texture, as small as an object's in Buy mode.
+    source.picture = [&](const BuildPanel::Floor& floor) -> const ts2::tga::Pixels* {
+        auto it = floorPictures_.find(floor.guid);
+        if (it == floorPictures_.end()) {
+            std::optional<ts2::tga::Pixels> picture;
+            if (const std::string texture = assets.materialTexture(floor.material); !texture.empty()) {
+                if (auto image = assets.texture(texture); image && image->width > 0 && image->height > 0) {
+                    picture = fitted(ts2::tga::Pixels{image->width, image->height, std::move(image->rgba)}, kSmallRewardPicture, kSmallRewardPicture);
+                }
+            }
+            it = floorPictures_.emplace(floor.guid, std::move(picture)).first;
+        }
+        return it->second ? &*it->second : nullptr;
+    };
+    buildPanel_.refresh(source);
 }
 
 void LotUi::refreshBuy(LotLife& life) {
@@ -780,6 +784,14 @@ LotUi::Action LotUi::clicked(int window) {
     if (storyShown() && ((id == kLiveMode && screen_.parent(window) == puck_) || window == screen_.find(story_, kStoryClose))) {
         showStory(false);
         return Action::StoryClosed;
+    }
+    // The Build catalog: a floor clicked is picked up to lay, and the hand puts it down.
+    if (const auto click = buildPanel_.clicked(window); click.panel) {
+        if (click.floor) {
+            pickedFloor_ = *click.floor;
+            return Action::BuildItem;
+        }
+        return click.hand ? Action::BuildHand : Action::None;
     }
     if (const auto click = buyPanel_.clicked(window); click.panel) {
         if (click.buy) {

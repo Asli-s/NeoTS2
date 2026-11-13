@@ -59,6 +59,20 @@ bool surfaceOpen(const array3d::Array3D& surface, int level, float x, float y);
 // right, top, as the floor grid stores its patterns.
 bool surfaceQuarterOpen(const array3d::Array3D& surface, int level, int x, int y, std::size_t quarter);
 
+// One level of a lot's floors as drawn: a triangle per floored quarter tile, by material, those on
+// a stage (a split-level platform) apart. `material` gives the scene material of a pattern name from
+// the lot's pattern list (-1 for none), and `materials` the scene's materials, whose floorTiles
+// say how many tiles a texture spans. Light map coordinates are as the lot's floor light maps lay
+// out tiles (see LotSceneBuilder::drawFloors).
+struct FloorSurfaces {
+    Surfaces floors, stage;
+    std::size_t patterns = 0;  // different materials drawn
+};
+// Where a point of tile (tileX, tileY) at (fx, fy) within it falls on its level's floor light map.
+std::array<float, 2> floorLightUv(const array3d::Array3D& floors, int ground, std::int32_t level, float tileX, float tileY, float fx, float fy);
+FloorSurfaces floorSurfaces(const content::Lot& lot, const Heights& heights, int level,
+                            const std::function<int(const std::string& pattern)>& material, const std::vector<Material>& materials);
+
 // The name a script's material takes on a mesh group the lot's save cut a hole in. A counter top is
 // saved as "<top>-cutout-<mask>", and the mask stays with the group, so that a top turning from clean
 // to dirty keeps the sink's hole. Any other material or group keeps its name, as does a whole-model
