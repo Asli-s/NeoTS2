@@ -43,8 +43,7 @@ public:
     // Goes back to the sort's first view (the categories, page one), as the panel opens.
     void reset();
 
-    // The objects the catalog lists now (in the chosen category, multi-tile ones left out), exposed
-    // for tests.
+    // The objects the catalog lists now (in the chosen category), exposed for tests.
     static std::vector<ts2::sim::catalog::Item> listed(const std::vector<ts2::sim::catalog::Item>& all, bool byRoom,
                                                        std::uint16_t category, std::uint16_t subsort);
 

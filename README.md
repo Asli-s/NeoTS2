@@ -29,7 +29,7 @@ NeoTS2 is in early development and is not yet a complete engine. Currently worki
 - Sims on their lots (behavior is still early and buggy)
 - Custom content from the Downloads folder
 - Sound effects, Sims' voices and the menu and neighborhood music
-- Buy mode, first stage: browse the catalog by function or room, buy and place one-tile objects that stand on the floor, move and sell objects
+- Buy mode, first stage: browse the catalog by function or room, buy and place objects that stand on the floor (beds and sofas too), move and sell them
 
 Saving is not supported yet.
 

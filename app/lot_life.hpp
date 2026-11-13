@@ -9,6 +9,7 @@
 #include "scene/scene_ray.hpp"
 #include "scene/sims.hpp"
 #include "sim/catalog.hpp"
+#include "sim/snap.hpp"
 #include "sim/clock.hpp"
 #include "content/ui_meters.hpp"
 #include "formats/tga.hpp"
@@ -228,6 +229,14 @@ public:
     void setCurrentValue(std::int16_t object, std::int32_t value);
     // The object's type (its GUID). 0 for one that is gone.
     std::uint32_t typeOf(std::int16_t object);
+    // The definition Buy mode sells an object by: a multi-tile part's master's, else its own. Null
+    // for one that is gone or unknown.
+    const ts2::objd::ObjectDefinition* buyDefinition(std::int16_t object);
+    // A multi-tile object's lead part (data 0x13), which Buy mode holds it by. Other objects are
+    // their own lead.
+    std::int16_t leadOf(std::int16_t object);
+    // Every part of a multi-tile object (the object itself for one of a tile).
+    std::vector<std::int16_t> partsOf(std::int16_t object);
     // Takes an object off the lot for good (bought then cancelled, or sold). The Sims forget it.
     void removeObject(std::int16_t object);
     // Adds to the household's funds (less for a negative amount).
@@ -295,6 +304,8 @@ private:
     double drawnMs() const { return sim_->world().clockMs() + leadMs_; }
     // A scene point as a route position on the lot (x and y, see SimObject::x).
     std::array<float, 2> routePoint(const std::array<float, 3>& scenePoint) const;
+    // Buy mode's placement test for a multi-tile object snapped to `target` by its lead.
+    bool multiTileFits(const ts2::sim::SimObject& lead, const ts2::sim::SnapTarget& target);
     // The lot object of a scene object id, null for none.
     ts2::sim::SimObject* lotObject(std::uint32_t id);
     // A Sim's own inventory, null for a Sim that is gone or has none.

@@ -195,6 +195,11 @@ public:
     // Makes a new object of type `guid` out of the world and starts it as Create New Object Instance
     // does (its Init runs and its Main runs until it first waits). Null when the type is unknown.
     SimObject* create(std::uint32_t guid);
+    // Makes a multi-tile object of master type `guid` out of the world, as Create New Object Instance
+    // does: each part an object of its own, lead first, every part's data 0x13 naming the lead and the
+    // lead's current value (data 0x29) the master's price, then starts them (see startCreatedParts).
+    // Returns the lead, or null when the type is unknown, isn't a master or has no lead part.
+    SimObject* createMultiTile(std::uint32_t guid);
 
     // Runs an event tree for `me` as the game does, on top of whatever `me` is running: until it
     // ends, with `stackObject` as its stack object and sharing `me`'s temps. With `keepTemps` my

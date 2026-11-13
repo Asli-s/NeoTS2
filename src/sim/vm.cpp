@@ -483,6 +483,31 @@ SimObject* Vm::create(std::uint32_t guid) {
     return &created;
 }
 
+SimObject* Vm::createMultiTile(std::uint32_t guid) {
+    constexpr std::size_t kRoomData = 0x1D, kCurrentValueData = 0x29;
+    const ObjectType* master = code_.objectType(guid);
+    if (master == nullptr || world_ == nullptr || !master->definition.isMultiTileMaster()) {
+        return nullptr;
+    }
+    const std::vector<const ObjectType*> types = code_.multiTileParts(*master);
+    if (types.empty()) {
+        return nullptr;
+    }
+    std::vector<SimObject*> parts;
+    parts.reserve(types.size());
+    for (const ObjectType* type : types) {
+        parts.push_back(&world_->create(type->group, type->definition, containerSlotsOf(code_, *type)));
+        parts.back()->data[kRoomData] = -1;  // made out of the world, so in no room
+    }
+    SimObject& lead = *parts.front();
+    for (SimObject* part : parts) {
+        part->data[kLeadTileField] = lead.id;
+    }
+    lead.data[kCurrentValueData] = static_cast<std::int16_t>(master->definition.field(objd::field::kPrice));
+    startCreatedParts(parts);
+    return &lead;
+}
+
 RunResult Vm::checkFromTree(SimObject& who, std::uint32_t codeOwner, std::uint16_t tree, std::int16_t stackObject,
                             std::span<const std::int16_t> callArgs, const ttab::Interaction& line, ttab::Interaction& changed,
                             InteractionIcon* icon, std::vector<OfferedAction>* offeredOut) {

@@ -1,6 +1,7 @@
 // Buy mode on a lot: the panel opens over the paused game, a catalog item clicked is held under the
 // mouse until it is put down (and paid for) or let go, and the hand picks up objects to move or sell.
-// What isn't done yet: multi-tile objects (beds, sofas), objects that go on surfaces or walls, the
+// A multi-tile object (a bed, a sofa) is held, placed, moved and sold whole, by its lead part.
+// What isn't done yet: objects that go on surfaces or walls, the
 // eyedropper, sledgehammer and undo, and daily depreciation. Purchases last until the lot is left, as
 // lots aren't saved yet.
 #include "game.hpp"
@@ -127,8 +128,8 @@ void Game::placeHeld() {
         lotLife_->addFunds(-buyHeld_->price);
         // Once down it is worth its price less its initial depreciation. Selling it before Buy mode
         // closes still gives back what it cost.
-        if (const auto* type = lotLife_->simulation().code().objectType(lotLife_->typeOf(object))) {
-            lotLife_->setCurrentValue(object, ts2::sim::catalog::placedValue(type->definition));
+        if (const auto* definition = lotLife_->buyDefinition(object)) {
+            lotLife_->setCurrentValue(object, ts2::sim::catalog::placedValue(*definition));
         }
         boughtThisVisit_[object] = buyHeld_->price;
         ts2::diag::step(std::format("buy mode: bought object {} for {}", object, buyHeld_->price));
@@ -192,9 +193,10 @@ bool Game::buyMouse(const pf::Event& e, float x, float y) {
             placeHeld();
             return true;
         }
-        // The hand picks up the object under the mouse, when it can be moved.
+        // The hand picks up the object under the mouse, when it can be moved: a multi-tile object as a
+        // whole, by its lead.
         if (hovered_ != 0) {
-            const auto object = static_cast<std::int16_t>(hovered_);
+            const auto object = lotLife_->leadOf(static_cast<std::int16_t>(hovered_));
             buyHeld_ = BuyHeld{};
             buyHeld_->object = object;
             buyHeld_->from = lotLife_->placed(object);

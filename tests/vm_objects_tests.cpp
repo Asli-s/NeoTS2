@@ -981,6 +981,46 @@ void createObjectCanTakeItsGuidFromTemps() {
     CHECK(world.size() == 2);
 }
 
+// Buy mode makes a multi-tile object from code the way Create Object does: its parts, lead first,
+// each naming the lead, each running its Init, the lead worth the master's price. A type that isn't
+// a master makes nothing.
+void vmMakesAMultiTileObjectForBuyMode() {
+    constexpr std::uint32_t kMasterGuid = 0x0B000001, kLeadGuid = 0x0B000002, kPartGuid = 0x0B000003;
+    constexpr std::uint32_t kLeadGroup = 0x7F000301, kPartGroup = 0x7F000302;
+    auto tile = [](std::uint32_t guid, std::uint16_t subIndex, bool lead) {
+        auto d = typed(guid);
+        d.fields[ts2::objd::field::kMultiTileMasterId] = 9;
+        d.fields[ts2::objd::field::kMultiTileSubIndex] = subIndex;
+        d.fields[0x3F] = lead ? 1 : 0;
+        return d;
+    };
+    MemoryCodeSource code;
+    auto master = tile(kMasterGuid, 0xFFFF, false);
+    master.fields[ts2::objd::field::kPrice] = 450;
+    code.addObjectType(kLampGroup, master);
+    code.addObjectType(kLeadGroup, tile(kLeadGuid, 0x0000, true));
+    code.addObjectType(kPartGroup, tile(kPartGuid, 0x0001, false));
+    code.setMultiTileParts(kMasterGuid, {kLeadGuid, kPartGuid});
+    for (const std::uint32_t group : {kLeadGroup, kPartGroup}) {
+        code.add(group, 0x1001, bhav({expr(owner::kMyData, 0x20, op::kAssign, owner::kLiteral, 1, T, E)}));
+        std::vector<ts2::objf::Function> functions(1);
+        functions[0].action = 0x1001;
+        code.addFunctions(group, functions);
+    }
+    ts2::sim::World world;
+    Vm vm(code, {}, &world);
+    const auto* lead = vm.createMultiTile(kMasterGuid);
+    CHECK(lead != nullptr && world.size() == 2);
+    if (lead == nullptr) {
+        return;
+    }
+    const auto* part = world.find(static_cast<std::int16_t>(lead->id + 1));
+    CHECK(lead->definition.guid() == kLeadGuid && part != nullptr && part->definition.guid() == kPartGuid);
+    CHECK(lead->data[0x13] == lead->id && part != nullptr && part->data[0x13] == lead->id);
+    CHECK(lead->data[0x20] == 1 && part != nullptr && part->data[0x20] == 1);
+    CHECK(lead->data[0x29] == 450 && lead->x == ts2::sim::kOffLot);
+    CHECK(vm.createMultiTile(kLeadGuid) == nullptr && world.size() == 2);
+}
 // A multi-tile master's GUID makes its parts, lead first: each is reset and runs its own Init,
 // names the lead in data 0x13, and the lead's Main runs before the primitive returns. The lead's
 // data 0x29 is the master's price, and the lead becomes the stack object.
@@ -3254,6 +3294,7 @@ std::vector<Test> vmObjectTests() {
         {"neighbor fields come from the neighbor", neighborFieldsComeFromTheNeighbor},
         {"Create Object can take its GUID from temps", createObjectCanTakeItsGuidFromTemps},
         {"Create Object makes a multi-tile object's parts", createObjectMakesAMultiTileObjectsParts},
+        {"the VM makes a multi-tile object for Buy mode", vmMakesAMultiTileObjectForBuyMode},
         {"a moved multi-tile part takes the others with it", movedPartsFollow},
         {"Snap tests every part of a multi-tile object at its spot", snapTestsEveryPartAtItsSpot},
         {"the placement test keeps the lot's far edge on the lot", placementTestKeepsTheFarEdgeOnTheLot},

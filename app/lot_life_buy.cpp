@@ -2,6 +2,7 @@
 #include "lot_life.hpp"
 
 #include "diag/log.hpp"
+#include "sim/idle_spot.hpp"
 #include "sim/snap.hpp"
 #include "sim/vm.hpp"
 #include "sim/vm_execution.hpp"
@@ -17,6 +18,8 @@ namespace {
 
 constexpr std::size_t kDirectionData = 1, kAllowedHeightsData = 4;
 constexpr std::int16_t kOnTheFloor = 0x01;
+
+bool isMultiTile(const ts2::sim::SimObject& o) { return o.definition.field(ts2::objd::field::kMultiTileMasterId) != 0; }
 
 } // namespace
 
@@ -34,7 +37,10 @@ std::string LotLife::catalogText(const ts2::sim::catalog::Item& item, std::size_
 
 std::int16_t LotLife::makeForBuying(std::uint32_t guid) {
     try {
-        ts2::sim::SimObject* made = sim_->vm().create(guid);
+        // A multi-tile object is made as its parts, and is held by its lead.
+        const ts2::sim::ObjectType* type = sim_->code().objectType(guid);
+        const bool multiTile = type != nullptr && type->definition.isMultiTileMaster();
+        ts2::sim::SimObject* made = multiTile ? sim_->vm().createMultiTile(guid) : sim_->vm().create(guid);
         if (made == nullptr) {
             return 0;
         }
@@ -58,9 +64,74 @@ LotLife::BuySpot LotLife::buySpot(const std::array<float, 3>& scenePoint, int st
     return {middle(x), middle(y), storey};
 }
 
+std::int16_t LotLife::leadOf(std::int16_t object) {
+    const auto* found = sim_->world().find(object);
+    if (found == nullptr || !isMultiTile(*found) || found->data[ts2::sim::kLeadTileField] <= 0) {
+        return object;
+    }
+    return found->data[ts2::sim::kLeadTileField];
+}
+
+std::vector<std::int16_t> LotLife::partsOf(std::int16_t object) {
+    const std::int16_t lead = leadOf(object);
+    const auto* found = sim_->world().find(lead);
+    if (found == nullptr || !isMultiTile(*found)) {
+        return {object};
+    }
+    return sim_->world().idsIncludingRemoved([&](const ts2::sim::SimObject& o) {
+        return !o.removed && isMultiTile(o) && o.data[ts2::sim::kLeadTileField] == lead;
+    });
+}
+
+// A multi-tile object, its lead at `target`, may stay where every part is on the lot with nothing in
+// its way (Snap's placement test for each part), every part above the ground has a floor under all
+// of it, and no wall runs between two parts side by side. The object must allow the floor (its
+// lead's data 4 bit 0). Not done yet, as for objects of one tile: the game's other placement rules.
+bool LotLife::multiTileFits(const ts2::sim::SimObject& lead, const ts2::sim::SnapTarget& target) {
+    auto& world = sim_->world();
+    if ((lead.data[kAllowedHeightsData] & kOnTheFloor) == 0 || ts2::sim::placementCode(world, lead, target)) {
+        return false;
+    }
+    const auto parts = partsOf(lead.id);
+    std::vector<const ts2::sim::SimObject*> placed;
+    for (const std::int16_t id : parts) {
+        const auto* part = world.find(id);
+        if (part == nullptr || part->x == ts2::sim::kOffLot || part->y == ts2::sim::kOffLot) {
+            return false;
+        }
+        placed.push_back(part);
+    }
+    const auto& pattern = world.floorPattern();
+    for (const auto* part : placed) {
+        if (part->level <= 1) {
+            continue;
+        }
+        const int tileX = part->x >> 16, tileY = part->y >> 16;
+        bool floor = static_cast<bool>(pattern);
+        for (int q = 0; floor && q < 4; ++q) {
+            const auto p = pattern(part->level - 1, tileY, tileX, q);  // the floor grid counts tiles the other way round
+            floor = p && *p != 0;
+        }
+        if (!floor) {
+            return false;
+        }
+    }
+    for (const auto* a : placed) {
+        for (const auto* b : placed) {
+            const int dx = (b->x >> 16) - (a->x >> 16), dy = (b->y >> 16) - (a->y >> 16);
+            if (a->id < b->id && a->level == b->level && std::abs(dx) + std::abs(dy) == 1 &&
+                ts2::sim::wallBetween(world, a->level - 1, static_cast<float>(a->x) / 65536.0f, static_cast<float>(a->y) / 65536.0f,
+                                      static_cast<float>(b->x) / 65536.0f, static_cast<float>(b->y) / 65536.0f)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 bool LotLife::holdAt(std::int16_t object, const BuySpot& spot, std::int16_t direction) {
     auto& world = sim_->world();
-    ts2::sim::SimObject* found = world.find(object);
+    ts2::sim::SimObject* found = world.find(leadOf(object));
     if (found == nullptr) {
         return false;
     }
@@ -71,13 +142,16 @@ bool LotLife::holdAt(std::int16_t object, const BuySpot& spot, std::int16_t dire
     target.facing = direction;
     target.checkRoom = false;
     target.checkWalls = false;
-    ts2::sim::snapTo(world, *found, target);
+    ts2::sim::snapTo(world, *found, target);  // the other parts of a multi-tile object follow
+    if (isMultiTile(*found)) {
+        return multiTileFits(*found, target);
+    }
     const auto& fits = world.objectFits();
     return !fits || fits(*found, static_cast<float>(spot.x) / 65536.0f, static_cast<float>(spot.y) / 65536.0f, spot.level, direction);
 }
 
 std::optional<LotLife::Placed> LotLife::placed(std::int16_t object) {
-    const auto* found = sim_->world().find(object);
+    const auto* found = sim_->world().find(leadOf(object));
     if (found == nullptr || found->x == ts2::sim::kOffLot || found->y == ts2::sim::kOffLot) {
         return std::nullopt;
     }
@@ -100,17 +174,38 @@ bool LotLife::movable(std::int16_t object) {
     if (std::find(std::begin(ts2::sim::vm_detail::kProtectedGuids), std::end(ts2::sim::vm_detail::kProtectedGuids), guid) != std::end(ts2::sim::vm_detail::kProtectedGuids)) {
         return false;
     }
-    const auto& d = found->definition;
-    return ts2::sim::catalog::isBuyItem(d) && d.field(ts2::objd::field::kMultiTileMasterId) == 0;
+    // A part of a multi-tile object is moved with the rest when its master is sold in Buy mode.
+    if (isMultiTile(*found)) {
+        const auto* master = buyDefinition(object);
+        return master != nullptr && ts2::sim::catalog::isBuyItem(*master);
+    }
+    return ts2::sim::catalog::isBuyItem(found->definition);
+}
+
+const ts2::objd::ObjectDefinition* LotLife::buyDefinition(std::int16_t object) {
+    const auto* found = sim_->world().find(object);
+    if (found == nullptr) {
+        return nullptr;
+    }
+    auto& code = sim_->code();
+    const ts2::sim::ObjectType* type = code.objectType(found->definition.guid());
+    if (type == nullptr) {
+        return nullptr;
+    }
+    if (isMultiTile(*found)) {
+        const ts2::sim::ObjectType* master = code.multiTileMaster(*type);
+        return master != nullptr ? &master->definition : nullptr;
+    }
+    return &type->definition;
 }
 
 std::int32_t LotLife::currentValue(std::int16_t object) {
-    const auto* found = sim_->world().find(object);
+    const auto* found = sim_->world().find(leadOf(object));
     return found != nullptr ? std::max<std::int32_t>(0, found->data[ts2::sim::catalog::kCurrentValueData]) : 0;
 }
 
 void LotLife::setCurrentValue(std::int16_t object, std::int32_t value) {
-    if (auto* found = sim_->world().find(object)) {
+    if (auto* found = sim_->world().find(leadOf(object))) {
         found->data[ts2::sim::catalog::kCurrentValueData] = static_cast<std::int16_t>(std::clamp<std::int32_t>(value, 0, 32767));
     }
 }
@@ -121,23 +216,26 @@ std::uint32_t LotLife::typeOf(std::int16_t object) {
 }
 
 void LotLife::removeObject(std::int16_t object) {
-    auto& world = sim_->world();
-    ts2::sim::SimObject* found = world.find(object);
-    if (found == nullptr) {
-        return;
-    }
     constexpr std::size_t kRoomData = 0x1D;
-    ts2::sim::takeOutOfSlot(world, *found);
-    // Off the lot, as Create Object's "out of world" leaves an object: no tile and room -1.
-    found->x = found->y = ts2::sim::kOffLot;
-    found->tile.reset();
-    found->data[kRoomData] = -1;
-    world.markFootprintChanged(found->id);
-    world.remove(*found);
-    try {
-        sim_->vm().tellSimsObjectGoes(object);
-    } catch (const std::exception& e) {
-        ts2::diag::warning(std::format("buy mode: the Sims couldn't forget object {}: {}", object, e.what()));
+    auto& world = sim_->world();
+    // Every part of a multi-tile object goes with it.
+    for (const std::int16_t id : partsOf(object)) {
+        ts2::sim::SimObject* found = world.findIncludingRemoved(id);
+        if (found == nullptr) {
+            continue;
+        }
+        ts2::sim::takeOutOfSlot(world, *found);
+        // Off the lot, as Create Object's "out of world" leaves an object: no tile and room -1.
+        found->x = found->y = ts2::sim::kOffLot;
+        found->tile.reset();
+        found->data[kRoomData] = -1;
+        world.markFootprintChanged(found->id);
+        world.remove(*found);
+        try {
+            sim_->vm().tellSimsObjectGoes(id);
+        } catch (const std::exception& e) {
+            ts2::diag::warning(std::format("buy mode: the Sims couldn't forget object {}: {}", id, e.what()));
+        }
     }
 }
 

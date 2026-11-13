@@ -232,10 +232,6 @@ BuyPanel::Click BuyPanel::clicked(int window) {
 std::vector<catalog::Item> BuyPanel::listed(const std::vector<catalog::Item>& all, bool byRoom, std::uint16_t category, std::uint16_t subsort) {
     std::vector<catalog::Item> out;
     for (const auto& item : all) {
-        // Multi-tile objects (beds, sofas) can't be placed yet.
-        if (item.multiTile) {
-            continue;
-        }
         if (category != 0 && (byRoom ? (item.rooms & category) == 0 : (item.functions & category) == 0)) {
             continue;
         }
