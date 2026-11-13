@@ -43,8 +43,9 @@ std::optional<Pcm> decodeClip(std::span<const std::uint8_t> bytes) {
 
 // Maxis XA: a 24-byte header ("XA", two bytes that vary, the decoded size in bytes, then a WAVE
 // format: tag 1, channels, rate, byte rate, block align, 16 bits), then blocks of 15 bytes per
-// channel, each channel's 15 bytes together. A block's first byte picks the filter (high nibble)
-// and the shift (low nibble plus 8); its 14 bytes hold 28 4-bit samples, high nibble first.
+// channel: first each channel's head byte, which picks its filter (high nibble) and shift (low
+// nibble plus 8), then 14 bytes of each channel taken in turn (left, right, left, ...), each
+// holding two 4-bit samples, high nibble first: 28 samples a channel.
 std::optional<Pcm> decodeXa(std::span<const std::uint8_t> bytes) {
     constexpr std::size_t kHeader = 24, kBlock = 15, kSamplesPerBlock = 28;
     if (bytes.size() < kHeader || !startsWith(bytes, "XA")) {
@@ -64,21 +65,20 @@ std::optional<Pcm> decodeXa(std::span<const std::uint8_t> bytes) {
     static constexpr std::array<int, 4> kC0{0, 240, 460, 392}, kC1{0, 0, -208, -220};
     std::array<int, 2> previous1{}, previous2{};
     std::size_t at = kHeader;
-    for (std::size_t block = 0; block < blocks; ++block) {
-        for (std::size_t c = 0; c < channels; ++c, at += kBlock) {
-            const std::uint8_t head = bytes[at];
+    for (std::size_t block = 0; block < blocks; ++block, at += kBlock * channels) {
+        for (std::size_t c = 0; c < channels; ++c) {
+            const std::uint8_t head = bytes[at + c];
             const int filter = (head >> 4) & 3;  // the table has four filters; a broken clip's higher index wraps
             const int shift = (head & 0x0F) + 8;
             for (std::size_t i = 0; i < kSamplesPerBlock; ++i) {
-                const std::uint8_t pair = bytes[at + 1 + i / 2];
+                const std::uint8_t pair = bytes[at + channels + (i / 2) * channels + c];
                 const int nibble = (i % 2 == 0) ? pair >> 4 : pair & 0x0F;
                 const auto widened = static_cast<std::int32_t>(static_cast<std::uint32_t>(nibble) << 28);
                 // The scaled nibble and the prediction are summed, then the whole sum is scaled down.
                 const std::int64_t sum = static_cast<std::int64_t>(widened >> shift) +
                                          static_cast<std::int64_t>(previous1[c]) * kC0[static_cast<std::size_t>(filter)] +
                                          static_cast<std::int64_t>(previous2[c]) * kC1[static_cast<std::size_t>(filter)] + 128;
-                int sample = static_cast<int>(std::clamp<std::int64_t>(sum >> 8, -32768, 32767));
-                sample = std::clamp(sample, -32768, 32767);
+                const int sample = static_cast<int>(std::clamp<std::int64_t>(sum >> 8, -32768, 32767));
                 previous2[c] = previous1[c];
                 previous1[c] = sample;
                 const std::size_t frame = block * kSamplesPerBlock + i;

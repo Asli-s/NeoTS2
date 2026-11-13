@@ -59,14 +59,18 @@ void xaBlocksDecodeAsTheGame() {
     CHECK(pcm->samples[0] == 4096 && pcm->samples[1] == -4096 && pcm->samples[2] == 4096 && pcm->samples[27] == 4096);
     CHECK(pcm->samples[28] == (4096 * 240 + 128) / 256);
     CHECK(pcm->samples[29] == (pcm->samples[28] * 240 + 128) / 256);
-    // Stereo: each channel's 15 bytes come together, the left's first.
+    // Stereo: both head bytes first, then the channels' bytes taken in turn, left first.
     auto s = xaHeader(2, 32000, 4 * 28);
-    s.push_back(0x00);
-    for (int i = 0; i < 14; ++i) s.push_back(0x11);  // left: 4096s
-    s.push_back(0x00);
-    for (int i = 0; i < 14; ++i) s.push_back(0xFF);  // right: -4096s
+    s.push_back(0x00);  // left: filter 0, shift 8
+    s.push_back(0x01);  // right: filter 0, shift 9
+    for (int i = 0; i < 14; ++i) {
+        s.push_back(0x1F);  // left: 1, -1 -> 4096, -4096
+        s.push_back(0x11);  // right: 1, 1 -> 2048s
+    }
     const auto stereo = ts2::audio::decodeXa(s);
-    CHECK(stereo && stereo->channels == 2 && stereo->frames() == 28 && stereo->samples[0] == 4096 && stereo->samples[1] == -4096);
+    CHECK(stereo && stereo->channels == 2 && stereo->frames() == 28);
+    CHECK(stereo->samples[0] == 4096 && stereo->samples[1] == 2048 && stereo->samples[2] == -4096 && stereo->samples[3] == 2048);
+    CHECK(stereo->samples[2 * 26] == 4096 && stereo->samples[2 * 27] == -4096 && stereo->samples[2 * 27 + 1] == 2048);
     // Broken clips decode to nothing, or only as far as their blocks go.
     CHECK(!ts2::audio::decodeXa(std::vector<std::uint8_t>{'X', 'A', 0}));
     auto noChannels = xaHeader(0, 22050, 0);
