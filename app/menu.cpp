@@ -2492,6 +2492,12 @@ void Game::run() {
         while (pf::pollEvent(e)) {
             handleEvent(e);
         }
+        // The window can change size at any time: going fullscreen (which a hidden window only does
+        // once it shows, after the game was first laid out), being maximized or dragged. The game is
+        // laid out again for the size it has now.
+        if (!pf::firstWindowMinimized()) {
+            takeWindowSize();
+        }
         // The menu plays its own music and the neighborhood its own. Live mode on a lot has none.
         if (sound_) {
             sound_->music(inLot_ ? "" : inNeighborhood_ ? "nhood" : "splash");
