@@ -2346,6 +2346,30 @@ void Game::startLotLife() {
         lotLife_->simulation().world().setAsksMessages(true);
         if (sound_) {
             lotLife_->simulation().world().setSoundEvents([this](const ts2::sim::SoundEvent& e) { sound_->lotSound(e.name, e.source, e.stop); });
+            sound_->setVoiceOf([this](std::int16_t id) -> std::optional<ts2::audio::SimVoice> {
+                if (!lotLife_) {
+                    return std::nullopt;
+                }
+                const ts2::sim::SimObject* sim = lotLife_->simulation().world().find(id);
+                if (sim == nullptr || !sim->isPerson()) {
+                    return std::nullopt;
+                }
+                constexpr std::size_t kNeighborId = 0x1F, kYoungAdult = 0xAF;
+                const std::int16_t age = sim->personData[ts2::sim::kLifeStagePersonData];
+                ts2::audio::SimVoice v;
+                using Age = ts2::audio::SimVoice::Age;
+                v.age = age > 50                                             ? Age::Elder
+                        : age > 18 || sim->personData[kYoungAdult] != 0 ? Age::Adult
+                        : age > 15                                           ? Age::Teen
+                        : age > 2                                            ? Age::Child
+                        : age == 2                                           ? Age::Toddler
+                                                                             : Age::Baby;
+                v.female = sim->personData[ts2::sim::kGenderPersonData] == 1;
+                // Where the game keeps an adult's voice (a or b) isn't known yet: each Sim keeps one,
+                // chosen by its neighbor id.
+                v.voice = (sim->personData[kNeighborId] & 1) != 0 ? 'b' : 'a';
+                return v;
+            });
         }
         lotLife_->simulation().setTextTables([this](std::uint32_t group, std::uint16_t instance) { return data_.texts(group, instance); });
         lotLife_->simulation().world().setDeclinesGameTips(options_.noGameTips);

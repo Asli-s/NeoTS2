@@ -52,6 +52,23 @@ struct PickedSound {
     std::shared_ptr<const Pcm> pcm;
 };
 
+// Who a Sim's voice belongs to, for its "vox" sounds.
+struct SimVoice {
+    enum class Age { Baby, Toddler, Child, Teen, Adult, Elder };
+    Age age = Age::Adult;
+    bool female = false;
+    char voice = 'a';  // adults have voices a and b, the others a only
+};
+
+// A script's vox sound is filed per kind of Sim: its name, "_", then the age (a adult, t teen, e
+// elder, c child), the sex (f or m, not for children) and the voice letter: vox_soc_agree_meda for
+// an adult woman with voice a is vox_soc_agree_meda_afa, for a child vox_soc_agree_meda_ca. The
+// names to try in order, the closest first (babies' and toddlers' letters aren't known: they try p,
+// b, then the child's).
+std::vector<std::string> voiceNames(std::string_view name, const SimVoice& voice);
+// Whether a sound name is a Sim's voice line (it begins with "vox").
+bool isVoiceName(std::string_view name);
+
 // The game's sounds, from every product's TSData/Res/Sound/*.package (later packs replace earlier
 // ones' resources with the same key). A sound's name, lowercased after the game's alias table
 // (property set 0xEBFEE33F 0x4C1940C5 0xFF1EBA43:0x3CF64D4B) has renamed it, gives the key of its
@@ -69,6 +86,8 @@ public:
     // not played lately (see HitList). Nothing for a sound the packages don't have, as the game
     // stays silent for those, or a clip that doesn't decode.
     std::optional<PickedSound> pick(std::string_view name);
+    // Whether the packages have a sound by this name.
+    [[nodiscard]] bool has(std::string_view name) const;
 
     // A music station's songs: the clips filed under group 0xFF000000 | crc24(lowercase station name),
     // such as "splash" (the main menu), "nhood", "build", "buy", "cas", "pop" or "hiphop".

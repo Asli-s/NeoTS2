@@ -177,9 +177,24 @@ void GameSound::lotSound(const std::string& name, std::int16_t source, bool stop
     if (std::any_of(lotVoices_.begin(), lotVoices_.end(), [&](const LotVoice& v) { return v.source == source && v.name == name && v.track.looped; })) {
         return;
     }
-    auto picked = sounds->pick(name);
+    std::string heard = name;
+    if (ts2::audio::isVoiceName(name)) {
+        const auto voice = voiceOf_ ? voiceOf_(source) : std::nullopt;
+        if (!voice) {
+            tellOnce("sound: a voice line from an object that isn't a Sim: " + name);
+            return;
+        }
+        const auto names = ts2::audio::voiceNames(name, *voice);
+        const auto found = std::find_if(names.begin(), names.end(), [&](const std::string& n) { return sounds->has(n); });
+        if (found == names.end()) {
+            tellOnce("sound: the game has no voice for " + names.front());
+            return;
+        }
+        heard = *found;
+    }
+    auto picked = sounds->pick(heard);
     if (!picked) {
-        tellOnce("sound: the game has no sound named " + name);
+        tellOnce("sound: the game has no sound named " + heard);
         return;
     }
     ts2::audio::PlayRequest r;
@@ -199,7 +214,7 @@ void GameSound::lotSound(const std::string& name, std::int16_t source, bool stop
     const auto id = mixer_->play(r);
     if (id != 0) {
         lotVoices_.push_back({id, source, name, picked->track, false});
-        tellOnce(std::format("sound: plays {}{}", name, picked->track.is3d ? " (3D)" : ""));
+        tellOnce(std::format("sound: plays {}{}", heard, picked->track.is3d ? " (3D)" : ""));
     }
 }
 

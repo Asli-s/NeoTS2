@@ -275,11 +275,25 @@ void animationSoundEventsNameTheirSound() {
     CHECK(!ts2::anim::soundEventName(e));
 }
 
+// A Sim's voice line is filed per age, sex and voice: name_<age><sex><voice>, children without a sex.
+void voiceLinesAreFiledPerSim() {
+    using ts2::audio::SimVoice;
+    using Age = SimVoice::Age;
+    CHECK(ts2::audio::isVoiceName("vox_soc_agree_medA") && ts2::audio::isVoiceName("VOX_x") && !ts2::audio::isVoiceName("foot_step"));
+    CHECK(ts2::audio::voiceNames("vox_soc_agree_medA", {Age::Adult, true, 'a'}) == std::vector<std::string>{"vox_soc_agree_meda_afa"});
+    CHECK(ts2::audio::voiceNames("vox_x", {Age::Adult, false, 'b'}) == (std::vector<std::string>{"vox_x_amb", "vox_x_ama"}));
+    CHECK(ts2::audio::voiceNames("vox_x", {Age::Teen, true, 'a'}) == (std::vector<std::string>{"vox_x_tfa", "vox_x_afa"}));
+    CHECK(ts2::audio::voiceNames("vox_x", {Age::Elder, false, 'a'}) == (std::vector<std::string>{"vox_x_ema", "vox_x_ama"}));
+    CHECK(ts2::audio::voiceNames("vox_soc_talk_gencC", {Age::Child, true, 'a'}) == std::vector<std::string>{"vox_soc_talk_gencc_ca"});
+    CHECK(ts2::audio::voiceNames("vox_x", {Age::Toddler, false, 'a'}) == (std::vector<std::string>{"vox_x_pa", "vox_x_ca"}));
+}
+
 } // namespace
 
 std::vector<Test> audioTests() {
     return {
         {"XA blocks decode as the game", xaBlocksDecodeAsTheGame},
+        {"voice lines are filed per Sim", voiceLinesAreFiledPerSim},
         {"SPX clips decode", spxClipsDecode},
         {"hit lists are read", hitListsAreRead},
         {"hit lists don't repeat soon", hitListsDontRepeatSoon},

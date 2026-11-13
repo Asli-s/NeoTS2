@@ -39,7 +39,11 @@ public:
     void music(std::string_view station);
 
     // A sound a lot's script or animation asked for, from object `source` (stop: the sound it started).
+    // A Sim's voice line ("vox...") plays the version for that Sim's age, sex and voice.
     void lotSound(const std::string& name, std::int16_t source, bool stop);
+    // Whose voice a lot object has, or nothing when it isn't a Sim.
+    using VoiceOf = std::function<std::optional<ts2::audio::SimVoice>(std::int16_t object)>;
+    void setVoiceOf(VoiceOf voiceOf) { voiceOf_ = std::move(voiceOf); }
     // Where a lot object is now, in world units, or nothing when it's gone.
     using PlaceOf = std::function<std::optional<ts2::render::Vec3>(std::int16_t object)>;
     // Moves the lot's 3D sounds as the camera and their objects move, and holds them while paused.
@@ -70,6 +74,7 @@ private:
     bool started_ = false;
     std::vector<LotVoice> lotVoices_;
     std::set<std::string> told_;
+    VoiceOf voiceOf_;
 
     // Music.
     std::string station_;

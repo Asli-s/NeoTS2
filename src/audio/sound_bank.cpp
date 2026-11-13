@@ -225,6 +225,48 @@ std::vector<std::uint8_t> SoundBank::read(const Where& where) {
     return bytes;
 }
 
+bool isVoiceName(std::string_view name) {
+    return name.size() > 3 && lower(name.substr(0, 3)) == "vox";
+}
+
+std::vector<std::string> voiceNames(std::string_view name, const SimVoice& voice) {
+    const std::string base = lower(name) + "_";
+    const char sex = voice.female ? 'f' : 'm';
+    const char letter = voice.voice == 'b' ? 'b' : 'a';
+    std::vector<std::string> names;
+    const auto withSex = [&](char age) {
+        names.push_back(base + age + sex + letter);
+        if (letter != 'a') {
+            names.push_back(base + age + sex + 'a');
+        }
+    };
+    const auto noSex = [&](char age) {
+        names.push_back(base + age + letter);
+        if (letter != 'a') {
+            names.push_back(base + age + 'a');
+        }
+    };
+    switch (voice.age) {
+    case SimVoice::Age::Adult: withSex('a'); break;
+    case SimVoice::Age::Teen: withSex('t'); withSex('a'); break;
+    case SimVoice::Age::Elder: withSex('e'); withSex('a'); break;
+    case SimVoice::Age::Child: noSex('c'); break;
+    case SimVoice::Age::Toddler: noSex('p'); noSex('c'); break;
+    case SimVoice::Age::Baby: noSex('b'); noSex('p'); noSex('c'); break;
+    }
+    return names;
+}
+
+bool SoundBank::has(std::string_view name) const {
+    std::string lowered = lower(name);
+    if (const auto alias = aliases_.find(lowered); alias != aliases_.end()) {
+        lowered = alias->second;
+    }
+    const auto hashed = hash::scenegraphKey(lowered);
+    const std::uint64_t k = key(hashed.instance, hashed.instanceHigh);
+    return tracks_.contains(k) && hitLists_.contains(k);
+}
+
 std::optional<PickedSound> SoundBank::pick(std::string_view name) {
     std::string lowered = lower(name);
     if (const auto alias = aliases_.find(lowered); alias != aliases_.end()) {
