@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(NeoTS2 VERSION 0.2.3 LANGUAGES C CXX)
+project(NeoTS2 VERSION 0.2.4 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -240,6 +240,8 @@ add_library(ts2content
     src/content/ui_queue.cpp
     src/content/ui_text.cpp
     src/content/target_pictures.cpp
+    src/audio/xa.cpp
+    src/audio/bank.cpp
 )
 target_link_libraries(ts2content PUBLIC ts2formats ts2diag ts2paths PRIVATE project_warnings)
 
@@ -488,7 +490,7 @@ else()
         tests/vm_scripts_tests.cpp tests/simulation_tests.cpp tests/route_planning_tests.cpp tests/vm_walking_tests.cpp
         tests/vm_set_to_next_tests.cpp tests/vm_animation_tests.cpp tests/formats_tests.cpp
         tests/models_and_images_tests.cpp tests/scene_tests.cpp tests/assets_tests.cpp tests/lighting_tests.cpp tests/render_plan_tests.cpp tests/content_tests.cpp
-        tests/ui_and_diag_tests.cpp tests/paths_tests.cpp tests/fuzz_regressions_tests.cpp src/ui/pie_layout.cpp src/ui/tip_layout.cpp src/ui/font_metrics.cpp src/ui/drag_arrow.cpp src/ui/scroll_bar.cpp src/ui/animated_bitmap.cpp app/object_materials.cpp)
+        tests/ui_and_diag_tests.cpp tests/paths_tests.cpp tests/fuzz_regressions_tests.cpp tests/audio_tests.cpp src/ui/pie_layout.cpp src/ui/tip_layout.cpp src/ui/font_metrics.cpp src/ui/drag_arrow.cpp src/ui/scroll_bar.cpp src/ui/animated_bitmap.cpp app/object_materials.cpp)
     target_link_libraries(vm_tests PRIVATE ts2renderplan ts2sim ts2scene ts2paths ts2settings lua50 project_warnings)
     # Every fuzz target's entry point under its own name, so the tests replay the inputs kept in
     # fuzz/regressions/<target> through the same code the fuzzer ran.
@@ -740,9 +742,15 @@ else()
         target_link_libraries(vm_tests PRIVATE ts2ui)
         target_compile_definitions(vm_tests PRIVATE NEOTS2_TEXT_LAYOUT_TESTS)
 
-        add_executable(neots2 app/main.cpp app/menu.cpp app/game_effects.cpp app/game_surroundings.cpp app/game_graphics.cpp app/neighborhood.cpp app/neighborhood_ui.cpp app/lot_life.cpp app/lot_life_clips.cpp app/lot_life_effects.cpp app/lot_life_panels.cpp app/lot_life_objects.cpp app/lot_life_sims.cpp app/pose_numbers.cpp app/object_materials.cpp app/sim_loader.cpp app/lot_light.cpp app/imposter_baker.cpp app/lot_daylight.cpp app/route_sources.cpp app/lot_ui.cpp app/game_options_panel.cpp app/graphics_options_panel.cpp app/options_list.cpp app/list_box_rows.cpp app/live_panel.cpp app/job_panel.cpp app/memories_page.cpp app/age_meter.cpp app/queue_panel.cpp app/pie_menu_ui.cpp app/mood_meter.cpp app/aspiration_bars.cpp app/pause_frame.cpp app/baby_name_dialog.cpp app/phone_book_dialog.cpp app/type_picker_dialog.cpp app/notification_stack.cpp app/dialog_fills.cpp app/description_box.cpp app/cheat_console.cpp app/needs_panel.cpp app/personality_page.cpp app/relationships_panel.cpp app/rewards_panel.cpp app/simology_panel.cpp app/interests_page.cpp app/hobbies_page.cpp app/chemistry_page.cpp app/meter_bar.cpp app/skewer.cpp app/wants_panel.cpp app/portraits.cpp app/cursors.cpp
+        add_executable(neots2 app/main.cpp app/menu.cpp app/game_audio.cpp app/game_effects.cpp app/game_surroundings.cpp app/game_graphics.cpp app/neighborhood.cpp app/neighborhood_ui.cpp app/lot_life.cpp app/lot_life_clips.cpp app/lot_life_effects.cpp app/lot_life_panels.cpp app/lot_life_objects.cpp app/lot_life_sims.cpp app/pose_numbers.cpp app/object_materials.cpp app/sim_loader.cpp app/lot_light.cpp app/imposter_baker.cpp app/lot_daylight.cpp app/route_sources.cpp app/lot_ui.cpp app/game_options_panel.cpp app/graphics_options_panel.cpp app/options_list.cpp app/list_box_rows.cpp app/live_panel.cpp app/job_panel.cpp app/memories_page.cpp app/age_meter.cpp app/queue_panel.cpp app/pie_menu_ui.cpp app/mood_meter.cpp app/aspiration_bars.cpp app/pause_frame.cpp app/baby_name_dialog.cpp app/phone_book_dialog.cpp app/type_picker_dialog.cpp app/notification_stack.cpp app/dialog_fills.cpp app/description_box.cpp app/cheat_console.cpp app/needs_panel.cpp app/personality_page.cpp app/relationships_panel.cpp app/rewards_panel.cpp app/simology_panel.cpp app/interests_page.cpp app/hobbies_page.cpp app/chemistry_page.cpp app/meter_bar.cpp app/skewer.cpp app/wants_panel.cpp app/portraits.cpp app/cursors.cpp
                        app/diagnostics.cpp app/crash_handler.cpp app/crash_dialog.cpp app/unexpected_exit.cpp app/report_upload.cpp app/message_box.cpp app/open_renderer.cpp)
         target_link_libraries(neots2 PRIVATE ts2render ts2ui ts2sim ts2diag project_warnings)
+        # Audio output needs SDL 3; the SDL 1.2 build keeps the same interface silent.
+        if(platform_name STREQUAL "sdl3")
+            target_sources(neots2 PRIVATE src/audio/system.cpp)
+        else()
+            target_sources(neots2 PRIVATE src/audio/system_none.cpp)
+        endif()
         add_dependencies(neots2 neots2_version)
         if(sdlgpu_enabled)
             add_dependencies(neots2 neots2_shaders)

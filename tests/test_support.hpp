@@ -508,3 +508,4 @@ std::vector<Test> textLayoutTests();
 #endif
 std::vector<Test> pathsTests();
 std::vector<Test> fuzzRegressionTests();
+std::vector<Test> audioTests();

@@ -48,6 +48,7 @@ int main(int argc, char** argv) {
 #endif
     for (auto& t : pathsTests()) tests.push_back(t);
     for (auto& t : fuzzRegressionTests()) tests.push_back(t);
+    for (auto& t : audioTests()) tests.push_back(t);
 
     std::size_t run = 0;
     for (std::size_t i = 0; i < tests.size(); ++i) {

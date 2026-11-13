@@ -117,6 +117,8 @@ public:
     int y(int window) const;
     // A window's caption (its text).
     const std::string& text(int window) const;
+    // The UI sound the window's script names for a click (btnclicksnd), empty when it names none.
+    std::string clickSound(int window) const;
     // The texts of a window's children (a script's table of constants, written as captions).
     std::vector<std::string> childTexts(int window) const;
     int width(int window) const;
@@ -195,6 +197,8 @@ private:
         bool checkBox = false;           // a check box or radio button (style=checkbox, radiobtn or radiocheck)
         bool radioCheck = false;         // a radio button drawn from an 8-frame picture (style=radiocheck)
         std::string text, font;
+        // The UI sound a click on it plays (btnclicksnd), empty when the script names none.
+        std::string clickSound;
         HAlign hAlign = HAlign::Left;  // the text's place in the window (align)
         VAlign vAlign = VAlign::Top;
         std::array<float, 4> textColor{1, 1, 1, 1};

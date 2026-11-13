@@ -43,11 +43,13 @@ struct AnimateOperands {
 };
 AnimateOperands animateOperands(std::span<const std::uint8_t> operands);
 
-// A SimAntics event an animation marks ("event=N"): when it comes, in milliseconds of the clip as
-// authored, and its number.
+// A moment a clip marks: a SimAntics event ("event=N") with its number, a sound ("sound_name=...")
+// with its name in `sound`, or an effect (see effectEvent).
 struct AnimationEvent {
     float timeMs = 0;
     int id = 0;
+    // The sound's name for a type 1014 mark; empty for a SimAntics event.
+    std::string sound;
 };
 
 // An animation playing on an object, started by an Animate primitive.

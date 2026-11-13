@@ -276,8 +276,12 @@ LotLife::LotLife(std::unique_ptr<ts2::sim::LotSimulation> sim, ts2::scene::Asset
         }
         std::vector<ts2::sim::AnimationEvent> events;
         for (const auto& [ms, id] : animations_.simAnticsEvents(name)) {
-            events.push_back({ms, id});
+            events.push_back({ms, id, {}});
         }
+        for (const auto& [ms, sound] : animations_.soundEvents(name)) {
+            events.push_back({ms, 0, sound});
+        }
+        std::stable_sort(events.begin(), events.end(), [](const auto& a, const auto& b) { return a.timeMs < b.timeMs; });
         return animationEvents_.emplace(name, std::move(events)).first->second;
     });
     sim_->world().setAnimationTurns([this](const std::string& name, float ms) { return animations_.rootTurn(name, ms); });

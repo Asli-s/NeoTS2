@@ -82,6 +82,7 @@ struct Event {
     std::string text;
 };
 constexpr std::uint16_t kSimAnticsEvent = 1005;
+constexpr std::uint16_t kSoundEvent = 1014;
 
 // An effect (event type 8) a clip starts or stops, by the keys in its text. Bones and names are as the clip
 // states them. `op` is softStart, hardStart, softStop or hardStop.
@@ -95,6 +96,9 @@ std::optional<EffectEvent> effectEvent(const Event& event);
 
 // The N of a SimAntics event's "event=N" line, or nullopt for other events.
 std::optional<int> simAnticsEventId(const Event& event);
+// The name a sound event's "sound_name=..." line gives, or nullopt for other events and ones with no
+// name.
+std::optional<std::string> soundEventName(const Event& event);
 
 // An animation (cAnimResourceConst, the game's memory image of it): the skeleton it is made for,
 // its channels, IK chains and events (from its first target, the skeleton, unless that drives morphs),
