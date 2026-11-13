@@ -2,6 +2,7 @@
 
 #include "formats/binary_reader.hpp"
 #include "formats/binary_writer.hpp"
+#include "parse_float.hpp"
 
 #include <bit>
 #include <charconv>
@@ -397,11 +398,11 @@ bool readValue(Property& p, const std::string& text) {
         return true;
     }
     case kFloatType: {
-        float value = 0;
-        if (!readNumber(text, value)) {
+        const std::optional<float> value = parseFloat(text);
+        if (!value) {
             return false;
         }
-        p.word = std::bit_cast<std::uint32_t>(value);
+        p.word = std::bit_cast<std::uint32_t>(*value);
         return true;
     }
     default:

@@ -1,5 +1,7 @@
 #include "audio/track.hpp"
 
+#include "parse_float.hpp"
+
 #include <charconv>
 #include <cmath>
 #include <string_view>
@@ -29,10 +31,8 @@ std::optional<double> number(std::string_view text) {
     while (!text.empty() && text.front() == ' ') {
         text.remove_prefix(1);
     }
-    double value = 0;
-    const char* end = text.data() + text.size();
-    const auto [stop, error] = std::from_chars(text.data(), end, value);
-    if (error != std::errc() || stop == text.data() || !std::isfinite(value)) {
+    const std::optional<double> value = parseLeadingDouble(text);
+    if (!value || !std::isfinite(*value)) {
         return std::nullopt;
     }
     return value;

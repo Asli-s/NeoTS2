@@ -11,9 +11,14 @@
 
 namespace ts2 {
 
-// macOS libc++ does not provide floating-point from_chars before macOS 26.
-// Keep its fallback here so callers can otherwise use the same parser.
-#ifdef __APPLE__
+// macOS libc++ does not provide floating-point from_chars before macOS 26 (its to_chars is there).
+// Keep its fallback here so callers can otherwise use the same parser. Defining
+// NEOTS2_PARSE_FLOAT_FALLBACK takes the same path anywhere, so a test can compare the two.
+#if defined(__APPLE__) || defined(NEOTS2_PARSE_FLOAT_FALLBACK)
+#define NEOTS2_FLOAT_PARSE_FALLBACK 1
+#endif
+
+#ifdef NEOTS2_FLOAT_PARSE_FALLBACK
 namespace detail {
 
 inline bool startsWithWord(std::string_view text, std::string_view word) {
@@ -68,10 +73,12 @@ inline std::size_t leadingFloatLength(std::string_view text) {
 } // namespace detail
 #endif
 
-// The number at the start of the text, ignoring anything after it. Nothing when the text doesn't
-// start with one.
-inline std::optional<float> parseLeadingFloat(std::string_view text, std::size_t* length = nullptr) {
-#ifdef __APPLE__
+namespace detail {
+
+// The number at the start of the text, for float or double.
+template <typename T>
+inline std::optional<T> parseLeading(std::string_view text, std::size_t* length) {
+#ifdef NEOTS2_FLOAT_PARSE_FALLBACK
     // Infinity and not-a-number, which from_chars reads too.
     const bool negative = !text.empty() && text[0] == '-';
     const std::string_view word = text.substr(negative ? 1 : 0);
@@ -80,7 +87,7 @@ inline std::optional<float> parseLeadingFloat(std::string_view text, std::size_t
             if (length) {
                 *length = name.size() + (negative ? 1 : 0);
             }
-            const float value = name == "nan" ? std::numeric_limits<float>::quiet_NaN() : std::numeric_limits<float>::infinity();
+            const T value = name == "nan" ? std::numeric_limits<T>::quiet_NaN() : std::numeric_limits<T>::infinity();
             return negative ? -value : value;
         }
     }
@@ -90,7 +97,7 @@ inline std::optional<float> parseLeadingFloat(std::string_view text, std::size_t
     }
     std::istringstream input{std::string(text.substr(0, n))};
     input.imbue(std::locale::classic());
-    float value = 0;
+    T value = 0;
     input >> std::noskipws >> value;
     if (input.fail()) {
         return std::nullopt;
@@ -100,7 +107,7 @@ inline std::optional<float> parseLeadingFloat(std::string_view text, std::size_t
     }
     return value;
 #else
-    float value = 0;
+    T value = 0;
     const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
     if (error != std::errc{}) {
         return std::nullopt;
@@ -112,10 +119,28 @@ inline std::optional<float> parseLeadingFloat(std::string_view text, std::size_t
 #endif
 }
 
+}  // namespace detail
+
+// The number at the start of the text, ignoring anything after it. Nothing when the text doesn't
+// start with one.
+inline std::optional<float> parseLeadingFloat(std::string_view text, std::size_t* length = nullptr) {
+    return detail::parseLeading<float>(text, length);
+}
+
+inline std::optional<double> parseLeadingDouble(std::string_view text, std::size_t* length = nullptr) {
+    return detail::parseLeading<double>(text, length);
+}
+
 // The number the whole text spells. Nothing when anything else follows it.
 inline std::optional<float> parseFloat(std::string_view text) {
     std::size_t length = 0;
     const auto value = parseLeadingFloat(text, &length);
+    return value && length == text.size() ? value : std::nullopt;
+}
+
+inline std::optional<double> parseDouble(std::string_view text) {
+    std::size_t length = 0;
+    const auto value = parseLeadingDouble(text, &length);
     return value && length == text.size() ? value : std::nullopt;
 }
 
