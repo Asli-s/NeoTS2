@@ -1,6 +1,7 @@
 #include "ui/screen.hpp"
 
 #include "diag/log.hpp"
+#include "formats/hash.hpp"
 #include "ui/tip_layout.hpp"
 
 #include <algorithm>
@@ -9,10 +10,37 @@
 #include <cstdlib>
 #include <cstdint>
 #include <sstream>
+#include <string_view>
 
 namespace ts2::ui {
 
 namespace {
+
+// The UI sounds the game's buttons name: a script keeps the CRC24 of one of these (btnclicksnd), as
+// the sound index keys them. The list is the executable's ui_* names, limited to the ones the panels
+// here use.
+constexpr std::string_view kUiSounds[] = {
+    "ui_primary_button", "ui_secondary_button", "ui_tertiary_button", "ui_pane_primary", "ui_error",
+    "ui_panel_open", "ui_panel_close", "ui_panel_expand", "ui_panel_collapse", "ui_softwindow_open",
+    "ui_softwindow_close", "ui_hardwindow_open", "ui_hardwindow_close", "ui_button_play", "ui_button_pause",
+    "ui_button_fw", "ui_button_ffw", "ui_button_zoom_in", "ui_button_zoom_out", "ui_queue", "ui_queue_delete",
+    "ui_piemenu_primary", "ui_piemenu_secondary", "ui_text_notification_open", "ui_text_notification_close",
+    "ui_text_description_open", "ui_text_description_close", "ui_object_buy", "ui_object_sell", "ui_object_pickup",
+    "ui_object_plop", "ui_object_rotate", "ui_undo", "ui_redo",
+};
+
+std::string clickSoundOf(const ui::Window& source) {
+    const auto key = source.list("btnclicksnd");
+    if (key.size() < 2 || key.back() == 0) {
+        return {};
+    }
+    for (const std::string_view name : kUiSounds) {
+        if (ts2::hash::scenegraphKey(name).instance == static_cast<std::uint32_t>(key.back())) {
+            return std::string(name);
+        }
+    }
+    return {};
+}
 
 // Which frame of a button's four-frame image strip each state shows (as the game's main menu
 // shows them: idle, hovered and pressed). Disabled takes the one left, a bare outline.
@@ -148,6 +176,7 @@ int Screen::add(const ui::Window& source, int parent) {
         w.text = source.text("initvalue");
     }
     w.font = source.text("font");
+    w.clickSound = clickSoundOf(source);
     // Align names run from "lefttop" to "rightbottom", and "center" centres both ways.
     const std::string align = source.text("align");
     w.hAlign = align.rfind("center", 0) == 0 ? HAlign::Centre : align.rfind("right", 0) == 0 ? HAlign::Right : HAlign::Left;
@@ -824,6 +853,10 @@ int Screen::y(int window) const {
 const std::string& Screen::text(int window) const {
     static const std::string none;
     return window >= 0 ? windows_[static_cast<std::size_t>(window)].text : none;
+}
+
+std::string Screen::clickSound(int window) const {
+    return window >= 0 ? windows_[static_cast<std::size_t>(window)].clickSound : std::string();
 }
 
 const std::vector<int>& Screen::children(int window) const {

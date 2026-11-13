@@ -1270,6 +1270,10 @@ public:
     using SoundEvents = std::function<void(const SoundEvent&)>;
     void setSoundEvents(SoundEvents events) { soundEvents_ = std::move(events); }
     const SoundEvents& soundEvents() const { return soundEvents_; }
+    // Stops every sound of one object: Stop All Sounds (0x30).
+    using SoundStopAll = std::function<void(std::int16_t source)>;
+    void setSoundStopAll(SoundStopAll stop) { soundStopAll_ = std::move(stop); }
+    const SoundStopAll& soundStopAll() const { return soundStopAll_; }
     // What a ray meets in the lot as it is drawn (RayTrace). Without it RayTrace stops the script.
     void setRayQuery(RayQuery query) { rayQuery_ = std::move(query); }
     const RayQuery& rayQuery() const { return rayQuery_; }
@@ -1297,6 +1301,11 @@ public:
     using AnimationEvents = std::function<const std::vector<AnimationEvent>&(const std::string& name)>;
     void setAnimationEvents(AnimationEvents events) { animationEvents_ = std::move(events); }
     const AnimationEvents& animationEvents() const { return animationEvents_; }
+    // Plays an animation's sound mark ("sound_name=...") on the object it plays on. Without one, the
+    // marks are ignored.
+    using AnimationSound = std::function<void(std::int16_t object, const std::string& name)>;
+    void setAnimationSound(AnimationSound sound) { animationSound_ = std::move(sound); }
+    const AnimationSound& animationSound() const { return animationSound_; }
     void setLocoClips(LocoClips clips) { locoClips_ = std::move(clips); }
     const LocoClips& locoClips() const { return locoClips_; }
     // A Sim's size against its skeleton's own (its age data's stretch: teens 0.94), which shortens
@@ -1533,6 +1542,7 @@ private:
     AnimationLengths animationLengths_;
     AnimationCarries animationCarries_;
     SoundEvents soundEvents_;
+    SoundStopAll soundStopAll_;
     EffectCommands effectCommands_;
     Notification* findNotification(std::int16_t id) {
         const auto it = std::find_if(notifications_.begin(), notifications_.end(), [&](const Notification& n) { return n.id == id; });
@@ -1583,6 +1593,7 @@ private:
     SimScale simScale_;
     AnimationEventTime animationEventTime_;
     AnimationEvents animationEvents_;
+    AnimationSound animationSound_;
     SlotRouter slotRouter_;
     PlacementSpots placementSpots_;
     ObjectFits objectFits_;

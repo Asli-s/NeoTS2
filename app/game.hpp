@@ -3,6 +3,7 @@
 
 #include "menu.hpp"
 #include "baby_name_dialog.hpp"
+#include "audio/system.hpp"
 #include "phone_book_dialog.hpp"
 #include "type_picker_dialog.hpp"
 #include "description_box.hpp"
@@ -262,6 +263,8 @@ private:
     void showSimStorey(const ts2::sim::SimObject& object);
     void followSimStorey();
     std::optional<ts2::render::Vec3> simRoot(std::int16_t sim) const;
+    // A lot object's place from the scene, for sounds from objects that are not Sims.
+    std::optional<ts2::render::Vec3> objectRoot(std::int16_t object) const;
     bool openGroundMenu(float x, float y);
     void toggleFreeCamera();
     std::function<float(float, float, std::array<float, 4>&, unsigned&)> hoodFreeGround() const;
@@ -279,6 +282,13 @@ private:
     void puckCamera();
     void toggleNight();
     void startLotLife();
+    // The app's one sound system: made on the first sound or --play-sound, then kept.
+    void ensureAudio();
+    void onSoundEvent(const ts2::sim::SoundEvent& event);
+    // Plays the click a UI window names, or the primary click, when the audio is up.
+    void playUiClick(int window);
+    // The click a live-mode key shortcut stands for (pause, speed, floor, walls, options).
+    void playUiAction(app::LotUi::Action action);
     void drawHousehold(std::uint64_t now);
     void sendLotChanges();
     // The lot's instances shown this frame: those its view shows, less the neighborhood's
@@ -353,6 +363,7 @@ private:
     ts2::render::IRenderer& renderer_;
     const std::filesystem::path install_;
     const MenuOptions& options_;
+    std::unique_ptr<ts2::audio::System> audio_;
     int width_, height_;  // the window's, which the scene is drawn and picked at
     // The UI is laid out in pixels of its own, uiScale_ window pixels each, so it fills a screen
     // uiWidth_ x uiHeight_ of them (see MenuOptions::uiScale).

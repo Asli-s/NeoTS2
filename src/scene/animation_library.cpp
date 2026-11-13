@@ -82,4 +82,17 @@ std::vector<std::pair<float, int>> AnimationLibrary::simAnticsEvents(const std::
     return out;
 }
 
+std::vector<std::pair<float, std::string>> AnimationLibrary::soundEvents(const std::string& name) {
+    std::vector<std::pair<float, std::string>> out;
+    if (const auto animation = find(name)) {
+        for (const auto& event : animation->events) {
+            if (const auto sound = anim::soundEventName(event)) {
+                out.emplace_back(static_cast<float>(event.timeMs), *sound);
+            }
+        }
+    }
+    std::stable_sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    return out;
+}
+
 } // namespace ts2::scene

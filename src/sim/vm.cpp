@@ -137,9 +137,16 @@ bool Execution::primitive(const bhav::Instruction& in, Frame& f) {
     case kLookAtOpcode:           return lookAt(in, f);
     case kAssignLocomotionOpcode: return assignLocomotion(in, f);
     case kEffectOpcode:           return effectStopStart(in, f);
-    // This stops all of an object's sounds, and carries on at once. Nothing plays sounds yet.
-    case kStopAllSoundsOpcode:
+    // This stops all of an object's sounds: its own, or with a nonzero u16 the stack object's, and
+    // carries on at once.
+    case kStopAllSoundsOpcode: {
+        const std::int16_t source =
+            (in.operands[0] != 0 || in.operands[1] != 0) && world().find(stackObject()) != nullptr ? stackObject() : me().id;
+        if (const auto& stop = world().soundStopAll()) {
+            stop(source);
+        }
         return true;
+    }
     // Debug only does something with the game's debug (cheat) setting on: console commands.
     case kDebugOpcode:
         return true;

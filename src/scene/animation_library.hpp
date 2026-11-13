@@ -33,6 +33,8 @@ public:
     [[nodiscard]] std::optional<float> eventTime(const std::string& name, int id);
     // An animation's SimAntics events as (time in milliseconds, number), earliest first.
     [[nodiscard]] std::vector<std::pair<float, int>> simAnticsEvents(const std::string& name);
+    // An animation's sound marks as (time in milliseconds, name), earliest first.
+    [[nodiscard]] std::vector<std::pair<float, std::string>> soundEvents(const std::string& name);
     // Whether an animation has a target (skeleton) of this type (2: a carry pose). False when missing.
     [[nodiscard]] bool hasTargetType(const std::string& name, std::uint16_t type);
 

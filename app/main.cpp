@@ -10,6 +10,7 @@
 //          [--pool-style-sea (the sea with a depth colour and caustics, not in the original game)]
 //          [--smooth-lot-skirts (lots joined to the ground around them without seams, not in the original game)]
 //          [--ui-scale 100|125|150|175|200 (the UI drawn larger, in percent, not in the original game)]
+//   neots2 <install folder> --play-sound <name> [<name> ...]   play tracks and exit
 //   neots2 <install folder> <lot.package> [--shot <out.png> [yaw pitch distance]]
 //          [--seed n (the lot's random draws when it has no saved random state, so runs repeat)]
 //          [--renderer sdlgpu|gl2 (what draws: SDL's GPU API, or OpenGL 2.1)]
@@ -21,6 +22,7 @@
 // comma/period turn a quarter, Z/X or +/- zoom, Page Up/Down change storey, 1/2/3 or Tab walls
 // up/cutaway/down, R roofs on/off. --shot draws one frame to a file and exits.
 #include "content/cameras.hpp"
+#include "audio/system.hpp"
 #include "content/downloads.hpp"
 #include "content/graphics_options.hpp"
 #include "content/install.hpp"
@@ -59,6 +61,7 @@
 #include "platform/platform.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -335,6 +338,21 @@ bool parseOptions(int argc, char** argv, Options& o) {
 
 int main(int argc, char** argv) {
     app::startDiagnostics(argc, argv);
+    // Plays tracks by name and exits, without a window: the quickest way to check the decoder and
+    // a track's name.
+    if (argc >= 4 && std::string_view(argv[2]) == "--play-sound") {
+        ts2::audio::System audio;
+        audio.addInstall(utf8Path(argv[1]));
+        for (int i = 3; i < argc; ++i) {
+            const double seconds = audio.playName(argv[i]);
+            if (seconds <= 0) {
+                ts2::diag::warning(std::string("no sound named ") + argv[i]);
+                continue;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<long long>((seconds + 0.25) * 1000)));
+        }
+        return 0;
+    }
     if (argc >= 3 && std::string_view(argv[2]) == "--menu") {
         MenuOptions menu;
         for (int i = 3; i < argc; ++i) {
@@ -416,6 +434,8 @@ int main(int argc, char** argv) {
                 menu.smoothLotSkirts = true;
             } else if (arg == "--timings") {
                 menu.timings = true;
+            } else if (arg == "--play-sound" && i + 1 < argc) {
+                menu.playSound = argv[++i];
             } else if (arg == "--size" && i + 2 < argc) {
                 menu.sizeGiven = true;
                 menu.width = std::stoi(argv[i + 1]);
