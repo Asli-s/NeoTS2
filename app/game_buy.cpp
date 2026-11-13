@@ -26,11 +26,10 @@ void Game::enterBuy() {
     if (!lotLife_ || buyActive_) {
         return;
     }
-    buyActive_ = true;
     // Buy mode pauses the game; leaving it brings back the pause it had (from before the options
-    // menu, when Buy mode took its place).
-    pausedBeforeBuy_ = lotUi_.buyOpenedFromOptions() ? pausedBeforeOptions_ : lotLife_->paused();
-    lotUi_.setBuyOpenedFromOptions(false);
+    // menu or Build or Story mode, when Buy mode took its place).
+    pausedBeforeBuy_ = takePauseBeforeModes();
+    buyActive_ = true;
     lotLife_->setPaused(true);
     boughtThisVisit_.clear();
     ts2::diag::step("buy mode: opened");
@@ -48,6 +47,45 @@ void Game::leaveBuy(bool restorePause) {
         lotLife_->setPaused(pausedBeforeBuy_);
     }
     ts2::diag::step("buy mode: closed");
+}
+
+bool Game::takePauseBeforeModes() {
+    const bool fromOptions = lotUi_.modeOpenedFromOptions();
+    lotUi_.setModeOpenedFromOptions(false);
+    if (buyActive_) {
+        const bool paused = pausedBeforeBuy_;
+        leaveBuy(false);
+        return paused;
+    }
+    if (buildActive_ || storyActive_) {
+        leavePanelMode(false);
+        return pausedBeforeMode_;
+    }
+    if (fromOptions) {
+        return pausedBeforeOptions_;
+    }
+    return lotLife_ ? lotLife_->paused() : false;
+}
+
+void Game::enterPanelMode(bool build) {
+    if (!lotLife_ || (build ? buildActive_ : storyActive_)) {
+        return;
+    }
+    pausedBeforeMode_ = takePauseBeforeModes();
+    (build ? buildActive_ : storyActive_) = true;
+    lotLife_->setPaused(true);
+    ts2::diag::step(build ? "build mode: opened" : "story mode: opened");
+}
+
+void Game::leavePanelMode(bool restorePause) {
+    if (!buildActive_ && !storyActive_) {
+        return;
+    }
+    ts2::diag::step(buildActive_ ? "build mode: closed" : "story mode: closed");
+    buildActive_ = storyActive_ = false;
+    if (restorePause && lotLife_) {
+        lotLife_->setPaused(pausedBeforeMode_);
+    }
 }
 
 void Game::buyTip(const std::string& text) {

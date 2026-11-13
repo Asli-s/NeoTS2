@@ -96,7 +96,7 @@ public:
     void hideForFreeCamera(bool hide);
 
     // What a released button asks for.
-    enum class Action { None, Neighborhood, Quit, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, GameOptionChanged, GraphicsOptionChanged, RewardsOpened, RewardsClosed, SelectSim, TrackSim, CentreOnNeighbor, CloseNotification, FloorUp, FloorDown, WallMode, ToggleCeiling, MainMenu, BuyOpened, BuyClosed, BuyItem };
+    enum class Action { None, Neighborhood, Quit, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, GameOptionChanged, GraphicsOptionChanged, RewardsOpened, RewardsClosed, SelectSim, TrackSim, CentreOnNeighbor, CloseNotification, FloorUp, FloorDown, WallMode, ToggleCeiling, MainMenu, BuyOpened, BuyClosed, BuyItem, BuildOpened, BuildClosed, StoryOpened, StoryClosed };
     Action clicked(int window);
     // The puck's camera button held down under the mouse.
     enum class CameraButton { None, RotateLeft, RotateRight, ZoomIn, ZoomOut };
@@ -133,9 +133,18 @@ public:
     bool buyShown() const;
     // The object type a click on the Buy catalog picked (for BuyItem).
     std::uint32_t pickedBuyItem() const { return pickedBuyItem_; }
-    // Whether Buy mode last opened in place of the options menu (for BuyOpened).
-    bool buyOpenedFromOptions() const { return buyFromOptions_; }
-    void setBuyOpenedFromOptions(bool from) { buyFromOptions_ = from; }
+    // Whether the mode last opened (Buy, Build or Story) opened in place of the options menu (for
+    // BuyOpened, BuildOpened and StoryOpened).
+    bool modeOpenedFromOptions() const { return modeFromOptions_; }
+    void setModeOpenedFromOptions(bool from) { modeFromOptions_ = from; }
+    // Shows or hides the Build mode panel, as the puck's Build button and F3 open it and its Live
+    // button and F1 close it. Its tools aren't built yet, so they are greyed.
+    void showBuild(bool show);
+    bool buildShown() const;
+    // Shows or hides Story mode's story editor, as the puck's Story button and F4 open it and its
+    // close button, the puck's Live button and F1 close it. Albums aren't read yet: it shows none.
+    void showStory(bool show);
+    bool storyShown() const;
     // Shows the Buy catalog's page (its pictures and names) for the lot.
     void refreshBuy(LotLife& life);
 
@@ -170,6 +179,18 @@ private:
     // Moves a panel so that its anchor (a hidden window captioned "<window id>:bl") sits on that
     // window of the puck.
     void anchor(int panel);
+    // Shows or hides a mode's panel (Buy, Build or Story mode) in place of the live panel, its puck
+    // button lit while it shows. Showing one hides the options menu and the other modes' panels.
+    void showMode(int panel, std::uint32_t button, bool show);
+    // Hides the modes' panels but `keep` (-1: all), their puck buttons unlit.
+    void hideModesBut(int keep);
+    // The mode panel showing, -1 when none.
+    int shownMode() const;
+    // Sets up the Build panel and the story editor with only what works yet usable.
+    void setUpBuildPanel();
+    void setUpStoryPanel();
+    // Keeps the story editor in the middle of the screen.
+    void centreStory();
     int left(int window) const;
     void openWallMenu();
     void closeWallMenu();
@@ -202,10 +223,11 @@ private:
     ts2::ui::Screen& screen_;
     int width_, height_;
     bool testingCheats_ = false;
-    int puck_ = -1, live_ = -1, options_ = -1, buy_ = -1;
+    int puck_ = -1, live_ = -1, options_ = -1, buy_ = -1, build_ = -1, story_ = -1;
     BuyPanel buyPanel_;
     std::uint32_t pickedBuyItem_ = 0;
-    bool buyFromOptions_ = false, buyWasShown_ = false;
+    bool modeFromOptions_ = false;
+    int modeWasShown_ = -1;  // the mode's panel shown before the free camera hid the panels, -1: none
     int version_ = -1;  // the version text, -1 when it isn't shown
     int loaded_ = 0;  // parts of the panels loaded (see load), 2 when all are
     int funds_ = -1, wallMenu_ = -1, clock_ = -1;

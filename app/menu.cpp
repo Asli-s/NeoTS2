@@ -1476,6 +1476,7 @@ void Game::leaveLot() {
     ts2::diag::step("back to the neighborhood");
     // What Buy mode's hand holds is let go; what was bought stays with the lot until it is gone.
     leaveBuy(false);
+    leavePanelMode(false);
     endCameraDrag();
     inLot_ = false;
     if (surroundingsBuilding_.valid()) {
@@ -1630,11 +1631,19 @@ app::LotUi::Action Game::lotKey(const pf::Event& e) {
     case pf::Key::F5:
         lotUi_.showOptions(!lotUi_.optionsShown());
         return lotUi_.optionsShown() ? Action::OptionsOpened : Action::OptionsClosed;
-    // F1 is Live mode and F2 Buy mode.
+    // F1 is Live mode, F2 Buy mode, F3 Build mode and F4 Story (album) mode.
     case pf::Key::F1:
         if (lotUi_.buyShown()) {
             lotUi_.showBuy(false);
             return Action::BuyClosed;
+        }
+        if (lotUi_.buildShown()) {
+            lotUi_.showBuild(false);
+            return Action::BuildClosed;
+        }
+        if (lotUi_.storyShown()) {
+            lotUi_.showStory(false);
+            return Action::StoryClosed;
         }
         if (lotUi_.optionsShown()) {
             lotUi_.showOptions(false);
@@ -1645,9 +1654,23 @@ app::LotUi::Action Game::lotKey(const pf::Event& e) {
         if (lotUi_.buyShown()) {
             return Action::None;
         }
-        lotUi_.setBuyOpenedFromOptions(lotUi_.optionsShown());
+        lotUi_.setModeOpenedFromOptions(lotUi_.optionsShown());
         lotUi_.showBuy(true);
         return Action::BuyOpened;
+    case pf::Key::F3:
+        if (lotUi_.buildShown()) {
+            return Action::None;
+        }
+        lotUi_.setModeOpenedFromOptions(lotUi_.optionsShown());
+        lotUi_.showBuild(true);
+        return Action::BuildOpened;
+    case pf::Key::F4:
+        if (lotUi_.storyShown()) {
+            return Action::None;
+        }
+        lotUi_.setModeOpenedFromOptions(lotUi_.optionsShown());
+        lotUi_.showStory(true);
+        return Action::StoryOpened;
     case pf::Key::Q: return Action::Quit;
     default: return Action::None;
     }
@@ -1689,17 +1712,16 @@ void Game::lotAction(app::LotUi::Action action) {
     case Action::High: lotLife_->setSpeed(ts2::sim::Speed::High); break;
     case Action::Ultra: lotLife_->setSpeed(ts2::sim::Speed::Ultra); break;
     case Action::OptionsOpened:
-        // From Buy mode, the options keep the pause from before Buy mode.
-        if (buyActive_) {
-            pausedBeforeOptions_ = pausedBeforeBuy_;
-            leaveBuy(false);
-        } else {
-            pausedBeforeOptions_ = lotLife_->paused();
-        }
+        // From Buy, Build or Story mode, the options keep the pause from before that mode.
+        pausedBeforeOptions_ = takePauseBeforeModes();
         lotLife_->setPaused(true);
         break;
     case Action::BuyOpened: enterBuy(); break;
     case Action::BuyClosed: leaveBuy(true); break;
+    case Action::BuildOpened: enterPanelMode(true); break;
+    case Action::StoryOpened: enterPanelMode(false); break;
+    case Action::BuildClosed:
+    case Action::StoryClosed: leavePanelMode(true); break;
     case Action::BuyItem: buyItem(lotUi_.pickedBuyItem()); break;
     case Action::OptionsClosed: lotLife_->setPaused(pausedBeforeOptions_); break;
     case Action::GraphicsOptionChanged:
@@ -2178,7 +2200,7 @@ void Game::lotMouse(const pf::Event& e, float x, float y) {
     }
     const bool leftDown = e.type == pf::Event::Type::MouseDown && e.button == pf::MouseButton::Left;
     // A left click on the highlighted object opens its pie menu for the selected Sim.
-    if (lotLife_ && hovered_ != 0 && leftDown && !buyActive_ && !screen_.over(ix, iy)) {
+    if (lotLife_ && hovered_ != 0 && leftDown && !buyActive_ && !panelModeActive() && !screen_.over(ix, iy)) {
         const std::uint32_t part = lotLife_->partAt(hovered_, hoveredPoint_, lot_);
         if (auto choices = lotLife_->pieMenu(part, mouseShift_); !choices.empty()) {
             pieObject_ = part;
@@ -2188,7 +2210,7 @@ void Game::lotMouse(const pf::Event& e, float x, float y) {
         }
     }
     // A left click on empty floor or ground opens the menu of a destination made there.
-    if (lotLife_ && hovered_ == 0 && leftDown && !lotUi_.optionsShown() && !buyActive_ && !screen_.over(ix, iy) && openGroundMenu(x, y)) {
+    if (lotLife_ && hovered_ == 0 && leftDown && !lotUi_.optionsShown() && !buyActive_ && !panelModeActive() && !screen_.over(ix, iy) && openGroundMenu(x, y)) {
         showPieCursor();
         return;
     }
@@ -2322,20 +2344,22 @@ void Game::updateLot(std::uint64_t now) {
         const auto ray = screenRay(orbit_.camera(), width_, height_, (*hoverAt_)[0], (*hoverAt_)[1]);
         const auto hit = lotPicker_.pick(lot_, shown, orbit_.camera().eye, ray, &lotPose_);
         const std::uint32_t object = hit ? hit->object : 0;
-        // In Buy mode the hand highlights what it can pick up (nothing while it holds something).
-        hovered_ = buyActive_ ? (!buyHeld_ && lotLife_->movable(static_cast<std::int16_t>(object)) ? object : 0)
-                              : (lotLife_->hoverable(object, mouseShift_) ? object : 0);
+        // In Buy mode the hand highlights what it can pick up (nothing while it holds something). Build
+        // and Story mode highlight nothing yet.
+        hovered_ = buyActive_    ? (!buyHeld_ && lotLife_->movable(static_cast<std::int16_t>(object)) ? object : 0)
+                   : panelModeActive() ? 0
+                   : (lotLife_->hoverable(object, mouseShift_) ? object : 0);
         if (hit) {
             const auto& eye = orbit_.camera().eye;
             hoveredPoint_ = {eye[0] + ray[0] * hit->distance, eye[1] + ray[1] * hit->distance, eye[2] + ray[2] * hit->distance};
         }
         hoveredSim_ = hovered_ != 0 && lotLife_->isSim(hovered_);
-        liveCursor_ = buyActive_ ? app::Cursors::kArrow : liveCursor(hit ? &lot_.instances[hit->instance] : nullptr, hovered_ != 0, hoveredSim_);
+        liveCursor_ = buyActive_ || panelModeActive() ? app::Cursors::kArrow : liveCursor(hit ? &lot_.instances[hit->instance] : nullptr, hovered_ != 0, hoveredSim_);
         cursors_.show(liveCursor_);
         // A Sim the mouse comes to shows its name at once, pointing at where the ray hit it. Moving
         // over the same Sim changes nothing, and the tip goes when the mouse leaves it. Buy mode uses
         // the tip for its own messages.
-        if (object != spotTipObject_ && !buyActive_) {
+        if (object != spotTipObject_ && !buyActive_ && !panelModeActive()) {
             spotTipObject_ = object;
             spotTipPoint_ = hoveredPoint_;
             const bool sim = object != 0 && lotLife_->isSim(object);

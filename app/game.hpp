@@ -569,6 +569,8 @@ private:
     // Buy mode (app/game_buy.cpp). It pauses the game while open. The hand holds one object at a
     // time: one just bought from the catalog (paid for once placed) or one picked up from the lot.
     bool buyActive_ = false, pausedBeforeBuy_ = false;
+    // Build and Story mode, which only show their panels yet. They pause the game too.
+    bool buildActive_ = false, storyActive_ = false, pausedBeforeMode_ = false;
     struct BuyHeld {
         std::int16_t object = 0;
         bool fromCatalog = false;                     // bought now, not placed yet
@@ -585,6 +587,13 @@ private:
     std::optional<std::array<float, 2>> buyMouseAt_;  // where the mouse last was over the lot, in the window
     void enterBuy();
     void leaveBuy(bool restorePause);
+    // The pause from before Buy, Build or Story mode or the options menu, whichever is open as
+    // another of them opens in its place, which it leaves. The game's pause now when none is.
+    bool takePauseBeforeModes();
+    bool panelModeActive() const { return buildActive_ || storyActive_; }
+    // Opens Build or Story mode, or closes whichever is open and brings back the pause from before.
+    void enterPanelMode(bool build);
+    void leavePanelMode(bool restorePause);
     void buyItem(std::uint32_t guid);
     // Buy mode's share of the mouse on the lot: true when it took the event.
     bool buyMouse(const ts2::platform::Event& e, float x, float y);

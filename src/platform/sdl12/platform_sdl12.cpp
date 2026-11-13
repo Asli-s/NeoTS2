@@ -59,7 +59,7 @@ constexpr KeyInfo kKeys[] = {
     {Key::PageDown, SDLK_PAGEDOWN},
     {Key::Home, SDLK_HOME},
     {Key::End, SDLK_END},
-    {Key::F1, SDLK_F1}, {Key::F2, SDLK_F2}, {Key::F5, SDLK_F5},
+    {Key::F1, SDLK_F1}, {Key::F2, SDLK_F2}, {Key::F3, SDLK_F3}, {Key::F4, SDLK_F4}, {Key::F5, SDLK_F5},
     {Key::Up, SDLK_UP},
     {Key::Down, SDLK_DOWN},
     {Key::Left, SDLK_LEFT},

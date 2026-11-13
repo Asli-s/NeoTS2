@@ -32,6 +32,21 @@ constexpr std::uint32_t kPuck = 0x4905F85B, kLivePanel = 0x49060005, kOptionsMen
 constexpr std::uint32_t kLiveMode = 0x37D97B25, kOptions = 0x67D97B2F, kFunds = 0x00003000;
 // Buy mode: the puck's Buy button and the Buy panel's script.
 constexpr std::uint32_t kBuyMode = 0x67D97B2A, kBuyPanel = 0x49060004;
+// Build mode: the puck's Build button and the Build panel's script. In the panel: the hand (lit),
+// the Build Mode tab (lit), the other tools, the group of category buttons, the catalog and the
+// auto roof options, which show once a category is picked.
+constexpr std::uint32_t kBuildMode = 0x77D97B28, kBuildPanel = 0x49060003;
+constexpr std::uint32_t kBuildHand = 0x000000A5, kBuildTab = 0x000000A6, kBuildCategories = 0x0000A000, kBuildCatalog = 0xAD502BBF,
+                        kAutoRoofOptions = 0x000000AC;
+constexpr std::array<std::uint32_t, 8> kBuildToolsNotDone = {0xA1, 0xA2, 0xA3, 0xA4, 0xAA, 0xAB, 0xAE, 0xAF};
+// Story mode: the puck's Album button (F4, Set Album Mode) and the story editor's script, with its
+// close button, its views (organize, story and blog), the story view's no-entries text, and the
+// album's name. The story view's buttons and the editor's other buttons aren't built yet.
+constexpr std::uint32_t kStoryMode = 0x27D97B2D, kStoryPanel = 0x0C7FE4BF, kStoryClose = 0xCC800571;
+constexpr std::uint32_t kOrganizeView = 0xACB252C1, kStoryView = 0x8CB2529E, kBlogView = 0x4CB2526C, kNoEntries = 0x0D49F038,
+                        kAlbumName = 0x2C8006C4, kCaption = 0x2C8006CA;
+constexpr std::array<std::uint32_t, 7> kStoryButtonsNotDone = {0x6CD88190, 0xACB79625, 0x6CB795EC, 0x2C8006B9,
+                                                               0x2C8006BC, 0x0CB23B3C, 0x6D4898DD};
 constexpr std::uint32_t kFloorUp = 0x00002001, kFloorDown = 0x00002000, kToggleCeiling = 0x00007000;
 // The camera buttons: rotate left and right, zoom in and out.
 constexpr std::uint32_t kCameraButtons[] = {0x00001001, 0x00001000, 0x00001002, 0x00001003};
@@ -204,6 +219,8 @@ void LotUi::load() {
         live_ = screen_.load(kScripts, kLivePanel, 0, 0);
         options_ = screen_.load(kScripts, kOptionsMenu, 0, 0);
         buy_ = screen_.load(kScripts, kBuyPanel, 0, 0);
+        build_ = screen_.load(kScripts, kBuildPanel, 0, 0);
+        story_ = screen_.load(kScripts, kStoryPanel, 0, 0);
         hoodPanel_ = screen_.load(kScripts, kHoodOptions, 0, kHoodPanelY);
         hoodStrip_ = screen_.find(hoodPanel_, kHoodStrip);
         hoodButtonHolder_ = screen_.find(hoodPanel_, kHoodButtonHolder);
@@ -218,7 +235,10 @@ void LotUi::load() {
         anchor(live_);
         anchor(options_);
         anchor(buy_);
+        anchor(build_);
         buyPanel_.attach(screen_, buy_);
+        setUpBuildPanel();
+        setUpStoryPanel();
         screen_.raise(puck_);
         // The clock and speed buttons, and the frame the live panel lays out. The rest (portrait,
         // influence and aspiration meters) isn't built yet.
@@ -262,11 +282,12 @@ void LotUi::setSize(int width, int height) {
     if (loaded_ < 2) {
         return;
     }
-    for (const int panel : {puck_, live_, options_, buy_}) {
+    for (const int panel : {puck_, live_, options_, buy_, build_}) {
         if (panel >= 0) {
             screen_.move(panel, screen_.x(panel), screen_.y(panel) + down);
         }
     }
+    centreStory();
     pauseFrame_.layout(width, height);
     if (version_ >= 0) {
         screen_.move(version_, width_ - screen_.width(version_) - kVersionInset, kVersionInset);
@@ -316,7 +337,7 @@ void LotUi::close() {
     closeWallMenu();
     pauseFrame_.show(false);
     queue_.setVisible(false);
-    for (const int panel : {puck_, live_, options_, buy_, version_}) {
+    for (const int panel : {puck_, live_, options_, buy_, build_, story_, version_}) {
         if (panel >= 0) {
             screen_.setVisible(panel, false);
         }
@@ -383,10 +404,10 @@ void LotUi::hideForFreeCamera(bool hide) {
     skewer_.setHidden(hide);
     if (hide) {
         optionsWereShown_ = optionsShown();
-        buyWasShown_ = buyShown();
+        modeWasShown_ = shownMode();
         closeWallMenu();
         queue_.setVisible(false);
-        for (const int panel : {puck_, live_, options_, buy_, version_}) {
+        for (const int panel : {puck_, live_, options_, buy_, build_, story_, version_}) {
             if (panel >= 0) {
                 screen_.setVisible(panel, false);
             }
@@ -403,8 +424,12 @@ void LotUi::hideForFreeCamera(bool hide) {
         screen_.setVisible(live_, true);
     }
     showOptions(optionsWereShown_);
-    if (buyWasShown_) {
+    if (modeWasShown_ >= 0 && modeWasShown_ == buy_) {
         showBuy(true);
+    } else if (modeWasShown_ >= 0 && modeWasShown_ == build_) {
+        showBuild(true);
+    } else if (modeWasShown_ >= 0 && modeWasShown_ == story_) {
+        showStory(true);
     }
 }
 
@@ -451,10 +476,10 @@ void LotUi::anchor(int panel) {
 }
 
 void LotUi::showOptions(bool show) {
-    // The options menu is not live mode, so the queue goes with the live panel. It takes Buy mode's place.
-    if (show && buy_ >= 0) {
-        screen_.setVisible(buy_, false);
-        screen_.setChecked(screen_.find(puck_, kBuyMode), false);
+    // The options menu is not live mode, so the queue goes with the live panel. It takes the place
+    // of Buy, Build and Story mode.
+    if (show) {
+        hideModesBut(-1);
     }
     queue_.setVisible(!show);
     if (options_ < 0) {
@@ -477,29 +502,120 @@ void LotUi::showOptions(bool show) {
 
 bool LotUi::optionsShown() const { return options_ >= 0 && screen_.visible(options_); }
 
-void LotUi::showBuy(bool show) {
-    if (buy_ < 0) {
+void LotUi::hideModesBut(int keep) {
+    const std::array<std::pair<int, std::uint32_t>, 3> modes = {{{buy_, kBuyMode}, {build_, kBuildMode}, {story_, kStoryMode}}};
+    for (const auto& [panel, button] : modes) {
+        if (panel >= 0 && panel != keep) {
+            screen_.setVisible(panel, false);
+            screen_.setChecked(screen_.find(puck_, button), false);
+        }
+    }
+}
+
+void LotUi::showMode(int panel, std::uint32_t button, bool show) {
+    if (panel < 0) {
         return;
     }
     if (show) {
         if (optionsShown()) {
             showOptions(false);
         }
-        buyPanel_.reset();
+        hideModesBut(panel);  // one mode at a time
     }
-    screen_.setVisible(buy_, show);
-    // Buy mode isn't live mode: the live panel and the queue give way, as they do to the options.
+    screen_.setVisible(panel, show);
+    // A mode isn't live mode: the live panel and the queue give way, as they do to the options.
     queue_.setVisible(!show);
     screen_.setVisible(live_, !show && hasMembers_);
     skewer_.setLiveMode(!show);
-    screen_.setChecked(screen_.find(puck_, kBuyMode), show);
+    screen_.setChecked(screen_.find(puck_, button), show);
     const int live = screen_.find(puck_, kLiveMode);
     screen_.setEnabled(live, hasMembers_);
     screen_.setChecked(live, !show && hasMembers_);
     screen_.raise(puck_);
+    if (show && panel == story_) {
+        screen_.raise(story_);
+    }
+}
+
+int LotUi::shownMode() const {
+    for (const int panel : {buy_, build_, story_}) {
+        if (panel >= 0 && screen_.visible(panel)) {
+            return panel;
+        }
+    }
+    return -1;
+}
+
+void LotUi::showBuy(bool show) {
+    if (show && buy_ >= 0) {
+        buyPanel_.reset();
+    }
+    showMode(buy_, kBuyMode, show);
 }
 
 bool LotUi::buyShown() const { return buy_ >= 0 && screen_.visible(buy_); }
+
+void LotUi::showBuild(bool show) { showMode(build_, kBuildMode, show); }
+
+bool LotUi::buildShown() const { return build_ >= 0 && screen_.visible(build_); }
+
+void LotUi::showStory(bool show) {
+    if (show) {
+        centreStory();
+    }
+    showMode(story_, kStoryMode, show);
+}
+
+bool LotUi::storyShown() const { return story_ >= 0 && screen_.visible(story_); }
+
+void LotUi::setUpBuildPanel() {
+    if (build_ < 0) {
+        return;
+    }
+    // Until a category is picked the catalog and the roof options don't show.
+    screen_.setVisible(screen_.find(build_, kBuildCatalog), false);
+    screen_.setVisible(screen_.find(build_, kAutoRoofOptions), false);
+    screen_.setChecked(screen_.find(build_, kBuildHand), true);
+    screen_.setChecked(screen_.find(build_, kBuildTab), true);
+    for (const std::uint32_t id : kBuildToolsNotDone) {
+        screen_.setEnabled(screen_.find(build_, id), false);
+    }
+    // No Build mode tool is built yet: walls, floors, doors and windows, terrain and the rest.
+    if (const int categories = screen_.find(build_, kBuildCategories); categories >= 0) {
+        for (const int category : screen_.children(categories)) {
+            screen_.setEnabled(category, false);
+        }
+    }
+}
+
+void LotUi::setUpStoryPanel() {
+    if (story_ < 0) {
+        return;
+    }
+    // It opens on the story view. The family's albums aren't read yet, so it shows no snapshot,
+    // and as there may be some it doesn't say there are none.
+    screen_.setVisible(screen_.find(story_, kOrganizeView), false);
+    screen_.setVisible(screen_.find(story_, kBlogView), false);
+    const int story = screen_.find(story_, kStoryView);
+    screen_.setVisible(story, true);
+    screen_.setVisible(screen_.find(story, kNoEntries), false);
+    screen_.setEnabled(screen_.find(story, kCaption), false);
+    for (const std::uint32_t id : kStoryButtonsNotDone) {
+        screen_.setEnabled(screen_.find(story_, id), false);
+    }
+    // "[autotext]" marks a name the game fills in.
+    const int name = screen_.find(story_, kAlbumName);
+    if (const std::string text = name >= 0 ? screen_.text(name) : std::string(); text.starts_with("[autotext] ")) {
+        screen_.setText(name, text.substr(11));
+    }
+    screen_.setEnabled(name, false);
+}
+
+void LotUi::centreStory() {
+    if (story_ >= 0) {
+        screen_.move(story_, (width_ - screen_.width(story_)) / 2, (height_ - screen_.height(story_)) / 2);
+    }
+}
 
 void LotUi::refreshBuy(LotLife& life) {
     if (!buyShown()) {
@@ -634,13 +750,36 @@ LotUi::Action LotUi::clicked(int window) {
         if (buyShown()) {
             return Action::None;
         }
-        buyFromOptions_ = optionsShown();
+        modeFromOptions_ = optionsShown();
         showBuy(true);
         return Action::BuyOpened;
     }
     if (id == kLiveMode && screen_.parent(window) == puck_ && buyShown()) {
         showBuy(false);
         return Action::BuyClosed;
+    }
+    // Build and Story mode: their puck buttons open them, and Live closes them, as does the story
+    // editor's close button.
+    if ((id == kBuildMode || id == kStoryMode) && screen_.parent(window) == puck_) {
+        const bool build = id == kBuildMode;
+        if (build ? buildShown() : storyShown()) {
+            return Action::None;
+        }
+        modeFromOptions_ = optionsShown();
+        if (build) {
+            showBuild(true);
+        } else {
+            showStory(true);
+        }
+        return build ? Action::BuildOpened : Action::StoryOpened;
+    }
+    if (id == kLiveMode && screen_.parent(window) == puck_ && buildShown()) {
+        showBuild(false);
+        return Action::BuildClosed;
+    }
+    if (storyShown() && ((id == kLiveMode && screen_.parent(window) == puck_) || window == screen_.find(story_, kStoryClose))) {
+        showStory(false);
+        return Action::StoryClosed;
     }
     if (const auto click = buyPanel_.clicked(window); click.panel) {
         if (click.buy) {
