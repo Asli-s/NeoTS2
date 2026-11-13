@@ -258,8 +258,9 @@ void unimplementedPrimitiveStopsWithItsOpcode() {
     CHECK(r.detail == "0x0004");
 }
 
-// Tutorial (0x0A) and UI Effect (0x22) only change the game's UI, so they carry on as true.
-void uiOnlyPrimitivesCarryOn() {
+// UI Effect (0x22) only changes the game's UI, so it carries on as true. Situation (0x0A) begin and
+// end answer false: NeoTS2 has no situations yet, the cases where the game answers false too.
+void uiEffectAndSituationDontStop() {
     for (const std::uint16_t opcode : {std::uint16_t{0x000A}, std::uint16_t{0x0022}}) {
         MemoryCodeSource code;
         Instruction in;
@@ -268,7 +269,7 @@ void uiOnlyPrimitivesCarryOn() {
         in.falseTarget = F;
         code.add(kObjectGroup, 0x1000, bhav({in}));
         ThreadState t;
-        CHECK(runPrivate(code, t, 0x1000).outcome == Outcome::True);
+        CHECK(runPrivate(code, t, 0x1000).outcome == (opcode == 0x0022 ? Outcome::True : Outcome::False));
     }
 }
 
@@ -1191,7 +1192,7 @@ std::vector<Test> vmCoreTests() {
         {"infinite recursion hits depth limit", infiniteRecursionHitsDepthLimit},
         {"missing call target is reported", missingCallTargetIsReported},
         {"unimplemented primitive stops with its opcode", unimplementedPrimitiveStopsWithItsOpcode},
-        {"UI-only primitives carry on", uiOnlyPrimitivesCarryOn},
+        {"UI Effect and Situation don't stop the run", uiEffectAndSituationDontStop},
         {"jump past the end is an error", jumpPastTheEndIsAnError},
         {"attributes belong to each object", attributesBelongToEachObject},
         {"Init - Object sets defaults; attributes and semi-attributes by param", initObjectSetsDefaultsAndAttributesByParam},

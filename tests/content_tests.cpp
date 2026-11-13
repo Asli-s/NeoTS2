@@ -17,6 +17,7 @@
 #include "paths/save_folders.hpp"
 
 #include <cstdlib>
+#include <sstream>
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
@@ -868,6 +869,31 @@ void packagesAreRewrittenSafely() {
         return false;
     };
     CHECK(throws([&] { (void)ts2::content::rewritePackage(lot, std::vector<ts2::content::ReplacedResource>{{a, {}}, {a, {}}}); }));
+
+    // Most saved lots are DBPF 1.1, and some old ones have index 7.0: a rewrite keeps both.
+    const fs::path old = root / "Tutorial_Lot1.package";
+    {
+        std::ofstream out(old, std::ios::binary);
+        ts2::dbpf::PackageWriter writer(out);
+        writer.keepVersions(0, 0);
+        writer.add(a, bytes("object a"), false, 0);
+        writer.add(b, bytes("packed b"), true, 50);
+        writer.finish(0x00010001);
+    }
+    const std::string oldHeader = read(old).substr(0, 0x44);
+    report = ts2::content::rewritePackage(old);
+    CHECK(report.copied == 2);
+    // Version 1.0 at 0x08, index 7.0 at 0x3C (the reader takes it as 7.1, as the game does) and 0x40.
+    const std::string newHeader = read(old).substr(0, 0x44);
+    CHECK(newHeader.substr(0x04, 8) == oldHeader.substr(0x04, 8) && newHeader.substr(0x3C, 8) == oldHeader.substr(0x3C, 8));
+    CHECK(newHeader[0x08] == 0 && newHeader[0x3C] == 0);
+    {
+        std::ostringstream sink;
+        ts2::dbpf::PackageWriter writer(sink);
+        writer.keepVersions(1, 1);
+        writer.add({a.type, a.group, a.instance, 9}, bytes("x"), false, 0);
+        CHECK(throws([&] { writer.finish(0); }));  // 7.1 has no instance-high field
+    }
 
     const fs::path broken = root / "broken.package";
     write(broken, "not a package at all, not even close to a header");

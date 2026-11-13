@@ -3,6 +3,7 @@
 #include "formats/dbpf.hpp"
 
 #include <cstdint>
+#include <optional>
 #include <ostream>
 #include <span>
 #include <vector>
@@ -27,10 +28,17 @@ public:
     // or `instanceHigh` asks for them, as when a package that had them is written again.
     void finish(std::uint32_t headerWord40, bool instanceHigh = false);
 
+    // Writes the header with these versions instead (DBPF 1.`minorVersion`, index
+    // 7.`indexMinorVersion`), as a package written again keeps the ones it had. Index 7.2 has
+    // instance-high fields, 7.0 and 7.1 don't, so a resource that needs one with 7.0 or 7.1 throws.
+    void keepVersions(std::uint32_t minorVersion, std::uint32_t indexMinorVersion);
+
 private:
     void write(std::span<const std::uint8_t> bytes);
 
     std::ostream& out_;
+    std::uint32_t minorVersion_ = 2;
+    std::optional<std::uint32_t> indexMinorVersion_;
     std::uint64_t position_ = 0;
     std::vector<IndexEntry> entries_;
 };

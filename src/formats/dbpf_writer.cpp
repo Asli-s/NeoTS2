@@ -60,10 +60,27 @@ void PackageWriter::add(const ResourceKey& key, std::span<const std::uint8_t> st
     entries_.push_back(entry);
 }
 
-void PackageWriter::finish(std::uint32_t headerWord40, bool instanceHigh) {
-    for (const IndexEntry& entry : entries_) {
-        instanceHigh = instanceHigh || entry.key.instanceHigh != 0;
+void PackageWriter::keepVersions(std::uint32_t minorVersion, std::uint32_t indexMinorVersion) {
+    if (minorVersion > 2 || indexMinorVersion > 2) {
+        throw std::invalid_argument("DBPF: only versions 1.0-1.2 with index 7.0-7.2 are written");
     }
+    minorVersion_ = minorVersion;
+    indexMinorVersion_ = indexMinorVersion;
+}
+
+void PackageWriter::finish(std::uint32_t headerWord40, bool instanceHigh) {
+    bool needsInstanceHigh = false;
+    for (const IndexEntry& entry : entries_) {
+        needsInstanceHigh = needsInstanceHigh || entry.key.instanceHigh != 0;
+    }
+    std::uint32_t indexMinor = needsInstanceHigh || instanceHigh ? 2 : 1;
+    if (indexMinorVersion_) {
+        if (needsInstanceHigh && *indexMinorVersion_ != 2) {
+            throw std::runtime_error("DBPF: a resource has an instance-high value the kept index version can't hold");
+        }
+        indexMinor = *indexMinorVersion_;
+    }
+    instanceHigh = indexMinor == 2;
     std::vector<std::uint8_t> directory;
     for (const IndexEntry& entry : entries_) {
         if (entry.compressed) {
@@ -85,8 +102,8 @@ void PackageWriter::finish(std::uint32_t headerWord40, bool instanceHigh) {
     write(index);
 
     std::vector<std::uint8_t> header{'D', 'B', 'P', 'F'};
-    put(header, 1);  // version 1.2
-    put(header, 2);
+    put(header, 1);  // version 1.2 unless kept
+    put(header, minorVersion_);
     header.resize(0x20, 0);  // reserved and dates, left 0 as the game leaves them
     put(header, 7);  // index version 7
     put(header, static_cast<std::uint32_t>(entries_.size()));
@@ -95,7 +112,7 @@ void PackageWriter::finish(std::uint32_t headerWord40, bool instanceHigh) {
     put(header, 0);  // no holes
     put(header, 0);
     put(header, 0);
-    put(header, instanceHigh ? 2 : 1);
+    put(header, indexMinor);
     put(header, headerWord40);
     header.resize(kHeaderSize, 0);
     if (!out_.seekp(0) || !out_.write(reinterpret_cast<const char*>(header.data()), static_cast<std::streamsize>(header.size())) ||

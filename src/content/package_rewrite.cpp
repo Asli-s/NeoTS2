@@ -16,16 +16,27 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr std::size_t kHeaderWord40 = 0x40;
+// The header's words a rewrite keeps, as stored. The reader's Header can't give the index minor
+// version as stored: it reads a version 1.0 file's as 1, as the game does.
+struct KeptWords {
+    std::uint32_t minorVersion = 0;       // at 0x08
+    std::uint32_t indexMinorVersion = 0;  // at 0x3C
+    std::uint32_t word40 = 0;             // at 0x40
 
-std::uint32_t headerWord40(const fs::path& file) {
-    std::array<std::uint8_t, kHeaderWord40 + 4> bytes{};
+    bool operator==(const KeptWords&) const = default;
+};
+
+KeptWords keptWords(const fs::path& file) {
+    std::array<std::uint8_t, 0x44> bytes{};
     std::ifstream in(file, std::ios::binary);
     if (!in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()))) {
         throw std::runtime_error("can't read the package's header");
     }
-    return static_cast<std::uint32_t>(bytes[kHeaderWord40]) | static_cast<std::uint32_t>(bytes[kHeaderWord40 + 1]) << 8 |
-           static_cast<std::uint32_t>(bytes[kHeaderWord40 + 2]) << 16 | static_cast<std::uint32_t>(bytes[kHeaderWord40 + 3]) << 24;
+    const auto at = [&](std::size_t o) {
+        return static_cast<std::uint32_t>(bytes[o]) | static_cast<std::uint32_t>(bytes[o + 1]) << 8 |
+               static_cast<std::uint32_t>(bytes[o + 2]) << 16 | static_cast<std::uint32_t>(bytes[o + 3]) << 24;
+    };
+    return {at(0x08), at(0x3C), at(0x40)};
 }
 
 bool isDirectory(const dbpf::IndexEntry& entry) { return entry.key.type == types::kDirectory; }
@@ -61,10 +72,20 @@ RewriteReport rewritePackage(const fs::path& file, std::span<const ReplacedResou
     RewriteReport report;
     const fs::path written = fs::path(file) += ".neots2-new";
     std::vector<Expected> expected;
+    dbpf::Header oldHeader;
+    KeptWords kept;
     {
         // The old package is closed before anything replaces it (Windows won't replace an open file).
         dbpf::Package old(file);
-        const std::uint32_t word40 = headerWord40(file);
+        oldHeader = old.header();
+        if (oldHeader.majorVersion != 1 || oldHeader.minorVersion > 2 || oldHeader.indexMajorVersion != 7 ||
+            oldHeader.indexMinorVersion > 2) {
+            throw std::runtime_error("the package's version isn't one NeoTS2 writes, so it was left alone");
+        }
+        kept = keptWords(file);
+        if (kept.minorVersion != oldHeader.minorVersion || kept.indexMinorVersion > 2) {
+            throw std::runtime_error("the package's header isn't one NeoTS2 writes, so it was left alone");
+        }
         std::vector<bool> used(changes.size(), false);
         std::ofstream out(written, std::ios::binary | std::ios::trunc);
         if (!out) {
@@ -72,6 +93,7 @@ RewriteReport rewritePackage(const fs::path& file, std::span<const ReplacedResou
         }
         try {
             dbpf::PackageWriter writer(out);
+            writer.keepVersions(kept.minorVersion, kept.indexMinorVersion);
             for (const dbpf::IndexEntry& entry : old.entries()) {
                 // The writer makes the compression directory again from the resources.
                 if (isDirectory(entry)) {
@@ -100,7 +122,7 @@ RewriteReport rewritePackage(const fs::path& file, std::span<const ReplacedResou
                     ++report.added;
                 }
             }
-            writer.finish(word40, old.header().indexMinorVersion == 2);
+            writer.finish(kept.word40);
         } catch (...) {
             out.close();
             std::error_code error;
@@ -120,6 +142,12 @@ RewriteReport rewritePackage(const fs::path& file, std::span<const ReplacedResou
             check.emplace(written);
         } catch (const std::exception& e) {
             mismatch(written, std::string("it can't be read: ") + e.what());
+        }
+        const dbpf::Header& gotHeader = check->header();
+        if (gotHeader.majorVersion != oldHeader.majorVersion || gotHeader.minorVersion != oldHeader.minorVersion ||
+            gotHeader.indexMajorVersion != oldHeader.indexMajorVersion || gotHeader.indexMinorVersion != oldHeader.indexMinorVersion ||
+            keptWords(written) != kept) {
+            mismatch(written, "the header's versions changed");
         }
         std::vector<dbpf::IndexEntry> entries;
         std::ranges::copy_if(check->entries(), std::back_inserter(entries), [](const dbpf::IndexEntry& e) { return !isDirectory(e); });

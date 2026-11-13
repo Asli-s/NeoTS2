@@ -143,12 +143,15 @@ bool Execution::primitive(const bhav::Instruction& in, Frame& f) {
     // Debug only does something with the game's debug (cheat) setting on: console commands.
     case kDebugOpcode:
         return true;
-    // Both only change the game's UI (the tutorial's steps, and controls of its panels), which
-    // NeoTS2's UI doesn't take orders from yet, so they carry on at once. Stopping here instead reset
-    // the object or Sim running them. Event trees hung on controls don't run.
-    case kTutorialOpcode:
+    // UI Effect only changes controls of the game's UI, which NeoTS2's UI doesn't take orders from
+    // yet, so it carries on at once. Stopping here instead reset the object or Sim running it. Event
+    // trees hung on controls don't run.
     case kUiEffectOpcode:
         return true;
+    // NeoTS2 has no situations yet, so "begin" can't start one and "end" finds me not the situation
+    // object: both answer false, as the game does in those cases, instead of resetting the Sim.
+    case kSituationOpcode:
+        return false;
     default:
         throw Stop{Outcome::Unsupported, "primitive not implemented", hex(in.opcode, 4)};
     }

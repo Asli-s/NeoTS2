@@ -78,8 +78,10 @@ constexpr std::uint16_t kAnimateOverlayOpcode = 0x006B;
 constexpr std::uint16_t kAnimateStopOpcode = 0x006C;
 constexpr std::uint16_t kLookAtOpcode = 0x006E;
 constexpr std::uint16_t kStopAllSoundsOpcode = 0x0030;
-// The tutorial primitive: the game's describer only names operand byte 0 from STR# 0xEE.
-constexpr std::uint16_t kTutorialOpcode = 0x000A;
+// Situation: operand byte 0 is 0 "begin" (start a situation with me as the situation object, false
+// if one can't be started) or 1 "end" (false if I am not the situation object), from the
+// describer's STR# 0xEE "situation action descriptions".
+constexpr std::uint16_t kSituationOpcode = 0x000A;
 // UI Effect: presses, enables, disables, shows or hides controls of the game's UI, plays effects on
 // them, or hangs event trees on them (the describer's names).
 constexpr std::uint16_t kUiEffectOpcode = 0x0022;
