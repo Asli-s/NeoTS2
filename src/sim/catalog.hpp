@@ -73,4 +73,16 @@ std::uint16_t subsortOfButton(std::uint32_t id);
 // 0x23), but not below its depreciation limit (OBJD 0x26).
 std::int32_t placedValue(const objd::ObjectDefinition& definition);
 
+// Whether an object fits a container slot by height: a slot of height n (its SLOT entry's
+// containerKind: 2 coffee tables, 4 counters, 8 end tables, 9 sinks, 10 under counters) takes an
+// object whose allowed heights (object data 4) have bit n - 1. Bit 0 is the floor.
+bool fitsSlotHeight(std::uint16_t allowedHeights, std::int32_t slotHeight);
+
+// Whether a tile's walls are where an object's wall placement flags (object data 0x0D) need them,
+// by its facing (0, 2, 4 or 6): bit 0x1 a wall in front, 0x2 on its right, 0x4 behind it (posters,
+// paintings, mirrors, sconces), 0x8 on its left. `sides` are the tile's wall sides as WallTiles
+// gives them (0x01 low y, 0x02 low x, 0x04 high y, 0x08 high x). Facing 0 points to low y, 2 to
+// high x, 4 to high y and 6 to low x.
+bool wallsWhereNeeded(std::int16_t wallFlags, std::uint8_t sides, std::int16_t facing);
+
 } // namespace ts2::sim::catalog

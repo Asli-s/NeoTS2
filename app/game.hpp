@@ -271,6 +271,9 @@ private:
         int storey = 1;
     };
     std::optional<LotFloorPoint> lotFloorAt(float x, float y);
+    // The lot object under a window point, looking through the objects in `ignore` (0: none).
+    std::uint32_t lotObjectAt(float x, float y, const std::vector<std::int16_t>& ignore);
+    std::vector<std::uint8_t> objectsShown_;  // lotObjectAt's mask
     std::vector<std::uint8_t> floorsShown_;  // lotFloorAt's mask: the floors and terrain shown
     void toggleFreeCamera();
     std::function<float(float, float, std::array<float, 4>&, unsigned&)> hoodFreeGround() const;
@@ -573,6 +576,7 @@ private:
         std::optional<app::LotLife::Placed> from;     // where it stood (picked up from the lot)
         std::int16_t direction = 0;                   // which way it faces: 0, 2, 4 or 6
         std::optional<app::LotLife::BuySpot> spot;    // where it is held now, none until over the lot
+        std::optional<app::LotLife::SlotSpot> slot;   // or the surface slot it is held in
         bool fits = false;                            // whether it may be put down there
     };
     std::optional<BuyHeld> buyHeld_;

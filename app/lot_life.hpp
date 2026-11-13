@@ -213,11 +213,28 @@ public:
     // Moves a held object to a spot facing `direction` (0, 2, 4 or 6) and says whether it may stay
     // there by the game's placement test.
     bool holdAt(std::int16_t object, const BuySpot& spot, std::int16_t direction);
+    // Whether an object may go in a surface's slot: its allowed heights (data 4) have a bit other
+    // than the floor's.
+    bool goesOnSurfaces(std::int16_t object);
+    // A container slot an object is in or may go in.
+    struct SlotSpot {
+        std::int16_t container = 0;
+        std::int16_t slot = 0;
+        bool operator==(const SlotSpot&) const = default;
+    };
+    // The free container slot of `container` (a surface: a counter, an end table, a desk's part)
+    // that `held` may go in, the first that fits: a slot of height n takes an object whose allowed
+    // heights (data 4) have bit n - 1 (counters 4, end tables 8, coffee tables 2, sinks 9). None
+    // when it has none free, or `container` is `held` itself or a Sim.
+    std::optional<SlotSpot> freeSlot(std::int16_t held, std::int16_t container);
+    // Puts a held object into a container's slot, facing the container's way.
+    void holdInSlot(std::int16_t object, const SlotSpot& where);
     // Where an object stands and which way it faces, to put it back after a move is cancelled.
     // None for an object that is gone or off the lot.
     struct Placed {
         BuySpot spot;
         std::int16_t direction = 0;
+        std::optional<SlotSpot> slot;  // the slot it was in
     };
     std::optional<Placed> placed(std::int16_t object);
     void putBack(std::int16_t object, const Placed& where);

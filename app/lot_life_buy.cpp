@@ -21,6 +21,16 @@ constexpr std::int16_t kOnTheFloor = 0x01;
 
 bool isMultiTile(const ts2::sim::SimObject& o) { return o.definition.field(ts2::objd::field::kMultiTileMasterId) != 0; }
 
+constexpr std::size_t kContainerData = 2, kSlotData = 3, kWallPlacementData = 0x0D;
+
+// Whether the built walls (not fences) of the tile at (x, y) on `level` (1 = ground) are where the
+// object's wall placement flags (data 0x0D) need them facing `facing` (see catalog::wallsWhereNeeded).
+bool requiredWallsThere(const ts2::sim::World& world, const ts2::sim::SimObject& object, float x, float y, std::int32_t level,
+                        std::int16_t facing) {
+    const std::uint8_t sides = world.sightWalls().at(level - 1, static_cast<int>(x), static_cast<int>(y));
+    return ts2::sim::catalog::wallsWhereNeeded(object.data[kWallPlacementData], sides, facing);
+}
+
 } // namespace
 
 const std::vector<ts2::sim::catalog::Item>& LotLife::buyItems() {
@@ -142,9 +152,14 @@ bool LotLife::holdAt(std::int16_t object, const BuySpot& spot, std::int16_t dire
     target.facing = direction;
     target.checkRoom = false;
     target.checkWalls = false;
+    ts2::sim::takeOutOfSlot(world, *found);  // off the surface it was on
     ts2::sim::snapTo(world, *found, target);  // the other parts of a multi-tile object follow
     if (isMultiTile(*found)) {
         return multiTileFits(*found, target);
+    }
+    const float x = static_cast<float>(spot.x) / 65536.0f, y = static_cast<float>(spot.y) / 65536.0f;
+    if (!requiredWallsThere(world, *found, x, y, spot.level, direction)) {
+        return false;
     }
     const auto& fits = world.objectFits();
     return !fits || fits(*found, static_cast<float>(spot.x) / 65536.0f, static_cast<float>(spot.y) / 65536.0f, spot.level, direction);
@@ -155,11 +170,76 @@ std::optional<LotLife::Placed> LotLife::placed(std::int16_t object) {
     if (found == nullptr || found->x == ts2::sim::kOffLot || found->y == ts2::sim::kOffLot) {
         return std::nullopt;
     }
-    return Placed{{found->x, found->y, found->level}, found->data[kDirectionData]};
+    Placed out{{found->x, found->y, found->level}, found->data[kDirectionData], std::nullopt};
+    if (found->data[kContainerData] > 0) {
+        out.slot = SlotSpot{found->data[kContainerData], found->data[kSlotData]};
+    }
+    return out;
 }
 
 void LotLife::putBack(std::int16_t object, const Placed& where) {
-    holdAt(object, where.spot, where.direction);
+    if (where.slot) {
+        holdInSlot(object, *where.slot);
+    } else {
+        holdAt(object, where.spot, where.direction);
+    }
+}
+
+bool LotLife::goesOnSurfaces(std::int16_t object) {
+    const auto* found = sim_->world().find(object);
+    return found != nullptr && (found->data[kAllowedHeightsData] & ~kOnTheFloor) != 0;
+}
+
+std::optional<LotLife::SlotSpot> LotLife::freeSlot(std::int16_t held, std::int16_t container) {
+    auto& world = sim_->world();
+    const auto* object = world.find(held);
+    const auto* surface = world.find(container);
+    if (object == nullptr || surface == nullptr || surface->isPerson() || surface->removed) {
+        return std::nullopt;
+    }
+    const auto parts = partsOf(held);
+    if (std::find(parts.begin(), parts.end(), container) != parts.end() || surface->data[kContainerData] == held) {
+        return std::nullopt;
+    }
+    const ts2::sim::ObjectType* type = sim_->code().objectType(surface->definition.guid());
+    if (type == nullptr) {
+        return std::nullopt;
+    }
+    const auto heights = static_cast<std::uint16_t>(object->data[kAllowedHeightsData]);
+    for (std::size_t i = 0; i < type->containerSlotEntries.size() && i < surface->slots.size(); ++i) {
+        if (!ts2::sim::catalog::fitsSlotHeight(heights, type->containerSlotEntries[i].containerKind)) {
+            continue;
+        }
+        const std::int16_t inside = surface->slots[i];
+        if (inside == 0 || inside == held || world.find(inside) == nullptr) {
+            return SlotSpot{container, static_cast<std::int16_t>(i)};
+        }
+    }
+    return std::nullopt;
+}
+
+void LotLife::holdInSlot(std::int16_t object, const SlotSpot& where) {
+    constexpr std::size_t kRoomData = 0x1D;
+    auto& world = sim_->world();
+    ts2::sim::SimObject* held = world.find(object);
+    ts2::sim::SimObject* surface = world.find(where.container);
+    if (held == nullptr || surface == nullptr || where.slot < 0 || static_cast<std::size_t>(where.slot) >= surface->slots.size()) {
+        return;
+    }
+    // As Snap Into a slot puts it: out of its old slot and off the tiles, at the surface's place,
+    // facing the surface's way.
+    ts2::sim::takeOutOfSlot(world, *held);
+    surface->slots[static_cast<std::size_t>(where.slot)] = held->id;
+    held->data[kContainerData] = surface->id;
+    held->data[kSlotData] = where.slot;
+    held->x = surface->x;
+    held->y = surface->y;
+    held->level = surface->level;
+    held->tile.reset();
+    held->data[kDirectionData] = surface->data[kDirectionData];
+    held->heading.reset();
+    held->data[kRoomData] = surface->data[kRoomData];
+    world.markFootprintChanged(held->id);
 }
 
 bool LotLife::movable(std::int16_t object) {
@@ -167,8 +247,12 @@ bool LotLife::movable(std::int16_t object) {
     if (found == nullptr || found->removed || found->isPerson() || found->x == ts2::sim::kOffLot || found->y == ts2::sim::kOffLot) {
         return false;
     }
-    if (found->data[2] != 0) {  // in another object's slot (on a table, in a hand)
-        return false;
+    // In a slot: on a surface it may be picked up, in a Sim's hand not.
+    if (found->data[kContainerData] > 0) {
+        const auto* container = sim_->world().find(found->data[kContainerData]);
+        if (container == nullptr || container->isPerson()) {
+            return false;
+        }
     }
     const std::uint32_t guid = found->definition.guid();
     if (std::find(std::begin(ts2::sim::vm_detail::kProtectedGuids), std::end(ts2::sim::vm_detail::kProtectedGuids), guid) != std::end(ts2::sim::vm_detail::kProtectedGuids)) {

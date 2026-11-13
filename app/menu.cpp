@@ -1872,6 +1872,19 @@ std::optional<Game::LotFloorPoint> Game::lotFloorAt(float x, float y) {
     return out;
 }
 
+std::uint32_t Game::lotObjectAt(float x, float y, const std::vector<std::int16_t>& ignore) {
+    objectsShown_.assign(lot_.instances.size(), 0);
+    for (std::size_t i = 0; i < lot_.instances.size(); ++i) {
+        const auto& instance = lot_.instances[i];
+        const bool shown = i >= lotVisible_.size() || lotVisible_[i] != 0;
+        const bool ignored = std::find(ignore.begin(), ignore.end(), static_cast<std::int16_t>(instance.object)) != ignore.end();
+        objectsShown_[i] = shown && !(instance.object != 0 && ignored) ? 1 : 0;
+    }
+    const auto ray = screenRay(orbit_.camera(), width_, height_, x, y);
+    const auto hit = lotPicker_.pick(lot_, objectsShown_, orbit_.camera().eye, ray, &lotPose_);
+    return hit ? hit->object : 0;
+}
+
 // The right button held from a press on the lot or neighborhood drags the camera: a small square
 // marks the press point, and once the mouse is more than 8 pixels from it (along either axis) the
 // cursor is the turned drag arrow pointing from the press point to the mouse. Within those 8

@@ -1,7 +1,9 @@
 #include "sim/catalog.hpp"
 
 #include <algorithm>
+#include <array>
 #include <set>
+#include <utility>
 
 namespace ts2::sim::catalog {
 
@@ -87,6 +89,35 @@ std::int32_t placedValue(const objd::ObjectDefinition& d) {
     const std::int32_t limit = d.field(field::kDepreciationLimit);
     const std::int32_t value = price - d.field(field::kInitialDepreciation);
     return std::clamp(value, std::min(limit, price), price);
+}
+
+bool fitsSlotHeight(std::uint16_t allowedHeights, std::int32_t slotHeight) {
+    return slotHeight >= 1 && slotHeight <= 16 && ((allowedHeights >> (slotHeight - 1)) & 1) != 0;
+}
+
+bool wallsWhereNeeded(std::int16_t wallFlags, std::uint8_t sides, std::int16_t facing) {
+    // The tile side each facing points to: 0 low y, 2 high x, 4 high y, 6 low x.
+    constexpr std::uint8_t kLowY = 0x01, kLowX = 0x02, kHighY = 0x04, kHighX = 0x08;
+    const auto sideTowards = [](int direction) -> std::uint8_t {
+        switch (((direction % 8) + 8) % 8) {
+        case 0: return kLowY;
+        case 2: return kHighX;
+        case 4: return kHighY;
+        case 6: return kLowX;
+        default: return 0;  // diagonal facings aren't known
+        }
+    };
+    // In front, on the right, behind and on the left, a quarter turn apart.
+    constexpr std::array<std::pair<int, int>, 4> kNeeds = {{{0x1, 0}, {0x2, 2}, {0x4, 4}, {0x8, 6}}};
+    for (const auto& [bit, turn] : kNeeds) {
+        if ((wallFlags & bit) != 0) {
+            const std::uint8_t side = sideTowards(facing + turn);
+            if (side == 0 || (sides & side) == 0) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 } // namespace ts2::sim::catalog

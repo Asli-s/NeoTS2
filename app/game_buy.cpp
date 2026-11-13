@@ -77,11 +77,10 @@ void Game::buyItem(std::uint32_t guid) {
         buyTip("That can't be bought yet.");
         return;
     }
-    // Objects that go on tables, counters or walls set that in their own start-up code. Placing them
-    // there isn't done yet.
-    if (!lotLife_->standsOnFloor(made)) {
+    // Where an object may go (the floor, surfaces of some heights) its own start-up code sets.
+    if (!lotLife_->standsOnFloor(made) && !lotLife_->goesOnSurfaces(made)) {
         lotLife_->removeObject(made);
-        buyTip("Objects that go on surfaces or walls can't be placed yet.");
+        buyTip("That can't be placed yet.");
         return;
     }
     buyHeld_ = BuyHeld{};
@@ -98,21 +97,49 @@ void Game::holdUnderMouse(float x, float y) {
     if (!buyHeld_ || !lotLife_) {
         return;
     }
+    const std::int16_t held = buyHeld_->object;
+    // Over a surface (a counter, a table, a desk) with a free slot it fits, the object goes in that
+    // slot. A multi-tile surface's slots are on its parts.
+    if (lotLife_->goesOnSurfaces(held)) {
+        const auto parts = lotLife_->partsOf(held);
+        if (const std::uint32_t under = lotObjectAt(x, y, parts); under != 0) {
+            for (const std::int16_t part : lotLife_->partsOf(static_cast<std::int16_t>(under))) {
+                if (const auto slot = lotLife_->freeSlot(held, part)) {
+                    if (buyHeld_->slot != *slot) {
+                        ts2::diag::step(std::format("buy mode: object {} held in slot {} of object {}", held, slot->slot, slot->container));
+                        lotLife_->holdInSlot(held, *slot);
+                        buyHeld_->slot = *slot;
+                        buyHeld_->spot.reset();
+                    }
+                    buyHeld_->fits = true;
+                    buyTip({});
+                    return;
+                }
+            }
+        }
+    }
     const auto floor = lotFloorAt(x, y);
     if (!floor) {
         return;
     }
     const auto spot = lotLife_->buySpot(floor->at, floor->storey);
-    if (buyHeld_->spot && *buyHeld_->spot == spot) {
+    if (buyHeld_->spot && *buyHeld_->spot == spot && !buyHeld_->slot) {
         return;
     }
+    buyHeld_->slot.reset();
     buyHeld_->spot = spot;
-    buyHeld_->fits = lotLife_->holdAt(buyHeld_->object, spot, buyHeld_->direction);
-    buyTip(buyHeld_->fits ? std::string() : std::string("It can't go here."));
+
+    // An object that only goes on surfaces is shown where the mouse is but can't be put down there.
+    const bool floorAllowed = lotLife_->standsOnFloor(held);
+    const bool fits = lotLife_->holdAt(held, spot, buyHeld_->direction);
+    buyHeld_->fits = floorAllowed && fits;
+    ts2::diag::step(std::format("buy mode: object {} held at {:.1f} {:.1f} storey {} facing {}: {}", held, spot.x / 65536.0, spot.y / 65536.0, spot.level,
+                                buyHeld_->direction, buyHeld_->fits ? "fits" : "doesn't fit"));
+    buyTip(buyHeld_->fits ? std::string() : floorAllowed ? std::string("It can't go here.") : std::string("It goes on a counter or table."));
 }
 
 void Game::placeHeld() {
-    if (!buyHeld_ || !lotLife_ || !buyHeld_->spot) {
+    if (!buyHeld_ || !lotLife_ || (!buyHeld_->spot && !buyHeld_->slot)) {
         return;
     }
     if (!buyHeld_->fits) {
@@ -233,7 +260,8 @@ bool Game::buyKey(const pf::Event& e) {
         // , and . turn what the hand holds, as they turn the camera otherwise.
         const std::int16_t step = e.key == pf::Key::Period ? kQuarterTurn : -kQuarterTurn;
         buyHeld_->direction = static_cast<std::int16_t>(((buyHeld_->direction + step) % kTurns + kTurns) % kTurns);
-        if (buyHeld_->spot) {
+        // In a surface's slot it faces the surface's way; the turn shows once it is off it.
+        if (buyHeld_->spot && !buyHeld_->slot) {
             buyHeld_->fits = lotLife_->holdAt(buyHeld_->object, *buyHeld_->spot, buyHeld_->direction);
             buyTip(buyHeld_->fits ? std::string() : std::string("It can't go here."));
         }

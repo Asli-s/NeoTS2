@@ -85,6 +85,32 @@ void aPlacedObjectLosesItsInitialDepreciation() {
     CHECK(catalog::placedValue(painting) == 35);
 }
 
+// A slot of height n takes an object whose allowed heights have bit n - 1: a table lamp (0xAE) goes
+// on a coffee table (2), a counter (4) or an end table (8); a microwave (0x08) on a counter only; a
+// sink (0x100) in a counter's sink slot (9).
+void slotsTakeObjectsByHeight() {
+    CHECK(catalog::fitsSlotHeight(0xAE, 2) && catalog::fitsSlotHeight(0xAE, 4) && catalog::fitsSlotHeight(0xAE, 8));
+    CHECK(!catalog::fitsSlotHeight(0xAE, 1) && !catalog::fitsSlotHeight(0xAE, 9));
+    CHECK(catalog::fitsSlotHeight(0x08, 4) && !catalog::fitsSlotHeight(0x08, 2));
+    CHECK(catalog::fitsSlotHeight(0x100, 9) && !catalog::fitsSlotHeight(0x100, 4));
+    CHECK(!catalog::fitsSlotHeight(0xFFFF, 0) && !catalog::fitsSlotHeight(0xFFFF, 17));
+}
+
+// Wall placement: a poster (0x4, a wall behind) facing 0 (towards low y) needs a wall on the tile's
+// high-y side, facing 2 (towards high x) one on its low-x side. Objects that need no wall go anywhere.
+void wallObjectsNeedTheirWall() {
+    constexpr std::uint8_t kLowY = 0x01, kLowX = 0x02, kHighY = 0x04, kHighX = 0x08;
+    CHECK(catalog::wallsWhereNeeded(0x4, kHighY, 0));
+    CHECK(!catalog::wallsWhereNeeded(0x4, kLowY, 0));
+    CHECK(!catalog::wallsWhereNeeded(0x4, 0, 0));
+    CHECK(catalog::wallsWhereNeeded(0x4, kLowX, 2) && !catalog::wallsWhereNeeded(0x4, kHighX, 2));
+    CHECK(catalog::wallsWhereNeeded(0x4, kLowY, 4) && catalog::wallsWhereNeeded(0x4, kHighX, 6));
+    CHECK(catalog::wallsWhereNeeded(0x1, kLowY, 0));                      // a wall in front
+    CHECK(catalog::wallsWhereNeeded(0x5, kLowY | kHighY, 0) && !catalog::wallsWhereNeeded(0x5, kLowY, 0));
+    CHECK(catalog::wallsWhereNeeded(0x0, 0, 0) && catalog::wallsWhereNeeded(0x200, 0, 0));  // no wall needed
+    CHECK(!catalog::wallsWhereNeeded(0x4, 0xFF, 1));                      // diagonal facings aren't known
+}
+
 } // namespace
 
 std::vector<Test> catalogTests() {
@@ -93,5 +119,7 @@ std::vector<Test> catalogTests() {
         {"the catalog sorts by function and room", theCatalogSortsByFunctionAndRoom},
         {"sub-category buttons pick sub-sort bits", subCategoryButtonsPickSubsortBits},
         {"a placed object loses its initial depreciation", aPlacedObjectLosesItsInitialDepreciation},
+        {"slots take objects by height", slotsTakeObjectsByHeight},
+        {"wall objects need their wall", wallObjectsNeedTheirWall},
     };
 }
