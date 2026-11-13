@@ -15,6 +15,7 @@
 #include "free_camera.hpp"
 #include "neighborhood.hpp"
 #include "lot_daylight.hpp"
+#include "game_sound.hpp"
 #include "lot_life.hpp"
 #include "lot_light.hpp"
 #include "lot_ui.hpp"
@@ -441,6 +442,10 @@ private:
     ts2::scene::EffectTerrain hoodEffectTerrain_;                  // the ground and water they meet
     std::map<std::string, int> hoodEffectImages_;  // their textures by name: index into the neighborhood's images
     std::unique_ptr<ts2::scene::ObjectEffects> lotEffects_;
+    // The game's sound and music (see GameSound). Made as the game starts.
+    std::unique_ptr<GameSound> sound_;
+    // Updates the lot's sounds: where they are as the camera and their objects move.
+    void updateLotSound();
     std::map<std::string, int> effectImages_;  // the scene's image of each effect texture, negative for none
     // Pictures waiting for a Sim's portrait, and a want's badge to go on it.
     struct EffectPortrait {

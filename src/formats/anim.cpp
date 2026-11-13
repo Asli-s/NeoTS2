@@ -367,4 +367,31 @@ std::optional<int> simAnticsEventId(const Event& event) {
     return value;
 }
 
+std::optional<std::string> soundEventName(const Event& event) {
+    if (event.type != kSoundEvent) {
+        return std::nullopt;
+    }
+    constexpr std::string_view kKey = "sound_name=";
+    std::size_t at = 0;
+    while ((at = event.text.find(kKey, at)) != std::string::npos && at != 0 && event.text[at - 1] != '\n' && event.text[at - 1] != '\r') {
+        at += kKey.size();  // only at a line's start
+    }
+    if (at == std::string::npos) {
+        return std::nullopt;
+    }
+    const std::size_t begin = at + kKey.size();
+    std::size_t end = event.text.find_first_of("\r\n", begin);
+    if (end == std::string::npos) {
+        end = event.text.size();
+    }
+    std::string name = event.text.substr(begin, end - begin);
+    while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) {
+        name.pop_back();
+    }
+    if (name.empty()) {
+        return std::nullopt;
+    }
+    return name;
+}
+
 } // namespace ts2::anim

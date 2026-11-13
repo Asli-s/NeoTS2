@@ -28,6 +28,7 @@ NeoTS2 is in early development and is not yet a complete engine. Currently worki
 - Live mode camera, panels, needs and wants
 - Sims on their lots (behavior is still early and buggy)
 - Custom content from the Downloads folder
+- Sound effects, Sims' voices and the menu and neighborhood music
 
 Saving is not supported yet.
 
@@ -88,6 +89,7 @@ for the game's file formats, verify anything important against the game.
 - [VHSMODDING](https://github.com/VHSMODDING): native macOS build for Apple Silicon
 - Libraries: [SDL 3](https://www.libsdl.org/), [FreeType](https://freetype.org/),
   [stb_image and stb_dxt](https://github.com/nothings/stb), [Lua](https://www.lua.org/) 5.0.3,
+  [Speex](https://www.speex.org/) 1.2.1, [dr_mp3](https://github.com/mackron/dr_libs),
   [Dear ImGui](https://github.com/ocornut/imgui) (MIT) and the
   [Noto Sans](https://fonts.google.com/noto/specimen/Noto+Sans) font (SIL Open Font License 1.1)
 - App and launcher icons drawn by me

@@ -114,6 +114,21 @@ void Game::placeEffectModels() {
     renderer_.show(std::move(shown));
 }
 
+void Game::updateLotSound() {
+    if (!sound_ || !lotLife_) {
+        return;
+    }
+    using Where = ts2::scene::ObjectEffects::Where;
+    const int highest = lotView_.view.level - lotView_.ground + 1;
+    sound_->lotFrame(viewCamera(), [&](std::int16_t object) -> std::optional<ts2::render::Vec3> {
+        const Where where = lotLife_->effectPlace(lot_, lotPose_, object, "", highest);
+        if (where.state != Where::State::Here) {
+            return std::nullopt;
+        }
+        return ts2::render::Vec3{where.place.position[0], where.place.position[1], where.place.position[2]};
+    }, lotLife_->paused());
+}
+
 ts2::scene::ObjectEffects::PlaceOf Game::effectPlaces() {
     // Objects count levels from 1 at the ground storey.
     return [this](std::int16_t object, const std::string& bone) { return lotLife_->effectPlace(lot_, lotPose_, object, bone, lotView_.view.level - lotView_.ground + 1); };
@@ -272,7 +287,11 @@ void Game::updateLotEffects(float realSeconds) {
         const auto over = ts2::render::cross(beside, ahead);
         lotEffectPlayer_->setCamera({camera.eye[0], camera.eye[1], camera.eye[2]}, {ahead[0], ahead[1], ahead[2]}, {over[0], over[1], over[2]});
     }
-    lotLife_->clipEffects(lot_, [this](const ts2::sim::EffectCommand& c) { doEffectCommand(c); });
+    lotLife_->clipEffects(lot_, [this](const ts2::sim::EffectCommand& c) { doEffectCommand(c); }, [this](std::int16_t object, const std::string& name) {
+        if (sound_) {
+            sound_->lotSound(name, object, false);
+        }
+    });
     if (!lotLife_->paused()) {
         lotEffects_->advanceQueues(lotLife_->simulation().world().ticks(), effectPlaces());
     }

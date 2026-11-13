@@ -96,6 +96,11 @@ std::optional<EffectEvent> effectEvent(const Event& event);
 // The N of a SimAntics event's "event=N" line, or nullopt for other events.
 std::optional<int> simAnticsEventId(const Event& event);
 
+// A sound event's sound: its text's "sound_name=" line (it also has sound_source and bone_tag lines),
+// or nullopt for other events and ones naming none.
+constexpr std::uint16_t kSoundEvent = 1014;
+std::optional<std::string> soundEventName(const Event& event);
+
 // An animation (cAnimResourceConst, the game's memory image of it): the skeleton it is made for,
 // its channels, IK chains and events (from its first target, the skeleton, unless that drives morphs),
 // and its morph and eye targets.

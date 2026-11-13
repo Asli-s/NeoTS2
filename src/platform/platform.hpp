@@ -3,6 +3,7 @@
 // where there is no SDL 3 (Mac OS X on PowerPC), chosen when the game is built (NEOTS2_PLATFORM).
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -16,6 +17,14 @@ namespace ts2::platform {
 [[nodiscard]] bool init();
 void quit();
 [[nodiscard]] std::string lastError();
+
+// Sound out: the system's default playback device, fed interleaved stereo floats at `rate` by `fill`,
+// which runs on the device's own thread and must fill all `frames`. False, with lastError() saying
+// why, when there is no device (or no sound on this system yet: the SDL 1.2 build has none).
+using AudioFill = void (*)(void* context, float* out, std::size_t frames);
+[[nodiscard]] bool startAudio(int rate, AudioFill fill, void* context);
+// Stops the device. After it returns, `fill` isn't called again.
+void stopAudio();
 
 // Nanoseconds from a start near the program's own (a count from the computer's start would be too large
 // for the floats animations are timed in), and a pause for the thread.

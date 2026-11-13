@@ -54,6 +54,8 @@ $notices = @(
     @("Noto Sans (SIL Open Font License 1.1)", (Get-Content -Raw (Join-Path $root "third_party\fonts\OFL.txt"))),
     @("stb_image (MIT License or public domain)", (($stb | Select-Object -Skip ($stbStart - 1)) -join "`r`n")),
     @("Lua 5.0.3 (MIT License)", (Get-Content -Raw (Join-Path $root "third_party\lua-5.0.3\COPYRIGHT"))),
+    @("Speex 1.2.1 (BSD License)", (Get-Content -Raw (Join-Path $root "third_party\licenses\Speex-COPYING.txt"))),
+    @("dr_mp3 0.7.4 (public domain, or MIT No Attribution)", "dr_mp3 by David Reid, https://github.com/mackron/dr_libs. Dedicated to the public domain; where that isn't possible, under MIT No Attribution."),
     @("Microsoft Visual C++ runtime", "msvcp140*.dll, vcruntime140*.dll, concrt140.dll and vccorlib140.dll are Microsoft's redistributable runtime files, shipped as Visual Studio's license allows.")
 )
 $text = "NeoTS2 uses these libraries, and ships them inside its programs or beside them.`r`n"

@@ -335,6 +335,10 @@ Game::Game(ts2::content::UiData& data, ts2::ui::Fonts& fonts, ts2::render::IRend
         subHoodTips_.push_back(screen_.tip(shownChild(screen_, preview_, button.id)));
     }
     sims1Turn_ = ts2::content::readUserProps(options.user).flag("rotateCameraSims1Mode").value_or(false);
+    // Pictures taken from the command line are silent.
+    if (options.shot.empty()) {
+        sound_ = std::make_unique<GameSound>(install, options.user);
+    }
     lotUi_.setFolders(data, install, options.user);
     hoodUi_.gameOptions().takeSettings(lotUi_.gameOptions());
     hoodUi_.graphicsOptions().takeSettings(lotUi_.graphicsOptions());
@@ -1476,6 +1480,9 @@ void Game::leaveLot() {
         surroundingsBuilding_.wait();
         surroundingsBuilding_ = {};
     }
+    if (sound_) {
+        sound_->leaveLot();
+    }
     neighborsToBuild_.clear();
     std::vector<std::shared_ptr<ts2::scene::Assets>> houseAssets;
     std::vector<std::future<std::shared_ptr<ts2::scene::Assets>>> houseAssetsOpening;
@@ -2315,6 +2322,7 @@ void Game::updateLot(std::uint64_t now) {
     }
     app::animateActors(lot_, lotLife_ ? lotLife_->seconds() : static_cast<double>(now - lotShown_) / 1e9, renderer_, lotPose_);
     updateLotEffects(dt);
+    updateLotSound();
     if (!lotLife_ || !lotLife_->paused()) {
         lotRealSeconds_ += std::min(0.1, static_cast<double>(now - lastFrame_) / 1e9);
     }
@@ -2336,6 +2344,9 @@ void Game::startLotLife() {
         lotLife_->simulation().world().setAsksPhoneBook(true);
         lotLife_->simulation().world().setAsksTypePicker(true);
         lotLife_->simulation().world().setAsksMessages(true);
+        if (sound_) {
+            lotLife_->simulation().world().setSoundEvents([this](const ts2::sim::SoundEvent& e) { sound_->lotSound(e.name, e.source, e.stop); });
+        }
         lotLife_->simulation().setTextTables([this](std::uint32_t group, std::uint16_t instance) { return data_.texts(group, instance); });
         lotLife_->simulation().world().setDeclinesGameTips(options_.noGameTips);
         lotLife_->simulation().world().setBabyFirstNames(data_.text(kLiveText, kBabyBoyText), data_.text(kLiveText, kBabyGirlText));
@@ -2454,6 +2465,11 @@ void Game::run() {
         pf::Event e;
         while (pf::pollEvent(e)) {
             handleEvent(e);
+        }
+        // The menu plays its own music and the neighborhood its own. Live mode on a lot has none.
+        if (sound_) {
+            sound_->music(inLot_ ? "" : inNeighborhood_ ? "nhood" : "splash");
+            sound_->update();
         }
         // While the window is minimized the game stops, its simulation and drawing alike, and only
         // waits for the system, unless the player turned Sim While Minimized on.

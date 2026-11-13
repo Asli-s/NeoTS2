@@ -139,6 +139,14 @@ void quit() {
     SDL_Quit();
 }
 
+// Sound isn't played on the SDL 1.2 build yet.
+bool startAudio(int /*rate*/, AudioFill /*fill*/, void* /*context*/) {
+    SDL_SetError("sound isn't played on this build yet");
+    return false;
+}
+
+void stopAudio() {}
+
 std::string lastError() {
     return SDL_GetError();
 }

@@ -176,7 +176,60 @@ bool init() {
 }
 
 void quit() {
+    stopAudio();
     SDL_Quit();
+}
+
+namespace {
+
+struct AudioOut {
+    SDL_AudioStream* stream = nullptr;
+    AudioFill fill = nullptr;
+    void* context = nullptr;
+    std::vector<float> buffer;
+};
+AudioOut audioOut;
+
+// SDL asks for `needed` more bytes: the game's mixer makes them.
+void SDLCALL feedAudio(void* user, SDL_AudioStream* stream, int needed, int /*total*/) {
+    auto& out = *static_cast<AudioOut*>(user);
+    if (needed <= 0) {
+        return;
+    }
+    const auto frames = static_cast<std::size_t>(needed) / (2 * sizeof(float));
+    out.buffer.resize(frames * 2);
+    out.fill(out.context, out.buffer.data(), frames);
+    SDL_PutAudioStreamData(stream, out.buffer.data(), static_cast<int>(frames * 2 * sizeof(float)));
+}
+
+} // namespace
+
+bool startAudio(int rate, AudioFill fill, void* context) {
+    stopAudio();
+    if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+        return false;
+    }
+    audioOut.fill = fill;
+    audioOut.context = context;
+    const SDL_AudioSpec spec{SDL_AUDIO_F32, 2, rate};
+    audioOut.stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, feedAudio, &audioOut);
+    if (audioOut.stream == nullptr) {
+        SDL_QuitSubSystem(SDL_INIT_AUDIO);
+        return false;
+    }
+    SDL_ResumeAudioStreamDevice(audioOut.stream);
+    return true;
+}
+
+void stopAudio() {
+    if (audioOut.stream == nullptr) {
+        return;
+    }
+    SDL_DestroyAudioStream(audioOut.stream);  // closes the device; the callback has stopped when it returns
+    audioOut.stream = nullptr;
+    audioOut.fill = nullptr;
+    audioOut.context = nullptr;
+    SDL_QuitSubSystem(SDL_INIT_AUDIO);
 }
 
 std::string lastError() {

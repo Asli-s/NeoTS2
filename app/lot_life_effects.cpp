@@ -29,7 +29,8 @@ std::string otherSide(std::string name) {
 
 // Each object's clip and overlays, from the time each was last seen. Clips already playing as the lot opens have told
 // theirs. Only a clip's first play tells, as whether its events come again when it repeats is not known yet.
-void LotLife::clipEffects(const ts2::scene::Scene& scene, const std::function<void(const ts2::sim::EffectCommand&)>& send) {
+void LotLife::clipEffects(const ts2::scene::Scene& scene, const std::function<void(const ts2::sim::EffectCommand&)>& send,
+                          const std::function<void(std::int16_t object, const std::string& sound)>& sound) {
     const double now = sim_->world().eventClockMs();
     std::map<std::tuple<std::int16_t, double, std::string>, double> seen;
     const auto play = [&](std::int16_t id, const std::string& name, double startMs, double speed, bool flipped) {
@@ -42,15 +43,29 @@ void LotLife::clipEffects(const ts2::scene::Scene& scene, const std::function<vo
         auto effects = clipEffects_.find(name);
         if (effects == clipEffects_.end()) {
             std::vector<ClipEffect> list;
+            std::vector<ClipSound> sounds;
             if (const auto clip = animations_.find(name)) {
                 for (const auto& event : clip->events) {
                     if (auto effect = ts2::anim::effectEvent(event)) {
                         list.push_back({static_cast<float>(event.timeMs), std::move(*effect)});
+                    } else if (auto named = ts2::anim::soundEventName(event)) {
+                        sounds.push_back({static_cast<float>(event.timeMs), std::move(*named)});
                     }
                 }
                 std::stable_sort(list.begin(), list.end(), [](const ClipEffect& a, const ClipEffect& b) { return a.ms < b.ms; });
             }
             effects = clipEffects_.emplace(name, std::move(list)).first;
+            clipSounds_.insert_or_assign(name, std::move(sounds));
+        }
+        if (sound) {
+            if (const auto sounds = clipSounds_.find(name); sounds != clipSounds_.end()) {
+                for (const ClipSound& s : sounds->second) {
+                    const double at = startMs + s.ms / speed;
+                    if (at > from && at <= now) {
+                        sound(id, s.name);
+                    }
+                }
+            }
         }
         for (const ClipEffect& e : effects->second) {
             const double at = startMs + e.ms / speed;

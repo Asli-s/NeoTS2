@@ -222,8 +222,10 @@ public:
     // brought into the scene before each ray, as the game's are there at once.
     void traceIn(ts2::scene::Scene& scene, const ts2::scene::ScenePose& pose, const std::vector<std::uint8_t>& shown);
 
-    // Tells of the effects clips have reached since the last call, as commands.
-    void clipEffects(const ts2::scene::Scene& scene, const std::function<void(const ts2::sim::EffectCommand&)>& send);
+    // Tells of the effects clips have reached since the last call, as commands, and of their sounds
+    // (by the object playing the clip and the sound's name) to `sound` when given.
+    void clipEffects(const ts2::scene::Scene& scene, const std::function<void(const ts2::sim::EffectCommand&)>& send,
+                     const std::function<void(std::int16_t object, const std::string& sound)>& sound = {});
     // Where an object's node, or a bone of it, is now, for its effects. An empty bone or "locator" is
     // the node. Effects hide on storeys above `highestLevelShown`.
     ts2::scene::ObjectEffects::Where effectPlace(const ts2::scene::Scene& scene, const ts2::scene::ScenePose& pose, std::int16_t object, const std::string& bone, int highestLevelShown);
@@ -320,6 +322,11 @@ private:
         ts2::anim::EffectEvent event;
     };
     std::map<std::string, std::vector<ClipEffect>, std::less<>> clipEffects_;  // each clip's, by time
+    struct ClipSound {
+        float ms = 0;
+        std::string name;
+    };
+    std::map<std::string, std::vector<ClipSound>, std::less<>> clipSounds_;  // each clip's, by time
     // How far each playing clip's effects have been told: by its object, start and name, in milliseconds on the clock.
     std::map<std::tuple<std::int16_t, double, std::string>, double> clipEffectsTold_;
     bool clipEffectsStarted_ = false;
