@@ -622,7 +622,7 @@ void Assets::readCatalog() {
     for (const auto& [id, p] : scripts_.roofPatterns) {
         roofPatterns_[id] = {p.top, p.under, p.edges, p.trim};
     }
-    std::map<std::uint32_t, CatalogPattern> floorsByGuid;
+    std::map<std::uint32_t, CatalogPattern> floorsByGuid, wallsByGuid;
     for (const auto& r : catalog_.resources()) {
         const auto type = r.entry.key.type;
         if (type != kPatternProperties && type != kFenceProperties && type != kRoofProperties) {
@@ -642,29 +642,32 @@ void Assets::readCatalog() {
                 roofPatterns_[id] = {p["texturetop"], p["textureunder"], p["textureedges"], p["texturetrim"]};
             } else if (const auto material = p.find("material"); material != p.end()) {
                 patternsByGuid_[id] = material->second;
-                // Floors Build mode sells: those shown in the catalog and not retired. A later
-                // product's entry replaces an earlier one's.
-                if (p["type"] == "floor" && p["showincatalog"] == "1" && p["deprecated"] != "1") {
-                    CatalogPattern floor;
-                    floor.guid = id;
-                    floor.name = p["name"];
-                    floor.description = p["description"];
-                    floor.price = static_cast<std::int32_t>(number(p["cost"], 10).value_or(0));
-                    floor.subsort = lower(p["subsort"]);
-                    floor.material = material->second;
-                    floorsByGuid[id] = std::move(floor);
+                // Floors and wall coverings Build mode sells: those shown in the catalog and not
+                // retired. A later product's entry replaces an earlier one's.
+                const std::string kind = p["type"];
+                if ((kind == "floor" || kind == "wall") && p["showincatalog"] == "1" && p["deprecated"] != "1") {
+                    CatalogPattern pattern;
+                    pattern.guid = id;
+                    pattern.name = p["name"];
+                    pattern.description = p["description"];
+                    pattern.price = static_cast<std::int32_t>(number(p["cost"], 10).value_or(0));
+                    pattern.subsort = lower(p["subsort"]);
+                    pattern.material = material->second;
+                    (kind == "floor" ? floorsByGuid : wallsByGuid)[id] = std::move(pattern);
                 }
             }
         } catch (const std::exception& ex) {
             diag::warnOnce(std::string("catalog: a build or buy catalog entry that can't be read is left out: ") + ex.what());
         }
     }
-    floorCatalog_.clear();
-    for (auto& [guid, floor] : floorsByGuid) {
-        floorCatalog_.push_back(std::move(floor));
-    }
     // Cheapest first, as Buy mode's catalog lists objects.
-    std::stable_sort(floorCatalog_.begin(), floorCatalog_.end(), [](const CatalogPattern& a, const CatalogPattern& b) { return a.price < b.price; });
+    for (auto [byGuid, catalog] : {std::pair{&floorsByGuid, &floorCatalog_}, std::pair{&wallsByGuid, &wallCatalog_}}) {
+        catalog->clear();
+        for (auto& [guid, pattern] : *byGuid) {
+            catalog->push_back(std::move(pattern));
+        }
+        std::stable_sort(catalog->begin(), catalog->end(), [](const CatalogPattern& a, const CatalogPattern& b) { return a.price < b.price; });
+    }
 }
 
 std::string Assets::materialTexture(const std::string& material) {

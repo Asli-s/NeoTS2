@@ -81,7 +81,7 @@ void Game::leavePanelMode(bool restorePause) {
     if (!buildActive_ && !storyActive_) {
         return;
     }
-    dropFloorTool();
+    dropBuildTool();
     ts2::diag::step(buildActive_ ? "build mode: closed" : "story mode: closed");
     buildActive_ = storyActive_ = false;
     if (restorePause && lotLife_) {

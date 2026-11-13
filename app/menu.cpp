@@ -1341,12 +1341,14 @@ void Game::enterLot(std::uint32_t id) {
                 lotHeights = std::make_shared<const ts2::scene::Heights>(std::make_shared<const ts2::array3d::Array3D>(*heights.grid()));
                 groundLevel = ts2::content::groundGridLevel(lot);
             }
-            ts2::scene::addLot(builder, lot, file);
+            built.walls = ts2::scene::addLot(builder, lot, file).drawnWalls;
             // What Build mode's floor tool needs of the lot, kept as the rest is let go.
             built.floors = std::make_shared<ts2::content::Lot>();
             built.floors->worldBounds = lot.worldBounds;
             built.floors->roomGraph = lot.roomGraph;
             built.floors->floorPatterns = lot.floorPatterns;
+            built.floors->wallPatterns = lot.wallPatterns;
+            built.floors->wallCoverings = lot.wallCoverings;
             for (const std::uint32_t grid : {ts2::content::kFloorGridInstance, ts2::content::kFloorHeightGridInstance,
                                              ts2::content::kSurfaceGridInstance, ts2::content::kPlatformRegionGridInstance}) {
                 if (const auto it = lot.grids.find(grid); it != lot.grids.end()) {
@@ -1423,6 +1425,8 @@ void Game::showLot(LotBuilt& built) {
     }
     lotRouteModels_ = std::move(built.routeModels);
     buildLot_ = std::move(built.floors);
+    drawnWalls_ = std::move(built.walls);
+    findDrawnWalls();
     {
         // Imposters around the lot take the lighting state's environment colour.
         const auto* state = ts2::content::findState(assets_.get()->lighting(), built.lightState);
@@ -1490,8 +1494,11 @@ void Game::leaveLot() {
     // What Buy mode's hand holds is let go; what was bought stays with the lot until it is gone.
     leaveBuy(false);
     leavePanelMode(false);
-    dropFloorTool();
+    dropBuildTool();
     buildLot_.reset();
+    drawnWalls_.reset();
+    wallInstances_.clear();
+    wallOfInstance_.clear();
     endCameraDrag();
     inLot_ = false;
     if (surroundingsBuilding_.valid()) {
@@ -1735,8 +1742,9 @@ void Game::lotAction(app::LotUi::Action action) {
     case Action::BuyClosed: leaveBuy(true); break;
     case Action::BuildOpened: enterPanelMode(true); break;
     case Action::StoryOpened: enterPanelMode(false); break;
-    case Action::BuildItem: pickFloor(lotUi_.pickedFloor()); break;
-    case Action::BuildHand: dropFloorTool(); break;
+    case Action::BuildItem: pickPattern(lotUi_.pickedFloor(), false); break;
+    case Action::BuildWallItem: pickPattern(lotUi_.pickedWallCovering(), true); break;
+    case Action::BuildHand: dropBuildTool(); break;
     case Action::BuildClosed:
     case Action::StoryClosed: leavePanelMode(true); break;
     case Action::BuyItem: buyItem(lotUi_.pickedBuyItem()); break;
@@ -1949,6 +1957,35 @@ std::optional<std::array<std::int32_t, 2>> Game::buildTileAt(float x, float y) {
         return std::nullopt;
     }
     return std::array<std::int32_t, 2>{tx, ty};
+}
+
+std::optional<std::pair<std::size_t, bool>> Game::wallSideAt(float x, float y) {
+    if (!drawnWalls_ || wallOfInstance_.empty()) {
+        return std::nullopt;
+    }
+    // Only the lot's walls shown take the ray.
+    std::vector<std::uint8_t> walls(lot_.instances.size(), 0);
+    for (const auto& [instance, wall] : wallOfInstance_) {
+        if (instance < walls.size() && (instance >= lotVisible_.size() || lotVisible_[instance] != 0)) {
+            walls[instance] = 1;
+        }
+    }
+    const auto ray = screenRay(orbit_.camera(), width_, height_, x, y);
+    const auto hit = lotPicker_.pick(lot_, walls, orbit_.camera().eye, ray, &lotPose_);
+    if (!hit) {
+        return std::nullopt;
+    }
+    const auto found = wallOfInstance_.find(hit->instance);
+    if (found == wallOfInstance_.end()) {
+        return std::nullopt;
+    }
+    // The side seen is the one whose face looks back along the ray: the wall graph's left side faces
+    // (dy, -dx), in the lot's own space.
+    const auto& q = drawnWalls_->walls[found->second].wall.q;
+    std::array<float, 3> direction{ray[0], ray[1], ray[2]};
+    lotPlace_.rigidInverse().apply(direction.data(), false);
+    const float dx = q.x1 - q.x0, dy = q.y1 - q.y0;
+    return std::pair{found->second, direction[0] * dy - direction[1] * dx < 0};
 }
 
 std::uint32_t Game::lotObjectAt(float x, float y, const std::vector<std::int16_t>& ignore) {

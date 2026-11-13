@@ -517,3 +517,4 @@ std::vector<Test> fuzzRegressionTests();
 std::vector<Test> audioTests();
 std::vector<Test> catalogTests();
 std::vector<Test> floorEditTests();
+std::vector<Test> wallEditTests();

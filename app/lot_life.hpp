@@ -263,6 +263,10 @@ public:
     // scripts read floor patterns) after Build mode changed them: grid level `ground` is storey 1.
     int floorMaterial(const std::string& pattern, ts2::scene::Scene& scene) { return objectMaterials_.floorMaterial(pattern, scene); }
     void setFloors(const ts2::array3d::Array3D& floors, int ground);
+    // Build mode: a wall drawn again with its coverings as they are now (see ObjectMaterials::wallMesh).
+    int wallMesh(const ts2::scene::DrawnWall& wall, int sceneTop, bool cut, ts2::scene::Scene& scene) {
+        return objectMaterials_.wallMesh(wall, sceneTop, cut, scene);
+    }
     // An interaction as the queue shows it, and what its icon pictures: picture `index` of the
     // object type `guid` (0: its usual one) or, when `neighbor` is set, that Sim.
     struct QueuedAction {

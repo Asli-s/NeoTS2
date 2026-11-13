@@ -323,6 +323,8 @@ void LotSceneBuilder::collectWalls() {
         t.left = t.leftCovering = side(covering->second->left);
         t.right = t.rightCovering = side(covering->second->right);
         ++stats_.coveredWalls;
+        wallIds_.push_back(w.id);
+        wallCoverable_.push_back(fence == nullptr && !(style != styles.end() && style->first == kPoolEdgeStyle));
         walls_.push_back(std::move(t));
     }
     collectStageSides();
@@ -384,6 +386,8 @@ void LotSceneBuilder::collectStageSides() {
         const auto covering = coverings.find(w.id);
         t.left = t.leftCovering = side(covering != coverings.end() ? covering->second->left : 0);
         t.right = t.rightCovering = side(covering != coverings.end() ? covering->second->right : 0);
+        wallIds_.push_back(-1);
+        wallCoverable_.push_back(false);
         walls_.push_back(std::move(t));
     }
 }
@@ -588,6 +592,32 @@ void LotSceneBuilder::drawWalls() {
             }
         }
     }
+    // Kept for Build mode, which draws walls again with other coverings: each wall as drawn, and the
+    // roof shapes their ceilings follow, copied as the builder's own go with it.
+    auto drawn = std::make_shared<DrawnWalls>();
+    if (wallTop_ >= 0) {
+        drawn->topMaterial = b_.scene().materials[static_cast<std::size_t>(wallTop_)].name;
+    }
+    std::map<const RoofShape*, std::size_t> shapeAt;
+    drawn->gables.reserve(roofs_.size());
+    for (const auto& r : roofs_) {
+        shapeAt.emplace(&r.shape, drawn->gables.size());
+        drawn->gables.push_back(r.shape);
+    }
+    for (std::size_t i = 0; i < walls_.size(); ++i) {
+        DrawnWall d;
+        d.wall = walls_[i];
+        for (auto& g : d.wall.ceiling.gables) {
+            const auto it = shapeAt.find(g);
+            g = it != shapeAt.end() ? &drawn->gables[it->second] : nullptr;
+        }
+        std::erase(d.wall.ceiling.gables, nullptr);
+        d.lightRects = {lightRect(walls_[i], true), lightRect(walls_[i], false)};
+        d.graphWall = i < wallIds_.size() ? wallIds_[i] : -1;
+        d.coverable = i < wallCoverable_.size() && wallCoverable_[i];
+        drawn->walls.push_back(std::move(d));
+    }
+    stats_.drawnWalls = std::move(drawn);
     // Fan from each hub's point to each pair of neighboring corners (counterclockwise, so facing up).
     for (const auto& hub : hubs) {
         for (const bool cut : {false, true}) {

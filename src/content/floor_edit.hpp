@@ -24,10 +24,10 @@ struct FloorChange {
     std::map<std::string, std::size_t> replaced;
 };
 
-// The id a lot's floor grid stores for a floor pattern (named as the lot's pattern list names its
-// catalog floors: the GUID in hex), added to the list with the lowest free id when it isn't there.
+// The id a lot's floor grid or wall layer stores for a pattern (named as the lot's pattern list names its
+// catalog patterns: the GUID in hex), added to the list with the lowest free id when it isn't there.
 // 0 when every id is taken.
-std::uint16_t floorPatternId(std::map<std::uint16_t, stringmap::Entry>& patterns, const std::string& name);
+std::uint16_t patternId(std::map<std::uint16_t, stringmap::Entry>& patterns, const std::string& name);
 
 // The name a lot's pattern list gives a catalog floor: its GUID in lowercase hex.
 std::string floorPatternName(std::uint32_t guid);

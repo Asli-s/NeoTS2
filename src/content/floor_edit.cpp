@@ -68,7 +68,7 @@ std::string nameOf(const std::map<std::uint16_t, stringmap::Entry>& patterns, st
 
 std::string floorPatternName(std::uint32_t guid) { return std::format("{:08x}", guid); }
 
-std::uint16_t floorPatternId(std::map<std::uint16_t, stringmap::Entry>& patterns, const std::string& name) {
+std::uint16_t patternId(std::map<std::uint16_t, stringmap::Entry>& patterns, const std::string& name) {
     // Lots may spell a GUID in either case.
     const auto same = [](const std::string& a, const std::string& b) {
         return std::equal(a.begin(), a.end(), b.begin(), b.end(), [](char x, char y) {
@@ -93,7 +93,7 @@ std::uint16_t floorPatternId(std::map<std::uint16_t, stringmap::Entry>& patterns
 FloorChange layFloor(array3d::Array3D& floors, std::map<std::uint16_t, stringmap::Entry>& patterns, std::int32_t level, TileRect rect,
                      const std::string& name, bool anywhere, const array3d::Array3D* surface) {
     FloorChange change;
-    const std::uint16_t id = floorPatternId(patterns, name);
+    const std::uint16_t id = patternId(patterns, name);
     if (id == 0) {
         return change;
     }

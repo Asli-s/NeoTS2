@@ -273,4 +273,38 @@ std::optional<ts2::scene::Transform> ObjectMaterials::jointPose(const ts2::sim::
     return poseScratch_[static_cast<std::size_t>(node)];
 }
 
+int ObjectMaterials::wallMesh(const ts2::scene::DrawnWall& drawn, int sceneTop, bool cut, ts2::scene::Scene& scene) {
+    // Each side's covering as the lot's builder draws it, with any door or window hole cut again here.
+    ts2::scene::ThickWall wall = drawn.wall;
+    for (const bool left : {true, false}) {
+        const std::string& covering = left ? wall.leftCovering : wall.rightCovering;
+        const std::string& mask = left ? wall.leftMask : wall.rightMask;
+        std::string& side = left ? wall.left : wall.right;
+        side = covering;
+        if (!covering.empty() && !mask.empty()) {
+            if (const int masked = builder_.maskedMaterial(covering, mask, left ? wall.leftMaskMirrored : wall.rightMaskMirrored); masked >= 0) {
+                side = builder_.scene().materials[static_cast<std::size_t>(masked)].name;
+            }
+        }
+    }
+    // The top is the lot's own material, given its place under a key no builder material has.
+    constexpr int kTop = INT_MIN;
+    ts2::scene::Surfaces surfaces;
+    ts2::scene::addThickWall(builder_, surfaces, wall, kTop, cut ? ts2::scene::kCutWallHeight : 0, &drawn.lightRects);
+    ts2::scene::Mesh mesh;
+    mesh.name = "wall";
+    for (auto& [material, p] : surfaces) {
+        if (p.indices.empty()) {
+            continue;
+        }
+        p.material = material == kTop ? sceneTop : builderMaterial(material, scene);
+        mesh.primitives.push_back(std::move(p));
+    }
+    if (mesh.primitives.empty()) {
+        return -1;
+    }
+    scene.meshes.push_back(std::move(mesh));
+    return static_cast<int>(scene.meshes.size() - 1);
+}
+
 } // namespace app

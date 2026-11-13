@@ -604,8 +604,9 @@ void LotUi::refreshBuild(LotLife& life) {
     auto& assets = life.assets();
     BuildPanel::Source source;
     source.floors = &assets.floorCatalog();
-    // A floor's picture is its material's texture, as small as an object's in Buy mode.
-    source.picture = [&](const BuildPanel::Floor& floor) -> const ts2::tga::Pixels* {
+    source.walls = &assets.wallCatalog();
+    // A pattern's picture is its material's texture, as small as an object's in Buy mode.
+    source.picture = [&](const BuildPanel::Pattern& floor) -> const ts2::tga::Pixels* {
         auto it = floorPictures_.find(floor.guid);
         if (it == floorPictures_.end()) {
             std::optional<ts2::tga::Pixels> picture;
@@ -785,11 +786,15 @@ LotUi::Action LotUi::clicked(int window) {
         showStory(false);
         return Action::StoryClosed;
     }
-    // The Build catalog: a floor clicked is picked up to lay, and the hand puts it down.
+    // The Build catalog: a floor or wall covering clicked is picked up to lay, and the hand puts it down.
     if (const auto click = buildPanel_.clicked(window); click.panel) {
         if (click.floor) {
             pickedFloor_ = *click.floor;
             return Action::BuildItem;
+        }
+        if (click.wall) {
+            pickedWallCovering_ = *click.wall;
+            return Action::BuildWallItem;
         }
         return click.hand ? Action::BuildHand : Action::None;
     }

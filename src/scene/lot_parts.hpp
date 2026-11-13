@@ -250,6 +250,26 @@ using LightRect = std::array<float, 4>;
 void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w, int topMaterial, float cutHeight = 0,
                   const std::array<std::optional<LightRect>, 2>* lightRects = nullptr);
 
+// A wall as a lot's scene drew it (see LotSceneBuilder::drawWalls), kept so that Build mode can
+// draw it again with other coverings: each side's material by name as drawn (door and window holes
+// cut), its light-map rects, and which wall of the room graph it is.
+struct DrawnWall {
+    ThickWall wall;
+    std::array<std::optional<LightRect>, 2> lightRects;
+    std::int32_t graphWall = -1;  // its id in the room wall graph, -1 for a stage's side
+    // Its sides take wall coverings: not a pool's edge, a half wall's fence or a stage's side.
+    bool coverable = false;
+};
+struct DrawnWalls {
+    DrawnWalls() = default;
+    DrawnWalls(const DrawnWalls&) = delete;  // the walls' ceilings point into `gables`
+    DrawnWalls& operator=(const DrawnWalls&) = delete;
+
+    std::vector<DrawnWall> walls;   // in the order of the scene walls added with them
+    std::string topMaterial;        // the scene material their tops are drawn in, by name
+    std::vector<RoofShape> gables;  // the roof shapes the walls' ceilings follow
+};
+
 // The materials a roof is drawn with.
 struct RoofLook {
     int top = -1, under = -1, trim = -1, edges = -1, cap = -1, valley = -1;

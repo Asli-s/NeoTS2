@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -16,6 +17,8 @@ struct Lot;
 namespace ts2::scene {
 
 // What adding a lot to a scene found.
+struct DrawnWalls;
+
 struct LotSceneStats {
     std::size_t objects = 0;           // objects placed
     std::size_t sims = 0;              // Sims placed
@@ -26,6 +29,8 @@ struct LotSceneStats {
     std::size_t fenceRails = 0, fencePosts = 0;
     std::size_t floorPatterns = 0, roofs = 0;
     std::size_t terrainPaints = 0;  // paints drawn over the terrain's canvas
+    // The walls as drawn, for Build mode to draw again.
+    std::shared_ptr<DrawnWalls> drawnWalls;
     // One line per object (where it is, what it shows), when asked for.
     std::vector<std::string> objectLog;
 };

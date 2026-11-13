@@ -106,6 +106,9 @@ private:
     int edge_ = -1;
     int wallTop_ = -1;
     std::vector<ThickWall> walls_;
+    // For each of walls_, its room graph wall id (-1 for none) and whether its sides take coverings.
+    std::vector<std::int32_t> wallIds_;
+    std::vector<bool> wallCoverable_;
     int wallBase_ = 0;  // index of walls_[0] in the scene's walls
     std::map<EdgeKey, std::size_t> wallAt_;  // walls_ by their middle
     struct ShapedRoof {

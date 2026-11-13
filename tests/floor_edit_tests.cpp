@@ -26,8 +26,8 @@ void floorsJoinThePatternList() {
     std::map<std::uint16_t, ts2::stringmap::Entry> patterns{{1, {"floor_wood", 4}}, {3, {"4CC2A1B7", 8}}};
     CHECK(ts2::content::floorPatternName(0x4cc2a1b7) == "4cc2a1b7");
     CHECK(ts2::content::floorPatternName(0x1a) == "0000001a");
-    CHECK(ts2::content::floorPatternId(patterns, "4cc2a1b7") == 3);  // either case
-    CHECK(ts2::content::floorPatternId(patterns, "0000001a") == 2);
+    CHECK(ts2::content::patternId(patterns, "4cc2a1b7") == 3);  // either case
+    CHECK(ts2::content::patternId(patterns, "0000001a") == 2);
     CHECK(patterns.size() == 3 && patterns[2].name == "0000001a" && patterns[2].uses == 0);
 }
 

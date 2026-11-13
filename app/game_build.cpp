@@ -1,18 +1,23 @@
-// Build mode on a lot: the panel opens over the paused game, and its floor tool lays the floor picked
+// Build mode on a lot: the panel opens over the paused game. Its floor tool lays the floor picked
 // from the catalog over the tiles dragged across (or one clicked), paying for it a tile at a time and
 // getting back what the floor it covers cost. Ctrl held as the drag starts takes floor up instead,
 // paying back what it cost. On the ground storey floor goes anywhere but over a pool. Above it only
-// floors already there can be covered, until walls and floors that make new rooms are built. What
-// is changed lasts until the lot is left, as lots aren't saved yet.
+// floors already there can be covered, until walls and floors that make new rooms are built. Its wall
+// covering tool covers the wall side clicked, or with Shift every side facing the same room on that
+// storey, a wall side at a time, giving back what the coverings it replaces cost. What is changed lasts
+// until the lot is left, as lots aren't saved yet.
 #include "game.hpp"
 
 #include "content/floor_edit.hpp"
+#include "content/wall_edit.hpp"
 #include "diag/log.hpp"
 #include "scene/lot_parts.hpp"
 
 #include <algorithm>
 #include <charconv>
 #include <format>
+#include <map>
+#include <set>
 
 namespace app {
 
@@ -43,29 +48,48 @@ std::optional<std::int32_t> catalogPrice(const std::vector<ts2::scene::Assets::C
 
 } // namespace
 
-void Game::pickFloor(std::uint32_t guid) {
+void Game::pickPattern(std::uint32_t guid, bool wall) {
     if (!buildActive_ || !lotLife_) {
         return;
     }
-    const auto& catalog = assets_.get()->floorCatalog();
-    const auto it = std::find_if(catalog.begin(), catalog.end(), [&](const auto& floor) { return floor.guid == guid; });
+    const auto& catalog = wall ? assets_.get()->wallCatalog() : assets_.get()->floorCatalog();
+    const auto it = std::find_if(catalog.begin(), catalog.end(), [&](const auto& pattern) { return pattern.guid == guid; });
     if (it == catalog.end()) {
         return;
     }
-    floorTool_ = FloorTool{guid, ts2::content::floorPatternName(guid), it->name, it->price};
+    // Catalog floors and wall coverings are both named by their GUID in hex in the lot's lists.
+    buildTool_ = BuildTool{wall, guid, ts2::content::floorPatternName(guid), it->name, it->price};
     floorDragFrom_.reset();
     floorTileAt_.reset();
-    ts2::diag::step(std::format("build mode: floor {} ({:08x}) picked", it->name, guid));
+    ts2::diag::step(std::format("build mode: {} {} ({:08x}) picked", wall ? "wall covering" : "floor", it->name, guid));
 }
 
-void Game::dropFloorTool() {
-    if (floorTool_) {
-        ts2::diag::step("build mode: floor tool put down");
+void Game::dropBuildTool() {
+    if (buildTool_) {
+        ts2::diag::step(buildTool_->wall ? "build mode: wall covering tool put down" : "build mode: floor tool put down");
     }
-    floorTool_.reset();
+    buildTool_.reset();
     floorDragFrom_.reset();
     floorTileAt_.reset();
     buildTip({});
+}
+
+// The wall covering tool: the tip names the covering and its price over a wall side it can cover,
+// and a click covers that side, or with Shift every side facing the same room.
+bool Game::wallMouse(const pf::Event& e, float x, float y, bool overPanels) {
+    if (e.type == pf::Event::Type::MouseMotion) {
+        const auto side = overPanels ? std::nullopt : wallSideAt(x, y);
+        buildTip(side ? std::format("{}: {} a wall", buildTool_->name, simoleons(buildTool_->price)) : std::string());
+        return false;  // the camera may still move
+    }
+    if (e.type != pf::Event::Type::MouseDown || e.button != pf::MouseButton::Left || overPanels) {
+        return false;
+    }
+    if (const auto side = wallSideAt(x, y)) {
+        const std::string message = coverWalls(side->first, side->second, e.shift);
+        buildTip(message.empty() ? std::format("{}: {} a wall", buildTool_->name, simoleons(buildTool_->price)) : message);
+    }
+    return true;
 }
 
 void Game::buildTip(const std::string& text) {
@@ -77,11 +101,17 @@ void Game::buildTip(const std::string& text) {
 }
 
 bool Game::buildMouse(const pf::Event& e, float x, float y) {
-    if (!buildActive_ || !lotLife_ || !floorTool_) {
+    if (!buildActive_ || !lotLife_ || !buildTool_) {
         return false;
     }
     const auto [ix, iy] = toUi(x, y);
     const bool overPanels = screen_.over(ix, iy);
+    if (buildTool_->wall) {
+        if (!overPanels) {
+            buildMouseAt_ = {x, y};
+        }
+        return wallMouse(e, x, y, overPanels);
+    }
     if (!overPanels || floorDragFrom_) {
         buildMouseAt_ = {x, y};
     }
@@ -92,13 +122,13 @@ bool Game::buildMouse(const pf::Event& e, float x, float y) {
             return;
         }
         if (!floorDragFrom_) {
-            buildTip(std::format("{}: {} a tile", floorTool_->name, simoleons(floorTool_->price)));
+            buildTip(std::format("{}: {} a tile", buildTool_->name, simoleons(buildTool_->price)));
             return;
         }
         const ts2::content::TileRect rect{(*floorDragFrom_)[0], (*floorDragFrom_)[1], (*floorTileAt_)[0], (*floorTileAt_)[1]};
         const std::int32_t tiles = rect.width() * rect.height();
         buildTip(floorRemoving_ ? std::format("Take up {} x {}", rect.width(), rect.height())
-                                : std::format("{} x {}: {}", rect.width(), rect.height(), simoleons(floorTool_->price * tiles)));
+                                : std::format("{} x {}: {}", rect.width(), rect.height(), simoleons(buildTool_->price * tiles)));
     };
     if (e.type == pf::Event::Type::MouseMotion) {
         if (const auto tile = buildTileAt(x, y)) {
@@ -140,7 +170,7 @@ bool Game::buildMouse(const pf::Event& e, float x, float y) {
 }
 
 bool Game::buildKey(const pf::Event& e) {
-    if (!buildActive_ || !floorTool_ || e.type != pf::Event::Type::KeyDown || e.key != pf::Key::Escape) {
+    if (!buildActive_ || !buildTool_ || e.type != pf::Event::Type::KeyDown || e.key != pf::Key::Escape) {
         return false;
     }
     // Esc lets go of a drag, then of the tool.
@@ -149,14 +179,14 @@ bool Game::buildKey(const pf::Event& e) {
             floorDragFrom_.reset();
             buildTip({});
         } else {
-            dropFloorTool();
+            dropBuildTool();
         }
     }
     return true;
 }
 
 std::string Game::layFloors(std::array<std::int32_t, 2> to) {
-    if (!floorTool_ || !floorDragFrom_ || !buildLot_ || !lotLife_) {
+    if (!buildTool_ || !floorDragFrom_ || !buildLot_ || !lotLife_) {
         return {};
     }
     auto& lot = *buildLot_;
@@ -175,7 +205,7 @@ std::string Game::layFloors(std::array<std::int32_t, 2> to) {
     auto patterns = lot.floorPatterns;
     const auto surface = lot.grids.find(ts2::content::kSurfaceGridInstance);
     const auto change = floorRemoving_ ? ts2::content::removeFloor(floors, patterns, level, rect)
-                                       : ts2::content::layFloor(floors, patterns, level, rect, floorTool_->pattern, level == ground,
+                                       : ts2::content::layFloor(floors, patterns, level, rect, buildTool_->pattern, level == ground,
                                                                 surface == lot.grids.end() ? nullptr : &surface->second);
     if (change.quarters == 0) {
         ts2::diag::step(std::format("build mode: nothing to change on storey {} from {} {} to {} {}", level - ground + 1, rect.x0, rect.y0, rect.x1, rect.y1));
@@ -192,7 +222,7 @@ std::string Game::layFloors(std::array<std::int32_t, 2> to) {
             refund += ts2::content::floorPrice(*price, quarters);
         }
     }
-    const std::int32_t cost = floorRemoving_ ? 0 : ts2::content::floorPrice(floorTool_->price, change.quarters);
+    const std::int32_t cost = floorRemoving_ ? 0 : ts2::content::floorPrice(buildTool_->price, change.quarters);
     if (cost - refund > lotLife_->funds()) {
         return "You can't afford that.";
     }
@@ -202,7 +232,7 @@ std::string Game::layFloors(std::array<std::int32_t, 2> to) {
     redrawFloors(level);
     lotLife_->setFloors(grid->second, ground);
     ts2::diag::step(std::format("build mode: {} {} quarter tiles on storey {} from {} {} to {} {}: paid {}, got back {}",
-                                floorRemoving_ ? "took up" : "laid " + floorTool_->name + " on", change.quarters, level - ground + 1, rect.x0,
+                                floorRemoving_ ? "took up" : "laid " + buildTool_->name + " on", change.quarters, level - ground + 1, rect.x0,
                                 rect.y0, rect.x1, rect.y1, cost, refund));
     return {};
 }
@@ -262,6 +292,120 @@ void Game::redrawFloors(int level) {
         renderer_.setInstance(lot_, index);
         lotPicker_.update(lot_, index);
     }
+}
+
+void Game::findDrawnWalls() {
+    wallInstances_.clear();
+    wallOfInstance_.clear();
+    wallTopMaterial_ = -1;
+    if (!drawnWalls_) {
+        return;
+    }
+    // The lot's walls are the last the scene has: its own are the neighborhood's skirt's before it.
+    const std::size_t count = drawnWalls_->walls.size();
+    if (lot_.walls.size() < count) {
+        drawnWalls_.reset();
+        return;
+    }
+    const std::size_t first = lot_.walls.size() - count;
+    wallInstances_.assign(count, {-1, -1});
+    for (std::size_t i = 0; i < lot_.instances.size(); ++i) {
+        const auto& instance = lot_.instances[i];
+        if (instance.part != ts2::scene::Part::Wall || instance.walls.size() != 1 || instance.walls.front() < static_cast<int>(first)) {
+            continue;
+        }
+        const auto wall = static_cast<std::size_t>(instance.walls.front()) - first;
+        if (wall < count) {
+            wallInstances_[wall][instance.cut ? 1 : 0] = static_cast<int>(i);
+            wallOfInstance_[i] = wall;
+        }
+    }
+    for (std::size_t m = 0; m < lot_.materials.size(); ++m) {
+        if (lot_.materials[m].name == drawnWalls_->topMaterial) {
+            wallTopMaterial_ = static_cast<int>(m);
+        }
+    }
+}
+
+std::string Game::coverWalls(std::size_t wall, bool left, bool room) {
+    if (!buildTool_ || !buildTool_->wall || !buildLot_ || !lotLife_ || !drawnWalls_ || wall >= drawnWalls_->walls.size()) {
+        return {};
+    }
+    auto& lot = *buildLot_;
+    auto& drawn = drawnWalls_->walls;
+    if (!drawn[wall].coverable || !lot.roomGraph) {
+        return "This wall can't be covered.";
+    }
+    // The drawn walls by their room graph wall, for those that take coverings.
+    std::map<std::int32_t, std::size_t> drawnByGraph;
+    for (std::size_t i = 0; i < drawn.size(); ++i) {
+        if (drawn[i].coverable && drawn[i].graphWall >= 0) {
+            drawnByGraph.emplace(drawn[i].graphWall, i);
+        }
+    }
+    const ts2::content::WallSide clicked{drawn[wall].graphWall, left};
+    const auto sides = room ? ts2::content::roomWallSides(*lot.roomGraph, lot.wallCoverings, clicked,
+                                                          [&](std::int32_t id) { return drawnByGraph.contains(id); })
+                            : std::vector<ts2::content::WallSide>{clicked};
+    // Worked out on copies, kept only once paid for.
+    auto coverings = lot.wallCoverings;
+    auto patterns = lot.wallPatterns;
+    const auto& catalog = assets_.get()->wallCatalog();
+    std::vector<ts2::content::WallSide> covered;
+    std::int32_t refund = 0;
+    for (const auto& side : sides) {
+        if (const auto before = ts2::content::coverWallSide(coverings, patterns, side, buildTool_->pattern)) {
+            covered.push_back(side);
+            if (const auto price = catalogPrice(catalog, *before)) {
+                refund += *price;
+            }
+        }
+    }
+    if (covered.empty()) {
+        return {};
+    }
+    const std::int32_t cost = buildTool_->price * static_cast<std::int32_t>(covered.size());
+    if (cost - refund > lotLife_->funds()) {
+        return "You can't afford that.";
+    }
+    lotLife_->addFunds(refund - cost);
+    lot.wallCoverings = std::move(coverings);
+    lot.wallPatterns = std::move(patterns);
+    // Each covered side shows the new covering, its wall drawn again in full and cut down.
+    const std::string material = assets_.get()->patternMaterial(buildTool_->pattern, true);
+    std::set<std::size_t> redraw;
+    for (const auto& side : covered) {
+        const auto it = drawnByGraph.find(side.wall);
+        if (it == drawnByGraph.end()) {
+            continue;
+        }
+        auto& w = drawn[it->second].wall;
+        (side.left ? w.leftCovering : w.rightCovering) = material;
+        redraw.insert(it->second);
+    }
+    renderer_.addMaterials(lot_);
+    for (const std::size_t i : redraw) {
+        for (const bool cut : {false, true}) {
+            const int instance = wallInstances_[i][cut ? 1 : 0];
+            if (instance < 0) {
+                continue;
+            }
+            const int mesh = lotLife_->wallMesh(drawn[i], wallTopMaterial_, cut, lot_);
+            if (mesh < 0) {
+                continue;
+            }
+            lot_.instances[static_cast<std::size_t>(instance)].mesh = mesh;
+            renderer_.addMaterials(lot_);
+            renderer_.addMeshes(lot_);
+            renderer_.setInstance(lot_, static_cast<std::size_t>(instance));
+            lotPicker_.update(lot_, static_cast<std::size_t>(instance));
+        }
+    }
+    const auto& q = drawn[wall].wall.q;
+    ts2::diag::step(std::format("build mode: covered {} wall side{} with {}{} from the {} side of the wall from {} {} to {} {} (grid level {}{}): paid {}, got back {}",
+                                covered.size(), covered.size() == 1 ? "" : "s", buildTool_->name, room ? " round the room" : "", left ? "left" : "right",
+                                q.x0, q.y0, q.x1, q.y1, drawn[wall].wall.level, (left ? drawn[wall].wall.leftMask : drawn[wall].wall.rightMask).empty() ? "" : ", cut by a door or window", cost, refund));
+    return {};
 }
 
 } // namespace app

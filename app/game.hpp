@@ -142,6 +142,7 @@ private:
         std::shared_ptr<const app::RouteModelTable> routeModels;
         // The lot's floors and what places them (grids, pattern list, room graph), for Build mode.
         std::shared_ptr<ts2::content::Lot> floors;
+        std::shared_ptr<ts2::scene::DrawnWalls> walls;  // its walls as drawn, for Build mode
         // For lighting it again as its clock moves on.
         std::shared_ptr<app::LotLightBase> light;
         std::string lightState;
@@ -587,19 +588,25 @@ private:
     // What each object bought in this visit to Buy mode cost: selling it before leaving gives all of it back.
     std::map<std::int16_t, std::int32_t> boughtThisVisit_;
     std::optional<std::array<float, 2>> buyMouseAt_;  // where the mouse last was over the lot, in the window
-    // Build mode's floor tool (app/game_build.cpp): the floor picked from the catalog, the tile
-    // under the mouse and the one a drag started on, and whether the drag takes floor up (Ctrl held
-    // as it started). The lot's floors as Build mode changes them, kept from loading.
-    struct FloorTool {
+    // Build mode's tools (app/game_build.cpp): the floor or wall covering picked from the catalog;
+    // for floors the tile under the mouse and the one a drag started on, and whether the drag takes
+    // floor up (Ctrl held as it started). The lot's floors and wall coverings as Build mode changes
+    // them, kept from loading, and its walls as drawn with each one's full and cut-down instance.
+    struct BuildTool {
+        bool wall = false;          // a wall covering, else a floor
         std::uint32_t guid = 0;
         std::string pattern, name;  // its name in the lot's pattern list, its catalog name
         std::int32_t price = 0;     // per tile
     };
-    std::optional<FloorTool> floorTool_;
+    std::optional<BuildTool> buildTool_;
     std::optional<std::array<std::int32_t, 2>> floorTileAt_, floorDragFrom_;
     bool floorRemoving_ = false;
     std::optional<std::array<float, 2>> buildMouseAt_;  // where the mouse last was over the lot, in the window
     std::shared_ptr<ts2::content::Lot> buildLot_;
+    std::shared_ptr<ts2::scene::DrawnWalls> drawnWalls_;
+    std::vector<std::array<int, 2>> wallInstances_;  // by drawn wall: its full and cut instances (-1: none)
+    std::map<std::size_t, std::size_t> wallOfInstance_;  // scene instance: drawn wall
+    int wallTopMaterial_ = -1;  // the scene material the walls' tops are drawn in
     void enterBuy();
     void leaveBuy(bool restorePause);
     // The pause from before Buy, Build or Story mode or the options menu, whichever is open as
@@ -620,9 +627,9 @@ private:
     void sellHeld();
     // A short message at the mouse, as the game's tip in the world (empty: none).
     void buyTip(const std::string& text);
-    // Build mode: picks a floor from the catalog to lay, or puts the tool down.
-    void pickFloor(std::uint32_t guid);
-    void dropFloorTool();
+    // Build mode: picks a floor or wall covering from the catalog to lay, or puts the tool down.
+    void pickPattern(std::uint32_t guid, bool wall);
+    void dropBuildTool();
     // Build mode's share of the mouse on the lot and of the keys: true when it took the event.
     bool buildMouse(const ts2::platform::Event& e, float x, float y);
     bool buildKey(const ts2::platform::Event& e);
@@ -634,6 +641,15 @@ private:
     std::string layFloors(std::array<std::int32_t, 2> to);
     // Draws a grid level's floors again from buildLot_.
     void redrawFloors(int level);
+    // The wall side under the mouse: a drawn wall's index and whether its left side is the one seen.
+    std::optional<std::pair<std::size_t, bool>> wallSideAt(float x, float y);
+    // Covers that wall side, or with `room` every side facing the same room on its storey, with the
+    // tool's wall covering, paying for it and getting back what the coverings it replaces cost. Why
+    // nothing changed when it can't, else empty.
+    std::string coverWalls(std::size_t wall, bool left, bool room);
+    bool wallMouse(const ts2::platform::Event& e, float x, float y, bool overPanels);
+    // Finds the lot's walls among the scene's instances as a lot is shown.
+    void findDrawnWalls();
     void buildTip(const std::string& text);
     float downX_ = 0, downY_ = 0;
     std::optional<std::array<float, 2>> dragFrom_;  // where a camera drag (right button) started

@@ -3,6 +3,7 @@
 #include "scene/animation_library.hpp"
 #include "scene/assets.hpp"
 #include "scene/builder.hpp"
+#include "scene/lot_parts.hpp"
 #include "scene/scene.hpp"
 #include "scene/sim_builder.hpp"
 #include "sim/world.hpp"
@@ -51,6 +52,11 @@ public:
     // The scene material of a lot floor pattern (a name from the lot's pattern list), added from the
     // game's files on first use. -1 when the game has no such material.
     int floorMaterial(const std::string& pattern, ts2::scene::Scene& scene) { return material(assets_.patternMaterial(pattern, false), scene); }
+
+    // A lot wall's mesh drawn again as the lot's scene drew it (full, or cut down for the views that cut
+    // walls), with its sides' coverings as `drawn` has them now, its top in the scene material
+    // `sceneTop`. Added to the scene with its materials; -1 when it has nothing to draw.
+    int wallMesh(const ts2::scene::DrawnWall& drawn, int sceneTop, bool cut, ts2::scene::Scene& scene);
 
     // Looks for objects whose materials changed since the last update.
     void update(ts2::sim::World& world, ts2::scene::Scene& scene);
