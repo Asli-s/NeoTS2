@@ -235,6 +235,22 @@ struct WallMask {
 // Wall masks by lowercase model name, from material names "<model>_<east>_<south>_<level>_<face>_wallmask".
 std::map<std::string, std::vector<WallMask>> wallMasks(const std::vector<std::string>& materialNames);
 
+// Where a door or window's wall masks cut walls, with the object placed at `world` (in the lot's own
+// space) on grid level `level`: for each mask face, the middle of the tile edge (or the tile's
+// diagonal) whose wall it cuts, that wall's level, the way the face looks, its mask material and
+// whether the mask runs mirrored.
+struct WallCut {
+    std::array<float, 2> middle{};
+    int level = 0;
+    std::array<float, 2> facing{};
+    std::string material;
+    std::string face;  // the mask's face: n, e, s, w or a diagonal
+    bool mirrored = false;
+};
+std::vector<WallCut> wallCuts(const std::vector<WallMask>& masks, const Transform& world, int level);
+// Whether a cut's face is on the left side (as the wall graph has it) of a wall from (x0, y0) to (x1, y1).
+bool cutsLeftSide(const WallCut& cut, float x0, float y0, float x1, float y1);
+
 // Joins the walls meeting at each wall graph point: going around the point, each wall's side line
 // ends where it meets the facing side line of the next wall (mitred corners, T and cross joins).
 std::vector<WallHub> joinWalls(std::vector<ThickWall>& walls);

@@ -18,6 +18,7 @@ constexpr std::array<std::uint32_t, 8> kToolsNotDone = {0xA1, 0xA2, 0xA3, 0xA4, 
 // panels, each with Back.
 constexpr std::uint32_t kCategories = 0x0000A000, kFloors = 0x0000A400, kFloorSorts = 0x0000B400, kFloorBack = 0x0000B410;
 constexpr std::uint32_t kWalls = 0x0000A500, kWallSorts = 0x0000B500, kWallBack = 0x0000B510;
+constexpr std::uint32_t kDoorsWindows = 0x0000A300, kDoorSorts = 0x0000B300, kDoorBack = 0x0000B310;
 // The Wall Tool category: its panel with Back, Walls & Rooms (done) and Half Walls (not done).
 constexpr std::uint32_t kWallTool = 0x0000A100, kWallToolSorts = 0x0000B100, kWallToolBack = 0x0000B110, kWallsAndRooms = 0x0000B120,
                         kHalfWalls = 0x0000B130;
@@ -26,7 +27,12 @@ struct SortButton {
     std::uint32_t id;
     const char* subsort;
 };
-constexpr std::array<SortButton, 17> kSortButtons = {{{0xB420, "stone"},
+constexpr std::array<SortButton, 22> kSortButtons = {{{0xB320, "doors"},
+                                                      {0xB330, "tallwindows"},
+                                                      {0xB340, "windows"},
+                                                      {0xB350, "arches"},
+                                                      {0xB370, "multistory"},
+                                                      {0xB420, "stone"},
                                                       {0xB430, "brick"},
                                                       {0xB440, "wood"},
                                                       {0xB450, "carpet"},
@@ -43,7 +49,7 @@ constexpr std::array<SortButton, 17> kSortButtons = {{{0xB420, "stone"},
                                                       {0xB580, "tile"},
                                                       {0xB590, "paneling"},
                                                       {0xB5A1, "other"}}};
-constexpr std::uint32_t kAllFloors = 0xB4A0, kAllWalls = 0xB5A0;
+constexpr std::uint32_t kAllFloors = 0xB4A0, kAllWalls = 0xB5A0, kAllDoors = 0xB360;
 // The catalog and the auto roof options beside the panel; in the catalog its normal view (the
 // others aren't done), and there the item area, its mark, the page buttons, scrollbar, Expand,
 // Organize Items and the custom content buttons. The catalog's info text.
@@ -84,11 +90,13 @@ void BuildPanel::attach(ts2::ui::Screen& screen, int content) {
     categories_ = s.find(content, kCategories);
     if (categories_ >= 0) {
         for (const int category : s.children(categories_)) {
-            s.setEnabled(category, s.id(category) == kFloors || s.id(category) == kWalls || s.id(category) == kWallTool);
+            s.setEnabled(category, s.id(category) == kFloors || s.id(category) == kWalls || s.id(category) == kWallTool ||
+                                       s.id(category) == kDoorsWindows);
         }
     }
     floorSorts_ = s.find(content, kFloorSorts);
     wallSorts_ = s.find(content, kWallSorts);
+    doorSorts_ = s.find(content, kDoorSorts);
     wallToolSorts_ = s.find(content, kWallToolSorts);
     s.setEnabled(s.find(wallToolSorts_, kHalfWalls), false);
     catalog_ = s.find(content, kCatalog);
@@ -147,20 +155,23 @@ void BuildPanel::reset() {
 void BuildPanel::showView() {
     auto& s = *screen_;
     // The categories until one is chosen, then its sub-categories and the catalog.
-    const bool floors = category_ == Category::Floors, walls = category_ == Category::Walls;
+    const bool floors = category_ == Category::Floors, walls = category_ == Category::Walls, doors = category_ == Category::Doors;
     s.setVisible(categories_, category_ == Category::None);
     // The Build Tools tab shares its place with each sub-category panel's Back button.
     s.setVisible(s.find(content_, kBuildTab), category_ == Category::None);
     s.setVisible(floorSorts_, floors);
     s.setVisible(wallSorts_, walls);
+    s.setVisible(doorSorts_, doors);
     s.setVisible(wallToolSorts_, category_ == Category::WallTool);
     s.setChecked(s.find(wallToolSorts_, kWallsAndRooms), wallToolPicked_);
-    s.setVisible(catalog_, floors || walls);  // the Wall tool has no catalog
+    s.setVisible(catalog_, floors || walls || doors);  // the Wall tool has no catalog
     for (const auto& b : kSortButtons) {
-        s.setChecked(s.find((b.id & 0xFF00) == 0xB400 ? floorSorts_ : wallSorts_, b.id), subsortButton_ == b.id);
+        const std::uint32_t panel = b.id & 0xFF00;
+        s.setChecked(s.find(panel == 0xB400 ? floorSorts_ : panel == 0xB500 ? wallSorts_ : doorSorts_, b.id), subsortButton_ == b.id);
     }
     s.setChecked(s.find(floorSorts_, kAllFloors), floors && subsortButton_ == 0);
     s.setChecked(s.find(wallSorts_, kAllWalls), walls && subsortButton_ == 0);
+    s.setChecked(s.find(doorSorts_, kAllDoors), doors && subsortButton_ == 0);
 }
 
 std::string BuildPanel::subsortOf(std::uint32_t button) {
@@ -196,7 +207,7 @@ BuildPanel::Click BuildPanel::clicked(int window) {
         for (int w = window; w >= 0; w = s.parent(w)) {
             if (w == slots_[i]) {
                 if (slotGuids_[i] != 0) {
-                    (category_ == Category::Walls ? out.wall : out.floor) = slotGuids_[i];
+                    (category_ == Category::Walls ? out.wall : category_ == Category::Doors ? out.object : out.floor) = slotGuids_[i];
                     wallToolPicked_ = false;
                 }
                 return out;
@@ -220,6 +231,13 @@ BuildPanel::Click BuildPanel::clicked(int window) {
     } else if (id == kWallToolBack && parent == wallToolSorts_) {
         category_ = Category::None;
         page_ = 0;
+    } else if (id == kDoorsWindows && parent == categories_) {
+        category_ = Category::Doors;
+        subsortButton_ = 0;
+        page_ = 0;
+    } else if (id == kDoorBack && parent == doorSorts_) {
+        category_ = Category::None;
+        page_ = 0;
     } else if ((id == kFloors || id == kWalls) && parent == categories_) {
         category_ = id == kFloors ? Category::Floors : Category::Walls;
         subsortButton_ = 0;
@@ -227,8 +245,9 @@ BuildPanel::Click BuildPanel::clicked(int window) {
     } else if ((id == kFloorBack && parent == floorSorts_) || (id == kWallBack && parent == wallSorts_)) {
         category_ = Category::None;
         page_ = 0;
-    } else if ((parent == floorSorts_ || parent == wallSorts_) && (id == kAllFloors || id == kAllWalls || !subsortOf(id).empty())) {
-        subsortButton_ = id == kAllFloors || id == kAllWalls || subsortButton_ == id ? 0 : id;  // clicked again, all show
+    } else if ((parent == floorSorts_ || parent == wallSorts_ || parent == doorSorts_) &&
+               (id == kAllFloors || id == kAllWalls || id == kAllDoors || !subsortOf(id).empty())) {
+        subsortButton_ = id == kAllFloors || id == kAllWalls || id == kAllDoors || subsortButton_ == id ? 0 : id;  // clicked again, all show
         page_ = 0;
     } else if (window == previous_) {
         page_ = std::max(0, page_ - 1);
@@ -243,7 +262,10 @@ BuildPanel::Click BuildPanel::clicked(int window) {
 }
 
 void BuildPanel::refresh(const Source& source) {
-    const auto* all = category_ == Category::Floors ? source.floors : category_ == Category::Walls ? source.walls : nullptr;
+    const auto* all = category_ == Category::Floors  ? source.floors
+                      : category_ == Category::Walls ? source.walls
+                      : category_ == Category::Doors ? source.objects
+                                                     : nullptr;
     if (screen_ == nullptr || content_ < 0 || all == nullptr) {
         return;
     }

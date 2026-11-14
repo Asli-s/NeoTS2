@@ -1751,6 +1751,7 @@ void Game::lotAction(app::LotUi::Action action) {
     case Action::BuildItem: pickPattern(lotUi_.pickedFloor(), false); break;
     case Action::BuildWallItem: pickPattern(lotUi_.pickedWallCovering(), true); break;
     case Action::BuildWallTool: pickWallTool(); break;
+    case Action::BuildObjectItem: buildObject(lotUi_.pickedBuildObject()); break;
     case Action::BuildHand: dropBuildTool(); break;
     case Action::BuildClosed:
     case Action::StoryClosed: leavePanelMode(true); break;
@@ -2017,13 +2018,13 @@ std::optional<std::pair<std::size_t, bool>> Game::wallSideAt(float x, float y) {
     return std::pair{found->second, direction[0] * dy - direction[1] * dx < 0};
 }
 
-std::uint32_t Game::lotObjectAt(float x, float y, const std::vector<std::int16_t>& ignore) {
+std::uint32_t Game::lotObjectAt(float x, float y, const std::vector<std::int16_t>& ignore, bool objectsOnly) {
     objectsShown_.assign(lot_.instances.size(), 0);
     for (std::size_t i = 0; i < lot_.instances.size(); ++i) {
         const auto& instance = lot_.instances[i];
         const bool shown = i >= lotVisible_.size() || lotVisible_[i] != 0;
         const bool ignored = std::find(ignore.begin(), ignore.end(), static_cast<std::int16_t>(instance.object)) != ignore.end();
-        objectsShown_[i] = shown && !(instance.object != 0 && ignored) ? 1 : 0;
+        objectsShown_[i] = shown && !(instance.object != 0 && ignored) && (!objectsOnly || instance.object != 0) ? 1 : 0;
     }
     const auto ray = screenRay(orbit_.camera(), width_, height_, x, y);
     const auto hit = lotPicker_.pick(lot_, objectsShown_, orbit_.camera().eye, ray, &lotPose_);
@@ -2468,9 +2469,9 @@ void Game::updateLot(std::uint64_t now) {
         const auto hit = lotPicker_.pick(lot_, shown, orbit_.camera().eye, ray, &lotPose_);
         const std::uint32_t object = hit ? hit->object : 0;
         // In Buy mode the hand highlights what it can pick up (nothing while it holds something). Build
-        // and Story mode highlight nothing yet.
+        // mode's hand highlights doors and windows, Story mode nothing.
         hovered_ = buyActive_    ? (!buyHeld_ && lotLife_->movable(static_cast<std::int16_t>(object)) ? object : 0)
-                   : panelModeActive() ? 0
+                   : panelModeActive() ? buildHover()
                    : (lotLife_->hoverable(object, mouseShift_) ? object : 0);
         if (hit) {
             const auto& eye = orbit_.camera().eye;

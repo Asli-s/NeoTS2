@@ -17,7 +17,8 @@ constexpr std::size_t kSelfDepreciating = 0x25;
 constexpr std::size_t kDepreciationLimit = 0x26;
 constexpr std::size_t kRoomSort = 0x27;
 constexpr std::size_t kFunctionSort = 0x28;
-constexpr std::size_t kBuildModeType = 0x45;
+constexpr std::size_t kBuildModeType = 0x45;  // the Build catalog category, one bit (see buildSort)
+constexpr std::size_t kBuildModeSubsort = 0x4A;
 constexpr std::size_t kFunctionSubsort = 0x5E;
 } // namespace field
 
@@ -65,6 +66,22 @@ std::vector<Item> inFunction(const std::vector<Item>& items, std::uint16_t funct
 // The items for a room (one bit of the room sort flags).
 std::vector<Item> inRoom(const std::vector<Item>& items, std::uint16_t room);
 
+
+// The Build catalog's categories of objects (OBJD 0x45) and, for doors and windows, their
+// sub-categories (OBJD 0x4A), as the game's own objects have them.
+namespace buildSort {
+constexpr std::uint16_t kDoorsAndWindows = 0x08;
+constexpr std::uint16_t kDoors = 0x01, kTallWindows = 0x02, kWindows = 0x04, kGates = 0x08, kArches = 0x10, kMultiStory = 0x20;
+} // namespace buildSort
+
+// Whether an object type is one Build mode's Doors & Windows catalog shows: a door (OBJD type 8) or
+// window (type 9) with a price in that category, but not a gate (the fence tools' own) nor a part
+// of a multi-tile one.
+bool isDoorOrWindow(const objd::ObjectDefinition& definition);
+
+// Every door, window and arch Build mode sells, the cheapest first, each type once: Item's
+// `functions` holds its category bits and `subsorts` its sub-category bits.
+std::vector<Item> doorsAndWindows(CodeSource& code);
 // The sub-category bit of a Buy panel sub-category button: the panels number them 0xBn20, 0xBn30
 // and so on (0xBn10 is Back), the n-th of which is bit n - 2. 0 for other ids.
 std::uint16_t subsortOfButton(std::uint32_t id);

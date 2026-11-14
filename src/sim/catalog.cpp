@@ -52,6 +52,46 @@ std::vector<Item> buyItems(CodeSource& code) {
     return items;
 }
 
+bool isDoorOrWindow(const objd::ObjectDefinition& d) {
+    // Doors (and arches and gates) are object type 8, windows type 9.
+    constexpr std::uint16_t kDoorObject = 8, kWindowObject = 9;
+    const std::uint16_t type = d.field(objd::field::kType);
+    if ((type != kDoorObject && type != kWindowObject) || d.field(objd::field::kPrice) == 0) {
+        return false;
+    }
+    if ((d.field(field::kBuildModeType) & buildSort::kDoorsAndWindows) == 0) {
+        return false;
+    }
+    const std::uint16_t sub = d.field(field::kBuildModeSubsort);
+    if (sub == 0 || (sub & ~buildSort::kGates) == 0) {
+        return false;
+    }
+    return d.field(objd::field::kMultiTileMasterId) == 0 || d.isMultiTileMaster();
+}
+
+std::vector<Item> doorsAndWindows(CodeSource& code) {
+    std::vector<Item> items;
+    std::set<std::uint32_t> seen;
+    for (const std::uint32_t guid : code.objectTypeGuids()) {
+        const ObjectType* type = code.objectType(guid);
+        if (type == nullptr || !isDoorOrWindow(type->definition) || !seen.insert(guid).second) {
+            continue;
+        }
+        const auto& d = type->definition;
+        Item item;
+        item.guid = guid;
+        item.group = type->group;
+        item.catalogStrings = d.field(objd::field::kCatalogStringsId);
+        item.price = d.field(objd::field::kPrice);
+        item.functions = d.field(field::kBuildModeType);
+        item.subsorts = d.field(field::kBuildModeSubsort);
+        item.multiTile = d.isMultiTileMaster();
+        items.push_back(item);
+    }
+    std::stable_sort(items.begin(), items.end(), [](const Item& a, const Item& b) { return a.price < b.price; });
+    return items;
+}
+
 std::vector<Item> inFunction(const std::vector<Item>& items, std::uint16_t function, std::uint16_t subsort) {
     std::vector<Item> out;
     for (const Item& item : items) {

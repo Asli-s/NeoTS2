@@ -45,6 +45,23 @@ const std::vector<ts2::sim::catalog::Item>& LotLife::buyItems() {
     return *buyItems_;
 }
 
+const std::vector<ts2::sim::catalog::Item>& LotLife::doorsAndWindows() {
+    if (!doorsAndWindows_) {
+        doorsAndWindows_ = ts2::sim::catalog::doorsAndWindows(sim_->code());
+        ts2::diag::info(std::format("build mode: {} doors, windows and arches in the catalog", doorsAndWindows_->size()));
+    }
+    return *doorsAndWindows_;
+}
+
+bool LotLife::isDoorOrWindow(std::int16_t object) {
+    const auto* found = sim_->world().find(object);
+    if (found == nullptr || found->removed || found->isPerson() || found->x == ts2::sim::kOffLot || found->y == ts2::sim::kOffLot) {
+        return false;
+    }
+    const auto* definition = buyDefinition(object);
+    return definition != nullptr && ts2::sim::catalog::isDoorOrWindow(*definition);
+}
+
 std::string LotLife::catalogText(const ts2::sim::catalog::Item& item, std::size_t line) {
     return sim_->code().catalogString(item.group, item.catalogStrings, line).value_or(std::string());
 }

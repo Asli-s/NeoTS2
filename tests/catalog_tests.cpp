@@ -111,6 +111,39 @@ void wallObjectsNeedTheirWall() {
     CHECK(!catalog::wallsWhereNeeded(0x4, 0xFF, 1));                      // diagonal facings aren't known
 }
 
+// Build mode's Doors & Windows: objects in that Build category (OBJD 0x45 bit 0x08) with a door,
+// window or arch sub-category (OBJD 0x4A), but not gates; and they aren't in Buy mode's catalog.
+void doorsAndWindowsAreInTheBuildCatalog() {
+    auto door = object(0x10, 350, 0, 0);
+    door.fields[catalog::field::kBuildModeType] = catalog::buildSort::kDoorsAndWindows;
+    door.fields[catalog::field::kBuildModeSubsort] = catalog::buildSort::kDoors;
+    door.fields[ts2::objd::field::kType] = 8;
+    auto window = door;
+    window.fields[ts2::objd::field::kGuid1] = 0x20;
+    window.fields[ts2::objd::field::kPrice] = 120;
+    window.fields[catalog::field::kBuildModeSubsort] = catalog::buildSort::kWindows;
+    window.fields[ts2::objd::field::kType] = 9;
+    auto gate = door;
+    gate.fields[ts2::objd::field::kGuid1] = 0x30;
+    gate.fields[catalog::field::kBuildModeSubsort] = catalog::buildSort::kGates;
+    auto column = door;
+    column.fields[ts2::objd::field::kGuid1] = 0x40;
+    column.fields[catalog::field::kBuildModeType] = 0x01;
+    CHECK(catalog::isDoorOrWindow(door) && catalog::isDoorOrWindow(window));
+    CHECK(!catalog::isDoorOrWindow(gate) && !catalog::isDoorOrWindow(column));
+    auto plain = door;  // a normal object, though sorted as a door
+    plain.fields[ts2::objd::field::kType] = 4;
+    CHECK(!catalog::isDoorOrWindow(plain));
+    CHECK(!catalog::isBuyItem(door));
+    MemoryCodeSource code;
+    for (const auto& d : {door, window, gate, column}) {
+        code.addObjectType(kGroup, d);
+    }
+    const auto items = catalog::doorsAndWindows(code);
+    CHECK(items.size() == 2 && items[0].guid == 0x20 && items[1].guid == 0x10);
+    CHECK(items.size() == 2 && items[0].subsorts == catalog::buildSort::kWindows && items[1].price == 350);
+}
+
 } // namespace
 
 std::vector<Test> catalogTests() {
@@ -121,5 +154,6 @@ std::vector<Test> catalogTests() {
         {"a placed object loses its initial depreciation", aPlacedObjectLosesItsInitialDepreciation},
         {"slots take objects by height", slotsTakeObjectsByHeight},
         {"wall objects need their wall", wallObjectsNeedTheirWall},
+        {"doors and windows are in the Build catalog", doorsAndWindowsAreInTheBuildCatalog},
     };
 }

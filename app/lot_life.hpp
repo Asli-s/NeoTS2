@@ -196,6 +196,10 @@ public:
 
     // Buy mode (app/lot_life_buy.cpp). Every object Buy mode can sell, the cheapest first, read once.
     const std::vector<ts2::sim::catalog::Item>& buyItems();
+    // Build mode's Doors & Windows catalog (read when first asked for), and whether an object (on the
+    // lot, not taken off it) is one of those or a part of one.
+    const std::vector<ts2::sim::catalog::Item>& doorsAndWindows();
+    bool isDoorOrWindow(std::int16_t object);
     // An item's catalog name and description (its catalog strings' lines 0 and 1).
     std::string catalogText(const ts2::sim::catalog::Item& item, std::size_t line);
     // Makes an object of type `guid` off the lot and starts it, for Buy mode to place. 0 when it
@@ -534,6 +538,7 @@ private:
     std::vector<std::size_t> relit_;
     std::vector<std::size_t> shapeColored_;
     std::optional<std::vector<ts2::sim::catalog::Item>> buyItems_;  // read when Buy mode first opens
+    std::optional<std::vector<ts2::sim::catalog::Item>> doorsAndWindows_;
 };
 
 } // namespace app

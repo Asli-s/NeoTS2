@@ -482,33 +482,16 @@ void LotSceneBuilder::cutWalls() {
         if (list == masks.end()) {
             continue;
         }
-        for (const auto& m : list->second) {
-            // The face's direction: n is the object's front (+y), e its +x. Ne and the like are diagonal.
-            const float fx = m.face.ends_with('e') ? 1.0f : m.face.ends_with('w') ? -1.0f : 0.0f;
-            const float fy = m.face.starts_with('n') ? 1.0f : m.face.starts_with('s') ? -1.0f : 0.0f;
-            if (fx == 0 && fy == 0) {
-                continue;
-            }
-            // A straight face's wall runs along the tile edge behind it, a diagonal one's through the
-            // tile's middle.
-            const bool diagonal = fx != 0 && fy != 0;
-            float mid[3] = {static_cast<float>(m.east) - (diagonal ? 0 : fx / 2), static_cast<float>(-m.south) - (diagonal ? 0 : fy / 2), 0};
-            float facing[3] = {fx, fy, 0};
-            o.world.apply(mid, true);
-            o.world.apply(facing, false);
-            const int level = content::gridLevel(lot_, o.object->state.header.value1) + m.level;
-            const auto wall = wallAt_.find(edgeKey(mid[0], mid[1], mid[0], mid[1], level));
+        const int level = content::gridLevel(lot_, o.object->state.header.value1);
+        for (const auto& cut : wallCuts(list->second, o.world, level)) {
+            const auto wall = wallAt_.find(edgeKey(cut.middle[0], cut.middle[1], cut.middle[0], cut.middle[1], cut.level));
             if (wall == wallAt_.end()) {
                 continue;
             }
             ThickWall& w = walls_[wall->second];
-            const float dx = w.q.x1 - w.q.x0, dy = w.q.y1 - w.q.y0;
-            // The wall graph's left side faces (dy, -dx). A straight face's mask runs along the
-            // object's own -x: left to right as seen from n and e faces, right to left from s and w.
-            // A diagonal one runs right to left as seen from ne and nw faces, left to right from se and sw.
-            const bool left = facing[0] * dy - facing[1] * dx > 0;
-            (left ? w.leftMask : w.rightMask) = m.material;
-            (left ? w.leftMaskMirrored : w.rightMaskMirrored) = diagonal ? m.face.starts_with('n') : m.face == "s" || m.face == "w";
+            const bool left = cutsLeftSide(cut, w.q.x0, w.q.y0, w.q.x1, w.q.y1);
+            (left ? w.leftMask : w.rightMask) = cut.material;
+            (left ? w.leftMaskMirrored : w.rightMaskMirrored) = cut.mirrored;
             b_.scene().instances[o.instance].walls.push_back(wallBase_ + static_cast<int>(wall->second));
             ++stats_.wallCuts;
         }
@@ -643,6 +626,43 @@ void LotSceneBuilder::drawWalls() {
 }
 
 } // namespace lotscene
+
+std::vector<WallCut> wallCuts(const std::vector<WallMask>& masks, const Transform& world, int level) {
+    std::vector<WallCut> cuts;
+    for (const auto& m : masks) {
+        // The face's direction: n is the object's front (+y), e its +x. Ne and the like are diagonal.
+        const float fx = m.face.ends_with('e') ? 1.0f : m.face.ends_with('w') ? -1.0f : 0.0f;
+        const float fy = m.face.starts_with('n') ? 1.0f : m.face.starts_with('s') ? -1.0f : 0.0f;
+        if (fx == 0 && fy == 0) {
+            continue;
+        }
+        // A straight face's wall runs along the tile edge behind it, a diagonal one's through the
+        // tile's middle.
+        const bool diagonal = fx != 0 && fy != 0;
+        float mid[3] = {static_cast<float>(m.east) - (diagonal ? 0 : fx / 2), static_cast<float>(-m.south) - (diagonal ? 0 : fy / 2), 0};
+        float facing[3] = {fx, fy, 0};
+        world.apply(mid, true);
+        world.apply(facing, false);
+        WallCut cut;
+        cut.middle = {mid[0], mid[1]};
+        cut.level = level + m.level;
+        cut.facing = {facing[0], facing[1]};
+        cut.material = m.material;
+        cut.face = m.face;
+        // A straight face's mask runs along the object's own -x: left to right as seen from n and e
+        // faces, right to left from s and w. A diagonal one runs right to left as seen from ne and nw
+        // faces, left to right from se and sw.
+        cut.mirrored = diagonal ? m.face.starts_with('n') : m.face == "s" || m.face == "w";
+        cuts.push_back(std::move(cut));
+    }
+    return cuts;
+}
+
+bool cutsLeftSide(const WallCut& cut, float x0, float y0, float x1, float y1) {
+    // The wall graph's left side faces (dy, -dx).
+    const float dx = x1 - x0, dy = y1 - y0;
+    return cut.facing[0] * dy - cut.facing[1] * dx > 0;
+}
 
 ObjectLighting outdoorLighting(const content::Lighting::State& state) {
     ObjectLighting out;

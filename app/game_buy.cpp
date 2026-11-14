@@ -82,6 +82,7 @@ void Game::leavePanelMode(bool restorePause) {
         return;
     }
     dropBuildTool();
+    cancelHeld();  // a door or window held goes back, or isn't bought
     ts2::diag::step(buildActive_ ? "build mode: closed" : "story mode: closed");
     buildActive_ = storyActive_ = false;
     if (restorePause && lotLife_) {
@@ -168,6 +169,25 @@ void Game::holdUnderMouse(float x, float y) {
     buyHeld_->slot.reset();
     buyHeld_->spot = spot;
 
+    if (buyHeld_->door) {
+        // A door or window goes in a wall: turned the first way its wall masks find their wall from
+        // the way it faces. The game places them with its own door tool, not by the placement rules
+        // other objects keep (a door's footprint reaches into its wall), so only its walls decide.
+        bool fits = false;
+        for (int turn = 0; turn < 4 && !fits; ++turn) {
+            const auto direction = static_cast<std::int16_t>((buyHeld_->direction + 2 * turn) % kTurns);
+            if (doorCuts(held, spot, direction, true)) {
+                buyHeld_->direction = direction;
+                fits = true;
+            }
+        }
+        lotLife_->holdAt(held, spot, buyHeld_->direction);
+        buyHeld_->fits = fits;
+        ts2::diag::step(std::format("build mode: door or window {} held at {:.1f} {:.1f} storey {} facing {}: {}", held, spot.x / 65536.0,
+                                    spot.y / 65536.0, spot.level, buyHeld_->direction, fits ? "fits" : "doesn't fit"));
+        buyTip(fits ? std::string() : std::string("Doors and windows go in a wall."));
+        return;
+    }
     // An object that only goes on surfaces is shown where the mouse is but can't be put down there.
     const bool floorAllowed = lotLife_->standsOnFloor(held);
     const bool fits = lotLife_->holdAt(held, spot, buyHeld_->direction);
@@ -202,6 +222,10 @@ void Game::placeHeld() {
     } else {
         ts2::diag::step(std::format("buy mode: moved object {}", object));
     }
+    // A door or window put down cuts its walls.
+    if (buyHeld_->door) {
+        cutForDoor(object, true);
+    }
     buyHeld_.reset();
     buyTip({});
 }
@@ -215,6 +239,9 @@ void Game::cancelHeld() {
         lotLife_->removeObject(buyHeld_->object);  // nothing was paid yet
     } else if (buyHeld_->from) {
         lotLife_->putBack(buyHeld_->object, *buyHeld_->from);
+        if (buyHeld_->door) {
+            cutForDoor(buyHeld_->object, true);
+        }
     }
     buyHeld_.reset();
     buyTip({});
@@ -239,7 +266,7 @@ void Game::sellHeld() {
 }
 
 bool Game::buyMouse(const pf::Event& e, float x, float y) {
-    if (!buyActive_ || !lotLife_) {
+    if ((!buyActive_ && !buildActive_) || !lotLife_) {
         return false;
     }
     const auto [ix, iy] = toUi(x, y);
@@ -267,6 +294,11 @@ bool Game::buyMouse(const pf::Event& e, float x, float y) {
             buyHeld_->object = object;
             buyHeld_->from = lotLife_->placed(object);
             buyHeld_->direction = buyHeld_->from ? buyHeld_->from->direction : 0;
+            // A door or window picked up leaves its walls whole while it is held.
+            buyHeld_->door = lotLife_->isDoorOrWindow(object);
+            if (buyHeld_->door) {
+                cutForDoor(object, false);
+            }
             hovered_ = 0;
             holdUnderMouse(x, y);
             return true;
@@ -276,7 +308,7 @@ bool Game::buyMouse(const pf::Event& e, float x, float y) {
 }
 
 bool Game::buyKey(const pf::Event& e) {
-    if (!buyActive_ || !lotLife_ || e.type != pf::Event::Type::KeyDown) {
+    if ((!buyActive_ && !buildActive_) || !lotLife_ || e.type != pf::Event::Type::KeyDown) {
         return false;
     }
     if (!buyHeld_) {
@@ -299,6 +331,12 @@ bool Game::buyKey(const pf::Event& e) {
         // , and . turn what the hand holds, as they turn the camera otherwise.
         const std::int16_t step = e.key == pf::Key::Period ? kQuarterTurn : -kQuarterTurn;
         buyHeld_->direction = static_cast<std::int16_t>(((buyHeld_->direction + step) % kTurns + kTurns) % kTurns);
+        // A door or window turns to the next way that fits its wall.
+        if (buyHeld_->door && buyHeld_->spot && buyMouseAt_) {
+            buyHeld_->spot.reset();
+            holdUnderMouse((*buyMouseAt_)[0], (*buyMouseAt_)[1]);
+            return true;
+        }
         // In a surface's slot it faces the surface's way; the turn shows once it is off it.
         if (buyHeld_->spot && !buyHeld_->slot) {
             buyHeld_->fits = lotLife_->holdAt(buyHeld_->object, *buyHeld_->spot, buyHeld_->direction);

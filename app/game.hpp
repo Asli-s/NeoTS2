@@ -275,7 +275,7 @@ private:
     };
     std::optional<LotFloorPoint> lotFloorAt(float x, float y);
     // The lot object under a window point, looking through the objects in `ignore` (0: none).
-    std::uint32_t lotObjectAt(float x, float y, const std::vector<std::int16_t>& ignore);
+    std::uint32_t lotObjectAt(float x, float y, const std::vector<std::int16_t>& ignore, bool objectsOnly = false);
     std::vector<std::uint8_t> objectsShown_;  // lotObjectAt's mask
     std::vector<std::uint8_t> floorsShown_;  // lotFloorAt's mask: the floors and terrain shown
     void toggleFreeCamera();
@@ -583,6 +583,7 @@ private:
         std::optional<app::LotLife::BuySpot> spot;    // where it is held now, none until over the lot
         std::optional<app::LotLife::SlotSpot> slot;   // or the surface slot it is held in
         bool fits = false;                            // whether it may be put down there
+        bool door = false;                            // a door, window or arch (Build mode): it goes in a wall
     };
     std::optional<BuyHeld> buyHeld_;
     // What each object bought in this visit to Buy mode cost: selling it before leaving gives all of it back.
@@ -665,6 +666,21 @@ private:
     std::optional<std::array<float, 2>> buildPointAt(float x, float y);
     std::string buildWallLine(std::array<std::int32_t, 2> to);
     void redrawLevelWalls(int level, const std::vector<std::int32_t>& built, const std::vector<std::int32_t>& removed);
+    // Doors, windows and arches (app/game_doors.cpp): one bought from the Build catalog to hold, the
+    // wall sides a held one's masks would cut (none when a wall it needs isn't there, or is cut
+    // already, with `needFree`), and cutting or closing the walls of one placed on the lot.
+    struct DoorCut {
+        std::size_t wall = 0;  // a drawn wall
+        bool left = true;
+        std::string material;
+        bool mirrored = false;
+    };
+    void buildObject(std::uint32_t guid);
+    std::optional<std::vector<DoorCut>> doorCuts(std::int16_t object, const app::LotLife::BuySpot& spot, std::int16_t direction, bool needFree);
+    void cutForDoor(std::int16_t object, bool cut);
+    // What Build mode's hand highlights under the mouse: a door, window or arch (walls round it ignored), 0 for none.
+    std::uint32_t buildHover();
+    std::optional<std::map<std::string, std::vector<ts2::scene::WallMask>>> wallMasks_;  // by model, read once
     void buildTip(const std::string& text);
     float downX_ = 0, downY_ = 0;
     std::optional<std::array<float, 2>> dragFrom_;  // where a camera drag (right button) started

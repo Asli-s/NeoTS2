@@ -605,8 +605,29 @@ void LotUi::refreshBuild(LotLife& life) {
     BuildPanel::Source source;
     source.floors = &assets.floorCatalog();
     source.walls = &assets.wallCatalog();
+    // Doors, windows and arches: their catalog names and prices, each in its first sub-category.
+    if (!doorPatterns_) {
+        namespace sort = ts2::sim::catalog::buildSort;
+        doorPatterns_.emplace();
+        for (const auto& item : life.doorsAndWindows()) {
+            BuildPanel::Pattern p;
+            p.guid = item.guid;
+            p.name = life.catalogText(item, 0);
+            p.price = item.price;
+            p.subsort = (item.subsorts & sort::kDoors)         ? "doors"
+                        : (item.subsorts & sort::kTallWindows) ? "tallwindows"
+                        : (item.subsorts & sort::kWindows)     ? "windows"
+                        : (item.subsorts & sort::kArches)      ? "arches"
+                                                               : "multistory";
+            doorPatterns_->push_back(std::move(p));
+        }
+    }
+    source.objects = &*doorPatterns_;
     // A pattern's picture is its material's texture, as small as an object's in Buy mode.
     source.picture = [&](const BuildPanel::Pattern& floor) -> const ts2::tga::Pixels* {
+        if (floor.material.empty()) {
+            return objectPicture(life, floor.guid, kSmallRewardPicture);  // a door, window or arch
+        }
         auto it = floorPictures_.find(floor.guid);
         if (it == floorPictures_.end()) {
             std::optional<ts2::tga::Pixels> picture;
@@ -795,6 +816,10 @@ LotUi::Action LotUi::clicked(int window) {
         if (click.wall) {
             pickedWallCovering_ = *click.wall;
             return Action::BuildWallItem;
+        }
+        if (click.object) {
+            pickedBuildObject_ = *click.object;
+            return Action::BuildObjectItem;
         }
         if (click.wallTool) {
             return Action::BuildWallTool;

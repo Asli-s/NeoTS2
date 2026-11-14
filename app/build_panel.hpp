@@ -27,6 +27,9 @@ public:
     struct Source {
         const std::vector<Pattern>* floors = nullptr;
         const std::vector<Pattern>* walls = nullptr;
+        // The doors, windows and arches, as patterns with no material (their sub-sorts doors,
+        // tallwindows, windows, arches or multistory).
+        const std::vector<Pattern>* objects = nullptr;
         std::function<const ts2::tga::Pixels*(const Pattern&)> picture;
     };
     // Shows the catalog page for the sub-category chosen (only when something changed since last time).
@@ -36,7 +39,7 @@ public:
     // the hand tool, or another window of the panel (handled here).
     struct Click {
         bool panel = false;
-        std::optional<std::uint32_t> floor, wall;
+        std::optional<std::uint32_t> floor, wall, object;  // object: a door, window or arch
         bool hand = false;
         bool wallTool = false;  // the Wall tool (Walls & Rooms)
     };
@@ -52,12 +55,12 @@ public:
     static std::string subsortOf(std::uint32_t button);
 
 private:
-    enum class Category { None, Floors, Walls, WallTool };
+    enum class Category { None, Floors, Walls, WallTool, Doors };
     void showView();
 
     ts2::ui::Screen* screen_ = nullptr;
     int content_ = -1;
-    int categories_ = -1, floorSorts_ = -1, wallSorts_ = -1, wallToolSorts_ = -1, catalog_ = -1;
+    int categories_ = -1, floorSorts_ = -1, wallSorts_ = -1, wallToolSorts_ = -1, doorSorts_ = -1, catalog_ = -1;
     int area_ = -1;
     int previous_ = -1, next_ = -1;
     std::vector<int> slots_;
