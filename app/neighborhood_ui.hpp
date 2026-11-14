@@ -97,11 +97,24 @@ public:
     const std::vector<std::uint32_t>& occupiedLots() const { return occupied_; }
 
 private:
+    // A strip of tiles in a bin: one row (window 0x1000), or expanded to two rows (window 0x2000),
+    // paged with its Previous and Next buttons.
     struct Strip {
         int container = -1;         // the strip's row (window 0x1000)
+        int tall = -1;              // the expanded strip (window 0x2000)
         std::vector<int> tiles;     // the tiles placed in it
+        std::size_t first = 0;      // the item shown in the first tile
+        std::size_t perPage = 0;    // tiles shown at once
+        bool expanded = false;
     };
     void layoutStrip(Strip& strip, const std::vector<ts2::tga::Pixels>& pictures);
+    // A strip's Previous, Next, Expand or Collapse button pressed (`window`): whether it was one.
+    bool stripClicked(Strip& strip, const std::vector<ts2::tga::Pixels>& pictures, int window);
+    // Shows one of the lots bin's views: Lots & Houses, Empty Lots or Specialty Lots.
+    enum class LotView { Lots, EmptyLots, Specialty };
+    void showLotView(LotView view);
+    // Shows the Empty Lots view's ordinary or beach lot sizes.
+    void showEmptyLotSizes(bool beach);
     // Shows story page `page`: its picture, caption and number.
     void showStoryPage(std::size_t page);
 
@@ -116,7 +129,8 @@ private:
     int tag_ = -1, tagIcon_ = -1, tagText_ = -1;
     std::uint32_t tagLot_ = 0;
     int puck_ = -1;
-    Strip familyStrip_, lotStrip_;
+    Strip familyStrip_, lotStrip_, specialtyStrip_;
+    std::map<std::uint32_t, int> lotBackgrounds_;  // each lots bin view's background, by its id
     std::vector<ts2::tga::Pixels> familyPictures_, lotPictures_;
     Bin bin_ = Bin::None;
     std::vector<std::uint32_t> occupied_;

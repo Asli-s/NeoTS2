@@ -62,6 +62,13 @@ constexpr std::uint32_t kFamilyStripHolder = 0x0000000b, kTallStrip = 0x00002000
 constexpr std::uint32_t kLotsBackground = 0x0000c200, kEmptyLotsBackground = 0x0000d200, kLotsView = 0x0000c000,
                         kEmptyLotsView = 0x0000d000, kEmptyLotsSizes = 0x1111d000, kSpecialtyView = 0x0000f000,
                         kLotsButton = 0x0000c100, kEmptyLotsButton = 0x0000d100, kAllLots = 0x0000c600;
+constexpr std::uint32_t kSpecialtyBackground = 0x0000f200, kSpecialtyButton = 0x0000f100, kLotStripHolder = 0x0000c300,
+                        kOccupiedLots = 0x0000c400, kUnoccupiedLots = 0x0000c500;
+// The Empty Lots view's ordinary and beach lot sizes (a button per size in each) and their buttons.
+constexpr std::uint32_t kEmptyLotSizes = 0x0000d400, kBeachLotSizes = 0x0000d500, kOrdinaryLotsButton = 0x0000d600,
+                        kBeachLotsButton = 0x0000d700;
+// The lot bin's tools: Move or Rotate Lot, Move to Lots & Houses Bin, Bulldoze.
+constexpr std::uint32_t kMoveLot = 0x0000a000, kLotToBin = 0x0000e000, kBulldoze = 0x0000b000;
 // A strip of tiles: its row, the row's parts, and the tile each item shows in.
 constexpr std::uint32_t kStripRow = 0x00001000, kStripLeftCap = 0x00001001, kStripMiddle = 0x00001002, kStripRightCap = 0x00001003,
                         kStripBack = 0x00001004, kStripNext = 0x00001005, kStripArea = 0x00001006, kStripScroll = 0x00001008,
@@ -70,6 +77,8 @@ constexpr std::uint32_t kTile = 0x49001006, kTilePicture = 0x00000002;
 // Tiles start 52 into the row, 95 apart. The row ends 51 past the last. A row holds at least 4 and
 // as many as fit before 63 from the screen's right edge.
 constexpr int kTileLeft = 52, kTileStep = 95, kTileTop = 9, kRowTail = 51, kMinTiles = 4, kScreenRightGap = 63;
+// The expanded strip's two rows of tiles: from 11 down (its tile area's top), a tile's height apart.
+constexpr int kTallTileTop = 11, kTileRowStep = 93;
 // The lot catalog's picture of a lot.
 constexpr std::uint32_t kImageType = 0x856DDBAC, kLotPicture = 0x35CA0002;
 constexpr std::uint32_t kFamilyType = 0x46414D49, kFamilyPictureType = 0x8C3CE95A;
@@ -414,41 +423,49 @@ void NeighborhoodUi::open(const fs::path& folder, const std::string& name, Conte
         screen_.setVisible(college[i], i == 0);
         screen_.setEnabled(college[i], false);  // no college attached
     }
+    // Making a family (Create-a-Sim) and moving one in aren't built yet.
+    for (const std::uint32_t id : {kMoveFamily, kNewFamily}) {
+        for (const int c : childrenWithId(screen_, families_, id)) {
+            screen_.setEnabled(c, false);
+        }
+    }
     const int familyHolder = screen_.find(families_, kFamilyStripHolder);
-    screen_.setVisible(screen_.find(familyHolder, kTallStrip), false);
-    familyStrip_ = {screen_.find(familyHolder, kStripRow), {}};
+    familyStrip_ = {screen_.find(familyHolder, kStripRow), screen_.find(familyHolder, kTallStrip)};
     familyPictures_ = std::move(content.familyPictures);
     occupied_ = std::move(content.occupied);
     layoutStrip(familyStrip_, familyPictures_);
     screen_.setVisible(families_, false);
 
     lots_ = screen_.load(kScripts, kLotBin, binX, binY);
-    // The lots view: its background (the first of its versions), its strip and filter. The others
-    // are put away, and Lots & Houses and All are shown chosen.
-    const auto backgrounds = childrenWithId(screen_, lots_, kLotsBackground);
-    for (std::size_t i = 0; i < backgrounds.size(); ++i) {
-        screen_.setVisible(backgrounds[i], i == 0);
-    }
-    for (const int c : childrenWithId(screen_, lots_, kEmptyLotsBackground)) {
-        screen_.setVisible(c, false);
-    }
-    for (const std::uint32_t id : {kEmptyLotsView, kEmptyLotsSizes, kSpecialtyView}) {
-        for (const int c : childrenWithId(screen_, lots_, id)) {
-            screen_.setVisible(c, false);
-        }
+    chooseVersions(screen_, lots_, folder);
+    // Of each view's backgrounds (a version for each product), the first.
+    for (const std::uint32_t id : {kLotsBackground, kEmptyLotsBackground, kSpecialtyBackground}) {
+        lotBackgrounds_[id] = childrenWithId(screen_, lots_, id).empty() ? -1 : childrenWithId(screen_, lots_, id).front();
     }
     const int lotsView = screen_.find(lots_, kLotsView);
-    screen_.setVisible(lotsView, true);
-    chooseVersions(screen_, lots_, folder);
-    for (const int c : childrenWithId(screen_, lots_, kLotsButton)) {
-        screen_.setChecked(c, true);
-    }
     screen_.setChecked(screen_.find(lotsView, kAllLots), true);
-    const int lotHolder = screen_.find(lotsView, 0x0000c300);
-    screen_.setVisible(screen_.find(lotHolder, kTallStrip), false);
-    lotStrip_ = {screen_.find(lotHolder, kStripRow), {}};
+    const int lotHolder = screen_.find(lotsView, kLotStripHolder);
+    lotStrip_ = {screen_.find(lotHolder, kStripRow), screen_.find(lotHolder, kTallStrip)};
     lotPictures_ = std::move(content.lotPictures);
     layoutStrip(lotStrip_, lotPictures_);
+    // The specialty lots aren't read yet: their strip is empty.
+    const int specialtyHolder = screen_.find(screen_.find(lots_, kSpecialtyView), kLotStripHolder);
+    specialtyStrip_ = {screen_.find(specialtyHolder, kStripRow), screen_.find(specialtyHolder, kTallStrip)};
+    layoutStrip(specialtyStrip_, {});
+    // What changes the neighborhood isn't built yet: placing an empty lot, moving, packing away and
+    // bulldozing lots. Nor is the Occupied and Unoccupied filter: All stays chosen.
+    for (const std::uint32_t id : {kMoveLot, kLotToBin, kBulldoze}) {
+        screen_.setEnabled(screen_.find(lots_, id), false);
+    }
+    screen_.setEnabled(screen_.find(lotsView, kOccupiedLots), false);
+    screen_.setEnabled(screen_.find(lotsView, kUnoccupiedLots), false);
+    const int emptyView = screen_.find(lots_, kEmptyLotsView);
+    for (const std::uint32_t sizes : {kEmptyLotSizes, kBeachLotSizes}) {
+        for (const int c : screen_.children(screen_.find(emptyView, sizes))) {
+            screen_.setEnabled(c, false);
+        }
+    }
+    showLotView(LotView::Lots);
     screen_.setVisible(lots_, false);
     // The lot card, loaded with the neighborhood and hidden until a lot is clicked.
     card_ = screen_.load(kScripts, kLotCard, 0, 0);
@@ -557,6 +574,8 @@ void NeighborhoodUi::close() {
     hidden_.clear();
     familyStrip_ = {};
     lotStrip_ = {};
+    specialtyStrip_ = {};
+    lotBackgrounds_.clear();
     bin_ = Bin::None;
 }
 
@@ -611,6 +630,17 @@ NeighborhoodUi::Action NeighborhoodUi::clicked(int window) {
         showBin(bin_ == Bin::Families ? Bin::None : Bin::Families);
     } else if (screen_.parent(window) == puck_ && id == kPuckLots) {
         showBin(bin_ == Bin::Lots ? Bin::None : Bin::Lots);
+    } else if (stripClicked(familyStrip_, familyPictures_, window) || stripClicked(lotStrip_, lotPictures_, window) ||
+               stripClicked(specialtyStrip_, {}, window)) {
+        // A strip's page turned, or the strip expanded or collapsed.
+    } else if (lots_ >= 0 && screen_.parent(window) == lots_ && id == kLotsButton) {
+        showLotView(LotView::Lots);
+    } else if (lots_ >= 0 && screen_.parent(window) == lots_ && id == kEmptyLotsButton) {
+        showLotView(LotView::EmptyLots);
+    } else if (lots_ >= 0 && screen_.parent(window) == lots_ && id == kSpecialtyButton) {
+        showLotView(LotView::Specialty);
+    } else if (lots_ >= 0 && screen_.parent(window) == screen_.find(lots_, kEmptyLotsView) && (id == kOrdinaryLotsButton || id == kBeachLotsButton)) {
+        showEmptyLotSizes(id == kBeachLotsButton);
     } else if (screen_.parent(window) == puck_ && id == kPuckStory) {
         showStory(!storyShown());
     } else if (storyShown() && window == screen_.find(story_, kStoryDone)) {
@@ -819,48 +849,138 @@ void NeighborhoodUi::hideCard() {
 }
 
 void NeighborhoodUi::layoutStrip(Strip& strip, const std::vector<ts2::tga::Pixels>& pictures) {
-    const int row = strip.container;
-    if (row < 0) {
+    if (strip.container < 0) {
         return;
     }
-    // As many tiles as the items need, at least 4, at most what fits before the screen's right edge.
+    for (const int tile : strip.tiles) {
+        screen_.remove(tile);
+    }
+    strip.tiles.clear();
+    // The expanded strip's windows have the row's ids plus 0x1000, and it has two rows of tiles.
+    const bool tall = strip.expanded && strip.tall >= 0;
+    const int row = tall ? strip.tall : strip.container;
+    const std::uint32_t part = tall ? kTallStrip - kStripRow : 0;
+    const int rows = tall ? 2 : 1;
+    screen_.setVisible(strip.container, !tall);
+    if (strip.tall >= 0) {
+        screen_.setVisible(strip.tall, tall);
+    }
+    // As many tiles across as the items need, at least 4, at most what fits before the screen's
+    // right edge.
     int rowLeft = 0;
     for (int w = row; w >= 0; w = screen_.parent(w)) {
         rowLeft += screen_.x(w);
     }
     const int fit = std::max(kMinTiles, (width_ - kScreenRightGap - rowLeft - kTileLeft - kRowTail) / kTileStep);
     const int count = static_cast<int>(pictures.size());
-    const int n = std::clamp(count, kMinTiles, fit);
+    const int n = std::clamp((count + rows - 1) / rows, kMinTiles, fit);
+    strip.perPage = static_cast<std::size_t>(n * rows);
+    // A page starts at a multiple of the page's size, and the last page is never past the items.
+    if (strip.first >= pictures.size()) {
+        strip.first = pictures.empty() ? 0 : (pictures.size() - 1) / strip.perPage * strip.perPage;
+    }
+    strip.first = strip.first / strip.perPage * strip.perPage;
+    const bool before = strip.first > 0, after = strip.first + strip.perPage < pictures.size();
     const int rowWidth = kTileLeft + n * kTileStep + kRowTail;
-    const bool more = count > n;
     screen_.resize(row, rowWidth, screen_.height(row));
-    screen_.resize(screen_.find(row, kStripMiddle), rowWidth - 25 - 30, screen_.height(screen_.find(row, kStripMiddle)));
-    screen_.move(screen_.find(row, kStripRightCap), rowWidth - 25, 0);
-    screen_.setVisible(screen_.find(row, kStripBack), false);
-    const int next = screen_.find(row, kStripNext);
+    // The windows holding the strip grow to hold it too: a click only reaches a button inside each
+    // of its parents.
+    for (int w = row, p = screen_.parent(row); p >= 0; w = p, p = screen_.parent(p)) {
+        if (screen_.x(w) + screen_.width(w) > screen_.width(p)) {
+            screen_.resize(p, screen_.x(w) + screen_.width(w), screen_.height(p));
+        }
+    }
+    const int middle = screen_.find(row, kStripMiddle + part);
+    screen_.resize(middle, rowWidth - 25 - 30, screen_.height(middle));
+    screen_.move(screen_.find(row, kStripRightCap + part), rowWidth - 25, 0);
+    screen_.setVisible(screen_.find(row, kStripBack + part), before);
+    const int next = screen_.find(row, kStripNext + part);
     screen_.move(next, rowWidth - 50, screen_.y(next));
-    screen_.setVisible(next, more);
-    const int taller = screen_.find(row, kStripTaller);
+    screen_.setVisible(next, after);
+    // Expand shows while a row can't hold every item; Collapse always shows on the expanded strip.
+    const int taller = screen_.find(row, kStripTaller + part);
     screen_.move(taller, rowWidth - 31, screen_.y(taller));
-    screen_.setVisible(taller, more);
-    const int corner = screen_.find(row, kStripCorner);
+    screen_.setVisible(taller, tall || count > n);
+    const int corner = screen_.find(row, kStripCorner + part);
     screen_.move(corner, rowWidth - 44, screen_.y(corner));
     for (const int c : screen_.children(corner)) {
         screen_.setEnabled(c, false);  // nothing chosen in the strip
     }
-    screen_.setVisible(screen_.find(row, kStripScroll), more);
-    screen_.setVisible(screen_.find(row, kStripArea), false);
-    // A tile per item on the first page, its picture inside it.
-    for (int i = 0; i < std::min(count, n); ++i) {
-        const int tile = screen_.load(kScripts, kTile, kTileLeft + i * kTileStep, kTileTop, row);
+    screen_.setVisible(screen_.find(row, kStripScroll + part), false);  // the pages are turned with Previous and Next
+    screen_.setVisible(screen_.find(row, kStripArea + part), false);
+    // A tile per item on the page, its picture inside it, row by row.
+    const int top = tall ? kTallTileTop : kTileTop;
+    for (std::size_t i = strip.first; i < pictures.size() && i < strip.first + strip.perPage; ++i) {
+        const int at = static_cast<int>(i - strip.first);
+        const int tile = screen_.load(kScripts, kTile, kTileLeft + at % n * kTileStep, top + at / n * kTileRowStep, row);
         if (tile < 0) {
             break;
         }
-        if (pictures[static_cast<std::size_t>(i)].width > 0) {
-            screen_.setImage(screen_.find(tile, kTilePicture), pictures[static_cast<std::size_t>(i)]);
+        if (pictures[i].width > 0) {
+            screen_.setImage(screen_.find(tile, kTilePicture), pictures[i]);
         }
         strip.tiles.push_back(tile);
     }
+}
+
+void NeighborhoodUi::showLotView(LotView view) {
+    if (lots_ < 0) {
+        return;
+    }
+    // The view's background (only its first version) and its part, the others put away.
+    const std::pair<std::uint32_t, std::uint32_t> views[] = {
+        {kLotsBackground, kLotsView}, {kEmptyLotsBackground, kEmptyLotsView}, {kSpecialtyBackground, kSpecialtyView}};
+    for (std::size_t i = 0; i < std::size(views); ++i) {
+        const bool shown = static_cast<std::size_t>(view) == i;
+        for (const int c : childrenWithId(screen_, lots_, views[i].first)) {
+            screen_.setVisible(c, shown && c == lotBackgrounds_[views[i].first]);
+        }
+        for (const int c : childrenWithId(screen_, lots_, views[i].second)) {
+            screen_.setVisible(c, shown);
+        }
+    }
+    for (const int c : childrenWithId(screen_, lots_, kEmptyLotsSizes)) {
+        screen_.setVisible(c, false);
+    }
+    // The tabs: the view's shown chosen.
+    const std::pair<std::uint32_t, LotView> tabs[] = {
+        {kLotsButton, LotView::Lots}, {kEmptyLotsButton, LotView::EmptyLots}, {kSpecialtyButton, LotView::Specialty}};
+    for (const auto& [id, tabView] : tabs) {
+        for (const int c : childrenWithId(screen_, lots_, id)) {
+            screen_.setChecked(c, tabView == view);
+        }
+    }
+    if (view == LotView::EmptyLots) {
+        showEmptyLotSizes(false);
+    }
+}
+
+void NeighborhoodUi::showEmptyLotSizes(bool beach) {
+    const int view = screen_.find(lots_, kEmptyLotsView);
+    screen_.setVisible(screen_.find(view, kEmptyLotSizes), !beach);
+    screen_.setVisible(screen_.find(view, kBeachLotSizes), beach);
+    screen_.setVisible(screen_.find(view, kStripRow), false);
+    screen_.setChecked(screen_.find(view, kOrdinaryLotsButton), !beach);
+    screen_.setChecked(screen_.find(view, kBeachLotsButton), beach);
+}
+
+bool NeighborhoodUi::stripClicked(Strip& strip, const std::vector<ts2::tga::Pixels>& pictures, int window) {
+    const int parent = screen_.parent(window);
+    if (strip.container < 0 || (parent != strip.container && parent != strip.tall)) {
+        return false;
+    }
+    const std::uint32_t id = screen_.id(window) - (parent == strip.tall ? kTallStrip - kStripRow : 0);
+    if (id == kStripBack && strip.first > 0) {
+        strip.first -= std::min(strip.first, strip.perPage);
+    } else if (id == kStripNext && strip.first + strip.perPage < pictures.size()) {
+        strip.first += strip.perPage;
+    } else if (id == kStripTaller) {
+        strip.expanded = !strip.expanded;
+    } else {
+        return false;
+    }
+    layoutStrip(strip, pictures);
+    return true;
 }
 
 } // namespace app
