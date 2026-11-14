@@ -17,6 +17,10 @@ struct VideoCaptureSettings {
     std::uint32_t width = 320, height = 240, fps = 15;
     int jpegQuality = 75;
     std::uint32_t maxSeconds = 60;
+    // Video Sound Capture (videoCaptureAudioOn): the game's sound recorded too, mono at a quarter of
+    // the sound's own rate (VideoCapture.ini's AudioStereoOutput=0 and AudioRateDivisor=4).
+    bool sound = true;
+    int soundRateDivisor = 4;
 };
 
 // The settings from the user's saved options, else the install's defaults (globalProps.xml).

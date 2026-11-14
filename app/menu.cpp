@@ -346,8 +346,8 @@ Game::Game(ts2::content::UiData& data, ts2::ui::Fonts& fonts, ts2::render::IRend
         subHoodTips_.push_back(screen_.tip(shownChild(screen_, preview_, button.id)));
     }
     sims1Turn_ = ts2::content::readUserProps(options.user).flag("rotateCameraSims1Mode").value_or(false);
-    // Pictures taken from the command line are silent.
-    if (options.shot.empty()) {
+    // Pictures taken from the command line are silent, but for a test recording, which records the sound.
+    if (options.shot.empty() || options.recordSeconds > 0) {
         sound_ = std::make_unique<GameSound>(install, options.user);
     }
     lotUi_.setFolders(data, install, options.user);

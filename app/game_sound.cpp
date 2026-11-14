@@ -77,7 +77,21 @@ GameSound::~GameSound() {
 }
 
 void GameSound::fill(void* self, float* out, std::size_t frames) {
-    static_cast<GameSound*>(self)->mixer_->mix(out, frames);
+    auto* sound = static_cast<GameSound*>(self);
+    sound->mixer_->mix(out, frames);
+    std::lock_guard lock(sound->captureMutex_);
+    if (sound->capture_) {
+        sound->capture_(out, frames);
+    }
+}
+
+std::optional<int> GameSound::outputRate() const {
+    return started_ ? std::optional<int>(mixer_->outputRate()) : std::nullopt;
+}
+
+void GameSound::setCapture(Capture capture) {
+    std::lock_guard lock(captureMutex_);
+    capture_ = std::move(capture);
 }
 
 void GameSound::readOptions(const std::filesystem::path& userFolder) {

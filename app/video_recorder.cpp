@@ -3,6 +3,7 @@
 #include "diag/log.hpp"
 #include "formats/jpeg.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
@@ -16,12 +17,18 @@ constexpr std::size_t kMostWaiting = 4;
 
 } // namespace
 
-VideoRecorder::VideoRecorder(const std::filesystem::path& file, const ts2::content::VideoCaptureSettings& settings)
+VideoRecorder::VideoRecorder(const std::filesystem::path& file, const ts2::content::VideoCaptureSettings& settings, std::optional<int> soundRate)
     : file_(file), settings_(settings), out_(file, std::ios::binary | std::ios::trunc) {
     if (!out_) {
         throw std::runtime_error("the video file can't be made");
     }
-    writer_ = std::make_unique<ts2::avi::MjpegWriter>(out_, settings_.width, settings_.height, settings_.fps);
+    // Sound when the options ask for it and there is any: mono at the sound's rate over the divisor.
+    std::optional<ts2::avi::AudioFormat> audio;
+    if (settings_.sound && soundRate && *soundRate > 0 && settings_.soundRateDivisor > 0) {
+        soundDivisor_ = settings_.soundRateDivisor;
+        audio = ts2::avi::AudioFormat{1, static_cast<std::uint32_t>(*soundRate / soundDivisor_)};
+    }
+    writer_ = std::make_unique<ts2::avi::MjpegWriter>(out_, settings_.width, settings_.height, settings_.fps, audio);
     worker_ = std::thread([this] { run(); });
 }
 
@@ -50,18 +57,43 @@ void VideoRecorder::add(ts2::tga::Pixels picture, std::uint32_t frames) {
 
 void VideoRecorder::repeat(std::uint32_t frames) { add({}, frames); }
 
+void VideoRecorder::addSound(const float* stereo, std::size_t frames) {
+    if (soundDivisor_ <= 0 || stereo == nullptr) {
+        return;
+    }
+    std::lock_guard lock(mutex_);
+    if (finished_) {
+        return;
+    }
+    // Each video-rate sample the average of `soundDivisor_` frames, both channels together.
+    for (std::size_t i = 0; i < frames; ++i) {
+        soundSum_ += (stereo[i * 2] + stereo[i * 2 + 1]) * 0.5f;
+        if (++soundCount_ == soundDivisor_) {
+            const float v = std::clamp(soundSum_ / static_cast<float>(soundDivisor_), -1.0f, 1.0f);
+            sound_.push_back(static_cast<std::int16_t>(std::lround(v * 32767.0f)));
+            soundSum_ = 0;
+            soundCount_ = 0;
+        }
+    }
+}
+
 void VideoRecorder::run() {
     std::vector<std::uint8_t> last;
+    std::vector<std::int16_t> sound;
     for (;;) {
         Job job;
+        bool done = false;
         {
             std::unique_lock lock(mutex_);
             wake_.wait(lock, [&] { return stopping_ || !jobs_.empty(); });
-            if (jobs_.empty()) {
-                return;  // stopping, and nothing waits
+            done = jobs_.empty();  // stopping, and nothing waits
+            if (!done) {
+                job = std::move(jobs_.front());
+                jobs_.pop_front();
             }
-            job = std::move(jobs_.front());
-            jobs_.pop_front();
+            // The sound so far goes in after this picture's frames, so the two stay together.
+            sound.swap(sound_);
+            sound_.clear();
         }
         if (!job.picture.rgba.empty()) {
             auto encoded = ts2::jpeg::encode(job.picture, settings_.jpegQuality);
@@ -69,11 +101,15 @@ void VideoRecorder::run() {
                 last = std::move(encoded);
             }
         }
-        if (last.empty()) {
-            continue;  // nothing to repeat yet
+        if (!done && !last.empty()) {
+            for (std::uint32_t i = 0; i < job.frames; ++i) {
+                writer_->addFrame(last);
+            }
         }
-        for (std::uint32_t i = 0; i < job.frames; ++i) {
-            writer_->addFrame(last);
+        writer_->addAudio(sound);
+        sound.clear();
+        if (done) {
+            return;
         }
     }
 }

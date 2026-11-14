@@ -39,16 +39,23 @@ void Game::toggleVideoCapture() {
     std::filesystem::create_directories(folder, ec);
     const auto file = ts2::content::nextMovieFile(folder);
     try {
-        videoRecorder_ = std::make_unique<VideoRecorder>(file, settings);
+        const std::optional<int> soundRate = sound_ ? sound_->outputRate() : std::nullopt;
+        videoRecorder_ = std::make_unique<VideoRecorder>(file, settings, soundRate);
     } catch (const std::exception& ex) {
         ts2::diag::warning(std::format("video capture: {} can't be written: {}", ts2::diag::utf8(file), ex.what()));
         return;
     }
+    // The game's sound goes in as it plays (the sound device's thread hands each mix over).
+    if (sound_ && videoRecorder_->recordsSound()) {
+        VideoRecorder* recorder = videoRecorder_.get();
+        sound_->setCapture([recorder](const float* stereo, std::size_t frames) { recorder->addSound(stereo, frames); });
+    }
     videoStartedAt_ = ts2::platform::ticksNs();
     lotUi_.setVideoRecording(true);
     hoodUi_.setVideoRecording(true);
-    ts2::diag::step(std::format("video capture: recording {} at {} x {}, {} frames a second, at most {} s", ts2::diag::utf8(file.filename()),
-                                settings.width, settings.height, settings.fps, settings.maxSeconds));
+    ts2::diag::step(std::format("video capture: recording {} at {} x {}, {} frames a second, at most {} s, {}", ts2::diag::utf8(file.filename()),
+                                settings.width, settings.height, settings.fps, settings.maxSeconds,
+                                videoRecorder_->recordsSound() ? "with sound" : settings.sound ? "without sound (no playback device)" : "without sound"));
 }
 
 void Game::captureVideoFrame(std::uint64_t now) {
@@ -97,6 +104,9 @@ void Game::captureVideoFrame(std::uint64_t now) {
 void Game::stopVideoCapture(bool tell) {
     if (!videoRecorder_) {
         return;
+    }
+    if (sound_) {
+        sound_->setCapture(nullptr);  // no mix reaches the recorder from here on
     }
     const auto file = videoRecorder_->file();
     const auto frames = videoRecorder_->finish();

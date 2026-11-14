@@ -11,6 +11,8 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <vector>
 #include <thread>
 
 namespace app {
@@ -22,7 +24,8 @@ namespace app {
 class VideoRecorder {
 public:
     // Starts writing `file`. Throws when it can't be made.
-    VideoRecorder(const std::filesystem::path& file, const ts2::content::VideoCaptureSettings& settings);
+    // With `soundRate` (the game's sound output rate), the video records sound too, as the settings ask.
+    VideoRecorder(const std::filesystem::path& file, const ts2::content::VideoCaptureSettings& settings, std::optional<int> soundRate = std::nullopt);
     ~VideoRecorder();
     VideoRecorder(const VideoRecorder&) = delete;
     VideoRecorder& operator=(const VideoRecorder&) = delete;
@@ -40,6 +43,11 @@ public:
     void add(ts2::tga::Pixels picture, std::uint32_t frames);
     // Repeats the last picture for `frames` more frames (when the game drew none since).
     void repeat(std::uint32_t frames);
+
+    // The game's sound as it plays: interleaved stereo floats at the sound's rate. Called from the
+    // sound device's thread; it is made mono at the video's rate and written between frames.
+    void addSound(const float* stereo, std::size_t frames);
+    bool recordsSound() const { return soundDivisor_ > 0; }
 
     // Stops, writes what waits and finishes the file. The frames written.
     std::uint64_t finish();
@@ -60,6 +68,11 @@ private:
     std::deque<Job> jobs_;
     bool stopping_ = false, finished_ = false;
     std::uint64_t given_ = 0;
+    // Sound waiting to be written, and the average being made of the next video-rate sample.
+    int soundDivisor_ = 0;
+    std::vector<std::int16_t> sound_;
+    float soundSum_ = 0;
+    int soundCount_ = 0;
     std::thread worker_;
 };
 

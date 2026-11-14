@@ -7,6 +7,7 @@
 #include <array>
 #include <filesystem>
 #include <functional>
+#include <mutex>
 #include <future>
 #include <memory>
 #include <optional>
@@ -55,6 +56,12 @@ public:
     void update();
 
     [[nodiscard]] bool running() const { return started_; }
+    // The rate the sound plays at (stereo frames a second), nothing without a playback device.
+    [[nodiscard]] std::optional<int> outputRate() const;
+    // Hands each mix, as it goes to the device, to `capture` too (interleaved stereo floats), from the
+    // device's thread. None stops it; once this returns no call is under way.
+    using Capture = std::function<void(const float* stereo, std::size_t frames)>;
+    void setCapture(Capture capture);
 
 private:
     struct LotVoice {
@@ -73,6 +80,8 @@ private:
     std::unique_ptr<ts2::audio::Mixer> mixer_;
     bool started_ = false;
     std::vector<LotVoice> lotVoices_;
+    std::mutex captureMutex_;
+    Capture capture_;
     std::set<std::string> told_;
     VoiceOf voiceOf_;
 

@@ -44,6 +44,7 @@ VideoCaptureSettings videoCaptureSettings(const UserProps& saved, const UserProp
     default: out.fps = 15, out.jpegQuality = 75; break;
     }
     out.maxSeconds = static_cast<std::uint32_t>(std::clamp(number(saved, defaults, "videoCaptureMaxRecordingSeconds").value_or(60), 1ul, kMostSeconds));
+    out.sound = saved.flag("videoCaptureAudioOn").value_or(defaults.flag("videoCaptureAudioOn").value_or(true));
     return out;
 }
 
