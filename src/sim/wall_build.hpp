@@ -29,6 +29,12 @@ struct WallStep {
 // the start. A line neither along x nor along y runs along the longer of the two from the start.
 std::vector<WallStep> wallSteps(std::int32_t level, std::int32_t x0, std::int32_t y0, std::int32_t x1, std::int32_t y1);
 
+// A new id for the graph's points (counter 0) or walls (counter 1): its next one as the game counts them
+// (WallGraph::counters), or past the largest in use when the counter is behind. The counter moves on.
+std::int32_t nextGraphId(wallgraph::WallGraph& graph, std::size_t counter);
+// The id of the graph's point at corner (x, y) of a level, the point made when there is none.
+std::int32_t graphPointAt(wallgraph::WallGraph& graph, std::int32_t level, std::int32_t x, std::int32_t y);
+
 // Whether a tile edge lies inside the lot: not on its border (where the graph traces the lot's edge).
 bool insideLot(const wallgraph::WallGraph& graph, const WallStep& step);
 

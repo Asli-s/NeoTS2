@@ -32,7 +32,7 @@ NeoTS2 is in early development and is not yet a complete engine. Currently worki
 - Buy mode, first stage: browse the catalog by function or room, buy and place objects on the floor (beds and sofas too), on counters and tables, and against walls; move and sell them
 - Build mode, first stages: lay and take up floor tiles, cover walls (one side, or a whole room), build and take down straight walls, put in doors, windows and arches, and paint the terrain; the sledgehammer, and undo and redo in Buy and Build mode; the other tools are not built yet
 
-Saving, first stage: answering **Yes** to "save before quitting?" (when quitting or leaving a lot) saves the lot's floors, wall coverings and terrain paint, and the money they took. Walls, doors, windows, objects and what happens in Live mode are not saved yet. The first save of a file keeps the original beside it as `<file>.neots2bak`.
+Saving: answering **Yes** to "save before quitting?" (when quitting or leaving a lot) saves the lot's floors, wall coverings, terrain paint and walls built or taken down, and the money they took. Doors, windows, objects and what happens in Live mode are not saved yet. The first save of a file keeps the original beside it as `<file>.neots2bak`.
 
 | Main menu | Neighborhood |
 | :---: | :---: |

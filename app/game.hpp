@@ -794,10 +794,10 @@ private:
     std::uint32_t enteredLot_ = 0;
     std::filesystem::path lotFile_;  // the entered lot's package
     // What Build and Buy mode changed on the lot since it was entered or saved, and the money taken
-    // (below 0) or given back by the floors and coverings laid.
+    // (below 0) or given back by the floors, coverings and walls.
     struct LotEdits {
         bool floors = false, coverings = false, paint = false, walls = false, objects = false;
-        std::int32_t floorFunds = 0, coveringFunds = 0;
+        std::int32_t floorFunds = 0, coveringFunds = 0, wallFunds = 0;
     };
     LotEdits edits_;
 

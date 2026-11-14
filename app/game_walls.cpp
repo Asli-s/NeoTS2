@@ -212,9 +212,10 @@ std::string Game::buildWallLine(std::array<std::int32_t, 2> to) {
         }
     }
     const WallState before = wallState();  // for undoing it
-    edits_.walls = true;  // walls aren't saved yet
+    edits_.walls = true;
     ts2::sim::renumberRooms(graph, graphLevel);
     lotLife_->addFunds(-cost);
+    edits_.wallFunds -= cost;
     lot.roomGraph = std::move(graph);
     lot.wallCoverings = std::move(coverings);
     lot.wallPatterns = std::move(patterns);
@@ -227,10 +228,14 @@ std::string Game::buildWallLine(std::array<std::int32_t, 2> to) {
                [this, level, before, cost] {
                    applyWallState(level, before);
                    lotLife_->addFunds(cost);
+                   edits_.wallFunds += cost;
+                   edits_.walls = true;
                },
                [this, level, after = wallState(), cost] {
                    applyWallState(level, after);
                    lotLife_->addFunds(-cost);
+                   edits_.wallFunds -= cost;
+                   edits_.walls = true;
                });
     ts2::diag::step(std::format("build mode: {} {} wall{} on storey {} from {} {} to {} {}: {} {}", wallRemoving_ ? "took down" : "built",
                                 wallRemoving_ ? removed.size() : built.size(), (wallRemoving_ ? removed.size() : built.size()) == 1 ? "" : "s",

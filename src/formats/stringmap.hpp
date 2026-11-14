@@ -4,6 +4,7 @@
 #include <map>
 #include <span>
 #include <string>
+#include <vector>
 
 namespace ts2::stringmap {
 
@@ -15,5 +16,7 @@ struct Entry {
 };
 
 std::map<std::uint16_t, Entry> parse(std::span<const std::uint8_t> data);
+// The map `saved` (as parse reads it) with `entries` in place of its own, the rest as saved.
+std::vector<std::uint8_t> write(std::span<const std::uint8_t> saved, const std::map<std::uint16_t, Entry>& entries);
 
 } // namespace ts2::stringmap

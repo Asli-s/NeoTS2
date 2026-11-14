@@ -59,5 +59,7 @@ private:
 };
 
 WallGraph parse(std::span<const std::uint8_t> data);
+// The graph saved as parse reads it, after `name` (the 64-byte name it was saved with).
+std::vector<std::uint8_t> write(const WallGraph& graph, std::span<const std::uint8_t> name);
 
 } // namespace ts2::wallgraph

@@ -124,3 +124,17 @@ ListGrid parseLists(std::span<const std::uint8_t> data) {
 }
 
 } // namespace ts2::array3d
+
+namespace ts2::array3d {
+
+std::vector<std::uint8_t> write(std::span<const std::uint8_t> saved, const std::vector<std::uint8_t>& elements) {
+    const auto before = parse(saved);
+    if (before.elements.size() != elements.size()) {
+        throw std::runtime_error("c3DArray: the grid's size changed");
+    }
+    std::vector<std::uint8_t> out(saved.begin(), saved.end() - static_cast<std::ptrdiff_t>(elements.size()));
+    out.insert(out.end(), elements.begin(), elements.end());
+    return out;
+}
+
+} // namespace ts2::array3d

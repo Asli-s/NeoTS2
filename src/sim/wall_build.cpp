@@ -20,6 +20,23 @@ bool at(const wallgraph::Point& p, std::int32_t level, std::int32_t x, std::int3
     return p.level == level && std::lround(p.x) == x && std::lround(p.y) == y;
 }
 
+// A new id for a graph's points (counter 0) or walls (counter 1): the graph's next one, as the game
+// counts them, or past the largest in use when the counter is behind.
+std::int32_t nextId(wallgraph::WallGraph& graph, std::size_t counter) {
+    std::int32_t id = graph.counters[counter];
+    if (counter == 0) {
+        for (const auto& p : graph.points) {
+            id = std::max(id, p.id + 1);
+        }
+    } else {
+        for (const auto& w : graph.walls) {
+            id = std::max(id, w.id + 1);
+        }
+    }
+    graph.counters[counter] = id + 1;
+    return id;
+}
+
 // The graph's point at a corner, made when there is none.
 std::int32_t pointAt(wallgraph::WallGraph& graph, std::int32_t level, std::int32_t x, std::int32_t y) {
     for (const auto& p : graph.points) {
@@ -27,12 +44,9 @@ std::int32_t pointAt(wallgraph::WallGraph& graph, std::int32_t level, std::int32
             return p.id;
         }
     }
-    std::int32_t id = 0;
-    for (const auto& p : graph.points) {
-        id = std::max(id, p.id);
-    }
-    graph.points.push_back({id + 1, static_cast<float>(x), static_cast<float>(y), level});
-    return id + 1;
+    const std::int32_t id = nextId(graph, 0);
+    graph.points.push_back({id, static_cast<float>(x), static_cast<float>(y), level});
+    return id;
 }
 
 // The segment between two corners of a step, either way round, or the graph's end.
@@ -97,10 +111,7 @@ std::vector<std::int32_t> buildWalls(wallgraph::WallGraph& graph, std::vector<wa
                 continue;  // a wall or a fence already
             }
         } else {
-            for (const auto& w : graph.walls) {
-                wall = std::max(wall, w.id);
-            }
-            ++wall;
+            wall = nextId(graph, 1);
             const std::int32_t from = pointAt(graph, s.level, s.x0, s.y0);
             const std::int32_t to = pointAt(graph, s.level, s.x1, s.y1);
             graph.walls.push_back({wall, from, kUnnumberedRoom, to, kUnnumberedRoom});
@@ -154,6 +165,14 @@ void renumberRooms(wallgraph::WallGraph& graph, std::int32_t level) {
         const auto* a = points(w.from);
         return a != nullptr && a->level == level;
     };
+    // The rooms the level's walls named before: those none names after leave the graph's list.
+    std::set<std::int32_t> namedBefore;
+    for (const auto& w : graph.walls) {
+        if (onLevel(w)) {
+            namedBefore.insert(w.leftRoom);
+            namedBefore.insert(w.rightRoom);
+        }
+    }
     // Each side of each segment on the level its own mark: the rooms the graph finds then are the
     // places apart, each named by one of its sides' marks.
     constexpr std::int32_t kFirstMark = 1 << 20;
@@ -253,6 +272,12 @@ void renumberRooms(wallgraph::WallGraph& graph, std::int32_t level) {
         auto& w = graph.walls[side.first];
         (side.second ? w.leftRoom : w.rightRoom) = roomOfPlace[place->second];
     }
+    std::set<std::int32_t> named{0};
+    for (const auto& w : graph.walls) {
+        named.insert(w.leftRoom);
+        named.insert(w.rightRoom);
+    }
+    std::erase_if(graph.rooms, [&](std::int32_t r) { return namedBefore.contains(r) && !named.contains(r); });
 }
 
 void updateRoomGrid(array3d::Array3D& rooms, const wallgraph::WallGraph& graph, std::int32_t level) {
@@ -281,6 +306,18 @@ void updateRoomGrid(array3d::Array3D& rooms, const wallgraph::WallGraph& graph, 
             }
         }
     }
+}
+
+} // namespace ts2::sim
+
+namespace ts2::sim {
+
+std::int32_t nextGraphId(wallgraph::WallGraph& graph, std::size_t counter) {
+    return nextId(graph, counter);
+}
+
+std::int32_t graphPointAt(wallgraph::WallGraph& graph, std::int32_t level, std::int32_t x, std::int32_t y) {
+    return pointAt(graph, level, x, y);
 }
 
 } // namespace ts2::sim

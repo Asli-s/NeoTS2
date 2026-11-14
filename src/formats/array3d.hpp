@@ -27,6 +27,8 @@ struct Array3D {
 };
 
 Array3D parse(std::span<const std::uint8_t> data);
+// The grid `saved` (as parse reads it, of the same size) with `elements` in place of its own.
+std::vector<std::uint8_t> write(std::span<const std::uint8_t> saved, const std::vector<std::uint8_t>& elements);
 
 // A c3DArray whose tiles each hold a list of numbers, saved as a count and then that many u32s
 // (lot grid 0x0C).

@@ -16,5 +16,7 @@ struct Entry {
 
 // cWallLayer (resource type 0x8A84D7B0).
 std::vector<Entry> parse(std::span<const std::uint8_t> data);
+// The layer `saved` (as parse reads it) with `entries` in place of its own, the rest as saved.
+std::vector<std::uint8_t> write(std::span<const std::uint8_t> saved, const std::vector<Entry>& entries);
 
 } // namespace ts2::walllayer

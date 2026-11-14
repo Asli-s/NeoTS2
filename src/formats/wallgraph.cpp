@@ -2,6 +2,7 @@
 
 #include "formats/binary_reader.hpp"
 
+#include <cstring>
 #include <stdexcept>
 
 namespace ts2::wallgraph {
@@ -72,6 +73,63 @@ WallGraph parse(std::span<const std::uint8_t> data) {
         throw std::runtime_error("cWallGraph: data left after the walls");
     }
     return g;
+}
+
+} // namespace ts2::wallgraph
+
+namespace ts2::wallgraph {
+
+namespace {
+
+void put(std::vector<std::uint8_t>& out, std::uint32_t v) {
+    for (int s = 0; s < 32; s += 8) {
+        out.push_back(static_cast<std::uint8_t>(v >> s));
+    }
+}
+
+void put(std::vector<std::uint8_t>& out, std::int32_t v) { put(out, static_cast<std::uint32_t>(v)); }
+
+void put(std::vector<std::uint8_t>& out, float v) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &v, 4);
+    put(out, bits);
+}
+
+} // namespace
+
+std::vector<std::uint8_t> write(const WallGraph& graph, std::span<const std::uint8_t> name) {
+    if (name.size() != 64 || graph.className.size() > 255) {
+        throw std::runtime_error("cWallGraph: can't write that name");
+    }
+    std::vector<std::uint8_t> out(name.begin(), name.end());
+    put(out, graph.classId);
+    put(out, graph.version);
+    out.push_back(static_cast<std::uint8_t>(graph.className.size()));
+    out.insert(out.end(), graph.className.begin(), graph.className.end());
+    for (const auto v : graph.unknown) {
+        put(out, v);
+    }
+    for (const auto v : {graph.firstLevel, graph.width, graph.height, graph.levels, graph.counters[0], graph.counters[1]}) {
+        put(out, v);
+    }
+    put(out, static_cast<std::int32_t>(graph.points.size()));
+    for (const auto& p : graph.points) {
+        put(out, p.id);
+        put(out, p.x);
+        put(out, p.y);
+        put(out, p.level);
+    }
+    put(out, static_cast<std::int32_t>(graph.rooms.size()));
+    for (const auto r : graph.rooms) {
+        put(out, r);
+    }
+    put(out, static_cast<std::int32_t>(graph.walls.size()));
+    for (const auto& w : graph.walls) {
+        for (const auto v : {w.id, w.from, w.leftRoom, w.to, w.rightRoom}) {
+            put(out, v);
+        }
+    }
+    return out;
 }
 
 } // namespace ts2::wallgraph

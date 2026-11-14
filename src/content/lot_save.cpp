@@ -43,16 +43,6 @@ void set32(std::vector<std::uint8_t>& out, std::size_t at, std::uint32_t v) {
     }
 }
 
-void putVarString(std::vector<std::uint8_t>& out, const std::string& text) {
-    std::size_t length = text.size();
-    do {
-        const auto low = static_cast<std::uint8_t>(length & 0x7F);
-        length >>= 7;
-        out.push_back(length != 0 ? static_cast<std::uint8_t>(low | 0x80) : low);
-    } while (length != 0);
-    out.insert(out.end(), text.begin(), text.end());
-}
-
 void putShortString(std::vector<std::uint8_t>& out, const std::string& text) {
     if (text.size() > 255) {
         throw std::runtime_error("name too long to save: " + text);
@@ -69,35 +59,6 @@ std::vector<std::uint8_t> withElements(const std::vector<std::uint8_t>& saved, s
     }
     std::vector<std::uint8_t> out(saved.begin(), saved.end() - static_cast<std::ptrdiff_t>(savedElements));
     out.insert(out.end(), elements.begin(), elements.end());
-    return out;
-}
-
-std::vector<std::uint8_t> patternMap(const std::vector<std::uint8_t>& saved, const std::map<std::uint16_t, stringmap::Entry>& patterns) {
-    BinaryReader r(saved);
-    r.skip(kHeader);
-    r.varString();  // "cStringMap"
-    std::vector<std::uint8_t> out(saved.begin(), saved.begin() + static_cast<std::ptrdiff_t>(r.position()));
-    put32(out, static_cast<std::uint32_t>(patterns.size()));
-    for (const auto& [id, e] : patterns) {
-        putVarString(out, e.name);
-        put16(out, id);
-        put32(out, e.uses);
-    }
-    return out;
-}
-
-std::vector<std::uint8_t> wallLayer(const std::vector<std::uint8_t>& saved, const std::vector<walllayer::Entry>& entries) {
-    BinaryReader r(saved);
-    r.skip(kHeader);
-    r.skip(r.u8());  // "cWallLayer"
-    std::vector<std::uint8_t> out(saved.begin(), saved.begin() + static_cast<std::ptrdiff_t>(r.position()));
-    put32(out, static_cast<std::uint32_t>(entries.size()));
-    for (const auto& e : entries) {
-        put32(out, e.wall);
-        put32(out, e.type);
-        put16(out, e.left);
-        put16(out, e.right);
-    }
     return out;
 }
 
@@ -182,7 +143,7 @@ LotChanges lotChanges(dbpf::Package& original, const Lot& edited, const LotSaveP
             }
             const auto before = array3d::parse(grid->bytes);
             put(*grid, withElements(grid->bytes, before.elements.size(), edits->second.elements), kFloorGridInstance);
-            put(*patterns, patternMap(patterns->bytes, edited.floorPatterns), kFloorPatternMapInstance);
+            put(*patterns, stringmap::write(patterns->bytes, edited.floorPatterns), kFloorPatternMapInstance);
         });
     }
 
@@ -212,8 +173,8 @@ LotChanges lotChanges(dbpf::Package& original, const Lot& edited, const LotSaveP
                     changed.push_back(c);
                 }
             }
-            put(*layer, wallLayer(layer->bytes, coveringsOfWallGraph(roomGraph, wallGraph, savedLayer, changed)), kWallCoveringLayerInstance);
-            put(*patterns, patternMap(patterns->bytes, edited.wallPatterns), kWallPatternMapInstance);
+            put(*layer, walllayer::write(layer->bytes, coveringsOfWallGraph(roomGraph, wallGraph, savedLayer, changed)), kWallCoveringLayerInstance);
+            put(*patterns, stringmap::write(patterns->bytes, edited.wallPatterns), kWallPatternMapInstance);
         });
     }
 
