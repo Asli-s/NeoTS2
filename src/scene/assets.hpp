@@ -142,6 +142,8 @@ public:
     // The catalog's wall coverings (sub-sorts brick, masonry, other, paint, paneling, poured, siding,
     // tile or wallpaper), cheapest first.
     const std::vector<CatalogPattern>& wallCatalog() const { return wallCatalog_; }
+    // The catalog's terrain paints (their material is the paint's texture, their sub-sort "paint").
+    const std::vector<CatalogPattern>& paintCatalog() const { return paintCatalog_; }
     // A material's base texture (stdMatBaseTextureName), empty when it has none or can't be read.
     std::string materialTexture(const std::string& material);
 
@@ -189,7 +191,7 @@ private:
     content::Lighting lighting_;
     terrainwater::AlphaCurve waterAlphaCurve_;
     std::map<std::uint32_t, std::string> patternsByGuid_;
-    std::vector<CatalogPattern> floorCatalog_, wallCatalog_;
+    std::vector<CatalogPattern> floorCatalog_, wallCatalog_, paintCatalog_;
     std::map<std::uint32_t, Fence> fences_;
     std::map<std::uint32_t, RoofPattern> roofPatterns_;
     // Object types by GUID: their group and SLOT instance, read on first use.

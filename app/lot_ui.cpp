@@ -623,6 +623,7 @@ void LotUi::refreshBuild(LotLife& life) {
         }
     }
     source.objects = &*doorPatterns_;
+    source.paints = &assets.paintCatalog();
     // A pattern's picture is its material's texture, as small as an object's in Buy mode.
     source.picture = [&](const BuildPanel::Pattern& floor) -> const ts2::tga::Pixels* {
         if (floor.material.empty()) {
@@ -631,7 +632,9 @@ void LotUi::refreshBuild(LotLife& life) {
         auto it = floorPictures_.find(floor.guid);
         if (it == floorPictures_.end()) {
             std::optional<ts2::tga::Pixels> picture;
-            if (const std::string texture = assets.materialTexture(floor.material); !texture.empty()) {
+            // A terrain paint's material is its texture.
+            std::string texture = floor.subsort == "paint" ? floor.material : assets.materialTexture(floor.material);
+            if (!texture.empty()) {
                 if (auto image = assets.texture(texture); image && image->width > 0 && image->height > 0) {
                     picture = fitted(ts2::tga::Pixels{image->width, image->height, std::move(image->rgba)}, kSmallRewardPicture, kSmallRewardPicture);
                 }
@@ -816,6 +819,10 @@ LotUi::Action LotUi::clicked(int window) {
         if (click.wall) {
             pickedWallCovering_ = *click.wall;
             return Action::BuildWallItem;
+        }
+        if (click.paint) {
+            pickedPaint_ = *click.paint;
+            return Action::BuildPaintItem;
         }
         if (click.object) {
             pickedBuildObject_ = *click.object;

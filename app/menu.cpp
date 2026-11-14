@@ -1351,9 +1351,8 @@ void Game::enterLot(std::uint32_t id) {
             built.floors->wallCoverings = lot.wallCoverings;
             built.floors->layerGraphs = lot.layerGraphs;
             built.floors->fencePosts = lot.fencePosts;
-            if (const auto water = lot.flatGrids.find(ts2::content::kWaterHeightGridInstance); water != lot.flatGrids.end()) {
-                built.floors->flatGrids.emplace(water->first, water->second);
-            }
+            built.floors->flatGrids = lot.flatGrids;  // the water's height and the terrain paints' strengths
+            built.floors->terrainTextures = lot.terrainTextures;
             for (const std::uint32_t grid : {ts2::content::kFloorGridInstance, ts2::content::kFloorHeightGridInstance,
                                              ts2::content::kSurfaceGridInstance, ts2::content::kPlatformRegionGridInstance,
                                              ts2::content::kRoomGridInstance}) {
@@ -1432,6 +1431,7 @@ void Game::showLot(LotBuilt& built) {
     lotRouteModels_ = std::move(built.routeModels);
     buildLot_ = std::move(built.floors);
     drawnWalls_ = std::move(built.walls);
+    terrainInstance_ = terrainPaintInstance_ = -1;
     findDrawnWalls();
     {
         // Imposters around the lot take the lighting state's environment colour.
@@ -1505,6 +1505,8 @@ void Game::leaveLot() {
     drawnWalls_.reset();
     wallInstances_.clear();
     wallOfInstance_.clear();
+    terrainInstance_ = terrainPaintInstance_ = -1;
+    painting_ = false;
     endCameraDrag();
     inLot_ = false;
     if (surroundingsBuilding_.valid()) {
@@ -1752,6 +1754,7 @@ void Game::lotAction(app::LotUi::Action action) {
     case Action::BuildWallItem: pickPattern(lotUi_.pickedWallCovering(), true); break;
     case Action::BuildWallTool: pickWallTool(); break;
     case Action::BuildObjectItem: buildObject(lotUi_.pickedBuildObject()); break;
+    case Action::BuildPaintItem: pickPaint(lotUi_.pickedPaint()); break;
     case Action::BuildHand: dropBuildTool(); break;
     case Action::BuildClosed:
     case Action::StoryClosed: leavePanelMode(true); break;
@@ -1927,7 +1930,7 @@ std::optional<Game::LotFloorPoint> Game::lotFloorAt(float x, float y) {
     return out;
 }
 
-std::optional<std::array<float, 2>> Game::buildPointAt(float x, float y) {
+std::optional<std::array<float, 2>> Game::buildPointAt(float x, float y, std::optional<int> gridLevel) {
     if (!buildLot_) {
         return std::nullopt;
     }
@@ -1947,7 +1950,7 @@ std::optional<std::array<float, 2>> Game::buildPointAt(float x, float y) {
     if (std::abs(direction[2]) < 1e-5f) {
         return std::nullopt;
     }
-    const int level = lotView_.view.level;
+    const int level = gridLevel.value_or(lotView_.view.level);
     const ts2::scene::Heights heights(*buildLot_);
     float px = static_cast<float>(floors.width) / 2, py = static_cast<float>(floors.height) / 2;
     for (int pass = 0; pass < 3; ++pass) {

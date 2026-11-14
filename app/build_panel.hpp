@@ -30,6 +30,7 @@ public:
         // The doors, windows and arches, as patterns with no material (their sub-sorts doors,
         // tallwindows, windows, arches or multistory).
         const std::vector<Pattern>* objects = nullptr;
+        const std::vector<Pattern>* paints = nullptr;  // terrain paints
         std::function<const ts2::tga::Pixels*(const Pattern&)> picture;
     };
     // Shows the catalog page for the sub-category chosen (only when something changed since last time).
@@ -39,11 +40,14 @@ public:
     // the hand tool, or another window of the panel (handled here).
     struct Click {
         bool panel = false;
-        std::optional<std::uint32_t> floor, wall, object;  // object: a door, window or arch
+        std::optional<std::uint32_t> floor, wall, object, paint;  // object: a door, window or arch; paint: a terrain paint
         bool hand = false;
         bool wallTool = false;  // the Wall tool (Walls & Rooms)
     };
     Click clicked(int window);
+
+    // The terrain brush size picked: 0 small, 1 medium, 2 large.
+    int brushSize() const { return brush_; }
 
     // Back to the categories, as the panel opens.
     void reset();
@@ -55,12 +59,13 @@ public:
     static std::string subsortOf(std::uint32_t button);
 
 private:
-    enum class Category { None, Floors, Walls, WallTool, Doors };
+    enum class Category { None, Floors, Walls, WallTool, Doors, Terrain };
     void showView();
 
     ts2::ui::Screen* screen_ = nullptr;
     int content_ = -1;
-    int categories_ = -1, floorSorts_ = -1, wallSorts_ = -1, wallToolSorts_ = -1, doorSorts_ = -1, catalog_ = -1;
+    int categories_ = -1, floorSorts_ = -1, wallSorts_ = -1, wallToolSorts_ = -1, doorSorts_ = -1, terrainSorts_ = -1, catalog_ = -1;
+    int brush_ = 1;  // the terrain brush size: 0 small, 1 medium, 2 large
     int area_ = -1;
     int previous_ = -1, next_ = -1;
     std::vector<int> slots_;

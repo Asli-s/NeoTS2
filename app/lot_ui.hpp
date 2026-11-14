@@ -97,7 +97,7 @@ public:
     void hideForFreeCamera(bool hide);
 
     // What a released button asks for.
-    enum class Action { None, Neighborhood, Quit, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, GameOptionChanged, GraphicsOptionChanged, RewardsOpened, RewardsClosed, SelectSim, TrackSim, CentreOnNeighbor, CloseNotification, FloorUp, FloorDown, WallMode, ToggleCeiling, MainMenu, BuyOpened, BuyClosed, BuyItem, BuildOpened, BuildClosed, BuildItem, BuildWallItem, BuildWallTool, BuildObjectItem, BuildHand, StoryOpened, StoryClosed };
+    enum class Action { None, Neighborhood, Quit, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, GameOptionChanged, GraphicsOptionChanged, RewardsOpened, RewardsClosed, SelectSim, TrackSim, CentreOnNeighbor, CloseNotification, FloorUp, FloorDown, WallMode, ToggleCeiling, MainMenu, BuyOpened, BuyClosed, BuyItem, BuildOpened, BuildClosed, BuildItem, BuildWallItem, BuildWallTool, BuildObjectItem, BuildPaintItem, BuildHand, StoryOpened, StoryClosed };
     Action clicked(int window);
     // The puck's camera button held down under the mouse.
     enum class CameraButton { None, RotateLeft, RotateRight, ZoomIn, ZoomOut };
@@ -148,6 +148,9 @@ public:
     std::uint32_t pickedWallCovering() const { return pickedWallCovering_; }
     // The door, window or arch a click on the Build catalog picked (for BuildObjectItem), by GUID.
     std::uint32_t pickedBuildObject() const { return pickedBuildObject_; }
+    // The terrain paint a click on the Build catalog picked (for BuildPaintItem), by GUID, and the brush size.
+    std::uint32_t pickedPaint() const { return pickedPaint_; }
+    int buildBrushSize() const { return buildPanel_.brushSize(); }
     // Shows the Build catalog's page (its floors' or wall coverings' pictures) for the lot.
     void refreshBuild(LotLife& life);
     // Shows or hides Story mode's story editor, as the puck's Story button and F4 open it and its
@@ -234,7 +237,7 @@ private:
     int puck_ = -1, live_ = -1, options_ = -1, buy_ = -1, build_ = -1, story_ = -1;
     BuyPanel buyPanel_;
     BuildPanel buildPanel_;
-    std::uint32_t pickedFloor_ = 0, pickedWallCovering_ = 0, pickedBuildObject_ = 0;
+    std::uint32_t pickedFloor_ = 0, pickedWallCovering_ = 0, pickedBuildObject_ = 0, pickedPaint_ = 0;
     std::optional<std::vector<BuildPanel::Pattern>> doorPatterns_;  // the Doors & Windows catalog as the panel lists it
     std::map<std::uint32_t, std::optional<ts2::tga::Pixels>> floorPictures_;  // by floor GUID, made once
     std::uint32_t pickedBuyItem_ = 0;

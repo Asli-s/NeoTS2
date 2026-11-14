@@ -596,6 +596,7 @@ private:
     struct BuildTool {
         bool wall = false;          // a wall covering, else a floor (or walls, below)
         bool buildsWalls = false;   // the Wall tool: it builds walls, and has no pattern
+        bool paints = false;        // a terrain paint: `pattern` is its texture
         std::uint32_t guid = 0;
         std::string pattern, name;  // its name in the lot's pattern list, its catalog name
         std::int32_t price = 0;     // per tile
@@ -663,7 +664,8 @@ private:
     void pickWallTool();
     bool wallToolMouse(const ts2::platform::Event& e, float x, float y, bool overPanels);
     std::optional<std::array<std::int32_t, 2>> buildCornerAt(float x, float y);
-    std::optional<std::array<float, 2>> buildPointAt(float x, float y);
+    // Where the mouse meets the floor of a grid level (the storey in view when not given), in the lot's tiles.
+    std::optional<std::array<float, 2>> buildPointAt(float x, float y, std::optional<int> gridLevel = std::nullopt);
     std::string buildWallLine(std::array<std::int32_t, 2> to);
     void redrawLevelWalls(int level, const std::vector<std::int32_t>& built, const std::vector<std::int32_t>& removed);
     // Doors, windows and arches (app/game_doors.cpp): one bought from the Build catalog to hold, the
@@ -680,6 +682,17 @@ private:
     void cutForDoor(std::int16_t object, bool cut);
     // What Build mode's hand highlights under the mouse: a door, window or arch (walls round it ignored), 0 for none.
     std::uint32_t buildHover();
+    // Terrain paint (app/game_terrain.cpp): picked from the catalog, its share of the mouse (a drag
+    // paints, Ctrl held as it starts rubs paint out), and drawing the lot's paints again.
+    void pickPaint(std::uint32_t guid);
+    bool paintMouse(const ts2::platform::Event& e, float x, float y, bool overPanels);
+    void paintAt(float x, float y);
+    void redrawTerrainPaint();
+    bool painting_ = false, erasing_ = false;
+    std::optional<std::array<float, 2>> paintedAt_;  // where the brush last painted, in tiles
+    std::uint64_t paintDrawnAt_ = 0;                  // when the paints were last drawn again (ns)
+    bool paintChanged_ = false;                        // painted since
+    int terrainInstance_ = -1, terrainPaintInstance_ = -1;  // the lot's terrain, and the paints drawn over it anew
     std::optional<std::map<std::string, std::vector<ts2::scene::WallMask>>> wallMasks_;  // by model, read once
     void buildTip(const std::string& text);
     float downX_ = 0, downY_ = 0;

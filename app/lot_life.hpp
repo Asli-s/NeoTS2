@@ -275,6 +275,7 @@ public:
     // An object whose wall (a poster's, a door's) would be gone with the walls of `candidate`, 0 for none.
     std::int16_t objectNeedingWalls(const ts2::content::Lot& candidate);
     // Build mode: a wall drawn again with its coverings as they are now (see ObjectMaterials::wallMesh).
+    int terrainPaintMaterial(const std::string& texture, ts2::scene::Scene& scene) { return objectMaterials_.terrainPaintMaterial(texture, scene); }
     int wallMesh(const ts2::scene::DrawnWall& wall, int sceneTop, bool cut, ts2::scene::Scene& scene) {
         return objectMaterials_.wallMesh(wall, sceneTop, cut, scene);
     }

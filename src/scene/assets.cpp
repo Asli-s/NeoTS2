@@ -32,6 +32,7 @@ constexpr std::uint32_t kTxtr = 0x1C4A276C;
 constexpr std::uint32_t kLifo = 0xED534136;
 constexpr std::uint32_t kPatternProperties = 0xCCA8E925;
 constexpr std::uint32_t kFenceProperties = 0x2CB230B8;
+constexpr std::uint32_t kTerrainPaintProperties = 0x4DCADB7E;
 constexpr std::uint32_t kRoofProperties = 0xACA8EA06;
 constexpr std::uint32_t kBoneNames = 0x90;  // an object's "Model - Bones" string table
 constexpr std::uint32_t kLocalGroup = 0xFFFFFFFF;  // a package's own resources
@@ -622,10 +623,10 @@ void Assets::readCatalog() {
     for (const auto& [id, p] : scripts_.roofPatterns) {
         roofPatterns_[id] = {p.top, p.under, p.edges, p.trim};
     }
-    std::map<std::uint32_t, CatalogPattern> floorsByGuid, wallsByGuid;
+    std::map<std::uint32_t, CatalogPattern> floorsByGuid, wallsByGuid, paintsByGuid;
     for (const auto& r : catalog_.resources()) {
         const auto type = r.entry.key.type;
-        if (type != kPatternProperties && type != kFenceProperties && type != kRoofProperties) {
+        if (type != kPatternProperties && type != kFenceProperties && type != kRoofProperties && type != kTerrainPaintProperties) {
             continue;
         }
         try {
@@ -636,7 +637,19 @@ void Assets::readCatalog() {
                 continue;
             }
             const auto id = *parsed;
-            if (type == kFenceProperties) {
+            if (type == kTerrainPaintProperties) {
+                // Terrain paints Build mode sells: their texture is their material.
+                if (p["type"] == "terrainPaint" && p["showincatalog"] == "1" && p["deprecated"] != "1") {
+                    CatalogPattern paint;
+                    paint.guid = id;
+                    paint.name = p["name"];
+                    paint.description = p["description"];
+                    paint.price = static_cast<std::int32_t>(number(p["cost"], 10).value_or(0));
+                    paint.subsort = "paint";
+                    paint.material = p["texturetname"];
+                    paintsByGuid[id] = std::move(paint);
+                }
+            } else if (type == kFenceProperties) {
                 fences_[id] = {p["rail"], p["diagrail"], p["post"], p["maywalkover"] == "1", p["ishalfwall"] == "1"};
             } else if (type == kRoofProperties) {
                 roofPatterns_[id] = {p["texturetop"], p["textureunder"], p["textureedges"], p["texturetrim"]};
@@ -661,7 +674,7 @@ void Assets::readCatalog() {
         }
     }
     // Cheapest first, as Buy mode's catalog lists objects.
-    for (auto [byGuid, catalog] : {std::pair{&floorsByGuid, &floorCatalog_}, std::pair{&wallsByGuid, &wallCatalog_}}) {
+    for (auto [byGuid, catalog] : {std::pair{&floorsByGuid, &floorCatalog_}, std::pair{&wallsByGuid, &wallCatalog_}, std::pair{&paintsByGuid, &paintCatalog_}}) {
         catalog->clear();
         for (auto& [guid, pattern] : *byGuid) {
             catalog->push_back(std::move(pattern));

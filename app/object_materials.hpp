@@ -57,6 +57,13 @@ public:
     // walls), with its sides' coverings as `drawn` has them now, its top in the scene material
     // `sceneTop`. Added to the scene with its materials; -1 when it has nothing to draw.
     int wallMesh(const ts2::scene::DrawnWall& drawn, int sceneTop, bool cut, ts2::scene::Scene& scene);
+    // The scene material of a terrain paint (a texture laid over the lot's canvas by its strength), as
+    // the lot's scene draws its paints. -1 when the texture is missing.
+    int terrainPaintMaterial(const std::string& texture, ts2::scene::Scene& scene) {
+        constexpr int kDetailRepeats = 5;  // as LotSceneBuilder::drawTerrain
+        constexpr float kShade = 0.9f;
+        return builderMaterial(builder_.terrainMaterial(texture, kDetailRepeats, kShade, true), scene);
+    }
 
     // Looks for objects whose materials changed since the last update.
     void update(ts2::sim::World& world, ts2::scene::Scene& scene);

@@ -71,8 +71,13 @@ void Game::pickPattern(std::uint32_t guid, bool wall) {
 }
 
 void Game::dropBuildTool() {
+    if (painting_ && paintChanged_) {
+        redrawTerrainPaint();  // what a stroke cut short painted
+    }
+    painting_ = false;
     if (buildTool_) {
-        ts2::diag::step(buildTool_->buildsWalls ? "build mode: wall tool put down"
+        ts2::diag::step(buildTool_->paints        ? "build mode: terrain paint put down"
+                        : buildTool_->buildsWalls ? "build mode: wall tool put down"
                         : buildTool_->wall      ? "build mode: wall covering tool put down"
                                                 : "build mode: floor tool put down");
     }
@@ -116,6 +121,12 @@ bool Game::buildMouse(const pf::Event& e, float x, float y) {
     }
     const auto [ix, iy] = toUi(x, y);
     const bool overPanels = screen_.over(ix, iy);
+    if (buildTool_->paints) {
+        if (!overPanels || painting_) {
+            buildMouseAt_ = {x, y};
+        }
+        return paintMouse(e, x, y, overPanels);
+    }
     if (buildTool_->buildsWalls) {
         if (!overPanels || wallDragFrom_) {
             buildMouseAt_ = {x, y};

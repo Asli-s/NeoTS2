@@ -519,3 +519,4 @@ std::vector<Test> catalogTests();
 std::vector<Test> floorEditTests();
 std::vector<Test> wallEditTests();
 std::vector<Test> wallBuildTests();
+std::vector<Test> terrainPaintTests();
