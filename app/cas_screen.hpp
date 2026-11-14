@@ -1,5 +1,6 @@
 #pragma once
 
+#include "meter_bar.hpp"
 #include "text_field.hpp"
 
 #include "content/ui_data.hpp"
@@ -7,6 +8,7 @@
 #include "platform/platform.hpp"
 #include "ui/screen.hpp"
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -22,11 +24,13 @@ namespace app {
 // - Step 3 (Hair & Face, 0xCB980E82): hair styles of the chosen hair colour (black, brown, blonde,
 //   red), set for every outfit.
 // - Step 5 (Clothing, 0xCB980E84): tops, bottoms and outfits for each outfit category.
+// - Step 6 (Personality, 0xCB980E83): the five personality traits (25 points to share, set from a
+//   zodiac sign or bar by bar) and the aspiration (Grow Up for toddlers and children).
 // A step's choices (hair styles, clothes) are listed by the game side (see setChoices), in a grid of
 // six a page with their pictures. The Sim is shown as a picture the game side draws (see
 // setPreview), turned with the puck's rotate buttons.
 //
-// Not built yet: steps 2, 4 and 6 (heads, makeup, personality), the face tabs, custom hair colours,
+// Not built yet: steps 2 and 4 (heads, makeup), turn-ons and offs, the face tabs, custom hair colours,
 // hair per outfit, the Sim bin, biography, custom skins and fitness, collections, the family's view
 // (its name and members), family relationships, and accepting (saving) the family. Their buttons
 // are greyed.
@@ -48,8 +52,16 @@ public:
         int hairColour = 2;
         std::uint32_t category = 1;
         Clothes clothes = Clothes::Outfits;
+        // Personality points (0 to 10): neat, outgoing, active, playful, nice, as the bars stand;
+        // the zodiac sign they point to (1 Aries to 12 Pisces); the aspiration (0 none chosen, 1
+        // romance, 2 family, 3 fortune, 5 popularity, 6 knowledge, 7 grow up, 8 pleasure).
+        std::array<int, 5> traits{};
+        int zodiac = 1;
+        int aspiration = 0;
     };
-    enum class Step { Genetics, Hair, Clothing };
+    enum class Step { Genetics, Hair, Clothing, Personality };
+    // The points a Sim has to share between its traits.
+    static constexpr int kPersonalityPoints = 25;
 
     // Shows it on a `width` x `height` screen with a new Sim drawn by `seed`.
     void open(int width, int height, std::uint32_t seed);
@@ -63,7 +75,8 @@ public:
     enum class Action { None, Cancel, Remake, Recolour, ChoicesNeeded, Chosen, Turned, Category };
     // A released button of the screen.
     Action clicked(int window);
-    void pointerDown(int window);
+    // The mouse went down on `window`, at (x, y) on the screen.
+    void pointerDown(int window, int x, int y);
     bool editing() const;
     void typed(const std::string& text);
     void key(ts2::platform::Key key);
@@ -95,6 +108,8 @@ private:
     };
     void showStep(Step step);
     void showSim();
+    void showPersonality();
+    void setTrait(std::size_t trait, int points);
     void layoutChoices();
     int find(std::uint32_t id) const;
 
@@ -112,6 +127,9 @@ private:
     std::vector<Tile> tiles_;
     std::vector<ts2::tga::Pixels> pictures_;
     int choiceWidth_ = 96, choiceHeight_ = 128;
+    // Step 6: the trait bars (as the Sim's traits) and the points left.
+    std::array<MeterBar, 5> traitBars_;
+    MeterBar pointsLeft_;
 };
 
 } // namespace app

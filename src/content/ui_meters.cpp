@@ -182,11 +182,24 @@ int barPixels(int value, int min, int max, int steps, int size) {
     return std::clamp(filled, 0, size - 1);
 }
 
+namespace {
+
+// Outgoing, nice, playful, neat, active of each sign.
+constexpr int kSigns[12][5] = {{8, 3, 3, 5, 6}, {5, 4, 8, 5, 3}, {7, 3, 3, 4, 8}, {3, 6, 4, 6, 6},
+                               {10, 3, 4, 4, 4}, {2, 5, 3, 9, 6}, {8, 7, 6, 2, 2}, {5, 3, 3, 6, 8},
+                               {3, 4, 7, 2, 9}, {4, 5, 8, 7, 1}, {4, 6, 7, 4, 4}, {3, 7, 3, 5, 7}};
+
+} // namespace
+
+std::array<int, 5> zodiacTraits(int sign) {
+    if (sign < 1 || sign > 12) {
+        return {};
+    }
+    const int* t = kSigns[sign - 1];
+    return {t[0], t[1], t[2], t[3], t[4]};
+}
+
 int nearestZodiacSign(int outgoing, int nice, int playful, int neat, int active) {
-    // Outgoing, nice, playful, neat, active of each sign.
-    static constexpr int kSigns[12][5] = {{8, 3, 3, 5, 6}, {5, 4, 8, 5, 3}, {7, 3, 3, 4, 8}, {3, 6, 4, 6, 6},
-                                          {10, 3, 4, 4, 4}, {2, 5, 3, 9, 6}, {8, 7, 6, 2, 2}, {5, 3, 3, 6, 8},
-                                          {3, 4, 7, 2, 9}, {4, 5, 8, 7, 1}, {4, 6, 7, 4, 4}, {3, 7, 3, 5, 7}};
     const double traits[5] = {outgoing * 0.01, nice * 0.01, playful * 0.01, neat * 0.01, active * 0.01};
     int best = 1;
     double bestDistance = 0;

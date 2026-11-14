@@ -83,6 +83,9 @@ int barPixels(int value, int min, int max, int steps, int size);
 // Sim's saved sign (person data 0x46) is not 1..12: the sign whose traits are nearest to outgoing,
 // nice, playful, neat and active (person data 6, 2, 5, 7, 3, in hundredths). Of equals, the first.
 int nearestZodiacSign(int outgoing, int nice, int playful, int neat, int active);
+// A sign's traits in points (0..10): outgoing, nice, playful, neat, active. Each sign's add up to
+// 25, the points Create-a-Sim gives a Sim. Not a sign (1..12): all 0.
+std::array<int, 5> zodiacTraits(int sign);
 
 // A picture placed at (x, y) on a transparent one of `width` x `height` (the parts outside are cut).
 tga::Pixels placed(const tga::Pixels& picture, std::uint32_t width, std::uint32_t height, int x, int y);

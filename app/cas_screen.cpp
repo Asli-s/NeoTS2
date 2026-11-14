@@ -1,5 +1,7 @@
 #include "cas_screen.hpp"
 
+#include "content/ui_meters.hpp"
+
 #include <algorithm>
 #include <array>
 #include <map>
@@ -10,7 +12,8 @@ namespace app {
 namespace {
 
 constexpr std::uint32_t kCasScripts = 0x08000600;
-constexpr std::uint32_t kCasMain = 0xCB980E50, kStepGenetics = 0xCB980E81, kStepHair = 0xCB980E82, kStepClothing = 0xCB980E84;
+constexpr std::uint32_t kCasMain = 0xCB980E50, kStepGenetics = 0xCB980E81, kStepHair = 0xCB980E82, kStepClothing = 0xCB980E84,
+                        kStepPersonality = 0xCB980E83;
 // The screen is laid out for 800 x 600.
 constexpr int kLayoutWidth = 800, kLayoutHeight = 600;
 // The main screen: the puck's Accept Family, Cancel Family, Create Family (a new Sim), Family
@@ -60,6 +63,24 @@ constexpr std::uint32_t kClothingGrid = 0x0BD73DA0, kClothingPrevious = 0x000001
 constexpr std::array<std::uint32_t, 6> kCollectionButtons = {0x0000F001, 0x0000F002, 0xECFD6F92, 0xCDEBBAEC, 0x6CFD0001, 0x2CFD6FDC};
 constexpr std::uint32_t kAllCollections = 0x6CFD0000;
 
+// Step 6: its tabs (aspiration and personality; turn-ons and offs), their windows, the zodiac's
+// backgrounds and buttons (Aries first) and the sign's name, the aspirations of toddlers and
+// children (Grow Up) and of the older ages, each aspiration's button (0x0CDC0000 + aspiration), the
+// trait bars (neat, outgoing, active, playful, nice) with their fill, and the points left.
+constexpr std::uint32_t kAspirationTab = 0x6FA06348, kTurnOnsTab = 0x6FA0634E, kTurnOnsWindow = 0x2FA06311,
+                        kPersonalityWindow = 0x2FA06310;
+constexpr std::uint32_t kZodiacBackground = 0x4CDC0000, kZodiacButton = 0xACDC0000, kZodiacName = 0x2BE35D53;
+constexpr std::uint32_t kChildAspirations = 0x4DA3D18B, kOlderAspirations = 0x2DA3D170, kAspirationButton = 0x0CDC0000;
+constexpr std::array<int, 6> kOlderAspirationKinds = {8, 2, 1, 6, 3, 5};
+constexpr int kGrowUp = 7;
+constexpr std::array<std::uint32_t, 5> kTraitBars = {0x4BDEFF03, 0x4BDEFF00, 0x4BDEFF04, 0x4BDEFF02, 0x4BDEFF01};
+constexpr std::uint32_t kPointsLeft = 0x4BDEFF05, kBarFill = 0x00000003;
+constexpr std::uint32_t kTraitPicture = 0xCA100130, kPointsLeftPicture = 0xCA100110;
+// A trait bar's points start 6 pixels in, 9 pixels each.
+constexpr int kTraitBarLeft = 6, kTraitPointWidth = 9, kTraitMax = 10;
+constexpr std::array<const char*, 12> kZodiacNames = {"Aries", "Taurus", "Gemini",  "Cancer",    "Leo",      "Virgo",
+                                                      "Libra", "Scorpio", "Sagittarius", "Capricorn", "Aquarius", "Pisces"};
+
 // A grid shows two columns of three.
 constexpr int kGridColumns = 2, kGridRows = 3;
 constexpr std::size_t kPerPage = kGridColumns * kGridRows;
@@ -105,6 +126,19 @@ ts2::tga::Pixels backdropPicture() {
     return out;
 }
 
+// A zodiac sign's traits in the bars' order: neat, outgoing, active, playful, nice.
+std::array<int, 5> signTraits(int sign) {
+    const auto t = ts2::content::zodiacTraits(sign);  // outgoing, nice, playful, neat, active
+    return {t[3], t[0], t[4], t[2], t[1]};
+}
+
+// The sign the bars' traits point to.
+int traitsSign(const std::array<int, 5>& traits) {
+    return ts2::content::nearestZodiacSign(traits[1] * 100, traits[4] * 100, traits[3] * 100, traits[0] * 100, traits[2] * 100);
+}
+
+bool young(std::uint32_t age) { return age == 0x01 || age == 0x02; }
+
 } // namespace
 
 int CasScreen::find(std::uint32_t id) const {
@@ -119,6 +153,8 @@ void CasScreen::open(int width, int height, std::uint32_t seed) {
     sim_.gender = seed % 2 == 0 ? 1 : 2;
     sim_.skin = static_cast<int>(seed / 2 % 4) + 1;
     sim_.hairColour = static_cast<int>(seed / 8 % 4) + 1;
+    sim_.zodiac = static_cast<int>(seed / 32 % 12) + 1;
+    sim_.traits = signTraits(sim_.zodiac);
     turn_ = 0;
     const int x = std::max(0, (width - kLayoutWidth) / 2), y = std::max(0, (height - kLayoutHeight) / 2);
     // The backdrop over everything else, the Sim's picture on it, and the screen over both.
@@ -140,8 +176,8 @@ void CasScreen::open(int width, int height, std::uint32_t seed) {
         screen_.setEnabled(find(id), false);
     }
     for (std::uint32_t i = 1; i < kSteps; ++i) {
-        // Steps 3 and 5 (hair, clothing) are built.
-        screen_.setEnabled(find(kFirstStep + i), i == 2 || i == 4);
+        // Steps 3, 5 and 6 (hair, clothing, personality) are built.
+        screen_.setEnabled(find(kFirstStep + i), i == 2 || i == 4 || i == 5);
     }
     family_ = TextField(screen_.find(screen_.find(root_, kHousehold), kHouseholdName), 64, false);
     family_.setText(screen_, "");
@@ -169,7 +205,12 @@ void CasScreen::showStep(Step step) {
     tiles_.clear();
     grid_ = -1;
     first_ = bio_ = {};
-    const std::uint32_t script = step == Step::Genetics ? kStepGenetics : step == Step::Hair ? kStepHair : kStepClothing;
+    traitBars_ = {};
+    pointsLeft_ = {};
+    const std::uint32_t script = step == Step::Genetics ? kStepGenetics
+                                 : step == Step::Hair   ? kStepHair
+                                 : step == Step::Clothing ? kStepClothing
+                                                          : kStepPersonality;
     panel_ = screen_.load(kCasScripts, script, 0, 0, root_);
     if (panel_ < 0) {
         return;
@@ -180,7 +221,8 @@ void CasScreen::showStep(Step step) {
     const int mx = marker >= 0 ? screen_.x(marker) : 15, my = marker >= 0 ? screen_.y(marker) + screen_.height(marker) : 309;
     screen_.move(panel_, kAnchorX - mx, kAnchorY - my);
     for (std::uint32_t i = 0; i < kSteps; ++i) {
-        const bool shown = (i == 0 && step == Step::Genetics) || (i == 2 && step == Step::Hair) || (i == 4 && step == Step::Clothing);
+        const bool shown = (i == 0 && step == Step::Genetics) || (i == 2 && step == Step::Hair) || (i == 4 && step == Step::Clothing) ||
+                           (i == 5 && step == Step::Personality);
         screen_.setChecked(find(kFirstStep + i), shown);
     }
     if (step == Step::Genetics) {
@@ -204,6 +246,21 @@ void CasScreen::showStep(Step step) {
             screen_.setEnabled(find(id), false);
         }
         grid_ = find(kHairGrid);
+    } else if (step == Step::Personality) {
+        // The aspiration and personality tab; turn-ons and offs aren't built.
+        screen_.setVisible(find(kTurnOnsWindow), false);
+        screen_.setVisible(find(kPersonalityWindow), true);
+        screen_.setChecked(find(kAspirationTab), true);
+        screen_.setEnabled(find(kTurnOnsTab), false);
+        screen_.setVisible(find(kChildAspirations), young(sim_.age));
+        screen_.setVisible(find(kOlderAspirations), !young(sim_.age));
+        for (std::size_t i = 0; i < kTraitBars.size(); ++i) {
+            const int bar = find(kTraitBars[i]);
+            traitBars_[i] = MeterBar(screen_, bar >= 0 ? screen_.find(bar, kBarFill) : -1, kTraitPicture, false);
+        }
+        const int left = find(kPointsLeft);
+        pointsLeft_ = MeterBar(screen_, left >= 0 ? screen_.find(left, kBarFill) : -1, kPointsLeftPicture, true);
+        showPersonality();
     } else {
         for (const std::uint32_t id : kCollectionButtons) {
             screen_.setEnabled(find(id), false);
@@ -236,6 +293,39 @@ void CasScreen::showSim() {
         screen_.setChecked(find(id), sim_.clothes == kind);
     }
     screen_.setText(find(kSimName), sim_.firstName);
+}
+
+void CasScreen::showPersonality() {
+    if (step_ != Step::Personality) {
+        return;
+    }
+    int spent = 0;
+    for (std::size_t i = 0; i < traitBars_.size(); ++i) {
+        traitBars_[i].show(sim_.traits[i] * 100, kTraitMax);
+        spent += sim_.traits[i];
+    }
+    pointsLeft_.show((kPersonalityPoints - spent) * 1000 / kPersonalityPoints, kPersonalityPoints);
+    for (std::uint32_t sign = 1; sign <= 12; ++sign) {
+        screen_.setVisible(find(kZodiacBackground + sign), static_cast<int>(sign) == sim_.zodiac);
+        screen_.setChecked(find(kZodiacButton + sign), static_cast<int>(sign) == sim_.zodiac);
+    }
+    screen_.setText(find(kZodiacName), sim_.zodiac >= 1 && sim_.zodiac <= 12 ? kZodiacNames[sim_.zodiac - 1] : "");
+    const int aspiration = young(sim_.age) ? kGrowUp : sim_.aspiration;
+    screen_.setChecked(find(kAspirationButton + kGrowUp), aspiration == kGrowUp);
+    for (const int kind : kOlderAspirationKinds) {
+        screen_.setChecked(find(kAspirationButton + static_cast<std::uint32_t>(kind)), aspiration == kind);
+    }
+}
+
+void CasScreen::setTrait(std::size_t trait, int points) {
+    int others = 0;
+    for (std::size_t i = 0; i < sim_.traits.size(); ++i) {
+        others += i == trait ? 0 : sim_.traits[i];
+    }
+    // No more than the points left.
+    sim_.traits[trait] = std::clamp(points, 0, std::min(kTraitMax, kPersonalityPoints - others));
+    sim_.zodiac = traitsSign(sim_.traits);
+    showPersonality();
 }
 
 void CasScreen::setChoices(std::size_t count, std::optional<std::size_t> worn) {
@@ -326,6 +416,26 @@ CasScreen::Action CasScreen::clicked(int window) {
         showStep(Step::Clothing);
         return Action::ChoicesNeeded;
     }
+    if (is(kFirstStep + 5) && step_ != Step::Personality) {
+        showStep(Step::Personality);
+        return Action::None;
+    }
+    // Step 6: a sign sets its traits; an aspiration is chosen (toddlers and children grow up).
+    if (step_ == Step::Personality) {
+        for (std::uint32_t sign = 1; sign <= 12; ++sign) {
+            if (is(kZodiacButton + sign)) {
+                sim_.zodiac = static_cast<int>(sign);
+                sim_.traits = signTraits(sim_.zodiac);
+            }
+        }
+        for (const int kind : kOlderAspirationKinds) {
+            if (is(kAspirationButton + static_cast<std::uint32_t>(kind)) && !young(sim_.age)) {
+                sim_.aspiration = kind;
+            }
+        }
+        showPersonality();
+        return Action::None;
+    }
     // A choice, or a page of them.
     for (const auto& t : tiles_) {
         if (window == t.button) {
@@ -393,12 +503,30 @@ CasScreen::Action CasScreen::clicked(int window) {
     return result;
 }
 
-void CasScreen::pointerDown(int window) {
+void CasScreen::pointerDown(int window, int x, int /*y*/) {
     if (root_ < 0) {
         return;
     }
     for (TextField* field : {&first_, &family_, &bio_}) {
         field->focus(screen_, field->window() >= 0 && field->holds(screen_, window));
+    }
+    // Step 6: down on a trait bar sets the trait to the point under the mouse (left of the first,
+    // none), as far as the points left go.
+    if (step_ != Step::Personality) {
+        return;
+    }
+    for (int w = window; w >= 0; w = screen_.parent(w)) {
+        for (std::size_t i = 0; i < kTraitBars.size(); ++i) {
+            if (w == find(kTraitBars[i])) {
+                int left = 0;
+                for (int p = w; p >= 0; p = screen_.parent(p)) {
+                    left += screen_.x(p);
+                }
+                const int into = x - left - kTraitBarLeft;
+                setTrait(i, into <= 0 ? 0 : (into + kTraitPointWidth - 1) / kTraitPointWidth);
+                return;
+            }
+        }
     }
 }
 

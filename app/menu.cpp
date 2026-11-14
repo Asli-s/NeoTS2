@@ -3264,7 +3264,7 @@ void Game::mouseEvent(const pf::Event& e) {
         }
         if (cas_.isOpen()) {
             const auto [ux, uy] = toUi(x, y);
-            cas_.pointerDown(screen_.mouseWindow(ux, uy));
+            cas_.pointerDown(screen_.mouseWindow(ux, uy), ux, uy);
         }
         down_ = true;
         downX_ = x;
@@ -3483,7 +3483,7 @@ bool Game::takePicture() {
             const auto [wx, wy, kind] = options_.uiClicks[uiClickNext_++];
             const auto [cx, cy] = toUi(static_cast<float>(wx), static_cast<float>(wy));
             if (cas_.isOpen()) {
-                cas_.pointerDown(screen_.mouseWindow(cx, cy));
+                cas_.pointerDown(screen_.mouseWindow(cx, cy), cx, cy);
             }
             if (StoryEditor* editor = activeStoryEditor()) {
                 editor->pointerDown(screen_.mouseWindow(cx, cy));

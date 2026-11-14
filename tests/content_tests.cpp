@@ -1362,6 +1362,14 @@ void steppedBarsFillAsTheGame() {
     CHECK(ts2::content::nearestZodiacSign(800, 300, 300, 500, 600) == 1);     // Aries exactly
     CHECK(ts2::content::nearestZodiacSign(300, 700, 300, 500, 700) == 12);
     CHECK(ts2::content::nearestZodiacSign(0, 0, 0, 0, 0) == 4);      // ties with sign 11: the first wins
+    // Each sign's traits add up to Create-a-Sim's 25 points, and point back to the sign.
+    for (int sign = 1; sign <= 12; ++sign) {
+        const auto t = ts2::content::zodiacTraits(sign);
+        CHECK(t[0] + t[1] + t[2] + t[3] + t[4] == 25);
+        CHECK(ts2::content::nearestZodiacSign(t[0] * 100, t[1] * 100, t[2] * 100, t[3] * 100, t[4] * 100) == sign);
+    }
+    const auto none = ts2::content::zodiacTraits(0);
+    CHECK(none[0] + none[1] + none[2] + none[3] + none[4] == 0);
 }
 
 // Live panel texts: money with the simoleon sign and commas, hours on a 12-hour clock.
