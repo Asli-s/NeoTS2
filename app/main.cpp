@@ -1,6 +1,6 @@
 // NeoTS2: opens a saved lot in a window, or shows the game's main menu.
 //   neots2 <install folder> --menu [--user <user folder>] [--size w h | --fit-screen] [--preview n]
-//          [--play n [--bin families|lots|options|gameoptions|chooser|quit] [--lot id] [--click x y] [--card x y]]
+//          [--play n [--bin families|lots|story|options|gameoptions|chooser|quit] [--lot id] [--click x y] [--card x y]]
 //          [--hover x y (on the neighborhood, or the lot before the picture)] [--ui-click x y | --ui-right-click x y | --ui-hover x y
 //          (on the lot's panels before the picture, repeatable)]
 //          [--shot <out.png>] [--seed n (the neighborhood ground's variants, so pictures repeat)]

@@ -30,10 +30,18 @@ public:
     };
     // What the bins show from a neighborhood's files and the user folder's lot catalog. Reading it
     // takes a while, so it is read with the neighborhood, off the main thread.
+    // A page of the neighborhood's story: its snapshot and caption (the player's, or a premade
+    // story's from the game's text, `textResource`).
+    struct StoryPage {
+        ts2::tga::Pixels picture;
+        std::string text;
+        std::uint32_t textResource = 0;
+    };
     struct Content {
         std::vector<ts2::tga::Pixels> familyPictures, lotPictures;
         std::vector<std::uint32_t> occupied;
         std::map<std::uint32_t, LotCard> cards;  // by lot id
+        std::vector<StoryPage> story;
     };
     static Content read(const std::filesystem::path& folder, const std::filesystem::path& user);
 
@@ -43,6 +51,14 @@ public:
 
     enum class Bin { None, Families, Lots };
     void showBin(Bin bin);
+
+    // F1 to F5 pressed (`n`): each opens or closes what its puck button does.
+    void functionKey(int n);
+
+    // Shows or hides the neighborhood's story (the puck's Neighborhood Story button, F4), from its
+    // first page.
+    void showStory(bool show);
+    bool storyShown() const;
 
     // Shows or hides the options menu the puck's options button opens.
     void showOptions(bool show);
@@ -86,11 +102,13 @@ private:
         std::vector<int> tiles;     // the tiles placed in it
     };
     void layoutStrip(Strip& strip, const std::vector<ts2::tga::Pixels>& pictures);
+    // Shows story page `page`: its picture, caption and number.
+    void showStoryPage(std::size_t page);
 
     ts2::ui::Screen& screen_;
     ts2::content::UiData& data_;
     int width_, height_;
-    int panel_ = -1, families_ = -1, lots_ = -1, card_ = -1, options_ = -1;
+    int panel_ = -1, families_ = -1, lots_ = -1, card_ = -1, options_ = -1, story_ = -1;
     OptionsMenu optionsMenu_{screen_};
     GameOptionsPanel gameOptions_{screen_, optionsMenu_};
     GraphicsOptionsPanel graphicsOptions_{screen_, optionsMenu_};
@@ -104,6 +122,10 @@ private:
     std::vector<std::uint32_t> occupied_;
     std::map<std::uint32_t, LotCard> cards_;
     std::uint32_t cardLot_ = 0;
+    std::vector<StoryPage> storyPages_;
+    std::size_t storyPage_ = 0;
+    ts2::tga::Pixels storyShape_;  // the story picture's rounded shape
+    std::string storyCounter_;     // the page counter's text from the script ("%ld of %ld")
 };
 
 } // namespace app

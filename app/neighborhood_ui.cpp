@@ -3,18 +3,24 @@
 #include "neighborhood.hpp"
 
 #include "content/neighborhood.hpp"
+#include "content/story_album.hpp"
+#include "content/ui_meters.hpp"
 #include "diag/log.hpp"
 #include "formats/dbpf.hpp"
 #include "formats/fami.hpp"
 #include "formats/image.hpp"
 #include "formats/lot_description.hpp"
+#include "formats/neighborhood_id.hpp"
 #include "formats/str.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <format>
+#include <fstream>
+#include <iterator>
 #include <map>
+#include <optional>
 #include <utility>
 
 namespace app {
@@ -88,6 +94,17 @@ constexpr int kTagPadding = 16, kTagIcon = 24, kTagTextGap = 4;  // the name has
 const std::string kTagFont = "0x4a809916";  // GenHeader
 // "For Sale" (Neighborhood text 0x82, string 1).
 constexpr std::uint32_t kNeighborhoodText = 0x7F3A262A, kForSale = 0x00820001;  // a string id, leakcheck: ok
+// The neighborhood's story (Neighborhood Story), opened by the puck's story button: its title
+// ("Welcome to %s!"), picture (cut to the shape of its own image), caption, page counter ("%ld of
+// %ld"), Previous and Next, the text shown when there are no pages, Done, and Edit Neighborhood
+// Story (the story editor isn't built yet).
+constexpr std::uint32_t kStoryViewer = 0x49001030, kPuckStory = 0xacd99323;
+constexpr std::uint32_t kStoryTitle = 0x2d0a8e57, kStoryPicture = 0x4d0a8d83, kStoryCaption = 0xcd0a8ef7, kStoryCounter = 0x2d0e41dc,
+                        kStoryPrevious = 0x2d0a8f5a, kStoryNext = 0x2d0a8f55, kStoryNone = 0x4d7407b2, kStoryDone = 0xcc800571,
+                        kStoryEdit = 0x0cb23b3c;
+constexpr std::uint32_t kStoryShape = 0xa96d0603;  // the picture window's image, in the UI image group
+// Snapshots are read at most this wide or tall (the game saves them 640 x 480 or so).
+constexpr std::uint32_t kMaxSnapshotSide = 2048;
 // Lot types that are community lots.
 constexpr std::uint8_t kCommunityTypes[] = {1, 7, 10};
 
@@ -312,13 +329,57 @@ std::vector<ts2::tga::Pixels> catalogLots(const fs::path& user) {
     return out;
 }
 
+// The neighborhood's story: the album named by the neighborhood's id in the user folder's
+// Storytelling folder, each entry's snapshot read from there. A snapshot that can't be read leaves
+// its page without a picture.
+std::vector<NeighborhoodUi::StoryPage> storyPages(const fs::path& folder, const fs::path& user) {
+    std::vector<NeighborhoodUi::StoryPage> out;
+    std::optional<std::int32_t> id;
+    try {
+        ts2::dbpf::Package package{ts2::content::neighborhoodPackage(folder)};
+        for (const auto& e : package.entries()) {
+            if (e.key.type == ts2::nhoodid::kType) {
+                id = ts2::nhoodid::parse(package.read(e)).id;
+                break;
+            }
+        }
+    } catch (const std::exception& ex) {
+        ts2::diag::warnOnce(std::string("neighborhood story: the neighborhood's id can't be read, so it shows no story: ") + ex.what());
+        return out;
+    }
+    if (!id) {
+        return out;
+    }
+    const fs::path storytelling = user / "Storytelling";
+    const fs::path file = ts2::content::storyAlbumFile(storytelling, static_cast<std::uint32_t>(*id));
+    std::ifstream in(file, std::ios::binary);
+    if (!in) {
+        return out;  // no story yet
+    }
+    const std::string xml{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    for (const auto& entry : ts2::content::parseStoryAlbum(xml).entries) {
+        NeighborhoodUi::StoryPage page;
+        page.text = entry.text;
+        page.textResource = entry.textResource;
+        std::ifstream picture(storytelling / entry.snapshot, std::ios::binary);
+        const std::vector<std::uint8_t> bytes{std::istreambuf_iterator<char>(picture), std::istreambuf_iterator<char>()};
+        if (auto decoded = bytes.empty() ? std::nullopt : ts2::image::decode(bytes, kMaxSnapshotSide)) {
+            page.picture = std::move(*decoded);
+        } else {
+            ts2::diag::warnOnce("neighborhood story: a snapshot can't be read, so its page shows no picture: " + entry.snapshot);
+        }
+        out.push_back(std::move(page));
+    }
+    return out;
+}
+
 } // namespace
 
 NeighborhoodUi::NeighborhoodUi(ts2::ui::Screen& screen, ts2::content::UiData& data, int width, int height)
     : screen_(screen), data_(data), width_(width), height_(height) {}
 
 NeighborhoodUi::Content NeighborhoodUi::read(const fs::path& folder, const fs::path& user) {
-    return {homelessFamilies(folder), catalogLots(user), livedInLots(folder), lotCards(folder)};
+    return {homelessFamilies(folder), catalogLots(user), livedInLots(folder), lotCards(folder), storyPages(folder, user)};
 }
 
 void NeighborhoodUi::open(const fs::path& folder, const std::string& name, Content content) {
@@ -397,6 +458,31 @@ void NeighborhoodUi::open(const fs::path& folder, const std::string& name, Conte
     screen_.setVisible(card_, false);
     cards_ = std::move(content.cards);
     cardLot_ = 0;
+    // The story, hidden until the puck's story button opens it. Its title names the neighborhood.
+    story_ = screen_.load(kScripts, kStoryViewer, 0, 0);
+    if (story_ >= 0) {
+        const int title = screen_.find(story_, kStoryTitle);
+        std::string welcome = screen_.text(title);
+        if (const std::size_t at = welcome.find("%s"); at != std::string::npos) {
+            welcome.replace(at, 2, name);
+        }
+        screen_.setText(title, welcome);
+        storyCounter_ = screen_.text(screen_.find(story_, kStoryCounter));
+        screen_.setEnabled(screen_.find(story_, kStoryCaption), false);  // shown, not edited: editing isn't built yet
+        screen_.setEnabled(screen_.find(story_, kStoryEdit), false);
+        // The picture window's own image is the shape a snapshot is cut to.
+        if (auto shape = data_.image(kTagImageGroup, kStoryShape)) {
+            storyShape_ = std::move(*shape);
+        }
+        screen_.setVisible(story_, false);
+    }
+    storyPages_ = std::move(content.story);
+    for (auto& page : storyPages_) {
+        if (page.text.empty() && page.textResource != 0) {
+            page.text = data_.text(ts2::content::kStoryTextGroup, page.textResource);
+        }
+    }
+    storyPage_ = 0;
     tag_ = screen_.addWindows({tagWindow("IGZWinGen", {{"image", std::format("{{{:08x},{:08x}}}", kTagImageGroup, kTagBox)}, {"edgeimage", "yes"}})}, 0, 0);
     tagIcon_ = screen_.addWindows({tagWindow("IGZWinBMP", {{"image", std::format("{{{:08x},{:08x}}}", kTagImageGroup, kTagSun)}})}, 0, 0, tag_);
     tagText_ = screen_.addWindows({tagWindow("IGZWinText", {{"font", kTagFont}})}, 0, 0, tag_);
@@ -459,10 +545,12 @@ void NeighborhoodUi::close() {
     gameOptions_.remove();
     graphicsOptions_.remove();
     optionsMenu_.setMenu(-1);
-    for (const int w : {panel_, families_, lots_, card_, tag_, options_}) {
+    for (const int w : {panel_, families_, lots_, card_, tag_, options_, story_}) {
         screen_.remove(w);
     }
-    panel_ = families_ = lots_ = puck_ = card_ = tag_ = tagIcon_ = tagText_ = options_ = -1;
+    panel_ = families_ = lots_ = puck_ = card_ = tag_ = tagIcon_ = tagText_ = options_ = story_ = -1;
+    storyPages_.clear();
+    storyPage_ = 0;
     tagLot_ = 0;
     cards_.clear();
     cardLot_ = 0;
@@ -478,6 +566,7 @@ void NeighborhoodUi::showBin(Bin bin) {
     bin_ = bin;
     if (bin != Bin::None) {
         showOptions(false);
+        showStory(false);
     }
     screen_.setVisible(families_, bin == Bin::Families);
     screen_.setVisible(lots_, bin == Bin::Lots);
@@ -522,6 +611,14 @@ NeighborhoodUi::Action NeighborhoodUi::clicked(int window) {
         showBin(bin_ == Bin::Families ? Bin::None : Bin::Families);
     } else if (screen_.parent(window) == puck_ && id == kPuckLots) {
         showBin(bin_ == Bin::Lots ? Bin::None : Bin::Lots);
+    } else if (screen_.parent(window) == puck_ && id == kPuckStory) {
+        showStory(!storyShown());
+    } else if (storyShown() && window == screen_.find(story_, kStoryDone)) {
+        showStory(false);
+    } else if (storyShown() && window == screen_.find(story_, kStoryPrevious) && storyPage_ > 0) {
+        showStoryPage(storyPage_ - 1);
+    } else if (storyShown() && window == screen_.find(story_, kStoryNext) && storyPage_ + 1 < storyPages_.size()) {
+        showStoryPage(storyPage_ + 1);
     } else if (id == kFamilyClose || id == kCommunityClose) {
         hideCard();
     } else if (id == kFamilyEnter && cardLot_ != 0) {
@@ -532,7 +629,7 @@ NeighborhoodUi::Action NeighborhoodUi::clicked(int window) {
 
 void NeighborhoodUi::hideAll(bool hide) {
     if (hide && hidden_.empty()) {
-        for (const int w : {panel_, families_, lots_, card_, tag_, options_}) {
+        for (const int w : {panel_, families_, lots_, card_, tag_, options_, story_}) {
             if (w >= 0) {
                 hidden_.emplace_back(w, screen_.visible(w));
                 screen_.setVisible(w, false);
@@ -552,11 +649,82 @@ void NeighborhoodUi::showOptions(bool show) {
     }
     if (show) {
         showBin(Bin::None);
+        showStory(false);
     } else {
         optionsMenu_.close();
     }
     screen_.setVisible(options_, show);
     screen_.setChecked(screen_.find(puck_, kPuckOptions), show);
+}
+
+void NeighborhoodUi::functionKey(int n) {
+    if (panel_ < 0 || !screen_.visible(panel_)) {
+        return;
+    }
+    switch (n) {
+    case 1: showBin(bin_ == Bin::Families ? Bin::None : Bin::Families); break;
+    case 2: showBin(bin_ == Bin::Lots ? Bin::None : Bin::Lots); break;
+    case 4: showStory(!storyShown()); break;
+    case 5: showOptions(options_ >= 0 && !screen_.visible(options_)); break;
+    default: break;
+    }
+}
+
+void NeighborhoodUi::showStory(bool show) {
+    if (story_ < 0) {
+        return;
+    }
+    if (show) {
+        showBin(Bin::None);
+        showOptions(false);
+        hideCard();
+        // In the middle of the screen, on top, from its first page.
+        screen_.move(story_, (width_ - screen_.width(story_)) / 2, (height_ - screen_.height(story_)) / 2);
+        screen_.raise(story_);
+        showStoryPage(0);
+    }
+    screen_.setVisible(story_, show);
+    screen_.setChecked(screen_.find(puck_, kPuckStory), show);
+}
+
+bool NeighborhoodUi::storyShown() const { return story_ >= 0 && screen_.visible(story_); }
+
+void NeighborhoodUi::showStoryPage(std::size_t page) {
+    const bool any = !storyPages_.empty();
+    storyPage_ = any ? std::min(page, storyPages_.size() - 1) : 0;
+    screen_.setVisible(screen_.find(story_, kStoryNone), !any);
+    const int picture = screen_.find(story_, kStoryPicture);
+    const int caption = screen_.find(story_, kStoryCaption);
+    const int counter = screen_.find(story_, kStoryCounter);
+    screen_.setVisible(picture, any);
+    screen_.setVisible(caption, any);
+    screen_.setVisible(counter, any);
+    screen_.setEnabled(screen_.find(story_, kStoryPrevious), any && storyPage_ > 0);
+    screen_.setEnabled(screen_.find(story_, kStoryNext), any && storyPage_ + 1 < storyPages_.size());
+    if (!any) {
+        return;
+    }
+    const StoryPage& shown = storyPages_[storyPage_];
+    // The snapshot fills the picture window, cut to its rounded shape.
+    const auto w = static_cast<std::uint32_t>(screen_.width(picture)), h = static_cast<std::uint32_t>(screen_.height(picture));
+    if (shown.picture.width > 0 && w > 0 && h > 0) {
+        auto fitted = ts2::content::scaled(shown.picture, w, h);
+        if (storyShape_.width > 0) {
+            fitted = ts2::content::masked(fitted, ts2::content::scaled(storyShape_, w, h));
+        }
+        screen_.setImage(picture, std::move(fitted));
+    } else {
+        screen_.setVisible(picture, false);
+    }
+    screen_.setText(caption, shown.text);
+    // The counter's own text ("%ld of %ld") with the page and the count put in.
+    std::string count = storyCounter_;
+    for (const std::size_t n : {storyPage_ + 1, storyPages_.size()}) {
+        if (const std::size_t at = count.find("%ld"); at != std::string::npos) {
+            count.replace(at, 3, std::to_string(n));
+        }
+    }
+    screen_.setText(counter, count);
 }
 
 bool NeighborhoodUi::clickable(std::uint32_t lot) const {

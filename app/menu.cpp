@@ -718,6 +718,8 @@ void Game::showNeighborhood(Built built) {
         hoodUi_.showBin(app::NeighborhoodUi::Bin::Families);
     } else if (options_.bin == "lots") {
         hoodUi_.showBin(app::NeighborhoodUi::Bin::Lots);
+    } else if (options_.bin == "story") {
+        hoodUi_.showStory(true);
     } else if (options_.bin == "options") {
         hoodUi_.showOptions(true);
     } else if (options_.bin == "gameoptions") {
@@ -3147,6 +3149,10 @@ void Game::handleEvent(const pf::Event& e) {
         openQuitBox();  // Q asks to quit in the neighborhood too
     } else if (e.type == pf::Event::Type::KeyDown && !e.repeat && inNeighborhood_ && !neighborhoodCovered() && e.key == pf::Key::L) {
         toggleNight();
+    } else if (e.type == pf::Event::Type::KeyDown && !e.repeat && inNeighborhood_ && !neighborhoodCovered() &&
+               (e.key == pf::Key::F1 || e.key == pf::Key::F2 || e.key == pf::Key::F4 || e.key == pf::Key::F5)) {
+        // The puck's keys: F1 Families, F2 Lots & Houses, F4 Neighborhood Story, F5 Options.
+        hoodUi_.functionKey(e.key == pf::Key::F1 ? 1 : e.key == pf::Key::F2 ? 2 : e.key == pf::Key::F4 ? 4 : 5);
     } else if (e.type == pf::Event::Type::KeyDown && inNeighborhood_ && !neighborhoodCovered() &&
                (key == pf::Key::Comma || key == pf::Key::Period || key == pf::Key::Z || key == pf::Key::X) && !dialogOpen()) {
         // The neighborhood camera's turn and zoom keys work as the lot camera's.
