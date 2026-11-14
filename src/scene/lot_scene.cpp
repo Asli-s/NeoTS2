@@ -274,8 +274,11 @@ void LotSceneBuilder::collectWalls() {
         // The game adds attic walls under gable ends, often with the outdoors on both sides.
         const auto style = fence != nullptr ? styles.end() : styles.find(covering->second->type);
         const bool toRoof = style != styles.end() && style->second.toRoof;
-        // A half wall stands wherever it is built, also with the outdoors on both sides.
-        if ((w.leftRoom == w.rightRoom && !toRoof && fence == nullptr) || (onBorder(a) && onBorder(b))) {
+        // A half wall stands wherever it is built, also with the outdoors on both sides, and so does a
+        // full room wall (a drawn style spanning floor to floor, like the Wall tool's): one standing on
+        // its own has the same room on both sides.
+        const bool roomWall = style != styles.end() && style->second.rendered && style->second.floorToFloor;
+        if ((w.leftRoom == w.rightRoom && !toRoof && !roomWall && fence == nullptr) || (onBorder(a) && onBorder(b))) {
             continue;
         }
         ThickWall t;
