@@ -1681,6 +1681,8 @@ app::LotUi::Action Game::lotKey(const pf::Event& e) {
     case pf::Key::Pad2: return Action::High;
     case pf::Key::Num3:
     case pf::Key::Pad3: return Action::Ultra;
+    case pf::Key::V:
+        return e.ctrl || e.alt ? Action::None : Action::VideoCapture;
     case pf::Key::F5:
         lotUi_.showOptions(!lotUi_.optionsShown());
         return lotUi_.optionsShown() ? Action::OptionsOpened : Action::OptionsClosed;
@@ -1761,6 +1763,7 @@ void Game::lotAction(app::LotUi::Action action) {
     }
     switch (action) {
     case Action::Pause: lotLife_->setPaused(!lotLife_->paused()); break;
+    case Action::VideoCapture: toggleVideoCapture(); break;
     case Action::Normal: lotLife_->setSpeed(ts2::sim::Speed::Normal); break;
     case Action::High: lotLife_->setSpeed(ts2::sim::Speed::High); break;
     case Action::Ultra: lotLife_->setSpeed(ts2::sim::Speed::Ultra); break;
@@ -2868,6 +2871,7 @@ void Game::run() {
             }
         } else {
             const bool drawn = renderer_.draw(inLot_ || inNeighborhood_ ? viewCamera() : ts2::render::Camera{});
+            captureVideoFrame(now);
             if (!windowShown_) {
                 ts2::platform::showFirstWindow();
                 windowShown_ = true;
@@ -3165,6 +3169,8 @@ void Game::handleEvent(const pf::Event& e) {
         }
     } else if (e.type == pf::Event::Type::KeyDown && !e.repeat && inNeighborhood_ && !neighborhoodCovered() && e.key == pf::Key::Q) {
         openQuitBox(hoodEdits_.changed());  // Q asks to quit in the neighborhood too, to save first when decorations changed
+    } else if (e.type == pf::Event::Type::KeyDown && !e.repeat && inNeighborhood_ && !neighborhoodCovered() && e.key == pf::Key::V && !e.ctrl && !e.alt) {
+        toggleVideoCapture();
     } else if (e.type == pf::Event::Type::KeyDown && !e.repeat && inNeighborhood_ && !neighborhoodCovered() && e.key == pf::Key::C && !e.ctrl && !e.alt) {
         takeSnapshot();
     } else if (e.type == pf::Event::Type::KeyDown && !e.repeat && inNeighborhood_ && !neighborhoodCovered() && e.key == pf::Key::L) {
@@ -3250,6 +3256,10 @@ void Game::mouseEvent(const pf::Event& e) {
 }
 
 void Game::windowClicked(int window) {
+    if (noticeBox_.clicked(screen_, window)) {
+        noticeBox_.close(screen_);
+        return;
+    }
     if (const auto button = errorBox_.clicked(screen_, window)) {
         answerObjectError(*button);
         return;
@@ -3288,6 +3298,8 @@ void Game::windowClicked(int window) {
             openQuitBox(hoodEdits_.changed());
         } else if (action == app::NeighborhoodUi::Action::DecorationTool) {
             decorationToolChosen();
+        } else if (action == app::NeighborhoodUi::Action::VideoCapture) {
+            toggleVideoCapture();
         } else if (action == app::NeighborhoodUi::Action::Snapshot) {
             takeSnapshot();
         } else if (action == app::NeighborhoodUi::Action::DayNight) {
@@ -3383,6 +3395,24 @@ std::optional<T> Game::finished(std::future<T>& job, const char* what) {
 // The picture the options ask for, of the neighborhood or lot just opened, after the clicks
 // asked for. False while it waits for the Sims or for the lot to play on.
 bool Game::takePicture() {
+    // A recording asked for runs its time first, the view drawn as it goes.
+    if (options_.recordSeconds > 0 && !recordingTaken_) {
+        if (!videoRecorder_) {
+            toggleVideoCapture();
+            if (!videoRecorder_) {
+                recordingTaken_ = true;
+                return false;
+            }
+        }
+        const std::uint64_t now = ts2::platform::ticksNs();
+        captureVideoFrame(now);
+        (void)renderer_.draw(viewCamera());
+        if (static_cast<double>(now - videoStartedAt_) / 1e9 < options_.recordSeconds) {
+            return false;
+        }
+        stopVideoCapture(false);
+        recordingTaken_ = true;
+    }
     // In the neighborhood the clicks go to its panels, as a player's would.
     if (inNeighborhood_ && !inLot_ && !options_.uiClicks.empty() && !uiClicked_) {
         uiClicked_ = true;

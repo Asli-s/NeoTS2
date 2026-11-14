@@ -56,6 +56,7 @@ int main(int argc, char** argv) {
     for (auto& t : terrainPaintTests()) tests.push_back(t);
     for (auto& t : lotSaveTests()) tests.push_back(t);
     for (auto& t : storyAlbumTests()) tests.push_back(t);
+    for (auto& t : videoTests()) tests.push_back(t);
     for (auto& t : wallSaveTests()) tests.push_back(t);
     for (auto& t : objectSaveTests()) tests.push_back(t);
 

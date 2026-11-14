@@ -24,6 +24,7 @@
 #include "neighborhood_ui.hpp"
 #include "orbit.hpp"
 #include "quit_box.hpp"
+#include "video_recorder.hpp"
 #include "portraits.hpp"
 
 #include "content/cameras.hpp"
@@ -246,7 +247,7 @@ private:
     // Whether one of the game's dialogs is open over the lot: the quit box, an object error, the
     // naming dialog, the phone book, the type picker or a message box.
     bool dialogOpen() const {
-        return quitBox_.isOpen() || errorBox_.isOpen() || babyNames_.isOpen() || phoneBook_.isOpen() || typePicker_.isOpen() ||
+        return quitBox_.isOpen() || errorBox_.isOpen() || noticeBox_.isOpen() || babyNames_.isOpen() || phoneBook_.isOpen() || typePicker_.isOpen() ||
                messageBox_.isOpen();
     }
     // Typing goes on in the naming dialog after the cheat window closes over it.
@@ -310,6 +311,16 @@ private:
     // Camera Snapshot (C in the neighborhood): saves the view, without the panels, as one of the
     // neighborhood's snapshots in the user folder's Storytelling folder.
     void takeSnapshot();
+    // Video Capture (game_video.cpp): V or the puck's video button starts and stops a recording of
+    // the view; it stops by itself after the options' longest time, or when the view goes.
+    void toggleVideoCapture();
+    void captureVideoFrame(std::uint64_t now);
+    // Finishes the recording, telling where it was saved when `tell`.
+    void stopVideoCapture(bool tell);
+    std::unique_ptr<VideoRecorder> videoRecorder_;
+    std::uint64_t videoStartedAt_ = 0;
+    bool recordingTaken_ = false;  // the test recording (--record-seconds) is done
+    app::DialogBox noticeBox_;  // a message with OK, such as where a video was saved
     // Decorations: the neighborhood's Decorations catalog and its tools (game_decorations.cpp).
     // What the hand holds: a catalog entry to place, or one already placed, picked up with the Hand
     // Tool to move (or delete). It is drawn by `instance`, following the mouse over the ground.

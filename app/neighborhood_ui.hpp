@@ -86,6 +86,8 @@ public:
     void showOptions(bool show);
     // Hides every neighborhood panel (under the neighborhood chooser), or shows them again as they were.
     void hideAll(bool hide);
+    // Shows the puck's Video Capture button pressed while a recording goes on.
+    void setVideoRecording(bool on);
     // Hides the puck in the lower left corner while the free camera is on, or shows it again.
     void hidePuck(bool hide) {
         if (puck_ >= 0) {
@@ -97,7 +99,7 @@ public:
     // The screen has a new size: what sits at its bottom edge moves with it.
     void setSize(int width, int height);
     // DecorationTool: a Decorations tool or catalog entry was chosen (see decorationTool).
-    enum class Action { None, MainMenu, EnterLot, Quit, GameOptionChanged, GraphicsOptionChanged, DayNight, Snapshot, DecorationTool };
+    enum class Action { None, MainMenu, EnterLot, Quit, GameOptionChanged, GraphicsOptionChanged, DayNight, Snapshot, VideoCapture, DecorationTool };
     // A button released: what the player asked for.
     Action clicked(int window);
     // The puck's camera button held down. They turn and zoom while held, as the lot puck's do.

@@ -438,7 +438,6 @@ void NeighborhoodUi::open(const fs::path& folder, const std::string& name, Conte
     puck_ = screen_.find(panel_, kPuck);
     screen_.move(puck_, 0, height_ - screen_.height(puck_));
     chooseVersions(screen_, puck_, folder);
-    screen_.setEnabled(screen_.find(puck_, kVideoCapture), false);  // video capture isn't built yet
     for (const int c : screen_.children(panel_)) {
         if (screen_.id(c) == kTopBar && screen_.visible(c)) {
             chooseVersions(screen_, c, folder);
@@ -692,6 +691,8 @@ NeighborhoodUi::Action NeighborhoodUi::clicked(int window) {
         showOptions(!screen_.visible(options_));
     } else if (screen_.parent(window) == puck_ && id == kSnapshot) {
         return Action::Snapshot;
+    } else if (screen_.parent(window) == puck_ && id == kVideoCapture) {
+        return Action::VideoCapture;
     } else if (screen_.parent(window) == puck_ && id == kDayNight) {
         return Action::DayNight;
     } else if (options_ >= 0 && window == screen_.find(options_, kOptionsQuit)) {
@@ -771,6 +772,12 @@ void NeighborhoodUi::showOptions(bool show) {
     }
     screen_.setVisible(options_, show);
     screen_.setChecked(screen_.find(puck_, kPuckOptions), show);
+}
+
+void NeighborhoodUi::setVideoRecording(bool on) {
+    if (puck_ >= 0) {
+        screen_.setChecked(screen_.find(puck_, kVideoCapture), on);
+    }
 }
 
 void NeighborhoodUi::functionKey(int n) {

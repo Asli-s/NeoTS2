@@ -33,6 +33,7 @@ constexpr KeyInfo kKeys[] = {
     {Key::S, SDLK_s},
     {Key::W, SDLK_w},
     {Key::X, SDLK_x},
+    {Key::V, SDLK_v},
     {Key::Y, SDLK_y},
     {Key::Z, SDLK_z},
     {Key::Num1, SDLK_1},

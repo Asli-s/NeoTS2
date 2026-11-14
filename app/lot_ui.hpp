@@ -97,7 +97,7 @@ public:
     void hideForFreeCamera(bool hide);
 
     // What a released button asks for.
-    enum class Action { None, Neighborhood, Quit, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, GameOptionChanged, GraphicsOptionChanged, RewardsOpened, RewardsClosed, SelectSim, TrackSim, CentreOnNeighbor, CloseNotification, FloorUp, FloorDown, WallMode, ToggleCeiling, MainMenu, BuyOpened, BuyClosed, BuyItem, BuildOpened, BuildClosed, BuildItem, BuildWallItem, BuildWallTool, BuildObjectItem, BuildPaintItem, BuildHand, Sledgehammer, Undo, Redo, StoryOpened, StoryClosed };
+    enum class Action { None, Neighborhood, Quit, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, GameOptionChanged, GraphicsOptionChanged, RewardsOpened, RewardsClosed, SelectSim, TrackSim, CentreOnNeighbor, CloseNotification, FloorUp, FloorDown, WallMode, ToggleCeiling, MainMenu, BuyOpened, BuyClosed, BuyItem, BuildOpened, BuildClosed, BuildItem, BuildWallItem, BuildWallTool, BuildObjectItem, BuildPaintItem, BuildHand, Sledgehammer, Undo, Redo, StoryOpened, StoryClosed, VideoCapture };
     Action clicked(int window);
     // The puck's camera button held down under the mouse.
     enum class CameraButton { None, RotateLeft, RotateRight, ZoomIn, ZoomOut };
@@ -159,6 +159,8 @@ public:
     }
     // Shows the Build catalog's page (its floors' or wall coverings' pictures) for the lot.
     void refreshBuild(LotLife& life);
+    // Shows the puck's Video Capture button pressed while a recording goes on.
+    void setVideoRecording(bool on);
     // Shows or hides Story mode's story editor, as the puck's Story button and F4 open it and its
     // close button, the puck's Live button and F1 close it. Albums aren't read yet: it shows none.
     void showStory(bool show);

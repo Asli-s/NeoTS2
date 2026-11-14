@@ -27,6 +27,7 @@ struct MenuOptions {
     // click, 2 the mouse resting there).
     std::vector<std::array<int, 3>> uiClicks;
     bool saveNeighborhood = false;  // the neighborhood's decorations saved after the clicks (a test)
+    double recordSeconds = 0;  // a Video Capture this long before the picture (a test)
     std::optional<std::array<float, 3>> view;  // the picture's camera: yaw, pitch (radians), distance
     // A point of the lot clicked before its picture (x, y) and the menu choice made (-1: left open).
     std::optional<std::array<int, 3>> groundClick;

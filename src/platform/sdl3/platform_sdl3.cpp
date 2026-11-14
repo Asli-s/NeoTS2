@@ -79,6 +79,7 @@ constexpr KeyInfo kKeys[] = {
     {Key::S, SDLK_S, SDL_SCANCODE_S},
     {Key::W, SDLK_W, SDL_SCANCODE_W},
     {Key::X, SDLK_X, SDL_SCANCODE_X},
+    {Key::V, SDLK_V, SDL_SCANCODE_V},
     {Key::Y, SDLK_Y, SDL_SCANCODE_Y},
     {Key::Z, SDLK_Z, SDL_SCANCODE_Z},
     {Key::Num1, SDLK_1, SDL_SCANCODE_1},

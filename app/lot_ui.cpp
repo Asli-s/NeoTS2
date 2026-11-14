@@ -43,6 +43,8 @@ constexpr std::uint32_t kOrganizeView = 0xACB252C1, kStoryView = 0x8CB2529E, kBl
 constexpr std::array<std::uint32_t, 7> kStoryButtonsNotDone = {0x6CD88190, 0xACB79625, 0x6CB795EC, 0x2C8006B9,
                                                                0x2C8006BC, 0x0CB23B3C, 0x6D4898DD};
 constexpr std::uint32_t kFloorUp = 0x00002001, kFloorDown = 0x00002000, kToggleCeiling = 0x00007000;
+// The puck's Video Capture button (V).
+constexpr std::uint32_t kVideoCapture = 0x00005000;
 // The camera buttons: rotate left and right, zoom in and out.
 constexpr std::uint32_t kCameraButtons[] = {0x00001001, 0x00001000, 0x00001002, 0x00001003};
 // One wall button per wall mode, in the same place. The one for the mode in use shows.
@@ -568,6 +570,12 @@ void LotUi::showStory(bool show) {
 
 bool LotUi::storyShown() const { return story_ >= 0 && screen_.visible(story_); }
 
+void LotUi::setVideoRecording(bool on) {
+    if (puck_ >= 0) {
+        screen_.setChecked(child(screen_, puck_, kVideoCapture), on);
+    }
+}
+
 void LotUi::setUpStoryPanel() {
     if (story_ < 0) {
         return;
@@ -757,6 +765,9 @@ LotUi::Action LotUi::clicked(int window) {
         }
         if (id == kToggleCeiling) {
             return Action::ToggleCeiling;
+        }
+        if (id == kVideoCapture) {
+            return Action::VideoCapture;
         }
     }
     // Advanced Neighborhood Options opens and closes its strip. In the strip, Return goes back to the
