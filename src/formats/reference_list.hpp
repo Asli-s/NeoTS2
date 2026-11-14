@@ -13,5 +13,7 @@ constexpr std::uint32_t kType = 0xAC506764;
 // A reference list (3IDR): the resources a property set or a Sim's age data points to, by index
 // (a property set's "resourcekeyidx" picks one). Version 1 entries carry no high instance.
 std::vector<scenegraph::Link> parse(std::span<const std::uint8_t> data);
+// A list as the game writes Sims' lists: version 2, each entry with its high instance.
+std::vector<std::uint8_t> encode(const std::vector<scenegraph::Link>& links);
 
 } // namespace ts2::reflist

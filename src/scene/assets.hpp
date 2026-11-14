@@ -16,6 +16,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ts2::scene {
@@ -78,6 +79,9 @@ public:
     // The outfit catalog's packages, in the order the catalog is read, for a reader of its own on
     // another thread.
     std::vector<std::filesystem::path> skinPackages() const;
+    // Every resource of an objects group as the game loads it (a later product's copy over an
+    // earlier one's), each with its key: the template a Sim's character file is made from.
+    std::vector<std::pair<scenegraph::Link, std::vector<std::uint8_t>>> objectGroupResources(std::uint32_t group);
     // The packages of the skin catalog, in the order the game reads them (see skinCatalogPackages).
     const std::vector<std::filesystem::path>& skinCatalog() const { return skinCatalog_; }
 

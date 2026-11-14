@@ -7,6 +7,7 @@
 #include "content/ui_meters.hpp"
 #include "diag/log.hpp"
 #include "scene/age_data.hpp"
+#include "scene/character_file.hpp"
 #include "scene/portrait.hpp"
 #include "scene/sim_builder.hpp"
 #include "scene/sims.hpp"
@@ -78,7 +79,8 @@ void Game::openCas() {
         return;
     }
     hoodUi_.hideAll(true);
-    cas_.open(uiWidth_, uiHeight_, static_cast<std::uint32_t>(ts2::platform::ticksNs() & 0x7FFFFFFF));
+    // A test's seed makes the same Sims each run.
+    cas_.open(uiWidth_, uiHeight_, options_.seed.value_or(static_cast<std::uint32_t>(ts2::platform::ticksNs() & 0x7FFFFFFF)));
     if (!casCatalog_.valid()) {
         casCatalog_ = std::async(std::launch::async, [packages = assets_.get()->skinCatalog()] { return ts2::scene::readOutfitCatalog(packages); })
                           .share();
@@ -328,6 +330,11 @@ std::optional<std::size_t> Game::buildCasLook(const ts2::scene::MadeLook& made, 
     using namespace ts2::scene;
     auto& assets = *assets_.get();
     SimLook look = madeSimLook(assets, casCatalog_.get(), made, category);
+    // A test: the Sim drawn from a character file instead, as a saved Sim is.
+    const bool fromFile = !options_.casShowCharacter.empty() && !hairOnly && x == 0;
+    if (fromFile) {
+        look = simLook(assets, options_.casShowCharacter, category);
+    }
     for (const auto& problem : look.problems) {
         ts2::diag::warnOnce("create-a-sim: " + problem);
     }
@@ -351,6 +358,9 @@ std::optional<std::size_t> Game::buildCasLook(const ts2::scene::MadeLook& made, 
         renderer_.setInstance(hood_.scene, i);
         setHoodHidden(i, true);  // drawn only into pictures
     }
+    if (fromFile) {
+        assets.useCharacterFile({});  // its own resources are read by now
+    }
     return hood_.scene.actors.size() - 1;
 }
 
@@ -364,6 +374,16 @@ void Game::buildCasSim() {
             OutfitRandom random(sim.seed);
             casMade_ = makeLook(NewCharacter{sim.age, sim.gender, sim.skin}, {}, casCatalog_.get(), random);
             recolourHair(*casMade_, sim.hairColour);
+        }
+        // A test: the Sim's character file written each time it is built, as Accept Family will write it.
+        if (!options_.casWriteCharacter.empty()) {
+            std::vector<std::string> problems;
+            const CharacterFileSim file{options_.casWriteCharacter, 0x8E000000u | (sim.seed & 0x00FFFFFF), sim.firstName, cas_.familyName(), sim.bio};
+            writeCharacterFile(file.file, characterResources(*assets_.get(), casCatalog_.get(), *casMade_, file, problems));
+            for (const auto& problem : problems) {
+                ts2::diag::warning("create-a-sim: character file: " + problem);
+            }
+            ts2::diag::step("create-a-sim: wrote the Sim's character file " + ts2::diag::utf8(file.file));
         }
         const std::size_t firstInstance = hood_.scene.instances.size();
         const auto actor = buildCasLook(*casMade_, cas_.step() == CasScreen::Step::Clothing ? sim.category : kEveryday, false);

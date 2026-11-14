@@ -380,6 +380,7 @@ add_library(ts2scene
     src/scene/face_blend.cpp
     src/scene/newborn_face.cpp
     src/scene/sims.cpp
+    src/scene/character_file.cpp
     src/scene/outfit_catalog.cpp
     src/scene/age_data.cpp
     src/scene/texture_blend.cpp

@@ -4,6 +4,7 @@
 #include "content/animation_lists.hpp"
 #include "diag/log.hpp"
 #include "formats/dbpf.hpp"
+#include "formats/hash.hpp"
 #include "formats/objd.hpp"
 #include "formats/propset.hpp"
 #include "formats/reference_list.hpp"
@@ -517,6 +518,43 @@ SimLook madeSimLook(Assets& assets, const OutfitCatalog& catalog, const MadeLook
         }
     }
     return look;
+}
+
+MadeFace madeFace(Assets& assets, const OutfitCatalog& catalog, const MadeLook& made, std::uint32_t age, std::vector<std::string>& problems) {
+    constexpr std::uint32_t kMeshOverlay = 0x0C1FE246;
+    MadeFace face;
+    const std::uint32_t gender = number(made.data.properties, "gender");
+    if (!made.faceFamily.empty()) {
+        if (auto edit = faceTemplateEdit(assets, catalog, made.faceFamily, age == kYoungAdultAge ? kAdultAge : age, gender, problems)) {
+            face.edit = std::make_shared<const MeshEdit>(std::move(*edit));
+        }
+    }
+    std::vector<std::pair<std::uint32_t, MadeFace::Overlay>> layers;
+    for (const auto& key : made.faceOverlays) {
+        const auto bytes = key.type == kMeshOverlay ? std::nullopt : assets.skinResource(key);
+        if (!bytes) {
+            continue;
+        }
+        try {
+            const auto p = propset::parse(*bytes);
+            MadeFace::Overlay overlay{text(p, "family"), overlayTexture(assets, key, p)};
+            if (!overlay.texture.empty()) {
+                layers.emplace_back(number(p, "layer"), std::move(overlay));
+            }
+        } catch (const std::exception& ex) {
+            problems.push_back(std::string("a face overlay can't be read: ") + ex.what());
+        }
+    }
+    std::stable_sort(layers.begin(), layers.end(), [](const auto& x, const auto& y) { return x.first < y.first; });
+    for (auto& [layer, overlay] : layers) {
+        face.overlays.push_back(std::move(overlay));
+    }
+    return face;
+}
+
+sg::Link defaultSkeletonKey(std::uint32_t age) {
+    const auto key = hash::scenegraphKey(defaultSkeleton(age) + "_cres");
+    return {kCres, sg::kScenegraphGroup, key.instance, key.instanceHigh};
 }
 
 std::string skinUnderClothes(const SimLook& look, bool separates) {

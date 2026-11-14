@@ -97,6 +97,23 @@ SimLook newbornLook(Assets& assets, const BabyCatalog& catalog, const Newborn& b
 // (facial hair, glasses) aren't drawn yet.
 SimLook madeSimLook(Assets& assets, const OutfitCatalog& catalog, const MadeLook& made, std::uint32_t category);
 
+// What a made Sim's own face is made of, as its character file keeps it: its face template's change
+// to the base face (none for the plain face), and its overlays (eyes, eyebrows; mesh overlays left
+// out) in the order drawn, each with its part's family and its texture.
+struct MadeFace {
+    std::shared_ptr<const MeshEdit> edit;
+    struct Overlay {
+        std::string family, texture;
+    };
+    std::vector<Overlay> overlays;
+};
+// `age` (an age flag) is the age the face is changed for: the Sim's own, or a later one (its
+// face template has a face for each age).
+MadeFace madeFace(Assets& assets, const OutfitCatalog& catalog, const MadeLook& made, std::uint32_t age, std::vector<std::string>& problems);
+
+// The skeleton (its resource node) the game gives a Sim of this age flag when its age data names none.
+scenegraph::Link defaultSkeletonKey(std::uint32_t age);
+
 // Whether a Sim wears only the last entry of an outfit's list of this part (kHairPart...). A Sim
 // wears one hair, top, bottom and body each, so the game takes the last of those (a PlantSim's
 // everyday hair list holds its old hair, then the leaf crown). Faces and accessories keep every entry.

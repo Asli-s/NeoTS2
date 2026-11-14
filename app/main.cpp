@@ -1,7 +1,7 @@
 // NeoTS2: opens a saved lot in a window, or shows the game's main menu.
 //   neots2 <install folder> --menu [--user <user folder>] [--size w h | --fit-screen] [--preview n]
 //          [--play n [--bin families|lots|decorations|story|cas|options|gameoptions|chooser|quit] [--save-neighborhood] [--record-seconds s] [--type text] [--lot id] [--click x y] [--card x y]]
-//          [--hover x y (on the neighborhood, or the lot before the picture)] [--ui-click x y | --ui-right-click x y | --ui-hover x y | --ui-type text
+//          [--hover x y (on the neighborhood, or the lot before the picture)] [--ui-click x y | --ui-right-click x y | --ui-hover x y | --ui-type text | --cas-write-character file | --cas-show-character file
 //          (on the lot's panels before the picture, repeatable)]
 //          [--shot <out.png>] [--seed n (the neighborhood ground's variants, so pictures repeat)]
 //          [--renderer sdlgpu|gl2 (what draws: SDL's GPU API, or OpenGL 2.1)]
@@ -390,6 +390,10 @@ int main(int argc, char** argv) {
             } else if (arg == "--ground-click" && i + 3 < argc) {
                 menu.groundClick = std::array<int, 3>{std::stoi(argv[i + 1]), std::stoi(argv[i + 2]), std::stoi(argv[i + 3])};
                 i += 3;
+            } else if (arg == "--cas-write-character" && i + 1 < argc) {
+                menu.casWriteCharacter = utf8Path(argv[++i]);
+            } else if (arg == "--cas-show-character" && i + 1 < argc) {
+                menu.casShowCharacter = utf8Path(argv[++i]);
             } else if (arg == "--ui-type" && i + 1 < argc) {
                 menu.uiClicks.push_back({static_cast<int>(menu.uiTypes.size()), 0, 3});
                 menu.uiTypes.emplace_back(argv[++i]);

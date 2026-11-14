@@ -25,6 +25,16 @@ struct AgeData {
 // into. The standard lists are read ("listcntStd", or the older "listcnt").
 AgeData readAgeData(const std::map<std::string, std::string>& file, const std::vector<scenegraph::Link>& references);
 
+// Age data as a character file keeps it, as the game writes a Sim's: its property set (the text form,
+// each property typed as the game types it, those the data lacks as the game's files have them) and
+// its resource list. The list starts with `leading` (a Sim's own face resource node and an empty
+// entry), then the skeleton, then each part listed, once each, in the order the lists first name it.
+// readAgeData reads it back the same.
+struct WrittenAgeData {
+    std::vector<std::uint8_t> properties, references;
+};
+WrittenAgeData writeAgeData(const AgeData& data, const std::vector<scenegraph::Link>& leading);
+
 // The part property sets in a character file (the Sim's own faces and parts), in the file's order.
 std::vector<CatalogPart> characterParts(const std::filesystem::path& characterFile);
 

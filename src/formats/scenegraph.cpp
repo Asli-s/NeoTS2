@@ -1,12 +1,15 @@
 #include "formats/scenegraph.hpp"
 
 #include "formats/binary_reader.hpp"
+#include "formats/binary_writer.hpp"
 #include "formats/tga.hpp"
 
 #include <algorithm>
 #include <bit>
+#include <set>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace ts2::scenegraph {
 
@@ -14,7 +17,7 @@ namespace {
 
 constexpr std::uint32_t kMaxCount = 1u << 20;
 
-void fail(const std::string& what) {
+[[noreturn]] void fail(const std::string& what) {
     throw std::runtime_error("scenegraph: " + what);
 }
 
@@ -370,7 +373,9 @@ Mesh parseMesh(std::span<const std::uint8_t> data) {
         e.stream = r.u32();
         e.blockFormat = r.u32();
         e.setFormat = r.u32();
-        const auto bytes = r.bytes(r.u32Count(1));
+        const std::size_t size = r.u32Count(1);
+        e.dataOffset = r.position();
+        const auto bytes = r.bytes(size);
         e.data.assign(bytes.begin(), bytes.end());
         indexList(skipped);
     }
@@ -501,10 +506,143 @@ Shape parseShape(std::span<const std::uint8_t> data) {
     return s;
 }
 
+std::vector<std::uint8_t> encodeMaterial(const Material& m) {
+    constexpr std::uint32_t kMaterialType = 0x49596978;
+    BinaryWriter w;
+    if (!m.container.empty()) {
+        w.bytes(m.container);
+    } else {
+        // A container with no links and one block, the material.
+        w.u32(0xFFFF0001);
+        w.u32(0);
+        w.u32(1);
+        w.u32(kMaterialType);
+    }
+    w.varString("cMaterialDefinition");
+    w.u32(kMaterialType);
+    const std::uint32_t version = m.version != 0 ? m.version : 11;
+    w.u32(version);
+    w.varString("cSGResource");
+    w.u32(0);
+    w.u32(2);
+    w.varString(m.name);
+    w.varString(m.description);
+    w.varString(m.type);
+    w.u32(static_cast<std::uint32_t>(m.properties.size()));
+    std::set<std::string> named(m.order.begin(), m.order.end());
+    const bool inOrder = m.order.size() == m.properties.size() && named.size() == m.order.size() &&
+                         std::all_of(m.order.begin(), m.order.end(), [&](const std::string& k) { return m.properties.contains(k); });
+    if (inOrder) {
+        for (const auto& key : m.order) {
+            w.varString(key);
+            w.varString(m.properties.at(key));
+        }
+    } else {
+        for (const auto& [key, value] : m.properties) {
+            w.varString(key);
+            w.varString(value);
+        }
+    }
+    if (version > 8) {
+        w.u32(static_cast<std::uint32_t>(m.textures.size()));
+        for (const auto& t : m.textures) {
+            w.varString(t);
+        }
+    }
+    w.bytes(m.tail);
+    return w.take();
+}
+
+namespace {
+
+// Bytes of a length in 7-bit groups and where its text starts, at `at`.
+std::pair<std::size_t, std::size_t> nameAt(std::span<const std::uint8_t> data, std::size_t at) {
+    std::size_t length = 0;
+    for (int shift = 0; at < data.size(); shift += 7) {
+        if (shift > 28) {
+            fail("a name's length is too long");
+        }
+        const std::uint8_t b = data[at++];
+        length |= static_cast<std::size_t>(b & 0x7F) << shift;
+        if ((b & 0x80) == 0) {
+            return {length, at};
+        }
+    }
+    fail("a name runs past the data");
+}
+
+std::vector<std::uint8_t> lengthAndText(std::string_view text) {
+    BinaryWriter w;
+    w.varString(text);
+    return w.take();
+}
+
+} // namespace
+
+void renameResource(std::vector<std::uint8_t>& data, std::string_view name) {
+    static constexpr std::string_view kBlock = "\x0B" "cSGResource";
+    const auto it = std::search(data.begin(), data.end(), kBlock.begin(), kBlock.end());
+    if (it == data.end()) {
+        fail("no cSGResource block to rename");
+    }
+    // The block's name, its id and version, then the resource's name.
+    const std::size_t at = static_cast<std::size_t>(it - data.begin()) + kBlock.size() + 8;
+    const auto [length, text] = nameAt(data, at);
+    if (text + length > data.size()) {
+        fail("the resource's name runs past the data");
+    }
+    const auto replacement = lengthAndText(name);
+    data.erase(data.begin() + static_cast<std::ptrdiff_t>(at), data.begin() + static_cast<std::ptrdiff_t>(text + length));
+    data.insert(data.begin() + static_cast<std::ptrdiff_t>(at), replacement.begin(), replacement.end());
+}
+
+std::size_t replaceName(std::vector<std::uint8_t>& data, std::string_view from, std::string_view to) {
+    const auto needle = lengthAndText(from);
+    const auto replacement = lengthAndText(to);
+    std::size_t changed = 0;
+    for (auto it = std::search(data.begin(), data.end(), needle.begin(), needle.end()); it != data.end();
+         it = std::search(it, data.end(), needle.begin(), needle.end())) {
+        const auto at = it - data.begin();
+        data.erase(it, it + static_cast<std::ptrdiff_t>(needle.size()));
+        data.insert(data.begin() + at, replacement.begin(), replacement.end());
+        it = data.begin() + at + static_cast<std::ptrdiff_t>(replacement.size());
+        ++changed;
+    }
+    return changed;
+}
+
+void setContainerLink(std::vector<std::uint8_t>& data, std::size_t index, const Link& link) {
+    BinaryReader r(data);
+    std::uint32_t links = r.u32();
+    const bool withHigh = (links & 0xFFFF0000) == 0xFFFF0000;
+    if (withHigh) {
+        links = r.u32();
+    }
+    if (index >= links) {
+        fail("no such link");
+    }
+    if (!withHigh && link.instanceHigh != 0) {
+        fail("the container has no high instances");
+    }
+    std::size_t at = r.position() + index * (withHigh ? 16 : 12);
+    auto put = [&](std::uint32_t v) {
+        for (int i = 0; i < 4; ++i) {
+            data[at++] = static_cast<std::uint8_t>(v >> (8 * i));
+        }
+    };
+    put(link.group);
+    put(link.instance);
+    if (withHigh) {
+        put(link.instanceHigh);
+    }
+    put(link.type);
+}
+
 Material parseMaterial(std::span<const std::uint8_t> data) {
     BinaryReader r(data);
     Material m;
     readContainer(r);
+    m.container.assign(data.begin(), data.begin() + static_cast<std::ptrdiff_t>(r.position()));
     m.version = blockHeader(r, "cMaterialDefinition").version;
     m.name = sgResource(r);
     m.description = r.varString();
@@ -512,6 +650,7 @@ Material parseMaterial(std::span<const std::uint8_t> data) {
     const std::size_t properties = count(r, 2);
     for (std::size_t i = 0; i < properties; ++i) {
         std::string key = r.varString();
+        m.order.push_back(key);
         m.properties[std::move(key)] = r.varString();
     }
     if (m.version > 8 && r.remaining() >= 4) {
@@ -520,6 +659,8 @@ Material parseMaterial(std::span<const std::uint8_t> data) {
             m.textures.push_back(r.varString());
         }
     }
+    const auto tail = r.bytes(r.remaining());
+    m.tail.assign(tail.begin(), tail.end());
     return m;
 }
 

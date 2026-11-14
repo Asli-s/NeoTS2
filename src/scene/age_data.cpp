@@ -2,10 +2,12 @@
 
 #include "content/resource_index.hpp"
 #include "formats/propset.hpp"
+#include "formats/reference_list.hpp"
 
 #include <algorithm>
 #include <cstdint>
 #include <initializer_list>
+#include <set>
 #include <tuple>
 
 namespace ts2::scene {
@@ -854,6 +856,70 @@ AgeData readAgeData(const std::map<std::string, std::string>& file, const std::v
         data.skeleton = references[s];
     }
     return data;
+}
+
+WrittenAgeData writeAgeData(const AgeData& data, const std::vector<sg::Link>& leading) {
+    constexpr const char* kUint = "0xeb61e4f7";
+    constexpr const char* kString = "0x0b8bea18";
+    constexpr const char* kFloat = "0xabc78708";
+    // The properties every Sim's age data has, with the values the game's files give them when
+    // the data has none.
+    static const std::map<std::string, std::string> kDefaults = {
+        {"activecat", "1"}, {"creatorid", "00000000-0000-0000-0000-000000000000"}, {"fitness", "0"}, {"species", "1"},
+        {"stretch", "1"},   {"validparts", "65535"},
+    };
+    std::map<std::string, std::string> properties = kDefaults;
+    for (const auto& [name, value] : data.properties) {
+        if (!isList(name) && name != "skeletonkeyidx") {
+            properties[name] = value;
+        }
+    }
+    std::vector<sg::Link> references = leading;
+    auto indexOf = [&](const sg::Link& link) {
+        for (std::size_t i = 0; i < references.size(); ++i) {
+            const auto& r = references[i];
+            if (r.type == link.type && r.group == link.group && r.instance == link.instance && r.instanceHigh == link.instanceHigh) {
+                return i;
+            }
+        }
+        references.push_back(link);
+        return references.size() - 1;
+    };
+    if (data.skeleton) {
+        references.push_back(*data.skeleton);
+        properties["skeletonkeyidx"] = std::to_string(references.size() - 1);
+    }
+    std::size_t list = 0;
+    for (const auto& [key, entries] : data.lists) {
+        const std::string i = std::to_string(list++);
+        properties["lk" + i] = std::to_string(key);
+        properties["ls" + i] = std::to_string(entries.size());
+        for (std::size_t j = 0; j < entries.size(); ++j) {
+            properties["le" + i + "_" + std::to_string(j)] = std::to_string(indexOf(entries[j]));
+        }
+    }
+    properties["listcnt"] = std::to_string(list);
+    // Typed as the game types them: numbers (the outfit category, age, gender, list counts and
+    // entries), the stretch a float, the rest (colours, list keys and sizes) strings.
+    static const std::set<std::string> kNumbers = {"activecat", "age", "fitness", "gender", "listcnt", "skeletonkeyidx", "species", "validparts"};
+    std::vector<propset::TextProperty> typed;
+    for (const auto& [name, value] : properties) {
+        propset::TextProperty p;
+        p.key = name;
+        p.value = value;
+        if (kNumbers.contains(name) || name.starts_with("le")) {
+            p.element = "AnyUint32";
+            p.type = kUint;
+        } else if (name == "stretch") {
+            p.element = "AnyFloat32";
+            p.type = kFloat;
+        } else {
+            p.element = "AnyString";
+            p.type = kString;
+        }
+        typed.push_back(std::move(p));
+    }
+    return {propset::encodeText(typed), reflist::encode(references)};
 }
 
 std::vector<CatalogPart> characterParts(const std::filesystem::path& characterFile) {

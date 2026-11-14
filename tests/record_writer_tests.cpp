@@ -1,5 +1,6 @@
-// The family and Sim records NeoTS2 writes (for Create-a-Sim's Accept Family): each written as the
-// game writes it, read back the same, and records read from bytes written back byte for byte.
+// The family and Sim records NeoTS2 writes (for Create-a-Sim's Accept Family), and the pieces of a
+// Sim's character file: each written as the game writes it, read back the same, and records read
+// from bytes written back byte for byte.
 #include "test_support.hpp"
 
 #include "formats/binary_writer.hpp"
@@ -7,12 +8,15 @@
 #include "formats/famt.hpp"
 #include "formats/ngbh.hpp"
 #include "formats/propset.hpp"
+#include "formats/reference_list.hpp"
+#include "formats/scenegraph.hpp"
 #include "formats/record_roundtrip.hpp"
 #include "formats/resource_types.hpp"
 #include "formats/sdsc.hpp"
 #include "formats/srel.hpp"
 #include "formats/str.hpp"
 #include "formats/swaf.hpp"
+#include "scene/age_data.hpp"
 
 namespace {
 
@@ -206,7 +210,7 @@ void simDnaIsWrittenBack() {
 }
 
 void roundTripCheckRewritesTheRecordTypes() {
-    CHECK(ts2::roundtrip::kinds().size() == 8);
+    CHECK(ts2::roundtrip::kinds().size() == 9);
     ts2::srel::Relationship rel;
     rel.version = 3;
     rel.values = {1};
@@ -214,6 +218,105 @@ void roundTripCheckRewritesTheRecordTypes() {
     const auto again = ts2::roundtrip::rewrite(ts2::types::kSimRelationship, bytes);
     CHECK(again && *again == bytes);
     CHECK(!ts2::roundtrip::rewrite(0x12345678, bytes));
+}
+
+void referenceListsAreWrittenBack() {
+    const std::vector<ts2::scenegraph::Link> links = {{0xE519C933, 0xFFFFFFFF, 0xFFDF89DF, 0xFCB631C9}, {}, {0xEBCF3E27, 0x2C17B74A, 0x2C204CEF, 0}};
+    const auto bytes = ts2::reflist::encode(links);
+    CHECK(bytes.size() == 12 + 3 * 16);
+    const auto again = ts2::reflist::parse(bytes);
+    CHECK(again.size() == 3 && again[0].instanceHigh == 0xFCB631C9 && again[2].instance == 0x2C204CEF && again[1].type == 0);
+}
+
+void ageDataIsWrittenAsTheGameWritesIt() {
+    using ts2::scenegraph::Link;
+    ts2::scene::AgeData data;
+    data.properties = {{"age", "8"}, {"gender", "2"}, {"haircolor", "00000002-0000-0000-0000-000000000000"}, {"stretch", "1"}};
+    const Link hair{0xEBCF3E27, 0x2C17B74A, 0x11, 0}, face{0xEBCF3E27, 0xFFFFFFFF, 1, 0}, top{0xEBCF3E27, 0x2C17B74A, 0x22, 0};
+    data.lists[1u << 16 | 1] = {hair};
+    data.lists[1u << 16 | 2] = {face};
+    data.lists[8u << 16 | 1] = {hair};
+    data.lists[8u << 16 | 4] = {top};
+    data.skeleton = Link{0xE519C933, 0x1C0532FA, 0xFF6B8A91, 0x3CC1ADAA};
+    const Link ownNode{0xE519C933, 0xFFFFFFFF, 0xFFDF89DF, 0xFCB631C9};
+    const auto written = ts2::scene::writeAgeData(data, {ownNode, Link{}});
+    const auto refs = ts2::reflist::parse(written.references);
+    // The leading entries, the skeleton, then each part once, in the order first named.
+    CHECK(refs.size() == 6 && refs[0].instance == 0xFFDF89DF && refs[2].instance == 0xFF6B8A91 && refs[3].instance == 0x11 &&
+          refs[4].instance == 1 && refs[5].instance == 0x22);
+    const std::string text(written.properties.begin(), written.properties.end());
+    CHECK(text.find("<AnyUint32 key=\"le0_0\" type=\"0xeb61e4f7\">3</AnyUint32>") != std::string::npos);
+    CHECK(text.find("<AnyString key=\"lk1\" type=\"0x0b8bea18\">65538</AnyString>") != std::string::npos);
+    CHECK(text.find("<AnyFloat32 key=\"stretch\" type=\"0xabc78708\">1</AnyFloat32>") != std::string::npos);
+    CHECK(text.find("<AnyString key=\"creatorid\" type=\"0x0b8bea18\">00000000-0000-0000-0000-000000000000</AnyString>") != std::string::npos);
+    CHECK(text.find("key=\"skeletonkeyidx\" type=\"0xeb61e4f7\">2<") != std::string::npos);
+    const auto again = ts2::scene::readAgeData(ts2::propset::parse(written.properties), refs);
+    CHECK(again.lists.size() == 4 && again.lists.at(8u << 16 | 4).front().instance == 0x22 && again.skeleton &&
+          again.skeleton->instance == 0xFF6B8A91);
+    CHECK(again.properties.at("age") == "8" && again.properties.at("validparts") == "65535");
+}
+
+void copiedResourcesAreRenamedAndRelinked() {
+    namespace sg = ts2::scenegraph;
+    sg::Material m;
+    m.name = "amface_s2_txmt";
+    m.description = "amface_s2";
+    m.type = "SimStandardMaterial";
+    m.properties = {{"stdMatBaseTextureName", "amface-s2"}, {"reflectivity", "0"}};
+    m.textures = {"amface-s2"};
+    auto bytes = sg::encodeMaterial(m);
+    const auto read = sg::parseMaterial(bytes);
+    CHECK(read.version == 11 && read.name == "amface_s2_txmt" && read.order.front() == "reflectivity" && read.textures.size() == 1);
+    CHECK(sg::encodeMaterial(read) == bytes);
+    sg::renameResource(bytes, "#0x7fdda187!ss_customFace_0xe0a714f_3_0_cmpm_txmt");
+    CHECK(sg::replaceName(bytes, "amface-s2", "uuface-eye-gray") == 2);
+    const auto renamed = sg::parseMaterial(bytes);
+    CHECK(renamed.name == "#0x7fdda187!ss_customFace_0xe0a714f_3_0_cmpm_txmt" && renamed.properties.at("stdMatBaseTextureName") == "uuface-eye-gray");
+    CHECK(renamed.textures.front() == "uuface-eye-gray" && renamed.description == "amface_s2");
+    // A link of a container with high instances made another.
+    ts2::BinaryWriter w;
+    for (const std::uint32_t v : {0xFFFF0001u, 1u, 0x1C0532FAu, 0xFF5451A3u, 0xA9573D6Au, 0xFC6EB1F7u, 0u}) {
+        w.u32(v);
+    }
+    auto node = w.take();
+    sg::setContainerLink(node, 0, {0xFC6EB1F7, 0xFFFFFFFF, 0xFFF14C45, 0xD6E9E5B3});
+    const auto links = sg::parseContainer(node).links;
+    CHECK(links.size() == 1 && links[0].group == 0xFFFFFFFF && links[0].instance == 0xFFF14C45 && links[0].instanceHigh == 0xD6E9E5B3);
+    bool threw = false;
+    try {
+        sg::setContainerLink(node, 1, {});
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
+void oldMaterialsAreWrittenBackAsTheyWere() {
+    namespace sg = ts2::scenegraph;
+    // An older material: a links header without high instances, version 10, keys out of order.
+    ts2::BinaryWriter w;
+    for (const std::uint32_t v : {0u, 1u, 0x49596978u}) {
+        w.u32(v);
+    }
+    w.varString("cMaterialDefinition");
+    w.u32(0x49596978);
+    w.u32(10);
+    w.varString("cSGResource");
+    w.u32(0);
+    w.u32(2);
+    w.varString("old_txmt");
+    w.varString("old");
+    w.varString("StandardMaterial");
+    w.u32(2);
+    for (const char* s : {"zKey", "1", "aKey", "2"}) {
+        w.varString(s);
+    }
+    w.u32(1);
+    w.varString("oldtexture");
+    const auto bytes = w.take();
+    const auto m = sg::parseMaterial(bytes);
+    CHECK(m.version == 10 && m.order.size() == 2 && m.order[0] == "zKey");
+    CHECK(sg::encodeMaterial(m) == bytes);
 }
 
 } // namespace
@@ -228,5 +331,9 @@ std::vector<Test> recordWriterTests() {
         {"the neighborhood record is written back with every inventory", neighborhoodRecordIsWrittenBack},
         {"Sim DNA is written back as the neighborhood keeps it", simDnaIsWrittenBack},
         {"the round-trip check rewrites the family record types", roundTripCheckRewritesTheRecordTypes},
+        {"reference lists are written back", referenceListsAreWrittenBack},
+        {"age data is written as the game writes a Sim's", ageDataIsWrittenAsTheGameWritesIt},
+        {"copied scenegraph resources are renamed and relinked", copiedResourcesAreRenamedAndRelinked},
+        {"older materials are written back as they were", oldMaterialsAreWrittenBackAsTheyWere},
     };
 }

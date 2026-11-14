@@ -5,6 +5,7 @@
 #include "formats/ngbh.hpp"
 #include "formats/propset.hpp"
 #include "formats/resource_types.hpp"
+#include "formats/scenegraph.hpp"
 #include "formats/sdsc.hpp"
 #include "formats/srel.hpp"
 #include "formats/str.hpp"
@@ -19,6 +20,7 @@ namespace ts2::roundtrip {
 namespace {
 
 constexpr std::size_t kMostProblems = 20;
+constexpr std::uint32_t kMaterial = 0x49596978;  // TXMT
 
 std::string key(const dbpf::IndexEntry& e) {
     char text[64];
@@ -32,7 +34,7 @@ const std::map<std::uint32_t, std::string>& kinds() {
     static const std::map<std::uint32_t, std::string> names = {
         {types::kFamily, "FAMI"},         {types::kSimDescription, "SDSC"}, {types::kStringTable, "STR#"},
         {types::kSimRelationship, "SREL"}, {types::kFamilyTies, "FAMT"},     {types::kWantsAndFears, "SWAF"},
-        {types::kNeighborhoodRecord, "NGBH"}, {types::kSimDna, "SDNA"},
+        {types::kNeighborhoodRecord, "NGBH"}, {types::kSimDna, "SDNA"}, {kMaterial, "TXMT"},
     };
     return names;
 }
@@ -47,6 +49,7 @@ std::optional<std::vector<std::uint8_t>> rewrite(std::uint32_t type, std::span<c
     case types::kWantsAndFears: return swaf::encode(swaf::parse(data));
     case types::kNeighborhoodRecord: return ngbh::encode(ngbh::readRaw(data));
     case types::kSimDna: return propset::encodeText(propset::readText(data));
+    case kMaterial: return scenegraph::encodeMaterial(scenegraph::parseMaterial(data));
     default: return std::nullopt;
     }
 }

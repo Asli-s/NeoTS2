@@ -14,8 +14,8 @@ namespace ts2::roundtrip {
 
 // The records NeoTS2 writes for a family, each read and written again, so a writer can be checked
 // against what the game wrote: families (FAMI), Sim descriptions (SDSC), string tables (STR#),
-// relationships (SREL), family ties (FAMT), wants and fears (SWAF), the neighborhood record (NGBH)
-// and Sim DNA (SDNA).
+// relationships (SREL), family ties (FAMT), wants and fears (SWAF), the neighborhood record (NGBH),
+// Sim DNA (SDNA) and materials (TXMT, a Sim's own face material).
 
 // What a record of `type` reads and writes back as, or nullopt when it isn't one of those types.
 // Throws when the record can't be read.

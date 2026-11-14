@@ -479,6 +479,17 @@ std::vector<Image> Assets::textureFaces(const std::string& name) {
     return out;
 }
 
+std::vector<std::pair<sg::Link, std::vector<std::uint8_t>>> Assets::objectGroupResources(std::uint32_t group) {
+    std::vector<std::pair<sg::Link, std::vector<std::uint8_t>>> out;
+    for (const auto& r : objects_.resources()) {
+        const auto& k = r.entry.key;
+        if (k.group == group) {
+            out.emplace_back(sg::Link{k.type, k.group, k.instance, k.instanceHigh}, objects_.read(r));
+        }
+    }
+    return out;
+}
+
 void Assets::readObjectTypes() {
     if (objectTypesRead_) {
         return;

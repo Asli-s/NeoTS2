@@ -41,6 +41,7 @@ struct Element {
     std::uint32_t stream = 0;
     std::uint32_t count = 0;
     std::vector<std::uint8_t> data;
+    std::size_t dataOffset = 0;  // where the data starts in the resource read, for writing it back in place
 };
 constexpr std::uint32_t kPositions = 0x5B830781;
 constexpr std::uint32_t kNormals = 0x3B83078B;
@@ -133,6 +134,17 @@ Shape parseShape(std::span<const std::uint8_t> data);
 // Resource node (CRES) and geometry node (GMND): only their links are read.
 Container parseContainer(std::span<const std::uint8_t> data);
 
+// Changing a copy of a scenegraph resource (CRES, SHPE, GMND, GMDC, TXMT), as the game copies the
+// base face into a Sim's character file. Each throws when the resource isn't laid out as expected.
+// Its own name (its cSGResource block's), e.g. "#0x7fdda187!age3_0_gmdc".
+void renameResource(std::vector<std::uint8_t>& data, std::string_view name);
+// Every name `from` it holds (a length and the text) made `to`: how a shape names its geometry
+// nodes and materials. How many it changed.
+std::size_t replaceName(std::vector<std::uint8_t>& data, std::string_view from, std::string_view to);
+// Link `index` of its container made `link` (a link with a high instance needs a container that
+// has them).
+void setContainerLink(std::vector<std::uint8_t>& data, std::size_t index, const Link& link);
+
 // The node tree of a resource node (CRES): transform nodes (joints, slots, routing points), shape
 // references and light references, each with a local transform. Shapes are drawn and lights shine
 // at their reference's place in the tree (a light is known by its node's name). Nodes are indexed
@@ -191,8 +203,17 @@ struct Material {
     std::string type;  // e.g. "StandardMaterial"
     std::map<std::string, std::string> properties;
     std::vector<std::string> textures;
+    // For writing it back as it was: its links header as read (empty: none, as the game writes a
+    // Sim's face material) and the bytes after its last value.
+    std::vector<std::uint8_t> container, tail;
+    // The properties' keys in the order read (the game's own are in key order; some older ones aren't).
+    // Written in that order when it names each property once, else in key order.
+    std::vector<std::string> order;
 };
 Material parseMaterial(std::span<const std::uint8_t> data);
+// The material as the game writes one: its links header (a new one's: none, one block), version
+// (11 for a new one), its properties in key order, then its textures (from version 9).
+std::vector<std::uint8_t> encodeMaterial(const Material& material);
 
 // Texture (TXTR, cImageData): mip levels from the smallest, each either inline or the name of a
 // large mip level resource (LIFO).
