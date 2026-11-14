@@ -3449,7 +3449,7 @@ std::optional<T> Game::finished(std::future<T>& job, const char* what) {
 // asked for. False while it waits for the Sims or for the lot to play on.
 bool Game::takePicture() {
     // Create-a-Sim's Sim is built and drawn before the picture.
-    if (cas_.isOpen() && (casRebuild_ || casRedraw_)) {
+    if (cas_.isOpen() && (casRebuild_ || casRedraw_ || casListChoices_ || casPicturesPending())) {
         updateCas();
         return false;
     }
@@ -3473,8 +3473,14 @@ bool Game::takePicture() {
     }
     // In the neighborhood the clicks go to its panels, as a player's would.
     if (inNeighborhood_ && !inLot_ && !options_.uiClicks.empty() && !uiClicked_) {
-        uiClicked_ = true;
-        for (const auto& [wx, wy, kind] : options_.uiClicks) {
+        // One click at a time while Create-a-Sim is busy with the last one (its Sim or its choices),
+        // so a click can reach what the last one brought up.
+        while (uiClickNext_ < options_.uiClicks.size()) {
+            if (cas_.isOpen() && (casRebuild_ || casRedraw_ || casListChoices_ || casPicturesPending())) {
+                updateCas();
+                return false;
+            }
+            const auto [wx, wy, kind] = options_.uiClicks[uiClickNext_++];
             const auto [cx, cy] = toUi(static_cast<float>(wx), static_cast<float>(wy));
             if (cas_.isOpen()) {
                 cas_.pointerDown(screen_.mouseWindow(cx, cy));
@@ -3491,6 +3497,7 @@ bool Game::takePicture() {
                 windowClicked(*clicked);
             }
         }
+        uiClicked_ = true;
         if (cas_.isOpen() && cas_.editing() && !options_.type.empty()) {
             cas_.typed(options_.type);
         }
@@ -3503,7 +3510,7 @@ bool Game::takePicture() {
         }
         showSprites(static_cast<double>(ts2::platform::ticksNs()) / 1e9, true);
     }
-    if (cas_.isOpen() && (casRebuild_ || casRedraw_)) {
+    if (cas_.isOpen() && (casRebuild_ || casRedraw_ || casListChoices_ || casPicturesPending())) {
         return false;  // the clicks changed the Sim: it is drawn again first
     }
     // A neighborhood being built again (a new Water) is waited for.

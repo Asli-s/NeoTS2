@@ -26,6 +26,7 @@
 #include "quit_box.hpp"
 #include "cas_screen.hpp"
 #include "scene/animation_library.hpp"
+#include "scene/age_data.hpp"
 #include "scene/outfit_catalog.hpp"
 #include "scene/sim_builder.hpp"
 #include "video_recorder.hpp"
@@ -350,6 +351,23 @@ private:
     std::vector<std::size_t> casInstances_;  // the Sim being made, in the neighborhood's scene
     std::optional<std::size_t> casActor_;
     bool casRebuild_ = false, casRedraw_ = false;
+    bool casCatalogReady() const;
+    // Whether choices on the page shown still want their pictures.
+    bool casPicturesPending() const;
+    // The Sim's hair in colour `colour` (1 to 4), each style kept.
+    void recolourHair(ts2::scene::MadeLook& made, int colour);
+    // The Sim wearing a choice of the step shown (a hair for every outfit, or clothes in the category).
+    void wearChoice(ts2::scene::MadeLook& made, const ts2::scenegraph::Link& choice);
+    void listCasChoices();
+    // A Sim in `made` built into the neighborhood's scene, hidden from it: its actor's index.
+    std::optional<std::size_t> buildCasLook(const ts2::scene::MadeLook& made, std::uint32_t category, bool hairOnly);
+    // A picture of the Sim `actorIndex` draws: its whole body turned `turnDegrees`, or its face.
+    std::optional<ts2::tga::Pixels> drawCasPicture(std::size_t actorIndex, int width, int height, bool face, float turnDegrees);
+    void drawCasChoice(std::size_t choice);
+    std::optional<ts2::scene::MadeLook> casMade_;     // the Sim being made, as its age data has it
+    std::vector<ts2::scenegraph::Link> casChoices_;   // the step's choices, as the screen lists them
+    std::map<std::string, ts2::tga::Pixels> casPictures_;  // choices' pictures, drawn once each
+    bool casListChoices_ = false;
     // Decorations: the neighborhood's Decorations catalog and its tools (game_decorations.cpp).
     // What the hand holds: a catalog entry to place, or one already placed, picked up with the Hand
     // Tool to move (or delete). It is drawn by `instance`, following the mouse over the ground.
@@ -945,6 +963,7 @@ private:
     bool windowShown_ = false;  // the window, made hidden, is shown after the first frame
     // A picture's clicks are made once, then the lot plays on for --run seconds.
     bool uiClicked_ = false;
+    std::size_t uiClickNext_ = 0;  // the next scripted click (--ui-click) in the neighborhood
     bool groundClicked_ = false;
     bool menuChoiceMade_ = false;  // the --choose menu choice is made
     bool lotHovered_ = false;
