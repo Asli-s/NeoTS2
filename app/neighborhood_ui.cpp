@@ -2,7 +2,9 @@
 
 #include "neighborhood.hpp"
 
+#include "content/install.hpp"
 #include "content/neighborhood.hpp"
+#include "content/nhood_catalog.hpp"
 #include "content/story_album.hpp"
 #include "content/ui_meters.hpp"
 #include "diag/log.hpp"
@@ -34,6 +36,14 @@ constexpr std::uint32_t kScripts = 0xA99D8A11;
 constexpr std::uint32_t kPanel = 0x49000000, kMainMenu = 0x00000002, kCityName = 0x00000003;
 constexpr std::uint32_t kPuck = 0x4be6ed7d, kTopBar = 0x4be6ed7e, kTopBarBackground = 0x00000001;
 constexpr std::uint32_t kPuckFamilies = 0x2be6f563, kPuckLots = 0x4be6f571, kPuckOptions = 0x2bf08bec;
+// The Decorations catalog (the puck's Decorations button, F3): its panel and strip holder, its
+// section buttons, and its tools.
+constexpr std::uint32_t kPuckDecorations = 0x2d51756d, kDecorationBin = 0x4D517180, kDecorationStripHolder = 0x2d51756d;
+constexpr std::pair<std::uint32_t, const char*> kDecorationSorts[] = {
+    {0x0000a100, "flora"}, {0x0000a200, "stone"}, {0x0000a300, "landmark"}, {0x0000a400, "effects"}, {0x0000a500, "misc"}};
+constexpr std::uint32_t kDecorationHand = 0x000000a5, kDecorationEyedropper = 0x000000a4, kDecorationUndo = 0x000000a1,
+                        kDecorationRedo = 0x000000a2;
+constexpr std::uint32_t kTileButton = 0x00000003;  // a strip tile's button
 // The puck's camera buttons in CameraButton's order, from the left Rotate.
 constexpr std::uint32_t kCameraButtons[] = {0x2be6fb52, 0x2be6fb57, 0x2be6fb48, 0x2be6fb4e};
 constexpr std::uint32_t kDayNight = 0x0fb31a16;
@@ -386,14 +396,37 @@ std::vector<NeighborhoodUi::StoryPage> storyPages(std::optional<std::int32_t> id
     return out;
 }
 
+// The Decorations catalog: the entries it offers, in guid order, each with its picture (none when
+// the catalog has no picture of it).
+std::vector<NeighborhoodUi::DecorationItem> decorationItems(const fs::path& install) {
+    std::vector<NeighborhoodUi::DecorationItem> out;
+    try {
+        const auto products = ts2::content::findProducts(install);
+        auto pictures = ts2::content::neighborhoodObjectThumbnails(products);
+        for (const auto& [guid, type] : ts2::content::neighborhoodObjectTypes(products)) {
+            if (!type.shownInCatalog || type.model.empty() || type.sort.empty()) {
+                continue;
+            }
+            NeighborhoodUi::DecorationItem item{guid, type.sort, {}};
+            if (const auto p = pictures.find(guid); p != pictures.end()) {
+                item.picture = std::move(p->second);
+            }
+            out.push_back(std::move(item));
+        }
+    } catch (const std::exception& ex) {
+        ts2::diag::warnOnce(std::string("decorations: the catalog can't be read, so it is empty: ") + ex.what());
+    }
+    return out;
+}
+
 } // namespace
 
 NeighborhoodUi::NeighborhoodUi(ts2::ui::Screen& screen, ts2::content::UiData& data, int width, int height)
     : screen_(screen), data_(data), width_(width), height_(height) {}
 
-NeighborhoodUi::Content NeighborhoodUi::read(const fs::path& folder, const fs::path& user) {
+NeighborhoodUi::Content NeighborhoodUi::read(const fs::path& folder, const fs::path& user, const fs::path& install) {
     const auto id = readNeighborhoodId(folder);
-    return {homelessFamilies(folder), catalogLots(user), livedInLots(folder), lotCards(folder), storyPages(id, user), id};
+    return {homelessFamilies(folder), catalogLots(user), livedInLots(folder), lotCards(folder), storyPages(id, user), id, decorationItems(install)};
 }
 
 void NeighborhoodUi::open(const fs::path& folder, const std::string& name, Content content) {
@@ -473,6 +506,22 @@ void NeighborhoodUi::open(const fs::path& folder, const std::string& name, Conte
     }
     showLotView(LotView::Lots);
     screen_.setVisible(lots_, false);
+    // The Decorations catalog, opening on its plants. Undo and Redo aren't built yet (and the
+    // strip's Delete Custom Content stays greyed, as nothing in it is chosen).
+    decorations_ = screen_.load(kScripts, kDecorationBin, binX, binY);
+    if (decorations_ >= 0) {
+        chooseVersions(screen_, decorations_, folder);
+        const int holder = screen_.find(decorations_, kDecorationStripHolder);
+        decorationStrip_ = {screen_.find(holder, kStripRow), screen_.find(holder, kTallStrip)};
+        for (const std::uint32_t id : {kDecorationUndo, kDecorationRedo}) {
+            screen_.setEnabled(screen_.find(decorations_, id), false);
+        }
+        decorationItems_ = std::move(content.decorations);
+        showDecorationSort("flora");
+        screen_.setVisible(decorations_, false);
+    }
+    decorationTool_ = DecorationTool::None;
+    chosenDecoration_ = 0;
     // The lot card, loaded with the neighborhood and hidden until a lot is clicked.
     card_ = screen_.load(kScripts, kLotCard, 0, 0);
     for (const int c : screen_.children(card_)) {
@@ -557,7 +606,7 @@ void NeighborhoodUi::setSize(int width, int height) {
         return;
     }
     screen_.resize(panel_, width_, height_);
-    for (const int window : {puck_, families_, lots_, options_}) {
+    for (const int window : {puck_, families_, lots_, options_, decorations_}) {
         if (window >= 0) {
             screen_.move(window, screen_.x(window), screen_.y(window) + down);
         }
@@ -569,10 +618,16 @@ void NeighborhoodUi::close() {
     gameOptions_.remove();
     graphicsOptions_.remove();
     optionsMenu_.setMenu(-1);
-    for (const int w : {panel_, families_, lots_, card_, tag_, options_, story_}) {
+    for (const int w : {panel_, families_, lots_, card_, tag_, options_, story_, decorations_}) {
         screen_.remove(w);
     }
-    panel_ = families_ = lots_ = puck_ = card_ = tag_ = tagIcon_ = tagText_ = options_ = story_ = -1;
+    panel_ = families_ = lots_ = puck_ = card_ = tag_ = tagIcon_ = tagText_ = options_ = story_ = decorations_ = -1;
+    decorationStrip_ = {};
+    decorationItems_.clear();
+    decorationShown_.clear();
+    decorationPictures_.clear();
+    decorationTool_ = DecorationTool::None;
+    chosenDecoration_ = 0;
     storyPages_.clear();
     neighborhoodId_.reset();
     storyPage_ = 0;
@@ -590,6 +645,9 @@ void NeighborhoodUi::close() {
 // The puck shows one of its bins or its options at a time, as the game does: opening one closes
 // the other.
 void NeighborhoodUi::showBin(Bin bin) {
+    if (bin != Bin::Decorations && bin_ == Bin::Decorations) {
+        setDecorationTool(DecorationTool::None);
+    }
     bin_ = bin;
     if (bin != Bin::None) {
         showOptions(false);
@@ -597,6 +655,10 @@ void NeighborhoodUi::showBin(Bin bin) {
     }
     screen_.setVisible(families_, bin == Bin::Families);
     screen_.setVisible(lots_, bin == Bin::Lots);
+    if (decorations_ >= 0) {
+        screen_.setVisible(decorations_, bin == Bin::Decorations);
+    }
+    screen_.setChecked(screen_.find(puck_, kPuckDecorations), bin == Bin::Decorations);
     for (const int c : childrenWithId(screen_, puck_, kPuckFamilies)) {
         screen_.setChecked(c, bin == Bin::Families);
     }
@@ -640,9 +702,23 @@ NeighborhoodUi::Action NeighborhoodUi::clicked(int window) {
         showBin(bin_ == Bin::Families ? Bin::None : Bin::Families);
     } else if (screen_.parent(window) == puck_ && id == kPuckLots) {
         showBin(bin_ == Bin::Lots ? Bin::None : Bin::Lots);
+    } else if (screen_.parent(window) == puck_ && id == kPuckDecorations) {
+        showBin(bin_ == Bin::Decorations ? Bin::None : Bin::Decorations);
     } else if (stripClicked(familyStrip_, familyPictures_, window) || stripClicked(lotStrip_, lotPictures_, window) ||
-               stripClicked(specialtyStrip_, {}, window)) {
+               stripClicked(specialtyStrip_, {}, window) || stripClicked(decorationStrip_, decorationPictures_, window)) {
         // A strip's page turned, or the strip expanded or collapsed.
+    } else if (const auto item = stripItemAt(decorationStrip_, window); item && *item < decorationShown_.size()) {
+        setDecorationTool(DecorationTool::Place, decorationShown_[*item]);
+        return Action::DecorationTool;
+    } else if (decorations_ >= 0 && window == screen_.find(decorations_, kDecorationHand)) {
+        setDecorationTool(decorationTool_ == DecorationTool::Hand ? DecorationTool::None : DecorationTool::Hand);
+        return Action::DecorationTool;
+    } else if (decorations_ >= 0 && window == screen_.find(decorations_, kDecorationEyedropper)) {
+        setDecorationTool(decorationTool_ == DecorationTool::Eyedropper ? DecorationTool::None : DecorationTool::Eyedropper);
+        return Action::DecorationTool;
+    } else if (const auto sort = std::find_if(std::begin(kDecorationSorts), std::end(kDecorationSorts), [&](const auto& s) { return s.first == id; });
+               decorations_ >= 0 && sort != std::end(kDecorationSorts) && screen_.parent(screen_.parent(window)) == decorations_) {
+        showDecorationSort(sort->second);
     } else if (lots_ >= 0 && screen_.parent(window) == lots_ && id == kLotsButton) {
         showLotView(LotView::Lots);
     } else if (lots_ >= 0 && screen_.parent(window) == lots_ && id == kEmptyLotsButton) {
@@ -669,7 +745,7 @@ NeighborhoodUi::Action NeighborhoodUi::clicked(int window) {
 
 void NeighborhoodUi::hideAll(bool hide) {
     if (hide && hidden_.empty()) {
-        for (const int w : {panel_, families_, lots_, card_, tag_, options_, story_}) {
+        for (const int w : {panel_, families_, lots_, card_, tag_, options_, story_, decorations_}) {
             if (w >= 0) {
                 hidden_.emplace_back(w, screen_.visible(w));
                 screen_.setVisible(w, false);
@@ -704,6 +780,7 @@ void NeighborhoodUi::functionKey(int n) {
     switch (n) {
     case 1: showBin(bin_ == Bin::Families ? Bin::None : Bin::Families); break;
     case 2: showBin(bin_ == Bin::Lots ? Bin::None : Bin::Lots); break;
+    case 3: showBin(bin_ == Bin::Decorations ? Bin::None : Bin::Decorations); break;
     case 4: showStory(!storyShown()); break;
     case 5: showOptions(options_ >= 0 && !screen_.visible(options_)); break;
     default: break;
@@ -972,6 +1049,49 @@ void NeighborhoodUi::showEmptyLotSizes(bool beach) {
     screen_.setVisible(screen_.find(view, kStripRow), false);
     screen_.setChecked(screen_.find(view, kOrdinaryLotsButton), !beach);
     screen_.setChecked(screen_.find(view, kBeachLotsButton), beach);
+}
+
+void NeighborhoodUi::showDecorationSort(const std::string& sort) {
+    decorationSort_ = sort;
+    decorationShown_.clear();
+    decorationPictures_.clear();
+    for (const auto& item : decorationItems_) {
+        if (item.sort == sort) {
+            decorationShown_.push_back(item.guid);
+            decorationPictures_.push_back(item.picture);
+        }
+    }
+    for (const auto& [id, name] : kDecorationSorts) {
+        screen_.setChecked(screen_.find(decorations_, id), name == sort);
+    }
+    decorationStrip_.first = 0;
+    layoutStrip(decorationStrip_, decorationPictures_);
+}
+
+std::optional<std::size_t> NeighborhoodUi::stripItemAt(const Strip& strip, int window) const {
+    for (int w = window; w >= 0; w = screen_.parent(w)) {
+        const auto tile = std::find(strip.tiles.begin(), strip.tiles.end(), w);
+        if (tile != strip.tiles.end()) {
+            return strip.first + static_cast<std::size_t>(tile - strip.tiles.begin());
+        }
+    }
+    return std::nullopt;
+}
+
+void NeighborhoodUi::setDecorationTool(DecorationTool tool, std::uint32_t guid) {
+    decorationTool_ = tool;
+    chosenDecoration_ = tool == DecorationTool::Place ? guid : 0;
+    if (decorations_ < 0) {
+        return;
+    }
+    screen_.setChecked(screen_.find(decorations_, kDecorationHand), tool == DecorationTool::Hand);
+    screen_.setChecked(screen_.find(decorations_, kDecorationEyedropper), tool == DecorationTool::Eyedropper);
+    // The chosen entry's tile shows pressed while it is held.
+    for (std::size_t i = 0; i < decorationStrip_.tiles.size(); ++i) {
+        const std::size_t item = decorationStrip_.first + i;
+        screen_.setChecked(screen_.find(decorationStrip_.tiles[i], kTileButton),
+                           tool == DecorationTool::Place && item < decorationShown_.size() && decorationShown_[item] == guid);
+    }
 }
 
 bool NeighborhoodUi::stripClicked(Strip& strip, const std::vector<ts2::tga::Pixels>& pictures, int window) {

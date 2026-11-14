@@ -178,6 +178,10 @@ const std::vector<std::int16_t>& simsInView(const ts2::scene::Scene& scene, cons
     return seen;
 }
 
+} // namespace
+
+namespace app {
+
 // The direction of the camera's ray through a point of the screen (it starts at the eye).
 ts2::render::Vec3 screenRay(const ts2::render::Camera& c, int width, int height, float mx, float my) {
     using ts2::render::Vec3;
@@ -190,6 +194,12 @@ ts2::render::Vec3 screenRay(const ts2::render::Camera& c, int width, int height,
     const float nx = 2 * mx / static_cast<float>(width) - 1, ny = 1 - 2 * my / static_cast<float>(height);
     return {f[0] + s[0] * nx * tx + u[0] * ny * ty, f[1] + s[1] * nx * tx + u[1] * ny * ty, f[2] + s[2] * nx * tx + u[2] * ny * ty};
 }
+
+} // namespace app
+
+namespace {
+
+using app::screenRay;
 
 // The window pixel a point of the scene shows at, none behind the camera.
 std::optional<std::array<int, 2>> screenPixel(const ts2::render::Camera& c, int width, int height, const ts2::render::Vec3& point) {
@@ -684,7 +694,7 @@ std::future<Game::Built> Game::startNeighborhoodBuild(const std::filesystem::pat
                 ts2::diag::warning("the neighborhood camera won't drift: the effects file has no usable nhoodcam effect");
             }
         }
-        b.panel = app::NeighborhoodUi::read(folder, user);
+        b.panel = app::NeighborhoodUi::read(folder, user, install);
         b.gpu = renderer.prepare(b.scene);
         return b;
     });
@@ -713,11 +723,16 @@ void Game::showNeighborhood(Built built) {
     hoodFreeRig_ = std::move(hood_.freeRig);
     hoodSea_ = hood_.realisticSea;
     hoodPonds_ = hood_.realisticPonds;
+    heldDecoration_.reset();
+    hoodEdits_ = {};
+    hoodHidden_.clear();
     hoodUi_.open(openFolder_, openName_, std::move(hood_.panel));
     if (options_.bin == "families") {
         hoodUi_.showBin(app::NeighborhoodUi::Bin::Families);
     } else if (options_.bin == "lots") {
         hoodUi_.showBin(app::NeighborhoodUi::Bin::Lots);
+    } else if (options_.bin == "decorations") {
+        hoodUi_.showBin(app::NeighborhoodUi::Bin::Decorations);
     } else if (options_.bin == "story") {
         hoodUi_.showStory(true);
     } else if (options_.bin == "options") {
@@ -764,6 +779,7 @@ void Game::showNeighborhood(Built built) {
 // buttons, Close and Quit, in place of the start's Quit. The panels under it hide until it closes.
 // Picking a neighborhood there opens it as at the start, and from a lot it first leaves the lot.
 void Game::showChooser() {
+    saveDecorationsOnLeaving();
     endCameraDrag();
     screen_.setVisible(screen_.find(menu_, kBackdrop), false);
     screen_.setVisible(screen_.find(menu_, kStartButtons), false);
@@ -1287,6 +1303,7 @@ void Game::showLotCard(std::uint32_t lot) {
 
 // Builds a lot of the open neighborhood in the background. It shows once built.
 void Game::enterLot(std::uint32_t id) {
+    saveDecorationsOnLeaving();
     if (freeCam_ && hoodOrbitBefore_) {
         toggleFreeCamera();
     }
@@ -2822,6 +2839,7 @@ void Game::run() {
         if (inNeighborhood_) {
             if (!freeCam_) {
                 showLotTag();
+                updateHeldDecoration();
             }
             if (clickedLot_ != 0 && now - clickedAt_ > kDoubleClickNs) {
                 showLotCard(clickedLot_);
@@ -3146,15 +3164,17 @@ void Game::handleEvent(const pf::Event& e) {
             pieMenu_.close();
         }
     } else if (e.type == pf::Event::Type::KeyDown && !e.repeat && inNeighborhood_ && !neighborhoodCovered() && e.key == pf::Key::Q) {
-        openQuitBox();  // Q asks to quit in the neighborhood too
+        openQuitBox(hoodEdits_.changed());  // Q asks to quit in the neighborhood too, to save first when decorations changed
     } else if (e.type == pf::Event::Type::KeyDown && !e.repeat && inNeighborhood_ && !neighborhoodCovered() && e.key == pf::Key::C && !e.ctrl && !e.alt) {
         takeSnapshot();
     } else if (e.type == pf::Event::Type::KeyDown && !e.repeat && inNeighborhood_ && !neighborhoodCovered() && e.key == pf::Key::L) {
         toggleNight();
+    } else if (e.type == pf::Event::Type::KeyDown && inNeighborhood_ && !neighborhoodCovered() && decorationKey(e.key)) {
+        // What the Decorations hand holds: let go, deleted or turned.
     } else if (e.type == pf::Event::Type::KeyDown && !e.repeat && inNeighborhood_ && !neighborhoodCovered() &&
-               (e.key == pf::Key::F1 || e.key == pf::Key::F2 || e.key == pf::Key::F4 || e.key == pf::Key::F5)) {
-        // The puck's keys: F1 Families, F2 Lots & Houses, F4 Neighborhood Story, F5 Options.
-        hoodUi_.functionKey(e.key == pf::Key::F1 ? 1 : e.key == pf::Key::F2 ? 2 : e.key == pf::Key::F4 ? 4 : 5);
+               (e.key == pf::Key::F1 || e.key == pf::Key::F2 || e.key == pf::Key::F3 || e.key == pf::Key::F4 || e.key == pf::Key::F5)) {
+        // The puck's keys: F1 Families, F2 Lots & Houses, F3 Decorations, F4 Neighborhood Story, F5 Options.
+        hoodUi_.functionKey(e.key == pf::Key::F1 ? 1 : e.key == pf::Key::F2 ? 2 : e.key == pf::Key::F3 ? 3 : e.key == pf::Key::F4 ? 4 : 5);
     } else if (e.type == pf::Event::Type::KeyDown && inNeighborhood_ && !neighborhoodCovered() &&
                (key == pf::Key::Comma || key == pf::Key::Period || key == pf::Key::Z || key == pf::Key::X) && !dialogOpen()) {
         // The neighborhood camera's turn and zoom keys work as the lot camera's.
@@ -3205,7 +3225,9 @@ void Game::mouseEvent(const pf::Event& e) {
         const auto [ux, uy] = toUi(x, y);
         if (inNeighborhood_ && !neighborhoodCovered() && !lotBuilding_.valid() && !loading(lotSimBuilding_) && !hoodRefreshing_.valid() && std::abs(x - downX_) < 4 && std::abs(y - downY_) < 4 &&
             !screen_.over(ux, uy)) {
-            lotClicked(x, y);
+            if (!decorationClick(x, y)) {
+                lotClicked(x, y);
+            }
         }
     }
     if (inLot_ && freeCam_) {
@@ -3238,6 +3260,9 @@ void Game::windowClicked(int window) {
         const bool leaving = quitBox_.leaving();
         if (*answer == app::QuitBox::Answer::Yes && quitBox_.asksSave() && inLot_) {
             saveLot();
+        } else if (*answer == app::QuitBox::Answer::Yes && quitBox_.asksSave() && inNeighborhood_) {
+            dropHeldDecoration(true);
+            saveNeighborhood();
         }
         closeQuitBox();
         if (leaving) {
@@ -3260,7 +3285,9 @@ void Game::windowClicked(int window) {
         // The chooser, but not while a lot is loading: it reads this neighborhood.
         const auto action = hoodUi_.clicked(window);
         if (action == app::NeighborhoodUi::Action::Quit) {
-            openQuitBox();
+            openQuitBox(hoodEdits_.changed());
+        } else if (action == app::NeighborhoodUi::Action::DecorationTool) {
+            decorationToolChosen();
         } else if (action == app::NeighborhoodUi::Action::Snapshot) {
             takeSnapshot();
         } else if (action == app::NeighborhoodUi::Action::DayNight) {
@@ -3361,10 +3388,17 @@ bool Game::takePicture() {
         uiClicked_ = true;
         for (const auto& [wx, wy, kind] : options_.uiClicks) {
             const auto [cx, cy] = toUi(static_cast<float>(wx), static_cast<float>(wy));
+            // Off the panels, a Decorations tool takes the click.
+            if (!screen_.over(cx, cy) && decorationClick(static_cast<float>(wx), static_cast<float>(wy))) {
+                continue;
+            }
             screen_.mouse(cx, cy, true, 0);
             if (const auto clicked = screen_.mouse(cx, cy, false, 0)) {
                 windowClicked(*clicked);
             }
+        }
+        if (options_.saveNeighborhood) {
+            saveNeighborhood();
         }
         showSprites(static_cast<double>(ts2::platform::ticksNs()) / 1e9, true);
     }

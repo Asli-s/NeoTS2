@@ -340,8 +340,10 @@ NeighborhoodSceneStats addNeighborhood(SceneBuilder& builder, const std::filesys
     // their effects, which play at their model's slots.
     builder.setDrawShadows(true);
     auto placeAll = [&](const std::vector<nhood::PlacedObject>& list, bool effects) {
+        std::size_t record = 0;
         std::size_t shown = 0;
         for (const auto& item : list) {
+            const std::size_t index = record++;
             const auto type = objectTypes.find(item.type);
             if (type == objectTypes.end() || type->second.model.empty()) {
                 continue;
@@ -366,6 +368,7 @@ NeighborhoodSceneStats addNeighborhood(SceneBuilder& builder, const std::filesys
                 placed->litOutdoors = true;
                 placed->seaReflected = true;
                 ++shown;
+                stats.placedRecords.push_back({static_cast<std::size_t>(placed - builder.scene().instances.data()), effects, index, item});
             }
         }
         return shown;

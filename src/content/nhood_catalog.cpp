@@ -2,6 +2,7 @@
 
 #include "diag/log.hpp"
 #include "formats/dbpf.hpp"
+#include "formats/image.hpp"
 #include "formats/propset.hpp"
 
 #include <algorithm>
@@ -54,7 +55,12 @@ std::map<std::uint32_t, NeighborhoodObjectType> neighborhoodObjectTypes(const st
                         if (guid == p.end() || guid->second.empty()) {
                             continue;
                         }
-                        out[static_cast<std::uint32_t>(std::stoul(guid->second))] = {p["modelname"], p["sort"]};
+                        auto number = [&](const char* key) -> std::uint32_t {
+                            const auto v = p.find(key);
+                            return v == p.end() || v->second.empty() ? 0 : static_cast<std::uint32_t>(std::stoul(v->second));
+                        };
+                        out[static_cast<std::uint32_t>(std::stoul(guid->second))] = {p["modelname"], p["sort"], p["name"], p.find("showincatalog") == p.end() || number("showincatalog") != 0,
+                                                                                   number("stringsetgroupid"), number("stringsetid")};
                     } catch (const std::exception& ex) {
                         diag::warnOnce(std::string("neighborhood objects: a broken catalog entry is left out: ") + ex.what());
                     }
@@ -65,4 +71,38 @@ std::map<std::uint32_t, NeighborhoodObjectType> neighborhoodObjectTypes(const st
     return out;
 }
 
+
+std::map<std::uint32_t, tga::Pixels> neighborhoodObjectThumbnails(const std::vector<Product>& products) {
+    constexpr std::uint32_t kThumbnailType = 0x4D533EDD;
+    std::map<std::uint32_t, tga::Pixels> out;
+    auto ordered = products;
+    std::stable_sort(ordered.begin(), ordered.end(), [](const Product& a, const Product& b) { return a.releaseOrder < b.releaseOrder; });
+    std::set<fs::path> seen;
+    for (const auto& product : ordered) {
+        for (const auto& objects : product.objectPackages) {
+            fs::path res = objects.parent_path();
+            while (res.has_relative_path() && lower(res.filename().string()) != "res") {
+                res = res.parent_path();
+            }
+            const fs::path file = res / "UserData" / "Thumbnails" / "CANHObjectsThumbnails.package";
+            std::error_code ec;
+            if (!fs::is_regular_file(file, ec) || !seen.insert(file).second) {
+                continue;
+            }
+            try {
+                dbpf::Package package{file};
+                for (const auto& e : package.entries()) {
+                    if (e.key.type == kThumbnailType) {
+                        if (auto picture = image::decode(package.read(e))) {
+                            out[e.key.instance] = std::move(*picture);
+                        }
+                    }
+                }
+            } catch (const std::exception& ex) {
+                diag::warnOnce(std::string("neighborhood objects: catalog pictures that can't be read are left out: ") + ex.what());
+            }
+        }
+    }
+    return out;
+}
 } // namespace ts2::content

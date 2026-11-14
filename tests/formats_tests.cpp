@@ -1497,6 +1497,40 @@ void neighborhoodRoadsParse() {
     const auto& road = objects.roads[0];
     CHECK(road.piece == 0x4b00 && road.bounds[0] == 10 && road.bounds[3] == 1030);
     CHECK(road.corners[2][0] == 20 && road.corners[2][1] == 1030 && road.corners[2][2] == 368.5f && road.corners[3][3] == 1);
+    // Saving: nothing changed gives the same bytes; a record left out and records added keep the
+    // rest (roads, bridges, the other records) as they were.
+    ts2::nhood::ObjectsLayout layout;
+    ts2::nhood::parseObjects(d, &layout);
+    CHECK(layout.flora.records.size() == 1 && layout.decorations.records.size() == 2);
+    CHECK(ts2::nhood::rewritePlaced(d, layout, {}, {}, {}, {}) == d);
+    ts2::nhood::PlacedObject tree{{10, 20, 30}, {5, 15, 15, 25}, 45, 60};
+    ts2::nhood::PlacedObject sign{{40, 50, 60}, {35, 45, 45, 55}, 90, 12};
+    const auto saved = ts2::nhood::rewritePlaced(d, layout, {true}, {tree}, {false, true}, {sign});
+    const auto again = ts2::nhood::parseObjects(saved);
+    CHECK(again.flora.size() == 2 && again.flora[1].type == 60 && again.flora[1].angle == 45 && again.flora[1].bounds[3] == 25 &&
+          again.flora[1].position[2] == 30);
+    CHECK(again.decorations.size() == 2 && again.decorations[0].type == 0 && again.decorations[0].angle == 180 &&
+          again.decorations[1].type == 12 && again.decorations[1].angle == 90 && again.decorations[1].position[0] == 40);
+    CHECK(again.roads.size() == 1 && again.roads[0].piece == 0x4b00 && again.bridges.size() == 1 && again.bridges[0].road.piece == 0x0ac40000);
+    // A list in the oldest layout can lose records but not gain any.
+    auto old = layout;
+    old.decorations.listVersion = 6;
+    bool refused = false;
+    try {
+        (void)ts2::nhood::rewritePlaced(d, old, {}, {}, {}, {sign});
+    } catch (const std::exception&) {
+        refused = true;
+    }
+    CHECK(refused);
+    auto broken = layout;
+    broken.decorations.end = d.size() + 1;
+    refused = false;
+    try {
+        (void)ts2::nhood::rewritePlaced(d, broken, {}, {}, {}, {});
+    } catch (const std::exception&) {
+        refused = true;
+    }
+    CHECK(refused);
 }
 
 // Binary property sets (magic 0xCBE750E0) read like the XML ones. Reference lists (3IDR) list keys,

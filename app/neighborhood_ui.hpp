@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -28,8 +29,6 @@ public:
         ts2::tga::Pixels picture;
         bool forSale = false;
     };
-    // What the bins show from a neighborhood's files and the user folder's lot catalog. Reading it
-    // takes a while, so it is read with the neighborhood, off the main thread.
     // A page of the neighborhood's story: its snapshot and caption (the player's, or a premade
     // story's from the game's text, `textResource`).
     struct StoryPage {
@@ -37,21 +36,40 @@ public:
         std::string text;
         std::uint32_t textResource = 0;
     };
+    // An entry of the Decorations catalog: its guid, section and picture.
+    struct DecorationItem {
+        std::uint32_t guid = 0;
+        std::string sort;
+        ts2::tga::Pixels picture;
+    };
+    // What the bins show from a neighborhood's files, the user folder's lot catalog and the
+    // install's neighborhood object catalog. Reading it takes a while, so it is read with the
+    // neighborhood, off the main thread.
     struct Content {
         std::vector<ts2::tga::Pixels> familyPictures, lotPictures;
         std::vector<std::uint32_t> occupied;
         std::map<std::uint32_t, LotCard> cards;  // by lot id
         std::vector<StoryPage> story;
         std::optional<std::int32_t> neighborhoodId;  // its story album's id too
+        std::vector<DecorationItem> decorations;     // in the catalog's order (by guid)
     };
-    static Content read(const std::filesystem::path& folder, const std::filesystem::path& user);
+    static Content read(const std::filesystem::path& folder, const std::filesystem::path& user, const std::filesystem::path& install);
 
     // Shows the panels for a neighborhood (its folder in Neighborhoods and its name).
     void open(const std::filesystem::path& folder, const std::string& name, Content content);
     void close();
 
-    enum class Bin { None, Families, Lots };
+    enum class Bin { None, Families, Lots, Decorations };
     void showBin(Bin bin);
+    Bin bin() const { return bin_; }
+
+    // The Decorations catalog's tools: an entry chosen to place, the Hand Tool (move or delete what
+    // is placed) and the Eyedropper (choose what is placed). Whichever the player chose last.
+    enum class DecorationTool { None, Place, Hand, Eyedropper };
+    DecorationTool decorationTool() const { return decorationTool_; }
+    std::uint32_t chosenDecoration() const { return chosenDecoration_; }
+    // Shows a tool as chosen (None when the hand lets go of what it held).
+    void setDecorationTool(DecorationTool tool, std::uint32_t guid = 0);
 
     // The open neighborhood's id, its story album's too (snapshots are filed under it).
     std::optional<std::int32_t> neighborhoodId() const { return neighborhoodId_; }
@@ -78,7 +96,8 @@ public:
     GraphicsOptionsPanel& graphicsOptions() { return graphicsOptions_; }
     // The screen has a new size: what sits at its bottom edge moves with it.
     void setSize(int width, int height);
-    enum class Action { None, MainMenu, EnterLot, Quit, GameOptionChanged, GraphicsOptionChanged, DayNight, Snapshot };
+    // DecorationTool: a Decorations tool or catalog entry was chosen (see decorationTool).
+    enum class Action { None, MainMenu, EnterLot, Quit, GameOptionChanged, GraphicsOptionChanged, DayNight, Snapshot, DecorationTool };
     // A button released: what the player asked for.
     Action clicked(int window);
     // The puck's camera button held down. They turn and zoom while held, as the lot puck's do.
@@ -121,6 +140,10 @@ private:
     void showEmptyLotSizes(bool beach);
     // Shows story page `page`: its picture, caption and number.
     void showStoryPage(std::size_t page);
+    // Shows the Decorations catalog's section `sort` ("flora", "stone", "landmark", "effects", "misc").
+    void showDecorationSort(const std::string& sort);
+    // The item a strip's tile shows, when `window` is in one of its tiles.
+    std::optional<std::size_t> stripItemAt(const Strip& strip, int window) const;
 
     ts2::ui::Screen& screen_;
     ts2::content::UiData& data_;
@@ -145,6 +168,16 @@ private:
     std::size_t storyPage_ = 0;
     ts2::tga::Pixels storyShape_;  // the story picture's rounded shape
     std::string storyCounter_;     // the page counter's text from the script ("%ld of %ld")
+    // The Decorations catalog: its panel and strip, every entry, the shown section's entries and
+    // their pictures, and the tool chosen.
+    int decorations_ = -1;
+    Strip decorationStrip_;
+    std::vector<DecorationItem> decorationItems_;
+    std::vector<std::uint32_t> decorationShown_;
+    std::vector<ts2::tga::Pixels> decorationPictures_;
+    std::string decorationSort_;
+    DecorationTool decorationTool_ = DecorationTool::None;
+    std::uint32_t chosenDecoration_ = 0;
 };
 
 } // namespace app

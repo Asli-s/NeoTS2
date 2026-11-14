@@ -1,5 +1,6 @@
 #pragma once
 
+#include "formats/nhood_objects.hpp"
 #include "content/nhood_catalog.hpp"
 #include "formats/lot_description.hpp"
 #include "formats/nhood_paint_rules.hpp"
@@ -56,6 +57,15 @@ struct NeighborhoodSceneStats {
     std::size_t lots = 0, imposters = 0;      // lots, and those shown as their imposters
     std::size_t plants = 0, plantsShown = 0;  // plants, and those whose model was found
     std::size_t decorations = 0, decorationsShown = 0;
+    // The plant or decoration record each placed one is drawn from: its instance, its list (the
+    // decorations' or the plants') and its place in the list.
+    struct PlacedRecord {
+        std::size_t instance = 0;
+        bool decoration = false;
+        std::size_t record = 0;
+        nhood::PlacedObject object;  // as saved
+    };
+    std::vector<PlacedRecord> placedRecords;
     std::size_t imposterObjects = 0, imposterObjectsShown = 0;  // the lots' imposter objects, and those whose model was found
     std::size_t bridgesShown = 0;
     std::vector<EffectDecoration> effectDecorations;

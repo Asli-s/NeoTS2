@@ -36,6 +36,8 @@
 #include "content/lot.hpp"
 #include "content/material_scripts.hpp"
 #include "content/neighborhood.hpp"
+#include "content/nhood_catalog.hpp"
+#include "formats/nhood_objects.hpp"
 #include "content/ui_data.hpp"
 #include "content/ui_meters.hpp"
 #include "content/ui_text.hpp"
@@ -65,6 +67,9 @@
 #include <vector>
 
 namespace app {
+
+// The direction of the camera's ray through a point of a `width` x `height` window (it starts at the eye).
+ts2::render::Vec3 screenRay(const ts2::render::Camera& c, int width, int height, float mx, float my);
 
 // The game in its window: the main menu, a neighborhood opened from it, and a lot entered from
 // that neighborhood.
@@ -305,6 +310,62 @@ private:
     // Camera Snapshot (C in the neighborhood): saves the view, without the panels, as one of the
     // neighborhood's snapshots in the user folder's Storytelling folder.
     void takeSnapshot();
+    // Decorations: the neighborhood's Decorations catalog and its tools (game_decorations.cpp).
+    // What the hand holds: a catalog entry to place, or one already placed, picked up with the Hand
+    // Tool to move (or delete). It is drawn by `instance`, following the mouse over the ground.
+    struct HeldDecoration {
+        std::uint32_t type = 0;
+        std::size_t instance = 0;
+        float angle = 0;  // degrees
+        bool moving = false;
+        bool shown = false;
+        // Where a picked-up one stood, and the saved record it was (its list, the decorations' or
+        // the plants', and its place there) or the one placed this visit: put back on Escape.
+        ts2::nhood::PlacedObject was;
+        std::optional<std::pair<bool, std::size_t>> wasRecord;
+    };
+    // What has changed on the neighborhood since it was opened or last saved: decorations placed
+    // (their instance, list and record) and saved records taken away.
+    struct HoodEdits {
+        struct Added {
+            std::size_t instance = 0;
+            bool decoration = false;
+            ts2::nhood::PlacedObject object;
+        };
+        std::vector<Added> added;
+        std::set<std::pair<bool, std::size_t>> removed;
+        bool changed() const { return !added.empty() || !removed.empty(); }
+    };
+    std::optional<HeldDecoration> heldDecoration_;
+    HoodEdits hoodEdits_;
+    std::vector<std::uint8_t> hoodHidden_;  // per neighborhood instance: 1 when deleted
+    std::map<std::uint32_t, ts2::content::NeighborhoodObjectType> hoodObjectTypes_;
+    // The catalog tool or entry the panel has chosen now: the hand lets go of what it held.
+    void decorationToolChosen();
+    // A click on the neighborhood with a Decorations tool: places, picks up or chooses. Whether the
+    // tool took it.
+    bool decorationClick(float x, float y);
+    // A key while the hand holds a decoration: Escape lets go (a picked-up one goes back), Delete
+    // deletes a picked-up one, comma and period turn it. Whether it was one of those.
+    bool decorationKey(ts2::platform::Key key);
+    void dropHeldDecoration(bool putBack);
+    // Moves what the hand holds to the ground under the mouse, each frame.
+    void updateHeldDecoration();
+    // The ground of the neighborhood under a point of the window, where the camera's ray meets it.
+    std::optional<std::array<float, 3>> hoodGroundAt(float x, float y) const;
+    float hoodHeightAt(float x, float y) const;
+    // A new instance showing catalog entry `type`, hidden until placed. Nullopt when its model is missing.
+    std::optional<std::size_t> addDecorationInstance(std::uint32_t type);
+    // The placed decoration or plant standing on the ground at `point`, as the instance drawing it.
+    std::optional<std::size_t> hoodDecorationAt(const std::array<float, 3>& point) const;
+    // The ground a decoration of `instance`'s model covers standing at `position` turned `angle` degrees.
+    std::array<float, 4> decorationBounds(std::size_t instance, const std::array<float, 3>& position, float angle) const;
+    void setHoodHidden(std::size_t instance, bool hidden);
+    // Writes the decorations changed into the neighborhood's package. Whether it was saved.
+    bool saveNeighborhood();
+    // Leaving the neighborhood for a lot or another neighborhood: the decorations changed are saved,
+    // as the neighborhood is read again from its package when it next shows.
+    void saveDecorationsOnLeaving();
     void startLotLife();
     void drawHousehold(std::uint64_t now);
     void sendLotChanges();

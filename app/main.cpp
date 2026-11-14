@@ -1,6 +1,6 @@
 // NeoTS2: opens a saved lot in a window, or shows the game's main menu.
 //   neots2 <install folder> --menu [--user <user folder>] [--size w h | --fit-screen] [--preview n]
-//          [--play n [--bin families|lots|story|options|gameoptions|chooser|quit] [--lot id] [--click x y] [--card x y]]
+//          [--play n [--bin families|lots|decorations|story|options|gameoptions|chooser|quit] [--save-neighborhood] [--lot id] [--click x y] [--card x y]]
 //          [--hover x y (on the neighborhood, or the lot before the picture)] [--ui-click x y | --ui-right-click x y | --ui-hover x y
 //          (on the lot's panels before the picture, repeatable)]
 //          [--shot <out.png>] [--seed n (the neighborhood ground's variants, so pictures repeat)]
@@ -375,6 +375,8 @@ int main(int argc, char** argv) {
                 menu.cardX = std::stoi(argv[i + 1]);
                 menu.cardY = std::stoi(argv[i + 2]);
                 i += 2;
+            } else if (arg == "--save-neighborhood") {
+                menu.saveNeighborhood = true;
             } else if (arg == "--ui-click" && i + 2 < argc) {
                 menu.uiClicks.push_back({std::stoi(argv[i + 1]), std::stoi(argv[i + 2]), 0});
                 i += 2;

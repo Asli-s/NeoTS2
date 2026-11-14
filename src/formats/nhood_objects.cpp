@@ -2,6 +2,7 @@
 
 #include "formats/binary_reader.hpp"
 
+#include <bit>
 #include <stdexcept>
 #include <string>
 
@@ -93,14 +94,18 @@ RoadTile roadTile(BinaryReader& r) {
 
 } // namespace
 
-Objects parseObjects(std::span<const std::uint8_t> data) {
+Objects parseObjects(std::span<const std::uint8_t> data, ObjectsLayout* layout) {
+    ObjectsLayout spans;
     BinaryReader r(data);
     Objects out;
     out.version = r.u32();
     // Plants: the angle, then the catalog guid, from the record versions that have them.
+    spans.flora.start = r.position();
     const std::uint16_t plantVersion = r.u16();
+    spans.flora.listVersion = plantVersion;
     out.flora.resize(placedCount(r, plantVersion, kPlantLayout, "plant"));
     for (auto& f : out.flora) {
+        const std::size_t first = r.position();
         const std::uint16_t version = placedHeader(r, plantVersion, kPlantLayout, f);
         if (version >= 7) {
             f.angle = r.f32();
@@ -109,7 +114,9 @@ Objects parseObjects(std::span<const std::uint8_t> data) {
             f.type = r.u32();
         }
         placedTail(r, version, kPlantLayout, f);
+        spans.flora.records.emplace_back(first, r.position());
     }
+    spans.flora.end = r.position();
     // Roads.
     r.u16();
     const std::uint32_t roads = r.u32();
@@ -141,16 +148,90 @@ Objects parseObjects(std::span<const std::uint8_t> data) {
         r.skip(12);
     }
     // Decorations: the catalog guid from version 8, then the angle in every version.
+    spans.decorations.start = r.position();
     const std::uint16_t decorVersion = r.u16();
+    spans.decorations.listVersion = decorVersion;
     out.decorations.resize(placedCount(r, decorVersion, kDecorationLayout, "decoration"));
     for (auto& f : out.decorations) {
+        const std::size_t first = r.position();
         const std::uint16_t version = placedHeader(r, decorVersion, kDecorationLayout, f);
         if (version >= 8) {
             f.type = r.u32();
         }
         f.angle = r.f32();
         placedTail(r, version, kDecorationLayout, f);
+        spans.decorations.records.emplace_back(first, r.position());
     }
+    spans.decorations.end = r.position();
+    if (layout != nullptr) {
+        *layout = std::move(spans);
+    }
+    return out;
+}
+
+namespace {
+
+void put32(std::vector<std::uint8_t>& out, std::uint32_t v) {
+    for (int i = 0; i < 4; ++i) {
+        out.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
+    }
+}
+void putFloat(std::vector<std::uint8_t>& out, float v) { put32(out, std::bit_cast<std::uint32_t>(v)); }
+
+// A list written again: its version, its count, the records kept as they were, then the new ones.
+void writeList(std::vector<std::uint8_t>& out, std::span<const std::uint8_t> data, const PlacedSpans& list, const std::vector<bool>& keep,
+               const std::vector<PlacedObject>& add, const PlacedLayout& layout, bool decorations) {
+    if (!add.empty() && list.listVersion < layout.newFrom) {
+        throw std::runtime_error(std::string("neighborhood objects: the ") + (decorations ? "decoration" : "plant") +
+                                 " list is laid out as an old version of the game saved it, so nothing can be added to it");
+    }
+    std::vector<std::pair<std::size_t, std::size_t>> kept;
+    for (std::size_t i = 0; i < list.records.size(); ++i) {
+        if (i >= keep.size() || keep[i]) {
+            kept.push_back(list.records[i]);
+        }
+    }
+    out.push_back(static_cast<std::uint8_t>(list.listVersion));
+    out.push_back(static_cast<std::uint8_t>(list.listVersion >> 8));
+    put32(out, static_cast<std::uint32_t>(kept.size() + add.size()));
+    for (const auto& [first, end] : kept) {
+        out.insert(out.end(), data.begin() + static_cast<std::ptrdiff_t>(first), data.begin() + static_cast<std::ptrdiff_t>(end));
+    }
+    for (const auto& item : add) {
+        out.push_back(2);  // placed, with its bounds
+        for (const float v : item.position) {
+            putFloat(out, v);
+        }
+        for (const float v : item.bounds) {
+            putFloat(out, v);
+        }
+        out.push_back(8);  // record version
+        // A plant's angle comes before its type, a decoration's after.
+        if (decorations) {
+            put32(out, item.type);
+            putFloat(out, item.angle);
+        } else {
+            putFloat(out, item.angle);
+            put32(out, item.type);
+        }
+    }
+}
+
+} // namespace
+
+std::vector<std::uint8_t> rewritePlaced(std::span<const std::uint8_t> data, const ObjectsLayout& layout, const std::vector<bool>& keepFlora,
+                                        const std::vector<PlacedObject>& addFlora, const std::vector<bool>& keepDecorations,
+                                        const std::vector<PlacedObject>& addDecorations) {
+    const auto& f = layout.flora;
+    const auto& d = layout.decorations;
+    if (!(f.start <= f.end && f.end <= d.start && d.start <= d.end && d.end <= data.size())) {
+        throw std::runtime_error("neighborhood objects: the lists don't lie where they were read");
+    }
+    std::vector<std::uint8_t> out(data.begin(), data.begin() + static_cast<std::ptrdiff_t>(f.start));
+    writeList(out, data, f, keepFlora, addFlora, kPlantLayout, false);
+    out.insert(out.end(), data.begin() + static_cast<std::ptrdiff_t>(f.end), data.begin() + static_cast<std::ptrdiff_t>(d.start));
+    writeList(out, data, d, keepDecorations, addDecorations, kDecorationLayout, true);
+    out.insert(out.end(), data.begin() + static_cast<std::ptrdiff_t>(d.end), data.end());
     return out;
 }
 

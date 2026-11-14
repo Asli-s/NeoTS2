@@ -101,6 +101,9 @@ void Game::placeEffectModels() {
     }
     models.place(hoodEffectPlayer_.get(), effectModelPlaces_);
     std::vector<std::uint8_t> shown(hood_.scene.instances.size(), 1);
+    for (std::size_t i = 0; i < shown.size() && i < hoodHidden_.size(); ++i) {
+        shown[i] = hoodHidden_[i] ? 0 : 1;  // decorations deleted or not placed yet
+    }
     for (const auto& p : effectModelPlaces_) {
         if (p.instance >= shown.size()) {
             continue;

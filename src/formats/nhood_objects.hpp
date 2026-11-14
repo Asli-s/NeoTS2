@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace ts2::nhood {
@@ -44,8 +45,31 @@ struct Objects {
     std::vector<PlacedObject> decorations;
 };
 
+// Where a plant or decoration list lies in the resource: from its list version (`start`) to past
+// its last record (`end`), and each record's first byte and end. Saving changes to the lists keeps
+// every other byte as it was.
+struct PlacedSpans {
+    std::uint16_t listVersion = 0;
+    std::size_t start = 0, end = 0;
+    std::vector<std::pair<std::size_t, std::size_t>> records;
+};
+struct ObjectsLayout {
+    PlacedSpans flora, decorations;
+};
+
 constexpr std::uint32_t kObjectsType = 0xABD0DC63;
 
-Objects parseObjects(std::span<const std::uint8_t> data);
+// Reads the resource, and where its plants and decorations lie into `layout` when given.
+Objects parseObjects(std::span<const std::uint8_t> data, ObjectsLayout* layout = nullptr);
+
+// The resource `data` (laid out as `layout`) with only the plant and decoration records flagged in
+// `keepFlora` and `keepDecorations` (one flag per record, in order; a record past a list's flags is
+// kept) and the records in `addFlora` and `addDecorations` after them, written as the game writes
+// them now: placed (2), with their bounds, record version 8. Every other byte is as in `data`.
+// Throws when a list gaining records is laid out as before record versions (plants before list
+// version 6, decorations before 7).
+std::vector<std::uint8_t> rewritePlaced(std::span<const std::uint8_t> data, const ObjectsLayout& layout, const std::vector<bool>& keepFlora,
+                                        const std::vector<PlacedObject>& addFlora, const std::vector<bool>& keepDecorations,
+                                        const std::vector<PlacedObject>& addDecorations);
 
 } // namespace ts2::nhood
