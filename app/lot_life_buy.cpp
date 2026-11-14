@@ -8,10 +8,12 @@
 #include "sim/vm_execution.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <format>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
 
 namespace app {
@@ -328,6 +330,72 @@ void LotLife::removeObject(std::int16_t object) {
 void LotLife::addFunds(std::int32_t amount) {
     auto globals = sim_->globals();
     ts2::sim::setFunds(globals, static_cast<std::int64_t>(ts2::sim::funds(globals)) + amount);
+}
+
+// Objects on the lot (not Sims, not taken off it or held in a slot) on a storey, with their tile in
+// wall graph coordinates (route x is the graph's y).
+namespace {
+
+struct OnTile {
+    const ts2::sim::SimObject* object;
+    int x, y;  // the tile, in wall graph coordinates
+};
+
+std::vector<OnTile> objectsOn(ts2::sim::World& world, std::int32_t storey) {
+    std::vector<OnTile> out;
+    world.nextAfter(0, [&](const ts2::sim::SimObject& o) {
+        if (!o.removed && !o.isPerson() && o.x != ts2::sim::kOffLot && o.y != ts2::sim::kOffLot && o.level == storey &&
+            o.data[kContainerData] <= 0) {
+            const int routeX = static_cast<int>(std::floor(static_cast<float>(o.x) / 65536.0f));
+            const int routeY = static_cast<int>(std::floor(static_cast<float>(o.y) / 65536.0f));
+            out.push_back({&o, routeY, routeX});
+        }
+        return false;
+    });
+    return out;
+}
+
+} // namespace
+
+bool LotLife::objectAcross(std::int32_t storey, std::int32_t x0, std::int32_t y0, std::int32_t x1, std::int32_t y1) {
+    // The two tiles the edge parts, in wall graph coordinates.
+    const bool alongY = x0 == x1;
+    const std::array<int, 2> a = alongY ? std::array<int, 2>{x0 - 1, std::min(y0, y1)} : std::array<int, 2>{std::min(x0, x1), y0 - 1};
+    const std::array<int, 2> b = alongY ? std::array<int, 2>{x0, std::min(y0, y1)} : std::array<int, 2>{std::min(x0, x1), y0};
+    std::map<std::int16_t, std::array<bool, 2>> sides;  // by lead: has a part on a, on b
+    for (const auto& on : objectsOn(sim_->world(), storey)) {
+        const bool onA = on.x == a[0] && on.y == a[1], onB = on.x == b[0] && on.y == b[1];
+        if (onA || onB) {
+            auto& s = sides[leadOf(on.object->id)];
+            s[0] = s[0] || onA;
+            s[1] = s[1] || onB;
+        }
+    }
+    return std::any_of(sides.begin(), sides.end(), [](const auto& s) { return s.second[0] && s.second[1]; });
+}
+
+std::int16_t LotLife::objectNeedingWalls(const ts2::content::Lot& candidate) {
+    const auto after = ts2::sim::WallTiles::builtWalls(candidate);
+    const auto& world = sim_->world();
+    std::int16_t needing = 0;
+    for (std::int32_t storey = 1; storey <= 8 && needing == 0; ++storey) {
+        for (const auto& on : objectsOn(sim_->world(), storey)) {
+            const auto& o = *on.object;
+            const std::int16_t flags = o.data[kWallPlacementData];
+            if ((flags & 0xF) == 0) {
+                continue;
+            }
+            const float x = static_cast<float>(o.x) / 65536.0f, y = static_cast<float>(o.y) / 65536.0f;
+            const std::int16_t facing = o.data[kDirectionData];
+            // Only an object that has its walls now can lose them.
+            if (requiredWallsThere(world, o, x, y, o.level, facing) &&
+                !ts2::sim::catalog::wallsWhereNeeded(flags, after.at(o.level - 1, static_cast<int>(x), static_cast<int>(y)), facing)) {
+                needing = o.id;
+                break;
+            }
+        }
+    }
+    return needing;
 }
 
 void LotLife::setFloors(const ts2::array3d::Array3D& floors, int ground) {

@@ -38,6 +38,7 @@ public:
         bool panel = false;
         std::optional<std::uint32_t> floor, wall;
         bool hand = false;
+        bool wallTool = false;  // the Wall tool (Walls & Rooms)
     };
     Click clicked(int window);
 
@@ -51,12 +52,12 @@ public:
     static std::string subsortOf(std::uint32_t button);
 
 private:
-    enum class Category { None, Floors, Walls };
+    enum class Category { None, Floors, Walls, WallTool };
     void showView();
 
     ts2::ui::Screen* screen_ = nullptr;
     int content_ = -1;
-    int categories_ = -1, floorSorts_ = -1, wallSorts_ = -1, catalog_ = -1;
+    int categories_ = -1, floorSorts_ = -1, wallSorts_ = -1, wallToolSorts_ = -1, catalog_ = -1;
     int area_ = -1;
     int previous_ = -1, next_ = -1;
     std::vector<int> slots_;
@@ -66,6 +67,7 @@ private:
     std::uint32_t subsortButton_ = 0;  // the sub-category button chosen, 0: all
     int page_ = 0;
     bool dirty_ = true;
+    bool wallToolPicked_ = false;  // Walls & Rooms shows pressed
     std::vector<Pattern> listed_;
 };
 

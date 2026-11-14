@@ -1,5 +1,7 @@
 #pragma once
 
+#include "content/build_scripts.hpp"
+#include "content/install.hpp"
 #include "content/neighborhood.hpp"
 #include "content/resource_index.hpp"
 #include "sim/clock.hpp"
@@ -80,6 +82,9 @@ public:
     // The lot's route grids with every footprint up to date, as the game has them before routing
     // work, null until route sources are set or when the lot has no floors.
     const RouteWorld* routeWorld();
+    // Build mode changed the lot's walls (`lot` holds them as they are now, with its floors, fence posts and
+    // region layers): the walls, rooms and route grids the simulation knows follow.
+    void wallsChanged(const content::Lot& lot);
     std::size_t ticks() const { return ticks_; }
 
     // Why scripts stopped (outcome, reason and detail), how often, and the first time it happened.
@@ -139,6 +144,9 @@ private:
     std::vector<std::int16_t> household_;
     mutable std::vector<std::int16_t> familyHousehold_;  // the family's Sims on the lot, as household() last found them
     std::unique_ptr<const content::Lot> lot_;  // kept until the route world is built
+    std::vector<content::Product> products_;
+    content::BuildScripts buildScripts_;
+    void setWallsFrom(const content::Lot& lot);
     std::map<std::uint32_t, std::string> objectModels_;  // the lot's model name of each object id
     std::map<std::uint32_t, std::uint32_t> savedGuids_;  // the type (GUID) each id had when the lot was saved
     std::map<std::uint32_t, std::vector<cobject::SavedJoint>> savedJoints_;  // as the lot saved each object's model posed

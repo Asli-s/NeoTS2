@@ -593,7 +593,8 @@ private:
     // floor up (Ctrl held as it started). The lot's floors and wall coverings as Build mode changes
     // them, kept from loading, and its walls as drawn with each one's full and cut-down instance.
     struct BuildTool {
-        bool wall = false;          // a wall covering, else a floor
+        bool wall = false;          // a wall covering, else a floor (or walls, below)
+        bool buildsWalls = false;   // the Wall tool: it builds walls, and has no pattern
         std::uint32_t guid = 0;
         std::string pattern, name;  // its name in the lot's pattern list, its catalog name
         std::int32_t price = 0;     // per tile
@@ -607,6 +608,10 @@ private:
     std::vector<std::array<int, 2>> wallInstances_;  // by drawn wall: its full and cut instances (-1: none)
     std::map<std::size_t, std::size_t> wallOfInstance_;  // scene instance: drawn wall
     int wallTopMaterial_ = -1;  // the scene material the walls' tops are drawn in
+    // The Wall tool: the tile corner under the mouse and the one a drag started at, and whether the drag
+    // takes walls down (Ctrl held as it started).
+    std::optional<std::array<std::int32_t, 2>> wallCornerAt_, wallDragFrom_;
+    bool wallRemoving_ = false;
     void enterBuy();
     void leaveBuy(bool restorePause);
     // The pause from before Buy, Build or Story mode or the options menu, whichever is open as
@@ -650,6 +655,16 @@ private:
     bool wallMouse(const ts2::platform::Event& e, float x, float y, bool overPanels);
     // Finds the lot's walls among the scene's instances as a lot is shown.
     void findDrawnWalls();
+    // The Wall tool (app/game_walls.cpp): picked from the panel, its share of the mouse, the tile
+    // corner under the mouse on the storey in view, building or taking down the walls from the drag's
+    // start to `to` (why nothing changed when it can't, else empty), and drawing a grid level's walls
+    // again after walls were built or taken down there.
+    void pickWallTool();
+    bool wallToolMouse(const ts2::platform::Event& e, float x, float y, bool overPanels);
+    std::optional<std::array<std::int32_t, 2>> buildCornerAt(float x, float y);
+    std::optional<std::array<float, 2>> buildPointAt(float x, float y);
+    std::string buildWallLine(std::array<std::int32_t, 2> to);
+    void redrawLevelWalls(int level, const std::vector<std::int32_t>& built, const std::vector<std::int32_t>& removed);
     void buildTip(const std::string& text);
     float downX_ = 0, downY_ = 0;
     std::optional<std::array<float, 2>> dragFrom_;  // where a camera drag (right button) started

@@ -58,7 +58,13 @@ void Game::pickPattern(std::uint32_t guid, bool wall) {
         return;
     }
     // Catalog floors and wall coverings are both named by their GUID in hex in the lot's lists.
-    buildTool_ = BuildTool{wall, guid, ts2::content::floorPatternName(guid), it->name, it->price};
+    BuildTool tool;
+    tool.wall = wall;
+    tool.guid = guid;
+    tool.pattern = ts2::content::floorPatternName(guid);
+    tool.name = it->name;
+    tool.price = it->price;
+    buildTool_ = std::move(tool);
     floorDragFrom_.reset();
     floorTileAt_.reset();
     ts2::diag::step(std::format("build mode: {} {} ({:08x}) picked", wall ? "wall covering" : "floor", it->name, guid));
@@ -66,11 +72,15 @@ void Game::pickPattern(std::uint32_t guid, bool wall) {
 
 void Game::dropBuildTool() {
     if (buildTool_) {
-        ts2::diag::step(buildTool_->wall ? "build mode: wall covering tool put down" : "build mode: floor tool put down");
+        ts2::diag::step(buildTool_->buildsWalls ? "build mode: wall tool put down"
+                        : buildTool_->wall      ? "build mode: wall covering tool put down"
+                                                : "build mode: floor tool put down");
     }
     buildTool_.reset();
     floorDragFrom_.reset();
     floorTileAt_.reset();
+    wallDragFrom_.reset();
+    wallCornerAt_.reset();
     buildTip({});
 }
 
@@ -106,6 +116,12 @@ bool Game::buildMouse(const pf::Event& e, float x, float y) {
     }
     const auto [ix, iy] = toUi(x, y);
     const bool overPanels = screen_.over(ix, iy);
+    if (buildTool_->buildsWalls) {
+        if (!overPanels || wallDragFrom_) {
+            buildMouseAt_ = {x, y};
+        }
+        return wallToolMouse(e, x, y, overPanels);
+    }
     if (buildTool_->wall) {
         if (!overPanels) {
             buildMouseAt_ = {x, y};
@@ -175,8 +191,9 @@ bool Game::buildKey(const pf::Event& e) {
     }
     // Esc lets go of a drag, then of the tool.
     if (!e.repeat) {
-        if (floorDragFrom_) {
+        if (floorDragFrom_ || wallDragFrom_) {
             floorDragFrom_.reset();
+            wallDragFrom_.reset();
             buildTip({});
         } else {
             dropBuildTool();
@@ -309,6 +326,9 @@ void Game::findDrawnWalls() {
     }
     const std::size_t first = lot_.walls.size() - count;
     wallInstances_.assign(count, {-1, -1});
+    for (std::size_t i = 0; i < count; ++i) {
+        drawnWalls_->walls[i].sceneWall = static_cast<int>(first + i);
+    }
     for (std::size_t i = 0; i < lot_.instances.size(); ++i) {
         const auto& instance = lot_.instances[i];
         if (instance.part != ts2::scene::Part::Wall || instance.walls.size() != 1 || instance.walls.front() < static_cast<int>(first)) {

@@ -263,6 +263,13 @@ public:
     // scripts read floor patterns) after Build mode changed them: grid level `ground` is storey 1.
     int floorMaterial(const std::string& pattern, ts2::scene::Scene& scene) { return objectMaterials_.floorMaterial(pattern, scene); }
     void setFloors(const ts2::array3d::Array3D& floors, int ground);
+    // Build mode changed the walls: rooms, routes and the walls Sims see follow (see LotSimulation::wallsChanged).
+    void wallsChanged(const ts2::content::Lot& lot) { sim_->wallsChanged(lot); }
+    // Whether a multi-tile object has parts on both tiles a tile edge parts (in wall graph tiles) on a
+    // storey (1 = ground): no wall may go there.
+    bool objectAcross(std::int32_t storey, std::int32_t x0, std::int32_t y0, std::int32_t x1, std::int32_t y1);
+    // An object whose wall (a poster's, a door's) would be gone with the walls of `candidate`, 0 for none.
+    std::int16_t objectNeedingWalls(const ts2::content::Lot& candidate);
     // Build mode: a wall drawn again with its coverings as they are now (see ObjectMaterials::wallMesh).
     int wallMesh(const ts2::scene::DrawnWall& wall, int sceneTop, bool cut, ts2::scene::Scene& scene) {
         return objectMaterials_.wallMesh(wall, sceneTop, cut, scene);

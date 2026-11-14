@@ -1349,8 +1349,14 @@ void Game::enterLot(std::uint32_t id) {
             built.floors->floorPatterns = lot.floorPatterns;
             built.floors->wallPatterns = lot.wallPatterns;
             built.floors->wallCoverings = lot.wallCoverings;
+            built.floors->layerGraphs = lot.layerGraphs;
+            built.floors->fencePosts = lot.fencePosts;
+            if (const auto water = lot.flatGrids.find(ts2::content::kWaterHeightGridInstance); water != lot.flatGrids.end()) {
+                built.floors->flatGrids.emplace(water->first, water->second);
+            }
             for (const std::uint32_t grid : {ts2::content::kFloorGridInstance, ts2::content::kFloorHeightGridInstance,
-                                             ts2::content::kSurfaceGridInstance, ts2::content::kPlatformRegionGridInstance}) {
+                                             ts2::content::kSurfaceGridInstance, ts2::content::kPlatformRegionGridInstance,
+                                             ts2::content::kRoomGridInstance}) {
                 if (const auto it = lot.grids.find(grid); it != lot.grids.end()) {
                     built.floors->grids.emplace(grid, it->second);
                 }
@@ -1744,6 +1750,7 @@ void Game::lotAction(app::LotUi::Action action) {
     case Action::StoryOpened: enterPanelMode(false); break;
     case Action::BuildItem: pickPattern(lotUi_.pickedFloor(), false); break;
     case Action::BuildWallItem: pickPattern(lotUi_.pickedWallCovering(), true); break;
+    case Action::BuildWallTool: pickWallTool(); break;
     case Action::BuildHand: dropBuildTool(); break;
     case Action::BuildClosed:
     case Action::StoryClosed: leavePanelMode(true); break;
@@ -1919,7 +1926,7 @@ std::optional<Game::LotFloorPoint> Game::lotFloorAt(float x, float y) {
     return out;
 }
 
-std::optional<std::array<std::int32_t, 2>> Game::buildTileAt(float x, float y) {
+std::optional<std::array<float, 2>> Game::buildPointAt(float x, float y) {
     if (!buildLot_) {
         return std::nullopt;
     }
@@ -1952,11 +1959,33 @@ std::optional<std::array<std::int32_t, 2>> Game::buildTileAt(float x, float y) {
         px = eye[0] + direction[0] * t;
         py = eye[1] + direction[1] * t;
     }
-    const auto tx = static_cast<std::int32_t>(std::floor(px)), ty = static_cast<std::int32_t>(std::floor(py));
-    if (!floors.contains(level, tx, ty)) {
+    return std::array<float, 2>{px, py};
+}
+
+std::optional<std::array<std::int32_t, 2>> Game::buildTileAt(float x, float y) {
+    const auto point = buildPointAt(x, y);  // none without the lot's floors
+    if (!point) {
+        return std::nullopt;
+    }
+    const auto grid = buildLot_->grids.find(ts2::content::kFloorGridInstance);
+    const auto tx = static_cast<std::int32_t>(std::floor((*point)[0])), ty = static_cast<std::int32_t>(std::floor((*point)[1]));
+    if (!grid->second.contains(lotView_.view.level, tx, ty)) {
         return std::nullopt;
     }
     return std::array<std::int32_t, 2>{tx, ty};
+}
+
+std::optional<std::array<std::int32_t, 2>> Game::buildCornerAt(float x, float y) {
+    const auto point = buildPointAt(x, y);
+    if (!point || !buildLot_ || !buildLot_->roomGraph) {
+        return std::nullopt;
+    }
+    // The nearest tile corner, on the lot.
+    const auto cx = static_cast<std::int32_t>(std::lround((*point)[0])), cy = static_cast<std::int32_t>(std::lround((*point)[1]));
+    if (cx < 0 || cy < 0 || cx > buildLot_->roomGraph->width || cy > buildLot_->roomGraph->height) {
+        return std::nullopt;
+    }
+    return std::array<std::int32_t, 2>{cx, cy};
 }
 
 std::optional<std::pair<std::size_t, bool>> Game::wallSideAt(float x, float y) {

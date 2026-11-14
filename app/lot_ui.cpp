@@ -796,6 +796,9 @@ LotUi::Action LotUi::clicked(int window) {
             pickedWallCovering_ = *click.wall;
             return Action::BuildWallItem;
         }
+        if (click.wallTool) {
+            return Action::BuildWallTool;
+        }
         return click.hand ? Action::BuildHand : Action::None;
     }
     if (const auto click = buyPanel_.clicked(window); click.panel) {

@@ -30,7 +30,7 @@ NeoTS2 is in early development and is not yet a complete engine. Currently worki
 - Custom content from the Downloads folder
 - Sound effects, Sims' voices and the menu and neighborhood music
 - Buy mode, first stage: browse the catalog by function or room, buy and place objects on the floor (beds and sofas too), on counters and tables, and against walls; move and sell them
-- Build mode, first stages: lay and take up floor tiles, and cover walls (one side, or a whole room) from the catalog; the other tools are not built yet
+- Build mode, first stages: lay and take up floor tiles, cover walls (one side, or a whole room), and build and take down straight walls; the other tools are not built yet
 
 Saving is not supported yet.
 

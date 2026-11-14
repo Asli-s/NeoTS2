@@ -259,6 +259,8 @@ struct DrawnWall {
     std::int32_t graphWall = -1;  // its id in the room wall graph, -1 for a stage's side
     // Its sides take wall coverings: not a pool's edge, a half wall's fence or a stage's side.
     bool coverable = false;
+    bool removed = false;  // taken down in Build mode: its instances draw nothing
+    int sceneWall = -1;    // its index in the scene's walls (for the views' cutaway), once in a scene
 };
 struct DrawnWalls {
     DrawnWalls() = default;

@@ -673,7 +673,7 @@ bool Execution::nextOnSameTile(const std::array<std::uint8_t, 16>& o, std::uint8
         return false;
     }
     if (target->data[kSameTileRefusedField] & kSameTileRefusedBit) {
-        throw Stop{Outcome::Error, "could not find object reference", std::to_string(targetId)};
+        throw Stop{Outcome::Error, "could not find object reference", std::to_string(targetId) + " (" + target->definition.name + ")"};
     }
     const Tile tile = *target->tile;
     const SimObject* next = world().nextAround(targetId, [&](const SimObject& s) {

@@ -113,51 +113,9 @@ LotSimulation::LotSimulation(const std::filesystem::path& install, const std::fi
         savedGuids_.emplace(static_cast<std::uint32_t>(o.id), o.definition.guid());
         return false;
     });
-    world_.setWalls(WallTiles::fromLot(saved));
-    world_.setSightWalls(WallTiles::builtWalls(saved));
-    const auto products = content::findProducts(install);
-    const content::BuildScripts buildScripts = content::loadBuildScripts(products);
-    std::vector<World::WallSection> sections;
-    std::unordered_map<std::int32_t, const wallgraph::Wall*> walls;
-    std::optional<wallgraph::PointIndex> points;
-    if (saved.roomGraph) {
-        for (const auto& w : saved.roomGraph->walls) {
-            walls.emplace(w.id, &w);
-        }
-        points.emplace(*saved.roomGraph);
-    }
-    for (const auto& e : saved.wallCoverings) {
-        if (!buildScripts.isRoomWall(e.type)) {
-            continue;
-        }
-        World::WallSection section;
-        if (const auto wall = walls.find(static_cast<std::int32_t>(e.wall)); wall != walls.end() && points) {
-            const auto* from = (*points)(wall->second->from);
-            const auto* to = (*points)(wall->second->to);
-            if (from != nullptr && to != nullptr) {
-                section = {*from, *to, true};
-            }
-        }
-        sections.push_back(section);
-    }
-    world_.setWallSections(std::move(sections));
-    {
-        constexpr std::uint32_t kKeptOutStyles[] = {300, 301};
-        std::vector<WallPiece> pieces;
-        for (const auto& e : saved.wallCoverings) {
-            const auto wall = walls.find(static_cast<std::int32_t>(e.wall));
-            if (wall == walls.end() || !points || buildScripts.fenceArches.contains(e.type) ||
-                std::ranges::find(kKeptOutStyles, e.type) != std::end(kKeptOutStyles)) {
-                continue;
-            }
-            const auto* from = (*points)(wall->second->from);
-            const auto* to = (*points)(wall->second->to);
-            if (from != nullptr && to != nullptr) {
-                pieces.push_back({*from, *to, e.type});
-            }
-        }
-        world_.setWallOutline(std::make_shared<const WallOutline>(pieces), content::loadGreenhouseFences(products));
-    }
+    products_ = content::findProducts(install);
+    buildScripts_ = content::loadBuildScripts(products_);
+    setWallsFrom(saved);
     if (const auto graph = saved.layerGraphs.find(content::kLayerGraphInstances[1]); graph != saved.layerGraphs.end()) {
         world_.setWeatherRegions(RoomMap(graph->second));
     }
@@ -272,6 +230,80 @@ void LotSimulation::setRouteSources(RouteSources sources) {
         return type != nullptr && objectInTheWay(placed, *type, x, y, level, direction);
     });
     world_.setStepBlocker([this](const SimObject& sim, float x, float y, std::int32_t level) { return stepBlocker(sim, x, y, level); });
+}
+
+void LotSimulation::setWallsFrom(const content::Lot& lot) {
+    world_.setWalls(WallTiles::fromLot(lot));
+    world_.setSightWalls(WallTiles::builtWalls(lot));
+    const auto& buildScripts = buildScripts_;
+    std::vector<World::WallSection> sections;
+    std::unordered_map<std::int32_t, const wallgraph::Wall*> walls;
+    std::optional<wallgraph::PointIndex> points;
+    if (lot.roomGraph) {
+        for (const auto& w : lot.roomGraph->walls) {
+            walls.emplace(w.id, &w);
+        }
+        points.emplace(*lot.roomGraph);
+    }
+    for (const auto& e : lot.wallCoverings) {
+        if (!buildScripts.isRoomWall(e.type)) {
+            continue;
+        }
+        World::WallSection section;
+        if (const auto wall = walls.find(static_cast<std::int32_t>(e.wall)); wall != walls.end() && points) {
+            const auto* from = (*points)(wall->second->from);
+            const auto* to = (*points)(wall->second->to);
+            if (from != nullptr && to != nullptr) {
+                section = {*from, *to, true};
+            }
+        }
+        sections.push_back(section);
+    }
+    world_.setWallSections(std::move(sections));
+    {
+        constexpr std::uint32_t kKeptOutStyles[] = {300, 301};
+        std::vector<WallPiece> pieces;
+        for (const auto& e : lot.wallCoverings) {
+            const auto wall = walls.find(static_cast<std::int32_t>(e.wall));
+            if (wall == walls.end() || !points || buildScripts.fenceArches.contains(e.type) ||
+                std::ranges::find(kKeptOutStyles, e.type) != std::end(kKeptOutStyles)) {
+                continue;
+            }
+            const auto* from = (*points)(wall->second->from);
+            const auto* to = (*points)(wall->second->to);
+            if (from != nullptr && to != nullptr) {
+                pieces.push_back({*from, *to, e.type});
+            }
+        }
+        world_.setWallOutline(std::make_shared<const WallOutline>(pieces), content::loadGreenhouseFences(products_));
+    }
+}
+
+void LotSimulation::wallsChanged(const content::Lot& lot) {
+    setWallsFrom(lot);
+    // Rooms as the room grid has them now (Build mode keeps it up to date), else from the walls, with the game's two
+    // other region layers as saved.
+    RoomMap rooms;
+    if (const auto grid = lot.grids.find(content::kRoomGridInstance); grid != lot.grids.end()) {
+        rooms = RoomMap(grid->second, lot.roomGraph ? lot.roomGraph->firstLevel : 0);
+    } else if (lot.roomGraph) {
+        rooms = RoomMap(*lot.roomGraph);
+    }
+    for (int layer = 0; layer < 2; ++layer) {
+        if (const auto graph = lot.layerGraphs.find(content::kLayerGraphInstances[layer]); graph != lot.layerGraphs.end()) {
+            rooms.assignLayer(layer, RoomMap(graph->second));
+        }
+    }
+    world_.setRooms(std::move(rooms));
+    // The route grids again, with every object's footprint.
+    if (routeSources_) {
+        RouteWorld built(lot, routeSources_->fenceBlocks, routeSources_->postFootprint);
+        built.addObjects(world_, code_, objectModels_, routeSources_->models);
+        routeWorld_ = std::move(built);
+        world_.takeFootprintChanges();
+        lot_.reset();
+        routeLinks_.clear();
+    }
 }
 
 const RouteWorld* LotSimulation::routeWorld() {

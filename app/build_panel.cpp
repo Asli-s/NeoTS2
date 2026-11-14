@@ -18,6 +18,9 @@ constexpr std::array<std::uint32_t, 8> kToolsNotDone = {0xA1, 0xA2, 0xA3, 0xA4, 
 // panels, each with Back.
 constexpr std::uint32_t kCategories = 0x0000A000, kFloors = 0x0000A400, kFloorSorts = 0x0000B400, kFloorBack = 0x0000B410;
 constexpr std::uint32_t kWalls = 0x0000A500, kWallSorts = 0x0000B500, kWallBack = 0x0000B510;
+// The Wall Tool category: its panel with Back, Walls & Rooms (done) and Half Walls (not done).
+constexpr std::uint32_t kWallTool = 0x0000A100, kWallToolSorts = 0x0000B100, kWallToolBack = 0x0000B110, kWallsAndRooms = 0x0000B120,
+                        kHalfWalls = 0x0000B130;
 // The sub-category buttons and the catalog's sub-sorts.
 struct SortButton {
     std::uint32_t id;
@@ -81,11 +84,13 @@ void BuildPanel::attach(ts2::ui::Screen& screen, int content) {
     categories_ = s.find(content, kCategories);
     if (categories_ >= 0) {
         for (const int category : s.children(categories_)) {
-            s.setEnabled(category, s.id(category) == kFloors || s.id(category) == kWalls);
+            s.setEnabled(category, s.id(category) == kFloors || s.id(category) == kWalls || s.id(category) == kWallTool);
         }
     }
     floorSorts_ = s.find(content, kFloorSorts);
     wallSorts_ = s.find(content, kWallSorts);
+    wallToolSorts_ = s.find(content, kWallToolSorts);
+    s.setEnabled(s.find(wallToolSorts_, kHalfWalls), false);
     catalog_ = s.find(content, kCatalog);
     for (const std::uint32_t id : {kExpanded, kWholesale, kWholesaleExpanded, kInfo}) {
         s.setVisible(s.find(catalog_, id), false);
@@ -130,6 +135,7 @@ void BuildPanel::attach(ts2::ui::Screen& screen, int content) {
 
 void BuildPanel::reset() {
     category_ = Category::None;
+    wallToolPicked_ = false;
     subsortButton_ = 0;
     page_ = 0;
     dirty_ = true;
@@ -143,9 +149,13 @@ void BuildPanel::showView() {
     // The categories until one is chosen, then its sub-categories and the catalog.
     const bool floors = category_ == Category::Floors, walls = category_ == Category::Walls;
     s.setVisible(categories_, category_ == Category::None);
+    // The Build Tools tab shares its place with each sub-category panel's Back button.
+    s.setVisible(s.find(content_, kBuildTab), category_ == Category::None);
     s.setVisible(floorSorts_, floors);
     s.setVisible(wallSorts_, walls);
-    s.setVisible(catalog_, category_ != Category::None);
+    s.setVisible(wallToolSorts_, category_ == Category::WallTool);
+    s.setChecked(s.find(wallToolSorts_, kWallsAndRooms), wallToolPicked_);
+    s.setVisible(catalog_, floors || walls);  // the Wall tool has no catalog
     for (const auto& b : kSortButtons) {
         s.setChecked(s.find((b.id & 0xFF00) == 0xB400 ? floorSorts_ : wallSorts_, b.id), subsortButton_ == b.id);
     }
@@ -187,6 +197,7 @@ BuildPanel::Click BuildPanel::clicked(int window) {
             if (w == slots_[i]) {
                 if (slotGuids_[i] != 0) {
                     (category_ == Category::Walls ? out.wall : out.floor) = slotGuids_[i];
+                    wallToolPicked_ = false;
                 }
                 return out;
             }
@@ -195,11 +206,21 @@ BuildPanel::Click BuildPanel::clicked(int window) {
     const std::uint32_t id = s.id(window);
     const int parent = s.parent(window);
     if (id == kHand) {
+        wallToolPicked_ = false;
         s.setChecked(window, true);
         out.hand = true;
         return out;
     }
-    if ((id == kFloors || id == kWalls) && parent == categories_) {
+    if (id == kWallTool && parent == categories_) {
+        category_ = Category::WallTool;
+        page_ = 0;
+    } else if (id == kWallsAndRooms && parent == wallToolSorts_) {
+        wallToolPicked_ = true;
+        out.wallTool = true;
+    } else if (id == kWallToolBack && parent == wallToolSorts_) {
+        category_ = Category::None;
+        page_ = 0;
+    } else if ((id == kFloors || id == kWalls) && parent == categories_) {
         category_ = id == kFloors ? Category::Floors : Category::Walls;
         subsortButton_ = 0;
         page_ = 0;
