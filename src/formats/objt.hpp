@@ -32,5 +32,7 @@ struct ObjectTypeTable {
 };
 
 ObjectTypeTable parse(std::span<const std::uint8_t> data);
+// The table saved as parse reads it, after `name` (the 64-byte name its resource starts with).
+std::vector<std::uint8_t> write(const ObjectTypeTable& table, std::span<const std::uint8_t> name);
 
 } // namespace ts2::objt

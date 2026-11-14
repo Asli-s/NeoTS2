@@ -73,4 +73,24 @@ bool typeChangedSinceSave(CodeSource& code, const ObjectType& type, const objt::
            type.definition.field(0x3B) != word(3);
 }
 
+objt::Entry typeTableEntry(CodeSource& code, const ObjectType& type, std::size_t semiAttributes, bool savedWithMaterial, const std::string& name) {
+    objt::Entry e;
+    e.guid = e.secondGuid = type.definition.guid();
+    const auto* functions = code.objectFunctions(type);
+    auto signature = [&](std::size_t entry) -> std::uint32_t {
+        return functions != nullptr && entry < functions->size() ? treeSignature(code, type.group, (*functions)[entry].action) : 0;
+    };
+    const std::uint32_t words[5] = {signature(0), signature(1), type.definition.field(0x3A), type.definition.field(0x3B),
+                                    static_cast<std::uint32_t>(semiAttributes)};
+    for (std::size_t i = 0; i < 5; ++i) {
+        e.unknown[2 * i] = static_cast<std::uint16_t>(words[i]);
+        e.unknown[2 * i + 1] = static_cast<std::uint16_t>(words[i] >> 16);
+    }
+    constexpr std::uint16_t kObjectKind = 4;
+    e.kind = kObjectKind;
+    e.flag = savedWithMaterial ? 1 : 0;
+    e.name = savedWithMaterial ? std::string() : name;
+    return e;
+}
+
 } // namespace ts2::sim

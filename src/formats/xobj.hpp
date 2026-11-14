@@ -99,10 +99,12 @@ struct Tail {
     std::int32_t value1 = 0;
     std::vector<std::string> strings;
     std::uint16_t value2 = 0;
+    std::int32_t stackValue = 0;  // the word after the frame count
     std::vector<StackFrame> stack;
     std::int32_t relationshipVersion = 0;
     std::vector<std::uint32_t> relationshipIds;
     Slots slots;
+    std::int16_t effectsSaved = 0;  // not 0 when the effect list follows
     std::uint16_t effectVersion = 0;
     std::vector<Effect> effects;
     std::vector<MaterialOverride> materials;
@@ -141,5 +143,9 @@ SavedObject parse(std::span<const std::uint8_t> data, std::uint32_t version,
 // isn't known: versions before 0x93 and Sims.
 SavedObject parseEmbedded(std::span<const std::uint8_t> data, std::uint32_t version, RecordKind kind,
                           std::size_t& consumed);
+
+// An object saved as parse reads it, after `name` (the 64-byte name its resource starts with): for
+// versions 0x93 and later, which parse reads whole, and not Sims. Throws for others.
+std::vector<std::uint8_t> write(const SavedObject& object, std::span<const std::uint8_t> name, RecordKind kind = RecordKind::Object);
 
 } // namespace ts2::xobj

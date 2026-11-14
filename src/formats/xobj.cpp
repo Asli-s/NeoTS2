@@ -2,6 +2,7 @@
 
 #include "formats/binary_reader.hpp"
 
+#include <cstring>
 #include <stdexcept>
 
 namespace ts2::xobj {
@@ -136,7 +137,7 @@ Tail readTail(BinaryReader& r, std::uint32_t version, RecordKind kind) {
     t.value2 = r.u16();
 
     const std::size_t frames = r.checkedCount(r.i32(), 14);
-    r.i32();
+    t.stackValue = r.i32();
     for (std::size_t i = 0; i < frames; ++i) {
         t.stack.push_back(readFrame(r, version));
     }
@@ -153,7 +154,8 @@ Tail readTail(BinaryReader& r, std::uint32_t version, RecordKind kind) {
 
     t.slots = readSlots(r);
 
-    if (r.i16() != 0) {
+    t.effectsSaved = r.i16();
+    if (t.effectsSaved != 0) {
         t.effectVersion = r.u16();
         if (t.effectVersion != 1 && t.effectVersion != 2) {
             throw std::runtime_error("XOBJ: effect list version not supported");
@@ -343,6 +345,201 @@ SavedObject parseEmbedded(std::span<const std::uint8_t> data, std::uint32_t vers
     SavedObject o = readObject(r, version, kind, false);
     consumed = data.size() - r.remaining();
     return o;
+}
+
+} // namespace ts2::xobj
+
+namespace ts2::xobj {
+
+namespace {
+
+class Writer {
+public:
+    std::vector<std::uint8_t> out;
+    void u8(std::uint8_t v) { out.push_back(v); }
+    void u16(std::uint16_t v) {
+        u8(static_cast<std::uint8_t>(v));
+        u8(static_cast<std::uint8_t>(v >> 8));
+    }
+    void i16(std::int16_t v) { u16(static_cast<std::uint16_t>(v)); }
+    void u32(std::uint32_t v) {
+        u16(static_cast<std::uint16_t>(v));
+        u16(static_cast<std::uint16_t>(v >> 16));
+    }
+    void i32(std::int32_t v) { u32(static_cast<std::uint32_t>(v)); }
+    void f32(float v) {
+        std::uint32_t bits = 0;
+        std::memcpy(&bits, &v, 4);
+        u32(bits);
+    }
+    void shorts(const std::vector<std::int16_t>& values) {
+        for (const auto v : values) {
+            i16(v);
+        }
+    }
+    void countedShorts(const std::vector<std::int16_t>& values) {
+        i16(count16(values.size()));
+        shorts(values);
+    }
+    void varString(const std::string& s) {
+        std::size_t length = s.size();
+        do {
+            const auto low = static_cast<std::uint8_t>(length & 0x7F);
+            length >>= 7;
+            u8(length != 0 ? static_cast<std::uint8_t>(low | 0x80) : low);
+        } while (length != 0);
+        out.insert(out.end(), s.begin(), s.end());
+    }
+    static std::int16_t count16(std::size_t n) {
+        if (n > 0x7FFF) {
+            throw std::runtime_error("XOBJ: too many values to write");
+        }
+        return static_cast<std::int16_t>(n);
+    }
+    static std::uint8_t count8(std::size_t n) {
+        if (n > 0xFF) {
+            throw std::runtime_error("XOBJ: too many stack values to write");
+        }
+        return static_cast<std::uint8_t>(n);
+    }
+};
+
+} // namespace
+
+std::vector<std::uint8_t> write(const SavedObject& o, std::span<const std::uint8_t> name, RecordKind kind) {
+    const std::uint32_t v = o.version;
+    if (v < kFirstDecodedTailVersion || kind == RecordKind::Person || !o.tail || name.size() != 64) {
+        throw std::runtime_error("XOBJ: only objects saved by version 0x93 and later can be written");
+    }
+    Writer w;
+    w.out.assign(name.begin(), name.end());
+    const auto& h = o.header;
+    for (const auto f : h.reserved) {
+        w.f32(f);
+    }
+    for (const auto f : h.location) {
+        w.f32(f);
+    }
+    w.i32(h.value1);
+    w.i16(h.value2);
+    w.f32(h.value3);
+    w.i32(h.value4);
+    w.i16(h.value5);
+    if (v > 0xD6) {
+        w.f32(h.value6);
+    }
+    w.countedShorts(o.attributes);
+    w.countedShorts(o.semiAttributes);
+    for (const auto t : o.temps) {
+        w.i16(t);
+    }
+    for (std::size_t i = 0; i < dataCountForVersion(v); ++i) {
+        w.i16(o.data[i]);
+    }
+    for (const auto e : o.tokenSource) {
+        w.i16(e);
+    }
+
+    const auto& t = *o.tail;
+    w.u32(t.token.guid);
+    w.u16(t.token.flags);
+    if (v > 0xC1) {
+        w.u16(t.token.value1);
+    }
+    if (v > 0xB3) {
+        w.u32(t.token.value2);
+    }
+    if (v > 0xCA) {
+        w.u16(t.token.value3);
+    }
+    w.i32(static_cast<std::int32_t>(t.token.properties.size()));
+    w.shorts(t.token.properties);
+    w.i16(Writer::count16(t.arrays.size()));
+    for (const auto& a : t.arrays) {
+        w.countedShorts(a);
+    }
+    w.countedShorts(t.shorts);
+    w.i32(t.value1);
+    w.i16(Writer::count16(t.strings.size()));
+    for (const auto& s : t.strings) {
+        w.varString(s);
+    }
+    w.u16(t.value2);
+    w.i32(static_cast<std::int32_t>(t.stack.size()));
+    w.i32(t.stackValue);
+    for (const auto& f : t.stack) {
+        w.i16(f.objectId);
+        w.i16(f.treeId);
+        w.u16(f.node);
+        w.u8(Writer::count8(f.locals.size()));
+        w.u8(Writer::count8(f.params.size()));
+        if (v >= 0xA5) {
+            w.i16(f.value1);
+            w.i16(f.value2);
+        }
+        w.shorts(f.params);
+        w.shorts(f.locals);
+        w.i32(f.value3);
+        w.i16(f.codeOwner);
+    }
+    w.i32(t.relationshipVersion);
+    w.u32(static_cast<std::uint32_t>(t.relationshipIds.size()));
+    for (const auto id : t.relationshipIds) {
+        w.u32(id);
+    }
+    w.i16(t.slots.marker);
+    if (t.slots.marker < 0) {
+        if (t.slots.marker == -100) {
+            w.i16(t.slots.extra);
+        }
+        w.countedShorts(t.slots.values);
+    } else if (t.slots.marker > 0) {
+        w.shorts(t.slots.values);
+    }
+    w.i16(t.effectsSaved);
+    if (t.effectsSaved != 0) {
+        w.u16(t.effectVersion);
+        w.i32(static_cast<std::int32_t>(t.effects.size()));
+        for (const auto& e : t.effects) {
+            w.varString(e.name);
+            w.varString(e.slot);
+            w.u32(e.value1);
+            w.u32(e.value2);
+            if (t.effectVersion >= 2) {
+                w.u8(e.value3);
+            }
+        }
+    }
+    if (v > 0x94) {
+        w.i16(Writer::count16(t.materials.size()));
+        for (const auto& m : t.materials) {
+            w.varString(m.resource);
+            w.varString(m.subset);
+            w.varString(m.material);
+        }
+    }
+    if (v > 0x95) {
+        w.u32(static_cast<std::uint32_t>(t.timers.size()));
+        for (const auto& e : t.timers) {
+            w.u32(e.value1);
+            w.u32(e.value2);
+            w.u16(e.value3);
+            w.u32(e.value4);
+            w.i32(e.value5);
+            w.i32(e.value6);
+            for (const auto x : e.values) {
+                w.i16(x);
+            }
+        }
+    }
+    if (kind == RecordKind::ObjectWithMaterial) {
+        if (t.materialBlock.size() != kMaterialBlockSize) {
+            throw std::runtime_error("XOBJ: material block of the wrong size");
+        }
+        w.out.insert(w.out.end(), t.materialBlock.begin(), t.materialBlock.end());
+    }
+    w.out.insert(w.out.end(), o.rest.begin(), o.rest.end());
+    return std::move(w.out);
 }
 
 } // namespace ts2::xobj

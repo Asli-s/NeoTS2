@@ -56,6 +56,7 @@ int main(int argc, char** argv) {
     for (auto& t : terrainPaintTests()) tests.push_back(t);
     for (auto& t : lotSaveTests()) tests.push_back(t);
     for (auto& t : wallSaveTests()) tests.push_back(t);
+    for (auto& t : objectSaveTests()) tests.push_back(t);
 
     std::size_t run = 0;
     for (std::size_t i = 0; i < tests.size(); ++i) {

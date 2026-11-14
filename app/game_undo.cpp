@@ -81,7 +81,9 @@ std::int16_t Game::rebuy(std::uint32_t guid, const LotLife::Placed& where, std::
         return 0;
     }
     lotLife_->putBack(made, where);
+    touchObject(made);
     lotLife_->addFunds(-price);
+    edits_.objectFunds[made] -= price;
     if (const auto* definition = lotLife_->buyDefinition(made)) {
         lotLife_->setCurrentValue(made, ts2::sim::catalog::placedValue(*definition));
     }
@@ -96,10 +98,12 @@ void Game::takeAway(std::int16_t object, std::int32_t refund, bool door) {
     if (object == 0) {
         return;
     }
+    touchObject(object);
     if (door) {
         cutForDoor(object, false);
     }
     lotLife_->addFunds(refund);
+    edits_.objectFunds[object] += refund;
     boughtThisVisit_.erase(object);
     lotLife_->removeObject(object);
 }
@@ -115,6 +119,7 @@ void Game::moveTo(std::int16_t object, const LotLife::Placed& where, bool door) 
     if (door) {
         cutForDoor(object, true);
     }
+    touchObject(object);
 }
 
 void Game::cutPendingDoors() {
@@ -140,7 +145,6 @@ void Game::sledgeObject(std::int16_t object) {
     const std::int32_t refund = refundFor(object);
     const auto cell = cellFor(object);
     takeAway(object, refund, door);
-    edits_.objects = true;
     ts2::diag::step(std::format("build mode: sledgehammered object {} for {}", object, refund));
     recordStep(
         std::format("the sledgehammer on object {}", object),

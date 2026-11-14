@@ -63,10 +63,11 @@ struct Expected {
 
 } // namespace
 
-RewriteReport rewritePackage(const fs::path& file, std::span<const ReplacedResource> changes) {
+RewriteReport rewritePackage(const fs::path& file, std::span<const ReplacedResource> changes, std::span<const dbpf::ResourceKey> removed) {
     for (std::size_t i = 0; i < changes.size(); ++i) {
-        if (isDirectory({changes[i].key}) || changeFor(changes.subspan(0, i), changes[i].key) != nullptr) {
-            throw std::invalid_argument("a change names the compression directory, or a key twice");
+        if (isDirectory({changes[i].key}) || changeFor(changes.subspan(0, i), changes[i].key) != nullptr ||
+            std::ranges::find(removed, changes[i].key) != removed.end()) {
+            throw std::invalid_argument("a change names the compression directory, a key twice, or a key it also removes");
         }
     }
     RewriteReport report;
@@ -97,6 +98,10 @@ RewriteReport rewritePackage(const fs::path& file, std::span<const ReplacedResou
             for (const dbpf::IndexEntry& entry : old.entries()) {
                 // The writer makes the compression directory again from the resources.
                 if (isDirectory(entry)) {
+                    continue;
+                }
+                if (std::ranges::find(removed, entry.key) != removed.end()) {
+                    ++report.removed;
                     continue;
                 }
                 Expected e;

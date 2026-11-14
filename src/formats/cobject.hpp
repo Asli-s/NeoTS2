@@ -50,6 +50,14 @@ struct SavedObject {
     std::uint32_t outerTag = 0;         // the outermost class's tag
     std::vector<SavedJoint> joints;     // left out of records older than version 0xF, whose layout isn't known
     std::vector<SavedAnimation> animations;
+    // The object's place in the scene (position, then rotation as x, y, z, w), version 0xF and later,
+    // and where in the record its floats start.
+    std::optional<std::array<float, 7>> transform;
+    std::size_t transformOffset = 0;
+    // cAnimatable's own copy of a transform and where its floats start, and where its animation
+    // count is (0 when the record has no cAnimatable).
+    std::optional<std::array<float, 7>> animatableTransform;
+    std::size_t animatableTransformOffset = 0, animationsOffset = 0;
 };
 
 // Throws std::runtime_error on data it cannot read.

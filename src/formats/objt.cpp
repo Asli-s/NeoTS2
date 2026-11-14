@@ -51,3 +51,39 @@ ObjectTypeTable parse(std::span<const std::uint8_t> data) {
 }
 
 } // namespace ts2::objt
+
+namespace ts2::objt {
+
+std::vector<std::uint8_t> write(const ObjectTypeTable& table, std::span<const std::uint8_t> name) {
+    if (name.size() != 64) {
+        throw std::runtime_error("objt: a name is 64 bytes");
+    }
+    std::vector<std::uint8_t> out(name.begin(), name.end());
+    auto put = [&](std::uint32_t v, int bytes) {
+        for (int s = 0; s < bytes * 8; s += 8) {
+            out.push_back(static_cast<std::uint8_t>(v >> s));
+        }
+    };
+    put(kMagic, 4);
+    put(table.version, 4);
+    put(table.unknown, 4);
+    for (const auto& e : table.entries) {
+        if (e.name.size() > 255) {
+            throw std::runtime_error("objt: a type's name is too long");
+        }
+        put(e.guid, 4);
+        for (const auto word : e.unknown) {
+            put(word, 2);
+        }
+        put(e.index, 2);
+        put(e.kind, 2);
+        out.push_back(static_cast<std::uint8_t>(e.name.size()));
+        out.insert(out.end(), e.name.begin(), e.name.end());
+        put(e.flag, 4);
+        put(e.secondGuid, 4);
+    }
+    put(0, 4);  // the table ends with a type 0
+    return out;
+}
+
+} // namespace ts2::objt

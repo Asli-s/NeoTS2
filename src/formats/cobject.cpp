@@ -31,7 +31,8 @@ void skipFloats(BinaryReader& r, std::size_t n) {
     r.skip(4 * n);
 }
 
-void objectData(BinaryReader& r, std::uint32_t version, std::vector<SavedJoint>& joints) {
+void objectData(BinaryReader& r, std::uint32_t version, SavedObject& saved) {
+    auto& joints = saved.joints;
     if (version < 0xD) {
         r.varString();
         r.i32();
@@ -50,7 +51,12 @@ void objectData(BinaryReader& r, std::uint32_t version, std::vector<SavedJoint>&
         }
     }
     if (version >= 0xF) {
-        skipFloats(r, kTransformFloats);
+        saved.transformOffset = r.position();
+        std::array<float, kTransformFloats> t{};
+        for (auto& v : t) {
+            v = r.f32();
+        }
+        saved.transform = t;
     }
     for (std::size_t j = r.i32Count(1 + 4 * kTransformFloats); j > 0; --j) {
         SavedJoint joint;
@@ -211,7 +217,8 @@ std::optional<SavedAnimation> entry(BinaryReader& r) {
     return a;
 }
 
-void animatableData(BinaryReader& r, std::uint32_t version, std::vector<SavedAnimation>& out) {
+void animatableData(BinaryReader& r, std::uint32_t version, SavedObject& saved) {
+    auto& out = saved.animations;
     r.f32();  // scale
     if (r.i32() != 0) {
         skipFloats(r, 2 * kTransformFloats);
@@ -244,7 +251,13 @@ void animatableData(BinaryReader& r, std::uint32_t version, std::vector<SavedAni
     if (version >= 0xE) {
         r.skip(version < 0x10 ? 4 : 8);
     }
-    skipFloats(r, kTransformFloats);
+    saved.animatableTransformOffset = r.position();
+    std::array<float, kTransformFloats> t{};
+    for (auto& v : t) {
+        v = r.f32();
+    }
+    saved.animatableTransform = t;
+    saved.animationsOffset = r.position();
     for (std::size_t n = r.i32Count(4); n > 0; --n) {
         if (auto a = entry(r)) {
             out.push_back(std::move(*a));
@@ -291,14 +304,14 @@ SavedObject parse(std::span<const std::uint8_t> data) {
     if (objectVersion < 0xC || objectVersion > 0x11) {
         fail("unknown cObject version");
     }
-    objectData(r, objectVersion, saved.joints);
+    objectData(r, objectVersion, saved);
     for (auto h = headers.rbegin() + 1; h != headers.rend(); ++h) {
         switch (h->tag) {
         case kAnimatableTag:
             if (h->version < 8 || h->version > 16) {
                 fail("unknown cAnimatable version");
             }
-            animatableData(r, h->version, saved.animations);
+            animatableData(r, h->version, saved);
             break;
         case kLocomotableTag:
             expect(h->version, 4, "unknown cLocomotable version");

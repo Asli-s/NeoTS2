@@ -42,6 +42,7 @@
 #include "content/user_props.hpp"
 #include "formats/reia.hpp"
 #include "scene/assets.hpp"
+#include "sim/object_save.hpp"
 #include "scene/builder.hpp"
 #include "scene/lot_skirt.hpp"
 #include "scene/pick.hpp"
@@ -213,6 +214,10 @@ private:
     // Saves what can be saved so far of what Build mode changed on the lot: floors, wall coverings,
     // terrain paint and the money they took (game_save.cpp). False when it couldn't be saved.
     bool saveLot();
+    // Notes an object changed in Buy or Build mode, for saving: it, its parts and its container.
+    void touchObject(std::int16_t object);
+    // The object changes saveLot writes into the lot package `original` (game_save.cpp).
+    ts2::sim::ObjectSave saveObjects(ts2::dbpf::Package& original);
     void openQuitBox(bool askSave = false, bool leaving = false);
     // Shows the baby naming dialog when the lot's scripts ask for names, and closes it when answered.
     void updateBabyNames();
@@ -798,6 +803,10 @@ private:
     struct LotEdits {
         bool floors = false, coverings = false, paint = false, walls = false, objects = false;
         std::int32_t floorFunds = 0, coveringFunds = 0, wallFunds = 0;
+        // The money each object took (below 0) or gave back, by its id.
+        std::map<std::int16_t, std::int32_t> objectFunds;
+        // The objects bought, moved or sold (each multi-tile object's parts too), and what held them.
+        std::set<std::int16_t> touched;
     };
     LotEdits edits_;
 

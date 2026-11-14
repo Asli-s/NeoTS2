@@ -21,13 +21,14 @@ struct RewriteReport {
     std::size_t copied = 0;    // resources kept exactly as they were stored
     std::size_t replaced = 0;  // resources written from `changes`
     std::size_t added = 0;     // keys of `changes` the package didn't have
+    std::size_t removed = 0;   // resources left out, as `removed` asked
     std::filesystem::path backup;
     bool madeBackup = false;   // false when the backup from an earlier rewrite was kept
 };
 
 // Saving's first step: writes the package at `file` again, every resource as it was stored (still
 // compressed where it was) in the same order, with `changes` in place of the resources with their
-// keys. The header keeps its word at 0x40 and an index with instance-high fields keeps them.
+// keys and without those `removed` names. The header keeps its word at 0x40 and an index with instance-high fields keeps them.
 //
 // It never leaves `file` half written: the new package goes to "<file>.neots2-new", is read back
 // with NeoTS2's own reader and checked resource by resource against the old one, and only then
@@ -36,6 +37,7 @@ struct RewriteReport {
 //
 // Throws std::runtime_error (and leaves `file` as it was) when the package can't be read, the new
 // one can't be written, or the check finds any difference it shouldn't have.
-RewriteReport rewritePackage(const std::filesystem::path& file, std::span<const ReplacedResource> changes = {});
+RewriteReport rewritePackage(const std::filesystem::path& file, std::span<const ReplacedResource> changes = {},
+                             std::span<const dbpf::ResourceKey> removed = {});
 
 } // namespace ts2::content

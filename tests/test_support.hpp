@@ -522,3 +522,4 @@ std::vector<Test> wallBuildTests();
 std::vector<Test> terrainPaintTests();
 std::vector<Test> lotSaveTests();
 std::vector<Test> wallSaveTests();
+std::vector<Test> objectSaveTests();
