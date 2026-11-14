@@ -3,7 +3,7 @@
 // rubs paint off back to the bare ground. Paint is free, as in the game. The ground's shape doesn't
 // change, so its paints are drawn again apart from it: the lot's own paint layers are hidden and
 // every paint is drawn over the ground anew, a few times a second while painting and when a stroke
-// ends. What is painted lasts until the lot is left, as lots aren't saved yet.
+// ends. What is painted is saved with the lot (game_save.cpp).
 #include "game.hpp"
 
 #include "content/terrain_paint.hpp"
@@ -86,12 +86,15 @@ bool Game::paintMouse(const pf::Event& e, float x, float y, bool overPanels) {
             redrawTerrainPaint();
         }
         ts2::diag::step(std::format("build mode: {} terrain", erasing_ ? "rubbed paint off the" : "painted " + buildTool_->name + " on the"));
+        // Saved when the lot is (lotChanges writes only what differs).
+        edits_.paint = true;
         // Undone, the paints go back as they were before the stroke.
         if (paintBefore_ && buildLot_) {
             auto setPaints = [this](const PaintState& state) {
                 if (buildLot_) {
                     buildLot_->terrainTextures = state.textures;
                     buildLot_->flatGrids = state.grids;
+                    edits_.paint = true;
                     redrawTerrainPaint();
                 }
             };

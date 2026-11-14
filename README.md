@@ -32,7 +32,7 @@ NeoTS2 is in early development and is not yet a complete engine. Currently worki
 - Buy mode, first stage: browse the catalog by function or room, buy and place objects on the floor (beds and sofas too), on counters and tables, and against walls; move and sell them
 - Build mode, first stages: lay and take up floor tiles, cover walls (one side, or a whole room), build and take down straight walls, put in doors, windows and arches, and paint the terrain; the sledgehammer, and undo and redo in Buy and Build mode; the other tools are not built yet
 
-Saving is not supported yet.
+Saving, first stage: answering **Yes** to "save before quitting?" (when quitting or leaving a lot) saves the lot's floors, wall coverings and terrain paint, and the money they took. Walls, doors, windows, objects and what happens in Live mode are not saved yet. The first save of a file keeps the original beside it as `<file>.neots2bak`.
 
 | Main menu | Neighborhood |
 | :---: | :---: |
@@ -54,7 +54,7 @@ The macOS and Linux builds are new and have had little testing. Bug reports are 
 NeoTS2 is not code-signed yet. On Windows, click **More info** and then **Run anyway**. On macOS,
 Control-click the app and choose **Open**.
 
-NeoTS2 does not modify save folders that already contain files. It only sets up new or empty
+NeoTS2 does not set up save folders that already contain files. It only sets up new or empty
 folders, and asks before adding the default neighborhoods.
 
 ## Crash reports

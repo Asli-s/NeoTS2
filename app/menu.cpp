@@ -1290,6 +1290,7 @@ void Game::enterLot(std::uint32_t id) {
     }
     enteredLot_ = id;
     const auto file = openFolder_ / "Lots" / (openFolder_.filename().u8string() + u8"_Lot" + std::u8string(reinterpret_cast<const char8_t*>(std::to_string(id).c_str())) + u8".package");
+    lotFile_ = file;
     ts2::diag::step(std::format("entering lot {}", id));
     lotLoadStarted_ = ts2::platform::ticksNs();
     // The ground around it, as in the game's lot view.
@@ -1432,6 +1433,7 @@ void Game::showLot(LotBuilt& built) {
     buildLot_ = std::move(built.floors);
     drawnWalls_ = std::move(built.walls);
     terrainInstance_ = terrainPaintInstance_ = -1;
+    edits_ = {};
     findDrawnWalls();
     {
         // Imposters around the lot take the lighting state's environment colour.
@@ -3223,9 +3225,12 @@ void Game::windowClicked(int window) {
         return;
     }
     if (const auto answer = quitBox_.clicked(screen_, window)) {
-        // On the save question No quits too, and Yes saves first in the game. Saving isn't done yet.
+        // On the save question No quits too, and Yes saves first (what can be saved so far).
         const bool quit = *answer == app::QuitBox::Answer::Yes || (*answer == app::QuitBox::Answer::No && quitBox_.asksSave());
         const bool leaving = quitBox_.leaving();
+        if (*answer == app::QuitBox::Answer::Yes && quitBox_.asksSave() && inLot_) {
+            saveLot();
+        }
         closeQuitBox();
         if (leaving) {
             // The same for leaving the lot: Yes and No leave, Cancel stays.

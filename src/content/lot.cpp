@@ -89,6 +89,39 @@ std::unordered_map<std::int32_t, const wallgraph::Point*> pointsOf(const wallgra
 
 } // namespace
 
+std::vector<walllayer::Entry> coveringsOfWallGraph(const wallgraph::WallGraph& rooms, const wallgraph::WallGraph& walls,
+                                                   const std::vector<walllayer::Entry>& saved, const std::vector<walllayer::Entry>& roomCoverings) {
+    std::unordered_map<std::int32_t, const walllayer::Entry*> byRoomWall;
+    for (const auto& c : roomCoverings) {
+        byRoomWall.emplace(static_cast<std::int32_t>(c.wall), &c);
+    }
+    const auto roomPoints = pointsOf(rooms);
+    std::map<WallPlace, const walllayer::Entry*> byPlace;
+    for (const auto& w : rooms.walls) {
+        const auto place = placeOf(w, roomPoints);
+        const auto covering = byRoomWall.find(w.id);
+        if (place && covering != byRoomWall.end()) {
+            byPlace.emplace(*place, covering->second);
+        }
+    }
+    const auto wallPoints = pointsOf(walls);
+    std::unordered_map<std::int32_t, const walllayer::Entry*> byWall;
+    for (const auto& w : walls.walls) {
+        const auto place = placeOf(w, wallPoints);
+        if (const auto covering = place ? byPlace.find(*place) : byPlace.end(); covering != byPlace.end()) {
+            byWall.emplace(w.id, covering->second);
+        }
+    }
+    std::vector<walllayer::Entry> out = saved;
+    for (auto& e : out) {
+        if (const auto covering = byWall.find(static_cast<std::int32_t>(e.wall)); covering != byWall.end()) {
+            e.left = covering->second->left;
+            e.right = covering->second->right;
+        }
+    }
+    return out;
+}
+
 std::vector<walllayer::Entry> coveringsOfRoomWalls(const wallgraph::WallGraph& rooms, const wallgraph::WallGraph& walls,
                                                    const std::vector<walllayer::Entry>& coverings) {
     std::unordered_map<std::int32_t, const walllayer::Entry*> byWall;

@@ -212,6 +212,7 @@ std::string Game::buildWallLine(std::array<std::int32_t, 2> to) {
         }
     }
     const WallState before = wallState();  // for undoing it
+    edits_.walls = true;  // walls aren't saved yet
     ts2::sim::renumberRooms(graph, graphLevel);
     lotLife_->addFunds(-cost);
     lot.roomGraph = std::move(graph);

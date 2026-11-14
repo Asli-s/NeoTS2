@@ -4,8 +4,8 @@
 // paying back what it cost. On the ground storey floor goes anywhere but over a pool. Above it only
 // floors already there can be covered, until walls and floors that make new rooms are built. Its wall
 // covering tool covers the wall side clicked, or with Shift every side facing the same room on that
-// storey, a wall side at a time, giving back what the coverings it replaces cost. What is changed lasts
-// until the lot is left, as lots aren't saved yet.
+// storey, a wall side at a time, giving back what the coverings it replaces cost. Floors and coverings
+// are saved with the lot (game_save.cpp).
 #include "game.hpp"
 
 #include "content/floor_edit.hpp"
@@ -266,6 +266,8 @@ std::string Game::layFloors(std::array<std::int32_t, 2> to) {
             buildLot_->grids[ts2::content::kFloorGridInstance] = floorsNow;
             buildLot_->floorPatterns = patternsNow;
             lotLife_->addFunds(funds);
+            edits_.floorFunds += funds;
+            edits_.floors = true;
             redrawFloors(level);
             lotLife_->setFloors(floorsNow, ground);
         };
@@ -275,6 +277,8 @@ std::string Game::layFloors(std::array<std::int32_t, 2> to) {
                    [setFloors, after = floors, afterPatterns = patterns, paid] { setFloors(after, afterPatterns, -paid); });
     }
     lotLife_->addFunds(refund - cost);
+    edits_.floorFunds += refund - cost;
+    edits_.floors = true;
     grid->second = std::move(floors);
     lot.floorPatterns = std::move(patterns);
     redrawFloors(level);
@@ -423,6 +427,8 @@ std::string Game::coverWalls(std::size_t wall, bool left, bool room) {
     const auto coveringsBefore = lot.wallCoverings;
     const auto patternsBefore = lot.wallPatterns;
     lotLife_->addFunds(refund - cost);
+    edits_.coveringFunds += refund - cost;
+    edits_.coverings = true;
     lot.wallCoverings = std::move(coverings);
     lot.wallPatterns = std::move(patterns);
     // Each covered side shows the new covering, its wall drawn again in full and cut down.
@@ -451,6 +457,8 @@ std::string Game::coverWalls(std::size_t wall, bool left, bool room) {
         buildLot_->wallCoverings = coveringsNow;
         buildLot_->wallPatterns = patternsNow;
         lotLife_->addFunds(funds);
+        edits_.coveringFunds += funds;
+        edits_.coverings = true;
         renderer_.addMaterials(lot_);
         for (const auto& [i, s] : sides) {
             if (i < drawnWalls_->walls.size()) {

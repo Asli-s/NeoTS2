@@ -140,6 +140,7 @@ void Game::sledgeObject(std::int16_t object) {
     const std::int32_t refund = refundFor(object);
     const auto cell = cellFor(object);
     takeAway(object, refund, door);
+    edits_.objects = true;
     ts2::diag::step(std::format("build mode: sledgehammered object {} for {}", object, refund));
     recordStep(
         std::format("the sledgehammer on object {}", object),

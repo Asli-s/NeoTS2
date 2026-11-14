@@ -2,8 +2,8 @@
 // mouse until it is put down (and paid for) or let go, and the hand picks up objects to move or sell.
 // A multi-tile object (a bed, a sofa) is held, placed, moved and sold whole, by its lead part.
 // What isn't done yet: objects that go on surfaces or walls, the
-// eyedropper, sledgehammer and undo, and daily depreciation. Purchases last until the lot is left, as
-// lots aren't saved yet.
+// eyedropper and daily depreciation. Purchases last until the lot is left, as objects
+// aren't saved yet.
 #include "game.hpp"
 
 #include "diag/log.hpp"
@@ -222,6 +222,7 @@ void Game::placeHeld() {
             return;
         }
         lotLife_->addFunds(-buyHeld_->price);
+        edits_.objects = true;  // objects aren't saved yet
         // Once down it is worth its price less its initial depreciation. Selling it before Buy mode
         // closes still gives back what it cost.
         if (const auto* definition = lotLife_->buyDefinition(object)) {
@@ -231,6 +232,7 @@ void Game::placeHeld() {
         ts2::diag::step(std::format("buy mode: bought object {} for {}", object, buyHeld_->price));
     } else {
         ts2::diag::step(std::format("buy mode: moved object {}", object));
+        edits_.objects = true;
     }
     // A door or window put down cuts its walls.
     if (buyHeld_->door) {
@@ -284,6 +286,7 @@ void Game::sellHeld() {
         const auto* definition = lotLife_->buyDefinition(object);
         const std::uint32_t guid = definition != nullptr ? definition->guid() : 0;
         lotLife_->addFunds(refund);
+        edits_.objects = true;
         boughtThisVisit_.erase(object);
         ts2::diag::step(std::format("buy mode: sold object {} for {}", object, refund));
         if (buyHeld_->from && guid != 0) {

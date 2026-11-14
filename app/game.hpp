@@ -207,8 +207,12 @@ private:
     // the camera only drifts behind it.
     bool neighborhoodCovered() const { return chooserOpen() || quitBox_.isOpen(); }
     // Whether the lot has something to save: as in the game, once time has run unpaused since the
-    // lot loaded. The game's other reasons are not known yet.
-    bool lotChanged() const { return lotRan_; }
+    // lot loaded, and once anything was changed in Build or Buy mode.
+    // The game's other reasons are not known yet.
+    bool lotChanged() const { return lotRan_ || edits_.floors || edits_.coverings || edits_.paint || edits_.walls || edits_.objects; }
+    // Saves what can be saved so far of what Build mode changed on the lot: floors, wall coverings,
+    // terrain paint and the money they took (game_save.cpp). False when it couldn't be saved.
+    bool saveLot();
     void openQuitBox(bool askSave = false, bool leaving = false);
     // Shows the baby naming dialog when the lot's scripts ask for names, and closes it when answered.
     void updateBabyNames();
@@ -788,6 +792,14 @@ private:
     std::vector<std::pair<std::size_t, ts2::scene::Transform>> plumbobPlaces_;
     std::vector<ts2::scene::EffectModels::Placed> effectModelPlaces_;
     std::uint32_t enteredLot_ = 0;
+    std::filesystem::path lotFile_;  // the entered lot's package
+    // What Build and Buy mode changed on the lot since it was entered or saved, and the money taken
+    // (below 0) or given back by the floors and coverings laid.
+    struct LotEdits {
+        bool floors = false, coverings = false, paint = false, walls = false, objects = false;
+        std::int32_t floorFunds = 0, coveringFunds = 0;
+    };
+    LotEdits edits_;
 
     bool running_ = true;
     bool down_ = false;

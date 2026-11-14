@@ -143,6 +143,12 @@ constexpr std::uint32_t kWaterHeightGridInstance = 0x3B76;
 std::vector<walllayer::Entry> coveringsOfRoomWalls(const wallgraph::WallGraph& rooms, const wallgraph::WallGraph& walls,
                                                    const std::vector<walllayer::Entry>& coverings);
 
+// The other way, for saving: the wall layer as saved (`saved`, naming the wall graph's walls), each
+// entry given the coverings `roomCoverings` (by room graph wall) has for the room graph wall in its
+// place. Entries with none there keep theirs.
+std::vector<walllayer::Entry> coveringsOfWallGraph(const wallgraph::WallGraph& rooms, const wallgraph::WallGraph& walls,
+                                                   const std::vector<walllayer::Entry>& saved, const std::vector<walllayer::Entry>& roomCoverings);
+
 // Loads the objects saved in a lot package (Neighborhoods/<hood>/Lots/<hood>_Lot<n>.package).
 // Like the game, the objects are those the object map (ObjM) lists, read with the map's version.
 Lot loadLot(const std::filesystem::path& path);
