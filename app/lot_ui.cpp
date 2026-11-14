@@ -44,7 +44,7 @@ constexpr std::array<std::uint32_t, 7> kStoryButtonsNotDone = {0x6CD88190, 0xACB
                                                                0x2C8006BC, 0x0CB23B3C, 0x6D4898DD};
 constexpr std::uint32_t kFloorUp = 0x00002001, kFloorDown = 0x00002000, kToggleCeiling = 0x00007000;
 // The puck's Video Capture button (V).
-constexpr std::uint32_t kVideoCapture = 0x00005000;
+constexpr std::uint32_t kVideoCapture = 0x00005000, kSnapshot = 0x00006000;  // and Camera Snapshot (C)
 // The camera buttons: rotate left and right, zoom in and out.
 constexpr std::uint32_t kCameraButtons[] = {0x00001001, 0x00001000, 0x00001002, 0x00001003};
 // One wall button per wall mode, in the same place. The one for the mode in use shows.
@@ -765,6 +765,9 @@ LotUi::Action LotUi::clicked(int window) {
         }
         if (id == kToggleCeiling) {
             return Action::ToggleCeiling;
+        }
+        if (id == kSnapshot) {
+            return Action::Snapshot;
         }
         if (id == kVideoCapture) {
             return Action::VideoCapture;

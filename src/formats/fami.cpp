@@ -42,7 +42,7 @@ Family parse(std::span<const std::uint8_t> data) {
         f.members.push_back(r.u32());
     }
     if (f.version > 0x4A) {
-        f.id7 = r.u32();
+        f.albumId = r.u32();
     }
     if (f.version > 0x4E) {
         f.value8 = r.u32();

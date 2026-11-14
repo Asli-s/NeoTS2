@@ -295,7 +295,7 @@ int showFamilies(const std::filesystem::path& hood) {
         std::printf("family 0x%04X  v0x%X  lot %4d%s  current %4d  vacation %4d  funds %7d / %7d  flags 0x%X  "
                     "values %d %d %u  id 0x%08X  members %zu (%zu neighbors)\n",
                     e.key.instance, f.version, f.lot, f.lot == 0 ? "" : lotExists ? "" : "?", f.currentLot,
-                    f.vacationLot, f.funds, f.funds2, f.flags, f.value4, f.value6, f.value8, f.id7, f.members.size(),
+                    f.vacationLot, f.funds, f.funds2, f.flags, f.value4, f.value6, f.value8, f.albumId, f.members.size(),
                     found);
     }
     std::printf("%zu families (%zu with bytes left over); %zu of %zu lots exist; %zu of %zu members are "

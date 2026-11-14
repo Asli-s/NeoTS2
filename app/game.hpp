@@ -311,6 +311,8 @@ private:
     // Camera Snapshot (C in the neighborhood): saves the view, without the panels, as one of the
     // neighborhood's snapshots in the user folder's Storytelling folder.
     void takeSnapshot();
+    // The story album of the family living on the open lot, from its family record. None when none has one.
+    std::optional<std::uint32_t> lotFamilyAlbum() const;
     // Video Capture (game_video.cpp): V or the puck's video button starts and stops a recording of
     // the view; it stops by itself after the options' longest time, or when the view goes.
     void toggleVideoCapture();
@@ -350,6 +352,26 @@ private:
     std::optional<HeldDecoration> heldDecoration_;
     HoodEdits hoodEdits_;
     std::vector<std::uint8_t> hoodHidden_;  // per neighborhood instance: 1 when deleted
+    // Undo and Redo for Decorations: each place, move or delete is a step holding what changed on
+    // the neighborhood before and after it, and how its decoration stood (hidden, place, ground).
+    struct DecorationState {
+        bool hidden = true;
+        ts2::scene::Transform transform;
+        std::optional<std::array<float, 4>> ground;
+    };
+    struct DecorationStep {
+        HoodEdits before, after;
+        std::size_t instance = 0;
+        DecorationState was, now;
+    };
+    std::vector<DecorationStep> decorationUndo_, decorationRedo_;
+    std::optional<std::pair<HoodEdits, DecorationState>> pickedUp_;  // before the hand picked one up
+    DecorationState decorationState(std::size_t instance) const;
+    void applyDecorationState(std::size_t instance, const DecorationState& state);
+    void recordDecorationStep(const HoodEdits& before, std::size_t instance, const DecorationState& was);
+    // Undoes the last step, or redoes the last undone (`redo`).
+    void undoDecoration(bool redo);
+    void clearDecorationSteps();
     std::map<std::uint32_t, ts2::content::NeighborhoodObjectType> hoodObjectTypes_;
     // The catalog tool or entry the panel has chosen now: the hand lets go of what it held.
     void decorationToolChosen();

@@ -70,6 +70,8 @@ public:
     std::uint32_t chosenDecoration() const { return chosenDecoration_; }
     // Shows a tool as chosen (None when the hand lets go of what it held).
     void setDecorationTool(DecorationTool tool, std::uint32_t guid = 0);
+    // Lets the Decorations Undo and Redo buttons be pressed when there is something to undo or redo.
+    void setDecorationUndo(bool canUndo, bool canRedo);
 
     // The open neighborhood's id, its story album's too (snapshots are filed under it).
     std::optional<std::int32_t> neighborhoodId() const { return neighborhoodId_; }
@@ -99,7 +101,7 @@ public:
     // The screen has a new size: what sits at its bottom edge moves with it.
     void setSize(int width, int height);
     // DecorationTool: a Decorations tool or catalog entry was chosen (see decorationTool).
-    enum class Action { None, MainMenu, EnterLot, Quit, GameOptionChanged, GraphicsOptionChanged, DayNight, Snapshot, VideoCapture, DecorationTool };
+    enum class Action { None, MainMenu, EnterLot, Quit, GameOptionChanged, GraphicsOptionChanged, DayNight, Snapshot, VideoCapture, DecorationTool, DecorationUndo, DecorationRedo };
     // A button released: what the player asked for.
     Action clicked(int window);
     // The puck's camera button held down. They turn and zoom while held, as the lot puck's do.

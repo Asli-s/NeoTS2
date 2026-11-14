@@ -20,7 +20,9 @@ struct Family {
     std::int32_t value6 = 0;     // from version 2
     std::uint32_t flags = 0;     // from version 7
     std::vector<std::uint32_t> members;  // the Sims' GUIDs
-    std::uint32_t id7 = 0;       // above version 0x4A
+    // Above version 0x4A: the family's story album (Storytelling/webentry_<album>.xml and its
+    // snapshot_<album>_*.jpg), 0 for none.
+    std::uint32_t albumId = 0;
     std::uint32_t value8 = 0;    // above version 0x4E
     std::int32_t funds2 = 0;     // from version 0x51, else the funds
     std::size_t extraBytes = 0;  // left after the last value

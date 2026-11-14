@@ -295,12 +295,16 @@ bool Game::decorationClick(float x, float y) {
         object.angle = held.angle;
         object.type = held.type;
         object.bounds = decorationBounds(held.instance, *ground, held.angle);
+        // Undo goes back to before it was picked up, or to the catalog entry not placed.
+        const HoodEdits editsBefore = held.moving && pickedUp_ ? pickedUp_->first : hoodEdits_;
+        const DecorationState stateBefore = held.moving && pickedUp_ ? pickedUp_->second : DecorationState{true, {}, {}};
         const auto place = ts2::scene::Transform::at((*ground)[0], (*ground)[1], (*ground)[2], held.angle * kDegrees);
         hood_.scene.instances[held.instance].transform = place;
         hood_.scene.instances[held.instance].ground = object.bounds;
         renderer_.setPlace(held.instance, place);
         setHoodHidden(held.instance, false);
         hoodEdits_.added.push_back({held.instance, inDecorationList(entry->second), object});
+        recordDecorationStep(editsBefore, held.instance, stateBefore);
         heldDecoration_.reset();
         ts2::diag::step(std::format("decorations: placed {} at ({:.1f}, {:.1f})", entry->second.model, (*ground)[0], (*ground)[1]));
         // A catalog entry stays chosen: another one follows the mouse.
@@ -346,6 +350,7 @@ bool Game::decorationClick(float x, float y) {
         return true;
     }
     // Picked up: it follows the mouse until placed, deleted or put back.
+    pickedUp_ = std::pair{hoodEdits_, decorationState(*under)};
     if (record) {
         hoodEdits_.removed.insert(*record);
     } else {
@@ -368,7 +373,11 @@ bool Game::decorationKey(pf::Key key) {
     }
     if ((key == pf::Key::Delete || key == pf::Key::Backspace) && heldDecoration_->moving) {
         ts2::diag::step("decorations: deleted one");
+        const std::size_t instance = heldDecoration_->instance;
         dropHeldDecoration(false);
+        if (pickedUp_) {
+            recordDecorationStep(pickedUp_->first, instance, pickedUp_->second);
+        }
         return true;
     }
     if (key == pf::Key::Comma || key == pf::Key::Period) {
@@ -377,6 +386,55 @@ bool Game::decorationKey(pf::Key key) {
         return true;
     }
     return false;
+}
+
+Game::DecorationState Game::decorationState(std::size_t instance) const {
+    const auto& i = hood_.scene.instances[instance];
+    return {instance < hoodHidden_.size() && hoodHidden_[instance] != 0, i.transform, i.ground};
+}
+
+void Game::applyDecorationState(std::size_t instance, const DecorationState& state) {
+    auto& i = hood_.scene.instances[instance];
+    i.transform = state.transform;
+    i.ground = state.ground;
+    renderer_.setPlace(instance, state.transform);
+    setHoodHidden(instance, state.hidden);
+}
+
+void Game::recordDecorationStep(const HoodEdits& before, std::size_t instance, const DecorationState& was) {
+    decorationUndo_.push_back({before, hoodEdits_, instance, was, decorationState(instance)});
+    decorationRedo_.clear();
+    pickedUp_.reset();
+    hoodUi_.setDecorationUndo(true, false);
+}
+
+void Game::undoDecoration(bool redo) {
+    auto& from = redo ? decorationRedo_ : decorationUndo_;
+    auto& to = redo ? decorationUndo_ : decorationRedo_;
+    if (from.empty()) {
+        return;
+    }
+    // What the hand holds goes back first, so the step meets the neighborhood as it left it.
+    dropHeldDecoration(true);
+    pickedUp_.reset();
+    const DecorationStep step = from.back();
+    from.pop_back();
+    hoodEdits_ = redo ? step.after : step.before;
+    applyDecorationState(step.instance, redo ? step.now : step.was);
+    to.push_back(step);
+    hoodUi_.setDecorationUndo(!decorationUndo_.empty(), !decorationRedo_.empty());
+    ts2::diag::step(redo ? "decorations: redone" : "decorations: undone");
+    // A catalog entry still chosen gets a new one to follow the mouse.
+    if (hoodUi_.decorationTool() == app::NeighborhoodUi::DecorationTool::Place) {
+        decorationToolChosen();
+    }
+}
+
+void Game::clearDecorationSteps() {
+    decorationUndo_.clear();
+    decorationRedo_.clear();
+    pickedUp_.reset();
+    hoodUi_.setDecorationUndo(false, false);
 }
 
 bool Game::saveNeighborhood() {
@@ -442,6 +500,7 @@ bool Game::saveNeighborhood() {
     }
     hood_.stats.placedRecords = std::move(records);
     hoodEdits_ = {};
+    clearDecorationSteps();  // the steps name records as they were before the save
     return true;
 }
 

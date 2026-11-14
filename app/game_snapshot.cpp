@@ -1,9 +1,13 @@
-// Camera Snapshot (C): a picture of the view, without the panels, saved where the game keeps the
-// neighborhood's snapshots for its story.
+// Camera Snapshot (C): a picture of the view, without the panels, saved where the game keeps
+// snapshots: under the neighborhood's story album in the neighborhood, under the family's album on
+// its lot.
 #include "game.hpp"
 
+#include "content/neighborhood.hpp"
 #include "content/ui_meters.hpp"
 #include "diag/log.hpp"
+#include "formats/dbpf.hpp"
+#include "formats/fami.hpp"
 #include "formats/jpeg.hpp"
 #include "platform/platform.hpp"
 
@@ -19,6 +23,7 @@ namespace {
 // The game's snapshots and their thumbnails, 4:3.
 constexpr std::uint32_t kSnapshotWidth = 400, kSnapshotHeight = 300, kThumbnailWidth = 128, kThumbnailHeight = 96;
 constexpr int kSnapshotQuality = 90;
+constexpr std::uint32_t kFamilyType = 0x46414D49;  // FAMI
 
 // The middle of a picture cut to 4:3.
 ts2::tga::Pixels middleFourByThree(const ts2::scene::Image& image) {
@@ -49,9 +54,41 @@ bool writeFile(const std::filesystem::path& path, const std::vector<std::uint8_t
 
 } // namespace
 
+std::optional<std::uint32_t> Game::lotFamilyAlbum() const {
+    // The album of the family living on the lot, from its family record in the neighborhood.
+    try {
+        const auto hoodFile = ts2::content::neighborhoodPackage(ts2::content::neighborhoodOfLot(lotFile_));
+        ts2::dbpf::Package hood(hoodFile);
+        for (const auto& e : hood.entries()) {
+            if (e.key.type != kFamilyType) {
+                continue;
+            }
+            const auto family = ts2::fami::parse(hood.read(e));
+            if (family.lot == static_cast<std::int32_t>(enteredLot_) && family.albumId != 0) {
+                return family.albumId;
+            }
+        }
+    } catch (const std::exception& ex) {
+        ts2::diag::warnOnce(std::string("camera snapshot: the lot's family can't be read: ") + ex.what());
+    }
+    return std::nullopt;
+}
+
 void Game::takeSnapshot() {
-    const auto album = hoodUi_.neighborhoodId();
-    if (!inNeighborhood_ || !album || options_.user.empty()) {
+    // A lot's snapshots go to the album of the family living there, the neighborhood's to its story.
+    std::optional<std::uint32_t> album;
+    if (inLot_) {
+        album = lotFamilyAlbum();
+        if (!album) {
+            ts2::diag::warning("camera snapshot: no family on this lot has an album, so no snapshot was taken");
+            return;
+        }
+    } else if (inNeighborhood_) {
+        if (const auto id = hoodUi_.neighborhoodId()) {
+            album = static_cast<std::uint32_t>(*id);
+        }
+    }
+    if (!album || options_.user.empty()) {
         return;
     }
     // The view as it is, the panels left out for the one picture.
@@ -75,8 +112,8 @@ void Game::takeSnapshot() {
     std::filesystem::path snapshotPath, thumbnailPath;
     for (int tries = 0; tries < 100; ++tries) {
         const std::uint32_t id = static_cast<std::uint32_t>(random()) | 1u;  // never 0
-        snapshotPath = folder / std::format("snapshot_{:08x}_{:08x}.jpg", static_cast<std::uint32_t>(*album), id);
-        thumbnailPath = folder / std::format("thumbnail_{:08x}_{:08x}.jpg", static_cast<std::uint32_t>(*album), id);
+        snapshotPath = folder / std::format("snapshot_{:08x}_{:08x}.jpg", *album, id);
+        thumbnailPath = folder / std::format("thumbnail_{:08x}_{:08x}.jpg", *album, id);
         if (!std::filesystem::exists(snapshotPath, ec) && !std::filesystem::exists(thumbnailPath, ec)) {
             break;
         }

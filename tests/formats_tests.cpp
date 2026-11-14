@@ -734,7 +734,7 @@ void familyRecordIsReadByVersion() {
     }
     const auto f = ts2::fami::parse(d);
     CHECK(f.lot == 23 && f.currentLot == 23 && f.vacationLot == 0 && f.funds == 20000 && f.flags == 9 && f.funds2 == 20000);
-    CHECK(f.members.size() == 2 && f.members[1] == 0x0A000102 && f.id7 == 0xE0000301 && f.extraBytes == 0);
+    CHECK(f.members.size() == 2 && f.members[1] == 0x0A000102 && f.albumId == 0xE0000301 && f.extraBytes == 0);
 }
 
 // One Sim's entry in a family ties record: father 3, mother 5, children 20 and 21.

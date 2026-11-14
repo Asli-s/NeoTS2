@@ -727,6 +727,9 @@ void Game::showNeighborhood(Built built) {
     hoodEdits_ = {};
     hoodHidden_.clear();
     hoodUi_.open(openFolder_, openName_, std::move(hood_.panel));
+    decorationUndo_.clear();
+    decorationRedo_.clear();
+    pickedUp_.reset();
     if (options_.bin == "families") {
         hoodUi_.showBin(app::NeighborhoodUi::Bin::Families);
     } else if (options_.bin == "lots") {
@@ -1681,6 +1684,8 @@ app::LotUi::Action Game::lotKey(const pf::Event& e) {
     case pf::Key::Pad2: return Action::High;
     case pf::Key::Num3:
     case pf::Key::Pad3: return Action::Ultra;
+    case pf::Key::C:
+        return e.ctrl || e.alt ? Action::None : Action::Snapshot;
     case pf::Key::V:
         return e.ctrl || e.alt ? Action::None : Action::VideoCapture;
     case pf::Key::F5:
@@ -1764,6 +1769,7 @@ void Game::lotAction(app::LotUi::Action action) {
     switch (action) {
     case Action::Pause: lotLife_->setPaused(!lotLife_->paused()); break;
     case Action::VideoCapture: toggleVideoCapture(); break;
+    case Action::Snapshot: takeSnapshot(); break;
     case Action::Normal: lotLife_->setSpeed(ts2::sim::Speed::Normal); break;
     case Action::High: lotLife_->setSpeed(ts2::sim::Speed::High); break;
     case Action::Ultra: lotLife_->setSpeed(ts2::sim::Speed::Ultra); break;
@@ -3175,6 +3181,9 @@ void Game::handleEvent(const pf::Event& e) {
         takeSnapshot();
     } else if (e.type == pf::Event::Type::KeyDown && !e.repeat && inNeighborhood_ && !neighborhoodCovered() && e.key == pf::Key::L) {
         toggleNight();
+    } else if (e.type == pf::Event::Type::KeyDown && inNeighborhood_ && !neighborhoodCovered() && e.ctrl && (e.key == pf::Key::Z || e.key == pf::Key::Y) &&
+               hoodUi_.bin() == app::NeighborhoodUi::Bin::Decorations) {
+        undoDecoration(e.key == pf::Key::Y);  // Ctrl+Z and Ctrl+Y, as the Decorations tooltips say
     } else if (e.type == pf::Event::Type::KeyDown && inNeighborhood_ && !neighborhoodCovered() && decorationKey(e.key)) {
         // What the Decorations hand holds: let go, deleted or turned.
     } else if (e.type == pf::Event::Type::KeyDown && !e.repeat && inNeighborhood_ && !neighborhoodCovered() &&
@@ -3296,6 +3305,8 @@ void Game::windowClicked(int window) {
         const auto action = hoodUi_.clicked(window);
         if (action == app::NeighborhoodUi::Action::Quit) {
             openQuitBox(hoodEdits_.changed());
+        } else if (action == app::NeighborhoodUi::Action::DecorationUndo || action == app::NeighborhoodUi::Action::DecorationRedo) {
+            undoDecoration(action == app::NeighborhoodUi::Action::DecorationRedo);
         } else if (action == app::NeighborhoodUi::Action::DecorationTool) {
             decorationToolChosen();
         } else if (action == app::NeighborhoodUi::Action::VideoCapture) {

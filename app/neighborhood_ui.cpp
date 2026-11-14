@@ -505,7 +505,7 @@ void NeighborhoodUi::open(const fs::path& folder, const std::string& name, Conte
     }
     showLotView(LotView::Lots);
     screen_.setVisible(lots_, false);
-    // The Decorations catalog, opening on its plants. Undo and Redo aren't built yet (and the
+    // The Decorations catalog, opening on its plants. Undo and Redo wait for something to undo (and the
     // strip's Delete Custom Content stays greyed, as nothing in it is chosen).
     decorations_ = screen_.load(kScripts, kDecorationBin, binX, binY);
     if (decorations_ >= 0) {
@@ -711,6 +711,10 @@ NeighborhoodUi::Action NeighborhoodUi::clicked(int window) {
     } else if (const auto item = stripItemAt(decorationStrip_, window); item && *item < decorationShown_.size()) {
         setDecorationTool(DecorationTool::Place, decorationShown_[*item]);
         return Action::DecorationTool;
+    } else if (decorations_ >= 0 && window == screen_.find(decorations_, kDecorationUndo)) {
+        return Action::DecorationUndo;
+    } else if (decorations_ >= 0 && window == screen_.find(decorations_, kDecorationRedo)) {
+        return Action::DecorationRedo;
     } else if (decorations_ >= 0 && window == screen_.find(decorations_, kDecorationHand)) {
         setDecorationTool(decorationTool_ == DecorationTool::Hand ? DecorationTool::None : DecorationTool::Hand);
         return Action::DecorationTool;
@@ -1083,6 +1087,13 @@ std::optional<std::size_t> NeighborhoodUi::stripItemAt(const Strip& strip, int w
         }
     }
     return std::nullopt;
+}
+
+void NeighborhoodUi::setDecorationUndo(bool canUndo, bool canRedo) {
+    if (decorations_ >= 0) {
+        screen_.setEnabled(screen_.find(decorations_, kDecorationUndo), canUndo);
+        screen_.setEnabled(screen_.find(decorations_, kDecorationRedo), canRedo);
+    }
 }
 
 void NeighborhoodUi::setDecorationTool(DecorationTool tool, std::uint32_t guid) {
