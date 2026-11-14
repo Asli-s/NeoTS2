@@ -3264,7 +3264,7 @@ void Game::mouseEvent(const pf::Event& e) {
         }
         if (cas_.isOpen()) {
             const auto [ux, uy] = toUi(x, y);
-            cas_.pointerDown(screen_.mouseWindow(ux, uy), ux, uy);
+            casPointer(screen_.mouseWindow(ux, uy), ux, uy);
         }
         down_ = true;
         downX_ = x;
@@ -3449,7 +3449,7 @@ std::optional<T> Game::finished(std::future<T>& job, const char* what) {
 // asked for. False while it waits for the Sims or for the lot to play on.
 bool Game::takePicture() {
     // Create-a-Sim's Sim is built and drawn before the picture.
-    if (cas_.isOpen() && (casRebuild_ || casRedraw_ || casListChoices_ || casPicturesPending())) {
+    if (casBusy()) {
         updateCas();
         return false;
     }
@@ -3476,14 +3476,22 @@ bool Game::takePicture() {
         // One click at a time while Create-a-Sim is busy with the last one (its Sim or its choices),
         // so a click can reach what the last one brought up.
         while (uiClickNext_ < options_.uiClicks.size()) {
-            if (cas_.isOpen() && (casRebuild_ || casRedraw_ || casListChoices_ || casPicturesPending())) {
+            if (casBusy()) {
                 updateCas();
                 return false;
             }
             const auto [wx, wy, kind] = options_.uiClicks[uiClickNext_++];
+            if (kind == 3) {
+                // Typed into the box the clicks focused.
+                const auto at = static_cast<std::size_t>(wx);
+                if (cas_.isOpen() && cas_.editing() && at < options_.uiTypes.size()) {
+                    cas_.typed(options_.uiTypes[at]);
+                }
+                continue;
+            }
             const auto [cx, cy] = toUi(static_cast<float>(wx), static_cast<float>(wy));
             if (cas_.isOpen()) {
-                cas_.pointerDown(screen_.mouseWindow(cx, cy), cx, cy);
+                casPointer(screen_.mouseWindow(cx, cy), cx, cy);
             }
             if (StoryEditor* editor = activeStoryEditor()) {
                 editor->pointerDown(screen_.mouseWindow(cx, cy));
@@ -3510,7 +3518,7 @@ bool Game::takePicture() {
         }
         showSprites(static_cast<double>(ts2::platform::ticksNs()) / 1e9, true);
     }
-    if (cas_.isOpen() && (casRebuild_ || casRedraw_ || casListChoices_ || casPicturesPending())) {
+    if (casBusy()) {
         return false;  // the clicks changed the Sim: it is drawn again first
     }
     // A neighborhood being built again (a new Water) is waited for.

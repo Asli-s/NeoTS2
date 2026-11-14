@@ -28,6 +28,9 @@ using ts2::scenegraph::Link;
 constexpr float kStandX = 0, kStandY = 0, kStandZ = 0;
 // The picture's camera: this much of the Sim's height in view, from a little above its middle.
 constexpr float kFovY = 0.5f, kHeightShown = 1.32f, kLookAt = 0.56f;
+// The family's row: its members this far apart, each about this wide, and at least this tall a
+// frame (toddlers and children alone stand no bigger than they are).
+constexpr float kMemberSpacing = 0.75f, kMemberWidth = 0.9f, kFamilyLeastHeight = 1.6f;
 constexpr std::uint32_t kEveryday = 1, kHuman = 1;
 // Parts of these flags are left out of what Create-a-Sim offers, as Make New Character leaves them out
 // of what it draws (career uniforms, costumes, hats).
@@ -101,6 +104,8 @@ void Game::closeCas() {
     casActor_.reset();
     casMade_.reset();
     casChoices_.clear();
+    casLooks_.clear();
+    casRebuild_ = casRedraw_ = casListChoices_ = casFamilyRedraw_ = false;
     hoodUi_.hideAll(false);
     ts2::diag::step("create-a-sim: closed");
 }
@@ -109,9 +114,49 @@ bool Game::casCatalogReady() const {
     return casCatalog_.valid() && casCatalog_.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
 }
 
-void Game::casClicked(int window) {
-    switch (cas_.clicked(window)) {
+void Game::casClicked(int window) { casAction(cas_.clicked(window)); }
+
+void Game::casPointer(int window, int x, int y) { casAction(cas_.pointerDown(window, x, y)); }
+
+bool Game::casBusy() const {
+    return cas_.isOpen() && (casRebuild_ || casRedraw_ || casListChoices_ || casFamilyRedraw_ || casPicturesPending());
+}
+
+void Game::casAction(CasScreen::Action action) {
+    const std::size_t member = cas_.member();
+    switch (action) {
     case CasScreen::Action::Cancel: closeCas(); break;
+    case CasScreen::Action::NewSim:
+        casMade_.reset();
+        casRebuild_ = true;
+        break;
+    case CasScreen::Action::EditSim:
+        // The member's look as it was made.
+        casMade_ = member < casLooks_.size() ? std::optional(casLooks_[member]) : std::nullopt;
+        casRebuild_ = true;
+        break;
+    case CasScreen::Action::SimDone: {
+        auto look = casMade_.value_or(ts2::scene::MadeLook{});
+        if (member < casLooks_.size()) {
+            casLooks_[member] = std::move(look);
+        } else {
+            casLooks_.push_back(std::move(look));
+        }
+        casFamilyRedraw_ = true;
+        break;
+    }
+    case CasScreen::Action::SimDropped: casFamilyRedraw_ = true; break;
+    case CasScreen::Action::MemberDeleted:
+        if (member < casLooks_.size()) {
+            casLooks_.erase(casLooks_.begin() + static_cast<std::ptrdiff_t>(member));
+        }
+        casFamilyRedraw_ = true;
+        break;
+    case CasScreen::Action::Accepted:
+        ts2::diag::step(std::format("create-a-sim: family \"{}\" accepted with {} Sims; saving new families isn't built yet, so it isn't kept",
+                                    cas_.familyName(), cas_.members().size()));
+        closeCas();
+        break;
     case CasScreen::Action::Remake:
         casMade_.reset();
         casRebuild_ = true;
@@ -143,6 +188,13 @@ void Game::casClicked(int window) {
 void Game::updateCas() {
     if (!cas_.isOpen() || !casCatalogReady()) {
         return;  // the catalog is read once, in the background; the Sim waits for it
+    }
+    if (cas_.inFamily()) {
+        if (casFamilyRedraw_) {
+            casFamilyRedraw_ = false;
+            drawCasFamily();
+        }
+        return;
     }
     if (casRebuild_) {
         casRebuild_ = false;
@@ -272,7 +324,7 @@ void Game::listCasChoices() {
     cas_.setChoices(casChoices_.size(), wornChoice);
 }
 
-std::optional<std::size_t> Game::buildCasLook(const ts2::scene::MadeLook& made, std::uint32_t category, bool hairOnly) {
+std::optional<std::size_t> Game::buildCasLook(const ts2::scene::MadeLook& made, std::uint32_t category, bool hairOnly, float x) {
     using namespace ts2::scene;
     auto& assets = *assets_.get();
     SimLook look = madeSimLook(assets, casCatalog_.get(), made, category);
@@ -288,7 +340,7 @@ std::optional<std::size_t> Game::buildCasLook(const ts2::scene::MadeLook& made, 
     }
     SceneBuilder builder(assets);
     std::vector<Transform> world;
-    Actor actor = buildSim(builder, *casRigs_, look, Transform::at(kStandX, kStandY, kStandZ, 0), 0, "create-a-sim",
+    Actor actor = buildSim(builder, *casRigs_, look, Transform::at(kStandX + x, kStandY, kStandZ, 0), 0, "create-a-sim",
                            standingIdle(assets, look.age), world);
     builder.scene().actors.push_back(std::move(actor));
     const std::size_t first = hood_.scene.instances.size();
@@ -438,4 +490,104 @@ void Game::drawCasChoice(std::size_t choice) {
     cas_.setChoicePicture(choice, picture);
 }
 
+
+void Game::drawCasFamily() {
+    using namespace ts2::scene;
+    const int width = cas_.previewWidth(), height = cas_.previewHeight();
+    const ts2::tga::Pixels nothing{1, 1, {0, 0, 0, 0}};
+    const std::size_t count = casLooks_.size();
+    if (count == 0 || width <= 0 || height <= 0) {
+        cas_.setFamilyPicture(nothing, {});
+        return;
+    }
+    // The members in a row along the world's x axis, the first on the picture's left (the
+    // portrait camera looks at a Sim from +y, so the picture's right is -x).
+    std::vector<float> along(count);
+    std::vector<std::optional<std::size_t>> actors(count);
+    try {
+        for (std::size_t i = 0; i < count; ++i) {
+            along[i] = -(static_cast<float>(i) - static_cast<float>(count - 1) / 2) * kMemberSpacing;
+            const std::size_t first = hood_.scene.instances.size();
+            actors[i] = buildCasLook(casLooks_[i], kEveryday, false, along[i]);
+            for (std::size_t k = first; k < hood_.scene.instances.size(); ++k) {
+                casInstances_.push_back(k);
+            }
+        }
+    } catch (const std::exception& ex) {
+        ts2::diag::warning(std::string("create-a-sim: the family can't be built: ") + ex.what());
+    }
+    // Each posed as for its portrait; the first's shot gives the facing and the lighting.
+    auto& assets = *assets_.get();
+    std::vector<std::uint8_t> visible(hood_.scene.instances.size(), 0);
+    std::optional<PortraitShot> firstShot;
+    float tallest = 0;
+    for (const auto& actorIndex : actors) {
+        if (!actorIndex) {
+            continue;
+        }
+        const Actor& actor = hood_.scene.actors[*actorIndex];
+        if (!actor.rig) {
+            continue;
+        }
+        const auto pose = casAnimations_->bound(actor.rig, standingIdle(assets, actor.age));
+        PortraitShot shot;
+        if (!portraitShot(hood_.scene, actor, pose.get(), shot)) {
+            continue;
+        }
+        for (const auto& [instance, joints] : shot.joints) {
+            visible[instance] = 1;
+            renderer_.setJoints(instance, joints);
+        }
+        for (const auto& [instance, weights] : shot.morphs) {
+            renderer_.setMorphWeights(instance, weights);
+        }
+        for (const auto& [instance, eyes] : shot.eyes) {
+            renderer_.setEyes(instance, eyes);
+        }
+        tallest = std::max(tallest, shot.camera.target[2] - kStandZ);
+        if (!firstShot) {
+            firstShot = std::move(shot);
+        }
+    }
+    if (!firstShot) {
+        cas_.setFamilyPicture(nothing, {});
+        return;
+    }
+    float fx = firstShot->camera.eye[0] - firstShot->camera.target[0], fy = firstShot->camera.eye[1] - firstShot->camera.target[1];
+    if (const float length = std::hypot(fx, fy); length > 1e-4f) {
+        fx /= length;
+        fy /= length;
+    } else {
+        fx = 0, fy = 1;
+    }
+    // Far enough for the tallest's height and the whole row's width.
+    const float simHeight = std::max(tallest, kFamilyLeastHeight);
+    const float tanV = std::tan(kFovY / 2), tanH = tanV * static_cast<float>(width) / static_cast<float>(height);
+    const float rowWidth = static_cast<float>(count - 1) * kMemberSpacing + kMemberWidth;
+    const float distance = std::max(simHeight * kHeightShown / (2 * tanV), rowWidth / (2 * tanH));
+    ts2::render::Camera camera;
+    camera.target = {kStandX, kStandY, kStandZ + simHeight * kLookAt};
+    camera.eye = {kStandX + fx * distance, kStandY + fy * distance, kStandZ + simHeight * kLookAt + simHeight * 0.08f};
+    camera.fovY = kFovY;
+    camera.nearPlane = 0.05f;
+    camera.farPlane = distance * 4;
+    renderer_.show(std::move(visible));
+    auto image = renderer_.drawInstancesToImage(camera, static_cast<unsigned>(width), static_cast<unsigned>(height), firstShot->lighting);
+    std::vector<std::uint8_t> shown(hood_.scene.instances.size(), 1);
+    for (std::size_t i = 0; i < shown.size() && i < hoodHidden_.size(); ++i) {
+        shown[i] = hoodHidden_[i] ? 0 : 1;
+    }
+    renderer_.show(std::move(shown));
+    // Each member's middle across the picture: the picture's right is (-fy, fx) in the world.
+    std::vector<int> middles;
+    const float pixelsPerMetre = static_cast<float>(width) / 2 / (distance * tanH);
+    for (std::size_t i = 0; i < count; ++i) {
+        middles.push_back(actors[i] ? static_cast<int>(std::lround(width / 2.0f + along[i] * -fy * pixelsPerMetre)) : -100000);
+    }
+    if (!image) {
+        cas_.setFamilyPicture(nothing, middles);
+        return;
+    }
+    cas_.setFamilyPicture(ts2::content::unpremultiplied(ts2::tga::Pixels{image->width, image->height, std::move(image->rgba)}), middles);
+}
 } // namespace app

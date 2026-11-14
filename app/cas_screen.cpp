@@ -1,9 +1,12 @@
 #include "cas_screen.hpp"
 
 #include "content/ui_meters.hpp"
+#include "formats/hash.hpp"
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
+#include <utility>
 #include <map>
 #include <vector>
 
@@ -81,6 +84,30 @@ constexpr int kTraitBarLeft = 6, kTraitPointWidth = 9, kTraitMax = 10;
 constexpr std::array<const char*, 12> kZodiacNames = {"Aries", "Taurus", "Gemini",  "Cancer",    "Leo",      "Virgo",
                                                       "Libra", "Scorpio", "Sagittarius", "Capricorn", "Aquarius", "Pisces"};
 
+// Create-a-Sim's own texts (CAS.package, string table 0x8C, counted from 1) and the buttons' (UI
+// text, table 0x8E): the boxes' titles, what DONE and Accept Family ask for, Cancel Family's question.
+constexpr std::uint32_t kFamilyChanges = 0x008C0004, kSimChanges = 0x008C0010, kNeedsAdult = 0x008C0006, kNeedsFamilyName = 0x008C0007,
+                        kNeedsFirstName = 0x008C0008, kNeedsPoints = 0x008C000B, kCancelFamilyQuestion = 0x008C0013,
+                        kCancelFamilyTitle = 0x008C0014, kNeedsAspiration = 0x008C001B;  // string ids, leakcheck: ok
+constexpr std::uint32_t kUiText = 0x7FA7DC7C, kOkText = 0x008E0001, kYesText = 0x008E0003, kNoText = 0x008E0004;  // string ids, leakcheck: ok
+constexpr std::uint32_t kOkButton = 1, kYesButton = 2, kNoButton = 3;
+// A click this near a member's middle (in pixels) picks it.
+constexpr int kMemberReach = 60;
+// Teens and older, adults and elders (age flags).
+constexpr std::uint32_t kAdultOrElder = 0x08 | 0x10;
+// The draw of each new Sim after the first moves on by this much.
+constexpr std::uint32_t kSeedStep = 0x9E3779B9;
+
+// A window's place on the screen.
+std::array<int, 2> absolute(const ts2::ui::Screen& screen, int window) {
+    std::array<int, 2> at{0, 0};
+    for (int w = window; w >= 0; w = screen.parent(w)) {
+        at[0] += screen.x(w);
+        at[1] += screen.y(w);
+    }
+    return at;
+}
+
 // A grid shows two columns of three.
 constexpr int kGridColumns = 2, kGridRows = 3;
 constexpr std::size_t kPerPage = kGridColumns * kGridRows;
@@ -139,6 +166,18 @@ int traitsSign(const std::array<int, 5>& traits) {
 
 bool young(std::uint32_t age) { return age == 0x01 || age == 0x02; }
 
+// A new Sim drawn by `seed`: its gender, skin, hair colour and zodiac sign (with the sign's traits).
+CasScreen::Sim drawnSim(std::uint32_t seed) {
+    CasScreen::Sim sim;
+    sim.seed = seed;
+    sim.gender = seed % 2 == 0 ? 1 : 2;
+    sim.skin = static_cast<int>(seed / 2 % 4) + 1;
+    sim.hairColour = static_cast<int>(seed / 8 % 4) + 1;
+    sim.zodiac = static_cast<int>(seed / 32 % 12) + 1;
+    sim.traits = signTraits(sim.zodiac);
+    return sim;
+}
+
 } // namespace
 
 int CasScreen::find(std::uint32_t id) const {
@@ -148,14 +187,9 @@ int CasScreen::find(std::uint32_t id) const {
 
 void CasScreen::open(int width, int height, std::uint32_t seed) {
     close();
-    sim_ = {};
-    sim_.seed = seed;
-    sim_.gender = seed % 2 == 0 ? 1 : 2;
-    sim_.skin = static_cast<int>(seed / 2 % 4) + 1;
-    sim_.hairColour = static_cast<int>(seed / 8 % 4) + 1;
-    sim_.zodiac = static_cast<int>(seed / 32 % 12) + 1;
-    sim_.traits = signTraits(sim_.zodiac);
-    turn_ = 0;
+    members_.clear();
+    middles_.clear();
+    nextSeed_ = seed;
     const int x = std::max(0, (width - kLayoutWidth) / 2), y = std::max(0, (height - kLayoutHeight) / 2);
     // The backdrop over everything else, the Sim's picture on it, and the screen over both.
     backdrop_ = screen_.addWindows({window("IGZWinBMP", width, height)}, 0, 0);
@@ -166,13 +200,11 @@ void CasScreen::open(int width, int height, std::uint32_t seed) {
         return;
     }
     keepFirstVersions(screen_, root_);
-    screen_.setVisible(screen_.find(root_, kCreateSimControls), true);
-    screen_.setVisible(screen_.find(root_, kHouseholdBar), false);
     const int rotation = screen_.find(root_, kRotationWindow);
     const int w = rotation >= 0 ? screen_.width(rotation) : 440, h = rotation >= 0 ? screen_.height(rotation) : 546;
     preview_ = screen_.addWindows({window("IGZWinBMP", w, h)}, x + (rotation >= 0 ? screen_.x(rotation) : 0), y, backdrop_);
     // What isn't built yet is greyed.
-    for (std::uint32_t id : {kAcceptFamily, kCreateFamily, kRelationships, kCasOptions, kZoomIn, kZoomOut, kDone, kCancelSim, kUndo, kRedo}) {
+    for (std::uint32_t id : {kRelationships, kCasOptions, kZoomIn, kZoomOut, kUndo, kRedo}) {
         screen_.setEnabled(find(id), false);
     }
     for (std::uint32_t i = 1; i < kSteps; ++i) {
@@ -181,10 +213,76 @@ void CasScreen::open(int width, int height, std::uint32_t seed) {
     }
     family_ = TextField(screen_.find(screen_.find(root_, kHousehold), kHouseholdName), 64, false);
     family_.setText(screen_, "");
+    // It opens on the family's first Sim.
+    showSimControls(drawnSim(nextSeed_), std::nullopt);
+}
+
+void CasScreen::showSimControls(const Sim& sim, std::optional<std::size_t> editing) {
+    inFamily_ = false;
+    sim_ = sim;
+    editing_ = editing;
+    turn_ = 0;
+    screen_.setVisible(screen_.find(root_, kCreateSimControls), true);
+    screen_.setVisible(screen_.find(root_, kHouseholdBar), false);
+    family_.focus(screen_, false);
+    // While a Sim is made the family can't be accepted or grow.
+    screen_.setEnabled(find(kAcceptFamily), false);
+    screen_.setEnabled(find(kCreateFamily), false);
+    for (std::uint32_t id : {kDone, kCancelSim, kRotateClockwise, kRotateCounter}) {
+        screen_.setEnabled(find(id), true);
+    }
+    if (preview_ >= 0) {
+        screen_.setImage(preview_, ts2::tga::Pixels{1, 1, {0, 0, 0, 0}});  // until the Sim is drawn
+    }
     showStep(Step::Genetics);
 }
 
+void CasScreen::showFamily() {
+    inFamily_ = true;
+    editing_.reset();
+    step_ = Step::Genetics;
+    if (panel_ >= 0) {
+        screen_.remove(panel_);
+        panel_ = -1;
+    }
+    tiles_.clear();
+    pictures_.clear();
+    choices_ = 0;
+    grid_ = -1;
+    first_ = bio_ = {};
+    traitBars_ = {};
+    pointsLeft_ = {};
+    turn_ = 0;
+    middles_.clear();
+    screen_.setVisible(screen_.find(root_, kCreateSimControls), false);
+    screen_.setVisible(screen_.find(root_, kHouseholdBar), true);
+    screen_.setEnabled(find(kAcceptFamily), !members_.empty());
+    screen_.setEnabled(find(kCreateFamily), members_.size() < kMostMembers);
+    screen_.setEnabled(find(kCancelFamily), true);
+    // The family stands as it is drawn: it isn't turned.
+    for (std::uint32_t id : {kRotateClockwise, kRotateCounter}) {
+        screen_.setEnabled(find(id), false);
+    }
+}
+
+void CasScreen::setFamilyPicture(const ts2::tga::Pixels& picture, std::vector<int> middles) {
+    if (preview_ >= 0) {
+        screen_.setImage(preview_, picture);
+    }
+    middles_ = std::move(middles);
+}
+
+std::string CasScreen::casText(std::uint32_t value) const { return screen_.data().text(ts2::hash::groupId("CAS"), value); }
+
+void CasScreen::tell(std::uint32_t title, std::uint32_t message) {
+    const auto [w, h] = screen_.size();
+    box_.open(screen_, w, h, casText(title), casText(message), {{kOkButton, screen_.data().text(kUiText, kOkText)}});
+    asking_ = Asking::Told;
+}
+
 void CasScreen::close() {
+    box_.close(screen_);
+    asking_ = Asking::Nothing;
     for (const int w : {root_, backdrop_}) {
         if (w >= 0) {
             screen_.remove(w);
@@ -395,9 +493,96 @@ CasScreen::Action CasScreen::clicked(int window) {
     if (root_ < 0 || window < 0) {
         return Action::None;
     }
+    // A box shown takes the clicks until it is answered.
+    if (box_.isOpen()) {
+        const auto answer = box_.clicked(screen_, window);
+        if (!answer) {
+            return Action::None;
+        }
+        box_.close(screen_);
+        const Asking asked = std::exchange(asking_, Asking::Nothing);
+        if (asked == Asking::CancelFamily) {
+            return *answer == kYesButton ? Action::Cancel : Action::None;
+        }
+        if (asked == Asking::DeleteMember && editing_ && *editing_ < members_.size()) {
+            member_ = *editing_;
+            if (*answer == kYesButton) {
+                members_.erase(members_.begin() + static_cast<std::ptrdiff_t>(member_));
+                showFamily();
+                return Action::MemberDeleted;
+            }
+            showFamily();
+            return Action::SimDropped;  // kept as it was
+        }
+        return Action::None;
+    }
     auto is = [&](std::uint32_t wanted) { return window == find(wanted); };
     if (is(kCancelFamily)) {
-        return Action::Cancel;
+        // With Sims made, the game asks first.
+        if (members_.empty()) {
+            return Action::Cancel;
+        }
+        const auto [w, h] = screen_.size();
+        box_.open(screen_, w, h, casText(kCancelFamilyTitle), casText(kCancelFamilyQuestion),
+                  {{kYesButton, screen_.data().text(kUiText, kYesText)}, {kNoButton, screen_.data().text(kUiText, kNoText)}});
+        asking_ = Asking::CancelFamily;
+        return Action::None;
+    }
+    if (inFamily_) {
+        if (is(kCreateFamily) && members_.size() < kMostMembers) {
+            nextSeed_ = (nextSeed_ + kSeedStep) & 0x7FFFFFFF;
+            showSimControls(drawnSim(nextSeed_), std::nullopt);
+            return Action::NewSim;
+        } else if (is(kAcceptFamily) && !members_.empty()) {
+            // The family wants a name and an adult or elder.
+            const bool adult = std::any_of(members_.begin(), members_.end(), [](const Sim& s) { return (s.age & kAdultOrElder) != 0; });
+            if (family_.text().empty()) {
+                tell(kFamilyChanges, kNeedsFamilyName);
+            } else if (!adult) {
+                tell(kFamilyChanges, kNeedsAdult);
+            } else {
+                return Action::Accepted;
+            }
+        }
+        return Action::None;
+    }
+    if (is(kDone)) {
+        // The Sim wants a first name, all its personality points and (teens and older) an aspiration.
+        int spent = 0;
+        for (const int t : sim_.traits) {
+            spent += t;
+        }
+        if (sim_.firstName.empty()) {
+            tell(kSimChanges, kNeedsFirstName);
+        } else if (spent < kPersonalityPoints) {
+            tell(kSimChanges, kNeedsPoints);
+        } else if (!young(sim_.age) && sim_.aspiration == 0) {
+            tell(kSimChanges, kNeedsAspiration);
+        } else {
+            if (editing_ && *editing_ < members_.size()) {
+                member_ = *editing_;
+                members_[member_] = sim_;
+            } else {
+                member_ = members_.size();
+                members_.push_back(sim_);
+            }
+            showFamily();
+            return Action::SimDone;
+        }
+        return Action::None;
+    }
+    if (is(kCancelSim)) {
+        // A new Sim is let go. A member edited: asked whether to delete it (else it stays as it was).
+        if (editing_ && *editing_ < members_.size()) {
+            const auto [w, h] = screen_.size();
+            const std::string name = members_[*editing_].firstName;
+            box_.open(screen_, w, h, casText(kSimChanges), "Delete " + name + " from the family?\n\nNo keeps " + name + " as before.",
+                      {{kYesButton, screen_.data().text(kUiText, kYesText)}, {kNoButton, screen_.data().text(kUiText, kNoText)}});
+            asking_ = Asking::DeleteMember;
+            return Action::None;
+        }
+        showFamily();
+        return Action::SimDropped;
     }
     if (is(kRotateClockwise) || is(kRotateCounter)) {
         turn_ += is(kRotateClockwise) ? -kTurnStep : kTurnStep;
@@ -503,31 +688,49 @@ CasScreen::Action CasScreen::clicked(int window) {
     return result;
 }
 
-void CasScreen::pointerDown(int window, int x, int /*y*/) {
-    if (root_ < 0) {
-        return;
+CasScreen::Action CasScreen::pointerDown(int window, int x, int y) {
+    if (root_ < 0 || box_.isOpen()) {
+        return Action::None;
     }
     for (TextField* field : {&first_, &family_, &bio_}) {
         field->focus(screen_, field->window() >= 0 && field->holds(screen_, window));
     }
+    if (inFamily_) {
+        // A member clicked (off the screen's buttons) is edited again: the one whose middle is
+        // nearest, within reach.
+        const auto [px, py] = absolute(screen_, preview_);
+        if (screen_.buttonAt(x, y) || x < px || y < py || x >= px + previewWidth() || y >= py + previewHeight()) {
+            return Action::None;
+        }
+        std::optional<std::size_t> nearest;
+        for (std::size_t i = 0; i < middles_.size() && i < members_.size(); ++i) {
+            const int off = std::abs(px + middles_[i] - x);
+            if (off <= kMemberReach && (!nearest || off < std::abs(px + middles_[*nearest] - x))) {
+                nearest = i;
+            }
+        }
+        if (!nearest) {
+            return Action::None;
+        }
+        member_ = *nearest;
+        showSimControls(members_[member_], member_);
+        return Action::EditSim;
+    }
     // Step 6: down on a trait bar sets the trait to the point under the mouse (left of the first,
     // none), as far as the points left go.
     if (step_ != Step::Personality) {
-        return;
+        return Action::None;
     }
     for (int w = window; w >= 0; w = screen_.parent(w)) {
         for (std::size_t i = 0; i < kTraitBars.size(); ++i) {
             if (w == find(kTraitBars[i])) {
-                int left = 0;
-                for (int p = w; p >= 0; p = screen_.parent(p)) {
-                    left += screen_.x(p);
-                }
-                const int into = x - left - kTraitBarLeft;
+                const int into = x - absolute(screen_, w)[0] - kTraitBarLeft;
                 setTrait(i, into <= 0 ? 0 : (into + kTraitPointWidth - 1) / kTraitPointWidth);
-                return;
+                return Action::None;
             }
         }
     }
+    return Action::None;
 }
 
 bool CasScreen::editing() const { return first_.focused() || family_.focused() || bio_.focused(); }

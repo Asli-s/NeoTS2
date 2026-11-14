@@ -24,8 +24,10 @@ struct MenuOptions {
     int cardX = -1, cardY = -1;    // or open the card of the lot under this point
     int hoverX = -1, hoverY = -1;  // the mouse rests here (for a picture with a tooltip)
     // Points of the lot's panels clicked before its picture: x, y and the kind (0 left click, 1 right
-    // click, 2 the mouse resting there).
+    // click, 2 the mouse resting there, 3 a text of uiTypes typed).
     std::vector<std::array<int, 3>> uiClicks;
+    // Texts typed in turn with the clicks (kind 3, the text's index as x) into the box they focused (a test).
+    std::vector<std::string> uiTypes;
     bool saveNeighborhood = false;  // the neighborhood's decorations saved after the clicks (a test)
     double recordSeconds = 0;  // a Video Capture this long before the picture (a test)
     std::string type;  // typed after the clicks into the story editor box they focused, then saved (a test)

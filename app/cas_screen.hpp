@@ -1,5 +1,6 @@
 #pragma once
 
+#include "dialog_box.hpp"
 #include "meter_bar.hpp"
 #include "text_field.hpp"
 
@@ -30,13 +31,20 @@ namespace app {
 // six a page with their pictures. The Sim is shown as a picture the game side draws (see
 // setPreview), turned with the puck's rotate buttons.
 //
+// It opens on a new Sim. DONE adds the Sim to the family (when it has a first name, all its
+// personality points and an aspiration, as the game asks) and shows the family's view: its name,
+// its members standing together (the game side draws them, see setFamilyPicture), Create a Sim
+// for another (up to 8), a member clicked to edit it again (its Cancel Sim asks whether to delete
+// it), and Accept Family and Cancel Family. Accept Family asks for the family's name and an adult or
+// elder, as the game does.
+//
 // Not built yet: steps 2 and 4 (heads, makeup), turn-ons and offs, the face tabs, custom hair colours,
-// hair per outfit, the Sim bin, biography, custom skins and fitness, collections, the family's view
-// (its name and members), family relationships, and accepting (saving) the family. Their buttons
-// are greyed.
+// hair per outfit, the Sim bin, biography, custom skins and fitness, collections, family
+// relationships, and saving the family. Their buttons are greyed.
 class CasScreen {
 public:
-    CasScreen(ts2::ui::Screen& screen, ts2::content::UiData& data) : screen_(screen), data_(data) {}
+    // The game's data is reached through the screen.
+    explicit CasScreen(ts2::ui::Screen& screen) : screen_(screen) {}
 
     // The kinds of clothes the Clothing step lists.
     enum class Clothes { Tops, Bottoms, Outfits };
@@ -72,11 +80,31 @@ public:
     // ChoicesNeeded: the step or its tab changed, so its choices are listed again. Chosen: a choice
     // was clicked (see chosen()). Turned: the camera turned. Category: the Clothing step's outfit
     // category changed (the Sim is shown in it).
-    enum class Action { None, Cancel, Remake, Recolour, ChoicesNeeded, Chosen, Turned, Category };
+    // The family: NewSim, a new Sim is made (drawn anew). EditSim: member() is edited again (its look
+    // comes back). SimDone: the Sim made or edited is member() now. SimDropped: the Sim made or
+    // edited is let go (a member edited stays as it was). MemberDeleted: member() was taken out.
+    // Each of the last four shows the family's view, which wants drawing again. Accepted: Accept
+    // Family's checks passed, and the screen is to close.
+    enum class Action {
+        None,
+        Cancel,
+        Remake,
+        Recolour,
+        ChoicesNeeded,
+        Chosen,
+        Turned,
+        Category,
+        NewSim,
+        EditSim,
+        SimDone,
+        SimDropped,
+        MemberDeleted,
+        Accepted
+    };
     // A released button of the screen.
     Action clicked(int window);
     // The mouse went down on `window`, at (x, y) on the screen.
-    void pointerDown(int window, int x, int y);
+    Action pointerDown(int window, int x, int y);
     bool editing() const;
     void typed(const std::string& text);
     void key(ts2::platform::Key key);
@@ -101,6 +129,16 @@ public:
     int choiceHeight() const { return choiceHeight_; }
     std::size_t chosen() const { return chosen_; }
 
+    // The family: its members (as made), whether its view shows (else a Sim is being made), the
+    // member the last action was about.
+    const std::vector<Sim>& members() const { return members_; }
+    bool inFamily() const { return inFamily_; }
+    std::size_t member() const { return member_; }
+    static constexpr std::size_t kMostMembers = 8;
+    // The family's picture, with each member's middle across it (in its pixels, in members' order),
+    // for clicking them.
+    void setFamilyPicture(const ts2::tga::Pixels& picture, std::vector<int> middles);
+
 private:
     struct Tile {
         int button = -1, picture = -1;
@@ -108,13 +146,17 @@ private:
     };
     void showStep(Step step);
     void showSim();
+    void showFamily();
+    void showSimControls(const Sim& sim, std::optional<std::size_t> editing);
+    // A box with the game's text `message` (CAS text table 0x8C) under title `title`, with OK.
+    void tell(std::uint32_t title, std::uint32_t message);
+    std::string casText(std::uint32_t value) const;
     void showPersonality();
     void setTrait(std::size_t trait, int points);
     void layoutChoices();
     int find(std::uint32_t id) const;
 
     ts2::ui::Screen& screen_;
-    ts2::content::UiData& data_;
     int backdrop_ = -1, root_ = -1, panel_ = -1, preview_ = -1;
     Step step_ = Step::Genetics;
     TextField first_, family_, bio_;
@@ -130,6 +172,18 @@ private:
     // Step 6: the trait bars (as the Sim's traits) and the points left.
     std::array<MeterBar, 5> traitBars_;
     MeterBar pointsLeft_;
+    // The family: its members, its view shown or not, the member edited (none: a new Sim), the member
+    // the last action was about, the members' middles across the preview, and the next new Sim's draw.
+    std::vector<Sim> members_;
+    bool inFamily_ = false;
+    std::optional<std::size_t> editing_;
+    std::size_t member_ = 0;
+    std::vector<int> middles_;
+    std::uint32_t nextSeed_ = 1;
+    // The box shown over the screen, and what it asks.
+    enum class Asking { Nothing, Told, CancelFamily, DeleteMember };
+    DialogBox box_;
+    Asking asking_ = Asking::Nothing;
 };
 
 } // namespace app

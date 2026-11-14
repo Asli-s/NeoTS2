@@ -340,11 +340,19 @@ private:
     void openCas();
     void closeCas();
     void casClicked(int window);
+    // The mouse down at (x, y) on the UI over `window`.
+    void casPointer(int window, int x, int y);
+    // What the screen's action asks of the Sim, the family's looks and their pictures.
+    void casAction(CasScreen::Action action);
+    // Whether Create-a-Sim is still busy with the last change (its Sim, family, choices or pictures).
+    bool casBusy() const;
     // Each frame while it is open: the Sim built again when its look changed, its picture drawn again.
     void updateCas();
     void buildCasSim();
     void drawCasSim();
-    CasScreen cas_{screen_, data_};
+    // The family standing in a row, drawn for the preview, each member's middle told to the screen.
+    void drawCasFamily();
+    CasScreen cas_{screen_};
     std::shared_future<ts2::scene::OutfitCatalog> casCatalog_;
     std::unique_ptr<ts2::scene::RigLibrary> casRigs_;
     std::unique_ptr<ts2::scene::AnimationLibrary> casAnimations_;
@@ -360,7 +368,8 @@ private:
     void wearChoice(ts2::scene::MadeLook& made, const ts2::scenegraph::Link& choice);
     void listCasChoices();
     // A Sim in `made` built into the neighborhood's scene, hidden from it: its actor's index.
-    std::optional<std::size_t> buildCasLook(const ts2::scene::MadeLook& made, std::uint32_t category, bool hairOnly);
+    // It stands `x` along the world's x axis (the family's row).
+    std::optional<std::size_t> buildCasLook(const ts2::scene::MadeLook& made, std::uint32_t category, bool hairOnly, float x = 0);
     // A picture of the Sim `actorIndex` draws: its whole body turned `turnDegrees`, or its face.
     std::optional<ts2::tga::Pixels> drawCasPicture(std::size_t actorIndex, int width, int height, bool face, float turnDegrees);
     void drawCasChoice(std::size_t choice);
@@ -368,6 +377,8 @@ private:
     std::vector<ts2::scenegraph::Link> casChoices_;   // the step's choices, as the screen lists them
     std::map<std::string, ts2::tga::Pixels> casPictures_;  // choices' pictures, drawn once each
     bool casListChoices_ = false;
+    std::vector<ts2::scene::MadeLook> casLooks_;  // the family's members' looks, as the screen's members
+    bool casFamilyRedraw_ = false;
     // Decorations: the neighborhood's Decorations catalog and its tools (game_decorations.cpp).
     // What the hand holds: a catalog entry to place, or one already placed, picked up with the Hand
     // Tool to move (or delete). It is drawn by `instance`, following the mouse over the ground.
