@@ -1,5 +1,6 @@
 #pragma once
 
+#include "story_editor.hpp"
 #include "build_panel.hpp"
 #include "buy_panel.hpp"
 #include "game_options_panel.hpp"
@@ -165,6 +166,7 @@ public:
     // close button, the puck's Live button and F1 close it. Albums aren't read yet: it shows none.
     void showStory(bool show);
     bool storyShown() const;
+    StoryEditor& storyEditor() { return storyEditor_; }
     // Shows the Buy catalog's page (its pictures and names) for the lot.
     void refreshBuy(LotLife& life);
 
@@ -243,6 +245,7 @@ private:
     int width_, height_;
     bool testingCheats_ = false;
     int puck_ = -1, live_ = -1, options_ = -1, buy_ = -1, build_ = -1, story_ = -1;
+    StoryEditor storyEditor_{screen_, screen_.data()};  // Story mode's editor, in story_
     BuyPanel buyPanel_;
     BuildPanel buildPanel_;
     std::uint32_t pickedFloor_ = 0, pickedWallCovering_ = 0, pickedBuildObject_ = 0, pickedPaint_ = 0;

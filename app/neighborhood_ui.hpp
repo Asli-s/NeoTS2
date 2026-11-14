@@ -3,6 +3,7 @@
 #include "content/ui_data.hpp"
 #include "game_options_panel.hpp"
 #include "graphics_options_panel.hpp"
+#include "story_editor.hpp"
 #include "ui/screen.hpp"
 
 #include <cstdint>
@@ -52,6 +53,7 @@ public:
         std::vector<StoryPage> story;
         std::optional<std::int32_t> neighborhoodId;  // its story album's id too
         std::vector<DecorationItem> decorations;     // in the catalog's order (by guid)
+        std::filesystem::path user;                  // the user folder it was read from
     };
     static Content read(const std::filesystem::path& folder, const std::filesystem::path& user, const std::filesystem::path& install);
 
@@ -83,6 +85,9 @@ public:
     // first page.
     void showStory(bool show);
     bool storyShown() const;
+    // The story editor, while Edit Neighborhood Story has it open.
+    bool storyEditorShown() const { return storyEditorWindow_ >= 0 && screen_.visible(storyEditorWindow_); }
+    StoryEditor& storyEditor() { return storyEditor_; }
 
     // Shows or hides the options menu the puck's options button opens.
     void showOptions(bool show);
@@ -168,6 +173,13 @@ private:
     std::map<std::uint32_t, LotCard> cards_;
     std::uint32_t cardLot_ = 0;
     std::vector<StoryPage> storyPages_;
+    // The story editor (Edit Neighborhood Story), and what it needs to open the story.
+    StoryEditor storyEditor_{screen_, data_};
+    int storyEditorWindow_ = -1;
+    std::string name_;
+    std::filesystem::path user_;
+    void setStoryPages(std::vector<StoryPage> pages);
+    void showStoryEditor();
     std::optional<std::int32_t> neighborhoodId_;
     std::size_t storyPage_ = 0;
     ts2::tga::Pixels storyShape_;  // the story picture's rounded shape

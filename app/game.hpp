@@ -311,8 +311,16 @@ private:
     // Camera Snapshot (C in the neighborhood): saves the view, without the panels, as one of the
     // neighborhood's snapshots in the user folder's Storytelling folder.
     void takeSnapshot();
-    // The story album of the family living on the open lot, from its family record. None when none has one.
-    std::optional<std::uint32_t> lotFamilyAlbum() const;
+    // The family living on the open lot: its story album and its family record's instance. None when
+    // no family there has an album.
+    struct LotFamily {
+        std::uint32_t album = 0, family = 0;
+    };
+    std::optional<LotFamily> lotFamily() const;
+    // Opens Story mode's editor on the lot family's album.
+    void openLotStory();
+    // The story editor open now (the lot's Story mode or the neighborhood's), if any.
+    StoryEditor* activeStoryEditor();
     // Video Capture (game_video.cpp): V or the puck's video button starts and stops a recording of
     // the view; it stops by itself after the options' longest time, or when the view goes.
     void toggleVideoCapture();

@@ -35,13 +35,8 @@ constexpr std::uint32_t kBuyMode = 0x67D97B2A, kBuyPanel = 0x49060004;
 // Build mode: the puck's Build button and the Build panel's script.
 constexpr std::uint32_t kBuildMode = 0x77D97B28, kBuildPanel = 0x49060003;
 // Story mode: the puck's Album button (F4, Set Album Mode) and the story editor's script, with its
-// close button, its views (organize, story and blog), the story view's no-entries text, and the
-// album's name. The story view's buttons and the editor's other buttons aren't built yet.
+// close button. The editor itself is StoryEditor.
 constexpr std::uint32_t kStoryMode = 0x27D97B2D, kStoryPanel = 0x0C7FE4BF, kStoryClose = 0xCC800571;
-constexpr std::uint32_t kOrganizeView = 0xACB252C1, kStoryView = 0x8CB2529E, kBlogView = 0x4CB2526C, kNoEntries = 0x0D49F038,
-                        kAlbumName = 0x2C8006C4, kCaption = 0x2C8006CA;
-constexpr std::array<std::uint32_t, 7> kStoryButtonsNotDone = {0x6CD88190, 0xACB79625, 0x6CB795EC, 0x2C8006B9,
-                                                               0x2C8006BC, 0x0CB23B3C, 0x6D4898DD};
 constexpr std::uint32_t kFloorUp = 0x00002001, kFloorDown = 0x00002000, kToggleCeiling = 0x00007000;
 // The puck's Video Capture button (V).
 constexpr std::uint32_t kVideoCapture = 0x00005000, kSnapshot = 0x00006000;  // and Camera Snapshot (C)
@@ -577,26 +572,8 @@ void LotUi::setVideoRecording(bool on) {
 }
 
 void LotUi::setUpStoryPanel() {
-    if (story_ < 0) {
-        return;
-    }
-    // It opens on the story view. The family's albums aren't read yet, so it shows no snapshot,
-    // and as there may be some it doesn't say there are none.
-    screen_.setVisible(screen_.find(story_, kOrganizeView), false);
-    screen_.setVisible(screen_.find(story_, kBlogView), false);
-    const int story = screen_.find(story_, kStoryView);
-    screen_.setVisible(story, true);
-    screen_.setVisible(screen_.find(story, kNoEntries), false);
-    screen_.setEnabled(screen_.find(story, kCaption), false);
-    for (const std::uint32_t id : kStoryButtonsNotDone) {
-        screen_.setEnabled(screen_.find(story_, id), false);
-    }
-    // "[autotext]" marks a name the game fills in.
-    const int name = screen_.find(story_, kAlbumName);
-    if (const std::string text = name >= 0 ? screen_.text(name) : std::string(); text.starts_with("[autotext] ")) {
-        screen_.setText(name, text.substr(11));
-    }
-    screen_.setEnabled(name, false);
+    // The editor works in the panel; it shows an album once the game opens one (StoryOpened).
+    storyEditor_.attach(story_);
 }
 
 void LotUi::centreStory() {
@@ -819,6 +796,9 @@ LotUi::Action LotUi::clicked(int window) {
     if (id == kLiveMode && screen_.parent(window) == puck_ && buildShown()) {
         showBuild(false);
         return Action::BuildClosed;
+    }
+    if (storyShown() && window != screen_.find(story_, kStoryClose) && storyEditor_.clicked(window)) {
+        return Action::None;  // the story editor's own buttons
     }
     if (storyShown() && ((id == kLiveMode && screen_.parent(window) == puck_) || window == screen_.find(story_, kStoryClose))) {
         showStory(false);

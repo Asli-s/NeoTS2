@@ -123,6 +123,7 @@ constexpr std::uint32_t kStoryViewer = 0x49001030, kPuckStory = 0xacd99323;
 constexpr std::uint32_t kStoryTitle = 0x2d0a8e57, kStoryPicture = 0x4d0a8d83, kStoryCaption = 0xcd0a8ef7, kStoryCounter = 0x2d0e41dc,
                         kStoryPrevious = 0x2d0a8f5a, kStoryNext = 0x2d0a8f55, kStoryNone = 0x4d7407b2, kStoryDone = 0xcc800571,
                         kStoryEdit = 0x0cb23b3c;
+constexpr std::uint32_t kStoryEditor = 0x0C7FE4BF;  // the story editor Edit opens
 constexpr std::uint32_t kStoryShape = 0xa96d0603;  // the picture window's image, in the UI image group
 // Snapshots are read at most this wide or tall (the game saves them 640 x 480 or so).
 constexpr std::uint32_t kMaxSnapshotSide = 2048;
@@ -426,7 +427,7 @@ NeighborhoodUi::NeighborhoodUi(ts2::ui::Screen& screen, ts2::content::UiData& da
 
 NeighborhoodUi::Content NeighborhoodUi::read(const fs::path& folder, const fs::path& user, const fs::path& install) {
     const auto id = readNeighborhoodId(folder);
-    return {homelessFamilies(folder), catalogLots(user), livedInLots(folder), lotCards(folder), storyPages(id, user), id, decorationItems(install)};
+    return {homelessFamilies(folder), catalogLots(user), livedInLots(folder), lotCards(folder), storyPages(id, user), id, decorationItems(install), user};
 }
 
 void NeighborhoodUi::open(const fs::path& folder, const std::string& name, Content content) {
@@ -539,22 +540,21 @@ void NeighborhoodUi::open(const fs::path& folder, const std::string& name, Conte
         }
         screen_.setText(title, welcome);
         storyCounter_ = screen_.text(screen_.find(story_, kStoryCounter));
-        screen_.setEnabled(screen_.find(story_, kStoryCaption), false);  // shown, not edited: editing isn't built yet
-        screen_.setEnabled(screen_.find(story_, kStoryEdit), false);
+        screen_.setEnabled(screen_.find(story_, kStoryCaption), false);  // shown here, edited in the story editor
         // The picture window's own image is the shape a snapshot is cut to.
         if (auto shape = data_.image(kTagImageGroup, kStoryShape)) {
             storyShape_ = std::move(*shape);
         }
         screen_.setVisible(story_, false);
     }
-    storyPages_ = std::move(content.story);
+    // The story editor, which Edit Neighborhood Story opens in the viewer's place.
+    storyEditorWindow_ = screen_.load(kScripts, kStoryEditor, 0, 0);
+    storyEditor_.attach(storyEditorWindow_);
+    screen_.setVisible(storyEditorWindow_, false);
+    name_ = name;
+    user_ = content.user;
     neighborhoodId_ = content.neighborhoodId;
-    for (auto& page : storyPages_) {
-        if (page.text.empty() && page.textResource != 0) {
-            page.text = data_.text(ts2::content::kStoryTextGroup, page.textResource);
-        }
-    }
-    storyPage_ = 0;
+    setStoryPages(std::move(content.story));
     tag_ = screen_.addWindows({tagWindow("IGZWinGen", {{"image", std::format("{{{:08x},{:08x}}}", kTagImageGroup, kTagBox)}, {"edgeimage", "yes"}})}, 0, 0);
     tagIcon_ = screen_.addWindows({tagWindow("IGZWinBMP", {{"image", std::format("{{{:08x},{:08x}}}", kTagImageGroup, kTagSun)}})}, 0, 0, tag_);
     tagText_ = screen_.addWindows({tagWindow("IGZWinText", {{"font", kTagFont}})}, 0, 0, tag_);
@@ -613,14 +613,17 @@ void NeighborhoodUi::setSize(int width, int height) {
 }
 
 void NeighborhoodUi::close() {
+    if (storyEditorShown()) {
+        storyEditor_.save();  // a neighborhood left with the editor open keeps what was written
+    }
     // Removed rather than hidden: the next neighborhood loads its own panel and bins.
     gameOptions_.remove();
     graphicsOptions_.remove();
     optionsMenu_.setMenu(-1);
-    for (const int w : {panel_, families_, lots_, card_, tag_, options_, story_, decorations_}) {
+    for (const int w : {panel_, families_, lots_, card_, tag_, options_, story_, decorations_, storyEditorWindow_}) {
         screen_.remove(w);
     }
-    panel_ = families_ = lots_ = puck_ = card_ = tag_ = tagIcon_ = tagText_ = options_ = story_ = decorations_ = -1;
+    panel_ = families_ = lots_ = puck_ = card_ = tag_ = tagIcon_ = tagText_ = options_ = story_ = decorations_ = storyEditorWindow_ = -1;
     decorationStrip_ = {};
     decorationItems_.clear();
     decorationShown_.clear();
@@ -734,6 +737,16 @@ NeighborhoodUi::Action NeighborhoodUi::clicked(int window) {
         showEmptyLotSizes(id == kBeachLotsButton);
     } else if (screen_.parent(window) == puck_ && id == kPuckStory) {
         showStory(!storyShown());
+    } else if (storyEditorShown() && window == screen_.find(storyEditorWindow_, kStoryDone)) {
+        // The editor's Close: what changed is saved, and the viewer shows the story as it is now.
+        storyEditor_.save();
+        screen_.setVisible(storyEditorWindow_, false);
+        setStoryPages(storyPages(neighborhoodId_, user_));
+        showStory(true);
+    } else if (storyEditorShown() && storyEditor_.clicked(window)) {
+        // The editor's own buttons.
+    } else if (storyShown() && window == screen_.find(story_, kStoryEdit)) {
+        showStoryEditor();
     } else if (storyShown() && window == screen_.find(story_, kStoryDone)) {
         showStory(false);
     } else if (storyShown() && window == screen_.find(story_, kStoryPrevious) && storyPage_ > 0) {
@@ -750,7 +763,7 @@ NeighborhoodUi::Action NeighborhoodUi::clicked(int window) {
 
 void NeighborhoodUi::hideAll(bool hide) {
     if (hide && hidden_.empty()) {
-        for (const int w : {panel_, families_, lots_, card_, tag_, options_, story_, decorations_}) {
+        for (const int w : {panel_, families_, lots_, card_, tag_, options_, story_, decorations_, storyEditorWindow_}) {
             if (w >= 0) {
                 hidden_.emplace_back(w, screen_.visible(w));
                 screen_.setVisible(w, false);
@@ -802,6 +815,12 @@ void NeighborhoodUi::showStory(bool show) {
     if (story_ < 0) {
         return;
     }
+    // The story editor gives way, its changes saved, and the viewer shows the story as it is now.
+    if (storyEditorShown()) {
+        storyEditor_.save();
+        screen_.setVisible(storyEditorWindow_, false);
+        setStoryPages(storyPages(neighborhoodId_, user_));
+    }
     if (show) {
         showBin(Bin::None);
         showOptions(false);
@@ -813,6 +832,27 @@ void NeighborhoodUi::showStory(bool show) {
     }
     screen_.setVisible(story_, show);
     screen_.setChecked(screen_.find(puck_, kPuckStory), show);
+}
+
+void NeighborhoodUi::setStoryPages(std::vector<StoryPage> pages) {
+    storyPages_ = std::move(pages);
+    for (auto& page : storyPages_) {
+        if (page.text.empty() && page.textResource != 0) {
+            page.text = data_.text(ts2::content::kStoryTextGroup, page.textResource);
+        }
+    }
+    storyPage_ = 0;
+}
+
+void NeighborhoodUi::showStoryEditor() {
+    if (storyEditorWindow_ < 0 || !neighborhoodId_) {
+        return;
+    }
+    screen_.setVisible(story_, false);
+    screen_.move(storyEditorWindow_, (width_ - screen_.width(storyEditorWindow_)) / 2, (height_ - screen_.height(storyEditorWindow_)) / 2);
+    screen_.raise(storyEditorWindow_);
+    screen_.setVisible(storyEditorWindow_, true);
+    storyEditor_.open(static_cast<std::uint32_t>(*neighborhoodId_), user_ / "Storytelling", {name_, 0, 0, true});
 }
 
 bool NeighborhoodUi::storyShown() const { return story_ >= 0 && screen_.visible(story_); }

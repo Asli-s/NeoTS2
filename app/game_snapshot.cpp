@@ -54,7 +54,7 @@ bool writeFile(const std::filesystem::path& path, const std::vector<std::uint8_t
 
 } // namespace
 
-std::optional<std::uint32_t> Game::lotFamilyAlbum() const {
+std::optional<Game::LotFamily> Game::lotFamily() const {
     // The album of the family living on the lot, from its family record in the neighborhood.
     try {
         const auto hoodFile = ts2::content::neighborhoodPackage(ts2::content::neighborhoodOfLot(lotFile_));
@@ -65,7 +65,7 @@ std::optional<std::uint32_t> Game::lotFamilyAlbum() const {
             }
             const auto family = ts2::fami::parse(hood.read(e));
             if (family.lot == static_cast<std::int32_t>(enteredLot_) && family.albumId != 0) {
-                return family.albumId;
+                return LotFamily{family.albumId, e.key.instance};
             }
         }
     } catch (const std::exception& ex) {
@@ -78,7 +78,9 @@ void Game::takeSnapshot() {
     // A lot's snapshots go to the album of the family living there, the neighborhood's to its story.
     std::optional<std::uint32_t> album;
     if (inLot_) {
-        album = lotFamilyAlbum();
+        if (const auto family = lotFamily()) {
+            album = family->album;
+        }
         if (!album) {
             ts2::diag::warning("camera snapshot: no family on this lot has an album, so no snapshot was taken");
             return;
@@ -131,6 +133,23 @@ void Game::takeSnapshot() {
         return;
     }
     ts2::diag::info("camera snapshot: saved " + ts2::diag::utf8(snapshotPath.filename()));
+}
+
+void Game::openLotStory() {
+    // The album of the family living here; a lot without one shows the editor empty.
+    const auto family = lotFamily();
+    StoryEditor::AlbumInfo info{openName_, family ? family->family : 0, enteredLot_, false};
+    lotUi_.storyEditor().open(family ? std::optional<std::uint32_t>(family->album) : std::nullopt, options_.user / "Storytelling", info);
+}
+
+StoryEditor* Game::activeStoryEditor() {
+    if (inLot_ && lotUi_.storyShown()) {
+        return &lotUi_.storyEditor();
+    }
+    if (inNeighborhood_ && !inLot_ && hoodUi_.storyEditorShown()) {
+        return &hoodUi_.storyEditor();
+    }
+    return nullptr;
 }
 
 } // namespace app

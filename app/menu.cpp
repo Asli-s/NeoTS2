@@ -1201,6 +1201,7 @@ void Game::askToLeave(std::optional<std::size_t> hood) {
 }
 
 void Game::leaveFor(std::optional<std::size_t> hood) {
+    lotUi_.storyEditor().save();  // a lot left with Story mode open keeps what was written
     leaveLot();
     if (hood && *hood != openHood_ && *hood < hoods_.size()) {
         chosen_ = *hood;
@@ -1781,7 +1782,10 @@ void Game::lotAction(app::LotUi::Action action) {
     case Action::BuyOpened: enterBuy(); break;
     case Action::BuyClosed: leaveBuy(true); break;
     case Action::BuildOpened: enterPanelMode(true); break;
-    case Action::StoryOpened: enterPanelMode(false); break;
+    case Action::StoryOpened:
+        enterPanelMode(false);
+        openLotStory();
+        break;
     case Action::BuildItem: pickPattern(lotUi_.pickedFloor(), false); break;
     case Action::BuildWallItem: pickPattern(lotUi_.pickedWallCovering(), true); break;
     case Action::BuildWallTool: pickWallTool(); break;
@@ -1800,7 +1804,10 @@ void Game::lotAction(app::LotUi::Action action) {
     case Action::Undo: undoStep(); break;
     case Action::Redo: redoStep(); break;
     case Action::BuildClosed:
-    case Action::StoryClosed: leavePanelMode(true); break;
+    case Action::StoryClosed:
+        lotUi_.storyEditor().save();
+        leavePanelMode(true);
+        break;
     case Action::BuyItem: buyItem(lotUi_.pickedBuyItem()); break;
     case Action::OptionsClosed: lotLife_->setPaused(pausedBeforeOptions_); break;
     case Action::GraphicsOptionChanged:
@@ -3130,6 +3137,15 @@ void Game::handleEvent(const pf::Event& e) {
     }
     // The naming dialog takes the keyboard while it is open. Keys let go still stop the camera's
     // turn above and the free camera's moves, so none goes on after the dialog.
+    // A story editor's text box takes the typing while it has the keyboard.
+    if (StoryEditor* editor = activeStoryEditor(); editor && editor->editing() && (e.type == pf::Event::Type::Text || e.type == pf::Event::Type::KeyDown)) {
+        if (e.type == pf::Event::Type::Text) {
+            editor->typed(e.text);
+        } else {
+            editor->key(e.key);
+        }
+        return;
+    }
     if (babyNames_.isOpen() && e.type != pf::Event::Type::Quit && e.type != pf::Event::Type::MouseMotion &&
         e.type != pf::Event::Type::MouseDown && e.type != pf::Event::Type::MouseUp && e.type != pf::Event::Type::MouseWheel) {
         if (e.type == pf::Event::Type::Text) {
@@ -3230,6 +3246,10 @@ void Game::mouseEvent(const pf::Event& e) {
     float x = 0, y = 0;
     pf::mousePosition(x, y);
     if (e.type == pf::Event::Type::MouseDown && e.button == pf::MouseButton::Left) {
+        if (StoryEditor* editor = activeStoryEditor()) {
+            const auto [ux, uy] = toUi(x, y);
+            editor->pointerDown(screen_.mouseWindow(ux, uy));
+        }
         down_ = true;
         downX_ = x;
         downY_ = y;
@@ -3429,6 +3449,9 @@ bool Game::takePicture() {
         uiClicked_ = true;
         for (const auto& [wx, wy, kind] : options_.uiClicks) {
             const auto [cx, cy] = toUi(static_cast<float>(wx), static_cast<float>(wy));
+            if (StoryEditor* editor = activeStoryEditor()) {
+                editor->pointerDown(screen_.mouseWindow(cx, cy));
+            }
             // Off the panels, a Decorations tool takes the click.
             if (!screen_.over(cx, cy) && decorationClick(static_cast<float>(wx), static_cast<float>(wy))) {
                 continue;
@@ -3437,6 +3460,10 @@ bool Game::takePicture() {
             if (const auto clicked = screen_.mouse(cx, cy, false, 0)) {
                 windowClicked(*clicked);
             }
+        }
+        if (StoryEditor* editor = activeStoryEditor(); editor && !options_.type.empty()) {
+            editor->typed(options_.type);
+            editor->save();  // as Close would
         }
         if (options_.saveNeighborhood) {
             saveNeighborhood();
