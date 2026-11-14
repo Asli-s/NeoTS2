@@ -37,6 +37,8 @@ constexpr std::uint32_t kPuckFamilies = 0x2be6f563, kPuckLots = 0x4be6f571, kPuc
 // The puck's camera buttons in CameraButton's order, from the left Rotate.
 constexpr std::uint32_t kCameraButtons[] = {0x2be6fb52, 0x2be6fb57, 0x2be6fb48, 0x2be6fb4e};
 constexpr std::uint32_t kDayNight = 0x0fb31a16;
+// The puck's Camera Snapshot (C) and Video Capture (V) buttons.
+constexpr std::uint32_t kSnapshot = 0xcd094d26, kVideoCapture = 0xed094d4f;
 // The neighborhood's own options menu and its Main Menu and Quit buttons. A hidden 1x1 window in it
 // is its anchor, whose caption names the puck window it goes on ("aabbccdd:tl").
 constexpr std::uint32_t kOptionsMenu = 0x49001028, kOptionsMainMenu = 0x0000a221, kOptionsQuit = 0x0000a220;
@@ -338,24 +340,26 @@ std::vector<ts2::tga::Pixels> catalogLots(const fs::path& user) {
     return out;
 }
 
-// The neighborhood's story: the album named by the neighborhood's id in the user folder's
-// Storytelling folder, each entry's snapshot read from there. A snapshot that can't be read leaves
-// its page without a picture.
-std::vector<NeighborhoodUi::StoryPage> storyPages(const fs::path& folder, const fs::path& user) {
-    std::vector<NeighborhoodUi::StoryPage> out;
-    std::optional<std::int32_t> id;
+// The neighborhood's id (its story album's too), from its package. Empty when it can't be read.
+std::optional<std::int32_t> readNeighborhoodId(const fs::path& folder) {
     try {
         ts2::dbpf::Package package{ts2::content::neighborhoodPackage(folder)};
         for (const auto& e : package.entries()) {
             if (e.key.type == ts2::nhoodid::kType) {
-                id = ts2::nhoodid::parse(package.read(e)).id;
-                break;
+                return ts2::nhoodid::parse(package.read(e)).id;
             }
         }
     } catch (const std::exception& ex) {
-        ts2::diag::warnOnce(std::string("neighborhood story: the neighborhood's id can't be read, so it shows no story: ") + ex.what());
-        return out;
+        ts2::diag::warnOnce(std::string("neighborhood story: the neighborhood's id can't be read, so it has no story or snapshots: ") + ex.what());
     }
+    return std::nullopt;
+}
+
+// The neighborhood's story: the album named by the neighborhood's id in the user folder's
+// Storytelling folder, each entry's snapshot read from there. A snapshot that can't be read leaves
+// its page without a picture.
+std::vector<NeighborhoodUi::StoryPage> storyPages(std::optional<std::int32_t> id, const fs::path& user) {
+    std::vector<NeighborhoodUi::StoryPage> out;
     if (!id) {
         return out;
     }
@@ -388,7 +392,8 @@ NeighborhoodUi::NeighborhoodUi(ts2::ui::Screen& screen, ts2::content::UiData& da
     : screen_(screen), data_(data), width_(width), height_(height) {}
 
 NeighborhoodUi::Content NeighborhoodUi::read(const fs::path& folder, const fs::path& user) {
-    return {homelessFamilies(folder), catalogLots(user), livedInLots(folder), lotCards(folder), storyPages(folder, user)};
+    const auto id = readNeighborhoodId(folder);
+    return {homelessFamilies(folder), catalogLots(user), livedInLots(folder), lotCards(folder), storyPages(id, user), id};
 }
 
 void NeighborhoodUi::open(const fs::path& folder, const std::string& name, Content content) {
@@ -400,6 +405,7 @@ void NeighborhoodUi::open(const fs::path& folder, const std::string& name, Conte
     puck_ = screen_.find(panel_, kPuck);
     screen_.move(puck_, 0, height_ - screen_.height(puck_));
     chooseVersions(screen_, puck_, folder);
+    screen_.setEnabled(screen_.find(puck_, kVideoCapture), false);  // video capture isn't built yet
     for (const int c : screen_.children(panel_)) {
         if (screen_.id(c) == kTopBar && screen_.visible(c)) {
             chooseVersions(screen_, c, folder);
@@ -494,6 +500,7 @@ void NeighborhoodUi::open(const fs::path& folder, const std::string& name, Conte
         screen_.setVisible(story_, false);
     }
     storyPages_ = std::move(content.story);
+    neighborhoodId_ = content.neighborhoodId;
     for (auto& page : storyPages_) {
         if (page.text.empty() && page.textResource != 0) {
             page.text = data_.text(ts2::content::kStoryTextGroup, page.textResource);
@@ -567,6 +574,7 @@ void NeighborhoodUi::close() {
     }
     panel_ = families_ = lots_ = puck_ = card_ = tag_ = tagIcon_ = tagText_ = options_ = story_ = -1;
     storyPages_.clear();
+    neighborhoodId_.reset();
     storyPage_ = 0;
     tagLot_ = 0;
     cards_.clear();
@@ -620,6 +628,8 @@ NeighborhoodUi::Action NeighborhoodUi::clicked(int window) {
     }
     if (screen_.parent(window) == puck_ && id == kPuckOptions) {
         showOptions(!screen_.visible(options_));
+    } else if (screen_.parent(window) == puck_ && id == kSnapshot) {
+        return Action::Snapshot;
     } else if (screen_.parent(window) == puck_ && id == kDayNight) {
         return Action::DayNight;
     } else if (options_ >= 0 && window == screen_.find(options_, kOptionsQuit)) {

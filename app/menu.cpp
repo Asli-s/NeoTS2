@@ -3147,6 +3147,8 @@ void Game::handleEvent(const pf::Event& e) {
         }
     } else if (e.type == pf::Event::Type::KeyDown && !e.repeat && inNeighborhood_ && !neighborhoodCovered() && e.key == pf::Key::Q) {
         openQuitBox();  // Q asks to quit in the neighborhood too
+    } else if (e.type == pf::Event::Type::KeyDown && !e.repeat && inNeighborhood_ && !neighborhoodCovered() && e.key == pf::Key::C && !e.ctrl && !e.alt) {
+        takeSnapshot();
     } else if (e.type == pf::Event::Type::KeyDown && !e.repeat && inNeighborhood_ && !neighborhoodCovered() && e.key == pf::Key::L) {
         toggleNight();
     } else if (e.type == pf::Event::Type::KeyDown && !e.repeat && inNeighborhood_ && !neighborhoodCovered() &&
@@ -3259,6 +3261,8 @@ void Game::windowClicked(int window) {
         const auto action = hoodUi_.clicked(window);
         if (action == app::NeighborhoodUi::Action::Quit) {
             openQuitBox();
+        } else if (action == app::NeighborhoodUi::Action::Snapshot) {
+            takeSnapshot();
         } else if (action == app::NeighborhoodUi::Action::DayNight) {
             toggleNight();
         } else if (action == app::NeighborhoodUi::Action::GraphicsOptionChanged) {

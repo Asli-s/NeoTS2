@@ -1253,6 +1253,44 @@ void jpegDecodesAsTheGame() {
     CHECK(safe);
 }
 
+// A picture saved as a snapshot reads back as it was, by the game's way of decoding and by stb's,
+// whatever its size: also one whose sides aren't multiples of 8.
+void jpegEncodesSnapshots() {
+    for (const auto [w, h] : {std::pair<std::uint32_t, std::uint32_t>{400, 300}, {13, 9}, {1, 1}}) {
+        ts2::tga::Pixels picture{w, h, std::vector<std::uint8_t>(static_cast<std::size_t>(w) * h * 4)};
+        for (std::uint32_t y = 0; y < h; ++y) {
+            for (std::uint32_t x = 0; x < w; ++x) {
+                std::uint8_t* p = &picture.rgba[(static_cast<std::size_t>(y) * w + x) * 4];
+                p[0] = static_cast<std::uint8_t>(x * 255 / std::max(w - 1, 1u));
+                p[1] = static_cast<std::uint8_t>(y * 255 / std::max(h - 1, 1u));
+                p[2] = static_cast<std::uint8_t>(128 + (x + y) % 2 * 40);  // a fine checker, the hardest part
+                p[3] = 255;
+            }
+        }
+        const auto file = ts2::jpeg::encode(picture, 95);
+        CHECK(file.size() > 4 && file[0] == 0xFF && file[1] == 0xD8 && file[file.size() - 2] == 0xFF && file.back() == 0xD9);
+        for (const auto& decoded : {ts2::jpeg::decode(file), ts2::image::decode(file)}) {
+            CHECK(decoded && decoded->width == w && decoded->height == h);
+            if (!decoded || decoded->rgba.size() != picture.rgba.size()) {
+                continue;
+            }
+            double error = 0;
+            int worst = 0;
+            for (std::size_t i = 0; i < picture.rgba.size(); ++i) {
+                if (i % 4 != 3) {
+                    const int d = std::abs(int{decoded->rgba[i]} - int{picture.rgba[i]});
+                    error += d;
+                    worst = std::max(worst, d);
+                }
+            }
+            CHECK(error / (static_cast<double>(w) * h * 3) < 3.0);
+            CHECK(worst < 40);
+        }
+    }
+    CHECK(ts2::jpeg::encode({}).empty());
+    CHECK(ts2::jpeg::encode(ts2::tga::Pixels{2, 2, {1, 2, 3}}).empty());
+}
+
 void barPaintingKeepsTheFillShape() {
     ts2::tga::Pixels fill{3, 2, {9, 9, 9, 0, 9, 9, 9, 128, 9, 9, 9, 255, 9, 9, 9, 255, 9, 9, 9, 64, 9, 9, 9, 0}};
     ts2::tga::Pixels gradient{3, 2, {1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255, 13, 14, 15, 255, 16, 17, 18, 255}};
@@ -1449,6 +1487,7 @@ std::vector<Test> modelAndImageTests() {
         {"Limb IK adds additive targets", limbIkAddsAdditiveTargets},
         {"Limb IK reaches bones of the IK object", limbIkReachesBonesOfTheIkObject},
         {"JPEG pictures decode as the game decodes them", jpegDecodesAsTheGame},
+        {"snapshots are saved as JPEG pictures", jpegEncodesSnapshots},
         {"scenegraph hashes and textures", scenegraphHashesAndTextures},
         {"Light resources are read", lightResourcesAreRead},
         {"data list reads flags and two-float vectors", dataListReadsFlagsAndTwoFloatVectors},

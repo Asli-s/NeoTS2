@@ -302,6 +302,9 @@ private:
     void updateLot(std::uint64_t now);
     void puckCamera();
     void toggleNight();
+    // Camera Snapshot (C in the neighborhood): saves the view, without the panels, as one of the
+    // neighborhood's snapshots in the user folder's Storytelling folder.
+    void takeSnapshot();
     void startLotLife();
     void drawHousehold(std::uint64_t now);
     void sendLotChanges();

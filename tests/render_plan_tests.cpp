@@ -26,6 +26,7 @@ public:
     bool draw(const Camera&) override { return true; }
     void setWaitForScreen(bool) override {}
     bool drawToFile(const Camera&, unsigned, unsigned, const std::filesystem::path&) override { return true; }
+    std::optional<ts2::scene::Image> drawToImage(const Camera&, unsigned, unsigned) override { return std::nullopt; }
     std::optional<scene::Image> drawInstancesToImage(const Camera&, unsigned, unsigned, std::optional<scene::ObjectLighting>) override { return {}; }
     std::string backend() const override { return "none"; }
     std::string device() const override { return "none"; }

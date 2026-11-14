@@ -43,6 +43,7 @@ public:
     void setSprites(const std::vector<std::pair<int, const scene::Image*>>& images) override;
     [[nodiscard]] bool draw(const Camera& camera) override;
     [[nodiscard]] bool drawToFile(const Camera& camera, unsigned width, unsigned height, const std::filesystem::path& path) override;
+    [[nodiscard]] std::optional<scene::Image> drawToImage(const Camera& camera, unsigned width, unsigned height) override;
     [[nodiscard]] std::optional<scene::Image> drawInstancesToImage(const Camera& camera, unsigned width, unsigned height,
                                                                    std::optional<scene::ObjectLighting> lighting) override;
     std::string backend() const override { return "opengl"; }

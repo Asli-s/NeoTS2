@@ -206,6 +206,11 @@ bool GlRenderer::drawToFile(const Camera& camera, unsigned width, unsigned heigh
     return platform::savePng(path, image.rgba.data(), width, height);
 }
 
+std::optional<scene::Image> GlRenderer::drawToImage(const Camera& camera, unsigned width, unsigned height) {
+    scene::Image image;
+    return drawOffscreen(camera, width, height, image) ? std::optional<scene::Image>(std::move(image)) : std::nullopt;
+}
+
 std::optional<scene::Image> GlRenderer::drawInstancesToImage(const Camera& camera, unsigned width, unsigned height,
                                                              std::optional<scene::ObjectLighting> lighting) {
     // Back to the scene's own drawing afterwards, even if drawing throws.

@@ -42,6 +42,7 @@ public:
         std::vector<std::uint32_t> occupied;
         std::map<std::uint32_t, LotCard> cards;  // by lot id
         std::vector<StoryPage> story;
+        std::optional<std::int32_t> neighborhoodId;  // its story album's id too
     };
     static Content read(const std::filesystem::path& folder, const std::filesystem::path& user);
 
@@ -51,6 +52,9 @@ public:
 
     enum class Bin { None, Families, Lots };
     void showBin(Bin bin);
+
+    // The open neighborhood's id, its story album's too (snapshots are filed under it).
+    std::optional<std::int32_t> neighborhoodId() const { return neighborhoodId_; }
 
     // F1 to F5 pressed (`n`): each opens or closes what its puck button does.
     void functionKey(int n);
@@ -74,7 +78,7 @@ public:
     GraphicsOptionsPanel& graphicsOptions() { return graphicsOptions_; }
     // The screen has a new size: what sits at its bottom edge moves with it.
     void setSize(int width, int height);
-    enum class Action { None, MainMenu, EnterLot, Quit, GameOptionChanged, GraphicsOptionChanged, DayNight };
+    enum class Action { None, MainMenu, EnterLot, Quit, GameOptionChanged, GraphicsOptionChanged, DayNight, Snapshot };
     // A button released: what the player asked for.
     Action clicked(int window);
     // The puck's camera button held down. They turn and zoom while held, as the lot puck's do.
@@ -137,6 +141,7 @@ private:
     std::map<std::uint32_t, LotCard> cards_;
     std::uint32_t cardLot_ = 0;
     std::vector<StoryPage> storyPages_;
+    std::optional<std::int32_t> neighborhoodId_;
     std::size_t storyPage_ = 0;
     ts2::tga::Pixels storyShape_;  // the story picture's rounded shape
     std::string storyCounter_;     // the page counter's text from the script ("%ld of %ld")

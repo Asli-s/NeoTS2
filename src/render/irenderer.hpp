@@ -112,6 +112,8 @@ public:
 
     // Draws one frame off-screen and saves it as a PNG.
     [[nodiscard]] virtual bool drawToFile(const Camera& camera, unsigned width, unsigned height, const std::filesystem::path& path) = 0;
+    // Draws one frame off-screen and returns it (rows from the top), nullopt when it can't be drawn.
+    [[nodiscard]] virtual std::optional<scene::Image> drawToImage(const Camera& camera, unsigned width, unsigned height) = 0;
     // Draws only the shown instances off-screen over a clear (transparent) background, without the
     // sky, ground, water or sprites, and returns the picture (rows from the top). Everything is lit
     // by `lighting` (Sim portraits), or without it as the scene is (lot imposter pictures). Nullopt

@@ -167,6 +167,11 @@ bool SdlGpuRenderer::drawToFile(const Camera& camera, unsigned width, unsigned h
     return saved;
 }
 
+std::optional<scene::Image> SdlGpuRenderer::drawToImage(const Camera& camera, unsigned width, unsigned height) {
+    scene::Image image;
+    return drawOffscreen(camera, width, height, image) ? std::optional<scene::Image>(std::move(image)) : std::nullopt;
+}
+
 std::optional<scene::Image> SdlGpuRenderer::drawInstancesToImage(const Camera& camera, unsigned width, unsigned height,
                                                            std::optional<scene::ObjectLighting> lighting) {
     // Back to the scene's own drawing afterwards, even if drawing throws.
