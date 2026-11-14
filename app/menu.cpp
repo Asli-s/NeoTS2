@@ -734,6 +734,8 @@ void Game::showNeighborhood(Built built) {
         hoodUi_.showBin(app::NeighborhoodUi::Bin::Families);
     } else if (options_.bin == "lots") {
         hoodUi_.showBin(app::NeighborhoodUi::Bin::Lots);
+    } else if (options_.bin == "cas") {
+        openCas();
     } else if (options_.bin == "decorations") {
         hoodUi_.showBin(app::NeighborhoodUi::Bin::Decorations);
     } else if (options_.bin == "story") {
@@ -2856,6 +2858,7 @@ void Game::run() {
             if (!freeCam_) {
                 showLotTag();
                 updateHeldDecoration();
+                updateCas();
             }
             if (clickedLot_ != 0 && now - clickedAt_ > kDoubleClickNs) {
                 showLotCard(clickedLot_);
@@ -3137,6 +3140,15 @@ void Game::handleEvent(const pf::Event& e) {
     }
     // The naming dialog takes the keyboard while it is open. Keys let go still stop the camera's
     // turn above and the free camera's moves, so none goes on after the dialog.
+    // Create-a-Sim's text boxes take the typing while one has the keyboard.
+    if (cas_.isOpen() && cas_.editing() && (e.type == pf::Event::Type::Text || e.type == pf::Event::Type::KeyDown)) {
+        if (e.type == pf::Event::Type::Text) {
+            cas_.typed(e.text);
+        } else {
+            cas_.key(e.key);
+        }
+        return;
+    }
     // A story editor's text box takes the typing while it has the keyboard.
     if (StoryEditor* editor = activeStoryEditor(); editor && editor->editing() && (e.type == pf::Event::Type::Text || e.type == pf::Event::Type::KeyDown)) {
         if (e.type == pf::Event::Type::Text) {
@@ -3250,6 +3262,10 @@ void Game::mouseEvent(const pf::Event& e) {
             const auto [ux, uy] = toUi(x, y);
             editor->pointerDown(screen_.mouseWindow(ux, uy));
         }
+        if (cas_.isOpen()) {
+            const auto [ux, uy] = toUi(x, y);
+            cas_.pointerDown(screen_.mouseWindow(ux, uy));
+        }
         down_ = true;
         downX_ = x;
         downY_ = y;
@@ -3320,6 +3336,10 @@ void Game::windowClicked(int window) {
     }
     const std::uint32_t id = screen_.id(window);
     ts2::diag::info(std::format("clicked 0x{:08x}", id));
+    if (cas_.isOpen()) {
+        casClicked(window);  // Create-a-Sim covers the neighborhood's panels
+        return;
+    }
     if (inNeighborhood_ && !screen_.visible(menu_)) {
         // The chooser, but not while a lot is loading: it reads this neighborhood.
         const auto action = hoodUi_.clicked(window);
@@ -3329,6 +3349,8 @@ void Game::windowClicked(int window) {
             undoDecoration(action == app::NeighborhoodUi::Action::DecorationRedo);
         } else if (action == app::NeighborhoodUi::Action::DecorationTool) {
             decorationToolChosen();
+        } else if (action == app::NeighborhoodUi::Action::CreateFamily) {
+            openCas();
         } else if (action == app::NeighborhoodUi::Action::VideoCapture) {
             toggleVideoCapture();
         } else if (action == app::NeighborhoodUi::Action::Snapshot) {
@@ -3426,6 +3448,11 @@ std::optional<T> Game::finished(std::future<T>& job, const char* what) {
 // The picture the options ask for, of the neighborhood or lot just opened, after the clicks
 // asked for. False while it waits for the Sims or for the lot to play on.
 bool Game::takePicture() {
+    // Create-a-Sim's Sim is built and drawn before the picture.
+    if (cas_.isOpen() && (casRebuild_ || casRedraw_)) {
+        updateCas();
+        return false;
+    }
     // A recording asked for runs its time first, the view drawn as it goes.
     if (options_.recordSeconds > 0 && !recordingTaken_) {
         if (!videoRecorder_) {
@@ -3449,6 +3476,9 @@ bool Game::takePicture() {
         uiClicked_ = true;
         for (const auto& [wx, wy, kind] : options_.uiClicks) {
             const auto [cx, cy] = toUi(static_cast<float>(wx), static_cast<float>(wy));
+            if (cas_.isOpen()) {
+                cas_.pointerDown(screen_.mouseWindow(cx, cy));
+            }
             if (StoryEditor* editor = activeStoryEditor()) {
                 editor->pointerDown(screen_.mouseWindow(cx, cy));
             }
@@ -3461,6 +3491,9 @@ bool Game::takePicture() {
                 windowClicked(*clicked);
             }
         }
+        if (cas_.isOpen() && cas_.editing() && !options_.type.empty()) {
+            cas_.typed(options_.type);
+        }
         if (StoryEditor* editor = activeStoryEditor(); editor && !options_.type.empty()) {
             editor->typed(options_.type);
             editor->save();  // as Close would
@@ -3469,6 +3502,9 @@ bool Game::takePicture() {
             saveNeighborhood();
         }
         showSprites(static_cast<double>(ts2::platform::ticksNs()) / 1e9, true);
+    }
+    if (cas_.isOpen() && (casRebuild_ || casRedraw_)) {
+        return false;  // the clicks changed the Sim: it is drawn again first
     }
     // A neighborhood being built again (a new Water) is waited for.
     if (hoodRefreshing_.valid()) {

@@ -462,8 +462,8 @@ void NeighborhoodUi::open(const fs::path& folder, const std::string& name, Conte
         screen_.setVisible(college[i], i == 0);
         screen_.setEnabled(college[i], false);  // no college attached
     }
-    // Making a family (Create-a-Sim) and moving one in aren't built yet.
-    for (const std::uint32_t id : {kMoveFamily, kNewFamily}) {
+    // Moving a family in isn't built yet. Create New Family opens Create-a-Sim.
+    for (const std::uint32_t id : {kMoveFamily}) {
         for (const int c : childrenWithId(screen_, families_, id)) {
             screen_.setEnabled(c, false);
         }
@@ -706,6 +706,9 @@ NeighborhoodUi::Action NeighborhoodUi::clicked(int window) {
         showBin(bin_ == Bin::Families ? Bin::None : Bin::Families);
     } else if (screen_.parent(window) == puck_ && id == kPuckLots) {
         showBin(bin_ == Bin::Lots ? Bin::None : Bin::Lots);
+    } else if (families_ >= 0 && id == kNewFamily && screen_.parent(window) == families_) {
+        showBin(Bin::None);
+        return Action::CreateFamily;
     } else if (screen_.parent(window) == puck_ && id == kPuckDecorations) {
         showBin(bin_ == Bin::Decorations ? Bin::None : Bin::Decorations);
     } else if (stripClicked(familyStrip_, familyPictures_, window) || stripClicked(lotStrip_, lotPictures_, window) ||

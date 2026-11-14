@@ -106,7 +106,7 @@ public:
     // The screen has a new size: what sits at its bottom edge moves with it.
     void setSize(int width, int height);
     // DecorationTool: a Decorations tool or catalog entry was chosen (see decorationTool).
-    enum class Action { None, MainMenu, EnterLot, Quit, GameOptionChanged, GraphicsOptionChanged, DayNight, Snapshot, VideoCapture, DecorationTool, DecorationUndo, DecorationRedo };
+    enum class Action { None, MainMenu, EnterLot, Quit, GameOptionChanged, GraphicsOptionChanged, DayNight, Snapshot, VideoCapture, DecorationTool, DecorationUndo, DecorationRedo, CreateFamily };
     // A button released: what the player asked for.
     Action clicked(int window);
     // The puck's camera button held down. They turn and zoom while held, as the lot puck's do.

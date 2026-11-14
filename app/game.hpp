@@ -24,6 +24,10 @@
 #include "neighborhood_ui.hpp"
 #include "orbit.hpp"
 #include "quit_box.hpp"
+#include "cas_screen.hpp"
+#include "scene/animation_library.hpp"
+#include "scene/outfit_catalog.hpp"
+#include "scene/sim_builder.hpp"
 #include "video_recorder.hpp"
 #include "portraits.hpp"
 
@@ -331,6 +335,21 @@ private:
     std::uint64_t videoStartedAt_ = 0;
     bool recordingTaken_ = false;  // the test recording (--record-seconds) is done
     app::DialogBox noticeBox_;  // a message with OK, such as where a video was saved
+    // Create-a-Sim (game_cas.cpp), as the Families bin's Create New Family opens it.
+    void openCas();
+    void closeCas();
+    void casClicked(int window);
+    // Each frame while it is open: the Sim built again when its look changed, its picture drawn again.
+    void updateCas();
+    void buildCasSim();
+    void drawCasSim();
+    CasScreen cas_{screen_, data_};
+    std::shared_future<ts2::scene::OutfitCatalog> casCatalog_;
+    std::unique_ptr<ts2::scene::RigLibrary> casRigs_;
+    std::unique_ptr<ts2::scene::AnimationLibrary> casAnimations_;
+    std::vector<std::size_t> casInstances_;  // the Sim being made, in the neighborhood's scene
+    std::optional<std::size_t> casActor_;
+    bool casRebuild_ = false, casRedraw_ = false;
     // Decorations: the neighborhood's Decorations catalog and its tools (game_decorations.cpp).
     // What the hand holds: a catalog entry to place, or one already placed, picked up with the Hand
     // Tool to move (or delete). It is drawn by `instance`, following the mouse over the ground.
