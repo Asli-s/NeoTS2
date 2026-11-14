@@ -40,6 +40,7 @@ std::string simoleons(std::int32_t amount) {
 } // namespace
 
 void Game::pickWallTool() {
+    sledgeActive_ = false;
     if (!buildActive_ || !lotLife_) {
         return;
     }
@@ -210,6 +211,7 @@ std::string Game::buildWallLine(std::array<std::int32_t, 2> to) {
             return "You can't afford that.";
         }
     }
+    const WallState before = wallState();  // for undoing it
     ts2::sim::renumberRooms(graph, graphLevel);
     lotLife_->addFunds(-cost);
     lot.roomGraph = std::move(graph);
@@ -220,13 +222,22 @@ std::string Game::buildWallLine(std::array<std::int32_t, 2> to) {
         ts2::sim::updateRoomGrid(rooms->second, *lot.roomGraph, graphLevel);
     }
     lotLife_->wallsChanged(lot);
+    recordStep(wallRemoving_ ? "taking walls down" : "building walls",
+               [this, level, before, cost] {
+                   applyWallState(level, before);
+                   lotLife_->addFunds(cost);
+               },
+               [this, level, after = wallState(), cost] {
+                   applyWallState(level, after);
+                   lotLife_->addFunds(-cost);
+               });
     ts2::diag::step(std::format("build mode: {} {} wall{} on storey {} from {} {} to {} {}: {} {}", wallRemoving_ ? "took down" : "built",
                                 wallRemoving_ ? removed.size() : built.size(), (wallRemoving_ ? removed.size() : built.size()) == 1 ? "" : "s",
                                 storey, (*wallDragFrom_)[0], (*wallDragFrom_)[1], to[0], to[1], cost < 0 ? "got back" : "paid", std::abs(cost)));
     return {};
 }
 
-void Game::redrawLevelWalls(int level, const std::vector<std::int32_t>& built, const std::vector<std::int32_t>& removed) {
+void Game::redrawLevelWalls(int level, const std::vector<std::int32_t>& built, const std::vector<std::int32_t>& removed, bool force) {
     if (!drawnWalls_ || !buildLot_ || !buildLot_->roomGraph || !lotLife_) {
         return;
     }
@@ -336,7 +347,7 @@ void Game::redrawLevelWalls(int level, const std::vector<std::int32_t>& built, c
         const bool isNew = wallInstances_[onLevel[k]][0] < 0 && wallInstances_[onLevel[k]][1] < 0;
         const bool moved = now.leftA != d.wall.leftA || now.leftB != d.wall.leftB || now.rightA != d.wall.rightA || now.rightB != d.wall.rightB ||
                            now.joined != d.wall.joined;
-        if (!isNew && !moved) {
+        if (!isNew && !moved && !force) {
             continue;
         }
         d.wall = now;

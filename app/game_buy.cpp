@@ -39,6 +39,11 @@ void Game::leaveBuy(bool restorePause) {
     if (!buyActive_) {
         return;
     }
+    // Back to Live mode: undo reaches no further back.
+    if (restorePause) {
+        clearUndo();
+        sledgeActive_ = false;
+    }
     cancelHeld();
     buyActive_ = false;
     boughtThisVisit_.clear();
@@ -81,6 +86,10 @@ void Game::leavePanelMode(bool restorePause) {
     if (!buildActive_ && !storyActive_) {
         return;
     }
+    if (restorePause) {
+        clearUndo();
+        sledgeActive_ = false;
+    }
     dropBuildTool();
     cancelHeld();  // a door or window held goes back, or isn't bought
     ts2::diag::step(buildActive_ ? "build mode: closed" : "story mode: closed");
@@ -99,6 +108,7 @@ void Game::buyTip(const std::string& text) {
 }
 
 void Game::buyItem(std::uint32_t guid) {
+    sledgeActive_ = false;
     if (!lotLife_ || !buyActive_) {
         return;
     }
@@ -226,6 +236,21 @@ void Game::placeHeld() {
     if (buyHeld_->door) {
         cutForDoor(object, true);
     }
+    // Undone, a bought object goes back for what it cost and a moved one returns where it stood.
+    if (const auto now = lotLife_->placed(object)) {
+        const auto cell = cellFor(object);
+        const bool door = buyHeld_->door;
+        if (buyHeld_->fromCatalog) {
+            const auto* definition = lotLife_->buyDefinition(object);
+            const std::uint32_t guid = definition != nullptr ? definition->guid() : 0;
+            const std::int32_t price = buyHeld_->price;
+            recordStep(std::format("buying object {}", object), [this, cell, price, door] { takeAway(*cell, price, door); },
+                       [this, cell, guid, where = *now, price, door] { *cell = rebuy(guid, where, price, door); });
+        } else if (buyHeld_->from) {
+            recordStep(std::format("moving object {}", object), [this, cell, from = *buyHeld_->from, door] { moveTo(*cell, from, door); },
+                       [this, cell, to = *now, door] { moveTo(*cell, to, door); });
+        }
+    }
     buyHeld_.reset();
     buyTip({});
 }
@@ -253,12 +278,21 @@ void Game::sellHeld() {
     }
     const std::int16_t object = buyHeld_->object;
     if (!buyHeld_->fromCatalog) {
-        // Bought in this visit: all of it back. Otherwise what it is worth now.
-        const auto bought = boughtThisVisit_.find(object);
-        const std::int32_t refund = bought != boughtThisVisit_.end() ? bought->second : lotLife_->currentValue(object);
+        // Bought in this visit: all of it back. Otherwise what it is worth now. Undone, it is bought
+        // again for that and put where it stood.
+        const std::int32_t refund = refundFor(object);
+        const auto* definition = lotLife_->buyDefinition(object);
+        const std::uint32_t guid = definition != nullptr ? definition->guid() : 0;
         lotLife_->addFunds(refund);
         boughtThisVisit_.erase(object);
         ts2::diag::step(std::format("buy mode: sold object {} for {}", object, refund));
+        if (buyHeld_->from && guid != 0) {
+            const auto cell = cellFor(object);
+            const bool door = buyHeld_->door;
+            recordStep(std::format("selling object {}", object),
+                       [this, cell, guid, where = *buyHeld_->from, refund, door] { *cell = rebuy(guid, where, refund, door); },
+                       [this, cell, refund, door] { takeAway(*cell, refund, door); });
+        }
     }
     lotLife_->removeObject(object);
     buyHeld_.reset();
@@ -282,6 +316,14 @@ bool Game::buyMouse(const pf::Event& e, float x, float y) {
         return false;
     }
     if (e.button == pf::MouseButton::Left) {
+        // The sledgehammer takes the object under it away.
+        if (sledgeActive_ && !buyHeld_) {
+            if (hovered_ != 0) {
+                sledgeObject(static_cast<std::int16_t>(hovered_));
+                hovered_ = 0;
+            }
+            return true;
+        }
         if (buyHeld_) {
             placeHeld();
             return true;
@@ -310,6 +352,13 @@ bool Game::buyMouse(const pf::Event& e, float x, float y) {
 bool Game::buyKey(const pf::Event& e) {
     if ((!buyActive_ && !buildActive_) || !lotLife_ || e.type != pf::Event::Type::KeyDown) {
         return false;
+    }
+    // Ctrl+Z undoes the newest change, Ctrl+Y does it again.
+    if (e.ctrl && (e.key == pf::Key::Z || e.key == pf::Key::Y)) {
+        if (!e.repeat) {
+            e.key == pf::Key::Z ? undoStep() : redoStep();
+        }
+        return true;
     }
     if (!buyHeld_) {
         return false;

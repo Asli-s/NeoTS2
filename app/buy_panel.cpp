@@ -42,9 +42,10 @@ constexpr std::array<RoomButton, 9> kRooms = {{{0xC100, catalog::room::kLivingRo
 constexpr std::uint32_t kNormal = 0x1000, kExpanded = 0x2000, kWholesale = 0x3300, kWholesaleExpanded = 0x5500;
 constexpr std::uint32_t kArea = 0x1006, kAreaMark = 0x1007, kPrevious = 0x1004, kNext = 0x1005, kScrollbar = 0x1008, kOrganize = 0x3001,
                         kExpand = 0x1009, kCustomContent = 0x100A;
-// The tools: the hand (always on), and the eyedropper, sledgehammer, view and undo buttons (not done).
+// The tools: the hand, the sledgehammer, undo and redo, and the eyedropper and view buttons (not done).
 constexpr std::uint32_t kHand = 0xCC607031;
-constexpr std::array<std::uint32_t, 8> kToolsNotDone = {0xCC607032, 0x000000AE, 0xCC6070AF, 0xCC607030, 0xCC607035, 0xCC607036, 0xCC607033, 0xCC607034};
+constexpr std::uint32_t kSledgehammer = 0x000000AE, kUndo = 0xCC607033, kRedo = 0xCC607034;
+constexpr std::array<std::uint32_t, 5> kToolsNotDone = {0xCC607032, 0xCC6070AF, 0xCC607030, 0xCC607035, 0xCC607036};
 // A catalog item: the game's thumbnail (UI script 0xFEEDEABE) made smaller to fit four across and
 // two down, with its background button, picture and overlay button, and the pictures' shape.
 constexpr std::uint32_t kThumbnail = 0xFEEDEABE, kThumbBackground = 0xA001, kThumbPicture = 0xA002, kThumbOverlay = 0xA003;
@@ -119,6 +120,17 @@ void BuyPanel::attach(ts2::ui::Screen& screen, int content) {
     reset();
 }
 
+void BuyPanel::showTools(bool sledgehammer, bool canUndo, bool canRedo) {
+    if (screen_ == nullptr || content_ < 0) {
+        return;
+    }
+    auto& s = *screen_;
+    s.setChecked(s.find(content_, kHand), !sledgehammer);
+    s.setChecked(s.find(content_, kSledgehammer), sledgehammer);
+    s.setEnabled(s.find(content_, kUndo), canUndo);
+    s.setEnabled(s.find(content_, kRedo), canRedo);
+}
+
 void BuyPanel::reset() {
     byRoom_ = false;
     category_ = 0;
@@ -179,6 +191,16 @@ BuyPanel::Click BuyPanel::clicked(int window) {
         return out;
     }
     out.panel = true;
+    // The tools: the hand and the sledgehammer take turns lit; undo and redo act at once.
+    if (const std::uint32_t tool = s.id(window); tool == kHand || tool == kSledgehammer) {
+        s.setChecked(s.find(content_, kHand), tool == kHand);
+        s.setChecked(s.find(content_, kSledgehammer), tool == kSledgehammer);
+        (tool == kHand ? out.hand : out.sledgehammer) = true;
+        return out;
+    } else if (tool == kUndo || tool == kRedo) {
+        (tool == kUndo ? out.undo : out.redo) = true;
+        return out;
+    }
     // A catalog item.
     for (std::size_t i = 0; i < slots_.size(); ++i) {
         for (int w = window; w >= 0; w = s.parent(w)) {

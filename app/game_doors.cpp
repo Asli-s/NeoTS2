@@ -17,6 +17,7 @@
 namespace app {
 
 void Game::buildObject(std::uint32_t guid) {
+    sledgeActive_ = false;
     if (!lotLife_ || !buildActive_) {
         return;
     }
@@ -105,17 +106,17 @@ std::optional<std::vector<Game::DoorCut>> Game::doorCuts(std::int16_t object, co
     return out;
 }
 
-void Game::cutForDoor(std::int16_t object, bool cut) {
+bool Game::cutForDoor(std::int16_t object, bool cut) {
     if (!lotLife_ || !drawnWalls_ || !buildLot_) {
-        return;
+        return false;
     }
     const auto placed = lotLife_->placed(object);
     if (!placed) {
-        return;
+        return false;
     }
     const auto cuts = doorCuts(object, placed->spot, placed->direction, false);
     if (!cuts) {
-        return;
+        return false;
     }
     const auto drawnObject = std::find_if(lot_.placedObjects.begin(), lot_.placedObjects.end(),
                                           [&](const ts2::scene::PlacedObject& p) { return p.object == static_cast<std::uint32_t>(object); });
@@ -159,6 +160,7 @@ void Game::cutForDoor(std::int16_t object, bool cut) {
     lotLife_->wallsChanged(*buildLot_);
     ts2::diag::step(std::format("build mode: {} {} wall side{} for object {}", cut ? "cut" : "closed", cuts->size(), cuts->size() == 1 ? "" : "s",
                                 object));
+    return true;
 }
 
 std::uint32_t Game::buildHover() {
@@ -167,7 +169,9 @@ std::uint32_t Game::buildHover() {
     }
     // A door sits inside its wall's thickness: only objects take the ray, so the wall doesn't hide it.
     const std::uint32_t object = lotObjectAt((*hoverAt_)[0], (*hoverAt_)[1], {}, true);
-    return object != 0 && lotLife_->isDoorOrWindow(static_cast<std::int16_t>(object)) ? object : 0;
+    // The sledgehammer reaches any object the hand could move too.
+    const auto id = static_cast<std::int16_t>(object);
+    return object != 0 && (lotLife_->isDoorOrWindow(id) || (sledgeActive_ && lotLife_->movable(id))) ? object : 0;
 }
 
 } // namespace app

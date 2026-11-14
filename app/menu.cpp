@@ -1507,6 +1507,8 @@ void Game::leaveLot() {
     wallOfInstance_.clear();
     terrainInstance_ = terrainPaintInstance_ = -1;
     painting_ = false;
+    clearUndo();
+    sledgeActive_ = false;
     endCameraDrag();
     inLot_ = false;
     if (surroundingsBuilding_.valid()) {
@@ -1755,7 +1757,18 @@ void Game::lotAction(app::LotUi::Action action) {
     case Action::BuildWallTool: pickWallTool(); break;
     case Action::BuildObjectItem: buildObject(lotUi_.pickedBuildObject()); break;
     case Action::BuildPaintItem: pickPaint(lotUi_.pickedPaint()); break;
-    case Action::BuildHand: dropBuildTool(); break;
+    case Action::BuildHand:
+        dropBuildTool();
+        sledgeActive_ = false;
+        break;
+    case Action::Sledgehammer:
+        cancelHeld();
+        dropBuildTool();
+        sledgeActive_ = true;
+        ts2::diag::step("build mode: sledgehammer picked");
+        break;
+    case Action::Undo: undoStep(); break;
+    case Action::Redo: redoStep(); break;
     case Action::BuildClosed:
     case Action::StoryClosed: leavePanelMode(true); break;
     case Action::BuyItem: buyItem(lotUi_.pickedBuyItem()); break;
@@ -2537,6 +2550,8 @@ void Game::updateLot(std::uint64_t now) {
         lotUi_.showLife(*lotLife_);
         lotUi_.refreshBuy(*lotLife_);
         lotUi_.refreshBuild(*lotLife_);
+        lotUi_.showTools(sledgeActive_, !undoSteps_.empty(), !redoSteps_.empty());
+        cutPendingDoors();
         lotUi_.showNotifications(*lotLife_, static_cast<double>(now - lastFrame_) / 1e9);
         updateBabyNames();
         updatePhoneBook();
@@ -3094,9 +3109,9 @@ void Game::handleEvent(const pf::Event& e) {
         }
         return;
     }
-    // The neighborhood has no Y for its free camera.
+    // The neighborhood has no Y for its free camera. Ctrl+Y is redo in Buy and Build mode.
     const bool freeToggle = e.type == pf::Event::Type::KeyDown && !e.repeat && !quitBox_.isOpen() &&
-                            ((inLot_ && (e.scancode == pf::Key::Tab || e.scancode == pf::Key::Y || (freeCam_ && e.scancode == pf::Key::Escape))) ||
+                            ((inLot_ && (e.scancode == pf::Key::Tab || (e.scancode == pf::Key::Y && !e.ctrl) || (freeCam_ && e.scancode == pf::Key::Escape))) ||
                              (inNeighborhood_ && !neighborhoodCovered() && (e.scancode == pf::Key::Tab || (freeCam_ && e.scancode == pf::Key::Escape))));
     if (freeToggle) {
         toggleFreeCamera();

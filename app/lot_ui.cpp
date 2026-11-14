@@ -831,6 +831,9 @@ LotUi::Action LotUi::clicked(int window) {
         if (click.wallTool) {
             return Action::BuildWallTool;
         }
+        if (click.sledgehammer || click.undo || click.redo) {
+            return click.sledgehammer ? Action::Sledgehammer : click.undo ? Action::Undo : Action::Redo;
+        }
         return click.hand ? Action::BuildHand : Action::None;
     }
     if (const auto click = buyPanel_.clicked(window); click.panel) {
@@ -838,7 +841,7 @@ LotUi::Action LotUi::clicked(int window) {
             pickedBuyItem_ = *click.buy;
             return Action::BuyItem;
         }
-        return Action::None;
+        return click.hand ? Action::BuildHand : click.sledgehammer ? Action::Sledgehammer : click.undo ? Action::Undo : click.redo ? Action::Redo : Action::None;
     }
     if (graphicsOptions_.clicked(window)) {
         return graphicsOptions_.takeChanged() ? Action::GraphicsOptionChanged : Action::None;

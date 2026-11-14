@@ -13,7 +13,9 @@ namespace {
 constexpr std::uint32_t kScripts = 0xA99D8A11, kImages = 0x499DB772;
 // The tools: the hand (lit), the Build Mode tab (lit), and the others (not done).
 constexpr std::uint32_t kHand = 0x000000A5, kBuildTab = 0x000000A6;
-constexpr std::array<std::uint32_t, 8> kToolsNotDone = {0xA1, 0xA2, 0xA3, 0xA4, 0xAA, 0xAB, 0xAE, 0xAF};
+// The sledgehammer, undo and redo; the eyedropper, design and view tools aren't done.
+constexpr std::uint32_t kSledgehammer = 0xAE, kUndo = 0xA1, kRedo = 0xA2;
+constexpr std::array<std::uint32_t, 5> kToolsNotDone = {0xA3, 0xA4, 0xAA, 0xAB, 0xAF};
 // The category buttons' group, the Floors and Wall Coverings buttons, and their sub-category
 // panels, each with Back.
 constexpr std::uint32_t kCategories = 0x0000A000, kFloors = 0x0000A400, kFloorSorts = 0x0000B400, kFloorBack = 0x0000B410;
@@ -150,6 +152,17 @@ void BuildPanel::attach(ts2::ui::Screen& screen, int content) {
     reset();
 }
 
+void BuildPanel::showTools(bool sledgehammer, bool canUndo, bool canRedo) {
+    if (screen_ == nullptr || content_ < 0) {
+        return;
+    }
+    auto& s = *screen_;
+    s.setChecked(s.find(content_, kHand), !sledgehammer);
+    s.setChecked(s.find(content_, kSledgehammer), sledgehammer);
+    s.setEnabled(s.find(content_, kUndo), canUndo);
+    s.setEnabled(s.find(content_, kRedo), canRedo);
+}
+
 void BuildPanel::reset() {
     category_ = Category::None;
     wallToolPicked_ = false;
@@ -237,7 +250,19 @@ BuildPanel::Click BuildPanel::clicked(int window) {
     if (id == kHand) {
         wallToolPicked_ = false;
         s.setChecked(window, true);
+        s.setChecked(s.find(content_, kSledgehammer), false);
         out.hand = true;
+        return out;
+    }
+    if (id == kSledgehammer) {
+        wallToolPicked_ = false;
+        s.setChecked(window, true);
+        s.setChecked(s.find(content_, kHand), false);
+        out.sledgehammer = true;
+        return out;
+    }
+    if (id == kUndo || id == kRedo) {
+        (id == kUndo ? out.undo : out.redo) = true;
         return out;
     }
     if (id == kWallTool && parent == categories_) {

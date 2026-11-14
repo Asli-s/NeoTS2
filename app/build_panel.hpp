@@ -43,9 +43,12 @@ public:
         std::optional<std::uint32_t> floor, wall, object, paint;  // object: a door, window or arch; paint: a terrain paint
         bool hand = false;
         bool wallTool = false;  // the Wall tool (Walls & Rooms)
+        bool sledgehammer = false, undo = false, redo = false;
     };
     Click clicked(int window);
 
+    // Lights the hand or the sledgehammer, and greys undo and redo when there is nothing to do.
+    void showTools(bool sledgehammer, bool canUndo, bool canRedo);
     // The terrain brush size picked: 0 small, 1 medium, 2 large.
     int brushSize() const { return brush_; }
 

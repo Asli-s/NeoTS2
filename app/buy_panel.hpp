@@ -37,8 +37,12 @@ public:
     struct Click {
         bool panel = false;
         std::optional<std::uint32_t> buy;
+        bool hand = false, sledgehammer = false, undo = false, redo = false;
     };
     Click clicked(int window);
+
+    // Lights the hand (and not the sledgehammer), and greys undo and redo when there is nothing to do.
+    void showTools(bool sledgehammer, bool canUndo, bool canRedo);
 
     // Goes back to the sort's first view (the categories, page one), as the panel opens.
     void reset();

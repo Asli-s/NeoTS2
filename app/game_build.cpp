@@ -14,6 +14,7 @@
 #include "scene/lot_parts.hpp"
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <format>
 #include <map>
@@ -49,6 +50,7 @@ std::optional<std::int32_t> catalogPrice(const std::vector<ts2::scene::Assets::C
 } // namespace
 
 void Game::pickPattern(std::uint32_t guid, bool wall) {
+    sledgeActive_ = false;
     if (!buildActive_ || !lotLife_) {
         return;
     }
@@ -254,6 +256,24 @@ std::string Game::layFloors(std::array<std::int32_t, 2> to) {
     if (cost - refund > lotLife_->funds()) {
         return "You can't afford that.";
     }
+    // Undone, the storey's floors and pattern list go back as they were, and the money with them.
+    {
+        auto setFloors = [this, level, ground](const ts2::array3d::Array3D& floorsNow, const std::map<std::uint16_t, ts2::stringmap::Entry>& patternsNow,
+                                               std::int32_t funds) {
+            if (!buildLot_ || !lotLife_) {
+                return;
+            }
+            buildLot_->grids[ts2::content::kFloorGridInstance] = floorsNow;
+            buildLot_->floorPatterns = patternsNow;
+            lotLife_->addFunds(funds);
+            redrawFloors(level);
+            lotLife_->setFloors(floorsNow, ground);
+        };
+        const std::int32_t paid = cost - refund;
+        recordStep(floorRemoving_ ? "taking floor up" : "laying floor",
+                   [setFloors, before = grid->second, beforePatterns = lot.floorPatterns, paid] { setFloors(before, beforePatterns, paid); },
+                   [setFloors, after = floors, afterPatterns = patterns, paid] { setFloors(after, afterPatterns, -paid); });
+    }
     lotLife_->addFunds(refund - cost);
     grid->second = std::move(floors);
     lot.floorPatterns = std::move(patterns);
@@ -399,39 +419,53 @@ std::string Game::coverWalls(std::size_t wall, bool left, bool room) {
     if (cost - refund > lotLife_->funds()) {
         return "You can't afford that.";
     }
+    // What the covered walls showed, for undoing it.
+    const auto coveringsBefore = lot.wallCoverings;
+    const auto patternsBefore = lot.wallPatterns;
     lotLife_->addFunds(refund - cost);
     lot.wallCoverings = std::move(coverings);
     lot.wallPatterns = std::move(patterns);
     // Each covered side shows the new covering, its wall drawn again in full and cut down.
     const std::string material = assets_.get()->patternMaterial(buildTool_->pattern, true);
-    std::set<std::size_t> redraw;
+    std::map<std::size_t, std::array<std::string, 2>> sidesBefore, sidesAfter;  // by drawn wall: left and right coverings
     for (const auto& side : covered) {
         const auto it = drawnByGraph.find(side.wall);
         if (it == drawnByGraph.end()) {
             continue;
         }
         auto& w = drawn[it->second].wall;
+        sidesBefore.try_emplace(it->second, std::array{w.leftCovering, w.rightCovering});
         (side.left ? w.leftCovering : w.rightCovering) = material;
-        redraw.insert(it->second);
+        sidesAfter[it->second] = {w.leftCovering, w.rightCovering};
     }
     renderer_.addMaterials(lot_);
-    for (const std::size_t i : redraw) {
-        for (const bool cut : {false, true}) {
-            const int instance = wallInstances_[i][cut ? 1 : 0];
-            if (instance < 0) {
-                continue;
-            }
-            const int mesh = lotLife_->wallMesh(drawn[i], wallTopMaterial_, cut, lot_);
-            if (mesh < 0) {
-                continue;
-            }
-            lot_.instances[static_cast<std::size_t>(instance)].mesh = mesh;
-            renderer_.addMaterials(lot_);
-            renderer_.addMeshes(lot_);
-            renderer_.setInstance(lot_, static_cast<std::size_t>(instance));
-            lotPicker_.update(lot_, static_cast<std::size_t>(instance));
-        }
+    for (const auto& [i, after] : sidesAfter) {
+        redrawWall(i);
     }
+    // Undone, the walls show what they did and the money comes back.
+    auto setCoverings = [this](const std::vector<ts2::walllayer::Entry>& coveringsNow, const std::map<std::uint16_t, ts2::stringmap::Entry>& patternsNow,
+                               const std::map<std::size_t, std::array<std::string, 2>>& sides, std::int32_t funds) {
+        if (!buildLot_ || !drawnWalls_ || !lotLife_) {
+            return;
+        }
+        buildLot_->wallCoverings = coveringsNow;
+        buildLot_->wallPatterns = patternsNow;
+        lotLife_->addFunds(funds);
+        renderer_.addMaterials(lot_);
+        for (const auto& [i, s] : sides) {
+            if (i < drawnWalls_->walls.size()) {
+                drawnWalls_->walls[i].wall.leftCovering = s[0];
+                drawnWalls_->walls[i].wall.rightCovering = s[1];
+                redrawWall(i);
+            }
+        }
+    };
+    const std::int32_t paid = cost - refund;
+    recordStep("covering walls",
+               [setCoverings, coveringsBefore, patternsBefore, sidesBefore, paid] { setCoverings(coveringsBefore, patternsBefore, sidesBefore, paid); },
+               [setCoverings, after = lot.wallCoverings, afterPatterns = lot.wallPatterns, sidesAfter, paid] {
+                   setCoverings(after, afterPatterns, sidesAfter, -paid);
+               });
     const auto& q = drawn[wall].wall.q;
     ts2::diag::step(std::format("build mode: covered {} wall side{} with {}{} from the {} side of the wall from {} {} to {} {} (grid level {}{}): paid {}, got back {}",
                                 covered.size(), covered.size() == 1 ? "" : "s", buildTool_->name, room ? " round the room" : "", left ? "left" : "right",

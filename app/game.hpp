@@ -667,7 +667,7 @@ private:
     // Where the mouse meets the floor of a grid level (the storey in view when not given), in the lot's tiles.
     std::optional<std::array<float, 2>> buildPointAt(float x, float y, std::optional<int> gridLevel = std::nullopt);
     std::string buildWallLine(std::array<std::int32_t, 2> to);
-    void redrawLevelWalls(int level, const std::vector<std::int32_t>& built, const std::vector<std::int32_t>& removed);
+    void redrawLevelWalls(int level, const std::vector<std::int32_t>& built, const std::vector<std::int32_t>& removed, bool force = false);
     // Doors, windows and arches (app/game_doors.cpp): one bought from the Build catalog to hold, the
     // wall sides a held one's masks would cut (none when a wall it needs isn't there, or is cut
     // already, with `needFree`), and cutting or closing the walls of one placed on the lot.
@@ -679,9 +679,51 @@ private:
     };
     void buildObject(std::uint32_t guid);
     std::optional<std::vector<DoorCut>> doorCuts(std::int16_t object, const app::LotLife::BuySpot& spot, std::int16_t direction, bool needFree);
-    void cutForDoor(std::int16_t object, bool cut);
+    bool cutForDoor(std::int16_t object, bool cut);  // whether its walls were found
     // What Build mode's hand highlights under the mouse: a door, window or arch (walls round it ignored), 0 for none.
     std::uint32_t buildHover();
+    // Undo and redo in Buy and Build mode (app/game_undo.cpp): each change made there is a step that
+    // can be undone and done again, newest first, until Live mode or another lot. Objects a step
+    // takes away and brings back are made anew with other ids, so steps reach them through a cell
+    // that follows the object.
+    struct UndoStep {
+        std::string what;
+        std::function<void()> undo, redo;
+    };
+    std::vector<UndoStep> undoSteps_, redoSteps_;
+    std::vector<std::shared_ptr<std::int16_t>> objectCells_;
+    void recordStep(std::string what, std::function<void()> undo, std::function<void()> redo);
+    void undoStep();
+    void redoStep();
+    void clearUndo();
+    std::shared_ptr<std::int16_t> cellFor(std::int16_t object);
+    // An object bought (again) of type `guid` and put where it was, paid for; one taken off the lot
+    // with `refund` given back; one moved. Doors and windows cut or close their walls as they go.
+    std::int16_t rebuy(std::uint32_t guid, const app::LotLife::Placed& where, std::int32_t price, bool door);
+    void takeAway(std::int16_t object, std::int32_t refund, bool door);
+    void moveTo(std::int16_t object, const app::LotLife::Placed& where, bool door);
+    // Doors and windows bought again, whose walls are cut once the scene draws them.
+    std::vector<std::pair<std::int16_t, int>> pendingDoorCuts_;  // and how many frames it has waited
+    void cutPendingDoors();
+    // The sledgehammer: an object clicked is taken off the lot for what it is worth (all it cost when
+    // bought this visit), as selling it does.
+    bool sledgeActive_ = false;
+    void sledgeObject(std::int16_t object);
+    // What a sale or the sledgehammer gives back for an object: what it cost when bought this visit,
+    // else what it is worth now.
+    std::int32_t refundFor(std::int16_t object);
+    // A drawn wall's instances drawn again with its coverings and holes as they are now.
+    void redrawWall(std::size_t wall);
+    // The lot's walls as Build mode keeps them, to undo walls built or taken down.
+    struct WallState {
+        std::optional<ts2::wallgraph::WallGraph> graph;
+        std::vector<ts2::walllayer::Entry> coverings;
+        std::map<std::uint16_t, ts2::stringmap::Entry> patterns;
+        std::optional<ts2::array3d::Array3D> rooms;
+        std::vector<ts2::scene::DrawnWall> drawn;
+    };
+    WallState wallState();
+    void applyWallState(int level, const WallState& state);
     // Terrain paint (app/game_terrain.cpp): picked from the catalog, its share of the mouse (a drag
     // paints, Ctrl held as it starts rubs paint out), and drawing the lot's paints again.
     void pickPaint(std::uint32_t guid);
@@ -693,6 +735,12 @@ private:
     std::uint64_t paintDrawnAt_ = 0;                  // when the paints were last drawn again (ns)
     bool paintChanged_ = false;                        // painted since
     int terrainInstance_ = -1, terrainPaintInstance_ = -1;  // the lot's terrain, and the paints drawn over it anew
+    // The lot's paints as a stroke started, for undoing it.
+    struct PaintState {
+        std::optional<ts2::terrain::LotTexture> textures;
+        std::map<std::uint32_t, ts2::terrain::Array2D> grids;
+    };
+    std::optional<PaintState> paintBefore_;
     std::optional<std::map<std::string, std::vector<ts2::scene::WallMask>>> wallMasks_;  // by model, read once
     void buildTip(const std::string& text);
     float downX_ = 0, downY_ = 0;

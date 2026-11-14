@@ -97,7 +97,7 @@ public:
     void hideForFreeCamera(bool hide);
 
     // What a released button asks for.
-    enum class Action { None, Neighborhood, Quit, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, GameOptionChanged, GraphicsOptionChanged, RewardsOpened, RewardsClosed, SelectSim, TrackSim, CentreOnNeighbor, CloseNotification, FloorUp, FloorDown, WallMode, ToggleCeiling, MainMenu, BuyOpened, BuyClosed, BuyItem, BuildOpened, BuildClosed, BuildItem, BuildWallItem, BuildWallTool, BuildObjectItem, BuildPaintItem, BuildHand, StoryOpened, StoryClosed };
+    enum class Action { None, Neighborhood, Quit, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, GameOptionChanged, GraphicsOptionChanged, RewardsOpened, RewardsClosed, SelectSim, TrackSim, CentreOnNeighbor, CloseNotification, FloorUp, FloorDown, WallMode, ToggleCeiling, MainMenu, BuyOpened, BuyClosed, BuyItem, BuildOpened, BuildClosed, BuildItem, BuildWallItem, BuildWallTool, BuildObjectItem, BuildPaintItem, BuildHand, Sledgehammer, Undo, Redo, StoryOpened, StoryClosed };
     Action clicked(int window);
     // The puck's camera button held down under the mouse.
     enum class CameraButton { None, RotateLeft, RotateRight, ZoomIn, ZoomOut };
@@ -151,6 +151,12 @@ public:
     // The terrain paint a click on the Build catalog picked (for BuildPaintItem), by GUID, and the brush size.
     std::uint32_t pickedPaint() const { return pickedPaint_; }
     int buildBrushSize() const { return buildPanel_.brushSize(); }
+    // Lights the hand or the sledgehammer in the Buy and Build panels, and greys undo and redo when
+    // there is nothing to undo or redo.
+    void showTools(bool sledgehammer, bool canUndo, bool canRedo) {
+        buyPanel_.showTools(sledgehammer, canUndo, canRedo);
+        buildPanel_.showTools(sledgehammer, canUndo, canRedo);
+    }
     // Shows the Build catalog's page (its floors' or wall coverings' pictures) for the lot.
     void refreshBuild(LotLife& life);
     // Shows or hides Story mode's story editor, as the puck's Story button and F4 open it and its

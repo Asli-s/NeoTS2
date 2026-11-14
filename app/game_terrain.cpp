@@ -31,6 +31,7 @@ constexpr std::uint8_t kShownStrength = 10;
 } // namespace
 
 void Game::pickPaint(std::uint32_t guid) {
+    sledgeActive_ = false;
     if (!buildActive_ || !lotLife_) {
         return;
     }
@@ -70,6 +71,9 @@ bool Game::paintMouse(const pf::Event& e, float x, float y, bool overPanels) {
     if (e.type == pf::Event::Type::MouseDown && !overPanels) {
         painting_ = true;
         erasing_ = e.ctrl;
+        if (buildLot_) {
+            paintBefore_ = PaintState{buildLot_->terrainTextures, buildLot_->flatGrids};
+        }
         paintedAt_.reset();
         paintChanged_ = false;
         buildTip({});
@@ -82,6 +86,19 @@ bool Game::paintMouse(const pf::Event& e, float x, float y, bool overPanels) {
             redrawTerrainPaint();
         }
         ts2::diag::step(std::format("build mode: {} terrain", erasing_ ? "rubbed paint off the" : "painted " + buildTool_->name + " on the"));
+        // Undone, the paints go back as they were before the stroke.
+        if (paintBefore_ && buildLot_) {
+            auto setPaints = [this](const PaintState& state) {
+                if (buildLot_) {
+                    buildLot_->terrainTextures = state.textures;
+                    buildLot_->flatGrids = state.grids;
+                    redrawTerrainPaint();
+                }
+            };
+            recordStep(erasing_ ? "rubbing paint off" : "painting the ground", [setPaints, before = *paintBefore_] { setPaints(before); },
+                       [setPaints, after = PaintState{buildLot_->terrainTextures, buildLot_->flatGrids}] { setPaints(after); });
+            paintBefore_.reset();
+        }
         return true;
     }
     return false;
