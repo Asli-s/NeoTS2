@@ -36,6 +36,13 @@ constexpr std::uint32_t kHouseBinBackground = 0x6CB2578B, kOtherBinBackground = 
 constexpr std::uint32_t kBinHint = 0xCD869748, kPreviewFrame = 0x4D10E455, kPreviewPicture = 0x8DED2C0D, kAddToAlbum = 0x2C8006BF,
                         kRemoveEntry = 0xECBCE67F;
 constexpr std::uint32_t kColumn = 0x4DEBC7E1, kMoveUp = 0x4C8006DB, kMoveDown = 0x4C8006D8;
+// The blog view: its scrolling part (holding the entries' area, Scroll Up and Down and a scroll bar),
+// Remove Entry From Story and the text shown with no entries.
+constexpr std::uint32_t kBlogScroller = 0x0DED8B21, kBlogScrollBar = 0x00001008, kBlogRemove = 0x4DED8B79, kBlogNoEntries = 0x4DED8C66;
+// The blog shows two entries at a time, each a 200 x 150 snapshot with its caption beside it.
+constexpr std::size_t kBlogRows = 2;
+constexpr int kBlogPictureWidth = 200, kBlogPictureHeight = 150, kBlogGap = 12;
+constexpr int kBlogCaptionMargin = 4;  // a caption box is its row's height less this, so a long caption fits
 // UIText (table 0xa9): the bins' hints for a family and a neighborhood, the delete question.
 constexpr std::uint32_t kUiText = 0x7FA7DC7C;
 constexpr std::uint32_t kFamilyHint = 0x00A9002D, kNeighborhoodHint = 0x00A9002E;  // string ids, leakcheck: ok
@@ -112,7 +119,9 @@ void StoryEditor::open(std::optional<std::uint32_t> albumId, const fs::path& sto
     page_ = 0;
     chosenBin_.reset();
     chosenEntry_.reset();
-    binFirst_ = columnFirst_ = 0;
+    binFirst_ = columnFirst_ = blogFirst_ = 0;
+    blogChosen_.reset();
+    captionEntry_ = 0;
     if (albumId_) {
         const auto file = ts2::content::storyAlbumFile(folder_, *albumId_);
         const auto bytes = readFile(file);
@@ -198,16 +207,73 @@ std::string StoryEditor::caption(const ts2::content::StoryEntry& entry) const {
 void StoryEditor::showStoryView(bool story) {
     storyView_ = story;
     focus_ = Focus::None;
-    screen_.setVisible(screen_.find(root_, kStoryView), story);
+    // A story is shown as its style lays it out: an album a page at a time, a blog as a column.
+    const bool blog = isBlog();
+    screen_.setVisible(screen_.find(root_, kStoryView), story && !blog);
+    screen_.setVisible(screen_.find(root_, kBlogView), story && blog);
     screen_.setVisible(screen_.find(root_, kOrganizeView), !story);
     screen_.setChecked(screen_.find(root_, kOrganize), !story);
     screen_.setChecked(screen_.find(root_, kEditStory), story);
+    clearBlog();  // rows are made again whenever the blog shows
     if (story) {
-        showPage();
+        blog ? showBlog() : showPage();
     } else {
         showOrganize();
     }
     showTitle();
+}
+
+void StoryEditor::clearBlog() {
+    for (const auto& row : blogRows_) {
+        screen_.remove(row.picture.button);
+        screen_.remove(row.caption);
+    }
+    blogRows_.clear();
+}
+
+void StoryEditor::showBlog() {
+    clearBlog();
+    const int view = screen_.find(root_, kBlogView);
+    const int scroller = screen_.find(view, kBlogScroller);
+    const int area = screen_.find(scroller, kTileArea);
+    const bool any = !album_.entries.empty();
+    blogFirst_ = any ? std::min(blogFirst_, album_.entries.size() - 1) : 0;
+    if (blogChosen_ && *blogChosen_ >= album_.entries.size()) {
+        blogChosen_.reset();
+    }
+    screen_.setVisible(screen_.find(view, kBlogNoEntries), !any);
+    screen_.setVisible(screen_.find(scroller, kBlogScrollBar), false);  // the pages turn with Scroll Up and Down
+    screen_.setEnabled(screen_.find(scroller, kStripPrevious), blogFirst_ > 0);
+    screen_.setEnabled(screen_.find(scroller, kStripNext), blogFirst_ + kBlogRows < album_.entries.size());
+    screen_.setEnabled(screen_.find(view, kBlogRemove), blogChosen_.has_value());
+    if (area < 0) {
+        return;
+    }
+    // Each entry a row: its snapshot on the left, its caption beside it, as many rows as fit.
+    const int rowHeight = screen_.height(area) / kBlogRows;
+    const int pictureY = (rowHeight - kBlogPictureHeight) / 2;
+    const int captionX = kBlogPictureWidth + kBlogGap;
+    for (std::size_t i = blogFirst_; i < album_.entries.size() && i < blogFirst_ + kBlogRows; ++i) {
+        const int top = screen_.y(area) + static_cast<int>(i - blogFirst_) * rowHeight + pictureY;
+        BlogRow row;
+        row.entry = i;
+        auto button = window("IGZWinBtn", kBlogPictureWidth, kBlogPictureHeight);
+        button.children.push_back(window("IGZWinBMP", kBlogPictureWidth, kBlogPictureHeight, {{"winflag_ignoremouse", "yes"}}));
+        row.picture.button = screen_.addWindows({button}, screen_.x(area), top, scroller);
+        row.picture.picture = screen_.children(row.picture.button).empty() ? -1 : screen_.children(row.picture.button).front();
+        const auto shown = i < columnPictures_.size() && columnPictures_[i].width > 0 ? columnPictures_[i] : picture(album_.entries[i].snapshot);
+        if (row.picture.picture >= 0 && shown.width > 0) {
+            screen_.setImage(row.picture.picture, ts2::content::scaled(shown, kBlogPictureWidth, kBlogPictureHeight));
+            screen_.setImageColor(row.picture.picture, !blogChosen_ || *blogChosen_ == i ? kChosen : kNotChosen);
+        }
+        // The caption box as the story view's: GenBodyMedium in the album's blue, wrapped.
+        row.caption = screen_.addWindows({window("IGZWinTextEdit", screen_.width(area) - captionX, rowHeight - kBlogCaptionMargin,
+                                                 {{"font", "GenBodyMedium"}, {"wrapped", "yes"}, {"editable", "yes"}, {"singleline", "no"},
+                                                  {"colorfontnormal", "(5,6,113)"}, {"caretcolor", "(5,6,113)"}, {"outline", "no"}})},
+                                         screen_.x(area) + captionX, screen_.y(area) + static_cast<int>(i - blogFirst_) * rowHeight + kBlogCaptionMargin / 2, scroller);
+        blogRows_.push_back(row);
+        showText(Focus::Caption, i);
+    }
 }
 
 void StoryEditor::showPage() {
@@ -230,7 +296,7 @@ void StoryEditor::showPage() {
     if (shown.width > 0) {
         screen_.setImage(frame, ts2::content::scaled(shown, static_cast<std::uint32_t>(screen_.width(frame)), static_cast<std::uint32_t>(screen_.height(frame))));
     }
-    showText(Focus::Caption);
+    showText(Focus::Caption, page_);
 }
 
 void StoryEditor::clearThumbs(std::vector<Thumb>& thumbs) {
@@ -316,20 +382,33 @@ void StoryEditor::showStyle() {
     screen_.setChecked(screen_.find(root_, kEditBlog), album_.style == "Blog");
 }
 
-void StoryEditor::showText(Focus box) {
-    const int w = box == Focus::Title ? screen_.find(root_, kTitle) : screen_.find(root_, kCaption);
+int StoryEditor::captionWindow(std::size_t entry) const {
+    if (!isBlog()) {
+        return entry == page_ ? screen_.find(root_, kCaption) : -1;
+    }
+    for (const auto& row : blogRows_) {
+        if (row.entry == entry) {
+            return row.caption;
+        }
+    }
+    return -1;
+}
+
+void StoryEditor::showText(Focus box, std::optional<std::size_t> entry) {
+    const std::size_t which = entry.value_or(box == Focus::Caption && focus_ == Focus::Caption ? captionEntry_ : page_);
+    const int w = box == Focus::Title ? screen_.find(root_, kTitle) : captionWindow(which);
     if (w < 0) {
         return;
     }
     if (box == Focus::Caption) {
-        if (album_.entries.empty()) {
+        if (which >= album_.entries.size()) {
             return;
         }
-        screen_.setText(w, caption(album_.entries[page_]));
+        screen_.setText(w, caption(album_.entries[which]));
     } else {
         screen_.setText(w, album_.title);
     }
-    if (focus_ == box) {
+    if (focus_ == box && (box == Focus::Title || which == captionEntry_)) {
         screen_.setSelection(w, caret_, caret_);
         screen_.setCaret(w, caret_);
     } else {
@@ -338,11 +417,22 @@ void StoryEditor::showText(Focus box) {
     }
 }
 
-std::string& StoryEditor::focusedText() {
-    return focus_ == Focus::Title ? album_.title : album_.entries[page_].text;
+void StoryEditor::showCaptions() {
+    if (!storyView_) {
+        return;
+    }
+    if (isBlog()) {
+        for (const auto& row : blogRows_) {
+            showText(Focus::Caption, row.entry);
+        }
+    } else {
+        showText(Focus::Caption, page_);
+    }
 }
 
-int StoryEditor::focusedWindow() const { return focus_ == Focus::Title ? screen_.find(root_, kTitle) : screen_.find(root_, kCaption); }
+std::string& StoryEditor::focusedText() {
+    return focus_ == Focus::Title ? album_.title : album_.entries[captionEntry_].text;
+}
 
 void StoryEditor::pointerDown(int window) {
     if (root_ < 0 || !albumId_) {
@@ -350,15 +440,28 @@ void StoryEditor::pointerDown(int window) {
     }
     const Focus before = focus_;
     focus_ = Focus::None;
-    for (int w = window; w >= 0; w = screen_.parent(w)) {
+    for (int w = window; w >= 0 && focus_ == Focus::None; w = screen_.parent(w)) {
         if (w == screen_.find(root_, kTitle)) {
             focus_ = Focus::Title;
-        } else if (storyView_ && !album_.entries.empty() && w == screen_.find(root_, kCaption)) {
-            focus_ = Focus::Caption;
-            // A premade caption becomes the player's own text to edit.
-            auto& entry = album_.entries[page_];
-            if (entry.text.empty() && entry.textResource != 0) {
-                entry.text = caption(entry);
+            continue;
+        }
+        if (!storyView_) {
+            continue;
+        }
+        // A caption: the page's, or one of the blog's rows (which is then the one chosen).
+        for (std::size_t i = 0; i < album_.entries.size(); ++i) {
+            if (w >= 0 && w == captionWindow(i)) {
+                focus_ = Focus::Caption;
+                captionEntry_ = i;
+                if (isBlog()) {
+                    blogChosen_ = i;
+                }
+                // A premade caption becomes the player's own text to edit.
+                auto& entry = album_.entries[i];
+                if (entry.text.empty() && entry.textResource != 0) {
+                    entry.text = caption(entry);
+                }
+                break;
             }
         }
     }
@@ -367,8 +470,9 @@ void StoryEditor::pointerDown(int window) {
     }
     if (before != focus_ || focus_ != Focus::None) {
         showText(Focus::Title);
-        if (storyView_) {
-            showText(Focus::Caption);
+        showCaptions();
+        if (isBlog() && storyView_ && focus_ == Focus::Caption) {
+            showBlogChoice();
         }
     }
 }
@@ -384,7 +488,7 @@ void StoryEditor::typed(const std::string& text) {
     s.insert(caret_, text);
     caret_ += text.size();
     if (focus_ == Focus::Caption) {
-        album_.entries[page_].textResource = 0;  // the player's own caption from now on
+        album_.entries[captionEntry_].textResource = 0;  // the player's own caption from now on
     }
     changed_ = true;
     showText(focus_);
@@ -396,19 +500,20 @@ void StoryEditor::key(ts2::platform::Key key) {
         return;
     }
     std::string& s = focusedText();
+    bool edited = false;
     switch (key) {
     case Key::Backspace:
         if (caret_ > 0) {
             const std::size_t from = previousChar(s, caret_);
             s.erase(from, caret_ - from);
             caret_ = from;
-            changed_ = true;
+            edited = true;
         }
         break;
     case Key::Delete:
         if (caret_ < s.size()) {
             s.erase(caret_, nextChar(s, caret_) - caret_);
-            changed_ = true;
+            edited = true;
         }
         break;
     case Key::Left: caret_ = previousChar(s, caret_); break;
@@ -420,7 +525,7 @@ void StoryEditor::key(ts2::platform::Key key) {
         if (focus_ == Focus::Caption && s.size() < kMaxText) {
             s.insert(caret_, "\n");
             ++caret_;
-            changed_ = true;
+            edited = true;
         } else {
             focus_ = Focus::None;
         }
@@ -428,13 +533,23 @@ void StoryEditor::key(ts2::platform::Key key) {
     case Key::Escape: focus_ = Focus::None; break;
     default: return;
     }
-    if (focus_ == Focus::Caption && changed_ && !album_.entries.empty()) {
-        album_.entries[page_].textResource = 0;
+    if (edited) {
+        changed_ = true;
+        if (focus_ == Focus::Caption && captionEntry_ < album_.entries.size()) {
+            album_.entries[captionEntry_].textResource = 0;
+        }
     }
     showText(Focus::Title);
-    if (storyView_) {
-        showText(Focus::Caption);
+    showCaptions();
+}
+
+void StoryEditor::showBlogChoice() {
+    for (const auto& row : blogRows_) {
+        if (row.picture.picture >= 0) {
+            screen_.setImageColor(row.picture.picture, !blogChosen_ || *blogChosen_ == row.entry ? kChosen : kNotChosen);
+        }
     }
+    screen_.setEnabled(screen_.find(screen_.find(root_, kBlogView), kBlogRemove), blogChosen_.has_value());
 }
 
 bool StoryEditor::clicked(int window) {
@@ -460,6 +575,7 @@ bool StoryEditor::clicked(int window) {
     const std::uint32_t id = screen_.id(window);
     const int storyView = screen_.find(root_, kStoryView), organize = screen_.find(root_, kOrganizeView);
     const int strip = screen_.find(organize, kBinStrip), column = screen_.find(organize, kColumn);
+    const int blogView = screen_.find(root_, kBlogView), blogScroller = screen_.find(blogView, kBlogScroller);
     auto is = [&](int parentView, std::uint32_t wanted) { return window == screen_.find(parentView, wanted); };
     // A thumbnail chosen in the bin or the story's column.
     for (std::size_t i = 0; i < binThumbs_.size(); ++i) {
@@ -487,6 +603,32 @@ bool StoryEditor::clicked(int window) {
         changed_ = changed_ || style != album_.style;
         album_.style = style;
         showStyle();
+        if (storyView_) {
+            showStoryView(true);  // laid out in the new style
+        }
+    } else if (const auto row = std::find_if(blogRows_.begin(), blogRows_.end(), [&](const BlogRow& r) { return r.picture.button == window; });
+               row != blogRows_.end()) {
+        blogChosen_ = row->entry;
+        showBlogChoice();
+    } else if (is(blogScroller, kStripPrevious) && blogFirst_ > 0) {
+        --blogFirst_;
+        focus_ = Focus::None;
+        showBlog();
+    } else if (is(blogScroller, kStripNext) && blogFirst_ + kBlogRows < album_.entries.size()) {
+        ++blogFirst_;
+        focus_ = Focus::None;
+        showBlog();
+    } else if (is(blogView, kBlogRemove) && blogChosen_ && *blogChosen_ < album_.entries.size()) {
+        // Out of the story, back to the bin (its files stay).
+        album_.entries.erase(album_.entries.begin() + static_cast<std::ptrdiff_t>(*blogChosen_));
+        if (*blogChosen_ < columnPictures_.size()) {
+            columnPictures_.erase(columnPictures_.begin() + static_cast<std::ptrdiff_t>(*blogChosen_));
+        }
+        changed_ = true;
+        blogChosen_.reset();
+        focus_ = Focus::None;
+        readBin();
+        showBlog();
     } else if (is(storyView, kPrevious) && page_ > 0) {
         --page_;
         focus_ = Focus::None;

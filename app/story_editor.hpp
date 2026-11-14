@@ -65,6 +65,14 @@ private:
     };
     void showStoryView(bool story);
     void showPage();
+    // The blog view: the entries from blogFirst_ in rows, each its snapshot and caption.
+    void showBlog();
+    void clearBlog();
+    void showBlogChoice();
+    bool isBlog() const { return album_.style == "Blog"; }
+    // The caption box of an entry where it shows now (the page's, or a blog row's), -1 when it doesn't.
+    int captionWindow(std::size_t entry) const;
+    void showCaptions();
     void showOrganize();
     void showTitle();
     void showStyle();
@@ -74,9 +82,8 @@ private:
     ts2::tga::Pixels picture(const std::string& file);
     std::string caption(const ts2::content::StoryEntry& entry) const;
     void readBin();
-    void showText(Focus box);
+    void showText(Focus box, std::optional<std::size_t> entry = std::nullopt);
     std::string& focusedText();
-    int focusedWindow() const;
 
     ts2::ui::Screen& screen_;
     ts2::content::UiData& data_;
@@ -96,6 +103,15 @@ private:
     std::vector<Thumb> binThumbs_, columnThumbs_;
     Focus focus_ = Focus::None;
     std::size_t caret_ = 0;
+    std::size_t captionEntry_ = 0;  // the entry whose caption has the keyboard
+    struct BlogRow {
+        Thumb picture;
+        int caption = -1;
+        std::size_t entry = 0;
+    };
+    std::vector<BlogRow> blogRows_;
+    std::size_t blogFirst_ = 0;
+    std::optional<std::size_t> blogChosen_;
     DialogBox confirm_;  // "Are you sure you want to delete this snapshot?"
 };
 
