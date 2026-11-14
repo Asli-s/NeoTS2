@@ -1,6 +1,7 @@
 #include "formats/xobj.hpp"
 
 #include "formats/binary_reader.hpp"
+#include "formats/binary_writer.hpp"
 
 #include <cstring>
 #include <stdexcept>
@@ -245,6 +246,24 @@ Token readToken(BinaryReader& r, std::uint32_t version) {
     }
     t.properties = readShorts(r, r.checkedCount(r.i32(), 2));
     return t;
+}
+
+void writeToken(BinaryWriter& w, const Token& t, std::uint32_t version) {
+    w.u32(t.guid);
+    w.u16(t.flags);
+    if (version > 0xC1) {
+        w.u16(t.value1);
+    }
+    if (version > 0xB3) {
+        w.u32(t.value2);
+    }
+    if (version > 0xCA) {
+        w.u16(t.value3);
+    }
+    w.i32(static_cast<std::int32_t>(t.properties.size()));
+    for (const std::int16_t p : t.properties) {
+        w.i16(p);
+    }
 }
 
 // How many object data values an object saved by `version` holds.

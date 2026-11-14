@@ -5,6 +5,7 @@
 #include "formats/ngbh.hpp"
 #include "formats/datatables.hpp"
 #include "formats/ttab.hpp"
+#include "formats/record_roundtrip.hpp"
 
 #include "lauxlib.h"
 #include "lua.h"
@@ -385,6 +386,19 @@ int showNeighborhoodRecord(ts2::dbpf::Package& package) {
     return 1;
 }
 
+// Each family and Sim record NeoTS2 writes, read and written again: how many come back byte for byte.
+int checkRoundTrip(ts2::dbpf::Package& package) {
+    const auto report = ts2::roundtrip::check(package);
+    for (const auto& [kind, counts] : report.kinds) {
+        std::printf("%-5s %6zu same  %4zu different  %4zu unreadable\n", kind.c_str(), counts.same, counts.different, counts.unreadable);
+    }
+    for (const auto& problem : report.problems) {
+        std::printf("  %s\n", problem.c_str());
+    }
+    std::printf(report.allSame() ? "all written back byte for byte\n" : "NOT all written back the same\n");
+    return report.allSame() ? 0 : 2;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -392,7 +406,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
                      "Usage: dbpfdump <file.package> [--list | --verify | --grep <text> |\n"
                      "                                --str <group> <instance> | --str-survey | --ttab-survey | --lua-survey |\n"
-                     "                                --ngbh | --datatable-survey | --datatables <name> |\n"
+                     "                                --ngbh | --roundtrip | --datatable-survey | --datatables <name> |\n"
                      "                                --hex <type> <group> <instance> [bytes] |\n"
                      "                                --extract <type> <folder>]\n");
         return 1;
@@ -431,6 +445,9 @@ int main(int argc, char** argv) {
         }
         if (mode == "--ngbh") {
             return showNeighborhoodRecord(package);
+        }
+        if (mode == "--roundtrip") {
+            return checkRoundTrip(package);
         }
         if (mode == "--str-survey") {
             return surveyStrings(package);

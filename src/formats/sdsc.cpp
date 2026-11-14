@@ -1,6 +1,7 @@
 #include "formats/sdsc.hpp"
 
 #include "formats/binary_reader.hpp"
+#include "formats/binary_writer.hpp"
 
 #include <array>
 #include <stdexcept>
@@ -60,6 +61,26 @@ SimDescription parse(std::span<const std::uint8_t> data) {
     const auto rest = r.bytes(r.remaining());
     s.rest.assign(rest.begin(), rest.end());
     return s;
+}
+
+std::vector<std::uint8_t> encode(const SimDescription& s) {
+    BinaryWriter w;
+    w.u32(s.version);
+    w.i32(s.personDataVersion);
+    if (s.personDataVersion > 0) {
+        w.u32(s.personDataFlag);
+        if (s.personDataFlag != 0) {
+            // As many values as the version holds: missing ones are 0, more aren't written.
+            const std::size_t count = personDataCount(s.personDataVersion);
+            for (std::size_t i = 0; i < count; ++i) {
+                w.i16(i < s.personData.size() ? s.personData[i] : std::int16_t{0});
+            }
+        }
+    }
+    w.i16(s.neighborId);
+    w.u32(s.guid);
+    w.bytes(s.rest);
+    return w.take();
 }
 
 } // namespace ts2::sdsc

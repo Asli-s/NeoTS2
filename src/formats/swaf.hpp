@@ -37,9 +37,18 @@ struct WantsAndFears {
     std::map<std::uint32_t, std::vector<Want>> history;  // past wants, by want GUID
     // Bytes after the history. The game never reads them, and many saves have stale data there.
     std::size_t extraBytes = 0;
+    // For writing it back as it was: the word before the extra want (from version 3; not 0 when
+    // there is one), the history's groups in the order saved (a GUID may come more than once), and
+    // the bytes after them.
+    std::uint32_t extraFlag = 0;
+    std::vector<std::pair<std::uint32_t, std::vector<Want>>> historyGroups;
+    std::vector<std::uint8_t> tail;
 };
 
 WantsAndFears parse(std::span<const std::uint8_t> data);
+// The record as the game writes it, from the saved order (historyGroups, not history):
+// encode(parse(bytes)) gives the bytes back.
+std::vector<std::uint8_t> encode(const WantsAndFears& wants);
 
 // A Sim's want and fear slots and how many wants it may hold, as the game reads them: the saved
 // slot counts (4 and 3 before version 2) and one hold more than the saved extra holds (none

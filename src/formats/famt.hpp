@@ -26,8 +26,11 @@ struct FamilyTies {
     std::uint32_t version = 0;
     std::vector<SimTies> sims;
     std::size_t extraBytes = 0;  // left after the last Sim
+    std::vector<std::uint8_t> tail;  // those bytes, written back as they were
 };
 
 FamilyTies parse(std::span<const std::uint8_t> data);
+// The record as the game writes it: encode(parse(bytes)) gives the bytes back.
+std::vector<std::uint8_t> encode(const FamilyTies& ties);
 
 } // namespace ts2::famt

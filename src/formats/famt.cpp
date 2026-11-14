@@ -1,6 +1,7 @@
 #include "formats/famt.hpp"
 
 #include "formats/binary_reader.hpp"
+#include "formats/binary_writer.hpp"
 
 #include <stdexcept>
 #include <utility>
@@ -36,7 +37,26 @@ FamilyTies parse(std::span<const std::uint8_t> data) {
         f.sims.push_back(std::move(s));
     }
     f.extraBytes = r.remaining();
+    const auto tail = r.bytes(r.remaining());
+    f.tail.assign(tail.begin(), tail.end());
     return f;
+}
+
+std::vector<std::uint8_t> encode(const FamilyTies& f) {
+    BinaryWriter w;
+    w.u32(f.version);
+    w.u32(static_cast<std::uint32_t>(f.sims.size()));
+    for (const SimTies& s : f.sims) {
+        w.i16(s.sim);
+        w.u32(s.value);
+        w.u32(static_cast<std::uint32_t>(s.ties.size()));
+        for (const Tie& t : s.ties) {
+            w.u32(t.type);
+            w.i16(t.other);
+        }
+    }
+    w.bytes(f.tail);
+    return w.take();
 }
 
 } // namespace ts2::famt

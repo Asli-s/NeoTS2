@@ -9,6 +9,7 @@
 
 namespace ts2 {
 class BinaryReader;
+class BinaryWriter;
 }
 
 namespace ts2::xobj {
@@ -47,6 +48,8 @@ struct Token {
 
 // Reads a token as saved with this version (objects and the neighborhood's inventories).
 Token readToken(BinaryReader& r, std::uint32_t version);
+// Writes a token as readToken reads it for this version.
+void writeToken(BinaryWriter& w, const Token& token, std::uint32_t version);
 
 struct StackFrame {
     std::int16_t objectId = 0;

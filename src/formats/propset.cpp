@@ -114,6 +114,69 @@ std::map<std::string, std::string> parse(std::span<const std::uint8_t> data) {
     return properties;
 }
 
+std::vector<TextProperty> readText(std::span<const std::uint8_t> data) {
+    const std::string_view text(reinterpret_cast<const char*>(data.data()), data.size());
+    std::vector<TextProperty> out;
+    auto attribute = [](std::string_view tag, std::string_view name) {
+        const std::string wanted = " " + std::string(name) + "=\"";
+        const auto start = tag.find(wanted);
+        if (start == std::string_view::npos) {
+            return std::string();
+        }
+        const auto from = start + wanted.size();
+        const auto end = tag.find('"', from);
+        return end == std::string_view::npos ? std::string() : std::string(tag.substr(from, end - from));
+    };
+    for (std::size_t pos = text.find("<Any"); pos != std::string_view::npos; pos = text.find("<Any", pos)) {
+        const auto tagEnd = text.find('>', pos);
+        if (tagEnd == std::string_view::npos) {
+            break;
+        }
+        const std::string_view tag = text.substr(pos, tagEnd - pos);
+        pos = tagEnd + 1;
+        TextProperty p;
+        p.element = std::string(tag.substr(1, tag.find_first_of(" /") - 1));
+        p.key = attribute(tag, "key");
+        p.type = attribute(tag, "type");
+        if (tag.ends_with('/')) {
+            p.empty = true;
+            out.push_back(std::move(p));
+            continue;
+        }
+        const auto valueEnd = text.find("</", pos);
+        if (valueEnd == std::string_view::npos) {
+            break;
+        }
+        p.value = decodeEntities(text.substr(pos, valueEnd - pos));
+        out.push_back(std::move(p));
+        pos = valueEnd;
+    }
+    return out;
+}
+
+std::vector<std::uint8_t> encodeText(const std::vector<TextProperty>& properties) {
+    std::string out = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<cGZPropertySetString>\n";
+    for (const TextProperty& p : properties) {
+        out += "  <" + p.element + " key=\"" + p.key + "\" type=\"" + p.type + "\"";
+        if (p.empty) {
+            out += "/>\n";
+            continue;
+        }
+        out += ">";
+        for (const char c : p.value) {
+            switch (c) {
+            case '&': out += "&amp;"; break;
+            case '<': out += "&lt;"; break;
+            case '>': out += "&gt;"; break;
+            default: out += c; break;
+            }
+        }
+        out += "</" + p.element + ">\n";
+    }
+    out += "</cGZPropertySetString>";
+    return {out.begin(), out.end()};
+}
+
 std::uint32_t number(const std::map<std::string, std::string>& properties, const std::string& key) {
     const auto it = properties.find(key);
     if (it == properties.end()) {

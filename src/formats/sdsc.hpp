@@ -24,4 +24,7 @@ std::size_t personDataCount(std::int32_t personDataVersion);
 
 SimDescription parse(std::span<const std::uint8_t> data);
 
+// The record as the game writes it: encode(parse(bytes)) gives the bytes back.
+std::vector<std::uint8_t> encode(const SimDescription& sim);
+
 } // namespace ts2::sdsc

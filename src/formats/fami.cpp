@@ -1,6 +1,7 @@
 #include "formats/fami.hpp"
 
 #include "formats/binary_reader.hpp"
+#include "formats/binary_writer.hpp"
 
 #include <stdexcept>
 
@@ -30,7 +31,7 @@ Family parse(std::span<const std::uint8_t> data) {
     f.value4 = r.i32();
     f.funds = r.i32();
     if (f.version < 0x4D) {
-        r.i32();
+        f.oldValue = r.i32();
     }
     f.value6 = r.i32();
     f.flags = r.u32();
@@ -49,7 +50,45 @@ Family parse(std::span<const std::uint8_t> data) {
     }
     f.funds2 = f.version >= 0x51 ? r.i32() : f.funds;
     f.extraBytes = r.remaining();
+    const auto tail = r.bytes(r.remaining());
+    f.tail.assign(tail.begin(), tail.end());
     return f;
+}
+
+std::vector<std::uint8_t> encode(const Family& f) {
+    BinaryWriter w;
+    w.u32(f.magic);
+    w.u32(f.version);
+    w.u32(f.unknown0);
+    w.i32(f.lot);
+    if (f.version >= 0x50) {
+        w.i32(f.currentLot);
+    }
+    if (f.version >= 0x55) {
+        w.i32(f.vacationLot);
+    }
+    w.i32(f.value4);
+    w.i32(f.funds);
+    if (f.version < 0x4D) {
+        w.i32(f.oldValue);
+    }
+    w.i32(f.value6);
+    w.u32(f.flags);
+    w.u32(static_cast<std::uint32_t>(f.members.size()));
+    for (const std::uint32_t m : f.members) {
+        w.u32(m);
+    }
+    if (f.version > 0x4A) {
+        w.u32(f.albumId);
+    }
+    if (f.version > 0x4E) {
+        w.u32(f.value8);
+    }
+    if (f.version >= 0x51) {
+        w.i32(f.funds2);
+    }
+    w.bytes(f.tail);
+    return w.take();
 }
 
 } // namespace ts2::fami

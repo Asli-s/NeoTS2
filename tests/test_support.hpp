@@ -522,6 +522,7 @@ std::vector<Test> wallBuildTests();
 std::vector<Test> terrainPaintTests();
 std::vector<Test> lotSaveTests();
 std::vector<Test> storyAlbumTests();
+std::vector<Test> recordWriterTests();
 std::vector<Test> videoTests();
 std::vector<Test> wallSaveTests();
 std::vector<Test> objectSaveTests();

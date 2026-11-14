@@ -14,8 +14,11 @@ struct Relationship {
     std::int32_t version = 0;
     std::vector<std::int32_t> values;
     std::size_t extraBytes = 0;
+    std::vector<std::uint8_t> tail;  // those bytes, written back as they were
 };
 
 Relationship parse(std::span<const std::uint8_t> data);
+// The record as the game writes it: encode(parse(bytes)) gives the bytes back.
+std::vector<std::uint8_t> encode(const Relationship& relationship);
 
 } // namespace ts2::srel

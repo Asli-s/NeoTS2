@@ -1,6 +1,7 @@
 #include "formats/srel.hpp"
 
 #include "formats/binary_reader.hpp"
+#include "formats/binary_writer.hpp"
 
 #include <stdexcept>
 #include <string>
@@ -28,7 +29,20 @@ Relationship parse(std::span<const std::uint8_t> data) {
         rel.values.push_back(r.i32());
     }
     rel.extraBytes = r.remaining();
+    const auto tail = r.bytes(r.remaining());
+    rel.tail.assign(tail.begin(), tail.end());
     return rel;
+}
+
+std::vector<std::uint8_t> encode(const Relationship& rel) {
+    BinaryWriter w;
+    w.i32(rel.version);
+    w.u32(static_cast<std::uint32_t>(rel.values.size()));
+    for (const std::int32_t v : rel.values) {
+        w.i32(v);
+    }
+    w.bytes(rel.tail);
+    return w.take();
 }
 
 } // namespace ts2::srel

@@ -1,6 +1,7 @@
 #include "formats/str.hpp"
 
 #include "formats/binary_reader.hpp"
+#include "formats/binary_writer.hpp"
 
 #include <algorithm>
 #include <stdexcept>
@@ -34,8 +35,12 @@ StringTable parse(std::span<const std::uint8_t> data) {
     const auto nameBytes = r.bytes(kNameSize);
     const auto nameEnd = std::find(nameBytes.begin(), nameBytes.end(), std::uint8_t{0});
     t.name.assign(nameBytes.begin(), nameEnd);
+    t.nameField.assign(nameBytes.begin(), nameBytes.end());
 
     if (r.remaining() < 2) {
+        t.nameOnly = true;
+        const auto rest = r.bytes(r.remaining());
+        t.tail.assign(rest.begin(), rest.end());
         return t;
     }
 
@@ -50,6 +55,8 @@ StringTable parse(std::span<const std::uint8_t> data) {
     } else {
         t.format = raw;
         t.supported = false;
+        const auto rest = r.bytes(r.remaining());
+        t.tail.assign(rest.begin(), rest.end());
         return t;
     }
 
@@ -79,7 +86,67 @@ StringTable parse(std::span<const std::uint8_t> data) {
         }
         t.entries.push_back(std::move(e));
     }
+    const auto rest = r.bytes(r.remaining());
+    t.tail.assign(rest.begin(), rest.end());
     return t;
+}
+
+std::vector<std::uint8_t> encode(const StringTable& t) {
+    BinaryWriter w;
+    if (t.nameField.size() == kNameSize) {
+        w.bytes(t.nameField);
+    } else {
+        std::string name = t.name.substr(0, kNameSize - 1);
+        name.resize(kNameSize, '\0');
+        w.text(name);
+    }
+    if (t.nameOnly) {
+        w.bytes(t.tail);
+        return w.take();
+    }
+    if (!t.supported) {
+        w.u16(t.format);
+        w.bytes(t.tail);
+        return w.take();
+    }
+    if (t.format == 0x0000) {
+        // The old format counts in the word's high byte.
+        if (t.entries.size() > 0xFF) {
+            fail("too many entries for the old format");
+        }
+        w.u16(static_cast<std::uint16_t>(t.entries.size() << 8));
+    } else {
+        if (t.entries.size() > 0xFFFF) {
+            fail("too many entries");
+        }
+        w.u16(t.format);
+        w.u16(static_cast<std::uint16_t>(t.entries.size()));
+    }
+    for (const Entry& e : t.entries) {
+        switch (t.format) {
+        case 0x0000:
+            if (e.value.size() > 0xFF) {
+                fail("a text too long for the old format");
+            }
+            w.u8(static_cast<std::uint8_t>(e.value.size()));
+            w.text(e.value);
+            break;
+        case 0xFFFF:
+            w.cString(e.value);
+            break;
+        case 0xFFFE:
+            w.cString(e.value);
+            w.cString(e.description);
+            break;
+        default:
+            w.u8(e.language);
+            w.cString(e.value);
+            w.cString(e.description);
+            break;
+        }
+    }
+    w.bytes(t.tail);
+    return w.take();
 }
 
 } // namespace ts2::str

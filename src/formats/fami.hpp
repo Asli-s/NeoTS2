@@ -17,6 +17,7 @@ struct Family {
     std::int32_t vacationLot = 0;  // CachedFamily:getVacationLotId, from version 0x55, else 0
     std::int32_t value4 = 0;
     std::int32_t funds = 0;      // from version 2
+    std::int32_t oldValue = 0;   // below version 0x4D, after the funds
     std::int32_t value6 = 0;     // from version 2
     std::uint32_t flags = 0;     // from version 7
     std::vector<std::uint32_t> members;  // the Sims' GUIDs
@@ -26,8 +27,13 @@ struct Family {
     std::uint32_t value8 = 0;    // above version 0x4E
     std::int32_t funds2 = 0;     // from version 0x51, else the funds
     std::size_t extraBytes = 0;  // left after the last value
+    std::vector<std::uint8_t> tail;  // those bytes, written back as they were
 };
 
 Family parse(std::span<const std::uint8_t> data);
+
+// The record as the game writes it: parse(encode(f)) gives f back, and encode(parse(bytes)) gives the
+// bytes back.
+std::vector<std::uint8_t> encode(const Family& family);
 
 } // namespace ts2::fami
