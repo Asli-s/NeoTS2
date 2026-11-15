@@ -232,16 +232,6 @@ void Bank::readPropertySets() {
     readManagerTuning(propertySet(kManagerTuning), tuning_);
     readListenerTuning(propertySet(kListenerTuning), tuning_);
     readDippingTuning(propertySet(kDippingTuning), tuning_);
-    // Ambience layers are the property sets that have a Name.
-    for (const auto& [key, at] : propertySets_) {
-        try {
-            if (auto layer = ambienceLayer(propset::parse(read(at)))) {
-                ambienceLayers_.push_back(std::move(*layer));
-            }
-        } catch (const std::exception& ex) {
-            diag::warnOnce("ambience layer: " + std::string(ex.what()));
-        }
-    }
 }
 
 const Bank::Track* Bank::track(SoundKey key) const {

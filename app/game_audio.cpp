@@ -3,8 +3,8 @@
 #include "game.hpp"
 
 #include <array>
-#include <cmath>
 #include <cstdint>
+#include <vector>
 
 namespace app {
 
@@ -54,14 +54,28 @@ void Game::applyAudioOptions() {
     if (!audio_) {
         return;
     }
+    using ts2::audio::Group;
     const app::AudioOptionsPanel& panel = openAudioOptions();
     const auto volumes = panel.volumes();
     const auto mutes = panel.mutes();
-    constexpr ts2::audio::Group kGroups[] = {ts2::audio::Group::Voice, ts2::audio::Group::Sfx, ts2::audio::Group::Music,
-                                             ts2::audio::Group::Ambience};
+    // Each option covers more groups than its name says, as in the game. The effects level and box
+    // also set UI, TV and Stitcher, and music also sets Stereo. The voices box also mutes Cinematic,
+    // but the voices level leaves it alone.
+    const std::array<std::vector<Group>, 4> levels{{{Group::Voice},
+                                                    {Group::Sfx, Group::Ui, Group::Television, Group::Stitcher},
+                                                    {Group::Music, Group::Stereo},
+                                                    {Group::Ambience}}};
+    const std::array<std::vector<Group>, 4> boxes{{{Group::Voice, Group::Cinematic},
+                                                   {Group::Sfx, Group::Ui, Group::Television, Group::Stitcher},
+                                                   {Group::Music, Group::Stereo},
+                                                   {Group::Ambience}}};
     for (std::size_t i = 0; i < volumes.size(); ++i) {
-        audio_->setGroupVolume(kGroups[i], volumes[i]);
-        audio_->setGroupMuted(kGroups[i], mutes[i]);
+        for (const Group group : levels[i]) {
+            audio_->setGroupVolume(group, volumes[i]);
+        }
+        for (const Group group : boxes[i]) {
+            audio_->setGroupMuted(group, mutes[i]);
+        }
     }
 }
 
@@ -183,43 +197,6 @@ void Game::updateAudio() {
             }
             return soundPlace(id);
         });
-        const auto globals = lotLife_->simulation().globals();
-        ts2::audio::AmbienceState state;
-        state.onLot = true;
-        state.hour = globals[ts2::sim::global::kHour] + globals[ts2::sim::global::kMinute] / 60.0;
-        const int cx = static_cast<int>(std::floor(camera.target[0]));
-        const int cy = static_cast<int>(std::floor(camera.target[1]));
-        // Radius in tiles, 20 far out to 8 close in (Misc.package's LotAmbienceZoomRadiusCurve).
-        const float distance = std::sqrt((camera.eye[0] - camera.target[0]) * (camera.eye[0] - camera.target[0]) +
-                                         (camera.eye[1] - camera.target[1]) * (camera.eye[1] - camera.target[1]) +
-                                         (camera.eye[2] - camera.target[2]) * (camera.eye[2] - camera.target[2]));
-        state.zoom = 1 - std::clamp(distance / 40.0f, 0.0f, 1.0f);
-        const int radius = static_cast<int>(std::lround(20.0f - 12.0f * state.zoom));
-        int open = 0, total = 0;
-        bool water = false;
-        for (int y = cy - radius; y <= cy + radius; ++y) {
-            for (int x = cx - radius; x <= cx + radius; ++x) {
-                for (int q = 0; q < 4; ++q) {
-                    const float qx = x + ((q == 0 || q == 3) ? 0.25f : 0.75f);
-                    const float qy = y + ((q == 0 || q == 1) ? 0.25f : 0.75f);
-                    if (const auto isOpen = world.outside().open(0, qx, qy)) {
-                        ++total;
-                        open += *isOpen ? 1 : 0;
-                    }
-                }
-                water = water || world.outside().pool(0, x, y, 0) || world.outside().pool(0, x, y, 1) ||
-                        world.outside().pool(0, x, y, 2) || world.outside().pool(0, x, y, 3);
-            }
-        }
-        state.outside = total > 0 ? static_cast<float>(open) / static_cast<float>(total) : 1;
-        state.water = water;
-        audio_->setAmbience(state);
-    } else {
-        // The neighborhood has no night and its ground is all open.
-        ts2::audio::AmbienceState state;
-        state.inNeighborhood = inNeighborhood_;
-        state.hour = 12;
-        audio_->setAmbience(state);
     }
     audio_->update();
 }

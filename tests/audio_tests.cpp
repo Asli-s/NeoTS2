@@ -2,7 +2,6 @@
 
 #include "../app/audio_options_panel.hpp"
 #include "audio/audio_config.hpp"
-#include "audio/ambience.hpp"
 #include "audio/bank.hpp"
 #include "audio/manager.hpp"
 #include "audio/mix.hpp"
@@ -265,6 +264,17 @@ void cinematicDippingFadesAndComesBack() {
     CHECK(near(out[0].mono.left, centre * 0.6f));
     out = manager.update(2500);
     CHECK(near(out[0].mono.left, centre));
+    // The stereo dips with the music, and ambience doesn't dip at all.
+    Manager groups;
+    groups.setTuning(tuning);
+    Request stereo = request(2, 2);
+    stereo.group = Group::Stereo;
+    Request ambience = request(3, 3);
+    ambience.group = Group::Ambience;
+    CHECK(groups.start(stereo, oneShot(), samples, 0) && groups.start(ambience, oneShot(), samples, 0));
+    groups.setDipping(true);
+    out = groups.update(500);
+    CHECK(out.size() == 2 && near(out[0].mono.left, centre * 0.1f) && near(out[1].mono.left, centre));
 }
 
 void dippingTuningReadsItsValues() {
@@ -307,56 +317,12 @@ void spxReadsItsHeaderAndRejectsBadResources() {
     std::vector<std::uint8_t> cut = header;
     cut.push_back(40);
     CHECK(fails(cut));
-}
-
-void ambienceLayersFollowTheirConditions() {
-    AmbienceLayer day;
-    day.name = "LotDayLoop";
-    day.loop = "lot_day_lp";
-    day.enabled = {"islot", "lightofday", "curveisday"};
-    day.curves = {{"curveisday", {{0.0f, 0.0f}, {0.49f, 1.0f}, {0.5f, 1.0f}, {0.9f, 0.0f}, {1.0f, 0.0f}}},
-                  {"outsidenesscurve", {{0.0f, 0.0f}, {0.5f, 1.0f}}}};
-    day.loopVolumes = {"outsideness", "outsidenesscurve"};
-    AmbienceState state;
-    state.onLot = true;
-    state.hour = 12;  // the middle of the day
-    state.outside = 0.75f;
-    auto plays = activeLayers({day}, state);
-    CHECK(plays.size() == 1 && plays[0].loop == "lot_day_lp" && near(plays[0].volume, 1));
-    // The curve falls to zero in the evening, and the layer stops.
-    state.hour = 22;
-    CHECK(activeLayers({day}, state).empty());
-    // It is a lot layer only.
-    state.hour = 12;
-    state.onLot = false;
-    CHECK(activeLayers({day}, state).empty());
-    // Its level follows the outsideness curve.
-    state.onLot = true;
-    state.outside = 0.25f;
-    plays = activeLayers({day}, state);
-    CHECK(plays.size() == 1 && near(plays[0].volume, 0.5f));
-    // NOT isinside drops it indoors, and a layer with only a note sequence makes no loop.
-    AmbienceLayer night;
-    night.name = "LotNight";
-    night.loop = "nite_lp";
-    night.enabled = {"islot"};
-    night.notIds = {"isinside"};
-    state.outside = 0.2f;
-    CHECK(activeLayers({night}, state).empty());
-    state.outside = 0.8f;
-    CHECK(activeLayers({night}, state).size() == 1);
-    night.loop.clear();
-    night.freshness = "night";
-    CHECK(activeLayers({night}, state).empty());
-}
-
-void stopAllLetsALoopStartAgain() {
-    const std::vector<SampleKey> samples{{1, 1}};
-    Manager manager;
-    const auto id = manager.start(request(1, 1), oneShot(), samples, 0);
-    CHECK(id && manager.playing(*id));
-    manager.stopAll();
-    CHECK(!manager.playing(*id));
+    // A frame that doesn't decode still gives a frame of samples, as the game plays on past it.
+    std::vector<std::uint8_t> garbage = header;
+    garbage[5] = 0x00, garbage[6] = 0x05;  // 1280 decoded bytes, one frame
+    garbage.push_back(3);
+    garbage.insert(garbage.end(), {0xFF, 0xFF, 0xFF});
+    CHECK(decodeSpx(garbage).samples.size() == 640);
 }
 
 void sliderThumbsAreTheirShareOfTheTrack() {
@@ -364,18 +330,6 @@ void sliderThumbsAreTheirShareOfTheTrack() {
     CHECK(app::AudioOptionsPanel::thumbLength(236, 105, 5, 9) == 18);
     CHECK(app::AudioOptionsPanel::thumbLength(236, 4, 1, 9) == 59);
     CHECK(app::AudioOptionsPanel::thumbLength(10, 105, 5, 9) == 10);
-}
-
-void ambiencePropertySetsBecomeLayers() {
-    const auto layer = ambienceLayer({{"Name", "LotNightLoop"},
-                                      {"EnabledPrimitiveIds", "islot,lightofday,curveisnight"},
-                                      {"curveisnight", "0,1,0.25,0"},
-                                      {"AmbientLoopName", "nite_lp"},
-                                      {"LoopVolumePrimitives", "outsideness,outsidenesscurve"},
-                                      {"outsidenesscurve", "0,0.2,1,1"}});
-    CHECK(layer && layer->name == "LotNightLoop" && layer->loop == "nite_lp");
-    CHECK(layer->enabled.size() == 3 && layer->curves.size() == 2 && layer->loopVolumes.size() == 2);
-    CHECK(!ambienceLayer({{"AmbientLoopName", "no_name"}}));
 }
 
 void oneInstanceRules() {
@@ -513,9 +467,6 @@ std::vector<Test> audioTests() {
         {"cinematic dipping fades and comes back", cinematicDippingFadesAndComesBack},
         {"dipping tuning reads its values", dippingTuningReadsItsValues},
         {"SPX reads its header and rejects bad resources", spxReadsItsHeaderAndRejectsBadResources},
-        {"ambience layers follow their conditions", ambienceLayersFollowTheirConditions},
-        {"ambience property sets become layers", ambiencePropertySetsBecomeLayers},
-        {"stop all lets a loop start again", stopAllLetsALoopStartAgain},
         {"slider thumbs are their share of the track", sliderThumbsAreTheirShareOfTheTrack},
         {"one instance rules", oneInstanceRules},
         {"sound stops match event and object", stopsMatchEventAndObject},

@@ -15,8 +15,6 @@
 #include <cmath>
 #include <condition_variable>
 #include <deque>
-#include <format>
-#include <map>
 #include <mutex>
 #include <set>
 #include <thread>
@@ -133,10 +131,6 @@ struct System::Impl {
     std::size_t cacheBytes = 0;
     std::unordered_set<std::uint64_t> pending;
     std::unordered_set<std::uint64_t> failed;
-    AmbienceState ambience;
-    bool ambienceSet = false;
-    std::map<std::string, std::uint32_t> ambiencePlaying;
-    void updateAmbience();
     std::array<std::shared_ptr<const Pcm>, kMaxVoices> slotPcm;
     std::unordered_map<std::uint32_t, std::size_t> slotOf;
     std::set<std::string> missed;
@@ -426,8 +420,9 @@ void System::play(const Event& event) {
         impl_->manager.stopEvent(soundKey(name), event.object);
         return;
     }
+    // The game takes these two events and does nothing with them. Its dip starts and ends with the
+    // cinematic camera instead.
     if (name == "startmusicdipping" || name == "stopmusicdipping") {
-        impl_->manager.setDipping(name == "startmusicdipping");
         return;
     }
     if (name == "stopallsounds") {
@@ -473,45 +468,6 @@ void System::setMuted(bool muted) {
     impl_->manager.setMuted(muted);
 }
 
-void System::setAmbience(const AmbienceState& state) {
-    impl_->ambience = state;
-    impl_->ambienceSet = true;
-}
-
-void System::Impl::updateAmbience() {
-    const auto plays = activeLayers(bank.ambienceLayers(), ambience);
-    std::set<std::string> active;
-    for (const AmbiencePlay& play : plays) {
-        active.insert(play.layer);
-        const auto playing = ambiencePlaying.find(play.layer);
-        if (playing != ambiencePlaying.end()) {
-            // Stop All Sounds ends the loop under us, so it has to be started again.
-            if (manager.playing(playing->second)) {
-                manager.setGain(playing->second, play.volume);
-                continue;
-            }
-            ambiencePlaying.erase(playing);
-        }
-        Request request;
-        request.track = soundKey(play.loop);
-        request.event = soundKey("ambience:" + play.layer);
-        request.group = Group::Ambience;
-        request.gain = play.volume;
-        if (const std::uint32_t id = startTrack(request, play.loop); id != 0) {
-            ambiencePlaying.emplace(play.layer, id);
-            diag::info(std::format("audio: ambience {} at {:.2f}", play.layer, play.volume));
-        }
-    }
-    for (auto it = ambiencePlaying.begin(); it != ambiencePlaying.end();) {
-        if (active.contains(it->first)) {
-            ++it;
-            continue;
-        }
-        manager.stop(it->second);
-        it = ambiencePlaying.erase(it);
-    }
-}
-
 void System::setListener(const Vec3& eye, const Vec3& target, const Vec3& up) {
     if (!impl_->started) {
         return;
@@ -547,15 +503,11 @@ void System::update() {
         impl.startDecoder();
         impl.openDevice();
         impl.started = true;
-        diag::info("audio: indexed " + std::to_string(impl.bank.trackCount()) + " sound tracks and " +
-                   std::to_string(impl.bank.ambienceLayers().size()) + " ambience layers");
+        diag::info("audio: indexed " + std::to_string(impl.bank.trackCount()) + " sound tracks");
     }
     const auto at = now();
     const double elapsed = std::chrono::duration<double, std::milli>(at - impl.lastUpdate).count();
     impl.lastUpdate = at;
-    if (impl.ambienceSet) {
-        impl.updateAmbience();
-    }
     impl.takeDecoded();
     // Sounds whose sample cannot be decoded never start.
     for (const auto& instance : impl.manager.instances()) {

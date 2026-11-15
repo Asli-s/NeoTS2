@@ -294,7 +294,6 @@ add_library(ts2content
     src/audio/mix.cpp
     src/audio/audio_config.cpp
     src/audio/manager.cpp
-    src/audio/ambience.cpp
 )
 target_link_libraries(ts2content PUBLIC ts2formats ts2diag ts2paths PRIVATE project_warnings speex)
 
@@ -466,6 +465,8 @@ if(NEOTS2_FUZZ)
     # Engine code that is not a file reader but takes values from lots and objects.
     add_executable(xa_fuzz fuzz/xa_fuzz.cpp src/audio/xa.cpp)
     target_link_libraries(xa_fuzz PRIVATE ts2formats project_warnings)
+    add_executable(spx_fuzz fuzz/spx_fuzz.cpp src/audio/spx.cpp)
+    target_link_libraries(spx_fuzz PRIVATE ts2formats speex project_warnings)
     add_executable(sound_data_fuzz fuzz/sound_data_fuzz.cpp src/audio/audio_config.cpp src/audio/names.cpp src/audio/track.cpp)
     target_link_libraries(sound_data_fuzz PRIVATE ts2formats project_warnings)
     add_executable(ground_decal_fuzz fuzz/ground_decal_fuzz.cpp src/scene/ground_decal.cpp)

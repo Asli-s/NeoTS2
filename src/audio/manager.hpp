@@ -22,7 +22,6 @@ struct Request {
     std::int16_t object = 0;  // the object it plays on, 0 for none
     Group group = Group::Sfx;
     std::optional<Vec3> position;  // where its object is, none for no place
-    float gain = 1;  // the layer's own level, on top of the track's
 };
 
 // Why a request did not start, for the log.
@@ -60,7 +59,8 @@ public:
     void setGroupVolume(Group group, float volume);
     void setGroupMuted(Group group, bool muted);
     void setMuted(bool muted);
-    // Cinematic dip: effects, voices and music fall to the tuning's levels and come back.
+    // Cinematic dip: effects, voices, music and the stereo fall to the tuning's levels and come back.
+    // Nothing calls it yet, as the game starts it from the cinematic camera.
     void setDipping(bool on);
     // The sound quality option's AudioPerformance, 0 to 2.
     void setPerformanceLevel(int level);
@@ -82,9 +82,6 @@ public:
     void stopObject(std::int16_t object);
     void stop(std::uint32_t id);
     void stopAll();
-    // Changes a playing sound's level, for ambience.
-    void setGain(std::uint32_t id, float gain);
-    [[nodiscard]] bool playing(std::uint32_t id) const;
 
     // A decoded sample's length, and how far a voice has played, from the mixer.
     void setLength(std::uint32_t id, double lengthMs);

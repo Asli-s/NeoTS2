@@ -58,7 +58,7 @@ void Manager::setMuted(bool muted) {
 void Manager::setDipping(bool on) {
     for (const auto& [group, level] :
          {std::pair{Group::Sfx, tuning_.sfxDippingVolume}, std::pair{Group::Voice, tuning_.voxDippingVolume},
-          std::pair{Group::Music, tuning_.musicDippingVolume}}) {
+          std::pair{Group::Music, tuning_.musicDippingVolume}, std::pair{Group::Stereo, tuning_.musicDippingVolume}}) {
         const auto at = static_cast<std::size_t>(group);
         duckFrom_[at] = duck_[at];
         duckTarget_[at] = on ? level : 1.0f;
@@ -215,18 +215,6 @@ void Manager::stopAll() {
     instances_.clear();
 }
 
-bool Manager::playing(std::uint32_t id) const {
-    return std::any_of(instances_.begin(), instances_.end(), [id](const Instance& i) { return i.id == id && !i.stopped; });
-}
-
-void Manager::setGain(std::uint32_t id, float gain) {
-    for (Instance& instance : instances_) {
-        if (instance.id == id) {
-            instance.request.gain = std::clamp(gain, 0.0f, 1.0f);
-        }
-    }
-}
-
 void Manager::setLength(std::uint32_t id, double lengthMs) {
     for (Instance& instance : instances_) {
         if (instance.id == id) {
@@ -259,7 +247,7 @@ const Manager::Instance* Manager::find(std::uint32_t id) const {
 Manager::Output Manager::output(Instance& instance, double elapsedMs) {
     const TrackSettings& s = instance.settings;
     const bool positional = s.positional && instance.request.position;
-    float volume = s.volume * instance.request.gain;
+    float volume = s.volume;
     float azimuthRadians = 0;
     instance.primaryGain = 1;
     if (positional) {

@@ -158,6 +158,7 @@ void AudioOptionsPanel::remove() {
     sliders_ = {-1, -1, -1, -1};
     thumbs_ = {};
     hover_ = -1;
+    dragging_ = -1;
     muteButtons_ = {-1, -1, -1, -1};
 }
 

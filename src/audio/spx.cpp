@@ -60,6 +60,9 @@ Pcm decodeSpx(std::span<const std::uint8_t> data) {
     int frameSize = 0, rate = 0;
     speex_decoder_ctl(decoder.get(), SPEEX_GET_FRAME_SIZE, &frameSize);
     speex_decoder_ctl(decoder.get(), SPEEX_GET_SAMPLING_RATE, &rate);
+    // The game's decoder runs without the perceptual enhancer, which Speex turns on by default.
+    int enhance = 0;
+    speex_decoder_ctl(decoder.get(), SPEEX_SET_ENH, &enhance);
     if (frameSize <= 0 || (frameSamples != 0 && frameSamples != frameSize)) {
         fail("frame size " + std::to_string(frameSamples) + " is not the mode's " + std::to_string(frameSize));
     }
@@ -81,9 +84,8 @@ Pcm decodeSpx(std::span<const std::uint8_t> data) {
         }
         speex_bits_read_from(&bits, reinterpret_cast<const char*>(data.data() + at), static_cast<int>(length));
         at += length;
-        if (speex_decode_int(decoder.get(), &bits, frame.data()) != 0) {
-            fail("bad frame at " + std::to_string(at - length - 1));
-        }
+        // A frame that doesn't decode still gives its samples, as in the game, which plays on.
+        (void)speex_decode_int(decoder.get(), &bits, frame.data());
         for (const spx_int16_t sample : frame) {
             pcm.samples.push_back(static_cast<std::int16_t>(sample));
         }

@@ -6,7 +6,6 @@
 #include "audio/mix.hpp"
 #include "audio/names.hpp"
 #include "audio/track.hpp"
-#include "audio/ambience.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -45,7 +44,6 @@ public:
     void setGroupMuted(Group group, bool muted);
     // Silences everything; the levels still apply behind it.
     void setMuted(bool muted);
-    void setAmbience(const AmbienceState& state);
 
     void play(const Event& event);
     // Stops every sound of one object, as Stop All Sounds does.
