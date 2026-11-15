@@ -24,6 +24,7 @@ constexpr std::uint32_t kPropertySet = 0xEBFEE33F;
 // The sound manager's and the listener's tuning sets in Misc.package.
 constexpr SoundKey kManagerTuning{0xFF11CE39, 0x067B4265};
 constexpr SoundKey kListenerTuning{0xFFD94C49, 0x104F8C8A};
+constexpr SoundKey kDippingTuning{0xFF500B7C, 0xB90ECD35};
 
 // The most sound packages and resources read, far above an install's (about 120 packages), so a
 // folder of broken files cannot fill the memory.
@@ -230,6 +231,17 @@ void Bank::readPropertySets() {
     aliases_ = aliasMap(propertySet(soundKey("aliases")));
     readManagerTuning(propertySet(kManagerTuning), tuning_);
     readListenerTuning(propertySet(kListenerTuning), tuning_);
+    readDippingTuning(propertySet(kDippingTuning), tuning_);
+    // Ambience layers are the property sets that have a Name.
+    for (const auto& [key, at] : propertySets_) {
+        try {
+            if (auto layer = ambienceLayer(propset::parse(read(at)))) {
+                ambienceLayers_.push_back(std::move(*layer));
+            }
+        } catch (const std::exception& ex) {
+            diag::warnOnce("ambience layer: " + std::string(ex.what()));
+        }
+    }
 }
 
 const Bank::Track* Bank::track(SoundKey key) const {

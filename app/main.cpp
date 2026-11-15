@@ -436,6 +436,10 @@ int main(int argc, char** argv) {
                 menu.timings = true;
             } else if (arg == "--play-sound" && i + 1 < argc) {
                 menu.playSound = argv[++i];
+            } else if (arg == "--no-audio") {
+                menu.noAudio = true;
+            } else if (arg == "--mute") {
+                menu.mute = true;
             } else if (arg == "--size" && i + 2 < argc) {
                 menu.sizeGiven = true;
                 menu.width = std::stoi(argv[i + 1]);

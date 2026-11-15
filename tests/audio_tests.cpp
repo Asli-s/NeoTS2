@@ -1,10 +1,13 @@
 #include "test_support.hpp"
 
+#include "../app/audio_options_panel.hpp"
 #include "audio/audio_config.hpp"
+#include "audio/ambience.hpp"
 #include "audio/bank.hpp"
 #include "audio/manager.hpp"
 #include "audio/mix.hpp"
 #include "audio/names.hpp"
+#include "audio/spx.hpp"
 #include "audio/track.hpp"
 #include "audio/xa.hpp"
 #include "formats/anim.hpp"
@@ -12,6 +15,7 @@
 #include <cmath>
 #include <cstdint>
 #include <numbers>
+#include <span>
 #include <vector>
 
 namespace {
@@ -214,6 +218,166 @@ void pauseDropsOneShotsAndHoldsLoops() {
     CHECK(outputs.size() == 2 && outputs[0].advancing);
 }
 
+void groupVolumesMutesAndDippingScaleTheMix() {
+    const std::vector<SampleKey> samples{{1, 1}};
+    const float centre = std::sqrt(0.5f);
+    Manager manager;
+    CHECK(manager.start(request(1, 1), oneShot(), samples, 0));
+    auto out = manager.update(0);
+    CHECK(out.size() == 1 && near(out[0].mono.left, centre));
+    manager.setGroupVolume(Group::Sfx, 0.5f);
+    out = manager.update(0);
+    CHECK(near(out[0].mono.left, centre * 0.5f));
+    manager.setGroupMuted(Group::Sfx, true);
+    out = manager.update(0);
+    CHECK(near(out[0].mono.left, 0));
+    manager.setGroupMuted(Group::Sfx, false);
+    // --mute silences everything without losing the levels.
+    manager.setMuted(true);
+    out = manager.update(0);
+    CHECK(near(out[0].mono.left, 0));
+    manager.setMuted(false);
+    out = manager.update(0);
+    CHECK(near(out[0].mono.left, centre * 0.5f));
+}
+
+void cinematicDippingFadesAndComesBack() {
+    Tuning tuning;
+    tuning.sfxDippingVolume = 0.2f;
+    tuning.voxDippingVolume = 0.3f;
+    tuning.musicDippingVolume = 0.1f;
+    tuning.dippingStartMs = 500;
+    tuning.dippingStopMs = 5000;
+    Manager manager;
+    manager.setTuning(tuning);
+    const std::vector<SampleKey> samples{{1, 1}};
+    CHECK(manager.start(request(1, 1), oneShot(), samples, 0));
+    const float centre = std::sqrt(0.5f);
+    manager.setDipping(true);
+    // Half of the start time takes the effects half way down to 0.2.
+    auto out = manager.update(250);
+    CHECK(near(out[0].mono.left, centre * 0.6f));
+    out = manager.update(250);
+    CHECK(near(out[0].mono.left, centre * 0.2f));
+    // Coming back takes the stop time.
+    manager.setDipping(false);
+    out = manager.update(2500);
+    CHECK(near(out[0].mono.left, centre * 0.6f));
+    out = manager.update(2500);
+    CHECK(near(out[0].mono.left, centre));
+}
+
+void dippingTuningReadsItsValues() {
+    Tuning tuning;
+    readDippingTuning({{"sfxdippingvolume", "0.2"}, {"voxdippingvolume", "0.3"}, {"musicdippingvolume", "0.1"},
+                       {"dippingstarttime", "0.5"}, {"dippingstoptime", "5"}},
+                      tuning);
+    CHECK(near(tuning.sfxDippingVolume, 0.2f) && near(tuning.voxDippingVolume, 0.3f) && near(tuning.musicDippingVolume, 0.1f));
+    CHECK(tuning.dippingStartMs == 500 && tuning.dippingStopMs == 5000);
+    // A broken value leaves the default.
+    Tuning fallback;
+    readDippingTuning({{"sfxdippingvolume", "x"}}, fallback);
+    CHECK(near(fallback.sfxDippingVolume, 0.5f) && fallback.dippingStopMs == 5000);
+}
+
+void spxReadsItsHeaderAndRejectsBadResources() {
+    const auto fails = [](std::span<const std::uint8_t> data) {
+        try {
+            (void)decodeSpx(data);
+        } catch (const std::exception&) {
+            return true;
+        }
+        return false;
+    };
+    CHECK(fails({}));
+    std::vector<std::uint8_t> stereo(15, 0);
+    stereo[0] = 'S', stereo[1] = 'P', stereo[2] = 'X', stereo[3] = '1';
+    stereo[4] = 2;
+    CHECK(fails(stereo));
+    // A valid header with no frames is an empty sound at the mode's own rate.
+    std::vector<std::uint8_t> header(15, 0);
+    header[0] = 'S', header[1] = 'P', header[2] = 'X', header[3] = '1';
+    header[4] = 1;
+    header[5] = 0x80, header[6] = 0x02;  // 640 decoded bytes
+    header[9] = 2;                       // ultra-wideband, 32 kHz
+    header[13] = 0x80, header[14] = 0x02;  // 640 samples a frame
+    const Pcm pcm = decodeSpx(header);
+    CHECK(pcm.sampleRate == 32000 && pcm.channels == 1 && pcm.samples.empty());
+    // A frame whose length runs past the resource is a broken file.
+    std::vector<std::uint8_t> cut = header;
+    cut.push_back(40);
+    CHECK(fails(cut));
+}
+
+void ambienceLayersFollowTheirConditions() {
+    AmbienceLayer day;
+    day.name = "LotDayLoop";
+    day.loop = "lot_day_lp";
+    day.enabled = {"islot", "lightofday", "curveisday"};
+    day.curves = {{"curveisday", {{0.0f, 0.0f}, {0.49f, 1.0f}, {0.5f, 1.0f}, {0.9f, 0.0f}, {1.0f, 0.0f}}},
+                  {"outsidenesscurve", {{0.0f, 0.0f}, {0.5f, 1.0f}}}};
+    day.loopVolumes = {"outsideness", "outsidenesscurve"};
+    AmbienceState state;
+    state.onLot = true;
+    state.hour = 12;  // the middle of the day
+    state.outside = 0.75f;
+    auto plays = activeLayers({day}, state);
+    CHECK(plays.size() == 1 && plays[0].loop == "lot_day_lp" && near(plays[0].volume, 1));
+    // The curve falls to zero in the evening, and the layer stops.
+    state.hour = 22;
+    CHECK(activeLayers({day}, state).empty());
+    // It is a lot layer only.
+    state.hour = 12;
+    state.onLot = false;
+    CHECK(activeLayers({day}, state).empty());
+    // Its level follows the outsideness curve.
+    state.onLot = true;
+    state.outside = 0.25f;
+    plays = activeLayers({day}, state);
+    CHECK(plays.size() == 1 && near(plays[0].volume, 0.5f));
+    // NOT isinside drops it indoors, and a layer with only a note sequence makes no loop.
+    AmbienceLayer night;
+    night.name = "LotNight";
+    night.loop = "nite_lp";
+    night.enabled = {"islot"};
+    night.notIds = {"isinside"};
+    state.outside = 0.2f;
+    CHECK(activeLayers({night}, state).empty());
+    state.outside = 0.8f;
+    CHECK(activeLayers({night}, state).size() == 1);
+    night.loop.clear();
+    night.freshness = "night";
+    CHECK(activeLayers({night}, state).empty());
+}
+
+void stopAllLetsALoopStartAgain() {
+    const std::vector<SampleKey> samples{{1, 1}};
+    Manager manager;
+    const auto id = manager.start(request(1, 1), oneShot(), samples, 0);
+    CHECK(id && manager.playing(*id));
+    manager.stopAll();
+    CHECK(!manager.playing(*id));
+}
+
+void sliderThumbsAreTheirShareOfTheTrack() {
+    // The volume bars (0 to 100, 5 shown) get the two caps; Audio Quality (1 to 4) a quarter.
+    CHECK(app::AudioOptionsPanel::thumbLength(236, 105, 5, 9) == 18);
+    CHECK(app::AudioOptionsPanel::thumbLength(236, 4, 1, 9) == 59);
+    CHECK(app::AudioOptionsPanel::thumbLength(10, 105, 5, 9) == 10);
+}
+
+void ambiencePropertySetsBecomeLayers() {
+    const auto layer = ambienceLayer({{"Name", "LotNightLoop"},
+                                      {"EnabledPrimitiveIds", "islot,lightofday,curveisnight"},
+                                      {"curveisnight", "0,1,0.25,0"},
+                                      {"AmbientLoopName", "nite_lp"},
+                                      {"LoopVolumePrimitives", "outsideness,outsidenesscurve"},
+                                      {"outsidenesscurve", "0,0.2,1,1"}});
+    CHECK(layer && layer->name == "LotNightLoop" && layer->loop == "nite_lp");
+    CHECK(layer->enabled.size() == 3 && layer->curves.size() == 2 && layer->loopVolumes.size() == 2);
+    CHECK(!ambienceLayer({{"AmbientLoopName", "no_name"}}));
+}
+
 void oneInstanceRules() {
     const std::vector<SampleKey> samples{{1, 1}};
     Manager manager;
@@ -345,6 +509,14 @@ std::vector<Test> audioTests() {
         {"effective priority fades over the last quarter second", effectivePriorityFadesOverTheLastQuarterSecond},
         {"voice limit steals only lower priorities", voiceLimitStealsOnlyLowerPriorities},
         {"pause drops one-shots and holds loops", pauseDropsOneShotsAndHoldsLoops},
+        {"group volumes, mutes and dipping scale the mix", groupVolumesMutesAndDippingScaleTheMix},
+        {"cinematic dipping fades and comes back", cinematicDippingFadesAndComesBack},
+        {"dipping tuning reads its values", dippingTuningReadsItsValues},
+        {"SPX reads its header and rejects bad resources", spxReadsItsHeaderAndRejectsBadResources},
+        {"ambience layers follow their conditions", ambienceLayersFollowTheirConditions},
+        {"ambience property sets become layers", ambiencePropertySetsBecomeLayers},
+        {"stop all lets a loop start again", stopAllLetsALoopStartAgain},
+        {"slider thumbs are their share of the track", sliderThumbsAreTheirShareOfTheTrack},
         {"one instance rules", oneInstanceRules},
         {"sound stops match event and object", stopsMatchEventAndObject},
         {"track settings read their keys", trackSettingsReadTheirKeys},

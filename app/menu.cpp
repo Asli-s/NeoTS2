@@ -338,6 +338,7 @@ Game::Game(ts2::content::UiData& data, ts2::ui::Fonts& fonts, ts2::render::IRend
     lotUi_.setFolders(data, install, options.user);
     hoodUi_.gameOptions().takeSettings(lotUi_.gameOptions());
     hoodUi_.graphicsOptions().takeSettings(lotUi_.graphicsOptions());
+    hoodUi_.audioOptions().takeSettings(lotUi_.audioOptions());
     applyGraphicsOptions();
     lotUi_.graphicsOptions().setWindowSize(width_, height_);
     hoodUi_.graphicsOptions().setWindowSize(width_, height_);
@@ -360,8 +361,10 @@ Game::Game(ts2::content::UiData& data, ts2::ui::Fonts& fonts, ts2::render::IRend
     // Index the sound packages beside the menu, so a lot opened later can play at once.
     ensureAudio();
     screen_.setPressHandler([this](int window) { playPressSound(window); });
-    if (!options_.playSound.empty()) {
-        (void)audio_->playName(options_.playSound);
+    if (!options_.playSound.empty() && audio_) {
+        const double seconds = audio_->playName(options_.playSound);
+        ts2::diag::info(seconds > 0 ? std::format("audio: played {} for {:.2f} s", options_.playSound, seconds)
+                                    : std::format("audio: {} did not play", options_.playSound));
     }
 }
 
@@ -731,6 +734,9 @@ void Game::showNeighborhood(Built built) {
     } else if (options_.bin == "gameoptions") {
         hoodUi_.showOptions(true);
         hoodUi_.gameOptions().show(true);
+    } else if (options_.bin == "audiooptions") {
+        hoodUi_.showOptions(true);
+        hoodUi_.audioOptions().show(true);
     } else if (options_.bin == "graphicsoptions") {
         hoodUi_.showOptions(true);
         hoodUi_.graphicsOptions().show(true);
@@ -1477,6 +1483,10 @@ void Game::showLot(LotBuilt& built) {
     hoodUi_.showTag(0, 0, 0);
     lotUi_.setTestingCheats(cheats_.testingCheats());
     lotUi_.open();
+    if (options_.bin == "audiooptions") {
+        lotUi_.showOptions(true);
+        lotUi_.audioOptions().show(true);
+    }
     lotUi_.setNeighborhood(openName_);
     inNeighborhood_ = false;
     inLot_ = true;
@@ -1688,6 +1698,10 @@ void Game::lotAction(app::LotUi::Action action) {
         hoodUi_.graphicsOptions().takeSettings(lotUi_.graphicsOptions());
         applyGraphicsOptions();
         applyDisplayOptions();
+        break;
+    case Action::AudioOptionChanged:
+        hoodUi_.audioOptions().takeSettings(lotUi_.audioOptions());
+        applyAudioOptions();
         break;
     // The game turns the camera the new way the moment Camera Rotation is picked.
     case Action::GameOptionChanged:
@@ -2693,16 +2707,35 @@ void Game::handleEvent(const pf::Event& e) {
         pf::mousePosition(mx, my);
         const auto [ux, uy] = toUi(mx, my);
         auto& graphics = openGraphicsOptions();
+        auto& audio = openAudioOptions();
+        // Apply a drag at once and keep the other panel in step.
+        const auto audioChanged = [&] {
+            if (audio.takeChanged()) {
+                (inLot_ ? hoodUi_.audioOptions() : lotUi_.audioOptions()).takeSettings(audio);
+                applyAudioOptions();
+            }
+        };
         // Every move lights the thumbs up under the mouse.
         if (e.type == pf::Event::Type::MouseMotion) {
+            const bool audioHeld = audio.holdsMouse();
             const bool held = graphics.holdsMouse();
             graphics.mouseMove(ux, uy);
-            if (held) {
+            audio.mouseMove(ux, uy);
+            audioChanged();
+            if (held || audioHeld) {
                 return;
             }
         }
+        if (audio.holdsMouse() && e.type == pf::Event::Type::MouseUp) {
+            audio.mouseUp(ux, uy);
+            return;
+        }
         if (graphics.holdsMouse() && e.type == pf::Event::Type::MouseUp) {
             graphics.mouseUp(ux, uy);
+            return;
+        }
+        if (e.type == pf::Event::Type::MouseDown && e.button == pf::MouseButton::Left && audio.mouseDown(ux, uy)) {
+            audioChanged();
             return;
         }
         if (e.type == pf::Event::Type::MouseDown && e.button == pf::MouseButton::Left && graphics.mouseDown(ux, uy)) {
@@ -2996,6 +3029,9 @@ void Game::windowClicked(int window) {
             lotUi_.graphicsOptions().takeSettings(hoodUi_.graphicsOptions());
             applyGraphicsOptions();
             applyDisplayOptions();
+        } else if (action == app::NeighborhoodUi::Action::AudioOptionChanged) {
+            lotUi_.audioOptions().takeSettings(hoodUi_.audioOptions());
+            applyAudioOptions();
         } else if (action == app::NeighborhoodUi::Action::GameOptionChanged) {
             // A lot reads the Lot View Options when it opens. Camera Rotation turns the camera the new way at once.
             lotUi_.gameOptions().takeSettings(hoodUi_.gameOptions());

@@ -3,6 +3,7 @@
 #include "game.hpp"
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 
 namespace app {
@@ -38,12 +39,30 @@ ts2::audio::NameInputs nameInputs(ts2::sim::LotSimulation& simulation, std::int1
 } // namespace
 
 void Game::ensureAudio() {
-    if (audio_) {
+    if (audio_ || options_.noAudio) {
         return;
     }
     audio_ = std::make_unique<ts2::audio::System>();
     audio_->setPerformanceLevel(lotUi_.gameOptions().audioPerformance());
     audio_->addInstall(install_);
+    // --mute leaves the mixer running, so the options' levels still apply behind it.
+    audio_->setMuted(options_.mute);
+    applyAudioOptions();
+}
+
+void Game::applyAudioOptions() {
+    if (!audio_) {
+        return;
+    }
+    const app::AudioOptionsPanel& panel = openAudioOptions();
+    const auto volumes = panel.volumes();
+    const auto mutes = panel.mutes();
+    constexpr ts2::audio::Group kGroups[] = {ts2::audio::Group::Voice, ts2::audio::Group::Sfx, ts2::audio::Group::Music,
+                                             ts2::audio::Group::Ambience};
+    for (std::size_t i = 0; i < volumes.size(); ++i) {
+        audio_->setGroupVolume(kGroups[i], volumes[i]);
+        audio_->setGroupMuted(kGroups[i], mutes[i]);
+    }
 }
 
 std::optional<ts2::audio::Vec3> Game::soundPlace(std::int16_t id) const {
@@ -164,6 +183,43 @@ void Game::updateAudio() {
             }
             return soundPlace(id);
         });
+        const auto globals = lotLife_->simulation().globals();
+        ts2::audio::AmbienceState state;
+        state.onLot = true;
+        state.hour = globals[ts2::sim::global::kHour] + globals[ts2::sim::global::kMinute] / 60.0;
+        const int cx = static_cast<int>(std::floor(camera.target[0]));
+        const int cy = static_cast<int>(std::floor(camera.target[1]));
+        // Radius in tiles, 20 far out to 8 close in (Misc.package's LotAmbienceZoomRadiusCurve).
+        const float distance = std::sqrt((camera.eye[0] - camera.target[0]) * (camera.eye[0] - camera.target[0]) +
+                                         (camera.eye[1] - camera.target[1]) * (camera.eye[1] - camera.target[1]) +
+                                         (camera.eye[2] - camera.target[2]) * (camera.eye[2] - camera.target[2]));
+        state.zoom = 1 - std::clamp(distance / 40.0f, 0.0f, 1.0f);
+        const int radius = static_cast<int>(std::lround(20.0f - 12.0f * state.zoom));
+        int open = 0, total = 0;
+        bool water = false;
+        for (int y = cy - radius; y <= cy + radius; ++y) {
+            for (int x = cx - radius; x <= cx + radius; ++x) {
+                for (int q = 0; q < 4; ++q) {
+                    const float qx = x + ((q == 0 || q == 3) ? 0.25f : 0.75f);
+                    const float qy = y + ((q == 0 || q == 1) ? 0.25f : 0.75f);
+                    if (const auto isOpen = world.outside().open(0, qx, qy)) {
+                        ++total;
+                        open += *isOpen ? 1 : 0;
+                    }
+                }
+                water = water || world.outside().pool(0, x, y, 0) || world.outside().pool(0, x, y, 1) ||
+                        world.outside().pool(0, x, y, 2) || world.outside().pool(0, x, y, 3);
+            }
+        }
+        state.outside = total > 0 ? static_cast<float>(open) / static_cast<float>(total) : 1;
+        state.water = water;
+        audio_->setAmbience(state);
+    } else {
+        // The neighborhood has no night and its ground is all open.
+        ts2::audio::AmbienceState state;
+        state.inNeighborhood = inNeighborhood_;
+        state.hour = 12;
+        audio_->setAmbience(state);
     }
     audio_->update();
 }

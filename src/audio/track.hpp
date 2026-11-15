@@ -88,11 +88,17 @@ struct Tuning {
     float rolloff = 1.8f;
     float listenerMinHeight = 2;
     float listenerToCameraOffset = 0;
+    float sfxDippingVolume = 0.5f;
+    float voxDippingVolume = 0.5f;
+    float musicDippingVolume = 0.1f;
+    double dippingStartMs = 500;
+    double dippingStopMs = 5000;
 };
 
 // Fills `tuning` from the sound manager's property set.
 void readManagerTuning(const std::map<std::string, std::string>& properties, Tuning& tuning);
 // Fills `tuning` from the listener's property set.
 void readListenerTuning(const std::map<std::string, std::string>& properties, Tuning& tuning);
+void readDippingTuning(const std::map<std::string, std::string>& properties, Tuning& tuning);
 
 } // namespace ts2::audio

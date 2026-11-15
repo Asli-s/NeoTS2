@@ -51,6 +51,8 @@ struct MenuOptions {
     ts2::render::Backend backend = ts2::render::defaultBackend();  // what draws (--renderer)
     bool timings = false;        // write the timing report (diag/timing.hpp) to the log every 10 seconds
     std::string playSound;       // play this track by name at start (--play-sound), for checking audio
+    bool noAudio = false;        // --no-audio: no device is opened and nothing is decoded
+    bool mute = false;           // --mute: the mixer runs at the options' levels, but silent
     std::optional<std::uint32_t> seed;  // fixes a neighborhood's ground variants, so its pictures repeat
     // Asked once a frame: a warning about the install's files found by a check running beside the
     // game, given once, or nothing yet.

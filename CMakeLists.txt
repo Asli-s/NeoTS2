@@ -111,6 +111,40 @@ elseif(NOT MSVC)
     target_compile_options(project_warnings INTERFACE -ffp-contract=off)
 endif()
 
+# Speex 1.2.1 (BSD, licence in third_party/licenses), fetched at its release tag: decodes the SPX1 voice
+# resources. Its source tree has no CMake build, so only the decoder's files are compiled here.
+include(FetchContent)
+FetchContent_Declare(speex GIT_REPOSITORY https://github.com/xiph/speex.git
+                     GIT_TAG 5dceaaf3e23ee7fd17c80cb5f02a838fd6c18e01  # Speex-1.2.1
+                     SOURCE_SUBDIR no-cmake-build)
+FetchContent_MakeAvailable(speex)
+# What its configure step writes: the sized integer types.
+file(WRITE ${CMAKE_BINARY_DIR}/speex_generated/speex/speex_config_types.h
+"#ifndef __SPEEX_TYPES_H__
+#define __SPEEX_TYPES_H__
+#include <stdint.h>
+typedef int16_t spx_int16_t;
+typedef uint16_t spx_uint16_t;
+typedef int32_t spx_int32_t;
+typedef uint32_t spx_uint32_t;
+#endif
+")
+set(SPEEX_SOURCES bits cb_search exc_10_16_table exc_10_32_table exc_20_32_table exc_5_256_table exc_5_64_table
+    exc_8_128_table filters gain_table gain_table_lbr hexc_10_32_table hexc_table high_lsp_tables lpc lsp
+    lsp_tables_nb ltp modes modes_wb nb_celp quant_lsp sb_celp speex speex_callbacks speex_header stereo vbr vq window)
+list(TRANSFORM SPEEX_SOURCES PREPEND ${speex_SOURCE_DIR}/libspeex/)
+list(TRANSFORM SPEEX_SOURCES APPEND .c)
+add_library(speex STATIC ${SPEEX_SOURCES})
+target_include_directories(speex PUBLIC ${speex_SOURCE_DIR}/include ${CMAKE_BINARY_DIR}/speex_generated)
+if(MSVC)
+    # MSVC's C has no variable-length arrays; Speex's USE_ALLOCA path uses _alloca.
+    target_compile_definitions(speex PRIVATE FLOATING_POINT USE_ALLOCA EXPORT=)
+    target_compile_options(speex PRIVATE /W0)
+else()
+    target_compile_definitions(speex PRIVATE FLOATING_POINT VAR_ARRAYS EXPORT=)
+    target_compile_options(speex PRIVATE -w)
+endif()
+
 # The original Lua 5.0.3 interpreter, for the game's object scripts (third-party, MIT).
 file(GLOB LUA_SOURCES third_party/lua-5.0.3/src/*.c third_party/lua-5.0.3/src/lib/*.c)
 # Its memory goes through src/sim/lua_memory.c, which caps how much one script state may hold.
@@ -253,14 +287,16 @@ add_library(ts2content
     src/content/ui_text.cpp
     src/content/target_pictures.cpp
     src/audio/xa.cpp
+    src/audio/spx.cpp
     src/audio/bank.cpp
     src/audio/names.cpp
     src/audio/track.cpp
     src/audio/mix.cpp
     src/audio/audio_config.cpp
     src/audio/manager.cpp
+    src/audio/ambience.cpp
 )
-target_link_libraries(ts2content PUBLIC ts2formats ts2diag ts2paths PRIVATE project_warnings)
+target_link_libraries(ts2content PUBLIC ts2formats ts2diag ts2paths PRIVATE project_warnings speex)
 
 add_library(ts2sim
     src/sim/index_code_source.cpp
@@ -764,7 +800,7 @@ else()
         target_link_libraries(vm_tests PRIVATE ts2ui)
         target_compile_definitions(vm_tests PRIVATE NEOTS2_TEXT_LAYOUT_TESTS)
 
-        add_executable(neots2 app/main.cpp app/menu.cpp app/game_audio.cpp app/game_effects.cpp app/game_surroundings.cpp app/game_graphics.cpp app/neighborhood.cpp app/neighborhood_ui.cpp app/lot_life.cpp app/lot_life_clips.cpp app/lot_life_effects.cpp app/lot_life_panels.cpp app/lot_life_objects.cpp app/lot_life_sims.cpp app/pose_numbers.cpp app/object_materials.cpp app/sim_loader.cpp app/lot_light.cpp app/imposter_baker.cpp app/lot_daylight.cpp app/route_sources.cpp app/lot_ui.cpp app/game_options_panel.cpp app/graphics_options_panel.cpp app/options_list.cpp app/list_box_rows.cpp app/live_panel.cpp app/job_panel.cpp app/memories_page.cpp app/age_meter.cpp app/queue_panel.cpp app/pie_menu_ui.cpp app/mood_meter.cpp app/aspiration_bars.cpp app/pause_frame.cpp app/baby_name_dialog.cpp app/phone_book_dialog.cpp app/type_picker_dialog.cpp app/notification_stack.cpp app/dialog_fills.cpp app/description_box.cpp app/cheat_console.cpp app/needs_panel.cpp app/personality_page.cpp app/relationships_panel.cpp app/rewards_panel.cpp app/simology_panel.cpp app/interests_page.cpp app/hobbies_page.cpp app/chemistry_page.cpp app/meter_bar.cpp app/skewer.cpp app/wants_panel.cpp app/portraits.cpp app/cursors.cpp
+        add_executable(neots2 app/main.cpp app/menu.cpp app/game_audio.cpp app/game_effects.cpp app/game_surroundings.cpp app/game_graphics.cpp app/neighborhood.cpp app/neighborhood_ui.cpp app/lot_life.cpp app/lot_life_clips.cpp app/lot_life_effects.cpp app/lot_life_panels.cpp app/lot_life_objects.cpp app/lot_life_sims.cpp app/pose_numbers.cpp app/object_materials.cpp app/sim_loader.cpp app/lot_light.cpp app/imposter_baker.cpp app/lot_daylight.cpp app/route_sources.cpp app/lot_ui.cpp app/game_options_panel.cpp app/graphics_options_panel.cpp app/audio_options_panel.cpp app/options_list.cpp app/list_box_rows.cpp app/live_panel.cpp app/job_panel.cpp app/memories_page.cpp app/age_meter.cpp app/queue_panel.cpp app/pie_menu_ui.cpp app/mood_meter.cpp app/aspiration_bars.cpp app/pause_frame.cpp app/baby_name_dialog.cpp app/phone_book_dialog.cpp app/type_picker_dialog.cpp app/notification_stack.cpp app/dialog_fills.cpp app/description_box.cpp app/cheat_console.cpp app/needs_panel.cpp app/personality_page.cpp app/relationships_panel.cpp app/rewards_panel.cpp app/simology_panel.cpp app/interests_page.cpp app/hobbies_page.cpp app/chemistry_page.cpp app/meter_bar.cpp app/skewer.cpp app/wants_panel.cpp app/portraits.cpp app/cursors.cpp
                        app/diagnostics.cpp app/crash_handler.cpp app/crash_dialog.cpp app/unexpected_exit.cpp app/report_upload.cpp app/message_box.cpp app/open_renderer.cpp)
         target_link_libraries(neots2 PRIVATE ts2render ts2ui ts2sim ts2diag project_warnings)
         # Audio output needs SDL 3; the SDL 1.2 build keeps the same interface silent.

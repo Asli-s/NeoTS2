@@ -349,6 +349,8 @@ private:
     void paceFrame();
     void applyFrameLimit();
     app::GraphicsOptionsPanel& openGraphicsOptions() { return inLot_ ? lotUi_.graphicsOptions() : hoodUi_.graphicsOptions(); }
+    app::AudioOptionsPanel& openAudioOptions() { return inLot_ ? lotUi_.audioOptions() : hoodUi_.audioOptions(); }
+    void applyAudioOptions();
     std::uint64_t frameDueNs_ = 0;  // when the next frame may start under a frame rate limit
     int frameLimit_ = 0;
     // Under a frame rate limit that divides the screen's refresh rate, how many refreshes each frame

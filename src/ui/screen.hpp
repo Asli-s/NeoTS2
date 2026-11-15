@@ -152,6 +152,8 @@ public:
     void moveSpotTip(int x, int y) { spotTip_.at = {x, y}; }
     std::uint32_t id(int window) const;
     int parent(int window) const;
+    // A window's top left on screen, in UI pixels.
+    std::array<int, 2> position(int window) const { return origin(window); }
     const std::vector<int>& children(int window) const;
 
     // The screen's size, which tooltips stay inside (0: no limits).

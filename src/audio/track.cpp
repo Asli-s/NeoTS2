@@ -171,4 +171,22 @@ void readListenerTuning(const std::map<std::string, std::string>& properties, Tu
     }
 }
 
+void readDippingTuning(const std::map<std::string, std::string>& properties, Tuning& tuning) {
+    if (const auto v = find(properties, "sfxdippingvolume")) {
+        tuning.sfxDippingVolume = clampedFloat(*v, 0, 1);
+    }
+    if (const auto v = find(properties, "voxdippingvolume")) {
+        tuning.voxDippingVolume = clampedFloat(*v, 0, 1);
+    }
+    if (const auto v = find(properties, "musicdippingvolume")) {
+        tuning.musicDippingVolume = clampedFloat(*v, 0, 1);
+    }
+    if (const auto v = find(properties, "dippingstarttime")) {
+        tuning.dippingStartMs = clampedFloat(*v, 0, 60) * 1000;
+    }
+    if (const auto v = find(properties, "dippingstoptime")) {
+        tuning.dippingStopMs = clampedFloat(*v, 0, 60) * 1000;
+    }
+}
+
 } // namespace ts2::audio

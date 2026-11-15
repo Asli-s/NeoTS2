@@ -1,6 +1,7 @@
 #pragma once
 
 #include "content/ui_data.hpp"
+#include "audio_options_panel.hpp"
 #include "game_options_panel.hpp"
 #include "graphics_options_panel.hpp"
 #include "ui/screen.hpp"
@@ -56,9 +57,10 @@ public:
     }
     GameOptionsPanel& gameOptions() { return gameOptions_; }
     GraphicsOptionsPanel& graphicsOptions() { return graphicsOptions_; }
+    AudioOptionsPanel& audioOptions() { return audioOptions_; }
     // The screen has a new size: what sits at its bottom edge moves with it.
     void setSize(int width, int height);
-    enum class Action { None, MainMenu, EnterLot, Quit, GameOptionChanged, GraphicsOptionChanged, DayNight };
+    enum class Action { None, MainMenu, EnterLot, Quit, GameOptionChanged, GraphicsOptionChanged, AudioOptionChanged, DayNight };
     // A button released: what the player asked for.
     Action clicked(int window);
     // The puck's camera button held down. They turn and zoom while held, as the lot puck's do.
@@ -94,6 +96,7 @@ private:
     OptionsMenu optionsMenu_{screen_};
     GameOptionsPanel gameOptions_{screen_, optionsMenu_};
     GraphicsOptionsPanel graphicsOptions_{screen_, optionsMenu_};
+    AudioOptionsPanel audioOptions_{screen_, optionsMenu_};
     std::vector<std::pair<int, bool>> hidden_;  // the panels hideAll hid, and whether each was shown
     int tag_ = -1, tagIcon_ = -1, tagText_ = -1;
     std::uint32_t tagLot_ = 0;
