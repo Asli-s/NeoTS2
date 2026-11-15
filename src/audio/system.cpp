@@ -3,6 +3,7 @@
 #include "audio/bank.hpp"
 #include "audio/manager.hpp"
 #include "audio/mp3.hpp"
+#include "audio/music.hpp"
 #include "audio/spx.hpp"
 #include "audio/xa.hpp"
 #include "diag/log.hpp"
@@ -16,7 +17,9 @@
 #include <cmath>
 #include <condition_variable>
 #include <deque>
+#include <map>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <thread>
 #include <unordered_map>
@@ -135,6 +138,13 @@ struct System::Impl {
     std::array<std::shared_ptr<const Pcm>, kMaxVoices> slotPcm;
     std::unordered_map<std::uint32_t, std::size_t> slotOf;
     std::set<std::string> missed;
+    // The music states by category name: whether it is playing, its shuffled songs and its current song.
+    struct MusicState {
+        bool active = false;
+        std::optional<Playlist> playlist;
+        std::uint32_t id = 0;
+    };
+    std::map<std::string, MusicState> music;
     std::chrono::steady_clock::time_point lastUpdate = now();
     std::chrono::steady_clock::time_point startTime = now();
 
@@ -155,6 +165,7 @@ struct System::Impl {
     void takeDecoded();
     void trimCache();
     void syncMixer(const std::vector<Manager::Output>& outputs);
+    void updateMusic();
     std::uint32_t startTrack(const Request& request, std::string_view name);
     static void SDLCALL feed(void* userdata, SDL_AudioStream* stream, int additional, int total);
 };
@@ -389,6 +400,45 @@ std::uint32_t System::Impl::startTrack(const Request& request, std::string_view 
     return *id;
 }
 
+void System::Impl::updateMusic() {
+    for (auto& [category, state] : music) {
+        if (state.id != 0 && !manager.playing(state.id)) {
+            state.id = 0;
+        }
+        if (!state.active || state.id != 0) {
+            continue;
+        }
+        if (!state.playlist) {
+            state.playlist.emplace(std::vector<SampleKey>(bank.songs(category).begin(), bank.songs(category).end()),
+                                   static_cast<std::uint32_t>(std::hash<std::string>{}(category)));
+            if (state.playlist->empty()) {
+                diag::warnOnce("audio: no songs for music category " + category);
+            }
+        }
+        if (state.playlist->empty()) {
+            continue;
+        }
+        const Tuning& tuning = bank.tuning();
+        TrackSettings settings;
+        settings.volume = tuning.musicVolume * tuning.music2dScalar;
+        settings.priority = tuning.musicPriority;
+        settings.fadeOutMs = tuning.musicFadeOutMs;
+        settings.keepPlaying = true;
+        Request request;
+        request.track = soundKey("music:" + category);
+        request.event = request.track;
+        request.group = Group::Music;
+        const SampleKey song = state.playlist->take();
+        if (const auto id = manager.start(request, settings, std::span<const SampleKey>(&song, 1), nowMs())) {
+            state.id = *id;
+            diag::info("audio: music " + category + " plays one of " + std::to_string(bank.songs(category).size()) + " songs");
+            askDecode(song);
+            // The next song decodes while this one plays.
+            askDecode(state.playlist->upcoming());
+        }
+    }
+}
+
 System::System() : impl_(std::make_unique<Impl>()) {}
 System::~System() = default;
 
@@ -528,7 +578,33 @@ void System::update() {
             }
         }
     }
+    impl.updateMusic();
     impl.syncMixer(impl.manager.update(elapsed));
+}
+
+void System::startMusic(std::string_view category) {
+    auto& state = impl_->music[std::string(category)];
+    state.active = true;
+    if (state.id != 0) {
+        impl_->manager.pause(state.id, false, 0);
+    }
+}
+
+void System::pauseMusic(std::string_view category) {
+    auto& state = impl_->music[std::string(category)];
+    state.active = false;
+    if (state.id != 0) {
+        impl_->manager.pause(state.id, true, 0);
+    }
+}
+
+void System::fadeOutMusic(std::string_view category, double ms) {
+    auto& state = impl_->music[std::string(category)];
+    state.active = false;
+    if (state.id != 0) {
+        impl_->manager.fadeOut(state.id, ms);
+        state.id = 0;
+    }
 }
 
 std::uint32_t System::playUi(std::string_view name) {

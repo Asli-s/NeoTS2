@@ -11,9 +11,11 @@
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -65,12 +67,17 @@ public:
     [[nodiscard]] const AliasMap& aliases() const { return aliases_; }
     [[nodiscard]] const Tuning& tuning() const { return tuning_; }
     [[nodiscard]] std::size_t trackCount() const { return tracks_.size(); }
+    // The songs of a music category (the name `musiccategories` lists), each readable with readSample.
+    [[nodiscard]] std::span<const SampleKey> songs(std::string_view category) const;
 
 private:
     [[nodiscard]] std::vector<std::uint8_t> read(const Location& location);
     [[nodiscard]] std::map<std::string, std::string> propertySet(SoundKey key);
     void readTracks(const KeyMap& definitions, const KeyMap& hitLists);
     void readPropertySets();
+    void addSongs(std::uint32_t package, std::span<const dbpf::IndexEntry> entries);
+    std::uint32_t songCount_ = 0;
+    std::set<std::tuple<std::uint32_t, std::uint32_t, std::uint32_t>> songSeen_;  // group, instance, instance high
 
     std::vector<std::unique_ptr<dbpf::Package>> packages_;
     KeyMap samples_;
@@ -79,6 +86,8 @@ private:
     // The first track of each instance, for keys with instance high 0.
     std::unordered_map<std::uint32_t, std::uint64_t> firstOfInstance_;
     std::vector<SampleKey> sampleLists_;
+    // Songs by their group, which is the hash of the category name.
+    std::unordered_map<std::uint32_t, std::vector<SampleKey>> songs_;
     std::unordered_map<std::uint64_t, std::uint32_t> eventMasks_;
     AliasMap aliases_;
     Tuning tuning_;

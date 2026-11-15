@@ -157,6 +157,9 @@ void readManagerTuning(const std::map<std::string, std::string>& properties, Tun
     if (const auto v = find(properties, "ListenerAttenuationPositionsScalar")) {
         tuning.attenuationPositionsScalar = clampedFloat(*v, -1e3, 1e3);
     }
+    if (const auto v = find(properties, "2dMusicVolumeScalar")) {
+        tuning.music2dScalar = clampedFloat(*v, 0, 1);
+    }
 }
 
 void readListenerTuning(const std::map<std::string, std::string>& properties, Tuning& tuning) {
@@ -186,6 +189,18 @@ void readDippingTuning(const std::map<std::string, std::string>& properties, Tun
     }
     if (const auto v = find(properties, "dippingstoptime")) {
         tuning.dippingStopMs = clampedFloat(*v, 0, 60) * 1000;
+    }
+}
+
+void readMusicTuning(const std::map<std::string, std::string>& properties, Tuning& tuning) {
+    if (const auto v = find(properties, "defaultmusicvolume")) {
+        tuning.musicVolume = clampedFloat(*v, 0, 1);
+    }
+    if (const auto v = find(properties, "musicpriority")) {
+        tuning.musicPriority = clampedFloat(*v, 0, 1e6);
+    }
+    if (const auto v = find(properties, "trackfadeouttime")) {
+        tuning.musicFadeOutMs = static_cast<std::uint32_t>(clampedFloat(*v, 0, 60000));
     }
 }
 

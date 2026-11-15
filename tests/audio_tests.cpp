@@ -6,6 +6,7 @@
 #include "audio/manager.hpp"
 #include "audio/mix.hpp"
 #include "audio/mp3.hpp"
+#include "audio/music.hpp"
 #include "audio/mp3.hpp"
 #include "audio/names.hpp"
 #include "audio/spx.hpp"
@@ -17,6 +18,7 @@
 #include <cstdint>
 #include <numbers>
 #include <span>
+#include <set>
 #include <vector>
 
 namespace {
@@ -277,6 +279,59 @@ void cinematicDippingFadesAndComesBack() {
     groups.setDipping(true);
     out = groups.update(500);
     CHECK(out.size() == 2 && near(out[0].mono.left, centre * 0.1f) && near(out[1].mono.left, centre));
+}
+
+void musicTuningReadsItsValues() {
+    Tuning tuning;
+    readMusicTuning({{"defaultmusicvolume", ".7"}, {"musicpriority", "128"}, {"trackfadeouttime", "3000"}}, tuning);
+    readManagerTuning({{"2dMusicVolumeScalar", "0.75"}}, tuning);
+    CHECK(near(tuning.musicVolume, 0.7f) && near(tuning.music2dScalar, 0.75f) && near(tuning.musicPriority, 128));
+    CHECK(tuning.musicFadeOutMs == 3000);
+}
+
+void playlistPlaysEverySongBeforeRepeatingAndNeverTwiceInARow() {
+    std::vector<SampleKey> songs;
+    for (std::uint32_t i = 1; i <= 5; ++i) {
+        songs.push_back({i, 0});
+    }
+    Playlist playlist(songs, 7);
+    std::vector<std::uint32_t> heard;
+    for (int i = 0; i < 20; ++i) {
+        const SampleKey next = playlist.upcoming();
+        const SampleKey taken = playlist.take();
+        CHECK(next.instance == taken.instance);
+        heard.push_back(taken.instance);
+    }
+    for (std::size_t round = 0; round < 4; ++round) {
+        std::set<std::uint32_t> once(heard.begin() + static_cast<std::ptrdiff_t>(round * 5),
+                                     heard.begin() + static_cast<std::ptrdiff_t>(round * 5 + 5));
+        CHECK(once.size() == 5);
+    }
+    for (std::size_t i = 1; i < heard.size(); ++i) {
+        CHECK(heard[i] != heard[i - 1]);
+    }
+    CHECK(Playlist({}, 1).empty());
+}
+
+void oneSoundPausesAndFadesOut() {
+    const std::vector<SampleKey> samples{{1, 1}};
+    const float centre = std::sqrt(0.5f);
+    Manager manager;
+    const auto id = manager.start(request(1, 0, Group::Music), oneShot(), samples, 0);
+    CHECK(id.has_value());
+    // A pause with no fade is silent and holds at once, and resuming brings it back at once.
+    manager.pause(*id, true, 0);
+    auto out = manager.update(10);
+    CHECK(out.size() == 1 && near(out[0].mono.left, 0) && !out[0].advancing);
+    manager.pause(*id, false, 0);
+    out = manager.update(10);
+    CHECK(near(out[0].mono.left, centre) && out[0].advancing);
+    // A fade-out takes its time, then the sound is gone.
+    manager.fadeOut(*id, 1000);
+    out = manager.update(500);
+    CHECK(out.size() == 1 && near(out[0].mono.left, centre * 0.5f, 1e-3f));
+    out = manager.update(600);
+    CHECK(out.empty() && manager.find(*id) == nullptr);
 }
 
 void dippingTuningReadsItsValues() {
@@ -550,6 +605,9 @@ std::vector<Test> audioTests() {
         {"group volumes, mutes and dipping scale the mix", groupVolumesMutesAndDippingScaleTheMix},
         {"cinematic dipping fades and comes back", cinematicDippingFadesAndComesBack},
         {"dipping tuning reads its values", dippingTuningReadsItsValues},
+        {"music tuning reads its values", musicTuningReadsItsValues},
+        {"a playlist plays every song before repeating", playlistPlaysEverySongBeforeRepeatingAndNeverTwiceInARow},
+        {"one sound pauses and fades out", oneSoundPausesAndFadesOut},
         {"SPX reads its header and rejects bad resources", spxReadsItsHeaderAndRejectsBadResources},
         {"MP3 decodes to PCM and rejects garbage", mp3DecodesToPcmAndRejectsGarbage},
         {"slider thumbs are their share of the track", sliderThumbsAreTheirShareOfTheTrack},

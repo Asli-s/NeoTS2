@@ -360,6 +360,10 @@ Game::Game(ts2::content::UiData& data, ts2::ui::Fonts& fonts, ts2::render::IRend
     renderer_.setAmbientOcclusionHalfSize(lotUi_.graphicsOptions().display().occlusionHalfSize);
     // Index the sound packages beside the menu, so a lot opened later can play at once.
     ensureAudio();
+    // The main menu plays the opening music.
+    if (audio_ && options_.shot.empty()) {
+        audio_->startMusic("splash");
+    }
     screen_.setPressHandler([this](int window) { playPressSound(window); });
     if (!options_.playSound.empty() && audio_) {
         const double seconds = audio_->playName(options_.playSound);
@@ -752,6 +756,11 @@ void Game::showNeighborhood(Built built) {
     }
     renderer_.setClearColor(0, 0, 0);
     inNeighborhood_ = true;
+    // The opening music fades out over 6 s as the neighborhood's begins.
+    if (audio_ && options_.shot.empty()) {
+        audio_->fadeOutMusic("splash", 6000);
+        audio_->startMusic("nhood");
+    }
     startImposterBaker(hoodHighImposters());
     if (options_.lot > 0) {
         enterLot(static_cast<std::uint32_t>(options_.lot));
@@ -1476,6 +1485,10 @@ void Game::showLot(LotBuilt& built) {
     lotShown_ = ts2::platform::ticksNs();
     lotRealSeconds_ = 0;
     ts2::diag::info(std::format("lot {} shown after {:.1f} s", enteredLot_, secondsSince(lotLoadStarted_)));
+    // The neighborhood's music fades out over 6 s once the lot is ready, as the game's opening music does.
+    if (audio_) {
+        audio_->fadeOutMusic("nhood", 6000);
+    }
 
     screen_.setVisible(hoodUi_.root(), false);
     hoodUi_.showOptions(false);
@@ -1567,6 +1580,9 @@ void Game::leaveLot() {
     orbit_.dragSpeed = {0, 0};
     screen_.setVisible(hoodUi_.root(), true);
     inNeighborhood_ = true;
+    if (audio_ && options_.shot.empty()) {
+        audio_->startMusic("nhood");
+    }
     // Lot Imposters may have changed in the lot.
     if (hoodHighImposters() != highImposters_) {
         startImposterBaker(!highImposters_);

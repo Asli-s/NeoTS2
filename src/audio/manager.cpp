@@ -211,6 +211,29 @@ void Manager::stop(std::uint32_t id) {
     }
 }
 
+bool Manager::playing(std::uint32_t id) const {
+    const Instance* instance = find(id);
+    return instance != nullptr && !instance->stopped;
+}
+
+void Manager::pause(std::uint32_t id, bool paused, double fadeMs) {
+    for (Instance& instance : instances_) {
+        if (instance.id == id) {
+            instance.gamePaused = paused;
+            instance.settings.fadeOutMs = static_cast<std::uint32_t>(fadeMs);
+        }
+    }
+}
+
+void Manager::fadeOut(std::uint32_t id, double fadeMs) {
+    pause(id, true, fadeMs);
+    for (Instance& instance : instances_) {
+        if (instance.id == id) {
+            instance.endWhenSilent = true;
+        }
+    }
+}
+
 void Manager::stopAll() {
     instances_.clear();
 }
@@ -277,6 +300,9 @@ Manager::Output Manager::output(Instance& instance, double elapsedMs) {
         instance.fade = target < instance.fade ? std::max(target, instance.fade - step) : std::min(target, instance.fade + step);
     }
     volume *= instance.fade;
+    if (instance.endWhenSilent && instance.fade <= 0) {
+        instance.stopped = true;
+    }
     // Group level and mute, then the cinematic dip (ramped in update()).
     const auto group = static_cast<std::size_t>(instance.request.group);
     volume *= muted_ || groupMuted_[group] ? 0.0f : groupVolume_[group] * duck_[group];

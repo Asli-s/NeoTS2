@@ -297,6 +297,7 @@ add_library(ts2content
     src/audio/xa.cpp
     src/audio/spx.cpp
     src/audio/mp3.cpp
+    src/audio/music.cpp
     src/audio/bank.cpp
     src/audio/names.cpp
     src/audio/track.cpp

@@ -25,6 +25,9 @@ void System::setSpeed(int) {}
 void System::setListener(const Vec3&, const Vec3&, const Vec3&) {}
 void System::updatePositions(const std::function<std::optional<Vec3>(std::int16_t)>&) {}
 void System::update() {}
+void System::startMusic(std::string_view) {}
+void System::pauseMusic(std::string_view) {}
+void System::fadeOutMusic(std::string_view, double) {}
 std::uint32_t System::playUi(std::string_view) { return 0; }
 std::uint32_t System::playUiId(std::uint32_t) { return 0; }
 void System::stop(std::uint32_t) {}

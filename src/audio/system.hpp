@@ -60,6 +60,14 @@ public:
     // Once a frame: applies the rules, hands decoded samples to the mixer and drops ended sounds.
     void update();
 
+    // The music states the game switches between (menu "splash", neighborhood "nhood", and so on): a
+    // started state plays its category's songs one after another; each state keeps its own song.
+    void startMusic(std::string_view category);
+    // Holds the state's song where it is, until startMusic carries on.
+    void pauseMusic(std::string_view category);
+    // Fades the state's song out over `ms` and ends it; the next startMusic begins a new song.
+    void fadeOutMusic(std::string_view category, double ms);
+
     // A UI sound by name, or by the track id a UI script names (btnclicksnd). Its id, 0 when it
     // does not play.
     std::uint32_t playUi(std::string_view name);

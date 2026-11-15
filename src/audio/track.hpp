@@ -93,6 +93,11 @@ struct Tuning {
     float musicDippingVolume = 0.1f;
     double dippingStartMs = 500;
     double dippingStopMs = 5000;
+    // Music, from the music manager's set (0xFFFA7BF6) and the sound manager's 2dMusicVolumeScalar.
+    float musicVolume = 0.7f;
+    float music2dScalar = 0.75f;
+    float musicPriority = 128;
+    std::uint32_t musicFadeOutMs = 3000;
 };
 
 // Fills `tuning` from the sound manager's property set.
@@ -100,5 +105,6 @@ void readManagerTuning(const std::map<std::string, std::string>& properties, Tun
 // Fills `tuning` from the listener's property set.
 void readListenerTuning(const std::map<std::string, std::string>& properties, Tuning& tuning);
 void readDippingTuning(const std::map<std::string, std::string>& properties, Tuning& tuning);
+void readMusicTuning(const std::map<std::string, std::string>& properties, Tuning& tuning);
 
 } // namespace ts2::audio
