@@ -2,6 +2,7 @@
 
 #include "game_options_panel.hpp"
 #include "graphics_options_panel.hpp"
+#include "audio_options_panel.hpp"
 #include "live_panel.hpp"
 #include "lot_life.hpp"
 #include "notification_stack.hpp"
@@ -50,8 +51,10 @@ public:
     void setFolders(ts2::content::UiData& data, const std::filesystem::path& install, const std::filesystem::path& userFolder) {
         gameOptions_.readSettings(install, userFolder);
         graphicsOptions_.readSettings(data, install, userFolder);
+        audioOptions_.readSettings(install, userFolder);
     }
     GraphicsOptionsPanel& graphicsOptions() { return graphicsOptions_; }
+    AudioOptionsPanel& audioOptions() { return audioOptions_; }
     // The screen has a new size: what sits at its bottom and right edges moves with them.
     void setSize(int width, int height);
     // The name of the neighborhood the lot is in, for the Advanced Neighborhood Options panel the
@@ -95,7 +98,7 @@ public:
     void hideForFreeCamera(bool hide);
 
     // What a released button asks for.
-    enum class Action { None, Neighborhood, Quit, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, GameOptionChanged, GraphicsOptionChanged, RewardsOpened, RewardsClosed, SelectSim, TrackSim, CentreOnNeighbor, CloseNotification, FloorUp, FloorDown, WallMode, ToggleCeiling, MainMenu };
+    enum class Action { None, Neighborhood, Quit, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, GameOptionChanged, GraphicsOptionChanged, AudioOptionChanged, RewardsOpened, RewardsClosed, SelectSim, TrackSim, CentreOnNeighbor, CloseNotification, FloorUp, FloorDown, WallMode, ToggleCeiling, MainMenu };
     Action clicked(int window);
     // The puck's camera button held down under the mouse.
     enum class CameraButton { None, RotateLeft, RotateRight, ZoomIn, ZoomOut };
@@ -208,6 +211,7 @@ private:
     OptionsMenu optionsMenu_{screen_};
     GameOptionsPanel gameOptions_{screen_, optionsMenu_};
     GraphicsOptionsPanel graphicsOptions_{screen_, optionsMenu_};
+    AudioOptionsPanel audioOptions_{screen_, optionsMenu_};
     Skewer skewer_;
     PauseFrame pauseFrame_;
     QueuePanel queue_;

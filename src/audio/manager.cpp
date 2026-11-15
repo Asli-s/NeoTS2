@@ -43,6 +43,28 @@ void Manager::setPerformanceLevel(int level) {
     level_ = std::clamp(level, 0, 2);
 }
 
+void Manager::setGroupVolume(Group group, float volume) {
+    groupVolume_[static_cast<std::size_t>(group)] = std::clamp(volume, 0.0f, 1.0f);
+}
+
+void Manager::setGroupMuted(Group group, bool muted) {
+    groupMuted_[static_cast<std::size_t>(group)] = muted;
+}
+
+void Manager::setMuted(bool muted) {
+    muted_ = muted;
+}
+
+void Manager::setDipping(bool on) {
+    for (const auto& [group, level] :
+         {std::pair{Group::Sfx, tuning_.sfxDippingVolume}, std::pair{Group::Voice, tuning_.voxDippingVolume},
+          std::pair{Group::Music, tuning_.musicDippingVolume}}) {
+        const auto at = static_cast<std::size_t>(group);
+        duckFrom_[at] = duck_[at];
+        duckTarget_[at] = on ? level : 1.0f;
+    }
+}
+
 void Manager::setGamePaused(bool paused) {
     gamePaused_ = paused;
     for (Instance& instance : instances_) {
@@ -193,6 +215,18 @@ void Manager::stopAll() {
     instances_.clear();
 }
 
+bool Manager::playing(std::uint32_t id) const {
+    return std::any_of(instances_.begin(), instances_.end(), [id](const Instance& i) { return i.id == id && !i.stopped; });
+}
+
+void Manager::setGain(std::uint32_t id, float gain) {
+    for (Instance& instance : instances_) {
+        if (instance.id == id) {
+            instance.request.gain = std::clamp(gain, 0.0f, 1.0f);
+        }
+    }
+}
+
 void Manager::setLength(std::uint32_t id, double lengthMs) {
     for (Instance& instance : instances_) {
         if (instance.id == id) {
@@ -225,7 +259,7 @@ const Manager::Instance* Manager::find(std::uint32_t id) const {
 Manager::Output Manager::output(Instance& instance, double elapsedMs) {
     const TrackSettings& s = instance.settings;
     const bool positional = s.positional && instance.request.position;
-    float volume = s.volume;
+    float volume = s.volume * instance.request.gain;
     float azimuthRadians = 0;
     instance.primaryGain = 1;
     if (positional) {
@@ -255,6 +289,9 @@ Manager::Output Manager::output(Instance& instance, double elapsedMs) {
         instance.fade = target < instance.fade ? std::max(target, instance.fade - step) : std::min(target, instance.fade + step);
     }
     volume *= instance.fade;
+    // Group level and mute, then the cinematic dip (ramped in update()).
+    const auto group = static_cast<std::size_t>(instance.request.group);
+    volume *= muted_ || groupMuted_[group] ? 0.0f : groupVolume_[group] * duck_[group];
     const auto speed = static_cast<std::size_t>(speedIndex_ >= 2 && speedIndex_ <= 4 ? speedIndex_ : 2);
     Output out;
     out.id = instance.id;
@@ -273,6 +310,16 @@ Manager::Output Manager::output(Instance& instance, double elapsedMs) {
 }
 
 std::vector<Manager::Output> Manager::update(double elapsedMs) {
+    for (std::size_t g = 0; g < kGroupCount; ++g) {
+        const float target = duckTarget_[g];
+        if (duck_[g] == target) {
+            continue;
+        }
+        const double ms = target < duck_[g] ? tuning_.dippingStartMs : tuning_.dippingStopMs;
+        const float range = std::fabs(duckFrom_[g] - target);
+        const float step = ms <= 0 ? range : range * static_cast<float>(elapsedMs / ms);
+        duck_[g] = target < duck_[g] ? std::max(target, duck_[g] - step) : std::min(target, duck_[g] + step);
+    }
     std::erase_if(instances_, [](const Instance& i) { return i.stopped; });
     std::vector<Output> out;
     out.reserve(instances_.size());

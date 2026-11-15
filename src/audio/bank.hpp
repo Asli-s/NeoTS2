@@ -3,6 +3,7 @@
 // The install's sound resources: track settings, hit lists, samples and the sound property sets,
 // indexed once in the game's package order.
 
+#include "audio/ambience.hpp"
 #include "audio/names.hpp"
 #include "audio/track.hpp"
 #include "formats/dbpf.hpp"
@@ -64,6 +65,7 @@ public:
     [[nodiscard]] std::uint32_t listedMask(std::string_view event) const;
     [[nodiscard]] const AliasMap& aliases() const { return aliases_; }
     [[nodiscard]] const Tuning& tuning() const { return tuning_; }
+    [[nodiscard]] const std::vector<AmbienceLayer>& ambienceLayers() const { return ambienceLayers_; }
     [[nodiscard]] std::size_t trackCount() const { return tracks_.size(); }
 
 private:
@@ -82,6 +84,7 @@ private:
     std::unordered_map<std::uint64_t, std::uint32_t> eventMasks_;
     AliasMap aliases_;
     Tuning tuning_;
+    std::vector<AmbienceLayer> ambienceLayers_;
 };
 
 } // namespace ts2::audio

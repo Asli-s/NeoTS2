@@ -246,6 +246,7 @@ void LotUi::load() {
         optionsMenu_.setMenu(options_);
         gameOptions_.load(GameOptionsPanel::Place::Lot);
         graphicsOptions_.load(GraphicsOptionsPanel::Place::Lot);
+        audioOptions_.load();
         setUpVersion();
     }
 }
@@ -582,6 +583,9 @@ LotUi::Action LotUi::clicked(int window) {
     }
     if (graphicsOptions_.clicked(window)) {
         return graphicsOptions_.takeChanged() ? Action::GraphicsOptionChanged : Action::None;
+    }
+    if (audioOptions_.clicked(window)) {
+        return audioOptions_.takeChanged() ? Action::AudioOptionChanged : Action::None;
     }
     if (gameOptions_.clicked(window)) {
         return gameOptions_.takeChanged() ? Action::GameOptionChanged : Action::None;

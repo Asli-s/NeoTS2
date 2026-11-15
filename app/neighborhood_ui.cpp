@@ -433,6 +433,7 @@ void NeighborhoodUi::open(const fs::path& folder, const std::string& name, Conte
         optionsMenu_.setMenu(options_);
         gameOptions_.load(GameOptionsPanel::Place::Neighborhood);
         graphicsOptions_.load(GraphicsOptionsPanel::Place::Neighborhood);
+        audioOptions_.load();
     }
     // The puck and top bar are drawn over the bins and the options.
     screen_.raise(panel_);
@@ -458,6 +459,7 @@ void NeighborhoodUi::close() {
     // Removed rather than hidden: the next neighborhood loads its own panel and bins.
     gameOptions_.remove();
     graphicsOptions_.remove();
+    audioOptions_.remove();
     optionsMenu_.setMenu(-1);
     for (const int w : {panel_, families_, lots_, card_, tag_, options_}) {
         screen_.remove(w);
@@ -502,6 +504,9 @@ NeighborhoodUi::CameraButton NeighborhoodUi::heldCameraButton() const {
 NeighborhoodUi::Action NeighborhoodUi::clicked(int window) {
     if (graphicsOptions_.clicked(window)) {
         return graphicsOptions_.takeChanged() ? Action::GraphicsOptionChanged : Action::None;
+    }
+    if (audioOptions_.clicked(window)) {
+        return audioOptions_.takeChanged() ? Action::AudioOptionChanged : Action::None;
     }
     if (gameOptions_.clicked(window)) {
         return gameOptions_.takeChanged() ? Action::GameOptionChanged : Action::None;
