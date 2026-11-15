@@ -119,7 +119,7 @@ FetchContent_Declare(speex GIT_REPOSITORY https://github.com/xiph/speex.git
                      SOURCE_SUBDIR no-cmake-build)
 FetchContent_MakeAvailable(speex)
 # What its configure step writes: the sized integer types.
-file(WRITE ${CMAKE_BINARY_DIR}/speex_generated/speex/speex_config_types.h
+file(WRITE ${CMAKE_BINARY_DIR}/speex_generated/speex_config_types.h
 "#ifndef __SPEEX_TYPES_H__
 #define __SPEEX_TYPES_H__
 #include <stdint.h>
