@@ -145,6 +145,14 @@ else()
     target_compile_options(speex PRIVATE -w)
 endif()
 
+# minimp3 (CC0, header only), fetched at a pinned commit: decodes the MP3 music.
+FetchContent_Declare(minimp3 GIT_REPOSITORY https://github.com/lieff/minimp3.git
+                     GIT_TAG a2ad968c94819fb98589cca8026e0a57958c963c
+                     SOURCE_SUBDIR no-cmake-build)
+FetchContent_MakeAvailable(minimp3)
+add_library(minimp3 INTERFACE)
+target_include_directories(minimp3 SYSTEM INTERFACE ${minimp3_SOURCE_DIR})
+
 # The original Lua 5.0.3 interpreter, for the game's object scripts (third-party, MIT).
 file(GLOB LUA_SOURCES third_party/lua-5.0.3/src/*.c third_party/lua-5.0.3/src/lib/*.c)
 # Its memory goes through src/sim/lua_memory.c, which caps how much one script state may hold.
@@ -288,6 +296,7 @@ add_library(ts2content
     src/content/target_pictures.cpp
     src/audio/xa.cpp
     src/audio/spx.cpp
+    src/audio/mp3.cpp
     src/audio/bank.cpp
     src/audio/names.cpp
     src/audio/track.cpp
@@ -295,7 +304,7 @@ add_library(ts2content
     src/audio/audio_config.cpp
     src/audio/manager.cpp
 )
-target_link_libraries(ts2content PUBLIC ts2formats ts2diag ts2paths PRIVATE project_warnings speex)
+target_link_libraries(ts2content PUBLIC ts2formats ts2diag ts2paths PRIVATE project_warnings speex minimp3)
 
 add_library(ts2sim
     src/sim/index_code_source.cpp

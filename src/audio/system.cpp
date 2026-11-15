@@ -2,6 +2,7 @@
 
 #include "audio/bank.hpp"
 #include "audio/manager.hpp"
+#include "audio/mp3.hpp"
 #include "audio/spx.hpp"
 #include "audio/xa.hpp"
 #include "diag/log.hpp"
@@ -241,6 +242,12 @@ void System::Impl::decodeLoop() {
         } else if (bytes.size() >= 4 && bytes[0] == 'S' && bytes[1] == 'P' && bytes[2] == 'X' && bytes[3] == '1') {
             try {
                 pcm = std::make_shared<const Pcm>(decodeSpx(bytes));
+            } catch (const std::exception& ex) {
+                diag::warnOnce(std::string("sound sample: ") + ex.what());
+            }
+        } else if (bytes.size() >= 2 && bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0) {
+            try {
+                pcm = std::make_shared<const Pcm>(decodeMp3(bytes));
             } catch (const std::exception& ex) {
                 diag::warnOnce(std::string("sound sample: ") + ex.what());
             }
