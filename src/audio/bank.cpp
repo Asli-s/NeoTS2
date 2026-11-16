@@ -4,6 +4,8 @@
 #include "content/install.hpp"
 #include "diag/log.hpp"
 #include "formats/propset.hpp"
+#include "formats/resource_types.hpp"
+#include "formats/str.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -26,6 +28,8 @@ constexpr SoundKey kManagerTuning{0xFF11CE39, 0x067B4265};
 constexpr SoundKey kListenerTuning{0xFFD94C49, 0x104F8C8A};
 constexpr SoundKey kDippingTuning{0xFF500B7C, 0xB90ECD35};
 constexpr SoundKey kMusicTuning{0xFFFA7BF6, 0x8FAD1E74};
+// The set of music categories, whose name is hashed as written, not lowercased.
+constexpr SoundKey kMusicCategories{0xFFD3706D, 0x38888A91};
 
 // The most sound packages and resources read, far above an install's (about 120 packages), so a
 // folder of broken files cannot fill the memory.
@@ -152,6 +156,7 @@ void Bank::load(const fs::path& installRoot) {
             const auto index = static_cast<std::uint32_t>(packages_.size());
             addSegment(samples_, index, package->entries(), kSample);
             addSongs(index, package->entries());
+            addCategories(*package, package->entries());
             addSegment(hitLists, index, package->entries(), kHitList);
             addSegment(definitions, index, package->entries(), kTrackSettings);
             addSegment(propertySets_, index, package->entries(), kPropertySet);
@@ -163,6 +168,7 @@ void Bank::load(const fs::path& installRoot) {
     }
     readTracks(definitions, hitLists);
     readPropertySets();
+    loadTitles(installRoot);
     for (auto& package : packages_) {
         package->close();
     }
@@ -240,7 +246,71 @@ void Bank::addSongs(std::uint32_t package, std::span<const dbpf::IndexEntry> ent
         }
         const SampleKey own{static_cast<std::uint32_t>(0xFE000000u | songCount_++), kSongHigh};
         samples_[mapKey(own.instance, own.instanceHigh)] = Location{package, entry};
+        songIds_[mapKey(own.instance, own.instanceHigh)] = entry.key.instance;
         songs_[entry.key.group].push_back(own);
+    }
+}
+
+std::uint32_t Bank::songId(SampleKey song) const {
+    const auto it = songIds_.find(mapKey(song.instance, song.instanceHigh));
+    return it == songIds_.end() ? 0 : it->second;
+}
+
+std::string Bank::songTitle(std::uint32_t id, std::uint8_t language) const {
+    const std::string* title = titles_.title(id, language);
+    return title == nullptr ? std::string() : *title;
+}
+
+// Every package that lists categories adds its own, so the lists are joined, not replaced.
+void Bank::addCategories(dbpf::Package& package, std::span<const dbpf::IndexEntry> entries) {
+    for (const dbpf::IndexEntry& entry : entries) {
+        if (entry.key.type != kPropertySet || entry.key.instance != kMusicCategories.instance || entry.key.instanceHigh != kMusicCategories.instanceHigh) {
+            continue;
+        }
+        try {
+            for (const auto& [name, list] : propset::parse(package.read(entry))) {
+                if (std::any_of(categories_.begin(), categories_.end(), [&](const Category& c) { return c.first == name; })) {
+                    continue;
+                }
+                std::vector<std::string> stations;
+                for (std::size_t from = 0; from <= list.size();) {
+                    const std::size_t comma = std::min(list.find(',', from), list.size());
+                    if (comma > from) {
+                        stations.push_back(list.substr(from, comma - from));
+                    }
+                    from = comma + 1;
+                }
+                categories_.emplace_back(name, std::move(stations));
+            }
+        } catch (const std::exception& ex) {
+            diag::warnOnce(std::string("music categories: ") + ex.what());
+        }
+        return;
+    }
+}
+
+// Each product's MusicTitles.package. Every table of every product is read, as a song's title may
+// sit in a table of another product than its station's.
+void Bank::loadTitles(const fs::path& installRoot) {
+    auto products = content::inGameOrder(content::findProducts(installRoot));
+    std::reverse(products.begin(), products.end());
+    for (const auto& product : products) {
+        const fs::path data = dataFolder(product);
+        std::error_code error;
+        const fs::path path = data / "Res" / "Text" / "MusicTitles.package";
+        if (data.empty() || !fs::is_regular_file(path, error)) {
+            continue;
+        }
+        try {
+            dbpf::Package package(path);
+            for (const dbpf::IndexEntry& entry : package.entries()) {
+                if (entry.key.type == types::kStringTable) {
+                    titles_.add(str::parse(package.read(entry)));
+                }
+            }
+        } catch (const std::exception& ex) {
+            diag::warnOnce("music titles " + path.string() + ": " + ex.what());
+        }
     }
 }
 

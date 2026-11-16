@@ -7,6 +7,8 @@
 #include "audio/mix.hpp"
 #include "audio/mp3.hpp"
 #include "audio/music.hpp"
+#include "audio/song_settings.hpp"
+#include "audio/song_titles.hpp"
 #include "audio/mp3.hpp"
 #include "audio/names.hpp"
 #include "audio/spx.hpp"
@@ -289,6 +291,55 @@ void musicTuningReadsItsValues() {
     readManagerTuning({{"2dMusicVolumeScalar", "0.75"}}, tuning);
     CHECK(near(tuning.musicVolume, 0.7f) && near(tuning.music2dScalar, 0.75f) && near(tuning.musicPriority, 128));
     CHECK(tuning.musicFadeOutMs == 3000 && near(tuning.musicMinDistance, 5) && near(tuning.musicMaxDistance, 64));
+}
+
+void songSettingsReadAndWriteTheirFile() {
+    // Three songs of a station, the middle one off, as a station folder's file holds them.
+    const std::vector<std::uint8_t> file{0x62, 0x48, 0xEA, 0x2B, 0x02, 0x00, 0x03, 0x00, 0x00, 0x00,
+                                         0xE1, 0x08, 0xA9, 0xCB, 0x08, 0x72, 0x19, 0xFF, 0x01,
+                                         0xE1, 0x08, 0xA9, 0xCB, 0x79, 0x2D, 0x37, 0xFF, 0x00,
+                                         0xE1, 0x08, 0xA9, 0xCB, 0x8D, 0xB8, 0x4A, 0xFF, 0x01};
+    const auto settings = parseSongSettings(file);
+    CHECK(settings && settings->songs.size() == 3);
+    CHECK(settings->enabled(0xFF197208) && !settings->enabled(0xFF372D79) && settings->enabled(0xFF4AB88D));
+    CHECK(settings->enabled(0xFF000001));  // a song the file does not list plays
+    CHECK(writeSongSettings(*settings) == file);
+    // A cut-short file, extra bytes, another magic or another type are refused.
+    CHECK(!parseSongSettings(std::span(file).first(file.size() - 1)));
+    auto longer = file;
+    longer.push_back(0);
+    CHECK(!parseSongSettings(longer));
+    auto other = file;
+    other[0] = 0;
+    CHECK(!parseSongSettings(other));
+    other = file;
+    other[10] = 0;
+    CHECK(!parseSongSettings(other) && !parseSongSettings({}));
+}
+
+void songTitlesAreFoundByTheHashOfTheDefaultText() {
+    ts2::str::StringTable table;
+    for (const auto& [language, text] : std::vector<std::pair<int, const char*>>{
+             {1, "Techno"}, {1, "Banana Blaster"}, {3, "Techno"}, {3, "La guerre des bananes"}}) {
+        ts2::str::Entry entry;
+        entry.language = static_cast<std::uint8_t>(language);
+        entry.value = text;
+        table.entries.push_back(entry);
+    }
+    SongTitles titles;
+    titles.add(table);
+    // 0xFF82AD9E is CRC24 of "Banana Blaster", the id its song has.
+    CHECK(titles.title(0xFF82AD9E, 1) && *titles.title(0xFF82AD9E, 1) == "Banana Blaster");
+    CHECK(*titles.title(0xFF82AD9E, 3) == "La guerre des bananes");
+    CHECK(*titles.title(0xFF82AD9E, 9) == "Banana Blaster");  // no text in that language
+    CHECK(titles.title(0xFF000001, 1) == nullptr);
+    // The station's own name is a row too: pop's id is the hash of "pop".
+    ts2::str::StringTable pop;
+    ts2::str::Entry name;
+    name.value = "Pop";
+    pop.entries.push_back(name);
+    titles.add(pop);
+    CHECK(titles.title(0xFF23C3BF, 1) && *titles.title(0xFF23C3BF, 1) == "Pop");
 }
 
 void playlistPlaysEverySongBeforeRepeatingAndNeverTwiceInARow() {
@@ -632,6 +683,8 @@ std::vector<Test> audioTests() {
         {"dipping tuning reads its values", dippingTuningReadsItsValues},
         {"biquad filters pass their band", biquadFiltersPassTheirBand},
         {"music tuning reads its values", musicTuningReadsItsValues},
+        {"song settings read and write their file", songSettingsReadAndWriteTheirFile},
+        {"song titles are found by the hash of the default text", songTitlesAreFoundByTheHashOfTheDefaultText},
         {"a playlist plays every song before repeating", playlistPlaysEverySongBeforeRepeatingAndNeverTwiceInARow},
         {"one sound pauses and fades out", oneSoundPausesAndFadesOut},
         {"SPX reads its header and rejects bad resources", spxReadsItsHeaderAndRejectsBadResources},

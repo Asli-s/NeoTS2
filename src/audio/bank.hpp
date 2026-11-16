@@ -4,6 +4,7 @@
 // indexed once in the game's package order.
 
 #include "audio/names.hpp"
+#include "audio/song_titles.hpp"
 #include "audio/track.hpp"
 #include "formats/dbpf.hpp"
 
@@ -69,6 +70,14 @@ public:
     [[nodiscard]] std::size_t trackCount() const { return tracks_.size(); }
     // The songs of a music category (the name `musiccategories` lists), each readable with readSample.
     [[nodiscard]] std::span<const SampleKey> songs(std::string_view category) const;
+    // The id a song is known by in titles and settings files, 0 for a key that is not a song.
+    [[nodiscard]] std::uint32_t songId(SampleKey song) const;
+    // The title of a song in a language (the default language's when there is none), empty when unknown.
+    [[nodiscard]] std::string songTitle(std::uint32_t id, std::uint8_t language) const;
+    // The music categories the packages list, each with the stations it draws on: a station lists itself,
+    // and a mode (build, buy, cas, nhood) lists the stations its music comes from. In first-seen order.
+    using Category = std::pair<std::string, std::vector<std::string>>;
+    [[nodiscard]] const std::vector<Category>& categories() const { return categories_; }
 
 private:
     [[nodiscard]] std::vector<std::uint8_t> read(const Location& location);
@@ -76,6 +85,8 @@ private:
     void readTracks(const KeyMap& definitions, const KeyMap& hitLists);
     void readPropertySets();
     void addSongs(std::uint32_t package, std::span<const dbpf::IndexEntry> entries);
+    void addCategories(dbpf::Package& package, std::span<const dbpf::IndexEntry> entries);
+    void loadTitles(const std::filesystem::path& installRoot);
     std::uint32_t songCount_ = 0;
     std::set<std::tuple<std::uint32_t, std::uint32_t, std::uint32_t>> songSeen_;  // group, instance, instance high
 
@@ -88,6 +99,9 @@ private:
     std::vector<SampleKey> sampleLists_;
     // Songs by their group, which is the hash of the category name.
     std::unordered_map<std::uint32_t, std::vector<SampleKey>> songs_;
+    std::unordered_map<std::uint64_t, std::uint32_t> songIds_;  // by a song's own key
+    SongTitles titles_;
+    std::vector<Category> categories_;
     std::unordered_map<std::uint64_t, std::uint32_t> eventMasks_;
     AliasMap aliases_;
     Tuning tuning_;
