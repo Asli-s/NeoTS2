@@ -19,6 +19,19 @@ execute_process(
 if(NOT result EQUAL 0)
     message(FATAL_ERROR "spirv-cross failed on ${SOURCE}:\n${errors}")
 endif()
+# Older SPIRV-Cross releases write isnan for HLSL's max, and GLSL 1.20 has no isnan.
+string(FIND "${glsl}" "isnan(" nan_at)
+if(NOT nan_at EQUAL -1)
+    message(FATAL_ERROR "${SPIRV_CROSS} is too old for the OpenGL 2 renderer: its GLSL for ${SOURCE} uses isnan, "
+                        "which GLSL 1.20 doesn't have. Use a newer spirv-cross (the Vulkan SDK 1.4.357 one works) "
+                        "and point NEOTS2_SPIRV_CROSS at it.")
+endif()
+# Some drivers accept bit operators in GLSL 1.20, but Mesa refuses them as the standard says.
+string(REGEX MATCH "[^&]&[^&]|[^|]\\|[^|]|<<|>>" bit_op "${glsl}")
+if(bit_op)
+    message(FATAL_ERROR "The GLSL made from ${SOURCE} uses a bit operator (${bit_op}), which GLSL 1.20 doesn't have. "
+                        "Write the HLSL without bit operators, for example with floor, fmod and exp2.")
+endif()
 # A vertex shader's outputs and a fragment shader's inputs are the same varyings, named by their semantic.
 if(STAGE STREQUAL "vert")
     string(REPLACE "out_var_" "v_" glsl "${glsl}")

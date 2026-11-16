@@ -897,7 +897,7 @@ else()
         target_include_directories(header_check PRIVATE ${CMAKE_BINARY_DIR}/generated)
         add_dependencies(header_check neots2_version)
     else()
-        message(STATUS "SDL3, a shader compiler (dxc, or glslc off Windows), or spirv-cross on macOS not found: the renderer and the neots2 app are not built")
+        message(WARNING "SDL3, a shader compiler (dxc, or glslc off Windows), or spirv-cross on macOS not found: the renderer and the neots2 app are not built")
     endif()
 
     if(SDL3_FOUND)
