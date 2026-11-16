@@ -226,7 +226,7 @@ constexpr std::uint16_t kCameraControlOpcode = 0x0023;
 // Dialog types (byte 5).
 constexpr std::uint8_t kTextNotification = 0x08, kStopNotification = 0x09, kModifyNotification = 0x0A,
                        kAppendNotification = 0x1C, kTutorialTasks = 0x12, kTutorialNext = 0x16, kTutorialNextModal = 0x19,
-                       kHint = 0x39, kSetBabyName = 0x17, kPhoneInvite = 0x06, kObjectTypePicker = 0x34,
+                       kHint = 0x39, kSetBabyName = 0x17, kPhoneInvite = 0x06, kObjectTypePicker = 0x34, kChangeAppearance = 0x15,
                        kMessage = 0x00, kYesNo = 0x01, kYesNoCancel = 0x02, kMessageNoTimeout = 0x04;
 constexpr std::uint8_t kCloseBox = 0x80;  // byte 7: a close box in place of OK (not shown yet)
 // Pickers, which list the stack object's object arrays.
@@ -715,6 +715,7 @@ public:
     std::optional<bool> babyNameDialog(Frame& f);
     std::optional<bool> phoneBookDialog(const bhav::Instruction& in, Frame& f);
     std::optional<bool> typePickerDialog(const bhav::Instruction& in, Frame& f);
+    std::optional<bool> changeAppearanceDialog(Frame& f);
     std::optional<bool> messageDialog(const bhav::Instruction& in, Frame& f, std::int16_t& answerTemp);
     bool textNotification(const bhav::Instruction& in, Frame& f, std::int16_t& id);
     // The picture a notification's text names, a neighbor's Sim or an object type (0 for none).

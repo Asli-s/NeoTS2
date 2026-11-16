@@ -9,6 +9,8 @@
 #include <cctype>
 #include <system_error>
 #include <tuple>
+#include <unordered_map>
+#include <utility>
 
 namespace ts2::scene {
 
@@ -72,6 +74,9 @@ CatalogPart catalogPart(const scenegraph::Link& key, const std::map<std::string,
     part.fitness = propset::number(p, "fitness");
     part.subtype = propset::number(p, "subtype");
     part.layer = propset::number(p, "layer");
+    if (p.contains("product")) {
+        part.product = propset::number(p, "product");
+    }
     const auto text = [&](const char* name) {
         const auto it = p.find(name);
         return catalogGuid(it != p.end() ? it->second : std::string());
@@ -92,8 +97,10 @@ std::string catalogGuid(const std::string& text) {
     return out.empty() ? std::string(32, '0') : out;
 }
 
-std::vector<std::filesystem::path> skinCatalogPackages(const std::vector<content::Product>& products) {
-    std::vector<std::filesystem::path> packages;
+namespace {
+
+std::vector<std::pair<std::filesystem::path, std::uint32_t>> skinCatalog(const std::vector<content::Product>& products) {
+    std::vector<std::pair<std::filesystem::path, std::uint32_t>> packages;
     const auto ordered = content::inGameOrder(products);
     for (const char* file : {"Skins.package", "Jewelry.package"}) {
         for (const auto& product : ordered) {
@@ -104,14 +111,80 @@ std::vector<std::filesystem::path> skinCatalogPackages(const std::vector<content
             const auto path = product.objectPackages.front().parent_path().parent_path() / "Catalog" / "Skins" / file;
             std::error_code ec;
             if (std::filesystem::is_regular_file(path, ec)) {
-                packages.push_back(path);
+                packages.emplace_back(path, static_cast<std::uint32_t>(content::gameNumber(product) + 1));
             }
         }
     }
     return packages;
 }
 
-OutfitCatalog readOutfitCatalog(const std::vector<std::filesystem::path>& packages) {
+} // namespace
+
+std::vector<std::filesystem::path> skinCatalogPackages(const std::vector<content::Product>& products) {
+    std::vector<std::filesystem::path> packages;
+    for (auto& [path, product] : skinCatalog(products)) {
+        packages.push_back(std::move(path));
+    }
+    return packages;
+}
+
+std::vector<std::uint32_t> skinCatalogProducts(const std::vector<content::Product>& products) {
+    std::vector<std::uint32_t> numbers;
+    for (const auto& [path, product] : skinCatalog(products)) {
+        numbers.push_back(product);
+    }
+    return numbers;
+}
+
+std::uint32_t partProduct(const std::vector<PartCopy>& copies) {
+    const PartCopy* newest = nullptr;
+    std::uint32_t oldest = 0xFFFF;
+    for (const auto& copy : copies) {
+        if (copy.field && (newest == nullptr || copy.packageProduct > newest->packageProduct)) {
+            newest = &copy;
+        }
+        oldest = std::min(oldest, copy.packageProduct);
+    }
+    return newest != nullptr ? *newest->field : oldest;
+}
+
+namespace {
+
+// Each part's product from all its copies in the game's packages. A part only in Downloads keeps
+// its own field, or 0xFFFF.
+void fillProducts(std::vector<CatalogPart>& parts, const std::vector<std::filesystem::path>& packages,
+                  const std::vector<std::uint32_t>& packageProducts) {
+    std::unordered_map<dbpf::ResourceKey, std::vector<PartCopy>, dbpf::ResourceKeyHash> copies;
+    for (std::size_t i = 0; i < packages.size(); ++i) {
+        content::ResourceIndex one;
+        try {
+            one.addPackage(packages[i]);
+        } catch (const std::exception&) {
+            continue;
+        }
+        for (const auto& r : one.resources()) {
+            if (r.entry.key.type != kPartProperties) {
+                continue;
+            }
+            try {
+                const auto p = propset::parse(one.read(r));
+                auto& list = copies[r.entry.key];
+                list.push_back({packageProducts[i], p.contains("product") ? std::optional(propset::number(p, "product")) : std::nullopt});
+            } catch (const std::exception&) {
+            }
+        }
+    }
+    for (auto& part : parts) {
+        const auto it = copies.find({part.key.type, part.key.group, part.key.instance, part.key.instanceHigh});
+        if (it != copies.end()) {
+            part.product = partProduct(it->second);
+        }
+    }
+}
+
+} // namespace
+
+OutfitCatalog readOutfitCatalog(const std::vector<std::filesystem::path>& packages, const std::vector<std::uint32_t>& packageProducts) {
     content::ResourceIndex index;
     for (const auto& path : packages) {
         try {
@@ -143,6 +216,9 @@ OutfitCatalog readOutfitCatalog(const std::vector<std::filesystem::path>& packag
         } catch (const std::exception& ex) {
             diag::warnOnce(std::string("skin catalog: a part that can't be read is left out: ") + ex.what());
         }
+    }
+    if (packageProducts.size() == packages.size()) {
+        fillProducts(catalog.parts, packages, packageProducts);
     }
     // Sorted by type first, the mesh overlays come before the texture overlays, as the game lists them.
     for (auto* list : {&catalog.parts, &catalog.skinTones, &catalog.hairTones, &catalog.faceOverlays, &catalog.faceTemplates}) {

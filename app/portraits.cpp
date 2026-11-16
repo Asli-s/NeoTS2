@@ -49,4 +49,79 @@ std::optional<ts2::tga::Pixels> drawPortrait(const ts2::scene::Scene& lot, ts2::
     return ts2::content::unpremultiplied(ts2::tga::Pixels{image->width, image->height, std::move(image->rgba)});
 }
 
+std::optional<ts2::tga::Pixels> drawPartPicture(const ts2::scene::Scene& lot, ts2::render::IRenderer& renderer,
+                                                ts2::scene::AnimationLibrary& animations, const ts2::scene::Actor& actor,
+                                                const std::string& pose, const ts2::scene::PictureView& view) {
+    using namespace ts2::scene;
+    if (!actor.rig) {
+        return std::nullopt;
+    }
+    const auto clip = animations.bound(actor.rig, pose);
+    PortraitShot shot;
+    if (!posedForPicture(lot, actor, clip.get(), shot)) {
+        return std::nullopt;
+    }
+    std::vector<std::uint8_t> visible(lot.instances.size(), 0);
+    for (const auto& [instance, joints] : shot.joints) {
+        visible[instance] = 1;
+        renderer.setJoints(instance, joints);
+    }
+    for (const auto& [instance, weights] : shot.morphs) {
+        renderer.setMorphWeights(instance, weights);
+    }
+    for (const auto& [instance, eyes] : shot.eyes) {
+        renderer.setEyes(instance, eyes);
+    }
+    renderer.show(std::move(visible));
+    ts2::render::Camera camera;
+    camera.eye = view.eye;
+    camera.target = view.target;
+    camera.up = view.up;
+    camera.fovY = view.fovY;
+    camera.nearPlane = view.nearPlane;
+    camera.farPlane = view.farPlane;
+    auto image = renderer.drawInstancesToImage(camera, PictureView::kSize, PictureView::kSize, view.lighting);
+    if (!image) {
+        return std::nullopt;
+    }
+    return ts2::content::unpremultiplied(ts2::tga::Pixels{image->width, image->height, std::move(image->rgba)});
+}
+
+std::optional<ts2::tga::Pixels> drawSimView(const ts2::scene::Scene& lot, ts2::render::IRenderer& renderer,
+                                            ts2::scene::AnimationLibrary& animations, const ts2::scene::Actor& actor,
+                                            const std::string& pose, unsigned width, unsigned height, float turn) {
+    using namespace ts2::scene;
+    if (!actor.rig || width == 0 || height == 0) {
+        return std::nullopt;
+    }
+    const auto clip = animations.bound(actor.rig, pose);
+    PortraitShot shot;
+    if (!simViewShot(lot, actor, clip.get(), width, height, turn, shot)) {
+        return std::nullopt;
+    }
+    std::vector<std::uint8_t> visible(lot.instances.size(), 0);
+    for (const auto& [instance, joints] : shot.joints) {
+        visible[instance] = 1;
+        renderer.setJoints(instance, joints);
+    }
+    for (const auto& [instance, weights] : shot.morphs) {
+        renderer.setMorphWeights(instance, weights);
+    }
+    for (const auto& [instance, eyes] : shot.eyes) {
+        renderer.setEyes(instance, eyes);
+    }
+    renderer.show(std::move(visible));
+    ts2::render::Camera camera;
+    camera.eye = shot.camera.eye;
+    camera.target = shot.camera.target;
+    camera.fovY = shot.camera.fovY;
+    camera.nearPlane = shot.camera.nearPlane;
+    camera.farPlane = shot.camera.farPlane;
+    auto image = renderer.drawInstancesToImage(camera, width, height, shot.lighting);
+    if (!image) {
+        return std::nullopt;
+    }
+    return ts2::content::unpremultiplied(ts2::tga::Pixels{image->width, image->height, std::move(image->rgba)});
+}
+
 } // namespace app

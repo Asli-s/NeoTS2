@@ -25,6 +25,8 @@ public:
 
     // Puts up a thumbnail per member (none: the skewer is hidden).
     void setHousehold(std::vector<Member> members);
+    // Puts a new portrait on a Sim's thumbnail.
+    void setPortrait(std::int16_t sim, const ts2::tga::Pixels& portrait);
     // Shows the skewer in live mode only (the game hides it in the options menu).
     void setLiveMode(bool live);
     // Hides it while the free camera is on, with the rest of the UI.

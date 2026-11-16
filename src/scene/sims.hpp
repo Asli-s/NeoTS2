@@ -97,6 +97,11 @@ SimLook newbornLook(Assets& assets, const BabyCatalog& catalog, const Newborn& b
 // (facial hair, glasses) aren't drawn yet.
 SimLook madeSimLook(Assets& assets, const OutfitCatalog& catalog, const MadeLook& made, std::uint32_t category);
 
+// The Sim Create-A-Sim and the mirror draw a hair's picture on, the same for every Sim of the age
+// (a flag below) and gender (1 female, 2 male): its bare skin outfit of medium skin at the default
+// fitness, wearing only the hair set `hair`, with a teen's stretch for teens.
+SimLook hairPictureLook(Assets& assets, const OutfitCatalog& catalog, std::uint32_t age, std::uint32_t gender, const scenegraph::Link& hair);
+
 // Whether a Sim wears only the last entry of an outfit's list of this part (kHairPart...). A Sim
 // wears one hair, top, bottom and body each, so the game takes the last of those (a PlantSim's
 // everyday hair list holds its old hair, then the leaf crown). Faces and accessories keep every entry.

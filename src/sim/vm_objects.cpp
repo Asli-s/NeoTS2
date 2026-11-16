@@ -441,10 +441,10 @@ bool Execution::cinematic(const bhav::Instruction& in, Frame& f) {
 // Dialog. Byte 5 is the type, byte 7 bit 0 shows it and goes on, bits 4-6 name the temp holding a
 // notification's id (or a yes-no-cancel answer). A text notification puts a new id there and goes on
 // (see textNotification). Stop is true when it was shown (and removes it). Tutorial popups
-// and hints go on. "Set Baby Name", the phone book, the type picker and the message box wait for the
-// player when shown (see babyNameDialog and messageDialog). Others wait a tick and answer their
-// first button (true), except the Game Tips question when the world declines them (false). Pickers
-// need the stack object to have object arrays.
+// and hints go on. "Set Baby Name", the phone book, the type picker, Change Appearance and the
+// message box wait for the player when shown (see babyNameDialog and messageDialog). Others wait a
+// tick and answer their first button (true), except the Game Tips question when the world declines
+// them (false). Pickers need the stack object to have object arrays.
 std::optional<bool> Execution::dialog(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     const std::uint8_t type = o[5];
@@ -470,6 +470,9 @@ std::optional<bool> Execution::dialog(const bhav::Instruction& in, Frame& f) {
     }
     if (type == kObjectTypePicker && world().asksTypePicker()) {
         return typePickerDialog(in, f);
+    }
+    if (type == kChangeAppearance && world().asksChangeAppearance()) {
+        return changeAppearanceDialog(f);
     }
     const bool message = type == kMessage || type == kYesNo || type == kYesNoCancel || type == kMessageNoTimeout;
     const bool declined = world().declinesGameTips() && f.group == kGameTipsGroup;
@@ -581,6 +584,21 @@ std::optional<bool> Execution::typePickerDialog(const bhav::Instruction& in, Fra
     const std::uint32_t owner = f.codeOwner;
     const std::uint32_t textGroup = (o[8] & 0x01) ? code_.semiGlobalGroup(owner) : (o[8] & 0x40) ? kGlobalGroup : owner;
     world().askTypePicker({me().id, std::move(types), textGroup, o[6], static_cast<std::uint16_t>(o[13] | o[14] << 8)});
+    f.dialogOpen = true;
+    return std::nullopt;
+}
+
+// Change Appearance (type 0x15) opens the appearance editor on me and waits: true for OK, false
+// for Cancel. The mirror's script registers the new look only on true.
+std::optional<bool> Execution::changeAppearanceDialog(Frame& f) {
+    if (f.dialogOpen) {
+        const std::optional<bool> answer = world().takeChangeAppearanceAnswer(me().id);
+        if (answer) {
+            f.dialogOpen = false;
+        }
+        return answer;
+    }
+    world().askChangeAppearance({me().id});
     f.dialogOpen = true;
     return std::nullopt;
 }

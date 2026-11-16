@@ -1207,6 +1207,20 @@ public:
     void answerTypePicker(std::optional<std::uint32_t> picked) { typePickers_.answer(picked.value_or(0)); }
     // The asker's answer once given: the GUID picked, or 0 for Cancel (and for an asker with none).
     std::optional<std::uint32_t> takeTypePickerAnswer(std::int16_t asker) { return typePickers_.take(asker, 0); }
+    // The appearance editor (Dialog type 0x15, Change Appearance at a mirror or dresser) for the Sim
+    // that runs it. Asking and the order of requests work as for the phone book. With asking off the
+    // dialog waits a tick and is true, as OK on an unchanged look would be.
+    struct ChangeAppearanceRequest {
+        std::int16_t asker = 0;  // the Sim whose look it edits
+    };
+    void setAsksChangeAppearance(bool asks) { asksChangeAppearance_ = asks; }
+    bool asksChangeAppearance() const { return asksChangeAppearance_; }
+    void askChangeAppearance(ChangeAppearanceRequest request) { changeAppearances_.ask(request); }
+    const ChangeAppearanceRequest* changeAppearanceAsked() const { return changeAppearances_.shown(); }
+    // Answers the shown request, true for OK and false for Cancel.
+    void answerChangeAppearance(bool ok) { changeAppearances_.answer(ok); }
+    // The asker's answer once given (false too for an asker with none). Nothing while it waits.
+    std::optional<bool> takeChangeAppearanceAnswer(std::int16_t asker) { return changeAppearances_.take(asker, false); }
     // The game's message box (Dialog types 0, 1, 2 and 4, the newspaper's job offer among them): a
     // title over a text, and buttons that answer it. Asking and the order of requests work as for the
     // phone book. With asking off the dialog waits a tick and answers its first button.
@@ -1573,9 +1587,11 @@ private:
         State state = State::Waiting;
     };
     std::vector<NameRequest> nameRequests_;  // in the order asked
-    bool asksPhoneBook_ = false, asksTypePicker_ = false, asksMessages_ = false, declinesGameTips_ = false;
+    bool asksPhoneBook_ = false, asksTypePicker_ = false, asksMessages_ = false, declinesGameTips_ = false,
+         asksChangeAppearance_ = false;
     DialogQueue<PhoneBookRequest, std::int16_t> phoneBooks_;     // answers: the neighbor, 0 for Cancel
     DialogQueue<TypePickerRequest, std::uint32_t> typePickers_;  // answers: the GUID, 0 for Cancel
+    DialogQueue<ChangeAppearanceRequest, bool> changeAppearances_;  // answers: true for OK
     DialogQueue<MessageRequest, std::uint8_t> messages_;         // answers: the button, from 0
     // Shows the first waiting request when none is shown.
     void showNextNames();

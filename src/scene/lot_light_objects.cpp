@@ -64,7 +64,10 @@ const Model* modelOf(Assets& assets, std::map<std::string, std::optional<Model>>
         if (const auto data = assets.byKey(l)) {
             try {
                 auto r = sg::parseLight(*data);
-                m.lights[lowered(r.name)] = r;
+                // What an object's directional or ambient light does on the lot is not known yet.
+                if (r.kind == "cPointLight" || r.kind == "cSpotLight") {
+                    m.lights[lowered(r.name)] = r;
+                }
             } catch (const std::exception& ex) {
                 diag::warnOnce(std::string("lights: a light resource that can't be read is left out: ") + ex.what());
             }

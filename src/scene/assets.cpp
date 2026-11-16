@@ -14,6 +14,7 @@
 #include "formats/slot.hpp"
 #include "formats/str.hpp"
 #include "scene/normal_map.hpp"
+#include "scene/catalog_bins.hpp"
 #include "scene/outfit_catalog.hpp"
 
 #include <algorithm>
@@ -59,6 +60,8 @@ std::string lower(std::string s) {
 Assets::Assets(const fs::path& install) : scripts_(content::loadBuildScripts(content::findProducts(install))) {
     const auto products = content::findProducts(install);
     skinCatalog_ = skinCatalogPackages(products);
+    skinCatalogProducts_ = scene::skinCatalogProducts(products);
+    catalogBins_ = catalogBinPackages(products);
     lighting_ = content::readLighting(products);
     if (const auto ini = content::newestDataFile(products, "Sys/Terrain.ini")) {
         // The shipped file is a few kilobytes. A larger one is not read.

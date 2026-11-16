@@ -6,6 +6,7 @@
 #include "audio/system.hpp"
 #include "phone_book_dialog.hpp"
 #include "type_picker_dialog.hpp"
+#include "change_appearance_dialog.hpp"
 #include "description_box.hpp"
 #include "cheat_console.hpp"
 #include "dialog_box.hpp"
@@ -221,6 +222,13 @@ private:
     void updateTypePicker();
     void answerTypePicker(std::optional<std::uint32_t> picked);
     void closeTypePicker();
+    // Shows the appearance editor when a mirror's or dresser's script asks, and closes it when answered.
+    void updateChangeAppearance();
+    void answerChangeAppearance(bool ok);
+    void closeChangeAppearance();
+    // A hair's picture for the appearance editor, drawn as the game draws it on its stock Sim of the
+    // age and gender, over a clear background. Nullopt when it can't be drawn.
+    std::optional<ts2::tga::Pixels> drawHairPicture(std::uint32_t age, std::uint32_t gender, const ts2::scenegraph::Link& hair);
     // Shows the game's message box (the newspaper's job offer among them) when a script asks, and
     // closes it when answered with the button pressed, counted from 0.
     void updateMessage();
@@ -228,10 +236,10 @@ private:
     void closeMessage();
     std::optional<ts2::tga::Pixels> framedPicture(const std::optional<ts2::tga::Pixels>& picture);
     // Whether one of the game's dialogs is open over the lot: the quit box, an object error, the
-    // naming dialog, the phone book, the type picker or a message box.
+    // naming dialog, the phone book, the type picker, the appearance editor or a message box.
     bool dialogOpen() const {
         return quitBox_.isOpen() || errorBox_.isOpen() || babyNames_.isOpen() || phoneBook_.isOpen() || typePicker_.isOpen() ||
-               messageBox_.isOpen();
+               changeAppearance_.isOpen() || messageBox_.isOpen();
     }
     // Typing goes on in the naming dialog after the cheat window closes over it.
     void keepBabyNameTyping() {
@@ -302,6 +310,9 @@ private:
     // Once a frame: the listener, pause and speed from the lot, then the sound system's update.
     void updateAudio();
     void drawHousehold(std::uint64_t now);
+    void redrawPortrait(std::uint64_t now);
+    std::optional<ts2::tga::Pixels> drawSimView(const LotLife::AppearanceHairs& sim, const ts2::scene::HairSlots& slots, const std::string& tone,
+                                                unsigned width, unsigned height, float turn);
     void sendLotChanges();
     // The lot's instances shown this frame: those its view shows, less the neighborhood's
     // decorations when the Decorations option is off.
@@ -431,6 +442,7 @@ private:
     app::BabyNameDialog babyNames_;  // the game's "Set Baby Name" dialog
     app::PhoneBookDialog phoneBook_;  // the game's Personal Phonebook
     app::TypePickerDialog typePicker_;  // the game's object type picker ("Call Sim Options")
+    app::ChangeAppearanceDialog changeAppearance_;  // the game's appearance editor (mirrors, dressers)
     ts2::sim::CheatProperties cheats_;  // what the cheat window's boolProp set
     app::CheatConsole cheatConsole_{cheats_};
     bool mouseShift_ = false;  // Shift held at the last mouse move or press
@@ -440,6 +452,8 @@ private:
     std::optional<bool> pausedBeforeBabyNames_;  // the game pauses while it is open
     std::optional<bool> pausedBeforePhoneBook_;  // and while the Personal Phonebook is open
     std::optional<bool> pausedBeforeTypePicker_;  // and the object type picker
+    std::optional<bool> pausedBeforeChangeAppearance_;  // and the appearance editor
+    std::optional<std::int16_t> changeAppearanceSim_;   // the Sim the open appearance editor shows
     std::optional<bool> pausedBeforeMessage_;  // and the message box
     std::uint64_t messageAskedAt_ = 0;  // when the shown message box began waiting for its picture (ns)
     std::uint64_t messageTimeoutNs_ = 0;  // when the open message box presses its last button, 0 for never
@@ -495,6 +509,7 @@ private:
     std::unique_ptr<app::LotDaylight> lotDaylight_;
     app::LotLightOptions lotLight_;  // as last given to the lot's light
     bool householdShown_ = false;
+    std::optional<std::int16_t> portraitRedraw_;  // a Sim whose portrait is drawn again once it is redressed
     std::vector<std::int16_t> householdDrawn_;  // whose portraits the household shows
     // A lot left behind: its scene and simulation are freed in the background, its GPU textures a
     // few a frame (SDL destroys what is given back in the next frame, which took 50 ms for all).

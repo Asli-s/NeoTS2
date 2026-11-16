@@ -85,22 +85,41 @@ PortraitCamera portraitCamera(const Transform& place, const std::array<float, 3>
     return c;
 }
 
-bool portraitShot(const Scene& scene, const Actor& actor, const RigAnimation* pose, PortraitShot& out) {
-    out.joints.clear();
-    out.morphs.clear();
-    out.eyes.clear();
-    if (!actor.rig) {
-        return false;
+// The box is centred 0.05 above the head joint. The camera stands back far enough for the box's
+// width (or its height, in a view wider than the box) to fill the view, plus half its depth.
+PortraitCamera simViewCamera(const std::array<float, 3>& head, unsigned width, unsigned height, float turn) {
+    constexpr float kBoxWidth = 0.3f, kBoxDepth = 0.3f, kBoxHeight = 0.3f, kBoxRaise = 0.05f;
+    constexpr float kFovAcross = 0.34906585f;
+    const float aspect = height > 0 ? static_cast<float>(width) / static_cast<float>(height) : 1.0f;
+    const float across = kBoxWidth / kBoxHeight < aspect ? aspect * kBoxHeight : kBoxWidth;
+    const float tanHalf = std::tan(kFovAcross / 2);
+    const float fit = std::max(0.01f, across / (2 * tanHalf));
+    const float distance = kBoxDepth / 2 + fit;
+    PortraitCamera c;
+    c.target = {head[0], head[1], head[2] + kBoxRaise};
+    c.eye = {c.target[0], c.target[1] + distance, c.target[2]};
+    // Turning the Sim about its own up axis is the camera going round it the other way.
+    const float cs = std::cos(-turn), sn = std::sin(-turn);
+    for (auto* p : {&c.eye, &c.target}) {
+        const float x = (*p)[0], y = (*p)[1];
+        (*p)[0] = x * cs - y * sn;
+        (*p)[1] = x * sn + y * cs;
     }
-    const int head = actor.rig->find("head");
-    std::vector<Transform> world;
-    poseRig(*actor.rig, pose, 0, world);
-    if (head < 0 || static_cast<std::size_t>(head) >= world.size()) {
-        return false;
-    }
-    const auto& m = world[static_cast<std::size_t>(head)].m;
-    out.camera = portraitCamera(actor.place, {m[3], m[7], m[11]});
-    out.lighting = portraitLighting(out.camera);
+    c.fovY = 2 * std::atan(tanHalf / aspect);
+    c.nearPlane = fit * 0.2f;
+    c.farPlane = distance * 2.4f;
+    return c;
+}
+
+std::string simViewPose(std::uint32_t age) {
+    return age == kToddler || age == kBaby ? "p-CAS-clothingPose" : age == kChild ? "c-pose-neutral-stand" : "a-pose-neutral-stand";
+}
+
+namespace {
+
+// Each skinned instance's joints, morph weights and eyes for `pose` at its first frame, with the
+// rig's joints in `world` as posed.
+void poseInstances(const Scene& scene, const Actor& actor, const RigAnimation* pose, const std::vector<Transform>& world, PortraitShot& out) {
     LayeredClip clip;
     clip.animation = pose;
     const std::span<const LayeredClip> clips(&clip, pose != nullptr ? 1 : 0);
@@ -122,6 +141,61 @@ bool portraitShot(const Scene& scene, const Actor& actor, const RigAnimation* po
             mixEyes(clips, out.eyes.emplace_back(s.instance, std::array<float, 4>{}).second);
         }
     }
+}
+
+} // namespace
+
+bool portraitShot(const Scene& scene, const Actor& actor, const RigAnimation* pose, PortraitShot& out) {
+    out.joints.clear();
+    out.morphs.clear();
+    out.eyes.clear();
+    if (!actor.rig) {
+        return false;
+    }
+    const int head = actor.rig->find("head");
+    std::vector<Transform> world;
+    poseRig(*actor.rig, pose, 0, world);
+    if (head < 0 || static_cast<std::size_t>(head) >= world.size()) {
+        return false;
+    }
+    const auto& m = world[static_cast<std::size_t>(head)].m;
+    out.camera = portraitCamera(actor.place, {m[3], m[7], m[11]});
+    out.lighting = portraitLighting(out.camera);
+    poseInstances(scene, actor, pose, world, out);
+    return !out.joints.empty();
+}
+
+bool simViewShot(const Scene& scene, const Actor& actor, const RigAnimation* pose, unsigned width, unsigned height, float turn,
+                 PortraitShot& out) {
+    out.joints.clear();
+    out.morphs.clear();
+    out.eyes.clear();
+    if (!actor.rig) {
+        return false;
+    }
+    const int head = actor.rig->find("head");
+    std::vector<Transform> world;
+    poseRig(*actor.rig, pose, 0, world);
+    if (head < 0 || static_cast<std::size_t>(head) >= world.size()) {
+        return false;
+    }
+    const auto& m = world[static_cast<std::size_t>(head)].m;
+    out.camera = simViewCamera({m[3], m[7], m[11]}, width, height, turn);
+    out.lighting = portraitLighting(out.camera);
+    poseInstances(scene, actor, pose, world, out);
+    return !out.joints.empty();
+}
+
+bool posedForPicture(const Scene& scene, const Actor& actor, const RigAnimation* pose, PortraitShot& out) {
+    out.joints.clear();
+    out.morphs.clear();
+    out.eyes.clear();
+    if (!actor.rig) {
+        return false;
+    }
+    std::vector<Transform> world;
+    poseRig(*actor.rig, pose, 0, world);
+    poseInstances(scene, actor, pose, world, out);
     return !out.joints.empty();
 }
 

@@ -2883,6 +2883,32 @@ void typePickerWaitsForThePick() {
     CHECK(w.world.typePickerAsked() == nullptr);
 }
 
+// Change Appearance (type 0x15) opens the appearance editor on the Sim running it and waits: true
+// for OK, false for Cancel. Without anyone showing it the dialog is true.
+void changeAppearanceWaitsForTheAnswer() {
+    MemoryCodeSource code;
+    code.add(kObjectGroup, 0x1000, bhav({dialog(0x15, 0x00)}));
+    SmallWorld w;
+    Vm vm(code, {}, &w.world);
+    auto start = [&] {
+        w.controller->thread = {};
+        return vm.run(*w.controller, 0x1000).outcome;
+    };
+    CHECK(start() == Outcome::Sleeping);
+    CHECK(vm.resume(*w.controller).outcome == Outcome::True);  // nobody shows it
+    w.world.setAsksChangeAppearance(true);
+    CHECK(start() == Outcome::Sleeping);
+    const auto* asked = w.world.changeAppearanceAsked();
+    CHECK(asked != nullptr && asked->asker == w.controller->id);
+    CHECK(vm.resume(*w.controller).outcome == Outcome::Sleeping);  // still open
+    w.world.answerChangeAppearance(false);
+    CHECK(vm.resume(*w.controller).outcome == Outcome::False);
+    CHECK(start() == Outcome::Sleeping);
+    w.world.answerChangeAppearance(true);
+    CHECK(vm.resume(*w.controller).outcome == Outcome::True);
+    CHECK(w.world.changeAppearanceAsked() == nullptr);
+}
+
 // The message box as the newspaper's job offer asks it: type 2 with the title, text and three
 // buttons from string table 0x12D, tokens filled. Take Job is true, Look Again false with 0 in the
 // temp byte 7 names, End Search false with 1. A missing button text is left empty for the usual one.
@@ -3296,6 +3322,7 @@ std::vector<Test> vmObjectTests() {
         {"set baby name waits for the names", setBabyNameWaitsForTheNames},
         {"phone invite waits for the pick", phoneInviteWaitsForThePick},
         {"object type picker waits for the pick", typePickerWaitsForThePick},
+        {"change appearance waits for the answer", changeAppearanceWaitsForTheAnswer},
         {"message box waits for a button", messageBoxWaitsForAButton},
         {"baby genes follow the game's rules", babyGenesFollowTheGameRules},
         {"baby genes draw in the game's order", babyGenesDrawInTheGamesOrder},

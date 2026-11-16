@@ -30,6 +30,15 @@ struct PortraitCamera {
 // The portrait camera for a Sim standing at `place` whose head joint is at `head` in its model.
 PortraitCamera portraitCamera(const Transform& place, const std::array<float, 3>& head);
 
+// The appearance editor's Sim view camera for a `width` x `height` view of a Sim at the origin
+// (facing +y) whose head joint is at `head`: it frames a box round the head (0.3 wide and deep,
+// from 0.1 below the joint to 0.2 above it) with a 20 degree view across, from straight in front.
+// The Sim is turned `turn` radians about its up axis (positive turns its face to the view's right).
+PortraitCamera simViewCamera(const std::array<float, 3>& head, unsigned width, unsigned height, float turn = 0);
+
+// The pose the Sim view shows a Sim of this age (its look's age flag) in, without "_anim".
+std::string simViewPose(std::uint32_t age);
+
 // How a portrait is lit, whatever the lot: no ambient and five lights fixed to the camera (a bright
 // key from the front left, others from below, the right and behind), turned into the world.
 ObjectLighting portraitLighting(const PortraitCamera& camera);
@@ -45,5 +54,14 @@ struct PortraitShot {
     ObjectLighting lighting;
 };
 [[nodiscard]] bool portraitShot(const Scene& scene, const Actor& actor, const RigAnimation* pose, PortraitShot& out);
+
+// The same pose for a part picture, which brings its own camera and lights: only the joints, morph
+// weights and eyes are set. False when the actor has no rig or nothing skinned.
+[[nodiscard]] bool posedForPicture(const Scene& scene, const Actor& actor, const RigAnimation* pose, PortraitShot& out);
+
+// The same pose for the appearance editor's Sim view, with its camera (see simViewCamera) and the
+// portrait's lights. False when the actor has no rig, no head joint or nothing skinned.
+[[nodiscard]] bool simViewShot(const Scene& scene, const Actor& actor, const RigAnimation* pose, unsigned width, unsigned height,
+                               float turn, PortraitShot& out);
 
 } // namespace ts2::scene

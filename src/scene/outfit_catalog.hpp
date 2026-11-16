@@ -18,8 +18,22 @@ struct CatalogPart {
     scenegraph::Link key;
     std::uint32_t age = 0, gender = 0, species = 1, parts = 0, flags = 0, category = 0, fitness = 0;
     std::uint32_t subtype = 0, layer = 0;  // a face overlay's kind (1 eyebrows, 3 eyes...) and drawing order
+    // The product the game files the part under (1 the base game, then each pack's number plus one),
+    // which orders Create-A-Sim's lists newest first. 0xFFFF when not known.
+    std::uint32_t product = 0xFFFF;
     std::string skinTone, hairTone, family;
 };
+
+// One copy of a part property set: the product number of the package that holds it, and its own
+// "product" field when it has one.
+struct PartCopy {
+    std::uint32_t packageProduct = 0xFFFF;
+    std::optional<std::uint32_t> field;
+};
+
+// The product the game gives a part from all its copies: the field of the copy from the newest
+// package that has one, else the oldest package's own number.
+std::uint32_t partProduct(const std::vector<PartCopy>& copies);
 
 // The skin catalog's outfit parts, skin and hair tones, face overlays (mesh overlays, then texture
 // overlays) and face templates (face archetypes), one per key, in the order the game lists them: by
@@ -62,8 +76,14 @@ bool hasSkinTone(const OutfitCatalog& catalog, const std::string& tone, std::uin
 // product's Jewelry.package, each in the game's product order.
 std::vector<std::filesystem::path> skinCatalogPackages(const std::vector<content::Product>& products);
 
-// Reads the catalog from those packages. It takes a while, and can run on any thread.
-OutfitCatalog readOutfitCatalog(const std::vector<std::filesystem::path>& packages);
+// The product number of each of those packages, in the same order: 1 for the base game, then each
+// pack's number in the game's list plus one.
+std::vector<std::uint32_t> skinCatalogProducts(const std::vector<content::Product>& products);
+
+// Reads the catalog from those packages. With their product numbers, each part also gets its
+// product, else it is left at 0xFFFF. It takes a while, and can run on any thread.
+OutfitCatalog readOutfitCatalog(const std::vector<std::filesystem::path>& packages,
+                                const std::vector<std::uint32_t>& packageProducts = {});
 
 // What the game asks the catalog for. Age, gender and species are flags, and a part needs a bit in
 // common with each (species 0 asks for any). A part with no category fits every category, and so

@@ -31,6 +31,7 @@
 #include "render/frame_plan.hpp"
 #include "scene/imposters.hpp"
 #include "scene/object_effects.hpp"
+#include "scene/portrait.hpp"
 #include "content/install.hpp"
 #include "content/lighting_state.hpp"
 #include "content/lot.hpp"
@@ -880,7 +881,7 @@ constexpr std::uint32_t kErrorCancel = 1, kErrorReset = 2, kErrorDelete = 3;
 
 void Game::updateObjectErrors() {
     if (!lotLife_ || errorBox_.isOpen() || quitBox_.isOpen() || babyNames_.isOpen() || phoneBook_.isOpen() || typePicker_.isOpen() ||
-        messageBox_.isOpen()) {
+        changeAppearance_.isOpen() || messageBox_.isOpen()) {
         return;
     }
     auto& sim = lotLife_->simulation();
@@ -1069,6 +1070,128 @@ void Game::closeTypePicker() {
     }
     pausedBeforeTypePicker_.reset();
     typePicker_.close(screen_);
+}
+
+// The appearance editor (Dialog type 0x15) opens on the Sim at a mirror or dresser. The game pauses
+// while it is open, and closing it puts the pause back as it was.
+void Game::updateChangeAppearance() {
+    auto& world = lotLife_->simulation().world();
+    if (world.changeAppearanceAsked() == nullptr) {
+        closeChangeAppearance();
+        return;
+    }
+    // Another Sim's request shown in place of the one open (its Sim was removed) gets its own dialog.
+    if (changeAppearance_.isOpen() && changeAppearanceSim_ != world.changeAppearanceAsked()->asker) {
+        closeChangeAppearance();
+    }
+    if (changeAppearance_.isOpen()) {
+        changeAppearance_.update(screen_);
+        return;
+    }
+    if (changeAppearance_.open(screen_, uiWidth_, uiHeight_)) {
+        changeAppearanceSim_ = world.changeAppearanceAsked()->asker;
+        const auto offered = lotLife_->appearanceHairs(world.changeAppearanceAsked()->asker);
+        auto shared = std::make_shared<const LotLife::AppearanceHairs>(offered);
+        app::ChangeAppearanceDialog::HairSource source;
+        source.hairsOf = [this, shared](const std::string& tone, bool onlyTone) { return lotLife_->appearanceHairs(*shared, tone, onlyTone); };
+        source.pictureOf = [this, age = offered.age, gender = offered.gender](const auto& hair) { return drawHairPicture(age, gender, hair); };
+        source.toneOf = [this](const auto& hair) { return lotLife_->hairTone(hair); };
+        source.outfitHair = [this, shared](const auto& hair, std::uint32_t category, const std::string& tone, bool customTones) {
+            return lotLife_->outfitHair(*shared, hair, category, tone, customTones);
+        };
+        source.simView = [this, shared](const ts2::scene::HairSlots& slots, const std::string& tone, unsigned width, unsigned height, float turn) {
+            return drawSimView(*shared, slots, tone, width, height, turn);
+        };
+        changeAppearance_.setHairs(screen_, offered.tone, offered.slots, std::move(source));
+        endCameraDrag();  // the dialog takes the mouse, as the quit box does
+        pausedBeforeChangeAppearance_ = lotLife_->paused();
+        lotLife_->setPaused(true);
+    } else {
+        ts2::diag::warnOnce("Change Appearance: its UI script is missing, the look is left as it is");
+        world.answerChangeAppearance(false);
+    }
+}
+
+std::optional<ts2::tga::Pixels> Game::drawHairPicture(std::uint32_t age, std::uint32_t gender, const ts2::scenegraph::Link& hair) {
+    if (!lotLife_) {
+        return std::nullopt;
+    }
+    const auto view = lotLife_->hairPictureView(age);
+    const auto actor = view ? lotLife_->addHairPictureSim(lot_, age, gender, hair) : std::nullopt;
+    if (!actor) {
+        return std::nullopt;
+    }
+    const auto send = [&] {
+        for (const auto& s : actor->skinned) {
+            renderer_.setInstance(lot_, s.instance);
+        }
+        for (const auto& h : actor->held) {
+            renderer_.setInstance(lot_, h.instance);
+        }
+    };
+    renderer_.addMaterials(lot_);
+    renderer_.addMeshes(lot_);
+    send();
+    auto picture = app::drawPartPicture(lot_, renderer_, lotLife_->animations(), *actor,
+                                        ts2::scene::picturePose(ts2::scene::pictureAge(age)), *view);
+    // The Sim leaves the lot at once, so it is never drawn there.
+    lotLife_->removePictureSim(lot_, *actor);
+    send();
+    renderer_.show(lotShown());
+    return picture;
+}
+
+std::optional<ts2::tga::Pixels> Game::drawSimView(const LotLife::AppearanceHairs& sim, const ts2::scene::HairSlots& slots, const std::string& tone,
+                                                  unsigned width, unsigned height, float turn) {
+    if (!lotLife_) {
+        return std::nullopt;
+    }
+    const auto actor = lotLife_->addSimViewSim(lot_, sim, slots, tone);
+    if (!actor) {
+        return std::nullopt;
+    }
+    const auto send = [&] {
+        for (const auto& s : actor->skinned) {
+            renderer_.setInstance(lot_, s.instance);
+        }
+        for (const auto& h : actor->held) {
+            renderer_.setInstance(lot_, h.instance);
+        }
+    };
+    renderer_.addMaterials(lot_);
+    renderer_.addMeshes(lot_);
+    send();
+    auto view = app::drawSimView(lot_, renderer_, lotLife_->animations(), *actor, ts2::scene::simViewPose(actor->age), width, height, turn);
+    // The Sim leaves the lot at once, so it is never drawn there.
+    lotLife_->removePictureSim(lot_, *actor);
+    send();
+    renderer_.show(lotShown());
+    return view;
+}
+
+void Game::answerChangeAppearance(bool ok) {
+    if (lotLife_) {
+        auto& world = lotLife_->simulation().world();
+        if (const auto* asked = world.changeAppearanceAsked();
+            ok && asked != nullptr && changeAppearance_.isOpen() && changeAppearanceSim_ == asked->asker) {
+            lotLife_->wearAppearanceHairs(asked->asker, changeAppearance_.hairSlots(), changeAppearance_.hairTone());
+            portraitRedraw_ = asked->asker;
+        }
+        world.answerChangeAppearance(ok);
+    }
+    closeChangeAppearance();
+}
+
+void Game::closeChangeAppearance() {
+    if (changeAppearance_.turning()) {
+        pf::showCursor();
+    }
+    if (lotLife_ && pausedBeforeChangeAppearance_) {
+        lotLife_->setPaused(*pausedBeforeChangeAppearance_);
+    }
+    pausedBeforeChangeAppearance_.reset();
+    changeAppearanceSim_.reset();
+    changeAppearance_.close(screen_);
 }
 
 // The message box's buttons by the game's ids, the first button 2. A button with no text of its
@@ -1553,6 +1676,8 @@ void Game::leaveLot() {
     phoneBook_.close(screen_);
     pausedBeforeTypePicker_.reset();
     typePicker_.close(screen_);
+    pausedBeforeChangeAppearance_.reset();
+    changeAppearance_.close(screen_);
     pausedBeforeMessage_.reset();
     messageBox_.close(screen_);
     hovered_ = 0;
@@ -1561,7 +1686,9 @@ void Game::leaveLot() {
     spotTipShown_.reset();
     screen_.setSpotTip({});
     renderer_.setHighlight(0, 0);
+    changeAppearanceSim_.reset();
     renderer_.setImposterLight(hood_.times.now().imposters);
+    portraitRedraw_.reset();
     renderer_.setImpostersShown(true);
     orbit_ = hoodOrbit_;
     orbit_.dragSpeed = {0, 0};
@@ -2121,6 +2248,36 @@ void Game::lotMouse(const pf::Event& e, float x, float y) {
         }
         return;
     }
+    if (changeAppearance_.isOpen()) {
+        // As the game does, dragging the Sim view with the left button turns the Sim, with the
+        // pointer hidden, and letting go puts the pointer back in the middle of the view.
+        const bool left = e.type != pf::Event::Type::MouseMotion && e.button == pf::MouseButton::Left;
+        if (changeAppearance_.turning()) {
+            if (e.type == pf::Event::Type::MouseMotion) {
+                changeAppearance_.turnTo(ix);
+            } else if (left && e.type == pf::Event::Type::MouseUp) {
+                const auto [cx, cy] = changeAppearance_.endTurn(screen_);
+                pf::showCursor();
+                if (pf::Window* window = pf::mouseFocus()) {
+                    window->warpMouse(static_cast<float>(cx) * uiScale_, static_cast<float>(cy) * uiScale_);
+                }
+            }
+            return;
+        }
+        const bool overView = changeAppearance_.overSimView(screen_, ix, iy);
+        if (overView && left && e.type == pf::Event::Type::MouseDown) {
+            changeAppearance_.startTurn(ix);
+            pf::hideCursor();
+            return;
+        }
+        cursors_.show(overView ? app::Cursors::kSimsRotate : app::Cursors::kArrow);
+        if (const auto clicked = screen_.mouse(ix, iy, down_, static_cast<double>(ts2::platform::ticksNs()) / 1e9)) {
+            if (const auto ok = changeAppearance_.clicked(screen_, *clicked)) {
+                answerChangeAppearance(*ok);
+            }
+        }
+        return;
+    }
     if (pieMenu_.isOpen()) {
         using Mouse = app::PieMenuUi::Mouse;
         const bool leftButton = e.type != pf::Event::Type::MouseMotion && e.button == pf::MouseButton::Left;
@@ -2333,6 +2490,9 @@ void Game::updateLot(std::uint64_t now) {
     if (lotLife_ && householdShown_ && lotLife_->household() != householdDrawn_) {
         drawHousehold(now);
     }
+    if (lotLife_ && householdShown_ && portraitRedraw_) {
+        redrawPortrait(now);
+    }
     if (lotLife_) {
         lotLife_->markOnScreen(simsInView(lot_, viewCamera(), width_, height_));
         lotLife_->setCamera(viewCamera().eye);
@@ -2347,6 +2507,7 @@ void Game::updateLot(std::uint64_t now) {
         updateBabyNames();
         updatePhoneBook();
         updateTypePicker();
+        updateChangeAppearance();
         updateMessage();
         updateObjectErrors();
         followSimStorey();
@@ -2373,6 +2534,7 @@ void Game::startLotLife() {
         lotLife_->simulation().world().setAsksNames(true);
         lotLife_->simulation().world().setAsksPhoneBook(true);
         lotLife_->simulation().world().setAsksTypePicker(true);
+        lotLife_->simulation().world().setAsksChangeAppearance(true);
         lotLife_->simulation().world().setAsksMessages(true);
         lotLife_->simulation().setTextTables([this](std::uint32_t group, std::uint16_t instance) { return data_.texts(group, instance); });
         lotLife_->simulation().world().setDeclinesGameTips(options_.noGameTips);
@@ -2431,6 +2593,22 @@ void Game::drawHousehold(std::uint64_t now) {
     renderer_.show(lotShown());
     lotUi_.showHousehold(std::move(members));
     ts2::diag::step("household portraits drawn");
+}
+
+// A Sim's portrait is drawn again after its look changed, as the game draws it after Change
+// Appearance, once its new outfit is worn and on the GPU.
+void Game::redrawPortrait(std::uint64_t now) {
+    const auto* sim = lotLife_->simulation().world().find(*portraitRedraw_);
+    if (sim != nullptr && sim->outfitChange) {
+        return;
+    }
+    const std::int16_t id = *portraitRedraw_;
+    portraitRedraw_.reset();
+    std::mt19937 poseRandom(static_cast<unsigned>(now));
+    if (auto portrait = app::drawPortrait(lot_, renderer_, lotLife_->animations(), static_cast<std::uint32_t>(id), poseRandom)) {
+        lotUi_.setPortrait(id, *portrait);
+    }
+    renderer_.show(lotShown());
 }
 
 // What the Sims changed on the lot this frame goes to the GPU and the picker.
@@ -3203,6 +3381,16 @@ bool Game::takePicture() {
         const double nowSeconds = static_cast<double>(ts2::platform::ticksNs()) / 1e9;
         for (const auto& [wx, wy, kind] : options_.uiClicks) {
             const auto [cx, cy] = toUi(static_cast<float>(wx), static_cast<float>(wy));
+            // An appearance editor a script opened during the run takes the clicks asked for.
+            if (kind == 0 && changeAppearance_.isOpen()) {
+                screen_.mouse(cx, cy, true, nowSeconds);
+                if (const auto clicked = screen_.mouse(cx, cy, false, nowSeconds)) {
+                    if (const auto ok = changeAppearance_.clicked(screen_, *clicked)) {
+                        answerChangeAppearance(*ok);
+                    }
+                }
+                continue;
+            }
             if (kind == 2) {
                 screen_.mouse(cx, cy, false, nowSeconds - 1);
                 lotUi_.mouseMoved(cx, cy);

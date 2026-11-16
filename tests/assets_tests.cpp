@@ -6,10 +6,15 @@
 #include "scene/age_data.hpp"
 #include "scene/assets.hpp"
 #include "scene/builder.hpp"
+#include "content/lighting.hpp"
+#include "scene/cas_picture.hpp"
+#include "scene/catalog_bins.hpp"
 #include "scene/face_blend.hpp"
+#include "scene/game_sort.hpp"
 #include "scene/imposters.hpp"
 #include "scene/lot_skirt.hpp"
 #include "scene/outfit_catalog.hpp"
+#include "scene/outfit_hair.hpp"
 #include "scene/sims.hpp"
 
 #include <bit>
@@ -338,6 +343,75 @@ void catalogQueriesMatchAsTheGames() {
     CHECK(findParts(catalog, q).empty());
 }
 
+// The appearance editor's OK gives each outfit with a hair its version of the hair picked: the hair
+// itself when made for that outfit, else one of its family, else the first shown hair of the Sim's
+// colour made for that outfit, as the game gave a teen's maternity and try-on outfits.
+void outfitsWearTheirVersionOfAPickedHair() {
+    using namespace ts2::scene;
+    const std::string brown = "00000002-0000-0000-0000-000000000000", custom = "6baf064a-85ad-4e37-8d81-a987e9f8da46";
+    const auto hair = [](std::uint32_t instance, std::uint32_t category, std::uint32_t flags, const std::string& tone, const char* family) {
+        CatalogPart p;
+        p.key = {0xEBCF3E27, 0x2C17B74A, instance, 0};
+        p.age = 4;
+        p.gender = 2;
+        p.parts = 1;
+        p.category = category;
+        p.flags = flags;
+        p.hairTone = catalogGuid(tone);
+        p.family = catalogGuid(family);
+        return p;
+    };
+    OutfitCatalog catalog;
+    catalog.parts = {hair(1, 0x100, 9, brown, "f2"),       // hidden
+                     hair(2, 0x100, 0, brown, "f2"),       // first shown with maternity
+                     hair(3, 0x020, 0, brown, "f1"),       // the picked hair's formal version
+                     hair(4, 0x100, 0, brown, "f3"),
+                     hair(5, 0x001, 0, brown, "f1"),       // the picked hair, everyday only
+                     hair(6, 0x001, 0, custom, "f4")};     // a hair of a colour the game doesn't ship
+    AgeData data;
+    data.properties = {{"age", "4"}, {"gender", "2"}, {"haircolor", brown}};
+    const ts2::scenegraph::Link picked = catalog.parts[4].key;
+    const auto pick = [&](const ts2::scenegraph::Link& h, std::uint32_t category) {
+        const auto got = outfitHair(catalog, data, h, category, brown, true);
+        return got ? got->instance : 0u;
+    };
+    CHECK(pick(picked, 0x001) == 5);
+    CHECK(pick(picked, 0x020) == 3);
+    CHECK(pick(picked, 0x100) == 2);
+    CHECK(pick(picked, 0x400) == 0);
+    CHECK(pick(catalog.parts[5].key, 0x001) == 6);
+    // Without custom colours the custom hair isn't kept, and the first shown brown everyday hair takes its place.
+    const auto keptOut = outfitHair(catalog, data, catalog.parts[5].key, 0x001, brown, false);
+    CHECK(keptOut && keptOut->instance == 5);
+    // A Sim with no hair colour is offered hairs of every colour.
+    const auto anyTone = outfitHair(catalog, data, catalog.parts[1].key, 0x020, "00000000-0000-0000-0000-000000000000", false);
+    CHECK(anyTone && anyTone->instance == 3);
+    // Only outfits that have a hair slot change, and the scalp keeps its own.
+    data.lists[(0x001 << 16) | 1] = {catalog.parts[3].key};
+    data.lists[(0x100 << 16) | 1] = {catalog.parts[3].key};
+    data.lists[(0x080 << 16) | 1] = {catalog.parts[0].key};
+    HairSlots slots = hairSlots(data);
+    CHECK(slots[0] && slots[7] && slots[8] && !slots[5]);
+    for (auto& s : slots) {
+        if (s) {
+            s = picked;
+        }
+    }
+    wearHairs(data, catalog, slots, brown);
+    CHECK(data.lists.at((0x001 << 16) | 1).front().instance == 5);
+    CHECK(data.lists.at((0x100 << 16) | 1).front().instance == 2);
+    CHECK(data.lists.at((0x080 << 16) | 1).front().instance == 1);
+    CHECK(!data.lists.contains((0x020 << 16) | 1));
+    // A hair the catalog doesn't hold, such as removed custom content, leaves the outfit's hair alone.
+    const ts2::scenegraph::Link removed{0xEBCF3E27, 0x2C17B74A, 99, 0};
+    data.lists[(0x200 << 16) | 1] = {removed};
+    HairSlots gone{};
+    gone[9] = removed;
+    wearHairs(data, catalog, gone, brown);
+    CHECK(data.lists.at((0x200 << 16) | 1).front().instance == 99);
+    CHECK(isStockHairTone(brown) && !isStockHairTone(custom) && !isStockHairTone("00000006-0000-0000-0000-000000000000"));
+}
+
 // Old everyday hairs and one-gender faces are worn with outerwear too, as the game reads them.
 void oldEverydayHairsAndFacesFitOuterwear() {
     using ts2::scene::partCategories;
@@ -347,6 +421,88 @@ void oldEverydayHairsAndFacesFitOuterwear() {
     CHECK(partCategories({{"category", "1"}, {"outfit", "2"}, {"gender", "3"}}) == 0x1);
     CHECK(partCategories({{"category", "8"}, {"outfit", "1"}}) == 0x8);
     CHECK(partCategories({{"category", "1"}, {"outfit", "4"}}) == 0x1);
+}
+
+// A part's product comes from the newest copy with a "product" field, else the oldest package.
+void partProductsComeFromTheirCopies() {
+    using ts2::scene::PartCopy;
+    using ts2::scene::partProduct;
+    CHECK(partProduct({{1, std::nullopt}, {2, 1}}) == 1);
+    CHECK(partProduct({{1, std::nullopt}, {2, std::nullopt}}) == 1);
+    CHECK(partProduct({{2, std::nullopt}}) == 2);
+    CHECK(partProduct({{4, 4}, {15, 1}, {1, std::nullopt}}) == 1);
+    CHECK(partProduct({{4, 4}, {1, std::nullopt}}) == 4);
+    CHECK(partProduct({}) == 0xFFFF);
+}
+
+// The game's sort leaves equal items in its own order, which the catalog bins' order depends on.
+void gameSortLeavesTiesAsTheGame() {
+    std::vector<std::pair<int, int>> v;
+    for (int i = 0; i < 40; ++i) {
+        v.emplace_back((i * 7) % 5, i);
+    }
+    ts2::scene::gameSort(v, [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::vector<int> order;
+    for (const auto& item : v) {
+        order.push_back(item.second);
+    }
+    CHECK((order == std::vector<int>{35, 30, 25, 20, 15, 10, 0, 5, 38, 8, 33, 13, 28, 23, 18, 3, 36, 31, 1, 26,
+                                     21, 6, 11, 16, 39, 9, 34, 14, 29, 4, 24, 19, 27, 12, 32, 2, 17, 7, 37, 22}));
+    std::vector<std::pair<int, int>> same;
+    for (int i = 0; i < 40; ++i) {
+        same.emplace_back(3, i);
+    }
+    ts2::scene::gameSort(same, [](const auto& a, const auto& b) { return a.first < b.first; });
+    CHECK(same.front().second == 20 && same[19].second == 39 && same[20].second == 0 && same.back().second == 19);
+}
+
+// Only parts a clothing bin lists are offered, newest product first, then by bin, then by sort index.
+void binnedPartsFollowTheGamesOrder() {
+    using namespace ts2::scene;
+    constexpr std::uint32_t kGzps = 0xEBCF3E27, kColl = 0x6C4F359D;
+    OutfitCatalog catalog;
+    for (std::uint32_t i = 1; i <= 6; ++i) {
+        CatalogPart p;
+        p.key = {kGzps, 1, i, 0};
+        p.age = 4;
+        p.gender = 2;
+        p.parts = 1;
+        p.category = 1;
+        p.product = i <= 2 ? 1 : 4;
+        p.hairTone = catalogGuid(i == 3 ? "00000002-0000-0000-0000-000000000000" : "00000003-0000-0000-0000-000000000000");
+        catalog.parts.push_back(p);
+    }
+    catalog.parts[1].flags = 1;
+    CatalogBins bins;
+    bins.collections = {{{kColl, 7, 2, 0}, kClothingKind, 0, 50}, {{kColl, 7, 1, 0}, kClothingKind, 0, 47},
+                        {{kColl, 7, 3, 0}, kClothingKind, 1, 10}, {{kColl, 7, 4, 0}, collectionKind("genetics"), 0, 1}};
+    const sg::Link a{kColl, 7, 1, 0}, b{kColl, 7, 2, 0}, flagged{kColl, 7, 3, 0}, genetics{kColl, 7, 4, 0};
+    bins.packages = {{{{kGzps, 1, 1, 0}, b, 5}, {{kGzps, 1, 2, 0}, b, 1}, {{kGzps, 1, 3, 0}, b, 9},
+                      {{kGzps, 1, 4, 0}, b, 2}, {{kGzps, 1, 5, 0}, a, 8}, {{kGzps, 1, 6, 0}, flagged, 0},
+                      {{kGzps, 1, 6, 0}, genetics, 0}, {{kGzps, 1, 9, 0}, a, 0}}};
+    CHECK(collectionKind("clothing") == kClothingKind && collectionKind("specialoutfit") == kSpecialOutfitKind);
+    CHECK(collectionKind("nothing") == 0);
+    const auto ranked = rankedCollections(bins);
+    CHECK(ranked.size() == 12 && ranked.back().key.instance == 2 && ranked[ranked.size() - 2].key.instance == 1);
+    const auto keys = [](const std::vector<const CatalogPart*>& parts) {
+        std::vector<std::uint32_t> out;
+        for (const auto* p : parts) {
+            out.push_back(p->key.instance);
+        }
+        return out;
+    };
+    const auto binned = binnedParts(bins, catalog, kClothingKind);
+    CHECK((keys(binned) == std::vector<std::uint32_t>{5, 4, 3, 2, 1}));
+    BuilderQuery q;
+    q.age = 4;
+    q.gender = 2;
+    q.parts = 1;
+    q.category = 1;
+    q.hairTone = "00000003-0000-0000-0000-000000000000";
+    CHECK((keys(builderParts(binned, q)) == std::vector<std::uint32_t>{5, 4, 1}));
+    q.withHidden = true;
+    q.hairTone.reset();
+    CHECK((keys(builderParts(binned, q)) == std::vector<std::uint32_t>{5, 4, 3, 2, 1}));
 }
 
 // A teen ages as the game ages one: its hair becomes the adult hair of its family, its own adult
@@ -626,6 +782,227 @@ void imposterObjectsComeFromItsResourceNode() {
     }
 }
 
+// A mirror's model as the game ships it: the root, its reflection camera's node (which holds a
+// transform of its own), then the frame's transform node lifted 1.3.
+std::vector<std::uint8_t> mirrorResourceNode() {
+    constexpr std::uint32_t kResourceNodeBlock = 0xE519C933, kTransformBlock = 0x65246462, kViewerBlock = 0x0C152B8E;
+    testres::Bytes b;
+    testres::container(b, {}, {kResourceNodeBlock, kViewerBlock, kTransformBlock});
+    auto header = [&](const std::string& className, std::uint32_t id, std::uint32_t version) {
+        b.text(className);
+        b.u32(id);
+        b.u32(version);
+    };
+    auto compositionTree = [&](const std::string& nodeName, const std::vector<std::uint32_t>& children) {
+        header("cCompositionTreeNode", 0, 11);
+        header("cObjectGraphNode", 0, 4);
+        b.u32(0);
+        b.text(nodeName);
+        b.u32(static_cast<std::uint32_t>(children.size()));
+        for (const auto c : children) {
+            b.u8(1);
+            b.u8(0);
+            b.u32(c);
+        }
+    };
+    auto transform = [&](const std::string& nodeName, float lift) {
+        header("cTransformNode", kTransformBlock, 7);
+        compositionTree(nodeName, {});
+        for (const float v : {0.0f, 0.0f, lift, 0.0f, 0.0f, 0.0f, 1.0f}) {
+            b.f32(v);
+        }
+        b.u32(0x7FFFFFFF);
+    };
+    header("cResourceNode", kResourceNodeBlock, 7);
+    b.u8(1);
+    testres::sgResource(b, "mirror_cres");
+    compositionTree("mirror", {1, 2});
+    header("cViewerRefNodeRecursive", kViewerBlock, 1);
+    header("cViewerRefNodeBase", 0, 1);
+    header("cRenderableNode", 0, 5);
+    header("cBoundedNode", 0, 5);
+    transform("mirror_camera", 0);
+    b.text("screenreflection");
+    transform("root_trans", 1.3f);
+    return b.out;
+}
+
+// A camera's node is read past its own transform, so the node after it keeps its index and place.
+void aCameraNodeKeepsTheNodesAfterIt() {
+    const auto tree = sg::parseResourceNode(mirrorResourceNode());
+    CHECK(tree.nodes.size() == 3);
+    if (tree.nodes.size() == 3) {
+        CHECK(tree.nodes[1].kind == sg::SceneNode::Kind::ViewerRef && tree.nodes[1].name == "mirror_camera");
+        CHECK(tree.nodes[2].kind == sg::SceneNode::Kind::Transform && tree.nodes[2].name == "root_trans" && tree.nodes[2].translation[2] == 1.3f);
+    }
+}
+
+namespace {
+
+// A float from its bits, as the game's files store it.
+float bits(std::uint32_t b) { return std::bit_cast<float>(b); }
+
+// Header, composition tree and transform writers for hand-made resource nodes.
+struct NodeWriter {
+    testres::Bytes& b;
+    void header(const std::string& className, std::uint32_t id, std::uint32_t version) {
+        b.text(className);
+        b.u32(id);
+        b.u32(version);
+    }
+    void tree(const std::string& nodeName, const std::vector<std::uint32_t>& children) {
+        header("cCompositionTreeNode", 0, 11);
+        header("cObjectGraphNode", 0, 4);
+        b.u32(0);
+        b.text(nodeName);
+        b.u32(static_cast<std::uint32_t>(children.size()));
+        for (const auto c : children) {
+            b.u8(1);
+            b.u8(0);
+            b.u32(c);
+        }
+    }
+    void transform(const std::string& nodeName, const std::array<float, 7>& place) {
+        header("cTransformNode", 0x65246462, 7);
+        tree(nodeName, {});
+        for (const float v : place) {
+            b.f32(v);
+        }
+        b.u32(0x7FFFFFFF);
+    }
+};
+
+// The adult hair picture camera as the game's file has it: its place, then its lens among the values
+// after its render group.
+std::vector<std::uint8_t> pictureCameraNode() {
+    constexpr std::uint32_t kResourceNodeBlock = 0xE519C933, kViewerBlock = 0xDCA76DBB;
+    testres::Bytes b;
+    testres::container(b, {}, {kResourceNodeBlock, kViewerBlock});
+    NodeWriter w{b};
+    w.header("cResourceNode", kResourceNodeBlock, 7);
+    b.u8(1);
+    testres::sgResource(b, "camera_cres");
+    w.tree("camera_cres", {1});
+    w.header("cViewerRefNode", kViewerBlock, 14);
+    w.header("cViewerRefNodeBase", 0, 5);
+    w.header("cRenderableNode", 0, 5);
+    w.header("cBoundedNode", 0, 5);
+    w.transform("thumbnail", {bits(0x3EA4B519), bits(0x3F2DF33E), bits(0x3FE278B8), bits(0x3C16EAA3), bits(0xBCB3084D), bits(0x3F79D17A),
+                              bits(0x3E5E59A2)});
+    b.u16(0x0100);
+    b.u32(1);
+    b.text("Practical");
+    for (int i = 0; i < 41; ++i) {
+        b.u8(i == 4 || i == 40 ? 1 : 0);
+    }
+    for (const float v : {0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, bits(0x3C23D70A), 1000.0f, 1.0f, 0.0f, 1.0f, bits(0x3F291D96)}) {
+        b.f32(v);
+    }
+    return b.out;
+}
+
+// A light rig of light nodes: the key light where the game's rig has it, a light from below, a fill and the ambient.
+std::vector<std::uint8_t> pictureLightRig() {
+    constexpr std::uint32_t kResourceNodeBlock = 0xE519C933, kLightBlock = 0x253D2018;
+    testres::Bytes b;
+    testres::container(b, {}, {kResourceNodeBlock, kLightBlock, kLightBlock, kLightBlock, kLightBlock});
+    NodeWriter w{b};
+    w.header("cResourceNode", kResourceNodeBlock, 7);
+    b.u8(1);
+    testres::sgResource(b, "rig_cres");
+    w.tree("rig_cres", {1, 2, 3, 4});
+    auto light = [&](const std::string& name, const std::array<float, 7>& place) {
+        w.header("cLightRefNode", kLightBlock, 10);
+        w.header("cRenderableNode", 0, 5);
+        w.header("cBoundedNode", 0, 5);
+        w.transform(name, place);
+    };
+    light("casthumb_key", {0, 0, 6, bits(0xBE9DBF72), bits(0x3EB534D1), bits(0x3F2D2841), bits(0x3F115602)});
+    light("casthumb_z", {0, 0, 0.16f, 0, 1, 0, 0});
+    light("casthumb_fill", {0, 0, 4, 0, 0, 0, 1});
+    light("casthumb_ambient", {0, 0, -3, 0, 0, 0, 1});
+    return b.out;
+}
+
+} // namespace
+
+// A part picture's camera comes from its camera node and its lights from the light rig, with the
+// light files' intensities over the rig's own. The adult hair camera and key light give the view
+// and light the game draws hair pictures with.
+void partPicturesUseTheirCameraAndLights() {
+    using namespace ts2::scene;
+    const auto camera = sg::parseResourceNode(pictureCameraNode());
+    const auto rig = sg::parseResourceNode(pictureLightRig());
+    CHECK(camera.nodes.size() == 2 && camera.nodes[1].kind == sg::SceneNode::Kind::ViewerRef && camera.nodes[1].lens);
+    std::vector<sg::LightResource> lights(4);
+    lights[0] = {"cDirectionalLight", "casthumb_key", 0.075f, 1, {1, bits(0x3F7F0DE6), bits(0x3F71EB85)}};
+    lights[1] = {"cDirectionalLight", "casthumb_z", 0.8f, 1, {0.46f, 0.63f, 0.83f}};
+    lights[2] = {"cDirectionalLight", "casthumb_fill", 0.05f, 1, {0.85f, 0.91f, 1}};
+    lights[3] = {"cAmbientLight", "casthumb_ambient", 0.2f, 1, {1, 1, 1}};
+    const auto files = ts2::content::readLightingText("lightAttribOverride CASThumb_key intensity 0.99\n"
+                                                      "lightAttribOverride CASThumb_fill intensity 0\n"
+                                                      "lightAttribOverride CASThumb_ambient intensity 0.225\n");
+    const auto view = pictureView(camera, rig, lights, files);
+    CHECK(view.has_value());
+    if (!view) {
+        return;
+    }
+    auto near = [](float a, float b) { return std::fabs(a - b) < 2e-5f; };
+    // The game's view: its rows are the camera's right, ahead and up, and its last column takes the
+    // eye to the camera's origin.
+    const std::array<float, 3> right{-0.90553f, 0.42339f, 0.02747f}, ahead{-0.42419f, -0.90475f, -0.03865f}, up{0.00849f, -0.04665f, 0.99888f};
+    std::array<float, 3> look{};
+    for (int i = 0; i < 3; ++i) {
+        look[i] = view->target[i] - view->eye[i];
+    }
+    float origin[3] = {};
+    for (int i = 0; i < 3; ++i) {
+        origin[0] -= right[i] * view->eye[i];
+        origin[1] -= ahead[i] * view->eye[i];
+        origin[2] -= up[i] * view->eye[i];
+    }
+    CHECK(near(look[0], ahead[0]) && near(look[1], ahead[1]) && near(look[2], ahead[2]));
+    CHECK(near(view->up[0], up[0]) && near(view->up[1], up[1]) && near(view->up[2], up[2]));
+    CHECK(near(origin[0], -0.04499f) && near(origin[1], 0.81962f) && near(origin[2], -1.73835f));
+    // About 37.8 degrees from top to bottom, from a hundredth to a thousand.
+    CHECK(near(view->fovY, 0.66061f) && near(view->nearPlane, 0.01f) && view->farPlane == 1000);
+    // The key light at the game's intensity, toward it in the camera's space as the game lights.
+    CHECK(view->lighting.lights.size() == 1 && near(view->lighting.ambient[0], 0.225f) && view->lighting.thumbnailScale == 0.4f);
+    if (view->lighting.lights.size() == 1) {
+        const auto& key = view->lighting.lights[0];
+        float c[3] = {};
+        for (int i = 0; i < 3; ++i) {
+            c[0] += right[i] * key.direction[i];
+            c[1] += ahead[i] * key.direction[i];
+            c[2] += up[i] * key.direction[i];
+        }
+        CHECK(near(c[0], 0.37973f) && near(c[1], -0.76497f) && near(c[2], 0.52022f));
+        CHECK(near(key.color[0], 0.99f) && near(key.color[1], 0.98634f) && near(key.color[2], 0.93555f));
+    }
+    // A directional light resource holds its intensity, specular and colour.
+    testres::Bytes l;
+    testres::container(l, {}, {0xC9C81BA3});
+    NodeWriter lw{l};
+    lw.header("cDirectionalLight", 0, 1);
+    lw.header("cStandardLightBase", 0, 11);
+    testres::sgResource(l, "key_lght");
+    lw.header("cLightT", 0, 1);
+    testres::sgResource(l, "key_lght");
+    lw.header("cReferentNode", 0, 1);
+    lw.header("cObjectGraphNode", 0, 4);
+    l.u32(0);
+    l.u8(0);
+    l.text("casthumb_key");
+    for (const float v : {0.075f, 1.0f, 1.0f, 0.5f, 0.25f}) {
+        l.f32(v);
+    }
+    const auto keyLight = sg::parseLight(l.out);
+    CHECK(keyLight.kind == "cDirectionalLight" && keyLight.name == "casthumb_key" && keyLight.intensity == 0.075f);
+    CHECK((keyLight.color == std::array<float, 3>{1.0f, 0.5f, 0.25f}));
+    CHECK(pictureAge(1) == PictureAge::Toddler && pictureAge(4) == PictureAge::Teen && pictureAge(0x10) == PictureAge::Adult);
+    CHECK(picturePose(PictureAge::Teen) == "a-pose-neutral-stand-CAS" && picturePose(PictureAge::Child) == "c-pose-neutral-stand-CAS");
+}
+
 // A shape is drawn where its reference node sits in the model's tree.
 void shapesSitWhereTheirNodePutsThem() {
     auto resources = testres::squareModel("square");
@@ -818,7 +1195,11 @@ std::vector<Test> assetTests() {
         {"plant skin lies between skin and clothes", plantSkinLiesBetweenSkinAndClothes},
         {"sims wear the last hair, top, bottom and body", simsWearTheLastHairTopBottomAndBody},
         {"catalog queries match as the game's", catalogQueriesMatchAsTheGames},
+        {"outfits wear their version of a picked hair", outfitsWearTheirVersionOfAPickedHair},
         {"old everyday hairs and faces fit outerwear", oldEverydayHairsAndFacesFitOuterwear},
+        {"part products come from their copies", partProductsComeFromTheirCopies},
+        {"game sort leaves ties as the game", gameSortLeavesTiesAsTheGame},
+        {"binned parts follow the game's order", binnedPartsFollowTheGamesOrder},
         {"teens age into adults", teensAgeIntoAdults},
         {"made Sims wear their uniform", madeSimsWearTheirUniform},
         {"outfits are picked and put on", outfitsArePickedAndPutOn},
@@ -829,6 +1210,8 @@ std::vector<Test> assetTests() {
         {"saved joints move the model", savedJointsMoveTheModel},
         {"shapes sit where their node puts them", shapesSitWhereTheirNodePutsThem},
         {"imposter objects come from its resource node", imposterObjectsComeFromItsResourceNode},
+        {"a camera node keeps the nodes after it", aCameraNodeKeepsTheNodesAfterIt},
+        {"part pictures use their camera and lights", partPicturesUseTheirCameraAndLights},
         {"env cube reflection turns on as the game's", envCubeReflectionTurnsOnAsTheGames},
         {"specular turns on as the game's", specularTurnsOnAsTheGames},
         {"lot skirt meets the lot's edges", lotSkirtMeetsTheLotsEdges},
