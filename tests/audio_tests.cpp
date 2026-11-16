@@ -3,6 +3,7 @@
 #include "../app/audio_options_panel.hpp"
 #include "audio/audio_config.hpp"
 #include "audio/bank.hpp"
+#include "audio/custom_stations.hpp"
 #include "audio/manager.hpp"
 #include "audio/mix.hpp"
 #include "audio/mp3.hpp"
@@ -291,6 +292,21 @@ void musicTuningReadsItsValues() {
     readManagerTuning({{"2dMusicVolumeScalar", "0.75"}}, tuning);
     CHECK(near(tuning.musicVolume, 0.7f) && near(tuning.music2dScalar, 0.75f) && near(tuning.musicPriority, 128));
     CHECK(tuning.musicFadeOutMs == 3000 && near(tuning.musicMinDistance, 5) && near(tuning.musicMaxDistance, 64));
+}
+
+void customStationsReadAndWriteTheirFile() {
+    const std::vector<CustomStation> stations{{"Mine & more", {{0xFF82AD9E, 0xDEBFE7F5}, {0xFF4A6CF8, 0xA570A39F}}}, {"Empty", {}}};
+    const std::string xml = writeCustomStations(stations);
+    CHECK(xml.find("<Station Name=\"Mine &amp; more\">") != std::string::npos);
+    CHECK(xml.find("<Song ID1=\"0xff82ad9e\" ID2=\"0xdebfe7f5\"/>") != std::string::npos);
+    CHECK(xml.find("Empty") == std::string::npos);  // a station without songs is not written
+    const auto back = parseCustomStations(xml);
+    CHECK(back && back->size() == 1 && (*back)[0] == stations[0]);
+    // The ids may come in either order, with single quotes, and a song with a bad id is left out.
+    const auto loose = parseCustomStations("<?xml version=\"1.0\"?><!-- mine --><CustomStations><Station Name='A'><Songs>"
+                                           "<Song ID2='2' ID1='0x10'/><Song ID1='x' ID2='3'/><Song ID1='5'/></Songs></Station></CustomStations>");
+    CHECK(loose && loose->size() == 1 && (*loose)[0].songs.size() == 1 && (*loose)[0].songs[0] == (CustomSong{0x10, 2}));
+    CHECK(!parseCustomStations("<Other/>") && !parseCustomStations("") && parseCustomStations("<CustomStations></CustomStations>")->empty());
 }
 
 void songSettingsReadAndWriteTheirFile() {
@@ -683,6 +699,7 @@ std::vector<Test> audioTests() {
         {"dipping tuning reads its values", dippingTuningReadsItsValues},
         {"biquad filters pass their band", biquadFiltersPassTheirBand},
         {"music tuning reads its values", musicTuningReadsItsValues},
+        {"custom stations read and write their file", customStationsReadAndWriteTheirFile},
         {"song settings read and write their file", songSettingsReadAndWriteTheirFile},
         {"song titles are found by the hash of the default text", songTitlesAreFoundByTheHashOfTheDefaultText},
         {"a playlist plays every song before repeating", playlistPlaysEverySongBeforeRepeatingAndNeverTwiceInARow},
