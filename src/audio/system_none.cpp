@@ -28,6 +28,11 @@ void System::update() {}
 void System::startMusic(std::string_view) {}
 void System::pauseMusic(std::string_view) {}
 void System::fadeOutMusic(std::string_view, double) {}
+void System::setMusicFolder(const std::filesystem::path&) {}
+std::vector<std::string> System::musicStations(std::string_view) { return {}; }
+std::string System::musicTitle(std::string_view) { return {}; }
+std::vector<MusicSong> System::musicSongs(std::string_view) { return {}; }
+void System::setSongOn(std::string_view, std::uint32_t, bool) {}
 std::uint32_t System::playUi(std::string_view) { return 0; }
 std::uint32_t System::playUiId(std::uint32_t) { return 0; }
 void System::stop(std::uint32_t) {}

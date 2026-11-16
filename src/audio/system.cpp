@@ -4,6 +4,7 @@
 #include "audio/manager.hpp"
 #include "audio/mp3.hpp"
 #include "audio/music.hpp"
+#include "audio/song_settings.hpp"
 #include "audio/spx.hpp"
 #include "audio/xa.hpp"
 #include "diag/log.hpp"
@@ -13,10 +14,13 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <deque>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -154,6 +158,12 @@ struct System::Impl {
         std::uint32_t id = 0;
     };
     std::map<std::string, MusicState> music;
+    // The songs that are off, by station name in lowercase, read from the station's settings file when first needed.
+    std::filesystem::path musicFolder;
+    std::map<std::string, SongSettings> songSettings;
+    SongSettings& settingsOf(const std::string& station);
+    std::vector<SampleKey> playableSongs(std::string_view station);
+    void saveSettings(const std::string& station);
     // The stereos playing a station, one per object: each plays its station's songs one after another.
     struct StereoPlay {
         Request request;
@@ -424,6 +434,70 @@ std::uint32_t System::Impl::startTrack(const Request& request, std::string_view 
     return *id;
 }
 
+namespace {
+
+std::string lowerCase(std::string_view text) {
+    std::string out(text);
+    for (char& c : out) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return out;
+}
+
+constexpr std::uintmax_t kMaxSettingsBytes = 1u << 20;
+
+} // namespace
+
+SongSettings& System::Impl::settingsOf(const std::string& station) {
+    const auto found = songSettings.find(station);
+    if (found != songSettings.end()) {
+        return found->second;
+    }
+    SongSettings settings;
+    std::error_code error;
+    const std::filesystem::path file = musicFolder / station / "settings";
+    if (!musicFolder.empty() && std::filesystem::exists(file, error) && std::filesystem::file_size(file, error) <= kMaxSettingsBytes) {
+        std::ifstream in(file, std::ios::binary);
+        const std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        if (auto read = parseSongSettings(bytes)) {
+            settings = std::move(*read);
+        } else {
+            diag::warnOnce("audio: the settings file of station " + station + " is not readable, so all its songs play");
+        }
+    }
+    return songSettings.emplace(station, std::move(settings)).first->second;
+}
+
+std::vector<SampleKey> System::Impl::playableSongs(std::string_view station) {
+    const SongSettings& settings = settingsOf(lowerCase(station));
+    std::vector<SampleKey> out;
+    for (const SampleKey& song : bank.songs(station)) {
+        if (settings.enabled(bank.songId(song))) {
+            out.push_back(song);
+        }
+    }
+    return out;
+}
+
+// The file lists every song of the station, so a song a pack adds later shows up as on.
+void System::Impl::saveSettings(const std::string& station) {
+    if (musicFolder.empty()) {
+        return;
+    }
+    SongSettings& settings = settingsOf(station);
+    for (const SampleKey& song : bank.songs(station)) {
+        settings.songs.emplace(bank.songId(song), true);
+    }
+    std::error_code error;
+    std::filesystem::create_directories(musicFolder / station, error);
+    std::ofstream out(musicFolder / station / "settings", std::ios::binary | std::ios::trunc);
+    const auto bytes = writeSongSettings(settings);
+    out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    if (!out) {
+        diag::warnOnce("audio: the settings file of station " + station + " cannot be saved");
+    }
+}
+
 void System::Impl::updateMusic() {
     for (auto& [category, state] : music) {
         if (state.id != 0 && !manager.playing(state.id)) {
@@ -433,10 +507,9 @@ void System::Impl::updateMusic() {
             continue;
         }
         if (!state.playlist) {
-            state.playlist.emplace(std::vector<SampleKey>(bank.songs(category).begin(), bank.songs(category).end()),
-                                   static_cast<std::uint32_t>(std::hash<std::string>{}(category)));
+            state.playlist.emplace(playableSongs(category), static_cast<std::uint32_t>(std::hash<std::string>{}(category)));
             if (state.playlist->empty()) {
-                diag::warnOnce("audio: no songs for music category " + category);
+                diag::warnOnce("audio: no songs to play for music category " + category);
             }
         }
         if (state.playlist->empty()) {
@@ -467,9 +540,9 @@ void System::Impl::startStereo(const Event& event) {
     // The station is what follows "stereo_". The wall speakers take the nearest stereo's station
     // and are not played yet.
     const std::string station = event.name.substr(7);
-    const std::span<const SampleKey> songs = bank.songs(station);
+    const std::vector<SampleKey> songs = playableSongs(station);
     if (songs.empty()) {
-        diag::warnOnce("audio: no songs for station " + station);
+        diag::warnOnce("audio: no songs to play for station " + station);
         return;
     }
     // A stereo plays one station: choosing another replaces it.
@@ -493,7 +566,7 @@ void System::Impl::startStereo(const Event& event) {
         request.hipass = 3500;
     }
     const std::uint32_t seed = static_cast<std::uint32_t>(std::hash<std::string>{}(station)) ^ static_cast<std::uint32_t>(event.object);
-    stereos.push_back({request, Playlist(std::vector<SampleKey>(songs.begin(), songs.end()), seed), 0, 0});
+    stereos.push_back({request, Playlist(songs, seed), 0, 0});
 }
 
 void System::Impl::updateStereos() {
@@ -544,6 +617,57 @@ void System::addInstall(const std::filesystem::path& installRoot) {
         }
         impl->loaded = true;
     });
+}
+
+void System::setMusicFolder(const std::filesystem::path& folder) {
+    impl_->musicFolder = folder;
+    impl_->songSettings.clear();
+}
+
+std::vector<std::string> System::musicStations(std::string_view category) {
+    std::vector<std::string> out;
+    if (!impl_->started) {
+        return out;
+    }
+    const std::string wanted = lowerCase(category);
+    for (const auto& [name, pool] : impl_->bank.categories()) {
+        if (wanted.empty() ? pool.size() == 1 && lowerCase(pool[0]) == lowerCase(name) : lowerCase(name) == wanted) {
+            out.insert(out.end(), pool.begin(), pool.end());
+        }
+    }
+    return out;
+}
+
+std::string System::musicTitle(std::string_view station) {
+    return impl_->started ? impl_->bank.songTitle(soundKey(station).instance, 1) : std::string();
+}
+
+std::vector<MusicSong> System::musicSongs(std::string_view station) {
+    std::vector<MusicSong> out;
+    if (!impl_->started) {
+        return out;
+    }
+    const SongSettings& settings = impl_->settingsOf(lowerCase(station));
+    for (const SampleKey& song : impl_->bank.songs(station)) {
+        const std::uint32_t id = impl_->bank.songId(song);
+        out.push_back({id, impl_->bank.songTitle(id, 1), settings.enabled(id)});
+    }
+    return out;
+}
+
+void System::setSongOn(std::string_view station, std::uint32_t id, bool on) {
+    if (!impl_->started) {
+        return;
+    }
+    const std::string name = lowerCase(station);
+    impl_->settingsOf(name).songs[id] = on;
+    impl_->saveSettings(name);
+    // The station's next song comes from the new list.
+    for (auto& [category, state] : impl_->music) {
+        if (lowerCase(category) == name) {
+            state.playlist.reset();
+        }
+    }
 }
 
 bool System::ready() const {

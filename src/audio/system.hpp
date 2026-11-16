@@ -14,8 +14,16 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace ts2::audio {
+
+// One song of a station, as the options list it.
+struct MusicSong {
+    std::uint32_t id = 0;
+    std::string title;
+    bool on = true;
+};
 
 // A sound event of the simulation: a Play Sound primitive or an animation's sound mark.
 struct Event {
@@ -67,6 +75,19 @@ public:
     void pauseMusic(std::string_view category);
     // Fades the state's song out over `ms` and ends it; the next startMusic begins a new song.
     void fadeOutMusic(std::string_view category, double ms);
+
+    // Music/ under the user's folder: each station's folder there keeps a `settings` file naming the songs
+    // that are off. Set before the first music starts.
+    void setMusicFolder(const std::filesystem::path& folder);
+    // The stations a music category draws on (a mode such as "buy" lists several, a station only itself), and
+    // with no category every station a stereo plays. Empty until indexing is done.
+    [[nodiscard]] std::vector<std::string> musicStations(std::string_view category);
+    // A station's name as the player reads it, empty when the titles have none.
+    [[nodiscard]] std::string musicTitle(std::string_view station);
+    // The station's songs in the order the packages list them, with their titles. Empty until indexing is done.
+    [[nodiscard]] std::vector<MusicSong> musicSongs(std::string_view station);
+    // Turns one of the station's songs on or off and saves its settings file. A song that is off is not played.
+    void setSongOn(std::string_view station, std::uint32_t id, bool on);
 
     // A UI sound by name, or by the track id a UI script names (btnclicksnd). Its id, 0 when it
     // does not play.

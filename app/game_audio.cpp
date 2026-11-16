@@ -44,6 +44,9 @@ void Game::ensureAudio() {
     }
     audio_ = std::make_unique<ts2::audio::System>();
     audio_->addInstall(install_);
+    audio_->setMusicFolder(options_.user / "Music");
+    lotUi_.audioOptions().setMusic(audio_.get());
+    hoodUi_.audioOptions().setMusic(audio_.get());
     // --mute leaves the mixer running, so the options' levels still apply behind it.
     audio_->setMuted(options_.mute);
     applyAudioOptions();

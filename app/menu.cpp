@@ -2760,7 +2760,7 @@ void Game::handleEvent(const pf::Event& e) {
         if (e.type == pf::Event::Type::MouseDown && e.button == pf::MouseButton::Left && graphics.mouseDown(ux, uy)) {
             return;
         }
-        if (e.type == pf::Event::Type::MouseWheel && e.wheel != 0 && graphics.wheel(ux, uy, e.wheel < 0 ? -1 : 1)) {
+        if (e.type == pf::Event::Type::MouseWheel && e.wheel != 0 && (graphics.wheel(ux, uy, e.wheel < 0 ? -1 : 1) || audio.wheel(ux, uy, e.wheel < 0 ? -1 : 1))) {
             return;
         }
     }
