@@ -196,6 +196,12 @@ void readMusicTuning(const std::map<std::string, std::string>& properties, Tunin
     if (const auto v = find(properties, "defaultmusicvolume")) {
         tuning.musicVolume = clampedFloat(*v, 0, 1);
     }
+    if (const auto v = find(properties, "musicmindistance")) {
+        tuning.musicMinDistance = clampedFloat(*v, 0, 1e6);
+    }
+    if (const auto v = find(properties, "musicmaxdistance")) {
+        tuning.musicMaxDistance = clampedFloat(*v, 0, 1e6);
+    }
     if (const auto v = find(properties, "musicpriority")) {
         tuning.musicPriority = clampedFloat(*v, 0, 1e6);
     }

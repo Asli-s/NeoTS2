@@ -56,6 +56,21 @@ int chanceRoll(int draw);
 // Whether a track with that chance (in percent) plays for a roll. A chance of 0 always plays.
 bool chancePlays(std::uint32_t chance, int roll);
 
+// A second-order Butterworth filter, one per channel of a voice. A cutoff of 0 or past the Nyquist
+// frequency leaves the sound as it is.
+struct Biquad {
+    float b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
+    float z1 = 0, z2 = 0;
+    static Biquad lowpass(float hz, float sampleRate);
+    static Biquad highpass(float hz, float sampleRate);
+    float process(float x) {
+        const float y = b0 * x + z1;
+        z1 = b1 * x - a1 * y + z2;
+        z2 = b2 * x - a2 * y;
+        return y;
+    }
+};
+
 // The random draws the play chance and sample choice take: 0 to 32767, the same series for the
 // same seed. NeoTS2's own, as the game's seed is not known.
 class AudioRandom {

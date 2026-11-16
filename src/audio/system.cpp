@@ -64,6 +64,8 @@ struct MixVoice {
     bool ended = false;
     std::array<EarGains, 3> gains{};  // mono, stereo left channel, stereo right channel
     std::array<EarGains, 3> lastGains{};
+    bool filtered = false;
+    std::array<Biquad, 2> lowpass, highpass;  // by source channel
 };
 
 EarGains lerp(const EarGains& a, const EarGains& b, float t) {
@@ -95,13 +97,20 @@ void mixVoice(MixVoice& v, float* out, std::size_t frames) {
             return static_cast<float>(pcm.samples[frame * channels + channel]);
         };
         if (channels == 1) {
-            const float s = sample(a, 0) + (sample(b, 0) - sample(a, 0)) * t;
+            float s = sample(a, 0) + (sample(b, 0) - sample(a, 0)) * t;
+            if (v.filtered) {
+                s = v.lowpass[0].process(v.highpass[0].process(s));
+            }
             const EarGains g = lerp(v.lastGains[0], v.gains[0], ramp);
             out[i * 2] += s * g.left;
             out[i * 2 + 1] += s * g.right;
         } else {
-            const float l = sample(a, 0) + (sample(b, 0) - sample(a, 0)) * t;
-            const float r = sample(a, 1) + (sample(b, 1) - sample(a, 1)) * t;
+            float l = sample(a, 0) + (sample(b, 0) - sample(a, 0)) * t;
+            float r = sample(a, 1) + (sample(b, 1) - sample(a, 1)) * t;
+            if (v.filtered) {
+                l = v.lowpass[0].process(v.highpass[0].process(l));
+                r = v.lowpass[1].process(v.highpass[1].process(r));
+            }
             const EarGains gl = lerp(v.lastGains[1], v.gains[1], ramp);
             const EarGains gr = lerp(v.lastGains[2], v.gains[2], ramp);
             out[i * 2] += l * gl.left + r * gr.left;
@@ -145,6 +154,14 @@ struct System::Impl {
         std::uint32_t id = 0;
     };
     std::map<std::string, MusicState> music;
+    // The stereos playing a station, one per object: each plays its station's songs one after another.
+    struct StereoPlay {
+        Request request;
+        Playlist playlist;
+        std::uint32_t id = 0;
+        double retryAtMs = 0;
+    };
+    std::vector<StereoPlay> stereos;
     std::chrono::steady_clock::time_point lastUpdate = now();
     std::chrono::steady_clock::time_point startTime = now();
 
@@ -166,6 +183,8 @@ struct System::Impl {
     void trimCache();
     void syncMixer(const std::vector<Manager::Output>& outputs);
     void updateMusic();
+    void updateStereos();
+    void startStereo(const Event& event);
     std::uint32_t startTrack(const Request& request, std::string_view name);
     static void SDLCALL feed(void* userdata, SDL_AudioStream* stream, int additional, int total);
 };
@@ -369,6 +388,11 @@ void System::Impl::syncMixer(const std::vector<Manager::Output>& outputs) {
             voice.pcm = slotPcm[slot].get();
             voice.id = output.id;
             voice.loop = instance->settings.looping;
+            voice.filtered = instance->request.lopass > 0 || instance->request.hipass > 0;
+            for (std::size_t channel = 0; channel < 2; ++channel) {
+                voice.lowpass[channel] = Biquad::lowpass(instance->request.lopass, kOutputRate);
+                voice.highpass[channel] = Biquad::highpass(instance->request.hipass, kOutputRate);
+            }
             voice.gains = voice.lastGains = {output.mono, output.stereo[0], output.stereo[1]};
             voice.advancing = output.advancing;
             voice.step = static_cast<double>(voice.pcm->sampleRate) / kOutputRate * output.pitch;
@@ -439,6 +463,70 @@ void System::Impl::updateMusic() {
     }
 }
 
+void System::Impl::startStereo(const Event& event) {
+    // The station is what follows "stereo_". The wall speakers take the nearest stereo's station
+    // and are not played yet.
+    const std::string station = event.name.substr(7);
+    const std::span<const SampleKey> songs = bank.songs(station);
+    if (songs.empty()) {
+        diag::warnOnce("audio: no songs for station " + station);
+        return;
+    }
+    // A stereo plays one station: choosing another replaces it.
+    std::erase_if(stereos, [&](const StereoPlay& play) {
+        if (play.request.object != event.object) {
+            return false;
+        }
+        manager.stop(play.id);
+        return true;
+    });
+    Request request;
+    request.track = soundKey(event.name);
+    request.event = request.track;
+    request.object = event.object;
+    request.group = Group::Stereo;
+    request.position = event.position;
+    // A cheap stereo plays through a narrow band, as the game's does (inferred: the game's quality
+    // names are "cheap" and "exp", and an object's quality string is "chp" or "exp").
+    if (event.inputs.quality && (*event.inputs.quality == "chp" || *event.inputs.quality == "cheap")) {
+        request.lopass = 8500;
+        request.hipass = 3500;
+    }
+    const std::uint32_t seed = static_cast<std::uint32_t>(std::hash<std::string>{}(station)) ^ static_cast<std::uint32_t>(event.object);
+    stereos.push_back({request, Playlist(std::vector<SampleKey>(songs.begin(), songs.end()), seed), 0, 0});
+}
+
+void System::Impl::updateStereos() {
+    const Tuning& tuning = bank.tuning();
+    TrackSettings settings;
+    settings.positional = true;
+    settings.minDistance = tuning.musicMinDistance;
+    settings.maxDistance = tuning.musicMaxDistance;
+    settings.volume = tuning.musicVolume;
+    settings.priority = tuning.musicPriority;
+    settings.fadeOutMs = tuning.musicFadeOutMs;
+    settings.keepPlaying = true;
+    for (StereoPlay& play : stereos) {
+        if (play.id != 0 && !manager.playing(play.id)) {
+            play.id = 0;
+        }
+        if (play.id != 0 || nowMs() < play.retryAtMs) {
+            continue;
+        }
+        const SampleKey song = play.playlist.take();
+        if (const auto id = manager.start(play.request, settings, std::span<const SampleKey>(&song, 1), nowMs())) {
+            play.id = *id;
+            diag::info("audio: stereo on object " + std::to_string(play.request.object) + " plays a song" +
+                       (play.request.lopass > 0 ? " (cheap)" : ""));
+            askDecode(song);
+            askDecode(play.playlist.upcoming());
+        } else {
+            // Dropped (no voice, say): try again in a second, not on every frame.
+            play.retryAtMs = nowMs() + 1000;
+        }
+    }
+}
+
 System::System() : impl_(std::make_unique<Impl>()) {}
 System::~System() = default;
 
@@ -474,6 +562,9 @@ void System::play(const Event& event) {
     const std::string_view name = event.name;
     // A start of "stop_<name>" stops, under the full name as written.
     if (event.stop || name.starts_with("stop_")) {
+        std::erase_if(impl_->stereos, [&](const Impl::StereoPlay& play) {
+            return play.request.event == soundKey(name) && play.request.object == event.object;
+        });
         impl_->manager.stopEvent(soundKey(name), event.object);
         return;
     }
@@ -483,7 +574,12 @@ void System::play(const Event& event) {
         return;
     }
     if (name == "stopallsounds") {
+        impl_->stereos.clear();
         impl_->manager.stopAll();
+        return;
+    }
+    if (name.starts_with("stereo_") && name != "stereo_wall_speaker") {
+        impl_->startStereo(event);
         return;
     }
     const std::uint32_t mask = eventMask(name, impl_->bank.listedMask(name));
@@ -498,10 +594,12 @@ void System::play(const Event& event) {
 }
 
 void System::stopObject(std::int16_t object) {
+    std::erase_if(impl_->stereos, [object](const Impl::StereoPlay& play) { return play.request.object == object; });
     impl_->manager.stopObject(object);
 }
 
 void System::stopAll() {
+    impl_->stereos.clear();
     impl_->manager.stopAll();
 }
 
@@ -579,6 +677,7 @@ void System::update() {
         }
     }
     impl.updateMusic();
+    impl.updateStereos();
     impl.syncMixer(impl.manager.update(elapsed));
 }
 

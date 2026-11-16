@@ -283,10 +283,12 @@ void cinematicDippingFadesAndComesBack() {
 
 void musicTuningReadsItsValues() {
     Tuning tuning;
-    readMusicTuning({{"defaultmusicvolume", ".7"}, {"musicpriority", "128"}, {"trackfadeouttime", "3000"}}, tuning);
+    readMusicTuning({{"defaultmusicvolume", ".7"}, {"musicpriority", "128"}, {"trackfadeouttime", "3000"},
+                     {"musicmindistance", "5"}, {"musicmaxdistance", "64"}},
+                    tuning);
     readManagerTuning({{"2dMusicVolumeScalar", "0.75"}}, tuning);
     CHECK(near(tuning.musicVolume, 0.7f) && near(tuning.music2dScalar, 0.75f) && near(tuning.musicPriority, 128));
-    CHECK(tuning.musicFadeOutMs == 3000);
+    CHECK(tuning.musicFadeOutMs == 3000 && near(tuning.musicMinDistance, 5) && near(tuning.musicMaxDistance, 64));
 }
 
 void playlistPlaysEverySongBeforeRepeatingAndNeverTwiceInARow() {
@@ -332,6 +334,29 @@ void oneSoundPausesAndFadesOut() {
     CHECK(out.size() == 1 && near(out[0].mono.left, centre * 0.5f, 1e-3f));
     out = manager.update(600);
     CHECK(out.empty() && manager.find(*id) == nullptr);
+}
+
+void biquadFiltersPassTheirBand() {
+    // A tone of one frequency through a filter, as the loudness of what is left once it has settled.
+    const auto level = [](Biquad filter, float hz) {
+        float peak = 0;
+        for (int i = 0; i < 4800; ++i) {
+            const float out = filter.process(std::sin(2 * std::numbers::pi_v<float> * hz * static_cast<float>(i) / 48000.0f));
+            if (i > 2400) {
+                peak = std::max(peak, std::fabs(out));
+            }
+        }
+        return peak;
+    };
+    // The cheap stereo's band: low-pass 8500 Hz, high-pass 3500 Hz.
+    CHECK(level(Biquad::lowpass(8500, 48000), 200) > 0.98f);
+    CHECK(near(level(Biquad::lowpass(8500, 48000), 8500), 0.7071f, 0.02f));
+    CHECK(level(Biquad::lowpass(8500, 48000), 20000) < 0.2f);
+    CHECK(level(Biquad::highpass(3500, 48000), 200) < 0.01f);
+    CHECK(near(level(Biquad::highpass(3500, 48000), 3500), 0.7071f, 0.02f));
+    CHECK(level(Biquad::highpass(3500, 48000), 15000) > 0.95f);
+    // A cutoff of 0 leaves the sound as it is.
+    CHECK(near(level(Biquad::lowpass(0, 48000), 1000), 1, 1e-4f) && near(level(Biquad::highpass(0, 48000), 1000), 1, 1e-4f));
 }
 
 void dippingTuningReadsItsValues() {
@@ -605,6 +630,7 @@ std::vector<Test> audioTests() {
         {"group volumes, mutes and dipping scale the mix", groupVolumesMutesAndDippingScaleTheMix},
         {"cinematic dipping fades and comes back", cinematicDippingFadesAndComesBack},
         {"dipping tuning reads its values", dippingTuningReadsItsValues},
+        {"biquad filters pass their band", biquadFiltersPassTheirBand},
         {"music tuning reads its values", musicTuningReadsItsValues},
         {"a playlist plays every song before repeating", playlistPlaysEverySongBeforeRepeatingAndNeverTwiceInARow},
         {"one sound pauses and fades out", oneSoundPausesAndFadesOut},

@@ -97,6 +97,8 @@ struct Tuning {
     float musicVolume = 0.7f;
     float music2dScalar = 0.75f;
     float musicPriority = 128;
+    float musicMinDistance = 5;
+    float musicMaxDistance = 64;
     std::uint32_t musicFadeOutMs = 3000;
 };
 

@@ -22,6 +22,8 @@ struct Request {
     std::int16_t object = 0;  // the object it plays on, 0 for none
     Group group = Group::Sfx;
     std::optional<Vec3> position;  // where its object is, none for no place
+    float lopass = 0;  // filter cutoffs in Hz, 0 for none
+    float hipass = 0;
 };
 
 // Why a request did not start, for the log.
