@@ -490,9 +490,9 @@ void spxReadsItsHeaderAndRejectsBadResources() {
 }
 
 void sliderThumbsAreTheirShareOfTheTrack() {
-    // The volume bars (0 to 100, 5 shown) get the two caps; Audio Quality (1 to 4) a quarter.
+    // The volume bars (0 to 100, 5 shown) get the two caps; Audio Quality (1 to 4, 1 shown) a third.
     CHECK(app::AudioOptionsPanel::thumbLength(236, 105, 5, 9) == 18);
-    CHECK(app::AudioOptionsPanel::thumbLength(236, 4, 1, 9) == 59);
+    CHECK(app::AudioOptionsPanel::thumbLength(236, 3, 1, 9) == 78);
     CHECK(app::AudioOptionsPanel::thumbLength(10, 105, 5, 9) == 10);
 }
 

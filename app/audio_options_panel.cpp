@@ -17,24 +17,29 @@ namespace {
 
 constexpr std::uint32_t kScripts = 0xA99D8A11, kAudioOptions = 0x49060F01;
 constexpr std::uint32_t kMenuButton = 0x0000A242;
-// Voices, effects, music, ambience.
-constexpr std::array<std::uint32_t, 4> kSliders{0x00000B31, 0x00000B01, 0x00000B41, 0x00000B21};
+// Voices, effects, music, ambience, then Audio Quality.
+constexpr std::array<std::uint32_t, 5> kSliders{0x00000B31, 0x00000B01, 0x00000B41, 0x00000B21, 0x00000B11};
+constexpr std::size_t kQualitySlider = 4;
 constexpr std::array<std::uint32_t, 4> kMutes{0x00000010, 0x00000011, 0x00000012, 0x00000013};
-// Drawn but not wired up.
-constexpr std::uint32_t kQuality = 0x00000B11;
+// The Speakers radios (Stereo, 4.0, 5.1) and the value each saves as SoundOutputMode.
+constexpr std::array<std::uint32_t, 3> kSpeakers{0x00000A01, 0x00000A03, 0x00000A04};
+constexpr std::array<const char*, 3> kSpeakerModes{"stereo", "4.0", "5.1"};
 // Track and thumb pictures named by the panel's script.
 constexpr std::uint32_t kPictures = 0x499DB772, kTrack = 0xE9F50515, kThumb = 0xE9F50510;
 // Track and thumb are drawn in three slices, caps a quarter of the 36 px width. The thumb picture stacks
 // four frames: disabled, normal, hover, pressed.
 constexpr int kPictureWidth = 36, kBarHeight = 12, kCap = kPictureWidth / 4;
 constexpr int kNormalFrame = 1, kHoverFrame = 2, kPressedFrame = 3;
-// Scroll-bar values from the script: volumes 0-100 with 5 shown, quality 1-4 with 1 shown. The thumb is
+// Scroll-bar values from the script: volumes 0-100 with 5 shown, quality 1-4 with 1 shown, so quality has
+// three places (1, 2 and 3: Low, Medium and High, the numbers Graphics Rules gives them). The thumb is
 // shown/rows of the track, at least two caps.
-constexpr int kVolumeRows = 105, kVolumeShown = 5, kQualityRows = 4, kQualityShown = 1;
+constexpr int kVolumeRows = 105, kVolumeShown = 5, kQualityRows = 3, kQualityShown = 1;
+// Audio Quality is the game's SoundQuality option, saved as its setting number like the other options.
+constexpr const char* kQualityKey = "optionSoundQuality";
 constexpr std::array<const char*, 4> kVolumeKeys{"VOXVolume", "FXVolume", "MusicVolume", "AmbienceVolume"};
 constexpr std::array<const char*, 4> kMuteKeys{"SoundMasterGroupVoxEnabled", "SoundMasterGroupFXEnabled",
                                                "SoundMasterGroupMusicEnabled", "SoundMasterGroupAmbienceEnabled"};
-constexpr std::string_view kNotWorking = "Not working in NeoTS2 yet. The choice is saved, but changes nothing.";
+constexpr std::string_view kStillStereo = "NeoTS2 plays in stereo for now. The choice is saved.";
 
 bool readBool(const std::string& text, bool& out) {
     if (text == "true") {
@@ -57,9 +62,20 @@ void AudioOptionsPanel::readSettings(const std::filesystem::path& install, const
     if (const auto file = ts2::content::newestDataFile(ts2::content::findProducts(install), "Res/Config/globalProps.xml")) {
         defaults_ = ts2::content::readPropsFile(*file).values;
     }
-    for (std::size_t i = 0; i < volume_.size(); ++i) {
+    for (std::size_t i = 0; i < kVolumeKeys.size(); ++i) {
         volume_[i] = static_cast<float>(std::clamp(number(kVolumeKeys[i], 100), 0, 100)) / 100.0f;
         muted_[i] = !flag(kMuteKeys[i], true);
+    }
+    // Without a saved quality it stays at what globalProps.xml's AudioPerformance (0 to 2) says.
+    const int quality = std::clamp(number(kQualityKey, number("AudioPerformance", 1) + 1), 1, 3);
+    volume_[kQualitySlider] = static_cast<float>(quality - 1) / 2.0f;
+    speakers_ = 0;
+    if (const auto it = saved_.find("SoundOutputMode"); it != saved_.end()) {
+        for (std::size_t i = 0; i < kSpeakerModes.size(); ++i) {
+            if (it->second == kSpeakerModes[i]) {
+                speakers_ = static_cast<int>(i);
+            }
+        }
     }
 }
 
@@ -69,6 +85,7 @@ void AudioOptionsPanel::takeSettings(const AudioOptionsPanel& other) {
     defaults_ = other.defaults_;
     volume_ = other.volume_;
     muted_ = other.muted_;
+    speakers_ = other.speakers_;
     showValues();
 }
 
@@ -135,16 +152,20 @@ void AudioOptionsPanel::load() {
     menu_.place(panel_);
     for (std::size_t i = 0; i < sliders_.size(); ++i) {
         sliders_[i] = screen_.find(panel_, kSliders[i]);
-        muteButtons_[i] = screen_.find(panel_, kMutes[i]);
+        if (i < muteButtons_.size()) {
+            muteButtons_[i] = screen_.find(panel_, kMutes[i]);
+        }
         if (sliders_[i] < 0) {
             continue;
         }
-        thumbs_[i] = addSlider(sliders_[i], kVolumeRows, kVolumeShown, thumbLength_[i]);
+        const bool quality = i == kQualitySlider;
+        thumbs_[i] = addSlider(sliders_[i], quality ? kQualityRows : kVolumeRows, quality ? kQualityShown : kVolumeShown, thumbLength_[i]);
     }
-    if (const int quality = screen_.find(panel_, kQuality); quality >= 0) {
-        int length = 0;
-        addSlider(quality, kQualityRows, kQualityShown, length);
-        screen_.setTip(quality, std::string(kNotWorking));
+    for (std::size_t i = 0; i < speakerButtons_.size(); ++i) {
+        speakerButtons_[i] = screen_.find(panel_, kSpeakers[i]);
+        if (i > 0 && speakerButtons_[i] >= 0) {
+            screen_.setTip(speakerButtons_[i], std::string(kStillStereo));
+        }
     }
     showValues();
 }
@@ -160,6 +181,7 @@ void AudioOptionsPanel::remove() {
     hover_ = -1;
     dragging_ = -1;
     muteButtons_ = {-1, -1, -1, -1};
+    speakerButtons_ = {-1, -1, -1};
 }
 
 int AudioOptionsPanel::thumbX(int group) const {
@@ -192,8 +214,13 @@ void AudioOptionsPanel::showValues() {
             screen_.move(thumbs_[i][1], x + kCap, 0);
             screen_.move(thumbs_[i][2], x + length - kCap, 0);
         }
-        if (muteButtons_[i] >= 0) {
+        if (i < muteButtons_.size() && muteButtons_[i] >= 0) {
             screen_.setChecked(muteButtons_[i], muted_[i]);
+        }
+    }
+    for (std::size_t i = 0; i < speakerButtons_.size(); ++i) {
+        if (speakerButtons_[i] >= 0) {
+            screen_.setChecked(speakerButtons_[i], static_cast<int>(i) == speakers_);
         }
     }
 }
@@ -227,6 +254,17 @@ bool AudioOptionsPanel::clicked(int window) {
             showValues();
             changed_ = true;
             saveMute(static_cast<int>(i));
+            return true;
+        }
+    }
+    for (std::size_t i = 0; i < speakerButtons_.size(); ++i) {
+        if (window == speakerButtons_[i]) {
+            speakers_ = static_cast<int>(i);
+            showValues();
+            changed_ = true;
+            if (!ts2::content::saveUserString(userFolder_, "SoundOutputMode", kSpeakerModes[i])) {
+                ts2::diag::warnOnce("audio options: the speaker choice could not be saved to userProps.xml");
+            }
             return true;
         }
     }
@@ -299,7 +337,9 @@ void AudioOptionsPanel::setFromX(int group, int x) {
     const int left = screen_.position(sliders_[group])[0];
     const int room = std::max(1, screen_.width(sliders_[group]) - thumbLength_[group]);
     const float value = std::clamp(static_cast<float>(x - grab_ - left) / static_cast<float>(room), 0.0f, 1.0f);
-    const float rounded = std::round(value * 100.0f) / 100.0f;
+    // Volumes go in whole percents, Audio Quality in its three places.
+    const float steps = group == static_cast<int>(kQualitySlider) ? 2.0f : 100.0f;
+    const float rounded = std::round(value * steps) / steps;
     if (rounded == volume_[group]) {
         return;
     }
@@ -309,6 +349,12 @@ void AudioOptionsPanel::setFromX(int group, int x) {
 }
 
 void AudioOptionsPanel::saveVolume(int group) {
+    if (group == static_cast<int>(kQualitySlider)) {
+        if (!ts2::content::saveUserProps(userFolder_, {{kQualityKey, {std::to_string(quality()), false}}})) {
+            ts2::diag::warnOnce("audio options: the sound quality could not be saved to userProps.xml");
+        }
+        return;
+    }
     const std::string value = std::to_string(std::lround(volume_[group] * 100.0f));
     if (!ts2::content::saveUserProps(userFolder_, {{kVolumeKeys[group], {value, false}}})) {
         ts2::diag::warnOnce("audio options: a level could not be saved to userProps.xml");

@@ -5,14 +5,15 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <filesystem>
 #include <map>
 #include <string>
 
 namespace app {
 
-// The Audio Options panel (script 0x49060F01): a volume slider and mute box per mixer group, saved to
-// Config/userProps.xml under the game's own keys as they change. The Audio Quality slider does nothing yet.
+// The Audio Options panel (script 0x49060F01): a volume slider and mute box per mixer group, the Audio Quality
+// slider and the Speakers choice, saved to Config/userProps.xml under the game's own keys as they change.
 class AudioOptionsPanel {
 public:
     AudioOptionsPanel(ts2::ui::Screen& screen, OptionsMenu& menu) : screen_(screen), menu_(menu) {}
@@ -38,7 +39,10 @@ public:
     bool holdsMouse() const { return dragging_ >= 0; }
     bool takeChanged();
 
-    std::array<float, 4> volumes() const { return volume_; }
+    std::array<float, 4> volumes() const { return {volume_[0], volume_[1], volume_[2], volume_[3]}; }
+    // The Audio Quality: 1 Low, 2 Medium, 3 High (the game's SoundQuality setting). The mixer's performance
+    // level is one less.
+    int quality() const { return 1 + static_cast<int>(std::lround(volume_[4] * 2)); }
     std::array<bool, 4> mutes() const { return muted_; }
 
 private:
@@ -57,11 +61,14 @@ private:
     ts2::ui::Screen& screen_;
     OptionsMenu& menu_;
     int panel_ = -1;
-    std::array<int, 4> sliders_{-1, -1, -1, -1};
-    std::array<std::array<int, 3>, 4> thumbs_{};  // each thumb's left cap, middle and right cap
-    std::array<int, 4> thumbLength_{};
+    // The four volume sliders, then the Audio Quality one: its "volume" is where the thumb sits, 0, 0.5 or 1.
+    std::array<int, 5> sliders_{-1, -1, -1, -1, -1};
+    std::array<std::array<int, 3>, 5> thumbs_{};  // each thumb's left cap, middle and right cap
+    std::array<int, 5> thumbLength_{};
     std::array<int, 4> muteButtons_{-1, -1, -1, -1};
-    std::array<float, 4> volume_{1, 1, 0.4f, 1};
+    std::array<float, 5> volume_{1, 1, 0.4f, 1, 0.5f};
+    std::array<int, 3> speakerButtons_{-1, -1, -1};
+    int speakers_ = 0;  // 0 stereo, 1 4.0, 2 5.1
     std::array<bool, 4> muted_{};
     std::filesystem::path userFolder_;
     std::map<std::string, std::string> saved_;     // userProps.xml's settings

@@ -2399,10 +2399,6 @@ void Game::startLotLife() {
         }
         lotLife_->simulation().world().setNameTables(std::move(nameTables));
         ensureAudio();
-        // With --no-audio there is no sound system to set up or stop sounds on.
-        if (audio_) {
-            audio_->setPerformanceLevel(lotUi_.gameOptions().audioPerformance());
-        }
         lotLife_->simulation().world().setSoundEvents([this](const ts2::sim::SoundEvent& event) { onSoundEvent(event); });
         lotLife_->simulation().world().setSoundStopAll([this](std::int16_t object) {
             if (audio_) {

@@ -43,7 +43,6 @@ void Game::ensureAudio() {
         return;
     }
     audio_ = std::make_unique<ts2::audio::System>();
-    audio_->setPerformanceLevel(lotUi_.gameOptions().audioPerformance());
     audio_->addInstall(install_);
     // --mute leaves the mixer running, so the options' levels still apply behind it.
     audio_->setMuted(options_.mute);
@@ -58,6 +57,7 @@ void Game::applyAudioOptions() {
     const app::AudioOptionsPanel& panel = openAudioOptions();
     const auto volumes = panel.volumes();
     const auto mutes = panel.mutes();
+    audio_->setPerformanceLevel(panel.quality() - 1);
     // Each option covers more groups than its name says, as in the game. The effects level and box
     // also set UI, TV and Stitcher, and music also sets Stereo. The voices box also mutes Cinematic,
     // but the voices level leaves it alone.
