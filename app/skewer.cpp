@@ -96,6 +96,19 @@ void Skewer::setHousehold(std::vector<Member> members) {
     select(selected_);
 }
 
+void Skewer::setPortrait(std::int16_t sim, const ts2::tga::Pixels& portrait) {
+    auto& s = *screen_;
+    for (const Thumbnail& t : thumbnails_) {
+        if (t.sim != sim) {
+            continue;
+        }
+        const int group = s.find(t.window, kPortraitGroup);
+        s.setVisible(s.find(group, kShadow), true);
+        s.setImage(s.find(group, kShadow), thumbnailPicture(ts2::content::portraitSilhouette(portrait)));
+        s.setImage(s.find(group, kPortrait), thumbnailPicture(portrait));
+    }
+}
+
 void Skewer::select(std::int16_t sim) {
     selected_ = sim;
     for (const Thumbnail& t : thumbnails_) {

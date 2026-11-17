@@ -252,7 +252,10 @@ LotLife::LotLife(std::unique_ptr<ts2::sim::LotSimulation> sim, ts2::scene::Asset
     sim_->setRouteSources(routeSources(assets, std::move(routeModels)));
     // A birth then finds the baby outfits read and doesn't stop the game to read them.
     babyCatalog_ = std::async(std::launch::async, [packages = assets.skinPackages()] { return ts2::scene::readBabyCatalog(packages); }).share();
-    outfitCatalog_ = std::async(std::launch::async, [packages = assets.skinCatalog()] { return ts2::scene::readOutfitCatalog(packages); }).share();
+    outfitCatalog_ = std::async(std::launch::async, [packages = assets.skinCatalog(), products = assets.skinCatalogProducts()] {
+        return ts2::scene::readOutfitCatalog(packages, products);
+    }).share();
+    catalogBins_ = std::async(std::launch::async, [packages = assets.catalogBins()] { return ts2::scene::readCatalogBins(packages); }).share();
     try {
         sim_->routeWorld();
     } catch (const std::exception& ex) {

@@ -2,7 +2,10 @@
 
 #include "object_materials.hpp"
 #include "scene/animation_library.hpp"
+#include "scene/cas_picture.hpp"
+#include "scene/catalog_bins.hpp"
 #include "scene/object_effects.hpp"
+#include "scene/outfit_hair.hpp"
 #include "scene/outfit_properties.hpp"
 #include "scene/scene.hpp"
 #include "scene/newborn_face.hpp"
@@ -247,6 +250,48 @@ public:
     // windows keep theirs). They join relitInstances.
     void relightAll(ts2::scene::Scene& scene);
 
+    // The hairs the appearance editor offers the Sim `simId` in its everyday outfit and own hair
+    // colour, as the game's Sim builder lists them, with the Sim's age flag, gender (1 female, 2
+    // male), species flag and hair colour, its age data and its hair in each outfit. No hairs when
+    // the Sim has no character file.
+    struct AppearanceHairs {
+        std::uint32_t age = 0, gender = 0, species = 1;
+        std::string tone;  // its age data's "haircolor", a hair tone GUID
+        std::vector<ts2::scenegraph::Link> hairs;
+        ts2::scene::AgeData data;
+        ts2::scene::HairSlots slots;
+        std::filesystem::path characterFile;
+    };
+    AppearanceHairs appearanceHairs(std::int16_t simId);
+    // The hairs offered a Sim like `sim` in hair colour `tone` instead. With `onlyTone`, hairs of no
+    // colour of their own are left out.
+    std::vector<ts2::scenegraph::Link> appearanceHairs(const AppearanceHairs& sim, const std::string& tone, bool onlyTone);
+    // A hair's own colour (a hair tone GUID), empty when it has none or isn't in the catalog.
+    std::string hairTone(const ts2::scenegraph::Link& hair);
+    // The version of `hair` a Sim like `sim` wears in outfit `category` with hair colour `tone` (see
+    // ts2::scene::outfitHair).
+    std::optional<ts2::scenegraph::Link> outfitHair(const AppearanceHairs& sim, const ts2::scenegraph::Link& hair, std::uint32_t category,
+                                                    const std::string& tone, bool customTones);
+    // The appearance editor's OK on the hair page: the Sim takes the hair colour and its outfits the
+    // slots' hairs (see ts2::scene::wearHairs), and it wears its outfit again at once.
+    void wearAppearanceHairs(std::int16_t simId, const ts2::scene::HairSlots& slots, const std::string& tone);
+    // Puts the Sim a hair's picture is drawn on (see hairPictureLook) into `scene`, standing at the
+    // origin in its picture pose, out of the lot's actors. Its instances are new or reused ones that
+    // drew nothing. Nullopt when it can't be built. Take it out again with removePictureSim.
+    std::optional<ts2::scene::Actor> addHairPictureSim(ts2::scene::Scene& scene, std::uint32_t age, std::uint32_t gender,
+                                                       const ts2::scenegraph::Link& hair);
+    // Puts the Sim the appearance editor's Sim view shows into `scene`: a copy of the Sim `sim` with
+    // hair colour `tone` and the slots' hairs, in its everyday outfit, standing at the origin in its
+    // Sim view pose, out of the lot's actors. Nullopt when it can't be built. Take it out again with
+    // removePictureSim.
+    std::optional<ts2::scene::Actor> addSimViewSim(ts2::scene::Scene& scene, const AppearanceHairs& sim, const ts2::scene::HairSlots& slots,
+                                                   const std::string& tone);
+    // Frees a picture Sim's instances, which join changedInstances.
+    void removePictureSim(ts2::scene::Scene& scene, const ts2::scene::Actor& actor);
+    // The camera and lights of a hair's picture for a Sim of this age flag. Nullopt when the game's
+    // files can't give them.
+    std::optional<ts2::scene::PictureView> hairPictureView(std::uint32_t age);
+
 private:
     // The clock's time the actors are posed at, in milliseconds (see seconds).
     double drawnMs() const { return sim_->world().clockMs() + leadMs_; }
@@ -425,6 +470,8 @@ private:
     std::map<std::int16_t, std::vector<std::size_t>> createdSims_;  // Sims created during play: id -> instances
     std::shared_future<ts2::scene::BabyCatalog> babyCatalog_;  // read in the background from the start
     std::shared_future<ts2::scene::OutfitCatalog> outfitCatalog_;  // the same, for aging Sims' new outfits and made Sims' looks
+    std::shared_future<ts2::scene::CatalogBins> catalogBins_;      // the catalog bins, for the parts the game offers
+    std::optional<std::vector<const ts2::scene::CatalogPart*>> clothing_;  // the clothing bins' parts in the game's order, made when first asked
     std::map<std::int16_t, ts2::scene::MadeLook> madeLooks_;      // by neighbor (see madeLook)
     // The age data of Sims that aged on this lot or had an outfit written into it, by neighbor id. Their
     // character files don't hold it yet.

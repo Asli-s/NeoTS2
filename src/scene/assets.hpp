@@ -80,6 +80,10 @@ public:
     std::vector<std::filesystem::path> skinPackages() const;
     // The packages of the skin catalog, in the order the game reads them (see skinCatalogPackages).
     const std::vector<std::filesystem::path>& skinCatalog() const { return skinCatalog_; }
+    // Each of those packages' product number (see skinCatalogProducts).
+    const std::vector<std::uint32_t>& skinCatalogProducts() const { return skinCatalogProducts_; }
+    // The packages of the catalog bins (see catalogBinPackages).
+    const std::vector<std::filesystem::path>& catalogBins() const { return catalogBins_; }
 
     // The largest mip level of a texture, decoded. Empty when it is missing or unreadable.
     [[nodiscard]] std::optional<Image> texture(const std::string& name);
@@ -160,6 +164,8 @@ private:
     content::ResourceIndex skins_;     // Catalog/Skins packages, read on first use
     std::vector<std::filesystem::path> skinFolders_;
     std::vector<std::filesystem::path> skinCatalog_;
+    std::vector<std::uint32_t> skinCatalogProducts_;
+    std::vector<std::filesystem::path> catalogBins_;
     bool skinsRead_ = false;
     void readSkins();
     std::optional<std::uint32_t> localGroup_;  // the character file in use

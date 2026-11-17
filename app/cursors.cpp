@@ -24,6 +24,7 @@ constexpr std::pair<std::uint32_t, const char*> kNames[] = {
     {Cursors::kLivePerson, "liveperson"},
     {Cursors::kLiveObjectAvailable, "liveobjectavail"},
     {Cursors::kLiveObjectUnavailable, "liveobjectunavail"},
+    {Cursors::kSimsRotate, "simsrotate"},
 };
 
 // The game's cursor setting picks the "_8" files (its default, on) or the "_1" ones. Each name is

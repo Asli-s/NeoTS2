@@ -519,6 +519,49 @@ SimLook madeSimLook(Assets& assets, const OutfitCatalog& catalog, const MadeLook
     return look;
 }
 
+SimLook hairPictureLook(Assets& assets, const OutfitCatalog& catalog, std::uint32_t age, std::uint32_t gender, const sg::Link& hair) {
+    constexpr std::uint32_t kEverydayCategory = 1, kHuman = 1, kDefaultFitness = 0;
+    SimLook look;
+    look.category = kEverydayCategory;
+    look.age = age;
+    look.gender = gender;
+    look.skinTone = catalogGuid("00000002-0000-0000-0000-000000000000");  // Medium
+    look.skeleton = skeletonName(assets, {}, {}, age, look.problems);
+    // A teen is the adult skeleton made smaller, as every teen's age data says.
+    constexpr float kTeenStretch = 0.94f;
+    look.stretch = age == kTeenAge ? kTeenStretch : 1.0f;
+    // The first bare skin set of each part in catalog order, of medium skin at the default fitness.
+    std::map<std::uint32_t, sg::Link> skin;
+    for (const auto& p : catalog.parts) {
+        if (!(p.category & kSkinCategory) || !(p.age & age) || !(p.gender & gender) || !(p.species & kHuman) || p.skinTone != look.skinTone ||
+            p.fitness != kDefaultFitness) {
+            continue;
+        }
+        for (const std::uint32_t kind : {kHairPart, kFacePart, kTopPart, kBottomPart, kBodyPart}) {
+            if (p.parts & kind) {
+                skin.try_emplace(kind, p.key);
+            }
+        }
+    }
+    for (const auto& [kind, set] : skin) {
+        auto part = readPart(assets, set, kind, look.problems);
+        if (!part) {
+            continue;
+        }
+        if (kind != kFacePart && !part->overrides.empty()) {
+            skinOf(look, kind) = part->overrides[0].material;
+        }
+        // The bald head is only the scalp under the hair.
+        if (kind != kHairPart) {
+            look.parts.push_back(std::move(*part));
+        }
+    }
+    if (auto part = readPart(assets, hair, kHairPart, look.problems)) {
+        look.parts.push_back(std::move(*part));
+    }
+    return look;
+}
+
 std::string skinUnderClothes(const SimLook& look, bool separates) {
     if (separates) {
         return look.skinBottom;

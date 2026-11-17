@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <stdexcept>
 #include <string>
 
@@ -210,7 +211,7 @@ DataValue dataValue(BinaryReader& r, int depth, std::size_t& budget) {
 
 ResourceNode parseResourceNode(std::span<const std::uint8_t> data) {
     constexpr std::uint32_t kResourceNode = 0xE519C933, kTransformNode = 0x65246462, kShapeRefNode = 0x65245517, kLightRefNode = 0x253D2018,
-                            kBoneData = 0xE9075BC5, kDataList = 0x6A836D56;
+                            kBoneData = 0xE9075BC5, kDataList = 0x6A836D56, kViewerRefNode = 0x0C152B8E, kViewerNode = 0xDCA76DBB;
     BinaryReader header(data);
     ResourceNode rn;
     rn.container = readContainer(header);
@@ -272,6 +273,41 @@ ResourceNode parseResourceNode(std::span<const std::uint8_t> data) {
                     r.u8();
                     r.u8();
                     node.shapeLinks.push_back(r.u32());
+                }
+            } else if (type == kViewerRefNode) {
+                // Read past its transform, so the next block's search doesn't stop at the transform
+                // header inside it and take every later block for the one before.
+                node.kind = SceneNode::Kind::ViewerRef;
+                blockHeader(r, "cViewerRefNodeRecursive");
+                blockHeader(r, "cViewerRefNodeBase");
+                blockHeader(r, "cRenderableNode");
+                blockHeader(r, "cBoundedNode");
+                transformNode(r, node);
+            } else if (type == kViewerNode) {
+                node.kind = SceneNode::Kind::ViewerRef;
+                const BlockHeader viewer = blockHeader(r, "cViewerRefNode");
+                blockHeader(r, "cViewerRefNodeBase");
+                blockHeader(r, "cRenderableNode");
+                blockHeader(r, "cBoundedNode");
+                transformNode(r, node);
+                r.u16();
+                const std::size_t groups = count(r, 1);
+                for (std::size_t i = 0; i < groups; ++i) {
+                    r.varString();
+                }
+                // Of what follows the render groups only the lens is known yet, at fixed places in
+                // version 14 (the version every pack's camera files have).
+                if (viewer.version == 14) {
+                    r.skip(41);
+                    std::array<float, 16> v{};
+                    for (auto& f : v) {
+                        f = std::bit_cast<float>(r.u32());
+                    }
+                    // A broken file's lens would give no picture at all, so it is only kept when it can be drawn.
+                    const float fovY = v[15], nearPlane = v[10], farPlane = v[11];
+                    if (std::isfinite(fovY) && std::isfinite(farPlane) && fovY > 0 && fovY < 3.14159f && nearPlane > 0 && farPlane > nearPlane) {
+                        node.lens = SceneNode::Lens{fovY, nearPlane, farPlane};
+                    }
                 }
             } else if (type == kLightRefNode) {
                 node.kind = SceneNode::Kind::LightRef;
@@ -655,7 +691,8 @@ LightResource parseLight(std::span<const std::uint8_t> data) {
     l.kind = r.varString();
     r.u32();
     r.u32();
-    if (l.kind != "cPointLight" && l.kind != "cSpotLight") {
+    const bool lamp = l.kind == "cPointLight" || l.kind == "cSpotLight";
+    if (!lamp && l.kind != "cDirectionalLight" && l.kind != "cAmbientLight") {
         fail("light kind " + l.kind + " is not read");
     }
     blockHeader(r, "cStandardLightBase");
@@ -679,6 +716,9 @@ LightResource parseLight(std::span<const std::uint8_t> data) {
     l.intensity = f();
     l.specular = f();
     l.color = {f(), f(), f()};
+    if (!lamp) {
+        return l;
+    }
     l.falloffRate = f();
     if (l.kind == "cSpotLight") {
         l.coneAngle = f();

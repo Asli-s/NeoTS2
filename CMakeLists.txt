@@ -414,13 +414,16 @@ add_library(ts2scene
     src/scene/face_blend.cpp
     src/scene/newborn_face.cpp
     src/scene/sims.cpp
+    src/scene/catalog_bins.cpp
     src/scene/outfit_catalog.cpp
     src/scene/age_data.cpp
+    src/scene/outfit_hair.cpp
     src/scene/texture_blend.cpp
     src/scene/normal_map.cpp
     src/scene/incidence_map.cpp
     src/scene/sim_builder.cpp
     src/scene/portrait.cpp
+    src/scene/cas_picture.cpp
     src/scene/limb_ik.cpp
     src/scene/look_at.cpp
     src/scene/rig.cpp
@@ -814,7 +817,7 @@ else()
         target_link_libraries(vm_tests PRIVATE ts2ui)
         target_compile_definitions(vm_tests PRIVATE NEOTS2_TEXT_LAYOUT_TESTS)
 
-        add_executable(neots2 app/main.cpp app/menu.cpp app/game_audio.cpp app/game_effects.cpp app/game_surroundings.cpp app/game_graphics.cpp app/neighborhood.cpp app/neighborhood_ui.cpp app/lot_life.cpp app/lot_life_clips.cpp app/lot_life_effects.cpp app/lot_life_panels.cpp app/lot_life_objects.cpp app/lot_life_sims.cpp app/pose_numbers.cpp app/object_materials.cpp app/sim_loader.cpp app/lot_light.cpp app/imposter_baker.cpp app/lot_daylight.cpp app/route_sources.cpp app/lot_ui.cpp app/game_options_panel.cpp app/graphics_options_panel.cpp app/audio_options_panel.cpp app/options_list.cpp app/list_box_rows.cpp app/live_panel.cpp app/job_panel.cpp app/memories_page.cpp app/age_meter.cpp app/queue_panel.cpp app/pie_menu_ui.cpp app/mood_meter.cpp app/aspiration_bars.cpp app/pause_frame.cpp app/baby_name_dialog.cpp app/phone_book_dialog.cpp app/type_picker_dialog.cpp app/notification_stack.cpp app/dialog_fills.cpp app/description_box.cpp app/cheat_console.cpp app/needs_panel.cpp app/personality_page.cpp app/relationships_panel.cpp app/rewards_panel.cpp app/simology_panel.cpp app/interests_page.cpp app/hobbies_page.cpp app/chemistry_page.cpp app/meter_bar.cpp app/skewer.cpp app/wants_panel.cpp app/portraits.cpp app/cursors.cpp
+        add_executable(neots2 app/main.cpp app/menu.cpp app/game_audio.cpp app/game_effects.cpp app/game_surroundings.cpp app/game_graphics.cpp app/neighborhood.cpp app/neighborhood_ui.cpp app/lot_life.cpp app/lot_life_clips.cpp app/lot_life_effects.cpp app/lot_life_panels.cpp app/lot_life_objects.cpp app/lot_life_sims.cpp app/pose_numbers.cpp app/object_materials.cpp app/sim_loader.cpp app/lot_light.cpp app/imposter_baker.cpp app/lot_daylight.cpp app/route_sources.cpp app/lot_ui.cpp app/game_options_panel.cpp app/graphics_options_panel.cpp app/audio_options_panel.cpp app/options_list.cpp app/list_box_rows.cpp app/live_panel.cpp app/job_panel.cpp app/memories_page.cpp app/age_meter.cpp app/queue_panel.cpp app/pie_menu_ui.cpp app/mood_meter.cpp app/aspiration_bars.cpp app/pause_frame.cpp app/baby_name_dialog.cpp app/phone_book_dialog.cpp app/type_picker_dialog.cpp app/change_appearance_dialog.cpp app/notification_stack.cpp app/dialog_fills.cpp app/description_box.cpp app/cheat_console.cpp app/needs_panel.cpp app/personality_page.cpp app/relationships_panel.cpp app/rewards_panel.cpp app/simology_panel.cpp app/interests_page.cpp app/hobbies_page.cpp app/chemistry_page.cpp app/meter_bar.cpp app/skewer.cpp app/wants_panel.cpp app/portraits.cpp app/cursors.cpp
                        app/diagnostics.cpp app/crash_handler.cpp app/crash_dialog.cpp app/unexpected_exit.cpp app/report_upload.cpp app/message_box.cpp app/open_renderer.cpp)
         target_link_libraries(neots2 PRIVATE ts2render ts2ui ts2sim ts2diag project_warnings)
         # Audio output needs SDL 3; the SDL 1.2 build keeps the same interface silent.
@@ -822,6 +825,10 @@ else()
             target_sources(neots2 PRIVATE src/audio/system.cpp)
         else()
             target_sources(neots2 PRIVATE src/audio/system_none.cpp)
+        endif()
+        # In a debug build app/menu.cpp has more sections than an object file allows by default.
+        if(MSVC)
+            target_compile_options(neots2 PRIVATE /bigobj)
         endif()
         add_dependencies(neots2 neots2_version)
         if(sdlgpu_enabled)
@@ -903,7 +910,7 @@ else()
         target_include_directories(header_check PRIVATE ${CMAKE_BINARY_DIR}/generated)
         add_dependencies(header_check neots2_version)
     else()
-        message(STATUS "SDL3, a shader compiler (dxc, or glslc off Windows), or spirv-cross on macOS not found: the renderer and the neots2 app are not built")
+        message(WARNING "SDL3, a shader compiler (dxc, or glslc off Windows), or spirv-cross on macOS not found: the renderer and the neots2 app are not built")
     endif()
 
     if(SDL3_FOUND)

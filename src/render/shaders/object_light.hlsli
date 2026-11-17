@@ -87,7 +87,6 @@ float3 skirtSunLight(float3 normal, float3 world) {
         return float3(0, 0, 0);
     }
     const float3 n = normalize(normal);
-    const int suns = (int)thumbnail.w;
     float3 sum = ambient.rgb;
     float3 sun = float3(0, 0, 0);
     [unroll] for (int i = 0; i < 8; ++i) {
@@ -96,7 +95,8 @@ float3 skirtSunLight(float3 normal, float3 world) {
             const float3 l = towardLight(i, world, reach);
             const float3 c = max(0, dot(n, l) * reach) * lightColors[i].rgb;
             sum += c;
-            sun += ((suns >> i) & 1) != 0 ? c : float3(0, 0, 0);
+            // Bit i of the sun mask, without bit operators: GLSL 1.20 has none.
+            sun += fmod(floor(thumbnail.w / exp2(i)), 2) >= 1 ? c : float3(0, 0, 0);
         }
     }
     return (saturate(sum) - saturate(sum - sun)) * thumbnail.rgb;

@@ -1115,6 +1115,17 @@ void LotUi::showHousehold(std::vector<Skewer::Member> members) {
     }
 }
 
+void LotUi::setPortrait(std::int16_t sim, const ts2::tga::Pixels& portrait) {
+    if (!portraits_.contains(sim)) {
+        return;
+    }
+    portraits_[sim] = portrait;
+    skewer_.setPortrait(sim, portrait);
+    if (sim == portraitShown_) {
+        portraitShown_ = -1;  // the live panel shows it again
+    }
+}
+
 void LotUi::showLife(LotLife& life) {
     ts2::diag::Timer timer("lot ui");
     show(life.clockText(), life.speed(), life.paused(), life.funds());

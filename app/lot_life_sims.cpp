@@ -4,6 +4,8 @@
 #include "diag/log.hpp"
 #include "formats/propset.hpp"
 #include "formats/reference_list.hpp"
+#include "scene/cas_picture.hpp"
+#include "scene/portrait.hpp"
 #include "scene/newborn_face.hpp"
 
 #include <climits>
@@ -526,6 +528,161 @@ void LotLife::wearChangedOutfits(ts2::scene::Scene& scene) {
         } catch (const std::exception& ex) {
             ts2::diag::warning(std::format("Sim {} keeps what it wears: the outfit can't be read: {}", sim->id, ex.what()));
         }
+    }
+}
+
+// The Sim builder's hair search for the appearance editor (UI-63): the clothing bins' hairs for the
+// Sim's age, gender and species in its everyday outfit and its own hair colour, hidden parts left out.
+LotLife::AppearanceHairs LotLife::appearanceHairs(std::int16_t simId) {
+    const ts2::sim::SimObject* sim = sim_->world().find(simId);
+    const std::int16_t neighbor = sim != nullptr ? sim_->world().neighborIdOf(*sim) : 0;
+    const auto file = neighbor != 0 ? sim_->characterFile(neighbor) : std::nullopt;
+    if (!file) {
+        return {};
+    }
+    std::optional<ts2::scene::AgeData> data;
+    try {
+        const ts2::scene::Assets::CharacterInUse inUse(assets_, *file);
+        const auto aged = agedData_.find(neighbor);
+        data = aged != agedData_.end() ? std::optional(aged->second) : ts2::scene::characterAgeData(assets_, *file);
+    } catch (const std::exception& ex) {
+        ts2::diag::warnOnce(std::string("Change Appearance: a character file that can't be read offers no hairs: ") + ex.what());
+        return {};
+    }
+    if (!data) {
+        return {};
+    }
+    const auto& p = data->properties;
+    AppearanceHairs out;
+    out.age = ts2::propset::number(p, "age");
+    out.gender = ts2::propset::number(p, "gender") == 1 ? 1 : 2;
+    // The age data keeps species as a flag, 1 human, and an old file's 0 is human too.
+    const std::uint32_t species = ts2::propset::number(p, "species");
+    out.species = species != 0 ? species : 1;
+    if (const auto it = p.find("haircolor"); it != p.end()) {
+        out.tone = it->second;
+    }
+    out.hairs = appearanceHairs(out, out.tone, false);
+    out.slots = ts2::scene::hairSlots(*data);
+    out.data = std::move(*data);
+    out.characterFile = *file;
+    return out;
+}
+
+std::string LotLife::hairTone(const ts2::scenegraph::Link& hair) {
+    const auto* part = ts2::scene::findPart(outfitCatalog_.get(), hair);
+    return part != nullptr ? part->hairTone : std::string();
+}
+
+std::optional<ts2::scenegraph::Link> LotLife::outfitHair(const AppearanceHairs& sim, const ts2::scenegraph::Link& hair, std::uint32_t category,
+                                                         const std::string& tone, bool customTones) {
+    return ts2::scene::outfitHair(outfitCatalog_.get(), sim.data, hair, category, tone, customTones);
+}
+
+// The Sim's own age data and, when it has one, the working copy Change Outfit dresses it from both
+// take the hairs, as the game's OK writes the age data the Sim is dressed from.
+void LotLife::wearAppearanceHairs(std::int16_t simId, const ts2::scene::HairSlots& slots, const std::string& tone) {
+    constexpr std::size_t kCurrentOutfit = 0x08;
+    ts2::sim::SimObject* sim = sim_->world().find(simId);
+    const std::int16_t neighbor = sim != nullptr ? sim_->world().neighborIdOf(*sim) : 0;
+    const auto file = neighbor != 0 ? sim_->characterFile(neighbor) : std::nullopt;
+    if (!file) {
+        return;
+    }
+    try {
+        const ts2::scene::Assets::CharacterInUse inUse(assets_, *file);
+        auto aged = agedData_.find(neighbor);
+        if (aged == agedData_.end()) {
+            auto own = ts2::scene::characterAgeData(assets_, *file);
+            if (!own) {
+                return;
+            }
+            aged = agedData_.insert_or_assign(neighbor, std::move(*own)).first;
+        }
+        ts2::scene::wearHairs(aged->second, outfitCatalog_.get(), slots, tone);
+        if (const auto working = outfitData_.find(neighbor); working != outfitData_.end()) {
+            ts2::scene::wearHairs(working->second, outfitCatalog_.get(), slots, tone);
+        }
+    } catch (const std::exception& ex) {
+        ts2::diag::warning(std::format("Sim {} keeps its hair: its age data can't be read: {}", simId, ex.what()));
+        return;
+    }
+    if (sim->personData.size() > kCurrentOutfit) {
+        sim->outfitChange = ts2::sim::SimObject::OutfitChange{sim->personData[kCurrentOutfit], std::nullopt};
+    }
+}
+
+std::vector<ts2::scenegraph::Link> LotLife::appearanceHairs(const AppearanceHairs& sim, const std::string& tone, bool onlyTone) {
+    if (!clothing_) {
+        clothing_ = ts2::scene::binnedParts(catalogBins_.get(), outfitCatalog_.get(), ts2::scene::kClothingKind);
+    }
+    constexpr std::uint32_t kHairPart = 1, kEverydayOutfit = 1;
+    ts2::scene::BuilderQuery query;
+    query.age = sim.age;
+    query.gender = sim.gender;
+    query.species = sim.species;
+    query.parts = kHairPart;
+    query.category = kEverydayOutfit;
+    if (!tone.empty()) {
+        query.hairTone = tone;
+    }
+    const std::string own = ts2::scene::catalogGuid(tone);
+    std::vector<ts2::scenegraph::Link> hairs;
+    for (const auto* part : ts2::scene::builderParts(*clothing_, query)) {
+        if (!onlyTone || part->hairTone == own) {
+            hairs.push_back(part->key);
+        }
+    }
+    return hairs;
+}
+
+std::optional<ts2::scene::Actor> LotLife::addHairPictureSim(ts2::scene::Scene& scene, std::uint32_t age, std::uint32_t gender,
+                                                            const ts2::scenegraph::Link& hair) {
+    const ts2::scene::SimLook look = ts2::scene::hairPictureLook(assets_, outfitCatalog_.get(), age, gender, hair);
+    for (const auto& problem : look.problems) {
+        ts2::diag::warnOnce("Change Appearance: a hair picture's Sim: " + problem);
+    }
+    if (look.parts.empty()) {
+        return std::nullopt;
+    }
+    return objectMaterials_.sim(look, "picture", ts2::scene::Transform{}, scene.groundLevel,
+                                ts2::scene::picturePose(ts2::scene::pictureAge(age)), scene, freeSimInstances_);
+}
+
+// The game dresses a copy of the Sim in its try-on outfit: the outfit open in the editor (everyday
+// while hairs are set for all outfits) with the hair picked.
+std::optional<ts2::scene::Actor> LotLife::addSimViewSim(ts2::scene::Scene& scene, const AppearanceHairs& sim, const ts2::scene::HairSlots& slots,
+                                                        const std::string& tone) {
+    constexpr std::uint32_t kEveryday = 0x01;
+    try {
+        const ts2::scene::Assets::CharacterInUse inUse(assets_, sim.characterFile);
+        ts2::scene::AgeData data = sim.data;
+        ts2::scene::wearHairs(data, outfitCatalog_.get(), slots, tone);
+        const ts2::scene::SimLook look = ts2::scene::simLook(assets_, data, kEveryday);
+        for (const auto& problem : look.problems) {
+            ts2::diag::warnOnce("Change Appearance: the Sim view's Sim: " + problem);
+        }
+        if (look.parts.empty()) {
+            return std::nullopt;
+        }
+        return objectMaterials_.sim(look, "view", ts2::scene::Transform{}, scene.groundLevel, ts2::scene::simViewPose(look.age), scene,
+                                    freeSimInstances_);
+    } catch (const std::exception& ex) {
+        ts2::diag::warnOnce(std::string("Change Appearance: the Sim view's Sim can't be built: ") + ex.what());
+        return std::nullopt;
+    }
+}
+
+std::optional<ts2::scene::PictureView> LotLife::hairPictureView(std::uint32_t age) {
+    return ts2::scene::hairPictureView(assets_, ts2::scene::pictureAge(age));
+}
+
+void LotLife::removePictureSim(ts2::scene::Scene& scene, const ts2::scene::Actor& actor) {
+    for (const auto& s : actor.skinned) {
+        freeSimInstance(scene, s.instance);
+    }
+    for (const auto& h : actor.held) {
+        freeSimInstance(scene, h.instance);
     }
 }
 

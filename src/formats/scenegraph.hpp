@@ -140,8 +140,9 @@ Container parseContainer(std::span<const std::uint8_t> data);
 struct DataValue;
 struct SceneNode {
     // ModelRef: a resource node inside the tree, naming another model ("<name>_cres") drawn at its
-    // place. DataList: a data list extension (see DataValue).
-    enum class Kind { Other, Root, Transform, ShapeRef, LightRef, ModelRef, DataList };
+    // place. DataList: a data list extension (see DataValue). ViewerRef: a camera's node, such as a
+    // mirror's reflection camera, with its place and children but nothing drawn.
+    enum class Kind { Other, Root, Transform, ShapeRef, LightRef, ModelRef, DataList, ViewerRef };
     Kind kind = Kind::Other;
     std::string name;
     std::vector<std::uint32_t> children;  // block indices
@@ -158,6 +159,12 @@ struct SceneNode {
     };
     std::optional<BoneData> boneData;
     std::shared_ptr<const DataValue> dataList;  // a DataList node's list
+    // A Create-A-Sim picture camera's lens (a ViewerRef node of class cViewerRefNode, version 14): its
+    // view from top to bottom in radians and its near and far planes. Unset for other cameras.
+    struct Lens {
+        float fovY = 0, nearPlane = 0, farPlane = 0;
+    };
+    std::optional<Lens> lens;
 };
 struct ResourceNode {
     Container container;
@@ -237,10 +244,11 @@ struct SceneObject {
 };
 SceneObject parseSceneObject(std::span<const std::uint8_t> data);
 
-// A light resource (LGHT: cPointLight or cSpotLight): the values the light files can override by
-// the light's name. Other light kinds are not read (parseLight throws).
+// A light resource (LGHT: cPointLight, cSpotLight, cDirectionalLight or cAmbientLight): the values the
+// light files can override by the light's name. Directional and ambient lights have only the
+// intensity, specular and colour. Other light kinds are not read (parseLight throws).
 struct LightResource {
-    std::string kind;   // "cPointLight" or "cSpotLight"
+    std::string kind;   // "cPointLight", "cSpotLight", "cDirectionalLight" or "cAmbientLight"
     std::string name;   // the light's own name
     float intensity = 0;
     float specular = 0;  // relSpecIntensity

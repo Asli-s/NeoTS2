@@ -1,0 +1,44 @@
+#pragma once
+
+#include "content/lighting.hpp"
+#include "formats/scenegraph.hpp"
+#include "scene/scene.hpp"
+
+#include <array>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace ts2::scene {
+
+class Assets;
+
+// The age a Create-A-Sim part picture is made for, which picks its camera and pose. Young adults
+// and elders take the adults'.
+enum class PictureAge { Toddler, Child, Teen, Adult };
+PictureAge pictureAge(std::uint32_t age);  // from an age flag (1 toddler, 2 child, 4 teen...)
+
+// The single-frame pose (an animation name without "_anim") the Sim of a part picture stands in,
+// except for bottoms pictures.
+std::string picturePose(PictureAge age);
+
+// The camera and lights of a part picture, in the space of the picture's Sim standing at the origin.
+struct PictureView {
+    std::array<float, 3> eye{}, target{}, up{0, 0, 1};
+    float fovY = 0, nearPlane = 0, farPlane = 0;  // radians from top to bottom, then world units
+    ObjectLighting lighting;
+    static constexpr unsigned kSize = 256;  // the picture is this many pixels square
+};
+
+// The view from picture camera `cameraNode` (a model whose camera node holds a lens), lit by the
+// lights of the picture light rig `rig` (a model of light nodes) with the light files' settings
+// over each light's own. Nullopt when the camera can't be read.
+std::optional<PictureView> pictureView(const scenegraph::ResourceNode& cameraNode, const scenegraph::ResourceNode& rig,
+                                       const std::vector<scenegraph::LightResource>& rigLights, const content::Lighting& lighting);
+
+// The view a hair's picture is drawn with, from the game's files. Nullopt when they can't be read.
+std::optional<PictureView> hairPictureView(Assets& assets, PictureAge age);
+
+} // namespace ts2::scene

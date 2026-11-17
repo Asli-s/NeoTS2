@@ -134,6 +134,8 @@ public:
     void show(const std::string& clock, ts2::sim::Speed speed, bool paused, std::int32_t funds);
     // Puts up the household's thumbnails.
     void showHousehold(std::vector<Skewer::Member> members);
+    // Puts a household Sim's newly drawn portrait on its thumbnail and the live panel.
+    void setPortrait(std::int16_t sim, const ts2::tga::Pixels& portrait);
     // A Sim's name as its tips show it: first and last name with a space between, either alone when
     // the other is empty, and a witch's title round it (Live text 0x336). Only English order is
     // done. The game puts the last name first in some languages.

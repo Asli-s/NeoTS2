@@ -3,6 +3,7 @@
 #include "formats/tga.hpp"
 #include "render/irenderer.hpp"
 #include "scene/animation_library.hpp"
+#include "scene/cas_picture.hpp"
 #include "scene/scene.hpp"
 
 #include <cstdint>
@@ -17,5 +18,21 @@ namespace app {
 // Sim's joints are changed, and the next frame sets them again.
 [[nodiscard]] std::optional<ts2::tga::Pixels> drawPortrait(const ts2::scene::Scene& lot, ts2::render::IRenderer& renderer,
                                              ts2::scene::AnimationLibrary& animations, std::uint32_t sim, std::mt19937& random);
+
+// Draws a part picture's Sim (see LotLife::addHairPictureSim) alone in its picture pose with the
+// picture's camera and lights, over a transparent background (PictureView::kSize pixels square).
+// Nullopt when it can't be drawn. The renderer's shown instances are changed, and the caller shows
+// the lot's again.
+[[nodiscard]] std::optional<ts2::tga::Pixels> drawPartPicture(const ts2::scene::Scene& lot, ts2::render::IRenderer& renderer,
+                                                ts2::scene::AnimationLibrary& animations, const ts2::scene::Actor& actor,
+                                                const std::string& pose, const ts2::scene::PictureView& view);
+
+// Draws the appearance editor's Sim view: the Sim view's Sim (see LotLife::addSimViewSim) alone in
+// `pose`, turned `turn` radians, with the Sim view camera and the portrait's lights, over a
+// transparent background, `width` x `height` pixels. Nullopt when it can't be drawn. The renderer's shown instances are
+// changed, and the caller shows the lot's again.
+[[nodiscard]] std::optional<ts2::tga::Pixels> drawSimView(const ts2::scene::Scene& lot, ts2::render::IRenderer& renderer,
+                                            ts2::scene::AnimationLibrary& animations, const ts2::scene::Actor& actor,
+                                            const std::string& pose, unsigned width, unsigned height, float turn);
 
 } // namespace app

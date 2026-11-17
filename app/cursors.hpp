@@ -26,6 +26,8 @@ public:
     // Live mode: over ground, a Sim, an object the selected Sim can use (also over a lot in the
     // neighborhood), and anything else.
     static constexpr std::uint32_t kLiveNothing = 0x2B, kLivePerson = 0x2C, kLiveObjectAvailable = 0x2D, kLiveObjectUnavailable = 0x2E;
+    // Over a view that turns the Sim in it when dragged (the appearance editor's).
+    static constexpr std::uint32_t kSimsRotate = 0x1B;
 
     Cursors(const std::filesystem::path& install, ts2::content::UiData& ui);
     ~Cursors();
