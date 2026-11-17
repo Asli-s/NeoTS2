@@ -285,7 +285,8 @@ void System::Impl::decodeLoop() {
             } catch (const std::exception& ex) {
                 diag::warnOnce(std::string("sound sample: ") + ex.what());
             }
-        } else if (bytes.size() >= 2 && bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0) {
+        } else if ((bytes.size() >= 3 && bytes[0] == 'I' && bytes[1] == 'D' && bytes[2] == '3') ||
+                   (bytes.size() >= 2 && bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0)) {
             try {
                 pcm = std::make_shared<const Pcm>(decodeMp3(bytes));
             } catch (const std::exception& ex) {

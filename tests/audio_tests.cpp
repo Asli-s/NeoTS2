@@ -511,6 +511,10 @@ void mp3DecodesToPcmAndRejectsGarbage() {
         peak = std::max(peak, std::abs(static_cast<int>(s)));
     }
     CHECK(peak > 1000);
+    // Many songs start with an ID3 tag, which the decoder has to step over.
+    std::vector<std::uint8_t> tagged = {'I', 'D', '3', 3, 0, 0, 0, 0, 0, 4, 1, 2, 3, 4};
+    tagged.insert(tagged.end(), std::begin(kTinyMp3), std::end(kTinyMp3));
+    CHECK(decodeMp3(tagged).samples.size() == pcm.samples.size());
     const std::uint8_t garbage[64] = {1, 2, 3};
     bool threw = false;
     try {
