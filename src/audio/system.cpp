@@ -322,6 +322,9 @@ void System::Impl::takeDecoded() {
         std::lock_guard lock(decodeMutex);
         done.swap(decoded);
     }
+    // Before the new samples go in: a song is a large part of the cache, and trimming after would drop it
+    // before any voice holds it, so it would be decoded again and again.
+    trimCache();
     for (auto& [id, pcm] : done) {
         pending.erase(id);
         if (!pcm || pcm->samples.empty() || pcm->channels == 0) {
@@ -329,13 +332,9 @@ void System::Impl::takeDecoded() {
             diag::info("audio: a sample could not be decoded");
             continue;
         }
-        if (pcm->seconds() > 30) {
-            diag::info("audio: a song of " + std::to_string(static_cast<int>(pcm->seconds())) + " s is decoded");
-        }
         cacheBytes += pcm->samples.size() * sizeof(std::int16_t);
         cache[id] = std::move(pcm);
     }
-    trimCache();
 }
 
 void System::Impl::trimCache() {
