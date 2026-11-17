@@ -86,9 +86,10 @@ for the game's file formats, verify anything important against the game.
 - [kouta-kun](https://github.com/kouta-kun): Linux build, Vulkan support, OpenGL 2 renderer and Mac
   OS X PowerPC port
 - [VHSMODDING](https://github.com/VHSMODDING): native macOS build for Apple Silicon
+- [alexjyong](https://github.com/alexjyong): sound playback, Sim voices and the Audio Options panel
 - Libraries: [SDL 3](https://www.libsdl.org/), [FreeType](https://freetype.org/),
   [stb_image and stb_dxt](https://github.com/nothings/stb), [Lua](https://www.lua.org/) 5.0.3,
-  [Dear ImGui](https://github.com/ocornut/imgui) (MIT) and the
+  [Speex](https://www.speex.org/), [Dear ImGui](https://github.com/ocornut/imgui) (MIT) and the
   [Noto Sans](https://fonts.google.com/noto/specimen/Noto+Sans) font (SIL Open Font License 1.1)
 - App and launcher icons drawn by me
 
