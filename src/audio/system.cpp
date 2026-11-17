@@ -326,7 +326,11 @@ void System::Impl::takeDecoded() {
         pending.erase(id);
         if (!pcm || pcm->samples.empty() || pcm->channels == 0) {
             failed.insert(id);
+            diag::info("audio: a sample could not be decoded");
             continue;
+        }
+        if (pcm->seconds() > 30) {
+            diag::info("audio: a song of " + std::to_string(static_cast<int>(pcm->seconds())) + " s is decoded");
         }
         cacheBytes += pcm->samples.size() * sizeof(std::int16_t);
         cache[id] = std::move(pcm);
@@ -582,6 +586,7 @@ void System::Impl::updateStereos() {
     settings.keepPlaying = true;
     for (StereoPlay& play : stereos) {
         if (play.id != 0 && !manager.playing(play.id)) {
+            diag::info("audio: stereo on object " + std::to_string(play.request.object) + " has stopped its song");
             play.id = 0;
         }
         if (play.id != 0 || nowMs() < play.retryAtMs) {
