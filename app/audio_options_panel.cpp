@@ -46,11 +46,10 @@ constexpr std::array<const char*, 5> kTabStations{"", "buy", "build", "nhood", "
 constexpr std::uint32_t kStereoPanel = 0x200, kModePanel = 0x100, kStereoOverlay = 0xCC, kModeOverlay = 0xDD;
 constexpr std::uint32_t kSongBox = 0x0CC3BA9B, kSongList = 0x297, kSongBar = 0x299, kStationBox = 0x400, kStationTemplate = 0x201;
 constexpr std::array<std::uint32_t, 2> kStationArrows{0x2AA, 0x2BB};
-// The song list sits 106 px further left under the modes' smaller panel, as their overlay does.
-constexpr int kStereoListX = 277, kModeListX = 171;
-// The station buttons stand 25 apart (a button is 20 high and the script's track spacing is 5), as many as fit
-// the box under the template's first place.
-constexpr int kStationFirstY = 11, kStationPitch = 25, kStationRows = 8, kStationWidth = 116, kStationHeight = 20;
+// The song list sits 107 px further left under the modes' smaller panel, as their overlay does.
+constexpr int kStereoListX = 277, kModeListX = 170;
+// The station buttons stand one button's height apart, as many as the box (215 high) holds.
+constexpr int kStationFirstY = 11, kStationPitch = 20, kStationRows = 10, kStationWidth = 116, kStationHeight = 20;
 constexpr std::uint32_t kFirstStationId = 0x00B00000;  // window id, leakcheck: ok
 const std::string kSongBoxImage = "{499db772,ac76e160}";
 constexpr std::string_view kStillStereo = "NeoTS2 plays in stereo for now. The choice is saved.";
