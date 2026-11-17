@@ -56,6 +56,7 @@
 #include <bit>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <fstream>
