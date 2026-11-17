@@ -8,6 +8,7 @@
 #include "sim/ground_click.hpp"
 #include "sim/motives.hpp"
 #include "sim/pie_menu.hpp"
+#include "sim/selection.hpp"
 #include "sim/want_refill.hpp"
 
 #include <algorithm>
@@ -139,6 +140,9 @@ std::vector<LotLife::QueuedAction> LotLife::queue(std::int16_t sim) {
     }
     auto add = [&](const ts2::sim::QueuedInteraction& q, bool running, std::int16_t object, std::uint32_t guid, std::uint32_t index,
                    const std::string& name) {
+        if (!ts2::sim::queueShows(sim_->world(), object, guid)) {
+            return;
+        }
         QueuedAction a{q.id, running, q.cancelled, q.nested, 0, index, 0, name};
         if (a.name.empty()) {
             const auto* target = sim_->world().find(q.object);
@@ -146,7 +150,8 @@ std::vector<LotLife::QueuedAction> LotLife::queue(std::int16_t sim) {
         }
         if (guid != 0 && guid != UINT32_MAX) {
             a.guid = guid;
-        } else if (const auto* icon = sim_->world().find(object)) {
+        } else {
+            const auto* icon = sim_->world().find(object);
             if (icon->isPerson()) {
                 a.neighbor = sim_->world().neighborIdOf(*icon);
             } else {
@@ -157,8 +162,6 @@ std::vector<LotLife::QueuedAction> LotLife::queue(std::int16_t sim) {
                     a.index = static_cast<std::uint16_t>(shown.data[kGraphicField]);
                 }
             }
-        } else {
-            return;  // no icon: the queue leaves it out
         }
         out.push_back(a);
     };

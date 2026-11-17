@@ -99,4 +99,33 @@ void keepSelection(World& world, CodeSource& code, std::span<std::int16_t> globa
     selected = next;
 }
 
+bool queueShows(const World& world, std::int16_t object, std::uint32_t guid) {
+    return (guid != 0 && guid != UINT32_MAX) || world.find(object) != nullptr;
+}
+
+void markShownNames(World& world, std::span<const std::int16_t> globals) {
+    if (globals.size() <= global::kSelectedPerson) {
+        return;
+    }
+    SimObject* sim = world.find(globals[global::kSelectedPerson]);
+    if (sim == nullptr) {
+        return;
+    }
+    const auto mark = [&](QueuedInteraction& q, std::int16_t object, std::uint32_t guid) {
+        if (queueShows(world, object, guid)) {
+            q.nameShown = true;
+        }
+    };
+    // The running interaction shows the Sim's action picture, as in the queue.
+    if (sim->running) {
+        mark(*sim->running, sim->actionIconObject, sim->actionIconGuid);
+    }
+    if (sim->runningSub) {
+        mark(*sim->runningSub, sim->runningSub->icon(), sim->runningSub->iconGuid);
+    }
+    for (QueuedInteraction& q : sim->queue) {
+        mark(q, q.icon(), q.iconGuid);
+    }
+}
+
 } // namespace ts2::sim

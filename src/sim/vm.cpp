@@ -80,8 +80,10 @@ std::optional<Execution::NamedCall> Execution::namedTree(const bhav::Instruction
             call.args[i] = read(o[6 + 3 * i], data, f);
         }
     } else {
-        // Without either flag the called tree's params are the temps of the object it runs on.
-        const auto& temps = mode == kRunInStackObjectsStack ? stack().thread.temps : thread_.temps;
+        // Without either flag the called tree's params are the temps of the object it runs on, my
+        // running temps when that is me.
+        const bool onOther = mode == kRunInStackObjectsStack && &stack() != &me();
+        const auto& temps = onOther ? stack().thread.temps : thread_.temps;
         call.args.assign(temps.begin(), temps.end());
     }
     if (mode == kRunInMyStack || mode == kRunInStackObjectsStack) {
@@ -475,6 +477,7 @@ SimObject* Vm::create(std::uint32_t guid) {
         return nullptr;
     }
     SimObject& created = world_->create(type->group, type->definition, containerSlotsOf(code_, *type));
+    created.data[kTargetSlotCountField] = targetSlotCount(*type);
     startCreated(created, *type);
     return &created;
 }
@@ -698,7 +701,7 @@ void Vm::RunState::noteFrameReturned() {
         return;
     }
     if (me_->currentInteraction == SimObject::CurrentInteraction::Blank) {
-        nextSimulatorId(vm_.globals);
+        me_->blankId = nextSimulatorId(vm_.globals);
     } else {
         me_->currentInteraction = SimObject::CurrentInteraction::Blank;
     }
@@ -984,7 +987,7 @@ Vm::RunState::Next Vm::RunState::gosubFoundAction(const bhav::Instruction& in) {
     if (vm_.onInteractionStart) {
         vm_.onInteractionStart(*me_, *call->interaction);
     }
-    startRunning(*me_, *call->interaction);
+    startRunning(*me_, *call->interaction, vm_.globals);
     frames_.back().interactionId = me_->running->id;
     return Next::Continue;
 }
@@ -1035,7 +1038,7 @@ Vm::RunState::Next Vm::RunState::idleForInput(const bhav::Instruction& in, Frame
             me_->currentInteraction = SimObject::CurrentInteraction::Started;
             noteCurrentInteraction(*me_, static_cast<std::int16_t>(started.index), started.object);
             notePriority(*me_, &started);
-            startRunning(*me_, started);
+            startRunning(*me_, started, vm_.globals);
         }
         frames_.back().interactionId = started.id;
         frames_.back().runsInteraction = true;

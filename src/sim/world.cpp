@@ -378,6 +378,7 @@ std::optional<std::int16_t> World::addNeighbor(SavedNeighbor neighbor) {
     SavedNeighborhood& hood = ownNeighborhood();
     hood.neighborIds.insert(newId);
     hood.neighbors[newId] = std::move(neighbor);
+    addedNeighbors_.insert(newId);
     return newId;
 }
 

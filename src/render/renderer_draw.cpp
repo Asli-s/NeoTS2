@@ -643,10 +643,10 @@ bool SdlGpuRenderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, u
             // A picture's mirror image shows the sky and the lot with its walls up over the whole
             // view, as the game's bake draws it.
             auto shown = std::exchange(visible_, *picturePools_);
-            drawMirror(f, mirrorHeight, pool->instance->poolMirrorKeep, poolReflection_, Mirrored::Pool, {-1, 1, -1, 1});
+            drawMirror(f, {0, 0, 1, -mirrorHeight}, pool->instance->poolMirrorKeep, poolReflection_, Mirrored::Pool, {-1, 1, -1, 1});
             visible_ = std::move(shown);
         } else if (reflections_) {
-            drawMirror(f, mirrorHeight, pool->instance->poolMirrorKeep, poolReflection_, Mirrored::Pool,
+            drawMirror(f, {0, 0, 1, -mirrorHeight}, pool->instance->poolMirrorKeep, poolReflection_, Mirrored::Pool,
                        poolMirrorArea(f, blended, width, height));
         } else {
             clearMirror(f, poolReflection_);
@@ -661,8 +661,14 @@ bool SdlGpuRenderer::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* target, u
     seaFromWater_ = hoodSea && f.water && reflections_ && sea != nullptr && single_.sea != nullptr;
     seaReflected_ = seaFromWater_;
     if (!hoodSea && reflections_ && seaReflections_ && sea != nullptr && single_.sea != nullptr && mirrorReady(seaReflection_, width, height)) {
-        drawMirror(f, sea->instance->transform.m[11] + sea->primitive->low[2], 0, seaReflection_, Mirrored::Sea, {-1, 1, -1, 1});
+        drawMirror(f, {0, 0, 1, -(sea->instance->transform.m[11] + sea->primitive->low[2])}, 0, seaReflection_, Mirrored::Sea, {-1, 1, -1, 1});
         seaReflected_ = true;
+    }
+    // The mirrors' images, only with the Reflections option on as the game's. A lot picture's mirrors
+    // show grey (see scene::kMirrorPictureGrey).
+    shownGlasses_.clear();
+    if (f.extras && reflections_ && !picturing_ && picturePools_ == nullptr && single_.mirror != nullptr) {
+        drawMirrorImages(f, {opaque, layers});
     }
 
     const bool occluded = f.extras && occlusionReady(width, height);
@@ -779,7 +785,7 @@ bool SdlGpuRenderer::reflectionReady(unsigned width, unsigned height) {
 void SdlGpuRenderer::drawReflection(const Frame& f) {
     const MirrorTarget target{reflection_, reflectionDepth_, reflectionWidth_, reflectionHeight_};
     if (reflections_) {
-        drawMirror(f, gpu_->waterLevel, 0, target, Mirrored::Neighborhood, {-1, 1, -1, 1});
+        drawMirror(f, {0, 0, 1, -gpu_->waterLevel}, 0, target, Mirrored::Neighborhood, {-1, 1, -1, 1});
         return;
     }
     SDL_GPUColorTargetInfo color{};
@@ -840,16 +846,20 @@ void SdlGpuRenderer::clearMirror(const Frame& f, const MirrorTarget& target) {
 // Draws the scene mirrored in water, the sky and what lies above `plane`, as the game's reflections do.
 // A pool's leaves out the pools' and ponds' water. The beach sea's shows only the skirt's ground and
 // sand, the lot's terrain and the neighborhood's plants (see scene::Instance::seaReflected). The
-// neighborhood water's shows terrain, roads, plants, decorations, bridges and effects. None shows lot
-// imposters. Only `area` is drawn (see poolMirrorArea).
-void SdlGpuRenderer::drawMirror(const Frame& f, float plane, float keepBelow, const MirrorTarget& target, Mirrored what,
-                                const std::array<float, 4>& area) {
+// neighborhood water's shows terrain, roads, plants, decorations, bridges and effects. A mirror's
+// glass shows the lot without the mirrors themselves, as the game marks out only the one glass. None
+// shows lot imposters. Only `area` is drawn (see poolMirrorArea).
+void SdlGpuRenderer::drawMirror(const Frame& f, const std::array<float, 4>& plane, float keepBelow, const MirrorTarget& target, Mirrored what,
+                                const std::array<float, 4>& area, bool clear) {
+    const Vec3 normal{plane[0], plane[1], plane[2]};
+    const auto across = [&](const Vec3& p) { return sub(p, scale(normal, 2 * (dot(normal, p) + plane[3]))); };
     Camera mirrored = *f.camera;
-    mirrored.eye[2] = 2 * plane - mirrored.eye[2];
-    mirrored.target[2] = 2 * plane - mirrored.target[2];
+    mirrored.eye = across(f.camera->eye);
+    mirrored.target = across(f.camera->target);
+    mirrored.up = sub(f.camera->up, scale(normal, 2 * dot(normal, f.camera->up)));
     Frame r = f;
     r.camera = &mirrored;
-    r.viewProjection = poolMirror(f.viewProjection, plane, keepBelow);
+    r.viewProjection = planeMirror(f.viewProjection, plane, keepBelow);
     r.depthClip = true;
 
     thread_local std::vector<Draw> opaque, layers, blended;
@@ -860,7 +870,12 @@ void SdlGpuRenderer::drawMirror(const Frame& f, float plane, float keepBelow, co
     culled.viewProjection = narrowedTo(r.viewProjection, area);
     FramePlan::collectDraws(*this, *this, culled, opaque, layers, blended);
     for (auto* list : {&opaque, &layers, &blended}) {
-        if (what != Mirrored::Pool) {
+        if (what == Mirrored::Glass) {
+            // The water surfaces are drawn their own ways, which don't clip at the glass.
+            std::erase_if(*list, [](const Draw& d) {
+                return d.instance->poolWater || (d.material && (d.material->mirror || d.material->pondWater || d.material->poolSurface || d.material->skirtSea));
+            });
+        } else if (what != Mirrored::Pool) {
             std::erase_if(*list, [](const Draw& d) { return !d.instance->seaReflected; });
         } else {
             std::erase_if(*list, [](const Draw& d) { return d.instance->poolWater || (d.material && d.material->pondWater); });
@@ -870,7 +885,7 @@ void SdlGpuRenderer::drawMirror(const Frame& f, float plane, float keepBelow, co
     SDL_GPUColorTargetInfo color{};
     color.texture = target.color;
     color.clear_color = SDL_FColor{0, 0, 0, 1};
-    color.load_op = SDL_GPU_LOADOP_CLEAR;
+    color.load_op = clear ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
     color.store_op = SDL_GPU_STOREOP_STORE;
     SDL_GPUDepthStencilTargetInfo depth{};
     depth.texture = target.depth;
@@ -890,7 +905,7 @@ void SdlGpuRenderer::drawMirror(const Frame& f, float plane, float keepBelow, co
     // A lot's show its own sky (the game's $skyboxCubeMap in lot view), the neighborhood's its sky cube.
     SDL_GPUTexture* sky = what == Mirrored::Neighborhood ? gpu_->skyCube : gpu_->skybox;
     if (sky != nullptr) {
-        drawSky(r, r.pass, sky, mirroredSkyCamera(f));
+        drawSky(r, r.pass, sky, mirroredSkyCamera(f, plane));
     }
     drawList(r, opaque, 0);
     if (what == Mirrored::Neighborhood) {
@@ -906,6 +921,60 @@ void SdlGpuRenderer::drawMirror(const Frame& f, float plane, float keepBelow, co
         drawList(r, blended, 1);
     }
     SDL_EndGPURenderPass(r.pass);
+}
+
+void SdlGpuRenderer::drawMirrorImages(const Frame& f, std::initializer_list<std::span<const Draw>> lists) {
+    thread_local std::vector<const Draw*> glasses;
+    thread_local std::vector<MirrorGlass> inView;
+    thread_local std::vector<int> glassImage;
+    glasses.clear();
+    inView.clear();
+    for (const auto& list : lists) {
+        for (const Draw& d : list) {
+            if (const auto glass = mirrorGlass(f, d, f.width, f.height)) {
+                glasses.push_back(&d);
+                inView.push_back(*glass);
+            }
+        }
+    }
+    if (glasses.empty()) {
+        return;
+    }
+    const auto images = planMirrors(inView, kMirrorTargets, glassImage);
+    std::array<bool, kMirrorTargets> cleared{};
+    std::array<bool, kMirrorTargets> ready{};
+    for (int t = 0; t < kMirrorTargets; ++t) {
+        ready[static_cast<std::size_t>(t)] = std::any_of(images.begin(), images.end(), [t](const MirrorImage& m) { return m.target == t; }) &&
+                                             mirrorReady(mirrorTargets_[static_cast<std::size_t>(t)], f.width, f.height);
+    }
+    for (const MirrorImage& image : images) {
+        const auto t = static_cast<std::size_t>(image.target);
+        if (image.target < 0 || !ready[t]) {
+            continue;
+        }
+        drawMirror(f, image.plane, 0, mirrorTargets_[t], Mirrored::Glass, image.area, !cleared[t]);
+        cleared[t] = true;
+    }
+    for (std::size_t i = 0; i < glasses.size(); ++i) {
+        const int image = glassImage[i];
+        if (image >= 0 && ready[static_cast<std::size_t>(images[static_cast<std::size_t>(image)].target)]) {
+            shownGlasses_.push_back({glasses[i]->primitive, glasses[i]->instance, images[static_cast<std::size_t>(image)].target});
+        }
+    }
+}
+
+// A mirror's glass over its mirror image (see mirror.frag.hlsl).
+void SdlGpuRenderer::drawMirrorGlass(const Frame& f, const Draw& d, int target) {
+    const MeshBuffers& buffers = gpu_->meshBuffers[d.primitive->buffers];
+    const MirrorUniforms u = FramePlan::mirrorUniformsFor(f, d);
+    SDL_BindGPUGraphicsPipeline(f.pass, drawing_->mirror);
+    SDL_PushGPUVertexUniformData(f.cmd, 0, &u, sizeof(u));
+    const SDL_GPUTextureSamplerBinding image{mirrorTargets_[static_cast<std::size_t>(target)].color, clampedSampler_};
+    SDL_BindGPUFragmentSamplers(f.pass, 0, &image, 1);
+    const SDL_GPUBufferBinding vertices{buffers.vertices, 0};
+    SDL_BindGPUVertexBuffers(f.pass, 0, &vertices, 1);
+    const auto& p = *d.primitive;
+    SDL_DrawGPUIndexedPrimitives(f.pass, p.count, 1, p.firstIndex, static_cast<Sint32>(p.firstVertex), 0);
 }
 
 bool SdlGpuRenderer::drawPoolCaustics(const Frame& f, const Draw& pool, ShadowUniforms& shadows, bool passes) {
@@ -1151,6 +1220,18 @@ void SdlGpuRenderer::drawList(const Frame& f, std::span<const Draw> list, int bl
             jointsBound = false;
             continue;
         }
+        // A glass showing its mirror image in the main view. Elsewhere it is drawn in its grey.
+        if (m && m->mirror && f.pass != nullptr && !f.depthClip && !shownGlasses_.empty()) {
+            const auto shown = std::find_if(shownGlasses_.begin(), shownGlasses_.end(),
+                                            [&](const ShownGlass& g) { return g.primitive == d.primitive && g.instance == d.instance; });
+            if (shown != shownGlasses_.end()) {
+                drawMirrorGlass(f, d, shown->target);
+                bound = nullptr;
+                boundSamplers = {};
+                jointsBound = false;
+                continue;
+            }
+        }
         if (m && m->poolSurface) {
             if (poolReflected_ && f.pass != nullptr && m->normalMap >= 0 && hasImage(m->normalMap)) {
                 drawPoolSurface(f, d);
@@ -1179,10 +1260,15 @@ void SdlGpuRenderer::drawList(const Frame& f, std::span<const Draw> list, int bl
             SDL_BindGPUVertexStorageBuffers(f.pass, 0, &jointBuffer_, 1);
             jointsBound = true;
         }
-        if (ready.empty()) {
-            made = FramePlan::uniformsFor(*this, *this, f, d, blend);
+        // A glass in the water's reflections and in lot pictures shows the darker grey.
+        const bool pictureGlass = m && m->mirror && (f.depthClip || picturing_);
+        if (ready.empty() || pictureGlass) {
+            made = ready.empty() ? FramePlan::uniformsFor(*this, *this, f, d, blend) : ready[i];
+            if (pictureGlass) {
+                std::fill_n(made.fragment.color, 3, scene::kMirrorPictureGrey);
+            }
         }
-        const DrawUniforms& u = ready.empty() ? made : ready[i];
+        const DrawUniforms& u = ready.empty() || pictureGlass ? made : ready[i];
         std::array<SDL_GPUTextureSamplerBinding, 16> samplers;
         for (std::size_t k = 0; k < u.samplers.size(); ++k) {
             samplers[k] = {textureFor(u.samplers[k].texture), samplerFor(u.samplers[k].sampler)};

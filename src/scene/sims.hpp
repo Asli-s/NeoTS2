@@ -85,11 +85,24 @@ struct BabyCatalog {
 };
 BabyCatalog readBabyCatalog(const std::vector<std::filesystem::path>& skinPackages);
 
+// The catalog parts a newborn wears: its skin outfit's face, bald head and bare body of its tone, by
+// part (kFacePart, kHairPart, kBodyPart), and its everyday body (the diaper), each the first in
+// catalog order. A part the catalog has none of is missing.
+struct NewbornOutfit {
+    std::map<std::uint32_t, scenegraph::Link> skin;
+    std::optional<scenegraph::Link> body;
+};
+NewbornOutfit newbornOutfit(const BabyCatalog& catalog, const Newborn& baby);
+
 // What a newborn wears, picked from the outfit catalog as the game picks it for a baby: the skin
 // outfit's bald head, face and bare body of its tone, and the one baby body worn every day (the
 // diaper). On the face, its eye colour and then eyebrows of its hair tone, one of the baby
 // eyebrows drawn by `browDraw`.
 SimLook newbornLook(Assets& assets, const BabyCatalog& catalog, const Newborn& baby);
+
+// The family of the baby eyebrows `browDraw` picks for the newborn (newbornLook draws them). Its
+// face materials at every age take that family's eyebrows. Empty when the catalog has none.
+std::string newbornBrowFamily(const BabyCatalog& catalog, const Newborn& baby);
 
 // What a Sim made by Make New Character wears in outfit category `category`, from its made look
 // (see makeLook): its age data's parts, its own face in every outfit (the bare skin outfit's face

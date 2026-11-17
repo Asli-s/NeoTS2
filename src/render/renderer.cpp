@@ -119,6 +119,14 @@ void SdlGpuRenderer::destroy() {
             SDL_ReleaseGPUTexture(device_, t);
         }
     }
+    for (auto& target : mirrorTargets_) {
+        for (auto* t : {target.color, target.depth}) {
+            if (t) {
+                SDL_ReleaseGPUTexture(device_, t);
+            }
+        }
+        target = {};
+    }
     if (spriteSampler_) {
         SDL_ReleaseGPUSampler(device_, spriteSampler_);
     }

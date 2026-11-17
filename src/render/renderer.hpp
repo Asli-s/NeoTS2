@@ -129,6 +129,7 @@ private:
         SDL_GPUGraphicsPipeline* clip = nullptr;   // a lot skirt's boundary curtain: four walls written into depth only
         SDL_GPUGraphicsPipeline* pond = nullptr;   // the water in the lot's ponds
         SDL_GPUGraphicsPipeline* pool = nullptr;   // the pools' water surface
+        SDL_GPUGraphicsPipeline* mirror = nullptr; // a mirror's glass showing its mirror image
         SDL_GPUGraphicsPipeline* sea = nullptr;    // a beach lot's sea
         // Its lots' imposters (see scene::PaintedTerrain::ImposterPart): the terrain's light map, the
         // terrain's texture, walls and slices, and roofs. A fading imposter's walls and roofs (see
@@ -159,6 +160,7 @@ private:
     void makePoolPipeline(const std::filesystem::path& shaders, PassPipelines& out, int samples, bool gameAlpha = false);
     void makeSeaPipeline(const std::filesystem::path& shaders, PassPipelines& out, int samples);
     void makePondPipeline(const std::filesystem::path& shaders, PassPipelines& out, int samples);
+    void makeMirrorPipeline(const std::filesystem::path& shaders, PassPipelines& out, int samples);
     void makeCausticsPipelines(const std::filesystem::path& shaders);
     void makeShadowPipelines(const std::filesystem::path& shaders);
     void destroy();
@@ -190,13 +192,14 @@ private:
     // Makes `target`'s textures at the size drawn at. False when they couldn't be made, to be tried
     // again next frame.
     [[nodiscard]] bool mirrorReady(MirrorTarget& target, unsigned width, unsigned height);
-    // What a mirror image shows: the lot for a pool's, the beach sea's own list for the sea's, and
-    // the neighborhood water's for the neighborhood's.
-    enum class Mirrored { Pool, Sea, Neighborhood };
-    // The scene mirrored in the plane at height `plane` (see poolMirror) into `target`, only within
-    // `area` of its clip space.
+    // What a mirror image shows: the lot for a pool's, the beach sea's own list for the sea's, the
+    // neighborhood water's for the neighborhood's, and the lot for a mirror's glass.
+    enum class Mirrored { Pool, Sea, Neighborhood, Glass };
+    // The scene mirrored in `plane` (see planeMirror) into `target`, only within `area` of its clip
+    // space. Without `clear` what the target holds outside `area` is kept.
     void clearMirror(const Frame& f, const MirrorTarget& target);
-    void drawMirror(const Frame& f, float plane, float keepBelow, const MirrorTarget& target, Mirrored what, const std::array<float, 4>& area);
+    void drawMirror(const Frame& f, const std::array<float, 4>& plane, float keepBelow, const MirrorTarget& target, Mirrored what,
+                    const std::array<float, 4>& area, bool clear = true);
     void drawPoolSurface(const Frame& f, const Draw& d);
     void drawSkirtSea(const Frame& f, const Draw& d);
     void drawPondWater(const Frame& f, const Draw& d);
@@ -298,6 +301,20 @@ private:
     MirrorTarget seaReflection_;
     bool seaReflected_ = false;  // seaReflection_ holds this frame's picture
     bool seaFromWater_ = false;  // the sea shows the water sheet's reflection (a neighborhood's pool-style sea)
+    // The mirrors' images, each frame mirrors are in view (see planMirrors). Each is the size of the
+    // screen, so a few are kept at most. A mirror past them shows the game's grey without one.
+    static constexpr int kMirrorTargets = 3;
+    std::array<MirrorTarget, kMirrorTargets> mirrorTargets_;
+    // This frame's glasses showing a mirror image, and the target each reads.
+    struct ShownGlass {
+        const GpuPrimitive* primitive;
+        const scene::Instance* instance;
+        int target;
+    };
+    std::vector<ShownGlass> shownGlasses_;
+    // Draws the mirror images of the glasses among `lists` and notes them in shownGlasses_.
+    void drawMirrorImages(const Frame& f, std::initializer_list<std::span<const Draw>> lists);
+    void drawMirrorGlass(const Frame& f, const Draw& d, int target);
     // The pools' caustics: the tile drawn from the flipbook each frame, and the shadow map from the
     // sun (depth along the sun, with its depth buffer), made once.
     SDL_GPUGraphicsPipeline* causticsPipeline_ = nullptr;

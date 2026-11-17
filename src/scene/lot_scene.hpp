@@ -23,6 +23,7 @@ struct LotSceneStats {
     std::size_t withoutRecord = 0;     // objects with no scene record
     std::size_t withoutModel = 0;      // objects whose model wasn't found
     std::size_t walls = 0, coveredWalls = 0, wallCuts = 0;
+    std::size_t onWalls = 0;  // walls objects other than doors and windows hide with (see hidesWithWalls)
     std::size_t fenceRails = 0, fencePosts = 0;
     std::size_t floorPatterns = 0, roofs = 0;
     std::size_t terrainPaints = 0;  // paints drawn over the terrain's canvas

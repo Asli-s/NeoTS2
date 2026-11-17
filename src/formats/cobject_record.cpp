@@ -264,7 +264,13 @@ void writeRequest(Writer& w, const Request& q) {
 
 Instance readInstance(Reader& r) {
     r.expect(kInstanceTag);
-    r.expect(kInstanceVersion);
+    // Version 1, which the lots the game ships hold, ends before the last value, which the game
+    // then leaves at 0. It writes the instance back as version 2.
+    constexpr std::uint32_t kShippedInstanceVersion = 1;
+    const Word version = r.word();
+    if (version != kInstanceVersion && version != kShippedInstanceVersion) {
+        throw NotWritten{};
+    }
     r.expect(kInstanceBaseTag);
     r.expect(kInstanceBaseVersion);
     Instance s;
@@ -296,7 +302,7 @@ Instance readInstance(Reader& r) {
     s.savedTick = r.i32();
     r.words(s.words5);
     s.time = r.word();
-    s.word6 = r.word();
+    s.word6 = version == kInstanceVersion ? r.word() : 0;
     return s;
 }
 

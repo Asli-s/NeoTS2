@@ -27,7 +27,8 @@ struct Transform {
 
     Transform operator*(const Transform& b) const;
     // The inverse of a transform that only turns and moves (no scale or shear).
-    Transform rigidInverse() const;
+    Transform rigidInverse() const;    // Its rotation as a quaternion (x, y, z, w), as `of` takes it.
+    std::array<float, 4> rotation() const;
 
     // Transforms a point (with translation) or a direction (without) in place.
     void apply(float* v, bool point) const;
@@ -61,6 +62,12 @@ constexpr std::uint32_t kDxt1 = 4, kDxt3 = 5, kDxt5 = 8;
 enum class AlphaMode { Opaque, Mask, Blend, Layer, Add, Sum };
 
 // How a surface looks: a color, optionally times an image, and how its alpha is used.
+// The grey a mirror's glass shows with the Reflections option off, and the darker grey it shows in
+// the water's reflections and in lot pictures (the game's reflectionsOffMirrorColor and
+// impostorMirrorColor).
+constexpr float kMirrorOffGrey = 0.6f;
+constexpr float kMirrorPictureGrey = 0.4f;
+
 struct Material {
     std::string name;
     std::array<float, 4> color{1, 1, 1, 1};
@@ -167,6 +174,10 @@ struct Material {
     // SceneBuilder::causticsOverlayMaterial). 4 is the same with faces turned from the sun lit as
     // fully as the rest (a beach sea drawn with them, not in the original game). 0 for none.
     int caustics = 0;
+    // A mirror's glass, drawn by the game's SimpleMirrorReflection material: with the Reflections
+    // option on, the lot seen in the glass's plane, unlit. `color` is the flat grey the game shows
+    // with the option off.
+    bool mirror = false;
 };
 
 // Triangles sharing one material: per vertex a position, a normal, texture coordinates and,

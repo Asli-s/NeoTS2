@@ -61,10 +61,16 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <format>
+#include "content/save_writer.hpp"
+#include "formats/dbpf_writer.hpp"
+#include "sim/hood_save.hpp"
+#include "sim/lot_save.hpp"
+
 #include <fstream>
 #include <future>
 #include <map>
@@ -1420,6 +1426,185 @@ void Game::showLotCard(std::uint32_t lot) {
     hoodUi_.showCard(lot, toUi(at[0], at[1])[0]);
 }
 
+
+// Where a Sim is drawn on the lot, as its scene record saves it: the position, then the rotation as
+// a quaternion, in the lot's own frame. A Sim in a slot is where the slot's bone holds it.
+std::optional<ts2::cobject::Place> Game::drawnSimPlace(std::int16_t sim) const {
+    const auto actor = std::find_if(lot_.actors.begin(), lot_.actors.end(),
+                                    [&](const ts2::scene::Actor& a) { return a.object == static_cast<std::uint32_t>(sim); });
+    if (actor == lot_.actors.end()) {
+        return std::nullopt;
+    }
+    const ts2::scene::Transform onLot = actor->lotFrame.rigidInverse() * actor->place;
+    const auto& m = onLot.m;
+    const std::array<float, 4> q = onLot.rotation();
+    const auto word = [](float v) { return std::bit_cast<ts2::cobject::Word>(v); };
+    return ts2::cobject::Place{word(m[3]), word(m[7]), word(m[11]), word(q[0]), word(q[1]), word(q[2]), word(q[3])};
+}
+
+std::optional<std::vector<ts2::cobject::PosedJoint>> Game::drawnSimJoints(std::int16_t sim) const {
+    for (const auto& [index, nodes] : lotPose_.nodes) {
+        if (index >= lot_.actors.size() || lot_.actors[index].object != static_cast<std::uint32_t>(sim) || !lot_.actors[index].rig) {
+            continue;
+        }
+        const ts2::scene::Rig& rig = *lot_.actors[index].rig;
+        if (nodes.size() != rig.nodes.size()) {
+            return std::nullopt;
+        }
+        const auto word = [](float v) { return std::bit_cast<ts2::cobject::Word>(v); };
+        std::vector<ts2::cobject::PosedJoint> joints;
+        for (std::size_t node = 0; node < rig.nodes.size(); ++node) {
+            if (rig.nodes[node].name.empty()) {
+                continue;
+            }
+            // The rig's nodes are posed in the model's space, so a joint's own place is its parent's undone.
+            const int parent = rig.nodes[node].parent;
+            const ts2::scene::Transform local = parent >= 0 ? nodes[static_cast<std::size_t>(parent)].rigidInverse() * nodes[node] : nodes[node];
+            const auto& m = local.m;
+            const std::array<float, 4> q = local.rotation();
+            joints.push_back({rig.nodes[node].name, {word(m[3]), word(m[7]), word(m[11]), word(q[0]), word(q[1]), word(q[2]), word(q[3])}});
+        }
+        return joints;
+    }
+    return std::nullopt;
+}
+
+// Writes the lot being played back to its package, as the game's save does, into the neighborhood
+// package the descriptions of the Sims on the lot and the lot's own, and a character file for each
+// Sim born this run. All go as one save. An existing character file changes only when its Sim's
+// look changed at a mirror, and then only in its age data.
+std::string Game::saveLot() {
+    if (!inLot_ || !lotLife_ || lotFile_.empty()) {
+        return "no lot is being played";
+    }
+    if (options_.lock == nullptr) {
+        return "the save folder is not held by this game";
+    }
+    try {
+        // Each file is closed again before the save, which moves it aside.
+        const auto readFile = [](const std::filesystem::path& path) {
+            std::ifstream in(path, std::ios::binary);
+            return std::vector<std::uint8_t>(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        };
+        const std::vector<std::uint8_t> file = readFile(lotFile_);
+        if (file.empty()) {
+            return "the lot's package could not be read";
+        }
+        const auto hoodFile = openFolder_ / (openFolder_.filename().u8string() + u8"_Neighborhood.package");
+        const std::vector<std::uint8_t> hoodBytes = readFile(hoodFile);
+        if (hoodBytes.empty()) {
+            return "the neighborhood's package could not be read";
+        }
+        ts2::dbpf::PackageImage package = ts2::dbpf::readImage(file);
+        if (!ts2::sim::canSaveLot(package)) {
+            return "the lot was last saved by an older version of the game, which NeoTS2 cannot write yet";
+        }
+        std::optional<ts2::sim::LotCameraView> view;
+        if (orbit_.rig) {
+            view.emplace();
+            view->rig = *orbit_.rig;
+            view->state.target = {orbit_.target[0], orbit_.target[1], orbit_.target[2]};
+            view->state.distance = orbit_.distance;
+            view->state.zoomingTo = orbit_.distanceGoal;
+            view->state.yaw = orbit_.yawGoal;
+            view->state.pitchBlend = orbit_.pitchBlendGoal;
+        }
+        // Sims born this run are saved with their character files, or not at all.
+        ts2::sim::NewCharacterFiles made = lotLife_->newCharacterFiles(openFolder_);
+        if (!made.problem.empty()) {
+            ts2::diag::warning("save: the Sims made this run are left out: " + made.problem);
+        }
+        const ts2::sim::LotSaveCounts counts =
+            ts2::sim::fillLotPackage(
+                package, lotLife_->simulation(), view ? &*view : nullptr, made.neighbors, [this](std::int16_t sim) { return drawnSimPlace(sim); },
+                [this](std::int16_t sim) { return drawnSimJoints(sim); }, runningEffectsOf());
+        ts2::dbpf::PackageImage hood = ts2::dbpf::readImage(hoodBytes);
+        const ts2::sim::HoodSaveCounts hoodCounts = ts2::sim::fillNeighborhoodPackage(
+            hood, package, enteredLot_, lotLife_->simulation().world(), lotLife_->simulation().globals(),
+            made.problem.empty() ? ts2::sim::NewNeighbors::Written : ts2::sim::NewNeighbors::LeftOut);
+        ts2::content::SaveWriter writer(*options_.lock);
+        writer.add(lotFile_, ts2::dbpf::writeImage(package), ts2::content::SaveTarget::Replace);
+        writer.add(hoodFile, ts2::dbpf::writeImage(hood), ts2::content::SaveTarget::Replace);
+        for (ts2::sim::NewCharacterFile& newFile : made.files) {
+            writer.add(newFile.path, std::move(newFile.bytes), ts2::content::SaveTarget::Create);
+        }
+        // A Sim whose look changed gets its character file's look rewritten, as the game's save does.
+        const auto looks = lotLife_->changedLooks();
+        // A look that can't be written yet is left out alone, the rest of the save going ahead.
+        std::vector<std::filesystem::path> rewritten;
+        for (const auto& [path, look] : looks) {
+            const std::vector<std::uint8_t> character = readFile(path);
+            if (character.empty()) {
+                return "a character file could not be read";
+            }
+            std::vector<std::uint8_t> bytes;
+            try {
+                bytes = ts2::sim::rewriteOutfitLook(character, look);
+            } catch (const std::exception& ex) {
+                ts2::diag::warning("save: a Sim's changed look is left out: " + std::string(ex.what()));
+                continue;
+            }
+            writer.add(path, std::move(bytes), ts2::content::SaveTarget::Replace);
+            rewritten.push_back(path);
+        }
+        writer.commit();
+        for (const ts2::sim::NewCharacterFile& newFile : made.files) {
+            lotLife_->simulation().addCharacterFile(newFile.neighbor, newFile.path);
+        }
+        // What has read a rewritten character file reads it again, as its places in the file moved.
+        for (const auto& path : rewritten) {
+            try {
+                assets_.get()->refreshCharacterFile(path);
+                lotLife_->simulation().refreshPackage(path);
+            } catch (const std::exception& ex) {
+                ts2::diag::warning("save: a rewritten character file could not be read again: " + std::string(ex.what()));
+            }
+        }
+        ts2::diag::info(std::format("saved the lot: {} objects, {} of them new, {} left out, {} Sim descriptions, {} new character files, {} looks",
+                                    counts.objects, counts.objectsAdded, counts.objectsUnnamed, hoodCounts.descriptions, made.files.size(),
+                                    rewritten.size()));
+        // Nothing has happened since, so leaving the lot has nothing to ask about.
+        lotRan_ = false;
+        return {};
+    } catch (const std::exception& ex) {
+        return ex.what();
+    }
+}
+
+// The effects each object plays now, as a save writes them. Nothing before the lot's effects start,
+// so a save then keeps the effects the lot was loaded with.
+std::function<std::vector<ts2::xobj::Effect>(std::int16_t)> Game::runningEffectsOf() {
+    if (!lotEffects_) {
+        return {};
+    }
+    return [this](std::int16_t object) {
+        std::vector<ts2::xobj::Effect> out;
+        for (const auto& e : lotEffects_->saved(object)) {
+            out.push_back({e.name, e.bone, static_cast<std::uint32_t>(e.number), static_cast<std::uint32_t>(e.kind), e.keep});
+        }
+        return out;
+    };
+}
+
+void Game::saveLotShown(std::function<void(const std::string& problem)> after) {
+    savingPopup_.open(screen_, uiWidth_, uiHeight_);
+    afterShownSave_ = std::move(after);
+    // Asked while handling a frame's events: that frame draws the box and the next one saves.
+    shownSaveFrames_ = 2;
+}
+
+void Game::runShownSave() {
+    if (shownSaveFrames_ == 0 || --shownSaveFrames_ > 0) {
+        return;
+    }
+    const std::string problem = inLot_ ? saveLot() : "not on a lot";
+    savingPopup_.close(screen_);
+    if (auto after = std::move(afterShownSave_)) {
+        afterShownSave_ = nullptr;
+        after(problem);
+    }
+}
+
 // Builds a lot of the open neighborhood in the background. It shows once built.
 void Game::enterLot(std::uint32_t id) {
     if (freeCam_ && hoodOrbitBefore_) {
@@ -1427,6 +1612,7 @@ void Game::enterLot(std::uint32_t id) {
     }
     enteredLot_ = id;
     const auto file = openFolder_ / "Lots" / (openFolder_.filename().u8string() + u8"_Lot" + std::u8string(reinterpret_cast<const char8_t*>(std::to_string(id).c_str())) + u8".package");
+    lotFile_ = file;
     ts2::diag::step(std::format("entering lot {}", id));
     lotLoadStarted_ = ts2::platform::ticksNs();
     // The ground around it, as in the game's lot view.
@@ -1793,6 +1979,17 @@ void Game::lotAction(app::LotUi::Action action) {
     }
     if (action == Action::Quit) {
         openQuitBox(lotChanged());
+        return;
+    }
+    // Save writes the lot where it is, without asking, as the game's does, with its "Saving Lot" box.
+    if (action == Action::Save) {
+        if (!savingPopup_.isOpen()) {
+            saveLotShown([](const std::string& problem) {
+                if (!problem.empty()) {
+                    ts2::diag::error("the lot could not be saved: " + problem);
+                }
+            });
+        }
         return;
     }
     if (action == Action::FloorUp || action == Action::FloorDown) {
@@ -2544,6 +2741,11 @@ void Game::startLotLife() {
             nameTables[table] = data_.texts(kLiveText, table);
         }
         lotLife_->simulation().world().setNameTables(std::move(nameTables));
+        std::map<std::uint16_t, ts2::sim::World::LanguageLists> languageTables;
+        for (const std::uint16_t table : kNameTables) {
+            languageTables[table] = data_.languageTexts(kLiveText, table);
+        }
+        lotLife_->simulation().world().setLanguageNameTables(std::move(languageTables));
         ensureAudio();
         // With --no-audio there is no sound system to set up or stop sounds on.
         if (audio_) {
@@ -2683,6 +2885,7 @@ void Game::run() {
         while (pf::pollEvent(e)) {
             handleEvent(e);
         }
+        runShownSave();
         // While the window is minimized the game stops, its simulation and drawing alike, and only
         // waits for the system, unless the player turned Sim While Minimized on.
         if (running_ && pf::firstWindowMinimized() && !lotUi_.gameOptions().flag("simInBackground", false)) {
@@ -3183,22 +3386,38 @@ void Game::windowClicked(int window) {
         return;
     }
     if (const auto answer = quitBox_.clicked(screen_, window)) {
-        // On the save question No quits too, and Yes saves first in the game. Saving isn't done yet.
+        // On the save question No quits too, and Yes saves first, as in the game.
         const bool quit = *answer == app::QuitBox::Answer::Yes || (*answer == app::QuitBox::Answer::No && quitBox_.asksSave());
         const bool leaving = quitBox_.leaving();
+        const bool saving = *answer == app::QuitBox::Answer::Yes && quitBox_.asksSave();
         closeQuitBox();
-        if (leaving) {
-            // The same for leaving the lot: Yes and No leave, Cancel stays.
-            if (quit && inLot_) {
-                leaveFor(leaveTo_);
+        const auto finish = [this, quit, leaving] {
+            if (leaving) {
+                // The same for leaving the lot: Yes and No leave, Cancel stays.
+                if (quit && inLot_) {
+                    leaveFor(leaveTo_);
+                }
+                leaveTo_.reset();
+                return;
             }
-            leaveTo_.reset();
+            if (quit) {
+                ts2::diag::step("quitting (quit box)");
+                running_ = false;
+            }
+        };
+        // A save that fails leaves the player in the lot, so a session is never lost without a word.
+        if (saving && inLot_) {
+            saveLotShown([this, finish](const std::string& problem) {
+                if (!problem.empty()) {
+                    ts2::diag::error("the lot could not be saved: " + problem);
+                    leaveTo_.reset();
+                    return;
+                }
+                finish();
+            });
             return;
         }
-        if (quit) {
-            ts2::diag::step("quitting (quit box)");
-            running_ = false;
-        }
+        finish();
         return;
     }
     const std::uint32_t id = screen_.id(window);
@@ -3373,6 +3592,12 @@ bool Game::takePicture() {
         }
         if (secondsSince(*runStarted_) < options_.runSeconds) {
             return false;
+        }
+    }
+    if (inLot_ && options_.saveLot && !lotSaved_) {
+        lotSaved_ = true;
+        if (const std::string problem = saveLot(); !problem.empty()) {
+            ts2::diag::error("the lot could not be saved: " + problem);
         }
     }
     if (inLot_ && options_.runSeconds > 0) {

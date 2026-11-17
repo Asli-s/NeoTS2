@@ -206,7 +206,11 @@ std::optional<Execution::NamedCall> Execution::foundAction(const bhav::Instructi
     found.action = line->action;
     found.priority = 20;
     found.autonomous = true;
+    found.markedAutonomous = true;
     found.source = QueuedInteraction::Source::Autonomy;
+    found.lineFlags = line->flags;
+    found.attenuationCode = line->attenuationCode;
+    found.lineAttenuation = line->attenuation;
     found.nested = (line->flags & kNestedInteractionFlag) != 0;
     found.iconObject = me().foundIcon.object;
     found.iconGuid = me().foundIcon.guid;
@@ -333,26 +337,45 @@ void dropSubQueue(SimObject& sim) {
 
 } // namespace
 
+namespace {
+
+// My object data 0x32, 0x06, 0x65 and 0x68, which an interaction's test starts at 0 and its check
+// tree may set.
+constexpr std::array<std::size_t, 4> kTestDataFields{0x32, 0x06, 0x65, 0x68};
+constexpr std::size_t kTestValueField = 0x65;
+
+// The flags the game gives an interaction after its test: 4 for tested, 8 when it passed, 0x10 when
+// the check tree left my object data 0x32 set and 0x2000 for data 0x06.
+std::int32_t testedFlags(const SimObject& sim, bool passed) {
+    return 0x04 | (passed ? 0x08 : 0) | (sim.data[0x32] != 0 ? 0x10 : 0) | (sim.data[0x06] != 0 ? 0x2000 : 0);
+}
+
+} // namespace
+
 // The test the game gives a waiting interaction just before it starts: the checks of mayStartLine,
 // then the line's check tree, as me with the object as stack object. The tree's params are 1 or 0
 // for whether the Sim queued it as autonomy's pick, then 0, 0, 0 (the game's second one is a join
 // flag, not kept yet). My object data 0x32, 0x06, 0x65 and 0x68 start at 0 and keep what the tree
-// leaves. My temps are put back afterwards. A line no longer in its table isn't tested.
-bool Execution::passesStartCheck(SimObject& sim, const SimObject& object, const QueuedInteraction& waiting) {
+// leaves, and the interaction takes its testedFlags. My temps are put back afterwards. A line no
+// longer in its table isn't tested.
+bool Execution::passesStartCheck(SimObject& sim, const SimObject& object, QueuedInteraction& waiting) {
     const auto table = interactionsOf(code_, object).table;
     const ttab::Interaction* line = table ? ttab::find(*table, waiting.index) : nullptr;
     if (line == nullptr) {
         return true;
     }
-    for (const std::size_t field : {0x32, 0x06, 0x65, 0x68}) {
+    for (const std::size_t field : kTestDataFields) {
         sim.data[field] = 0;
     }
+    waiting.testValue = 0;
     const bool autonomy = waiting.source == QueuedInteraction::Source::Autonomy;
     const bool debugOnly = !autonomy && object.shiftClicked && world_ != nullptr && world_->testingCheats;
     if (!mayStartLine(*line, sim, object, globals_[kParentalControlGlobal] != 0, autonomy, debugOnly)) {
+        waiting.testFlags = testedFlags(sim, false);
         return false;
     }
     if (line->test == 0) {
+        waiting.testFlags = testedFlags(sim, true);
         return true;
     }
     const auto temps = sim.thread.temps;
@@ -360,6 +383,8 @@ bool Execution::passesStartCheck(SimObject& sim, const SimObject& object, const 
     ttab::Interaction changed;
     const RunResult check = runCheck(sim, object.group, line->test, object.id, args, *line, changed, nullptr, nullptr);
     sim.thread.temps = temps;
+    waiting.testFlags = testedFlags(sim, check.outcome == Outcome::True);
+    waiting.testValue = sim.data[kTestValueField];
     if (check.outcome == Outcome::Sleeping) {
         throw Stop{Outcome::Unsupported, "interaction test tree waited", hex(line->test, 4)};
     }
@@ -488,8 +513,8 @@ Execution::IdleResult Execution::idleForInput(const bhav::Instruction& in, Frame
         return IdleResult{};
     }
     // Run again after an interaction it started, it starts only a continuation, and only while the
-    // Sim carries nothing. The game also checks a flag some social pushes set (Push Interaction byte
-    // 14 bit 4), on an interaction not known yet.
+    // Sim carries nothing. The game also holds it back while the Sim's interrupted interaction has
+    // QueuedInteraction::holdsContinuations, which is not kept yet.
     if (f.idleStarted && (!first->continuation || sim.semiAttributes[kCarryFlagsSemiAttribute] != 0)) {
         return IdleResult{};
     }
@@ -555,6 +580,7 @@ void Execution::runPushedAtOnce(SimObject& sim, const SimObject& object, const Q
         World& world;
         std::int16_t priority, autonomous;
         std::optional<std::pair<std::uint32_t, bool>> running;  // the running interaction's id and flag
+        bool marked;
         std::array<std::int16_t, kKeptTemps> temps;
         ~Restore() {
             sim.personData[kPriorityPersonData] = priority;
@@ -562,18 +588,21 @@ void Execution::runPushedAtOnce(SimObject& sim, const SimObject& object, const Q
             // The tree can end the running interaction or start another, which keeps its own flag.
             if (running && sim.running && sim.running->id == running->first) {
                 sim.running->autonomous = running->second;
+                sim.running->markedAutonomous = marked;
             }
             std::copy(temps.begin(), temps.end(), thread.temps.begin());
             world.setRunningAtOnce(false);
         }
     } restore{sim, simThread, world(), sim.personData[kPriorityPersonData], sim.personData[kInteractionAutonomousPersonData],
-              sim.running ? std::optional(std::pair{sim.running->id, sim.running->autonomous}) : std::nullopt, {}};
+              sim.running ? std::optional(std::pair{sim.running->id, sim.running->autonomous}) : std::nullopt,
+              sim.running && sim.running->markedAutonomous, {}};
     std::copy_n(simThread.temps.begin(), kKeptTemps, restore.temps.begin());
     world().setRunningAtOnce(true);
     sim.personData[kPriorityPersonData] = pushed.priority;
     sim.personData[kInteractionAutonomousPersonData] = pushed.autonomous ? 1 : 0;
     if (sim.running) {
         sim.running->autonomous = pushed.autonomous;
+        sim.running->markedAutonomous = pushed.markedAutonomous;
     }
     const RunResult r = onMe ? runOnMe(pushed.group, pushed.action, object.id, pushed.args)
                              : runOnObject(sim, pushed.group, pushed.action, object.id, pushed.args);
@@ -604,10 +633,11 @@ void Execution::runPushedAtOnce(SimObject& sim, const SimObject& object, const Q
 //                (see linked_interactions.hpp)
 //   byte 14      bit 0: my parameters are its arguments. Bit 1: object and number from autonomy's
 //                choice (person data 0x35, object data 0x14). Bit 2: the queue icon is the type
-//                with GUID temp 5 << 16 | temp 4. Bit 3: the icon's index is temp 6, not byte 15
+//                with GUID temp 5 << 16 | temp 4. Bit 3: the icon's index is temp 6, not byte 15.
+//                Bit 4: while it is interrupted, no continuation starts (holdsContinuations)
 // On failure my object data 0x34 says why: 1 no priority, 2 the test tree said no, 3 queue full,
 // 4 sub-queue full, 6 a sub-interaction the Sim can't take now or a flag 0x4 line that couldn't run
-// at once. Byte 3 bit 5 and byte 14 bit 4 are not implemented.
+// at once. Byte 3 bit 5 is not implemented.
 bool Execution::pushInteraction(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
     SimObject& self = me();
@@ -669,8 +699,10 @@ bool Execution::pushInteraction(const bhav::Instruction& in, Frame& f) {
     queued.action = entry.action;
     queued.priority = priority;
     queued.source = fromAutonomy ? QueuedInteraction::Source::Autonomy : QueuedInteraction::Source::Script;
+    queued.pushedBy = fromAutonomy ? std::int16_t{-1} : me().id;
     queued.autonomous = (o[3] & 0x08) != 0;
     queued.continuation = (o[3] & 0x04) != 0;
+    queued.holdsContinuations = (o[14] & 0x10) != 0;
     if (o[3] & 0x01) {
         queued.partner = slotAt(f.locals, o[4], "local");
         queued.noIconObject = world().find(queued.partner) == nullptr;
@@ -684,10 +716,20 @@ bool Execution::pushInteraction(const bhav::Instruction& in, Frame& f) {
                           static_cast<std::uint16_t>(thread_.temps[4]);
     }
     queued.iconIndex = (o[14] & 0x08) ? static_cast<std::uint16_t>(thread_.temps[6]) : o[15];
+    queued.markedAutonomous = fromAutonomy || (self.isPerson() && self.running && self.running->markedAutonomous);
+    queued.lineFlags = entry.flags;
+    queued.attenuationCode = entry.attenuationCode;
+    queued.lineAttenuation = entry.attenuation;
 
-    // Tested the way autonomy tests it: on a copy of the menu line.
+    // Tested the way autonomy tests it: on a copy of the menu line. The test also starts the Sim's
+    // test data at 0 and gives the interaction its testedFlags.
     const auto passesTest = [&] {
+        for (const std::size_t field : kTestDataFields) {
+            sim.data[field] = 0;
+        }
+        queued.testValue = 0;
         if (entry.test == 0) {
+            queued.testFlags = testedFlags(sim, true);
             return true;
         }
         ttab::Interaction changed;
@@ -698,6 +740,8 @@ bool Execution::pushInteraction(const bhav::Instruction& in, Frame& f) {
         if (check.outcome != Outcome::True && check.outcome != Outcome::False) {
             throw Stop{check.outcome, "interaction test tree: " + check.reason, check.detail};
         }
+        queued.testFlags = testedFlags(sim, check.outcome == Outcome::True);
+        queued.testValue = sim.data[kTestValueField];
         return check.outcome == Outcome::True;
     };
     if (!passesTest()) {
@@ -720,10 +764,10 @@ bool Execution::pushInteraction(const bhav::Instruction& in, Frame& f) {
     }
     // The links are made before the queue takes it, so a refused push still leaves them written.
     if (o[3] & 0x40) {
-        linkInteraction(world(), queued, read(o[8], static_cast<std::uint16_t>(o[9] | o[10] << 8), f));
+        linkInteraction(world(), globals_, queued, read(o[8], static_cast<std::uint16_t>(o[9] | o[10] << 8), f));
     }
     if (o[3] & 0x80) {
-        write(o[11], static_cast<std::uint16_t>(o[12] | o[13] << 8), f, static_cast<std::int16_t>(ownLinkId(world(), queued)));
+        write(o[11], static_cast<std::uint16_t>(o[12] | o[13] << 8), f, static_cast<std::int16_t>(ownLinkId(globals_, queued)));
     }
     // A sub-interaction is taken only while the Sim runs an interaction whose line has flag 0x4000.
     if (queued.nested && !takesSubInteractions(code_, world(), sim)) {

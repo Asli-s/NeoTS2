@@ -3,6 +3,7 @@
 #include "formats/objt.hpp"
 #include "sim/code_source.hpp"
 
+#include <array>
 #include <cstdint>
 
 namespace ts2::sim {
@@ -16,5 +17,10 @@ std::uint32_t treeSignature(CodeSource& code, std::uint32_t objectGroup, std::ui
 // object type table): the signatures of its Init and Main trees (object functions 0 and 1) and its
 // OBJD fields 0x3A and 0x3B. The game resets every object of a changed type when the lot loads.
 bool typeChangedSinceSave(CodeSource& code, const ObjectType& type, const objt::Entry& saved);
+
+// The values a lot's type table saves of an installed type, which a load compares: the signatures
+// of its Init and Main trees and its OBJD fields 0x3A and 0x3B. A save writes them so the next load
+// finds the type unchanged.
+std::array<std::uint32_t, 4> savedTypeValues(CodeSource& code, const ObjectType& type);
 
 } // namespace ts2::sim

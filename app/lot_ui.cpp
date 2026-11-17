@@ -99,7 +99,7 @@ constexpr std::size_t kRewardPoints = 0xA1, kLifetimeLevels = 0xD9, kLifetimeLev
 constexpr std::uint32_t kFreeTime = 0x2000;
 constexpr std::uint32_t kPanelPortrait = 0x00000001, kPanelShadow = 0x00000002, kPortraitConstants = 0x00000004, kPanelStar = 0x4BDEFFAA;
 // The options menu's windows.
-constexpr std::uint32_t kNeighborhood = 0x0000A210, kExitTutorial = 0x0000A211, kQuit = 0x0000A220;
+constexpr std::uint32_t kNeighborhood = 0x0000A210, kExitTutorial = 0x0000A211, kQuit = 0x0000A220, kSave = 0x0000A230;
 
 // A window's own child with an id (the puck's skewer thumbnails reuse some of the puck's ids).
 int child(const ts2::ui::Screen& screen, int parent, std::uint32_t id) {
@@ -613,6 +613,9 @@ LotUi::Action LotUi::clicked(int window) {
     if (id == kQuit && optionsShown()) {
         return Action::Quit;
     }
+    if (id == kSave && optionsShown()) {
+        return Action::Save;
+    }
     switch (id) {
     case kPause: return Action::Pause;
     case kNormal: return Action::Normal;
@@ -1096,6 +1099,11 @@ void LotUi::showHousehold(std::vector<Skewer::Member> members) {
     memoryPortraits_.clear();
     wantPopupPortraits_.clear();
     balloonPortraits_.clear();
+    // A newborn's file holds no portrait, so a picture asked for before the household's were drawn
+    // was kept empty.
+    queuePortraits_.clear();
+    notificationPortraits_.clear();
+    notificationSmallPortraits_.clear();
     panel_.refreshWants();  // their pictures may be of the last household
     wantsPending_ = true;  // the wants shown point at the pictures just cleared
     portraitShown_ = -1;
@@ -1121,6 +1129,9 @@ void LotUi::setPortrait(std::int16_t sim, const ts2::tga::Pixels& portrait) {
     }
     portraits_[sim] = portrait;
     skewer_.setPortrait(sim, portrait);
+    queuePortraits_.clear();
+    notificationPortraits_.clear();
+    notificationSmallPortraits_.clear();
     if (sim == portraitShown_) {
         portraitShown_ = -1;  // the live panel shows it again
     }

@@ -36,6 +36,8 @@ public:
     float corner(int level, float x, float y) const;
     // The average height of the four corners of the tile containing (x, y).
     float tile(int level, float x, float y) const;
+    // The height at (x, y), blended between the four corners of its tile, as the game places a Sim.
+    float blended(int level, float x, float y) const;
     // The heights the lot's ground is drawn through: `steps` points a tile each way, blended between tile
     // corners, by column then row ((width - 1) * steps + 1 columns). With `sea` (smooth lot skirts, not in
     // the game) points under it or less than 0.6 above are evened with their neighbours, rounding a steep
@@ -220,6 +222,15 @@ struct WallMask {
 
 // Wall masks by lowercase model name, from material names "<model>_<east>_<south>_<level>_<face>_wallmask".
 std::map<std::string, std::vector<WallMask>> wallMasks(const std::vector<std::string>& materialNames);
+
+// The walls an object hides with when a view cuts them down, as the game picks them: only an object
+// it treats as a window (object data 8 bit 0x400, wall lamps among them), and then the walls along
+// the tile edges its wall placement (object data 0x0D) names. Bits 0x1, 0x2, 0x4 and 0x8 name the
+// edge in front, to the left (-x), behind and to the right (+x), and 0x10 and 0x40 the two diagonals,
+// all in the object's own frame (+y its front). Bit 0x1000 leaves it out. Ceiling lamps and hanging
+// plants name no edge, so they stay. Each wall is given by its middle, in tiles from the object's
+// centre.
+std::vector<std::array<float, 2>> hidesWithWalls(std::int16_t flags, std::int16_t wallPlacement);
 
 // Joins the walls meeting at each wall graph point: going around the point, each wall's side line
 // ends where it meets the facing side line of the next wall (mitred corners, T and cross joins).

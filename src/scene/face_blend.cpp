@@ -128,20 +128,38 @@ std::vector<MaskPoint> maskPoints(const sg::Mesh& mesh) {
     return points;
 }
 
-std::vector<FacePair> readFacePairs(std::span<const std::uint8_t> bytes) {
+FaceInfo readFaceInfo(std::span<const std::uint8_t> bytes) {
     BinaryReader r(bytes);
     r.u32();  // version
-    // Each pair is four strings of at least a length each.
-    const std::size_t count = r.u32Count(16);
     auto text = [&r] { return r.text(r.u32Count(1)); };
-    std::vector<FacePair> pairs;
-    for (std::size_t i = 0; i < count; ++i) {
-        FacePair pair{text(), text()};
-        text();  // the regions moved up and down to keep the pair's seam
-        text();
-        pairs.push_back(std::move(pair));
+    FaceInfo info;
+    // Each pair is four strings of at least a length each.
+    const std::size_t pairs = r.u32Count(16);
+    for (std::size_t i = 0; i < pairs; ++i) {
+        FacePair pair;
+        pair.a = text();
+        pair.b = text();
+        pair.up = text();
+        pair.down = text();
+        info.pairs.push_back(std::move(pair));
     }
-    return pairs;
+    // Each range is two numbers, two strings and two floats.
+    const std::size_t ranges = r.u32Count(24);
+    for (std::size_t i = 0; i < ranges; ++i) {
+        FaceRange range;
+        range.age = r.u32();
+        range.gender = r.u32();
+        range.a = text();
+        range.b = text();
+        range.low = r.f32();
+        range.high = r.f32();
+        info.ranges.push_back(std::move(range));
+    }
+    return info;
+}
+
+std::vector<FacePair> readFacePairs(std::span<const std::uint8_t> bytes) {
+    return readFaceInfo(bytes).pairs;
 }
 
 bool blendsBabyFace(const std::optional<faceshape::FaceShape>& a, const std::optional<faceshape::FaceShape>& b, const FacePicks& picks) {

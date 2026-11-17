@@ -1,4 +1,5 @@
 #include "sim/vm_execution.hpp"
+#include "sim/character_file.hpp"
 #include "sim/want_refill.hpp"
 
 #include "formats/propset.hpp"
@@ -367,11 +368,16 @@ std::optional<bool> Execution::makeNewCharacter(const bhav::Instruction& in, Fra
 }
 
 // A Sim Make New Character makes from a template gets a first name and a surname drawn from the
-// game's name tables by species and gender, first name first, each drawn among the table's entries
-// by the character factory's generator. A table missing draws nothing. A template whose definition
-// field 0x30 is set keeps its own first name and gets no surname.
+// game's name tables by species and gender, first name first, each drawn among the table's US
+// English entries by the character factory's generator. A table missing draws nothing. A template
+// whose definition field 0x30 is set keeps its own first name and gets no surname.
+//
+// The names are kept in every language as the character file holds them (inEveryLanguage). Two
+// templates put a title before the first name (Prof., Count), which isn't done yet, so their Sims'
+// names are known in US English alone, and so are a Sim's whose name table is missing.
 void Execution::nameNewCharacter(std::int16_t id, const ObjectType& type, int species, int gender) {
     constexpr std::size_t kKeepsName = 0x30;
+    constexpr std::uint32_t kProfessorTemplate = 0x8EA1056C, kCountTemplate = 0xCF99CB2E;
     if (type.definition.field(kKeepsName) != 0) {
         world().setNeighborSurname(id, "");
         return;
@@ -380,19 +386,33 @@ void Execution::nameNewCharacter(std::int16_t id, const ObjectType& type, int sp
     const bool human = species == 0;
     const std::uint16_t firstNames = human ? (female ? 0x97 : 0x96) : (female ? 0xEB : 0xEA);
     const std::uint16_t surnames = human ? (female ? 0xCC : 0x98) : (female ? 0xED : 0xEC);
-    const auto draw = [&](std::uint16_t table) -> std::optional<std::string> {
+    std::vector<std::pair<std::string, std::string>> local(kNameLanguages);
+    bool everyLanguage = type.definition.guid() != kProfessorTemplate && type.definition.guid() != kCountTemplate;
+    const auto draw = [&](std::uint16_t table, bool first) -> std::optional<std::string> {
         const auto* names = world().nameTable(table);
         if (names == nullptr || names->empty()) {
+            everyLanguage = false;
             return std::nullopt;
         }
-        const auto pick = (static_cast<std::uint64_t>(world().characterRandom()()) * names->size()) >> 32;
-        return (*names)[static_cast<std::size_t>(pick)];
+        const auto pick = static_cast<std::size_t>((static_cast<std::uint64_t>(world().characterRandom()()) * names->size()) >> 32);
+        const auto* lists = world().languageNameTable(table);
+        const auto rows = lists != nullptr ? inEveryLanguage(*lists, pick) : std::vector<std::string>{};
+        if (rows.empty()) {
+            everyLanguage = false;
+        }
+        for (std::size_t i = 0; i < rows.size(); ++i) {
+            (first ? local[i].first : local[i].second) = rows[i];
+        }
+        return (*names)[pick];
     };
-    if (auto first = draw(firstNames)) {
+    if (auto first = draw(firstNames, true)) {
         world().setNeighborFirstName(id, std::move(*first));
     }
-    if (auto last = draw(surnames)) {
+    if (auto last = draw(surnames, false)) {
         world().setNeighborSurname(id, std::move(*last));
+    }
+    if (everyLanguage) {
+        world().setNeighborLanguageNames(id, std::move(local));
     }
 }
 
@@ -536,6 +556,35 @@ std::optional<std::int16_t> Execution::makeChild(std::int16_t parent1, std::int1
             made.genes = childGenome(*a, *b, *catalog, world().geneticsRandom(), &made.facePicks);
             made.faceParentA = geneticA;
             made.faceParentB = geneticB;
+            // Its personality follows on the same generator, from each parent as the lot has it, and
+            // with it the copy of its traits, its zodiac sign, its GUID's low half and its age's value.
+            constexpr std::size_t kTraitCopy = 0x2F, kZodiac = 0x46, kGuidLow = 0x58, kAgeValue = 0x2E;
+            constexpr std::int16_t kYoungAgeValue = 0x40;
+            const auto parentValue = [&](bool fromA, std::size_t index) {
+                const std::int16_t parent = fromA ? geneticA : geneticB;
+                std::optional<std::int16_t> onLot;
+                world().nextAfter(0, [&](const SimObject& o) {
+                    if (o.isPerson() && world().neighborIdOf(o) == parent && index < o.personData.size()) {
+                        onLot = o.personData[index];
+                        return true;
+                    }
+                    return false;
+                });
+                return onLot ? *onLot : world().neighborPersonValue(parent, index);
+            };
+            const Personality personality = childPersonality(parentValue, world().geneticsRandom(), true);
+            for (const auto& [trait, value] : personality) {
+                made.personData[trait] = value;
+            }
+            // The copy holds neat, nice, active, outgoing and playful, in that order.
+            constexpr std::array<std::size_t, 5> kCopied{7, 2, 3, 6, 5};
+            for (std::size_t i = 0; i < kCopied.size(); ++i) {
+                made.personData[kTraitCopy + i] = made.personData[kCopied[i]];
+            }
+            made.personData[kZodiac] = zodiacSign(personality);
+            made.personData[kGuidLow] = static_cast<std::int16_t>(made.guid);
+            // A baby, toddler or child has 0x40. What an older Sim gets by its sign is not known yet.
+            made.personData[kAgeValue] = kYoungAgeValue;
             // The eyebrows are drawn after the genes, from the catalog when the look is made. The
             // game draws them with the birth job's generator, not the genes', so they are drawn with
             // the factory's other draws here and the genes' stream stays as the game's.

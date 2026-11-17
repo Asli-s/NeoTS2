@@ -30,6 +30,7 @@ public:
     const std::map<std::string, std::string>* ageData(std::uint32_t group) override;
     std::optional<std::vector<std::uint8_t>> characterResource(std::uint32_t type, std::uint32_t group) override;
     std::vector<std::pair<std::uint32_t, std::vector<std::uint8_t>>> groupResources(std::uint32_t type, std::uint32_t group) override;
+    std::vector<std::pair<dbpf::ResourceKey, std::vector<std::uint8_t>>> everyGroupResource(std::uint32_t group) override;
     [[nodiscard]] std::optional<std::string> string(std::uint32_t group, std::uint16_t instance,
                                       std::size_t index) override;
     [[nodiscard]] std::optional<std::string> stringDescription(std::uint32_t group, std::uint16_t instance, std::size_t index) override;

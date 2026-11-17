@@ -97,6 +97,9 @@ void Skewer::setHousehold(std::vector<Member> members) {
 }
 
 void Skewer::setPortrait(std::int16_t sim, const ts2::tga::Pixels& portrait) {
+    if (skewer_ < 0) {
+        return;
+    }
     auto& s = *screen_;
     for (const Thumbnail& t : thumbnails_) {
         if (t.sim != sim) {

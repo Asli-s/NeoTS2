@@ -51,6 +51,9 @@ public:
 
     std::size_t size() const { return count_; }
 
+    // Every message with its subscribers, by message id and then object id.
+    const std::map<std::uint32_t, std::map<std::int16_t, std::string>>& all() const { return byMessage_; }
+
 private:
     std::map<std::uint32_t, std::map<std::int16_t, std::string>> byMessage_;
     std::size_t count_ = 0;

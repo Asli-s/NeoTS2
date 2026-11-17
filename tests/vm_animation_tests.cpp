@@ -152,7 +152,7 @@ void animateSimWaitsForItsAnimation() {
 
     CHECK(vm.run(sim, kObjectGroup, 0x1000).outcome == Outcome::Sleeping);
     CHECK(sim.animation && sim.animation->name == "a2o-shower-getOut-E");
-    CHECK(std::fabs(sim.animation->fadeInMs - 233.33f) < 1e-3f && std::fabs(sim.animation->fadeOutMs - 233.33f) < 1e-3f);
+    CHECK(std::fabs(sim.animation->fadeInMs - ts2::sim::kAnimateFadeMs) < 1e-3f && std::fabs(sim.animation->fadeOutMs - ts2::sim::kAnimateFadeMs) < 1e-3f);
     world.advanceClock(1700);
     CHECK(vm.resume(sim).outcome == Outcome::Sleeping && sim.thread.temps[0] == 0);
     // It goes on once its clip starts fading out, and the clip fades on as the one ending.

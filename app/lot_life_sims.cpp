@@ -395,6 +395,12 @@ void LotLife::dressFromSource(std::int16_t id) {
         if (sim->personData[kDefaultSource] != 0) {
             ts2::diag::warnOnce("a Sim's default outfit source (person data 0x69) isn't worn yet (PR-63)");
         }
+        // A Sim saved in another outfit of its own, as one in the bath or shower is, wears it again.
+        const ts2::sim::SimObject::OutfitChange saved{sim->personData[kCurrentOutfit], std::nullopt};
+        constexpr std::uint32_t kEveryday = 0x01;
+        if (saved.categoryFlag() != kEveryday) {
+            sim->outfitChange = saved;
+        }
         return;
     }
     if (const auto built = buildOutfit(*sim, {guid, false, false}); built && built->sourceFound) {
@@ -600,6 +606,7 @@ void LotLife::wearAppearanceHairs(std::int16_t simId, const ts2::scene::HairSlot
             aged = agedData_.insert_or_assign(neighbor, std::move(*own)).first;
         }
         ts2::scene::wearHairs(aged->second, outfitCatalog_.get(), slots, tone);
+        looksChanged_.insert(neighbor);
         if (const auto working = outfitData_.find(neighbor); working != outfitData_.end()) {
             ts2::scene::wearHairs(working->second, outfitCatalog_.get(), slots, tone);
         }
@@ -647,6 +654,27 @@ std::optional<ts2::scene::Actor> LotLife::addHairPictureSim(ts2::scene::Scene& s
     }
     return objectMaterials_.sim(look, "picture", ts2::scene::Transform{}, scene.groundLevel,
                                 ts2::scene::picturePose(ts2::scene::pictureAge(age)), scene, freeSimInstances_);
+}
+
+std::vector<std::pair<std::filesystem::path, ts2::sim::OutfitLook>> LotLife::changedLooks() {
+    std::vector<std::pair<std::filesystem::path, ts2::sim::OutfitLook>> out;
+    for (const std::int16_t neighbor : looksChanged_) {
+        const auto file = sim_->characterFile(neighbor);
+        const auto aged = agedData_.find(neighbor);
+        if (!file || aged == agedData_.end()) {
+            continue;
+        }
+        ts2::sim::OutfitLook look;
+        look.properties = aged->second.properties;
+        for (const auto& [key, parts] : aged->second.lists) {
+            auto& keys = look.lists[key];
+            for (const auto& p : parts) {
+                keys.push_back({p.type, p.group, p.instance, p.instanceHigh});
+            }
+        }
+        out.emplace_back(*file, std::move(look));
+    }
+    return out;
 }
 
 // The game dresses a copy of the Sim in its try-on outfit: the outfit open in the editor (everyday

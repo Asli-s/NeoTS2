@@ -7,8 +7,10 @@
 
 #include "content/build_scripts.hpp"
 #include "content/genetics_catalog.hpp"
+#include "content/recolour_catalog.hpp"
 #include "content/install.hpp"
 #include "content/lot.hpp"
+#include "scene/lot_parts.hpp"
 #include "content/neighborhood.hpp"
 #include "content/scripts.hpp"
 #include "content/wants.hpp"
@@ -20,6 +22,7 @@
 #include "sim/object_reset.hpp"
 #include "sim/overlay_events.hpp"
 #include "sim/pie_menu.hpp"
+#include "sim/recolour_rows.hpp"
 #include "sim/route_destinations.hpp"
 #include "sim/route_goals.hpp"
 #include "sim/route_portals.hpp"
@@ -98,6 +101,14 @@ LotSimulation::LotSimulation(const std::filesystem::path& install, const std::fi
                              }
                          }).share();
     world_.setGeneticsCatalog([catalog] { return &catalog.get(); });
+    auto recolours = std::async(std::launch::async, [install] {
+        try {
+            return content::loadRecolourCatalog(content::findProducts(install));
+        } catch (const std::exception& ex) {
+            diag::warnOnce(std::string("recolours: the material catalogs can't be read: ") + ex.what());
+            return content::RecolourCatalog{};
+        }
+    });
     world_.geneticsRandom().seed(seed ? *seed : clockSeed());
     world_.characterRandom().seed(seed ? *seed : clockSeed());
     vm_.resetSim = [this](SimObject& sim) {
@@ -107,9 +118,18 @@ LotSimulation::LotSimulation(const std::filesystem::path& install, const std::fi
     };
     lot_ = std::make_unique<const content::Lot>(content::loadLot(lot));
     const content::Lot& saved = *lot_;
+    {
+        // A copy of the grid, as the lot is let go once the route world is built.
+        const scene::Heights fromLot(saved);
+        const auto heights = std::make_shared<const scene::Heights>(fromLot.grid() ? std::make_shared<const array3d::Array3D>(*fromLot.grid())
+                                                                                   : nullptr);
+        const int groundLevel = content::gridLevel(saved, 1);
+        floorHeight_ = [heights, groundLevel](std::int32_t level, float x, float y) { return heights->blended(level - 1 + groundLevel, x, y); };
+    }
     objectModels_ = saved.objectModels;
     savedJoints_ = saved.savedJoints;
     report_ = buildWorld(saved, code_, world_);
+    applyChosenRecolours(saved, code_, world_, recolours.get());
     world_.nextAfter(0, [&](const SimObject& o) {
         savedGuids_.emplace(static_cast<std::uint32_t>(o.id), o.definition.guid());
         return false;
@@ -241,9 +261,20 @@ LotSimulation::LotSimulation(const std::filesystem::path& install, const std::fi
         }
     }
     world_.setScripts(loadScripts(install, code_));
+    std::unordered_set<std::int16_t> fromSave;
+    world_.nextAfter(0, [&](const SimObject& o) {
+        fromSave.insert(o.id);
+        return false;
+    });
     vm_.onStep = std::move(onLoadStep);
     startObjects();
     vm_.onStep = nullptr;
+    world_.nextAfter(0, [&](const SimObject& o) {
+        if (!fromSave.contains(o.id)) {
+            madeAsLoaded_.insert(o.id);
+        }
+        return false;
+    });
 }
 
 void LotSimulation::setRouteSources(RouteSources sources) {
@@ -922,6 +953,16 @@ std::optional<std::filesystem::path> LotSimulation::characterFile(std::int16_t n
     return it != characterFiles_.end() ? std::optional<std::filesystem::path>(it->second) : std::nullopt;
 }
 
+float LotSimulation::floorHeight(std::int32_t level, float x, float y) const {
+    return floorHeight_ ? floorHeight_(level, x, y) : 0.0f;
+}
+
+void LotSimulation::addCharacterFile(std::int16_t neighbor, const std::filesystem::path& path) {
+    if (const SavedNeighbor* n = world_.neighbor(neighbor)) {
+        characterFiles_.insert_or_assign(n->guid, path);
+    }
+}
+
 void LotSimulation::findCharacterFiles() {
     characterFiles_.clear();
     std::vector<content::ResourceIndex::Resource> definitions;
@@ -1332,6 +1373,7 @@ void LotSimulation::tick() {
     forgetRemoved();
     purgeRemoved();
     keepSelection(world_, code_, vm_.globals);
+    markShownNames(world_, vm_.globals);
     world_.countTick();
     ++ticks_;
 }

@@ -97,6 +97,7 @@ public:
         Transform place;
         std::string node;
         Transform fromNode;
+        Transform restPlace;  // where it sits with every joint at rest
     };
     // A model's shapes and its joints: by the index meshes skin to, each one's rest place in the
     // model, and the joints that nodes drawing shapes follow.
@@ -105,6 +106,9 @@ public:
         std::map<int, std::string> joints;
         Pose rests;
         std::set<std::string> shapeJoints;
+        // With saved joint places: how far each joint moved from its rest place, in the model. A
+        // group skinned to the joints moves with them, as the game draws it by its joints.
+        Pose savedMoves;
     };
     // What a buildModel call asks for, as its parts read it.
     struct ModelRequest {

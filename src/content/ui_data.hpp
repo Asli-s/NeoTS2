@@ -34,6 +34,10 @@ public:
     // (US English when the table has none of it). Empty when there is no such table.
     std::vector<std::string> texts(std::uint32_t group, std::uint32_t instance, std::uint8_t language = 1);
 
+    // The same strings in every language the table has, by language - 1, as the table holds their
+    // bytes. A language it lacks has an empty list. Empty when there is no such table.
+    std::vector<std::vector<std::string>> languageTexts(std::uint32_t group, std::uint32_t instance);
+
     std::size_t packageCount() const { return index_.packageCount(); }
 
 private:

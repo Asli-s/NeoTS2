@@ -60,12 +60,16 @@ struct Request {
     std::uint16_t eventTree = 0;
     std::int32_t value2 = 0;  // not known yet
     Word rate = 0;
-    std::array<Word, 15> words1{};  // not known yet, a place among them
+    // Not known yet but word 5, the object the animation's IK reaches for (0 for none). A place is
+    // among them.
+    std::array<Word, 15> words1{};
     Word eventObjectGuid = 0;
     std::array<Word, 2> words2{};  // not known yet
     std::string text;              // not known yet
     std::optional<std::pair<std::int32_t, Word>> part;  // not known yet
-    std::array<Word, 2> words3{};  // not known yet
+    // What the animation hangs from (see sim::AnimationAnchor): the seat or holder the Sim was in as
+    // it started, and the name hash of that object's slot bone. 0 for none, -1 for the Sim's own place.
+    std::array<Word, 2> words3{};
     std::int32_t value3 = 0;       // not known yet
 };
 
@@ -88,15 +92,21 @@ struct Instance {
     Word word1 = 0;          // not known yet
     std::int32_t startTick = 0;
     Word stopTick = 0;
-    std::array<Word, 3> words2{};  // not known yet
+    // A float not known yet, a float (1 in every save), and how the clip decides it has ended (5 as
+    // the game makes a clip, 3 or 4 for some).
+    std::array<Word, 3> words2{};
     std::int32_t layer = 0;
     Word weight = 0;
     std::optional<Curve> curve;
     Word word3 = 0;  // not known yet
     std::int32_t plays = 1;  // -1: until stopped
-    std::array<Word, 26> words4{};  // not known yet, three places among them
+    // Two floats (1 and 0 in every save), then three places, each a position, a rotation and a scale
+    // of 1. The first is the Sim's own place for a Sim's clip that hangs from the Sim, else no move.
+    std::array<Word, 26> words4{};
     std::int32_t savedTick = 0;
-    std::array<Word, 5> words5{};  // not known yet
+    // 1 once the clip has started, 1 for a clip of state 2, a tick ("never" in most saves), the
+    // float just under 2^31, and a flag (1 in every save).
+    std::array<Word, 5> words5{};
     Word time = 0;   // time into the clip
     Word word6 = 0;  // not known yet
 };
@@ -137,9 +147,10 @@ struct Record {
     LocomotablePart locomotable;  // for Person
 };
 
-// Reads a record as the game writes it now. Empty for a chain or a part version the game no longer
-// writes (it upgrades them when it loads), a name that is not all zeros, a length written longer
-// than needed, or bytes cut short or left over.
+// Reads a record as the game writes it now. An animation instance of version 1, as the lots the game
+// ships hold, is read as the game upgrades it and writes back as version 2. Empty for a chain or
+// another part version the game no longer writes (it upgrades them when it loads), a name that is
+// not all zeros, a length written longer than needed, or bytes cut short or left over.
 std::optional<Record> readRecord(std::span<const std::uint8_t> data);
 
 // Throws std::runtime_error for a list too long to write.

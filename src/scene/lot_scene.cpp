@@ -108,6 +108,13 @@ std::vector<float> Heights::drawnGrid(int level, std::uint32_t steps, std::optio
     return h;
 }
 
+float Heights::blended(int level, float x, float y) const {
+    const float fx = std::floor(x), fy = std::floor(y);
+    const auto at = [&](float cx, float cy) { return corner(level, cx, cy); };
+    const float u = x - fx, v = y - fy;
+    return (at(fx, fy) * (1 - u) + at(fx + 1, fy) * u) * (1 - v) + (at(fx, fy + 1) * (1 - u) + at(fx + 1, fy + 1) * u) * v;
+}
+
 float Heights::tile(int level, float x, float y) const {
     float sum = 0;
     int n = 0;
@@ -467,7 +474,21 @@ void LotSceneBuilder::log(const content::LotObject& o, const std::string& what, 
     stats_.objectLog.push_back(line.str());
 }
 
-// Doors and windows cut their wall masks out of the wall faces they sit in.
+void LotSceneBuilder::tieToWalls(const Shown& o) {
+    const auto& data = o.object->state.data;
+    const int level = content::gridLevel(lot_, o.object->state.header.value1);
+    for (const auto& middle : hidesWithWalls(data[kFlagsData], data[kWallPlacementData])) {
+        float at[3] = {middle[0], middle[1], 0};
+        o.world.apply(at, true);
+        if (const auto wall = wallAt_.find(edgeKey(at[0], at[1], at[0], at[1], level)); wall != wallAt_.end()) {
+            b_.scene().instances[o.instance].walls.push_back(wallBase_ + static_cast<int>(wall->second));
+            ++stats_.onWalls;
+        }
+    }
+}
+
+// Doors and windows cut their wall masks out of the wall faces they sit in, and hide with those walls
+// when a view cuts them down. Objects the game treats as windows do too (see hidesWithWalls).
 void LotSceneBuilder::cutWalls() {
     if (walls_.empty()) {
         return;
@@ -476,6 +497,7 @@ void LotSceneBuilder::cutWalls() {
     for (const auto& o : shown_) {
         const auto list = masks.find(lower(o.model));
         if (list == masks.end()) {
+            tieToWalls(o);
             continue;
         }
         for (const auto& m : list->second) {

@@ -18,6 +18,25 @@ Transform Transform::at(float x, float y, float z, float angle) {
     return of({x, y, z}, {0, 0, std::sin(angle / 2), std::cos(angle / 2)});
 }
 
+std::array<float, 4> Transform::rotation() const {
+    // From the largest of the diagonal terms, so the root taken stays well above 0.
+    const float trace = m[0] + m[5] + m[10];
+    if (trace > 0) {
+        const float s = std::sqrt(trace + 1.0f) * 2;
+        return {(m[9] - m[6]) / s, (m[2] - m[8]) / s, (m[4] - m[1]) / s, 0.25f * s};
+    }
+    if (m[0] > m[5] && m[0] > m[10]) {
+        const float s = std::sqrt(1.0f + m[0] - m[5] - m[10]) * 2;
+        return {0.25f * s, (m[1] + m[4]) / s, (m[2] + m[8]) / s, (m[9] - m[6]) / s};
+    }
+    if (m[5] > m[10]) {
+        const float s = std::sqrt(1.0f + m[5] - m[0] - m[10]) * 2;
+        return {(m[1] + m[4]) / s, 0.25f * s, (m[6] + m[9]) / s, (m[2] - m[8]) / s};
+    }
+    const float s = std::sqrt(1.0f + m[10] - m[0] - m[5]) * 2;
+    return {(m[2] + m[8]) / s, (m[6] + m[9]) / s, 0.25f * s, (m[4] - m[1]) / s};
+}
+
 Transform Transform::rigidInverse() const {
     Transform r;
     for (int i = 0; i < 3; ++i) {

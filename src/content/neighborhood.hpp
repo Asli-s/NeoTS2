@@ -58,6 +58,9 @@ std::vector<NeighborhoodEntry> listNeighborhoods(const std::filesystem::path& ne
 struct Neighbor {
     std::uint32_t guid = 0;                  // the Sim's object type
     std::vector<std::int16_t> personData;    // the neighbor's copy, indexed like a Sim's
+    // The neighbors it has a relationship record towards, in the description's saved order. Empty
+    // for a description of an older version.
+    std::vector<std::uint32_t> relationshipList;
 };
 
 struct Neighborhood {
@@ -101,6 +104,8 @@ struct Neighborhood {
     std::map<std::int16_t, datatables::DataTables> dataTables;
     // Its identity: id, type and the season of each quadrant.
     std::optional<nhoodid::NeighborhoodId> identity;
+    // The id the next new neighbor starts from (0xCC2A6A34), as saved.
+    std::optional<std::uint16_t> nextNeighborId;
     // Its weather and season (Seasons), nullopt when not saved.
     std::optional<weather::Weather> weather;
     std::vector<std::string> problems;

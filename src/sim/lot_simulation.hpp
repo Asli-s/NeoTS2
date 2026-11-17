@@ -17,12 +17,14 @@
 #include <cstdint>
 #include <initializer_list>
 #include <filesystem>
+#include <functional>
 #include <span>
 #include <map>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string>
+#include <unordered_set>
 #include <utility>
 
 namespace ts2::sim {
@@ -70,6 +72,9 @@ public:
 
     World& world() { return world_; }
     CodeSource& code() { return code_; }
+    // The objects the lot made as it loaded, its controllers among them, as opposed to those the
+    // save held or play made since.
+    const std::unordered_set<std::int16_t>& madeAsLoaded() const { return madeAsLoaded_; }
     // See IndexCodeSource::setTextTables.
     void setTextTables(std::function<std::vector<std::string>(std::uint32_t group, std::uint16_t instance)> lookup) {
         code_.setTextTables(std::move(lookup));
@@ -103,6 +108,13 @@ public:
     // A neighbor's character file (by neighbor id), on the lot or not: the one whose object
     // definition has the neighbor's GUID. Nullopt when unknown. Only looks it up, reads nothing.
     [[nodiscard]] std::optional<std::filesystem::path> characterFile(std::int16_t neighbor) const;
+    // The floor height at (x, y) in the lot's tiles (the scene's x and y) on storey `level` (1 = ground),
+    // blended between its tile's corners, from the height grid the lot was saved with.
+    [[nodiscard]] float floorHeight(std::int32_t level, float x, float y) const;
+    // Records that a save wrote neighbor `neighbor`'s character file at `path`.
+    void addCharacterFile(std::int16_t neighbor, const std::filesystem::path& path);
+    // Reads again a package of the lot's code that a save has replaced (a character file).
+    void refreshPackage(const std::filesystem::path& path) { index_.refreshPackage(path); }
     // The group of a neighbor's object type, where a neighbor without a character file keeps its looks.
     [[nodiscard]] std::optional<std::uint32_t> characterGroup(std::int16_t neighbor);
 
@@ -130,6 +142,7 @@ private:
     // Character files by their Sim's GUID, gathered while the simulation is built.
     std::map<std::uint32_t, std::filesystem::path> characterFiles_;
     IndexCodeSource code_;
+    std::unordered_set<std::int16_t> madeAsLoaded_;
     World world_;
     Vm vm_;
     std::uint32_t installedPacks_ = 0;
@@ -142,6 +155,7 @@ private:
     std::vector<std::int16_t> household_;
     mutable std::vector<std::int16_t> familyHousehold_;  // the family's Sims on the lot, as household() last found them
     std::unique_ptr<const content::Lot> lot_;  // kept until the route world is built
+    std::function<float(std::int32_t, float, float)> floorHeight_;
     std::map<std::uint32_t, std::string> objectModels_;  // the lot's model name of each object id
     std::map<std::uint32_t, std::uint32_t> savedGuids_;  // the type (GUID) each id had when the lot was saved
     std::map<std::uint32_t, std::vector<cobject::SavedJoint>> savedJoints_;  // as the lot saved each object's model posed

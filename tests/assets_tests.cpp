@@ -555,7 +555,8 @@ void madeSimsWearTheirUniform() {
         return catalogPart(key(0xEBCF3E27, instance), std::move(p));
     };
     OutfitCatalog catalog;
-    catalog.parts = {gzps(1, {{"age", "8"}, {"gender", "2"}, {"outfit", "1"}, {"category", "1"}, {"hairtone", "cccc"}}),
+    // The hair has no category, so it fits every outfit the hair spread fills.
+    catalog.parts = {gzps(1, {{"age", "8"}, {"gender", "2"}, {"outfit", "1"}, {"hairtone", "cccc"}}),
                      gzps(3, {{"age", "8"}, {"gender", "2"}, {"outfit", "2"}, {"category", "128"}}),
                      gzps(4, {{"age", "8"}, {"gender", "2"}, {"outfit", "8"}, {"category", "1"}})};
     catalog.skinTones = {catalogPart(key(0x4C158081, 1), {{"age", "127"}, {"gender", "3"}, {"family", "bbbb"}})};
@@ -576,6 +577,36 @@ void madeSimsWearTheirUniform() {
     CHECK(d.lists.at(0x10008).size() == 1 && d.lists.at(0x10008).front().instance == 9);
     CHECK(made.faceFamily == "ffff" && made.problems.empty());
     CHECK(made.faceOverlays.size() == 2 && made.faceOverlays[0].instance == 1 && made.faceOverlays[1].instance == 2);
+}
+
+// The Gypsy Matchmaker's outfit (lock 0x3E4) puts its hair on, as in the game's file for her: the
+// outfit's hair where its categories fit, its family's other hair in the outfits it keeps hats out
+// of, and no hair for the bare skin, PlantSim or leaf outfits from the spread.
+void madeSimsTakeTheirOutfitsHair() {
+    using namespace ts2::scene;
+    const auto key = [](std::uint32_t type, std::uint32_t instance) { return sg::Link{type, 0x2C17B74A, instance, 0}; };
+    const auto gzps = [&](std::uint32_t instance, std::map<std::string, std::string> p) {
+        return catalogPart(key(0xEBCF3E27, instance), std::move(p));
+    };
+    OutfitCatalog catalog;
+    catalog.parts = {gzps(0x55, {{"age", "16"}, {"gender", "1"}, {"outfit", "1"}, {"category", "39"}, {"flags", "11"}, {"version", "2"},
+                                 {"family", "0acee78a"}, {"hairtone", "5"}}),
+                     gzps(0x9C, {{"age", "16"}, {"gender", "1"}, {"outfit", "1"}, {"category", "856"}, {"flags", "9"},
+                                 {"family", "0acee78a"}, {"hairtone", "5"}})};
+    catalog.hairTones = {catalogPart(key(0x8C1580B5, 1), {{"age", "127"}, {"gender", "3"}, {"family", "5"}})};
+    AgeData outfit;
+    outfit.properties = {{"age", "16"}, {"gender", "1"}, {"species", "1"}, {"validparts", "996"}};
+    outfit.lists[0x10001] = {key(0xEBCF3E27, 0x55)};
+    OutfitRandom random(1);
+    const auto made = makeLook({0x10, 1, 1}, {outfit}, catalog, random);
+    const auto hair = [&](std::uint32_t category) {
+        const auto it = made.data.lists.find(category << 16 | 1);
+        return it == made.data.lists.end() || it->second.empty() ? 0u : it->second.front().instance;
+    };
+    CHECK(hair(1) == 0x55 && hair(0x20) == 0x55 && hair(0x1000) == 0x55);
+    CHECK(hair(8) == 0x9C && hair(0x10) == 0x9C && hair(0x40) == 0x9C && hair(0x100) == 0x9C && hair(0x200) == 0x9C);
+    CHECK(hair(0x400) == 0 && hair(0x800) == 0);
+    CHECK(std::none_of(made.problems.begin(), made.problems.end(), [](const std::string& p) { return p.find("hair") != std::string::npos; }));
 }
 
 // Change Outfit picks among an outfit object's age data those of the Sim's age and gender (or of
@@ -1058,6 +1089,43 @@ void savedJointsMoveTheModel() {
     std::filesystem::remove_all(root);
 }
 
+// A skinned group follows its joints as a lot saved them, though its shape node doesn't move: a
+// bar stool's seat and legs hang on a joint under the one the stool slides on, and a stool saved
+// pushed in under its counter is drawn there. A group under a moved shape node moves once.
+void savedJointsMoveSkinnedGroups() {
+    const std::vector<float> positions{0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0};
+    const testres::MeshSkin onSeat{2, 3};
+    auto resources = testres::squareModel("stool");
+    resources[0].data = testres::slidingResourceNode("stool_cres", "stool_shpe");
+    resources[3].data = testres::mesh("stool_tslocator_gmdc", "square", positions, {0, 1, 1, 1, 1, 0, 0, 0}, {0, 1, 2, 0, 2, 3}, nullptr, &onSeat);
+    auto jointed = testres::squareModel("chair");
+    jointed[0].data = testres::jointedResourceNode("chair_cres", "chair_shpe", "Slot_Seat");
+    const testres::MeshSkin onSlot{0, 1};
+    jointed[3].data = testres::mesh("chair_tslocator_gmdc", "square", positions, {0, 1, 1, 1, 1, 0, 0, 0}, {0, 1, 2, 0, 2, 3}, nullptr, &onSlot);
+    resources.insert(resources.end(), jointed.begin(), jointed.end());
+    const auto root = testres::gameFolder("neots2-builder-saved-skin-test", resources);
+    {
+        ts2::scene::Assets assets(root);
+        ts2::scene::SceneBuilder builder(assets);
+        const auto moved = [&](const std::string& model, const std::string& joint) -> std::optional<float> {
+            const int rest = builder.model(model, {});
+            std::string boneKey;
+            const int posed = builder.savedPoseModel(model, {}, std::vector<ts2::cobject::SavedJoint>{{joint, {0, 0.5f, 0}}}, boneKey);
+            if (rest < 0 || posed < 0 || rest == posed) {
+                return std::nullopt;
+            }
+            const auto& a = builder.scene().meshes[static_cast<std::size_t>(rest)].primitives.front().positions;
+            const auto& b = builder.scene().meshes[static_cast<std::size_t>(posed)].primitives.front().positions;
+            return a.size() == b.size() && b[0] == a[0] ? std::optional<float>(b[1] - a[1]) : std::nullopt;
+        };
+        const auto stool = moved("stool", "slide");
+        CHECK(stool && std::fabs(*stool - 0.5f) < 1e-5f);
+        const auto chair = moved("chair", "slot_seat");
+        CHECK(chair && std::fabs(*chair - 0.5f) < 1e-5f);
+    }
+    std::filesystem::remove_all(root);
+}
+
 // A model whose material is missing is still built, without a material. One whose mesh is missing
 // has nothing to draw.
 void modelsWithMissingPartsAreHandled() {
@@ -1202,12 +1270,14 @@ std::vector<Test> assetTests() {
         {"binned parts follow the game's order", binnedPartsFollowTheGamesOrder},
         {"teens age into adults", teensAgeIntoAdults},
         {"made Sims wear their uniform", madeSimsWearTheirUniform},
+        {"made Sims take their outfit's hair", madeSimsTakeTheirOutfitsHair},
         {"outfits are picked and put on", outfitsArePickedAndPutOn},
         {"face templates move the face", faceTemplatesMoveTheFace},
         {"models are built from their resources", modelsAreBuiltFromTheirResources},
         {"models keep their morphs", modelsKeepTheirMorphs},
         {"models with missing parts are handled", modelsWithMissingPartsAreHandled},
         {"saved joints move the model", savedJointsMoveTheModel},
+        {"saved joints move skinned groups", savedJointsMoveSkinnedGroups},
         {"shapes sit where their node puts them", shapesSitWhereTheirNodePutsThem},
         {"imposter objects come from its resource node", imposterObjectsComeFromItsResourceNode},
         {"a camera node keeps the nodes after it", aCameraNodeKeepsTheNodesAfterIt},

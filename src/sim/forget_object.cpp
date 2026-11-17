@@ -23,6 +23,15 @@ bool forgetObject(SimObject& sim, std::int16_t removed) {
     std::erase_if(sim.queue, [&](const QueuedInteraction& q) {
         return q.object == removed || q.icon() == removed;
     });
+    // The running interaction keeps running without its picture, whether it is the one it started
+    // with or one Add/Change Action String gave it since. A new object that takes the id later is
+    // not shown in its place.
+    if (sim.running && (sim.running->icon() == removed || sim.actionIconObject == removed)) {
+        sim.running->iconObject = 0;
+        sim.running->noIconObject = true;
+        sim.running->lostIcon = true;
+        sim.actionIconObject = 0;
+    }
     return false;
 }
 

@@ -5,6 +5,7 @@
 #include "formats/famt.hpp"
 #include "formats/hash.hpp"
 #include "formats/lot_description.hpp"
+#include "formats/lot_records.hpp"
 #include "formats/neighborhood_id.hpp"
 #include "formats/propset.hpp"
 #include "formats/resource_types.hpp"
@@ -190,8 +191,12 @@ Neighborhood loadNeighborhood(const fs::path& neighborhoodPackage) {
             const auto id = static_cast<std::int16_t>(e.key.instance);
             hood.neighborIds.insert(id);
             try {
-                auto s = sdsc::parse(package.read(e));
-                hood.neighbors[id] = Neighbor{s.guid, std::move(s.personData)};
+                const std::vector<std::uint8_t> bytes = package.read(e);
+                auto s = sdsc::parse(bytes);
+                hood.neighbors[id] = Neighbor{s.guid, std::move(s.personData), {}};
+                if (auto record = sdsc::readRecord(bytes)) {
+                    hood.neighbors[id].relationshipList = std::move(record->relationships);
+                }
             } catch (const std::exception& ex) {
                 hood.problems.push_back("neighbor " + std::to_string(id) + ": " + ex.what());
             }
@@ -217,6 +222,12 @@ Neighborhood loadNeighborhood(const fs::path& neighborhoodPackage) {
         } else if (e.key.type == nhood::kLotDescriptionType) {
             if (addLot(hood, package, e)) {
                 mainLots.push_back(static_cast<std::int32_t>(e.key.instance));
+            }
+        } else if (e.key.type == lotrecords::kShortRecordType) {
+            try {
+                hood.nextNeighborId = lotrecords::readShortRecord(package.read(e));
+            } catch (const std::exception& ex) {
+                hood.problems.push_back(std::string("next neighbor id: ") + ex.what());
             }
         } else if (e.key.type == nhoodid::kType) {
             try {

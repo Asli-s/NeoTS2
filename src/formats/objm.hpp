@@ -60,10 +60,17 @@ struct MapRecord {
     std::vector<std::int32_t> buildBuyBlockers;  // objects keeping build and buy mode closed, as listed
     std::string text;  // from the simulator, empty in every save seen
     std::vector<Subscription> subscriptions;
+    // Read at the shipped version, which saves no subscriptions, so the list is empty however many
+    // the lot's scripts made since it loaded.
+    bool upgraded = false;
 };
 
-// Reads instance 1 of the version the game writes. Empty for another version, a first word that
-// is not 0, a field the game writes as 0 that is not, or bytes cut short or left over.
+// The version of the lots the game ships, which a lot keeps until the game first saves it.
+constexpr std::uint32_t kShippedVersion = 0xAD;
+
+// Reads instance 1 of the version the game writes, or of the shipped version, which ends before
+// the subscriptions. Empty for another version, a first word that is not 0, a field the game
+// writes as 0 that is not, or bytes cut short or left over.
 std::optional<MapRecord> readMapRecord(std::span<const std::uint8_t> data);
 std::vector<std::uint8_t> writeMapRecord(const MapRecord& record);
 

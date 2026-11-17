@@ -150,6 +150,30 @@ std::vector<std::string> UiData::texts(std::uint32_t group, std::uint32_t instan
     return out;
 }
 
+std::vector<std::vector<std::string>> UiData::languageTexts(std::uint32_t group, std::uint32_t instance) {
+    const auto* r = index_.find({types::kStringTable, group, instance, 0});
+    if (!r) {
+        return {};
+    }
+    const std::uint64_t key = static_cast<std::uint64_t>(group) << 32 | instance;
+    auto known = tables_.find(key);
+    if (known == tables_.end()) {
+        known = tables_.emplace(key, str::parse(index_.read(*r))).first;
+    }
+    std::vector<std::vector<std::string>> out;
+    for (const auto& e : known->second.entries) {
+        // Language 0 is no language the game names, so it has no list.
+        if (e.language == 0) {
+            continue;
+        }
+        if (out.size() < e.language) {
+            out.resize(e.language);
+        }
+        out[e.language - 1u].push_back(e.value);
+    }
+    return out;
+}
+
 std::string UiData::text(std::uint32_t group, std::uint32_t value, std::uint8_t language) {
     const auto* r = index_.find({types::kStringTable, group, value >> 16, 0});
     const std::uint32_t n = value & 0xFFFF;

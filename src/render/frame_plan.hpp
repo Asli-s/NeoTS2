@@ -239,6 +239,19 @@ CausticsUniforms causticsFrame(float seconds, float brightness);
 // plane too (0 in the game).
 Mat4 poolMirror(const Mat4& viewProjection, float plane, float keepBelow = 0);
 
+// The view a mirror's reflection is drawn with: poolMirror's in any plane. `plane` is a unit normal
+// toward the camera's side and an offset (see GpuPrimitive::plane), in world space. Nothing behind
+// the plane is drawn, as the game clips its mirrors' reflections at the glass. `keepBehind` draws
+// that much behind it too.
+Mat4 planeMirror(const Mat4& viewProjection, const std::array<float, 4>& plane, float keepBehind = 0);
+
+// What a mirror's glass is drawn with (see mirror.vert.hlsl): the same place as the scene's.
+struct MirrorUniforms {
+    float viewProjection[16];
+    float model[16];
+};
+static_assert(sizeof(MirrorUniforms) == 128);
+
 enum class InView { Outside, Inside, Partly };
 
 // Where a model-space box lies against the view of `clip` (projection * view * model). It is
@@ -310,6 +323,8 @@ std::array<float, 12> skyCamera(const FrameView& f, float up);
 
 // skyCamera's mirrored rays, also flipped left to right as a mirror image drawn with poolMirror is.
 std::array<float, 12> mirroredSkyCamera(const FrameView& f);
+// The same mirrored in any plane (see planeMirror).
+std::array<float, 12> mirroredSkyCamera(const FrameView& f, const std::array<float, 4>& plane);
 
 // A primitive to draw, with what its draw needs.
 struct Draw {
@@ -329,6 +344,29 @@ std::array<float, 4> poolMirrorArea(const FrameView& f, std::span<const Draw> bl
 // `viewProjection` with that area stretched over the whole clip space, to cull what lies outside it.
 // Depth is unchanged, so blended surfaces sort as before.
 Mat4 narrowedTo(const Mat4& viewProjection, const std::array<float, 4>& area);
+
+// A mirror's glass in view: its plane in world space facing the camera (see planeMirror), and the
+// part of its mirror image it shows, as x0, x1, y0, y1 in the mirror's clip space (see
+// poolMirrorArea).
+struct MirrorGlass {
+    std::array<float, 4> plane;
+    std::array<float, 4> area;
+};
+// None for a draw that isn't a flat glass (see GpuPrimitive::mirror), one seen from behind (the game
+// draws only its front) and one off the screen.
+std::optional<MirrorGlass> mirrorGlass(const FrameView& f, const Draw& d, unsigned width, unsigned height);
+
+// One mirror image to draw: the glasses in one plane, their areas joined, and the target it is drawn
+// into. Images whose areas overlap go into different targets.
+struct MirrorImage {
+    std::array<float, 4> plane;
+    std::array<float, 4> area;
+    int target;
+};
+// Gathers `glasses` into mirror images, using at most `targets` targets. `glassImage` gets each
+// glass's index into the result, or -1 for a glass left without its reflection when the targets run
+// out.
+std::vector<MirrorImage> planMirrors(std::span<const MirrorGlass> glasses, int targets, std::vector<int>& glassImage);
 
 // What one draw pushes and binds.
 struct DrawUniforms {
@@ -350,6 +388,8 @@ struct FramePlan {
     static DrawUniforms uniformsFor(const RendererState& state, const ResourceQuery& resources, const FrameView& f, const Draw& d, int blend);
     // A pool's water surface's uniforms (see scene::Material::poolSurface).
     static PoolUniforms poolUniformsFor(const RendererState& state, const FrameView& f, const Draw& d);
+    // A mirror's glass's uniforms (see scene::Material::mirror).
+    static MirrorUniforms mirrorUniformsFor(const FrameView& f, const Draw& d);
     // The water in a lot's ponds' uniforms (see scene::Material::pondWater).
     static PondUniforms pondUniformsFor(const RendererState& state, const FrameView& f, const Draw& d);
     // The first pool water surface in `blended`, nullptr for none.

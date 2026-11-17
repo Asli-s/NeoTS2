@@ -269,6 +269,7 @@ LotLife::LotLife(std::unique_ptr<ts2::sim::LotSimulation> sim, ts2::scene::Asset
     });
     sim_->world().setAnimationLengths([this](const std::string& name) { return animations_.length(name); });
     sim_->world().setAnimationCarries([this](const std::string& name) { return animations_.hasTargetType(name, 2); });
+    sim_->world().setAnimationMovesSkeleton([this](const std::string& name) { return animations_.hasTargetType(name, 1); });
     sim_->world().setLocoClips([this](const std::string& name) -> std::optional<ts2::sim::LocoClip> {
         const auto a = animations_.find(name);
         return a ? std::optional<ts2::sim::LocoClip>({name, a->duration, a->travel, a->loopPhase, a->match, a->speed, a->rootTurn, a->category}) : std::nullopt;

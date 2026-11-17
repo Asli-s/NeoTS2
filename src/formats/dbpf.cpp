@@ -5,11 +5,21 @@
 #include "formats/resource_types.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <fcntl.h>
+#include <io.h>
+#include <windows.h>
+#endif
 
 namespace ts2::dbpf {
 
@@ -20,6 +30,45 @@ constexpr std::size_t kHeaderSize = 96;
 [[noreturn]] void fail(const std::string& message) {
     throw std::runtime_error("DBPF: " + message);
 }
+
+#ifdef _WIN32
+// A package file read while other code may rename or delete it, as a save does when it puts a
+// new copy in place: Windows refuses that for a file opened without delete sharing. The open
+// file goes on reading the bytes it was opened on, which the package's index describes.
+class SharedFileStream : public std::istream {
+public:
+    explicit SharedFileStream(std::FILE* file) : std::istream(nullptr), buffer_(file), file_(file) { rdbuf(&buffer_); }
+    ~SharedFileStream() override {
+        rdbuf(nullptr);
+        std::fclose(file_);
+    }
+    SharedFileStream(const SharedFileStream&) = delete;
+    SharedFileStream& operator=(const SharedFileStream&) = delete;
+
+private:
+    std::filebuf buffer_;
+    std::FILE* file_;
+};
+
+std::unique_ptr<std::istream> openShared(const std::filesystem::path& path) {
+    HANDLE handle = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        return nullptr;
+    }
+    const int descriptor = _open_osfhandle(reinterpret_cast<intptr_t>(handle), _O_RDONLY | _O_BINARY);
+    if (descriptor == -1) {
+        CloseHandle(handle);
+        return nullptr;
+    }
+    std::FILE* file = _fdopen(descriptor, "rb");
+    if (file == nullptr) {
+        _close(descriptor);
+        return nullptr;
+    }
+    return std::make_unique<SharedFileStream>(file);
+}
+#endif
 
 } // namespace
 
@@ -46,11 +95,19 @@ void Package::close() {
 }
 
 std::unique_ptr<std::istream> Package::openFile() const {
+#ifdef _WIN32
+    auto file = openShared(path_);
+    if (!file) {
+        fail("cannot open " + path_.string());
+    }
+    return file;
+#else
     auto file = std::make_unique<std::ifstream>(path_, std::ios::binary);
     if (!*file) {
         fail("cannot open " + path_.string());
     }
     return file;
+#endif
 }
 
 void Package::load() {

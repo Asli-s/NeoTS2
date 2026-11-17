@@ -1631,6 +1631,14 @@ void sceneTransformsTurnAndMove() {
     float d[3] = {1, 0, 0};
     Transform::at(10, 20, 3, ts2::scene::kPi / 2).apply(d, false);
     CHECK(std::abs(d[0]) < 1e-5f && std::abs(d[1] - 1) < 1e-5f);
+    // A rotation read back gives the quaternion it was made from, or its negative (the same turn),
+    // whichever of its terms is largest, as a carried baby's tilted place needs.
+    for (const std::array<float, 4> q : {std::array<float, 4>{0, 0, 0.707107f, 0.707107f}, std::array<float, 4>{-0.706336f, 0.420387f, -0.320927f, 0.4705f},
+                                         std::array<float, 4>{1, 0, 0, 0}, std::array<float, 4>{0, 1, 0, 0}, std::array<float, 4>{0, 0, 1, -4.37114e-08f}}) {
+        const auto back = Transform::of({1, 2, 3}, q).rotation();
+        const float dot = back[0] * q[0] + back[1] * q[1] + back[2] * q[2] + back[3] * q[3];
+        CHECK(std::abs(std::abs(dot) - 1.0f) < 1e-4f);
+    }
 }
 
 // A quad is wound to face the way it's asked to, whatever order its corners come in.
@@ -1859,6 +1867,19 @@ void sceneCutawayCutsWallsInFrontOfRooms() {
     CHECK(!cutDown(outer, view));
     view.walls = WallView::Up;
     CHECK(!cutDown(inner, view));
+}
+
+// The walls an object hides with, as the game picks them: a wall lamp (flags 0x404, wall placement 0x4)
+// with the wall behind it, a wall phone (not treated as a window) and a ceiling lamp (no wall
+// placement) with none.
+void objectsTreatedAsWindowsHideWithTheirWalls() {
+    using ts2::scene::hidesWithWalls;
+    using Points = std::vector<std::array<float, 2>>;
+    CHECK((hidesWithWalls(0x404, 0x4) == Points{{0, -0.5f}}));
+    CHECK(hidesWithWalls(0x4, 0x4).empty());
+    CHECK(hidesWithWalls(0x400, 0).empty());
+    CHECK((hidesWithWalls(0x400, 0x1 | 0x8) == Points{{0, 0.5f}, {0.5f, 0}}));
+    CHECK(hidesWithWalls(0x400, 0x1000 | 0x4).empty());
 }
 
 // What a view shows: nothing above its storey, roofs with walls up once their eaves' storey is looked at, a wall's
@@ -3136,6 +3157,12 @@ void portraitPoseAndCamera() {
     CHECK(std::abs(lit.lights[0].direction[0] - 0.43493f) < 1e-4f && std::abs(lit.lights[0].direction[1] - 0.79454f) < 1e-4f &&
           std::abs(lit.lights[0].direction[2] - 0.42373f) < 1e-4f && std::abs(lit.lights[0].color[0] - 1.6452f) < 1e-6f);
     CHECK(std::abs(lit.lights[1].direction[2] + 1) < 1e-4f);
+    // A Sim lying on its back the other way round (a baby in someone's arms): the camera's up is the
+    // Sim's up, so the picture isn't upside down, and the lights turn with it.
+    const auto rolled = portraitCamera(Transform::of({0, 0, 1}, {0, 1, 0, 0}), {0, 0, 1.6f});
+    CHECK(std::abs(rolled.up[2] + 1) < 1e-5f);
+    const auto rolledLit = portraitLighting(rolled);
+    CHECK(std::abs(rolledLit.lights[1].direction[2] - 1) < 1e-4f);
 }
 
 // A portrait takes its pose's face as well as its joints: the morph weights of each face part that
@@ -3745,6 +3772,7 @@ std::vector<Test> sceneTests() {
         {"scene greenhouse roof pieces match the game", sceneGreenhouseRoofPiecesMatchTheGame},
         {"scene grid roofs match the game", sceneGridRoofsMatchTheGame},
         {"scene cutaway cuts walls in front of rooms", sceneCutawayCutsWallsInFrontOfRooms},
+        {"objects treated as windows hide with their walls", objectsTreatedAsWindowsHideWithTheirWalls},
         {"scene views show storeys, walls and roofs", sceneViewsShowStoreysWallsAndRoofs},
         {"floor undersides show from below with Toggle Ceiling", floorUndersidesShowFromBelowWithToggleCeiling},
         {"a saved cutout stays on its mesh group", savedCutoutStaysOnItsGroup},

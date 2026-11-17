@@ -1,9 +1,15 @@
 #include "formats/saved_camera.hpp"
 
 #include "formats/binary_reader.hpp"
+#include "formats/hash.hpp"
 
 #include <algorithm>
+#include <bit>
+#include <cmath>
+#include <cctype>
 #include <exception>
+#include <numbers>
+#include <string>
 
 namespace ts2::savedcamera {
 
@@ -37,6 +43,14 @@ void putAll(std::vector<std::uint8_t>& out, const std::array<std::uint32_t, N>& 
 
 } // namespace
 
+std::uint32_t instanceOf(std::string_view cameraName) {
+    std::string lower(cameraName);
+    for (char& c : lower) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return hash::crc24(lower) & 0xFFFF;
+}
+
 std::optional<Record> readRecord(std::span<const std::uint8_t> data) {
     try {
         BinaryReader r(data);
@@ -65,7 +79,7 @@ std::optional<Record> readRecord(std::span<const std::uint8_t> data) {
                 v.orientation = r.i32();
                 v.byte2 = r.u8();
                 v.yaw = r.u32();
-                v.angle = r.u32();
+                v.pitchBlend = r.u32();
                 readAll(r, v.target);
                 v.value1 = r.i32();
                 v.value2 = r.i32();
@@ -106,7 +120,7 @@ std::vector<std::uint8_t> writeRecord(const Record& record) {
             putI32(out, view->orientation);
             out.push_back(view->byte2);
             putU32(out, view->yaw);
-            putU32(out, view->angle);
+            putU32(out, view->pitchBlend);
             putAll(out, view->target);
             putI32(out, view->value1);
             putI32(out, view->value2);
@@ -124,6 +138,40 @@ std::vector<std::uint8_t> writeRecord(const Record& record) {
         }
     }
     return out;
+}
+
+Record viewRecord(const Record& loaded, const camera::Config& rig, const ViewState& state) {
+    if (loaded.kind != kOrbitKind || !loaded.orbit[0]) {
+        return loaded;
+    }
+    Record record = loaded;
+    OrbitView& view = *record.orbit[0];
+    view.target = {std::bit_cast<std::uint32_t>(state.target[0]), std::bit_cast<std::uint32_t>(state.target[1]),
+                   std::bit_cast<std::uint32_t>(state.target[2])};
+    view.distance = std::bit_cast<std::uint32_t>(state.distance);
+    view.yaw = std::bit_cast<std::uint32_t>(state.yaw);
+    view.pitchBlend = std::bit_cast<std::uint32_t>(state.pitchBlend);
+    const int step = camera::zoomLevelAt(rig, state.zoomingTo);
+    if (step >= 0) {
+        view.zoomStep = step;
+    }
+    if (!rig.orientations.empty()) {
+        constexpr float kTurn = 360;
+        float degrees = std::fmod(state.yaw * 180 / std::numbers::pi_v<float>, kTurn);
+        if (degrees < 0) {
+            degrees += kTurn;
+        }
+        // The camera turns to the first orientation at or past where it points, and past the last
+        // one it turns to the first. A thousandth of a degree counts as the same angle, so a yaw
+        // that came from an orientation finds it again.
+        constexpr float kSame = 0.001f;
+        std::size_t at = 0;
+        while (at + 1 < rig.orientations.size() && rig.orientations[at] < degrees - kSame) {
+            ++at;
+        }
+        view.orientation = static_cast<std::int32_t>(rig.orientations[at] < degrees - kSame ? 0 : at);
+    }
+    return record;
 }
 
 } // namespace ts2::savedcamera

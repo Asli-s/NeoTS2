@@ -38,9 +38,12 @@ std::array<float, 3> normalized(std::array<float, 3> v) {
 
 ObjectLighting portraitLighting(const PortraitCamera& camera) {
     const auto forward = normalized({camera.target[0] - camera.eye[0], camera.target[1] - camera.eye[1], camera.target[2] - camera.eye[2]});
-    // The camera never tilts, so its right is level and its up is the world's.
-    const auto right = normalized({forward[1], -forward[0], 0});
-    const std::array<float, 3> up{0, 0, 1};
+    // The lights turn with the camera, which tilts only with a Sim that doesn't stand upright.
+    const auto& u = camera.up;
+    const auto right = normalized({forward[1] * u[2] - forward[2] * u[1], forward[2] * u[0] - forward[0] * u[2],
+                                   forward[0] * u[1] - forward[1] * u[0]});
+    const std::array<float, 3> up{right[1] * forward[2] - right[2] * forward[1], right[2] * forward[0] - right[0] * forward[2],
+                                  right[0] * forward[1] - right[1] * forward[0]};
     ObjectLighting l;
     l.thumbnailScale = kThumbnailScale;
     for (const auto& k : kLights) {
@@ -75,10 +78,13 @@ PortraitCamera portraitCamera(const Transform& place, const std::array<float, 3>
     PortraitCamera c;
     float eye[3] = {head[0], head[1] + kAhead, head[2] + kAbove};
     float back[3] = {0, -1, 0};
+    float up[3] = {0, 0, 1};
     place.apply(eye, true);
     place.apply(back, false);
+    place.apply(up, false);
     c.eye = {eye[0], eye[1], eye[2]};
     c.target = {eye[0] + back[0], eye[1] + back[1], eye[2] + back[2]};
+    c.up = normalized({up[0], up[1], up[2]});
     c.fovY = kFovY;
     c.nearPlane = kNear;
     c.farPlane = kFar;

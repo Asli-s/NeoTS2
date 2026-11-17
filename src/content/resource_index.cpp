@@ -18,6 +18,10 @@ constexpr std::size_t kSharedPackage = (std::numeric_limits<std::size_t>::max() 
 
 constexpr std::uint32_t kLocalGroup = 0xFFFFFFFF;
 
+// The package number of a resource a refreshed package no longer holds. It is left out of every
+// listing and lookup.
+constexpr std::size_t kDroppedPackage = std::numeric_limits<std::size_t>::max();
+
 } // namespace
 
 void ResourceIndex::SharedPackages::add(const std::filesystem::path& path, std::uintmax_t fileSize, std::span<const dbpf::IndexEntry> entries, std::uint32_t localGroup) {
@@ -52,18 +56,73 @@ bool ResourceIndex::addPackage(const std::filesystem::path& path,
     package->forgetEntries();
     packages_.push_back(std::move(package));
     paths_.push_back(path);
+    localGroups_.push_back(localGroup);
     return true;
+}
+
+void ResourceIndex::refreshPackage(const std::filesystem::path& path) {
+    std::error_code error;
+    for (std::size_t i = 0; i < paths_.size(); ++i) {
+        if (paths_[i] != path && !std::filesystem::equivalent(paths_[i], path, error)) {
+            continue;
+        }
+        auto fresh = std::make_unique<dbpf::Package>(path);
+        std::erase(openPackages_, i);
+        packages_[i]->close();
+        std::unordered_map<dbpf::ResourceKey, dbpf::IndexEntry, dbpf::ResourceKeyHash> now;
+        for (dbpf::IndexEntry entry : fresh->entries()) {
+            if (localGroups_[i] && entry.key.group == kLocalGroup) {
+                entry.key.group = *localGroups_[i];
+            }
+            now[entry.key] = entry;
+        }
+        for (std::size_t r = 0; r < resources_.size(); ++r) {
+            Resource& resource = resources_[r];
+            if (resource.package != i) {
+                continue;
+            }
+            if (const auto it = now.find(resource.entry.key); it != now.end()) {
+                resource.entry = it->second;
+                now.erase(it);
+            } else {
+                if (const auto at = byKey_.find(resource.entry.key); at != byKey_.end() && at->second == r) {
+                    byKey_.erase(at);
+                }
+                resource.package = kDroppedPackage;
+            }
+        }
+        // A key a later package already holds stays that package's, as the load order gives it.
+        std::vector<dbpf::IndexEntry> added;
+        for (const auto& [key, entry] : now) {
+            const auto at = byKey_.find(key);
+            const std::size_t owner = at != byKey_.end() ? resources_[at->second].package : kDroppedPackage;
+            const bool laterPackage = owner != kDroppedPackage && (owner & kSharedPackage) == 0 && owner > i;
+            if (!laterPackage) {
+                added.push_back(entry);
+            }
+        }
+        // Already in the index's own groups, so filed as they are.
+        addEntriesOf(i, added, std::nullopt);
+        fresh->forgetEntries();
+        packages_[i] = std::move(fresh);
+        const std::lock_guard lock(*listLock_);
+        listed_ = false;
+    }
 }
 
 void ResourceIndex::addIndexed(const std::filesystem::path& path, std::uintmax_t fileSize, std::span<const dbpf::IndexEntry> entries, std::uint32_t localGroup) {
     addEntries(entries, localGroup);
     packages_.push_back(std::make_unique<dbpf::Package>(path, fileSize));
     paths_.push_back(path);
+    localGroups_.push_back(localGroup);
 }
 
 // Call before adding the package to packages_, whose new place the resources name.
 void ResourceIndex::addEntries(std::span<const dbpf::IndexEntry> entries, std::optional<std::uint32_t> localGroup) {
-    const std::size_t packageIndex = packages_.size();
+    addEntriesOf(packages_.size(), entries, localGroup);
+}
+
+void ResourceIndex::addEntriesOf(std::size_t packageIndex, std::span<const dbpf::IndexEntry> entries, std::optional<std::uint32_t> localGroup) {
     byKey_.reserve(byKey_.size() + entries.size());
     for (dbpf::IndexEntry entry : entries) {
         if (localGroup && entry.key.group == kLocalGroup) {
@@ -118,11 +177,16 @@ const ResourceIndex::ResourceList& ResourceIndex::resources() const {
     if (!shared_) {
         items.reserve(resources_.size());
         for (const Resource& r : resources_) {
-            items.push_back(&r);
+            if (r.package != kDroppedPackage) {
+                items.push_back(&r);
+            }
         }
     } else {
         items.reserve(resources_.size() + shared_->resources_.size());
         for (std::size_t i = 0; i < sharedAt_; ++i) {
+            if (resources_[i].package == kDroppedPackage) {
+                continue;
+            }
             const auto over = shared_->byKey_.find(resources_[i].entry.key);
             const bool sharedWins = over != shared_->byKey_.end() && resources_[i].package < firstPackageAfterShared_;
             items.push_back(sharedWins ? &shared_->resources_[over->second] : &resources_[i]);
@@ -136,7 +200,7 @@ const ResourceIndex::ResourceList& ResourceIndex::resources() const {
             }
         }
         for (std::size_t i = sharedAt_; i < resources_.size(); ++i) {
-            if (!shared_->byKey_.contains(resources_[i].entry.key)) {
+            if (resources_[i].package != kDroppedPackage && !shared_->byKey_.contains(resources_[i].entry.key)) {
                 items.push_back(&resources_[i]);
             }
         }

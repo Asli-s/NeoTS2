@@ -38,6 +38,7 @@ std::optional<ts2::tga::Pixels> drawPortrait(const ts2::scene::Scene& lot, ts2::
     ts2::render::Camera camera;
     camera.eye = shot.camera.eye;
     camera.target = shot.camera.target;
+    camera.up = shot.camera.up;
     camera.fovY = shot.camera.fovY;
     camera.nearPlane = shot.camera.nearPlane;
     camera.farPlane = shot.camera.farPlane;
@@ -114,6 +115,7 @@ std::optional<ts2::tga::Pixels> drawSimView(const ts2::scene::Scene& lot, ts2::r
     ts2::render::Camera camera;
     camera.eye = shot.camera.eye;
     camera.target = shot.camera.target;
+    camera.up = shot.camera.up;
     camera.fovY = shot.camera.fovY;
     camera.nearPlane = shot.camera.nearPlane;
     camera.farPlane = shot.camera.farPlane;

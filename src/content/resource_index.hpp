@@ -78,6 +78,12 @@ public:
     // group 0xFFFFFFFF are indexed under `localGroup`.
     void addIndexed(const std::filesystem::path& path, std::uintmax_t fileSize, std::span<const dbpf::IndexEntry> entries, std::uint32_t localGroup);
 
+    // Reads again a package of this index that a save has replaced, at `path`: its resources take
+    // the new file's places, those it no longer holds are dropped, and new ones are added under it.
+    // A dropped resource that overrode another package's leaves no resource at its key. Throws
+    // when the new file can't be read. Nothing happens when the index doesn't hold the package.
+    void refreshPackage(const std::filesystem::path& path);
+
     // Adds these packages after what the index holds, so they override it, and what is added later
     // overrides them. An index takes one such set, and a later set replaces it.
     void addShared(std::shared_ptr<const SharedPackages> packages);
@@ -95,11 +101,13 @@ private:
     dbpf::Package& use(std::size_t package);
     dbpf::Package& packageAt(std::size_t package);
     void addEntries(std::span<const dbpf::IndexEntry> entries, std::optional<std::uint32_t> localGroup);
+    void addEntriesOf(std::size_t packageIndex, std::span<const dbpf::IndexEntry> entries, std::optional<std::uint32_t> localGroup);
 
     std::vector<std::unique_ptr<dbpf::Package>> packages_;
     // Packages most recently read from, oldest first. Only these keep their files open.
     std::vector<std::size_t> openPackages_;
     std::vector<std::filesystem::path> paths_;
+    std::vector<std::optional<std::uint32_t>> localGroups_;
     std::vector<Resource> resources_;
     std::unordered_map<dbpf::ResourceKey, std::size_t, dbpf::ResourceKeyHash> byKey_;
     Stats stats_;

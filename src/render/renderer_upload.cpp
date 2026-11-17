@@ -487,7 +487,7 @@ void SdlGpuRenderer::SceneGpu::uploadMeshes(Copy& c, const scene::Scene& scene) 
     MeshData data;
     meshBuffers.emplace_back();
     for (const auto& mesh : scene.meshes) {
-        meshes.push_back(packMesh(mesh, scene.materials.size(), 0, data));
+        meshes.push_back(packMesh(mesh, scene.materials, 0, data));
     }
     if (data.tooBig) {
         diag::warning("renderer: the scene's meshes are too big for one GPU buffer; some are left out");

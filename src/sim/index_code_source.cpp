@@ -266,6 +266,16 @@ std::vector<std::pair<std::uint32_t, std::vector<std::uint8_t>>> IndexCodeSource
     return out;
 }
 
+std::vector<std::pair<dbpf::ResourceKey, std::vector<std::uint8_t>>> IndexCodeSource::everyGroupResource(std::uint32_t group) {
+    std::vector<std::pair<dbpf::ResourceKey, std::vector<std::uint8_t>>> out;
+    for (const auto& r : index_.resources()) {
+        if (r.entry.key.group == group) {
+            out.emplace_back(r.entry.key, index_.read(r));
+        }
+    }
+    return out;
+}
+
 const fcns::Tunings* IndexCodeSource::tunings() {
     constexpr std::uint32_t kTunings = 0x46434E53;
     constexpr std::uint32_t kAutonomyTunings = 2;

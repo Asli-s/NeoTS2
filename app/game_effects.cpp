@@ -136,7 +136,20 @@ void Game::startLotEffects() {
     lotEffectsSeconds_ = lotLife_->seconds();
     updateLotEffectConditions();
     lotEffectPlayer_->update(0, 0);  // takes the state at once, so the first effects are built for it
-    lotLife_->simulation().world().setEffectCommands([this](const ts2::sim::EffectCommand& c) { doEffectCommand(c); });
+    auto& world = lotLife_->simulation().world();
+    world.setEffectCommands([this](const ts2::sim::EffectCommand& c) { doEffectCommand(c); });
+    // The effects objects were playing when the lot was saved start again, hard, at their bones, as
+    // the game starts them once an object's model is loaded: the selected Sim's plumbob glows.
+    for (std::int16_t id = 1; id > 0 && id <= world.highestId(); ++id) {
+        auto* object = world.find(id);
+        if (object == nullptr) {
+            continue;
+        }
+        for (const auto& e : object->savedEffects) {
+            lotEffects_->restore(id, {e.name, e.bone, e.number, static_cast<ts2::scene::ObjectEffects::Kind>(e.kind), e.keep}, effectPlaces());
+        }
+        object->savedEffects.clear();
+    }
 }
 
 void Game::doEffectCommand(const ts2::sim::EffectCommand& c) {

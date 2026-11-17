@@ -23,6 +23,7 @@ std::string portraitPose(std::uint32_t age, std::uint32_t gender, int pick);
 // The camera a portrait is drawn with: in front of the Sim's head, looking straight back at it.
 struct PortraitCamera {
     std::array<float, 3> eye{}, target{};
+    std::array<float, 3> up{0, 0, 1};  // the Sim's up, so a Sim lying in someone's arms is the right way up
     float fovY = 0, nearPlane = 0, farPlane = 0;
     static constexpr unsigned kSize = 256;  // the picture is this many pixels square
 };

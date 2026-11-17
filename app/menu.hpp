@@ -1,5 +1,6 @@
 #pragma once
 
+#include "paths/save_folders.hpp"
 #include "render/make_renderer.hpp"
 
 #include <array>
@@ -57,6 +58,9 @@ struct MenuOptions {
     // Asked once a frame: a warning about the install's files found by a check running beside the
     // game, given once, or nothing yet.
     std::function<std::string()> takeInstallWarning;
+    // The save folder's lock, while the game holds it. Without one the game saves nothing.
+    const ts2::paths::SaveFolderLock* lock = nullptr;
+    bool saveLot = false;        // save the lot once it has run, for checking saves
 };
 
 // Shows the game's main menu until it is closed.

@@ -105,6 +105,24 @@ std::vector<std::array<float, 2>> endHoles(SceneBuilder& builder, const std::str
 
 } // namespace
 
+std::vector<std::array<float, 2>> hidesWithWalls(std::int16_t flags, std::int16_t wallPlacement) {
+    constexpr std::int16_t kWindowLike = 0x400, kLeftOut = 0x1000;
+    std::vector<std::array<float, 2>> out;
+    if ((flags & kWindowLike) == 0 || (wallPlacement & kLeftOut) != 0) {
+        return out;
+    }
+    // A diagonal wall runs through the tile's middle.
+    constexpr std::array<std::pair<std::int16_t, std::array<float, 2>>, 6> kEdges{{
+        {0x1, {0, 0.5f}}, {0x2, {-0.5f, 0}}, {0x4, {0, -0.5f}}, {0x8, {0.5f, 0}}, {0x10, {0, 0}}, {0x40, {0, 0}},
+    }};
+    for (const auto& [bit, middle] : kEdges) {
+        if ((wallPlacement & bit) != 0) {
+            out.push_back(middle);
+        }
+    }
+    return out;
+}
+
 std::map<std::string, std::vector<WallMask>> wallMasks(const std::vector<std::string>& materialNames) {
     // Up to 5 digits, so the numbers always fit an int.
     const std::regex pattern(R"(^(.+)_(0|\d{1,5}[ew])_(0|\d{1,5}[ns])_(\d{1,5})_(n|s|e|w|ne|nw|se|sw)_wallmask_txmt$)",
