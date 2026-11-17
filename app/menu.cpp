@@ -740,6 +740,7 @@ void Game::showNeighborhood(Built built) {
         hoodUi_.showOptions(true);
         hoodUi_.gameOptions().show(true);
     } else if (options_.bin == "audiooptions") {
+        waitForAudioIndex();
         hoodUi_.showOptions(true);
         hoodUi_.audioOptions().show(true);
     } else if (options_.bin == "graphicsoptions") {
@@ -1620,6 +1621,7 @@ void Game::showLot(LotBuilt& built) {
     lotUi_.setTestingCheats(cheats_.testingCheats());
     lotUi_.open();
     if (options_.bin == "audiooptions") {
+        waitForAudioIndex();
         lotUi_.showOptions(true);
         lotUi_.audioOptions().show(true);
     }

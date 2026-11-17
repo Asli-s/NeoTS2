@@ -3,7 +3,9 @@
 #include "game.hpp"
 
 #include <array>
+#include <chrono>
 #include <cstdint>
+#include <thread>
 #include <vector>
 
 namespace app {
@@ -50,6 +52,14 @@ void Game::ensureAudio() {
     // --mute leaves the mixer running, so the options' levels still apply behind it.
     audio_->setMuted(options_.mute);
     applyAudioOptions();
+}
+
+void Game::waitForAudioIndex() {
+    // About 30 s at most, so a broken install still gets its picture.
+    for (int i = 0; audio_ && !audio_->ready() && i < 1500; ++i) {
+        audio_->update();
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
 }
 
 void Game::applyAudioOptions() {
