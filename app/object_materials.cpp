@@ -8,6 +8,10 @@
 
 namespace app {
 
+namespace {
+constexpr std::string_view kStationBase = "tvscreenanimations_screen_simscommercial";
+}
+
 void ObjectMaterials::update(ts2::sim::World& world, ts2::scene::Scene& scene) {
     changed_.clear();
     for (const auto& placed : scene.placedObjects) {
@@ -68,7 +72,8 @@ int ObjectMaterials::material(const std::string& name, ts2::scene::Scene& scene)
         return it->second;
     }
     int m = builderMaterial(builder_.material(name), scene);
-    if (m < 0 && isStation_ && isStation_(key)) {
+    // A station is made from the base screen material, so that one is never a station itself.
+    if (m < 0 && isStation_ && key != kStationBase && isStation_(key)) {
         m = stationMaterial(key, scene);
     }
     return materials_[key] = m;
@@ -78,7 +83,7 @@ int ObjectMaterials::material(const std::string& name, ts2::scene::Scene& scene)
 // the station's movie as its base texture. Its picture starts black.
 int ObjectMaterials::stationMaterial(const std::string& name, ts2::scene::Scene& scene) {
     constexpr std::uint32_t kStartSide = 128;
-    const int base = material("tvscreenanimations_screen_simscommercial", scene);
+    const int base = material(std::string(kStationBase), scene);
     if (base < 0) {
         return -1;
     }

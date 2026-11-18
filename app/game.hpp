@@ -402,7 +402,11 @@ private:
     void windowClicked(int window);
     void showSprites(double seconds, bool scene);
     // A point of the window in the UI's pixels.
-    std::array<int, 2> toUi(float x, float y) const { return {static_cast<int>(x / uiScale_), static_cast<int>(y / uiScale_)}; }
+    // Clamped, as a point just in front of the camera projects far off the screen.
+    std::array<int, 2> toUi(float x, float y) const {
+        const auto ui = [&](float v) { return static_cast<int>(std::clamp(v / uiScale_, -1e6f, 1e6f)); };
+        return {ui(x), ui(y)};
+    }
     void reportFrame(std::uint64_t now);
     template <typename T>
     std::optional<T> finished(std::future<T>& job, const char* what);

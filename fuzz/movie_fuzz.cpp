@@ -11,19 +11,29 @@
 namespace {
 
 // Every frame decoded and turned to colour, twice: different pixels mean memory read before it
-// was written (Windows has no sanitizer for that).
-std::vector<std::uint8_t> pictures(std::span<const std::uint8_t> bytes, const ts2::movie::Movie& movie, ts2::movie::Quality quality) {
+// was written (Windows has no sanitizer for that). Frames are hashed, not kept, and a movie with
+// too many pixels in all is cut short, so a small input can't ask for gigabytes.
+std::uint64_t pictures(std::span<const std::uint8_t> bytes, const ts2::movie::Movie& movie, ts2::movie::Quality quality) {
+    constexpr std::size_t kMaxPixels = std::size_t{1} << 26;
     ts2::movie::VideoDecoder decoder(quality);
-    std::vector<std::uint8_t> all, rgba;
+    std::vector<std::uint8_t> rgba;
+    std::uint64_t hash = 0xCBF29CE484222325ull;
+    std::size_t pixels = 0;
     for (const auto& frame : movie.frames) {
+        pixels += std::size_t{movie.width} * movie.height;
+        if (pixels > kMaxPixels) {
+            break;
+        }
         (void)decoder.decode(bytes, movie, frame);
         decoder.rgba(rgba);
         if (rgba.size() != std::size_t{movie.width} * movie.height * 4) {
             std::abort();
         }
-        all.insert(all.end(), rgba.begin(), rgba.end());
+        for (const std::uint8_t b : rgba) {
+            hash = (hash ^ b) * 0x100000001B3ull;
+        }
     }
-    return all;
+    return hash;
 }
 
 } // namespace

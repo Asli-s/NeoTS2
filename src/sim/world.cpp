@@ -135,6 +135,7 @@ void World::removeOne(SimObject& object) {
         typePickers_.forget(object.id);
         changeAppearances_.forget(object.id);
         messages_.forget(object.id);
+        tvLinks_.forget(object.id);
         objectsChanged();
         ++removedCount_;
         footprintChanges_.insert(object.id);

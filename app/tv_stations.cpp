@@ -30,6 +30,13 @@ std::vector<std::uint8_t> readMovie(const std::filesystem::path& path) {
 
 } // namespace
 
+// A load still running is kept until it ends, as dropping its future would wait for the read.
+void TvStations::keepLoading(Playing& playing) {
+    if (playing.loading.valid()) {
+        loadingLeft_.push_back(std::move(playing.loading));
+    }
+}
+
 std::optional<ts2::sim::TvLinks::Station> TvStations::station(std::string_view name) const {
     const ts2::content::Station* s = catalog_ ? catalog_->find(name) : nullptr;
     if (s == nullptr) {
@@ -73,8 +80,10 @@ std::optional<std::filesystem::path> TvStations::nextMovie(const ts2::content::S
 }
 
 void TvStations::start(Playing& playing, const std::string& name) {
+    keepLoading(playing);
     playing.movie.reset();
     playing.file.clear();
+    playing.decoder = ts2::movie::VideoDecoder{kQuality};
     playing.clockMs = 0;
     playing.decoded = -1;
     const auto path = nextMovie(*playing.station, progress_[name]);
@@ -96,8 +105,8 @@ bool TvStations::play(Playing& playing, const std::string& name, double elapsedM
         if (!playing.loading.valid() || playing.loading.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
             return true;
         }
-        playing.file = playing.loading.get();
         try {
+            playing.file = playing.loading.get();
             playing.movie = ts2::movie::read(playing.file);
         } catch (const std::exception& e) {
             ts2::diag::warnOnce(std::string("TV: a movie of ") + name + " can't be played: " + e.what());
@@ -107,7 +116,7 @@ bool TvStations::play(Playing& playing, const std::string& name, double elapsedM
     }
     const ts2::movie::Movie& movie = *playing.movie;
     playing.clockMs += elapsedMs;
-    const auto target = static_cast<long>(playing.clockMs / std::max<int>(movie.frameMs, 1));
+    const auto target = static_cast<long>(playing.clockMs / std::max<int>(movie.frameMs, kMinFrameMs));
     if (target >= static_cast<long>(movie.frames.size())) {
         const auto& entry = playing.station->entry;
         if (entry.isGames || entry.dontRestart) {
@@ -129,10 +138,12 @@ bool TvStations::play(Playing& playing, const std::string& name, double elapsedM
             break;
         }
     }
-    for (long n = from; n <= target; ++n) {
+    // A movie without later key frames catches up over several updates.
+    const long last = std::min(target, from + kMaxDecodesPerUpdate - 1);
+    for (long n = from; n <= last; ++n) {
         (void)playing.decoder.decode(playing.file, movie, movie.frames[static_cast<std::size_t>(n)]);
     }
-    playing.decoded = target;
+    playing.decoded = last;
     if (image) {
         playing.decoder.rgba(frame_.rgba);
         frame_.width = playing.decoder.width();
@@ -147,8 +158,15 @@ void TvStations::update(ts2::sim::World& world, double elapsedMs, ObjectMaterial
     for (const auto& [tv, link] : world.tvLinks().links()) {
         tuned.insert(link.station);
     }
+    std::erase_if(loadingLeft_, [](const auto& f) { return f.wait_for(std::chrono::seconds(0)) == std::future_status::ready; });
     // The stream closes when the last TV leaves its station.
-    std::erase_if(playing_, [&](const auto& p) { return !tuned.contains(p.first); });
+    std::erase_if(playing_, [&](auto& p) {
+        if (tuned.contains(p.first)) {
+            return false;
+        }
+        keepLoading(p.second);
+        return true;
+    });
     for (const std::string& name : tuned) {
         if (playing_.contains(name)) {
             continue;
@@ -165,6 +183,7 @@ void TvStations::update(ts2::sim::World& world, double elapsedMs, ObjectMaterial
         if (play(it->second, it->first, elapsedMs, world, materials.stationImage(it->first), renderer)) {
             ++it;
         } else {
+            keepLoading(it->second);
             it = playing_.erase(it);
         }
     }

@@ -71,7 +71,8 @@ Pcm decodeMovieSound(std::span<const std::uint8_t> file, const movie::Sound& sou
         }
         const std::size_t bytes = next - first - 4;
         const std::size_t frames = bytes / kFrameBytes;
-        if (channels * (4 + bytes) > chunk.size - head) {
+        // Divided, not multiplied, so a huge offset can't wrap on a 32-bit build.
+        if (bytes > (chunk.size - head) / channels - 4 || (chunk.size - head) / channels < 4) {
             break;
         }
         if (pcm.samples.size() + frames * kFrameSamples * channels > kMaxDecodedSamples) {

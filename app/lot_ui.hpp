@@ -239,7 +239,7 @@ private:
     ts2::content::TargetPictures notificationSmallPortraits_{ts2::content::readCharacterPortrait, 40};
     // Each household Sim's portrait, and whose the live panel shows (-1: none yet).
     std::map<std::int16_t, ts2::tga::Pixels> portraits_;
-    // Portraits drawn for neighbors outside the household (see portraitWanted), and those waiting.
+    // Portraits drawn for neighbors outside the household (see portraitsWanted), and those waiting.
     std::map<std::int16_t, std::optional<ts2::tga::Pixels>> drawnPortraits_;
     std::vector<std::int16_t> portraitsWanted_;
     int portraitShown_ = -1;

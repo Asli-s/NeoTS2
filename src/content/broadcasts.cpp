@@ -99,7 +99,8 @@ std::map<std::string, std::vector<fs::path>> moviesByFolder(const std::vector<fs
             if (it.depth() >= kMaxFolderDepth) {
                 it.disable_recursion_pending();
             }
-            if (!it->is_regular_file(ec) || lower(utf8(it->path().extension())) != ".movie") {
+            std::error_code fileError;
+            if (!it->is_regular_file(fileError) || lower(utf8(it->path().extension())) != ".movie") {
                 continue;
             }
             const std::string folder = lower(utf8(it->path().parent_path().filename()));
@@ -225,7 +226,8 @@ Broadcasts Broadcasts::load(const std::vector<Product>& products, const fs::path
         }
         std::vector<fs::path> inis;
         for (fs::directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec)) {
-            if (it->is_regular_file(ec) && lower(utf8(it->path().extension())) == ".ini") {
+            std::error_code fileError;
+            if (it->is_regular_file(fileError) && lower(utf8(it->path().extension())) == ".ini") {
                 inis.push_back(it->path());
             }
         }

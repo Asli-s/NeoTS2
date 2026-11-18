@@ -15,7 +15,8 @@ namespace app {
 class OptionsList {
 public:
     // Each row's button: its size (a width of 0 is the list's), gutters and caption alignment, and
-    // how the rows are laid out (see ListBoxRows::Layout). The default is the options panels' rows.
+    // how the rows are laid out (see ListBoxRows::Layout). The default is the options panels' rows,
+    // 17 high: the height of their radio dot picture plus 2.
     struct RowStyle {
         ListBoxRows::Layout layout{17};
         int width = 0, height = 17;

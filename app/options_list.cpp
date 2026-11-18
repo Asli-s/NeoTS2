@@ -1,5 +1,7 @@
 #include "options_list.hpp"
 
+#include "diag/log.hpp"
+
 #include <algorithm>
 #include <format>
 
@@ -7,7 +9,6 @@ namespace app {
 
 namespace {
 
-// A row is 17 high, the height of its radio dot picture plus 2 (see RowStyle).
 // Rows' ids, clear of the ids of the panel's other windows.
 constexpr std::uint32_t kFirstRowId = 0x00A00000;  // window id, leakcheck: ok
 const std::string kRowImage = "{499db772,ac76e165}";
@@ -49,8 +50,16 @@ void OptionsList::setRows(const std::vector<std::string>& rows) {
     for (const std::string& text : rows) {
         if (style_.scriptInstance != 0) {
             const int root = screen_->load(style_.scriptGroup, style_.scriptInstance, 0, 0, list_);
+            // All rows or none, so each row stays at its song's index.
             if (root < 0) {
-                continue;
+                for (const int built : rows_) {
+                    screen_->remove(built);
+                }
+                rows_.clear();
+                scriptRows_.clear();
+                checks_.clear();
+                ts2::diag::warnOnce("options list: the row script can't be loaded, so the list is empty");
+                break;
             }
             ScriptRow row;
             row.dot = screen_->find(root, 1);

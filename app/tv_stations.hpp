@@ -45,25 +45,31 @@ private:
         bool commercialNext = false;
         std::optional<std::size_t> lastCommercial;
     };
+    static constexpr ts2::movie::Quality kQuality = ts2::movie::Quality::Fine;
+    // A frame time this short is a broken file, and decoding caps keep a broken movie cheap.
+    static constexpr int kMinFrameMs = 10;
+    static constexpr long kMaxDecodesPerUpdate = 32;
     struct Playing {
         const ts2::content::Station* station = nullptr;
         std::future<std::vector<std::uint8_t>> loading;
         std::vector<std::uint8_t> file;
         std::optional<ts2::movie::Movie> movie;
-        ts2::movie::VideoDecoder decoder{ts2::movie::Quality::Fine};
+        ts2::movie::VideoDecoder decoder{kQuality};
         double clockMs = 0;
-        long decoded = -1;  // the last frame decoded
+        long decoded = -1;  // -1 before the movie's first frame
         bool nothingToPlay = false;
     };
 
     std::optional<std::filesystem::path> nextMovie(const ts2::content::Station& station, Progress& progress);
     void start(Playing& playing, const std::string& name);
+    void keepLoading(Playing& playing);
     // False when the station ended for good.
     bool play(Playing& playing, const std::string& name, double elapsedMs, ts2::sim::World& world, std::optional<int> image,
               ts2::render::IRenderer& renderer);
 
     std::shared_ptr<const ts2::content::Broadcasts> catalog_;
     std::map<std::string, Playing> playing_;
+    std::vector<std::future<std::vector<std::uint8_t>>> loadingLeft_;
     std::map<std::string, Progress> progress_;
     std::mt19937 random_{std::random_device{}()};
     ts2::scene::Image frame_;

@@ -63,7 +63,8 @@ void colourClearTexels(tga::Pixels& p) {
     if (w == 0 || h == 0 || p.rgba.size() != w * h * 4) {
         return;
     }
-    const std::vector<std::uint8_t> was = p.rgba;
+    // Only clear texels change, and only visible ones are read, so no copy is needed.
+    const std::vector<std::uint8_t>& was = p.rgba;
     constexpr int kNear[8][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}, {-1, -1}, {1, -1}, {-1, 1}, {1, 1}};
     for (std::size_t y = 0; y < h; ++y) {
         for (std::size_t x = 0; x < w; ++x) {
@@ -104,6 +105,12 @@ int Screen::texture(tga::Pixels pixels) {
     }
     changed_.push_back(index);
     return index;
+}
+
+void Screen::replaceTexture(int texture, tga::Pixels pixels) {
+    colourClearTexels(pixels);
+    textures_[static_cast<std::size_t>(texture)] = std::move(pixels);
+    changed_.push_back(texture);
 }
 
 void Screen::release(int texture) {
@@ -334,8 +341,7 @@ void Screen::layoutText(int index) {
         w.firstBaseline = style.lineSpacing + w.captionLine->ascent;
     }
     if (w.textImage >= 0) {
-        textures_[static_cast<std::size_t>(w.textImage)] = std::move(block);
-        changed_.push_back(w.textImage);
+        replaceTexture(w.textImage, std::move(block));
     } else {
         w.textImage = texture(std::move(block));
     }
@@ -684,8 +690,7 @@ void Screen::setImage(int window, tga::Pixels pixels) {
     }
     Window& w = windows_[static_cast<std::size_t>(window)];
     if (w.ownImage) {
-        textures_[static_cast<std::size_t>(w.image)] = std::move(pixels);
-        changed_.push_back(w.image);
+        replaceTexture(w.image, std::move(pixels));
     } else {
         w.image = texture(std::move(pixels));
         w.ownImage = true;

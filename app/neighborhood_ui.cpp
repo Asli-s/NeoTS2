@@ -853,6 +853,9 @@ void NeighborhoodUi::showCard(std::uint32_t lot, int lotX, int lotY) {
         glowBoxPicture_ = box.picture;
         glowBoxAt_ = {box.x, box.y};
         showGlow(glow_, std::move(box.picture), box.x, box.y);
+    } else {
+        showGlow(glow_, {}, 0, 0);
+        showGlow(glowTail_, {}, 0, 0);
     }
     glowPoint_ = {std::numeric_limits<int>::min(), 0};
     setCardPoint(lotX, lotY);

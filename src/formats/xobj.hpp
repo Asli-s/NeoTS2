@@ -79,9 +79,8 @@ struct Effect {
     // How it was started: 0 by an animation event, 2 by the Effect primitive, 5 queued.
     std::uint32_t value2 = 0;
     // The keep flag. Nonzero keeps the effect running when the object's effects are stopped.
-    // The game starts effects with 0 or 1. A version 1 list has no keep byte, and the game
-    // leaves whatever its memory held there, so shipped lots with such lists show bytes like
-    // 100 and 192 once resaved. The engine reads 0 for those.
+    // The game starts effects with 0 or 1. A version 1 list has no keep byte and the game leaves
+    // it unset, so resaved shipped lots hold bytes like 100 and 192. The engine reads 0 for those.
     std::uint8_t value3 = 0;
 };
 

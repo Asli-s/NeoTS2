@@ -381,7 +381,8 @@ void SdlGpuRenderer::setImagePixels(int index, const scene::Image& image) {
         if (SDL_GPUTexture* old = std::exchange(gpu_->textures[at], fresh)) {
             SDL_ReleaseGPUTexture(device_, old);  // freed once the frames drawing with it are done
         }
-        s = {image.width, image.height, transfer};    }
+        s = {image.width, image.height, transfer};
+    }
     // Cycling lets the GPU keep drawing earlier frames from the old contents without a wait.
     void* mapped = SDL_MapGPUTransferBuffer(device_, s.transfer, true);
     if (mapped == nullptr) {

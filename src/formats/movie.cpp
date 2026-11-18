@@ -410,7 +410,6 @@ bool VideoDecoder::codedBlock(std::int32_t* work, std::size_t stride) {
         coef[k] = static_cast<std::int32_t>(static_cast<std::uint32_t>(level) * static_cast<std::uint32_t>(quant_[k]));
         ++pos;
     }
-    // Rows of coefficients into a turned-over temporary, then its rows into the block.
     std::array<std::int32_t, 64> temp{};
     std::int32_t y[8];
     for (std::size_t r = 0; r < 8; ++r) {

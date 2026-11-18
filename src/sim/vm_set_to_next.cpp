@@ -234,10 +234,10 @@ bool Execution::setToNext(const bhav::Instruction& in, Frame& f) {
                    hex(searchType, 2)};
     }
 
-    // Searches 0x00, 0x02, 0x06, 0x0C, 0x19 and 0x21 walk the game's object list, where a
-    // multi-tile object's parts stand before its lead. Starting again from a part's lead goes on
-    // past the part, which ends loops like "College - Dorm Room - Is Sim X's?". The person, species
-    // and object type searches keep their own lists, whose order is not known yet.
+    // These searches walk the game's object list, where a multi-tile object's parts stand before
+    // its lead. So a loop that goes on from a part's lead, like "College - Dorm Room - Is Sim X's?",
+    // ends. The person, species and object type searches keep their own lists, whose order is not
+    // known yet.
     const bool walksObjectList = searchType == kSearchObject || searchType == kSearchNonPerson ||
                                  searchType == kSearchCategoryInParam0 || searchType == kSearchCategoryInTemp0 ||
                                  searchType == kSearchObjectInRoomInTemp0 || searchType == kSearchHauntable;

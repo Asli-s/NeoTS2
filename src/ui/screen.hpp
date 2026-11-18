@@ -244,6 +244,8 @@ private:
 
     int add(const ui::Window& w, int parent);
     int texture(tga::Pixels pixels);
+    // Gives a texture new pixels in place, with the same clear texel fix as texture().
+    void replaceTexture(int texture, tga::Pixels pixels);
     void release(int texture);
     void layoutText(int window);
     std::vector<std::string> wrapLines(const Window& w, const FontStyle& style) const;

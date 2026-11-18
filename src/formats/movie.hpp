@@ -94,7 +94,7 @@ private:
 
     Quality quality_;
     std::uint16_t width_ = 0, height_ = 0;
-    int quantiser_ = 0;  // the frame's quantiser scale
+    int quantiser_ = 0;
     std::vector<std::uint8_t> out_, reference_;
     bool shownIsReference_ = false;  // the last frame shown became the reference
     std::array<std::int32_t, 64> quant_{};

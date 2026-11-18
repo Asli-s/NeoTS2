@@ -1858,10 +1858,12 @@ void Game::leaveLot() {
     lotLeft_ = renderer_.swap(std::move(hood_.gpu));
     stopLotEffects();
     lotFreeing_ = std::async(std::launch::async, [scene = std::move(lot_), life = std::move(lotLife_), daylight = std::move(lotDaylight_), houseAssets = std::move(houseAssets),
-                                                 houseAssetsOpening = std::move(houseAssetsOpening)]() mutable {
+                                                 houseAssetsOpening = std::move(houseAssetsOpening), tv = std::move(tvStations_)]() mutable {
         daylight.reset();
         scene = {};
+        // The TV stations go after the lot, whose materials still point at them.
         life.reset();
+        tv.reset();
         houseAssets.clear();
         houseAssetsOpening.clear();
     });
@@ -2714,7 +2716,6 @@ void Game::updateLot(std::uint64_t now) {
     if (lotLife_ && householdShown_ && portraitRedraw_) {
         redrawPortrait(now);
     }
-    // A Sim that grew older is drawn again in its new body.
     if (lotLife_ && householdShown_ && !portraitRedraw_) {
         portraitRedraw_ = lotLife_->takeAgedSim();
     }
@@ -2835,6 +2836,10 @@ void Game::redrawPortrait(std::uint64_t now) {
     }
     const std::int16_t id = *portraitRedraw_;
     portraitRedraw_.reset();
+    // Only a household Sim has a thumbnail to draw again.
+    if (std::ranges::find(householdDrawn_, id) == householdDrawn_.end()) {
+        return;
+    }
     std::mt19937 poseRandom(static_cast<unsigned>(now));
     if (auto portrait = drawSimPortrait(id, poseRandom)) {
         lotUi_.setPortrait(id, *portrait);
@@ -2857,11 +2862,16 @@ std::optional<ts2::tga::Pixels> Game::drawSimPortrait(std::int16_t sim, std::mt1
             renderer_.setInstance(lot_, h.instance);
         }
     };
-    renderer_.addMaterials(lot_);
-    renderer_.addMeshes(lot_);
-    send();
-    auto portrait = app::drawPortrait(lot_, renderer_, lotLife_->animations(), *actor, random);
-    // The copy leaves the lot at once, so it is never drawn there.
+    // The copy leaves the lot at once, also when drawing fails, so it is never drawn there.
+    std::optional<ts2::tga::Pixels> portrait;
+    try {
+        renderer_.addMaterials(lot_);
+        renderer_.addMeshes(lot_);
+        send();
+        portrait = app::drawPortrait(lot_, renderer_, lotLife_->animations(), *actor, random);
+    } catch (const std::exception& ex) {
+        ts2::diag::warnOnce(std::string("a Sim's portrait can't be drawn: ") + ex.what());
+    }
     lotLife_->removePictureSim(lot_, *actor);
     send();
     return portrait;

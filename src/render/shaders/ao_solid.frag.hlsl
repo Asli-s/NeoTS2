@@ -1,6 +1,6 @@
-// Ambient occlusion's depth pass for surfaces without holes (not in the original game): depth, and the
-// drawn normal for ao.frag, which faces of a low-poly surface would show as flat steps if taken from
-// depth.
+// Ambient occlusion's depth pass for surfaces without holes (not in the original game): depth and the
+// drawn normal for ao.frag. A normal worked out from depth would show a low-poly surface's faces as
+// flat steps.
 
 #include "sdl_gpu.hlsli"
 

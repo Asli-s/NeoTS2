@@ -93,8 +93,8 @@ std::vector<RouteItem> wallRouteItems(const wallgraph::WallGraph& rooms, const s
     for (const auto& c : coverings) {
         coveringOf[static_cast<std::int32_t>(c.wall)] = c.type;
     }
-    // A wall's place: its level and its two ends in route coordinates, the lower end first. Points
-    // that are not numbers (a broken file) have none.
+    // A wall's place: its level and its two ends in route coordinates, the lower end first. A wall
+    // with an end that is not a number (a broken file) is skipped.
     using Place = std::tuple<int, float, float, float, float>;
     auto finite = [](const wallgraph::Point& p) { return std::isfinite(p.x) && std::isfinite(p.y); };
     auto placeOf = [](const wallgraph::Point& a, const wallgraph::Point& b) {

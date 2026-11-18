@@ -1,7 +1,8 @@
 // Ambient occlusion, not in the original game: the Graphics panel's setting darkens corners and contacts. The
 // opaque surfaces are drawn into a depth texture of their own, as the main view's may be multisampled and
-// can't be read, with their normals beside it. How open each pixel is comes from that, and the main view's opaque surfaces and layers
-// are multiplied by it as they are drawn, so glass, water and particles aren't darkened.
+// can't be read, with their normals beside it. How open each pixel is comes from those, and the main
+// view's opaque surfaces and layers are multiplied by it as they are drawn, so glass, water and
+// particles aren't darkened.
 
 #include "render/renderer.hpp"
 #include "render/renderer_internals.hpp"
@@ -159,7 +160,7 @@ void SdlGpuRenderer::drawOcclusion(const Frame& f, std::span<const Draw> opaque,
         }
         const bool skinned = d.primitive->skinned;
         const DrawUniforms& u = uniforms[i];
-        // The same tests as ao_depth.frag's: a surface that can't leave a hole needs no fragment shader work.
+        // The same tests as ao_depth.frag's: a surface that can't leave a hole skips the texture reads.
         const bool holes = u.fragment.wallMask[0] > 0.5f || u.fragment.alphaCutoff > 0;
         SDL_GPUGraphicsPipeline* pipeline = (holes ? occlusion_.depthPipelines : occlusion_.solidPipelines)[skinned ? 1 : 0][d.material && d.material->doubleSided ? 1 : 0];
         if (pipeline != bound) {

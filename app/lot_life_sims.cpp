@@ -730,7 +730,7 @@ std::optional<ts2::scene::Actor> LotLife::addEverydaySim(ts2::scene::Scene& scen
     constexpr std::uint32_t kEveryday = 0x01;
     constexpr std::size_t kCurrentOutfit = 0x08, kSourceGuidLow = 0x77, kSourceGuidHigh = 0x78;
     const auto* sim = sim_->world().find(simId);
-    if (sim == nullptr || !sim->isPerson()) {
+    if (sim == nullptr || !sim->isPerson() || sim->personData.size() <= kSourceGuidHigh) {
         return std::nullopt;
     }
     const bool everyday = ts2::sim::SimObject::OutfitChange{sim->personData[kCurrentOutfit], std::nullopt}.categoryFlag() == kEveryday &&

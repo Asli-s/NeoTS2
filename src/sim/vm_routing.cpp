@@ -631,7 +631,7 @@ Execution::WalkStep Execution::climbStair(SimObject& sim, Walking& walk) {
     step.codeOwner = owner->group;
     step.stackObject = entry->id;
     const auto room = [&](int level, const std::pair<float, float>& at) {
-        return static_cast<std::int16_t>(world().rooms().roomAt(level - 1, at.first, at.second));
+        return static_cast<std::int16_t>(world().rooms().roomAtPosition(level - 1, at.first, at.second));
     };
     step.args = {room(stair.entryLevel, walk.route.points.back()),
                  room(stair.exitLevel, walk.ahead->points.front()),
@@ -677,7 +677,7 @@ std::optional<Execution::WalkStep> Execution::doorPortal(const StairCrossing& do
     step.codeOwner = owner->group;
     step.stackObject = entry->id;
     const auto room = [&](int level, const std::pair<float, float>& at) {
-        return static_cast<std::int16_t>(world().rooms().roomAt(level - 1, at.first, at.second));
+        return static_cast<std::int16_t>(world().rooms().roomAtPosition(level - 1, at.first, at.second));
     };
     step.args = {room(door.entryLevel, door.entryAt),
                  room(door.exitLevel, door.exitAt),

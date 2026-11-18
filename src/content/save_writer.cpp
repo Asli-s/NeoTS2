@@ -459,7 +459,9 @@ void SaveWriter::move(const fs::path& from, const fs::path& to) {
         throw SaveError(what);
     }
     if (!moveNoReplace(from, to)) {
-        throw SaveError(what + ": " + moveFailure());
+        // Read before the message is built, which could change the last error.
+        const std::string why = moveFailure();
+        throw SaveError(what + ": " + why);
     }
 }
 

@@ -220,7 +220,7 @@ void putHuffman(std::vector<std::uint8_t>& out, std::uint8_t classAndId, const H
 std::vector<std::uint8_t> encode(const tga::Pixels& image, int quality, std::span<const std::uint8_t> extraApp0) {
     const int width = static_cast<int>(image.width);
     const int height = static_cast<int>(image.height);
-    if (width <= 0 || height <= 0 || width > 0xFFFF || height > 0xFFFF || image.rgba.size() < image.width * image.height * 4u ||
+    if (width <= 0 || height <= 0 || width > 0xFFFF || height > 0xFFFF || image.rgba.size() < static_cast<std::size_t>(image.width) * image.height * 4 ||
         extraApp0.size() > 0xFFFD || quality < 1 || quality > 100) {
         return {};
     }
