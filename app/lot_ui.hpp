@@ -136,6 +136,11 @@ public:
     void showHousehold(std::vector<Skewer::Member> members);
     // Puts a household Sim's newly drawn portrait on its thumbnail and the live panel.
     void setPortrait(std::int16_t sim, const ts2::tga::Pixels& portrait);
+    // The neighbors outside the household whose pictures are wanted but whose characters hold none,
+    // and whose Sims are on the lot to be drawn, as the game draws a portrait then.
+    const std::vector<std::int16_t>& portraitsWanted() const { return portraitsWanted_; }
+    // That neighbor's drawn portrait, or nullopt when it couldn't be drawn.
+    void setDrawnPortrait(std::int16_t neighbor, std::optional<ts2::tga::Pixels> portrait);
     // A Sim's name as its tips show it: first and last name with a space between, either alone when
     // the other is empty, and a witch's title round it (Live text 0x336). Only English order is
     // done. The game puts the last name first in some languages.
@@ -234,6 +239,9 @@ private:
     ts2::content::TargetPictures notificationSmallPortraits_{ts2::content::readCharacterPortrait, 40};
     // Each household Sim's portrait, and whose the live panel shows (-1: none yet).
     std::map<std::int16_t, ts2::tga::Pixels> portraits_;
+    // Portraits drawn for neighbors outside the household (see portraitWanted), and those waiting.
+    std::map<std::int16_t, std::optional<ts2::tga::Pixels>> drawnPortraits_;
+    std::vector<std::int16_t> portraitsWanted_;
     int portraitShown_ = -1;
     PortraitWindows portraitWindows_;
     std::int16_t tracked_ = 0;

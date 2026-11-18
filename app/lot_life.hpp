@@ -80,13 +80,20 @@ public:
     const std::vector<std::int16_t>& household() const { return sim_->household(); }
     [[nodiscard]] std::optional<ts2::tga::Pixels> portrait(std::int16_t sim);
     // A Sim's neighbor id (0 when it has none), and where a neighbor's portrait for its life stage
-    // is: its character file and the picture's instance there (nullopt when unknown).
+    // is: its character file and the picture's instance there (nullopt when unknown or when the
+    // file holds no such picture, as many NPCs' files the game writes don't).
     std::int16_t neighborId(std::int16_t sim);
     struct PortraitFile {
         std::filesystem::path file;
         std::uint32_t instance = 0;
     };
     [[nodiscard]] std::optional<PortraitFile> neighborPortrait(std::int16_t neighbor);
+    // The portrait of an NPC without a character file (Rod Humble, the Grim Reaper): the picture for
+    // its life stage in its object type's group, read once. Nullopt when there is none.
+    [[nodiscard]] std::optional<ts2::tga::Pixels> npcPortrait(std::int16_t neighbor);
+    // A Sim that got its new age's body since last asked, to draw its portrait again, as the game
+    // keeps a portrait for each life stage. Nullopt when there is none.
+    std::optional<std::int16_t> takeAgedSim();
     // A Sim's life stage (person data 0x3A), its motives as the panels show them (whole numbers)
     // and its mood (motive 3). 0 for a Sim that is gone.
     std::int16_t lifeStage(std::int16_t sim);
@@ -299,6 +306,11 @@ public:
     // removePictureSim.
     std::optional<ts2::scene::Actor> addSimViewSim(ts2::scene::Scene& scene, const AppearanceHairs& sim, const ts2::scene::HairSlots& slots,
                                                    const std::string& tone);
+    // A copy of the Sim `simId` in its everyday outfit, standing at the origin out of the lot's
+    // actors, while it wears another outfit (its pajamas, a towel), as the game's portraits always
+    // show the everyday one. Nullopt when it wears that already or the copy can't be built. Take it
+    // out again with removePictureSim.
+    std::optional<ts2::scene::Actor> addEverydaySim(ts2::scene::Scene& scene, std::int16_t simId);
     // Frees a picture Sim's instances, which join changedInstances.
     void removePictureSim(ts2::scene::Scene& scene, const ts2::scene::Actor& actor);
     // The camera and lights of a hair's picture for a Sim of this age flag. Nullopt when the game's
@@ -389,6 +401,10 @@ private:
     const ts2::scene::ScenePose* pose_ = nullptr;  // the Sims as last posed
     // The states each Sim's looks took as it was last posed, told at the next update.
     std::map<std::int16_t, std::vector<ts2::sim::LookController::Change>> lookChanges_;
+    // The pictures each character file holds, by instance, as of the file's write time.
+    std::map<std::filesystem::path, std::pair<std::filesystem::file_time_type, std::set<std::uint32_t>>> filePictures_;
+    std::map<std::int16_t, std::optional<ts2::tga::Pixels>> npcPortraits_;  // by neighbor, once read
+    std::vector<std::int16_t> agedSims_;  // see takeAgedSim
     std::optional<std::array<float, 3>> cameraEye_;
     ts2::scene::Transform lotFrame_;  // the lot's place in the scene
     ts2::sim::TickPacer pacer_;

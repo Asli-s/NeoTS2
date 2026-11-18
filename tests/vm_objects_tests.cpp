@@ -682,6 +682,53 @@ void addToFamilyZeroJoinsTheLotsHousehold() {
     CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::Unsupported);
 }
 
+// "Remove from family" (Generic Sims Call 0x06), as the Grim Reaper runs it on a Sim who died: the
+// neighbor in the stack object leaves its family, and when its Sim was selected, control passes to
+// the selectable family Sim that came onto the lot first.
+void removeFromFamilyPassesControl() {
+    Instruction remove = primitiveCall(0x0001, T, F);
+    remove.operands[0] = 0x06;
+    MemoryCodeSource code;
+    code.add(kObjectGroup, 0x1000, bhav({
+        expr(owner::kStackObjectId, 0, op::kAssign, owner::kLiteral, 9, 1, E),
+        remove,
+    }));
+    ts2::sim::World world;
+    ts2::sim::SimObject& controller = world.create(kObjectGroup, typed(0x0BADF00D));
+    const auto person = [&](std::uint32_t guid, std::int16_t neighbor) -> ts2::sim::SimObject& {
+        ts2::sim::SimObject& s = world.create(kObjectGroup, typed(guid, ts2::sim::kPersonType));
+        s.personData[0x1F] = neighbor;
+        s.personData[0x3D] = 6;
+        s.personData[0x9E] = 1;
+        return s;
+    };
+    ts2::sim::SimObject& dead = person(0x0D000009, 9);   // id 2
+    ts2::sim::SimObject& later = person(0x0D000008, 8);  // id 3
+    world.remove(controller);
+    world.purge();
+    ts2::sim::SimObject& first = person(0x0D000007, 7);  // takes the free id 1, but came last
+    ts2::sim::SimObject& replacement = world.create(kObjectGroup, typed(0x0BADF00D));
+    auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
+    hood->neighborIds = {7, 8, 9};
+    for (const std::int16_t id : std::initializer_list<std::int16_t>{7, 8, 9}) {
+        hood->neighbors[id].guid = 0x0D000000u + static_cast<std::uint32_t>(id);
+        hood->neighbors[id].personData.assign(0xE7, 0);
+        hood->neighbors[id].personData[0x3D] = 6;
+    }
+    hood->familyLots[6] = 10;
+    hood->familyMembers[6] = {0x0D000007, 0x0D000008, 0x0D000009};
+    world.setNeighborhood(hood);
+    Vm vm(code, {}, &world);
+    vm.globals[ts2::sim::global::kSelectedPerson] = dead.id;
+    CHECK(vm.run(replacement, 0x1000).outcome == Outcome::True);
+    CHECK(world.neighborPersonValue(9, 0x3D) == 0 && dead.personData[0x3D] == 0);
+    const auto members = world.familyMemberGuids(6);
+    CHECK(members.size() == 2 && members[0] == 0x0D000007 && members[1] == 0x0D000008);
+    CHECK(vm.globals[ts2::sim::global::kSelectedPerson] == later.id && first.id < later.id);
+    // Out of the family, it can't leave again.
+    CHECK(vm.run(replacement, 0x1000).outcome == Outcome::False);
+}
+
 // Neighbor data field 6 ("house number") is the lot of the neighbor's family (person data 0x3D).
 void neighborHouseNumberIsTheFamilysLot() {
     ts2::sim::World world;
@@ -3517,6 +3564,7 @@ std::vector<Test> vmObjectTests() {
         {"make new character adds a neighbor", makeNewCharacterAddsANeighbor},
         {"make new character makes babies of two parents", makeNewCharacterMakesBabiesOfTwoParents},
         {"add to family 0 joins the lot's household", addToFamilyZeroJoinsTheLotsHousehold},
+        {"remove from family passes control", removeFromFamilyPassesControl},
         {"A neighbor's house number is its family's lot", neighborHouseNumberIsTheFamilysLot},
         {"neighbor object definition reads", neighborObjectDefinitionReads},
         {"Get Distance To measures in tiles", getDistanceToMeasuresInTiles},

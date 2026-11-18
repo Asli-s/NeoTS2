@@ -330,6 +330,8 @@ private:
     void updateAudio();
     void drawHousehold(std::uint64_t now);
     void redrawPortrait(std::uint64_t now);
+    void drawNeighborPortrait(std::uint64_t now);
+    std::optional<ts2::tga::Pixels> drawSimPortrait(std::int16_t sim, std::mt19937& random);
     std::optional<ts2::tga::Pixels> drawSimView(const LotLife::AppearanceHairs& sim, const ts2::scene::HairSlots& slots, const std::string& tone,
                                                 unsigned width, unsigned height, float turn);
     void sendLotChanges();

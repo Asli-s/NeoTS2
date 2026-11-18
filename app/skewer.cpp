@@ -171,6 +171,15 @@ void Skewer::setAwayIcons(std::int16_t sim, std::uint16_t flags, bool roommate) 
     }
 }
 
+void Skewer::setPressable(std::int16_t sim, bool pressable) {
+    for (const Thumbnail& t : thumbnails_) {
+        if (t.sim == sim) {
+            screen_->setEnabled(screen_->find(t.window, kFrame), pressable);
+            screen_->setEnabled(screen_->find(t.window, kAwayFrame), pressable);
+        }
+    }
+}
+
 std::optional<std::int16_t> Skewer::clicked(int window) const {
     for (const Thumbnail& t : thumbnails_) {
         if (screen_->parent(window) == t.window) {

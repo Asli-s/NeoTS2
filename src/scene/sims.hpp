@@ -63,6 +63,9 @@ struct SimLook {
 SimLook simLook(Assets& assets, const std::filesystem::path& characterFile, std::optional<std::uint32_t> category = std::nullopt);
 // A character file's age data, nullopt when it has none. The file becomes the one in use.
 std::optional<AgeData> characterAgeData(Assets& assets, const std::filesystem::path& characterFile);
+// The age data of an NPC without a character file, such as the Grim Reaper, which its object's
+// group in the object packages holds. That group becomes the character in use. Nullopt without it.
+std::optional<AgeData> characterGroupAgeData(Assets& assets, std::uint32_t group);
 // The same from age data held apart from the file, such as an aged Sim's. The Sim's character file
 // must be the one in use, for its own parts.
 SimLook simLook(Assets& assets, const AgeData& data, std::optional<std::uint32_t> category = std::nullopt);
@@ -150,6 +153,9 @@ std::string separatesOverSkin(SceneBuilder& builder, Assets& assets, const SimLo
 std::string simSlotBone(Assets& assets, const std::filesystem::path& characterFile, std::size_t slot);
 // All of them, by slot, read at once. With `targeting`, the bones of its targeting slots instead.
 std::vector<std::string> simSlotBones(Assets& assets, const std::filesystem::path& characterFile, bool targeting = false);
+// The same for an NPC without a character file, such as the Grim Reaper: the object type `guid`'s
+// own SLOT and string table in the object packages. Empty when unknown.
+std::vector<std::string> npcSlotBones(Assets& assets, std::uint32_t guid, bool targeting = false);
 
 // The animation a Sim of this age (SimLook::age) stands idle with, as the game's idle code names it
 // for each age (adults' when its age has none). Empty when unknown.

@@ -4,7 +4,9 @@
 
 #include "content/neighborhood.hpp"
 #include "diag/log.hpp"
+#include "formats/dbpf.hpp"
 #include "formats/image.hpp"
+#include "formats/resource_types.hpp"
 #include "sim/ground_click.hpp"
 #include "sim/motives.hpp"
 #include "sim/pie_menu.hpp"
@@ -531,7 +533,46 @@ std::optional<LotLife::PortraitFile> LotLife::neighborPortrait(std::int16_t neig
     }
     const auto image = ts2::content::portraitImage(n->personData[ts2::sim::kLifeStagePersonData]);
     auto file = image ? sim_->characterFile(neighbor) : std::nullopt;
-    return file ? std::optional<PortraitFile>(PortraitFile{std::move(*file), *image}) : std::nullopt;
+    if (!file) {
+        return std::nullopt;
+    }
+    std::error_code ec;
+    const auto written = std::filesystem::last_write_time(*file, ec);
+    const bool read = filePictures_.contains(*file);
+    auto& known = filePictures_[*file];
+    if (!read || ec || known.first != written) {
+        known = {written, {}};
+        try {
+            const ts2::dbpf::Package package(*file);
+            for (const auto& e : package.entries()) {
+                if (e.key.type == ts2::types::kImage) {
+                    known.second.insert(e.key.instance);
+                }
+            }
+        } catch (const std::exception& ex) {
+            ts2::diag::warnOnce(std::string("portraits: a character file that can't be read has none: ") + ex.what());
+        }
+    }
+    return known.second.contains(*image) ? std::optional<PortraitFile>(PortraitFile{std::move(*file), *image}) : std::nullopt;
+}
+
+std::optional<ts2::tga::Pixels> LotLife::npcPortrait(std::int16_t neighbor) {
+    const auto* n = sim_->world().neighbor(neighbor);
+    if (n == nullptr || n->personData.size() <= ts2::sim::kLifeStagePersonData || sim_->characterFile(neighbor)) {
+        return std::nullopt;
+    }
+    if (const auto known = npcPortraits_.find(neighbor); known != npcPortraits_.end()) {
+        return known->second;
+    }
+    auto& portrait = npcPortraits_[neighbor];
+    const auto image = ts2::content::portraitImage(n->personData[ts2::sim::kLifeStagePersonData]);
+    const auto* type = sim_->code().objectType(n->guid);
+    if (image && type != nullptr) {
+        const ts2::scene::Assets::CharacterInUse inUse(assets_, type->group);
+        const auto bytes = assets_.byKey({ts2::types::kImage, type->group, *image, 0});
+        portrait = bytes ? ts2::image::decode(*bytes, ts2::content::kMaxPortraitSide) : std::nullopt;
+    }
+    return portrait;
 }
 
 } // namespace app

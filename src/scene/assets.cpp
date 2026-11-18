@@ -140,8 +140,9 @@ std::optional<std::vector<std::uint8_t>> Assets::byName(std::uint32_t type, cons
         }
         const auto key = hash::scenegraphKey(name.substr(mark + 1));
         // A 0x6F group is the number the game gave a package in the session that saved the file,
-        // so it means nothing later. Inside a character file it names the file's own resources.
-        const bool sessionGroup = (*group >> 24) == 0x6F && localGroup_ && !characterGroup_;
+        // so it means nothing later. Inside a character file it names the file's own resources, and
+        // for an NPC kept in the object packages its object's group (Rod Humble's face mesh).
+        const bool sessionGroup = (*group >> 24) == 0x6F && localGroup_;
         return byKey({type, sessionGroup ? *localGroup_ : *group, key.instance, key.instanceHigh});
     }
     const auto key = hash::scenegraphKey(name);
@@ -217,7 +218,8 @@ void Assets::forEachSkinResource(std::uint32_t type, const std::function<void(co
 }
 
 std::optional<std::vector<std::uint8_t>> Assets::skinResource(const sg::Link& link) {
-    if (link.group == kLocalGroup) {
+    // An NPC's age data names its own outfit parts by its object's group (Rod Humble's face).
+    if (link.group == kLocalGroup || link.group == characterGroup_) {
         return byKey(link);
     }
     readSkins();

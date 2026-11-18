@@ -18,6 +18,10 @@ namespace app {
 // Sim's joints are changed, and the next frame sets them again.
 [[nodiscard]] std::optional<ts2::tga::Pixels> drawPortrait(const ts2::scene::Scene& lot, ts2::render::IRenderer& renderer,
                                              ts2::scene::AnimationLibrary& animations, std::uint32_t sim, std::mt19937& random);
+// The same for an actor kept out of the lot's actors, such as a Sim's copy in its everyday outfit.
+[[nodiscard]] std::optional<ts2::tga::Pixels> drawPortrait(const ts2::scene::Scene& lot, ts2::render::IRenderer& renderer,
+                                             ts2::scene::AnimationLibrary& animations, const ts2::scene::Actor& actor,
+                                             std::mt19937& random);
 
 // Draws a part picture's Sim (see LotLife::addHairPictureSim) alone in its picture pose with the
 // picture's camera and lights, over a transparent background (PictureView::kSize pixels square).

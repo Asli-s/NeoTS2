@@ -2708,6 +2708,13 @@ void Game::updateLot(std::uint64_t now) {
     if (lotLife_ && householdShown_ && portraitRedraw_) {
         redrawPortrait(now);
     }
+    // A Sim that grew older is drawn again in its new body.
+    if (lotLife_ && householdShown_ && !portraitRedraw_) {
+        portraitRedraw_ = lotLife_->takeAgedSim();
+    }
+    if (lotLife_ && householdShown_ && !lotUi_.portraitsWanted().empty()) {
+        drawNeighborPortrait(now);
+    }
     if (lotLife_) {
         lotLife_->markOnScreen(simsInView(lot_, viewCamera(), width_, height_));
         lotLife_->setCamera(viewCamera().eye);
@@ -2796,7 +2803,7 @@ void Game::drawHousehold(std::uint64_t now) {
     std::vector<app::Skewer::Member> members;
     std::mt19937 poseRandom(static_cast<unsigned>(now));
     for (const std::int16_t id : householdDrawn_) {
-        auto portrait = app::drawPortrait(lot_, renderer_, lotLife_->animations(), static_cast<std::uint32_t>(id), poseRandom);
+        auto portrait = drawSimPortrait(id, poseRandom);
         members.push_back({id, portrait ? std::move(portrait) : lotLife_->portrait(id)});
     }
     const auto age = [&](std::int16_t sim) {
@@ -2821,10 +2828,57 @@ void Game::redrawPortrait(std::uint64_t now) {
     const std::int16_t id = *portraitRedraw_;
     portraitRedraw_.reset();
     std::mt19937 poseRandom(static_cast<unsigned>(now));
-    if (auto portrait = app::drawPortrait(lot_, renderer_, lotLife_->animations(), static_cast<std::uint32_t>(id), poseRandom)) {
+    if (auto portrait = drawSimPortrait(id, poseRandom)) {
         lotUi_.setPortrait(id, *portrait);
     }
     renderer_.show(lotShown());
+}
+
+// A Sim's portrait, drawn in its everyday outfit whatever it wears now, as the game draws them. A
+// Sim in another outfit is drawn as a copy dressed every day, built and taken out at once.
+std::optional<ts2::tga::Pixels> Game::drawSimPortrait(std::int16_t sim, std::mt19937& random) {
+    const auto actor = lotLife_->addEverydaySim(lot_, sim);
+    if (!actor) {
+        return app::drawPortrait(lot_, renderer_, lotLife_->animations(), static_cast<std::uint32_t>(sim), random);
+    }
+    const auto send = [&] {
+        for (const auto& s : actor->skinned) {
+            renderer_.setInstance(lot_, s.instance);
+        }
+        for (const auto& h : actor->held) {
+            renderer_.setInstance(lot_, h.instance);
+        }
+    };
+    renderer_.addMaterials(lot_);
+    renderer_.addMeshes(lot_);
+    send();
+    auto portrait = app::drawPortrait(lot_, renderer_, lotLife_->animations(), *actor, random);
+    // The copy leaves the lot at once, so it is never drawn there.
+    lotLife_->removePictureSim(lot_, *actor);
+    send();
+    return portrait;
+}
+
+// A neighbor outside the household whose character holds no portrait gets one drawn from its Sim
+// on the lot, as the game draws one, one a frame. A Sim not drawn yet waits, and one gone has none.
+void Game::drawNeighborPortrait(std::uint64_t now) {
+    auto& world = lotLife_->simulation().world();
+    const std::vector<std::int16_t> wanted = lotUi_.portraitsWanted();
+    for (const std::int16_t neighbor : wanted) {
+        const auto* sim = world.nextAfter(0, [&](const ts2::sim::SimObject& o) { return o.isPerson() && world.neighborIdOf(o) == neighbor; });
+        if (sim == nullptr) {
+            lotUi_.setDrawnPortrait(neighbor, std::nullopt);
+            continue;
+        }
+        const auto id = static_cast<std::uint32_t>(sim->id);
+        if (std::none_of(lot_.actors.begin(), lot_.actors.end(), [&](const ts2::scene::Actor& a) { return a.object == id; })) {
+            continue;
+        }
+        std::mt19937 poseRandom(static_cast<unsigned>(now));
+        lotUi_.setDrawnPortrait(neighbor, drawSimPortrait(sim->id, poseRandom));
+        renderer_.show(lotShown());
+        return;
+    }
 }
 
 // What the Sims changed on the lot this frame goes to the GPU and the picker.

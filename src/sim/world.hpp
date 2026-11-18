@@ -262,6 +262,9 @@ struct MaterialChange {
 
 struct SimObject {
     std::int16_t id = 0;
+    // When it came onto the lot, counted from 1 over created and loaded objects alike. The game
+    // keeps its Sims in this order. Not saved.
+    std::uint32_t addOrder = 0;
     // How strongly its lights shine (set by Change Light, 1 until a script sets it). Not saved.
     float lightStrength = 1;
     // Change Material's changes in the order they apply. One for the whole model replaces all
@@ -957,6 +960,8 @@ public:
     void addFamily(std::uint32_t family);
     // Adds a Sim's GUID to the end of a family's members unless it is there. It lasts for this run only.
     void addFamilyMember(std::uint32_t family, std::uint32_t guid);
+    // Takes a Sim's GUID out of a family's members. It lasts for this run only.
+    void removeFamilyMember(std::uint32_t family, std::uint32_t guid);
     bool hasFamily(std::uint32_t family) const { return hood_ && hood_->familyLots.contains(family); }
     // The household of the lot being played: of the families whose home is this lot, the one the
     // game lists first, with the highest rank (familyRanks) and then the highest id.
@@ -1747,6 +1752,7 @@ private:
     // up all the time. Null for ids with no object.
     std::vector<SimObject*> byId_ = std::vector<SimObject*>(0x8000, nullptr);
     std::int16_t highestId_ = 0;
+    std::uint32_t addCount_ = 0;
     // The game's object list, which Set to Next's general searches walk: each id's next and
     // previous id, with id 0 standing for the list's ends. A loaded object joins the back and a new
     // object the front, as in the game.

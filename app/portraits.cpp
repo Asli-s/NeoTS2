@@ -14,13 +14,22 @@ std::optional<ts2::tga::Pixels> drawPortrait(const ts2::scene::Scene& lot, ts2::
             actor = &a;
         }
     }
-    if (actor == nullptr || !actor->rig) {
+    if (actor == nullptr) {
         return std::nullopt;
     }
-    std::uniform_int_distribution<int> pick(1, portraitPoseCount(actor->age));
-    const auto pose = animations.bound(actor->rig, portraitPose(actor->age, actor->gender, pick(random)));
+    return drawPortrait(lot, renderer, animations, *actor, random);
+}
+
+std::optional<ts2::tga::Pixels> drawPortrait(const ts2::scene::Scene& lot, ts2::render::IRenderer& renderer,
+                                             ts2::scene::AnimationLibrary& animations, const ts2::scene::Actor& actor, std::mt19937& random) {
+    using namespace ts2::scene;
+    if (!actor.rig) {
+        return std::nullopt;
+    }
+    std::uniform_int_distribution<int> pick(1, portraitPoseCount(actor.age));
+    const auto pose = animations.bound(actor.rig, portraitPose(actor.age, actor.gender, pick(random)));
     PortraitShot shot;
-    if (!portraitShot(lot, *actor, pose.get(), shot)) {
+    if (!portraitShot(lot, actor, pose.get(), shot)) {
         return std::nullopt;
     }
     std::vector<std::uint8_t> visible(lot.instances.size(), 0);

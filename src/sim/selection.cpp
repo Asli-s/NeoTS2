@@ -13,8 +13,6 @@ constexpr std::size_t kPersonTypeData = 0x20, kLifeStage = 0x3A, kAgeDaysLeft = 
                       kSelectionFlags = 0x9E, kSpecies = 0xBA;  // person data
 constexpr std::int16_t kSelectable = 0x01, kPassedOver = 0x02, kSelectableVisitor = 0x08;
 
-bool passedOver(const SimObject& sim) { return (sim.personData[kSelectionFlags] & kPassedOver) != 0; }
-
 // The game compares these as unsigned numbers, so a negative sum sorts as a large one.
 std::uint32_t ageKey(const SimObject& sim) {
     const int key = sim.personData[kLifeStage] * 1000 - sim.personData[kAgeDaysLeft] + sim.personData[kAgeDuration];
@@ -34,6 +32,8 @@ int compareNames(const std::string& a, const std::string& b) {
 }
 
 } // namespace
+
+bool passedOver(const SimObject& sim) { return (sim.personData[kSelectionFlags] & kPassedOver) != 0; }
 
 bool isSelectable(const SimObject& sim) {
     const std::int16_t flags = sim.personData[kSelectionFlags];

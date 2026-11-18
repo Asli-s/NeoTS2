@@ -39,6 +39,8 @@ public:
     // Shows the icons for where a Sim is away (person data 0x34, the UI icon flags, one icon per bit).
     // `roommate` (person data 0x54 bit 0x800) shows the roommate work icon in place of at work.
     void setAwayIcons(std::int16_t sim, std::uint16_t flags, bool roommate);
+    // Enables or disables a Sim's thumbnail buttons. A disabled one can't be clicked.
+    void setPressable(std::int16_t sim, bool pressable);
     // Sets the tip of a Sim's thumbnail, the Sim's name.
     void setName(std::int16_t sim, const std::string& name);
 

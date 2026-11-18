@@ -1,5 +1,6 @@
 #include "sim/vm_execution.hpp"
 #include "sim/character_file.hpp"
+#include "sim/selection.hpp"
 #include "sim/want_refill.hpp"
 
 #include "formats/propset.hpp"
@@ -154,6 +155,9 @@ bool Execution::genericSimsCall(const bhav::Instruction& in) {
     if (call == kAddToFamilyGenericCall) {
         return addToFamily();
     }
+    if (call == kRemoveFromFamilyGenericCall) {
+        return removeFromFamily();
+    }
     if (call == kUnlinkCharacterGenericCall) {
         return unlinkCharacter();
     }
@@ -279,6 +283,48 @@ bool Execution::addToFamily() {
         sim->personData[kFamilyField] = family;
         sim->personData[kClearedOnJoin] = 0;
     }
+    return true;
+}
+
+// "Remove from family": the neighbor whose id is my stack object leaves its family (person data
+// "family" 0x3D), which becomes 0 on the neighbor and on its Sim when on the lot. When that Sim was
+// selected (global 3), control passes to the first selectable Sim of the family in the order the
+// Sims came onto the lot, or to none. False when it has no family or isn't among its members. The
+// game also sends message 0x94 with the family's id, whose readers are not known yet.
+bool Execution::removeFromFamily() {
+    constexpr std::size_t kFamilyField = 0x3D, kNeighborIdField = 0x1F;
+    const std::int16_t neighborId = stackObject();
+    const SavedNeighbor* neighbor = world().neighbor(neighborId);
+    std::vector<std::int16_t>* data = neighbor ? world().neighborPersonData(neighborId) : nullptr;
+    if (data == nullptr) {
+        throw Stop{Outcome::Error, "missing neighbor for data access", std::to_string(neighborId)};
+    }
+    const std::int16_t family = (*data)[kFamilyField];
+    const auto familyId = static_cast<std::uint16_t>(family);
+    const std::uint32_t guid = neighbor->guid;
+    const auto members = world().familyMemberGuids(familyId);
+    if (family == 0 || !world().hasFamily(familyId) || std::ranges::find(members, guid) == members.end()) {
+        return false;
+    }
+    if (SimObject* sim = world().nextAfter(0, [&](const SimObject& s) { return s.isPerson() && s.definition.guid() == guid; })) {
+        sim->personData[kFamilyField] = 0;
+    }
+    (*data)[kFamilyField] = 0;
+    world().removeFamilyMember(familyId, guid);
+
+    std::int16_t& selected = globals_[global::kSelectedPerson];
+    const SimObject* current = world().find(selected);
+    if (current == nullptr || !current->isPerson() || current->personData[kNeighborIdField] != neighborId) {
+        return true;
+    }
+    const SimObject* next = nullptr;
+    const auto inFamily = [&](const SimObject& s) { return s.isPerson() && s.personData[kFamilyField] == family && isSelectable(s); };
+    for (const SimObject* s = world().nextAfter(0, inFamily); s != nullptr; s = world().nextAfter(s->id, inFamily)) {
+        if (next == nullptr || s->addOrder < next->addOrder) {
+            next = s;
+        }
+    }
+    selected = next != nullptr ? next->id : 0;
     return true;
 }
 

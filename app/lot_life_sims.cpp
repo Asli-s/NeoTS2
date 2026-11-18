@@ -196,6 +196,7 @@ bool LotLife::addCreatedSim(ts2::scene::Scene& scene, const ts2::sim::SimObject&
         return addLoadedSim(scene, sim, std::move(*built));
     }
     std::optional<ts2::scene::Assets::CharacterInUse> inUse;
+    bool fromObject = false;
     ts2::scene::SimLook look;
     if (file) {
         inUse.emplace(assets_, *file);
@@ -247,6 +248,14 @@ bool LotLife::addCreatedSim(ts2::scene::Scene& scene, const ts2::sim::SimObject&
         // A human made from a template during play: its look drawn as Make New Character draws it.
         constexpr std::uint32_t kEveryday = 1;
         look = ts2::scene::madeSimLook(assets_, outfitCatalog_.get(), *madeLook(neighbor, *fromTemplate->madeAs), kEveryday);
+    } else {
+        // A neighbor's character is the object type with its GUID, so an NPC without a character
+        // file (the Grim Reaper) wears the age data its object's group holds.
+        inUse.emplace(assets_, sim.group);
+        fromObject = true;
+        if (const auto data = ts2::scene::characterGroupAgeData(assets_, sim.group)) {
+            look = ts2::scene::simLook(assets_, *data);
+        }
     }
     for (const auto& problem : look.problems) {
         ts2::diag::warnOnce(std::format("Sim {}: {}", sim.id, problem));
@@ -263,6 +272,10 @@ bool LotLife::addCreatedSim(ts2::scene::Scene& scene, const ts2::sim::SimObject&
     if (file) {
         actor.slotNodes = boneNodes(actor.rig.get(), ts2::scene::simSlotBones(assets_, *file));
         actor.targetNodes = boneNodes(actor.rig.get(), ts2::scene::simSlotBones(assets_, *file, true));
+    } else if (fromObject) {
+        const std::uint32_t guid = sim.definition.guid();
+        actor.slotNodes = boneNodes(actor.rig.get(), ts2::scene::npcSlotBones(assets_, guid));
+        actor.targetNodes = boneNodes(actor.rig.get(), ts2::scene::npcSlotBones(assets_, guid, true));
     }
     keepSimParts(sim.id, actor, true);
     scene.actors.push_back(std::move(actor));
@@ -465,10 +478,22 @@ void LotLife::buildNewAges(ts2::scene::Scene& scene) {
             actor.targetNodes = boneNodes(actor.rig.get(), ts2::scene::simSlotBones(assets_, *file, true));
             keepSimParts(sim->id, actor, false);
             ownAnimations_.erase(actor.object);
+            if (std::ranges::find(agedSims_, sim->id) == agedSims_.end()) {
+                agedSims_.push_back(sim->id);
+            }
         } catch (const std::exception& ex) {
             ts2::diag::warning(std::format("Sim {} keeps its body: its new age can't be built: {}", sim->id, ex.what()));
         }
     }
+}
+
+std::optional<std::int16_t> LotLife::takeAgedSim() {
+    if (agedSims_.empty()) {
+        return std::nullopt;
+    }
+    const std::int16_t sim = agedSims_.front();
+    agedSims_.erase(agedSims_.begin());
+    return sim;
 }
 
 // A Sim that Change Outfit dressed wears the new outfit at once. Only its parts change: its rig,
@@ -697,6 +722,39 @@ std::optional<ts2::scene::Actor> LotLife::addSimViewSim(ts2::scene::Scene& scene
                                     freeSimInstances_);
     } catch (const std::exception& ex) {
         ts2::diag::warnOnce(std::string("Change Appearance: the Sim view's Sim can't be built: ") + ex.what());
+        return std::nullopt;
+    }
+}
+
+std::optional<ts2::scene::Actor> LotLife::addEverydaySim(ts2::scene::Scene& scene, std::int16_t simId) {
+    constexpr std::uint32_t kEveryday = 0x01;
+    constexpr std::size_t kCurrentOutfit = 0x08, kSourceGuidLow = 0x77, kSourceGuidHigh = 0x78;
+    const auto* sim = sim_->world().find(simId);
+    if (sim == nullptr || !sim->isPerson()) {
+        return std::nullopt;
+    }
+    const bool everyday = ts2::sim::SimObject::OutfitChange{sim->personData[kCurrentOutfit], std::nullopt}.categoryFlag() == kEveryday &&
+                          sim->personData[kSourceGuidLow] == 0 && sim->personData[kSourceGuidHigh] == 0;
+    const std::int16_t neighbor = sim_->world().neighborIdOf(*sim);
+    const auto file = neighbor != 0 ? sim_->characterFile(neighbor) : std::nullopt;
+    // Only a Sim with a character file changes outfits, so any other wears its everyday one.
+    if (everyday || !file) {
+        return std::nullopt;
+    }
+    try {
+        const ts2::scene::Assets::CharacterInUse inUse(assets_, *file);
+        const auto working = outfitData_.find(neighbor);
+        const auto aged = agedData_.find(neighbor);
+        const ts2::scene::SimLook look = working != outfitData_.end() ? ts2::scene::simLook(assets_, working->second, kEveryday)
+                                         : aged != agedData_.end()    ? ts2::scene::simLook(assets_, aged->second, kEveryday)
+                                                                      : ts2::scene::simLook(assets_, *file, kEveryday);
+        if (look.parts.empty()) {
+            return std::nullopt;
+        }
+        return objectMaterials_.sim(look, "portrait", ts2::scene::Transform{}, scene.groundLevel, ts2::scene::standingIdle(assets_, look.age),
+                                    scene, freeSimInstances_);
+    } catch (const std::exception& ex) {
+        ts2::diag::warnOnce(std::string("portraits: a Sim's everyday outfit can't be built: ") + ex.what());
         return std::nullopt;
     }
 }

@@ -186,6 +186,16 @@ std::optional<AgeData> characterAgeData(Assets& assets, const std::filesystem::p
     return readAgeData(propset::parse(*aged), reflist::parse(*agedRefs));
 }
 
+std::optional<AgeData> characterGroupAgeData(Assets& assets, std::uint32_t group) {
+    assets.useCharacterGroup(group);
+    const auto aged = assets.byKey({kAgeData, kLocalGroup, 1, 0});
+    const auto agedRefs = assets.byKey({reflist::kType, kLocalGroup, 1, 0});
+    if (!aged || !agedRefs) {
+        return std::nullopt;
+    }
+    return readAgeData(propset::parse(*aged), reflist::parse(*agedRefs));
+}
+
 SimLook simLook(Assets& assets, const std::filesystem::path& characterFile, std::optional<std::uint32_t> category) {
     const auto data = characterAgeData(assets, characterFile);
     if (!data) {
@@ -683,6 +693,28 @@ namespace {
 constexpr std::uint32_t kTemplatePersonGuid = 0x7FD96B54;
 constexpr std::uint32_t kBoneNames = 0x90;
 
+// The bones (lowercase) a Sim's SLOT entries sit at, named by its "Model - Bones" strings: each
+// container slot's by slot, or with `targeting` each targeting slot's.
+std::vector<std::string> slotBonesOf(const slot::Slots& parsed, const std::vector<std::string>& entries, bool targeting) {
+    const auto boneName = [&](std::int32_t b) {
+        return b >= 0 && static_cast<std::size_t>(b) < entries.size() ? lower(entries[static_cast<std::size_t>(b)]) : std::string();
+    };
+    std::vector<std::string> bones;
+    if (targeting) {
+        for (const auto& e : parsed.entries) {
+            if (e.type == slot::kTargetSlot) {
+                bones.push_back(boneName(e.bone));
+            }
+        }
+        return bones;
+    }
+    bones.resize(parsed.containerCount());
+    for (std::size_t slot = 0; slot < bones.size(); ++slot) {
+        bones[slot] = boneName(parsed.containerBone(slot));
+    }
+    return bones;
+}
+
 } // namespace
 
 std::string simSlotBone(Assets& assets, const std::filesystem::path& characterFile, std::size_t slot) {
@@ -729,23 +761,26 @@ std::vector<std::string> simSlotBones(Assets& assets, const std::filesystem::pat
         } else {
             entries = assets.objectStrings(*templateGroup, kBoneNames);
         }
-        const auto boneName = [&](std::int32_t b) {
-            return b >= 0 && static_cast<std::size_t>(b) < entries.size() ? lower(entries[static_cast<std::size_t>(b)]) : std::string();
-        };
-        std::vector<std::string> bones;
-        if (targeting) {
-            for (const auto& e : parsed.entries) {
-                if (e.type == slot::kTargetSlot) {
-                    bones.push_back(boneName(e.bone));
-                }
-            }
-            return bones;
-        }
-        bones.resize(parsed.containerCount());
-        for (std::size_t slot = 0; slot < bones.size(); ++slot) {
-            bones[slot] = boneName(parsed.containerBone(slot));
-        }
-        return bones;
+        return slotBonesOf(parsed, entries, targeting);
+    } catch (const std::exception&) {
+        return {};
+    }
+}
+
+std::vector<std::string> npcSlotBones(Assets& assets, std::uint32_t guid, bool targeting) {
+    const objd::ObjectDefinition* definition = assets.objectDefinition(guid);
+    const auto group = assets.objectGroup(guid);
+    if (definition == nullptr || !group) {
+        return {};
+    }
+    const Assets::CharacterInUse inUse(assets, *group);
+    const auto slots = assets.byKey({types::kSlots, *group, definition->field(objd::field::kSlotsId), 0});
+    const auto entries = assets.objectStrings(*group, kBoneNames);
+    if (!slots || entries.empty()) {
+        return {};
+    }
+    try {
+        return slotBonesOf(slot::parse(*slots), entries, targeting);
     } catch (const std::exception&) {
         return {};
     }

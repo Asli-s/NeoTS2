@@ -292,6 +292,7 @@ constexpr std::uint8_t kClearHairOverrideGenericCall = 0x2F;
 // nothing changes and it is true. Other skins are named by a text resource (not kept yet).
 constexpr std::uint8_t kSetSkinGenericCall = 0x3C;
 constexpr std::uint8_t kAddToFamilyGenericCall = 0x04;
+constexpr std::uint8_t kRemoveFromFamilyGenericCall = 0x06;
 constexpr std::uint8_t kUnlinkCharacterGenericCall = 0x26;
 // Generic calls 0x0A and 0x0B turn Build and Buy mode off and back on for the object running them.
 // Always true.
@@ -684,6 +685,7 @@ public:
     // Generic Sims Calls, family, new characters, relationships, motives and wants (vm_sims.cpp).
     bool genericSimsCall(const bhav::Instruction& in);
     bool addToFamily();
+    bool removeFromFamily();
     bool unlinkCharacter();
     bool fitsWithFootprint();
     bool outfitsInformation();

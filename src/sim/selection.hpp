@@ -14,6 +14,10 @@ struct SimObject;
 // Sim with a person type (person data 0x20) bit 3 too.
 bool isSelectable(const SimObject& sim);
 
+// Whether control passes over this Sim: bit 1 of Selection Flags, which a baby has. The game also
+// disables the Sim's household thumbnail while it is set, so clicking it does nothing.
+bool passedOver(const SimObject& sim);
+
 // The lot's selectable Sims in the order the game passes control in: humans before pets (person
 // data 0xBA), then the larger life stage (person data 0x3A) x 1000 - days left (0x5B) + the stage's
 // length (0x9C) first, then catalog names (line 0 of the catalog strings) A to Z, then the higher GUID.

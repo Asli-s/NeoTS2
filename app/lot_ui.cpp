@@ -8,6 +8,7 @@
 #include "diagnostics.hpp"
 #include "formats/hash.hpp"
 #include "names.hpp"
+#include "sim/selection.hpp"
 
 #include <algorithm>
 #include <climits>
@@ -725,12 +726,24 @@ void LotUi::closeClickedNotification(LotLife& life) {
 const ts2::tga::Pixels* LotUi::targetPicture(ts2::content::TargetPictures& pictures, LotLife& life, std::int16_t neighbor) {
     if (!pictures.known(neighbor)) {
         // A household Sim on the lot has its fresh portrait. Anyone else has its character file's,
-        // read in the background (asked for again next frame while too many are loading).
+        // read in the background (asked for again next frame while too many are loading), or an
+        // NPC without one its object's own.
         const auto drawn = std::find_if(portraits_.begin(), portraits_.end(), [&](const auto& p) { return life.neighborId(p.first) == neighbor; });
         if (drawn != portraits_.end()) {
             pictures.make(neighbor, drawn->second);
         } else if (const auto file = life.neighborPortrait(neighbor)) {
             pictures.load(neighbor, file->file, file->instance);
+        } else if (const auto npc = life.npcPortrait(neighbor)) {
+            pictures.make(neighbor, *npc);
+        } else if (const auto drawnHere = drawnPortraits_.find(neighbor); drawnHere != drawnPortraits_.end()) {
+            pictures.make(neighbor, drawnHere->second.value_or(ts2::tga::Pixels{}));
+        } else if (life.simulation().world().nextAfter(0, [&](const ts2::sim::SimObject& o) {
+                       return o.isPerson() && life.simulation().world().neighborIdOf(o) == neighbor;
+                   }) != nullptr) {
+            // Asked for again once it is drawn.
+            if (std::ranges::find(portraitsWanted_, neighbor) == portraitsWanted_.end()) {
+                portraitsWanted_.push_back(neighbor);
+            }
         } else {
             pictures.make(neighbor, {});
         }
@@ -1104,6 +1117,8 @@ void LotUi::showHousehold(std::vector<Skewer::Member> members) {
     queuePortraits_.clear();
     notificationPortraits_.clear();
     notificationSmallPortraits_.clear();
+    drawnPortraits_.clear();
+    portraitsWanted_.clear();
     panel_.refreshWants();  // their pictures may be of the last household
     wantsPending_ = true;  // the wants shown point at the pictures just cleared
     portraitShown_ = -1;
@@ -1121,6 +1136,14 @@ void LotUi::showHousehold(std::vector<Skewer::Member> members) {
     if (!hidden_) {
         showOptions(optionsShown());
     }
+}
+
+void LotUi::setDrawnPortrait(std::int16_t neighbor, std::optional<ts2::tga::Pixels> portrait) {
+    std::erase(portraitsWanted_, neighbor);
+    if (portrait && (portrait->width > ts2::content::kMaxPortraitSide || portrait->height > ts2::content::kMaxPortraitSide)) {
+        portrait.reset();
+    }
+    drawnPortraits_[neighbor] = std::move(portrait);
 }
 
 void LotUi::setPortrait(std::int16_t sim, const ts2::tga::Pixels& portrait) {
@@ -1235,6 +1258,8 @@ void LotUi::showLife(LotLife& life) {
             return index < data.size() ? static_cast<std::uint16_t>(data[index]) : std::uint16_t{0};
         };
         skewer_.setAwayIcons(member, memberPersonData(kUiIconFlags), (memberPersonData(kRoommateFlags) & 0x800) != 0);
+        const auto* who = life.simulation().world().find(member);
+        skewer_.setPressable(member, who == nullptr || !ts2::sim::passedOver(*who));
     }
     showNames(life, sim);
     showQueue(life, sim);

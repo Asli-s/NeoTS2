@@ -16,6 +16,7 @@ SimObject& World::create(std::uint32_t group, objd::ObjectDefinition definition,
     object->id = static_cast<std::int16_t>(free - byId_.begin());
     object->group = group;
     object->definition = std::move(definition);
+    object->addOrder = ++addCount_;
     object->data[kObjectIdField] = object->id;
     object->data[kLeadTileField] = object->id;
     object->arrays.resize(object->definition.field(kObjectArrayCountField));
@@ -39,6 +40,7 @@ SimObject& World::restore(std::int16_t id, std::uint32_t group, objd::ObjectDefi
     }
     auto object = std::make_unique<SimObject>();
     object->id = id;
+    object->addOrder = ++addCount_;
     object->group = group;
     object->definition = std::move(definition);
     object->arrays.resize(object->definition.field(kObjectArrayCountField));
@@ -433,6 +435,13 @@ void World::addFamilyMember(std::uint32_t family, std::uint32_t guid) {
     if (std::ranges::find(members, guid) == members.end()) {
         members.push_back(guid);
     }
+}
+
+void World::removeFamilyMember(std::uint32_t family, std::uint32_t guid) {
+    if (!hood_ || std::ranges::find(familyMemberGuids(family), guid) == familyMemberGuids(family).end()) {
+        return;
+    }
+    std::erase(ownNeighborhood().familyMembers[family], guid);
 }
 
 void World::removeFamilyTie(std::int16_t a, std::int16_t b) {

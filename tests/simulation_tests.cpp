@@ -111,6 +111,8 @@ void selectionPassesToTheNextSelectableSim() {
     world.find(zoe.id)->personData[0x9E] = 3;
     ts2::sim::keepSelection(world, code, globals);
     CHECK(globals[3] == child.id);
+    // The game's newborns have flags 3, and their household thumbnails can't be clicked.
+    CHECK(ts2::sim::passedOver(*world.find(adam.id)) && !ts2::sim::passedOver(child));
     world.find(child.id)->personData[0x9E] = 0;
     ts2::sim::keepSelection(world, code, globals);
     CHECK(globals[3] == dog.id);
