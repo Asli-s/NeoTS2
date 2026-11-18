@@ -1530,6 +1530,12 @@ void userOptionsAreSavedKeepingTheRestOfTheFile() {
     CHECK(!ts2::content::setUserProp(xml, "edgeScrolling", "<x>", true) && !ts2::content::setUserProp(xml, "a b", "1", false));
     std::string broken = "<cGZPropertySetString>";
     CHECK(!ts2::content::setUserProp(broken, "a", "1", false) && broken == "<cGZPropertySetString>");
+    // A text setting (the speaker mode) is added as the game's AnyString and then replaced in place.
+    CHECK(ts2::content::setUserString(xml, "SoundOutputMode", "5.1"));
+    CHECK(xml.find("  <AnyString key=\"SoundOutputMode\" type=\"0x0b8bea18\">5.1</AnyString>\r\n") != std::string::npos);
+    CHECK(ts2::content::setUserString(xml, "SoundOutputMode", "stereo"));
+    CHECK(ts2::content::parseUserProps(xml).values.at("SoundOutputMode") == "stereo" && xml.find("SoundOutputMode") == xml.rfind("SoundOutputMode"));
+    CHECK(!ts2::content::setUserString(xml, "SoundOutputMode", "<x>") && !ts2::content::setUserString(broken, "a", "b"));
 }
 
 namespace saves {

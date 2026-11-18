@@ -59,9 +59,16 @@ std::optional<OptionControl> parseOptionCaption(std::string_view caption);
 // value holds anything but letters and digits.
 bool setUserProp(std::string& xml, std::string_view key, std::string_view value, bool isBool);
 
+// The same for a text setting, such as SoundOutputMode: letters, digits and dots, written as the game
+// writes its text settings (an AnyString element).
+bool setUserString(std::string& xml, std::string_view key, std::string_view value);
+
 // Saves settings to the user folder's Config/userProps.xml, keeping the rest of the file as it is.
 // The new file replaces the old one only once it is fully written. False when it can't be saved.
 bool saveUserProps(const std::filesystem::path& userFolder, const std::map<std::string, std::pair<std::string, bool>>& settings);
+
+// Saves one text setting the same way.
+bool saveUserString(const std::filesystem::path& userFolder, std::string_view key, std::string_view value);
 
 // NeoTS2's own settings, which the game has none of: Config/neots2Props.xml in the user folder, kept
 // the way userProps.xml is. Separate so the game's file holds only what the game knows.

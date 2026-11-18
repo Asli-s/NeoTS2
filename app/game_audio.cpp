@@ -3,7 +3,9 @@
 #include "game.hpp"
 
 #include <array>
+#include <chrono>
 #include <cstdint>
+#include <thread>
 #include <vector>
 
 namespace app {
@@ -43,11 +45,21 @@ void Game::ensureAudio() {
         return;
     }
     audio_ = std::make_unique<ts2::audio::System>();
-    audio_->setPerformanceLevel(lotUi_.gameOptions().audioPerformance());
     audio_->addInstall(install_);
+    audio_->setMusicFolder(options_.user / "Music");
+    lotUi_.audioOptions().setMusic(audio_.get());
+    hoodUi_.audioOptions().setMusic(audio_.get());
     // --mute leaves the mixer running, so the options' levels still apply behind it.
     audio_->setMuted(options_.mute);
     applyAudioOptions();
+}
+
+void Game::waitForAudioIndex() {
+    // About 30 s at most, so a broken install still gets its picture.
+    for (int i = 0; audio_ && !audio_->ready() && i < 1500; ++i) {
+        audio_->update();
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
 }
 
 void Game::applyAudioOptions() {
@@ -58,6 +70,7 @@ void Game::applyAudioOptions() {
     const app::AudioOptionsPanel& panel = openAudioOptions();
     const auto volumes = panel.volumes();
     const auto mutes = panel.mutes();
+    audio_->setPerformanceLevel(panel.quality() - 1);
     // Each option covers more groups than its name says, as in the game. The effects level and box
     // also set UI, TV and Stitcher, and music also sets Stereo. The voices box also mutes Cinematic,
     // but the voices level leaves it alone.

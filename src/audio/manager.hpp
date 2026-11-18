@@ -22,6 +22,8 @@ struct Request {
     std::int16_t object = 0;  // the object it plays on, 0 for none
     Group group = Group::Sfx;
     std::optional<Vec3> position;  // where its object is, none for no place
+    float lopass = 0;  // filter cutoffs in Hz, 0 for none
+    float hipass = 0;
 };
 
 // Why a request did not start, for the log.
@@ -42,6 +44,7 @@ public:
         float fade = 1;        // the pause fade, 1 heard, 0 silent
         float primaryGain = 1;  // the distance drop to the listener, for the steal rule
         bool stopped = false;   // to be removed
+        bool endWhenSilent = false;  // stopped once its fade has run out
     };
 
     // What a voice plays with this update.
@@ -82,6 +85,10 @@ public:
     void stopObject(std::int16_t object);
     void stop(std::uint32_t id);
     void stopAll();
+    // Pauses or resumes one sound, fading over `fadeMs` (0 at once).
+    void pause(std::uint32_t id, bool paused, double fadeMs);
+    // Fades one sound out over `fadeMs` and then removes it.
+    void fadeOut(std::uint32_t id, double fadeMs);
 
     // A decoded sample's length, and how far a voice has played, from the mixer.
     void setLength(std::uint32_t id, double lengthMs);
@@ -94,6 +101,8 @@ public:
 
     [[nodiscard]] const std::vector<Instance>& instances() const { return instances_; }
     [[nodiscard]] const Instance* find(std::uint32_t id) const;
+    // Whether a sound is still there and not ended.
+    [[nodiscard]] bool playing(std::uint32_t id) const;
 
 private:
     [[nodiscard]] bool groupPaused(Group group) const;

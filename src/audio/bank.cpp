@@ -4,6 +4,8 @@
 #include "content/install.hpp"
 #include "diag/log.hpp"
 #include "formats/propset.hpp"
+#include "formats/resource_types.hpp"
+#include "formats/str.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -25,6 +27,9 @@ constexpr std::uint32_t kPropertySet = 0xEBFEE33F;
 constexpr SoundKey kManagerTuning{0xFF11CE39, 0x067B4265};
 constexpr SoundKey kListenerTuning{0xFFD94C49, 0x104F8C8A};
 constexpr SoundKey kDippingTuning{0xFF500B7C, 0xB90ECD35};
+constexpr SoundKey kMusicTuning{0xFFFA7BF6, 0x8FAD1E74};
+// The set of music categories, whose name is hashed as written, not lowercased.
+constexpr SoundKey kMusicCategories{0xFFD3706D, 0x38888A91};
 
 // The most sound packages and resources read, far above an install's (about 120 packages), so a
 // folder of broken files cannot fill the memory.
@@ -150,6 +155,8 @@ void Bank::load(const fs::path& installRoot) {
             }
             const auto index = static_cast<std::uint32_t>(packages_.size());
             addSegment(samples_, index, package->entries(), kSample);
+            addSongs(index, package->entries());
+            addCategories(*package, package->entries());
             addSegment(hitLists, index, package->entries(), kHitList);
             addSegment(definitions, index, package->entries(), kTrackSettings);
             addSegment(propertySets_, index, package->entries(), kPropertySet);
@@ -161,6 +168,7 @@ void Bank::load(const fs::path& installRoot) {
     }
     readTracks(definitions, hitLists);
     readPropertySets();
+    loadTitles(installRoot);
     for (auto& package : packages_) {
         package->close();
     }
@@ -223,6 +231,94 @@ std::map<std::string, std::string> Bank::propertySet(SoundKey key) {
     }
 }
 
+// A song's key is only unique within its group: one of the Pop songs shares its key with a text file in
+// another group. So each song gets a key of its own, which readSample finds like any sample.
+void Bank::addSongs(std::uint32_t package, std::span<const dbpf::IndexEntry> entries) {
+    constexpr std::uint32_t kSongHigh = 0x4D555349;
+    for (const dbpf::IndexEntry& entry : entries) {
+        // The music groups are name hashes, which carry 0xFF in their top byte.
+        if (entry.key.type != kSample || (entry.key.group >> 24) != 0xFF) {
+            continue;
+        }
+        // A song a package earlier in the order already holds stays as it was.
+        if (!songSeen_.emplace(entry.key.group, entry.key.instance, entry.key.instanceHigh).second) {
+            continue;
+        }
+        const SampleKey own{static_cast<std::uint32_t>(0xFE000000u | songCount_++), kSongHigh};
+        samples_[mapKey(own.instance, own.instanceHigh)] = Location{package, entry};
+        songIds_[mapKey(own.instance, own.instanceHigh)] = entry.key.instance;
+        songs_[entry.key.group].push_back(own);
+    }
+}
+
+std::uint32_t Bank::songId(SampleKey song) const {
+    const auto it = songIds_.find(mapKey(song.instance, song.instanceHigh));
+    return it == songIds_.end() ? 0 : it->second;
+}
+
+std::string Bank::songTitle(std::uint32_t id, std::uint8_t language) const {
+    const std::string* title = titles_.title(id, language);
+    return title == nullptr ? std::string() : *title;
+}
+
+// Every package that lists categories adds its own, so the lists are joined, not replaced.
+void Bank::addCategories(dbpf::Package& package, std::span<const dbpf::IndexEntry> entries) {
+    for (const dbpf::IndexEntry& entry : entries) {
+        if (entry.key.type != kPropertySet || entry.key.instance != kMusicCategories.instance || entry.key.instanceHigh != kMusicCategories.instanceHigh) {
+            continue;
+        }
+        try {
+            for (const auto& [name, list] : propset::parse(package.read(entry))) {
+                if (std::any_of(categories_.begin(), categories_.end(), [&](const Category& c) { return c.first == name; })) {
+                    continue;
+                }
+                std::vector<std::string> stations;
+                for (std::size_t from = 0; from <= list.size();) {
+                    const std::size_t comma = std::min(list.find(',', from), list.size());
+                    if (comma > from) {
+                        stations.push_back(list.substr(from, comma - from));
+                    }
+                    from = comma + 1;
+                }
+                categories_.emplace_back(name, std::move(stations));
+            }
+        } catch (const std::exception& ex) {
+            diag::warnOnce(std::string("music categories: ") + ex.what());
+        }
+        return;
+    }
+}
+
+// Each product's MusicTitles.package. Every table of every product is read, as a song's title may
+// sit in a table of another product than its station's.
+void Bank::loadTitles(const fs::path& installRoot) {
+    auto products = content::inGameOrder(content::findProducts(installRoot));
+    std::reverse(products.begin(), products.end());
+    for (const auto& product : products) {
+        const fs::path data = dataFolder(product);
+        std::error_code error;
+        const fs::path path = data / "Res" / "Text" / "MusicTitles.package";
+        if (data.empty() || !fs::is_regular_file(path, error)) {
+            continue;
+        }
+        try {
+            dbpf::Package package(path);
+            for (const dbpf::IndexEntry& entry : package.entries()) {
+                if (entry.key.type == types::kStringTable) {
+                    titles_.add(str::parse(package.read(entry)));
+                }
+            }
+        } catch (const std::exception& ex) {
+            diag::warnOnce("music titles " + path.string() + ": " + ex.what());
+        }
+    }
+}
+
+std::span<const SampleKey> Bank::songs(std::string_view category) const {
+    const auto it = songs_.find(soundKey(category).instance);
+    return it == songs_.end() ? std::span<const SampleKey>{} : std::span<const SampleKey>(it->second);
+}
+
 void Bank::readPropertySets() {
     for (const auto& [event, list] : propertySet(soundKey("events"))) {
         const SoundKey key = soundKey(event);
@@ -232,6 +328,7 @@ void Bank::readPropertySets() {
     readManagerTuning(propertySet(kManagerTuning), tuning_);
     readListenerTuning(propertySet(kListenerTuning), tuning_);
     readDippingTuning(propertySet(kDippingTuning), tuning_);
+    readMusicTuning(propertySet(kMusicTuning), tuning_);
 }
 
 const Bank::Track* Bank::track(SoundKey key) const {

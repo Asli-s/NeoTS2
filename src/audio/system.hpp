@@ -14,8 +14,16 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace ts2::audio {
+
+// One song of a station, as the options list it.
+struct MusicSong {
+    std::uint32_t id = 0;
+    std::string title;
+    bool on = true;
+};
 
 // A sound event of the simulation: a Play Sound primitive or an animation's sound mark.
 struct Event {
@@ -59,6 +67,27 @@ public:
     void updatePositions(const std::function<std::optional<Vec3>(std::int16_t object)>& positionOf);
     // Once a frame: applies the rules, hands decoded samples to the mixer and drops ended sounds.
     void update();
+
+    // The music states the game switches between (menu "splash", neighborhood "nhood", and so on): a
+    // started state plays its category's songs one after another; each state keeps its own song.
+    void startMusic(std::string_view category);
+    // Holds the state's song where it is, until startMusic carries on.
+    void pauseMusic(std::string_view category);
+    // Fades the state's song out over `ms` and ends it; the next startMusic begins a new song.
+    void fadeOutMusic(std::string_view category, double ms);
+
+    // Music/ under the user's folder: each station's folder there keeps a `settings` file naming the songs
+    // that are off. Set before the first music starts.
+    void setMusicFolder(const std::filesystem::path& folder);
+    // The stations a music category draws on (a mode such as "buy" lists several, a station only itself), and
+    // with no category every station a stereo plays. Empty until indexing is done.
+    [[nodiscard]] std::vector<std::string> musicStations(std::string_view category);
+    // A station's name as the player reads it, empty when the titles have none.
+    [[nodiscard]] std::string musicTitle(std::string_view station);
+    // The station's songs in the order the packages list them, with their titles. Empty until indexing is done.
+    [[nodiscard]] std::vector<MusicSong> musicSongs(std::string_view station);
+    // Turns one of the station's songs on or off and saves its settings file. A song that is off is not played.
+    void setSongOn(std::string_view station, std::uint32_t id, bool on);
 
     // A UI sound by name, or by the track id a UI script names (btnclicksnd). Its id, 0 when it
     // does not play.

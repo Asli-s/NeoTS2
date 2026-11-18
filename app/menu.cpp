@@ -367,6 +367,10 @@ Game::Game(ts2::content::UiData& data, ts2::ui::Fonts& fonts, ts2::render::IRend
     renderer_.setAmbientOcclusionHalfSize(lotUi_.graphicsOptions().display().occlusionHalfSize);
     // Index the sound packages beside the menu, so a lot opened later can play at once.
     ensureAudio();
+    // The main menu plays the opening music.
+    if (audio_ && options_.shot.empty()) {
+        audio_->startMusic("splash");
+    }
     screen_.setPressHandler([this](int window) { playPressSound(window); });
     if (!options_.playSound.empty() && audio_) {
         const double seconds = audio_->playName(options_.playSound);
@@ -742,6 +746,7 @@ void Game::showNeighborhood(Built built) {
         hoodUi_.showOptions(true);
         hoodUi_.gameOptions().show(true);
     } else if (options_.bin == "audiooptions") {
+        waitForAudioIndex();
         hoodUi_.showOptions(true);
         hoodUi_.audioOptions().show(true);
     } else if (options_.bin == "graphicsoptions") {
@@ -759,6 +764,11 @@ void Game::showNeighborhood(Built built) {
     }
     renderer_.setClearColor(0, 0, 0);
     inNeighborhood_ = true;
+    // The opening music fades out over 6 s as the neighborhood's begins.
+    if (audio_ && options_.shot.empty()) {
+        audio_->fadeOutMusic("splash", 6000);
+        audio_->startMusic("nhood");
+    }
     startImposterBaker(hoodHighImposters());
     if (options_.lot > 0) {
         enterLot(static_cast<std::uint32_t>(options_.lot));
@@ -1785,6 +1795,10 @@ void Game::showLot(LotBuilt& built) {
     lotShown_ = ts2::platform::ticksNs();
     lotRealSeconds_ = 0;
     ts2::diag::info(std::format("lot {} shown after {:.1f} s", enteredLot_, secondsSince(lotLoadStarted_)));
+    // The neighborhood's music fades out over 6 s once the lot is ready, as the game's opening music does.
+    if (audio_) {
+        audio_->fadeOutMusic("nhood", 6000);
+    }
 
     screen_.setVisible(hoodUi_.root(), false);
     hoodUi_.showOptions(false);
@@ -1793,6 +1807,7 @@ void Game::showLot(LotBuilt& built) {
     lotUi_.setTestingCheats(cheats_.testingCheats());
     lotUi_.open();
     if (options_.bin == "audiooptions") {
+        waitForAudioIndex();
         lotUi_.showOptions(true);
         lotUi_.audioOptions().show(true);
     }
@@ -1880,6 +1895,9 @@ void Game::leaveLot() {
     orbit_.dragSpeed = {0, 0};
     screen_.setVisible(hoodUi_.root(), true);
     inNeighborhood_ = true;
+    if (audio_ && options_.shot.empty()) {
+        audio_->startMusic("nhood");
+    }
     // Lot Imposters may have changed in the lot.
     if (hoodHighImposters() != highImposters_) {
         startImposterBaker(!highImposters_);
@@ -2747,10 +2765,6 @@ void Game::startLotLife() {
         }
         lotLife_->simulation().world().setLanguageNameTables(std::move(languageTables));
         ensureAudio();
-        // With --no-audio there is no sound system to set up or stop sounds on.
-        if (audio_) {
-            audio_->setPerformanceLevel(lotUi_.gameOptions().audioPerformance());
-        }
         lotLife_->simulation().world().setSoundEvents([this](const ts2::sim::SoundEvent& event) { onSoundEvent(event); });
         lotLife_->simulation().world().setSoundStopAll([this](std::int16_t object) {
             if (audio_) {
@@ -3129,7 +3143,7 @@ void Game::handleEvent(const pf::Event& e) {
         if (e.type == pf::Event::Type::MouseDown && e.button == pf::MouseButton::Left && graphics.mouseDown(ux, uy)) {
             return;
         }
-        if (e.type == pf::Event::Type::MouseWheel && e.wheel != 0 && graphics.wheel(ux, uy, e.wheel < 0 ? -1 : 1)) {
+        if (e.type == pf::Event::Type::MouseWheel && e.wheel != 0 && (graphics.wheel(ux, uy, e.wheel < 0 ? -1 : 1) || audio.wheel(ux, uy, e.wheel < 0 ? -1 : 1))) {
             return;
         }
     }

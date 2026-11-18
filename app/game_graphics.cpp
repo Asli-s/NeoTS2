@@ -16,6 +16,8 @@ void Game::tickGraphicsOptions(std::uint64_t ms) {
     auto& hood = hoodUi_.graphicsOptions();
     lot.tick(ms);
     hood.tick(ms);
+    lotUi_.audioOptions().tick(ms);
+    hoodUi_.audioOptions().tick(ms);
     if (lot.takeChanged()) {
         hood.takeSettings(lot);
         applyGraphicsOptions();

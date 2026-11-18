@@ -312,6 +312,8 @@ private:
     void startLotLife();
     // The app's one sound system: made with the menu, its packages indexed beside it.
     void ensureAudio();
+    // For a picture of the audio options: waits until the sound packages are indexed, as the stations and songs come from them.
+    void waitForAudioIndex();
     void onSoundEvent(const ts2::sim::SoundEvent& event);
     // An animation's sound mark on an object. Hidden objects make no sound.
     void onAnimationSound(std::int16_t object, const std::string& name);

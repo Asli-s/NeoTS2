@@ -8,6 +8,7 @@
 #include <charconv>
 #include <climits>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <system_error>
 
@@ -26,6 +27,7 @@ constexpr std::size_t kMaxOptionValues = 16;
 // The element names and type ids the game writes for true or false settings and for numbers.
 constexpr std::string_view kBoolElement = "AnyBoolean", kBoolType = "0xcba908e1";
 constexpr std::string_view kNumberElement = "AnyUint32", kNumberType = "0xeb61e4f7";
+constexpr std::string_view kStringElement = "AnyString", kStringType = "0x0b8bea18";
 constexpr std::string_view kClosingTag = "</cGZPropertySetString>";
 
 bool plainWord(std::string_view text) {
@@ -157,9 +159,31 @@ bool setUserProp(std::string& xml, std::string_view key, std::string_view value,
     return true;
 }
 
+bool setUserString(std::string& xml, std::string_view key, std::string_view value) {
+    const auto plainText = [](std::string_view text) {
+        return !text.empty() && text.size() <= kMaxText &&
+               std::all_of(text.begin(), text.end(), [](char c) { return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '.'; });
+    };
+    if (!plainWord(key) || !plainText(value)) {
+        return false;
+    }
+    if (const auto place = findSetting(xml, key)) {
+        xml.replace(place->first, place->second - place->first, value);
+        return true;
+    }
+    const std::size_t close = xml.rfind(kClosingTag);
+    if (close == std::string::npos) {
+        return false;
+    }
+    const std::string lineEnd = xml.find("\r\n") != std::string::npos ? "\r\n" : "\n";
+    xml.insert(close, "  <" + std::string(kStringElement) + " key=\"" + std::string(key) + "\" type=\"" + std::string(kStringType) + "\">" +
+                          std::string(value) + "</" + std::string(kStringElement) + ">" + lineEnd);
+    return true;
+}
+
 namespace {
 
-bool savePropsFile(const std::filesystem::path& userFolder, const std::string& name, const std::map<std::string, std::pair<std::string, bool>>& settings) {
+bool savePropsFile(const std::filesystem::path& userFolder, const std::string& name, const std::function<bool(std::string&)>& edit) {
     const std::filesystem::path folder = userFolder / "Config";
     const std::filesystem::path file = folder / name;
     std::error_code error;
@@ -180,11 +204,9 @@ bool savePropsFile(const std::filesystem::path& userFolder, const std::string& n
         std::filesystem::create_directories(folder, error);
         text = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<cGZPropertySetString>\r\n</cGZPropertySetString>\r\n";
     }
-    for (const auto& [key, setting] : settings) {
-        if (!setUserProp(text, key, setting.first, setting.second)) {
-            diag::warnOnce("user options: userProps.xml has no settings list, so the options are not saved");
-            return false;
-        }
+    if (!edit(text)) {
+        diag::warnOnce("user options: userProps.xml has no settings list, so the options are not saved");
+        return false;
     }
     const std::filesystem::path written = folder / (name + ".neots2-new");
     {
@@ -204,12 +226,29 @@ bool savePropsFile(const std::filesystem::path& userFolder, const std::string& n
 
 } // namespace
 
+namespace {
+
+bool setAll(std::string& text, const std::map<std::string, std::pair<std::string, bool>>& settings) {
+    for (const auto& [key, setting] : settings) {
+        if (!setUserProp(text, key, setting.first, setting.second)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
 bool saveUserProps(const std::filesystem::path& userFolder, const std::map<std::string, std::pair<std::string, bool>>& settings) {
-    return savePropsFile(userFolder, "userProps.xml", settings);
+    return savePropsFile(userFolder, "userProps.xml", [&](std::string& text) { return setAll(text, settings); });
+}
+
+bool saveUserString(const std::filesystem::path& userFolder, std::string_view key, std::string_view value) {
+    return savePropsFile(userFolder, "userProps.xml", [&](std::string& text) { return setUserString(text, key, value); });
 }
 
 bool saveNeoProps(const std::filesystem::path& userFolder, const std::map<std::string, std::pair<std::string, bool>>& settings) {
-    return savePropsFile(userFolder, "neots2Props.xml", settings);
+    return savePropsFile(userFolder, "neots2Props.xml", [&](std::string& text) { return setAll(text, settings); });
 }
 
 std::optional<bool> UserProps::flag(std::string_view key) const {

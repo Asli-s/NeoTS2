@@ -15,8 +15,16 @@ namespace app {
 class OptionsList {
 public:
     // `list` is the script's empty window. Its width and height are the rows' area.
-    void attach(ts2::ui::Screen& screen, int list);
+    // `image` is the rows' picture as a script writes it, "{group,instance}"; empty for the radio dots.
+    void attach(ts2::ui::Screen& screen, int list, const std::string& image = {});
     void setRows(const std::vector<std::string>& rows);
+    // With `multi`, each row is a box that a click turns on or off and any number may be on, not one
+    // pick among them. The boxes are given by setChecks.
+    void setMulti(bool multi) { multi_ = multi; }
+    void setChecks(const std::vector<bool>& checks);
+    const std::vector<bool>& checks() const { return checks_; }
+    // The row the last click turned on or off, -1 before any.
+    int toggled() const { return toggled_; }
     // Picks a row, -1 for none. A row below the ones shown scrolls up to be the last one shown.
     void pick(int row);
     int picked() const { return picked_; }
@@ -42,6 +50,10 @@ private:
     std::vector<int> rows_;
     int picked_ = -1;
     bool enabled_ = true;
+    bool multi_ = false;
+    std::vector<bool> checks_;
+    int toggled_ = -1;
+    std::string image_;
 };
 
 } // namespace app

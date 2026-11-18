@@ -17,9 +17,11 @@ constexpr ListBoxRows::BarImages kBar{0x499DB772, 0xE9F50525, 0xE9F50520};
 
 } // namespace
 
-void OptionsList::attach(ts2::ui::Screen& screen, int list) {
+void OptionsList::attach(ts2::ui::Screen& screen, int list, const std::string& image) {
     screen_ = &screen;
     list_ = list;
+    image_ = image.empty() ? kRowImage : image;
+    toggled_ = -1;
     // Rows made for an earlier list went with it, and their handles may now name other windows.
     rows_.clear();
     picked_ = -1;
@@ -27,15 +29,19 @@ void OptionsList::attach(ts2::ui::Screen& screen, int list) {
 }
 
 void OptionsList::setRows(const std::vector<std::string>& rows) {
+    if (screen_ == nullptr) {
+        return;
+    }
     for (const int row : rows_) {
         screen_->remove(row);
     }
     rows_.clear();
     picked_ = -1;
+    checks_.assign(rows.size(), false);
     std::uint32_t id = 0;
     for (const std::string& text : rows) {
         ts2::ui::Window row{{{"iid", "IGZWinBtn"}, {"winflag_visible", "yes"}, {"id", std::format("0x{:08x}", kFirstRowId + id++)},
-                             {"area", std::format("(0,0,{},{})", box_.width(), kRowHeight)}, {"image", kRowImage}, {"style", "radiocheck"},
+                             {"area", std::format("(0,0,{},{})", box_.width(), kRowHeight)}, {"image", image_}, {"style", "radiocheck"},
                              {"showcaption", "yes"}, {"font", "OptionsText"}, {"colorfontnormal", "(5,6,113)"}, {"colorfontdisabled", "(84,85,105)"},
                              {"colorfonthilited", "(204,214,255)"}, {"gutters", "(4,2,4,2)"}, {"align", "center"}},
                             {}};
@@ -50,7 +56,16 @@ void OptionsList::setRows(const std::vector<std::string>& rows) {
 
 void OptionsList::showChecks() {
     for (std::size_t i = 0; i < rows_.size(); ++i) {
-        screen_->setChecked(rows_[i], static_cast<int>(i) == picked_);
+        screen_->setChecked(rows_[i], multi_ ? checks_[i] : static_cast<int>(i) == picked_);
+    }
+}
+
+void OptionsList::setChecks(const std::vector<bool>& checks) {
+    for (std::size_t i = 0; i < checks_.size(); ++i) {
+        checks_[i] = i < checks.size() && checks[i];
+    }
+    if (screen_ != nullptr) {
+        showChecks();
     }
 }
 
@@ -74,7 +89,14 @@ bool OptionsList::clicked(int window) {
     if (found == rows_.end()) {
         return false;
     }
-    pick(static_cast<int>(found - rows_.begin()));
+    const int row = static_cast<int>(found - rows_.begin());
+    if (multi_) {
+        checks_[row] = !checks_[row];
+        toggled_ = row;
+        showChecks();
+    } else {
+        pick(row);
+    }
     return true;
 }
 

@@ -104,4 +104,35 @@ int AudioRandom::next() {
     return static_cast<int>((state_ >> 16) & 0x7FFF);
 }
 
+namespace {
+
+Biquad design(float hz, float sampleRate, bool high) {
+    if (hz <= 0 || hz >= sampleRate / 2) {
+        return {};
+    }
+    // The cookbook formulas with Q = 1 / sqrt(2), which makes the response maximally flat.
+    const float w = 2 * std::numbers::pi_v<float> * hz / sampleRate;
+    const float cosine = std::cos(w);
+    const float alpha = std::sin(w) / (2 * 0.70710678f);
+    const float a0 = 1 + alpha;
+    const float sign = high ? 1.0f : -1.0f;
+    Biquad out;
+    out.b0 = (1 + sign * cosine) / 2 / a0;
+    out.b1 = sign * -(1 + sign * cosine) / a0;
+    out.b2 = out.b0;
+    out.a1 = -2 * cosine / a0;
+    out.a2 = (1 - alpha) / a0;
+    return out;
+}
+
+} // namespace
+
+Biquad Biquad::lowpass(float hz, float sampleRate) {
+    return design(hz, sampleRate, false);
+}
+
+Biquad Biquad::highpass(float hz, float sampleRate) {
+    return design(hz, sampleRate, true);
+}
+
 } // namespace ts2::audio
