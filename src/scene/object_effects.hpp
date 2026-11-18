@@ -72,11 +72,26 @@ public:
 
     std::size_t recordCount() const;
 
+    // An effect as a lot save writes it: by name, bone and number, what started it and the byte saved
+    // for `keep` (nonzero keeps it, as the game's saves hold 0, 100 or 192).
+    struct Saved {
+        std::string name, bone;
+        int number = 0;
+        Kind kind = AnyKind;
+        std::uint8_t keep = 0;
+    };
+    // The object's effects a save keeps: those playing and not stopping, as the game's save drops
+    // stopped and stopping ones first.
+    std::vector<Saved> saved(std::int16_t object) const;
+    // Starts an effect a lot was saved playing, hard, keeping its saved keep byte for the next save.
+    void restore(std::int16_t object, const Saved& effect, const PlaceOf& placeOf);
+
 private:
     struct Record {
         std::shared_ptr<PlayingEffect> effect;
         Kind kind = AnyKind;
         bool keep = false;
+        std::uint8_t keepByte = 0;  // as a save writes it
     };
     using Key = std::tuple<std::string, std::string, int>;  // name, bone, number
     struct Queued {

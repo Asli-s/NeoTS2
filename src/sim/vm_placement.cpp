@@ -373,6 +373,8 @@ void Execution::putInSlot(SimObject& object, SimObject& container, std::int16_t 
             object.data[kDirectionField] = compassDirection(compassHeading(container.data[kDirectionField] & 7) + bone->yaw);
         }
     }
+    object.anchor = {container.id, type != nullptr ? sim::slotAnchorName(code_, *type, slot) : 0};
+    object.anchoredAtMs = world().clockMs();
     object.heading.reset();
     world().updateRoom(object);
     world().markFootprintChanged(object.id);

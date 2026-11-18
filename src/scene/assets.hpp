@@ -43,6 +43,8 @@ public:
     // Makes a Sim's character file (Neighborhoods/<hood>/Characters/*.package) the one in use. Its
     // resources are indexed under the file's own group on first use. An empty path stops using one.
     void useCharacterFile(const std::filesystem::path& file);
+    // Reads again a character file a save has replaced, if it was in use before.
+    void refreshCharacterFile(const std::filesystem::path& file);
     // Makes a group of the object packages the character in use, as a Sim without a character file
     // (an NPC made from its object) keeps its looks there. Links into group 0xFFFFFFFF go to it.
     void useCharacterGroup(std::uint32_t group);

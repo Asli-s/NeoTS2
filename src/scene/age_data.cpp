@@ -192,6 +192,96 @@ protected:
         }
     }
 
+    // Hairs as the copy keeps them: a hair of no colour, the Sim's colour or "Other" stays, and any
+    // other becomes its family's hair for the outfit, else stays as it is.
+    std::vector<sg::Link> inHairColour(const std::vector<sg::Link>& hairs, std::uint32_t category, const Looks& now) {
+        std::vector<sg::Link> out;
+        const std::string colour = catalogGuid(none(now.hair) ? std::string(kUnknownHair) : now.hair);
+        for (const auto& hair : hairs) {
+            const CatalogPart* p = findPart(catalog_, hair);
+            if (p == nullptr || noTone(p->hairTone) || p->hairTone == colour || p->hairTone == catalogGuid(kOtherHair)) {
+                out.push_back(hair);
+                continue;
+            }
+            PartFilter q;
+            q.parts = kHair;
+            q.species = now.species;
+            q.age = now.age;
+            q.gender = now.gender;
+            if (!none(now.skin)) {
+                q.skinTone = now.skin;
+            }
+            q.hairTone = colour;
+            q.category = category;
+            q.family = p->family;
+            if (categoryFlags(category) & 1) {
+                q.excludedFlags = 2;
+            }
+            q.requiredFlags = p->flags;
+            const CatalogPart* pick = first(q);
+            if (pick == nullptr) {
+                q.requiredFlags.reset();
+                pick = first(q);
+            }
+            out.push_back(pick != nullptr ? pick->key : hair);
+        }
+        return out;
+    }
+
+    const CatalogPart* first(const PartFilter& f) {
+        const auto found = filterParts(catalog_, f, 1);
+        return found.empty() ? nullptr : found.front();
+    }
+
+    // The hair spread after a made Sim's look is put together: the first hair of the active outfit
+    // goes into every outfit but the bare skin, the PlantSim's and the leaf one. It stays itself
+    // where it fits the outfit and the Sim, else it becomes the first of its family that does. Where
+    // no hair of its family fits either, what the game does is not known yet, and `problems` says so.
+    void spreadHair(AgeData& d, std::vector<std::string>& problems) {
+        constexpr std::uint32_t kKeptCategories = 0xC80;
+        const Looks now = looksOf(d);
+        std::uint32_t active = propset::number(d.properties, "activecat");
+        if (active == 0) {
+            active = 1;
+        }
+        const auto from = d.lists.find(listKey(active, kHair));
+        const CatalogPart* hair = from != d.lists.end() && !from->second.empty() ? findPart(catalog_, from->second.front()) : nullptr;
+        if (hair == nullptr) {
+            return;
+        }
+        for (int i = 0; i < kCategories; ++i) {
+            const std::uint32_t c = 1u << i;
+            if (c & kKeptCategories) {
+                continue;
+            }
+            PartFilter q;
+            q.parts = kHair;
+            q.species = now.species;
+            q.age = drawAge_;
+            q.gender = now.gender;
+            if (!none(now.skin)) {
+                q.skinTone = now.skin;
+            }
+            if (!none(now.hair)) {
+                q.hairTone = now.hair;
+            }
+            q.category = c;
+            if (fitsFilter(*hair, q)) {
+                d.lists[listKey(c, kHair)] = {hair->key};
+                continue;
+            }
+            q.family = hair->family;
+            if (categoryFlags(c) & 1) {
+                q.excludedFlags = 2;
+            }
+            if (const auto* member = first(q)) {
+                d.lists[listKey(c, kHair)] = {member->key};
+            } else {
+                problems.push_back("a hair for an outfit its hair doesn't fit isn't known yet");
+            }
+        }
+    }
+
     const OutfitCatalog& catalog_;
     OutfitRandom& random_;
     std::uint32_t drawAge_;
@@ -358,47 +448,6 @@ private:
             }
         }
         return d;
-    }
-
-    // Hairs as the copy keeps them: a hair of no colour, the Sim's colour or "Other" stays, and any
-    // other becomes its family's hair for the outfit, else stays as it is.
-    std::vector<sg::Link> inHairColour(const std::vector<sg::Link>& hairs, std::uint32_t category, const Looks& now) {
-        std::vector<sg::Link> out;
-        const std::string colour = catalogGuid(none(now.hair) ? std::string(kUnknownHair) : now.hair);
-        for (const auto& hair : hairs) {
-            const CatalogPart* p = findPart(catalog_, hair);
-            if (p == nullptr || noTone(p->hairTone) || p->hairTone == colour || p->hairTone == catalogGuid(kOtherHair)) {
-                out.push_back(hair);
-                continue;
-            }
-            PartFilter q;
-            q.parts = kHair;
-            q.species = now.species;
-            q.age = now.age;
-            q.gender = now.gender;
-            if (!none(now.skin)) {
-                q.skinTone = now.skin;
-            }
-            q.hairTone = colour;
-            q.category = category;
-            q.family = p->family;
-            if (categoryFlags(category) & 1) {
-                q.excludedFlags = 2;
-            }
-            q.requiredFlags = p->flags;
-            const CatalogPart* pick = first(q);
-            if (pick == nullptr) {
-                q.requiredFlags.reset();
-                pick = first(q);
-            }
-            out.push_back(pick != nullptr ? pick->key : hair);
-        }
-        return out;
-    }
-
-    const CatalogPart* first(const PartFilter& f) {
-        const auto found = filterParts(catalog_, f, 1);
-        return found.empty() ? nullptr : found.front();
     }
 
     // The new age's hair for an old hair in an outfit category: of the same family when it has
@@ -612,8 +661,8 @@ std::uint32_t lockOf(const AgeData& d) {
 
 // What an outfit's lock names is put on. Its tops, bottoms and bodies replace the Sim's in each
 // outfit it has them for (a top or bottom takes the body off, a body takes both off), and its
-// PlantSim lists replace the Sim's outright.
-void putOnOutfit(AgeData& data, const AgeData& outfit, std::vector<std::string>& problems) {
+// PlantSim lists replace the Sim's outright. The lock bits in `handled` are put on by the caller.
+void putOnOutfit(AgeData& data, const AgeData& outfit, std::vector<std::string>& problems, std::uint32_t handled = 0) {
     const std::uint32_t lock = lockOf(outfit) | kLockSpecies | kLockLocks;
     const auto copy = [&](const char* name) {
         if (const auto it = outfit.properties.find(name); it != outfit.properties.end()) {
@@ -630,7 +679,7 @@ void putOnOutfit(AgeData& data, const AgeData& outfit, std::vector<std::string>&
     if (lock & kLockFitness) {
         copy("fitness");
     }
-    if (lock & (kLockSkin | kLockHairColour | kLockHair | kLockFace | kLockEyes)) {
+    if (lock & (kLockSkin | kLockHairColour | kLockHair | kLockFace | kLockEyes) & ~handled) {
         problems.push_back("an outfit's skin, hair or face isn't put on yet");
     }
     const auto listOf = [&](std::uint32_t key) -> const std::vector<sg::Link>* {
@@ -700,6 +749,7 @@ public:
                 putOn(outfit);
             }
         }
+        spreadHair(n_, look_.problems);
         if (outfitFace) {
             look_.problems.push_back("the face an outfit brings isn't made yet");
         }
@@ -815,7 +865,56 @@ private:
         }
     }
 
-    void putOn(const AgeData& outfit) { putOnOutfit(n_, outfit, look_.problems); }
+    // The outfit put on as the game copies it. Beyond what putOnOutfit does: its hair colour, its
+    // eye colour with its glasses in every outfit (bit 0x8000 too), its faces where it has them,
+    // and its hairs in the outfits that take a copied hair, in the Sim's hair colour. Its skin isn't
+    // put on yet.
+    void putOn(const AgeData& outfit) {
+        constexpr std::uint32_t kLockEyesToo = 0x8000, kNoCopy = kSkinCategory | kPlantCategory;
+        const std::uint32_t lock = lockOf(outfit);
+        putOnOutfit(n_, outfit, look_.problems, kLockHairColour | kLockHair | kLockFace | kLockEyes);
+        const auto copy = [&](const char* name) {
+            if (const auto it = outfit.properties.find(name); it != outfit.properties.end()) {
+                n_.properties[name] = it->second;
+            }
+        };
+        const auto listOf = [&](std::uint32_t key) -> const std::vector<sg::Link>* {
+            const auto it = outfit.lists.find(key);
+            return it != outfit.lists.end() && !it->second.empty() ? &it->second : nullptr;
+        };
+        if (lock & kLockHairColour) {
+            copy("haircolor");
+        }
+        if (lock & (kLockEyes | kLockEyesToo)) {
+            copy("eyecolor");
+        }
+        for (int i = 0; i < kCategories; ++i) {
+            const std::uint32_t c = 1u << i;
+            if (c & kNoCopy) {
+                continue;
+            }
+            if (lock & kLockEyes) {
+                n_.lists.erase(listKey(c, kGlasses));
+                if (const auto* glasses = listOf(listKey(c, kGlasses))) {
+                    n_.lists[listKey(c, kGlasses)] = *glasses;
+                }
+            }
+            if (lock & kLockFace) {
+                if (const auto* faces = listOf(listKey(c, kFace))) {
+                    n_.lists[listKey(c, kFace)] = *faces;
+                }
+            }
+        }
+        if (lock & kLockHair) {
+            const Looks now = looksOf(n_);
+            for (int i = 0; i < kCategories; ++i) {
+                const std::uint32_t c = 1u << i;
+                if (const auto* hairs = (c & kHairCopyCategories) ? listOf(listKey(c, kHair)) : nullptr) {
+                    n_.lists[listKey(c, kHair)] = inHairColour(*hairs, c, now);
+                }
+            }
+        }
+    }
 
     const NewCharacter& who_;
     const std::vector<AgeData>& outfits_;

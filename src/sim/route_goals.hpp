@@ -21,6 +21,11 @@ namespace ts2::sim {
 // separated, in lower case, as models name their joints.
 std::vector<std::string> slotJointNames(std::string_view entry);
 
+// The name hash of the bone container slot `slot` of `type` sits at (its first name in STR# 0x90),
+// which a Sim's animations hang from while it is in that slot (see AnimationAnchor). 0 when the
+// slot names no bone.
+std::uint32_t slotAnchorName(CodeSource& code, const ObjectType& type, std::int16_t slot);
+
 // A joint of `object`'s model. A part of a multi-tile object other than its lead has no model of its
 // own, and the game then puts every joint at the part's own place, unturned.
 std::optional<ModelBone> modelJoint(const World& world, const SimObject& object, const std::string& name);

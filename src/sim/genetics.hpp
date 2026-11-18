@@ -3,7 +3,9 @@
 #include "content/genetics_catalog.hpp"
 #include "sim/sim_random.hpp"
 
+#include <array>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <string>
 #include <utility>
@@ -45,5 +47,21 @@ using FacePicks = std::vector<std::pair<std::string, bool>>;
 //   dominant ones, and `facePicks` gets which parent gave each.
 Genome childGenome(const Genome& a, const Genome& b, const content::GeneticsCatalog& catalog, SimRandom& random,
                    FacePicks* facePicks = nullptr);
+
+// A Sim's personality traits by person data index: 6 outgoing, 2 nice, 5 playful, 7 neat and 3
+// active, in points times 100 (0 to 1000).
+constexpr std::array<std::size_t, 5> kPersonalityTraits{6, 2, 5, 7, 3};
+using Personality = std::map<std::size_t, std::int16_t>;
+
+// A baby's personality, drawn right after its genes on the same generator. The traits go in a
+// random order, and each takes parent `a`'s value, parent `b`'s or a random 100 to 1000, a third of
+// the time each, never more than the points left of the budget (3500 for a baby, 2500 otherwise).
+// While more than 1000 points are left (any otherwise), each trait from 400 to 600 gets a random
+// part of what is left on top, up to 1000, or when none is in that range every trait does.
+// `parentValue(fromA, index)` gives a parent's trait.
+Personality childPersonality(const std::function<std::int16_t(bool fromA, std::size_t index)>& parentValue, SimRandom& random, bool baby);
+
+// The zodiac sign (1 to 12) a personality is nearest to, as person data 0x46 holds it.
+std::int16_t zodiacSign(const Personality& personality);
 
 } // namespace ts2::sim

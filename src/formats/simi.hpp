@@ -12,10 +12,11 @@ constexpr std::uint32_t kType = 0x53494D49;
 constexpr std::size_t kGlobalCount = 60;
 
 // Simulator state saved with a lot (SIMI): a 64-byte name, "IMIS", the version, a reserved word,
-// then the simulator's 60 global variables (hour, day of month, minute, second, month, year, the
-// current house, the budget, the speed...), then from version 0xD4 three values not read yet, the
-// random number state the simulator's ticks run on, and a second random number state for what runs
-// outside the ticks. Only the globals and the ticks' state are read so far.
+// then the simulator's global variables (hour, day of month, minute, second, month, year, the
+// current house, the budget, the speed...), three values not read yet, the random number state the
+// simulator's ticks run on, and a second random number state for what runs outside the ticks.
+// Version 0xD8 saves 60 globals. Version 0xAD, which the lots the game ships are saved at, saves
+// the first 54. Only the globals and the ticks' state are read so far.
 struct SimulatorState {
     std::uint32_t version = 0;
     std::vector<std::int16_t> globals;
@@ -27,6 +28,11 @@ SimulatorState parse(std::span<const std::uint8_t> data);
 // The version the game writes. It reads older ones and saves them as this.
 constexpr std::uint32_t kWrittenVersion = 0xD8;
 constexpr std::size_t kRecordSize = 498;
+
+// The version of the lots the game ships, which a lot keeps until the game first saves it.
+constexpr std::uint32_t kShippedVersion = 0xAD;
+constexpr std::size_t kShippedRecordSize = 438;
+constexpr std::size_t kShippedGlobalCount = 54;
 
 // The whole record of the version the game writes, every byte kept, to be written back. Fields
 // whose meaning is not known yet are kept as their bytes.
@@ -40,8 +46,10 @@ struct Record {
     std::array<std::uint8_t, 284> rest{};
 };
 
-// Reads a record of the version the game writes. Empty for any other version, a wrong magic or
-// size, or a reserved word that is not 0 (the game always writes 0 there).
+// Reads a record of the version the game writes, or of the shipped version upgraded to it as the
+// game upgrades one: the six globals the shipped version lacks are 0 until the simulator sets them,
+// and each block moves to version 2 with its two newer values 0. Empty for any other version, a wrong
+// magic or size, or a reserved word that is not 0 (the game always writes 0 there).
 std::optional<Record> readRecord(std::span<const std::uint8_t> data);
 
 // Writes the record as the game writes it, kRecordSize bytes.

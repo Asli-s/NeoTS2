@@ -25,4 +25,13 @@ std::vector<std::int16_t> selectionOrder(World& world, CodeSource& code);
 // selected, so this picks the first Sim of a new household.
 void keepSelection(World& world, CodeSource& code, std::span<std::int16_t> globals);
 
+// Whether the queue shows an interaction with this picture: the object type `guid` when it is set,
+// else the object `object`. With neither it leaves the interaction out.
+bool queueShows(const World& world, std::int16_t object, std::uint32_t guid);
+
+// Marks the interactions the selected Sim's queue (global 3) shows as having their name shown (see
+// QueuedInteraction::nameShown). Run after every lot update and before a save, as the game's queue
+// reads the names even while paused.
+void markShownNames(World& world, std::span<const std::int16_t> globals);
+
 } // namespace ts2::sim

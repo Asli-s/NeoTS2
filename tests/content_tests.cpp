@@ -1764,10 +1764,75 @@ void interruptedSavesAreUndone() {
     }
 }
 
+// A package being read can be moved aside, as a save moves a character file it replaces, and goes on
+// reading the file it opened.
+void anOpenPackageCanBeMovedAside() {
+    const std::filesystem::path folder = std::filesystem::temp_directory_path() / "neots2-open-package";
+    std::filesystem::remove_all(folder);
+    const std::filesystem::path file = folder / "N002_User00211.package", moved = folder / "N002_User00211.package.neots2-old";
+    testres::writeFile(file, testres::package({{{0x1, 0, 1, 0}, {1, 2, 3}}, {{0x1, 0, 2, 0}, {4, 5}}}));
+    {
+        ts2::dbpf::Package open(file);
+        CHECK(open.read(open.entries().at(0)) == (std::vector<std::uint8_t>{1, 2, 3}));
+        std::error_code error;
+        std::filesystem::rename(file, moved, error);
+        CHECK(!error);
+        CHECK(open.read(open.entries().at(1)) == (std::vector<std::uint8_t>{4, 5}));
+    }
+    std::error_code error;
+    std::filesystem::remove_all(folder, error);
+}
+
+// An index reads a package a save replaced again: kept resources at their new places, a dropped
+// one gone, a new one found, all under the package's own group.
+void aReplacedPackageIsReadAgain() {
+    const std::filesystem::path folder = std::filesystem::temp_directory_path() / "neots2-replaced-package";
+    std::filesystem::remove_all(folder);
+    const std::filesystem::path file = folder / "N002_User00211.package";
+    testres::writeFile(file, testres::package({{{0x1, 0xFFFFFFFF, 1, 0}, {1, 2, 3}}, {{0x1, 0xFFFFFFFF, 2, 0}, {4, 5}}}));
+    ts2::content::ResourceIndex index;
+    index.addPackage(file, 0x7F000001);
+    const auto* kept = index.find({0x1, 0x7F000001, 2, 0});
+    CHECK(kept != nullptr && index.read(*kept) == (std::vector<std::uint8_t>{4, 5}));
+    std::error_code error;
+    std::filesystem::rename(file, folder / "old.package", error);
+    CHECK(!error);
+    testres::writeFile(file, testres::package({{{0x1, 0xFFFFFFFF, 3, 0}, {7, 7, 7, 7}}, {{0x1, 0xFFFFFFFF, 2, 0}, {8, 9, 10}}}));
+    index.refreshPackage(file);
+    kept = index.find({0x1, 0x7F000001, 2, 0});
+    const auto* added = index.find({0x1, 0x7F000001, 3, 0});
+    CHECK(kept != nullptr && index.read(*kept) == (std::vector<std::uint8_t>{8, 9, 10}));
+    CHECK(added != nullptr && index.read(*added) == (std::vector<std::uint8_t>{7, 7, 7, 7}));
+    CHECK(index.find({0x1, 0x7F000001, 1, 0}) == nullptr && index.resources().size() == 2);
+    std::filesystem::remove_all(folder, error);
+}
+
+// A package read again doesn't take over a key that a package loaded after it holds.
+void aReplacedPackageKeepsTheLoadOrder() {
+    const std::filesystem::path folder = std::filesystem::temp_directory_path() / "neots2-replaced-order";
+    std::filesystem::remove_all(folder);
+    const std::filesystem::path first = folder / "first.package", later = folder / "later.package";
+    const ts2::scenegraph::Link sharedLink{0x1, 0x5, 9, 0};
+    testres::writeFile(first, testres::package({{{0x1, 0x5, 1, 0}, {1}}}));
+    testres::writeFile(later, testres::package({{sharedLink, {2, 2}}}));
+    ts2::content::ResourceIndex index;
+    index.addPackage(first, 0x7F000001);
+    index.addPackage(later, 0x7F000002);
+    std::error_code error;
+    std::filesystem::rename(first, folder / "old.package", error);
+    CHECK(!error);
+    testres::writeFile(first, testres::package({{{0x1, 0x5, 1, 0}, {1}}, {sharedLink, {3, 3, 3}}}));
+    index.refreshPackage(first);
+    const auto* found = index.find({0x1, 0x5, 9, 0});
+    CHECK(found != nullptr && index.read(*found) == (std::vector<std::uint8_t>{2, 2}));
+    std::filesystem::remove_all(folder, error);
+}
+
 } // namespace
 
 std::vector<Test> contentTests() {
     return {
+        {"a replaced package keeps the load order", aReplacedPackageKeepsTheLoadOrder},
         {"save writer replaces its targets", saveWriterReplacesItsTargets},
         {"save writer refuses wrong targets", saveWriterRefusesWrongTargets},
         {"save writer undoes a failed save", saveWriterUndoesAFailedSave},
@@ -1818,5 +1883,7 @@ std::vector<Test> contentTests() {
         {"neighborhoods are added only when missing", neighborhoodsAreAddedOnlyWhenMissing},
         {"user options are read as the game saves them", userOptionsAreReadAsTheGameSavesThem},
         {"numbers are read whole or from the start", numbersAreReadWholeOrFromTheStart},
+        {"an open package can be moved aside", anOpenPackageCanBeMovedAside},
+        {"a replaced package is read again", aReplacedPackageIsReadAgain},
     };
 }

@@ -163,4 +163,78 @@ Genome childGenome(const Genome& a, const Genome& b, const content::GeneticsCata
     return child;
 }
 
+Personality childPersonality(const std::function<std::int16_t(bool fromA, std::size_t index)>& parentValue, SimRandom& random, bool baby) {
+    constexpr std::int32_t kTraitMax = 1000, kPoint = 100, kMiddleLow = 400, kMiddleHigh = 600, kFirstBudget = 2500;
+    std::vector<std::size_t> left(kPersonalityTraits.begin(), kPersonalityTraits.end());
+    std::vector<std::size_t> order;
+    while (!left.empty()) {
+        const std::uint32_t at = draw(random, static_cast<std::uint32_t>(left.size()));
+        order.push_back(left[at]);
+        left.erase(left.begin() + at);
+    }
+    const std::int32_t budget = baby ? 3500 : kFirstBudget;
+    std::int32_t points = budget;
+    Personality out;
+    for (const std::size_t trait : order) {
+        std::int32_t value = 0;
+        switch (draw(random, 3)) {
+        case 0: value = parentValue(true, trait); break;
+        case 1: value = parentValue(false, trait); break;
+        default: value = (static_cast<std::int32_t>(draw(random, 10)) + 1) * kPoint; break;
+        }
+        value = std::min<std::int32_t>(static_cast<std::int16_t>(value), points);
+        out[trait] = static_cast<std::int16_t>(value);
+        points -= static_cast<std::int16_t>(value);
+    }
+    // Each trait raised takes points, so this ends unless every trait is already full. The cap only
+    // guards a broken parent value.
+    const auto raise = [&](std::size_t trait) {
+        const std::int32_t was = out[trait];
+        const std::int32_t step = (static_cast<std::int32_t>(draw(random, static_cast<std::uint32_t>(std::max(points / kPoint, 0)))) + 1) * kPoint;
+        const std::int16_t now = static_cast<std::int16_t>(std::min<std::int32_t>(static_cast<std::int16_t>(was + step), kTraitMax));
+        out[trait] = now;
+        points += was - now;
+    };
+    constexpr int kMostRounds = 64;
+    for (int round = 0; round < kMostRounds && points > budget - kFirstBudget; ++round) {
+        bool raised = false;
+        for (std::size_t i = 0; i < order.size() && points > 0; ++i) {
+            if (out[order[i]] >= kMiddleLow && out[order[i]] <= kMiddleHigh) {
+                raise(order[i]);
+                raised = true;
+            }
+        }
+        for (std::size_t i = 0; !raised && i < order.size() && points > 0; ++i) {
+            raise(order[i]);
+        }
+    }
+    return out;
+}
+
+std::int16_t zodiacSign(const Personality& personality) {
+    // Each sign's traits in kPersonalityTraits order, in points.
+    static constexpr std::array<std::array<float, 5>, 12> kSigns{{
+        {8, 3, 3, 5, 6}, {5, 4, 8, 5, 3}, {7, 3, 3, 4, 8}, {3, 6, 4, 6, 6}, {10, 3, 4, 4, 4}, {2, 5, 3, 9, 6},
+        {8, 7, 6, 2, 2}, {5, 3, 3, 6, 8}, {3, 4, 7, 2, 9}, {4, 5, 8, 7, 1}, {4, 6, 7, 4, 4}, {3, 7, 3, 5, 7},
+    }};
+    std::array<float, 5> points{};
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        const auto it = personality.find(kPersonalityTraits[i]);
+        points[i] = static_cast<float>(it != personality.end() ? it->second : 0) * 0.01f;
+    }
+    std::int16_t nearest = 1;
+    float best = 1e38f;
+    for (std::size_t sign = 0; sign < kSigns.size(); ++sign) {
+        float distance = 0;
+        for (std::size_t i = 0; i < points.size(); ++i) {
+            distance += (points[i] - kSigns[sign][i]) * (points[i] - kSigns[sign][i]);
+        }
+        if (distance < best) {
+            best = distance;
+            nearest = static_cast<std::int16_t>(sign + 1);
+        }
+    }
+    return nearest;
+}
+
 } // namespace ts2::sim

@@ -166,6 +166,11 @@ std::optional<QueuedInteraction> queuedChoice(CodeSource& code, const World& wor
     queued.name = choice.name;
     // Line flag 0x8000 shows it nested in the queue.
     queued.nested = line != nullptr && (line->flags & 0x8000) != 0;
+    if (line != nullptr) {
+        queued.lineFlags = line->flags;
+        queued.attenuationCode = line->attenuationCode;
+        queued.lineAttenuation = line->attenuation;
+    }
     queued.iconObject = choice.icon.object;
     queued.iconGuid = choice.icon.guid;
     queued.iconIndex = choice.icon.index;
@@ -195,6 +200,7 @@ RunResult runAtOnce(Vm& vm, CodeSource& code, World& world, SimObject& sim, SimO
     sim.personData[vm_detail::kInteractionAutonomousPersonData] = 0;
     if (sim.running) {
         sim.running->autonomous = false;
+        sim.running->markedAutonomous = false;
     }
     const RunResult r = vm.runEvent(sim, queued->group, queued->action, part->id, queued->args, true);
     sim.personData[vm_detail::kPriorityPersonData] = priority;
@@ -203,6 +209,7 @@ RunResult runAtOnce(Vm& vm, CodeSource& code, World& world, SimObject& sim, SimO
     if (running && sim.running && sim.running->object == running->object && sim.running->group == running->group &&
         sim.running->index == running->index && sim.running->action == running->action) {
         sim.running->autonomous = running->autonomous;
+        sim.running->markedAutonomous = running->markedAutonomous;
     }
     return r;
 }

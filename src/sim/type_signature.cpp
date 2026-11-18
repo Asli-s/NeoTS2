@@ -56,12 +56,7 @@ std::uint32_t treeSignature(CodeSource& code, std::uint32_t objectGroup, std::ui
     return (startVersion << 16) + versions;
 }
 
-bool typeChangedSinceSave(CodeSource& code, const ObjectType& type, const objt::Entry& saved) {
-    // The saved values, as five 32-bit words: Init and Main signatures, OBJD 0x3A, OBJD 0x3B, and one
-    // the game doesn't compare.
-    auto word = [&](std::size_t i) {
-        return static_cast<std::uint32_t>(saved.unknown[2 * i]) | static_cast<std::uint32_t>(saved.unknown[2 * i + 1]) << 16;
-    };
+std::array<std::uint32_t, 4> savedTypeValues(CodeSource& code, const ObjectType& type) {
     const auto* functions = code.objectFunctions(type);
     auto signature = [&](std::size_t entry) -> std::uint32_t {
         if (functions == nullptr || entry >= functions->size()) {
@@ -69,8 +64,18 @@ bool typeChangedSinceSave(CodeSource& code, const ObjectType& type, const objt::
         }
         return treeSignature(code, type.group, (*functions)[entry].action);
     };
-    return signature(0) != word(0) || signature(1) != word(1) || type.definition.field(0x3A) != word(2) ||
-           type.definition.field(0x3B) != word(3);
+    return {signature(0), signature(1), static_cast<std::uint32_t>(type.definition.field(0x3A)),
+            static_cast<std::uint32_t>(type.definition.field(0x3B))};
+}
+
+bool typeChangedSinceSave(CodeSource& code, const ObjectType& type, const objt::Entry& saved) {
+    // The saved values, as five 32-bit words: Init and Main signatures, OBJD 0x3A, OBJD 0x3B, and one
+    // the game doesn't compare.
+    auto word = [&](std::size_t i) {
+        return static_cast<std::uint32_t>(saved.unknown[2 * i]) | static_cast<std::uint32_t>(saved.unknown[2 * i + 1]) << 16;
+    };
+    const auto now = savedTypeValues(code, type);
+    return now[0] != word(0) || now[1] != word(1) || now[2] != word(2) || now[3] != word(3);
 }
 
 } // namespace ts2::sim

@@ -49,7 +49,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     const auto a = tryParse<ts2::faceshape::FaceShape>(piece(rest), [](auto bytes) { return ts2::faceshape::parse(bytes); });
     const auto b = tryParse<ts2::faceshape::FaceShape>(piece(rest), [](auto bytes) { return ts2::faceshape::parse(bytes); });
     const auto maskMesh = tryParse<ts2::scenegraph::Mesh>(piece(rest), [](auto bytes) { return ts2::scenegraph::parseMesh(bytes); });
-    const auto pairs = tryParse<std::vector<ts2::scene::FacePair>>(piece(rest), [](auto bytes) { return ts2::scene::readFacePairs(bytes); });
+    const auto pairs = tryParse<std::vector<ts2::scene::FacePair>>(piece(rest), [](auto bytes) { return ts2::scene::readFaceInfo(bytes).pairs; });
     if (!face) {
         return 0;
     }

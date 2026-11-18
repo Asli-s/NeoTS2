@@ -1,6 +1,7 @@
 #include "sim/lot_world.hpp"
 
 #include "sim/object_reset.hpp"
+#include "sim/relationship_table.hpp"
 #include "sim/type_signature.hpp"
 #include "sim/vm_execution.hpp"
 
@@ -50,6 +51,105 @@ void restoreRuns(const xobj::PersonState& saved, SimObject& object) {
     }
     object.currentInteraction =
         xobj::isBlank(saved.running) ? SimObject::CurrentInteraction::Blank : SimObject::CurrentInteraction::Started;
+    if (xobj::isBlank(saved.running)) {
+        object.blankId = static_cast<std::uint16_t>(saved.running.id);
+    }
+    // The motive changes it was saved with go on (a Sim on the toilet keeps filling its bladder). A
+    // broken save's change of a motive the Sim doesn't have, or of a value that isn't a number, is left
+    // out, and at most 64 are kept, as Set Motive Change keeps.
+    constexpr std::size_t kMaxMotiveChanges = 64;
+    for (const auto& entry : saved.entries) {
+        if (entry.key < 0 || static_cast<std::size_t>(entry.key) >= object.motives.size() || !std::isfinite(entry.value1) ||
+            !std::isfinite(entry.value2) || object.motiveChanges.size() >= kMaxMotiveChanges) {
+            continue;
+        }
+        object.motiveChanges.push_back({static_cast<std::uint8_t>(entry.key), entry.value1, entry.value2});
+    }
+}
+
+// An interaction a Sim was saved with, as the lot gives it back. The fields the save keeps that the
+// engine does not work from yet are left out, so a restored interaction shows and links as the game
+// had it. Nothing for a blank one, which stands for a Sim with nothing to do.
+std::optional<QueuedInteraction> restoredInteraction(const xobj::SavedInteraction& saved, const World& world) {
+    if (xobj::isBlank(saved)) {
+        return std::nullopt;
+    }
+    QueuedInteraction out;
+    out.object = saved.target;
+    if (const SimObject* object = world.find(saved.target)) {
+        out.group = object->group;
+    }
+    // A line of -1 means the interaction runs a tree of its own rather than one of the object's lines.
+    out.index = saved.index >= 0 ? static_cast<std::uint16_t>(saved.index) : 0;
+    out.ownTree = saved.index < 0;
+    out.action = saved.tree;
+    out.priority = static_cast<std::int16_t>(std::clamp(saved.priority, static_cast<std::int32_t>(INT16_MIN),
+                                                        static_cast<std::int32_t>(INT16_MAX)));
+    for (std::size_t i = 0; i < out.args.size(); ++i) {
+        out.args[i] = static_cast<std::int16_t>(saved.values[i]);
+    }
+    out.name = saved.name;
+    out.iconObject = saved.iconObject > 0 ? saved.iconObject : 0;
+    out.noIconObject = saved.iconObject < 0;
+    out.iconGuid = static_cast<std::uint32_t>(saved.iconGuid);
+    out.iconIndex = static_cast<std::uint32_t>(saved.iconIndex);
+    out.nested = saved.lineFlag2 != 0;
+    // The save gives an interaction its own number and the number of the one it is linked with, so
+    // a social's two halves still drop together.
+    out.linkId = static_cast<std::uint16_t>(saved.id);
+    out.savedId = static_cast<std::uint16_t>(saved.id);
+    out.linkedId = static_cast<std::uint16_t>(saved.linkId);
+    constexpr std::int32_t kMarkedAutonomous = 0x400;
+    out.markedAutonomous = (saved.flags & kMarkedAutonomous) != 0;
+    constexpr std::int32_t kCancelled = 0x100;
+    out.cancelled = (saved.flags & kCancelled) != 0;
+    return out;
+}
+
+// The interactions a Sim was saved running and waiting to run, given back to it.
+void restoreQueue(const xobj::PersonState& saved, SimObject& object, World& world) {
+    const auto take = [&](const xobj::SavedInteraction& from) -> Boxed<QueuedInteraction> {
+        auto one = restoredInteraction(from, world);
+        if (!one) {
+            return {};
+        }
+        one->id = ++object.nextInteractionId;
+        return Boxed<QueuedInteraction>(*one);
+    };
+    object.running = take(saved.running);
+    if (saved.runningSub) {
+        object.runningSub = take(*saved.runningSub);
+    }
+    for (const auto& from : saved.queue) {
+        if (auto one = restoredInteraction(from, world)) {
+            one->id = ++object.nextInteractionId;
+            object.queue.push_back(std::move(*one));
+        }
+    }
+    // The game keeps nested interactions waiting in a queue of their own.
+    for (const auto& from : saved.subQueue) {
+        if (auto one = restoredInteraction(from, world)) {
+            one->id = ++object.nextInteractionId;
+            one->nested = true;
+            object.queue.push_back(std::move(*one));
+        }
+    }
+    // A frame an Idle for Input started runs the interaction or sub-interaction, which ends when it
+    // returns, as one started after loading does.
+    for (Frame& f : object.thread.frames) {
+        if (f.runsInteraction) {
+            const Boxed<QueuedInteraction>& runs = f.callerContinuesTrue ? object.runningSub : object.running;
+            f.interactionId = runs ? runs->id : 0;
+        }
+    }
+    if (object.running) {
+        // The queue shows the interaction it runs by the Sim's own action picture, which a script
+        // can change while it runs, so the one the save held is put back there too.
+        object.actionString = object.running->name;
+        object.actionIconObject = object.running->icon();
+        object.actionIconGuid = object.running->iconGuid;
+        object.actionIconIndex = object.running->iconIndex;
+    }
 }
 
 std::optional<std::string> restoreStack(const content::Lot& lot, const content::LotObject& saved,
@@ -97,6 +197,7 @@ std::optional<std::string> restoreStack(const content::Lot& lot, const content::
         } else if (startedBelow == 2) {
             f.callerContinuesTrue = true;
         }
+        f.runsInteraction = startedBelow != 0;
         startedBelow = 0;
         const auto& at = bhav->instructions[f.pc];
         if (s.value3 == 1 && at.opcode == vm_detail::kIdleForInputOpcode) {
@@ -155,6 +256,8 @@ void restoreOverlays(const content::Lot& lot, std::uint32_t id, SimObject& objec
         }
         o.eventTree = a.eventTree;
         o.stackObject = a.eventObject;
+        o.ikTarget = a.ikObject > 0 ? a.ikObject : 0;
+        o.savedAnchor = AnimationAnchor{a.anchorObject, a.anchorName};
         if (const ObjectType* owner = code.objectType(a.eventObjectGuid)) {
             o.codeOwner = owner->group;
         }
@@ -184,23 +287,28 @@ void restoreSimClip(const content::Lot& lot, std::uint32_t id, SimObject& object
     for (const auto& a : saved->second) {
         if (a.kind == cobject::SavedAnimation::Kind::Clip && a.state == 1 && animateSim(a.type) && std::isfinite(a.rate) &&
             a.rate != 0 && a.rate >= kMinRate && a.rate <= kMaxRate) {
-            object.resumedClip = SimObject::ResumedClip{a.name, a.rate, static_cast<double>(a.startedMsAgo)};
+            object.resumedClip = SimObject::ResumedClip{a.name, a.rate, static_cast<double>(a.startedMsAgo),
+                                                        AnimationAnchor{a.anchorObject, a.anchorName}};
             return;
         }
     }
 }
 
 // The Animate Object clip an object was playing when the lot was saved ("obj"), carrying on from where
-// it got to. Animate Object never waits, so no script starts it again. Shipped saves only hold clips
-// played once or until stopped. A clip saved with more plays is left out, as its length isn't known
-// while the lot loads. So is a rate outside what the speed byte can give.
-void restoreObjectClip(const content::Lot& lot, std::uint32_t id, SimObject& object, double nowMs) {
+// it got to. Animate Object never waits, so no script starts it again. The game keeps each clip it
+// starts in the list, in the order started, and the engine keeps the latest, as a later Animate Object
+// takes over the object: the plumbob's turn, started after its default pose. Shipped saves only hold
+// clips played once or until stopped. A clip saved with more plays is left out, as its length isn't
+// known while the lot loads. So is a rate outside what the speed byte can give.
+void restoreObjectClip(const content::Lot& lot, std::uint32_t id, SimObject& object, const World& world) {
+    const double nowMs = world.clockMs();
     const auto saved = lot.savedAnimations.find(id);
     if (saved == lot.savedAnimations.end() || object.isPerson()) {
         return;
     }
     constexpr float kMinRate = -128.0f / 32, kMaxRate = 127.0f / 32;
-    for (const auto& a : saved->second) {
+    for (auto it = saved->second.rbegin(); it != saved->second.rend(); ++it) {
+        const auto& a = *it;
         if (a.kind != cobject::SavedAnimation::Kind::Clip || a.state != 1 || a.type != "obj") {
             continue;
         }
@@ -214,6 +322,14 @@ void restoreObjectClip(const content::Lot& lot, std::uint32_t id, SimObject& obj
         play.speed = a.rate;
         play.flipped = a.flipped;
         play.loops = a.plays == -1;
+        // Its saved kind. One without a kind is Normal, or Carry for a carry pose, as the game makes it.
+        namespace cat = content::animation_category;
+        if (a.category && *a.category >= 0 && *a.category <= cat::kReceptivity) {
+            play.category = static_cast<std::uint8_t>(*a.category);
+        }
+        if (play.category == cat::kNoCategory) {
+            play.category = world.animationCarries() && world.animationCarries()(a.name) ? cat::kCarry : cat::kNormal;
+        }
         play.lengthMs = std::numeric_limits<float>::infinity();
         object.animation = std::move(play);
         return;
@@ -265,6 +381,7 @@ LotWorldReport buildWorld(const content::Lot& lot, CodeSource& code, World& worl
         const auto& b = *lot.worldBounds;
         world.setTileBounds(World::TileBounds{b.minX, b.minY, b.maxX, b.maxY, b.minLevel, b.maxLevel});
     }
+    std::vector<std::int16_t> persons;
     for (const auto& saved : lot.objects) {
         const ObjectType* type = saved.type ? code.objectType(saved.type->guid) : nullptr;
         if (!type) {
@@ -318,6 +435,9 @@ LotWorldReport buildWorld(const content::Lot& lot, CodeSource& code, World& worl
             // The saved slots (one object id per container slot) win over the SLOT resource.
             object.slots = state.tail->slots.marker < 0 ? state.tail->slots.values
                                                         : std::vector<std::int16_t>(type->containerSlots, 0);
+            for (const auto& e : state.tail->effects) {
+                object.savedEffects.push_back({e.name, e.slot, static_cast<std::int32_t>(e.value1), static_cast<std::uint8_t>(e.value2), e.value3});
+            }
         } else {
             object.slots.assign(type->containerSlots, 0);
         }
@@ -337,16 +457,48 @@ LotWorldReport buildWorld(const content::Lot& lot, CodeSource& code, World& worl
             report.problems.push_back({saved.id, *problem});
         } else if (state.person) {
             restoreRuns(state.person->state, object);
+            restoreQueue(state.person->state, object, world);
+            persons.push_back(object.id);
         }
         restoreOverlays(lot, saved.id, object, code, world.clockMs());
         restoreSimClip(lot, saved.id, object);
-        restoreObjectClip(lot, saved.id, object, world.clockMs());
+        restoreObjectClip(lot, saved.id, object, world);
         // An object or Sim whose type changed since the save (a patch, expansion or mod) will start over.
         if (saved.type && typeChangedSinceSave(code, *type, *saved.type)) {
             report.changedType.push_back(object.id);
         }
         ++report.objects;
         report.threads += object.thread.isRunning();
+    }
+    // An interaction on an object saved after its Sim gets the object's code group now that every
+    // object is back.
+    for (const std::int16_t id : persons) {
+        SimObject* sim = world.find(id);
+        const auto fill = [&](QueuedInteraction& q) {
+            const SimObject* object = q.group == 0 ? world.find(q.object) : nullptr;
+            if (object != nullptr) {
+                q.group = object->group;
+            }
+        };
+        if (sim == nullptr) {
+            continue;
+        }
+        // A Sim saved in a slot hangs what it starts from now on from that slot's bone.
+        constexpr std::size_t kContainerField = 2, kSlotField = 3;
+        if (const SimObject* container = sim->data[kContainerField] > 0 ? world.find(sim->data[kContainerField]) : nullptr) {
+            const ObjectType* type = code.objectType(container->definition.guid());
+            sim->anchor = {container->id, type != nullptr ? slotAnchorName(code, *type, sim->data[kSlotField]) : 0};
+            sim->anchoredAtMs = world.clockMs();
+        }
+        if (sim->running) {
+            fill(*sim->running);
+        }
+        if (sim->runningSub) {
+            fill(*sim->runningSub);
+        }
+        for (QueuedInteraction& q : sim->queue) {
+            fill(q);
+        }
     }
     for (const auto& [id, tables] : lot.dataTables) {
         SimObject* object = world.find(static_cast<std::int16_t>(id));
@@ -408,6 +560,9 @@ std::shared_ptr<const SavedNeighborhood> savedNeighborhood(const content::Neighb
         saved->id = hood.identity->id;
         all.try_emplace(hood.identity->id, *hood.identity);
     }
+    if (hood.nextNeighborId && *hood.nextNeighborId >= 1 && *hood.nextNeighborId <= INT16_MAX) {
+        saved->nextNeighborId = static_cast<std::int16_t>(*hood.nextNeighborId);
+    }
     saved->allNeighborhoods = std::make_shared<const std::map<std::int32_t, nhoodid::NeighborhoodId>>(std::move(all));
     saved->neighborIds = hood.neighborIds;
     saved->lotIds = hood.lotIds;
@@ -431,6 +586,7 @@ std::shared_ptr<const SavedNeighborhood> savedNeighborhood(const content::Neighb
     for (const auto& [id, n] : hood.neighbors) {
         const auto dna = hood.dna.find(id);
         saved->neighbors[id] = SavedNeighbor{n.guid, n.personData, dna != hood.dna.end() ? genomeFromProperties(dna->second) : Genome{}};
+        saved->neighbors[id].relationshipTable = loadedRelationshipTable(n.relationshipList);
     }
     saved->familyTies = hood.familyTies;
     for (const auto& [id, w] : hood.wants) {

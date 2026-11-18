@@ -114,18 +114,135 @@ FrameView FrameView::make(const Camera& camera, unsigned width, unsigned height)
 }
 
 Mat4 poolMirror(const Mat4& viewProjection, float plane, float keepBelow) {
+    return planeMirror(viewProjection, {0, 0, 1, -plane}, keepBelow);
+}
+
+Mat4 planeMirror(const Mat4& viewProjection, const std::array<float, 4>& plane, float keepBehind) {
+    // A point p goes to p - 2 (dot(n, p) + d) n.
     Mat4 mirror;
-    mirror.m[10] = -1;
-    mirror.m[11] = 2 * plane;
+    for (std::size_t i = 0; i < 3; ++i) {
+        for (std::size_t j = 0; j < 3; ++j) {
+            mirror.m[i * 4 + j] = (i == j ? 1.0f : 0.0f) - 2 * plane[i] * plane[j];
+        }
+        mirror.m[i * 4 + 3] = -2 * plane[3] * plane[i];
+    }
     Mat4 r = viewProjection * mirror;
     for (int c = 0; c < 4; ++c) {
         r.m[c] = -r.m[c];
     }
-    const std::array<float, 4> above{0, 0, 1, -(plane - keepBelow)};
+    const std::array<float, 4> front{plane[0], plane[1], plane[2], plane[3] + keepBehind};
     for (int c = 0; c < 4; ++c) {
-        r.m[8 + c] = r.m[12 + c] - above[c];
+        r.m[8 + c] = r.m[12 + c] - front[c];
     }
     return r;
+}
+
+MirrorUniforms FramePlan::mirrorUniformsFor(const FrameView& f, const Draw& d) {
+    MirrorUniforms u{};
+    std::copy(f.viewProjection.m.begin(), f.viewProjection.m.end(), u.viewProjection);
+    const auto& t = d.instance->transform.m;
+    const float model[16] = {t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10], t[11], 0, 0, 0, 1};
+    std::copy(std::begin(model), std::end(model), u.model);
+    return u;
+}
+
+std::optional<MirrorGlass> mirrorGlass(const FrameView& f, const Draw& d, unsigned width, unsigned height) {
+    const GpuPrimitive& p = *d.primitive;
+    if (!p.mirror || !p.hasBox || width == 0 || height == 0 || !d.material || !d.material->mirror) {
+        return std::nullopt;
+    }
+    // The plane goes to world space by the placement's inverse transpose: its cofactors, signed by its
+    // determinant.
+    const auto& t = d.instance->transform.m;
+    const auto a = [&](std::size_t r, std::size_t c) { return t[r * 4 + c]; };
+    const std::array<float, 9> cof{a(1, 1) * a(2, 2) - a(1, 2) * a(2, 1), a(1, 2) * a(2, 0) - a(1, 0) * a(2, 2), a(1, 0) * a(2, 1) - a(1, 1) * a(2, 0),
+                                   a(0, 2) * a(2, 1) - a(0, 1) * a(2, 2), a(0, 0) * a(2, 2) - a(0, 2) * a(2, 0), a(0, 1) * a(2, 0) - a(0, 0) * a(2, 1),
+                                   a(0, 1) * a(1, 2) - a(0, 2) * a(1, 1), a(0, 2) * a(1, 0) - a(0, 0) * a(1, 2), a(0, 0) * a(1, 1) - a(0, 1) * a(1, 0)};
+    const float det = a(0, 0) * cof[0] + a(0, 1) * cof[1] + a(0, 2) * cof[2];
+    if (!(std::abs(det) > 1e-12f)) {
+        return std::nullopt;
+    }
+    const Vec3 local{p.plane[0], p.plane[1], p.plane[2]};
+    Vec3 normal{};
+    for (std::size_t r = 0; r < 3; ++r) {
+        normal[r] = (det < 0 ? -1.0f : 1.0f) * (cof[r * 3] * local[0] + cof[r * 3 + 1] * local[1] + cof[r * 3 + 2] * local[2]);
+    }
+    if (!(dot(normal, normal) > 1e-12f)) {
+        return std::nullopt;
+    }
+    normal = normalize(normal);
+    const Vec3 on = scale(local, -p.plane[3]);
+    const Vec3 at{a(0, 0) * on[0] + a(0, 1) * on[1] + a(0, 2) * on[2] + a(0, 3), a(1, 0) * on[0] + a(1, 1) * on[1] + a(1, 2) * on[2] + a(1, 3),
+                  a(2, 0) * on[0] + a(2, 1) * on[1] + a(2, 2) * on[2] + a(2, 3)};
+    const std::array<float, 4> plane{normal[0], normal[1], normal[2], -dot(normal, at)};
+    const Camera& camera = *f.camera;
+    const bool square = camera.orthographic[1] != camera.orthographic[0];
+    const float front = square ? -dot(normal, sub(camera.target, camera.eye)) : dot(normal, camera.eye) + plane[3];
+    if (!(front > 0)) {
+        return std::nullopt;
+    }
+    Mat4 model;
+    std::copy_n(t.begin(), 12, model.m.begin());
+    const Mat4 clip = f.viewProjection * model;
+    float x0 = 1, x1 = -1, y0 = 1, y1 = -1;
+    for (int c = 0; c < 8; ++c) {
+        const float x = c & 1 ? p.high[0] : p.low[0], y = c & 2 ? p.high[1] : p.low[1], z = c & 4 ? p.high[2] : p.low[2];
+        const float* m = clip.m.data();
+        const float w = m[12] * x + m[13] * y + m[14] * z + m[15];
+        // A corner near or behind the camera can land anywhere on the screen.
+        if (!(w >= f.nearZ)) {
+            return MirrorGlass{plane, {-1, 1, -1, 1}};
+        }
+        const float sx = (m[0] * x + m[1] * y + m[2] * z + m[3]) / w, sy = (m[4] * x + m[5] * y + m[6] * z + m[7]) / w;
+        x0 = std::min(x0, sx);
+        x1 = std::max(x1, sx);
+        y0 = std::min(y0, sy);
+        y1 = std::max(y1, sy);
+    }
+    if (x1 < -1 || x0 > 1 || y1 < -1 || y0 > 1) {
+        return std::nullopt;
+    }
+    // Two pixels more cover filtering and rounding. The mirror image is flipped left to right.
+    const float margin = 4.0f / static_cast<float>(std::min(width, height));
+    return MirrorGlass{plane, {std::max(-1.0f, -x1 - margin), std::min(1.0f, -x0 + margin), std::max(-1.0f, y0 - margin), std::min(1.0f, y1 + margin)}};
+}
+
+std::vector<MirrorImage> planMirrors(std::span<const MirrorGlass> glasses, int targets, std::vector<int>& glassImage) {
+    std::vector<MirrorImage> images;
+    glassImage.assign(glasses.size(), -1);
+    // Panes side by side on one wall share their plane to rounding.
+    const auto samePlane = [](const std::array<float, 4>& a, const std::array<float, 4>& b) {
+        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2] > 0.9999f && std::abs(a[3] - b[3]) < 0.001f;
+    };
+    for (std::size_t i = 0; i < glasses.size(); ++i) {
+        const MirrorGlass& g = glasses[i];
+        auto same = std::find_if(images.begin(), images.end(), [&](const MirrorImage& m) { return samePlane(m.plane, g.plane); });
+        if (same == images.end()) {
+            images.push_back({g.plane, g.area, -1});
+            same = images.end() - 1;
+        } else {
+            auto& r = same->area;
+            r = {std::min(r[0], g.area[0]), std::max(r[1], g.area[1]), std::min(r[2], g.area[2]), std::max(r[3], g.area[3])};
+        }
+        glassImage[i] = static_cast<int>(same - images.begin());
+    }
+    const auto overlap = [](const std::array<float, 4>& a, const std::array<float, 4>& b) {
+        return a[0] < b[1] && b[0] < a[1] && a[2] < b[3] && b[2] < a[3];
+    };
+    for (std::size_t i = 0; i < images.size(); ++i) {
+        for (int target = 0; target < targets && images[i].target < 0; ++target) {
+            if (std::none_of(images.begin(), images.begin() + static_cast<std::ptrdiff_t>(i),
+                             [&](const MirrorImage& m) { return m.target == target && overlap(m.area, images[i].area); })) {
+                images[i].target = target;
+            }
+        }
+    }
+    for (int& image : glassImage) {
+        if (image >= 0 && images[static_cast<std::size_t>(image)].target < 0) {
+            image = -1;
+        }
+    }
+    return images;
 }
 
 namespace {
@@ -213,6 +330,19 @@ std::array<float, 12> skyCamera(const FrameView& f, float up) {
     const bool square = camera.orthographic[1] != camera.orthographic[0];
     const float ty = square ? 0 : std::tan(f.fovY / 2), tx = ty * f.aspect;
     return {s[0] * tx, s[1] * tx, s[2] * tx, 0, u[0] * ty, u[1] * ty, u[2] * ty, 0, forward[0], forward[1], forward[2], up};
+}
+
+std::array<float, 12> mirroredSkyCamera(const FrameView& f, const std::array<float, 4>& plane) {
+    auto sky = skyCamera(f, 1);
+    const Vec3 n{plane[0], plane[1], plane[2]};
+    for (std::size_t v = 0; v < 3; ++v) {
+        const Vec3 d{sky[v * 4], sky[v * 4 + 1], sky[v * 4 + 2]};
+        const Vec3 r = sub(d, scale(n, 2 * dot(n, d)));
+        for (std::size_t k = 0; k < 3; ++k) {
+            sky[v * 4 + k] = v == 0 ? -r[k] : r[k];
+        }
+    }
+    return sky;
 }
 
 std::array<float, 12> mirroredSkyCamera(const FrameView& f) {

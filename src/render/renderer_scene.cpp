@@ -142,7 +142,7 @@ void SdlGpuRenderer::addMeshes(const scene::Scene& scene) {
     MeshData data;
     std::vector<GpuMesh> added;
     for (std::size_t i = gpu_->meshes.size(); i < scene.meshes.size(); ++i) {
-        added.push_back(packMesh(scene.meshes[i], scene.materials.size(), set, data));
+        added.push_back(packMesh(scene.meshes[i], scene.materials, set, data));
     }
     if (data.tooBig) {
         diag::warning("renderer: added meshes are too big for one GPU buffer; some are left out");
@@ -197,7 +197,7 @@ IRenderer::Addition SdlGpuRenderer::prepareAddition(const scene::Scene& add, con
     a->materials = add.materials.size();
     MeshData data;
     for (const auto& mesh : add.meshes) {
-        a->meshes.push_back(packMesh(mesh, add.materials.size(), 0, data));
+        a->meshes.push_back(packMesh(mesh, add.materials, 0, data));
     }
     if (data.tooBig) {
         diag::warning("renderer: added meshes are too big for one GPU buffer; some are left out");

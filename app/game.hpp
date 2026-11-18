@@ -25,9 +25,11 @@
 #include "neighborhood_ui.hpp"
 #include "orbit.hpp"
 #include "quit_box.hpp"
+#include "saving_popup.hpp"
 #include "portraits.hpp"
 
 #include "content/cameras.hpp"
+#include "formats/cobject_record.hpp"
 #include "ui/animated_bitmap.hpp"
 #include "imposter_baker.hpp"
 #include "render/frame_plan.hpp"
@@ -236,10 +238,11 @@ private:
     void closeMessage();
     std::optional<ts2::tga::Pixels> framedPicture(const std::optional<ts2::tga::Pixels>& picture);
     // Whether one of the game's dialogs is open over the lot: the quit box, an object error, the
-    // naming dialog, the phone book, the type picker, the appearance editor or a message box.
+    // naming dialog, the phone book, the type picker, the appearance editor, a message box or the
+    // "Saving Lot" box.
     bool dialogOpen() const {
         return quitBox_.isOpen() || errorBox_.isOpen() || babyNames_.isOpen() || phoneBook_.isOpen() || typePicker_.isOpen() ||
-               changeAppearance_.isOpen() || messageBox_.isOpen();
+               changeAppearance_.isOpen() || messageBox_.isOpen() || savingPopup_.isOpen();
     }
     // Typing goes on in the naming dialog after the cheat window closes over it.
     void keepBabyNameTyping() {
@@ -256,6 +259,20 @@ private:
 
     // The lot.
     void enterLot(std::uint32_t id);
+    // Writes the lot being played back to its package, as a save does. The message says why it
+    // could not be written, and is empty when it was.
+    std::string saveLot();
+    // The effects each object plays now, for a save (see TypeOwners::runningEffects).
+    std::function<std::vector<ts2::xobj::Effect>(std::int16_t)> runningEffectsOf();
+    // Saves the lot with the game's "Saving Lot" box shown, then tells `after` why the save failed
+    // (empty when it didn't). The save waits for a frame drawn with the box, so the box is seen.
+    void saveLotShown(std::function<void(const std::string& problem)> after);
+    // Runs a save saveLotShown asked for once its box has been drawn.
+    void runShownSave();
+    // Where a Sim is drawn on the lot, for its saved scene record (see TypeOwners::drawnPlace).
+    std::optional<ts2::cobject::Place> drawnSimPlace(std::int16_t sim) const;
+    // A Sim's skeleton joints as last posed, each relative to its parent joint (see TypeOwners::drawnJoints).
+    std::optional<std::vector<ts2::cobject::PosedJoint>> drawnSimJoints(std::int16_t sim) const;
     void showLot(LotBuilt& built);
     void leaveLot();
     // The game's request to go to a neighborhood from a lot (Neighborhood, Return, a pick in the
@@ -441,6 +458,9 @@ private:
     app::Orbit hoodOrbit_;
     std::optional<ts2::scene::HoodDrift> hoodDrift_;  // the camera's drift while mouse and keys rest
     app::QuitBox quitBox_;  // the game's "Are you sure you want to quit?" box
+    app::SavingPopup savingPopup_;  // the game's "Saving Lot" box
+    std::function<void(const std::string&)> afterShownSave_;  // see saveLotShown
+    int shownSaveFrames_ = 0;  // frames until the shown save runs, 0 for none
     app::BabyNameDialog babyNames_;  // the game's "Set Baby Name" dialog
     app::PhoneBookDialog phoneBook_;  // the game's Personal Phonebook
     app::TypePickerDialog typePicker_;  // the game's object type picker ("Call Sim Options")
@@ -624,6 +644,8 @@ private:
     app::Cursors cursors_{install_, data_};
     std::string openName_;
     std::filesystem::path openFolder_;
+    std::filesystem::path lotFile_;  // the package of the lot being played
+    bool lotSaved_ = false;  // the lot has been saved once for --save-lot
     std::size_t chosen_ = 0;
     // A neighborhood tile clicked once, waiting for a second click, and when.
     std::optional<std::size_t> clickedTile_;

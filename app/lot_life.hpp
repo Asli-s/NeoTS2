@@ -11,10 +11,12 @@
 #include "scene/newborn_face.hpp"
 #include "scene/scene_ray.hpp"
 #include "scene/sims.hpp"
+#include "sim/character_look.hpp"
 #include "sim/clock.hpp"
 #include "content/ui_meters.hpp"
 #include "formats/tga.hpp"
 #include "sim/lot_simulation.hpp"
+#include "sim/newborn_save.hpp"
 #include "sim/pie_menu.hpp"
 #include "sim/speed_clock.hpp"
 #include "route_sources.hpp"
@@ -216,6 +218,14 @@ public:
     double seconds() const { return drawnMs() / 1000.0; }
 
     ts2::sim::LotSimulation& simulation() { return *sim_; }
+    // The character files a save into neighborhood folder `hoodFolder` writes for the Sims born or
+    // made this run. A made Sim's file holds the look it is drawn in.
+    ts2::sim::NewCharacterFiles newCharacterFiles(const std::filesystem::path& hoodFolder) {
+        return ts2::sim::newCharacterFiles(*sim_, assets_, babyCatalog_.get(), hoodFolder, &outfitCatalog_.get(), [this](std::int16_t id) {
+            const auto* neighbor = sim_->world().neighbor(id);
+            return neighbor != nullptr && neighbor->madeAs ? madeLook(id, *neighbor->madeAs) : nullptr;
+        });
+    }
     ts2::scene::AnimationLibrary& animations() { return animations_; }
 
     // The lot objects the last update moved because a script did (scene instance, where it is drawn
@@ -275,6 +285,9 @@ public:
     // The appearance editor's OK on the hair page: the Sim takes the hair colour and its outfits the
     // slots' hairs (see ts2::scene::wearHairs), and it wears its outfit again at once.
     void wearAppearanceHairs(std::int16_t simId, const ts2::scene::HairSlots& slots, const std::string& tone);
+    // The character files whose Sims' looks the appearance editor changed this run, with each
+    // Sim's look as it is now, for a save to write.
+    std::vector<std::pair<std::filesystem::path, ts2::sim::OutfitLook>> changedLooks();
     // Puts the Sim a hair's picture is drawn on (see hairPictureLook) into `scene`, standing at the
     // origin in its picture pose, out of the lot's actors. Its instances are new or reused ones that
     // drew nothing. Nullopt when it can't be built. Take it out again with removePictureSim.
@@ -348,7 +361,8 @@ private:
     std::optional<ts2::sim::World::BuiltOutfit> buildOutfit(const ts2::sim::SimObject& sim,
                                                             const ts2::sim::World::OutfitBuildRequest& request);
     // A Sim the game dresses from an outfit source as it loads (person data 0x77-0x78, a uniform)
-    // wears that outfit once drawn.
+    // wears that outfit once drawn, and one saved in another outfit of its own (person data 0x08)
+    // wears that one.
     void dressFromSource(std::int16_t id);
     void relight(ts2::scene::Scene& scene, std::size_t index, const ts2::scene::Transform& inLot, int storey);
     // A Sim's scene instance draws nothing from now on and goes to the next Sim drawn.
@@ -476,6 +490,7 @@ private:
     // The age data of Sims that aged on this lot or had an outfit written into it, by neighbor id. Their
     // character files don't hold it yet.
     std::map<std::int16_t, ts2::scene::AgeData> agedData_;
+    std::set<std::int16_t> looksChanged_;  // neighbors whose look the appearance editor changed
     // Each Sim's working copy of its age data, which it is dressed from, by neighbor id (see buildOutfit).
     std::map<std::int16_t, ts2::scene::AgeData> outfitData_;
     bool loadedSimsDressed_ = false;

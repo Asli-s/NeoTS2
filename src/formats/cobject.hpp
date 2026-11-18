@@ -35,6 +35,11 @@ struct SavedAnimation {
     float fadeInMs = 0, fadeOutMs = 0;  // its blend curve's rise at the start and fall at the end
     bool flipped = false;               // played mirrored
     std::int32_t startedMsAgo = 0;      // when the lot was saved (game ticks are milliseconds)
+    std::int16_t ikObject = 0;          // the object its IK reaches for (Animate Overlay's temp 6), 0 for none
+    // The seat or holder the Sim was in when it started, and the hash of the slot bone it hangs
+    // from (see AnimationAnchor). Both 0 for none.
+    std::int32_t anchorObject = 0;
+    std::uint32_t anchorName = 0;
 };
 
 // A joint of the object's model as it was posed: its place relative to its parent, which replaces

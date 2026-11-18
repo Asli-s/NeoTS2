@@ -31,9 +31,16 @@ struct FaceShape {
     const Mesh* find(std::uint8_t age, std::uint8_t gender, std::uint8_t group) const;
 };
 
-// Versions 3 to 5 are read. The baby meshes of versions 3 and 4, and version 3's far-away face of an
-// elder of gender 1, are left out as the game leaves them: those faces are the base face.
+// Versions 3 to 5 are read. The baby meshes of versions 3 and 4 move nothing, as the game takes those
+// faces as the base face. Version 3's far-away face of an elder of gender 1 is left out, as the game
+// leaves it.
 // Throws on other versions and broken data, points that aren't finite numbers among it.
 FaceShape parse(std::span<const std::uint8_t> data);
+
+// A face shape record as the game writes it, at version 5 with the meshes in the order given. Each
+// offset and texture coordinate pair goes into the pool as the first entry within 0.0001 on every
+// axis, or is added after the last. Throws std::runtime_error when the pool or a mesh needs more
+// entries than the record's 16-bit counts hold.
+std::vector<std::uint8_t> write(const FaceShape& shape);
 
 } // namespace ts2::faceshape

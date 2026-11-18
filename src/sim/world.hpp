@@ -192,6 +192,31 @@ struct QueuedInteraction {
     // A continuation (Push Interaction byte 3 bit 2): it starts as soon as the interaction before
     // it ends, before the Sim's main loop runs again.
     bool continuation = false;
+    // Push Interaction byte 14 bit 4, the game's flag 0x4000. While an interaction with it waits in
+    // the Sim's interrupted place, Idle for Input starts no continuation. That place is not kept yet.
+    bool holdsContinuations = false;
+    // The object whose script pushed it, which the game saves with it. -1 for one the player or
+    // autonomy picked.
+    std::int16_t pushedBy = -1;
+    // The selected Sim's queue has shown it. Showing it reads its name, which takes the game's flag
+    // 0x80 (name not read yet) off for good.
+    bool nameShown = false;
+    // The game's flags 4, 8, 0x10 and 0x2000 from its last test (see testedFlags), which it saves
+    // with it. Empty when it has not been tested since the lot loaded.
+    std::optional<std::int32_t> testFlags;
+    // The Sim's object data 0x65 after that test, which the game saves with it too.
+    std::int16_t testValue = 0;
+    // Its picture object was deleted while it ran, which leaves it without one and gives it the
+    // game's flag 0x10.
+    bool lostIcon = false;
+    // The game's flag 0x400, which it saves with it: set on autonomy's pick and, on a Sim's push,
+    // copied from the interaction that Sim runs as it pushes.
+    bool markedAutonomous = false;
+    // Its interaction table line's flags and attenuation code and value (see attenuationOf), from
+    // which the game works out what it saves with a new interaction. 0 for none.
+    std::uint32_t lineFlags = 0;
+    std::uint32_t attenuationCode = 0;
+    float lineAttenuation = 0;
     // The queue shows picture `iconIndex` of the object type `iconGuid` when it is set, else of
     // icon(). With neither it leaves the interaction out.
     std::uint32_t iconGuid = 0;
@@ -207,6 +232,9 @@ struct QueuedInteraction {
     }
     // Interaction table flag 0x8000: the queue shows it in a column under its first icon.
     bool nested = false;
+    // It runs a tree of its own rather than one of its object's interaction table lines, as a save
+    // gives it with line -1. Its index is then 0.
+    bool ownTree = false;
     // The player cancelled it while it ran. The queue shows it crossed out until it ends.
     bool cancelled = false;
     // Tells it from the Sim's other interactions while it waits and runs (1 and up, see
@@ -217,6 +245,9 @@ struct QueuedInteraction {
     // drops. 0 for none.
     std::uint16_t linkId = 0;
     std::uint16_t linkedId = 0;
+    // The id it was saved with, for one the lot gave back. A save writes it over the saved
+    // interaction with that id, which keeps the fields the engine does not work from.
+    std::optional<std::uint16_t> savedId;
     // Its name in the queue's tooltip: the pie menu line it was chosen from. Empty for its
     // interaction table line's.
     std::string name;
@@ -240,6 +271,9 @@ struct SimObject {
     // Its recolor's materials, entry n + 1 standing in for entry n of its material names (string
     // table 0x88) when not empty. Read from the lot's save.
     std::vector<std::string> materialNames;
+    // The material names as the lot's save holds them, kept once a chosen recolour fills in more.
+    // The game's saves write them back without the recolour's names.
+    std::optional<std::vector<std::string>> savedMaterialNames;
     // The model a script last gave it by changing its graphic (object data 0), as its model names
     // (string table 0x85) give it. Empty until then, and the saved or created model shows. Not saved yet.
     std::string model;
@@ -285,6 +319,8 @@ struct SimObject {
     // interaction it was saved with, or starts with a blank one.
     enum class CurrentInteraction : std::uint8_t { None, Blank, Started };
     CurrentInteraction currentInteraction = CurrentInteraction::None;
+    // The id of that blank interaction, which a save writes. 0 while the Sim has none yet.
+    std::uint16_t blankId = 0;
     // The queue icon of autonomy's last pick, which Gosub Found Action gives the interaction it
     // starts. Not saved yet.
     InteractionIcon foundIcon;
@@ -351,8 +387,13 @@ struct SimObject {
         std::string name;
         float speed = 1;
         double playedMs = 0;
+        std::optional<AnimationAnchor> anchor;  // the one it was saved with
     };
     Boxed<ResumedClip> resumedClip;
+    // The container a Sim was last put in and the name hash of its slot's bone (see AnimationAnchor),
+    // and when, on the world's clock. Animations it starts while still there hang from that bone.
+    AnimationAnchor anchor;
+    double anchoredAtMs = 0;
     // The Animate Sim clip it last finished, while that fades out (see PlayingAnimation::blendsOut).
     // For an object, the clip Animate Object last replaced. An instant Animate Stop removes it.
     std::optional<PlayingAnimation> ending;
@@ -400,6 +441,16 @@ struct SimObject {
     Boxed<Reaching> reaching;
     // Timers On Timer set on it, in the order they were set.
     std::vector<ObjectTimer> timers;
+    // The effects it was playing when the lot was saved, which start again as the lot opens: by name,
+    // the bone they play at, their number, what started them (as EffectCommand::kind) and the byte
+    // saved for whether stops of all its effects spare them (nonzero). Emptied once started.
+    struct SavedEffect {
+        std::string name, bone;
+        std::int32_t number = 0;
+        std::uint8_t kind = 2;
+        std::uint8_t keep = 0;
+    };
+    std::vector<SavedEffect> savedEffects;
     // Why a tree another object ran on it at once failed. The simulation resets it on its next turn.
     std::optional<std::string> failedRun;
     // Whether that was a primitive the engine doesn't run yet, which never asks the player.
@@ -493,6 +544,9 @@ struct SavedNeighbor {
         std::uint32_t outfit = 0;
     };
     std::optional<MadeAs> madeAs;
+    // The neighbors its description lists relationships towards, in the order the game's table
+    // holds them after loading it (see relationship_table.hpp).
+    std::vector<std::uint32_t> relationshipTable;
 };
 
 struct SavedNeighborhood {
@@ -518,6 +572,7 @@ struct SavedNeighborhood {
     std::shared_ptr<const ngbh::Neighborhood> record;      // inventories, null when not saved
     std::map<std::int16_t, DataTables> dataTables;         // each neighbor's script data tables
     std::optional<std::int32_t> id;                         // this neighborhood's id
+    std::optional<std::int16_t> nextNeighborId;             // where new neighbor ids start, as saved
     // Every neighborhood of the Neighborhoods folder by id, as NeighborhoodManager lists them.
     std::shared_ptr<const std::map<std::int32_t, nhoodid::NeighborhoodId>> allNeighborhoods;
 };
@@ -544,7 +599,8 @@ public:
     void remove(SimObject& object);
     // Marks an object removed for scripts, as remove() does, but leaves it on the lot: purge() keeps
     // it and it is still drawn. The game does this to a saved Placeholder or TemplatePerson as the
-    // lot loads. A later remove() deletes it at the end of that tick.
+    // lot loads. A later remove() deletes it at the end of that tick. A save leaves it out, as no lot
+    // the game has saved holds a Placeholder or TemplatePerson.
     void keepUntilUnload(SimObject& object);
     // Goes up when an object comes or goes, a script writes an object's own definition fields, which
     // hold its GUID, or gives it another model. What was worked out from the objects and their types
@@ -665,12 +721,17 @@ public:
 
     // The messages objects subscribed to. Deleted objects leave them when purge() frees them.
     MessageSubscriptions& messageSubscriptions() { return messageSubscriptions_; }
+    const MessageSubscriptions& messageSubscriptions() const { return messageSubscriptions_; }
 
     void setNeighborhood(std::shared_ptr<const SavedNeighborhood> hood) {
         hood_ = std::move(hood);
         ownHood_.reset();
-        nextNeighborId_ = hood_ && !hood_->neighborIds.empty() ? static_cast<std::int16_t>(*hood_->neighborIds.rbegin() + 1) : 1;
+        nextNeighborId_ = !hood_                  ? std::int16_t{1}
+                          : hood_->nextNeighborId ? *hood_->nextNeighborId
+                          : !hood_->neighborIds.empty() ? static_cast<std::int16_t>(*hood_->neighborIds.rbegin() + 1)
+                                                        : std::int16_t{1};
         neighborRelationships_.clear();
+        neighborRelationshipsAdded_.clear();
         neighborPersonData_.clear();
         neighborWants_.clear();
         neighborFears_.clear();
@@ -833,6 +894,9 @@ public:
         return values ? values->size() : 0;
     }
 
+    // The relationships made since the neighborhood loaded, which it had no record of, in the order
+    // they were made. One a neighbor unlinked since is still listed.
+    std::span<const std::pair<std::int16_t, std::int16_t>> neighborRelationshipsAdded() const { return neighborRelationshipsAdded_; }
     // The neighbors `from` holds relationship variables towards (saved or grown), in id order.
     std::vector<std::int16_t> neighborRelationshipTargets(std::int16_t from) const {
         std::set<std::int16_t> targets;
@@ -859,7 +923,11 @@ public:
                     saved = s->second;
                 }
             }
+            const bool added = !hood_ || !hood_->relationships.contains(key);
             it = neighborRelationships_.emplace(key, std::move(saved)).first;
+            if (added) {
+                neighborRelationshipsAdded_.push_back(key);
+            }
         }
         return it->second;
     }
@@ -876,6 +944,12 @@ public:
     // Adds a neighbor made while playing (Make New Character) and returns its id, or nothing when the
     // neighborhood has no free id. It is kept for this run only, as nothing is saved yet.
     std::optional<std::int16_t> addNeighbor(SavedNeighbor neighbor);
+    // The neighbors addNeighbor made this run, which the saved neighborhood does not hold.
+    const std::set<std::int16_t>& addedNeighbors() const { return addedNeighbors_; }
+    // Where the next new neighbor's id search starts, which the neighborhood saves.
+    std::int16_t nextNeighborId() const { return nextNeighborId_; }
+    // Every neighbor's family ties, null without a neighborhood.
+    const std::map<std::int16_t, std::vector<famt::Tie>>* allFamilyTies() const { return hood_ ? &hood_->familyTies : nullptr; }
     // The 29-bit count under a new GUID made during play. The game counts time for it, the engine
     // counts the GUIDs it made from 1, so a run repeats.
     std::uint32_t nextGuidCount() { return ++guidCount_ & 0x1FFFFFFF; }
@@ -988,6 +1062,9 @@ public:
     // A new id for an object put away in an inventory (its archive). What the archive keeps of the
     // object is not modelled yet.
     std::uint32_t nextArchiveId() { return ++lastArchiveId_; }
+
+    // The inventories scripts have used since the neighborhood loaded (see inventory), by kind and id.
+    const std::map<std::pair<InventoryKind, std::int32_t>, Inventory>& usedInventories() const { return inventories_; }
 
     // A neighbor's current wants: the saved ones until changed, empty if none were saved.
     std::vector<swaf::Want>& neighborWants(std::int16_t id) {
@@ -1134,15 +1211,6 @@ public:
     // Whether an interaction with line flag 0x4 is running at once. Only one can at a time.
     bool runningAtOnce() const { return runningAtOnce_; }
     void setRunningAtOnce(bool running) { runningAtOnce_ = running; }
-    // A new link number for linked interactions, never 0. How the game counts them is not known
-    // yet. Only telling links apart matters.
-    std::uint16_t newLinkId() {
-        if (++lastLinkId_ == 0) {
-            ++lastLinkId_;
-        }
-        return lastLinkId_;
-    }
-
     // Naming Sims (Dialog "Set Baby Name"). Whoever shows the dialog turns asking on, and a request
     // then waits for its answer. With asking off the dialog waits a tick and is true, and no name
     // changes, as OK on the untouched names would. As in the game, the requests wait in one list in
@@ -1265,6 +1333,23 @@ public:
         const auto it = nameTables_.find(instance);
         return it != nameTables_.end() ? &it->second : nullptr;
     }
+    // The same tables in every language, by table instance, then by language - 1 (an empty list for
+    // a language the table lacks). Without them a made Sim's names are known in US English alone.
+    using LanguageLists = std::vector<std::vector<std::string>>;
+    void setLanguageNameTables(std::map<std::uint16_t, LanguageLists> tables) { languageNameTables_ = std::move(tables); }
+    const LanguageLists* languageNameTable(std::uint16_t instance) const {
+        const auto it = languageNameTables_.find(instance);
+        return it != languageNameTables_.end() ? &it->second : nullptr;
+    }
+    // A made Sim's first name and surname in each of the game's 44 languages (by language - 1), as
+    // its character file's name text holds them. Empty when they are not known.
+    void setNeighborLanguageNames(std::int16_t id, std::vector<std::pair<std::string, std::string>> names) {
+        languageNames_[id] = std::move(names);
+    }
+    const std::vector<std::pair<std::string, std::string>>* neighborLanguageNames(std::int16_t id) const {
+        const auto it = languageNames_.find(id);
+        return it != languageNames_.end() ? &it->second : nullptr;
+    }
     void setNeighborFirstName(std::int16_t id, std::string name) {
         firstNames_[id] = std::move(name);
         ++namesVersion_;
@@ -1312,6 +1397,8 @@ public:
     const AnimationLengths& animationLengths() const { return animationLengths_; }
     void setAnimationCarries(AnimationCarries carries) { animationCarries_ = std::move(carries); }
     const AnimationCarries& animationCarries() const { return animationCarries_; }
+    void setAnimationMovesSkeleton(AnimationMovesSkeleton moves) { animationMovesSkeleton_ = std::move(moves); }
+    const AnimationMovesSkeleton& animationMovesSkeleton() const { return animationMovesSkeleton_; }
     void setAnimationTurns(AnimationTurns turns) { animationTurns_ = std::move(turns); }
     // A locomotion clip's header as the walk planner reads it (see walk_plan.hpp). Without it,
     // walking Sims move at a fixed pace without clips.
@@ -1528,6 +1615,7 @@ private:
     std::set<std::int16_t> unlinkedNeighbors_;
     std::uint8_t lotType_ = 0;
     std::int16_t nextNeighborId_ = 1;  // where the search for a new neighbor's id starts
+    std::set<std::int16_t> addedNeighbors_;
     weather::Weather weather_;
     MessageSubscriptions messageSubscriptions_;
     std::optional<std::int32_t> lotNumber_;
@@ -1539,6 +1627,7 @@ private:
     RoomMap weatherRegions_;
     OutsideGrid outside_;
     std::map<std::pair<std::int16_t, std::int16_t>, std::vector<std::int32_t>> neighborRelationships_;
+    std::vector<std::pair<std::int16_t, std::int16_t>> neighborRelationshipsAdded_;  // in the order made
     const std::vector<std::int32_t>* neighborRelationshipIfAny(std::int16_t from, std::int16_t to) const {
         const std::pair key{from, to};
         if (const auto it = neighborRelationships_.find(key); it != neighborRelationships_.end()) {
@@ -1565,6 +1654,7 @@ private:
     std::optional<double> eventMs_;
     AnimationLengths animationLengths_;
     AnimationCarries animationCarries_;
+    AnimationMovesSkeleton animationMovesSkeleton_;
     SoundEvents soundEvents_;
     SoundStopAll soundStopAll_;
     EffectCommands effectCommands_;
@@ -1577,7 +1667,6 @@ private:
     std::int16_t lastNotification_ = 0;
     std::uint32_t notificationsVersion_ = 0;
     bool runningAtOnce_ = false;
-    std::uint16_t lastLinkId_ = 0;
     bool asksNames_ = false;
     std::uint32_t namesVersion_ = 0;
     struct NameRequest {
@@ -1614,6 +1703,8 @@ private:
     SimRandom geneticsRandom_{0};
     SimRandom characterRandom_{0};
     std::map<std::uint16_t, std::vector<std::string>> nameTables_;
+    std::map<std::uint16_t, LanguageLists> languageNameTables_;
+    std::map<std::int16_t, std::vector<std::pair<std::string, std::string>>> languageNames_;
     ModelBoneLookup modelBones_;
     LocoClips locoClips_;
     SimScale simScale_;

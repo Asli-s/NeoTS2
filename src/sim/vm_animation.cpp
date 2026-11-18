@@ -163,6 +163,9 @@ std::optional<bool> Execution::animateSim(const bhav::Instruction& in, Frame& f)
     if (a.ikOwner != 0 || a.ikData != 0) {
         play.ikTarget = read(a.ikOwner, a.ikData, f);
     }
+    if (resumed) {
+        play.savedAnchor = resumed->anchor;
+    }
     if (const auto& lengths = world().animationLengths()) {
         if (const auto ms = lengths(play.name)) {
             play.lengthMs = *ms / std::abs(play.speed);
@@ -428,6 +431,9 @@ bool Execution::animateObject(const bhav::Instruction& in, Frame& f) {
     play.eventTree = static_cast<std::uint16_t>(o[4] | o[5] << 8);
     play.eventCodeOwner = f.codeOwner;
     play.eventStackObject = stackObject();
+    // The kind its list entry gives it, an entry without one Normal (or Carry), as every Animate
+    // Object clip of the game's saves has it.
+    play.category = entryCategory(name, content::animationCategory(text));
     play.tellsEnd = true;
     // The clip it replaces plays on under it until it ends or the new one crossfades it.
     if (target->animation) {
@@ -449,7 +455,7 @@ bool Execution::animateObject(const bhav::Instruction& in, Frame& f) {
 //   byte 8     priority: 0 any, else layers 2p-2 and 2p-1
 // Animations stop or start fading out at once, and the primitive carries on.
 bool Execution::animateStop(const bhav::Instruction& in, Frame& f) {
-    constexpr float kBlendMs = 233.33f, kShortBlendMs = 70.0f;
+    constexpr float kBlendMs = kAnimateFadeMs, kShortBlendMs = 70.0f;
     const auto& o = in.operands;
     const std::int16_t targetId = read(o[3], static_cast<std::uint16_t>(o[4] | o[5] << 8), f);
     SimObject* target = world().find(targetId);
@@ -665,9 +671,9 @@ Execution::ReachStep Execution::reachPut(const bhav::Instruction& in, Frame& f) 
                                                           : objectAnimationText(moved->group, nullptr, static_cast<std::uint16_t>(o[13] | o[14] << 8));
         reach.objectClip = content::animationName(text);
     }
-    // It plays as a Sim animation of medium priority, fading in and out over 233.33 ms each, or over
-    // half its length each when it is shorter than both.
-    constexpr float kReachFadeMs = 233.33f;
+    // It plays as a Sim animation of medium priority, fading in and out over the blend time each, or
+    // over half its length each when it is shorter than both.
+    constexpr float kReachFadeMs = kAnimateFadeMs;
     constexpr int kReachLayer = 2;
     PlayingAnimation play;
     play.name = *clip;
@@ -771,12 +777,15 @@ void Execution::playHandOffClip(const Reaching& reach) {
 
 // The object takes "o-generic-resetToZero-pose" at once in place of its own clip, its joints back at
 // rest with no fade: Snap Into's reset flag lays a served bowl flat as it goes from the hand to the
-// table. What the game does for a Sim here is not known yet, so a Sim keeps its clips.
+// table. The game adds the reset pose beside the object's clips and stops none, so a clip played until
+// stopped plays on: the plumbob turns on as it snaps into the selected Sim's head. The engine holds one
+// clip per object, so such a clip keeps it. What the game does for a Sim here is not known yet, so a
+// Sim keeps its clips.
 void Execution::resetObjectPose(SimObject& object) {
     static const std::string kResetPose = "o-generic-resettozero-pose";
     const auto& lengths = world().animationLengths();
     const auto length = lengths ? lengths(kResetPose) : std::nullopt;
-    if (object.isPerson() || !length) {
+    if (object.isPerson() || !length || (object.animation && !std::isfinite(object.animation->lengthMs))) {
         return;
     }
     PlayingAnimation play;
@@ -807,7 +816,7 @@ std::string Execution::childClip(const SimObject& sim, const std::string& clip) 
 void Execution::playReachStages(SimObject& sim, const SimObject& object, bool grab, bool flipped, std::uint16_t entry, float length,
                      float event, double now) {
     constexpr std::uint8_t kStageList = 0x81;
-    constexpr float kBlendMs = 233.33f;
+    constexpr float kBlendMs = kAnimateFadeMs;
     namespace cat = content::animation_category;
     if (!grab) {
         for (auto& overlay : sim.overlays) {

@@ -6,6 +6,7 @@
 #include "formats/cobject.hpp"
 #include "formats/cobject_record.hpp"
 #include "formats/face_shape.hpp"
+#include "formats/rcol.hpp"
 #include "formats/cursor.hpp"
 #include "formats/dbpf_writer.hpp"
 #include "formats/effects.hpp"
@@ -1553,7 +1554,7 @@ void binaryPropertySetsAndReferenceLists() {
 }
 
 // A face shape (LxNR): points as (offset, texture coordinates) pairs of a shared pool, per mesh key.
-// Baby meshes of versions before 5 are left out, and broken data throws.
+// Baby meshes of versions before 5 are the base face (no offsets), and broken data throws.
 void faceShapesRead() {
     auto make = [](std::uint32_t version, std::uint16_t badIndex) {
         std::vector<std::uint8_t> d;
@@ -1580,7 +1581,10 @@ void faceShapesRead() {
     const auto* baby = shape.find(5, 0, 0);
     CHECK(shape.meshes.size() == 2 && baby != nullptr && baby->points.size() == 1);
     CHECK(baby != nullptr && baby->points[0].offset[0] == 0.5f && baby->points[0].offset[2] == -0.25f && baby->points[0].uv[1] == 0.2f);
-    CHECK(ts2::faceshape::parse(make(4, 1)).find(5, 0, 0) == nullptr);
+    const auto older = ts2::faceshape::parse(make(4, 1));
+    const auto* olderBaby = older.find(5, 0, 0);
+    CHECK(olderBaby != nullptr && olderBaby->points.size() == 1 && olderBaby->points[0].offset[0] == 0.0f &&
+          olderBaby->points[0].uv[1] == 0.2f && older.find(3, 0, 0)->points[0].offset[0] == 0.1f);
     bool threw = false;
     try {
         ts2::faceshape::parse(make(5, 7));
@@ -1605,6 +1609,119 @@ void faceShapesRead() {
         // The pool's first float sits after the version, the key count, two keys, the tag and the size.
         for (int i = 0; i < 4; ++i) bad[4 * 5 + 2 + static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(nan >> (8 * i));
         ts2::faceshape::parse(bad);
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
+// A face shape writes as the game writes it: each value goes to the first pool entry within 0.0001
+// on every axis, and the record reads back the same.
+void faceShapesWrite() {
+    ts2::faceshape::FaceShape shape;
+    shape.meshes.push_back({5, 0, 0, {{{0.5f, 0, -0.25f}, {0.1f, 0.2f}}, {{0.50005f, 0.00005f, -0.25f}, {0.1f, 0.2f}}}});
+    shape.meshes.push_back({3, 1, 15, {{{0.1f, 0.2f, 0.00009f}, {0.7f, 0.8f}}, {{0.5f, 0.0002f, -0.25f}, {0.7f, 0.8f}}}});
+    const auto bytes = ts2::faceshape::write(shape);
+    const auto read = ts2::faceshape::parse(bytes);
+    CHECK(read.version == 5 && read.meshes.size() == 2);
+    // The second offset is within 0.0001 of the first, so it is stored as the first. The third is the
+    // first texture coordinate pair with z 0, as the writer stores texture coordinates.
+    const auto* baby = read.find(5, 0, 0);
+    const auto* far = read.find(3, 1, 15);
+    CHECK(baby != nullptr && baby->points[1].offset[0] == 0.5f && baby->points[1].offset[1] == 0.0f);
+    CHECK(far != nullptr && far->points[0].offset[0] == 0.1f && far->points[0].offset[2] == 0.0f && far->points[1].offset[1] == 0.0002f);
+    // Pool: (0.5, 0, -0.25), (0.1, 0.2, 0), (0.7, 0.8, 0), (0.5, 0.0002, -0.25).
+    const std::size_t poolSize = static_cast<std::size_t>(bytes[4 * 5]) | static_cast<std::size_t>(bytes[4 * 5 + 1]) << 8;
+    CHECK(poolSize == 4);
+    CHECK(ts2::faceshape::write(read) == bytes);
+    // More distinct values than the 16-bit pool count holds throw.
+    ts2::faceshape::FaceShape big;
+    for (int m = 0; m < 2; ++m) {
+        big.meshes.push_back({3, static_cast<std::uint8_t>(m), 0, {}});
+        for (int i = 0; i < 0x6000; ++i) {
+            const float step = static_cast<float>(i) * 0.001f;
+            big.meshes.back().points.push_back({{step + 30.0f * static_cast<float>(m), 0, 0}, {static_cast<float>(m), step}});
+        }
+    }
+    bool threw = false;
+    try {
+        ts2::faceshape::write(big);
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
+// Scenegraph records write as they read: a geometry node and a material made in code read back
+// the same, including a material property order that isn't sorted. Unknown blocks, versions not
+// read, trailing bytes and text lengths in a longer form than the game writes are refused.
+void sceneRecordsWrite() {
+    ts2::rcol::Resource r;
+    r.links.push_back({0xAC4F8687, 0xFFFFFFFF, 0x12345678, 0x9ABCDEF0});
+    ts2::rcol::GeometryNode node;
+    node.header = {"cGeometryNode", 0x7BA3838C, 12};
+    node.graph.header = {"cObjectGraphNode", 0, 4};
+    node.graph.extensions.push_back({1, 1, 2});
+    node.graph.name = "buFace_tslocator_gmnd";
+    node.name.header = {"cSGResource", 0, 2};
+    node.name.name = "age5_0_gmnd";
+    node.word = 0x100;
+    node.value = 1;
+    ts2::rcol::Material material;
+    material.header = {"cMaterialDefinition", 0x49596978, 11};
+    material.name.header = {"cSGResource", 0, 2};
+    material.name.name = std::string(200, 'm');  // a length of two 7-bit groups
+    material.type = "SimSkin";
+    material.properties = {{"stdMatDiffCoef", "1,1,1,1"}, {"baseTexture0", "buface-s5"}};
+    material.textures = {"buface-s5"};
+    r.blocks = {node, material};
+    r.blockTypes = {0x7BA3838C, 0x49596978};
+    const auto bytes = ts2::rcol::write(r);
+    const auto back = ts2::rcol::read(bytes);
+    CHECK(ts2::rcol::write(back) == bytes);
+    CHECK(back.links.size() == 1 && back.links[0].instanceHigh == 0x9ABCDEF0 && back.blocks.size() == 2);
+    const auto* readNode = std::get_if<ts2::rcol::GeometryNode>(&back.blocks[0]);
+    const auto* readMaterial = std::get_if<ts2::rcol::Material>(&back.blocks[1]);
+    CHECK(readNode != nullptr && readNode->name.name == "age5_0_gmnd" && readNode->graph.extensions[0].index == 2);
+    CHECK(readMaterial != nullptr && readMaterial->name.name.size() == 200 && readMaterial->properties[0].first == "stdMatDiffCoef");
+    const auto throws = [](std::vector<std::uint8_t> data) {
+        try {
+            ts2::rcol::read(data);
+        } catch (const std::exception&) {
+            return true;
+        }
+        return false;
+    };
+    auto trailing = bytes;
+    trailing.push_back(0);
+    CHECK(throws(trailing));
+    auto cut = bytes;
+    cut.resize(cut.size() - 3);
+    CHECK(throws(cut));
+    // The geometry node's version follows its class name, the 4 bytes of the block id and the
+    // links: 4 marker, 4 count, 16 link, 4 block count, 8 block types, 14 name.
+    auto version = bytes;
+    version[4 + 4 + 16 + 4 + 8 + 14 + 4] = 11;
+    CHECK(throws(version));
+    auto unknown = bytes;
+    unknown[4 + 4 + 16 + 4] = 0x01;
+    CHECK(throws(unknown));
+    // The class name's length (13) stored as two groups.
+    auto longForm = bytes;
+    longForm[4 + 4 + 16 + 4 + 8] = 0x8D;
+    longForm.insert(longForm.begin() + (4 + 4 + 16 + 4 + 8 + 1), 0x00);
+    CHECK(throws(longForm));
+    // A bounding mesh with corners but no points can't be stored.
+    ts2::rcol::Resource mesh;
+    ts2::rcol::Mesh m;
+    m.header = {"cGeometryDataContainer", 0xAC4F8687, 4};
+    m.name.header = {"cSGResource", 0, 2};
+    m.bounds.indices = {0, 1, 2};
+    mesh.blocks = {m};
+    mesh.blockTypes = {0xAC4F8687};
+    bool threw = false;
+    try {
+        ts2::rcol::write(mesh);
     } catch (const std::exception&) {
         threw = true;
     }
@@ -2081,6 +2198,53 @@ void simulatorStateRecordsWriteBack() {
     CHECK(!ts2::simi::readRecord(std::span(bytes).first(ts2::simi::kRecordSize - 1)));
     changed[0x48] = 1;  // the reserved word the game always writes as 0
     CHECK(!ts2::simi::readRecord(changed));
+}
+
+// A simulator record of the version the game ships lots at reads as the game upgrades it: its 54
+// globals stay first, the six newer ones are 0, and each block keeps its eight values, moves to
+// version 2 and gets two newer values of 0. The game's own save of a shipped lot is laid out so.
+void shippedSimulatorRecordsUpgrade() {
+    std::vector<std::uint8_t> old(ts2::simi::kShippedRecordSize, 0);
+    auto put = [](std::vector<std::uint8_t>& d, std::size_t at, std::uint32_t v, int size) {
+        for (int i = 0; i < size; ++i) d[at + static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(v >> (8 * i));
+    };
+    put(old, 0x40, ts2::simi::kType, 4);
+    put(old, 0x44, ts2::simi::kShippedVersion, 4);
+    for (std::size_t g = 0; g < ts2::simi::kShippedGlobalCount; ++g) put(old, 0x4C + g * 2, 100 + static_cast<std::uint32_t>(g), 2);
+    for (std::size_t k = 0; k < 10; ++k) put(old, 0xB8 + k, 0x30 + static_cast<std::uint32_t>(k), 1);
+    put(old, 0xC2, 0x41854B68, 4);  // the ticks' random state
+    put(old, 0xC6, 0x5D4B3B51, 4);
+    for (std::size_t k = 0; k < 20; ++k) put(old, 0xCA + k, 0x50 + static_cast<std::uint32_t>(k), 1);
+    for (std::size_t b = 0; b < 6; ++b) {
+        put(old, 0xDE + b * 36, 1, 4);
+        for (std::size_t k = 4; k < 36; ++k) put(old, 0xDE + b * 36 + k, static_cast<std::uint32_t>(b * 40 + k), 1);
+    }
+    const auto record = ts2::simi::readRecord(old);
+    CHECK(record.has_value());
+    if (!record) {
+        return;
+    }
+    const auto written = ts2::simi::writeRecord(*record);
+    CHECK(written.size() == ts2::simi::kRecordSize);
+    CHECK(written[0x44] == ts2::simi::kWrittenVersion);
+    CHECK(std::equal(old.begin() + 0x4C, old.begin() + 0xB8, written.begin() + 0x4C));
+    CHECK(std::all_of(written.begin() + 0xB8, written.begin() + 0xC4, [](std::uint8_t v) { return v == 0; }));
+    CHECK(std::equal(old.begin() + 0xB8, old.end() - 6 * 36, written.begin() + 0xC4));
+    CHECK(record->tickRandomState == 0x41854B68 && record->otherRandomState == 0x5D4B3B51);
+    for (std::size_t b = 0; b < 6; ++b) {
+        const auto from = old.begin() + 0xDE + static_cast<std::ptrdiff_t>(b * 36);
+        const auto to = written.begin() + 0xEA + static_cast<std::ptrdiff_t>(b * 44);
+        CHECK(to[0] == 2 && to[1] == 0 && to[2] == 0 && to[3] == 0);
+        CHECK(std::equal(from + 4, from + 36, to + 4));
+        CHECK(std::all_of(to + 36, to + 44, [](std::uint8_t v) { return v == 0; }));
+    }
+    const ts2::simi::SimulatorState state = ts2::simi::parse(old);
+    CHECK(state.globals.size() == ts2::simi::kGlobalCount && state.globals[53] == 153 && state.globals[54] == 0);
+
+    auto changed = old;
+    put(changed, 0xDE + 36, 3, 4);  // a block version not known
+    CHECK(!ts2::simi::readRecord(changed));
+    CHECK(!ts2::simi::readRecord(std::span(old).first(ts2::simi::kShippedRecordSize - 1)));
 }
 
 // A lot info record of the version the game writes reads back to every byte. Texts take a 7-bit
@@ -2709,6 +2873,30 @@ void sceneRecordsWriteBack() {
     const auto again = readRecord(bytes);
     CHECK(again && writeRecord(*again) == bytes && again->animatable.animations[1].kind == Animation::Kind::None);
 
+    // The clip's instance as the lots the game ships save it: version 1, without the last value,
+    // which the game leaves at 0 and writes back as version 2.
+    const std::array<std::uint8_t, 4> instanceTag{0xB6, 0x69, 0xDE, 0xC9};
+    const auto tagAt = std::search(bytes.begin(), bytes.end(), instanceTag.begin(), instanceTag.end());
+    CHECK(tagAt != bytes.end());
+    if (tagAt != bytes.end()) {
+        std::vector<std::uint8_t> shipped = bytes;
+        const auto at = static_cast<std::size_t>(tagAt - bytes.begin());
+        CHECK(shipped[at + 4] == 2);
+        shipped[at + 4] = 1;
+        std::string resource(1, static_cast<char>(clip.resource.size()));
+        resource += clip.resource;
+        const auto nameAt = std::search(shipped.begin() + static_cast<std::ptrdiff_t>(at), shipped.end(), resource.begin(),
+                                        resource.end());
+        CHECK(nameAt != shipped.end());
+        if (nameAt != shipped.end()) {
+            shipped.erase(nameAt - 4, nameAt);
+            const auto upgraded = readRecord(shipped);
+            CHECK(upgraded && writeRecord(*upgraded) == bytes);
+            shipped[at + 4] = 3;  // a version the game does not read
+            CHECK(!readRecord(shipped));
+        }
+    }
+
     Record plain;
     plain.object.model = "chair";
     const std::vector<std::uint8_t> plainBytes = writeRecord(plain);
@@ -2748,7 +2936,7 @@ void savedCameraRecordsWriteBack() {
     view.orientation = 3;
     view.byte2 = 1;
     view.yaw = std::bit_cast<std::uint32_t>(1.5f);
-    view.angle = std::bit_cast<std::uint32_t>(0.25f);
+    view.pitchBlend = std::bit_cast<std::uint32_t>(0.25f);
     view.target = {std::bit_cast<std::uint32_t>(10.0f), std::bit_cast<std::uint32_t>(20.0f), std::bit_cast<std::uint32_t>(3.0f)};
     view.value1 = 1;
     view.value2 = -4;
@@ -2793,6 +2981,50 @@ void savedCameraRecordsWriteBack() {
     broken.push_back(0);
     CHECK(!readRecord(broken));
     CHECK(!readRecord(std::span(bytes).first(bytes.size() - 1)));
+}
+
+// A camera's own view goes into slot 0 as the game saves it: the point it circles, its distance,
+// angle and pitch, the zoom level it is zooming to and the orientation it is turning to. The fields
+// whose meaning is not known yet keep what was read.
+void savedCameraViewsFollowTheCamera() {
+    using namespace ts2::savedcamera;
+    ts2::camera::Config rig;
+    rig.levels = {{70, 45, 1, 2000, 30, 40}, {40, 45, 1, 2000, 22, 45}, {25, 45, 1, 2000, 14, 50}};
+    rig.orientations = {10, 55, 100, 145, 190, 235, 280, 325};
+    Record loaded;
+    OrbitView was;
+    was.byte1 = 1;
+    was.byte2 = 1;
+    was.value1 = 7;
+    was.value2 = -9;
+    loaded.orbit[0] = was;
+    loaded.orbit[2] = was;
+
+    ViewState state;
+    state.target = {30, 20, 2.5f};
+    state.distance = 31.5f;
+    state.zoomingTo = 25;
+    state.yaw = 190 * 3.14159265f / 180;
+    state.pitchBlend = 0.4f;
+    const Record filled = viewRecord(loaded, rig, state);
+    const auto& view = *filled.orbit[0];
+    CHECK(std::bit_cast<float>(view.target[0]) == 30.0f && std::bit_cast<float>(view.target[2]) == 2.5f);
+    CHECK(std::bit_cast<float>(view.distance) == 31.5f && std::bit_cast<float>(view.pitchBlend) == 0.4f);
+    // The zoom is easing to the third level, and the yaw is on the fifth orientation.
+    CHECK(view.zoomStep == 2 && view.orientation == 4);
+    CHECK(view.byte1 == 1 && view.byte2 == 1 && view.value1 == 7 && view.value2 == -9);
+    // The other slots are the views the player saved to a key, which the camera moving doesn't touch.
+    CHECK(filled.orbit[2] && filled.orbit[2]->zoomStep == was.zoomStep && !filled.orbit[1]);
+
+    // Between two orientations the camera is turning to the one it has not reached.
+    state.yaw = 170 * 3.14159265f / 180;
+    CHECK(viewRecord(loaded, rig, state).orbit[0]->orientation == 4);
+    // Past the last one it is turning back to the first.
+    state.yaw = 350 * 3.14159265f / 180;
+    CHECK(viewRecord(loaded, rig, state).orbit[0]->orientation == 0);
+    // A camera with no view left leaves the record alone.
+    Record empty;
+    CHECK(!viewRecord(empty, rig, state).orbit[0]);
 }
 
 // The object map's two records write back as the game writes them, and the reader of saves finds
@@ -2928,6 +3160,7 @@ std::vector<Test> formatTests() {
         {"saved objects write back", savedObjectsWriteBack},
         {"object map records write back", objectMapRecordsWriteBack},
         {"saved camera records write back", savedCameraRecordsWriteBack},
+        {"saved camera views follow the camera", savedCameraViewsFollowTheCamera},
         {"scene records write back", sceneRecordsWriteBack},
         {"relationship records write back", relationshipRecordsWriteBack},
         {"lot grids write back", lotGridsWriteBack},
@@ -2936,6 +3169,7 @@ std::vector<Test> formatTests() {
         {"small lot records write back", smallLotRecordsWriteBack},
         {"neighborhood records write back", neighborhoodRecordsWriteBack},
         {"simulator state records write back", simulatorStateRecordsWriteBack},
+        {"shipped simulator records upgrade", shippedSimulatorRecordsUpgrade},
         {"lot info records write back", lotInfoRecordsWriteBack},
         {"QFS compresses as the game does", qfsCompressesAsTheGameDoes},
         {"QFS round-trips any data", qfsRoundTripsAnyData},
@@ -2976,6 +3210,8 @@ std::vector<Test> formatTests() {
         {"beach locations lie in bands off the beach side", beachLocationsLieInBandsOffTheBeachSide},
         {"binary property sets and reference lists", binaryPropertySetsAndReferenceLists},
         {"face shapes read", faceShapesRead},
+        {"face shapes write", faceShapesWrite},
+        {"scene records write as they read", sceneRecordsWrite},
         {"fence post layer reads posts", fencePostLayerReadsPosts},
         {"neighbor remap keeps table 6", neighborRemapKeepsTableSix},
         {"wall layer reads coverings per side", wallLayerReadsCoveringsPerSide},

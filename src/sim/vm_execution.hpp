@@ -11,6 +11,7 @@
 #include "sim/in_view.hpp"
 #include "sim/lua_runtime.hpp"
 #include "sim/object_functions.hpp"
+#include "sim/simulator_ids.hpp"
 #include "sim/motive_update.hpp"
 #include "sim/object_reset.hpp"
 #include "sim/pie_menu.hpp"
@@ -385,9 +386,16 @@ inline void notePriority(SimObject& sim, const QueuedInteraction* running) {
     sim.personData[kInteractionAutonomousPersonData] = running && running->autonomous ? 1 : 0;
 }
 
-// Makes `interaction` the one the Sim runs, its name and icon the action string and icon.
-inline void startRunning(SimObject& sim, const QueuedInteraction& interaction) {
+// Makes `interaction` the one the Sim runs, its name and icon the action string and icon. One that
+// is not linked takes its link number from the simulator's id counter (`globals`) as it starts,
+// and drops only itself. A linked one keeps the numbers its link gave it.
+inline void startRunning(SimObject& sim, const QueuedInteraction& interaction, std::span<std::int16_t> globals) {
     sim.running = interaction;
+    sim.blankId = 0;  // the next blank gets an id of its own
+    if (sim.running->linkId == 0) {
+        sim.running->linkId = nextSimulatorId(globals);
+        sim.running->linkedId = sim.running->linkId;
+    }
     sim.personData[kHoldInterruptsPersonData] = 0;
     sim.personData[kLinkedDeletedPersonData] = 0;
     sim.actionString = interaction.name;
@@ -931,7 +939,7 @@ public:
     bool findBestObject(const bhav::Instruction& in, Frame& f);
     bool findBestInteraction(const bhav::Instruction& in);
     IdleResult idleForInput(const bhav::Instruction& in, Frame& f);
-    bool passesStartCheck(SimObject& sim, const SimObject& object, const QueuedInteraction& waiting);
+    bool passesStartCheck(SimObject& sim, const SimObject& object, QueuedInteraction& waiting);
     void queueSkipped(const SimObject& sim, SimObject& object);
     // dropLinkedInteractions, with each dropped waiting interaction's Queue Skipped function run.
     void dropLinked(QueuedInteraction& ended, const SimObject* skip);

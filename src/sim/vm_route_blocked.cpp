@@ -357,6 +357,9 @@ bool Execution::askedToMove(SimObject& sim, Walking& walk, SimObject& other) {
     queued.action = move->action;
     queued.priority = static_cast<std::int16_t>(askPriority(sim));
     queued.nested = (move->flags & kNestedInteractionFlag) != 0;
+    queued.lineFlags = move->flags;
+    queued.attenuationCode = move->attenuationCode;
+    queued.lineAttenuation = move->attenuation;
     queueInteraction(other, queued);
     walk.block.waitingOn = other.id;
     walk.block.waitInteraction = other.queue.back().id;
@@ -394,6 +397,7 @@ SimObject* Execution::makeDestination(SimObject& mover, const SimObject& other, 
         return nullptr;
     }
     SimObject& made = world().create(type->group, type->definition, containerSlotsOf(code_, *type));
+    made.data[kTargetSlotCountField] = targetSlotCount(*type);
     made.x = mover.x;
     made.y = mover.y;
     made.level = mover.level;

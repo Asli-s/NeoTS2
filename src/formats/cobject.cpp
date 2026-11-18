@@ -96,7 +96,8 @@ void request(BinaryReader& r, SavedAnimation& a) {
         a.rate = r.f32();
     }
     skipFloats(r, 2);
-    r.skip(4 * 4);
+    r.skip(3 * 4);
+    a.ikObject = static_cast<std::int16_t>(r.i32());
     if (version >= 4) {
         skipFloats(r, kTransformFloats);
     }
@@ -115,7 +116,8 @@ void request(BinaryReader& r, SavedAnimation& a) {
         r.skip(3 * 4);
     }
     if (version >= 0xA) {
-        r.skip(2 * 4);
+        a.anchorObject = r.i32();
+        a.anchorName = r.u32();
     }
     if (version >= 0xB) {
         r.i32();

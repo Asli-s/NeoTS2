@@ -7,6 +7,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <span>
 #include <vector>
 
 namespace ts2::render {
@@ -43,6 +45,11 @@ struct GpuPrimitive {
     std::array<float, 3> low{}, high{};
     bool hasBox = false;  // the box is finite
     bool cullable = false;
+    // A mirror's glass (see scene::Material::mirror) that lies flat: its plane in model space as a
+    // unit normal toward its front and an offset, a point p lying on it where dot(normal, p) + offset
+    // is 0. A skinned glass, which moves out of its plane, is never one.
+    bool mirror = false;
+    std::array<float, 4> plane{};
 };
 
 struct GpuMesh {
@@ -61,7 +68,11 @@ struct MeshData {
     bool tooBig = false;  // some primitives were left out (a buffer's size is 32-bit)
 };
 
+// The plane a primitive's triangles lie in, as GpuPrimitive::plane, its normal toward the side their
+// corners run counterclockwise seen from. None when they have no area or don't lie flat.
+std::optional<std::array<float, 4>> flatPlane(const scene::Primitive& p);
+
 // Appends a mesh's primitives to `data`, the set of mesh buffers numbered `buffers`.
-GpuMesh packMesh(const scene::Mesh& mesh, std::size_t materials, std::uint32_t buffers, MeshData& data);
+GpuMesh packMesh(const scene::Mesh& mesh, std::span<const scene::Material> materials, std::uint32_t buffers, MeshData& data);
 
 } // namespace ts2::render

@@ -163,11 +163,18 @@ struct MeshMorph {
     std::vector<std::pair<std::string, std::string>> pairs;
 };
 
+// A test mesh's skinning: every vertex wholly on the group's first bone, the joint `bone`, and
+// `joints` inverse binds at the model's origin.
+struct MeshSkin {
+    std::uint16_t bone = 0;
+    std::uint32_t joints = 1;
+};
+
 // A mesh (GMDC, version 4) of one triangle-list group: positions (three floats per vertex), and
-// texture coordinates (two per vertex) when given, and a morph stream when given.
+// texture coordinates (two per vertex) when given, and a morph stream and skinning when given.
 inline std::vector<std::uint8_t> mesh(const std::string& name, const std::string& group, const std::vector<float>& positions,
                                       const std::vector<float>& uvs, const std::vector<std::uint16_t>& indices,
-                                      const MeshMorph* morph = nullptr) {
+                                      const MeshMorph* morph = nullptr, const MeshSkin* skin = nullptr) {
     Bytes b;
     container(b, {}, {kGmdc});
     blockHeader(b, "cGeometryDataContainer", 4);
@@ -186,7 +193,7 @@ inline std::vector<std::uint8_t> mesh(const std::string& name, const std::string
         b.u32(0);  // its index list
     };
     const bool withUvs = !uvs.empty();
-    const std::uint32_t elements = (withUvs ? 2 : 1) + (morph != nullptr ? 2 : 0);
+    const std::uint32_t elements = (withUvs ? 2 : 1) + (morph != nullptr ? 2 : 0) + (skin != nullptr ? 2 : 0);
     b.u32(elements);
     element(ts2::scenegraph::kPositions, 2, positions);
     if (withUvs) {
@@ -204,6 +211,21 @@ inline std::vector<std::uint8_t> mesh(const std::string& name, const std::string
             b.u8(i);
         }
         b.u32(0);
+    }
+    if (skin != nullptr) {
+        b.u32(vertices);
+        b.u32(ts2::scenegraph::kBlendIndices);
+        b.u32(0);
+        b.u32(4);
+        b.u32(0);
+        b.u32(vertices * 4);
+        for (std::uint32_t v = 0; v < vertices; ++v) {
+            for (const std::uint8_t i : std::initializer_list<std::uint8_t>{0, 0xFF, 0xFF, 0xFF}) {
+                b.u8(i);
+            }
+        }
+        b.u32(0);
+        element(ts2::scenegraph::kBlendWeights, 0, std::vector<float>(vertices, 1.0f), 0);
     }
     b.u32(1);  // links
     b.u32(elements);
@@ -224,8 +246,16 @@ inline std::vector<std::uint8_t> mesh(const std::string& name, const std::string
         b.u16(i);
     }
     b.u32(0xFFFFFFFF);  // opacity
-    b.u32(0);           // bones
-    b.u32(0);           // inverse binds
+    b.u32(skin != nullptr ? 1 : 0);  // bones
+    if (skin != nullptr) {
+        b.u16(skin->bone);
+    }
+    b.u32(skin != nullptr ? skin->joints : 0);  // inverse binds
+    for (std::uint32_t j = 0; skin != nullptr && j < skin->joints; ++j) {
+        for (const float v : {0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f}) {
+            b.f32(v);
+        }
+    }
     if (morph != nullptr) {
         b.u32(static_cast<std::uint32_t>(morph->pairs.size()));
         for (const auto& [blendGroup, morphName] : morph->pairs) {
@@ -314,6 +344,66 @@ inline std::vector<std::uint8_t> placedResourceNode(const std::string& name, con
         b.f32(v);
     }
     for (const float v : {0.0f, 0.0f, 0.0f, 1.0f}) {
+        b.f32(v);
+    }
+    b.u32(0xFFFFFFFF);  // no joint
+    b.u16(1);
+    b.u32(1);  // render groups
+    b.text("Practical");
+    b.u32(0);
+    b.u8(0);
+    b.u32(1);  // shapes
+    b.u8(1);
+    b.u8(0);
+    b.u32(0);  // the container's link 0
+    return b.out;
+}
+
+// A resource node (CRES) shaped as a bar stool's: a root, a joint "base" (joint 0) and under it a
+// joint "slide" (joint 1), which holds a joint "seat" (joint 2), and beside it a shape reference
+// node that draws the shape. All at rest at the model's origin.
+inline std::vector<std::uint8_t> slidingResourceNode(const std::string& name, const std::string& shapeName) {
+    constexpr std::uint32_t kResourceNodeBlock = 0xE519C933, kTransformBlock = 0x65246462, kShapeRefBlock = 0x65245517;
+    Bytes b;
+    container(b, {keyOf(kShpe, shapeName)}, {kResourceNodeBlock, kTransformBlock, kTransformBlock, kTransformBlock, kShapeRefBlock});
+    auto header = [&](const std::string& className, std::uint32_t id, std::uint32_t version) {
+        b.text(className);
+        b.u32(id);
+        b.u32(version);
+    };
+    auto compositionTree = [&](const std::string& nodeName, const std::vector<std::uint32_t>& children) {
+        header("cCompositionTreeNode", 0, 11);
+        header("cObjectGraphNode", 0, 4);
+        b.u32(0);  // extensions
+        b.text(nodeName);
+        b.u32(static_cast<std::uint32_t>(children.size()));
+        for (const auto c : children) {
+            b.u8(1);
+            b.u8(0);
+            b.u32(c);
+        }
+    };
+    auto joint = [&](const std::string& jointName, const std::vector<std::uint32_t>& children, std::uint32_t index) {
+        header("cTransformNode", kTransformBlock, 7);
+        compositionTree(jointName, children);
+        for (const float v : {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f}) {
+            b.f32(v);
+        }
+        b.u32(index);
+    };
+    header("cResourceNode", kResourceNodeBlock, 7);
+    b.u8(1);
+    sgResource(b, name);
+    compositionTree(name, {1});
+    joint("base", {2, 4}, 0);
+    joint("slide", {3}, 1);
+    joint("seat", {}, 2);
+    header("cShapeRefNode", kShapeRefBlock, 21);
+    header("cRenderableNode", 0, 5);
+    header("cBoundedNode", 0, 5);
+    header("cTransformNode", 0, 7);
+    compositionTree("shape", {});
+    for (const float v : {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f}) {
         b.f32(v);
     }
     b.u32(0xFFFFFFFF);  // no joint

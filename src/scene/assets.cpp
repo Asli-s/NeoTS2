@@ -163,6 +163,10 @@ void Assets::useCharacterFile(const fs::path& file) {
     }
 }
 
+void Assets::refreshCharacterFile(const fs::path& file) {
+    models_.refreshPackage(file);
+}
+
 void Assets::useCharacterGroup(std::uint32_t group) {
     localGroup_ = group;
     characterGroup_ = group;

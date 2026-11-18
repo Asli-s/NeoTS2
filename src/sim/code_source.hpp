@@ -1,6 +1,7 @@
 #pragma once
 
 #include "formats/bhav.hpp"
+#include "formats/dbpf.hpp"
 #include "formats/fcns.hpp"
 #include "formats/objd.hpp"
 #include "formats/objf.hpp"
@@ -92,6 +93,9 @@ public:
     virtual std::vector<std::pair<std::uint32_t, std::vector<std::uint8_t>>> groupResources(std::uint32_t, std::uint32_t) {
         return {};
     }
+    // Every resource of a group, of any type, with its key (the template a new character is made
+    // from), the highest pack's version of each key.
+    virtual std::vector<std::pair<dbpf::ResourceKey, std::vector<std::uint8_t>>> everyGroupResource(std::uint32_t) { return {}; }
     // The game's named tuning values (FCNS instance 2 of the global group), if any.
     virtual const fcns::Tunings* tunings() { return nullptr; }
     // The global routing slots (the routing entries of SLOT 0x64 in the global group, in order), which
@@ -115,6 +119,13 @@ inline std::size_t containerSlotsOf(CodeSource& code, const ObjectType& type) {
                                static_cast<std::uint32_t>(type.definition.field(kOriginalGuidHigh)) << 16;
     const ObjectType* original = guid != 0 ? code.objectType(guid) : nullptr;
     return original != nullptr ? std::max(type.containerSlots, original->containerSlots) : type.containerSlots;
+}
+
+// Object data 0x37 of an object of `type` made during play, as every saved object has it: the
+// type's number of target slots.
+constexpr std::size_t kTargetSlotCountField = 0x37;
+inline std::int16_t targetSlotCount(const ObjectType& type) {
+    return static_cast<std::int16_t>(std::min<std::size_t>(type.targetSlots.size(), 0x7FFF));
 }
 
 } // namespace ts2::sim

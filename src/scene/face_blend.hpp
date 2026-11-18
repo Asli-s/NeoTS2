@@ -19,9 +19,24 @@ struct MaskPoint {
 };
 using FaceMasks = std::map<std::string, std::vector<MaskPoint>>;
 
-// Two regions the blend takes together, in FaceInfo's order.
+// Two regions the blend takes together, in FaceInfo's order, and the regions moved up or down to
+// keep the seam between them in its range.
 struct FacePair {
+    std::string a, b, up, down;
+};
+
+// How far apart, in height, two regions' seam may be for a face of one age and gender: the mean
+// height of region a's full-weight vertices less region b's. FaceInfo's age numbers are the face
+// shape's (0 toddler to 5 baby), and so are its genders.
+struct FaceRange {
+    std::uint32_t age = 0, gender = 0;
     std::string a, b;
+    float low = 0, high = 0;
+};
+
+struct FaceInfo {
+    std::vector<FacePair> pairs;
+    std::vector<FaceRange> ranges;
 };
 
 // Each face region, from parent `a` (true) or `b`.
@@ -30,6 +45,9 @@ using FacePicks = std::vector<std::pair<std::string, bool>>;
 // A mask mesh's points. A point's weight is its vertex colour's alpha, and points weighing nothing
 // are left out.
 std::vector<MaskPoint> maskPoints(const scenegraph::Mesh& mesh);
+
+// The face pairs and seam ranges a FaceInfo resource lists, in order. Throws when it can't be read.
+FaceInfo readFaceInfo(std::span<const std::uint8_t> bytes);
 
 // The face pairs a FaceInfo resource lists, in order. Throws when it can't be read.
 std::vector<FacePair> readFacePairs(std::span<const std::uint8_t> bytes);

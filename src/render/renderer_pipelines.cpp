@@ -115,6 +115,7 @@ void SdlGpuRenderer::makePassPipelines(PassPipelines& out, int samples) {
     makePoolPipeline(shaders, out, samples);
     makeSeaPipeline(shaders, out, samples);
     makePondPipeline(shaders, out, samples);
+    makeMirrorPipeline(shaders, out, samples);
 }
 
 void SdlGpuRenderer::releasePassPipelines(PassPipelines& pipelines) {
@@ -130,7 +131,7 @@ void SdlGpuRenderer::releasePassPipelines(PassPipelines& pipelines) {
     }
     std::for_each(pipelines.particles.begin(), pipelines.particles.end(), release);
     for (auto* p : {pipelines.sprite, pipelines.terrain, pipelines.road, pipelines.imposterLight, pipelines.imposterTerrain, pipelines.imposterWall, pipelines.imposterRoof,
-                    pipelines.imposterFadedWall, pipelines.imposterFadedRoof, pipelines.clip, pipelines.sky, pipelines.water, pipelines.pond, pipelines.pool, pipelines.sea}) {
+                    pipelines.imposterFadedWall, pipelines.imposterFadedRoof, pipelines.clip, pipelines.sky, pipelines.water, pipelines.pond, pipelines.pool, pipelines.sea, pipelines.mirror}) {
         release(p);
     }
     pipelines = {};
@@ -732,6 +733,43 @@ void SdlGpuRenderer::makePoolPipeline(const std::filesystem::path& shaders, Pass
     SDL_ReleaseGPUShader(device_, fragment);
     if (out.pool == nullptr) {
         throw sdlError("pool pipeline");
+    }
+}
+
+// A mirror's glass: the scene's positions, opaque, testing and writing depth as the scene's opaque
+// surfaces do.
+void SdlGpuRenderer::makeMirrorPipeline(const std::filesystem::path& shaders, PassPipelines& out, int samples) {
+    SDL_GPUShader* vertex = loadShader(device_, shaders, "mirror.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0);
+    SDL_GPUShader* fragment = loadShader(device_, shaders, "mirror.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 0);
+    SDL_GPUVertexBufferDescription buffers[2]{};
+    SDL_GPUVertexAttribute attributes[11]{};
+    sceneVertexLayout(buffers, attributes);
+    SDL_GPUColorTargetDescription color{};
+    color.format = SDL_GetGPUSwapchainTextureFormat(device_, window_);
+    SDL_GPUGraphicsPipelineCreateInfo info{};
+    info.vertex_shader = vertex;
+    info.fragment_shader = fragment;
+    info.vertex_input_state.vertex_buffer_descriptions = buffers;
+    info.vertex_input_state.num_vertex_buffers = 1;
+    info.vertex_input_state.vertex_attributes = attributes;
+    info.vertex_input_state.num_vertex_attributes = 1;
+    info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+    info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_BACK;
+    info.rasterizer_state.front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
+    info.depth_stencil_state.enable_depth_test = true;
+    info.depth_stencil_state.enable_depth_write = true;
+    info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_GREATER_OR_EQUAL;
+    info.target_info.color_target_descriptions = &color;
+    info.target_info.num_color_targets = 1;
+    info.multisample_state.sample_count = sampleCount(samples);
+    info.target_info.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+    info.target_info.has_depth_stencil_target = true;
+    out.mirror = SDL_CreateGPUGraphicsPipeline(device_, &info);
+    SDL_ReleaseGPUShader(device_, vertex);
+    SDL_ReleaseGPUShader(device_, fragment);
+    if (out.mirror == nullptr) {
+        throw sdlError("mirror pipeline");
     }
 }
 

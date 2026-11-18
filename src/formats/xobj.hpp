@@ -232,6 +232,14 @@ constexpr std::uint32_t kWrittenVersion = 0xD8;
 // is written. Throws for another version or a record missing the parts its kind has.
 std::vector<std::uint8_t> write(const SavedObject& object, RecordKind kind);
 
+// The version of the lots the game ships, which a lot keeps until the game first saves it.
+constexpr std::uint32_t kShippedVersion = 0xAD;
+
+// A record read at the shipped version, moved to kWrittenVersion as the game's own save moves it.
+// A Sim's person data grows to the full count, the newer values 0 until the simulation fills
+// them. Empty for a record of any other version.
+std::optional<SavedObject> upgraded(SavedObject object);
+
 SavedObject parseEmbedded(std::span<const std::uint8_t> data, std::uint32_t version, RecordKind kind,
                           std::size_t& consumed);
 

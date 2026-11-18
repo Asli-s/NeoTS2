@@ -433,6 +433,13 @@ SavedObject readObject(BinaryReader& r, std::uint32_t version, RecordKind kind, 
             t = r.i16();
         }
         copyData(o, readShorts(r, dataCountForVersion(version)));
+        // Before version 0xB1 the game sets object data 0x39, the wash clothes value, to 255 as it
+        // reads the record, whatever was saved there.
+        constexpr std::uint32_t kWashValueSaved = 0xB1;
+        constexpr std::size_t kWashClothesValue = 0x39;
+        if (version < kWashValueSaved) {
+            o.data[kWashClothesValue] = 0xFF;
+        }
         if (version > 0x65) {
             for (auto& e : o.tokenSource) {
                 e = r.i16();
@@ -464,6 +471,17 @@ SavedObject parse(std::span<const std::uint8_t> data, std::uint32_t version, Rec
     SavedObject o = readObject(r, version, kind, true);
     std::copy(name.begin(), name.end(), o.name.begin());
     return o;
+}
+
+std::optional<SavedObject> upgraded(SavedObject object) {
+    if (object.version != kShippedVersion || !object.tail) {
+        return std::nullopt;
+    }
+    object.version = kWrittenVersion;
+    if (object.person) {
+        object.person->personData.resize(kPersonDataCount, 0);
+    }
+    return object;
 }
 
 SavedObject parseEmbedded(std::span<const std::uint8_t> data, std::uint32_t version, RecordKind kind,

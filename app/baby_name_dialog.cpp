@@ -81,6 +81,9 @@ bool BabyNameDialog::open(ts2::ui::Screen& screen, int width, int height, const 
         screen.setText(box.window, box.name);
         boxes_.push_back(std::move(box));
     }
+    // The root takes the shown panel's size, as the game sizes it, so the mouse reaches the panel's
+    // OK button below the script's smaller root area.
+    screen.resize(root_, screen.width(panel), screen.height(panel));
     screen.move(root_, (width - screen.width(panel)) / 2, (height - screen.height(panel)) / 2);
     screen.raise(root_);
     screen.setModal(root_);

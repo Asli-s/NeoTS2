@@ -53,6 +53,14 @@ struct AnimationEvent {
 };
 
 // An animation playing on an object, started by an Animate primitive.
+// What a Sim's animation hangs from: the seat or holder the Sim was in when it started, and the
+// name hash (hash::crc32 of the lowercase name) of that object's slot bone. A load hangs the clip
+// from that bone again. Both 0 for an animation started outside any container.
+struct AnimationAnchor {
+    std::int32_t object = 0;
+    std::uint32_t name = 0;
+};
+
 struct PlayingAnimation {
     std::string name;
     double startMs = 0;   // on the world's clock
@@ -83,6 +91,8 @@ struct PlayingAnimation {
     // The object Animate Sim names as the clip's IK object, whose bones its targets can name (a
     // hug's other Sim), 0 for none.
     std::int16_t ikTarget = 0;
+    // The anchor a save gave it. A clip started since takes the Sim's container (see SimObject::anchor).
+    std::optional<AnimationAnchor> savedAnchor;
     // The mixer layer it plays on: twice its priority (0 low .. 6 highest), between the overlays'
     // odd layers. Walks and turns play on 0.
     int layer = 0;
@@ -118,8 +128,10 @@ struct PlayingAnimation {
 };
 
 // How long an Animate Sim clip playing `lengthMs` fades in and out: kAnimateFadeMs each (none where
-// the operands turn it off), both shortened alike to fit a clip shorter than the two together.
-constexpr float kAnimateFadeMs = 233.33f;
+// the operands turn it off), both shortened alike to fit a clip shorter than the two together. The
+// game's blend time, the float nearest 700/3 ms, which Animate Object, Animate Stop and Reach/Put
+// blend over too.
+constexpr float kAnimateFadeMs = 233.333328f;
 struct AnimateFades {
     float inMs = 0, outMs = 0;
 };
@@ -164,6 +176,7 @@ struct PlayingOverlay {
     // How long it fades in at its start and out before its end, when not kOverlayBlendMs.
     std::optional<float> blendInMs, blendOutMs;
     std::int16_t ikTarget = 0;  // as PlayingAnimation::ikTarget
+    std::optional<AnimationAnchor> savedAnchor;  // as PlayingAnimation::savedAnchor
     // Tells two overlays with the same clip and start apart while their events are told.
     std::uint32_t serial = 0;
 };
@@ -177,6 +190,9 @@ using AnimationLengths = std::function<std::optional<float>(const std::string& n
 // Whether an animation, by name, is a carry pose by its clip (a target of type 2): what an entry
 // without a kind is (see content::animationCategory).
 using AnimationCarries = std::function<bool(const std::string& name)>;
+// Whether an animation, by name, moves a skeleton by its clip (a target of type 1). A save gives
+// such a clip the higher of its two kinds (see lot_save_scene.cpp).
+using AnimationMovesSkeleton = std::function<bool(const std::string& name)>;
 // How far an animation has turned its root about the up axis after some milliseconds as authored,
 // in radians, nullopt when the animation isn't known.
 using AnimationTurns = std::function<std::optional<float>(const std::string& name, float ms)>;

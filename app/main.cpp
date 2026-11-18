@@ -420,6 +420,8 @@ int main(int argc, char** argv) {
                 ++i;
             } else if (arg == "--run" && i + 1 < argc) {
                 menu.runSeconds = std::stod(argv[++i]);
+            } else if (arg == "--save-lot") {
+                menu.saveLot = true;
             } else if (arg == "--unpaused") {
                 menu.unpaused = true;
             } else if (arg == "--no-game-tips") {
@@ -514,6 +516,7 @@ int main(int argc, char** argv) {
                 const std::string name = "downloads-" + std::to_string(ts2::hash::groupId(ts2::paths::utf8Text(lock->folder()))) + ".index";
                 ts2::content::loadDownloads(lock->folder(), data.empty() ? std::filesystem::path{} : data / name);
             }
+            menu.lock = lock ? &*lock : nullptr;
             result = runMenu(utf8Path(argv[1]), shaderFolder(), menu);
         } catch (const std::exception& ex) {
             ts2::diag::error(ex.what());

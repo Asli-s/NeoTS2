@@ -29,7 +29,7 @@ void ObjectEffects::start(std::int16_t object, const std::string& name, const st
             effect->place(where.place);
         }
         effect->setHidden(where.hidden || where.state != Where::State::Here);
-        record = &(objects_[object][std::move(key)] = Record{std::move(effect), kind, keep});
+        record = &(objects_[object][std::move(key)] = Record{std::move(effect), kind, keep, static_cast<std::uint8_t>(keep ? 1 : 0)});
     }
     record->effect->start(hard);
 }
@@ -158,6 +158,27 @@ void ObjectEffects::follow(const PlaceOf& placeOf) {
             ++it;
         }
         objectIt = records.empty() ? objects_.erase(objectIt) : std::next(objectIt);
+    }
+}
+
+std::vector<ObjectEffects::Saved> ObjectEffects::saved(std::int16_t object) const {
+    std::vector<Saved> out;
+    const auto records = objects_.find(object);
+    if (records == objects_.end()) {
+        return out;
+    }
+    for (const auto& [key, record] : records->second) {
+        if (record.effect && record.effect->running() && !record.effect->stopping()) {
+            out.push_back({std::get<0>(key), std::get<1>(key), std::get<2>(key), record.kind, record.keepByte});
+        }
+    }
+    return out;
+}
+
+void ObjectEffects::restore(std::int16_t object, const Saved& effect, const PlaceOf& placeOf) {
+    start(object, effect.name, effect.bone, effect.number, effect.kind, effect.keep != 0, true, placeOf);
+    if (Record* record = find(object, Key{effect.name, effect.bone, effect.number})) {
+        record->keepByte = effect.keep;
     }
 }
 

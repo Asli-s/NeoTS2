@@ -36,9 +36,10 @@ struct Shown {
     std::vector<scenegraph::MaterialOverride> chosen;  // see PlacedObject::chosen
 };
 
-// Lot object data: 1 its facing, 2 the object it is held by, 3 its slot there, 0x13 a multi-tile
-// part's lead and 0x2A its placement flags.
-constexpr std::size_t kFacingData = 1, kContainerData = 2, kSlotData = 3, kLeadTileData = 0x13, kPlacementData = 0x2A;
+// Lot object data: 1 its facing, 2 the object it is held by, 3 its slot there, 8 its flags, 0x0D its
+// wall placement, 0x13 a multi-tile part's lead and 0x2A its placement flags.
+constexpr std::size_t kFacingData = 1, kContainerData = 2, kSlotData = 3, kFlagsData = 8, kWallPlacementData = 0x0D, kLeadTileData = 0x13,
+                      kPlacementData = 0x2A;
 
 // The container slots kept for each object, for placing what scripts put into them.
 constexpr std::size_t kMaxShownSlots = 16;
@@ -68,6 +69,8 @@ private:
     void makeFloorLightMaps();
     void log(const content::LotObject& o, const std::string& what, const std::string& model);
     void cutWalls();
+    // Ties an object the game treats as a window to the walls it is placed against (see hidesWithWalls).
+    void tieToWalls(const Shown& o);
     void drawWalls();
 
     // Objects and Sims (lot_scene_objects.cpp).

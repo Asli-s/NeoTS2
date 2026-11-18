@@ -2,6 +2,7 @@
 #include "sim/forget_object.hpp"
 #include "sim/object_model.hpp"
 #include "sim/object_reset.hpp"
+#include "sim/recolour_rows.hpp"
 #include "sim/snap.hpp"
 #include "test_support.hpp"
 
@@ -423,6 +424,8 @@ void makeNewCharacterAddsANeighbor() {
     w.controller->arrays.assign(1, {7, 7});
     // Human first names and surnames, by gender. The pets' tables are missing.
     w.world.setNameTables({{0x96, {"Ted"}}, {0x97, {"Ann", "Brittany"}}, {0x98, {"Smith"}}, {0xCC, {"Wendland"}}});
+    // The human tables in other languages too: a German list for the surnames alone.
+    w.world.setLanguageNameTables({{0x96, {{"Ted"}}}, {0x97, {{"Ann", "Brittany"}}}, {0x98, {{"Smith"}}}, {0xCC, {{"Wendland"}, {}, {}, {"Scheuer"}}}});
     Vm vm(code, {}, &w.world);
     auto make1 = [&](std::int16_t age, std::int16_t gender, std::int16_t species) {
         code.add(kObjectGroup, 0x1001, bhav({
@@ -440,10 +443,14 @@ void makeNewCharacterAddsANeighbor() {
     CHECK(made != nullptr && made->personData[0x3A] == 19 && made->personData[0xAF] == 1 && made->personData[0x41] == 1);
     // She is named from the female tables. A dog gets no names without the pets' tables.
     CHECK(w.world.neighborFirstName(9) && !w.world.neighborFirstName(9)->empty() && w.world.neighborSurname(9) == "Wendland");
+    // Her names in every language: the German surname, US English's elsewhere.
+    const auto* names = w.world.neighborLanguageNames(9);
+    CHECK(names != nullptr && names->size() == 44 && (*names)[0].first == *w.world.neighborFirstName(9) && (*names)[0].second == "Wendland" &&
+          (*names)[3].second == "Scheuer" && (*names)[2].second == "Wendland" && (*names)[43].first == (*names)[0].first);
     CHECK(make1(4, 2, 1).outcome == Outcome::True && w.controller->arrays[0] == std::vector<std::int16_t>{10});
     made = w.world.neighbor(10);
     CHECK(made != nullptr && made->personData[0x3A] == 16 && made->personData[0x41] == 0 && made->personData[0xBA] == 1);
-    CHECK(!w.world.neighborFirstName(10) && !w.world.neighborSurname(10));
+    CHECK(!w.world.neighborFirstName(10) && !w.world.neighborSurname(10) && w.world.neighborLanguageNames(10) == nullptr);
     // Each new Sim is a person made from its species' template, under a GUID of its own.
     const auto* person = code.objectType(w.world.neighbor(9)->guid);
     const auto* dog = code.objectType(made->guid);
@@ -492,6 +499,28 @@ ts2::content::GeneticsCatalog testGeneticsCatalog() {
 // shown as passed and leads when its parent's two skins match, and the face regions follow their
 // odds (one in two from the carrier, two in three from the other parent). Parents carry gene 2 as
 // well as gene 6, as every Sim's DNA does.
+// A baby's personality spends 2500 to 3500 points, no trait above 1000, and its zodiac sign is the
+// nearest of the twelve. The two trait sets are of babies the game made, with signs 10 and 1.
+void babyPersonalityFollowsTheGameRules() {
+    for (std::uint32_t seed = 1; seed <= 200; ++seed) {
+        ts2::sim::SimRandom random(seed);
+        const auto personality = ts2::sim::childPersonality([&](bool fromA, std::size_t) { return static_cast<std::int16_t>(fromA ? 900 : 200); },
+                                                            random, true);
+        int total = 0;
+        bool inRange = personality.size() == 5;
+        for (const auto& [trait, value] : personality) {
+            total += value;
+            inRange = inRange && value >= 0 && value <= 1000 && value % 100 == 0;
+        }
+        CHECK(inRange && total >= 2500 && total <= 3500);
+    }
+    const auto traits = [](std::int16_t outgoing, std::int16_t nice, std::int16_t playful, std::int16_t neat, std::int16_t active) {
+        return ts2::sim::Personality{{6, outgoing}, {2, nice}, {5, playful}, {7, neat}, {3, active}};
+    };
+    CHECK(ts2::sim::zodiacSign(traits(500, 1000, 700, 1000, 300)) == 10);
+    CHECK(ts2::sim::zodiacSign(traits(1000, 100, 400, 1000, 1000)) == 1);
+}
+
 void babyGenesFollowTheGameRules() {
     using ts2::sim::Gene;
     using ts2::sim::Genome;
@@ -968,7 +997,7 @@ void testObjectTypeCanAskWhetherAGuidExists() {
 
 void createObjectCanTakeItsGuidFromTemps() {
     MemoryCodeSource code;
-    code.addObjectType(kLampGroup, typed(kLampGuid));
+    code.addObjectType(kLampGroup, typed(kLampGuid), {}, {}, {ts2::slot::Entry{}, ts2::slot::Entry{}});
     code.add(kObjectGroup, 0x1000, bhav({
         expr(owner::kTemp, 0, op::kAssign, owner::kLiteral, static_cast<std::uint16_t>(kLampGuid), 1, E),
         expr(owner::kTemp, 1, op::kAssign, owner::kLiteral, static_cast<std::uint16_t>(kLampGuid >> 16), 2, E),
@@ -979,6 +1008,9 @@ void createObjectCanTakeItsGuidFromTemps() {
     Vm vm(code, {}, &world);
     CHECK(vm.run(sim, 0x1000).outcome == Outcome::True);
     CHECK(world.size() == 2);
+    // It counts its type's target slots in object data 0x37, as every object the game saves does.
+    const ts2::sim::SimObject* lamp = world.find(static_cast<std::int16_t>(sim.id + 1));
+    CHECK(lamp != nullptr && lamp->data[0x37] == 2);
 }
 
 // A multi-tile master's GUID makes its parts, lead first: each is reset and runs its own Init,
@@ -1190,7 +1222,7 @@ void reachPutMovesTheObjectAtTheClipsEvent() {
     const double start = world.clockMs();
     CHECK(vm.run(sim, 0x1000).outcome == Outcome::Sleeping && sim.animation && sim.animation->name == "a2o-floor-get");
     // The reach clip plays as a medium Sim animation, fading in and out over 233.33 ms each.
-    CHECK(sim.animation->layer == 2 && sim.animation->fades && sim.animation->fadeInMs == 233.33f && sim.animation->fadeOutMs == 233.33f);
+    CHECK(sim.animation->layer == 2 && sim.animation->fades && sim.animation->fadeInMs == ts2::sim::kAnimateFadeMs && sim.animation->fadeOutMs == ts2::sim::kAnimateFadeMs);
     // The grasp fades in towards the event and hands over to the carry pose as the clip ends. The
     // carry stays until something stops it.
     CHECK(sim.overlays.size() == 2);
@@ -1316,6 +1348,7 @@ void snapIntoPutsTheObjectInTheSlot() {
     code.add(kObjectGroup, 0x1001, bhav({snapInto(18, 0x02)}));
     code.add(kObjectGroup, 0x1002, bhav({snapInto(30, 0)}));
     code.add(kObjectGroup, 0x1003, bhav({snapInto(19, 0x04)}));
+    code.add(kObjectGroup, 0x1004, bhav({snapInto(17, 0x04)}));
     World world;
     world.setAnimationLengths([](const std::string& name) -> std::optional<float> {
         return name == "o-generic-resettozero-pose" ? std::optional<float>(0.0f) : std::nullopt;
@@ -1346,6 +1379,15 @@ void snapIntoPutsTheObjectInTheSlot() {
     other.ending = other.animation;
     CHECK(vm.run(sim, 0x1003).outcome == Outcome::True && sim.slots[19] == other.id);
     CHECK(other.animation && other.animation->name == "o-generic-resettozero-pose" && !other.animation->fades && !other.ending);
+    // A clip played until stopped plays on through the reset pose, as the plumbob turns on in a head.
+    auto& plumbob = world.create(kLampGroup, typed(kLampGuid));
+    plumbob.animation = PlayingAnimation{};
+    plumbob.animation->name = "o-plumbob-spin";
+    plumbob.animation->loops = true;
+    plumbob.animation->lengthMs = std::numeric_limits<float>::infinity();
+    sim.thread.stackObjectId = plumbob.id;
+    CHECK(vm.run(sim, 0x1004).outcome == Outcome::True && sim.slots[17] == plumbob.id);
+    CHECK(plumbob.animation && plumbob.animation->name == "o-plumbob-spin");
 }
 
 // Placements 1 "on top of me" and 2 "in my hand" both put the new object in my slot 0, at my place.
@@ -1467,8 +1509,8 @@ void useCountFollowsInteractionFrames() {
     CHECK(chat.data[0x3E] == 1);
 }
 
-// When an object is deleted, a Sim drops its queued interactions on it or showing it as their icon
-// and stops naming it in object data 0x5A and 0x5F. Its own data 0x19 and 0x3E go to 0. A Sim
+// When an object is deleted, a Sim drops its queued interactions on it or showing it as their icon,
+// its running interaction loses it as its icon, and it stops naming it in object data 0x5A and 0x5F. Its own data 0x19 and 0x3E go to 0. A Sim
 // running one of its interactions, or with it as person data 0x50 or 0x9D, must be reset instead.
 void simsForgetADeletedObject() {
     ts2::sim::World world;
@@ -1480,6 +1522,8 @@ void simsForgetADeletedObject() {
     showingIt.partner = gone;
     elsewhere.object = other;
     sim.queue = {onIt, showingIt, elsewhere};
+    sim.running = ts2::sim::Boxed<ts2::sim::QueuedInteraction>(showingIt);
+    sim.actionIconObject = gone;
     sim.data[0x5A] = gone;
     sim.data[0x5F] = other;
     sim.data[0x19] = 3;
@@ -1487,6 +1531,16 @@ void simsForgetADeletedObject() {
     CHECK(!ts2::sim::forgetObject(sim, gone));
     CHECK(sim.queue.size() == 1 && sim.queue[0].object == other && sim.queue[0].partner == 0);
     CHECK(sim.data[0x5A] == 0 && sim.data[0x5F] == other && sim.data[0x19] == 0 && sim.data[0x3E] == 0);
+    // The running interaction showing it goes on without a picture.
+    CHECK(sim.running && sim.running->icon() == 0 && sim.running->lostIcon && sim.actionIconObject == 0);
+    // So does one whose picture Add/Change Action String set to the object.
+    sim.running = ts2::sim::Boxed<ts2::sim::QueuedInteraction>(elsewhere);
+    sim.actionIconObject = gone;
+    CHECK(!ts2::sim::forgetObject(sim, gone));
+    CHECK(sim.actionIconObject == 0 && sim.running->lostIcon);
+    sim.running = ts2::sim::Boxed<ts2::sim::QueuedInteraction>(showingIt);
+    sim.running->iconObject = 0;
+    sim.running->noIconObject = true;
     sim.personData[0x9D] = gone;
     CHECK(ts2::sim::forgetObject(sim, gone));
     sim.personData[0x9D] = 0;
@@ -2269,6 +2323,60 @@ void changeMaterialNamesAMaterialForAMeshGroup() {
     channel.operands[13] = 0x01;                                            // a TV channel: still its material
     CHECK(run(channel) == Outcome::True);
     CHECK((changes == std::vector<Change>{{"", "other"}, {"frame", "metal"}}));
+}
+
+// The Chinese Riddle Lantern's material names (string table 0x88) and its turquoise recolour, as the
+// game ships them. The lit and unlit outer shades land on their own rows.
+const std::vector<std::string> kLanternRows{
+    "lightingceilingcentralasian_bulb_lit",
+    "lightingceilingcentralasian_bulb_unlit",
+    "",
+    "lightingceilingcentralasian_insideshade_blue_lit",
+    "lightingceilingcentralasian_insideshade_blue_unlit",
+    "",
+    "lightingceilingcentralasian_outsideshade_blue_lit",
+    "lightingceilingcentralasian_outsideshade_blue_unlit",
+};
+
+void aRecolourMaterialFindsItsRow() {
+    using ts2::sim::recolourRow;
+    const std::string model = "lightingceilingcentralasian_cres";
+    CHECK(recolourRow(kLanternRows, model, "outsideshade", "lightingceilingcentralasian_outsideshade_turq_lit") == 6u);
+    CHECK(recolourRow(kLanternRows, model, "outsideshade", "lightingceilingcentralasian_outsideshade_turq_unlit") == 7u);
+    CHECK(recolourRow(kLanternRows, model, "insideshade", "lightingceilingcentralasian_insideshade_turq_unlit") == 4u);
+    // Without a state ending the last row of the subset wins.
+    CHECK(recolourRow(kLanternRows, model, "insideshade", "lightingceilingcentralasian_insideshade_turq") == 4u);
+    CHECK(!recolourRow(kLanternRows, model, "frame", "lightingceilingcentralasian_frame_turq_lit"));
+    CHECK(!recolourRow(kLanternRows, "lampother_cres", "outsideshade", "lampother_outsideshade_turq_lit"));
+}
+
+// A lot's chosen recolour fills the object's material names for every state of its family, so the
+// lamp's unlit shade keeps the colour, as the game does. Other families are left out.
+void chosenRecoloursFillTheMaterialNames() {
+    MemoryCodeSource code;
+    code.addStrings(kObjectGroup, 0x88, kLanternRows);
+    SmallWorld w;
+    ts2::sim::SimObject& lamp = *w.world.find(3);
+    lamp.group = kObjectGroup;
+    lamp.materialNames = {"", "", "", "", "", "", "", "lightingceilingcentralasian_outsideshade_turq_lit"};
+    ts2::content::RecolourCatalog catalog;
+    const std::string model = "lightingceilingcentralasian_cres";
+    catalog.add({model, "outsideshade", "lightingceilingcentralasian_outsideshade_turq_lit", "9ffd"});
+    catalog.add({model, "outsideshade", "lightingceilingcentralasian_outsideshade_turq_unlit", "9ffd"});
+    catalog.add({model, "insideshade", "lightingceilingcentralasian_insideshade_turq_unlit", "2bb6"});
+    ts2::content::Lot lot;
+    ts2::content::LotObject saved;
+    saved.id = 3;
+    saved.state.tail.emplace();
+    saved.state.tail->materials.push_back({model, "outsideshade", "lightingceilingcentralasian_outsideshade_turq_unlit"});
+    lot.objects.push_back(saved);
+    ts2::sim::applyChosenRecolours(lot, code, w.world, catalog);
+    CHECK(lamp.materialNames.size() == 9);
+    CHECK(lamp.materialNames.size() == 9 && lamp.materialNames[7] == "lightingceilingcentralasian_outsideshade_turq_lit" &&
+          lamp.materialNames[8] == "lightingceilingcentralasian_outsideshade_turq_unlit" && lamp.materialNames[5].empty());
+    // The save keeps the names as loaded, as the game's saves of this lot do.
+    CHECK(lamp.savedMaterialNames && lamp.savedMaterialNames->size() == 8 &&
+          (*lamp.savedMaterialNames)[7] == "lightingceilingcentralasian_outsideshade_turq_lit");
 }
 
 Instruction effectStopStart(std::uint8_t mode, std::int16_t name, std::uint8_t slot = 0xFF, std::uint8_t slotKind = 3, std::uint16_t flags = 0) {
@@ -3152,11 +3260,16 @@ void savedIdleForInputRunsAgainAfterItsInteraction() {
     interaction.treeId = 0x1001;
     interaction.value3 = 0;
     saved.state.tail->stack = {waiting, interaction};
+    // The effects it was playing come back to start again as the lot opens (the plumbob's glow).
+    saved.state.tail->effects = {{"fxPlumbobGlow_75", "slot_plumbob_0_fx", 3, 2, 1}};
     lot.objects.push_back(saved);
     ts2::sim::World world;
     ts2::sim::buildWorld(lot, code, world);
     auto* sim = world.find(1);
     CHECK(sim != nullptr && sim->thread.frames.size() == 2);
+    CHECK(sim != nullptr && sim->savedEffects.size() == 1 && sim->savedEffects[0].name == "fxPlumbobGlow_75" &&
+          sim->savedEffects[0].bone == "slot_plumbob_0_fx" && sim->savedEffects[0].number == 3 && sim->savedEffects[0].kind == 2 &&
+          sim->savedEffects[0].keep == 1);
     Vm vm(code, {}, &world);
     CHECK(sim != nullptr && vm.resume(*sim).outcome == Outcome::True);
 
@@ -3164,12 +3277,18 @@ void savedIdleForInputRunsAgainAfterItsInteraction() {
     // counts as one it started.
     ts2::xobj::PersonPart person;
     person.state.runs = {{1, 1, false}, {1, 2, false}, {1, -3, false}};
+    // Its motive changes too (Fun by 0.05 a tick up to 75, as in a game save of a Sim at the computer).
+    // One of a motive out of range is left out.
+    person.state.entries = {{15, 0.05f, 75}, {99, 1, 1}};
     person.state.running.index = 4;
     lot.objects.back().state.person = person;
     ts2::sim::World again;
     ts2::sim::buildWorld(lot, code, again);
     const auto* loaded = again.find(1);
     CHECK((loaded != nullptr && loaded->runDepths == std::vector<std::size_t>{1, 2}));
+    CHECK(loaded != nullptr && loaded->motiveChanges.size() == 1 && loaded->motiveChanges[0].motive == 15 &&
+          loaded->motiveChanges[0].perTick == 0.05f && loaded->motiveChanges[0].limit == 75);
+
     CHECK(loaded != nullptr && loaded->currentInteraction == ts2::sim::SimObject::CurrentInteraction::Started);
     person.state.running.index = -1;
     person.state.running.iconObject = -1;
@@ -3177,6 +3296,83 @@ void savedIdleForInputRunsAgainAfterItsInteraction() {
     ts2::sim::World blank;
     ts2::sim::buildWorld(lot, code, blank);
     CHECK(blank.find(1) != nullptr && blank.find(1)->currentInteraction == ts2::sim::SimObject::CurrentInteraction::Blank);
+    // A blank one leaves the Sim with no interaction to show.
+    CHECK(!blank.find(1)->running);
+    // The interaction it was running comes back with the name the queue shows, the object it is on
+    // and both link numbers, so a social's two halves still drop together.
+    person.state.running.index = 4;
+    person.state.running.target = 1;
+    person.state.running.tree = 0x1001;
+    person.state.running.priority = 20;
+    person.state.running.name = "Play";
+    person.state.running.iconObject = 1;
+    person.state.running.id = 77;
+    person.state.running.linkId = 78;
+    person.state.queue.push_back(person.state.running);
+    person.state.queue.back().name = "Play Later";
+    person.state.subQueue.push_back(person.state.running);  // a nested one waiting
+    person.state.subQueue.back().name = "Nested Later";
+    lot.objects.back().state.person = person;
+    ts2::sim::World third;
+    ts2::sim::buildWorld(lot, code, third);
+    const auto* withQueue = third.find(1);
+    CHECK(withQueue != nullptr && withQueue->running && withQueue->running->name == "Play");
+    CHECK(withQueue->running->object == 1 && withQueue->running->action == 0x1001 && withQueue->running->index == 4);
+    CHECK(withQueue->running->linkId == 77 && withQueue->running->linkedId == 78);
+    CHECK(withQueue->actionString == "Play" && withQueue->queue.size() == 2 && withQueue->queue[0].name == "Play Later");
+    CHECK(!withQueue->queue[0].nested && withQueue->queue[1].nested && withQueue->queue[1].name == "Nested Later");
+    // The restored interaction ends when its frame returns, and the Sim's Priority (person data
+    // 0x21) drops with it, so a waiting one of the same priority can interrupt.
+    auto* resumed = third.find(1);
+    resumed->personData[0x21] = 20;
+    Vm again3(code, {}, &third);
+    CHECK(again3.resume(*resumed).outcome == Outcome::True);
+    CHECK(!resumed->running && resumed->personData[0x21] == 0);
+
+    // An interaction on an object saved after its Sim gets that object's code group.
+    code.addObjectType(kSimGroup, typed(0x52525252));
+    ts2::objt::Entry later;
+    later.guid = 0x52525252;
+    later.index = 2;
+    lot.types.entries.push_back(later);
+    ts2::content::LotObject laterObject;
+    laterObject.id = 2;
+    laterObject.type = later;
+    person.state.queue.front().target = 2;
+    lot.objects.back().state.person = person;
+    lot.objects.push_back(laterObject);
+    ts2::sim::World fourth;
+    ts2::sim::buildWorld(lot, code, fourth);
+    CHECK(fourth.find(1) != nullptr && fourth.find(1)->queue[0].object == 2 && fourth.find(1)->queue[0].group == kSimGroup);
+}
+
+// An object saved playing Animate Object clips comes back playing the latest: the game keeps each in
+// its list in the order started, and the plumbob's turn comes after its default pose.
+void aLoadedObjectPlaysItsLatestClip() {
+    MemoryCodeSource code;
+    code.addObjectType(kObjectGroup, typed(0x1000));
+    ts2::content::Lot lot;
+    ts2::objt::Entry entry;
+    entry.guid = 0x1000;
+    entry.index = 1;
+    lot.types.entries.push_back(entry);
+    ts2::content::LotObject saved;
+    saved.id = 1;
+    saved.type = entry;
+    lot.objects.push_back(saved);
+    const auto clip = [](const char* name) {
+        ts2::cobject::SavedAnimation a;
+        a.name = name;
+        a.type = "obj";
+        a.state = 1;
+        a.plays = -1;
+        return a;
+    };
+    lot.savedAnimations[1] = {clip("o-plumbob-poses-default-0"), clip("o-plumbob-spin")};
+    ts2::sim::World world;
+    ts2::sim::buildWorld(lot, code, world);
+    const auto* plumbob = world.find(1);
+    CHECK(plumbob != nullptr && plumbob->animation && plumbob->animation->name == "o-plumbob-spin" && plumbob->animation->loops);
 }
 
 void roomFieldsAreReadThroughTempZero() {
@@ -3249,6 +3445,7 @@ void outsideIsRegionZeroInLayerZero() {
 
 std::vector<Test> vmObjectTests() {
     return {
+        {"a loaded object plays its latest clip", aLoadedObjectPlaysItsLatestClip},
         {"room fields are read through temp 0", roomFieldsAreReadThroughTempZero},
         {"text notifications fill their tokens", textNotificationsFillTheirTokens},
         {"outside is region 0 in layer 0", outsideIsRegionZeroInLayerZero},
@@ -3312,6 +3509,8 @@ std::vector<Test> vmObjectTests() {
         {"Relationship between Sims uses their neighbors", relationshipBetweenSimsUsesTheirNeighbors},
         {"Change Light sets how strongly an object's lights shine", changeLightSetsLightStrength},
         {"Change Material names a material for a mesh group", changeMaterialNamesAMaterialForAMeshGroup},
+        {"A recolour material finds its row", aRecolourMaterialFindsItsRow},
+        {"Chosen recolours fill the material names", chosenRecoloursFillTheMaterialNames},
         {"Play/Stop Sound Event names the sound and its source", soundEventNamesTheSoundAndItsSource},
         {"held objects come along with their holder", heldObjectsComeAlongWithTheirHolder},
         {"Effect Stop/Start asks for effects", effectStopStartAsksForEffects},
@@ -3325,6 +3524,7 @@ std::vector<Test> vmObjectTests() {
         {"change appearance waits for the answer", changeAppearanceWaitsForTheAnswer},
         {"message box waits for a button", messageBoxWaitsForAButton},
         {"baby genes follow the game's rules", babyGenesFollowTheGameRules},
+        {"baby personality follows the game's rules", babyPersonalityFollowsTheGameRules},
         {"baby genes draw in the game's order", babyGenesDrawInTheGamesOrder},
         {"Camera Control waits while the camera moves", cameraControlWaitsWhileTheCameraMoves},
         {"Alter Budget charges the funds", alterBudgetChargesTheFunds},

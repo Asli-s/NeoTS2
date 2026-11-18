@@ -75,6 +75,12 @@ if(MSVC AND NOT NEOTS2_FUZZ AND NOT NEOTS2_ASAN AND NOT NEOTS2_COVERAGE)
                      $<$<CONFIG:Release>:/PDBALTPATH:%_PDB%>)
 endif()
 
+# The larger source files have more sections than an object file allows by default, more so in
+# debug, sanitizer and fuzz builds.
+if(MSVC)
+    add_compile_options(/bigobj)
+endif()
+
 # The same on Linux and macOS when crashes are caught there: debug info, and on Linux a build id that
 # matches a crash dump to its symbols. The packaging scripts keep the symbols and strip the programs.
 if(NEOTS2_CRASHPAD AND NOT WIN32)
@@ -202,6 +208,7 @@ add_library(ts2formats
     src/formats/propset.cpp
     src/formats/anim.cpp
     src/formats/face_shape.cpp
+    src/formats/rcol.cpp
     src/formats/reference_list.cpp
     src/formats/ttab.cpp
     src/formats/luascript.cpp
@@ -284,6 +291,7 @@ add_library(ts2content
     src/content/lot.cpp
     src/content/neighborhood.cpp
     src/content/genetics_catalog.cpp
+    src/content/recolour_catalog.cpp
     src/content/wants.cpp
     src/content/scripts.cpp
     src/content/resource_index.cpp
@@ -313,10 +321,24 @@ target_link_libraries(ts2content PUBLIC ts2formats ts2diag ts2paths PRIVATE proj
 add_library(ts2sim
     src/sim/index_code_source.cpp
     src/sim/lot_world.cpp
+    src/sim/recolour_rows.cpp
     src/sim/want_refill.cpp
     src/sim/selection.cpp
     src/sim/lot_simulation.cpp
     src/sim/lot_save.cpp
+    src/sim/lot_save_interactions.cpp
+    src/sim/lot_save_map.cpp
+    src/sim/lot_save_objects.cpp
+    src/sim/lot_save_scene.cpp
+    src/sim/character_file.cpp
+    src/sim/character_look.cpp
+    src/sim/character_models.cpp
+    src/sim/newborn_file.cpp
+    src/sim/newborn_save.cpp
+    src/sim/hood_save.cpp
+    src/sim/hood_save_neighbors.cpp
+    src/sim/relationship_table.cpp
+    src/sim/lot_save_types.cpp
     src/sim/look_at.cpp
     src/sim/ground_click.cpp
     src/sim/route_portals.cpp
@@ -413,6 +435,7 @@ add_library(ts2scene
     src/scene/outfit_properties.cpp
     src/scene/face_blend.cpp
     src/scene/newborn_face.cpp
+    src/scene/newborn_face_shape.cpp
     src/scene/sims.cpp
     src/scene/catalog_bins.cpp
     src/scene/outfit_catalog.cpp
@@ -474,7 +497,7 @@ if(NEOTS2_FUZZ)
     foreach(target qfs_fuzz dbpf_fuzz cobject_fuzz bhav_fuzz str_fuzz bcon_fuzz fcns_fuzz glob_fuzz objd_fuzz
                    objt_fuzz objm_fuzz xobj_fuzz wallgraph_fuzz array3d_fuzz srel_fuzz sdsc_fuzz fami_fuzz famt_fuzz slot_fuzz swaf_fuzz want_trees_fuzz propset_fuzz ttab_fuzz luascript_fuzz ngbh_fuzz datatables_fuzz scenegraph_fuzz stringmap_fuzz walllayer_fuzz namemap_fuzz fencepostlayer_fuzz roofs_fuzz terrain_fuzz reia_fuzz
                    anim_fuzz image_fuzz lot_description_fuzz nhood_objects_fuzz nhood_terrain_fuzz objf_fuzz reference_list_fuzz simi_fuzz weather_fuzz neighborhood_id_fuzz camera_config_fuzz nhood_paint_rules_fuzz ui_script_fuzz cursor_fuzz effects_fuzz
-                   neighbor_remap_fuzz face_shape_fuzz)
+                   neighbor_remap_fuzz face_shape_fuzz rcol_fuzz)
         add_executable(${target} fuzz/${target}.cpp)
         target_link_libraries(${target} PRIVATE ts2formats project_warnings)
     endforeach()
@@ -556,7 +579,7 @@ else()
     add_executable(ts2index tools/ts2index/main.cpp)
     target_link_libraries(ts2index PRIVATE ts2content project_warnings)
 
-    add_executable(simrun tools/simrun/main.cpp app/route_sources.cpp)
+    add_executable(simrun tools/simrun/main.cpp tools/simrun/save_fields.cpp app/route_sources.cpp)
     target_link_libraries(simrun PRIVATE ts2sim ts2scene project_warnings)
 
     enable_testing()
@@ -582,10 +605,6 @@ else()
     target_sources(vm_tests PRIVATE ${fuzz_harnesses})
     target_include_directories(vm_tests PRIVATE ${CMAKE_BINARY_DIR}/generated)
     target_compile_definitions(vm_tests PRIVATE NEOTS2_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-    # The larger test files have more sections than an object file allows by default.
-    if(MSVC)
-        target_compile_options(vm_tests PRIVATE /bigobj)
-    endif()
     # The tests in 4 groups, which ctest -j runs side by side. Each test still runs once.
     set(test_groups 4)
     foreach(group RANGE 1 ${test_groups})
@@ -686,7 +705,7 @@ else()
         # The shaders the OpenGL 2 renderer draws with (skinned ones are posed on the CPU there).
         set(gl2_shaders scene.vert scene.frag ui.vert ui.frag particle.vert particle.frag terrain.vert terrain.frag sky.vert sky.frag road.vert road.frag imposter.vert imposter.frag clip.vert clip.frag water.vert water.frag)
         if(sdlgpu_enabled)
-        foreach(shader ao_depth.frag ao_solid.frag ao.frag ao_blur.frag ao_halfdepth.frag ao_upsample.frag scene.vert skinned.vert scene.frag ui.vert ui.frag particle.vert particle.frag terrain.vert terrain.frag sky.vert sky.frag water.vert water.frag pool.vert pool.frag sea.vert sea.frag pond.vert pond.frag caustics.frag pool_shadow.frag road.vert road.frag imposter.vert imposter.frag clip.vert clip.frag shadow_caster.frag shadow_blur.frag object_blur.frag)
+        foreach(shader ao_depth.frag ao_solid.frag ao.frag ao_blur.frag ao_halfdepth.frag ao_upsample.frag scene.vert skinned.vert scene.frag ui.vert ui.frag particle.vert particle.frag terrain.vert terrain.frag sky.vert sky.frag water.vert water.frag pool.vert pool.frag sea.vert sea.frag pond.vert pond.frag mirror.vert mirror.frag caustics.frag pool_shadow.frag road.vert road.frag imposter.vert imposter.frag clip.vert clip.frag shadow_caster.frag shadow_blur.frag object_blur.frag)
             if(shader MATCHES "vert$")
                 set(profile vs_6_0)
             else()
@@ -825,10 +844,6 @@ else()
             target_sources(neots2 PRIVATE src/audio/system.cpp)
         else()
             target_sources(neots2 PRIVATE src/audio/system_none.cpp)
-        endif()
-        # In a debug build app/menu.cpp has more sections than an object file allows by default.
-        if(MSVC)
-            target_compile_options(neots2 PRIVATE /bigobj)
         endif()
         add_dependencies(neots2 neots2_version)
         if(sdlgpu_enabled)

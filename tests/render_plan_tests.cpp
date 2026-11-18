@@ -46,7 +46,7 @@ public:
         swapScene(p);
         MeshData data;
         for (const auto& mesh : s.meshes) {
-            meshes_.push_back(packMesh(mesh, s.materials.size(), 0, data));
+            meshes_.push_back(packMesh(mesh, s.materials, 0, data));
         }
     }
     const std::vector<GpuMesh>& meshes() const override { return meshes_; }
@@ -205,6 +205,89 @@ void aPoolMirrorIsDrawnOnlyWhereRead() {
     for (int k = 8; k < 16; ++k) {
         CHECK(narrow.m[k] == f.viewProjection.m[k]);
     }
+}
+
+std::array<float, 4> clipOf(const Mat4& m, float x, float y, float z) {
+    std::array<float, 4> r{};
+    for (std::size_t i = 0; i < 4; ++i) {
+        r[i] = m.m[i * 4] * x + m.m[i * 4 + 1] * y + m.m[i * 4 + 2] * z + m.m[i * 4 + 3];
+    }
+    return r;
+}
+
+// A mirror's glass keeps its plane, facing the side its corners run counterclockwise from. A bent
+// or skinned glass, and a flat surface of another material, get none.
+void aMirrorGlassKeepsItsPlane() {
+    std::vector<scene::Material> materials(2);
+    materials[1].mirror = true;
+    MeshData data;
+    const GpuMesh glass = packMesh(quad(1), materials, 0, data);
+    CHECK(glass.primitives.size() == 1 && glass.primitives[0].mirror);
+    const auto& plane = glass.primitives[0].plane;
+    CHECK(std::fabs(plane[0]) < 1e-6f && std::fabs(plane[1] + 1) < 1e-6f && std::fabs(plane[2]) < 1e-6f && std::fabs(plane[3]) < 1e-6f);
+    CHECK(!packMesh(quad(0), materials, 0, data).primitives[0].mirror);
+    scene::Mesh bent = quad(1);
+    bent.primitives[0].positions[4] = 0.1f;
+    CHECK(!packMesh(bent, materials, 0, data).primitives[0].mirror);
+    scene::Mesh skinned = quad(1);
+    skinned.primitives[0].joints.assign(16, 0);
+    skinned.primitives[0].weights.assign(16, 0.25f);
+    CHECK(!packMesh(skinned, materials, 0, data).primitives[0].mirror);
+}
+
+// A mirror's view: a point in front of the glass is seen where its image behind the glass would be,
+// flipped left to right. A point on the glass is at the near end of depth and one behind it is past
+// it (not drawn). A level plane gives the pool's view exactly.
+void aMirrorReflectsTheViewInItsPlane() {
+    const Camera camera = front();
+    const FrameView f = FrameView::make(camera, 1280, 800);
+    const std::array<float, 4> wall{0, -1, 0, 3};  // y = 3, facing the camera
+    const Mat4 mirror = planeMirror(f.viewProjection, wall);
+    const auto mirrored = clipOf(mirror, 0.3f, 1, 0.2f), seen = clipOf(f.viewProjection, 0.3f, 5, 0.2f);
+    CHECK(std::fabs(mirrored[0] + seen[0]) < 1e-4f && std::fabs(mirrored[1] - seen[1]) < 1e-4f && std::fabs(mirrored[3] - seen[3]) < 1e-4f);
+    const auto onGlass = clipOf(mirror, 0.3f, 3, 0.2f), behind = clipOf(mirror, 0.3f, 3.1f, 0.2f);
+    CHECK(std::fabs(onGlass[2] - onGlass[3]) < 1e-4f && behind[2] > behind[3]);
+    CHECK(mirrored[2] < mirrored[3] && mirrored[2] > 0);
+    CHECK(planeMirror(f.viewProjection, {0, 0, 1, -0.5f}, 0.1f).m == poolMirror(f.viewProjection, 0.5f, 0.1f).m);
+}
+
+// A glass in view gets its plane in world space and the part of the mirror image it shows, flipped
+// left to right. Seen from behind it gets none.
+void aMirrorGlassInViewIsFound() {
+    std::vector<scene::Material> materials(1);
+    materials[0].mirror = true;
+    MeshData data;
+    const GpuMesh mesh = packMesh(quad(0), materials, 0, data);
+    const scene::Instance glass = at(0, 1, 3, 0);
+    const Draw d{&mesh.primitives[0], &glass, &materials[0], 0, 0, 1};
+    const Camera camera = front();
+    const FrameView f = FrameView::make(camera, 1280, 800);
+    const auto found = mirrorGlass(f, d, 1280, 800);
+    CHECK(found.has_value());
+    if (found) {
+        CHECK(std::fabs(found->plane[1] + 1) < 1e-5f && std::fabs(found->plane[3] - 3) < 1e-5f);
+        // The glass lies right of the middle, so its image lies left.
+        CHECK(found->area[1] < 0.2f && found->area[0] > -1 && found->area[1] - found->area[0] < 1);
+    }
+    Camera back = camera;
+    back.eye = {0, 10, 0};
+    CHECK(!mirrorGlass(FrameView::make(back, 1280, 800), d, 1280, 800).has_value());
+}
+
+// Glasses in one plane share a mirror image, their areas joined. Images in different planes whose
+// areas overlap take different targets, and with none left a glass goes without.
+void mirrorGlassesShareImagesByPlane() {
+    const std::vector<MirrorGlass> glasses{{{0, -1, 0, 3}, {-0.5f, -0.2f, 0, 0.5f}},
+                                           {{0, -1, 0, 3.0001f}, {0.1f, 0.4f, -0.2f, 0.3f}},
+                                           {{1, 0, 0, 2}, {-0.3f, 0.2f, 0.1f, 0.2f}},
+                                           {{-1, 0, 0, 2}, {0.8f, 0.9f, 0.8f, 0.9f}}};
+    std::vector<int> glassImage;
+    const auto images = planMirrors(glasses, 3, glassImage);
+    CHECK(images.size() == 3 && (glassImage == std::vector<int>{0, 0, 1, 2}));
+    CHECK((images[0].area == std::array<float, 4>{-0.5f, 0.4f, -0.2f, 0.5f}));
+    CHECK(images[0].target == 0 && images[1].target == 1 && images[2].target == 0);
+    const auto fewer = planMirrors(glasses, 1, glassImage);
+    CHECK(fewer[1].target == -1 && (glassImage == std::vector<int>{0, 0, -1, 2}));
 }
 
 // The sun's view of an 11 by 7 tile pool, fitted as the game fits it, against the game's own: across and
@@ -479,9 +562,10 @@ void packedMeshesAreLaidOutInTheSharedBuffers() {
     scene::Mesh bad = quad(0);
     bad.primitives[0].indices = {0, 1, 9};  // reads past its vertices
     MeshData data;
-    const GpuMesh first = packMesh(m, 1, 0, data);
-    const GpuMesh skipped = packMesh(bad, 1, 0, data);
-    const GpuMesh second = packMesh(m, 1, 0, data);
+    const std::vector<scene::Material> materials(1);
+    const GpuMesh first = packMesh(m, materials, 0, data);
+    const GpuMesh skipped = packMesh(bad, materials, 0, data);
+    const GpuMesh second = packMesh(m, materials, 0, data);
     CHECK(first.primitives.size() == 1 && skipped.primitives.empty() && second.primitives.size() == 1);
     CHECK(first.primitives[0].firstVertex == 0 && second.primitives[0].firstVertex == 4);
     CHECK(second.primitives[0].firstIndex == 6);
@@ -497,6 +581,10 @@ std::vector<Test> renderPlanTests() {
         {"An imposter part's box holds its positions", imposterPartBoxes},
         {"A pool mirrors the view in its plane", aPoolMirrorsTheViewInItsPlane},
         {"A pool's mirror image is drawn only where read", aPoolMirrorIsDrawnOnlyWhereRead},
+        {"A mirror's glass keeps its plane", aMirrorGlassKeepsItsPlane},
+        {"A mirror reflects the view in its plane", aMirrorReflectsTheViewInItsPlane},
+        {"A mirror's glass in view is found", aMirrorGlassInViewIsFound},
+        {"Mirror glasses share images by plane", mirrorGlassesShareImagesByPlane},
         {"A pool's sun view is fitted as the game's", aPoolsSunViewIsFittedAsTheGames},
         {"A frame view takes its fov and near plane as the game does", aFrameViewTakesItsFovAndNearPlane},
         {"Draws are sorted as the game sorts them", drawsAreSortedAsTheGameSortsThem},

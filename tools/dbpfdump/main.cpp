@@ -428,7 +428,9 @@ struct SaveCheck {
     std::size_t ruleOther = 0;
     // Records a writer exists for: written back to the same bytes, differently, or of a version it
     // doesn't write.
-    std::map<std::string, std::array<std::size_t, 4>> records;  // the fourth: as shipped, never written by the game
+    // The fourth: as shipped, never written by the game. The fifth: written back upgraded, as the game
+    // writes an older part it reads at the version it writes now.
+    std::map<std::string, std::array<std::size_t, 5>> records;
     // With a copy of the shipped folders: resources stored as they shipped were never written by the
     // game, so they are set apart.
     std::filesystem::path root;
@@ -440,6 +442,30 @@ struct SaveCheck {
 // empty when none applies, and sets `same` when the bytes match or `skipped` for an unhandled version.
 // Wants records that read but keep bytes after their history, counted apart.
 std::size_t leftOverRecords = 0;
+// Set by checkRecord when the record it wrote back differs only by an older part written at today's
+// version: a scene record whose animation instances of version 1 were written as version 2.
+bool upgradedRecord = false;
+
+// Whether `written` is `body` with each animation instance of version 1 written as version 2: one
+// more 4-byte value for each, and nothing else that a second write changes. The instance tag
+// followed by version 1 marks one. Any other difference counts as a record written differently.
+bool upgradedInstances(std::span<const std::uint8_t> body, const std::vector<std::uint8_t>& written) {
+    const auto word = [](std::span<const std::uint8_t> d, std::size_t at) {
+        return static_cast<std::uint32_t>(d[at] | d[at + 1] << 8 | d[at + 2] << 16 | d[at + 3] << 24);
+    };
+    constexpr std::uint32_t kInstanceTag = 0xC9DE69B6;
+    std::size_t older = 0;
+    for (std::size_t at = 0; at + 8 <= body.size(); ++at) {
+        if (word(body, at) == kInstanceTag && word(body, at + 4) == 1) {
+            ++older;
+        }
+    }
+    if (older == 0 || written.size() != body.size() + 4 * older) {
+        return false;
+    }
+    const auto again = ts2::cobject::readRecord(written);
+    return again && ts2::cobject::writeRecord(*again) == written;
+}
 // Sims read at their lot's version whose saved interactions did not read, and all Sims read.
 std::size_t unreadSimStates = 0;
 std::size_t readSims = 0;
@@ -766,7 +792,9 @@ std::string checkRecord(std::uint32_t type, std::span<const std::uint8_t> body, 
             at += 9 + body[at + 8];
         }
         skipped = !record && (!current || lotVersion != ts2::objm::kWrittenVersion);
-        same = record && ts2::cobject::writeRecord(*record) == std::vector<std::uint8_t>(body.begin(), body.end());
+        const std::vector<std::uint8_t> written = record ? ts2::cobject::writeRecord(*record) : std::vector<std::uint8_t>{};
+        same = record && written == std::vector<std::uint8_t>(body.begin(), body.end());
+        upgradedRecord = record && !same && upgradedInstances(body, written);
         return "scene";
     }
     if (type == ts2::savedcamera::kType) {
@@ -863,12 +891,13 @@ void checkSavedPackage(const std::filesystem::path& path, SaveCheck& total) {
         }
         bool same = false;
         bool skipped = false;
+        upgradedRecord = false;
         const bool objectRecord = r.key.type == 0x584F424A || r.key.type == 0x584D544F || r.key.type == 0x50455253 ||
                                   r.key.type == ts2::cobject::kType;
         const std::uint32_t version = objectRecord && !liveObjects.contains(r.key.instance) ? 0 : lotVersion;
         if (const std::string kind = checkRecord(r.key.type, body, version, same, skipped); !kind.empty()) {
-            ++total.records[kind][skipped ? 2 : same ? 0 : 1];
-            if (!skipped && !same) {
+            ++total.records[kind][skipped ? 2 : same ? 0 : upgradedRecord ? 4 : 1];
+            if (!skipped && !same && !upgradedRecord) {
                 std::printf("%s: %s %08X/%08X/%08X writes back differently\n", path.string().c_str(), kind.c_str(), r.key.type, r.key.group,
                             r.key.instance);
             }
@@ -907,8 +936,8 @@ int saveCheck(const std::filesystem::path& root, const std::filesystem::path& pr
                 total.resources, total.packedSame, total.packedOther, total.ruleSame, total.ruleOther, total.shipped);
     bool recordsSame = true;
     for (const auto& [kind, counts] : total.records) {
-        std::printf("%s records: %zu written back the same, %zu differently, %zu of other versions, %zu as shipped\n", kind.c_str(),
-                    counts[0], counts[1], counts[2], counts[3]);
+        std::printf("%s records: %zu written back the same, %zu differently, %zu upgraded, %zu of other versions, %zu as shipped\n",
+                    kind.c_str(), counts[0], counts[1], counts[4], counts[2], counts[3]);
         recordsSame = recordsSame && counts[1] == 0;
     }
     std::printf("%zu of %zu Sims read with saved interactions that did not read\n", unreadSimStates, readSims);

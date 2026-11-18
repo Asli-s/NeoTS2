@@ -311,30 +311,41 @@ std::string overlayTexture(Assets& assets, const sg::Link& key, const std::map<s
     }
 }
 
+constexpr std::uint32_t kEyebrowOverlay = 1, kEyeOverlay = 3;
+
+bool fitsNewborn(const std::map<std::string, std::string>& p, const Newborn& baby) {
+    return (number(p, "age") & kBabyAge) && (number(p, "gender") & baby.gender) &&
+           (noGuid(text(p, "skintone")) || sameGuid(text(p, "skintone"), baby.skinTone));
+}
+
+// The baby eyebrow overlay the newborn's draw picks from those of its hair tone, in catalog order.
+const std::pair<sg::Link, std::map<std::string, std::string>>* drawnBabyBrow(const BabyCatalog& catalog, const Newborn& baby) {
+    std::vector<const std::pair<sg::Link, std::map<std::string, std::string>>*> brows;
+    for (const auto& overlay : catalog.overlays) {
+        const auto& p = overlay.second;
+        if (fitsNewborn(p, baby) && number(p, "subtype") == kEyebrowOverlay && !(number(p, "flags") & 1) &&
+            (noGuid(text(p, "hairtone")) || sameGuid(text(p, "hairtone"), baby.hairTone))) {
+            brows.push_back(&overlay);
+        }
+    }
+    return brows.empty() ? nullptr : brows[static_cast<std::size_t>((static_cast<std::uint64_t>(baby.browDraw) * brows.size()) >> 32)];
+}
+
 // The newborn's eye colour and eyebrows, lowest layer first.
 std::vector<std::string> newbornFaceOverlays(Assets& assets, const BabyCatalog& catalog, const Newborn& baby) {
-    constexpr std::uint32_t kEyebrows = 1, kEyes = 3;
     std::optional<std::pair<std::uint32_t, std::string>> eyes;
-    std::vector<std::pair<std::uint32_t, std::string>> brows;
     for (const auto& [key, p] : catalog.overlays) {
-        const std::uint32_t subtype = number(p, "subtype");
-        if (!(number(p, "age") & kBabyAge) || !(number(p, "gender") & baby.gender) ||
-            !(noGuid(text(p, "skintone")) || sameGuid(text(p, "skintone"), baby.skinTone))) {
-            continue;
-        }
-        if (subtype == kEyes && !eyes && sameGuid(text(p, "family"), baby.eyeColour)) {
+        if (fitsNewborn(p, baby) && number(p, "subtype") == kEyeOverlay && sameGuid(text(p, "family"), baby.eyeColour)) {
             eyes.emplace(number(p, "layer"), overlayTexture(assets, key, p));
-        } else if (subtype == kEyebrows && !(number(p, "flags") & 1) &&
-                   (noGuid(text(p, "hairtone")) || sameGuid(text(p, "hairtone"), baby.hairTone))) {
-            brows.emplace_back(number(p, "layer"), overlayTexture(assets, key, p));
+            break;
         }
     }
     std::vector<std::pair<std::uint32_t, std::string>> layers;
     if (eyes) {
         layers.push_back(*eyes);
     }
-    if (!brows.empty()) {
-        layers.push_back(brows[static_cast<std::size_t>((static_cast<std::uint64_t>(baby.browDraw) * brows.size()) >> 32)]);
+    if (const auto* brow = drawnBabyBrow(catalog, baby)) {
+        layers.emplace_back(number(brow->second, "layer"), overlayTexture(assets, brow->first, brow->second));
     }
     std::stable_sort(layers.begin(), layers.end(), [](const auto& x, const auto& y) { return x.first < y.first; });
     std::vector<std::string> textures;
@@ -347,6 +358,11 @@ std::vector<std::string> newbornFaceOverlays(Assets& assets, const BabyCatalog& 
 }
 
 } // namespace
+
+std::string newbornBrowFamily(const BabyCatalog& catalog, const Newborn& baby) {
+    const auto* brow = drawnBabyBrow(catalog, baby);
+    return brow != nullptr ? text(brow->second, "family") : std::string();
+}
 
 BabyCatalog readBabyCatalog(const std::vector<std::filesystem::path>& skinPackages) {
     BabyCatalog catalog;
@@ -376,17 +392,10 @@ BabyCatalog readBabyCatalog(const std::vector<std::filesystem::path>& skinPackag
     return catalog;
 }
 
-SimLook newbornLook(Assets& assets, const BabyCatalog& catalog, const Newborn& baby) {
+NewbornOutfit newbornOutfit(const BabyCatalog& catalog, const Newborn& baby) {
     constexpr std::uint32_t kEverydayCategory = 1, kHuman = 1;
-    SimLook look;
-    look.category = kEverydayCategory;
-    look.age = kBabyAge;
-    look.gender = baby.gender;
-    look.skinTone = baby.skinTone;
-    look.skeleton = skeletonName(assets, {}, {}, kBabyAge, look.problems);
+    NewbornOutfit out;
     // The first set of each part in catalog order: the skin outfit's (by tone) and the everyday body.
-    std::map<std::uint32_t, sg::Link> skinSets;
-    std::optional<sg::Link> body;
     for (const auto& [key, p] : catalog.parts) {
         const std::uint32_t species = number(p, "species"), parts = number(p, "outfit"), category = number(p, "category");
         if (!(number(p, "age") & kBabyAge) || !(number(p, "gender") & baby.gender) || (species != 0 && !(species & kHuman))) {
@@ -396,14 +405,28 @@ SimLook newbornLook(Assets& assets, const BabyCatalog& catalog, const Newborn& b
         if (category & kSkinCategory) {
             for (const std::uint32_t kind : {kFacePart, kHairPart, kBodyPart}) {
                 if ((parts & kind) && sameGuid(tone, baby.skinTone)) {
-                    skinSets.try_emplace(kind, key);
+                    out.skin.try_emplace(kind, key);
                 }
             }
         }
-        if ((category & kEverydayCategory) && (parts & kBodyPart) && (noGuid(tone) || sameGuid(tone, baby.skinTone)) && !body) {
-            body = key;
+        if ((category & kEverydayCategory) && (parts & kBodyPart) && (noGuid(tone) || sameGuid(tone, baby.skinTone)) && !out.body) {
+            out.body = key;
         }
     }
+    return out;
+}
+
+SimLook newbornLook(Assets& assets, const BabyCatalog& catalog, const Newborn& baby) {
+    constexpr std::uint32_t kEverydayCategory = 1;
+    SimLook look;
+    look.category = kEverydayCategory;
+    look.age = kBabyAge;
+    look.gender = baby.gender;
+    look.skinTone = baby.skinTone;
+    look.skeleton = skeletonName(assets, {}, {}, kBabyAge, look.problems);
+    const NewbornOutfit outfit = newbornOutfit(catalog, baby);
+    const std::map<std::uint32_t, sg::Link>& skinSets = outfit.skin;
+    const std::optional<sg::Link>& body = outfit.body;
     for (const auto& [kind, set] : skinSets) {
         auto part = readPart(assets, set, kind, look.problems);
         if (!part) {

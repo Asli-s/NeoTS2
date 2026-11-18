@@ -960,6 +960,27 @@ void runTreeByNamePassesTheTempsWithoutFlags() {
     CHECK(s.fridge->attributes[0] == 17);
 }
 
+// An object run at once that runs a tree on itself passes its running temps, as a baby put on the
+// floor turns an eighth at a time ("Snap - Left" sets temp 0 for "CT - Snap Me").
+void runTreeByNameOnMyselfPassesMyRunningTemps() {
+    NamedTreeSetup s;
+    const std::vector<std::string> names{"Restock", "Missing Tree", "Turn", "Set"};
+    s.code.addStrings(kSimGroup, 0x12F, names);
+    s.code.addStrings(kObjectGroup, 0x12F, names);
+    s.code.add(kObjectGroup, 0x1006, named("Turn", {
+        expr(owner::kTemp, 0, op::kAssign, owner::kLiteral, 4, 1, E),
+        runTreeByName(3, 0x00, 0x01, T, F),
+    }));
+    s.code.add(kObjectGroup, 0x1007, named("Set", {
+        expr(owner::kStackObjectAttribute, 0, op::kAssign, owner::kParam, 0, T, E),
+    }, 1));
+    s.code.add(kSimGroup, 0x1000, named("Caller", {runTreeByName(2, 0x00, 0x01, T, F)}));
+    s.fridge->thread.temps[0] = 9;
+    Vm vm(s.code, {}, &s.world);
+    CHECK(vm.run(*s.sim, 0x1000).outcome == Outcome::True);
+    CHECK(s.fridge->attributes[0] == 4);
+}
+
 // A tree with more than four params gets as many temps as it takes (a jealousy trigger's setup
 // reads its second Sim from param 5).
 void runTreeByNamePassesEveryTempTheTreeTakes() {
@@ -1147,8 +1168,11 @@ void pushInteractionQueuesForTheSim() {
     auto fridgeType = typed(kFridgeGuid);
     fridgeType.fields[ts2::objd::field::kInteractionTableId] = 0x80;
     ts2::ttab::InteractionTable table;
-    table.interactions.resize(3);
+    table.interactions.resize(4);
     table.interactions[0].action = 0x1000;
+    table.interactions[3].action = 0x1000;
+    table.interactions[3].test = 0x1006;
+    table.interactions[3].stringIndex = 3;
     table.interactions[1].action = 0x1001;
     table.interactions[1].test = 0x1002;
     table.interactions[1].stringIndex = 1;
@@ -1164,6 +1188,8 @@ void pushInteractionQueuesForTheSim() {
     code.add(kObjectGroup, 0x1102, bhav({pushInteraction(0, 0, 0, T, F)}, 1));
     code.add(kObjectGroup, 0x1103, bhav({pushInteraction(5, 0, 1, T, F)}, 1));
     code.add(kObjectGroup, 0x1105, bhav({pushInteraction(0, 4, 1, T, F)}, 1));
+    code.add(kObjectGroup, 0x1006, bhav({expr(owner::kMyData, 0x32, op::kAssign, owner::kLiteral, 1, T, E)}));
+    code.add(kObjectGroup, 0x1106, bhav({pushInteraction(3, 0, 1, T, F)}, 1));
 
     ts2::sim::World world;
     auto& controller = world.create(kObjectGroup, typed(0x0BADF00D));
@@ -1177,6 +1203,15 @@ void pushInteractionQueuesForTheSim() {
     CHECK(sim.queue.size() == 1 && sim.queue[0].object == fridge.id && sim.queue[0].action == 0x1000 &&
           sim.queue[0].priority == 100);
     CHECK(sim.personData[0x4F] == fridge.id && sim.personData[0x2D] == 0);  // the next queued interaction
+    // The test starts the Sim's object data 0x32 at 0 and gives flags 0x0C, tested and passed, with
+    // 0x10 when the check tree sets it.
+    sim.data[0x32] = 3;
+    const RunResult tested = vm.run(controller, kObjectGroup, 0x1106, onFridge);
+    CHECK(tested.outcome == Outcome::True && sim.queue.size() == 2 && sim.queue.back().testFlags == 0x1C);
+    if (sim.queue.size() == 2) {
+        sim.queue.pop_back();
+    }
+    CHECK(sim.queue[0].testFlags == 0x0C);
     CHECK(vm.run(controller, kObjectGroup, 0x1101, onFridge).outcome == Outcome::False && controller.data[0x34] == 2);
     CHECK(vm.run(controller, kObjectGroup, 0x1104, onFridge).outcome == Outcome::True && sim.queue.size() == 2);
     sim.queue.pop_back();
@@ -1191,6 +1226,15 @@ void pushInteractionQueuesForTheSim() {
     CHECK(vm.run(sim, kObjectGroup, 0x1102, onFridge).outcome == Outcome::False && sim.data[0x34] == 1);
     sim.personData[0x21] = 40;
     CHECK(vm.run(sim, kObjectGroup, 0x1102, onFridge).outcome == Outcome::True && sim.queue.back().priority == 40);
+    // A Sim's push takes the saved autonomous mark (flag 0x400) of the interaction it runs, and an
+    // object's push has none.
+    CHECK(!sim.queue.back().markedAutonomous && !sim.queue.front().markedAutonomous);
+    sim.queue.pop_back();
+    ts2::sim::QueuedInteraction running;
+    running.markedAutonomous = true;
+    sim.running = ts2::sim::Boxed<ts2::sim::QueuedInteraction>(running);
+    CHECK(vm.run(sim, kObjectGroup, 0x1102, onFridge).outcome == Outcome::True && sim.queue.back().markedAutonomous);
+    sim.running.reset();
     sim.queue.front().index = 1;
     CHECK(vm.run(controller, kObjectGroup, 0x1100, onFridge).outcome == Outcome::True && sim.personData[0x2D] == 1);
     sim.queue.pop_back();
@@ -2948,6 +2992,7 @@ std::vector<Test> vmInteractionTests() {
         {"Notify out of Idle ends a Sleep counted in param 0", notifyOutOfIdleEndsASleepCountedInParamZero},
         {"Run Tree by Name passes the temps without flags", runTreeByNamePassesTheTempsWithoutFlags},
         {"Run Tree by Name passes every temp the tree takes", runTreeByNamePassesEveryTempTheTreeTakes},
+        {"Run Tree by Name on myself passes my running temps", runTreeByNameOnMyselfPassesMyRunningTemps},
         {"Run Tree by Name reads the semi-global names", runTreeByNameReadsTheSemiGlobalNames},
         {"Run Tree by Name skips the groups its flags name", runTreeByNameSkipsTheGroupsItsFlagsName},
         {"Run Tree by Name runs on the stack object's stack", runTreeByNameRunsOnTheStackObjectsStack},

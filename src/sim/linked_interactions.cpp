@@ -1,4 +1,5 @@
 #include "sim/linked_interactions.hpp"
+#include "sim/simulator_ids.hpp"
 #include "sim/vm_execution.hpp"
 
 #include <algorithm>
@@ -50,15 +51,15 @@ Found find(World& world, std::uint16_t id, const SimObject* skip) {
 
 } // namespace
 
-std::uint16_t ownLinkId(World& world, QueuedInteraction& pushed) {
+std::uint16_t ownLinkId(std::span<std::int16_t> globals, QueuedInteraction& pushed) {
     if (pushed.linkId == 0) {
-        pushed.linkId = world.newLinkId();
+        pushed.linkId = nextSimulatorId(globals);
         pushed.linkedId = pushed.linkId;
     }
     return pushed.linkId;
 }
 
-void linkInteraction(World& world, QueuedInteraction& pushed, std::int16_t with) {
+void linkInteraction(World& world, std::span<std::int16_t> globals, QueuedInteraction& pushed, std::int16_t with) {
     const auto id = static_cast<std::uint16_t>(with);
     if (id == 0) {
         return;
@@ -68,7 +69,7 @@ void linkInteraction(World& world, QueuedInteraction& pushed, std::int16_t with)
         return;
     }
     pushed.linkedId = other.interaction->linkedId;
-    pushed.linkId = world.newLinkId();
+    pushed.linkId = nextSimulatorId(globals);
     other.interaction->linkedId = pushed.linkId;
 }
 

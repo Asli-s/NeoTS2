@@ -115,9 +115,14 @@ std::optional<MapRecord> readMapRecord(std::span<const std::uint8_t> data) {
         BinaryReader r(data);
         MapRecord out;
         readHeader(r, out.header);
-        if (r.u32() != 0 || r.u32() != kWrittenVersion || r.u32() != kMagic) {
+        if (r.u32() != 0) {
             return std::nullopt;
         }
+        const std::uint32_t version = r.u32();
+        if ((version != kWrittenVersion && version != kShippedVersion) || r.u32() != kMagic) {
+            return std::nullopt;
+        }
+        out.upgraded = version == kShippedVersion;
         out.objects.resize(r.u32Count(8));
         for (auto& [id, type] : out.objects) {
             id = r.i32();
@@ -134,6 +139,9 @@ std::optional<MapRecord> readMapRecord(std::span<const std::uint8_t> data) {
         }
         if (r.u32() != 0 || !readVarString(r, out.text)) {
             return std::nullopt;
+        }
+        if (out.upgraded) {
+            return r.remaining() == 0 ? std::optional(out) : std::nullopt;
         }
         // Each subscription takes at least its message and count, each subscriber 5 bytes.
         out.subscriptions.resize(r.u32Count(8));

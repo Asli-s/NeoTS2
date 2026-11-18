@@ -473,6 +473,15 @@ int SceneBuilder::material(const std::string& name, bool hair) {
     Material out;
     out.name = name;
     const int stdLayer = intProperty(m, "stdMatLayer");
+    // A mirror's glass takes none of its standard properties. The game draws it in one flat colour
+    // when it shows no reflection.
+    if (m.type == "SimpleMirrorReflection") {
+        out.mirror = true;
+        out.unlit = true;
+        out.color = {kMirrorOffGrey, kMirrorOffGrey, kMirrorOffGrey, 1};
+        out.takesShapeColor = false;
+        return addMaterial(key, std::move(out));
+    }
     // Untextured and unlit, its color and see-through alpha are its vertices' (counters' shadows).
     if (m.type == "VertexAlpha") {
         out.vertexColor = true;
@@ -1065,12 +1074,13 @@ int SceneBuilder::addMaterial(const std::string& key, Material m) {
 
 namespace {
 
-// Moves a mesh group's vertices (and normals and tangents, if any) from the bind pose to `pose`:
-// each follows up to four joints, weighted (three weights stored, the fourth what is left).
-// Vertices of joints the pose lacks stay where they are. Tangents keep their length, as the game's
-// vertex shader turns them by the weighted joints' matrices without normalizing.
-void skin(const sg::Mesh& mesh, const sg::ElementLink& link, const sg::Group& group, const std::map<int, std::string>& joints,
-          const Pose& pose, std::vector<float>& positions, std::vector<float>& normals, std::vector<float>& tangents) {
+// Moves a mesh group's vertices (and normals and tangents, if any) by its joints' `moves` (one per
+// joint of the group, none to leave a joint out): each vertex follows up to four joints, weighted
+// (three weights stored, the fourth what is left). Vertices of joints left out stay where they are.
+// Tangents keep their length, as the game's vertex shader turns them by the weighted joints'
+// matrices without normalizing.
+void moveByJoints(const sg::Mesh& mesh, const sg::ElementLink& link, const sg::Group& group, const std::vector<std::optional<Transform>>& moves,
+                  std::vector<float>& positions, std::vector<float>& normals, std::vector<float>& tangents) {
     const std::size_t vertices = positions.size() / 3;
     const sg::Element* indices = mesh.find(link, sg::kBlendIndices);
     const sg::Element* weightElement = mesh.find(link, sg::kBlendWeights);
@@ -1080,20 +1090,6 @@ void skin(const sg::Mesh& mesh, const sg::ElementLink& link, const sg::Group& gr
     }
     const std::vector<float> weights = sg::floats(*weightElement);
     const std::size_t perVertex = weights.size() / std::max<std::size_t>(vertices, 1);
-    // Each of the group's joints: from the bind pose to the pose.
-    std::vector<std::optional<Transform>> moves(group.bones.size());
-    for (std::size_t b = 0; b < group.bones.size(); ++b) {
-        const std::uint16_t j = group.bones[b];
-        const auto name = joints.find(j);
-        if (j >= mesh.inverseBinds.size() || name == joints.end()) {
-            continue;
-        }
-        const auto at = pose.find(name->second);
-        if (at != pose.end()) {
-            const auto& inverse = mesh.inverseBinds[j];
-            moves[b] = at->second * Transform::of(inverse.translation, inverse.rotation);
-        }
-    }
     const bool withNormals = normals.size() == positions.size();
     const bool withTangents = tangents.size() == positions.size();
     for (std::size_t v = 0; v < vertices; ++v) {
@@ -1146,6 +1142,48 @@ void skin(const sg::Mesh& mesh, const sg::ElementLink& link, const sg::Group& gr
             }
         }
     }
+}
+
+// Moves a mesh group's vertices from the bind pose to `pose`, each joint by its place in the pose.
+// Vertices of joints the pose lacks stay where they are.
+void skin(const sg::Mesh& mesh, const sg::ElementLink& link, const sg::Group& group, const std::map<int, std::string>& joints,
+          const Pose& pose, std::vector<float>& positions, std::vector<float>& normals, std::vector<float>& tangents) {
+    std::vector<std::optional<Transform>> moves(group.bones.size());
+    for (std::size_t b = 0; b < group.bones.size(); ++b) {
+        const std::uint16_t j = group.bones[b];
+        const auto name = joints.find(j);
+        if (j >= mesh.inverseBinds.size() || name == joints.end()) {
+            continue;
+        }
+        if (const auto at = pose.find(name->second); at != pose.end()) {
+            const auto& inverse = mesh.inverseBinds[j];
+            moves[b] = at->second * Transform::of(inverse.translation, inverse.rotation);
+        }
+    }
+    moveByJoints(mesh, link, group, moves, positions, normals, tangents);
+}
+
+// Places a skinned mesh group by its joints alone, as the game draws one: where it is drawn with
+// every joint at rest (its shape node's rest place `rest`), moved by how far each of its joints moved
+// from rest (`moved`, in the model). False, with nothing moved, for a group not skinned.
+bool followSavedJoints(const sg::Mesh& mesh, const sg::ElementLink& link, const sg::Group& group, const std::map<int, std::string>& joints,
+                       const Pose& moved, const Transform& rest, std::vector<float>& positions, std::vector<float>& normals,
+                       std::vector<float>& tangents) {
+    const std::size_t vertices = positions.size() / 3;
+    const sg::Element* indices = mesh.find(link, sg::kBlendIndices);
+    if (indices == nullptr || mesh.find(link, sg::kBlendWeights) == nullptr || group.bones.empty() || indices->data.size() < vertices * 4 ||
+        !link.aliases[0].empty()) {
+        return false;
+    }
+    std::vector<std::optional<Transform>> moves(group.bones.size(), rest);
+    for (std::size_t b = 0; b < group.bones.size(); ++b) {
+        const auto name = joints.find(group.bones[b]);
+        if (const auto at = name != joints.end() ? moved.find(name->second) : moved.end(); at != moved.end()) {
+            moves[b] = at->second * rest;
+        }
+    }
+    moveByJoints(mesh, link, group, moves, positions, normals, tangents);
+    return true;
 }
 
 // Gives a mesh group's vertices their morphs (see Primitive::morphs): each stream's deltas, one per
@@ -1396,10 +1434,11 @@ std::optional<SceneBuilder::ModelShapes> SceneBuilder::readModelShapes(const std
             model.rests.try_emplace(lower(n.name), Transform::of(n.translation, n.rotation));
         }
     }
-    std::vector<Transform> world(tree.nodes.size());
+    std::vector<Transform> world(tree.nodes.size()), restWorld(tree.nodes.size());
     std::vector<bool> seen(tree.nodes.size(), false);
     std::map<std::string, Transform> jointPlaces;  // where each named node sits in the model
-    auto walk = [&](auto&& self, std::uint32_t index, const Transform& parent, const std::string& under, int depth) -> void {
+    auto walk = [&](auto&& self, std::uint32_t index, const Transform& parent, const Transform& parentRest, const std::string& under,
+                    int depth) -> void {
         if (index >= tree.nodes.size() || seen[index] || depth > 64) {
             return;
         }
@@ -1413,6 +1452,10 @@ std::optional<SceneBuilder::ModelShapes> SceneBuilder::readModelShapes(const std
             placed = found != places->end() ? &found->second : nullptr;
         }
         world[index] = parent * (placed != nullptr ? *placed : rest);
+        restWorld[index] = parentRest * rest;
+        if (places != nullptr && node.joint >= 0 && node.joint < 0x7FFFFFFF && !node.name.empty()) {
+            model.savedMoves.insert_or_assign(lower(node.name), world[index] * restWorld[index].rigidInverse());
+        }
         // A named shape node is a joint itself, which its shapes follow.
         const std::string next = (node.kind == sg::SceneNode::Kind::Transform || node.kind == sg::SceneNode::Kind::ShapeRef) &&
                                          !node.name.empty()
@@ -1431,7 +1474,7 @@ std::optional<SceneBuilder::ModelShapes> SceneBuilder::readModelShapes(const std
                 if (l < tree.container.links.size() && tree.container.links[l].type == kShpe) {
                     if (const auto data = assets_.byKey(tree.container.links[l])) {
                         try {
-                            model.shapes.push_back({sg::parseShape(*data), world[index], next, fromNode});
+                            model.shapes.push_back({sg::parseShape(*data), world[index], next, fromNode, restWorld[index]});
                         } catch (const std::exception& ex) {
                             diag::warnOnce(std::string("models: a shape that can't be read is left out: ") + ex.what());
                         }
@@ -1440,11 +1483,11 @@ std::optional<SceneBuilder::ModelShapes> SceneBuilder::readModelShapes(const std
             }
         }
         for (const auto c : node.children) {
-            self(self, c, world[index], next, depth + 1);
+            self(self, c, world[index], restWorld[index], next, depth + 1);
         }
     };
     if (!tree.nodes.empty()) {
-        walk(walk, 0, Transform{}, {}, 0);
+        walk(walk, 0, Transform{}, Transform{}, {}, 0);
         // Nodes the root didn't reach: start from those no node lists as a child.
         std::vector<bool> isChild(tree.nodes.size(), false);
         for (const auto& n : tree.nodes) {
@@ -1456,7 +1499,7 @@ std::optional<SceneBuilder::ModelShapes> SceneBuilder::readModelShapes(const std
         }
         for (std::uint32_t i = 0; i < tree.nodes.size(); ++i) {
             if (!seen[i] && !isChild[i]) {
-                walk(walk, i, Transform{}, {}, 0);
+                walk(walk, i, Transform{}, Transform{}, {}, 0);
             }
         }
         auto& bones = bones_[boneKey.empty() ? lower(name) : boneKey];
@@ -1565,6 +1608,9 @@ std::optional<Primitive> SceneBuilder::groupPrimitive(const ModelRequest& reques
     if (request.pose != nullptr) {
         skin(data, link, group, model.joints, *request.pose, p.positions, p.normals, p.tangents);
     }
+    const bool followsJoints = request.pose == nullptr && !request.skinned && !model.savedMoves.empty() &&
+                               followSavedJoints(data, link, group, model.joints, model.savedMoves, placed.restPlace, p.positions, p.normals,
+                                                 p.tangents);
     // Morphs move a vertex before its joints do, so a group posed here, to a fixed pose, keeps none.
     if (request.pose == nullptr) {
         morphData(data, link, mesh.morphs, p);
@@ -1574,23 +1620,25 @@ std::optional<Primitive> SceneBuilder::groupPrimitive(const ModelRequest& reques
     if (request.skinned && !skinnedHere && group.bones.empty() && !placed.node.empty()) {
         skinnedHere = skinToNode(placed.node, placed.fromNode, mesh.skin, p);
     }
-    if (!skinnedHere) {
+    if (!skinnedHere && !followsJoints) {
         for (std::size_t i = 0; i + 2 < p.positions.size(); i += 3) {
             xf.apply(&p.positions[i], true);
         }
-        for (std::size_t i = 0; i + 2 < p.positionDeltas.size(); i += 3) {
-            xf.apply(&p.positionDeltas[i], false);
-            xf.apply(&p.normalDeltas[i], false);
-        }
+    }
+    // A group placed by its joints keeps its morphs turned as it sits at rest.
+    for (std::size_t i = 0; !skinnedHere && i + 2 < p.positionDeltas.size(); i += 3) {
+        const Transform& turn = followsJoints ? placed.restPlace : xf;
+        turn.apply(&p.positionDeltas[i], false);
+        turn.apply(&p.normalDeltas[i], false);
     }
     if (p.normals.size() == p.positions.size()) {
-        for (std::size_t i = 0; !skinnedHere && i + 2 < p.normals.size(); i += 3) {
+        for (std::size_t i = 0; !skinnedHere && !followsJoints && i + 2 < p.normals.size(); i += 3) {
             xf.apply(&p.normals[i], false);
         }
     } else {
         p.normals.clear();
     }
-    for (std::size_t i = 0; !skinnedHere && i + 2 < p.tangents.size(); i += 3) {
+    for (std::size_t i = 0; !skinnedHere && !followsJoints && i + 2 < p.tangents.size(); i += 3) {
         xf.apply(&p.tangents[i], false);
     }
     p.uvs = sg::vertexFloats(data, link, sg::kTextureCoordinates);

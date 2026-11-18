@@ -4,17 +4,20 @@
 
 #include <cstdint>
 #include <functional>
+#include <span>
 
 namespace ts2::sim {
 
 // Push Interaction byte 3 bit 7: the pushed interaction's link number, which the script keeps to
-// link a later push with it. One without a number gets a new one, which it also drops.
-std::uint16_t ownLinkId(World& world, QueuedInteraction& pushed);
+// link a later push with it. One without a number gets a new one from the simulator's id counter
+// (`globals`, see nextSimulatorId), which it also drops.
+std::uint16_t ownLinkId(std::span<std::int16_t> globals, QueuedInteraction& pushed);
 
 // Push Interaction byte 3 bit 6: links `pushed` with the interaction whose link number is `with`,
-// running or waiting on any Sim. `pushed` takes over what that one dropped and gets a new number,
-// which that one now drops. Nothing happens when no interaction has the number.
-void linkInteraction(World& world, QueuedInteraction& pushed, std::int16_t with);
+// running or waiting on any Sim. `pushed` takes over what that one dropped and gets a new number
+// from the simulator's id counter, which that one now drops. Nothing happens when no interaction
+// has the number.
+void linkInteraction(World& world, std::span<std::int16_t> globals, QueuedInteraction& pushed, std::int16_t with);
 
 // What the game does when `ended` ends, is cancelled or is skipped: it follows the chain of
 // interactions `ended` drops, across all Sims but `skip` (null for none), each link once. A

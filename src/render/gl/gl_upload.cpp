@@ -230,7 +230,7 @@ std::unique_ptr<GlRenderer::Staged> GlRenderer::stage(const scene::Scene& scene,
         s->noMips.insert(static_cast<std::size_t>(scene.lightMaps->skirtLamps));
     }
     for (const auto& mesh : scene.meshes) {
-        s->meshes.push_back(packMesh(mesh, scene.materials.size(), 0, s->meshData));
+        s->meshes.push_back(packMesh(mesh, scene.materials, 0, s->meshData));
     }
     if (s->meshData.tooBig) {
         diag::warning("renderer: the scene's meshes are too big for one GPU buffer; some are left out");
@@ -437,7 +437,7 @@ void GlRenderer::addMeshes(const scene::Scene& scene) {
     MeshData data;
     std::vector<GpuMesh> added;
     for (std::size_t i = gpu_->meshes.size(); i < scene.meshes.size(); ++i) {
-        added.push_back(packMesh(scene.meshes[i], scene.materials.size(), set, data));
+        added.push_back(packMesh(scene.meshes[i], scene.materials, set, data));
     }
     if (data.tooBig) {
         diag::warning("renderer: added meshes are too big for one GPU buffer; some are left out");
