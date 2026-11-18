@@ -156,6 +156,7 @@ struct System::Impl {
         bool active = false;
         std::optional<Playlist> playlist;
         std::uint32_t id = 0;
+        double retryAtMs = 0;
     };
     std::map<std::string, MusicState> music;
     // The songs that are off, by station name in lowercase, read from the station's settings file when first needed.
@@ -167,11 +168,14 @@ struct System::Impl {
     // The stereos playing a station, one per object: each plays its station's songs one after another.
     struct StereoPlay {
         Request request;
+        std::string station;
         Playlist playlist;
         std::uint32_t id = 0;
         double retryAtMs = 0;
     };
     std::vector<StereoPlay> stereos;
+    // The songs decoded ahead, which the cache trim keeps.
+    std::unordered_set<std::uint64_t> upcoming;
     std::chrono::steady_clock::time_point lastUpdate = now();
     std::chrono::steady_clock::time_point startTime = now();
 
@@ -340,7 +344,7 @@ void System::Impl::takeDecoded() {
 void System::Impl::trimCache() {
     // Samples no voice plays go first, the cache is only kept to start a sound again at once.
     for (auto it = cache.begin(); it != cache.end() && cacheBytes > kMaxCacheBytes;) {
-        if (it->second.use_count() == 1) {
+        if (it->second.use_count() == 1 && !upcoming.contains(it->first)) {
             cacheBytes -= it->second->samples.size() * sizeof(std::int16_t);
             it = cache.erase(it);
         } else {
@@ -492,22 +496,37 @@ void System::Impl::saveSettings(const std::string& station) {
     for (const SampleKey& song : bank.songs(station)) {
         settings.songs.emplace(bank.songId(song), true);
     }
+    // Replaced only once fully written, as the game reads this file too.
     std::error_code error;
-    std::filesystem::create_directories(musicFolder / station, error);
-    std::ofstream out(musicFolder / station / "settings", std::ios::binary | std::ios::trunc);
+    const std::filesystem::path folder = musicFolder / station;
+    std::filesystem::create_directories(folder, error);
+    const std::filesystem::path written = folder / "settings.neots2-new";
     const auto bytes = writeSongSettings(settings);
-    out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-    if (!out) {
+    bool saved = false;
+    {
+        std::ofstream out(written, std::ios::binary | std::ios::trunc);
+        saved = out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size())) && out.flush();
+    }
+    if (saved) {
+        std::filesystem::rename(written, folder / "settings", error);
+        saved = !error;
+    }
+    if (!saved) {
+        std::filesystem::remove(written, error);
         diag::warnOnce("audio: the settings file of station " + station + " cannot be saved");
     }
 }
 
 void System::Impl::updateMusic() {
+    upcoming.clear();
     for (auto& [category, state] : music) {
         if (state.id != 0 && !manager.playing(state.id)) {
             state.id = 0;
         }
-        if (!state.active || state.id != 0) {
+        if (state.id != 0 && state.playlist && !state.playlist->empty()) {
+            upcoming.insert(sampleId(state.playlist->upcoming()));
+        }
+        if (!state.active || state.id != 0 || nowMs() < state.retryAtMs) {
             continue;
         }
         if (!state.playlist) {
@@ -529,13 +548,16 @@ void System::Impl::updateMusic() {
         request.track = soundKey("music:" + category);
         request.event = request.track;
         request.group = Group::Music;
-        const SampleKey song = state.playlist->take();
+        const SampleKey song = state.playlist->upcoming();
         if (const auto id = manager.start(request, settings, std::span<const SampleKey>(&song, 1), nowMs())) {
+            state.playlist->take();
             state.id = *id;
             diag::info("audio: music " + category + " plays one of " + std::to_string(bank.songs(category).size()) + " songs");
             askDecode(song);
             // The next song decodes while this one plays.
             askDecode(state.playlist->upcoming());
+        } else {
+            state.retryAtMs = nowMs() + 1000;
         }
     }
 }
@@ -563,14 +585,14 @@ void System::Impl::startStereo(const Event& event) {
     request.object = event.object;
     request.group = Group::Stereo;
     request.position = event.position;
-    // A cheap stereo plays through a narrow band, as the game's does (inferred: the game's quality
-    // names are "cheap" and "exp", and an object's quality string is "chp" or "exp").
-    if (event.inputs.quality && (*event.inputs.quality == "chp" || *event.inputs.quality == "cheap")) {
+    // A "cheap" quality plays through a narrow band, as in the game. Objects say "chp" or "exp", so
+    // where the game's "cheap" comes from is not known yet.
+    if (event.inputs.quality && *event.inputs.quality == "cheap") {
         request.lopass = 8500;
         request.hipass = 3500;
     }
     const std::uint32_t seed = static_cast<std::uint32_t>(std::hash<std::string>{}(station)) ^ static_cast<std::uint32_t>(event.object);
-    stereos.push_back({request, Playlist(songs, seed), 0, 0});
+    stereos.push_back({request, lowerCase(station), Playlist(songs, seed), 0, 0});
 }
 
 void System::Impl::updateStereos() {
@@ -588,11 +610,15 @@ void System::Impl::updateStereos() {
             diag::info("audio: stereo on object " + std::to_string(play.request.object) + " has stopped its song");
             play.id = 0;
         }
-        if (play.id != 0 || nowMs() < play.retryAtMs) {
+        if (play.id != 0 && !play.playlist.empty()) {
+            upcoming.insert(sampleId(play.playlist.upcoming()));
+        }
+        if (play.id != 0 || play.playlist.empty() || nowMs() < play.retryAtMs) {
             continue;
         }
-        const SampleKey song = play.playlist.take();
+        const SampleKey song = play.playlist.upcoming();
         if (const auto id = manager.start(play.request, settings, std::span<const SampleKey>(&song, 1), nowMs())) {
+            play.playlist.take();
             play.id = *id;
             diag::info("audio: stereo on object " + std::to_string(play.request.object) + " plays a song" +
                        (play.request.lopass > 0 ? " (cheap)" : ""));
@@ -671,6 +697,12 @@ void System::setSongOn(std::string_view station, std::uint32_t id, bool on) {
     for (auto& [category, state] : impl_->music) {
         if (lowerCase(category) == name) {
             state.playlist.reset();
+        }
+    }
+    for (Impl::StereoPlay& play : impl_->stereos) {
+        if (play.station == name) {
+            const std::uint32_t seed = static_cast<std::uint32_t>(std::hash<std::string>{}(name)) ^ static_cast<std::uint32_t>(play.request.object);
+            play.playlist = Playlist(impl_->playableSongs(name), seed);
         }
     }
 }

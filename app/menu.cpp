@@ -1795,7 +1795,7 @@ void Game::showLot(LotBuilt& built) {
     lotShown_ = ts2::platform::ticksNs();
     lotRealSeconds_ = 0;
     ts2::diag::info(std::format("lot {} shown after {:.1f} s", enteredLot_, secondsSince(lotLoadStarted_)));
-    // The neighborhood's music fades out over 6 s once the lot is ready, as the game's opening music does.
+    // The neighborhood's music fades out over 6 s once the lot is ready, as the opening music does.
     if (audio_) {
         audio_->fadeOutMusic("nhood", 6000);
     }

@@ -10,7 +10,7 @@
 namespace ts2::audio {
 
 // A station's songs in shuffled order: every song once before any plays again, and never the same
-// song twice in a row.
+// song twice in a row. The game's order is not known yet.
 class Playlist {
 public:
     explicit Playlist(std::vector<SampleKey> songs, std::uint32_t seed = 1);
