@@ -825,7 +825,7 @@ void SdlGpuRenderer::makeOcclusionPipelines() {
     SDL_GPUShader* depthFragment = loadShader(device_, shaders, "ao_depth.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 2);
     SDL_GPUShader* solidFragment = loadShader(device_, shaders, "ao_solid.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 0, 0);
     SDL_GPUShader* screenVertex = loadShader(device_, shaders, "sky.vert", SDL_GPU_SHADERSTAGE_VERTEX, 0, 0);
-    SDL_GPUShader* occlusionFragment = loadShader(device_, shaders, "ao.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
+    SDL_GPUShader* occlusionFragment = loadShader(device_, shaders, "ao.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 2);
     SDL_GPUShader* blurFragment = loadShader(device_, shaders, "ao_blur.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 0);
     SDL_GPUShader* upsampleFragment = loadShader(device_, shaders, "ao_upsample.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 3, 0);
     SDL_GPUShader* halfDepthFragment = loadShader(device_, shaders, "ao_halfdepth.frag", SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 0);
@@ -833,11 +833,15 @@ void SdlGpuRenderer::makeOcclusionPipelines() {
     SDL_GPUVertexBufferDescription buffers[2]{};
     SDL_GPUVertexAttribute attributes[11]{};
     sceneVertexLayout(buffers, attributes);
+    SDL_GPUColorTargetDescription normals{};
+    normals.format = kOcclusionNormalFormat;
     for (int skinned = 0; skinned < 2; ++skinned) {
         for (int twoSided = 0; twoSided < 2; ++twoSided) {
             SDL_GPUGraphicsPipelineCreateInfo info{};
             info.vertex_shader = skinned ? skinnedVertex : vertex;
             info.fragment_shader = depthFragment;
+            info.target_info.color_target_descriptions = &normals;
+            info.target_info.num_color_targets = 1;
             info.vertex_input_state.vertex_buffer_descriptions = buffers;
             info.vertex_input_state.num_vertex_buffers = skinned ? 2 : 1;
             info.vertex_input_state.vertex_attributes = attributes;

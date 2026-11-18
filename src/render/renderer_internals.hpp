@@ -26,6 +26,8 @@ inline float seaHazeMode(const scene::PaintedTerrain& t) {
 // How open each pixel is, for ambient occlusion.
 constexpr SDL_GPUTextureFormat kOcclusionFormat = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
 constexpr SDL_GPUTextureFormat kHalfDepthFormat = SDL_GPU_TEXTUREFORMAT_R32_FLOAT;
+// Ambient occlusion's normals: each direction as 0.5 + 0.5 x its axis.
+constexpr SDL_GPUTextureFormat kOcclusionNormalFormat = SDL_GPU_TEXTUREFORMAT_R10G10B10A2_UNORM;
 // The scene pipelines' kind for opaque surfaces drawn over ambient occlusion's depth: they test it
 // without writing it, so the card shades only what shows.
 constexpr int kOpaqueOverDepth = 5;

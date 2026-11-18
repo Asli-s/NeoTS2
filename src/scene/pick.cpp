@@ -68,6 +68,12 @@ Vec placed(const Transform& transform, const std::vector<float>& positions, std:
     return v;
 }
 
+// What the mouse is tested against: the mesh's bounding meshes and hulls, or its drawn primitives
+// when those weren't read.
+const std::vector<Primitive>& tested(const Mesh& mesh) {
+    return mesh.pickRead ? mesh.pick : mesh.primitives;
+}
+
 // Vertices whose weights add up to a little over 1 still count as bounded, with the box grown to match.
 constexpr float kWeightSlack = 1e-3f;
 
@@ -126,7 +132,7 @@ std::optional<float> Picker::posedHit(const Scene& scene, const ScenePose& pose,
     const std::vector<Transform>* joints = posed != pose.joints.end() ? &posed->second : nullptr;
     const auto placed = std::find_if(pose.places.begin(), pose.places.end(), [&](const auto& p) { return p.first == i; });
     const Transform place = placed != pose.places.end() ? placed->second : instance.transform;
-    const auto& primitives = scene.meshes[static_cast<std::size_t>(instance.mesh)].primitives;
+    const auto& primitives = tested(scene.meshes[static_cast<std::size_t>(instance.mesh)]);
     std::optional<float> best;
     std::vector<float> positions;
     for (std::size_t n = 0; n < primitives.size(); ++n) {
@@ -234,7 +240,7 @@ void Picker::update(const Scene& scene, std::size_t i) {
     Vec low{std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
     Vec high{std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest()};
     bool any = false;
-    for (const auto& primitive : scene.meshes[static_cast<std::size_t>(instance.mesh)].primitives) {
+    for (const auto& primitive : tested(scene.meshes[static_cast<std::size_t>(instance.mesh)])) {
         for (std::size_t v = 0; v + 2 < primitive.positions.size(); v += 3) {
             for (std::size_t k = 0; k < 3; ++k) {
                 low[k] = std::min(low[k], primitive.positions[v + k]);
@@ -275,7 +281,7 @@ std::optional<Picker::Hit> Picker::pick(const Scene& scene, std::span<const std:
         if (instance.mesh < 0 || static_cast<std::size_t>(instance.mesh) >= scene.meshes.size()) {
             continue;
         }
-        for (const auto& primitive : scene.meshes[static_cast<std::size_t>(instance.mesh)].primitives) {
+        for (const auto& primitive : tested(scene.meshes[static_cast<std::size_t>(instance.mesh)])) {
             const std::size_t vertices = primitive.positions.size() / 3;
             const auto& indices = primitive.indices;
             for (std::size_t t = 0; t + 2 < indices.size(); t += 3) {

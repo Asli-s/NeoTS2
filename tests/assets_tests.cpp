@@ -1126,6 +1126,59 @@ void savedJointsMoveSkinnedGroups() {
     std::filesystem::remove_all(root);
 }
 
+// A group whose material is the game's Null shader draws nothing, as a fire's box has. The model is
+// still built while it can be clicked, so a Sim can put the fire out. One with nothing to click is not.
+void nullMaterialsDrawNothing() {
+    testres::MeshSkin skin{0, 1, {0, 0, 0}, {-0.5f, -0.5f, 0, 0.5f, -0.5f, 0, 0, 0.5f, 0}};
+    auto resources = testres::squareModel("fire");
+    resources[0].data = testres::jointedResourceNode("fire_cres", "fire_shpe", "Slot_Seat");
+    resources[3].data = testres::mesh("fire_tslocator_gmdc", "square", {0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0}, {0, 1, 1, 1, 1, 0, 0, 0},
+                                      {0, 1, 2, 0, 2, 3}, nullptr, &skin);
+    resources[4].data = testres::material("fire_material_txmt", "Null", {});
+    auto plain = testres::squareModel("box");
+    plain[4].data = testres::material("box_material_txmt", "Null", {});
+    resources.insert(resources.end(), plain.begin(), plain.end());
+    const auto root = testres::gameFolder("neots2-builder-null-material-test", resources);
+    {
+        ts2::scene::Assets assets(root);
+        ts2::scene::SceneBuilder builder(assets);
+        const int model = builder.model("fire", {});
+        CHECK(model >= 0);
+        if (model >= 0) {
+            const auto& mesh = builder.scene().meshes[static_cast<std::size_t>(model)];
+            CHECK(mesh.primitives.empty() && mesh.pick.size() == 1);
+        }
+        CHECK(builder.model("box", {}) == -1);
+    }
+    std::filesystem::remove_all(root);
+}
+
+// A joint's hull is stored in the joint's own space, as a Sim's leg hull runs from its hip down the
+// joint's y axis. It is clicked where the joint rests, not at the model's origin.
+void jointHullsAreClickedWhereTheirJointsRest() {
+    testres::MeshSkin skin{0, 1, {0, 0, 1}, {-0.5f, -0.5f, 0, 0.5f, -0.5f, 0, 0, 0.5f, 0}};
+    auto resources = testres::squareModel("chair");
+    resources[0].data = testres::jointedResourceNode("chair_cres", "chair_shpe", "Slot_Seat");
+    resources[3].data = testres::mesh("chair_tslocator_gmdc", "square", {0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0}, {0, 1, 1, 1, 1, 0, 0, 0},
+                                      {0, 1, 2, 0, 2, 3}, nullptr, &skin);
+    const auto root = testres::gameFolder("neots2-builder-hull-test", resources);
+    {
+        ts2::scene::Assets assets(root);
+        ts2::scene::SceneBuilder builder(assets);
+        const int model = builder.model("chair", {});
+        CHECK(model >= 0);
+        if (model >= 0) {
+            const auto& mesh = builder.scene().meshes[static_cast<std::size_t>(model)];
+            CHECK(mesh.pickRead && mesh.pick.size() == 1);
+            if (mesh.pick.size() == 1) {
+                const auto& p = mesh.pick.front().positions;
+                CHECK(p.size() == 9 && p[2] == 1 && p[5] == 1 && p[8] == 1 && p[0] == -0.5f && p[7] == 0.5f);
+            }
+        }
+    }
+    std::filesystem::remove_all(root);
+}
+
 // A model whose material is missing is still built, without a material. One whose mesh is missing
 // has nothing to draw.
 void modelsWithMissingPartsAreHandled() {
@@ -1278,6 +1331,8 @@ std::vector<Test> assetTests() {
         {"models with missing parts are handled", modelsWithMissingPartsAreHandled},
         {"saved joints move the model", savedJointsMoveTheModel},
         {"saved joints move skinned groups", savedJointsMoveSkinnedGroups},
+        {"joint hulls are clicked where their joints rest", jointHullsAreClickedWhereTheirJointsRest},
+        {"null materials draw nothing", nullMaterialsDrawNothing},
         {"shapes sit where their node puts them", shapesSitWhereTheirNodePutsThem},
         {"imposter objects come from its resource node", imposterObjectsComeFromItsResourceNode},
         {"a camera node keeps the nodes after it", aCameraNodeKeepsTheNodesAfterIt},

@@ -123,6 +123,7 @@ public:
     std::optional<scenegraph::Mesh> readShapeMesh(const scenegraph::Shape& shape, std::size_t item, const std::string& name, const MeshEdit* edit);
     std::optional<Primitive> groupPrimitive(const ModelRequest& request, const ModelShapes& model, const ModelShape& placed,
                                             const scenegraph::Mesh& data, const scenegraph::Group& group, Mesh& mesh);
+    void addPickMeshes(const ModelRequest& request, const ModelShapes& model, const ModelShape& placed, const scenegraph::Mesh& data, Mesh& mesh);
     int composedFace(const scenegraph::Material& m);
     void readMaps(const scenegraph::Material& m, bool deprecated, Material& out);
 
@@ -262,6 +263,8 @@ private:
     bool smoothLotSkirts_ = false;
     std::optional<float> lotSea_;
     std::map<std::string, int> models_, materials_, images_, envCubes_;
+    // The materials (by materials_'s key) whose type is the game's Null shader, which has no passes.
+    std::set<std::string> nullMaterials_;
     std::map<std::string, std::map<std::string, Transform>> bones_;
     std::map<std::string, std::string> followJoints_;  // see followJoint, by the name bone() takes
     // Each model's joints at rest relative to their parents, by lower-case model and joint name, read once.

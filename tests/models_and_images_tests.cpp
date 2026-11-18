@@ -154,7 +154,8 @@ void shapeBeforeVersion8LinksItsGeometry() {
     }
 }
 
-// Meshes before version 3 store index lists as u32s. Version 1 groups have no bone list.
+// Meshes before version 3 store index lists as u32s. Version 1 groups have no bone list. Version 4
+// meshes end with a bounding mesh and joint hulls.
 void oldMeshVersionsParse() {
     for (const std::uint32_t version : {1u, 2u, 3u, 4u}) {
         std::vector<std::uint8_t> d;
@@ -217,7 +218,31 @@ void oldMeshVersionsParse() {
         str("");
         str("faceblends");
         str("y_nose");
+        // A bounding mesh of one triangle, then two joint hulls: an empty one and a triangle.
+        auto hull = [&](float x) {
+            u32(3);
+            u32(3);
+            for (int k = 0; k < 9; ++k) u32(std::bit_cast<std::uint32_t>(k == 0 ? x : 0.0f));
+            for (const int i : {0, 1, 2}) {
+                d.push_back(static_cast<std::uint8_t>(i));
+                d.push_back(0);
+            }
+        };
+        hull(5);
+        u32(2);
+        u32(0);
+        hull(7);
         const auto mesh = ts2::scenegraph::parseMesh(d);
+        if (version == 4) {
+            CHECK(mesh.hullsRead && mesh.bounds.points.size() == 9 && mesh.bounds.points[0] == 5 && mesh.bounds.indices.size() == 3);
+            CHECK(mesh.hulls.size() == 2 && mesh.hulls[0].points.empty() && mesh.hulls[1].points[0] == 7 && mesh.hulls[1].indices[2] == 2);
+        } else {
+            CHECK(!mesh.hullsRead && mesh.bounds.points.empty() && mesh.hulls.empty());
+        }
+        // A broken end leaves the hulls unread and keeps the mesh.
+        d.resize(d.size() - 5);
+        const auto cut = ts2::scenegraph::parseMesh(d);
+        CHECK(!cut.hullsRead && cut.hulls.empty() && cut.groups.size() == 1);
         CHECK(mesh.morphs.size() == 2 && mesh.morphs[0].group.empty() && mesh.morphs[1].group == "faceblends" && mesh.morphs[1].name == "y_nose");
         CHECK(mesh.version == version && mesh.links.size() == 1 && (mesh.links[0].elements == std::vector<std::uint16_t>{0}));
         CHECK(mesh.groups.size() == 1 && mesh.groups[0].name == "seat" && mesh.groups[0].indices.size() == 3);

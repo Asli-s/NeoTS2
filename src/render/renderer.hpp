@@ -357,6 +357,7 @@ private:
         SDL_GPUGraphicsPipeline* upsamplePipeline = nullptr;
         SDL_GPUGraphicsPipeline* halfDepthPipeline = nullptr;
         SDL_GPUTexture* depth = nullptr;
+        SDL_GPUTexture* normals = nullptr;  // the drawn surfaces' normals, written with depth
         // At half size it is worked out from halfDepth and blurred into raw and soft, then brought up
         // to the view's size in blurred. At full size halfDepth and soft aren't made.
         SDL_GPUTexture* halfDepth = nullptr;

@@ -466,6 +466,9 @@ int SceneBuilder::material(const std::string& name, bool hair) {
     if (hair && m.type != "SimStandardMaterial") {
         return material(name);
     }
+    if (m.type == "Null") {
+        nullMaterials_.insert(key);
+    }
     if (hair) {
         m.type = "SimHair";
     }
@@ -1254,6 +1257,23 @@ void morphData(const sg::Mesh& mesh, const sg::ElementLink& link, std::vector<Mo
     }
 }
 
+// The mesh's skin entry for a joint with this inverse bind at `placement`, added when missing. -1 when
+// the skin is full.
+int skinEntry(const std::string& joint, const Transform& inverseBind, const Transform& placement, const std::map<std::string, Transform>& rests,
+              std::vector<SkinJoint>& skin) {
+    for (std::size_t i = 0; i < skin.size(); ++i) {
+        if (skin[i].joint == joint && skin[i].inverseBind.m == inverseBind.m && skin[i].placement.m == placement.m) {
+            return static_cast<int>(i);
+        }
+    }
+    if (skin.size() >= 255) {
+        return -1;
+    }
+    const auto rest = rests.find(joint);
+    skin.push_back({joint, inverseBind, placement, rest != rests.end() ? std::optional(rest->second) : std::nullopt});
+    return static_cast<int>(skin.size() - 1);
+}
+
 // Gives a mesh group's vertices their joints and weights for skinning when drawn: up to four joints
 // each (three weights stored, the fourth what is left), as entries of the mesh's skin (`skin`,
 // added to as needed, `placement` is where the group's shape sits). Weights of joints the model
@@ -1271,19 +1291,7 @@ bool skinData(const sg::Mesh& mesh, const sg::ElementLink& link, const sg::Group
     }
     const std::vector<float> weights = sg::floats(*weightElement);
     const std::size_t perVertex = weights.size() / std::max<std::size_t>(vertices, 1);
-    auto entry = [&](const std::string& joint, const Transform& inverseBind) {
-        for (std::size_t i = 0; i < skin.size(); ++i) {
-            if (skin[i].joint == joint && skin[i].inverseBind.m == inverseBind.m && skin[i].placement.m == placement.m) {
-                return static_cast<int>(i);
-            }
-        }
-        if (skin.size() >= 255) {
-            return -1;
-        }
-        const auto rest = rests.find(joint);
-        skin.push_back({joint, inverseBind, placement, rest != rests.end() ? std::optional(rest->second) : std::nullopt});
-        return static_cast<int>(skin.size() - 1);
-    };
+    auto entry = [&](const std::string& joint, const Transform& inverseBind) { return skinEntry(joint, inverseBind, placement, rests, skin); };
     // The group's joints as skin entries.
     std::vector<int> entries(group.bones.size(), -1);
     for (std::size_t b = 0; b < group.bones.size(); ++b) {
@@ -1358,7 +1366,9 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
     Mesh mesh;
     mesh.name = name;
     bool skinnedGroups = false;
+    mesh.pickRead = true;
     for (const auto& placed : model->shapes) {
+        bool picked = false;  // the game tests one mesh per shape, its first
         const sg::Shape& shape = placed.shape;
         // With object detail on High the game draws level of detail 0, or the next one a shape has
         // (LODConfig.txt, Graphics Rules "lodOverride 0").
@@ -1384,9 +1394,19 @@ int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::Mate
                     mesh.primitives.push_back(std::move(*p));
                 }
             }
+            if (!picked) {
+                picked = true;
+                mesh.pickRead = mesh.pickRead && data->hullsRead;
+                addPickMeshes(request, *model, placed, *data, mesh);
+            }
         }
     }
-    if (mesh.primitives.empty()) {
+    if (!mesh.pickRead) {
+        mesh.pick.clear();
+    }
+    // A model with nothing drawn is still built while it can be clicked: a fire's box, whose
+    // material draws nothing, is what a Sim clicks to put the fire out.
+    if (mesh.primitives.empty() && mesh.pick.empty()) {
         return -1;
     }
     if (!skinnedGroups && model->shapeJoints.size() == 1 && !model->shapeJoints.begin()->empty()) {
@@ -1577,6 +1597,11 @@ std::optional<Primitive> SceneBuilder::groupPrimitive(const ModelRequest& reques
         return std::nullopt;
     }
     std::string materialName = named != overrides.rend() ? named->material : part->material;
+    // A Null material draws nothing: the game's Null shader has no passes. A fire's box is one.
+    material(materialName, request.hair);
+    if (nullMaterials_.contains(lower(materialName)) || nullMaterials_.contains(lower(materialName) + "|hair")) {
+        return std::nullopt;
+    }
     // A "_null" material hides its group. The one exception is blended glass with some opacity (a
     // greenhouse roof's faint panes), drawn as its material says.
     if (lower(materialName).find("_null") != std::string::npos) {
@@ -1659,6 +1684,79 @@ std::optional<Primitive> SceneBuilder::groupPrimitive(const ModelRequest& reques
     }
     p.origin = {xf.m[3], xf.m[7], xf.m[11]};
     return p;
+}
+
+// Adds to `mesh.pick` what the game tests the mouse against for one of a model's meshes: its joints'
+// hulls, each following its joint, or else its bounding mesh (see scenegraph::Mesh::bounds). They are
+// placed, posed or skinned as groupPrimitive does its groups. A hull of a joint the model doesn't name
+// is left out.
+void SceneBuilder::addPickMeshes(const ModelRequest& request, const ModelShapes& model, const ModelShape& placed, const sg::Mesh& data,
+                                 Mesh& mesh) {
+    const Transform& xf = placed.place;
+    auto add = [&](const sg::Mesh::Hull& hull, std::optional<std::uint16_t> joint) {
+        if (hull.indices.size() < 3 || hull.points.size() < 3) {
+            return;
+        }
+        Primitive p;
+        p.positions = hull.points;
+        p.indices.assign(hull.indices.begin(), hull.indices.end());
+        const std::size_t vertices = p.positions.size() / 3;
+        bool placedHere = false;
+        if (joint) {
+            const auto name = model.joints.find(*joint);
+            if (name == model.joints.end() || *joint >= data.inverseBinds.size()) {
+                return;
+            }
+            const auto& bind = data.inverseBinds[*joint];
+            const Transform inverse = Transform::of(bind.translation, bind.rotation);
+            // A hull is stored in its joint's own space. Placed where the joint sits at rest, it is
+            // then moved like the groups.
+            const Transform rest = inverse.rigidInverse();
+            for (std::size_t i = 0; i + 2 < p.positions.size(); i += 3) {
+                rest.apply(&p.positions[i], true);
+            }
+            std::optional<Transform> move;
+            if (request.pose != nullptr) {
+                if (const auto at = request.pose->find(name->second); at != request.pose->end()) {
+                    move = at->second * inverse;
+                }
+            } else if (request.skinned) {
+                const int entry = skinEntry(name->second, inverse, xf, model.rests, mesh.skin);
+                if (entry < 0) {
+                    return;
+                }
+                p.joints.assign(vertices * 4, 255);
+                p.weights.assign(vertices * 4, 0.0f);
+                for (std::size_t v = 0; v < vertices; ++v) {
+                    p.joints[v * 4] = static_cast<std::uint8_t>(entry);
+                    p.weights[v * 4] = 1;
+                }
+                placedHere = true;
+            } else if (!model.savedMoves.empty()) {
+                // As followSavedJoints places a group: by how far the joint moved from rest.
+                const auto at = model.savedMoves.find(name->second);
+                move = at != model.savedMoves.end() ? at->second * placed.restPlace : placed.restPlace;
+                placedHere = true;
+            }
+            for (std::size_t i = 0; move && i + 2 < p.positions.size(); i += 3) {
+                move->apply(&p.positions[i], true);
+            }
+        } else if (request.skinned && !placed.node.empty()) {
+            placedHere = skinToNode(placed.node, placed.fromNode, mesh.skin, p);
+        }
+        for (std::size_t i = 0; !placedHere && i + 2 < p.positions.size(); i += 3) {
+            xf.apply(&p.positions[i], true);
+        }
+        mesh.pick.push_back(std::move(p));
+    };
+    bool anyHull = false;
+    for (std::size_t j = 0; j < data.hulls.size() && j <= 0xFFFF; ++j) {
+        anyHull = anyHull || !data.hulls[j].indices.empty();
+        add(data.hulls[j], static_cast<std::uint16_t>(j));
+    }
+    if (!anyHull) {
+        add(data.bounds, std::nullopt);
+    }
 }
 
 const std::string* SceneBuilder::followJoint(const std::string& model) const {

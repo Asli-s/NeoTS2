@@ -1,12 +1,15 @@
 // Ambient occlusion (not in the original game): how open the space above each pixel's surface is, from
-// the depth pass alone. 1 is fully open, and lower where nearby surfaces crowd it. It repeats a 4 by 4
-// pattern of turned samples, which the blur pass smooths away. At half the view's size each pixel
-// works out one of the 2 by 2 depth pass pixels it stands for, as ao_halfdepth.frag picks them.
+// the depth pass and the normals it draws. 1 is fully open, and lower where nearby surfaces crowd it.
+// It repeats a 4 by 4 pattern of turned samples, which the blur pass smooths away. At half the view's
+// size each pixel works out one of the 2 by 2 depth pass pixels it stands for, as ao_halfdepth.frag
+// picks them.
 
 #include "sdl_gpu.hlsli"
 
 COMBINED Texture2D<float> depthTexture : register(t0, space2);
 COMBINED SamplerState depthSampler : register(s0, space2);
+COMBINED Texture2D<float4> normalTexture : register(t1, space2);
+COMBINED SamplerState normalSampler : register(s1, space2);
 
 cbuffer Occlusion : register(b0, space3) {
     row_major float4x4 clipToWorld;
@@ -70,7 +73,13 @@ float main(float4 position : SV_Position) : SV_Target {
         return 1;
     }
     const float3 here = worldAt(pixel);
-    const float3 n = normalAt(pixel, here);
+    // The drawn normal, so a low-poly surface shades smoothly. The one from depth is flat on each face.
+    const float4 drawn = normalTexture.Load(int3(pixel, 0));
+    float3 n = normalAt(pixel, here);
+    if (drawn.a > 0.5) {
+        const float3 smooth = normalize(drawn.xyz * 2 - 1);
+        n = dot(smooth, eye.xyz - here) < 0 ? -smooth : smooth;
+    }
     const float3 side = normalize(abs(n.z) < 0.99 ? cross(n, float3(0, 0, 1)) : cross(n, float3(1, 0, 0)));
     const float3 other = cross(n, side);
     static const float kOrder[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};

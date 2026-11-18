@@ -99,6 +99,17 @@ struct Mesh {
     };
     std::vector<Morph> morphs;
 
+    // The meshes the game tests the mouse against instead of the drawn groups. An unskinned mesh has
+    // a bounding mesh, and a skinned one has a hull per joint (by joint index), each moved by its joint.
+    // A mesh with neither can't be clicked. Light glows, rays and shadows are left out of them.
+    struct Hull {
+        std::vector<float> points;  // three per point, in the model for the bounding mesh and in its joint's own space for a hull
+        std::vector<std::uint16_t> indices;  // three per triangle
+    };
+    Hull bounds;
+    std::vector<Hull> hulls;
+    bool hullsRead = false;  // false for older versions and a broken end, which are clicked by their groups
+
     // An element of the link with this identity, or null.
     const Element* find(const ElementLink& link, std::uint32_t identity) const;
 };

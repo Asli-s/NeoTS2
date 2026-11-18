@@ -439,13 +439,43 @@ Mesh parseMesh(std::span<const std::uint8_t> data) {
             v = std::bit_cast<float>(r.u32());
         }
     }
-    // The morphs its morph streams name (see Mesh::morphs). A bounding mesh and per-joint bounding
-    // hulls follow, which aren't read.
+    // The morphs its morph streams name (see Mesh::morphs).
     if (r.remaining() >= 4) {
         m.morphs.resize(count(r, 2));
         for (auto& morph : m.morphs) {
             morph.group = r.varString();
             morph.name = r.varString();
+        }
+    }
+    // The bounding mesh and the joints' hulls (see Mesh::bounds). Each stores its point count, and
+    // only when that isn't 0, its corner count, the points and the corners. A broken end leaves them
+    // unread rather than losing the mesh.
+    if (m.version == 4 && r.remaining() >= 4) {
+        auto hull = [&](Mesh::Hull& h) {
+            const std::size_t points = count(r, 12);
+            if (points == 0) {
+                return;
+            }
+            const std::size_t corners = count(r, 2);
+            h.points.resize(points * 3);
+            for (auto& v : h.points) {
+                v = std::bit_cast<float>(r.u32());
+            }
+            h.indices.resize(corners);
+            for (auto& i : h.indices) {
+                i = r.u16();
+            }
+        };
+        try {
+            hull(m.bounds);
+            m.hulls.resize(count(r, 4));
+            for (auto& h : m.hulls) {
+                hull(h);
+            }
+            m.hullsRead = true;
+        } catch (const std::exception&) {
+            m.bounds = {};
+            m.hulls.clear();
         }
     }
     return m;

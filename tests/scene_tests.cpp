@@ -3039,6 +3039,41 @@ void pickerFindsTheNearestShownTriangle() {
     CHECK(std::abs(hoverAmbient(0.0) - 0.08f) < 1e-6f && std::abs(hoverAmbient(2.5) - 0.1f) < 1e-6f);
 }
 
+// A mesh with pick meshes is hit only by them, as the game tests a model's bounding mesh: a lamp's
+// glow drawn around it doesn't take the click. One whose models have none can't be clicked.
+void pickerTestsBoundingMeshes() {
+    using namespace ts2::scene;
+    Scene scene;
+    Mesh lamp;
+    Primitive glow;
+    glow.positions = {-2, -2, 0, 2, -2, 0, 2, 2, 0, -2, 2, 0};
+    glow.indices = {0, 1, 2, 0, 2, 3};
+    lamp.primitives.push_back(glow);
+    Primitive bounds;
+    bounds.positions = {-0.5f, -0.5f, 0, 0.5f, -0.5f, 0, 0.5f, 0.5f, 0};
+    bounds.indices = {0, 1, 2};
+    lamp.pick.push_back(bounds);
+    lamp.pickRead = true;
+    scene.meshes.push_back(lamp);
+    Mesh shadow = lamp;
+    shadow.pick.clear();
+    scene.meshes.push_back(shadow);
+    Instance i;
+    i.mesh = 0;
+    i.part = Part::Object;
+    i.object = 7;
+    scene.instances.push_back(i);
+    Picker picker;
+    picker.prepare(scene);
+    const std::array<float, 3> down{0, 0, -1};
+    CHECK(!picker.pick(scene, {}, {1.5f, 1.5f, 10}, down));
+    const auto hit = picker.pick(scene, {}, {0.3f, -0.3f, 10}, down);
+    CHECK(hit && hit->object == 7);
+    scene.instances[0].mesh = 1;
+    picker.prepare(scene);
+    CHECK(!picker.pick(scene, {}, {0.3f, -0.3f, 10}, down));
+}
+
 // With a pose, a Sim is hit by its skinned triangles where the pose puts them, not at rest, and
 // the hit names the Sim. A hidden Sim and one without joints in the pose are not hit.
 void pickerHitsPosedSims() {
@@ -3822,6 +3857,7 @@ std::vector<Test> sceneTests() {
         {"imposter fade is squared", imposterFadeIsSquared},
         {"only props near the lot fade", onlyPropsNearTheLotFade},
         {"picker finds the nearest shown triangle", pickerFindsTheNearestShownTriangle},
+        {"picker tests bounding meshes", pickerTestsBoundingMeshes},
         {"picker hits posed Sims", pickerHitsPosedSims},
         {"picker box keeps every posed hit", pickerBoxKeepsEveryPosedHit},
         {"portrait pose and camera", portraitPoseAndCamera},

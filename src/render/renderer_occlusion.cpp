@@ -1,6 +1,6 @@
 // Ambient occlusion, not in the original game: the Graphics panel's setting darkens corners and contacts. The
 // opaque surfaces are drawn into a depth texture of their own, as the main view's may be multisampled and
-// can't be read. How open each pixel is comes from that, and the main view's opaque surfaces and layers
+// can't be read, with their normals beside it. How open each pixel is comes from that, and the main view's opaque surfaces and layers
 // are multiplied by it as they are drawn, so glass, water and particles aren't darkened.
 
 #include "render/renderer.hpp"
@@ -53,7 +53,7 @@ void SdlGpuRenderer::releaseOcclusion() {
             SDL_ReleaseGPUGraphicsPipeline(device_, p);
         }
     }
-    for (auto* t : {occlusion_.depth, occlusion_.halfDepth, occlusion_.raw, occlusion_.soft, occlusion_.blurred}) {
+    for (auto* t : {occlusion_.depth, occlusion_.normals, occlusion_.halfDepth, occlusion_.raw, occlusion_.soft, occlusion_.blurred}) {
         if (t) {
             SDL_ReleaseGPUTexture(device_, t);
         }
@@ -87,9 +87,9 @@ bool SdlGpuRenderer::occlusionReady(unsigned width, unsigned height) {
         return false;
     }
     const bool halfMissing = occlusionHalf_ && (occlusion_.halfDepth == nullptr || occlusion_.soft == nullptr);
-    if (occlusion_.depth == nullptr || occlusion_.raw == nullptr || halfMissing || occlusion_.blurred == nullptr || occlusion_.width != width ||
+    if (occlusion_.depth == nullptr || occlusion_.normals == nullptr || occlusion_.raw == nullptr || halfMissing || occlusion_.blurred == nullptr || occlusion_.width != width ||
         occlusion_.height != height || occlusion_.half != occlusionHalf_) {
-        for (auto** t : {&occlusion_.depth, &occlusion_.halfDepth, &occlusion_.raw, &occlusion_.soft, &occlusion_.blurred}) {
+        for (auto** t : {&occlusion_.depth, &occlusion_.normals, &occlusion_.halfDepth, &occlusion_.raw, &occlusion_.soft, &occlusion_.blurred}) {
             if (*t) {
                 SDL_ReleaseGPUTexture(device_, *t);
                 *t = nullptr;
@@ -104,8 +104,10 @@ bool SdlGpuRenderer::occlusionReady(unsigned width, unsigned height) {
         info.layer_count_or_depth = 1;
         info.num_levels = 1;
         occlusion_.depth = SDL_CreateGPUTexture(device_, &info);
-        info.format = kOcclusionFormat;
+        info.format = kOcclusionNormalFormat;
         info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+        occlusion_.normals = SDL_CreateGPUTexture(device_, &info);
+        info.format = kOcclusionFormat;
         occlusion_.blurred = SDL_CreateGPUTexture(device_, &info);
         const unsigned scale = occlusionHalf_ ? 2 : 1;
         info.width = (width + scale - 1) / scale;
@@ -117,7 +119,7 @@ bool SdlGpuRenderer::occlusionReady(unsigned width, unsigned height) {
         occlusion_.width = width;
         occlusion_.height = height;
         occlusion_.half = occlusionHalf_;
-        if (occlusion_.depth == nullptr || occlusion_.raw == nullptr || (occlusionHalf_ && (occlusion_.halfDepth == nullptr || occlusion_.soft == nullptr)) ||
+        if (occlusion_.depth == nullptr || occlusion_.normals == nullptr || occlusion_.raw == nullptr || (occlusionHalf_ && (occlusion_.halfDepth == nullptr || occlusion_.soft == nullptr)) ||
             occlusion_.blurred == nullptr) {
             diag::warnOnce("ambient occlusion: no video memory for its targets, so it is left out");
             occlusion_.width = occlusion_.height = 0;
@@ -136,7 +138,12 @@ void SdlGpuRenderer::drawOcclusion(const Frame& f, std::span<const Draw> opaque,
     depth.store_op = SDL_GPU_STOREOP_STORE;
     depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
     depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
-    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(f.cmd, nullptr, 0, &depth);
+    // Alpha 0 where nothing is drawn.
+    SDL_GPUColorTargetInfo normals{};
+    normals.texture = occlusion_.normals;
+    normals.load_op = SDL_GPU_LOADOP_CLEAR;
+    normals.store_op = SDL_GPU_STOREOP_STORE;
+    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(f.cmd, &normals, 1, &depth);
     SDL_GPUGraphicsPipeline* bound = nullptr;
     const MeshBuffers* boundBuffers = nullptr;
     for (std::size_t i = 0; i < opaque.size(); ++i) {
@@ -221,8 +228,8 @@ void SdlGpuRenderer::drawOcclusion(const Frame& f, std::span<const Draw> opaque,
     pass = SDL_BeginGPURenderPass(f.cmd, &raw, 1, nullptr);
     SDL_BindGPUGraphicsPipeline(pass, occlusion_.occlusionPipeline);
     SDL_PushGPUFragmentUniformData(f.cmd, 0, &u, sizeof(u));
-    const SDL_GPUTextureSamplerBinding depthOnly{occlusion_.depth, shadowPoint_};
-    SDL_BindGPUFragmentSamplers(pass, 0, &depthOnly, 1);
+    const SDL_GPUTextureSamplerBinding depthAndNormals[2] = {{occlusion_.depth, shadowPoint_}, {occlusion_.normals, shadowPoint_}};
+    SDL_BindGPUFragmentSamplers(pass, 0, depthAndNormals, 2);
     SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
     SDL_EndGPURenderPass(pass);
 

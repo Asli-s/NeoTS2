@@ -164,10 +164,13 @@ struct MeshMorph {
 };
 
 // A test mesh's skinning: every vertex wholly on the group's first bone, the joint `bone`, and
-// `joints` inverse binds at the model's origin.
+// `joints` inverse binds at the model's origin, but for `bone`'s at `rest`. When `hull` has points
+// (three floats each, in the joint's own space), they are the joint's hull, one triangle per three.
 struct MeshSkin {
     std::uint16_t bone = 0;
     std::uint32_t joints = 1;
+    std::array<float, 3> rest{0, 0, 0};
+    std::vector<float> hull;
 };
 
 // A mesh (GMDC, version 4) of one triangle-list group: positions (three floats per vertex), and
@@ -252,15 +255,35 @@ inline std::vector<std::uint8_t> mesh(const std::string& name, const std::string
     }
     b.u32(skin != nullptr ? skin->joints : 0);  // inverse binds
     for (std::uint32_t j = 0; skin != nullptr && j < skin->joints; ++j) {
-        for (const float v : {0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f}) {
+        const std::array<float, 3> at = j == skin->bone ? skin->rest : std::array<float, 3>{0, 0, 0};
+        for (const float v : {0.0f, 0.0f, 0.0f, 1.0f, -at[0], -at[1], -at[2]}) {
             b.f32(v);
         }
     }
-    if (morph != nullptr) {
-        b.u32(static_cast<std::uint32_t>(morph->pairs.size()));
-        for (const auto& [blendGroup, morphName] : morph->pairs) {
+    const bool withHull = skin != nullptr && !skin->hull.empty();
+    if (morph != nullptr || withHull) {
+        b.u32(morph != nullptr ? static_cast<std::uint32_t>(morph->pairs.size()) : 0);
+        for (const auto& [blendGroup, morphName] : morph != nullptr ? morph->pairs : std::vector<std::pair<std::string, std::string>>{}) {
             b.text(blendGroup);
             b.text(morphName);
+        }
+    }
+    if (withHull) {
+        b.u32(0);  // no bounding mesh
+        b.u32(skin->joints);
+        for (std::uint32_t j = 0; j < skin->joints; ++j) {
+            const std::uint32_t points = j == skin->bone ? static_cast<std::uint32_t>(skin->hull.size() / 3) : 0;
+            b.u32(points);
+            if (points == 0) {
+                continue;
+            }
+            b.u32(points);
+            for (const float v : skin->hull) {
+                b.f32(v);
+            }
+            for (std::uint32_t i = 0; i < points; ++i) {
+                b.u16(static_cast<std::uint16_t>(i));
+            }
         }
     }
     return b.out;

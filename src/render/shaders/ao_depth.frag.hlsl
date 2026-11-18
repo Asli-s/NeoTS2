@@ -1,5 +1,6 @@
 // Ambient occlusion's depth pass (not in the original game): cut-out surfaces leave out what the scene
-// shader's alpha test leaves out, so their holes don't darken what is behind them.
+// shader's alpha test leaves out, so their holes don't darken what is behind them. It also writes the
+// drawn normal for ao.frag.
 
 #include "sdl_gpu.hlsli"
 
@@ -52,7 +53,8 @@ struct Input {
     float3 specular : TEXCOORD11;
 };
 
-void main(Input input) {
+// The drawn normal, as ao_solid.frag gives it.
+float4 main(Input input) : SV_Target {
     const float2 uv = input.uv * uvTile.xy + uvTile.zw;
     if (wallMask.x > 0.5 && maskTexture.Sample(maskSampler, float2(wallMask.y > 0.5 ? 1 - uv.x : uv.x, uv.y)).a < 0.5) {
         discard;
@@ -63,4 +65,6 @@ void main(Input input) {
             discard;
         }
     }
+    const float length2 = dot(input.normal, input.normal);
+    return length2 > 1e-12 ? float4(input.normal * rsqrt(length2) * 0.5 + 0.5, 1) : float4(0, 0, 0, 0);
 }

@@ -238,6 +238,12 @@ struct Mesh {
     std::vector<Primitive> primitives;
     std::vector<SkinJoint> skin;
     std::vector<MorphName> morphs;  // the morphs its primitives take, by Primitive::morphs
+    // What the mouse is tested against, when `pickRead`: the bounding meshes and joint hulls of its
+    // models (see scenegraph::Mesh::bounds), placed and skinned as its primitives are, with no
+    // material. Empty when none of its models can be clicked. Without `pickRead` its primitives are
+    // tested.
+    std::vector<Primitive> pick;
+    bool pickRead = false;
 };
 
 // What a placed mesh is, for choosing what a view shows.
