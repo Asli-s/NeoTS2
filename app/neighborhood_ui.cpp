@@ -12,6 +12,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <limits>
 #include <cstdlib>
 #include <format>
 #include <map>
@@ -75,6 +77,8 @@ constexpr std::uint32_t kStringsType = 0x53545223;
 constexpr std::uint32_t kLotCard = 0x49001000;
 constexpr std::uint32_t kFamilyLayout = 0xa000, kFamilyPicture = 0xa005, kFamilyName = 0xa006, kFamilyAddress = 0xa007,
                         kFamilyFunds = 0xa008, kFamilyBio = 0xa009, kFamilyEnter = 0xa002, kFamilyClose = 0xa00a;
+// The bio box's maxtext.
+constexpr std::size_t kBioCharacters = 1000;
 constexpr std::uint32_t kCommunityLayout = 0xe000, kCommunityAddress = 0xe003, kCommunityText = 0xe004, kCommunityClose = 0xe007;
 // The card sits this far beside its lot, on the side away from the screen's middle.
 constexpr int kCardGap = 60;
@@ -280,6 +284,197 @@ ts2::ui::Window tagWindow(const std::string& kind, std::vector<std::pair<std::st
     return window;
 }
 
+// The soft white glow the game draws behind the lot card, reaching out to its lot like a speech
+// bubble. It covers a box rounded at the corners, 6 in from the card's panel picture, together with
+// the point on screen of the lot's centre, and is white at alpha 0x70, fading to nothing 24 past its
+// edge. The corners are rounded by the smaller of 30 and half the panel's shorter side.
+constexpr float kGlowInset = 6, kGlowFade = 24, kGlowMostRadius = 30, kGlowAlpha = 0x70;
+// The game rounds each corner with 16 points 6 degrees apart and draws the fade as a band pushed
+// out along the outline's corners. The fade here is by distance, which is the same along the sides
+// and the corners but rounds off the tip at the lot's point, where the game's band comes to a point.
+constexpr int kGlowCornerPoints = 16;
+constexpr float kGlowStep = 6.0f * 3.14159265f / 180.0f;
+
+// A picture placed on screen.
+struct CardGlow {
+    ts2::tga::Pixels picture;
+    int x = 0, y = 0;  // where the picture's top left corner goes on screen
+};
+
+// The glow's rounded box: its corner centres and the corners' radius. The radius is below zero when
+// the panel is too small to hold the box.
+struct GlowBox {
+    float left = 0, top = 0, right = 0, bottom = 0, radius = -1;
+};
+
+GlowBox glowBox(const std::array<float, 4>& panel) {
+    const float w = panel[2] - panel[0], h = panel[3] - panel[1];
+    if (w <= 2 * kGlowInset || h <= 2 * kGlowInset) {
+        return {};
+    }
+    const float radius = std::min(kGlowMostRadius, 0.5f * std::min(w, h));
+    const float reach = radius + kGlowInset;
+    return {panel[0] + reach, panel[1] + reach, panel[2] - reach, panel[3] - reach, radius};
+}
+
+// How far (x, y) is outside the box, below zero inside it.
+float outsideBox(const GlowBox& box, float x, float y) {
+    const float dx = std::max({box.left - x, 0.0f, x - box.right}), dy = std::max({box.top - y, 0.0f, y - box.bottom});
+    return std::sqrt(dx * dx + dy * dy) - box.radius;
+}
+
+float glowShare(float outside) {
+    return std::clamp(1.0f - outside / kGlowFade, 0.0f, 1.0f);
+}
+
+// An empty picture over the screen pixels from (x0, y0) to (x1, y1), cut to a `width` x `height`
+// screen. Empty when nothing of it is on screen.
+CardGlow glowPicture(float x0, float y0, float x1, float y1, int width, int height) {
+    CardGlow out;
+    const int ix0 = std::max(0, static_cast<int>(std::floor(x0))), iy0 = std::max(0, static_cast<int>(std::floor(y0)));
+    const int ix1 = std::min(width, static_cast<int>(std::ceil(x1))), iy1 = std::min(height, static_cast<int>(std::ceil(y1)));
+    if (ix1 <= ix0 || iy1 <= iy0) {
+        return out;
+    }
+    out.x = ix0;
+    out.y = iy0;
+    out.picture.width = static_cast<std::uint32_t>(ix1 - ix0);
+    out.picture.height = static_cast<std::uint32_t>(iy1 - iy0);
+    out.picture.rgba.assign(std::size_t{out.picture.width} * out.picture.height * 4, 255);
+    return out;
+}
+
+// The rounded box with its fade, on a `width` x `height` screen.
+CardGlow boxGlow(const GlowBox& box, int width, int height) {
+    if (box.radius < 0) {
+        return {};
+    }
+    const float reach = box.radius + kGlowFade;
+    CardGlow out = glowPicture(box.left - reach, box.top - reach, box.right + reach, box.bottom + reach, width, height);
+    for (std::uint32_t y = 0; y < out.picture.height; ++y) {
+        for (std::uint32_t x = 0; x < out.picture.width; ++x) {
+            const float share = glowShare(outsideBox(box, static_cast<float>(out.x) + x + 0.5f, static_cast<float>(out.y) + y + 0.5f));
+            out.picture.rgba[(std::size_t{y} * out.picture.width + x) * 4 + 3] = static_cast<std::uint8_t>(kGlowAlpha * share + 0.5f);
+        }
+    }
+    return out;
+}
+
+// The reach from the box to the lot's point (px, py): the triangle from the point to where the lines
+// from it touch the box, with its fade. It is drawn over `box`, the picture of boxGlow at (boxX, boxY)
+// on screen. Where the two overlap, its alpha brings the pair to the higher of the two, the glow of
+// the single shape.
+// Empty when the point is inside the box or nothing of the reach is on screen.
+CardGlow tailGlow(const GlowBox& shape, const ts2::tga::Pixels& box, int boxX, int boxY, float px, float py, int width, int height) {
+    if (shape.radius < 0) {
+        return {};
+    }
+    // The outline the game builds, corner by corner from the top right, then the two points where
+    // the lines from the lot's point touch it: the ends of the run of edges that face the point.
+    std::array<std::array<float, 2>, 4 * kGlowCornerPoints> outline{};
+    float angle = 0;
+    for (int c = 0, i = 0; c < 4; ++c) {
+        const float cx = c == 1 || c == 2 ? shape.left : shape.right, cy = c >= 2 ? shape.bottom : shape.top;
+        for (int k = 0; k < kGlowCornerPoints; ++k, ++i) {
+            if (k > 0) {
+                angle += kGlowStep;
+            }
+            outline[i] = {cx + std::cos(angle) * shape.radius, cy - std::sin(angle) * shape.radius};
+        }
+    }
+    const int n = static_cast<int>(outline.size());
+    auto faces = [&](int i) {
+        const auto& a = outline[i];
+        const auto& b = outline[(i + 1) % n];
+        // A point beyond an edge of this outline gives a cross product above zero.
+        return (b[0] - a[0]) * (py - a[1]) - (b[1] - a[1]) * (px - a[0]) > 0;
+    };
+    bool tail = false;
+    std::array<float, 2> t1{}, t2{};
+    for (int i = 0; i < n; ++i) {
+        if (faces(i) && !faces((i + n - 1) % n)) {
+            t1 = outline[i];
+            tail = true;
+        }
+        if (faces(i) && !faces((i + 1) % n)) {
+            t2 = outline[(i + 1) % n];
+        }
+    }
+    if (!tail) {
+        return {};
+    }
+    const std::array<std::array<float, 2>, 3> tri{{{px, py}, t1, t2}};
+    CardGlow out = glowPicture(std::min({px, t1[0], t2[0]}) - kGlowFade, std::min({py, t1[1], t2[1]}) - kGlowFade,
+                               std::max({px, t1[0], t2[0]}) + kGlowFade, std::max({py, t1[1], t2[1]}) + kGlowFade, width, height);
+    // For each edge, from the point to t1, t1 to t2 and t2 back to the point: the distance outward
+    // from its line, a + b x + c y, and how far along it the nearest point of the line is, from 0 at
+    // its start to 1 at its end, ua + ub x + uc y. Being linear they step by b and ub along a row.
+    struct Edge {
+        float a = 0, b = 0, c = 0, ua = 0, ub = 0, uc = 0;
+    };
+    std::array<Edge, 3> edges{};
+    for (int e = 0; e < 3; ++e) {
+        const auto& from = tri[e];
+        const auto& to = tri[(e + 1) % 3];
+        const float ex = to[0] - from[0], ey = to[1] - from[1];
+        const float squared = ex * ex + ey * ey, length = std::sqrt(squared);
+        if (length > 0) {
+            edges[e] = {(ex * from[1] - ey * from[0]) / length, ey / length, -ex / length,
+                        -(ex * from[0] + ey * from[1]) / squared, ex / squared, ey / squared};
+        }
+    }
+    // The distance from (x, y) to an edge's segment, for a point beyond its line by `beyond`.
+    auto toSegment = [&](int e, float beyond, float along, float x, float y) {
+        if (along > 0 && along < 1) {
+            return beyond;
+        }
+        const auto& end = tri[along <= 0 ? e : (e + 1) % 3];
+        const float dx = x - end[0], dy = y - end[1];
+        return std::sqrt(dx * dx + dy * dy);
+    };
+    for (std::uint32_t y = 0; y < out.picture.height; ++y) {
+        const int sy = out.y + static_cast<int>(y), by = sy - boxY;
+        const float fy = static_cast<float>(sy) + 0.5f, fx = static_cast<float>(out.x) + 0.5f;
+        std::array<float, 3> s{}, u{};
+        for (int e = 0; e < 3; ++e) {
+            s[e] = edges[e].a + edges[e].b * fx + edges[e].c * fy;
+            u[e] = edges[e].ua + edges[e].ub * fx + edges[e].uc * fy;
+        }
+        for (std::uint32_t x = 0; x < out.picture.width; ++x) {
+            if (x > 0) {
+                for (int e = 0; e < 3; ++e) {
+                    s[e] += edges[e].b;
+                    u[e] += edges[e].ub;
+                }
+            }
+            const int bx = out.x + static_cast<int>(x) - boxX;
+            const bool inBox = bx >= 0 && by >= 0 && bx < static_cast<int>(box.width) && by < static_cast<int>(box.height);
+            const float under = inBox ? box.rgba[(static_cast<std::size_t>(by) * box.width + bx) * 4 + 3] / 255.0f : 0.0f;
+            float alpha = 0;
+            // Past the line from t1 to t2 the box is nearer than the reach, so the reach adds nothing there.
+            if (under < kGlowAlpha / 255.0f && s[1] <= 0) {
+                // Inside both sides it is inside the reach. Outside, the nearest part is on a side it
+                // is beyond.
+                const float sx = fx + static_cast<float>(x);
+                float outside = std::max(s[0], s[2]);
+                // A segment is never nearer than its line, so a pixel past the fade from a line is clear.
+                if (outside > 0 && outside < kGlowFade) {
+                    outside = std::numeric_limits<float>::max();
+                    for (const int e : {0, 2}) {
+                        if (s[e] > 0) {
+                            outside = std::min(outside, toSegment(e, s[e], u[e], sx, fy));
+                        }
+                    }
+                }
+                const float wanted = kGlowAlpha / 255.0f * glowShare(outside);
+                alpha = std::max(0.0f, wanted - under) / (1.0f - under);
+            }
+            out.picture.rgba[(std::size_t{y} * out.picture.width + x) * 4 + 3] = static_cast<std::uint8_t>(255.0f * alpha + 0.5f);
+        }
+    }
+    return out;
+}
+
 // The lot catalog (LotCatalog/cx_NNNNNNNN.package, newest first), as each lot's picture.
 std::vector<ts2::tga::Pixels> catalogLots(const fs::path& user) {
     std::vector<fs::path> files;
@@ -390,11 +585,18 @@ void NeighborhoodUi::open(const fs::path& folder, const std::string& name, Conte
     layoutStrip(lotStrip_, lotPictures_);
     screen_.setVisible(lots_, false);
     // The lot card, loaded with the neighborhood and hidden until a lot is clicked.
+    glow_ = screen_.addWindows({tagWindow("IGZWinBMP", {})}, 0, 0);
+    glowTail_ = screen_.addWindows({tagWindow("IGZWinBMP", {})}, 0, 0);
     card_ = screen_.load(kScripts, kLotCard, 0, 0);
     for (const int c : screen_.children(card_)) {
         screen_.setVisible(c, false);
     }
     screen_.setVisible(card_, false);
+    for (const int w : {glow_, glowTail_}) {
+        screen_.setPassive(w);
+        screen_.setVisible(w, false);
+    }
+    bio_.attach(screen_, screen_.find(screen_.find(card_, kFamilyLayout), kFamilyBio), kBioCharacters);
     cards_ = std::move(content.cards);
     cardLot_ = 0;
     tag_ = screen_.addWindows({tagWindow("IGZWinGen", {{"image", std::format("{{{:08x},{:08x}}}", kTagImageGroup, kTagBox)}, {"edgeimage", "yes"}})}, 0, 0);
@@ -461,10 +663,10 @@ void NeighborhoodUi::close() {
     graphicsOptions_.remove();
     audioOptions_.remove();
     optionsMenu_.setMenu(-1);
-    for (const int w : {panel_, families_, lots_, card_, tag_, options_}) {
+    for (const int w : {panel_, families_, lots_, glow_, glowTail_, card_, tag_, options_}) {
         screen_.remove(w);
     }
-    panel_ = families_ = lots_ = puck_ = card_ = tag_ = tagIcon_ = tagText_ = options_ = -1;
+    panel_ = families_ = lots_ = puck_ = glow_ = glowTail_ = card_ = tag_ = tagIcon_ = tagText_ = options_ = -1;
     tagLot_ = 0;
     cards_.clear();
     cardLot_ = 0;
@@ -537,7 +739,7 @@ NeighborhoodUi::Action NeighborhoodUi::clicked(int window) {
 
 void NeighborhoodUi::hideAll(bool hide) {
     if (hide && hidden_.empty()) {
-        for (const int w : {panel_, families_, lots_, card_, tag_, options_}) {
+        for (const int w : {panel_, families_, lots_, glow_, glowTail_, card_, tag_, options_}) {
             if (w >= 0) {
                 hidden_.emplace_back(w, screen_.visible(w));
                 screen_.setVisible(w, false);
@@ -569,7 +771,29 @@ bool NeighborhoodUi::clickable(std::uint32_t lot) const {
     return card != cards_.end() && !card->second.forSale && (!card->second.community || bin_ == Bin::Lots);
 }
 
-void NeighborhoodUi::showCard(std::uint32_t lot, int lotX) {
+void NeighborhoodUi::setCardPoint(int x, int y) {
+    if (glowTail_ < 0 || card_ < 0 || !screen_.visible(card_) || glowPanel_ < 0 || glowPoint_ == std::array<int, 2>{x, y}) {
+        return;
+    }
+    glowPoint_ = {x, y};
+    // Only the reach to the lot moves with the camera. The box under it was drawn with the card.
+    CardGlow tail = tailGlow(glowBox(glowPanelRect_), glowBoxPicture_, glowBoxAt_[0], glowBoxAt_[1], static_cast<float>(x),
+                             static_cast<float>(y), width_, height_);
+    showGlow(glowTail_, std::move(tail.picture), tail.x, tail.y);
+}
+
+void NeighborhoodUi::showGlow(int window, ts2::tga::Pixels picture, int x, int y) {
+    if (picture.width == 0) {
+        screen_.setVisible(window, false);
+        return;
+    }
+    screen_.move(window, x, y);
+    screen_.resize(window, static_cast<int>(picture.width), static_cast<int>(picture.height));
+    screen_.setImage(window, std::move(picture));
+    screen_.setVisible(window, true);
+}
+
+void NeighborhoodUi::showCard(std::uint32_t lot, int lotX, int lotY) {
     const auto found = cards_.find(lot);
     if (card_ < 0 || found == cards_.end() || found->second.forSale) {
         return;
@@ -578,6 +802,7 @@ void NeighborhoodUi::showCard(std::uint32_t lot, int lotX) {
     for (const int c : screen_.children(card_)) {
         screen_.setVisible(c, false);
     }
+    bioShown_ = !card.community;
     if (card.community) {
         const int layout = screen_.find(card_, kCommunityLayout);
         screen_.setVisible(layout, true);
@@ -593,7 +818,7 @@ void NeighborhoodUi::showCard(std::uint32_t lot, int lotX) {
         // The worth the game shows here is more than the family's funds, and how it adds up is not known
         // yet (open question UI-30).
         screen_.setText(screen_.find(layout, kFamilyFunds), {});
-        screen_.setText(screen_.find(layout, kFamilyBio), card.text);
+        bio_.setText(screen_, card.text);
         if (card.picture.width > 0) {
             screen_.setImage(screen_.find(layout, kFamilyPicture), card.picture);
         }
@@ -613,6 +838,26 @@ void NeighborhoodUi::showCard(std::uint32_t lot, int lotX) {
     }
     screen_.move(card_, x, (height_ - h) / 2);
     screen_.setVisible(card_, true);
+    // The glow surrounds the layout's panel picture, its window 1.
+    const std::uint32_t layoutId = card.community ? kCommunityLayout : kFamilyLayout;
+    glowPanel_ = screen_.find(screen_.find(card_, layoutId), layoutId | 1);
+    if (glowPanel_ >= 0) {
+        int px = 0, py = 0;
+        for (int up = glowPanel_; up >= 0; up = screen_.parent(up)) {
+            px += screen_.x(up);
+            py += screen_.y(up);
+        }
+        const auto f = [](int v) { return static_cast<float>(v); };
+        glowPanelRect_ = {f(px), f(py), f(px + screen_.width(glowPanel_)), f(py + screen_.height(glowPanel_))};
+        CardGlow box = boxGlow(glowBox(glowPanelRect_), width_, height_);
+        glowBoxPicture_ = box.picture;
+        glowBoxAt_ = {box.x, box.y};
+        showGlow(glow_, std::move(box.picture), box.x, box.y);
+    }
+    glowPoint_ = {std::numeric_limits<int>::min(), 0};
+    setCardPoint(lotX, lotY);
+    screen_.raise(glow_);
+    screen_.raise(glowTail_);
     screen_.raise(card_);
     cardLot_ = lot;
 }
@@ -649,8 +894,13 @@ void NeighborhoodUi::showTag(std::uint32_t lot, int x, int y) {
 }
 
 void NeighborhoodUi::hideCard() {
+    if (bioShown_) {
+        bio_.unfocus(screen_);
+    }
     if (card_ >= 0) {
         screen_.setVisible(card_, false);
+        screen_.setVisible(glow_, false);
+        screen_.setVisible(glowTail_, false);
     }
     cardLot_ = 0;
 }

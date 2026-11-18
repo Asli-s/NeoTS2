@@ -255,6 +255,8 @@ private:
     void closeChooser();
     void lotClicked(float x, float y);
     void showLotCard(std::uint32_t lot);
+    // Where a lot's centre is on screen, in UI units, at its height less 2 as the game projects it.
+    std::optional<std::array<int, 2>> lotCentreOnUi(std::uint32_t lot) const;
     void showLotTag();
     void placePlumbobs(std::uint64_t now);
 

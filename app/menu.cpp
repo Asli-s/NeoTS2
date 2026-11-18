@@ -1427,13 +1427,19 @@ void Game::showLotCard(std::uint32_t lot) {
     if (neighborhoodCovered()) {
         return;
     }
+    if (const auto ui = lotCentreOnUi(lot)) {
+        hoodUi_.showCard(lot, (*ui)[0], (*ui)[1]);
+    }
+}
+
+std::optional<std::array<int, 2>> Game::lotCentreOnUi(std::uint32_t lot) const {
     const auto where = std::find_if(hood_.stats.lotFootprints.begin(), hood_.stats.lotFootprints.end(),
                                     [&](const ts2::scene::LotFootprint& f) { return f.id == lot; });
     if (where == hood_.stats.lotFootprints.end()) {
-        return;
+        return std::nullopt;
     }
-    const auto at = app::screenPoint(orbit_.camera(), width_, height_, {(where->x0 + where->x1) / 2, (where->y0 + where->y1) / 2, where->z});
-    hoodUi_.showCard(lot, toUi(at[0], at[1])[0]);
+    const auto at = app::screenPoint(orbit_.camera(), width_, height_, {(where->x0 + where->x1) / 2, (where->y0 + where->y1) / 2, where->z - 2});
+    return toUi(at[0], at[1]);
 }
 
 
@@ -3049,6 +3055,15 @@ void Game::run() {
         if (screen_.visible(preview_)) {
             description_.tick(screen_, ts2::platform::ticksNs() / 1'000'000);
         }
+        if (auto* bio = hoodUi_.cardBio()) {
+            bio->tick(screen_, ts2::platform::ticksNs() / 1'000'000);
+        }
+        // The glow behind the lot card reaches to the lot wherever the camera moves.
+        if (inNeighborhood_ && hoodUi_.cardLot() != 0) {
+            if (const auto ui = lotCentreOnUi(hoodUi_.cardLot())) {
+                hoodUi_.setCardPoint((*ui)[0], (*ui)[1]);
+            }
+        }
         showPlumbob();
         lastFrame_ = now;
         showSprites(static_cast<double>(ts2::platform::ticksNs()) / 1e9, inNeighborhood_ || inLot_);
@@ -3283,6 +3298,41 @@ void Game::handleEvent(const pf::Event& e) {
                 description_.type(screen_, e.text);
             } else {
                 description_.key(screen_, e.key, e.shift, e.ctrl);
+            }
+            return;
+        }
+    }
+    // The lot card's household bio is a text box too, with its scroll bar. A changed bio isn't kept
+    // yet, as saving it is not ported.
+    if (auto* bio = inNeighborhood_ && !quitBox_.isOpen() ? hoodUi_.cardBio() : nullptr) {
+        float mx = 0, my = 0;
+        pf::mousePosition(mx, my);
+        const auto [ux, uy] = toUi(mx, my);
+        const bool left = e.button == pf::MouseButton::Left;
+        if (e.type == pf::Event::Type::MouseDown && left) {
+            if (bio->mouseDown(screen_, ux, uy, ts2::platform::ticksNs() / 1'000'000, e.shift)) {
+                return;
+            }
+            bio->unfocus(screen_);
+        }
+        if (e.type == pf::Event::Type::MouseMotion) {
+            const bool held = bio->holdsMouse();
+            bio->mouseMove(screen_, ux, uy);
+            if (held) {
+                return;
+            }
+        }
+        if (e.type == pf::Event::Type::MouseUp && left) {
+            bio->mouseUp(screen_, ux, uy);
+        }
+        if (e.type == pf::Event::Type::MouseWheel && bio->wheel(screen_, ux, uy, static_cast<int>(std::lround(e.wheel * 120)))) {
+            return;
+        }
+        if (bio->focused() && (e.type == pf::Event::Type::Text || e.type == pf::Event::Type::KeyDown)) {
+            if (e.type == pf::Event::Type::Text) {
+                bio->type(screen_, e.text);
+            } else {
+                bio->key(screen_, e.key, e.shift, e.ctrl);
             }
             return;
         }

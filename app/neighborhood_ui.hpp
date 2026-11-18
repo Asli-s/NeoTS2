@@ -2,10 +2,12 @@
 
 #include "content/ui_data.hpp"
 #include "audio_options_panel.hpp"
+#include "description_box.hpp"
 #include "game_options_panel.hpp"
 #include "graphics_options_panel.hpp"
 #include "ui/screen.hpp"
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -70,10 +72,14 @@ public:
     // Whether a click on a lot opens its card: lived-in lots always, community lots only while the
     // lots bin is open.
     bool clickable(std::uint32_t lot) const;
-    // Shows a lot's card beside the lot, whose centre is at `lotX` across the screen.
-    void showCard(std::uint32_t lot, int lotX);
+    // Shows a lot's card beside the lot, whose centre is at (`lotX`, `lotY`) on screen.
+    void showCard(std::uint32_t lot, int lotX, int lotY);
+    // The lot's centre on screen moved: the glow behind the card follows it.
+    void setCardPoint(int x, int y);
     void hideCard();
     std::uint32_t cardLot() const { return cardLot_; }
+    // The household bio box of the card on screen, or null when no household card shows.
+    DescriptionBox* cardBio() { return cardLot_ != 0 && bioShown_ ? &bio_ : nullptr; }
 
     // Shows the tag of the lot under the mouse (0: none) over the lot's centre, at (x, y) on screen.
     void showTag(std::uint32_t lot, int x, int y);
@@ -88,11 +94,21 @@ private:
         std::vector<int> tiles;     // the tiles placed in it
     };
     void layoutStrip(Strip& strip, const std::vector<ts2::tga::Pixels>& pictures);
+    // Puts a glow picture in its window at (x, y) on screen, or hides the window for an empty one.
+    void showGlow(int window, ts2::tga::Pixels picture, int x, int y);
 
     ts2::ui::Screen& screen_;
     ts2::content::UiData& data_;
     int width_, height_;
     int panel_ = -1, families_ = -1, lots_ = -1, card_ = -1, options_ = -1;
+    // The soft glow behind the card: its box round the panel picture, drawn with the card, and its
+    // reach to the lot, drawn over the box whenever the lot's point moves.
+    int glow_ = -1, glowTail_ = -1;
+    int glowPanel_ = -1;  // the panel picture it surrounds
+    std::array<float, 4> glowPanelRect_{};  // the panel on screen
+    ts2::tga::Pixels glowBoxPicture_;  // the box's picture, which the reach is drawn over
+    std::array<int, 2> glowBoxAt_{};  // where that picture is on screen
+    std::array<int, 2> glowPoint_{};  // the lot's point the reach was drawn for
     OptionsMenu optionsMenu_{screen_};
     GameOptionsPanel gameOptions_{screen_, optionsMenu_};
     GraphicsOptionsPanel graphicsOptions_{screen_, optionsMenu_};
@@ -107,6 +123,8 @@ private:
     std::vector<std::uint32_t> occupied_;
     std::map<std::uint32_t, LotCard> cards_;
     std::uint32_t cardLot_ = 0;
+    DescriptionBox bio_;
+    bool bioShown_ = false;
 };
 
 } // namespace app
