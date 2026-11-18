@@ -13,19 +13,35 @@ constexpr int kBarGap = 3;
 } // namespace
 
 void ListBoxRows::attach(ts2::ui::Screen& screen, int list, int rowHeight, BarImages bar) {
+    attach(screen, list, Layout{rowHeight}, bar);
+}
+
+void ListBoxRows::attach(ts2::ui::Screen& screen, int list, const Layout& layout, BarImages bar) {
     screen_ = &screen;
     list_ = list;
     // Rows taken for an earlier list went with it, and their handles may now name other windows.
     rows_.clear();
     top_ = 0;
-    rowHeight_ = std::max(1, rowHeight);
+    rowHeight_ = std::max(1, layout.rowHeight);
     width_ = screen.width(list);
     height_ = screen.height(list);
-    visible_ = height_ / rowHeight_;
+    const int gap = std::max(0, layout.gap);
+    if (gap > 0) {
+        visible_ = std::max(1, (height_ - gap) / (rowHeight_ + gap));
+        pitch_ = std::max(rowHeight_, (height_ - gap) / visible_);
+    } else {
+        visible_ = height_ / rowHeight_;
+        pitch_ = rowHeight_;
+    }
+    firstY_ = gap + layout.rowY;
+    rowX_ = layout.rowX;
     const int barWidth = GameScrollBar::width(screen, bar.images, bar.track, bar.thumb);
-    screen.resize(list, width_ + kBarGap + barWidth, height_);
-    const ts2::ui::Window window{{{"iid", "IGZWinGen"}, {"winflag_visible", "yes"}, {"area", std::format("(0,0,{},{})", barWidth, visible_ * rowHeight_)}}, {}};
-    bar_ = screen.addWindows({window}, width_ + kBarGap, 0, list);
+    const int barX = layout.bar ? (*layout.bar)[0] : width_ + kBarGap;
+    const int barY = layout.bar ? (*layout.bar)[1] : 0;
+    const int barHeight = layout.bar ? (*layout.bar)[2] : visible_ * rowHeight_;
+    screen.resize(list, std::max(width_, barX + barWidth), std::max(height_, barY + barHeight));
+    const ts2::ui::Window window{{{"iid", "IGZWinGen"}, {"winflag_visible", "yes"}, {"area", std::format("(0,0,{},{})", barWidth, barHeight)}}, {}};
+    bar_ = screen.addWindows({window}, barX, barY, list);
     scroll_.attach(screen, bar_, bar.images, bar.track, bar.thumb);
 }
 
@@ -46,7 +62,7 @@ void ListBoxRows::showRows() {
     for (int i = 0; i < static_cast<int>(rows_.size()); ++i) {
         const int row = rows_[static_cast<std::size_t>(i)];
         screen_->setVisible(row, i >= top_ && i < top_ + visible_);
-        screen_->move(row, 0, (i - top_) * rowHeight_);
+        screen_->move(row, rowX_, firstY_ + (i - top_) * pitch_);
     }
     scroll_.set(*screen_, static_cast<int>(rows_.size()), visible_, top_);
 }

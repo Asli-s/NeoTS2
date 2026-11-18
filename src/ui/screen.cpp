@@ -54,6 +54,38 @@ std::array<float, 4> color(const std::vector<std::int64_t>& rgb) {
     return {static_cast<float>(rgb[0]) / 255, static_cast<float>(rgb[1]) / 255, static_cast<float>(rgb[2]) / 255, 1};
 }
 
+// Each fully clear texel next to a visible one takes that neighbour's colour (side neighbours before
+// corner ones), keeping its alpha of 0. A picture enlarged with the UI blends each texel with the next
+// along its edge, and would otherwise show a fringe of whatever colour the clear texels hold (magenta
+// in the game's art), such as an outline round every station button in Audio Options.
+void colourClearTexels(tga::Pixels& p) {
+    const std::size_t w = p.width, h = p.height;
+    if (w == 0 || h == 0 || p.rgba.size() != w * h * 4) {
+        return;
+    }
+    const std::vector<std::uint8_t> was = p.rgba;
+    constexpr int kNear[8][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}, {-1, -1}, {1, -1}, {-1, 1}, {1, 1}};
+    for (std::size_t y = 0; y < h; ++y) {
+        for (std::size_t x = 0; x < w; ++x) {
+            const std::size_t at = (y * w + x) * 4;
+            if (was[at + 3] != 0) {
+                continue;
+            }
+            for (const auto& [dx, dy] : kNear) {
+                const auto nx = static_cast<std::ptrdiff_t>(x) + dx, ny = static_cast<std::ptrdiff_t>(y) + dy;
+                if (nx < 0 || ny < 0 || nx >= static_cast<std::ptrdiff_t>(w) || ny >= static_cast<std::ptrdiff_t>(h)) {
+                    continue;
+                }
+                const std::size_t from = (static_cast<std::size_t>(ny) * w + static_cast<std::size_t>(nx)) * 4;
+                if (was[from + 3] != 0) {
+                    std::copy_n(was.begin() + static_cast<std::ptrdiff_t>(from), 3, p.rgba.begin() + static_cast<std::ptrdiff_t>(at));
+                    break;
+                }
+            }
+        }
+    }
+}
+
 } // namespace
 
 Screen::Screen(content::UiData& data, Fonts& fonts) : data_(data), fonts_(fonts) {
@@ -61,6 +93,7 @@ Screen::Screen(content::UiData& data, Fonts& fonts) : data_(data), fonts_(fonts)
 }
 
 int Screen::texture(tga::Pixels pixels) {
+    colourClearTexels(pixels);
     int index = static_cast<int>(textures_.size());
     if (!freeTextures_.empty()) {
         index = freeTextures_.back();
@@ -164,6 +197,9 @@ int Screen::add(const ui::Window& source, int parent) {
     w.textColor = color(source.list(w.kind == Kind::Text ? "forecolor" : "colorfontnormal"));
     if (const auto disabled = source.list("colorfontdisabled"); w.kind == Kind::Button && disabled.size() >= 3) {
         w.disabledTextColor = color(disabled);
+    }
+    if (const auto hilited = source.list("colorfonthilited"); w.kind == Kind::Button && hilited.size() >= 3) {
+        w.hoverTextColor = color(hilited);
     }
     if (w.kind == Kind::TextEdit) {
         w.highlightColor = color(source.list("highlightcolor"));
@@ -1263,7 +1299,9 @@ void Screen::emit(int index, std::vector<Quad>& out) const {
         // Other text is cut off inside the window's gutters.
         const float cx0 = std::max(tx, x0 + gx), cy0 = std::max(ty, top), cx1 = std::min(tx + tw, x1 - gx), cy1 = std::min(ty + th, bottom);
         if (cx1 > cx0 && cy1 > cy0) {
-            const std::array<float, 4> color = w.state == ButtonState::Disabled && w.disabledTextColor ? *w.disabledTextColor : w.textColor;
+            const std::array<float, 4> color = w.state == ButtonState::Disabled && w.disabledTextColor ? *w.disabledTextColor
+                                               : w.state == ButtonState::Hover && w.hoverTextColor   ? *w.hoverTextColor
+                                                                                                     : w.textColor;
             auto part = [&](float a, float b, float c0, float c1, const std::array<float, 4>& c) {
                 if (b > a && c1 > c0) {
                     out.push_back({a, c0, b, c1, (a - tx) / tw, (c0 - ty) / th, (b - tx) / tw, (c1 - ty) / th, w.textImage, c});

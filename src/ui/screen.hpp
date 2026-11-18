@@ -207,6 +207,8 @@ private:
         VAlign vAlign = VAlign::Top;
         std::array<float, 4> textColor{1, 1, 1, 1};
         std::optional<std::array<float, 4>> disabledTextColor;  // a button's text while disabled
+        // A button's text under the pointer (colorfonthilited), as a stereo's station names light up.
+        std::optional<std::array<float, 4>> hoverTextColor;
         std::array<int, 4> gutters{};  // left, top, right, bottom
         bool wrapped = false, showCaption = true;
         bool wrapCaption = false;  // a button's caption measured as wrapped lines (wrapcaption)

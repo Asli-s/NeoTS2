@@ -5,6 +5,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ts2::propset {
@@ -14,6 +15,8 @@ namespace ts2::propset {
 // removed and the basic XML entities decoded. The binary form (magic 0xCBE750E0) is read too, its
 // values written as the text form would show them.
 std::map<std::string, std::string> parse(std::span<const std::uint8_t> data);
+// The same entries in the order the set holds them, a name met twice kept twice.
+std::vector<std::pair<std::string, std::string>> parseInOrder(std::span<const std::uint8_t> data);
 
 // A property as a number (decimal, or hex with 0x), 0 when missing or not a number.
 std::uint32_t number(const std::map<std::string, std::string>& properties, const std::string& key);

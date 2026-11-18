@@ -261,14 +261,15 @@ std::string Bank::songTitle(std::uint32_t id, std::uint8_t language) const {
     return title == nullptr ? std::string() : *title;
 }
 
-// Every package that lists categories adds its own, so the lists are joined, not replaced.
+// Every package that lists categories adds its own, so the lists are joined, not replaced. They keep
+// the order the list holds them in, which is the order the stereo's stations show in Audio Options.
 void Bank::addCategories(dbpf::Package& package, std::span<const dbpf::IndexEntry> entries) {
     for (const dbpf::IndexEntry& entry : entries) {
         if (entry.key.type != kPropertySet || entry.key.instance != kMusicCategories.instance || entry.key.instanceHigh != kMusicCategories.instanceHigh) {
             continue;
         }
         try {
-            for (const auto& [name, list] : propset::parse(package.read(entry))) {
+            for (const auto& [name, list] : propset::parseInOrder(package.read(entry))) {
                 if (std::any_of(categories_.begin(), categories_.end(), [&](const Category& c) { return c.first == name; })) {
                     continue;
                 }

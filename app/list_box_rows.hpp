@@ -3,7 +3,9 @@
 #include "game_scroll_bar.hpp"
 #include "ui/screen.hpp"
 
+#include <array>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace app {
@@ -19,8 +21,20 @@ public:
         std::uint32_t images = 0, track = 0, thumb = 0;
     };
 
+    // How a list lays out its rows, when not one row height apart from the top (see attach).
+    struct Layout {
+        int rowHeight = 1;
+        // With a gap, as many rows show as fit with the gap above each and below the last, spread
+        // evenly over the list's height below the first gap, as the game's music list places them.
+        int gap = 0;
+        int rowX = 0, rowY = 0;  // where each row stands in its place
+        // The bar's place in the list, its width the bar's own. Without one it stands 3 past the rows.
+        std::optional<std::array<int, 3>> bar;  // x, y, height
+    };
+
     // `list` is the list window. Its width and height are the rows' area.
     void attach(ts2::ui::Screen& screen, int list, int rowHeight, BarImages bar);
+    void attach(ts2::ui::Screen& screen, int list, const Layout& layout, BarImages bar);
     // Takes `rows`, windows inside the list in the order shown, and shows them from the first.
     void setRows(std::vector<int> rows);
     // Scrolls so that `row` shows. A row below the ones shown becomes the last one shown.
@@ -48,6 +62,7 @@ private:
     int list_ = -1, bar_ = -1;
     GameScrollBar scroll_;
     int rowHeight_ = 1, width_ = 0, height_ = 0, visible_ = 0;
+    int pitch_ = 1, firstY_ = 0, rowX_ = 0;  // rows' spacing, the first row's top and every row's left
     std::vector<int> rows_;
     int top_ = 0;
 };

@@ -99,6 +99,7 @@ private:
     int stereoPanel_ = -1, modePanel_ = -1, stereoOverlay_ = -1, modeOverlay_ = -1;
     int songBox_ = -1, songBar_ = -1, stationBox_ = -1, stationTemplate_ = -1;
     std::array<int, 2> stationArrows_{-1, -1};
+    std::array<int, 2> customStations_{-1, -1};  // the Custom Radio Stations buttons (see kCustomStations)
     std::vector<int> stationButtons_;
     std::vector<std::string> stations_;
     int stationTop_ = 0, station_ = 0;

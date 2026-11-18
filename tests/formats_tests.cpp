@@ -1546,6 +1546,14 @@ void binaryPropertySetsAndReferenceLists() {
     u32(0xABC78708), name("stretch"), u32(0x3F800000);
     const auto p = ts2::propset::parse(d);
     CHECK(p.at("lk0") == "65538" && p.at("type") == "skin" && std::stof(p.at("stretch")) == 1.0f);
+    // In order, as the set holds them: the game's music category list keeps the stereo stations' order.
+    const auto ordered = ts2::propset::parseInOrder(d);
+    CHECK(ordered.size() == 3 && ordered[0].first == "lk0" && ordered[1].first == "type" && ordered[2].first == "stretch");
+    const std::string xml = "<cGZPropertySetString><AnyString key=\"hiphop\" type=\"0x0b8bea18\">hiphop</AnyString>"
+                            "<AnyString key=\"metal\" type=\"0x0b8bea18\">metal</AnyString>"
+                            "<AnyString key=\"classical\" type=\"0x0b8bea18\">classical</AnyString></cGZPropertySetString>";
+    const auto text = ts2::propset::parseInOrder(std::span(reinterpret_cast<const std::uint8_t*>(xml.data()), xml.size()));
+    CHECK(text.size() == 3 && text[0].first == "hiphop" && text[1].first == "metal" && text[2].first == "classical");
 
     d = {0xEF, 0xBE, 0xAD, 0xDE, 2, 0, 0, 0, 1, 0, 0, 0};
     u32(0xE519C933), u32(0x1C0532FA), u32(0xFF6B8A91), u32(0x12345678);

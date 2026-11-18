@@ -46,13 +46,28 @@ constexpr std::array<const char*, 5> kTabStations{"", "buy", "build", "nhood", "
 constexpr std::uint32_t kStereoPanel = 0x200, kModePanel = 0x100, kStereoOverlay = 0xCC, kModeOverlay = 0xDD;
 constexpr std::uint32_t kSongBox = 0x0CC3BA9B, kSongList = 0x297, kSongBar = 0x299, kStationBox = 0x400, kStationTemplate = 0x201;
 constexpr std::array<std::uint32_t, 2> kStationArrows{0x2AA, 0x2BB};
+// The Custom Radio Stations button: one at the stations' top left on the stereos' tab, the other at the
+// song list's top right on the other tabs, each shown only on its own tabs.
+constexpr std::array<std::uint32_t, 2> kCustomStations{0xD07, 0xD08};
 // The song list sits 107 px further left under the modes' smaller panel, as their overlay does.
 constexpr int kStereoListX = 277, kModeListX = 170;
 // The station buttons stand one button's height apart, as many as the box (215 high) holds.
 constexpr int kStationFirstY = 11, kStationPitch = 20, kStationRows = 10, kStationWidth = 116, kStationHeight = 20;
 constexpr std::uint32_t kFirstStationId = 0x00B00000;  // window id, leakcheck: ok
-const std::string kSongBoxImage = "{499db772,ac76e160}";
 constexpr std::string_view kStillStereo = "NeoTS2 plays in stereo for now. The choice is saved.";
+
+// A song's row, as the game builds it from its row script (UI script 0x49060F04, the one for every
+// screen size but 800 x 600): 19 high with 5 between rows, as many as fit, spread over the list's
+// height. The bar is the panel script's own (0x299), 9 past the list's right end and 15 below its
+// top, 241 high.
+constexpr std::uint32_t kSongRowScript = 0x49060F04;
+OptionsList::RowStyle songRows() {
+    OptionsList::RowStyle style;
+    style.layout = ListBoxRows::Layout{19, 5, 0, 0, std::array<int, 3>{286, 15, 241}};
+    style.scriptGroup = kScripts;
+    style.scriptInstance = kSongRowScript;
+    return style;
+}
 
 bool readBool(const std::string& text, bool& out) {
     if (text == "true") {
@@ -192,6 +207,7 @@ void AudioOptionsPanel::load() {
     stationBox_ = screen_.find(panel_, kStationBox);
     stationTemplate_ = screen_.find(panel_, kStationTemplate);
     stationArrows_ = {screen_.find(panel_, kStationArrows[0]), screen_.find(panel_, kStationArrows[1])};
+    customStations_ = {screen_.find(panel_, kCustomStations[0]), screen_.find(panel_, kCustomStations[1])};
     // The script's bar and button are only samples: the lists make their own, as the game's code does.
     for (const int sample : {songBar_, stationTemplate_}) {
         if (sample >= 0) {
@@ -200,7 +216,7 @@ void AudioOptionsPanel::load() {
     }
     const int list = screen_.find(panel_, kSongList);
     if (list >= 0) {
-        songs_.attach(screen_, list, kSongBoxImage);
+        songs_.attach(screen_, list, songRows());
         songs_.setMulti(true);
     }
     tab_ = 0;
@@ -218,6 +234,7 @@ void AudioOptionsPanel::remove() {
     tabButtons_ = {-1, -1, -1, -1, -1};
     stereoPanel_ = modePanel_ = stereoOverlay_ = modeOverlay_ = songBox_ = songBar_ = stationBox_ = stationTemplate_ = -1;
     stationArrows_ = {-1, -1};
+    customStations_ = {-1, -1};
     stationButtons_.clear();
     stations_.clear();
     songList_.clear();
@@ -428,12 +445,12 @@ void AudioOptionsPanel::showTab() {
             screen_.setChecked(tabButtons_[i], static_cast<int>(i) == tab_);
         }
     }
-    for (const int window : {stereoPanel_, stereoOverlay_, stationBox_, stationArrows_[0], stationArrows_[1]}) {
+    for (const int window : {stereoPanel_, stereoOverlay_, stationBox_, stationArrows_[0], stationArrows_[1], customStations_[0]}) {
         if (window >= 0) {
             screen_.setVisible(window, stereo);
         }
     }
-    for (const int window : {modePanel_, modeOverlay_}) {
+    for (const int window : {modePanel_, modeOverlay_, customStations_[1]}) {
         if (window >= 0) {
             screen_.setVisible(window, !stereo);
         }
@@ -505,6 +522,14 @@ void AudioOptionsPanel::showSongs() {
     if (music_ != nullptr && station_ < static_cast<int>(stations_.size())) {
         songList_ = music_->musicSongs(stations_[station_]);
     }
+    // The game lists a station's songs by title, whatever order the station plays them in.
+    const auto lowered = [](const std::string& text) {
+        std::string out = text;
+        std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return out;
+    };
+    std::stable_sort(songList_.begin(), songList_.end(),
+                     [&](const ts2::audio::MusicSong& a, const ts2::audio::MusicSong& b) { return lowered(a.title) < lowered(b.title); });
     std::vector<std::string> titles;
     std::vector<bool> checks;
     for (const ts2::audio::MusicSong& song : songList_) {

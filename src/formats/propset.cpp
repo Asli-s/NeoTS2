@@ -48,13 +48,13 @@ std::string decodeEntities(std::string_view s) {
 }
 
 // The binary form (magic 0xCBE750E0): typed values, written out as the text form shows them.
-std::map<std::string, std::string> parseBinary(std::span<const std::uint8_t> data) {
+std::vector<std::pair<std::string, std::string>> parseBinary(std::span<const std::uint8_t> data) {
     constexpr std::uint32_t kUint = 0xEB61E4F7, kString = 0x0B8BEA18, kFloat = 0xABC78708, kBool = 0xCBA908E1,
                             kInt = 0x0C264712;
     BinaryReader r(data);
     r.u32();
     r.u16();  // version
-    std::map<std::string, std::string> properties;
+    std::vector<std::pair<std::string, std::string>> properties;
     const std::uint32_t count = r.u32();
     for (std::uint32_t i = 0; i < count; ++i) {
         const std::uint32_t type = r.u32();
@@ -75,19 +75,19 @@ std::map<std::string, std::string> parseBinary(std::span<const std::uint8_t> dat
         } else {
             break;  // an unknown type: its size isn't known either
         }
-        properties[std::move(name)] = std::move(value);
+        properties.emplace_back(std::move(name), std::move(value));
     }
     return properties;
 }
 
 } // namespace
 
-std::map<std::string, std::string> parse(std::span<const std::uint8_t> data) {
+std::vector<std::pair<std::string, std::string>> parseInOrder(std::span<const std::uint8_t> data) {
     if (data.size() >= 4 && data[0] == 0xE0 && data[1] == 0x50 && data[2] == 0xE7 && data[3] == 0xCB) {
         return parseBinary(data);
     }
     const std::string_view text(reinterpret_cast<const char*>(data.data()), data.size());
-    std::map<std::string, std::string> properties;
+    std::vector<std::pair<std::string, std::string>> properties;
     for (std::size_t pos = text.find("<Any"); pos != std::string_view::npos; pos = text.find("<Any", pos)) {
         const auto tagEnd = text.find('>', pos);
         if (tagEnd == std::string_view::npos) {
@@ -105,15 +105,23 @@ std::map<std::string, std::string> parse(std::span<const std::uint8_t> data) {
         }
         std::string key(tag.substr(keyStart + 5, keyEnd - keyStart - 5));
         if (tag.ends_with('/')) {
-            properties[std::move(key)] = {};
+            properties.emplace_back(std::move(key), std::string());
             continue;
         }
         const auto valueEnd = text.find("</", pos);
         if (valueEnd == std::string_view::npos) {
             break;
         }
-        properties[std::move(key)] = decodeEntities(trim(text.substr(pos, valueEnd - pos)));
+        properties.emplace_back(std::move(key), decodeEntities(trim(text.substr(pos, valueEnd - pos))));
         pos = valueEnd;
+    }
+    return properties;
+}
+
+std::map<std::string, std::string> parse(std::span<const std::uint8_t> data) {
+    std::map<std::string, std::string> properties;
+    for (auto& [key, value] : parseInOrder(data)) {
+        properties[std::move(key)] = std::move(value);
     }
     return properties;
 }
