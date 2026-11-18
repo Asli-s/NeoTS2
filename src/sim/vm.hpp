@@ -212,6 +212,9 @@ public:
     // That copy as the last check tree left it.
     const std::optional<ttab::Interaction>& testedLine() const { return testedLine_; }
 
+    // The world the VM runs in. Null when it runs trees without one.
+    const World* world() const { return world_; }
+
     std::array<std::int16_t, kGlobalCount> globals{};
     std::function<void(const StepInfo&)> onStep;
     // Called when a Sim takes an interaction from its queue and starts it, or starts autonomy's pick.

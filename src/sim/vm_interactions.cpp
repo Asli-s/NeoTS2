@@ -315,15 +315,6 @@ bool Execution::findBestInteraction(const bhav::Instruction& in) {
 
 namespace {
 
-// Whether the Sim's running interaction lets sub-interactions wait: its line has flag 0x4000.
-bool takesSubInteractions(CodeSource& code, const World& world, const SimObject& sim) {
-    constexpr std::uint32_t kTakesSubInteractionsFlag = 0x4000;
-    const SimObject* object = sim.running ? world.find(sim.running->object) : nullptr;
-    const auto table = object != nullptr ? interactionsOf(code, *object).table : nullptr;
-    const ttab::Interaction* line = table ? ttab::find(*table, sim.running->index) : nullptr;
-    return line != nullptr && (line->flags & kTakesSubInteractionsFlag) != 0;
-}
-
 // Forgets the sub-queue interaction: the running one and person data 0x4B-0x4E and 0x9D, which name
 // it and the sub-queue's next one.
 void dropSubQueue(SimObject& sim) {

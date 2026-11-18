@@ -30,7 +30,7 @@ constexpr std::size_t kSpecies = 0xBA;
 // The Sim's object data the check tree answers in.
 constexpr std::size_t kHideInteraction = 0x32;
 constexpr std::size_t kStopBaseInteraction = 0x06;
-constexpr std::size_t kMenuData65 = 0x65;
+constexpr std::size_t kMenuIcons = 0x65;  // the menu's icons for the line, one per bit
 constexpr std::size_t kMenuOrder = 0x68;
 
 // The object's object data that turn its menu off.
@@ -44,9 +44,11 @@ constexpr std::size_t kLockout = 0x19;
 constexpr std::size_t kParentalControlGlobal = 0x23;
 
 // A Sim may queue a new interaction while fewer than this many wait, or one of them is less urgent
-// than a menu choice.
+// than a menu choice. Sub-interactions wait in a queue of their own and count apart.
 constexpr std::size_t kMaxQueued = 7;
+constexpr std::size_t kMaxQueuedSub = 5;
 constexpr std::int16_t kMenuPriority = 50;
+constexpr std::uint32_t kTakesSubInteractions = 0x4000;
 
 // The interaction flag for what `sim` is: its age and species.
 std::uint32_t whoFlag(const SimObject& sim) {
@@ -76,9 +78,18 @@ bool objectOffersNothing(const SimObject& object) {
            (object.data[kPlacementFlags2] & kPlacementNoInteractions) != 0;
 }
 
-bool queueHasRoom(const SimObject& sim) {
-    return sim.queue.size() < kMaxQueued ||
-           std::any_of(sim.queue.begin(), sim.queue.end(), [](const QueuedInteraction& q) { return q.priority < kMenuPriority; });
+// Whether `sim` has room to queue `line`. A sub-interaction (flag 0x8000) needs a running interaction
+// that takes them and fewer than 5 waiting. Any other line needs fewer than 7 waiting in the main
+// queue, or one of those less urgent than a menu choice.
+bool queueHasRoom(CodeSource& code, const World* world, const SimObject& sim, const ttab::Interaction& line) {
+    const bool nested = (line.flags & kNested) != 0;
+    const auto waiting = std::count_if(sim.queue.begin(), sim.queue.end(), [&](const QueuedInteraction& q) { return q.nested == nested; });
+    if (nested) {
+        return world != nullptr && takesSubInteractions(code, *world, sim) && static_cast<std::size_t>(waiting) < kMaxQueuedSub;
+    }
+    return static_cast<std::size_t>(waiting) < kMaxQueued || std::any_of(sim.queue.begin(), sim.queue.end(), [](const QueuedInteraction& q) {
+               return !q.nested && q.priority < kMenuPriority;
+           });
 }
 
 // The checks before the check tree runs.
@@ -142,6 +153,13 @@ ObjectInteractions interactionsOf(CodeSource& code, const SimObject& object) {
     }
     const std::uint32_t semiGlobal = code.semiGlobalGroup(object.group);
     return {code.interactionTable(semiGlobal, tableId), semiGlobal, tableId};
+}
+
+bool takesSubInteractions(CodeSource& code, const World& world, const SimObject& sim) {
+    const SimObject* object = sim.running ? world.find(sim.running->object) : nullptr;
+    const auto table = object != nullptr ? interactionsOf(code, *object).table : nullptr;
+    const ttab::Interaction* line = table ? ttab::find(*table, sim.running->index) : nullptr;
+    return line != nullptr && (line->flags & kTakesSubInteractions) != 0;
 }
 
 std::optional<QueuedInteraction> queuedChoice(CodeSource& code, const World& world, const SimObject& object,
@@ -232,16 +250,18 @@ PieMenu pieMenu(Vm& vm, CodeSource& code, SimObject& sim, SimObject& object, con
 
     // Each check tree starts with the temps the one before left. The Sim gets its own back at the end.
     const auto temps = sim.thread.temps;
+    // The checks look at the part the interactions run on (see World::interactionPart), so either
+    // half of a two-tile stereo offers what its lead's state allows.
+    const std::int16_t checked = vm.world() != nullptr ? vm.world()->interactionPart(object) : object.id;
     for (std::size_t i = 0; i < table->interactions.size(); ++i) {
         const ttab::Interaction& line = table->interactions[i];
-        // The Sim's running interaction isn't known yet, so nested interactions are never offered.
         // Ids above 0x7FFF can't be named by scripts or the queue.
-        if ((line.flags & kNested) != 0 || line.stringIndex > 0x7FFF || !queueHasRoom(sim)) {
+        if (line.stringIndex > 0x7FFF || !queueHasRoom(code, vm.world(), sim, line)) {
             continue;
         }
         sim.data[kHideInteraction] = 0;
         sim.data[kStopBaseInteraction] = 0;
-        sim.data[kMenuData65] = 0;
+        sim.data[kMenuIcons] = 0;
         sim.data[kMenuOrder] = 0;
         if (!mayOffer(line, sim, vm, options)) {
             continue;
@@ -256,7 +276,7 @@ PieMenu pieMenu(Vm& vm, CodeSource& code, SimObject& sim, SimObject& object, con
             icon.index = line.iconIndex;
         }
         if (line.test != 0) {
-            const RunResult r = vm.runCheck(sim, object.group, line.test, object.id, std::array<std::int16_t, 4>{}, line, offered, &icon);
+            const RunResult r = vm.runCheck(sim, object.group, line.test, checked, std::array<std::int16_t, 4>{}, line, offered, &icon);
             if (r.outcome != Outcome::True && r.outcome != Outcome::False) {
                 menu.problems.push_back("line " + std::to_string(i) + ": " + r.reason + " " + r.detail);
             }
@@ -266,13 +286,18 @@ PieMenu pieMenu(Vm& vm, CodeSource& code, SimObject& sim, SimObject& object, con
             passed = true;
             sim.data[kHideInteraction] = 0;
         }
+        // A line the check tree offers choices from keeps no icons, as what the game gives them is not
+        // known yet.
         for (auto& o : offered) {
             menu.choices.push_back(PieChoice{std::move(o.name), static_cast<std::uint16_t>(line.stringIndex), o.params, o.disabled, 0, o.icon});
+            menu.choices.back().nested = (line.flags & kNested) != 0;
         }
         if (offered.empty() && passed && sim.data[kHideInteraction] == 0) {
             const std::string name = lineName(code, tableGroup, tableId, line, object.group);
             menu.choices.push_back(PieChoice{name, static_cast<std::uint16_t>(line.stringIndex), {}, OfferedAction::Disabled::No,
                                              sim.data[kMenuOrder], icon});
+            menu.choices.back().nested = (line.flags & kNested) != 0;
+            menu.choices.back().iconFlags = static_cast<std::uint16_t>(sim.data[kMenuIcons]);
         }
         if (options.firstOnly && !menu.choices.empty()) {
             break;

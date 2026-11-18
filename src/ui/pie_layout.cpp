@@ -39,16 +39,27 @@ std::pair<int, int> itemCorner(Shape shape, int knobX, int knobY, int w) {
     return {knobX - w / 2, knobY - kPillHeight / 2};
 }
 
-Item place(Shape shape, int knobX, int knobY, int textWidth, int textHeight) {
+Item place(Shape shape, int knobX, int knobY, int textWidth, int textHeight, int iconsWidth) {
     Item item;
     item.shape = shape;
     item.knobX = knobX;
     item.knobY = knobY;
-    const int w = itemWidth(shape, textWidth);
+    const bool icons = iconsWidth > 0;
+    const int middle = icons ? std::max(0, textWidth + iconsWidth - kCapWidth) : textWidth;
+    const int w = itemWidth(shape, middle);
     const auto [x, y] = itemCorner(shape, knobX, knobY, w);
     const bool stalk = shape == Shape::Below || shape == Shape::Above;
     item.rect = {x, y, w, stalk ? kStalkHeight : kPillHeight};
-    item.textX = knobLeft(shape) ? kKnobCapWidth : knobRight(shape) || shape == Shape::Centre ? kCapWidth : (w - textWidth) / 2;
+    item.iconsX = knobRight(shape) ? 0 : w - iconsWidth;
+    // The text follows the knob, or the icons at the left end. Icons at the right end move a centred
+    // text to the left end too.
+    if (knobLeft(shape)) {
+        item.textX = kKnobCapWidth;
+    } else if (knobRight(shape)) {
+        item.textX = icons ? iconsWidth : kCapWidth;
+    } else {
+        item.textX = shape == Shape::Centre || icons ? kCapWidth : (w - textWidth) / 2;
+    }
     item.textY = (kPillHeight - textHeight) / 2 + (shape == Shape::Above ? kStalkHeight - kPillHeight : 0);
     return item;
 }
@@ -79,7 +90,7 @@ Shape shapeAt(float angle) {
 }
 
 Layout layout(int centreX, int centreY, std::span<const int> textWidths, int textHeight, int headWidth, int headHeight,
-              int screenWidth, int screenHeight) {
+              int screenWidth, int screenHeight, std::span<const int> iconWidths) {
     Layout menu;
     menu.centreX = centreX;
     menu.centreY = centreY;
@@ -89,7 +100,7 @@ Layout layout(int centreX, int centreY, std::span<const int> textWidths, int tex
         const float angle = static_cast<float>(i) * step;
         const int knobX = centreX + static_cast<int>(kItemRadius * std::sin(angle));
         const int knobY = centreY - static_cast<int>(kItemRadius * std::cos(angle));
-        menu.items.push_back(place(shapeAt(angle), knobX, knobY, textWidths[i], textHeight));
+        menu.items.push_back(place(shapeAt(angle), knobX, knobY, textWidths[i], textHeight, i < iconWidths.size() ? iconWidths[i] : 0));
         grow(menu.bounds, menu.items.back().rect);
     }
     // Back onto the screen, everything together.
@@ -122,7 +133,9 @@ Page page(std::size_t total, std::size_t first) {
     return {first, count, true, first + count < total ? first + count : 0};
 }
 
-Item centreItem(int x, int y, int textWidth, int textHeight) { return place(Shape::Centre, x, y, textWidth, textHeight); }
+Item centreItem(int x, int y, int textWidth, int textHeight, int iconsWidth) {
+    return place(Shape::Centre, x, y, textWidth, textHeight, iconsWidth);
+}
 
 bool over(const Item& item, int x, int y) {
     const Rect& r = item.rect;

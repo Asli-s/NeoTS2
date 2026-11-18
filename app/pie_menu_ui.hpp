@@ -5,7 +5,9 @@
 #include "ui/pie_layout.hpp"
 #include "ui/screen.hpp"
 
+#include <array>
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -44,6 +46,10 @@ private:
         std::optional<std::size_t> choice;  // a leaf: which choice
         bool disabled = false;
         std::vector<Node> children;
+        // Its icons. A sub-menu's item takes the ring from the choice that made it and the icon bits
+        // of all its choices, as the game merges them.
+        bool nested = false;
+        std::uint16_t iconFlags = 0;
     };
     struct Shown {
         int knob = -1, litKnob = -1, text = -1;
@@ -63,10 +69,16 @@ private:
     std::optional<ts2::sim::PieChoice> choose(std::size_t item);
     // The entry an item shown stands for. None for "More...".
     std::optional<std::size_t> entryOf(std::size_t item) const;
-    int addItem(const ts2::ui::pie::Item& item, int textWidth, std::uint32_t base, const std::string& label, bool disabled, Shown& shown);
+    int addItem(const ts2::ui::pie::Item& item, int textWidth, std::uint32_t base, const std::string& label, bool disabled,
+                const std::vector<std::uint32_t>& icons, Shown& shown);
+    // A node's icon pictures, left to right. None for "More...".
+    std::vector<std::uint32_t> iconsOf(const Node* node) const;
+    int iconsWidth(const std::vector<std::uint32_t>& icons) const;
 
     ts2::ui::Screen& screen_;
     std::string moreText_;
+    // The picture of each icon bit, from the pie menu script's kIcon constants. 0 for a bit it doesn't name.
+    std::array<std::uint32_t, 16> iconPictures_{};
     std::vector<ts2::sim::PieChoice> choices_;
     std::vector<Node> top_;
     std::vector<Level> levels_;  // the top ring, then the sub-menus opened

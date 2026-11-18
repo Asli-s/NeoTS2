@@ -106,6 +106,24 @@ void pieItemsGoRoundTheCentre() {
     CHECK(menu.bounds.x == 1 && menu.bounds.y == 1 && menu.centreX > 5 && menu.centreY > 5);
 }
 
+// An item's icons widen its pill's middle by their width less the end cap they cover. They sit at the
+// pill's left end when its knob is on the right, the text after them, and at its right end otherwise,
+// where a stalked item's text moves from the middle to after the left cap.
+void pieItemIconsWidenThePill() {
+    namespace pie = ts2::ui::pie;
+    const std::vector<int> seven{50, 50, 50, 50, 50, 50, 50};
+    const std::vector<int> icons{28, 28, 0, 0, 0, 28, 0};
+    const auto menu = pie::layout(500, 400, seven, 16, 250, 370, 1920, 1080, icons);
+    // Knob below: middles of (50 + 28 - 16 - 35) / 2 = 13, the ring at the right end.
+    CHECK(menu.items[0].rect.w == 16 + 13 + 35 + 13 + 16 && menu.items[0].iconsX == 93 - 28 && menu.items[0].textX == 16);
+    // Knob on the left: 50 + 28 - 16 wide in the middle, the ring over the right end.
+    CHECK(menu.items[1].rect.w == 38 + 62 + 16 && menu.items[1].iconsX == 116 - 28 && menu.items[1].textX == 38);
+    CHECK(menu.items[2].rect.w == 104 && menu.items[2].textX == 38);
+    // Knob on the right: the ring at the left end and the text after it.
+    CHECK(menu.items[5].rect.w == 116 && menu.items[5].iconsX == 0 && menu.items[5].textX == 28);
+    CHECK(menu.items[5].rect.x == menu.items[5].knobX + 14 - 116);
+}
+
 // A UI script: windows with their attributes, quoted text with entities, lists and keys, and a
 // window's children.
 void uiScriptsParse() {
@@ -537,6 +555,7 @@ std::vector<Test> uiAndDiagTests() {
         {"animated bitmaps play as the game's", animatedBitmapsPlayAsTheGame},
         {"the scroll bar steps as the game's", scrollBarStepsAsTheGame},
         {"pie items go round the centre", pieItemsGoRoundTheCentre},
+        {"pie item icons widen the pill", pieItemIconsWidenThePill},
         {"clicks are dropped while loading", clicksAreDroppedWhileLoading},
         {"pie pages hold eleven and More", piePagesHoldElevenAndMore},
         {"tips are placed as the game", tipsArePlacedAsTheGame},

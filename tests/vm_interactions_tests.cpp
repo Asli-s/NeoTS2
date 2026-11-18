@@ -1389,6 +1389,22 @@ void pairedPartsHandTheirInteractionsOn() {
     const auto chosen = ts2::sim::queuedChoice(code, world, end, ts2::sim::PieChoice{});
     CHECK(chosen && chosen->object == middle.id);
 
+    // The menu's check trees look at that part too, so either part offers what its state allows: a
+    // stereo's Turn On checks its lead's attribute 10, whichever half is clicked.
+    table.interactions[0].test = 0x1200;
+    table.interactions[0].stringIndex = 0;
+    table.interactions[0].flags = 0x40;  // adults
+    sim.queue.clear();
+    code.addInteractionTable(kObjectGroup, 0x80, table);
+    code.addInteractionStrings(kObjectGroup, 0x80, {"Turn On"});
+    code.add(kObjectGroup, 0x1200, bhav({expr(owner::kStackObjectAttribute, 10, op::kEquals, owner::kLiteral, 0, T, F)}));
+    sim.personData[0x3A] = 30;
+    middle.attributes[10] = 1;
+    CHECK(ts2::sim::pieMenu(vm, code, sim, end).choices.empty() && ts2::sim::pieMenu(vm, code, sim, middle).choices.empty());
+    middle.attributes[10] = 0;
+    end.attributes[10] = 1;
+    CHECK(ts2::sim::pieMenu(vm, code, sim, end).choices.size() == 1);
+
     // A part with no partner keeps its interactions.
     middle.definition.fields[ts2::objd::field::kInteractionGroup] = 2;
     CHECK(world.interactionPart(end) == end.id);
@@ -2097,7 +2113,8 @@ void pieMenuOffersWhatChecksAllow() {
     code.addInteractionStrings(kObjectGroup, 0x80, {"Use", "Never", "Play", "Debug", "Sit", "", "Hidden"});
     code.addStrings(kObjectGroup, 0x12E, {"Red", "Blue"});
     code.add(kObjectGroup, 0x1010, bhav({expr(owner::kTemp, 0, op::kAssign, owner::kLiteral, 99, F, F)}));
-    code.add(kObjectGroup, 0x1011, bhav({expr(owner::kMyData, 0x68, op::kAssign, owner::kLiteral, 5, T, E)}));
+    code.add(kObjectGroup, 0x1011, bhav({expr(owner::kMyData, 0x68, op::kAssign, owner::kLiteral, 5, 1, E),
+                                         expr(owner::kMyData, 0x65, op::kAssign, owner::kLiteral, 2, T, E)}));
     code.add(kObjectGroup, 0x1012, bhav({offer(1, 0, 1), offer(2, 0x01, T)}));
     code.add(kObjectGroup, 0x1013, bhav({expr(owner::kMyData, 0x32, op::kAssign, owner::kLiteral, 1, T, E)}));
 
@@ -2112,6 +2129,8 @@ void pieMenuOffersWhatChecksAllow() {
     CHECK(menu.choices.size() == 4);
     if (menu.choices.size() == 4) {
         CHECK(menu.choices[0].name == "Sit" && menu.choices[0].order == 5 && menu.choices[0].interaction == 4);
+        // Data 0x65 as its check tree left it gives its icons, here the second one (the pie script's kIcon1).
+        CHECK(menu.choices[0].iconFlags == 2 && !menu.choices[0].nested && menu.choices[1].iconFlags == 0);
         CHECK(menu.choices[1].name == "Use" && menu.choices[1].interaction == 0);
         // Line 1's check tree left 99 in temp 0 for the ones after it.
         CHECK(menu.choices[2].name == "Red" && menu.choices[2].interaction == 5 && menu.choices[2].params[1] == 99);
@@ -2316,6 +2335,77 @@ void multiTilePartsUseTheirMastersTexts() {
         CHECK(menu.choices.size() == 1 && menu.choices[0].name == "Relax");
         CHECK(ts2::sim::interactionName(code, *part, 0) == "Relax");
     }
+}
+
+// A sub-interaction line (flag 0x8000) is offered only while the Sim's running interaction has a line
+// with flag 0x4000 and fewer than 5 sub-interactions wait. They wait apart from the main queue and
+// don't use up its 7 places. The flags are the double bed's: Relax takes sub-interactions, and Cuddle
+// is one.
+void subInteractionsAreOfferedWhileTheRunningLineTakesThem() {
+    MemoryCodeSource code;
+    auto bedType = typed(kFridgeGuid);
+    bedType.fields[ts2::objd::field::kInteractionTableId] = 0x80;
+    code.addObjectType(kObjectGroup, bedType);
+    ts2::ttab::InteractionTable table;
+    table.interactions.resize(2);
+    table.interactions[0].action = 0x1000;
+    table.interactions[0].flags = 0x3C007C53;
+    table.interactions[1].action = 0x1000;
+    table.interactions[1].stringIndex = 1;
+    table.interactions[1].flags = 0x00008C41;
+    code.addInteractionTable(kObjectGroup, 0x80, table);
+    code.addInteractionStrings(kObjectGroup, 0x80, {"Relax", "Cuddle"});
+    code.add(kObjectGroup, 0x1000, bhav({expr(owner::kTemp, 0, op::kAssign, owner::kLiteral, 1, T, E)}));
+
+    ts2::sim::World world;
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    auto& bed = world.create(kObjectGroup, bedType);
+    sim.personData[0x3A] = 30;
+    Vm vm(code, {}, &world);
+    const auto names = [&] {
+        std::vector<std::string> out;
+        for (const auto& c : ts2::sim::pieMenu(vm, code, sim, bed).choices) {
+            out.push_back(c.name);
+        }
+        return out;
+    };
+    using Names = std::vector<std::string>;
+    CHECK(names() == Names{"Relax"});
+
+    ts2::sim::QueuedInteraction relax;
+    relax.object = bed.id;
+    relax.group = kObjectGroup;
+    relax.index = 0;
+    sim.running = relax;
+    CHECK(ts2::sim::takesSubInteractions(code, world, sim));
+    CHECK(names() == (Names{"Relax", "Cuddle"}));
+    // The menu marks a sub-interaction with its ring icon.
+    const auto offered = ts2::sim::pieMenu(vm, code, sim, bed).choices;
+    CHECK(offered.size() == 2 && !offered[0].nested && offered[1].nested);
+
+    ts2::sim::QueuedInteraction waiting;
+    waiting.object = bed.id;
+    waiting.priority = 100;
+    waiting.nested = true;
+    sim.queue.assign(4, waiting);
+    CHECK(names() == (Names{"Relax", "Cuddle"}));
+    sim.queue.push_back(waiting);
+    CHECK(names() == Names{"Relax"});
+
+    // Seven in the main queue leave no room there, whatever waits in the sub-queue.
+    sim.queue.resize(4);
+    waiting.nested = false;
+    sim.queue.insert(sim.queue.end(), 6, waiting);
+    CHECK(names() == (Names{"Relax", "Cuddle"}));
+    sim.queue.push_back(waiting);
+    CHECK(names() == Names{"Cuddle"});
+
+    // A running line without flag 0x4000 takes none.
+    sim.queue.clear();
+    relax.index = 1;
+    sim.running = relax;
+    CHECK(!ts2::sim::takesSubInteractions(code, world, sim));
+    CHECK(names() == Names{"Relax"});
 }
 
 // A check tree reads and changes the advertisement of the line it tests for the Sim's age group (a
@@ -2985,6 +3075,7 @@ std::vector<Test> vmInteractionTests() {
         {"debug lines start from Shift-clicked objects", debugLinesStartFromShiftClickedObjects},
         {"choices flagged to run at once skip the queue", choicesFlaggedToRunAtOnceSkipTheQueue},
         {"multi-tile parts use their master's texts", multiTilePartsUseTheirMastersTexts},
+        {"sub-interactions are offered while the running line takes them", subInteractionsAreOfferedWhileTheRunningLineTakesThem},
         {"check tree owners read the tested line", checkTreeOwnersReadTheTestedLine},
         {"Run Tree by Name runs the stack object's tree", runTreeByNameRunsTheStackObjectsTree},
         {"Run Tree by Name takes false when the tree is missing", runTreeByNameTakesFalseWhenTheTreeIsMissing},

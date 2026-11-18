@@ -1,7 +1,9 @@
 #include "pie_menu_ui.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <format>
+#include <string_view>
 
 namespace app {
 
@@ -23,6 +25,10 @@ const std::string kFont = "0x2966548b";  // "piemenu"
 constexpr std::array<float, 4> kTextNormal{178 / 255.f, 193 / 255.f, 1, 1};
 constexpr std::array<float, 4> kTextHighlighted{0, 1, 0, 1};
 constexpr std::array<float, 4> kTextDisabled{80 / 255.f, 80 / 255.f, 80 / 255.f, 1};
+// The pie menu script, whose constants name the icon bits' pictures (kIcon0, kIcon1...).
+constexpr std::uint32_t kScripts = 0xA99D8A11, kPieScript = 0x090617B7, kPieConstants = 0x0BD726B1;
+// The ring icon of a sub-interaction's item.
+constexpr std::uint32_t kNestedIcon = 0x99100200;
 // "More...": string 0x19 of table 0xAB in the UI text.
 constexpr std::uint32_t kUiText = 0x7FA7DC7C, kMoreText = 0x00AB0019;  // string ids, leakcheck: ok
 
@@ -63,7 +69,30 @@ ts2::ui::Window text(int x, int y, int w, int h, const std::string& caption) {
 
 } // namespace
 
-PieMenuUi::PieMenuUi(ts2::ui::Screen& screen, ts2::content::UiData& data) : screen_(screen), moreText_(data.text(kUiText, kMoreText)) {}
+PieMenuUi::PieMenuUi(ts2::ui::Screen& screen, ts2::content::UiData& data) : screen_(screen), moreText_(data.text(kUiText, kMoreText)) {
+    // Older installs have no such script, and then no icon bits.
+    const int script = screen_.load(kScripts, kPieScript, 0, 0);
+    if (script < 0) {
+        return;
+    }
+    // Lines read "kIcon<bit>=0x<picture>".
+    constexpr std::string_view kIcon = "kIcon";
+    for (const std::string& line : screen_.childTexts(screen_.find(script, kPieConstants))) {
+        const std::size_t eq = line.find('=');
+        if (!line.starts_with(kIcon) || eq == std::string::npos || line.compare(eq + 1, 2, "0x") != 0) {
+            continue;
+        }
+        unsigned bit = 0;
+        std::uint32_t picture = 0;
+        const char* begin = line.data();
+        const auto b = std::from_chars(begin + kIcon.size(), begin + eq, bit);
+        const auto p = std::from_chars(begin + eq + 3, begin + line.size(), picture, 16);
+        if (b.ec == std::errc{} && b.ptr == begin + eq && p.ec == std::errc{} && bit < iconPictures_.size()) {
+            iconPictures_[bit] = picture;
+        }
+    }
+    screen_.remove(script);
+}
 
 void PieMenuUi::open(std::vector<ts2::sim::PieChoice> choices, int x, int y, int screenWidth, int screenHeight) {
     close();
@@ -86,14 +115,19 @@ void PieMenuUi::open(std::vector<ts2::sim::PieChoice> choices, int x, int y, int
                 leaf.label = label;
                 leaf.choice = i;
                 leaf.disabled = choices_[i].disabled != ts2::sim::OfferedAction::Disabled::No;
+                leaf.nested = choices_[i].nested;
+                leaf.iconFlags = choices_[i].iconFlags;
                 level->push_back(std::move(leaf));
                 break;
             }
             auto group = std::find_if(level->begin(), level->end(), [&](const Node& n) { return !n.choice && n.label == label; });
             if (group == level->end()) {
-                level->push_back(Node{label, std::nullopt, false, {}});
+                Node made{label, std::nullopt, false, {}};
+                made.nested = choices_[i].nested;
+                level->push_back(std::move(made));
                 group = level->end() - 1;
             }
+            group->iconFlags |= choices_[i].iconFlags;
             level = &group->children;
             start = slash + 1;
         }
@@ -118,7 +152,34 @@ void PieMenuUi::close() {
     pressed_ = false;
 }
 
-int PieMenuUi::addItem(const pie::Item& item, int textWidth, std::uint32_t base, const std::string& label, bool disabled, Shown& shown) {
+std::vector<std::uint32_t> PieMenuUi::iconsOf(const Node* node) const {
+    std::vector<std::uint32_t> icons;
+    if (node == nullptr) {
+        return icons;
+    }
+    if (node->nested) {
+        icons.push_back(kNestedIcon);
+    }
+    for (std::size_t bit = 0; bit < iconPictures_.size(); ++bit) {
+        if ((node->iconFlags >> bit & 1) != 0 && iconPictures_[bit] != 0) {
+            icons.push_back(iconPictures_[bit]);
+        }
+    }
+    return icons;
+}
+
+int PieMenuUi::iconsWidth(const std::vector<std::uint32_t>& icons) const {
+    int width = 0;
+    for (const std::uint32_t icon : icons) {
+        if (const auto picture = screen_.data().image(kImageGroup, icon)) {
+            width += static_cast<int>(picture->width);
+        }
+    }
+    return width;
+}
+
+int PieMenuUi::addItem(const pie::Item& item, int textWidth, std::uint32_t base, const std::string& label, bool disabled,
+                       const std::vector<std::uint32_t>& icons, Shown& shown) {
     if (disabled) {
         base = kDisabledBase;
     }
@@ -150,23 +211,38 @@ int PieMenuUi::addItem(const pie::Item& item, int textWidth, std::uint32_t base,
     }
     case pie::Shape::LeftUpper:
     case pie::Shape::LeftSide:
-    case pie::Shape::LeftLower:
+    case pie::Shape::LeftLower: {
+        const int middle = r.w - pie::kKnobCapWidth - pie::kCapWidth;
         addKnob(r.x, r.y, pie::kKnobCapWidth, pie::kPillHeight);
-        add(r.x + pie::kKnobCapWidth, r.y, textWidth, pie::kPillHeight, kMiddle);
+        add(r.x + pie::kKnobCapWidth, r.y, middle, pie::kPillHeight, kMiddle);
         add(r.x + r.w - pie::kCapWidth, r.y, pie::kCapWidth, pie::kPillHeight, kRightCap);
         break;
+    }
     case pie::Shape::RightLower:
     case pie::Shape::RightSide:
-    case pie::Shape::RightUpper:
+    case pie::Shape::RightUpper: {
+        const int middle = r.w - pie::kCapWidth - pie::kKnobCapWidth;
         add(r.x, r.y, pie::kCapWidth, pie::kPillHeight, kLeftCap);
-        add(r.x + pie::kCapWidth, r.y, textWidth, pie::kPillHeight, kMiddle);
-        addKnob(r.x + pie::kCapWidth + textWidth, r.y, pie::kKnobCapWidth, pie::kPillHeight);
+        add(r.x + pie::kCapWidth, r.y, middle, pie::kPillHeight, kMiddle);
+        addKnob(r.x + pie::kCapWidth + middle, r.y, pie::kKnobCapWidth, pie::kPillHeight);
         break;
+    }
     case pie::Shape::Centre:
         add(r.x, r.y, pie::kCapWidth, pie::kPillHeight, kLeftCap);
-        add(r.x + pie::kCapWidth, r.y, textWidth, pie::kPillHeight, kMiddle);
+        add(r.x + pie::kCapWidth, r.y, r.w - 2 * pie::kCapWidth, pie::kPillHeight, kMiddle);
         add(r.x + r.w - pie::kCapWidth, r.y, pie::kCapWidth, pie::kPillHeight, kRightCap);
         break;
+    }
+    // The icons lie over the pill, side by side.
+    int iconX = r.x + item.iconsX;
+    for (const std::uint32_t icon : icons) {
+        const auto picture = screen_.data().image(kImageGroup, icon);
+        if (!picture) {
+            continue;
+        }
+        const int w = static_cast<int>(picture->width);
+        pieces.push_back(piece(iconX, pillY, w, static_cast<int>(picture->height), icon));
+        iconX += w;
     }
     const int first = static_cast<int>(screen_.children(root_).size());
     for (const auto& p : pieces) {
@@ -201,29 +277,40 @@ void PieMenuUi::show(const Level& level) {
     const auto textHeight = screen_.textSize(kFont, "Ag")[1];
     page_ = pie::page(level.nodes->size(), level.first);
     std::vector<int> widths;
+    std::vector<std::vector<std::uint32_t>> icons;
     if (page_.more) {
         widths.push_back(screen_.textSize(kFont, moreText_)[0]);
+        icons.emplace_back();
     }
     for (std::size_t i = 0; i < page_.count; ++i) {
-        widths.push_back(screen_.textSize(kFont, (*level.nodes)[page_.first + i].label)[0]);
+        const Node& node = (*level.nodes)[page_.first + i];
+        widths.push_back(screen_.textSize(kFont, node.label)[0]);
+        icons.push_back(iconsOf(&node));
+    }
+    std::vector<int> iconWidths;
+    for (const auto& list : icons) {
+        iconWidths.push_back(iconsWidth(list));
     }
     // A sub-menu goes round the item clicked. The head stays where the menu opened.
     const bool top = level.back == nullptr;
-    layout_ = pie::layout(level.x, level.y, widths, textHeight, top ? kHeadWidth : 0, top ? kHeadHeight : 0, screenWidth_, screenHeight_);
+    layout_ = pie::layout(level.x, level.y, widths, textHeight, top ? kHeadWidth : 0, top ? kHeadHeight : 0, screenWidth_, screenHeight_,
+                          iconWidths);
     for (std::size_t i = 0; i < widths.size(); ++i) {
         const auto entry = entryOf(i);
         const Node* node = entry ? &(*level.nodes)[*entry] : nullptr;
         Shown s;
-        addItem(layout_.items[i], widths[i], top ? kNormalBase : kSubmenuBase, node ? node->label : moreText_, node && node->disabled, s);
+        addItem(layout_.items[i], widths[i], top ? kNormalBase : kSubmenuBase, node ? node->label : moreText_, node && node->disabled,
+                icons[i], s);
         shown_.push_back(s);
     }
     backItem_.reset();
     back_ = {};
     if (level.back != nullptr) {
         const int w = screen_.textSize(kFont, level.back->label)[0];
-        backItem_ = pie::centreItem(layout_.centreX, layout_.centreY, w, textHeight);
+        const auto backIcons = iconsOf(level.back);
+        backItem_ = pie::centreItem(layout_.centreX, layout_.centreY, w, textHeight, iconsWidth(backIcons));
         // The item in the middle keeps the top ring's darker pictures at every depth.
-        addItem(*backItem_, w, kNormalBase, level.back->label, false, back_);
+        addItem(*backItem_, w, kNormalBase, level.back->label, false, backIcons, back_);
     }
 }
 

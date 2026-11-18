@@ -37,6 +37,9 @@ struct Item {
     int knobX = 0, knobY = 0;  // the knob's centre, whose offset from the menu's centre is the item's direction
     Rect rect;                 // the whole item
     int textX = 0, textY = 0;  // the text's top left, inside the item
+    // Where its icons start, inside the item, on the pill's top. They sit side by side at the pill's
+    // left end when its knob is on the right, else at its right end.
+    int iconsX = 0;
 };
 
 struct Layout {
@@ -47,9 +50,11 @@ struct Layout {
 
 // The items for texts `textWidths` wide and `textHeight` high round (centreX, centreY): the head's
 // area (`headWidth` x `headHeight`) centred there. The whole menu is moved back onto a
-// `screenWidth` x `screenHeight` screen, 1 pixel from its edges.
+// `screenWidth` x `screenHeight` screen, 1 pixel from its edges. `iconWidths` gives each item's
+// icons together, none for an item past its end. Icons widen the pill's middle by their width less
+// the end cap they cover.
 Layout layout(int centreX, int centreY, std::span<const int> textWidths, int textHeight, int headWidth, int headHeight,
-              int screenWidth, int screenHeight);
+              int screenWidth, int screenHeight, std::span<const int> iconWidths = {});
 
 // A pie menu ring holds at most 12 items. With more entries, "More..." goes first and the
 // entries follow 11 a page. Every page shows "More...", which on the last page goes back to the first.
@@ -62,7 +67,7 @@ struct Page {
 [[nodiscard]] Page page(std::size_t total, std::size_t first);
 
 // The centre item a sub-menu shows to go back, centred on (x, y).
-Item centreItem(int x, int y, int textWidth, int textHeight);
+Item centreItem(int x, int y, int textWidth, int textHeight, int iconsWidth = 0);
 
 // Whether (x, y) is on the item's pictures: its pill and its knob.
 [[nodiscard]] bool over(const Item& item, int x, int y);

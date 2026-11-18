@@ -23,6 +23,10 @@ struct PieChoice {
     InteractionIcon icon;    // its queue icon, as the line and its check tree left it
     // A line the game adds itself, outside the object's table: the global tree it runs. 0 for a table line.
     std::uint16_t tree = 0;
+    bool nested = false;  // a sub-interaction (line flag 0x8000), which the menu marks with a ring icon
+    // The menu's icons for it: object data 0x65 as its check tree left it, one icon per bit the pie
+    // menu script names (kIcon0, kIcon1...).
+    std::uint16_t iconFlags = 0;
 };
 
 struct PieMenuOptions {
@@ -60,6 +64,10 @@ struct ObjectInteractions {
     std::uint16_t instance = 0;
 };
 ObjectInteractions interactionsOf(CodeSource& code, const SimObject& object);
+
+// Whether `sim`'s running interaction lets sub-interactions (lines with flag 0x8000) wait and be
+// offered: its line has flag 0x4000, as a bed's Relax has.
+[[nodiscard]] bool takesSubInteractions(CodeSource& code, const World& world, const SimObject& sim);
 
 // What a Sim queues for a choice of `object`'s menu, at the priority the game gives a menu choice.
 // It runs on the part World::interactionPart gives.
