@@ -44,15 +44,7 @@ objt::Entry typeEntry(CodeSource& code, const ObjectType& type, std::uint16_t in
     objt::Entry entry;
     entry.guid = d.guid();
     const auto values = savedTypeValues(code, type);
-    std::uint32_t semi = 0;
-    const std::uint32_t semiGlobal = code.semiGlobalGroup(type.group);
-    if (semiGlobal != type.group) {
-        constexpr std::uint16_t kAttributeLabels = 0x100;
-        constexpr std::uint32_t kMaxLabels = 0x7FFF;
-        while (semi < kMaxLabels && code.string(semiGlobal, kAttributeLabels, semi)) {
-            ++semi;
-        }
-    }
+    const auto semi = static_cast<std::uint32_t>(semiAttributeCount(code, type));
     const std::array<std::uint32_t, 5> words{values[0], values[1], values[2], values[3], semi};
     for (std::size_t i = 0; i < words.size(); ++i) {
         entry.unknown[2 * i] = static_cast<std::uint16_t>(words[i]);

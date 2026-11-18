@@ -17,6 +17,8 @@ struct ObjectMap {
     std::uint32_t version = 0;
     // Object id -> index of its entry in the lot's object type table (objt).
     std::unordered_map<std::uint32_t, std::uint32_t> typeIndexByObject;
+    // The object ids in the order the list holds them, which is the order of the game's object list.
+    std::vector<std::uint32_t> order;
     // The ticks each object id still waits before its thread runs again (index id - 1), as a Sleep
     // left it when the lot was saved. Negative or 0 when it doesn't wait. Empty when the map has none.
     std::vector<std::int16_t> waitTicks;

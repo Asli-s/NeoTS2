@@ -105,8 +105,13 @@ bool clipEnded(const std::string& name, float lengthMs, float speed, double play
     return std::isfinite(lengthMs) && playedMs >= lengthMs;
 }
 
+// A looping clip ends only where its length says: the plays it was given, or the time it played
+// once Animate Stop stopped it. One played until stopped has no end before then.
 bool objectClipEnded(const PlayingAnimation& clip, const World& world, double nowMs) {
-    return !clip.loops && clipEnded(clip.name, clip.lengthMs, clip.speed, nowMs - clip.startMs, world);
+    if (clip.loops) {
+        return std::isfinite(clip.lengthMs) && nowMs - clip.startMs >= clip.lengthMs;
+    }
+    return clipEnded(clip.name, clip.lengthMs, clip.speed, nowMs - clip.startMs, world);
 }
 
 // What the object is playing now. A walk or a turn, which plays on layer 0, is left out: the game's

@@ -126,4 +126,56 @@ std::optional<tga::Pixels> decode(std::span<const std::uint8_t> data, std::uint3
     return out;
 }
 
+std::vector<std::uint8_t> packAlpha(std::span<const std::uint8_t> alpha) {
+    std::vector<std::uint8_t> out;
+    std::size_t literalStart = 0;
+    const auto flushLiterals = [&](std::size_t end) {
+        while (literalStart < end) {
+            const std::size_t n = std::min<std::size_t>(end - literalStart, 128);
+            out.push_back(static_cast<std::uint8_t>(n - 1));
+            out.insert(out.end(), alpha.begin() + static_cast<std::ptrdiff_t>(literalStart),
+                       alpha.begin() + static_cast<std::ptrdiff_t>(literalStart + n));
+            literalStart += n;
+        }
+    };
+    std::size_t i = 0;
+    while (i < alpha.size()) {
+        std::size_t run = 1;
+        while (i + run < alpha.size() && run < 129 && alpha[i + run] == alpha[i]) {
+            ++run;
+        }
+        if (run >= 2) {
+            flushLiterals(i);
+            out.push_back(static_cast<std::uint8_t>(257 - run));
+            out.push_back(alpha[i]);
+            i += run;
+            literalStart = i;
+        } else {
+            ++i;
+        }
+    }
+    flushLiterals(alpha.size());
+    return out;
+}
+
+std::vector<std::uint8_t> encodeJpegWithAlpha(const tga::Pixels& image) {
+    const std::size_t pixels = static_cast<std::size_t>(image.width) * image.height;
+    if (image.rgba.size() < pixels * 4) {
+        return {};
+    }
+    std::vector<std::uint8_t> alpha(pixels);
+    for (std::size_t i = 0; i < pixels; ++i) {
+        alpha[i] = image.rgba[i * 4 + 3];
+    }
+    std::vector<std::uint8_t> segment{'A', 'L', 'F', 'A'};
+    const std::vector<std::uint8_t> packed = packAlpha(alpha);
+    segment.insert(segment.end(), packed.begin(), packed.end());
+    // A segment's length is 16 bits and counts itself.
+    if (segment.size() > 0xFFFD) {
+        return {};
+    }
+    constexpr int kQuality = 75;
+    return jpeg::encode(image, kQuality, segment);
+}
+
 } // namespace ts2::image

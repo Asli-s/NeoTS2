@@ -1134,6 +1134,52 @@ struct JpegWriter {
     }
 };
 
+// Family pictures are saved as JPEGs with their alpha in an "ALFA" segment. The alpha coding
+// reproduces the game's saved segments byte for byte.
+void jpegWithAlphaWrites() {
+    // Two or more equal bytes make a run of up to 129, the rest go in literals of up to 128.
+    std::vector<std::uint8_t> alpha(300, 0);
+    alpha[200] = 5;
+    alpha[201] = 6;
+    alpha[202] = 6;
+    alpha[203] = 7;
+    const std::vector<std::uint8_t> expected{0x80, 0, 0xBA, 0, 0x00, 5, 0xFF, 6, 0x00, 7, 0xA1, 0};
+    CHECK(ts2::image::packAlpha(alpha) == expected);
+    std::vector<std::uint8_t> noisy(260);
+    for (std::size_t i = 0; i < noisy.size(); ++i) noisy[i] = static_cast<std::uint8_t>(i & 0xFF);
+    const auto packedNoise = ts2::image::packAlpha(noisy);
+    CHECK(packedNoise.size() == 263 && packedNoise[0] == 127 && packedNoise[129] == 127 && packedNoise[258] == 3);
+
+    // A picture with soft alpha decodes back to the same alpha and close colours.
+    ts2::tga::Pixels picture{37, 21, std::vector<std::uint8_t>(37 * 21 * 4)};
+    for (std::size_t y = 0; y < 21; ++y) {
+        for (std::size_t x = 0; x < 37; ++x) {
+            auto* p = &picture.rgba[(y * 37 + x) * 4];
+            p[0] = static_cast<std::uint8_t>(x * 6);
+            p[1] = static_cast<std::uint8_t>(y * 10);
+            p[2] = 128;
+            p[3] = static_cast<std::uint8_t>(x < 10 ? 0 : x * 7);
+        }
+    }
+    const auto file = ts2::image::encodeJpegWithAlpha(picture);
+    CHECK(file.size() > 200 && file[0] == 0xFF && file[1] == 0xD8);
+    const auto back = ts2::image::decode(file);
+    CHECK(back && back->width == 37 && back->height == 21);
+    if (back) {
+        bool alphaSame = true;
+        int worst = 0;
+        for (std::size_t i = 0; i < 37 * 21; ++i) {
+            alphaSame = alphaSame && back->rgba[i * 4 + 3] == picture.rgba[i * 4 + 3];
+            for (std::size_t c = 0; c < 3; ++c) {
+                worst = std::max(worst, std::abs(back->rgba[i * 4 + c] - picture.rgba[i * 4 + c]));
+            }
+        }
+        CHECK(alphaSame);
+        CHECK(worst < 24);
+    }
+    CHECK(ts2::image::encodeJpegWithAlpha(ts2::tga::Pixels{4, 4, {}}).empty());
+}
+
 void jpegDecodesAsTheGame() {
     // Expected blocks come from running the game's JPEG library's own inverse DCT instructions.
     auto grey = [](int quant, const std::map<int, int>& coefficients) {
@@ -1449,6 +1495,7 @@ std::vector<Test> modelAndImageTests() {
         {"Limb IK adds additive targets", limbIkAddsAdditiveTargets},
         {"Limb IK reaches bones of the IK object", limbIkReachesBonesOfTheIkObject},
         {"JPEG pictures decode as the game decodes them", jpegDecodesAsTheGame},
+        {"JPEG pictures with alpha write as the game lays them out", jpegWithAlphaWrites},
         {"scenegraph hashes and textures", scenegraphHashesAndTextures},
         {"Light resources are read", lightResourcesAreRead},
         {"data list reads flags and two-float vectors", dataListReadsFlagsAndTwoFloatVectors},

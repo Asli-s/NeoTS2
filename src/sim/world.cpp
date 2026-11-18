@@ -27,6 +27,7 @@ SimObject& World::create(std::uint32_t group, objd::ObjectDefinition definition,
     objects_.emplace(ref.id, std::move(object));
     byId_[static_cast<std::size_t>(ref.id)] = &ref;
     highestId_ = std::max(highestId_, ref.id);
+    linkBefore(ref.id, listNext_[0]);
     objectsChanged();
     footprintChanges_.insert(ref.id);
     return ref;
@@ -47,9 +48,44 @@ SimObject& World::restore(std::int16_t id, std::uint32_t group, objd::ObjectDefi
     objects_.emplace(id, std::move(object));
     byId_[static_cast<std::size_t>(id)] = &ref;
     highestId_ = std::max(highestId_, id);
+    linkBefore(id, 0);
     objectsChanged();
     footprintChanges_.insert(id);
     return ref;
+}
+
+void World::linkBefore(std::int16_t id, std::int16_t before) {
+    const auto at = static_cast<std::size_t>(id);
+    const std::int16_t prev = listPrev_[static_cast<std::size_t>(before)];
+    listNext_[at] = before;
+    listPrev_[at] = prev;
+    listNext_[static_cast<std::size_t>(prev)] = id;
+    listPrev_[static_cast<std::size_t>(before)] = id;
+}
+
+void World::unlink(std::int16_t id) {
+    const auto at = static_cast<std::size_t>(id);
+    listNext_[static_cast<std::size_t>(listPrev_[at])] = listNext_[at];
+    listPrev_[static_cast<std::size_t>(listNext_[at])] = listPrev_[at];
+    listNext_[at] = listPrev_[at] = 0;
+}
+
+void World::orderList(const std::vector<std::uint32_t>& ids) {
+    for (const std::uint32_t id : ids) {
+        if (id > 0 && id <= 0x7FFF && findIncludingRemoved(static_cast<std::int16_t>(id)) != nullptr) {
+            const auto object = static_cast<std::int16_t>(id);
+            unlink(object);
+            linkBefore(object, 0);
+        }
+    }
+}
+
+std::vector<std::int16_t> World::listOrder() const {
+    std::vector<std::int16_t> ids;
+    for (std::int16_t at = listNext_[0]; at != 0; at = listNext_[static_cast<std::size_t>(at)]) {
+        ids.push_back(at);
+    }
+    return ids;
 }
 
 SimObject* World::find(std::int16_t id) {
@@ -255,6 +291,7 @@ void World::purge() {
             messageSubscriptions_.dropObject(entry.first);
             std::erase(buildBuyBlockers_, entry.first);
             byId_[static_cast<std::size_t>(entry.first)] = nullptr;
+            unlink(entry.first);
             return true;
         }
         return false;

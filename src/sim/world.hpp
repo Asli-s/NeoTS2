@@ -1571,6 +1571,26 @@ public:
         return nullptr;
     }
 
+    // The first match after object `id` in the game's object list, or from the front when no object
+    // has that id. Null at the end of the list. Unlike nextAfter this follows the list, not ids.
+    template <typename Predicate>
+    SimObject* nextInList(std::int16_t id, Predicate matches) {
+        std::int16_t at = find(id) != nullptr ? listNext_[static_cast<std::size_t>(id)] : listNext_[0];
+        for (; at != 0; at = listNext_[static_cast<std::size_t>(at)]) {
+            SimObject* object = byId_[static_cast<std::size_t>(at)];
+            if (object != nullptr && !object->removed && matches(*object)) {
+                return object;
+            }
+        }
+        return nullptr;
+    }
+    // Puts the objects into the list in the order of `ids`, as the lot's saved object list (ObjM
+    // instance 1) holds them. The game appends each object to its list in that order as the lot
+    // loads. An id with no object is passed over.
+    void orderList(const std::vector<std::uint32_t>& ids);
+    // The object ids in list order, removed ones too.
+    std::vector<std::int16_t> listOrder() const;
+
     // Like nextAround, but going down: the first match below `id`, then from the highest id down to
     // `id` itself.
     template <typename Predicate>
@@ -1727,6 +1747,13 @@ private:
     // up all the time. Null for ids with no object.
     std::vector<SimObject*> byId_ = std::vector<SimObject*>(0x8000, nullptr);
     std::int16_t highestId_ = 0;
+    // The game's object list, which Set to Next's general searches walk: each id's next and
+    // previous id, with id 0 standing for the list's ends. A loaded object joins the back and a new
+    // object the front, as in the game.
+    std::vector<std::int16_t> listNext_ = std::vector<std::int16_t>(0x8000, 0);
+    std::vector<std::int16_t> listPrev_ = std::vector<std::int16_t>(0x8000, 0);
+    void linkBefore(std::int16_t id, std::int16_t before);
+    void unlink(std::int16_t id);
     std::vector<std::int16_t> buildBuyBlockers_;
     // The Sim each neighbor GUID is on this lot (0: none), as neighborData field 0 finds it. Social
     // check trees ask it thousands of times a tick, so it's kept until objects are added or removed.

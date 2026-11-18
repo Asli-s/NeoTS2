@@ -909,6 +909,7 @@ bool Execution::createObject(const bhav::Instruction& in, Frame& f) {
 
     SimObject& created = world().create(type->group, type->definition, containerSlotsOf(code_, *type));
     created.data[kTargetSlotCountField] = targetSlotCount(*type);
+    created.data[kSemiAttributeCountField] = semiAttributeCount(code_, *type);
     stampBirth(created);
     // An object made out of the world is in no room, so its room (object data 0x1D) is -1. Scripts
     // such as a Sim's motive checks skip their work while it is.
@@ -960,6 +961,7 @@ bool Execution::createParts(const ObjectType& master, std::uint8_t placement, st
     for (const ObjectType* type : types) {
         parts.push_back(&world().create(type->group, type->definition, containerSlotsOf(code_, *type)));
         parts.back()->data[kTargetSlotCountField] = targetSlotCount(*type);
+        parts.back()->data[kSemiAttributeCountField] = semiAttributeCount(code_, *type);
         stampBirth(*parts.back());
         parts.back()->data[kRoomDataField] = -1;  // made out of the world, so in no room
     }

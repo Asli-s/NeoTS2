@@ -1621,6 +1621,29 @@ void saveWriterReplacesItsTargets() {
     CHECK(!saves::workFilesLeft(f.saves));
 }
 
+// A package another program holds open can't be moved aside on Windows. The save is undone and says
+// why, so the player can close that program, often the game itself.
+void saveWriterSaysWhenAnotherProgramHoldsAPackage() {
+#ifdef _WIN32
+    saves::Folder f;
+    std::string message;
+    {
+        std::ifstream held(f.lot, std::ios::binary);  // opened without delete sharing, as other programs do
+        const ts2::paths::SaveFolderLock lock(f.saves);
+        ts2::content::SaveWriter writer(lock);
+        writer.add(f.lot, f.newLot, ts2::content::SaveTarget::Replace);
+        try {
+            writer.commit();
+        } catch (const ts2::content::SaveError& e) {
+            message = e.what();
+        }
+    }
+    CHECK(message.find("another program has it open") != std::string::npos);
+    CHECK(saves::bytesOf(f.lot) == f.oldLot);
+    CHECK(!saves::workFilesLeft(f.saves));
+#endif
+}
+
 // Anything a save shouldn't touch is refused before a byte is written.
 void saveWriterRefusesWrongTargets() {
     saves::Folder f;
@@ -1835,6 +1858,7 @@ std::vector<Test> contentTests() {
         {"a replaced package keeps the load order", aReplacedPackageKeepsTheLoadOrder},
         {"save writer replaces its targets", saveWriterReplacesItsTargets},
         {"save writer refuses wrong targets", saveWriterRefusesWrongTargets},
+        {"save writer says when another program holds a package", saveWriterSaysWhenAnotherProgramHoldsAPackage},
         {"save writer undoes a failed save", saveWriterUndoesAFailedSave},
         {"interrupted saves are undone", interruptedSavesAreUndone},
         {"Animate Sim uses its age's list", animateSimUsesItsAgesList},

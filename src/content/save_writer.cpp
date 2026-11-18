@@ -160,6 +160,25 @@ bool moveNoReplace(const fs::path& from, const fs::path& to) {
 #endif
 }
 
+// Why the last move failed, in words for the player. Read right after moveNoReplace fails.
+std::string moveFailure() {
+#ifdef _WIN32
+    const DWORD code = GetLastError();
+    if (code == ERROR_SHARING_VIOLATION || code == ERROR_LOCK_VIOLATION) {
+        return "another program has it open, such as the game";
+    }
+    if (code == ERROR_ACCESS_DENIED) {
+        return "Windows refused access to it";
+    }
+    if (code == ERROR_ALREADY_EXISTS || code == ERROR_FILE_EXISTS) {
+        return "the new name is already taken";
+    }
+    return std::system_category().message(static_cast<int>(code));
+#else
+    return std::generic_category().message(errno);
+#endif
+}
+
 // Waits until the disk has a folder's list of names, so moves in it survive a power cut.
 void syncFolder([[maybe_unused]] const fs::path& folder) {
 #ifndef _WIN32
@@ -435,8 +454,12 @@ void SaveWriter::add(const fs::path& target, std::vector<std::uint8_t> bytes, Sa
 }
 
 void SaveWriter::move(const fs::path& from, const fs::path& to) {
-    if (++moves_ == failAtMove_ || !moveNoReplace(from, to)) {
-        throw SaveError("could not move " + paths::utf8Text(from.filename()) + " to " + paths::utf8Text(to.filename()));
+    const std::string what = "could not move " + paths::utf8Text(from.filename()) + " to " + paths::utf8Text(to.filename());
+    if (++moves_ == failAtMove_) {
+        throw SaveError(what);
+    }
+    if (!moveNoReplace(from, to)) {
+        throw SaveError(what + ": " + moveFailure());
     }
 }
 

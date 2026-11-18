@@ -254,12 +254,15 @@ void restoreOverlays(const content::Lot& lot, std::uint32_t id, SimObject& objec
         if (a.category && *a.category >= 0 && *a.category <= content::animation_category::kReceptivity) {
             o.category = static_cast<std::uint8_t>(*a.category);
         }
-        o.eventTree = a.eventTree;
         o.stackObject = a.eventObject;
         o.ikTarget = a.ikObject > 0 ? a.ikObject : 0;
         o.savedAnchor = AnimationAnchor{a.anchorObject, a.anchorName};
+        // Its events run its tree in the code of the type its event GUID names. A GUID that names no
+        // installed type leaves it no code, so it plays without its events. The game always writes a
+        // GUID with a tree, and older NeoTS2 saves wrote 0.
         if (const ObjectType* owner = code.objectType(a.eventObjectGuid)) {
             o.codeOwner = owner->group;
+            o.eventTree = a.eventTree;
         }
         // Its saved blend curve gives its fades: a weight-shift pose held between its start and reverse
         // clips has none, so it hands over at full weight instead of fading out first.
@@ -470,6 +473,7 @@ LotWorldReport buildWorld(const content::Lot& lot, CodeSource& code, World& worl
         ++report.objects;
         report.threads += object.thread.isRunning();
     }
+    world.orderList(lot.objectMap.order);
     // An interaction on an object saved after its Sim gets the object's code group now that every
     // object is back.
     for (const std::int16_t id : persons) {

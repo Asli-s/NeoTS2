@@ -264,7 +264,7 @@ target_include_directories(ts2formats PUBLIC src)
 # stb_image (third-party, public domain / MIT) decodes the UI's PNG and bitmap images; jpeg.cpp
 # decodes JPEGs as the game does, stb taking the kinds it does not read. stb_dxt (the same) compresses
 # High lot imposter pictures.
-add_library(stb_image STATIC src/formats/image.cpp src/formats/jpeg.cpp src/formats/dxt_encode.cpp)
+add_library(stb_image STATIC src/formats/image.cpp src/formats/jpeg.cpp src/formats/jpeg_encode.cpp src/formats/dxt_encode.cpp)
 target_include_directories(stb_image PRIVATE src third_party/stb)
 target_link_libraries(ts2formats PUBLIC stb_image)
 # image.cpp calls tga::decode, which is in ts2formats. The two static libraries need each other, so

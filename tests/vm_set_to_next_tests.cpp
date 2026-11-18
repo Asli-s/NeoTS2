@@ -601,6 +601,48 @@ void setToNextWrapsAroundLikeHideAll() {
     CHECK(w.controller->thread.stackObjectId == 4);
 }
 
+// The general searches walk the game's object list, which the Smiths lot (N002_Lot10) saves with
+// each door part before its lead: part 291 then lead 288, part 286 then lead 284. The tree loops
+// like "College - Dorm Room - Is Sim X's?": find a door (category 26) in room 17, count it, go on
+// from its lead. From lead 284 the walk is past part 286, so it ends instead of finding it again.
+void setToNextWalksTheObjectListInItsSavedOrder() {
+    constexpr std::int16_t kDoorCategory = 26, kRoom = 17;
+    constexpr std::size_t kLeadField = 0x13, kRoomField = 0x1D, kCategoryField = 0x3B;
+    MemoryCodeSource code;
+    code.add(kObjectGroup, 0x1000, bhav({
+        expr(owner::kStackObjectId, 0, op::kAssign, owner::kLiteral, 0, 1, E),
+        expr(owner::kTemp, 0, op::kAssign, owner::kLiteral, kDoorCategory, 2, E),
+        setToNext(0x0C, owner::kStackObjectId, 0, 0, 3, T),
+        expr(owner::kStackObjectData, kRoomField, op::kEquals, owner::kLiteral, kRoom, 4, 2),
+        expr(owner::kTemp, 1, op::kAdd, owner::kLiteral, 1, 5, E),
+        expr(owner::kStackObjectId, 0, op::kAssign, owner::kStackObjectData, kLeadField, 1, E),
+    }));
+    ts2::sim::World world;
+    ts2::sim::SimObject& controller = world.restore(1, kObjectGroup, typed(0x0BADF00D));
+    const auto door = [&](std::int16_t id, std::int16_t lead, std::int16_t room) {
+        ts2::sim::SimObject& o = world.restore(id, kObjectGroup, typed(0x6C77520E));
+        o.data[kLeadField] = lead;
+        o.data[kRoomField] = room;
+        o.data[kCategoryField] = kDoorCategory;
+    };
+    door(284, 284, 22);
+    door(286, 284, kRoom);
+    door(288, 288, 22);
+    door(291, 288, 13);
+    world.orderList({1, 291, 288, 286, 284, 999});
+    CHECK((world.listOrder() == std::vector<std::int16_t>{1, 291, 288, 286, 284}));
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(controller, 0x1000).outcome == Outcome::True);
+    CHECK(controller.thread.temps[1] == 1);
+
+    // A new object joins the front of the list and a purged one leaves it.
+    ts2::sim::SimObject& made = world.create(kObjectGroup, typed(0x0BADF00D));
+    CHECK(world.listOrder().front() == made.id);
+    world.remove(*world.find(288));
+    world.purge();
+    CHECK((world.listOrder() == std::vector<std::int16_t>{made.id, 1, 291, 286, 284}));
+}
+
 } // namespace
 
 std::vector<Test> vmSetToNextTests() {
@@ -614,6 +656,7 @@ std::vector<Test> vmSetToNextTests() {
         {"Set to Next walks neighbors of a family", setToNextWalksNeighborsOfAFamily},
         {"Set to Next finds neighbors of a type", setToNextFindsNeighborsOfAType},
         {"Set to Next finds objects by category", setToNextFindsObjectsByCategory},
+        {"Set to Next walks the object list in its saved order", setToNextWalksTheObjectListInItsSavedOrder},
         {"Set to Next finds objects in a room", setToNextFindsObjectsInARoom},
         {"Set to Next finds hauntable objects", setToNextFindsHauntableObjects},
         {"Set to Next finds the owners of an object", setToNextFindsOwnersOfAnObject},

@@ -29,6 +29,7 @@ ObjectMap parse(std::span<const std::uint8_t> data) {
     for (std::uint32_t i = 0; i < count; ++i) {
         const std::uint32_t object = r.u32();
         map.typeIndexByObject[object] = r.u32();
+        map.order.push_back(object);
     }
     // Object ids are 16-bit, so a longer table is broken. A map cut short before it has none.
     constexpr std::uint32_t kMaxWaitEntries = 0x7FFF;

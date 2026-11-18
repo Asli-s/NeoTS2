@@ -1940,6 +1940,30 @@ void animationsHangFromTheSeatTheyStartedIn() {
     CHECK((anchorOf("kept") == std::array<ts2::cobject::Word, 2>{0xFFFFFFFF, 0}));
 }
 
+// An object's clip played until stopped is saved while it plays, and left out once Animate Stop has
+// stopped it, as the game's saves keep no clip that has ended. A video game console stopped by its
+// turn off came back from the save with its disc spinning.
+void aStoppedLoopingClipIsNotSaved() {
+    ts2::sim::World world;
+    auto& console = world.create(kObjectGroup, typed(0x4D214140));
+    ts2::sim::PlayingAnimation spin;
+    spin.name = "o-electronicVideoGameSystem-CDSpin";
+    spin.startMs = 1000;
+    spin.loops = true;
+    spin.lengthMs = std::numeric_limits<float>::infinity();
+    console.animation = spin;
+    const auto saved = [&] {
+        ts2::cobject::Record loaded;
+        loaded.animatable.animations = {ts2::cobject::Animation{}};
+        const auto record = ts2::sim::lot_save_detail::sceneRecord(loaded, console, world, 5000, nullptr);
+        return std::any_of(record.animatable.animations.begin(), record.animatable.animations.end(),
+                           [&](const ts2::cobject::Animation& a) { return a.request.name == spin.name; });
+    };
+    CHECK(saved());
+    console.animation->lengthMs = 3000;  // stopped 3 seconds in
+    CHECK(!saved());
+}
+
 // A clip saved where the record held only an empty entry starts as the game makes a new clip, as
 // every clip of the game's saves holds it: its places at no move with a scale of 1, the request's
 // starting values, the started flag and the word after its resource name. One held until stopped
@@ -2626,6 +2650,7 @@ std::vector<Test> simulationTests() {
         {"a changed look keeps the skeleton", aChangedLookKeepsTheSkeleton},
         {"animations hang from the seat they started in", animationsHangFromTheSeatTheyStartedIn},
         {"a clip built from an empty entry starts as the game makes one", aClipBuiltFromAnEmptyEntryStartsAsTheGameMakesOne},
+        {"a stopped looping clip is not saved", aStoppedLoopingClipIsNotSaved},
         {"newborn brow family follows the draw", newbornBrowFamilyFollowsTheDraw},
         {"newborn file needs the catalog", newbornFileNeedsTheCatalog},
         {"saving a lot writes a newborn from another Sim", savingALotWritesANewbornFromAnotherSim},

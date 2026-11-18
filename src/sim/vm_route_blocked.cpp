@@ -398,6 +398,7 @@ SimObject* Execution::makeDestination(SimObject& mover, const SimObject& other, 
     }
     SimObject& made = world().create(type->group, type->definition, containerSlotsOf(code_, *type));
     made.data[kTargetSlotCountField] = targetSlotCount(*type);
+    made.data[kSemiAttributeCountField] = semiAttributeCount(code_, *type);
     made.x = mover.x;
     made.y = mover.y;
     made.level = mover.level;

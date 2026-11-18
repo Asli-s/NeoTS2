@@ -478,6 +478,7 @@ SimObject* Vm::create(std::uint32_t guid) {
     }
     SimObject& created = world_->create(type->group, type->definition, containerSlotsOf(code_, *type));
     created.data[kTargetSlotCountField] = targetSlotCount(*type);
+    created.data[kSemiAttributeCountField] = semiAttributeCount(code_, *type);
     startCreated(created, *type);
     return &created;
 }

@@ -1013,6 +1013,23 @@ void createObjectCanTakeItsGuidFromTemps() {
     CHECK(lamp != nullptr && lamp->data[0x37] == 2);
 }
 
+// An object made during play keeps its number of semi-global attributes in object data 0x4F, the
+// labels of its semi-global's string table 0x100, as the game's newborn and the townie it made at
+// the birth have 36. An object without a semi-global has 0.
+void aMadeObjectCountsItsSemiGlobalAttributes() {
+    constexpr std::uint32_t kToyGuid = 0x0B000001;
+    MemoryCodeSource code;
+    code.addObjectType(kObjectGroup, typed(kToyGuid));
+    code.addObjectType(kLampGroup, typed(kLampGuid));
+    code.addStrings(kSemiGroup, 0x100, {"first", "second", "third"});
+    ts2::sim::World world;
+    Vm vm(code, {}, &world);
+    const ts2::sim::SimObject* toy = vm.create(kToyGuid);
+    const ts2::sim::SimObject* lamp = vm.create(kLampGuid);
+    CHECK(toy != nullptr && toy->data[0x4F] == 3);
+    CHECK(lamp != nullptr && lamp->data[0x4F] == 0);
+}
+
 // A multi-tile master's GUID makes its parts, lead first: each is reset and runs its own Init,
 // names the lead in data 0x13, and the lead's Main runs before the primitive returns. The lead's
 // data 0x29 is the master's price, and the lead becomes the stack object.
@@ -3375,6 +3392,44 @@ void aLoadedObjectPlaysItsLatestClip() {
     CHECK(plumbob != nullptr && plumbob->animation && plumbob->animation->name == "o-plumbob-spin" && plumbob->animation->loops);
 }
 
+// A saved overlay runs its event tree in the code of the type its event GUID names. One whose GUID
+// names no installed type, as older NeoTS2 saves wrote for a chair's seat idle, comes back without its
+// tree instead of running one in no code, which stopped the Sim and ended its interaction.
+void aLoadedOverlayRunsItsEventsInTheTypeItsGuidNames() {
+    MemoryCodeSource code;
+    code.addObjectType(kObjectGroup, typed(0x1000));
+    ts2::content::Lot lot;
+    ts2::objt::Entry entry;
+    entry.guid = 0x1000;
+    entry.index = 1;
+    lot.types.entries.push_back(entry);
+    ts2::content::LotObject saved;
+    saved.id = 1;
+    saved.type = entry;
+    lot.objects.push_back(saved);
+    const auto overlay = [](const char* name, std::uint32_t guid) {
+        ts2::cobject::SavedAnimation a;
+        a.name = name;
+        a.type = "ovl";
+        a.layer = 1;
+        a.state = 1;
+        a.plays = 1;
+        a.eventTree = 0x2000;
+        a.eventObject = 1;
+        a.eventObjectGuid = guid;
+        return a;
+    };
+    lot.savedAnimations[1] = {overlay("c2o-chair-idle-a", 0x1000), overlay("c2o-chair-idle-b", 0)};
+    ts2::sim::World world;
+    ts2::sim::buildWorld(lot, code, world);
+    const auto* object = world.find(1);
+    CHECK(object != nullptr && object->overlays.size() == 2);
+    if (object != nullptr && object->overlays.size() == 2) {
+        CHECK(object->overlays[0].eventTree == 0x2000 && object->overlays[0].codeOwner == kObjectGroup);
+        CHECK(object->overlays[1].eventTree == 0 && object->overlays[1].codeOwner == 0);
+    }
+}
+
 void roomFieldsAreReadThroughTempZero() {
     MemoryCodeSource code;
     code.add(kObjectGroup, 0x1000, bhav({
@@ -3446,6 +3501,7 @@ void outsideIsRegionZeroInLayerZero() {
 std::vector<Test> vmObjectTests() {
     return {
         {"a loaded object plays its latest clip", aLoadedObjectPlaysItsLatestClip},
+        {"a loaded overlay runs its events in the type its GUID names", aLoadedOverlayRunsItsEventsInTheTypeItsGuidNames},
         {"room fields are read through temp 0", roomFieldsAreReadThroughTempZero},
         {"text notifications fill their tokens", textNotificationsFillTheirTokens},
         {"outside is region 0 in layer 0", outsideIsRegionZeroInLayerZero},
@@ -3473,6 +3529,7 @@ std::vector<Test> vmObjectTests() {
         {"array operations work on object arrays", arrayOperationsWorkOnObjectArrays},
         {"neighbor fields come from the neighbor", neighborFieldsComeFromTheNeighbor},
         {"Create Object can take its GUID from temps", createObjectCanTakeItsGuidFromTemps},
+        {"a made object counts its semi-global attributes", aMadeObjectCountsItsSemiGlobalAttributes},
         {"Create Object makes a multi-tile object's parts", createObjectMakesAMultiTileObjectsParts},
         {"a moved multi-tile part takes the others with it", movedPartsFollow},
         {"Snap tests every part of a multi-tile object at its spot", snapTestsEveryPartAtItsSpot},

@@ -128,4 +128,22 @@ inline std::int16_t targetSlotCount(const ObjectType& type) {
     return static_cast<std::int16_t>(std::min<std::size_t>(type.targetSlots.size(), 0x7FFF));
 }
 
+// How many semi-global attributes an object of `type` gets: the labels in its semi-global's string
+// table 0x100, or 0 without a semi-global. An object made during play keeps it in object data 0x4F.
+// Objects saved under older packs hold smaller counts there, which a load keeps.
+constexpr std::size_t kSemiAttributeCountField = 0x4F;
+inline std::int16_t semiAttributeCount(CodeSource& code, const ObjectType& type) {
+    const std::uint32_t semiGlobal = code.semiGlobalGroup(type.group);
+    if (semiGlobal == type.group) {
+        return 0;
+    }
+    constexpr std::uint16_t kAttributeLabels = 0x100;
+    constexpr std::int16_t kMaxLabels = 0x7FFF;
+    std::int16_t count = 0;
+    while (count < kMaxLabels && code.string(semiGlobal, kAttributeLabels, static_cast<std::size_t>(count))) {
+        ++count;
+    }
+    return count;
+}
+
 } // namespace ts2::sim
