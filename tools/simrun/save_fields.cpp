@@ -300,6 +300,15 @@ void objectFields(Line& line, const ts2::xobj::SavedObject& o) {
     line.number("header6", h.value6);
     line.number("attributeCount", static_cast<double>(o.attributes.size()));
     line.number("semiAttributeCount", static_cast<double>(o.semiAttributes.size()));
+    const auto joined = [](const auto& values) {
+        std::string text;
+        for (const auto v : values) {
+            text += (text.empty() ? "" : ",") + std::to_string(v);
+        }
+        return text;
+    };
+    line.text("attributes", joined(o.attributes));
+    line.text("semiAttributes", joined(o.semiAttributes));
     for (std::size_t i = 0; i < o.temps.size(); ++i) {
         line.number(indexed("temp", i), o.temps[i]);
     }

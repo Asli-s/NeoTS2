@@ -106,6 +106,10 @@ bool isGripList(const ts2::rcol::DataList* list) {
 
 // --list-objects: list every object but the Sims when a lot run ends.
 bool listObjects = false;
+// --sim-data <field>: print that object data field of every Sim, with its container and slot, when a lot run ends.
+std::optional<std::size_t> simDataField;
+// --show-object <id>: print that object's attributes and semi-attributes when a lot run ends.
+std::optional<std::int16_t> showObject;
 bool savedQueues = false;
 bool savedAnimations = false;
 bool upgradeCheck = false;
@@ -607,8 +611,8 @@ int printInteractionTable(ResourceIndex& index, std::uint32_t group, std::uint16
     for (std::size_t i = 0; i < table->interactions.size(); ++i) {
         const auto& line = table->interactions[i];
         const auto text = code.interactionString(group, instance, line.stringIndex);
-        std::printf("%3zu  action 0x%04X test 0x%04X flags 0x%08X string %u \"%s\"\n", i, line.action, line.test, line.flags,
-                    line.stringIndex, text ? text->c_str() : "-");
+        std::printf("%3zu  action 0x%04X test 0x%04X flags 0x%08X string %u \"%s\" joins %d\n", i, line.action, line.test, line.flags,
+                    line.stringIndex, text ? text->c_str() : "-", line.joiningIndex);
     }
     for (std::size_t s = 0;; ++s) {
         const auto text = code.interactionString(group, instance, s);
@@ -1506,7 +1510,8 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
            std::optional<std::array<int, 3>> queueChoice, std::size_t queueTick, std::optional<std::size_t> queueAgainTick, std::optional<std::size_t> cancelTick,
            std::optional<std::array<float, 3>> groundAt, bool portals, std::optional<std::array<float, 4>> groundLater,
            const std::vector<std::array<float, 5>>& goHere, std::optional<std::uint32_t> seed,
-           const std::vector<std::array<float, 3>>& motives, std::optional<std::array<float, 2>> camera) {
+           const std::vector<std::array<float, 3>>& motives, std::optional<std::array<float, 2>> camera,
+           const std::vector<std::array<int, 4>>& queueAlso) {
     const auto primitives = editorTable(index, kPrimitiveNames);
     const auto owners = editorTable(index, kDataOwners);
     const auto genericCalls = editorTable(index, kGenericSimsCalls);
@@ -1623,11 +1628,11 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
     }
 
     // A pie menu choice queued before the ticks, or at a later tick: Sim, object, the choice's place in the menu.
-    const auto queuePieChoice = [&] {
-        auto* actor = world.find(static_cast<std::int16_t>((*queueChoice)[0]));
-        auto* object = world.find(static_cast<std::int16_t>((*queueChoice)[1]));
+    const auto queueChoiceOf = [&](const std::array<int, 3>& choice) {
+        auto* actor = world.find(static_cast<std::int16_t>(choice[0]));
+        auto* object = world.find(static_cast<std::int16_t>(choice[1]));
         const auto menu = actor && object ? ts2::sim::pieMenu(sim.vm(), sim.code(), *actor, *object) : ts2::sim::PieMenu{};
-        const auto at = static_cast<std::size_t>((*queueChoice)[2]);
+        const auto at = static_cast<std::size_t>(choice[2]);
         if (at < menu.choices.size() && ts2::sim::runsAtOnce(sim.code(), *object, menu.choices[at])) {
             const auto r = ts2::sim::runAtOnce(sim.vm(), sim.code(), world, *actor, *object, menu.choices[at]);
             std::printf("light strength of %d now %.2f\n", object->id, object->lightStrength);
@@ -1643,6 +1648,7 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
             std::printf("nothing to queue\n");
         }
     };
+    const auto queuePieChoice = [&] { queueChoiceOf(*queueChoice); };
     if (queueChoice && queueTick == 0) {
         queuePieChoice();
     }
@@ -1661,6 +1667,8 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
 
     // The queued Sim's running interaction as it changes, and the player's cancel of it at a tick.
     std::uint32_t lastRunning = 0;
+    // Overlays started after this time are new. Event trees start theirs at the event's moment inside a tick.
+    double overlaysSince = world.clockMs();
     for (std::size_t tick = 0; tick < ticks; ++tick) {
         if (auto* actor = queueChoice ? world.find(static_cast<std::int16_t>((*queueChoice)[0])) : nullptr) {
             const std::uint32_t running = actor->running ? actor->running->id : 0;
@@ -1684,6 +1692,13 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
             if (cancelTick && tick == *cancelTick) {
                 const bool done = actor->running && ts2::sim::cancelInteraction(world, *actor, actor->running->id);
                 std::printf("tick %zu: %s\n", tick, done ? "cancelled it" : "nothing to cancel");
+            }
+        }
+        // More pie menu choices for any Sim (Sim, object, place in the menu, tick).
+        for (const auto& also : queueAlso) {
+            if (tick == static_cast<std::size_t>(also[3])) {
+                std::printf("tick %zu: ", tick);
+                queueChoiceOf({also[0], also[1], also[2]});
             }
         }
         // Go Here orders for any Sim (Sim, tick, x, y, level), as a click on the ground would queue them.
@@ -1759,8 +1774,10 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
         }
         if (overlays) {
             world.nextAfter(0, [&](const ts2::sim::SimObject& o) {
-                if (!o.overlays.empty() && o.overlays.back().startMs == world.clockMs()) {
-                    const auto& last = o.overlays.back();
+                for (const auto& last : o.overlays) {
+                    if (last.startMs <= overlaysSince || last.startMs > world.clockMs()) {
+                        continue;
+                    }
                     std::printf("overlay tick %zu %s %d %s%s type %d stay %d, event tree 0x%04X of 0x%08X, stack object %d, "
                                 "priority %u, plays %d\n",
                                 tick, o.isPerson() ? "Sim" : "object", o.id, last.name.c_str(), last.flipped ? " flipped" : "", o.semiAttributes[0], o.semiAttributes[3], last.eventTree,
@@ -1773,6 +1790,7 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
                 }
                 return false;
             });
+            overlaysSince = world.clockMs();
         }
     }
 
@@ -1898,6 +1916,39 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
     if (savedQueues) {
         std::printf("saved queues of %s:\n", lotPath.filename().string().c_str());
         printSavedQueues(lotPath);
+    }
+    if (simDataField && *simDataField < ts2::sim::kObjectDataCount) {
+        world.nextAfter(0, [&](const ts2::sim::SimObject& o) {
+            if (o.isPerson()) {
+                std::printf("Sim %d %s container %d slot %d data 0x%zX = %d\n", o.id, o.definition.name.c_str(), o.data[2], o.data[3],
+                            *simDataField, o.data[*simDataField]);
+            }
+            return false;
+        });
+    }
+    if (const auto* shown = showObject ? world.find(*showObject) : nullptr) {
+        std::printf("object %d %s attributes", shown->id, shown->definition.name.c_str());
+        for (const auto v : shown->attributes) {
+            std::printf(" %d", v);
+        }
+        std::printf(", semi-attributes");
+        for (const auto v : shown->semiAttributes) {
+            std::printf(" %d", v);
+        }
+        std::printf("\n");
+        // Its clips: the current one, the one it replaced and its overlays, with start and length (ms).
+        const auto clip = [](const char* what, const ts2::sim::PlayingAnimation& a) {
+            std::printf("  %s %s start %.0f length %.0f loops %d flipped %d\n", what, a.name.c_str(), a.startMs, a.lengthMs, a.loops, a.flipped);
+        };
+        if (shown->animation) {
+            clip("clip", *shown->animation);
+        }
+        if (shown->ending) {
+            clip("replaced", *shown->ending);
+        }
+        for (const auto& o : shown->overlays) {
+            std::printf("  overlay %s start %.0f length %.0f plays %d stopped %d\n", o.name.c_str(), o.startMs, o.lengthMs, o.plays, o.stopped);
+        }
     }
     if (listObjects) {
         // Every object but the Sims: where it is, its direction (data 1) and its lead (data 0x13).
@@ -4065,7 +4116,7 @@ int main(int argc, char** argv) {
                      "  simrun <install-folder> --progress [--hood <folder>] [--json <file>]\n"
                      "  simrun <install-folder | file.package> --run <group> <instance> [args...] [--trace]\n"
                      "  simrun <install-folder | file.package> --guid <hex-guid> [...]\n"
-                     "  simrun <install-folder> --lot <lot.package> [ticks [--trace-tick <tick>] [--trace-object <id>] [--on-screen] [--pie <sim> [--pie-trace <object>]] [--queue <sim> <object> <choice> [--queue-at <tick>] [--queue-again <tick>] [--cancel <tick>]] [--ground <x> <y> <level> [--ground-later <tick> <x> <y> <level>]] [--go-here <sim> <tick> <x> <y> <level>]... [--portals] [--seed <n>] [--motive <sim> <motive> <value>]... [--camera <x> <y>]]\n"
+                     "  simrun <install-folder> --lot <lot.package> [ticks [--trace-tick <tick>] [--trace-object <id>] [--on-screen] [--pie <sim> [--pie-trace <object>]] [--queue <sim> <object> <choice> [--queue-at <tick>] [--queue-again <tick>] [--cancel <tick>]] [--queue-also <sim> <object> <choice> <tick>]... [--ground <x> <y> <level> [--ground-later <tick> <x> <y> <level>]] [--go-here <sim> <tick> <x> <y> <level>]... [--portals] [--seed <n>] [--motive <sim> <motive> <value>]... [--camera <x> <y>]]\n"
                      "  simrun <install-folder> --loco <clip>...\n"
                      "  simrun <install-folder> --wall-types <lot.package>\n"
                      "  simrun <install-folder> --wall-list <lot.package>\n"
@@ -4134,6 +4185,7 @@ int main(int argc, char** argv) {
             std::optional<std::uint32_t> seed;
             std::vector<std::array<float, 3>> motives;
             std::optional<std::array<float, 2>> camera;
+            std::vector<std::array<int, 4>> queueAlso;
             for (int i = 5; i < argc; ++i) {
                 if (std::string_view(argv[i]) == "--trace-tick" && i + 1 < argc) {
                     traceTick = std::stoul(argv[++i]);
@@ -4156,6 +4208,9 @@ int main(int argc, char** argv) {
                 } else if (std::string_view(argv[i]) == "--queue" && i + 3 < argc) {
                     queueChoice = std::array<int, 3>{std::stoi(argv[i + 1]), std::stoi(argv[i + 2]), std::stoi(argv[i + 3])};
                     i += 3;
+                } else if (std::string_view(argv[i]) == "--queue-also" && i + 4 < argc && queueAlso.size() < 64) {
+                    queueAlso.push_back({std::stoi(argv[i + 1]), std::stoi(argv[i + 2]), std::stoi(argv[i + 3]), std::stoi(argv[i + 4])});
+                    i += 4;
                 } else if (std::string_view(argv[i]) == "--queue-at" && i + 1 < argc) {
                     queueTick = std::stoul(argv[++i]);
                 } else if (std::string_view(argv[i]) == "--queue-again" && i + 1 < argc) {
@@ -4191,6 +4246,10 @@ int main(int argc, char** argv) {
                     lastHood = static_cast<std::int16_t>(std::stoi(argv[++i]));
                 } else if (std::string_view(argv[i]) == "--list-objects") {
                     listObjects = true;
+                } else if (std::string_view(argv[i]) == "--sim-data" && i + 1 < argc) {
+                    simDataField = std::stoul(argv[++i], nullptr, 0);
+                } else if (std::string_view(argv[i]) == "--show-object" && i + 1 < argc) {
+                    showObject = static_cast<std::int16_t>(std::stoi(argv[++i]));
                 } else if (std::string_view(argv[i]) == "--saved-queues") {
                     savedQueues = true;
                 } else if (std::string_view(argv[i]) == "--saved-animations") {
@@ -4203,7 +4262,7 @@ int main(int argc, char** argv) {
                 }
             }
             return runLot(index, std::filesystem::path(argv[1]), std::filesystem::path(argv[3]), ticks, traceTick, traceObject, onScreen,
-                          personData, overlays, motion, pieSim, pieTrace, queueChoice, queueTick, queueAgainTick, cancelTick, groundAt, portals, groundLater, goHere, seed, motives, camera);
+                          personData, overlays, motion, pieSim, pieTrace, queueChoice, queueTick, queueAgainTick, cancelTick, groundAt, portals, groundLater, goHere, seed, motives, camera, queueAlso);
         }
         if (mode == "--outside" && argc >= 4) {
             return printOutside(std::filesystem::path(argv[3]));
