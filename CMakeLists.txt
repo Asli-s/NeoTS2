@@ -198,6 +198,7 @@ target_include_directories(ts2settings PUBLIC src)
 target_link_libraries(ts2settings PRIVATE project_warnings)
 
 add_library(ts2formats
+    src/formats/movie.cpp
     src/formats/array3d.cpp
     src/formats/terrain.cpp
     src/formats/fami.cpp
@@ -293,6 +294,7 @@ add_library(ts2content
     src/content/genetics_catalog.cpp
     src/content/recolour_catalog.cpp
     src/content/wants.cpp
+    src/content/broadcasts.cpp
     src/content/scripts.cpp
     src/content/resource_index.cpp
     src/content/downloads.cpp
@@ -303,6 +305,7 @@ add_library(ts2content
     src/content/ui_text.cpp
     src/content/target_pictures.cpp
     src/audio/xa.cpp
+    src/audio/movie_sound.cpp
     src/audio/spx.cpp
     src/audio/mp3.cpp
     src/audio/music.cpp
@@ -399,6 +402,7 @@ add_library(ts2sim
     src/sim/walk_plan.cpp
     src/sim/walk_sweep.cpp
     src/sim/world.cpp
+    src/sim/tv_links.cpp
 )
 target_link_libraries(ts2sim PUBLIC ts2content PRIVATE ts2scene lua50 project_warnings)
 
@@ -504,6 +508,8 @@ if(NEOTS2_FUZZ)
     # Engine code that is not a file reader but takes values from lots and objects.
     add_executable(xa_fuzz fuzz/xa_fuzz.cpp src/audio/xa.cpp)
     target_link_libraries(xa_fuzz PRIVATE ts2formats project_warnings)
+    add_executable(movie_fuzz fuzz/movie_fuzz.cpp src/audio/movie_sound.cpp)
+    target_link_libraries(movie_fuzz PRIVATE ts2formats project_warnings)
     add_executable(spx_fuzz fuzz/spx_fuzz.cpp src/audio/spx.cpp)
     target_link_libraries(spx_fuzz PRIVATE ts2formats speex project_warnings)
     add_executable(sound_data_fuzz fuzz/sound_data_fuzz.cpp src/audio/audio_config.cpp src/audio/names.cpp src/audio/track.cpp)
@@ -562,6 +568,9 @@ else()
     add_executable(dbpfdump tools/dbpfdump/main.cpp)
     target_link_libraries(dbpfdump PRIVATE ts2formats lua50 project_warnings)
 
+    add_executable(moviedump tools/moviedump/main.cpp)
+    target_link_libraries(moviedump PRIVATE ts2content project_warnings)
+
 
     add_executable(lotview tools/lotview/main.cpp)
     target_link_libraries(lotview PRIVATE ts2sim project_warnings)
@@ -588,7 +597,7 @@ else()
         tests/vm_scripts_tests.cpp tests/simulation_tests.cpp tests/route_planning_tests.cpp tests/vm_walking_tests.cpp
         tests/vm_set_to_next_tests.cpp tests/vm_animation_tests.cpp tests/formats_tests.cpp
         tests/models_and_images_tests.cpp tests/scene_tests.cpp tests/assets_tests.cpp tests/lighting_tests.cpp tests/render_plan_tests.cpp tests/content_tests.cpp
-        tests/ui_and_diag_tests.cpp tests/paths_tests.cpp tests/fuzz_regressions_tests.cpp tests/audio_tests.cpp src/ui/pie_layout.cpp src/ui/tip_layout.cpp src/ui/font_metrics.cpp src/ui/drag_arrow.cpp src/ui/scroll_bar.cpp src/ui/animated_bitmap.cpp app/object_materials.cpp)
+        tests/ui_and_diag_tests.cpp tests/paths_tests.cpp tests/fuzz_regressions_tests.cpp tests/audio_tests.cpp tests/movie_tests.cpp src/ui/pie_layout.cpp src/ui/tip_layout.cpp src/ui/font_metrics.cpp src/ui/drag_arrow.cpp src/ui/scroll_bar.cpp src/ui/animated_bitmap.cpp app/object_materials.cpp)
     target_link_libraries(vm_tests PRIVATE ts2renderplan ts2sim ts2scene ts2paths ts2settings lua50 project_warnings)
     # Every fuzz target's entry point under its own name, so the tests replay the inputs kept in
     # fuzz/regressions/<target> through the same code the fuzzer ran.
@@ -836,7 +845,7 @@ else()
         target_link_libraries(vm_tests PRIVATE ts2ui)
         target_compile_definitions(vm_tests PRIVATE NEOTS2_TEXT_LAYOUT_TESTS)
 
-        add_executable(neots2 app/main.cpp app/menu.cpp app/game_audio.cpp app/game_effects.cpp app/game_surroundings.cpp app/game_graphics.cpp app/neighborhood.cpp app/neighborhood_ui.cpp app/lot_life.cpp app/lot_life_clips.cpp app/lot_life_effects.cpp app/lot_life_panels.cpp app/lot_life_objects.cpp app/lot_life_sims.cpp app/pose_numbers.cpp app/object_materials.cpp app/sim_loader.cpp app/lot_light.cpp app/imposter_baker.cpp app/lot_daylight.cpp app/route_sources.cpp app/lot_ui.cpp app/game_options_panel.cpp app/graphics_options_panel.cpp app/audio_options_panel.cpp app/options_list.cpp app/list_box_rows.cpp app/live_panel.cpp app/job_panel.cpp app/memories_page.cpp app/age_meter.cpp app/queue_panel.cpp app/pie_menu_ui.cpp app/mood_meter.cpp app/aspiration_bars.cpp app/pause_frame.cpp app/baby_name_dialog.cpp app/phone_book_dialog.cpp app/type_picker_dialog.cpp app/change_appearance_dialog.cpp app/notification_stack.cpp app/dialog_fills.cpp app/description_box.cpp app/cheat_console.cpp app/needs_panel.cpp app/personality_page.cpp app/relationships_panel.cpp app/rewards_panel.cpp app/simology_panel.cpp app/interests_page.cpp app/hobbies_page.cpp app/chemistry_page.cpp app/meter_bar.cpp app/skewer.cpp app/wants_panel.cpp app/portraits.cpp app/cursors.cpp
+        add_executable(neots2 app/main.cpp app/menu.cpp app/game_tv.cpp app/tv_stations.cpp app/game_audio.cpp app/game_effects.cpp app/game_surroundings.cpp app/game_graphics.cpp app/neighborhood.cpp app/neighborhood_ui.cpp app/lot_life.cpp app/lot_life_clips.cpp app/lot_life_effects.cpp app/lot_life_panels.cpp app/lot_life_objects.cpp app/lot_life_sims.cpp app/pose_numbers.cpp app/object_materials.cpp app/sim_loader.cpp app/lot_light.cpp app/imposter_baker.cpp app/lot_daylight.cpp app/route_sources.cpp app/lot_ui.cpp app/game_options_panel.cpp app/graphics_options_panel.cpp app/audio_options_panel.cpp app/options_list.cpp app/list_box_rows.cpp app/live_panel.cpp app/job_panel.cpp app/memories_page.cpp app/age_meter.cpp app/queue_panel.cpp app/pie_menu_ui.cpp app/mood_meter.cpp app/aspiration_bars.cpp app/pause_frame.cpp app/baby_name_dialog.cpp app/phone_book_dialog.cpp app/type_picker_dialog.cpp app/change_appearance_dialog.cpp app/notification_stack.cpp app/dialog_fills.cpp app/description_box.cpp app/cheat_console.cpp app/needs_panel.cpp app/personality_page.cpp app/relationships_panel.cpp app/rewards_panel.cpp app/simology_panel.cpp app/interests_page.cpp app/hobbies_page.cpp app/chemistry_page.cpp app/meter_bar.cpp app/skewer.cpp app/wants_panel.cpp app/portraits.cpp app/cursors.cpp
                        app/diagnostics.cpp app/crash_handler.cpp app/crash_dialog.cpp app/unexpected_exit.cpp app/report_upload.cpp app/message_box.cpp app/open_renderer.cpp)
         target_link_libraries(neots2 PRIVATE ts2render ts2ui ts2sim ts2diag project_warnings)
         # Audio output needs SDL 3; the SDL 1.2 build keeps the same interface silent.

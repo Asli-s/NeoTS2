@@ -2742,6 +2742,7 @@ void Game::updateLot(std::uint64_t now) {
     renderer_.setTime(static_cast<float>(lotRealSeconds_));
     if (lotLife_) {
         sendLotChanges();
+        updateTvStations();
     }
 }
 
@@ -2779,6 +2780,7 @@ void Game::startLotLife() {
             }
         });
         lotLife_->simulation().world().setAnimationSound([this](std::int16_t object, const std::string& name) { onAnimationSound(object, name); });
+        startTvStations();
         lotLife_->traceIn(lot_, lotPose_, lotVisible_);
         startLotEffects();
         // A lot opens paused, as in the game, after the game's 10 ticks of loading. Sims start

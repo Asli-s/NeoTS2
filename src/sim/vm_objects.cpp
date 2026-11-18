@@ -91,8 +91,9 @@ bool Execution::changeLight(const bhav::Instruction& in, Frame& f) {
 //   byte 5, 6-7 the object to change
 //   byte 8, 9-10 the source object whose tables flags 0x01 and 0x08 read, else the tree owner's (an
 //               own material is looked up in the recolor first, see materialNames)
-//   byte 13     0x01 a TV channel (its video isn't played yet), 0x02-0x20 snapshot, portrait and
-//               painting modes, not done yet
+//   byte 13     0x01 a TV channel: the object is tuned to the station the material names (see
+//               TvLinks). Without it the object leaves its station. 0x02-0x20 snapshot,
+//               portrait and painting modes, not done yet
 // A missing or empty mesh group name means the whole model. Always true.
 bool Execution::changeMaterial(const bhav::Instruction& in, Frame& f) {
     const auto& o = in.operands;
@@ -151,6 +152,11 @@ bool Execution::changeMaterial(const bhav::Instruction& in, Frame& f) {
     const std::string meshGroup = meshGroupIndex < 0 ? std::string()
                                                      : name(meshGroupOwner, flags & kMeshGroupGlobal, flags & kMeshGroupSemiGlobal,
                                                             kMeshGroupNameTable, static_cast<std::size_t>(meshGroupIndex));
+    if (o[13] & kMaterialIsTvChannel) {
+        world().tvLinks().tune(*target, material);
+    } else {
+        world().tvLinks().leave(*target);
+    }
     setMaterial(*target, {meshGroup, material});
     return true;
 }

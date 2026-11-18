@@ -22,6 +22,7 @@
 #include "sim/outside_grid.hpp"
 #include "sim/rooms.hpp"
 #include "sim/turn.hpp"
+#include "sim/tv_links.hpp"
 #include "sim/walk_plan.hpp"
 #include "sim/walking.hpp"
 #include "sim/want_history.hpp"
@@ -1395,6 +1396,9 @@ public:
     using EffectCommands = std::function<void(const EffectCommand&)>;
     void setEffectCommands(EffectCommands commands) { effectCommands_ = std::move(commands); }
     const EffectCommands& effectCommands() const { return effectCommands_; }
+    // Which TVs show which station (Change Material with its TV flag).
+    TvLinks& tvLinks() { return tvLinks_; }
+    const TvLinks& tvLinks() const { return tvLinks_; }
     using SoundEvents = std::function<void(const SoundEvent&)>;
     void setSoundEvents(SoundEvents events) { soundEvents_ = std::move(events); }
     const SoundEvents& soundEvents() const { return soundEvents_; }
@@ -1696,6 +1700,7 @@ private:
     AnimationCarries animationCarries_;
     AnimationMovesSkeleton animationMovesSkeleton_;
     SoundEvents soundEvents_;
+    TvLinks tvLinks_;
     SoundStopAll soundStopAll_;
     EffectCommands effectCommands_;
     Notification* findNotification(std::int16_t id) {

@@ -51,6 +51,7 @@ public:
     void addMaterials(const scene::Scene& scene) override;
     void addMeshes(const scene::Scene& scene) override;
     void setImages(const scene::Scene& scene, const std::vector<int>& indexes, bool fade = false) override;
+    void setImagePixels(int index, const scene::Image& image) override;
     void setLightMapFade(float fade) override;
     void setSkybox(const std::vector<scene::Image>& faces) override;
     void setTerrainLightMap(const scene::Image& lightMap) override;
@@ -101,6 +102,8 @@ private:
         // Light maps being faded from, by the image they are replacing (see setImages), and how far
         // the fade has gone (0 .. 1).
         std::map<int, Texture> fadingFrom;
+        // The sizes of the images setImagePixels writes into.
+        std::map<int, std::pair<std::uint32_t, std::uint32_t>> streamed;
         float lightMapFade = 1;
 
         // A neighborhood's painted terrain (see scene::PaintedTerrain). OpenGL 2 has no texture arrays:

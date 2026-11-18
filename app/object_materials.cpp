@@ -67,7 +67,36 @@ int ObjectMaterials::material(const std::string& name, ts2::scene::Scene& scene)
     if (const auto it = materials_.find(key); it != materials_.end()) {
         return it->second;
     }
-    return materials_[key] = builderMaterial(builder_.material(name), scene);
+    int m = builderMaterial(builder_.material(name), scene);
+    if (m < 0 && isStation_ && isStation_(key)) {
+        m = stationMaterial(key, scene);
+    }
+    return materials_[key] = m;
+}
+
+// The game copies tvscreenanimations_screen_simscommercial for a station, with lighting off and
+// the station's movie as its base texture. Its picture starts black.
+int ObjectMaterials::stationMaterial(const std::string& name, ts2::scene::Scene& scene) {
+    constexpr std::uint32_t kStartSide = 128;
+    const int base = material("tvscreenanimations_screen_simscommercial", scene);
+    if (base < 0) {
+        return -1;
+    }
+    ts2::scene::Material m = scene.materials[static_cast<std::size_t>(base)];
+    m.name = name;
+    m.unlit = true;
+    m.takesTextureLight = false;
+    m.tiles = 0;
+    m.tileSpeed = 0;
+    std::vector<std::uint8_t> black(std::size_t{kStartSide} * kStartSide * 4, 0);
+    for (std::size_t i = 3; i < black.size(); i += 4) {
+        black[i] = 255;
+    }
+    m.image = static_cast<int>(scene.images.size());
+    scene.images.push_back({kStartSide, kStartSide, std::move(black)});
+    stationImages_[name] = m.image;
+    scene.materials.push_back(std::move(m));
+    return static_cast<int>(scene.materials.size() - 1);
 }
 
 int ObjectMaterials::builderMaterial(int index, ts2::scene::Scene& scene) {

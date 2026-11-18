@@ -9,6 +9,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -48,6 +49,15 @@ public:
     // Where a named node of a model sits in it, once model() has added it. Null for none.
     const ts2::scene::Transform* bone(const std::string& model, const std::string& node) const { return builder_.bone(model, node); }
 
+    // Names TV stations (see content::Broadcasts). A material name the game has no material for
+    // but that names a station becomes the station's screen: a copy of the TV commercial material,
+    // unlit, showing the station's own picture.
+    void setStations(std::function<bool(const std::string& name)> isStation) { isStation_ = std::move(isStation); }
+    // The scene image a station's screen shows, once a script has put the station on a TV.
+    std::optional<int> stationImage(const std::string& name) const {
+        const auto it = stationImages_.find(name);
+        return it == stationImages_.end() ? std::nullopt : std::optional<int>{it->second};
+    }
     // Looks for objects whose materials changed since the last update.
     void update(ts2::sim::World& world, ts2::scene::Scene& scene);
     // The next update sends the object's materials again if scripts changed them (its instance got
@@ -79,6 +89,7 @@ private:
     // The scene's material of that name, added from the game's files on first use. -1 when the
     // game has no such material.
     int material(const std::string& name, ts2::scene::Scene& scene);
+    int stationMaterial(const std::string& name, ts2::scene::Scene& scene);
     int image(int builderImage, ts2::scene::Scene& scene);
     int envCube(int builderCube, ts2::scene::Scene& scene);
     // The scene's copy of one of the builder's materials.
@@ -97,6 +108,8 @@ private:
     std::map<std::string, int> models_;              // lower-case name -> scene mesh
     std::map<std::string, int> skinnedModels_;       // lower-case name and materials -> scene mesh
     std::vector<std::pair<std::size_t, std::vector<int>>> changed_;
+    std::function<bool(const std::string&)> isStation_;
+    std::map<std::string, int> stationImages_;  // lower-case station name -> scene image
 };
 
 } // namespace app

@@ -18,6 +18,7 @@
 #include "neighborhood.hpp"
 #include "lot_daylight.hpp"
 #include "lot_life.hpp"
+#include "tv_stations.hpp"
 #include "lot_light.hpp"
 #include "lot_ui.hpp"
 #include "pie_menu_ui.hpp"
@@ -335,6 +336,9 @@ private:
     std::optional<ts2::tga::Pixels> drawSimView(const LotLife::AppearanceHairs& sim, const ts2::scene::HairSlots& slots, const std::string& tone,
                                                 unsigned width, unsigned height, float turn);
     void sendLotChanges();
+    // TV stations: the lot's are set up as it starts, and play each frame (game_tv.cpp).
+    void startTvStations();
+    void updateTvStations();
     // The lot's instances shown this frame: those its view shows, less the neighborhood's
     // decorations when the Decorations option is off.
     std::vector<std::uint8_t> lotShown() const;
@@ -500,6 +504,9 @@ private:
     double lotRealSeconds_ = 0;
     std::future<std::unique_ptr<ts2::sim::LotSimulation>> lotSimBuilding_;  // built beside the lot's scene
     std::unique_ptr<app::LotLife> lotLife_;
+    std::shared_ptr<const ts2::content::Broadcasts> broadcasts_;  // read on the first lot
+    std::unique_ptr<app::TvStations> tvStations_;
+    std::int64_t tvClockMs_ = 0;  // the lot's speed clock when the stations last moved
     // What plays visual effects on the lot, kept while the lot is open. The file stays for the next lot.
     std::unique_ptr<ts2::content::EffectsFiles> effectsFiles_;
     std::unique_ptr<ts2::scene::EffectPlayer> lotEffectPlayer_;

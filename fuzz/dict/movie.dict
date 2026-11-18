@@ -1,0 +1,9 @@
+# Chunk ids and the sound header start of .movie files (src/formats/movie.cpp).
+"MADk"
+"MADm"
+"MADe"
+"SCHl"
+"SCDl"
+"SCEl"
+"PT\x00\x00"
+"\xFD\x80\x01\x01"

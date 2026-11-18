@@ -76,6 +76,7 @@ public:
     void leaveOutPrepared(Addition& addition, const std::vector<std::size_t>& positions) const override;
     void addPrepared(const scene::Scene& scene, Addition addition) override;
     void setImages(const scene::Scene& scene, const std::vector<int>& indexes, bool fade = false) override;
+    void setImagePixels(int index, const scene::Image& image) override;
     void setLightMapFade(float fade) override;
     void setSkybox(const std::vector<scene::Image>& faces) override;
     void setTerrainLightMap(const scene::Image& lightMap) override;
@@ -454,6 +455,12 @@ private:
         // the fade has gone (0 .. 1).
         std::map<int, SDL_GPUTexture*> fadingFrom;
         float lightMapFade = 1;
+        // Images setImagePixels writes into: their size and the upload buffer kept for them.
+        struct Streamed {
+            unsigned width = 0, height = 0;
+            SDL_GPUTransferBuffer* transfer = nullptr;
+        };
+        std::map<int, Streamed> streamed;
         // A lot skirt's boundary curtain.
         SDL_GPUBuffer* clipVertices = nullptr;
         SDL_GPUBuffer* clipIndices = nullptr;

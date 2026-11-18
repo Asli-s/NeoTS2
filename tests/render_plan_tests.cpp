@@ -33,6 +33,7 @@ public:
     void addMaterials(const scene::Scene&) override {}
     void addMeshes(const scene::Scene&) override {}
     void setImages(const scene::Scene&, const std::vector<int>&, bool) override {}
+    void setImagePixels(int, const scene::Image&) override {}
     void setLightMapFade(float) override {}
     void setSkybox(const std::vector<scene::Image>&) override {}
     void setTerrainLightMap(const scene::Image&) override {}

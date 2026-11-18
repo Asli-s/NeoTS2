@@ -468,6 +468,27 @@ void GlRenderer::setImages(const scene::Scene& scene, const std::vector<int>& in
     }
 }
 
+void GlRenderer::setImagePixels(int index, const scene::Image& image) {
+    const auto at = static_cast<std::size_t>(index);
+    if (index < 0 || at >= gpu_->textures.size() || !complete(image)) {
+        return;
+    }
+    auto& size = gpu_->streamed[index];
+    if (size != std::pair{image.width, image.height} || gpu_->textures[at].id == 0) {
+        Texture fresh = uploadTexture(image, false);
+        Texture old = std::exchange(gpu_->textures[at], fresh);
+        release(old);
+        size = {image.width, image.height};
+        return;
+    }
+    gl_.ActiveTexture(GL_TEXTURE0);
+    gl_.BindTexture(GL_TEXTURE_2D, gpu_->textures[at].id);
+    forgetBindings();
+    gl_.PixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    gl_.TexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, static_cast<GLsizei>(image.width), static_cast<GLsizei>(image.height), GL_RGBA, GL_UNSIGNED_BYTE,
+                      image.rgba.data());
+}
+
 void GlRenderer::setLightMapFade(float fade) {
     gpu_->lightMapFade = std::clamp(fade, 0.0f, 1.0f);
     if (gpu_->lightMapFade >= 1) {

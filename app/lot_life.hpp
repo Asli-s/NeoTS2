@@ -66,6 +66,8 @@ public:
     void setSpeed(ts2::sim::Speed speed);
     bool paused();
     void setPaused(bool paused);
+    // The speed clock's time in ms, which runs at the game speed and stops while paused.
+    std::int64_t speedClockMs() const { return pacer_.clock().timeMs(); }
 
     // The Sim clock as the live panel shows it, and the household's funds.
     std::string clockText() { return ts2::sim::clockText(sim_->globals()); }
@@ -254,6 +256,8 @@ public:
     // The lot objects whose materials the last update changed (scene instance, its materials), for
     // the renderer. Materials new to the lot were added to its scene.
     const std::vector<std::pair<std::size_t, std::vector<int>>>& changedMaterials() const { return objectMaterials_.changed(); }
+    // The materials scripts put on objects, TV stations' screens among them.
+    ObjectMaterials& objectMaterials() { return objectMaterials_; }
 
     // The lot instances the last update added or replaced for objects scripts created or removed, in
     // order, for the renderer (see Renderer::setInstance). Their meshes and materials are in the scene.

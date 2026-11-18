@@ -346,6 +346,68 @@ void SdlGpuRenderer::setImages(const scene::Scene& scene, const std::vector<int>
     SDL_SubmitGPUCommandBuffer(cmd);
 }
 
+void SdlGpuRenderer::setImagePixels(int index, const scene::Image& image) {
+    const auto at = static_cast<std::size_t>(index);
+    if (index < 0 || at >= gpu_->textures.size() || !complete(image)) {
+        return;
+    }
+    const auto bytes = static_cast<Uint32>(image.rgba.size());
+    auto& s = gpu_->streamed[index];
+    if (s.width != image.width || s.height != image.height || s.transfer == nullptr) {
+        // A texture of its own, one level, which later frames write into.
+        SDL_GPUTextureCreateInfo info{};
+        info.type = SDL_GPU_TEXTURETYPE_2D;
+        info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+        info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+        info.width = image.width;
+        info.height = image.height;
+        info.layer_count_or_depth = 1;
+        info.num_levels = 1;
+        SDL_GPUTexture* fresh = SDL_CreateGPUTexture(device_, &info);
+        SDL_GPUTransferBufferCreateInfo buffer{};
+        buffer.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+        buffer.size = bytes;
+        SDL_GPUTransferBuffer* transfer = fresh ? SDL_CreateGPUTransferBuffer(device_, &buffer) : nullptr;
+        if (transfer == nullptr) {
+            if (fresh) {
+                SDL_ReleaseGPUTexture(device_, fresh);
+            }
+            gpu_->streamed.erase(index);
+            return;
+        }
+        if (s.transfer) {
+            SDL_ReleaseGPUTransferBuffer(device_, s.transfer);
+        }
+        if (SDL_GPUTexture* old = std::exchange(gpu_->textures[at], fresh)) {
+            SDL_ReleaseGPUTexture(device_, old);  // freed once the frames drawing with it are done
+        }
+        s = {image.width, image.height, transfer};    }
+    // Cycling lets the GPU keep drawing earlier frames from the old contents without a wait.
+    void* mapped = SDL_MapGPUTransferBuffer(device_, s.transfer, true);
+    if (mapped == nullptr) {
+        return;
+    }
+    std::memcpy(mapped, image.rgba.data(), bytes);
+    SDL_UnmapGPUTransferBuffer(device_, s.transfer);
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+    if (cmd == nullptr) {
+        throw sdlError("GPU command buffer");
+    }
+    SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
+    SDL_GPUTextureTransferInfo from{};
+    from.transfer_buffer = s.transfer;
+    from.pixels_per_row = image.width;
+    from.rows_per_layer = image.height;
+    SDL_GPUTextureRegion to{};
+    to.texture = gpu_->textures[at];
+    to.w = image.width;
+    to.h = image.height;
+    to.d = 1;
+    SDL_UploadToGPUTexture(copy, &from, &to, true);
+    SDL_EndGPUCopyPass(copy);
+    SDL_SubmitGPUCommandBuffer(cmd);
+}
+
 void SdlGpuRenderer::setLightMapFade(float fade) {
     gpu_->lightMapFade = std::clamp(fade, 0.0f, 1.0f);
     if (gpu_->lightMapFade >= 1) {

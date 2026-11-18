@@ -223,6 +223,12 @@ void SdlGpuRenderer::SceneGpu::release(SDL_GPUDevice* device) {
         }
     }
     fadingFrom.clear();
+    for (const auto& [index, s] : streamed) {
+        if (s.transfer) {
+            SDL_ReleaseGPUTransferBuffer(device, s.transfer);
+        }
+    }
+    streamed.clear();
     if (white) {
         SDL_ReleaseGPUTexture(device, white);
         white = nullptr;

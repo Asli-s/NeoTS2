@@ -226,6 +226,10 @@ public:
     // smaller levels (as light maps are drawn). With `fade`, light maps are drawn fading from the
     // ones they replace (see setLightMapFade).
     virtual void setImages(const scene::Scene& scene, const std::vector<int>& indexes, bool fade = false) = 0;
+    // Puts new pixels in the scene's image at `index` from the next frame on, as a movie's frames
+    // are shown: one level, no smaller ones. The first call makes the image a texture of its own,
+    // later calls of the same size write into it and send only the pixels.
+    virtual void setImagePixels(int index, const scene::Image& image) = 0;
     // How far light maps have faded to the ones setImages put in (0 .. 1, at 1 the old ones are let go).
     virtual void setLightMapFade(float fade) = 0;
     // Draws a lot's sky with these six faces from the next frame on (see scene::Scene::skybox). None

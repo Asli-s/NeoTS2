@@ -509,3 +509,4 @@ std::vector<Test> textLayoutTests();
 std::vector<Test> pathsTests();
 std::vector<Test> fuzzRegressionTests();
 std::vector<Test> audioTests();
+std::vector<Test> movieTests();
