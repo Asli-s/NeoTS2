@@ -52,6 +52,10 @@ constexpr std::size_t kSemiAttributeCount = 64;
 constexpr std::size_t kObjectDataCount = 128;
 constexpr std::size_t kPersonDataCount = 256;
 constexpr std::size_t kLifeStagePersonData = 0x3A;
+// The platform region of a split-level interior foundation ("stage"), and how far its floor stands
+// above its storey's.
+constexpr std::int32_t kStagePlatformRegion = 4;
+constexpr float kStageLift = 0.75f;
 constexpr std::size_t kGenderPersonData = 0x41;  // 1 female
 constexpr std::size_t kSwimmingPersonData = 0x40;  // Is Swimming?
 // A neighbor's copy of its person data has exactly this many values in the game.
@@ -697,6 +701,13 @@ public:
     using PlatformRegion = std::function<std::optional<std::int32_t>(int level, int x, int y, int quarter)>;
     void setPlatformRegion(PlatformRegion f) { platformRegion_ = std::move(f); }
     const PlatformRegion& platformRegion() const { return platformRegion_; }
+    // Which of a tile's four triangles (split along both diagonals) holds the point (fx, fy) inside it,
+    // each from 0 to 1, as the floor and platform grids number their quarters.
+    static int pointQuarter(double fx, double fy);
+    // How much higher than its storey's floor a Sim stands at (x, y) on `level`: 0.75 on a quarter of
+    // a stage, else 0. The level and point are the platform grid's: level 0 is the ground, one below a
+    // Sim's own level, and x and y run along the grid, an object's y and x.
+    float standingLift(int level, double x, double y) const;
 
     // The lot's neighbor id remap table (Generic Sims Call 0x30): the neighbor id each id maps to.
     // None when the lot has no remap tables. Unread when it has tables the engine can't read.
@@ -718,6 +729,9 @@ public:
     // The walls that block a Sim's view (Set to Next 0x18): built walls only.
     const WallTiles& sightWalls() const { return sightWalls_; }
     void setSightWalls(WallTiles walls) { sightWalls_ = std::move(walls); }
+    // The walls Snap won't move a Sim across: walls and fences with a covering.
+    const WallTiles& snapWalls() const { return snapWalls_; }
+    void setSnapWalls(WallTiles walls) { snapWalls_ = std::move(walls); }
 
     // The neighborhood's weather and season, as scripts read and change them.
     weather::Weather& weather() { return weather_; }
@@ -1649,6 +1663,7 @@ private:
     std::optional<TileBounds> tileBounds_;
     std::optional<std::vector<WallSection>> wallSections_;
     WallTiles sightWalls_;
+    WallTiles snapWalls_;
     RoomMap weatherRegions_;
     OutsideGrid outside_;
     std::map<std::pair<std::int16_t, std::int16_t>, std::vector<std::int32_t>> neighborRelationships_;

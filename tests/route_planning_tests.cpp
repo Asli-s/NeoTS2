@@ -413,6 +413,72 @@ void diagonalWallsBlockRouting() {
     CHECK(!plan(graph(0, 0, 8, 8)).has_value());  // corner to corner across the lot, no way through
 }
 
+// A stage's outline (the lot's stage wall graph) blocks as walls, with joints at its corners, as the
+// game's route grid has it. The room walls along the stage's edges have no covering and route only
+// because a stage wall lies on them. An edge with a real wall is routed once. A Sim can't walk onto
+// a stage with no way up.
+void stageOutlineBlocksRouting() {
+    using namespace ts2::sim;
+    const auto noFences = [](std::uint32_t) { return false; };
+    // A 2 x 2 stage from (2, 2) to (4, 4), one wall per tile edge.
+    auto outline = [](std::int32_t firstId) {
+        ts2::wallgraph::WallGraph g;
+        g.levels = 1;
+        const std::pair<int, int> ring[] = {{2, 2}, {3, 2}, {4, 2}, {4, 3}, {4, 4}, {3, 4}, {2, 4}, {2, 3}};
+        for (std::int32_t i = 0; i < 8; ++i) {
+            g.points.push_back({i, static_cast<float>(ring[i].first), static_cast<float>(ring[i].second), 0});
+        }
+        for (std::int32_t i = 0; i < 8; ++i) {
+            g.walls.push_back({firstId + i, i, 0, (i + 1) % 8, 0});
+        }
+        return g;
+    };
+    const auto stages = outline(100);
+    auto rooms = outline(1);
+    // A room wall away from the stage with no covering only divides rooms.
+    rooms.points.push_back({8, 6, 6, 0});
+    rooms.points.push_back({9, 7, 6, 0});
+    rooms.walls.push_back({9, 8, 0, 9, 0});
+    const std::vector<ts2::walllayer::Entry> styles{{1, 1, 0, 0}};  // a real wall on the stage edge (2, 2)-(3, 2)
+    auto count = [](const std::vector<RouteItem>& items, RouteItemKind kind, int type) {
+        return std::ranges::count_if(items, [&](const RouteItem& i) { return i.kind == kind && i.type == type; });
+    };
+
+    const auto items = wallRouteItems(rooms, styles, 0, noFences, 8, 8, &stages);
+    CHECK(count(items, RouteItemKind::Wall, 15) == 8 && count(items, RouteItemKind::Wall, 14) == 8);
+    CHECK(count(items, RouteItemKind::WallJoint, 0) == 4);
+    CHECK(std::ranges::count_if(items, [](const RouteItem& i) { return i.rect.x0 >= 5; }) == 0);
+    // Route x is graph y: the graph edge (2, 3)-(2, 4) runs along route y = 2.
+    CHECK(std::ranges::count_if(items, [](const RouteItem& i) {
+              return i.type == 15 && i.rect == RouteRect{3, 2 - 0.075f, 4, 2 + 0.075f};
+          }) == 1);
+    // The stage wall list alone gives the same walls, and without it only the real wall routes.
+    const auto stageOnly = wallRouteItems(ts2::wallgraph::WallGraph{}, {}, 0, noFences, 8, 8, &stages);
+    CHECK(count(stageOnly, RouteItemKind::Wall, 15) == 8 && count(stageOnly, RouteItemKind::WallJoint, 0) == 4);
+    CHECK(count(wallRouteItems(rooms, styles, 0, noFences, 8, 8), RouteItemKind::Wall, 15) == 1);
+    // A broken file's stage point that is not a number makes no wall on either side of it.
+    auto broken = stages;
+    broken.points[1].x = std::numeric_limits<float>::quiet_NaN();
+    CHECK(count(wallRouteItems(ts2::wallgraph::WallGraph{}, {}, 0, noFences, 8, 8, &broken), RouteItemKind::Wall, 15) == 6);
+
+    RouteGrid grid(8, 8);
+    grid.add({{0, 0, 8, 8}, 1, 0, RouteItemKind::Floor, true, 0});
+    for (const auto& item : items) grid.add(item);
+    const RouteLinks links = RouteLinks::build(grid);
+    RouteRandom jitter(1), heuristic(2);
+    const RouteStart start[] = {{1, 3}};
+    const RouteGoal onStage[] = {{3, 3, 1}};
+    CHECK(!planRoute(grid, links, start, onStage, 3, 3, {}, jitter, heuristic).has_value());
+    const RouteGoal pastIt[] = {{5.5f, 3, 1}};
+    const auto around = planRoute(grid, links, start, pastIt, 5.5f, 3, {}, jitter, heuristic);
+    CHECK(around.has_value());
+    if (around) {
+        bool crosses = false;
+        for (const auto& p : around->waypoints) crosses |= p.x > 1.8f && p.x < 4.2f && p.y > 1.8f && p.y < 4.2f;
+        CHECK(!crosses);
+    }
+}
+
 // The path search links leaves that share an edge (both ways), walks around a wall to the goal, and
 // takes the best-scoring goal it can reach over a nearer one.
 void routeSearchWalksAroundAWall() {
@@ -1214,11 +1280,12 @@ void snapPutsMeAtARoutingSlot() {
     CHECK(vm.run(me, 0x1000).outcome == Outcome::True);
     CHECK(me.x == 5 * 65536 + 32768 && me.y == 4 * 65536 + 32768 && me.data[1] == 4);
 
-    // A wall across the way refuses.
+    // A covered wall across a slanting way refuses.
+    me.x = 6 * 65536;
     me.y = 3 * 65536;
     ts2::sim::WallTiles walls;
     walls.add(0, 5, 4, 6, 4);
-    world.setWalls(walls);
+    world.setSnapWalls(walls);
     CHECK(vm.run(me, 0x1000).outcome == Outcome::False && me.y == 3 * 65536);
 
     // Off the lot: refused, data 0x34 = 4 (placement code 2, plus 2), as a car at the lot's edge finds.
@@ -1751,6 +1818,19 @@ void walkPathsRoundCorners() {
     CHECK(ts2::sim::WalkPath(Points{}, 0, 0).length() == 0 && ts2::sim::WalkPath(Points{{1.0f, 1.0f}}, 0, 0).length() < 1e-5f);
 }
 
+// A door's Portal tree runs where the walk's path comes closest to the door's entry point, found
+// from the last door on, so a path passing a spot twice finds the later pass.
+void walkPathsFindTheirNearestPoint() {
+    using Points = std::vector<std::pair<float, float>>;
+    const ts2::sim::WalkPath straight(Points{{0.0f, 0.0f}, {1.0f, 0.0f}, {3.0f, 0.0f}}, 0, 0);
+    CHECK(std::fabs(straight.nearest(2.0f, 0.3f, 0) - 2.0f) < 0.02f);
+    CHECK(std::fabs(straight.nearest(-5.0f, 0, 0)) < 1e-5f && std::fabs(straight.nearest(9.0f, 0, 0) - straight.length()) < 1e-5f);
+    const ts2::sim::WalkPath back(Points{{0.0f, 0.0f}, {2.0f, 0.0f}, {2.0f, 1.0f}, {0.0f, 1.0f}}, 0, 3.1415927f);
+    const float first = back.nearest(1.0f, 0.4f, 0);
+    CHECK(first < 1.5f && back.nearest(1.0f, 0.4f, first + 1.0f) > 3.0f);
+    CHECK(ts2::sim::WalkPath(Points{}, 0, 0).nearest(1.0f, 1.0f, 0) == 0);
+}
+
 // Short routes take the game's shapes: a turn on the spot to the end facing and a straight walk, or
 // (a Sim with no step clips) the path with turns before and after.
 void shortRoutesTurnOnTheSpot() {
@@ -1788,6 +1868,7 @@ std::vector<Test> routePlanningTests() {
         {"route search walks around a wall", routeSearchWalksAroundAWall},
         {"wall joints follow the angle gaps", wallJointsFollowTheAngleGaps},
         {"diagonal walls block routing", diagonalWallsBlockRouting},
+        {"stage outline blocks routing", stageOutlineBlocksRouting},
         {"path pass lines see the grid", pathPassLinesSeeTheGrid},
         {"path passes smooth a path", pathPassesSmoothAPath},
         {"route search escapes and refuses", routeSearchEscapesAndRefuses},
@@ -1817,6 +1898,7 @@ std::vector<Test> routePlanningTests() {
         {"steps are planned as the game plans them", stepsArePlannedAsTheGamePlansThem},
         {"sim rings are soft costs", simRingsAreSoftCosts},
         {"walk paths round corners", walkPathsRoundCorners},
+        {"walk paths find their nearest point", walkPathsFindTheirNearestPoint},
         {"short routes turn on the spot", shortRoutesTurnOnTheSpot},
     };
 }

@@ -290,7 +290,8 @@ RouteWorld::RouteWorld(const content::Lot& lot, const FenceBlocks& fenceBlocks, 
     lowest_ = lowest;
     for (int level = lowest; level < levels; ++level) {
         RouteGrid& grid = grids_.emplace_back(static_cast<float>(width), static_cast<float>(height));
-        for (const auto& item : wallRouteItems(*lot.roomGraph, lot.wallCoverings, level, fenceBlocks, width, height)) {
+        for (const auto& item : wallRouteItems(*lot.roomGraph, lot.wallCoverings, level, fenceBlocks, width, height,
+                                               lot.stageWalls ? &*lot.stageWalls : nullptr)) {
             grid.add(item);
         }
         for (const auto& item : floorRouteItems(floors->second, heights, surface, lot.floorPatterns, level, lowest, width, height, water)) {

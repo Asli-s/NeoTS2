@@ -1077,7 +1077,8 @@ Vm::RunState::Next Vm::RunState::walk(const bhav::Instruction& in, Frame& f) {
         frames_.back().callerReruns = true;
         return Next::Continue;
     }
-    if (walk.kind == Execution::WalkStep::Kind::Stair || walk.kind == Execution::WalkStep::Kind::GoalCheck ||
+    if (walk.kind == Execution::WalkStep::Kind::Stair || walk.kind == Execution::WalkStep::Kind::Door ||
+        walk.kind == Execution::WalkStep::Kind::GoalCheck ||
         walk.kind == Execution::WalkStep::Kind::RouteTree) {
         checkDepth();
         push(walk.group, std::move(walk.code), walk.instance, walk.args, walk.codeOwner);

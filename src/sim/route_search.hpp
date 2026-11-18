@@ -82,6 +82,7 @@ struct RouteWaypoint {
     float startHold = 0, endHold = 0;
     int level = 0;
     int portal = -1;  // at a stair's entry or exit: which of the search's portals
+    std::uint32_t door = 0;  // at a door's entry: the door's lead part
 };
 
 struct RoutePlan {

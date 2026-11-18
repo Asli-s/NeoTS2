@@ -972,6 +972,25 @@ void hasStageReadsThePlatformRegion() {
     CHECK(vm.run(object, 0x1000).outcome == Outcome::True && object.thread.temps[0] == 20001);
 }
 
+// A Sim stands 0.75 above its storey's floor on a stage's quarter. Other quarters, regions, levels and
+// broken points add nothing.
+void aSimStandsHigherOnAStage() {
+    ts2::sim::World world;
+    CHECK(world.standingLift(1, 11.5, 25.2) == 0.0f);
+    world.setPlatformRegion([](int level, int x, int y, int quarter) -> std::optional<std::int32_t> {
+        if (level == 1 && x == 11 && y == 25) return quarter == 3 ? 4 : -1;
+        if (level == 1 && x == 13 && y == 25) return 1;
+        return level == 0 ? std::optional<std::int32_t>(4) : std::nullopt;
+    });
+    CHECK(world.standingLift(1, 11.5, 25.2) == 0.75f);
+    CHECK(world.standingLift(1, 11.5, 25.9) == 0.0f);
+    CHECK(world.standingLift(1, 13.5, 25.5) == 0.0f);
+    CHECK(world.standingLift(2, 11.5, 25.2) == 0.0f);
+    CHECK(world.standingLift(1, -1.0, 25.2) == 0.0f);
+    CHECK(world.standingLift(1, std::numeric_limits<double>::quiet_NaN(), 25.2) == 0.0f);
+    CHECK(world.standingLift(1, 1e9, 25.2) == 0.0f);
+}
+
 // nWorld.GetNumWallSections gives the lot's room wall count, and GetRoomOnSideOfWall the room on side
 // 0 (the wall's left) or 1 of a wall. Both stop without the lot's walls. The second also stops past the
 // last wall and on a wall the room graph doesn't have, which still counts.
@@ -1685,6 +1704,7 @@ std::vector<Test> vmScriptTests() {
         {"CachedPerson reads a queued interaction's object", queuedInteractionObjectIsRead},
         {"nWorld.HasSolidFloor reads the floor quarter", hasSolidFloorReadsTheFloorQuarter},
         {"nWorld.HasStage reads the platform region", hasStageReadsThePlatformRegion},
+        {"A Sim stands higher on a stage", aSimStandsHigherOnAStage},
         {"nWorld.GetNumWallSections is the room wall count", numWallSectionsIsTheRoomWallCount},
         {"nWorld's lot size comes from the world bounds", lotSizeComesFromTheWorldBounds},
         {"ObjectManager lists a multi-tile object's parts", objectManagerListsMultiTileParts},

@@ -1,6 +1,8 @@
 #include "sim/vm_execution.hpp"
 #include "sim/turn.hpp"
 
+#include <limits>
+
 namespace ts2::sim::vm_detail {
 
 namespace {
@@ -526,6 +528,16 @@ std::optional<Execution::WalkStep> Execution::walkRouteStep(SimObject& sim, Walk
             }
         }
     }
+    // A door's Portal tree runs as the walk nears the door (see doorsAlong), and the walk goes on.
+    if (!walk.arrived && !walk.interrupted && walk.doorsRun < walk.doorsAt.size() && walk.doorsRun < walk.route.doors.size()) {
+        const float walked = walkedAt(walk.plan, static_cast<float>(std::max(0.0, now - walk.startMs)));
+        if (walked >= walk.doorsAt[walk.doorsRun]) {
+            const StairCrossing door = walk.route.doors[walk.doorsRun++];
+            if (auto step = doorPortal(door)) {
+                return *step;
+            }
+        }
+    }
     // The look-ahead for other Sims runs before the step (see sweepBlocker).
     if (!walk.arrived && !walk.interrupted) {
         if (const std::int16_t ahead = sweepBlocker(sim, walk, now)) {
@@ -633,6 +645,49 @@ Execution::WalkStep Execution::climbStair(SimObject& sim, Walking& walk) {
     sim.data[kRouteFlagsField] = static_cast<std::int16_t>(sim.data[kRouteFlagsField] & ~kPlanAgain);
     walk.climbing = true;
     walk.climbed.reset();
+    return step;
+}
+
+// A door's Portal tree (OBJf entry 15 of its entry part, else its exit part) for me to run as I walk
+// through, with the entry part as stack object. It is given the rooms at the entry and exit ends,
+// their levels, parts and slots, and 1 (walking). It opens the door and tells the rooms I leave and
+// enter. What it returns is not used. None when neither part has the tree.
+std::optional<Execution::WalkStep> Execution::doorPortal(const StairCrossing& door) {
+    constexpr std::size_t kPortalFunction = 15;
+    constexpr std::int16_t kWalking = 1;
+    const SimObject* entry = world().find(door.entryPart);
+    const SimObject* exit = world().find(door.exitPart);
+    const auto portalTree = [&](const SimObject* part) -> std::uint16_t {
+        const ObjectType* type = part != nullptr ? code_.objectType(part->definition.guid()) : nullptr;
+        const auto* functions = type != nullptr ? code_.objectFunctions(*type) : nullptr;
+        return functions != nullptr && kPortalFunction < functions->size() ? (*functions)[kPortalFunction].action : 0;
+    };
+    const SimObject* owner = portalTree(entry) != 0 ? entry : exit;
+    const std::uint16_t tree = portalTree(owner);
+    if (entry == nullptr || exit == nullptr || tree == 0) {
+        return std::nullopt;
+    }
+    WalkStep step{WalkStep::Kind::Door};
+    step.instance = tree;
+    step.group = groupFor(tree, owner->group);
+    step.code = code_.behavior(step.group, tree);
+    if (!step.code) {
+        throw Stop{Outcome::MissingCode, "BHAV not found", hex(step.group, 8) + " " + hex(tree, 4)};
+    }
+    step.codeOwner = owner->group;
+    step.stackObject = entry->id;
+    const auto room = [&](int level, const std::pair<float, float>& at) {
+        return static_cast<std::int16_t>(world().rooms().roomAt(level - 1, at.first, at.second));
+    };
+    step.args = {room(door.entryLevel, door.entryAt),
+                 room(door.exitLevel, door.exitAt),
+                 static_cast<std::int16_t>(door.entryLevel),
+                 static_cast<std::int16_t>(door.exitLevel),
+                 entry->id,
+                 exit->id,
+                 static_cast<std::int16_t>(door.entrySlot),
+                 static_cast<std::int16_t>(door.exitSlot),
+                 kWalking};
     return step;
 }
 
@@ -887,6 +942,25 @@ std::optional<LocoPair> Execution::locoPair(const std::optional<WalkTurnClips>& 
     return pair;
 }
 
+// How far along the walk each door's Portal tree runs: where the path comes closest to the door's
+// entry point, less the distance the walk loop covers in 0.42 seconds at `loopSpeed` (tiles per
+// millisecond), and not before the walk starts.
+static void doorsAlong(Walking& walk, float loopSpeed) {
+    constexpr float kDoorLeadMs = 420;
+    walk.doorsAt.clear();
+    walk.doorsRun = 0;
+    float along = 0;
+    for (const StairCrossing& door : walk.route.doors) {
+        if (door.at >= walk.route.points.size()) {
+            walk.doorsAt.push_back(std::numeric_limits<float>::max());
+            continue;
+        }
+        const auto& p = walk.route.points[door.at];
+        along = walk.path.nearest(p.first, p.second, along);
+        walk.doorsAt.push_back(std::max(0.0f, along - kDoorLeadMs * std::max(0.0f, loopSpeed)));
+    }
+}
+
 // Plans my walk along its route: its path from my facing to the slot's facing (else the way the
 // route's last stretch runs), started and stopped by the clips that turn from my facing onto the
 // path and from the path's way at its end into the facing I end in.
@@ -955,6 +1029,7 @@ void Execution::planWalkFor(const SimObject& sim, Walking& walk) {
             const auto inPlace = set.empty() ? locoClip(stepInPlaceClip(stage)) : walkSetClip(set, kStepInPlaceCategory);
             if (auto step = planStep(input.length, move, scale ? scale(sim.id) : 1.0f, clipAt, inPlace)) {
                 walk.plan = std::move(*step);
+                doorsAlong(walk, 0);  // how far ahead a step opens a door is not known yet
                 return;
             }
         }
@@ -1023,13 +1098,15 @@ void Execution::planWalkFor(const SimObject& sim, Walking& walk) {
     if (!(topStraight > 0)) {
         topStraight = kFallbackStraightShare * topLoop;
     }
-    input.speed = walkSpeed(counted > 0 && loopSpeed > 0 ? loopSpeed / counted : loop && loop->speed > 0 ? loop->speed : topLoop, input.length);
+    const float loopSpeedNow = counted > 0 && loopSpeed > 0 ? loopSpeed / counted : loop && loop->speed > 0 ? loop->speed : topLoop;
+    input.speed = walkSpeed(loopSpeedNow, input.length);
     input.topLoopSpeed = topLoop;
     input.topStraightSpeed = topStraight;
     if (const auto& scale = world().simScale()) {
         input.scale = scale(sim.id);
     }
     walk.plan = planWalk(input);
+    doorsAlong(walk, loopSpeedNow);
 }
 
 // The walk's part at `walked` tiles, and its clip as my animation (for scripts, as the walk is

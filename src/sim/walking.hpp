@@ -21,6 +21,8 @@ struct StairCrossing {
     std::int32_t entrySlot = 0, exitSlot = 0;
     int entryLevel = 1, exitLevel = 1;
     std::optional<std::int16_t> entryFacing;  // the entry slot's facing, which the walk there ends in
+    // A door's two ends (route coordinates), where its Portal tree's rooms are read.
+    std::pair<float, float> entryAt{0.0f, 0.0f}, exitAt{0.0f, 0.0f};
 };
 
 // A route for Go To Routing Slot: the points from the Sim's spot to the goal (route coordinates, in
@@ -29,6 +31,9 @@ struct StairCrossing {
 struct SlotRoute {
     std::vector<std::pair<float, float>> points;
     std::vector<StairCrossing> stairs;  // in the order they are crossed
+    // The doors on the way, in the order they are crossed: `at` is the door's entry point, and the
+    // entry is the end on the side the Sim comes from. The walk goes through without stopping.
+    std::vector<StairCrossing> doors;
     std::optional<std::int16_t> facing;
     std::int16_t failure = 0;
     std::int16_t goalObject = 0;  // the seat of a seat goal reached, else 0
@@ -133,6 +138,9 @@ struct Walking {
     std::optional<std::int16_t> goalFacing;
     bool climbing = false;          // the stair's Portal tree runs on the Sim
     std::optional<bool> climbed;    // what it returned
+    // How far along this stretch each door's Portal tree runs (see doorsAlong), and how many have run.
+    std::vector<float> doorsAt;
+    std::size_t doorsRun = 0;
     // The goal check of the object the walking tree runs on: it runs before the Sim sets off and
     // again each tile walked, and false ends the walk. `checkAt` is how far along this stretch the
     // next one runs.
@@ -178,6 +186,11 @@ inline void cutAtStair(Walking& walk) {
     rest.stairs.erase(rest.stairs.begin());
     for (StairCrossing& s : rest.stairs) {
         s.at -= cut;
+    }
+    std::erase_if(route.doors, [&](const StairCrossing& d) { return d.at >= cut; });
+    std::erase_if(rest.doors, [&](const StairCrossing& d) { return d.at < cut; });
+    for (StairCrossing& d : rest.doors) {
+        d.at -= cut;
     }
     route.points.resize(cut);
     route.stairs.resize(1);

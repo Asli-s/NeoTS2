@@ -611,10 +611,10 @@ public:
     using TokenList = std::vector<std::shared_ptr<InventoryToken>>;
 
     struct WalkStep {
-        enum class Kind { Done, Wait, PreRoute, PostRoute, Stair, GoalCheck, RouteTree } kind = Kind::Done;
+        enum class Kind { Done, Wait, PreRoute, PostRoute, Stair, Door, GoalCheck, RouteTree } kind = Kind::Done;
         bool result = false;
         // The tree run on my stack before the instruction runs again: my pre- or post-route tree, a
-        // stair's Portal tree (its entry part as stack object), the walking tree's object's goal check
+        // stair's or door's Portal tree (its entry part as stack object), the walking tree's object's goal check
         // (that tree's stack object), or a blocked or failed route's tree (see RouteBlock).
         std::uint32_t group = 0;
         std::uint16_t instance = 0;
@@ -875,6 +875,7 @@ public:
     std::optional<WalkStep> walkRouteStep(SimObject& sim, Walking& walk, SlotRouteCall& call, double now);
     WalkStep arriveOnRoute(SimObject& sim, Walking& walk, const Frame& f, std::size_t frame);
     WalkStep climbStair(SimObject& sim, Walking& walk);
+    std::optional<WalkStep> doorPortal(const StairCrossing& door);
     WalkStep goToRelativePosition(const bhav::Instruction& in, Frame& f);
     bool walkTo(SimObject& sim, Walking& walk, double now, std::int16_t& blocker);
     // A blocked walk's next move (vm_route_blocked.cpp): a step to return, or a plan again from where

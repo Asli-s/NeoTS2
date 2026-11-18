@@ -88,16 +88,38 @@ bool hasWideGap(const std::vector<std::pair<float, float>>& dirs) {
 } // namespace
 
 std::vector<RouteItem> wallRouteItems(const wallgraph::WallGraph& rooms, const std::vector<walllayer::Entry>& coverings, int level,
-                                      const FenceBlocks& fenceBlocks, int width, int height) {
+                                      const FenceBlocks& fenceBlocks, int width, int height, const wallgraph::WallGraph* stages) {
     std::map<std::int32_t, std::uint32_t> coveringOf;
     for (const auto& c : coverings) {
         coveringOf[static_cast<std::int32_t>(c.wall)] = c.type;
     }
-    // Wall styles route as walls, fences that stop Sims as fences.
-    auto barrier = [&](const wallgraph::Wall& w) {
+    // A wall's place: its level and its two ends in route coordinates, the lower end first. Points
+    // that are not numbers (a broken file) have none.
+    using Place = std::tuple<int, float, float, float, float>;
+    auto finite = [](const wallgraph::Point& p) { return std::isfinite(p.x) && std::isfinite(p.y); };
+    auto placeOf = [](const wallgraph::Point& a, const wallgraph::Point& b) {
+        const std::pair<float, float> p{a.y, a.x}, q{b.y, b.x};
+        const auto [lo, hi] = std::minmax(p, q);
+        return Place{a.level, lo.first, lo.second, hi.first, hi.second};
+    };
+    std::set<Place> stagePlaces;
+    static const wallgraph::WallGraph kNoStages{};
+    const wallgraph::PointIndex stagePointById(stages != nullptr ? *stages : kNoStages);
+    if (stages != nullptr) {
+        for (const auto& w : stages->walls) {
+            const auto* a = stagePointById(w.from);
+            const auto* b = stagePointById(w.to);
+            if (a != nullptr && b != nullptr && a->level == level && finite(*a) && finite(*b)) {
+                stagePlaces.insert(placeOf(*a, *b));
+            }
+        }
+    }
+    // Wall styles route as walls, fences that stop Sims as fences. A wall with no covering takes the
+    // stage wall style when a stage wall lies on it, and that style is a wall.
+    auto barrier = [&](const wallgraph::Wall& w, const Place& place) {
         const auto it = coveringOf.find(w.id);
         if (it == coveringOf.end()) {
-            return Barrier::None;  // only divides rooms
+            return stagePlaces.contains(place) ? Barrier::Wall : Barrier::None;  // else it only divides rooms
         }
         const std::uint32_t covering = it->second;
         if (covering < kFirstGuid) {
@@ -112,18 +134,21 @@ std::vector<RouteItem> wallRouteItems(const wallgraph::WallGraph& rooms, const s
     std::map<std::pair<float, float>, std::vector<std::pair<float, float>>> directions;
     // The tiles holding a diagonal piece already, by direction.
     std::set<std::tuple<int, int, bool>> diagonalTiles;
-    const wallgraph::PointIndex pointById(rooms);
-    for (const auto& w : rooms.walls) {
-        const auto* a = pointById(w.from);
-        const auto* b = pointById(w.to);
-        const Barrier kind = barrier(w);
-        if (a == nullptr || b == nullptr || a->level != level || kind == Barrier::None) {
-            continue;
+    // The places routed already. A stage wall on one of them adds nothing.
+    std::set<Place> routed;
+    auto route = [&](const wallgraph::Wall& w, const wallgraph::PointIndex& points, bool stage) {
+        const auto* a = points(w.from);
+        const auto* b = points(w.to);
+        if (a == nullptr || b == nullptr || a->level != level || !finite(*a) || !finite(*b)) {
+            return;
         }
+        const Place place = placeOf(*a, *b);
+        const Barrier kind = stage ? Barrier::Wall : barrier(w, place);
+        if (kind == Barrier::None || (stage && routed.contains(place))) {
+            return;
+        }
+        routed.insert(place);
         const float ax = a->y, ay = a->x, bx = b->y, by = b->x;
-        if (!std::isfinite(ax) || !std::isfinite(ay) || !std::isfinite(bx) || !std::isfinite(by)) {
-            continue;
-        }
         directions[{ax, ay}].push_back({bx - ax, by - ay});
         directions[{bx, by}].push_back({ax - bx, ay - by});
         const bool fence = kind == Barrier::Fence;
@@ -138,12 +163,12 @@ std::vector<RouteItem> wallRouteItems(const wallgraph::WallGraph& rooms, const s
             const RouteRect span{std::min(ax, bx), std::min(ay, by), std::max(ax, bx), std::max(ay, by)};
             const float h = kWallHalfWidth;
             add(ay == by ? RouteRect{span.x0, span.y0 - h, span.x1, span.y1 + h} : RouteRect{span.x0 - h, span.y0, span.x1 + h, span.y1});
-            continue;
+            return;
         }
         // A diagonal runs corner to corner through whole tiles. Other slants are not walls the game builds.
         const float run = std::abs(bx - ax);
         if (run != std::abs(by - ay) || run > kMaxDiagonalTiles || std::floor(run) != run || std::floor(ax) != ax || std::floor(ay) != ay) {
-            continue;
+            return;
         }
         const float x0 = std::min(ax, bx), yAtX0 = ax < bx ? ay : by;
         const bool rising = (ax < bx) == (ay < by);
@@ -159,6 +184,16 @@ std::vector<RouteItem> wallRouteItems(const wallgraph::WallGraph& rooms, const s
                 const float y = rising ? ty + t : ty + 1 - t - kDiagonalSquare;
                 add({tx + t, y, tx + t + kDiagonalSquare, y + kDiagonalSquare});
             }
+        }
+    };
+    // The room walls first, then the stage walls, as the game adds them.
+    const wallgraph::PointIndex pointById(rooms);
+    for (const auto& w : rooms.walls) {
+        route(w, pointById, false);
+    }
+    if (stages != nullptr) {
+        for (const auto& w : stages->walls) {
+            route(w, stagePointById, true);
         }
     }
     // A joint where a wall ends, or where the walls round a point leave a gap wider than 1.05 pi between

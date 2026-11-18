@@ -831,6 +831,7 @@ std::optional<RoutePlan> Search::run(std::span<const RouteStart> starts, std::sp
                 if (through) {
                     const Node& next = node(path[i + 1]);
                     add(v.x, v.y, WaypointKind::DoorEntry);
+                    plan.waypoints.back().door = d->owner;
                     add((next.x + v.x) * 0.5f, (next.y + v.y) * 0.5f, WaypointKind::DoorExit);
                     continue;
                 }

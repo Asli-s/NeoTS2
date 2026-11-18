@@ -40,16 +40,18 @@ WallTiles WallTiles::fromLot(const content::Lot& lot) {
     return walls;
 }
 
-WallTiles WallTiles::builtWalls(const content::Lot& lot) {
-    // Coverings below this are wall styles. Above, it is a fence's GUID.
-    constexpr std::uint32_t kFirstFenceGuid = 0x10000;
+namespace {
+
+// The room graph's segments whose covering `keep` takes.
+template <typename Keep>
+WallTiles coveredBy(const content::Lot& lot, Keep keep) {
     WallTiles walls;
     if (!lot.roomGraph) {
         return walls;
     }
     std::set<std::int32_t> built;
     for (const auto& c : lot.wallCoverings) {
-        if (c.type < kFirstFenceGuid) {
+        if (keep(c.type)) {
             built.insert(static_cast<std::int32_t>(c.wall));
         }
     }
@@ -63,6 +65,18 @@ WallTiles WallTiles::builtWalls(const content::Lot& lot) {
         }
     }
     return walls;
+}
+
+} // namespace
+
+WallTiles WallTiles::builtWalls(const content::Lot& lot) {
+    // Coverings below this are wall styles. Above, it is a fence's GUID.
+    constexpr std::uint32_t kFirstFenceGuid = 0x10000;
+    return coveredBy(lot, [](std::uint32_t type) { return type < kFirstFenceGuid; });
+}
+
+WallTiles WallTiles::coveredWalls(const content::Lot& lot) {
+    return coveredBy(lot, [](std::uint32_t) { return true; });
 }
 
 void WallTiles::mark(int level, int x, int y, std::uint8_t side) { sides_[{level, x, y}] |= side; }

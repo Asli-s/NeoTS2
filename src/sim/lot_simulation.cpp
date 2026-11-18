@@ -136,6 +136,7 @@ LotSimulation::LotSimulation(const std::filesystem::path& install, const std::fi
     });
     world_.setWalls(WallTiles::fromLot(saved));
     world_.setSightWalls(WallTiles::builtWalls(saved));
+    world_.setSnapWalls(WallTiles::coveredWalls(saved));
     const auto products = content::findProducts(install);
     const content::BuildScripts buildScripts = content::loadBuildScripts(products);
     std::vector<World::WallSection> sections;
@@ -782,10 +783,13 @@ SlotRoute LotSimulation::routeToSlot(const SimObject& sim, const SimObject& owne
     // Each door as the game reads it when a plan starts: its lead's data 0x35 and 0x16.
     std::vector<RouteDoorState> doors;
     std::set<std::uint32_t> doorOwners;
-    const bool acrossLevels = sim.level != owner.level;
+    // The lot's stairs are part of the route world the game searches, so a route uses them even when
+    // it ends on the level it starts on (a stage's stairs). Without stairs one level is searched.
+    const std::vector<StairPortal> stairs = stairPortals(world_, code_);
+    const bool allLevels = sim.level != owner.level || !stairs.empty();
     std::vector<const RouteItem*> doorItems;
     for (int l = routes->lowest(); l < routes->lowest() + routes->levels(); ++l) {
-        if (const RouteGrid* g = routes->level(l); g != nullptr && (acrossLevels || l == level)) {
+        if (const RouteGrid* g = routes->level(l); g != nullptr && (allLevels || l == level)) {
             for (const RouteItem& item : g->items()) {
                 doorItems.push_back(&item);
             }
@@ -809,8 +813,7 @@ SlotRoute LotSimulation::routeToSlot(const SimObject& sim, const SimObject& owne
     const int lowest = routes->lowest();
     const RouteStart start[] = {{static_cast<float>(sim.x) / 65536.0f, static_cast<float>(sim.y) / 65536.0f, sim.level - 1 - lowest}};
     std::optional<RoutePlan> plan;
-    std::vector<StairPortal> stairs;
-    if (!acrossLevels) {
+    if (!allLevels) {
         plan = planRoute(*grid, links->second, start, goals, aimX, aimY, doors, routeJitter_, random, intersects);
     } else {
         // Every level, joined by the lot's stairs, each as this Sim may cross it.
@@ -829,7 +832,6 @@ SlotRoute LotSimulation::routeToSlot(const SimObject& sim, const SimObject& owne
         for (RouteGoal& g : onLevel) {
             g.level = level - lowest;
         }
-        stairs = stairPortals(world_, code_);
         std::vector<RoutePortal> portals;
         for (const StairPortal& p : stairs) {
             RoutePortal r;
@@ -863,6 +865,34 @@ SlotRoute LotSimulation::routeToSlot(const SimObject& sim, const SimObject& owne
         const StairPortal::End& entry = fromEnd ? p.from : p.to;
         const StairPortal::End& exit = fromEnd ? p.to : p.from;
         route.stairs.push_back({i, entry.part, exit.part, entry.slot, exit.slot, entry.level, exit.level, entry.facing});
+    }
+    // Each door crossed: the way through it nearest its entry point, entered from the end on the
+    // side of the point before.
+    for (std::size_t i = 1; i < plan->walk.size(); ++i) {
+        const RouteWaypoint& w = plan->walk[i];
+        const SimObject* lead = w.kind == WaypointKind::DoorEntry ? world_.find(static_cast<std::int16_t>(w.door)) : nullptr;
+        if (lead == nullptr) {
+            continue;
+        }
+        const RouteWaypoint& before = plan->walk[i - 1];
+        const StairPortal* way = nullptr;
+        float gap = 0;
+        const auto ways = doorPortals(world_, code_, *lead);
+        for (const StairPortal& p : ways) {
+            const float g = std::hypot(w.x - (p.from.x + p.to.x) * 0.5f, w.y - (p.from.y + p.to.y) * 0.5f);
+            if (way == nullptr || g < gap) {
+                way = &p;
+                gap = g;
+            }
+        }
+        if (way == nullptr) {
+            continue;
+        }
+        const bool fromEnd = std::hypot(before.x - way->from.x, before.y - way->from.y) <= std::hypot(before.x - way->to.x, before.y - way->to.y);
+        const StairPortal::End& entry = fromEnd ? way->from : way->to;
+        const StairPortal::End& exit = fromEnd ? way->to : way->from;
+        route.doors.push_back(
+            {i, entry.part, exit.part, entry.slot, exit.slot, entry.level, exit.level, std::nullopt, {entry.x, entry.y}, {exit.x, exit.y}});
     }
     // A seat goal: the seat, the joint of its slot and the facing there. A bone slot that turns the
     // Sim: the facing of the joint whose spot was reached.

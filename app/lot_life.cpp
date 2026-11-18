@@ -107,14 +107,16 @@ SimFrame simFrame(const ts2::sim::SimObject& sim, double nowMs) {
     return f;
 }
 
-// How high a Sim stands at (x, y) on its level: on the floor, or, swimming (person data 0x40), at
-// the pool water's surface, which the swim clips hang the body below.
-float standHeight(const ts2::scene::Actor& actor, const ts2::sim::SimObject& sim, std::int32_t level, float x, float y) {
+// How high a Sim stands at (x, y) on its level: on the floor, 0.75 above it on a stage, or, swimming
+// (person data 0x40), at the pool water's surface, which the swim clips hang the body below. The
+// scene's x is the lot's y.
+float standHeight(const ts2::scene::Actor& actor, const ts2::sim::World& world, const ts2::sim::SimObject& sim, std::int32_t level, float x,
+                  float y) {
     constexpr std::int32_t kLevelBelowGround = 0;
     if (sim.personData[ts2::sim::kSwimmingPersonData] != 0) {
         return ts2::scene::poolwater::surfaceHeight(actor.floorHeight(kLevelBelowGround, x, y));
     }
-    return actor.floorHeight(level, x, y);
+    return actor.floorHeight(level, x, y) + world.standingLift(level - 1, x, y);
 }
 
 // Draws a Sim in an object's slot (a seat, a stair step) at the slot's bone and turned as it is, as the
@@ -122,7 +124,8 @@ float standHeight(const ts2::scene::Actor& actor, const ts2::sim::SimObject& sim
 // LotLife::slotPlace) and `partSlot` one of a multi-tile part drawn by its lead (a double bed's far side).
 // A Sim carried in another Sim's slot hangs at that slot's bone once posed (see Actor::carrier), and
 // until then stands at its last pose (`pose`), else at its carrier's place.
-void placeSim(ts2::scene::Actor& actor, const ts2::sim::SimObject& sim, const SimFrame& frame, const ts2::scene::Scene& scene,
+void placeSim(ts2::scene::Actor& actor, const ts2::sim::World& world, const ts2::sim::SimObject& sim, const SimFrame& frame,
+              const ts2::scene::Scene& scene,
               const std::function<std::optional<ts2::scene::Transform>(const ts2::scene::PlacedObject&, std::size_t slot)>& slotAt,
               const std::function<std::optional<ts2::scene::Transform>(std::int16_t part, std::size_t slot)>& partSlot,
               const ts2::scene::ScenePose* pose) {
@@ -188,7 +191,7 @@ void placeSim(ts2::scene::Actor& actor, const ts2::sim::SimObject& sim, const Si
     }
     const float x = frame.y;  // the lot's x and y are the position's y and x
     const float y = frame.x;
-    actor.place = actor.lotFrame * ts2::scene::Transform::at(x, y, standHeight(actor, sim, sim.level, x, y), ts2::sim::drawnHeading(frame.heading));
+    actor.place = actor.lotFrame * ts2::scene::Transform::at(x, y, standHeight(actor, world, sim, sim.level, x, y), ts2::sim::drawnHeading(frame.heading));
 }
 
 // A Sim and what it holds are on the storey the simulation has the Sim on (1 = ground), so a view
@@ -779,7 +782,7 @@ void LotLife::poseSim(ts2::scene::Actor& actor, const ts2::sim::SimObject& objec
         if (actor.floorHeight) {
             const auto at = own.tail->path.at(walked);
             const float heading = at.heading && !own.tail->plan.keepsFacing ? *at.heading : own.tailHeading;
-            tailPlace = actor.lotFrame * ts2::scene::Transform::at(at.y, at.x, standHeight(actor, object, own.tail->level, at.y, at.x), heading);
+            tailPlace = actor.lotFrame * ts2::scene::Transform::at(at.y, at.x, standHeight(actor, sim_->world(), object, own.tail->level, at.y, at.x), heading);
         }
     }
     const auto* tailPoses = own.tail ? &tailPoses_ : nullptr;
@@ -805,7 +808,7 @@ void LotLife::poseSim(ts2::scene::Actor& actor, const ts2::sim::SimObject& objec
         addSettleClips(actor, object, *own.settledMs, own.settledAt, animations_, sim_->world().locoClips());
     }
     placeSim(
-        actor, object, frame, scene, [&](const ts2::scene::PlacedObject& p, std::size_t slot) { return slotPlace(p, slot, scene); },
+        actor, sim_->world(), object, frame, scene, [&](const ts2::scene::PlacedObject& p, std::size_t slot) { return slotPlace(p, slot, scene); },
         [&](std::int16_t part, std::size_t slot) { return partSlot(part, slot, scene); }, pose_);
     own.noteStarts(object, actor.place, walking, hung, holderSlot);
     setSimStorey(scene, actor, object.level);

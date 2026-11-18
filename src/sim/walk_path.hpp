@@ -46,6 +46,8 @@ public:
         std::optional<float> heading;
     };
     Point at(float distance) const;
+    // How far along the path, from `from` on, it comes closest to (x, y).
+    float nearest(float x, float y, float from) const;
 
 private:
     std::array<float, 2> curve(std::size_t piece, float t) const;

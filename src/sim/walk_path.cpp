@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace ts2::sim {
 
@@ -241,6 +242,28 @@ WalkPath::Point WalkPath::at(float distance) const {
         out.heading = std::atan2(-dy, dx);  // the world's x and y are the route's y and x
     }
     return out;
+}
+
+float WalkPath::nearest(float x, float y, float from) const {
+    float best = std::clamp(std::isfinite(from) ? from : 0.0f, 0.0f, length());
+    float bestGap = std::numeric_limits<float>::max();
+    if (lengths_.size() < 2) {
+        return best;
+    }
+    for (std::size_t s = 0; s < lengths_.size(); ++s) {
+        if (lengths_[s] < from) {
+            continue;
+        }
+        const std::size_t piece = std::min(s == 0 ? 0 : (s - 1) / kSamplesPerPiece, lengths_.size() / kSamplesPerPiece - 1);
+        const float t = s == 0 ? 0.0f : static_cast<float>(s - piece * kSamplesPerPiece) / kSamplesPerPiece;
+        const auto c = curve(piece, std::clamp(t, 0.0f, 1.0f));
+        const float gap = std::hypot(c[0] - x, c[1] - y);
+        if (gap < bestGap) {
+            bestGap = gap;
+            best = lengths_[s];
+        }
+    }
+    return best;
 }
 
 } // namespace ts2::sim

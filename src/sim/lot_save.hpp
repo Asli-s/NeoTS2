@@ -67,8 +67,8 @@ struct TypeOwners {
     // Neighbors made since the neighborhood loaded whose character files this save writes. Only
     // those can be saved on the lot, as the game loads a Sim through its file.
     std::set<std::int16_t> writtenNewSims;
-    // The floor height at (x, y) in the scene's tiles on a storey (1 = ground), for where a new Sim
-    // stands. Without it a new Sim stands at height 0.
+    // The height a Sim stands at (x, y) in the scene's tiles on a storey (1 = ground), higher on a
+    // stage than on the floor. Without it a Sim stands at height 0.
     std::function<float(std::int32_t, float, float)> floorHeight;
     // Where a Sim is drawn on the lot (its position, then its rotation as a quaternion), by object id,
     // which for one in a slot is where the slot's bone holds it. Without it, or with nothing for a

@@ -386,7 +386,10 @@ LotSaveCounts fillLotPackage(dbpf::PackageImage& package, LotSimulation& simulat
     owners.drawnPlace = std::move(drawnPlace);
     owners.drawnJoints = std::move(drawnJoints);
     owners.runningEffects = std::move(runningEffects);
-    owners.floorHeight = [&simulation](std::int32_t level, float x, float y) { return simulation.floorHeight(level, x, y); };
+    // A Sim on a stage stands above its storey's floor. The scene's x is the lot's y.
+    owners.floorHeight = [&simulation](std::int32_t level, float x, float y) {
+        return simulation.floorHeight(level, x, y) + simulation.world().standingLift(level - 1, x, y);
+    };
     addNewTypes(package, simulation, owners);
     const LotSaveCounts counts =
         fillLotPackage(package, simulation.world(), simulation.globals(), simulation.vm().rng.state(), owners, view);

@@ -110,9 +110,12 @@ SnapRefusal snapRefusal(const World& world, const SimObject& object, const SnapT
                                                          world.rooms().roomAtPosition(target.level - 1, toX, toY))) {
         return SnapRefusal::NotSameRoom;
     }
-    const bool moves = object.x != target.x || object.y != target.y;
-    if (target.checkWalls && moves && object.level == target.level && onLot(fromX, fromY) &&
-        wallBetween(world, object.level - 1, fromX, fromY, toX, toY)) {
+    // The game tests walls only for a move that changes both x and y, so a straight move along a
+    // tile row passes. Only walls and fences with a covering count, so a stage's edges don't stop
+    // a Sim stepping off its stairs.
+    const bool slants = object.x != target.x && object.y != target.y;
+    if (target.checkWalls && slants && object.level == target.level && onLot(fromX, fromY) &&
+        wallCrosses(world.snapWalls(), object.level - 1, fromX, fromY, toX, toY)) {
         return SnapRefusal::WallInTheWay;
     }
     return SnapRefusal::None;

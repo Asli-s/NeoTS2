@@ -29,6 +29,9 @@ public:
     static WallTiles fromLot(const content::Lot& lot);
     // Only the segments built as walls (a wall style): no fences, no lines that only divide rooms.
     static WallTiles builtWalls(const content::Lot& lot);
+    // The segments with a covering, walls and fences: no lines that only divide rooms, such as a
+    // stage's edges.
+    static WallTiles coveredWalls(const content::Lot& lot);
 
     // A wall from (x0, y0) to (x1, y1) along the grid or diagonally across tiles.
     void add(int level, float x0, float y0, float x1, float y1);

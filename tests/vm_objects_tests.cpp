@@ -1229,6 +1229,34 @@ void placementTestKeepsTheFarEdgeOnTheLot() {
     CHECK(ts2::sim::snapRefusal(world, me, {at(6.0f), at(1.5f), 1, std::int16_t{0}}) == ts2::sim::SnapRefusal::OffLot);
 }
 
+// Snap stops at a wall or fence with a covering, and only for a move that changes both x and y,
+// as the game tests. A line that only divides rooms (a stage's edge) lets a Sim step off a stage's
+// stairs onto it.
+void snapStopsOnlyAtCoveredWallsCrossedSlantwise() {
+    using namespace ts2::sim;
+    World world;
+    auto& me = world.create(kObjectGroup, definition("Me", 0));
+    const auto at = [](float tiles) { return static_cast<std::int32_t>(tiles * 65536.0f); };
+    me.x = at(2.5f);
+    me.y = at(2.75f);
+    me.level = 1;
+    WallTiles edge;
+    edge.add(0, 2, 3, 3, 3);
+    auto target = [&](float x, float y) {
+        SnapTarget t{at(x), at(y), 1, std::nullopt};
+        t.checkRoom = false;
+        return t;
+    };
+    world.setWalls(edge);  // every line of the room graph, the stage's edge among them
+    CHECK(snapRefusal(world, me, target(2.666f, 3.188f)) == SnapRefusal::None);
+    world.setSnapWalls(edge);  // now a covered wall
+    CHECK(snapRefusal(world, me, target(2.666f, 3.188f)) == SnapRefusal::WallInTheWay);
+    CHECK(snapRefusal(world, me, target(2.5f, 3.25f)) == SnapRefusal::None);  // straight across
+    auto skip = target(2.666f, 3.188f);
+    skip.checkWalls = false;
+    CHECK(snapRefusal(world, me, skip) == SnapRefusal::None);
+}
+
 void reachPutMovesTheObjectAtTheClipsEvent() {
     using namespace ts2::sim;
     const auto reach = [](std::uint8_t mode) {
@@ -3582,6 +3610,7 @@ std::vector<Test> vmObjectTests() {
         {"a moved multi-tile part takes the others with it", movedPartsFollow},
         {"Snap tests every part of a multi-tile object at its spot", snapTestsEveryPartAtItsSpot},
         {"the placement test keeps the lot's far edge on the lot", placementTestKeepsTheFarEdgeOnTheLot},
+        {"Snap stops only at covered walls crossed slantwise", snapStopsOnlyAtCoveredWallsCrossedSlantwise},
         {"removing a part removes the whole multi-tile object", removingAPartRemovesTheWholeObject},
         {"snapped cars take their passengers", snappedCarsTakeTheirPassengers},
         {"Create Object can go below the object in a local", createObjectCanGoBelowTheObjectInALocal},

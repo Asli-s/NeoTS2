@@ -21,9 +21,7 @@ std::optional<QuarterTile> quarterTileArg(lua_State* L) {
     if (!std::isfinite(x) || !std::isfinite(y) || x < 0 || y < 0 || x > 1e6 || y > 1e6) {
         return std::nullopt;
     }
-    const double fx = x - std::floor(x), fy = y - std::floor(y);
-    const int quarter = fx <= fy ? (fx + fy < 1 ? 0 : 1) : (fx + fy < 1 ? 3 : 2);
-    return QuarterTile{static_cast<int>(x), static_cast<int>(y), level, quarter};
+    return QuarterTile{static_cast<int>(x), static_cast<int>(y), level, World::pointQuarter(x - std::floor(x), y - std::floor(y))};
 }
 
 } // namespace
@@ -59,7 +57,6 @@ int hasSolidGround(lua_State* L) {
 // platform region 4. HasStageAny gives the same answer in the game: it loops over the tile's
 // quarters but asks about the point's own quarter each time.
 int hasStage(lua_State* L) {
-    constexpr std::int32_t kStageRegion = 4;
     const ScriptCall& c = call(L);
     const auto at = quarterTileArg(L);
     if (!at || c.world == nullptr || !c.world->platformRegion()) {
@@ -67,7 +64,7 @@ int hasStage(lua_State* L) {
         return 1;
     }
     const auto region = c.world->platformRegion()(at->level, at->x, at->y, at->quarter);
-    lua_pushboolean(L, region.has_value() && *region == kStageRegion);
+    lua_pushboolean(L, region.has_value() && *region == kStagePlatformRegion);
     return 1;
 }
 

@@ -25,8 +25,12 @@ using FenceBlocks = std::function<bool(std::uint32_t guid)>;
 // gap wider than 1.05 pi. A diagonal piece is a row of small squares across its tile, each padded.
 // Diagonals are kept only on the lot's `width` by `height` tiles, one per tile and direction, so a
 // broken file can't make millions of them.
+// `stages` is the lot's stage wall graph, the outline of its stages (split-level platforms). Its
+// walls block as walls. A room wall with no covering blocks too when a stage wall lies on it, and a
+// stage wall is left out where a room wall already blocks.
 std::vector<RouteItem> wallRouteItems(const wallgraph::WallGraph& rooms, const std::vector<walllayer::Entry>& coverings, int level,
-                                      const FenceBlocks& fenceBlocks, int width, int height);
+                                      const FenceBlocks& fenceBlocks, int width, int height,
+                                      const wallgraph::WallGraph* stages = nullptr);
 
 // A fence's post footprint around the post's point (its model's extent), or none for fences that
 // don't stop Sims.

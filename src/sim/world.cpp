@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <cmath>
 #include <stdexcept>
 #include <string>
 
@@ -315,6 +316,21 @@ const std::vector<std::int16_t>* World::livePersonData(std::int16_t id) const {
     }
     const SavedNeighbor* saved = neighbor(id);
     return saved ? &saved->personData : nullptr;
+}
+
+int World::pointQuarter(double fx, double fy) {
+    return fx <= fy ? (fx + fy < 1 ? 0 : 1) : (fx + fy < 1 ? 3 : 2);
+}
+
+float World::standingLift(int level, double x, double y) const {
+    // Points far outside any lot are refused before they become tile numbers.
+    constexpr double kFarthest = 1e6;
+    if (!platformRegion_ || !std::isfinite(x) || !std::isfinite(y) || x < 0 || y < 0 || x > kFarthest || y > kFarthest) {
+        return 0.0f;
+    }
+    const double tx = std::floor(x), ty = std::floor(y);
+    const auto region = platformRegion_(level, static_cast<int>(tx), static_cast<int>(ty), pointQuarter(x - tx, y - ty));
+    return region == kStagePlatformRegion ? kStageLift : 0.0f;
 }
 
 // Friends as the neighbor fields count them: no relationship value 3 either way, and each a friend
