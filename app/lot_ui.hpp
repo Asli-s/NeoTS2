@@ -4,6 +4,7 @@
 #include "graphics_options_panel.hpp"
 #include "audio_options_panel.hpp"
 #include "live_panel.hpp"
+#include "pet_panel.hpp"
 #include "lot_life.hpp"
 #include "notification_stack.hpp"
 #include "pause_frame.hpp"
@@ -98,7 +99,7 @@ public:
     void hideForFreeCamera(bool hide);
 
     // What a released button asks for.
-    enum class Action { None, Neighborhood, Quit, Save, Pause, Normal, High, Ultra, OptionsOpened, OptionsClosed, GameOptionChanged, GraphicsOptionChanged, AudioOptionChanged, RewardsOpened, RewardsClosed, SelectSim, TrackSim, CentreOnNeighbor, CloseNotification, FloorUp, FloorDown, WallMode, ToggleCeiling, MainMenu };
+    enum class Action { None, Neighborhood, Quit, Save, Pause, Resume, Normal, High, Ultra, OptionsOpened, OptionsClosed, GameOptionChanged, GraphicsOptionChanged, AudioOptionChanged, RewardsOpened, RewardsClosed, SelectSim, TrackSim, CentreOnNeighbor, CloseNotification, FloorUp, FloorDown, WallMode, ToggleCeiling, MainMenu };
     Action clicked(int window);
     // The puck's camera button held down under the mouse.
     enum class CameraButton { None, RotateLeft, RotateRight, ZoomIn, ZoomOut };
@@ -145,6 +146,7 @@ public:
     // the other is empty, and a witch's title round it (Live text 0x336). Only English order is
     // done. The game puts the last name first in some languages.
     std::string fullName(LotLife& life, std::int16_t sim) const;
+    AspirationPopup::Content aspirationPopupContent(LotLife& life, std::int16_t sim);
     // Shows the lot's life: the clock, speed and funds, the selected Sim (its aspiration and needs)
     // and every household Sim's mood.
     void showLife(LotLife& life);
@@ -165,6 +167,14 @@ public:
 private:
     // Sets the Sims' names as the tips of their thumbnails and the live panel's portrait.
     void showNames(LotLife& life, std::int16_t sim);
+    // The Sims' live panel and the pets' for the selected Sim and pet.
+    void showSimPanel(LotLife& life, std::int16_t sim);
+    void showPetPanel(LotLife& life, std::int16_t sim);
+    // The live panel shown for the selected Sim, the pets' one for a pet.
+    int shownPanel() const { return petShown_ ? petLive_ : live_; }
+    // Shows or hides the live panel, the one for the selected Sim's kind.
+    void showLivePanel(bool show);
+    void showPetsBackground(bool pets);
     // Moves a panel so that its anchor (a hidden window captioned "<window id>:bl") sits on that
     // window of the puck.
     void anchor(int panel);
@@ -201,11 +211,16 @@ private:
     int width_, height_;
     bool testingCheats_ = false;
     int puck_ = -1, live_ = -1, options_ = -1;
+    int petLive_ = -1;  // the pets' live panel
+    bool petShown_ = false;  // whether the selected Sim is a pet, which has its own live panel
     int version_ = -1;  // the version text, -1 when it isn't shown
     int loaded_ = 0;  // parts of the panels loaded (see load), 2 when all are
     int funds_ = -1, wallMenu_ = -1, clock_ = -1;
     // The pause, normal, high and ultra speed buttons, set each frame.
     std::array<int, 4> speedButtons_{-1, -1, -1, -1};
+    // The pets' live panel has its own clock and speed buttons.
+    int petClock_ = -1;
+    std::array<int, 4> petSpeedButtons_{-1, -1, -1, -1};
     std::array<int, 4> cameraButtons_{-1, -1, -1, -1};  // in CameraButton's order, from RotateLeft
     int wallMode_ = 2, pickedWallMode_ = 2;
     // The Advanced Neighborhood Options panel, its strip of neighborhood buttons and the window
@@ -215,6 +230,7 @@ private:
     void showHoodPanel(bool show);
     void showHoodStrip(bool show);
     LivePanel panel_;
+    PetPanel petPanel_;
     OptionsMenu optionsMenu_{screen_};
     GameOptionsPanel gameOptions_{screen_, optionsMenu_};
     GraphicsOptionsPanel graphicsOptions_{screen_, optionsMenu_};

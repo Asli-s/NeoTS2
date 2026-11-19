@@ -35,6 +35,12 @@ void PauseFrame::attach(ts2::ui::Screen& screen, int width, int height) {
     layout(width, height);
 }
 
+void PauseFrame::setEnabled(bool enabled) {
+    if (screen_ != nullptr) {
+        screen_->setEnabled(pieces_[Sign], enabled);
+    }
+}
+
 void PauseFrame::layout(int width, int height) {
     if (screen_ == nullptr || pieces_[Sign] < 0) {
         return;

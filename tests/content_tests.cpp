@@ -16,6 +16,7 @@
 #include "parse_float.hpp"
 #include "paths/save_folders.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #ifdef _WIN32
 #include <fcntl.h>
@@ -1243,6 +1244,25 @@ void ageTipFollowsTheStage() {
     CHECK(is(ageTip(19, false, -1, -1, 0), 0x2C, 0));  // 65536 days left wraps to 0 in 16 bits
 }
 
+// The pet panel's age picture goes by species and age group, and its tooltip has its own texts for
+// puppies, kittens, adults and elders.
+void petAgeFollowsSpeciesAndStage() {
+    using ts2::content::petAgeTip;
+    using ts2::content::petAgeWindow;
+    const auto is = [](ts2::content::AgeTip t, std::uint16_t entry, int days) { return t.entry == entry && t.days == days; };
+    CHECK(petAgeWindow(1, 2) == 0xBD8A9F0B && petAgeWindow(2, 19) == 0xBD8A9F0E && petAgeWindow(2, 51) == 0xBD8A9F0F);
+    CHECK(petAgeWindow(3, 18) == 0xAD8A9F0B && petAgeWindow(3, 50) == 0xAD8A9F0E && petAgeWindow(3, 51) == 0xAD8A9F0F);
+    CHECK(petAgeWindow(0, 19) == 0 && petAgeWindow(4, 19) == 0);
+    CHECK(is(petAgeTip(1, 2, 7, 3, 0), 0x36, 4));     // puppy, 4 days left
+    CHECK(is(petAgeTip(2, 2, 7, 0, 0), 0x38, 1));     // puppy, last day
+    CHECK(is(petAgeTip(3, 2, 7, 3, 0), 0x37, 4));     // kitten
+    CHECK(is(petAgeTip(3, 2, 7, 0, 0), 0x39, 1));
+    CHECK(is(petAgeTip(1, 19, 20, 9, 0), 0x3A, 10));  // adult
+    CHECK(is(petAgeTip(3, 19, 20, 0, 0), 0x3B, 1));
+    CHECK(is(petAgeTip(2, 51, 9, 6, 70), 0x3D, 73));  // elder: 70 days before, 3 as an elder
+    CHECK(is(petAgeTip(0, 19, 20, 9, 0), 0, 0));
+}
+
 // Stepped bars: personality pips are 8 pixels each of 80 (a full bar draws 79), the fitness bar
 // moves a pixel at a time and stops one short of its 79.
 void steppedBarsFillAsTheGame() {
@@ -1332,6 +1352,30 @@ void portraitShadowIsItsBlurredOutline() {
     // Larger than any portrait: refused rather than blurred.
     const ts2::tga::Pixels huge{2048, 2048, std::vector<std::uint8_t>(2048u * 2048u * 4u, 255)};
     CHECK(ts2::content::portraitSilhouette(huge).rgba.empty() && ts2::content::portraitCrop(huge).rgba.empty());
+}
+
+// A Sim's thumbnail is scaled as the game scales it: a Catmull-Rom cubic across, then down, in 14-bit
+// fixed point, edges repeated. This 12 x 12 picture scaled to 5 x 4 gives the game's numbers.
+void cubicScaleIsTheGamesFilter() {
+    ts2::tga::Pixels picture{12, 12, {}};
+    for (std::uint32_t y = 0; y < 12; ++y) {
+        for (std::uint32_t x = 0; x < 12; ++x) {
+            picture.rgba.insert(picture.rgba.end(), {static_cast<std::uint8_t>((x * 37 + y * 11) % 256), static_cast<std::uint8_t>((x * x + 3 * y) % 256),
+                                                     static_cast<std::uint8_t>((x + y) % 5 ? 255 : 0), static_cast<std::uint8_t>(x < 9 ? 255 : 64)});
+        }
+    }
+    const std::vector<std::uint8_t> expected{
+        36, 4, 216, 255, 131, 13, 193, 255, 186, 33, 211, 255, 56, 65, 199, 208, 135, 110, 206, 59,
+        69, 13, 186, 255, 169, 22, 218, 255, 155, 42, 192, 255, 74, 74, 215, 208, 169, 119, 192, 59,
+        103, 22, 219, 255, 194, 31, 188, 255, 86, 51, 218, 255, 104, 83, 188, 208, 207, 128, 219, 59,
+        143, 31, 189, 255, 164, 40, 221, 255, 58, 60, 186, 255, 152, 92, 225, 208, 164, 137, 178, 59};
+    const auto out = ts2::content::cubicScaled(picture, 5, 4);
+    CHECK(out.width == 5 && out.height == 4 && out.rgba == expected);
+    // A flat picture stays flat.
+    const auto flat = ts2::content::cubicScaled(ts2::tga::Pixels{256, 256, std::vector<std::uint8_t>(256 * 256 * 4, 200)}, 36, 36);
+    CHECK(flat.rgba.size() == 36 * 36 * 4 && std::all_of(flat.rgba.begin(), flat.rgba.end(), [](std::uint8_t v) { return v >= 199 && v <= 201; }));
+    CHECK(ts2::content::cubicScaled(ts2::tga::Pixels{4, 4, {1}}, 2, 2).rgba.empty());  // broken: nothing
+    CHECK(ts2::content::cubicScaled(picture, 0, 4).rgba.empty());
 }
 
 // Thumbnail pictures are scaled by area (colour weighted by alpha) and cut to the thumbnail's
@@ -1888,6 +1932,7 @@ std::vector<Test> contentTests() {
         {"mood meter picks a column", moodMeterPicksAColumn},
         {"age bar follows the stage", ageBarFollowsTheStage},
         {"age tip follows the stage", ageTipFollowsTheStage},
+        {"pet age follows species and stage", petAgeFollowsSpeciesAndStage},
         {"stepped bars fill as the game", steppedBarsFillAsTheGame},
         {"live panel texts as the game", livePanelTextsAsTheGame},
         {"want categories are read", wantCategoriesAreRead},
@@ -1896,6 +1941,7 @@ std::vector<Test> contentTests() {
         {"thumbnail pictures are scaled and masked", thumbnailPicturesAreScaledAndMasked},
         {"queue icons are laid out as the game", queueIconsAreLaidOutAsTheGame},
         {"portrait shadow is its blurred outline", portraitShadowIsItsBlurredOutline},
+        {"cubic scale is the game's filter", cubicScaleIsTheGamesFilter},
         {"outside grid covers under floors and roofs", outsideGridCoversUnderFloorsAndRoofs},
         {"new save folder is filled as the game", newSaveFolderIsFilledAsTheGame},
         {"save folders in use are left alone", saveFoldersInUseAreLeftAlone},

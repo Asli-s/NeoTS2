@@ -1544,6 +1544,10 @@ std::string Game::saveLot() {
         for (ts2::sim::NewCharacterFile& newFile : made.files) {
             writer.add(newFile.path, std::move(newFile.bytes), ts2::content::SaveTarget::Create);
         }
+        // The household's family picture is drawn anew, as the game's save draws it.
+        if (auto picture = familyPictureFile()) {
+            writer.add(picture->first, std::move(picture->second), ts2::content::SaveTarget::Replace);
+        }
         // A Sim whose look changed gets its character file's look rewritten, as the game's save does.
         const auto looks = lotLife_->changedLooks();
         // A look that can't be written yet is left out alone, the rest of the save going ahead.
@@ -1564,6 +1568,9 @@ std::string Game::saveLot() {
             rewritten.push_back(path);
         }
         writer.commit();
+        if (hoodCounts.savedFunds) {
+            lotLife_->simulation().world().setFamilyLastSavedFunds(hoodCounts.savedFunds->first, hoodCounts.savedFunds->second);
+        }
         for (const ts2::sim::NewCharacterFile& newFile : made.files) {
             lotLife_->simulation().addCharacterFile(newFile.neighbor, newFile.path);
         }
@@ -2036,6 +2043,8 @@ void Game::lotAction(app::LotUi::Action action) {
     }
     switch (action) {
     case Action::Pause: lotLife_->setPaused(!lotLife_->paused()); break;
+    // The pause sign resumes the game, without a sound.
+    case Action::Resume: lotLife_->setPaused(false); break;
     case Action::Normal: lotLife_->setSpeed(ts2::sim::Speed::Normal); break;
     case Action::High: lotLife_->setSpeed(ts2::sim::Speed::High); break;
     case Action::Ultra: lotLife_->setSpeed(ts2::sim::Speed::Ultra); break;
@@ -2813,7 +2822,12 @@ void Game::drawHousehold(std::uint64_t now) {
     std::mt19937 poseRandom(static_cast<unsigned>(now));
     for (const std::int16_t id : householdDrawn_) {
         auto portrait = drawSimPortrait(id, poseRandom);
-        members.push_back({id, portrait ? std::move(portrait) : lotLife_->portrait(id)});
+        const auto data = lotLife_->personData(id);
+        const auto person = [&](std::size_t index) { return index < data.size() ? data[index] : std::int16_t{0}; };
+        constexpr std::size_t kSpecies = 0xBA, kSelectionFlags = 0x9E, kRoommateFlags = 0x54;
+        const bool pet = person(kSpecies) != 0;
+        const bool branch = pet || (person(kSelectionFlags) & 8) != 0 || (person(kRoommateFlags) & 0x800) != 0;
+        members.push_back({id, portrait ? std::move(portrait) : lotLife_->portrait(id), branch, pet});
     }
     const auto age = [&](std::int16_t sim) {
         const auto data = lotLife_->personData(sim);
@@ -3576,7 +3590,7 @@ void Game::windowClicked(int window) {
         } else if (action == app::NeighborhoodUi::Action::MainMenu && !lotBuilding_.valid()) {
             showChooser();
         } else if (action == app::NeighborhoodUi::Action::EnterLot && !lotBuilding_.valid() && !loading(lotSimBuilding_) && !hoodRefreshing_.valid()) {
-            const std::uint32_t lot = hoodUi_.cardLot();
+            const std::uint32_t lot = hoodUi_.lotToEnter();
             hoodUi_.hideCard();
             enterLot(lot);
         }

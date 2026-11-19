@@ -103,7 +103,7 @@ void WantsPanel::show(const std::vector<Want>& wants, const std::vector<Want>& f
         // A clicked want that changed closes its popup and highlight. The same want refills an open popup.
         const auto& shown = popupWant_;
         if (shown) {
-            const auto same = [&](const Want& w) { return w.guid == shown->guid; };
+            const auto same = [&](const Want& w) { return w.guid == shown->guid && w.argument == shown->argument; };
             const Want* found = nullptr;
             if (const auto it = std::find_if(wants_.begin(), wants_.end(), same); it != wants_.end()) {
                 found = &*it;
@@ -215,7 +215,8 @@ void WantsPanel::highlight() {
     for (auto* slots : {&layout.wants, &layout.fears}) {
         for (const Slot& slot : *slots) {
             if (slot.icon >= 0) {
-                const bool on = slot.shown && popupWant_ && slot.shown->guid == popupWant_->guid;
+                // Wants of one kind differ by what they are about (each career of Get A Job).
+                const bool on = slot.shown && popupWant_ && slot.shown->guid == popupWant_->guid && slot.shown->argument == popupWant_->argument;
                 screen_->setChecked(screen_->find(slot.icon, kButton), on);
             }
         }

@@ -2,6 +2,7 @@
 
 #include "content/ui_data.hpp"
 #include "ui/fonts.hpp"
+#include "ui/tip_layout.hpp"
 
 #include <array>
 #include <cstdint>
@@ -78,6 +79,9 @@ public:
     // Shows only the part of the window's image from (left, top) to (right, bottom) in pixels,
     // stretched over the window's area. An empty part shows the whole image again.
     void setImagePart(int window, const std::array<int, 4>& part);
+    // Draws the window's image in nine pieces with corners `margin` pixels square, kept at their
+    // size while the edges and middle stretch. 0 stretches the whole image again.
+    void setImageMargin(int window, int margin);
     // Multiplies the window's image by a colour (its alpha fades it).
     void setImageColor(int window, const std::array<float, 4>& color);
     // Textures added or changed since the last call (a window's own picture or text keeps its
@@ -184,6 +188,7 @@ private:
         std::array<int, 4> part{};       // part of the image stretched over the window (setImagePart), when set
         std::array<float, 4> imageColor{1, 1, 1, 1};
         bool edge = false;               // the image is stretched around its border (edgeimage)
+        int edgeMargin = 0;              // the corners' size in pixels when set, a third of the image otherwise
         bool passive = false;            // shown only: the mouse goes through it to what is under it
         // How the window takes the mouse. A disabled window or one with winflag_ignoremouse lets it
         // through, and buttons are enabled by their state instead. A container (winflag_container)
@@ -219,8 +224,9 @@ private:
         bool paint = true;  // a generic window draws its image
         int textImage = -1;
         std::string tip;
-        // The tip's lines drawn into one image, where its first baseline is, and its widest line.
-        int tipImage = -1, tipBaseline = 0, tipWidth = 0, tipLines = 0;
+        // The tip's title and body drawn into one image, how far its text area's top is below the
+        // image's, and the text area's width and height as the game measures them.
+        int tipImage = -1, tipTop = 0, tipWidth = 0, tipHeight = 0;
         bool tipTimeout = true;  // the tip hides after a while (tipstimeout)
         int baseline = 0;
         // A text window in a Type 1 font: each line's width without trailing spaces (empty for
@@ -255,6 +261,14 @@ private:
     void emitLines(const Window& w, float x0, float y0, std::vector<Quad>& out) const;
     // Draws a window's tooltip text into an image, if it has a tip and none is drawn yet.
     void drawTip(Window& window);
+    // Shows the tip of the window the mouse came to: its popup UI script when the tip names one
+    // that loads, else the drawn box.
+    void showTip(int window);
+    // Loads, fills and places a tip's popup script. -1 when the script doesn't load.
+    int loadTipPopup(const TipText& tip);
+    // Lines of `text` wrapped in `style` as the game measures a tip's text: 240 pixels wide, wider
+    // by 10 at a time while the lines are taller than 500. Gives the widest line as measured.
+    std::vector<std::string> tipLines(const std::string& text, const FontStyle& style, int& widest);
     // A tip's frame, w by h at (x, y), and its text image with its baseline at `baselineY`. The frame
     // is a dark blue border and a see-through beige inside on all but its last 2 columns and 3 rows,
     // which hold a soft shadow.
@@ -299,6 +313,7 @@ private:
         std::array<int, 2> at{0, 0};
     } spotTip_;
     double hoverSince_ = 0;
+    int tipPopup_ = -1;  // the hovered window's tip popup, while one is loaded
     int white_ = -1;          // a white texture for plain colors
     std::vector<int> changed_;
     std::vector<int> freeWindows_, freeTextures_;  // slots of removed windows and their pictures, for reuse

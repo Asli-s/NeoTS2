@@ -328,6 +328,29 @@ void detachedWindowsKeepTheirPlace() {
     CHECK(rig.screen.buttonAt(150, 130) == child && rig.screen.buttonAt(115, 115) == cover);
 }
 
+// A picture drawn in nine pieces with 16 pixel corners, as the neighborhood's lot tag is: the corners
+// keep their size and only the edges and middle stretch.
+void marginedImagesKeepTheirCorners() {
+    Rig rig("Button = \"NeoTS2 Test\", \"20\", \"bold\"\n");
+    ts2::ui::Window window{{{"iid", "IGZWinGen"}, {"paint", "yes"}, {"winflag_visible", "yes"}, {"area", "(0,0,200,56)"}}, {}};
+    const int tag = rig.screen.addWindows({window}, 0, 0);
+    ts2::tga::Pixels box;
+    box.width = box.height = 60;
+    box.rgba.assign(60 * 60 * 4, 255);
+    rig.screen.setImage(tag, box);
+    rig.screen.setImageMargin(tag, 16);
+    const auto quads = rig.screen.quads();
+    CHECK(quads.size() == 9);
+    if (quads.size() != 9) {
+        return;
+    }
+    CHECK(quads.front().x0 == 0 && quads.front().x1 == 16 && quads.front().y1 == 16 && quads.front().u1 * 60 == 16);
+    CHECK(quads.back().x0 == 184 && quads.back().y0 == 40 && quads.back().x1 == 200 && quads.back().u0 * 60 == 44);
+    // A new picture is stretched whole again until a margin is set.
+    rig.screen.setImage(tag, box);
+    CHECK(rig.screen.quads().size() == 1);
+}
+
 } // namespace
 
 std::vector<Test> textLayoutTests() {
@@ -342,6 +365,7 @@ std::vector<Test> textLayoutTests() {
         {"removed windows free their slot once", removedWindowsFreeTheirSlotOnce},
         {"the mouse goes to the window on top", theMouseGoesToTheWindowOnTop},
         {"detached windows keep their place", detachedWindowsKeepTheirPlace},
+        {"margined images keep their corners", marginedImagesKeepTheirCorners},
         {"windows keep the mouse as in the game", windowsKeepTheMouseAsInTheGame},
         {"see-through windows let the mouse through", seeThroughWindowsLetTheMouseThrough},
     };

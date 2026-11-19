@@ -15,6 +15,10 @@ public:
     // Lays the frame out for a screen of this size.
     void layout(int width, int height);
     void show(bool shown);
+    // The pause sign is a button that resumes the game, and only in live mode.
+    void setEnabled(bool enabled);
+    // Whether `window` is the pause sign.
+    bool clicked(int window) const { return window >= 0 && window == pieces_[0]; }
 
 private:
     ts2::ui::Screen* screen_ = nullptr;

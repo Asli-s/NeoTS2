@@ -8,6 +8,7 @@
 #include "diagnostics.hpp"
 #include "formats/hash.hpp"
 #include "names.hpp"
+#include "sim/want_refill.hpp"
 #include "sim/selection.hpp"
 
 #include <algorithm>
@@ -29,6 +30,8 @@ bool sameWants(const std::vector<ts2::swaf::Want>& a, const std::vector<ts2::swa
 
 constexpr std::uint32_t kScripts = 0xA99D8A11;
 constexpr std::uint32_t kPuck = 0x4905F85B, kLivePanel = 0x49060005, kOptionsMenu = 0x49060001;
+// The live panel for a selected pet.
+constexpr std::uint32_t kPetPanel = 0xFEED2000;
 // The puck's windows.
 constexpr std::uint32_t kLiveMode = 0x37D97B25, kOptions = 0x67D97B2F, kFunds = 0x00003000;
 constexpr std::uint32_t kFloorUp = 0x00002001, kFloorDown = 0x00002000, kToggleCeiling = 0x00007000;
@@ -60,6 +63,8 @@ constexpr int kVersionInset = 5;
 constexpr std::uint32_t kClock = 0x37D82A93, kPause = 0x27D7258F, kNormal = 0x57E01CC1, kHigh = 0x37E01CC3,
                         kUltra = 0x47E01CC5;
 constexpr std::uint32_t kNoPetsBackground = 0xA94E97E4, kPetsBackground = 0xA94E97E3;
+// The pet panel's season indicator, which isn't inside its frame as the Sims' panel's is.
+constexpr std::uint32_t kPetSeasons = 0x7235F4C7;
 constexpr std::uint32_t kPortraitHolder = 0x4BDEFFA4, kVacationDays = 0x1320BD2F;
 // In the portrait holder: the selected Sim's whole portrait, its shadow, and a small picture whose use isn't known.
 // A saved want's argument kind for a Sim: its argument is the Sim's neighbor id.
@@ -201,6 +206,7 @@ void LotUi::load() {
     if (loaded_ == 0) {
         puck_ = screen_.load(kScripts, kPuck, 0, 0);
         live_ = screen_.load(kScripts, kLivePanel, 0, 0);
+        petLive_ = screen_.load(kScripts, kPetPanel, 0, 0);
         options_ = screen_.load(kScripts, kOptionsMenu, 0, 0);
         hoodPanel_ = screen_.load(kScripts, kHoodOptions, 0, kHoodPanelY);
         hoodStrip_ = screen_.find(hoodPanel_, kHoodStrip);
@@ -214,6 +220,7 @@ void LotUi::load() {
         // The puck sits in the bottom left corner and the panels hang off it.
         screen_.move(puck_, 0, height_ - screen_.height(puck_));
         anchor(live_);
+        anchor(petLive_);
         anchor(options_);
         screen_.raise(puck_);
         // The clock and speed buttons, and the frame the live panel lays out. The rest (portrait,
@@ -226,6 +233,18 @@ void LotUi::load() {
             screen_.setVisible(part, part == clock || part == pause || part == speeds);
         }
         panel_.attach(screen_, live_);
+        // The pets' panel the same way, its frame laid out by the pet panel.
+        if (petLive_ >= 0) {
+            petClock_ = screen_.find(petLive_, kClock);
+            petSpeedButtons_ = {screen_.find(petLive_, kPause), screen_.find(petLive_, kNormal), screen_.find(petLive_, kHigh),
+                                screen_.find(petLive_, kUltra)};
+            const int petSpeeds = screen_.parent(petSpeedButtons_[1]);
+            for (const int part : screen_.children(petLive_)) {
+                screen_.setVisible(part, part == petSpeeds || screen_.id(part) == kPetSeasons);
+            }
+            petPanel_.attach(screen_, petLive_);
+            screen_.setVisible(screen_.find(petLive_, kPortraitHolder), false);
+        }
         portraitWindows_ = portraitWindows(screen_);
         skewer_.attach(screen_, puck_);
         pauseFrame_.attach(screen_, width_, height_);
@@ -233,8 +252,7 @@ void LotUi::load() {
         screen_.setVisible(screen_.find(live_, kPortraitHolder), false);
         screen_.setVisible(screen_.find(live_, kVacationDays), false);
         // A household without pets shows the plain background.
-        screen_.setVisible(screen_.find(live_, kPetsBackground), false);
-        screen_.setVisible(screen_.find(live_, kNoPetsBackground), true);
+        showPetsBackground(false);
         screen_.setChecked(screen_.find(puck_, kLiveMode), true);
         // Exit Tutorial shares the Neighborhood button's place. It only shows in the tutorial.
         screen_.setVisible(screen_.find(options_, kExitTutorial), false);
@@ -259,7 +277,7 @@ void LotUi::setSize(int width, int height) {
     if (loaded_ < 2) {
         return;
     }
-    for (const int panel : {puck_, live_, options_}) {
+    for (const int panel : {puck_, live_, petLive_, options_}) {
         if (panel >= 0) {
             screen_.move(panel, screen_.x(panel), screen_.y(panel) + down);
         }
@@ -313,7 +331,7 @@ void LotUi::close() {
     closeWallMenu();
     pauseFrame_.show(false);
     queue_.setVisible(false);
-    for (const int panel : {puck_, live_, options_, version_}) {
+    for (const int panel : {puck_, live_, petLive_, options_, version_}) {
         if (panel >= 0) {
             screen_.setVisible(panel, false);
         }
@@ -382,7 +400,7 @@ void LotUi::hideForFreeCamera(bool hide) {
         optionsWereShown_ = optionsShown();
         closeWallMenu();
         queue_.setVisible(false);
-        for (const int panel : {puck_, live_, options_, version_}) {
+        for (const int panel : {puck_, live_, petLive_, options_, version_}) {
             if (panel >= 0) {
                 screen_.setVisible(panel, false);
             }
@@ -395,9 +413,7 @@ void LotUi::hideForFreeCamera(bool hide) {
             screen_.setVisible(panel, true);
         }
     }
-    if (live_ >= 0) {
-        screen_.setVisible(live_, true);
-    }
+    showLivePanel(true);
     showOptions(optionsWereShown_);
 }
 
@@ -456,7 +472,7 @@ void LotUi::showOptions(bool show) {
     showHoodPanel(show && puck_ >= 0 && screen_.visible(puck_));
     // With nobody in the household, Live can't be used: its button is disabled and the live panel
     // stays hidden.
-    screen_.setVisible(live_, !show && hasMembers_);
+    showLivePanel(!show && hasMembers_);
     skewer_.setLiveMode(!show);
     screen_.setChecked(screen_.find(puck_, kOptions), show);
     const int live = screen_.find(puck_, kLiveMode);
@@ -465,6 +481,17 @@ void LotUi::showOptions(bool show) {
 }
 
 bool LotUi::optionsShown() const { return options_ >= 0 && screen_.visible(options_); }
+
+// The Sims' live panel shows its background with the pets' branch while the skewer has one.
+void LotUi::showPetsBackground(bool pets) {
+    screen_.setVisible(screen_.find(live_, kPetsBackground), pets);
+    screen_.setVisible(screen_.find(live_, kNoPetsBackground), !pets);
+}
+
+void LotUi::showLivePanel(bool show) {
+    screen_.setVisible(live_, show && !petShown_);
+    screen_.setVisible(petLive_, show && petShown_);
+}
 
 void LotUi::openWallMenu() {
     if (wallMenu_ < 0 || screen_.visible(wallMenu_)) {
@@ -595,8 +622,14 @@ LotUi::Action LotUi::clicked(int window) {
         showOptions(false);
         return Action::OptionsClosed;
     }
+    if (pauseFrame_.clicked(window)) {
+        return Action::Resume;
+    }
+    if (petShown_ && petPanel_.clicked(window)) {
+        return Action::None;
+    }
     const bool rewardsWereOpen = panel_.sub() == LivePanel::Sub::Rewards;
-    if (panel_.clicked(window)) {
+    if (!petShown_ && panel_.clicked(window)) {
         const bool rewardsOpen = panel_.sub() == LivePanel::Sub::Rewards;
         if (rewardsOpen != rewardsWereOpen) {
             rewardsPaused_ = false;
@@ -633,7 +666,7 @@ void LotUi::showTracked(std::int16_t sim) {
     const bool star = sim != 0 && sim == portraitShown_;
     if (live_ >= 0 && starShown_ != star) {
         starShown_ = star;
-        screen_.setVisible(screen_.find(screen_.find(live_, kPortraitHolder), kPanelStar), star);
+        screen_.setVisible(screen_.find(screen_.find(shownPanel(), kPortraitHolder), kPanelStar), star);
     }
 }
 
@@ -653,6 +686,7 @@ void LotUi::show(const std::string& clock, ts2::sim::Speed speed, bool paused, s
         return;
     }
     screen_.setText(clock_, clock);
+    screen_.setText(petClock_, clock);
     screen_.setText(funds_, fundsText(funds));
     using ts2::sim::Speed;
     // The chosen speed stays pressed while paused. The pause button flips every half second.
@@ -662,11 +696,16 @@ void LotUi::show(const std::string& clock, ts2::sim::Speed speed, bool paused, s
         pauseBlink_ = now;
     }
     wasPaused_ = paused;
-    screen_.setChecked(speedButtons_[0], paused && pauseLit_);
-    screen_.setChecked(speedButtons_[1], speed == Speed::Normal);
-    screen_.setChecked(speedButtons_[2], speed == Speed::High);
-    screen_.setChecked(speedButtons_[3], speed == Speed::Ultra);
+    for (const auto& buttons : {speedButtons_, petSpeedButtons_}) {
+        screen_.setChecked(buttons[0], paused && pauseLit_);
+        screen_.setChecked(buttons[1], speed == Speed::Normal);
+        screen_.setChecked(buttons[2], speed == Speed::High);
+        screen_.setChecked(buttons[3], speed == Speed::Ultra);
+    }
     pauseFrame_.show(paused);
+    // The game enables the pause sign in live mode only: not in the options menu, nor while the
+    // inventory and rewards panel holds the game paused.
+    pauseFrame_.setEnabled(!optionsShown() && (petShown_ || panel_.sub() != LivePanel::Sub::Rewards));
     // Unpausing while the inventory and rewards panel has the game paused closes the panel.
     if (panel_.sub() == LivePanel::Sub::Rewards) {
         if (paused) {
@@ -793,9 +832,9 @@ std::vector<WantsPanel::Want> LotUi::panelWants(LotLife& life, const std::vector
 }
 
 // A want popup's texts, as the game's want text builder makes them: the name from the want's string
-// set (row 1, or 2 for a female Sim, with the target put in, and row 3 when there is no target or
-// a token whose source isn't read yet), then its aspiration and influence values. Then the
-// description (row 4).
+// set (row 1, or 2 for a female Sim, with the target and $Value put in, a career want's track, job
+// title and level, and row 3 when there is no target, nothing to put in or a token not put in yet),
+// then its aspiration and influence values. Then the description (row 4).
 void LotUi::wantPopupTexts(LotLife& life, const ts2::swaf::Want& w, const ts2::content::WantDefinition& d, WantsPanel::Want& p) {
     using ts2::content::WantArgument;
     const std::uint32_t texts = ts2::hash::groupId("Wants");
@@ -808,17 +847,33 @@ void LotUi::wantPopupTexts(LotLife& life, const ts2::swaf::Want& w, const ts2::c
     };
     std::string name;
     const auto kind = static_cast<WantArgument>(w.type);
+    // $Value is the want's value times its definition's multiplier.
+    const std::string valueText = ts2::content::groupedNumber(std::int64_t{w.value} * d.integerMultiplier);
     if (kind == WantArgument::Sim && w.argument >= 1 && w.argument <= INT16_MAX) {
         if (const auto neighbor = life.neighborName(static_cast<std::int16_t>(w.argument))) {
             name = row(neighbor->female ? 2 : 1);
             name = name.empty() ? row(1) : name;
-            name = replaceAll(name, "$Neighbor", neighbor->first);
+            name = replaceAll(replaceAll(name, "$Neighbor", neighbor->first), "$Value", valueText);
         }
     } else if (kind == WantArgument::Object) {
-        name = replaceAll(row(1), "$Object", life.objectName(static_cast<std::uint32_t>(w.argument)));
+        name = replaceAll(replaceAll(row(1), "$Object", life.objectName(static_cast<std::uint32_t>(w.argument))), "$Value", valueText);
+    } else if (kind == WantArgument::Career && life.knowsNeighbor(static_cast<std::int16_t>(w.id))) {
+        // The career object the argument names and the level the value holds. The job title is line
+        // level x 2 of the career's job titles (string table 0x93), 20 lines on for a want of a
+        // female Sim (person data 0x41), whose titles follow the male ones.
+        constexpr std::uint16_t kJobTitles = 0x93;
+        constexpr int kFemaleTitles = 20;
+        auto& simulation = life.simulation();
+        if (const auto* career = simulation.code().objectType(static_cast<std::uint32_t>(w.argument))) {
+            const bool female = simulation.world().neighborPersonValue(static_cast<std::int16_t>(w.id), ts2::sim::kGenderPersonData) != 0;
+            const int line = w.value * 2 + (female ? kFemaleTitles : 0);
+            const std::string title = line >= 1 ? simulation.code().string(career->group, kJobTitles, static_cast<std::size_t>(line - 1)).value_or("") : "";
+            name = replaceAll(row(1), "$CareerTrack", life.objectName(static_cast<std::uint32_t>(w.argument)));
+            name = replaceAll(replaceAll(name, "$JobTitle", title), "$Level", ts2::content::groupedNumber(w.value));
+        }
     } else if (kind == WantArgument::None) {
-        // Row 1 only when it has a value to put in, which isn't read yet.
-        name = row(1).find('$') == std::string::npos ? std::string() : row(1);
+        // Row 1 only when it has a value to put in. $Money isn't put in yet.
+        name = row(1).find("$Value") == std::string::npos ? std::string() : replaceAll(row(1), "$Value", valueText);
     }
     if (name.empty() || name.find('$') != std::string::npos) {
         name = row(3);
@@ -1091,6 +1146,92 @@ std::vector<RelationshipsPanel::Person> LotUi::panelRelationships(LotLife& life,
     return out;
 }
 
+// The Aspiration Meter popup's texts, as the game fills them: the lines with the Sim's first name,
+// the level's name by age, aspiration, level and gender with "(Gold)" or "(Platinum)" when the
+// meter is that high, and the lifetime want the neighborhood saved for the Sim.
+AspirationPopup::Content LotUi::aspirationPopupContent(LotLife& life, std::int16_t sim) {
+    constexpr std::uint32_t kLiveText = 0x7F96C284, kPanelText = 0x91, kValues = 0x9F;
+    constexpr std::uint32_t kLevelLine = 0x18, kGold = 0x26, kPlatinum = 0x27, kLifetimeLine = 8;
+    constexpr std::size_t kLifeStage = 0x3A, kGender = 0x41, kAspiration = 0x2E, kScore = 0xA2;
+    auto text = [&](std::uint32_t table, std::uint32_t n) { return screen_.data().text(kLiveText, table << 16 | n); };
+    const auto data = life.personData(sim);
+    const auto value = [&](std::size_t index) -> std::int16_t { return index < data.size() ? data[index] : 0; };
+    AspirationPopup::Content content;
+    const std::string first = life.simName(sim).first;
+    content.levelLine = ts2::content::formatted(text(kPanelText, kLevelLine), {first});
+    content.lifetimeLine = ts2::content::formatted(text(kValues, kLifetimeLine), {first});
+
+    // The level's name: a table by age, a block in it by aspiration (toddlers and children have one
+    // block each), then two rows a level, male first.
+    std::int16_t aspiration = value(kAspiration);
+    if (const auto secondary = life.inventoryValue(sim, kAspirationToken); secondary && *secondary > 0) {
+        aspiration = static_cast<std::int16_t>(aspiration ^ *secondary);
+    }
+    auto blockOf = [](std::int16_t a) -> std::uint32_t {
+        switch (a) {
+        case 1: return 0x01;     // Romance
+        case 2: return 0x0E;     // Family
+        case 0x10: return 0x1B;  // Popularity
+        case 4: return 0x28;     // Fortune
+        case 0x20: return 0x35;  // Knowledge
+        case 0x80: return 0x42;  // Pleasure
+        case 0x100: return 0x4F; // Grilled Cheese
+        default: return 0;
+        }
+    };
+    constexpr std::int16_t kToddler = 2, kChild = 3, kTeen = 16, kAdult = 19, kElder = 51;
+    const std::int16_t stage = value(kLifeStage);
+    std::uint32_t table = 0, block = 0;
+    if (stage == kAdult) {
+        table = 0x9A, block = blockOf(aspiration);
+    } else if (stage == kTeen) {
+        table = 0x9C, block = blockOf(aspiration);
+    } else if (stage == kElder) {
+        table = 0x9D, block = blockOf(aspiration);
+    } else if (stage == kToddler) {
+        table = 0x9B, block = 0x01;
+    } else if (stage == kChild) {
+        table = 0x9B, block = 0x0E;
+    }
+    const std::array<std::int32_t, 7>* levels = nullptr;
+    if (const auto* definitions = life.simulation().world().wantDefinitions()) {
+        if (const auto it = definitions->aspirationLevels.find(ts2::sim::wantAgeCode(stage)); it != definitions->aspirationLevels.end()) {
+            levels = &it->second;
+        }
+    }
+    const std::int32_t score = value(kScore) * 10;
+    // Without its age's levels a Sim counts as normal.
+    const std::int32_t band = levels != nullptr ? ts2::sim::aspirationBand(*levels, score) : 2;
+    if (table != 0 && block != 0) {
+        content.level = text(table, block + 2 * static_cast<std::uint32_t>(band) + (value(kGender) == 1 ? 1 : 0));
+    }
+    const std::int32_t meter = levels != nullptr ? ts2::sim::aspirationLevel(*levels, score) : 0;
+    if (meter >= 75) {
+        content.level += " " + text(kPanelText, kPlatinum);
+    } else if (meter >= 50) {
+        content.level += " " + text(kPanelText, kGold);
+    }
+
+    // The lifetime want: its name with its values on the line under it, its blurb and its icon.
+    if (const auto* want = life.simulation().world().lifetimeWant(life.neighborId(sim))) {
+        if (const auto* d = life.wantDefinition(want->guid)) {
+            WantsPanel::Want p;
+            wantPopupTexts(life, *want, *d, p);
+            AspirationPopup::Lifetime lifetime;
+            // The tooltip is the name and a line for each value. Here the values share one line.
+            lifetime.name = p.tip;
+            if (const auto firstBreak = lifetime.name.find('\n'); firstBreak != std::string::npos) {
+                std::replace(lifetime.name.begin() + static_cast<std::ptrdiff_t>(firstBreak) + 1, lifetime.name.end(), '\n', ' ');
+            }
+            lifetime.blurb = p.description;
+            lifetime.icon = d->primaryIcon;
+            lifetime.fulfilled = !want->tail.empty() && want->tail[0] != 0;
+            content.lifetime = std::move(lifetime);
+        }
+    }
+    return content;
+}
+
 std::string LotUi::fullName(LotLife& life, std::int16_t sim) const {
     constexpr std::uint32_t kLiveText = 0x7F96C284, kTitles = 0x336;
     const LotLife::SimName parts = life.simName(sim);
@@ -1133,6 +1274,7 @@ void LotUi::showHousehold(std::vector<Skewer::Member> members) {
     }
     hasMembers_ = !members.empty();
     skewer_.setHousehold(std::move(members));
+    showPetsBackground(skewer_.hasBranch());
     if (!hidden_) {
         showOptions(optionsShown());
     }
@@ -1165,6 +1307,16 @@ void LotUi::showLife(LotLife& life) {
     show(life.clockText(), life.speed(), life.paused(), life.funds());
     const std::int16_t sim = life.selected();
     skewer_.select(sim);
+    // A pet has its own live panel.
+    constexpr std::size_t kSpecies = 0xBA;
+    const auto selectedData = life.personData(sim);
+    const bool pet = selectedData.size() > kSpecies && selectedData[kSpecies] != 0;
+    if (pet != petShown_ && petLive_ >= 0) {
+        const bool shown = screen_.visible(live_) || screen_.visible(petLive_);
+        petShown_ = pet;
+        showLivePanel(shown);
+        portraitShown_ = -1;
+    }
     targets_.collect();
     relationshipPictures_.collect();
     memoryPortraits_.collect();
@@ -1175,7 +1327,7 @@ void LotUi::showLife(LotLife& life) {
     // The live panel shows the selected Sim's portrait over its shadow.
     if (sim != portraitShown_ && live_ >= 0) {
         portraitShown_ = sim;
-        const int holder = screen_.find(live_, kPortraitHolder);
+        const int holder = screen_.find(shownPanel(), kPortraitHolder);
         const auto it = portraits_.find(sim);
         screen_.setVisible(holder, it != portraits_.end());
         if (it != portraits_.end()) {
@@ -1197,6 +1349,63 @@ void LotUi::showLife(LotLife& life) {
         starShown_.reset();
         showTracked(tracked_);
     }
+    // The Aspiration Meter popup moves on under a pet's panel too, which hides it.
+    panel_.updateAspirationPopup([&] { return aspirationPopupContent(life, sim); });
+    if (petShown_) {
+        showPetPanel(life, sim);
+    } else {
+        showSimPanel(life, sim);
+    }
+    constexpr std::size_t kUiIconFlags = 0x34, kRoommateFlags = 0x54;
+    for (const std::int16_t member : life.household()) {
+        skewer_.setMood(member, life.mood(member));
+        const auto data = life.personData(member);
+        const auto memberPersonData = [&](std::size_t index) {
+            return index < data.size() ? static_cast<std::uint16_t>(data[index]) : std::uint16_t{0};
+        };
+        std::uint16_t awayFlags = memberPersonData(kUiIconFlags);
+        // A pet with person data 0x54 bit 0x80 shows as run away. Its reinforce behavior icon
+        // comes from training data not known yet.
+        if (memberPersonData(kSpecies) != 0 && (memberPersonData(kRoommateFlags) & 0x80) != 0) {
+            awayFlags |= 4;
+        }
+        skewer_.setAwayIcons(member, awayFlags, (memberPersonData(kRoommateFlags) & 0x800) != 0);
+        const auto* who = life.simulation().world().find(member);
+        skewer_.setPressable(member, who == nullptr || !ts2::sim::passedOver(*who));
+    }
+    showNames(life, sim);
+    showQueue(life, sim);
+}
+
+// The pet panel's needs, mood, age and relationships for the selected pet.
+void LotUi::showPetPanel(LotLife& life, std::int16_t sim) {
+    constexpr std::size_t kSpecies = 0xBA;
+    const auto personData = life.personData(sim);
+    const auto person = [&](std::size_t index) -> std::int16_t { return index < personData.size() ? personData[index] : 0; };
+    const std::int16_t species = person(kSpecies);
+    petPanel_.setNeeds(sim, life.lifeStage(sim), species, life.motives(sim));
+    petPanel_.setMood(life.mood(sim));
+    const auto age = life.ageProgress(sim);
+    petPanel_.setAge(species, life.lifeStage(sim), age.lived, age.length,
+                     ts2::content::petAgeTip(species, life.lifeStage(sim), person(kAgeDuration), person(kAgeDaysLeft), person(kDaysBeforeElder)));
+    if (petPanel_.showsRelationships()) {
+        petPanel_.setRelationships(panelRelationships(life, sim), species);
+    }
+    if (petPanel_.sub() == PetPanel::Sub::Job) {
+        // A pet has a job when person data 0x39 is set and its career (GUID person data 0x5A, 0x59)
+        // exists.
+        constexpr std::size_t kJob = 0x39, kCareerLow = 0x59, kCareerHigh = 0x5A;
+        const auto guid = static_cast<std::uint32_t>(static_cast<std::uint16_t>(person(kCareerHigh))) << 16 |
+                          static_cast<std::uint16_t>(person(kCareerLow));
+        petPanel_.setJob(personData, person(kJob) != 0 && life.simulation().code().objectType(guid) != nullptr);
+    } else if (petPanel_.sub() == PetPanel::Sub::Petology) {
+        petPanel_.setPetology(personData);
+    }
+}
+
+// The Sims' live panel for the selected Sim: aspiration, needs, mood, age, the open sub-panel and
+// the wants.
+void LotUi::showSimPanel(LotLife& life, std::int16_t sim) {
     panel_.setAspiration(life.aspiration());
     if (panel_.sub() == LivePanel::Sub::Rewards) {
         panel_.setRewards(rewardsOf(life, sim));
@@ -1250,19 +1459,6 @@ void LotUi::showLife(LotLife& life) {
     }
     const auto slots = life.wantSlots(sim);
     panel_.setWants(wantsShown_, fearsShown_, slots.wants, slots.fears, {sim, life.wantsRefilling(sim), &life.satisfiedWantPlaces(sim)});
-    constexpr std::size_t kUiIconFlags = 0x34, kRoommateFlags = 0x54;
-    for (const std::int16_t member : life.household()) {
-        skewer_.setMood(member, life.mood(member));
-        const auto data = life.personData(member);
-        const auto memberPersonData = [&](std::size_t index) {
-            return index < data.size() ? static_cast<std::uint16_t>(data[index]) : std::uint16_t{0};
-        };
-        skewer_.setAwayIcons(member, memberPersonData(kUiIconFlags), (memberPersonData(kRoommateFlags) & 0x800) != 0);
-        const auto* who = life.simulation().world().find(member);
-        skewer_.setPressable(member, who == nullptr || !ts2::sim::passedOver(*who));
-    }
-    showNames(life, sim);
-    showQueue(life, sim);
 }
 
 // The household's names as tips over their thumbnails, and the selected Sim's over the live panel's
@@ -1287,7 +1483,7 @@ void LotUi::showNames(LotLife& life, std::int16_t sim) {
         skewer_.setName(member, fullName(life, member));
     }
     if (live_ >= 0) {
-        screen_.setTip(screen_.find(live_, kPortraitHolder), sim != 0 ? fullName(life, sim) : std::string());
+        screen_.setTip(screen_.find(shownPanel(), kPortraitHolder), sim != 0 ? fullName(life, sim) : std::string());
     }
 }
 

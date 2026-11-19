@@ -38,6 +38,8 @@ struct WantDefinition {
     // Tree that lists the Sims the want is checked for, empty when it is just the Sim's own.
     std::string simArrayTree;
     std::int32_t influence = 0;
+    // What a want's value is multiplied by where its name shows it ($Value).
+    std::int32_t integerMultiplier = 1;
     WantLevel level = WantLevel::Transitory;
     // Its pictures in the UI images (group 0x499DB772): the icon and a small badge, 0 for none.
     std::uint32_t primaryIcon = 0, secondaryIcon = 0;

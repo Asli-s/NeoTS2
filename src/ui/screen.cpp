@@ -28,11 +28,14 @@ constexpr int kButtonFrame[4] = {1, 3, 2, 0};  // normal, hover, pressed, disabl
 constexpr int kRadioFrame[4] = {0, 1, 2, 3};
 constexpr float kRadioFrames = 8;
 
-// Part of an image (u0..u1 of an iw x ih image) drawn over a window in thirds: corners kept, edges
-// and middle stretched. The corners are always drawn whole, overlapping in a window narrower or
-// shorter than two of them, and the edges and middle between them only where there is room.
-void pushThirds(std::vector<Quad>& out, int texture, float x0, float y0, float x1, float y1, float u0, float u1, float iw, float ih) {
-    const float cw = std::floor((u1 - u0) * iw / 3), ch = std::floor(ih / 3);
+// Part of an image (u0..u1 of an iw x ih image) drawn over a window in nine pieces: corners kept,
+// edges and middle stretched. The corners are `margin` pixels square, or a third of the part when
+// `margin` is 0. They are always drawn whole, overlapping in a window narrower or shorter than two of
+// them, and the edges and middle between them only where there is room.
+void pushThirds(std::vector<Quad>& out, int texture, float x0, float y0, float x1, float y1, float u0, float u1, float iw, float ih,
+                int margin = 0) {
+    const float cw = margin > 0 ? std::min(static_cast<float>(margin), (u1 - u0) * iw / 2) : std::floor((u1 - u0) * iw / 3);
+    const float ch = margin > 0 ? std::min(static_cast<float>(margin), ih / 2) : std::floor(ih / 3);
     const float xs[4] = {x0, x0 + cw, x1 - cw, x1}, ys[4] = {y0, y0 + ch, y1 - ch, y1};
     const float us[4] = {u0, u0 + cw / iw, u1 - cw / iw, u1}, vs[4] = {0, ch / ih, 1 - ch / ih, 1};
     for (int r = 0; r < 3; ++r) {
@@ -520,7 +523,7 @@ void Screen::remove(int window) {
     }
     std::vector<int>& siblings = w.parent >= 0 ? windows_[static_cast<std::size_t>(w.parent)].children : roots_;
     siblings.erase(std::remove(siblings.begin(), siblings.end(), window), siblings.end());
-    for (int* held : {&pressed_, &modal_, &hover_}) {
+    for (int* held : {&pressed_, &modal_, &hover_, &tipPopup_}) {
         if (*held == window) {
             *held = -1;
         }
@@ -697,6 +700,16 @@ void Screen::setImage(int window, tga::Pixels pixels) {
     }
     w.imageRect = {};
     w.edge = false;
+    w.edgeMargin = 0;
+}
+
+void Screen::setImageMargin(int window, int margin) {
+    if (window < 0 || static_cast<std::size_t>(window) >= windows_.size()) {
+        return;
+    }
+    Window& w = windows_[static_cast<std::size_t>(window)];
+    w.edge = margin > 0;
+    w.edgeMargin = std::max(0, margin);
 }
 
 void Screen::setImagePart(int window, const std::array<int, 4>& part) {
@@ -936,7 +949,7 @@ void Screen::setTip(int window, const std::string& text) {
         windows_[static_cast<std::size_t>(window)].tipImage = -1;
         // A tip already showing is drawn again with the new text at once.
         if (window == hover_) {
-            drawTip(windows_[static_cast<std::size_t>(window)]);
+            showTip(window);
         }
     }
 }
@@ -980,41 +993,92 @@ void Screen::emitTip(int x, int y, int w, int h, int image, int baseline, int ba
     out.push_back({px, py, px + static_cast<float>(text.width), py + static_cast<float>(text.height), 0, 0, 1, 1, image, {0, 0, 0, 1}});
 }
 
+std::vector<std::string> Screen::tipLines(const std::string& text, const FontStyle& style, int& widest) {
+    // A line break is a new line, a carriage return or both.
+    std::string clean;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '\r') {
+            if (i + 1 < text.size() && text[i + 1] == '\n') {
+                continue;
+            }
+            clean += '\n';
+        } else {
+            clean += text[i];
+        }
+    }
+    // The game widens the wrap by 10 pixels until the lines fit in 500 pixels of height. It never
+    // measures a wrap wider than 4000 pixels.
+    constexpr int kWidth = 240, kStep = 10, kMaxHeight = 500, kMaxWidth = 4000;
+    const int advance = std::max(fonts_.lineHeight(style), 1);
+    const auto maxLines = static_cast<std::size_t>(std::max(kMaxHeight, advance) / advance);
+    std::vector<std::string> lines;
+    for (int room = kWidth; room <= kMaxWidth; room += kStep) {
+        lines = wrapAt(clean, style, room);
+        if (lines.size() <= maxLines) {
+            break;
+        }
+    }
+    // Text that fits no wrap would keep the game widening forever. Here it keeps the lines that
+    // fit in the height, so a broken tip can't draw thousands of lines.
+    if (lines.size() > maxLines) {
+        lines.resize(maxLines);
+    }
+    // A drawn line is 2 pixels wider than the text the game measures.
+    widest = 0;
+    for (const std::string& line : lines) {
+        widest = std::max(widest, fonts_.width(style, line) - 2);
+    }
+    return lines;
+}
+
 void Screen::drawTip(Window& b) {
     if (b.tip.empty() || b.tipImage >= 0) {
         return;
     }
-    // Each line break (a new line or a carriage return) starts a line, a line's height lower. The
-    // game measures at most 500 pixels of lines, 41 of them.
-    constexpr std::size_t kMaxLines = 41;
-    const FontStyle& style = fonts_.style("HoverTipTitle");
-    const int advance = fonts_.lineHeight(style);
-    std::vector<TextImage> lines;
-    std::size_t start = 0;
-    while (lines.size() < kMaxLines) {
-        const std::size_t end = b.tip.find_first_of("\r\n", start);
-        lines.push_back(fonts_.draw(style, b.tip.substr(start, end == std::string::npos ? std::string::npos : end - start)));
-        if (end == std::string::npos) {
-            break;
-        }
-        start = end + 1;
+    // The title (HoverTipTitle) and the body (style 0xA85F1A83) are each wrapped on their own, the
+    // body 4 pixels under the title. The title's width counts 4 more than measured.
+    const TipText tip = splitTip(b.tip);
+    const FontStyle& titleStyle = fonts_.style("HoverTipTitle");
+    const FontStyle& bodyStyle = fonts_.style("0xa85f1a83");
+    int titleWidth = 0, bodyWidth = 0;
+    const std::vector<std::string> titleLines = tipLines(tip.title, titleStyle, titleWidth);
+    const std::vector<std::string> bodyLines = tipLines(tip.body, bodyStyle, bodyWidth);
+    const int titleAdvance = fonts_.lineHeight(titleStyle), bodyAdvance = fonts_.lineHeight(bodyStyle);
+    const int titleHeight = static_cast<int>(titleLines.size()) * titleAdvance;
+    // The gap only comes between a title and a body: a tip of one line is 24 pixels high in the game.
+    const int bodyTop = titleHeight + (titleHeight > 0 && !bodyLines.empty() ? 4 : 0);
+    // A title's first baseline is 9 below the text area's top. The body's sits as much lower as
+    // its font's ascent is larger.
+    constexpr int kTitleBaseline = 9;
+    const int bodyBaseline = kTitleBaseline + fonts_.ascent(bodyStyle) - fonts_.ascent(titleStyle);
+    struct Placed {
+        TextImage text;
+        int baseline;  // below the text area's top
+    };
+    std::vector<Placed> placed;
+    for (std::size_t k = 0; k < titleLines.size(); ++k) {
+        placed.push_back({fonts_.draw(titleStyle, titleLines[k]), kTitleBaseline + static_cast<int>(k) * titleAdvance});
     }
-    // One image holding every line, each baseline an advance below the one before.
-    int baseline = 0, below = 0;
+    for (std::size_t k = 0; k < bodyLines.size(); ++k) {
+        placed.push_back({fonts_.draw(bodyStyle, bodyLines[k]), bodyTop + bodyBaseline + static_cast<int>(k) * bodyAdvance});
+    }
+    // One image holding every line. A glyph may reach above the text area, so the image starts
+    // that much higher.
+    int above = 0, bottom = 0;
     std::uint32_t width = 0;
-    for (const TextImage& line : lines) {
-        baseline = std::max(baseline, line.baseline);
-        below = std::max(below, static_cast<int>(line.pixels.height) - line.baseline);
-        width = std::max(width, line.pixels.width);
+    for (const Placed& l : placed) {
+        above = std::max(above, l.text.baseline - l.baseline);
+        bottom = std::max(bottom, l.baseline - l.text.baseline + static_cast<int>(l.text.pixels.height));
+        width = std::max(width, l.text.pixels.width);
     }
-    const int lineCount = static_cast<int>(lines.size());
     tga::Pixels image;
     image.width = width;
-    image.height = static_cast<std::uint32_t>(std::max(0, baseline + (lineCount - 1) * advance + below));
+    // A broken tip of thousands of lines is cut at the largest text image, so it can't take all memory.
+    image.height = static_cast<std::uint32_t>(std::clamp(above + bottom, 0, kMaxTextImage));
     image.rgba.assign(static_cast<std::size_t>(image.width) * image.height * 4, 0);
-    for (int k = 0; k < lineCount; ++k) {
-        const tga::Pixels& p = lines[static_cast<std::size_t>(k)].pixels;
-        const int top = baseline - lines[static_cast<std::size_t>(k)].baseline + k * advance;
+    for (const Placed& l : placed) {
+        const tga::Pixels& p = l.text.pixels;
+        const int top = above + l.baseline - l.text.baseline;
         for (std::uint32_t y = 0; y < p.height; ++y) {
             const auto row = static_cast<std::size_t>(top) + y;
             if (row >= image.height) {
@@ -1030,15 +1094,91 @@ void Screen::drawTip(Window& b) {
             }
         }
     }
-    // A drawn line is 2 pixels wider than the text the game measures.
-    int widest = 0;
-    for (const TextImage& line : lines) {
-        widest = std::max(widest, static_cast<int>(line.pixels.width) - 2);
-    }
-    b.tipBaseline = baseline;
-    b.tipWidth = widest;
-    b.tipLines = lineCount;
+    b.tipTop = above;
+    b.tipWidth = std::max(titleLines.empty() ? 0 : titleWidth + 4, bodyWidth);
+    b.tipHeight = bodyTop + static_cast<int>(bodyLines.size()) * bodyAdvance;
     b.tipImage = texture(std::move(image));
+}
+
+int Screen::loadTipPopup(const TipText& tip) {
+    constexpr std::uint32_t kScripts = 0xA99D8A11;
+    constexpr std::uint32_t kTitle = 0xA1, kBody = 0xA2, kExtra = 0xA3, kPicture1 = 0xB4, kPicture2 = 0xB5, kMarker = 0xAAAA;
+    const int popup = load(kScripts, tip.popup, 0, 0);
+    if (popup < 0) {
+        return -1;
+    }
+    setPassive(popup);
+    // The title and body go in their windows. A body taller than its window makes the popup that
+    // much taller, never shorter.
+    if (const int title = find(popup, kTitle); title >= 0) {
+        setText(title, tip.title);
+    }
+    const int body = find(popup, kBody);
+    if (body >= 0) {
+        setText(body, tip.body);
+        const Window& w = windows_[static_cast<std::size_t>(body)];
+        const int grow = textHeight(body) + w.gutters[1] + w.gutters[3] - w.h;
+        if (grow > 0) {
+            // What lies below the body and overlaps it sideways moves down with it, and so does the
+            // marker wherever it is, so the popup keeps its place on its anchor by its bottom.
+            const int left = x(body), right = x(body) + width(body), bottom = y(body) + height(body);
+            resize(body, w.w, w.h + grow);
+            resize(popup, width(popup), height(popup) + grow);
+            for (const int c : std::vector<int>(windows_[static_cast<std::size_t>(popup)].children)) {
+                const bool below = y(c) > bottom;
+                const bool beside = x(c) + width(c) > left && x(c) < right;
+                if (c != body && below && (beside || id(c) == kMarker)) {
+                    move(c, x(c), y(c) + grow);
+                }
+            }
+        }
+    }
+    // The extra text, when there is one, shows under the body.
+    if (const int extra = find(popup, kExtra); extra >= 0 && !tip.extra.empty()) {
+        setText(extra, tip.extra);
+        if (body >= 0) {
+            move(extra, x(extra), y(body) + height(body));
+        }
+        setVisible(extra, true);
+    }
+    if ((tip.picture1 != 0 && find(popup, kPicture1) >= 0) || (tip.picture2 != 0 && find(popup, kPicture2) >= 0)) {
+        diag::warnOnce("tips: a tip popup's pictures aren't shown yet");
+    }
+    // The marker window's text names a window and the popup moves so the marker lands on it.
+    if (const int marker = find(popup, kMarker); marker >= 0) {
+        const std::string& text = windows_[static_cast<std::size_t>(marker)].text;
+        const std::size_t colon = text.find(':');
+        const auto anchorId = hexNumber(std::string_view(text).substr(0, colon));
+        int anchor = -1;
+        for (auto r = roots_.rbegin(); anchorId && r != roots_.rend() && anchor < 0; ++r) {
+            if (*r != popup) {
+                anchor = findShown(*r, *anchorId);
+            }
+        }
+        if (anchor >= 0) {
+            const auto to = origin(anchor), from = origin(marker), at = origin(popup);
+            move(popup, to[0] - (from[0] - at[0]), to[1] - (from[1] - at[1]));
+        }
+    }
+    return popup;
+}
+
+void Screen::showTip(int window) {
+    if (tipPopup_ >= 0) {
+        remove(tipPopup_);
+        tipPopup_ = -1;
+    }
+    if (window < 0) {
+        return;
+    }
+    // The large tip ("L") isn't drawn yet and shows as the drawn box.
+    const TipText tip = splitTip(windows_[static_cast<std::size_t>(window)].tip);
+    if (tip.mode == TipText::Mode::Popup) {
+        tipPopup_ = loadTipPopup(tip);
+    }
+    if (tipPopup_ < 0) {
+        drawTip(windows_[static_cast<std::size_t>(window)]);
+    }
 }
 
 bool Screen::over(int x, int y) const {
@@ -1175,11 +1315,7 @@ std::optional<int> Screen::mouse(int x, int y, bool down, double seconds) {
     if (hovered != hover_) {
         hover_ = hovered;
         hoverSince_ = seconds;
-        // Tooltips are written in Helvetica Neue Medium at 12, as the game's tooltips are. Which of
-        // the styles set so the game uses is not known yet.
-        if (hovered >= 0) {
-            drawTip(windows_[static_cast<std::size_t>(hovered)]);
-        }
+        showTip(hovered);
     }
     std::optional<int> clicked;
     if (!down && pressed_ >= 0 && pressed_ == over) {
@@ -1244,7 +1380,7 @@ void Screen::emit(int index, std::vector<Quad>& out) const {
                 out.push_back({x0, y0, x0 + dw, y0 + dh, u0, 0, u0 + dw / iw, dh / ih, w.image});
             }
         } else if (w.edge) {
-            pushThirds(out, w.image, x0, y0, x1, y1, 0, 1, iw, ih);
+            pushThirds(out, w.image, x0, y0, x1, y1, 0, 1, iw, ih, w.edgeMargin);
         } else if (w.part[2] > w.part[0] && w.part[3] > w.part[1]) {
             out.push_back({x0, y0, x1, y1, static_cast<float>(w.part[0]) / iw, static_cast<float>(w.part[1]) / ih,
                            static_cast<float>(w.part[2]) / iw, static_cast<float>(w.part[3]) / ih, w.image});
@@ -1459,8 +1595,12 @@ std::vector<Quad> Screen::quads(double seconds) const {
 
 void Screen::quads(double seconds, std::vector<Quad>& out) const {
     out.clear();
+    // A tip's popup shows 0.4 s after the mouse came to its window and stays while the mouse does.
+    constexpr double kPopupDelay = 0.4;
     for (const int r : roots_) {
-        emit(r, out);
+        if (r != tipPopup_ || (hover_ >= 0 && seconds - hoverSince_ >= kPopupDelay)) {
+            emit(r, out);
+        }
     }
     // The tip over a Sim in the world: its text in the Default style, the box the text's width plus
     // 20 by a line plus 12, kept 28 pixels from its spot, 8 from the screen's top and left edges and
@@ -1486,13 +1626,13 @@ void Screen::quads(double seconds, std::vector<Quad>& out) const {
         return;
     }
     const Window& b = windows_[static_cast<std::size_t>(hover_)];
-    if (b.tip.empty() || b.tipImage < 0 || (b.tipTimeout && seconds - hoverSince_ >= kTipTimeout)) {
+    if (tipPopup_ >= 0 || b.tip.empty() || b.tipImage < 0 || (b.tipTimeout && seconds - hoverSince_ >= kTipTimeout)) {
         return;
     }
     const auto at = origin(hover_);
-    const int advance = fonts_.lineHeight(fonts_.style("HoverTipTitle"));
-    const TipBox box = placeTip(at[0] + b.w / 2, at[1] + b.h / 2, b.tipWidth + 24, b.tipLines * advance + 12, size_);
-    emitTip(box.x, box.y, box.w, box.h, b.tipImage, b.tipBaseline, box.y + 15, out);
+    const TipBox box = placeTip(at[0] + b.w / 2, at[1] + b.h / 2, b.tipWidth + 20, b.tipHeight + 12, size_);
+    // The text area starts 6 pixels into the box.
+    emitTip(box.x, box.y, box.w, box.h, b.tipImage, b.tipTop, box.y + 6, out);
     return;
 }
 

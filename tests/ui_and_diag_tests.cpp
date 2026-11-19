@@ -29,6 +29,23 @@ void tipsArePlacedAsTheGame() {
     CHECK(is(placeTip(1200, 40, 120, 23, world, 28), 1140, 68, 120, 23));  // near the top: below
 }
 
+// A tip's text is taken apart as the game takes it: the Fitness tip names its popup script, five
+// separators add the extra field, "L" asks for the large tip, and text without '|' is all title.
+void tipTextsSplitAsTheGame() {
+    using Mode = ts2::ui::TipText::Mode;
+    const auto fitness = ts2::ui::splitTip("Fitness|Sims need to exercise.|||0x4906501f");
+    CHECK(fitness.title == "Fitness" && fitness.body == "Sims need to exercise." && fitness.mode == Mode::Popup &&
+          fitness.popup == 0x4906501F && fitness.picture1 == 0 && fitness.picture2 == 0);
+    const auto extra = ts2::ui::splitTip("A|B|C|ab|cd|0x10");
+    CHECK(extra.extra == "C" && extra.picture1 == 0xAB && extra.picture2 == 0xCD && extra.popup == 0x10);
+    const auto large = ts2::ui::splitTip("Hand Tool|Use the Hand Tool.|||L");
+    CHECK(large.mode == Mode::Large && large.body == "Use the Hand Tool.");
+    const auto plain = ts2::ui::splitTip("Rotate");
+    CHECK(plain.title == "Rotate" && plain.body.empty() && plain.mode == Mode::Box);
+    CHECK(ts2::ui::splitTip("Title|Body").mode == Mode::Box && ts2::ui::splitTip("Title|Body|||").mode == Mode::Box);
+    CHECK(ts2::ui::hexNumber(" 0x1Fz") == 0x1Fu && !ts2::ui::hexNumber("zz") && !ts2::ui::hexNumber(""));
+}
+
 // Up to 12 entries share one pie. With more, each page shows "More..." and 11 of them, and the last
 // page's "More..." goes back to the first.
 // While a scene loads, presses are dropped and so are their releases, even once loading has ended.
@@ -559,6 +576,7 @@ std::vector<Test> uiAndDiagTests() {
         {"clicks are dropped while loading", clicksAreDroppedWhileLoading},
         {"pie pages hold eleven and More", piePagesHoldElevenAndMore},
         {"tips are placed as the game", tipsArePlacedAsTheGame},
+        {"tip texts split as the game", tipTextsSplitAsTheGame},
         {"type 1 lines as the game measures", typeOneLinesAsTheGameMeasures},
         {"ui scripts parse", uiScriptsParse},
         {"log keeps its lines and files", logKeepsItsLinesAndFiles},
