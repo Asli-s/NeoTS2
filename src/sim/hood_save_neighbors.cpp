@@ -6,6 +6,7 @@
 #include "formats/qfs.hpp"
 #include "formats/resource_types.hpp"
 #include "formats/sdsc.hpp"
+#include "formats/swaf.hpp"
 #include "sim/world.hpp"
 
 #include <algorithm>
@@ -14,6 +15,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 
 namespace ts2::sim::hoodsave {
 
@@ -232,6 +234,71 @@ int saveInventories(dbpf::StoredResource& resource, const World& world, const st
     }
     if (written > 0) {
         resource = dbpf::storeResource(resource.key, ngbh::writeRecord(*record));
+    }
+    return written;
+}
+
+namespace {
+
+// The wants and fears of a list that fill a place, in place order.
+std::vector<swaf::Want> filledPlaces(std::vector<swaf::Want> list) {
+    std::erase_if(list, [](const swaf::Want& w) { return w.guid == 0; });
+    return list;
+}
+
+} // namespace
+
+int saveWants(dbpf::PackageImage& hood, const World& world, const std::set<std::int16_t>& leftOut) {
+    std::unordered_map<std::uint32_t, std::size_t> records;
+    for (std::size_t i = 0; i < hood.resources.size(); ++i) {
+        if (hood.resources[i].key.type == swaf::kType) {
+            records.emplace(hood.resources[i].key.instance, i);
+        }
+    }
+    int written = 0;
+    for (const auto& [id, history] : world.wantsState().histories) {
+        if (id <= 0 || leftOut.contains(id)) {
+            continue;
+        }
+        const auto instance = static_cast<std::uint32_t>(id);
+        const auto at = records.find(instance);
+        std::vector<std::uint8_t> old;
+        std::optional<swaf::Record> loaded;
+        if (at != records.end()) {
+            old = bodyOf(hood.resources[at->second]);
+            std::size_t leftOver = 0;
+            loaded = swaf::readRecord(old, &leftOver);
+            if (!loaded) {
+                continue;
+            }
+        }
+        swaf::Record record;
+        const swaf::Slots slots = world.wantSlots(id);
+        record.extra = loaded ? loaded->extra : std::nullopt;
+        record.maxWants = loaded ? loaded->maxWants : slots.wants;
+        record.maxFears = loaded ? loaded->maxFears : slots.fears;
+        record.lastValue = loaded ? loaded->lastValue : 0;
+        record.wants = filledPlaces(world.wantsNow(id, false));
+        record.fears = filledPlaces(world.wantsNow(id, true));
+        record.historyValue = history.time;
+        record.history.assign(history.records.begin(), history.records.end());
+        std::vector<std::uint8_t> body;
+        try {
+            body = swaf::writeRecord(record);
+        } catch (const std::runtime_error&) {
+            // A want loaded from an older record lacks the numbers the game writes now.
+            continue;
+        }
+        if (old.size() > body.size()) {
+            body.insert(body.end(), old.begin() + static_cast<std::ptrdiff_t>(body.size()), old.end());
+        }
+        const dbpf::ResourceKey key{swaf::kType, 0xFFFFFFFF, instance, 0};
+        if (at != records.end()) {
+            hood.resources[at->second] = dbpf::storeResource(key, body);
+        } else {
+            append(hood, key, body);
+        }
+        ++written;
     }
     return written;
 }

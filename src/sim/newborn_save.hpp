@@ -35,8 +35,7 @@ struct NewCharacterFile {
 // a group number of its own.
 //
 // All or nothing: when any file can't be made, there are none, and `problem` says why. A made Sim
-// whose look or names in every language aren't known, or that wears facial hair or glasses (not
-// written yet), can't be made.
+// whose look or names in every language aren't known can't be made.
 struct NewCharacterFiles {
     std::vector<NewCharacterFile> files;
     // Every neighbor made this run that has a character file once the save is written: those in

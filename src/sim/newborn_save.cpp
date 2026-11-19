@@ -174,7 +174,8 @@ NewCharacterFile newbornFile(LotSimulation& simulation, scene::Assets& assets, c
 // One made Sim's file. Throws std::runtime_error saying why when it can't be made.
 NewCharacterFile madeFile(LotSimulation& simulation, scene::Assets& assets, const scene::OutfitCatalog& outfits, const scene::MadeLook& look,
                           const std::filesystem::path& hoodFolder, CharacterFolder& folder, std::int16_t id, std::uint32_t group) {
-    constexpr std::uint32_t kEyebrows = 1, kEyes = 3;
+    constexpr std::uint32_t kFacialHair = 0, kEyebrows = 1, kEyes = 3, kGlasses = 5, kTextureOverlayType = 0x2C1FD8A1,
+                            kMeshOverlayType = 0x0C1FE246;
     const SavedNeighbor* neighbor = simulation.world().neighbor(id);
     if (neighbor == nullptr || neighbor->personData.size() <= kSpeciesPersonData || neighbor->personData[kSpeciesPersonData] != 0) {
         throw std::runtime_error("a made Sim that isn't human can't be written yet");
@@ -187,33 +188,54 @@ NewCharacterFile madeFile(LotSimulation& simulation, scene::Assets& assets, cons
     if (names == nullptr || names->empty()) {
         throw std::runtime_error("a made Sim's names in every language aren't known");
     }
-    // Its overlays are its eyebrows and eyes alone. Facial hair and glasses aren't written yet.
-    // The overlays are the catalog's face overlays, not its parts.
-    const auto subtypeOf = [&](std::size_t i) {
-        if (i >= look.faceOverlays.size()) {
-            return 0u;
-        }
+    // Its overlays are its eyebrows, eyes, any facial hair and glasses, as Make New Character picks
+    // them. The overlays are the catalog's face overlays, not its parts.
+    const auto partOf = [&](std::size_t i) -> const scene::CatalogPart* {
         const auto& key = look.faceOverlays[i];
         const auto it = std::find_if(outfits.faceOverlays.begin(), outfits.faceOverlays.end(), [&](const scene::CatalogPart& p) {
             return p.key.type == key.type && p.key.group == key.group && p.key.instance == key.instance && p.key.instanceHigh == key.instanceHigh;
         });
-        return it != outfits.faceOverlays.end() ? it->subtype : 0u;
+        return it != outfits.faceOverlays.end() ? &*it : nullptr;
     };
-    if (look.faceOverlays.size() != 2 || subtypeOf(0) != kEyebrows || subtypeOf(1) != kEyes) {
-        throw std::runtime_error("a made Sim with facial hair or glasses can't be written yet");
+    const auto familyOf = [&](std::size_t i) {
+        const auto bytes = assets.skinResource(look.faceOverlays[i]);
+        const auto p = bytes ? propset::parse(*bytes) : std::map<std::string, std::string>{};
+        const auto family = p.find("family");
+        if (family == p.end()) {
+            throw std::runtime_error("a made Sim's face overlay has no family");
+        }
+        return family->second;
+    };
+    const auto subtypeIs = [&](std::size_t i, std::uint32_t subtype) {
+        const scene::CatalogPart* part = partOf(i);
+        return part != nullptr && part->subtype == subtype && part->key.type == kTextureOverlayType;
+    };
+    if (look.faceOverlays.size() < 2 || !subtypeIs(0, kEyebrows) || !subtypeIs(1, kEyes)) {
+        throw std::runtime_error("a made Sim's face overlays aren't its eyebrows and eyes");
     }
-    const auto brows = assets.skinResource(look.faceOverlays[0]);
-    const auto browProperties = brows ? propset::parse(*brows) : std::map<std::string, std::string>{};
-    const auto browFamily = browProperties.find("family");
-    if (browFamily == browProperties.end()) {
-        throw std::runtime_error("a made Sim's eyebrows have no family");
+    // Facial hair, then glasses, as Make New Character picks them. A mesh beard is written as glasses
+    // are, as the face's next part.
+    std::vector<std::string> facialHair;
+    std::vector<MadeLookParts::MeshOverlay> meshOverlays;
+    for (std::size_t i = 2; i < look.faceOverlays.size(); ++i) {
+        const scene::CatalogPart* part = partOf(i);
+        if (meshOverlays.empty() && subtypeIs(i, kFacialHair)) {
+            facialHair.push_back(familyOf(i));
+        } else if (part != nullptr && part->key.type == kMeshOverlayType && (part->subtype == kFacialHair || part->subtype == kGlasses)) {
+            meshOverlays.push_back({part->key, familyOf(i), part->category});
+        } else {
+            throw std::runtime_error("a made Sim's face overlay isn't facial hair or glasses");
+        }
     }
+    const std::string browFamily = familyOf(0);
     FileStart start = fileStart(simulation, hoodFolder, folder, id, *neighbor);
     start.character.languageNames = *names;
     MadeLookParts parts;
     parts.data = look.data;
     parts.faceFamily = look.faceFamily;
-    parts.browFamily = browFamily->second;
+    parts.browFamily = browFamily;
+    parts.facialHairFamilies = std::move(facialHair);
+    parts.meshOverlays = std::move(meshOverlays);
     parts.group = group;
     parts.materialCounter = neighbor->guid;
     parts.takenMaterials = folder.materials;

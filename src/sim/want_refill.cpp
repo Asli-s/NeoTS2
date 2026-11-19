@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <set>
 
 namespace ts2::sim {
 
@@ -287,15 +288,16 @@ private:
         return item;
     }
 
-    // The records of the node's want in the history that the node matches.
+    // The records of the node's want in the history that the node matches. Looking a want up gives
+    // the history an empty group for it when it has none, as the game's lookup does, and the
+    // group is saved.
     void events(const Node& node, std::vector<const swaf::Want*>& out) const {
         out.clear();
         const WantDefinition* def = world_.wantDefinition(node.wantId);
-        const auto found = history_->records.find(node.wantId);
-        if (def == nullptr || found == history_->records.end()) {
+        if (def == nullptr) {
             return;
         }
-        for (const auto& record : found->second) {
+        for (const auto& record : history_->records[node.wantId]) {
             if (!(record.flags & kSkippedRecord) && nodeMatches(node, *def, record, c_->code)) {
                 out.push_back(&record);
             }
@@ -759,6 +761,16 @@ std::int32_t aspirationLevel(const std::array<std::int32_t, 7>& levels, std::int
     return std::clamp(static_cast<std::int32_t>(std::lround(value)), -100, 100);
 }
 
+std::int32_t aspirationBand(const std::array<std::int32_t, 7>& levels, std::int32_t score) {
+    std::int32_t band = 0;
+    for (std::int32_t k = 1; k <= 5; ++k) {
+        if (score >= levels[static_cast<std::size_t>(k)]) {
+            band = k;
+        }
+    }
+    return band;
+}
+
 int wantAgeCode(std::int16_t lifeStage) {
     if (lifeStage <= 1) {
         return 13;
@@ -835,12 +847,25 @@ WantHistory& wantHistory(World& world, std::int16_t neighbor) {
         WantHistory history;
         if (const WantHistory* saved = world.savedWantHistory(neighbor)) {
             history = *saved;
-            for (auto it = history.records.begin(); it != history.records.end();) {
-                it = world.wantDefinition(it->first) == nullptr ? history.records.erase(it) : std::next(it);
+            // A want the game doesn't know loses its records but keeps its group, which is saved.
+            for (auto& [guid, records] : history.records) {
+                if (world.wantDefinition(guid) == nullptr) {
+                    records.clear();
+                }
             }
         }
         history.lastClock = state.clock;
         found = state.histories.emplace(neighbor, std::move(history)).first;
+        // Every history starts with a record of the start want, which a new Sim's gets now.
+        auto& start = found->second.records[kHistoryStartWant];
+        if (std::none_of(start.begin(), start.end(), [](const swaf::Want& r) { return (r.flags & kSkippedRecord) == 0; })) {
+            swaf::Want record;
+            record.version = swaf::kWrittenWantVersion;
+            record.id = static_cast<std::uint16_t>(neighbor);
+            record.guid = kHistoryStartWant;
+            record.tail = {historyNow(found->second, state.clock, 1), 0, 0};
+            start.push_back(std::move(record));
+        }
     }
     return found->second;
 }
@@ -913,9 +938,12 @@ bool wantRefillWaiting(World& world, std::int16_t neighbor) {
            (state.refill && state.refill->neighbor == neighbor && state.refill->stage != RefillWork::Stage::Done);
 }
 
-void stepWants(const WantContext& context) {
+namespace {
+
+// The wants manager's refill moves on one stage. With nothing in progress it takes `pick` when that
+// Sim is queued, else the selected Sim, else the first queued.
+void processWants(const WantContext& context, std::int16_t pick) {
     WantsState& state = context.world.wantsState();
-    state.clock += 2;
     if (state.refill) {
         RefillWork& work = *state.refill;
         work.refill.use(context);
@@ -942,7 +970,9 @@ void stepWants(const WantContext& context) {
         return;
     }
     auto next = state.queue.begin();
-    if (const SimObject* selected = context.world.find(context.vm.globals[global::kSelectedPerson])) {
+    if (const auto picked = state.queue.find(pick); pick != 0 && picked != state.queue.end()) {
+        next = picked;
+    } else if (const SimObject* selected = context.world.find(context.vm.globals[global::kSelectedPerson])) {
         if (const auto it = state.queue.find(context.world.neighborIdOf(*selected)); it != state.queue.end()) {
             next = it;
         }
@@ -958,6 +988,39 @@ void stepWants(const WantContext& context) {
     }
     const auto& saved = state.savedLists[neighbor];
     state.refill = std::make_shared<RefillWork>(RefillWork{std::move(refill), neighbor, level, saved.first, saved.second});
+}
+
+} // namespace
+
+void stepWants(const WantContext& context) {
+    context.world.wantsState().clock += 2;
+    processWants(context, 0);
+}
+
+void prepareWantsForSave(const WantContext& context) {
+    std::set<std::int16_t> ids;
+    for (const auto& [id, history] : context.world.wantsState().histories) {
+        ids.insert(id);
+    }
+    context.world.nextAfter(0, [&](const SimObject& object) {
+        if (const std::int16_t id = context.world.neighborIdOf(object); id > 0) {
+            ids.insert(id);
+        }
+        return false;
+    });
+    for (const std::int16_t id : ids) {
+        finishWantRefill(context, id);
+        wantHistory(context.world, id);
+    }
+}
+
+void finishWantRefill(const WantContext& context, std::int16_t neighbor) {
+    // A refill takes four stages, and the one in progress ends first. The bound only guards
+    // against a refill that never ends.
+    constexpr int kMostStages = 64;
+    for (int stage = 0; stage < kMostStages && wantRefillWaiting(context.world, neighbor); ++stage) {
+        processWants(context, neighbor);
+    }
 }
 
 } // namespace ts2::sim

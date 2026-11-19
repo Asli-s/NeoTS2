@@ -4,6 +4,7 @@
 #include "formats/scenegraph.hpp"
 #include "scene/assets.hpp"
 #include "scene/newborn_face_shape.hpp"
+#include "scene/overlay_fit.hpp"
 #include "sim/character_models.hpp"
 
 #include <algorithm>
@@ -54,17 +55,6 @@ std::vector<std::uint8_t> nodeMesh(scene::Assets& assets, std::span<const std::u
     missing("base face mesh", age);
 }
 
-// The face model's morphs: the base face mesh's, "group::name", without the empty one.
-std::vector<std::string> faceMorphs(std::span<const std::uint8_t> mesh) {
-    std::vector<std::string> morphs;
-    for (const auto& m : scenegraph::parseMesh(mesh).morphs) {
-        if (!m.group.empty() || !m.name.empty()) {
-            morphs.push_back(m.group + "::" + m.name);
-        }
-    }
-    return morphs;
-}
-
 std::string lower(std::string text) {
     std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return text;
@@ -75,6 +65,8 @@ std::string lower(std::string text) {
 struct AgeFace {
     std::uint32_t gender = 0;
     std::string skinTone, hairTone, eyeColour, browFamily;
+    std::vector<std::string> facialHairFamilies;
+    std::vector<MadeLookParts::MeshOverlay> meshOverlays;
     bool browFirst = false;
     std::uint32_t group = 0;
     const std::set<std::uint64_t>* takenMaterials = nullptr;
@@ -101,6 +93,8 @@ void addAge(dbpf::PackageImage& package, scene::Assets& assets, const AgeFace& l
     }
     const std::string materialName = faceMaterialName(counter, age, shapeGender);
     std::vector<std::string> morphs;
+    // The near base face and the Sim's, which the mesh overlays are fitted to.
+    std::vector<float> baseFace, simFace;
     for (const bool far : {false, true}) {
         const auto node = scene::baseFaceNode(assets, ageFlag, look.gender, far, look.skinTone);
         if (!node) {
@@ -109,14 +103,18 @@ void addAge(dbpf::PackageImage& package, scene::Assets& assets, const AgeFace& l
         add(package, kNodeType, ageName(age, far, "_gmnd"), newFaceNode(*node, age, far, look.group));
         const std::vector<std::uint8_t> catalogMesh = nodeMesh(assets, *node, age);
         if (!far) {
-            morphs = faceMorphs(catalogMesh);
+            morphs = meshMorphs(catalogMesh);
         }
         const auto vertices = look.vertices(shapeAge, shapeGender, far);
         if (!vertices) {
             missing("new face", age);
         }
-        add(package, kMeshType, ageName(age, far, "_gmdc"),
-            newFaceMesh(catalogMesh, age, far, look.group, vertices->positions, vertices->normals));
+        const auto mesh = newFaceMesh(catalogMesh, age, far, look.group, vertices->positions, vertices->normals);
+        if (!far && !look.meshOverlays.empty()) {
+            baseFace = scene::meshPositions(catalogMesh);
+            simFace = scene::meshPositions(mesh);
+        }
+        add(package, kMeshType, ageName(age, far, "_gmdc"), mesh);
     }
     add(package, kShapeType, "age" + std::to_string(age) + "_00_shpe", newFaceShape(age, look.group, lower(materialName)));
 
@@ -140,14 +138,56 @@ void addAge(dbpf::PackageImage& package, scene::Assets& assets, const AgeFace& l
     material.age = age;
     material.paramGender = look.gender == kFemale ? 1 : 0;
     material.browFirst = look.browFirst;
-    const auto catalog =
-        scene::newbornFaceMaterialParts(assets, ageFlag, look.gender, look.skinTone, look.eyeColour, material.hairTone, look.browFamily);
+    material.facialHairFamilies = look.facialHairFamilies;
+    const auto catalog = scene::newbornFaceMaterialParts(assets, ageFlag, look.gender, look.skinTone, look.eyeColour, material.hairTone,
+                                                         look.browFamily, look.facialHairFamilies);
     if (!catalog) {
         missing("base face material", age);
     }
-    material.eyeTexture = catalog->eyeTexture;
-    material.browTexture = catalog->browTexture;
+    const auto copy = [](const scene::FaceOverlayTexture& t) { return FaceTexture{t.texture, t.layer}; };
+    material.eye = copy(catalog->eye);
+    material.brow = copy(catalog->brow);
+    for (const auto& t : catalog->others) {
+        if (t.texture.empty()) {
+            missing("facial hair overlay", age);
+        }
+        material.facialHair.push_back(copy(t));
+    }
+    for (const auto& overlay : look.meshOverlays) {
+        material.meshOverlayFamilies.push_back(overlay.family);
+    }
     add(package, kMaterialType, materialName + "_txmt", newFaceMaterial(catalog->catalogMaterial, look.group, material));
+
+    // Each mesh overlay (a mesh beard or glasses) is fitted to the face and written as the age's next
+    // part, its materials named on from the face's.
+    for (std::size_t k = 0; k < look.meshOverlays.size(); ++k) {
+        const int part = static_cast<int>(k + 1);
+        std::string problem;
+        const auto pieces = scene::meshOverlayCatalog(assets, look.meshOverlays[k].part, problem);
+        if (!pieces) {
+            throw std::runtime_error("character file: " + problem);
+        }
+        const auto fitted = scene::fitMeshOverlay(scene::meshPositions(pieces->mesh), scene::meshPositions(pieces->maskMesh),
+                                                  scene::meshColours(pieces->maskMesh), baseFace, simFace);
+        if (fitted.empty()) {
+            throw std::runtime_error("character file: a mesh overlay that can't be fitted to the face");
+        }
+        const std::string stem = "age" + std::to_string(age) + "_" + std::to_string(part);
+        add(package, kNodeType, stem + "_gmnd", newOverlayNode(pieces->node, age, part, look.group));
+        add(package, kMeshType, stem + "_gmdc", newOverlayMesh(pieces->mesh, age, part, look.group, fitted));
+        std::vector<OverlaySubset> subsets;
+        for (const auto& subset : pieces->subsets) {
+            ++counter;
+            for (int skips = 0; skips < kMaxSkips && taken(look, faceMaterialName(counter, age, shapeGender)); ++skips) {
+                ++counter;
+            }
+            const std::string name = faceMaterialName(counter, age, shapeGender);
+            add(package, kMaterialType, name + "_txmt", newOverlayMaterial(subset.material, look.group, name));
+            subsets.push_back({subset.subset, lower(name)});
+        }
+        add(package, kShapeType, stem + "0_shpe", newOverlayShape(age, part, look.group, subsets));
+        add(package, kModelType, stem + "_cres", newFaceModel(*skeleton, age, look.group, {}, meshMorphs(pieces->mesh), part));
+    }
 }
 
 // A catalog GUID as bare hex digits (as the catalog keeps it) written as the files write GUIDs,
@@ -236,6 +276,9 @@ dbpf::PackageImage madeCharacterPackage(scene::Assets& assets, const std::vector
     }
 
     dbpf::PackageImage package = newCharacterPackage(templ, character, installedPacks);
+    for (const auto& overlay : parts.meshOverlays) {
+        look.overlayCategories.push_back(overlay.category);
+    }
     addMadeLookRecords(package, look);
     const auto shape = scene::madeFaceShape(assets, faceTemplates, parts.faceFamily, look.skinTone);
     if (!shape) {
@@ -249,6 +292,8 @@ dbpf::PackageImage madeCharacterPackage(scene::Assets& assets, const std::vector
     face.hairTone = look.hairTone;
     face.eyeColour = look.eyeColour;
     face.browFamily = parts.browFamily;
+    face.facialHairFamilies = parts.facialHairFamilies;
+    face.meshOverlays = parts.meshOverlays;
     face.browFirst = true;
     face.group = parts.group;
     face.takenMaterials = &parts.takenMaterials;

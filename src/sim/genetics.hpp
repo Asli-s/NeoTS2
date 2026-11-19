@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -63,5 +64,21 @@ Personality childPersonality(const std::function<std::int16_t(bool fromA, std::s
 
 // The zodiac sign (1 to 12) a personality is nearest to, as person data 0x46 holds it.
 std::int16_t zodiacSign(const Personality& personality);
+
+// What a Sim Make New Character makes takes from its zodiac sign (1 to 12, see fillMadeSimPersonData): a
+// human gets the sign's own personality (each trait its points times 100), an aspiration (0x2E) by
+// sign, or Grow Up (0x40) up to a child, and a pet gets the sign's value for person data 0xC7.
+// Empty or 0 for a sign out of range.
+Personality signPersonality(std::int16_t sign);
+std::int16_t signAspiration(std::int16_t sign, std::int16_t lifeStage);
+std::int16_t signPetValue(std::int16_t sign);
+
+// The person data a Sim Make New Character makes gets from its zodiac sign, drawn 1 to 12 on the
+// genetics generator: the sign (0x46), the low half of its GUID (0x58), and for a human the sign's
+// personality, its trait copy (0x2F..0x33) and aspiration, for a pet 0xC7. Then each of the eight
+// face regions is drawn for its face gene, kept when a draw of 0..99 reaches the region's threshold
+// for its gender. Returns the kept regions in the gene's order, each followed by a comma, empty
+// for a pet.
+std::string fillMadeSimPersonData(std::span<std::int16_t> personData, std::uint32_t guid, SimRandom& random);
 
 } // namespace ts2::sim

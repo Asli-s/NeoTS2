@@ -2,6 +2,7 @@
 
 #include "formats/dbpf_writer.hpp"
 #include "formats/face_shape.hpp"
+#include "formats/scenegraph.hpp"
 #include "sim/character_file.hpp"
 #include "sim/character_look.hpp"
 #include "scene/age_data.hpp"
@@ -58,6 +59,16 @@ struct MadeLookParts {
     // Its face template's family as the catalog keeps it (none for the plain face), and the GUID
     // of its eyebrow overlay's family.
     std::string faceFamily, browFamily;
+    // The GUIDs of its facial hair overlays' families, in the order it wears them.
+    std::vector<std::string> facialHairFamilies;
+    // Its mesh overlays (a mesh beard, glasses), after the facial hair: each catalog part, its
+    // family's GUID and its outfit categories.
+    struct MeshOverlay {
+        scenegraph::Link part;
+        std::string family;
+        std::uint32_t category = 0;
+    };
+    std::vector<MeshOverlay> meshOverlays;
     std::uint32_t group = 0x6F000000;
     std::uint32_t materialCounter = 0;
     std::set<std::uint64_t> takenMaterials;
@@ -66,10 +77,12 @@ struct MadeLookParts {
 // A made Sim's whole character file as Make New Character writes it: the template copy, its look
 // records (addMadeLookRecords), its face shape (scene::madeFaceShape), and for its own age alone its
 // face's geometry nodes, meshes, shape, model and material. The material lists its overlays
-// eyebrows first. Portraits are left out, as for a newborn.
+// eyebrows first, then eyes, facial hair and mesh overlays. Each mesh overlay is fitted to the face
+// (scene::fitMeshOverlay) and written as a part of its own: node, mesh, a material per subset
+// named on from the face's, shape and model. Portraits are left out, as for a newborn.
 //
 // Throws std::runtime_error when the catalog lacks a base face, skeleton or material the Sim
-// needs, its age or gender isn't known, or a face template can't be read.
+// needs or a piece of a mesh overlay, its age or gender isn't known, or a face template can't be read.
 dbpf::PackageImage madeCharacterPackage(scene::Assets& assets, const std::vector<scene::CatalogPart>& faceTemplates,
                                         std::span<const TemplateResource> templ, const NewCharacter& character,
                                         std::span<const std::uint8_t> installedPacks, const MadeLookParts& parts);

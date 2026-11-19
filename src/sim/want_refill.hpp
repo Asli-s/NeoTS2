@@ -21,6 +21,9 @@ class CodeSource;
 // queues the Sim. Each tick the wants manager takes a queued Sim, makes candidates from the want
 // trees and the history, scores them and fills the Sim's empty slots from the best.
 
+// The want every Sim's history begins with, recorded when its history is first made.
+constexpr std::uint32_t kHistoryStartWant = 0xAD9ACD9A;
+
 // The want trees' code for a Sim's life stage (person data 0x3A): Baby 13, Toddler 2, Child 1,
 // Teen 3, Adult 0, Elder 4.
 int wantAgeCode(std::int16_t lifeStage);
@@ -28,6 +31,10 @@ int wantAgeCode(std::int16_t lifeStage);
 // An aspiration score (person data 0xA2 times 10) on -100..100 by its age's levels, rock bottom to perfect:
 // -100 at rock bottom, -50, 0 at neutral, 25, 50, 75 and 100 at perfect, straight between them.
 std::int32_t aspirationLevel(const std::array<std::int32_t, 7>& levels, std::int32_t score);
+
+// The aspiration level a score (person data 0xA2 times 10) reaches by its age's levels: 0 failure,
+// 1 distress, 2 normal, 3 bronze, 4 silver and 5 gold, the highest whose threshold it meets.
+std::int32_t aspirationBand(const std::array<std::int32_t, 7>& levels, std::int32_t score);
 
 // What a want record's argument and value are compared with: the operators of the definitions.
 bool wantCompare(content::WantOperator op, std::int32_t got, std::int32_t wanted);
@@ -63,6 +70,15 @@ bool wantRefillWaiting(World& world, std::int16_t neighbor);
 // is taken on the tick after that.
 void stepWants(const WantContext& context);
 
+// Runs the wants manager's refills until the Sim has none waiting, as the game does before it saves
+// the Sim's wants: the refill in progress ends, then the Sim's own runs. The clock doesn't move.
+void finishWantRefill(const WantContext& context, std::int16_t neighbor);
+
+// Gets the wants of every Sim on the lot and every Sim whose history is in use ready to be saved:
+// each Sim's waiting refill is run (see finishWantRefill) and its history made (see wantHistory),
+// as the game's save does for each Sim it writes.
+void prepareWantsForSave(const WantContext& context);
+
 // Forgets which tree node filled a place of the Sim's wants (or fears) once the place empties.
 void forgetWantPlace(World& world, std::int16_t neighbor, std::size_t place, bool fear);
 
@@ -70,7 +86,9 @@ void forgetWantPlace(World& world, std::int16_t neighbor, std::size_t place, boo
 void addWantHistory(World& world, std::int16_t neighbor, swaf::Want record);
 
 // The Sim's history in use, made from the saved one the first time. Records whose want definition
-// is unknown are dropped, as the game drops them when it loads them.
+// is unknown are dropped, as the game drops them when it loads them, and their group stays empty.
+// A history without a record of the start want (kHistoryStartWant) gets one at its clock's next
+// step, as a new Sim's does.
 struct WantHistory;
 WantHistory& wantHistory(World& world, std::int16_t neighbor);
 

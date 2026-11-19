@@ -49,6 +49,16 @@ std::vector<std::uint32_t> loadedRelationshipTable(std::span<const std::uint32_t
     return listed(buckets);
 }
 
+void addToRelationshipTable(std::vector<std::uint32_t>& table, std::uint32_t id) {
+    if (table.size() >= kRelationshipTableBuckets) {
+        table.push_back(id);
+        return;
+    }
+    const std::size_t bucket = relationshipBucket(id);
+    const auto at = std::find_if(table.begin(), table.end(), [bucket](std::uint32_t other) { return relationshipBucket(other) >= bucket; });
+    table.insert(at, id);
+}
+
 std::vector<std::uint32_t> savedRelationshipList(std::span<const std::uint32_t> table,
                                                  std::span<const std::uint32_t> kept,
                                                  std::span<const std::uint32_t> added) {

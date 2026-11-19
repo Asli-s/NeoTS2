@@ -33,7 +33,8 @@ float weightedMood(const ScoreCurves& weights, const SimObject& sim);
 
 // Keeps a Sim's motives moving while it lives. Called for each tick the Sim's script runs on
 // (sleeping ticks too), it does three things in the game's order:
-//  1. every 60 ticks, unless person data 0x1D is set: decay the motives, then work out the mood.
+//  1. every 60 ticks, unless person data 0x1D is set: decay the motives, keep a copy of them
+//     (motivesAtDecay), then work out the mood.
 //  2. add one to the tick counter (person data 0x1B).
 //  3. while person data 0x1D is below 2: move the motives by their motive changes.
 class MotiveUpdate {

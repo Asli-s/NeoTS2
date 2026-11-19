@@ -71,6 +71,12 @@ CatalogPart catalogPart(const scenegraph::Link& key, const std::map<std::string,
     part.parts = propset::number(p, p.contains("parts") ? "parts" : "outfit");
     part.flags = propset::number(p, "flags");
     part.category = partCategories(p);
+    // A mesh overlay older than version 6 worn every day is worn with outerwear too, whatever its parts.
+    constexpr std::uint32_t kMeshOverlayType = 0x0C1FE246, kEveryday = 0x01, kOuterwear = 0x1000;
+    if (key.type == kMeshOverlayType && (part.category & kEveryday) &&
+        (p.contains("version") ? propset::number(p, "version") & 0xFFFF : 1) < 6) {
+        part.category |= kOuterwear;
+    }
     part.fitness = propset::number(p, "fitness");
     part.subtype = propset::number(p, "subtype");
     part.layer = propset::number(p, "layer");

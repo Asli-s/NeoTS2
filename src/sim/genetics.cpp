@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <string_view>
 #include <vector>
@@ -211,12 +212,86 @@ Personality childPersonality(const std::function<std::int16_t(bool fromA, std::s
     return out;
 }
 
+namespace {
+
+// Each sign's traits in kPersonalityTraits order, in points.
+constexpr std::array<std::array<float, 5>, 12> kSigns{{
+    {8, 3, 3, 5, 6}, {5, 4, 8, 5, 3}, {7, 3, 3, 4, 8}, {3, 6, 4, 6, 6}, {10, 3, 4, 4, 4}, {2, 5, 3, 9, 6},
+    {8, 7, 6, 2, 2}, {5, 3, 3, 6, 8}, {3, 4, 7, 2, 9}, {4, 5, 8, 7, 1}, {4, 6, 7, 4, 4}, {3, 7, 3, 5, 7},
+}};
+
+bool validSign(std::int16_t sign) { return sign >= 1 && sign <= 12; }
+
+} // namespace
+
+Personality signPersonality(std::int16_t sign) {
+    Personality out;
+    if (!validSign(sign)) {
+        return out;
+    }
+    for (std::size_t i = 0; i < kPersonalityTraits.size(); ++i) {
+        out[kPersonalityTraits[i]] = static_cast<std::int16_t>(std::lround(kSigns[static_cast<std::size_t>(sign - 1)][i] * 100.0f));
+    }
+    return out;
+}
+
+std::int16_t signAspiration(std::int16_t sign, std::int16_t lifeStage) {
+    // Life stages up to 15 are babies, toddlers and children.
+    constexpr std::int16_t kOldestChild = 15, kGrowUp = 0x40;
+    static constexpr std::array<std::int16_t, 12> kBySign{16, 1, 4, 2, 16, 32, 1, 4, 32, 4, 2, 32};
+    if (lifeStage <= kOldestChild) {
+        return kGrowUp;
+    }
+    return validSign(sign) ? kBySign[static_cast<std::size_t>(sign - 1)] : std::int16_t{0};
+}
+
+std::int16_t signPetValue(std::int16_t sign) {
+    static constexpr std::array<std::int16_t, 12> kBySign{0x61, 0x21A, 0x144, 0x90, 0x168, 0x211, 0x12A, 0x55, 0x186, 0x209, 0xA2, 0x284};
+    return validSign(sign) ? kBySign[static_cast<std::size_t>(sign - 1)] : std::int16_t{0};
+}
+
+std::string fillMadeSimPersonData(std::span<std::int16_t> personData, std::uint32_t guid, SimRandom& random) {
+    constexpr std::size_t kZodiac = 0x46, kGuidLow = 0x58, kAspiration = 0x2E, kTraitCopy = 0x2F, kPetValue = 0xC7,
+                          kLifeStage = 0x3A, kSpecies = 0xBA, kGender = 0x41;
+    if (personData.size() <= kPetValue) {
+        return {};
+    }
+    const auto draw = [&](std::uint32_t n) { return static_cast<std::uint32_t>((static_cast<std::uint64_t>(random()) * n) >> 32); };
+    const auto sign = static_cast<std::int16_t>(draw(12) + 1);
+    personData[kZodiac] = sign;
+    personData[kGuidLow] = static_cast<std::int16_t>(guid & 0xFFFF);
+    if (personData[kSpecies] != 0) {
+        personData[kPetValue] = signPetValue(sign);
+        return {};
+    }
+    for (const auto& [trait, value] : signPersonality(sign)) {
+        personData[trait] = value;
+    }
+    personData[kAspiration] = signAspiration(sign, personData[kLifeStage]);
+    // The copy holds neat, nice, active, outgoing and playful, in that order.
+    constexpr std::array<std::size_t, 5> kCopied{7, 2, 3, 6, 5};
+    for (std::size_t i = 0; i < kCopied.size(); ++i) {
+        personData[kTraitCopy + i] = personData[kCopied[i]];
+    }
+    // Each region's threshold for a male and a female.
+    struct Region {
+        const char* name;
+        std::uint32_t male, female;
+    };
+    static constexpr std::array<Region, 8> kRegions{{{"nose", 66, 50}, {"brow", 66, 50}, {"mouth", 50, 66}, {"cheek", 50, 50},
+                                                     {"cheekbones", 50, 66}, {"eyes", 50, 66}, {"jaw", 66, 50}, {"ears", 50, 50}}};
+    const bool female = personData[kGender] == 1;
+    std::string regions;
+    for (const Region& region : kRegions) {
+        if (draw(100) >= (female ? region.female : region.male)) {
+            regions += region.name;
+            regions += ',';
+        }
+    }
+    return regions;
+}
+
 std::int16_t zodiacSign(const Personality& personality) {
-    // Each sign's traits in kPersonalityTraits order, in points.
-    static constexpr std::array<std::array<float, 5>, 12> kSigns{{
-        {8, 3, 3, 5, 6}, {5, 4, 8, 5, 3}, {7, 3, 3, 4, 8}, {3, 6, 4, 6, 6}, {10, 3, 4, 4, 4}, {2, 5, 3, 9, 6},
-        {8, 7, 6, 2, 2}, {5, 3, 3, 6, 8}, {3, 4, 7, 2, 9}, {4, 5, 8, 7, 1}, {4, 6, 7, 4, 4}, {3, 7, 3, 5, 7},
-    }};
     std::array<float, 5> points{};
     for (std::size_t i = 0; i < points.size(); ++i) {
         const auto it = personality.find(kPersonalityTraits[i]);

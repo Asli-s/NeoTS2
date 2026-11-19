@@ -196,6 +196,7 @@ HoodSaveCounts fillNeighborhoodPackage(dbpf::PackageImage& hood, const dbpf::Pac
                 family.funds2 = family.funds;
                 rewrite = true;
                 counts.family = true;
+                counts.savedFunds = std::pair{resource.key.instance, family.funds};
             }
             // A Sim born or made into the family joins its members, after those it had.
             std::vector<std::uint32_t> members;
@@ -224,10 +225,16 @@ HoodSaveCounts fillNeighborhoodPackage(dbpf::PackageImage& hood, const dbpf::Pac
                 continue;
             }
             record->own = *lotInfo;
+            // The room light percents, by room as the game keeps them, with what scripts set.
+            record->roomLights.clear();
+            for (const auto& [room, percent] : world.roomLightPercents()) {
+                record->roomLights.emplace_back(static_cast<std::uint16_t>(room), static_cast<std::uint16_t>(percent));
+            }
             resource = dbpf::storeResource(resource.key, nhood::writeLotDescriptionRecord(*record));
             counts.lotDescription = true;
         }
     }
+    counts.wants = hoodsave::saveWants(hood, world, leaveOut ? world.addedNeighbors() : std::set<std::int16_t>{});
     for (dbpf::StoredResource& resource : madeRecords) {
         hood.resources.push_back(std::move(resource));
         hood.dataOrder.push_back(hood.resources.size() - 1);

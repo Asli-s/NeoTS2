@@ -12,6 +12,7 @@
 #include "sim/simulator_ids.hpp"
 #include "sim/linked_interactions.hpp"
 #include "sim/hood_save.hpp"
+#include "sim/family_picture.hpp"
 #include "formats/ngbh.hpp"
 #include "formats/sdsc.hpp"
 #include "formats/fami.hpp"
@@ -29,6 +30,7 @@
 #include "sim/character_models.hpp"
 #include "sim/newborn_file.hpp"
 #include "scene/assets.hpp"
+#include "scene/overlay_fit.hpp"
 #include "scene/sims.hpp"
 #include "formats/propset.hpp"
 #include "formats/reference_list.hpp"
@@ -122,10 +124,13 @@ void selectionPassesToTheNextSelectableSim() {
 }
 
 // Motives move by their daily rate / 720 each update. A decaying one is slowed by its modifier
-// (here 50%), a rising one is not. All stay within -100..100.
+// (here 50%), a rising one is not. All stay within -100..100. A new Sim starts as the game's do.
 void motivesDecayByTheirRates() {
     ts2::sim::World world;
     auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    CHECK(sim.motives[ts2::sim::motive::kEnergy] == 70.0f && sim.motives[ts2::sim::motive::kHunger] == -40.0f);
+    CHECK(sim.motivesAtDecay[ts2::sim::motive::kEnergy] == 70.0f && sim.motivesAtDecay[ts2::sim::motive::kHunger] == 0.0f);
+    sim.motives = {};
     sim.personData[0x5D] = -720;  // hunger
     sim.personData[0xDB] = 50;    // hunger slowed by half
     sim.personData[0x60] = 1440;  // energy rises
@@ -1424,6 +1429,27 @@ void relationshipListsTakeTheGamesTableOrder() {
     const std::vector<std::uint32_t> savedAgain{0x77, 0x79, 0xF9, 0x7E, 0x64, 0x2A, 0x34, 0x76, 0xF8, 0x36, 0x31, 0x38, 0x2B, 0x2D, 0x35, 0x7A, 0x37};
     const std::vector<std::uint32_t> table = ts2::sim::loadedRelationshipTable(saved);
     CHECK(table == savedAgain && ts2::sim::savedRelationshipList(table, saved, {}) == savedAgain);
+    std::vector<std::uint32_t> growing = ts2::sim::loadedRelationshipTable(vidcund);
+    ts2::sim::addToRelationshipTable(growing, 0x1AE);
+    CHECK(growing == withArmando);
+}
+
+// An object keeps the objects it holds relationship variables towards in the same table: the game
+// saved the baby Star (object 124) listing 282, 214 and 43. One that goes leaves the table.
+void objectRelationshipTablesTakeTheGamesOrder() {
+    ts2::sim::World world;
+    const auto make = [&](std::int16_t id) -> ts2::sim::SimObject& { return world.restore(id, kObjectGroup, typed(0x51515151, 0)); };
+    ts2::sim::SimObject& star = make(124);
+    make(43);
+    ts2::sim::SimObject& gone = make(214);
+    make(282);
+    for (const std::int16_t to : std::initializer_list<std::int16_t>{43, 214, 282}) {
+        world.relationship(star.id, to).resize(1, 0);
+    }
+    CHECK((star.relationshipTable == std::vector<std::uint32_t>{282, 214, 43}));
+    world.remove(gone);
+    world.purge();
+    CHECK((world.find(124)->relationshipTable == std::vector<std::uint32_t>{282, 43}));
 }
 
 // A relationship made during play that holds values gets a record, and its neighbor's description
@@ -1661,6 +1687,52 @@ void madeLookRecordsListEachPartOnce() {
           list[3].instance == hair.instance && list[4].group == 0xFFFFFFFF && list[4].instance == 1 && list[5].instance == body.instance);
     const auto face = ts2::propset::parse(body0(2));
     CHECK(package.resources[2].key.type == 0xEBCF3E27 && face.at("hairtone") == look.hairTone && ts2::propset::number(face, "age") == 0x10);
+
+    // Glasses: a face part of their own (instance 2) with their categories and a list naming their
+    // model, worn after the face in every face list.
+    look.overlayCategories = {0x1327};
+    ts2::dbpf::PackageImage withGlasses;
+    ts2::sim::addMadeLookRecords(withGlasses, look);
+    CHECK(withGlasses.resources.size() == 5);
+    const auto glassesBody = [&](std::size_t i) {
+        const auto& r = withGlasses.resources[i];
+        return r.compressed ? ts2::qfs::decompress(r.bytes) : r.bytes;
+    };
+    const auto agedGlasses = ts2::propset::parse(glassesBody(0));
+    CHECK(agedGlasses.at("ls1") == "2" && ts2::propset::number(agedGlasses, "le1_0") == 4 && ts2::propset::number(agedGlasses, "le1_1") == 5 &&
+          agedGlasses.at("ls4") == "2" && ts2::propset::number(agedGlasses, "le4_1") == 5 && ts2::propset::number(agedGlasses, "le2_0") == 6);
+    const auto glassesPart = ts2::propset::parse(glassesBody(3));
+    CHECK(withGlasses.resources[3].key.instance == 2 && ts2::propset::number(glassesPart, "category") == 0x1327 &&
+          ts2::propset::number(glassesPart, "parts") == 2);
+    const auto glassesList = ts2::reflist::parse(glassesBody(4));
+    CHECK(withGlasses.resources[4].key.instance == 2 && glassesList.size() == 2 &&
+          glassesList[0].instance == ts2::sim::newFaceModelKey(4, 1).instance && glassesList[1].type == 0);
+}
+
+// Glasses fitted to a face: a vertex on the mask at a base face vertex takes that vertex's place on
+// the Sim's face, one on the mask elsewhere moves by the average move of its 3 nearest face
+// vertices, and one off the mask by the average move of its nearest vertices on the mask. A mask
+// vertex counts only with alpha over half. A nearer vertex put in front of a list that isn't full
+// still drops the last one, so the vertex off the mask follows the nearer tied vertex alone.
+void meshOverlaysFollowTheFace() {
+    const std::vector<float> base{0, 0, 0, 1, 0, 0, 0, 1, 0, 10, 10, 10};
+    const std::vector<float> face{0.1f, 0, 0, 1, 0.2f, 0, 0, 1, 0.3f, 10, 10, 10};
+    const std::vector<float> rest{0, 0, 0, 0.5f, 0.5f, 0, 5, 5, 5};
+    const std::vector<float> mask{0, 0, 0, 0.5f, 0.5f, 0, 5, 5, 5};
+    const std::vector<std::uint8_t> colours{0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 100};
+    const auto fitted = ts2::scene::fitMeshOverlay(rest, mask, colours, base, face);
+    const auto near = [](float a, float b) { return std::abs(a - b) < 1e-5f; };
+    CHECK(fitted.size() == 9 && near(fitted[0], 0.1f) && fitted[1] == 0 && fitted[2] == 0);
+    CHECK(near(fitted[3], 0.5f + 0.1f / 3) && near(fitted[4], 0.5f + 0.2f / 3) && near(fitted[5], 0.1f));
+    CHECK(near(fitted[6], 5 + 0.1f / 3) && near(fitted[7], 5 + 0.2f / 3) && near(fitted[8], 5 + 0.1f));
+    CHECK(ts2::scene::fitMeshOverlay(rest, mask, colours, base, std::vector<float>{0, 0, 0}).empty());
+    CHECK(ts2::scene::fitMeshOverlay(rest, mask, std::vector<std::uint8_t>{0}, base, face).empty());
+    // With no mask (a bracelet), or a mask with no vertex over half, every vertex is tied to the face:
+    // the far one follows its 3 nearest base face vertices, the first of them dropped on the way.
+    const auto maskless = ts2::scene::fitMeshOverlay(rest, {}, {}, base, face);
+    CHECK(maskless.size() == 9 && maskless[6] == 5 && near(maskless[7], 5 + 0.2f / 3) && near(maskless[8], 5 + 0.1f));
+    const std::vector<std::uint8_t> faint{0, 0, 0, 100, 0, 0, 0, 100, 0, 0, 0, 100};
+    CHECK(ts2::scene::fitMeshOverlay(rest, mask, faint, base, face) == maskless);
 }
 
 // A newborn's look records: its age data, and a face part and resource list for each age, the
@@ -1697,6 +1769,27 @@ void newFaceModelsNameTheSimsOwnParts() {
     CHECK(copy.links[0].group == 0xFFFFFFFF && copy.links[0].instance == mesh.instance && copy.links[0].instanceHigh == mesh.instanceHigh);
     CHECK(std::get<ts2::rcol::GeometryNode>(copy.blocks[0]).name.name == "#0x6f000001!age5_0LOD15_gmnd");
     CHECK(std::get<ts2::rcol::DataList>(copy.blocks[1]).value.name == "face" && std::get<ts2::rcol::DataList>(copy.blocks[2]).value.name == "tsNoShadow");
+    // A glasses node as the catalog ships the aviators': the game's copy lists its blocks the other
+    // way round but keeps the node's references to them as they were.
+    auto& glasses = std::get<ts2::rcol::GeometryNode>(node.blocks[0]);
+    glasses.name.name = "amAccessoryEyeglassesAviatorFrame_tslocator_gmnd";
+    node.blocks.resize(1);
+    node.blockTypes.resize(1);
+    for (const char* list : {"tsNoShadow", "tsDesignModeEnabled", "lens", "frame"}) {
+        ts2::rcol::DataList d;
+        d.header = {"cDataListExtension", 0x6A836D56, 1};
+        d.extension = {"cExtension", 0, 3};
+        d.value.type = 7;
+        d.value.name = list;
+        std::get<ts2::rcol::GeometryNode>(node.blocks[0]).graph.extensions.push_back({1, 0, static_cast<std::uint32_t>(node.blocks.size())});
+        node.blocks.push_back(d);
+        node.blockTypes.push_back(0x6A836D56);
+    }
+    const auto overlay = ts2::rcol::read(ts2::sim::newOverlayNode(ts2::rcol::write(node), 3, 1, 0x6F00128F));
+    const auto& overlayNode = std::get<ts2::rcol::GeometryNode>(overlay.blocks[0]);
+    CHECK(overlayNode.name.name == "#0x6f00128f!age3_1_gmnd" && overlay.blocks.size() == 5);
+    CHECK(std::get<ts2::rcol::DataList>(overlay.blocks[1]).value.name == "frame" && std::get<ts2::rcol::DataList>(overlay.blocks[4]).value.name == "tsNoShadow");
+    CHECK(overlayNode.graph.extensions.size() == 4 && overlayNode.graph.extensions[0].index == 1 && overlayNode.graph.extensions[3].index == 4);
     bool threw = false;
     try {
         ts2::sim::newFaceNode(ts2::sim::newFaceShape(5, 1, "m"), 5, false, 1);
@@ -1808,8 +1901,8 @@ void newFaceMaterialsCompositeTheOverlays() {
     catalog.blockTypes = {0x49596978};
     ts2::sim::FaceMaterialLook look;
     look.name = ts2::sim::faceMaterialName(0x1A, 3, 0);
-    look.eyeTexture = "uuface-eye-dkblue";
-    look.browTexture = "uuface-browbushy-black";
+    look.eye = {"uuface-eye-dkblue", 0};
+    look.brow = {"uuface-browbushy-black", 80};
     look.eyeColour = "e1";
     look.browFamily = "b1";
     look.hairTone = "h1";
@@ -1827,6 +1920,25 @@ void newFaceMaterialsCompositeTheOverlays() {
     CHECK(value("compositeBaseTextureName") == "_amface_s5_uuface_eye_dkblue_uuface_browbushy_black-diffuse");
     CHECK(value("baseTexture0") == "amface-s5" && value("cafOverlay1") == "b1," && value("cafNumOverlays") == "2" && value("numTexturesToComposite") == "3");
     CHECK(std::is_sorted(out.properties.begin(), out.properties.end()) && out.textures.size() == 2 && out.textures[1] == "amface-s5");
+
+    // A made Sim with stubble: eyebrows, eyes then the stubble in the overlay list, and the textures
+    // by layer (eyes 0, stubble 60, eyebrows 80), as in a stubbled townie's file the game wrote.
+    look.browFirst = true;
+    look.eye = {"uuface-eye-green", 0};
+    look.brow = {"uuface-browcombed-brown", 80};
+    look.facialHairFamilies = {"a739e0f6-197c-4311-8cd0-3c9b7c9ba3f5"};
+    look.facialHair = {{"uuface-stubble1-brown", 60}};
+    const auto bearded = rc::read(ts2::sim::newFaceMaterial(rc::write(catalog), 0x6F000001, look));
+    const auto& b = std::get<rc::Material>(bearded.blocks[0]);
+    const auto beardValue = [&](const char* key) {
+        const auto it = std::find_if(b.properties.begin(), b.properties.end(), [&](const auto& p) { return p.first == key; });
+        return it != b.properties.end() ? it->second : std::string("-");
+    };
+    CHECK(beardValue("compositeBaseTextureName") == "_amface_s5_uuface_eye_green_uuface_stubble1_brown_uuface_browcombed_brown-diffuse");
+    CHECK(beardValue("baseTexture1") == "uuface-eye-green" && beardValue("baseTexture2") == "uuface-stubble1-brown" &&
+          beardValue("baseTexture3") == "uuface-browcombed-brown" && beardValue("numTexturesToComposite") == "4");
+    CHECK(beardValue("cafNumOverlays") == "3" && beardValue("cafOverlay0") == "b1," && beardValue("cafOverlay1") == "e1," &&
+          beardValue("cafOverlay2") == "a739e0f6-197c-4311-8cd0-3c9b7c9ba3f5,");
 }
 
 // The eyebrows a newborn's draw picks come from the baby eyebrow overlays of its gender, tone and
@@ -2580,6 +2692,75 @@ void simulatorRecordTakesTheSimulationsGlobalsAndTickState() {
 // The object map a save writes: objects that are gone drop out, objects the record already lists
 // keep their place, new ones go in front with the newest first, and the wait table holds the ticks
 // a sleeping script still waits, 0 for an id with no object. A new object carries run flag 1.
+// Households arranged for their family picture as the game arranges them at a save: Green, the
+// Smiths and the Ottomases.
+void familyPictureArrangesHouseholdsAsTheGame() {
+    using ts2::famt::TieType;
+    using Sim = ts2::sim::FamilyPictureSim;
+    std::map<std::pair<int, int>, std::vector<std::int16_t>> ties;
+    std::map<std::pair<int, int>, std::vector<std::int32_t>> relationships;
+    ts2::sim::FamilyPictureFacts facts;
+    facts.ties = [&](std::int16_t id, TieType type) {
+        const auto it = ties.find({int{id}, static_cast<int>(type)});
+        return it != ties.end() ? it->second : std::vector<std::int16_t>{};
+    };
+    facts.relationship = [&](std::int16_t from, std::int16_t to) -> std::optional<std::vector<std::int32_t>> {
+        const auto it = relationships.find({int{from}, int{to}});
+        return it != relationships.end() ? std::optional(it->second) : std::nullopt;
+    };
+    const auto marry = [&](int a, int b) {
+        ties[{a, static_cast<int>(TieType::Spouse)}] = {static_cast<std::int16_t>(b)};
+        ties[{b, static_cast<int>(TieType::Spouse)}] = {static_cast<std::int16_t>(a)};
+        relationships[{a, b}] = {80, 2, 80};  // in love: variable 1 bit 1
+        relationships[{b, a}] = {80, 2, 80};
+    };
+    const auto placeOf = [](const ts2::sim::FamilyPicture& p, std::int16_t id) {
+        const auto it = std::find_if(p.sims.begin(), p.sims.end(), [&](const auto& s) { return s.id == id; });
+        return it != p.sims.end() ? std::format("{} {}", it->slot, it->animation) : std::string("left out");
+    };
+
+    const auto green = ts2::sim::arrangeFamilyPicture({Sim{0x18, 0x7518EF1F, 0, 19, 0}, Sim{0x3E, 0x352C9AC9, 0, 19, 1}}, facts);
+    CHECK(green.unknown.empty() && green.camera == "A");
+    CHECK(placeOf(green, 0x18) == "2 a-solo-male-portraitPose-slot02_anim");
+    CHECK(placeOf(green, 0x3E) == "3 a-solo-female-portraitPose-slot03_anim");
+
+    // Pascal is an elder by age, and still Jenny's partner: only the first of a couple is aged 19 to 50.
+    marry(0x64, 0x65);
+    const auto smiths = ts2::sim::arrangeFamilyPicture(
+        {Sim{0x64, 0xAD468F3C, 0, 51, 0}, Sim{0x65, 0x4D469184, 0, 19, 1}, Sim{0x66, 0x6D469423, 0, 16, 0}, Sim{0x68, 0xAD4696BB, 0, 3, 1}}, facts);
+    CHECK(smiths.unknown.empty() && smiths.camera == "F");
+    CHECK(placeOf(smiths, 0x65) == "2 a2a-couple-simA-portraitPose-kissCheek_anim");
+    CHECK(placeOf(smiths, 0x64) == "3 a2a-couple-simB-portraitPose-kissCheek_anim");
+    CHECK(placeOf(smiths, 0x66) == "1 a-solo-male-portraitPose-slot01_anim");
+    CHECK(placeOf(smiths, 0x68) == "7 c-solo-portraitPose-handsInAir_anim");
+
+    // The elder holds the toddler, as the couple already stands together.
+    marry(0x5FA, 0x601);
+    ties[{0x603, static_cast<int>(TieType::Child)}] = {0x5FA};
+    ties[{0x5FA, static_cast<int>(TieType::Child)}] = {0x5F9, 0x5FC, 0x602};
+    const auto ottomas = ts2::sim::arrangeFamilyPicture({Sim{0x5F9, 0x37E917CC, 0, 2, 1}, Sim{0x5FA, 0x57E917CC, 0, 19, 0},
+                                                         Sim{0x5FC, 0x97E917CC, 0, 16, 0}, Sim{0x601, 0x37E917CD, 0, 19, 1},
+                                                         Sim{0x602, 0x57E917CD, 0, 3, 1}, Sim{0x603, 0x77E917CD, 0, 51, 1}},
+                                                        facts);
+    CHECK(ottomas.unknown.empty() && ottomas.camera == "F");
+    CHECK(placeOf(ottomas, 0x5FA) == "2 a2a-couple-simA-portraitPose-kissCheek_anim");
+    CHECK(placeOf(ottomas, 0x601) == "3 a2a-couple-simB-portraitPose-kissCheek_anim");
+    CHECK(placeOf(ottomas, 0x603) == "1 a2p-portraitPose-holdInArms_anim");
+    CHECK(placeOf(ottomas, 0x5F9) == "1 p2a-portraitPose-holdInArms_anim");
+    CHECK(placeOf(ottomas, 0x5FC) == "4 a-solo-male-portraitPose-slot04_anim");
+    CHECK(placeOf(ottomas, 0x602) == "7 c-solo-portraitPose-slot07_anim");
+
+    // A partner out of love stands alone and disgruntled, the other alone beside.
+    relationships[{0x65, 0x64}] = {80, 0, 80};
+    const auto sulking = ts2::sim::arrangeFamilyPicture({Sim{0x64, 0xAD468F3C, 0, 51, 0}, Sim{0x65, 0x4D469184, 0, 19, 1}}, facts);
+    CHECK(placeOf(sulking, 0x65) == "2 a-solo-portraitPoseDisgruntled-slot02_anim");
+    CHECK(placeOf(sulking, 0x64) == "3 a-solo-male-portraitPose-slot03_anim");
+
+    // Households needing a rule not known yet get no picture.
+    CHECK(!ts2::sim::arrangeFamilyPicture({Sim{1, 3, 1, 19, 0}, Sim{2, 6, 1, 19, 0}}, facts).unknown.empty());
+    CHECK(!ts2::sim::arrangeFamilyPicture({}, facts).unknown.empty());
+}
+
 void objectMapRecordFollowsTheLotsObjects() {
     ts2::objt::ObjectTypeTable types;
     for (std::uint16_t i = 0; i < 3; ++i) {
@@ -2641,6 +2822,7 @@ std::vector<Test> simulationTests() {
         {"saving a lot writes the changed inventories", savingALotWritesTheChangedInventories},
         {"saving a lot writes the family funds and relationships", savingALotWritesTheFamilyFundsAndRelationships},
         {"relationship lists take the game's table order", relationshipListsTakeTheGamesTableOrder},
+        {"object relationship tables take the game's order", objectRelationshipTablesTakeTheGamesOrder},
         {"saving a lot adds new relationships", savingALotAddsNewRelationships},
         {"saving a lot writes a newborn's neighborhood records", savingALotWritesANewbornsNeighborhoodRecords},
         {"new character files start from their template", newCharacterFilesStartFromTheirTemplate},
@@ -2660,6 +2842,7 @@ std::vector<Test> simulationTests() {
         {"new face models build on the skeleton", newFaceModelsBuildOnTheSkeleton},
         {"new face meshes replace the face", newFaceMeshesReplaceTheFace},
         {"new face materials composite the overlays", newFaceMaterialsCompositeTheOverlays},
+        {"mesh overlays follow the face", meshOverlaysFollowTheFace},
         {"saving a lot keeps stale types' values", savingALotKeepsStaleTypesValues},
         {"saving a lot writes the effects playing now", savingALotWritesTheEffectsPlayingNow},
         {"saving a lot writes the types' values now", savingALotWritesTheTypesValuesNow},
@@ -2691,5 +2874,6 @@ std::vector<Test> simulationTests() {
         {"Lua error without text is reported", luaErrorWithoutTextIsReported},
         {"vertex aliases follow kind", vertexAliasesFollowKind},
         {"motives are shown as whole numbers", motivesAreShownAsWholeNumbers},
+        {"family pictures arrange households as the game", familyPictureArrangesHouseholdsAsTheGame},
     };
 }

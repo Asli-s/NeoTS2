@@ -941,8 +941,11 @@ std::string baseTextureOf(const std::optional<std::vector<std::uint8_t>>& materi
 } // namespace
 
 std::optional<FaceMaterialParts> newbornFaceMaterialParts(Assets& assets, std::uint32_t ageFlag, std::uint32_t genderFlag, const std::string& skinTone,
-                                                          const std::string& eyeColour, const std::string& hairTone, const std::string& browFamily) {
+                                                          const std::string& eyeColour, const std::string& hairTone, const std::string& browFamily,
+                                                          std::span<const std::string> otherFamilies) {
     FaceMaterialParts out;
+    out.others.resize(otherFamilies.size());
+    std::vector<bool> found(otherFamilies.size(), false);
     // The base face part's own material, picked as its mesh is.
     const auto parts = faceParts(assets);
     const FacePart* pick = nullptr;
@@ -973,11 +976,19 @@ std::optional<FaceMaterialParts> newbornFaceMaterialParts(Assets& assets, std::u
                 return;
             }
             const auto subtype = number(p, "subtype");
-            if (subtype == kEyeOverlay && out.eyeTexture.empty() && sameGuid(textOf(p, "family"), eyeColour)) {
-                out.eyeTexture = baseTextureOf(partMaterial(assets, key, p));
-            } else if (subtype == kEyebrowOverlay && out.browTexture.empty() && sameGuid(textOf(p, "family"), browFamily) &&
-                       (noGuid(textOf(p, "hairtone")) || sameGuid(textOf(p, "hairtone"), hairTone))) {
-                out.browTexture = baseTextureOf(partMaterial(assets, key, p));
+            const bool hairFits = noGuid(textOf(p, "hairtone")) || sameGuid(textOf(p, "hairtone"), hairTone);
+            const auto texture = [&] { return FaceOverlayTexture{baseTextureOf(partMaterial(assets, key, p)), number(p, "layer")}; };
+            if (subtype == kEyeOverlay && out.eye.texture.empty() && sameGuid(textOf(p, "family"), eyeColour)) {
+                out.eye = texture();
+            } else if (subtype == kEyebrowOverlay && out.brow.texture.empty() && sameGuid(textOf(p, "family"), browFamily) && hairFits) {
+                out.brow = texture();
+            } else if (hairFits) {
+                for (std::size_t i = 0; i < otherFamilies.size(); ++i) {
+                    if (!found[i] && sameGuid(textOf(p, "family"), otherFamilies[i])) {
+                        out.others[i] = texture();
+                        found[i] = true;
+                    }
+                }
             }
         } catch (const std::exception& ex) {
             diag::warnOnce(std::string("newborn face material: an overlay that can't be read is left out: ") + ex.what());

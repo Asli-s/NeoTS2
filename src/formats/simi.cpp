@@ -3,6 +3,8 @@
 #include "formats/binary_reader.hpp"
 
 #include <algorithm>
+#include <cstdint>
+#include <utility>
 #include <stdexcept>
 
 namespace ts2::simi {
@@ -17,7 +19,7 @@ SimulatorState parse(std::span<const std::uint8_t> data) {
     s.version = r.u32();
     r.u32();
     s.globals.resize(kGlobalCount);
-    const std::size_t saved = s.version == kShippedVersion ? kShippedGlobalCount : kGlobalCount;
+    const std::size_t saved = savedGlobalCount(s.version);
     for (std::size_t i = 0; i < saved; ++i) {
         s.globals[i] = r.i16();
     }
@@ -30,6 +32,66 @@ SimulatorState parse(std::span<const std::uint8_t> data) {
         s.randomState = r.u32();
     }
     return s;
+}
+
+std::size_t savedGlobalCount(std::uint32_t version) {
+    // Each entry: the first version that saves more, and how many the versions before it save.
+    constexpr std::pair<std::uint32_t, std::size_t> kCounts[] = {
+        {0x40, 32},  {0x70, 33},  {0x75, 34},  {0x79, 35},  {0x7C, 36},  {0x7D, 37},  {0x8C, 40},
+        {0x8D, 43},  {0x8E, 44},  {0x92, 45},  {0xA1, 46},  {0xA3, 50},  {0xA7, 51},  {0xAA, 52},
+        {0xAB, 53},  {0xAF, 54},  {0xC5, 55},  {0xCA, 56},  {0xCB, 57},  {0xD4, 58}};
+    if (version < 0x12) {
+        return 0;
+    }
+    for (const auto& [below, count] : kCounts) {
+        if (version < below) {
+            return count;
+        }
+    }
+    return kGlobalCount;
+}
+
+std::optional<LotValue> readLotValue(std::span<const std::uint8_t> data) {
+    BinaryReader r(data);
+    // Before the parts: the name, magic, version and a reserved word, the globals, ten bytes, and from
+    // version 0x0E the two random states, then one more value.
+    constexpr std::size_t kHeader = 64 + 4 + 4 + 4, kBetween = 10, kRandomStates = 8;
+    constexpr std::uint32_t kWithParts = 0x25, kWithThird = 0xAD;
+    constexpr std::size_t kGlobal15 = 0x15;
+    if (data.size() < kHeader) {
+        return std::nullopt;
+    }
+    r.skip(64);
+    const std::uint32_t magic = r.u32(), version = r.u32();
+    const std::size_t globals = savedGlobalCount(version);
+    const std::size_t parts = version >= kWithThird ? 4 : 3;
+    const std::size_t needed = kHeader + 2 * globals + kBetween + kRandomStates + 4 + 4 * parts;
+    if (magic != 0x53494D49 || version < kWithParts || data.size() < needed) {
+        return std::nullopt;
+    }
+    r.u32();
+    LotValue out;
+    for (std::size_t i = 0; i < globals; ++i) {
+        const std::int16_t value = r.i16();
+        if (i == kGlobal15) {
+            out.global15 = value;
+        }
+    }
+    r.skip(kBetween + kRandomStates + 4);
+    out.first = r.i32();
+    out.second = r.i32();
+    if (parts == 4) {
+        out.third = r.i32();
+    }
+    out.fourth = r.i32();
+    return out;
+}
+
+std::int32_t lotValue(const LotValue& parts, bool leaveOutSecond) {
+    constexpr float kFourthShare = 0.8f;
+    const auto fourth = static_cast<std::int64_t>(static_cast<float>(parts.fourth) * kFourthShare);
+    const std::int64_t sum = std::int64_t{parts.first} + (leaveOutSecond ? 0 : parts.second) + parts.third + fourth;
+    return static_cast<std::int32_t>(std::clamp<std::int64_t>(sum, INT32_MIN, INT32_MAX));
 }
 
 namespace {

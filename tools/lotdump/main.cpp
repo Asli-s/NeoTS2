@@ -191,9 +191,16 @@ int showNeighbors(const std::filesystem::path& hood, IndexCodeSource& code, std:
         if (only && *only != s.neighborId) {
             continue;
         }
-        std::printf("neighbor %4d  guid 0x%08X  version 0x%X  person data v0x%X: %3zu values  rest %3zu bytes  %s\n",
-                    s.neighborId, s.guid, s.version, static_cast<unsigned>(s.personDataVersion),
-                    s.personData.size(), s.rest.size(), type ? type->definition.name.c_str() : "-");
+        // Pets show their species (person data 0xBA) and family (0x3D) after the name.
+        constexpr std::size_t kSpecies = 0xBA, kFamily = 0x3D;
+        const std::int16_t species = s.personData.size() > kSpecies ? s.personData[kSpecies] : 0;
+        std::printf("neighbor %4d  guid 0x%08X  version 0x%X  person data v0x%X: %3zu values  rest %3zu bytes  %s", s.neighborId,
+                    s.guid, s.version, static_cast<unsigned>(s.personDataVersion), s.personData.size(), s.rest.size(),
+                    type ? type->definition.name.c_str() : "-");
+        if (species != 0) {
+            std::printf("  species %d  family %d", species, s.personData.size() > kFamily ? s.personData[kFamily] : 0);
+        }
+        std::printf("\n");
         if (only) {
             printShorts("person", s.personData);
         }

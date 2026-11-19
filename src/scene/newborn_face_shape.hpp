@@ -7,6 +7,7 @@
 
 #include <array>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -85,18 +86,27 @@ std::vector<FaceGrip> newbornFaceGrips(Assets& assets, const faceshape::FaceShap
 std::vector<FaceGrip> madeFaceGrips(Assets& assets, const std::vector<CatalogPart>& faceTemplates, const std::string& family,
                                     const std::string& skinTone, int age, std::uint32_t genderFlag, const std::string& skeletonName);
 
+// An overlay's base texture and its drawing order, lowest first.
+struct FaceOverlayTexture {
+    std::string texture;
+    std::uint32_t layer = 0;
+};
+
 // What a new Sim's face material at one age is made from: the catalog base face part's material
 // (by age flag, gender flag and skin tone, as the base face mesh is picked), and the base textures
 // of the first eye overlay of its eye colour and the first eyebrow overlay of its brow family and
 // hair tone for the age, gender and skin tone, in catalog order. A texture is empty when the
-// catalog has no such overlay.
+// catalog has no such overlay. The other overlays (facial hair) are found as the eyebrows are, one
+// for each family asked for, in that order.
 struct FaceMaterialParts {
     std::vector<std::uint8_t> catalogMaterial;
-    std::string eyeTexture, browTexture;
+    FaceOverlayTexture eye, brow;
+    std::vector<FaceOverlayTexture> others;
 };
 
 // None when the catalog has no base face part or material for the age, gender and tone.
 std::optional<FaceMaterialParts> newbornFaceMaterialParts(Assets& assets, std::uint32_t ageFlag, std::uint32_t genderFlag, const std::string& skinTone,
-                                                          const std::string& eyeColour, const std::string& hairTone, const std::string& browFamily);
+                                                          const std::string& eyeColour, const std::string& hairTone, const std::string& browFamily,
+                                                          std::span<const std::string> otherFamilies = {});
 
 } // namespace ts2::scene

@@ -247,15 +247,17 @@ std::vector<std::uint8_t> rewriteOutfitLook(std::span<const std::uint8_t> charac
     return dbpf::writeImage(package);
 }
 
-dbpf::ResourceKey newFaceModelKey(int age) {
-    const hash::ScenegraphKey key = hash::scenegraphKey("age" + std::to_string(age) + "_0_cres");
+dbpf::ResourceKey newFaceModelKey(int age, int part) {
+    const hash::ScenegraphKey key = hash::scenegraphKey("age" + std::to_string(age) + "_" + std::to_string(part) + "_cres");
     return {kModelType, kOwnGroup, key.instance, key.instanceHigh};
 }
 
 namespace {
 
-// A skin part (GZPS) of the Sim's own face, as the game writes one.
-std::vector<std::uint8_t> ownFacePart(std::uint32_t ageFlag, std::uint32_t gender, const std::string& skinTone, const std::string& hairTone) {
+// A skin part (GZPS) of the Sim's own face, as the game writes one. A mesh overlay worn on the face
+// is written the same way with the overlay's outfit categories.
+std::vector<std::uint8_t> ownFacePart(std::uint32_t ageFlag, std::uint32_t gender, const std::string& skinTone, const std::string& hairTone,
+                                      std::uint32_t category = 0) {
     const std::vector<propset::Property> part{number("version", 6),
                                               number("product", 0xFFFF),
                                               number("age", ageFlag),
@@ -272,7 +274,7 @@ std::vector<std::uint8_t> ownFacePart(std::uint32_t ageFlag, std::uint32_t gende
                                               text("type", "skin"),
                                               text("skintone", skinTone),
                                               text("hairtone", ageFlag == kElderFlag ? kGreyHair : hairTone),
-                                              number("category", 0),
+                                              number("category", category),
                                               number("shoe", 0),
                                               number("fitness", 0),
                                               number("resourcekeyidx", 0),
@@ -305,6 +307,11 @@ std::vector<propset::Property> ageHead(std::uint32_t product, std::uint32_t ageF
 
 void addMadeLookRecords(dbpf::PackageImage& package, const MadeAgeLook& look) {
     const dbpf::ResourceKey ownFace{kPartType, kOwnGroup, 1, 0};
+    // The parts of the mesh overlays the face wears, after the face's own.
+    std::vector<dbpf::ResourceKey> ownOverlays;
+    for (std::size_t k = 0; k < look.overlayCategories.size(); ++k) {
+        ownOverlays.push_back({kPartType, kOwnGroup, static_cast<std::uint32_t>(k + 2), 0});
+    }
     std::vector<dbpf::ResourceKey> used{newFaceModelKey(look.ageNumber), {}, look.skeleton};
     const auto indexOf = [&](const dbpf::ResourceKey& key) {
         const auto it = std::find_if(used.begin() + 3, used.end(), [&](const dbpf::ResourceKey& k) { return k == key; });
@@ -323,6 +330,11 @@ void addMadeLookRecords(dbpf::PackageImage& package, const MadeAgeLook& look) {
         for (const auto& part : parts) {
             entries.push_back(indexOf((key & 0xFFFF) == kFacePart ? ownFace : part));
         }
+        if ((key & 0xFFFF) == kFacePart) {
+            for (const auto& overlay : ownOverlays) {
+                entries.push_back(indexOf(overlay));
+            }
+        }
         lists.emplace_back(key, std::move(entries));
     }
     std::vector<propset::Property> age =
@@ -338,6 +350,11 @@ void addMadeLookRecords(dbpf::PackageImage& package, const MadeAgeLook& look) {
     add(package, {kAgeDataType, kOwnGroup, 1, 0}, propset::writeBinary(age));
     add(package, {kResourceListType, kOwnGroup, 1, 0}, resourceList(used));
     add(package, ownFace, ownFacePart(look.ageFlag, look.gender, look.skinTone, look.hairTone));
+    for (std::size_t k = 0; k < ownOverlays.size(); ++k) {
+        add(package, ownOverlays[k], ownFacePart(look.ageFlag, look.gender, look.skinTone, look.hairTone, look.overlayCategories[k]));
+        add(package, {kResourceListType, kOwnGroup, ownOverlays[k].instance, 0},
+            resourceList({newFaceModelKey(look.ageNumber, static_cast<int>(k + 1)), {}}));
+    }
 }
 
 void addBabyLookRecords(dbpf::PackageImage& package, const BabyLook& look) {

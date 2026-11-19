@@ -169,7 +169,8 @@ void aHairPartDrawsItsStrandsAsSimHair() {
 }
 
 // A wall cut by a door's mask keeps its covering's texture as it is (shared with the uncut wall) and
-// takes the mask as its own texture, as the game's walls do.
+// takes the mask as its own texture, as the game's walls do. A mask whose material has
+// tsMirrorWallMask 1 runs the other way across the face, as the Rutherfords' diagonal door's se masks.
 void aWallMaskStaysItsOwnTexture() {
     std::vector<testres::Resource> resources;
     for (const std::string name : {"plain", "door_mask"}) {
@@ -177,6 +178,9 @@ void aWallMaskStaysItsOwnTexture() {
                              testres::material(name + "_txmt", "StandardMaterial",
                                                {{"stdMatBaseTextureName", name + "_tex"}, {"stdMatBaseTextureEnabled", "true"}})});
     }
+    resources.push_back({testres::keyOf(testres::kTxmt, "door_mask_se_txmt"),
+                         testres::material("door_mask_se_txmt", "StandardMaterial",
+                                           {{"stdMatBaseTextureName", "door_mask_tex"}, {"tsMirrorWallMask", "1"}})});
     resources.push_back({testres::keyOf(testres::kTxtr, "plain_tex_txtr"), testres::texture("plain_tex_txtr", 1, 1, {200, 100, 50, 255})});
     resources.push_back({testres::keyOf(testres::kTxtr, "door_mask_tex_txtr"),
                          testres::texture("door_mask_tex_txtr", 2, 1, {0, 0, 0, 0, 255, 255, 255, 255})});
@@ -184,10 +188,10 @@ void aWallMaskStaysItsOwnTexture() {
     {
         ts2::scene::Assets assets(root);
         ts2::scene::SceneBuilder builder(assets);
-        const int cut = builder.maskedMaterial("plain", "door_mask", true);
-        const int other = builder.maskedMaterial("plain", "door_mask", false);
+        const int cut = builder.maskedMaterial("plain", "door_mask_se");
+        const int other = builder.maskedMaterial("plain", "door_mask");
         CHECK(cut >= 0 && other >= 0 && cut != other);
-        CHECK(builder.maskedMaterial("plain", "nothing", false) == -1);
+        CHECK(builder.maskedMaterial("plain", "nothing") == -1);
         if (cut >= 0 && other >= 0) {
             const auto& m = builder.scene().materials[static_cast<std::size_t>(cut)];
             const auto& n = builder.scene().materials[static_cast<std::size_t>(other)];
@@ -815,7 +819,9 @@ void imposterObjectsComeFromItsResourceNode() {
 
 // A mirror's model as the game ships it: the root, its reflection camera's node (which holds a
 // transform of its own), then the frame's transform node lifted 1.3.
-std::vector<std::uint8_t> mirrorResourceNode() {
+// With a plane, the camera is laid out as the game's frosted club mirror has it: its glass is block 2
+// and the plane follows its render settings and target name.
+std::vector<std::uint8_t> mirrorResourceNode(std::optional<std::array<float, 4>> plane = std::nullopt) {
     constexpr std::uint32_t kResourceNodeBlock = 0xE519C933, kTransformBlock = 0x65246462, kViewerBlock = 0x0C152B8E;
     testres::Bytes b;
     testres::container(b, {}, {kResourceNodeBlock, kViewerBlock, kTransformBlock});
@@ -849,11 +855,29 @@ std::vector<std::uint8_t> mirrorResourceNode() {
     testres::sgResource(b, "mirror_cres");
     compositionTree("mirror", {1, 2});
     header("cViewerRefNodeRecursive", kViewerBlock, 1);
-    header("cViewerRefNodeBase", 0, 1);
+    header("cViewerRefNodeBase", 0, plane ? 5 : 1);
     header("cRenderableNode", 0, 5);
     header("cBoundedNode", 0, 5);
     transform("mirror_camera", 0);
-    b.text("screenreflection");
+    if (plane) {
+        b.u16(0x0101);
+        b.u32(1);
+        b.text("Practical");
+        b.u32(0);
+        b.u8(1);
+        b.u8(1);
+        b.text("screenreflection");
+        b.u8(1);
+        b.u8(1);
+        b.u8(0);
+        b.u32(2);
+        for (const float v : *plane) {
+            b.f32(v);
+        }
+        b.u32(7);
+    } else {
+        b.text("screenreflection");
+    }
     transform("root_trans", 1.3f);
     return b.out;
 }
@@ -866,6 +890,22 @@ void aCameraNodeKeepsTheNodesAfterIt() {
         CHECK(tree.nodes[1].kind == sg::SceneNode::Kind::ViewerRef && tree.nodes[1].name == "mirror_camera");
         CHECK(tree.nodes[2].kind == sg::SceneNode::Kind::Transform && tree.nodes[2].name == "root_trans" && tree.nodes[2].translation[2] == 1.3f);
     }
+}
+
+// A mirror camera's plane is read with the glass node it names, its normal made unit length. One
+// with no direction gives none, and the node after it is still read.
+void aMirrorCameraKeepsItsPlane() {
+    const auto tree = sg::parseResourceNode(mirrorResourceNode(std::array<float, 4>{0, 2, 0, -1}));
+    CHECK(tree.nodes.size() == 3);
+    if (tree.nodes.size() == 3) {
+        const auto& reflection = tree.nodes[1].reflection;
+        CHECK(reflection && reflection->glass == 2);
+        CHECK(reflection && reflection->plane == (std::array<float, 4>{0, 1, 0, -0.5f}));
+        CHECK(tree.nodes[2].name == "root_trans");
+    }
+    const auto flat = sg::parseResourceNode(mirrorResourceNode(std::array<float, 4>{0, 0, 0, 1}));
+    CHECK(flat.nodes.size() == 3 && !flat.nodes[1].reflection && flat.nodes[2].name == "root_trans");
+    CHECK(!sg::parseResourceNode(mirrorResourceNode()).nodes[1].reflection);
 }
 
 namespace {
@@ -1336,6 +1376,7 @@ std::vector<Test> assetTests() {
         {"shapes sit where their node puts them", shapesSitWhereTheirNodePutsThem},
         {"imposter objects come from its resource node", imposterObjectsComeFromItsResourceNode},
         {"a camera node keeps the nodes after it", aCameraNodeKeepsTheNodesAfterIt},
+        {"a mirror camera keeps its plane", aMirrorCameraKeepsItsPlane},
         {"part pictures use their camera and lights", partPicturesUseTheirCameraAndLights},
         {"env cube reflection turns on as the game's", envCubeReflectionTurnsOnAsTheGames},
         {"specular turns on as the game's", specularTurnsOnAsTheGames},

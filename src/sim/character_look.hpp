@@ -41,13 +41,17 @@ struct MadeAgeLook {
     std::string skinTone, hairTone, eyeColour;
     dbpf::ResourceKey skeleton;
     std::map<std::uint32_t, std::vector<dbpf::ResourceKey>> lists;
+    // The outfit categories of each mesh overlay (a mesh beard, glasses) the face wears, in the order worn.
+    std::vector<std::uint32_t> overlayCategories;
 };
 
 // Adds a made Sim's look records to its character file as Make New Character writes them: its age
 // data (AGED), the list of resources the age data points into (3IDR) and the skin part (GZPS) of
 // its own face. The list holds its face model, an empty key, its skeleton, then each part in the
 // order the outfit lists first name it, walked in ascending key order. Lists with no parts are left
-// out, as the game's files hold none.
+// out, as the game's files hold none. Each mesh overlay gets a skin part of its own after the face's
+// (instance 2 on), with its categories and a list naming its model, and every face list wears it
+// after the face.
 void addMadeLookRecords(dbpf::PackageImage& package, const MadeAgeLook& look);
 
 // Adds a Sim's face shape record (LxNR, as faceshape::write makes it) to its character file, as
@@ -55,8 +59,8 @@ void addMadeLookRecords(dbpf::PackageImage& package, const MadeAgeLook& look);
 void addFaceShapeRecord(dbpf::PackageImage& package, std::span<const std::uint8_t> record);
 
 // The model (CRES) of a new Sim's face at age number `age` (0 toddler to 5 baby, 7 young adult),
-// "age<number>_0_cres" in the character file's own group.
-dbpf::ResourceKey newFaceModelKey(int age);
+// "age<number>_0_cres" in the character file's own group, or of its mesh overlay `part` (from 1).
+dbpf::ResourceKey newFaceModelKey(int age, int part = 0);
 
 // A Sim's look as its age data keeps it: its text and number properties by name (as read, such as
 // "haircolor"), and its outfit lists, keyed (outfit category << 16) | part, of part keys.

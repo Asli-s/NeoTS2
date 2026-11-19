@@ -47,5 +47,12 @@ bool saveNeighborCounter(dbpf::StoredResource& resource, const World& world);
 // version.
 int saveInventories(dbpf::StoredResource& resource, const World& world, const std::set<std::int16_t>& leftOut);
 
+// Writes the wants record (SWAF) of every Sim whose want history is in use, but those in
+// `leftOut`: its wants and fears without the empty places, its history in use, and the extra want
+// and hold count it was loaded with, which NeoTS2 doesn't change yet. The game writes a record over
+// the one it had without cutting it short, so a shorter record keeps the old bytes after it. A record
+// of another version is left as it is. Returns how many were written.
+int saveWants(dbpf::PackageImage& hood, const World& world, const std::set<std::int16_t>& leftOut);
+
 } // namespace hoodsave
 } // namespace ts2::sim

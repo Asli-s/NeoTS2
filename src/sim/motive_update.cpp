@@ -149,6 +149,7 @@ void MotiveUpdate::tick(SimObject& sim, std::int64_t time) {
         sim.motivesUpdatedAt = time;
         if (sim.personData[kMotivesPaused] == 0) {
             decayMotives(sim);
+            sim.motivesAtDecay = sim.motives;
             updateMood(sim);
         }
     }

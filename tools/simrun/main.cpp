@@ -1,5 +1,6 @@
 #include "../../app/route_sources.hpp"
 #include "save_fields.hpp"
+#include "content/cameras.hpp"
 #include "content/install.hpp"
 #include "content/lot.hpp"
 #include "content/neighborhood.hpp"
@@ -39,12 +40,14 @@
 #include "scene/sims.hpp"
 #include "scene/newborn_face.hpp"
 #include "scene/newborn_face_shape.hpp"
+#include "scene/overlay_fit.hpp"
 #include "formats/face_shape.hpp"
 #include "formats/rcol.hpp"
 #include "formats/scenegraph.hpp"
 #include "formats/hash.hpp"
 #include "formats/reference_list.hpp"
 #include "sim/hood_save.hpp"
+#include "sim/family_picture.hpp"
 #include "sim/lot_save.hpp"
 #include "sim/lot_simulation.hpp"
 #include "sim/lot_world.hpp"
@@ -79,6 +82,23 @@ const std::vector<std::pair<std::string, std::string>>& materialProperties(const
     static const std::vector<std::pair<std::string, std::string>> none;
     const auto* material = record.blocks.empty() ? nullptr : std::get_if<ts2::rcol::Material>(&record.blocks[0]);
     return material != nullptr ? material->properties : none;
+}
+
+// Prints each property whose value differs between two property lists, ours then the game's.
+template <class Mine, class Game>
+void printPropertyDifferences(const Mine& mine, const Game& game) {
+    std::map<std::string, std::pair<std::string, std::string>> both;
+    for (const auto& [k, v] : mine) {
+        both[k].first = v;
+    }
+    for (const auto& [k, v] : game) {
+        both[k].second = v;
+    }
+    for (const auto& [k, v] : both) {
+        if (v.first != v.second) {
+            std::printf("    %s: ours '%s', game '%s'\n", k.c_str(), v.first.c_str(), v.second.c_str());
+        }
+    }
 }
 
 // The link of a mesh's first group, when the mesh has one that points at a link it holds.
@@ -734,6 +754,52 @@ int printWallTypes(const std::filesystem::path& lotPath) {
         std::printf("0x%X %zu\n", type, n);
     }
     std::printf("total %zu\n", lot.wallCoverings.size());
+    return 0;
+}
+
+// Prints a visual effect's records (flags, components) and, a few levels deep, the effects its
+// components and meta particles play. Particle and meta particle components show their block's flags.
+int printEffect(const std::filesystem::path& install, const std::string& name) {
+    ts2::content::EffectsFiles files(install);
+    const ts2::effects::File* file = files.all();
+    if (file == nullptr) {
+        std::fprintf(stderr, "no effects\n");
+        return 1;
+    }
+    const std::function<void(const std::string&, int)> print = [&](const std::string& n, int depth) {
+        std::string key = n;
+        std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        const auto found = file->names.find(key);
+        const std::string pad(static_cast<std::size_t>(depth) * 2, ' ');
+        if (found == file->names.end()) {
+            std::printf("%s%s: not found\n", pad.c_str(), n.c_str());
+            return;
+        }
+        for (const std::uint32_t at : found->second) {
+            if (at >= file->effects.size()) {
+                continue;
+            }
+            const auto& e = file->effects[at];
+            std::printf("%s%s: flags 0x%X level %u\n", pad.c_str(), n.c_str(), e.flags, e.level);
+            for (const auto& c : e.components) {
+                std::printf("%s  type %u index %d flags 0x%X offset (%.3f %.3f %.3f) %s", pad.c_str(), c.type, c.index, c.flags, c.offset[0], c.offset[1], c.offset[2], c.name.c_str());
+                if (c.type == static_cast<std::uint8_t>(ts2::effects::BlockType::Particles) && c.index >= 0 && static_cast<std::size_t>(c.index) < file->particles.size()) {
+                    std::printf(" particle flags 0x%llX", static_cast<unsigned long long>(file->particles[static_cast<std::size_t>(c.index)].flags));
+                }
+                const bool meta = c.type == static_cast<std::uint8_t>(ts2::effects::BlockType::MetaParticles) && c.index >= 0 &&
+                                  static_cast<std::size_t>(c.index) < file->metaParticles.size();
+                if (meta) {
+                    const auto& block = file->metaParticles[static_cast<std::size_t>(c.index)];
+                    std::printf(" meta flags 0x%llX life %.2f..%.2f plays %s", static_cast<unsigned long long>(block.flags), block.life[0], block.life[1], block.effect.c_str());
+                }
+                std::printf("\n");
+                if (depth < 6 && (c.type == 0 || meta)) {
+                    print(meta ? file->metaParticles[static_cast<std::size_t>(c.index)].effect : c.name, depth + 2);
+                }
+            }
+        }
+    };
+    print(name, 0);
     return 0;
 }
 
@@ -2295,7 +2361,7 @@ int surveyPersonExtras(int count, char** lots) {
             }
             ++tally[values];
             std::snprintf(buf, sizeof buf, "runs %zu entries %zu sub start %u value1 %u value2 %d listed %zu value3 %u value4 %u text %s",
-                          s.runs.size(), s.entries.size(), s.subStartCount, s.value1, s.value2, s.list.size(), s.value3, s.value4,
+                          s.runs.size(), s.entries.size(), s.subStartCount, s.value1, s.value2, s.list.size(), s.collectiblesLow, s.collectiblesHigh,
                           s.text.empty() ? "empty" : "set");
             ++tally[buf];
             std::string motives = "motives2";
@@ -2561,6 +2627,51 @@ int checkNewNeighborRecords(const char* before, const char* after) {
     }
     std::printf("%d of the records compared differ\n", differ);
     return differ == 0 ? 0 : 1;
+}
+
+// Prints how each household of a neighborhood stands in its family picture: slot, pose and camera.
+int familyPictures(const char* folder) {
+    const auto hood = ts2::content::loadNeighborhood(ts2::content::neighborhoodPackage(folder));
+    std::map<std::uint32_t, std::int16_t> idOfGuid;
+    for (const auto& [id, n] : hood.neighbors) {
+        idOfGuid.emplace(n.guid, id);
+    }
+    const auto pd = [](const ts2::content::Neighbor& n, std::size_t i) -> std::int16_t { return i < n.personData.size() ? n.personData[i] : 0; };
+    ts2::sim::FamilyPictureFacts facts;
+    facts.ties = [&](std::int16_t id, ts2::famt::TieType type) {
+        std::vector<std::int16_t> out;
+        if (const auto it = hood.familyTies.find(id); it != hood.familyTies.end()) {
+            for (const auto& t : it->second) {
+                if (t.type == static_cast<std::uint32_t>(type)) out.push_back(t.other);
+            }
+        }
+        return out;
+    };
+    facts.relationship = [&](std::int16_t from, std::int16_t to) -> std::optional<std::vector<std::int32_t>> {
+        const auto it = hood.relationships.find({from, to});
+        if (it == hood.relationships.end()) return std::nullopt;
+        return it->second;
+    };
+    for (const auto& [family, f] : hood.families) {
+        std::vector<ts2::sim::FamilyPictureSim> members;
+        for (const std::uint32_t guid : f.members) {
+            const auto id = idOfGuid.find(guid);
+            if (id == idOfGuid.end()) continue;
+            const auto& n = hood.neighbors.at(id->second);
+            members.push_back({id->second, guid, pd(n, 0xBA), pd(n, 0x3A), pd(n, 0x41)});
+        }
+        if (members.empty()) continue;
+        const auto picture = ts2::sim::arrangeFamilyPicture(members, facts);
+        std::printf("family %u (lot %d): camera %s%s%s\n", family, f.lot, picture.camera.c_str(), picture.unknown.empty() ? "" : "  NOT KNOWN: ",
+                    picture.unknown.c_str());
+        for (const auto& m : members) {
+            const auto it = std::find_if(picture.sims.begin(), picture.sims.end(), [&](const auto& p) { return p.id == m.id; });
+            const std::string where = it == picture.sims.end() ? "left out" : std::format("slot {} {}", it->slot, it->animation);
+            std::printf("  0x%04X guid %08X age %d species %d: %s\n", static_cast<unsigned>(static_cast<std::uint16_t>(m.id)), m.guid, m.age, m.species,
+                        where.c_str());
+        }
+    }
+    return 0;
 }
 
 // Checks the neighborhood save rules against a save the game made: each Sim the saved lot holds,
@@ -3012,7 +3123,7 @@ int printRecord(const char* lot, std::uint32_t id) {
                         "picked %d %d %d, value2 %d, %zu listed, value3 %u value4 %u, values",
                         s.queue.size(), s.runs.size(), s.entries.size(), s.subStartCount, s.value1, s.runningSub ? "a" : "no",
                         s.subQueue.size(), s.text.c_str(), s.pickedIconIndex, s.pickedIconGuid, s.pickedIconObject, s.value2, s.list.size(),
-                        s.value3, s.value4);
+                        s.collectiblesLow, s.collectiblesHigh);
             for (const auto v : s.values) {
                 std::printf(" %u", v);
             }
@@ -3671,8 +3782,8 @@ int checkBabyModels(const char* install, const char* gameFile, const char* outFo
             look.age = age;
             look.paramGender = gender == 1 ? 1 : 0;
             if (const auto parts = ts2::scene::newbornFaceMaterialParts(assets, ts2::sim::baseFaceAgeFlag(age), gender, tone, eyes, look.hairTone, look.browFamily)) {
-                look.eyeTexture = parts->eyeTexture;
-                look.browTexture = parts->browTexture;
+                look.eye = {parts->eye.texture, parts->eye.layer};
+                look.brow = {parts->brow.texture, parts->brow.layer};
                 compare(0x49596978, materialName, ts2::sim::newFaceMaterial(parts->catalogMaterial, group, look));
             } else {
                 std::printf("  age %d: no catalog face material\n", age);
@@ -3752,6 +3863,20 @@ int compareCharacterFile(const ts2::dbpf::PackageImage& made,
             ++byType[r.key.type].second;
             std::printf("  %08X:%08X %s (ours %zu bytes, game %zu)\n", r.key.type, r.key.instance,
                         it == theirs.end() ? "not in the game's file" : "differs", body.size(), it != theirs.end() ? it->second.size() : 0);
+            // Age data that differs: its properties, ours then the game's.
+            if (it != theirs.end() && r.key.type == 0xAC598EAC) {
+                printPropertyDifferences(ts2::propset::parse(body), ts2::propset::parse(it->second));
+            }
+            // A material's properties that differ, ours then the game's.
+            if (it != theirs.end() && r.key.type == 0x49596978) {
+                try {
+                    const auto mine = materialProperties(ts2::rcol::read(body));
+                    const auto game = materialProperties(ts2::rcol::read(it->second));
+                    printPropertyDifferences(mine, game);
+                } catch (const std::exception& ex) {
+                    std::printf("    the materials can't be read: %s\n", ex.what());
+                }
+            }
         }
     }
     int differ = 0;
@@ -3891,9 +4016,23 @@ int checkMadeFile(ResourceIndex& index, const char* install, const char* gameFil
             }
         } else if (std::get<0>(key) == 0x49596978) {
             const auto record = ts2::rcol::read(body);
+            // Eyebrows first, then eyes, then facial hair.
+            std::map<int, std::string> overlays;
             for (const auto& [name, value] : materialProperties(record)) {
-                if (name == "cafOverlay0") {
-                    parts.browFamily = value.substr(0, value.find(','));
+                if (name.starts_with("cafOverlay") && name.size() > 10) {
+                    overlays[std::atoi(name.c_str() + 10)] = value.substr(0, value.find(','));
+                }
+            }
+            // From one face material only, the last read, as the eyebrows are.
+            if (overlays.empty()) {
+                continue;
+            }
+            parts.facialHairFamilies.clear();
+            for (const auto& [i, overlay] : overlays) {
+                if (i == 0) {
+                    parts.browFamily = overlay;
+                } else if (i >= 2) {
+                    parts.facialHairFamilies.push_back(overlay);
                 }
             }
         }
@@ -3918,8 +4057,382 @@ int checkMadeFile(ResourceIndex& index, const char* install, const char* gameFil
     }
     ts2::scene::Assets assets(install);
     const auto catalog = ts2::scene::readOutfitCatalog(assets.skinCatalog(), assets.skinCatalogProducts());
+    // The overlays after the eyes that are mesh overlays (glasses) of the Sim's age and gender.
+    const std::uint32_t ageFlag = static_cast<std::uint32_t>(std::stoul(parts.data.properties["age"], nullptr, 0));
+    const std::uint32_t genderFlag = female ? 1 : 2;
+    std::vector<std::string> textureFamilies;
+    for (const auto& f : parts.facialHairFamilies) {
+        std::string bare = f;
+        bare.erase(std::remove(bare.begin(), bare.end(), '-'), bare.end());
+        const auto mesh = std::find_if(catalog.faceOverlays.begin(), catalog.faceOverlays.end(), [&](const ts2::scene::CatalogPart& o) {
+            return o.key.type == 0x0C1FE246 && o.family == bare && (o.age & ageFlag) && (o.gender & genderFlag);
+        });
+        if (mesh != catalog.faceOverlays.end()) {
+            parts.meshOverlays.push_back({mesh->key, f, mesh->category});
+        } else {
+            textureFamilies.push_back(f);
+        }
+    }
+    parts.facialHairFamilies = textureFamilies;
+    // The file's face lists already wear the mesh overlays' own parts after the face, which the
+    // writer adds itself.
+    if (!parts.meshOverlays.empty()) {
+        for (auto& [key, list] : parts.data.lists) {
+            if ((key & 0xFFFF) == 2 && list.size() > 1) {
+                list.resize(1);
+            }
+        }
+    }
+    std::printf("facial hair %zu, mesh overlays %zu\n", parts.facialHairFamilies.size(), parts.meshOverlays.size());
     return compareCharacterFile(
         ts2::sim::madeCharacterPackage(assets, catalog.faceTemplates, made->templ, made->character, made->packs, parts), theirs);
+}
+
+// Writes the glasses (mesh overlay) records of age number `age` of a character file the game wrote,
+// fitted to that file's own face, and compares each with the game's: node, mesh, shape, model and
+// materials. The names' group and the material counter come from the file's face material.
+int checkGlasses(const char* install, const char* gameFile, int age, const char* dumpFolder) {
+    using Key = std::pair<std::uint32_t, std::uint64_t>;
+    std::map<Key, std::vector<std::uint8_t>> theirs;
+    ts2::dbpf::Package game{gameFile};
+    for (const auto& e : game.entries()) {
+        theirs[{e.key.type, static_cast<std::uint64_t>(e.key.instanceHigh) << 32 | e.key.instance}] = game.read(e);
+    }
+    const auto find = [&](std::uint32_t type, const std::string& name) -> const std::vector<std::uint8_t>* {
+        const auto key = ts2::hash::scenegraphKey(name);
+        const auto it = theirs.find({type, static_cast<std::uint64_t>(key.instanceHigh) << 32 | key.instance});
+        return it != theirs.end() ? &it->second : nullptr;
+    };
+    // The face material of that age: its counter, group, gender, skin tone and overlay families.
+    std::uint32_t counter = 0, group = 0, paramGender = 0;
+    std::string skinTone;
+    std::vector<std::string> families;
+    for (const auto& [key, body] : theirs) {
+        if (key.first != 0x49596978) {
+            continue;
+        }
+        const auto record = ts2::rcol::read(body);
+        const auto* m = record.blocks.empty() ? nullptr : std::get_if<ts2::rcol::Material>(&record.blocks[0]);
+        // "#0x<group>!ss_customPart_0x<counter>_<age>_<gender>_cmpm_txmt"
+        unsigned c = 0, g = 0, pg = 0;
+        int a = -1;
+        if (m != nullptr) {
+            const std::string& n = m->name.name;
+            const std::string marker = "!ss_customPart_0x";
+            const auto bang = n.find(marker);
+            if (n.starts_with("#0x") && bang != std::string::npos) {
+                std::from_chars(n.data() + 3, n.data() + bang, g, 16);
+                const char* p = n.data() + bang + marker.size();
+                const char* end = n.data() + n.size();
+                p = std::from_chars(p, end, c, 16).ptr;
+                if (p < end && *p == '_') {
+                    p = std::from_chars(p + 1, end, a).ptr;
+                }
+                if (p < end && *p == '_') {
+                    std::from_chars(p + 1, end, pg);
+                }
+            }
+        }
+        if (m == nullptr || a != age) {
+            continue;
+        }
+        const auto& props = materialProperties(record);
+        if (std::none_of(props.begin(), props.end(), [](const auto& p) { return p.first == "cafNumOverlays"; })) {
+            continue;
+        }
+        counter = c;
+        group = g;
+        paramGender = pg;
+        std::map<int, std::string> overlays;
+        for (const auto& [name, value] : props) {
+            if (name == "cafSkinTone") {
+                skinTone = value;
+            } else if (name.starts_with("cafOverlay") && name.size() > 10) {
+                overlays[std::atoi(name.c_str() + 10)] = value.substr(0, value.find(','));
+            }
+        }
+        for (auto& [i, f] : overlays) {
+            f.erase(std::remove(f.begin(), f.end(), '-'), f.end());
+            families.push_back(f);
+        }
+    }
+    if (group == 0) {
+        std::fprintf(stderr, "no face material of age %d\n", age);
+        return 1;
+    }
+    ts2::scene::Assets assets(install);
+    const auto catalog = ts2::scene::readOutfitCatalog(assets.skinCatalog(), assets.skinCatalogProducts());
+    const std::uint32_t ageFlag = ts2::sim::baseFaceAgeFlag(age), genderFlag = paramGender == 1 ? 1 : 2;
+    // Of the family's parts (one per colour), the one whose first material the game's file holds.
+    const ts2::scene::CatalogPart* glasses = nullptr;
+    std::string problem;
+    std::optional<ts2::scene::MeshOverlayCatalog> parts;
+    const auto* firstMaterial = find(0x49596978, ts2::sim::faceMaterialName(counter + 1, age, paramGender) + "_txmt");
+    for (const auto& o : catalog.faceOverlays) {
+        if (o.key.type != 0x0C1FE246 || !(o.age & ageFlag) || !(o.gender & genderFlag) ||
+            std::find(families.begin(), families.end(), o.family) == families.end()) {
+            continue;
+        }
+        auto candidate = ts2::scene::meshOverlayCatalog(assets, o.key, problem);
+        const bool matches = candidate && !candidate->subsets.empty() && firstMaterial != nullptr &&
+                             ts2::sim::newOverlayMaterial(candidate->subsets[0].material, group,
+                                                          ts2::sim::faceMaterialName(counter + 1, age, paramGender)) == *firstMaterial;
+        if (glasses == nullptr || matches) {
+            glasses = &o;
+            parts = std::move(candidate);
+        }
+        if (matches) {
+            break;
+        }
+    }
+    if (glasses == nullptr) {
+        std::fprintf(stderr, "no mesh overlay among the face material's overlays\n");
+        return 1;
+    }
+    std::printf("glasses part %08X %08X %08X %08X subtype %u\n", glasses->key.type, glasses->key.group, glasses->key.instance,
+                glasses->key.instanceHigh, glasses->subtype);
+    if (parts) {
+        for (const auto& e : ts2::scenegraph::parseMesh(parts->mesh).elements) {
+            if (e.identity == ts2::scenegraph::kPositions) {
+                std::printf("  positions list: stream %u count %u, %zu bytes\n", e.stream, e.count, e.data.size());
+            }
+        }
+        for (const auto& s : ts2::scenegraph::parseShape(parts->shape).parts) {
+            std::printf("  catalog shape subset %s: %s\n", s.group.c_str(), s.material.c_str());
+        }
+        for (const auto& g : ts2::scenegraph::parseMesh(parts->mesh).groups) {
+            std::printf("  catalog mesh group %s\n", g.name.c_str());
+        }
+        for (const auto& s : parts->subsets) {
+            const auto m = ts2::rcol::read(s.material);
+            const auto* mat = m.blocks.empty() ? nullptr : std::get_if<ts2::rcol::Material>(&m.blocks[0]);
+            std::printf("  override subset %s: %s\n", s.subset.c_str(), mat != nullptr ? mat->name.name.c_str() : "?");
+        }
+        if (const auto* gameShape = find(0xFC6EB1F7, "age" + std::to_string(age) + "_10_shpe")) {
+            for (const auto& s : ts2::scenegraph::parseShape(*gameShape).parts) {
+                std::printf("  game shape subset %s: %s\n", s.group.c_str(), s.material.c_str());
+            }
+        }
+    }
+    const auto baseNode = ts2::scene::baseFaceNode(assets, ageFlag, genderFlag, false, skinTone);
+    std::optional<std::vector<std::uint8_t>> baseMesh;
+    if (baseNode) {
+        for (const auto& link : ts2::scenegraph::parseContainer(*baseNode).links) {
+            if (link.type == 0xAC4F8687 && !baseMesh) {
+                baseMesh = assets.byKey(link);
+            }
+        }
+    }
+    const std::string stem = "age" + std::to_string(age);
+    const auto* face = find(0xAC4F8687, stem + "_0_gmdc");
+    const auto skeleton = assets.byName(0xE519C933, ts2::sim::skeletonModelName(age));
+    if (!parts || !baseMesh || face == nullptr || !skeleton) {
+        std::fprintf(stderr, "missing: %s\n", !parts ? problem.c_str() : !baseMesh ? "base face mesh" : face == nullptr ? "the file's face mesh" : "skeleton");
+        return 1;
+    }
+    const auto colours = ts2::scene::meshColours(parts->maskMesh);
+    const auto fitted = ts2::scene::fitMeshOverlay(ts2::scene::meshPositions(parts->mesh), ts2::scene::meshPositions(parts->maskMesh), colours,
+                                                   ts2::scene::meshPositions(*baseMesh), ts2::scene::meshPositions(*face));
+    if (const auto* gameMesh = find(0xAC4F8687, stem + "_1_gmdc")) {
+        const auto rest = ts2::scene::meshPositions(parts->mesh), written = ts2::scene::meshPositions(*gameMesh);
+        std::size_t moved = 0;
+        for (std::size_t i = 0; i < rest.size() && i < written.size(); i += 3) {
+            moved += rest[i] != written[i] || rest[i + 1] != written[i + 1] || rest[i + 2] != written[i + 2] ? 1 : 0;
+        }
+        std::printf("  the game's overlay: %zu of %zu vertices moved from the catalog's\n", moved, rest.size() / 3);
+    }
+    std::printf("  floats: overlay %zu, mask %zu (colour bytes %zu), base face %zu, face %zu, fitted %zu\n",
+                ts2::scene::meshPositions(parts->mesh).size(), ts2::scene::meshPositions(parts->maskMesh).size(),
+                ts2::scene::meshColours(parts->maskMesh).size(), ts2::scene::meshPositions(*baseMesh).size(), ts2::scene::meshPositions(*face).size(),
+                fitted.size());
+    std::vector<std::pair<std::string, std::vector<std::uint8_t>>> ours;
+    ours.emplace_back(stem + "_1_gmnd", ts2::sim::newOverlayNode(parts->node, age, 1, group));
+    ours.emplace_back(stem + "_1_gmdc", ts2::sim::newOverlayMesh(parts->mesh, age, 1, group, fitted));
+    // The game's subset order isn't known yet: put ours in the order of the game's shape, so the
+    // materials named on from the face's compare by content.
+    if (const auto* gameShape = find(0xFC6EB1F7, stem + "_10_shpe")) {
+        const auto order = ts2::scenegraph::parseShape(*gameShape).parts;
+        const auto place = [&](const std::string& subset) {
+            const auto it = std::find_if(order.begin(), order.end(), [&](const auto& s) { return s.group == subset; });
+            return it - order.begin();
+        };
+        const auto before = parts->subsets;
+        std::stable_sort(parts->subsets.begin(), parts->subsets.end(), [&](const auto& a, const auto& b) { return place(a.subset) < place(b.subset); });
+        const bool same = std::equal(before.begin(), before.end(), parts->subsets.begin(), parts->subsets.end(),
+                                     [](const auto& a, const auto& b) { return a.subset == b.subset; });
+        std::printf("  subsets %s\n", same ? "in the game's order" : "put in the game's order");
+    }
+    std::vector<ts2::sim::OverlaySubset> subsets;
+    for (std::size_t i = 0; i < parts->subsets.size(); ++i) {
+        const std::string name = ts2::sim::faceMaterialName(counter + 1 + static_cast<std::uint32_t>(i), age, paramGender);
+        std::string lower = name;
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        subsets.push_back({parts->subsets[i].subset, lower});
+        ours.emplace_back(name + "_txmt", ts2::sim::newOverlayMaterial(parts->subsets[i].material, group, name));
+    }
+    ours.emplace_back(stem + "_10_shpe", ts2::sim::newOverlayShape(age, 1, group, subsets));
+    ours.emplace_back(stem + "_1_cres", ts2::sim::newFaceModel(*skeleton, age, group, {}, ts2::sim::meshMorphs(parts->mesh), 1));
+    const std::map<std::string, std::uint32_t> types{{"gmnd", 0x7BA3838C}, {"gmdc", 0xAC4F8687}, {"txmt", 0x49596978}, {"shpe", 0xFC6EB1F7},
+                                                     {"cres", 0xE519C933}};
+    int differ = 0;
+    for (const auto& [name, bytes] : ours) {
+        const auto type = types.at(name.substr(name.size() - 4));
+        const auto* theirsBytes = find(type, name);
+        const bool same = theirsBytes != nullptr && *theirsBytes == bytes;
+        differ += same ? 0 : 1;
+        std::printf("  %s: %s (ours %zu bytes, game %zu)\n", name.c_str(), same ? "the same" : theirsBytes ? "differs" : "not in the game's file",
+                    bytes.size(), theirsBytes ? theirsBytes->size() : 0);
+        if (theirsBytes != nullptr && !same && type == 0x49596978) {
+            const auto mine = materialProperties(ts2::rcol::read(bytes));
+            const auto gameProps = materialProperties(ts2::rcol::read(*theirsBytes));
+            printPropertyDifferences(mine, gameProps);
+        } else if (theirsBytes != nullptr && !same) {
+            std::size_t first = 0;
+            while (first < bytes.size() && first < theirsBytes->size() && bytes[first] == (*theirsBytes)[first]) {
+                ++first;
+            }
+            std::printf("    first difference at byte %zu\n", first);
+            for (const auto* side : {&bytes, theirsBytes}) {
+                std::printf("    %s:", side == &bytes ? "ours" : "game");
+                for (std::size_t b = first >= 24 ? first - 24 : 0; b < first + 40 && b < side->size(); ++b) {
+                    std::printf(b == first ? " [%02X" : " %02X", (*side)[b]);
+                }
+                std::printf("\n");
+            }
+        }
+    }
+    if (dumpFolder != nullptr) {
+        // Both meshes, for --mesh-delta.
+        const auto write = [&](const std::string& name, const std::vector<std::uint8_t>& bytes) {
+            std::ofstream(std::filesystem::path(dumpFolder) / name, std::ios::binary).write(reinterpret_cast<const char*>(bytes.data()),
+                                                                                            static_cast<std::streamsize>(bytes.size()));
+        };
+        write("ours.gmdc", ours[1].second);
+        if (const auto* gameMesh = find(0xAC4F8687, stem + "_1_gmdc")) {
+            write("game.gmdc", *gameMesh);
+        }
+        write("catalog.gmdc", parts->mesh);
+    }
+    std::printf("%zu records, %d differ\n", ours.size(), differ);
+    return differ == 0 ? 0 : 1;
+}
+
+// Draws the look of a townie the game made with glasses as NeoTS2 draws a made Sim (its age data,
+// face template `family`, and the eyebrows, eyes, facial hair and glasses its face material lists),
+// and compares the glasses the drawn look fits with the fitted glasses the game wrote in its file.
+int checkMadeGlassesLook(const char* install, const char* gameFile, const std::string& family) {
+    ts2::scene::Assets assets(install);
+    const auto catalog = ts2::scene::readOutfitCatalog(assets.skinCatalog(), assets.skinCatalogProducts());
+    std::map<std::pair<std::uint32_t, std::uint64_t>, std::vector<std::uint8_t>> theirs;
+    ts2::dbpf::Package game{gameFile};
+    for (const auto& e : game.entries()) {
+        theirs[{e.key.type, static_cast<std::uint64_t>(e.key.instanceHigh) << 32 | e.key.instance}] = game.read(e);
+    }
+    const auto aged = theirs.find({0xAC598EAC, 1});
+    const auto refs = theirs.find({0xAC506764, 1});
+    if (aged == theirs.end() || refs == theirs.end()) {
+        std::fprintf(stderr, "no age data\n");
+        return 1;
+    }
+    ts2::scene::MadeLook made;
+    made.data = ts2::scene::readAgeData(ts2::propset::parse(aged->second), ts2::reflist::parse(refs->second));
+    made.faceFamily = family;
+    const std::uint32_t ageFlag = static_cast<std::uint32_t>(std::stoul(made.data.properties["age"], nullptr, 0));
+    const std::uint32_t gender = static_cast<std::uint32_t>(std::stoul(made.data.properties["gender"], nullptr, 0));
+    // The face material's overlays, by family, as the catalog parts of the Sim's age and gender.
+    for (const auto& [key, body] : theirs) {
+        if (key.first != 0x49596978) {
+            continue;
+        }
+        const auto record = ts2::rcol::read(body);
+        std::map<int, std::string> overlays;
+        for (const auto& [name, value] : materialProperties(record)) {
+            if (name.starts_with("cafOverlay") && name.size() > 10) {
+                std::string f = value.substr(0, value.find(','));
+                f.erase(std::remove(f.begin(), f.end(), '-'), f.end());
+                overlays[std::atoi(name.c_str() + 10)] = f;
+            }
+        }
+        if (overlays.empty()) {
+            continue;
+        }
+        made.faceOverlays.clear();
+        for (const auto& [i, f] : overlays) {
+            for (const auto& o : catalog.faceOverlays) {
+                if (o.family == f && (o.age & ageFlag) && (o.gender & gender)) {
+                    made.faceOverlays.push_back(o.key);
+                    break;
+                }
+            }
+        }
+    }
+    // The face lists hold the game's glasses part too, which the made look leaves to its overlays.
+    for (auto& [key, list] : made.data.lists) {
+        if ((key & 0xFFFF) == 2 && list.size() > 1) {
+            list.resize(1);
+        }
+    }
+    const int ageNumber = ageFlag == 1 ? 0 : ageFlag == 2 ? 1 : ageFlag == 4 ? 2 : ageFlag == 0x10 ? 4 : ageFlag == 0x40 ? 7 : 3;
+    const auto key = ts2::hash::scenegraphKey("age" + std::to_string(ageNumber) + "_1_gmdc");
+    const auto file = theirs.find({0xAC4F8687, static_cast<std::uint64_t>(key.instanceHigh) << 32 | key.instance});
+    if (file == theirs.end()) {
+        std::printf("the file has no fitted glasses\n");
+        return 1;
+    }
+    const auto written = ts2::scene::meshPositions(file->second);
+    const auto overlayKey = std::find_if(made.faceOverlays.begin(), made.faceOverlays.end(), [](const auto& k) { return k.type == 0x0C1FE246; });
+    std::string problem;
+    const auto pieces = overlayKey != made.faceOverlays.end() ? ts2::scene::meshOverlayCatalog(assets, *overlayKey, problem) : std::nullopt;
+    if (!pieces) {
+        std::printf("no glasses among the overlays\n");
+        return 1;
+    }
+    // "*" tries every face template family (and the plain face).
+    std::vector<std::string> families{family};
+    if (family == "*") {
+        families = {""};
+        for (const auto& t : catalog.faceTemplates) {
+            if (std::find(families.begin(), families.end(), t.family) == families.end()) {
+                families.push_back(t.family);
+            }
+        }
+    }
+    int matches = 0;
+    for (const auto& f : families) {
+        made.faceFamily = f;
+        const auto look = ts2::scene::madeSimLook(assets, catalog, made, 1);
+        const auto glasses = std::find_if(look.parts.begin(), look.parts.end(), [](const ts2::scene::SimPart& p) { return p.part == 0x20; });
+        if (glasses == look.parts.end() || !glasses->meshEdit || !glasses->modelKey) {
+            if (families.size() == 1) {
+                for (const auto& p : look.problems) {
+                    std::printf("problem: %s\n", p.c_str());
+                }
+                std::printf("no glasses part drawn\n");
+            }
+            continue;
+        }
+        // The catalog glasses mesh as the drawn part changes it, against the file's.
+        auto mesh = ts2::scenegraph::parseMesh(pieces->mesh);
+        glasses->meshEdit->apply(mesh);
+        std::vector<float> drawn;
+        for (const auto& e : mesh.elements) {
+            if (e.identity == ts2::scenegraph::kPositions && e.stream == 0 && e.count > 0) {
+                const auto fl = ts2::scenegraph::floats(e);
+                drawn.insert(drawn.end(), fl.begin(), fl.end());
+            }
+        }
+        std::size_t same = 0;
+        for (std::size_t i = 0; i < drawn.size() && i < written.size(); ++i) {
+            same += drawn[i] == written[i] ? 1 : 0;
+        }
+        if (families.size() == 1 || same == written.size()) {
+            std::printf("family '%s': glasses part model '%s', %zu materials, %zu of %zu floats the same as the file's\n", f.c_str(),
+                        glasses->model.c_str(), glasses->overrides.size(), same, written.size());
+        }
+        matches += same == written.size() && drawn.size() == written.size() ? 1 : 0;
+    }
+    std::printf("%d of %zu families draw the file's glasses\n", matches, families.size());
+    return matches > 0 ? 0 : 1;
 }
 
 // Makes a Sim of the age and gender of a game-made character file in outfit object `outfitGuid`
@@ -4282,6 +4795,10 @@ int main(int argc, char** argv) {
         if (mode == "--type-changes" && argc >= 4) {
             return typeChanges(index, std::filesystem::path(argv[3]));
         }
+        if (mode == "--effect" && argc >= 4) {
+            // simrun <install> --effect <name>: a visual effect's records and their parts, with the parts it plays by name.
+            return printEffect(argv[1], argv[3]);
+        }
         if (mode == "--strings" && argc >= 5) {
             const auto labels = editorTable(index, static_cast<std::uint32_t>(std::stoul(argv[4], nullptr, 0)),
                                             static_cast<std::uint32_t>(std::stoul(argv[3], nullptr, 0)));
@@ -4327,6 +4844,176 @@ int main(int argc, char** argv) {
             // simrun <install> --check-made-hair <game file> <outfit GUID>
             return checkMadeHair(index, argv[1], argv[3], static_cast<std::uint32_t>(std::stoul(argv[4], nullptr, 0)));
         }
+        if (mode == "--check-made-glasses-look" && argc >= 5) {
+            // simrun <install> --check-made-glasses-look <game file> <face template family>
+            return checkMadeGlassesLook(argv[1], argv[3], argv[4]);
+        }
+        if (mode == "--check-glasses" && argc >= 5) {
+            // simrun <install> --check-glasses <game file> <age number> [folder for both meshes]
+            return checkGlasses(argv[1], argv[3], std::atoi(argv[4]), argc >= 6 ? argv[5] : nullptr);
+        }
+        if (mode == "--rcol-blocks" && argc >= 4) {
+            // simrun <install> --rcol-blocks <file>: a scenegraph resource's links and blocks (type and
+            // a joint's name), one a line.
+            std::ifstream in(std::filesystem::path(argv[3]), std::ios::binary);
+            const std::vector<std::uint8_t> bytes(std::istreambuf_iterator<char>(in), {});
+            const auto r = ts2::rcol::read(bytes);
+            for (const auto& l : r.links) {
+                std::printf("link %08X %08X %08X %08X\n", l.type, l.group, l.instance, l.instanceHigh);
+            }
+            for (std::size_t i = 0; i < r.blocks.size(); ++i) {
+                std::string name;
+                if (const auto* t = std::get_if<ts2::rcol::TransformBlock>(&r.blocks[i])) {
+                    name = t->transform.tree.graph.name;
+                } else if (const auto* d = std::get_if<ts2::rcol::DataList>(&r.blocks[i])) {
+                    name = d->value.name + (d->value.items.empty() ? "" : " " + d->value.items[0].text);
+                } else if (const auto* s = std::get_if<ts2::rcol::ShapeRef>(&r.blocks[i])) {
+                    name = "shapes " + std::to_string(s->shapes.size()) + " names " + std::to_string(s->names.size());
+                } else if (const auto* n = std::get_if<ts2::rcol::ResourceNode>(&r.blocks[i])) {
+                    name = n->name.name + " value " + std::to_string(n->value);
+                }
+                std::printf("block %zu %08X %s\n", i, r.blockTypes[i], name.c_str());
+            }
+            return 0;
+        }
+        if (mode == "--propset" && argc >= 4) {
+            // simrun <install> --propset <file>: a property set's (CPF or XML) properties, one a line.
+            std::ifstream in(std::filesystem::path(argv[3]), std::ios::binary);
+            const std::vector<std::uint8_t> bytes(std::istreambuf_iterator<char>(in), {});
+            for (const auto& [k, v] : ts2::propset::parse(bytes)) {
+                std::printf("%s = %s\n", k.c_str(), v.c_str());
+            }
+            return 0;
+        }
+        if (mode == "--mesh-delta" && argc >= 5) {
+            // simrun <install> --mesh-delta <a.gmdc> <b.gmdc>: how each position and normal element of mesh
+            // b differs from a's of the same index: the range of the per-item deltas and the first items.
+            const auto read = [](const char* path) {
+                std::ifstream in(std::filesystem::path(path), std::ios::binary);
+                return std::vector<std::uint8_t>(std::istreambuf_iterator<char>(in), {});
+            };
+            const auto a = ts2::scenegraph::parseMesh(read(argv[3]));
+            const auto b = ts2::scenegraph::parseMesh(read(argv[4]));
+            for (const auto& m : a.morphs) {
+                std::printf("morph '%s::%s'\n", m.group.c_str(), m.name.c_str());
+            }
+            for (const auto& g : a.groups) {
+                std::printf("group '%s' link %u bones", g.name.c_str(), g.link);
+                for (const auto bone : g.bones) {
+                    std::printf(" %u", bone);
+                }
+                std::printf("\n");
+            }
+            for (std::size_t j = 0; j < a.inverseBinds.size(); ++j) {
+                const auto& ib = a.inverseBinds[j];
+                std::printf("inverse bind %zu: rot %g %g %g %g trans %g %g %g\n", j, ib.rotation[0], ib.rotation[1], ib.rotation[2],
+                            ib.rotation[3], ib.translation[0], ib.translation[1], ib.translation[2]);
+            }
+            for (const auto& e : a.elements) {
+                if ((e.identity == ts2::scenegraph::kBlendIndices || e.identity == ts2::scenegraph::kBlendWeights) && e.count > 0) {
+                    std::printf("%s:", e.identity == ts2::scenegraph::kBlendIndices ? "indices" : "weights");
+                    if (e.identity == ts2::scenegraph::kBlendIndices) {
+                        for (std::size_t i = 0; i < 40 && i < e.data.size(); ++i) {
+                            std::printf(" %u", e.data[i]);
+                        }
+                    } else {
+                        const auto w = ts2::scenegraph::floats(e);
+                        for (std::size_t i = 0; i < 20 && i < w.size(); ++i) {
+                            std::printf(" %g", w[i]);
+                        }
+                    }
+                    std::printf("\n");
+                }
+            }
+            for (std::size_t e = 0; e < a.elements.size(); ++e) {
+                std::printf("element %zu identity %08X stream %u count %u\n", e, a.elements[e].identity, a.elements[e].stream,
+                            a.elements[e].count);
+            }
+            for (std::size_t e = 0; e < a.elements.size() && e < b.elements.size(); ++e) {
+                const auto& ea = a.elements[e];
+                if (ea.identity != ts2::scenegraph::kPositions && ea.identity != ts2::scenegraph::kNormals) {
+                    continue;
+                }
+                const auto fa = ts2::scenegraph::floats(ea), fb = ts2::scenegraph::floats(b.elements[e]);
+                std::array<float, 3> low{1e9f, 1e9f, 1e9f}, high{-1e9f, -1e9f, -1e9f};
+                std::size_t moved = 0;
+                for (std::size_t i = 0; i + 2 < fa.size() && i + 2 < fb.size(); i += 3) {
+                    bool any = false;
+                    for (int k = 0; k < 3; ++k) {
+                        const float d = fb[i + k] - fa[i + k];
+                        low[k] = std::min(low[k], d);
+                        high[k] = std::max(high[k], d);
+                        any = any || d != 0;
+                    }
+                    moved += any ? 1 : 0;
+                }
+                std::printf("element %zu %s stream %u: %zu items, %zu moved, delta x [%g, %g] y [%g, %g] z [%g, %g]\n", e,
+                            ea.identity == ts2::scenegraph::kPositions ? "positions" : "normals", ea.stream, fa.size() / 3, moved, low[0],
+                            high[0], low[1], high[1], low[2], high[2]);
+                for (std::size_t i = 0; i < 18 && i + 2 < fa.size() && i + 2 < fb.size(); i += 3) {
+                    std::printf("    %g %g %g -> %g %g %g\n", fa[i], fa[i + 1], fa[i + 2], fb[i], fb[i + 1], fb[i + 2]);
+                }
+            }
+            return 0;
+        }
+        if (mode == "--by-name" && argc >= 6) {
+            // simrun <install> --by-name <type> <scenegraph name> <out>: the installed resource of that
+            // type and name, unpacked, written to <out>.
+            ts2::scene::Assets assets(argv[1]);
+            const auto bytes = assets.byName(static_cast<std::uint32_t>(std::stoul(argv[3], nullptr, 16)), argv[4]);
+            if (!bytes) {
+                std::fprintf(stderr, "no such resource\n");
+                return 1;
+            }
+            std::ofstream(std::filesystem::path(argv[5]), std::ios::binary).write(reinterpret_cast<const char*>(bytes->data()),
+                                                                                  static_cast<std::streamsize>(bytes->size()));
+            std::printf("%zu bytes\n", bytes->size());
+            return 0;
+        }
+        if (mode == "--face-overlays") {
+            // simrun <install> --face-overlays: the skin catalog's face overlays, one a line: key type,
+            // family, subtype, layer, age and gender flags, and the part's name.
+            ts2::scene::Assets assets(argv[1]);
+            const auto catalog = ts2::scene::readOutfitCatalog(assets.skinCatalog(), assets.skinCatalogProducts());
+            for (const auto& o : catalog.faceOverlays) {
+                const auto bytes = assets.skinResource(o.key);
+                const auto p = bytes ? ts2::propset::parse(*bytes) : std::map<std::string, std::string>{};
+                const auto name = p.find("name");
+                std::printf("%08X %s subtype %u layer %u age 0x%X gender 0x%X %s\n", o.key.type, o.family.c_str(), o.subtype, o.layer, o.age,
+                            o.gender, name != p.end() ? name->second.c_str() : "");
+                // simrun <install> --face-overlays <family>: with every property of that family's parts.
+                if (argc >= 4 && o.family == argv[3]) {
+                    for (const auto& [k, v] : p) {
+                        std::printf("    %s = %s\n", k.c_str(), v.c_str());
+                    }
+                    // Its reference list (3IDR), by index, with each name.
+                    const ts2::scenegraph::Link refKey{ts2::reflist::kType, o.key.group, o.key.instance, o.key.instanceHigh};
+                    auto refs = assets.skinResource(refKey);
+                    if (!refs) {
+                        refs = assets.byKey(refKey);
+                    }
+                    std::printf("    reference list %s\n", refs ? "found" : "not found");
+                    if (refs) {
+                        const auto links = ts2::reflist::parse(*refs);
+                        for (std::size_t i = 0; i < links.size(); ++i) {
+                            const auto& l = links[i];
+                            const auto body = assets.byKey(l);
+                            std::string refName;
+                            if (body) {
+                                const std::string text(body->begin(), body->begin() + static_cast<std::ptrdiff_t>(std::min<std::size_t>(body->size(), 200)));
+                                const auto at = text.find("cSGResource");
+                                if (at != std::string::npos && at + 20 < text.size()) {
+                                    const std::size_t len = static_cast<unsigned char>(text[at + 19]);
+                                    refName = text.substr(at + 20, std::min(len, text.size() - at - 20));
+                                }
+                            }
+                            std::printf("    ref %zu: %08X %08X %08X %08X %s\n", i, l.type, l.group, l.instance, l.instanceHigh, refName.c_str());
+                        }
+                    }
+                }
+            }
+            return 0;
+        }
         if (mode == "--check-made-file" && argc >= 5) {
             // simrun <install> --check-made-file <game file> <face template family>
             return checkMadeFile(index, argv[1], argv[3], argv[4]);
@@ -4337,6 +5024,10 @@ int main(int argc, char** argv) {
         }
         if (mode == "--guid") {
             return lookupGuids(index, argc - 3, argv + 3);
+        }
+        if (mode == "--family-pictures" && argc >= 4) {
+            // simrun <install> --family-pictures <neighborhood folder>
+            return familyPictures(argv[3]);
         }
         if (mode == "--check-hood-save" && argc >= 7) {
             return checkHoodSave(argv[3], argv[4], argv[5], static_cast<std::uint32_t>(std::stoul(argv[6], nullptr, 0)));

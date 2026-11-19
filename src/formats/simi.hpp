@@ -25,6 +25,24 @@ struct SimulatorState {
 
 SimulatorState parse(std::span<const std::uint8_t> data);
 
+// How many globals a record of `version` saves, as the game's reader counts them (60 from 0xD4).
+// The rest read as 0. 0 for versions before 0x12, which keep them another way.
+std::size_t savedGlobalCount(std::uint32_t version);
+
+// The four parts of a lot's value, as its simulator state keeps them from version 0x25, in file order.
+// Versions before 0xAD keep no third part.
+struct LotValue {
+    std::int32_t first = 0, second = 0, third = 0, fourth = 0;
+    std::int16_t global15 = 0;  // global 0x15: while it isn't 0 the lot isn't shown for sale
+};
+
+// The lot value parts, or none for a version before 0x25, a wrong magic or a record cut short.
+std::optional<LotValue> readLotValue(std::span<const std::uint8_t> data);
+
+// A lot's value as the game adds it: the first three parts and the fourth times 0.8 with its fraction dropped.
+// A lot whose description has flag 8 set (flags from version 5) leaves out the second part.
+std::int32_t lotValue(const LotValue& parts, bool leaveOutSecond);
+
 // The version the game writes. It reads older ones and saves them as this.
 constexpr std::uint32_t kWrittenVersion = 0xD8;
 constexpr std::size_t kRecordSize = 498;

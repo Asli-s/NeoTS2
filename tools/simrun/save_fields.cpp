@@ -254,8 +254,8 @@ void personFields(Line& line, const std::string& where, const ts2::xobj::PersonP
     }
     line.number("stateValue2", s.value2);
     line.number("list", static_cast<double>(s.list.size()));
-    line.word("stateValue3", s.value3);
-    line.word("stateValue4", s.value4);
+    line.word("stateValue3", s.collectiblesLow);
+    line.word("stateValue4", s.collectiblesHigh);
     if (p.stateUnread) {
         return;
     }
@@ -339,6 +339,11 @@ void objectFields(Line& line, const ts2::xobj::SavedObject& o) {
     line.number("stackValue", t.stackValue);
     line.number("relationshipVersion", t.relationshipVersion);
     line.number("relationships", static_cast<double>(t.relationshipIds.size()));
+    std::string partners;
+    for (const auto id : t.relationshipIds) {
+        partners += (partners.empty() ? "" : ",") + std::to_string(id);
+    }
+    line.text("relationshipList", partners);
     line.number("slotMarker", t.slots.marker);
     line.number("slotExtra", t.slots.extra);
     line.number("slotValues", static_cast<double>(t.slots.values.size()));

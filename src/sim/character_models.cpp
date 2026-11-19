@@ -2,6 +2,7 @@
 
 #include "formats/hash.hpp"
 #include "formats/rcol.hpp"
+#include "formats/scenegraph.hpp"
 
 #include <algorithm>
 #include <array>
@@ -73,6 +74,58 @@ std::vector<std::uint8_t> newFaceShape(int age, std::uint32_t group, std::string
     rcol::Resource resource;
     resource.blocks.push_back(std::move(shape));
     resource.blockTypes.push_back(kShapeType);
+    return rcol::write(resource);
+}
+
+std::vector<std::uint8_t> newOverlayNode(std::span<const std::uint8_t> catalogNode, int age, int part, std::uint32_t group) {
+    rcol::Resource node = rcol::read(catalogNode);
+    auto* geometry = node.blocks.empty() ? nullptr : std::get_if<rcol::GeometryNode>(&node.blocks[0]);
+    const bool lists = std::all_of(node.blockTypes.begin() + (node.blocks.empty() ? 0 : 1), node.blockTypes.end(),
+                                   [](std::uint32_t t) { return t == kDataListType; });
+    if (geometry == nullptr || node.links.size() != 1 || node.links[0].type != kMeshType || !lists) {
+        throw std::runtime_error("a catalog mesh overlay node that isn't one geometry node, a mesh link and data lists");
+    }
+    const std::string stem = "age" + std::to_string(age) + "_" + std::to_string(part);
+    const hash::ScenegraphKey mesh = hash::scenegraphKey(stem + "_gmdc");
+    node.links[0] = {kMeshType, kOwnGroup, mesh.instance, mesh.instanceHigh};
+    geometry->name.name = ownGroupName(group, stem + "_gmnd");
+    std::reverse(node.blocks.begin() + 1, node.blocks.end());
+    return rcol::write(node);
+}
+
+std::vector<std::uint8_t> newOverlayShape(int age, int part, std::uint32_t group, std::span<const OverlaySubset> subsets) {
+    const std::string stem = "age" + std::to_string(age) + "_" + std::to_string(part);
+    rcol::Shape shape;
+    shape.header = {"cShape", kShapeType, 8};
+    shape.name = {{"cSGResource", 0, 2}, ownGroupName(group, stem + "0_shpe")};
+    shape.referent = {"cReferentNode", 0, 1};
+    shape.graph.header = {"cObjectGraphNode", 0, 4};
+    shape.items.push_back({0, 1, ownGroupName(group, stem + "_gmnd"), 0, 0});
+    for (const OverlaySubset& s : subsets) {
+        shape.parts.push_back({s.subset, s.material, 0, {}, 0});
+    }
+    rcol::Resource resource;
+    resource.blocks.push_back(std::move(shape));
+    resource.blockTypes.push_back(kShapeType);
+    return rcol::write(resource);
+}
+
+std::vector<std::uint8_t> newOverlayMaterial(std::span<const std::uint8_t> catalogMaterial, std::uint32_t group, std::string_view name,
+                                             int species) {
+    rcol::Resource resource = rcol::read(catalogMaterial);
+    auto* material = resource.blocks.size() == 1 ? std::get_if<rcol::Material>(&resource.blocks[0]) : nullptr;
+    if (material == nullptr) {
+        throw std::runtime_error("a catalog mesh overlay material that isn't one material");
+    }
+    std::map<std::string, std::string> properties(material->properties.begin(), material->properties.end());
+    properties["paramSpecies"] = std::to_string(species);
+    properties["simHairFlag"] = "true";
+    properties["stdMatAlphaBlendMode"] = "blend";
+    material->properties.assign(properties.begin(), properties.end());
+    std::string lower(name);
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    material->description = lower;
+    material->name.name = ownGroupName(group, std::string(name) + "_txmt");
     return rcol::write(resource);
 }
 
@@ -207,6 +260,34 @@ std::vector<std::uint8_t> newFaceMesh(std::span<const std::uint8_t> catalogMesh,
     return rcol::write(mesh);
 }
 
+std::vector<std::uint8_t> newOverlayMesh(std::span<const std::uint8_t> catalogMesh, int age, int part, std::uint32_t group,
+                                         std::span<const float> positions) {
+    constexpr std::uint32_t kPositions = 0x5B830781;
+    rcol::Resource mesh = rcol::read(catalogMesh);
+    auto* m = mesh.blocks.size() == 1 ? std::get_if<rcol::Mesh>(&mesh.blocks[0]) : nullptr;
+    if (m == nullptr) {
+        throw std::runtime_error("a catalog mesh overlay that isn't one mesh");
+    }
+    // The lists with vertices, in the mesh's order, as the fitted positions run.
+    std::size_t at = 0;
+    for (auto& e : m->elements) {
+        if (e.identity != kPositions || e.stream != 0 || e.data.empty()) {
+            continue;
+        }
+        const std::size_t floats = e.data.size() / sizeof(float);
+        if (e.data.size() % sizeof(float) != 0 || floats > positions.size() - at) {
+            throw std::runtime_error("a mesh overlay's fitted vertices don't fit its catalog mesh");
+        }
+        std::memcpy(e.data.data(), positions.data() + at, e.data.size());
+        at += floats;
+    }
+    if (at != positions.size()) {
+        throw std::runtime_error("a mesh overlay's fitted vertices don't fit its catalog mesh");
+    }
+    m->name.name = ownGroupName(group, "age" + std::to_string(age) + "_" + std::to_string(part) + "_gmdc");
+    return rcol::write(mesh);
+}
+
 std::string faceMaterialName(std::uint32_t counter, int age, std::uint32_t paramGender) {
     char name[64];
     std::snprintf(name, sizeof name, "ss_customPart_0x%x_%d_%u_cmpm", counter, age, paramGender);
@@ -221,11 +302,22 @@ std::vector<std::uint8_t> newFaceMaterial(std::span<const std::uint8_t> catalogM
     }
     std::map<std::string, std::string> properties(material->properties.begin(), material->properties.end());
     const std::string base = properties["stdMatBaseTextureName"];
-    std::vector<std::string> composite{base};
-    for (const std::string* texture : {&look.eyeTexture, &look.browTexture}) {
-        if (!texture->empty()) {
-            composite.push_back(*texture);
+    // The overlays in the list's order, then by layer. The base texture stays first.
+    std::vector<const FaceTexture*> layers;
+    const auto listed = [&](const FaceTexture& t) {
+        if (!t.texture.empty()) {
+            layers.push_back(&t);
         }
+    };
+    listed(look.browFirst ? look.brow : look.eye);
+    listed(look.browFirst ? look.eye : look.brow);
+    for (const FaceTexture& t : look.facialHair) {
+        listed(t);
+    }
+    std::stable_sort(layers.begin(), layers.end(), [](const FaceTexture* a, const FaceTexture* b) { return a->layer < b->layer; });
+    std::vector<std::string> composite{base};
+    for (const FaceTexture* t : layers) {
+        composite.push_back(t->texture);
     }
     std::string compositeName;
     for (std::size_t i = 0; i < composite.size(); ++i) {
@@ -234,7 +326,7 @@ std::vector<std::uint8_t> newFaceMaterial(std::span<const std::uint8_t> catalogM
     }
     std::replace(compositeName.begin(), compositeName.end(), '-', '_');
     compositeName += "-diffuse";
-    // The overlays are the eye colour and the eyebrow family, each a list of one GUID.
+    // The overlays are the eye colour, the eyebrow family and the facial hair, each a list of one GUID.
     std::vector<std::string> overlays;
     const std::array<const std::string*, 2> order = look.browFirst ? std::array{&look.browFamily, &look.eyeColour}
                                                                   : std::array{&look.eyeColour, &look.browFamily};
@@ -242,6 +334,12 @@ std::vector<std::uint8_t> newFaceMaterial(std::span<const std::uint8_t> catalogM
         if (!family->empty()) {
             overlays.push_back(*family + ",");
         }
+    }
+    for (const std::string& family : look.facialHairFamilies) {
+        overlays.push_back(family + ",");
+    }
+    for (const std::string& family : look.meshOverlayFamilies) {
+        overlays.push_back(family + ",");
     }
     properties["cafHairTone"] = look.hairTone;
     properties["cafNumOverlays"] = std::to_string(overlays.size());
@@ -265,6 +363,16 @@ std::vector<std::uint8_t> newFaceMaterial(std::span<const std::uint8_t> catalogM
     return rcol::write(resource);
 }
 
+std::vector<std::string> meshMorphs(std::span<const std::uint8_t> mesh) {
+    std::vector<std::string> morphs;
+    for (const auto& m : scenegraph::parseMesh(mesh).morphs) {
+        if (!m.group.empty() || !m.name.empty()) {
+            morphs.push_back(m.group + "::" + m.name);
+        }
+    }
+    return morphs;
+}
+
 std::string skeletonModelName(int age) {
     switch (age) {
     case 5: return "buSkel_cres";
@@ -279,7 +387,7 @@ std::string skeletonModelName(int age) {
 }
 
 std::vector<std::uint8_t> newFaceModel(std::span<const std::uint8_t> skeleton, int age, std::uint32_t group,
-                                       std::span<const GripAdjust> grips, std::span<const std::string> morphs) {
+                                       std::span<const GripAdjust> grips, std::span<const std::string> morphs, int part) {
     rcol::Resource model = rcol::read(skeleton);
     auto* root = model.blocks.empty() ? nullptr : std::get_if<rcol::ResourceNode>(&model.blocks[0]);
     if (root == nullptr || root->root == 0 || root->tree.children.size() != 1) {
@@ -314,7 +422,12 @@ std::vector<std::uint8_t> newFaceModel(std::span<const std::uint8_t> skeleton, i
         model.blockTypes.push_back(kDataListType);
     }
     const auto shapeRef = static_cast<std::uint32_t>(model.blocks.size());
-    model.blocks.push_back(faceShapeRef(morphs));
+    rcol::ShapeRef shapeRefBlock = faceShapeRef(morphs);
+    // A mesh overlay's model leaves out the 16 bytes of data a face model's shape reference has.
+    if (part != 0) {
+        shapeRefBlock.data.clear();
+    }
+    model.blocks.push_back(std::move(shapeRefBlock));
     model.blockTypes.push_back(kShapeRefType);
     root = &std::get<rcol::ResourceNode>(model.blocks[0]);
     root->tree.graph.extensions.insert(root->tree.graph.extensions.begin(), gripRefs.begin(), gripRefs.end());
@@ -347,7 +460,8 @@ std::vector<std::uint8_t> newFaceModel(std::span<const std::uint8_t> skeleton, i
         throw std::runtime_error("a skeleton model with blocks its tree doesn't reach");
     }
     rcol::Resource out;
-    const hash::ScenegraphKey shapeKey = hash::scenegraphKey("age" + std::to_string(age) + "_00_shpe");
+    const std::string stem = "age" + std::to_string(age) + "_" + std::to_string(part);
+    const hash::ScenegraphKey shapeKey = hash::scenegraphKey(stem + "0_shpe");
     out.links.push_back({kShapeType, kOwnGroup, shapeKey.instance, shapeKey.instanceHigh});
     for (const std::uint32_t old : order) {
         out.blocks.push_back(std::move(model.blocks[old]));
@@ -357,7 +471,7 @@ std::vector<std::uint8_t> newFaceModel(std::span<const std::uint8_t> skeleton, i
         forEachRef(refsOf(block), [&](rcol::Ref& r) { r.index = static_cast<std::uint32_t>(newIndex[r.index]); });
     }
     auto& model0 = std::get<rcol::ResourceNode>(out.blocks[0]);
-    model0.name.name = ownGroupName(group, "age" + std::to_string(age) + "_0_cres");
+    model0.name.name = ownGroupName(group, stem + "_cres");
     model0.value = kFaceModelValue;
     return rcol::write(out);
 }

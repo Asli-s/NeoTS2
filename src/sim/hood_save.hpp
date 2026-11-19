@@ -5,7 +5,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
+#include <utility>
 
 namespace ts2::sim {
 
@@ -31,6 +33,8 @@ struct HoodSaveCounts {
     int descriptions = 0;     // Sim descriptions rewritten
     bool lotDescription = false;  // the lot's description rewritten
     bool family = false;          // the lot's family rewritten
+    // The lot's family and the funds it saved, which become its last saved funds.
+    std::optional<std::pair<std::uint32_t, std::int32_t>> savedFunds;
     int relationships = 0;        // relationship records rewritten or added
     int newNeighbors = 0;         // descriptions added for Sims made this run
     int newDna = 0;               // DNA records added for them
@@ -38,6 +42,7 @@ struct HoodSaveCounts {
     bool familyTies = false;      // the family ties record rewritten
     bool neighborCounter = false; // the counter new neighbor ids start from rewritten
     int inventories = 0;          // inventories written into the neighborhood record
+    int wants = 0;                // wants records written
 };
 
 // Writes into `hood`, the neighborhood package, what the game's save of a lot changes there: the
