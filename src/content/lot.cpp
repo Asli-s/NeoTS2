@@ -3,6 +3,7 @@
 #include "formats/binary_reader.hpp"
 #include "formats/cobject.hpp"
 #include "formats/dbpf.hpp"
+#include "formats/lot_records.hpp"
 #include "formats/resource_types.hpp"
 #include "formats/scenegraph.hpp"
 #include "formats/simi.hpp"
@@ -118,6 +119,26 @@ std::vector<walllayer::Entry> coveringsOfRoomWalls(const wallgraph::WallGraph& r
     return out;
 }
 
+std::vector<CurvedPoolCorner> curvedPoolCorners(std::span<const std::uint8_t> data) {
+    constexpr std::size_t kEntryWords = 4;
+    constexpr std::uint32_t kMaxSide = 256;  // lots are at most this many tiles a side
+    // More corners than 2 by 2 blocks fit on the largest lot is a broken file.
+    constexpr std::size_t kMaxCorners = kMaxSide * kMaxSide / 4;
+    const auto table = lotrecords::readWordTable(data);
+    std::vector<CurvedPoolCorner> out;
+    if (!table || table->type != lotrecords::kFourWordTableType) {
+        return out;
+    }
+    for (std::size_t i = 0; i + kEntryWords <= table->words.size() && out.size() < kMaxCorners; i += kEntryWords) {
+        const auto x = table->words[i + 1], y = table->words[i + 2], direction = table->words[i + 3];
+        if (x < 1 || y < 1 || x >= kMaxSide || y >= kMaxSide || direction > 6 || direction % 2 != 0) {
+            continue;
+        }
+        out.push_back({static_cast<std::int32_t>(x), static_cast<std::int32_t>(y), static_cast<std::int32_t>(direction)});
+    }
+    return out;
+}
+
 Lot loadLotGround(const std::filesystem::path& path) {
     dbpf::Package package{path};
     Lot lot;
@@ -130,6 +151,8 @@ Lot loadLotGround(const std::filesystem::path& path) {
                 lot.grids.emplace(e.key.instance, array3d::parse(package.read(e)));
             } else if (e.key.type == types::kArray2D && e.key.instance == kWaterHeightGridInstance) {
                 lot.flatGrids.emplace(e.key.instance, terrain::parseArray2D(package.read(e)));
+            } else if (e.key.type == lotrecords::kFourWordTableType) {
+                lot.curvedPools = curvedPoolCorners(package.read(e));
             }
         } catch (const std::exception& ex) {
             lot.problems.push_back({e.key.instance, std::string("ground: ") + ex.what()});
@@ -207,6 +230,9 @@ Lot loadLot(const std::filesystem::path& path) {
                     if (!saved.joints.empty()) {
                         lot.savedJoints.emplace(e.key.instance, std::move(saved.joints));
                     }
+                    if (saved.position) {
+                        lot.savedPositions.emplace(e.key.instance, *saved.position);
+                    }
                 } catch (const std::exception& ex) {
                     lot.problems.push_back({e.key.instance, std::string("saved animations: ") + ex.what()});
                 }
@@ -279,6 +305,8 @@ Lot loadLot(const std::filesystem::path& path) {
             } catch (const std::exception& ex) {
                 lot.problems.push_back({e.key.instance, std::string("simulator state: ") + ex.what()});
             }
+        } else if (e.key.type == lotrecords::kFourWordTableType) {
+            lot.curvedPools = curvedPoolCorners(package.read(e));
         } else if (e.key.type == types::kRoofs) {
             try {
                 lot.roofs = roofs::parse(package.read(e));

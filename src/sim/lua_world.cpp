@@ -129,28 +129,53 @@ int isLocked(lua_State* L) {
     return 1;
 }
 
-// nWorld.MoveObjectToLocation(id, x, y, level[, facing]): moves the object to the point (x and y as
-// GetObjectLocation gives them, level from 0) when the placement test passes there, and says
-// whether it moved. It keeps its facing unless a fifth number gives one, in the scripts' own
-// numbering (10 minus it, remainder by 8, is the object's direction).
-int moveObjectToLocation(lua_State* L) {
-    SimObject& o = objectOrError(L, argShort(L, 1));
+namespace {
+
+// Where nWorld.MoveObjectToLocation and CanMoveObjectToLocation put an object: (x, y, level) and the
+// direction (object data 0x01). A fifth number is a direction as object data 0x01 counts them, which
+// the game turns into its placement direction and back, and without one the facing is `facing`.
+// None for a place too far away to test.
+std::optional<SnapTarget> scriptLocation(lua_State* L, std::int16_t facing) {
     const double x = lua_tonumber(L, 2), y = lua_tonumber(L, 3);
     const std::int32_t level = argInt(L, 4);
-    std::int16_t facing = o.data[1];
     if (lua_gettop(L) == 5 && lua_type(L, 5) == LUA_TNUMBER) {
-        facing = static_cast<std::int16_t>((10 - static_cast<std::int32_t>(argShort(L, 5))) % 8);
+        const std::int32_t placement = (10 - static_cast<std::int32_t>(argShort(L, 5))) % 8;
+        facing = static_cast<std::int16_t>((10 - placement) % 8);
     }
     constexpr double kLimit = 1 << 14;  // far beyond any lot, and safe in 1/65536 tiles
     if (!(std::fabs(x) < kLimit) || !(std::fabs(y) < kLimit) || level < -kLimit || level > kLimit) {
+        return std::nullopt;
+    }
+    return SnapTarget{static_cast<std::int32_t>(y * 65536.0), static_cast<std::int32_t>(x * 65536.0), level + 1, facing};
+}
+
+} // namespace
+
+// nWorld.CanMoveObjectToLocation(id, x, y, level[, direction]): whether MoveObjectToLocation would
+// put the object there, without moving it. Without a direction it tests facing direction 2 (the
+// game's placement direction 0), not the object's own.
+int canMoveObjectToLocation(lua_State* L) {
+    SimObject& o = objectOrError(L, argShort(L, 1));
+    constexpr std::int16_t kPlacementDirectionZero = 2;
+    const auto target = scriptLocation(L, kPlacementDirectionZero);
+    lua_pushboolean(L, target && !placementCode(*call(L).world, o, *target, true));
+    return 1;
+}
+
+// nWorld.MoveObjectToLocation(id, x, y, level[, direction]): moves the object to the point (x and y
+// as GetObjectLocation gives them, level from 0) when the placement test passes there, and says
+// whether it moved. It keeps its facing unless a fifth number gives one (see scriptLocation).
+int moveObjectToLocation(lua_State* L) {
+    SimObject& o = objectOrError(L, argShort(L, 1));
+    const auto location = scriptLocation(L, o.data[1]);
+    if (!location) {
         lua_pushboolean(L, false);
         return 1;
     }
     World& world = *call(L).world;
-    const SnapTarget target{static_cast<std::int32_t>(y * 65536.0), static_cast<std::int32_t>(x * 65536.0), level + 1, facing};
-    const bool fits = !placementCode(world, o, target, true);
+    const bool fits = !placementCode(world, o, *location, true);
     if (fits) {
-        snapTo(world, o, target);
+        snapTo(world, o, *location);
     }
     lua_pushboolean(L, fits);
     return 1;
@@ -251,6 +276,27 @@ int isOutsideForWeather(lua_State* L) {
     }
     const std::optional<bool> open = c.world ? c.world->outside().open(level, x, y) : std::nullopt;
     lua_pushboolean(L, open.value_or(false) ? 1 : 0);
+    return 1;
+}
+
+// nWorld.GetLoadBearingRoomAtLocation(x, y, level): the region of the lot's walls and roofs (the
+// layer IsOutsideForWeather reads) at tile (x, y), all three taken as whole numbers. It reads the
+// tile's first quarter as the game saves quarters (the one a whole-number position falls in). 0 is
+// not enclosed, -1 off the grid.
+int getLoadBearingRoomAtLocation(lua_State* L) {
+    const ScriptCall& c = call(L);
+    const std::int32_t x = argInt(L, 1), y = argInt(L, 2), level = argInt(L, 3);
+    constexpr int kFirstSavedQuarter = 3;  // saved quarter element 0
+    lua_pushnumber(L, c.world ? c.world->weatherRegions().quarterRoom(level, x, y, kFirstSavedQuarter) : RoomMap::kNoRoom);
+    return 1;
+}
+
+// nWorld.GetRoomAtLocation(x, y, level): the same for the lot's rooms as the game saves them.
+int getRoomAtLocation(lua_State* L) {
+    const ScriptCall& c = call(L);
+    const std::int32_t x = argInt(L, 1), y = argInt(L, 2), level = argInt(L, 3);
+    constexpr int kFirstSavedQuarter = 3;  // saved quarter element 0
+    lua_pushnumber(L, c.world ? c.world->rooms().quarterRoom(level, x, y, kFirstSavedQuarter) : RoomMap::kNoRoom);
     return 1;
 }
 

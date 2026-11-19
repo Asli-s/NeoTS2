@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -51,6 +52,17 @@ struct WorldBounds {
 // whose far edges count as on it, and on lots that aren't beach lots.
 bool isBeachLocation(const WorldBounds& bounds, std::optional<std::uint8_t> beachSide, double x, double y, int mask);
 
+// A pool corner rounded with the curved pool tool. It fills the 2 by 2 tiles around the tile corner
+// (x, y), and the pool's edge there is a quarter circle about the block's inner corner: (x - 1, y - 1)
+// for direction 0, (x + 1, y - 1) for 2, (x + 1, y + 1) for 4 and (x - 1, y + 1) for 6.
+struct CurvedPoolCorner {
+    std::int32_t x = 0, y = 0, direction = 0;
+};
+
+// The rounded corners of a lot's curved pool records (0x916DA14D, version 1: an id, x, y and the
+// direction per corner). Corners off the lot or with a direction the game doesn't draw are left out.
+std::vector<CurvedPoolCorner> curvedPoolCorners(std::span<const std::uint8_t> data);
+
 struct Lot {
     std::optional<WorldBounds> worldBounds;
     objt::ObjectTypeTable types;
@@ -80,6 +92,7 @@ struct Lot {
     // Fence posts (fence rails are wall segments whose wall layer type is the fence's GUID).
     std::vector<fencepostlayer::Post> fencePosts;
     std::vector<roofs::Roof> roofs;
+    std::vector<CurvedPoolCorner> curvedPools;
     // The terrain's canvas and paint textures, and c2DArray grids by instance (paint i's strength,
     // 0-255 at four points per tile, is instance kFirstPaintMapInstance + i).
     std::optional<terrain::LotTexture> terrainTextures;
@@ -92,6 +105,8 @@ struct Lot {
     std::map<std::uint32_t, std::vector<cobject::SavedAnimation>> savedAnimations;
     // Each object's model joints as they were posed when the lot was saved, by object id.
     std::map<std::uint32_t, std::vector<cobject::SavedJoint>> savedJoints;
+    // Where each object stood as the lot was saved (see cobject::SavedObject::position), by object id.
+    std::map<std::uint32_t, std::array<float, 3>> savedPositions;
     // Each object's script data tables (instance = object id).
     std::map<std::uint32_t, datatables::DataTables> dataTables;
     // Relationship variables one of the lot's objects holds towards another (SREL, instance =
@@ -120,6 +135,8 @@ constexpr std::uint32_t kListGridInstance = 0x0C;
 constexpr std::uint32_t kLayerGraphInstances[2] = {7, 6};
 // Floor pattern ids, one per quarter tile per level (ids into Lot::floorPatterns, 0 for none).
 constexpr std::uint32_t kFloorGridInstance = 0;
+// The floor patterns' texture turns, two bytes per tile per level (see drawFloors).
+constexpr std::uint32_t kFloorTurnGridInstance = 0x20;
 constexpr std::uint32_t kFloorPatternMapInstance = 0xE;
 constexpr std::uint32_t kWallPatternMapInstance = 0xD;
 constexpr std::uint32_t kWallCoveringLayerInstance = 4;

@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -30,6 +31,23 @@ public:
         std::string address, name, text;
         ts2::tga::Pixels picture;
         bool forSale = false;
+        // A household's worth (its funds and its lot's value), or the price of a lot for sale. None
+        // when it isn't known: the lot has no readable simulator state, or the lot isn't shown for sale.
+        std::optional<std::int64_t> money;
+        // An apartment lot's households in the neighborhood's order. A household is none when no
+        // family has the apartment as its home.
+        struct Tenant {
+            std::string name;
+            std::int64_t funds = 0;
+            bool atHome = false;  // its current lot is its home
+            std::uint32_t lot = 0;  // its apartment's own lot, which entering it loads
+            // Its Sims' portraits in the family's order, empty for a Sim without one.
+            std::vector<ts2::tga::Pixels> sims;
+        };
+        std::vector<std::optional<Tenant>> households;
+        // Its apartments, at most 4 while any is lived in, and its rent range, lowest first.
+        int apartments = 0;
+        std::pair<std::int64_t, std::int64_t> rent;
     };
     // What the bins show from a neighborhood's files and the user folder's lot catalog. Reading it
     // takes a while, so it is read with the neighborhood, off the main thread.
@@ -78,6 +96,9 @@ public:
     void setCardPoint(int x, int y);
     void hideCard();
     std::uint32_t cardLot() const { return cardLot_; }
+    // The lot Enter Lot loads: the card's lot, or on an apartment lot's card the chosen household's
+    // apartment. 0 when there is none to enter.
+    std::uint32_t lotToEnter() const;
     // The household bio box of the card on screen, or null when no household card shows.
     DescriptionBox* cardBio() { return cardLot_ != 0 && bioShown_ ? &bio_ : nullptr; }
 
@@ -96,6 +117,14 @@ private:
     void layoutStrip(Strip& strip, const std::vector<ts2::tga::Pixels>& pictures);
     // Puts a glow picture in its window at (x, y) on screen, or hides the window for an empty one.
     void showGlow(int window, ts2::tga::Pixels picture, int x, int y);
+    // Fills the Apartment Info layout for an apartment lot's card.
+    void showApartments(const LotCard& card);
+    // Shows apartment row `row` (1 to 4) chosen and the others not.
+    void chooseApartment(int row);
+    // Hides every apartment row's Sim thumbnails, as the game does when the card is loaded or
+    // closed. Filling the card sets them only on rows with a household, so an unoccupied row, or
+    // a row whose household is missing, keeps what it had.
+    void clearApartmentSims();
 
     ts2::ui::Screen& screen_;
     ts2::content::UiData& data_;
@@ -114,7 +143,8 @@ private:
     GraphicsOptionsPanel graphicsOptions_{screen_, optionsMenu_};
     AudioOptionsPanel audioOptions_{screen_, optionsMenu_};
     std::vector<std::pair<int, bool>> hidden_;  // the panels hideAll hid, and whether each was shown
-    int tag_ = -1, tagIcon_ = -1, tagText_ = -1;
+    int tag_ = -1, tagIcon_ = -1;
+    std::vector<std::array<int, 3>> tagLines_;  // each line's text in the name font, in the price font, and its sun
     std::uint32_t tagLot_ = 0;
     int puck_ = -1;
     Strip familyStrip_, lotStrip_;
@@ -125,6 +155,7 @@ private:
     std::uint32_t cardLot_ = 0;
     DescriptionBox bio_;
     bool bioShown_ = false;
+    int apartmentRow_ = 0;  // the apartment card's chosen row, 0 for none
 };
 
 } // namespace app

@@ -10,6 +10,7 @@
 #include "formats/neighborhood_id.hpp"
 #include "formats/weather.hpp"
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -78,6 +79,12 @@ struct Neighborhood {
     std::map<std::int32_t, std::int32_t> lotNeighborhoods;
     // Each placed lot's owner (a neighbor id, 0 for none).
     std::map<std::int32_t, std::int32_t> lotOwners;
+    // Each apartment's building (an apartment's own lot, type 9), and each building's apartments lived
+    // in: each one's lot, family, control room and roommate, in the description's order.
+    std::map<std::int32_t, std::int32_t> lotBuildings;
+    std::map<std::int32_t, std::vector<std::array<std::uint32_t, 4>>> apartments;
+    // Each lot's saved room light percents, by room (see nhood::LotDescription::roomLightPercents).
+    std::map<std::int32_t, std::map<std::int16_t, std::int16_t>> lotRoomLights;
     // Each placed lot's size in neighborhood tiles (ten of its own tiles each) and, on a beach lot
     // (description flag 0x80), its beach's side.
     struct LotShape {

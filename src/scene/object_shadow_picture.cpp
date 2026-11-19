@@ -144,13 +144,11 @@ OutdoorFloors outdoorFloors(const Scene& scene, const std::vector<Place>& places
 
 } // namespace
 
-std::optional<Picture> picture(const Mesh& mesh, int meshIndex, int facing, const Vec& toSun) {
+std::optional<std::array<float, 16>> boxCamera(Vec low, Vec high, const Vec& toSun) {
     const auto axes = axesFor(toSun);
-    Vec low, high;
-    if (!axes || !turnedBox(mesh, facing, low, high)) {
+    if (!axes) {
         return std::nullopt;
     }
-    const Vec turnedLow = low, turnedHigh = high;
     // The game's box never reaches below the ground.
     low[2] = std::max(low[2], 0.0f);
     const float extent = std::max({high[0] - low[0], high[1] - low[1], high[2] - low[2]});
@@ -172,19 +170,34 @@ std::optional<Picture> picture(const Mesh& mesh, int meshIndex, int facing, cons
     if (!(across > 1e-4f) || !(depth > 1e-4f)) {
         return std::nullopt;
     }
-    Picture p;
-    p.mesh = meshIndex;
-    p.facing = facing;
-    p.low = turnedLow;
-    p.high = turnedHigh;
+    std::array<float, 16> camera{};
     const float width = across + 2 * kMargin;
     const float bottom = lo[1] - kMargin, top = hi[1] + kMargin;
     // The game hands its camera the depth over the width as the picture's shape, so the picture's
     // height comes from those, not from the box's height.
-    setRow(p.camera, 0, axes->right, 2 / width, -(lo[0] + hi[0]) / width);
-    setRow(p.camera, 1, axes->up, 2 * across / (width * depth), -(bottom + top) / (top - bottom));
-    setRow(p.camera, 2, axes->forward, 1 / depth, -lo[2] / depth);
-    p.camera[15] = 1;
+    setRow(camera, 0, axes->right, 2 / width, -(lo[0] + hi[0]) / width);
+    setRow(camera, 1, axes->up, 2 * across / (width * depth), -(bottom + top) / (top - bottom));
+    setRow(camera, 2, axes->forward, 1 / depth, -lo[2] / depth);
+    camera[15] = 1;
+    return camera;
+}
+
+std::optional<Picture> picture(const Mesh& mesh, int meshIndex, int facing, const Vec& toSun) {
+    Vec low, high;
+    if (!turnedBox(mesh, facing, low, high)) {
+        return std::nullopt;
+    }
+    const auto camera = boxCamera(low, high, toSun);
+    if (!camera) {
+        return std::nullopt;
+    }
+    Picture p;
+    p.mesh = meshIndex;
+    p.facing = facing;
+    p.low = low;
+    p.high = high;
+    p.camera = *camera;
+    const float extent = std::max({high[0] - low[0], high[1] - low[1], high[2] - std::max(low[2], 0.0f)});
     p.size = extent < 0.5f ? 32 : extent < 1.5f ? 64 : 128;
     return p;
 }

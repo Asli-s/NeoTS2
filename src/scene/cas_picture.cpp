@@ -159,4 +159,78 @@ std::optional<PictureView> hairPictureView(Assets& assets, PictureAge age) {
     }
 }
 
+namespace {
+
+// The lights of a model's light nodes, read from the light resources it links.
+std::vector<sg::LightResource> rigLights(Assets& assets, const sg::ResourceNode& rig) {
+    std::vector<sg::LightResource> lights;
+    for (const auto& link : rig.container.links) {
+        if ((link.type & 0xFFFFFF00u) != 0xC9C81B00u) {
+            continue;  // not a light resource
+        }
+        if (const auto data = assets.byKey(link)) {
+            try {
+                lights.push_back(sg::parseLight(*data));
+            } catch (const std::exception&) {
+                // A light that can't be read is left out.
+            }
+        }
+    }
+    return lights;
+}
+
+// A node's place in its model: its own after its parents'. A chain can't be longer than the tree.
+Transform placeInModel(const sg::ResourceNode& tree, std::size_t node) {
+    std::vector<int> parent(tree.nodes.size(), -1);
+    for (std::size_t i = 0; i < tree.nodes.size(); ++i) {
+        for (const auto c : tree.nodes[i].children) {
+            if (c < parent.size() && c != i && parent[c] < 0) {
+                parent[c] = static_cast<int>(i);
+            }
+        }
+    }
+    Transform place = Transform::of(tree.nodes[node].translation, tree.nodes[node].rotation);
+    int p = parent[node];
+    for (std::size_t steps = 0; p >= 0 && steps < tree.nodes.size(); ++steps) {
+        const auto& n = tree.nodes[static_cast<std::size_t>(p)];
+        place = Transform::of(n.translation, n.rotation) * place;
+        p = parent[static_cast<std::size_t>(p)];
+    }
+    return place;
+}
+
+} // namespace
+
+std::optional<FamilyPictureStage> familyPictureStage(Assets& assets, const std::string& camera) {
+    const std::string stageName = "casNeighborhoodPose";
+    const auto stageData = assets.byName(kCres, stageName + "_cres");
+    const auto cameraData = assets.byName(kCres, stageName + "_camera_thumbnail_" + stageName + "_" + camera + "Shape_cres");
+    if (!stageData || !cameraData) {
+        return std::nullopt;
+    }
+    try {
+        const auto stage = sg::parseResourceNode(*stageData);
+        const auto cameraNode = sg::parseResourceNode(*cameraData);
+        auto view = pictureView(cameraNode, stage, rigLights(assets, stage), assets.lighting());
+        if (!view) {
+            return std::nullopt;
+        }
+        FamilyPictureStage out;
+        out.view = *view;
+        const std::string mark = "simmark_";
+        for (std::size_t i = 0; i < stage.nodes.size(); ++i) {
+            const std::string name = lowered(stage.nodes[i].name);
+            if (name.size() > mark.size() && name.compare(0, mark.size(), mark) == 0) {
+                const std::string number = name.substr(mark.size());
+                if (number.size() <= 2 && std::all_of(number.begin(), number.end(), [](char c) { return c >= '0' && c <= '9'; })) {
+                    out.slots.emplace(std::stoi(number), placeInModel(stage, i));
+                }
+            }
+        }
+        return out;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
 } // namespace ts2::scene

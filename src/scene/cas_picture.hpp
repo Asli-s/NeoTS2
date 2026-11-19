@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -40,5 +41,15 @@ std::optional<PictureView> pictureView(const scenegraph::ResourceNode& cameraNod
 
 // The view a hair's picture is drawn with, from the game's files. Nullopt when they can't be read.
 std::optional<PictureView> hairPictureView(Assets& assets, PictureAge age);
+
+// Where the household's family picture is taken (casNeighborhoodPose_cres): each slot's place by
+// its number (the simMark_<n> nodes), and the view from camera `camera` (a letter, see
+// sim::FamilyPicture) lit by the stage's lights. Nullopt when the game's files can't give them.
+struct FamilyPictureStage {
+    std::map<int, Transform> slots;
+    PictureView view;
+    static constexpr unsigned kSize = 512;  // the picture is this many pixels square
+};
+std::optional<FamilyPictureStage> familyPictureStage(Assets& assets, const std::string& camera);
 
 } // namespace ts2::scene

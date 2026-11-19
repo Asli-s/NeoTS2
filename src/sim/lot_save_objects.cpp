@@ -298,6 +298,8 @@ xobj::SavedObject objectRecord(const xobj::SavedObject& loaded, const SimObject&
         tail.token.value1 = object.token.value1;
         tail.token.value2 = object.token.value2;
         tail.token.value3 = object.token.category;
+        tail.relationshipVersion = 3;
+        tail.relationshipIds = owners.relationshipList ? owners.relationshipList(object) : object.relationshipTable;
         tail.token.properties = object.token.properties;
         // A record whose slot marker is not negative keeps the lot's own slots, so writing the
         // object's there would not be read back.
@@ -322,6 +324,8 @@ xobj::SavedObject objectRecord(const xobj::SavedObject& loaded, const SimObject&
     if (record.person) {
         SaveCounters none;
         saveQueue(record.person->state, object, counters != nullptr ? *counters : none, owners.tunings);
+        record.person->state.collectiblesLow = object.vacationCollectibles[0];
+        record.person->state.collectiblesHigh = object.vacationCollectibles[1];
         // The runs go with the stack: each is the depth it started at and the object the frame there
         // runs on. With the stack kept as loaded they stay as loaded too.
         if (stackFromState) {
@@ -334,6 +338,7 @@ xobj::SavedObject objectRecord(const xobj::SavedObject& loaded, const SimObject&
             }
         }
         record.person->motives = object.motives;
+        record.person->motives2 = object.motivesAtDecay;
         for (std::size_t i = 0; i < record.person->personData.size(); ++i) {
             record.person->personData[i] = object.personData[i];
         }

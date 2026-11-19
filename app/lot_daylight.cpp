@@ -95,7 +95,10 @@ void LotDaylight::update(double seconds, std::span<const std::int16_t> globals, 
             wanted = std::move(byClock);
         }
     }
-    if (wanted == state_ && !lampsChanged && !again_) {
+    // A script set a room's light percent.
+    const bool roomsChanged = world.roomLightsVersion() != roomLightsVersion_;
+    roomLightsVersion_ = world.roomLightsVersion();
+    if (wanted == state_ && !lampsChanged && !roomsChanged && !again_) {
         return;
     }
     again_ = false;
@@ -108,7 +111,7 @@ void LotDaylight::update(double seconds, std::span<const std::int16_t> globals, 
             const float strength = strengthOf(id);
             lamps_.emplace_back(id, strength);
             return strength;
-        });
+        }, [&world](std::int16_t room) { return world.roomLightPercent(room); });
     } catch (const std::exception& ex) {
         ts2::diag::error(std::format("lot light: reading the lot's lights for {} failed: {}", wanted, ex.what()));
     }

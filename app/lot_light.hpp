@@ -32,6 +32,9 @@ struct LotLightBase;
 // A lot's light in one lighting state, gathered from the game's files and then worked out.
 struct LotLight;
 
+// The game's lighting state for drawing a lot as its neighbors see it, in its imposter (Lighting.txt).
+inline constexpr const char* kImposterLighting = "neighbourhoodImposter";
+
 // The lighting state the game lights a lot with at the hour its clock was saved at.
 std::string savedLightingState(const ts2::content::Lighting& lighting, const ts2::content::Lot& saved);
 
@@ -46,9 +49,11 @@ std::shared_ptr<LotLightBase> lightLot(ts2::scene::Assets& assets, ts2::scene::S
 // Lighting the lot again in another state, in three steps. First the lot's lamps, windows and doors
 // in `state`, read from the game's files (on the thread that uses `assets`), or null without that state.
 // `strength` gives how strongly each object's lights shine now (by object id, asked once for each
-// object with lights of its own), all off without it.
+// object with lights of its own), all off without it. `roomPercent` gives each room's light
+// percent, the lot's saved ones without it. Lamps in a room below 100 stay off.
 std::shared_ptr<LotLight> gatherLotLight(ts2::scene::Assets& assets, std::shared_ptr<LotLightBase> base, const std::string& state,
-                                         const std::function<float(std::uint32_t object)>& strength = {});
+                                         const std::function<float(std::uint32_t object)>& strength = {},
+                                         const std::function<std::int16_t(std::int16_t room)>& roomPercent = {});
 // Then the light worked out, on any thread (one at a time for a lot).
 void workOutLotLight(LotLight& light);
 // Then put into the lot's scene (`place` is where the lot stands in it): its sky, its light maps,

@@ -9,6 +9,12 @@
 
 namespace ts2::scene::objectshadow {
 
+// The camera the game frames a box (in world units) with from the sun line `toSun`: world to the
+// picture's clip space (see Picture::camera), the box raised to the ground where it reaches below
+// it, with half a unit spare on either side across and up. None for a box under 0.15 in every
+// direction or a sun the picture can't look along.
+std::optional<std::array<float, 16>> boxCamera(std::array<float, 3> low, std::array<float, 3> high, const std::array<float, 3>& toSun);
+
 // The picture of a model at a facing, looking along the sun line `toSun` (toward the sun). The
 // picture holds the box around the model's vertices, every group counted, turned to the facing,
 // with half a unit spare on either side across. None for a model under 0.15 in every direction.

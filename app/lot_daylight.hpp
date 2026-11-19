@@ -57,6 +57,7 @@ private:
     std::vector<std::pair<std::uint32_t, float>> lamps_;
     bool lampsRead_ = false;
     bool again_ = false;
+    std::uint64_t roomLightsVersion_ = 0;  // the world's room light version last lit
     std::future<std::shared_ptr<LotLight>> working_;
     // The outdoor lights fading from one state's to the next's.
     ts2::scene::ObjectLighting from_, to_;

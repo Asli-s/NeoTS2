@@ -6,6 +6,7 @@
 #include "scene/object_shadow.hpp"
 #include "scene/object_shadow_picture.hpp"
 #include "scene/sim_shadows.hpp"
+#include "scene/family_picture_shadow.hpp"
 
 #include <limits>
 
@@ -1667,6 +1668,72 @@ void objectShadowsFollowTheGame() {
     CHECK(layout(lot, {-0.5570860f, -0.3713907f, 0.7427813f}).floors.levels == 0);
 }
 
+// The family picture's shadow: each Sim bounded by its joints' boxes in their own frames, the box
+// framed as an object's, the Sims' picture sampled at texel corners and blurred, and laid where
+// nothing covers the picture in full.
+void familyPictureShadowFollowsTheGame() {
+    using namespace ts2::scene;
+    // Two vertices on joint 0, whose frame sits at x = 1, posed turned an eighth about z.
+    Mesh mesh;
+    mesh.skin.resize(1);
+    mesh.skin[0].inverseBind.m = {1, 0, 0, -1, 0, 1, 0, 0, 0, 0, 1, 0};
+    Primitive p;
+    p.positions = {1, 0, 0, 2, 1, 1};
+    p.joints = {0, 255, 255, 255, 0, 255, 255, 255};
+    p.weights = {1, 0, 0, 0, 1, 0, 0, 0};
+    mesh.primitives.push_back(p);
+    const float c = std::sqrt(0.5f);
+    Transform turn;
+    turn.m = {c, -c, 0, 1, c, c, 0, 0, 0, 0, 1, 0};
+    familyshadow::Box box;
+    familyshadow::growByJoints(box, mesh, {turn * mesh.skin[0].inverseBind}, Transform::at(3, 0, 0, 0));
+    // The joint's box [0, 1] x [0, 1] x [0, 1] turned about the joint: x from 1 - c to 1 + c.
+    CHECK(std::abs(box.low[0] - (4 - c)) < 1e-5f && std::abs(box.high[0] - (4 + c)) < 1e-5f);
+    CHECK(std::abs(box.low[1]) < 1e-5f && std::abs(box.high[1] - 2 * c) < 1e-5f && box.low[2] == 0 && box.high[2] == 1);
+    // A Sim's mesh turned a quarter on the stage gets the box turned with it.
+    familyshadow::Box turned;
+    familyshadow::growByJoints(turned, mesh, {mesh.skin[0].inverseBind.rigidInverse() * mesh.skin[0].inverseBind},
+                               Transform::at(0, 0, 0, 3.14159265f / 2));
+    CHECK(std::abs(turned.low[0] + 1) < 1e-5f && std::abs(turned.high[0]) < 1e-5f && std::abs(turned.low[1] - 1) < 1e-5f);
+
+    // Framed as an object box along the material's light.
+    const auto light = familyshadow::camera(box);
+    const auto object = objectshadow::boxCamera(box.low, box.high, familyshadow::kToLight);
+    CHECK(light && object && *light == *object);
+    CHECK(!familyshadow::camera(familyshadow::Box{}));
+
+    // A triangle over the left half of the picture covers the texels whose corners it holds.
+    std::array<float, 16> flat{};
+    flat[0] = 1;
+    flat[5] = 1;
+    flat[10] = 1;
+    flat[15] = 1;
+    const auto half = familyshadow::coverage({-1, -2, 0, 0, -2, 0, 0, 4, 0, -1, -2, 0, -1, 4, 0, 0, 4, 0}, flat);
+    CHECK(half.size() == 128 * 128 && half[0] == 1 && half[63] == 1 && half[64] == 1 && half[65] == 0 && half[127 * 128 + 10] == 1);
+    // The blur spreads one texel over 5 x 5 and loses none of it.
+    std::vector<float> one(128 * 128, 0.0f);
+    one[60 * 128 + 60] = 1;
+    const auto soft = familyshadow::blurred(one);
+    float sum = 0;
+    for (float v : soft) {
+        sum += v;
+    }
+    CHECK(std::abs(sum - 1) < 1e-5f && soft[58 * 128 + 58] > 0 && soft[57 * 128 + 60] == 0);
+
+    // Looking straight down on a floor the shadow covers: only the pixels not covered in full darken.
+    Image picture;
+    picture.width = picture.height = 4;
+    picture.rgba.assign(64, 0);
+    picture.rgba[0] = 200;
+    picture.rgba[3] = 255;
+    picture.rgba[4] = 100;
+    picture.rgba[7] = 128;
+    std::vector<float> full(128 * 128, 1.0f);
+    familyshadow::lay(picture, {0, 0, 5}, {0, 0, 0}, {0, 1, 0}, 0.5f, flat, full);
+    CHECK(picture.rgba[0] == 200 && picture.rgba[3] == 255);
+    CHECK(picture.rgba[4] == 50 && picture.rgba[7] == 192 && picture.rgba[11] == 128 && picture.rgba[8] == 0);
+}
+
 // Sims' projected shadows: the blur shares 255 between its taps, the colour is the game's by day and
 // at night, to the byte, and the picture frames the Sim as the game does.
 void simShadowsFollowTheGame() {
@@ -1744,6 +1811,7 @@ std::vector<Test> lightingTests() {
         {"objects get the window lights of their room", objectsGetTheWindowLightsOfTheirRoom},
         {"objects outdoors get the outdoor lamps and windows", objectsOutdoorsGetTheOutdoorLampsAndWindows},
         {"Sim shadows follow the game", simShadowsFollowTheGame},
+        {"The family picture's shadow follows the game", familyPictureShadowFollowsTheGame},
         {"object shadows follow the game", objectShadowsFollowTheGame},
         {"ground normals use the lot's own triangles", groundNormalsUseTheLotsOwnTriangles},
         {"drawn ground normals follow the drawn slope", drawnGroundNormalsFollowTheDrawnSlope},

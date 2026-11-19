@@ -23,9 +23,6 @@ namespace {
 
 using namespace ts2;
 
-// The game's lighting state for drawing imposters from lot houses (Lighting.txt).
-constexpr const char* kImposterLighting = "neighbourhoodImposter";
-
 template <typename T>
 bool ready(const std::future<T>& job) {
     return job.valid() && job.wait_for(std::chrono::seconds(0)) == std::future_status::ready;

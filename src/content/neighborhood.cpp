@@ -125,6 +125,15 @@ bool addLot(Neighborhood& hood, dbpf::Package& package, const dbpf::IndexEntry& 
         const auto id = static_cast<std::int32_t>(e.key.instance);
         hood.lotTypes[id] = description.type;
         hood.lotOwners[id] = description.owner;
+        if (description.building != 0) {
+            hood.lotBuildings[id] = static_cast<std::int32_t>(description.building);
+        }
+        if (!description.roomLightPercents.empty()) {
+            hood.lotRoomLights[id] = description.roomLightPercents;
+        }
+        for (const auto& t : description.tenants) {
+            hood.apartments[id].push_back({t.lot, t.family, t.controlRoom, t.roommate});
+        }
         hood.lotShapes[id] = {description.width, description.depth,
                               (description.flags & kBeachLot) != 0 ? std::optional<std::uint8_t>(description.ownFacing) : std::nullopt};
         return true;

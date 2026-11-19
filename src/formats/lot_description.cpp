@@ -77,9 +77,9 @@ LotDescription parseLotDescription(std::span<const std::uint8_t> data) {
         r.u32();
     }
     if (own >= 9) {
-        r.u8();
-        r.u32();
-        r.u32();
+        out.apartments = r.u8();
+        out.highestRent = r.u32();
+        out.lowestRent = r.u32();
     }
     if (own >= 10) {
         r.u32();
@@ -109,6 +109,25 @@ LotDescription parseLotDescription(std::span<const std::uint8_t> data) {
         out.owner = r.i32();
     }
     if (out.version >= 0x12) {
+        // An apartment's building, three values not read yet, then the tenants, sixteen bytes each.
+        // A description cut short keeps none.
+        try {
+            out.building = r.u32();
+            r.u8();
+            r.i32();
+            r.i32();
+            for (std::size_t n = r.i32Count(16); n > 0; --n) {
+                LotDescription::Tenant tenant;
+                tenant.lot = r.u32();
+                tenant.family = r.u32();
+                tenant.controlRoom = r.u32();
+                tenant.roommate = r.u32();
+                out.tenants.push_back(tenant);
+            }
+        } catch (const std::exception&) {
+            out.building = 0;
+            out.tenants.clear();
+        }
         out.roomLightPercents = roomLightPercents(data);
     }
     return out;

@@ -295,7 +295,8 @@ void setLotLightOptions(const LotLightOptions& options) {
 }
 
 std::shared_ptr<LotLight> gatherLotLight(ts2::scene::Assets& assets, std::shared_ptr<LotLightBase> base, const std::string& stateName,
-                                         const std::function<float(std::uint32_t object)>& strength) {
+                                         const std::function<float(std::uint32_t object)>& strength,
+                                         const std::function<std::int16_t(std::int16_t room)>& roomPercent) {
     using namespace ts2::scene;
     if (!base) {
         return nullptr;
@@ -311,7 +312,9 @@ std::shared_ptr<LotLight> gatherLotLight(ts2::scene::Assets& assets, std::shared
     lotlightobjects::Queries queries;
     queries.roomAt = base->roomAt;
     queries.strength = strength ? strength : [](std::uint32_t) { return 0.0f; };
-    queries.roomLit = [description = &base->description](std::int16_t room) { return description->roomLightPercent(room) >= 100; };
+    queries.roomLit = [description = &base->description, roomPercent](std::int16_t room) {
+        return (roomPercent ? roomPercent(room) : description->roomLightPercent(room)) >= 100;
+    };
     out->found = lotlightobjects::gather(assets, base->fromGround, base->package, *state, queries);
     out->outdoor = outdoorLighting(*state);
     out->outdoor.textureLight = state->environment;

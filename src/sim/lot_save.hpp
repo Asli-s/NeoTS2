@@ -81,7 +81,14 @@ struct TypeOwners {
     // The effects an object is playing now, by object id, as its record saves them. Without it the
     // record keeps the effects it was loaded with.
     std::function<std::vector<xobj::Effect>(std::int16_t)> runningEffects;
+    // The objects an object's record lists relationships towards (see savedRelationships). Without
+    // it the record lists the object's whole relationship table.
+    std::function<std::vector<std::uint32_t>(const SimObject&)> relationshipList;
 };
+
+// The objects `object` saves relationships towards: those in its relationship table it holds
+// variables towards. One a failed lookup left empty is left out, as the game's saves hold none.
+std::vector<std::uint32_t> savedRelationships(const World& world, const SimObject& object);
 
 // The object on the running lot that continues the one the object map lists at `id` with the type
 // at `typeIndex`: the object at that id now, when its GUID is that type's. Ids are reused, so an
@@ -134,6 +141,7 @@ struct LotSaveCounts {
     int objects = 0;     // objects whose saved state was written
     int scenes = 0;      // objects whose scene record was written
     int objectsAdded = 0;  // objects made since the load given a record of their own
+    int relationships = 0; // relationship records written, one for each object an object lists
     // New objects left out: the lot's table holds no entry for their type, there is no record to
     // start theirs from, or their record does not write.
     int objectsUnnamed = 0;

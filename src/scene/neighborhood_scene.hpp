@@ -26,6 +26,7 @@ struct LotFootprint {
     Transform place;  // where the lot itself goes in the neighborhood (from its own coordinates)
     std::string texture;  // its terrain texture (the ground around it in lot view)
     bool hasImposter = false;
+    std::uint32_t building = 0;  // on an apartment's own lot (type 9), the building it is in
     std::optional<std::uint8_t> beachSide;  // on a beach lot, its beach's side (see content::isBeachLocation)
     // Where the game starts the effect shown over the lot (its plumbob): the middle of its tiles
     // less the row along each road side, 2 above the top of the lot's box.

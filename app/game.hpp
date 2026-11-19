@@ -136,6 +136,8 @@ private:
         std::shared_ptr<ts2::scene::Assets> assets;
         std::size_t worker = 0;  // the house worker that built it
         bool failed = false;  // its imposter stays, and it isn't tried again
+        std::string state;  // the lighting state it was lit in
+        bool relight = false;  // built again only for its light maps (see relightNeighborHouse)
     };
 
     // A lot built in the background, then shown.
@@ -335,6 +337,12 @@ private:
     void redrawPortrait(std::uint64_t now);
     void drawNeighborPortrait(std::uint64_t now);
     std::optional<ts2::tga::Pixels> drawSimPortrait(std::int16_t sim, std::mt19937& random);
+    // The household's family picture, drawn as the game draws it at a save. Nullopt, with the reason
+    // logged, when it can't be drawn.
+    std::optional<ts2::tga::Pixels> drawFamilyPicture();
+    // The household's FamilyThumbnails package with its picture put in, for the save. Nullopt when
+    // there is no picture or package to write.
+    std::optional<std::pair<std::filesystem::path, std::vector<std::uint8_t>>> familyPictureFile();
     std::optional<ts2::tga::Pixels> drawSimView(const LotLife::AppearanceHairs& sim, const ts2::scene::HairSlots& slots, const std::string& tone,
                                                 unsigned width, unsigned height, float turn);
     void sendLotChanges();
@@ -361,6 +369,7 @@ private:
     void buildNextNeighborHouse();
     void buildNextNeighborHouse(std::size_t worker);
     void addNeighborHouse(NeighborBuilt built);
+    void relightNeighborHouse(NeighborBuilt built);
     void fadeNeighborHouses(const std::array<float, 3>& eye);
     // Shows the surroundings built for this View Distance, building them first when there are none.
     void showMargin(int margin);
@@ -581,6 +590,10 @@ private:
     struct NeighborHouse {
         std::uint32_t id = 0;
         std::size_t first = 0, count = 0;
+        ts2::scene::LotFootprint footprint;
+        std::string state;  // the lighting state its light maps are lit in
+        // Its light maps and incidence maps: their indexes in the house as built and in the lot's scene.
+        std::vector<std::pair<std::size_t, std::size_t>> lightMaps;
         std::array<float, 4> ground{};  // its lot in the neighborhood: x0, x1, y0, y1
         ts2::scene::propfade::Box box;  // in the lot's coordinates, for the Fade Distance
         float alpha = 1;

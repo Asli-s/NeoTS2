@@ -9,6 +9,8 @@
 #include <cstdint>
 #include <optional>
 #include <random>
+#include <string>
+#include <vector>
 
 namespace app {
 
@@ -38,5 +40,19 @@ namespace app {
 [[nodiscard]] std::optional<ts2::tga::Pixels> drawSimView(const ts2::scene::Scene& lot, ts2::render::IRenderer& renderer,
                                             ts2::scene::AnimationLibrary& animations, const ts2::scene::Actor& actor,
                                             const std::string& pose, unsigned width, unsigned height, float turn);
+
+// A Sim in the family picture, built at its slot (see LotLife::addFamilyPictureSim).
+struct FamilyPictureActor {
+    ts2::scene::Actor actor;
+    std::string pose;  // the animation's name without "_anim"
+};
+
+// Draws a household's family picture: each actor in its pose, with the stage's camera and lights
+// and their soft shadow on the floor, over a transparent background (FamilyPictureStage::kSize
+// pixels square). Its colour is premultiplied by its alpha. Nullopt when nothing can be drawn.
+// The renderer's shown instances are changed, and the caller shows the lot's again.
+[[nodiscard]] std::optional<ts2::tga::Pixels> drawFamilyPicture(const ts2::scene::Scene& lot, ts2::render::IRenderer& renderer,
+                                                  ts2::scene::AnimationLibrary& animations, const std::vector<FamilyPictureActor>& actors,
+                                                  const ts2::scene::FamilyPictureStage& stage);
 
 } // namespace app

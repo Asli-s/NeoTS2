@@ -20,10 +20,23 @@ struct LotDescription {
     std::uint8_t type = 0;
     std::uint8_t roadSides = 0;  // a bit per side with a road, 1 << ownFacing among them
     std::uint8_t ownFacing = 0;  // the quarter turn the lot was built facing (on a beach lot, its beach's side)
-    // Flags (from version 5): 0x80 a beach lot.
+    // Flags (from version 5): 0x80 a beach lot, 8 leaves the second part out of the lot's value
+    // (simi::lotValue).
     std::uint32_t flags = 0;
     std::string name;
     std::string description;  // the text its card shows (a community lot's)
+    // An apartment lot's (from version 9): how many apartments it has and the rent range.
+    std::uint8_t apartments = 0;
+    std::uint32_t lowestRent = 0, highestRent = 0;
+    // The apartments lived in, in the neighborhood's order: each one's own lot, the family there and
+    // two values the apartment scripts read as its control room and roommate (from the
+    // neighborhood's version 0x12).
+    struct Tenant {
+        std::uint32_t lot = 0, family = 0, controlRoom = 0, roommate = 0;
+    };
+    std::vector<Tenant> tenants;
+    // An apartment's own lot (type 9): the building it is in (from version 0x12).
+    std::uint32_t building = 0;
     std::uint32_t x = 0, y = 0;  // the lot's corner, in neighborhood tiles
     float elevation = 0;
     std::uint32_t id = 0;
@@ -81,7 +94,7 @@ struct LotDescriptionRecord {
     std::uint8_t facing = 0;
     std::string texture;
     std::int32_t owner = 0;
-    std::int32_t value1 = 0;  // not known yet
+    std::int32_t value1 = 0;  // an apartment's building lot
     std::uint8_t flag = 0;    // not known yet
     std::int32_t value2 = 0, value3 = 0;  // not known yet
     std::vector<std::array<std::uint32_t, 4>> entries;  // not known yet

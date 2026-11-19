@@ -10,6 +10,7 @@
 #include "formats/fami.hpp"
 #include "formats/famt.hpp"
 #include "formats/ngbh.hpp"
+#include "formats/object_archive.hpp"
 #include "formats/lot_grid.hpp"
 #include "formats/wallgraph.hpp"
 #include "formats/walllayer.hpp"
@@ -393,8 +394,9 @@ int printDataTables(ts2::dbpf::Package& package, std::string_view name) {
     return 0;
 }
 
-// Reads the neighborhood record (NGBH) and summarizes its inventories.
-int showNeighborhoodRecord(ts2::dbpf::Package& package) {
+// Reads the neighborhood record (NGBH) and summarizes its inventories, then lists one lot's singular
+// tokens when `lot` is given.
+int showNeighborhoodRecord(ts2::dbpf::Package& package, std::optional<std::int32_t> lot = std::nullopt) {
     for (const auto& e : package.entries()) {
         if (e.key.type != ts2::types::kNeighborhoodRecord) {
             continue;
@@ -410,6 +412,13 @@ int showNeighborhoodRecord(ts2::dbpf::Package& package) {
         std::printf("lots: %zu (%zu tokens), families: %zu (%zu tokens), neighbors: %zu (%zu tokens)\n",
                     hood.lots.size(), lotTokens, hood.families.size(), familyTokens, hood.neighbors.size(),
                     neighborTokens);
+        if (const auto it = lot ? hood.lots.find(*lot) : hood.lots.end(); it != hood.lots.end()) {
+            for (std::size_t i = 0; i < it->second.singular.size(); ++i) {
+                const auto& t = it->second.singular[i];
+                std::printf("lot %d token %zu: guid 0x%08X flags 0x%X value1 %u value2 %u value3 %u, %zu properties\n", *lot, i, t.guid,
+                            t.flags, t.value1, t.value2, t.value3, t.properties.size());
+            }
+        }
         return hood.extraBytes == 0 ? 0 : 1;
     }
     std::fprintf(stderr, "no NGBH resource\n");
@@ -963,7 +972,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
                      "Usage: dbpfdump <file.package> [--list | --verify | --grep <text> |\n"
                      "                                --str <group> <instance> | --str-survey | --ttab-survey | --lua-survey |\n"
-                     "                                --ngbh | --datatable-survey | --datatables <name> |\n"
+                     "                                --ngbh [lot] | --archives | --datatable-survey | --datatables <name> |\n"
                      "                                --hex <type> <group> <instance> [bytes] |\n"
                      "                                --extract <type> <folder>]\n"
                      "       dbpfdump <file.package or folder> --save-check [--pristine <shipped folder>]\n");
@@ -1001,8 +1010,27 @@ int main(int argc, char** argv) {
         if (mode == "--datatable-survey") {
             return surveyDataTables(package);
         }
+        if (mode == "--archives") {
+            // Each object archive (0x4F6FD33D): its objects' GUIDs and part counts.
+            for (const auto& e : package.entries()) {
+                if (e.key.type != ts2::archive::kType) {
+                    continue;
+                }
+                const auto record = ts2::archive::readRecord(package.read(e));
+                std::printf("archive %u:", e.key.instance);
+                if (!record) {
+                    std::printf(" not readable");
+                } else {
+                    for (const auto& o : record->objects) {
+                        std::printf(" 0x%08X x%zu", o.guid, o.parts.size());
+                    }
+                }
+                std::printf("\n");
+            }
+            return 0;
+        }
         if (mode == "--ngbh") {
-            return showNeighborhoodRecord(package);
+            return showNeighborhoodRecord(package, argc > 3 ? std::optional<std::int32_t>(std::atoi(argv[3])) : std::nullopt);
         }
         if (mode == "--str-survey") {
             return surveyStrings(package);

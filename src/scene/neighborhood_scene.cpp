@@ -294,8 +294,14 @@ NeighborhoodSceneStats addNeighborhood(SceneBuilder& builder, const std::filesys
         const auto rect = effectTiles(lot);
         stats.lotFootprints.back().effectAnchor = {static_cast<float>(rect[0] + rect[2]) * kTile / 2,
                                                    static_cast<float>(rect[1] + rect[3]) * kTile / 2, lot.elevation + kEffectAboveLot};
+        constexpr std::uint8_t kApartmentLot = 9;
+        if (lot.type == kApartmentLot) {
+            stats.lotFootprints.back().building = lot.building;
+        }
+        // An apartment's own lot (description flag 0x10) shows no imposter: its building's stands there.
+        constexpr std::uint32_t kApartmentFlag = 0x10;
         const auto file = neighborhood / "Lots" / (hood + "_Lot" + std::to_string(lot.id) + ".package");
-        if (!std::filesystem::is_regular_file(file)) {
+        if ((lot.flags & kApartmentFlag) != 0 || !std::filesystem::is_regular_file(file)) {
             continue;
         }
         try {

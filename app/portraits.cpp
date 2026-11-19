@@ -1,7 +1,9 @@
 #include "portraits.hpp"
 
 #include "content/ui_meters.hpp"
+#include "scene/family_picture_shadow.hpp"
 #include "scene/portrait.hpp"
+#include "scene/rig.hpp"
 
 namespace app {
 
@@ -133,6 +135,83 @@ std::optional<ts2::tga::Pixels> drawSimView(const ts2::scene::Scene& lot, ts2::r
         return std::nullopt;
     }
     return ts2::content::unpremultiplied(ts2::tga::Pixels{image->width, image->height, std::move(image->rgba)});
+}
+
+std::optional<ts2::tga::Pixels> drawFamilyPicture(const ts2::scene::Scene& lot, ts2::render::IRenderer& renderer,
+                                                  ts2::scene::AnimationLibrary& animations, const std::vector<FamilyPictureActor>& actors,
+                                                  const ts2::scene::FamilyPictureStage& stage) {
+    using namespace ts2::scene;
+    std::vector<std::uint8_t> visible(lot.instances.size(), 0);
+    bool any = false;
+    familyshadow::Box box;
+    std::vector<float> triangles, posed;
+    for (const auto& a : actors) {
+        if (!a.actor.rig) {
+            continue;
+        }
+        const auto clip = animations.bound(a.actor.rig, a.pose);
+        PortraitShot shot;
+        if (!posedForPicture(lot, a.actor, clip.get(), shot)) {
+            continue;
+        }
+        for (const auto& [instance, joints] : shot.joints) {
+            visible[instance] = 1;
+            renderer.setJoints(instance, joints);
+            const Instance& placed = lot.instances[instance];
+            if (placed.mesh < 0 || static_cast<std::size_t>(placed.mesh) >= lot.meshes.size()) {
+                continue;
+            }
+            const Mesh& mesh = lot.meshes[static_cast<std::size_t>(placed.mesh)];
+            familyshadow::growByJoints(box, mesh, joints, placed.transform);
+            for (const auto& p : mesh.primitives) {
+                if (!isSkinned(p) || p.material == kHiddenMaterial) {
+                    continue;
+                }
+                posedPositions(p, joints, posed);
+                const std::size_t vertices = posed.size() / 3;
+                for (const std::uint32_t i : p.indices) {
+                    if (i >= vertices) {
+                        triangles.resize(triangles.size() - triangles.size() % 9);
+                        break;
+                    }
+                    float v[3] = {posed[3 * i], posed[3 * i + 1], posed[3 * i + 2]};
+                    placed.transform.apply(v, true);
+                    triangles.insert(triangles.end(), v, v + 3);
+                }
+                triangles.resize(triangles.size() - triangles.size() % 9);
+            }
+        }
+        for (const auto& [instance, weights] : shot.morphs) {
+            renderer.setMorphWeights(instance, weights);
+        }
+        for (const auto& [instance, eyes] : shot.eyes) {
+            renderer.setEyes(instance, eyes);
+        }
+        any = true;
+    }
+    if (!any) {
+        return std::nullopt;
+    }
+    renderer.show(std::move(visible));
+    const PictureView& view = stage.view;
+    ts2::render::Camera camera;
+    camera.eye = view.eye;
+    camera.target = view.target;
+    camera.up = view.up;
+    camera.fovY = view.fovY;
+    camera.nearPlane = view.nearPlane;
+    camera.farPlane = view.farPlane;
+    auto image = renderer.drawInstancesToImage(camera, FamilyPictureStage::kSize, FamilyPictureStage::kSize, view.lighting);
+    if (!image) {
+        return std::nullopt;
+    }
+    if (const auto light = familyshadow::camera(box)) {
+        familyshadow::lay(*image, view.eye, view.target, view.up, view.fovY, *light,
+                          familyshadow::blurred(familyshadow::coverage(triangles, *light)));
+    }
+    // The game keeps the picture's colour as drawn over black, its soft edges darkened, with the
+    // alpha beside it.
+    return ts2::tga::Pixels{image->width, image->height, std::move(image->rgba)};
 }
 
 } // namespace app

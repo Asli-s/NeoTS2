@@ -142,13 +142,14 @@ void keepGroundOff(ts2::scene::Scene& scene, const ts2::scene::Transform& place,
     }
 }
 
-// Builds a neighbor's lot as it looks from outside. It is lit once by day and drawn in the hour's light, as
-// the game's imposter of it is, keeps what shows with its walls up and its roofs on, and takes no part in
-// the lot's views. Its ponds are drawn like pools with `poolStylePonds` (Water), as the
-// played lot's are. Its ground keeps off the tiles in `taken` (see keepGroundOff).
-ts2::scene::Scene neighborHouse(ts2::scene::Assets& assets, const std::filesystem::path& file, std::vector<std::string>& imageKeys, bool poolStylePonds,
-                                const ts2::scene::PaintedTerrain* hood, const ts2::scene::Transform& place,
-                                const std::vector<std::array<float, 4>>& taken) {
+// Builds a neighbor's lot as it looks from outside, lit as the played lot is: its light maps in lighting
+// state `state` with its lamps off, and its objects and roofs by the played lot's outdoor lights. It keeps
+// what shows with its walls up and its roofs on, and takes no part in the lot's views. Its ponds are drawn
+// like pools with `poolStylePonds` (Water), as the played lot's are. Its ground keeps off the tiles in
+// `taken` (see keepGroundOff).
+ts2::scene::Scene neighborHouse(ts2::scene::Assets& assets, const std::filesystem::path& file, const std::string& state,
+                                std::vector<std::string>& imageKeys, bool poolStylePonds, const ts2::scene::PaintedTerrain* hood,
+                                const ts2::scene::Transform& place, const std::vector<std::array<float, 4>>& taken) {
     using namespace ts2::scene;
     SceneBuilder builder(assets);
     builder.setPoolStylePonds(poolStylePonds);
@@ -162,7 +163,7 @@ ts2::scene::Scene neighborHouse(ts2::scene::Assets& assets, const std::filesyste
     }
     {
         ts2::diag::Timer timer("house: light");
-        app::lightLot(assets, builder.scene(), lot, file, "day", false);
+        app::lightLot(assets, builder.scene(), lot, file, state, false);
     }
     imageKeys = builder.imageKeys();
     Scene scene = std::move(builder.scene());
@@ -179,6 +180,12 @@ ts2::scene::Scene neighborHouse(ts2::scene::Assets& assets, const std::filesyste
     for (std::size_t i = 0; i < scene.instances.size(); ++i) {
         if (visible[i]) {
             Instance& instance = scene.instances[i];
+            // Seen from outside, its objects and roofs are lit as outdoors, not by their rooms.
+            if (instance.part == Part::Object || instance.part == Part::Roof || instance.litOutdoors) {
+                instance.litOutdoors = true;
+                instance.lightSet = -1;
+                instance.partLightSets.clear();
+            }
             instance.part = Part::Other;
             instance.underside = Instance{}.underside;
             instance.walls.clear();
@@ -405,7 +412,8 @@ void Game::buildNextNeighborHouse() {
     }
 }
 
-// The nearest house not being built yet, on worker `w` when it is free.
+// The nearest house not being built yet, on worker `w` when it is free. With none left, a house lit for
+// another lighting state than the lot's now is built again for its light maps.
 void Game::buildNextNeighborHouse(std::size_t w) {
     HouseWorker& worker = houseWorkers_[w];
     if (!inLot_ || worker.building.valid()) {
@@ -422,11 +430,25 @@ void Game::buildNextNeighborHouse(std::size_t w) {
             ts2::diag::error(std::format("couldn't open the game's packages for the neighbors' houses: {}", ex.what()));
         }
     }
-    const auto building = [&](const ts2::scene::LotFootprint& f) {
-        return std::any_of(houseWorkers_.begin(), houseWorkers_.end(), [&](const HouseWorker& other) { return other.building.valid() && other.lot == f.id; });
+    const auto building = [&](std::uint32_t lot) {
+        return std::any_of(houseWorkers_.begin(), houseWorkers_.end(), [&](const HouseWorker& other) { return other.building.valid() && other.lot == lot; });
     };
-    const auto next = std::find_if_not(neighborsToBuild_.rbegin(), neighborsToBuild_.rend(), building);
-    if (next == neighborsToBuild_.rend()) {
+    const std::string state = lotDaylight_ ? lotDaylight_->state() : std::string("day");
+    const ts2::scene::LotFootprint* next = nullptr;
+    bool relight = false;
+    if (const auto first = std::find_if_not(neighborsToBuild_.rbegin(), neighborsToBuild_.rend(), [&](const auto& f) { return building(f.id); });
+        first != neighborsToBuild_.rend()) {
+        next = &*first;
+    } else {
+        for (const NeighborHouse& house : neighborHouses_) {
+            if (house.state != state && !building(house.id)) {
+                next = &house.footprint;
+                relight = true;
+                break;
+            }
+        }
+    }
+    if (next == nullptr) {
         return;
     }
     const std::uint32_t id = next->id;
@@ -434,13 +456,15 @@ void Game::buildNextNeighborHouse(std::size_t w) {
     const auto file = openFolder_ / "Lots" / (openFolder_.filename().u8string() + u8"_Lot" + std::u8string(reinterpret_cast<const char8_t*>(std::to_string(id).c_str())) + u8".package");
     // Houses are built one at a time and the shared images change only as one is added, so they stay
     // as they are now until this one is added.
-    const ts2::render::IRenderer* uploader = renderer_.capabilities().threadedPrepare ? &renderer_ : nullptr;
+    const ts2::render::IRenderer* uploader = renderer_.capabilities().threadedPrepare && !relight ? &renderer_ : nullptr;
     worker.building = std::async(std::launch::async, [install = install_, assets = worker.assets, file, id, w, shared = sharedImages_, uploader,
                                                    poolStylePonds = realisticPonds_, hood = skirtSource_ && skirtSource_->hood && skirtSource_->hood->terrain ? &*skirtSource_->hood->terrain : nullptr, place = next->place,
-                                                   taken = tilesTakenFrom(*next)]() mutable {
+                                                   taken = tilesTakenFrom(*next), state, relight]() mutable {
         NeighborBuilt built;
         built.id = id;
         built.worker = w;
+        built.state = state;
+        built.relight = relight;
         try {
             ts2::diag::Timer whole("house: whole");
             if (!assets) {
@@ -448,7 +472,7 @@ void Game::buildNextNeighborHouse(std::size_t w) {
                 assets = std::make_shared<ts2::scene::Assets>(install);
             }
             built.assets = std::move(assets);
-            built.scene = neighborHouse(*built.assets, file, built.imageKeys, poolStylePonds, hood, place, taken);
+            built.scene = neighborHouse(*built.assets, file, state, built.imageKeys, poolStylePonds, hood, place, taken);
             built.imageAt = sharedImageIndexes(built.imageKeys, shared, built.scene.images.size());
             if (uploader != nullptr) {
                 ts2::diag::Timer timer("house: prepare upload");
@@ -465,6 +489,10 @@ void Game::buildNextNeighborHouse(std::size_t w) {
 void Game::addNeighborHouse(NeighborBuilt built) {
     if (built.worker < houseWorkers_.size()) {
         houseWorkers_[built.worker].assets = std::move(built.assets);
+    }
+    if (built.relight) {
+        relightNeighborHouse(std::move(built));
+        return;
     }
     const auto where = std::find_if(neighborsToBuild_.begin(), neighborsToBuild_.end(), [&](const ts2::scene::LotFootprint& f) { return f.id == built.id; });
     if (!inLot_ || where == neighborsToBuild_.end()) {
@@ -499,9 +527,20 @@ void Game::addNeighborHouse(NeighborBuilt built) {
         renderer_.leaveOutPrepared(built.gpu, nowShared);
     }
     const std::size_t shared = static_cast<std::size_t>(std::count_if(imageAt.begin(), imageAt.end(), [](int i) { return i >= 0; }));
+    std::set<int> lightMaps;
+    for (const auto& instance : built.scene.instances) {
+        for (const int image : {instance.lightMap, instance.incidenceMap}) {
+            if (image >= 0) {
+                lightMaps.insert(image);
+            }
+        }
+    }
     // The images moved in keep their order, so the ones not shared are numbered from firstImage on.
     for (std::size_t i = 0, next = firstImage; i < imageAt.size(); ++i) {
         if (imageAt[i] < 0) {
+            if (lightMaps.contains(static_cast<int>(i))) {
+                house.lightMaps.emplace_back(i, next);
+            }
             if (i < built.imageKeys.size() && !built.imageKeys[i].empty()) {
                 sharedImages_.emplace(built.imageKeys[i], static_cast<int>(next));
             }
@@ -530,6 +569,8 @@ void Game::addNeighborHouse(NeighborBuilt built) {
             p = std::move(empty);
         }
     }
+    house.footprint = footprint;
+    house.state = built.state;
     house.ground = {footprint.x0, footprint.x1, footprint.y0, footprint.y1};
     const ts2::scene::Transform toLot = lotPlace_.rigidInverse();
     float low[3] = {footprint.x0, footprint.y0, footprint.z}, high[3] = {footprint.x1, footprint.y1, footprint.top};
@@ -543,6 +584,34 @@ void Game::addNeighborHouse(NeighborBuilt built) {
     showNeighborHouses();
     renderer_.show(lotShown());
     ts2::diag::info(std::format("lot view: lot {} shows as a real house ({} instances, {} images shared)", footprint.id, house.count, shared));
+}
+
+// A house built again in the lot's lighting state now: its new light maps take the place of the old ones,
+// fading with the lot's if they are still fading.
+void Game::relightNeighborHouse(NeighborBuilt built) {
+    const auto house = std::find_if(neighborHouses_.begin(), neighborHouses_.end(), [&](const NeighborHouse& h) { return h.id == built.id; });
+    if (!inLot_ || house == neighborHouses_.end()) {
+        return;
+    }
+    // A failed build isn't tried again for this state.
+    house->state = built.state;
+    if (built.failed) {
+        return;
+    }
+    std::vector<int> changed;
+    for (const auto& [own, inLot] : house->lightMaps) {
+        if (own < built.scene.images.size() && inLot < lot_.images.size()) {
+            lot_.images[inLot] = std::move(built.scene.images[own]);
+            changed.push_back(static_cast<int>(inLot));
+        }
+    }
+    renderer_.setImages(lot_, changed, true);
+    for (const int i : changed) {
+        auto& image = lot_.images[static_cast<std::size_t>(i)];
+        image.rgba = {};
+        image.smallerLevels = {};
+        image.blockLevels = {};
+    }
 }
 
 // A house between the camera and the lot fades as its imposter would.

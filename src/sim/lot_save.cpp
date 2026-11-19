@@ -1,10 +1,13 @@
 #include "sim/lot_save.hpp"
 
+#include "formats/srel.hpp"
+
 #include "sim/lot_save_detail.hpp"
 #include "sim/lot_simulation.hpp"
 #include "sim/selection.hpp"
 #include "sim/simulator_ids.hpp"
 #include "sim/type_signature.hpp"
+#include "sim/want_refill.hpp"
 #include "sim/world.hpp"
 
 #include <algorithm>
@@ -323,12 +326,63 @@ void writeTypeTable(SaveState& save) {
     }
 }
 
+// Gives each object the save wrote a relationship record towards each object it lists (see
+// savedRelationships), as the game saves an object's relationships with it. Records no object lists
+// stay as loaded.
+void writeRelationships(SaveState& save) {
+    std::unordered_map<std::uint32_t, std::size_t> loaded;
+    for (std::size_t i = 0; i < save.package.resources.size(); ++i) {
+        const dbpf::ResourceKey& key = save.package.resources[i].key;
+        if (key.type == srel::kType && key.group == 0xFFFFFFFF && key.instanceHigh == 0) {
+            loaded.emplace(key.instance, i);
+        }
+    }
+    std::vector<std::int32_t> ids(save.done.begin(), save.done.end());
+    std::sort(ids.begin(), ids.end());
+    for (const std::int32_t id : ids) {
+        const SimObject* object = save.world.find(static_cast<std::int16_t>(id));
+        if (object == nullptr) {
+            continue;
+        }
+        for (const std::uint32_t to : savedRelationships(save.world, *object)) {
+            const std::vector<std::int16_t>* values = save.world.relationshipIfAny(object->id, static_cast<std::int16_t>(to));
+            const auto instance = static_cast<std::uint32_t>(static_cast<std::uint16_t>(object->id)) << 16 | (to & 0xFFFF);
+            const std::vector<std::uint8_t> body = srel::writeRecord({{values->begin(), values->end()}});
+            const dbpf::ResourceKey key{srel::kType, 0xFFFFFFFF, instance, 0};
+            if (const auto at = loaded.find(instance); at != loaded.end()) {
+                save.package.resources[at->second] = dbpf::storeResource(key, body);
+            } else {
+                save.package.resources.push_back(dbpf::storeResource(key, body));
+                save.package.dataOrder.push_back(save.package.resources.size() - 1);
+                loaded.emplace(instance, save.package.resources.size() - 1);
+            }
+            ++save.counts.relationships;
+        }
+    }
+}
+
 } // namespace
+
+std::vector<std::uint32_t> savedRelationships(const World& world, const SimObject& object) {
+    std::vector<std::uint32_t> ids;
+    for (const std::uint32_t to : object.relationshipTable) {
+        const std::vector<std::int16_t>* values = world.relationshipIfAny(object.id, static_cast<std::int16_t>(to));
+        if (values != nullptr && !values->empty()) {
+            ids.push_back(to);
+        }
+    }
+    return ids;
+}
 
 LotSaveCounts fillLotPackage(dbpf::PackageImage& package, const World& world, std::span<const std::int16_t> globals,
                              std::uint32_t tickRandomState, const TypeOwners& owners, const LotCameraView* view) {
     refuseNewSims(world, owners.writtenNewSims);
-    SaveState save{package, world, owners};
+    // Records list the relationships the save writes records for.
+    TypeOwners withLists = owners;
+    if (!withLists.relationshipList) {
+        withLists.relationshipList = [&world](const SimObject& object) { return savedRelationships(world, object); };
+    }
+    SaveState save{package, world, withLists};
     save.types = typesOf(package);
     // Types of objects made since the lot loaded that its table does not hold yet go on its end.
     if (save.types) {
@@ -354,6 +408,7 @@ LotSaveCounts fillLotPackage(dbpf::PackageImage& package, const World& world, st
     rewriteLoadedRecords(save, globals, tickRandomState, view, anyAnimation ? &*anyAnimation : nullptr);
     if (save.types) {
         addNewObjects(save);
+        writeRelationships(save);
         writeObjectMap(save);
         writeTypeTable(save);
     }
@@ -369,6 +424,8 @@ LotSaveCounts fillLotPackage(dbpf::PackageImage& package, LotSimulation& simulat
     // The game's queue reads the names as soon as a Sim is selected, even while paused, so a save
     // right after a switch sees 0x80 gone.
     markShownNames(simulation.world(), simulation.globals());
+    // Each Sim's waiting want refill runs before its wants are saved, as the game's save runs it.
+    prepareWantsForSave({simulation.world(), simulation.code(), simulation.vm(), simulation.installedPacks()});
     TypeOwners owners;
     if (const auto types = typesOf(package)) {
         for (const objt::Entry& entry : types->entries) {

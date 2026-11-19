@@ -157,7 +157,8 @@ Found gather(Assets& assets, const content::Lot& lot, const std::filesystem::pat
         if (!(x >= 0 && y >= 0 && x <= 256 && y <= 256)) {
             continue;
         }
-        const float z = heights.tile(content::gridLevel(lot, h.value1), x, y) + h.value3;
+        const auto [floorX, floorY] = floorPoint(x, y, object.state.data[1], object.state.data[0x0D]);
+        const float z = savedHeight(lot, object).value_or(heights.blended(content::gridLevel(lot, h.value1), floorX, floorY) + h.value3);
         const auto saved = lot.savedJoints.find(object.id);
         const auto nodes = lamplights::lightNodes(model->tree, {{x, y, z}, lamplights::facingRotation(object.state.data[1])},
                                                   saved != lot.savedJoints.end() ? std::span<const cobject::SavedJoint>(saved->second)

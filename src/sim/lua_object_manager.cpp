@@ -1,4 +1,5 @@
 #include "sim/lua_internals.hpp"
+#include "sim/snap.hpp"
 #include "sim/turn.hpp"
 
 namespace ts2::sim::lua_detail {
@@ -243,6 +244,68 @@ int objectManagerGetNeighborIds(lua_State* L) {
     return 1;
 }
 
+namespace {
+
+// Deletes an object and what its slots hold, those first. Slots nest only so deep, so a broken lot
+// can't recurse without end. A Sim in a slot is taken out and kept: the game keeps it only in some
+// containers and deletes it in others, which ones is not known yet.
+void deleteWithContents(World& world, SimObject& object, int depth) {
+    constexpr int kMostDepth = 16;
+    if (depth < kMostDepth) {
+        for (const std::int16_t id : std::vector<std::int16_t>(object.slots)) {
+            SimObject* held = id > 0 ? world.find(id) : nullptr;
+            if (held == nullptr || held == &object) {
+                continue;
+            }
+            if (held->isPerson()) {
+                takeOutOfSlot(world, *held);
+            } else {
+                deleteWithContents(world, *held, depth + 1);
+            }
+        }
+    }
+    // It leaves the lot at once.
+    takeOutOfSlot(world, object);
+    object.x = kOffLot;
+    object.y = kOffLot;
+    object.tile.reset();
+    world.markFootprintChanged(object.id);
+    world.remove(object);
+}
+
+} // namespace
+
+// ObjectManager:removeObjectInstance(objectId): deletes the object at once, with what its slots hold
+// and the rest of a multi-tile object. The object may be a Sim. Nothing happens for an id no object has or
+// one already deleted. Always returns 1. The game also sends the object's removal messages and
+// tells the Sims using it, which isn't ported yet.
+int objectManagerRemoveObjectInstance(lua_State* L) {
+    ScriptCall& c = call(L);
+    const std::int16_t id = argShort(L, 2);
+    if (SimObject* object = c.world ? c.world->find(id) : nullptr) {
+        deleteWithContents(*c.world, *object, 0);
+    }
+    lua_pushnumber(L, 1);
+    return 1;
+}
+
 int newObjectManager(lua_State* L) { return pushInstance(L, "ObjectManager", 0); }
+
+// LightingManager.new(): the lot's lighting manager.
+int newLightingManager(lua_State* L) { return pushInstance(L, "LightingManager", 0); }
+
+// LightingManager:setPlacementRoomLightPercent(room, percent): sets how brightly the room's lights
+// shine, as the lot saves it, and relights its lamps (those below 100 stay off). Neither value is
+// checked. Returns true. The game keys the percent by the room id of a random tile of the room in
+// another room layer, whose ids are taken to be the room's here (not known yet whether they differ).
+int lightingManagerSetPlacementRoomLightPercent(lua_State* L) {
+    ScriptCall& c = call(L);
+    const std::int16_t room = argShort(L, 2), percent = argShort(L, 3);
+    if (c.world != nullptr) {
+        c.world->setRoomLightPercent(room, percent);
+    }
+    lua_pushboolean(L, true);
+    return 1;
+}
 
 } // namespace ts2::sim::lua_detail

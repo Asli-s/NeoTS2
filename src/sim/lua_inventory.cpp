@@ -245,6 +245,34 @@ int tokenSetProperties(lua_State* L) {
     return 0;
 }
 
+// createObjectFromToken(index): makes the singular token at `index` (from 0) into an object again and
+// gives its id, 0 when it can't. A token naming an object archive (its value2) gets the archived
+// objects back, their Load function given 1, the inventory's kind and owner and the index. Otherwise
+// it is a new object of the token's GUID. The token stays. The game also keeps the object made for
+// each index of one Inventory and gives it again for that index, which isn't ported yet. Which of
+// the inventory's two values the Load function gets second and third is not known yet.
+int inventoryCreateObjectFromToken(lua_State* L) {
+    const Inventory& inventory = selfInventory(L);
+    const auto* self = selfInstance(L);
+    ScriptCall& c = call(L);
+    const std::int16_t index = argShort(L, 2);
+    std::int16_t id = 0;
+    if (index >= 0 && static_cast<std::size_t>(index) < inventory.singular.size() && inventory.singular[static_cast<std::size_t>(index)]) {
+        // Held, as the Load functions may remove the token.
+        const TokenRef held = inventory.singular[static_cast<std::size_t>(index)];
+        const InventoryToken& token = *held;
+        const std::array<std::int16_t, 4> params{1, static_cast<std::int16_t>(self->kind), static_cast<std::int16_t>(self->id), index};
+        if (token.value2 >= 1 && c.restoreArchive) {
+            id = c.restoreArchive(token.value2, params);
+        }
+        if (id == 0 && c.createObject) {
+            id = c.createObject(token.guid);
+        }
+    }
+    lua_pushnumber(L, id);
+    return 1;
+}
+
 // Inventory.new(kind, id): kTypeGlobal, kTypeLot (lot id), kTypeFamily (family id),
 // kTypeNeighbor (neighbor id) or kTypeGameWide. An unknown kind is error 0x59. An inventory the
 // neighborhood doesn't have is 0x57.

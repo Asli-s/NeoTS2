@@ -3,11 +3,18 @@
 #include "neighborhood.hpp"
 
 #include "content/neighborhood.hpp"
+#include "content/target_pictures.hpp"
+#include "content/ui_meters.hpp"
 #include "diag/log.hpp"
 #include "formats/dbpf.hpp"
 #include "formats/fami.hpp"
 #include "formats/image.hpp"
+#include "content/ui_text.hpp"
 #include "formats/lot_description.hpp"
+#include "formats/objd.hpp"
+#include "formats/resource_types.hpp"
+#include "formats/sdsc.hpp"
+#include "formats/simi.hpp"
 #include "formats/str.hpp"
 
 #include <algorithm>
@@ -80,6 +87,21 @@ constexpr std::uint32_t kFamilyLayout = 0xa000, kFamilyPicture = 0xa005, kFamily
 // The bio box's maxtext.
 constexpr std::size_t kBioCharacters = 1000;
 constexpr std::uint32_t kCommunityLayout = 0xe000, kCommunityAddress = 0xe003, kCommunityText = 0xe004, kCommunityClose = 0xe007;
+// An apartment lot with households (Apartment Info): its name, rent range and buttons, then a row
+// per apartment. Row n (1 to 4) is window 0xd0n00 with its family name 0xd0n21 and funds 0xd0n20,
+// and beside it the button that chooses it, 0xd0n22.
+constexpr std::uint32_t kApartmentLayout = 0xd0000, kApartmentName = 0xd0007, kApartmentRent = 0xd0008, kApartmentEnter = 0xd0002,
+                        kApartmentInfo = 0xd0004, kApartmentMove = 0xd0009, kApartmentMerge = 0xd000b, kApartmentClose = 0xd000a;
+constexpr std::uint32_t kRowStep = 0x100, kRowFunds = 0x20, kRowName = 0x21, kRowChoose = 0x22;
+constexpr int kApartmentRows = 4;
+constexpr std::uint32_t kRowSims = 8;  // a row's Sim thumbnail buttons, 0xd0n01 to 0xd0n08
+// Each Sim thumbnail is its portrait at its life stage, all of it scaled to its 36 x 36 picture
+// window (window 1 of holder 0xd0n11 to 0xd0n18).
+constexpr std::uint32_t kRowSimHolders = 0x11, kSimThumbPicture = 1, kSimThumbSide = 36;
+// "%s to %s" (the rent range) and "Unoccupied Apartment" (Neighborhood text 0xDF, strings 1 and 3).
+constexpr std::uint32_t kRentRange = 0x00df0001, kUnoccupied = 0x00df0003;  // string ids, leakcheck: ok
+// A household's name and funds: dark blue while it is home, else grey.
+constexpr std::array<float, 4> kAtHomeColor{5 / 255.0f, 6 / 255.0f, 113 / 255.0f, 1}, kAwayColor{160 / 255.0f, 160 / 255.0f, 160 / 255.0f, 1};
 // The card sits this far beside its lot, on the side away from the screen's middle.
 constexpr int kCardGap = 60;
 // The tag over the lot under the mouse: a soft white box stretched around its content, 16 pixels
@@ -89,7 +111,8 @@ constexpr std::uint32_t kTagImageGroup = 0x499db772, kTagBox = 0x14416193, kTagS
 constexpr std::uint32_t kTagBoxSize = 60;
 constexpr int kTagAbove = 28;
 constexpr int kTagPadding = 16, kTagIcon = 24, kTagTextGap = 4;  // the name has 4 pixels on each side
-const std::string kTagFont = "0x4a809916";  // GenHeader
+const std::string kTagFont = "0x4a809916";       // GenHeader
+const std::string kTagPriceFont = "0x4a809917";  // GenBodyMedium, a lot for sale's price under its name
 // "For Sale" (Neighborhood text 0x82, string 1).
 constexpr std::uint32_t kNeighborhoodText = 0x7F3A262A, kForSale = 0x00820001;  // a string id, leakcheck: ok
 // Lot types that are community lots.
@@ -212,6 +235,74 @@ std::vector<ts2::tga::Pixels> homelessFamilies(const fs::path& folder) {
     return out;
 }
 
+// A lot's value from the simulator state in its package, or none when it has none the game can read.
+std::optional<std::int32_t> lotValue(const fs::path& folder, const ts2::nhood::LotDescription& lot, std::int16_t* global15) {
+    const fs::path file = folder / "Lots" / (folder.filename().u8string() + u8"_Lot" + fs::path(std::to_string(lot.id)).u8string() + u8".package");
+    std::error_code ec;
+    if (!fs::is_regular_file(file, ec)) {
+        return std::nullopt;
+    }
+    try {
+        ts2::dbpf::Package package{file};
+        for (const auto& e : package.entries()) {
+            if (e.key.type == ts2::simi::kType) {
+                const auto parts = ts2::simi::readLotValue(package.read(e));
+                if (!parts) {
+                    return std::nullopt;
+                }
+                if (global15) {
+                    *global15 = parts->global15;
+                }
+                constexpr std::uint32_t kLeaveOutSecond = 8;
+                return ts2::simi::lotValue(*parts, (lot.flags & kLeaveOutSecond) == kLeaveOutSecond);
+            }
+        }
+    } catch (const std::exception& ex) {
+        ts2::diag::warnOnce(std::string("neighborhood: a lot's value can't be read: ") + ex.what());
+    }
+    return std::nullopt;
+}
+
+// The portraits of the Sims with these GUIDs, in their order, each from its character file at its
+// life stage (person data 0x3A in its Sim description). Empty for a Sim without one.
+std::vector<ts2::tga::Pixels> simPortraits(const fs::path& folder, const std::map<std::uint32_t, std::int16_t>& lifeStages,
+                                           std::map<std::uint32_t, fs::path>& files, const std::vector<std::uint32_t>& guids) {
+    if (files.empty()) {
+        for (const fs::path& file : ts2::content::characterFiles(folder)) {
+            try {
+                ts2::dbpf::Package package{file};
+                for (const auto& e : package.entries()) {
+                    if (e.key.type == ts2::types::kObjectDefinition) {
+                        files.emplace(ts2::objd::parse(package.read(e)).guid(), file);
+                        break;
+                    }
+                }
+            } catch (const std::exception& ex) {
+                ts2::diag::warnOnce(std::string("neighborhood: a character file that can't be read has no portrait: ") + ex.what());
+            }
+        }
+    }
+    std::vector<ts2::tga::Pixels> out;
+    for (const std::uint32_t guid : guids) {
+        auto& picture = out.emplace_back();
+        const auto stage = lifeStages.find(guid);
+        const auto file = files.find(guid);
+        const auto image = stage != lifeStages.end() ? ts2::content::portraitImage(stage->second) : std::nullopt;
+        if (!image || file == files.end()) {
+            continue;
+        }
+        try {
+            if (auto portrait = ts2::content::readCharacterPortrait(file->second, *image)) {
+                // Portraits keep premultiplied colour, which the screen takes straight.
+                picture = ts2::content::unpremultiplied(ts2::content::cubicScaled(*portrait, kSimThumbSide, kSimThumbSide));
+            }
+        } catch (const std::exception& ex) {
+            ts2::diag::warnOnce(std::string("neighborhood: a Sim's portrait can't be read: ") + ex.what());
+        }
+    }
+    return out;
+}
+
 // The cards of the lots a household lives on and of the community lots. A household's name is
 // string 0 of its string table (instance = family id), its bio string 1.
 std::map<std::uint32_t, NeighborhoodUi::LotCard> lotCards(const fs::path& folder) {
@@ -222,6 +313,8 @@ std::map<std::uint32_t, NeighborhoodUi::LotCard> lotCards(const fs::path& folder
         std::map<std::uint32_t, ts2::nhood::LotDescription> lots;
         std::map<std::uint32_t, ts2::fami::Family> families;
         std::map<std::uint32_t, ts2::str::StringTable> strings;
+        std::map<std::uint32_t, std::int16_t> lifeStages;  // by Sim GUID
+        std::map<std::uint32_t, fs::path> characterFiles;  // by Sim GUID, read once an apartment needs them
         for (const auto& e : package.entries()) {
             if (e.key.type == ts2::nhood::kLotDescriptionType) {
                 lots[e.key.instance] = ts2::nhood::parseLotDescription(package.read(e));
@@ -229,6 +322,16 @@ std::map<std::uint32_t, NeighborhoodUi::LotCard> lotCards(const fs::path& folder
                 families[e.key.instance] = ts2::fami::parse(package.read(e));
             } else if (e.key.type == kStringsType && e.key.instance < kFirstGameFamily) {
                 strings[e.key.instance] = ts2::str::parse(package.read(e));
+            } else if (e.key.type == ts2::sdsc::kType) {
+                try {
+                    const auto sim = ts2::sdsc::parse(package.read(e));
+                    constexpr std::size_t kLifeStage = 0x3A;
+                    if (sim.personData.size() > kLifeStage) {
+                        lifeStages[sim.guid] = sim.personData[kLifeStage];
+                    }
+                } catch (const std::exception& ex) {
+                    ts2::diag::warnOnce(std::string("neighborhood: a Sim description that can't be read is left out: ") + ex.what());
+                }
             }
         }
         for (const auto& [id, lot] : lots) {
@@ -236,6 +339,12 @@ std::map<std::uint32_t, NeighborhoodUi::LotCard> lotCards(const fs::path& folder
                 cards[id] = {true, lot.name, {}, lot.description, {}};
             } else {
                 cards[id] = {false, lot.name, {}, {}, {}, true};  // for sale, unless a household lives there
+                // Its price shows unless its global 0x15 is set or it is an apartment lot.
+                constexpr std::uint8_t kApartment = 8;
+                std::int16_t global15 = 0;
+                if (const auto value = lotValue(folder, lot, &global15); value && global15 == 0 && lot.type != kApartment) {
+                    cards[id].money = *value;
+                }
             }
         }
         for (const auto& [id, family] : families) {
@@ -244,6 +353,9 @@ std::map<std::uint32_t, NeighborhoodUi::LotCard> lotCards(const fs::path& folder
                 continue;
             }
             NeighborhoodUi::LotCard card{false, lot->second.name, {}, {}, {}};
+            if (const auto value = lotValue(folder, lot->second, nullptr)) {
+                card.money = std::int64_t{family.funds} + *value;
+            }
             if (const auto table = strings.find(id); table != strings.end()) {
                 const auto texts = table->second.forLanguage(1);
                 card.name = texts.size() > 0 ? texts[0]->value : std::string{};
@@ -251,6 +363,40 @@ std::map<std::uint32_t, NeighborhoodUi::LotCard> lotCards(const fs::path& folder
             }
             cards[lot->first] = std::move(card);
             familyOnLot[lot->first] = id;
+        }
+        // An apartment lot lists its households, each the family whose home is the apartment. Lived
+        // in, it has at most four apartments.
+        constexpr std::uint8_t kApartmentLot = 8;
+        constexpr int kMostLivedInApartments = 4;
+        for (const auto& [id, lot] : lots) {
+            if (lot.type != kApartmentLot || lot.tenants.empty()) {
+                continue;
+            }
+            NeighborhoodUi::LotCard& card = cards[id];
+            card.forSale = false;
+            for (const auto& tenant : lot.tenants) {
+                const auto family = std::find_if(families.begin(), families.end(), [&](const auto& f) {
+                    return f.second.lot != 0 && static_cast<std::uint32_t>(f.second.lot) == tenant.lot;
+                });
+                if (family == families.end()) {
+                    card.households.emplace_back();
+                    continue;
+                }
+                NeighborhoodUi::LotCard::Tenant household;
+                if (const auto table = strings.find(family->first); table != strings.end()) {
+                    const auto texts = table->second.forLanguage(1);
+                    household.name = texts.empty() ? std::string{} : texts[0]->value;
+                }
+                household.funds = family->second.funds;
+                household.atHome = family->second.currentLot == family->second.lot;
+                household.lot = tenant.lot;
+                const auto& members = family->second.members;
+                household.sims = simPortraits(folder, lifeStages, characterFiles,
+                                              {members.begin(), members.begin() + std::min<std::size_t>(members.size(), kRowSims)});
+                card.households.push_back(std::move(household));
+            }
+            card.apartments = std::min<int>(lot.apartments, kMostLivedInApartments);
+            card.rent = {lot.lowestRent, lot.highestRent};
         }
     } catch (const std::exception& ex) {
         ts2::diag::warnOnce(std::string("neighborhood: the lots' cards can't be read: ") + ex.what());
@@ -592,6 +738,7 @@ void NeighborhoodUi::open(const fs::path& folder, const std::string& name, Conte
         screen_.setVisible(c, false);
     }
     screen_.setVisible(card_, false);
+    clearApartmentSims();
     for (const int w : {glow_, glowTail_}) {
         screen_.setPassive(w);
         screen_.setVisible(w, false);
@@ -601,8 +748,7 @@ void NeighborhoodUi::open(const fs::path& folder, const std::string& name, Conte
     cardLot_ = 0;
     tag_ = screen_.addWindows({tagWindow("IGZWinGen", {{"image", std::format("{{{:08x},{:08x}}}", kTagImageGroup, kTagBox)}, {"edgeimage", "yes"}})}, 0, 0);
     tagIcon_ = screen_.addWindows({tagWindow("IGZWinBMP", {{"image", std::format("{{{:08x},{:08x}}}", kTagImageGroup, kTagSun)}})}, 0, 0, tag_);
-    tagText_ = screen_.addWindows({tagWindow("IGZWinText", {{"font", kTagFont}})}, 0, 0, tag_);
-    screen_.setTextColor(tagText_, {0, 0, 0, 1});
+    tagLines_.clear();
     if (auto box = data_.image(kTagImageGroup, kTagBox); box && box->width >= kTagBoxSize && box->height >= kTagBoxSize) {
         ts2::tga::Pixels used;
         used.width = used.height = kTagBoxSize;
@@ -611,6 +757,7 @@ void NeighborhoodUi::open(const fs::path& folder, const std::string& name, Conte
             std::copy_n(&box->rgba[std::size_t{y} * box->width * 4], kTagBoxSize * 4, &used.rgba[std::size_t{y} * kTagBoxSize * 4]);
         }
         screen_.setImage(tag_, std::move(used));
+        screen_.setImageMargin(tag_, kTagPadding);
     }
     screen_.setPassive(tag_);
     screen_.setVisible(tag_, false);
@@ -666,7 +813,8 @@ void NeighborhoodUi::close() {
     for (const int w : {panel_, families_, lots_, glow_, glowTail_, card_, tag_, options_}) {
         screen_.remove(w);
     }
-    panel_ = families_ = lots_ = puck_ = glow_ = glowTail_ = card_ = tag_ = tagIcon_ = tagText_ = options_ = -1;
+    panel_ = families_ = lots_ = puck_ = glow_ = glowTail_ = card_ = tag_ = tagIcon_ = options_ = -1;
+    tagLines_.clear();
     tagLot_ = 0;
     cards_.clear();
     cardLot_ = 0;
@@ -729,9 +877,17 @@ NeighborhoodUi::Action NeighborhoodUi::clicked(int window) {
         showBin(bin_ == Bin::Families ? Bin::None : Bin::Families);
     } else if (screen_.parent(window) == puck_ && id == kPuckLots) {
         showBin(bin_ == Bin::Lots ? Bin::None : Bin::Lots);
-    } else if (id == kFamilyClose || id == kCommunityClose) {
+    } else if (id == kFamilyClose || id == kCommunityClose || id == kApartmentClose) {
         hideCard();
-    } else if (id == kFamilyEnter && cardLot_ != 0) {
+    } else if (const int n = static_cast<int>((id - kApartmentLayout) / kRowStep);
+               card_ >= 0 && screen_.parent(window) == screen_.find(card_, kApartmentLayout) && n >= 1 && n <= kApartmentRows &&
+               id == kApartmentLayout + kRowStep * static_cast<std::uint32_t>(n) + kRowChoose) {
+        // Only a household's row can be chosen.
+        if (const auto card = cards_.find(cardLot_);
+            card != cards_.end() && n <= static_cast<int>(card->second.households.size()) && card->second.households[static_cast<std::size_t>(n - 1)]) {
+            chooseApartment(n);
+        }
+    } else if ((id == kFamilyEnter || id == kApartmentEnter) && lotToEnter() != 0) {
         return Action::EnterLot;
     }
     return Action::None;
@@ -802,8 +958,10 @@ void NeighborhoodUi::showCard(std::uint32_t lot, int lotX, int lotY) {
     for (const int c : screen_.children(card_)) {
         screen_.setVisible(c, false);
     }
-    bioShown_ = !card.community;
-    if (card.community) {
+    bioShown_ = !card.community && card.households.empty();
+    if (!card.households.empty()) {
+        showApartments(card);
+    } else if (card.community) {
         const int layout = screen_.find(card_, kCommunityLayout);
         screen_.setVisible(layout, true);
         screen_.setText(screen_.find(layout, kCommunityAddress), card.address);
@@ -815,9 +973,7 @@ void NeighborhoodUi::showCard(std::uint32_t lot, int lotX, int lotY) {
         screen_.setVisible(layout, true);
         screen_.setText(screen_.find(layout, kFamilyName), card.name);
         screen_.setText(screen_.find(layout, kFamilyAddress), card.address);
-        // The worth the game shows here is more than the family's funds, and how it adds up is not known
-        // yet (open question UI-30).
-        screen_.setText(screen_.find(layout, kFamilyFunds), {});
+        screen_.setText(screen_.find(layout, kFamilyFunds), card.money ? ts2::content::moneyText(*card.money) : std::string{});
         bio_.setText(screen_, card.text);
         if (card.picture.width > 0) {
             screen_.setImage(screen_.find(layout, kFamilyPicture), card.picture);
@@ -839,7 +995,7 @@ void NeighborhoodUi::showCard(std::uint32_t lot, int lotX, int lotY) {
     screen_.move(card_, x, (height_ - h) / 2);
     screen_.setVisible(card_, true);
     // The glow surrounds the layout's panel picture, its window 1.
-    const std::uint32_t layoutId = card.community ? kCommunityLayout : kFamilyLayout;
+    const std::uint32_t layoutId = !card.households.empty() ? kApartmentLayout : card.community ? kCommunityLayout : kFamilyLayout;
     glowPanel_ = screen_.find(screen_.find(card_, layoutId), layoutId | 1);
     if (glowPanel_ >= 0) {
         int px = 0, py = 0;
@@ -865,6 +1021,99 @@ void NeighborhoodUi::showCard(std::uint32_t lot, int lotX, int lotY) {
     cardLot_ = lot;
 }
 
+void NeighborhoodUi::showApartments(const LotCard& card) {
+    const int layout = screen_.find(card_, kApartmentLayout);
+    screen_.setVisible(layout, true);
+    screen_.setText(screen_.find(layout, kApartmentName), card.name);
+    std::string rent = data_.text(kNeighborhoodText, kRentRange);
+    for (const std::int64_t money : {card.rent.first, card.rent.second}) {
+        if (const auto at = rent.find("%s"); at != std::string::npos) {
+            rent.replace(at, 2, ts2::content::moneyText(money));
+        }
+    }
+    screen_.setText(screen_.find(layout, kApartmentRent), rent);
+    // A row for each apartment: a household's name and funds, or "Unoccupied Apartment" in dark
+    // blue with no funds. Only a household's row can be chosen, and the first is.
+    const int lived = static_cast<int>(card.households.size());
+    apartmentRow_ = 0;
+    for (int n = 1; n <= kApartmentRows; ++n) {
+        const std::uint32_t row = kApartmentLayout + kRowStep * static_cast<std::uint32_t>(n);
+        const int rowWindow = screen_.find(layout, row), choose = screen_.find(layout, row | kRowChoose);
+        const bool shown = n <= std::max(lived, card.apartments);
+        screen_.setVisible(rowWindow, shown);
+        screen_.setVisible(choose, shown);
+        if (!shown) {
+            continue;
+        }
+        // The buttons over the Sims' thumbnails only show them here.
+        for (std::uint32_t k = 1; k <= kRowSims; ++k) {
+            screen_.setEnabled(screen_.find(rowWindow, row | k), false);
+        }
+        const int name = screen_.find(rowWindow, row | kRowName), funds = screen_.find(rowWindow, row | kRowFunds);
+        if (n > lived) {
+            screen_.setText(name, data_.text(kNeighborhoodText, kUnoccupied));
+            screen_.setTextColor(name, kAtHomeColor);
+            screen_.setVisible(funds, false);
+            screen_.setEnabled(choose, false);
+            continue;
+        }
+        const auto& household = card.households[static_cast<std::size_t>(n - 1)];
+        if (!household) {
+            continue;
+        }
+        const auto& color = household->atHome ? kAtHomeColor : kAwayColor;
+        screen_.setText(name, household->name);
+        screen_.setTextColor(name, color);
+        screen_.setText(funds, ts2::content::moneyText(household->funds));
+        screen_.setTextColor(funds, color);
+        screen_.setVisible(funds, true);
+        // A thumbnail per Sim. A Sim without a portrait leaves its place empty.
+        for (std::uint32_t k = 0; k < kRowSims; ++k) {
+            const int holder = screen_.find(rowWindow, row | (kRowSimHolders + k));
+            const bool sim = k < household->sims.size();
+            screen_.setVisible(holder, sim);
+            const int picture = screen_.find(holder, kSimThumbPicture);
+            const bool drawn = sim && household->sims[k].width > 0;
+            screen_.setVisible(picture, drawn);
+            if (drawn) {
+                screen_.setImage(picture, household->sims[k]);
+            }
+        }
+        screen_.setEnabled(choose, true);
+        if (apartmentRow_ == 0) {
+            chooseApartment(n);
+        }
+    }
+    screen_.setChecked(screen_.find(layout, kApartmentInfo), false);
+    // From a lot click the card enters the lot. Moving or merging a family in is for the family bin.
+    screen_.setVisible(screen_.find(layout, kApartmentEnter), true);
+    screen_.setVisible(screen_.find(layout, kApartmentMove), false);
+    screen_.setVisible(screen_.find(layout, kApartmentMerge), false);
+}
+
+std::uint32_t NeighborhoodUi::lotToEnter() const {
+    const auto card = cards_.find(cardLot_);
+    if (card == cards_.end() || card->second.households.empty()) {
+        return cardLot_;
+    }
+    // A household away from home asks first whether to play the lot it is visiting, which isn't
+    // ported yet, so its apartment isn't entered.
+    const auto& households = card->second.households;
+    if (apartmentRow_ < 1 || apartmentRow_ > static_cast<int>(households.size())) {
+        return 0;
+    }
+    const auto& household = households[static_cast<std::size_t>(apartmentRow_ - 1)];
+    return household && household->atHome ? household->lot : 0;
+}
+
+void NeighborhoodUi::chooseApartment(int row) {
+    const int layout = screen_.find(card_, kApartmentLayout);
+    for (int n = 1; n <= kApartmentRows; ++n) {
+        screen_.setChecked(screen_.find(layout, kApartmentLayout + kRowStep * static_cast<std::uint32_t>(n) + kRowChoose), n == row);
+    }
+    apartmentRow_ = row;
+}
+
 void NeighborhoodUi::showTag(std::uint32_t lot, int x, int y) {
     const auto found = cards_.find(lot);
     if (tag_ < 0 || found == cards_.end()) {
@@ -876,19 +1125,76 @@ void NeighborhoodUi::showTag(std::uint32_t lot, int x, int y) {
     }
     if (lot != tagLot_) {
         const LotCard& card = found->second;
-        const std::string text = card.forSale ? data_.text(kNeighborhoodText, kForSale) : card.community ? card.address : card.name;
+        // The tag's lines: the name, or an apartment lot's households with an empty line between
+        // each two, then a lot for sale's price or an apartment lot's rent range in the second font
+        // (the range after an empty line). A sun stands beside each household, or one in the middle.
+        struct Line {
+            const std::string* font;
+            std::string text;
+            bool sun = false;
+        };
+        std::vector<Line> lines;
         const bool sun = !card.community;
-        // The box fits the icon and the name with 16 pixels round them. Both are centred top to bottom.
-        const auto size = screen_.textSize(kTagFont, text);
+        if (!card.households.empty()) {
+            for (std::size_t i = 0; i < card.households.size(); ++i) {
+                if (i > 0) {
+                    lines.push_back({&kTagFont, {}});
+                }
+                lines.push_back({&kTagFont, card.households[i] ? card.households[i]->name : std::string{}, true});
+            }
+            if (static_cast<int>(card.households.size()) < card.apartments) {
+                lines.push_back({&kTagPriceFont, {}});
+                lines.push_back({&kTagPriceFont, ts2::content::moneyText(card.rent.first) + " - " + ts2::content::moneyText(card.rent.second)});
+            }
+        } else {
+            lines.push_back({&kTagFont, card.forSale ? data_.text(kNeighborhoodText, kForSale) : card.community ? card.address : card.name});
+            if (card.forSale && card.money) {
+                lines.push_back({&kTagPriceFont, ts2::content::moneyText(*card.money)});
+            }
+        }
+        const bool sunPerLine = !card.households.empty();
+        int textWidth = 0, textHeight = 0;
+        std::vector<std::array<int, 2>> sizes;
+        for (const Line& line : lines) {
+            sizes.push_back(screen_.textSize(*line.font, line.text.empty() ? std::string(" ") : line.text));
+            textWidth = std::max(textWidth, line.text.empty() ? 0 : sizes.back()[0]);
+            textHeight += sizes.back()[1];
+        }
+        // The box fits the icon and the lines with 16 pixels round them, both centred top to bottom.
         const int left = kTagPadding + (sun ? kTagIcon : 0) + kTagTextGap;
-        const int w = left + size[0] + kTagTextGap + kTagPadding, h = 2 * kTagPadding + std::max(sun ? kTagIcon : 0, size[1]);
+        const int w = left + textWidth + kTagTextGap + kTagPadding, h = 2 * kTagPadding + std::max(sun ? kTagIcon : 0, textHeight);
         screen_.resize(tag_, w, h);
-        screen_.setVisible(tagIcon_, sun);
+        screen_.setVisible(tagIcon_, sun && !sunPerLine);
         screen_.resize(tagIcon_, kTagIcon, kTagIcon);
         screen_.move(tagIcon_, kTagPadding, (h - kTagIcon) / 2);
-        screen_.setText(tagText_, text);
-        screen_.resize(tagText_, size[0] + 2, size[1]);
-        screen_.move(tagText_, left, (h - size[1]) / 2);
+        // Each line has a text window in each font and a sun, made as the tag first needs them.
+        while (tagLines_.size() < lines.size()) {
+            std::array<int, 3> made{};
+            for (int k = 0; k < 2; ++k) {
+                made[k] = screen_.addWindows({tagWindow("IGZWinText", {{"font", k == 0 ? kTagFont : kTagPriceFont}})}, 0, 0, tag_);
+                screen_.setTextColor(made[k], {0, 0, 0, 1});
+            }
+            made[2] = screen_.addWindows({tagWindow("IGZWinBMP", {{"image", std::format("{{{:08x},{:08x}}}", kTagImageGroup, kTagSun)}})}, 0, 0, tag_);
+            screen_.resize(made[2], kTagIcon, kTagIcon);
+            tagLines_.push_back(made);
+        }
+        int top = (h - textHeight) / 2;
+        for (std::size_t i = 0; i < tagLines_.size(); ++i) {
+            const bool used = i < lines.size();
+            const bool second = used && lines[i].font == &kTagPriceFont;
+            const int text = tagLines_[i][second ? 1 : 0], icon = tagLines_[i][2];
+            screen_.setVisible(tagLines_[i][second ? 0 : 1], false);
+            screen_.setVisible(text, used && !lines[i].text.empty());
+            screen_.setVisible(icon, used && sunPerLine && lines[i].sun);
+            if (!used) {
+                continue;
+            }
+            screen_.setText(text, lines[i].text);
+            screen_.resize(text, sizes[i][0] + 2, sizes[i][1]);
+            screen_.move(text, left, top);
+            screen_.move(icon, kTagPadding, top + (sizes[i][1] - kTagIcon) / 2);
+            top += sizes[i][1];
+        }
         tagLot_ = lot;
     }
     // Centred across the point, its box's bottom 28 pixels above it.
@@ -904,8 +1210,20 @@ void NeighborhoodUi::hideCard() {
         screen_.setVisible(card_, false);
         screen_.setVisible(glow_, false);
         screen_.setVisible(glowTail_, false);
+        clearApartmentSims();
     }
     cardLot_ = 0;
+}
+
+void NeighborhoodUi::clearApartmentSims() {
+    const int layout = screen_.find(card_, kApartmentLayout);
+    for (int n = 1; n <= kApartmentRows; ++n) {
+        const std::uint32_t row = kApartmentLayout + kRowStep * static_cast<std::uint32_t>(n);
+        const int rowWindow = screen_.find(layout, row);
+        for (std::uint32_t k = 0; k < kRowSims; ++k) {
+            screen_.setVisible(screen_.find(rowWindow, row | (kRowSimHolders + k)), false);
+        }
+    }
 }
 
 void NeighborhoodUi::layoutStrip(Strip& strip, const std::vector<ts2::tga::Pixels>& pictures) {

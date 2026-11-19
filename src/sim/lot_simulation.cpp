@@ -16,6 +16,8 @@
 #include "content/wants.hpp"
 #include "diag/log.hpp"
 #include "diag/timing.hpp"
+#include "formats/dbpf.hpp"
+#include "formats/object_archive.hpp"
 #include "formats/resource_types.hpp"
 #include "sim/lua_runtime.hpp"
 #include "sim/object_footprint.hpp"
@@ -245,6 +247,21 @@ LotSimulation::LotSimulation(const std::filesystem::path& install, const std::fi
         world_.weather() = loaded.weather.value_or(weather::Weather{});
         findCharacterFiles();
         world_.setHasCharacterFile([this](std::int16_t neighbor) { return characterFile(neighbor).has_value(); });
+        world_.setArchiveReader([hood, package = std::shared_ptr<dbpf::Package>{}](std::uint32_t id) mutable -> std::optional<std::vector<std::uint8_t>> {
+            try {
+                if (!package) {
+                    package = std::make_shared<dbpf::Package>(hood);
+                }
+                for (const auto& e : package->entries()) {
+                    if (e.key.type == archive::kType && e.key.instance == id) {
+                        return package->read(e);
+                    }
+                }
+            } catch (const std::exception& ex) {
+                diag::warnOnce(std::string("simulation: the neighborhood's object archives can't be read: ") + ex.what());
+            }
+            return std::nullopt;
+        });
     }
     if (const auto wants = content::wantsPackage(install)) {
         auto defs = std::make_shared<content::WantDefinitions>(content::loadWantDefinitions(*wants));
