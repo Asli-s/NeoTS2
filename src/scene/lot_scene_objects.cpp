@@ -24,12 +24,6 @@ bool onLot(float x, float y) {
     return x >= 0 && y >= 0 && x <= 256 && y <= 256;
 }
 
-// The turn of a saved facing: direction d faces 180 - 45d degrees (0 along -X, 6 along -Y), and
-// models face +Y.
-float facingAngle(std::int32_t direction) {
-    return kPi / 2 - static_cast<float>(direction) * kPi / 4;
-}
-
 } // namespace
 
 void LotSceneBuilder::placeObjects() {
@@ -41,6 +35,8 @@ void LotSceneBuilder::placeObjects() {
         }
     }
     std::map<std::uint32_t, std::size_t> byId;
+    // A multi-tile object's other parts, which draw nothing, by id.
+    std::map<std::uint32_t, const content::LotObject*> parts;
     for (const auto& object : lot_.objects) {
         // The lot's grids and wall graphs run along (location[1], location[0]), which is the world here.
         const auto& h = object.state.header;
@@ -50,6 +46,7 @@ void LotSceneBuilder::placeObjects() {
             continue;
         }
         if (isExtraTile(assets_, object)) {
+            parts[object.id] = &object;
             log(object, "part of " + std::to_string(object.state.data[kLeadTileData]), "");
             continue;
         }
@@ -101,33 +98,47 @@ void LotSceneBuilder::placeObjects() {
         // when it is 0 and the floor under them is lower. Other objects stand on their storey's
         // floor, raised by value 3 (the pieces of a stacked chimney).
         const int level = content::gridLevel(lot_, h.value1);
-        const float floorZ = heights_.tile(level, x, y);
+        const float angle = facingAngle(object.state.data[kFacingData]);
+        const auto [floorX, floorY] = floorPoint(x, y, object.state.data[kFacingData], object.state.data[kWallPlacementData]);
+        const float floorZ = heights_.blended(level, floorX, floorY);
         float z = h.value4 >= 0 ? h.value3 : floorZ + h.value3;
         // Another piece reaching down into the ground (a chimney's base) ends its full width at the
         // floor above, so that its tapered top tucks into the piece standing there.
         if (const auto range = heightRange(mesh); h.value4 < 0 && range[0] < -kLevelHeight) {
             z = heights_.tile(level + 1, x, y) - range[2];
         }
-        // Objects with placement flag 15 (object data 0x2A, as lily pads) float: on the ground, where
-        // the water stands above the floor, they sit on its surface with no offset.
-        if ((object.state.data[kPlacementData] & 0x4000) != 0 && level == content::groundGridLevel(lot_)) {
-            if (const auto water = lot_.flatGrids.find(content::kWaterHeightGridInstance); water != lot_.flatGrids.end()) {
-                if (const auto surface = terrainwater::heightAt(water->second, x, y); surface && floorZ < *surface) {
-                    z = *surface;
-                }
-            }
+        // A floating object sits on the water's surface with no offset.
+        const auto water = lot_.flatGrids.find(content::kWaterHeightGridInstance);
+        if (const auto surface = floatingHeight(water != lot_.flatGrids.end() ? &water->second : nullptr,
+                                                static_cast<std::int16_t>(object.state.data[kPlacementData]),
+                                                level == content::groundGridLevel(lot_), x, y, floorZ)) {
+            z = *surface;
         }
-        const float angle = facingAngle(object.state.data[kFacingData]);
+        if (const auto savedZ = savedHeight(lot_, object)) {
+            z = *savedZ;
+        }
         shown_.push_back({&object, mesh, so.model, Transform::at(x, y, z, angle), angle, 0, boneModel, so.overrides, std::move(chosen)});
         byId[object.id] = shown_.size() - 1;
         log(object, "placed", so.model);
     }
     // Objects held in a container slot (object data 2: container id, 3: slot number) sit at that
-    // slot's bone in the container's model, so each is placed after its container.
+    // slot's bone in the container's model, so each is placed after its container. A multi-tile
+    // object's other part names, in its own slots, bones of the model its lead draws (a two-tile wall
+    // shelf's second tile holds slot_displayslot_3 and 2): an object it holds sits on the lead's model.
+    auto holderOf = [&](std::size_t i) -> const content::LotObject* {
+        const auto id = static_cast<std::uint32_t>(shown_[i].object->state.data[kContainerData]);
+        const auto part = parts.find(id);
+        return part != parts.end() ? part->second : nullptr;
+    };
     auto containerOf = [&](std::size_t i) -> std::optional<std::size_t> {
         const Shown& s = shown_[i];
-        const auto container = byId.find(static_cast<std::uint32_t>(s.object->state.data[kContainerData]));
-        if (s.object->state.data[kContainerData] > 0 && container != byId.end() && container->second != i) {
+        if (s.object->state.data[kContainerData] <= 0) {
+            return std::nullopt;
+        }
+        const content::LotObject* part = holderOf(i);
+        const auto id = part ? static_cast<std::uint32_t>(part->state.data[kLeadTileData]) : static_cast<std::uint32_t>(s.object->state.data[kContainerData]);
+        const auto container = byId.find(id);
+        if (container != byId.end() && container->second != i) {
             return container->second;
         }
         return std::nullopt;
@@ -136,9 +147,11 @@ void LotSceneBuilder::placeObjects() {
         Shown& s = shown_[i];
         const Shown& c = shown_[container];
         const Transform& base = c.world;
+        const content::LotObject* part = holderOf(i);
+        const content::LotObject& holder = part ? *part : *c.object;
         std::string name;
-        if (c.object->type) {
-            name = assets_.slotBone(c.object->type->guid, static_cast<std::size_t>(s.object->state.data[kSlotData]));
+        if (holder.type) {
+            name = assets_.slotBone(holder.type->guid, static_cast<std::size_t>(s.object->state.data[kSlotData]));
         }
         const Transform* bone = name.empty() ? nullptr : b_.bone(c.boneModel, name);
         const Transform slot = bone ? base * *bone : base;
@@ -279,11 +292,11 @@ void LotSceneBuilder::placeSims() {
         const int level = content::gridLevel(lot_, h.value1);
         const Transform at = Transform::at(x, y, heights_.tile(level, x, y), angle);
         // Standing, as the game shows an idle Sim: its age's idle loop, played from its start.
-        const std::string idle = standingIdle(assets_, look.age);
+        const std::string idle = standingIdle(assets_, look.age, look.species);
         std::vector<Transform> world;
         Actor actor = buildSim(b_, rigs_, look, at, level, std::to_string(sim->id), idle, world);
         actor.object = sim->id;
-        actor.basePose = standingPose(assets_, look.age);
+        actor.basePose = standingPose(assets_, look.age, look.species);
         actor.floorHeight = floorHeight;
         for (const auto& bone : simSlotBones(assets_, file->second)) {
             actor.slotNodes.push_back(actor.rig && !bone.empty() ? actor.rig->find(bone) : -1);

@@ -11,12 +11,14 @@
 #include "scene/pool_water.hpp"
 #include "scene/rig.hpp"
 #include "scene/sim_builder.hpp"
+#include "scene/terrain_water.hpp"
 
 #include <array>
 #include <cmath>
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -45,6 +47,26 @@ constexpr std::size_t kFacingData = 1, kContainerData = 2, kSlotData = 3, kFlags
 constexpr std::size_t kMaxShownSlots = 16;
 // The pool's edge (wall style 0x1D) lets light through by walls.txt but the game treats it as stopping it.
 constexpr std::uint32_t kPoolEdgeStyle = 0x1D;
+
+// The turn of a saved facing: direction d faces 180 - 45d degrees (0 along -X, 6 along -Y), and
+// models face +Y.
+inline float facingAngle(std::int32_t direction) {
+    return kPi / 2 - static_cast<float>(direction) * kPi / 4;
+}
+
+// Objects with placement flag 15 (object data 0x2A bit 0x4000, as lily pads and cattails) float: on
+// the ground, where a pond's water stands above their floor, they sit on its surface. Empty for
+// anything else.
+inline std::optional<float> floatingHeight(const terrain::Array2D* water, std::int16_t placement, bool onGround, float x, float y,
+                                           float floor) {
+    if ((placement & 0x4000) == 0 || !onGround || water == nullptr) {
+        return std::nullopt;
+    }
+    if (const auto surface = terrainwater::heightAt(*water, x, y); surface && floor < *surface) {
+        return surface;
+    }
+    return std::nullopt;
+}
 
 // Middles of wall segments (doubled, so they are whole numbers) by level.
 using EdgeKey = std::tuple<int, int, int>;
@@ -89,6 +111,7 @@ private:
     // Pool and pond water (lot_scene_water.cpp).
     std::array<float, 6> poolBox(const std::vector<poolwater::Quarter>& quarters, int ground);
     void drawPoolWater();
+    void drawCurvedPoolCorners();
     void drawPondWater();
     void drawPondsAsPools(const terrain::Array2D& water, const std::function<float(int, int)>& terrain, int ground);
 

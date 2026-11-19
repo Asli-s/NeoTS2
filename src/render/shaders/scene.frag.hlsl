@@ -63,7 +63,7 @@ cbuffer Material : register(b0, space3) {
     float4 uvTile;    // the texture coordinates times xy plus zw: one frame of a tiled texture
     float4 shadowReceiver;  // x: 1 when Sims' projected shadows fall on it, y: its level, z: 1 to fade them by the light map, w: 1 for a floor
     float4 caustics;        // x: 1 for a pool floor, 2 for a pool wall, 3 for the caustics alone over a pond's ground, 4 the same over a beach sea's, 0 for none, yzw: the texture light
-    float4 neighborLight;   // rgb: what a neighbor's real house is tinted by, w: 1 when it is one, 2 for the ground around the lot
+    float4 neighborLight;   // w: 2 for the ground around the lot, which leaves out the neighbors' real houses' lots
     float4 wallMask;        // x: 1 when a wall mask cuts it, y: 1 when the mask runs the other way along u
     float4 terrainTexture;  // x: 1 for terrain (the texture's alpha plays no part), y: 1 with a detail texture, z: how many times it repeats over the texture
     float4 underwaterShade; // x: 1 when darkened below the water by the underwater gradient, y: 1 when hazed under a pool-style sea, z: 1 for the ground lot view hazes
@@ -494,10 +494,6 @@ float4 main(Input input) : SV_Target {
             r = float3(dot(r, cameraRight.xyz), dot(r, cameraUp.xyz), dot(r, cameraForward.xyz));
         }
         lit.rgb += envCubeTexture.Sample(envCubeSampler, r).rgb * envCube.rgb;
-    }
-    // A neighbor's real house, its ground too, takes the hour's light as the game's imposter of it does.
-    if (neighborLight.w > 0.5 && neighborLight.w < 1.5) {
-        lit.rgb *= neighborLight.rgb;
     }
     return lit;
 }

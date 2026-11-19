@@ -194,6 +194,14 @@ LotSceneStats LotSceneBuilder::build() {
     const auto kept = std::make_shared<const Heights>(heights_.grid() ? std::make_shared<const array3d::Array3D>(*heights_.grid()) : nullptr);
     const int groundLevel = content::gridLevel(lot_, 1);
     b_.scene().floorHeight = [kept, groundLevel](int storey, float x, float y) { return kept->tile(storey - 1 + groundLevel, x, y); };
+    const auto waterGrid = lot_.flatGrids.find(content::kWaterHeightGridInstance);
+    const auto water = waterGrid != lot_.flatGrids.end() ? std::make_shared<const terrain::Array2D>(waterGrid->second) : nullptr;
+    b_.scene().objectHeight = [kept, water, groundLevel](int storey, float x, float y, std::int32_t direction, std::int16_t wallPlacement,
+                                                         std::int16_t placement) {
+        const auto [fx, fy] = floorPoint(x, y, direction, wallPlacement);
+        const float floor = kept->blended(storey - 1 + groundLevel, fx, fy);
+        return floatingHeight(water.get(), placement, storey == 1, x, y, floor).value_or(floor);
+    };
     b_.scene().groundLevel = groundLevel;
     b_.scene().boundsTopLevel = content::topGridLevel(lot_);
     if (const auto floors = lot_.grids.find(content::kFloorGridInstance); floors != lot_.grids.end() && floors->second.elementSize == 8) {
@@ -219,6 +227,7 @@ LotSceneStats LotSceneBuilder::build() {
     drawTerrain();
     drawFloors();
     drawPoolWater();
+    drawCurvedPoolCorners();
     drawPondWater();
     placeRoofs();
     // The sky behind a lot by day, as the game's lot sky effect draws it (its plain-weather
@@ -243,6 +252,27 @@ void LotSceneBuilder::collectWalls() {
     };
     // Points off the lot (or not numbers, in a broken file) make no wall.
     auto onLot = [](const wallgraph::Point* p) { return p->x >= -1 && p->x <= 257 && p->y >= -1 && p->y <= 257; };
+    // A door or window leaves out the rail of a fence in its edge, so a gate stands in an open gap.
+    // The fence itself stays, for routing too.
+    std::set<EdgeKey> doorways;
+    for (const auto& o : lot_.objects) {
+        const auto* definition = o.type ? assets_.objectDefinition(o.type->guid) : nullptr;
+        if (definition == nullptr) {
+            continue;
+        }
+        const auto& h = o.state.header;
+        // Off the lot, or not a number in a broken file.
+        if (!(h.location[0] >= 0 && h.location[0] <= 256 && h.location[1] >= 0 && h.location[1] <= 256)) {
+            continue;
+        }
+        const Transform at = Transform::at(h.location[1], h.location[0], 0, facingAngle(o.state.data[kFacingData]));
+        const int level = content::gridLevel(lot_, h.value1);
+        for (const auto& middle : doorwayEdges(definition->field(objd::field::kType), o.state.data[kWallPlacementData])) {
+            float p[3] = {middle[0], middle[1], 0};
+            at.apply(p, true);
+            doorways.insert(edgeKey(p[0], p[1], p[0], p[1], level));
+        }
+    }
     const wallgraph::PointIndex pointById(rooms);
     for (const auto& w : rooms.walls) {
         const auto* a = pointById(w.from);
@@ -261,7 +291,9 @@ void LotSceneBuilder::collectWalls() {
         if (fence != nullptr) {
             const float dx = b->x - a->x, dy = b->y - a->y;
             const std::string& model = dx != 0 && dy != 0 ? fence->diagonalRail : fence->rail;
-            if (const int mesh = model.empty() ? -1 : b_.model(model, {}); mesh >= 0) {
+            // Half walls keep theirs.
+            const bool inDoorway = !fence->halfWall && doorways.contains(edgeKey(a->x, a->y, b->x, b->y, level));
+            if (const int mesh = model.empty() || inDoorway ? -1 : b_.model(model, {}); mesh >= 0) {
                 // On a slope the game shears the rail rather than tilting it, so the pickets stay upright.
                 // Each vertex rises by the slope times its distance along the rail.
                 const float za = heights_.corner(level, a->x, a->y);
@@ -521,21 +553,17 @@ void LotSceneBuilder::cutWalls() {
             }
             ThickWall& w = walls_[wall->second];
             const float dx = w.q.x1 - w.q.x0, dy = w.q.y1 - w.q.y0;
-            // The wall graph's left side faces (dy, -dx). A straight face's mask runs along the
-            // object's own -x: left to right as seen from n and e faces, right to left from s and w.
-            // A diagonal one runs right to left as seen from ne and nw faces, left to right from se and sw.
+            // The wall graph's left side faces (dy, -dx).
             const bool left = facing[0] * dy - facing[1] * dx > 0;
             (left ? w.leftMask : w.rightMask) = m.material;
-            (left ? w.leftMaskMirrored : w.rightMaskMirrored) = diagonal ? m.face.starts_with('n') : m.face == "s" || m.face == "w";
             b_.scene().instances[o.instance].walls.push_back(wallBase_ + static_cast<int>(wall->second));
             ++stats_.wallCuts;
         }
     }
     for (auto& w : walls_) {
-        for (auto [side, mask, mirrored] : {std::tuple{&w.left, &w.leftMask, w.leftMaskMirrored},
-                                            std::tuple{&w.right, &w.rightMask, w.rightMaskMirrored}}) {
+        for (auto [side, mask] : {std::pair{&w.left, &w.leftMask}, std::pair{&w.right, &w.rightMask}}) {
             if (!side->empty() && !mask->empty()) {
-                if (const int cut = b_.maskedMaterial(*side, *mask, mirrored); cut >= 0) {
+                if (const int cut = b_.maskedMaterial(*side, *mask); cut >= 0) {
                     *side = b_.scene().materials[static_cast<std::size_t>(cut)].name;
                 }
             }

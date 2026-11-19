@@ -43,6 +43,8 @@ public:
 
     // Where the effect sits inside `parent`, whose moves carry along what it has already made.
     void placeIn(const EmitterPlace& own, const EmitterPlace& parent);
+    // Keeps its last place inside a `parent` that has moved.
+    void moveParent(const EmitterPlace& parent) { placeIn(ownGiven_, parent); }
 
     // The alpha and colour the effect's particles are multiplied by, unless a keyword refuses them.
     void setMessages(float alpha, const std::array<float, 3>& colour);

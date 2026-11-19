@@ -17,7 +17,7 @@ struct Quarter {
 };
 
 // The ground storey's quarters with water: open ground (the surface grid) over a floor on the level
-// below it, as a pool is built.
+// below it, as a pool is built, and the tiles of its curved corners over a floor below.
 std::vector<Quarter> waterQuarters(const content::Lot& lot);
 
 // One of the see-through sheets under the water's surface that darken deeper water.

@@ -98,6 +98,10 @@ public:
         std::string node;
         Transform fromNode;
         Transform restPlace;  // where it sits with every joint at rest
+        int block = -1;       // the shape node's block in the model's tree, -1 for none
+        // The plane a mirror's camera reflects this shape's glass in, in the model (see
+        // scenegraph::SceneNode::Reflection). Unset for shapes no camera names.
+        std::optional<std::array<float, 4>> mirrorPlane;
     };
     // A model's shapes and its joints: by the index meshes skin to, each one's rest place in the
     // model, and the joints that nodes drawing shapes follow.
@@ -193,9 +197,9 @@ public:
     // (a layer).
     int terrainMaterial(const std::string& texture, int repeats, float shade, bool paint);
     // A wall covering with a door or window's wall mask cut out of it: alpha below half in the mask
-    // is a hole (see Material::mask). `mirrored` when the mask runs right to left across the face. -1
-    // when either is missing.
-    int maskedMaterial(const std::string& covering, const std::string& mask, bool mirrored);
+    // is a hole (see Material::mask). The mask runs right to left across the face when its material's
+    // tsMirrorWallMask is 1. -1 when either is missing.
+    int maskedMaterial(const std::string& covering, const std::string& mask);
     // Each of the scene's images by what it was made from (a texture's name, or a name and how it was
     // made), empty for images made for this scene alone such as light maps. Builders on the same
     // assets make the same image from the same key, so scenes joined later can share them.
@@ -247,6 +251,15 @@ private:
     int wallNormalMap(const scenegraph::Material& m);
     // Textures drawn one over another by their alpha, bottom first, at the smallest one's size, opaque.
     int layeredImage(const std::vector<std::string>& textures);
+    // A composite layer: its texture and, for a masked layer, its mask and amount (0 to 255).
+    struct ImageLayer {
+        std::string texture;
+        std::string mask;
+        std::uint8_t amount = 255;
+    };
+    // The same with masks: a masked layer covers by its mask's green channel and its amount. A layer
+    // whose mask is missing is left out.
+    int layeredImage(const std::vector<ImageLayer>& layers);
     // A wall covering's material with `maskTexture` as its wall mask (see maskedMaterial). -1 when
     // either is missing.
     int cutMaterial(const std::string& name, const std::string& covering, const std::string& maskTexture, bool mirrored);

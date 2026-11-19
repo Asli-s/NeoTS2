@@ -1,6 +1,7 @@
 // The water in the lot's pools and in the ponds dug in its terrain.
 #include "scene/lot_scene_builder.hpp"
 
+#include "scene/curved_pool.hpp"
 #include "scene/pool_water.hpp"
 #include "scene/terrain_water.hpp"
 
@@ -89,6 +90,45 @@ void LotSceneBuilder::drawPoolWater() {
     if (auto* water = b_.place(static_cast<int>(b_.scene().meshes.size() - 1), "pool water", Transform{}, Part::Floor, ground)) {
         water->poolWater = true;
         water->poolBox = poolBox(quarters, ground);
+    }
+}
+
+// The curved wall of each rounded pool corner: the game's poolShapeWall model, from the pool's floor
+// up to the ground, turned to the corner. Its wall takes the pool-side pattern of one of the corner's
+// straight pool walls (curvedpool::patternWall) and its top the walls' top material.
+void LotSceneBuilder::drawCurvedPoolCorners() {
+    const int ground = content::groundGridLevel(lot_);
+    if (lot_.curvedPools.empty() || ground < 1) {
+        return;
+    }
+    const int model = b_.model("poolShapeWall", {});
+    if (model < 0) {
+        return;
+    }
+    for (const auto& corner : lot_.curvedPools) {
+        const auto w = curvedpool::patternWall(corner);
+        const auto found = wallAt_.find(edgeKey(w[0], w[1], w[2], w[3], ground - 1));
+        if (found == wallAt_.end()) {
+            continue;
+        }
+        const ThickWall& wall = walls_[found->second];
+        // The pool's own side is the one with its room. Room 0 is the outdoors.
+        const std::string& pattern = wall.roomLeft || wall.right.empty() ? wall.left : wall.right;
+        const int wallMaterial = pattern.empty() ? -1 : b_.material(pattern);
+        Mesh mesh = b_.scene().meshes[static_cast<std::size_t>(model)];
+        mesh.name = "curved pool wall";
+        for (auto& p : mesh.primitives) {
+            const bool top = p.material >= 0 && lower(b_.scene().materials[static_cast<std::size_t>(p.material)].name).ends_with("_top");
+            p.material = top ? wallTop_ : wallMaterial;
+        }
+        std::erase_if(mesh.primitives, [](const Primitive& p) { return p.material < 0; });
+        if (mesh.primitives.empty()) {
+            continue;
+        }
+        b_.scene().meshes.push_back(std::move(mesh));
+        const float x = static_cast<float>(corner.x), y = static_cast<float>(corner.y);
+        b_.place(static_cast<int>(b_.scene().meshes.size() - 1), "curved pool wall",
+                 Transform::at(x, y, heights_.corner(ground - 1, x, y), curvedpool::turn(corner)), Part::Other, ground - 1);
     }
 }
 

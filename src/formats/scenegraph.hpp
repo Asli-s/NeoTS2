@@ -176,6 +176,15 @@ struct SceneNode {
         float fovY = 0, nearPlane = 0, farPlane = 0;
     };
     std::optional<Lens> lens;
+    // A mirror's camera (a ViewerRef node of class cViewerRefNodeRecursive): the shape node of the
+    // glass it reflects in (a block index) and the plane it mirrors and clips at, (a, b, c, d) with
+    // a unit normal, in that node's own place. The plane comes from this data, not from the glass,
+    // and may sit a little in front of it, which keeps a mirror's frame and back out of the image.
+    struct Reflection {
+        std::uint32_t glass = 0;
+        std::array<float, 4> plane{};
+    };
+    std::optional<Reflection> reflection;
 };
 struct ResourceNode {
     Container container;

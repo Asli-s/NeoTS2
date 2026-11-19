@@ -823,6 +823,11 @@ void MetaParticleEmitter::moveEffects() {
         p.effect->setMessages(block_.alpha.at(t) * alpha_ * p.alpha, {colour[0] * p.colour[0], colour[1] * p.colour[1], colour[2] * p.colour[2]});
         p.effect->placeIn(at, parent_);
     }
+    // A dead particle's effect stays where the particle was, inside the emitter as it moves, as a
+    // thought balloon stays over a Sim's bending head after its rise ends.
+    for (const auto& effect : dying_) {
+        effect->moveParent(parent_);
+    }
 }
 
 void MetaParticleEmitter::update(float seconds, const EffectConditions& conditions) {

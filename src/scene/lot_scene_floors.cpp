@@ -1,14 +1,31 @@
 // The lot's terrain with its paints, and its floors with the slabs and ceilings under them.
 #include "scene/lot_scene_builder.hpp"
 
+#include "scene/curved_pool.hpp"
 #include "scene/terrain_water.hpp"
 
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <set>
+#include <utility>
 
-namespace ts2::scene::lotscene {
+namespace ts2::scene {
+
+int floorTurnSteps(int nibble) {
+    return nibble == 2 ? 3 : nibble == 4 ? 2 : nibble == 8 ? 1 : 0;
+}
+
+std::array<float, 2> turnedFloorPoint(const std::array<float, 2>& point, const std::array<float, 2>& centre, int steps) {
+    float dx = point[0] - centre[0], dy = point[1] - centre[1];
+    for (int k = 0; k < steps; ++k) {
+        dx = std::exchange(dy, -dx);
+    }
+    return {centre[0] + dx, centre[1] + dy};
+}
+
+namespace lotscene {
 
 // The terrain: a grid of four points to a tile (as the paint strengths are kept), between the
 // height grid's corners. Like the game, the canvas texture repeats every 20 tiles and its detail
@@ -54,8 +71,64 @@ void LotSceneBuilder::drawTerrain() {
         return surface != lot_.grids.end() &&
                surfaceOpen(surface->second, ground, (static_cast<float>(i) + 0.5f) * step, (static_cast<float>(j) + 0.5f) * step);
     };
+    // A curved pool corner's terrain stops at its quarter circle: the cells it reaches are drawn as
+    // the pieces outside it, with points of their own between the cell's corners.
+    struct Between {
+        std::uint32_t i, j;
+        float fx, fy;  // across the cell, 0 to 1
+    };
+    std::vector<Between> between;
+    std::map<std::pair<std::uint32_t, std::uint32_t>, std::vector<std::uint32_t>> cutCells;
+    const auto roundedCorners = curvedpool::byTile(lot_.curvedPools);
+    for (const auto& [tile, corners] : roundedCorners) {
+        if (tile.first < 0 || tile.second < 0) {
+            continue;
+        }
+        for (std::uint32_t di = 0; di < kSteps; ++di) {
+            for (std::uint32_t dj = 0; dj < kSteps; ++dj) {
+                const std::uint32_t i = static_cast<std::uint32_t>(tile.first) * kSteps + di, j = static_cast<std::uint32_t>(tile.second) * kSteps + dj;
+                if (i + 1 >= columns || j + 1 >= rows) {
+                    continue;
+                }
+                const float x0 = static_cast<float>(i) * step, y0 = static_cast<float>(j) * step;
+                auto& indices = cutCells[{i, j}];
+                for (const auto& piece : curvedpool::outside({{x0, y0}, {x0 + step, y0}, {x0 + step, y0 + step}, {x0, y0 + step}}, corners)) {
+                    const auto first = static_cast<std::uint32_t>(canvas.positions.size() / 3);
+                    for (const auto& p : piece) {
+                        const float fx = std::clamp((p[0] - x0) / step, 0.0f, 1.0f), fy = std::clamp((p[1] - y0) / step, 0.0f, 1.0f);
+                        between.push_back({i, j, fx, fy});
+                        const std::uint32_t a = i * rows + j, b = (i + 1) * rows + j;
+                        auto mix = [&](const std::vector<float>& v, std::size_t stride, std::size_t k) {
+                            return (v[a * stride + k] * (1 - fx) + v[b * stride + k] * fx) * (1 - fy) +
+                                   (v[(a + 1) * stride + k] * (1 - fx) + v[(b + 1) * stride + k] * fx) * fy;
+                        };
+                        canvas.positions.insert(canvas.positions.end(), {p[0], p[1], mix(canvas.positions, 3, 2)});
+                        std::array<float, 3> n{mix(canvas.normals, 3, 0), mix(canvas.normals, 3, 1), mix(canvas.normals, 3, 2)};
+                        const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+                        canvas.normals.insert(canvas.normals.end(), {n[0] / len, n[1] / len, n[2] / len});
+                        canvas.uvs.insert(canvas.uvs.end(), {p[0] / kRepeat, p[1] / kRepeat});
+                        canvas.lightUvs.insert(canvas.lightUvs.end(), {p[0] / lotWidth, p[1] / lotHeight});
+                    }
+                    for (std::uint32_t k = 1; k + 1 < piece.size(); ++k) {
+                        indices.insert(indices.end(), {first, first + k, first + k + 1});
+                    }
+                }
+            }
+        }
+    }
+    // A value kept per terrain point, for the points between a cut cell's corners.
+    auto addBetween = [&](std::vector<float>& values) {
+        for (const auto& p : between) {
+            const std::uint32_t a = p.i * rows + p.j, b = (p.i + 1) * rows + p.j;
+            values.push_back((values[a] * (1 - p.fx) + values[b] * p.fx) * (1 - p.fy) + (values[a + 1] * (1 - p.fx) + values[b + 1] * p.fx) * p.fy);
+        }
+    };
     auto cell = [&](std::vector<std::uint32_t>& indices, std::uint32_t i, std::uint32_t j) {
         if (open(i, j)) {
+            return;
+        }
+        if (const auto cut = cutCells.find({i, j}); cut != cutCells.end()) {
+            indices.insert(indices.end(), cut->second.begin(), cut->second.end());
             return;
         }
         const std::uint32_t a = i * rows + j, b = (i + 1) * rows + j;
@@ -116,6 +189,7 @@ void LotSceneBuilder::drawTerrain() {
                 paint.alphas.push_back(static_cast<float>(strength.byte(static_cast<std::int32_t>(si), static_cast<std::int32_t>(sj))) / 255);
             }
         }
+        addBetween(paint.alphas);
         mesh.primitives.push_back(std::move(paint));
         ++stats_.terrainPaints;
     }
@@ -134,6 +208,7 @@ void LotSceneBuilder::drawTerrain() {
                 caustics.alphas.push_back(top ? (*top - (height(i, j) - kGroundDrop)) / kFadeDepth : -1.0f);
             }
         }
+        addBetween(caustics.alphas);
         for (std::uint32_t i = 0; i + 1 < columns; ++i) {
             for (std::uint32_t j = 0; j + 1 < rows; ++j) {
                 const std::uint32_t a = i * rows + j, b = (i + 1) * rows + j;
@@ -207,6 +282,17 @@ void LotSceneBuilder::drawFloors() {
         }
         return std::array<float, 2>{(tileX + (0.5f + 7 * fx) / 8) / mapWidth, (tileY + (0.5f + 7 * fy) / 8) / mapHeight};
     };
+    const auto roundedCorners = curvedpool::byTile(lot_.curvedPools);
+    // A quarter's saved texture turn (see floorTurnSteps), a nibble per quarter in the floor grid's order.
+    const auto turns = lot_.grids.find(content::kFloorTurnGridInstance);
+    auto floorTurn = [&](std::int32_t level, std::int32_t x, std::int32_t y, std::size_t quarter) {
+        if (turns == lot_.grids.end() || turns->second.elementSize != 2 || !turns->second.contains(level, x, y)) {
+            return 0;
+        }
+        const auto cell = turns->second.at(level, x, y);
+        const int nibble = (cell[quarter / 2] >> (4 * (quarter % 2))) & 0xF;
+        return floorTurnSteps(nibble);
+    };
     for (std::int32_t level = 0; level < static_cast<std::int32_t>(g.levels); ++level) {
         Surfaces surfaces, stageSurfaces;
         for (std::int32_t x = 0; x < static_cast<std::int32_t>(g.width); ++x) {
@@ -243,12 +329,38 @@ void LotSceneBuilder::drawFloors() {
                     if (material >= 0) {
                         span = b_.scene().materials[static_cast<std::size_t>(material)].floorTiles;
                     }
-                    addVertex(s, {corners[q][0], corners[q][1], h[q] + lift}, {0, 0, 1}, {corners[q][1] / span[0], corners[q][0] / span[1]});
-                    addVertex(s, {corners[n][0], corners[n][1], h[n] + lift}, {0, 0, 1}, {corners[n][1] / span[0], corners[n][0] / span[1]});
-                    addVertex(s, {fx + 0.5f, fy + 0.5f, center + lift}, {0, 0, 1}, {(fy + 0.5f) / span[0], (fx + 0.5f) / span[1]});
-                    for (const auto& c : {corners[q], corners[n], std::array<float, 2>{fx + 0.5f, fy + 0.5f}}) {
+                    const std::array<float, 2> middle{fx + 0.5f, fy + 0.5f};
+                    // The quarter's texture is turned about the tile's centre by its saved turn. A
+                    // pattern of four tiles, such as the sun on a pool's floor, is laid this way.
+                    const int steps = floorTurn(level, x, y, 3 - q);
+                    auto emit = [&](const std::array<float, 2>& c, float z) {
+                        const auto t = turnedFloorPoint(c, middle, steps);
+                        addVertex(s, {c[0], c[1], z + lift}, {0, 0, 1}, {t[1] / span[0], t[0] / span[1]});
                         const auto uv = lightUv(level, fx, fy, c[0] - fx, c[1] - fy);
                         s.lightUvs.insert(s.lightUvs.end(), uv.begin(), uv.end());
+                    };
+                    const auto rounded = level == ground ? roundedCorners.find({x, y}) : roundedCorners.end();
+                    if (rounded == roundedCorners.end()) {
+                        emit(corners[q], h[q]);
+                        emit(corners[n], h[n]);
+                        emit(middle, center);
+                        continue;
+                    }
+                    // A curved pool corner's ground floor stops at its quarter circle.
+                    const auto heightAt = [&](const std::array<float, 2>& p) {
+                        const auto& a = corners[q];
+                        const auto& b = corners[n];
+                        const float d = (b[1] - middle[1]) * (a[0] - middle[0]) + (middle[0] - b[0]) * (a[1] - middle[1]);
+                        const float wa = ((b[1] - middle[1]) * (p[0] - middle[0]) + (middle[0] - b[0]) * (p[1] - middle[1])) / d;
+                        const float wb = ((middle[1] - a[1]) * (p[0] - middle[0]) + (a[0] - middle[0]) * (p[1] - middle[1])) / d;
+                        return wa * h[q] + wb * h[n] + (1 - wa - wb) * center;
+                    };
+                    for (const auto& piece : curvedpool::outside({corners[q], corners[n], middle}, rounded->second)) {
+                        for (std::size_t k = 1; k + 1 < piece.size(); ++k) {
+                            for (const auto& p : {piece[0], piece[k], piece[k + 1]}) {
+                                emit(p, heightAt(p));
+                            }
+                        }
                     }
                 }
             }
@@ -311,6 +423,10 @@ void LotSceneBuilder::drawFloors() {
                     middle += top[k] / 4;
                 }
                 const std::array<float, 2> centre{fx + 0.5f, fy + 0.5f};
+                // A curved pool corner's floor ends at its quarter circle, under the curved wall's top.
+                if (level == ground && roundedCorners.contains({x, y})) {
+                    continue;
+                }
                 // A band from `a` (left, seen from outside) to `b`, facing `out`, above a wall below or not.
                 auto band = [&](const std::array<float, 2>& a, float ta, const std::array<float, 2>& b, float tb, const std::array<float, 3>& out,
                                 bool overWall) {
@@ -378,4 +494,5 @@ void LotSceneBuilder::drawFloors() {
     }
 }
 
-} // namespace ts2::scene::lotscene
+} // namespace lotscene
+} // namespace ts2::scene

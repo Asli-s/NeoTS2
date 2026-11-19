@@ -153,7 +153,7 @@ GpuMesh packMesh(const scene::Mesh& mesh, std::span<const scene::Material> mater
         const auto finite = [](const std::array<float, 3>& a) { return std::isfinite(a[0]) && std::isfinite(a[1]) && std::isfinite(a[2]); };
         g.hasBox = finite(g.low) && finite(g.high);
         if (g.material >= 0 && materials[static_cast<std::size_t>(g.material)].mirror && !g.skinned) {
-            if (const auto plane = flatPlane(p)) {
+            if (const auto plane = p.mirrorPlane ? p.mirrorPlane : flatPlane(p)) {
                 g.mirror = true;
                 g.plane = *plane;
             }

@@ -370,7 +370,7 @@ private:
     };
     Occlusion occlusion_;
     float occlusionStrength_ = 0;
-    bool occlusionHalf_ = true;
+    bool occlusionHalf_ = false;
     SDL_GPUTexture* noOcclusion_ = nullptr;  // bound when there is none, as the scene shader asks for a texture
     SDL_GPUTexture* occlusionBound_ = nullptr;  // what the scene shader reads this frame
 

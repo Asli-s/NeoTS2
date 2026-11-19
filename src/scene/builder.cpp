@@ -447,10 +447,20 @@ int SceneBuilder::material(const std::string& name, bool hair) {
     if (!data) {
         // A counter's top is named "<top>-cutout-<mask texture>" while something such as a sink sits
         // in it ("-cutout-0" for nothing): the top with the mask's hole cut out, made while playing.
+        // The game copies the whole top material and only adds the mask, so the top keeps its shine.
         if (const auto cut = key.find("-cutout-"); cut != std::string::npos) {
             const std::string top = name.substr(0, cut), mask = name.substr(cut + 8);
-            const int m = mask == "0" ? -1 : cutMaterial(name, top, mask, false);
-            return materials_[key] = m >= 0 ? m : material(top);
+            const int whole = material(top);
+            const int hole = whole < 0 || mask == "0" ? -1 : image(mask);
+            const auto empty = [&](int i) { return scene_.images[static_cast<std::size_t>(i)].width == 0 || scene_.images[static_cast<std::size_t>(i)].height == 0; };
+            if (hole < 0 || empty(hole)) {
+                return materials_[key] = whole;
+            }
+            Material m = scene_.materials[static_cast<std::size_t>(whole)];
+            m.name = name;
+            m.mask = hole;
+            m.maskMirrored = false;
+            return addMaterial(key, std::move(m));
         }
         ++missingMaterials;
         return materials_[key] = -1;
@@ -538,10 +548,14 @@ int SceneBuilder::composedFace(const sg::Material& m) {
     if (layers == 0) {
         return -1;
     }
-    std::vector<std::string> textures;
+    std::vector<ImageLayer> textures;
     for (std::size_t i = 0; i < layers; ++i) {
-        if (std::string t = property(m, ("baseTexture" + std::to_string(i)).c_str()); !t.empty()) {
-            textures.push_back(std::move(t));
+        const std::string n = std::to_string(i);
+        if (std::string t = property(m, ("baseTexture" + n).c_str()); !t.empty()) {
+            // A layer's amount is clamped to 0..255 and counts only with a mask, as the game reads it.
+            const std::string amount = property(m, ("baseMaskAmount" + n).c_str());
+            const long value = amount.empty() ? 255 : std::strtol(amount.c_str(), nullptr, 10);
+            textures.push_back({std::move(t), property(m, ("baseMask" + n).c_str()), static_cast<std::uint8_t>(std::clamp(value, 0L, 255L))});
         }
     }
     return layeredImage(textures);
@@ -874,16 +888,20 @@ int SceneBuilder::terrainMaterial(const std::string& texture, int repeats, float
     return addMaterial(key, std::move(m));
 }
 
-int SceneBuilder::maskedMaterial(const std::string& covering, const std::string& mask, bool mirrored) {
-    const std::string name = covering + " cut by " + mask + (mirrored ? " mirrored" : "");
+int SceneBuilder::maskedMaterial(const std::string& covering, const std::string& mask) {
+    const std::string name = covering + " cut by " + mask;
     const std::string key = lower(name);
     if (const auto it = materials_.find(key); it != materials_.end()) {
         return it->second;
     }
     std::string texture;
+    bool mirrored = false;
     if (const auto data = assets_.byName(kTxmt, mask + "_txmt")) {
         try {
-            texture = property(sg::parseMaterial(*data), "stdMatBaseTextureName");
+            const auto m = sg::parseMaterial(*data);
+            texture = property(m, "stdMatBaseTextureName");
+            // The mask's own flag says which way it runs across the face, off when it has none.
+            mirrored = property(m, "tsMirrorWallMask") == "1";
         } catch (const std::exception& ex) {
             diag::warnOnce(std::string("walls: a cutout material that can't be read is left out: ") + ex.what());
         }
@@ -998,9 +1016,21 @@ int SceneBuilder::normalMap(const std::string& texture) {
 }
 
 int SceneBuilder::layeredImage(const std::vector<std::string>& textures) {
-    std::string key = "layers";
+    std::vector<ImageLayer> layers;
+    layers.reserve(textures.size());
     for (const auto& t : textures) {
-        key += "|" + lower(t);
+        layers.push_back({t, {}, 255});
+    }
+    return layeredImage(layers);
+}
+
+int SceneBuilder::layeredImage(const std::vector<ImageLayer>& layers) {
+    std::string key = "layers";
+    for (const auto& l : layers) {
+        key += "|" + lower(l.texture);
+        if (!l.mask.empty()) {
+            key += "~" + lower(l.mask) + "@" + std::to_string(l.amount);
+        }
     }
     if (const auto it = images_.find(key); it != images_.end()) {
         return it->second;
@@ -1008,15 +1038,15 @@ int SceneBuilder::layeredImage(const std::vector<std::string>& textures) {
     // As the game composites: at the smallest layer's width and height, each layer taken from its
     // own mip level of that size rather than stretched.
     std::uint32_t width = 0, height = 0;
-    for (const auto& t : textures) {
-        if (const auto size = assets_.textureSize(t)) {
+    for (const auto& l : layers) {
+        if (const auto size = assets_.textureSize(l.texture)) {
             width = width == 0 ? size->first : std::min(width, size->first);
             height = height == 0 ? size->second : std::min(height, size->second);
         }
     }
     std::optional<Image> out;
-    for (const auto& t : textures) {
-        const auto layer = width > 0 && height > 0 ? assets_.texture(t, width, height) : std::nullopt;
+    for (const auto& l : layers) {
+        const auto layer = width > 0 && height > 0 ? assets_.texture(l.texture, width, height) : std::nullopt;
         if (!layer) {
             continue;
         }
@@ -1027,7 +1057,11 @@ int SceneBuilder::layeredImage(const std::vector<std::string>& textures) {
             }
             continue;
         }
-        textureblend::drawOver(*out, *layer);
+        if (l.mask.empty()) {
+            textureblend::drawOver(*out, *layer);
+        } else if (const auto mask = assets_.texture(l.mask, width, height)) {
+            textureblend::drawThroughMask(*out, *layer, *mask, l.amount);
+        }
     }
     return images_[key] = out ? addImage(std::move(*out)) : -1;
 }
@@ -1495,6 +1529,7 @@ std::optional<SceneBuilder::ModelShapes> SceneBuilder::readModelShapes(const std
                     if (const auto data = assets_.byKey(tree.container.links[l])) {
                         try {
                             model.shapes.push_back({sg::parseShape(*data), world[index], next, fromNode, restWorld[index]});
+                            model.shapes.back().block = static_cast<int>(index);
                         } catch (const std::exception& ex) {
                             diag::warnOnce(std::string("models: a shape that can't be read is left out: ") + ex.what());
                         }
@@ -1520,6 +1555,23 @@ std::optional<SceneBuilder::ModelShapes> SceneBuilder::readModelShapes(const std
         for (std::uint32_t i = 0; i < tree.nodes.size(); ++i) {
             if (!seen[i] && !isChild[i]) {
                 walk(walk, i, Transform{}, Transform{}, {}, 0);
+            }
+        }
+        // A mirror camera's plane moves with its glass node into the model.
+        for (const auto& n : tree.nodes) {
+            if (!n.reflection || n.reflection->glass >= tree.nodes.size() || !seen[n.reflection->glass]) {
+                continue;
+            }
+            const auto& [a, b, c, d] = n.reflection->plane;
+            const Transform& glassAt = world[n.reflection->glass];
+            float normal[3] = {a, b, c}, point[3] = {-d * a, -d * b, -d * c};
+            glassAt.apply(normal, false);
+            glassAt.apply(point, true);
+            const std::array<float, 4> plane{normal[0], normal[1], normal[2], -(normal[0] * point[0] + normal[1] * point[1] + normal[2] * point[2])};
+            for (auto& s : model.shapes) {
+                if (s.block == static_cast<int>(n.reflection->glass)) {
+                    s.mirrorPlane = plane;
+                }
             }
         }
         auto& bones = bones_[boneKey.empty() ? lower(name) : boneKey];
@@ -1683,6 +1735,9 @@ std::optional<Primitive> SceneBuilder::groupPrimitive(const ModelRequest& reques
         }
     }
     p.origin = {xf.m[3], xf.m[7], xf.m[11]};
+    if (!skinnedHere) {
+        p.mirrorPlane = placed.mirrorPlane;
+    }
     return p;
 }
 

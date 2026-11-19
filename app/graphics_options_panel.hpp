@@ -58,7 +58,7 @@ public:
         // How dark Ambient Occlusion is, an index into content::kAmbientOcclusionStrengths.
         int ambientOcclusion = 0;
         // Ambient Occlusion worked out at half the view's size, which costs less and is a little softer.
-        bool occlusionHalfSize = true;
+        bool occlusionHalfSize = false;
         // The UI drawn this much larger, in percent: one of content::kUiScales. Not in the original
         // game, so 100 unless the player picks another.
         int uiScale = 100;

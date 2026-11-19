@@ -207,6 +207,40 @@ DataValue dataValue(BinaryReader& r, int depth, std::size_t& budget) {
     return v;
 }
 
+// What follows a recursive viewer node's transform: its render settings and target name, then
+// whether it has a glass, the glass's node, and its plane in that node's own place. None when it has
+// no glass or its plane has no direction.
+std::optional<SceneNode::Reflection> viewerReflection(BinaryReader& r) {
+    r.u16();
+    const std::size_t groups = count(r, 1);
+    for (std::size_t i = 0; i < groups; ++i) {
+        r.varString();
+    }
+    r.u32();
+    r.u8();
+    r.u8();
+    r.varString();  // the image it draws into, "screenreflection"
+    if (r.u8() == 0) {
+        return std::nullopt;
+    }
+    r.u8();
+    const std::uint8_t kind = r.u8();
+    const std::uint32_t glass = r.u32();
+    std::array<float, 4> plane{};
+    for (auto& f : plane) {
+        f = std::bit_cast<float>(r.u32());
+    }
+    // Only a glass reference of kind 0, a block of the same tree, names a node.
+    const float length = std::sqrt(plane[0] * plane[0] + plane[1] * plane[1] + plane[2] * plane[2]);
+    if (kind != 0 || !std::isfinite(length) || !std::isfinite(plane[3]) || !(length > 1e-6f)) {
+        return std::nullopt;
+    }
+    for (auto& f : plane) {
+        f /= length;
+    }
+    return SceneNode::Reflection{glass, plane};
+}
+
 } // namespace
 
 ResourceNode parseResourceNode(std::span<const std::uint8_t> data) {
@@ -279,10 +313,20 @@ ResourceNode parseResourceNode(std::span<const std::uint8_t> data) {
                 // header inside it and take every later block for the one before.
                 node.kind = SceneNode::Kind::ViewerRef;
                 blockHeader(r, "cViewerRefNodeRecursive");
-                blockHeader(r, "cViewerRefNodeBase");
+                const BlockHeader base = blockHeader(r, "cViewerRefNodeBase");
                 blockHeader(r, "cRenderableNode");
                 blockHeader(r, "cBoundedNode");
                 transformNode(r, node);
+                // The reflection is read on a copy, so a broken one costs only itself and never
+                // carries the search for the next block past it.
+                if (base.version >= 3) {
+                    try {
+                        BinaryReader extra = r;
+                        node.reflection = viewerReflection(extra);
+                    } catch (const std::exception&) {
+                        node.reflection.reset();
+                    }
+                }
             } else if (type == kViewerNode) {
                 node.kind = SceneNode::Kind::ViewerRef;
                 const BlockHeader viewer = blockHeader(r, "cViewerRefNode");

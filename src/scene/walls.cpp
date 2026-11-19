@@ -123,6 +123,56 @@ std::vector<std::array<float, 2>> hidesWithWalls(std::int16_t flags, std::int16_
     return out;
 }
 
+std::vector<std::array<float, 2>> doorwayEdges(int definitionType, std::int16_t wallPlacement) {
+    constexpr int kDoorType = 8, kWindowType = 9;
+    std::vector<std::array<float, 2>> out;
+    if (definitionType != kDoorType && definitionType != kWindowType) {
+        return out;
+    }
+    constexpr std::array<std::pair<std::int16_t, std::array<float, 2>>, 4> kEdges{{
+        {0x1, {0, 0.5f}}, {0x2, {-0.5f, 0}}, {0x4, {0, -0.5f}}, {0x8, {0.5f, 0}},
+    }};
+    for (const auto& [bit, middle] : kEdges) {
+        if ((wallPlacement & bit) != 0) {
+            out.push_back(middle);
+        }
+    }
+    return out;
+}
+
+std::optional<float> topCrossing(float above0, float above1) {
+    constexpr float kEps = 1e-4f;
+    if ((above0 < -kEps && above1 > kEps) || (above0 > kEps && above1 < -kEps)) {
+        return above0 / (above0 - above1);
+    }
+    return std::nullopt;
+}
+
+std::array<float, 2> floorPoint(float x, float y, std::int32_t direction, std::int16_t wallPlacement) {
+    constexpr std::int16_t kWallBehind = 0x4;
+    if ((wallPlacement & kWallBehind) == 0) {
+        return {x, y};
+    }
+    // Direction d faces 180 - 45d degrees, so the wall behind lies at -45d degrees.
+    const float behind = -static_cast<float>(direction) * kPi / 4;
+    return {x + 0.5f * std::cos(behind), y + 0.5f * std::sin(behind)};
+}
+
+std::optional<float> savedHeight(const content::Lot& lot, const content::LotObject& object) {
+    const auto saved = lot.savedPositions.find(object.id);
+    if (saved == lot.savedPositions.end()) {
+        return std::nullopt;
+    }
+    // Within a hundredth of a tile of where it stands now.
+    constexpr float kSameSpot = 0.01f;
+    const auto& [x, y, z] = saved->second;
+    const auto& h = object.state.header;
+    if (std::fabs(x - h.location[1]) > kSameSpot || std::fabs(y - h.location[0]) > kSameSpot) {
+        return std::nullopt;
+    }
+    return z;
+}
+
 std::map<std::string, std::vector<WallMask>> wallMasks(const std::vector<std::string>& materialNames) {
     // Up to 5 digits, so the numbers always fit an int.
     const std::regex pattern(R"(^(.+)_(0|\d{1,5}[ew])_(0|\d{1,5}[ns])_(\d{1,5})_(n|s|e|w|ne|nw|se|sw)_wallmask_txmt$)",
@@ -319,9 +369,7 @@ void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w,
                 p.lightUvs.insert(p.lightUvs.end(), {r[0] + t * (r[2] - r[0]), r[1] + down * (r[3] - r[1])});
             }
         };
-        for (std::size_t k = 0; k + 1 < pts.size(); ++k) {
-            const auto& p = pts[k];
-            const auto& n = pts[k + 1];
+        auto piece = [&](const std::array<float, 2>& p, const std::array<float, 2>& n) {
             const float bp = bottomAt(p), bn = bottomAt(n), tp = topAt(p), tn = topAt(n);
             const float op = ownTopAt(p), on = ownTopAt(n);
             // Up to the wall's own top, then any part above it.
@@ -336,6 +384,19 @@ void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w,
                         left ? leftNormal : rightNormal,
                         {{{u(p), v(p, z0p)}, {u(n), v(n, z0n)}, {u(n), v(n, z1n)}, {u(p), v(p, z1p)}}});
                 light(prim, first);
+            }
+        };
+        for (std::size_t k = 0; k + 1 < pts.size(); ++k) {
+            const auto& p = pts[k];
+            const auto& n = pts[k + 1];
+            // Where a roof's underside crosses the wall's own top between the two points, the pieces
+            // below and above that top are split there, so neither reaches past the roof's line.
+            if (const auto s = topCrossing(topAt(p) - ownTopAt(p), topAt(n) - ownTopAt(n))) {
+                const std::array<float, 2> mid{p[0] + (n[0] - p[0]) * *s, p[1] + (n[1] - p[1]) * *s};
+                piece(p, mid);
+                piece(mid, n);
+            } else {
+                piece(p, n);
             }
         }
         // The free end on this side's left: the last thickness of the paint, ending at this side.

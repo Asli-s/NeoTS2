@@ -74,9 +74,10 @@ struct Material {
     int image = -1;  // index into Scene::images, -1 for none
     AlphaMode alpha = AlphaMode::Opaque;
     float alphaReference = 0.5f;  // Mask: drawn where alpha is at least this
-    // A wall's door or window mask (index into Scene::images, -1 for none), as the game's walls take
-    // it: drawn only where its alpha is at least half, read clamped at the wall's texture coordinates,
-    // with u running the other way when `maskMirrored`. The covering's own alpha cuts nothing.
+    // A wall's door or window mask, or a counter top's hole for a sink (index into Scene::images, -1
+    // for none), as the game takes it: drawn only where its alpha is at least half, read clamped at
+    // the surface's texture coordinates, with u running the other way when `maskMirrored`. On a wall
+    // the covering's own alpha cuts nothing.
     int mask = -1;
     bool maskMirrored = false;
     // Drawn as the game's lot terrain shaders draw a canvas or paint: the texture's own alpha plays
@@ -213,6 +214,9 @@ struct Primitive {
     static constexpr std::size_t kMorphStreams = 4;
     // Where the node of the model it belongs to sits in the model.
     std::array<float, 3> origin{0, 0, 0};
+    // A mirror glass's plane (a, b, c, d) in the model, as its mirror's camera stores it. Unset when
+    // no camera names it, and a flat glass then mirrors in its own plane.
+    std::optional<std::array<float, 4>> mirrorPlane;
 };
 
 // A joint a skinned mesh follows: a vertex moves with it from the bind pose (`inverseBind` takes it
@@ -346,9 +350,8 @@ struct Instance {
     // the lot does). Its materials then draw blended, without reflections, their colour and alpha
     // times this.
     std::optional<std::array<float, 4>> shapeColor;
-    // A neighbor's house drawn for real around the lot: lit once by day and tinted by the light the lots'
-    // imposters take (see IRenderer::setImposterLight), as it isn't lit again as the hours pass. Its
-    // ground takes the light of the ground around the lot instead.
+    // A neighbor's house drawn for real around the lot, lit as the played lot is (its light maps lit
+    // again when the lot's lighting state changes).
     bool neighborHouse = false;
     // An object a lot's imposter carries as a model (see ImposterObject): its lot, which it shows and
     // hides with.
@@ -715,6 +718,11 @@ struct Scene {
     std::vector<PlacedObject> placedObjects;
     // The height of the lot's floor on a storey (1 = ground) at a lot position.
     std::function<float(int storey, float x, float y)> floorHeight;
+    // Where an object the simulation moves stands, as the lot's objects are placed: its floor read at
+    // floorPoint, or a pond's surface for one that floats (see lotscene::floatingHeight). Takes its
+    // storey (1 = ground), lot position, facing (object data 1), wall placement (0x0D) and placement
+    // flags (0x2A).
+    std::function<float(int storey, float x, float y, std::int32_t direction, std::int16_t wallPlacement, std::int16_t placement)> objectHeight;
     // For a lot tile (x, y) on a level (as Instance::level counts them) with a floor on any quarter:
     // the height grid's value at the tile's low corner, in lot coordinates. Nothing for a tile
     // without a floor or off the lot.

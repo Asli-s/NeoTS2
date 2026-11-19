@@ -49,6 +49,10 @@ std::vector<Quarter> waterQuarters(const content::Lot& lot) {
         ground < 1) {
         return {};
     }
+    std::set<std::pair<int, int>> roundedTiles;
+    for (const auto& c : lot.curvedPools) {
+        roundedTiles.insert({{c.x - 1, c.y - 1}, {c.x, c.y - 1}, {c.x - 1, c.y}, {c.x, c.y}});
+    }
     std::vector<Quarter> out;
     for (std::uint32_t x = 0; x < surface->second.width; ++x) {
         for (std::uint32_t y = 0; y < surface->second.height; ++y) {
@@ -57,8 +61,11 @@ std::vector<Quarter> waterQuarters(const content::Lot& lot) {
             if (open.size() != 4 || !floors->second.contains(ground - 1, tx, ty)) {
                 continue;
             }
+            // A curved pool corner's tiles hold water under its floor too: the floor stops at the
+            // corner's quarter circle.
+            const bool rounded = roundedTiles.contains({tx, ty});
             for (std::size_t q = 0; q < 4; ++q) {
-                if (open[q] == 0 && floors->second.i16(ground - 1, tx, ty, q) != 0) {
+                if ((open[q] == 0 || rounded) && floors->second.i16(ground - 1, tx, ty, q) != 0) {
                     out.push_back({tx, ty, static_cast<int>(q)});
                 }
             }

@@ -18,6 +18,8 @@
 #include "sim/look_at.hpp"
 #include "scene/scene_ray.hpp"
 #include "scene/terrain_water.hpp"
+#include "scene/curved_pool.hpp"
+#include "scene/lot_parts.hpp"
 #include "scene/instance_merge.hpp"
 #include "scene/imposter_bake.hpp"
 #include "scene/imposter_cache.hpp"
@@ -678,6 +680,68 @@ void metaParticlesFollowTheirPath() {
     effect->place(at);
     player.update(0.1f, 0.1f);
     CHECK(near(where()[2], 40.35f));
+}
+
+// In a rigid effect, as a thought balloon is, a dead particle's effect keeps its place in the
+// effect, so the balloon stays over a bending Sim's head after its rise.
+void rigidMetaParticlesKeepTheirDeadParticlesEffects() {
+    using namespace ts2;
+    using Meta = effects::MetaParticleBlock;
+    effects::File file;
+    auto still = stillParticles(effects::ParticleBlock::kHoldCount, 1);
+    still.life = {100, 100};
+    file.particles.push_back(still);
+    effects::VisualEffect spark;
+    spark.flags = effects::VisualEffect::kRigid;
+    spark.components = {particlePart(0)};
+    addEffect(file, "spark", spark);
+    Meta balloon;
+    balloon.flags = Meta::kBursts | Meta::kFollowsPath;
+    balloon.life = {1, 1};
+    balloon.delay = {-1, -1};
+    balloon.gap = {-1, -1};
+    balloon.count.values = {1};
+    balloon.interval = 100;
+    balloon.burstLimit = 1;
+    balloon.size.values = {1};
+    balloon.effect = "spark";
+    balloon.path = {{{0, 0, 0.35f}, {}, 0}, {{0, 0, 0.35f}, {}, 1}};
+    file.metaParticles.push_back(balloon);
+    effects::Component part;
+    part.type = 2;
+    part.index = 0;
+    part.orientation = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    effects::VisualEffect holder;
+    holder.flags = effects::VisualEffect::kRigid;
+    holder.components = {part};
+    addEffect(file, "balloon", holder);
+
+    scene::EffectPlayer player(file, 1);
+    player.setDetail(1);
+    auto effect = player.create("balloon");
+    scene::EmitterPlace at;
+    at.position = {10, 20, 30};
+    effect->place(at);
+    effect->start(false);
+    const auto drawnHeight = [&] {
+        float found = 0;
+        player.forEachParticleSystem([&](const auto&, const auto& emitter, const auto& parent) {
+            found = parent.position[2] + emitter.where().position[2];
+        });
+        return found;
+    };
+    for (int i = 0; i < 5; ++i) {
+        player.update(0.1f, 0.1f);
+    }
+    CHECK(near(drawnHeight(), 30.35f));
+    // Past its one second the particle is gone, and its spark still moves with the effect.
+    for (int i = 0; i < 10; ++i) {
+        player.update(0.1f, 0.1f);
+    }
+    at.position = {10, 20, 29};
+    effect->place(at);
+    player.update(0.1f, 0.1f);
+    CHECK(near(drawnHeight(), 29.35f));
 }
 
 void attractorsHoldParticlesInPlace() {
@@ -1606,6 +1670,17 @@ void atticWallsReachTheRoofsUnderside() {
     CHECK(ceiling.at(5, 0, 6) == 7.5f);
 }
 
+// A gable wall on G001 lot 39 has its own top at 9.75 and the roof's underside rising from 9.58 to
+// 10.58 along it: its two pieces split where the underside passes 9.75, so neither sticks out past
+// the roof. Tops that stay on one side, or touch it, need no split.
+void gableWallsSplitWhereTheRoofCrossesTheirTop() {
+    const auto s = ts2::scene::topCrossing(9.58f - 9.75f, 10.58f - 9.75f);
+    CHECK(s && std::fabs(*s - 0.17f) < 1e-4f);
+    CHECK(!ts2::scene::topCrossing(-1, -0.5f));
+    CHECK(!ts2::scene::topCrossing(0.2f, 1));
+    CHECK(!ts2::scene::topCrossing(0, 1));
+}
+
 // Past the saved storeys, a floor is a storey up from the highest saved one (an attic wall's top over
 // a 0.75 foundation is 6.75, so its window's hole lines up with the window).
 void heightsPastTheSavedStoreys() {
@@ -1880,6 +1955,68 @@ void objectsTreatedAsWindowsHideWithTheirWalls() {
     CHECK(hidesWithWalls(0x400, 0).empty());
     CHECK((hidesWithWalls(0x400, 0x1 | 0x8) == Points{{0, 0.5f}, {0.5f, 0}}));
     CHECK(hidesWithWalls(0x400, 0x1000 | 0x4).empty());
+}
+
+// The edges a door or window stands in, where a fence's rail is left out: the two parts of the
+// Smiths' picket gate (a door, wall placement 0x1001 and 0x1004) name the edge in front of one and
+// behind the other. A window's high bits (0xA1) and a 2 tile door part's 0x800 add no edge. A wall
+// lamp (type 4) with a wall behind it stands in none.
+void doorsAndWindowsStandInTheirWallEdges() {
+    using ts2::scene::doorwayEdges;
+    using Points = std::vector<std::array<float, 2>>;
+    CHECK((doorwayEdges(8, 0x1001) == Points{{0, 0.5f}}));
+    CHECK((doorwayEdges(8, 0x1004) == Points{{0, -0.5f}}));
+    CHECK((doorwayEdges(9, 0xA1) == Points{{0, 0.5f}}));
+    CHECK((doorwayEdges(8, 0x804) == Points{{0, -0.5f}}));
+    CHECK((doorwayEdges(8, 0x2 | 0x8) == Points{{-0.5f, 0}, {0.5f, 0}}));
+    CHECK(doorwayEdges(4, 0x4).empty());
+    CHECK(doorwayEdges(8, 0).empty());
+}
+
+// Where an object's floor height is read, from the heights the game saved. The Rutherfords' arch
+// windows (wall placement 0xA4, facing +y and +x) stand outside their foundation, where the tile's far
+// corners are 2.25 higher, and the game keeps them at the foundation's 0.75. A painting (0x204, facing
+// -x) reads the edge behind it too, and a vase with no wall behind reads its own spot.
+void objectsAgainstAWallTakeItsFloorHeight() {
+    using ts2::scene::floorPoint;
+    const auto near = [](std::array<float, 2> p, float x, float y) { return std::fabs(p[0] - x) < 1e-5f && std::fabs(p[1] - y) < 1e-5f; };
+    CHECK(near(floorPoint(3.5f, 15.5f, 2, 0xA4), 3.5f, 15));
+    CHECK(near(floorPoint(14.5f, 13.5f, 4, 0xA4), 14, 13.5f));
+    CHECK(near(floorPoint(12.5f, 9.5f, 0, 0x204), 13, 9.5f));
+    CHECK(near(floorPoint(8.5f, 4.5f, 6, 0x4), 8.5f, 5));
+    CHECK(near(floorPoint(13.5f, 8.5f, 2, 0), 13.5f, 8.5f));
+    // Off the foundation the storey's corners hold 3, on it 0.75: the edge behind gives 0.75.
+    auto grid = std::make_shared<ts2::array3d::Array3D>();
+    grid->width = grid->height = 17;
+    grid->levels = 2;
+    grid->elementSize = 4;
+    grid->elements.assign(static_cast<std::size_t>(17 * 17 * 2) * 4, 0);
+    for (std::size_t x = 0; x < 17; ++x) {
+        for (std::size_t y = 0; y < 17; ++y) {
+            const float h = y <= 15 ? 0.75f : 3.0f;
+            std::memcpy(&grid->elements[((17 + x) * 17 + y) * 4], &h, 4);
+        }
+    }
+    const ts2::scene::Heights heights(grid);
+    const auto [x, y] = floorPoint(3.5f, 15.5f, 2, 0xA4);
+    CHECK(std::fabs(heights.blended(1, x, y) - 0.75f) < 1e-5f);
+    CHECK(std::fabs(heights.blended(1, 3.5f, 15.5f) - 1.875f) < 1e-5f);
+}
+
+// The height an object was saved at wins over its floor's while it stands where it was saved: the
+// Rutherfords' wall shelf 529 hangs 0.4 below the floor height, as it does in the game. A record at
+// another spot (held by another object, or moved since) gives none.
+void objectsKeepTheirSavedHeight() {
+    ts2::content::Lot lot;
+    ts2::content::LotObject shelf;
+    shelf.id = 529;
+    shelf.state.header.location = {8.5f, 12.5f};
+    lot.savedPositions[529] = {12.5f, 8.5f, 0.35f};
+    CHECK(ts2::scene::savedHeight(lot, shelf) == 0.35f);
+    lot.savedPositions[529] = {0, 0, 0.35f};
+    CHECK(!ts2::scene::savedHeight(lot, shelf));
+    lot.savedPositions.clear();
+    CHECK(!ts2::scene::savedHeight(lot, shelf));
 }
 
 // What a view shows: nothing above its storey, roofs with walls up once their eaves' storey is looked at, a wall's
@@ -2478,6 +2615,65 @@ void floatingObjectsReadTheWaterByHalfTiles() {
     CHECK(!heightAt(water, 1.5f, 0) && !heightAt(water, -0.1f, 0));
 }
 
+// A curved pool corner as G001 Lot 19 saves it (id 11, x 26, y 9, direction 0): its quarter circle
+// is about (25, 8), the models turn three eighth-turns past half, and the curved wall takes the
+// pattern of the pool wall from (26, 10) to (27, 10). The other directions follow the game's table.
+void curvedPoolCornersFollowTheGame() {
+    using namespace ts2::scene;
+    std::vector<std::uint8_t> bytes(64, 0);
+    for (const std::uint32_t v : {0x916DA14Du, 1u, 2u, 11u, 26u, 9u, 0u, 12u, 3u, 3u, 3u}) {
+        for (int k = 0; k < 4; ++k) {
+            bytes.push_back(static_cast<std::uint8_t>(v >> (8 * k)));
+        }
+    }
+    const auto corners = ts2::content::curvedPoolCorners(bytes);  // direction 3 is not drawn
+    CHECK(corners.size() == 1 && corners[0].x == 26 && corners[0].y == 9 && corners[0].direction == 0);
+    CHECK(ts2::content::curvedPoolCorners(std::vector<std::uint8_t>(10, 0)).empty());
+    const auto& c = corners[0];
+    CHECK((curvedpool::centre(c) == curvedpool::Point{25, 8}));
+    CHECK(curvedpool::patternWall(c) == (std::array<float, 4>{26, 10, 27, 10}));
+    CHECK(std::fabs(curvedpool::turn(c) - 3 * kPi / 2) < 1e-6f);
+    CHECK((curvedpool::centre({26, 9, 2}) == curvedpool::Point{27, 8} && curvedpool::centre({26, 9, 4}) == curvedpool::Point{27, 10} &&
+           curvedpool::centre({26, 9, 6}) == curvedpool::Point{25, 10}));
+    CHECK((curvedpool::patternWall({26, 9, 2}) == std::array<float, 4>{25, 9, 25, 10} &&
+           curvedpool::patternWall({26, 9, 4}) == std::array<float, 4>{26, 8, 25, 8} &&
+           curvedpool::patternWall({26, 9, 6}) == std::array<float, 4>{27, 9, 27, 8}));
+    CHECK((curvedpool::turn({26, 9, 2}) == 0.0f));
+    // Of the 2 by 2 block, only the corner outside the circle is left: 4 - pi square tiles.
+    float left = 0;
+    const curvedpool::Polygon block{{25, 8}, {27, 8}, {27, 10}, {25, 10}};
+    for (const auto& piece : curvedpool::outside(block, corners)) {
+        for (std::size_t k = 1; k + 1 < piece.size(); ++k) {
+            const auto &a = piece[0], &b = piece[k], &d = piece[k + 1];
+            left += std::fabs((b[0] - a[0]) * (d[1] - a[1]) - (d[0] - a[0]) * (b[1] - a[1])) / 2;
+        }
+    }
+    CHECK(std::fabs(left - (4 - kPi)) < 0.01f);
+    // A tile away from the corner is kept whole.
+    const curvedpool::Polygon away{{20, 8}, {21, 8}, {21, 9}, {20, 9}};
+    const auto whole = curvedpool::outside(away, corners);
+    CHECK(whole.size() == 1 && whole[0].size() == 4);
+    CHECK((curvedpool::byTile(corners).size() == 4 && curvedpool::byTile(corners).contains({25, 8})));
+}
+
+// G001 Lot 19's sun on the pool floor: one pattern on tiles (24, 7), (24, 8), (25, 7) and (25, 8), saved
+// with turns 1, 2, 8 and 4. Its texture holds a quarter of the sun with the middle at its (1, 1)
+// corner, so each tile must put that corner at the tiles' shared point (25, 8).
+void floorTurnsLayTheSunWhole() {
+    using ts2::scene::floorTurnSteps;
+    using ts2::scene::turnedFloorPoint;
+    CHECK(floorTurnSteps(1) == 0 && floorTurnSteps(2) == 3 && floorTurnSteps(4) == 2 && floorTurnSteps(8) == 1 && floorTurnSteps(0) == 0);
+    const struct {
+        float x, y;
+        int nibble;
+    } tiles[] = {{24, 7, 1}, {24, 8, 2}, {25, 7, 8}, {25, 8, 4}};
+    for (const auto& t : tiles) {
+        const auto p = turnedFloorPoint({25, 8}, {t.x + 0.5f, t.y + 0.5f}, floorTurnSteps(t.nibble));
+        // The texture point's place in its tile: the far corner (1, 1) in both of the texture's axes.
+        CHECK(std::fabs(p[0] - (t.x + 1)) < 1e-6f && std::fabs(p[1] - (t.y + 1)) < 1e-6f);
+    }
+}
+
 void poolWaterHasTheGamesDepthLayers() {
     using namespace ts2::scene;
     // A one-tile pool: open ground over a floor on the level below.
@@ -2496,6 +2692,8 @@ void poolWaterHasTheGamesDepthLayers() {
     CHECK(poolwater::waterQuarters(lot).size() == 4);
     lot.grids.at(ts2::content::kSurfaceGridInstance).elements[4] = 1;  // ground over one quarter
     CHECK(poolwater::waterQuarters(lot).size() == 3);
+    lot.curvedPools.push_back({1, 1, 0});  // the tile is a curved corner's: water under its floor too
+    CHECK(poolwater::waterQuarters(lot).size() == 4);
 
     // A pool three tiles square, level ground: 0.75, 1.5, 2.25 down. Clear on the wall, faint beside it.
     std::vector<poolwater::Quarter> quarters;
@@ -3262,6 +3460,23 @@ void compositeLayersBlendAsTheGame() {
     CHECK(under.rgba[0] == 99 && under.rgba[1] == 75 && under.rgba[2] == 128 && under.rgba[3] == 255);
 }
 
+// A masked layer (a pet's coat patch) covers by its mask's green channel, scaled by its amount below
+// 255, and a layer pixel that is all zero is left out.
+void compositeMaskedLayersBlendAsTheGame() {
+    using namespace ts2::scene::textureblend;
+    CHECK(maskWeight(255, 255) == 256 && maskWeight(128, 255) == 129 && maskWeight(0, 200) == 0);
+    CHECK(maskWeight(255, 132) == 132 && maskWeight(128, 128) == 64);
+    ts2::scene::Image under{2, 1, {200, 100, 0, 255, 200, 100, 0, 255}};
+    const ts2::scene::Image layer{2, 1, {0, 50, 255, 255, 0, 0, 0, 0}};
+    const ts2::scene::Image mask{2, 1, {0, 255, 0, 0, 0, 255, 0, 0}};
+    drawThroughMask(under, layer, mask, 255);
+    CHECK(under.rgba == (std::vector<std::uint8_t>{0, 50, 255, 255, 200, 100, 0, 255}));
+    // Half the mask at full amount covers half.
+    ts2::scene::Image half{1, 1, {0, 0, 0, 255}};
+    drawThroughMask(half, ts2::scene::Image{1, 1, {200, 200, 200, 255}}, ts2::scene::Image{1, 1, {0, 128, 0, 0}}, 255);
+    CHECK(half.rgba[0] == 101 && half.rgba[3] == 255);
+}
+
 void compositeLayersUseTheMipLevelOfTheirSize() {
     using ts2::scene::mipLevelOfSize;
     CHECK(mipLevelOfSize(256, 256, 9, 256, 256) == std::size_t{0});
@@ -3781,6 +3996,7 @@ void effectTilesLeaveOutTheRoadRow() {
 std::vector<Test> sceneTests() {
     return {
         {"composite layers use the mip level of their size", compositeLayersUseTheMipLevelOfTheirSize},
+        {"composite masked layers blend as the game", compositeMaskedLayersBlendAsTheGame},
         {"composite layers blend as the game", compositeLayersBlendAsTheGame},
         {"Stretched rig scales joint translations", stretchedRigScalesJointTranslations},
         {"Worn parts adjust joints", partsAdjustJoints},
@@ -3808,6 +4024,10 @@ std::vector<Test> sceneTests() {
         {"scene grid roofs match the game", sceneGridRoofsMatchTheGame},
         {"scene cutaway cuts walls in front of rooms", sceneCutawayCutsWallsInFrontOfRooms},
         {"objects treated as windows hide with their walls", objectsTreatedAsWindowsHideWithTheirWalls},
+        {"doors and windows stand in their wall edges", doorsAndWindowsStandInTheirWallEdges},
+        {"objects against a wall take its floor height", objectsAgainstAWallTakeItsFloorHeight},
+        {"objects keep their saved height", objectsKeepTheirSavedHeight},
+        {"gable walls split where the roof crosses their top", gableWallsSplitWhereTheRoofCrossesTheirTop},
         {"scene views show storeys, walls and roofs", sceneViewsShowStoreysWallsAndRoofs},
         {"floor undersides show from below with Toggle Ceiling", floorUndersidesShowFromBelowWithToggleCeiling},
         {"a saved cutout stays on its mesh group", savedCutoutStaysOnItsGroup},
@@ -3817,6 +4037,8 @@ std::vector<Test> sceneTests() {
         {"pond water follows the game's curve", pondWaterFollowsTheGamesCurve},
         {"floating objects read the water by half tiles", floatingObjectsReadTheWaterByHalfTiles},
         {"pool water has the game's surface", poolWaterHasTheGamesSurface},
+        {"curved pool corners follow the game", curvedPoolCornersFollowTheGame},
+        {"floor turns lay the sun whole", floorTurnsLayTheSunWhole},
         {"attic walls reach the roof's underside", atticWallsReachTheRoofsUnderside},
         {"heights past the saved storeys", heightsPastTheSavedStoreys},
         {"held particles are replaced when they die", heldParticlesAreReplacedWhenTheyDie},
@@ -3842,6 +4064,7 @@ std::vector<Test> sceneTests() {
         {"object effects start, stop and follow", objectEffectsStartStopAndFollow},
         {"metaparticles play an effect each", metaParticlesPlayAnEffectEach},
         {"metaparticles follow their path", metaParticlesFollowTheirPath},
+        {"rigid metaparticles keep their dead particles' effects", rigidMetaParticlesKeepTheirDeadParticlesEffects},
         {"a hard restart leaves no gap", aHardRestartLeavesNoGap},
         {"metaparticles pass on a picture", metaParticlesPassOnAPicture},
         {"object effects play a queue in turn", objectEffectsPlayAQueueInTurn},

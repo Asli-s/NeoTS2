@@ -63,7 +63,7 @@ struct FragmentUniforms {
     float uvTile[4];    // the texture coordinates times xy plus zw: one frame of a tiled texture
     float shadowReceiver[4];  // x: 1 when Sims' projected shadows fall on it, y: its level, z: 1 to fade them by the light map, w: 1 for a floor
     float caustics[4];        // x: 1 for a pool floor, 2 for a pool wall, 3 for the caustics alone over a pond's ground, 0 for none (see scene::Material), yzw: the texture light
-    float neighborLight[4];   // rgb: what a neighbor's real house is tinted by, w: 1 when it is one (its ground too), 2 for the ground around the lot
+    float neighborLight[4];   // w: 2 for the ground around the lot, which leaves out the neighbors' real houses' lots
     float wallMask[4];        // x: 1 when a wall mask cuts it, y: 1 when the mask runs the other way along u (see scene::Material::mask)
     float terrainTexture[4];  // x: 1 for terrain, y: 1 with a detail texture, z: its repeats (see scene::Material::terrain)
     float underwaterShade[4];  // x: 1 when darkened below the water (see scene::Material::partlyUnderwater), y: 1 when hazed under a pool-style sea, z: 1 for the ground lot view hazes

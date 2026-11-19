@@ -200,7 +200,6 @@ struct ThickWall {
     std::string leftCovering, rightCovering;  // each side's covering, without door and window holes
     WallCeiling ceiling;
     std::string leftMask, rightMask;  // wall masks of doors and windows in this wall
-    bool leftMaskMirrored = false, rightMaskMirrored = false;
     std::array<float, 2> leftA{}, leftB{}, rightA{}, rightB{};
     std::array<bool, 2> joined{};  // another thick wall meets it at (x0, y0), at (x1, y1)
 };
@@ -220,6 +219,31 @@ struct WallMask {
     std::string face, material;
 };
 
+// Where along a wall face, as a fraction of the way, its top crosses the wall's own top, given how far
+// above its own top the top is at each end (negative below). Empty when it doesn't cross between them.
+// A wall closing a gable is drawn in two pieces, below and above its own top, split there.
+std::optional<float> topCrossing(float above0, float above1);
+
+// A floor quarter's texture turn as the lot saves it (a nibble per quarter, grid 0x20): 1 for none,
+// 2, 4 and 8 for 3, 2 and 1 steps. Anything else is no turn, as the game reads it.
+int floorTurnSteps(int nibble);
+
+// Where on a floor's texture a point of the tile whose centre is `centre` lies, its texture turned
+// `steps` times about the centre. Each step takes a quarter's corners to the previous quarter's
+// (the quarters as the floor grid orders them), so the sun pattern's four tiles meet at its middle.
+std::array<float, 2> turnedFloorPoint(const std::array<float, 2>& point, const std::array<float, 2>& centre, int steps);
+
+// Where an object's floor height is read: at its own spot, or for one placed against the wall behind
+// it (wall placement bit 0x4, object data 0x0D) half a tile back, in the middle of that tile edge.
+// That keeps a window on a foundation's outer edge, or on sloped ground, level with the floor at the
+// wall. `direction` is the saved facing (object data 1).
+std::array<float, 2> floorPoint(float x, float y, std::int32_t direction, std::int16_t wallPlacement);
+
+// The height an object stood at as the lot was saved, which the game keeps over its floor's: a wall
+// shelf hung lower, a lily pad on the pond's surface. Empty when its scene record holds none, or holds
+// another spot (an object held by another, or one moved since).
+std::optional<float> savedHeight(const content::Lot& lot, const content::LotObject& object);
+
 // Wall masks by lowercase model name, from material names "<model>_<east>_<south>_<level>_<face>_wallmask".
 std::map<std::string, std::vector<WallMask>> wallMasks(const std::vector<std::string>& materialNames);
 
@@ -231,6 +255,13 @@ std::map<std::string, std::vector<WallMask>> wallMasks(const std::vector<std::st
 // plants name no edge, so they stay. Each wall is given by its middle, in tiles from the object's
 // centre.
 std::vector<std::array<float, 2>> hidesWithWalls(std::int16_t flags, std::int16_t wallPlacement);
+
+// The tile edges a door or window stands in (object definition type 8 or 9, a fence gate is a door),
+// where the game leaves out a fence rail. These are the edges its wall placement (object data 0x0D)
+// names with bits 0x1, 0x2, 0x4 and 0x8, in the object's own frame as for hidesWithWalls. Other
+// objects stand in none. Whether the diagonal bits count is not known yet. Each edge is given by its
+// middle, in tiles from the object's centre.
+std::vector<std::array<float, 2>> doorwayEdges(int definitionType, std::int16_t wallPlacement);
 
 // Joins the walls meeting at each wall graph point: going around the point, each wall's side line
 // ends where it meets the facing side line of the next wall (mitred corners, T and cross joins).

@@ -471,7 +471,8 @@ DrawUniforms FramePlan::uniformsFor(const RendererState& s, const ResourceQuery&
     if (lighting && !lighting->simLights.empty() && d.instance->lightGroup == scene::LightGroup::Sims) {
         lighting = &simLightingFor(*lighting);
     }
-    const bool roof = d.instance->part == scene::Part::Roof && m && m->roofLight && s.objectLighting_;
+    // A neighbor's real house keeps its roofs' materials but not their part.
+    const bool roof = (d.instance->part == scene::Part::Roof || d.instance->neighborHouse) && m && m->roofLight && s.objectLighting_;
     // A roof's underside, trim and edges: standard materials, lit as objects outdoors.
     const bool roofEdge = d.instance->part == scene::Part::Roof && m && !m->roofLight && !m->unlit && s.objectLighting_;
     // As the game's standard and Sim materials: on lit surfaces with tangents, the first lights per
@@ -590,12 +591,6 @@ void FramePlan::setMaterial(const RendererState& s, const ResourceQuery& q, Draw
     }
     if (d.instance->part == scene::Part::Skirt) {
         fu.neighborLight[3] = 2;
-    }
-    if (d.instance->neighborHouse) {
-        fu.neighborLight[0] = s.imposterLight_[0];
-        fu.neighborLight[1] = s.imposterLight_[1];
-        fu.neighborLight[2] = s.imposterLight_[2];
-        fu.neighborLight[3] = 1;
     }
     if (const auto& shape = d.instance->shapeColor; shape && (!m || m->takesShapeColor)) {
         for (std::size_t i = 0; i < 4; ++i) {

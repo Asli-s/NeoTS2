@@ -151,7 +151,7 @@ GraphicsOptionsPanel::Display GraphicsOptionsPanel::savedDisplay(const std::file
     if (const auto saved = own.values.find(kOcclusionKey); saved != own.values.end()) {
         out.ambientOcclusion = ts2::content::savedAmbientOcclusion(saved->second);
     }
-    out.occlusionHalfSize = own.flag(kOcclusionSizeKey).value_or(true);
+    out.occlusionHalfSize = own.flag(kOcclusionSizeKey).value_or(false);
     // Either of the older options Realistic makes Water so.
     out.realisticWater = own.flag(kWaterKey).value_or(own.flag(kOldPondsKey).value_or(false) || own.flag(kOldSeaKey).value_or(false));
     out.realisticSky = own.flag(kSkyKey).value_or(false);
