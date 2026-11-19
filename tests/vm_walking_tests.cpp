@@ -663,6 +663,43 @@ void simsAreDrawnAtTheNearestEighth() {
     }
 }
 
+// A pet walks by the game's default pet set with its species' prefix and no gender part: d- large
+// dogs, l- small dogs, f- cats, w- puppies, k- kittens, and an elder finds the adults' clips.
+void petsWalkWithTheirSpeciesClips() {
+    using ts2::sim::LocoClip;
+    const std::map<std::string, LocoClip> clips = {
+        {"l-walkShort", {"l-walkShort", 1000, 0.5f, 0, 0, 0.001f, 0, 100}}, {"l-walk", {"l-walk", 1000, 0.6f, 0, 0, 0.001f, 0, 100}},
+        {"l-walkPose", {"l-walkPose", 0, 0, 0, 0, 0, 0, 1}},           {"w-walk", {"w-walk", 1000, 0.4f, 0, 0, 0.001f, 0, 100}},
+        {"k-walk", {"k-walk", 1000, 0.4f, 0, 0, 0.001f, 0, 100}},       {"d-walk", {"d-walk", 1000, 0.8f, 0, 0, 0.001f, 0, 100}},
+        {"f-walk", {"f-walk", 1000, 0.7f, 0, 0, 0.001f, 0, 100}},       {"a-walkPose", {"a-walkPose", 0, 0, 0, 0, 0, 0, 1}},
+    };
+    const ts2::sim::LocoClipLookup lookup = [&](const std::string& name) -> std::optional<LocoClip> {
+        const auto it = clips.find(name);
+        return it == clips.end() ? std::nullopt : std::optional<LocoClip>(it->second);
+    };
+    const ts2::sim::WalkSetLines pet = {"", "stepInPlace,walkShort,walk,walkPose", ""};
+    constexpr std::int16_t kLargeDog = 1, kSmallDog = 2, kCat = 3, kAdult = 19, kElder = 51, kYoung = 3;
+    const auto names = [&](std::int16_t stage, std::int16_t species) {
+        std::vector<std::string> out;
+        for (const auto& c : ts2::sim::walkSetClips(pet, stage, 1, lookup, species)) {
+            out.push_back(c.name);
+        }
+        return out;
+    };
+    CHECK((names(kAdult, kSmallDog) == std::vector<std::string>{"l-walkShort", "l-walk", "l-walkPose"}));
+    CHECK((names(kYoung, kSmallDog) == std::vector<std::string>{"w-walk"}));
+    CHECK((names(kYoung, kCat) == std::vector<std::string>{"k-walk"}));
+    CHECK((names(kElder, kLargeDog) == std::vector<std::string>{"d-walk"}));
+    // The life stage limits: over 18 is an adult, over 50 an elder, and pets never fall back to the
+    // humans' a- clips.
+    CHECK((names(18, kLargeDog) == std::vector<std::string>{"w-walk"}));
+    CHECK((names(18, kCat) == std::vector<std::string>{"k-walk"}));
+    CHECK((names(50, kCat) == std::vector<std::string>{"f-walk"}));
+    CHECK((names(kElder, kCat) == std::vector<std::string>{"f-walk"}));
+    CHECK((names(kElder, kSmallDog) == std::vector<std::string>{"l-walkShort", "l-walk", "l-walkPose"}));
+    CHECK(ts2::sim::settlePose(&pet, kAdult, 2, lookup, kSmallDog) == "l-walkPose");
+}
+
 // Assign Locomotion Animations pushes a walk set from the code owner's own, semi-global or global
 // string table 0x84, takes the newest off, or takes all off. The set's names find their clips as the
 // game's do: turns at each angle, poses alone, the walk with the gender, an elder's from the
@@ -671,14 +708,14 @@ void pushedWalkSetsWalkWithTheirClips() {
     constexpr float kPi = 3.14159265f;
     using ts2::sim::LocoClip;
     const std::map<std::string, LocoClip> clips = {
-        {"a-swim-TurnInPlace-90", {"a-swim-TurnInPlace-90", 900, 0, 0, 0, 0, -kPi / 2, 128}},
-        {"a-swim-TurnInPlace-180", {"a-swim-TurnInPlace-180", 900, 0, 0, 0, 0, -kPi, 128}},
-        {"a-swimSlowTurnAndGoShort-0", {"a-swimSlowTurnAndGoShort-0", 866, 0.05f, 0.5f, 0, 0.0001f, 0, 96}},
-        {"a-swimSlowTurnAndGo-0", {"a-swimSlowTurnAndGo-0", 866, 0.1f, 0.5f, 0, 0.0001f, 0, 96}},
-        {"a-swimSlowTurnAndStop-0", {"a-swimSlowTurnAndStop-0", 1133, 0.7f, 0.5f, 0, 0.0006f, 0, 112}},
-        {"a-female-swimSlowShort", {"a-female-swimSlowShort", 1250, 1.7f, 0, 0, 0.0014f, 0, 176}},
-        {"a-female-swimSlow", {"a-female-swimSlow", 1250, 1.8f, 0, 0, 0.0014f, 0, 176}},
-        {"a-swimPose", {"a-swimPose", 0, 0, 0, 0, 0, 0, 16}},
+        {"a-swim-TurnInPlace-90", {"a-swim-TurnInPlace-90", 900, 0, 0, 0, 0, -kPi / 2, 8}},
+        {"a-swim-TurnInPlace-180", {"a-swim-TurnInPlace-180", 900, 0, 0, 0, 0, -kPi, 8}},
+        {"a-swimSlowTurnAndGoShort-0", {"a-swimSlowTurnAndGoShort-0", 866, 0.05f, 0.5f, 0, 0.0001f, 0, 6}},
+        {"a-swimSlowTurnAndGo-0", {"a-swimSlowTurnAndGo-0", 866, 0.1f, 0.5f, 0, 0.0001f, 0, 6}},
+        {"a-swimSlowTurnAndStop-0", {"a-swimSlowTurnAndStop-0", 1133, 0.7f, 0.5f, 0, 0.0006f, 0, 7}},
+        {"a-female-swimSlowShort", {"a-female-swimSlowShort", 1250, 1.7f, 0, 0, 0.0014f, 0, 100}},
+        {"a-female-swimSlow", {"a-female-swimSlow", 1250, 1.8f, 0, 0, 0.0014f, 0, 100}},
+        {"a-swimPose", {"a-swimPose", 0, 0, 0, 0, 0, 0, 1}},
         {"a-uncategorized", {"a-uncategorized", 100, 0, 0, 0, 0, 0, 0}},
     };
     const ts2::sim::LocoClipLookup lookup = [&](const std::string& name) -> std::optional<LocoClip> {
@@ -702,9 +739,9 @@ void pushedWalkSetsWalkWithTheirClips() {
     CHECK(!ts2::sim::walkSetTurnClips(elder, ts2::sim::kStartCategory, 0, kPi / 2));
     CHECK(ts2::sim::walkSetClip(elder, ts2::sim::kLoopCategory)->name == "a-female-swimSlowShort");
     CHECK(ts2::sim::walkSetLongClip(elder, ts2::sim::kLoopCategory)->name == "a-female-swimSlow");
-    // Another walk style's loops are found by that style's category (style 1's at 192).
-    const std::vector<LocoClip> styled{{"walk-youngAdult", 1000, 1, 0, 0, 0.001f, 0, 176}, {"walkShort-alt1-youngAdult", 800, 0.8f, 0, 0, 0.001f, 0, 192},
-                                       {"walk-alt1-youngAdult", 1000, 1, 0, 0, 0.001f, 0, 192}};
+    // Another walk style's loops are found by that style's category (style 1's at 101).
+    const std::vector<LocoClip> styled{{"walk-youngAdult", 1000, 1, 0, 0, 0.001f, 0, 100}, {"walkShort-alt1-youngAdult", 800, 0.8f, 0, 0, 0.001f, 0, 101},
+                                       {"walk-alt1-youngAdult", 1000, 1, 0, 0, 0.001f, 0, 101}};
     const auto style1 = static_cast<std::uint16_t>(ts2::sim::kLoopCategory + ts2::sim::kLoopStyleStep);
     CHECK(ts2::sim::walkSetClip(styled, style1)->name == "walkShort-alt1-youngAdult" &&
           ts2::sim::walkSetLongClip(styled, style1)->name == "walk-alt1-youngAdult");
@@ -1463,6 +1500,7 @@ std::vector<Test> vmWalkingTests() {
         {"Sims are drawn at the nearest eighth", simsAreDrawnAtTheNearestEighth},
         {"Turn Body Towards turns with its clip", turnBodyTowardsTurnsWithItsClip},
         {"pushed walk sets walk with their clips", pushedWalkSetsWalkWithTheirClips},
+        {"pets walk with their species clips", petsWalkWithTheirSpeciesClips},
         {"Turn Body Towards faces slots and finds its target after the pre-route", turnBodyTowardsSlotsAndTargetAfterPreRoute},
         {"blocked routes ask a standing Sim to move", blockedRoutesAskAStandingSimToMove},
         {"blocked routes wait for a walking Sim, then fail", blockedRoutesWaitForAWalkingSimThenFail},

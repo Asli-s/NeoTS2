@@ -18,8 +18,12 @@ public:
 
     // Shows a mood (-100..100) and an aspiration score (person data 0xA0).
     void show(int mood, int aspirationScore);
+    // Shows a pet's mood (-100..100). Pets have no aspiration, so the glows stay hidden.
+    void showMood(int mood);
 
 private:
+    void paint(int value, bool platinum);
+
     struct Meter {
         int fill = -1;                 // the meter's fill window
         ts2::tga::Pixels picture;      // the fill's own picture (its shape)

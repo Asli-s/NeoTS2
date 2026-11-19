@@ -122,6 +122,38 @@ float Curve::sample(float ms) const {
     return (2 * s3 - 3 * s2 + 1) * a.value + (s3 - 2 * s2 + s) * a.out + (-2 * s3 + 3 * s2) * b.value + (s3 - s2) * b.in;
 }
 
+namespace {
+
+// The clip's own version (cAnimResourceConst's), which its memory image repeats when it doesn't
+// name one. 0 when it can't be read.
+std::uint32_t resourceVersion(std::string_view all) {
+    constexpr std::string_view kBlock = "cAnimResourceConst";
+    const auto at = all.find(kBlock);
+    const std::size_t version = at == std::string_view::npos ? all.size() : at + kBlock.size() + 4;
+    if (version + 4 > all.size()) {
+        return 0;
+    }
+    const auto* b = reinterpret_cast<const std::uint8_t*>(all.data() + version);
+    return b[0] | b[1] << 8 | b[2] << 16 | static_cast<std::uint32_t>(b[3]) << 24;
+}
+
+// A clip's category as the game loads it. Clips older than version 7 (the human walks) keep it 16
+// times larger and in an older numbering, so their walk loops' 176 becomes 100 like newer clips'.
+std::uint16_t loadedCategory(std::uint32_t stored, std::uint32_t version) {
+    if (version >= 7) {
+        return static_cast<std::uint16_t>(stored);
+    }
+    std::uint32_t category = stored >> 4;
+    if (category >= 0x1E) {
+        category += 0xAA;
+    } else if (category >= 0x0B) {
+        category += 0x59;
+    }
+    return static_cast<std::uint16_t>(category & 0xFFF);
+}
+
+} // namespace
+
 Animation parse(std::span<const std::uint8_t> data) {
     // The resource block names it (cSGResource: id, version, then the name with a one-byte
     // length). The memory image follows, after its size.
@@ -139,10 +171,10 @@ Animation parse(std::span<const std::uint8_t> data) {
     const std::uint16_t targets = r.u16();
     const std::uint16_t eventCount = r.u16();
     const std::uint8_t userDataLength = r.u8();
-    r.u8();
+    const std::uint8_t imageVersion = r.u8();
     const std::uint32_t header = r.u32();
     const std::uint32_t skeletonLength = header >> 24;
-    a.category = static_cast<std::uint16_t>(header >> 12 & 0xFFF);
+    a.category = loadedCategory(header >> 12 & 0xFFF, imageVersion != 0 ? imageVersion : resourceVersion(all));
     for (int i = 0; i < 4; ++i) {
         pointer(r);
     }

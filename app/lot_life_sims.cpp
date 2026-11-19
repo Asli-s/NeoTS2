@@ -264,16 +264,22 @@ bool LotLife::addCreatedSim(ts2::scene::Scene& scene, const ts2::sim::SimObject&
         return false;
     }
     ts2::scene::Actor actor = objectMaterials_.sim(look, std::to_string(sim.id), lotFrame_, scene.groundLevel + sim.level - 1,
-                                                   ts2::scene::standingIdle(assets_, look.age), scene, freeSimInstances_);
+                                                   ts2::scene::standingIdle(assets_, look.age, look.species), scene, freeSimInstances_);
     actor.object = static_cast<std::uint32_t>(sim.id);
-    actor.basePose = ts2::scene::standingPose(assets_, look.age);
+    actor.basePose = ts2::scene::standingPose(assets_, look.age, look.species);
     actor.lotFrame = lotFrame_;
     actor.floorHeight = scene.floorHeight;
     if (file) {
         actor.slotNodes = boneNodes(actor.rig.get(), ts2::scene::simSlotBones(assets_, *file));
         actor.targetNodes = boneNodes(actor.rig.get(), ts2::scene::simSlotBones(assets_, *file, true));
-    } else if (fromObject) {
-        const std::uint32_t guid = sim.definition.guid();
+    } else {
+        // A Sim made during play has no character file yet. Its file starts as a copy of its
+        // template's, whose GUID its definition keeps in fields 0x46 and 0x47, so its slots and bone
+        // names are the template's: the plumbob hangs over its head.
+        constexpr std::size_t kTemplateGuid1 = 0x46, kTemplateGuid2 = 0x47;
+        const std::uint32_t guid = fromObject ? sim.definition.guid()
+                                              : static_cast<std::uint32_t>(sim.definition.field(kTemplateGuid1)) |
+                                                    static_cast<std::uint32_t>(sim.definition.field(kTemplateGuid2)) << 16;
         actor.slotNodes = boneNodes(actor.rig.get(), ts2::scene::npcSlotBones(assets_, guid));
         actor.targetNodes = boneNodes(actor.rig.get(), ts2::scene::npcSlotBones(assets_, guid, true));
     }
@@ -451,7 +457,7 @@ void LotLife::buildNewAges(ts2::scene::Scene& scene) {
                 continue;
             }
             ts2::scene::Actor built = objectMaterials_.sim(look, std::to_string(sim->id), actor.place, scene.groundLevel + sim->level - 1,
-                                                           ts2::scene::standingIdle(assets_, look.age), scene, freeSimInstances_);
+                                                           ts2::scene::standingIdle(assets_, look.age, look.species), scene, freeSimInstances_);
             if (!built.rig) {
                 for (const auto& s : built.skinned) {
                     freeSimInstance(scene, s.instance);
@@ -473,7 +479,7 @@ void LotLife::buildNewAges(ts2::scene::Scene& scene) {
             actor.animation = built.animation;
             actor.clips.clear();
             actor.skinned = std::move(built.skinned);
-            actor.basePose = ts2::scene::standingPose(assets_, look.age);
+            actor.basePose = ts2::scene::standingPose(assets_, look.age, look.species);
             actor.slotNodes = boneNodes(actor.rig.get(), ts2::scene::simSlotBones(assets_, *file));
             actor.targetNodes = boneNodes(actor.rig.get(), ts2::scene::simSlotBones(assets_, *file, true));
             keepSimParts(sim->id, actor, false);
@@ -751,7 +757,7 @@ std::optional<ts2::scene::Actor> LotLife::addEverydaySim(ts2::scene::Scene& scen
         if (look.parts.empty()) {
             return std::nullopt;
         }
-        return objectMaterials_.sim(look, "portrait", ts2::scene::Transform{}, scene.groundLevel, ts2::scene::standingIdle(assets_, look.age),
+        return objectMaterials_.sim(look, "portrait", ts2::scene::Transform{}, scene.groundLevel, ts2::scene::standingIdle(assets_, look.age, look.species),
                                     scene, freeSimInstances_);
     } catch (const std::exception& ex) {
         ts2::diag::warnOnce(std::string("portraits: a Sim's everyday outfit can't be built: ") + ex.what());
@@ -759,8 +765,71 @@ std::optional<ts2::scene::Actor> LotLife::addEverydaySim(ts2::scene::Scene& scen
     }
 }
 
+std::optional<ts2::scene::Actor> LotLife::addFamilyPictureSim(ts2::scene::Scene& scene, std::int16_t neighbor, const ts2::scene::Transform& place) {
+    constexpr std::uint32_t kEveryday = 0x01;
+    const auto file = sim_->characterFile(neighbor);
+    if (!file) {
+        return std::nullopt;
+    }
+    try {
+        const ts2::scene::Assets::CharacterInUse inUse(assets_, *file);
+        const auto working = outfitData_.find(neighbor);
+        const auto aged = agedData_.find(neighbor);
+        const ts2::scene::SimLook look = working != outfitData_.end() ? ts2::scene::simLook(assets_, working->second, kEveryday)
+                                         : aged != agedData_.end()    ? ts2::scene::simLook(assets_, aged->second, kEveryday)
+                                                                      : ts2::scene::simLook(assets_, *file, kEveryday);
+        if (look.parts.empty()) {
+            return std::nullopt;
+        }
+        return objectMaterials_.sim(look, "familyPicture", place, scene.groundLevel, ts2::scene::standingIdle(assets_, look.age, look.species), scene,
+                                    freeSimInstances_);
+    } catch (const std::exception& ex) {
+        ts2::diag::warnOnce(std::string("family picture: a Sim can't be built: ") + ex.what());
+        return std::nullopt;
+    }
+}
+
+std::optional<ts2::sim::FamilyPicture> LotLife::familyPicture() const {
+    const auto& world = sim_->world();
+    const auto family = world.lotHousehold();
+    if (!family) {
+        return std::nullopt;
+    }
+    constexpr std::size_t kSpecies = 0xBA;
+    std::vector<ts2::sim::FamilyPictureSim> members;
+    for (const std::uint32_t guid : world.familyMemberGuids(*family)) {
+        const std::int16_t id = world.neighborIdWithGuid(guid);
+        if (id == 0) {
+            continue;
+        }
+        // A Sim on the lot has its own person data, which the neighbor's copy takes at the save.
+        const auto* onLot = world.nextAfter(0, [&](const ts2::sim::SimObject& o) { return o.isPerson() && world.neighborIdOf(o) == id; });
+        const auto value = [&](std::size_t i) -> std::int16_t {
+            if (onLot != nullptr) {
+                return i < onLot->personData.size() ? onLot->personData[i] : 0;
+            }
+            return world.neighborPersonValue(id, i);
+        };
+        members.push_back({id, guid, value(kSpecies), value(ts2::sim::kLifeStagePersonData), value(ts2::sim::kGenderPersonData)});
+    }
+    if (members.empty()) {
+        return std::nullopt;
+    }
+    ts2::sim::FamilyPictureFacts facts;
+    facts.ties = [&](std::int16_t id, ts2::famt::TieType type) { return world.familyTies(id, type); };
+    facts.relationship = [&](std::int16_t from, std::int16_t to) -> std::optional<std::vector<std::int32_t>> {
+        const auto* values = world.neighborRelationshipValues(from, to);
+        return values != nullptr ? std::optional(*values) : std::nullopt;
+    };
+    return ts2::sim::arrangeFamilyPicture(members, facts);
+}
+
 std::optional<ts2::scene::PictureView> LotLife::hairPictureView(std::uint32_t age) {
     return ts2::scene::hairPictureView(assets_, ts2::scene::pictureAge(age));
+}
+
+std::optional<ts2::scene::FamilyPictureStage> LotLife::familyPictureStage(const std::string& camera) {
+    return ts2::scene::familyPictureStage(assets_, camera);
 }
 
 void LotLife::removePictureSim(ts2::scene::Scene& scene, const ts2::scene::Actor& actor) {

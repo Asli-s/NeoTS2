@@ -37,10 +37,23 @@ void MoodMeter::show(int mood, int aspirationScore) {
     if (screen_ == nullptr) {
         return;
     }
-    const int value = ts2::content::moodMeterValue(mood, aspirationScore);
+    paint(ts2::content::moodMeterValue(mood, aspirationScore), ts2::content::isPlatinum(aspirationScore));
+}
+
+void MoodMeter::showMood(int mood) {
+    if (screen_ != nullptr) {
+        paint(mood, false);
+    }
+}
+
+void MoodMeter::paint(int value, bool isPlatinum) {
     const int column = ts2::content::meterRow(value, -100, 100, static_cast<int>(gradient_.width));
-    const int platinum = ts2::content::isPlatinum(aspirationScore) ? 1 : 0;
+    const int platinum = isPlatinum ? 1 : 0;
     for (Meter& m : meters_) {
+        // The pet panel has only the meter for wants closed.
+        if (m.fill < 0) {
+            continue;
+        }
         if (column != m.column && gradient_.width > 0) {
             screen_->setImage(m.fill, ts2::content::paintColumns(m.picture, gradient_, column));
             m.column = column;

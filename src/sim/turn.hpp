@@ -96,27 +96,32 @@ using LocoClipLookup = std::function<std::optional<LocoClip>(const std::string& 
 // finds them. Turns and steps are looked for at 0, 45, 90, 135 and 180 degrees ("swim-TurnInPlace-90"),
 // poses and the step in place by name alone, and the rest with the gender ("a-male-swimSlow"). Each
 // name takes the age's prefix, and elders and teens fall back to the adults' clips. A clip of
-// category 0, or of category 100 without a speed, doesn't count.
+// category 0, or of category 100 without a speed, doesn't count. A pet (`species` person data 0xBA,
+// 1 large dog, 2 small dog, 3 cat) takes its species' prefix with no gender part: d-, l- or f-,
+// w- for puppies and k- for kittens, and elders fall back to the adults' clips. Pets use the humans'
+// life stage limits: over 50 is an elder, over 18 an adult and the rest are young.
 [[nodiscard]] std::vector<LocoClip> walkSetClips(const WalkSetLines& lines, std::int16_t lifeStage, std::int16_t gender,
-                                                 const LocoClipLookup& clip);
+                                                 const LocoClipLookup& clip, std::int16_t species = 0);
 // The set's first clip of a category (see anim::Animation::category).
 [[nodiscard]] std::optional<LocoClip> walkSetClip(const std::vector<LocoClip>& set, std::uint16_t category);
 // The set's second clip of a category, the long one a walk loop's first is mixed with.
 [[nodiscard]] std::optional<LocoClip> walkSetLongClip(const std::vector<LocoClip>& set, std::uint16_t category);
 // The pose a walk settles into: the newest pushed walk set's (`pushed`, its walk lines), else
 // walkPoseClip's. Empty when there is none.
-[[nodiscard]] std::string settlePose(const WalkSetLines* pushed, std::int16_t lifeStage, std::int16_t gender, const LocoClipLookup& clip);
+[[nodiscard]] std::string settlePose(const WalkSetLines* pushed, std::int16_t lifeStage, std::int16_t gender, const LocoClipLookup& clip,
+                                     std::int16_t species = 0);
 // As turnClip, from the set's turns in place.
 [[nodiscard]] std::optional<TurnClip> walkSetTurn(const std::vector<LocoClip>& set, float start, float end);
-// As walkStartClips, walkStopClips and stepClips, from the set's clips of a category (96 starts, 112
-// stops, 144 steps) that turn as far: the first is the short one, then the full one, then the two
+// As walkStartClips, walkStopClips and stepClips, from the set's clips of a category (6 starts, 7
+// stops, 9 steps) that turn as far: the first is the short one, then the full one, then the two
 // that begin on the other foot. None when the set has no clip for that turn.
 [[nodiscard]] std::optional<WalkTurnClips> walkSetTurnClips(const std::vector<LocoClip>& set, std::uint16_t category, float from, float to);
 
-constexpr std::uint16_t kPoseCategory = 16, kStartCategory = 96, kStopCategory = 112, kStepCategory = 144,
-                        kStepInPlaceCategory = 160, kLoopCategory = 176;
-// Each walk style's loops have their own category, 16 on from the style before (style 1's are 192).
-constexpr std::uint16_t kLoopStyleStep = 16;
+// Clip categories as the game loads them (see anim::Animation::category).
+constexpr std::uint16_t kPoseCategory = 1, kStartCategory = 6, kStopCategory = 7, kTurnInPlaceCategory = 8, kStepCategory = 9,
+                        kStepInPlaceCategory = 10, kLoopCategory = 100;
+// Each walk style's loops have their own category, 1 on from the style before (style 1's are 101).
+constexpr std::uint16_t kLoopStyleStep = 1;
 
 // A Turn Body Towards in progress (which instruction runs it, and its first steps).
 struct Turning {

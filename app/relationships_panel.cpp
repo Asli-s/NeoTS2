@@ -173,6 +173,12 @@ void RelationshipsPanel::show(std::vector<Person> people, std::int16_t species) 
         page_ = 0;
     }
     listed_ = std::move(people);
+    // A pet's list has the chemistry filter greyed out, as in the game.
+    if (species != species_) {
+        for (const std::uint32_t half : {kCollapsed, kExpanded}) {
+            screen_->setEnabled(screen_->find(screen_->find(content_, half), kFilters[kChemistryFilter - 1]), species == 0);
+        }
+    }
     species_ = species;
     layout();
 }

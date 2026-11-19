@@ -43,8 +43,9 @@ void playClips(ts2::scene::Actor& actor, const ts2::sim::SimObject& object, cons
                const std::optional<ts2::scene::Transform>& endedPlace = std::nullopt);
 
 // A stopped walk that settled at `settledMs` (see SimObject::walkSettledMs): the pose the Sim
-// was in fades out, held where it stood then (`at`), while the walk pose fades in and out.
+// was in fades out, held where it stood then (`at`), while the walk pose fades in and out. `lines`
+// is the walk set the Sim walks by (see World::walkLinesOf), null for the fixed walk clips.
 void addSettleClips(ts2::scene::Actor& actor, const ts2::sim::SimObject& object, double settledMs, const std::optional<ts2::scene::Transform>& at,
-                    ts2::scene::AnimationLibrary& animations, const ts2::sim::LocoClipLookup& clips);
+                    ts2::scene::AnimationLibrary& animations, const ts2::sim::LocoClipLookup& clips, const ts2::sim::WalkSetLines* lines);
 
 } // namespace app

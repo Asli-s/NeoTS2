@@ -71,6 +71,18 @@ struct AgeTip {
 };
 AgeTip ageTip(std::int16_t lifeStage, bool plantSim, std::int16_t ageDuration, std::int16_t ageDaysLeft, std::int16_t daysBefore);
 
+// A pet's age group by its life stage (person data 0x3A): 0 puppy or kitten (up to 18), 1 adult
+// (up to 50) and 2 elder.
+int petAgeGroup(std::int16_t lifeStage);
+
+// The pet live panel's age picture: its window id by species (person data 0xBA, 1 and 2 dogs, 3
+// cats) and age group, 0 for other species.
+std::uint32_t petAgeWindow(std::int16_t species, std::int16_t lifeStage);
+
+// The pet live panel's age tooltip, as ageTip: elders show their age in days, others the days left
+// of their stage with their own text for the last day. Other species than dogs and cats have none.
+AgeTip petAgeTip(std::int16_t species, std::int16_t lifeStage, std::int16_t ageDuration, std::int16_t ageDaysLeft, std::int16_t daysBefore);
+
 // How many of a bar's `width` columns are filled for `lived` of `length`.
 std::uint32_t barFill(int lived, int length, std::uint32_t width);
 
@@ -112,6 +124,12 @@ tga::Pixels portraitSilhouette(const tga::Pixels& portrait);
 // A picture scaled to `width` x `height`, each new pixel the average of the area it covers (its
 // colour weighted by alpha, so transparent pixels add none). Pictures here have straight alpha.
 tga::Pixels scaled(const tga::Pixels& picture, std::uint32_t width, std::uint32_t height);
+
+// A picture scaled to `width` x `height` as the game scales a Sim's thumbnail: a Catmull-Rom cubic
+// across, then down, widened by the shrink factor, with offsets in sixteenths and 14-bit weights.
+// All four channels are filtered alike and pixels past an edge repeat it. Empty for an empty
+// picture or size, or one over kMaxPortraitSide.
+tga::Pixels cubicScaled(const tga::Pixels& picture, std::uint32_t width, std::uint32_t height);
 
 // A picture cut to a shape of its size: its alpha times the shape's (the picture as it is when the
 // sizes differ).

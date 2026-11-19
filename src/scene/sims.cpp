@@ -13,13 +13,16 @@
 #include "parse_float.hpp"
 #include "scene/face_blend.hpp"
 #include "scene/newborn_face.hpp"
+#include "scene/newborn_face_shape.hpp"
 #include "scene/outfit_catalog.hpp"
+#include "scene/overlay_fit.hpp"
 #include "scene/rig.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <charconv>
 #include <cmath>
+#include <cstring>
 #include <map>
 #include <optional>
 #include <string_view>
@@ -47,9 +50,43 @@ std::string resourceName(const std::string& name, const char* suffix) {
     return name.size() > s.size() && lower(name.substr(name.size() - s.size())) == s ? name.substr(0, name.size() - s.size()) : name;
 }
 
-// The skeleton the game gives a Sim of this age when its age data names none.
-std::string defaultSkeleton(std::uint32_t age) {
+// A pet young enough for the puppy and kitten skeletons, poses and idles.
+bool youngPet(std::uint32_t age) {
+    return age == kToddlerAge || age == kChildAge || age == kTeenAge || age == kBabyAge;
+}
+
+// The skeleton the game gives a Sim of this age and species when its age data names none.
+std::string defaultSkeleton(std::uint32_t age, std::uint32_t species) {
+    switch (species) {
+    case kDogSpecies:      return youngPet(age) ? "wuskel" : "duskel";
+    case kSmallDogSpecies: return youngPet(age) ? "wuskel" : "luskel";
+    case kCatSpecies:      return youngPet(age) ? "kuskel" : "fuskel";
+    default:               break;
+    }
     return age == kToddlerAge ? "puskel" : age == kChildAge ? "cuskel" : age == kBabyAge ? "buskel" : "auskel";
+}
+
+// A pet's idle list: the string table its species' idle controller keeps (group and instance).
+// Elders use the adult list, as the game's own elder lists are empty. None for a human.
+std::optional<std::pair<std::uint32_t, std::uint16_t>> petIdleList(std::uint32_t age, std::uint32_t species) {
+    constexpr std::uint32_t kDogIdleGroup = 0x7F4C1DD2, kSmallDogIdleGroup = 0x7F820EC2, kCatIdleGroup = 0x7FE9E283;
+    constexpr std::uint16_t kDogList = 0x8D, kSmallDogList = 0x9B, kCatList = 0x8C, kPuppyList = 0x99, kKittenList = 0x9A;
+    switch (species) {
+    case kDogSpecies:      return std::pair{kDogIdleGroup, youngPet(age) ? kPuppyList : kDogList};
+    case kSmallDogSpecies: return std::pair{kSmallDogIdleGroup, youngPet(age) ? kPuppyList : kSmallDogList};
+    case kCatSpecies:      return std::pair{kCatIdleGroup, youngPet(age) ? kKittenList : kCatList};
+    default:               return std::nullopt;
+    }
+}
+
+// A pet's animation prefix: d large dog, l small dog, f cat, w puppy, k kitten. Empty for a human.
+std::string petPrefix(std::uint32_t age, std::uint32_t species) {
+    switch (species) {
+    case kDogSpecies:
+    case kSmallDogSpecies: return youngPet(age) ? "w-" : species == kDogSpecies ? "d-" : "l-";
+    case kCatSpecies:      return youngPet(age) ? "k-" : "f-";
+    default:               return {};
+    }
 }
 
 // How much a Sim's bones are stretched ("stretch", 1 when missing or not a sane number).
@@ -66,7 +103,7 @@ float stretchOf(const std::map<std::string, std::string>& p) {
 // any index into the reference list is ignored), newer ones index their reference list. Without
 // either, the default skeleton for the Sim's age. Empty when it can't be read.
 std::string skeletonName(Assets& assets, const std::map<std::string, std::string>& age, const std::optional<sg::Link>& listed,
-                         std::uint32_t ageFlag, std::vector<std::string>& problems) {
+                         std::uint32_t ageFlag, std::uint32_t species, std::vector<std::string>& problems) {
     std::optional<sg::Link> key;
     bool useRefs = true;
     if (age.count("skeltype")) {
@@ -84,7 +121,7 @@ std::string skeletonName(Assets& assets, const std::map<std::string, std::string
     if (useRefs && listed) {
         key = *listed;
     }
-    const auto cres = key ? assets.byKey(*key) : assets.byName(kCres, defaultSkeleton(ageFlag) + "_cres");
+    const auto cres = key ? assets.byKey(*key) : assets.byName(kCres, defaultSkeleton(ageFlag, species) + "_cres");
     if (!cres) {
         problems.push_back("no skeleton");
         return {};
@@ -116,7 +153,11 @@ std::string& skinOf(SimLook& look, std::uint32_t part) {
 std::optional<SimPart> readPart(Assets& assets, const sg::Link& set, std::uint32_t kind, std::vector<std::string>& problems,
                                 std::uint32_t wornIn = 0) {
     const auto bytes = assets.skinResource(set);
-    const auto setRefs = assets.skinResource({reflist::kType, set.group, set.instance, set.instanceHigh});
+    // A mesh overlay's reference list sits with its meshes, outside the skin catalog.
+    auto setRefs = assets.skinResource({reflist::kType, set.group, set.instance, set.instanceHigh});
+    if (!setRefs) {
+        setRefs = assets.byKey({reflist::kType, set.group, set.instance, set.instanceHigh});
+    }
     if (!bytes || !setRefs) {
         problems.push_back("part property set not found");
         return std::nullopt;
@@ -220,7 +261,7 @@ SimLook simLook(Assets& assets, const AgeData& data, std::optional<std::uint32_t
         look.skinTone = it->second;
     }
     look.stretch = stretchOf(age);
-    look.skeleton = skeletonName(assets, age, data.skeleton, look.age, look.problems);
+    look.skeleton = skeletonName(assets, age, data.skeleton, look.age, look.species, look.problems);
     // The bare skin outfit takes its hair and face from the formal outfit (category 8), so a Sim in
     // the shower keeps its own head.
     const auto wornCategory = [&](std::uint32_t kind) {
@@ -433,7 +474,7 @@ SimLook newbornLook(Assets& assets, const BabyCatalog& catalog, const Newborn& b
     look.age = kBabyAge;
     look.gender = baby.gender;
     look.skinTone = baby.skinTone;
-    look.skeleton = skeletonName(assets, {}, {}, kBabyAge, look.problems);
+    look.skeleton = skeletonName(assets, {}, {}, kBabyAge, kHumanSpecies, look.problems);
     const NewbornOutfit outfit = newbornOutfit(catalog, baby);
     const std::map<std::uint32_t, sg::Link>& skinSets = outfit.skin;
     const std::optional<sg::Link>& body = outfit.body;
@@ -500,6 +541,92 @@ std::optional<MeshEdit> faceTemplateEdit(Assets& assets, const OutfitCatalog& ca
     }
 }
 
+// The face shape's age number of an age flag: a young adult has the adult's face.
+std::uint8_t faceShapeAge(std::uint32_t ageFlag) {
+    switch (ageFlag) {
+    case kToddlerAge: return 0;
+    case kChildAge: return 1;
+    case kTeenAge: return 2;
+    case kElderAge: return 4;
+    case kBabyAge: return 5;
+    default: return 3;
+    }
+}
+
+// A made Sim's mesh beard or glasses (a mesh overlay of subtype 0 or 5) as a part of its own, fitted
+// to the Sim's face as its character file has it (see fitMeshOverlay). None, with a problem noted,
+// for other mesh overlays and pieces the catalog lacks, and none when the outfit `category` takes it
+// off.
+std::optional<SimPart> fittedMeshOverlay(Assets& assets, const OutfitCatalog& catalog, const MadeLook& made, SimLook& look, const sg::Link& key,
+                                         std::uint32_t category) {
+    constexpr std::uint32_t kBeardSubtype = 0, kGlassesSubtype = 5, kAccessoryPart = 0x20, kFitsAllCategory = 0x400;
+    const auto found = std::find_if(catalog.faceOverlays.begin(), catalog.faceOverlays.end(), [&](const CatalogPart& p) {
+        return p.key.type == key.type && p.key.group == key.group && p.key.instance == key.instance && p.key.instanceHigh == key.instanceHigh;
+    });
+    const CatalogPart* overlay = found != catalog.faceOverlays.end() ? &*found : nullptr;
+    if (overlay == nullptr || (overlay->subtype != kBeardSubtype && overlay->subtype != kGlassesSubtype)) {
+        look.problems.push_back("a mesh overlay that isn't a beard or glasses isn't drawn yet");
+        return std::nullopt;
+    }
+    if (overlay->category != 0 && !(category & kFitsAllCategory) && !(overlay->category & category)) {
+        return std::nullopt;
+    }
+    std::string problem;
+    const auto pieces = meshOverlayCatalog(assets, key, problem);
+    if (!pieces) {
+        look.problems.push_back(problem);
+        return std::nullopt;
+    }
+    const std::uint32_t faceAge = look.age == kYoungAdultAge ? kAdultAge : look.age;
+    const auto baseNode = baseFaceNode(assets, faceAge, look.gender, false, look.skinTone);
+    std::optional<std::vector<std::uint8_t>> baseMesh;
+    for (const auto& link : baseNode ? sg::parseContainer(*baseNode).links : std::vector<sg::Link>{}) {
+        if (link.type == 0xAC4F8687 && !baseMesh) {  // the node's mesh (GMDC)
+            baseMesh = assets.byKey(link);
+        }
+    }
+    const auto face = madeFaceVertices(assets, catalog.faceTemplates, made.faceFamily, look.skinTone, faceShapeAge(look.age),
+                                       look.gender == 1 ? 1 : 0, false);
+    auto fitted = baseMesh && face ? fitMeshOverlay(meshPositions(pieces->mesh), meshPositions(pieces->maskMesh), meshColours(pieces->maskMesh),
+                                                    meshPositions(*baseMesh), face->positions)
+                                   : std::vector<float>{};
+    if (fitted.empty()) {
+        look.problems.push_back("a mesh overlay can't be fitted to the face");
+        return std::nullopt;
+    }
+    auto part = readPart(assets, key, kAccessoryPart, look.problems);
+    if (!part) {
+        return std::nullopt;
+    }
+    const std::string editKey = "fittedoverlay_" + std::to_string(key.group) + "_" + std::to_string(key.instance) + "_" + made.faceFamily + "_" +
+                                look.skinTone + "_" + std::to_string(look.age) + "_" + std::to_string(look.gender);
+    auto positions = std::make_shared<const std::vector<float>>(std::move(fitted));
+    // The fitted positions replace every vertex list's, in the mesh's order, when they fit exactly.
+    part->meshEdit = std::make_shared<const MeshEdit>(MeshEdit{editKey, [positions](sg::Mesh& m) {
+        const auto lists = [](sg::Element& e) { return e.identity == sg::kPositions && e.stream == 0 && e.count > 0; };
+        std::size_t total = 0;
+        for (auto& e : m.elements) {
+            if (lists(e)) {
+                if (e.data.size() != static_cast<std::size_t>(e.count) * 3 * sizeof(float)) {
+                    return;
+                }
+                total += static_cast<std::size_t>(e.count) * 3;
+            }
+        }
+        if (total != positions->size()) {
+            return;
+        }
+        std::size_t at = 0;
+        for (auto& e : m.elements) {
+            if (lists(e)) {
+                std::memcpy(e.data.data(), positions->data() + at, e.data.size());
+                at += e.data.size() / sizeof(float);
+            }
+        }
+    }});
+    return part;
+}
+
 } // namespace
 
 SimLook madeSimLook(Assets& assets, const OutfitCatalog& catalog, const MadeLook& made, std::uint32_t category) {
@@ -529,7 +656,9 @@ SimLook madeSimLook(Assets& assets, const OutfitCatalog& catalog, const MadeLook
     std::vector<std::pair<std::uint32_t, std::string>> layers;
     for (const auto& key : made.faceOverlays) {
         if (key.type == kMeshOverlay) {
-            look.problems.push_back("a mesh overlay (facial hair, glasses) isn't drawn yet");
+            if (auto overlay = fittedMeshOverlay(assets, catalog, made, look, key, category)) {
+                look.parts.push_back(std::move(*overlay));
+            }
             continue;
         }
         const auto bytes = assets.skinResource(key);
@@ -559,7 +688,7 @@ SimLook hairPictureLook(Assets& assets, const OutfitCatalog& catalog, std::uint3
     look.age = age;
     look.gender = gender;
     look.skinTone = catalogGuid("00000002-0000-0000-0000-000000000000");  // Medium
-    look.skeleton = skeletonName(assets, {}, {}, age, look.problems);
+    look.skeleton = skeletonName(assets, {}, {}, age, kHumanSpecies, look.problems);
     // A teen is the adult skeleton made smaller, as every teen's age data says.
     constexpr float kTeenStretch = 0.94f;
     look.stretch = age == kTeenAge ? kTeenStretch : 1.0f;
@@ -786,7 +915,12 @@ std::vector<std::string> npcSlotBones(Assets& assets, std::uint32_t guid, bool t
     }
 }
 
-std::string standingIdle(Assets& assets, std::uint32_t age) {
+std::string standingIdle(Assets& assets, std::uint32_t age, std::uint32_t species) {
+    if (const auto list = petIdleList(age, species)) {
+        const auto entry = assets.objectString(list->first, list->second, content::kStandingIdleEntry);
+        const std::string name = entry ? content::animationName(*entry) : std::string();
+        return !name.empty() && assets.byName(anim::kType, name + "_anim") ? name : std::string();
+    }
     const std::uint8_t ageList = content::ageAnimationList(content::animation_list::kAdult, content::ageValue(age));
     for (const std::uint8_t list : {ageList, content::animation_list::kAdult}) {
         const auto entry = assets.objectString(content::kIdleSystemGroup, list, content::kStandingIdleEntry);
@@ -798,7 +932,13 @@ std::string standingIdle(Assets& assets, std::uint32_t age) {
     return {};
 }
 
-std::string standingPose(Assets& assets, std::uint32_t age) {
+std::string standingPose(Assets& assets, std::uint32_t age, std::uint32_t species) {
+    if (const std::string prefix = petPrefix(age, species); !prefix.empty()) {
+        // An elder pet's own pose (i-, j- or g-) isn't shipped and what the game uses instead is
+        // not known yet, so it gets none.
+        const std::string name = age == kElderAge ? std::string() : prefix + "pose-neutral-stand";
+        return !name.empty() && assets.byName(anim::kType, name + "_anim") ? name : std::string();
+    }
     const char* own = age == kToddlerAge     ? "p-sitPose-slotRigged"
                       : age == kChildAge     ? "c-pose-neutral-stand"
                       : age == kTeenAge      ? "t-pose-neutral-stand"

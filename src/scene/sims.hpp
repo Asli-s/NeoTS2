@@ -21,6 +21,9 @@ namespace ts2::scene {
 constexpr std::uint32_t kToddlerAge = 0x01, kChildAge = 0x02, kTeenAge = 0x04, kAdultAge = 0x08, kElderAge = 0x10,
                         kBabyAge = 0x20, kYoungAdultAge = 0x40;
 
+// A Sim's species in its age data (AGED "species"), a flag. Person data 0xBA counts them 0 to 3 instead.
+constexpr std::uint32_t kHumanSpecies = 0x01, kDogSpecies = 0x02, kSmallDogSpecies = 0x04, kCatSpecies = 0x08;
+
 // The kinds of part a Sim wears (a property set's "parts").
 constexpr std::uint32_t kHairPart = 1, kFacePart = 2, kTopPart = 4, kBodyPart = 8, kBottomPart = 16;
 
@@ -109,8 +112,8 @@ std::string newbornBrowFamily(const BabyCatalog& catalog, const Newborn& baby);
 
 // What a Sim made by Make New Character wears in outfit category `category`, from its made look
 // (see makeLook): its age data's parts, its own face in every outfit (the bare skin outfit's face
-// changed into its face template's) and its eyebrows and eyes drawn on the face. Mesh overlays
-// (facial hair, glasses) aren't drawn yet.
+// changed into its face template's), its eyebrows, eyes and facial hair drawn on the face, and its
+// mesh beard and glasses fitted to its face as its character file has them.
 SimLook madeSimLook(Assets& assets, const OutfitCatalog& catalog, const MadeLook& made, std::uint32_t category);
 
 // The Sim Create-A-Sim and the mirror draw a hair's picture on, the same for every Sim of the age
@@ -157,13 +160,15 @@ std::vector<std::string> simSlotBones(Assets& assets, const std::filesystem::pat
 // own SLOT and string table in the object packages. Empty when unknown.
 std::vector<std::string> npcSlotBones(Assets& assets, std::uint32_t guid, bool targeting = false);
 
-// The animation a Sim of this age (SimLook::age) stands idle with, as the game's idle code names it
-// for each age (adults' when its age has none). Empty when unknown.
-std::string standingIdle(Assets& assets, std::uint32_t age);
+// The animation a Sim of this age and species (SimLook::age, SimLook::species) stands idle with, as
+// the game's idle code names it for each age (adults' when its age has none). A pet's comes from its
+// species' idle controller. Empty when unknown.
+std::string standingIdle(Assets& assets, std::uint32_t age, std::uint32_t species = kHumanSpecies);
 
 // The pose the game keeps under everything a Sim of this age plays (<age>-pose-neutral-stand, a
-// toddler's p-sitPose-slotRigged, adults' when its age has none). Empty when unknown.
-std::string standingPose(Assets& assets, std::uint32_t age);
+// toddler's p-sitPose-slotRigged, adults' when its age has none). A pet's is the same with its
+// species' prefix (d- large dog, l- small dog, f- cat, w- puppy, k- kitten). Empty when unknown.
+std::string standingPose(Assets& assets, std::uint32_t age, std::uint32_t species = kHumanSpecies);
 
 // An animation by name (without "_anim"). Nullopt when missing or unreadable.
 [[nodiscard]] std::optional<anim::Animation> loadAnimation(Assets& assets, const std::string& name);

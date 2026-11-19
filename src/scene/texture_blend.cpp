@@ -24,4 +24,28 @@ void drawOver(Image& under, const Image& layer) {
     }
 }
 
+int maskWeight(std::uint8_t maskGreen, std::uint8_t amount) {
+    if (amount == 255) {
+        return weight(maskGreen);
+    }
+    const std::uint32_t t = (static_cast<std::uint32_t>(maskGreen) << 8) * amount;
+    return static_cast<int>((t >> 23) + (t >> 16));
+}
+
+void drawThroughMask(Image& under, const Image& layer, const Image& mask, std::uint8_t amount) {
+    if (under.width != layer.width || under.height != layer.height || under.rgba.size() != layer.rgba.size() ||
+        mask.rgba.size() != under.rgba.size()) {
+        return;
+    }
+    for (std::size_t i = 0; i + 3 < under.rgba.size(); i += 4) {
+        if ((layer.rgba[i] | layer.rgba[i + 1] | layer.rgba[i + 2] | layer.rgba[i + 3]) == 0) {
+            continue;
+        }
+        const int w = maskWeight(mask.rgba[i + 1], amount);
+        for (std::size_t c = 0; c < 3; ++c) {
+            under.rgba[i + c] = blend(under.rgba[i + c], layer.rgba[i + c], w);
+        }
+    }
+}
+
 } // namespace ts2::scene::textureblend

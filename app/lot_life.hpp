@@ -13,6 +13,7 @@
 #include "scene/sims.hpp"
 #include "sim/character_look.hpp"
 #include "sim/clock.hpp"
+#include "sim/family_picture.hpp"
 #include "content/ui_meters.hpp"
 #include "formats/tga.hpp"
 #include "sim/lot_simulation.hpp"
@@ -315,11 +316,19 @@ public:
     // show the everyday one. Nullopt when it wears that already or the copy can't be built. Take it
     // out again with removePictureSim.
     std::optional<ts2::scene::Actor> addEverydaySim(ts2::scene::Scene& scene, std::int16_t simId);
+    // A copy of neighbor `neighbor` in its everyday outfit, built from its character file at `place`
+    // out of the lot's actors, for the family picture. It needs no Sim on the lot. Nullopt when it
+    // can't be built. Take it out again with removePictureSim.
+    std::optional<ts2::scene::Actor> addFamilyPictureSim(ts2::scene::Scene& scene, std::int16_t neighbor, const ts2::scene::Transform& place);
+    // How the lot's household stands in its family picture, nullopt without a household.
+    std::optional<ts2::sim::FamilyPicture> familyPicture() const;
     // Frees a picture Sim's instances, which join changedInstances.
     void removePictureSim(ts2::scene::Scene& scene, const ts2::scene::Actor& actor);
     // The camera and lights of a hair's picture for a Sim of this age flag. Nullopt when the game's
     // files can't give them.
     std::optional<ts2::scene::PictureView> hairPictureView(std::uint32_t age);
+    // The family picture's stage seen from camera `camera`. Nullopt when the game's files can't give it.
+    std::optional<ts2::scene::FamilyPictureStage> familyPictureStage(const std::string& camera);
 
 private:
     // The clock's time the actors are posed at, in milliseconds (see seconds).

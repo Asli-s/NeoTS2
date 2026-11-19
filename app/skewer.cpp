@@ -2,8 +2,10 @@
 
 #include "content/ui_meters.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <string>
+#include <utility>
 
 namespace app {
 
@@ -12,10 +14,13 @@ namespace {
 constexpr std::uint32_t kScripts = 0xA99D8A11;
 // The puck's skewer, its anchor and its constants table.
 constexpr std::uint32_t kSkewer = 0x4BDEFFAB, kAnchor = 0x4BDEFFAC, kConstants = 0x515D96DC;
-// The skewer's pieces: the cap on top, the tile behind the thumbnails and the connectors below.
+// The skewer's pieces: the Sims' cap on top, the tile behind their thumbnails and the connectors
+// below, then the branch's connector, cap and tile.
 constexpr std::uint32_t kCap = 0x0000A001, kTile = 0x0000A002, kSimConnector = 0x0000A003, kSimPetConnector = 0x0000A004;
-// A Sim's thumbnail script, its portrait group (background, shadow, portrait) and its frame button.
-constexpr std::uint32_t kThumbnailScript = 0x49060053;
+constexpr std::uint32_t kPetConnector = 0x0000A005, kPetCap = 0x0000A006, kPetTile = 0x0000A007;
+// A Sim's thumbnail script and the branch's, its portrait group (background, shadow, portrait) and
+// its frame button.
+constexpr std::uint32_t kThumbnailScript = 0x49060053, kBranchThumbnailScript = 0xFEED2002;
 constexpr std::uint32_t kPortraitGroup = 0x00001000, kPortrait = 0x00000001, kShadow = 0x00000002, kBackground = 0x00000003;
 // The mood gradient (best mood at the top) and the background's own picture, whose shape the mood
 // colour fills.
@@ -33,8 +38,17 @@ constexpr std::uint32_t kTrackedMark = 0x00004000;
 constexpr std::uint32_t kAwayIcons[] = {0x5000, 0x6000, 0x7000, 0x8000, 0, 0x900A, 0xB00A, 0xA00A, 0xD00A, 0xD00B};
 // Shown in place of at work for a roommate.
 constexpr std::uint32_t kRoommateWork = 0xC00A;
-// The connector's top sits this far above the tile's bottom.
-constexpr int kSimConnectorOverlap = 9;
+// A pet's away icons, the first of its flags in this order showing alone: run away, at work,
+// reinforce behavior, on tour, jogging, hiking, banished by a witch and roommate walkabout.
+struct PetAwayIcon {
+    std::uint32_t flag, icon;
+};
+constexpr PetAwayIcon kPetAwayIcons[] = {{0x4, 0x7000},  {0x1, 0x5000},  {0x10, 0xA000},  {0x20, 0x900A},
+                                         {0x80, 0xA00A}, {0x40, 0xB00A}, {0x100, 0xD00A}, {0x200, 0xD00B}};
+// Every icon a pet's are picked from, all hidden first.
+constexpr std::uint32_t kPetIconsHidden[] = {0x5000, 0x7000, 0xA000, 0x900A, 0xA00A, 0xB00A, 0xC00A, 0xD00A, 0xD00B, 0x6000, 0x8000};
+// However high the screen, a column has room for at least this many pixels of thumbnails.
+constexpr int kMinColumnRoom = 100;
 
 } // namespace
 
@@ -54,9 +68,19 @@ void Skewer::attach(ts2::ui::Screen& screen, int puck) {
         } else if (name == "kThumbnailSpacer") {
             spacer_ = value;
         } else if (name == "kThumbnailTopMargin1") {
-            topMargin_ = value;
+            topMargin_[0] = value;
+        } else if (name == "kThumbnailTopMargin2") {
+            topMargin_[1] = value;
         } else if (name == "kThumbnailBottomMargin1") {
-            bottomMargin_ = value;
+            bottomMargin_[0] = value;
+        } else if (name == "kThumbnailBottomMargin2") {
+            bottomMargin_[1] = value;
+        } else if (name == "kSkewerCeiling1") {
+            ceiling_[0] = value;
+        } else if (name == "kSkewerCeiling2") {
+            ceiling_[1] = value;
+        } else if (name == "kOverflowCeiling") {
+            overflowCeiling_ = value;
         }
     }
     moodGradient_ = screen.data().image(kImages, kMoodGradient).value_or(ts2::tga::Pixels{});
@@ -76,7 +100,8 @@ void Skewer::setHousehold(std::vector<Member> members) {
     }
     thumbnails_.clear();
     for (Member& m : members) {
-        const int thumbnail = s.load(kScripts, kThumbnailScript, 0, 0, skewer_);
+        // The script goes by the column: a roommate on the branch has the pets' icons.
+        const int thumbnail = s.load(kScripts, m.branch ? kBranchThumbnailScript : kThumbnailScript, 0, 0, skewer_);
         if (thumbnail < 0) {
             break;
         }
@@ -90,7 +115,7 @@ void Skewer::setHousehold(std::vector<Member> members) {
             s.setImage(s.find(group, kShadow), thumbnailPicture(ts2::content::portraitSilhouette(*m.portrait)));
             s.setImage(s.find(group, kPortrait), thumbnailPicture(*m.portrait));
         }
-        thumbnails_.push_back({m.sim, thumbnail, s.find(group, kBackground), -1});
+        thumbnails_.push_back({m.sim, m.branch, m.pet, thumbnail, s.find(group, kBackground), -1});
     }
     layout();
     select(selected_);
@@ -159,6 +184,20 @@ void Skewer::setAwayIcons(std::int16_t sim, std::uint16_t flags, bool roommate) 
             continue;
         }
         t.awayFlags = flags;
+        if (t.pet) {
+            for (const std::uint32_t icon : kPetIconsHidden) {
+                screen_->setVisible(screen_->find(t.window, icon), false);
+            }
+            for (const auto& [flag, icon] : kPetAwayIcons) {
+                if ((flags & flag) != 0) {
+                    screen_->setVisible(screen_->find(t.window, icon), true);
+                    break;
+                }
+            }
+            screen_->setVisible(screen_->find(t.window, kFrame), flags == 0);
+            screen_->setVisible(screen_->find(t.window, kAwayFrame), flags != 0);
+            continue;
+        }
         for (std::size_t bit = 0; bit < std::size(kAwayIcons); ++bit) {
             const bool on = (flags >> bit & 1) != 0;
             if (kAwayIcons[bit] != 0) {
@@ -218,26 +257,104 @@ void Skewer::layout() {
     if (n == 0) {
         return;
     }
-    // The thumbnails stand in a column under the cap, the first one at the top.
-    const int capHeight = s.height(s.find(skewer_, kCap));
-    const int step = s.height(thumbnails_[0].window) + spacer_;
-    const int top = capHeight + topMargin_;
-    for (int i = 0; i < n; ++i) {
-        s.move(thumbnails_[static_cast<std::size_t>(i)].window, offsetX_, top + i * step);
+    auto piece = [&](std::uint32_t id) { return s.find(skewer_, id); };
+    auto bottom = [&](int w) { return s.y(w) + s.height(w); };
+    auto moveY = [&](int w, int y) { s.move(w, s.x(w), y); };
+    const int cap = piece(kCap), tile = piece(kTile), joint = piece(kSimPetConnector);
+    const int petConnector = piece(kPetConnector), petCap = piece(kPetCap), petTile = piece(kPetTile);
+
+    // Each column's thumbnails, bottom first: the last member stands at the bottom.
+    std::array<std::vector<int>, 2> columns;
+    for (auto t = thumbnails_.rbegin(); t != thumbnails_.rend(); ++t) {
+        columns[t->branch ? 1 : 0].push_back(t->window);
     }
-    // The tile runs behind them, the connector joins it to the puck.
-    const int tile = s.find(skewer_, kTile);
-    s.move(tile, 0, capHeight);
-    s.resize(tile, s.width(tile), topMargin_ + n * step - spacer_ + bottomMargin_);
-    const int tileBottom = capHeight + s.height(tile);
-    const int connector = s.find(skewer_, kSimPetConnector);
-    s.move(s.find(skewer_, kSimConnector), 0, tileBottom - kSimConnectorOverlap);
-    s.move(connector, 0, tileBottom);
-    // The skewer's bottom left corner sits on the puck's anchor.
-    const int height = tileBottom + s.height(connector);
-    s.resize(skewer_, s.width(skewer_), height);
+    const int thumbnailHeight = s.height(thumbnails_[0].window);
+    const int step = thumbnailHeight + spacer_;
+
+    // A column's tile is as tall as its thumbnails, up to the room the screen leaves over the anchor.
     const int anchor = s.find(puck_, kAnchor);
-    s.move(skewer_, s.x(puck_) + s.x(anchor), s.y(puck_) + s.y(anchor) + s.height(anchor) - height);
+    const int anchorBottom = s.y(puck_) + s.y(anchor) + s.height(anchor);
+    int parentTop = 0;
+    for (int w = s.parent(skewer_); w >= 0; w = s.parent(w)) {
+        parentTop += s.y(w);
+    }
+    auto columnHeight = [&](std::size_t kind) {
+        const int count = static_cast<int>(columns[kind].size());
+        if (count == 0 || thumbnailHeight <= 0) {
+            return 0;
+        }
+        const int below = kind == 0 ? s.height(piece(kSimConnector)) : s.height(joint) + s.height(petConnector);
+        const int room = std::max(kMinColumnRoom, anchorBottom - parentTop - below + spacer_ - ceiling_[kind] - bottomMargin_[kind] - topMargin_[kind]);
+        return std::max(0, std::min(step * count - spacer_ + bottomMargin_[kind] + topMargin_[kind], room));
+    };
+
+    // The pieces stack up from the skewer's bottom: the joint to the puck, then the Sims' tile and
+    // cap over it, and the branch's connector, tile and cap over it beside them.
+    moveY(joint, s.height(skewer_) - s.height(joint));
+    s.resize(tile, s.width(tile), columnHeight(0));
+    moveY(tile, s.y(joint) - s.height(tile));
+    moveY(cap, s.y(tile) - s.height(cap));
+    moveY(petConnector, s.y(joint) - s.height(petConnector));
+    s.resize(petTile, s.width(petTile), columnHeight(1));
+    moveY(petTile, s.y(petConnector) - s.height(petTile));
+    moveY(petCap, s.y(petTile) - s.height(petCap));
+    const bool branch = !columns[1].empty();
+    s.setVisible(petConnector, branch);
+    s.setVisible(petTile, branch);
+    s.setVisible(petCap, branch);
+    s.setVisible(tile, !columns[0].empty());
+
+    // The thumbnails stand up their tile from its bottom margin. Those past its top go on in columns
+    // to the right of the branch, shared by both, each from the Sims' tile's bottom up to under the
+    // overflow ceiling. A column's end takes the next place there too.
+    const int overflowStep = s.x(petTile) - s.x(tile);
+    const int overflowBottom = bottom(tile) - bottomMargin_[0] - thumbnailHeight;
+    int overflowX = offsetX_ + 2 * overflowStep, overflowY = overflowBottom;
+    auto nextOverflow = [&] {
+        overflowY -= step;
+        if (overflowY < s.y(cap) + overflowCeiling_ - ceiling_[0] + topMargin_[0]) {
+            overflowX += overflowStep;
+            overflowY = overflowBottom;
+        }
+    };
+    for (const std::size_t kind : {std::size_t{0}, std::size_t{1}}) {
+        const int column = kind == 0 ? tile : petTile;
+        int x = s.x(column) + offsetX_, y = bottom(column) - bottomMargin_[kind] - thumbnailHeight;
+        const int top = s.y(column) + topMargin_[kind];
+        bool over = false;
+        for (const int w : columns[kind]) {
+            s.move(w, x, y);
+            if (!over) {
+                y -= step;
+                over = y < top;
+            }
+            if (over) {
+                x = overflowX;
+                y = overflowY;
+                nextOverflow();
+            }
+        }
+    }
+
+    // The skewer grows to hold every piece and thumbnail, shown or not, and never shrinks. Its
+    // children keep their places on the screen.
+    int left = 0, top = 0, right = s.width(skewer_), bottomEdge = s.height(skewer_);
+    for (const int w : s.children(skewer_)) {
+        if (s.width(w) > 0 && s.height(w) > 0) {
+            left = std::min(left, s.x(w));
+            top = std::min(top, s.y(w));
+            right = std::max(right, s.x(w) + s.width(w));
+            bottomEdge = std::max(bottomEdge, bottom(w));
+        }
+    }
+    if (left < 0 || top < 0) {
+        for (const int w : s.children(skewer_)) {
+            s.move(w, s.x(w) - left, s.y(w) - top);
+        }
+    }
+    s.resize(skewer_, right - left, bottomEdge - top);
+    // Its bottom left corner sits on the puck's anchor.
+    s.move(skewer_, s.x(puck_) + s.x(anchor), anchorBottom - s.height(skewer_));
 }
 
 } // namespace app

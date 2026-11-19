@@ -1,6 +1,7 @@
 #pragma once
 
 #include "age_meter.hpp"
+#include "aspiration_popup.hpp"
 #include "job_panel.hpp"
 #include "aspiration_bars.hpp"
 #include "mood_meter.hpp"
@@ -13,6 +14,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -37,7 +39,7 @@ public:
     void setAspiration(std::int16_t aspiration);
     // Shows the selected Sim's needs (life stage and motives as whole numbers).
     void setNeeds(std::int16_t sim, std::int16_t lifeStage, const std::array<int, 16>& motives) {
-        needs_.show(sim, lifeStage, motives, sub_ == Sub::Needs);
+        needs_.show(sim, lifeStage, 0, motives, sub_ == Sub::Needs);
     }
     // Shows the selected Sim's wants and fears in its want and fear slots.
     void setWants(const std::vector<WantsPanel::Want>& wants, const std::vector<WantsPanel::Want>& fears, std::size_t wantSlots,
@@ -79,8 +81,11 @@ public:
     void setRelationships(std::vector<RelationshipsPanel::Person> people, std::int16_t species) {
         relationships_.show(std::move(people), species);
     }
+    // Moves the Aspiration Meter popup on. `make` gives its content when it is about to show.
+    void updateAspirationPopup(const std::function<AspirationPopup::Content()>& make) { aspirationPopup_.update(make); }
     // The mouse is at (x, y): a want's or memory's popup closes when it leaves the wants or memories.
     void mouseMoved(int x, int y) {
+        aspirationPopup_.mouseAt(x, y);
         if (wantsOpen_) {
             wants_.mouseAt(x, y);
         } else {
@@ -111,6 +116,7 @@ private:
     NeedsPanel needs_;
     MoodMeter mood_;
     AspirationBars aspirationBars_;
+    AspirationPopup aspirationPopup_;
     AgeMeter age_;
     WantsPanel wants_;
     SimologyPanel simology_;

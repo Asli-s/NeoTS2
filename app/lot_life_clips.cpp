@@ -238,7 +238,7 @@ void playClips(ts2::scene::Actor& actor, const ts2::sim::SimObject& object, cons
 }
 
 void addSettleClips(ts2::scene::Actor& actor, const ts2::sim::SimObject& object, double settledMs, const std::optional<ts2::scene::Transform>& at,
-                    ts2::scene::AnimationLibrary& animations, const ts2::sim::LocoClipLookup& clips) {
+                    ts2::scene::AnimationLibrary& animations, const ts2::sim::LocoClipLookup& clips, const ts2::sim::WalkSetLines* lines) {
     const double start = settledMs / 1000.0;
     auto& still = actor.clips.emplace_back();
     still.frozen = true;
@@ -247,8 +247,9 @@ void addSettleClips(ts2::scene::Actor& actor, const ts2::sim::SimObject& object,
     still.fadeIn = false;
     still.fadeOutSeconds = ts2::sim::kSettlePoseMs / 1000.0f;
     still.playedAt = at;
-    const std::string name = ts2::sim::settlePose(object.walkSets.empty() ? nullptr : &object.walkSets.back()[0],
-                                                  object.personData[ts2::sim::kLifeStagePersonData], object.personData[ts2::sim::kGenderPersonData], clips);
+    constexpr std::size_t kSpecies = 0xBA;
+    const std::string name = ts2::sim::settlePose(lines, object.personData[ts2::sim::kLifeStagePersonData],
+                                                  object.personData[ts2::sim::kGenderPersonData], clips, object.personData[kSpecies]);
     if (auto bound = animations.bound(actor.rig, name, false)) {
         auto& pose = actor.clips.emplace_back();
         pose.animation = std::move(bound);

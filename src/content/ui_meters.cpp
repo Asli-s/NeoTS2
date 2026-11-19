@@ -159,6 +159,29 @@ AgeTip ageTip(std::int16_t lifeStage, bool plantSim, std::int16_t ageDuration, s
     }
 }
 
+int petAgeGroup(std::int16_t lifeStage) { return lifeStage <= 18 ? 0 : lifeStage <= 50 ? 1 : 2; }
+
+std::uint32_t petAgeWindow(std::int16_t species, std::int16_t lifeStage) {
+    constexpr std::uint32_t kDogs[] = {0xBD8A9F0B, 0xBD8A9F0E, 0xBD8A9F0F}, kCats[] = {0xAD8A9F0B, 0xAD8A9F0E, 0xAD8A9F0F};
+    const auto group = static_cast<std::size_t>(petAgeGroup(lifeStage));
+    return species == 1 || species == 2 ? kDogs[group] : species == 3 ? kCats[group] : 0;
+}
+
+AgeTip petAgeTip(std::int16_t species, std::int16_t lifeStage, std::int16_t ageDuration, std::int16_t ageDaysLeft, std::int16_t daysBefore) {
+    if (species < 1 || species > 3) {
+        return {};
+    }
+    const AgeProgress progress = ageProgress(ageDuration, ageDaysLeft);
+    const auto lived = static_cast<std::int16_t>(progress.lived);
+    const auto left = static_cast<std::int16_t>(progress.length - progress.lived);
+    const bool dog = species != 3;
+    switch (petAgeGroup(lifeStage)) {
+    case 2: return {0x3D, daysBefore + lived};
+    case 1: return {static_cast<std::uint16_t>(left == 1 ? 0x3B : 0x3A), left};
+    default: return {static_cast<std::uint16_t>(left == 1 ? (dog ? 0x38 : 0x39) : (dog ? 0x36 : 0x37)), left};
+    }
+}
+
 std::uint32_t barFill(int lived, int length, std::uint32_t width) {
     if (length <= 0 || lived <= 0) {
         return 0;
@@ -276,6 +299,91 @@ tga::Pixels portraitSilhouette(const tga::Pixels& portrait) {
     tga::Pixels out{w, h, std::vector<std::uint8_t>(a.size() * 4, 0)};
     for (std::size_t i = 0; i < a.size(); ++i) {
         out.rgba[i * 4 + 3] = static_cast<std::uint8_t>(std::clamp(std::lround(a[i] * kSilhouetteStrength), 0L, 255L));
+    }
+    return out;
+}
+
+namespace {
+
+double catmullRom(double x) {
+    x = std::abs(x);
+    if (x < 1) {
+        return (1.5 * x - 2.5) * x * x + 1;
+    }
+    if (x < 2) {
+        return ((-0.5 * x + 2.5) * x - 4) * x + 2;
+    }
+    return 0;
+}
+
+// One output pixel's taps: the first source pixel and the weights, 1 << 14 in all.
+struct CubicTaps {
+    int first = 0;
+    std::vector<std::int32_t> weights;
+};
+
+std::vector<CubicTaps> cubicTaps(std::uint32_t from, std::uint32_t to) {
+    const double factor = static_cast<double>(from) / to, stretch = std::max(1.0, factor);
+    int count = static_cast<int>(std::lround(4 * stretch));
+    count += count & 1;
+    std::vector<CubicTaps> out(to);
+    for (std::uint32_t i = 0; i < to; ++i) {
+        const double centre = (i + 0.5) * factor - 0.5;
+        double base = std::floor(centre);
+        double phase = std::round((centre - base) * 16) / 16;
+        if (phase >= 1) {
+            base += 1;
+            phase -= 1;
+        }
+        out[i].first = static_cast<int>(base) - count / 2 + 1;
+        std::vector<double> w(static_cast<std::size_t>(count));
+        double sum = 0;
+        for (int k = 0; k < count; ++k) {
+            w[static_cast<std::size_t>(k)] = catmullRom((out[i].first + k - (base + phase)) / stretch);
+            sum += w[static_cast<std::size_t>(k)];
+        }
+        for (const double v : w) {
+            out[i].weights.push_back(static_cast<std::int32_t>(std::lround(v / sum * 16384)));
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+tga::Pixels cubicScaled(const tga::Pixels& picture, std::uint32_t width, std::uint32_t height) {
+    if (picture.width == 0 || picture.height == 0 || width == 0 || height == 0 || picture.width > kMaxPortraitSide ||
+        picture.height > kMaxPortraitSide || width > kMaxPortraitSide || height > kMaxPortraitSide ||
+        picture.rgba.size() < std::size_t{picture.width} * picture.height * 4) {
+        return {};
+    }
+    const auto across = cubicTaps(picture.width, width), down = cubicTaps(picture.height, height);
+    auto filter = [](const CubicTaps& taps, int last, auto&& value) {
+        std::int64_t sum = 0;
+        for (std::size_t k = 0; k < taps.weights.size(); ++k) {
+            sum += std::int64_t{value(std::clamp(taps.first + static_cast<int>(k), 0, last))} * taps.weights[k];
+        }
+        return static_cast<std::uint8_t>(std::clamp<std::int64_t>((sum + 8192) >> 14, 0, 255));
+    };
+    std::vector<std::uint8_t> middle(std::size_t{width} * picture.height * 4);
+    for (std::uint32_t y = 0; y < picture.height; ++y) {
+        for (std::uint32_t x = 0; x < width; ++x) {
+            for (std::size_t c = 0; c < 4; ++c) {
+                middle[(std::size_t{y} * width + x) * 4 + c] = filter(across[x], static_cast<int>(picture.width) - 1, [&](int sx) {
+                    return picture.rgba[(std::size_t{y} * picture.width + static_cast<std::size_t>(sx)) * 4 + c];
+                });
+            }
+        }
+    }
+    tga::Pixels out{width, height, std::vector<std::uint8_t>(std::size_t{width} * height * 4)};
+    for (std::uint32_t y = 0; y < height; ++y) {
+        for (std::uint32_t x = 0; x < width; ++x) {
+            for (std::size_t c = 0; c < 4; ++c) {
+                out.rgba[(std::size_t{y} * width + x) * 4 + c] = filter(down[y], static_cast<int>(picture.height) - 1, [&](int sy) {
+                    return middle[(static_cast<std::size_t>(sy) * width + x) * 4 + c];
+                });
+            }
+        }
     }
     return out;
 }

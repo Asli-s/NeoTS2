@@ -22,8 +22,13 @@ constexpr std::uint32_t kBar = 7, kFill = 3, kName = 8;
 // The needs script's layouts.
 constexpr std::uint32_t kToddler = 0xA003, kChild = 0xA004, kTeenAdultElder = 0xA005;
 constexpr std::uint32_t kOtherLayouts[] = {0xA006, 0xA007, 0xA008, 0xA009, 0xA00A};
+// The pets' layouts, for grown pets and for puppies and kittens, and the rest hidden with them.
+constexpr std::uint32_t kGrownPet = 0xA007, kYoungPet = 0xA008;
+constexpr std::uint32_t kNotPetLayouts[] = {0xA003, 0xA004, 0xA005, 0xA006, 0xA009, 0xA00A};
 // Life stages (person data 0x3A) with their own layout.
 constexpr std::int16_t kToddlerStage = 2, kChildStage = 3;
+// A pet's motive 1, Chew for dogs and Scratch for cats.
+constexpr std::size_t kPetMotive1 = 1;
 // How often the arrows look at the needs.
 constexpr auto kSampleTime = std::chrono::milliseconds(500);
 
@@ -42,14 +47,30 @@ std::uint32_t nameString(std::size_t m) {
     default: return 0;
     }
 }
+// A pet's need names are the Sims' ones moved down this many entries.
+constexpr std::uint32_t kPetNames = 0x13;
+// Motive 1's name for dogs (species 1 and 2) and for cats (species 3).
+constexpr std::uint32_t kChew = 0x25, kScratch = 0x23;
 
 } // namespace
 
-void NeedsPanel::attach(ts2::ui::Screen& screen, int content) {
+void NeedsPanel::attach(ts2::ui::Screen& screen, int content, bool pets) {
     screen_ = &screen;
     content_ = content;
+    pets_ = pets;
     fill_ = screen.data().image(kImages, kFillPicture).value_or(ts2::tga::Pixels{});
     gradient_ = screen.data().image(kImages, kBarGradient).value_or(ts2::tga::Pixels{});
+    if (pets) {
+        layouts_[0] = build(kYoungPet, {{0xA1, motive::kHunger}, {0xA2, motive::kComfort}, {0xA3, motive::kBladder},
+                                        {0xA4, motive::kEnergy}, {0xA6, motive::kSocial}});
+        layouts_[1] = build(kGrownPet, {{0xA1, motive::kHunger}, {0xA2, motive::kComfort}, {0xA3, motive::kBladder},
+                                        {0xA4, motive::kEnergy}, {0xA5, motive::kFun}, {0xA6, motive::kSocial},
+                                        {0xA7, motive::kHygiene}, {0xA8, kPetMotive1}});
+        for (const std::uint32_t id : kNotPetLayouts) {
+            screen.setVisible(screen.find(content, id), false);
+        }
+        return;
+    }
     // Each layout's slots and the motive each shows.
     layouts_[0] = build(kToddler, {{0xA1, motive::kHunger}, {0xA7, motive::kHygiene}, {0xA3, motive::kBladder},
                                    {0xA4, motive::kEnergy}, {0xA5, motive::kFun}, {0xA6, motive::kSocial}});
@@ -78,7 +99,7 @@ NeedsPanel::Layout NeedsPanel::build(std::uint32_t group, const std::vector<std:
         if (bar < 0 || s.load(kScripts, kBarScript, x, y, bar) < 0) {
             continue;
         }
-        s.setText(s.find(bar, kName), s.data().text(kLiveText, kNeedNames << 16 | nameString(m)));
+        s.setText(s.find(bar, kName), needName(m, 0));
         Bar shown{m, s.find(s.find(bar, kBar), kFill), -1, bar};
         showArrows(shown, 0);
         layout.bars.push_back(std::move(shown));
@@ -86,9 +107,30 @@ NeedsPanel::Layout NeedsPanel::build(std::uint32_t group, const std::vector<std:
     return layout;
 }
 
-void NeedsPanel::show(std::int16_t sim, std::int16_t lifeStage, const std::array<int, 16>& motives, bool open) {
+std::string NeedsPanel::needName(std::size_t m, std::int16_t species) const {
+    std::uint32_t entry = nameString(m);
+    if (pets_) {
+        if (m == kPetMotive1) {
+            entry = species == 1 || species == 2 ? kChew : species == 3 ? kScratch : 0;
+        } else if (entry != 0) {
+            entry += kPetNames;
+        }
+    }
+    return entry != 0 ? screen_->data().text(kLiveText, kNeedNames << 16 | entry) : std::string();
+}
+
+void NeedsPanel::show(std::int16_t sim, std::int16_t lifeStage, std::int16_t species, const std::array<int, 16>& motives, bool open) {
     if (screen_ == nullptr) {
         return;
+    }
+    // Motive 1's name goes by the pet's species.
+    if (pets_ && species != species_) {
+        species_ = species;
+        for (const Bar& bar : layouts_[1].bars) {
+            if (bar.motive == kPetMotive1) {
+                screen_->setText(screen_->find(bar.window, kName), needName(bar.motive, species));
+            }
+        }
     }
     // Another Sim's needs start without arrows.
     if (sim != sim_) {
@@ -100,7 +142,8 @@ void NeedsPanel::show(std::int16_t sim, std::int16_t lifeStage, const std::array
             }
         }
     }
-    const std::size_t shown = lifeStage == kToddlerStage ? 0 : lifeStage == kChildStage ? 1 : 2;
+    const std::size_t shown = pets_ ? (ts2::content::petAgeGroup(lifeStage) == 0 ? 0 : 1)
+                                    : lifeStage == kToddlerStage ? 0 : lifeStage == kChildStage ? 1 : 2;
     for (std::size_t i = 0; i < layouts_.size(); ++i) {
         screen_->setVisible(layouts_[i].group, i == shown);
     }

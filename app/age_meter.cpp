@@ -24,16 +24,21 @@ constexpr std::uint32_t kFillPicture = 0x000B1180;
 
 } // namespace
 
-void AgeMeter::attach(ts2::ui::Screen& screen, int panel) {
+void AgeMeter::attach(ts2::ui::Screen& screen, int panel) { attach(screen, panel, kStageWindows); }
+
+void AgeMeter::attach(ts2::ui::Screen& screen, int panel, std::span<const std::uint32_t> stageWindows) {
     screen_ = &screen;
     const int ages = screen.find(panel, kAges);
     tooltip_ = screen.find(ages, kTooltip);
-    for (std::size_t i = 0; i < stages_.size(); ++i) {
-        stages_[i].window = screen.find(ages, kStageWindows[i]);
-        stages_[i].fill = screen.find(screen.find(stages_[i].window, kProgressBar), kFill);
+    stages_.clear();
+    for (const std::uint32_t id : stageWindows) {
+        Stage stage;
+        stage.window = screen.find(ages, id);
+        stage.fill = screen.find(screen.find(stage.window, kProgressBar), kFill);
+        stages_.emplace_back(id, stage);
         // The glows only play when the Sim ages, at 6 pm.
-        if (stages_[i].window >= 0) {
-            for (const int part : screen.children(stages_[i].window)) {
+        if (stage.window >= 0) {
+            for (const int part : screen.children(stage.window)) {
                 if (screen.id(part) == kGlow || screen.id(part) == kBarGlow) {
                     screen.setVisible(part, false);
                 }
@@ -44,6 +49,11 @@ void AgeMeter::attach(ts2::ui::Screen& screen, int panel) {
 }
 
 void AgeMeter::show(std::int16_t lifeStage, int lived, int length, const ts2::content::AgeTip& tip) {
+    const int stage = ts2::content::ageStage(lifeStage);
+    showStage(stage >= 0 ? kStageWindows[stage] : 0, lived, length, tip);
+}
+
+void AgeMeter::showStage(std::uint32_t stageWindow, int lived, int length, const ts2::content::AgeTip& tip) {
     if (screen_ == nullptr) {
         return;
     }
@@ -52,24 +62,26 @@ void AgeMeter::show(std::int16_t lifeStage, int lived, int length, const ts2::co
         const std::string text = tip.entry != 0 ? screen_->data().text(kLiveText, kAgeTexts << 16 | tip.entry) : std::string();
         screen_->setTip(tooltip_, ts2::content::formatted(text, {std::to_string(tip.days)}));
     }
-    const int stage = ts2::content::ageStage(lifeStage);
     const std::uint32_t filled = ts2::content::barFill(lived, length, fill_.width);
-    if (stage == stage_ && filled == filled_) {
+    if (stage_ == stageWindow && filled == filled_) {
         return;
     }
-    for (int i = 0; i < static_cast<int>(stages_.size()); ++i) {
-        screen_->setVisible(stages_[static_cast<std::size_t>(i)].window, i == stage);
+    int fill = -1;
+    for (const auto& [id, stage] : stages_) {
+        screen_->setVisible(stage.window, id == stageWindow);
+        if (id == stageWindow) {
+            fill = stage.fill;
+        }
     }
-    if (stage >= 0) {
+    if (fill >= 0) {
         // The bar's fill is cut at the filled width.
-        const int fill = stages_[static_cast<std::size_t>(stage)].fill;
         screen_->setVisible(fill, filled > 0);
         if (filled > 0) {
             screen_->setImage(fill, ts2::content::placed(fill_, filled, fill_.height, 0, 0));
             screen_->resize(fill, static_cast<int>(filled), static_cast<int>(fill_.height));
         }
     }
-    stage_ = stage;
+    stage_ = stageWindow;
     filled_ = filled;
 }
 

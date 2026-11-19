@@ -226,7 +226,7 @@ bool addSetClips(std::string_view name, std::string_view prefix, std::string_vie
         if (!c && !fallback.empty()) {
             c = clip(nameWith(fallback, i * kAngleStep));
         }
-        if (c && c->category != 0 && (c->category != 100 || c->speed > 0)) {
+        if (c && c->category != 0 && (c->category != kLoopCategory || c->speed > 0)) {
             out.push_back(std::move(*c));
             found = true;
         }
@@ -258,14 +258,25 @@ std::vector<LocoClip>::const_iterator turnOf(const std::vector<LocoClip>& set, s
 
 } // namespace
 
-std::vector<LocoClip> walkSetClips(const WalkSetLines& lines, std::int16_t lifeStage, std::int16_t gender, const LocoClipLookup& clip) {
+std::vector<LocoClip> walkSetClips(const WalkSetLines& lines, std::int16_t lifeStage, std::int16_t gender, const LocoClipLookup& clip,
+                                   std::int16_t species) {
+    constexpr std::int16_t kLargeDog = 1, kSmallDog = 2, kCat = 3;
     std::vector<LocoClip> out;
-    if (lifeStage <= 1 || !clip) {
+    const bool pet = species == kLargeDog || species == kSmallDog || species == kCat;
+    if ((!pet && lifeStage <= 1) || !clip) {
         return out;
     }
     const std::string_view sex = gender == 1 ? "female-" : "male-";
     std::string_view prefix = "a-", fallback, withSex = sex;
-    if (lifeStage == 2) {
+    if (pet) {
+        // Elders' own prefixes (i-, j-, g-) have no clips, so they find the adults'.
+        const std::string_view adult = species == kLargeDog ? "d-" : species == kSmallDog ? "l-" : "f-";
+        const std::string_view young = species == kCat ? "k-" : "w-";
+        const std::string_view elder = species == kLargeDog ? "i-" : species == kSmallDog ? "j-" : "g-";
+        prefix = lifeStage > 50 ? elder : lifeStage > 18 ? adult : young;
+        fallback = lifeStage > 50 ? adult : std::string_view{};
+        withSex = {};
+    } else if (lifeStage == 2) {
         prefix = "p-";
         withSex = {};
     } else if (lifeStage <= 15) {
@@ -312,16 +323,16 @@ std::optional<LocoClip> walkSetLongClip(const std::vector<LocoClip>& set, std::u
     return second == set.end() ? std::nullopt : std::optional<LocoClip>(*second);
 }
 
-std::string settlePose(const WalkSetLines* pushed, std::int16_t lifeStage, std::int16_t gender, const LocoClipLookup& clip) {
+std::string settlePose(const WalkSetLines* pushed, std::int16_t lifeStage, std::int16_t gender, const LocoClipLookup& clip,
+                       std::int16_t species) {
     if (pushed == nullptr) {
         return walkPoseClip(lifeStage);
     }
-    const auto pose = walkSetClip(walkSetClips(*pushed, lifeStage, gender, clip), kPoseCategory);
+    const auto pose = walkSetClip(walkSetClips(*pushed, lifeStage, gender, clip, species), kPoseCategory);
     return pose ? pose->name : std::string();
 }
 
 std::optional<TurnClip> walkSetTurn(const std::vector<LocoClip>& set, float start, float end) {
-    constexpr std::uint16_t kTurnInPlaceCategory = 128;
     if (!std::isfinite(start) || !std::isfinite(end)) {
         return std::nullopt;
     }

@@ -107,8 +107,9 @@ struct Animation {
     std::string name;
     std::string skeleton;
     float duration = 0;  // milliseconds, as the clip states it
-    // What the walk planner takes the clip for, as its header states: 16 a standing pose, 96 a walk
-    // start, 112 a stop, 128 a turn in place, 144 a step, 160 a step in place, 176 a walk loop.
+    // What the walk planner takes the clip for, as the game loads it from the header: 1 a standing
+    // pose, 6 a walk start, 7 a stop, 8 a turn in place, 9 a step, 10 a step in place, 100 a walk
+    // loop (101 and on for other walk styles' loops).
     std::uint16_t category = 0;
     // The turn the clip plays at, off its Sim's frame (radians, the other way when mirrored), as its
     // header states: an entry into a seat from its side is authored a quarter turn round.

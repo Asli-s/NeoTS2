@@ -60,6 +60,7 @@ void LivePanel::attach(ts2::ui::Screen& screen, int panel) {
         aspirationButtons_[bit] = kAspirationButtons[bit] != 0 ? screen.find(panel, kAspirationButtons[bit]) : -1;
     }
     aspirationBars_.attach(screen, panel);
+    aspirationPopup_.attach(screen, panel);
     age_.attach(screen, panel);
     relationshipsContent_ = screen.load(kScripts, kRelationshipsScript, 0, 0, screen.find(panel, kSubHolder));
     jobContent_ = screen.load(kScripts, kJobScript, 0, 0, screen.find(panel, kSubHolder));
@@ -86,7 +87,7 @@ bool LivePanel::clicked(int window) {
     }
     const std::uint32_t id = screen_->id(window);
     auto toggle = [&](Sub sub) { sub_ = sub_ == sub ? Sub::None : sub; };
-    if (screen_->parent(window) == screen_->find(panel_, kAspirations)) {
+    if (screen_->parent(window) == screen_->find(panel_, kAspirations) || id == AspirationPopup::kButton) {
         wantsOpen_ = !wantsOpen_;
     } else if (id == kNeedsButton) {
         toggle(Sub::Needs);

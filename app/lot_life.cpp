@@ -123,12 +123,13 @@ float standHeight(const ts2::scene::Actor& actor, const ts2::sim::World& world, 
 // game does, so a stair's slots stand a step higher each. `slotAt` places an object's slot (see
 // LotLife::slotPlace) and `partSlot` one of a multi-tile part drawn by its lead (a double bed's far side).
 // A Sim carried in another Sim's slot hangs at that slot's bone once posed (see Actor::carrier), and
-// until then stands at its last pose (`pose`), else at its carrier's place.
+// until then stands at its last pose (`pose`) while in the same slot, else at its carrier's place.
 void placeSim(ts2::scene::Actor& actor, const ts2::sim::World& world, const ts2::sim::SimObject& sim, const SimFrame& frame,
               const ts2::scene::Scene& scene,
               const std::function<std::optional<ts2::scene::Transform>(const ts2::scene::PlacedObject&, std::size_t slot)>& slotAt,
               const std::function<std::optional<ts2::scene::Transform>(std::int16_t part, std::size_t slot)>& partSlot,
               const ts2::scene::ScenePose* pose) {
+    const std::pair<std::uint32_t, std::size_t> lastHold{actor.carrier, actor.carrierSlot};
     actor.carrier = 0;
     if (sim.x == ts2::sim::kOffLot || sim.y == ts2::sim::kOffLot) {
         // Out of the world (a Sim gone onto a school bus): not drawn, as an unplaced object isn't.
@@ -139,6 +140,14 @@ void placeSim(ts2::scene::Actor& actor, const ts2::sim::World& world, const ts2:
         return;
     }
     if (const std::int16_t holder = sim.data[kContainerField]; holder > 0 && sim.data[kSlotField] >= 0) {
+        // Where it was last posed counts only while it hangs in the slot it hung in then.
+        const auto lastPosed = [&]() -> const ts2::scene::Transform* {
+            if (pose == nullptr || lastHold != std::pair{static_cast<std::uint32_t>(holder), static_cast<std::size_t>(sim.data[kSlotField])}) {
+                return nullptr;
+            }
+            const auto last = pose->carried.find(actor.object);
+            return last != pose->carried.end() ? &last->second : nullptr;
+        };
         const auto carrier = std::find_if(scene.actors.begin(), scene.actors.end(),
                                           [&](const ts2::scene::Actor& a) { return a.object == static_cast<std::uint32_t>(holder); });
         if (carrier != scene.actors.end() && &*carrier != &actor) {
@@ -151,8 +160,8 @@ void placeSim(ts2::scene::Actor& actor, const ts2::sim::World& world, const ts2:
                 const auto index = static_cast<std::size_t>(carrier - scene.actors.begin());
                 const auto nodes = std::find_if(pose->nodes.begin(), pose->nodes.end(), [&](const auto& n) { return n.first == index; });
                 const int node = actor.carrierSlot < carrier->slotNodes.size() ? carrier->slotNodes[actor.carrierSlot] : -1;
-                if (const auto last = pose->carried.find(actor.object); last != pose->carried.end()) {
-                    actor.place = last->second;
+                if (const auto* last = lastPosed()) {
+                    actor.place = *last;
                 } else if (nodes != pose->nodes.end() && node >= 0 && static_cast<std::size_t>(node) < nodes->second.size()) {
                     actor.place = carrier->place * nodes->second[static_cast<std::size_t>(node)];
                 }
@@ -169,11 +178,9 @@ void placeSim(ts2::scene::Actor& actor, const ts2::sim::World& world, const ts2:
         if (drawn != scene.objectActors.end() && slot < drawn->slotNodes.size() && drawn->slotNodes[slot] >= 0) {
             actor.carrier = drawn->object;
             actor.carrierSlot = slot;
-            if (pose != nullptr) {
-                if (const auto last = pose->carried.find(actor.object); last != pose->carried.end()) {
-                    actor.place = last->second;
-                    return;
-                }
+            if (const auto* last = lastPosed()) {
+                actor.place = *last;
+                return;
             }
         }
         if (container != scene.placedObjects.end() && container->instance < scene.instances.size()) {
@@ -736,7 +743,10 @@ void LotLife::poseSim(ts2::scene::Actor& actor, const ts2::sim::SimObject& objec
     // carpool passenger's seated clips drive off with the car).
     std::optional<ts2::scene::Transform> hung;
     const std::pair<std::int16_t, std::int16_t> holderSlot{object.data[kContainerField], object.data[kSlotField]};
-    if (pose_ != nullptr && holderSlot.first > 0) {
+    // Where it hung when last posed counts only while it is still in that slot. On the frame it
+    // moves into another holder's slot, the new slot is where its clips are kept from.
+    if (pose_ != nullptr && holderSlot.first > 0 && actor.carrier == static_cast<std::uint32_t>(holderSlot.first) &&
+        actor.carrierSlot == static_cast<std::size_t>(holderSlot.second)) {
         if (const auto found = pose_->carried.find(actor.object); found != pose_->carried.end()) {
             hung = found->second;
         }
@@ -805,7 +815,8 @@ void LotLife::poseSim(ts2::scene::Actor& actor, const ts2::sim::SimObject& objec
                   startedAt, tailPlace);
     }
     if (own.settledMs && nowMs < *own.settledMs + ts2::sim::kSettleWalkPoseMs) {
-        addSettleClips(actor, object, *own.settledMs, own.settledAt, animations_, sim_->world().locoClips());
+        addSettleClips(actor, object, *own.settledMs, own.settledAt, animations_, sim_->world().locoClips(),
+                       sim_->world().walkLinesOf(object));
     }
     placeSim(
         actor, sim_->world(), object, frame, scene, [&](const ts2::scene::PlacedObject& p, std::size_t slot) { return slotPlace(p, slot, scene); },
