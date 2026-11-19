@@ -54,6 +54,9 @@ struct SavedObject {
     std::vector<std::string> classes;   // outermost first
     std::uint32_t outerTag = 0;         // the outermost class's tag
     std::vector<SavedJoint> joints;     // left out of records older than version 0xF, whose layout isn't known
+    // Where the object stood as the lot was saved, in the lot's frame (x along saved location[1]) or
+    // relative to the object holding it. Empty before version 0xF or when not a number.
+    std::optional<std::array<float, 3>> position;
     std::vector<SavedAnimation> animations;
 };
 

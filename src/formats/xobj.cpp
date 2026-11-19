@@ -313,8 +313,8 @@ PersonState readPersonState(BinaryReader& r, std::uint32_t version) {
         s.list = readInteractions(r, version);
     }
     if (version >= 0xCD) {
-        s.value3 = r.u32();
-        s.value4 = r.u32();
+        s.collectiblesLow = r.u32();
+        s.collectiblesHigh = r.u32();
     }
     return s;
 }
@@ -740,8 +740,8 @@ void writePersonState(Writer& w, const PersonState& s) {
     }
     w.i32(s.value2);
     writeInteractions(w, s.list);
-    w.u32(s.value3);
-    w.u32(s.value4);
+    w.u32(s.collectiblesLow);
+    w.u32(s.collectiblesHigh);
 }
 
 void writeBody(Writer& w, const SavedObject& o, RecordKind kind) {

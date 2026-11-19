@@ -293,6 +293,12 @@ struct SimObject {
     // Only Sims use most of it: it takes no memory on an object until something writes it (see LazyArray).
     LazyArray<std::int16_t, kPersonDataCount> personData;
     std::array<float, kMotiveCount> motives{};
+    // The objects it holds relationship variables towards, in the order the game's table keeps
+    // them (see relationship_table.hpp). Saved as its relationship list.
+    std::vector<std::uint32_t> relationshipTable;
+    // The motives as the last decay step left them, before the mood was worked out. Saved as the
+    // Sim's second set of motives.
+    std::array<float, kMotiveCount> motivesAtDecay{};
     std::vector<MotiveChange> motiveChanges;
     // The tick a Sim's motives last decayed (they decay every 60 ticks). Not saved.
     std::int64_t motivesUpdatedAt = 0;
@@ -329,6 +335,8 @@ struct SimObject {
     CurrentInteraction currentInteraction = CurrentInteraction::None;
     // The id of that blank interaction, which a save writes. 0 while the Sim has none yet.
     std::uint16_t blankId = 0;
+    // The vacation collectibles the Sim has unlocked, a bit each (bits 0-31, then 32-63), saved with it.
+    std::array<std::uint32_t, 2> vacationCollectibles{};
     // The queue icon of autonomy's last pick, which Gosub Found Action gives the interaction it
     // starts. Not saved yet.
     InteractionIcon foundIcon;
@@ -563,10 +571,15 @@ struct SavedNeighborhood {
     std::set<std::int32_t> lotIds;
     std::map<std::int32_t, std::uint8_t> lotTypes;    // each placed lot's type (its description)
     std::map<std::int32_t, std::int32_t> lotOwners;   // and its owner, a neighbor id
+    std::map<std::int32_t, std::int32_t> lotBuildings;  // each apartment's building
+    // Each building's apartments lived in: lot, family, control room and roommate (see content::Neighborhood).
+    std::map<std::int32_t, std::vector<std::array<std::uint32_t, 4>>> apartments;
+    std::map<std::int32_t, std::map<std::int16_t, std::int16_t>> lotRoomLights;  // each lot's saved room light percents
     std::map<std::int32_t, std::int32_t> lotNeighborhoods;  // and the id of the neighborhood placing it
     std::map<std::uint32_t, std::int32_t> familyLots;  // each family's home lot (FAMI instance -> lot, 0 for none)
     std::map<std::uint32_t, std::int32_t> familyCurrentLots;   // and the two other lots its FAMI saves
     std::map<std::uint32_t, std::int32_t> familyVacationLots;
+    std::map<std::uint32_t, std::int32_t> familySavedFunds;  // and its funds when its lot was last saved (FAMI)
     std::map<std::uint32_t, std::uint32_t> familyFlags;  // each family's saved flags (FAMI)
     // Each family's FAMI value4, which orders the game's families (highest first). Its meaning is not known yet.
     std::map<std::uint32_t, std::int32_t> familyRanks;
@@ -577,6 +590,7 @@ struct SavedNeighborhood {
     std::map<std::int16_t, std::vector<swaf::Want>> fears;  // and fears
     std::map<std::int16_t, swaf::Slots> wantSlots;          // and their slots and hold limit
     std::map<std::int16_t, WantHistory> wantHistories;      // and their want histories
+    std::map<std::int16_t, swaf::Want> lifetimeWants;       // and their lifetime wants
     std::shared_ptr<const ngbh::Neighborhood> record;      // inventories, null when not saved
     std::map<std::int16_t, DataTables> dataTables;         // each neighbor's script data tables
     std::optional<std::int32_t> id;                         // this neighborhood's id
@@ -657,11 +671,13 @@ public:
         return ids;
     }
 
-    // Relationship variables `from` holds towards `to`, empty until first grown.
-    std::vector<std::int16_t>& relationship(std::int16_t from, std::int16_t to) {
-        const auto [it, added] = relationships_.try_emplace({from, to});
-        relationshipAdded_ = relationshipAdded_ || added;
-        return it->second;
+    // Relationship variables `from` holds towards `to`, empty until first grown. A new one joins
+    // `from`'s relationship table.
+    std::vector<std::int16_t>& relationship(std::int16_t from, std::int16_t to);
+    // The relationship variables `from` holds towards `to`, null when it holds none.
+    const std::vector<std::int16_t>* relationshipIfAny(std::int16_t from, std::int16_t to) const {
+        const auto it = relationships_.find({from, to});
+        return it != relationships_.end() ? &it->second : nullptr;
     }
 
     // Rooms of the lot this world was built from (empty for worlds made in code).
@@ -796,6 +812,71 @@ public:
         }
         const auto n = std::ranges::count_if(hood_->lotTypes, [](const auto& lot) { return lot.second == kCommunityLot; });
         return static_cast<std::int16_t>(std::min<std::ptrdiff_t>(n, INT16_MAX));
+    }
+    // The apartments lived in that a lot lists: an apartment building's own (lot type 8), an
+    // apartment's (type 9) its building's, none for other lots. Each is its lot, family, control room
+    // and roommate. The game follows an apartment's building without a limit, here a chain of
+    // apartments stops after 16 steps so a broken neighborhood can't loop.
+    std::vector<std::array<std::uint32_t, 4>> lotApartments(std::int32_t id) const {
+        constexpr std::uint8_t kBuilding = 8, kApartment = 9;
+        constexpr int kMostSteps = 16;
+        for (int step = 0; hood_ && step < kMostSteps; ++step) {
+            const auto type = placedLotType(id);
+            if (type == kBuilding) {
+                const auto it = hood_->apartments.find(id);
+                return it != hood_->apartments.end() ? it->second : std::vector<std::array<std::uint32_t, 4>>{};
+            }
+            const auto building = hood_->lotBuildings.find(id);
+            if (type != kApartment || building == hood_->lotBuildings.end()) {
+                return {};
+            }
+            id = building->second;
+        }
+        return {};
+    }
+    // How brightly a room's lights are set on this lot, in percent: what a script set (see
+    // setRoomLightPercent), else what the lot saved, else 100. Room 0, the outdoors, is always 100.
+    std::int16_t roomLightPercent(std::int16_t room) const {
+        constexpr std::int16_t kFull = 100;
+        if (room == 0) {
+            return kFull;
+        }
+        const auto& percents = roomLightPercents();
+        const auto it = percents.find(room);
+        return it != percents.end() ? it->second : kFull;
+    }
+    // Every room with a light percent, by room: the lot's saved ones with what scripts set.
+    const std::map<std::int16_t, std::int16_t>& roomLightPercents() const {
+        if (roomLights_) {
+            return *roomLights_;
+        }
+        static const std::map<std::int16_t, std::int16_t> kNone;
+        if (hood_ && lotNumber_) {
+            if (const auto it = hood_->lotRoomLights.find(*lotNumber_); it != hood_->lotRoomLights.end()) {
+                return it->second;
+            }
+        }
+        return kNone;
+    }
+    // Sets a room's light percent, as LightingManager:setPlacementRoomLightPercent does. It is saved
+    // with the lot and its lamps relight.
+    void setRoomLightPercent(std::int16_t room, std::int16_t percent) {
+        if (!roomLights_) {
+            roomLights_ = roomLightPercents();
+        }
+        (*roomLights_)[room] = percent;
+        ++roomLightsVersion_;
+    }
+    // Goes up whenever a script sets a room's light percent.
+    std::uint64_t roomLightsVersion() const { return roomLightsVersion_; }
+    // The building a placed lot names in its description, as an apartment's own lot does, else 0.
+    std::int32_t placedLotBuilding(std::int32_t id) const {
+        if (hood_) {
+            if (const auto it = hood_->lotBuildings.find(id); it != hood_->lotBuildings.end()) {
+                return it->second;
+            }
+        }
+        return 0;
     }
     std::int32_t placedLotOwner(std::int32_t id) const {
         if (!hood_) {
@@ -1011,6 +1092,21 @@ public:
         };
         return FamilyLotIds{lotIn(hood_->familyLots), lotIn(hood_->familyCurrentLots), lotIn(hood_->familyVacationLots)};
     }
+    // A family's funds when its lot was last saved, as CachedFamily:getLastSavedFunds reads them: what
+    // a save this run gave it, else its FAMI's. Spending doesn't change them. A family added during this
+    // run has 0. Nothing for a family the neighborhood doesn't have.
+    std::optional<std::int32_t> familyLastSavedFunds(std::uint32_t family) const {
+        if (const auto it = savedFunds_.find(family); it != savedFunds_.end()) {
+            return it->second;
+        }
+        if (!hasFamily(family)) {
+            return std::nullopt;
+        }
+        const auto it = hood_->familySavedFunds.find(family);
+        return it != hood_->familySavedFunds.end() ? it->second : 0;
+    }
+    // A lot save gives the family living there these funds as its last saved funds.
+    void setFamilyLastSavedFunds(std::uint32_t family, std::int32_t funds) { savedFunds_[family] = funds; }
     // The GUIDs of a family's Sims in its FAMI's order, empty for an unknown family.
     std::span<const std::uint32_t> familyMemberGuids(std::uint32_t family) const {
         if (!hood_) {
@@ -1120,6 +1216,16 @@ public:
         return it->second;
     }
 
+    // A neighbor's lifetime want as the neighborhood saved it, null for none.
+    const swaf::Want* lifetimeWant(std::int16_t id) const {
+        if (hood_) {
+            if (const auto s = hood_->lifetimeWants.find(id); s != hood_->lifetimeWants.end()) {
+                return &s->second;
+            }
+        }
+        return nullptr;
+    }
+
     // The want history the neighborhood saved for a neighbor, null when none was.
     const WantHistory* savedWantHistory(std::int16_t id) const {
         if (hood_) {
@@ -1132,6 +1238,22 @@ public:
 
     // The wants manager's clock, queue and the histories in use (see sim/want_refill.hpp).
     WantsState& wantsState() { return wants_; }
+    const WantsState& wantsState() const { return wants_; }
+    // A neighbor's wants (or fears) as they are now, without making a working copy: the changed
+    // list, else the saved one.
+    std::vector<swaf::Want> wantsNow(std::int16_t id, bool fears) const {
+        const auto& changed = fears ? neighborFears_ : neighborWants_;
+        if (const auto it = changed.find(id); it != changed.end()) {
+            return it->second;
+        }
+        if (hood_) {
+            const auto& saved = fears ? hood_->fears : hood_->wants;
+            if (const auto it = saved.find(id); it != saved.end()) {
+                return it->second;
+            }
+        }
+        return {};
+    }
     void setWantTrees(std::shared_ptr<const std::vector<want_trees::Tree>> trees) { wantTrees_ = std::move(trees); }
     const std::vector<want_trees::Tree>* wantTrees() const { return wantTrees_.get(); }
 
@@ -1442,6 +1564,13 @@ public:
     const AnimationSound& animationSound() const { return animationSound_; }
     void setLocoClips(LocoClips clips) { locoClips_ = std::move(clips); }
     const LocoClips& locoClips() const { return locoClips_; }
+    // The walk lines a pet walks by when nothing pushed it a walk set: the game's own default pet set
+    // (lines 6 to 8 of the global locomotion strings), kept once read. Empty until then.
+    void setPetWalkLines(WalkSetLines lines) { petWalkLines_ = std::move(lines); }
+    const std::optional<WalkSetLines>& petWalkLines() const { return petWalkLines_; }
+    // The walk lines a Sim walks by: its newest pushed walk set's, else a pet's default ones. Null
+    // for a human with none pushed, who walks by the fixed walk clips.
+    const WalkSetLines* walkLinesOf(const SimObject& sim) const;
     // A Sim's size against its skeleton's own (its age data's stretch: teens 0.94), which shortens
     // how far its steps carry it. Without it, 1.
     using SimScale = std::function<float(std::int16_t object)>;
@@ -1457,6 +1586,13 @@ public:
     using HasCharacterFile = std::function<bool(std::int16_t neighbor)>;
     void setHasCharacterFile(HasCharacterFile f) { hasCharacterFile_ = std::move(f); }
     const HasCharacterFile& hasCharacterFile() const { return hasCharacterFile_; }
+    // The bytes of the neighborhood's object archive (0x4F6FD33D) with an id, or none. Without it,
+    // there are none.
+    using ArchiveReader = std::function<std::optional<std::vector<std::uint8_t>>(std::uint32_t archive)>;
+    void setArchiveReader(ArchiveReader f) { archiveReader_ = std::move(f); }
+    std::optional<std::vector<std::uint8_t>> archive(std::uint32_t id) const {
+        return archiveReader_ ? archiveReader_(id) : std::nullopt;
+    }
     // Whether an object's looks have a whole outfit in an outfit category (a flag: everyday 1,
     // see scene::OutfitProperties::hasOutfit), none when its looks aren't found. Without it,
     // scripts that ask stop as unsupported.
@@ -1662,6 +1798,8 @@ private:
     weather::Weather weather_;
     MessageSubscriptions messageSubscriptions_;
     std::optional<std::int32_t> lotNumber_;
+    std::optional<std::map<std::int16_t, std::int16_t>> roomLights_;  // set once a script changes one
+    std::uint64_t roomLightsVersion_ = 0;
     WallTiles walls_;
     LotShape lotShape_;
     std::optional<TileBounds> tileBounds_;
@@ -1743,6 +1881,7 @@ private:
     AnimationTurns animationTurns_;
     OutfitProperty outfitProperty_;
     HasCharacterFile hasCharacterFile_;
+    ArchiveReader archiveReader_;
     HasOutfit hasOutfit_;
     GeneticsCatalogSource geneticsCatalog_;
     SimRandom geneticsRandom_{0};
@@ -1752,6 +1891,8 @@ private:
     std::map<std::int16_t, std::vector<std::pair<std::string, std::string>>> languageNames_;
     ModelBoneLookup modelBones_;
     LocoClips locoClips_;
+    std::optional<WalkSetLines> petWalkLines_;
+    std::map<std::uint32_t, std::int32_t> savedFunds_;  // last saved funds a save this run set
     SimScale simScale_;
     AnimationEventTime animationEventTime_;
     AnimationEvents animationEvents_;

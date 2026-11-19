@@ -193,8 +193,9 @@ struct PersonState {
     std::array<std::uint16_t, 8> values{};  // 0xA9
     std::int32_t value2 = 0;                // 0xB4
     std::vector<SavedInteraction> list;     // 0xB5
-    std::uint32_t value3 = 0;               // 0xCD
-    std::uint32_t value4 = 0;               // 0xCD
+    // The vacation collectibles the Sim has unlocked, a bit each: 0-31 low, 32-63 high.
+    std::uint32_t collectiblesLow = 0;      // 0xCD
+    std::uint32_t collectiblesHigh = 0;     // 0xCD
 };
 
 struct PersonPart {

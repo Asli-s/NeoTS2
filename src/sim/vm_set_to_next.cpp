@@ -177,6 +177,9 @@ bool Execution::setToNext(const bhav::Instruction& in, Frame& f) {
     if (searchType == kSearchHumanNeighbor || (searchType >= kSearchAnyNeighbor && searchType <= kSearchSpecies3Neighbor)) {
         return nextNeighbor(searchType, passesFilters, targetOwner, targetData, f);
     }
+    if (searchType == kSearchUnlistedNeighbor) {
+        return nextUnlistedNeighbor(passesFilters, targetOwner, targetData, f);
+    }
     if (searchType == kSearchFamilyNeighbor) {
         const std::int16_t family = thread_.temps[0];
         return nextNeighborWhere([family](const std::vector<std::int16_t>& pd) {
@@ -517,6 +520,43 @@ bool Execution::nextWithRelationshipAbove(std::uint8_t targetOwner, std::uint16_
         if (*it > 0 && world().neighborRelationshipSize(of, *it) > 0 &&
             world().neighborRelationshipValue(of, *it, 0) > thread_.temps[1]) {
             write(targetOwner, targetData, f, *it);
+            return true;
+        }
+    }
+    write(targetOwner, targetData, f, 0);
+    return false;
+}
+
+// Search 0x27: the next neighbor id after the target's, the neighbor in temp 0 left out, toward
+// whom temp 0's relationship variable 1 doesn't have bit 15. That is the bit the Relationships
+// panel needs to list a Sim, and a neighbor with no variables toward them counts too. A neighbor
+// whose Sim is on the lot must also pass the search filters. Running out is false with the target 0.
+template <typename Filters>
+bool Execution::nextUnlistedNeighbor(const Filters& passesFilters, std::uint8_t targetOwner, std::uint16_t targetData,
+                                     Frame& f) {
+    const auto* ids = world().neighbors();
+    if (ids == nullptr) {
+        throw Stop{Outcome::Unsupported, "Set to Next needs the neighborhood", hex(kSearchUnlistedNeighbor, 2)};
+    }
+    const std::int16_t of = thread_.temps[0];
+    if (!ids->contains(of)) {
+        throw Stop{Outcome::Error, "neighbor not found", std::to_string(of)};
+    }
+    constexpr std::uint16_t kListedBit = 0x8000;
+    for (auto it = ids->upper_bound(read(targetOwner, targetData, f)); it != ids->end(); ++it) {
+        const std::int16_t id = *it;
+        if (id <= 0 || id == of ||
+            (static_cast<std::uint16_t>(world().neighborRelationshipValue(of, id, kRelationshipFlagsVariable)) &
+             kListedBit) != 0) {
+            continue;
+        }
+        const SavedNeighbor* neighbor = world().neighbor(id);
+        const SimObject* sim = neighbor == nullptr ? nullptr
+                               : world().nextAfter(std::numeric_limits<std::int16_t>::min(), [&](const SimObject& s) {
+                                     return s.isPerson() && s.definition.guid() == neighbor->guid;
+                                 });
+        if (sim == nullptr || passesFilters(*sim)) {
+            write(targetOwner, targetData, f, id);
             return true;
         }
     }

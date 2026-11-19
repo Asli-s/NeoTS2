@@ -39,8 +39,8 @@ struct PairTable {
 std::optional<PairTable> readPairTable(std::span<const std::uint8_t> data, bool texts);
 std::vector<std::uint8_t> writePairTable(const PairTable& table);
 
-// Tables of fixed-size entries (version 1): 0x0C900FDB with nine numbers per entry, 0x916DA14D with
-// four.
+// Tables of fixed-size entries (version 1): 0x0C900FDB with nine numbers per entry, 0x916DA14D (the
+// curved pool corners) with four.
 constexpr std::uint32_t kNineWordTableType = 0x0C900FDB;
 constexpr std::uint32_t kFourWordTableType = 0x916DA14D;
 struct WordTable {

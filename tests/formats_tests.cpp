@@ -186,6 +186,47 @@ void simulatorStateReadsTheRandomState() {
     CHECK(!ts2::simi::parse(d).randomState);
 }
 
+// A simulator state record of `version` with `globals` globals (global i holding i), the ten bytes
+// and random states, the value before the parts, then `parts`.
+std::vector<std::uint8_t> simiWithParts(std::uint32_t version, int globals, std::initializer_list<std::int32_t> parts) {
+    std::vector<std::uint8_t> d(64, 0);
+    auto put = [&d](std::uint32_t v, int bytes) {
+        for (int i = 0; i < bytes; ++i) d.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
+    };
+    put(0x53494D49, 4);
+    put(version, 4);
+    put(0, 4);
+    for (int g = 0; g < globals; ++g) put(static_cast<std::uint32_t>(g), 2);
+    put(1, 4); put(2, 2); put(3, 4);
+    put(0xBC598883, 4); put(0x4EE46106, 4);
+    put(0, 4);
+    for (const std::int32_t p : parts) put(static_cast<std::uint32_t>(p), 4);
+    return d;
+}
+
+// A lot's value from its simulator state, as the game adds it: the Smiths' lot (version 0xD8) is worth
+// 6,800 + 33,628 + 18,588 + 30,108 x 0.8 = §83,102, their card showing that with their §5,096. Older
+// versions save fewer globals and before 0xAD no third part. Globals a version doesn't save read as 0.
+void lotValueAddsTheGamesParts() {
+    const auto smiths = ts2::simi::readLotValue(simiWithParts(0xD8, 60, {6800, 33628, 18588, 30108}));
+    CHECK(smiths && smiths->first == 6800 && smiths->second == 33628 && smiths->third == 18588 && smiths->fourth == 30108);
+    CHECK(smiths && smiths->global15 == 0x15);
+    CHECK(smiths && ts2::simi::lotValue(*smiths, false) == 83102 && ts2::simi::lotValue(*smiths, true) == 83102 - 33628);
+    // Strangetown's lot 23, version 0xAD: shown for sale at §16,188.
+    const auto shipped = ts2::simi::readLotValue(simiWithParts(0xAD, 54, {2900, 3060, 2140, 10111}));
+    CHECK(shipped && ts2::simi::lotValue(*shipped, false) == 16188);
+    const auto older = ts2::simi::readLotValue(simiWithParts(0xAC, 54, {9400, 72066, 84423}));
+    CHECK(older && older->third == 0 && older->fourth == 84423 && ts2::simi::lotValue(*older, false) == 149004);
+    CHECK(ts2::simi::readLotValue(simiWithParts(0xB1, 55, {6800, 194909, 11800, 68899})).value_or(ts2::simi::LotValue{}).fourth == 68899);
+    CHECK(!ts2::simi::readLotValue(simiWithParts(0x24, 21, {1, 2, 3})));
+    auto cut = simiWithParts(0xD8, 60, {6800, 33628, 18588, 30108});
+    cut.pop_back();
+    CHECK(!ts2::simi::readLotValue(cut));
+    CHECK(ts2::simi::savedGlobalCount(0xB1) == 55 && ts2::simi::savedGlobalCount(0xD2) == 58 && ts2::simi::savedGlobalCount(0xD4) == 60);
+    const auto state = ts2::simi::parse(simiWithParts(0xB1, 55, {6800, 194909, 11800, 68899}));
+    CHECK(state.globals.size() == 60 && state.globals[54] == 54 && state.globals[55] == 0 && state.globals[59] == 0);
+}
+
 // A lot's neighbor remap tables: only table 6 is kept, its last value for a repeated key wins.
 void neighborRemapKeepsTableSix() {
     std::vector<std::uint8_t> d;
@@ -216,8 +257,8 @@ void neighborRemapKeepsTableSix() {
     CHECK(refused);
 }
 
-// A saved object's posed joints and playing animations: the cObject joints, then the cAnimatable
-// entries after the cObject data. An empty entry is skipped, cut-off data is refused.
+// A saved object's place, posed joints and playing animations: the cObject place and joints, then the
+// cAnimatable entries after the cObject data. An empty entry is skipped, cut-off data is refused.
 void savedObjectReadsPlayingAnimations() {
     std::vector<std::uint8_t> d(64, 0);
     auto u32 = [&d](std::uint32_t v) {
@@ -233,7 +274,7 @@ void savedObjectReadsPlayingAnimations() {
     };
     u32(0x7D4F2BB8), u32(16), str("cAnimatable");
     u32(0xFA1C39F7), u32(17), str("cObject");
-    str(""), u32(0), floats(7);                               // model, mesh groups, transform
+    str(""), u32(0), f32(12.5f), f32(8.5f), f32(0.35f), floats(4);  // model, mesh groups, place
     u32(1), str("slot_chairdining_trans");                    // a joint, slid 0.373 along y
     f32(0), f32(0.373f), f32(0), f32(0), f32(0), f32(0), f32(1);
     u32(0);                                                   // blends
@@ -257,6 +298,7 @@ void savedObjectReadsPlayingAnimations() {
     const auto saved = ts2::cobject::parse(d);
     CHECK(saved.classes == std::vector<std::string>({"cAnimatable", "cObject"}));
     CHECK(saved.outerTag == 0x7D4F2BB8);
+    CHECK(saved.position && (*saved.position == std::array<float, 3>{12.5f, 8.5f, 0.35f}));
     CHECK(saved.joints.size() == 1 && saved.joints[0].name == "slot_chairdining_trans" && saved.joints[0].translation[1] == 0.373f &&
           saved.joints[0].rotation[3] == 1.0f);
     CHECK(saved.animations.size() == 1);
@@ -1808,6 +1850,29 @@ void lotDescriptionParse() {
     CHECK(lit.roomLightPercents.size() == 3 && lit.roomLightPercent(2) == 40 && lit.roomLightPercent(9) == 100);
     CHECK(lit.roomLightPercent(5) == 100 && lit.roomLightPercent(0) == 100);
     CHECK(ts2::nhood::parseLotDescription(make(18, 11)).roomLightPercents.empty());
+    // An apartment lot: its apartments and rents (from version 9) and, from the neighborhood's version
+    // 0x12, its tenants, each apartment's own lot, family, control room and roommate (Sentinel
+    // Apartments in Belladonna Cove). An apartment's own lot names its building first.
+    auto apartments = make(18, 11);
+    const std::size_t afterOwn = 4 + 8 + 3 + 4 + 7 + 4 + 12 + 4 + 4;  // up to the version 9 values
+    const std::uint8_t sentinel[9] = {4, 0xEA, 0x08, 0, 0, 0xB4, 0x07, 0, 0};  // 4 apartments, 2282 and 1972
+    std::copy(std::begin(sentinel), std::end(sentinel), apartments.begin() + static_cast<std::ptrdiff_t>(afterOwn));
+    const std::size_t buildingAt = apartments.size();
+    apartments.insert(apartments.end(), 13, 0);
+    for (const std::uint32_t v : {2u, 149u, 10u, 18u, 0u, 150u, 9u, 3u, 0u, 0u}) {
+        for (int i = 0; i < 4; ++i) {
+            apartments.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
+        }
+    }
+    const auto sentinelLot = ts2::nhood::parseLotDescription(apartments);
+    CHECK(sentinelLot.apartments == 4 && sentinelLot.highestRent == 2282 && sentinelLot.lowestRent == 1972);
+    CHECK(sentinelLot.tenants.size() == 2 && sentinelLot.tenants[0].lot == 149 && sentinelLot.tenants[0].family == 10 &&
+          sentinelLot.tenants[1].family == 9);
+    CHECK(sentinelLot.tenants[0].controlRoom == 18 && sentinelLot.tenants[1].controlRoom == 3 && sentinelLot.tenants[1].roommate == 0);
+    CHECK(sentinelLot.building == 0);
+    auto unit = apartments;
+    unit[buildingAt] = 76;
+    CHECK(ts2::nhood::parseLotDescription(unit).building == 76);
 }
 
 // The beach bands run from the beach side's edge, ends and the lot's far edges included.
@@ -3138,7 +3203,7 @@ void savedObjectsWriteBack() {
             k.person->state.entries = {{2, 0.5f, -1.0f}};
             k.person->state.runningSub = running;
             k.person->state.text = "text";
-            k.person->state.value4 = 9;
+            k.person->state.collectiblesHigh = 9;
         }
         const std::vector<std::uint8_t> bytes = write(k, kind);
         const SavedObject again = parse(bytes, kWrittenVersion, kind);
@@ -3147,7 +3212,7 @@ void savedObjectsWriteBack() {
             const PersonState& s = again.person->state;
             CHECK(again.rest.empty() && s.queue.size() == 2 && s.queue[1].name == "Eat" && s.running.number == 41);
             CHECK(s.runs.size() == 1 && s.runs[0].object == 12 && s.runs[0].depth == 3 && s.runs[0].flag);
-            CHECK(s.runningSub && s.runningSub->id == 7 && s.text == "text" && s.value4 == 9 && s.entries[0].value2 == -1.0f);
+            CHECK(s.runningSub && s.runningSub->id == 7 && s.text == "text" && s.collectiblesHigh == 9 && s.entries[0].value2 == -1.0f);
         }
         CHECK(again.tail->stack.size() == 2 && again.tail->stack[1].params.size() == 4 && again.tail->stackValue == 1);
         CHECK(again.tail->strings[1].size() == 130 && again.data[0x19] == 600 && again.header.location[1] == 30.0f);
@@ -3234,6 +3299,7 @@ std::vector<Test> formatTests() {
         {"tuning lists read named values", tuningListsReadNamedValues},
         {"saved object reads playing animations", savedObjectReadsPlayingAnimations},
         {"simulator state reads the random state", simulatorStateReadsTheRandomState},
+        {"lot value adds the game's parts", lotValueAddsTheGamesParts},
         {"wall graph point index finds the first point", wallGraphPointIndexFindsTheFirstPoint},
     };
 }

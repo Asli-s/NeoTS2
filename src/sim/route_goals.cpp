@@ -254,12 +254,11 @@ std::vector<std::string> slotJointNames(std::string_view entry) {
 }
 
 std::uint32_t slotAnchorName(CodeSource& code, const ObjectType& type, std::int16_t slot) {
-    constexpr std::uint16_t kBoneNamesTable = 0x90;
     if (slot < 0 || static_cast<std::size_t>(slot) >= type.containerSlotEntries.size()) {
         return 0;
     }
     const slot::Entry& entry = type.containerSlotEntries[static_cast<std::size_t>(slot)];
-    const auto names = entry.bone >= 0 ? code.string(type.group, kBoneNamesTable, static_cast<std::size_t>(entry.bone)) : std::nullopt;
+    const auto names = slotBoneNames(code, type, entry.bone);
     if (!names) {
         return 0;
     }

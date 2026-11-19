@@ -470,6 +470,36 @@ void setToNextWalksRelationshipsAbove() {
     CHECK(next(12, -999) == -1);
 }
 
+// Search 0x27: neighbors other than temp 0 toward whom its relationship variable 1 lacks bit 15,
+// those with no variables included, by id. One whose Sim is on the lot must pass the filters.
+void setToNextWalksUnlistedNeighbors() {
+    MemoryCodeSource code;
+    code.add(kObjectGroup, 0x1000, bhav({setToNext(0x27, owner::kTemp, 2, 0, T, F)}));
+    SmallWorld w;
+    auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
+    hood->neighborIds = {1, 5, 8, 9, 12};
+    hood->neighbors[8].guid = 0x51515151;  // the person on the lot (object 5)
+    hood->relationships[{std::int16_t{1}, std::int16_t{5}}] = {0, static_cast<std::int16_t>(0x8010)};
+    hood->relationships[{std::int16_t{1}, std::int16_t{8}}] = {0, 0x10};
+    hood->relationships[{std::int16_t{12}, std::int16_t{1}}] = {0, static_cast<std::int16_t>(0x8000)};
+    w.world.setNeighborhood(hood);
+    Vm vm(code, {}, &w.world);
+    auto next = [&](std::int16_t from) {
+        w.controller->thread.temps[0] = 1;
+        w.controller->thread.temps[2] = from;
+        const RunResult r = vm.run(*w.controller, 0x1000);
+        return r.outcome == Outcome::True ? w.controller->thread.temps[2] : std::int16_t{-1};
+    };
+    CHECK(next(0) == 8);
+    CHECK(next(8) == 9);
+    CHECK(next(9) == 12);
+    CHECK(next(12) == -1 && w.controller->thread.temps[2] == 0);
+    w.world.find(5)->data[0x38] = 0x01;  // now its Sim is skipped
+    CHECK(next(0) == 9);
+    w.controller->thread.temps[0] = 77;
+    CHECK(vm.run(*w.controller, 0x1000).reason == "neighbor not found");
+}
+
 // Search 0x09: objects beside the object in a local, in the same room, at +x, +y, -x, -y.
 void setToNextFindsAdjacentObjects() {
     using ts2::sim::Tile;
@@ -668,6 +698,7 @@ std::vector<Test> vmSetToNextTests() {
         {"Set to Next walks family ties", setToNextWalksFamilyTies},
         {"Set to Next walks relationship flags", setToNextWalksRelationshipFlags},
         {"Set to Next walks relationships above a value", setToNextWalksRelationshipsAbove},
+        {"Set to Next walks neighbors the panel wouldn't list", setToNextWalksUnlistedNeighbors},
         {"Set to Next finds adjacent objects", setToNextFindsAdjacentObjects},
         {"Set to Next finds objects in a Sim's view", setToNextFindsObjectsInView},
         {"Set to Next can target a local", setToNextCanTargetALocal},

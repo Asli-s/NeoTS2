@@ -15,8 +15,9 @@ namespace app {
 
 namespace {
 
-// Object data 1, 2 and 3: an object's facing, the object it is held by and its slot there.
-constexpr std::size_t kDirectionField = 1, kContainerField = 2, kSlotField = 3;
+// Object data 1, 2 and 3: an object's facing, the object it is held by and its slot there. 0x0D is
+// its wall placement and 0x2A its placement flags.
+constexpr std::size_t kDirectionField = 1, kContainerField = 2, kSlotField = 3, kWallPlacementField = 0x0D, kPlacementField = 0x2A;
 
 // What the game reads from an object to choose its shadow (see objectshadow), as the lot scene reads
 // it for the lot's own objects.
@@ -149,7 +150,9 @@ void LotLife::placeObjectsOnce(ts2::scene::Scene& scene, const std::set<std::uin
         } else {
             const float x = static_cast<float>(now.y) / 65536.0f;  // the lot's x and y are the position's y and x
             const float y = static_cast<float>(now.x) / 65536.0f;
-            place = placed.lotFrame * ts2::scene::Transform::at(x, y, scene.floorHeight(now.level, x, y), ts2::sim::compassHeading(now.direction));
+            const float z = scene.objectHeight ? scene.objectHeight(now.level, x, y, now.direction, object->data[kWallPlacementField], object->data[kPlacementField])
+                                               : scene.floorHeight(now.level, x, y);
+            place = placed.lotFrame * ts2::scene::Transform::at(x, y, z, ts2::sim::compassHeading(now.direction));
         }
         if (!now.gone) {
             // An object in a slot is on its container's storey, as the simulation keeps it.

@@ -874,12 +874,29 @@ bool Execution::assignLocomotion(const bhav::Instruction& in, const Frame& f) {
     return true;
 }
 
-// The clips of my newest pushed walk set's walk (see walkSetClips), none without one.
+// The walk lines I walk by (see World::walkLinesOf), reading the game's default pet set the first
+// time a pet needs it.
+const WalkSetLines* Execution::walkLines(const SimObject& sim) {
+    constexpr std::uint16_t kWalkSetStrings = 0x84;
+    constexpr std::size_t kFirstPetLine = 6;
+    if (sim.walkSets.empty() && !world().petWalkLines()) {
+        WalkSetLines lines;
+        for (std::size_t i = 0; i < lines.size(); ++i) {
+            lines[i] = code_.string(kGlobalGroup, kWalkSetStrings, kFirstPetLine + i).value_or("");
+        }
+        world().setPetWalkLines(std::move(lines));
+    }
+    return world().walkLinesOf(sim);
+}
+
+// The clips of the walk set I walk by: my newest pushed one, or a pet's default one. None without.
 std::vector<LocoClip> Execution::pushedWalkSet(const SimObject& sim) {
-    if (sim.walkSets.empty()) {
+    const WalkSetLines* lines = walkLines(sim);
+    if (lines == nullptr) {
         return {};
     }
-    return walkSetClips(sim.walkSets.back()[0], sim.personData[kLifeStagePersonData], sim.personData[kGenderPersonData], world().locoClips());
+    return walkSetClips(*lines, sim.personData[kLifeStagePersonData], sim.personData[kGenderPersonData], world().locoClips(),
+                        sim.personData[kSpeciesPersonData]);
 }
 
 // The turn-in-place clip for my turn, from my pushed walk set when I have one.
@@ -890,8 +907,8 @@ std::optional<TurnClip> Execution::turnClipFor(const SimObject& sim, float start
 
 // The pose my walk settles into, from my pushed walk set when I have one.
 std::string Execution::walkPoseFor(const SimObject& sim) {
-    return settlePose(sim.walkSets.empty() ? nullptr : &sim.walkSets.back()[0], sim.personData[kLifeStagePersonData],
-                      sim.personData[kGenderPersonData], world().locoClips());
+    return settlePose(walkLines(sim), sim.personData[kLifeStagePersonData], sim.personData[kGenderPersonData], world().locoClips(),
+                      sim.personData[kSpeciesPersonData]);
 }
 
 namespace {

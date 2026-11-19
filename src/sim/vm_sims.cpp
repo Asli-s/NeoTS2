@@ -213,7 +213,8 @@ bool Execution::outfitsInformation() {
     return true;
 }
 
-// The game swaps the footprint index in, runs the test where the object stands and swaps it back.
+// The game swaps the footprint index in, runs the test where the object stands and swaps it back. Off
+// the lot's bounds (as an object out of the world is) the test fails.
 bool Execution::fitsWithFootprint() {
     SimObject* object = world().find(stackObject());
     if (object == nullptr) {
@@ -223,12 +224,21 @@ bool Execution::fitsWithFootprint() {
     if (object->data[kFootprintIndexField] == footprint) {
         return true;
     }
+    // The bounds are inclusive at both ends, up to the far edge of the last tile. Positions run along
+    // the bounds' other axis.
+    if (const auto& b = world().tileBounds()) {
+        const float x = static_cast<float>(object->y) / 65536.0f, y = static_cast<float>(object->x) / 65536.0f;
+        if (!(x >= static_cast<float>(b->minX) && x <= static_cast<float>(b->maxX) + 1 && y >= static_cast<float>(b->minY) &&
+              y <= static_cast<float>(b->maxY) + 1)) {
+            return false;
+        }
+    }
     const auto& fits = world().objectFits();
     if (!fits) {
         return true;
     }
     if (object->x == kOffLot || object->y == kOffLot) {
-        throw Stop{Outcome::Unsupported, "footprint test for an object off the lot", std::to_string(object->id)};
+        throw Stop{Outcome::Unsupported, "footprint test for an object off the lot without the lot's bounds", std::to_string(object->id)};
     }
     const std::int16_t saved = object->data[kFootprintIndexField];
     object->data[kFootprintIndexField] = footprint;
@@ -403,6 +413,14 @@ std::optional<bool> Execution::makeNewCharacter(const bhav::Instruction& in, Fra
         made.personData[kYoungAdultPersonData] = 1;
     }
     made.personData[kGenderPersonData] = gender == 1 ? 1 : 0;
+    // Its sign gives its personality and aspiration. The face gene drawn with them belongs in its
+    // DNA, which a made Sim doesn't get yet.
+    fillMadeSimPersonData(made.personData, made.guid, world().geneticsRandom());
+    // Its fitness (0x52) and body flags (0x51) follow its look's body shape, which Make New Character
+    // leaves normal: 500 and 0. A fit body would give 0 and 16, a fat one 1000 and 1.
+    constexpr std::size_t kFitness = 0x52;
+    constexpr std::int16_t kNormalFitness = 500;
+    made.personData[kFitness] = kNormalFitness;
     made.madeAs = SavedNeighbor::MadeAs{age, gender, skin, outfit};
     const std::optional<std::int16_t> id = world().addNeighbor(std::move(made));
     if (!id) {
@@ -552,15 +570,15 @@ std::int16_t Execution::speciesFlag(std::int16_t neighbor) {
 }
 
 // One baby of two neighbors, or nothing when it can't be made. Without a template it takes a random
-// parent's species and template, with one it is human. Age 1, skin data 0x52 = 500 and 0x51 = 0.
+// parent's species and template, with one it is human. Age 1, fitness 0x52 = 500 and body flags 0x51 = 0.
 // When exactly one parent has person data 0xA5 set, the other parent stands for both in the genes
 // (see childGenome, first parent first) and the gender is that parent's opposite, else 50/50. It is
 // "Baby Boy" or "Baby Girl" with the first parent's surname (a birth gives the carrier first). Its
 // look is not made yet.
 std::optional<std::int16_t> Execution::makeChild(std::int16_t parent1, std::int16_t parent2,
                                                  std::optional<std::uint32_t> templateGuid) {
-    constexpr std::size_t kMarkPersonData = 0xA5, kSkinPersonData = 0x51, kSkinShadePersonData = 0x52;
-    constexpr std::int16_t kBabyAge = 1, kBabySkinShade = 500;
+    constexpr std::size_t kMarkPersonData = 0xA5, kBodyFlagsPersonData = 0x51, kFitnessPersonData = 0x52;
+    constexpr std::int16_t kBabyAge = 1, kBabyFitness = 500;
     constexpr std::array<std::uint32_t, 4> kSpeciesTemplates{0x7FD96B54, 0x0F83C946, 0x111D8FFF, 0x911D900A};
     auto random = [&](std::uint32_t n) {
         return static_cast<std::uint32_t>((static_cast<std::uint64_t>(static_cast<std::uint32_t>(rng_())) * n) >> 32);
@@ -592,8 +610,8 @@ std::optional<std::int16_t> Execution::makeChild(std::int16_t parent1, std::int1
     made.personData[kNewAgePersonData] = kBabyAge;
     made.personData[kSpeciesPersonData] = static_cast<std::int16_t>(flag == 2 ? 1 : flag == 4 ? 2 : flag == 8 ? 3 : 0);
     made.personData[kGenderPersonData] = female ? 1 : 0;
-    made.personData[kSkinShadePersonData] = kBabySkinShade;
-    made.personData[kSkinPersonData] = 0;
+    made.personData[kFitnessPersonData] = kBabyFitness;
+    made.personData[kBodyFlagsPersonData] = 0;
     if (flag == 1) {
         const std::int16_t geneticA = marked1 != marked2 ? *decides : parent1;
         const std::int16_t geneticB = marked1 != marked2 ? *decides : parent2;

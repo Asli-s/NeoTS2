@@ -119,6 +119,118 @@ void scriptsRunTreesByName() {
     CHECK(t[0] == 42 && t[1] == 2 && t[2] == 7 && t[3] == 1 && t[4] == 101);
 }
 
+// RunTreeWithGuid runs a tree from another object type's code, found by its GUID, as the running
+// object on its temps, the stack object and arguments one place later than RunTree's. A GUID no type
+// has is error 0x7A.
+void scriptsRunTreesOfAnotherType() {
+    constexpr std::uint32_t kOtherGroup = 0x7F0000A1, kOtherGuid = 0x0000A1A1;
+    auto runtime = std::make_shared<ts2::sim::LuaRuntime>();
+    runtime->load({}, {compileScript("Calls", R"(
+        local a = RunTreeWithGuid(41377, "Other", 2, 42)
+        local b = RunTreeWithGuid(41377, "Missing")
+        SetTemp(4, (a and 1 or 0) + (b and 10 or 0))
+    )"), compileScript("Bad", "RunTreeWithGuid(12345, \"Other\")")});
+    CHECK(runtime->problems.empty());
+    MemoryCodeSource code;
+    code.addStrings(ts2::sim::kGlobalGroup, 0x130, {"Calls", "Bad"});
+    code.add(kObjectGroup, 0x1000, bhav({luaScriptCall(1)}));
+    code.add(kObjectGroup, 0x1001, bhav({luaScriptCall(2)}));
+    Behavior other = bhav({expr(owner::kTemp, 0, op::kAssign, owner::kParam, 0, T, F)}, 1);
+    other.name = "Other";
+    code.add(kOtherGroup, 0x1001, other);
+    code.addObjectType(kObjectGroup, typed(kFridgeGuid));
+    code.addObjectType(kOtherGroup, typed(kOtherGuid));
+    ts2::sim::World world;
+    world.setScripts(runtime);
+    auto& fridge = world.create(kObjectGroup, typed(kFridgeGuid));
+    world.create(kObjectGroup, typed(kFridgeGuid));
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(fridge, 0x1000).outcome == Outcome::True);
+    CHECK(fridge.thread.temps[0] == 42 && fridge.thread.temps[4] == 1);
+    CHECK(vm.run(fridge, 0x1001).outcome == Outcome::False);
+}
+
+// nWorld.MoveObjectToLocation gives the object a fifth number as its direction (object data 0x01),
+// as the game's placement direction turns it and back. CanMoveObjectToLocation tests without moving.
+void scriptsMoveObjectsFacingTheirNumber() {
+    auto runtime = std::make_shared<ts2::sim::LuaRuntime>();
+    runtime->load({}, {compileScript("Move", R"(
+        local id = GetTemp(0)
+        local can = nWorld.CanMoveObjectToLocation(id, 3.5, 4.5, 0)
+        SetTemp(1, GetObjectData(id, 1))
+        local moved = nWorld.MoveObjectToLocation(id, 3.5, 4.5, 0, 3)
+        SetTemp(2, GetObjectData(id, 1))
+        SetScriptReturnValue(can and moved)
+    )")});
+    CHECK(runtime->problems.empty());
+    ts2::sim::World world;
+    auto& chair = world.create(kObjectGroup, typed(kChairGuid));
+    chair.data[1] = 6;
+    std::array<std::int16_t, 8> temps{chair.id};
+    ts2::sim::ScriptCall call;
+    call.world = &world;
+    call.temps = &temps;
+    call.returnValue = false;
+    CHECK(runtime->run("Move", call) && call.returnValue);
+    CHECK(temps[1] == 6 && temps[2] == 3);
+    CHECK(chair.x == static_cast<std::int32_t>(4.5 * 65536) && chair.y == static_cast<std::int32_t>(3.5 * 65536));
+}
+
+// A tree a script runs can run a script of its own. The outer script then goes on with its own
+// temps and objects.
+void scriptsGoOnAfterANestedScript() {
+    auto runtime = std::make_shared<ts2::sim::LuaRuntime>();
+    runtime->load({}, {compileScript("Outer", R"(
+        RunTree("Inner")
+        SetTemp(1, 2)
+        SetScriptReturnValue(ObjectManager.new():verifyObjectId(1))
+    )"), compileScript("InnerScript", "SetTemp(0, 1)")});
+    CHECK(runtime->problems.empty());
+    MemoryCodeSource code;
+    code.addStrings(ts2::sim::kGlobalGroup, 0x130, {"Outer", "InnerScript"});
+    code.add(kObjectGroup, 0x1000, bhav({luaScriptCall(1)}));
+    Behavior inner = bhav({luaScriptCall(2)});
+    inner.name = "Inner";
+    code.add(kObjectGroup, 0x1001, inner);
+    ts2::sim::World world;
+    world.setScripts(runtime);
+    code.addObjectType(kObjectGroup, typed(kFridgeGuid));
+    auto& fridge = world.create(kObjectGroup, typed(kFridgeGuid));
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(fridge, 0x1000).outcome == Outcome::True);
+    CHECK(fridge.thread.temps[0] == 1 && fridge.thread.temps[1] == 2);
+}
+
+// nWorld.GetLoadBearingRoomAtLocation gives the walls-and-roofs region at a tile, from the tile's
+// first saved quarter: 0 not enclosed, -1 off the grid. GetRoomAtLocation reads the saved rooms alike.
+void loadBearingRoomIsTheTilesRegion() {
+    auto runtime = std::make_shared<ts2::sim::LuaRuntime>();
+    runtime->load({}, {compileScript("Room", R"(
+        SetTemp(0, nWorld.GetLoadBearingRoomAtLocation(1, 0, 0))
+        SetTemp(1, nWorld.GetLoadBearingRoomAtLocation(0, 0, 0))
+        SetTemp(2, nWorld.GetLoadBearingRoomAtLocation(5, 0, 0))
+        SetTemp(3, nWorld.GetRoomAtLocation(1, 0, 0))
+    )")});
+    CHECK(runtime->problems.empty());
+    ts2::array3d::Array3D grid;
+    grid.width = 2;
+    grid.height = 2;
+    grid.levels = 1;
+    grid.elementSize = 8;
+    grid.elements.assign(2 * 2 * 8, 0);
+    grid.elements[(1 * 2 + 0) * 8] = 5;  // tile (1, 0), saved quarter 0
+    grid.elements[(1 * 2 + 0) * 8 + 2] = 6;
+    ts2::sim::World world;
+    world.setWeatherRegions(ts2::sim::RoomMap(grid, 0));
+    grid.elements[(1 * 2 + 0) * 8] = 9;
+    world.setRooms(ts2::sim::RoomMap(grid, 0));
+    std::array<std::int16_t, 8> temps{};
+    ts2::sim::ScriptCall call;
+    call.world = &world;
+    call.temps = &temps;
+    CHECK(runtime->run("Room", call) && temps[0] == 5 && temps[1] == 0 && temps[2] == -1 && temps[3] == 9);
+}
+
 // A script's result is true unless it says otherwise.
 void scriptsAreTrueUnlessTheySayOtherwise() {
     CHECK(runScript("SetTemp(0, 1)") == ScriptEnd::True);
@@ -1245,8 +1357,123 @@ void apartmentDoorIsFalseOffApartmentLots() {
     CHECK(vm.run(door, 0x1000).outcome == Outcome::True);
 }
 
-// CachedFamily.new takes a family of the neighborhood (error 0x9A for any other), whose id and three
-// saved lots its getters read.
+// Neighborhood:getApartmentLinkedLots, getApartmentLinkedFamilies, getApartmentLinkedControlRooms and
+// getRoommateId list one value of each apartment lived in, keyed from 0, a building's own and an
+// apartment's its building's (Belladonna Cove's Sentinel Apartments, lot 76, with apartments 149 and
+// 150). Other lots give an empty table, and a lot the neighborhood doesn't place is error 0x9B.
+// getAptBaseLot gives an apartment's building, 0 for the building itself.
+void neighborhoodListsLinkedApartments() {
+    auto runtime = std::make_shared<ts2::sim::LuaRuntime>();
+    runtime->load({}, {compileScript("Linked", R"(
+        local n = Neighborhood.new()
+        local lots = n:getApartmentLinkedLots(149)
+        local families = n:getApartmentLinkedFamilies(76)
+        SetTemp(0, lots[0])
+        SetTemp(1, lots[1])
+        SetTemp(2, families[0] * 100 + families[1])
+        SetTemp(3, n:getApartmentLinkedControlRooms(76)[1])
+        SetTemp(4, n:getRoommateId(150)[0])
+        SetTemp(5, n:getAptBaseLot(150) * 10 + n:getAptBaseLot(76))
+        SetScriptReturnValue(lots[2] == nil and next(n:getApartmentLinkedLots(5)) == nil)
+    )"), compileScript("NoLot", "Neighborhood.new():getApartmentLinkedFamilies(77)")});
+    CHECK(runtime->problems.empty());
+    auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
+    hood->lotTypes = {{5, std::uint8_t{0}}, {76, std::uint8_t{8}}, {149, std::uint8_t{9}}, {150, std::uint8_t{9}}};
+    hood->lotBuildings = {{149, 76}, {150, 76}};
+    hood->apartments[76] = {{149, 10, 0x12, 0}, {150, 9, 3, 7}};
+    ts2::sim::World world;
+    world.setNeighborhood(hood);
+    std::array<std::int16_t, 8> temps{};
+    ts2::sim::ScriptCall call;
+    call.world = &world;
+    call.temps = &temps;
+    CHECK(runtime->run("Linked", call) && call.returnValue);
+    CHECK(temps[0] == 149 && temps[1] == 150 && temps[2] == 1009 && temps[3] == 3 && temps[4] == 0 && temps[5] == 760);
+    ts2::sim::ScriptCall noLot;
+    noLot.world = &world;
+    CHECK(!runtime->run("NoLot", noLot) && noLot.errorCode == 0x9B);
+    // An apartment whose building chain loops gives nothing rather than running on.
+    hood->lotTypes[76] = 9;
+    hood->lotBuildings[76] = 149;
+    CHECK(world.lotApartments(149).empty());
+}
+
+// Neighborhood:getNIDsApartment gives the first apartment door, by id, that belongs to the neighbor:
+// its attribute 13 is the neighbor's family below 32000, or attribute 15 is the neighbor's id. 0 for
+// none, off apartment lots and for a neighbor the neighborhood doesn't have. isNeighborsApartment
+// asks it of one door.
+void neighborhoodFindsANeighborsApartmentDoor() {
+    auto runtime = std::make_shared<ts2::sim::LuaRuntime>();
+    runtime->load({}, {compileScript("Door", "SetTemp(0, Neighborhood.new():getNIDsApartment(GetTemp(1)))"),
+                        compileScript("Owns", "SetScriptReturnValue(Neighborhood.new():isNeighborsApartment(GetTemp(1), GetTemp(2)))")});
+    CHECK(runtime->problems.empty());
+    auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
+    hood->neighborIds = {8};
+    hood->neighbors[8].guid = 0x80000008;
+    hood->neighbors[8].personData.assign(231, 0);
+    hood->neighbors[8].personData[0x3D] = 10;
+    ts2::sim::World world;
+    world.setNeighborhood(hood);
+    world.setLotType(9);
+    auto doorType = typed(kChairGuid);
+    doorType.fields[0x4B] = 0xCC;
+    doorType.fields[ts2::objd::field::kNumAttributes] = 17;
+    auto& other = world.create(kObjectGroup, doorType);
+    other.data[0x3B] = 0x1A;
+    other.attributes[13] = 11;
+    auto& door = world.create(kObjectGroup, doorType);
+    door.data[0x3B] = 0x1A;
+    door.attributes[13] = 10;
+    std::array<std::int16_t, 8> temps{};
+    temps[1] = 8;
+    ts2::sim::ScriptCall call;
+    call.world = &world;
+    call.temps = &temps;
+    CHECK(runtime->run("Door", call) && temps[0] == door.id);
+    // isNeighborsApartment asks the same of one door.
+    temps[2] = door.id;
+    call.returnValue = false;
+    CHECK(runtime->run("Owns", call) && call.returnValue);
+    temps[2] = other.id;
+    CHECK(runtime->run("Owns", call) && !call.returnValue);
+    // A game family (32000 up) needs the neighbor's own id in attribute 15 as well.
+    hood->neighbors[8].personData[0x3D] = 32001;
+    door.attributes[13] = 32001;
+    CHECK(runtime->run("Door", call) && temps[0] == 0);
+    door.attributes[15] = 8;
+    CHECK(runtime->run("Door", call) && temps[0] == door.id);
+    world.setLotType(0);
+    CHECK(runtime->run("Door", call) && temps[0] == 0);
+    world.setLotType(9);
+    temps[1] = 9;
+    CHECK(runtime->run("Door", call) && temps[0] == 0);
+}
+
+// LightingManager:setPlacementRoomLightPercent sets a room's light percent over the lot's saved ones,
+// unchecked, and returns true. Rooms without one are at 100, and the outdoors (room 0) always is.
+void lightingManagerSetsRoomLightPercents() {
+    auto runtime = std::make_shared<ts2::sim::LuaRuntime>();
+    runtime->load({}, {compileScript("Dim", "SetScriptReturnValue(LightingManager.new():setPlacementRoomLightPercent(GetTemp(0), GetTemp(1)))")});
+    CHECK(runtime->problems.empty());
+    auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
+    hood->lotRoomLights[149] = {{std::int16_t{2}, std::int16_t{40}}, {std::int16_t{5}, std::int16_t{0}}};
+    ts2::sim::World world;
+    world.setNeighborhood(hood);
+    world.setLotNumber(149);
+    CHECK(world.roomLightPercent(2) == 40 && world.roomLightPercent(3) == 100 && world.roomLightPercent(0) == 100);
+    std::array<std::int16_t, 8> temps{3, 150};
+    ts2::sim::ScriptCall call;
+    call.world = &world;
+    call.temps = &temps;
+    call.returnValue = false;
+    CHECK(runtime->run("Dim", call) && call.returnValue);
+    CHECK(world.roomLightPercent(3) == 150 && world.roomLightPercent(2) == 40 && world.roomLightsVersion() == 1);
+    CHECK(world.roomLightPercents().size() == 3 && hood->lotRoomLights[149].size() == 2);
+}
+
+// CachedFamily.new takes a family of the neighborhood (error 0x9A for any other), whose id, three
+// saved lots and last saved funds its getters read. A save during the run sets the funds. A script
+// may mark its result cacheable, and naming a temp past 7 is error 2.
 void cachedFamilyReadsTheSavedLots() {
     auto runtime = std::make_shared<ts2::sim::LuaRuntime>();
     runtime->load({}, {compileScript("Family", R"(
@@ -1255,11 +1482,14 @@ void cachedFamilyReadsTheSavedLots() {
         SetTemp(1, family:getLotId())
         SetTemp(2, family:getCurrentLotId())
         SetTemp(3, family:getVacationLotId())
+        SetCacheable(true)
+        SetCacheableTemps(4)
+        SetTemp(4, family:getLastSavedFunds())
         SetScriptReturnValue(true)
-    )"), compileScript("Missing", "CachedFamily.new(4)")});
+    )"), compileScript("Missing", "CachedFamily.new(4)"), compileScript("BadTemp", "SetCacheableTemps(0, 8)")});
     CHECK(runtime->problems.empty());
     MemoryCodeSource code;
-    code.addStrings(ts2::sim::kGlobalGroup, 0x130, {"Family", "Missing"});
+    code.addStrings(ts2::sim::kGlobalGroup, 0x130, {"Family", "Missing", "BadTemp"});
     Instruction in;
     in.opcode = 0x007E;
     in.operands[4] = 0x01;
@@ -1267,11 +1497,12 @@ void cachedFamilyReadsTheSavedLots() {
     in.falseTarget = F;
     in.operands[0] = 0x30;
     in.operands[1] = 0x01;
-    for (std::uint8_t i = 1; i <= 2; ++i) {
+    for (std::uint8_t i = 1; i <= 3; ++i) {
         in.operands[2] = i;
         code.add(kObjectGroup, static_cast<std::uint16_t>(0x0FFF + i), bhav({in}));
     }
     auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
+    hood->familySavedFunds[3] = 1234;
     hood->familyLots[3] = 10;
     hood->familyCurrentLots[3] = 12;
     hood->familyVacationLots[3] = 77;
@@ -1282,8 +1513,12 @@ void cachedFamilyReadsTheSavedLots() {
     Vm vm(code, {}, &world);
     CHECK(vm.run(object, 0x1000).outcome == Outcome::True);
     const auto& t = object.thread.temps;
-    CHECK(t[0] == 3 && t[1] == 10 && t[2] == 12 && t[3] == 77);
+    CHECK(t[0] == 3 && t[1] == 10 && t[2] == 12 && t[3] == 77 && t[4] == 1234);
     CHECK(scriptRaisesError(world, [&] { return vm.run(object, 0x1001); }));
+    world.setFamilyLastSavedFunds(3, 500);
+    CHECK(vm.run(object, 0x1000).outcome == Outcome::True && object.thread.temps[4] == 500);
+    CHECK(world.familyLastSavedFunds(3) == 500 && !world.familyLastSavedFunds(4));
+    CHECK(scriptRaisesError(world, [&] { return vm.run(object, 0x1002); }));
 }
 
 // ObjectDefinition.new takes the GUID of an object type (error 0x7A for any other), and getField and
@@ -1410,6 +1645,31 @@ void friendsForPromotionCountTokenCredits() {
     sim.personData[0x5A] = 0;
     sim.personData[0x59] = 0;
     CHECK(friendsAtLevel(2) == 0);
+}
+
+// CachedPerson:unlockVacationCollectible(n) sets bit n - 1 of the Sim's 64 collectible bits and
+// returns true. Above 32 it sets bit n - 33 of the upper half, wrapping as the game's shift does.
+void unlockVacationCollectibleSetsItsBit() {
+    auto runtime = std::make_shared<ts2::sim::LuaRuntime>();
+    runtime->load({}, {compileScript("Unlock", R"(
+        local p = CachedPerson.new(GetStackObjectId())
+        if p:unlockVacationCollectible(1) and p:unlockVacationCollectible(5) and
+           p:unlockVacationCollectible(33) and p:unlockVacationCollectible(64) and
+           p:unlockVacationCollectible(66) then
+            SetScriptReturnValue(true)
+        end
+    )")});
+    CHECK(runtime->problems.empty());
+    MemoryCodeSource code;
+    code.addStrings(ts2::sim::kGlobalGroup, 0x130, {"Unlock"});
+    code.add(kObjectGroup, 0x1000, bhav({luaScriptCall(1)}));
+    ts2::sim::World world;
+    world.setScripts(runtime);
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    sim.thread.stackObjectId = sim.id;
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::True);
+    CHECK(sim.vacationCollectibles[0] == 0x11u && sim.vacationCollectibles[1] == 0x80000003u);
 }
 
 // Neighborhood:isApartmentResident: a Sim with person data 0x20 = 8, only on apartment lots (types 8
@@ -1710,11 +1970,15 @@ std::vector<Test> vmScriptTests() {
         {"ObjectManager lists a multi-tile object's parts", objectManagerListsMultiTileParts},
         {"ObjectManager gives the direction to an object", objectManagerGivesTheDirectionToAnObject},
         {"Neighborhood:isApartmentDoor tests the category and OBJD field 0x4B", apartmentDoorIsFalseOffApartmentLots},
+        {"Neighborhood lists an apartment lot's linked apartments", neighborhoodListsLinkedApartments},
+        {"Neighborhood:getNIDsApartment finds a neighbor's apartment door", neighborhoodFindsANeighborsApartmentDoor},
+        {"LightingManager sets room light percents", lightingManagerSetsRoomLightPercents},
         {"Neighborhood:isApartmentResident needs an apartment lot", apartmentResidentsAreSimsOfType8OnApartmentLots},
         {"CachedFamily reads the saved lots", cachedFamilyReadsTheSavedLots},
         {"ObjectDefinition reads fields", objectDefinitionReadsFields},
         {"CachedFamily lists its members", cachedFamilyListsItsMembers},
         {"CachedPerson friends for promotion count token credits", friendsForPromotionCountTokenCredits},
+        {"CachedPerson unlockVacationCollectible sets its bit", unlockVacationCollectibleSetsItsBit},
         {"Neighborhood reads lot owners", neighborhoodReadsLotOwners},
         {"neighborhood lists the lots of all its neighborhoods", neighborhoodListsLotsOfAllNeighborhoods},
         {"neighbor relationships read as saved", neighborRelationshipsReadAsSaved},
@@ -1724,6 +1988,10 @@ std::vector<Test> vmScriptTests() {
         {"object scripts read and write values", objectScriptsReadAndWriteValues},
         {"scripts multiply the tested advertisements", scriptsMultiplyTheTestedAdvertisements},
         {"scripts run trees by name", scriptsRunTreesByName},
+        {"RunTreeWithGuid runs another type's tree", scriptsRunTreesOfAnotherType},
+        {"MoveObjectToLocation faces the object its number", scriptsMoveObjectsFacingTheirNumber},
+        {"scripts go on after a nested script", scriptsGoOnAfterANestedScript},
+        {"GetLoadBearingRoomAtLocation gives the tile's region", loadBearingRoomIsTheTilesRegion},
         {"definition fields as scripts number them", definitionFieldsAsScriptsNumberThem},
         {"scripts subscribe objects to messages", scriptsSubscribeToMessages},
         {"message subscriptions are bounded", messageSubscriptionsAreBounded},

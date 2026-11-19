@@ -43,13 +43,24 @@ struct ScriptCall {
     std::int16_t* globals = nullptr;  // the simulator globals
     std::size_t globalCount = 0;
     ttab::Interaction* testedLine = nullptr;  // the line a check tree is testing, while one runs
-    // Runs a tree, found by name, at once as the running object (RunTree). 1 when it ends true, 0 when
+    // Runs a tree, found by name, at once as the running object (RunTree), in the code of the object
+    // type with GUID `codeGuid` (RunTreeWithGuid), or in its own for 0. 1 when it ends true, 0 when
     // false or not found, -1 when the engine can't run it and the script must stop.
-    std::function<int(const std::string& name, std::int16_t stackObject, std::span<const std::int16_t> args)> runTree;
+    std::function<int(const std::string& name, std::int16_t stackObject, std::span<const std::int16_t> args, std::uint32_t codeGuid)> runTree;
+    // Restores the objects of the neighborhood's object archive with an id, running their Load
+    // function with `params`, and gives the first one's id (0 for none).
+    std::function<std::int16_t(std::uint32_t archive, std::span<const std::int16_t> params)> restoreArchive;
+    // Makes a new object of a type out of the world, Init and Main run, and gives its id (0 for none).
+    std::function<std::int16_t(std::uint32_t guid)> createObject;
 
     // Set by SetScriptReturnValue. A script that never calls it is true (PercentCalculate, which
     // every "Percentage" tree runs, is one).
     bool returnValue = true;
+    // Set by SetCacheable and SetCacheableTemps: the script's result, and these temps (bit n for temp
+    // n), may be reused for the same tree, string and parameters. The game reuses them only during an
+    // autonomy search, which the engine doesn't do yet.
+    bool cacheable = false;
+    std::uint8_t cacheableTemps = 0;
     std::uint64_t instructions = 0;  // Lua instructions run so far, counted to stop endless loops
     // How the script ended when it didn't simply return.
     std::int16_t errorCode = 0;   // the game's error number for a bad index, 0 for none

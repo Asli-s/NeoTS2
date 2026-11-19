@@ -272,8 +272,10 @@ constexpr std::uint8_t kArraySortAscending = 13;
 
 // Generic Sims Calls with no effect on simulation state: camera, UI, preloading and 3D sync. 0x1C
 // floats the money a transaction moved (temp 0 x temp 2) over the object in temp 1 (UI message 0xD6).
+// 0x25, which the lot load curtain calls once it is ready to rise, only sends the interface a message
+// (what the interface does with it is not known yet).
 constexpr std::uint8_t kNoOpGenericCalls[] = {
-    0x01, 0x02, 0x03, 0x12, 0x18, 0x1C, 0x1E, 0x1F, 0x28, 0x29, 0x2A, 0x2C, 0x33,
+    0x01, 0x02, 0x03, 0x12, 0x18, 0x1C, 0x1E, 0x1F, 0x25, 0x28, 0x29, 0x2A, 0x2C, 0x33,
 };
 // Generic call 0x1D waits for the character of the neighbor in temp 0 to load (see loadCharacter).
 constexpr std::uint8_t kLoadCharacterGenericCall = 0x1D;
@@ -470,6 +472,9 @@ constexpr std::uint8_t kSearchRelationshipFlags = 0x24;
 // Search 0x23: neighbors toward whom the neighbor in temp 0's relationship variable 0 (daily) is above
 // temp 1.
 constexpr std::uint8_t kSearchRelationshipAbove = 0x23;
+// Search 0x27: neighbors the Relationships panel of the neighbor in temp 0 wouldn't list (see
+// nextUnlistedNeighbor).
+constexpr std::uint8_t kSearchUnlistedNeighbor = 0x27;
 constexpr std::uint8_t kSearchObjectTypeByFields = 0x26;
 // Search 0x10, "vehicle": objects of OBJD type 0x0D or 0x12.
 constexpr std::uint8_t kSearchVehicle = 0x10;
@@ -746,6 +751,8 @@ public:
     std::optional<CreateSpot> tileInFront(const SimObject* ref);
     bool createObject(const bhav::Instruction& in, Frame& f);
     bool createParts(const ObjectType& master, std::uint8_t placement, std::uint8_t flags);
+    std::int16_t restoreArchive(std::uint32_t archiveId, std::span<const std::int16_t> params);
+    std::int16_t createOutOfWorld(std::uint32_t guid);
     void stampBirth(SimObject& created) const;
     void passToMain(SimObject& created, std::uint8_t flags);
     bool breakPoint(const bhav::Instruction& in, Frame& f);
@@ -756,7 +763,7 @@ public:
     // global ones, run at once as me on my stack. 1 when it ends true, 0 when false or no tree has the
     // name. A tree that fails otherwise is false and leaves me to be reset. What the engine can't run
     // yet is thrown.
-    int scriptRunTree(const std::string& name, std::int16_t stackObject, std::span<const std::int16_t> args);
+    int scriptRunTree(const std::string& name, std::int16_t stackObject, std::span<const std::int16_t> args, std::uint32_t codeGuid);
     bool message(const bhav::Instruction& in, Frame& f);
     bool onTimer(const bhav::Instruction& in, Frame& f);
     bool cinematic(const bhav::Instruction& in, Frame& f);
@@ -797,6 +804,9 @@ public:
     bool nextNeighborWhere(const Fits& fits, const Filters& passesFilters, std::uint8_t targetOwner,
                            std::uint16_t targetData, Frame& f, std::uint8_t searchType);
     bool nextRelative(std::uint8_t searchType, std::uint8_t targetOwner, std::uint16_t targetData, Frame& f);
+    template <typename Filters>
+    bool nextUnlistedNeighbor(const Filters& passesFilters, std::uint8_t targetOwner, std::uint16_t targetData,
+                              Frame& f);
     bool nextFamilyTie(std::uint8_t targetOwner, std::uint16_t targetData, Frame& f);
     bool nextWithRelationshipFlags(std::uint8_t targetOwner, std::uint16_t targetData, Frame& f);
     bool nextWithRelationshipAbove(std::uint8_t targetOwner, std::uint16_t targetData, Frame& f);
@@ -816,7 +826,7 @@ public:
     bool placeBySlot(const std::array<std::uint8_t, 16>& o, std::int16_t index, SimObject& placed, const SimObject& ref);
     bool snap(const bhav::Instruction& in, Frame& f);
     void leaveContainer(SimObject& object);
-    std::optional<ModelBone> slotBone(const SimObject& object, std::uint32_t group, const slot::Entry& entry);
+    std::optional<ModelBone> slotBone(const SimObject& object, const ObjectType* type, const slot::Entry& entry);
     bool effectStopStart(const bhav::Instruction& in, Frame& f);
     std::optional<ModelBone> modelJoint(const SimObject& object, const std::string& name);
     bool snapInto(const bhav::Instruction& in, Frame& f);
@@ -910,6 +920,7 @@ public:
                                         std::int16_t stackObject, std::span<const std::int16_t> args);
     bool turnOnTheSpot(SimObject& sim, Walking& walk, double now);
     std::optional<LocoClip> locoClip(const std::string& name);
+    const WalkSetLines* walkLines(const SimObject& sim);
     std::vector<LocoClip> pushedWalkSet(const SimObject& sim);
     std::optional<TurnClip> turnClipFor(const SimObject& sim, float start, float end);
     std::string walkPoseFor(const SimObject& sim);
@@ -946,6 +957,7 @@ public:
     void queueSkipped(const SimObject& sim, SimObject& object);
     // dropLinkedInteractions, with each dropped waiting interaction's Queue Skipped function run.
     void dropLinked(QueuedInteraction& ended, const SimObject* skip);
+    void dropLessUrgent(SimObject& sim, bool nested, std::int16_t priority);
     bool alterBudget(const bhav::Instruction& in, Frame& f);
     bool pushInteraction(const bhav::Instruction& in, Frame& f);
     // Runs a pushed interaction whose line has flag 0x4 to its end now.

@@ -48,11 +48,14 @@ void setCurrentCall(lua_State* L, ScriptCall* c) {
     lua_rawset(L, LUA_REGISTRYINDEX);
 }
 
-// Sets the current call for as long as it lives, then clears it, however the scope ends.
+// Sets the current call for as long as it lives, then puts back the one before, however the scope
+// ends. A script function can run trees that run scripts of their own, and the outer script goes on
+// with its own call afterwards.
 struct CallScope {
     lua_State* L;
-    CallScope(lua_State* state, ScriptCall* c) : L(state) { setCurrentCall(L, c); }
-    ~CallScope() { setCurrentCall(L, nullptr); }
+    ScriptCall* before;
+    CallScope(lua_State* state, ScriptCall* c) : L(state), before(currentCall(state)) { setCurrentCall(L, c); }
+    ~CallScope() { setCurrentCall(L, before); }
     CallScope(const CallScope&) = delete;
     CallScope& operator=(const CallScope&) = delete;
 };
@@ -92,6 +95,8 @@ constexpr Function kFunctions[] = {
     {"GetPrimitiveParameter", getPrimitiveParameter},
     {"GetTemp", getTemp},
     {"SetTemp", setTemp},
+    {"SetCacheable", setCacheable},
+    {"SetCacheableTemps", setCacheableTemps},
     {"GetLocal", getLocal},
     {"SetLocal", setLocal},
     {"GetTreeParameter", getTreeParameter},
@@ -139,6 +144,7 @@ constexpr Function kFunctions[] = {
     {"SetPersonMotive", setPersonMotive},
     {"MultiplyAdValues", multiplyAdValues},
     {"RunTree", runTree},
+    {"RunTreeWithGuid", runTreeWithGuid},
     {"GetNeighborPersonData", getNeighborPersonData},
     {"SetNeighborPersonData", setNeighborPersonData},
     {"GetNeighborData", getNeighborData},
@@ -151,7 +157,6 @@ constexpr Function kFunctions[] = {
 
 // Functions the game registers that the engine doesn't implement yet.
 constexpr const char* kNotYetImplemented[] = {
-    "SetCacheable", "SetCacheableTemps", "RunTreeWithGuid",
     "KissingPointsUnlock", "KissingPointsNumLeft", "ObjectError", "ObjectAssert", "GetString",
     "GetStringBySelector", "SetObjectDefinitionField", "GetCatalogName", "GetCatalogDescription",
     "SetNeighborRelationship", "GetMasterSelector",
@@ -190,16 +195,16 @@ const ScriptClass kClasses[] = {
     {"CachedFamily", true, newCachedFamily,
      {{"getId", cachedFamilyId}, {"getLotId", cachedFamilyLotId}, {"getCurrentLotId", cachedFamilyCurrentLotId},
       {"getVacationLotId", cachedFamilyVacationLotId}, {"getMembers", cachedFamilyMembers},
-      {"getNumMembers", cachedFamilyMemberCount}},
-     {"setVacationLotId", "getName", "getFunds", "getLastSavedFunds", "isNeighborInFamily", "addMemberClothing", "IsAFamilyInThisLot"},
+      {"getNumMembers", cachedFamilyMemberCount}, {"getLastSavedFunds", cachedFamilyLastSavedFunds}},
+     {"setVacationLotId", "getName", "getFunds", "isNeighborInFamily", "addMemberClothing", "IsAFamilyInThisLot"},
      {}},
     {"ObjectDefinition", true, newObjectDefinition,
      {{"getField", objectDefinitionField}, {"get32BitField", objectDefinitionField}},
      {},
      {}},
-    {"LightingManager", true, nullptr,
+    {"LightingManager", true, newLightingManager,
+     {{"setPlacementRoomLightPercent", lightingManagerSetPlacementRoomLightPercent}},
      {},
-     {"setPlacementRoomLightPercent"},
      {}},
     {"WeatherInfo", true, newWeatherInfo,
      {{"getSeason", getWeather<weather::Weather::kSeason>},
@@ -255,17 +260,19 @@ const ScriptClass kClasses[] = {
       {"getSingularTokens", inventoryTokens}, {"getSingularTokensByGUID", inventoryTokensByGuid},
       {"getSingularTokensByFlags", inventoryTokensByFlags}, {"getSingularTokensByCategory", inventoryTokensByCategory},
       {"getCountedTokens", inventoryCountedTokens}, {"getCountedTokensByGUID", inventoryCountedTokensByGuid},
-      {"getCountedTokensByFlags", inventoryCountedTokensByFlags}, {"findToken", inventoryFindToken}},
+      {"getCountedTokensByFlags", inventoryCountedTokensByFlags}, {"findToken", inventoryFindToken}, {"createObjectFromToken", inventoryCreateObjectFromToken}},
      {"removeTokensOfGUID", "copyToken", "copyCountedToken", "getTokenArchiveGUIDS",
-      "createTokenFromObject", "createObjectFromToken"},
+      "createTokenFromObject"},
      {{"kTypeGlobal", 0}, {"kTypeLot", 1}, {"kTypeFamily", 2}, {"kTypeNeighbor", 3}, {"kTypeGameWide", 4}}},
     {"Neighborhood", true, newNeighborhood,
      {{"isRoommate", neighborhoodIsRoommate}, {"isValidLot", neighborhoodIsValidLot}, {"isApartmentDoor", neighborhoodIsApartmentDoor},
-      {"isApartmentResident", neighborhoodIsApartmentResident},
+      {"isApartmentResident", neighborhoodIsApartmentResident}, {"getApartmentLinkedLots", neighborhoodGetApartmentLinkedLots},
+      {"getApartmentLinkedFamilies", neighborhoodGetApartmentLinkedFamilies}, {"getApartmentLinkedControlRooms", neighborhoodGetApartmentLinkedControlRooms},
+      {"getRoommateId", neighborhoodGetRoommateId}, {"getAptBaseLot", neighborhoodGetAptBaseLot}, {"isNeighborsApartment", neighborhoodIsNeighborsApartment}, {"getNIDsApartment", neighborhoodGetNidsApartment},
       {"getLotOwner", neighborhoodGetLotOwner}, {"getWitchLotType", neighborhoodGetWitchLotType},
       {"getLotType", neighborhoodGetLotType}, {"getLotIdsInAllNeighborhoods", neighborhoodGetLotIdsInAllNeighborhoods},
       {"getNeighborhoodIdFromLotId", neighborhoodGetNeighborhoodIdFromLotId}},
-     {"setLotOwner", "getLotValue", "getLotName", "getLotIds", "isHobbyFlagSet", "getApartmentLinkedFamilies", "getApartmentLinkedLots", "getApartmentLinkedControlRooms", "setAptControlRoom", "getAptBaseLot", "setAptMaxRent", "setAptMinRent", "setMaxApartments", "getRoommateId", "setRoommateId", "updateLotClass", "isNeighborsApartment", "getNIDsApartment"},
+     {"setLotOwner", "getLotValue", "getLotName", "getLotIds", "isHobbyFlagSet", "setAptControlRoom", "setAptMaxRent", "setAptMinRent", "setMaxApartments", "setRoommateId", "updateLotClass"},
      {}},
     {"BusinessInfo", true, nullptr,
      {},
@@ -277,14 +284,14 @@ const ScriptClass kClasses[] = {
      { "getName", "setName", "getSurname", "setSurname", "getFullName", "getBio", "setBio"},
      {}},
     {"nWorld", false, nullptr,
-     {{"GetObjectTile", getObjectTile}, {"GetObjectLocation", getObjectLocation}, {"IsOutsideForWeather", isOutsideForWeather},
+     {{"GetObjectTile", getObjectTile}, {"GetObjectLocation", getObjectLocation}, {"IsOutsideForWeather", isOutsideForWeather}, {"GetLoadBearingRoomAtLocation", getLoadBearingRoomAtLocation}, {"GetRoomAtLocation", getRoomAtLocation}, {"CanMoveObjectToLocation", canMoveObjectToLocation},
       {"HasSolidFloor", hasSolidFloor}, {"GetObjectsOnTile", getObjectsOnTile}, {"IsBeachLocation", isBeachLocation},
       {"HasStage", hasStage}, {"HasStageAny", hasStage}, {"GetNumWallSections", getNumWallSections}, {"GetRoomOnSideOfWall", getRoomOnSideOfWall},
       {"GetMinX", getMinX}, {"GetMaxX", getMaxX}, {"GetMinY", getMinY}, {"GetMaxY", getMaxY}, {"GetLotSizeX", getLotSizeX},
       {"GetLotSizeY", getLotSizeY}, {"IsLocked", isLocked}, {"HasSolidGround", hasSolidGround}, {"GetMinLevel", getMinLevel},
       {"GetMaxLevel", getMaxLevel}, {"GetNumLevels", getNumLevels},
       {"MoveObjectToLocation", moveObjectToLocation}},
-     {"IsOnLot", "HasRoof", "HasDriveway", "IsLoadBearing", "GetMinTileX", "GetMinTileY", "GetMaxTileX", "GetMaxTileY", "GetNumTilesX", "GetNumTilesY", "GetObjectTiles", "FindLocationForObject", "GetTerrainElevationForObject", "GetTerrainElevationForXY", "GetWaterElevationForObject", "GetWaterElevationForXY", "IsPoolOnTile", "IsWaterOnTile", "IsDeckOnTile", "IsWaterOnEntireTile", "GetSnowAccumulationLevelOnTile", "IsWallBetweenPoints", "SetLotImposterDirty", "MoveObjectToWallLocation", "CanMoveObjectToLocation", "GetTileOnSideOfWall", "GetOrientationAwayFromWallSide", "GetRoomAtLocation", "GetLoadBearingRoomAtLocation", "IsLoadWallBetweenPoints"},
+     {"IsOnLot", "HasRoof", "HasDriveway", "IsLoadBearing", "GetMinTileX", "GetMinTileY", "GetMaxTileX", "GetMaxTileY", "GetNumTilesX", "GetNumTilesY", "GetObjectTiles", "FindLocationForObject", "GetTerrainElevationForObject", "GetTerrainElevationForXY", "GetWaterElevationForObject", "GetWaterElevationForXY", "IsPoolOnTile", "IsWaterOnTile", "IsDeckOnTile", "IsWaterOnEntireTile", "GetSnowAccumulationLevelOnTile", "IsWallBetweenPoints", "SetLotImposterDirty", "MoveObjectToWallLocation", "GetTileOnSideOfWall", "GetOrientationAwayFromWallSide", "IsLoadWallBetweenPoints"},
      {}},
     {"NeighborhoodManager", true, newNeighborhoodManager,
      {{"isValidNeighborhood", neighborhoodManagerIsValid}, {"getNeighborhoodType", neighborhoodManagerType},
@@ -297,9 +304,10 @@ const ScriptClass kClasses[] = {
       {"getNumQueuedInteractions", cachedPersonQueueCount}, {"getQueuedInteractionId", cachedPersonQueuedId},
       {"getQueuedInteractionObjectId", cachedPersonQueuedObjectId},
       {"getGUID", cachedPersonGuid},
+      {"unlockVacationCollectible", cachedPersonUnlockCollectible},
       {"isQueuedObjAdvertisingForX", cachedPersonQueuedAdvertising},
       {"getFriendsRequiredForPromtion", cachedPersonFriendsForPromotion}},
-     {"getMotive", "setMotive", "cancelQueuedInteraction", "getNumSubQueuedInteractions", "getQueuedSubInteractionId", "getQueuedSubInteractionObjectId", "unlockVacationCollectible", "isAccessibleRoom"},
+     {"getMotive", "setMotive", "cancelQueuedInteraction", "getNumSubQueuedInteractions", "getQueuedSubInteractionId", "getQueuedSubInteractionObjectId", "isAccessibleRoom"},
      {}},
     {"ObjectDataTable", true, newObjectDataTable,
      {{"newTable", dataTableNew}, {"removeTable", dataTableRemove}, {"clearTable", dataTableClear},
@@ -327,6 +335,7 @@ const ScriptClass kClasses[] = {
      {}},
     {"ObjectManager", true, newObjectManager,
      {{"verifyObjectId", objectManagerVerifyObjectId},
+      {"removeObjectInstance", objectManagerRemoveObjectInstance},
       {"verifyNeighborId", objectManagerVerifyNeighborId},
       {"isValidObjectGUID", objectManagerIsValidObjectGuid},
       {"getObjectGUIDFromObjectId", objectManagerGetObjectGuidFromObjectId},
@@ -337,7 +346,7 @@ const ScriptClass kClasses[] = {
       {"getObjectIds", objectManagerGetObjectIds},
       {"getNeighborIds", objectManagerGetNeighborIds}},
      {"getDistanceBetweenObjects", "isWallBetweenObjects", "getObjectDefinitionGUIDs",
-      "createNewObject", "removeObjectInstance", "getNeighborsWithRelationship", "getLoadBearingRoom"},
+      "createNewObject", "getNeighborsWithRelationship", "getLoadBearingRoom"},
      {{"kQuery_All", 0}, {"kQuery_ByGUID", 1}, {"kQuery_ForPartsofMultiTileObject", 2}, {"kQuery_ByObjectDataField", 3}, {"kQuery_ByAccessibleRooms", 4}, {"kQuery_ByAccessableRooms", 4}, {"kSpeciesFlag_Human", 1}, {"kSpeciesFlag_DogLarge", 2}, {"kSpeciesFlag_DogSmall", 4}, {"kSpeciesFlag_Cat", 8}, {"kSpeciesMask_All", 0}}},
 };
 

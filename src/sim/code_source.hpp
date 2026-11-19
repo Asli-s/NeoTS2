@@ -121,6 +121,24 @@ inline std::size_t containerSlotsOf(CodeSource& code, const ObjectType& type) {
     return original != nullptr ? std::max(type.containerSlots, original->containerSlots) : type.containerSlots;
 }
 
+// A slot entry's bone names: the first is the bone, as entry `bone` of the "Model - Bones" string
+// table 0x90 of `type`. Sims' character files mostly carry no such table and read the template
+// person's, as the Sim's model does. None for a bone past the table or below 0.
+inline std::optional<std::string> slotBoneNames(CodeSource& code, const ObjectType& type, std::int32_t bone) {
+    constexpr std::uint16_t kBoneNames = 0x90;
+    constexpr std::uint16_t kPerson = 2;
+    constexpr std::uint32_t kTemplatePersonGuid = 0x7FD96B54;
+    if (bone < 0) {
+        return std::nullopt;
+    }
+    std::uint32_t group = type.group;
+    if (type.definition.field(objd::field::kType) == kPerson && !code.string(group, kBoneNames, 0)) {
+        const ObjectType* templatePerson = code.objectType(kTemplatePersonGuid);
+        group = templatePerson != nullptr ? templatePerson->group : group;
+    }
+    return code.string(group, kBoneNames, static_cast<std::size_t>(bone));
+}
+
 // Object data 0x37 of an object of `type` made during play, as every saved object has it: the
 // type's number of target slots.
 constexpr std::size_t kTargetSlotCountField = 0x37;

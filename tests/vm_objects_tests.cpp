@@ -521,6 +521,31 @@ void babyPersonalityFollowsTheGameRules() {
     CHECK(ts2::sim::zodiacSign(traits(1000, 100, 400, 1000, 1000)) == 1);
 }
 
+// A Sim Make New Character makes takes its sign's personality and aspiration: the game's townie
+// Brenda (Aries, sign 1) holds copy 500, 300, 600, 800, 300 and aspiration 16. Up to a child the
+// aspiration is Grow Up, and a pet gets its sign's value instead of a personality.
+void madeSimsTakeTheirSignsPersonality() {
+    ts2::sim::SimRandom random(1234);
+    std::vector<std::int16_t> pd(231, 0);
+    pd[0x3A] = 19;
+    pd[0x41] = 1;
+    const std::string regions = ts2::sim::fillMadeSimPersonData(pd, 0x3805E5A8, random);
+    const std::int16_t sign = pd[0x46];
+    CHECK(sign >= 1 && sign <= 12 && pd[0x58] == static_cast<std::int16_t>(0xE5A8));
+    const auto personality = ts2::sim::signPersonality(sign);
+    for (const auto& [trait, value] : personality) {
+        CHECK(pd[trait] == value);
+    }
+    CHECK(pd[0x2F] == pd[7] && pd[0x30] == pd[2] && pd[0x31] == pd[3] && pd[0x32] == pd[6] && pd[0x33] == pd[5]);
+    CHECK(pd[0x2E] == ts2::sim::signAspiration(sign, 19) && regions.size() <= 52);
+    const auto aries = ts2::sim::signPersonality(1);
+    CHECK(aries.at(7) == 500 && aries.at(2) == 300 && aries.at(3) == 600 && aries.at(6) == 800 && aries.at(5) == 300);
+    CHECK(ts2::sim::signAspiration(1, 19) == 16 && ts2::sim::signAspiration(1, 3) == 0x40 && ts2::sim::signAspiration(13, 19) == 0);
+    std::vector<std::int16_t> pet(231, 0);
+    pet[0xBA] = 1;
+    CHECK(ts2::sim::fillMadeSimPersonData(pet, 7, random).empty() && pet[0xC7] == ts2::sim::signPetValue(pet[0x46]) && pet[2] == 0);
+}
+
 void babyGenesFollowTheGameRules() {
     using ts2::sim::Gene;
     using ts2::sim::Genome;
@@ -2507,6 +2532,37 @@ void heldObjectsComeAlongWithTheirHolder() {
     CHECK(held.level == 3);
 }
 
+// A Sim's effect at a slot gets the slot's bone from the template person's bone names, as Sims'
+// character files carry none.
+void effectStopStartNamesASimsBoneFromTheTemplatePerson() {
+    constexpr std::uint32_t kCharacterGroup = 0x7E000001, kTemplateGroup = 0x7E000002;
+    constexpr std::uint32_t kSimGuid = 0x51515151, kTemplatePersonGuid = 0x7FD96B54;
+    MemoryCodeSource code;
+    ts2::slot::Entry head;
+    head.type = ts2::slot::kTargetSlot;
+    head.objectFlags = 0x20000;
+    head.bone = 1;
+    code.addObjectType(kCharacterGroup, typed(kSimGuid, ts2::sim::kPersonType), {}, {}, {head});
+    code.addObjectType(kTemplateGroup, typed(kTemplatePersonGuid, ts2::sim::kPersonType));
+    code.addStrings(kTemplateGroup, 0x90, {"r_hand_grip", "glasses_grip"});
+    code.addStrings(kCharacterGroup, 0x8F, {"balloon_fx"});
+    code.add(kCharacterGroup, 0x1000, bhav({effectStopStart(0, 0, 0, 0)}));
+    ts2::sim::World world;
+    std::vector<ts2::sim::EffectCommand> asked;
+    world.setEffectCommands([&](const ts2::sim::EffectCommand& c) { asked.push_back(c); });
+    auto& sim = world.create(kCharacterGroup, typed(kSimGuid, ts2::sim::kPersonType));
+    sim.data[0x0B] = sim.id;
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(sim, 0x1000).outcome == Outcome::True);
+    CHECK(asked.size() == 1 && asked[0].bone == "glasses_grip");
+    // A Sim's own bone names come first.
+    code.addStrings(kCharacterGroup, 0x90, {"own_grip", "own_head"});
+    asked.clear();
+    Vm again(code, {}, &world);
+    CHECK(again.run(sim, 0x1000).outcome == Outcome::True);
+    CHECK(asked.size() == 1 && asked[0].bone == "own_head");
+}
+
 void effectStopStartAsksForEffects() {
     using Do = ts2::sim::EffectCommand::Do;
     MemoryCodeSource code;
@@ -3157,6 +3213,40 @@ void messageBoxWaitsForAButton() {
     CHECK(w.world.messageAsked() == nullptr);
 }
 
+// A semi-global tree's message box takes its texts from the code owner's own group, as the careers'
+// "Sub - Chance Card - Dialog" does: type 2 with byte 8 0x0E, the text and two buttons from temps
+// 0-2, the title #18 and the third button #19, which every career object holds as "$Me" and
+// "Ignore". The careers' semi-global table has other texts at those lines.
+void semiGlobalMessageBoxTakesTheOwnersTexts() {
+    MemoryCodeSource code;
+    Instruction in = dialog(0x02, 0x00);
+    in.operands[0] = 19;
+    in.operands[6] = 18;
+    in.operands[8] = 0x0E;
+    code.add(kSemiGroup, 0x2000, bhav({in}));
+    std::vector<std::string> career(22), semiGlobal(22);
+    career[17] = "Career";
+    career[18] = "Ignore";
+    career[19] = "A chance to shine.";
+    career[20] = "Work late";
+    career[21] = "Go home";
+    semiGlobal[17] = "$NameLocal:2 has brought a friend home from work today.";
+    semiGlobal[18] = "$Me has been promoted to $JobTitle:1:0!";
+    code.addStrings(kObjectGroup, 0x12D, career);
+    code.addStrings(kSemiGroup, 0x12D, semiGlobal);
+    SmallWorld w;
+    w.world.setAsksMessages(true);
+    Vm vm(code, {}, &w.world);
+    w.controller->thread = {};
+    w.controller->thread.temps[0] = 20;
+    w.controller->thread.temps[1] = 21;
+    w.controller->thread.temps[2] = 22;
+    CHECK(vm.run(*w.controller, 0x2000).outcome == Outcome::Sleeping);
+    const auto* asked = w.world.messageAsked();
+    CHECK(asked != nullptr && asked->title == "Career" && asked->message == "A chance to shine.");
+    CHECK((asked->buttons == std::vector<std::string>{"Work late", "Go home", "Ignore"}));
+}
+
 // New objects lead themselves (object data 0x13), as every saved single-tile object does, so code
 // that takes "stack obj's lead tile object ID" as the stack object (CT - Intersect IDs) keeps it.
 void newObjectsLeadThemselves() {
@@ -3648,6 +3738,7 @@ std::vector<Test> vmObjectTests() {
         {"Play/Stop Sound Event names the sound and its source", soundEventNamesTheSoundAndItsSource},
         {"held objects come along with their holder", heldObjectsComeAlongWithTheirHolder},
         {"Effect Stop/Start asks for effects", effectStopStartAsksForEffects},
+        {"Effect Stop/Start names a Sim's bone from the template person", effectStopStartNamesASimsBoneFromTheTemplatePerson},
         {"Cinematic checks its actors and starts none", cinematicChecksItsActorsAndStartsNone},
         {"RayTrace rules judge the hits", rayTraceRulesJudgeTheHits},
         {"RayTrace asks the scene and writes temp 0", rayTraceAsksTheSceneAndWritesTemp0},
@@ -3657,8 +3748,10 @@ std::vector<Test> vmObjectTests() {
         {"object type picker waits for the pick", typePickerWaitsForThePick},
         {"change appearance waits for the answer", changeAppearanceWaitsForTheAnswer},
         {"message box waits for a button", messageBoxWaitsForAButton},
+        {"semi-global message box takes the owner's texts", semiGlobalMessageBoxTakesTheOwnersTexts},
         {"baby genes follow the game's rules", babyGenesFollowTheGameRules},
         {"baby personality follows the game's rules", babyPersonalityFollowsTheGameRules},
+        {"made Sims take their sign's personality", madeSimsTakeTheirSignsPersonality},
         {"baby genes draw in the game's order", babyGenesDrawInTheGamesOrder},
         {"Camera Control waits while the camera moves", cameraControlWaitsWhileTheCameraMoves},
         {"Alter Budget charges the funds", alterBudgetChargesTheFunds},

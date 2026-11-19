@@ -415,6 +415,32 @@ void Execution::queueSkipped(const SimObject& sim, SimObject& object) {
     }
 }
 
+// Takes out of `sim`'s main queue (or sub-queue when `nested`) the first interaction with a lower
+// priority than `priority` and every one after it. Each one dropped drops its linked interactions
+// and runs its object's Queue Skipped function, as a skipped one does.
+void Execution::dropLessUrgent(SimObject& sim, bool nested, std::int16_t priority) {
+    const auto sameQueue = [nested](const QueuedInteraction& q) { return q.nested == nested; };
+    const auto first = std::find_if(sim.queue.begin(), sim.queue.end(),
+                                    [&](const QueuedInteraction& q) { return sameQueue(q) && q.priority < priority; });
+    if (first == sim.queue.end()) {
+        return;
+    }
+    std::vector<QueuedInteraction> dropped;
+    std::copy_if(first, sim.queue.end(), std::back_inserter(dropped), sameQueue);
+    sim.queue.erase(std::remove_if(first, sim.queue.end(), sameQueue), sim.queue.end());
+    if (nested) {
+        noteSubQueue(sim);
+    } else {
+        noteNextQueued(sim);
+    }
+    for (QueuedInteraction& removed : dropped) {
+        dropLinked(removed, &sim);
+        if (SimObject* object = world().find(removed.object)) {
+            queueSkipped(sim, *object);
+        }
+    }
+}
+
 void Execution::dropLinked(QueuedInteraction& ended, const SimObject* skip) {
     dropLinkedInteractions(world(), ended, skip, [this](SimObject& sim, const QueuedInteraction& removed) {
         if (SimObject* object = world().find(removed.object)) {
@@ -618,10 +644,10 @@ void Execution::runPushedAtOnce(SimObject& sim, const SimObject& object, const Q
 //   byte 2       priority: 0 my own ("Priority" person data), 1 high (100), 2 low (20), 3 medium (50)
 //   byte 3       bit 0: the Sim it is with (its queue icon) is the object in local byte 4, and the
 //                queue leaves it out without one or an icon GUID (byte 14 bit 2). Bit 2: a
-//                continuation, not held back by the queue limit. Bit 3: autonomous (person data
-//                0xA6 while it runs). Bit 6: linked with the link number in owner byte 8, data
-//                bytes 9-10. Bit 7: its link number goes to owner byte 11, data bytes 12-13
-//                (see linked_interactions.hpp)
+//                continuation, not held back by the queue limit and queued first. Bit 3:
+//                autonomous (person data 0xA6 while it runs). Bit 6: linked with the link number
+//                in owner byte 8, data bytes 9-10. Bit 7: its link number goes to owner byte 11,
+//                data bytes 12-13 (see linked_interactions.hpp)
 //   byte 14      bit 0: my parameters are its arguments. Bit 1: object and number from autonomy's
 //                choice (person data 0x35, object data 0x14). Bit 2: the queue icon is the type
 //                with GUID temp 5 << 16 | temp 4. Bit 3: the icon's index is temp 6, not byte 15.
@@ -775,8 +801,17 @@ bool Execution::pushInteraction(const bhav::Instruction& in, Frame& f) {
         runPushedAtOnce(sim, *object, queued);
         return true;
     }
-    sim.queue.push_back(queued);
-    sim.queue.back().id = ++sim.nextInteractionId;
+    // A continuation goes first in its queue, so it starts before anything already waiting. Any
+    // other push goes last, after it drops every interaction of its queue from the first one with a
+    // lower priority on.
+    QueuedInteraction* added = nullptr;
+    if (queued.continuation) {
+        added = &*sim.queue.insert(sim.queue.begin(), queued);
+    } else {
+        dropLessUrgent(sim, queued.nested, queued.priority);
+        added = &sim.queue.emplace_back(queued);
+    }
+    added->id = ++sim.nextInteractionId;
     if (queued.nested) {
         noteSubQueue(sim);
     } else {

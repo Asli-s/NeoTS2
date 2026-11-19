@@ -252,9 +252,37 @@ int runTree(lua_State* L) {
             values[static_cast<std::size_t>(i)] = argShort(L, i + 3);
         }
     }
-    const int result = c.runTree && name != nullptr ? c.runTree(name, stackObject, values) : 0;
+    const int result = c.runTree && name != nullptr ? c.runTree(name, stackObject, values, 0) : 0;
     if (result < 0) {
         return stopUnsupported(L, "RunTree");
+    }
+    lua_pushboolean(L, result);
+    return 1;
+}
+
+// RunTreeWithGuid(guid, name[, stackObject, args...]) is RunTree with the tree looked up in the code
+// of the object type with that GUID (its own trees, then its semi-global and global ones), still run
+// as the running object. A GUID no type has is error 0x7A.
+int runTreeWithGuid(lua_State* L) {
+    constexpr std::size_t kMaxArguments = 8;
+    ScriptCall& c = call(L);
+    const std::uint32_t guid = argUnsigned(L, 1);
+    if (c.code == nullptr || c.code->objectType(guid) == nullptr) {
+        return gameError(L, kErrorBadGuid);
+    }
+    const int arguments = lua_gettop(L);
+    const char* name = lua_tostring(L, 2);
+    std::array<std::int16_t, kMaxArguments> values{};
+    std::int16_t stackObject = c.stackObject;
+    if (arguments >= 3) {
+        stackObject = argShort(L, 3);
+        for (int i = 0; i < arguments - 3 && i < static_cast<int>(kMaxArguments); ++i) {
+            values[static_cast<std::size_t>(i)] = argShort(L, i + 4);
+        }
+    }
+    const int result = c.runTree && name != nullptr && guid != 0 ? c.runTree(name, stackObject, values, guid) : 0;
+    if (result < 0) {
+        return stopUnsupported(L, "RunTreeWithGuid");
     }
     lua_pushboolean(L, result);
     return 1;
@@ -445,6 +473,16 @@ int cachedFamilyMemberCount(lua_State* L) {
     return 1;
 }
 
+// CachedFamily:getLastSavedFunds(): the family's funds when its lot was last saved (see
+// World::familyLastSavedFunds), 0 for an unknown family.
+int cachedFamilyLastSavedFunds(lua_State* L) {
+    const auto* self = selfInstance(L);
+    const ScriptCall& c = call(L);
+    const auto funds = self != nullptr && c.world != nullptr ? c.world->familyLastSavedFunds(static_cast<std::uint32_t>(self->id)) : std::nullopt;
+    lua_pushnumber(L, funds.value_or(0));
+    return 1;
+}
+
 // CachedPerson.new(objectId): a Sim on the lot. Anything else is error 0x1C.
 int newCachedPerson(lua_State* L) {
     const std::int16_t id = argShort(L, 1);
@@ -479,23 +517,153 @@ int neighborhoodIsApartmentResident(lua_State* L) {
     return 1;
 }
 
+int missingLot(lua_State* L, std::int32_t id);
+
+namespace {
+
+// Whether an object is an apartment door: a door (object data 0x3B, its category, is 0x1A) whose
+// OBJD field 0x4B is 0xCC.
+bool isApartmentDoor(const SimObject& o) {
+    constexpr std::size_t kCategoryField = 0x3B, kApartmentDoorField = 0x4B;
+    constexpr std::int16_t kDoorCategory = 0x1A;
+    constexpr std::uint16_t kApartmentDoorValue = 0xCC;
+    return o.data[kCategoryField] == kDoorCategory && o.definition.field(kApartmentDoorField) == kApartmentDoorValue;
+}
+
+} // namespace
+
 // Neighborhood:isApartmentDoor(objectId): on an apartment building or one of its apartments (lot
-// types 8 and 9), whether the object is a door (object data 0x3B, its category, is 0x1A) whose OBJD
-// field 0x4B is 0xCC. Objects queued for delete still count. False on other lots.
+// types 8 and 9), whether the object is an apartment door. Objects queued for delete still count.
+// False on other lots.
 int neighborhoodIsApartmentDoor(lua_State* L) {
     ScriptCall& c = call(L);
     const std::int16_t id = argShort(L, 2);
     const std::uint8_t type = c.world ? c.world->lotType() : 0;
-    constexpr std::size_t kCategoryField = 0x3B, kApartmentDoorField = 0x4B;
-    constexpr std::int16_t kDoorCategory = 0x1A;
-    constexpr std::uint16_t kApartmentDoorValue = 0xCC;
     bool door = false;
     if (type == kApartmentBuildingLot || type == kApartmentLot) {
         const SimObject* o = c.world->findIncludingRemoved(id);
-        door = o != nullptr && o->data[kCategoryField] == kDoorCategory &&
-               o->definition.field(kApartmentDoorField) == kApartmentDoorValue;
+        door = o != nullptr && isApartmentDoor(*o);
     }
     lua_pushboolean(L, door);
+    return 1;
+}
+
+namespace {
+
+// Neighborhood:getApartmentLinkedLots, getApartmentLinkedFamilies, getApartmentLinkedControlRooms
+// and getRoommateId(lotId): a table of one value of each apartment lived in that the lot lists (see
+// World::lotApartments), keyed 0, 1, 2 and on in the building's order. Empty for a lot that isn't
+// an apartment building or apartment. A lot the neighborhood doesn't place is error 0x9B.
+int apartmentValues(lua_State* L, std::size_t value) {
+    const ScriptCall& c = call(L);
+    const std::int16_t id = argShort(L, 2);
+    if (c.world == nullptr || !c.world->placedLotType(id)) {
+        return missingLot(L, id);
+    }
+    lua_newtable(L);
+    int key = 0;
+    for (const auto& apartment : c.world->lotApartments(id)) {
+        lua_pushnumber(L, key++);
+        lua_pushnumber(L, static_cast<std::int32_t>(apartment[value]));
+        lua_settable(L, -3);
+    }
+    return 1;
+}
+
+} // namespace
+
+// Neighborhood:getAptBaseLot(lotId): the building the lot's description names, as an apartment's own
+// lot names its building, else 0. A lot the neighborhood doesn't place is error 0x9B.
+int neighborhoodGetAptBaseLot(lua_State* L) {
+    const ScriptCall& c = call(L);
+    const std::int16_t id = argShort(L, 2);
+    if (c.world == nullptr || !c.world->placedLotType(id)) {
+        return missingLot(L, id);
+    }
+    lua_pushnumber(L, c.world->placedLotBuilding(id));
+    return 1;
+}
+
+int neighborhoodGetApartmentLinkedLots(lua_State* L) { return apartmentValues(L, 0); }
+int neighborhoodGetApartmentLinkedFamilies(lua_State* L) { return apartmentValues(L, 1); }
+int neighborhoodGetApartmentLinkedControlRooms(lua_State* L) { return apartmentValues(L, 2); }
+int neighborhoodGetRoommateId(lua_State* L) { return apartmentValues(L, 3); }
+
+namespace {
+
+// Whether an apartment door belongs to a neighbor. Door attribute 13 holds a family and attribute 15
+// a neighbor: the door is the family's when attribute 13 is the neighbor's family below 32000, and
+// otherwise the neighbor's own when attribute 15 is its id and either attribute 13 is its family or
+// the neighbor is a roommate on the lot (person data 0x54 bit 0x800) and attribute 13 is below
+// 32000. A Sim on the lot answers for the neighbor with its person data 0x3D (family) and 0x1F (id).
+bool apartmentDoorOf(const ScriptCall& c, const SimObject& door, const SavedNeighbor& neighbor, std::int16_t neighborId) {
+    const SimObject* sim = c.world->nextAfter(std::numeric_limits<std::int16_t>::min(),
+                                              [&](const SimObject& o) { return o.isPerson() && o.definition.guid() == neighbor.guid; });
+    constexpr std::size_t kFamilyData = 0x3D, kNeighborData = 0x1F;
+    const std::int16_t family = sim != nullptr                                ? sim->personData[kFamilyData]
+                                : neighbor.personData.size() > kFamilyData ? neighbor.personData[kFamilyData]
+                                                                             : 0;
+    const std::int16_t id = sim != nullptr ? sim->personData[kNeighborData] : neighborId;
+    // Doors keep their type's attribute count, at least 8. What the game reads past a door's count is
+    // not known yet, so a door with fewer than 16 belongs to no one.
+    constexpr std::size_t kFamilyAttribute = 13, kNeighborAttribute = 15, kLeastAttributes = 8;
+    const std::size_t count = std::max<std::size_t>(door.definition.field(objd::field::kNumAttributes), kLeastAttributes);
+    if (count <= kNeighborAttribute) {
+        return false;
+    }
+    constexpr std::int16_t kFirstGameFamily = 32000;
+    const std::int16_t doorFamily = door.attributes[kFamilyAttribute], doorNeighbor = door.attributes[kNeighborAttribute];
+    if (doorFamily == family) {
+        return family < kFirstGameFamily || doorNeighbor == id;
+    }
+    const bool roommate = sim != nullptr && (sim->personData[0x54] & 0x800) != 0;
+    return roommate && doorFamily < kFirstGameFamily && doorNeighbor == id;
+}
+
+} // namespace
+
+// Neighborhood:isNeighborsApartment(neighborId, objectId): whether the object is an apartment door
+// that belongs to the neighbor (see apartmentDoorOf). False when it isn't an apartment door or the
+// neighborhood doesn't have the neighbor. An apartment door with 16 attributes or fewer is the game's
+// error 6.
+int neighborhoodIsNeighborsApartment(lua_State* L) {
+    ScriptCall& c = call(L);
+    const std::int16_t neighborId = argShort(L, 2), id = argShort(L, 3);
+    const std::uint8_t type = c.world ? c.world->lotType() : 0;
+    const SimObject* any = type == kApartmentBuildingLot || type == kApartmentLot ? c.world->findIncludingRemoved(id) : nullptr;
+    const SavedNeighbor* neighbor = any != nullptr && isApartmentDoor(*any) ? c.world->neighbor(neighborId) : nullptr;
+    if (neighbor == nullptr) {
+        lua_pushboolean(L, false);
+        return 1;
+    }
+    const SimObject* door = c.world->find(id);
+    if (door == nullptr) {
+        char message[48];
+        std::snprintf(message, sizeof message, "Could not find object: %d", static_cast<int>(id));
+        gameError(L, kErrorScriptCheck, message);
+    }
+    constexpr std::int16_t kErrorTooFewAttributes = 6;
+    constexpr std::size_t kLeastAttributes = 8, kMostRefused = 16;
+    if (std::max<std::size_t>(door->definition.field(objd::field::kNumAttributes), kLeastAttributes) <= kMostRefused) {
+        gameError(L, kErrorTooFewAttributes);
+    }
+    lua_pushboolean(L, apartmentDoorOf(c, *door, *neighbor, neighborId));
+    return 1;
+}
+
+// Neighborhood:getNIDsApartment(neighborId): the id of the first apartment door on the lot, in id
+// order, that belongs to the neighbor, or 0. Also 0 for a neighbor the neighborhood doesn't have.
+int neighborhoodGetNidsApartment(lua_State* L) {
+    ScriptCall& c = call(L);
+    const std::int16_t neighborId = argShort(L, 2);
+    const SavedNeighbor* neighbor = c.world ? c.world->neighbor(neighborId) : nullptr;
+    const std::uint8_t type = c.world ? c.world->lotType() : 0;
+    const SimObject* door = nullptr;
+    if (neighbor != nullptr && (type == kApartmentBuildingLot || type == kApartmentLot)) {
+        door = c.world->nextAfter(std::numeric_limits<std::int16_t>::min(),
+                                  [&](const SimObject& o) { return isApartmentDoor(o) && apartmentDoorOf(c, o, *neighbor, neighborId); });
+    }
+    lua_pushnumber(L, door != nullptr ? door->id : 0);
     return 1;
 }
 
@@ -508,7 +676,7 @@ int neighborhoodIsValidLot(lua_State* L) {
 }
 
 // The game's error for a lot the neighborhood doesn't place.
-[[noreturn]] int missingLot(lua_State* L, std::int32_t id) {
+int missingLot(lua_State* L, std::int32_t id) {
     char message[64];
     std::snprintf(message, sizeof message, "Lot with id %d does not exist!", static_cast<int>(id));
     gameError(L, kErrorScriptCheck, message);
@@ -795,6 +963,21 @@ int cachedPersonGuid(lua_State* L) {
     const auto* self = selfInstance(L);
     const SimObject& o = personOrError(L, self ? static_cast<std::int16_t>(self->id) : 0);
     lua_pushnumber(L, static_cast<lua_Number>(static_cast<std::int32_t>(o.definition.guid())));
+    return 1;
+}
+
+// CachedPerson:unlockVacationCollectible(n): sets bit n - 1 of the Sim's 64 collectible bits and
+// returns true. Like the game, a number past 64 or below 1 sets bit (n - 33) mod 32 of the upper half.
+int cachedPersonUnlockCollectible(lua_State* L) {
+    const auto* self = selfInstance(L);
+    SimObject& o = personOrError(L, self ? static_cast<std::int16_t>(self->id) : 0);
+    const std::uint32_t bit = static_cast<std::uint32_t>(argInt(L, 2)) - 1;
+    if (bit < 32) {
+        o.vacationCollectibles[0] |= 1u << bit;
+    } else {
+        o.vacationCollectibles[1] |= 1u << ((bit - 32) & 31);
+    }
+    lua_pushboolean(L, 1);
     return 1;
 }
 

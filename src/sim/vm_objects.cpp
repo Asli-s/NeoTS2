@@ -225,7 +225,6 @@ bool Execution::effectStopStart(const bhav::Instruction& in, Frame& f) {
     constexpr std::uint16_t kAnotherPersonType = 0x11;
     constexpr std::uint16_t kFlagGlobal = 0x1, kFlagSemiGlobal = 0x2, kFlagIndexInTemp = 0x8, kFlagNumberInTemp = 0x40, kFlagQueue = 0x80;
     constexpr std::size_t kLeadField = 0x0A;  // OBJD: which part of a bigger object this type is
-    constexpr std::uint16_t kBoneNames = 0x90;
     constexpr std::uint32_t kSlotNamesBone = 0x20000;
     constexpr int kStart = 0, kStartHard = 1, kStop = 2, kStopHard = 3, kStopPrimitive = 4, kForgetOther = 5, kOnce = 6, kList = 7, kForgetPrimitive = 8, kForgetAll = 9,
                   kStateFirst = 10, kStateLast = 13, kStopEvery = 14, kStartKept = 15;
@@ -268,7 +267,7 @@ bool Execution::effectStopStart(const bhav::Instruction& in, Frame& f) {
             }
             const slot::Entry& entry = (*slots)[o[6]];
             if ((entry.objectFlags & kSlotNamesBone) && entry.bone >= 0) {
-                bone = code_.string(type->group, kBoneNames, static_cast<std::size_t>(entry.bone)).value_or(std::string());
+                bone = slotBoneNames(code_, *type, entry.bone).value_or(std::string());
             }
         }
     }
@@ -612,12 +611,14 @@ std::optional<bool> Execution::changeAppearanceDialog(Frame& f) {
 // The message box (types 0, 1, 2 and 4) shows a title over a text with OK, Yes and No, or Yes, No
 // and Cancel, and waits for a button. Its texts are entries of string table 0x12D, from 1: the text
 // bytes 13-14, the title byte 6 (none for 0), the buttons bytes 3, 4 and 0 (with byte 2 as the high
-// byte). They come from the running tree's group, its code owner's semi-global group with byte 8
-// bit 0, or the globals with bit 6. Byte 8 bits 1-5 take the text, the buttons and the title from
-// temps 0-4 instead. A text that is missing leaves the button its usual caption. Tokens are filled
-// in every text. Byte 7 bits 1-3 at 0 show a picture: what the text's tokens name, else the stack
-// object (a Sim's portrait, a multi-tile object's lead). The first button is true and the others
-// false. For type 2 the second puts 0 and the third 1 in the temp byte 7 names.
+// byte). They come from the code owner's own group, even when the tree is semi-global, from its
+// semi-global group with byte 8 bit 0, or from the globals with bit 6. So a career's chance card,
+// run by the careers' semi-global code, shows the career object's own texts. Byte 8 bits 1-5 take
+// the text, the buttons and the title from temps 0-4 instead. A text that is missing leaves the
+// button its usual caption. Tokens are filled in every text. Byte 7 bits 1-3 at 0 show a picture:
+// what the text's tokens name, else the stack object (a Sim's portrait, a multi-tile object's
+// lead). The first button is true and the others false. For type 2 the second puts 0 and the third
+// 1 in the temp byte 7 names.
 std::optional<bool> Execution::messageDialog(const bhav::Instruction& in, Frame& f, std::int16_t& answerTemp) {
     const auto& o = in.operands;
     const std::uint8_t type = o[5];
@@ -633,7 +634,7 @@ std::optional<bool> Execution::messageDialog(const bhav::Instruction& in, Frame&
         return *button == 0;
     }
     const std::uint8_t flags = o[8];
-    const std::uint32_t textGroup = (flags & 0x01) ? code_.semiGlobalGroup(f.codeOwner) : (flags & 0x40) ? kGlobalGroup : f.group;
+    const std::uint32_t textGroup = (flags & 0x01) ? code_.semiGlobalGroup(f.codeOwner) : (flags & 0x40) ? kGlobalGroup : f.codeOwner;
     auto number = [&](int fromTemp, std::uint16_t operand) {
         return (flags & fromTemp) ? static_cast<std::uint16_t>(thread_.temps[static_cast<std::size_t>(std::countr_zero(static_cast<unsigned>(fromTemp)) - 1)])
                                   : operand;
@@ -1100,12 +1101,28 @@ bool Execution::luaScript(const bhav::Instruction& in, Frame& f) {
     call.testedLine = testedLine;
     // What a tree run from the script can't run yet stops the caller as itself, not as a script error.
     std::optional<Stop> treeStop;
-    call.runTree = [this, &treeStop](const std::string& tree, std::int16_t stack, std::span<const std::int16_t> args) {
+    call.runTree = [this, &treeStop](const std::string& tree, std::int16_t stack, std::span<const std::int16_t> args, std::uint32_t codeGuid) {
         try {
-            return scriptRunTree(tree, stack, args);
+            return scriptRunTree(tree, stack, args, codeGuid);
         } catch (const Stop& stop) {
             treeStop = stop;
             return -1;
+        }
+    };
+    call.restoreArchive = [this, &treeStop](std::uint32_t archive, std::span<const std::int16_t> params) -> std::int16_t {
+        try {
+            return restoreArchive(archive, params);
+        } catch (const Stop& stop) {
+            treeStop = stop;
+            return 0;
+        }
+    };
+    call.createObject = [this, &treeStop](std::uint32_t guid) -> std::int16_t {
+        try {
+            return createOutOfWorld(guid);
+        } catch (const Stop& stop) {
+            treeStop = stop;
+            return 0;
         }
     };
     const auto table = static_cast<std::uint16_t>(o[0] | o[1] << 8);
@@ -1138,9 +1155,9 @@ bool Execution::luaScript(const bhav::Instruction& in, Frame& f) {
     throw Stop{Outcome::Unsupported, "script error: " + call.luaError, *name};
 }
 
-int Execution::scriptRunTree(const std::string& name, std::int16_t stackObject, std::span<const std::int16_t> args) {
+int Execution::scriptRunTree(const std::string& name, std::int16_t stackObject, std::span<const std::int16_t> args, std::uint32_t codeGuid) {
     SimObject& self = me();
-    const ObjectType* type = code_.objectType(self.definition.guid());
+    const ObjectType* type = code_.objectType(codeGuid != 0 ? codeGuid : self.definition.guid());
     if (type == nullptr) {
         return 0;
     }

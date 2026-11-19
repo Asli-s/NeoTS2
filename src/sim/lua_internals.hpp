@@ -80,6 +80,8 @@ constexpr std::int16_t kErrorMissingFamily = 0x9A;
 
 // Script results, temps, params, locals, bits and GUIDs (lua_script_values.cpp).
 int setScriptReturnValue(lua_State* L);
+int setCacheable(lua_State* L);
+int setCacheableTemps(lua_State* L);
 int getStackObjectId(lua_State* L);
 int getPrimitiveParameter(lua_State* L);
 int getTemp(lua_State* L);
@@ -170,6 +172,9 @@ template <typename... Args>
 }
 
 int newObjectManager(lua_State* L);
+int objectManagerRemoveObjectInstance(lua_State* L);
+int newLightingManager(lua_State* L);
+int lightingManagerSetPlacementRoomLightPercent(lua_State* L);
 
 // Object and neighbor data tables (lua_data_tables.cpp).
 // Lists scripts fill hold at most as many values as a 16-bit index can name (a limit of ours).
@@ -213,6 +218,7 @@ int getPersonMotive(lua_State* L);
 int setPersonMotive(lua_State* L);
 int multiplyAdValues(lua_State* L);
 int runTree(lua_State* L);
+int runTreeWithGuid(lua_State* L);
 int getNeighborPersonData(lua_State* L);
 int setNeighborPersonData(lua_State* L);
 int getNeighborRelationship(lua_State* L);
@@ -231,9 +237,17 @@ int cachedFamilyCurrentLotId(lua_State* L);
 int cachedFamilyVacationLotId(lua_State* L);
 int cachedFamilyMembers(lua_State* L);
 int cachedFamilyMemberCount(lua_State* L);
+int cachedFamilyLastSavedFunds(lua_State* L);
 int neighborhoodIsRoommate(lua_State* L);
 int neighborhoodIsApartmentDoor(lua_State* L);
 int neighborhoodIsApartmentResident(lua_State* L);
+int neighborhoodGetApartmentLinkedLots(lua_State* L);
+int neighborhoodGetApartmentLinkedFamilies(lua_State* L);
+int neighborhoodGetApartmentLinkedControlRooms(lua_State* L);
+int neighborhoodGetRoommateId(lua_State* L);
+int neighborhoodGetAptBaseLot(lua_State* L);
+int neighborhoodIsNeighborsApartment(lua_State* L);
+int neighborhoodGetNidsApartment(lua_State* L);
 int neighborhoodGetLotOwner(lua_State* L);
 int neighborhoodGetWitchLotType(lua_State* L);
 int neighborhoodGetLotType(lua_State* L);
@@ -257,6 +271,7 @@ int cachedPersonQueueCount(lua_State* L);
 int cachedPersonQueuedId(lua_State* L);
 int cachedPersonQueuedObjectId(lua_State* L);
 int cachedPersonGuid(lua_State* L);
+int cachedPersonUnlockCollectible(lua_State* L);
 int cachedPersonFriendsForPromotion(lua_State* L);
 int cachedPersonSetData(lua_State* L);
 int cachedNeighborGetData(lua_State* L);
@@ -286,6 +301,9 @@ int getObjectsOnTile(lua_State* L);
 int getObjectTile(lua_State* L);
 int getObjectLocation(lua_State* L);
 int isOutsideForWeather(lua_State* L);
+int getLoadBearingRoomAtLocation(lua_State* L);
+int getRoomAtLocation(lua_State* L);
+int canMoveObjectToLocation(lua_State* L);
 int newWeatherInfo(lua_State* L);
 int newNeighborhoodManager(lua_State* L);
 int neighborhoodManagerIsValid(lua_State* L);
@@ -331,6 +349,7 @@ int tokenPopProperty(lua_State* L);
 int tokenPropertiesCopy(lua_State* L);
 int tokenSetProperties(lua_State* L);
 int newInventory(lua_State* L);
+int inventoryCreateObjectFromToken(lua_State* L);
 int inventoryAddToken(lua_State* L);
 int inventoryAddTokenWithCategory(lua_State* L);
 int inventoryRemoveMarked(lua_State* L);

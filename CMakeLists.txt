@@ -340,6 +340,7 @@ add_library(ts2sim
     src/sim/newborn_save.cpp
     src/sim/hood_save.cpp
     src/sim/hood_save_neighbors.cpp
+    src/sim/family_picture.cpp
     src/sim/relationship_table.cpp
     src/sim/lot_save_types.cpp
     src/sim/look_at.cpp
@@ -360,6 +361,7 @@ add_library(ts2sim
     src/sim/vm_values.cpp
     src/sim/vm_sims.cpp
     src/sim/vm_objects.cpp
+    src/sim/vm_archive_restore.cpp
     src/sim/vm_notifications.cpp
     src/sim/vm_inventory.cpp
     src/sim/vm_set_to_next.cpp
@@ -428,6 +430,7 @@ add_library(ts2scene
     src/scene/imposter_cache.cpp
     src/scene/lot_skirt.cpp
     src/scene/sky_looks.cpp
+    src/scene/curved_pool.cpp
     src/scene/pool_water.cpp
     src/scene/prop_fade.cpp
     src/scene/terrain_water.cpp
@@ -435,11 +438,13 @@ add_library(ts2scene
     src/scene/pick.cpp
     src/scene/object_lights.cpp
     src/scene/object_shadow.cpp
+    src/scene/family_picture_shadow.cpp
     src/scene/object_shadow_picture.cpp
     src/scene/outfit_properties.cpp
     src/scene/face_blend.cpp
     src/scene/newborn_face.cpp
     src/scene/newborn_face_shape.cpp
+    src/scene/overlay_fit.cpp
     src/scene/sims.cpp
     src/scene/catalog_bins.cpp
     src/scene/outfit_catalog.cpp
@@ -845,7 +850,7 @@ else()
         target_link_libraries(vm_tests PRIVATE ts2ui)
         target_compile_definitions(vm_tests PRIVATE NEOTS2_TEXT_LAYOUT_TESTS)
 
-        add_executable(neots2 app/main.cpp app/menu.cpp app/game_tv.cpp app/tv_stations.cpp app/game_audio.cpp app/game_effects.cpp app/game_surroundings.cpp app/game_graphics.cpp app/neighborhood.cpp app/neighborhood_ui.cpp app/lot_life.cpp app/lot_life_clips.cpp app/lot_life_effects.cpp app/lot_life_panels.cpp app/lot_life_objects.cpp app/lot_life_sims.cpp app/pose_numbers.cpp app/object_materials.cpp app/sim_loader.cpp app/lot_light.cpp app/imposter_baker.cpp app/lot_daylight.cpp app/route_sources.cpp app/lot_ui.cpp app/game_options_panel.cpp app/graphics_options_panel.cpp app/audio_options_panel.cpp app/options_list.cpp app/list_box_rows.cpp app/live_panel.cpp app/job_panel.cpp app/memories_page.cpp app/age_meter.cpp app/queue_panel.cpp app/pie_menu_ui.cpp app/mood_meter.cpp app/aspiration_bars.cpp app/pause_frame.cpp app/baby_name_dialog.cpp app/phone_book_dialog.cpp app/type_picker_dialog.cpp app/change_appearance_dialog.cpp app/notification_stack.cpp app/dialog_fills.cpp app/description_box.cpp app/cheat_console.cpp app/needs_panel.cpp app/personality_page.cpp app/relationships_panel.cpp app/rewards_panel.cpp app/simology_panel.cpp app/interests_page.cpp app/hobbies_page.cpp app/chemistry_page.cpp app/meter_bar.cpp app/skewer.cpp app/wants_panel.cpp app/portraits.cpp app/cursors.cpp
+        add_executable(neots2 app/main.cpp app/menu.cpp app/game_tv.cpp app/tv_stations.cpp app/game_audio.cpp app/game_effects.cpp app/game_surroundings.cpp app/game_graphics.cpp app/neighborhood.cpp app/neighborhood_ui.cpp app/lot_life.cpp app/lot_life_clips.cpp app/lot_life_effects.cpp app/lot_life_panels.cpp app/lot_life_objects.cpp app/lot_life_sims.cpp app/pose_numbers.cpp app/object_materials.cpp app/sim_loader.cpp app/lot_light.cpp app/imposter_baker.cpp app/lot_daylight.cpp app/route_sources.cpp app/lot_ui.cpp app/game_options_panel.cpp app/graphics_options_panel.cpp app/audio_options_panel.cpp app/options_list.cpp app/list_box_rows.cpp app/live_panel.cpp app/pet_panel.cpp app/job_panel.cpp app/memories_page.cpp app/age_meter.cpp app/queue_panel.cpp app/pie_menu_ui.cpp app/mood_meter.cpp app/aspiration_bars.cpp app/aspiration_popup.cpp app/pause_frame.cpp app/baby_name_dialog.cpp app/phone_book_dialog.cpp app/type_picker_dialog.cpp app/change_appearance_dialog.cpp app/notification_stack.cpp app/dialog_fills.cpp app/description_box.cpp app/cheat_console.cpp app/needs_panel.cpp app/personality_page.cpp app/relationships_panel.cpp app/rewards_panel.cpp app/simology_panel.cpp app/interests_page.cpp app/hobbies_page.cpp app/chemistry_page.cpp app/meter_bar.cpp app/skewer.cpp app/wants_panel.cpp app/portraits.cpp app/family_picture_save.cpp app/cursors.cpp
                        app/diagnostics.cpp app/crash_handler.cpp app/crash_dialog.cpp app/unexpected_exit.cpp app/report_upload.cpp app/message_box.cpp app/open_renderer.cpp)
         target_link_libraries(neots2 PRIVATE ts2render ts2ui ts2sim ts2diag project_warnings)
         # Audio output needs SDL 3; the SDL 1.2 build keeps the same interface silent.

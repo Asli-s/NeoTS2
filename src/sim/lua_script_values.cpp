@@ -32,6 +32,25 @@ int setFrameValue(lua_State* L, std::vector<std::int16_t>* values, std::int16_t 
 
 } // namespace
 
+int setCacheable(lua_State* L) {
+    call(L).cacheable = lua_toboolean(L, 1) != 0;
+    return 0;
+}
+
+// Every argument names a temp (0 to 7). Any other number is error 2.
+int setCacheableTemps(lua_State* L) {
+    std::uint8_t mask = 0;
+    for (int i = 1; i <= lua_gettop(L); ++i) {
+        const std::int16_t temp = argShort(L, i);
+        if (temp < 0 || temp > 7) {
+            return gameError(L, kErrorTempOutOfRange);
+        }
+        mask = static_cast<std::uint8_t>(mask | 1u << temp);
+    }
+    call(L).cacheableTemps = mask;
+    return 0;
+}
+
 int setScriptReturnValue(lua_State* L) {
     call(L).returnValue = lua_toboolean(L, 1) != 0;
     return 0;

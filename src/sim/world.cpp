@@ -1,5 +1,8 @@
 #include "sim/world.hpp"
 
+#include "sim/motives.hpp"
+#include "sim/relationship_table.hpp"
+
 #include <algorithm>
 #include <climits>
 #include <cmath>
@@ -24,6 +27,13 @@ SimObject& World::create(std::uint32_t group, objd::ObjectDefinition definition,
     object->arrayIterators.resize(object->arrays.size(), 0);
     object->slots.resize(containerSlots, 0);
     object->data[kSlotCountField] = static_cast<std::int16_t>(std::min<std::size_t>(containerSlots, INT16_MAX));
+    // A new Sim starts with Energy at 70 and Hunger at -40, and Energy at 70 in the motives of its
+    // last decay step, until its scripts and its first decay set them.
+    if (object->isPerson()) {
+        object->motives[motive::kEnergy] = 70.0f;
+        object->motives[motive::kHunger] = -40.0f;
+        object->motivesAtDecay[motive::kEnergy] = 70.0f;
+    }
 
     SimObject& ref = *object;
     objects_.emplace(ref.id, std::move(object));
@@ -94,6 +104,15 @@ std::vector<std::int16_t> World::listOrder() const {
 SimObject* World::find(std::int16_t id) {
     SimObject* o = findIncludingRemoved(id);
     return o != nullptr && !o->removed ? o : nullptr;
+}
+
+const WalkSetLines* World::walkLinesOf(const SimObject& sim) const {
+    constexpr std::size_t kSpecies = 0xBA;
+    if (!sim.walkSets.empty()) {
+        return &sim.walkSets.back()[0];
+    }
+    const bool pet = sim.personData.size() > kSpecies && sim.personData[kSpecies] >= 1 && sim.personData[kSpecies] <= 3;
+    return pet && petWalkLines_ ? &*petWalkLines_ : nullptr;
 }
 
 const SimObject* World::find(std::int16_t id) const {
@@ -269,6 +288,17 @@ std::vector<std::int16_t> World::removedIds() const {
     return ids;
 }
 
+std::vector<std::int16_t>& World::relationship(std::int16_t from, std::int16_t to) {
+    const auto [it, added] = relationships_.try_emplace({from, to});
+    if (added) {
+        relationshipAdded_ = true;
+        if (SimObject* holder = findIncludingRemoved(from)) {
+            addToRelationshipTable(holder->relationshipTable, static_cast<std::uint32_t>(static_cast<std::uint16_t>(to)));
+        }
+    }
+    return it->second;
+}
+
 void World::purge() {
     // A relationship can only lose one of its objects when an object was removed or when it is new.
     if (removedCount_ == 0 && !relationshipAdded_) {
@@ -301,7 +331,14 @@ void World::purge() {
         return false;
     });
     std::erase_if(relationships_, [this](const auto& entry) {
-        return findIncludingRemoved(entry.first.first) == nullptr || findIncludingRemoved(entry.first.second) == nullptr;
+        SimObject* holder = findIncludingRemoved(entry.first.first);
+        if (holder != nullptr && findIncludingRemoved(entry.first.second) != nullptr) {
+            return false;
+        }
+        if (holder != nullptr) {
+            std::erase(holder->relationshipTable, static_cast<std::uint32_t>(static_cast<std::uint16_t>(entry.first.second)));
+        }
+        return true;
     });
     removedCount_ = 0;
 }

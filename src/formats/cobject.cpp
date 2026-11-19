@@ -31,7 +31,7 @@ void skipFloats(BinaryReader& r, std::size_t n) {
     r.skip(4 * n);
 }
 
-void objectData(BinaryReader& r, std::uint32_t version, std::vector<SavedJoint>& joints) {
+void objectData(BinaryReader& r, std::uint32_t version, SavedObject& saved) {
     if (version < 0xD) {
         r.varString();
         r.i32();
@@ -50,7 +50,14 @@ void objectData(BinaryReader& r, std::uint32_t version, std::vector<SavedJoint>&
         }
     }
     if (version >= 0xF) {
-        skipFloats(r, kTransformFloats);
+        std::array<float, 3> position{};
+        for (auto& v : position) {
+            v = r.f32();
+        }
+        skipFloats(r, kTransformFloats - 3);
+        if (std::isfinite(position[0]) && std::isfinite(position[1]) && std::isfinite(position[2])) {
+            saved.position = position;
+        }
     }
     for (std::size_t j = r.i32Count(1 + 4 * kTransformFloats); j > 0; --j) {
         SavedJoint joint;
@@ -65,7 +72,7 @@ void objectData(BinaryReader& r, std::uint32_t version, std::vector<SavedJoint>&
         for (auto& v : joint.rotation) {
             v = r.f32();
         }
-        joints.push_back(std::move(joint));
+        saved.joints.push_back(std::move(joint));
     }
     if (version >= 0x10) {
         for (std::size_t b = r.i32Count(6); b > 0; --b) {
@@ -293,7 +300,7 @@ SavedObject parse(std::span<const std::uint8_t> data) {
     if (objectVersion < 0xC || objectVersion > 0x11) {
         fail("unknown cObject version");
     }
-    objectData(r, objectVersion, saved.joints);
+    objectData(r, objectVersion, saved);
     for (auto h = headers.rbegin() + 1; h != headers.rend(); ++h) {
         switch (h->tag) {
         case kAnimatableTag:

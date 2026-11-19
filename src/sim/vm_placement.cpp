@@ -198,8 +198,7 @@ bool Execution::snap(const bhav::Instruction& in, Frame& f) {
         throw Stop{Outcome::Error, "slot number out of range", std::to_string(slot)};
     }
     const slot::Entry& entry = (*slots)[static_cast<std::size_t>(slot)];
-    const std::uint32_t boneGroup = mode == 4 ? kGlobalGroup : type->group;
-    const auto target = routingSlotTarget(*owner, entry, isBoneSlot(entry) ? slotBone(*owner, boneGroup, entry) : std::nullopt);
+    const auto target = routingSlotTarget(*owner, entry, isBoneSlot(entry) ? slotBone(*owner, mode == 4 ? nullptr : type, entry) : std::nullopt);
     if (!target) {
         throw Stop{Outcome::Unsupported, "Snap slot's bone not found", std::to_string(slot)};
     }
@@ -210,7 +209,7 @@ bool Execution::snap(const bhav::Instruction& in, Frame& f) {
             throw Stop{Outcome::Error, "slot number out of range", std::to_string(index)};
         }
         const slot::Entry& fromEntry = type->routingSlots[static_cast<std::size_t>(index)];
-        const auto spot = routingSlotTarget(*owner, fromEntry, isBoneSlot(fromEntry) ? slotBone(*owner, type->group, fromEntry) : std::nullopt);
+        const auto spot = routingSlotTarget(*owner, fromEntry, isBoneSlot(fromEntry) ? slotBone(*owner, type, fromEntry) : std::nullopt);
         if (!spot) {
             throw Stop{Outcome::Unsupported, "Snap slot's bone not found", std::to_string(index)};
         }
@@ -257,11 +256,13 @@ void Execution::leaveContainer(SimObject& object) {
     }
 }
 
-// The bone a slot sits at: the first name in entry `bone` of `group`'s "Model - Bones" string
-// table, found in the object's model.
-std::optional<ModelBone> Execution::slotBone(const SimObject& object, std::uint32_t group, const slot::Entry& entry) {
+// The bone a slot sits at, found in the object's model: the first of the slot's bone names (see
+// slotBoneNames), from `type` or for none from the global group.
+std::optional<ModelBone> Execution::slotBone(const SimObject& object, const ObjectType* type, const slot::Entry& entry) {
     constexpr std::uint16_t kBoneNamesTable = 0x90;
-    const auto names = entry.bone >= 0 ? code_.string(group, kBoneNamesTable, static_cast<std::size_t>(entry.bone)) : std::nullopt;
+    const auto names = type != nullptr ? slotBoneNames(code_, *type, entry.bone)
+                       : entry.bone >= 0 ? code_.string(kGlobalGroup, kBoneNamesTable, static_cast<std::size_t>(entry.bone))
+                                         : std::nullopt;
     if (!names || !world().modelBones()) {
         return std::nullopt;
     }
@@ -369,7 +370,7 @@ void Execution::putInSlot(SimObject& object, SimObject& container, std::int16_t 
     object.data[kDirectionField] = container.data[kDirectionField];
     const ObjectType* type = code_.objectType(container.definition.guid());
     if (type != nullptr && static_cast<std::size_t>(slot) < type->containerSlotEntries.size()) {
-        if (const auto bone = slotBone(container, type->group, type->containerSlotEntries[static_cast<std::size_t>(slot)])) {
+        if (const auto bone = slotBone(container, type, type->containerSlotEntries[static_cast<std::size_t>(slot)])) {
             object.data[kDirectionField] = compassDirection(compassHeading(container.data[kDirectionField] & 7) + bone->yaw);
         }
     }

@@ -1236,8 +1236,9 @@ void pushInteractionQueuesForTheSim() {
     CHECK(vm.run(sim, kObjectGroup, 0x1102, onFridge).outcome == Outcome::True && sim.queue.back().markedAutonomous);
     sim.running.reset();
     sim.queue.front().index = 1;
+    // The priority 100 push drops the waiting priority 40 one.
     CHECK(vm.run(controller, kObjectGroup, 0x1100, onFridge).outcome == Outcome::True && sim.personData[0x2D] == 1);
-    sim.queue.pop_back();
+    CHECK(sim.queue.size() == 2 && sim.queue.back().priority == 100);
 
     for (int i = 0; i < 5; ++i) {
         CHECK(vm.run(controller, kObjectGroup, 0x1100, onFridge).outcome == Outcome::True);
@@ -1758,6 +1759,41 @@ void pushInteractionLimitsEachQueue() {
     }
     CHECK(vm.run(controller, kObjectGroup, 0x1100, onFridge).outcome == Outcome::False && controller.data[0x34] == 3);
     CHECK(sim.queue.size() == 12);
+}
+
+// Push Interaction puts a continuation (byte 3 bit 2) first in the queue. Any other push goes last,
+// after it drops every waiting interaction from the first one with a lower priority on, so a low
+// priority social pushed onto a cook waits behind the cooking's continuation.
+void pushInteractionOrdersTheQueue() {
+    MemoryCodeSource code;
+    auto fridgeType = typed(kFridgeGuid);
+    fridgeType.fields[ts2::objd::field::kInteractionTableId] = 0x80;
+    ts2::ttab::InteractionTable table;
+    table.interactions.resize(1);
+    table.interactions[0].action = 0x1000;
+    code.addInteractionTable(kObjectGroup, 0x80, table);
+    code.add(kObjectGroup, 0x1000, bhav({expr(owner::kTemp, 0, op::kAssign, owner::kLiteral, 0, T, E)}));
+    code.add(kObjectGroup, 0x1100, bhav({pushInteraction(0, 0, 2, T, F)}, 1));  // low
+    code.add(kObjectGroup, 0x1101, bhav({pushInteraction(0, 0, 3, T, F)}, 1));  // medium
+    auto continuation = pushInteraction(0, 0, 2, T, F);
+    continuation.operands[3] = 0x04;
+    code.add(kObjectGroup, 0x1102, bhav({continuation}, 1));
+
+    ts2::sim::World world;
+    auto& controller = world.create(kObjectGroup, typed(0x0BADF00D));
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    auto& fridge = world.create(kObjectGroup, fridgeType);
+    controller.thread.stackObjectId = sim.id;
+    const std::array<std::int16_t, 1> onFridge{fridge.id};
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(controller, kObjectGroup, 0x1100, onFridge).outcome == Outcome::True);
+    CHECK(vm.run(controller, kObjectGroup, 0x1102, onFridge).outcome == Outcome::True);
+    CHECK(sim.queue.size() == 2 && sim.queue[0].continuation && !sim.queue[1].continuation);
+    CHECK(sim.personData[0x48] == 1);  // the next queued one is a continuation
+    // An equal priority keeps what waits, a higher one drops it all from the first lower one on.
+    CHECK(vm.run(controller, kObjectGroup, 0x1100, onFridge).outcome == Outcome::True && sim.queue.size() == 3);
+    CHECK(vm.run(controller, kObjectGroup, 0x1101, onFridge).outcome == Outcome::True);
+    CHECK(sim.queue.size() == 1 && sim.queue[0].priority == 50 && sim.personData[0x48] == 0);
 }
 
 // Idle for Input takes a sub-interaction (nested) in immediate mode and any other one otherwise, and
@@ -2873,6 +2909,15 @@ void gameQsortKeepsTheGamesOrderOfEqualScores() {
 // A satisfied want gives the Sim its aspiration points, within its age's levels, and its feedbackTree runs on the
 // Wants - Controller with the Sim, the points and the score before them as params. It runs for a failed match too,
 // with nothing given, and a person data 0xC1 holds the score but not the lifetime total.
+// The Aspiration Meter popup names the highest level whose threshold a score meets, from failure
+// (0) to gold (5).
+void aspirationBandsFollowTheLevels() {
+    const std::array<std::int32_t, 7> levels{-2000, -1000, 0, 500, 1000, 1500, 2000};
+    CHECK(ts2::sim::aspirationBand(levels, -1500) == 0 && ts2::sim::aspirationBand(levels, -1000) == 1);
+    CHECK(ts2::sim::aspirationBand(levels, 0) == 2 && ts2::sim::aspirationBand(levels, 499) == 2);
+    CHECK(ts2::sim::aspirationBand(levels, 500) == 3 && ts2::sim::aspirationBand(levels, 1999) == 5 && ts2::sim::aspirationBand(levels, 9000) == 5);
+}
+
 void wantSatisfyGivesPointsAndRunsItsFeedback() {
     constexpr std::uint32_t kSimGuid = 0x51515151, kControllerGuid = 0x6D9E58F0, kCheckTreesGuid = 0x8D92DD2E;
     constexpr std::uint32_t kCheckTreesGroup = 0x7F739728, kWant = 0x0EEEEEEE;
@@ -3044,6 +3089,7 @@ std::vector<Test> vmInteractionTests() {
         {"Find Best Interaction weighs the social bias", findBestInteractionWeighsTheSocialBias},
         {"Find Best Interaction weighs offered lines", findBestInteractionWeighsOfferedLines},
         {"Want Satisfy gives points and runs its feedback", wantSatisfyGivesPointsAndRunsItsFeedback},
+        {"aspiration bands follow the levels", aspirationBandsFollowTheLevels},
         {"Want tuning levels follow the game's loader", wantTuningLevelsFollowTheGamesLoader},
         {"The game's sort keeps its order of equal scores", gameSortKeepsTheGamesOrderOfEqualScores},
         {"The game's quicksort keeps its order of equal scores", gameQsortKeepsTheGamesOrderOfEqualScores},
@@ -3062,6 +3108,7 @@ std::vector<Test> vmInteractionTests() {
         {"Idle for Input starts queued interactions", idleForInputStartsQueuedInteractions},
         {"Idle for Input tests what starts", idleForInputTestsWhatStarts},
         {"Push Interaction limits each queue", pushInteractionLimitsEachQueue},
+        {"Push Interaction orders the queue", pushInteractionOrdersTheQueue},
         {"queued interactions show and cancel", queuedInteractionsShowAndCancel},
         {"linked interactions drop each other", linkedInteractionsDropEachOther},
         {"On Timer sets, changes and removes timers", onTimerSetsChangesAndRemovesTimers},

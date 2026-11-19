@@ -36,6 +36,11 @@ struct LotWorldReport {
 // (each frame with its own stack object).
 LotWorldReport buildWorld(const content::Lot& lot, CodeSource& code, World& world);
 
+// Gives an object of `type` the state it was saved with, as the game's object reader loads it:
+// attributes, semi-attributes, object data, temps, token, arrays, material names, slots, effects
+// and a Sim's motives and person data. Not its place, stack or animations. Returns what didn't fit.
+std::vector<std::string> applySavedState(SimObject& object, const xobj::SavedObject& state, CodeSource& code, const ObjectType& type);
+
 // The lot's platform regions as World::platformRegion reads them, or none when the lot has no
 // region grid. The lookup keeps its own copy of the grid.
 World::PlatformRegion platformRegions(const content::Lot& lot);
