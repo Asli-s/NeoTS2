@@ -97,7 +97,8 @@ void findLocationForCentresASimOnItsTile() {
     CHECK(sim.x == 3 * 65536 + 32768 && sim.y == 4 * 65536 + 32768 && sim.data[1] == 2);
     sim.data[1] = 3;
     CHECK(vm.run(sim, 0x1001).outcome == Outcome::True && sim.data[1] == 3);
-    // Mode 1 takes the stack object out of the slot it was in and out of the world.
+    // Mode 1 takes the stack object out of the slot it was in and out of the world. It keeps the
+    // object's use count and data 0x08 bit 0x20: a book put away waits for its reader to finish.
     Instruction stay = call(0x0010, T, F);
     stay.operands = {1, 0, 0x02};
     code.add(kObjectGroup, 0x1002, bhav({stay}));
@@ -107,8 +108,11 @@ void findLocationForCentresASimOnItsTile() {
     sim.slots[0] = held.id;
     held.data[2] = sim.id;
     held.data[3] = 0;
+    held.data[8] = 0x120;
+    held.data[0x3E] = 1;
     CHECK(vm.run(sim, 0x1002).outcome == Outcome::True && held.x == ts2::sim::kOffLot && held.y == ts2::sim::kOffLot && !held.tile);
     CHECK(sim.slots[0] == 0 && held.data[2] == 0 && held.data[3] == -1);
+    CHECK(held.data[8] == 0x20 && held.data[0x3E] == 1 && held.data[0x1D] == -1);
 }
 
 // Find Location For "on level ground" (flag 0x10) clears bit 0x100 of the placed object's data 0x2A
@@ -1336,8 +1340,11 @@ void reachPutMovesTheObjectAtTheClipsEvent() {
     Vm vm(code, {}, &world);
 
     // The cup comes into my hand at the clip's event 0. The primitive is true when the clip ends.
+    // Starting the reach clip clears the times my last Animate Sim clip left.
     const double start = world.clockMs();
+    sim.keptTimes = SimObject::KeptTimes{start, start};
     CHECK(vm.run(sim, 0x1000).outcome == Outcome::Sleeping && sim.animation && sim.animation->name == "a2o-floor-get");
+    CHECK(!sim.keptTimes);
     // The reach clip plays as a medium Sim animation, fading in and out over 233.33 ms each.
     CHECK(sim.animation->layer == 2 && sim.animation->fades && sim.animation->fadeInMs == ts2::sim::kAnimateFadeMs && sim.animation->fadeOutMs == ts2::sim::kAnimateFadeMs);
     // The grasp fades in towards the event and hands over to the carry pose as the clip ends. The
@@ -1395,7 +1402,9 @@ void reachPutMovesTheObjectAtTheClipsEvent() {
 }
 
 // A glass on a tray on a bar is reached for at the height the bar's bone slot holds the tray, so a
-// standing Sim takes the counter reach and not the glass's own seated one.
+// standing Sim takes the counter reach. The clip comes from the list of what holds the glass, then
+// the global list, never the glass's own (a book's own a2o-counter-book-get has no event 0). Byte 9
+// flag 0x08 takes the entry from byte 15.
 void reachPutMeasuresTheHeightThroughContainers() {
     using namespace ts2::sim;
     constexpr std::uint32_t kTrayGroup = 0x7F000088, kTrayGuid = 0x2B3C4D5E, kBarGroup = 0x7F000099, kBarGuid = 0x3C4D5E6F;
@@ -1407,7 +1416,11 @@ void reachPutMeasuresTheHeightThroughContainers() {
     clips[0] = "a2o-floor-get";
     clips[3] = "a2o-counter-get";
     code.addStrings(0x7FD46CD0, 0x92, clips);
-    code.addStrings(kLampGroup, 0x92, {"a2o-barstool-seated-get", "a2o-barstool-seated-put"});
+    code.addStrings(kLampGroup, 0x92, {"a2o-barstool-seated-get", "a2o-barstool-seated-put", "", "a2o-counter-book-get"});
+    Instruction picked = grab;
+    picked.operands[9] = 0x08;
+    picked.operands[15] = 0;
+    code.add(kObjectGroup, 0x1001, bhav({picked}));
     code.addObjectType(kLampGroup, typed(kLampGuid));
     ts2::slot::Entry onTray;
     onTray.z = 0.02f;
@@ -1421,7 +1434,7 @@ void reachPutMeasuresTheHeightThroughContainers() {
     World world;
     world.setAnimationLengths([](const std::string&) -> std::optional<float> { return 1000.0f; });
     world.setAnimationEventTime([](const std::string& name, int id) -> std::optional<float> {
-        return id == 0 && name != "a2o-barstool-seated-get" ? std::optional<float>(400.0f) : std::nullopt;
+        return id == 0 && name != "a2o-barstool-seated-get" && name != "a2o-counter-book-get" ? std::optional<float>(400.0f) : std::nullopt;
     });
     auto& sim = world.create(kObjectGroup, typed(0x51515151, kPersonType), 2);
     auto& glass = world.create(kLampGroup, typed(kLampGuid));
@@ -1446,7 +1459,17 @@ void reachPutMeasuresTheHeightThroughContainers() {
     glass.data[3] = 0;
     sim.thread.stackObjectId = glass.id;
     Vm vm(code, {}, &world);
-    CHECK(vm.run(sim, 0x1000).outcome == Outcome::Sleeping && sim.animation && sim.animation->name == "a2o-counter-get");
+    const auto reach = [&](std::uint16_t tree) {
+        sim.thread = {};
+        sim.reaching.reset();
+        sim.animation.reset();
+        sim.thread.stackObjectId = glass.id;
+        return vm.run(sim, tree).outcome == Outcome::Sleeping && sim.animation ? sim.animation->name : std::string();
+    };
+    CHECK(reach(0x1000) == "a2o-counter-get");
+    code.addStrings(kTrayGroup, 0x92, {"a2o-tray-pick-get", "", "", "a2o-counter-tray-get"});
+    CHECK(reach(0x1000) == "a2o-counter-tray-get");
+    CHECK(reach(0x1001) == "a2o-tray-pick-get");
 }
 
 void snapIntoPutsTheObjectInTheSlot() {
@@ -2952,6 +2975,31 @@ void dialogsAnswerAsTheGameDoesHeadless() {
     CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::Sleeping);
 }
 
+// A Sim named while playing (a newborn) goes by that first name in $Object and $Me, as interaction
+// labels such as "Feed Bottle To $Object" show it.
+void objectTokensNameSimsByTheirGivenName() {
+    MemoryCodeSource code;
+    code.addStrings(kObjectGroup, 0x12D, {"Feed Bottle To $Object"});
+    SmallWorld w;
+    auto hood = std::make_shared<ts2::sim::SavedNeighborhood>();
+    hood->neighborIds = {9};
+    hood->neighbors[9].personData.assign(0xE7, 0);
+    hood->neighbors[9].guid = 0x51515151;
+    w.world.setNeighborhood(hood);
+    auto& baby = w.world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    w.world.setNeighborFirstName(9, "Anna");
+    Vm vm(code, {}, &w.world);
+    Instruction in = dialog(0x08, 0x30);
+    in.operands[9] = 3;
+    in.operands[10] = 0x14;
+    in.operands[13] = 1;
+    code.add(kObjectGroup, 0x1000, bhav({in}));
+    w.controller->thread = {};
+    w.controller->thread.stackObjectId = baby.id;
+    CHECK(vm.run(*w.controller, 0x1000).outcome == Outcome::True);
+    CHECK(w.world.notifications().size() == 1 && w.world.notifications()[0].text == "Feed Bottle To Anna");
+}
+
 // A text notification's text is string table 0x12D's line bytes 13-14 with its tokens filled in,
 // found without regard to case. $Neighbor and $FullName also make the neighbor its picture. Tokens
 // the engine can't fill stay as written. Append adds to the shown text, and a style the game has
@@ -3595,6 +3643,46 @@ void aLoadedOverlayRunsItsEventsInTheTypeItsGuidNames() {
     }
 }
 
+// A Sim saved halfway through a social still knows the Sim it is with, so the social's animations
+// play on after the load. A waiting half of a social starts with its partner too.
+void aSocialSavedInProgressKeepsItsPartner() {
+    MemoryCodeSource code;
+    code.addObjectType(kObjectGroup, typed(0x1000));
+    ts2::content::Lot lot;
+    ts2::objt::Entry entry;
+    entry.guid = 0x1000;
+    entry.index = 1;
+    lot.types.entries.push_back(entry);
+    const auto social = [](std::int16_t target, std::int16_t partner, std::uint16_t tree) {
+        ts2::xobj::SavedInteraction i;
+        i.actor = 1;
+        i.target = target;
+        i.iconObject = partner;
+        i.index = 1;
+        i.tree = tree;
+        i.priority = 20;
+        return i;
+    };
+    ts2::content::LotObject sim;
+    sim.id = 1;
+    sim.type = entry;
+    sim.state.person.emplace();
+    sim.state.person->state.running = social(2, 3, 0x1001);
+    sim.state.person->state.queue.push_back(social(4, 5, 0x1001));
+    lot.objects.push_back(sim);
+    ts2::sim::World world;
+    ts2::sim::buildWorld(lot, code, world);
+    const auto* restored = world.find(1);
+    CHECK(restored != nullptr && restored->running && restored->interactionPartner == 3);
+    CHECK(restored != nullptr && restored->queue.size() == 1 && restored->queue[0].partner == 5);
+
+    // A running sub-interaction names the partner instead.
+    lot.objects[0].state.person->state.runningSub = social(2, 6, 0x1002);
+    ts2::sim::World again;
+    ts2::sim::buildWorld(lot, code, again);
+    CHECK(again.find(1) != nullptr && again.find(1)->interactionPartner == 6);
+}
+
 void roomFieldsAreReadThroughTempZero() {
     MemoryCodeSource code;
     code.add(kObjectGroup, 0x1000, bhav({
@@ -3667,8 +3755,10 @@ std::vector<Test> vmObjectTests() {
     return {
         {"a loaded object plays its latest clip", aLoadedObjectPlaysItsLatestClip},
         {"a loaded overlay runs its events in the type its GUID names", aLoadedOverlayRunsItsEventsInTheTypeItsGuidNames},
+        {"a social saved in progress keeps its partner", aSocialSavedInProgressKeepsItsPartner},
         {"room fields are read through temp 0", roomFieldsAreReadThroughTempZero},
         {"text notifications fill their tokens", textNotificationsFillTheirTokens},
+        {"object tokens name Sims by their given name", objectTokensNameSimsByTheirGivenName},
         {"outside is region 0 in layer 0", outsideIsRegionZeroInLayerZero},
         {"Find Location For centres a Sim on its tile", findLocationForCentresASimOnItsTile},
         {"a Sim reset moves a seated Sim out of its slot", aSimResetMovesASeatedSimOutOfItsSlot},

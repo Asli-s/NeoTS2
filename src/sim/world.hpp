@@ -306,7 +306,8 @@ struct SimObject {
     // The running interaction's name in the queue's tooltip: its own when it starts, then what
     // Add/Change the Action String sets (empty: its interaction table line's).
     std::string actionString;
-    // Who the interaction it runs is with (see QueuedInteraction::partner). Not saved yet.
+    // Who the interaction it runs is with (see QueuedInteraction::partner). A load takes it from the
+    // saved interaction's icon object.
     std::int16_t interactionPartner = 0;
     // Object flag 0x2000: Shift was held at the last hover or click on it (or another part with the same
     // lead, object data 0x13). With testingCheatsEnabled on, its lines that start are only debug lines.
@@ -406,6 +407,15 @@ struct SimObject {
         std::optional<AnimationAnchor> anchor;  // the one it was saved with
     };
     Boxed<ResumedClip> resumedClip;
+    // Two moments of the last Animate Sim clip that let its script go on, on the world's clock: when
+    // that clip ends and when it began fading out (its end without a fade out). Animate Sim, Animate
+    // Object and Animate Overlay can start a clip at one of them. The next clip Animate Sim or
+    // Reach/Put starts clears both, so they only ever line up with the clip just before. Not saved yet.
+    struct KeptTimes {
+        double endMs = 0;
+        double handedOverMs = 0;
+    };
+    std::optional<KeptTimes> keptTimes;
     // The container a Sim was last put in and the name hash of its slot's bone (see AnimationAnchor),
     // and when, on the world's clock. Animations it starts while still there hang from that bone.
     AnimationAnchor anchor;
@@ -1149,9 +1159,12 @@ public:
 
     // One of the neighborhood's inventories (the id picks the lot, family or neighbor): the saved
     // one until changed. A family or neighbor without one gets a new empty inventory, as in the
-    // game. A lot without one has none (null). The game-wide inventory is not saved with the
-    // neighborhood and starts empty.
+    // game. A lot without one has none (null). The game-wide inventory is the one given to
+    // setGameWideInventory, else an empty one of this world's own.
     Inventory* inventory(InventoryKind kind, std::int32_t id) {
+        if (kind == InventoryKind::GameWide && gameWide_) {
+            return gameWide_.get();
+        }
         const auto key = std::pair{kind, (kind == InventoryKind::Global || kind == InventoryKind::GameWide) ? 0 : id};
         if (auto it = inventories_.find(key); it != inventories_.end()) {
             return &it->second;
@@ -1179,7 +1192,12 @@ public:
     // object is not modelled yet.
     std::uint32_t nextArchiveId() { return ++lastArchiveId_; }
 
+    // The game-wide inventory belongs to the game, not to a neighborhood, so it is shared by every
+    // lot played until the game quits (see ngbh::kGameWideType).
+    void setGameWideInventory(std::shared_ptr<Inventory> inventory) { gameWide_ = std::move(inventory); }
+
     // The inventories scripts have used since the neighborhood loaded (see inventory), by kind and id.
+    // A game-wide inventory given to setGameWideInventory is not among them.
     const std::map<std::pair<InventoryKind, std::int32_t>, Inventory>& usedInventories() const { return inventories_; }
 
     // A neighbor's current wants: the saved ones until changed, empty if none were saved.
@@ -1826,6 +1844,7 @@ private:
     std::map<std::int16_t, std::vector<swaf::Want>> neighborWants_, neighborFears_;
     std::map<std::int16_t, DataTables> neighborDataTables_;
     std::map<std::pair<InventoryKind, std::int32_t>, Inventory> inventories_;
+    std::shared_ptr<Inventory> gameWide_;
     std::uint32_t lastArchiveId_ = 0;
     std::shared_ptr<const content::WantDefinitions> wantDefs_;
     std::shared_ptr<const std::vector<want_trees::Tree>> wantTrees_;

@@ -224,11 +224,29 @@ LotSimulation::LotSimulation(const std::filesystem::path& install, const std::fi
     if (lastNeighborhood && kLastNeighborhoodGlobal < vm_.globals.size()) {
         vm_.globals[kLastNeighborhoodGlobal] = *lastNeighborhood;
     }
+    // The want definitions come first: wants saved by an older game take numbers from them as the
+    // neighborhood loads.
+    if (const auto wants = content::wantsPackage(install)) {
+        auto defs = std::make_shared<content::WantDefinitions>(content::loadWantDefinitions(*wants));
+        if (const auto tuning = content::wantTuningPackage(install)) {
+            const std::string text = content::loadWantTuning(*tuning);
+            defs->categories = content::parseWantCategories(text);
+            defs->aspirationLevels = content::parseAspirationLevels(text);
+            if (const auto influence = content::parseInfluenceCurve(text)) {
+                defs->influenceLevels = influence->inverse();
+            }
+        }
+        world_.setWantDefinitions(std::move(defs));
+        if (const auto trees = content::wantTreesPackage(install)) {
+            world_.setWantTrees(std::make_shared<const std::vector<want_trees::Tree>>(content::loadWantTrees(*trees)));
+        }
+    }
     const auto hood = content::neighborhoodPackage(content::neighborhoodOfLot(lot));
     if (std::filesystem::exists(hood)) {
         const content::Neighborhood loaded = content::loadNeighborhood(hood);
         findHousehold(loaded, lot);
-        world_.setNeighborhood(savedNeighborhood(loaded, code_, content::neighborhoodIds(content::neighborhoodOfLot(lot).parent_path())));
+        world_.setNeighborhood(savedNeighborhood(loaded, code_, content::neighborhoodIds(content::neighborhoodOfLot(lot).parent_path()),
+                                                 world_.wantDefinitions()));
         // Global 0x28, the current neighborhood's id, is what scripts ask NeighborhoodManager about.
         constexpr std::size_t kCurrentNeighborhoodGlobal = 0x28;
         if (loaded.identity && kCurrentNeighborhoodGlobal < vm_.globals.size()) {
@@ -262,21 +280,6 @@ LotSimulation::LotSimulation(const std::filesystem::path& install, const std::fi
             }
             return std::nullopt;
         });
-    }
-    if (const auto wants = content::wantsPackage(install)) {
-        auto defs = std::make_shared<content::WantDefinitions>(content::loadWantDefinitions(*wants));
-        if (const auto tuning = content::wantTuningPackage(install)) {
-            const std::string text = content::loadWantTuning(*tuning);
-            defs->categories = content::parseWantCategories(text);
-            defs->aspirationLevels = content::parseAspirationLevels(text);
-            if (const auto influence = content::parseInfluenceCurve(text)) {
-                defs->influenceLevels = influence->inverse();
-            }
-        }
-        world_.setWantDefinitions(std::move(defs));
-        if (const auto trees = content::wantTreesPackage(install)) {
-            world_.setWantTrees(std::make_shared<const std::vector<want_trees::Tree>>(content::loadWantTrees(*trees)));
-        }
     }
     world_.setScripts(loadScripts(install, code_));
     std::unordered_set<std::int16_t> fromSave;

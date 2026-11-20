@@ -92,6 +92,8 @@ std::optional<QueuedInteraction> restoredInteraction(const xobj::SavedInteractio
     out.name = saved.name;
     out.iconObject = saved.iconObject > 0 ? saved.iconObject : 0;
     out.noIconObject = saved.iconObject < 0;
+    // The icon object is the interaction's second object, the Sim a social is with.
+    out.partner = out.iconObject;
     out.iconGuid = static_cast<std::uint32_t>(saved.iconGuid);
     out.iconIndex = static_cast<std::uint32_t>(saved.iconIndex);
     out.nested = saved.lineFlag2 != 0;
@@ -142,6 +144,11 @@ void restoreQueue(const xobj::PersonState& saved, SimObject& object, World& worl
             const Boxed<QueuedInteraction>& runs = f.callerContinuesTrue ? object.runningSub : object.running;
             f.interactionId = runs ? runs->id : 0;
         }
+    }
+    // A social animation is named for the second object of the running sub-interaction, else of the
+    // running interaction, so a social saved halfway through plays on with the same Sim.
+    if (const Boxed<QueuedInteraction>& with = object.runningSub ? object.runningSub : object.running) {
+        object.interactionPartner = with->partner != 0 ? with->partner : with->object;
     }
     if (object.running) {
         // The queue shows the interaction it runs by the Sim's own action picture, which a script
@@ -575,6 +582,35 @@ bool isNeighborSim(const ObjectType* type) {
     return kind == kPersonType || kind == kFamilyTreeOnlyType;
 }
 
+// A want saved by an older game, as the game reads it. Before version 4 its time was kept at half.
+// Before version 6 it takes its aspiration points from its definition, and before version 9 its
+// influence, both 0 for a want with no definition. Then a save writes it like any other.
+void upgradeWant(swaf::Want& w, const content::WantDefinitions* defs) {
+    if (w.tail.empty()) {
+        return;
+    }
+    const content::WantDefinition* def = nullptr;
+    if (defs != nullptr) {
+        const auto it = defs->byGuid.find(w.guid);
+        def = it != defs->byGuid.end() ? &it->second : nullptr;
+    }
+    if (w.version < 4) {
+        w.tail[0] = static_cast<std::int32_t>(static_cast<std::uint32_t>(w.tail[0]) * 2u);
+    }
+    if (w.version < 6 && w.tail.size() == 1) {
+        w.tail.push_back(def != nullptr ? def->score : 0);
+    }
+    if (w.version < 9 && w.tail.size() == 2) {
+        w.tail.push_back(def != nullptr ? def->influence : 0);
+    }
+}
+
+void upgradeWants(std::vector<swaf::Want>& list, const content::WantDefinitions* defs) {
+    for (swaf::Want& w : list) {
+        upgradeWant(w, defs);
+    }
+}
+
 void dropNeighbor(SavedNeighborhood& hood, std::int16_t id) {
     hood.neighborIds.erase(id);
     hood.neighbors.erase(id);
@@ -585,7 +621,8 @@ void dropNeighbor(SavedNeighborhood& hood, std::int16_t id) {
 } // namespace
 
 std::shared_ptr<const SavedNeighborhood> savedNeighborhood(const content::Neighborhood& hood, CodeSource& code,
-                                                          std::map<std::int32_t, nhoodid::NeighborhoodId> all) {
+                                                          std::map<std::int32_t, nhoodid::NeighborhoodId> all,
+                                                          const content::WantDefinitions* wantDefs) {
     auto saved = std::make_shared<SavedNeighborhood>();
     if (hood.identity) {
         saved->id = hood.identity->id;
@@ -629,12 +666,18 @@ std::shared_ptr<const SavedNeighborhood> savedNeighborhood(const content::Neighb
         saved->wantSlots[id] = slots;
         if (w.extra) {
             saved->lifetimeWants[id] = *w.extra;
+            upgradeWant(saved->lifetimeWants[id], wantDefs);
         }
         saved->wants[id].assign(w.wants.begin(), w.wants.begin() + static_cast<std::ptrdiff_t>(std::min<std::size_t>(w.wants.size(), slots.wants)));
         saved->fears[id].assign(w.fears.begin(), w.fears.begin() + static_cast<std::ptrdiff_t>(std::min<std::size_t>(w.fears.size(), slots.fears)));
+        upgradeWants(saved->wants[id], wantDefs);
+        upgradeWants(saved->fears[id], wantDefs);
         // History version 2 saves its clock. Older ones take the latest record's time.
         auto& history = saved->wantHistories[id];
         history.records = w.history;
+        for (auto& [guid, records] : history.records) {
+            upgradeWants(records, wantDefs);
+        }
         history.time = w.historyValue;
         if (w.historyVersion < 2) {
             history.time = 0;

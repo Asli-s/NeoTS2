@@ -50,10 +50,17 @@ struct SavedJoint {
     std::array<float, 4> rotation{0, 0, 0, 1};  // x, y, z, w
 };
 
+// A morph of the object's model and the weight it had (a wilted flower, an eaten cake slice).
+struct SavedBlend {
+    std::string group, name;  // as the model's meshes name it, both empty for "no morph"
+    float weight = 0;
+};
+
 struct SavedObject {
     std::vector<std::string> classes;   // outermost first
     std::uint32_t outerTag = 0;         // the outermost class's tag
     std::vector<SavedJoint> joints;     // left out of records older than version 0xF, whose layout isn't known
+    std::vector<SavedBlend> blends;     // none before version 0x10
     // Where the object stood as the lot was saved, in the lot's frame (x along saved location[1]) or
     // relative to the object holding it. Empty before version 0xF or when not a number.
     std::optional<std::array<float, 3>> position;

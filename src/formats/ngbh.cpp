@@ -96,8 +96,8 @@ Neighborhood parse(std::span<const std::uint8_t> data) {
 
 namespace {
 
-// An inventory as stored, with no properties added.
-std::optional<Inventory> readStoredInventory(BinaryReader& r) {
+// An inventory as stored, with no properties added. Its tokens are read as `version` saves them.
+std::optional<Inventory> readStoredInventory(BinaryReader& r, std::uint32_t version = kWrittenVersion) {
     Inventory inv;
     inv.version = r.u32();
     if (inv.version != kInventoryVersion) {
@@ -107,7 +107,7 @@ std::optional<Inventory> readStoredInventory(BinaryReader& r) {
         // A token takes at least 18 bytes.
         list->resize(r.u32Count(18));
         for (auto& t : *list) {
-            t = xobj::readToken(r, kWrittenVersion);
+            t = xobj::readToken(r, version);
         }
     }
     return inv;
@@ -198,6 +198,29 @@ std::vector<std::uint8_t> writeRecord(const Record& record) {
     writeKeyed(w, record.neighbors);
     w.u8(record.flag);
     w.u32(record.value3);
+    return w.take();
+}
+
+std::optional<Inventory> readGameWideRecord(std::span<const std::uint8_t> data) {
+    try {
+        BinaryReader r(data);
+        if (r.u32() != kGameWideVersion) {
+            return std::nullopt;
+        }
+        auto inventory = readStoredInventory(r, kGameWideVersion);
+        if (!inventory || r.remaining() != 0) {
+            return std::nullopt;
+        }
+        return inventory;
+    } catch (const std::runtime_error&) {
+        return std::nullopt;
+    }
+}
+
+std::vector<std::uint8_t> writeGameWideRecord(const Inventory& inventory) {
+    BinaryWriter w;
+    w.u32(kGameWideVersion);
+    writeInventory(w, inventory);
     return w.take();
 }
 

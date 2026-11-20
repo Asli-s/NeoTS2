@@ -73,9 +73,11 @@ struct OutfitLook {
 // `look`, as the game's save writes them. Every other record and every other property stays as it
 // was. The resource list keeps the entries before the first one an outfit list uses (its model and
 // skeleton), then lists each part the outfit lists name once, in the order the lists first name
-// them, the lists taken in key order. Only properties the age data already has and that hold text
-// or a whole number change. The portrait of the Sim's age and its shadow are left out, for the game
-// to draw anew. Throws std::runtime_error when the file has no age data or it can't be read.
+// them, the lists taken in key order. Only properties the age data already has and that hold text,
+// a whole number or a float (the stretch) change. The portrait of the age the file held and its
+// shadow are left out, for the game to draw anew. A Sim that aged keeps its old age's model entry,
+// as the game's saves keep it. Throws std::runtime_error when the file has no age data or it
+// can't be read.
 std::vector<std::uint8_t> rewriteOutfitLook(std::span<const std::uint8_t> characterFile, const OutfitLook& look);
 
 } // namespace ts2::sim

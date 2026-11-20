@@ -1,4 +1,5 @@
 #include "sim/lot_save_detail.hpp"
+#include "formats/objd.hpp"
 #include "sim/turn.hpp"
 
 #include <algorithm>
@@ -188,6 +189,48 @@ bool sameName(std::string_view a, std::string_view b) {
            std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) { return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y)); });
 }
 
+// The node the game writes for a model's own materials.
+constexpr cobject::Word kModelNode = 0xC;
+
+// Puts the materials scripts gave the object's groups (Change Material) into its record, on the
+// node named for its model, as the game saves the materials its model has now: a plumbob's mood
+// colour, a skill meter's tube. A load draws the groups with them. A group with a hole keeps it: the
+// game cuts each material set on the group again with the group's mask, named
+// "<material>-cutout-<mask>", as a counter top under a sink is.
+void putScriptMaterials(cobject::ObjectPart& part, const SimObject& object) {
+    constexpr std::string_view kCutout = "-cutout-";
+    const auto cutAt = [&](const std::string& name) {
+        std::string low(name);
+        std::ranges::transform(low, low.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return low.find(kCutout);
+    };
+    // Each group's mask, as the record was loaded with it.
+    std::vector<std::pair<std::string, std::string>> masks;
+    for (const auto& n : part.materials) {
+        for (const auto& [material, group] : n.subsets) {
+            if (const auto cut = cutAt(material); cut != std::string::npos) {
+                masks.emplace_back(group, material.substr(cut + kCutout.size()));
+            }
+        }
+    }
+    auto node = std::find_if(part.materials.begin(), part.materials.end(), [&](const cobject::NodeMaterials& n) { return sameName(n.node, part.model); });
+    for (const MaterialChange& change : object.materialChanges) {
+        if (change.group.empty()) {
+            continue;
+        }
+        std::string material = change.material;
+        if (const auto mask = std::find_if(masks.begin(), masks.end(), [&](const auto& m) { return sameName(m.first, change.group); }); mask != masks.end()) {
+            material = material.substr(0, cutAt(material)) + std::string(kCutout) + mask->second;
+        }
+        if (node == part.materials.end()) {
+            part.materials.push_back({part.model, kModelNode, {}});
+            node = part.materials.end() - 1;
+        }
+        std::erase_if(node->subsets, [&](const auto& s) { return sameName(s.second, change.group); });
+        node->subsets.emplace_back(std::move(material), change.group);
+    }
+}
+
 // The handle of a clip a save writes (see ClipHandles). A Sim clip carried on from the entry of the
 // same clip keeps its own. An object's Animate Object clip ("obj") has the handle every such clip of
 // the game's saves has. Another object clip keeps the one of the entry it starts from, as how the
@@ -368,6 +411,9 @@ namespace lot_save_detail {
 cobject::Record sceneRecord(const cobject::Record& loaded, const SimObject& object, const World& world, double nowMs,
                             const cobject::Animation* otherwise, ClipHandles* handles) {
     cobject::Record record = loaded;
+    if (!object.isPerson()) {
+        putScriptMaterials(record.object, object);
+    }
     std::vector<cobject::Animation>& animations = record.animatable.animations;
     std::vector<Playing> playing = playingNow(object, world, nowMs, animations, otherwise);
     // Each animation names the object its events go to and that object's type by GUID, which is
@@ -409,8 +455,9 @@ cobject::Record sceneRecord(const cobject::Record& loaded, const SimObject& obje
         out.push_back({});
     }
     animations = std::move(out);
-    if (handles != nullptr && object.isPerson()) {
+    if (handles != nullptr && record.chain != cobject::Chain::Object) {
         record.animatable.settings[0] = handles->saved;
+        record.animatable.settings[1] = handles->second;
     }
     return record;
 }
@@ -431,6 +478,90 @@ std::optional<std::array<cobject::Word, 14>> simPlacePair(const SimObject& sim, 
     return pair;
 }
 
+std::optional<cobject::Chain> sceneChainOf(const SimObject& object) {
+    switch (object.definition.field(objd::field::kType)) {
+    case 2:
+    case 0x10:
+        return cobject::Chain::Person;
+    case 8:
+    case 9:
+        return cobject::Chain::Animatable;
+    case 4:
+    case 5:
+    case 7:
+    case 0xA:
+    case 0xB:
+    case 0xC:
+    case 0xD:
+    case 0x12:
+    case 0x13:
+        switch (object.definition.field(objd::field::kSceneClass)) {
+        case 0:
+            return cobject::Chain::Object;
+        case 1:
+            return cobject::Chain::Animatable;
+        default:
+            return std::nullopt;
+        }
+    default:
+        return std::nullopt;
+    }
+}
+
+std::array<cobject::Word, 7> newAnimatableSettings() {
+    constexpr cobject::Word kNever = 0x7FFFFF00;
+    return {0, 0, kNever, kNever, std::bit_cast<cobject::Word>(0.5f), 0, 0};
+}
+
+void putDrawnMorphs(cobject::ObjectPart& part, std::int16_t id, const TypeOwners& owners) {
+    auto drawn = owners.drawnMorphs ? owners.drawnMorphs(id) : std::nullopt;
+    if (!drawn) {
+        return;
+    }
+    if (part.blends.empty()) {
+        part.blends = std::move(*drawn);
+        return;
+    }
+    for (cobject::NamedWeight& b : part.blends) {
+        const auto now = std::find_if(drawn->begin(), drawn->end(), [&](const cobject::NamedWeight& d) {
+            return sameName(d.first, b.first) && sameName(d.second, b.second);
+        });
+        if (now != drawn->end()) {
+            b.weight = now->weight;
+        }
+    }
+}
+
+cobject::Record newObjectSceneRecord(cobject::Chain chain, const std::string& model, const cobject::AnimatablePart& another,
+                                     const SimObject& object, const World& world, double nowMs, const cobject::Animation* otherwise,
+                                     const TypeOwners& owners, ClipHandles* handles) {
+    cobject::Record start;
+    start.chain = chain;
+    start.object.model = model;
+    start.object.materials.push_back({model, kModelNode, {}});
+    putScriptMaterials(start.object, object);
+    const cobject::Place place = simScenePlace(object, owners.floorHeight);
+    start.object.place = place;
+    // Its joints as drawn, below its own root ("<name>_objt") at its place. A clip that has ended
+    // isn't saved, so they hold the pose it left: a book held open is loaded open.
+    start.object.joints.push_back({object.definition.name + "_objt", place});
+    if (auto drawn = owners.drawnJoints ? owners.drawnJoints(object.id) : std::nullopt) {
+        start.object.joints.insert(start.object.joints.end(), drawn->begin(), drawn->end());
+    }
+    putDrawnMorphs(start.object, object.id, owners);
+    if (chain == cobject::Chain::Object) {
+        return start;
+    }
+    start.animatable.scale = std::bit_cast<cobject::Word>(1.0f);
+    start.animatable.settings = another.settings;
+    start.animatable.places = simPlacePair(object, place, owners);
+    start.animatable.place = place;
+    if (start.animatable.places) {
+        std::copy(start.animatable.places->begin() + 7, start.animatable.places->end(), start.animatable.place.begin());
+    }
+    return sceneRecord(start, object, world, nowMs, otherwise, handles);
+}
+
 cobject::Record newSimSceneRecord(const cobject::Record& another, const SimObject& sim, const World& world, double nowMs,
                                   const cobject::Animation* otherwise, float floorHeight, const TypeOwners& owners,
                                   ClipHandles* handles) {
@@ -443,6 +574,10 @@ cobject::Record newSimSceneRecord(const cobject::Record& another, const SimObjec
     start.object.place = place;
     start.animatable.place = place;
     start.animatable.places = simPlacePair(sim, place, owners);
+    start.object.joints.push_back({sim.definition.name + "_objt", place});
+    if (auto drawn = owners.drawnJoints ? owners.drawnJoints(sim.id) : std::nullopt) {
+        start.object.joints.insert(start.object.joints.end(), drawn->begin(), drawn->end());
+    }
     return sceneRecord(start, sim, world, nowMs, otherwise, handles);
 }
 

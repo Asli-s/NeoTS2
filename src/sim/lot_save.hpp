@@ -70,14 +70,22 @@ struct TypeOwners {
     // The height a Sim stands at (x, y) in the scene's tiles on a storey (1 = ground), higher on a
     // stage than on the floor. Without it a Sim stands at height 0.
     std::function<float(std::int32_t, float, float)> floorHeight;
-    // Where a Sim is drawn on the lot (its position, then its rotation as a quaternion), by object id,
-    // which for one in a slot is where the slot's bone holds it. Without it, or with nothing for a
-    // Sim, such a Sim keeps the pair of places it was loaded with.
+    // Where a Sim or an object is drawn on the lot (its position, then its rotation as a quaternion),
+    // by object id, which for one in a slot is where the slot's bone holds it. Without it, or with
+    // nothing for a Sim, such a Sim keeps the pair of places it was loaded with.
     std::function<std::optional<cobject::Place>(std::int16_t)> drawnPlace;
-    // A Sim's skeleton joints as drawn now, by object id: each named joint below the skeleton's own
-    // root in the skeleton's order, with its place relative to its parent joint. Without it, or with
-    // nothing for a Sim, the Sim's joints keep the pose they were loaded with.
+    // The name of the model an object made since the lot loaded shows, for its new scene record.
+    // Without it such an object gets no record of its own.
+    std::function<std::string(const SimObject&)> modelName;
+    // A Sim's skeleton joints or an animated object's model joints as drawn now, by object id: each
+    // named joint below the skeleton's own root in the skeleton's order, with its place relative to
+    // its parent joint. Without it, or with nothing for a Sim, the Sim's joints keep the pose they
+    // were loaded with.
     std::function<std::optional<std::vector<cobject::PosedJoint>>(std::int16_t)> drawnJoints;
+    // An object's model morphs and the weights they are drawn at now, by object id, in the order the
+    // game's record lists them (an eaten cake slice). Without it, or with nothing for an object, its
+    // record keeps the weights it was loaded with.
+    std::function<std::optional<std::vector<cobject::NamedWeight>>(std::int16_t)> drawnMorphs;
     // The effects an object is playing now, by object id, as its record saves them. Without it the
     // record keeps the effects it was loaded with.
     std::function<std::vector<xobj::Effect>(std::int16_t)> runningEffects;
@@ -114,7 +122,7 @@ struct SaveCounters {
 xobj::SavedObject objectRecord(const xobj::SavedObject& loaded, const SimObject& object, const TypeOwners& owners,
                                SaveCounters* counters = nullptr);
 
-// The lot camera as the player left it, for the view saved with the lot.
+// The lot camera as the player left it, in the game's lot coordinates, for the view saved with the lot.
 struct LotCameraView {
     savedcamera::ViewState state;
     camera::Config rig;  // the camera file the view follows, for its zoom levels and orientations
@@ -175,6 +183,7 @@ LotSaveCounts fillLotPackage(dbpf::PackageImage& package, LotSimulation& simulat
                              const std::set<std::int16_t>& writtenNewSims = {},
                              std::function<std::optional<cobject::Place>(std::int16_t)> drawnPlace = {},
                              std::function<std::optional<std::vector<cobject::PosedJoint>>(std::int16_t)> drawnJoints = {},
-                             std::function<std::vector<xobj::Effect>(std::int16_t)> runningEffects = {});
+                             std::function<std::vector<xobj::Effect>(std::int16_t)> runningEffects = {},
+                             std::function<std::optional<std::vector<cobject::NamedWeight>>(std::int16_t)> drawnMorphs = {});
 
 } // namespace ts2::sim

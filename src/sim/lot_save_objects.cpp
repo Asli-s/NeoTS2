@@ -110,6 +110,24 @@ std::optional<cobject::Record> anotherSimScene(const SaveState& save) {
     return found;
 }
 
+// The animatable part of the record of the object with the lowest id the lot was loaded with whose
+// record is a cAnimatable one, not a Sim's. Empty when none reads.
+std::optional<cobject::AnimatablePart> anotherObjectAnimatable(const SaveState& save) {
+    std::optional<cobject::AnimatablePart> found;
+    std::uint32_t lowest = UINT32_MAX;
+    for (const dbpf::StoredResource& resource : save.package.resources) {
+        if (resource.key.type != types::kSceneObject || resource.key.instance >= lowest ||
+            listedObject(save, static_cast<std::int32_t>(resource.key.instance)).object == nullptr) {
+            continue;
+        }
+        if (auto record = cobject::readRecord(bodyOf(resource)); record && record->chain == cobject::Chain::Animatable) {
+            found = std::move(record->animatable);
+            lowest = resource.key.instance;
+        }
+    }
+    return found;
+}
+
 // The record of a Sim of another type with the counts a Sim of `entry`'s type gets. Empty when the
 // lot has none.
 std::optional<xobj::SavedObject> anotherSimRecord(SaveState& save, const SimObject& object, const objt::Entry& entry) {
@@ -355,6 +373,9 @@ void addNewObjects(SaveState& save) {
         entryByGuid.emplace(entry.guid, &entry);
     }
     const std::unordered_set<std::int32_t> remade = remadeTypes(save);
+    // Read once, when the first new cAnimatable object needs it. New objects are not listed, so the
+    // records written here never change it.
+    std::optional<std::optional<cobject::AnimatablePart>> animatable;
     save.world.nextAfter(0, [&](const SimObject& object) {
         const auto id = static_cast<std::int32_t>(object.id);
         if (save.done.contains(id) || listedObject(save, id).object != nullptr) {
@@ -400,6 +421,25 @@ void addNewObjects(SaveState& save) {
                 putResource(save.package, {types::kSceneObject, 0xFFFFFFFF, static_cast<std::uint32_t>(id), 0},
                             cobject::writeRecord(newSimSceneRecord(*another, object, save.world, save.world.clockMs(), save.anyAnimation, floor,
                                                                   save.owners, &save.clipHandles)));
+                ++save.counts.scenes;
+            }
+        } else if (const auto chain = sceneChainOf(object); chain && save.owners.modelName &&
+                                                             (object.data[kLeadTileField] <= 0 || object.data[kLeadTileField] == object.id)) {
+            // A new object gets a record of its own, over any a removed object left at its id. The parts of a
+            // multi-tile object other than its lead are left as they are, as what the game writes for them
+            // isn't known yet.
+            if (*chain == cobject::Chain::Animatable && !animatable) {
+                animatable = anotherObjectAnimatable(save);
+            }
+            // A cPerson record of an object that isn't saved as a Sim (a Sim template) starts from the
+            // settings the game makes. What else the game writes for one is not known yet.
+            cobject::AnimatablePart made;
+            made.settings = newAnimatableSettings();
+            const auto another = *chain == cobject::Chain::Animatable ? *animatable : std::optional(made);
+            if (another) {
+                putResource(save.package, {types::kSceneObject, 0xFFFFFFFF, static_cast<std::uint32_t>(id), 0},
+                            cobject::writeRecord(newObjectSceneRecord(*chain, save.owners.modelName(object), *another, object, save.world,
+                                                                     save.world.clockMs(), save.anyAnimation, save.owners, &save.clipHandles)));
                 ++save.counts.scenes;
             }
         }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "diag/log.hpp"
+#include "formats/saved_camera.hpp"
 #include "orbit.hpp"
 #include "render/irenderer.hpp"
 #include "scene/lot_light_maps.hpp"
@@ -495,6 +496,26 @@ inline void placeCamera(Orbit& orbit, const ts2::scene::LotFootprint& where) {
     const float turn = std::atan2(where.place.m[4], where.place.m[0]);
     orbit.yaw += turn;
     orbit.yawGoal += turn;
+}
+
+// Puts the lot camera where a saved view left it, in the lot scene's own coordinates, as loading
+// the lot does in the game. The storey and wall mode come back only when neither is negative, so a
+// view left on a basement keeps the lot's starting storey. What the game does with a storey past the
+// lot's highest is not known yet, and here it keeps the starting storey too.
+inline void restoreView(Orbit& orbit, LotView& view, const ts2::savedcamera::ViewState& saved) {
+    orbit.target = {saved.target[0], saved.target[1], saved.target[2]};
+    orbit.yaw = orbit.yawGoal = saved.yaw;
+    orbit.pitchBlend = orbit.pitchBlendGoal = saved.pitchBlend;
+    orbit.zoomTo(saved.zoomingTo);
+    orbit.distanceGoal = orbit.distance;
+    if (saved.storey >= 0 && saved.wallMode >= 0) {
+        if (saved.storey <= view.top - view.ground) {
+            view.view.level = view.ground + saved.storey;
+        }
+        if (saved.wallMode <= 3) {
+            view.setWallMode(saved.wallMode);
+        }
+    }
 }
 
 } // namespace app

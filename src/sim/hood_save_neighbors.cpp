@@ -183,25 +183,14 @@ bool saveNeighborCounter(dbpf::StoredResource& resource, const World& world) {
 
 namespace {
 
-std::vector<xobj::Token> savedTokens(const std::vector<std::shared_ptr<InventoryToken>>& tokens) {
-    std::vector<xobj::Token> out;
-    out.reserve(tokens.size());
-    for (const auto& t : tokens) {
-        if (t) {
-            out.push_back({t->guid, t->flags, t->value1, t->value2, t->category, t->properties});
-        }
-    }
-    return out;
-}
-
 // Puts `inventory` in at `id`, keeping the list in ascending id order.
 void putInventory(std::vector<std::pair<std::int16_t, ngbh::Inventory>>& list, std::int16_t id, const Inventory& inventory) {
     auto at = std::lower_bound(list.begin(), list.end(), id, [](const auto& entry, std::int16_t key) { return entry.first < key; });
     if (at == list.end() || at->first != id) {
         at = list.insert(at, {id, ngbh::Inventory{ngbh::kInventoryVersion, {}, {}}});
     }
-    at->second.counted = savedTokens(inventory.counted);
-    at->second.singular = savedTokens(inventory.singular);
+    at->second.counted = toSavedTokens(inventory.counted);
+    at->second.singular = toSavedTokens(inventory.singular);
 }
 
 } // namespace
@@ -215,8 +204,8 @@ int saveInventories(dbpf::StoredResource& resource, const World& world, const st
     for (const auto& [key, inventory] : world.usedInventories()) {
         const auto [kind, id] = key;
         if (kind == InventoryKind::Global) {
-            record->global.counted = savedTokens(inventory.counted);
-            record->global.singular = savedTokens(inventory.singular);
+            record->global.counted = toSavedTokens(inventory.counted);
+            record->global.singular = toSavedTokens(inventory.singular);
             ++written;
             continue;
         }
@@ -264,20 +253,27 @@ int saveWants(dbpf::PackageImage& hood, const World& world, const std::set<std::
         const auto at = records.find(instance);
         std::vector<std::uint8_t> old;
         std::optional<swaf::Record> loaded;
+        // A record an older game wrote is written anew at the current version from what the Sim
+        // holds, as the game does. Its wants were brought up to date as the neighborhood loaded.
+        bool older = false;
         if (at != records.end()) {
             old = bodyOf(hood.resources[at->second]);
             std::size_t leftOver = 0;
             loaded = swaf::readRecord(old, &leftOver);
-            if (!loaded) {
+            older = !loaded && old.size() >= 4 &&
+                    (old[0] | old[1] << 8 | old[2] << 16 | static_cast<std::uint32_t>(old[3]) << 24) < swaf::kWrittenVersion;
+            if (!loaded && !older) {
                 continue;
             }
         }
         swaf::Record record;
         const swaf::Slots slots = world.wantSlots(id);
-        record.extra = loaded ? loaded->extra : std::nullopt;
+        const swaf::Want* lifetime = world.lifetimeWant(id);
+        record.extra = loaded ? loaded->extra : older && lifetime != nullptr ? std::optional(*lifetime) : std::nullopt;
         record.maxWants = loaded ? loaded->maxWants : slots.wants;
         record.maxFears = loaded ? loaded->maxFears : slots.fears;
-        record.lastValue = loaded ? loaded->lastValue : 0;
+        // The game keeps the number of extra holds here, one fewer than the holds.
+        record.lastValue = loaded ? loaded->lastValue : older ? static_cast<std::int16_t>(slots.holds - 1) : 0;
         record.wants = filledPlaces(world.wantsNow(id, false));
         record.fears = filledPlaces(world.wantsNow(id, true));
         record.historyValue = history.time;
@@ -289,7 +285,7 @@ int saveWants(dbpf::PackageImage& hood, const World& world, const std::set<std::
             // A want loaded from an older record lacks the numbers the game writes now.
             continue;
         }
-        if (old.size() > body.size()) {
+        if (!older && old.size() > body.size()) {
             body.insert(body.end(), old.begin() + static_cast<std::ptrdiff_t>(body.size()), old.end());
         }
         const dbpf::ResourceKey key{swaf::kType, 0xFFFFFFFF, instance, 0};

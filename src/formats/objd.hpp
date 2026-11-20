@@ -27,6 +27,7 @@ constexpr std::size_t kCatalogStringsId = 0x29;
 constexpr std::size_t kNumAttributes = 0x3A;
 constexpr std::size_t kObjectArrayCount = 0x3B;
 constexpr std::size_t kDefaultModel = 0x48;  // the row of its model names (string table 0x85) a new object shows
+constexpr std::size_t kSceneClass = 0x63;    // a plain object's scene record class: 0 cObject, 1 cAnimatable, 2 cLocomotable
 } // namespace field
 
 constexpr std::size_t kMaxFields = 108;

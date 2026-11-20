@@ -340,6 +340,7 @@ add_library(ts2sim
     src/sim/newborn_save.cpp
     src/sim/hood_save.cpp
     src/sim/hood_save_neighbors.cpp
+    src/sim/game_wide_save.cpp
     src/sim/family_picture.cpp
     src/sim/relationship_table.cpp
     src/sim/lot_save_types.cpp

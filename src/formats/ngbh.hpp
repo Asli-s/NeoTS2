@@ -62,4 +62,19 @@ std::optional<Record> readRecord(std::span<const std::uint8_t> data);
 // Throws std::runtime_error for a list or text too long to write.
 std::vector<std::uint8_t> writeRecord(const Record& record);
 
+// The game-wide inventory, which no neighborhood owns (the Game Tips flags are kept in it). The game
+// keeps it in Neighborhoods/NeighborhoodManager.package as this resource: the object save version,
+// then the inventory as the neighborhood record stores one. The game writes it when it quits.
+constexpr std::uint32_t kGameWideType = 0x0ABA73AF;
+constexpr std::uint32_t kGameWideGroup = 0xFFFFFFFF;
+constexpr std::uint32_t kGameWideInstance = 1;
+constexpr std::uint32_t kGameWideVersion = 0xD8;
+
+// Empty for another version, an inventory of another version, or bytes cut short or left over.
+// The tokens are as stored, with no properties added.
+std::optional<Inventory> readGameWideRecord(std::span<const std::uint8_t> data);
+
+// Writes the record at kGameWideVersion. Throws std::runtime_error for a list too long to write.
+std::vector<std::uint8_t> writeGameWideRecord(const Inventory& inventory);
+
 } // namespace ts2::ngbh

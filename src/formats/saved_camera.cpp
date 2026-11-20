@@ -10,6 +10,7 @@
 #include <exception>
 #include <numbers>
 #include <string>
+#include <utility>
 
 namespace ts2::savedcamera {
 
@@ -171,7 +172,45 @@ Record viewRecord(const Record& loaded, const camera::Config& rig, const ViewSta
         }
         view.orientation = static_cast<std::int32_t>(rig.orientations[at] < degrees - kSame ? 0 : at);
     }
+    view.value1 = state.storey;
+    view.value2 = state.wallMode;
     return record;
+}
+
+std::optional<ViewState> savedView(const Record& record, const camera::Config& rig) {
+    if (record.kind != kOrbitKind || !record.orbit[0]) {
+        return std::nullopt;
+    }
+    const OrbitView& view = *record.orbit[0];
+    ViewState state;
+    state.target = {std::bit_cast<float>(view.target[0]), std::bit_cast<float>(view.target[1]), std::bit_cast<float>(view.target[2])};
+    state.distance = std::bit_cast<float>(view.distance);
+    state.yaw = std::bit_cast<float>(view.yaw);
+    state.pitchBlend = std::bit_cast<float>(view.pitchBlend);
+    for (const float value : {state.target[0], state.target[1], state.target[2], state.distance, state.yaw, state.pitchBlend}) {
+        if (!std::isfinite(value)) {
+            return std::nullopt;
+        }
+    }
+    // The camera file lists its zoom levels from the farthest to the nearest.
+    if (!rig.levels.empty()) {
+        state.distance = std::min(std::max(state.distance, rig.levels.back().distance), rig.levels.front().distance);
+    }
+    state.zoomingTo = state.distance;
+    state.storey = view.value1;
+    state.wallMode = view.value2;
+    return state;
+}
+
+ViewState swappedAxes(ViewState state) {
+    std::swap(state.target[0], state.target[1]);
+    constexpr float kTurn = 2 * std::numbers::pi_v<float>;
+    float yaw = std::fmod(kTurn / 4 - state.yaw, kTurn);
+    if (yaw < 0) {
+        yaw += kTurn;
+    }
+    state.yaw = yaw;
+    return state;
 }
 
 } // namespace ts2::savedcamera

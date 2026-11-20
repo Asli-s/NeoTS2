@@ -30,6 +30,7 @@
 #include "portraits.hpp"
 
 #include "content/cameras.hpp"
+#include "sim/game_wide_save.hpp"
 #include "formats/cobject_record.hpp"
 #include "ui/animated_bitmap.hpp"
 #include "imposter_baker.hpp"
@@ -152,6 +153,8 @@ private:
         std::string lightState;
         ts2::scene::Transform place;
         std::optional<ts2::camera::Config> freeRig;  // the free camera's settings
+        // The view the lot was saved with, in the game's coordinates, when the camera came from it.
+        std::optional<ts2::savedcamera::ViewState> savedView;
         std::size_t decorations = 0;  // the scene's first instances: the neighborhood's plants and decorations
         std::size_t surroundings = 0;  // those and the skirt's instances after them
         std::shared_ptr<const SkirtSource> skirt;  // none for a lot shown without its neighborhood
@@ -274,7 +277,7 @@ private:
     void saveLotShown(std::function<void(const std::string& problem)> after);
     // Runs a save saveLotShown asked for once its box has been drawn.
     void runShownSave();
-    // Where a Sim is drawn on the lot, for its saved scene record (see TypeOwners::drawnPlace).
+    // Where a Sim or an object is drawn on the lot, for its saved scene record (see TypeOwners::drawnPlace).
     std::optional<ts2::cobject::Place> drawnSimPlace(std::int16_t sim) const;
     // A Sim's skeleton joints as last posed, each relative to its parent joint (see TypeOwners::drawnJoints).
     std::optional<std::vector<ts2::cobject::PosedJoint>> drawnSimJoints(std::int16_t sim) const;
@@ -519,6 +522,8 @@ private:
     double lotRealSeconds_ = 0;
     std::future<std::unique_ptr<ts2::sim::LotSimulation>> lotSimBuilding_;  // built beside the lot's scene
     std::unique_ptr<app::LotLife> lotLife_;
+    // The game-wide inventory (the Game Tips flags), read as the game starts and written as it quits.
+    std::optional<ts2::sim::GameWideStore> gameWide_;
     std::shared_ptr<const ts2::content::Broadcasts> broadcasts_;  // read on the first lot
     std::unique_ptr<app::TvStations> tvStations_;
     std::int64_t tvClockMs_ = 0;  // the lot's speed clock when the stations last moved
@@ -668,6 +673,15 @@ private:
     std::optional<app::Orbit> hoodOrbitBefore_;
     std::optional<std::array<float, 2>> freeMouse_;  // where the pointer moved to since the last frame
     ts2::scene::Transform lotPlace_;  // where the lot shown stands in its neighborhood
+    // The saved view the lot camera started from, and the target and yaw it became in the
+    // neighborhood. While the camera is still there a save writes the view's own values, which the
+    // move into the neighborhood and back would round.
+    struct LoadedView {
+        ts2::savedcamera::ViewState saved;
+        app::Vec3 target{};
+        float yaw = 0;
+    };
+    std::optional<LoadedView> loadedView_;
     app::NeighborhoodUi hoodUi_;
     app::Cursors cursors_{install_, data_};
     std::string openName_;

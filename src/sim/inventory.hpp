@@ -41,4 +41,19 @@ inline Inventory toInventory(const ngbh::Inventory& saved) {
     return Inventory{toTokens(saved.counted), toTokens(saved.singular)};
 }
 
+inline std::vector<xobj::Token> toSavedTokens(const std::vector<std::shared_ptr<InventoryToken>>& tokens) {
+    std::vector<xobj::Token> saved;
+    saved.reserve(tokens.size());
+    for (const auto& t : tokens) {
+        if (t) {
+            saved.push_back({t->guid, t->flags, t->value1, t->value2, t->category, t->properties});
+        }
+    }
+    return saved;
+}
+
+inline ngbh::Inventory toSavedInventory(const Inventory& inventory) {
+    return ngbh::Inventory{ngbh::kInventoryVersion, toSavedTokens(inventory.counted), toSavedTokens(inventory.singular)};
+}
+
 } // namespace ts2::sim

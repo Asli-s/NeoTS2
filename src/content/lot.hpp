@@ -105,6 +105,8 @@ struct Lot {
     std::map<std::uint32_t, std::vector<cobject::SavedAnimation>> savedAnimations;
     // Each object's model joints as they were posed when the lot was saved, by object id.
     std::map<std::uint32_t, std::vector<cobject::SavedJoint>> savedJoints;
+    // Each object's model morphs with the weights they had when the lot was saved, by object id.
+    std::map<std::uint32_t, std::vector<cobject::SavedBlend>> savedBlends;
     // Where each object stood as the lot was saved (see cobject::SavedObject::position), by object id.
     std::map<std::uint32_t, std::array<float, 3>> savedPositions;
     // Each object's script data tables (instance = object id).

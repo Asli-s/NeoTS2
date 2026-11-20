@@ -39,6 +39,7 @@
 #include "formats/terrain.hpp"
 
 #include <bit>
+#include <cmath>
 #include <initializer_list>
 #include <utility>
 #include <limits>
@@ -642,6 +643,46 @@ void interactionTableParse() {
     CHECK(in.motives.size() == 1 && in.motives[0].size() == 1 && in.motives[0][0].min == 10 &&
           in.motives[0][0].delta == -5 && in.motives[0][0].type == 3);
     CHECK(t.extraBytes == 0);
+}
+
+// A type 6 want an older game wrote keeps a 16-bit code. The game reads codes 1 to 8 as GUIDs and
+// any other, a GUID's own low half included, as 0.
+void oldWantCodesReadAsGuids() {
+    std::vector<std::uint8_t> d;
+    auto u8 = [&d](std::uint8_t v) { d.push_back(v); };
+    auto u16 = [&d](std::uint16_t v) { d.push_back(static_cast<std::uint8_t>(v)); d.push_back(static_cast<std::uint8_t>(v >> 8)); };
+    auto u32 = [&d](std::uint32_t v) {
+        for (int i = 0; i < 4; ++i) d.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
+    };
+    auto want = [&](std::uint16_t code) {
+        u32(8);
+        u16(27);
+        u32(0xADA6814F);
+        u8(6);
+        u16(code);
+        u16(0);
+        u32(0);
+        u32(3000);
+        u8(6);
+    };
+    u32(6);
+    u32(0);
+    u32(4);
+    u32(3);
+    want(3);
+    want(8);
+    want(0xDBC6);
+    u32(3);
+    u32(0);
+    u32(0);
+    u32(2);
+    u32(0);
+    u32(0);
+    const auto s = ts2::swaf::parse(d);
+    CHECK(s.wants.size() == 3);
+    CHECK(static_cast<std::uint32_t>(s.wants[0].argument) == 0x505FDBC6);
+    CHECK(static_cast<std::uint32_t>(s.wants[1].argument) == 0x305FDC9F);
+    CHECK(s.wants[2].argument == 0);
 }
 
 // Wants and fears, version 6 with version-10 wants: an extra want, the two lists with their
@@ -3079,13 +3120,16 @@ void savedCameraViewsFollowTheCamera() {
     state.zoomingTo = 25;
     state.yaw = 190 * 3.14159265f / 180;
     state.pitchBlend = 0.4f;
+    state.storey = 1;
+    state.wallMode = 3;
     const Record filled = viewRecord(loaded, rig, state);
     const auto& view = *filled.orbit[0];
     CHECK(std::bit_cast<float>(view.target[0]) == 30.0f && std::bit_cast<float>(view.target[2]) == 2.5f);
     CHECK(std::bit_cast<float>(view.distance) == 31.5f && std::bit_cast<float>(view.pitchBlend) == 0.4f);
     // The zoom is easing to the third level, and the yaw is on the fifth orientation.
     CHECK(view.zoomStep == 2 && view.orientation == 4);
-    CHECK(view.byte1 == 1 && view.byte2 == 1 && view.value1 == 7 && view.value2 == -9);
+    // The storey and wall mode go after the target, and the flag bytes stay as read.
+    CHECK(view.byte1 == 1 && view.byte2 == 1 && view.value1 == 1 && view.value2 == 3);
     // The other slots are the views the player saved to a key, which the camera moving doesn't touch.
     CHECK(filled.orbit[2] && filled.orbit[2]->zoomStep == was.zoomStep && !filled.orbit[1]);
 
@@ -3098,6 +3142,58 @@ void savedCameraViewsFollowTheCamera() {
     // A camera with no view left leaves the record alone.
     Record empty;
     CHECK(!viewRecord(empty, rig, state).orbit[0]);
+}
+
+// A lot's saved view comes back on load: slot 0's target, distance, yaw, pitch, storey and wall
+// mode, the distance kept within the camera file's zoom levels. Saved again unmoved, the record is
+// the same bytes. The lot scene has the game's x and y swapped, both ways.
+void savedCameraViewsComeBack() {
+    using namespace ts2::savedcamera;
+    ts2::camera::Config rig;
+    rig.levels = {{70, 45, 1, 2000, 30, 40}, {40, 45, 1, 2000, 22, 45}, {8, 45, 1, 2000, 14, 50}};
+    rig.orientations = {10, 55, 100, 145, 190, 235, 280, 325};
+    constexpr float kPi = 3.14159265f;
+    Record record;
+    OrbitView view;
+    view.zoomStep = 2;
+    view.byte1 = 1;
+    view.distance = std::bit_cast<std::uint32_t>(8.0f);
+    view.orientation = 1;
+    view.byte2 = 1;
+    view.yaw = std::bit_cast<std::uint32_t>(55 * kPi / 180);
+    view.pitchBlend = std::bit_cast<std::uint32_t>(0.375f);
+    view.target = {std::bit_cast<std::uint32_t>(18.5f), std::bit_cast<std::uint32_t>(24.25f), std::bit_cast<std::uint32_t>(0.75f)};
+    view.value1 = 1;
+    view.value2 = 2;
+    record.orbit[0] = view;
+    const std::vector<std::uint8_t> bytes = writeRecord(record);
+
+    const auto loaded = readRecord(bytes);
+    const auto state = loaded ? savedView(*loaded, rig) : std::nullopt;
+    CHECK(state && state->target[0] == 18.5f && state->target[1] == 24.25f && state->target[2] == 0.75f);
+    CHECK(state && state->distance == 8.0f && state->zoomingTo == 8.0f && state->pitchBlend == 0.375f);
+    CHECK(state && state->storey == 1 && state->wallMode == 2);
+    if (state) {
+        CHECK(writeRecord(viewRecord(*loaded, rig, *state)) == bytes);
+        // In the lot scene the target's x and y trade places, and the camera sits where it did.
+        const ViewState scene = swappedAxes(*state);
+        CHECK(scene.target[0] == 24.25f && scene.target[1] == 18.5f);
+        CHECK(std::abs(std::cos(scene.yaw) - std::sin(state->yaw)) < 1e-6f && std::abs(std::sin(scene.yaw) - std::cos(state->yaw)) < 1e-6f);
+        CHECK(scene.yaw >= 0 && scene.yaw < 2 * kPi);
+        const ViewState back = swappedAxes(scene);
+        CHECK(back.target == state->target && std::abs(back.yaw - state->yaw) < 1e-6f);
+    }
+
+    // A distance past the zoom levels is brought back inside them.
+    record.orbit[0]->distance = std::bit_cast<std::uint32_t>(500.0f);
+    CHECK(savedView(record, rig)->distance == 70.0f);
+    record.orbit[0]->distance = std::bit_cast<std::uint32_t>(1.0f);
+    CHECK(savedView(record, rig)->distance == 8.0f);
+    // A value that is not a number brings nothing back, nor does an empty slot 0.
+    record.orbit[0]->yaw = std::bit_cast<std::uint32_t>(std::numeric_limits<float>::quiet_NaN());
+    CHECK(!savedView(record, rig));
+    record.orbit[0].reset();
+    CHECK(!savedView(record, rig));
 }
 
 // The object map's two records write back as the game writes them, and the reader of saves finds
@@ -3234,6 +3330,7 @@ std::vector<Test> formatTests() {
         {"object map records write back", objectMapRecordsWriteBack},
         {"saved camera records write back", savedCameraRecordsWriteBack},
         {"saved camera views follow the camera", savedCameraViewsFollowTheCamera},
+        {"saved camera views come back", savedCameraViewsComeBack},
         {"scene records write back", sceneRecordsWriteBack},
         {"relationship records write back", relationshipRecordsWriteBack},
         {"lot grids write back", lotGridsWriteBack},
@@ -3289,6 +3386,7 @@ std::vector<Test> formatTests() {
         {"neighbor remap keeps table 6", neighborRemapKeepsTableSix},
         {"wall layer reads coverings per side", wallLayerReadsCoveringsPerSide},
         {"wants and fears parse", wantsAndFearsParse},
+        {"old want codes read as GUIDs", oldWantCodesReadAsGuids},
         {"want slots follow the version", wantSlotsFollowTheVersion},
         {"want trees are read", wantTreesAreRead},
         {"interaction table parse", interactionTableParse},

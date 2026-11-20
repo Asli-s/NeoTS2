@@ -48,7 +48,9 @@ World::PlatformRegion platformRegions(const content::Lot& lot);
 // The neighborhood's neighbors and relationships, ready to share between worlds. As the game loads
 // a neighborhood it drops every neighbor whose Sim isn't a person (OBJD type 2) or a family-tree-only
 // Sim (type 0x11), its type unknown included, with its relationships both ways and its family ties.
+// Wants saved by an older game take the numbers they lack from `wantDefs`, as the game's load does.
 std::shared_ptr<const SavedNeighborhood> savedNeighborhood(const content::Neighborhood& hood, CodeSource& code,
-                                                          std::map<std::int32_t, nhoodid::NeighborhoodId> all = {});
+                                                          std::map<std::int32_t, nhoodid::NeighborhoodId> all = {},
+                                                          const content::WantDefinitions* wantDefs = nullptr);
 
 } // namespace ts2::sim

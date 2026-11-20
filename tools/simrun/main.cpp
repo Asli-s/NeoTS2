@@ -784,7 +784,10 @@ int printEffect(const std::filesystem::path& install, const std::string& name) {
             for (const auto& c : e.components) {
                 std::printf("%s  type %u index %d flags 0x%X offset (%.3f %.3f %.3f) %s", pad.c_str(), c.type, c.index, c.flags, c.offset[0], c.offset[1], c.offset[2], c.name.c_str());
                 if (c.type == static_cast<std::uint8_t>(ts2::effects::BlockType::Particles) && c.index >= 0 && static_cast<std::size_t>(c.index) < file->particles.size()) {
-                    std::printf(" particle flags 0x%llX", static_cast<unsigned long long>(file->particles[static_cast<std::size_t>(c.index)].flags));
+                    const auto& block = file->particles[static_cast<std::size_t>(c.index)];
+                    const auto colour = block.colours.empty() ? std::array<float, 3>{1, 1, 1} : block.colours.front();
+                    std::printf(" particle flags 0x%llX texture %s blend %u alpha %.3f colour (%.3f %.3f %.3f)", static_cast<unsigned long long>(block.flags),
+                                block.texture.c_str(), static_cast<unsigned>(block.blend), block.alpha.at(0), colour[0], colour[1], colour[2]);
                 }
                 const bool meta = c.type == static_cast<std::uint8_t>(ts2::effects::BlockType::MetaParticles) && c.index >= 0 &&
                                   static_cast<std::size_t>(c.index) < file->metaParticles.size();
@@ -1430,6 +1433,13 @@ void printSavedAnimations(const std::filesystem::path& lot) {
                         a.name.c_str(), a.eventObject, a.eventTree, a.eventObjectGuid);
         }
     }
+    for (const auto& [id, joints] : read.savedJoints) {
+        std::printf("  object %u: %zu saved joints", id, joints.size());
+        for (const auto& j : joints) {
+            std::printf(" %s (%.3f %.3f %.3f)", j.name.c_str(), j.translation[0], j.translation[1], j.translation[2]);
+        }
+        std::printf("\n");
+    }
     std::printf("saved animations by type and layer:\n");
     for (const auto& [key, n] : byTypeAndLayer) {
         std::printf("  %-6s layer %d: %d\n", key.first.c_str(), key.second, n);
@@ -2001,7 +2011,14 @@ int runLot(ResourceIndex& index, const std::filesystem::path& install, const std
         for (const auto v : shown->semiAttributes) {
             std::printf(" %d", v);
         }
+        std::printf(", model '%s', data", shown->model.c_str());
+        for (const auto v : shown->data) {
+            std::printf(" %d", v);
+        }
         std::printf("\n");
+        for (const auto& change : shown->materialChanges) {
+            std::printf("  material '%s' on group '%s'\n", change.material.c_str(), change.group.c_str());
+        }
         // Its clips: the current one, the one it replaced and its overlays, with start and length (ms).
         const auto clip = [](const char* what, const ts2::sim::PlayingAnimation& a) {
             std::printf("  %s %s start %.0f length %.0f loops %d flipped %d\n", what, a.name.c_str(), a.startMs, a.lengthMs, a.loops, a.flipped);

@@ -4,6 +4,7 @@
 #include "formats/binary_writer.hpp"
 
 #include <algorithm>
+#include <array>
 #include <iterator>
 #include <stdexcept>
 #include <utility>
@@ -18,6 +19,13 @@ constexpr std::uint32_t kMaxHistoryVersion = 2;
 constexpr std::uint32_t kMaxCount = 0x10000;
 // More slots than any panel layout has. The game sets no limit.
 constexpr std::uint32_t kMaxSlots = 64;
+
+// The GUID an older game's 16-bit code 1 to 8 stands for in a type 6 want. Any other code reads as 0.
+std::int32_t oldCodeGuid(std::int16_t code) {
+    constexpr std::array<std::uint32_t, 8> kGuids{0xD05FDB91, 0x905FDBB5, 0x505FDBC6, 0xB05FDC1B,
+                                                  0x505FDC28, 0x105FDC52, 0x705FDC8F, 0x305FDC9F};
+    return code >= 1 && code <= 8 ? static_cast<std::int32_t>(kGuids[static_cast<std::size_t>(code - 1)]) : 0;
+}
 
 Want readWant(BinaryReader& r) {
     Want w;
@@ -58,13 +66,14 @@ Want readWant(BinaryReader& r) {
         }
         break;
     case 6:
-        // Before version 10 the argument is a 16-bit code the game maps to a GUID.
+        // Before version 10 the argument is a 16-bit code for a GUID.
         if (v >= 10) {
             w.argument = r.i32();
             w.value = r.i16();
         } else if (v >= 2) {
-            w.argument = r.u16();
+            const std::int16_t code = r.i16();
             w.value = r.i16();
+            w.argument = oldCodeGuid(code);
         }
         break;
     default:

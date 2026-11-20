@@ -27,7 +27,7 @@ enum class Chain { Object, Animatable, Person };
 struct NodeMaterials {
     std::string node;
     Word value = 0;  // not known yet
-    std::vector<std::pair<std::string, std::string>> subsets;  // subset, then material
+    std::vector<std::pair<std::string, std::string>> subsets;  // material, then subset
 };
 
 struct PosedJoint {

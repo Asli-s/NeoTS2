@@ -82,11 +82,15 @@ inline std::optional<objt::ObjectTypeTable> typesOf(const dbpf::PackageImage& pa
 // 0x60000000 and a Sim clip's 0x40000000 with an 8-bit serial from bit 21, both with bit 0 for a
 // mirrored clip. The serials come from a counter each Sim's scene record saves as its first setting,
 // which a load takes back. `last` is the last serial given out, and `saved` what the records save:
-// past every serial this save gives out.
+// past every serial this save gives out. `second` is the counter a record saves as its second
+// setting, which no clip this save starts gives out from, so it stays the highest the lot saved.
+// Every cAnimatable and cPerson record of a save holds the same two counters, as each one a load
+// reads sets them again.
 // `savedTick` is the clock the lot's clips were saved at, for an entry built from an empty one.
 struct ClipHandles {
     std::uint32_t last = 0;
     std::uint32_t saved = 0;
+    std::uint32_t second = 0;
     std::int32_t savedTick = 0;
 };
 
@@ -172,18 +176,46 @@ xobj::SavedInteraction blankInteraction(std::uint16_t id);
 // left empty, as the game leaves one it does not keep, and what it is attached to stays as it was.
 // An object whose record holds no animation to build one from takes `otherwise`, an animation of
 // another object of the lot, and without one it keeps what it was loaded with.
-// With `handles`, each clip gets its handle from them and a Sim's record saves their counter.
+// With `handles`, each clip gets its handle from them and a record with an animatable part saves
+// their two counters.
 cobject::Record sceneRecord(const cobject::Record& loaded, const SimObject& object, const World& world, double nowMs,
                             const cobject::Animation* otherwise, ClipHandles* handles = nullptr);
 
 // A new Sim's scene record, started from `another` Sim's: its place where it stands (or at the origin
 // while it is in a slot), its animations as sceneRecord gives them, and the settings `another` holds,
-// but for the clip handle counter, which `handles` give. A load only matches the pose, materials and
-// blends by name to the Sim's body, so they stay empty rather than take `another`'s. Its pair of
-// places is as simPlacePair gives it. Its locomotion keeps `another`'s value with no sets.
+// but for the clip handle counters, which `handles` give. Its joints are its skeleton's own root
+// ("<name>_objt") at its place, then the skeleton's joints as drawnJoints gives them. A load only
+// matches the pose, materials and blends by name to the Sim's body, so they stay empty rather than
+// take `another`'s. Its pair of places is as simPlacePair gives it. Its locomotion keeps `another`'s
+// value with no sets.
 cobject::Record newSimSceneRecord(const cobject::Record& another, const SimObject& sim, const World& world, double nowMs,
                                   const cobject::Animation* otherwise, float floorHeight, const TypeOwners& owners,
                                   ClipHandles* handles = nullptr);
+
+// The class of scene record the game makes for an object of its type, by its OBJD's type (field
+// 0x09) and, for a plain object, field 0x63: a Sim's is cPerson, a plain object's cObject or
+// cAnimatable. Nullopt for a type that gets none, or a cLocomotable one, which isn't written yet.
+std::optional<cobject::Chain> sceneChainOf(const SimObject& object);
+
+// The settings of a cAnimatable part as the game makes one: no phase sync tick (0x7FFFFF00, never,
+// twice), then 0.5, then two words a clip start sets, both 0. The clip handle counters, the first
+// two, are 0 here and come from ClipHandles when the record is saved.
+std::array<cobject::Word, 7> newAnimatableSettings();
+
+// Puts the weights an object's morphs are drawn at (TypeOwners::drawnMorphs) into its record: into
+// the list it was loaded with by name, else as the drawn list. Nothing changes without them.
+void putDrawnMorphs(cobject::ObjectPart& part, std::int16_t id, const TypeOwners& owners);
+
+// A scene record for an object made since the lot loaded, as the game's save writes one: its model,
+// one material node for the model with the materials its scripts set, and its place (the origin
+// while it is in a slot). A cAnimatable record also gets a scale of 1, the pair of places as
+// simPlacePair gives it, its place where it is drawn, the settings `another` record holds, and its
+// animations as sceneRecord gives them. Its joints are its own root ("<name>_objt") at its place,
+// as every record the game writes starts with, then the model's joints as drawnJoints gives them.
+// Without those a load leaves the model in its rest pose.
+cobject::Record newObjectSceneRecord(cobject::Chain chain, const std::string& model, const cobject::AnimatablePart& another,
+                                     const SimObject& object, const World& world, double nowMs, const cobject::Animation* otherwise,
+                                     const TypeOwners& owners, ClipHandles* handles = nullptr);
 
 // A Sim's pair of places, the record's place `place` and then where it is in the world: a standing
 // Sim's place twice, and for one in a slot where the slot's bone holds it (owners.drawnPlace). None

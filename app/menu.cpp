@@ -317,6 +317,24 @@ double secondsSince(std::uint64_t started) {
     return static_cast<double>(ts2::platform::ticksNs() - started) / 1e9;
 }
 
+// The view a lot package keeps for the camera `rig` describes, in the game's coordinates. Empty
+// when the lot has none or it can't be read, and the camera then starts as on a lot never saved.
+std::optional<ts2::savedcamera::ViewState> savedLotView(const std::filesystem::path& lot, const ts2::camera::Config& rig) {
+    try {
+        ts2::dbpf::Package package{lot};
+        const std::uint32_t instance = ts2::savedcamera::instanceOf(rig.name);
+        for (const auto& e : package.entries()) {
+            if (e.key.type == ts2::savedcamera::kType && e.key.instance == instance) {
+                const auto record = ts2::savedcamera::readRecord(package.read(e));
+                return record ? ts2::savedcamera::savedView(*record, rig) : std::nullopt;
+            }
+        }
+    } catch (const std::exception& ex) {
+        ts2::diag::warning(std::string("lot camera: the saved view can't be read: ") + ex.what());
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
 namespace app {
@@ -327,6 +345,7 @@ Game::Game(ts2::content::UiData& data, ts2::ui::Fonts& fonts, ts2::render::IRend
       uiScale_(uiScaleFor(options.uiScale, width_, height_)), uiWidth_(static_cast<int>(static_cast<float>(width_) / uiScale_)),
       uiHeight_(static_cast<int>(static_cast<float>(height_) / uiScale_)), screen_(data, fonts), lotUi_(screen_, uiWidth_, uiHeight_),
       pieMenu_(screen_, data), hoodUi_(screen_, data, uiWidth_, uiHeight_) {
+    gameWide_.emplace(options_.user);
     setUpMenu();
     pickMenuSims();
     setUpTiles();
@@ -1442,18 +1461,53 @@ std::optional<std::array<int, 2>> Game::lotCentreOnUi(std::uint32_t lot) const {
     return toUi(at[0], at[1]);
 }
 
+namespace {
 
-// Where a Sim is drawn on the lot, as its scene record saves it: the position, then the rotation as
-// a quaternion, in the lot's own frame. A Sim in a slot is where the slot's bone holds it.
+// Each named joint of `rig` with its place relative to its parent, from `nodes`, the rig's nodes
+// posed in the model's space. Nullopt when they don't fit the rig.
+std::optional<std::vector<ts2::cobject::PosedJoint>> localJoints(const ts2::scene::Rig& rig, const std::vector<ts2::scene::Transform>& nodes) {
+    if (nodes.size() != rig.nodes.size()) {
+        return std::nullopt;
+    }
+    const auto word = [](float v) { return std::bit_cast<ts2::cobject::Word>(v); };
+    std::vector<ts2::cobject::PosedJoint> joints;
+    for (std::size_t node = 0; node < rig.nodes.size(); ++node) {
+        if (rig.nodes[node].name.empty()) {
+            continue;
+        }
+        // The rig's nodes are posed in the model's space, so a joint's own place is its parent's undone.
+        const int parent = rig.nodes[node].parent;
+        const ts2::scene::Transform local = parent >= 0 ? nodes[static_cast<std::size_t>(parent)].rigidInverse() * nodes[node] : nodes[node];
+        const auto& m = local.m;
+        const std::array<float, 4> q = local.rotation();
+        joints.push_back({rig.nodes[node].name, {word(m[3]), word(m[7]), word(m[11]), word(q[0]), word(q[1]), word(q[2]), word(q[3])}});
+    }
+    return joints;
+}
+
+} // namespace
+
+// Where a Sim or an object is drawn on the lot, as its scene record saves it: the position, then the
+// rotation as a quaternion, in the lot's own frame. A Sim in a slot is where the slot's bone holds it.
 std::optional<ts2::cobject::Place> Game::drawnSimPlace(std::int16_t sim) const {
     const auto actor = std::find_if(lot_.actors.begin(), lot_.actors.end(),
                                     [&](const ts2::scene::Actor& a) { return a.object == static_cast<std::uint32_t>(sim); });
-    if (actor == lot_.actors.end()) {
+    std::optional<ts2::scene::Transform> drawn;
+    if (actor != lot_.actors.end()) {
+        drawn = actor->lotFrame.rigidInverse() * actor->place;
+    } else if (const auto placed = std::find_if(lot_.placedObjects.begin(), lot_.placedObjects.end(),
+                                                [&](const ts2::scene::PlacedObject& p) { return p.object == static_cast<std::uint32_t>(sim); });
+               placed != lot_.placedObjects.end() && placed->instance < lot_.instances.size()) {
+        // An object a Sim holds hangs where its hand put it as last posed. Any other is drawn where its
+        // instance is.
+        const auto hung = lotPose_.drawnAt.find(placed->object);
+        drawn = placed->lotFrame.rigidInverse() * (hung != lotPose_.drawnAt.end() ? hung->second : lot_.instances[placed->instance].transform);
+    }
+    if (!drawn) {
         return std::nullopt;
     }
-    const ts2::scene::Transform onLot = actor->lotFrame.rigidInverse() * actor->place;
-    const auto& m = onLot.m;
-    const std::array<float, 4> q = onLot.rotation();
+    const auto& m = drawn->m;
+    const std::array<float, 4> q = drawn->rotation();
     const auto word = [](float v) { return std::bit_cast<ts2::cobject::Word>(v); };
     return ts2::cobject::Place{word(m[3]), word(m[7]), word(m[11]), word(q[0]), word(q[1]), word(q[2]), word(q[3])};
 }
@@ -1463,24 +1517,14 @@ std::optional<std::vector<ts2::cobject::PosedJoint>> Game::drawnSimJoints(std::i
         if (index >= lot_.actors.size() || lot_.actors[index].object != static_cast<std::uint32_t>(sim) || !lot_.actors[index].rig) {
             continue;
         }
-        const ts2::scene::Rig& rig = *lot_.actors[index].rig;
-        if (nodes.size() != rig.nodes.size()) {
-            return std::nullopt;
-        }
-        const auto word = [](float v) { return std::bit_cast<ts2::cobject::Word>(v); };
-        std::vector<ts2::cobject::PosedJoint> joints;
-        for (std::size_t node = 0; node < rig.nodes.size(); ++node) {
-            if (rig.nodes[node].name.empty()) {
-                continue;
-            }
-            // The rig's nodes are posed in the model's space, so a joint's own place is its parent's undone.
-            const int parent = rig.nodes[node].parent;
-            const ts2::scene::Transform local = parent >= 0 ? nodes[static_cast<std::size_t>(parent)].rigidInverse() * nodes[node] : nodes[node];
-            const auto& m = local.m;
-            const std::array<float, 4> q = local.rotation();
-            joints.push_back({rig.nodes[node].name, {word(m[3]), word(m[7]), word(m[11]), word(q[0]), word(q[1]), word(q[2]), word(q[3])}});
-        }
-        return joints;
+        return localJoints(*lot_.actors[index].rig, nodes);
+    }
+    // An object its clips move is posed on its model's joints, as a book held open is.
+    const auto actor = std::find_if(lot_.objectActors.begin(), lot_.objectActors.end(),
+                                    [&](const ts2::scene::Actor& a) { return a.object == static_cast<std::uint32_t>(sim); });
+    const auto nodes = lotPose_.objectNodes.find(static_cast<std::uint32_t>(sim));
+    if (actor != lot_.objectActors.end() && actor->rig && nodes != lotPose_.objectNodes.end()) {
+        return localJoints(*actor->rig, nodes->second);
     }
     return std::nullopt;
 }
@@ -1517,13 +1561,27 @@ std::string Game::saveLot() {
         }
         std::optional<ts2::sim::LotCameraView> view;
         if (orbit_.rig) {
+            // The game saves the view in the lot's own coordinates, so the lot's place in its
+            // neighborhood is taken back out.
+            float at[3] = {orbit_.target[0], orbit_.target[1], orbit_.target[2]};
+            lotPlace_.rigidInverse().apply(at, true);
+            ts2::savedcamera::ViewState state;
+            state.target = {at[0], at[1], at[2]};
+            state.distance = orbit_.distance;
+            state.zoomingTo = orbit_.distanceGoal;
+            state.yaw = orbit_.yaw - std::atan2(lotPlace_.m[4], lotPlace_.m[0]);
+            state.pitchBlend = orbit_.pitchBlend;
+            state.storey = lotView_.view.level - lotView_.ground;
+            state.wallMode = lotView_.wallMode();
             view.emplace();
             view->rig = *orbit_.rig;
-            view->state.target = {orbit_.target[0], orbit_.target[1], orbit_.target[2]};
-            view->state.distance = orbit_.distance;
-            view->state.zoomingTo = orbit_.distanceGoal;
-            view->state.yaw = orbit_.yawGoal;
-            view->state.pitchBlend = orbit_.pitchBlendGoal;
+            view->state = ts2::savedcamera::swappedAxes(state);
+            if (loadedView_ && orbit_.target == loadedView_->target) {
+                view->state.target = loadedView_->saved.target;
+            }
+            if (loadedView_ && orbit_.yaw == loadedView_->yaw) {
+                view->state.yaw = loadedView_->saved.yaw;
+            }
         }
         // Sims born this run are saved with their character files, or not at all.
         ts2::sim::NewCharacterFiles made = lotLife_->newCharacterFiles(openFolder_);
@@ -1533,7 +1591,8 @@ std::string Game::saveLot() {
         const ts2::sim::LotSaveCounts counts =
             ts2::sim::fillLotPackage(
                 package, lotLife_->simulation(), view ? &*view : nullptr, made.neighbors, [this](std::int16_t sim) { return drawnSimPlace(sim); },
-                [this](std::int16_t sim) { return drawnSimJoints(sim); }, runningEffectsOf());
+                [this](std::int16_t sim) { return drawnSimJoints(sim); }, runningEffectsOf(),
+                [this](std::int16_t object) { return lotLife_->drawnMorphs(lot_, lotPose_, object); });
         ts2::dbpf::PackageImage hood = ts2::dbpf::readImage(hoodBytes);
         const ts2::sim::HoodSaveCounts hoodCounts = ts2::sim::fillNeighborhoodPackage(
             hood, package, enteredLot_, lotLife_->simulation().world(), lotLife_->simulation().globals(),
@@ -1708,6 +1767,11 @@ void Game::enterLot(std::uint32_t id) {
             built.camera.zoomTo(built.camera.distance);
             built.camera.distanceGoal = built.camera.distance;
             built.camera.levelKeys = built.camera.lotKeys = true;
+            // The view the lot was saved with, as the game's Live camera loads it.
+            built.savedView = savedLotView(file, *built.camera.rig);
+            if (built.savedView) {
+                app::restoreView(built.camera, built.view, ts2::savedcamera::swappedAxes(*built.savedView));
+            }
         }
         built.freeRig = ts2::content::findCamera(install, "CameraMan");
         // Shown in its neighborhood, where its imposter was.
@@ -1793,6 +1857,15 @@ void Game::showLot(LotBuilt& built) {
     applyNeighborHouses();
     if (orbit_.rig) {
         orbit_.limitGoal = keepNearLot(orbit_.rig->param("constraintwidth", 0));
+        // The game sets a saved view's target as a goal, which keeps it near the lot.
+        if (built.savedView && orbit_.limitGoal) {
+            orbit_.limitGoal(*orbit_.goal);
+            orbit_.target = *orbit_.goal;
+        }
+    }
+    loadedView_.reset();
+    if (built.savedView) {
+        loadedView_ = LoadedView{*built.savedView, orbit_.target, orbit_.yaw};
     }
     freeCam_.reset();
     freeRig_ = std::move(built.freeRig);
@@ -2777,6 +2850,7 @@ void Game::startLotLife() {
         lotLife_->simulation().world().setAsksMessages(true);
         lotLife_->simulation().setTextTables([this](std::uint32_t group, std::uint16_t instance) { return data_.texts(group, instance); });
         lotLife_->simulation().world().setDeclinesGameTips(options_.noGameTips);
+        lotLife_->simulation().world().setGameWideInventory(gameWide_->inventory());
         lotLife_->simulation().world().setBabyFirstNames(data_.text(kLiveText, kBabyBoyText), data_.text(kLiveText, kBabyGirlText));
         std::map<std::uint16_t, std::vector<std::string>> nameTables;
         for (const std::uint16_t table : kNameTables) {
@@ -3109,6 +3183,7 @@ void Game::run() {
         }
         paceFrame();
     }
+    gameWide_->save(options_.lock);
 }
 
 // Lays the game out for the window's size when it has changed.

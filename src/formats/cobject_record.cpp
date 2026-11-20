@@ -156,8 +156,8 @@ ObjectPart readObject(Reader& r) {
         m.node = r.text();
         m.value = r.word();
         for (std::size_t p = r.count(2); p > 0; --p) {
-            std::string subset = r.text();
-            m.subsets.emplace_back(std::move(subset), r.text());
+            std::string material = r.text();
+            m.subsets.emplace_back(std::move(material), r.text());
         }
         o.materials.push_back(std::move(m));
     }
@@ -185,9 +185,9 @@ void writeObject(Writer& w, const ObjectPart& o) {
         w.text(m.node);
         w.word(m.value);
         w.count(m.subsets.size());
-        for (const auto& [subset, material] : m.subsets) {
-            w.text(subset);
+        for (const auto& [material, subset] : m.subsets) {
             w.text(material);
+            w.text(subset);
         }
     }
     w.words(o.place);

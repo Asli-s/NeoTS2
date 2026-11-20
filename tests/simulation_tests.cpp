@@ -12,7 +12,11 @@
 #include "sim/simulator_ids.hpp"
 #include "sim/linked_interactions.hpp"
 #include "sim/hood_save.hpp"
+#include "sim/hood_save_detail.hpp"
+#include "sim/lot_world.hpp"
+#include "formats/swaf.hpp"
 #include "sim/family_picture.hpp"
+#include "sim/game_wide_save.hpp"
 #include "formats/ngbh.hpp"
 #include "formats/sdsc.hpp"
 #include "formats/fami.hpp"
@@ -742,6 +746,51 @@ void theObjectRecordFollowsTheRunningObject() {
     CHECK(ts2::sim::objectRecord(loaded, object, none).tail->stack.at(0).codeOwner == 41);
 }
 
+// Wants an older game saved take the numbers they lack from their definitions as the neighborhood
+// loads, and a save writes their record anew at the current version, with a want the player held.
+void wantsSavedByAnOlderGameAreSavedAnew() {
+    constexpr std::uint32_t kKiss = 0x6D9ACDE0, kUnknown = 0x12345678;
+    ts2::content::WantDefinitions defs;
+    defs.byGuid[kKiss].guid = kKiss;
+    defs.byGuid[kKiss].score = 300;
+    defs.byGuid[kKiss].influence = 250;
+    const auto want = [](std::uint32_t version, std::uint32_t guid, std::vector<std::int32_t> tail) {
+        ts2::swaf::Want w;
+        w.version = version;
+        w.id = 1;
+        w.guid = guid;
+        w.tail = std::move(tail);
+        w.flags = 6;
+        return w;
+    };
+    ts2::content::Neighborhood loaded;
+    auto& saved = loaded.wants[1];
+    saved.version = 1;
+    saved.wants = {want(8, kKiss, {40, 500}), want(3, kKiss, {20}), want(8, kUnknown, {10, 100})};
+    saved.historyVersion = 2;
+    saved.historyValue = 900;
+    saved.history[kKiss] = {want(5, kKiss, {7})};
+    MemoryCodeSource code;
+    ts2::sim::World world;
+    world.setNeighborhood(ts2::sim::savedNeighborhood(loaded, code, {}, &defs));
+    auto& wants = world.neighborWants(1);
+    // A want of version 8 lacks only its influence. One of version 3 also its points, and its time was kept at half.
+    CHECK((wants[0].tail == std::vector<std::int32_t>{40, 500, 250}));
+    CHECK((wants[1].tail == std::vector<std::int32_t>{40, 300, 250}));
+    CHECK((wants[2].tail == std::vector<std::int32_t>{10, 100, 0}));
+    wants[0].flags |= 1;  // held
+    world.wantsState().histories[1] = *world.savedWantHistory(1);
+    CHECK((world.wantsState().histories[1].records[kKiss][0].tail == std::vector<std::int32_t>{7, 300, 250}));
+
+    const std::vector<std::uint8_t> old{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0x84, 3, 0, 0, 0, 0, 0, 0};
+    ts2::dbpf::PackageImage hood;
+    hood.resources.push_back(ts2::dbpf::storeResource({ts2::swaf::kType, 0xFFFFFFFF, 1, 0}, old));
+    CHECK(ts2::sim::hoodsave::saveWants(hood, world, {}) == 1);
+    const auto record = ts2::swaf::readRecord(ts2::sim::hoodsave::bodyOf(hood.resources[0]));
+    CHECK(record && record->wants.size() == 3 && record->maxWants == 4 && record->maxFears == 3 && record->lastValue == 0);
+    CHECK(record && record->wants[0].flags == 7 && record->wants[1].flags == 6 && record->historyValue == 900);
+}
+
 // A Sim's record keeps the interaction it is running and the ones waiting in its queue, with the
 // fields the save holds that the engine does not work from left as they were read.
 void theObjectRecordKeepsASimsInteractions() {
@@ -1375,6 +1424,45 @@ void savingALotWritesTheChangedInventories() {
     CHECK(written->neighbors[1].first == 269 && written->neighbors[1].second.singular.size() == 1 &&
           written->neighbors[1].second.singular[0].guid == 0x33F6E0FB && written->neighbors[1].second.version == ts2::ngbh::kInventoryVersion);
     CHECK(written->neighbors[2].first == 300 && written->neighbors[2].second.singular.size() == 1);
+}
+
+// The game-wide inventory record as a game that answered No to Game Tips keeps it: two "asked" flag
+// tokens (flag 1, with the Game Edition it was asked in) and no "tips on" flag 2. It reads to its
+// tokens and writes back to the same bytes, and a lot's scripts change the one inventory the store
+// shares, which goes back into the package with the other resources kept.
+void gameWideInventoryKeepsTheGameTipsFlags() {
+    const std::vector<std::uint8_t> record = {
+        0xD8, 0x00, 0x00, 0x00, 0xBE, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
+        0x3A, 0x63, 0xF5, 0xAE, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00,
+        0x00, 0x00, 0x01, 0x00, 0x81, 0x00, 0x3A, 0x63, 0xF5, 0xAE, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0xFF, 0xFF};
+    const auto saved = ts2::ngbh::readGameWideRecord(record);
+    CHECK(saved && saved->counted.empty() && saved->singular.size() == 2);
+    CHECK(saved->singular[0].guid == 0xAEF5633A && (saved->singular[0].properties == std::vector<std::int16_t>{1, 0x81}));
+    CHECK((saved->singular[1].properties == std::vector<std::int16_t>{1, -1}));
+    CHECK(ts2::ngbh::writeGameWideRecord(*saved) == record);
+    std::vector<std::uint8_t> otherVersion = record;
+    otherVersion[0] = 0xD7;
+    CHECK(!ts2::ngbh::readGameWideRecord(otherVersion) && !ts2::ngbh::readGameWideRecord(std::span(record).first(59)));
+
+    ts2::dbpf::PackageImage image;
+    const std::vector<std::uint8_t> other(100, 7);
+    image.resources = {ts2::dbpf::storeResource({0x8CC0A14B, 0xFFFFFFFF, 0x8CC0A14B, 0}, other),
+                       ts2::dbpf::storeResource({ts2::ngbh::kGameWideType, 0xFFFFFFFF, 1, 0}, record)};
+    image.dataOrder = {0, 1};
+    const std::vector<std::uint8_t> package = ts2::dbpf::writeImage(image);
+    auto shared = std::make_shared<ts2::sim::Inventory>(*ts2::sim::gameWideFromPackage(package));
+    ts2::sim::World world;
+    world.setGameWideInventory(shared);
+    world.inventory(ts2::sim::InventoryKind::GameWide, 0)->singular.push_back(
+        std::make_shared<ts2::sim::InventoryToken>(ts2::sim::InventoryToken{0xAEF5633A, 0, 0, 0, 0, {2}}));
+    CHECK(shared->singular.size() == 3 && world.usedInventories().empty());
+    const std::vector<std::uint8_t> written = ts2::sim::packageWithGameWide(package, *shared);
+    const auto back = ts2::sim::gameWideFromPackage(written);
+    CHECK(back && back->singular.size() == 3 && back->singular[2]->properties == std::vector<std::int16_t>{2});
+    const ts2::dbpf::PackageImage reread = ts2::dbpf::readImage(written);
+    CHECK(reread.resources.size() == 2 && reread.resources[0].key.type == 0x8CC0A14B &&
+          ts2::sim::lot_save_detail::bodyOf(reread.resources[0]) == other);
 }
 
 // The family living on the lot saves the lot's funds as both its funds and its last saved funds,
@@ -2054,6 +2142,100 @@ void animationsHangFromTheSeatTheyStartedIn() {
     CHECK((anchorOf("kept") == std::array<ts2::cobject::Word, 2>{0xFFFFFFFF, 0}));
 }
 
+// A save writes the weights an object's morphs are drawn at, as the game's records keep them (an
+// eaten cake slice): a new record takes the drawn list, and a loaded one keeps its own list and takes
+// the drawn weights by name, whatever the case.
+void savesKeepMorphWeights() {
+    const auto word = [](float v) { return std::bit_cast<ts2::cobject::Word>(v); };
+    ts2::sim::TypeOwners owners;
+    owners.drawnMorphs = [&](std::int16_t id) {
+        return id == 7 ? std::optional(std::vector<ts2::cobject::NamedWeight>{{"", "", 0}, {"cakepieceblend", "piece1", word(1.0f)}})
+                       : std::nullopt;
+    };
+    ts2::cobject::ObjectPart made;
+    ts2::sim::lot_save_detail::putDrawnMorphs(made, 7, owners);
+    CHECK(made.blends.size() == 2 && made.blends[1].second == "piece1" && made.blends[1].weight == word(1.0f));
+    ts2::cobject::ObjectPart loaded;
+    loaded.blends = {{"CakePieceBlend", "Piece2", word(0.5f)}, {"CakePieceBlend", "Piece1", 0}};
+    ts2::sim::lot_save_detail::putDrawnMorphs(loaded, 7, owners);
+    CHECK(loaded.blends.size() == 2 && loaded.blends[0].weight == word(0.5f) && loaded.blends[1].weight == word(1.0f) &&
+          loaded.blends[1].first == "CakePieceBlend");
+    ts2::cobject::ObjectPart other = loaded;
+    ts2::sim::lot_save_detail::putDrawnMorphs(other, 8, owners);
+    CHECK(other.blends[1].weight == word(1.0f) && other.blends[0].weight == word(0.5f));
+}
+
+// An object made during play gets the scene record class the game gives its type: a Sim's is
+// cPerson, a plain object's comes from OBJD field 0x63 (a painting's cObject, a book's cAnimatable).
+// Its record names its model with the materials its scripts set, and a book held in a hand is saved
+// at the origin with the hand's place as its drawn one and its joints as drawn, as the game saves a
+// book being read.
+void aNewObjectGetsTheGamesSceneRecord() {
+    ts2::sim::World world;
+    auto definition = typed(0xC4F7A548);
+    definition.fields[ts2::objd::field::kSceneClass] = 1;
+    definition.name = "Book";
+    auto& book = world.create(kObjectGroup, definition);
+    auto painting = typed(0x11111111);
+    auto& still = world.create(kObjectGroup, painting);
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    auto other = typed(0x22222222, 6);
+    auto& none = world.create(kObjectGroup, other);
+    using ts2::sim::lot_save_detail::sceneChainOf;
+    CHECK(sceneChainOf(book) == ts2::cobject::Chain::Animatable);
+    CHECK(sceneChainOf(still) == ts2::cobject::Chain::Object);
+    CHECK(sceneChainOf(sim) == ts2::cobject::Chain::Person);
+    CHECK(!sceneChainOf(none));
+    book.materialChanges = {{"cover", "book_cover_reference"}};
+    book.data[2] = sim.id;  // in the Sim's hand
+    const auto word = [](float v) { return std::bit_cast<ts2::cobject::Word>(v); };
+    const ts2::cobject::Place hand{word(19.5f), word(25.5f), word(1.4f), 0, 0, 0, word(1.0f)};
+    ts2::sim::TypeOwners owners;
+    owners.drawnPlace = [&](std::int16_t id) { return id == book.id ? std::optional(hand) : std::nullopt; };
+    const ts2::cobject::PosedJoint open{"r_open", {0, 0, word(-0.025f), 0, 0, 0, word(1.0f)}};
+    owners.drawnJoints = [&](std::int16_t id) {
+        return id == book.id ? std::optional(std::vector<ts2::cobject::PosedJoint>{open}) : std::nullopt;
+    };
+    ts2::cobject::AnimatablePart another;
+    another.settings = {0x0001B3FE, 0x00000C19, 0x7FFFFF00, 0x7FFFFF00, 0, 0, 0};
+    const auto record = ts2::sim::lot_save_detail::newObjectSceneRecord(ts2::cobject::Chain::Animatable, "bookReference", another, book, world,
+                                                                        1000, nullptr, owners);
+    CHECK(record.chain == ts2::cobject::Chain::Animatable && record.object.model == "bookReference");
+    CHECK(record.object.materials.size() == 1 && record.object.materials[0].node == "bookReference" && record.object.materials[0].value == 0xC);
+    // The material, then the group, as the game's own records hold them ("plumbbob_corecolor100" then "core").
+    CHECK(record.object.materials[0].subsets.size() == 1 && record.object.materials[0].subsets[0].first == "book_cover_reference" &&
+          record.object.materials[0].subsets[0].second == "cover");
+    // A loaded record takes the material a script set since, over the one it was loaded with.
+    ts2::cobject::Record loaded = record;
+    loaded.object.materials[0].subsets = {{"book_cover_old", "cover"}, {"book_pages", "pages"}};
+    const auto rewritten = ts2::sim::lot_save_detail::sceneRecord(loaded, book, world, 1000, nullptr, nullptr);
+    const auto& subsets = rewritten.object.materials[0].subsets;
+    CHECK(subsets.size() == 2 && subsets[0].first == "book_pages" && subsets[0].second == "pages" &&
+          subsets[1].first == "book_cover_reference" && subsets[1].second == "cover");
+    // A group loaded with a hole keeps its mask on the material a script set since.
+    loaded.object.materials[0].subsets = {{"book_cover_old-cutout-sinkcountervalue-mask", "cover"}};
+    const auto cut = ts2::sim::lot_save_detail::sceneRecord(loaded, book, world, 1000, nullptr, nullptr);
+    CHECK(cut.object.materials[0].subsets.size() == 1 &&
+          cut.object.materials[0].subsets[0].first == "book_cover_reference-cutout-sinkcountervalue-mask");
+    CHECK(record.object.place[6] == word(1.0f) && record.object.place[0] == 0);
+    CHECK(record.animatable.scale == word(1.0f) && record.animatable.settings == another.settings);
+    CHECK(record.animatable.places && (*record.animatable.places)[7] == hand[0] && record.animatable.place == hand);
+    // Its joints hold the pose it is drawn in, below its own root at its place.
+    CHECK(record.object.joints.size() == 2 && record.object.joints[0].name == "Book_objt" && record.object.joints[0].place == record.object.place);
+    CHECK(record.object.joints[1].name == "r_open" && record.object.joints[1].place == open.place);
+    // It writes and reads back as a record of its class.
+    const auto back = ts2::cobject::readRecord(ts2::cobject::writeRecord(record));
+    CHECK(back && back->chain == ts2::cobject::Chain::Animatable && back->object.model == "bookReference");
+    // One with no drawn pose still starts its joints with its own root.
+    const auto painted = ts2::sim::lot_save_detail::newObjectSceneRecord(ts2::cobject::Chain::Object, "paintingStill", {}, still, world, 1000,
+                                                                         nullptr, ts2::sim::TypeOwners{});
+    CHECK(painted.object.joints.size() == 1 && painted.object.joints[0].name == still.definition.name + "_objt" &&
+          painted.object.joints[0].place == painted.object.place);
+    // The settings of a part the game has just made.
+    CHECK((ts2::sim::lot_save_detail::newAnimatableSettings() ==
+           std::array<ts2::cobject::Word, 7>{0, 0, 0x7FFFFF00, 0x7FFFFF00, word(0.5f), 0, 0}));
+}
+
 // An object's clip played until stopped is saved while it plays, and left out once Animate Stop has
 // stopped it, as the game's saves keep no clip that has ended. A video game console stopped by its
 // turn off came back from the save with its disc spinning.
@@ -2166,6 +2348,75 @@ void aChangedLookKeepsTheSkeleton() {
     }
     CHECK(refs.size() == 4 && index == 2 && refs[index].instance == skeleton.instance && refs[index].group == skeleton.group &&
           refs[index].instanceHigh == skeleton.instanceHigh);
+}
+
+// A Sim that aged is saved with its new age data, as the game's saves hold Sims who aged with the
+// face of their new age already in their files: the age and stretch change, the old age's model and
+// the skeleton stay at the top of the resource list, and the old age's portrait goes.
+void anAgedLookIsSavedWithItsNewAge() {
+    const ts2::dbpf::ResourceKey teenModel{0xE519C933, 0xFFFFFFFF, 0xFF2A8270, 0xA717ED03}, skeleton{0xE519C933, 0x1C0532FA, 0xFF6B8A91, 0},
+        teenFace{0xEBCF3E27, 0xFFFFFFFF, 1, 0}, adultFace{0xEBCF3E27, 0xFFFFFFFF, 2, 0}, teenHair{0xEBCF3E27, 0x2C17B74A, 0xA, 0},
+        adultHair{0xEBCF3E27, 0x2C17B74A, 0xB, 0};
+    const std::vector<ts2::propset::Property> props{{ts2::propset::kUintType, "age", 4, {}, {}},
+                                                    {ts2::propset::kFloatType, "stretch", std::bit_cast<std::uint32_t>(0.94f), {}, {}},
+                                                    {ts2::propset::kUintType, "skeletonkeyidx", 2, {}, {}},
+                                                    {ts2::propset::kUintType, "listcnt", 2, {}, {}},
+                                                    {ts2::propset::kStringType, "ls0", 0, "1", {}},
+                                                    {ts2::propset::kStringType, "lk0", 0, "65537", {}},
+                                                    {ts2::propset::kUintType, "le0_0", 3, {}, {}},
+                                                    {ts2::propset::kStringType, "ls1", 0, "1", {}},
+                                                    {ts2::propset::kStringType, "lk1", 0, "65538", {}},
+                                                    {ts2::propset::kUintType, "le1_0", 4, {}, {}}};
+    std::vector<std::uint8_t> list;
+    const auto put = [&](std::uint32_t v) {
+        for (int i = 0; i < 4; ++i) {
+            list.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
+        }
+    };
+    put(0xDEADBEEF);
+    put(2);
+    put(5);
+    for (const auto& k : {teenModel, ts2::dbpf::ResourceKey{}, skeleton, teenHair, teenFace}) {
+        put(k.type);
+        put(k.group);
+        put(k.instance);
+        put(k.instanceHigh);
+    }
+    ts2::dbpf::PackageImage made;
+    made.resources = {ts2::dbpf::storeResource({0xAC598EAC, 0xFFFFFFFF, 1, 0}, ts2::propset::writeBinary(props)),
+                      ts2::dbpf::storeResource({0xAC506764, 0xFFFFFFFF, 1, 0}, list)};
+    // The teen's portrait and its shadow.
+    for (const std::uint32_t instance : {0x04u, 0x400u}) {
+        made.resources.push_back(ts2::dbpf::storeResource({0x856DDBAC, 0xFFFFFFFF, instance, 0}, std::vector<std::uint8_t>{1, 2, 3}));
+    }
+    made.dataOrder = {0, 1, 2, 3};
+    ts2::sim::OutfitLook look;
+    look.properties = {{"age", "8"}, {"stretch", "1"}};
+    look.lists[0x10001] = {adultHair};
+    look.lists[0x10002] = {adultFace};
+    const auto out = ts2::sim::rewriteOutfitLook(ts2::dbpf::writeImage(made), look);
+    ts2::dbpf::Package package{std::span<const std::uint8_t>(out)};
+    std::optional<std::vector<ts2::propset::Property>> rewritten;
+    std::vector<ts2::scenegraph::Link> refs;
+    std::size_t portraits = 0;
+    for (const auto& e : package.entries()) {
+        if (e.key.type == 0xAC598EAC) {
+            rewritten = ts2::propset::readBinary(package.read(e));
+        } else if (e.key.type == 0xAC506764) {
+            refs = ts2::reflist::parse(package.read(e));
+        }
+        portraits += e.key.type == 0x856DDBAC;
+    }
+    std::map<std::string, ts2::propset::Property> named;
+    for (const auto& p : rewritten.value_or(std::vector<ts2::propset::Property>{})) {
+        named[p.name] = p;
+    }
+    CHECK(named["age"].word == 8);
+    CHECK(named["stretch"].type == ts2::propset::kFloatType && named["stretch"].word == std::bit_cast<std::uint32_t>(1.0f));
+    CHECK(named["skeletonkeyidx"].word == 2);
+    CHECK(refs.size() == 5 && refs[0].instance == teenModel.instance && refs[0].instanceHigh == teenModel.instanceHigh &&
+          refs[2].instance == skeleton.instance && refs[3].instance == adultHair.instance && refs[4].instance == adultFace.instance);
+    CHECK(portraits == 0);
 }
 
 // A save rewrites a changed look in the age data and its resource list, as the game's did for a teen
@@ -2360,19 +2611,23 @@ void savingALotWritesANewbornFromAnotherSim() {
             CHECK(ts2::xobj::isBlank(s.interrupted) && s.interrupted.id == 0);
         }
     }
-    // Its scene record places it where it stands, with no pose or materials of the parent's.
+    // Its scene record places it where it stands, with no pose or materials of the parent's. Its
+    // joints start with its own root at that place, as every record the game writes does.
     const auto scene = std::find_if(package.resources.begin(), package.resources.end(), [&](const auto& r) {
         return r.key.type == ts2::types::kSceneObject && r.key.instance == static_cast<std::uint32_t>(newbornId);
     });
     CHECK(scene != package.resources.end());
     if (scene != package.resources.end()) {
         const auto record = ts2::cobject::readRecord(scene->compressed ? ts2::qfs::decompress(scene->bytes) : scene->bytes);
-        CHECK(record && record->chain == ts2::cobject::Chain::Person && record->object.joints.empty() && record->object.materials.empty());
+        CHECK(record && record->chain == ts2::cobject::Chain::Person && record->object.materials.empty());
         if (record) {
             CHECK(std::bit_cast<float>(record->object.place[0]) == 21.5f && std::bit_cast<float>(record->object.place[1]) == 8.0f);
+            CHECK(record->object.joints.size() == 1 && record->object.joints[0].name.ends_with("_objt") &&
+                  record->object.joints[0].place == record->object.place);
             // Its first setting is the clip handle counter, past the Sims' saved one by a serial for
-            // each of the lot's two Sims.
-            CHECK(record->animatable.place == record->object.place && record->animatable.settings[0] == 0x759 + 2);
+            // each of the lot's two Sims. The second counter stays as the lot saved it.
+            CHECK(record->animatable.place == record->object.place && record->animatable.settings[0] == 0x759 + 2 &&
+                  record->animatable.settings[1] == 0xA9);
         }
     }
     // It gets an empty routing aggregate, as every idle Sim has.
@@ -2383,6 +2638,66 @@ void savingALotWritesANewbornFromAnotherSim() {
     if (routing != package.resources.end()) {
         const auto aggregate = ts2::lotrecords::readRoutingAggregate(routing->compressed ? ts2::qfs::decompress(routing->bytes) : routing->bytes);
         CHECK(aggregate && aggregate->objects == 0 && aggregate->list.empty());
+    }
+}
+
+// Every cAnimatable and cPerson record a save writes holds the same two clip handle counters, and
+// starts its joints with the object's own root, as the game's saves do. A loaded object's record that
+// lacks the root gets it at the record's place.
+void savingALotGivesEveryAnimatableRecordTheCountersAndARoot() {
+    ts2::sim::World world;
+    const std::int32_t simId = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType)).id;
+    auto bookType = typed(0xC4F7A548);
+    bookType.name = "Book";
+    const std::int32_t bookId = world.create(kObjectGroup, bookType).id;
+    ts2::objt::ObjectTypeTable types;
+    ts2::objt::Entry simEntry;
+    simEntry.guid = 0x51515151;
+    simEntry.index = 40;
+    simEntry.kind = ts2::objt::kPersonKind;
+    ts2::objt::Entry bookEntry;
+    bookEntry.guid = 0xC4F7A548;
+    bookEntry.index = 41;
+    bookEntry.kind = 4;
+    types.entries = {simEntry, bookEntry};
+    ts2::objm::MapRecord map;
+    map.objects = {{simId, 40}, {bookId, 41}};
+    map.waits.assign(4, 0);
+    ts2::cobject::Record simScene;
+    simScene.chain = ts2::cobject::Chain::Person;
+    simScene.animatable.settings = {0x759, 0xA9, 0x7FFFFF00, 0x7FFFFF00, 0, 1, 2};
+    const auto word = [](float v) { return std::bit_cast<ts2::cobject::Word>(v); };
+    ts2::cobject::Record bookScene;
+    bookScene.chain = ts2::cobject::Chain::Animatable;
+    bookScene.object.place = {word(3.5f), word(4.5f), 0, 0, 0, 0, word(1.0f)};
+    bookScene.animatable.settings = {0x700, 0x90, 0x7FFFFF00, 0x7FFFFF00, 0, 0, 0};
+    ts2::dbpf::PackageImage package;
+    package.resources = {
+        ts2::dbpf::storeResource({ts2::types::kObjectMap, 0xFFFFFFFF, 1, 0}, ts2::objm::writeMapRecord(map)),
+        ts2::dbpf::storeResource({ts2::types::kObjectTypeTable, 0xFFFFFFFF, 0, 0}, ts2::objt::write(types)),
+        ts2::dbpf::storeResource({ts2::types::kSceneObject, 0xFFFFFFFF, static_cast<std::uint32_t>(simId), 0}, ts2::cobject::writeRecord(simScene)),
+        ts2::dbpf::storeResource({ts2::types::kSceneObject, 0xFFFFFFFF, static_cast<std::uint32_t>(bookId), 0},
+                                 ts2::cobject::writeRecord(bookScene)),
+    };
+    package.dataOrder = {0, 1, 2, 3};
+    const std::array<std::int16_t, ts2::simi::kGlobalCount> globals{};
+    ts2::sim::fillLotPackage(package, world, globals, 0, ts2::sim::TypeOwners{}, nullptr);
+    const auto sceneOf = [&](std::int32_t id) -> std::optional<ts2::cobject::Record> {
+        for (const auto& r : package.resources) {
+            if (r.key.type == ts2::types::kSceneObject && r.key.instance == static_cast<std::uint32_t>(id)) {
+                return ts2::cobject::readRecord(r.compressed ? ts2::qfs::decompress(r.bytes) : r.bytes);
+            }
+        }
+        return std::nullopt;
+    };
+    const auto sim = sceneOf(simId);
+    const auto book = sceneOf(bookId);
+    CHECK(sim && book);
+    if (sim && book) {
+        CHECK(sim->animatable.settings[0] == 0x759 + 1 && sim->animatable.settings[1] == 0xA9);
+        CHECK(book->animatable.settings[0] == 0x759 + 1 && book->animatable.settings[1] == 0xA9);
+        CHECK(book->object.joints.size() == 1 && book->object.joints[0].name == "Book_objt" &&
+              book->object.joints[0].place == bookScene.object.place);
     }
 }
 
@@ -2810,6 +3125,7 @@ std::vector<Test> simulationTests() {
         {"the object map record follows the lot's objects", objectMapRecordFollowsTheLotsObjects},
         {"the object record follows the running object", theObjectRecordFollowsTheRunningObject},
         {"the object record keeps a Sim's interactions", theObjectRecordKeepsASimsInteractions},
+        {"wants saved by an older game are saved anew", wantsSavedByAnOlderGameAreSavedAnew},
         {"saving a lot keeps what it does not fill", savingALotKeepsWhatItDoesNotFill},
         {"saving a lot gives new objects a record", savingALotGivesNewObjectsARecord},
         {"saving a lot lists only new objects with a record", savingALotListsOnlyNewObjectsWithARecord},
@@ -2832,12 +3148,16 @@ std::vector<Test> simulationTests() {
         {"newborn look records cover every age", newbornLookRecordsCoverEveryAge},
         {"a changed look rewrites the age data and its list", aChangedLookRewritesTheAgeDataAndItsList},
         {"a changed look keeps the skeleton", aChangedLookKeepsTheSkeleton},
+        {"an aged look is saved with its new age", anAgedLookIsSavedWithItsNewAge},
         {"animations hang from the seat they started in", animationsHangFromTheSeatTheyStartedIn},
         {"a clip built from an empty entry starts as the game makes one", aClipBuiltFromAnEmptyEntryStartsAsTheGameMakesOne},
         {"a stopped looping clip is not saved", aStoppedLoopingClipIsNotSaved},
+        {"a new object gets the game's scene record", aNewObjectGetsTheGamesSceneRecord},
+        {"saves keep morph weights", savesKeepMorphWeights},
         {"newborn brow family follows the draw", newbornBrowFamilyFollowsTheDraw},
         {"newborn file needs the catalog", newbornFileNeedsTheCatalog},
         {"saving a lot writes a newborn from another Sim", savingALotWritesANewbornFromAnotherSim},
+        {"saving a lot gives every animatable record the counters and a root", savingALotGivesEveryAnimatableRecordTheCountersAndARoot},
         {"new face models name the Sim's own parts", newFaceModelsNameTheSimsOwnParts},
         {"new face models build on the skeleton", newFaceModelsBuildOnTheSkeleton},
         {"new face meshes replace the face", newFaceMeshesReplaceTheFace},
@@ -2875,5 +3195,6 @@ std::vector<Test> simulationTests() {
         {"vertex aliases follow kind", vertexAliasesFollowKind},
         {"motives are shown as whole numbers", motivesAreShownAsWholeNumbers},
         {"family pictures arrange households as the game", familyPictureArrangesHouseholdsAsTheGame},
+        {"game-wide inventory keeps the Game Tips flags", gameWideInventoryKeepsTheGameTipsFlags},
     };
 }

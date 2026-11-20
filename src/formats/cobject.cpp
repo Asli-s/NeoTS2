@@ -76,9 +76,11 @@ void objectData(BinaryReader& r, std::uint32_t version, SavedObject& saved) {
     }
     if (version >= 0x10) {
         for (std::size_t b = r.i32Count(6); b > 0; --b) {
-            r.varString();
-            r.varString();
-            r.f32();
+            SavedBlend blend;
+            blend.group = r.varString();
+            blend.name = r.varString();
+            blend.weight = r.f32();
+            saved.blends.push_back(std::move(blend));
         }
     }
 }

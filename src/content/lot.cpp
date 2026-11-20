@@ -230,6 +230,9 @@ Lot loadLot(const std::filesystem::path& path) {
                     if (!saved.joints.empty()) {
                         lot.savedJoints.emplace(e.key.instance, std::move(saved.joints));
                     }
+                    if (!saved.blends.empty()) {
+                        lot.savedBlends.emplace(e.key.instance, std::move(saved.blends));
+                    }
                     if (saved.position) {
                         lot.savedPositions.emplace(e.key.instance, *saved.position);
                     }
@@ -377,12 +380,13 @@ Lot loadLot(const std::filesystem::path& path) {
         lot.objects.push_back(std::move(*chosen));
     }
     // Ids are reused, so an object's scene record can be an older object's. A Sim's record under an
-    // object, or an object's under a Sim, gives it no saved model, joints or animations.
+    // object, or an object's under a Sim, gives it no saved model, joints, morphs or animations.
     for (const auto& object : lot.objects) {
         const auto record = personSceneRecords.find(object.id);
         if (record != personSceneRecords.end() && object.type && record->second != (object.type->kind == objt::kPersonKind)) {
             lot.objectModels.erase(object.id);
             lot.savedJoints.erase(object.id);
+            lot.savedBlends.erase(object.id);
             lot.savedAnimations.erase(object.id);
             ++lot.staleRecords;
         }

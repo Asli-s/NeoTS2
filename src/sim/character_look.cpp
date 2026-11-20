@@ -3,6 +3,7 @@
 #include "formats/hash.hpp"
 #include "formats/propset.hpp"
 #include "formats/reference_list.hpp"
+#include "parse_float.hpp"
 
 #include <algorithm>
 #include <array>
@@ -165,6 +166,12 @@ std::vector<std::uint8_t> rewriteOutfitLook(std::span<const std::uint8_t> charac
                 p.text = it->second;
             } else if (p.type == propset::kUintType) {
                 p.word = static_cast<std::uint32_t>(std::stoul(it->second));
+            } else if (p.type == propset::kFloatType) {
+                const std::optional<float> value = parseFloat(it->second);
+                if (!value) {
+                    throw std::runtime_error("the look's " + p.name + " is not a number");
+                }
+                p.word = std::bit_cast<std::uint32_t>(*value);
             }
         }
         out.push_back(std::move(p));

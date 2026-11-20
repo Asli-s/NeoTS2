@@ -1,5 +1,6 @@
 #include "sim/lot_save.hpp"
 
+#include "formats/objd.hpp"
 #include "formats/srel.hpp"
 
 #include "sim/lot_save_detail.hpp"
@@ -11,9 +12,11 @@
 #include "sim/world.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -91,9 +94,9 @@ std::optional<cobject::Animation> anySimClip(const dbpf::PackageImage& package) 
     return anyAnimation;
 }
 
-// The clip handle counter goes on from the highest the lot's Sims saved, and the records save it past
-// one new serial for each Sim on the lot, the most this save gives out, as a Sim plays one Sim clip
-// at a time.
+// The clip handle counter goes on from the highest the lot's records saved, and the records save it
+// past one new serial for each Sim on the lot, the most this save gives out, as a Sim plays one Sim
+// clip at a time. The second counter stays at the highest saved.
 ClipHandles clipHandlesFrom(const dbpf::PackageImage& package, const World& world) {
     ClipHandles handles;
     for (const dbpf::StoredResource& resource : package.resources) {
@@ -104,8 +107,9 @@ ClipHandles clipHandlesFrom(const dbpf::PackageImage& package, const World& worl
         if (!record) {
             continue;
         }
-        if (record->chain == cobject::Chain::Person) {
+        if (record->chain != cobject::Chain::Object) {
             handles.last = std::max(handles.last, record->animatable.settings[0]);
+            handles.second = std::max(handles.second, record->animatable.settings[1]);
         }
         for (const cobject::Animation& a : record->animatable.animations) {
             if (a.kind == cobject::Animation::Kind::Clip) {
@@ -211,6 +215,21 @@ std::optional<std::vector<std::uint8_t>> rewrittenScene(SaveState& save, const d
                 joint.place = record.object.place;
             }
         }
+    } else if (!object->isPerson() && record.chain == cobject::Chain::Animatable) {
+        // An object a clip has posed keeps that pose, as the game saves its joints as they are drawn:
+        // a plumbob raised over a skill meter stays raised. Its own root joint stays as loaded, and
+        // one a record lacks is put first at the record's place, as every record the game writes
+        // starts with it.
+        auto& joints = record.object.joints;
+        const auto root = std::find_if(joints.begin(), joints.end(), [](const cobject::PosedJoint& j) { return j.name.ends_with("_objt"); });
+        const cobject::PosedJoint own = root != joints.end() ? *root : cobject::PosedJoint{object->definition.name + "_objt", record.object.place};
+        if (auto drawn = save.owners.drawnJoints ? save.owners.drawnJoints(object->id) : std::nullopt) {
+            drawn->insert(drawn->begin(), own);
+            joints = std::move(*drawn);
+        } else if (root == joints.end()) {
+            joints.insert(joints.begin(), own);
+        }
+        putDrawnMorphs(record.object, object->id, save.owners);
     }
     std::vector<std::uint8_t> written = cobject::writeRecord(record);
     ++save.counts.scenes;
@@ -420,7 +439,8 @@ LotSaveCounts fillLotPackage(dbpf::PackageImage& package, LotSimulation& simulat
                              const std::set<std::int16_t>& writtenNewSims,
                              std::function<std::optional<cobject::Place>(std::int16_t)> drawnPlace,
                              std::function<std::optional<std::vector<cobject::PosedJoint>>(std::int16_t)> drawnJoints,
-                             std::function<std::vector<xobj::Effect>(std::int16_t)> runningEffects) {
+                             std::function<std::vector<xobj::Effect>(std::int16_t)> runningEffects,
+                             std::function<std::optional<std::vector<cobject::NamedWeight>>(std::int16_t)> drawnMorphs) {
     // The game's queue reads the names as soon as a Sim is selected, even while paused, so a save
     // right after a switch sees 0x80 gone.
     markShownNames(simulation.world(), simulation.globals());
@@ -441,8 +461,29 @@ LotSaveCounts fillLotPackage(dbpf::PackageImage& package, LotSimulation& simulat
     owners.tunings = AutonomyTunings::from(simulation.code().tunings());
     owners.writtenNewSims = writtenNewSims;
     owners.drawnPlace = std::move(drawnPlace);
+    // The model name as the game keeps it: the one a script gave, else the row of the type's model
+    // names that object data 0x00 gives, or OBJD field 0x48 when that is 0, with "_cres" cut off.
+    owners.modelName = [&simulation](const SimObject& object) {
+        constexpr std::uint16_t kModelNames = 0x85;
+        std::string model = object.model;
+        if (model.empty()) {
+            const auto own = static_cast<std::uint16_t>(object.data[0]);
+            const std::uint16_t row = own != 0 ? own : object.definition.field(objd::field::kDefaultModel);
+            model = row != 0 ? simulation.code().string(object.group, kModelNames, row).value_or(std::string{}) : std::string{};
+        }
+        constexpr std::string_view kSuffix = "_cres";
+        if (model.size() >= kSuffix.size()) {
+            std::string tail = model.substr(model.size() - kSuffix.size());
+            std::transform(tail.begin(), tail.end(), tail.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (tail == kSuffix) {
+                model.resize(model.size() - kSuffix.size());
+            }
+        }
+        return model;
+    };
     owners.drawnJoints = std::move(drawnJoints);
     owners.runningEffects = std::move(runningEffects);
+    owners.drawnMorphs = std::move(drawnMorphs);
     // A Sim on a stage stands above its storey's floor. The platform grid counts the ground as level 0.
     owners.floorHeight = [&simulation](std::int32_t level, float x, float y) {
         return simulation.floorHeight(level, x, y) + simulation.world().standingLift(level - 1, x, y);
