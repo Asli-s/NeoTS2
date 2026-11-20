@@ -20,14 +20,21 @@ namespace fs = std::filesystem;
 constexpr int kMaxEntries = 200000;
 constexpr int kMaxDepth = 10;
 
-// True for <...>/Base/TSData/Res/Objects/objects.package.
-bool isBaseObjects(const fs::path& file) {
+// True for <base>/TSData/Res/Objects/objects.package, where <base> is Base, the disc installs'
+// The Sims 2, or the recorded base game folder.
+bool isBaseObjects(const fs::path& file, const std::vector<RegisteredPack>& registered) {
     const fs::path objects = file.parent_path();
     const fs::path res = objects.parent_path();
     const fs::path tsdata = res.parent_path();
-    return foldedName(file.filename()) == "objects.package" && foldedName(objects.filename()) == "objects" &&
-           foldedName(res.filename()) == "res" && foldedName(tsdata.filename()) == "tsdata" &&
-           foldedName(tsdata.parent_path().filename()) == "base";
+    if (foldedName(file.filename()) != "objects.package" || foldedName(objects.filename()) != "objects" ||
+        foldedName(res.filename()) != "res" || foldedName(tsdata.filename()) != "tsdata") {
+        return false;
+    }
+    const std::string product = foldedName(tsdata.parent_path().filename());
+    return product == "base" || product == "the sims 2" ||
+           std::any_of(registered.begin(), registered.end(), [&](const RegisteredPack& pack) {
+               return pack.number == 0 && sameFolder(pack.folder, tsdata.parent_path());
+           });
 }
 
 // A package's header as the game reads it: the DBPF mark, version 1, then the index's entry count,
@@ -69,6 +76,7 @@ std::string_view editionName(Edition edition) {
 
 InstallCheck checkInstall(const fs::path& root) {
     InstallCheck check;
+    const std::vector<RegisteredPack> registered = registeredPacks(root);
     std::error_code error;
     fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, error);
     int entries = 0;
@@ -79,12 +87,10 @@ InstallCheck checkInstall(const fs::path& root) {
         }
         const fs::directory_entry& entry = *it;
         std::error_code typeError;
-        if (entry.is_symlink(typeError)) {
-            it.disable_recursion_pending();
-            continue;
-        }
+        // Loading reads linked files but never enters linked folders.
+        const bool linked = entry.is_symlink(typeError);
         if (entry.is_directory(typeError)) {
-            if (it.depth() >= kMaxDepth) {
+            if (linked || it.depth() >= kMaxDepth) {
                 it.disable_recursion_pending();
             } else if (foldedName(entry.path().filename()) == "tsdata") {
                 ++check.packFolders;
@@ -94,10 +100,16 @@ InstallCheck checkInstall(const fs::path& root) {
         const std::string name = foldedName(entry.path().filename());
         if (name.ends_with("_dip_staged")) {
             check.downloading = true;
-        } else if (isBaseObjects(entry.path())) {
-            check.hasBaseObjects = true;
+        } else if (isBaseObjects(entry.path(), registered)) {
+            if (entry.is_regular_file(typeError)) {
+                check.hasBaseObjects = true;
+            } else if (linked) {
+                check.brokenObjectsLink = true;
+            }
         }
     }
+    // A folder that is gone reads as missing files.
+    check.unreadable = error.value() != 0 && entries > 0;
     return check;
 }
 
@@ -110,7 +122,8 @@ DamagedPackages findDamagedPackages(const fs::path& root) {
     for (; !error && it != fs::recursive_directory_iterator() && ++entries <= kMaxEntries; it.increment(error)) {
         const fs::directory_entry& entry = *it;
         std::error_code typeError;
-        if (entry.is_symlink(typeError) || (entry.is_directory(typeError) && it.depth() >= kMaxDepth)) {
+        // Linked packages are checked, as loading reads them.
+        if (entry.is_directory(typeError) && (entry.is_symlink(typeError) || it.depth() >= kMaxDepth)) {
             it.disable_recursion_pending();
             continue;
         }

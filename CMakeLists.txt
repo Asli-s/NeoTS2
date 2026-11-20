@@ -184,7 +184,7 @@ target_link_libraries(ts2diag PRIVATE project_warnings)
 # Finds the game's installs and save folders without opening any game file. The launcher uses it,
 # so it must never link the engine's other libraries.
 add_library(ts2paths src/paths/steam_files.cpp src/paths/game_folders.cpp src/paths/save_folders.cpp
-            src/paths/new_save_folder.cpp)
+            src/paths/new_save_folder.cpp src/paths/registered_packs.cpp)
 target_include_directories(ts2paths PUBLIC src)
 target_link_libraries(ts2paths PRIVATE project_warnings)
 if(WIN32)

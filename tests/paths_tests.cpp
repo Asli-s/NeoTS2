@@ -71,13 +71,36 @@ void installCheckReadsNamesOnly() {
     check = ts2::paths::checkInstall(root);
     CHECK(check.ready() && check.packFolders == 2);
 
+    const fs::path disc = root / "Disc";
+    touch(disc / "The Sims 2" / "TSData" / "Res" / "Objects" / "objects.package");
+    CHECK(ts2::paths::checkInstall(disc).ready());
+
+    // Skipped without the right to make links.
+    const fs::path linked = root / "Linked";
+    const fs::path objects = linked / "Base" / "TSData" / "Res" / "Objects";
+    fs::create_directories(objects);
+    std::error_code linkError;
+    fs::create_symlink(root / "Double Deluxe" / "Base" / "TSData" / "Res" / "Objects" / "objects.package", objects / "objects.package", linkError);
+    if (!linkError) {
+        CHECK(ts2::paths::checkInstall(linked).ready());
+    }
+
+    const fs::path broken = root / "Broken" / "Base" / "TSData" / "Res" / "Objects";
+    fs::create_directories(broken);
+    fs::create_symlink(root / "nowhere.package", broken / "objects.package", linkError);
+    if (!linkError) {
+        check = ts2::paths::checkInstall(root / "Broken");
+        CHECK(!check.ready() && check.brokenObjectsLink);
+    }
+
     touch(root / "Seasons" / "TSData" / "Res" / "Sound" / "Sounds.package_DiP_Staged");
     check = ts2::paths::checkInstall(root);
     CHECK(!check.ready() && check.downloading);
 
     std::error_code error;
     fs::remove_all(root, error);
-    CHECK(!ts2::paths::checkInstall(root).ready());
+    check = ts2::paths::checkInstall(root);
+    CHECK(!check.ready() && !check.unreadable);
 }
 
 void installRootHoldsEveryPack() {
@@ -334,6 +357,60 @@ void damagedPackagesAreFound() {
 
     const auto damaged = ts2::paths::findDamagedPackages(root);
     CHECK(damaged.count == 3 && damaged.examples.size() == 3);
+
+    // Skipped without the right to make links.
+    std::error_code linkError;
+    fs::create_symlink(root / "EP1/TSData/Res/UI/ui.package", root / "EP2/TSData/Res/UI/linked.package", linkError);
+    if (!linkError) {
+        CHECK(ts2::paths::findDamagedPackages(root).count == 4);
+    }
+    std::error_code error;
+    fs::remove_all(root, error);
+}
+
+void winePackRecordsAreRead() {
+    const fs::path root = fs::temp_directory_path() / ("neots2-wine-test-" + std::to_string(std::random_device{}()));
+    const fs::path prefix = root / "pfx";
+    const std::string reg = R"(WINE REGISTRY Version 2
+;; All keys relative to \\Machine
+
+[Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\App Paths\\Sims2.exe] 1700000000
+#time=1da
+@="C:\\Games\\UC\\Odd\\TSBin\\Sims2.exe"
+"Game Registry"="SOFTWARE\\EA GAMES\\The Sims 2"
+"Installed"=dword:00000001
+"Path"="C:\\Games\\UC\\Odd"
+
+[Software\\Wow6432Node\\EA GAMES\\The Sims 2] 1700000000
+"EPsInstalled"="Sims2EP1.exe,,Sims2EP3.exe"
+
+[Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\App Paths\\Sims2EP1.exe] 1700000000
+"Installed"=dword:00000001
+"Path"="C:\\Games\\UC\\Caf\xe9"
+
+[Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\App Paths\\Sims2EP3.exe] 1700000000
+"Installed"=dword:00000000
+"Path"="C:\\Games\\UC\\Biz"
+)";
+    const auto packs = ts2::paths::wineRegisteredPacks(reg, prefix);
+    CHECK(packs.size() == 2);
+    if (packs.size() == 2) {
+        CHECK(packs[0].number == 0 && packs[0].folder == prefix / "drive_c" / "Games" / "UC" / "Odd");
+        CHECK(packs[1].number == 1 && packs[1].folder == prefix / "drive_c" / "Games" / "UC" / fs::path(u8"Caf\u00e9"));
+    }
+    CHECK(ts2::paths::sameFolder(prefix / "drive_c" / "games" / "uc" / "ODD", prefix / "drive_c" / "Games" / "UC" / "Odd"));
+    CHECK(!ts2::paths::sameFolder(prefix / "drive_c" / "Games" / "UC", prefix / "drive_c" / "Games" / "UC" / "Odd"));
+
+    CHECK(ts2::paths::wineRegisteredPacks("", prefix).empty());
+    CHECK(ts2::paths::wineRegisteredPacks("[Software\\\\Wow6432Node\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\App Paths\\\\Sims2.exe]\n\"Path\"=\"C:\\\\unclosed", prefix).empty());
+    CHECK(ts2::paths::wineRegisteredPacks(std::string(1 << 16, '['), prefix).empty());
+
+#ifndef _WIN32
+    fs::create_directories(prefix / "drive_c" / "Games" / "UC" / "Odd" / "TSData" / "Res" / "Objects");
+    std::ofstream(prefix / "drive_c" / "Games" / "UC" / "Odd" / "TSData" / "Res" / "Objects" / "objects.package").put('x');
+    std::ofstream(prefix / "system.reg", std::ios::binary) << reg;
+    CHECK(ts2::paths::checkInstall(prefix / "drive_c" / "Games" / "UC").ready());
+#endif
     std::error_code error;
     fs::remove_all(root, error);
 }
@@ -353,5 +430,6 @@ std::vector<Test> pathsTests() {
         {"work names stay NeoTS2's", workNamesStayNeoTS2s},
         {"long settings lists still load", longSettingsListsStillLoad},
         {"damaged packages are found", damagedPackagesAreFound},
+        {"wine pack records are read", winePackRecordsAreRead},
     };
 }

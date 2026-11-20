@@ -10,12 +10,14 @@ enum class Edition { UltimateCollection, LegacyCollection, Other };
 
 std::string_view editionName(Edition edition);
 
-// What an install folder holds, from file and folder names only. No file is opened.
+// What an install folder holds. No game file is opened.
 struct InstallCheck {
-    bool hasBaseObjects = false;  // Base/TSData/Res/Objects/objects.package, the base game's objects
+    bool hasBaseObjects = false;  // the base game's TSData/Res/Objects/objects.package
+    bool brokenObjectsLink = false;  // that file is a broken link
     int packFolders = 0;          // folders with a TSData folder, the base game's included
     bool downloading = false;     // a file still ends in _DiP_Staged, the EA app's mark while it downloads
     bool tooLarge = false;        // the walk stopped at its limit, so the folder isn't a game install
+    bool unreadable = false;      // a folder couldn't be read, so files may be missed
 
     bool ready() const { return hasBaseObjects && !downloading && !tooLarge; }
 };
@@ -41,6 +43,21 @@ struct GameInstall {
     std::vector<std::filesystem::path> saveFolders;
     InstallCheck check;
 };
+
+// A pack folder from the game's install records. The number is the game's: 0 for the base game,
+// then the order of its EPsInstalled list.
+struct RegisteredPack {
+    std::filesystem::path folder;
+    int number = 0;
+};
+
+// From the registry on Windows. Elsewhere from the Wine prefix holding the install, if any.
+std::vector<RegisteredPack> registeredPacks(const std::filesystem::path& installRoot);
+
+std::vector<RegisteredPack> wineRegisteredPacks(std::string_view systemReg, const std::filesystem::path& prefix);
+
+// Compares names as Windows does, after following links.
+bool sameFolder(const std::filesystem::path& a, const std::filesystem::path& b);
 
 // The installs this computer's game launchers recorded, checked. Empty off Windows.
 std::vector<GameInstall> findInstalls();

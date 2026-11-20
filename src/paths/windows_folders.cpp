@@ -2,6 +2,7 @@
 // itself follows.
 #include "paths/game_folders.hpp"
 #include "paths/names.hpp"
+#include "paths/pack_records.hpp"
 #include "paths/steam_files.hpp"
 
 #define WIN32_LEAN_AND_MEAN
@@ -24,9 +25,8 @@ constexpr const char* kAppPaths = "Software\\Microsoft\\Windows\\CurrentVersion\
 // The Legacy Collection's own key, and its Steam app id.
 constexpr const char* kLegacyKey = "Software\\Electronic Arts\\The Sims 2 Ultimate Collection 25";
 constexpr const char* kLegacyManifest = "appmanifest_3314070.acf";
-// The game reads at most 260 bytes of a name or path, and splits the pack list into at most 32.
+// The game reads at most 260 bytes of a name or path.
 constexpr DWORD kMaxValue = MAX_PATH;
-constexpr std::size_t kMaxPacks = 32;
 constexpr std::uintmax_t kMaxSteamFile = 1 << 20;
 
 // A text value read the way the game reads it: as ANSI text, which Windows converts with the
@@ -108,18 +108,11 @@ std::optional<std::string> readSmallFile(const fs::path& path) {
     return text;
 }
 
-// A pack's folder from App Paths\<exe>, kept only when the pack is marked installed.
-std::optional<fs::path> packFolder(const std::string& exe) {
-    if (exe.empty() || exe.find_first_of("\\/") != std::string::npos) {
-        return std::nullopt;
-    }
-    const std::string key = kAppPaths + exe;
-    const auto installed = numberValue(HKEY_LOCAL_MACHINE, key, "Installed");
-    const auto path = ansiValue(HKEY_LOCAL_MACHINE, key, "Path");
-    if (!installed || *installed == 0 || !path) {
-        return std::nullopt;
-    }
-    return fromAnsi(*path);
+std::vector<RegisteredPack> registryPacks() {
+    return readPackRecords(
+        [](const std::string& key, const char* name) { return ansiValue(HKEY_LOCAL_MACHINE, key, name); },
+        [](const std::string& key, const char* name) -> std::optional<std::uint32_t> { return numberValue(HKEY_LOCAL_MACHINE, key, name); },
+        fromAnsi);
 }
 
 // The Ultimate Collection, as the game finds it: the base game from App Paths\Sims2.exe, each pack
@@ -131,16 +124,9 @@ std::optional<GameInstall> ultimateCollection(const fs::path& documents) {
     if (!basePath || !gameKey) {
         return std::nullopt;
     }
-    std::vector<fs::path> folders{fromAnsi(*basePath)};
-    if (const auto packs = ansiValue(HKEY_LOCAL_MACHINE, *gameKey, "EPsInstalled")) {
-        std::size_t start = 0;
-        for (std::size_t n = 0; n < kMaxPacks && start <= packs->size(); ++n) {
-            const std::size_t comma = std::min(packs->find(',', start), packs->size());
-            if (const auto folder = packFolder(packs->substr(start, comma - start))) {
-                folders.push_back(*folder);
-            }
-            start = comma + 1;
-        }
+    std::vector<fs::path> folders;
+    for (RegisteredPack& pack : registryPacks()) {
+        folders.push_back(std::move(pack.folder));
     }
     GameInstall install;
     install.edition = Edition::UltimateCollection;
@@ -252,6 +238,10 @@ fs::path eaGamesFolder() {
 fs::path systemFontsFolder() {
     wchar_t buffer[MAX_PATH] = {};
     return SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_FONTS, nullptr, 0, buffer)) ? fs::path(buffer) : fs::path();
+}
+
+std::vector<RegisteredPack> registeredPacks(const fs::path&) {
+    return registryPacks();
 }
 
 std::vector<GameInstall> findInstalls() {

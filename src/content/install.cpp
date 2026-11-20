@@ -1,11 +1,14 @@
 #include "content/install.hpp"
 
 #include "formats/dbpf.hpp"
+#include "paths/game_folders.hpp"
+#include "paths/names.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <map>
+#include <mutex>
 #include <stdexcept>
 #include <string_view>
 #include <system_error>
@@ -24,7 +27,7 @@ struct KnownProduct {
 };
 
 constexpr std::array<KnownProduct, 18> kReleaseOrder = {{
-    {"base", "The Sims 2",           ""},
+    {"base", "The Sims 2",           "", "the sims 2"},  // the disc installs' folder
     {"ep1", "University",            "university"},
     {"ep2", "Nightlife",             "nightlife"},
     {"ep3", "Open for Business",     "business"},
@@ -37,7 +40,7 @@ constexpr std::array<KnownProduct, 18> kReleaseOrder = {{
     {"sp5", "H&M Fashion Stuff",     "h&m"},
     {"ep6", "Bon Voyage",            "bon voyage"},
     {"sp6", "Teen Style Stuff",      "teen style"},
-    {"ep7", "FreeTime",              "free time"},
+    {"ep7", "FreeTime",              "free time", "the sims 2 freetime"},  // the disc install's folder
     {"sp7", "Kitchen & Bath Interior Design Stuff", "kitchen"},
     {"sp8", "IKEA Home Stuff",       "ikea"},
     {"ep8", "Apartment Life",        "apartment life"},
@@ -107,11 +110,81 @@ bool isObjectBundle(const fs::path& path) {
     return lower(utf8(folder.filename())) == "bins" && lower(utf8(folder.parent_path().filename())) == "catalog";
 }
 
+fs::path childNamed(const fs::path& folder, std::string_view name) {
+    std::error_code error;
+    for (fs::directory_iterator it(folder, error), end; !error && it != end; it.increment(error)) {
+        if (paths::foldedName(it->path().filename()) == name) {
+            return it->path();
+        }
+    }
+    return {};
+}
+
+// The pack named by the folder's sound files (TSData/Sys/TSAudioPackedEP4.ini), or -1.
+// The base game has none.
+int soundFilesOrder(const fs::path& packFolder) {
+    // A Sys folder holds about 15 files.
+    constexpr int kMaxEntries = 1000;
+    const fs::path tsData = childNamed(packFolder, "tsdata");
+    const fs::path sys = tsData.empty() ? fs::path() : childNamed(tsData, "sys");
+    if (sys.empty()) {
+        return -1;
+    }
+    std::error_code error;
+    int entries = 0;
+    for (fs::directory_iterator it(sys, error), end; !error && it != end && ++entries <= kMaxEntries; it.increment(error)) {
+        const std::string name = paths::foldedName(it->path().filename());
+        for (const std::string_view kind : {"tsaudiolocale", "tsaudiopacked", "tsaudiounpacked"}) {
+            if (name.size() == kind.size() + 7 && name.starts_with(kind) && name.ends_with(".ini")) {
+                const std::string code = name.substr(kind.size(), 3);
+                if ((code[0] == 'e' || code[0] == 's') && code[1] == 'p' && code[2] >= '1' && code[2] <= '9') {
+                    return matchComponent(code);
+                }
+            }
+        }
+    }
+    return -1;
+}
+
+int recordedOrder(const fs::path& packFolder, const std::vector<paths::RegisteredPack>& registered) {
+    if (const int order = soundFilesOrder(packFolder); order >= 0) {
+        return order;
+    }
+    for (const auto& pack : registered) {
+        if (!paths::sameFolder(pack.folder, packFolder)) {
+            continue;
+        }
+        if (pack.number == 0) {
+            return matchComponent("base");
+        }
+        if (pack.number <= static_cast<int>(std::size(kGameOrder))) {
+            return matchComponent(std::string(kGameOrder[static_cast<std::size_t>(pack.number - 1)]));
+        }
+    }
+    return -1;
+}
+
+// Read once, because every part of the game asks for the packs.
+std::vector<paths::RegisteredPack> registeredPacksOnce(const fs::path& installRoot) {
+    static std::mutex mutex;
+    static fs::path root;
+    static std::vector<paths::RegisteredPack> packs;
+    const std::lock_guard lock(mutex);
+    if (root.empty() || root != installRoot) {
+        packs = paths::registeredPacks(installRoot);
+        root = installRoot;
+    }
+    return packs;
+}
+
 } // namespace
 
 std::vector<Product> findProducts(const fs::path& installRoot) {
     std::map<int, Product> byOrder;
     int nextUnknown = static_cast<int>(kReleaseOrder.size());
+    // A pack is named by its sound files, then the install records, then folder names.
+    const std::vector<paths::RegisteredPack> registered = registeredPacksOnce(installRoot);
+    std::map<fs::path, int> folderOrders;
 
     // A complete install has about 11,000 files and folders. A folder far larger (a whole drive
     // chosen by mistake) isn't an install, and walking all of it would look like a hang.
@@ -136,11 +209,24 @@ std::vector<Product> findProducts(const fs::path& installRoot) {
             continue;
         }
         std::vector<std::string> components;
+        fs::path packFolder = installRoot;
+        bool belowTsData = false;
         for (const auto& part : relative.parent_path()) {
             components.push_back(lower(utf8(part)));
+            belowTsData = belowTsData || components.back() == "tsdata";
+            if (!belowTsData) {
+                packFolder /= part;
+            }
         }
 
         int order = -1;
+        if (belowTsData) {
+            auto [known, added] = folderOrders.try_emplace(packFolder, -1);
+            if (added) {
+                known->second = recordedOrder(packFolder, registered);
+            }
+            order = known->second;
+        }
         for (auto it = components.rbegin(); it != components.rend() && order < 0; ++it) {
             order = matchComponent(*it);
         }

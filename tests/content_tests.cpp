@@ -559,6 +559,25 @@ void installedPacksAreFound() {
         pack(folder);
     }
     CHECK(codes() == "base ep5 sp9 ");
+    fs::remove_all(root);
+    for (const char* folder : {"The Sims 2", "The Sims 2 Apartment Life", "The Sims 2 Bon Voyage", "The Sims 2 Celebration! Stuff",
+                               "The Sims 2 Family Fun Stuff", "The Sims 2 FreeTime", "The Sims 2 Glamour Life Stuff",
+                               "The Sims 2 H&M\xC2\xAE Fashion Stuff", "The Sims 2 IKEA\xC2\xAE Home Stuff",
+                               "The Sims 2 Kitchen & Bath Interior Design Stuff", "The Sims 2 Mansion and Garden Stuff",
+                               "The Sims 2 Nightlife", "The Sims 2 Open For Business", "The Sims 2 Pets", "The Sims 2 Seasons",
+                               "The Sims 2 Teen Style Stuff", "The Sims 2 University"}) {
+        pack(fs::path(std::u8string(reinterpret_cast<const char8_t*>(folder))));
+    }
+    CHECK(codes() == "base ep1 ep2 ep3 sp1 sp2 ep4 ep5 sp4 sp5 ep6 sp6 ep7 sp7 sp8 ep8 sp9 ");
+    fs::remove_all(root);
+    // Mansion & Garden's sound files say EP9.
+    for (const auto& [folder, sound] : {std::pair{"Mine", "TSAudioPackedEP4.ini"}, std::pair{"Other", "tsaudiolocaleep9.INI"},
+                                        std::pair{"University", "TSAudioUnpackedSP6.ini"}}) {
+        pack(folder);
+        fs::create_directories(root / folder / "TSData" / "Sys");
+        std::ofstream(root / folder / "TSData" / "Sys" / sound).put('\0');
+    }
+    CHECK(codes() == "ep4 sp6 sp9 ");
 
     // Catalog bundles with objects (the Holiday packs' H05/H06) belong to their product.
     // globalcatbin and the localized bins are not object sources.

@@ -43,8 +43,14 @@ const char* installStatus(const paths::InstallCheck& check) {
     if (check.downloading) {
         return "Still downloading";
     }
+    if (!check.hasBaseObjects && check.brokenObjectsLink) {
+        return "Base/TSData/Res/Objects/objects.package is a broken link";
+    }
+    if (!check.hasBaseObjects && check.unreadable) {
+        return "Part of this folder can't be read";
+    }
     if (!check.hasBaseObjects) {
-        return "The base game's objects are missing";
+        return "Base/TSData/Res/Objects/objects.package is missing";
     }
     return "Ready";
 }
