@@ -220,7 +220,8 @@ void setSimStorey(ts2::scene::Scene& scene, const ts2::scene::Actor& actor, int 
 } // namespace
 
 void LotLife::OwnAnimations::noteStarts(const ts2::sim::SimObject& object, const ts2::scene::Transform& place, bool walks,
-                                        const std::optional<ts2::scene::Transform>& hung, std::pair<std::int16_t, std::int16_t> holderSlot) {
+                                        const std::optional<ts2::scene::Transform>& hung, bool snapped,
+                                        std::pair<std::int16_t, std::int16_t> holderSlot) {
     const auto drawn = [&](const Started& s) {
         const auto is = [&](const std::optional<ts2::sim::PlayingAnimation>& a) { return a && a->startMs == s.startMs && a->name == s.name; };
         return is(current) || is(previous) || is(held) ||
@@ -233,6 +234,9 @@ void LotLife::OwnAnimations::noteStarts(const ts2::sim::SimObject& object, const
             Started& s = started.emplace_back(Started{name, startMs, place});
             if (hung) {
                 s.fromCarrier = hung->rigidInverse() * place;
+                s.carrierSlot = holderSlot;
+            } else if (snapped) {
+                s.fromCarrier = ts2::scene::Transform{};
                 s.carrierSlot = holderSlot;
             }
         }
@@ -813,6 +817,23 @@ void LotLife::poseSim(ts2::scene::Actor& actor, const ts2::sim::SimObject& objec
     } else {
         playClips(actor, object, own.current, own.previous, drawn, animations_, nullptr, 1, 0, tailPoses, own.tailHeading,
                   startedAt, tailPlace);
+        // Frames are drawn a little ahead of the simulation, which starts the next clip only once it
+        // reaches this one's fade-out start (or end, without a fade out). Until then this clip doesn't
+        // fade, as the game starts the next one in the frame the fade out begins. Otherwise a reader's
+        // hand would sink to the carry pose and back between reading clips.
+        const auto& current = own.current;
+        if (current && object.animation && object.animation->startMs == current->startMs && object.animation->name == current->name &&
+            sim_->world().clockMs() < current->startMs + current->lengthMs - current->fadeOutMs) {
+            const std::string name = ts2::scene::lower(current->name);
+            for (auto& clip : actor.clips) {
+                if (clip.layer != current->layer || !clip.animation || !clip.animation->animation) {
+                    continue;
+                }
+                if (const std::string drawnName = ts2::scene::lower(clip.animation->animation->name); drawnName == name || drawnName == name + "_anim") {
+                    clip.fadeOut = false;
+                }
+            }
+        }
     }
     if (own.settledMs && nowMs < *own.settledMs + ts2::sim::kSettleWalkPoseMs) {
         addSettleClips(actor, object, *own.settledMs, own.settledAt, animations_, sim_->world().locoClips(),
@@ -821,7 +842,7 @@ void LotLife::poseSim(ts2::scene::Actor& actor, const ts2::sim::SimObject& objec
     placeSim(
         actor, sim_->world(), object, frame, scene, [&](const ts2::scene::PlacedObject& p, std::size_t slot) { return slotPlace(p, slot, scene); },
         [&](std::int16_t part, std::size_t slot) { return partSlot(part, slot, scene); }, pose_);
-    own.noteStarts(object, actor.place, walking, hung, holderSlot);
+    own.noteStarts(object, actor.place, walking, hung, actor.carrier != 0, holderSlot);
     setSimStorey(scene, actor, object.level);
     // The game picks a Sim's lights afresh as it moves.
     if (actor.place.m != own.litPlace || object.level != own.litLevel) {

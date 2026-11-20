@@ -7,6 +7,7 @@
 #include "sim/object_model.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <climits>
 #include <format>
 #include <iterator>
@@ -14,6 +15,15 @@
 namespace app {
 
 namespace {
+
+// Whether a drawn clip, named by its resource ("<name>_anim"), is the clip `name` plays.
+bool isClip(const ts2::scene::Actor::Clip& clip, const std::string& name) {
+    if (!clip.animation || !clip.animation->animation) {
+        return false;
+    }
+    const std::string drawn = ts2::scene::lower(clip.animation->animation->name), played = ts2::scene::lower(name);
+    return drawn == played || drawn == played + "_anim";
+}
 
 // Object data 1, 2 and 3: an object's facing, the object it is held by and its slot there. 0x0D is
 // its wall placement and 0x2A its placement flags.
@@ -47,6 +57,40 @@ std::string modelName(ts2::scene::Assets& assets, const ts2::sim::SimObject& obj
         return {};
     }
     return ts2::sim::createdModelName(object, [&](std::size_t row) { return assets.objectString(object.group, kModelNames, row); });
+}
+
+// The groups scripts last gave a material that shows (Change Material), as overrides by group name.
+// A group whose last material is "_null" stays hidden. A model leaves out the groups its shape gives
+// a Null material, as nothing would draw them, so these overrides build them into it: a skill meter's
+// tube is all Null until its script sets the skill's materials.
+std::vector<ts2::scenegraph::MaterialOverride> shownGroups(const ts2::sim::SimObject& o) {
+    std::vector<ts2::scenegraph::MaterialOverride> out;
+    for (const auto& change : o.materialChanges) {
+        if (change.group.empty()) {
+            continue;
+        }
+        const std::string group = ts2::scene::lower(change.group);
+        std::erase_if(out, [&](const ts2::scenegraph::MaterialOverride& m) { return m.group == group; });
+        if (ts2::scene::lower(change.material).find("_null") == std::string::npos) {
+            out.push_back({change.material, group});
+        }
+    }
+    return out;
+}
+
+// Whether a script showed a group `mesh` has no primitive for (see shownGroups).
+bool lacksShownGroup(const ts2::sim::SimObject& o, const ts2::scene::Scene& scene, int mesh) {
+    const auto shown = shownGroups(o);
+    if (shown.empty()) {
+        return false;
+    }
+    if (mesh < 0 || static_cast<std::size_t>(mesh) >= scene.meshes.size()) {
+        return true;
+    }
+    const auto& primitives = scene.meshes[static_cast<std::size_t>(mesh)].primitives;
+    return std::ranges::any_of(shown, [&](const ts2::scenegraph::MaterialOverride& m) {
+        return std::ranges::none_of(primitives, [&](const ts2::scene::Primitive& p) { return p.group == m.group; });
+    });
 }
 
 } // namespace
@@ -329,10 +373,14 @@ void LotLife::animateObjects(ts2::scene::Scene& scene) {
         const auto* object = sim_->world().find(static_cast<std::int16_t>(placed.object));
         auto actor = std::find_if(scene.objectActors.begin(), scene.objectActors.end(),
                                   [&](const ts2::scene::Actor& a) { return a.object == placed.object; });
+        // Only a skinned model draws morphs, so one the lot saved with a morph weighed (an eaten cake
+        // slice, a wilted flower) is drawn skinned from the start.
+        const bool savedMorphs = std::any_of(placed.savedBlends.begin(), placed.savedBlends.end(),
+                                             [](const ts2::cobject::SavedBlend& b) { return std::isfinite(b.weight) && b.weight != 0; });
         // A model that hangs under one joint moves whole with it (see followClips), unless it has
         // morphs, which only a skinned model draws: a living chair's cushions dent as a Sim sits.
         if (!placed.followJoint.empty() && !heldNow_.contains(placed.instance) && actor == scene.objectActors.end()) {
-            const bool playing = object != nullptr && (object->animation || !object->overlays.empty());
+            const bool playing = object != nullptr && (object->animation || !object->overlays.empty() || savedMorphs);
             const int mesh = playing ? objectMaterials_.skinnedModel(placed.model, placed.overrides, scene) : -1;
             if (mesh < 0 || scene.meshes[static_cast<std::size_t>(mesh)].morphs.empty()) {
                 continue;
@@ -347,7 +395,7 @@ void LotLife::animateObjects(ts2::scene::Scene& scene) {
             continue;
         }
         if (actor == scene.objectActors.end()) {
-            if ((!object->animation && object->overlays.empty()) || unskinned_.contains(placed.object)) {
+            if ((!object->animation && object->overlays.empty() && !savedMorphs) || unskinned_.contains(placed.object)) {
                 continue;
             }
             const int mesh = objectMaterials_.skinnedModel(placed.model, placed.overrides, scene);
@@ -360,6 +408,7 @@ void LotLife::animateObjects(ts2::scene::Scene& scene) {
             added.object = placed.object;
             added.skinned.push_back({placed.instance, ts2::scene::skinNodes(scene.meshes[static_cast<std::size_t>(mesh)], *rig)});
             added.rig = std::move(rig);
+            added.startMorphs = placed.savedBlends;
             for (std::size_t slot = 0; slot < placed.slots.size(); ++slot) {
                 const std::string bone = ts2::scene::lower(assets_.slotBone(object->definition.guid(), slot));
                 added.slotNodes.push_back(!bone.empty() ? added.rig->find(bone) : -1);
@@ -373,10 +422,38 @@ void LotLife::animateObjects(ts2::scene::Scene& scene) {
         actor->place = standingPlace(placed, scene);
         // The clip its latest replaced plays on under it while the game keeps it: until the latest
         // has crossfaded it, else to its own end.
-        const auto& own = object->animation;
+        const auto& latest = object->animation;
         const auto& replaced = object->ending;
-        const bool under = own && replaced && (crossfades(*replaced, *own, animations_) || stillPlaying(*replaced, *own));
-        playClips(*actor, *object, own, under ? replaced : std::nullopt, 0, animations_);
+        const bool under = latest && replaced && (crossfades(*replaced, *latest, animations_) || stillPlaying(*replaced, *latest));
+        // The game drops a clip once it ends, and joints keep their last pose until a clip moves them.
+        // So once a latest that ends first (a carry pose of no length) has ended, the clip it replaced
+        // plays on as the object's own, over the latest's last pose: a book opened by its reading start
+        // stays open after the shut carry pose that follows at once.
+        const bool latestGone = under && std::isfinite(latest->lengthMs) &&
+                                latest->startMs + latest->lengthMs < replaced->startMs + replaced->lengthMs &&
+                                nowMs >= latest->startMs + latest->lengthMs;
+        const auto& own = latestGone ? replaced : latest;
+        playClips(*actor, *object, own, under && !latestGone ? replaced : std::nullopt, 0, animations_);
+        // The clip playing on goes one clip layer up, so it alone poses each joint it moves, and the
+        // latest's last pose below keeps the rest. Clips on one layer would share each joint.
+        constexpr int kClipLayerStep = 2;
+        const int ownLayer = own ? own->layer + (latestGone ? kClipLayerStep : 0) : 0;
+        if (latestGone) {
+            for (auto& clip : actor->clips) {
+                if (clip.layer == replaced->layer && isClip(clip, replaced->name)) {
+                    clip.layer = ownLayer;
+                }
+            }
+            if (auto bound = animations_.bound(actor->rig, latest->name, latest->flipped); bound && bound->animation) {
+                auto& left = actor->clips.emplace_back();
+                left.animation = std::move(bound);
+                left.layer = replaced->layer;
+                left.start = latest->startMs / 1000.0;
+                left.end = left.start;
+                left.fadeIn = left.fadeOut = false;
+                left.atMs = clipMs(*latest, left.animation->animation->duration, latest->startMs + latest->lengthMs);
+            }
+        }
         // A latest that doesn't move the object's root leaves it where the clip it replaced did: at
         // that clip's last frame once it has played out, however few of its frames were drawn (a bus's
         // drive clip, done between two frames at ultra speed, leaves the bus where it stopped before
@@ -387,7 +464,25 @@ void LotLife::animateObjects(ts2::scene::Scene& scene) {
             return bound && root >= 0 && static_cast<std::size_t>(root) < bound->translation.size() &&
                    bound->translation[static_cast<std::size_t>(root)] >= 0;
         };
-        if (own && replaced && !under && replaced->startMs + replaced->lengthMs <= own->startMs && !movesRoot(*own)) {
+        const bool replacedDone = !latestGone && own && replaced && !under && replaced->startMs + replaced->lengthMs <= own->startMs;
+        const bool rootMoves = replacedDone && movesRoot(*own);
+        if (rootMoves) {
+            // Its morphs still stay as it left them, as the game keeps a morph's last weight: a cake
+            // slice's eaten pose is followed at once by the plate pose, which moves only the root. Below
+            // the starting layer its joints don't count once the object has a pose.
+            constexpr int kMorphsOnlyLayer = -1;
+            if (auto bound = animations_.bound(actor->rig, replaced->name, replaced->flipped);
+                bound && bound->animation && !bound->animation->morphTargets.empty()) {
+                auto& kept = actor->clips.emplace_back();
+                kept.animation = std::move(bound);
+                kept.layer = kMorphsOnlyLayer;
+                kept.start = replaced->startMs / 1000.0;
+                kept.end = kept.start;
+                kept.fadeIn = kept.fadeOut = false;
+                kept.atMs = clipMs(*replaced, kept.animation->animation->duration, replaced->startMs + replaced->lengthMs);
+            }
+        }
+        if (replacedDone && !rootMoves) {
             if (auto bound = animations_.bound(actor->rig, replaced->name, replaced->flipped); bound && bound->animation) {
                 auto& held = actor->clips.emplace_back();
                 held.animation = std::move(bound);
@@ -401,16 +496,48 @@ void LotLife::animateObjects(ts2::scene::Scene& scene) {
         // A stopped clip holds the pose it was stopped at, in full, however few of its frames were
         // drawn (a car's stop clip, played out within a few frames at ultra speed).
         if (own && nowMs - own->startMs >= own->lengthMs) {
-            const std::string ownName = ts2::scene::lower(own->name);
             for (auto& clip : actor->clips) {
-                if (clip.layer == own->layer && clip.animation && clip.animation->animation &&
-                    ts2::scene::lower(clip.animation->animation->name) == ownName) {
+                if (clip.layer == ownLayer && isClip(clip, own->name)) {
                     clip.atMs = clipMs(*own, clip.animation->animation->duration, nowMs);
                     clip.fadeOut = false;
                 }
             }
         }
     }
+}
+
+std::optional<std::vector<ts2::cobject::NamedWeight>> LotLife::drawnMorphs(const ts2::scene::Scene& scene, const ts2::scene::ScenePose& pose,
+                                                                           std::int16_t object) {
+    const auto actor = std::find_if(scene.objectActors.begin(), scene.objectActors.end(),
+                                    [&](const ts2::scene::Actor& a) { return a.object == static_cast<std::uint32_t>(object); });
+    const auto placed = std::find_if(scene.placedObjects.begin(), scene.placedObjects.end(),
+                                     [&](const ts2::scene::PlacedObject& p) { return p.object == static_cast<std::uint32_t>(object); });
+    if (actor == scene.objectActors.end() || actor->skinned.empty() || placed == scene.placedObjects.end() || placed->model.empty()) {
+        return std::nullopt;
+    }
+    const std::size_t instance = actor->skinned.front().instance;
+    const auto weights = pose.morphs.find(instance);
+    const int mesh = instance < scene.instances.size() ? scene.instances[instance].mesh : -1;
+    if (weights == pose.morphs.end() || mesh < 0 || static_cast<std::size_t>(mesh) >= scene.meshes.size()) {
+        return std::nullopt;
+    }
+    const auto& drawn = scene.meshes[static_cast<std::size_t>(mesh)].morphs;
+    std::vector<ts2::cobject::NamedWeight> out;
+    for (const auto& m : objectMaterials_.savedMorphNames(placed->model)) {
+        float weight = 0;
+        const std::string group = ts2::scene::lower(m.group);
+        const std::string name = ts2::scene::lower(m.name);
+        for (std::size_t k = 0; k < drawn.size() && k < weights->second.size(); ++k) {
+            if (drawn[k].group == group && drawn[k].name == name) {
+                weight = weights->second[k];
+            }
+        }
+        out.push_back({m.group, m.name, std::bit_cast<ts2::cobject::Word>(weight)});
+    }
+    if (out.empty()) {
+        return std::nullopt;
+    }
+    return out;
 }
 
 // An object in a slot of one drawn skinned (one that has played a clip) hangs from that slot's bone
@@ -606,6 +733,7 @@ void LotLife::addCreatedObjects(ts2::scene::Scene& scene, bool removeSims) {
         }
         drawnTypes_.erase(id);
         drawnModels_.erase(id);
+        groupsCheckedAt_.erase(id);
         // What was known of the old object's model goes with it, so the next one at this id starts afresh.
         unskinned_.erase(static_cast<std::uint32_t>(id));
         // A multi-tile part at this id, or the parts it leads, may be another object's now.
@@ -615,6 +743,23 @@ void LotLife::addCreatedObjects(ts2::scene::Scene& scene, bool removeSims) {
             created_.erase(created);
         }
     };
+    // An object whose script showed a group its drawn model left out is drawn again with it. Each
+    // object's materials are checked once per change.
+    for (const auto& placed : scene.placedObjects) {
+        const auto* object = placed.object <= static_cast<std::uint32_t>(INT16_MAX) ? world.find(static_cast<std::int16_t>(placed.object)) : nullptr;
+        if (object == nullptr || object->removed || object->materialChanges.empty() || placed.instance >= scene.instances.size()) {
+            continue;
+        }
+        auto [checked, added] = groupsCheckedAt_.try_emplace(object->id, object->materialVersion);
+        if (!added && checked->second == object->materialVersion) {
+            continue;
+        }
+        checked->second = object->materialVersion;
+        if (lacksShownGroup(*object, scene, scene.instances[placed.instance].mesh)) {
+            regroup_.insert(object->id);
+            createdFor_.reset();
+        }
+    }
     // Objects only change this way when the world's objects version does, and this runs every frame.
     const bool objectsSame = createdFor_ == world.objectsVersion();
     if (!objectsSame) {
@@ -692,10 +837,14 @@ void LotLife::addCreatedObjects(ts2::scene::Scene& scene, bool removeSims) {
         // every install that runs NeoTS2 has) sets each group's chosen material again on the new
         // model by group name, a counter top's hole mask with it (see PlacedObject::chosen).
         std::vector<ts2::scenegraph::MaterialOverride> kept, masks;
+        // The groups a script showed that the drawn model leaves out, built into the new one. Groups
+        // it has keep their own materials and masks, as a counter top under a sink keeps its hole.
+        auto scriptShown = shownGroups(o);
         if (const auto drawn = drawnTypes_.find(o.id); drawn != drawnTypes_.end()) {
             const auto drawnModel = drawnModels_.find(o.id);
             const bool sameModel = drawnModel != drawnModels_.end() ? drawnModel->second == o.model : o.model.empty();
-            if (drawn->second == o.definition.guid() && sameModel) {
+            const bool regroup = regroup_.contains(o.id);
+            if (drawn->second == o.definition.guid() && sameModel && !regroup) {
                 return false;
             }
             // A script giving a lot object the model the lot already shows for it changes nothing. A
@@ -703,13 +852,23 @@ void LotLife::addCreatedObjects(ts2::scene::Scene& scene, bool removeSims) {
             // lot saved for them.
             const auto shown = std::find_if(scene.placedObjects.begin(), scene.placedObjects.end(),
                                             [&](const ts2::scene::PlacedObject& p) { return p.object == static_cast<std::uint32_t>(o.id); });
-            if (drawn->second == o.definition.guid() && !created_.contains(o.id) && shown != scene.placedObjects.end() &&
+            if (drawn->second == o.definition.guid() && !created_.contains(o.id) && shown != scene.placedObjects.end() && !regroup &&
                 !o.model.empty() && ts2::scene::lower(shown->model) == ts2::scene::lower(o.model)) {
                 drawnModels_[o.id] = o.model;
                 return false;
             }
             if (shown != scene.placedObjects.end()) {
                 kept = shown->chosen;
+                // Only the same model keeps its own groups. A new model may lack a group the old one drew.
+                if (sameModel && drawn->second == o.definition.guid() && shown->instance < scene.instances.size()) {
+                    const int mesh = scene.instances[shown->instance].mesh;
+                    if (mesh >= 0 && static_cast<std::size_t>(mesh) < scene.meshes.size()) {
+                        const auto& primitives = scene.meshes[static_cast<std::size_t>(mesh)].primitives;
+                        std::erase_if(scriptShown, [&](const ts2::scenegraph::MaterialOverride& m) {
+                            return std::ranges::any_of(primitives, [&](const ts2::scene::Primitive& p) { return p.group == m.group; });
+                        });
+                    }
+                }
                 // The hole masks stay with the object apart from them, for scripts that set its top later.
                 std::copy_if(shown->overrides.begin(), shown->overrides.end(), std::back_inserter(masks), [](const ts2::scenegraph::MaterialOverride& m) {
                     return ts2::scene::lower(m.material).find("-cutout-") != std::string::npos;
@@ -721,9 +880,12 @@ void LotLife::addCreatedObjects(ts2::scene::Scene& scene, bool removeSims) {
             ts2::diag::warning(std::format("object {} is not drawn: {} created objects already are", o.id, kMaxCreated));
             return false;
         }
+        regroup_.erase(o.id);
         const std::string model = modelName(assets_, o);
+        auto built = kept;
+        built.insert(built.end(), scriptShown.begin(), scriptShown.end());
         ts2::scene::Instance instance;
-        instance.mesh = model.empty() ? -1 : objectMaterials_.model(model, kept, scene);
+        instance.mesh = model.empty() ? -1 : objectMaterials_.model(model, built, scene);
         instance.name = std::format("{} {}", o.id, model);
         instance.part = ts2::scene::Part::Object;
         instance.object = static_cast<std::uint32_t>(o.id);
@@ -742,7 +904,7 @@ void LotLife::addCreatedObjects(ts2::scene::Scene& scene, bool removeSims) {
         ts2::scene::PlacedObject placed{static_cast<std::uint32_t>(o.id), index, lotFrame_, {}};
         placed.model = model;
         placed.chosen = kept;
-        masks.insert(masks.end(), kept.begin(), kept.end());
+        masks.insert(masks.end(), built.begin(), built.end());
         placed.overrides = std::move(masks);
         for (std::size_t slot = 0; slot < kMaxSlots && !model.empty(); ++slot) {
             const std::string bone = assets_.slotBone(o.definition.guid(), slot);
@@ -757,6 +919,10 @@ void LotLife::addCreatedObjects(ts2::scene::Scene& scene, bool removeSims) {
         unshaded_.insert(index);
         drawnTypes_[o.id] = o.definition.guid();
         drawnModels_[o.id] = o.model;
+        // Built with every group its scripts show, so it is checked again only when they change. A group
+        // its shape doesn't have would otherwise draw it again every frame.
+        groupsCheckedAt_[o.id] = o.materialVersion;
+        objectMaterials_.showAgain(o.id);
         // Never placed yet, so placeObjects places it.
         const auto slot = static_cast<std::size_t>(o.id);
         if (slot >= objectPlaces_.size()) {

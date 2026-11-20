@@ -220,11 +220,17 @@ struct ScenePose {
     std::unordered_map<std::uint32_t, Transform> carried;
     // Where each Sim was placed and each held object hung as last posed, by object.
     std::unordered_map<std::uint32_t, Transform> drawnAt;
+    // Each lot object's actor's rig nodes in its model's space as last posed, by object. Effects
+    // on its bones follow them: a plumbob's glow rises with it.
+    std::unordered_map<std::uint32_t, std::vector<Transform>> objectNodes;
     // The rig each actor was last posed with, by object, so a pose kept from another rig is dropped.
     std::unordered_map<std::uint32_t, const Rig*> heldRig;
     // Each skinned instance's morph weights (by Mesh::morphs), by instance. Kept between calls, as a
     // morph no clip weighs keeps its weight.
     std::unordered_map<std::size_t, std::vector<float>> morphs;
+    // The mesh each instance's morph weights belong to. An instance drawn with another model (food
+    // put in the pan) keeps only the weights of morphs the two share by name.
+    std::unordered_map<std::size_t, int> morphMeshes;
     // Each instance with eyes' eye values (see mixEyes), by instance, kept the same way.
     std::unordered_map<std::size_t, std::array<float, 4>> eyes;
     MorphBindings morphBindings;  // kept between calls

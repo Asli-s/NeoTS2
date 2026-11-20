@@ -95,6 +95,17 @@ std::string Execution::catalogName(std::uint32_t guid) {
     return code_.catalogString(type->group, set, 0).value_or("");
 }
 
+// An object's name: its type's catalog name, for a Sim the first name given while playing when it
+// has one. A newborn's name is only given at birth, as its character file is made.
+std::string Execution::objectName(const SimObject& object) {
+    if (object.isPerson()) {
+        if (auto given = world().neighborFirstName(world().neighborIdOf(object))) {
+            return *given;
+        }
+    }
+    return catalogName(object.definition.guid());
+}
+
 // A neighbor's first and last name: its character's catalog strings, lines 0 and 2, or the names
 // given while playing. None for an unknown neighbor.
 std::optional<std::array<std::string, 2>> Execution::neighborNames(std::int16_t id) {
@@ -127,9 +138,9 @@ std::optional<std::string> Execution::expandToken(std::string_view token, int a,
     auto param = [&](int i) -> std::optional<std::int16_t> {
         return i >= 0 && static_cast<std::size_t>(i) < f.params.size() ? std::optional(f.params[static_cast<std::size_t>(i)]) : std::nullopt;
     };
-    auto objectName = [&](std::optional<std::int16_t> id) -> std::optional<std::string> {
+    auto nameOf = [&](std::optional<std::int16_t> id) -> std::optional<std::string> {
         const SimObject* o = id ? world().find(*id) : nullptr;
-        return o != nullptr ? std::optional(catalogName(o->definition.guid())) : std::nullopt;
+        return o != nullptr ? std::optional(objectName(*o)) : std::nullopt;
     };
     auto fullName = [](const std::array<std::string, 2>& n) {
         return n[1].empty() ? n[0] : n[0].empty() ? n[1] : n[0] + " " + n[1];
@@ -167,14 +178,14 @@ std::optional<std::string> Execution::expandToken(std::string_view token, int a,
         return n ? std::optional(fullName(*n)) : std::nullopt;
     }
     if (token == "$Me") {
-        return catalogName(me().definition.guid());
+        return objectName(me());
     }
     if (token == "$Object") {
         if (stackObj == nullptr) {
             return std::nullopt;
         }
         picture = pictureOf(*stackObj);
-        return catalogName(stackObj->definition.guid());
+        return objectName(*stackObj);
     }
     if (token == "$Local") {
         const auto v = local(a);
@@ -194,13 +205,13 @@ std::optional<std::string> Execution::expandToken(std::string_view token, int a,
             return std::nullopt;
         }
         const std::int16_t v = stackObj->attributes[static_cast<std::size_t>(a)];
-        return token == "$Attrib" ? std::optional(grouped(v)) : objectName(v);
+        return token == "$Attrib" ? std::optional(grouped(v)) : nameOf(v);
     }
     if (token == "$NameLocal") {
-        return objectName(local(a));
+        return nameOf(local(a));
     }
     if (token == "$NameParam") {
-        return objectName(param(a));
+        return nameOf(param(a));
     }
     if (token == "$DayLocal") {
         const auto v = local(a);

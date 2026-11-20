@@ -12,6 +12,8 @@
 #include "scene/terrain_water.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <optional>
 #include <sstream>
 
@@ -22,6 +24,21 @@ namespace {
 // Whether a saved position is on the lot. Written so that one that isn't a number is off it.
 bool onLot(float x, float y) {
     return x >= 0 && y >= 0 && x <= 256 && y <= 256;
+}
+
+// The model an object shows when its scene record names none it can load: the row of its type's
+// model names (string table 0x85) that object data 0x00 gives, or OBJD field 0x48 when that is 0.
+// Row 0 means no model. Empty for none.
+std::string defaultModel(Assets& assets, const content::LotObject& object) {
+    constexpr std::uint32_t kModelNames = 0x85;
+    const auto* definition = object.type ? assets.objectDefinition(object.type->guid) : nullptr;
+    const auto group = object.type ? assets.objectGroup(object.type->guid) : std::nullopt;
+    if (definition == nullptr || !group) {
+        return {};
+    }
+    const auto own = static_cast<std::uint16_t>(object.state.data[0]);
+    const std::uint16_t row = own != 0 ? own : definition->field(objd::field::kDefaultModel);
+    return row != 0 ? assets.objectString(*group, kModelNames, row).value_or(std::string{}) : std::string{};
 }
 
 } // namespace
@@ -64,6 +81,11 @@ void LotSceneBuilder::placeObjects() {
             log(object, ex.what(), "");
             continue;
         }
+        // A record naming no model can't load one, so the object gets its own, as the game's load does.
+        // A stale record of a removed object, left under an id a new object took, names none.
+        if (so.model.empty()) {
+            so.model = defaultModel(assets_, object);
+        }
         const std::string low = lower(so.model);
         if (so.model.empty() || low == "nullmodel" || low == "nomodel") {
             log(object, "no model", so.model);
@@ -89,7 +111,10 @@ void LotSceneBuilder::placeObjects() {
                                            saved != lot_.savedJoints.end() ? std::span<const cobject::SavedJoint>(saved->second)
                                                                            : std::span<const cobject::SavedJoint>{},
                                            boneModel);
-        if (mesh < 0) {
+        // A model with joints and nothing to draw still places the object, as one made during play
+        // is placed. The fight's cloud plays at the joints of such a model.
+        constexpr std::uint32_t kCres = 0xE519C933;
+        if (mesh < 0 && !assets_.byName(kCres, so.model + "_cres")) {
             ++stats_.withoutModel;
             log(object, "model not found", so.model);
             continue;
@@ -104,7 +129,7 @@ void LotSceneBuilder::placeObjects() {
         float z = h.value4 >= 0 ? h.value3 : floorZ + h.value3;
         // Another piece reaching down into the ground (a chimney's base) ends its full width at the
         // floor above, so that its tapered top tucks into the piece standing there.
-        if (const auto range = heightRange(mesh); h.value4 < 0 && range[0] < -kLevelHeight) {
+        if (const auto range = mesh >= 0 ? heightRange(mesh) : std::array<float, 3>{}; h.value4 < 0 && range[0] < -kLevelHeight) {
             z = heights_.tile(level + 1, x, y) - range[2];
         }
         // A floating object sits on the water's surface with no offset.
@@ -155,8 +180,31 @@ void LotSceneBuilder::placeObjects() {
         }
         const Transform* bone = name.empty() ? nullptr : b_.bone(c.boneModel, name);
         const Transform slot = bone ? base * *bone : base;
-        // The saved direction is the slot's rounded to 45 degrees unless the player turned the
-        // object on it: keep whole quarter turns of difference.
+        // The scene record keeps where it sits as seen from its holder's slot, in its root joint
+        // ("<name>_objt"): a dish turned on a plate keeps its turn. Its own direction doesn't follow
+        // the plate it sits on, so it counts only for records saved without joints.
+        if (const auto saved = lot_.savedJoints.find(s.object->id); saved != lot_.savedJoints.end()) {
+            const auto root = std::find_if(saved->second.begin(), saved->second.end(),
+                                           [](const cobject::SavedJoint& j) { return j.name.ends_with("_objt"); });
+            // A broken record's turn that isn't a unit one is made one, so it can't scale the object.
+            std::array<float, 4> turn{};
+            float length = 0;
+            if (root != saved->second.end()) {
+                turn = root->rotation;
+                length = std::sqrt(turn[0] * turn[0] + turn[1] * turn[1] + turn[2] * turn[2] + turn[3] * turn[3]);
+            }
+            if (root != saved->second.end() && std::ranges::all_of(root->translation, [](float v) { return std::isfinite(v); }) &&
+                std::isfinite(length) && length > 1e-6f) {
+                for (float& v : turn) {
+                    v /= length;
+                }
+                s.world = slot * Transform::of(root->translation, turn);
+                ++stats_.inSlots;
+                return;
+            }
+        }
+        // Without one, its saved direction is the slot's rounded to 45 degrees unless the player turned
+        // the object on it: keep whole quarter turns of difference.
         const float slotYaw = std::atan2(slot.m[4], slot.m[0]);
         const float turn = std::round(std::remainder(s.yaw - slotYaw, 2 * kPi) / (kPi / 2)) * (kPi / 2);
         s.world = slot * Transform::at(0, 0, 0, turn);
@@ -180,8 +228,19 @@ void LotSceneBuilder::placeObjects() {
             placed[*it] = 2;
         }
         shown_[i].instance = b_.scene().instances.size();
-        if (auto* instance = b_.place(shown_[i].mesh, std::to_string(shown_[i].object->id) + " " + shown_[i].model, shown_[i].world,
-                                      Part::Object, content::gridLevel(lot_, shown_[i].object->state.header.value1))) {
+        const std::string name = std::to_string(shown_[i].object->id) + " " + shown_[i].model;
+        const int level = content::gridLevel(lot_, shown_[i].object->state.header.value1);
+        Instance* instance = b_.place(shown_[i].mesh, name, shown_[i].world, Part::Object, level);
+        if (instance == nullptr) {
+            // A model with nothing to draw gets an instance with no mesh, which only gives its place.
+            instance = &b_.scene().instances.emplace_back();
+            instance->mesh = -1;
+            instance->name = name;
+            instance->transform = shown_[i].world;
+            instance->part = Part::Object;
+            instance->level = level;
+        }
+        {
             instance->object = shown_[i].object->id;
             PlacedObject record{shown_[i].object->id, shown_[i].instance, Transform{}, {}};
             record.model = shown_[i].model;
@@ -189,6 +248,9 @@ void LotSceneBuilder::placeObjects() {
             record.chosen = shown_[i].chosen;
             if (const auto saved = lot_.savedJoints.find(shown_[i].object->id); saved != lot_.savedJoints.end()) {
                 record.savedJoints = saved->second;
+            }
+            if (const auto blends = lot_.savedBlends.find(shown_[i].object->id); blends != lot_.savedBlends.end()) {
+                record.savedBlends = blends->second;
             }
             if (shown_[i].object->type) {
                 for (std::size_t slot = 0; slot < kMaxShownSlots; ++slot) {

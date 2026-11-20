@@ -107,6 +107,69 @@ void socialAnimationsAreNamedForBothSims() {
     CHECK(child.overlays.empty());
 }
 
+// Animate Sim with byte 8 flag 0x02 starts where my last Animate Sim clip ends, with 0x08 where it
+// began fading out, each only within 140 ms of now. Reading clips have no fades and follow on this
+// way, so a late tick leaves no gap between them. Without the flags a clip starts now.
+void animateSimFollowsOnAsTheClipBeforeEnds() {
+    auto animate = [](std::uint16_t entry, std::uint8_t fades, std::uint8_t start, decltype(Instruction{}.trueTarget) next) {
+        Instruction in;
+        in.opcode = 0x006A;
+        in.trueTarget = next;
+        in.falseTarget = E;
+        in.operands[0] = static_cast<std::uint8_t>(entry);
+        in.operands[2] = fades;
+        in.operands[3] = 32;
+        in.operands[6] = 0x81;
+        in.operands[8] = start;
+        return in;
+    };
+    constexpr std::uint8_t kNoFades = 0xC0, kFades = 0x00, kAtEnd = 0x02, kAtFadeOut = 0x08;
+    MemoryCodeSource code;
+    code.addStrings(kObjectGroup, 0x81, {"a2o-book-read-scan", "a2o-book-read-turnPage"});
+    code.add(kObjectGroup, 0x1000, bhav({animate(0, kNoFades, 0, 1), animate(1, kNoFades, kAtEnd, T)}));
+    code.add(kObjectGroup, 0x1001, bhav({animate(0, kFades, 0, 1), animate(1, kFades, kAtFadeOut, T)}));
+    code.add(kObjectGroup, 0x1002, bhav({animate(0, kNoFades, 0, 1), animate(1, kNoFades, 0, T)}));
+    ts2::sim::World world;
+    world.setAnimationLengths([](const std::string&) -> std::optional<float> { return 1000.0f; });
+    auto& sim = world.create(kObjectGroup, typed(0x51515151, ts2::sim::kPersonType));
+    Vm vm(code, {}, &world);
+    double start = world.clockMs();
+    CHECK(vm.run(sim, kObjectGroup, 0x1000).outcome == Outcome::Sleeping);
+    world.advanceClock(1030);  // the tick after the first clip ended at 1000 ms
+    CHECK(vm.resume(sim).outcome == Outcome::Sleeping);
+    CHECK(sim.animation && sim.animation->name == "a2o-book-read-turnPage" && sim.animation->startMs == start + 1000.0);
+    // Starting it cleared the times, so only the clip just before ever counts.
+    CHECK(!sim.keptTimes);
+    // One started more than 140 ms after that end starts now.
+    world.advanceClock(1100);
+    CHECK(vm.resume(sim).outcome == Outcome::True);
+    world.advanceClock(200);
+    sim.thread = {};
+    CHECK(vm.run(sim, kObjectGroup, 0x1000).outcome == Outcome::Sleeping);
+    world.advanceClock(1030);
+    CHECK(vm.resume(sim).outcome == Outcome::Sleeping);
+    start = world.clockMs() - 1030;
+    CHECK(sim.animation->startMs == start + 1000.0);
+    world.advanceClock(1100);
+    CHECK(vm.resume(sim).outcome == Outcome::True);
+    // Flag 0x08 after a clip that fades out: where its fade out began.
+    world.advanceClock(500);
+    sim.thread = {};
+    start = world.clockMs();
+    CHECK(vm.run(sim, kObjectGroup, 0x1001).outcome == Outcome::Sleeping);
+    world.advanceClock(800);
+    CHECK(vm.resume(sim).outcome == Outcome::Sleeping);
+    CHECK(sim.animation->name == "a2o-book-read-turnPage" && std::fabs(sim.animation->startMs - (start + 1000.0 - sim.animation->fadeOutMs)) < 1e-6);
+    // Without the flags the next clip starts at the tick's clock.
+    world.advanceClock(1100);
+    CHECK(vm.resume(sim).outcome == Outcome::True);
+    world.advanceClock(500);
+    sim.thread = {};
+    CHECK(vm.run(sim, kObjectGroup, 0x1002).outcome == Outcome::Sleeping);
+    world.advanceClock(1030);
+    CHECK(vm.resume(sim).outcome == Outcome::Sleeping && sim.animation->startMs == world.clockMs());
+}
+
 // Animate Sim: plays the named animation from the object's list (else the global one) and waits
 // until it has played by the world's clock, at its speed. Animate Object, Overlay and Stop go on at once.
 void animateSimWaitsForItsAnimation() {
@@ -732,6 +795,84 @@ void animateObjectPlaysUntilStopped() {
     }
 }
 
+// Animate Object byte 10 flags 0x04 and 0x08 only choose the start time, from the running object's
+// last Animate Sim clip, and the clip plays with flags 0x40 and 0x80 too. "Read - Loop Reading"
+// starts a book's page clips with byte 10 0xF6.
+void animateObjectAtAKeptTimePlays() {
+    auto animate = [](std::uint8_t more) {
+        Instruction in;
+        in.opcode = 0x0069;
+        in.trueTarget = T;
+        in.falseTarget = E;
+        const std::uint8_t bytes[] = {0x01, 0x00, 0x00, 0x20, 0x00, 0x00, owner::kMyData, 0x0B, 0x00, 0x00, more};
+        std::copy(std::begin(bytes), std::end(bytes), in.operands.begin());
+        return in;
+    };
+    MemoryCodeSource code;
+    code.addStrings(kObjectGroup, 0x86, {"o-book-carry", "o-book-read"});
+    code.add(kObjectGroup, 0x1000, bhav({animate(0x04)}));
+    code.add(kObjectGroup, 0x1001, bhav({animate(0x08)}));
+    code.add(kObjectGroup, 0x1002, bhav({animate(0xF4)}));
+    ts2::sim::World world;
+    world.setAnimationLengths([](const std::string&) -> std::optional<float> { return 1000.0f; });
+    auto& book = world.create(kObjectGroup, definition("Book", 0));
+    Vm vm(code, {}, &world);
+    // Unset, the clip starts now.
+    for (const std::uint16_t tree : {std::uint16_t{0x1000}, std::uint16_t{0x1001}, std::uint16_t{0x1002}}) {
+        book.animation.reset();
+        CHECK(vm.run(book, kObjectGroup, tree).outcome == Outcome::True);
+        CHECK(book.animation && book.animation->name == "o-book-read" && book.animation->startMs == world.clockMs());
+    }
+    // Flag 0x04 starts it where the running object's last Animate Sim clip ends, 0x08 where that one
+    // began fading out, each only within 140 ms of now.
+    const double now = world.clockMs();
+    book.keptTimes = ts2::sim::SimObject::KeptTimes{now + 100, now - 133};
+    const std::pair<std::uint16_t, double> starts[] = {{std::uint16_t{0x1000}, now + 100}, {std::uint16_t{0x1001}, now - 133}, {std::uint16_t{0x1002}, now + 100}};
+    for (const auto& [tree, at] : starts) {
+        book.animation.reset();
+        CHECK(vm.run(book, kObjectGroup, tree).outcome == Outcome::True && book.animation->startMs == at);
+    }
+    book.keptTimes = ts2::sim::SimObject::KeptTimes{now + 150, now - 150};
+    for (const std::uint16_t tree : {std::uint16_t{0x1000}, std::uint16_t{0x1001}}) {
+        book.animation.reset();
+        CHECK(vm.run(book, kObjectGroup, tree).outcome == Outcome::True && book.animation->startMs == now);
+    }
+}
+
+// A clip Animate Object goes over plays on under the new one. One that has already ended, as a
+// skill meter's fill pose of no length has, leaves an earlier clip still playing there: the
+// meter's level-up flip turns all the way round under the poses that follow it.
+void animateObjectKeepsAnEarlierClipStillPlaying() {
+    auto animate = [](std::uint8_t entry) {
+        Instruction in;
+        in.opcode = 0x0069;
+        in.trueTarget = T;
+        in.falseTarget = E;
+        const std::uint8_t bytes[] = {entry, 0x00, 0x00, 0x20, 0x00, 0x00, owner::kMyData, 0x0B, 0x00, 0x00, 0x10};
+        std::copy(std::begin(bytes), std::end(bytes), in.operands.begin());
+        return in;
+    };
+    MemoryCodeSource code;
+    code.addStrings(kObjectGroup, 0x86, {"o-meter-flip", "o-meter-pose-5", "o-meter-pose-10"});
+    code.add(kObjectGroup, 0x1000, bhav({animate(0)}));
+    code.add(kObjectGroup, 0x1001, bhav({animate(1)}));
+    code.add(kObjectGroup, 0x1002, bhav({animate(2)}));
+    ts2::sim::World world;
+    world.setAnimationLengths([](const std::string& name) -> std::optional<float> { return name == "o-meter-flip" ? 866.0f : 0.0f; });
+    auto& meter = world.create(kObjectGroup, definition("Meter", 0));
+    Vm vm(code, {}, &world);
+    CHECK(vm.run(meter, kObjectGroup, 0x1000).outcome == Outcome::True);
+    CHECK(vm.run(meter, kObjectGroup, 0x1001).outcome == Outcome::True);
+    CHECK(meter.ending && meter.ending->name == "o-meter-flip" && meter.animation->name == "o-meter-pose-5");
+    world.advanceClock(300);
+    CHECK(vm.run(meter, kObjectGroup, 0x1002).outcome == Outcome::True);
+    CHECK(meter.ending && meter.ending->name == "o-meter-flip" && meter.animation->name == "o-meter-pose-10");
+    // Once the flip has ended, the next clip goes over the latest as before.
+    world.advanceClock(600);
+    CHECK(vm.run(meter, kObjectGroup, 0x1001).outcome == Outcome::True);
+    CHECK(meter.ending && meter.ending->name == "o-meter-pose-10" && meter.animation->name == "o-meter-pose-5");
+}
+
 // Animate Object's event tree (bytes 4-5) hears the clip's own events, then 9997, 9998 and 9999 at
 // its end, run on the object that plays it. A clip Animate Stop ends tells nothing more.
 void animateObjectEventsReachTheirTree() {
@@ -946,6 +1087,9 @@ std::vector<Test> vmAnimationTests() {
         {"Animate Sim clips fade to fit", animateFadesFitTheClip},
         {"Animate Sim carries on the saved clip", animateSimCarriesOnTheSavedClip},
         {"Animate Object plays once, a count from temp 1, or until stopped", animateObjectPlaysUntilStopped},
+        {"Animate Object keeps an earlier clip still playing", animateObjectKeepsAnEarlierClipStillPlaying},
+        {"Animate Object at a kept time plays", animateObjectAtAKeptTimePlays},
+        {"Animate Sim follows on as the clip before ends", animateSimFollowsOnAsTheClipBeforeEnds},
         {"Animate Object events reach their tree", animateObjectEventsReachTheirTree},
         {"Animate Object reads the Sim's list", animateObjectReadsTheSimsList},
     };

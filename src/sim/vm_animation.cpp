@@ -1,5 +1,6 @@
 #include "sim/vm_execution.hpp"
 
+#include <cmath>
 #include <limits>
 
 namespace ts2::sim::vm_detail {
@@ -24,6 +25,22 @@ void stopOverlay(PlayingOverlay& overlay, double now, float blendMs) {
     overlay.plays = 1;
     overlay.lengthMs = static_cast<float>(played + blendMs);
     overlay.blendOutMs = blendMs;
+}
+
+// The start an Animate primitive's start bits give a clip: the end (`atEnd`) or the fade-out start
+// (`atHandOver`) of the running object's last Animate Sim clip (SimObject::keptTimes), when that is
+// within 140 ms of now, else `otherwise`. With both bits the fade-out start alone counts.
+double keptStart(const SimObject& runner, bool atEnd, bool atHandOver, double now, double otherwise) {
+    constexpr double kKeptWindowMs = 140;
+    const auto& kept = runner.keptTimes;
+    const auto near = [&](double t) { return std::abs(t - now) <= kKeptWindowMs; };
+    if (atHandOver) {
+        return kept && near(kept->handedOverMs) ? kept->handedOverMs : otherwise;
+    }
+    if (atEnd) {
+        return kept && near(kept->endMs) ? kept->endMs : otherwise;
+    }
+    return otherwise;
 }
 
 } // namespace
@@ -103,6 +120,8 @@ std::optional<bool> Execution::animateSim(const bhav::Instruction& in, Frame& f)
         if (!sim.animation->fadingOut(now)) {
             return std::nullopt;
         }
+        const double endMs = sim.animation->startMs + sim.animation->lengthMs;
+        sim.keptTimes = SimObject::KeptTimes{endMs, endMs - sim.animation->fadeOutMs};
         if (sim.animation->blendsOut) {
             sim.ending = std::move(sim.animation);
         }
@@ -144,9 +163,13 @@ std::optional<bool> Execution::animateSim(const bhav::Instruction& in, Frame& f)
     if (const auto& lengths = world().animationLengths(); lengths && !lengths(*name)) {
         return true;
     }
+    // Byte 8 flag 0x02 starts it where my last Animate Sim clip ends, 0x08 where that one began
+    // fading out. Reading clips follow on this way, so the one before never leaves a gap.
+    const double startMs = keptStart(sim, (in.operands[8] & 0x02) != 0, (in.operands[8] & 0x08) != 0, now, now);
+    sim.keptTimes.reset();
     PlayingAnimation play;
     play.name = *name;
-    play.startMs = resumed ? now - resumed->playedMs : now;
+    play.startMs = resumed ? now - resumed->playedMs : startMs;
     play.speed = resumed ? resumed->speed : static_cast<float>(speed) / 32.0f;
     play.flipped = a.flipFromTemp ? thread_.temps[3] != 0 : a.flipped;
     play.blendsOut = (in.operands[2] & 0x40) == 0;
@@ -358,21 +381,21 @@ std::string Execution::objectAnimationText(std::uint32_t owner, const SimObject*
 //              the object that plays it (see tellAnimateSimEvents)
 //   byte 6, 7-8  the object that plays it (owner, data)
 //   byte 10    more flags: 0x01 flipped if temp 3, 0x02 the entry is for the Sim in temp 5 (see
-//              objectAnimationText), 0x20 the lists are the running tree's code, not the object's
+//              objectAnimationText), 0x04 start it where my last Animate Sim clip ends, 0x08 where
+//              that one began fading out (each when within 140 ms of now), 0x20 the lists are the
+//              running tree's code, not the object's
 // It plays once, or temp 1 times (-1: until Animate Stop, 0 or below -1 is an error), carries on at
-// once and leaves the last pose. A missing clip plays nothing. Sims and other byte 10 flags show
-// nothing yet (AN-23).
+// once and leaves the last pose. A missing clip plays nothing. Byte 10 flags 0x40 and 0x80 change
+// how the clip plays (not known yet), and it plays as without them. A Sim shows nothing yet (AN-23).
 bool Execution::animateObject(const bhav::Instruction& in, Frame& f) {
-    constexpr std::uint8_t kFlipFromTemp3 = 0x01, kForSimInTemp5 = 0x02, kRefresh = 0x10, kRunningTreeCode = 0x20,
-                           kPlaysFromTemp1 = 0x20;
-    constexpr std::uint8_t kKnownFlags = kFlipFromTemp3 | kForSimInTemp5 | kRefresh | kRunningTreeCode;
+    constexpr std::uint8_t kFlipFromTemp3 = 0x01, kForSimInTemp5 = 0x02, kRunningTreeCode = 0x20, kPlaysFromTemp1 = 0x20;
     const auto& o = in.operands;
     const std::int16_t targetId = read(o[6], static_cast<std::uint16_t>(o[7] | o[8] << 8), f);
     SimObject* target = world().find(targetId);
     if (target == nullptr) {
         throw Stop{Outcome::Error, "could not find object reference", std::to_string(targetId)};
     }
-    if ((o[10] & ~kKnownFlags) != 0 || target->isPerson()) {
+    if (target->isPerson()) {
         return true;
     }
     const auto entry = static_cast<std::uint16_t>(o[0] | o[1] << 8);
@@ -408,7 +431,7 @@ bool Execution::animateObject(const bhav::Instruction& in, Frame& f) {
     const auto speed = (o[2] & 0x02) ? thread_.temps[2] : static_cast<std::int8_t>(o[3]);
     PlayingAnimation play;
     play.name = name;
-    play.startMs = world().eventClockMs();
+    play.startMs = keptStart(me(), (o[10] & 0x04) != 0, (o[10] & 0x08) != 0, world().clockMs(), world().eventClockMs());
     play.speed = static_cast<float>(speed) / 32.0f;
     play.flipped = (o[10] & kFlipFromTemp3) ? thread_.temps[3] != 0 : (o[2] & 0x01) != 0;
     play.loops = plays != 1;
@@ -435,8 +458,13 @@ bool Execution::animateObject(const bhav::Instruction& in, Frame& f) {
     // Object clip of the game's saves has it.
     play.category = entryCategory(name, content::animationCategory(text));
     play.tellsEnd = true;
-    // The clip it replaces plays on under it until it ends or the new one crossfades it.
-    if (target->animation) {
+    // The clip it replaces plays on under it until it ends or the new one crossfades it. The game
+    // keeps each clip until it ends, so when the one replaced has already ended (a pose of no length),
+    // an earlier clip still playing stays under the new one: a skill meter's level-up flip turns all
+    // the way round under the fill poses that follow it.
+    const bool keepEarlier = target->animation && target->animation->finished(play.startMs) && target->ending &&
+                             std::isfinite(target->ending->lengthMs) && !target->ending->finished(play.startMs);
+    if (target->animation && !keepEarlier) {
         target->ending = std::move(target->animation);
     }
     target->animation = std::move(play);
@@ -548,16 +576,18 @@ bool Execution::animateStop(const bhav::Instruction& in, Frame& f) {
 // Reach/Put (Sims only). Operands:
 //   byte 3, 4-5  the object (owner, data): what to grab, or a put's target
 //   byte 6       a put's target slot, or with flag bit 0 my temp 0
-//   byte 9       flags: bit 0 see above, bit 1 the hand from temp 3 (non-zero: hand 1), bit 0x10
-//                the object's clip is "o-generic-resetToZero-pose" instead of bytes 13-14
+//   byte 9       flags: bit 0 see above, bit 1 the hand from temp 3 (non-zero: hand 1), bit 0x08
+//                the reach clip's entry from byte 15, bit 0x10 the object's clip is
+//                "o-generic-resetToZero-pose" instead of bytes 13-14
 //   byte 10      0 grab into my hand, 1 put what I hold into the target's slot, 2 put it on the floor
 //   bytes 13-14  the entry of the moved object's animation list (0x86) it plays as it changes hands
+//   byte 15      with byte 9 bit 0x08, the reach clip's entry (a chess move's corner of the board)
 // Grabbing what that hand holds is true at once, putting with an empty hand false. Otherwise I play
 // STR# 0x92's clip for the height (floor, coffee table, table, counter), reach (over 0.8 tiles) and
 // grab or put, the object changes hands at event 0 (see runHandOffTrees), and it is true when the
-// clip ends. Bytes 11-12 name the grasp and carry poses laid over it (see playReachStages).
-// Not yet: byte 9 bit 0x04 (where the object's clip is looked up first) and a floor put's placement
-// test (PR-29).
+// clip ends. Bytes 11-12 name the grasp and carry poses laid over it (see playReachStages). Not yet:
+// byte 9 bit 0x04, which changes where the moved object's clip is looked up, and a floor put's
+// placement test (PR-29).
 Execution::ReachStep Execution::reachPut(const bhav::Instruction& in, Frame& f) {
     constexpr std::size_t kContainerField = 2, kSlotField = 3;
     constexpr std::uint8_t kReachList = 0x92;
@@ -613,7 +643,6 @@ Execution::ReachStep Execution::reachPut(const bhav::Instruction& in, Frame& f) 
     // to is not known yet, so it is measured to my own place.
     const HeldPlace mine = heldPlace(world(), code_, sim);
     HeldPlace there = mine;
-    std::uint32_t clipGroup = kGlobalGroup;
     if (mode == Reaching::Mode::Grab) {
         if (target->data[kContainerField] == sim.id && target->data[kSlotField] == hand) {
             return ReachStep{ReachStep::Kind::Done, true};
@@ -622,7 +651,6 @@ Execution::ReachStep Execution::reachPut(const bhav::Instruction& in, Frame& f) 
         reach.slot = hand;
         reach.source = std::max<std::int16_t>(target->data[kContainerField], 0);
         there = heldPlace(world(), code_, *target);
-        clipGroup = target->group;
     } else {
         reach.object = sim.slots[static_cast<std::size_t>(hand)];
         if (reach.object == 0 || world().find(reach.object) == nullptr) {
@@ -635,15 +663,26 @@ Execution::ReachStep Execution::reachPut(const bhav::Instruction& in, Frame& f) 
                 throw Stop{Outcome::Error, "bad slot number", std::to_string(reach.slot)};
             }
             there = slotPlace(world(), code_, *target, reach.slot);
-            clipGroup = target->group;
         }
     }
     const float height = there.height - mine.height;
     const float distance = std::hypot(static_cast<float>(there.x - mine.x) / 65536.0f, static_cast<float>(there.y - mine.y) / 65536.0f);
     const int band = height < 0.4f ? 0 : height < 0.7f ? 1 : height < 0.9f ? 2 : 3;
-    const auto entry = static_cast<std::uint16_t>(band + (distance > kFarReach ? 4 : 0) + (mode != Reaching::Mode::Grab ? 8 : 0));
+    constexpr std::uint8_t kEntryFlag = 0x08;
+    const auto entry = (flags & kEntryFlag) ? static_cast<std::uint16_t>(o[15])
+                                            : static_cast<std::uint16_t>(band + (distance > kFarReach ? 4 : 0) + (mode != Reaching::Mode::Grab ? 8 : 0));
+    // The reach clip comes from the container's code, its semi-global code, then the global list: a
+    // chessboard holds the moves of its pieces. A floor put has no container. The moved object's own
+    // list (a book's a2o-table-book-get, which has no event 0) is never used.
+    const SimObject* container = mode == Reaching::Mode::Put ? target
+                                 : mode == Reaching::Mode::Grab && target->data[kContainerField] > 0 ? world().find(target->data[kContainerField])
+                                                                                                    : nullptr;
+    const std::uint32_t containerGroup = container != nullptr ? container->group : 0;
     std::optional<std::string> clip;
-    for (const auto group : {clipGroup, code_.semiGlobalGroup(clipGroup), kGlobalGroup}) {
+    for (const auto group : {containerGroup, containerGroup != 0 ? code_.semiGlobalGroup(containerGroup) : 0u, kGlobalGroup}) {
+        if (group == 0) {
+            continue;
+        }
         if (const auto text = code_.string(group, kReachList, entry); text && !text->empty()) {
             clip = content::animationName(*text);
             break;
@@ -704,6 +743,7 @@ Execution::ReachStep Execution::reachPut(const bhav::Instruction& in, Frame& f) 
     }
     play.ikObject = ik;
     sim.animation = std::move(play);
+    sim.keptTimes.reset();
     sim.reaching = reach;
     const SimObject* named = mode == Reaching::Mode::Grab ? target : world().find(reach.object);
     if (named != nullptr) {

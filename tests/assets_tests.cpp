@@ -142,6 +142,28 @@ void aPartSetDrawsAGroupItsShapeLeavesOut() {
     std::filesystem::remove_all(root);
 }
 
+// A group whose shape gives it a Null "_null" material is left out of the model, as a skill meter's
+// tube is until its script sets the skill's materials. The same model given a material for that
+// group, as a lot object drawn again with its script's materials is, builds it.
+void aNullGroupIsBuiltWithAScriptMaterial() {
+    auto resources = testres::squareModel("meter");
+    for (auto& r : resources) {
+        if (r.key.type == testres::kShpe) {
+            r.data = testres::shape("meter_shpe", "meter_tslocator_gmnd", "square", "meter_null");
+        }
+    }
+    resources.push_back({testres::keyOf(testres::kTxmt, "meter_null_txmt"), testres::material("meter_null_txmt", "Null", {})});
+    const auto root = testres::gameFolder("neots2-null-group-test", resources);
+    {
+        ts2::scene::Assets assets(root);
+        ts2::scene::SceneBuilder builder(assets);
+        const auto primitives = [&](int mesh) { return mesh < 0 ? std::size_t{0} : builder.scene().meshes[static_cast<std::size_t>(mesh)].primitives.size(); };
+        CHECK(primitives(builder.model("meter", {})) == 0);
+        CHECK(primitives(builder.model("meter", {{"meter_material", "square"}})) == 1);
+    }
+    std::filesystem::remove_all(root);
+}
+
 // No hair's strands are typed SimHair in the files. The game draws a hair part's SimStandardMaterial
 // as SimHair: before other blended surfaces, writing depth. Its SimSkin scalp stays as it is.
 void aHairPartDrawsItsStrandsAsSimHair() {
@@ -1351,6 +1373,7 @@ std::vector<Test> assetTests() {
         {"terrain keeps its detail texture", terrainKeepsItsDetailTexture},
         {"a model is found at its key", aModelIsFoundAtItsKey},
         {"a part set draws a group its shape leaves out", aPartSetDrawsAGroupItsShapeLeavesOut},
+        {"a null group is built with a script material", aNullGroupIsBuiltWithAScriptMaterial},
         {"a hair part draws its strands as SimHair", aHairPartDrawsItsStrandsAsSimHair},
         {"character files find their session group names", characterFilesFindTheirSessionGroupNames},
         {"plant skin lies between skin and clothes", plantSkinLiesBetweenSkinAndClothes},

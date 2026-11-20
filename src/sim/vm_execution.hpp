@@ -742,6 +742,7 @@ public:
     std::string expandTokens(std::string text, Frame& f, TokenPicture& picture);
     std::optional<std::string> expandToken(std::string_view token, int a, int b, Frame& f, TokenPicture& picture);
     std::string catalogName(std::uint32_t guid);
+    std::string objectName(const SimObject& object);
     std::optional<std::array<std::string, 2>> neighborNames(std::int16_t id);
     std::optional<bool> cameraControl(const bhav::Instruction& in, Frame& f);
     static void setMaterial(SimObject& object, MaterialChange change);

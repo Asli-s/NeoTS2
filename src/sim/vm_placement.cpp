@@ -334,13 +334,14 @@ bool Execution::snapInto(const bhav::Instruction& in, Frame& f) {
     return true;
 }
 
-// As the game takes an object out of the world, it also clears object data 0x08 bits 0x20 and 0x100
-// (what they mean is not known yet), sets its use count (object data 0x3E) to 0 and its room
-// (object data 0x1D) to -1. At Work waits for that room before it marks a Sim as at work.
+// As the game takes an object out of the world, it also clears object data 0x08 bit 0x100 (what it
+// means is not known yet). Off the lot the object is in no room (object data 0x1D -1), as saved
+// out-of-world objects are. At Work waits for that room before it marks a Sim as at work. The use
+// count (object data 0x3E) stays: a book put away waits for it to fall to 0, when the Sim reading
+// it has finished, before it deletes itself.
 void Execution::takeOutOfWorld(SimObject& object) {
     takeOutOfSlot(object);
-    object.data[8] &= static_cast<std::int16_t>(~0x120);
-    object.data[0x3E] = 0;
+    object.data[8] &= static_cast<std::int16_t>(~0x100);
     object.data[0x1D] = -1;
     object.x = kOffLot;
     object.y = kOffLot;

@@ -15,6 +15,7 @@
 #include "sim/clock.hpp"
 #include "sim/family_picture.hpp"
 #include "content/ui_meters.hpp"
+#include "formats/cobject_record.hpp"
 #include "formats/tga.hpp"
 #include "sim/lot_simulation.hpp"
 #include "sim/newborn_save.hpp"
@@ -228,6 +229,11 @@ public:
     double seconds() const { return drawnMs() / 1000.0; }
 
     ts2::sim::LotSimulation& simulation() { return *sim_; }
+    // An object's model morphs with the weights they are drawn at in `pose`, in the order the game's
+    // scene record lists them, for a save. None for an object not drawn skinned (its weights are as
+    // the lot loaded them).
+    std::optional<std::vector<ts2::cobject::NamedWeight>> drawnMorphs(const ts2::scene::Scene& scene, const ts2::scene::ScenePose& pose,
+                                                                      std::int16_t object);
     // The character files a save into neighborhood folder `hoodFolder` writes for the Sims born or
     // made this run. A made Sim's file holds the look it is drawn in.
     ts2::sim::NewCharacterFiles newCharacterFiles(const std::filesystem::path& hoodFolder) {
@@ -297,8 +303,8 @@ public:
     // The appearance editor's OK on the hair page: the Sim takes the hair colour and its outfits the
     // slots' hairs (see ts2::scene::wearHairs), and it wears its outfit again at once.
     void wearAppearanceHairs(std::int16_t simId, const ts2::scene::HairSlots& slots, const std::string& tone);
-    // The character files whose Sims' looks the appearance editor changed this run, with each
-    // Sim's look as it is now, for a save to write.
+    // The character files whose Sims aged or had their looks changed in the appearance editor this
+    // run, with each Sim's look as it is now, for a save to write.
     std::vector<std::pair<std::filesystem::path, ts2::sim::OutfitLook>> changedLooks();
     // Puts the Sim a hair's picture is drawn on (see hairPictureLook) into `scene`, standing at the
     // origin in its picture pose, out of the lot's actors. Its instances are new or reused ones that
@@ -444,9 +450,11 @@ private:
         // Keeps where the Sim stands now as the start place of each of its clips that has none yet (its
         // own animation unless it walks, and its overlays), and forgets the clips no longer drawn. A
         // clip started in a slot hangs from the slot's bone as it is now (`hung`), so a driver whose
-        // clip starts as the car drives in stays in the seat.
+        // clip starts as the car drives in stays in the seat. One started as the Sim snaps into a
+        // carrier's slot (`snapped`, the bone not posed with it yet) plays right at that bone, as the
+        // game hangs a carried Sim. A newborn's clips start while the birth turns that bone fast.
         void noteStarts(const ts2::sim::SimObject& object, const ts2::scene::Transform& place, bool walks,
-                        const std::optional<ts2::scene::Transform>& hung, std::pair<std::int16_t, std::int16_t> holderSlot);
+                        const std::optional<ts2::scene::Transform>& hung, bool snapped, std::pair<std::int16_t, std::int16_t> holderSlot);
         // Where and on which storey its lights were last picked.
         std::array<float, 12> litPlace{};
         int litLevel = -1;
@@ -507,6 +515,10 @@ private:
     // The model scripts had given each created object when it was drawn (see SimObject::model). An
     // object a script gives another model is drawn again, a lot object too.
     std::map<std::int16_t, std::string> drawnModels_;
+    // Each object's material version when its drawn groups were last checked against what its
+    // scripts show, and the objects to draw again for a group their model left out (see addCreatedObjects).
+    std::map<std::int16_t, std::uint32_t> groupsCheckedAt_;
+    std::set<std::int16_t> regroup_;
     std::map<std::int16_t, std::size_t> created_;  // created objects in the scene: id -> instance
     std::vector<std::size_t> freeInstances_;       // instances of removed created objects, for reuse
     std::vector<std::size_t> freeSimInstances_;    // instances of removed Sims, for the next Sim drawn
@@ -519,7 +531,7 @@ private:
     // The age data of Sims that aged on this lot or had an outfit written into it, by neighbor id. Their
     // character files don't hold it yet.
     std::map<std::int16_t, ts2::scene::AgeData> agedData_;
-    std::set<std::int16_t> looksChanged_;  // neighbors whose look the appearance editor changed
+    std::set<std::int16_t> looksChanged_;  // neighbors that aged or whose look the appearance editor changed
     // Each Sim's working copy of its age data, which it is dressed from, by neighbor id (see buildOutfit).
     std::map<std::int16_t, ts2::scene::AgeData> outfitData_;
     bool loadedSimsDressed_ = false;

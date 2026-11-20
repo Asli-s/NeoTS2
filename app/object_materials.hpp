@@ -14,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -46,6 +47,15 @@ public:
                           const std::string& animation, ts2::scene::Scene& scene, std::vector<std::size_t>& reuse);
     // The rig of an object's model, at rest as the lot saved its joints. Empty when the model has none.
     std::shared_ptr<const ts2::scene::Rig> objectRig(const std::string& model, const std::vector<ts2::cobject::SavedJoint>& saved);
+    // A model's morphs as its scene record lists their weights (see SceneBuilder::savedMorphNames),
+    // read once per model.
+    const std::vector<ts2::scenegraph::Mesh::Morph>& savedMorphNames(const std::string& model) {
+        auto [found, added] = morphNames_.try_emplace(ts2::scene::lower(model));
+        if (added) {
+            found->second = builder_.savedMorphNames(model);
+        }
+        return found->second;
+    }
     // Where a named node of a model sits in it, once model() has added it. Null for none.
     const ts2::scene::Transform* bone(const std::string& model, const std::string& node) const { return builder_.bone(model, node); }
 
@@ -97,6 +107,7 @@ private:
 
     ts2::scene::Assets& assets_;
     ts2::scene::SceneBuilder builder_;
+    std::unordered_map<std::string, std::vector<ts2::scenegraph::Mesh::Morph>> morphNames_;  // by lowercase model
     ts2::scene::RigLibrary simRigs_;
     std::map<int, int> simMeshes_;                   // builder mesh -> scene mesh, for Sims
     std::vector<std::uint32_t> versions_;            // by object id, the materialVersion shown

@@ -90,6 +90,10 @@ public:
     // with different edits are kept apart by the edit's key.
     int skinnedModel(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides,
                      const MeshEdit* edit = nullptr, const scenegraph::Link* at = nullptr, bool hair = false);
+    // The morphs a model's meshes list as its scene record keeps their weights: each mesh's morphs in
+    // turn, each pair once, an empty pair for no morph included. Empty for a model with none or one
+    // that can't be read.
+    std::vector<scenegraph::Mesh::Morph> savedMorphNames(const std::string& name);
     // A model's shape with where it sits in the model, the joint it follows (its own node when named,
     // else the nearest named one above, empty for none) and where it sits from that joint.
     struct ModelShape {

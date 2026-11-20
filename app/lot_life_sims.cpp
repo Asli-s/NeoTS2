@@ -316,6 +316,8 @@ std::optional<std::set<std::uint32_t>> LotLife::buildAgeData(const ts2::sim::Sim
             }
         }
         agedData_[neighbor] = std::move(*made);
+        // The new age data reaches the character file when the lot is saved, as the game's does.
+        looksChanged_.insert(neighbor);
         // The working copy is dropped, as Age drops it, and made again from the new age data.
         outfitData_.erase(neighbor);
         return filled;

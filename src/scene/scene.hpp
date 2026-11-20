@@ -102,6 +102,9 @@ struct Material {
     // A Sim's hair in blend mode: blended, but it writes depth and drops alpha of 60 out of 255 and
     // below, as the game's hair state does. Strands drawn first hide the ones behind them.
     bool blendedHair = false;
+    // Takes the colour and alpha of the particle drawing it, as the game's particle model material
+    // does (a neighborhood plumbob). Other materials keep their own when an effect draws them.
+    bool takesParticleColour = false;
     bool doubleSided = false;
     bool alphaReplicate = false;  // the texture's alpha stands in for its colour (stdMatBaseTextureAlphaReplicate)
     // A texture of `tiles` frames side by side, shown one at a time, `tileSpeed` frames a second on
@@ -570,6 +573,9 @@ struct Actor {
     std::function<float(int storey, float x, float y)> floorHeight;
     // The rig node each of its container slots sits at (-1: its own place), a Sim's or a lot object's.
     std::vector<int> slotNodes;
+    // The morph weights its skinned meshes start with, by name, until a clip weighs them (an object
+    // loaded with an eaten cake slice's weights). Each mesh starts from these once.
+    std::vector<cobject::SavedBlend> startMorphs;
     // A Sim another Sim carries, or one in a slot of a lot object drawn by its clips (a car's seat):
     // that Sim or object (its object id, 0 for none) and the container slot it is in. It hangs at
     // that slot's bone as the carrier is posed, the way a held object does (see poseActors).
@@ -596,6 +602,8 @@ struct PlacedObject {
     // with it. The game sets these again when it gives the object a new model.
     std::vector<scenegraph::MaterialOverride> chosen;
     std::vector<cobject::SavedJoint> savedJoints;
+    // Its model's morphs with the weights the lot saved them at (an eaten cake slice).
+    std::vector<cobject::SavedBlend> savedBlends;
     // The joint its whole drawn model moves with when it plays a clip, empty for none, and where that
     // joint sits in the model as drawn.
     std::string followJoint;

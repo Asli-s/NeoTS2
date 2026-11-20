@@ -612,8 +612,9 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
     // Each posed instance's morph weights as its clips give them now, from what they last were. An
     // instance no longer posed gives up its weights.
     std::unordered_map<std::size_t, std::vector<float>> morphs;
+    std::unordered_map<std::size_t, int> morphMeshes;
     std::unordered_map<std::size_t, std::array<float, 4>> eyes;
-    const auto weighMorphs = [&](std::size_t instance, const Mesh& mesh) {
+    const auto weighMorphs = [&](std::size_t instance, const Mesh& mesh, std::span<const cobject::SavedBlend> start) {
         if (std::any_of(mesh.primitives.begin(), mesh.primitives.end(), [](const Primitive& p) { return !p.eyeUvs.empty(); })) {
             auto& values = eyes.try_emplace(instance).first->second;
             if (const auto was = out.eyes.find(instance); was != out.eyes.end()) {
@@ -625,10 +626,36 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
             return;
         }
         auto& weights = morphs[instance];
+        const int meshIndex = scene.instances[instance].mesh;
+        morphMeshes[instance] = meshIndex;
         if (const auto was = out.morphs.find(instance); was != out.morphs.end()) {
-            weights = std::move(was->second);
+            const auto from = out.morphMeshes.find(instance);
+            const int fromMesh = from != out.morphMeshes.end() ? from->second : meshIndex;
+            if (fromMesh == meshIndex) {
+                weights = std::move(was->second);
+            } else if (fromMesh >= 0 && static_cast<std::size_t>(fromMesh) < scene.meshes.size()) {
+                const auto& before = scene.meshes[static_cast<std::size_t>(fromMesh)].morphs;
+                weights.assign(mesh.morphs.size(), 0.0f);
+                for (std::size_t m = 0; m < mesh.morphs.size(); ++m) {
+                    for (std::size_t k = 0; k < before.size() && k < was->second.size(); ++k) {
+                        if (before[k] == mesh.morphs[m]) {
+                            weights[m] = was->second[k];
+                        }
+                    }
+                }
+            }
+        } else if (!start.empty()) {
+            // First drawn: the weights it starts with, by name.
+            weights.assign(mesh.morphs.size(), 0.0f);
+            for (std::size_t m = 0; m < mesh.morphs.size(); ++m) {
+                for (const auto& b : start) {
+                    if (std::isfinite(b.weight) && lower(b.group) == mesh.morphs[m].group && lower(b.name) == mesh.morphs[m].name) {
+                        weights[m] = b.weight;
+                    }
+                }
+            }
         }
-        mixMorphWeights(mesh, clips, weights, &out.morphBindings, scene.instances[instance].mesh);
+        mixMorphWeights(mesh, clips, weights, &out.morphBindings, meshIndex);
     };
     // A Sim's bones as last posed: this call's pose for a Sim posed before the one asking, else the
     // last call's, each at the place it was posed at. A lot object's bones as this call posed them, as
@@ -745,7 +772,7 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
             }
             auto& joints = jointsFor(s.instance);
             skinMatrices(scene.meshes[static_cast<std::size_t>(mesh)], s.nodes, *actor.rig, playing, world, joints, true);
-            weighMorphs(s.instance, scene.meshes[static_cast<std::size_t>(mesh)]);
+            weighMorphs(s.instance, scene.meshes[static_cast<std::size_t>(mesh)], actor.startMorphs);
             // One a Sim holds is placed at the Sim's hand below.
             if (!isInHand(s.instance)) {
                 out.places.emplace_back(s.instance, actor.place);
@@ -850,7 +877,7 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
             }
             auto& joints = jointsFor(s.instance);
             skinMatrices(scene.meshes[static_cast<std::size_t>(mesh)], s.nodes, *actor.rig, playing, world, joints);
-            weighMorphs(s.instance, scene.meshes[static_cast<std::size_t>(mesh)]);
+            weighMorphs(s.instance, scene.meshes[static_cast<std::size_t>(mesh)], actor.startMorphs);
             // The body goes where the actor stands now (it walks).
             out.places.emplace_back(s.instance, place);
         }
@@ -919,9 +946,17 @@ void poseActors(const Scene& scene, double seconds, ScenePose& out) {
     out.held = std::move(held);
     out.frozen = std::move(frozen);
     out.morphs = std::move(morphs);
+    out.morphMeshes = std::move(morphMeshes);
     out.eyes = std::move(eyes);
     out.carried = std::move(carried);
     out.drawnAt = std::move(drawnAt);
+    std::erase_if(out.objectNodes, [&](const auto& kept) {
+        return std::none_of(objectNodes.begin(), objectNodes.begin() + static_cast<std::ptrdiff_t>(objectsPosed),
+                            [&](const auto& n) { return n.first->object == kept.first; });
+    });
+    for (std::size_t i = 0; i < objectsPosed; ++i) {
+        out.objectNodes[objectNodes[i].first->object].assign(objectNodes[i].second.begin(), objectNodes[i].second.end());
+    }
 }
 
 } // namespace ts2::scene

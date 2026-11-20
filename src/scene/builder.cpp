@@ -569,6 +569,7 @@ void SceneBuilder::readMaps(const sg::Material& m, bool deprecated, Material& ou
     // A model drawn by an effect (a plumbob): its material script lights it as the standard material
     // does, with its emissive, its specular and a pass adding its environment cube.
     const bool particleModel = m.type == "StandardParticleModelMaterial";
+    out.takesParticleColour = particleModel;
     const auto bumpMap = [&] {
         const std::string bump = property(m, "stdMatNormalMapTextureName");
         return normalMap(bump.empty() ? "reggrid-bump" : bump);
@@ -1600,6 +1601,28 @@ std::optional<SceneBuilder::ModelShapes> SceneBuilder::readModelShapes(const std
         return std::nullopt;
     }
     return model;
+}
+
+std::vector<sg::Mesh::Morph> SceneBuilder::savedMorphNames(const std::string& name) {
+    std::vector<sg::Mesh::Morph> out;
+    std::string boneKey;
+    const auto model = readModelShapes(name, nullptr, boneKey, nullptr);
+    if (!model) {
+        return out;
+    }
+    for (const auto& placed : model->shapes) {
+        const sg::Shape& shape = placed.shape;
+        for (std::size_t item = 0; item < shape.geometryNodes.size(); ++item) {
+            if (const auto data = readShapeMesh(shape, item, name, nullptr)) {
+                for (const auto& m : data->morphs) {
+                    if (std::none_of(out.begin(), out.end(), [&](const sg::Mesh::Morph& o) { return o.group == m.group && o.name == m.name; })) {
+                        out.push_back(m);
+                    }
+                }
+            }
+        }
+    }
+    return out;
 }
 
 // The mesh of a shape's geometry node `item`, with `edit` applied. None when it is missing or can't

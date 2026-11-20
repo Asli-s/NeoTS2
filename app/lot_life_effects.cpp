@@ -145,9 +145,20 @@ ts2::scene::ObjectEffects::Where LotLife::effectPlace(const ts2::scene::Scene& s
         if (placed == scene.placedObjects.end() || placed->instance >= scene.instances.size()) {
             return where;
         }
-        const ts2::scene::Transform place = drawn != pose.drawnAt.end() ? drawn->second : scene.instances[placed->instance].transform;
+        // Where the object is drawn: a held one where the frame's pose hangs it, else at its instance's place.
+        const auto posedAt = std::find_if(pose.places.begin(), pose.places.end(), [&](const auto& p) { return p.first == placed->instance; });
+        const ts2::scene::Transform place = drawn != pose.drawnAt.end() ? drawn->second
+                                            : posedAt != pose.places.end() ? posedAt->second
+                                                                           : scene.instances[placed->instance].transform;
+        const auto actor = std::find_if(scene.objectActors.begin(), scene.objectActors.end(),
+                                        [&](const ts2::scene::Actor& a) { return a.object == static_cast<std::uint32_t>(id) && a.rig; });
+        const auto posed = pose.objectNodes.find(static_cast<std::uint32_t>(id));
+        const int posedNode = !onNode && actor != scene.objectActors.end() && posed != pose.objectNodes.end() ? actor->rig->find(joint) : -1;
         if (onNode) {
             found = place;
+        } else if (posedNode >= 0 && static_cast<std::size_t>(posedNode) < posed->second.size()) {
+            // The bone as its clip poses it now, where the object is drawn.
+            found = (drawn != pose.drawnAt.end() ? drawn->second : actor->place) * posed->second[static_cast<std::size_t>(posedNode)];
         } else if (const auto moved = std::find_if(placed->bones.begin(), placed->bones.end(), [&](const auto& b) { return b.first == ts2::hash::crc32(joint); });
                    moved != placed->bones.end()) {
             found = moved->second;
