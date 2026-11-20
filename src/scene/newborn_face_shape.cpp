@@ -977,7 +977,7 @@ std::optional<FaceMaterialParts> newbornFaceMaterialParts(Assets& assets, std::u
             }
             const auto subtype = number(p, "subtype");
             const bool hairFits = noGuid(textOf(p, "hairtone")) || sameGuid(textOf(p, "hairtone"), hairTone);
-            const auto texture = [&] { return FaceOverlayTexture{baseTextureOf(partMaterial(assets, key, p)), number(p, "layer")}; };
+            const auto texture = [&] { return FaceOverlayTexture{baseTextureOf(partMaterial(assets, key, p)), static_cast<std::uint32_t>(number(p, "layer"))}; };
             if (subtype == kEyeOverlay && out.eye.texture.empty() && sameGuid(textOf(p, "family"), eyeColour)) {
                 out.eye = texture();
             } else if (subtype == kEyebrowOverlay && out.brow.texture.empty() && sameGuid(textOf(p, "family"), browFamily) && hairFits) {

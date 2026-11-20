@@ -945,7 +945,7 @@ std::string standingPose(Assets& assets, std::uint32_t age, std::uint32_t specie
                       : age == kElderAge     ? "e-pose-neutral-stand"
                       : age == kBabyAge      ? ""
                                              : "a-pose-neutral-stand";
-    for (const std::string name : {std::string(own), std::string("a-pose-neutral-stand")}) {
+    for (const std::string& name : {std::string(own), std::string("a-pose-neutral-stand")}) {
         if (age != kBabyAge && !name.empty() && assets.byName(anim::kType, name + "_anim")) {
             return name;
         }
