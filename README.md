@@ -28,8 +28,7 @@ NeoTS2 is in early development and is not yet a complete engine. Currently worki
 - Live mode camera, panels, needs and wants
 - Sims on their lots (behavior is still early and buggy)
 - Custom content from the Downloads folder
-
-Saving is not supported yet.
+- Saving the lot and the neighborhood (back up your saves first)
 
 | Main menu | Neighborhood |
 | :---: | :---: |
@@ -51,8 +50,9 @@ The macOS and Linux builds are new and have had little testing. Bug reports are 
 NeoTS2 is not code-signed yet. On Windows, click **More info** and then **Run anyway**. On macOS,
 Control-click the app and choose **Open**.
 
-NeoTS2 does not modify save folders that already contain files. It only sets up new or empty
-folders, and asks before adding the default neighborhoods.
+The launcher does not change save folders that already contain files. It only sets up new or
+empty folders, and asks before adding the default neighborhoods. Saving in the game writes to the
+save folder you chose.
 
 ## Crash reports
 
