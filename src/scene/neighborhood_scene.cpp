@@ -298,6 +298,13 @@ NeighborhoodSceneStats addNeighborhood(SceneBuilder& builder, const std::filesys
         if (lot.type == kApartmentLot) {
             stats.lotFootprints.back().building = lot.building;
         }
+        constexpr std::uint8_t kApartmentBuilding = 8;
+        if (lot.type == kApartmentBuilding) {
+            auto& apartments = stats.lotFootprints.back().apartments.emplace();
+            for (const auto& tenant : lot.tenants) {
+                apartments.push_back(tenant.lot);
+            }
+        }
         // An apartment's own lot (description flag 0x10) shows no imposter: its building's stands there.
         constexpr std::uint32_t kApartmentFlag = 0x10;
         const auto file = neighborhood / "Lots" / (hood + "_Lot" + std::to_string(lot.id) + ".package");

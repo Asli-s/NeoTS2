@@ -14,8 +14,9 @@ namespace ts2::scene {
 
 // The plumbobs the game shows over lots in the neighborhood view: one visual effect per lot (the
 // green plumbob over a lived-in house), whose metaparticle plays a bundle of particle systems (the
-// spinning shape, its glows and shines). Only what those bundles use is played: systems that keep
-// one particle alive or emit one at a time, with a fixed life and spawn point. Others are left out.
+// spinning shape, its glows and shines), some of them in an effect inside the bundle. Only what
+// those bundles use is played: systems that keep one particle alive or emit one at a time, with a
+// fixed life and spawn point. Others are left out.
 
 // The name the plumbobs' instances are placed under.
 inline constexpr const char* kNeighborhoodPlumbobName = "neighborhood plumbob";
@@ -40,6 +41,9 @@ private:
         std::size_t block = 0;      // in blocks_
         std::array<float, 3> at{};  // where its particle is
         float scale = 1;            // the metaparticle's size
+        // Added to `at` in a frame turned to the camera (towards it, its right, its up), for a part of an
+        // effect inside the bundle that faces the camera.
+        std::array<float, 3> facing{};
     };
     std::vector<effects::ParticleBlock> blocks_;
     std::vector<Part> parts_;

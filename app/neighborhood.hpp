@@ -58,8 +58,10 @@ ts2::scene::NeighborhoodSceneStats buildNeighborhood(ts2::scene::SceneBuilder& b
 // at night, from how the light map lights flat ground (see scene::PaintedTerrain::seaLight).
 float seaLight(const NeighborhoodTimes& times);
 
-// Adds the green plumbob the game shows over each lot a household lives on (the effect
-// fxNeighborhoodPlumbob) to `plumbobs`. Lots without an imposter get none.
+// Adds to `plumbobs` the effect the game shows over each lot a household lives on: the green
+// plumbob (fxNeighborhoodPlumbob), or EP3_NhoodPlumbobNoGlow while the household is away. An
+// apartment building shows EP8_NhoodApartment while a family is at home in it, else
+// EP8_NhoodApartmentNoGlow. Lots without an imposter get none.
 void addPlumbobs(ts2::scene::SceneBuilder& builder, ts2::content::EffectsFiles& effects, const std::filesystem::path& folder,
                  const ts2::scene::NeighborhoodSceneStats& stats, ts2::scene::NeighborhoodPlumbobs& plumbobs);
 

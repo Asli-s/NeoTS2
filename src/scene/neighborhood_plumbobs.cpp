@@ -67,7 +67,8 @@ int quadMesh(SceneBuilder& builder, int material) {
 }
 
 // A shape's mesh with its materials times the particle's colour and alpha, as the particle model
-// material's colour scalar does (taken at the start of its life, the plumbob's never change).
+// material's colour scalar does (taken at the start of its life, the plumbob's never change). Other
+// materials, as the apartment icon's, draw as they are.
 int tinted(SceneBuilder& builder, int mesh, const effects::ParticleBlock& b) {
     auto& scene = builder.scene();
     if (mesh < 0 || static_cast<std::size_t>(mesh) >= scene.meshes.size()) {
@@ -80,7 +81,8 @@ int tinted(SceneBuilder& builder, int mesh, const effects::ParticleBlock& b) {
     }
     Mesh copy = scene.meshes[static_cast<std::size_t>(mesh)];
     for (auto& p : copy.primitives) {
-        if (p.material < 0 || static_cast<std::size_t>(p.material) >= scene.materials.size()) {
+        if (p.material < 0 || static_cast<std::size_t>(p.material) >= scene.materials.size() ||
+            !scene.materials[static_cast<std::size_t>(p.material)].takesParticleColour) {
             continue;
         }
         Material m = scene.materials[static_cast<std::size_t>(p.material)];
@@ -113,6 +115,7 @@ std::size_t NeighborhoodPlumbobs::add(SceneBuilder& builder, const effects::File
         int mesh = -1;
         std::array<float, 3> offset{};
         float scale = 1;
+        std::array<float, 3> facing{};
     };
     std::vector<System> systems;
     for (const auto& c : top->components) {
@@ -125,7 +128,39 @@ std::size_t NeighborhoodPlumbobs::add(SceneBuilder& builder, const effects::File
         if (bundle == nullptr || meta.spawnLow != meta.spawnHigh || !finite(meta.spawnLow) || !finite(meta.size)) {
             continue;
         }
+        // The bundle's particle systems, and those of the effects inside it (as the apartment icon's
+        // glows): an inner effect turned to the camera keeps its parts' offsets in that turned frame,
+        // scaled with it.
+        struct Source {
+            const effects::Component* part = nullptr;
+            std::array<float, 3> facing{};
+        };
+        std::vector<Source> sources;
         for (const auto& part : bundle->components) {
+            if (part.type != 0) {
+                sources.push_back({&part, {}});
+                continue;
+            }
+            const effects::VisualEffect* inner = file.find(part.name);
+            if (inner == nullptr) {
+                continue;
+            }
+            constexpr std::uint32_t kFacing = effects::VisualEffect::kViewRelative | effects::VisualEffect::kCameraFacing;
+            const bool facing = (inner->flags & kFacing) == kFacing;
+            const float scale = meta.size.at(0) * part.scale;
+            for (const auto& innerPart : inner->components) {
+                if (innerPart.type != static_cast<std::uint8_t>(effects::BlockType::Particles)) {
+                    continue;
+                }
+                if (!facing && innerPart.offset != std::array<float, 3>{}) {
+                    diag::warnOnce("neighborhood plumbobs: a part moved inside an effect that doesn't face the camera is left out of " + part.name);
+                    continue;
+                }
+                sources.push_back({&innerPart, {innerPart.offset[0] * scale, innerPart.offset[1] * scale, innerPart.offset[2] * scale}});
+            }
+        }
+        for (const auto& source : sources) {
+            const effects::Component& part = *source.part;
             if (part.type != static_cast<std::uint8_t>(effects::BlockType::Particles) || part.index < 0 ||
                 static_cast<std::size_t>(part.index) >= file.particles.size()) {
                 continue;
@@ -149,7 +184,7 @@ std::size_t NeighborhoodPlumbobs::add(SceneBuilder& builder, const effects::File
                 continue;
             }
             blocks_.push_back(b);
-            systems.push_back({blocks_.size() - 1, mesh, meta.spawnLow, meta.size.at(0)});
+            systems.push_back({blocks_.size() - 1, mesh, meta.spawnLow, meta.size.at(0), source.facing});
         }
     }
     auto& instances = builder.scene().instances;
@@ -162,7 +197,7 @@ std::size_t NeighborhoodPlumbobs::add(SceneBuilder& builder, const effects::File
                 // Shapes are lit as outdoor objects (the scene's object lighting), sprites aren't lit.
                 placed->litOutdoors = (blocks_[s.block].flags & effects::ParticleBlock::kModel) != 0;
                 placed->seaReflected = true;
-                parts_.push_back({instances.size() - 1, s.block, at, s.scale});
+                parts_.push_back({instances.size() - 1, s.block, at, s.scale, s.facing});
             }
         }
     }
@@ -174,6 +209,10 @@ void NeighborhoodPlumbobs::place(double seconds, const std::array<float, 3>& rig
     const std::array<float, 3> normal = cross(right, up);
     for (const auto& part : parts_) {
         const effects::ParticleBlock& b = blocks_[part.block];
+        std::array<float, 3> at = part.at;
+        for (std::size_t i = 0; i < 3; ++i) {
+            at[i] += part.facing[0] * normal[i] + part.facing[1] * right[i] + part.facing[2] * up[i];
+        }
         const float t = lifeShare(b, seconds);
         Transform place;
         if (t < 0) {
@@ -190,7 +229,7 @@ void NeighborhoodPlumbobs::place(double seconds, const std::array<float, 3>& rig
             const float length = std::sqrt(axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]);
             const float half = length > 0 ? turn / 2 : 0;
             const float k = length > 0 ? std::sin(half) / length : 0;
-            place = Transform::of(part.at, {axis[0] * k, axis[1] * k, axis[2] * k, std::cos(half)});
+            place = Transform::of(at, {axis[0] * k, axis[1] * k, axis[2] * k, std::cos(half)});
             for (int row = 0; row < 3; ++row) {
                 for (int column = 0; column < 3; ++column) {
                     place.m[static_cast<std::size_t>(row * 4 + column)] *= scale;
@@ -206,7 +245,7 @@ void NeighborhoodPlumbobs::place(double seconds, const std::array<float, 3>& rig
                 place.m[r * 4 + 0] = size * (c * aspect * right[r] + s * up[r]);
                 place.m[r * 4 + 1] = size * (-s * aspect * right[r] + c * up[r]);
                 place.m[r * 4 + 2] = normal[r];
-                place.m[r * 4 + 3] = part.at[r];
+                place.m[r * 4 + 3] = at[r];
             }
         }
         out.emplace_back(part.instance, place);

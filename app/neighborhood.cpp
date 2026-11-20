@@ -183,27 +183,73 @@ std::vector<std::uint32_t> livedInLots(const std::filesystem::path& folder) {
     return out;
 }
 
-void addPlumbobs(ts2::scene::SceneBuilder& builder, ts2::content::EffectsFiles& effects, const std::filesystem::path& folder,
-                 const ts2::scene::NeighborhoodSceneStats& stats, ts2::scene::NeighborhoodPlumbobs& plumbobs) {
-    constexpr const char* kPlumbob = "fxNeighborhoodPlumbob";
-    const auto lived = livedInLots(folder);
-    std::vector<std::array<float, 3>> anchors;
-    for (const auto& lot : stats.lotFootprints) {
-        if (lot.hasImposter && std::find(lived.begin(), lived.end(), lot.id) != lived.end()) {
-            anchors.push_back(lot.effectAnchor);
+namespace {
+
+// Each family's current lot by the lot it lives on, the first family for a lot as the game finds
+// it. A family away from home (on vacation) is on another lot.
+std::map<std::uint32_t, std::uint32_t> currentLotsByHome(const std::filesystem::path& folder) {
+    std::map<std::uint32_t, std::uint32_t> out;
+    try {
+        ts2::dbpf::Package package{ts2::content::neighborhoodPackage(folder)};
+        for (const auto& e : package.entries()) {
+            if (e.key.type == kFamilyType) {
+                const auto family = ts2::fami::parse(package.read(e));
+                if (family.lot > 0) {
+                    out.try_emplace(static_cast<std::uint32_t>(family.lot), static_cast<std::uint32_t>(family.currentLot));
+                }
+            }
         }
+    } catch (const std::exception& ex) {
+        ts2::diag::warnOnce(std::string("neighborhood: the families can't be read, apartment icons show as empty and plumbobs as at home: ") + ex.what());
     }
+    return out;
+}
+
+void addLotEffect(ts2::scene::SceneBuilder& builder, ts2::content::EffectsFiles& effects, ts2::scene::NeighborhoodPlumbobs& plumbobs,
+                  const char* name, const std::vector<std::array<float, 3>>& anchors) {
     if (anchors.empty()) {
         return;
     }
-    const auto* file = effects.with(kPlumbob);
+    const auto* file = effects.with(name);
     if (file == nullptr) {
-        ts2::diag::warnOnce("neighborhood: no effects file has the plumbob, lots show none");
+        ts2::diag::warnOnce(std::string("neighborhood: no effects file has ") + name + ", lots show none");
         return;
     }
-    if (plumbobs.add(builder, *file, kPlumbob, anchors) == 0) {
-        ts2::diag::warnOnce("neighborhood: the plumbob effect plays nothing that can be shown yet");
+    if (plumbobs.add(builder, *file, name, anchors) == 0) {
+        ts2::diag::warnOnce(std::string("neighborhood: ") + name + " plays nothing that can be shown yet");
     }
+}
+
+} // namespace
+
+void addPlumbobs(ts2::scene::SceneBuilder& builder, ts2::content::EffectsFiles& effects, const std::filesystem::path& folder,
+                 const ts2::scene::NeighborhoodSceneStats& stats, ts2::scene::NeighborhoodPlumbobs& plumbobs) {
+    const auto lived = livedInLots(folder);
+    const auto currentLots = currentLotsByHome(folder);
+    std::vector<std::array<float, 3>> plumbobAnchors, darkPlumbobAnchors, apartmentAnchors, darkApartmentAnchors;
+    for (const auto& lot : stats.lotFootprints) {
+        if (!lot.hasImposter) {
+            continue;
+        }
+        if (lot.apartments) {
+            // An apartment building's icon glows while a family is at home in one of its apartments, and
+            // is dark when none are lived in or every family there is away.
+            const bool home = std::any_of(lot.apartments->begin(), lot.apartments->end(), [&](std::uint32_t apartment) {
+                const auto family = currentLots.find(apartment);
+                return family != currentLots.end() && family->second == apartment;
+            });
+            (home ? apartmentAnchors : darkApartmentAnchors).push_back(lot.effectAnchor);
+        } else if (std::find(lived.begin(), lived.end(), lot.id) != lived.end()) {
+            // The plumbob is dark while the family is away from home.
+            const auto family = currentLots.find(lot.id);
+            const bool away = family != currentLots.end() && family->second != lot.id;
+            (away ? darkPlumbobAnchors : plumbobAnchors).push_back(lot.effectAnchor);
+        }
+    }
+    addLotEffect(builder, effects, plumbobs, "fxNeighborhoodPlumbob", plumbobAnchors);
+    addLotEffect(builder, effects, plumbobs, "EP3_NhoodPlumbobNoGlow", darkPlumbobAnchors);
+    addLotEffect(builder, effects, plumbobs, "EP8_NhoodApartment", apartmentAnchors);
+    addLotEffect(builder, effects, plumbobs, "EP8_NhoodApartmentNoGlow", darkApartmentAnchors);
 }
 
 namespace {
