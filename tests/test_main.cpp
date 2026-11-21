@@ -47,6 +47,7 @@ int main(int argc, char** argv) {
     for (auto& t : textLayoutTests()) tests.push_back(t);
 #endif
     for (auto& t : pathsTests()) tests.push_back(t);
+    for (auto& t : placementTests()) tests.push_back(t);
     for (auto& t : fuzzRegressionTests()) tests.push_back(t);
     for (auto& t : audioTests()) tests.push_back(t);
     for (auto& t : movieTests()) tests.push_back(t);
