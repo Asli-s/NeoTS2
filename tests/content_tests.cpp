@@ -598,6 +598,32 @@ void installedPacksAreFound() {
     fs::remove_all(root);
 }
 
+// A catalog bundle's resource wins over an object package's with the same key, as the Holiday
+// snowman's model names do over the Pets car emitter's that share its group.
+void catalogBundlesWinOverObjectPackages() {
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() / "neots2-bundle-order-test";
+    fs::remove_all(root);
+    const ts2::dbpf::ResourceKey key{0x53545223, 0x7F6D32BE, 0x85, 0};
+    auto write = [&](const fs::path& relative, std::uint8_t value) {
+        fs::create_directories((root / relative).parent_path());
+        std::ofstream out(root / relative, std::ios::binary);
+        ts2::dbpf::PackageWriter writer(out);
+        const std::uint8_t bytes[1] = {value};
+        writer.add(key, bytes, false, 1);
+        writer.finish(0);
+    };
+    write("Double Deluxe/Base/TSData/Res/Catalog/Bins/H05.bundle.package", 1);
+    write("Double Deluxe/Base/TSData/Res/Objects/objects.package", 2);
+    ts2::content::ResourceIndex index;
+    for (const auto& path : ts2::content::objectLoadOrder(ts2::content::findProducts(root))) {
+        index.addPackage(path);
+    }
+    const auto* found = index.find(key);
+    CHECK(found != nullptr && index.read(*found) == std::vector<std::uint8_t>{1});
+    fs::remove_all(root);
+}
+
 namespace savefolder {
 
 namespace fs = std::filesystem;
@@ -1931,6 +1957,7 @@ std::vector<Test> contentTests() {
         {"user options are saved keeping the rest of the file", userOptionsAreSavedKeepingTheRestOfTheFile},
         {"Graphics Rules options give their settings' properties", graphicsRulesOptionsGiveTheirSettingsProps},
         {"Installed packs are found", installedPacksAreFound},
+        {"Catalog bundles win over object packages", catalogBundlesWinOverObjectPackages},
         {"Downloads load in the game's order", downloadsLoadInTheGamesOrder},
         {"Shared packages act like added ones", sharedPackagesActLikeAddedOnes},
         {"Objects' daylight matches the game", objectDaylightMatchesTheGame},

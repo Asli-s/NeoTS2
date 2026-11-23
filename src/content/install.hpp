@@ -19,8 +19,8 @@ struct Product {
 std::vector<Product> findProducts(const std::filesystem::path& installRoot);
 
 // Treats every objects.package as a cumulative snapshot, so a larger one is newer. Snapshots load smallest-first, ties in release
-// order, and stuff packs' own SPObjects.package files load last. Catalog bundles with objects load first, so a resource
-// the object packages also have keeps theirs (which one the game keeps is not known yet).
+// order, then the stuff packs' own SPObjects.package files. Catalog bundles with objects load last, as their resources win
+// over the object packages' in the game. The Holiday snowman's group is also the Pets car emitter's in every later pack.
 std::vector<std::filesystem::path> objectLoadOrder(const std::vector<Product>& products);
 
 // The game's mask of installed products (what scripts test with

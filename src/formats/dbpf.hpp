@@ -58,6 +58,9 @@ public:
     // A package whose index is already known. It holds no entries, and touches the file only when
     // read with an entry from that index.
     Package(const std::filesystem::path& path, std::uintmax_t fileSize);
+    // Only the header of the package at `path`, far quicker than reading its index. It throws as
+    // opening the package would for a header that is broken.
+    static Header readHeaderOnly(const std::filesystem::path& path);
 
     const Header& header() const { return header_; }
     const std::vector<IndexEntry>& entries() const { return entries_; }

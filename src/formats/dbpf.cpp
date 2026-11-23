@@ -88,6 +88,12 @@ Package::Package(std::span<const std::uint8_t> bytes)
 
 Package::Package(const std::filesystem::path& path, std::uintmax_t fileSize) : path_(path), fileSize_(fileSize) {}
 
+Header Package::readHeaderOnly(const std::filesystem::path& path) {
+    Package package(path, std::filesystem::file_size(path));
+    package.readHeader();
+    return package.header_;
+}
+
 void Package::close() {
     if (!path_.empty()) {
         stream_.reset();

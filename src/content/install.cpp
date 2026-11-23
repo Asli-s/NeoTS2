@@ -311,8 +311,7 @@ std::vector<fs::path> objectLoadOrder(const std::vector<Product>& products) {
             if (lower(utf8(path.filename())) == "spobjects.package") {
                 stuffPackContent.push_back(path);
             } else {
-                const dbpf::Package package{path};
-                snapshots.push_back({package.header().indexEntryCount, product.releaseOrder, path});
+                snapshots.push_back({dbpf::Package::readHeaderOnly(path).indexEntryCount, product.releaseOrder, path});
             }
         }
     }
@@ -322,13 +321,13 @@ std::vector<fs::path> objectLoadOrder(const std::vector<Product>& products) {
     });
 
     std::vector<fs::path> order;
-    for (const auto& product : products) {
-        order.insert(order.end(), product.objectBundles.begin(), product.objectBundles.end());
-    }
     for (const auto& s : snapshots) {
         order.push_back(s.path);
     }
     order.insert(order.end(), stuffPackContent.begin(), stuffPackContent.end());
+    for (const auto& product : products) {
+        order.insert(order.end(), product.objectBundles.begin(), product.objectBundles.end());
+    }
     return order;
 }
 
