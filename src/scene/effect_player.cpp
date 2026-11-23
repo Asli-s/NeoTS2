@@ -124,7 +124,12 @@ void PlayingEffect::placeIn(const EmitterPlace& own, const EmitterPlace& parent)
         parent_.rotation = kNoTurn;
     }
     if (sizeByDetail_[0] >= 0) {
-        parent_.scale *= between(sizeByDetail_, player_->detailShare_);
+        // Grows about its own place.
+        const float s = between(sizeByDetail_, player_->detailShare_);
+        parent_.scale *= s;
+        for (std::size_t i = 0; i < 3; ++i) {
+            parent_.position[i] += own_.position[i] - s * own_.position[i];
+        }
     }
     if (flags & VisualEffect::kOrientZPole) {
         // Keeps only its turn about the vertical.
@@ -142,11 +147,13 @@ void PlayingEffect::placeIn(const EmitterPlace& own, const EmitterPlace& parent)
         own_ = EmitterPlace{};
     }
     if ((flags & VisualEffect::kViewRelative) && player_->hasCamera_) {
-        // Turns the parent about where it stands. cameraFacing points x at the camera with z up, and
-        // viewRelative alone turns about the vertical with the camera.
+        // Turns the parent about the point where the effect stands (its own place inside the parent),
+        // so turning never moves it. cameraFacing points x at the camera with z up, and viewRelative
+        // alone turns about the vertical with the camera.
+        const std::array<float, 3> pivot = inside(parent_, own_).position;
         std::array<float, 9> turn = kNoTurn;
         if (flags & VisualEffect::kCameraFacing) {
-            std::array<float, 3> n{player_->eye_[0] - parent_.position[0], player_->eye_[1] - parent_.position[1], player_->eye_[2] - parent_.position[2]};
+            std::array<float, 3> n{player_->eye_[0] - pivot[0], player_->eye_[1] - pivot[1], player_->eye_[2] - pivot[2]};
             const float nLength = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
             if (nLength > 0) {
                 for (float& v : n) {
@@ -173,6 +180,10 @@ void PlayingEffect::placeIn(const EmitterPlace& own, const EmitterPlace& parent)
             turn[1] = -turn[3];
         }
         parent_.rotation = product(turn, parent_.rotation);
+        const std::array<float, 3> d{parent_.position[0] - pivot[0], parent_.position[1] - pivot[1], parent_.position[2] - pivot[2]};
+        for (std::size_t i = 0; i < 3; ++i) {
+            parent_.position[i] = pivot[i] + turn[3 * i] * d[0] + turn[3 * i + 1] * d[1] + turn[3 * i + 2] * d[2];
+        }
     }
     for (EffectPart& part : parts_) {
         part.setPlace(inside(own_, placeOf(*part.component)), parent_);
