@@ -59,3 +59,15 @@
      D3D12_CPU_DESCRIPTOR_HANDLE cpuHandles[MAX_TEXTURE_SAMPLERS_PER_STAGE];
      D3D12_GPU_DESCRIPTOR_HANDLE gpuDescriptorHandle;
      D3D12_VERTEX_BUFFER_VIEW vertexBufferViews[MAX_VERTEX_BUFFERS];
+--- a/include/SDL3/SDL_version.h
++++ b/include/SDL3/SDL_version.h
+@@ -64,6 +64,9 @@
+  */
+ #define SDL_MICRO_VERSION   16
+ 
++/* This SDL carries NeoTS2's Direct3D 12 descriptor heap fix (SDL issue 16369). */
++#define NEOTS2_D3D12_HEAP_FIX 1
++
+ /**
+  * This macro turns the version numbers into a numeric value.
+  *

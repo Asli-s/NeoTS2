@@ -651,6 +651,34 @@ else()
             set(platform_name sdl3)
         endif()
     endif()
+    # Without our Direct3D 12 patch (third_party/sdl/README.md), SDL can crash the graphics driver on large scenes.
+    # The patch marks the SDL it went into with NEOTS2_D3D12_HEAP_FIX in SDL_version.h.
+    option(NEOTS2_ALLOW_ANY_SDL3 "Build the Windows app with an SDL 3 that lacks our Direct3D 12 patch" OFF)
+    if(platform_name STREQUAL "sdl3" AND WIN32)
+        set(sdl3_patched OFF)
+        if(TARGET SDL3::Headers)
+            get_target_property(sdl3_includes SDL3::Headers INTERFACE_INCLUDE_DIRECTORIES)
+            foreach(dir IN LISTS sdl3_includes)
+                if(EXISTS "${dir}/SDL3/SDL_version.h")
+                    file(STRINGS "${dir}/SDL3/SDL_version.h" sdl3_marker REGEX "^#define NEOTS2_D3D12_HEAP_FIX 1")
+                    if(sdl3_marker)
+                        set(sdl3_patched ON)
+                    endif()
+                endif()
+            endforeach()
+        endif()
+        if(NOT sdl3_patched)
+            if(NEOTS2_ALLOW_ANY_SDL3)
+                message(WARNING "SDL ${SDL3_VERSION} in ${SDL3_DIR} lacks third_party/sdl/d3d12-descriptor-heap.patch, "
+                    "and this build can crash the graphics driver on large scenes.")
+            else()
+                message(FATAL_ERROR "SDL ${SDL3_VERSION} in ${SDL3_DIR} lacks third_party/sdl/d3d12-descriptor-heap.patch. "
+                    "Without it, NeoTS2 on Windows can crash the graphics driver on large scenes. "
+                    "See third_party/sdl/README.md to build SDL 3.4.16 with the patch, and set SDL3_DIR "
+                    "to its cmake folder. To build anyway, set -DNEOTS2_ALLOW_ANY_SDL3=ON.")
+            endif()
+        endif()
+    endif()
     # Auto takes SDL 1.2 on a Mac only: elsewhere SDL 1.2 is there for other reasons, and it is asked for by name.
     if(NOT platform_name AND (NEOTS2_PLATFORM STREQUAL "sdl12" OR (NEOTS2_PLATFORM STREQUAL "auto" AND APPLE)))
         # SDL 1.2 has no CMake package: its header, library and the main() it starts a Mac program from.

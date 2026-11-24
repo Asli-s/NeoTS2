@@ -34,3 +34,6 @@ Drop the patch once an SDL release includes a fix.
    ```
 
 3. Configure NeoTS2 with `-DSDL3_DIR=<SDL install folder>/cmake`. The build copies that SDL3.dll next to neots2.exe.
+
+The patch also defines `NEOTS2_D3D12_HEAP_FIX` in `SDL_version.h`. On Windows, configuring stops if the SDL 3 it
+finds doesn't have it. `-DNEOTS2_ALLOW_ANY_SDL3=ON` builds with an unpatched SDL anyway, with a warning.
