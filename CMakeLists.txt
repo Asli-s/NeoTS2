@@ -289,6 +289,7 @@ add_library(ts2content
     src/content/material_scripts.cpp
     src/content/nhood_catalog.cpp
     src/content/build_scripts.cpp
+    src/content/wall_manager.cpp
     src/content/lot.cpp
     src/content/neighborhood.cpp
     src/content/genetics_catalog.cpp

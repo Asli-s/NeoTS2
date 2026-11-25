@@ -10,6 +10,7 @@
 #include <fstream>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <sstream>
 
@@ -66,24 +67,98 @@ void BuildScripts::addPatterns(std::string_view text, bool walls) {
 }
 
 void BuildScripts::addWallStyles(std::string_view text) {
+    // A wall style has at most a few catalog clones. A larger number is a broken script and is left out.
+    constexpr std::size_t kMostClones = 16;
     WallStyle* style = nullptr;
+    bool hidden = false;  // the style has notInCatalog
+    // The building tips of each clone of the entries that follow, by clone.
+    std::vector<int> tips;
+    const auto clone = [&](std::size_t index) -> WallStyle::CatalogClone* {
+        if (style == nullptr || hidden || index >= kMostClones) {
+            return nullptr;
+        }
+        if (style->clones.size() <= index) {
+            style->clones.resize(index + 1);
+        }
+        return &style->clones[index];
+    };
+    // Resource ids are written in hex and reach past what a 32-bit signed number holds.
+    const auto numbers = [](const std::string& value) {
+        std::vector<long long> out;
+        std::istringstream in(value);
+        std::string word;
+        while (in >> word && out.size() < kMostClones) {
+            out.push_back(std::strtoll(word.c_str(), nullptr, 0));
+        }
+        return out;
+    };
     forEachLine(text, [&](const std::string& key, const std::string& value) {
-        if (key == "wall") {
+        if (key == "catalogTextResource") {
+            std::istringstream words(value);
+            std::string file;
+            std::uint32_t table = 0;
+            if (words >> file >> table) {
+                wallTextFile = file;
+                wallTextTable = table;
+            }
+        } else if (key == "buildTipIndices") {
+            tips.clear();
+            for (const long long tip : numbers(value)) {
+                tips.push_back(static_cast<int>(tip));
+            }
+        } else if (key == "wall") {
             style = &(wallStyles[static_cast<std::uint32_t>(std::strtoul(value.c_str(), nullptr, 10))] = WallStyle{});
+            hidden = false;
         } else if (style == nullptr) {
             return;
+        } else if (key == "thumbnailResource") {
+            const auto v = numbers(value);
+            if (v.size() == 3 && v[0] >= 0) {
+                if (auto* c = clone(static_cast<std::size_t>(v[0]))) {
+                    c->thumbnailGroup = static_cast<std::uint32_t>(v[1]);
+                    c->thumbnailInstance = static_cast<std::uint32_t>(v[2]);
+                }
+            }
+        } else if (key == "catalogTextIndex" || key == "catalogTextIndices") {
+            const auto v = numbers(value);
+            for (std::size_t i = 0; i < v.size(); ++i) {
+                if (auto* c = clone(i)) {
+                    c->textIndex = static_cast<int>(v[i]);
+                    c->tip = i < tips.size() ? tips[i] : 0;
+                }
+            }
+        } else if (key == "notInCatalog") {
+            style->clones.clear();
+            hidden = true;
         } else if (key == "wallThickness") {
             style->thick = value != "none";
         } else if (key == "verticalSpan") {
-            style->belowFloor = lower(value) == "floortofloorbasedceiling";
-            style->toRoof = lower(value) == "floortoroof";
-            style->floorToFloor = lower(value) == "floortofloor";
+            const std::string span = lower(value);
+            style->belowFloor = span == "floortofloorbasedceiling";
+            style->toRoof = span == "floortoroof";
+            style->floorToFloor = span == "floortofloor";
+            style->span = span == "fixedheight"                ? WallStyle::Span::Fixed
+                          : span == "floortoroof"              ? WallStyle::Span::FloorToRoof
+                          : span == "floortostairs"            ? WallStyle::Span::FloorToStairs
+                          : span == "floortofloorbasedceiling" ? WallStyle::Span::FloorToFloorBasedCeiling
+                                                               : WallStyle::Span::FloorToFloor;
         } else if (key == "stageWall") {
             style->floorToFloor = false;
+            style->kind = WallStyle::Kind::Stage;
+        } else if (key == "invisibleLightBlocking") {
+            style->kind = WallStyle::Kind::InvisibleLightBlocking;
+        } else if (key == "requiresFlatBottom") {
+            style->flatBottom = lower(value) == "true";
+        } else if (key == "requiresFlatTop") {
+            style->flatTop = lower(value) == "true";
+        } else if (key == "blocksPlacement") {
+            style->blocksPlacement = lower(value) != "false";
         } else if (key == "mayCutAway") {
             style->cutAway = lower(value) != "false";
         } else if (key == "blocksLight") {
             style->blocksLight = lower(value) != "false";
+        } else if (key == "bearsLoad") {
+            style->bearsLoad = lower(value) != "false";
         } else if (key == "notRendered") {
             style->rendered = false;
         } else if (key == "defaultPattern") {
@@ -119,6 +194,17 @@ void BuildScripts::addFenceArches(std::string_view text) {
     });
 }
 
+void BuildScripts::addPlatforms(std::string_view text) {
+    std::optional<std::int32_t> product;
+    forEachLine(text, [&](const std::string& key, const std::string& value) {
+        if (key == "deck" || key == "foundation" || key == "pool" || key == "stage") {
+            product = static_cast<std::int32_t>(std::strtol(value.c_str(), nullptr, 10));
+        } else if (key == "floorPattern" && product) {
+            platformFloors[*product] = lower(value);
+        }
+    });
+}
+
 BuildScripts loadBuildScripts(const std::vector<Product>& products) {
     BuildScripts scripts;
     std::set<std::filesystem::path> seen;
@@ -132,11 +218,12 @@ BuildScripts loadBuildScripts(const std::vector<Product>& products) {
         scripts.addWallStyles(read(folder / "walls.txt"));
         scripts.addRoofPatterns(read(folder / "roofPatterns.txt"));
         scripts.addFenceArches(read(folder / "fencearches.txt"));
+        scripts.addPlatforms(read(folder / "deckfoundations.txt"));
     }
     return scripts;
 }
 
-std::set<std::uint32_t> loadGreenhouseFences(const std::vector<Product>& products) {
+std::set<std::uint32_t> loadFencesWith(const std::vector<Product>& products, const std::string& property) {
     constexpr std::uint32_t kFenceProperties = 0x2CB230B8;
     // A property's number, decimal or 0x hex, or a binary flag's "true".
     const auto number = [](const std::string& text) -> unsigned long long {
@@ -151,12 +238,12 @@ std::set<std::uint32_t> loadGreenhouseFences(const std::vector<Product>& product
     }
     // The catalog doesn't change while the game runs, so every lot after the first gets the same set.
     static std::mutex cacheLock;
-    static std::map<std::set<std::filesystem::path>, std::set<std::uint32_t>> cache;
+    static std::map<std::pair<std::set<std::filesystem::path>, std::string>, std::set<std::uint32_t>> cache;
     const std::lock_guard lock(cacheLock);
-    if (const auto it = cache.find(folders); it != cache.end()) {
+    if (const auto it = cache.find({folders, property}); it != cache.end()) {
         return it->second;
     }
-    std::set<std::uint32_t> greenhouse;
+    std::set<std::uint32_t> found;
     for (const auto& folder : folders) {
         std::error_code ec;
         for (std::filesystem::directory_iterator it(folder, ec), end; it != end; it.increment(ec)) {
@@ -171,21 +258,29 @@ std::set<std::uint32_t> loadGreenhouseFences(const std::vector<Product>& product
                     }
                     try {
                         const auto p = propset::parse(package.read(e));
-                        const auto guid = p.find("guid"), flag = p.find("isgreenhouse");
+                        const auto guid = p.find("guid"), flag = p.find(property);
                         if (guid != p.end() && flag != p.end() && number(flag->second) != 0) {
-                            greenhouse.insert(static_cast<std::uint32_t>(number(guid->second)));
+                            found.insert(static_cast<std::uint32_t>(number(guid->second)));
                         }
                     } catch (const std::exception& ex) {
-                        diag::warnOnce(std::string("greenhouse walls: a fence that can't be read is left out: ") + ex.what());
+                        diag::warnOnce(std::string("fences: a fence that can't be read is left out: ") + ex.what());
                     }
                 }
             } catch (const std::exception& ex) {
-                diag::warnOnce("greenhouse walls: " + it->path().string() + " can't be read and is passed over: " + ex.what());
+                diag::warnOnce("fences: " + it->path().string() + " can't be read and is passed over: " + ex.what());
             }
         }
     }
-    cache.emplace(folders, greenhouse);
-    return greenhouse;
+    cache.emplace(std::pair{folders, property}, found);
+    return found;
+}
+
+std::set<std::uint32_t> loadGreenhouseFences(const std::vector<Product>& products) {
+    return loadFencesWith(products, "isgreenhouse");
+}
+
+std::set<std::uint32_t> loadWalkOverFences(const std::vector<Product>& products) {
+    return loadFencesWith(products, "maywalkover");
 }
 
 } // namespace ts2::content

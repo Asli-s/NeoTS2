@@ -4,6 +4,7 @@
 
 #include <bit>
 #include <stdexcept>
+#include <utility>
 
 namespace ts2::array3d {
 
@@ -27,6 +28,14 @@ std::span<const std::uint8_t> Array3D::at(std::int32_t level, std::int32_t x, st
         return {};
     }
     return std::span<const std::uint8_t>(elements).subspan(index * elementSize, elementSize);
+}
+
+std::span<std::uint8_t> Array3D::at(std::int32_t level, std::int32_t x, std::int32_t y) {
+    const auto e = std::as_const(*this).at(level, x, y);
+    if (e.empty()) {
+        return {};
+    }
+    return std::span<std::uint8_t>(elements).subspan(static_cast<std::size_t>(e.data() - elements.data()), e.size());
 }
 
 std::int16_t Array3D::i16(std::int32_t level, std::int32_t x, std::int32_t y, std::size_t index) const {
