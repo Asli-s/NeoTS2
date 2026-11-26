@@ -119,6 +119,22 @@ std::vector<walllayer::Entry> coveringsOfRoomWalls(const wallgraph::WallGraph& r
     return out;
 }
 
+void refreshRoomWalls(Lot& lot) {
+    const auto rooms = lot.wallLayers.find(kRoomGraphInstance);
+    if (rooms == lot.wallLayers.end()) {
+        return;
+    }
+    lot.roomGraph = rooms->second;
+    for (const std::uint32_t instance : kLayerGraphInstances) {
+        if (const auto layer = lot.wallLayers.find(instance); layer != lot.wallLayers.end()) {
+            lot.layerGraphs.insert_or_assign(instance, layer->second);
+        }
+    }
+    if (const auto walls = lot.wallLayers.find(kWallGraphInstance); walls != lot.wallLayers.end()) {
+        lot.wallCoverings = coveringsOfRoomWalls(*lot.roomGraph, walls->second, lot.savedWallCoverings);
+    }
+}
+
 std::vector<CurvedPoolCorner> curvedPoolCorners(std::span<const std::uint8_t> data) {
     constexpr std::size_t kEntryWords = 4;
     constexpr std::uint32_t kMaxSide = 256;  // lots are at most this many tiles a side
@@ -190,9 +206,11 @@ Lot loadLot(const std::filesystem::path& path) {
             }
         } else if (e.key.type == types::kWallGraph && e.key.instance == kRoomGraphInstance) {
             lot.roomGraph = wallgraph::parse(package.read(e));
+            lot.wallLayers.insert_or_assign(e.key.instance, *lot.roomGraph);
         } else if (e.key.type == types::kWallGraph && e.key.instance == kWallGraphInstance) {
             try {
                 wallGraph = wallgraph::parse(package.read(e));
+                lot.wallLayers.insert_or_assign(e.key.instance, *wallGraph);
             } catch (const std::exception& ex) {
                 lot.problems.push_back({e.key.instance, std::string("wall graph: ") + ex.what()});
             }
@@ -217,6 +235,14 @@ Lot loadLot(const std::filesystem::path& path) {
         } else if (e.key.type == types::kWallGraph &&
                    std::ranges::find(kLayerGraphInstances, e.key.instance) != std::end(kLayerGraphInstances)) {
             lot.layerGraphs.insert_or_assign(e.key.instance, wallgraph::parse(package.read(e)));
+            lot.wallLayers.insert_or_assign(e.key.instance, lot.layerGraphs.at(e.key.instance));
+        } else if (e.key.type == types::kWallGraph &&
+                   std::ranges::find(kWallLayerInstances, e.key.instance) != std::end(kWallLayerInstances)) {
+            try {
+                lot.wallLayers.insert_or_assign(e.key.instance, wallgraph::parse(package.read(e)));
+            } catch (const std::exception& ex) {
+                lot.problems.push_back({e.key.instance, std::string("wall graph: ") + ex.what()});
+            }
         } else if (e.key.type == types::kSceneObject) {
             try {
                 const auto data = package.read(e);
@@ -330,6 +356,7 @@ Lot loadLot(const std::filesystem::path& path) {
             records[e.key.instance].push_back(&e);
         }
     }
+    lot.savedWallCoverings = lot.wallCoverings;
     if (lot.roomGraph && wallGraph) {
         lot.wallCoverings = coveringsOfRoomWalls(*lot.roomGraph, *wallGraph, lot.wallCoverings);
     }

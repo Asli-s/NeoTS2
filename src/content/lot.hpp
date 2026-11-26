@@ -84,6 +84,10 @@ struct Lot {
     std::map<std::uint16_t, stringmap::Entry> floorPatterns, wallPatterns;
     // The coverings of the room graph's wall segments (wall layer instance 4).
     std::vector<walllayer::Entry> wallCoverings;
+    // Every wall graph the game's wall manager saves, by instance, and wall layer 4 as saved (by the
+    // ids of wall graph 24), for editing walls (see WallManager and refreshRoomWalls).
+    std::map<std::uint32_t, wallgraph::WallGraph> wallLayers;
+    std::vector<walllayer::Entry> savedWallCoverings;
     // The sides of the lot's stages (split-level platforms): their own wall graph (instance 0x1C),
     // coverings (wall layer 0x1D, by that graph's wall ids) and wall patterns (pattern map 0x1E).
     std::optional<wallgraph::WallGraph> stageWalls;
@@ -156,6 +160,11 @@ constexpr std::uint32_t kPlatformRegionGridInstance = 0x14;
 // terrain lies below it is under water: ponds are dug below it.
 constexpr std::uint32_t kWaterHeightGridInstance = 0x3B76;
 
+// The wall manager's graphs, by the instances it saves them as.
+constexpr std::uint32_t kWallLayerInstances[12] = {22, 8, 23, 19, 7, 6, 5, 24, 25, 26, 28, 31};
+// After its walls changed, the room graph, the two room layers and the room walls' coverings again
+// from the wall manager's graphs and saved coverings.
+void refreshRoomWalls(Lot& lot);
 // The covering layer names the walls of the wall graph (instance 24), whose ids the room graph shares
 // only on lots whose walls were never renumbered: this gives the coverings by room graph wall, matched
 // by place. A room graph segment with no wall there only divides rooms and gets none.

@@ -23,6 +23,8 @@
 #include "scene/instance_merge.hpp"
 #include "scene/imposter_bake.hpp"
 #include "scene/imposter_cache.hpp"
+#include "content/covering_catalog.hpp"
+#include "formats/dbpf_writer.hpp"
 
 #include <cmath>
 #include <filesystem>
@@ -3114,6 +3116,42 @@ void roomSamplesAreGatheredAsTheGame() {
     CHECK((ts2::content::averageColor({}) == std::array<float, 3>{0, 0, 0}));
     ts2::content::CoveringColors none{std::filesystem::path{}};
     CHECK(!none.color(ts2::content::CoveringKind::Floor, "abc"));
+    CHECK(!none.picture(ts2::content::CoveringKind::Wall, "abc", 64));
+    // Build mode files a covering's picture under its GUID as 8 lower-case hex digits.
+    CHECK(ts2::content::coveringPictureName(0x0CC13DCA) == "0cc13dca" && ts2::content::coveringPictureName(7) == "00000007");
+    // A drawn covering picture: clear outside pixels 10 to 118, the texture inside, a wall's three
+    // times across.
+    {
+        ts2::tga::Pixels halves{2, 1, {255, 0, 0, 255, 0, 0, 255, 255}};  // red left, blue right
+        const auto px = [](const ts2::tga::Pixels& p, std::uint32_t x, std::uint32_t y) {
+            const std::size_t at = (std::size_t{y} * p.width + x) * 4;
+            return std::array<int, 4>{p.rgba[at], p.rgba[at + 1], p.rgba[at + 2], p.rgba[at + 3]};
+        };
+        const auto floor = ts2::content::coveringThumbnail(halves, ts2::content::CoveringKind::Floor);
+        CHECK(floor.width == 128 && floor.height == 128);
+        CHECK((px(floor, 9, 60) == std::array<int, 4>{0, 0, 0, 0}) && (px(floor, 119, 60) == std::array<int, 4>{0, 0, 0, 0}));
+        CHECK((px(floor, 10, 10) == std::array<int, 4>{255, 0, 0, 255}) && (px(floor, 118, 118) == std::array<int, 4>{0, 0, 255, 255}));
+        const auto wall = ts2::content::coveringThumbnail(halves, ts2::content::CoveringKind::Wall);
+        CHECK((px(wall, 10, 60) == std::array<int, 4>{255, 0, 0, 255}) && (px(wall, 40, 60) == std::array<int, 4>{0, 0, 255, 255}) &&
+              (px(wall, 50, 60) == std::array<int, 4>{255, 0, 0, 255}));
+        // A drawn picture kept in the cache reads back, and an earlier read sees the file changed.
+        const std::filesystem::path file = std::filesystem::temp_directory_path() / "neots2-covering-cache-test.package";
+        {
+            std::ofstream out(file, std::ios::binary);
+            ts2::dbpf::PackageWriter writer(out);
+            const std::vector<std::uint8_t> other{1, 2, 3};
+            writer.add({0x10, 0xFFFFFFFF, 1, 7}, other, false, 0);
+            writer.finish(0);
+        }
+        ts2::content::CoveringColors before{file}, cache{file};
+        CHECK(!cache.picture(ts2::content::CoveringKind::Floor, "0cc13dca", 512) && !before.changedOnDisk());
+        CHECK(cache.store(ts2::content::CoveringKind::Floor, "0cc13dca", floor));
+        const auto kept = cache.picture(ts2::content::CoveringKind::Floor, "0cc13dca", 512);
+        CHECK(kept && kept->width == 128 && kept->height == 128 && px(*kept, 5, 5)[3] == 0 && px(*kept, 60, 60)[3] == 255);
+        CHECK(!cache.picture(ts2::content::CoveringKind::Wall, "0cc13dca", 512) && before.changedOnDisk() && !cache.changedOnDisk());
+        std::error_code ec;
+        std::filesystem::remove(file, ec);
+    }
 
     // A lot two tiles wide with one floor covering, a wall between the tiles, and a portal.
     ts2::content::Lot lot;

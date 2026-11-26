@@ -131,9 +131,10 @@ private:
     void reassign(Face* f, const std::function<std::int32_t(const WallSegment&)>& roomOf);
 
     wallgraph::WallGraph header_;  // what the saved graph keeps besides its lists
-    std::vector<std::unique_ptr<Vertex>> vertices_;  // sorted by level, then x, then y
+    // In the saved order, which the game keeps sorted by level, then x, then y, and the rooms by id.
+    std::vector<std::unique_ptr<Vertex>> vertices_;
     std::vector<std::unique_ptr<Edge>> edges_;       // in the order added
-    std::vector<std::unique_ptr<Face>> faces_;       // sorted by id
+    std::vector<std::unique_ptr<Face>> faces_;
 };
 
 // The lot's walls as the game's wall manager keeps them: twelve wall graphs, three room grids, the
@@ -160,6 +161,12 @@ public:
     };
     std::vector<WallAt> wallsAt(float x, float y, std::int32_t level) const;
     std::optional<std::uint32_t> styleOn(const WallSegment& segment) const;
+    // Fence arches, which stand in a layer of their own: whether one stands on the segment, either way
+    // round, and those with an end at (x, y).
+    bool archOn(const WallSegment& segment) const;
+    // Whether a wall that divides rooms (wall graph 5) stands on the segment, either way round.
+    bool dividesOn(const WallSegment& segment) const;
+    std::vector<WallSegment> archesAt(float x, float y, std::int32_t level) const;
     // The section the way round it was added, its style and its pattern names, enough to undo taking it out.
     struct Kept {
         WallSegment segment;
@@ -167,6 +174,10 @@ public:
         std::string left, right;
     };
     std::optional<Kept> keptOn(const WallSegment& segment) const;
+    // The pattern on the section's side that leftQuarter(segment) names, empty for none. None with no
+    // section there. Setting it returns false with no section there.
+    std::optional<std::string> sidePattern(const WallSegment& segment) const;
+    bool setSidePattern(const WallSegment& segment, const std::string& name);
     // Either way round. False when there is none.
     bool remove(const WallSegment& segment);
     // Writes the layers back to the saved graphs.
@@ -177,10 +188,12 @@ public:
         bool halfWall = false;
         int postSpacing = 0;
         float height = 0;  // the tallest fence at a corner gives its post
+        bool bearsLoad = false;  // XFNC bearsload, which also keeps the ground under it level
     };
     // Nullopt for a style that is not a fence or half wall.
     void setFences(std::function<std::optional<Fence>(std::uint32_t style)> fenceOf) { fenceOf_ = std::move(fenceOf); }
     bool isHalfWall(std::uint32_t style) const;
+    std::optional<Fence> fence(std::uint32_t style) const { return fenceOf_ ? fenceOf_(style) : std::nullopt; }
     // Kept sorted by level, then x, then y, as the game keeps them.
     void setPosts(std::vector<fencepostlayer::Post>* posts) { posts_ = posts; }
     // Whether a corner needs a post: one fence or half wall section ends there, three or more meet, two

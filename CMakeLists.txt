@@ -228,6 +228,7 @@ add_library(ts2formats
     src/formats/fcns.cpp
     src/formats/bhav.cpp
     src/formats/dbpf.cpp
+    src/formats/dbpf_append.cpp
     src/formats/dbpf_writer.cpp
     src/formats/glob.cpp
     src/formats/hash.cpp
@@ -284,13 +285,18 @@ add_library(ts2content
     src/content/user_props.cpp
     src/content/lighting.cpp
     src/content/lighting_state.cpp
+    src/content/covering_catalog.cpp
     src/content/covering_colors.cpp
     src/content/object_thumbnails.cpp
     src/content/material_scripts.cpp
     src/content/nhood_catalog.cpp
     src/content/build_scripts.cpp
     src/content/wall_manager.cpp
+    src/content/floor_edit.cpp
+    src/content/terrain_edit.cpp
+    src/content/wall_check.cpp
     src/content/lot.cpp
+    src/content/lot_build_save.cpp
     src/content/neighborhood.cpp
     src/content/genetics_catalog.cpp
     src/content/recolour_catalog.cpp

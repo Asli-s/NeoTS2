@@ -98,6 +98,33 @@ std::array<float, 2> middleOf(const TileQuarter& t) {
     return {static_cast<float>(t.x) + 0.5f + ox, static_cast<float>(t.y) + 0.5f + oy};
 }
 
+// The covering entry of the wall with this id, none without one. Saved lists aren't known to be in
+// id order, so this looks at each.
+template <typename Entries>
+auto coveringOf(Entries& coverings, std::int32_t id) {
+    return std::find_if(coverings.begin(), coverings.end(), [&](const walllayer::Entry& e) { return static_cast<std::int32_t>(e.wall) == id; });
+}
+
+// The next id from a saved counter, which wraps past the largest as the game's does.
+std::int32_t nextId(std::int32_t& counter) {
+    const std::int32_t id = counter;
+    counter = static_cast<std::int32_t>(static_cast<std::uint32_t>(counter) + 1u);
+    return id;
+}
+
+// Whether a picked segment runs the way the stored section does: both ends within the corner
+// tolerance, counted from the picked one, and on the same level.
+bool runsAsStored(const WallSegment& picked, const WallSegment& stored) {
+    return picked.level == stored.level && sameCoordinate(picked.ax, stored.ax) && sameCoordinate(picked.ay, stored.ay) &&
+           sameCoordinate(picked.bx, stored.bx) && sameCoordinate(picked.by, stored.by);
+}
+
+// Coordinates a broken file may hold that no lot has. They would break the sorted lookups and the
+// conversions to tile numbers.
+bool usableCoordinate(float v) {
+    return std::isfinite(v) && std::abs(v) < 1.0e6f;
+}
+
 } // namespace
 
 TileQuarter leftQuarter(const WallSegment& s) {
@@ -232,12 +259,17 @@ void RoomGrid::flush() {
     const auto quarterOf = [](const Key& k) {
         return TileQuarter{std::get<1>(k), std::get<2>(k), std::get<0>(k), static_cast<std::uint8_t>(std::get<3>(k))};
     };
-    const std::uint16_t oldId = roomAt(quarterOf(queued_.begin()->first));
+    // The old room is the first queued quarter's that has one, read before that quarter is set.
+    std::uint16_t oldId = 0xFFFF;
     for (const auto& [k, q] : queued_) {
+        if (oldId == 0xFFFF) {
+            oldId = roomAt(quarterOf(k));
+        }
         set(q.id, quarterOf(k));
     }
+    // A quarter off the grid has no room to replace.
     for (const auto& [k, q] : queued_) {
-        if (!q.noSeed && oldId != q.id) {
+        if (!q.noSeed && oldId != q.id && oldId != 0xFFFF) {
             spread(oldId, q.id, neighbour(quarterOf(k), 0));
             spread(oldId, q.id, neighbour(quarterOf(k), 1));
         }
@@ -256,6 +288,9 @@ void RoomGrid::spread(std::uint16_t oldId, std::uint16_t id, const TileQuarter& 
             continue;
         }
         set(id, q);
+        if (roomAt(q) != id) {
+            continue;  // off the grid, so it can't be filled and mustn't be visited again
+        }
         for (int i = 0; i < 3; ++i) {
             const TileQuarter n = neighbour(q, i);
             if (inBounds(static_cast<float>(n.x), static_cast<float>(n.y))) {
@@ -334,6 +369,9 @@ WallLayer::WallLayer(const wallgraph::WallGraph& saved) : header_(saved) {
     header_.walls.clear();
     std::unordered_map<std::int32_t, Vertex*> vertexById;
     for (const auto& p : saved.points) {
+        if (!usableCoordinate(p.x) || !usableCoordinate(p.y)) {
+            continue;
+        }
         auto v = std::make_unique<Vertex>();
         v->id = p.id;
         v->x = p.x;
@@ -394,7 +432,7 @@ WallLayer::Vertex* WallLayer::findOrMake(float x, float y, std::int32_t level) {
     };
     const auto at = std::lower_bound(vertices_.begin(), vertices_.end(), std::tuple{level, x, y}, less);
     auto v = std::make_unique<Vertex>();
-    v->id = header_.counters[0]++;
+    v->id = nextId(header_.counters[0]);
     v->x = x;
     v->y = y;
     v->level = level;
@@ -620,9 +658,12 @@ void WallLayer::joinRooms(Ref e, RoomGrid* grid, const std::function<std::int32_
 void WallLayer::add(const WallSegment& s, RoomGrid* grid, const std::function<std::int32_t(const WallSegment&)>& roomOf) {
     Vertex* a = findOrMake(s.ax, s.ay, s.level);
     Vertex* b = findOrMake(s.bx, s.by, s.level);
+    if (a == b) {
+        return;  // a section needs two corners
+    }
     auto edge = std::make_unique<Edge>();
     Edge* e = edge.get();
-    e->id = header_.counters[1]++;
+    e->id = nextId(header_.counters[1]);
     e->next = {Ref{e, 0}, Ref{e, 3}, Ref{e, 2}, Ref{e, 1}};
     e->ends = {a, b};
     link(a, Ref{e, 0});
@@ -734,12 +775,8 @@ WallManager::~WallManager() = default;
 std::uint32_t WallManager::styleOf(const WallSegment& segment) const {
     if (const auto& all = layers_->layers[kAllWalls]) {
         const std::int32_t id = all->idOf(segment);
-        if (id >= 0) {
-            for (const auto& c : coverings_) {
-                if (static_cast<std::int32_t>(c.wall) == id) {
-                    return c.type;
-                }
-            }
+        if (const auto c = coveringOf(coverings_, id); id >= 0 && c != coverings_.end()) {
+            return c->type;
         }
     }
     const auto& stage = layers_->layers[kStageSides];
@@ -1066,6 +1103,21 @@ std::vector<WallManager::WallAt> WallManager::wallsAt(float x, float y, std::int
     return out;
 }
 
+bool WallManager::dividesOn(const WallSegment& segment) const {
+    const auto& layer = layers_->layers[kPlacementBlocking];
+    return layer && layer->contains(segment);
+}
+
+bool WallManager::archOn(const WallSegment& segment) const {
+    const auto& arches = layers_->layers[kArches];
+    return arches && arches->contains(segment);
+}
+
+std::vector<WallSegment> WallManager::archesAt(float x, float y, std::int32_t level) const {
+    const auto& arches = layers_->layers[kArches];
+    return arches ? arches->segmentsAt(x, y, level) : std::vector<WallSegment>{};
+}
+
 std::optional<std::uint32_t> WallManager::styleOn(const WallSegment& segment) const {
     if (!has(segment)) {
         return std::nullopt;
@@ -1085,14 +1137,37 @@ std::optional<WallManager::Kept> WallManager::keptOn(const WallSegment& segment)
         const auto p = patterns_.find(pattern);
         return p != patterns_.end() ? p->second.name : std::string();
     };
-    for (const auto& c : coverings_) {
-        if (static_cast<std::int32_t>(c.wall) == id) {
-            kept.left = name(c.left);
-            kept.right = name(c.right);
-            break;
-        }
+    if (const auto c = coveringOf(coverings_, id); c != coverings_.end()) {
+        kept.left = name(c->left);
+        kept.right = name(c->right);
     }
     return kept;
+}
+
+std::optional<std::string> WallManager::sidePattern(const WallSegment& segment) const {
+    const auto kept = keptOn(segment);
+    if (!kept) {
+        return std::nullopt;
+    }
+    return runsAsStored(segment, kept->segment) ? kept->left : kept->right;
+}
+
+bool WallManager::setSidePattern(const WallSegment& segment, const std::string& name) {
+    const auto& all = layers_->layers[kAllWalls];
+    const auto stored = all ? all->storedOf(segment) : std::nullopt;
+    if (!stored) {
+        return false;
+    }
+    const std::int32_t id = all->idOf(*stored);
+    const auto c = coveringOf(coverings_, id);
+    if (c == coverings_.end()) {
+        return false;
+    }
+    std::uint16_t& side = runsAsStored(segment, *stored) ? c->left : c->right;
+    releasePattern(side);
+    addPattern(name);
+    side = patternId(name);
+    return true;
 }
 
 bool WallManager::has(const WallSegment& segment) const {
@@ -1116,8 +1191,7 @@ bool WallManager::remove(const WallSegment& segment) {
         d.bearsLoad = d.blocksLight = d.rendered = false;
     }
     const std::int32_t id = L[kAllWalls]->idOf(segment);
-    if (const auto c = std::find_if(coverings_.begin(), coverings_.end(), [&](const walllayer::Entry& e) { return static_cast<std::int32_t>(e.wall) == id; });
-        c != coverings_.end()) {
+    if (const auto c = coveringOf(coverings_, id); c != coverings_.end()) {
         releasePattern(c->left);
         releasePattern(c->right);
         coverings_.erase(c);
@@ -1134,18 +1208,23 @@ bool WallManager::remove(const WallSegment& segment) {
         const int kind = static_cast<int>(k);
         L[i]->remove(segment, grid, [&](const WallSegment& s) { return roomByPoint(s, kind); });
     };
+    const auto inLayer = [&](LayerIndex i) { return L[i] && L[i]->contains(segment); };
     take(kAllWalls);
+    // From whichever half wall layer holds it, as a stage may have come or gone beside it since.
     if (halfWall) {
-        take(static_cast<LayerIndex>(halfWallLayer(segment)));
+        take(inLayer(kStageHalfWalls) ? kStageHalfWalls : kHalfWalls);
     }
     // The rooms keep a section the stage sides still need.
-    if (d.blocksPlacement && !(L[kStageSides] && L[kStageSides]->contains(segment))) {
+    if (inLayer(kPlacementBlocking) && !inLayer(kStageSides)) {
         take(kPlacementBlocking);
     }
     if (d.bearsLoad) {
         take(kLoadBearing);
     }
-    if (d.blocksLight) {
+    // Light stays blocked where an invisible light blocker stands, or for a wall that isn't drawn,
+    // where a drawn wall stands.
+    if (inLayer(kLightBlocking) &&
+        !(d.rendered ? inLayer(kInvisibleLightBlocking) : inLayer(kSpanFloorToFloor) || inLayer(kSpanFloorToRoof))) {
         take(kLightBlocking);
     }
     if (d.rendered) {

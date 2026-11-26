@@ -16,6 +16,14 @@
 #include "sim/index_code_source.hpp"
 #include "parse_float.hpp"
 #include "paths/save_folders.hpp"
+#include "content/floor_edit.hpp"
+#include "content/lot_build_save.hpp"
+#include "content/terrain_edit.hpp"
+#include "formats/lot_grid.hpp"
+#include "formats/qfs.hpp"
+#include "formats/stringmap.hpp"
+#include "formats/walllayer.hpp"
+#include "formats/array3d.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -24,6 +32,8 @@
 #include <io.h>
 #include <share.h>
 #include <sys/stat.h>
+#include <cstring>
+#include <tuple>
 #endif
 
 namespace {
@@ -49,6 +59,19 @@ void buildScriptsReadPatternsAndWallStyles() {
                       "roofunder \"roof-manor-under\"\nroofedges \"roof-manor-edges\"\nrooftrim \"roof-manor-trim\"\nnotInCatalog\ndefault");
     const auto& manor = b.roofPatterns.at(0);
     CHECK(manor.top == "roof-manor" && manor.under == "roof-manor-under" && manor.edges == "roof-manor-edges" && manor.trim == "roof-manor-trim");
+    // Each deck, foundation, pool and stage product's top floor, by its id.
+    b.addPlatforms("version 2\nfoundation 0\nwallStyle 23\nfloorPattern \"floor_plywoodFoundation\"\ndeck 1\nwallStyle 16\n"
+                   "floorPattern \"deckDarkRedwood\"\npool 3\nfloorPattern \"floor_poolRoundedLipBlue\"\nstage 4\nfloorPattern \"loftSmallBirchPlanks\"\n");
+    CHECK(b.platformFloors.at(0) == "floor_plywoodfoundation" && b.platformFloors.at(1) == "deckdarkredwood");
+    CHECK(b.platformFloors.at(3) == "floor_poolroundedlipblue" && b.platformFloors.at(4) == "loftsmallbirchplanks" && b.platformFloors.size() == 4);
+    // Fireplaces by id, keys in any case, the text table and tip of the lines above each.
+    b.addFireplaces("version 1\ncatalogTextResource build 144\nbuildTipIndex 22\nfireplace 0\nmantle \"Fireplace - Loft - Mantle\"\n"
+                    "chimneyhearth \"Fireplace - Loft - Chimney\"\nChimneyTopFP \"Fireplace - Loft - Chimney Cap - Footprint\"\n"
+                    "catalogTextIndex 0\ncatalogTextResource build 310\nfireplace 8\nmantle \"Fireplace - Stove - Romantic\"\ncatalogTextIndex 8\n");
+    const auto& loft = b.fireplaces.at(0);
+    CHECK(loft.mantle == "Fireplace - Loft - Mantle" && loft.chimney == "Fireplace - Loft - Chimney" && loft.top.empty());
+    CHECK(loft.topFootprint == "Fireplace - Loft - Chimney Cap - Footprint" && loft.textFile == "build" && loft.textTable == 144);
+    CHECK(loft.textIndex == 0 && loft.tip == 22 && b.fireplaces.at(8).textTable == 310 && b.fireplaces.at(8).textIndex == 8);
 }
 
 // Animate Sim from the adult list: a Sim reads its own age's list at the same entry, the entry's
@@ -2096,6 +2119,375 @@ void wallsClosingALoopMakeARoom() {
 
 } // namespace
 
+void floorsTakeTheirPatterns() {
+    using namespace ts2::content;
+    Lot lot;
+    auto& floors = lot.grids[kFloorGridInstance];
+    floors.width = floors.height = 2;
+    floors.levels = 1;
+    floors.elementSize = 8;
+    floors.elements.assign(2 * 2 * 8, 0);
+    auto& turns = lot.grids[kFloorTurnGridInstance];
+    turns.width = turns.height = 2;
+    turns.levels = 1;
+    turns.elementSize = 2;
+    turns.elements.assign(2 * 2 * 2, 0x33);  // every quarter turned
+    lot.floorPatterns[1] = {"6cea13d8", 1};
+    floors.at(0, 1, 0)[2] = 1;  // quarter 1 of tile (1, 0) has the boards
+    // A new pattern over the boards and a bare quarter: the map gains it under the smallest free id, the
+    // old one, used no more, leaves it, and both quarters are laid unturned. What was there comes back for undo.
+    const auto was = setFloors(lot, {{0, 1, 0, 1, "136226EE", 1}, {0, 1, 0, 2, "136226ee", 1}, {0, 9, 9, 0, "136226ee", 1}});
+    CHECK(was.size() == 2);
+    CHECK(was.size() == 2 && was[0].pattern == "6cea13d8" && was[0].turn == 3 && was[1].pattern.empty());
+    CHECK(floorPatternAt(lot, 0, 1, 0, 1) == "136226EE" && floorPatternAt(lot, 0, 1, 0, 2) == "136226EE");
+    CHECK(lot.floorPatterns.size() == 1 && lot.floorPatterns.contains(2) && lot.floorPatterns.at(2).uses == 2);
+    CHECK(turns.at(0, 1, 0)[0] == 0x13 && turns.at(0, 1, 0)[1] == 0x31);
+    // Undo puts them back.
+    setFloors(lot, was);
+    CHECK(floorPatternAt(lot, 0, 1, 0, 1) == "6cea13d8" && floorPatternAt(lot, 0, 1, 0, 2).empty() && turns.at(0, 1, 0)[0] == 0x33);
+    CHECK(lot.floorPatterns.size() == 1 && lot.floorPatterns.at(1).name == "6cea13d8" && lot.floorPatterns.at(1).uses == 1);
+}
+
+// A floor laid on a storey above the ground levels the corners of the tiles round it to its own height,
+// and those on the storeys above move with them, as the game did beside a deck: tile (27, 18) on the
+// deck's storey took corner (29, 18) from 3 to 0.9375 and the storey above from 6 to 3.9375.
+void floorsLevelTheCornersRoundThem() {
+    using namespace ts2::content;
+    Lot lot;
+    auto& heights = lot.grids[kFloorHeightGridInstance];
+    heights.width = 31;
+    heights.height = 31;
+    heights.levels = 3;
+    heights.elementSize = 4;
+    heights.elements.assign(31 * 31 * 3 * 4, 0);
+    const auto put = [&](std::int32_t level, std::int32_t x, std::int32_t y, float z) { std::memcpy(heights.at(level, x, y).data(), &z, sizeof z); };
+    for (std::int32_t x = 0; x < 31; ++x) {
+        for (std::int32_t y = 0; y < 31; ++y) {
+            put(1, x, y, x <= 28 ? 0.9375f : 3.0f);
+            put(2, x, y, x <= 28 ? 3.9375f : 6.0f);
+        }
+    }
+    const std::vector<FloorQuarter> laid{{1, 27, 18, 0, "stone", 1}, {1, 27, 18, 1, "stone", 1}};
+    const auto was = levelAroundFloors(lot, laid, 0);
+    CHECK(heights.f32(1, 29, 18, 0) == 0.9375f && heights.f32(2, 29, 18, 0) == 3.9375f);
+    CHECK(heights.f32(1, 29, 17, 0) == 0.9375f && heights.f32(1, 29, 20, 0) == 0.9375f);
+    // Only the corners of the tiles round it: the next column and row stay.
+    CHECK(heights.f32(1, 30, 18, 0) == 3.0f && heights.f32(1, 29, 21, 0) == 3.0f && heights.f32(1, 29, 16, 0) == 3.0f);
+    CHECK(was.size() == 8);
+    // Floors on the ground storey and floors taken up change nothing.
+    CHECK(levelAroundFloors(lot, {{0, 27, 18, 0, "stone", 1}, {1, 29, 25, 0, "", 1}}, 0).empty());
+    setCornerHeights(lot, was);
+    CHECK(heights.f32(1, 29, 18, 0) == 3.0f && heights.f32(2, 29, 20, 0) == 6.0f);
+}
+
+// Walls closing a square make a room inside it, and taking one out joins it with the outdoors again.
+void wallsLevelTheGroundUnderThem() {
+    using namespace ts2::content;
+    constexpr std::uint32_t kSide = 8, kCorners = kSide + 1;
+    Lot lot;
+    lot.worldBounds = WorldBounds{0, 0, 0, kSide - 1, kSide - 1, 1};
+    // Ground rising a quarter a tile along x, the storey above three higher, pond water half under it.
+    ts2::array3d::Array3D heights;
+    heights.width = heights.height = kCorners;
+    heights.levels = 2;
+    heights.elementSize = 4;
+    ts2::terrain::Array2D water;
+    water.width = water.height = kCorners;
+    water.elementSize = 4;
+    const auto put = [](std::vector<std::uint8_t>& out, float v) {
+        const auto bits = std::bit_cast<std::uint32_t>(v);
+        for (int i = 0; i < 4; ++i) {
+            out.push_back(static_cast<std::uint8_t>(bits >> (8 * i)));
+        }
+    };
+    for (std::uint32_t level = 0; level < 2; ++level) {
+        for (std::uint32_t x = 0; x < kCorners; ++x) {
+            for (std::uint32_t y = 0; y < kCorners; ++y) {
+                put(heights.elements, 0.25f * static_cast<float>(x) + 3.0f * static_cast<float>(level));
+                // The water grid runs along x first.
+                if (level == 0) {
+                    put(water.elements, 0.25f * static_cast<float>(y) - 0.5f);
+                }
+            }
+        }
+    }
+    lot.grids[kFloorHeightGridInstance] = heights;
+    lot.flatGrids[kWaterHeightGridInstance] = water;
+    std::map<std::uint32_t, ts2::wallgraph::WallGraph> graphs;
+    for (const std::uint32_t instance : {5u, 6u, 7u, 22u, 24u}) {
+        ts2::wallgraph::WallGraph g;
+        g.width = g.height = static_cast<std::int32_t>(kSide);
+        g.levels = 2;
+        g.rooms = {0};
+        graphs[instance] = g;
+    }
+    std::map<std::uint32_t, ts2::array3d::Array3D> grids;
+    std::vector<ts2::walllayer::Entry> coverings;
+    std::map<std::uint16_t, ts2::stringmap::Entry> patterns;
+    BuildScripts scripts;
+    scripts.addWallStyles("wall 1\ndefaultPattern \"blank\"\nrequiresFlatBottom true\nrequiresFlatTop true\n");
+    WallManager walls(graphs, grids, coverings, patterns, {0, 0, 0, kSide - 1, kSide - 1, 1}, scripts);
+    TerrainChanges changes;
+    TerrainEdit edit(lot, walls, scripts, {}, changes, std::nullopt);
+    std::vector<TerrainRefusal> refusals;
+    // A wall from (2, 2) to (3, 2) levels its far corner to the start's height, and the storey above
+    // with it. The water there goes half under the new ground.
+    CHECK(edit.flattenSection({2, 2, 3, 2, 0}, 0.5f, 1, refusals) && refusals.empty());
+    CHECK(edit.height({3, 2, 0}) == 0.5f && edit.height({3, 2, 1}) == 3.5f && edit.height({2, 2, 0}) == 0.5f);
+    CHECK(lot.flatGrids.at(kWaterHeightGridInstance).f32(3, 2) == 0.0f);
+    CHECK(changes.heights().size() == 2 && changes.water().size() == 1);
+    // Undo puts the ground and the water back, redo levels them again.
+    changes.toggle(lot);
+    CHECK(edit.height({3, 2, 0}) == 0.75f && edit.height({3, 2, 1}) == 3.75f && lot.flatGrids.at(kWaterHeightGridInstance).f32(3, 2) == 0.25f);
+    changes.toggle(lot);
+    CHECK(edit.height({3, 2, 0}) == 0.5f);
+    // The lot's edge stays as it is.
+    refusals.clear();
+    CHECK(!edit.flattenSection({2, 0, 3, 0, 0}, 0.5f, 1, refusals) && !refusals.empty() && refusals.front().code == 0x63);
+    CHECK(edit.height({3, 0, 0}) == 0.75f);
+}
+
+// A wall over a pool's water is refused, one along its edge is not.
+void wallsStayOffPoolWater() {
+    using namespace ts2::content;
+    constexpr std::uint32_t kSide = 8;
+    Lot lot;
+    lot.worldBounds = WorldBounds{0, 0, -1, kSide - 1, kSide - 1, 1};
+    ts2::wallgraph::WallGraph rooms;
+    rooms.firstLevel = -1;
+    lot.roomGraph = rooms;
+    // A pool on tiles 2..4 both ways, its region one storey under the ground.
+    ts2::array3d::Array3D regions;
+    regions.width = regions.height = kSide;
+    regions.levels = 3;
+    regions.elementSize = 16;
+    regions.elements.assign(std::size_t{kSide} * kSide * 3 * 16, 0xFF);
+    for (std::int32_t x = 2; x <= 4; ++x) {
+        for (std::int32_t y = 2; y <= 4; ++y) {
+            auto cell = regions.at(0, x, y);
+            for (std::size_t q = 0; q < 4; ++q) {
+                cell[q * 4] = 3;
+                cell[q * 4 + 1] = cell[q * 4 + 2] = cell[q * 4 + 3] = 0;
+            }
+        }
+    }
+    lot.grids[kPlatformRegionGridInstance] = regions;
+    std::map<std::uint32_t, ts2::wallgraph::WallGraph> graphs;
+    for (const std::uint32_t instance : {5u, 6u, 7u, 22u, 24u}) {
+        ts2::wallgraph::WallGraph g;
+        g.width = g.height = static_cast<std::int32_t>(kSide);
+        g.levels = 3;
+        g.firstLevel = -1;
+        g.rooms = {0};
+        graphs[instance] = g;
+    }
+    std::map<std::uint32_t, ts2::array3d::Array3D> grids;
+    std::vector<ts2::walllayer::Entry> coverings;
+    std::map<std::uint16_t, ts2::stringmap::Entry> patterns;
+    BuildScripts scripts;
+    WallManager walls(graphs, grids, coverings, patterns, {0, 0, -1, kSide - 1, kSide - 1, 1}, scripts);
+    TerrainChanges changes;
+    TerrainEdit edit(lot, walls, scripts, {}, changes, std::nullopt);
+    std::vector<TerrainRefusal> refusals;
+    // Across the water, straight and diagonal, the message at the first side's quarter.
+    CHECK(edit.overPool({3, 3, 4, 3, 0}, refusals) && refusals.size() == 1 && refusals.front().code == 0x46);
+    CHECK(std::abs(refusals.front().x - 3.5f) < 1e-5f && std::abs(refusals.front().y - (2.5f + 1.0f / 3.0f)) < 1e-5f);
+    CHECK(edit.overPool({3, 3, 4, 4, 0}, refusals));
+    // Along the edge, and on the pool's own storey.
+    refusals.clear();
+    CHECK(!edit.overPool({2, 2, 3, 2, 0}, refusals) && !edit.overPool({2, 5, 2, 4, 0}, refusals) && !edit.overPool({3, 3, 4, 3, -1}, refusals));
+    CHECK(refusals.empty());
+}
+
+// The wall checks: sides off the lot, the lot's outer ring, diagonals and pond water.
+void wallChecksRefuseLikeTheGame() {
+    using namespace ts2::content;
+    constexpr std::uint32_t kSide = 8, kCorners = kSide + 1;
+    Lot lot;
+    lot.worldBounds = WorldBounds{0, 0, 0, kSide - 1, kSide - 1, 1};
+    // Flat ground at 0 with pond water at 1 over it.
+    ts2::terrain::Array2D water;
+    water.width = water.height = kCorners;
+    water.elementSize = 4;
+    for (std::uint32_t i = 0; i < kCorners * kCorners; ++i) {
+        const auto bits = std::bit_cast<std::uint32_t>(1.0f);
+        for (int b = 0; b < 4; ++b) {
+            water.elements.push_back(static_cast<std::uint8_t>(bits >> (8 * b)));
+        }
+    }
+    lot.flatGrids[kWaterHeightGridInstance] = water;
+    std::map<std::uint32_t, ts2::wallgraph::WallGraph> graphs;
+    for (const std::uint32_t instance : {5u, 6u, 7u, 22u, 24u}) {
+        ts2::wallgraph::WallGraph g;
+        g.width = g.height = static_cast<std::int32_t>(kSide);
+        g.levels = 2;
+        g.rooms = {0};
+        graphs[instance] = g;
+    }
+    std::map<std::uint32_t, ts2::array3d::Array3D> grids;
+    std::vector<ts2::walllayer::Entry> coverings;
+    std::map<std::uint16_t, ts2::stringmap::Entry> patterns;
+    BuildScripts scripts;
+    scripts.addWallStyles("wall 1\n");
+    WallManager walls(graphs, grids, coverings, patterns, {0, 0, 0, kSide - 1, kSide - 1, 1}, scripts);
+    TerrainChanges changes;
+    TerrainEdit edit(lot, walls, scripts, {}, changes, std::nullopt);
+    // Every quarter is held up from below until the support test at the end.
+    bool heldUp = true;
+    edit.setHeldUp([&](const TileQuarter&) { return heldUp; });
+    const WallRules wall{}, fence{WallRules::Kind::Fence, true, false}, greenhouse{WallRules::Kind::Fence, false, false};
+    std::vector<TerrainRefusal> refusals;
+    const auto code = [&](const WallSegment& s, const WallRules& rules) {
+        refusals.clear();
+        return edit.checkWall(s, rules, refusals) ? 0 : refusals.empty() ? -1 : refusals.front().code;
+    };
+    // Along the lot's edge a wall has a side off the lot, a fence needs only one side on it.
+    CHECK(code({0, 3, 0, 4, 0}, wall) == 0x40);
+    CHECK(code({0, 3, 0, 4, 0}, fence) == 0x47);
+    // A wall beside the outer ring of tiles is refused, in pond water or not.
+    CHECK(code({1, 0, 1, 1, 0}, wall) == 0x45);
+    CHECK(code({3, 3, 4, 3, 0}, wall) == 0);
+    // A fence may not stand in pond water, and a greenhouse fence may not go diagonally.
+    CHECK(code({3, 3, 4, 3, 0}, fence) == 0x47);
+    CHECK(code({3, 3, 4, 4, 0}, greenhouse) == 0x4C && refusals.size() == 2);
+    // On the storey above the water is no matter.
+    CHECK(code({3, 3, 4, 3, 1}, fence) == 0);
+    // A locked tile keeps a wall off both its sides, a fence needs one side free.
+    ts2::array3d::Array3D locked;
+    locked.width = locked.height = kSide;
+    locked.levels = 2;
+    locked.elementSize = 1;
+    locked.elements.assign(std::size_t{kSide} * kSide * 2, 0);
+    locked.at(1, 5, 5)[0] = 1;
+    lot.grids[kLockedTileGridInstance] = locked;
+    CHECK(code({5, 5, 6, 5, 1}, wall) == 0x45);
+    CHECK(code({5, 5, 6, 5, 1}, fence) == 0);
+    // A wall on an edge that has one already is refused first for that, which the wall tool passes
+    // over. A diagonal may not cross another.
+    CHECK(walls.add(1, "", "", {2, 5, 3, 5, 1}) && walls.add(1, "", "", {5, 2, 6, 3, 1}));
+    CHECK(code({3, 5, 2, 5, 1}, wall) == 0x41 && code({2, 5, 3, 5, 1}, fence) == 0x41);
+    CHECK(code({6, 2, 5, 3, 1}, wall) == 0x4C);
+    // A Sim on a side tile is in the way, a hidden one is not.
+    std::uint16_t hidden = 0;
+    TerrainEdit withSim(lot, walls, scripts, [&](std::int32_t x, std::int32_t y, std::int32_t level) {
+        std::vector<TerrainObject> out;
+        if (x == 4 && y == 6 && level == 1) {
+            TerrainObject sim;
+            sim.sim = true;
+            sim.hidden = hidden;
+            sim.type = 2;
+            sim.x = 4.5f;
+            sim.y = 6.5f;
+            out.push_back(sim);
+        }
+        return out;
+    }, changes, std::nullopt);
+    withSim.setHeldUp([](const TileQuarter&) { return true; });
+    refusals.clear();
+    CHECK(!withSim.checkWall({4, 6, 5, 6, 1}, wall, refusals) && refusals.size() == 1 && refusals.front().code == 0x4B);
+    hidden = 2;
+    refusals.clear();
+    CHECK(withSim.checkWall({4, 6, 5, 6, 1}, wall, refusals) || refusals.front().code != 0x4B);
+    // An object keeps walls off its tile's diagonals unless its wall flags (data 0x0D) let them, and
+    // off a side whose bit is set, turned with it.
+    std::uint16_t wallFlags = 0;
+    std::int32_t direction = 0;
+    std::vector<std::array<float, 4>> footprint;
+    bool byBox = false;
+    TerrainEdit withObject(lot, walls, scripts, [&](std::int32_t x, std::int32_t y, std::int32_t level) {
+        std::vector<TerrainObject> out;
+        if (x == 4 && y == 6 && level == 1) {
+            TerrainObject o;
+            o.x = 4.5f;
+            o.y = 6.5f;
+            o.direction = direction;
+            o.wallFlags = wallFlags;
+            o.footprint = footprint;
+            o.byBox = byBox;
+            out.push_back(o);
+        }
+        return out;
+    }, changes, std::nullopt);
+    withObject.setHeldUp([](const TileQuarter&) { return true; });
+    const auto objectCode = [&](const WallSegment& s) {
+        refusals.clear();
+        return withObject.checkWall(s, wall, refusals) ? 0 : refusals.front().code;
+    };
+    CHECK(objectCode({4, 6, 5, 7, 1}) == 0x0C && objectCode({4, 6, 4, 7, 1}) == 0);
+    wallFlags = 0x20 | 0x80 | 0x100;
+    CHECK(objectCode({4, 6, 5, 7, 1}) == 0 && objectCode({5, 7, 4, 7, 1}) == 0x0C);
+    // A quarter turn moves the side to the next edge.
+    direction = 2;
+    CHECK(objectCode({5, 6, 5, 7, 1}) == 0 && objectCode({4, 7, 4, 6, 1}) == 0x0C);
+    // A one tile diagonal its footprint reaches is in the way. A corner piece past the tile's middle
+    // reaches only the diagonal through that corner.
+    direction = 0;
+    wallFlags = 0x20 | 0x80;
+    footprint = {{4.6f, 6.6f, 5.0f, 7.0f}};
+    CHECK(objectCode({4, 6, 5, 7, 1}) == 0x0C && objectCode({5, 6, 4, 7, 1}) == 0);
+    // A door tested by its box is in the way of a wall when a wall dividing rooms already runs inside
+    // that box.
+    footprint = {{4.0f, 6.0f, 5.0f, 8.0f}};
+    wallFlags = 0x20 | 0x80 | 0x100;
+    CHECK(objectCode({5, 6, 5, 7, 1}) == 0);
+    CHECK(walls.add(1, "", "", {4, 7, 5, 7, 1}));
+    CHECK(objectCode({5, 6, 5, 7, 1}) == 0);
+    byBox = true;
+    CHECK(objectCode({5, 6, 5, 7, 1}) == 0x0C);
+    // Upstairs with nothing below a wall needs support, which a flat topped hip roof a storey down
+    // gives three tiles in from its edge.
+    heldUp = false;
+    CHECK(code({3, 4, 4, 4, 1}, wall) == 0x48);
+    ts2::roofs::Roof roof;
+    roof.type = 6;
+    roof.x0 = 0;
+    roof.y0 = 0;
+    roof.x1 = 8;
+    roof.y1 = 8;
+    lot.roofs.push_back(roof);
+    CHECK(code({3, 4, 4, 4, 1}, wall) == 0 && code({2, 4, 3, 4, 1}, wall) == 0x48);
+}
+
+// A package being read can be moved aside, as a save moves a character file it replaces, and goes on
+// reading the file it opened.
+void buildDataIsPutBackIntoTheLotPackage() {
+    using namespace ts2;
+    const auto bodyOf = [](const dbpf::StoredResource& r) { return r.compressed ? qfs::decompress(r.bytes) : r.bytes; };
+    std::vector<walllayer::Entry> coverings{{7, 1, 0, 0xFFFF}};
+    std::map<std::uint16_t, stringmap::Entry> walls{{0, {"blank", 1}}}, floors{{0, {"0000abcd", 4}}};
+    lotgrid::Grid grid{true, 2, 2, 1, std::vector<std::uint8_t>(8, 0)};
+    dbpf::PackageImage image;
+    image.resources.push_back(dbpf::storeResource({types::kWallLayer, 0xFFFFFFFF, content::kWallCoveringLayerInstance, 0}, walllayer::write(coverings)));
+    image.resources.push_back(dbpf::storeResource({types::kPatternMap, 0xFFFFFFFF, content::kWallPatternMapInstance, 0}, stringmap::write(walls)));
+    image.resources.push_back(dbpf::storeResource({types::kPatternMap, 0xFFFFFFFF, content::kFloorPatternMapInstance, 0}, stringmap::write(floors)));
+    image.resources.push_back(dbpf::storeResource({types::kArray3D, 0xFFFFFFFF, content::kFloorGridInstance, 0}, lotgrid::writeGrid(grid)));
+    // A grid the lot holds at another size stays as it was.
+    image.resources.push_back(dbpf::storeResource({types::kArray3D, 0xFFFFFFFF, 9, 0}, lotgrid::writeGrid(grid)));
+    const auto keptGrid = image.resources.back().bytes;
+
+    content::Lot lot;
+    lot.savedWallCoverings = {{7, 1, 1, 0}};
+    lot.wallPatterns = {{0, {"blank", 1}}, {1, {"00001234", 1}}};
+    lot.floorPatterns = floors;
+    array3d::Array3D floor;
+    floor.width = floor.height = floor.levels = 1;
+    floor.elementSize = 2;
+    floor.elements = {1, 0, 2, 0, 3, 0, 4, 0};
+    lot.grids.emplace(content::kFloorGridInstance, floor);
+    array3d::Array3D other = floor;
+    other.elements.resize(4);
+    lot.grids.emplace(9, other);
+
+    CHECK(content::putBuildRecords(image, lot) == 4);
+    const auto layer = walllayer::parse(bodyOf(image.resources[0]));
+    CHECK(layer.size() == 1 && layer[0].wall == 7 && layer[0].left == 1 && layer[0].right == 0);
+    const auto patterns = stringmap::parse(bodyOf(image.resources[1]));
+    CHECK(patterns.size() == 2 && patterns.at(1).name == "00001234");
+    const auto floorBack = lotgrid::readGrid(bodyOf(image.resources[3]));
+    CHECK(floorBack && floorBack->cells == floor.elements && floorBack->width == 2);
+    CHECK(image.resources[4].bytes == keptGrid);
+}
+
 std::vector<Test> contentTests() {
     return {
         {"walls closing a loop make a room", wallsClosingALoopMakeARoom},
@@ -2158,5 +2550,11 @@ std::vector<Test> contentTests() {
         {"numbers are read whole or from the start", numbersAreReadWholeOrFromTheStart},
         {"an open package can be moved aside", anOpenPackageCanBeMovedAside},
         {"a replaced package is read again", aReplacedPackageIsReadAgain},
+        {"floors take their patterns", floorsTakeTheirPatterns},
+        {"floors level the corners round them", floorsLevelTheCornersRoundThem},
+        {"walls level the ground under them", wallsLevelTheGroundUnderThem},
+        {"walls stay off pool water", wallsStayOffPoolWater},
+        {"wall checks refuse like the game", wallChecksRefuseLikeTheGame},
+        {"build data is put back into the lot package", buildDataIsPutBackIntoTheLotPackage},
     };
 }

@@ -21,12 +21,21 @@ struct WallStyle {
     // verticalSpan floorToFloor, the default. A stage wall (stageWall) is a span of its own.
     bool floorToFloor = true;
     bool cutAway = true;      // mayCutAway: cut down by the cutaway and walls-down views
+    bool mayChangeSurface = true;  // mayChangeSurface: the wall paint tool may cover its sides
     bool blocksLight = true;  // blocksLight: stops lamp and window light spreading past it
     bool bearsLoad = true;    // bearsLoad: holds up floors and objects on the storey above
     bool blocksPlacement = true;  // blocksPlacement: divides rooms
     // requiresFlatBottom and requiresFlatTop: the ground under it, and the corners a storey up, are
-    // levelled as it is built and stay so while it stands. Off unless the script says so.
-    bool flatBottom = false, flatTop = false;
+    // levelled as it is built and stay so while it stands.
+    bool flatBottom = true, flatTop = true;
+    bool mayPlaceDiagonally = true;  // mayPlaceDiagonally
+    bool submersible = true;         // submersible: may stand with every side in pond water
+    bool supportUnderneath = true;   // requiresSupportUnderneath
+    bool blocksLocomotion = true;    // blocksLocomotion
+    // deleteTool: the tools that may take it out, as bits. The wall tool is the partition tool, and
+    // foundation, deck and pool sides go only with their platform (levelRoom).
+    static constexpr std::uint8_t kDeletePartition = 1, kDeleteRoof = 2, kDeleteLevelRoom = 4, kDeleteModularStairs = 8;
+    std::uint8_t deleteTools = 0x0F;
     // verticalSpan, as the game numbers it.
     enum class Span { Fixed, FloorToFloor, FloorToRoof, FloorToStairs, FloorToFloorBasedCeiling };
     Span span = Span::FloorToFloor;
@@ -70,6 +79,32 @@ struct BuildScripts {
     // The floor pattern on top of each deck, foundation, pool and stage product (deckfoundations.txt),
     // by the product's id, which the lot's platform region grid holds under it. Lowercase.
     std::map<std::int32_t, std::string> platformFloors;
+    // Each of those products: what it is, the wall style of its sides and the catalog text index of
+    // its square kind (its first clone), whose string 3N in the platform text table is its price.
+    struct Platform {
+        enum class Kind { Foundation, Deck, Pool, Stage };
+        Kind kind = Kind::Foundation;
+        std::uint32_t wallStyle = 0;
+        int textIndex = -1;
+        bool laysSupports = false;  // supportLayout with -floodfill, -edgefill or -corners
+    };
+    std::map<std::int32_t, Platform> platforms;
+    std::string platformTextFile;
+    std::uint32_t platformTextTable = 0;
+    // A fireplace from fireplaces.txt: the object names of its pieces, the mantle or hearth a Sim
+    // uses, the chimney above it on each storey, the chimney top over the roof (and its footprint
+    // under a roof) and the piece on a foundation storey. Its catalog text index N has its price at
+    // string 3N, its name at 3N + 1 and its description at 3N + 2 of its own text table, and its
+    // building tip (counted from 1, 0 for none) ends the description.
+    struct Fireplace {
+        std::string mantle, chimney, top, topFootprint, foundation;
+        std::string textFile;
+        std::uint32_t textTable = 0;
+        int textIndex = -1;
+        int tip = 0;
+    };
+    // By the fireplace's id.
+    std::map<std::int32_t, Fireplace> fireplaces;
 
     // Whether a wall segment of this wall layer type is a full room wall: a drawn wall style spanning
     // floor to floor. Fences (types that are GUIDs) and unknown styles are not.
@@ -84,6 +119,7 @@ struct BuildScripts {
     void addRoofPatterns(std::string_view text);
     void addFenceArches(std::string_view text);
     void addPlatforms(std::string_view text);
+    void addFireplaces(std::string_view text);
 };
 
 // The scripts of every product, in load order.

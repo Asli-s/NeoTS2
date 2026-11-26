@@ -148,17 +148,35 @@ void BuildScripts::addWallStyles(std::string_view text) {
         } else if (key == "invisibleLightBlocking") {
             style->kind = WallStyle::Kind::InvisibleLightBlocking;
         } else if (key == "requiresFlatBottom") {
-            style->flatBottom = lower(value) == "true";
+            style->flatBottom = lower(value) != "false";
         } else if (key == "requiresFlatTop") {
-            style->flatTop = lower(value) == "true";
+            style->flatTop = lower(value) != "false";
+        } else if (key == "mayPlaceDiagonally") {
+            style->mayPlaceDiagonally = lower(value) != "false";
+        } else if (key == "blocksLocomotion") {
+            style->blocksLocomotion = lower(value) != "false";
+        } else if (key == "requiresSupportUnderneath") {
+            style->supportUnderneath = lower(value) != "false";
+        } else if (key == "submersible") {
+            style->submersible = lower(value) != "false";
         } else if (key == "blocksPlacement") {
             style->blocksPlacement = lower(value) != "false";
         } else if (key == "mayCutAway") {
             style->cutAway = lower(value) != "false";
+        } else if (key == "mayChangeSurface") {
+            style->mayChangeSurface = lower(value) != "false";
         } else if (key == "blocksLight") {
             style->blocksLight = lower(value) != "false";
         } else if (key == "bearsLoad") {
             style->bearsLoad = lower(value) != "false";
+        } else if (key == "deleteTool") {
+            // One tool only. A name the game doesn't know leaves every tool allowed.
+            const std::string tool = lower(value);
+            style->deleteTools = tool == "partition"       ? WallStyle::kDeletePartition
+                                 : tool == "roof"          ? WallStyle::kDeleteRoof
+                                 : tool == "levelroom"     ? WallStyle::kDeleteLevelRoom
+                                 : tool == "modularstairs" ? WallStyle::kDeleteModularStairs
+                                                           : style->deleteTools;
         } else if (key == "notRendered") {
             style->rendered = false;
         } else if (key == "defaultPattern") {
@@ -195,12 +213,73 @@ void BuildScripts::addFenceArches(std::string_view text) {
 }
 
 void BuildScripts::addPlatforms(std::string_view text) {
+    using Kind = Platform::Kind;
     std::optional<std::int32_t> product;
     forEachLine(text, [&](const std::string& key, const std::string& value) {
         if (key == "deck" || key == "foundation" || key == "pool" || key == "stage") {
             product = static_cast<std::int32_t>(std::strtol(value.c_str(), nullptr, 10));
-        } else if (key == "floorPattern" && product) {
+            platforms[*product] = {key == "deck" ? Kind::Deck : key == "foundation" ? Kind::Foundation : key == "pool" ? Kind::Pool : Kind::Stage};
+        } else if (key == "catalogTextResource") {
+            std::istringstream words(value);
+            std::string file;
+            std::uint32_t table = 0;
+            if (words >> file >> table) {
+                platformTextFile = file;
+                platformTextTable = table;
+            }
+        } else if (!product) {
+            return;
+        } else if (key == "floorPattern") {
             platformFloors[*product] = lower(value);
+        } else if (key == "wallStyle") {
+            platforms[*product].wallStyle = static_cast<std::uint32_t>(std::strtoul(value.c_str(), nullptr, 10));
+        } else if (key == "catalogTextIndex" || key == "catalogTextIndices") {
+            platforms[*product].textIndex = static_cast<int>(std::strtol(value.c_str(), nullptr, 10));
+        } else if (key == "supportLayout") {
+            const std::string layout = lower(value);
+            platforms[*product].laysSupports = layout.find("-floodfill") != std::string::npos || layout.find("-edgefill") != std::string::npos ||
+                                               layout.find("-corners") != std::string::npos;
+        }
+    });
+}
+
+void BuildScripts::addFireplaces(std::string_view text) {
+    std::string file;
+    std::uint32_t table = 0;
+    int tip = 0;
+    Fireplace* fireplace = nullptr;
+    forEachLine(text, [&](const std::string& key, const std::string& value) {
+        const std::string k = lower(key);
+        if (k == "catalogtextresource") {
+            std::istringstream words(value);
+            std::string name;
+            std::uint32_t index = 0;
+            if (words >> name >> index) {
+                file = name;
+                table = index;
+            }
+        } else if (k == "buildtipindex") {
+            tip = static_cast<int>(std::strtol(value.c_str(), nullptr, 10));
+        } else if (k == "fireplace") {
+            fireplace = &fireplaces[static_cast<std::int32_t>(std::strtol(value.c_str(), nullptr, 10))];
+            *fireplace = {};
+            fireplace->textFile = file;
+            fireplace->textTable = table;
+            fireplace->tip = tip;
+        } else if (fireplace == nullptr) {
+            return;
+        } else if (k == "mantle") {
+            fireplace->mantle = value;
+        } else if (k == "chimneyhearth") {
+            fireplace->chimney = value;
+        } else if (k == "chimneytop") {
+            fireplace->top = value;
+        } else if (k == "chimneytopfp") {
+            fireplace->topFootprint = value;
+        } else if (k == "chimneyfoundation") {
+            fireplace->foundation = value;
+        } else if (k == "catalogtextindex") {
+            fireplace->textIndex = static_cast<int>(std::strtol(value.c_str(), nullptr, 10));
         }
     });
 }
@@ -219,6 +298,7 @@ BuildScripts loadBuildScripts(const std::vector<Product>& products) {
         scripts.addRoofPatterns(read(folder / "roofPatterns.txt"));
         scripts.addFenceArches(read(folder / "fencearches.txt"));
         scripts.addPlatforms(read(folder / "deckfoundations.txt"));
+        scripts.addFireplaces(read(folder / "fireplaces.txt"));
     }
     return scripts;
 }
