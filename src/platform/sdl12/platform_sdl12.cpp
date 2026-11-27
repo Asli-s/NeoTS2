@@ -26,15 +26,20 @@ constexpr KeyInfo kKeys[] = {
     {Key::C, SDLK_c},
     {Key::D, SDLK_d},
     {Key::E, SDLK_e},
+    {Key::G, SDLK_g},
+    {Key::H, SDLK_h},
+    {Key::J, SDLK_j},
     {Key::L, SDLK_l},
     {Key::P, SDLK_p},
     {Key::Q, SDLK_q},
     {Key::R, SDLK_r},
     {Key::S, SDLK_s},
+    {Key::T, SDLK_t},
     {Key::W, SDLK_w},
     {Key::X, SDLK_x},
     {Key::Y, SDLK_y},
     {Key::Z, SDLK_z},
+    {Key::F, SDLK_f},
     {Key::Num1, SDLK_1},
     {Key::Num2, SDLK_2},
     {Key::Num3, SDLK_3},
@@ -59,6 +64,9 @@ constexpr KeyInfo kKeys[] = {
     {Key::PageDown, SDLK_PAGEDOWN},
     {Key::Home, SDLK_HOME},
     {Key::End, SDLK_END},
+    {Key::F1, SDLK_F1},
+    {Key::F2, SDLK_F2},
+    {Key::F3, SDLK_F3},
     {Key::F5, SDLK_F5},
     {Key::Up, SDLK_UP},
     {Key::Down, SDLK_DOWN},
@@ -214,6 +222,14 @@ bool keyHeld(Key key) {
         }
     }
     return false;
+}
+
+bool ctrlHeld() {
+    return (SDL_GetModState() & KMOD_CTRL) != 0;
+}
+
+bool altHeld() {
+    return (SDL_GetModState() & KMOD_ALT) != 0;
 }
 
 void startTextInput() {

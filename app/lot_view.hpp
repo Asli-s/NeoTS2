@@ -5,6 +5,7 @@
 #include "orbit.hpp"
 #include "render/irenderer.hpp"
 #include "scene/lot_light_maps.hpp"
+#include "scene/lot_parts.hpp"
 #include "scene/lot_skirt.hpp"
 #include "scene/neighborhood_plumbobs.hpp"
 #include "scene/neighborhood_scene.hpp"
@@ -322,6 +323,22 @@ inline void appendScene(ts2::scene::Scene& out, ts2::scene::Scene add, const ts2
         w.x1 = b[0];
         w.y1 = b[1];
         out.walls.push_back(w);
+    }
+    if (add.lotGround && !out.lotGround) {
+        auto kept = std::make_shared<LotGround>(*add.lotGround);
+        for (auto& m : kept->meshes) {
+            m += meshes;
+        }
+        out.lotGround = std::move(kept);
+    }
+    if (add.lotWalls && !out.lotWalls) {
+        auto kept = std::make_shared<LotWalls>(*add.lotWalls);
+        for (auto& i : kept->instances) {
+            i += instances;
+        }
+        kept->firstWall += walls;
+        kept->place = place * kept->place;
+        out.lotWalls = std::move(kept);
     }
 }
 

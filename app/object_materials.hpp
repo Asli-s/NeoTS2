@@ -56,6 +56,8 @@ public:
         }
         return found->second;
     }
+    // The box a model's shapes take, as the game measures it (see SceneBuilder::modelBox).
+    std::optional<std::pair<std::array<float, 3>, std::array<float, 3>>> modelBox(const std::string& name) { return builder_.modelBox(name); }
     // Where a named node of a model sits in it, once model() has added it. Null for none.
     const ts2::scene::Transform* bone(const std::string& model, const std::string& node) const { return builder_.bone(model, node); }
 

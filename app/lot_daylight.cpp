@@ -40,6 +40,19 @@ ts2::scene::ObjectLighting between(const ts2::scene::ObjectLighting& from, const
     return out;
 }
 
+// A light map part way along a fade from `from` to `to` (0 .. 1), as drawn, to the nearest step.
+ts2::scene::Image between(const ts2::scene::Image& from, const ts2::scene::Image& to, float t) {
+    ts2::scene::Image out = to;
+    const auto w = static_cast<std::uint32_t>(std::clamp(t, 0.0f, 1.0f) * 256.0f + 0.5f);
+    const std::uint8_t* a = from.rgba.data();
+    const std::uint8_t* b = to.rgba.data();
+    std::uint8_t* o = out.rgba.data();
+    for (std::size_t i = 0, n = out.rgba.size(); i < n; ++i) {
+        o[i] = static_cast<std::uint8_t>((a[i] * (256 - w) + b[i] * w + 128) >> 8);
+    }
+    return out;
+}
+
 } // namespace
 
 LotDaylight::LotDaylight(std::shared_ptr<LotLightBase> base, std::string state, const std::array<float, 3>& environment,
@@ -58,7 +71,7 @@ void LotDaylight::update(double seconds, std::span<const std::int16_t> globals, 
         return;
     }
     if (fade_ < 1) {
-        fade_ = std::min(1.0, fade_ + seconds / kFadeSeconds);
+        fade_ = fadeSeconds_ > 0 ? std::min(1.0, fade_ + seconds / fadeSeconds_) : 1.0;
         scene.objectLighting = fade_ < 1 ? between(from_, to_, static_cast<float>(fade_)) : to_;
         renderer.setObjectLighting(scene.objectLighting);
         renderer.setLightMapFade(static_cast<float>(fade_));
@@ -67,6 +80,9 @@ void LotDaylight::update(double seconds, std::span<const std::int16_t> globals, 
             light[i] = environmentFrom_[i] + (environment_[i] - environmentFrom_[i]) * static_cast<float>(fade_);
         }
         renderer.setImposterLight(light);
+        if (fade_ >= 1) {
+            fadeFrom_.clear();
+        }
     }
     if (working_.valid()) {
         if (working_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
@@ -120,10 +136,26 @@ void LotDaylight::update(double seconds, std::span<const std::int16_t> globals, 
         return;
     }
     state_ = lotLightState(*light);
+    workingFade_ = changeFade_.value_or(kFadeSeconds);
+    changeFade_.reset();
     working_ = std::async(std::launch::async, [light = std::move(light)] {
         workOutLotLight(*light);
         return light;
     });
+}
+
+void LotDaylight::lotChanged(ts2::scene::Assets& assets, const ts2::scene::Scene& scene, const ts2::content::Lot& lot) {
+    if (!base_) {
+        return;
+    }
+    if (auto base = lotLightChanged(assets, *base_, scene, lot)) {
+        base_ = std::move(base);
+    }
+    again_ = true;
+    // A state without transition times: how the game fades then is not known yet, so it comes at once.
+    const auto& states = assets.lighting().states;
+    const auto state = states.find(state_);
+    changeFade_ = state != states.end() && state->second.transitionTimes ? (*state->second.transitionTimes)[0] : 0.0;
 }
 
 void LotDaylight::settle(ts2::scene::Scene& scene, ts2::render::IRenderer& renderer, LotLife& life) {
@@ -147,8 +179,27 @@ void LotDaylight::settle(ts2::scene::Scene& scene, ts2::render::IRenderer& rende
 }
 
 void LotDaylight::put(LotLight& light, ts2::scene::Scene& scene, ts2::render::IRenderer& renderer, LotLife& life) {
-    const auto put = putLotLight(scene, light, place_);
+    // Only light maps whose light changed are put in, each kept as it was.
+    std::map<int, ts2::scene::Image> replaced;
+    const auto put = putLotLight(scene, light, place_, &replaced);
     renderer.setImages(scene, put.images, true);
+    // A fade begun while one runs fades from the light seen then, part way between that one's ends:
+    // the light maps it still fades and those put in now.
+    if (fade_ < 1) {
+        std::map<int, ts2::scene::Image> seen;
+        for (auto& [i, from] : fadeFrom_) {
+            const auto old = replaced.find(i);
+            const auto& now = old != replaced.end() ? old->second : scene.images[static_cast<std::size_t>(i)];
+            if (from.width == now.width && from.height == now.height && from.rgba.size() == now.rgba.size()) {
+                seen.emplace(i, between(from, now, static_cast<float>(fade_)));
+            }
+        }
+        renderer.setLightMapFadeFrom(seen);
+        for (auto& [i, image] : seen) {
+            replaced.insert_or_assign(i, std::move(image));
+        }
+    }
+    fadeFrom_ = std::move(replaced);
     renderer.setLightMapFade(0);
     if (put.sky) {
         renderer.setSkybox(scene.skybox);
@@ -160,6 +211,7 @@ void LotDaylight::put(LotLight& light, ts2::scene::Scene& scene, ts2::render::IR
     // A fade still running ends where it was going, so the lights don't add up.
     from_ = fade_ < 1 ? to_ : scene.objectLighting.value_or(ts2::scene::ObjectLighting{});
     to_ = outdoorLotLight(light, place_);
+    fadeSeconds_ = workingFade_;
     environmentFrom_ = environment_;
     environment_ = lotLightEnvironment(light);
     fade_ = 0;

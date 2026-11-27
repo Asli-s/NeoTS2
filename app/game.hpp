@@ -17,6 +17,11 @@
 #include "free_camera.hpp"
 #include "neighborhood.hpp"
 #include "lot_daylight.hpp"
+#include "buy_hand.hpp"
+#include "money_text.hpp"
+#include "cost_labels.hpp"
+#include "wall_tool.hpp"
+#include "floor_tool.hpp"
 #include "lot_life.hpp"
 #include "tv_stations.hpp"
 #include "lot_light.hpp"
@@ -30,7 +35,10 @@
 #include "portraits.hpp"
 
 #include "content/cameras.hpp"
+#include "content/terrain_edit.hpp"
+#include "content/wall_manager.hpp"
 #include "sim/game_wide_save.hpp"
+#include "sim/rooms.hpp"
 #include "formats/cobject_record.hpp"
 #include "ui/animated_bitmap.hpp"
 #include "imposter_baker.hpp"
@@ -148,6 +156,7 @@ private:
         app::Orbit camera;
         ts2::render::IRenderer::Prepared gpu;
         std::shared_ptr<const app::RouteModelTable> routeModels;
+        std::shared_ptr<ts2::content::Lot> content;  // the lot as loaded, for its walls to be changed
         // For lighting it again as its clock moves on.
         std::shared_ptr<app::LotLightBase> light;
         std::string lightState;
@@ -237,6 +246,13 @@ private:
     // A hair's picture for the appearance editor, drawn as the game draws it on its stock Sim of the
     // age and gender, over a clear background. Nullopt when it can't be drawn.
     std::optional<ts2::tga::Pixels> drawHairPicture(std::uint32_t age, std::uint32_t gender, const ts2::scenegraph::Link& hair);
+    // The catalog picture the game draws of object type `guid` when it has none of its own.
+    std::optional<ts2::tga::Pixels> drawObjectPicture(std::uint32_t guid);
+    // The picture the game draws of a colour choice it hasn't cached: `model` drawn in the colours
+    // given as (material, subset).
+    std::optional<ts2::tga::Pixels> drawColourPicture(const std::string& model, const std::vector<std::pair<std::string, std::string>>& colours);
+    // Draws a model LotLife put in the lot for a picture, then takes it out again.
+    std::optional<ts2::tga::Pixels> drawPicture(const std::optional<LotLife::ObjectPicture>& picture);
     // Shows the game's message box (the newspaper's job offer among them) when a script asks, and
     // closes it when answered with the button pressed, counted from 0.
     void updateMessage();
@@ -248,7 +264,8 @@ private:
     // "Saving Lot" box.
     bool dialogOpen() const {
         return quitBox_.isOpen() || errorBox_.isOpen() || babyNames_.isOpen() || phoneBook_.isOpen() || typePicker_.isOpen() ||
-               changeAppearance_.isOpen() || messageBox_.isOpen() || savingPopup_.isOpen();
+               changeAppearance_.isOpen() || messageBox_.isOpen() || savingPopup_.isOpen() ||
+               lotUi_.designDialog().isOpen();
     }
     // Typing goes on in the naming dialog after the cheat window closes over it.
     void keepBabyNameTyping() {
@@ -332,6 +349,87 @@ private:
     void playPressSound(int window);
     // The sound a live-mode key plays: only the pause and speed keys make one.
     void playKeySound(app::LotUi::Action action, bool wasPaused);
+    // Sells what Buy mode's hand holds, with the game's sale sound and money text.
+    void sellHeld();
+    // Undoes (or redoes) Buy mode's last change, with the game's sound.
+    void undoHand(bool redo);
+    // The sound and money text of a purchase the hand made, or the error sound when it couldn't pay.
+    void paidHand(const app::BuyHand::Paid& paid);
+    // Leaving Buy mode or saving: the hand puts a lifted object down where it stands (back where it
+    // was lifted from when it can't stand there), drops a catalog item not bought, and sold objects
+    // are deleted for good. Going between Buy and Build mode keeps the undo history, which the two share,
+    // and the sold objects with it. With `asEscape` (opening Options) the hand lets go as Esc does,
+    // a lifted object going back where it was lifted from.
+    void settleHand(bool keepHistory = false, bool asEscape = false);
+    // One of Buy mode's tools (the Design tool, the eyedropper or the sledgehammer) takes the hand's
+    // place, dropping a catalog item the hand holds. Not while the hand holds a lifted object, whose
+    // panel hides the tool buttons.
+    void pickBuyTool(app::LotUi::Tool tool);
+    // The cursor of the Buy mode tool in use, the arrow for the hand.
+    std::uint32_t buyToolCursor() const;
+    // A left button let go over `object` on the lot with the eyedropper or the sledgehammer: the
+    // eyedropper hands the hand a copy of it to buy, in its colours, and the sledgehammer sells it.
+    void useBuyTool(std::uint32_t object);
+    // Sells `object` with undo as the sledgehammer does, refused while a Sim is in its slots.
+    void smashObject(std::uint32_t object);
+    // The sledgehammer in Build mode on a wall or floor at `point`, as the wall and floor tools take
+    // them out, with their refund and undo: one tile's length of wall, or one tile's floor. Pools
+    // and stages are not done yet.
+    void smashBuilt(const ts2::scene::Picker::Hit& hit, const std::array<float, 3>& point);
+    void smashWall(const ts2::scene::WallInfo& wall, const std::array<float, 2>& at);
+    // `level` is the floor grid's, `at` the route's x and y.
+    void smashFloor(std::int32_t level, const std::array<float, 2>& at);
+    // The tile the sledgehammer lights over a wall or floor hit at `point`: the wall's tile or the
+    // floored tile, none over anything else.
+    std::optional<ts2::render::TileHighlight> smashHighlight(const ts2::scene::Picker::Hit& hit, const std::array<float, 3>& point);
+    // The catalog covering the eyedropper takes at `point`: the floor quarter's, or the covering of
+    // the wall's side the point is on. Null over anything else.
+    const ts2::content::Covering* eyedropCovering(const ts2::scene::Picker::Hit& hit, const std::array<float, 3>& point);
+    // The eyedropper's name tip over what it would take, at `point`. Empty text takes it away.
+    void showEyedropTip(const std::string& text, const std::array<float, 3>& point);
+    // The sledgehammer on a foundation or deck tile under floor tile (x, y) of grid level `level`
+    // (game_platforms.cpp): the game's platform tool takes that tile out. False when no foundation or
+    // deck holds the tile up, for the plain floor smash.
+    bool smashPlatform(std::int32_t level, std::int32_t x, std::int32_t y);
+    // Undo puts the platform tile back (`in` false) and redo takes it out again.
+    void togglePlatform(std::uint32_t id, bool in);
+    // A texture by name as an image of the lot's scene, loaded once, -1 when missing.
+    int selectionImage(const std::string& texture);
+    std::map<std::string, int> selectionImages_;
+    // The lit tile stays until the mouse moves or the tool changes.
+    std::optional<ts2::render::TileHighlight> smashLit_;
+    // The day/night button or L: the lot is lit as at night while its time of day is day or morning,
+    // and as by day while it is evening or night. The clock sets the time of day from the hour again
+    // as it runs, and so does leaving Buy or Build mode.
+    void toggleDayNight();
+    // The lot's cameras: the Live camera, the top-down view (the Build camera of BuildCamera.txt) and
+    // the 45 degree view (the Ceiling camera of CeilingCamera.txt). Each keeps its own zoom and pitch.
+    // The one turned on takes the point looked at and the facing from the one left, and the Build
+    // camera zooms to its first level each time it comes on.
+    enum class LotCamera { Live, TopDown, Ceiling };
+    struct LotCameraState {
+        std::optional<ts2::camera::Config> rig;
+        float distance = 0, distanceGoal = 0, pitchBlend = 0, pitchBlendGoal = 0;
+        float minDistance = 1, maxDistance = 300, pivotHeight = 0;
+        bool used = false;
+    };
+    void setLotCamera(LotCamera camera);
+    // The top-down or 45 degree button (or T or G): turns that view on, or back to the Live camera
+    // when it is on.
+    void toggleLotCamera(LotCamera camera);
+    std::array<LotCameraState, 3> lotCameras_{};
+    LotCamera lotCamera_ = LotCamera::Live;
+    // The view Buy and Build mode show. Live mode puts the Live camera back and the view comes on
+    // again on going back to Buy or Build.
+    LotCamera buyCamera_ = LotCamera::Live;
+    bool wasLiveMode_ = true;  // live mode was shown last frame
+    bool wasBuyOrBuild_ = false;  // Buy or Build mode was shown last frame
+    app::LotUi::Mode handMode_ = app::LotUi::Mode::Live;  // the lot mode the hand was last updated in
+    // The Design tool's dialog answered: Accept gives the object the colours picked and takes the cost,
+    // which undo gives back.
+    void answerDesign(bool accepted);
+    // A colour picked in the Design tool's dialog shows on the object at once, until the dialog closes.
+    void previewDesign();
     // The puck's zoom buttons play once when pressed, its turn buttons loop while held.
     void playPuckSounds(bool zoomIn, bool zoomOut, bool turning);
     // Once a frame: the listener, pause and speed from the lot, then the sound system's update.
@@ -633,6 +731,255 @@ private:
     }
     // The object under the mouse, highlighted while the selected Sim could use it (0: none).
     ts2::scene::Picker lotPicker_;
+    app::BuyHand buyHand_;
+    app::MoneyText moneyText_;
+    // Build mode's wall tool (see WallTool). Each frame it finds the corner under the mouse and puts
+    // its marker effect there. A left press starts a drag at that corner, and while the button is held
+    // the walls planned stand on the lot with their price and size beside the mouse. Letting go builds
+    // them, when the household can pay.
+    // `ray` is the camera's ray through the mouse, while it is over the lot.
+    void updateWallTool(std::span<const std::uint8_t> shown, const std::optional<std::array<float, 3>>& ray);
+    void wallButton(bool down);
+    // The wall tool's own keys, true when `key` was one.
+    bool wallKey(ts2::platform::Key key);
+    void stopWallTool();
+    // Starts the marker effect `name` at the corner, in place of the one shown.
+    void showWallMarker(const std::string& name);
+    std::optional<std::array<float, 2>> wallMouse_;  // the mouse in the window, while it is over the lot
+    std::array<float, 2> wallPoint_{};               // the mouse on the lot, in tiles
+    std::optional<app::WallTool::Corner> wallCorner_, wallStart_;
+    std::optional<app::WallTool::Plan> wallOctagon_;  // the octagonal room planned at the last press
+    int wallOctagonSize_ = app::WallTool::kSmallestOctagon;
+    int wallOctagonTurn_ = 0;  // the octagonal room's turn in eighths, 0, 2, 4 or 6
+    app::WallTool::Mode wallMode_ = app::WallTool::Mode::Wall;
+    app::WallTool::Mode wallPlanMode_ = app::WallTool::Mode::Wall;  // the mode the walls planned were planned in
+    std::shared_ptr<ts2::scene::PlayingEffect> wallMarker_;
+    std::string wallMarkerName_;
+    std::vector<std::shared_ptr<ts2::scene::PlayingEffect>> wallPoofs_;  // kept until they finish
+    // The lot's walls as the game's wall manager keeps them, made on the first change, and the walls
+    // the tool shows planned: the game puts them in as walls and takes them out again as the plan changes.
+    std::shared_ptr<ts2::content::Lot> lotContent_;
+    std::unique_ptr<ts2::content::WallManager> wallManager_;
+    std::unique_ptr<ts2::scene::SceneBuilder> wallBuilder_;  // see redrawLotWalls
+    std::unique_ptr<ts2::scene::SceneBuilder> floorBuilder_;  // see floorsChanged
+    // Each fence's height for its posts, measured once a lot from its post model (see fenceHeight).
+    std::map<std::uint32_t, float> fenceHeights_;
+    std::unique_ptr<ts2::scene::SceneBuilder> fenceModels_;
+    // A wall as the tool put it in, to be taken out and put back as it was.
+    struct PlacedWall {
+        ts2::content::WallSegment segment;
+        std::uint32_t style = 0;
+        std::string left, right;  // its patterns
+    };
+    std::vector<PlacedWall> wallPlanned_;
+    std::vector<ts2::fencepostlayer::Post> wallPlanPosts_;  // the fence posts the planned walls put up
+    // The posts the planned walls and the demolish plan made another fence's, before and after.
+    std::vector<std::pair<ts2::fencepostlayer::Post, ts2::fencepostlayer::Post>> wallPlanPostsChanged_, wallDemolishPostsChanged_;
+    // The fence posts the demolish plan put up and took down.
+    std::vector<ts2::fencepostlayer::Post> wallDemolishPosts_, wallDemolishPostsRemoved_;
+    std::vector<ts2::content::WallSegment> wallPlanWanted_;
+    // The ground the plan levelled, put back before the next plan, and whether the plan passed.
+    ts2::content::TerrainChanges wallPlanGround_;
+    bool wallPlanOk_ = true;
+    // The walls each release built and the ground they levelled, by the id the undo history keeps.
+    struct BuiltWalls {
+        std::vector<PlacedWall> walls;
+        ts2::content::TerrainChanges ground;
+        bool removed = false;  // walls a demolish took out, rather than walls built
+        // The objects hung on them that went with them, by the object (a multi-tile object's lead),
+        // with what each sold for.
+        std::vector<std::pair<std::uint32_t, std::int32_t>> sold;
+        std::vector<ts2::fencepostlayer::Post> posts;  // the fence posts the change put up
+        std::vector<ts2::fencepostlayer::Post> postsRemoved;  // and those it took down
+        // Posts it made another fence's, before and after.
+        std::vector<std::pair<ts2::fencepostlayer::Post, ts2::fencepostlayer::Post>> postsChanged;
+    };
+    std::vector<std::pair<std::uint32_t, std::int32_t>> wallDemolishSold_;
+    bool wallDemolishOk_ = true;
+    // Why the game won't take out the wall on a section, as placement error codes: a Sim beside it,
+    // or an object hung on it that is in use. The objects it would take with it go in `hung`.
+    std::vector<int> demolishRefusals(const ts2::content::WallSegment& section, std::vector<std::uint32_t>& hung);
+    // Sells an object hung on a wall that comes out, put aside so an undo can bring it back. Gives what
+    // it sold for, none when it couldn't be put aside.
+    std::optional<std::int32_t> sellWithWall(std::uint32_t object);
+    // The walls a demolish drag has taken out, put back before its next plan.
+    std::vector<PlacedWall> wallDemolished_;
+    std::vector<ts2::content::WallSegment> wallDemolishWanted_;
+    std::int32_t wallRefund_ = 0;
+    // Takes out the walls standing on a demolish plan's sections, in place of the ones taken out before.
+    void showDemolishPlan(const std::vector<app::WallTool::Section>& sections);
+    std::vector<BuiltWalls> wallsBuilt_;
+    // A platform tile the sledgehammer took out, to be put back and taken out again.
+    struct SmashedPlatform {
+        struct Region {
+            std::int32_t level = 0, x = 0, y = 0, quarter = 0, before = -1;
+        };
+        std::vector<Region> regions;
+        std::vector<ts2::content::FloorQuarter> floorsBefore, floorsAfter;
+        std::vector<PlacedWall> wallsRemoved, wallsAdded;
+        std::vector<std::pair<std::uint32_t, std::int32_t>> sold;  // objects hung on the walls taken out
+        ts2::content::TerrainChanges heights;
+    };
+    std::vector<SmashedPlatform> platformsSmashed_;
+    // The walls the tool plans in `mode` from the drag's start to the mouse.
+    app::WallTool::Plan wallPlan(app::WallTool::Mode mode) const;
+    // Puts the walls of a plan in place of the ones planned before, and draws the lot's walls again.
+    void showPlannedWalls(const app::WallTool::Plan& plan);
+    // Makes the lot's wall manager on first use, told the build catalog's fences and the lot's fence posts.
+    void startWallManager();
+    // How tall a fence or half wall stands for its posts: the top of its post model, or of its rail
+    // model when it has no post, as for its sun shadow.
+    float fenceHeight(std::uint32_t style, const ts2::scene::Assets::Fence& fence);
+    // Takes the planned walls and the posts they put up out again.
+    void takeOutPlannedWalls();
+    // The objects on a lot tile, for the game's terrain check (wall graph axes, levels as walls count them).
+    std::vector<ts2::content::TerrainObject> terrainObjects(std::int32_t x, std::int32_t y, std::int32_t level);
+    // Whether a model's node tree has a node named "post_trans", cached by model.
+    bool modelHasPostTrans(const std::string& model);
+    std::map<std::string, bool> postTransModels_;
+    // Moves the lot's ground drawing to its heights again.
+    void groundChanged();
+    // Built walls or levelled ground stay or go (a release, undo or redo): Sims and objects stand on
+    // the heights as they are now, and the simulation takes the lot's walls and ground again.
+    void lotShapeChanged();
+    // Whether a scene instance's object stands (true), is put aside by a sale that can be undone
+    // (false) or is gone for good (none). Instances that aren't objects stand.
+    std::optional<bool> instanceStands(std::size_t instance);
+    // Letting go of the button: builds the walls planned or, short of money, takes them out.
+    void placeWalls();
+    // Keeps the walls the demolish plan took out, with their refund and undo. False when it took none
+    // out or was refused.
+    bool keepDemolished();
+    // A release that kept its plan puffs dust at the drag's start and says so.
+    void finishRelease();
+    // Whether Build mode builds without charging: on a lot with no household and no Sim selected.
+    bool buildFree();
+    // Undo takes out the walls built with `id` (`in` false) and redo puts them back.
+    void toggleBuiltWalls(std::uint32_t id, bool in);
+    // Writes the wall manager's changes to the lot and draws its walls again.
+    void wallsChanged();
+    // Draws the lot's walls again after the wall manager changed them.
+    void redrawLotWalls();
+    // Draws the lot's floors again after its floor grid changed, and gives the simulation and the light
+    // the lot again.
+    void floorsChanged();
+    // Only draws the floors again (see floorsChanged), for the floor tool's plan as it changes. Only
+    // the grid levels in `levels` when it isn't empty.
+    void redrawFloors(const std::set<std::int32_t>& levels = {});
+    // Build mode's floor tool (game_floors.cpp): the quarters under the mouse, or those a drag from
+    // where the button went down covers, shown laid (or taken up with Ctrl) with their price and size
+    // until the button comes up, which pays for them.
+    void updateFloorTool(std::span<const std::uint8_t> shown, const std::optional<std::array<float, 3>>& ray);
+    void floorButton(bool down);
+    // Keeps the floor plan shown, the last of floorsLaid_, paying `cost` (negative gives money back),
+    // with `sound` (none when null) and the buy or sell sound.
+    void keepFloorPlan(std::int32_t cost, const char* sound);
+    void stopFloorTool();
+    // Shows `plan` laid in place of the last plan shown, which goes back to what it covered.
+    void showFloorPlan(const std::vector<ts2::content::FloorQuarter>& plan);
+    // Undo takes out the floors laid with `id` (`in` false) and redo lays them again.
+    void toggleFloors(std::uint32_t id, bool in);
+    std::optional<std::array<float, 2>> floorMouse_;  // the mouse in the window, while it is over the lot
+    std::optional<app::FloorSpot> floorHover_, floorStart_;
+    std::vector<ts2::content::FloorQuarter> floorPlan_, floorPlanWas_;  // the plan shown and what it covered
+    float floorPlanCost_ = 0;
+    bool floorTipShown_ = false;  // the floor tool's refusal shows by the mouse
+    std::string floorPlanKey_;  // what the plan shown was worked out for, to work it out again only on a change
+    std::optional<ts2::sim::FloorSupport> floorSupport_;  // where floors may go, for the stroke being planned
+    // Where floors may go, for the storeys' grids drawn while the tool is used. Kept until floors are laid,
+    // taken up again or brought back, or the tool stops, as working it out takes a while.
+    std::optional<ts2::sim::FloorSupport> gridSupport_;
+    // Whether objects keep a floor off tile (x, y) of grid level `level`, as the game's floor check finds
+    // them, cached by tile while the tool is used.
+    bool floorObjectsBlock(std::int32_t level, std::int32_t x, std::int32_t y);
+    std::map<std::array<std::int32_t, 3>, bool> floorBlocked_;
+    // The ground storey's floored quarters on tiles whose corners aren't in one plane, as the ground was
+    // last drawn under them. Only there does the drawn ground need keeping under the floor.
+    std::vector<std::uint64_t> twistedFloors_;
+    // The grid levels of the plan shown, drawn again when it changes.
+    std::set<std::int32_t> floorPlanLevels_;
+    std::vector<std::uint64_t> twistedFloors() const;
+    // The quarter tile toggle (Ctrl+F): the floor tool lays one quarter at a time. The game's hand
+    // places objects on quarter tiles with it too, which is not done yet.
+    bool quarterTiles_ = false;
+    // What each floor stroke laid and what was there, by the id the history holds.
+    struct LaidFloors {
+        std::vector<ts2::content::FloorQuarter> before, after;
+        // The corners the floors laid levelled, as they were and as they became.
+        std::vector<ts2::content::CornerHeight> heightsBefore, heightsAfter;
+        // The ground a stroke on the ground storey levelled.
+        ts2::content::TerrainChanges ground;
+    };
+    std::vector<LaidFloors> floorsLaid_;
+    // Where the mouse ray meets storey `storey` (1 the ground) in route x and y, through the plane of the
+    // tile reached, starting from tile centre `near` and tried again a few times, as a storey stands
+    // higher over a foundation than past it.
+    std::optional<std::array<float, 2>> storeyPoint(int storey, const std::array<float, 3>& ray, std::array<float, 2> near) const;
+    // Build mode's wall paint tool (game_paint.cpp): the wall side under the mouse, shown with the chosen
+    // covering and its price until the button comes up, which pays.
+    // Ctrl puts the wall style's own pattern back, Shift takes the sides round the room that have the
+    // side's covering, and a drag adds each side the mouse passes.
+    void updatePaintTool(const std::optional<std::array<float, 3>>& ray);
+    void paintButton(bool down);
+    void stopPaintTool();
+    // Undo puts back the coverings painted over with `id` (`in` false) and redo paints them again.
+    void togglePaint(std::uint32_t id, bool in);
+    struct PaintedSide {
+        ts2::content::WallSegment side;  // the painted side is the one leftQuarter names
+        std::string before, after;
+    };
+    // Paints one side for the plan, as the game's plan takes it. False when it can't be painted or has
+    // the pattern already.
+    bool planPaint(const ts2::sim::WallPiece& side, const std::string& pattern);
+    // The wall side whose face the mouse ray meets first, turned so the face is on its right. None on a
+    // wall's top or off the walls.
+    std::optional<ts2::sim::WallPiece> wallFaceAt(const std::array<float, 3>& ray);
+    std::optional<std::array<float, 2>> paintMouse_;  // the mouse in the window, while it is over the lot
+    std::optional<ts2::sim::WallPiece> paintHover_;
+    bool paintHeld_ = false;
+    std::vector<PaintedSide> paintPlan_;  // shown painted on the walls
+    std::int32_t paintPlanCost_ = 0;
+    std::string paintPlanKey_;  // what the plan shown was worked out for
+    std::string paintPlanMode_;  // the Ctrl and Shift state and covering it was worked out with
+    // The lot's walls and fences as the room outline layers them, made when first needed after the walls change.
+    std::optional<ts2::sim::WallOutline> paintOutline_;
+    std::vector<std::vector<PaintedSide>> paintsDone_;  // by the id the history holds
+    // After the hand moved, put down, bought, sold or moved back objects: each door and window whose cuts
+    // aren't where it stands cuts the wall faces where it stands now instead (none while a sale puts it
+    // aside or while the hand holds it where it can't go), and the walls are drawn again.
+    void recutWalls();
+    std::optional<std::map<std::string, std::vector<ts2::scene::WallMask>>> wallMasks_;  // see recutWalls, by model
+    bool recutPending_ = false;  // recutWalls once the lot's scene shows the hand's change
+    bool carriedLastFrame_ = false;  // the hand held something last frame
+    // The wall faces each door and window cut at the last recutWalls, by object id: its instance,
+    // model (lower case) and the walls it cut.
+    struct Cuts {
+        std::size_t instance = 0;
+        std::string model;
+        std::vector<int> walls;
+    };
+    std::map<std::uint32_t, Cuts> cutsOf_;
+    app::CostLabels wallLabels_;
+    std::array<int, 2> lotMouseUi_{};  // where the mouse last was over the lot, in UI pixels
+    // Buy mode's drag turn: where the button went down while the hand held an object, the cursor of
+    // the quarter dragged toward, and the floor point the held object was last moved to.
+    std::optional<std::array<float, 2>> buyDragFrom_;
+    std::optional<std::uint32_t> buyDragCursor_;
+    std::array<float, 3> buyFloor_{};
+    // The press lifted the held object and hasn't turned it yet: letting go then keeps holding it.
+    bool buyDragLifted_ = false;
+    // Where the hand grabbed what it lifted, from the held object's origin in the scene, and how far
+    // on screen that origin is from the grabbed point, so the grabbed point stays under the mouse. A
+    // catalog item has none.
+    std::optional<std::array<float, 3>> buyGrab_;
+    std::array<float, 2> buyGrabScreen_{};
+    void dragTurnHand(float x, float y);
+    std::uint32_t buyHovered_ = 0;  // the object under Buy mode's hand that it could lift
+    app::LotUi::Tool buyTool_ = app::LotUi::Tool::Hand;  // Buy mode's tool in use
+    std::uint32_t designPressed_ = 0;  // the object the Design tool's press was on
+    std::uint32_t designObject_ = 0;   // the object the Design tool's dialog is for
+    // What a change with the Design tool costs.
+    static constexpr std::int32_t kDesignCost = 15;
     std::uint32_t hovered_ = 0;
     bool hoveredSim_ = false;  // the game never highlights a Sim
     std::array<float, 3> hoveredPoint_{};  // where the mouse's ray hit it, in the scene
@@ -642,6 +989,14 @@ private:
     std::uint32_t spotTipObject_ = 0;
     std::array<float, 3> spotTipPoint_{};
     std::optional<std::uint64_t> spotTipShown_;
+    // The balloon over a spot of the lot (Screen::setWorldTip): the scene point it points at and when
+    // it showed (ns).
+    std::array<float, 3> worldTipPoint_{};
+    std::optional<std::uint64_t> worldTipShown_;
+    std::string eyedropTip_;  // the name the eyedropper's tip shows, empty while it shows none
+    void showWorldTip(const std::string& text, const std::array<float, 3>& point);
+    void refusedHand(const app::BuyHand::Paid& paid);
+    void hideWorldTip();
     // The live-mode panels over the lot. The options menu pauses the game while it's open.
     app::LotUi lotUi_;
     // The pie menu of the object clicked. The object stays highlighted while it is open.

@@ -236,9 +236,17 @@ std::vector<std::uint8_t> Game::lotShown() const {
             hide(around.first, around.decorations);
         }
     }
-    if (!lotViewOptions_.realHouses) {
-        for (const NeighborHouse& house : neighborHouses_) {
+    for (const NeighborHouse& house : neighborHouses_) {
+        if (!lotViewOptions_.realHouses) {
             hide(house.first, house.count);
+            continue;
+        }
+        // Buy and Build modes lay their grid over the lot being played only.
+        for (std::size_t i = house.first; i < house.first + house.count && i < shown.size(); ++i) {
+            const auto part = lot_.instances[i].part;
+            if (part == ts2::scene::Part::Grid || part == ts2::scene::Part::UpperGrid || part == ts2::scene::Part::ActiveGrid) {
+                shown[i] = 0;
+            }
         }
     }
     // The neighbors' imposter objects hide with their imposters: all with Neighbors off, and a lot's

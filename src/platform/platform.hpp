@@ -25,13 +25,13 @@ void delayMs(std::uint32_t milliseconds);
 // The keys the game uses. A key it doesn't use is Unknown.
 enum class Key : std::uint8_t {
     Unknown,
-    A, C, D, E, L, P, Q, R, S, W, X, Y, Z,
+    A, C, D, E, F, G, H, J, L, P, Q, R, S, T, W, X, Y, Z,
     Num1, Num2, Num3,
     Pad0, Pad1, Pad2, Pad3, PadPlus, PadMinus,
     Comma, Period, Minus, Equals, Grave,
     Tab, Escape, Pause, Backspace, Delete, Return,
     PageUp, PageDown, Home, End,
-    F5,
+    F1, F2, F3, F5,
     Up, Down, Left, Right,
     Shift,  // either Shift key, as the game reads them
 };
@@ -64,6 +64,10 @@ struct Event {
 // The next event the game uses, false when there is none. Others are skipped.
 [[nodiscard]] bool pollEvent(Event& out);
 [[nodiscard]] bool keyHeld(Key key);
+// Whether either Ctrl key is held. Ctrl is not one of the keys above, so its presses send no events.
+[[nodiscard]] bool ctrlHeld();
+// Whether either Alt key is held, the same way.
+[[nodiscard]] bool altHeld();
 // Text events for typing (with the system's keyboard layout and input methods), off until started.
 void startTextInput();
 void stopTextInput();

@@ -8,7 +8,9 @@
 #include <array>
 #include <cstdint>
 #include <future>
+#include <map>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <utility>
@@ -39,6 +41,10 @@ public:
 
     // Works the light out again at the next update, for a Graphics option changed.
     void lightAgain() { again_ = true; }
+    // The lot changed while played (walls built or taken out, ground levelled), `lot` as it is now in
+    // `scene`. Its light is worked out again at the next update, the sun's shadow too, and the light
+    // maps fade into it over the state's transition time, as the game's do.
+    void lotChanged(ts2::scene::Assets& assets, const ts2::scene::Scene& scene, const ts2::content::Lot& lot);
 
     // Waits for light being worked out and puts it in with its fade done (for pictures).
     // The lighting state the lot is lit with, or being lit with.
@@ -63,6 +69,13 @@ private:
     ts2::scene::ObjectLighting from_, to_;
     std::array<float, 3> environmentFrom_{1, 1, 1}, environment_{1, 1, 1};  // lot imposters' light
     double fade_ = 1;  // 0 .. 1, 1 when done
+    double fadeSeconds_ = 0;  // the fade running
+    // The fade the light being worked out gets, and the one the next gets after the lot changed.
+    double workingFade_ = 0;
+    std::optional<double> changeFade_;
+    // The light maps the running fade goes from, by image, kept so that a fade begun while it runs
+    // starts from the light seen then.
+    std::map<int, ts2::scene::Image> fadeFrom_;
 };
 
 } // namespace app

@@ -63,7 +63,7 @@ struct LotLightBase {
     std::set<std::uint32_t> clearWalls;  // wall styles that let light through (see makeBase)
     // The lot's description in its neighborhood, for each room's saved light percent.
     ts2::nhood::LotDescription description;
-    std::unique_ptr<ts2::content::CoveringColors> colors;
+    std::shared_ptr<ts2::content::CoveringColors> colors;
     ts2::scene::lotshadow::Inputs shadowIn;  // reads `lot`
     // Whether each ground tile is bare terrain, and the ground's normals: asked for every texel, so
     // worked out once.
@@ -182,9 +182,11 @@ void workOut(LotLight& l, ts2::scene::Scene& target) {
                                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count()));
 }
 
-// What lighting the lot again needs, with the scene's light maps as they are before any light.
+// What lighting the lot again needs, with the scene's light maps as they are before any light. For
+// a lot changed while played, `was` is what it needed before: its description and colours are kept,
+// and so are its light maps before any light wherever they keep their size.
 std::shared_ptr<LotLightBase> makeBase(ts2::scene::Assets& assets, const ts2::scene::Scene& scene, const ts2::content::Lot& saved,
-                                       const std::filesystem::path& lotPackage) {
+                                       const std::filesystem::path& lotPackage, const LotLightBase* was = nullptr) {
     using namespace ts2::scene;
     auto base = std::make_shared<LotLightBase>();
     base->lot = saved;
@@ -195,7 +197,9 @@ std::shared_ptr<LotLightBase> makeBase(ts2::scene::Assets& assets, const ts2::sc
         return nullptr;
     }
     base->package = lotPackage;
-    if (const auto number = ts2::content::lotNumber(lotPackage)) {
+    if (was) {
+        base->description = was->description;
+    } else if (const auto number = ts2::content::lotNumber(lotPackage)) {
         try {
             ts2::dbpf::Package hood{ts2::content::neighborhoodPackage(ts2::content::neighborhoodOfLot(lotPackage))};
             for (const auto& e : hood.entries()) {
@@ -222,8 +226,11 @@ std::shared_ptr<LotLightBase> makeBase(ts2::scene::Assets& assets, const ts2::sc
         return static_cast<std::int16_t>(r < 0 ? 0 : r);
     };
     // The user folder's build-mode thumbnails give the coverings' colours (Neighborhoods/<hood>/Lots/<lot>).
+    // They are read again when pictures were added since, as the catalog adds those it draws.
     const auto userFolder = lotPackage.parent_path().parent_path().parent_path().parent_path();
-    base->colors = std::make_unique<ts2::content::CoveringColors>(userFolder / "Thumbnails" / "BuildModeThumbnails.package");
+    base->colors = was && !was->colors->changedOnDisk()
+                       ? was->colors
+                       : std::make_shared<ts2::content::CoveringColors>(userFolder / "Thumbnails" / "BuildModeThumbnails.package");
     // Each fence's height once: a lot asks for it on every segment.
     std::map<std::uint32_t, std::optional<float>> fenceHeights;
     base->shadowIn = lotshadow::fromLot(lot, [&](std::uint32_t covering) {
@@ -269,7 +276,13 @@ std::shared_ptr<LotLightBase> makeBase(ts2::scene::Assets& assets, const ts2::sc
             index = -1;
             return;
         }
-        base->maps.images.push_back(scene.images[static_cast<std::size_t>(index)]);
+        const auto& now = scene.images[static_cast<std::size_t>(index)];
+        const auto before = static_cast<std::size_t>(next);
+        if (was && before < was->maps.images.size() && was->maps.images[before].width == now.width && was->maps.images[before].height == now.height) {
+            base->maps.images.push_back(was->maps.images[before]);
+        } else {
+            base->maps.images.push_back(now);
+        }
         index = next++;
     };
     for (auto& f : maps.floors) take(f);
@@ -358,7 +371,12 @@ std::shared_ptr<LotLightBase> lightLot(ts2::scene::Assets& assets, ts2::scene::S
     return base;
 }
 
-PutLight putLotLight(ts2::scene::Scene& scene, const LotLight& light, const ts2::scene::Transform& place) {
+std::shared_ptr<LotLightBase> lotLightChanged(ts2::scene::Assets& assets, const LotLightBase& was, const ts2::scene::Scene& scene,
+                                              const ts2::content::Lot& lot) {
+    return makeBase(assets, scene, lot, was.package, &was);
+}
+
+PutLight putLotLight(ts2::scene::Scene& scene, const LotLight& light, const ts2::scene::Transform& place, std::map<int, ts2::scene::Image>* replaced) {
     using namespace ts2::scene;
     PutLight out;
     if (!light.done || !scene.lightMaps || !light.maps.lightMaps) {
@@ -374,6 +392,12 @@ PutLight putLotLight(ts2::scene::Scene& scene, const LotLight& light, const ts2:
         auto& image = scene.images[static_cast<std::size_t>(t)];
         const auto& fresh = light.maps.images[static_cast<std::size_t>(f)];
         if (image.width == fresh.width && image.height == fresh.height) {
+            if (replaced) {
+                if (image.rgba == fresh.rgba) {
+                    continue;
+                }
+                replaced->insert_or_assign(t, std::move(image));
+            }
             image = fresh;
             out.images.push_back(t);
         }
@@ -489,6 +513,8 @@ ts2::scene::ObjectLighting outdoorLotLight(const LotLight& light, const ts2::sce
 }
 
 const std::string& lotLightState(const LotLight& light) { return light.state; }
+
+std::vector<int> lotLightMapImages(const ts2::scene::Scene& scene) { return scene.lightMaps ? lightMapImages(*scene.lightMaps) : std::vector<int>{}; }
 
 const std::array<float, 3>& lotLightEnvironment(const LotLight& light) { return light.environment; }
 

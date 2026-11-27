@@ -72,15 +72,20 @@ constexpr KeyInfo kKeys[] = {
     {Key::C, SDLK_C, SDL_SCANCODE_C},
     {Key::D, SDLK_D, SDL_SCANCODE_D},
     {Key::E, SDLK_E, SDL_SCANCODE_E},
+    {Key::G, SDLK_G, SDL_SCANCODE_G},
+    {Key::H, SDLK_H, SDL_SCANCODE_H},
+    {Key::J, SDLK_J, SDL_SCANCODE_J},
     {Key::L, SDLK_L, SDL_SCANCODE_L},
     {Key::P, SDLK_P, SDL_SCANCODE_P},
     {Key::Q, SDLK_Q, SDL_SCANCODE_Q},
     {Key::R, SDLK_R, SDL_SCANCODE_R},
     {Key::S, SDLK_S, SDL_SCANCODE_S},
+    {Key::T, SDLK_T, SDL_SCANCODE_T},
     {Key::W, SDLK_W, SDL_SCANCODE_W},
     {Key::X, SDLK_X, SDL_SCANCODE_X},
     {Key::Y, SDLK_Y, SDL_SCANCODE_Y},
     {Key::Z, SDLK_Z, SDL_SCANCODE_Z},
+    {Key::F, SDLK_F, SDL_SCANCODE_F},
     {Key::Num1, SDLK_1, SDL_SCANCODE_1},
     {Key::Num2, SDLK_2, SDL_SCANCODE_2},
     {Key::Num3, SDLK_3, SDL_SCANCODE_3},
@@ -105,6 +110,9 @@ constexpr KeyInfo kKeys[] = {
     {Key::PageDown, SDLK_PAGEDOWN, SDL_SCANCODE_PAGEDOWN},
     {Key::Home, SDLK_HOME, SDL_SCANCODE_HOME},
     {Key::End, SDLK_END, SDL_SCANCODE_END},
+    {Key::F1, SDLK_F1, SDL_SCANCODE_F1},
+    {Key::F2, SDLK_F2, SDL_SCANCODE_F2},
+    {Key::F3, SDLK_F3, SDL_SCANCODE_F3},
     {Key::F5, SDLK_F5, SDL_SCANCODE_F5},
     {Key::Up, SDLK_UP, SDL_SCANCODE_UP},
     {Key::Down, SDLK_DOWN, SDL_SCANCODE_DOWN},
@@ -242,6 +250,14 @@ bool keyHeld(Key key) {
         }
     }
     return false;
+}
+
+bool ctrlHeld() {
+    return (SDL_GetModState() & SDL_KMOD_CTRL) != 0;
+}
+
+bool altHeld() {
+    return (SDL_GetModState() & SDL_KMOD_ALT) != 0;
 }
 
 void mousePosition(float& x, float& y) {

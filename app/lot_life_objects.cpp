@@ -121,10 +121,10 @@ void LotLife::placeObjectsOnce(ts2::scene::Scene& scene, const std::set<std::uin
         if (placed.object > static_cast<std::uint32_t>(INT16_MAX) || placed.instance >= scene.instances.size()) {
             continue;
         }
-        // An object the lot keeps until it unloads is still drawn.
+        // An object the lot keeps until it unloads is still drawn, but not one Buy mode's hand sold.
         const auto* object = sim_->world().findIncludingRemoved(static_cast<std::int16_t>(placed.object));
         ObjectPlace now;
-        if (object == nullptr || (object->removed && !object->keptUntilUnload)) {
+        if (object == nullptr || (object->removed && !object->keptUntilUnload) || handSold_.contains(object->id)) {
             now.gone = true;
         } else {
             now = {object->x, object->y, object->level, object->data[kDirectionField], object->data[kContainerField], object->data[kSlotField], false};
@@ -597,7 +597,10 @@ void LotLife::shadeHeld(ts2::scene::Scene& scene) {
 
 // The game's shape colour on an object in its fading draw style (object data 0x47, the draw style, at
 // 4, as a car leaving the lot is): red, green and blue from object data 0x49, 0x4A and 0x4B, alpha
-// the lower of data 0x39 and 0x48, each the low byte in 255ths.
+// the lower of data 0x39 and 0x48, each the low byte in 255ths. The object Buy mode's hand holds over
+// a spot where it can't stand takes the hand's draw style instead: the shape colour (1, 0.1, 0.1) at
+// 0.9 with white ambient. The object a Buy tool would take is drawn the same way in grey (0.5, 0.5,
+// 0.5) at 0.9.
 void LotLife::shapeColors(ts2::scene::Scene& scene) {
     constexpr std::size_t kDrawStyleField = 0x47, kAlphaField = 0x48, kRedField = 0x49, kGreenField = 0x4A, kBlueField = 0x4B,
                           kOtherAlphaField = 0x39;
@@ -613,9 +616,17 @@ void LotLife::shapeColors(ts2::scene::Scene& scene) {
             const std::int16_t alpha = std::min(object->data[kOtherAlphaField], object->data[kAlphaField]);
             color = std::array<float, 4>{byte(object->data[kRedField]), byte(object->data[kGreenField]), byte(object->data[kBlueField]), byte(alpha)};
         }
+        const bool designHover = designHovered_ != 0 && placed.object == designHovered_;
+        const bool refused = handRefusedParts_.contains(placed.object) || designHover;
+        if (designHover) {
+            color = std::array<float, 4>{0.5f, 0.5f, 0.5f, 0.9f};
+        } else if (refused) {
+            color = std::array<float, 4>{1.0f, 0.1f, 0.1f, 0.9f};
+        }
         auto& instance = scene.instances[placed.instance];
-        if (instance.shapeColor != color) {
+        if (instance.shapeColor != color || instance.refusedLook != refused) {
             instance.shapeColor = color;
+            instance.refusedLook = refused;
             shapeColored_.push_back(placed.instance);
         }
     }
@@ -933,6 +944,81 @@ void LotLife::addCreatedObjects(ts2::scene::Scene& scene, bool removeSims) {
         return false;
     });
     createdFor_ = world.objectsVersion();
+}
+
+std::optional<LotLife::ObjectPicture> LotLife::addObjectPicture(ts2::scene::Scene& scene, std::uint32_t guid) {
+    constexpr std::uint32_t kModelNames = 0x85;
+    const auto* type = sim_->code().objectType(guid);
+    if (type == nullptr) {
+        return std::nullopt;
+    }
+    const std::uint16_t row = type->definition.field(ts2::objd::field::kDefaultModel);
+    const auto name = row != 0 ? assets_.objectString(type->group, kModelNames, row) : std::nullopt;
+    if (!name) {
+        return std::nullopt;
+    }
+    return addModelPicture(scene, *name, {});
+}
+
+std::optional<LotLife::ObjectPicture> LotLife::addModelPicture(ts2::scene::Scene& scene, const std::string& modelName,
+                                                               const std::vector<ts2::scenegraph::MaterialOverride>& overrides) {
+    const std::string model = ts2::sim::drawnModelName(modelName);
+    if (model.empty()) {
+        return std::nullopt;
+    }
+    const int mesh = objectMaterials_.model(model, overrides, scene);
+    if (mesh < 0 || static_cast<std::size_t>(mesh) >= scene.meshes.size()) {
+        return std::nullopt;
+    }
+    // The box takes in the shadows the picture hides, as the game's does.
+    const auto box = objectMaterials_.modelBox(model);
+    if (!box) {
+        return std::nullopt;
+    }
+    const auto& [low, high] = *box;
+    // A model may name its own picture camera in its "thumbnailExtension" data list. Otherwise the
+    // camera fits its box.
+    std::optional<ts2::scene::PictureView> view;
+    constexpr std::uint32_t kModelType = 0xE519C933;  // CRES
+    if (const auto cres = assets_.byName(kModelType, model + "_cres")) {
+        try {
+            for (const auto& list : ts2::scenegraph::parseDataLists(*cres)) {
+                if (list.name != "thumbnailExtension") {
+                    continue;
+                }
+                if (!list.items.empty() && !list.items.front().name.empty()) {
+                    std::string camera = list.items.front().name;
+                    if (!ts2::scene::lower(camera).ends_with("_cres")) {
+                        camera += "_cres";
+                    }
+                    view = ts2::scene::objectPictureView(assets_, camera);
+                }
+            }
+        } catch (const std::exception&) {
+            // A model whose lists can't be read gets the usual camera.
+        }
+    }
+    if (!view) {
+        view = ts2::scene::objectPictureView(assets_, low, high);
+    }
+    if (!view) {
+        return std::nullopt;
+    }
+    ts2::scene::Instance instance;
+    instance.mesh = mesh;
+    instance.name = model;
+    instance.part = ts2::scene::Part::Object;
+    instance.shadow = ts2::scene::objectshadow::Kind::None;
+    std::size_t index = scene.instances.size();
+    if (!freeSimInstances_.empty() && freeSimInstances_.back() < scene.instances.size()) {
+        index = freeSimInstances_.back();
+        freeSimInstances_.pop_back();
+        scene.instances[index] = std::move(instance);
+    } else {
+        scene.instances.push_back(std::move(instance));
+    }
+    changedInstances_.push_back(index);
+    return ObjectPicture{index, std::move(*view)};
 }
 
 } // namespace app

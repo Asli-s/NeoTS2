@@ -1,6 +1,7 @@
 #pragma once
 
 #include "object_materials.hpp"
+#include "content/recolour_catalog.hpp"
 #include "scene/animation_library.hpp"
 #include "scene/cas_picture.hpp"
 #include "scene/catalog_bins.hpp"
@@ -229,6 +230,136 @@ public:
     double seconds() const { return drawnMs() / 1000.0; }
 
     ts2::sim::LotSimulation& simulation() { return *sim_; }
+
+    // Where Buy mode's hand holds an object: a position in tiles (the simulation's x and y), its
+    // storey (1 = ground) and its facing (object data 1).
+    struct HandSpot {
+        float x = 0, y = 0;
+        int storey = 1;
+        std::int16_t facing = 0;
+    };
+    // Why the hand can't lift an object: the game's placement error code (0x26 it can't be moved,
+    // 0x27 a part of it is in use, 0x39 a Sim is in its slots, 0x3A something in its slots is in use)
+    // and the object the game's message points at. Code 0 refuses with no message.
+    struct HandRefusal {
+        int code = 0;
+        std::uint32_t at = 0;
+    };
+    // Why the hand can't lift `object` (a multi-tile part counts as its lead), empty when it can.
+    std::optional<HandRefusal> handRefusal(std::uint32_t object);
+    bool handLiftable(std::uint32_t object) { return !handRefusal(object); }
+    // Whether a Sim sits in the slots of `object` or its other parts, slots inside slots too. The
+    // sledgehammer refuses such an object.
+    bool simInSlots(std::uint32_t object);
+    // The object the hand holds when `object` is clicked: the lead of a multi-tile object, which
+    // brings its other parts along, else `object` itself.
+    std::uint32_t handLead(std::uint32_t object);
+    // Where `object` stands in the scene (its model's origin), if it is drawn.
+    std::optional<std::array<float, 3>> handScenePoint(std::uint32_t object, const ts2::scene::Scene& scene) const;
+    // Where `object` stands now, if on the lot.
+    std::optional<HandSpot> handSpotOf(std::uint32_t object);
+    // The centre of the tile under a scene point (or the point itself, unless `snap`), on `storey`,
+    // with `facing`.
+    HandSpot handSpotAt(const std::array<float, 3>& scenePoint, int storey, std::int16_t facing, bool snap = true) const;
+    // Why `object` fails the game's placement test at `spot`, with all its parts, if it does.
+    std::optional<ts2::sim::LotSimulation::PlaceRefusal> handPlaceRefusal(std::uint32_t object, const HandSpot& spot);
+    bool handFits(std::uint32_t object, const HandSpot& spot) { return !handPlaceRefusal(object, spot); }
+    // Whether the hand turns `object` to fit against walls: any of bits 0x5F of its data 0x0D is set,
+    // and its category (data 0x3B) isn't 0x7D.
+    bool handTurnsToWalls(std::uint32_t object);
+    // The UI sound a put-down of `object` makes, another when its multi-tile master's OBJD field 0x45
+    // has bit 0x04. Not done yet: the sound of doors and windows.
+    std::uint32_t handPutDownSound(std::uint32_t object);
+    // An object's object data 4 (the surfaces it may stand on) and 0x2A (its placement flags).
+    std::array<std::uint16_t, 2> handPlacementFlags(std::uint32_t object);
+    // A lot position (in tiles) at the floor of `storey`, in the scene.
+    std::array<float, 3> scenePointAt(float x, float y, int storey, const ts2::scene::Scene& scene) const;
+    // A scene point as a route position on the lot (x and y, see SimObject::x).
+    std::array<float, 2> routePoint(const std::array<float, 3>& scenePoint) const;
+    // Moves `object` to `spot`, with what sits in its slots.
+    void handMove(std::uint32_t object, const HandSpot& spot);
+    // What the held object's panel tells of `object`: its catalog item's GUID (a multi-tile object's
+    // master) and what selling it brings.
+    struct HandSale {
+        std::uint32_t guid = 0;
+        std::int32_t value = 0;
+    };
+    std::optional<HandSale> handSale(std::uint32_t object);
+    std::optional<std::uint32_t> eyedropGuid(std::uint32_t object);
+    // A door, window or curtain's other version, diagonal or straight, when it has one.
+    std::optional<std::uint32_t> otherVersion(std::uint32_t guid);
+    // Whether catalog item `guid` is a door or a window (object type 8 or 9).
+    bool isDoorOrWindow(std::uint32_t guid);
+    // Sells `object` from the hand: the household gets what it sells for and the object leaves the
+    // lot. Returns what it sold for, none when the game wouldn't let it be deleted.
+    std::optional<std::int32_t> handSell(std::uint32_t object);
+    // Puts `object` aside as a sale does, so Buy mode's undo can bring it back, and adds
+    // `fundsChange` to the funds. False when it isn't on the lot.
+    bool handKeep(std::uint32_t object, std::int32_t fundsChange);
+    // Brings back an object handKeep() put aside and adds `fundsChange` to the funds. False once the
+    // object is gone for good.
+    bool handRestore(std::uint32_t object, std::int32_t fundsChange);
+    // A new object of type `guid` for Buy mode's hand, made out of the world and started as the game
+    // starts a new object. A multi-tile master makes all its parts and gives their lead. None for a type
+    // that isn't known.
+    std::optional<std::uint32_t> handCreate(std::uint32_t guid);
+    // The first recolour `object` or another of its parts has, with the object group that files its picture.
+    std::optional<std::pair<ts2::sim::ChosenRecolour, std::uint32_t>> handRecolourOf(std::uint32_t object);
+    // Gives `object` and its other parts colour choices, each replacing any colour its subset had. The
+    // save keeps them.
+    void handRecolour(std::uint32_t object, std::span<const ts2::content::RecolourChoice> choices);
+    // The models of `object` and its other parts, each with the object group that files its colour
+    // pictures.
+    std::vector<std::pair<std::string, std::uint32_t>> designModels(std::uint32_t object);
+    // The subsets the Design tool recolours on the catalog item `guid` with these models, at most two,
+    // each once (see Assets::designSubsets), and those of `object` and its other parts.
+    std::vector<ts2::content::DesignSubset> designSubsetsOf(std::span<const std::string> models, std::uint32_t guid);
+    std::vector<ts2::content::DesignSubset> designSubsets(std::uint32_t object);
+    // The colour strips of `object` for the Design tool's dialog, each starting at the colour the
+    // object has.
+    std::vector<ts2::content::RecolourStrip> designStrips(std::uint32_t object);
+    // Keeps the colours of `object` and its other parts for designRestore to put back after the Design
+    // dialog tries others.
+    void designKeep(std::uint32_t object);
+    void designRestore();
+    // Whether the Design tool can recolour `object`: one of its models has a recolourable subset.
+    bool designable(std::uint32_t object);
+    // The object the Design tool, eyedropper or sledgehammer would take (0 for none), drawn in the
+    // refused look in grey.
+    void setDesignHovered(std::uint32_t object) { designHovered_ = object; }
+    // Whether Buy mode's eyedropper, or its sledgehammer, takes `object` under the mouse.
+    bool toolTakes(std::uint32_t object, bool sledgehammer);
+    // The colours `object` has that its catalog item doesn't start with, which a copy the eyedropper
+    // takes gets.
+    std::vector<ts2::content::RecolourChoice> eyedropColours(std::uint32_t object);
+    // Deletes a new object the hand held without buying it.
+    void handDrop(std::uint32_t object);
+    // What buying an object of `object`'s type costs: its OBJD price, or its master's for a part of a
+    // multi-tile object.
+    std::int32_t handPrice(std::uint32_t object);
+    // Whether the household can afford catalog item `guid`: its price is nothing or within the funds.
+    bool handAffords(std::uint32_t guid);
+    // Whether the hand takes another of catalog item `guid` once one is bought (see the rule there).
+    bool handRepeats(std::uint32_t object, std::uint32_t guid, bool always);
+    // Whether `object` or another of its parts is a fireplace's mantle or hearth by its own code.
+    bool handIsFireplace(std::uint32_t object);
+    // Takes a purchase's `cost` from the funds.
+    void handPay(std::int32_t cost) { ts2::sim::setFunds(sim_->globals(), std::int64_t{funds()} - cost); }
+    // The facing (object data 1) of `object`, on the lot or not.
+    std::int16_t handFacing(std::uint32_t object);
+    // A step of (dx, dy) in the simulation's x and y as a direction in the scene.
+    std::array<float, 3> sceneDirection(float dx, float dy) const;
+    // Deletes for good the sold objects undo could have brought back, as Buy mode's history ends.
+    void handFinishSales();
+    // Draws `object` as the hand does over a spot where it can't stand (0 for none): red and see-through.
+    void setHandRefused(std::uint32_t object);
+    // Shows the hand's footprint marker under `object` and each of its other parts (0 for none): the
+    // game's objectPlacementIconGood model, or objectPlacementIconBad where the object can't stand.
+    void setHandMarker(std::uint32_t object, bool good) {
+        handMarked_ = object;
+        handMarkerGood_ = good;
+    }
+
     // An object's model morphs with the weights they are drawn at in `pose`, in the order the game's
     // scene record lists them, for a save. None for an object not drawn skinned (its weights are as
     // the lot loaded them).
@@ -311,6 +442,18 @@ public:
     // drew nothing. Nullopt when it can't be built. Take it out again with removePictureSim.
     std::optional<ts2::scene::Actor> addHairPictureSim(ts2::scene::Scene& scene, std::uint32_t age, std::uint32_t gender,
                                                        const ts2::scenegraph::Link& hair);
+    // Puts the model of object type `guid` into `scene` at the origin without shadows, to draw its
+    // catalog picture. Nullopt when it has no model or the light rig can't be read. Take it out with
+    // removeObjectPicture.
+    struct ObjectPicture {
+        std::size_t instance = 0;
+        ts2::scene::PictureView view;
+    };
+    std::optional<ObjectPicture> addObjectPicture(ts2::scene::Scene& scene, std::uint32_t guid);
+    // The same for model `model` with material overrides `overrides`, as a colour choice's picture is drawn.
+    std::optional<ObjectPicture> addModelPicture(ts2::scene::Scene& scene, const std::string& model,
+                                                 const std::vector<ts2::scenegraph::MaterialOverride>& overrides);
+    void removeObjectPicture(ts2::scene::Scene& scene, std::size_t instance) { freeSimInstance(scene, instance); }
     // Puts the Sim the appearance editor's Sim view shows into `scene`: a copy of the Sim `sim` with
     // hair colour `tone` and the slots' hairs, in its everyday outfit, standing at the origin in its
     // Sim view pose, out of the lot's actors. Nullopt when it can't be built. Take it out again with
@@ -339,8 +482,6 @@ public:
 private:
     // The clock's time the actors are posed at, in milliseconds (see seconds).
     double drawnMs() const { return sim_->world().clockMs() + leadMs_; }
-    // A scene point as a route position on the lot (x and y, see SimObject::x).
-    std::array<float, 2> routePoint(const std::array<float, 3>& scenePoint) const;
     // The lot object of a scene object id, null for none.
     ts2::sim::SimObject* lotObject(std::uint32_t id);
     // A Sim's own inventory, null for a Sim that is gone or has none.
@@ -402,6 +543,7 @@ private:
     // `drawnNow` for one drawn this frame, else they replace those it had.
     void keepSimParts(std::int16_t id, const ts2::scene::Actor& actor, bool drawnNow);
     ts2::scene::Assets& assets_;
+    std::map<std::string, std::vector<ts2::scene::Assets::DesignSubset>> designSubsetsByModel_;  // by lowercase model
     std::unique_ptr<ts2::sim::LotSimulation> sim_;
     ts2::scene::AnimationLibrary animations_;
     // Each animation's SimAntics events, made once as the animations are.
@@ -544,6 +686,25 @@ private:
     std::vector<std::size_t> changedInstances_;
     std::vector<std::size_t> relit_;
     std::vector<std::size_t> shapeColored_;
+    std::uint32_t handRefused_ = 0;  // see setHandRefused
+    std::set<std::uint32_t> handRefusedParts_;  // the refused object and its other parts
+    std::uint32_t designHovered_ = 0;           // see setDesignHovered
+    struct KeptColours {
+        std::int16_t id = 0;
+        std::vector<ts2::sim::MaterialChange> changes;
+        std::vector<ts2::sim::ChosenRecolour> recolours;
+        std::vector<std::string> names;
+        std::optional<std::vector<std::string>> savedNames;
+    };
+    std::vector<KeptColours> designKept_;  // see designKeep
+    // `object` and, for a part of a multi-tile object, its other parts.
+    std::vector<std::int16_t> handGroup(std::uint32_t object);
+    std::set<std::int16_t> handSold_;  // sold objects Buy mode's undo could still bring back
+    std::map<std::int16_t, std::vector<std::int16_t>> handKeptWith_;  // what each put aside object took with it
+    std::uint32_t handMarked_ = 0;   // see setHandMarker
+    bool handMarkerGood_ = true;
+    std::array<std::vector<std::size_t>, 2> handMarkers_;  // the good and bad marker instances made so far
+    void placeHandMarker(ts2::scene::Scene& scene);
 };
 
 } // namespace app

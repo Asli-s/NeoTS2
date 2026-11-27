@@ -240,7 +240,7 @@ struct Orbit {
         c.farPlane = std::max(minFar, away * 3);
         if (rig && !rig->levels.empty()) {
             const auto& level = rig->levels.front();
-            c.fovX = level.fov * kPi / 180;
+            c.fovX = ts2::camera::fovAt(*rig, away) * kPi / 180;
             // The near clip shrinks with the zoom (1 m far out, 0.1 m closest in LiveCamera.txt).
             c.nearPlane = ts2::camera::nearClipAt(*rig, away);
             c.farPlane = level.farClip;

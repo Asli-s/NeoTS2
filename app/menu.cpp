@@ -68,8 +68,10 @@
 #include <format>
 #include "content/save_writer.hpp"
 #include "formats/dbpf_writer.hpp"
+#include "sim/floor_support.hpp"
 #include "sim/hood_save.hpp"
 #include "sim/lot_save.hpp"
+#include "content/lot_build_save.hpp"
 
 #include <fstream>
 #include <future>
@@ -356,12 +358,20 @@ Game::Game(ts2::content::UiData& data, ts2::ui::Fonts& fonts, ts2::render::IRend
     preview_ = screen_.load(kScripts, kPreview, menuX_, menuY_);
     screen_.setVisible(preview_, false);
     description_.attach(screen_, screen_.find(preview_, kPreviewDescription), kDescriptionCharacters);
-    installedPacks_ = ts2::content::installedPacksMask(ts2::content::findProducts(install));
+    auto products = ts2::content::findProducts(install);
+    installedPacks_ = ts2::content::installedPacksMask(products);
     for (const auto& button : kSubHoodButtons) {
         subHoodTips_.push_back(screen_.tip(shownChild(screen_, preview_, button.id)));
     }
     sims1Turn_ = ts2::content::readUserProps(options.user).flag("rotateCameraSims1Mode").value_or(false);
-    lotUi_.setFolders(data, install, options.user);
+    lotUi_.setFolders(data, install, std::move(products), options.user);
+    lotUi_.setCoveringTextures([this](std::uint32_t guid, bool wall) -> std::optional<ts2::tga::Pixels> {
+        auto image = assets_.get()->patternTexture(ts2::content::coveringPictureName(guid), wall);
+        if (!image) {
+            return std::nullopt;
+        }
+        return ts2::tga::Pixels{image->width, image->height, std::move(image->rgba)};
+    });
     hoodUi_.gameOptions().takeSettings(lotUi_.gameOptions());
     hoodUi_.graphicsOptions().takeSettings(lotUi_.graphicsOptions());
     hoodUi_.audioOptions().takeSettings(lotUi_.audioOptions());
@@ -1176,6 +1186,51 @@ std::optional<ts2::tga::Pixels> Game::drawHairPicture(std::uint32_t age, std::ui
     return picture;
 }
 
+std::optional<ts2::tga::Pixels> Game::drawObjectPicture(std::uint32_t guid) {
+    return lotLife_ ? drawPicture(lotLife_->addObjectPicture(lot_, guid)) : std::nullopt;
+}
+
+std::optional<ts2::tga::Pixels> Game::drawColourPicture(const std::string& model, const std::vector<std::pair<std::string, std::string>>& colours) {
+    if (!lotLife_) {
+        return std::nullopt;
+    }
+    std::vector<ts2::scenegraph::MaterialOverride> overrides;
+    for (const auto& [material, subset] : colours) {
+        overrides.push_back({material, ts2::scene::lower(subset)});
+    }
+    return drawPicture(lotLife_->addModelPicture(lot_, model, overrides));
+}
+
+std::optional<ts2::tga::Pixels> Game::drawPicture(const std::optional<LotLife::ObjectPicture>& picture) {
+    if (!picture) {
+        return std::nullopt;
+    }
+    renderer_.addMaterials(lot_);
+    renderer_.addMeshes(lot_);
+    renderer_.setInstance(lot_, picture->instance);
+    std::vector<std::uint8_t> visible(lot_.instances.size(), 0);
+    visible[picture->instance] = 1;
+    renderer_.show(std::move(visible));
+    const auto& view = picture->view;
+    ts2::render::Camera camera;
+    camera.eye = view.eye;
+    camera.target = view.target;
+    camera.up = view.up;
+    camera.fovY = view.fovY;
+    camera.nearPlane = view.nearPlane;
+    camera.farPlane = view.farPlane;
+    auto image = renderer_.drawInstancesToImage(camera, ts2::scene::kObjectPictureSize, ts2::scene::kObjectPictureSize, view.lighting);
+    // The model leaves the lot at once, so it is never drawn there.
+    lotLife_->removeObjectPicture(lot_, picture->instance);
+    renderer_.setInstance(lot_, picture->instance);
+    renderer_.show(lotShown());
+    if (!image) {
+        return std::nullopt;
+    }
+    // Soft edges come out premultiplied, but the UI draws straight alpha.
+    return ts2::content::unpremultiplied(ts2::tga::Pixels{image->width, image->height, std::move(image->rgba)});
+}
+
 std::optional<ts2::tga::Pixels> Game::drawSimView(const LotLife::AppearanceHairs& sim, const ts2::scene::HairSlots& slots, const std::string& tone,
                                                   unsigned width, unsigned height, float turn) {
     if (!lotLife_) {
@@ -1540,6 +1595,8 @@ std::string Game::saveLot() {
     if (options_.lock == nullptr) {
         return "the save folder is not held by this game";
     }
+    // Nothing the hand holds or has only put aside may go into the save.
+    settleHand();
     try {
         // Each file is closed again before the save, which moves it aside.
         const auto readFile = [](const std::filesystem::path& path) {
@@ -1593,6 +1650,10 @@ std::string Game::saveLot() {
                 package, lotLife_->simulation(), view ? &*view : nullptr, made.neighbors, [this](std::int16_t sim) { return drawnSimPlace(sim); },
                 [this](std::int16_t sim) { return drawnSimJoints(sim); }, runningEffectsOf(),
                 [this](std::int16_t object) { return lotLife_->drawnMorphs(lot_, lotPose_, object); });
+        // Walls, floors and coverings built and painted in Build mode. A lot nothing was built on keeps
+        // its build data byte for byte as loaded.
+        const bool built = !wallsBuilt_.empty() || !floorsLaid_.empty() || !paintsDone_.empty() || !platformsSmashed_.empty();
+        const int buildRecords = built && lotContent_ ? ts2::content::putBuildRecords(package, *lotContent_) : 0;
         ts2::dbpf::PackageImage hood = ts2::dbpf::readImage(hoodBytes);
         const ts2::sim::HoodSaveCounts hoodCounts = ts2::sim::fillNeighborhoodPackage(
             hood, package, enteredLot_, lotLife_->simulation().world(), lotLife_->simulation().globals(),
@@ -1642,9 +1703,10 @@ std::string Game::saveLot() {
                 ts2::diag::warning("save: a rewritten character file could not be read again: " + std::string(ex.what()));
             }
         }
-        ts2::diag::info(std::format("saved the lot: {} objects, {} of them new, {} left out, {} Sim descriptions, {} new character files, {} looks",
-                                    counts.objects, counts.objectsAdded, counts.objectsUnnamed, hoodCounts.descriptions, made.files.size(),
-                                    rewritten.size()));
+        ts2::diag::info(std::format("saved the lot: {} objects, {} of them new, {} left out, {} build records, {} Sim descriptions, {} new character "
+                                    "files, {} looks",
+                                    counts.objects, counts.objectsAdded, counts.objectsUnnamed, buildRecords, hoodCounts.descriptions,
+                                    made.files.size(), rewritten.size()));
         // Nothing has happened since, so leaving the lot has nothing to ask about.
         lotRan_ = false;
         return {};
@@ -1739,7 +1801,7 @@ void Game::enterLot(std::uint32_t id) {
                 footprint->place.rigidInverse().apply(sea, true);
                 builder.setLotSea(sea[2]);
             }
-            const auto lot = ts2::content::loadLot(file);
+            auto lot = ts2::content::loadLot(file);
             worldBounds = lot.worldBounds;
             if (smoothLotSkirts) {
                 groundLook = ts2::scene::lotGroundLook(lot);
@@ -1748,11 +1810,28 @@ void Game::enterLot(std::uint32_t id) {
                 lotHeights = std::make_shared<const ts2::scene::Heights>(std::make_shared<const ts2::array3d::Array3D>(*heights.grid()));
                 groundLevel = ts2::content::groundGridLevel(lot);
             }
+            // Where floors may go upstairs, for the storeys' Buy and Build grids.
+            const auto& scripts = assets.get()->buildScripts();
+            const ts2::sim::FloorSupport support(lot, [&](std::uint32_t type) -> std::optional<ts2::sim::PartitionSupport> {
+                if (const auto style = scripts.wallStyles.find(type); style != scripts.wallStyles.end()) {
+                    return ts2::sim::PartitionSupport{style->second.bearsLoad, false};
+                }
+                if (const auto* fence = assets.get()->fence(type)) {
+                    return ts2::sim::PartitionSupport{fence->bearsLoad, true};
+                }
+                return std::nullopt;
+            }, [&](std::uint32_t guid) {
+                const auto* definition = assets.get()->objectDefinition(guid);
+                return definition != nullptr && definition->field(0x4A) == 8;
+            });
+            builder.setFloorAllowed([&support](int level, int x, int y) { return support.allowed(level, x, y); });
             ts2::scene::addLot(builder, lot, file);
+            builder.setFloorAllowed({});
             built.lightState = app::savedLightingState(assets.get()->lighting(), lot);
             built.light = app::lightLot(*assets.get(), builder.scene(), lot, file, built.lightState);
             built.imageKeys = builder.imageKeys();
             built.lot = std::move(builder.scene());
+            built.content = std::make_shared<ts2::content::Lot>(std::move(lot));
         }
         built.routeModels = app::readRouteModels(*assets.get(), file);
         built.view.start(built.lot, built.camera);
@@ -1823,6 +1902,45 @@ void Game::showLot(LotBuilt& built) {
         }
     }
     lotRouteModels_ = std::move(built.routeModels);
+    lotContent_ = std::move(built.content);
+    wallManager_.reset();
+    wallBuilder_.reset();
+    floorBuilder_.reset();
+    selectionImages_.clear();
+    smashLit_.reset();
+    floorsLaid_.clear();
+    paintsDone_.clear();
+    paintPlan_.clear();
+    paintPlanCost_ = 0;
+    paintPlanKey_.clear();
+    paintPlanMode_.clear();
+    paintHover_.reset();
+    paintHeld_ = false;
+    paintOutline_.reset();
+    floorPlan_.clear();
+    floorPlanWas_.clear();
+    floorPlanKey_.clear();
+    floorStart_.reset();
+    floorHover_.reset();
+    floorSupport_.reset();
+    floorBlocked_.clear();
+    wallPlanned_.clear();
+    wallPlanWanted_.clear();
+    wallsBuilt_.clear();
+    platformsSmashed_.clear();
+    wallPlanGround_ = {};
+    wallPlanOk_ = true;
+    wallDemolished_.clear();
+    wallDemolishWanted_.clear();
+    wallDemolishSold_.clear();
+    wallDemolishOk_ = true;
+    wallRefund_ = 0;
+    cutsOf_.clear();
+    postTransModels_.clear();
+    buyHand_.setWalls([this](std::uint32_t id, bool in) { toggleBuiltWalls(id, in); });
+    buyHand_.setFloors([this](std::uint32_t id, bool in) { toggleFloors(id, in); });
+    buyHand_.setPlatforms([this](std::uint32_t id, bool in) { togglePlatform(id, in); });
+    buyHand_.setPaint([this](std::uint32_t id, bool in) { togglePaint(id, in); });
     {
         // Imposters around the lot take the lighting state's environment colour.
         const auto* state = ts2::content::findState(assets_.get()->lighting(), built.lightState);
@@ -1849,6 +1967,8 @@ void Game::showLot(LotBuilt& built) {
     lotView_ = built.view;
     lotView_.view.ceilings = ceilings;
     orbit_ = built.camera;
+    lotCameras_ = {};
+    lotCamera_ = buyCamera_ = LotCamera::Live;
     orbit_.smoothFollow = options_.smoothFollow;
     orbit_.goal = orbit_.target;
     orbit_.useRigEasing();
@@ -1878,6 +1998,7 @@ void Game::showLot(LotBuilt& built) {
     spotTipObject_ = 0;
     spotTipShown_.reset();
     screen_.setSpotTip({});
+    hideWorldTip();
     lotShown_ = ts2::platform::ticksNs();
     lotRealSeconds_ = 0;
     ts2::diag::info(std::format("lot {} shown after {:.1f} s", enteredLot_, secondsSince(lotLoadStarted_)));
@@ -1909,6 +2030,7 @@ void Game::leaveLot() {
         audio_->stopAll();
     }
     endCameraDrag();
+    moneyText_.hide(screen_);
     inLot_ = false;
     if (surroundingsBuilding_.valid()) {
         surroundingsBuilding_.wait();
@@ -1974,8 +2096,10 @@ void Game::leaveLot() {
     spotTipObject_ = 0;
     spotTipShown_.reset();
     screen_.setSpotTip({});
+    hideWorldTip();
     renderer_.setHighlight(0, 0);
     changeAppearanceSim_.reset();
+    renderer_.setTileHighlight({});
     renderer_.setImposterLight(hood_.times.now().imposters);
     portraitRedraw_.reset();
     renderer_.setImpostersShown(true);
@@ -2045,8 +2169,9 @@ void Game::applySeaWater() {
     }
 }
 
-// The game's live-mode keys. P, Pause, ` or 0 on the number pad pause. 1, 2 and 3 pick a
-// speed. F5 opens the options. Q asks to quit, as in most of the game's modes.
+// The game's lot keys. P, Pause, ` or 0 on the number pad pause. 1, 2 and 3 pick a speed. F1, F2
+// and F3 set Live, Buy and Build mode, and F5 opens the options. Q asks to quit, as in most of the
+// game's modes.
 app::LotUi::Action Game::lotKey(const pf::Event& e) {
     using Action = app::LotUi::Action;
     // The game's ` is the Windows key code 0xC0, which other layouts put on another key (" on a
@@ -2065,9 +2190,15 @@ app::LotUi::Action Game::lotKey(const pf::Event& e) {
     case pf::Key::Pad2: return Action::High;
     case pf::Key::Num3:
     case pf::Key::Pad3: return Action::Ultra;
-    case pf::Key::F5:
+    // F1, F2 and F3 set Live, Buy and Build mode as the puck's buttons do.
+    case pf::Key::F1: return lotUi_.modeKey(app::LotUi::Mode::Live);
+    case pf::Key::F2: return lotUi_.modeKey(app::LotUi::Mode::Buy);
+    case pf::Key::F3: return lotUi_.modeKey(app::LotUi::Mode::Build);
+    case pf::Key::F5: {
+        const bool wasLive = lotUi_.liveMode();
         lotUi_.showOptions(!lotUi_.optionsShown());
-        return lotUi_.optionsShown() ? Action::OptionsOpened : Action::OptionsClosed;
+        return wasLive ? Action::LeftLiveMode : lotUi_.liveMode() ? Action::BackToLiveMode : Action::None;
+    }
     case pf::Key::Q: return Action::Quit;
     default: return Action::None;
     }
@@ -2121,11 +2252,12 @@ void Game::lotAction(app::LotUi::Action action) {
     case Action::Normal: lotLife_->setSpeed(ts2::sim::Speed::Normal); break;
     case Action::High: lotLife_->setSpeed(ts2::sim::Speed::High); break;
     case Action::Ultra: lotLife_->setSpeed(ts2::sim::Speed::Ultra); break;
-    case Action::OptionsOpened:
+    // Options, Buy and Build hold the game paused.
+    case Action::LeftLiveMode:
         pausedBeforeOptions_ = lotLife_->paused();
         lotLife_->setPaused(true);
         break;
-    case Action::OptionsClosed: lotLife_->setPaused(pausedBeforeOptions_); break;
+    case Action::BackToLiveMode: lotLife_->setPaused(pausedBeforeOptions_); break;
     case Action::GraphicsOptionChanged:
         hoodUi_.graphicsOptions().takeSettings(lotUi_.graphicsOptions());
         applyGraphicsOptions();
@@ -2163,6 +2295,23 @@ void Game::lotAction(app::LotUi::Action action) {
         break;
     case Action::TrackSim: trackSim(lotUi_.clickedSim()); break;
     case Action::CloseNotification: lotUi_.closeClickedNotification(*lotLife_); break;
+    case Action::SellHeld: sellHeld(); break;
+    case Action::HandTool:
+        // The catalog item not bought yet is dropped.
+        if (lotLife_ && buyHand_.buying()) {
+            buyHand_.cancel(*lotLife_);
+        }
+        buyTool_ = app::LotUi::Tool::Hand;
+        cursors_.show(app::Cursors::kArrow);
+        break;
+    case Action::DesignTool: pickBuyTool(app::LotUi::Tool::Design); break;
+    case Action::EyedropperTool: pickBuyTool(app::LotUi::Tool::Eyedropper); break;
+    case Action::SledgehammerTool: pickBuyTool(app::LotUi::Tool::Sledgehammer); break;
+    case Action::DayNight: toggleDayNight(); break;
+    case Action::TopDownView: toggleLotCamera(LotCamera::TopDown); break;
+    case Action::CeilingView: toggleLotCamera(LotCamera::Ceiling); break;
+    case Action::Undo: undoHand(false); break;
+    case Action::Redo: undoHand(true); break;
     case Action::CentreOnNeighbor:
         // A notification's Sim picture centres the camera on that Sim when it is on the lot.
         if (const auto sim = lotLife_->simulation().world().neighborData(lotUi_.clickedNeighbor(), 0); sim && *sim > 0) {
@@ -2448,6 +2597,7 @@ void Game::toggleFreeCamera() {
     spotTipObject_ = 0;
     spotTipShown_.reset();
     screen_.setSpotTip({});
+    hideWorldTip();
     // Only the pause frame stays on screen, as in the game.
     lotUi_.hideForFreeCamera(true);
     pf::hideCursor();
@@ -2501,6 +2651,7 @@ void Game::freeCameraLook() {
 // ground, then the panels and the camera.
 void Game::lotMouse(const pf::Event& e, float x, float y) {
     const auto [ix, iy] = toUi(x, y);
+    lotMouseUi_ = {ix, iy};
     if (e.type == pf::Event::Type::MouseMotion || e.type == pf::Event::Type::MouseDown) {
         mouseShift_ = e.shift;
     }
@@ -2541,6 +2692,17 @@ void Game::lotMouse(const pf::Event& e, float x, float y) {
             if (const auto button = messageBox_.clicked(screen_, *clicked)) {
                     answerMessage(static_cast<std::uint8_t>(*button - 2));
             }
+        }
+        return;
+    }
+    if (lotUi_.designDialog().isOpen()) {
+        cursors_.show(app::Cursors::kArrow);
+        bool accepted = false;
+        if (const auto clicked = screen_.mouse(ix, iy, down_, static_cast<double>(ts2::platform::ticksNs()) / 1e9);
+            clicked && lotUi_.designDialog().clicked(screen_, *clicked, accepted)) {
+            answerDesign(accepted);
+        } else if (lotUi_.designDialog().takePicked()) {
+            previewDesign();
         }
         return;
     }
@@ -2599,6 +2761,160 @@ void Game::lotMouse(const pf::Event& e, float x, float y) {
         return;
     }
     const bool leftDown = e.type == pf::Event::Type::MouseDown && e.button == pf::MouseButton::Left;
+    // While the hand holds an object, the button going down starts a drag that turns it in place, and
+    // the button coming up puts it down.
+    if (buyDragFrom_ && lotLife_) {
+        if (e.type == pf::Event::Type::MouseMotion) {
+            dragTurnHand(x, y);
+            return;
+        }
+        if (e.type == pf::Event::Type::MouseUp && e.button == pf::MouseButton::Left) {
+            const bool putDown = !buyDragLifted_;
+            buyDragFrom_.reset();
+            buyDragCursor_.reset();
+            buyDragLifted_ = false;
+            if (putDown) {
+                paidHand(buyHand_.click(*lotLife_, 0));
+            }
+            cursors_.show(buyHand_.carrying() ? app::Cursors::kHandHolding : app::Cursors::kArrow);
+            return;
+        }
+    }
+    // Build mode's wall tool takes the left button on the lot, and follows the mouse while it is held.
+    if (lotLife_ && buyTool_ == app::LotUi::Tool::Wall && lotUi_.mode() == app::LotUi::Mode::Build) {
+        if (!screen_.over(ix, iy) || wallStart_) {
+            wallMouse_ = std::array<float, 2>{x, y};
+        } else {
+            wallMouse_.reset();
+        }
+        if (leftDown && !screen_.over(ix, iy)) {
+            wallButton(true);
+            return;
+        }
+        if (e.type == pf::Event::Type::MouseUp && e.button == pf::MouseButton::Left && wallStart_) {
+            wallButton(false);
+            return;
+        }
+    }
+    // Build mode's wall paint tool takes the left button on the lot in the same way.
+    if (lotLife_ && buyTool_ == app::LotUi::Tool::WallPaint && lotUi_.mode() == app::LotUi::Mode::Build) {
+        if (!screen_.over(ix, iy) || paintHeld_) {
+            paintMouse_ = std::array<float, 2>{x, y};
+        } else {
+            paintMouse_.reset();
+        }
+        if (leftDown && !screen_.over(ix, iy)) {
+            paintButton(true);
+            return;
+        }
+        if (e.type == pf::Event::Type::MouseUp && e.button == pf::MouseButton::Left && paintHeld_) {
+            paintButton(false);
+            return;
+        }
+    }
+    // Build mode's floor tool takes the left button on the lot in the same way.
+    if (lotLife_ && buyTool_ == app::LotUi::Tool::Floor && lotUi_.mode() == app::LotUi::Mode::Build) {
+        if (!screen_.over(ix, iy) || floorStart_) {
+            floorMouse_ = std::array<float, 2>{x, y};
+        } else {
+            floorMouse_.reset();
+        }
+        if (leftDown && !screen_.over(ix, iy)) {
+            floorButton(true);
+            return;
+        }
+        if (e.type == pf::Event::Type::MouseUp && e.button == pf::MouseButton::Left && floorStart_) {
+            floorButton(false);
+            return;
+        }
+    }
+    if (lotLife_ && leftDown && lotUi_.buyOrBuild() && !screen_.over(ix, iy) && buyHand_.carrying()) {
+        buyDragFrom_ = std::array<float, 2>{x, y};
+        return;
+    }
+    // The Design tool: a press notes the designable object under the mouse, when the household can
+    // pay for the change, and letting go over that same object opens its dialog there.
+    if (lotLife_ && buyTool_ == app::LotUi::Tool::Design && lotUi_.buyOrBuild() && !screen_.over(ix, iy) && e.button == pf::MouseButton::Left &&
+        e.type != pf::Event::Type::MouseMotion) {
+        const auto ray = screenRay(orbit_.camera(), width_, height_, x, y);
+        const auto hit = lotPicker_.pick(lot_, lotVisible_, orbit_.camera().eye, ray, &lotPose_);
+        const std::uint32_t object = hit && lotLife_->designable(hit->object) ? hit->object : 0;
+        if (leftDown) {
+            // An object that can't be recoloured, or one the household can't pay to recolour, says
+            // so in a balloon pointing where the mouse's ray hit it. A press on nothing keeps the
+            // last one.
+            designPressed_ = object != 0 && lotLife_->funds() >= kDesignCost ? object : 0;
+            if (hit && designPressed_ == 0) {
+                constexpr std::uint32_t kUiText = 0x7FA7DC7C, kNotDesignable = 0x008D0010, kNoFunds = 0x008D000F;  // string ids, leakcheck: ok
+                const auto& eye = orbit_.camera().eye;
+                showWorldTip(screen_.data().text(kUiText, object != 0 ? kNoFunds : kNotDesignable),
+                             {eye[0] + ray[0] * hit->distance, eye[1] + ray[1] * hit->distance, eye[2] + ray[2] * hit->distance});
+            }
+        } else if (object != 0 && object == designPressed_ && lotUi_.openDesign(*lotLife_, object, ix, iy, kDesignCost)) {
+            designObject_ = object;
+            lotLife_->designKeep(object);
+            lotLife_->setDesignHovered(0);
+            cursors_.show(app::Cursors::kArrow);
+        }
+        return;
+    }
+    // The eyedropper and the sledgehammer act as the left button is let go, on what is under the mouse then.
+    if (lotLife_ && (buyTool_ == app::LotUi::Tool::Eyedropper || buyTool_ == app::LotUi::Tool::Sledgehammer) &&
+        lotUi_.buyOrBuild() && !screen_.over(ix, iy) && e.button == pf::MouseButton::Left &&
+        e.type != pf::Event::Type::MouseMotion) {
+        if (!leftDown) {
+            const auto ray = screenRay(orbit_.camera(), width_, height_, x, y);
+            const auto& eye = orbit_.camera().eye;
+            const auto hit = lotPicker_.pick(lot_, lotVisible_, eye, ray, &lotPose_);
+            const std::array<float, 3> point = hit ? std::array<float, 3>{eye[0] + ray[0] * hit->distance, eye[1] + ray[1] * hit->distance,
+                                                                          eye[2] + ray[2] * hit->distance}
+                                                   : std::array<float, 3>{};
+            const auto* covering = hit && buyTool_ == app::LotUi::Tool::Eyedropper ? eyedropCovering(*hit, point) : nullptr;
+            if (hit && hit->object == 0 && buyTool_ == app::LotUi::Tool::Sledgehammer && lotUi_.mode() == app::LotUi::Mode::Build) {
+                smashBuilt(*hit, point);
+                smashLit_.reset();
+            } else if (covering != nullptr) {
+                // The eyedropper's pick of a floor tile or wall opens Build mode on that covering.
+                showEyedropTip({}, point);
+                smashLit_.reset();
+                lotLife_->setDesignHovered(0);
+                lotUi_.eyedropCovering(*covering);
+            } else {
+                useBuyTool(hit ? hit->object : 0);
+            }
+        }
+        return;
+    }
+    // Ctrl with a catalog door or window in hand: a click deletes a door or window.
+    if (lotLife_ && leftDown && lotUi_.buyOrBuild() && !screen_.over(ix, iy) && buyHand_.stashed()) {
+        if (buyHovered_ != 0) {
+            smashObject(buyHovered_);
+        }
+        return;
+    }
+    // In Buy and Build mode a left click on the lot is the hand's (see BuyHand).
+    if (lotLife_ && leftDown && lotUi_.buyOrBuild() && !screen_.over(ix, iy)) {
+        const auto ray = screenRay(orbit_.camera(), width_, height_, x, y);
+        const auto& eye = orbit_.camera().eye;
+        const auto hit = lotPicker_.pick(lot_, lotVisible_, eye, ray, &lotPose_);
+        const bool lifting = !buyHand_.carrying();
+        paidHand(buyHand_.click(*lotLife_, hit ? hit->object : 0));
+        buyGrab_.reset();
+        if (const auto base = lifting && hit && buyHand_.carrying() ? lotLife_->handScenePoint(buyHand_.carried(), lot_) : std::nullopt) {
+            const std::array<float, 3> grabbed{eye[0] + ray[0] * hit->distance, eye[1] + ray[1] * hit->distance, eye[2] + ray[2] * hit->distance};
+            buyGrab_ = std::array<float, 3>{grabbed[0] - (*base)[0], grabbed[1] - (*base)[1], grabbed[2] - (*base)[2]};
+            const auto at = app::screenPoint(orbit_.camera(), width_, height_, *base);
+            buyGrabScreen_ = {at[0] - x, at[1] - y};
+            buyFloor_ = *base;
+        }
+        // The press that lifts an object turns it too when dragged, and then puts it down as it ends.
+        if (lifting && buyHand_.carrying()) {
+            buyDragFrom_ = std::array<float, 2>{x, y};
+            buyDragLifted_ = true;
+        }
+        cursors_.show(buyHand_.carrying() ? app::Cursors::kHandHolding : app::Cursors::kArrow);
+        return;
+    }
     // A left click on the highlighted object opens its pie menu for the selected Sim.
     if (lotLife_ && hovered_ != 0 && leftDown && !screen_.over(ix, iy)) {
         const std::uint32_t part = lotLife_->partAt(hovered_, hoveredPoint_, lot_);
@@ -2610,7 +2926,7 @@ void Game::lotMouse(const pf::Event& e, float x, float y) {
         }
     }
     // A left click on empty floor or ground opens the menu of a destination made there.
-    if (lotLife_ && hovered_ == 0 && leftDown && !lotUi_.optionsShown() && !screen_.over(ix, iy) && openGroundMenu(x, y)) {
+    if (lotLife_ && hovered_ == 0 && leftDown && lotUi_.liveMode() && !screen_.over(ix, iy) && openGroundMenu(x, y)) {
         showPieCursor();
         return;
     }
@@ -2620,12 +2936,14 @@ void Game::lotMouse(const pf::Event& e, float x, float y) {
     }
     if (e.type == pf::Event::Type::MouseDown && e.button == pf::MouseButton::Right && lotLife_) {
         if (const auto button = screen_.buttonAt(ix, iy)) {
-            lotAction(lotUi_.rightClicked(*button, *lotLife_));
+            lotAction(lotUi_.rightClicked(*button, *lotLife_, e.ctrl));
         }
     }
     if (!screen_.over(ix, iy)) {
         app::orbitEvent(orbit_, e);
-        if (e.type == pf::Event::Type::MouseMotion && !down_ && !dragFrom_) {
+        // The sledgehammer's lit tile follows the mouse also while the button is held.
+        const bool smashing = buyTool_ == app::LotUi::Tool::Sledgehammer && lotUi_.mode() == app::LotUi::Mode::Build;
+        if (e.type == pf::Event::Type::MouseMotion && (!down_ || smashing) && !dragFrom_) {
             hoverAt_ = {x, y};
         }
     } else {
@@ -2715,6 +3033,7 @@ void Game::updateLot(std::uint64_t now) {
         lotView_.view.eyeHeight = at[2];
         fadeProps({at[0], at[1], at[2]});
     }
+    lotView_.view.buildGrid = lotUi_.mode() == LotUi::Mode::Buy || lotUi_.mode() == LotUi::Mode::Build;
     const auto shown = lotShown();
     lotVisible_ = shown;
     renderer_.show(shown);
@@ -2725,12 +3044,123 @@ void Game::updateLot(std::uint64_t now) {
     if (lotLife_) {
         lotLife_->setTestingCheats(cheats_.testingCheats());
     }
-    // The options menu is not live mode: nothing on the lot is hovered or clicked and the cursor is
-    // the arrow. Only the camera moves.
-    if (lotUi_.optionsShown()) {
+    // Buy and Build mode's hand follows the mouse and notes an object it could lift under it (objects
+    // don't light up as in live mode). Leaving the mode, or going from one to the other, puts down
+    // what it holds where it stands, or back where it was lifted from when it can't stand there.
+    // Undo and redo keep their history through Buy, Build and Options, and Live mode drops it.
+    // Opening Options lets go of what the hand holds as Esc does.
+    const bool handMode = lotUi_.buyOrBuild() && lotUi_.mode() == handMode_;
+    handMode_ = lotUi_.mode();
+    if (!buyHand_.carrying() || buyHand_.buying()) {
+        buyGrab_.reset();
+    }
+    // The game reads the modifier keys only while no mouse button is held.
+    if (handMode && lotLife_ && !buyDragFrom_) {
+        buyHand_.stash(*lotLife_, ts2::platform::ctrlHeld());
+    }
+    // The lit tile stays between mouse moves while a tool that lights one is in use.
+    const bool lighting = (buyTool_ == app::LotUi::Tool::Sledgehammer && lotUi_.mode() == app::LotUi::Mode::Build) ||
+                          buyTool_ == app::LotUi::Tool::Eyedropper;
+    if (!handMode || !lighting || buyHand_.carrying() || buyHand_.stashed() || freeCam_) {
+        smashLit_.reset();
+    }
+    if (!handMode) {
+        buyHovered_ = 0;
+        buyTool_ = app::LotUi::Tool::Hand;
+        buyDragFrom_.reset();
+        buyDragCursor_.reset();
+        buyDragLifted_ = false;
+        settleHand(!lotUi_.liveMode(), lotUi_.mode() == app::LotUi::Mode::Options);
+    } else if (hoverAt_ && lotLife_ && !freeCam_) {
+        const auto ray = screenRay(orbit_.camera(), width_, height_, (*hoverAt_)[0], (*hoverAt_)[1]);
+        const auto& eye = orbit_.camera().eye;
+        buyHovered_ = 0;
+        if (buyHand_.stashed()) {
+            const auto hit = lotPicker_.pick(lot_, shown, eye, ray, &lotPose_);
+            const auto sale = hit ? lotLife_->handSale(hit->object) : std::nullopt;
+            buyHovered_ = sale && lotLife_->isDoorOrWindow(sale->guid) ? hit->object : 0;
+        } else if (buyHand_.carrying()) {
+            // The floor point is under the held object's origin, as far from the mouse as it was when
+            // lifted, and that distance follows the camera's view of the floor point.
+            const auto under = buyGrab_ ? screenRay(orbit_.camera(), width_, height_, (*hoverAt_)[0] + buyGrabScreen_[0], (*hoverAt_)[1] + buyGrabScreen_[1])
+                                        : ray;
+            // A drag turn keeps the held object where it is.
+            if (const auto at = buyDragFrom_ ? std::nullopt : app::BuyHand::floorPoint(lot_, shown, lotPicker_, eye, under, lot_.groundLevel)) {
+                buyHand_.moved(*lotLife_, *at);
+                buyFloor_ = at->point;
+                if (buyGrab_) {
+                    const auto& g = *buyGrab_;
+                    const auto base = app::screenPoint(orbit_.camera(), width_, height_, at->point);
+                    const auto grabbed = app::screenPoint(orbit_.camera(), width_, height_, {at->point[0] + g[0], at->point[1] + g[1], at->point[2] + g[2]});
+                    buyGrabScreen_ = {base[0] - grabbed[0], base[1] - grabbed[1]};
+                }
+            }
+        } else if (buyTool_ == app::LotUi::Tool::Wall || buyTool_ == app::LotUi::Tool::Floor || buyTool_ == app::LotUi::Tool::WallPaint) {
+            lotLife_->setDesignHovered(0);
+        } else if (buyTool_ != app::LotUi::Tool::Hand) {
+            // The Design tool, the eyedropper and the sledgehammer light the object under the mouse
+            // they would take.
+            const auto hit = lotPicker_.pick(lot_, shown, eye, ray, &lotPose_);
+            const std::uint32_t object = hit ? hit->object : 0;
+            const bool takes = object != 0 && (buyTool_ == app::LotUi::Tool::Design
+                                                   ? lotLife_->designable(object)
+                                                   : lotLife_->toolTakes(object, buyTool_ == app::LotUi::Tool::Sledgehammer));
+            lotLife_->setDesignHovered(takes ? object : 0);
+            smashLit_.reset();
+            const std::array<float, 3> point = hit ? std::array<float, 3>{eye[0] + ray[0] * hit->distance, eye[1] + ray[1] * hit->distance,
+                                                                          eye[2] + ray[2] * hit->distance}
+                                                   : std::array<float, 3>{};
+            if (hit && object == 0 && buyTool_ == app::LotUi::Tool::Sledgehammer && lotUi_.mode() == app::LotUi::Mode::Build) {
+                smashLit_ = smashHighlight(*hit, point);
+            }
+            // The eyedropper lights a floor tile it would take, and names the floor or object in a tip.
+            std::string tip;
+            if (buyTool_ == app::LotUi::Tool::Eyedropper && hit) {
+                if (takes) {
+                    const auto guid = lotLife_->eyedropGuid(object);
+                    tip = guid ? lotLife_->objectName(*guid) : std::string{};
+                } else if (const auto* covering = eyedropCovering(*hit, point)) {
+                    smashLit_ = smashHighlight(*hit, point);
+                    tip = covering->name;
+                }
+            }
+            showEyedropTip(tip, point);
+        } else if (const auto hit = lotPicker_.pick(lot_, shown, eye, ray, &lotPose_); hit && lotLife_->handLiftable(hit->object)) {
+            buyHovered_ = hit->object;
+        }
+    }
+    if (buyTool_ != app::LotUi::Tool::Eyedropper || !lotUi_.buyOrBuild()) {
+        showEyedropTip({}, {});
+    }
+    renderer_.setTileHighlight(smashLit_);
+    // Build mode's wall tool: its corner and marker under the mouse, and the drag's price and size.
+    std::optional<std::array<float, 3>> wallRay;
+    if (wallMouse_ && buyTool_ == app::LotUi::Tool::Wall) {
+        wallRay = screenRay(orbit_.camera(), width_, height_, (*wallMouse_)[0], (*wallMouse_)[1]);
+    }
+    updateWallTool(shown, wallRay);
+    std::optional<std::array<float, 3>> floorRay;
+    if (floorMouse_ && buyTool_ == app::LotUi::Tool::Floor) {
+        floorRay = screenRay(orbit_.camera(), width_, height_, (*floorMouse_)[0], (*floorMouse_)[1]);
+    }
+    updateFloorTool(shown, floorRay);
+    std::optional<std::array<float, 3>> paintRay;
+    if (paintMouse_ && buyTool_ == app::LotUi::Tool::WallPaint) {
+        paintRay = screenRay(orbit_.camera(), width_, height_, (*paintMouse_)[0], (*paintMouse_)[1]);
+    }
+    updatePaintTool(paintRay);
+    // Outside live mode (options, Buy and Build) nothing on the lot is hovered or clicked and the
+    // cursor is the arrow. Only the camera moves.
+    if (!lotUi_.liveMode()) {
         hovered_ = 0;
         hoveredSim_ = false;
-        liveCursor_ = app::Cursors::kArrow;
+        // Buy mode's hand: open over an object it could lift, closed while it holds one.
+        liveCursor_ = buyDragCursor_          ? *buyDragCursor_
+                      : buyTool_ != app::LotUi::Tool::Hand ? buyToolCursor()
+                      : buyHand_.stashed()  ? (buyHovered_ != 0 ? app::Cursors::kDelete : app::Cursors::kArrow)
+                      : buyHand_.carrying() ? app::Cursors::kHandHolding
+                      : buyHovered_ != 0   ? app::Cursors::kHandOpen
+                                           : app::Cursors::kArrow;
         if (hoverAt_) {
             cursors_.show(liveCursor_);
             hoverAt_.reset();
@@ -2771,6 +3201,19 @@ void Game::updateLot(std::uint64_t now) {
         screen_.setSpotTip({});
         spotTipShown_.reset();
     }
+    // The balloon over the lot hides 3 s after it showed and points at its spot as the camera moves.
+    // A tip shown during this frame is newer than `now`.
+    if (worldTipShown_ && (freeCam_ || (now > *worldTipShown_ && now - *worldTipShown_ >= kSpotTipTimeoutNs))) {
+        hideWorldTip();
+    }
+    if (worldTipShown_) {
+        if (const auto at = screenPixel(orbit_.camera(), width_, height_, worldTipPoint_)) {
+            const auto [tipX, tipY] = toUi(static_cast<float>((*at)[0]), static_cast<float>((*at)[1]));
+            screen_.moveWorldTip(tipX, tipY);
+        } else {
+            hideWorldTip();
+        }
+    }
     // It points at the same spot of the scene however the camera moves.
     if (spotTipShown_) {
         const auto at = screenPixel(orbit_.camera(), width_, height_, spotTipPoint_);
@@ -2808,12 +3251,80 @@ void Game::updateLot(std::uint64_t now) {
         lotLife_->markOnScreen(simsInView(lot_, viewCamera(), width_, height_));
         lotLife_->setCamera(viewCamera().eye);
         lotLife_->update(std::min(100.0, static_cast<double>(now - lastFrame_) / 1e6), lot_);
+        // A door or window the hand holds over a wall cuts it already, and its cut goes once let go of.
+        const bool carrying = buyHand_.carrying();
+        const bool letGo = std::exchange(carriedLastFrame_, carrying) && !carrying;
+        if (std::exchange(recutPending_, false) || carrying || letGo) {
+            recutWalls();
+        }
         lotRan_ = lotRan_ || !lotLife_->paused();
         if (lotDaylight_) {
             lotDaylight_->update(static_cast<double>(now - lastFrame_) / 1e9, lotLife_->simulation().globals(), *assets_.get(), lot_, renderer_,
                                  *lotLife_);
         }
+        if (lotUi_.takeColourPicked() && buyHand_.buying()) {
+            buyHand_.recolour(*lotLife_, lotUi_.boughtColours());
+        }
+        // An item the household can't afford stays in the catalog.
+        if (const auto bought = lotUi_.takeBought(); bought && (lotUi_.mode() == app::LotUi::Mode::Buy || lotUi_.mode() == app::LotUi::Mode::Build) &&
+                                                       lotLife_->handAffords(*bought)) {
+            buyHand_.buy(*lotLife_, *bought, lotUi_.boughtColours());
+            buyTool_ = app::LotUi::Tool::Hand;
+            cursors_.show(buyHand_.carrying() ? app::Cursors::kHandHolding : app::Cursors::kArrow);
+        }
+        // A catalog item being bought keeps the catalog shown: the held object's panel is for lifted objects.
+        lotUi_.setHeld(buyHand_.buying() ? 0 : buyHand_.carried());
+        lotUi_.setBuying(buyHand_.buying());
+        buyHand_.setInBuild(lotUi_.mode() == app::LotUi::Mode::Build);
+        // Build mode's wall tool category, its Walls & Rooms button or a wall tool entry of its catalog
+        // picks the wall tool, and leaving the category puts the hand back.
+        const bool wallEntryClicked = lotUi_.takeWallToolClicked();
+        if (lotUi_.takeWallPicked() || wallEntryClicked) {
+            pickBuyTool(app::LotUi::Tool::Wall);
+        } else if (buyTool_ == app::LotUi::Tool::Wall && !lotUi_.wallCategoryOpen()) {
+            buyTool_ = app::LotUi::Tool::Hand;
+        }
+        // A floor clicked in the Flooring catalog picks the floor tool, and leaving the category puts the
+        // hand back.
+        if (lotUi_.takeFloorPicked()) {
+            pickBuyTool(app::LotUi::Tool::Floor);
+        } else if (buyTool_ == app::LotUi::Tool::Floor && !lotUi_.floorCategoryOpen()) {
+            buyTool_ = app::LotUi::Tool::Hand;
+        }
+        // A covering clicked in the Wall Coverings catalog picks the wall paint tool in the same way.
+        if (lotUi_.takeWallCoveringPicked()) {
+            pickBuyTool(app::LotUi::Tool::WallPaint);
+        } else if (buyTool_ == app::LotUi::Tool::WallPaint && !lotUi_.wallCoveringCategoryOpen()) {
+            buyTool_ = app::LotUi::Tool::Hand;
+        }
+        lotUi_.setTool(buyTool_);
+        // Leaving Buy or Build mode sets the time of day from the hour again, undoing the day/night button.
+        const bool buyOrBuild = lotUi_.mode() == app::LotUi::Mode::Buy || lotUi_.mode() == app::LotUi::Mode::Build;
+        if (wasBuyOrBuild_ && !buyOrBuild) {
+            ts2::sim::updateTimeOfDay(lotLife_->simulation().globals());
+        }
+        wasBuyOrBuild_ = buyOrBuild;
+        // Live mode shows the Live camera, and Buy and Build bring their view back. Options leaves it.
+        const bool liveMode = lotUi_.mode() == app::LotUi::Mode::Live;
+        if (liveMode && !wasLiveMode_) {
+            setLotCamera(LotCamera::Live);
+        } else if (buyOrBuild && lotCamera_ != buyCamera_) {
+            setLotCamera(buyCamera_);
+        }
+        wasLiveMode_ = liveMode;
+        lotUi_.setViews(lotCamera_ == LotCamera::TopDown, lotCamera_ == LotCamera::Ceiling);
+        if (buyTool_ == app::LotUi::Tool::Hand) {
+            lotLife_->setDesignHovered(0);
+        }
+        lotUi_.setHistory(buyHand_.canUndo(), buyHand_.canRedo());
+        moneyText_.update(screen_, static_cast<double>(now - lastFrame_) / 1e9);
         lotUi_.showLife(*lotLife_);
+        // One catalog picture the game would draw itself is drawn each frame.
+        if (const auto asked = lotUi_.pictureToDraw()) {
+            auto colours = asked->also;
+            colours.insert(colours.begin(), {asked->material, asked->subset});
+            lotUi_.setDrawnPicture(*asked, asked->guid != 0 ? drawObjectPicture(asked->guid) : drawColourPicture(asked->model, colours));
+        }
         lotUi_.showNotifications(*lotLife_, static_cast<double>(now - lastFrame_) / 1e9);
         updateBabyNames();
         updatePhoneBook();
@@ -3011,6 +3522,7 @@ void Game::sendLotChanges() {
     }
     for (const std::size_t instance : lotLife_->shapeColored()) {
         renderer_.setShapeColor(instance, lot_.instances[instance].shapeColor);
+        renderer_.setRefusedLook(instance, lot_.instances[instance].refusedLook);
     }
     if (!lotLife_->changedMaterials().empty()) {
         renderer_.addMaterials(lot_);
@@ -3491,9 +4003,9 @@ void Game::handleEvent(const pf::Event& e) {
         }
         return;
     }
-    // The neighborhood has no Y for its free camera.
+    // The neighborhood has no Y for its free camera. Ctrl+Y is Buy mode's redo, not the free camera.
     const bool freeToggle = e.type == pf::Event::Type::KeyDown && !e.repeat && !quitBox_.isOpen() &&
-                            ((inLot_ && (e.scancode == pf::Key::Tab || e.scancode == pf::Key::Y || (freeCam_ && e.scancode == pf::Key::Escape))) ||
+                            ((inLot_ && (e.scancode == pf::Key::Tab || (e.scancode == pf::Key::Y && !e.ctrl) || (freeCam_ && e.scancode == pf::Key::Escape))) ||
                              (inNeighborhood_ && !neighborhoodCovered() && (e.scancode == pf::Key::Tab || (freeCam_ && e.scancode == pf::Key::Escape))));
     if (freeToggle) {
         toggleFreeCamera();
@@ -3543,6 +4055,39 @@ void Game::handleEvent(const pf::Event& e) {
                 const bool wasPaused = lotLife_ && lotLife_->paused();
                 lotAction(action);
                 playKeySound(action, wasPaused);
+            }
+        } else if (key == pf::Key::Escape && lotLife_ && buyHand_.carrying() && lotUi_.buyOrBuild() && !dialogOpen()) {
+            // Escape puts a lifted object back and drops a catalog item.
+            buyHand_.cancel(*lotLife_);
+            cursors_.show(app::Cursors::kArrow);
+        } else if (key == pf::Key::Delete && !e.repeat && lotLife_ && buyHand_.carrying() && lotUi_.buyOrBuild() &&
+                   !dialogOpen()) {
+            sellHeld();
+        } else if (!e.repeat && !e.ctrl && !e.alt && lotLife_ && !dialogOpen() && wallKey(key)) {
+            // The wall tool's own keys.
+        } else if (key == pf::Key::H && !e.repeat && !e.ctrl && !e.alt && lotLife_ && lotUi_.buyOrBuild() && !dialogOpen()) {
+            // The lot key table's H, as the hand button.
+            lotAction(app::LotUi::Action::HandTool);
+        } else if (key == pf::Key::L && !e.repeat && !e.ctrl && !e.alt && lotLife_ && !dialogOpen()) {
+            toggleDayNight();
+        } else if ((key == pf::Key::T || key == pf::Key::G) && !e.repeat && !e.ctrl && !e.alt && lotLife_ && !dialogOpen() &&
+                   (lotUi_.mode() == app::LotUi::Mode::Buy || lotUi_.mode() == app::LotUi::Mode::Build)) {
+            // The lot key table's T and G. Whether they work in live mode too is not known yet.
+            toggleLotCamera(key == pf::Key::T ? LotCamera::TopDown : LotCamera::Ceiling);
+        } else if ((key == pf::Key::R || key == pf::Key::E || key == pf::Key::J) && !e.repeat && !e.ctrl && !e.alt && lotLife_ &&
+                   lotUi_.buyOrBuild() && !dialogOpen()) {
+            // The lot key table's R, E and J.
+            pickBuyTool(key == pf::Key::R ? app::LotUi::Tool::Design : key == pf::Key::E ? app::LotUi::Tool::Eyedropper : app::LotUi::Tool::Sledgehammer);
+        } else if ((key == pf::Key::Z || key == pf::Key::Y) && e.ctrl && !e.shift && !e.alt && lotLife_ && lotUi_.buyOrBuild() &&
+                   !dialogOpen()) {
+            undoHand(key == pf::Key::Y);
+        } else if (key == pf::Key::F && e.ctrl && !e.shift && !e.alt && !e.repeat && lotLife_ && lotUi_.buyOrBuild() && !dialogOpen()) {
+            quarterTiles_ = !quarterTiles_;
+        } else if ((key == pf::Key::Comma || key == pf::Key::Period) && lotLife_ && buyHand_.carrying() &&
+                   lotUi_.buyOrBuild() && !dialogOpen()) {
+            // While the hand holds an object, "," and "." turn it a quarter (once a press) instead of the camera.
+            if (!e.repeat) {
+                buyHand_.turn(*lotLife_, key == pf::Key::Comma ? 1 : -1);
             }
         } else if (dialogOpen() && (key == pf::Key::Z || key == pf::Key::X || key == pf::Key::PadPlus || key == pf::Key::PadMinus ||
                                     key == pf::Key::Comma || key == pf::Key::Period)) {
@@ -3864,7 +4409,7 @@ void Game::clickPanels() {
             lotUi_.mouseMoved(cx, cy);
         } else if (right != 0) {
             if (const auto button = screen_.buttonAt(cx, cy); button && lotLife_) {
-                lotAction(lotUi_.rightClicked(*button, *lotLife_));
+                lotAction(lotUi_.rightClicked(*button, *lotLife_, false));
             }
         } else {
             screen_.mouse(cx, cy, true, 0);

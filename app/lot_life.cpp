@@ -379,6 +379,12 @@ std::array<float, 2> LotLife::routePoint(const std::array<float, 3>& scenePoint)
     return {lotY, lotX};  // the lot's x and y are the position's y and x
 }
 
+std::array<float, 3> LotLife::sceneDirection(float dx, float dy) const {
+    // Out of the lot's frame: the turn alone, with the lot's x and y being the position's y and x.
+    const auto& m = lotFrame_.m;
+    return {m[0] * dy + m[1] * dx, m[4] * dy + m[5] * dx, m[8] * dy + m[9] * dx};
+}
+
 ts2::sim::Speed LotLife::speed() {
     const auto s = static_cast<ts2::sim::Speed>(sim_->globals()[ts2::sim::global::kSpeed]);
     return s == ts2::sim::Speed::High || s == ts2::sim::Speed::Ultra ? s : ts2::sim::Speed::Normal;
@@ -630,6 +636,7 @@ void LotLife::update(double ms, ts2::scene::Scene& scene) {
     hangInAnimated(scene);
     shadeHeld(scene);
     shapeColors(scene);
+    placeHandMarker(scene);
     for (auto* list : {&changedInstances_, &relit_}) {
         std::sort(list->begin(), list->end());
         list->erase(std::unique(list->begin(), list->end()), list->end());

@@ -2,8 +2,12 @@
 // UI's buttons and the live-mode keys.
 #include "game.hpp"
 
+#include "placement_errors.hpp"
+#include "sim/clock.hpp"
+
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <thread>
 #include <vector>
@@ -170,6 +174,314 @@ void Game::playKeySound(app::LotUi::Action action, bool wasPaused) {
     } else if ((action == Action::Normal || action == Action::High || action == Action::Ultra) && !paused) {
         (void)audio_->playUi(speedSound());
     }
+}
+
+// The money text starts at the mouse as the sale is booked. Selling for nothing shows no text and
+// makes no sound.
+void Game::sellHeld() {
+    if (!lotLife_) {
+        return;
+    }
+    if (const auto sold = buyHand_.sell(*lotLife_); sold && *sold != 0) {
+        recutPending_ = true;
+        if (audio_) {
+            (void)audio_->playUi("ui_object_sell");
+        }
+        moneyText_.show(screen_, -*sold, lotMouseUi_[0], lotMouseUi_[1]);
+    }
+    if (!buyHand_.carrying()) {
+        cursors_.show(app::Cursors::kArrow);
+    }
+}
+
+void Game::undoHand(bool redo) {
+    if (!lotLife_) {
+        return;
+    }
+    if (redo ? buyHand_.redo(*lotLife_) : buyHand_.undo(*lotLife_)) {
+        recutPending_ = true;
+        if (audio_) {
+            (void)audio_->playUi(redo ? "ui_redo" : "ui_undo");
+        }
+    }
+}
+
+void Game::paidHand(const app::BuyHand::Paid& paid) {
+    using What = app::BuyHand::Paid::What;
+    if (paid.what == What::PutDown || paid.what == What::Bought) {
+        recutPending_ = true;
+    }
+    if (paid.what == What::Refused) {
+        refusedHand(paid);
+    } else if (paid.what == What::PutDown) {
+        if (audio_) {
+            (void)audio_->playUiId(paid.sound);
+        }
+    } else if (paid.what == What::Lifted) {
+        if (audio_) {
+            (void)audio_->playUi("ui_object_pickup");
+        }
+    } else if (paid.what == What::CantAfford) {
+        if (audio_) {
+            (void)audio_->playUi("ui_error");
+        }
+    } else if (paid.what == What::Bought) {
+        if (audio_) {
+            (void)audio_->playUiId(paid.sound);
+        }
+    }
+    if (paid.what == What::Bought && paid.cost != 0) {
+        if (audio_) {
+            (void)audio_->playUi("ui_object_buy");
+        }
+        moneyText_.show(screen_, paid.cost, lotMouseUi_[0], lotMouseUi_[1]);
+    }
+}
+
+// A refused lift or put-down says why in a balloon, with the error sound. A lift's points at the
+// object, a put-down's at the spot the test refused.
+void Game::refusedHand(const app::BuyHand::Paid& paid) {
+    constexpr std::uint32_t kUiText = 0x7FA7DC7C;  // string id, leakcheck: ok
+    if (audio_) {
+        (void)audio_->playUi("ui_error");
+    }
+    if (!lotLife_) {
+        return;
+    }
+    const auto flags = lotLife_->handPlacementFlags(paid.refusedAt);
+    const std::string text = app::placementErrorText(
+        [&](std::uint32_t table, std::uint32_t line) { return screen_.data().text(kUiText, table << 16 | line); }, paid.refusal, flags[0], flags[1]);
+    const auto at = paid.spot ? std::optional(lotLife_->scenePointAt(paid.spot->x, paid.spot->y, paid.spot->level, lot_))
+                              : lotLife_->handScenePoint(paid.refusedAt, lot_);
+    if (at && !text.empty()) {
+        showWorldTip(text, *at);
+    }
+}
+
+void Game::settleHand(bool keepHistory, bool asEscape) {
+    if (!lotLife_) {
+        return;
+    }
+    if (buyHand_.carrying()) {
+        if (asEscape || buyHand_.badSpot() || buyHand_.buying()) {
+            buyHand_.cancel(*lotLife_);
+        } else {
+            buyHand_.click(*lotLife_, 0);
+        }
+    }
+    if (!keepHistory) {
+        buyHand_.clearHistory(*lotLife_);
+    }
+}
+
+void Game::pickBuyTool(app::LotUi::Tool tool) {
+    if (!lotLife_ || (buyHand_.carrying() && !buyHand_.buying())) {
+        return;
+    }
+    if (buyHand_.buying()) {
+        buyHand_.cancel(*lotLife_);
+    }
+    buyTool_ = tool;
+    cursors_.show(buyToolCursor());
+}
+
+std::uint32_t Game::buyToolCursor() const {
+    using Tool = app::LotUi::Tool;
+    switch (buyTool_) {
+    case Tool::Design: return app::Cursors::kDesignTool;
+    case Tool::Eyedropper: return app::Cursors::kEyedropper;
+    case Tool::Sledgehammer: return app::Cursors::kSledgehammer;
+    case Tool::Hand:
+    case Tool::Wall: break;  // the wall tool shows its marker at the corner, with the arrow
+    case Tool::Floor: break;  // the game's floor tool cursor is not known yet
+    case Tool::WallPaint: break;  // nor the wall paint tool's
+    }
+    return app::Cursors::kArrow;
+}
+
+void Game::toggleDayNight() {
+    using ts2::sim::TimeOfDay;
+    if (!lotLife_) {
+        return;
+    }
+    const auto globals = lotLife_->simulation().globals();
+    if (globals.size() <= ts2::sim::global::kTimeOfDay) {
+        return;
+    }
+    auto& timeOfDay = globals[ts2::sim::global::kTimeOfDay];
+    const auto now = static_cast<TimeOfDay>(timeOfDay);
+    if (now == TimeOfDay::Evening || now == TimeOfDay::Night) {
+        timeOfDay = static_cast<std::int16_t>(TimeOfDay::Day);
+    } else if (now == TimeOfDay::Day || now == TimeOfDay::Morning) {
+        timeOfDay = static_cast<std::int16_t>(TimeOfDay::Night);
+    }
+}
+
+void Game::setLotCamera(LotCamera camera) {
+    if (camera == lotCamera_ || !orbit_.rig) {
+        return;
+    }
+    auto& left = lotCameras_[static_cast<std::size_t>(lotCamera_)];
+    left.rig = orbit_.rig;
+    left.distance = orbit_.distance;
+    left.distanceGoal = orbit_.distanceGoal;
+    left.pitchBlend = orbit_.pitchBlend;
+    left.pitchBlendGoal = orbit_.pitchBlendGoal;
+    left.minDistance = orbit_.minDistance;
+    left.maxDistance = orbit_.maxDistance;
+    left.pivotHeight = orbit_.pivotHeight;
+    left.used = true;
+    auto& next = lotCameras_[static_cast<std::size_t>(camera)];
+    if (!next.used) {
+        // The first time on, a camera starts at its first zoom level and its least pitch.
+        next.rig = ts2::content::findCamera(install_, camera == LotCamera::TopDown ? "Build" : "Ceiling");
+        if (!next.rig || next.rig->levels.empty()) {
+            return;
+        }
+        next.maxDistance = next.rig->levels.front().distance;
+        next.minDistance = next.rig->levels.back().distance;
+        next.pivotHeight = next.rig->param("pivotheightabovefloor", 0);
+        next.distance = next.distanceGoal = next.maxDistance;
+        next.used = true;
+    }
+    if (!next.rig || next.rig->levels.empty()) {
+        return;
+    }
+    if (camera == LotCamera::TopDown) {
+        next.distanceGoal = next.rig->levels.front().distance;
+    }
+    orbit_.rig = next.rig;
+    orbit_.minDistance = next.minDistance;
+    orbit_.maxDistance = next.maxDistance;
+    orbit_.pivotHeight = next.pivotHeight;
+    orbit_.pitchBlend = next.pitchBlend;
+    orbit_.pitchBlendGoal = next.pitchBlendGoal;
+    orbit_.zoomTo(next.distance);
+    orbit_.distanceGoal = next.distanceGoal;
+    orbit_.freeZoom = false;
+    orbit_.useRigEasing();
+    orbit_.limitGoal = keepNearLot(orbit_.rig->param("constraintwidth", 0));
+    lotCamera_ = camera;
+}
+
+void Game::toggleLotCamera(LotCamera camera) {
+    const LotCamera to = lotCamera_ == camera ? LotCamera::Live : camera;
+    setLotCamera(to);
+    if (lotCamera_ == to) {
+        buyCamera_ = to;
+    }
+}
+
+void Game::useBuyTool(std::uint32_t object) {
+    using Tool = app::LotUi::Tool;
+    if (!lotLife_ || object == 0 || !lotLife_->toolTakes(object, buyTool_ == Tool::Sledgehammer)) {
+        return;
+    }
+    if (buyTool_ == Tool::Eyedropper) {
+        // The hand takes a copy of the object's catalog item, with the object's colours, as if picked
+        // from the catalog.
+        if (const auto guid = lotLife_->eyedropGuid(object)) {
+            buyHand_.buy(*lotLife_, *guid, lotLife_->eyedropColours(object));
+            // A Build catalog item (one with a build type, OBJD 0x45) opens Build mode on it, any
+            // other Buy mode. Going between the two keeps the copy in the hand.
+            constexpr std::size_t kBuildType = 0x45;
+            const auto* type = lotLife_->simulation().code().objectType(*guid);
+            lotUi_.eyedropItem(*guid, type != nullptr && type->definition.field(kBuildType) != 0);
+            handMode_ = lotUi_.mode();
+            buyTool_ = Tool::Hand;
+            lotLife_->setDesignHovered(0);
+            cursors_.show(buyHand_.carrying() ? app::Cursors::kHandHolding : app::Cursors::kArrow);
+        }
+    } else if (buyTool_ == Tool::Sledgehammer) {
+        smashObject(object);
+    }
+}
+
+void Game::smashObject(std::uint32_t object) {
+    // A Sim in its slots keeps an object from being smashed (unless the moveObjects cheat is on,
+    // which isn't ported).
+    if (lotLife_->simInSlots(object)) {
+        constexpr int kCantDelete = 0x24;  // placement error code
+        refusedHand({app::BuyHand::Paid::What::Refused, 0, kCantDelete, lotLife_->handLead(object)});
+        return;
+    }
+    if (const auto sold = buyHand_.smash(*lotLife_, object)) {
+        // A door or window smashed leaves no hole in its wall.
+        recutPending_ = true;
+        if (audio_) {
+            (void)audio_->playUi("ui_object_sell");
+        }
+        moneyText_.show(screen_, -*sold, lotMouseUi_[0], lotMouseUi_[1]);
+    }
+}
+
+void Game::showWorldTip(const std::string& text, const std::array<float, 3>& point) {
+    hideWorldTip();
+    worldTipPoint_ = point;
+    worldTipShown_ = ts2::platform::ticksNs();
+    screen_.setWorldTip(text);
+}
+
+void Game::hideWorldTip() {
+    worldTipShown_.reset();
+    screen_.setWorldTip({});
+}
+
+void Game::answerDesign(bool accepted) {
+    const auto colours = lotUi_.designedColours(), replaced = lotUi_.designedColours(true);
+    lotUi_.designDialog().close(screen_);
+    // The colours tried on the object go, and Accept gives it the ones picked. Accepting the colours
+    // the object has already changes nothing and costs nothing.
+    if (lotLife_) {
+        lotLife_->designRestore();
+    }
+    if (accepted && lotLife_) {
+        if (!colours.empty()) {
+            lotLife_->handRecolour(designObject_, colours);
+            lotLife_->handPay(kDesignCost);
+            buyHand_.recordRecolour(designObject_, replaced, colours, kDesignCost);
+            if (audio_) {
+                (void)audio_->playUi("ui_object_buy");
+            }
+            moneyText_.show(screen_, kDesignCost, lotMouseUi_[0], lotMouseUi_[1]);
+        }
+    }
+    designObject_ = 0;
+    designPressed_ = 0;
+    cursors_.show(buyToolCursor());
+}
+
+void Game::previewDesign() {
+    if (lotLife_) {
+        lotLife_->designRestore();
+        lotLife_->handRecolour(designObject_, lotUi_.designedColours());
+    }
+}
+
+void Game::dragTurnHand(float x, float y) {
+    static constexpr std::uint32_t kCursors[4] = {app::Cursors::kRotateNorthEast, app::Cursors::kRotateNorthWest, app::Cursors::kRotateSouthWest,
+                                                  app::Cursors::kRotateSouthEast};
+    if (!buyDragFrom_ || !lotLife_ || !buyHand_.carrying()) {
+        return;
+    }
+    // A facing's front as the simulation steps it (see the front tile of Create New Object Instance),
+    // seen from the camera at the held object.
+    const auto front = [&](std::int16_t facing) -> std::array<float, 2> {
+        const float angle = static_cast<float>(2 - facing) * kPi / 4;
+        const auto d = lotLife_->sceneDirection(std::cos(angle), -std::sin(angle));
+        const auto& c = orbit_.camera();
+        const auto a = app::screenPoint(c, width_, height_, buyFloor_);
+        const auto b = app::screenPoint(c, width_, height_, {buyFloor_[0] + d[0], buyFloor_[1] + d[1], buyFloor_[2] + d[2]});
+        return {b[0] - a[0], b[1] - a[1]};
+    };
+    const auto turn = app::BuyHand::dragTurn(static_cast<int>(x - (*buyDragFrom_)[0]), static_cast<int>(y - (*buyDragFrom_)[1]), front);
+    if (!turn) {
+        return;
+    }
+    buyHand_.face(*lotLife_, turn->facing);
+    buyDragCursor_ = kCursors[turn->quarter];
+    buyDragLifted_ = false;
+    cursors_.show(*buyDragCursor_);
 }
 
 void Game::playPuckSounds(bool zoomIn, bool zoomOut, bool turning) {

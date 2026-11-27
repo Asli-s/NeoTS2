@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -46,6 +47,12 @@ std::string savedLightingState(const ts2::content::Lighting& lighting, const ts2
 std::shared_ptr<LotLightBase> lightLot(ts2::scene::Assets& assets, ts2::scene::Scene& scene, const ts2::content::Lot& saved,
                                        const std::filesystem::path& lotPackage, const std::string& state, bool skirt = true);
 
+// What lighting the lot needs after it changed while played (walls built or taken out, ground
+// levelled): `lot` as it is now in `scene`, which keeps its light maps' layout. Null when it gives
+// nothing to light.
+std::shared_ptr<LotLightBase> lotLightChanged(ts2::scene::Assets& assets, const LotLightBase& was, const ts2::scene::Scene& scene,
+                                              const ts2::content::Lot& lot);
+
 // Lighting the lot again in another state, in three steps. First the lot's lamps, windows and doors
 // in `state`, read from the game's files (on the thread that uses `assets`), or null without that state.
 // `strength` gives how strongly each object's lights shine now (by object id, asked once for each
@@ -65,10 +72,15 @@ struct PutLight {
     std::vector<std::size_t> instances; // lit anew (Renderer::setLights)
     bool sky = false;                   // the skybox changed (Renderer::setSkybox)
 };
-PutLight putLotLight(ts2::scene::Scene& scene, const LotLight& light, const ts2::scene::Transform& place);
+// With `replaced`, only light maps whose pixels changed are put in, and each one put in is kept
+// there as it was before.
+PutLight putLotLight(ts2::scene::Scene& scene, const LotLight& light, const ts2::scene::Transform& place,
+                     std::map<int, ts2::scene::Image>* replaced = nullptr);
 // The outdoor lights on objects in that state, placed by `place`.
 ts2::scene::ObjectLighting outdoorLotLight(const LotLight& light, const ts2::scene::Transform& place);
 const std::string& lotLightState(const LotLight& light);
+// The scene's light-map images, as putLotLight puts them in.
+std::vector<int> lotLightMapImages(const ts2::scene::Scene& scene);
 // The state's environment colour (see content::Lighting::State::environment).
 const std::array<float, 3>& lotLightEnvironment(const LotLight& light);
 
