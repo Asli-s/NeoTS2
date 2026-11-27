@@ -200,8 +200,10 @@ std::optional<ModelBone> posedModelBone(const RouteModel& model, const std::stri
     return bone;
 }
 
-std::vector<RouteRect> objectFootprintAt(const SimObject& object, const SimObject& lead, const ObjectType& type,
-                                         const RouteModel* model, float x, float y, std::int16_t direction) {
+namespace {
+
+// The footprint's rectangles in the object's own frame, none for a part whose tile isn't found.
+std::optional<std::vector<RouteRect>> localFootprint(const SimObject& object, const SimObject& lead, const ObjectType& type, const RouteModel* model) {
     const auto& d = object.data;
     FootprintShape shape;
     shape.square = (d[8] & 0x80) != 0;
@@ -215,9 +217,23 @@ std::vector<RouteRect> objectFootprintAt(const SimObject& object, const SimObjec
     shape.graphic = lead.data[9];  // a part asks its lead, which uses its own graphic
     if (&lead != &object &&
         !footprintTileOf(tiles(lead.x), tiles(lead.y), lead.data[1], tiles(object.x), tiles(object.y), shape.tileX, shape.tileY)) {
-        return {};
+        return std::nullopt;
     }
-    return placeFootprint(footprintRects(shape), x, y, direction);
+    return footprintRects(shape);
+}
+
+} // namespace
+
+std::vector<RouteRect> objectFootprintAt(const SimObject& object, const SimObject& lead, const ObjectType& type,
+                                         const RouteModel* model, float x, float y, std::int16_t direction) {
+    const auto local = localFootprint(object, lead, type, model);
+    return local ? placeFootprint(*local, x, y, direction) : std::vector<RouteRect>{};
+}
+
+std::vector<RouteRect> objectPlacementFootprintAt(const SimObject& object, const SimObject& lead, const ObjectType& type,
+                                                  const RouteModel* model, float x, float y, std::int16_t direction) {
+    const auto local = localFootprint(object, lead, type, model);
+    return local ? placeFootprintTurned(*local, x, y, direction) : std::vector<RouteRect>{};
 }
 
 std::vector<RouteItem> objectRouteItems(const SimObject& object, const SimObject& lead, const ObjectType& type, CodeSource& code,
@@ -354,17 +370,26 @@ void RouteWorld::addObjects(World& world, CodeSource& code, const std::map<std::
 
 std::vector<int> RouteWorld::updateObjects(World& world, CodeSource& code, const RouteModelLookup& models, const std::set<std::int16_t>& objects) {
     // Each level is changed once, for all objects whose items there differ from what they had.
+    // Only doors make solid squares and areas, so those are filed under door leads alone.
+    constexpr RouteItemKind kKinds[] = {RouteItemKind::Object, RouteItemKind::Solid, RouteItemKind::Area};
     std::vector<std::vector<std::uint32_t>> stale(grids_.size());
     std::vector<std::vector<RouteItem>> added(grids_.size());
-    const std::vector<RouteItem> none;
     for (const std::int16_t id : objects) {
         const SimObject* object = world.find(id);
         PlacedItems now = object != nullptr ? currentItems(world, code, objectModels_, models, *object, lowest_, levels()) : PlacedItems{};
-        std::erase_if(now.items, [](const RouteItem& item) { return item.kind != RouteItemKind::Object || !RouteGrid::accepts(item); });
+        std::erase_if(now.items, [&](const RouteItem& item) {
+            return std::find(std::begin(kKinds), std::end(kKinds), item.kind) == std::end(kKinds) || !RouteGrid::accepts(item);
+        });
         const auto owner = static_cast<std::uint32_t>(id);
         for (std::size_t level = 0; level < grids_.size(); ++level) {
-            const auto& wanted = static_cast<int>(level) + lowest_ == now.level ? now.items : none;
-            const auto had = grids_[level].itemsOf(RouteItemKind::Object, owner);
+            std::vector<RouteItem> wanted, had;
+            if (static_cast<int>(level) + lowest_ == now.level) {
+                wanted = now.items;
+            }
+            for (const RouteItemKind kind : kKinds) {
+                const auto some = grids_[level].itemsOf(kind, owner);
+                had.insert(had.end(), some.begin(), some.end());
+            }
             if (had.size() != wanted.size() || !std::is_permutation(had.begin(), had.end(), wanted.begin())) {
                 stale[level].push_back(owner);
                 added[level].insert(added[level].end(), wanted.begin(), wanted.end());
@@ -377,7 +402,9 @@ std::vector<int> RouteWorld::updateObjects(World& world, CodeSource& code, const
             continue;
         }
         std::sort(stale[level].begin(), stale[level].end());
-        grids_[level].remove(RouteItemKind::Object, stale[level]);
+        for (const RouteItemKind kind : kKinds) {
+            grids_[level].remove(kind, stale[level]);
+        }
         for (const auto& item : added[level]) {
             grids_[level].add(item);
         }

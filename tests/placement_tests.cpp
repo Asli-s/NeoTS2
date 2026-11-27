@@ -116,6 +116,28 @@ void wallsThroughFootprints() {
     CHECK(!walls.crossed(GameRect{1.2f, 1.2f, 1.8f, 2.8f}, 1));  // no such level
     CHECK(!walls.crossed(GameRect{1.8f, 1.2f, 1.2f, 2.8f}, 0));  // an empty rectangle
     CHECK(!ts2::sim::PlacementWalls(ts2::content::Lot{}).crossed(GameRect{0, 0, 1, 1}, 0));
+
+    // An object's sides: the wall along y = 2 is side 0 of tile (1, 1) facing 0, and also side 0 of
+    // tile (1, 2) facing 4. A side that forbids a wall there refuses with code 8 at the side's middle, and
+    // a side that needs one is satisfied by a wall but not by a fence or a room divider.
+    const auto sides = [&](std::uint32_t style, std::uint16_t bits, std::int32_t x, std::int32_t y, std::int16_t facing) {
+        ts2::content::Lot styled = lot;
+        if (style != 0) {
+            styled.wallCoverings = {{1, style, 0, 0}};
+        }
+        return ts2::sim::PlacementWalls(styled).sides(bits, x, y, 0, facing, false);
+    };
+    constexpr std::uint32_t kWall = 1, kFence = 0xAD0B35F2, kDivider = 0;
+    const auto forbidden = sides(kWall, 0x0100, 1, 1, 0);
+    CHECK(forbidden && forbidden->code == 8 && forbidden->at == (std::array<float, 2>{1.5f, 2.0f}));
+    const auto turned = sides(kWall, 0x0100, 1, 2, 4);
+    CHECK(turned && turned->code == 8 && turned->at == (std::array<float, 2>{1.5f, 2.0f}));
+    CHECK(!sides(kWall, 0x0001, 1, 1, 0));
+    CHECK(sides(kFence, 0x0001, 1, 1, 0) && sides(kFence, 0x0001, 1, 1, 0)->code == 7);
+    CHECK(sides(kFence, 0x0100, 1, 1, 0) && sides(kFence, 0x0100, 1, 1, 0)->code == 8);  // a fence still blocks
+    CHECK(!sides(kDivider, 0x0100, 1, 1, 0));
+    CHECK(sides(kDivider, 0x0001, 1, 1, 0) && sides(kDivider, 0x0001, 1, 1, 0)->code == 7);
+    CHECK(!sides(kWall, 0x1000 | 0x0100, 1, 1, 0));  // objects on fences aren't tested yet
 }
 
 void roofsLeaveRoom() {

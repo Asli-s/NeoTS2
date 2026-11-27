@@ -35,6 +35,11 @@ public:
     // Whether a floor may go on tile (x, y) of grid level `level` (grid levels count from the lot's
     // lowest, as its grids do). The ground storey and below always allow one.
     bool allowed(std::int32_t level, std::int32_t x, std::int32_t y) const;
+    // Whether quarter `quarter` (0 to 3, in the floor grid's order) of a tile is held up from right
+    // below: on the ground storey or under it, over a room of wall graph 6, or over a column.
+    bool heldUp(std::int32_t level, std::int32_t x, std::int32_t y, int quarter) const {
+        return level <= ground_ || regionBelow(level, x, y, 1 << quarter);
+    }
 
 private:
     bool inBounds(std::int32_t level, std::int32_t x, std::int32_t y) const;

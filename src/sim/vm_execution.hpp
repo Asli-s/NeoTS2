@@ -34,6 +34,18 @@
 
 namespace ts2::sim::vm_detail {
 
+// Writes the game clock into a new object's birth date and time (object data 0x2D, 0x2E, 0x2F, 0x18
+// and 0x15), as every creation does before the object starts.
+void stampBirth(SimObject& created, std::span<const std::int16_t> globals);
+// Gives a new object of one tile its price (OBJD field 0x12) as its current value, object data 0x29.
+// The game does this once the object has started, so it replaces whatever its Init wrote there.
+void giveValue(SimObject& created);
+// Makes the parts of a multi-tile master's object out of the world, lead first (see
+// CodeSource::multiTileParts), stamped with their birth and in no room. Each part's data 0x13 names
+// the lead, and the lead's current value (data 0x29) is the master's price. Not started yet. Empty
+// when the master has no parts.
+std::vector<SimObject*> makeParts(World& world, CodeSource& code, const ObjectType& master, std::span<const std::int16_t> globals);
+
 
 constexpr std::uint16_t kSleepOpcode = 0x0000;
 constexpr std::uint16_t kGenericSimsCallOpcode = 0x0001;

@@ -1,11 +1,17 @@
 #pragma once
 
+#include "content/build_scripts.hpp"
+#include "content/install.hpp"
 #include "content/neighborhood.hpp"
+#include "content/recolour_catalog.hpp"
 #include "content/resource_index.hpp"
 #include "sim/clock.hpp"
 #include "sim/index_code_source.hpp"
 #include "sim/lot_world.hpp"
 #include "sim/motive_update.hpp"
+#include "sim/placement_ground.hpp"
+#include "sim/placement_roofs.hpp"
+#include "sim/placement_walls.hpp"
 #include "sim/route_portals.hpp"
 #include "sim/route_search.hpp"
 #include "sim/route_world.hpp"
@@ -88,6 +94,8 @@ public:
     // The lot's route grids with every footprint up to date, as the game has them before routing
     // work, null until route sources are set or when the lot has no floors.
     const RouteWorld* routeWorld();
+    // Takes the walls, floors and ground again from `lot` after Build mode changed them, routing too.
+    void lotChanged(const content::Lot& lot);
     std::size_t ticks() const { return ticks_; }
 
     // Why scripts stopped (outcome, reason and detail), how often, and the first time it happened.
@@ -137,8 +145,32 @@ public:
     // Objects reset when the lot loaded because their type changed since the save.
     std::size_t resets() const { return resets_; }
 
+    // Every product's recolour materials (Res/Catalog/Materials).
+    const content::RecolourCatalog& recolours() const { return recolours_; }
+
+    // Why a spot fails the placement test: the game's placement error code (0 for a failure with no
+    // message) and where its message points, as a position (x, y in tiles) on a level.
+    struct PlaceRefusal {
+        std::int16_t code = 0;
+        float x = 0, y = 0;
+        std::int32_t level = 1;
+    };
+    // The game's placement test for `placed` at (x, y) on `level` facing `direction`, the whole object
+    // for a part of a multi-tile object. Every part is tested at its turned offset from `placed` (see
+    // partSpots) as an object of one tile, and the parts must all stand on a stage or none of them.
+    // Windows and the parts of a master of object type 5 never count as on a stage. Neither do parts
+    // that stand on a fence or half wall (data 0x2A bit 0x2000), whose stage test is not known yet.
+    std::optional<PlaceRefusal> groupRefusal(const SimObject& placed, float x, float y, std::int32_t level, std::int16_t direction);
+    bool groupFits(const SimObject& placed, float x, float y, std::int32_t level, std::int16_t direction) {
+        return !groupRefusal(placed, x, y, level, direction);
+    }
+    // An object's footprint rectangles where it stands, on the simulation's axes, a part of a multi-tile
+    // object taking its lead's model. Empty for an object of an unknown type.
+    std::vector<RouteRect> standingFootprint(const SimObject& object);
+
 private:
     content::ResourceIndex index_;
+    content::RecolourCatalog recolours_;
     // Character files by their Sim's GUID, gathered while the simulation is built.
     std::map<std::uint32_t, std::filesystem::path> characterFiles_;
     IndexCodeSource code_;
@@ -156,11 +188,17 @@ private:
     mutable std::vector<std::int16_t> familyHousehold_;  // the family's Sims on the lot, as household() last found them
     std::unique_ptr<const content::Lot> lot_;  // kept until the route world is built
     std::function<float(std::int32_t, float, float)> floorHeight_;
+    std::vector<content::Product> products_;
+    content::BuildScripts buildScripts_;
+    void takeLotShape(const content::Lot& lot);
     std::map<std::uint32_t, std::string> objectModels_;  // the lot's model name of each object id
     std::map<std::uint32_t, std::uint32_t> savedGuids_;  // the type (GUID) each id had when the lot was saved
     std::map<std::uint32_t, std::vector<cobject::SavedJoint>> savedJoints_;  // as the lot saved each object's model posed
     std::optional<RouteSources> routeSources_;
     std::optional<RouteWorld> routeWorld_;
+    std::optional<PlacementGround> placementGround_;  // the lot's ground for the placement test
+    std::optional<PlacementWalls> placementWalls_;
+    std::optional<PlacementRoofs> placementRoofs_;
     std::map<int, RouteLinks> routeLinks_;  // by level, rebuilt when the grids change
     void markLinksStale(int level) {
         if (const auto it = routeLinks_.find(level); it != routeLinks_.end()) {
@@ -196,9 +234,15 @@ private:
     std::vector<std::pair<float, float>> placementSpots(const SimObject& placed, const SimObject& owner, const slot::Entry& slot,
                                                         std::span<const std::optional<ModelBone>> joints);
     bool objectFits(const SimObject& placed, float x, float y, std::int32_t level, std::int16_t direction);
+    std::optional<PlaceRefusal> oneTileRefusal(const SimObject& placed, const ObjectType& type, float x, float y, std::int32_t level,
+                                               std::int16_t direction);
     std::int16_t stepBlocker(const SimObject& sim, float x, float y, std::int32_t level);
     std::optional<std::int16_t> placeTest(const SimObject& sim, float x, float y, std::int32_t level, const RouteIntersects& intersects);
-    bool objectInTheWay(const SimObject& placed, const ObjectType& type, float x, float y, std::int32_t level, std::int16_t direction);
+    std::optional<std::int16_t> objectInTheWay(const SimObject& placed, const ObjectType& type, float x, float y, std::int32_t level,
+                                               std::int16_t direction);
+    std::optional<std::int16_t> sameTileRefusal(const SimObject& placed, const SimObject& other, float x, float y, std::int16_t direction);
+    std::optional<std::array<float, 2>> wallInTheWay(const SimObject& placed, const ObjectType& type, float x, float y, std::int32_t level,
+                                                     std::int16_t direction);
     // Whether the object at an id is still the one the lot saved there (ids are given to new objects).
     bool isSaved(const SimObject& object) const;
     // An object's model: the one the lot saved for it, or for an object made since, the one it was made

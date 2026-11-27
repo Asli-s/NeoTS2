@@ -49,9 +49,13 @@ struct RouteSources {
 };
 
 // The footprint of `object` standing at (x, y) in tiles facing `direction` (object data 1), as
-// routing and the game's placement test build it. `lead` and `model` are as for objectRouteItems.
+// routing builds it. `lead` and `model` are as for objectRouteItems.
 std::vector<RouteRect> objectFootprintAt(const SimObject& object, const SimObject& lead, const ObjectType& type,
                                          const RouteModel* model, float x, float y, std::int16_t direction);
+// The same as the placement test reads it: snapped in the object's own frame and then turned and
+// moved into place (see placeFootprintTurned).
+std::vector<RouteRect> objectPlacementFootprintAt(const SimObject& object, const SimObject& lead, const ObjectType& type,
+                                                  const RouteModel* model, float x, float y, std::int16_t direction);
 
 // The route items of one object: each footprint rectangle as a blocking core with a padded copy, or
 // one walk-through rectangle. None for Sims, objects off the lot or held, windows, and walk-through
@@ -72,9 +76,14 @@ public:
     void addObjects(World& world, CodeSource& code, const std::map<std::uint32_t, std::string>& objectModels, const RouteModelLookup& models);
     // Drops the lot's model name of a removed object, so a new object given its id doesn't take it.
     void forgetModel(std::uint32_t id) { objectModels_.erase(id); }
-    // Brings the footprints of `objects` up to date, as the game does before routing work: each
-    // object's footprint items are replaced by its current ones (none once it is gone or held).
-    // Doors keep their items. The game adds those elsewhere. Returns the levels whose grid changed.
+    // The model name of an object made after the lot loaded.
+    void setModel(std::uint32_t id, std::string name) { objectModels_[id] = std::move(name); }
+    bool knowsModel(std::uint32_t id) const { return objectModels_.contains(id); }
+    const std::map<std::uint32_t, std::string>& objectModels() const { return objectModels_; }
+    // Brings the items of `objects` up to date, as the game does before routing work: each object's
+    // footprint, and a door's swing areas and doorways, are replaced by its current ones (none once
+    // it is gone or held), so a door put down, moved or sold changes where Sims can go through walls.
+    // Returns the levels whose grid changed.
     std::vector<int> updateObjects(World& world, CodeSource& code, const RouteModelLookup& models, const std::set<std::int16_t>& objects);
 
     // Where a Sim's rings go (see simRingItems): its level (0 = ground, -1 below it), its square there

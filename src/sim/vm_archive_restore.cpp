@@ -164,8 +164,11 @@ std::int16_t Execution::createOutOfWorld(std::uint32_t guid) {
         if (startCreatedParts) {
             startCreatedParts(made);
         }
-    } else if (startCreated) {
-        startCreated(*made.front(), *type);
+    } else {
+        if (startCreated) {
+            startCreated(*made.front(), *type);
+        }
+        giveValue(*made.front());
     }
     return made.front()->id;
 }

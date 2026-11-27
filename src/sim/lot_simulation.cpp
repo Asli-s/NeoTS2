@@ -120,100 +120,18 @@ LotSimulation::LotSimulation(const std::filesystem::path& install, const std::fi
     };
     lot_ = std::make_unique<const content::Lot>(content::loadLot(lot));
     const content::Lot& saved = *lot_;
-    {
-        // A copy of the grid, as the lot is let go once the route world is built.
-        const scene::Heights fromLot(saved);
-        const auto heights = std::make_shared<const scene::Heights>(fromLot.grid() ? std::make_shared<const array3d::Array3D>(*fromLot.grid())
-                                                                                   : nullptr);
-        const int groundLevel = content::gridLevel(saved, 1);
-        floorHeight_ = [heights, groundLevel](std::int32_t level, float x, float y) { return heights->blended(level - 1 + groundLevel, x, y); };
-    }
     objectModels_ = saved.objectModels;
     savedJoints_ = saved.savedJoints;
     report_ = buildWorld(saved, code_, world_);
-    applyChosenRecolours(saved, code_, world_, recolours.get());
+    recolours_ = recolours.get();
+    applyChosenRecolours(saved, code_, world_, recolours_);
     world_.nextAfter(0, [&](const SimObject& o) {
         savedGuids_.emplace(static_cast<std::uint32_t>(o.id), o.definition.guid());
         return false;
     });
-    world_.setWalls(WallTiles::fromLot(saved));
-    world_.setSightWalls(WallTiles::builtWalls(saved));
-    world_.setSnapWalls(WallTiles::coveredWalls(saved));
-    const auto products = content::findProducts(install);
-    const content::BuildScripts buildScripts = content::loadBuildScripts(products);
-    std::vector<World::WallSection> sections;
-    std::unordered_map<std::int32_t, const wallgraph::Wall*> walls;
-    std::optional<wallgraph::PointIndex> points;
-    if (saved.roomGraph) {
-        for (const auto& w : saved.roomGraph->walls) {
-            walls.emplace(w.id, &w);
-        }
-        points.emplace(*saved.roomGraph);
-    }
-    for (const auto& e : saved.wallCoverings) {
-        if (!buildScripts.isRoomWall(e.type)) {
-            continue;
-        }
-        World::WallSection section;
-        if (const auto wall = walls.find(static_cast<std::int32_t>(e.wall)); wall != walls.end() && points) {
-            const auto* from = (*points)(wall->second->from);
-            const auto* to = (*points)(wall->second->to);
-            if (from != nullptr && to != nullptr) {
-                section = {*from, *to, true};
-            }
-        }
-        sections.push_back(section);
-    }
-    world_.setWallSections(std::move(sections));
-    {
-        constexpr std::uint32_t kKeptOutStyles[] = {300, 301};
-        std::vector<WallPiece> pieces;
-        for (const auto& e : saved.wallCoverings) {
-            const auto wall = walls.find(static_cast<std::int32_t>(e.wall));
-            if (wall == walls.end() || !points || buildScripts.fenceArches.contains(e.type) ||
-                std::ranges::find(kKeptOutStyles, e.type) != std::end(kKeptOutStyles)) {
-                continue;
-            }
-            const auto* from = (*points)(wall->second->from);
-            const auto* to = (*points)(wall->second->to);
-            if (from != nullptr && to != nullptr) {
-                pieces.push_back({*from, *to, e.type});
-            }
-        }
-        world_.setWallOutline(std::make_shared<const WallOutline>(pieces), content::loadGreenhouseFences(products));
-    }
-    if (const auto graph = saved.layerGraphs.find(content::kLayerGraphInstances[1]); graph != saved.layerGraphs.end()) {
-        world_.setWeatherRegions(RoomMap(graph->second));
-    }
-    world_.setOutside(OutsideGrid(saved, world_.weatherRegions()));
-    if (const auto floors = saved.grids.find(content::kFloorGridInstance); floors != saved.grids.end()) {
-        const int ground = content::groundGridLevel(saved);
-        // A copy of its own: the loaded lot is freed once the routing world is built.
-        world_.setFloorPattern([grid = std::make_shared<const array3d::Array3D>(floors->second), ground](int level, int x, int y, int quarter) -> std::optional<std::uint16_t> {
-            constexpr int kQuarters = 4;
-            const auto index = static_cast<std::int64_t>(level) + ground;
-            if (quarter < 0 || quarter >= kQuarters || index < 0 || index > std::numeric_limits<std::int32_t>::max() ||
-                !grid->contains(static_cast<std::int32_t>(index), x, y)) {
-                return std::nullopt;
-            }
-            return static_cast<std::uint16_t>(grid->i16(static_cast<std::int32_t>(index), x, y, static_cast<std::size_t>(quarter)));
-        });
-    }
-    if (const auto locked = saved.grids.find(content::kLockedTileGridInstance); locked != saved.grids.end() && saved.worldBounds) {
-        // The game indexes the grid from the lot's first tile and lowest level.
-        const auto& b = *saved.worldBounds;
-        world_.setLockedTile([grid = std::make_shared<const array3d::Array3D>(locked->second), b](int level, int x, int y) -> std::optional<bool> {
-            const std::int64_t l = static_cast<std::int64_t>(level) - b.minLevel, gx = static_cast<std::int64_t>(x) - b.minX,
-                               gy = static_cast<std::int64_t>(y) - b.minY;
-            constexpr std::int64_t kMax = std::numeric_limits<std::int32_t>::max(), kMin = std::numeric_limits<std::int32_t>::min();
-            if (l < kMin || l > kMax || gx < kMin || gx > kMax || gy < kMin || gy > kMax || grid->elementSize == 0 ||
-                !grid->contains(static_cast<std::int32_t>(l), static_cast<std::int32_t>(gx), static_cast<std::int32_t>(gy))) {
-                return std::nullopt;
-            }
-            return grid->at(static_cast<std::int32_t>(l), static_cast<std::int32_t>(gx), static_cast<std::int32_t>(gy))[0] != 0;
-        });
-    }
-    world_.setPlatformRegion(platformRegions(saved));
+    products_ = content::findProducts(install);
+    buildScripts_ = content::loadBuildScripts(products_);
+    takeLotShape(saved);
     world_.setNeighborRemap(saved.neighborRemap ? std::optional(saved.neighborRemap->neighborIds) : std::nullopt,
                             saved.unreadNeighborRemap);
     std::copy_n(saved.globals.begin(), std::min(saved.globals.size(), vm_.globals.size()), vm_.globals.begin());
@@ -298,6 +216,113 @@ LotSimulation::LotSimulation(const std::filesystem::path& install, const std::fi
     });
 }
 
+void LotSimulation::takeLotShape(const content::Lot& lot) {
+    {
+        // A copy of the grid, as the lot is let go once the route world is built.
+        const scene::Heights fromLot(lot);
+        const auto heights = std::make_shared<const scene::Heights>(fromLot.grid() ? std::make_shared<const array3d::Array3D>(*fromLot.grid())
+                                                                                   : nullptr);
+        const int groundLevel = content::gridLevel(lot, 1);
+        floorHeight_ = [heights, groundLevel](std::int32_t level, float x, float y) { return heights->blended(level - 1 + groundLevel, x, y); };
+    }
+    world_.setWalls(WallTiles::fromLot(lot));
+    world_.setSightWalls(WallTiles::builtWalls(lot));
+    world_.setSnapWalls(WallTiles::coveredWalls(lot));
+    std::vector<World::WallSection> sections;
+    std::unordered_map<std::int32_t, const wallgraph::Wall*> walls;
+    std::optional<wallgraph::PointIndex> points;
+    if (lot.roomGraph) {
+        for (const auto& w : lot.roomGraph->walls) {
+            walls.emplace(w.id, &w);
+        }
+        points.emplace(*lot.roomGraph);
+    }
+    for (const auto& e : lot.wallCoverings) {
+        if (!buildScripts_.isRoomWall(e.type)) {
+            continue;
+        }
+        World::WallSection section;
+        if (const auto wall = walls.find(static_cast<std::int32_t>(e.wall)); wall != walls.end() && points) {
+            const auto* from = (*points)(wall->second->from);
+            const auto* to = (*points)(wall->second->to);
+            if (from != nullptr && to != nullptr) {
+                section = {*from, *to, true};
+            }
+        }
+        sections.push_back(section);
+    }
+    world_.setWallSections(std::move(sections));
+    {
+        constexpr std::uint32_t kKeptOutStyles[] = {300, 301};
+        std::vector<WallPiece> pieces;
+        for (const auto& e : lot.wallCoverings) {
+            const auto wall = walls.find(static_cast<std::int32_t>(e.wall));
+            if (wall == walls.end() || !points || buildScripts_.fenceArches.contains(e.type) ||
+                std::ranges::find(kKeptOutStyles, e.type) != std::end(kKeptOutStyles)) {
+                continue;
+            }
+            const auto* from = (*points)(wall->second->from);
+            const auto* to = (*points)(wall->second->to);
+            if (from != nullptr && to != nullptr) {
+                pieces.push_back({*from, *to, e.type});
+            }
+        }
+        world_.setWallOutline(std::make_shared<const WallOutline>(pieces), content::loadGreenhouseFences(products_));
+    }
+    if (const auto graph = lot.layerGraphs.find(content::kLayerGraphInstances[1]); graph != lot.layerGraphs.end()) {
+        world_.setWeatherRegions(RoomMap(graph->second));
+    }
+    world_.setOutside(OutsideGrid(lot, world_.weatherRegions()));
+    if (const auto floors = lot.grids.find(content::kFloorGridInstance); floors != lot.grids.end()) {
+        const int ground = content::groundGridLevel(lot);
+        // A copy of its own: the loaded lot is freed once the routing world is built.
+        world_.setFloorPattern([grid = std::make_shared<const array3d::Array3D>(floors->second), ground](int level, int x, int y, int quarter) -> std::optional<std::uint16_t> {
+            constexpr int kQuarters = 4;
+            const auto index = static_cast<std::int64_t>(level) + ground;
+            if (quarter < 0 || quarter >= kQuarters || index < 0 || index > std::numeric_limits<std::int32_t>::max() ||
+                !grid->contains(static_cast<std::int32_t>(index), x, y)) {
+                return std::nullopt;
+            }
+            return static_cast<std::uint16_t>(grid->i16(static_cast<std::int32_t>(index), x, y, static_cast<std::size_t>(quarter)));
+        });
+    }
+    if (const auto locked = lot.grids.find(content::kLockedTileGridInstance); locked != lot.grids.end() && lot.worldBounds) {
+        // The game indexes the grid from the lot's first tile and lowest level.
+        const auto& b = *lot.worldBounds;
+        world_.setLockedTile([grid = std::make_shared<const array3d::Array3D>(locked->second), b](int level, int x, int y) -> std::optional<bool> {
+            const std::int64_t l = static_cast<std::int64_t>(level) - b.minLevel, gx = static_cast<std::int64_t>(x) - b.minX,
+                               gy = static_cast<std::int64_t>(y) - b.minY;
+            constexpr std::int64_t kMax = std::numeric_limits<std::int32_t>::max(), kMin = std::numeric_limits<std::int32_t>::min();
+            if (l < kMin || l > kMax || gx < kMin || gx > kMax || gy < kMin || gy > kMax || grid->elementSize == 0 ||
+                !grid->contains(static_cast<std::int32_t>(l), static_cast<std::int32_t>(gx), static_cast<std::int32_t>(gy))) {
+                return std::nullopt;
+            }
+            return grid->at(static_cast<std::int32_t>(l), static_cast<std::int32_t>(gx), static_cast<std::int32_t>(gy))[0] != 0;
+        });
+    }
+    world_.setPlatformRegion(platformRegions(lot));
+    placementGround_.emplace(lot);
+    placementWalls_.emplace(lot);
+    placementRoofs_.emplace(lot);
+}
+
+void LotSimulation::lotChanged(const content::Lot& lot) {
+    takeLotShape(lot);
+    if (!routeWorld_) {
+        // Not built yet: it is built from this lot when first asked for.
+        lot_ = std::make_unique<const content::Lot>(lot);
+        return;
+    }
+    if (routeSources_) {
+        // Objects bought since the lot loaded keep the models the old route world was given.
+        RouteWorld built(lot, routeSources_->fenceBlocks, routeSources_->postFootprint);
+        built.addObjects(world_, code_, routeWorld_->objectModels(), routeSources_->models);
+        routeWorld_ = std::move(built);
+        world_.takeFootprintChanges();
+        routeLinks_.clear();
+    }
+}
+
 void LotSimulation::setRouteSources(RouteSources sources) {
     routeSources_ = std::move(sources);
     world_.setModelBones([this](std::int16_t id, const std::string& bone) -> std::optional<ModelBone> {
@@ -346,6 +371,15 @@ const RouteWorld* LotSimulation::routeWorld() {
         lot_.reset();
         routeLinks_.clear();
     } else if (auto changed = world_.takeFootprintChanges(); !changed.empty()) {
+        // An object made since the lot loaded routes by its own model too.
+        for (const std::int16_t id : changed) {
+            const SimObject* object = world_.find(id);
+            if (object != nullptr && !routeWorld_->knowsModel(static_cast<std::uint32_t>(id))) {
+                if (std::string name = modelOf(*object); !name.empty()) {
+                    routeWorld_->setModel(static_cast<std::uint32_t>(id), std::move(name));
+                }
+            }
+        }
         for (const int level : routeWorld_->updateObjects(world_, code_, routeSources_->models, changed)) {
             markLinksStale(level);
         }
@@ -382,58 +416,150 @@ std::vector<std::pair<float, float>> LotSimulation::placementSpots(const SimObje
 }
 
 // The game's placement test for a one-tile object. The spot must be on a routed level of the lot.
-// Above the ground the tile needs a floor pattern on every quarter or an object with data 0x62 bit 0
-// (unless data 0x2A has 0x200 or data 0x52 has 4). Data 0x1E 1 needs outdoors, 2 indoors. Nothing may
-// be in the way (see objectInTheWay), and allowed heights data 4 must have bit 0, the floor.
-// Not run yet: the second floor flag, pool below, terrain, pool, slope, floor-or-ground (data 0x2A
-// bits 0 and 1), lot edge, roof, ceiling, wall, same-tile and door rules. Multi-tile objects pass.
+// The lot's ground rules come first (see PlacementGround), then walls through the footprint (see
+// wallInTheWay). Data 0x1E 1 needs outdoors, 2 indoors. Nothing may be in the way (see
+// objectInTheWay), and allowed heights data 4 must have bit 0, the floor. Not run yet: the roof and
+// ceiling rules, the wall rules of objects that hang on or need walls (data 0x0D), the corner rule
+// of wall graph 0x13, the same-tile and door rules. Multi-tile objects pass here (see groupFits).
 bool LotSimulation::objectFits(const SimObject& placed, float x, float y, std::int32_t level, std::int16_t direction) {
-    constexpr std::size_t kHeightsField = 4, kRoomPlacementField = 0x1E, kPlacementFlagsField = 0x2A, kFlags3Field = 0x52;
-    constexpr std::size_t kFloorStandInField = 0x62, kMultiTileIdDefinitionField = 0x0A;
-    constexpr std::int16_t kOnTheFloor = 0x01, kNeedsNoFloor = 0x200, kNeedsNoFloor3 = 0x04;
     const ObjectType* type = code_.objectType(placed.definition.guid());
-    if (type == nullptr || type->definition.field(kMultiTileIdDefinitionField) != 0) {
+    if (type == nullptr || type->definition.field(objd::field::kMultiTileMasterId) != 0) {
         return true;
     }
-    const RouteWorld* routes = routeWorld();
-    if (routes == nullptr) {
-        return true;
+    return !oneTileRefusal(placed, *type, x, y, level, direction);
+}
+
+// The message for a part off the lot and for parts half on a stage points at `placed`'s spot. Where
+// the game points them is not known yet.
+std::optional<LotSimulation::PlaceRefusal> LotSimulation::groupRefusal(const SimObject& placed, float x, float y, std::int32_t level,
+                                                                       std::int16_t direction) {
+    constexpr std::size_t kPlacementFlagsField = 0x2A;
+    constexpr std::uint16_t kOnFenceTop = 0x2000;
+    constexpr int kWindowType = 9, kUncountedMasterType = 5;
+    constexpr float kFixed = 65536.0f;
+    constexpr std::int16_t kOutOfBounds = 2, kMixedStage = 0x9A;
+    const ObjectType* type = code_.objectType(placed.definition.guid());
+    if (type == nullptr) {
+        return std::nullopt;
     }
-    const RouteGrid* grid = routes->level(level - 1);
-    if (grid == nullptr || !(x >= 0 && y >= 0 && x < grid->width() && y < grid->height())) {
-        return false;
+    if (type->definition.field(objd::field::kMultiTileMasterId) == 0) {
+        return oneTileRefusal(placed, *type, x, y, level, direction);
     }
-    const int tileX = static_cast<int>(x), tileY = static_cast<int>(y);
+    struct Spot {
+        const SimObject* part;
+        float x, y;
+        std::int32_t level;
+        std::int16_t facing;
+    };
+    std::vector<Spot> spots{{&placed, x, y, level, direction}};
+    const SnapTarget at{static_cast<std::int32_t>(std::lround(x * kFixed)), static_cast<std::int32_t>(std::lround(y * kFixed)), level, direction,
+                        false, false};
+    // Parts don't follow a diagonal turn yet, so their tiles couldn't be tested.
+    if ((direction & 1) != 0) {
+        return PlaceRefusal{0, x, y, level};
+    }
+    for (const PartSpot& spot : partSpots(world_, placed, at)) {
+        const SimObject* part = world_.find(spot.id);
+        if (part == nullptr) {
+            continue;
+        }
+        if (spot.x == kOffLot || spot.y == kOffLot) {
+            return PlaceRefusal{kOutOfBounds, x, y, level};
+        }
+        spots.push_back({part, static_cast<float>(spot.x) / kFixed, static_cast<float>(spot.y) / kFixed, spot.level, spot.facing});
+    }
+    const ObjectType* master = code_.multiTileMaster(*type);
+    const bool masterCounts = master == nullptr || master->definition.field(objd::field::kType) != kUncountedMasterType;
+    const auto& region = world_.platformRegion();
+    std::size_t onStage = 0, countedParts = 0;
+    for (const Spot& spot : spots) {
+        const ObjectType* own = code_.objectType(spot.part->definition.guid());
+        if (own == nullptr) {
+            return PlaceRefusal{0, spot.x, spot.y, spot.level};
+        }
+        if (auto refused = oneTileRefusal(*spot.part, *own, spot.x, spot.y, spot.level, spot.facing)) {
+            return refused;
+        }
+        const bool counted = masterCounts && own->definition.field(objd::field::kType) != kWindowType &&
+                             (spot.part->data[kPlacementFlagsField] & kOnFenceTop) == 0;
+        countedParts += counted ? 1 : 0;
+        // The platform grid runs along an object's y and x, from level 0 for the ground.
+        const float gx = spot.y, gy = spot.x;
+        const float tx = std::floor(gx), ty = std::floor(gy);
+        if (counted && region &&
+            region(spot.level - 1, static_cast<int>(tx), static_cast<int>(ty), World::pointQuarter(gx - tx, gy - ty)) == kStagePlatformRegion) {
+            ++onStage;
+        }
+    }
+    if (onStage == 0 || onStage == countedParts) {
+        return std::nullopt;
+    }
+    return PlaceRefusal{kMixedStage, x, y, level};
+}
+
+// Each rule's code: the ground rules give theirs, a low roof 0x2F, a wall 8, an object 0xC and a spot
+// the object may not stand on 0x19. The inside and outside rule's codes are not known yet.
+std::optional<LotSimulation::PlaceRefusal> LotSimulation::oneTileRefusal(const SimObject& placed, const ObjectType& type, float x, float y,
+                                                                         std::int32_t level, std::int16_t direction) {
+    constexpr std::int16_t kCeilingTooLow = 0x2F, kWall = 8, kNotThisSpot = 0x19;
+    const auto at = [&](std::int16_t code) { return PlaceRefusal{code, x, y, level}; };
+    constexpr std::size_t kFlagsField = 8, kHeightsField = 4, kRoomPlacementField = 0x1E, kPlacementFlagsField = 0x2A, kFlags3Field = 0x52;
+    constexpr std::size_t kFloorStandInField = 0x62;
+    constexpr std::int16_t kOnTheFloor = 0x01;
+    if (routeWorld() == nullptr || !placementGround_) {
+        return std::nullopt;
+    }
     const auto& d = placed.data;
-    if (level > 1 && !(d[kPlacementFlagsField] & kNeedsNoFloor) && !(d[kFlags3Field] & kNeedsNoFloor3)) {
-        // The floor grid counts tiles the other way round.
-        const auto& pattern = world_.floorPattern();
-        bool floor = static_cast<bool>(pattern);
-        for (int q = 0; floor && q < 4; ++q) {
-            const auto p = pattern(level - 1, tileY, tileX, q);
-            floor = p && *p != 0;
+    const PlacedFlags flags{static_cast<std::uint16_t>(d[kFlagsField]), static_cast<std::uint16_t>(d[kPlacementFlagsField]),
+                            static_cast<std::uint16_t>(d[kFlags3Field]), type.definition.field(objd::field::kType)};
+    // The ground rules count tiles on the game's axes (a position's y first) and storeys from 0.
+    const auto standIn = [&](std::int32_t storey, std::int32_t gameX, std::int32_t gameY) {
+        return world_.nextAfter(std::numeric_limits<std::int16_t>::min(), [&](const SimObject& o) {
+            return !o.removed && o.id != placed.id && o.tile && o.tile->level == storey + 1 && o.tile->x == gameY &&
+                   o.tile->y == gameX && (o.data[kFloorStandInField] & 1) != 0;
+        }) != nullptr;
+    };
+    if (const auto code = placementGround_->code(flags, y, x, level - 1, standIn, world_.lotShape().beachSide)) {
+        return at(*code);
+    }
+    // Data 0x2A bit 0x8000 or data 0x52 bit 0x4 lets an object stand under a low roof. Doors and windows
+    // are tested by their wall slots, which isn't done yet.
+    constexpr std::uint16_t kUnderRoof = 0x8000, kUnderRoof3 = 0x4;
+    constexpr int kDoorType = 8, kWindowType = 9;
+    const int objectType = type.definition.field(objd::field::kType);
+    if (placementRoofs_ && !(flags.placement & kUnderRoof) && !(flags.flags3 & kUnderRoof3) && objectType != kDoorType &&
+        objectType != kWindowType && placementRoofs_->tooLow(y, x, level - 1)) {
+        return at(kCeilingTooLow);
+    }
+    // Walls are on the game's axes, the other way round from a position's, so a facing there is the
+    // mirror of the object's. The sides' rule comes before the footprint's.
+    if (placementWalls_) {
+        constexpr std::size_t kWallSidesField = 0x0D, kStandsInField = 0x45, kStandsInKindField = 0x4A;
+        const ObjectType* master = code_.multiTileMaster(type);
+        const bool standsIn = master != nullptr && master->definition.field(kStandsInField) == 1 && master->definition.field(kStandsInKindField) == 0x40;
+        const auto mirrored = static_cast<std::int16_t>((2 - direction) & 7);
+        if (const auto side = placementWalls_->sides(static_cast<std::uint16_t>(d[kWallSidesField]), static_cast<std::int32_t>(std::floor(y)),
+                                                     static_cast<std::int32_t>(std::floor(x)), level - 1, mirrored, standsIn)) {
+            return PlaceRefusal{side->code, side->at[1], side->at[0], level};
         }
-        if (!floor) {
-            floor = world_.nextAfter(std::numeric_limits<std::int16_t>::min(), [&](const SimObject& o) {
-                return !o.removed && o.id != placed.id && o.tile && o.tile->level == level && o.tile->x == tileX &&
-                       o.tile->y == tileY && (o.data[kFloorStandInField] & 1) != 0;
-            }) != nullptr;
-        }
-        if (!floor) {
-            return false;
-        }
+    }
+    if (const auto wall = wallInTheWay(placed, type, x, y, level, direction)) {
+        return PlaceRefusal{kWall, (*wall)[1], (*wall)[0], level};
     }
     if (const std::int16_t placement = d[kRoomPlacementField]; placement == 1 || placement == 2) {
         const RoomInfo* room = world_.rooms().room(world_.rooms().roomAtPosition(level - 1, x, y));
         const std::int32_t region = room != nullptr ? room->layerRegion[placement == 1 ? 0 : 1] : -1;
         if (region >= 0 && (placement == 1) != (region == 0)) {
-            return false;
+            return at(0);
         }
     }
-    if (objectInTheWay(placed, *type, x, y, level, direction)) {
-        return false;
+    if (const auto inTheWay = objectInTheWay(placed, type, x, y, level, direction)) {
+        return at(*inTheWay);
     }
-    return (d[kHeightsField] & kOnTheFloor) != 0;
+    if ((d[kHeightsField] & kOnTheFloor) == 0) {
+        return at(kNotThisSpot);
+    }
+    return std::nullopt;
 }
 
 bool LotSimulation::isSaved(const SimObject& object) const {
@@ -450,15 +576,71 @@ std::string LotSimulation::modelOf(const SimObject& object) {
     return createdModelName(object, [&](std::size_t row) { return code_.string(object.group, kModelNames, row); });
 }
 
+// The middle of a wall running through `placed`'s footprint at (x, y) facing `direction`, on the
+// game's axes (see PlacementWalls), unless data 0x2A has bit 0x400 or 0x2000. Objects with OBJD 0x4E
+// set, and doors with data 0x0D bits 0x50, are tested by their footprint's bounding box.
+std::optional<std::array<float, 2>> LotSimulation::wallInTheWay(const SimObject& placed, const ObjectType& type, float x, float y,
+                                                                std::int32_t level, std::int16_t direction) {
+    constexpr std::size_t kPlacementFlagsField = 0x2A, kWallFlagsField = 0x0D;
+    constexpr std::uint16_t kThroughWalls = 0x400, kOnFenceTop = 0x2000, kDoorWallFlags = 0x50;
+    constexpr int kDoorType = 8;
+    const auto placement = static_cast<std::uint16_t>(placed.data[kPlacementFlagsField]);
+    if (!placementWalls_ || (placement & (kThroughWalls | kOnFenceTop)) != 0) {
+        return std::nullopt;
+    }
+    const std::string name = modelOf(placed);
+    const RouteModel* model = !name.empty() && routeSources_ && routeSources_->models ? routeSources_->models(name) : nullptr;
+    const std::vector<RouteRect> rects = objectPlacementFootprintAt(placed, placed, type, model, x, y, direction);
+    // The game's axes run the other way round.
+    const auto game = [](const RouteRect& r) { return GameRect{r.y0, r.x0, r.y1, r.x1}; };
+    constexpr std::size_t kTestByBoxField = 0x4E;  // OBJD
+    const bool byBox = type.definition.field(kTestByBoxField) != 0 ||
+                       (type.definition.field(objd::field::kType) == kDoorType && (placed.data[kWallFlagsField] & kDoorWallFlags) != 0);
+    if (byBox) {
+        bool any = false;
+        RouteRect box{};
+        for (const RouteRect& r : rects) {
+            if (!(r.x0 < r.x1 && r.y0 < r.y1)) {
+                continue;
+            }
+            box = any ? RouteRect{std::min(box.x0, r.x0), std::min(box.y0, r.y0), std::max(box.x1, r.x1), std::max(box.y1, r.y1)} : r;
+            any = true;
+        }
+        return any ? placementWalls_->crossing(game(box), level - 1) : std::nullopt;
+    }
+    for (const RouteRect& r : rects) {
+        if (auto wall = placementWalls_->crossing(game(r), level - 1)) {
+            return wall;
+        }
+    }
+    return std::nullopt;
+}
+
+std::vector<RouteRect> LotSimulation::standingFootprint(const SimObject& o) {
+    constexpr std::size_t kLeadField = 0x13;
+    const ObjectType* type = code_.objectType(o.definition.guid());
+    if (type == nullptr) {
+        return {};
+    }
+    const bool part = o.definition.field(objd::field::kMultiTileMasterId) != 0 && o.data[kLeadField] > 0;
+    const SimObject* found = part ? world_.find(o.data[kLeadField]) : nullptr;
+    const SimObject& lead = found != nullptr ? *found : o;
+    const std::string name = modelOf(lead);
+    const RouteModel* model = !name.empty() && routeSources_ && routeSources_->models ? routeSources_->models(name) : nullptr;
+    return objectPlacementFootprintAt(o, lead, *type, model, static_cast<float>(o.x) / 65536.0f, static_cast<float>(o.y) / 65536.0f, o.data[1]);
+}
+
 // Whether something stands in the way of `placed` at (x, y) facing `direction` in the placement test.
-// Objects on nearby tiles count when their footprints overlap, Sims within 0.3 tiles. Left out:
-// objects in a slot or a hand, doors and windows, pairs either one's "allow intersection" (OBJf entry
-// 5) lets through, pairs whose data 0x2A bit 0x1000 differs, parts of one multi-tile object, objects
-// when either has data 8 bit 0x02 or 0x04, and Sims when the placed object has data 8 bit 0x04 or 0x10.
+// An object on the same tile is tested first (see sameTileRefusal). Then objects on nearby tiles count
+// when their footprints overlap, a door that keeps room to open (data 0x0D bits 0x50) when one of its
+// clearance areas does, and Sims within 0.3 tiles. Left out: objects in a slot or a hand, pairs either
+// one's "allow intersection" (OBJf entry 5) lets through, pairs whose data 0x2A bit 0x1000 differs,
+// parts of one multi-tile object, objects when either has data 8 bit 0x02 or 0x04 (except windows
+// with OBJD 0x4B 0x93), and Sims when the placed object has data 8 bit 0x04 or 0x10.
 // Sims with data 8 bit 0x01 or data 0x28 bit 0x1000 are left out too (one more Sim flag is not known
 // yet), and every Sim when the placed object has data 0x28 bit 0x4000 (the game then tests footprints).
-bool LotSimulation::objectInTheWay(const SimObject& placed, const ObjectType& type, float x, float y, std::int32_t level,
-                                   std::int16_t direction) {
+std::optional<std::int16_t> LotSimulation::objectInTheWay(const SimObject& placed, const ObjectType& type, float x, float y, std::int32_t level,
+                                                          std::int16_t direction) {
     constexpr std::size_t kContainerField = 2, kFlagsField = 8, kFlags2Field = 0x28, kPlacementFlagsField = 0x2A, kLeadField = 0x13;
     constexpr std::int16_t kSimGroupFlag = 0x1000, kIgnoresSims = 0x14, kIgnoresObjects = 0x06, kSkippedSim = 0x01;
     constexpr std::uint16_t kSimsByFootprint = 0x4000;
@@ -475,13 +657,11 @@ bool LotSimulation::objectInTheWay(const SimObject& placed, const ObjectType& ty
         return lead != nullptr ? lead : &o;
     };
     const SimObject& placedLead = *partLead(placed);
-    const std::vector<RouteRect> mine = objectFootprintAt(placed, placedLead, type, model(placedLead), x, y, direction);
-    if (mine.empty()) {
-        return false;
-    }
+    const std::vector<RouteRect> mine = objectPlacementFootprintAt(placed, placedLead, type, model(placedLead), x, y, direction);
     // The tiles round the spot's tile, or round every footprint rectangle for objects with OBJD 0x4E set.
+    constexpr std::size_t kTestByBoxField = 0x4E;  // OBJD
     float x0 = std::floor(x), y0 = std::floor(y), x1 = x0, y1 = y0;
-    if (type.definition.field(0x4E) != 0) {
+    if (type.definition.field(kTestByBoxField) != 0) {
         for (const RouteRect& r : mine) {
             x0 = std::min(x0, std::floor(r.x0));
             y0 = std::min(y0, std::floor(r.y0));
@@ -498,11 +678,23 @@ bool LotSimulation::objectInTheWay(const SimObject& placed, const ObjectType& ty
                intersectionsFor(placed)(static_cast<std::uint32_t>(o.id)).has_value() ||
                intersectionsFor(o)(static_cast<std::uint32_t>(placed.id)).has_value();
     };
-    return world_.nextAfter(std::numeric_limits<std::int16_t>::min(), [&](const SimObject& o) {
+    constexpr std::int16_t kObjectInTheWay = 0xC;
+    std::optional<std::int16_t> code;
+    world_.nextAfter(std::numeric_limits<std::int16_t>::min(), [&](const SimObject& o) {
         if (o.removed || o.id == placed.id || o.x == kOffLot || o.data[kContainerField] > 0 || !near(o)) {
             return false;
         }
         if (isPart(placed) && isPart(o) && o.data[kLeadField] == placed.data[kLeadField]) {
+            return false;
+        }
+        if (o.tile && o.tile->level == level && o.tile->x == static_cast<std::int32_t>(std::floor(x)) &&
+            o.tile->y == static_cast<std::int32_t>(std::floor(y))) {
+            if (const auto same = sameTileRefusal(placed, o, x, y, direction)) {
+                code = same;
+                return true;
+            }
+        }
+        if (mine.empty()) {
             return false;
         }
         if (o.isPerson()) {
@@ -521,23 +713,95 @@ bool LotSimulation::objectInTheWay(const SimObject& placed, const ObjectType& ty
                 }
                 const float dx = px < r.x0 ? r.x0 - px : px - r.x1, dy = py < r.y0 ? r.y0 - py : py - r.y1;
                 return dx * dx + dy * dy < kSimClearance * kSimClearance;
-            });
+            }) && (code = kObjectInTheWay);
         }
         const ObjectType* other = code_.objectType(o.definition.guid());
-        if (other == nullptr || ((placed.data[kFlagsField] | o.data[kFlagsField]) & kIgnoresObjects) != 0) {
+        if (other == nullptr) {
             return false;
         }
+        constexpr std::size_t kWindowKindField = 0x4B;  // OBJD
+        constexpr int kTestedWindowKind = 0x93;
         const int otherType = other->definition.field(objd::field::kType);
-        if (otherType == kDoorType || otherType == kWindowType || passes(o)) {
+        const bool testedWindow = otherType == kWindowType && other->definition.field(kWindowKindField) == kTestedWindowKind;
+        if ((((placed.data[kFlagsField] | o.data[kFlagsField]) & kIgnoresObjects) != 0 && !testedWindow) || passes(o)) {
             return false;
         }
         const SimObject* lead = partLead(o);
-        const std::vector<RouteRect> theirs = objectFootprintAt(o, *lead, *other, model(*lead), static_cast<float>(o.x) / 65536.0f,
-                                                                 static_cast<float>(o.y) / 65536.0f, o.data[1]);
+        const float ox = static_cast<float>(o.x) / 65536.0f, oy = static_cast<float>(o.y) / 65536.0f;
+        // A door that keeps room to open is met only by the room it keeps: its model's masks for
+        // graphics 0 and 2 at its tile.
+        constexpr std::size_t kWallFlagsField = 0x0D;
+        constexpr std::int16_t kKeepsRoom = 0x50;
+        std::vector<RouteRect> theirs;
+        if (otherType == kDoorType && (o.data[kWallFlagsField] & kKeepsRoom) != 0) {
+            const RouteModel* doorModel = model(*lead);
+            int tileX = 0, tileY = 0;
+            if (doorModel != nullptr && doorModel->footprint &&
+                (lead == &o || footprintTileOf(static_cast<float>(lead->x) / 65536.0f, static_cast<float>(lead->y) / 65536.0f, lead->data[1], ox, oy, tileX, tileY))) {
+                for (const int graphic : {0, 2}) {
+                    for (const RouteRect& r : placeFootprint(footprintTile(*doorModel->footprint, graphic, tileX, tileY), ox, oy, o.data[1])) {
+                        theirs.push_back(r);
+                    }
+                }
+            }
+        } else {
+            theirs = objectPlacementFootprintAt(o, *lead, *other, model(*lead), ox, oy, o.data[1]);
+        }
         return std::ranges::any_of(theirs, [&](const RouteRect& t) {
             return std::ranges::any_of(mine, [&](const RouteRect& m) { return m.overlaps(t); });
+        }) && (code = kObjectInTheWay);
+    });
+    return code;
+}
+
+// The test for another object on the spot's tile, which comes before the objects' footprints: code
+// 0xC when both objects' data 0x3F have bit 0x01 or 0x08, or either has bit 0x04 and the other is a
+// copy of the same object at the spot. Objects needing a wall along the same tile edge (data 0x0D) refuse
+// too, unless either has data 0x52 bit 0x01 or they differ in its bit 0x04: two doors or windows with
+// code 0x17, others with code 0xC when both data 0x3F have bit 0x02. One more flag of the game's, which
+// limits that last rule to doors and windows, is not known yet.
+std::optional<std::int16_t> LotSimulation::sameTileRefusal(const SimObject& placed, const SimObject& other, float x, float y,
+                                                           std::int16_t direction) {
+    constexpr std::size_t kSameTileField = 0x3F, kWallFlagsField = 0x0D, kEdgeFlagsField = 0x52;
+    constexpr std::int16_t kObjectInTheWay = 0xC, kUsedWall = 0x17;
+    constexpr int kDoorType = 8, kWindowType = 9;
+    const auto mineFlags = static_cast<std::uint16_t>(placed.data[kSameTileField]);
+    const auto theirFlags = static_cast<std::uint16_t>(other.data[kSameTileField]);
+    if ((mineFlags & theirFlags & 0x09) != 0) {
+        return kObjectInTheWay;
+    }
+    if (((mineFlags | theirFlags) & 0x04) != 0 && other.x == static_cast<std::int32_t>(std::lround(x * 65536.0f)) &&
+        other.y == static_cast<std::int32_t>(std::lround(y * 65536.0f)) && other.definition.guid() == placed.definition.guid()) {
+        return kObjectInTheWay;
+    }
+    // Edges on the game's axes, with facings mirrored as for the sides' rule.
+    const auto edges = [](const SimObject& o, float ox, float oy, std::int16_t facing) {
+        return PlacementWalls::neededEdges(static_cast<std::uint16_t>(o.data[kWallFlagsField]), static_cast<std::int32_t>(std::floor(oy)),
+                                           static_cast<std::int32_t>(std::floor(ox)), static_cast<std::int16_t>((2 - facing) & 7));
+    };
+    const auto mine = edges(placed, x, y, direction);
+    const auto theirs = edges(other, static_cast<float>(other.x) / 65536.0f, static_cast<float>(other.y) / 65536.0f, other.data[1]);
+    const bool shared = std::ranges::any_of(mine, [&](const auto& a) {
+        return std::ranges::any_of(theirs, [&](const auto& b) {
+            return a == b || (a[0] == b[2] && a[1] == b[3] && a[2] == b[0] && a[3] == b[1]);
         });
-    }) != nullptr;
+    });
+    const auto mineEdge = static_cast<std::uint16_t>(placed.data[kEdgeFlagsField]), theirEdge = static_cast<std::uint16_t>(other.data[kEdgeFlagsField]);
+    if (!shared || (mineEdge & 0x01) != 0 || (theirEdge & 0x01) != 0 || ((mineEdge ^ theirEdge) & 0x04) != 0) {
+        return std::nullopt;
+    }
+    const auto doorOrWindow = [&](const SimObject& o) {
+        const ObjectType* t = code_.objectType(o.definition.guid());
+        const int kind = t != nullptr ? t->definition.field(objd::field::kType) : 0;
+        return kind == kDoorType || kind == kWindowType;
+    };
+    if (doorOrWindow(placed) && doorOrWindow(other)) {
+        return kUsedWall;
+    }
+    if ((mineFlags & theirFlags & 0x02) != 0) {
+        return kObjectInTheWay;
+    }
+    return std::nullopt;
 }
 
 // What blocks a walking Sim's step to (x, y) on `level`, as the game places a walking Sim each tick.

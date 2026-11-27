@@ -51,6 +51,11 @@ RouteRect doorwaySquare(float x, float y);
 // Turns rectangles around an object's tile centre to face `direction` (object data 1, 0-7) and moves
 // them to the object's position (`x`, `y`), snapped to eighths.
 std::vector<RouteRect> placeFootprint(const std::vector<RouteRect>& local, float x, float y, int direction);
+// The same snapped first, facing 0 at the origin with the model's own y, and then turned and moved,
+// as the game keeps the footprint its placement test reads. Only a sliver differs: it grows from its
+// low edge in the model before the turn, so a thin picture on a wall grows into the room rather than
+// into the wall.
+std::vector<RouteRect> placeFootprintTurned(const std::vector<RouteRect>& local, float x, float y, int direction);
 
 // How an object's footprint routes, from its live object data (the game sets some of these flags
 // while the lot loads, so saved values are not enough).

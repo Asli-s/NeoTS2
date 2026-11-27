@@ -2519,6 +2519,27 @@ void chosenRecoloursFillTheMaterialNames() {
           (*lamp.savedMaterialNames)[7] == "lightingceilingcentralasian_outsideshade_turq_lit");
 }
 
+// The Design tool's strips come from each design subset's materials mesh when its geometry node
+// names one, as an archway takes its door's recolours, else from the object's own model.
+void designStripsComeFromTheMaterialsMesh() {
+    ts2::content::RecolourCatalog catalog;
+    catalog.add({"doorwalnut_cres", "wood", "doorwalnut_wood_walnut", "a", 2, 0, true});
+    catalog.add({"doorwalnut_cres", "wood", "doorwalnut_wood_blue", "b", 1, 0, false});
+    catalog.add({"doorwalnut_cres", "glass", "doorwalnut_glass_clear", "c", 3, 0, false});
+    catalog.add({"lamp_cres", "shade", "lamp_shade_red", "d", 4, 0, true, 0x1234});
+    catalog.add({"lampshade_cres", "shade", "lampshade_shade_blue", "e", 5, 0, false, 0x1234});
+    catalog.add({"lamp_cres", "shade", "lamp_shade_green", "f", 6, 0, false, 0x5678});
+    const std::vector<ts2::content::DesignSubset> arch{{"wood", "doorWalnut_cres", "doorWalnutArch", 0x9999}};
+    const auto strips = ts2::content::recolourStrips(catalog, arch);
+    CHECK(strips.size() == 1 && strips[0].subset == "wood" && strips[0].choices.size() == 2);
+    CHECK(strips.size() == 1 && strips[0].choices.size() == 2 && strips[0].choices[0].material == "doorwalnut_wood_blue" && strips[0].chosen == 1);
+    // A node that names no model takes the materials made for the catalog item, of any model.
+    const std::vector<ts2::content::DesignSubset> lamp{{"shade", "", "lamp", 0x1234}, {"base", "", "lamp", 0x1234}};
+    const auto made = ts2::content::recolourStrips(catalog, lamp);
+    CHECK(made.size() == 1 && made[0].subset == "shade" && made[0].choices.size() == 2);
+    CHECK(made.size() == 1 && made[0].choices.size() == 2 && made[0].choices[1].material == "lampshade_shade_blue");
+}
+
 Instruction effectStopStart(std::uint8_t mode, std::int16_t name, std::uint8_t slot = 0xFF, std::uint8_t slotKind = 3, std::uint16_t flags = 0) {
     Instruction in = primitiveCall(0x0070, T, F);
     in.operands[0] = mode;
@@ -3825,6 +3846,7 @@ std::vector<Test> vmObjectTests() {
         {"Change Material names a material for a mesh group", changeMaterialNamesAMaterialForAMeshGroup},
         {"A recolour material finds its row", aRecolourMaterialFindsItsRow},
         {"Chosen recolours fill the material names", chosenRecoloursFillTheMaterialNames},
+        {"Design strips come from the materials mesh", designStripsComeFromTheMaterialsMesh},
         {"Play/Stop Sound Event names the sound and its source", soundEventNamesTheSoundAndItsSource},
         {"held objects come along with their holder", heldObjectsComeAlongWithTheirHolder},
         {"Effect Stop/Start asks for effects", effectStopStartAsksForEffects},

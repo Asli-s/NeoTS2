@@ -230,4 +230,24 @@ std::vector<RouteRect> placeFootprint(const std::vector<RouteRect>& local, float
     return placed;
 }
 
+std::vector<RouteRect> placeFootprintTurned(const std::vector<RouteRect>& local, float x, float y, int direction) {
+    // The game snaps with the model's own y, which route coordinates turn round.
+    const auto flip = [](RouteRect r) { return RouteRect{r.x0, -r.y1, r.x1, -r.y0}; };
+    std::vector<RouteRect> modelFrame;
+    for (const auto& r : local) {
+        modelFrame.push_back(flip(r));
+    }
+    std::vector<RouteRect> placed;
+    for (auto r : placeFootprint(modelFrame, 0, 0, 0)) {
+        r = flip(r);
+        switch ((direction & 7) / 2) {
+        case 0: placed.push_back({x + r.x0, y + r.y0, x + r.x1, y + r.y1}); break;
+        case 1: placed.push_back({x - r.y1, y + r.x0, x - r.y0, y + r.x1}); break;
+        case 2: placed.push_back({x - r.x1, y - r.y1, x - r.x0, y - r.y0}); break;
+        default: placed.push_back({x + r.y0, y - r.x1, x + r.y1, y - r.x0}); break;
+        }
+    }
+    return placed;
+}
+
 } // namespace ts2::sim

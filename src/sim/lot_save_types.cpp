@@ -88,10 +88,8 @@ void addNewTypes(const dbpf::PackageImage& package, LotSimulation& simulation, T
             return false;
         }
         const objt::Entry entry = typeEntry(simulation.code(), *type, static_cast<std::uint16_t>(last + 1));
-        // Flag 1 marks a multi-tile type, saved with a material block, which a new object can't start
-        // from yet (see freshRecord). A Sim made this run is saved only with its character file.
-        if ((entry.flag & 1) != 0 ||
-            (entry.kind == objt::kPersonKind && !owners.writtenNewSims.contains(simulation.world().neighborIdOf(object)))) {
+        // A Sim made this run is saved only with its character file.
+        if (entry.kind == objt::kPersonKind && !owners.writtenNewSims.contains(simulation.world().neighborIdOf(object))) {
             return false;
         }
         known.insert(guid);

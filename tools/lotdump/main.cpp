@@ -9,6 +9,11 @@
 #include "formats/slot.hpp"
 #include "formats/wallgraph.hpp"
 #include "formats/resource_types.hpp"
+#include "content/build_scripts.hpp"
+#include "sim/floor_support.hpp"
+#include "sim/placement_ground.hpp"
+#include "sim/placement_roofs.hpp"
+#include "sim/placement_walls.hpp"
 #include "sim/index_code_source.hpp"
 #include "sim/rooms.hpp"
 #include "sim/world.hpp"
@@ -16,6 +21,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <iostream>
 #include <cstring>
 #include <exception>
 #include <filesystem>
@@ -117,6 +123,80 @@ int listLot(const std::filesystem::path& path, IndexCodeSource* code) {
     }
     for (const auto& p : lot.problems) {
         std::printf("problem: object %u: %s\n", p.id, p.message.c_str());
+    }
+    return 0;
+}
+
+// Where Build mode lets a floor go, per grid level above the ground: '#' allowed, 'F' floored, '.' not.
+int showFloorAllowed(const std::filesystem::path& path, const std::filesystem::path& install) {
+    const Lot lot = ts2::content::loadLot(path);
+    const auto products = ts2::content::findProducts(install);
+    const auto scripts = ts2::content::loadBuildScripts(products);
+    const auto bearing = ts2::content::loadFencesWith(products, "bearsload");
+    ts2::content::ResourceIndex index;
+    for (const auto& objects : ts2::content::objectLoadOrder(products)) {
+        index.addPackage(objects);
+    }
+    IndexCodeSource code(index);
+    const ts2::sim::FloorSupport support(lot, [&](std::uint32_t type) -> std::optional<ts2::sim::PartitionSupport> {
+        if (const auto style = scripts.wallStyles.find(type); style != scripts.wallStyles.end()) {
+            return ts2::sim::PartitionSupport{style->second.bearsLoad, false};
+        }
+        return ts2::sim::PartitionSupport{bearing.contains(type), true};
+    }, [&](std::uint32_t guid) {
+        constexpr std::size_t kBuildSubsortField = 0x4A;  // OBJD, 8 for columns
+        const auto* type = code.objectType(guid);
+        return type != nullptr && type->definition.field(kBuildSubsortField) == 8;
+    });
+    const auto floors = lot.grids.find(ts2::content::kFloorGridInstance);
+    if (floors == lot.grids.end()) {
+        return 1;
+    }
+    const auto& g = floors->second;
+    for (std::int32_t level = ts2::content::groundGridLevel(lot) + 1; level < static_cast<std::int32_t>(g.levels); ++level) {
+        std::printf("level %d\n", level);
+        for (std::int32_t x = 0; x < static_cast<std::int32_t>(g.width); ++x) {
+            for (std::int32_t y = 0; y < static_cast<std::int32_t>(g.height); ++y) {
+                bool floored = false;
+                for (std::size_t q = 0; q < 4; ++q) {
+                    floored = floored || g.i16(level, x, y, q) != 0;
+                }
+                std::putchar(floored ? 'F' : support.allowed(level, x, y) ? '#' : '.');
+            }
+            std::putchar('\n');
+        }
+    }
+    return 0;
+}
+
+// For each "x y level" line on stdin (game axes, level 0 = ground), the placement test's ground code
+// for an object with these data 0x2A, 0x52 and 8 values, or "-" when it passes. After the ground
+// rules, 0x2F when a roof leaves no room, then 8 when a wall crosses a footprint of the tile shrunk by
+// 0.1 on each side (a stand-in for the object's own). Objects that stand in for a floor and the beach
+// side are left out.
+int showGroundCodes(const std::filesystem::path& path, std::uint16_t placement, std::uint16_t flags3, std::uint16_t flags) {
+    constexpr float kInset = 0.1f;
+    const Lot lot = ts2::content::loadLot(path);
+    const ts2::sim::PlacementGround ground(lot);
+    const ts2::sim::PlacementWalls walls(lot);
+    const ts2::sim::PlacementRoofs roofs(lot);
+    const ts2::sim::PlacedFlags object{flags, placement, flags3};
+    float x = 0, y = 0;
+    int level = 0;
+    while (std::cin >> x >> y >> level) {
+        auto c = ground.code(object, x, y, level, {}, std::nullopt);
+        const float tx = std::floor(x), ty = std::floor(y);
+        if (!c && !(placement & 0x8000) && !(flags3 & 4) && roofs.tooLow(x, y, level)) {
+            c = std::int16_t{0x2F};
+        }
+        if (!c && walls.crossed({tx + kInset, ty + kInset, tx + 1 - kInset, ty + 1 - kInset}, level)) {
+            c = std::int16_t{8};
+        }
+        if (c) {
+            std::printf("%g %g %d 0x%X\n", x, y, level, static_cast<unsigned>(*c));
+        } else {
+            std::printf("%g %g %d -\n", x, y, level);
+        }
     }
     return 0;
 }
@@ -756,6 +836,11 @@ int main(int argc, char** argv) {
                 return showFrameSurvey(std::filesystem::path(argv[1]));
             } else if (arg == "--animation-survey") {
                 return showAnimationSurvey(std::filesystem::path(argv[1]));
+            } else if (arg == "--floor-allowed" && i + 1 < argc) {
+                return showFloorAllowed(std::filesystem::path(argv[1]), std::filesystem::path(argv[++i]));
+            } else if (arg == "--ground-codes" && i + 3 < argc) {
+                const auto number = [](const char* s) { return static_cast<std::uint16_t>(std::stoul(s, nullptr, 0)); };
+                return showGroundCodes(std::filesystem::path(argv[1]), number(argv[i + 1]), number(argv[i + 2]), number(argv[i + 3]));
             } else if (arg == "--graphs") {
                 return showGraphs(std::filesystem::path(argv[1]));
             } else {

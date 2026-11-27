@@ -569,4 +569,23 @@ bool WallOutline::mostlyGreenhouse(const RoomMap& rooms, std::int32_t room, cons
     return false;
 }
 
+std::vector<WallPiece> WallOutline::around(const WallPiece& side) const {
+    const auto a = vertex(side.from.x, side.from.y, side.from.level);
+    const auto b = vertex(side.to.x, side.to.y, side.to.level);
+    const auto start = a && b ? edge(*a, *b) : std::nullopt;
+    std::vector<WallPiece> out;
+    if (!start) {
+        return out;
+    }
+    std::size_t e = *start;
+    // Every half-edge lies on one face, so the walk is back at its start within them all.
+    do {
+        const Vertex& from = vertices_[edges_[e].from];
+        const Vertex& to = vertices_[edges_[e].to];
+        out.push_back({{0, from.x, from.y, from.level}, {0, to.x, to.y, to.level}, edges_[e].type});
+        e = next(e);
+    } while (e != *start && out.size() <= edges_.size());
+    return out;
+}
+
 } // namespace ts2::sim

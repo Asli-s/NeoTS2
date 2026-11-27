@@ -161,6 +161,23 @@ void World::removeOne(SimObject& object) {
     }
 }
 
+void World::keepSold(SimObject& object) {
+    if (!object.removed) {
+        keepUntilUnload(object);
+        footprintChanges_.insert(object.id);
+    }
+}
+
+void World::restoreKept(SimObject& object) {
+    if (object.removed && object.keptUntilUnload) {
+        object.removed = false;
+        object.keptUntilUnload = false;
+        --keptCount_;
+        objectsChanged();
+        footprintChanges_.insert(object.id);
+    }
+}
+
 void World::keepUntilUnload(SimObject& object) {
     if (!object.removed) {
         object.removed = true;

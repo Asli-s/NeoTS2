@@ -1131,9 +1131,63 @@ void savingALotWritesTheTypesValuesNow() {
     CHECK(written.entries[1].unknown == entry.unknown && written.entries[1].index == 41);
 }
 
-// A new object that gets no record, because no object of its type on the lot has one to start from
-// and its type keeps a material block, stays out of the object map. Its id can hold a record left
-// from an object deleted long ago, which the game would read as this object's.
+void aNewMultiTileObjectIsSavedWithItsBlock() {
+    ts2::objt::ObjectTypeTable types;
+    ts2::objt::Entry entry;
+    entry.guid = 0x3000;
+    entry.index = 41;
+    entry.flag = 1;
+    types.entries.push_back(entry);
+    ts2::sim::World world;
+    auto lead = typed(0x3000);
+    lead.fields[ts2::objd::field::kMultiTileMasterId] = 1;
+    auto part = lead;
+    part.fields[ts2::objd::field::kMultiTileSubIndex] = 0x0102;  // tile (1, 2) of the model
+    auto& leadObject = world.create(kObjectGroup, lead);
+    auto& partObject = world.create(kObjectGroup, part);
+    leadObject.x = 5 << 16;
+    leadObject.y = 7 << 16;
+    partObject.x = 4 << 16;
+    partObject.y = 7 << 16;
+    leadObject.data[ts2::sim::kLeadTileField] = static_cast<std::int16_t>(leadObject.id);
+    partObject.data[ts2::sim::kLeadTileField] = static_cast<std::int16_t>(leadObject.id);
+    const std::int16_t leadId = static_cast<std::int16_t>(leadObject.id), partId = static_cast<std::int16_t>(partObject.id);
+
+    ts2::objm::MapRecord map;
+    map.waits.assign(4, 0);
+    ts2::dbpf::PackageImage package;
+    package.resources = {
+        ts2::dbpf::storeResource({ts2::types::kObjectMap, 0xFFFFFFFF, 1, 0}, ts2::objm::writeMapRecord(map)),
+        ts2::dbpf::storeResource({ts2::types::kObjectTypeTable, 0xFFFFFFFF, 0, 0}, ts2::objt::write(types)),
+    };
+    package.dataOrder = {0, 1};
+    const std::array<std::int16_t, ts2::simi::kGlobalCount> globals{};
+    const ts2::sim::LotSaveCounts counts = ts2::sim::fillLotPackage(package, world, globals, 0, {}, nullptr);
+    CHECK(counts.objectsAdded == 2 && counts.objectsUnnamed == 0);
+    const auto found = std::find_if(package.resources.begin(), package.resources.end(), [&](const auto& r) {
+        return r.key.type == ts2::types::kSavedObjectWithMaterial && r.key.instance == static_cast<std::uint32_t>(partId);
+    });
+    CHECK(found != package.resources.end());
+    if (found == package.resources.end()) {
+        return;
+    }
+    const auto bytes = found->compressed ? ts2::qfs::decompress(found->bytes) : found->bytes;
+    const auto saved = ts2::xobj::parse(bytes, ts2::xobj::kWrittenVersion, ts2::xobj::RecordKind::ObjectWithMaterial);
+    // A tile back from its lead along x, tile (1, 2) of the model, then the lead's id.
+    std::vector<std::uint8_t> expected;
+    for (const std::int32_t v : {-1, 0, 0, 1, 2, 0}) {
+        for (int i = 0; i < 4; ++i) {
+            expected.push_back(static_cast<std::uint8_t>(static_cast<std::uint32_t>(v) >> (8 * i)));
+        }
+    }
+    expected.push_back(static_cast<std::uint8_t>(leadId));
+    expected.push_back(static_cast<std::uint8_t>(leadId >> 8));
+    CHECK(saved.tail && saved.tail->materialBlock == expected);
+}
+
+// A new object that gets no record, here a multi-tile part whose lead is gone, stays out of the
+// object map. Its id can hold a record left from an object deleted long ago, which the game would
+// read as this object's.
 void savingALotListsOnlyNewObjectsWithARecord() {
     ts2::objt::ObjectTypeTable types;
     ts2::objt::Entry entry;
@@ -1147,6 +1201,8 @@ void savingALotListsOnlyNewObjectsWithARecord() {
     ts2::sim::World world;
     const std::int32_t wasId = world.create(kObjectGroup, typed(0x1000)).id;
     const std::int32_t madeId = world.create(kObjectGroup, typed(0x3000)).id;
+    // A multi-tile part whose lead is gone has nothing to fill its record's last block from.
+    world.find(static_cast<std::int16_t>(madeId))->data[ts2::sim::kLeadTileField] = 999;
 
     ts2::xobj::SavedObject record;
     record.version = ts2::xobj::kWrittenVersion;
@@ -3129,6 +3185,7 @@ std::vector<Test> simulationTests() {
         {"saving a lot keeps what it does not fill", savingALotKeepsWhatItDoesNotFill},
         {"saving a lot gives new objects a record", savingALotGivesNewObjectsARecord},
         {"saving a lot lists only new objects with a record", savingALotListsOnlyNewObjectsWithARecord},
+        {"a new multi-tile object is saved with its block", aNewMultiTileObjectIsSavedWithItsBlock},
         {"saving a lot adds new types", savingALotAddsNewTypes},
         {"saving a lot tells reused ids apart", savingALotTellsReusedIdsApart},
         {"saving a lot refuses Sims made this run", savingALotRefusesSimsMadeThisRun},

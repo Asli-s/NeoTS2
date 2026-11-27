@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <optional>
 #include <stdexcept>
 #include <unordered_map>
@@ -66,6 +67,47 @@ xobj::SavedObject freshRecord(const objt::Entry& entry, const objd::ObjectDefini
     record.tail->relationshipVersion = 3;
     record.tail->slots.marker = -101;
     return record;
+}
+
+// The block a multi-tile object's record ends with, from where it stands now: its tile offset from
+// its lead (x, y, then levels, as three i32), its tile in the model from OBJD field 0x0B (x as a signed
+// byte, y unsigned, then a level, as three i32) and the lead's id (i16). None without a lead, or when
+// the object's parts stand on more than one level, as a part's level in the model is not known yet.
+std::optional<std::vector<std::uint8_t>> multiTileBlock(const World& world, const SimObject& object) {
+    const SimObject* lead = world.find(object.data[kLeadTileField]);
+    if (lead == nullptr) {
+        return std::nullopt;
+    }
+    bool oneLevel = true;
+    world.nextAfter(0, [&](const SimObject& other) {
+        if (other.data[kLeadTileField] == lead->id && other.level != lead->level) {
+            oneLevel = false;
+        }
+        return !oneLevel;
+    });
+    if (!oneLevel) {
+        return std::nullopt;
+    }
+    constexpr double kTile = 65536.0;
+    const std::uint16_t sub = object.definition.field(objd::field::kMultiTileSubIndex);
+    const std::array<std::int32_t, 6> values{
+        static_cast<std::int32_t>(std::lround((static_cast<double>(object.x) - lead->x) / kTile)),
+        static_cast<std::int32_t>(std::lround((static_cast<double>(object.y) - lead->y) / kTile)),
+        0,
+        static_cast<std::int8_t>(sub >> 8),
+        sub & 0xFF,
+        0};
+    std::vector<std::uint8_t> block;
+    const auto put = [&](std::uint32_t v, int bytes) {
+        for (int i = 0; i < bytes; ++i) {
+            block.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
+        }
+    };
+    for (const std::int32_t v : values) {
+        put(static_cast<std::uint32_t>(v), 4);
+    }
+    put(static_cast<std::uint16_t>(lead->id), 2);
+    return block;
 }
 
 // The types of the objects the lot was saved with that are not on it now. A lot makes its own
@@ -177,10 +219,9 @@ std::optional<xobj::SavedObject> recordToStartFrom(SaveState& save, const SimObj
             } catch (const std::exception&) {
             }
         }
-        // With no record of its type to start from, an ordinary object gets the record the game
-        // writes for an object just made. One with a material block (XMTO) does not, as what the
-        // game puts there for a new one is not known yet.
-        if (!from && kind == xobj::RecordKind::Object) {
+        // With no record of its type to start from, an object gets the record the game writes for
+        // an object just made. A multi-tile one's block is filled from where it stands as it is written.
+        if (!from && (kind == xobj::RecordKind::Object || kind == xobj::RecordKind::ObjectWithMaterial)) {
             from = freshRecord(entry, object.definition);
             ++save.counts.objectsFresh;
         }
@@ -311,6 +352,12 @@ xobj::SavedObject objectRecord(const xobj::SavedObject& loaded, const SimObject&
         tail.arrays = object.arrays;
         tail.shorts = object.arrayIterators;
         tail.strings = object.savedMaterialNames ? *object.savedMaterialNames : object.materialNames;
+        if (!object.recolours.empty()) {
+            tail.materials.clear();
+            for (const ChosenRecolour& r : object.recolours) {
+                tail.materials.push_back({r.model, r.subset, r.material});
+            }
+        }
         tail.token.guid = object.token.guid;
         tail.token.flags = object.token.flags;
         tail.token.value1 = object.token.value1;
@@ -400,9 +447,18 @@ void addNewObjects(SaveState& save) {
             ++save.counts.objectsUnnamed;
             return false;
         }
+        xobj::SavedObject record = objectRecord(asTemplate(*from), object, save.owners, &save.counters);
+        if (*kind == xobj::RecordKind::ObjectWithMaterial) {
+            const auto block = multiTileBlock(save.world, object);
+            if (!block || !record.tail) {
+                ++save.counts.objectsUnnamed;
+                return false;
+            }
+            record.tail->materialBlock = *block;
+        }
         std::vector<std::uint8_t> written;
         try {
-            written = xobj::write(objectRecord(asTemplate(*from), object, save.owners, &save.counters), *kind);
+            written = xobj::write(record, *kind);
         } catch (const std::exception&) {
             ++save.counts.objectsUnnamed;
             return false;

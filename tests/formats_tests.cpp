@@ -8,6 +8,7 @@
 #include "formats/face_shape.hpp"
 #include "formats/rcol.hpp"
 #include "formats/cursor.hpp"
+#include "formats/dbpf_append.hpp"
 #include "formats/dbpf_writer.hpp"
 #include "formats/effects.hpp"
 #include "formats/lot_description.hpp"
@@ -37,7 +38,6 @@
 #include "formats/wallgraph.hpp"
 #include "formats/array3d.hpp"
 #include "formats/terrain.hpp"
-#include "formats/dbpf_append.hpp"
 
 #include <bit>
 #include <cmath>
@@ -1096,6 +1096,37 @@ void packageMarksEveryCopyOfACompressedKey() {
         CHECK(package.entries()[i].compressed && package.entries()[i].uncompressedSize == 99);
     }
     CHECK(!package.entries()[2].compressed);
+}
+
+// Resources added in place replace those with the same key and keep the rest, and the space left
+// behind is listed as holes. A replaced compressed resource leaves the compression directory.
+void packagesTakeResourcesInPlace() {
+    namespace fs = std::filesystem;
+    const fs::path file = fs::temp_directory_path() / "neots2-append-test.package";
+    {
+        std::ofstream out(file, std::ios::binary);
+        ts2::dbpf::PackageWriter writer(out);
+        const std::vector<std::uint8_t> plain{1, 2, 3}, packed{4, 5};
+        writer.add({0x10, 0xFFFFFFFF, 1, 7}, plain, false, 0);
+        writer.add({0x10, 0xFFFFFFFF, 2, 7}, packed, true, 40);
+        writer.finish(0);
+    }
+    const std::vector<ts2::dbpf::StoredResource> added{{{0x10, 0xFFFFFFFF, 2, 7}, {9, 9, 9, 9}, false, 0},
+                                                       {{0x10, 0xFFFFFFFF, 3, 8}, {6}, false, 0}};
+    ts2::dbpf::appendToPackage(file, added);
+    {
+        ts2::dbpf::Package package{file};
+        const auto& entries = package.entries();
+        auto find = [&](std::uint32_t instance) {
+            return std::find_if(entries.begin(), entries.end(), [&](const auto& e) { return e.key.type == 0x10 && e.key.instance == instance; });
+        };
+        CHECK(entries.size() == 3);  // two pictures and the new one, no directory left
+        CHECK(find(1) != entries.end() && package.read(*find(1)) == std::vector<std::uint8_t>({1, 2, 3}));
+        CHECK(find(2) != entries.end() && !find(2)->compressed && package.read(*find(2)) == std::vector<std::uint8_t>({9, 9, 9, 9}));
+        CHECK(find(3) != entries.end() && find(3)->key.instanceHigh == 8 && package.read(*find(3)) == std::vector<std::uint8_t>({6}));
+        CHECK(package.header().holeCount >= 3);  // the old resource, directory and index
+    }
+    fs::remove(file);
 }
 
 // A written package reads back with its keys, stored bytes and compression directory. Its index
@@ -3325,39 +3356,6 @@ void savedObjectsWriteBack() {
     CHECK(refused);
 }
 
-// A written package reads back with its keys, stored bytes and compression directory. Its index
-// has high instances only when a resource has one.
-// Resources added in place replace those with the same key and keep the rest, and the space left
-// behind is listed as holes. A replaced compressed resource leaves the compression directory.
-void packagesTakeResourcesInPlace() {
-    namespace fs = std::filesystem;
-    const fs::path file = fs::temp_directory_path() / "neots2-append-test.package";
-    {
-        std::ofstream out(file, std::ios::binary);
-        ts2::dbpf::PackageWriter writer(out);
-        const std::vector<std::uint8_t> plain{1, 2, 3}, packed{4, 5};
-        writer.add({0x10, 0xFFFFFFFF, 1, 7}, plain, false, 0);
-        writer.add({0x10, 0xFFFFFFFF, 2, 7}, packed, true, 40);
-        writer.finish(0);
-    }
-    const std::vector<ts2::dbpf::StoredResource> added{{{0x10, 0xFFFFFFFF, 2, 7}, {9, 9, 9, 9}, false, 0},
-                                                       {{0x10, 0xFFFFFFFF, 3, 8}, {6}, false, 0}};
-    ts2::dbpf::appendToPackage(file, added);
-    {
-        ts2::dbpf::Package package{file};
-        const auto& entries = package.entries();
-        auto find = [&](std::uint32_t instance) {
-            return std::find_if(entries.begin(), entries.end(), [&](const auto& e) { return e.key.type == 0x10 && e.key.instance == instance; });
-        };
-        CHECK(entries.size() == 3);  // two pictures and the new one, no directory left
-        CHECK(find(1) != entries.end() && package.read(*find(1)) == std::vector<std::uint8_t>({1, 2, 3}));
-        CHECK(find(2) != entries.end() && !find(2)->compressed && package.read(*find(2)) == std::vector<std::uint8_t>({9, 9, 9, 9}));
-        CHECK(find(3) != entries.end() && find(3)->key.instanceHigh == 8 && package.read(*find(3)) == std::vector<std::uint8_t>({6}));
-        CHECK(package.header().holeCount >= 3);  // the old resource, directory and index
-    }
-    fs::remove(file);
-}
-
 std::vector<Test> formatTests() {
     return {
         {"saved objects write back", savedObjectsWriteBack},
@@ -3385,6 +3383,7 @@ std::vector<Test> formatTests() {
         {"a package marks every copy of a compressed key", packageMarksEveryCopyOfACompressedKey},
         {"a package recognises AppleDouble metadata", packageRecognisesAppleDoubleMetadata},
         {"written packages read back", writtenPackagesReadBack},
+        {"packages take resources in place", packagesTakeResourcesInPlace},
         {"interactions are found by string index", interactionsAreFoundByStringIndex},
         {"Weather record reads its values", weatherRecordReadsItsValues},
         {"Neighborhood id is read", neighborhoodIdIsRead},
@@ -3433,6 +3432,5 @@ std::vector<Test> formatTests() {
         {"simulator state reads the random state", simulatorStateReadsTheRandomState},
         {"lot value adds the game's parts", lotValueAddsTheGamesParts},
         {"wall graph point index finds the first point", wallGraphPointIndexFindsTheFirstPoint},
-        {"packages take resources in place", packagesTakeResourcesInPlace},
     };
 }

@@ -71,6 +71,17 @@ void objectFootprintsFollowTheModel() {
     CHECK(std::abs(step[0].x0 - 10.01f) < 1e-4f && std::abs(step[0].y0 - 27.26f) < 1e-4f && std::abs(step[0].x1 - 10.99f) < 1e-4f &&
           std::abs(step[0].y1 - 27.49f) < 1e-4f);
 
+    // A thin picture (the Piranha tri-pennant's extent) on a wall: routing snaps it after the turn,
+    // so its sliver grows toward the wall, while the placement test's footprint grows into the room
+    // as the game's does (0.26 to 0.365 from the tile's middle, facing 6 at the wall).
+    FootprintShape pennant;
+    pennant.modelBox = RouteRect{-0.411f, -0.413f, 0.489f, -0.398f};
+    const auto toWall = placeFootprint(footprintRects(pennant), 30.5f, 13.5f, 6);
+    const auto intoRoom = placeFootprintTurned(footprintRects(pennant), 30.5f, 13.5f, 6);
+    CHECK(toWall.size() == 1 && toWall[0].x1 > 31.0f);
+    CHECK(intoRoom.size() == 1 && std::abs(intoRoom[0].x0 - 30.76f) < 1e-4f && std::abs(intoRoom[0].x1 - 30.865f) < 1e-4f &&
+          std::abs(intoRoom[0].y0 - 13.011f) < 1e-3f && std::abs(intoRoom[0].y1 - 13.865f) < 1e-4f);
+
     // Types and costs, with the game's own flags for these objects.
     CHECK(footprintRouting(0x90, 300, 0x20a0, 4, false).passable && footprintRouting(0x90, 300, 0x20a0, 4, false).cost == 4);  // daisies
     CHECK(footprintRouting(0x0, 0, 0x30a4, 4, false).type == 9);   // a table

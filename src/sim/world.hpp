@@ -265,6 +265,14 @@ struct MaterialChange {
     bool operator==(const MaterialChange&) const = default;
 };
 
+// A recolour chosen for one subset of an object's model, as the save's per-subset recolour list
+// holds it: the model, the subset and the material of the recolour family.
+struct ChosenRecolour {
+    std::string model;
+    std::string subset;
+    std::string material;
+};
+
 struct SimObject {
     std::int16_t id = 0;
     // When it came onto the lot, counted from 1 over created and loaded objects alike. The game
@@ -276,6 +284,8 @@ struct SimObject {
     // before it. `materialVersion` goes up whenever they change. Not saved yet.
     std::vector<MaterialChange> materialChanges;
     std::uint32_t materialVersion = 0;
+    // Its per-subset recolour list: the save's, or the colours Buy mode gave it when it was bought.
+    std::vector<ChosenRecolour> recolours;
     // Its recolor's materials, entry n + 1 standing in for entry n of its material names (string
     // table 0x88) when not empty. Read from the lot's save.
     std::vector<std::string> materialNames;
@@ -629,6 +639,11 @@ public:
     // Removing any part of a multi-tile object removes all of its parts, as the game deletes the
     // whole object through its lead.
     void remove(SimObject& object);
+    // Buy mode's sale of one object: it is removed for scripts and routes as keepUntilUnload()
+    // removes it, but purge() keeps it while the undo history could bring it back. remove() then
+    // deletes it for good, and restoreKept() puts it back.
+    void keepSold(SimObject& object);
+    void restoreKept(SimObject& object);
     // Marks an object removed for scripts, as remove() does, but leaves it on the lot: purge() keeps
     // it and it is still drawn. The game does this to a saved Placeholder or TemplatePerson as the
     // lot loads. A later remove() deletes it at the end of that tick. A save leaves it out, as no lot

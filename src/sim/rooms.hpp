@@ -91,6 +91,9 @@ public:
     // then x, then y), on its edges or nearest corner, else a level lower. Not known yet: segments
     // outside this layer, and which of two equally near corner segments the game takes.
     bool mostlyGreenhouse(const RoomMap& rooms, std::int32_t room, const std::set<std::uint32_t>& greenhouse) const;
+    // The pieces round the area on the right of `side`, starting with `side`, each turned the way the walk
+    // goes. Empty when `side` is not in the outline.
+    std::vector<WallPiece> around(const WallPiece& side) const;
 
 private:
     struct Vertex {

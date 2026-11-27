@@ -791,14 +791,43 @@ std::optional<Execution::CreateSpot> Execution::tileInFront(const SimObject* ref
                       Tile{static_cast<std::uint8_t>(x), static_cast<std::uint8_t>(y), static_cast<std::uint8_t>(ref->level)}};
 }
 
-// A new object is born at the game clock: object data 0x2D year, 0x2E month, 0x2F day, 0x18 hour and 0x15 minute.
-// Food reads them to tell how old it is, and the object reset keeps them.
+// Food reads the birth date to tell how old it is, and the object reset keeps it.
+void stampBirth(SimObject& created, std::span<const std::int16_t> globals) {
+    created.data[0x2D] = globals[global::kYear];
+    created.data[0x2E] = globals[global::kMonth];
+    created.data[0x2F] = globals[global::kDayOfMonth];
+    created.data[0x18] = globals[global::kHour];
+    created.data[0x15] = globals[global::kMinute];
+}
+
+void giveValue(SimObject& created) {
+    constexpr std::size_t kCurrentValueField = 0x29;
+    created.data[kCurrentValueField] = static_cast<std::int16_t>(created.definition.field(objd::field::kPrice));
+}
+
+std::vector<SimObject*> makeParts(World& world, CodeSource& code, const ObjectType& master, std::span<const std::int16_t> globals) {
+    constexpr std::size_t kCurrentValueField = 0x29;
+    const std::vector<const ObjectType*> types = code.multiTileParts(master);
+    std::vector<SimObject*> parts;
+    parts.reserve(types.size());
+    for (const ObjectType* type : types) {
+        parts.push_back(&world.create(type->group, type->definition, containerSlotsOf(code, *type)));
+        parts.back()->data[kTargetSlotCountField] = targetSlotCount(*type);
+        parts.back()->data[kSemiAttributeCountField] = semiAttributeCount(code, *type);
+        stampBirth(*parts.back(), globals);
+        parts.back()->data[kRoomDataField] = -1;
+    }
+    if (!parts.empty()) {
+        for (SimObject* part : parts) {
+            part->data[kLeadTileField] = parts.front()->id;
+        }
+        parts.front()->data[kCurrentValueField] = static_cast<std::int16_t>(master.definition.field(objd::field::kPrice));
+    }
+    return parts;
+}
+
 void Execution::stampBirth(SimObject& created) const {
-    created.data[0x2D] = globals_[global::kYear];
-    created.data[0x2E] = globals_[global::kMonth];
-    created.data[0x2F] = globals_[global::kDayOfMonth];
-    created.data[0x18] = globals_[global::kHour];
-    created.data[0x15] = globals_[global::kMinute];
+    vm_detail::stampBirth(created, globals_);
 }
 
 // Create New Object Instance. Bytes 0-3 GUID, byte 4 where, byte 5 flags, byte 6 local, byte 9 slot,
@@ -945,6 +974,7 @@ bool Execution::createObject(const bhav::Instruction& in, Frame& f) {
     if (startCreated) {
         startCreated(created, *type);
     }
+    giveValue(created);
     passToMain(created, flags);
     stackObject() = created.id;
     return true;
@@ -955,28 +985,14 @@ bool Execution::createObject(const bhav::Instruction& in, Frame& f) {
 // (data 0x29) is the master's price. The lead becomes the stack object. Only out of world is done
 // yet. A master without a lead part is not supported.
 bool Execution::createParts(const ObjectType& master, std::uint8_t placement, std::uint8_t flags) {
-    constexpr std::size_t kCurrentValueField = 0x29;
     if (placement != kPlaceOutOfWorld) {
         throw Stop{Outcome::Unsupported, "Create Object of a multi-tile object placed on the lot", hex(placement, 2)};
     }
-    const std::vector<const ObjectType*> types = code_.multiTileParts(master);
-    if (types.empty()) {
+    if (code_.multiTileParts(master).empty()) {
         throw Stop{Outcome::Unsupported, "Create Object of a multi-tile object without a lead part", hex(master.definition.guid(), 8)};
     }
-    std::vector<SimObject*> parts;
-    parts.reserve(types.size());
-    for (const ObjectType* type : types) {
-        parts.push_back(&world().create(type->group, type->definition, containerSlotsOf(code_, *type)));
-        parts.back()->data[kTargetSlotCountField] = targetSlotCount(*type);
-        parts.back()->data[kSemiAttributeCountField] = semiAttributeCount(code_, *type);
-        stampBirth(*parts.back());
-        parts.back()->data[kRoomDataField] = -1;  // made out of the world, so in no room
-    }
+    const std::vector<SimObject*> parts = makeParts(world(), code_, master, globals_);
     SimObject& lead = *parts.front();
-    for (SimObject* part : parts) {
-        part->data[kLeadTileField] = lead.id;
-    }
-    lead.data[kCurrentValueField] = static_cast<std::int16_t>(master.definition.field(objd::field::kPrice));
     if (startCreatedParts) {
         startCreatedParts(parts);
     }

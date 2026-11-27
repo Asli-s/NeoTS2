@@ -192,9 +192,13 @@ public:
     // Whether tree `tree` exists for code of `codeGroup` (global, the group's own or its semi-global).
     bool hasTree(std::uint32_t codeGroup, std::uint16_t tree);
 
-    // Makes a new object of type `guid` out of the world and starts it as Create New Object Instance
-    // does (its Init runs and its Main runs until it first waits). Null when the type is unknown.
+    // Makes a new object of type `guid` out of the world, stamped with its birth and worth its price,
+    // and starts it as Create New Object Instance does (its Init runs and its Main runs until it first
+    // waits). Null when the type is unknown.
     SimObject* create(std::uint32_t guid);
+    // Makes the parts of the multi-tile object of master `guid` out of the world and starts them as
+    // Create New Object Instance does. The lead, or null when the type is unknown or has no parts.
+    SimObject* createMultiTile(std::uint32_t guid);
 
     // Runs an event tree for `me` as the game does, on top of whatever `me` is running: until it
     // ends, with `stackObject` as its stack object and sharing `me`'s temps. With `keepTemps` my

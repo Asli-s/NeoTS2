@@ -135,8 +135,8 @@ bool canSaveLot(const dbpf::PackageImage& package);
 
 // Gives `owners` an entry for each type of an object on the running lot that the lot's type table
 // does not hold yet, numbered after the table's last, as the game adds them when it saves. Only
-// types whose objects get a record are added: not multi-tile types, whose objects are saved with a
-// material block (XMTO), and Sims only when their character files are written (writtenNewSims).
+// types whose objects get a record are added: Sims only when their character files are written
+// (writtenNewSims).
 void addNewTypes(const dbpf::PackageImage& package, LotSimulation& simulation, TypeOwners& owners);
 
 // What a save put into a lot's package, for the log and the tests.

@@ -479,8 +479,23 @@ SimObject* Vm::create(std::uint32_t guid) {
     SimObject& created = world_->create(type->group, type->definition, containerSlotsOf(code_, *type));
     created.data[kTargetSlotCountField] = targetSlotCount(*type);
     created.data[kSemiAttributeCountField] = semiAttributeCount(code_, *type);
+    vm_detail::stampBirth(created, globals);
     startCreated(created, *type);
+    vm_detail::giveValue(created);
     return &created;
+}
+
+SimObject* Vm::createMultiTile(std::uint32_t guid) {
+    const ObjectType* master = code_.objectType(guid);
+    if (master == nullptr || world_ == nullptr) {
+        return nullptr;
+    }
+    const std::vector<SimObject*> parts = vm_detail::makeParts(*world_, code_, *master, globals);
+    if (parts.empty()) {
+        return nullptr;
+    }
+    startCreatedParts(parts);
+    return parts.front();
 }
 
 RunResult Vm::checkFromTree(SimObject& who, std::uint32_t codeOwner, std::uint16_t tree, std::int16_t stackObject,
