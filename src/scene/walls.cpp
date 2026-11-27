@@ -193,6 +193,36 @@ std::map<std::string, std::vector<WallMask>> wallMasks(const std::vector<std::st
     return masks;
 }
 
+std::vector<WallCut> wallCuts(const std::vector<ThickWall>& walls, const std::vector<WallMask>& masks, const Transform& place, int level) {
+    std::vector<WallCut> cuts;
+    // Wall segment middles, doubled so they are whole numbers.
+    auto key = [](float x, float y) { return std::array<long, 2>{std::lround(x), std::lround(y)}; };
+    for (const auto& m : masks) {
+        // n is the object's front (+y) and e its +x.
+        const float fx = m.face.ends_with('e') ? 1.0f : m.face.ends_with('w') ? -1.0f : 0.0f;
+        const float fy = m.face.starts_with('n') ? 1.0f : m.face.starts_with('s') ? -1.0f : 0.0f;
+        if (fx == 0 && fy == 0) {
+            continue;
+        }
+        const bool diagonal = fx != 0 && fy != 0;
+        float mid[3] = {static_cast<float>(m.east) - (diagonal ? 0 : fx / 2), static_cast<float>(-m.south) - (diagonal ? 0 : fy / 2), 0};
+        float facing[3] = {fx, fy, 0};
+        place.apply(mid, true);
+        place.apply(facing, false);
+        const auto at = key(mid[0] * 2, mid[1] * 2);
+        for (std::size_t i = 0; i < walls.size(); ++i) {
+            const auto& w = walls[i];
+            if (w.level != level + m.level || key(w.q.x0 + w.q.x1, w.q.y0 + w.q.y1) != at) {
+                continue;
+            }
+            const float dx = w.q.x1 - w.q.x0, dy = w.q.y1 - w.q.y0;
+            cuts.push_back({i, facing[0] * dy - facing[1] * dx > 0, m.material});
+            break;
+        }
+    }
+    return cuts;
+}
+
 std::vector<WallHub> joinWalls(std::vector<ThickWall>& walls) {
     std::vector<WallHub> hubs;
     std::map<std::int32_t, std::vector<std::pair<std::size_t, int>>> atPoint;
@@ -350,11 +380,26 @@ void addThickWall(SceneBuilder& builder, Surfaces& surfaces, const ThickWall& w,
         // Past a segment's ends (where corners are mitred) a mask would wrap around to its other
         // edge and could open a slit there. Masked sides keep to the segment's own part of the texture.
         const bool masked = !(left ? w.leftMask : w.rightMask).empty();
-        auto u = [&](const std::array<float, 2>& c) {
-            const float t = left ? along(c) / len : 1 - along(c) / len;
-            return masked ? std::clamp(t, 0.0f, 1.0f) : t;
-        };
         const auto pts = left ? points(w.leftA, w.leftB) : points(w.rightA, w.rightB);
+        // The covering runs once across the side, mitred corners included, its middle at the section's
+        // middle.
+        const auto fromStart = [&](const std::array<float, 2>& c) { return left ? along(c) : len - along(c); };
+        float startAt = fromStart(pts.front()), endAt = fromStart(pts.front());
+        for (const auto& c : pts) {
+            startAt = std::min(startAt, fromStart(c));
+            endAt = std::max(endAt, fromStart(c));
+        }
+        const float middle = len / 2;
+        auto u = [&](const std::array<float, 2>& c) {
+            if (masked) {
+                return std::clamp(fromStart(c) / len, 0.0f, 1.0f);
+            }
+            const float d = fromStart(c);
+            if (d <= middle) {
+                return middle - startAt > 0 ? 0.5f * (d - startAt) / (middle - startAt) : 0.0f;
+            }
+            return endAt - middle > 0 ? 0.5f + 0.5f * (d - middle) / (endAt - middle) : 1.0f;
+        };
         const std::optional<LightRect> rect = lightRects ? (*lightRects)[left ? 0 : 1] : std::nullopt;
         // Light-map coordinates for the vertices a quad just added to `p` (from `first` on).
         auto light = [&](Primitive& p, std::size_t first) {

@@ -79,6 +79,10 @@ void GlRenderer::setState(const State& want) {
             gl_.Enable(GL_BLEND);
             gl_.BlendFuncSeparate(GL_ONE, GL_ONE, GL_ZERO, GL_ONE);
             break;
+        case 8:  // added to what is there times its alpha
+            gl_.Enable(GL_BLEND);
+            gl_.BlendFuncSeparate(GL_ONE, GL_SRC_ALPHA, GL_ZERO, GL_ONE);
+            break;
         case 7:  // what is there multiplied by it
             gl_.Enable(GL_BLEND);
             gl_.BlendFuncSeparate(GL_DST_COLOR, GL_ZERO, GL_ZERO, GL_ONE);
@@ -254,9 +258,11 @@ void GlRenderer::drawList(const FrameView& f, std::span<const Draw> list, int bl
             continue;
         }
         State state;
-        state.blend = !blend || !m                          ? blend
+        state.blend = d.instance->refusedLook && blend      ? 2
+                      : !blend || !m                          ? blend
                       : m->alpha == scene::AlphaMode::Add ? 2
                       : m->alpha == scene::AlphaMode::Sum ? 6
+                      : m->alpha == scene::AlphaMode::Brighten ? 8
                                                           : blend;
         state.cull = !(m && m->doubleSided);
         state.depthWrite = blend == 0 || (m && m->blendedHair);
@@ -289,6 +295,17 @@ void GlRenderer::drawList(const FrameView& f, std::span<const Draw> list, int bl
         if (elementBuffer_ != buffers.indices) {
             gl_.BindBuffer(GL_ELEMENT_ARRAY_BUFFER, buffers.indices);
             elementBuffer_ = buffers.indices;
+        }
+        // A refused object's shape-coloured surfaces first write their depth alone, as the game draws
+        // them, so the added colour lands only on the nearest of them.
+        if (state.blend == 2 && d.instance->refusedLook && (!m || m->takesShapeColor)) {
+            State depth = state;
+            depth.blend = 0;
+            depth.depthWrite = true;
+            depth.colorWrite = false;
+            setState(depth);
+            gl_.DrawElements(GL_TRIANGLES, static_cast<GLsizei>(p.count), GL_UNSIGNED_INT, offset(static_cast<std::size_t>(p.firstIndex) * 4));
+            setState(state);
         }
         gl_.DrawElements(GL_TRIANGLES, static_cast<GLsizei>(p.count), GL_UNSIGNED_INT, offset(static_cast<std::size_t>(p.firstIndex) * 4));
     }

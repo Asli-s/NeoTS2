@@ -700,6 +700,8 @@ std::string SceneBuilder::poolWallMaterial(const std::string& name) {
     }
     Material m = scene_.materials[static_cast<std::size_t>(base)];
     m.caustics = 2;
+    // Its own name, so a wall rebuild matching materials by name doesn't take the plain one.
+    m.name = key;
     addMaterial(key, std::move(m));
     return key;
 }
@@ -884,8 +886,70 @@ int SceneBuilder::terrainMaterial(const std::string& texture, int repeats, float
         m.detailRepeats = static_cast<float>(repeats);
     }
     m.alpha = paint ? AlphaMode::Layer : AlphaMode::Opaque;
+    m.alphaReference = 10.0f / 255;  // the game draws a paint where its strength is above 10
     const std::string low = lower(texture);
     m.terrainCanvas = !paint || (low.find("lottexture") != std::string::npos && low.find("beach") == std::string::npos && low.find("cliff") == std::string::npos);
+    return addMaterial(key, std::move(m));
+}
+
+int SceneBuilder::groundGridMaterial() {
+    const std::string key = "floor-grid ground grid";
+    if (const auto it = materials_.find(key); it != materials_.end()) {
+        return it->second;
+    }
+    const int base = image("floor-grid");
+    if (base < 0) {
+        return -1;
+    }
+    Material m;
+    m.name = "floorGridBlack";
+    m.color = {0, 0, 0, 0.775f};  // the script's floorGridAlpha
+    m.image = base;
+    m.unlit = true;
+    m.alpha = AlphaMode::Layer;
+    m.alphaReference = 0.5f / 255;  // anything not fully clear, as the game's alpha test
+    return addMaterial(key, std::move(m));
+}
+
+int SceneBuilder::poolGridMaterial() {
+    const std::string key = "floor-grid pool grid";
+    if (const auto it = materials_.find(key); it != materials_.end()) {
+        return it->second;
+    }
+    const int base = image("floor-grid");
+    if (base < 0) {
+        return -1;
+    }
+    // Drawn after the pool water, which is on layer 5 (poolWaterLayer).
+    constexpr int kAfterPoolWater = 7;
+    Material m;
+    m.name = "floorGridBlack";
+    m.color = {0, 0, 0, 0.775f};  // the script's floorGridAlpha
+    m.image = base;
+    m.unlit = true;
+    m.alpha = AlphaMode::Blend;
+    m.layer = kAfterPoolWater;
+    return addMaterial(key, std::move(m));
+}
+
+int SceneBuilder::upperGridMaterial(bool active) {
+    const std::string texture = active ? "floor-grid-active" : "floor-grid";
+    const std::string key = texture + " upper grid";
+    if (const auto it = materials_.find(key); it != materials_.end()) {
+        return it->second;
+    }
+    const int base = image(texture);
+    if (base < 0) {
+        return -1;
+    }
+    Material m;
+    m.name = active ? "floorGridWhiteActiveLevel" : "floorGridWhite";
+    m.image = base;
+    m.unlit = true;
+    // The textures are black, so the game's colour, one minus the texture times its alpha, is the alpha.
+    m.alphaReplicate = true;
+    m.alpha = AlphaMode::Brighten;
+    m.alphaReference = 51.0f / 255;
     return addMaterial(key, std::move(m));
 }
 
@@ -1389,6 +1453,49 @@ bool skinToNode(const std::string& node, const Transform& fromNode, std::vector<
 }
 
 } // namespace
+
+std::optional<std::pair<std::array<float, 3>, std::array<float, 3>>> SceneBuilder::modelBox(const std::string& name) {
+    const auto model = readModelShapes(name, nullptr, name, nullptr);
+    if (!model) {
+        return std::nullopt;
+    }
+    constexpr float kHuge = std::numeric_limits<float>::max();
+    std::array<float, 3> low{kHuge, kHuge, kHuge}, high{-kHuge, -kHuge, -kHuge};
+    for (const auto& placed : model->shapes) {
+        const sg::Shape& shape = placed.shape;
+        std::uint32_t detail = UINT32_MAX;
+        for (std::size_t i = 0; i < shape.geometryNodes.size(); ++i) {
+            detail = std::min(detail, i < shape.detailLevels.size() ? shape.detailLevels[i] : 0u);
+        }
+        for (std::size_t item = 0; item < shape.geometryNodes.size(); ++item) {
+            if ((item < shape.detailLevels.size() ? shape.detailLevels[item] : 0u) != detail) {
+                continue;
+            }
+            const auto data = readShapeMesh(shape, item, name, nullptr);
+            if (!data) {
+                continue;
+            }
+            for (const auto& group : data->groups) {
+                if (group.link >= data->links.size()) {
+                    continue;
+                }
+                const auto positions = sg::vertexFloats(*data, data->links[group.link], sg::kPositions);
+                for (std::size_t v = 0; v + 2 < positions.size(); v += 3) {
+                    float p[3] = {positions[v], positions[v + 1], positions[v + 2]};
+                    placed.place.apply(p, true);
+                    for (std::size_t k = 0; k < 3; ++k) {
+                        low[k] = std::min(low[k], p[k]);
+                        high[k] = std::max(high[k], p[k]);
+                    }
+                }
+            }
+        }
+    }
+    if (low[0] > high[0]) {
+        return std::nullopt;
+    }
+    return std::pair{low, high};
+}
 
 int SceneBuilder::buildModel(const std::string& name, const std::vector<sg::MaterialOverride>& overrides, const Pose* pose,
                              bool skinned, const Pose* places, const std::string& boneKey, const MeshEdit* edit,

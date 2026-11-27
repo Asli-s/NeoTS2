@@ -19,6 +19,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -80,6 +81,10 @@ public:
         : b_(builder), assets_(builder.assets()), lot_(lot), path_(path), heights_(lot), log_(log) {}
 
     LotSceneStats build();
+    // See rebuildLotWalls. New wall faces get grey light-map rows past the last of `maps`.
+    void rebuildWalls(const LotWalls& before, const LightMaps& maps);
+    // See rebuildLotFloors.
+    void rebuildFloors(const LightMaps& maps, const std::set<std::int32_t>& levels);
 
 private:
     // Walls, fences and light maps (lot_scene.cpp).
@@ -94,6 +99,7 @@ private:
     // Ties an object the game treats as a window to the walls it is placed against (see hidesWithWalls).
     void tieToWalls(const Shown& o);
     void drawWalls();
+    void keepWalls();
 
     // Objects and Sims (lot_scene_objects.cpp).
     void placeObjects();
@@ -107,10 +113,12 @@ private:
     // The terrain and the floors (lot_scene_floors.cpp).
     void drawTerrain();
     void drawFloors();
+    void drawUpperGrids();
 
     // Pool and pond water (lot_scene_water.cpp).
     std::array<float, 6> poolBox(const std::vector<poolwater::Quarter>& quarters, int ground);
     void drawPoolWater();
+    void drawPoolGrid(const std::vector<poolwater::Quarter>& quarters);
     void drawCurvedPoolCorners();
     void drawPondWater();
     void drawPondsAsPools(const terrain::Array2D& water, const std::function<float(int, int)>& terrain, int ground);
@@ -132,6 +140,10 @@ private:
     std::vector<ThickWall> walls_;
     int wallBase_ = 0;  // index of walls_[0] in the scene's walls
     std::map<EdgeKey, std::size_t> wallAt_;  // walls_ by their middle
+    std::vector<std::size_t> wallParts_;     // the instances of the walls, their hubs and the fences' rails and posts
+    bool rebuilding_ = false;                // drawing walls or floors again into a loaded lot
+    std::set<std::int32_t> onlyLevels_;      // the grid levels rebuildFloors draws, all when empty
+    bool drawsLevel(std::int32_t level) const { return onlyLevels_.empty() || onlyLevels_.contains(level); }
     struct ShapedRoof {
         Surfaces surfaces;
         RoofShape shape;

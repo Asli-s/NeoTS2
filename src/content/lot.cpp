@@ -51,6 +51,27 @@ WorldBounds parseWorldBounds(std::span<const std::uint8_t> data) {
     return b;
 }
 
+// Lots the game shipped and never saved lack the wall layers later packs added. The game saves each
+// as the lot's wall graph header with no points, room 0 alone and no walls, until walls go in, so
+// the wall manager gets those to fill and a save to write. The stages' sides are read on their own.
+void addMissingWallLayers(Lot& lot) {
+    const auto source = lot.wallLayers.find(kWallGraphInstance);
+    if (source == lot.wallLayers.end()) {
+        return;
+    }
+    for (const std::uint32_t instance : kWallLayerInstances) {
+        if (instance == kStageWallGraphInstance || lot.wallLayers.contains(instance)) {
+            continue;
+        }
+        wallgraph::WallGraph empty = source->second;
+        empty.counters = {};
+        empty.points.clear();
+        empty.rooms = {0};
+        empty.walls.clear();
+        lot.wallLayers.emplace(instance, std::move(empty));
+    }
+}
+
 xobj::RecordKind recordKind(std::uint32_t resourceType) {
     return resourceType == types::kSavedPerson               ? xobj::RecordKind::Person
            : resourceType == types::kSavedObjectWithMaterial ? xobj::RecordKind::ObjectWithMaterial
@@ -357,6 +378,7 @@ Lot loadLot(const std::filesystem::path& path) {
         }
     }
     lot.savedWallCoverings = lot.wallCoverings;
+    addMissingWallLayers(lot);
     if (lot.roomGraph && wallGraph) {
         lot.wallCoverings = coveringsOfRoomWalls(*lot.roomGraph, *wallGraph, lot.wallCoverings);
     }

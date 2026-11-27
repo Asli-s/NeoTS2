@@ -4,6 +4,7 @@
 #include "content/lot.hpp"
 #include "content/neighborhood.hpp"
 #include "diag/log.hpp"
+#include "diag/timing.hpp"
 #include "formats/dbpf.hpp"
 #include "formats/objd.hpp"
 #include "formats/resource_types.hpp"
@@ -18,6 +19,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string_view>
@@ -177,6 +179,39 @@ std::string withSavedCutout(const std::string& material, const std::string& grou
     return material.substr(0, lower(material).find(kCutout)) + named->material.substr(mask);
 }
 
+void setLotHeights(Scene& scene, const content::Lot& lot) {
+    const Heights heights(lot);
+    // Where something the simulation moves stands: the floor of its storey (1 = ground), kept past the lot.
+    const auto kept = std::make_shared<const Heights>(heights.grid() ? std::make_shared<const array3d::Array3D>(*heights.grid()) : nullptr);
+    const int groundLevel = content::gridLevel(lot, 1);
+    scene.floorHeight = [kept, groundLevel](int storey, float x, float y) { return kept->tile(storey - 1 + groundLevel, x, y); };
+    const auto waterGrid = lot.flatGrids.find(content::kWaterHeightGridInstance);
+    const auto water = waterGrid != lot.flatGrids.end() ? std::make_shared<const terrain::Array2D>(waterGrid->second) : nullptr;
+    scene.objectHeight = [kept, water, groundLevel](int storey, float x, float y, std::int32_t direction, std::int16_t wallPlacement,
+                                                         std::int16_t placement) {
+        const auto [fx, fy] = floorPoint(x, y, direction, wallPlacement);
+        const float floor = kept->blended(storey - 1 + groundLevel, fx, fy);
+        return lotscene::floatingHeight(water.get(), placement, storey == 1, x, y, floor).value_or(floor);
+    };
+    scene.groundLevel = groundLevel;
+    scene.boundsTopLevel = content::topGridLevel(lot);
+    if (const auto floors = lot.grids.find(content::kFloorGridInstance); floors != lot.grids.end() && floors->second.elementSize == 8) {
+        const auto grid = std::make_shared<const std::remove_cvref_t<decltype(floors->second)>>(floors->second);
+        scene.floorCorner = [kept, grid](int level, int x, int y) -> std::optional<float> {
+            if (level < 0 || x < 0 || y < 0 || level >= static_cast<int>(grid->levels) || x >= static_cast<int>(grid->width) ||
+                y >= static_cast<int>(grid->height)) {
+                return std::nullopt;
+            }
+            for (int q = 0; q < 4; ++q) {
+                if (grid->i16(level, x, y, q) != 0) {
+                    return kept->corner(level, static_cast<float>(x), static_cast<float>(y));
+                }
+            }
+            return std::nullopt;
+        };
+    }
+}
+
 namespace lotscene {
 
 LotSceneStats LotSceneBuilder::build() {
@@ -190,35 +225,7 @@ LotSceneStats LotSceneBuilder::build() {
     }
     collectWalls();
     placeFencePosts();
-    // Where something the simulation moves stands: the floor of its storey (1 = ground), kept past the lot.
-    const auto kept = std::make_shared<const Heights>(heights_.grid() ? std::make_shared<const array3d::Array3D>(*heights_.grid()) : nullptr);
-    const int groundLevel = content::gridLevel(lot_, 1);
-    b_.scene().floorHeight = [kept, groundLevel](int storey, float x, float y) { return kept->tile(storey - 1 + groundLevel, x, y); };
-    const auto waterGrid = lot_.flatGrids.find(content::kWaterHeightGridInstance);
-    const auto water = waterGrid != lot_.flatGrids.end() ? std::make_shared<const terrain::Array2D>(waterGrid->second) : nullptr;
-    b_.scene().objectHeight = [kept, water, groundLevel](int storey, float x, float y, std::int32_t direction, std::int16_t wallPlacement,
-                                                         std::int16_t placement) {
-        const auto [fx, fy] = floorPoint(x, y, direction, wallPlacement);
-        const float floor = kept->blended(storey - 1 + groundLevel, fx, fy);
-        return floatingHeight(water.get(), placement, storey == 1, x, y, floor).value_or(floor);
-    };
-    b_.scene().groundLevel = groundLevel;
-    b_.scene().boundsTopLevel = content::topGridLevel(lot_);
-    if (const auto floors = lot_.grids.find(content::kFloorGridInstance); floors != lot_.grids.end() && floors->second.elementSize == 8) {
-        const auto grid = std::make_shared<const std::remove_cvref_t<decltype(floors->second)>>(floors->second);
-        b_.scene().floorCorner = [kept, grid](int level, int x, int y) -> std::optional<float> {
-            if (level < 0 || x < 0 || y < 0 || level >= static_cast<int>(grid->levels) || x >= static_cast<int>(grid->width) ||
-                y >= static_cast<int>(grid->height)) {
-                return std::nullopt;
-            }
-            for (int q = 0; q < 4; ++q) {
-                if (grid->i16(level, x, y, q) != 0) {
-                    return kept->corner(level, static_cast<float>(x), static_cast<float>(y));
-                }
-            }
-            return std::nullopt;
-        };
-    }
+    setLotHeights(b_.scene(), lot_);
     placeObjects();
     placeSims();
     cutWalls();
@@ -226,6 +233,7 @@ LotSceneStats LotSceneBuilder::build() {
     drawWalls();
     drawTerrain();
     drawFloors();
+    drawUpperGrids();
     drawPoolWater();
     drawCurvedPoolCorners();
     drawPondWater();
@@ -233,7 +241,95 @@ LotSceneStats LotSceneBuilder::build() {
     // The sky behind a lot by day, as the game's lot sky effect draws it (its plain-weather
     // skybox, seasons and weather pick others). Lighting the lot puts in its state's sky.
     b_.scene().skybox = assets_.textureFaces("skymap-generic-day-highres-envcube");
+    keepWalls();
     return stats_;
+}
+
+// Keeps the walls as drawn, with copies of the roof shapes their attic tops follow.
+void LotSceneBuilder::keepWalls() {
+    auto kept = std::make_shared<LotWalls>();
+    kept->walls = walls_;
+    kept->instances = wallParts_;
+    kept->firstWall = wallBase_;
+    std::map<const RoofShape*, const RoofShape*> copies;
+    for (auto& w : kept->walls) {
+        for (auto& g : w.ceiling.gables) {
+            auto copy = copies.find(g);
+            if (copy == copies.end()) {
+                auto shape = std::make_shared<const RoofShape>(*g);
+                copy = copies.emplace(g, shape.get()).first;
+                kept->gables.push_back(std::move(shape));
+            }
+            g = copy->second;
+        }
+    }
+    b_.scene().lotWalls = std::move(kept);
+}
+
+void LotSceneBuilder::rebuildFloors(const LightMaps& maps, const std::set<std::int32_t>& levels) {
+    rebuilding_ = true;
+    onlyLevels_ = levels;
+    edge_ = b_.colorMaterial("wall edge", {0.36f, 0.25f, 0.18f});
+    b_.scene().lightMaps = maps;
+    // The walls decide which floor edges run over a wall below.
+    collectWalls();
+    drawFloors();
+    drawUpperGrids();
+}
+
+void LotSceneBuilder::rebuildWalls(const LotWalls& before, const LightMaps& maps) {
+    rebuilding_ = true;
+    edge_ = b_.colorMaterial("wall edge", {0.36f, 0.25f, 0.18f});
+    wallTop_ = b_.textureMaterial("wall-top");
+    if (wallTop_ >= 0) {
+        b_.scene().materials[static_cast<std::size_t>(wallTop_)].unlit = true;
+    } else {
+        wallTop_ = edge_;
+    }
+    b_.scene().lightMaps = maps;
+    std::optional<diag::Timer> part("walls: collect");
+    collectWalls();
+    part.emplace("walls: cuts");
+    // Walls standing where they stood keep their cuts and attic tops.
+    std::map<EdgeKey, const ThickWall*> old;
+    for (const auto& w : before.walls) {
+        old.emplace(edgeKey(w.q.x0, w.q.y0, w.q.x1, w.q.y1, w.level), &w);
+    }
+    // So do walls standing again under doors and windows that still stand.
+    for (const auto& g : before.gone) {
+        old.insert_or_assign(edgeKey(g.wall.q.x0, g.wall.q.y0, g.wall.q.x1, g.wall.q.y1, g.wall.level), &g.wall);
+    }
+    for (auto& w : walls_) {
+        const auto it = old.find(edgeKey(w.q.x0, w.q.y0, w.q.x1, w.q.y1, w.level));
+        if (it == old.end()) {
+            continue;
+        }
+        const ThickWall& o = *it->second;
+        // The cuts belong to the doors and windows, so a side painted over keeps them.
+        const bool sameWay = o.q.x0 == w.q.x0 && o.q.y0 == w.q.y0;
+        w.leftMask = sameWay ? o.leftMask : o.rightMask;
+        w.rightMask = sameWay ? o.rightMask : o.leftMask;
+        w.ceiling = o.ceiling;
+    }
+    for (auto& w : walls_) {
+        for (auto [side, mask] : {std::pair{&w.left, &w.leftMask}, std::pair{&w.right, &w.rightMask}}) {
+            if (!side->empty() && !mask->empty()) {
+                if (const int cut = b_.maskedMaterial(*side, *mask); cut >= 0) {
+                    *side = b_.scene().materials[static_cast<std::size_t>(cut)].name;
+                }
+            }
+        }
+    }
+    part.emplace("walls: draw");
+    drawWalls();
+    placeFencePosts();
+    part.reset();
+    auto kept = std::make_shared<LotWalls>();
+    kept->walls = walls_;
+    kept->instances = wallParts_;
+    kept->gables = before.gables;
+    kept->gone = before.gone;
+    b_.scene().lotWalls = std::move(kept);
 }
 
 void LotSceneBuilder::collectWalls() {
@@ -303,6 +399,7 @@ void LotSceneBuilder::collectWalls() {
                 place.m[8] = length > 0 ? (heights_.corner(level, b->x, b->y) - za) / length : 0.0f;
                 if (auto* rail = b_.place(mesh, "rail " + model, place, Part::Object, level)) {
                     rail->sunTest = SunTest::AboveBox;
+                    wallParts_.push_back(b_.scene().instances.size() - 1);
                 }
                 ++stats_.fenceRails;
             }
@@ -310,11 +407,10 @@ void LotSceneBuilder::collectWalls() {
                 continue;
             }
         }
-        // The game adds attic walls under gable ends, often with the outdoors on both sides.
         const auto style = fence != nullptr ? styles.end() : styles.find(covering->second->type);
         const bool toRoof = style != styles.end() && style->second.toRoof;
-        // A half wall stands wherever it is built, also with the outdoors on both sides.
-        if ((w.leftRoom == w.rightRoom && !toRoof && fence == nullptr) || (onBorder(a) && onBorder(b))) {
+        // A wall is drawn even with the outdoors on both sides, as lone, attic and half walls are.
+        if (onBorder(a) && onBorder(b)) {
             continue;
         }
         ThickWall t;
@@ -324,9 +420,9 @@ void LotSceneBuilder::collectWalls() {
             t.q.top0 = t.q.bottom0 + kHalfWallHeight;
             t.q.top1 = t.q.bottom1 + kHalfWallHeight;
             t.coveringFromBottom = true;
-            t.coveredEnds = true;
             t.flatOutdoorLight = true;
         }
+        t.coveredEnds = true;
         t.points = {w.from, w.to};
         t.level = level;
         t.toRoof = toRoof;
@@ -438,6 +534,7 @@ void LotSceneBuilder::placeFencePosts() {
             if (auto* placed = b_.place(mesh, "post " + fence->post, Transform::at(post.x, post.y, heights_.corner(level, post.x, post.y), 0),
                                         Part::Object, level)) {
                 placed->sunTest = SunTest::AboveBox;
+                wallParts_.push_back(b_.scene().instances.size() - 1);
             }
             ++stats_.fencePosts;
         }
@@ -532,31 +629,10 @@ void LotSceneBuilder::cutWalls() {
             tieToWalls(o);
             continue;
         }
-        for (const auto& m : list->second) {
-            // The face's direction: n is the object's front (+y), e its +x. Ne and the like are diagonal.
-            const float fx = m.face.ends_with('e') ? 1.0f : m.face.ends_with('w') ? -1.0f : 0.0f;
-            const float fy = m.face.starts_with('n') ? 1.0f : m.face.starts_with('s') ? -1.0f : 0.0f;
-            if (fx == 0 && fy == 0) {
-                continue;
-            }
-            // A straight face's wall runs along the tile edge behind it, a diagonal one's through the
-            // tile's middle.
-            const bool diagonal = fx != 0 && fy != 0;
-            float mid[3] = {static_cast<float>(m.east) - (diagonal ? 0 : fx / 2), static_cast<float>(-m.south) - (diagonal ? 0 : fy / 2), 0};
-            float facing[3] = {fx, fy, 0};
-            o.world.apply(mid, true);
-            o.world.apply(facing, false);
-            const int level = content::gridLevel(lot_, o.object->state.header.value1) + m.level;
-            const auto wall = wallAt_.find(edgeKey(mid[0], mid[1], mid[0], mid[1], level));
-            if (wall == wallAt_.end()) {
-                continue;
-            }
-            ThickWall& w = walls_[wall->second];
-            const float dx = w.q.x1 - w.q.x0, dy = w.q.y1 - w.q.y0;
-            // The wall graph's left side faces (dy, -dx).
-            const bool left = facing[0] * dy - facing[1] * dx > 0;
-            (left ? w.leftMask : w.rightMask) = m.material;
-            b_.scene().instances[o.instance].walls.push_back(wallBase_ + static_cast<int>(wall->second));
+        for (const auto& cut : wallCuts(walls_, list->second, o.world, content::gridLevel(lot_, o.object->state.header.value1))) {
+            ThickWall& w = walls_[cut.wall];
+            (cut.left ? w.leftMask : w.rightMask) = cut.material;
+            b_.scene().instances[o.instance].walls.push_back(wallBase_ + static_cast<int>(cut.wall));
             ++stats_.wallCuts;
         }
     }
@@ -596,19 +672,23 @@ void LotSceneBuilder::drawWalls() {
                 const int x0 = (i % kPerRow) * kRectWidth, y0 = (i / kPerRow) * kRectHeight;
                 maps.wallRects[key] = {x0, y0, x0 + kRectWidth, y0 + kRectHeight};
             }
-            if (w.flatOutdoorLight) {
+            if (w.flatOutdoorLight && std::find(maps.outdoorFaces.begin(), maps.outdoorFaces.end(), key) == maps.outdoorFaces.end()) {
                 maps.outdoorFaces.push_back(key);
             }
         }
     }
-    Image atlas;
-    atlas.width = kAtlasWidth;
-    atlas.height = static_cast<std::uint32_t>(std::max<std::size_t>(1, (maps.wallRects.size() + kPerRow - 1) / kPerRow) * kRectHeight);
-    atlas.rgba.assign(static_cast<std::size_t>(atlas.width) * atlas.height * 4, 128);
-    const float atlasW = static_cast<float>(atlas.width), atlasH = static_cast<float>(atlas.height);
-    maps.walls = static_cast<int>(b_.scene().images.size());
-    b_.scene().images.push_back(std::move(atlas));
-    maps.wallIncidence = addIncidence(b_.scene().images.back());
+    const auto atlasHeight = static_cast<std::uint32_t>(std::max<std::size_t>(1, (maps.wallRects.size() + kPerRow - 1) / kPerRow) * kRectHeight);
+    const float atlasW = static_cast<float>(kAtlasWidth), atlasH = static_cast<float>(atlasHeight);
+    // A rebuild keeps the scene's wall light map, which the caller grows by the new rows.
+    if (!rebuilding_) {
+        Image atlas;
+        atlas.width = kAtlasWidth;
+        atlas.height = atlasHeight;
+        atlas.rgba.assign(static_cast<std::size_t>(atlas.width) * atlas.height * 4, 128);
+        maps.walls = static_cast<int>(b_.scene().images.size());
+        b_.scene().images.push_back(std::move(atlas));
+        maps.wallIncidence = addIncidence(b_.scene().images.back());
+    }
     // As texture coordinates, one texel in from each side (the game's inset for these rects).
     auto lightRect = [&](const ThickWall& w, bool left) -> std::optional<LightRect> {
         const auto it = maps.wallRects.find(faceKey(w, left));
@@ -626,6 +706,7 @@ void LotSceneBuilder::drawWalls() {
             Surfaces surfaces;
             addThickWall(b_, surfaces, w, wallTop_, cut ? kCutWallHeight : 0, &rects);
             if (auto* instance = b_.place(b_.addMesh("wall", std::move(surfaces)), "wall", Transform{}, Part::Wall, w.level)) {
+                wallParts_.push_back(b_.scene().instances.size() - 1);
                 instance->cut = cut;
                 instance->walls = {wallBase_ + static_cast<int>(i)};
                 if (w.clear) {
@@ -653,6 +734,7 @@ void LotSceneBuilder::drawWalls() {
             }
             if (auto* instance = b_.place(b_.addMesh("wall hub", std::move(surfaces)), "wall hub", Transform{}, Part::WallHub,
                                           walls_[hub.walls.front()].level)) {
+                wallParts_.push_back(b_.scene().instances.size() - 1);
                 instance->cut = cut;
                 for (const std::size_t i : hub.walls) {
                     instance->walls.push_back(wallBase_ + static_cast<int>(i));
@@ -698,6 +780,14 @@ std::optional<ObjectLighting> objectDaylight(const content::Lighting& lighting) 
 
 LotSceneStats addLot(SceneBuilder& builder, const std::filesystem::path& lot, bool logObjects) {
     return addLot(builder, content::loadLot(lot), lot, logObjects);
+}
+
+void rebuildLotWalls(SceneBuilder& builder, const content::Lot& lot, const LotWalls& before, const LightMaps& maps) {
+    lotscene::LotSceneBuilder(builder, lot, {}, false).rebuildWalls(before, maps);
+}
+
+void rebuildLotFloors(SceneBuilder& builder, const content::Lot& lot, const LightMaps& maps, const std::set<std::int32_t>& levels) {
+    lotscene::LotSceneBuilder(builder, lot, {}, false).rebuildFloors(maps, levels);
 }
 
 LotSceneStats addLot(SceneBuilder& builder, const content::Lot& loaded, const std::filesystem::path& lot, bool logObjects) {

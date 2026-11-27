@@ -18,6 +18,7 @@ struct View {
     std::array<float, 2> facing{0, 1};  // the way the camera looks, along the ground
     bool roofs = true;                  // roofs shown, those whose eaves rest at or below the storey looked at
     bool ceilings = false;              // the puck's Toggle Ceiling
+    bool buildGrid = false;             // the tile grid of Buy and Build modes
     float eyeHeight = 1e9f;             // the camera's height in the lot
 };
 

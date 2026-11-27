@@ -5,9 +5,12 @@
 #include "scene/terrain_water.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <map>
+#include <optional>
 #include <set>
 #include <utility>
 
@@ -25,6 +28,94 @@ std::array<float, 2> turnedFloorPoint(const std::array<float, 2>& point, const s
     return {centre[0] + dx, centre[1] + dy};
 }
 
+namespace {
+
+// Keeps the blended ground under the ground storey's floor quarters, which are flat triangles folded
+// along the tile's diagonals, where a floored tile's corners aren't in one plane.
+void keepUnderFloors(const content::Lot& lot, const Heights& heights, int level, std::uint32_t steps, std::uint32_t columns, std::uint32_t rows,
+                     std::vector<float>& drawn) {
+    const auto floors = lot.grids.find(content::kFloorGridInstance);
+    if (floors == lot.grids.end() || floors->second.elementSize != 8 || steps == 0 || drawn.size() != static_cast<std::size_t>(columns) * rows) {
+        return;
+    }
+    const auto& g = floors->second;
+    const auto tilesX = static_cast<std::int32_t>((columns - 1) / steps), tilesY = static_cast<std::int32_t>((rows - 1) / steps);
+    // The lowest floor at a point on the tile (x, y), none where the tile has no floor there. A point on
+    // an edge between quarters takes the lower.
+    const auto floorOnTile = [&](std::int32_t x, std::int32_t y, float px, float py) -> std::optional<float> {
+        if (x < 0 || y < 0 || x >= tilesX || y >= tilesY || !g.contains(level, x, y)) {
+            return std::nullopt;
+        }
+        const float fx = static_cast<float>(x), fy = static_cast<float>(y);
+        // The tile edge of each quarter, in the floor grid's order: x low, y high, x high, y low.
+        const std::array<std::array<float, 2>, 4> corners{{{fx, fy}, {fx, fy + 1}, {fx + 1, fy + 1}, {fx + 1, fy}}};
+        const float cx = fx + 0.5f, cy = fy + 0.5f, centre = heights.tile(level, fx, fy);
+        std::optional<float> lowest;
+        for (std::size_t q = 0; q < 4; ++q) {
+            if (g.i16(level, x, y, q) == 0) {
+                continue;
+            }
+            const auto& a = corners[q];
+            const auto& b = corners[(q + 1) % 4];
+            // The point's weights on the triangle's corners: a, b and the tile's centre.
+            const float d = (b[1] - cy) * (a[0] - cx) + (cx - b[0]) * (a[1] - cy);
+            const float wa = ((b[1] - cy) * (px - cx) + (cx - b[0]) * (py - cy)) / d;
+            const float wb = ((cy - a[1]) * (px - cx) + (a[0] - cx) * (py - cy)) / d;
+            const float wc = 1 - wa - wb;
+            constexpr float kEdge = -1e-4f;
+            if (wa < kEdge || wb < kEdge || wc < kEdge) {
+                continue;
+            }
+            const float z = wa * heights.corner(level, a[0], a[1]) + wb * heights.corner(level, b[0], b[1]) + wc * centre;
+            lowest = lowest ? std::min(*lowest, z) : z;
+        }
+        return lowest;
+    };
+    // Each cell is two triangles meeting on its rising diagonal. Where a floor folds the other way, the
+    // diagonal's ends go down until its middle is under the floor too.
+    const float step = 1.0f / static_cast<float>(steps);
+    for (std::int32_t x = 0; x < tilesX; ++x) {
+        for (std::int32_t y = 0; y < tilesY; ++y) {
+            if (!g.contains(level, x, y) || (g.i16(level, x, y, 0) | g.i16(level, x, y, 1) | g.i16(level, x, y, 2) | g.i16(level, x, y, 3)) == 0) {
+                continue;
+            }
+            // On a tile whose corners are in one plane the blend is that plane, the floor's own.
+            const float fx = static_cast<float>(x), fy = static_cast<float>(y);
+            constexpr float kFlat = 1e-4f;
+            if (std::abs(heights.corner(level, fx, fy) + heights.corner(level, fx + 1, fy + 1) - heights.corner(level, fx + 1, fy) -
+                         heights.corner(level, fx, fy + 1)) <= kFlat) {
+                continue;
+            }
+            const auto i0 = static_cast<std::uint32_t>(x) * steps, j0 = static_cast<std::uint32_t>(y) * steps;
+            for (std::uint32_t i = i0; i <= i0 + steps; ++i) {
+                for (std::uint32_t j = j0; j <= j0 + steps; ++j) {
+                    if (const auto z = floorOnTile(x, y, static_cast<float>(i) * step, static_cast<float>(j) * step)) {
+                        float& at = drawn[static_cast<std::size_t>(i) * rows + j];
+                        at = std::min(at, *z);
+                    }
+                }
+            }
+            for (std::uint32_t i = i0; i < i0 + steps; ++i) {
+                for (std::uint32_t j = j0; j < j0 + steps; ++j) {
+                    const auto z = floorOnTile(x, y, (static_cast<float>(i) + 0.5f) * step, (static_cast<float>(j) + 0.5f) * step);
+                    if (!z) {
+                        continue;
+                    }
+                    float& a = drawn[static_cast<std::size_t>(i) * rows + j];
+                    float& b = drawn[static_cast<std::size_t>(i + 1) * rows + j + 1];
+                    const float over = (a + b) / 2 - *z;
+                    if (over > 0) {
+                        a -= over;
+                        b -= over;
+                    }
+                }
+            }
+        }
+    }
+}
+
+} // namespace
+
 namespace lotscene {
 
 // The terrain: a grid of four points to a tile (as the paint strengths are kept), between the
@@ -41,6 +132,7 @@ void LotSceneBuilder::drawTerrain() {
     const std::uint32_t columns = (g->width - 1) * kSteps + 1, rows = (g->height - 1) * kSteps + 1;
     const int ground = g->contains(content::groundGridLevel(lot_), 0, 0) ? content::groundGridLevel(lot_) : 0;
     std::vector<float> drawn = heights_.drawnGrid(ground, kSteps, b_.edgeSea());
+    keepUnderFloors(lot_, heights_, ground, kSteps, columns, rows, drawn);
     auto height = [&](std::int64_t i, std::int64_t j) {
         const auto ci = static_cast<std::size_t>(std::clamp<std::int64_t>(i, 0, columns - 1));
         const auto cj = static_cast<std::size_t>(std::clamp<std::int64_t>(j, 0, rows - 1));
@@ -227,6 +319,16 @@ void LotSceneBuilder::drawTerrain() {
         }
     }
     b_.scene().meshes.push_back(std::move(mesh));
+    auto drawnGround = std::make_shared<LotGround>();
+    drawnGround->meshes.push_back(static_cast<int>(b_.scene().meshes.size() - 1));
+    drawnGround->steps = kSteps;
+    drawnGround->columns = columns;
+    drawnGround->rows = rows;
+    drawnGround->level = ground;
+    drawnGround->sea = b_.edgeSea();
+    for (const auto& p : between) {
+        drawnGround->between.push_back({p.i, p.j, p.fx, p.fy});
+    }
     if (b_.edgeSea()) {
         b_.scene().drawnGround = {kSteps, columns, rows, std::move(drawn), *b_.edgeSea()};
     }
@@ -241,6 +343,98 @@ void LotSceneBuilder::drawTerrain() {
         instance->lightMapGain = 1.8f;
         instance->lightMapOnly = true;
         instance->lightMapMultiply = true;
+    }
+    // The ground storey's grid for Buy and Build modes, the texture once per tile over the whole
+    // ground. The game draws it only where no floor is, which the floors standing just above the
+    // ground do here by hiding it.
+    if (const int material = b_.groundGridMaterial(); instance && material >= 0) {
+        Primitive grid;
+        grid.material = material;
+        grid.positions = canvas.positions;
+        grid.normals = canvas.normals;
+        grid.indices = canvas.indices;
+        grid.uvs.reserve(canvas.positions.size() / 3 * 2);
+        for (std::size_t p = 0; p + 2 < canvas.positions.size(); p += 3) {
+            grid.uvs.insert(grid.uvs.end(), {canvas.positions[p], canvas.positions[p + 1]});
+        }
+        Mesh gridMesh;
+        gridMesh.name = "ground grid";
+        gridMesh.primitives.push_back(std::move(grid));
+        b_.scene().meshes.push_back(std::move(gridMesh));
+        const int level = instance->level;
+        if (auto* placed = b_.place(static_cast<int>(b_.scene().meshes.size() - 1), "ground grid", Transform::at(0, 0, -kGroundDrop, 0))) {
+            placed->part = Part::Grid;
+            placed->level = level;
+            drawnGround->meshes.push_back(static_cast<int>(b_.scene().meshes.size() - 1));
+        }
+    }
+    b_.scene().lotGround = std::move(drawnGround);
+}
+
+
+// The Buy and Build grid of each storey above the ground: the game lays it on that storey's quarters
+// without a floor where a floor may go (see SceneBuilder::floorAllowed). Each storey gets it twice, in
+// white for when a higher storey is looked at and in the brighter active look for its own.
+void LotSceneBuilder::drawUpperGrids() {
+    const auto floors = lot_.grids.find(content::kFloorGridInstance);
+    const auto& allowed = b_.floorAllowed();
+    if (floors == lot_.grids.end() || floors->second.elementSize != 8 || !allowed) {
+        return;
+    }
+    const auto& g = floors->second;
+    const int white = b_.upperGridMaterial(false), active = b_.upperGridMaterial(true);
+    if (white < 0 || active < 0) {
+        return;
+    }
+    const int ground = content::groundGridLevel(lot_);
+    for (std::int32_t level = ground + 1; level < static_cast<std::int32_t>(g.levels); ++level) {
+        if (!drawsLevel(level)) {
+            continue;
+        }
+        Primitive grid;
+        for (std::int32_t x = 0; x < static_cast<std::int32_t>(g.width); ++x) {
+            for (std::int32_t y = 0; y < static_cast<std::int32_t>(g.height); ++y) {
+                if (!allowed(level, x, y)) {
+                    continue;
+                }
+                const float fx = static_cast<float>(x), fy = static_cast<float>(y);
+                const std::array<std::array<float, 2>, 4> corners{{{fx, fy}, {fx + 1, fy}, {fx + 1, fy + 1}, {fx, fy + 1}}};
+                std::array<float, 4> h{};
+                float center = 0;
+                for (std::size_t c = 0; c < 4; ++c) {
+                    h[c] = heights_.corner(level, corners[c][0], corners[c][1]) + 0.004f;
+                    center += h[c] / 4;
+                }
+                for (std::size_t q = 0; q < 4; ++q) {
+                    if (g.i16(level, x, y, 3 - q) != 0) {
+                        continue;
+                    }
+                    const std::size_t n = (q + 1) % 4;
+                    for (const auto& [p, z] : {std::pair{corners[q], h[q]}, std::pair{corners[n], h[n]}, std::pair{std::array<float, 2>{fx + 0.5f, fy + 0.5f}, center}}) {
+                        const auto first = static_cast<std::uint32_t>(grid.positions.size() / 3);
+                        grid.positions.insert(grid.positions.end(), {p[0], p[1], z});
+                        grid.normals.insert(grid.normals.end(), {0, 0, 1});
+                        grid.uvs.insert(grid.uvs.end(), {p[0], p[1]});
+                        grid.indices.push_back(first);
+                    }
+                }
+            }
+        }
+        if (grid.indices.empty()) {
+            continue;
+        }
+        for (const bool lookedAt : {false, true}) {
+            const std::string name = lookedAt ? "active storey grid" : "storey grid";
+            Mesh mesh;
+            mesh.name = name;
+            grid.material = lookedAt ? active : white;
+            mesh.primitives.push_back(grid);
+            b_.scene().meshes.push_back(std::move(mesh));
+            if (auto* placed = b_.place(static_cast<int>(b_.scene().meshes.size() - 1), name, Transform{})) {
+                placed->part = lookedAt ? Part::ActiveGrid : Part::UpperGrid;
+                placed->level = level;
+            }
+        }
     }
 }
 
@@ -294,6 +488,9 @@ void LotSceneBuilder::drawFloors() {
         return floorTurnSteps(nibble);
     };
     for (std::int32_t level = 0; level < static_cast<std::int32_t>(g.levels); ++level) {
+        if (!drawsLevel(level)) {
+            continue;
+        }
         Surfaces surfaces, stageSurfaces;
         for (std::int32_t x = 0; x < static_cast<std::int32_t>(g.width); ++x) {
             for (std::int32_t y = 0; y < static_cast<std::int32_t>(g.height); ++y) {
@@ -409,6 +606,9 @@ void LotSceneBuilder::drawFloors() {
     const std::array<std::array<float, 2>, 4> bandUv{{{0, 1}, {1, 1}, {1, 0}, {0, 0}}};
     constexpr float kHalf = 0.70710678f;  // a diagonal band's normal (1 / sqrt 2 each way)
     for (std::int32_t level = 1; level < static_cast<std::int32_t>(g.levels); ++level) {
+        if (!drawsLevel(level)) {
+            continue;
+        }
         Surfaces ceilings, edges, wallEdgeBands;
         // The storey's lowest floor, which the camera must be below to see its undersides.
         float lowestFloor = std::numeric_limits<float>::max();
@@ -495,4 +695,97 @@ void LotSceneBuilder::drawFloors() {
 }
 
 } // namespace lotscene
+
+std::vector<std::size_t> moveLotGround(Scene& scene, const content::Lot& lot, std::vector<std::pair<std::uint32_t, std::uint32_t>>* runs) {
+    std::vector<std::size_t> changed;
+    if (!scene.lotGround) {
+        return changed;
+    }
+    const LotGround& g = *scene.lotGround;
+    const Heights heights(lot);
+    std::vector<float> drawn = heights.drawnGrid(g.level, g.steps, g.sea);
+    if (drawn.size() != static_cast<std::size_t>(g.columns) * g.rows) {
+        return changed;
+    }
+    keepUnderFloors(lot, heights, g.level, g.steps, g.columns, g.rows, drawn);
+    const float step = 1.0f / static_cast<float>(g.steps);
+    auto height = [&](std::int64_t i, std::int64_t j) {
+        const auto ci = static_cast<std::size_t>(std::clamp<std::int64_t>(i, 0, g.columns - 1));
+        const auto cj = static_cast<std::size_t>(std::clamp<std::int64_t>(j, 0, g.rows - 1));
+        return drawn[ci * g.rows + cj];
+    };
+    // Each point's height and normal as drawTerrain makes them, then the points between.
+    const std::size_t points = static_cast<std::size_t>(g.columns) * g.rows;
+    std::vector<float> z(points), normals(points * 3);
+    for (std::uint32_t i = 0; i < g.columns; ++i) {
+        for (std::uint32_t j = 0; j < g.rows; ++j) {
+            const std::size_t k = static_cast<std::size_t>(i) * g.rows + j;
+            const float sx = (height(i + 1, j) - height(static_cast<std::int64_t>(i) - 1, j)) / (2 * step);
+            const float sy = (height(i, j + 1) - height(i, static_cast<std::int64_t>(j) - 1)) / (2 * step);
+            const float len = std::sqrt(sx * sx + sy * sy + 1);
+            z[k] = height(i, j);
+            normals[k * 3] = -sx / len;
+            normals[k * 3 + 1] = -sy / len;
+            normals[k * 3 + 2] = 1 / len;
+        }
+    }
+    for (const auto& p : g.between) {
+        const std::size_t a = static_cast<std::size_t>(p.i) * g.rows + p.j, b = static_cast<std::size_t>(p.i + 1) * g.rows + p.j;
+        auto mix = [&](const std::vector<float>& v, std::size_t stride, std::size_t c) {
+            return (v[a * stride + c] * (1 - p.fx) + v[b * stride + c] * p.fx) * (1 - p.fy) +
+                   (v[(a + 1) * stride + c] * (1 - p.fx) + v[(b + 1) * stride + c] * p.fx) * p.fy;
+        };
+        z.push_back(mix(z, 1, 0));
+        std::array<float, 3> n{mix(normals, 3, 0), mix(normals, 3, 1), mix(normals, 3, 2)};
+        const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+        normals.insert(normals.end(), {n[0] / len, n[1] / len, n[2] / len});
+    }
+    // The vertices that moved, from the first primitive drawn, which all of them share.
+    if (runs != nullptr) {
+        runs->clear();
+        const Primitive* first = nullptr;
+        for (const int m : g.meshes) {
+            if (m >= 0 && static_cast<std::size_t>(m) < scene.meshes.size()) {
+                for (const auto& p : scene.meshes[static_cast<std::size_t>(m)].primitives) {
+                    if (first == nullptr && p.positions.size() == z.size() * 3 && p.normals.size() == normals.size()) {
+                        first = &p;
+                    }
+                }
+            }
+        }
+        for (std::size_t k = 0; first != nullptr && k < z.size(); ++k) {
+            const bool moved = first->positions[k * 3 + 2] != z[k] || first->normals[k * 3] != normals[k * 3] ||
+                               first->normals[k * 3 + 1] != normals[k * 3 + 1] || first->normals[k * 3 + 2] != normals[k * 3 + 2];
+            if (!moved) {
+                continue;
+            }
+            const auto at = static_cast<std::uint32_t>(k);
+            if (!runs->empty() && runs->back().first + runs->back().second == at) {
+                ++runs->back().second;
+            } else {
+                runs->push_back({at, 1});
+            }
+        }
+    }
+    for (const int m : g.meshes) {
+        if (m < 0 || static_cast<std::size_t>(m) >= scene.meshes.size()) {
+            continue;
+        }
+        for (auto& p : scene.meshes[static_cast<std::size_t>(m)].primitives) {
+            if (p.positions.size() != z.size() * 3 || p.normals.size() != normals.size()) {
+                continue;
+            }
+            for (std::size_t k = 0; k < z.size(); ++k) {
+                p.positions[k * 3 + 2] = z[k];
+            }
+            p.normals = normals;
+        }
+        changed.push_back(static_cast<std::size_t>(m));
+    }
+    if (scene.drawnGround.columns == g.columns && scene.drawnGround.rows == g.rows) {
+        scene.drawnGround.heights = std::move(drawn);
+    }
+    return changed;
+}
+
 } // namespace ts2::scene

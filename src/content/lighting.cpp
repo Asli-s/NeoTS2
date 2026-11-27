@@ -319,6 +319,8 @@ struct Reader {
             state->portalSaturation = finiteNumber(value(w[1]));
         } else if (state && key == "projectiveShadowStrength" && w.size() >= 2) {
             state->projectiveShadowStrength = finiteNumber(value(w[1]));
+        } else if (state && key == "transitionTimes" && w.size() >= 3) {
+            state->transitionTimes = std::array<float, 2>{finiteNumber(value(w[1])), finiteNumber(value(w[2]))};
         } else if (state && key == "environment" && w.size() >= 3) {
             const auto color = triple(w[1]);
             const float strength = finiteNumber(value(w[2]));

@@ -359,8 +359,4 @@ std::set<std::uint32_t> loadGreenhouseFences(const std::vector<Product>& product
     return loadFencesWith(products, "isgreenhouse");
 }
 
-std::set<std::uint32_t> loadWalkOverFences(const std::vector<Product>& products) {
-    return loadFencesWith(products, "maywalkover");
-}
-
 } // namespace ts2::content

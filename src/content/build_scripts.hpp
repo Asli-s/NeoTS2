@@ -128,9 +128,6 @@ BuildScripts loadBuildScripts(const std::vector<Product>& products);
 // The GUIDs of the build catalog's greenhouse walls: the fences (XFNC resources in each product's
 // Catalog/Patterns packages) whose isgreenhouse is set. A fence that can't be read is left out.
 std::set<std::uint32_t> loadGreenhouseFences(const std::vector<Product>& products);
-// The GUIDs of the catalog's fences a Sim may walk over (XFNC maywalkover). They are the only
-// room walls that don't block walking.
-std::set<std::uint32_t> loadWalkOverFences(const std::vector<Product>& products);
 // The GUIDs of the build catalog's fences whose property `property` (isgreenhouse, bearsload) is set.
 std::set<std::uint32_t> loadFencesWith(const std::vector<Product>& products, const std::string& property);
 

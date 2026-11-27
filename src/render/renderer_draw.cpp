@@ -878,7 +878,12 @@ void SdlGpuRenderer::drawMirror(const Frame& f, const std::array<float, 4>& plan
         } else if (what != Mirrored::Pool) {
             std::erase_if(*list, [](const Draw& d) { return !d.instance->seaReflected; });
         } else {
-            std::erase_if(*list, [](const Draw& d) { return d.instance->poolWater || (d.material && d.material->pondWater); });
+            // The Buy and Build grids show on the water, not in it.
+            std::erase_if(*list, [](const Draw& d) {
+                const auto part = d.instance->part;
+                return d.instance->poolWater || (d.material && d.material->pondWater) || part == scene::Part::Grid || part == scene::Part::UpperGrid ||
+                       part == scene::Part::ActiveGrid;
+            });
         }
     }
 
@@ -1243,9 +1248,11 @@ void SdlGpuRenderer::drawList(const Frame& f, std::span<const Draw> list, int bl
         }
         const bool skinned = d.primitive->skinned;
         const int kind = overDepth                             ? kOpaqueOverDepth
+                         : d.instance->refusedLook && blend      ? 2
                          : !blend || !m                          ? blend
                          : m->alpha == scene::AlphaMode::Add ? 2
                          : m->alpha == scene::AlphaMode::Sum ? 3
+                         : m->alpha == scene::AlphaMode::Brighten ? kBrighten
                          : m->blendedHair                    ? 4
                                                              : blend;
         const auto& set = f.depthClip ? (skinned ? clippedSkinnedPipelines_ : clippedPipelines_) : (skinned ? drawing_->skinnedScene : drawing_->scene);
@@ -1308,6 +1315,13 @@ void SdlGpuRenderer::drawList(const Frame& f, std::span<const Draw> list, int bl
         } else {
             const SDL_GPUBufferBinding vertices{buffers.vertices, 0};
             SDL_BindGPUVertexBuffers(f.pass, 0, &vertices, 1);
+        }
+        // A refused object's shape-coloured surfaces first write their depth alone, as the game draws
+        // them, so the added colour lands only on the nearest of them.
+        if (kind == 2 && d.instance->refusedLook && (!m || m->takesShapeColor)) {
+            SDL_BindGPUGraphicsPipeline(f.pass, set[m && m->doubleSided ? 1 : 0][kDepthOnly]);
+            SDL_DrawGPUIndexedPrimitives(f.pass, p.count, 1, p.firstIndex, skinned ? 0 : static_cast<Sint32>(p.firstVertex), 0);
+            SDL_BindGPUGraphicsPipeline(f.pass, pipeline);
         }
         SDL_DrawGPUIndexedPrimitives(f.pass, p.count, 1, p.firstIndex, skinned ? 0 : static_cast<Sint32>(p.firstVertex), 0);
     }

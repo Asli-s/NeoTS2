@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -37,6 +38,17 @@ struct LotSceneStats {
 LotSceneStats addLot(SceneBuilder& builder, const std::filesystem::path& lot, bool logObjects = false);
 // The same with the lot already loaded from that package (content::loadLot).
 LotSceneStats addLot(SceneBuilder& builder, const content::Lot& loaded, const std::filesystem::path& lot, bool logObjects = false);
+// Draws only a lot's walls, hubs and fence parts again, in the lot's own space. Walls standing where
+// `before` has them keep its door and window cuts and attic tops.
+void rebuildLotWalls(SceneBuilder& builder, const content::Lot& lot, const LotWalls& before, const LightMaps& maps);
+// Draws only a lot's floors, ceilings, floor edges and upper storeys' grids again, the grids where the
+// builder's floorAllowed lets a floor go. With `levels`, only those grid levels.
+void rebuildLotFloors(SceneBuilder& builder, const content::Lot& lot, const LightMaps& maps, const std::set<std::int32_t>& levels = {});
+// Moves the lot ground's points (see Scene::lotGround) to the lot's corner heights and returns the
+// meshes changed. With `runs`, also the moved vertices as (first, count) runs, the same in each mesh.
+std::vector<std::size_t> moveLotGround(Scene& scene, const content::Lot& lot, std::vector<std::pair<std::uint32_t, std::uint32_t>>* runs = nullptr);
+// Sets the scene's floorHeight, objectHeight and floorCorner from the lot as it is now.
+void setLotHeights(Scene& scene, const content::Lot& lot);
 
 // How the game lights objects outdoors in a lighting state: the skylight as the ambient, then the
 // sun, fill and sky lights, each as strength * (colour - skylight) per channel. Sims also get the

@@ -395,6 +395,7 @@ void FramePlan::collectDraws(const RendererState& s, const ResourceQuery& q, con
             const auto alpha = m ? m->alpha : scene::AlphaMode::Opaque;
             // A shape colour draws the materials that take it blended, as the game turns standard materials to blend mode.
             const bool blends = alpha == scene::AlphaMode::Blend || alpha == scene::AlphaMode::Add || alpha == scene::AlphaMode::Sum ||
+                                alpha == scene::AlphaMode::Brighten ||
                                 (instance.shapeColor.has_value() && (!m || m->takesShapeColor));
             const float sortDepth = blends && p.hasBox ? nearestDepth(clip, p.low, p.high, f.nearZ) : clip.m[15];
             (blends ? blended : alpha == scene::AlphaMode::Layer ? layers : opaque)
@@ -513,6 +514,13 @@ void FramePlan::setLights(const RendererState& s, DrawUniforms& u, const Draw& d
             vu.frame.ambient[k] += s.highlightAmbient_;
         }
     }
+    // A refused object's shape-coloured surfaces get full white ambient. The rest, such as its ground
+    // shadow, draw as they are.
+    if (d.instance->refusedLook && (!d.material || d.material->takesShapeColor)) {
+        for (std::size_t k = 0; k < 3; ++k) {
+            vu.frame.ambient[k] += 1.0f;
+        }
+    }
     vu.frame.ambient[3] = skirt ? 3.0f : 1.0f;
     if (skirt) {
         std::copy(d.instance->skirtScale.begin(), d.instance->skirtScale.end(), vu.frame.thumbnail);
@@ -589,6 +597,9 @@ void FramePlan::setMaterial(const RendererState& s, const ResourceQuery& q, Draw
             fu.color[i] *= lighting->textureLight[i];
         }
     }
+    if (lighting && m && m->mirror && lighting->glassColor) {
+        std::copy(lighting->glassColor->begin(), lighting->glassColor->end(), fu.color);
+    }
     if (d.instance->part == scene::Part::Skirt) {
         fu.neighborLight[3] = 2;
     }
@@ -613,9 +624,10 @@ void FramePlan::setMaterial(const RendererState& s, const ResourceQuery& q, Draw
     }
     fu.alphaCutoff = !m                                     ? 0.0f
                      : m->alpha == scene::AlphaMode::Mask  ? m->alphaReference
-                     : m->alpha == scene::AlphaMode::Layer ? 10.0f / 255  // as the game's terrain paint
+                     : m->alpha == scene::AlphaMode::Layer ? m->alphaReference
                      : m->alpha == scene::AlphaMode::Add   ? 1.0f / 255   // as the game's particles
                      : m->alpha == scene::AlphaMode::Sum   ? 0.0f         // its alpha plays no part
+                     : m->alpha == scene::AlphaMode::Brighten ? m->alphaReference
                      : m->blendedHair                      ? 60.5f / 255  // the game keeps alpha above 60
                      : blend                               ? 0.01f
                                                            : 0.0f;
@@ -722,7 +734,22 @@ void FramePlan::setMaterial(const RendererState& s, const ResourceQuery& q, Draw
     fu.underwaterShade[2] =
         d.instance && (d.instance->part == scene::Part::Skirt || d.instance->skirtSand != 0 || d.instance->name == "terrain") ? 1.0f : 0.0f;
     TextureRef detail{TextureRef::Kind::White, 0};
-    if (m && m->terrain) {
+    // A highlighted tile takes its selection texture where terrain takes its detail texture.
+    bool highlighted = false;
+    if (const auto& h = s.tileHighlight_; h && d.instance && h->image >= 0 && q.hasImage(h->image)) {
+        const bool floor = h->kind == TileHighlight::Kind::Floor && d.instance->part == scene::Part::Floor && d.instance->level == h->level &&
+                           d.instance->underside == scene::Underside::None;
+        const bool wall = h->kind == TileHighlight::Kind::Wall && static_cast<std::size_t>(d.instance - s.instances_.data()) == h->instance;
+        if (floor || wall) {
+            highlighted = true;
+            detail = {TextureRef::Kind::Image, h->image};
+            fu.highlight[0] = floor ? 1.0f : 2.0f;
+            fu.highlight[1] = h->grey;
+            std::copy(h->toTile.begin(), h->toTile.begin() + 4, fu.highlightToTile[0]);
+            std::copy(h->toTile.begin() + 4, h->toTile.end(), fu.highlightToTile[1]);
+        }
+    }
+    if (m && m->terrain && !highlighted) {
         fu.terrainTexture[0] = 1;
         if (m->detail >= 0 && q.hasImage(m->detail)) {
             detail = {TextureRef::Kind::Image, m->detail};
@@ -737,7 +764,7 @@ void FramePlan::setMaterial(const RendererState& s, const ResourceQuery& q, Draw
                    {lightMapFrom ? *lightMapFrom : lightMap, SamplerKind::Clamped},
                    {cube, SamplerKind::Clamped},
                    {mask, SamplerKind::Clamped},
-                   {detail, SamplerKind::Repeat}}};
+                   {detail, highlighted ? SamplerKind::Clamped : SamplerKind::Repeat}}};
 }
 
 std::vector<std::vector<Draw>> FramePlan::shadowCasters(const RendererState& s, const ResourceQuery& q) {

@@ -186,14 +186,20 @@ void SdlGpuRenderer::makeScenePipelines(const std::filesystem::path& shaders, Pa
     for (int clip = 0; clip < (samples > 1 || gameAlpha ? 1 : 2); ++clip)
     for (int skinned = 0; skinned < 2; ++skinned)
     for (int twoSided = 0; twoSided < 2; ++twoSided) {
-        for (int blend = 0; blend < (clip == 0 && samples <= 1 && !gameAlpha ? kOpaqueOverDepth + 1 : kOpaqueOverDepth); ++blend) {
+        for (int blend = 0; blend <= kDepthOnly; ++blend) {
+            if (blend == kOpaqueOverDepth && !(clip == 0 && samples <= 1 && !gameAlpha)) {
+                continue;
+            }
             SDL_GPUVertexBufferDescription buffers[2]{};
             SDL_GPUVertexAttribute attributes[11]{};
             sceneVertexLayout(buffers, attributes);
 
             SDL_GPUColorTargetDescription color{};
             color.format = SDL_GetGPUSwapchainTextureFormat(device_, window_);
-            if (blend && blend != kOpaqueOverDepth) {
+            if (blend == kDepthOnly) {
+                color.blend_state.enable_color_write_mask = true;
+                color.blend_state.color_write_mask = 0;
+            } else if (blend && blend != kOpaqueOverDepth) {
                 color.blend_state.enable_blend = true;
                 const bool adds = blend == 2 || blend == 3;
                 color.blend_state.src_color_blendfactor = blend == 3 ? SDL_GPU_BLENDFACTOR_ONE : SDL_GPU_BLENDFACTOR_SRC_ALPHA;
@@ -202,6 +208,12 @@ void SdlGpuRenderer::makeScenePipelines(const std::filesystem::path& shaders, Pa
                 color.blend_state.src_alpha_blendfactor = adds ? SDL_GPU_BLENDFACTOR_ZERO : SDL_GPU_BLENDFACTOR_ONE;
                 color.blend_state.dst_alpha_blendfactor = adds ? SDL_GPU_BLENDFACTOR_ONE : SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
                 color.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+                if (blend == kBrighten) {
+                    color.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+                    color.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+                    color.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ZERO;
+                    color.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+                }
                 if (gameAlpha) {
                     color.blend_state.src_alpha_blendfactor = color.blend_state.src_color_blendfactor;
                     color.blend_state.dst_alpha_blendfactor = color.blend_state.dst_color_blendfactor;
@@ -221,7 +233,7 @@ void SdlGpuRenderer::makeScenePipelines(const std::filesystem::path& shaders, Pa
             info.rasterizer_state.front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
             info.rasterizer_state.enable_depth_clip = clip != 0;
             info.depth_stencil_state.enable_depth_test = true;
-            info.depth_stencil_state.enable_depth_write = blend == 0 || blend == 4;
+            info.depth_stencil_state.enable_depth_write = blend == 0 || blend == 4 || blend == kDepthOnly;
             info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_GREATER_OR_EQUAL;
             info.target_info.color_target_descriptions = &color;
             info.target_info.num_color_targets = 1;

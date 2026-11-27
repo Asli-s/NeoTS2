@@ -90,6 +90,10 @@ public:
     // with different edits are kept apart by the edit's key.
     int skinnedModel(const std::string& name, const std::vector<scenegraph::MaterialOverride>& overrides,
                      const MeshEdit* edit = nullptr, const scenegraph::Link* at = nullptr, bool hair = false);
+    // The box a model's shapes take in its own space, as the game measures a model: every group of
+    // the level of detail drawn, with the ones that draw nothing (Null materials, a mirror's bounding
+    // box) and its shadows. Nullopt for a model that can't be read or has no vertices.
+    std::optional<std::pair<std::array<float, 3>, std::array<float, 3>>> modelBox(const std::string& name);
     // The morphs a model's meshes list as its scene record keeps their weights: each mesh's morphs in
     // turn, each pair once, an empty pair for no morph included. Empty for a model with none or one
     // that can't be read.
@@ -200,6 +204,16 @@ public:
     // over by the detail's alpha (see Material::terrain), tinted by `shade`. Canvas (opaque) or paint
     // (a layer).
     int terrainMaterial(const std::string& texture, int repeats, float shade, bool paint);
+    // The ground storey's tile grid in Buy and Build modes, as the game's floorGridBlack material
+    // draws it: the floor-grid texture in black at 0.775 of its alpha, laid over the ground as a
+    // layer. -1 when the texture is missing.
+    int groundGridMaterial();
+    // The same grid over a pool, blended once the pool's water is drawn. -1 when the texture is missing.
+    int poolGridMaterial();
+    // An upper storey's grid, as the game's floorGridWhite (floorGridWhiteActiveLevel on the storey
+    // looked at): white times the texture's alpha added to what is there times that alpha, where the
+    // alpha is above 50 of 255. -1 when the texture is missing.
+    int upperGridMaterial(bool active);
     // A wall covering with a door or window's wall mask cut out of it: alpha below half in the mask
     // is a hole (see Material::mask). The mask runs right to left across the face when its material's
     // tsMirrorWallMask is 1. -1 when either is missing.
@@ -208,6 +222,9 @@ public:
     // made), empty for images made for this scene alone such as light maps. Builders on the same
     // assets make the same image from the same key, so scenes joined later can share them.
     std::vector<std::string> imageKeys() const;
+    // Forgets the models built so far, for a builder whose scene's meshes were taken away: the next
+    // use of each builds it again.
+    void forgetModels() { models_.clear(); }
 
     // Adds the collected surfaces as a mesh. -1 when there is nothing in them.
     int addMesh(const std::string& name, Surfaces surfaces);
@@ -230,6 +247,11 @@ public:
     // strength maps can hold 0. Not in the original game.
     void setSmoothLotSkirts(bool on) { smoothLotSkirts_ = on; }
     bool smoothLotSkirts() const { return smoothLotSkirts_; }
+    // Where Build mode lets a floor go on the storeys above the ground (grid level, tile x, y), for
+    // their grid. Unset, those storeys get no grid.
+    using FloorAllowed = std::function<bool(int level, int x, int y)>;
+    void setFloorAllowed(FloorAllowed allowed) { floorAllowed_ = std::move(allowed); }
+    const FloorAllowed& floorAllowed() const { return floorAllowed_; }
     // The neighborhood's water level in the lot's own heights, when the lot lies in a neighborhood
     // with water. With smooth lot skirts the lot's sea bed is rounded below it (see Heights::drawnGrid).
     void setLotSea(std::optional<float> z) { lotSea_ = z; }
@@ -278,6 +300,7 @@ private:
     bool poolStylePonds_ = false;
     bool poolStyleSea_ = false;
     bool smoothLotSkirts_ = false;
+    FloorAllowed floorAllowed_;
     std::optional<float> lotSea_;
     std::map<std::string, int> models_, materials_, images_, envCubes_;
     // The materials (by materials_'s key) whose type is the game's Null shader, which has no passes.

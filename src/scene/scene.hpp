@@ -58,8 +58,9 @@ constexpr std::uint32_t kDxt1 = 4, kDxt3 = 5, kDxt5 = 8;
 // Layer: blended onto the opaque surface it lies on (same vertices), right after opaque surfaces in
 // the order placed, as terrain paint is. Add: adds the colour times its alpha, as the game's additive
 // particles (stdPMAdditive). Sum: adds the colour whatever its alpha (stdMatAlphaBlendMode
-// addNoSrcAlphaScale, candle flames).
-enum class AlphaMode { Opaque, Mask, Blend, Layer, Add, Sum };
+// addNoSrcAlphaScale, candle flames). Brighten: adds the colour to what is there times the colour's
+// alpha, where alpha is at least alphaReference (the upper storeys' Buy and Build grid).
+enum class AlphaMode { Opaque, Mask, Blend, Layer, Add, Sum, Brighten };
 
 // How a surface looks: a color, optionally times an image, and how its alpha is used.
 // The grey a mirror's glass shows with the Reflections option off, and the darker grey it shows in
@@ -73,7 +74,7 @@ struct Material {
     std::array<float, 4> color{1, 1, 1, 1};
     int image = -1;  // index into Scene::images, -1 for none
     AlphaMode alpha = AlphaMode::Opaque;
-    float alphaReference = 0.5f;  // Mask: drawn where alpha is at least this
+    float alphaReference = 0.5f;  // Mask, Layer and Brighten: drawn where alpha is at least this
     // A wall's door or window mask, or a counter top's hole for a sink (index into Scene::images, -1
     // for none), as the game takes it: drawn only where its alpha is at least half, read clamped at
     // the surface's texture coordinates, with u running the other way when `maskMirrored`. On a wall
@@ -255,7 +256,9 @@ struct Mesh {
 
 // What a placed mesh is, for choosing what a view shows.
 // Skirt: the ground around a lot, lit by the lot's lights as the game's fixed-function skirt pass.
-enum class Part : std::uint8_t { Other, Object, Floor, Roof, Wall, WallHub, Skirt };
+// Grid: the ground storey's tile grid in Buy and Build modes. UpperGrid and ActiveGrid: a storey above
+// the ground's grid, as it shows below the storey looked at and on it.
+enum class Part : std::uint8_t { Other, Object, Floor, Roof, Wall, WallHub, Skirt, Grid, UpperGrid, ActiveGrid };
 
 // A mesh placed in the world.
 // Where a lot object is tested against the buildings' sun shadow: the centre of its box, each of its
@@ -353,6 +356,11 @@ struct Instance {
     // the lot does). Its materials then draw blended, without reflections, their colour and alpha
     // times this.
     std::optional<std::array<float, 4>> shapeColor;
+    // Drawn as Buy mode's hand draws an object where it can't stand: full white ambient light added
+    // to its own (the game's WhiteAmbient draw style). Its shape-coloured surfaces write their depth
+    // first, then are added to what is behind them, so only the nearest of them show. The Design
+    // tool's hovered object is drawn the same way in grey.
+    bool refusedLook = false;
     // A neighbor's house drawn for real around the lot, lit as the played lot is (its light maps lit
     // again when the lot's lighting state changes).
     bool neighborHouse = false;
@@ -643,6 +651,8 @@ struct ObjectLighting {
     // "environmentCube" light): in a room its average light, outdoors the lighting state's
     // environment colour.
     std::array<float, 3> textureLight{1, 1, 1};
+    // When set, the flat colour mirror glass shows in place of its own (object catalog pictures).
+    std::optional<std::array<float, 3>> glassColor;
     bool operator==(const ObjectLighting&) const = default;
 };
 
@@ -693,6 +703,8 @@ struct LightMaps {
 enum class LightGroup : std::uint8_t;
 using ThingLights = std::function<std::vector<ObjectLighting>(const Mesh& mesh, const Transform& inLot, int storey, LightGroup group)>;
 struct Scene;
+struct LotWalls;
+struct LotGround;
 using ThingSun = std::function<std::vector<float>(const Scene& scene, const Instance& inLot)>;
 
 // Everything needed to draw a scene, independent of any graphics API.
@@ -708,6 +720,10 @@ struct Scene {
     std::vector<Mesh> meshes;
     std::vector<Instance> instances;
     std::vector<WallInfo> walls;
+    // A lot's walls as its builder drew them (see LotWalls), none for other scenes.
+    std::shared_ptr<const LotWalls> lotWalls;
+    // A lot's ground as its builder drew it (see LotGround), none for other scenes.
+    std::shared_ptr<const LotGround> lotGround;
     std::optional<PaintedTerrain> terrain;
     // A lot's sky: the six faces of its skybox cube map (z up), drawn behind everything.
     std::vector<Image> skybox;

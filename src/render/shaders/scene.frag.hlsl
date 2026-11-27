@@ -68,6 +68,8 @@ cbuffer Material : register(b0, space3) {
     float4 terrainTexture;  // x: 1 for terrain (the texture's alpha plays no part), y: 1 with a detail texture, z: how many times it repeats over the texture
     float4 underwaterShade; // x: 1 when darkened below the water by the underwater gradient, y: 1 when hazed under a pool-style sea, z: 1 for the ground lot view hazes
     float4 skirtLamps[3];   // a lot skirt's lamp light from the light map: the rows giving its coordinates, then x the gain (0: none)
+    float4 highlight;       // x: 1 for a highlighted floor tile, 2 for a wall tile (0: none), y: its grey
+    float4 highlightToTile[2];  // the scene to the tile's u and v, 0 to 1 across it
 };
 
 #ifndef GL2
@@ -444,9 +446,33 @@ float4 shade(Input input) {
     return float4(albedo.rgb * (sky + sun), albedo.a);
 }
 
+// A highlighted floor or wall tile as the game's highlight shaders draw it, its selection texture's
+// alpha `a` at `tile`: a floor twice its pattern by `a` plus the grey by 1 - a, a wall its pattern by
+// `a` plus the grey. No light map, light or shadow reaches it.
+float4 highlightedTile(Input input, float2 tile) {
+    if (wallMask.x > 0.5) {
+        const float2 maskUv = float2(wallMask.y > 0.5 ? 1 - input.uv.x : input.uv.x, input.uv.y);
+        if (maskTexture.Sample(maskSampler, maskUv).a < 0.5) {
+            discard;
+        }
+    }
+    const float3 base = hasTexture > 0.5 ? baseTexture.Sample(baseSampler, input.uv).rgb : float3(1, 1, 1);
+    const float a = detailTexture.Sample(detailSampler, tile).a;
+    const float3 shown = highlight.x < 1.5 ? 2 * base * a + highlight.y * (1 - a) : base * a + highlight.y;
+    return float4(saturate(shown), 1);
+}
+
 // The specular, then the environment cube, are added over the lit colour, leaving its alpha. The
 // cube's colour scale already holds the texture light.
 float4 main(Input input) : SV_Target {
+    if (highlight.x > 0.5) {
+        const float4 at = float4(input.world, 1);
+        const float2 tile = float2(dot(highlightToTile[0], at), dot(highlightToTile[1], at));
+        if (tile.x >= 0 && tile.x <= 1 && tile.y >= 0 && tile.y <= 1) {
+            input.uv = input.uv * uvTile.xy + uvTile.zw;
+            return highlightedTile(input, tile);
+        }
+    }
 #ifndef GL2
     // A neighbor drawn as a real house brings its own ground.
     if (neighborLight.w > 1.5 && neighborLight.w < 2.5) {

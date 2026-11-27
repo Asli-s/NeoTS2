@@ -68,6 +68,8 @@ struct FragmentUniforms {
     float terrainTexture[4];  // x: 1 for terrain, y: 1 with a detail texture, z: its repeats (see scene::Material::terrain)
     float underwaterShade[4];  // x: 1 when darkened below the water (see scene::Material::partlyUnderwater), y: 1 when hazed under a pool-style sea, z: 1 for the ground lot view hazes
     float skirtLamps[3][4];    // a lot skirt's lamp light from the light map: its coordinates' rows, then x the gain (see scene::Instance::skirtLampMap)
+    float highlight[4];        // x: 1 for a highlighted floor tile, 2 for a wall tile (0: none), y: its grey (see TileHighlight)
+    float highlightToTile[2][4];  // the scene to the tile's u and v, 0 to 1 across it
 };
 
 // The shaders' constant buffers pack in 16-byte rows, so these must match them field for field.
@@ -76,7 +78,8 @@ static_assert(offsetof(SkinnedUniforms, jointBase) == 720 && sizeof(SkinnedUnifo
 static_assert(sizeof(FragmentUniforms) % 16 == 0 && offsetof(FragmentUniforms, lightMap) == 48 &&
               offsetof(FragmentUniforms, envCube) == 128 && offsetof(FragmentUniforms, emissive) == 192 &&
               offsetof(FragmentUniforms, uvTile) == 208 && offsetof(FragmentUniforms, shadowReceiver) == 224 &&
-              offsetof(FragmentUniforms, caustics) == 240);
+              offsetof(FragmentUniforms, caustics) == 240 && offsetof(FragmentUniforms, highlight) % 16 == 0 &&
+              offsetof(FragmentUniforms, highlightToTile) == offsetof(FragmentUniforms, highlight) + 16);
 
 // The Sims' shadow pictures share one atlas, a square of tiles each simshadows::kResolution texels
 // wide.

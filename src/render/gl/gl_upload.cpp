@@ -446,6 +446,52 @@ void GlRenderer::addMeshes(const scene::Scene& scene) {
     gpu_->meshes.insert(gpu_->meshes.end(), std::make_move_iterator(added.begin()), std::make_move_iterator(added.end()));
 }
 
+void GlRenderer::replaceMeshes(const scene::Scene& scene, const std::vector<std::size_t>& indexes) {
+    std::vector<std::size_t> replaced;
+    for (const std::size_t i : indexes) {
+        if (i < gpu_->meshes.size() && i < scene.meshes.size()) {
+            replaced.push_back(i);
+        }
+    }
+    if (replaced.empty()) {
+        return;
+    }
+    const auto set = static_cast<std::uint32_t>(gpu_->meshBuffers.size());
+    MeshData data;
+    std::vector<GpuMesh> packed;
+    for (const std::size_t i : replaced) {
+        packed.push_back(packMesh(scene.meshes[i], scene.materials, set, data));
+    }
+    gpu_->meshBuffers.push_back(uploadMeshBuffers(data));
+    for (std::size_t k = 0; k < replaced.size(); ++k) {
+        gpu_->meshes[replaced[k]] = std::move(packed[k]);
+    }
+    std::vector<bool> used(gpu_->meshBuffers.size(), false);
+    for (const auto& mesh : gpu_->meshes) {
+        for (const auto& p : mesh.primitives) {
+            if (p.buffers < used.size()) {
+                used[p.buffers] = true;
+            }
+        }
+    }
+    std::lock_guard lock(graveyard_->lock);
+    for (std::size_t s = 0; s < gpu_->meshBuffers.size(); ++s) {
+        auto& b = gpu_->meshBuffers[s];
+        if (used[s]) {
+            continue;
+        }
+        for (GLuint* id : {&b.vertices, &b.indices}) {
+            if (*id != 0) {
+                graveyard_->buffers.push_back(*id);
+                *id = 0;
+            }
+        }
+        b.cpuVertices.clear();
+        b.cpuSkin.clear();
+        b.cpuMorphs.clear();
+    }
+}
+
 void GlRenderer::setImages(const scene::Scene& scene, const std::vector<int>& indexes, bool fade) {
     for (const int i : indexes) {
         const auto at = static_cast<std::size_t>(i);
@@ -487,6 +533,17 @@ void GlRenderer::setImagePixels(int index, const scene::Image& image) {
     gl_.PixelStorei(GL_UNPACK_ALIGNMENT, 1);
     gl_.TexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, static_cast<GLsizei>(image.width), static_cast<GLsizei>(image.height), GL_RGBA, GL_UNSIGNED_BYTE,
                       image.rgba.data());
+}
+
+void GlRenderer::setLightMapFadeFrom(const std::map<int, scene::Image>& images) {
+    for (const auto& [index, image] : images) {
+        if (index < 0 || static_cast<std::size_t>(index) >= gpu_->textures.size() || !complete(image)) {
+            continue;
+        }
+        auto& from = gpu_->fadingFrom[index];
+        release(from);
+        from = uploadTexture(image, false);
+    }
 }
 
 void GlRenderer::setLightMapFade(float fade) {

@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -17,6 +18,22 @@
 #include <vector>
 
 namespace ts2::render {
+
+// One floor tile or one tile's length of wall drawn in the game's highlighted look: its floor or
+// wall material with the selection texture over it, without the light map. A floor shows twice
+// its pattern where the texture's alpha is 1 and `grey` where it is 0. A wall shows its pattern
+// times the alpha, plus `grey`.
+struct TileHighlight {
+    enum class Kind { Floor, Wall };
+    Kind kind = Kind::Floor;
+    int level = 0;              // a floor's storey, as Instance::level counts them
+    std::size_t instance = 0;   // a wall's instance
+    int image = -1;             // the selection texture, an image of the scene
+    float grey = 0.25f;
+    // Two rows taking a scene point (x, y, z, 1) to the tile's u and v, each 0 to 1 across the tile
+    // (along the wall and up it, for a wall).
+    std::array<float, 8> toTile{};
+};
 
 // What a renderer can't or won't do, so the game can leave out the settings that wouldn't work and
 // the passes that wouldn't show. A renderer given a setting it lacks leaves it alone.
@@ -187,6 +204,15 @@ public:
     virtual void addMaterials(const scene::Scene& scene) = 0;
     // The same for its meshes (after their materials).
     virtual void addMeshes(const scene::Scene& scene) = 0;
+    // Uploads the scene's meshes at these indexes again, in place of the uploaded ones. Buffers no
+    // mesh draws from any more are freed.
+    virtual void replaceMeshes(const scene::Scene& scene, const std::vector<std::size_t>& indexes) = 0;
+    // Uploads only these runs (first vertex, count) of each of a mesh's primitives again. The mesh
+    // must keep its primitives and their vertex counts. By default the whole mesh goes again.
+    virtual void updateMeshVertices(const scene::Scene& scene, std::size_t mesh, const std::vector<std::pair<std::uint32_t, std::uint32_t>>& runs) {
+        (void)runs;
+        replaceMeshes(scene, {mesh});
+    }
 
     // A scene's images and meshes uploaded ahead, to be added to the drawn scene (see prepareAddition).
     class AdditionBase {
@@ -232,6 +258,8 @@ public:
     virtual void setImagePixels(int index, const scene::Image& image) = 0;
     // How far light maps have faded to the ones setImages put in (0 .. 1, at 1 the old ones are let go).
     virtual void setLightMapFade(float fade) = 0;
+    // The light maps a running fade starts from, by image index, in place of the ones setImages kept.
+    virtual void setLightMapFadeFrom(const std::map<int, scene::Image>& images) = 0;
     // Draws a lot's sky with these six faces from the next frame on (see scene::Scene::skybox). None
     // when they are not six faces of one size.
     virtual void setSkybox(const std::vector<scene::Image>& faces) = 0;
@@ -338,9 +366,14 @@ public:
     virtual void setShadows(Shadows shadows) = 0;
     // Brightens a lot object (by its game object id, 0 for none) by adding `ambient` to its ambient light.
     virtual void setHighlight(std::uint32_t object, float ambient) = 0;
+    // Draws a floor tile or a wall tile highlighted from the next frame on, none to stop.
+    virtual void setTileHighlight(std::optional<TileHighlight> highlight) = 0;
     // Draws an uploaded instance with this shape colour from the next frame on, none to stop (see
     // scene::Instance::shapeColor).
     virtual void setShapeColor(std::size_t instance, std::optional<std::array<float, 4>> color) = 0;
+    // Draws an uploaded instance in Buy mode's refused look from the next frame on, or stops (see
+    // scene::Instance::refusedLook).
+    virtual void setRefusedLook(std::size_t instance, bool on) = 0;
 };
 
 } // namespace ts2::render

@@ -6,6 +6,7 @@
 #include "scene/terrain_water.hpp"
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <optional>
 
@@ -91,6 +92,44 @@ void LotSceneBuilder::drawPoolWater() {
         water->poolWater = true;
         water->poolBox = poolBox(quarters, ground);
     }
+    drawPoolGrid(quarters);
+}
+
+// The Buy and Build grid over the pools, where the ground storey's grid has no ground to lie on: at the
+// ground's height, the grid texture once per tile, each quarter the triangle from its tile edge to the
+// tile's centre.
+void LotSceneBuilder::drawPoolGrid(const std::vector<poolwater::Quarter>& quarters) {
+    const int material = b_.poolGridMaterial();
+    if (material < 0) {
+        return;
+    }
+    const int ground = content::groundGridLevel(lot_);
+    // Just over the ground, as the storeys' grids lie over their floors.
+    constexpr float kOver = 0.004f;
+    Primitive grid;
+    grid.material = material;
+    for (const auto& q : quarters) {
+        const float x = static_cast<float>(q.x), y = static_cast<float>(q.y);
+        // The quarter's tile edge, by the quarters' order: x low, y high, x high, y low.
+        const std::array<std::array<float, 2>, 4> corners{{{x, y}, {x, y + 1}, {x + 1, y + 1}, {x + 1, y}}};
+        const auto& a = corners[static_cast<std::size_t>(q.quarter) % 4];
+        const auto& b = corners[static_cast<std::size_t>(q.quarter + 1) % 4];
+        // Counter-clockwise from above, so the triangle faces up.
+        for (const auto& p : {b, a, std::array<float, 2>{x + 0.5f, y + 0.5f}}) {
+            grid.indices.push_back(static_cast<std::uint32_t>(grid.positions.size() / 3));
+            grid.positions.insert(grid.positions.end(), {p[0], p[1], (p[0] == x + 0.5f ? heights_.tile(ground, x, y) : heights_.corner(ground, p[0], p[1])) + kOver});
+            grid.normals.insert(grid.normals.end(), {0, 0, 1});
+            grid.uvs.insert(grid.uvs.end(), {p[0], p[1]});
+        }
+    }
+    if (grid.indices.empty()) {
+        return;
+    }
+    Mesh mesh;
+    mesh.name = "pool grid";
+    mesh.primitives.push_back(std::move(grid));
+    b_.scene().meshes.push_back(std::move(mesh));
+    b_.place(static_cast<int>(b_.scene().meshes.size() - 1), "pool grid", Transform{}, Part::Grid, content::groundGridLevel(lot_));
 }
 
 // The curved wall of each rounded pool corner: the game's poolShapeWall model, from the pool's floor

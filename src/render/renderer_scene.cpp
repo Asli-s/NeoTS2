@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
@@ -170,6 +171,208 @@ void SdlGpuRenderer::addMeshes(const scene::Scene& scene) {
         SDL_SubmitGPUCommandBuffer(cmd);
     }
     gpu_->meshes.insert(gpu_->meshes.end(), std::make_move_iterator(added.begin()), std::make_move_iterator(added.end()));
+}
+
+void SdlGpuRenderer::updateMeshVertices(const scene::Scene& scene, std::size_t mesh,
+                                        const std::vector<std::pair<std::uint32_t, std::uint32_t>>& runs) {
+    if (mesh >= gpu_->meshes.size() || mesh >= scene.meshes.size() || runs.empty()) {
+        return;
+    }
+    auto& packed = gpu_->meshes[mesh];
+    const auto& source = scene.meshes[mesh];
+    // A run's place in the buffer and in `floats`.
+    struct Piece {
+        SDL_GPUBuffer* buffer = nullptr;
+        Uint32 offset = 0, size = 0, from = 0;
+    };
+    std::vector<Piece> pieces;
+    std::vector<float> floats;
+    for (auto& g : packed.primitives) {
+        if (g.source >= source.primitives.size() || g.buffers >= gpu_->meshBuffers.size() || gpu_->meshBuffers[g.buffers].vertices == nullptr) {
+            continue;
+        }
+        const auto& p = source.primitives[g.source];
+        // A primitive whose vertex count changed needs the whole mesh again.
+        if (p.positions.size() / 3 != g.vertices) {
+            replaceMeshes(scene, {mesh});
+            return;
+        }
+        for (const auto& [first, count] : runs) {
+            if (count == 0 || first >= g.vertices || count > g.vertices - first) {
+                continue;
+            }
+            const auto at = floats.size();
+            floats.resize(at + static_cast<std::size_t>(count) * kVertexFloats);
+            for (std::uint32_t i = 0; i < count; ++i) {
+                packVertex(p, first + i, &floats[at + static_cast<std::size_t>(i) * kVertexFloats]);
+                // The culling box grows to take in the moved points.
+                for (std::size_t k = 0; k < 3; ++k) {
+                    const float c = p.positions[(first + i) * 3 + k];
+                    g.low[k] = std::min(g.low[k], c);
+                    g.high[k] = std::max(g.high[k], c);
+                }
+            }
+            pieces.push_back({gpu_->meshBuffers[g.buffers].vertices, static_cast<Uint32>((g.firstVertex + first) * kVertexFloats * sizeof(float)),
+                              static_cast<Uint32>(static_cast<std::size_t>(count) * kVertexFloats * sizeof(float)), static_cast<Uint32>(at * sizeof(float))});
+        }
+    }
+    if (pieces.empty()) {
+        return;
+    }
+    SDL_GPUTransferBufferCreateInfo info{};
+    info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+    info.size = static_cast<Uint32>(floats.size() * sizeof(float));
+    SDL_GPUTransferBuffer* transfer = SDL_CreateGPUTransferBuffer(device_, &info);
+    if (transfer == nullptr) {
+        replaceMeshes(scene, {mesh});
+        return;
+    }
+    if (void* mapped = SDL_MapGPUTransferBuffer(device_, transfer, false)) {
+        std::memcpy(mapped, floats.data(), floats.size() * sizeof(float));
+        SDL_UnmapGPUTransferBuffer(device_, transfer);
+        SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+        if (cmd != nullptr) {
+            SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
+            for (const auto& piece : pieces) {
+                const SDL_GPUTransferBufferLocation from{transfer, piece.from};
+                const SDL_GPUBufferRegion to{piece.buffer, piece.offset, piece.size};
+                // Not cycled, so the rest of the buffer keeps its contents. Earlier frames read it
+                // before the copy runs, as the GPU keeps the order commands were sent in.
+                SDL_UploadToGPUBuffer(copy, &from, &to, false);
+            }
+            SDL_EndGPUCopyPass(copy);
+            SDL_SubmitGPUCommandBuffer(cmd);
+        }
+    }
+    SDL_ReleaseGPUTransferBuffer(device_, transfer);
+}
+
+void SdlGpuRenderer::replaceMeshes(const scene::Scene& scene, const std::vector<std::size_t>& indexes) {
+    std::vector<std::size_t> replaced;
+    for (const std::size_t i : indexes) {
+        if (i < gpu_->meshes.size() && i < scene.meshes.size()) {
+            replaced.push_back(i);
+        }
+    }
+    if (replaced.empty()) {
+        return;
+    }
+    MeshData data;
+    std::vector<GpuMesh> packed;
+    for (const std::size_t i : replaced) {
+        packed.push_back(packMesh(scene.meshes[i], scene.materials, 0, data));
+    }
+    // Only unskinned meshes without morphs (walls and floors) are replaced in place.
+    if (!data.skin.empty() || !data.morphs.empty()) {
+        return;
+    }
+    const auto vertexBytes = static_cast<Uint32>(data.vertices.size() * sizeof(float));
+    const auto indexBytes = static_cast<Uint32>(data.indices.size() * sizeof(std::uint32_t));
+    // A buffer set only the replaced meshes draw from is filled again when the new data fits, as
+    // making new buffers on every change stutters.
+    std::vector<bool> isReplaced(gpu_->meshes.size(), false);
+    for (const std::size_t i : replaced) {
+        isReplaced[i] = true;
+    }
+    std::vector<std::uint32_t> theirs;
+    for (const std::size_t i : replaced) {
+        for (const auto& p : gpu_->meshes[i].primitives) {
+            if (std::find(theirs.begin(), theirs.end(), p.buffers) == theirs.end()) {
+                theirs.push_back(p.buffers);
+            }
+        }
+    }
+    std::vector<bool> usedElsewhere(gpu_->meshBuffers.size(), false);
+    for (std::size_t m = 0; m < gpu_->meshes.size(); ++m) {
+        for (const auto& p : gpu_->meshes[m].primitives) {
+            if (!isReplaced[m] && p.buffers < usedElsewhere.size()) {
+                usedElsewhere[p.buffers] = true;
+            }
+        }
+    }
+    const auto fits = [&](std::uint32_t s) {
+        if (s >= gpu_->meshBuffers.size() || usedElsewhere[s] || !data.skin.empty() || !data.morphs.empty()) {
+            return false;
+        }
+        const auto& b = gpu_->meshBuffers[s];
+        return b.vertices != nullptr && b.indices != nullptr && b.skin == nullptr && b.morphs == nullptr && vertexBytes <= b.vertexCapacity &&
+               indexBytes <= b.indexCapacity;
+    };
+    const auto own = std::find_if(theirs.begin(), theirs.end(), fits);
+    const bool refill = own != theirs.end();
+    std::uint32_t set = 0;
+    if (refill) {
+        set = *own;
+    } else {
+        // Otherwise a freed set is reused when there is one.
+        set = static_cast<std::uint32_t>(gpu_->meshBuffers.size());
+        for (std::size_t s = 0; s < gpu_->meshBuffers.size(); ++s) {
+            const auto& b = gpu_->meshBuffers[s];
+            if (!usedElsewhere[s] && std::find(theirs.begin(), theirs.end(), static_cast<std::uint32_t>(s)) == theirs.end() && b.vertices == nullptr &&
+                b.indices == nullptr && b.skin == nullptr && b.morphs == nullptr) {
+                set = static_cast<std::uint32_t>(s);
+                break;
+            }
+        }
+        if (set == gpu_->meshBuffers.size()) {
+            gpu_->meshBuffers.emplace_back();
+        }
+    }
+    for (auto& mesh : packed) {
+        for (auto& p : mesh.primitives) {
+            p.buffers = set;
+        }
+    }
+    if (!data.indices.empty()) {
+        SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+        if (cmd == nullptr) {
+            throw sdlError("GPU command buffer");
+        }
+        UploadPass pass(device_, cmd);
+        MeshBuffers& buffers = gpu_->meshBuffers[set];
+        // New buffers get room to spare, so a slightly larger change still fits.
+        const auto fill = [&](SDL_GPUBuffer*& buffer, std::uint32_t& capacity, SDL_GPUBufferUsageFlags usage, const void* bytes, Uint32 size) {
+            if (!refill) {
+                SDL_GPUBufferCreateInfo info{};
+                info.usage = usage;
+                info.size = size + size / 2;
+                buffer = SDL_CreateGPUBuffer(device_, &info);
+                if (buffer == nullptr) {
+                    throw sdlError("GPU buffer");
+                }
+                capacity = info.size;
+            }
+            const SDL_GPUTransferBufferLocation from = pass.stage(bytes, size);
+            if (from.transfer_buffer == nullptr) {
+                throw sdlError("GPU upload buffer");
+            }
+            const SDL_GPUBufferRegion to{buffer, 0, size};
+            // Cycled, so frames still drawing keep the old contents.
+            SDL_UploadToGPUBuffer(pass.copy(), &from, &to, refill);
+        };
+        fill(buffers.vertices, buffers.vertexCapacity, SDL_GPU_BUFFERUSAGE_VERTEX, data.vertices.data(), vertexBytes);
+        fill(buffers.indices, buffers.indexCapacity, SDL_GPU_BUFFERUSAGE_INDEX, data.indices.data(), indexBytes);
+        pass.end();
+        SDL_SubmitGPUCommandBuffer(cmd);
+    }
+    for (std::size_t k = 0; k < replaced.size(); ++k) {
+        gpu_->meshes[replaced[k]] = std::move(packed[k]);
+    }
+    // Sets no mesh draws from are released. SDL frees them once the frames using them are done.
+    std::vector<bool> used = std::move(usedElsewhere);
+    used.resize(gpu_->meshBuffers.size(), false);
+    used[set] = true;
+    for (std::size_t s = 0; s < gpu_->meshBuffers.size(); ++s) {
+        if (used[s]) {
+            continue;
+        }
+        for (auto** b : {&gpu_->meshBuffers[s].vertices, &gpu_->meshBuffers[s].indices, &gpu_->meshBuffers[s].skin, &gpu_->meshBuffers[s].morphs}) {
+            if (*b) {
+                SDL_ReleaseGPUBuffer(device_, *b);
+                *b = nullptr;
+            }
+        }
+    }
 }
 
 void SdlGpuRenderer::GpuAddition::release() {
@@ -406,6 +609,38 @@ void SdlGpuRenderer::setImagePixels(int index, const scene::Image& image) {
     to.d = 1;
     SDL_UploadToGPUTexture(copy, &from, &to, true);
     SDL_EndGPUCopyPass(copy);
+    SDL_SubmitGPUCommandBuffer(cmd);
+}
+
+void SdlGpuRenderer::setLightMapFadeFrom(const std::map<int, scene::Image>& images) {
+    if (images.empty()) {
+        return;
+    }
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+    if (cmd == nullptr) {
+        throw sdlError("GPU command buffer");
+    }
+    std::vector<SDL_GPUTexture*> withMips, made;
+    std::vector<int> madeFor;
+    try {
+        UploadPass pass(device_, cmd);
+        for (const auto& [index, image] : images) {
+            if (index < 0 || static_cast<std::size_t>(index) >= gpu_->textures.size() || !complete(image)) {
+                continue;
+            }
+            made.push_back(uploadTexture(device_, pass, image, false, withMips));
+            madeFor.push_back(index);
+        }
+        pass.end();
+    } catch (...) {
+        releaseUnfilled(device_, made);
+        throw;
+    }
+    for (std::size_t n = 0; n < made.size(); ++n) {
+        if (SDL_GPUTexture* old = std::exchange(gpu_->fadingFrom[madeFor[n]], made[n])) {
+            SDL_ReleaseGPUTexture(device_, old);
+        }
+    }
     SDL_SubmitGPUCommandBuffer(cmd);
 }
 

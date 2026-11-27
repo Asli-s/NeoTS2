@@ -383,6 +383,10 @@ std::optional<RoofGrid> RoofGrid::of(const roofs::Roof& roof, float eave) {
     g.minY = y0;
     g.nx = static_cast<int>(std::lround(2 * (x1 - x0))) + 1;
     g.ny = static_cast<int>(std::lround(2 * (y1 - y0))) + 1;
+    // An edited install's negative pagoda overhang can leave no grid to build.
+    if (g.nx < 2 || g.ny < 2) {
+        return std::nullopt;
+    }
     // A flat-topped hip rises one step less than a hip would, at most 7 steps (at least 1).
     g.cap = std::max(1, std::min(std::min(g.nx >> 1, g.ny >> 1) - 1, 7));
     // The saved slope is half the tangent of the roof's angle: the rise per grid step.

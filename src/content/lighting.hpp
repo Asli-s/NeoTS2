@@ -51,6 +51,9 @@ struct Lighting {
         std::map<std::string, Modifier> modifiers;
         std::map<std::string, std::vector<float>> diffParams;  // "diffParam <name> <value>", by name
         std::optional<UnlitRoom> unlitRoom;
+        // "transitionTimes": the longest fade into this state's light and out of it, in seconds. The
+        // lot's light fades in over the first after the lot changes (a wall built or taken out).
+        std::optional<std::array<float, 2>> transitionTimes;
     };
     // One object light's settings from the "lightAttribOverride <light> <setting> <value>" lines,
     // the last line for each setting winning. Unset ones keep the game's defaults.

@@ -46,6 +46,32 @@ std::optional<std::array<float, 4>> flatPlane(const scene::Primitive& p) {
     return std::array<float, 4>{static_cast<float>(normal[0]), static_cast<float>(normal[1]), static_cast<float>(normal[2]), static_cast<float>(offset)};
 }
 
+void packVertex(const scene::Primitive& p, std::size_t i, float* v) {
+    const std::size_t n = p.positions.size() / 3;
+    std::fill_n(v, kVertexFloats, 0.0f);
+    std::copy_n(&p.positions[i * 3], 3, v);
+    if (p.normals.size() == p.positions.size()) {
+        std::copy_n(&p.normals[i * 3], 3, v + 3);
+    } else {
+        v[5] = 1;
+    }
+    if (p.uvs.size() == n * 2) {
+        std::copy_n(&p.uvs[i * 2], 2, v + 6);
+    }
+    v[8] = p.alphas.size() == n ? p.alphas[i] : 1.0f;
+    if (p.lightUvs.size() == n * 2) {
+        std::copy_n(&p.lightUvs[i * 2], 2, v + 9);
+    }
+    if (p.colors.size() == n * 3) {
+        std::copy_n(&p.colors[i * 3], 3, v + 11);
+    } else {
+        std::fill_n(v + 11, 3, 1.0f);
+    }
+    if (p.tangents.size() == n * 3) {
+        std::copy_n(&p.tangents[i * 3], 3, v + 14);
+    }
+}
+
 GpuMesh packMesh(const scene::Mesh& mesh, std::span<const scene::Material> materials, std::uint32_t buffers, MeshData& data) {
     GpuMesh gm;
     for (const auto& p : mesh.primitives) {
@@ -74,27 +100,7 @@ GpuMesh packMesh(const scene::Mesh& mesh, std::span<const scene::Material> mater
         data.vertices.resize(data.vertices.size() + n * kVertexFloats, 0.0f);
         for (std::size_t i = 0; i < n; ++i) {
             float* v = &data.vertices[(g.firstVertex + i) * kVertexFloats];
-            std::copy_n(&p.positions[i * 3], 3, v);
-            if (p.normals.size() == p.positions.size()) {
-                std::copy_n(&p.normals[i * 3], 3, v + 3);
-            } else {
-                v[5] = 1;
-            }
-            if (p.uvs.size() == n * 2) {
-                std::copy_n(&p.uvs[i * 2], 2, v + 6);
-            }
-            v[8] = p.alphas.size() == n ? p.alphas[i] : 1.0f;
-            if (p.lightUvs.size() == n * 2) {
-                std::copy_n(&p.lightUvs[i * 2], 2, v + 9);
-            }
-            if (p.colors.size() == n * 3) {
-                std::copy_n(&p.colors[i * 3], 3, v + 11);
-            } else {
-                std::fill_n(v + 11, 3, 1.0f);
-            }
-            if (p.tangents.size() == n * 3) {
-                std::copy_n(&p.tangents[i * 3], 3, v + 14);
-            }
+            packVertex(p, i, v);
         }
         data.indices.insert(data.indices.end(), p.indices.begin(), p.indices.end());
         g.count = static_cast<unsigned>(p.indices.size());

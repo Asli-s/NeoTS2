@@ -72,12 +72,15 @@ public:
     void benchmark(const Camera& camera, unsigned width, unsigned height, int frames) override;
     void addMaterials(const scene::Scene& scene) override;
     void addMeshes(const scene::Scene& scene) override;
+    void replaceMeshes(const scene::Scene& scene, const std::vector<std::size_t>& indexes) override;
+    void updateMeshVertices(const scene::Scene& scene, std::size_t mesh, const std::vector<std::pair<std::uint32_t, std::uint32_t>>& runs) override;
     [[nodiscard]] Addition prepareAddition(const scene::Scene& add, const std::vector<int>& shared) const override;
     void leaveOutPrepared(Addition& addition, const std::vector<std::size_t>& positions) const override;
     void addPrepared(const scene::Scene& scene, Addition addition) override;
     void setImages(const scene::Scene& scene, const std::vector<int>& indexes, bool fade = false) override;
     void setImagePixels(int index, const scene::Image& image) override;
     void setLightMapFade(float fade) override;
+    void setLightMapFadeFrom(const std::map<int, scene::Image>& images) override;
     void setSkybox(const std::vector<scene::Image>& faces) override;
     void setTerrainLightMap(const scene::Image& lightMap) override;
     void setSeaLight(float light) override;
@@ -105,6 +108,8 @@ private:
         SDL_GPUBuffer* indices = nullptr;
         SDL_GPUBuffer* skin = nullptr;
         SDL_GPUBuffer* morphs = nullptr;  // the morphing vertices' deltas (see MeshData::morphs), none without
+        // Bytes the vertex and index buffers hold, 0 for a set replaceMeshes didn't make.
+        std::uint32_t vertexCapacity = 0, indexCapacity = 0;
     };
     // Binds what a skinned draw from `buffers` reads besides its vertices: the joint matrices and
     // morph weights, and the set's morph deltas (a stand-in when it has none).
@@ -116,11 +121,12 @@ private:
     // What the main view is drawn with. A pipeline only works on targets of its own sample count, so
     // smoothing edges needs a second set of them.
     struct PassPipelines {
-        // By two-sided, then opaque, blended, added, summed, blended hair or opaque over a depth drawn
-        // already. Opaque and alpha-tested surfaces write depth, blended ones don't, except a Sim's
-        // blended hair. The last kind is only made with one sample (see kOpaqueOverDepth).
-        SDL_GPUGraphicsPipeline* scene[2][6] = {};
-        SDL_GPUGraphicsPipeline* skinnedScene[2][6] = {};  // the same for skinned primitives
+        // By two-sided, then opaque, blended, added, summed, blended hair, opaque over a depth drawn
+        // already, brightened, or depth only. Opaque and alpha-tested surfaces write depth, blended ones
+        // don't, except a Sim's blended hair. Opaque over depth is only made with one sample, depth
+        // clamped and without the game's alpha blending.
+        SDL_GPUGraphicsPipeline* scene[2][8] = {};
+        SDL_GPUGraphicsPipeline* skinnedScene[2][8] = {};  // the same for skinned primitives
         std::array<SDL_GPUGraphicsPipeline*, 8> particles{};  // by effects::ParticleBlock::Draw
         SDL_GPUGraphicsPipeline* sprite = nullptr;
         SDL_GPUGraphicsPipeline* terrain = nullptr;
@@ -267,8 +273,8 @@ private:
     SDL_GPUSampler* sampler_ = nullptr;
     SDL_GPUSampler* clampedSampler_ = nullptr;  // sampler_, clamped at the edges
     // The scene's pipelines clipping depth instead of clamping it, for the pools' reflection.
-    SDL_GPUGraphicsPipeline* clippedPipelines_[2][6] = {};
-    SDL_GPUGraphicsPipeline* clippedSkinnedPipelines_[2][6] = {};
+    SDL_GPUGraphicsPipeline* clippedPipelines_[2][8] = {};
+    SDL_GPUGraphicsPipeline* clippedSkinnedPipelines_[2][8] = {};
     SDL_GPUBuffer* jointBuffer_ = nullptr;
     SDL_GPUBuffer* noMorphs_ = nullptr;  // bound in place of a mesh set's morph deltas when it has none  // jointData_ on the GPU
     std::size_t jointCapacity_ = 0;  // floats the buffer holds

@@ -77,9 +77,15 @@ public:
         highlightObject_ = object;
         highlightAmbient_ = ambient;
     }
+    void setTileHighlight(std::optional<TileHighlight> highlight) override { tileHighlight_ = highlight; }
     void setShapeColor(std::size_t instance, std::optional<std::array<float, 4>> color) override {
         if (instance < instances_.size()) {
             instances_[instance].shapeColor = color;
+        }
+    }
+    void setRefusedLook(std::size_t instance, bool on) override {
+        if (instance < instances_.size()) {
+            instances_[instance].refusedLook = on;
         }
     }
 
@@ -141,6 +147,7 @@ protected:
     bool floorAndWallNormalMapping_ = true;
     std::uint32_t highlightObject_ = 0;
     float highlightAmbient_ = 0;
+    std::optional<TileHighlight> tileHighlight_;
     Shadows shadows_;
     scene::objectshadow::Options shadowOptions_;
     bool reflections_ = true;

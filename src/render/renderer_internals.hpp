@@ -31,6 +31,12 @@ constexpr SDL_GPUTextureFormat kOcclusionNormalFormat = SDL_GPU_TEXTUREFORMAT_R1
 // The scene pipelines' kind for opaque surfaces drawn over ambient occlusion's depth: they test it
 // without writing it, so the card shades only what shows.
 constexpr int kOpaqueOverDepth = 5;
+// The scene pipelines' kind that adds a colour to what is there times the colour's alpha
+// (AlphaMode::Brighten).
+constexpr int kBrighten = 6;
+// The scene pipelines' kind that writes depth and no colour: the pass the refused look draws first, so
+// only an object's nearest surfaces take its added colour.
+constexpr int kDepthOnly = 7;
 constexpr std::uint32_t kSpriteFloats = 8;  // position, texture coordinates, color
 
 // Windows draws with Direct3D 12 and DXIL shaders, macOS with Metal and MSL shaders, other systems

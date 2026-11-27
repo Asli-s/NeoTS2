@@ -50,9 +50,11 @@ public:
     void benchmark(const Camera& camera, unsigned width, unsigned height, int frames) override;
     void addMaterials(const scene::Scene& scene) override;
     void addMeshes(const scene::Scene& scene) override;
+    void replaceMeshes(const scene::Scene& scene, const std::vector<std::size_t>& indexes) override;
     void setImages(const scene::Scene& scene, const std::vector<int>& indexes, bool fade = false) override;
     void setImagePixels(int index, const scene::Image& image) override;
     void setLightMapFade(float fade) override;
+    void setLightMapFadeFrom(const std::map<int, scene::Image>& images) override;
     void setSkybox(const std::vector<scene::Image>& faces) override;
     void setTerrainLightMap(const scene::Image& lightMap) override;
     void setNeighborhoodSky(const std::vector<scene::Image>& faces) override;

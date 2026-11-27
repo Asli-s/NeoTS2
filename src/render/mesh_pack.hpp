@@ -72,6 +72,10 @@ struct MeshData {
 // corners run counterclockwise seen from. None when they have no area or don't lie flat.
 std::optional<std::array<float, 4>> flatPlane(const scene::Primitive& p);
 
+// Writes vertex `i` of a primitive as the GPU takes it (kVertexFloats floats at `v`), as packMesh does
+// for a primitive that isn't a skinned Sim surface.
+void packVertex(const scene::Primitive& p, std::size_t i, float* v);
+
 // Appends a mesh's primitives to `data`, the set of mesh buffers numbered `buffers`.
 GpuMesh packMesh(const scene::Mesh& mesh, std::span<const scene::Material> materials, std::uint32_t buffers, MeshData& data);
 

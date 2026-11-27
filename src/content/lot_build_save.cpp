@@ -21,6 +21,9 @@ namespace ts2::content {
 
 namespace {
 
+// The group a lot's own resources are filed under.
+constexpr std::uint32_t kLocalGroup = 0xFFFFFFFF;
+
 std::vector<std::uint8_t> bodyOf(const dbpf::StoredResource& resource) {
     return resource.compressed ? qfs::decompress(resource.bytes) : resource.bytes;
 }
@@ -45,7 +48,9 @@ std::optional<std::vector<std::uint8_t>> buildRecord(const dbpf::StoredResource&
             return wallgraph::write(graph->second);
         }
         // One the wall manager keeps but the lot couldn't read: the others would no longer match it.
-        if (std::ranges::find(kWallLayerInstances, key.instance) != std::end(kWallLayerInstances)) {
+        // The stages' sides are read on their own and not edited yet, so they stay as loaded.
+        if (key.instance != kStageWallGraphInstance &&
+            std::ranges::find(kWallLayerInstances, key.instance) != std::end(kWallLayerInstances)) {
             throw std::runtime_error("wall graph " + std::to_string(key.instance) + " wasn't read");
         }
         return std::nullopt;
@@ -87,10 +92,27 @@ int putBuildRecords(dbpf::PackageImage& package, const Lot& lot) {
         diag::warning(std::string("save: the lot's build data is kept as it was loaded: ") + ex.what());
         return 0;
     }
+    // Wall graphs the lot holds that the package doesn't (the layers a shipped lot lacks) go after the others.
+    std::vector<std::pair<std::uint32_t, std::vector<std::uint8_t>>> added;
+    try {
+        for (const auto& [instance, graph] : lot.wallLayers) {
+            const dbpf::ResourceKey key{types::kWallGraph, kLocalGroup, instance, 0};
+            if (std::ranges::none_of(package.resources, [&](const dbpf::StoredResource& r) { return r.key == key; })) {
+                added.emplace_back(instance, wallgraph::write(graph));
+            }
+        }
+    } catch (const std::exception& ex) {
+        diag::warning(std::string("save: the lot's build data is kept as it was loaded: ") + ex.what());
+        return 0;
+    }
     for (auto& [i, stored] : written) {
         package.resources[i] = std::move(stored);
     }
-    return static_cast<int>(written.size());
+    for (const auto& [instance, record] : added) {
+        package.resources.push_back(dbpf::storeResource({types::kWallGraph, kLocalGroup, instance, 0}, record));
+        package.dataOrder.push_back(package.resources.size() - 1);
+    }
+    return static_cast<int>(written.size() + added.size());
 }
 
 } // namespace ts2::content

@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <span>
@@ -35,8 +36,17 @@ public:
     // are hit by their triangles where it poses them, as in the game. What they hold is not hit.
     [[nodiscard]] std::optional<Hit> pick(const Scene& scene, std::span<const std::uint8_t> shown, const std::array<float, 3>& origin,
                             const std::array<float, 3>& direction, const ScenePose* pose = nullptr) const;
+    // The nearest hit among the shown instances `accept` takes, as a ray that passes through the
+    // others would find it. Sims are left out.
+    [[nodiscard]] std::optional<Hit> pickAmong(const Scene& scene, std::span<const std::uint8_t> shown, const std::array<float, 3>& origin,
+                                               const std::array<float, 3>& direction,
+                                               const std::function<bool(const Instance&)>& accept) const;
 
 private:
+    std::optional<Hit> pickInstances(const Scene& scene, std::span<const std::uint8_t> shown, const std::array<float, 3>& origin,
+                                     const std::array<float, 3>& direction, const ScenePose* pose,
+                                     const std::function<bool(const Instance&)>* accept) const;
+
     struct Box {
         std::array<float, 3> low{0, 0, 0}, high{0, 0, 0};
         bool pickable = false;

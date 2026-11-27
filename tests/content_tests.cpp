@@ -2,8 +2,17 @@
 #include "test_support.hpp"
 #include "test_resources.hpp"
 
-#include "content/wall_manager.hpp"
 #include "content/download_index.hpp"
+#include "content/floor_edit.hpp"
+#include "content/lot_build_save.hpp"
+#include "formats/lot_grid.hpp"
+#include "formats/qfs.hpp"
+#include "formats/stringmap.hpp"
+#include "formats/walllayer.hpp"
+#include "formats/wallgraph.hpp"
+#include "formats/array3d.hpp"
+#include "content/terrain_edit.hpp"
+#include "content/wall_manager.hpp"
 #include "content/downloads.hpp"
 #include "content/resource_index.hpp"
 #include "content/save_folder.hpp"
@@ -16,24 +25,16 @@
 #include "sim/index_code_source.hpp"
 #include "parse_float.hpp"
 #include "paths/save_folders.hpp"
-#include "content/floor_edit.hpp"
-#include "content/lot_build_save.hpp"
-#include "content/terrain_edit.hpp"
-#include "formats/lot_grid.hpp"
-#include "formats/qfs.hpp"
-#include "formats/stringmap.hpp"
-#include "formats/walllayer.hpp"
-#include "formats/array3d.hpp"
 
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
+#include <tuple>
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
 #include <share.h>
 #include <sys/stat.h>
-#include <cstring>
-#include <tuple>
 #endif
 
 namespace {
@@ -1900,6 +1901,53 @@ void interruptedSavesAreUndone() {
     }
 }
 
+// The lot's walls, coverings, pattern maps and floor grid go back into its package, and a wall layer
+// it lacks is added.
+void buildDataIsPutBackIntoTheLotPackage() {
+    using namespace ts2;
+    const auto bodyOf = [](const dbpf::StoredResource& r) { return r.compressed ? qfs::decompress(r.bytes) : r.bytes; };
+    std::vector<walllayer::Entry> coverings{{7, 1, 0, 0xFFFF}};
+    std::map<std::uint16_t, stringmap::Entry> walls{{0, {"blank", 1}}}, floors{{0, {"0000abcd", 4}}};
+    lotgrid::Grid grid{true, 2, 2, 1, std::vector<std::uint8_t>(8, 0)};
+    dbpf::PackageImage image;
+    image.resources.push_back(dbpf::storeResource({types::kWallLayer, 0xFFFFFFFF, content::kWallCoveringLayerInstance, 0}, walllayer::write(coverings)));
+    image.resources.push_back(dbpf::storeResource({types::kPatternMap, 0xFFFFFFFF, content::kWallPatternMapInstance, 0}, stringmap::write(walls)));
+    image.resources.push_back(dbpf::storeResource({types::kPatternMap, 0xFFFFFFFF, content::kFloorPatternMapInstance, 0}, stringmap::write(floors)));
+    image.resources.push_back(dbpf::storeResource({types::kArray3D, 0xFFFFFFFF, content::kFloorGridInstance, 0}, lotgrid::writeGrid(grid)));
+    // A grid the lot holds at another size stays as it was.
+    image.resources.push_back(dbpf::storeResource({types::kArray3D, 0xFFFFFFFF, 9, 0}, lotgrid::writeGrid(grid)));
+    const auto keptGrid = image.resources.back().bytes;
+    // The stages' sides, which the lot reads on their own, stay as they were.
+    image.resources.push_back(dbpf::storeResource({types::kWallGraph, 0xFFFFFFFF, content::kStageWallGraphInstance, 0}, std::vector<std::uint8_t>(8, 7)));
+
+    content::Lot lot;
+    lot.savedWallCoverings = {{7, 1, 1, 0}};
+    lot.wallPatterns = {{0, {"blank", 1}}, {1, {"00001234", 1}}};
+    lot.floorPatterns = floors;
+    array3d::Array3D floor;
+    floor.width = floor.height = floor.levels = 1;
+    floor.elementSize = 2;
+    floor.elements = {1, 0, 2, 0, 3, 0, 4, 0};
+    lot.grids.emplace(content::kFloorGridInstance, floor);
+    array3d::Array3D other = floor;
+    other.elements.resize(4);
+    lot.grids.emplace(9, other);
+
+    wallgraph::WallGraph emptyLayer;
+    emptyLayer.rooms = {0};
+    lot.wallLayers.emplace(0x19, emptyLayer);
+    CHECK(content::putBuildRecords(image, lot) == 5);
+    CHECK(image.resources.size() == 7 && image.resources[6].key.type == types::kWallGraph && image.resources[6].key.instance == 0x19);
+    const auto layer = walllayer::parse(bodyOf(image.resources[0]));
+    CHECK(layer.size() == 1 && layer[0].wall == 7 && layer[0].left == 1 && layer[0].right == 0);
+    const auto patterns = stringmap::parse(bodyOf(image.resources[1]));
+    CHECK(patterns.size() == 2 && patterns.at(1).name == "00001234");
+    const auto floorBack = lotgrid::readGrid(bodyOf(image.resources[3]));
+    CHECK(floorBack && floorBack->cells == floor.elements && floorBack->width == 2);
+    CHECK(image.resources[4].bytes == keptGrid);
+    CHECK(image.resources[5].bytes == std::vector<std::uint8_t>(8, 7));
+}
+
 // A package being read can be moved aside, as a save moves a character file it replaces, and goes on
 // reading the file it opened.
 void anOpenPackageCanBeMovedAside() {
@@ -1964,223 +2012,7 @@ void aReplacedPackageKeepsTheLoadOrder() {
     std::filesystem::remove_all(folder, error);
 }
 
-void halfWallRunsPutUpPosts() {
-    using namespace ts2::content;
-    constexpr std::uint32_t kSide = 8, kNoSpacing = 0xD5D75E5E, kEveryCorner = 0x0F911C64;
-    std::map<std::uint32_t, ts2::wallgraph::WallGraph> graphs;
-    for (const std::uint32_t instance : {5u, 24u, 25u}) {
-        ts2::wallgraph::WallGraph g;
-        g.width = g.height = static_cast<std::int32_t>(kSide);
-        g.levels = 1;
-        g.rooms = {0};
-        graphs[instance] = g;
-    }
-    std::map<std::uint32_t, ts2::array3d::Array3D> grids;
-    std::vector<ts2::walllayer::Entry> coverings;
-    std::map<std::uint16_t, ts2::stringmap::Entry> patterns;
-    BuildScripts scripts;
-    WallManager walls(graphs, grids, coverings, patterns, {0, 0, 0, kSide - 1, kSide - 1, 0}, scripts);
-    walls.setFences([](std::uint32_t style) -> std::optional<WallManager::Fence> {
-        if (style == kNoSpacing) {
-            return WallManager::Fence{true, 0};
-        }
-        if (style == kEveryCorner) {
-            return WallManager::Fence{true, 1, 1.0f};
-        }
-        return std::nullopt;
-    });
-    std::vector<ts2::fencepostlayer::Post> posts;
-    walls.setPosts(&posts);
-    const auto run = [&](std::uint32_t style, float ax, float ay, float bx, float by, int count) {
-        const float sx = (bx - ax) / static_cast<float>(count), sy = (by - ay) / static_cast<float>(count);
-        for (int i = 0; i < count; ++i) {
-            const float x = ax + sx * static_cast<float>(i), y = ay + sy * static_cast<float>(i);
-            CHECK(walls.add(style, "blank", "blank", {x, y, x + sx, y + sy, 0}));
-        }
-        return walls.addRunPosts(style, ax, ay, bx, by, 0, count, [](float, float) { return true; }).added;
-    };
-    // Three tiles of a half wall with no post spacing: posts at its two ends only.
-    CHECK(run(kNoSpacing, 1, 1, 4, 1, 3).size() == 2);
-    CHECK(posts.size() == 2 && posts[0].x == 1 && posts[1].x == 4);
-    // A second run turning at its end keeps the post there, and puts one at its own far end.
-    CHECK(run(kNoSpacing, 4, 1, 4, 3, 2).size() == 1);
-    // With a spacing of one, every corner gets a post.
-    CHECK(run(kEveryCorner, 1, 5, 4, 5, 3).size() == 4);
-    // Kept in order of level, then x, then y.
-    CHECK(std::is_sorted(posts.begin(), posts.end(), [](const auto& a, const auto& b) { return std::tuple{a.level, a.x, a.y} < std::tuple{b.level, b.x, b.y}; }));
-    // A straight corner between two runs needs no post, a corner where they turn does.
-    CHECK(!walls.needsPost(2, 1, 0) && walls.needsPost(4, 1, 0));
-    CHECK(walls.removePost(4, 3, 0) && !walls.removePost(4, 3, 0) && posts.size() == 6);
-    // A corner's post is that of the fence there, and a corner with none has no post style.
-    CHECK(walls.postStyleAt(4, 1, 0) == kNoSpacing && !walls.postStyleAt(7, 7, 0) && walls.postAt(1, 1, 0).has_value());
-    // A taller half wall reaching a corner's post makes it its own, and the post as it was comes back.
-    CHECK(walls.add(kEveryCorner, "blank", "blank", {4, 1, 5, 1, 0}) && walls.add(kEveryCorner, "blank", "blank", {5, 1, 6, 1, 0}));
-    const auto changes = walls.addRunPosts(kEveryCorner, 4, 1, 6, 1, 0, 2, [](float, float) { return true; });
-    CHECK(changes.replaced.size() == 1 && changes.replaced[0].fence == kNoSpacing && walls.postAt(4, 1, 0)->fence == kEveryCorner);
-
-}
-
-void halfWallsGoInTheirLayers() {
-    using namespace ts2::content;
-    constexpr std::uint32_t kSide = 8, kHalfWall = 0xD5D75E5E;
-    std::map<std::uint32_t, ts2::wallgraph::WallGraph> graphs;
-    for (const std::uint32_t instance : {5u, 6u, 7u, 22u, 24u, 25u, 31u}) {
-        ts2::wallgraph::WallGraph g;
-        g.width = g.height = static_cast<std::int32_t>(kSide);
-        g.levels = 1;
-        g.rooms = {0};
-        graphs[instance] = g;
-    }
-    std::map<std::uint32_t, ts2::array3d::Array3D> grids;
-    // The stage's platform region (4) on the quarters of tile (5, 5) and (6, 5).
-    ts2::array3d::Array3D regions;
-    regions.width = regions.height = kSide;
-    regions.levels = 1;
-    regions.elementSize = 16;
-    regions.elements.assign(kSide * kSide * 16, 0xFF);
-    for (const std::uint32_t x : {5u, 6u}) {
-        const std::size_t at = (static_cast<std::size_t>(x) * kSide + 5) * 16;
-        for (std::size_t q = 0; q < 4; ++q) {
-            const std::int32_t stage = 4;
-            std::memcpy(regions.elements.data() + at + q * 4, &stage, sizeof stage);
-        }
-    }
-    grids[0x14] = regions;
-    std::vector<ts2::walllayer::Entry> coverings;
-    std::map<std::uint16_t, ts2::stringmap::Entry> patterns;
-    BuildScripts scripts;
-    scripts.addWallStyles("wall 1\ndefaultPattern \"blank\"\n");
-    WallManager walls(graphs, grids, coverings, patterns, {0, 0, 0, kSide - 1, kSide - 1, 0}, scripts);
-    // Unknown to the manager until it is told which styles are half walls.
-    CHECK(!walls.add(kHalfWall, "blank", "blank", {1, 1, 2, 1, 0}));
-    walls.setFences([](std::uint32_t style) { return style == kHalfWall ? std::optional<WallManager::Fence>({true, 0}) : std::nullopt; });
-    CHECK(walls.add(kHalfWall, "blank", "blank", {1, 1, 2, 1, 0}));
-    // Both ends beside the stage.
-    CHECK(walls.add(kHalfWall, "blank", "blank", {6, 5, 6, 6, 0}));
-    walls.save();
-    const auto count = [&](std::uint32_t instance) { return graphs.at(instance).walls.size(); };
-    CHECK(count(24) == 2 && count(5) == 2 && count(25) == 1 && count(31) == 1);
-    CHECK(count(6) == 0 && count(7) == 0 && count(22) == 0);
-    CHECK(coverings.size() == 2 && coverings.front().type == kHalfWall);
-    CHECK(walls.remove({6, 6, 6, 5, 0}) && walls.remove({1, 1, 2, 1, 0}));
-    walls.save();
-    CHECK(count(24) == 0 && count(5) == 0 && count(25) == 0 && count(31) == 0 && coverings.empty());
-}
-
-void wallsClosingALoopMakeARoom() {
-    using namespace ts2::content;
-    constexpr std::uint32_t kSide = 8;
-    std::map<std::uint32_t, ts2::wallgraph::WallGraph> graphs;
-    for (const std::uint32_t instance : {5u, 6u, 7u, 22u, 24u}) {
-        ts2::wallgraph::WallGraph g;
-        g.width = g.height = static_cast<std::int32_t>(kSide);
-        g.levels = 1;
-        g.rooms = {0};
-        graphs[instance] = g;
-    }
-    std::map<std::uint32_t, ts2::array3d::Array3D> grids;
-    for (const std::uint32_t instance : {9u, 10u, 11u}) {
-        ts2::array3d::Array3D grid;
-        grid.width = grid.height = kSide;
-        grid.levels = 1;
-        grid.elementSize = 8;
-        grid.elements.assign(kSide * kSide * 8, 0);
-        grids[instance] = grid;
-    }
-    std::vector<ts2::walllayer::Entry> coverings;
-    std::map<std::uint16_t, ts2::stringmap::Entry> patterns;
-    BuildScripts scripts;
-    scripts.addWallStyles("wall 1\ndefaultPattern \"blank\"\n");
-    WallManager walls(graphs, grids, coverings, patterns, {0, 0, 0, kSide - 1, kSide - 1, 0}, scripts);
-    const std::array<std::array<float, 2>, 9> loop{{{2, 2}, {3, 2}, {4, 2}, {4, 3}, {4, 4}, {3, 4}, {2, 4}, {2, 3}, {2, 2}}};
-    for (std::size_t i = 0; i + 1 < loop.size(); ++i) {
-        CHECK(walls.add(1, "blank", "blank", {loop[i][0], loop[i][1], loop[i + 1][0], loop[i + 1][1], 0}));
-    }
-    walls.save();
-    const auto roomAt = [&](std::int32_t x, std::int32_t y, std::uint8_t q) {
-        RoomGrid grid(grids.at(9), 0, {0, 0, 0, kSide - 1, kSide - 1, 0});
-        return grid.roomAt({x, y, 0, q});
-    };
-    for (const std::uint8_t q : std::array<std::uint8_t, 4>{1, 2, 4, 8}) {
-        CHECK(roomAt(2, 2, q) == 1 && roomAt(3, 3, q) == 1);
-        CHECK(roomAt(1, 1, q) == 0 && roomAt(5, 5, q) == 0 && roomAt(2, 4, q) == 0);
-    }
-    const auto& rooms = graphs.at(5);
-    CHECK(rooms.rooms == (std::vector<std::int32_t>{0, 1}) && rooms.walls.size() == 8 && rooms.points.size() == 8);
-    CHECK(std::ranges::all_of(rooms.walls, [](const auto& w) { return (w.leftRoom == 0) != (w.rightRoom == 0); }));
-    CHECK(coverings.size() == 8 && patterns.size() == 1 && patterns.begin()->second.uses == 16);
-    CHECK(walls.remove({4, 3, 4, 4, 0}));
-    walls.save();
-    for (const std::uint8_t q : std::array<std::uint8_t, 4>{1, 2, 4, 8}) {
-        CHECK(roomAt(2, 2, q) == 0 && roomAt(3, 3, q) == 0);
-    }
-    CHECK(graphs.at(5).rooms == (std::vector<std::int32_t>{0}) && graphs.at(5).walls.size() == 7 && coverings.size() == 7);
-}
-
-} // namespace
-
-void floorsTakeTheirPatterns() {
-    using namespace ts2::content;
-    Lot lot;
-    auto& floors = lot.grids[kFloorGridInstance];
-    floors.width = floors.height = 2;
-    floors.levels = 1;
-    floors.elementSize = 8;
-    floors.elements.assign(2 * 2 * 8, 0);
-    auto& turns = lot.grids[kFloorTurnGridInstance];
-    turns.width = turns.height = 2;
-    turns.levels = 1;
-    turns.elementSize = 2;
-    turns.elements.assign(2 * 2 * 2, 0x33);  // every quarter turned
-    lot.floorPatterns[1] = {"6cea13d8", 1};
-    floors.at(0, 1, 0)[2] = 1;  // quarter 1 of tile (1, 0) has the boards
-    // A new pattern over the boards and a bare quarter: the map gains it under the smallest free id, the
-    // old one, used no more, leaves it, and both quarters are laid unturned. What was there comes back for undo.
-    const auto was = setFloors(lot, {{0, 1, 0, 1, "136226EE", 1}, {0, 1, 0, 2, "136226ee", 1}, {0, 9, 9, 0, "136226ee", 1}});
-    CHECK(was.size() == 2);
-    CHECK(was.size() == 2 && was[0].pattern == "6cea13d8" && was[0].turn == 3 && was[1].pattern.empty());
-    CHECK(floorPatternAt(lot, 0, 1, 0, 1) == "136226EE" && floorPatternAt(lot, 0, 1, 0, 2) == "136226EE");
-    CHECK(lot.floorPatterns.size() == 1 && lot.floorPatterns.contains(2) && lot.floorPatterns.at(2).uses == 2);
-    CHECK(turns.at(0, 1, 0)[0] == 0x13 && turns.at(0, 1, 0)[1] == 0x31);
-    // Undo puts them back.
-    setFloors(lot, was);
-    CHECK(floorPatternAt(lot, 0, 1, 0, 1) == "6cea13d8" && floorPatternAt(lot, 0, 1, 0, 2).empty() && turns.at(0, 1, 0)[0] == 0x33);
-    CHECK(lot.floorPatterns.size() == 1 && lot.floorPatterns.at(1).name == "6cea13d8" && lot.floorPatterns.at(1).uses == 1);
-}
-
-// A floor laid on a storey above the ground levels the corners of the tiles round it to its own height,
-// and those on the storeys above move with them, as the game did beside a deck: tile (27, 18) on the
-// deck's storey took corner (29, 18) from 3 to 0.9375 and the storey above from 6 to 3.9375.
-void floorsLevelTheCornersRoundThem() {
-    using namespace ts2::content;
-    Lot lot;
-    auto& heights = lot.grids[kFloorHeightGridInstance];
-    heights.width = 31;
-    heights.height = 31;
-    heights.levels = 3;
-    heights.elementSize = 4;
-    heights.elements.assign(31 * 31 * 3 * 4, 0);
-    const auto put = [&](std::int32_t level, std::int32_t x, std::int32_t y, float z) { std::memcpy(heights.at(level, x, y).data(), &z, sizeof z); };
-    for (std::int32_t x = 0; x < 31; ++x) {
-        for (std::int32_t y = 0; y < 31; ++y) {
-            put(1, x, y, x <= 28 ? 0.9375f : 3.0f);
-            put(2, x, y, x <= 28 ? 3.9375f : 6.0f);
-        }
-    }
-    const std::vector<FloorQuarter> laid{{1, 27, 18, 0, "stone", 1}, {1, 27, 18, 1, "stone", 1}};
-    const auto was = levelAroundFloors(lot, laid, 0);
-    CHECK(heights.f32(1, 29, 18, 0) == 0.9375f && heights.f32(2, 29, 18, 0) == 3.9375f);
-    CHECK(heights.f32(1, 29, 17, 0) == 0.9375f && heights.f32(1, 29, 20, 0) == 0.9375f);
-    // Only the corners of the tiles round it: the next column and row stay.
-    CHECK(heights.f32(1, 30, 18, 0) == 3.0f && heights.f32(1, 29, 21, 0) == 3.0f && heights.f32(1, 29, 16, 0) == 3.0f);
-    CHECK(was.size() == 8);
-    // Floors on the ground storey and floors taken up change nothing.
-    CHECK(levelAroundFloors(lot, {{0, 27, 18, 0, "stone", 1}, {1, 29, 25, 0, "", 1}}, 0).empty());
-    setCornerHeights(lot, was);
-    CHECK(heights.f32(1, 29, 18, 0) == 3.0f && heights.f32(2, 29, 20, 0) == 6.0f);
-}
-
-// Walls closing a square make a room inside it, and taking one out joins it with the outdoors again.
+// A wall levels the ground and pond water under it, and undo puts them back.
 void wallsLevelTheGroundUnderThem() {
     using namespace ts2::content;
     constexpr std::uint32_t kSide = 8, kCorners = kSide + 1;
@@ -2448,52 +2280,233 @@ void wallChecksRefuseLikeTheGame() {
     CHECK(code({3, 4, 4, 4, 1}, wall) == 0 && code({2, 4, 3, 4, 1}, wall) == 0x48);
 }
 
-// A package being read can be moved aside, as a save moves a character file it replaces, and goes on
-// reading the file it opened.
-void buildDataIsPutBackIntoTheLotPackage() {
-    using namespace ts2;
-    const auto bodyOf = [](const dbpf::StoredResource& r) { return r.compressed ? qfs::decompress(r.bytes) : r.bytes; };
-    std::vector<walllayer::Entry> coverings{{7, 1, 0, 0xFFFF}};
-    std::map<std::uint16_t, stringmap::Entry> walls{{0, {"blank", 1}}}, floors{{0, {"0000abcd", 4}}};
-    lotgrid::Grid grid{true, 2, 2, 1, std::vector<std::uint8_t>(8, 0)};
-    dbpf::PackageImage image;
-    image.resources.push_back(dbpf::storeResource({types::kWallLayer, 0xFFFFFFFF, content::kWallCoveringLayerInstance, 0}, walllayer::write(coverings)));
-    image.resources.push_back(dbpf::storeResource({types::kPatternMap, 0xFFFFFFFF, content::kWallPatternMapInstance, 0}, stringmap::write(walls)));
-    image.resources.push_back(dbpf::storeResource({types::kPatternMap, 0xFFFFFFFF, content::kFloorPatternMapInstance, 0}, stringmap::write(floors)));
-    image.resources.push_back(dbpf::storeResource({types::kArray3D, 0xFFFFFFFF, content::kFloorGridInstance, 0}, lotgrid::writeGrid(grid)));
-    // A grid the lot holds at another size stays as it was.
-    image.resources.push_back(dbpf::storeResource({types::kArray3D, 0xFFFFFFFF, 9, 0}, lotgrid::writeGrid(grid)));
-    const auto keptGrid = image.resources.back().bytes;
+void halfWallRunsPutUpPosts() {
+    using namespace ts2::content;
+    constexpr std::uint32_t kSide = 8, kNoSpacing = 0xD5D75E5E, kEveryCorner = 0x0F911C64;
+    std::map<std::uint32_t, ts2::wallgraph::WallGraph> graphs;
+    for (const std::uint32_t instance : {5u, 24u, 25u}) {
+        ts2::wallgraph::WallGraph g;
+        g.width = g.height = static_cast<std::int32_t>(kSide);
+        g.levels = 1;
+        g.rooms = {0};
+        graphs[instance] = g;
+    }
+    std::map<std::uint32_t, ts2::array3d::Array3D> grids;
+    std::vector<ts2::walllayer::Entry> coverings;
+    std::map<std::uint16_t, ts2::stringmap::Entry> patterns;
+    BuildScripts scripts;
+    WallManager walls(graphs, grids, coverings, patterns, {0, 0, 0, kSide - 1, kSide - 1, 0}, scripts);
+    walls.setFences([](std::uint32_t style) -> std::optional<WallManager::Fence> {
+        if (style == kNoSpacing) {
+            return WallManager::Fence{true, 0};
+        }
+        if (style == kEveryCorner) {
+            return WallManager::Fence{true, 1, 1.0f};
+        }
+        return std::nullopt;
+    });
+    std::vector<ts2::fencepostlayer::Post> posts;
+    walls.setPosts(&posts);
+    const auto run = [&](std::uint32_t style, float ax, float ay, float bx, float by, int count) {
+        const float sx = (bx - ax) / static_cast<float>(count), sy = (by - ay) / static_cast<float>(count);
+        for (int i = 0; i < count; ++i) {
+            const float x = ax + sx * static_cast<float>(i), y = ay + sy * static_cast<float>(i);
+            CHECK(walls.add(style, "blank", "blank", {x, y, x + sx, y + sy, 0}));
+        }
+        return walls.addRunPosts(style, ax, ay, bx, by, 0, count, [](float, float) { return true; }).added;
+    };
+    // Three tiles of a half wall with no post spacing: posts at its two ends only.
+    CHECK(run(kNoSpacing, 1, 1, 4, 1, 3).size() == 2);
+    CHECK(posts.size() == 2 && posts[0].x == 1 && posts[1].x == 4);
+    // A second run turning at its end keeps the post there, and puts one at its own far end.
+    CHECK(run(kNoSpacing, 4, 1, 4, 3, 2).size() == 1);
+    // With a spacing of one, every corner gets a post.
+    CHECK(run(kEveryCorner, 1, 5, 4, 5, 3).size() == 4);
+    // Kept in order of level, then x, then y.
+    CHECK(std::is_sorted(posts.begin(), posts.end(), [](const auto& a, const auto& b) { return std::tuple{a.level, a.x, a.y} < std::tuple{b.level, b.x, b.y}; }));
+    // A straight corner between two runs needs no post, a corner where they turn does.
+    CHECK(!walls.needsPost(2, 1, 0) && walls.needsPost(4, 1, 0));
+    CHECK(walls.removePost(4, 3, 0) && !walls.removePost(4, 3, 0) && posts.size() == 6);
+    // A corner's post is that of the fence there, and a corner with none has no post style.
+    CHECK(walls.postStyleAt(4, 1, 0) == kNoSpacing && !walls.postStyleAt(7, 7, 0) && walls.postAt(1, 1, 0).has_value());
+    // A taller half wall reaching a corner's post makes it its own, and the post as it was comes back.
+    CHECK(walls.add(kEveryCorner, "blank", "blank", {4, 1, 5, 1, 0}) && walls.add(kEveryCorner, "blank", "blank", {5, 1, 6, 1, 0}));
+    const auto changes = walls.addRunPosts(kEveryCorner, 4, 1, 6, 1, 0, 2, [](float, float) { return true; });
+    CHECK(changes.replaced.size() == 1 && changes.replaced[0].fence == kNoSpacing && walls.postAt(4, 1, 0)->fence == kEveryCorner);
 
-    content::Lot lot;
-    lot.savedWallCoverings = {{7, 1, 1, 0}};
-    lot.wallPatterns = {{0, {"blank", 1}}, {1, {"00001234", 1}}};
-    lot.floorPatterns = floors;
-    array3d::Array3D floor;
-    floor.width = floor.height = floor.levels = 1;
-    floor.elementSize = 2;
-    floor.elements = {1, 0, 2, 0, 3, 0, 4, 0};
-    lot.grids.emplace(content::kFloorGridInstance, floor);
-    array3d::Array3D other = floor;
-    other.elements.resize(4);
-    lot.grids.emplace(9, other);
-
-    CHECK(content::putBuildRecords(image, lot) == 4);
-    const auto layer = walllayer::parse(bodyOf(image.resources[0]));
-    CHECK(layer.size() == 1 && layer[0].wall == 7 && layer[0].left == 1 && layer[0].right == 0);
-    const auto patterns = stringmap::parse(bodyOf(image.resources[1]));
-    CHECK(patterns.size() == 2 && patterns.at(1).name == "00001234");
-    const auto floorBack = lotgrid::readGrid(bodyOf(image.resources[3]));
-    CHECK(floorBack && floorBack->cells == floor.elements && floorBack->width == 2);
-    CHECK(image.resources[4].bytes == keptGrid);
 }
+
+void floorsTakeTheirPatterns() {
+    using namespace ts2::content;
+    Lot lot;
+    auto& floors = lot.grids[kFloorGridInstance];
+    floors.width = floors.height = 2;
+    floors.levels = 1;
+    floors.elementSize = 8;
+    floors.elements.assign(2 * 2 * 8, 0);
+    auto& turns = lot.grids[kFloorTurnGridInstance];
+    turns.width = turns.height = 2;
+    turns.levels = 1;
+    turns.elementSize = 2;
+    turns.elements.assign(2 * 2 * 2, 0x33);  // every quarter turned
+    lot.floorPatterns[1] = {"6cea13d8", 1};
+    floors.at(0, 1, 0)[2] = 1;  // quarter 1 of tile (1, 0) has the boards
+    // A new pattern over the boards and a bare quarter: the map gains it under the smallest free id, the
+    // old one, used no more, leaves it, and both quarters are laid unturned. What was there comes back for undo.
+    const auto was = setFloors(lot, {{0, 1, 0, 1, "136226EE", 1}, {0, 1, 0, 2, "136226ee", 1}, {0, 9, 9, 0, "136226ee", 1}});
+    CHECK(was.size() == 2);
+    CHECK(was.size() == 2 && was[0].pattern == "6cea13d8" && was[0].turn == 3 && was[1].pattern.empty());
+    CHECK(floorPatternAt(lot, 0, 1, 0, 1) == "136226EE" && floorPatternAt(lot, 0, 1, 0, 2) == "136226EE");
+    CHECK(lot.floorPatterns.size() == 1 && lot.floorPatterns.contains(2) && lot.floorPatterns.at(2).uses == 2);
+    CHECK(turns.at(0, 1, 0)[0] == 0x13 && turns.at(0, 1, 0)[1] == 0x31);
+    // Undo puts them back.
+    setFloors(lot, was);
+    CHECK(floorPatternAt(lot, 0, 1, 0, 1) == "6cea13d8" && floorPatternAt(lot, 0, 1, 0, 2).empty() && turns.at(0, 1, 0)[0] == 0x33);
+    CHECK(lot.floorPatterns.size() == 1 && lot.floorPatterns.at(1).name == "6cea13d8" && lot.floorPatterns.at(1).uses == 1);
+}
+
+// A floor laid on a storey above the ground levels the corners of the tiles round it to its own height,
+// and those on the storeys above move with them.
+void floorsLevelTheCornersRoundThem() {
+    using namespace ts2::content;
+    Lot lot;
+    auto& heights = lot.grids[kFloorHeightGridInstance];
+    heights.width = 31;
+    heights.height = 31;
+    heights.levels = 3;
+    heights.elementSize = 4;
+    heights.elements.assign(31 * 31 * 3 * 4, 0);
+    const auto put = [&](std::int32_t level, std::int32_t x, std::int32_t y, float z) { std::memcpy(heights.at(level, x, y).data(), &z, sizeof z); };
+    for (std::int32_t x = 0; x < 31; ++x) {
+        for (std::int32_t y = 0; y < 31; ++y) {
+            put(1, x, y, x <= 28 ? 0.9375f : 3.0f);
+            put(2, x, y, x <= 28 ? 3.9375f : 6.0f);
+        }
+    }
+    const std::vector<FloorQuarter> laid{{1, 27, 18, 0, "stone", 1}, {1, 27, 18, 1, "stone", 1}};
+    const auto was = levelAroundFloors(lot, laid, 0);
+    CHECK(heights.f32(1, 29, 18, 0) == 0.9375f && heights.f32(2, 29, 18, 0) == 3.9375f);
+    CHECK(heights.f32(1, 29, 17, 0) == 0.9375f && heights.f32(1, 29, 20, 0) == 0.9375f);
+    // Only the corners of the tiles round it: the next column and row stay.
+    CHECK(heights.f32(1, 30, 18, 0) == 3.0f && heights.f32(1, 29, 21, 0) == 3.0f && heights.f32(1, 29, 16, 0) == 3.0f);
+    CHECK(was.size() == 8);
+    // Floors on the ground storey and floors taken up change nothing.
+    CHECK(levelAroundFloors(lot, {{0, 27, 18, 0, "stone", 1}, {1, 29, 25, 0, "", 1}}, 0).empty());
+    setCornerHeights(lot, was);
+    CHECK(heights.f32(1, 29, 18, 0) == 3.0f && heights.f32(2, 29, 20, 0) == 6.0f);
+}
+
+void halfWallsGoInTheirLayers() {
+    using namespace ts2::content;
+    constexpr std::uint32_t kSide = 8, kHalfWall = 0xD5D75E5E;
+    std::map<std::uint32_t, ts2::wallgraph::WallGraph> graphs;
+    for (const std::uint32_t instance : {5u, 6u, 7u, 22u, 24u, 25u, 31u}) {
+        ts2::wallgraph::WallGraph g;
+        g.width = g.height = static_cast<std::int32_t>(kSide);
+        g.levels = 1;
+        g.rooms = {0};
+        graphs[instance] = g;
+    }
+    std::map<std::uint32_t, ts2::array3d::Array3D> grids;
+    // The stage's platform region (4) on the quarters of tile (5, 5) and (6, 5).
+    ts2::array3d::Array3D regions;
+    regions.width = regions.height = kSide;
+    regions.levels = 1;
+    regions.elementSize = 16;
+    regions.elements.assign(kSide * kSide * 16, 0xFF);
+    for (const std::uint32_t x : {5u, 6u}) {
+        const std::size_t at = (static_cast<std::size_t>(x) * kSide + 5) * 16;
+        for (std::size_t q = 0; q < 4; ++q) {
+            const std::int32_t stage = 4;
+            std::memcpy(regions.elements.data() + at + q * 4, &stage, sizeof stage);
+        }
+    }
+    grids[0x14] = regions;
+    std::vector<ts2::walllayer::Entry> coverings;
+    std::map<std::uint16_t, ts2::stringmap::Entry> patterns;
+    BuildScripts scripts;
+    scripts.addWallStyles("wall 1\ndefaultPattern \"blank\"\n");
+    WallManager walls(graphs, grids, coverings, patterns, {0, 0, 0, kSide - 1, kSide - 1, 0}, scripts);
+    // Unknown to the manager until it is told which styles are half walls.
+    CHECK(!walls.add(kHalfWall, "blank", "blank", {1, 1, 2, 1, 0}));
+    walls.setFences([](std::uint32_t style) { return style == kHalfWall ? std::optional<WallManager::Fence>({true, 0}) : std::nullopt; });
+    CHECK(walls.add(kHalfWall, "blank", "blank", {1, 1, 2, 1, 0}));
+    // Both ends beside the stage.
+    CHECK(walls.add(kHalfWall, "blank", "blank", {6, 5, 6, 6, 0}));
+    walls.save();
+    const auto count = [&](std::uint32_t instance) { return graphs.at(instance).walls.size(); };
+    CHECK(count(24) == 2 && count(5) == 2 && count(25) == 1 && count(31) == 1);
+    CHECK(count(6) == 0 && count(7) == 0 && count(22) == 0);
+    CHECK(coverings.size() == 2 && coverings.front().type == kHalfWall);
+    CHECK(walls.remove({6, 6, 6, 5, 0}) && walls.remove({1, 1, 2, 1, 0}));
+    walls.save();
+    CHECK(count(24) == 0 && count(5) == 0 && count(25) == 0 && count(31) == 0 && coverings.empty());
+}
+
+// Walls closing a square make a room inside it, and taking one out joins it with the outdoors again.
+void wallsClosingALoopMakeARoom() {
+    using namespace ts2::content;
+    constexpr std::uint32_t kSide = 8;
+    std::map<std::uint32_t, ts2::wallgraph::WallGraph> graphs;
+    for (const std::uint32_t instance : {5u, 6u, 7u, 22u, 24u}) {
+        ts2::wallgraph::WallGraph g;
+        g.width = g.height = static_cast<std::int32_t>(kSide);
+        g.levels = 1;
+        g.rooms = {0};
+        graphs[instance] = g;
+    }
+    std::map<std::uint32_t, ts2::array3d::Array3D> grids;
+    for (const std::uint32_t instance : {9u, 10u, 11u}) {
+        ts2::array3d::Array3D grid;
+        grid.width = grid.height = kSide;
+        grid.levels = 1;
+        grid.elementSize = 8;
+        grid.elements.assign(kSide * kSide * 8, 0);
+        grids[instance] = grid;
+    }
+    std::vector<ts2::walllayer::Entry> coverings;
+    std::map<std::uint16_t, ts2::stringmap::Entry> patterns;
+    BuildScripts scripts;
+    scripts.addWallStyles("wall 1\ndefaultPattern \"blank\"\n");
+    WallManager walls(graphs, grids, coverings, patterns, {0, 0, 0, kSide - 1, kSide - 1, 0}, scripts);
+    const std::array<std::array<float, 2>, 9> loop{{{2, 2}, {3, 2}, {4, 2}, {4, 3}, {4, 4}, {3, 4}, {2, 4}, {2, 3}, {2, 2}}};
+    for (std::size_t i = 0; i + 1 < loop.size(); ++i) {
+        CHECK(walls.add(1, "blank", "blank", {loop[i][0], loop[i][1], loop[i + 1][0], loop[i + 1][1], 0}));
+    }
+    walls.save();
+    const auto roomAt = [&](std::int32_t x, std::int32_t y, std::uint8_t q) {
+        RoomGrid grid(grids.at(9), 0, {0, 0, 0, kSide - 1, kSide - 1, 0});
+        return grid.roomAt({x, y, 0, q});
+    };
+    for (const std::uint8_t q : std::array<std::uint8_t, 4>{1, 2, 4, 8}) {
+        CHECK(roomAt(2, 2, q) == 1 && roomAt(3, 3, q) == 1);
+        CHECK(roomAt(1, 1, q) == 0 && roomAt(5, 5, q) == 0 && roomAt(2, 4, q) == 0);
+    }
+    const auto& rooms = graphs.at(5);
+    CHECK(rooms.rooms == (std::vector<std::int32_t>{0, 1}) && rooms.walls.size() == 8 && rooms.points.size() == 8);
+    CHECK(std::ranges::all_of(rooms.walls, [](const auto& w) { return (w.leftRoom == 0) != (w.rightRoom == 0); }));
+    CHECK(coverings.size() == 8 && patterns.size() == 1 && patterns.begin()->second.uses == 16);
+    CHECK(walls.remove({4, 3, 4, 4, 0}));
+    walls.save();
+    for (const std::uint8_t q : std::array<std::uint8_t, 4>{1, 2, 4, 8}) {
+        CHECK(roomAt(2, 2, q) == 0 && roomAt(3, 3, q) == 0);
+    }
+    CHECK(graphs.at(5).rooms == (std::vector<std::int32_t>{0}) && graphs.at(5).walls.size() == 7 && coverings.size() == 7);
+}
+
+} // namespace
 
 std::vector<Test> contentTests() {
     return {
+        {"a replaced package keeps the load order", aReplacedPackageKeepsTheLoadOrder},
         {"walls closing a loop make a room", wallsClosingALoopMakeARoom},
+        {"floors take their patterns", floorsTakeTheirPatterns},
+        {"floors level the corners round them", floorsLevelTheCornersRoundThem},
         {"half walls go in their layers", halfWallsGoInTheirLayers},
         {"half wall runs put up posts", halfWallRunsPutUpPosts},
-        {"a replaced package keeps the load order", aReplacedPackageKeepsTheLoadOrder},
+        {"walls level the ground under them", wallsLevelTheGroundUnderThem},
+        {"walls stay off pool water", wallsStayOffPoolWater},
+        {"wall checks refuse like the game", wallChecksRefuseLikeTheGame},
         {"save writer replaces its targets", saveWriterReplacesItsTargets},
         {"save writer refuses wrong targets", saveWriterRefusesWrongTargets},
         {"save writer says when another program holds a package", saveWriterSaysWhenAnotherProgramHoldsAPackage},
@@ -2548,13 +2561,8 @@ std::vector<Test> contentTests() {
         {"neighborhoods are added only when missing", neighborhoodsAreAddedOnlyWhenMissing},
         {"user options are read as the game saves them", userOptionsAreReadAsTheGameSavesThem},
         {"numbers are read whole or from the start", numbersAreReadWholeOrFromTheStart},
+        {"build data is put back into the lot package", buildDataIsPutBackIntoTheLotPackage},
         {"an open package can be moved aside", anOpenPackageCanBeMovedAside},
         {"a replaced package is read again", aReplacedPackageIsReadAgain},
-        {"floors take their patterns", floorsTakeTheirPatterns},
-        {"floors level the corners round them", floorsLevelTheCornersRoundThem},
-        {"walls level the ground under them", wallsLevelTheGroundUnderThem},
-        {"walls stay off pool water", wallsStayOffPoolWater},
-        {"wall checks refuse like the game", wallChecksRefuseLikeTheGame},
-        {"build data is put back into the lot package", buildDataIsPutBackIntoTheLotPackage},
     };
 }

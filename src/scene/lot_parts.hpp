@@ -185,7 +185,7 @@ struct ThickWall {
     // stage's sides and half walls show the foot of their paint, with its baseboard.
     bool coveringFromBottom = false;
     // A free end shows the paint of the side it is on the left of, as seen from that side, instead of
-    // the top's material (half walls).
+    // the top's material (walls and half walls, not stage sides).
     bool coveredEnds = false;
     // A side looking outdoors (as the lot's light counts it) takes the outdoor light for its facing,
     // flat and without shadows, instead of the lot's wall light (half walls, which it leaves out).
@@ -247,6 +247,16 @@ std::optional<float> savedHeight(const content::Lot& lot, const content::LotObje
 // Wall masks by lowercase model name, from material names "<model>_<east>_<south>_<level>_<face>_wallmask".
 std::map<std::string, std::vector<WallMask>> wallMasks(const std::vector<std::string>& materialNames);
 
+// A wall face a door or window cuts. `left` is the wall graph's left side, which faces (dy, -dx).
+struct WallCut {
+    std::size_t wall = 0;
+    bool left = false;
+    std::string material;
+};
+// The faces of `walls` a door or window's `masks` cut, placed at `place` on grid level `level`. A
+// straight face's wall runs along the tile edge behind the mask's tile, a diagonal one's through its middle.
+std::vector<WallCut> wallCuts(const std::vector<ThickWall>& walls, const std::vector<WallMask>& masks, const Transform& place, int level);
+
 // The walls an object hides with when a view cuts them down, as the game picks them: only an object
 // it treats as a window (object data 8 bit 0x400, wall lamps among them), and then the walls along
 // the tile edges its wall placement (object data 0x0D) names. Bits 0x1, 0x2, 0x4 and 0x8 name the
@@ -266,6 +276,37 @@ std::vector<std::array<float, 2>> doorwayEdges(int definitionType, std::int16_t 
 // Joins the walls meeting at each wall graph point: going around the point, each wall's side line
 // ends where it meets the facing side line of the next wall (mitred corners, T and cross joins).
 std::vector<WallHub> joinWalls(std::vector<ThickWall>& walls);
+
+// A lot's ground as drawn, kept to move its points (see moveLotGround). The terrain and ground grid
+// meshes share `columns` by `rows` points, `steps` to a tile, then the points cut cells add.
+struct LotGround {
+    struct Between {
+        std::uint32_t i = 0, j = 0;
+        float fx = 0, fy = 0;  // across the cell, 0 to 1
+    };
+    std::vector<int> meshes;  // the terrain mesh and the ground grid mesh
+    std::uint32_t steps = 0, columns = 0, rows = 0;
+    int level = 0;  // the grid level drawn
+    std::optional<float> sea;
+    std::vector<Between> between;
+};
+
+// A lot's walls as drawn, kept to draw them again after they change (see rebuildLotWalls).
+struct LotWalls {
+    std::vector<ThickWall> walls;        // in the lot's own space, with their door and window cuts
+    std::vector<std::size_t> instances;  // the scene's instances drawing them, their hubs and the fences' rails and posts
+    int firstWall = 0;                   // where walls[0] is in the scene's walls
+    Transform place;                     // from the lot's space to the scene's
+    // The roof shapes attic walls reach up to (WallCeiling::gables points into them).
+    std::vector<std::shared_ptr<const RoofShape>> gables;
+    // Walls taken out while doors or windows were tied to them, with those objects' instances, so a
+    // wall built there again gets its cuts back.
+    struct Gone {
+        ThickWall wall;
+        std::vector<std::size_t> tied;
+    };
+    std::vector<Gone> gone;
+};
 
 // A light-map rect a wall face reads, as texture coordinates: u0, v0 (its top) and u1, v1 (its bottom).
 using LightRect = std::array<float, 4>;

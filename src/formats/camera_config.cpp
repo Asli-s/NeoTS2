@@ -190,6 +190,10 @@ float nearClipAt(const Config& config, float distance) {
     return atDistance(config, distance, [](const ZoomLevel& l) { return l.nearClip; });
 }
 
+float fovAt(const Config& config, float distance) {
+    return atDistance(config, distance, [](const ZoomLevel& l) { return l.fov; });
+}
+
 int zoomLevelAt(const Config& config, float distance) {
     const auto& l = config.levels;
     for (std::size_t i = 0; i < l.size(); ++i) {

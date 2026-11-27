@@ -269,6 +269,18 @@ void Picker::update(const Scene& scene, std::size_t i) {
 
 std::optional<Picker::Hit> Picker::pick(const Scene& scene, std::span<const std::uint8_t> shown, const std::array<float, 3>& origin,
                                          const std::array<float, 3>& direction, const ScenePose* pose) const {
+    return pickInstances(scene, shown, origin, direction, pose, nullptr);
+}
+
+std::optional<Picker::Hit> Picker::pickAmong(const Scene& scene, std::span<const std::uint8_t> shown, const std::array<float, 3>& origin,
+                                             const std::array<float, 3>& direction,
+                                             const std::function<bool(const Instance&)>& accept) const {
+    return pickInstances(scene, shown, origin, direction, nullptr, &accept);
+}
+
+std::optional<Picker::Hit> Picker::pickInstances(const Scene& scene, std::span<const std::uint8_t> shown, const std::array<float, 3>& origin,
+                                                 const std::array<float, 3>& direction, const ScenePose* pose,
+                                                 const std::function<bool(const Instance&)>* accept) const {
     std::optional<Hit> best;
     float nearest = std::numeric_limits<float>::max();
     const std::size_t count = std::min(boxes_.size(), scene.instances.size());
@@ -278,7 +290,7 @@ std::optional<Picker::Hit> Picker::pick(const Scene& scene, std::span<const std:
             continue;
         }
         const Instance& instance = scene.instances[i];
-        if (instance.mesh < 0 || static_cast<std::size_t>(instance.mesh) >= scene.meshes.size()) {
+        if (instance.mesh < 0 || static_cast<std::size_t>(instance.mesh) >= scene.meshes.size() || (accept != nullptr && !(*accept)(instance))) {
             continue;
         }
         for (const auto& primitive : tested(scene.meshes[static_cast<std::size_t>(instance.mesh)])) {

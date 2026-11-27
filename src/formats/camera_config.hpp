@@ -50,6 +50,8 @@ float pitchAt(const Config& config, float distance, float blend = 0);
 float effectDetailAt(const Config& config, float distance);
 // The near clip distance at a distance, blended between zoom levels the same way.
 float nearClipAt(const Config& config, float distance);
+// The field of view, in degrees, at a distance, blended between zoom levels the same way.
+float fovAt(const Config& config, float distance);
 // The zoom level a distance is at: the first level, farthest first, at or nearer than it, else the
 // nearest level. -1 for a camera without levels.
 int zoomLevelAt(const Config& config, float distance);

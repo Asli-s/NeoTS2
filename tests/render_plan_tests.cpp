@@ -32,9 +32,11 @@ public:
     void benchmark(const Camera&, unsigned, unsigned, int) override {}
     void addMaterials(const scene::Scene&) override {}
     void addMeshes(const scene::Scene&) override {}
+    void replaceMeshes(const scene::Scene&, const std::vector<std::size_t>&) override {}
     void setImages(const scene::Scene&, const std::vector<int>&, bool) override {}
     void setImagePixels(int, const scene::Image&) override {}
     void setLightMapFade(float) override {}
+    void setLightMapFadeFrom(const std::map<int, scene::Image>&) override {}
     void setSkybox(const std::vector<scene::Image>&) override {}
     void setTerrainLightMap(const scene::Image&) override {}
     void setNeighborhoodSky(const std::vector<scene::Image>&) override {}

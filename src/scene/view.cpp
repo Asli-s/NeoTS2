@@ -96,6 +96,15 @@ std::vector<std::uint8_t> visibleInstances(const Scene& scene, const View& view)
             show = show && instance.cut == allCut;
             break;
         }
+        case Part::Grid:
+            show = show && view.buildGrid;
+            break;
+        case Part::UpperGrid:
+            show = view.buildGrid && instance.level < view.level;
+            break;
+        case Part::ActiveGrid:
+            show = view.buildGrid && instance.level == view.level;
+            break;
         case Part::Object:
             show = show && std::none_of(instance.walls.begin(), instance.walls.end(), isCut);
             break;

@@ -1,6 +1,8 @@
 // Building and viewing scenes: lots, Sims, rigs, roofs, walls and views.
 #include <cstring>
 #include "render/math.hpp"
+#include "content/covering_catalog.hpp"
+#include "formats/dbpf_writer.hpp"
 #include "test_support.hpp"
 
 #include "../app/object_materials.hpp"
@@ -23,8 +25,6 @@
 #include "scene/instance_merge.hpp"
 #include "scene/imposter_bake.hpp"
 #include "scene/imposter_cache.hpp"
-#include "content/covering_catalog.hpp"
-#include "formats/dbpf_writer.hpp"
 
 #include <cmath>
 #include <filesystem>
