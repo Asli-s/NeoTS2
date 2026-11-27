@@ -1,5 +1,7 @@
 #include "content/object_thumbnails.hpp"
 
+#include "diag/log.hpp"
+#include "formats/dbpf_append.hpp"
 #include "formats/hash.hpp"
 #include "formats/image.hpp"
 
@@ -17,7 +19,7 @@ char lowered(char c) {
 
 } // namespace
 
-ObjectThumbnails::ObjectThumbnails(const std::filesystem::path& file) {
+ObjectThumbnails::ObjectThumbnails(const std::filesystem::path& file) : file_(file) {
     std::error_code ec;
     if (file.empty() || !std::filesystem::is_regular_file(file, ec)) {
         return;
@@ -49,13 +51,36 @@ std::optional<std::uint32_t> ObjectThumbnails::key(std::uint32_t group, std::str
 
 std::optional<tga::Pixels> ObjectThumbnails::picture(std::uint32_t group, std::string_view modelName, std::uint32_t maxSide) {
     const auto low = key(group, modelName);
-    if (!low || !package_) {
+    return low ? pictureAt(group, *low, maxSide) : std::nullopt;
+}
+
+std::uint32_t ObjectThumbnails::colourKey(std::uint32_t group, std::string_view model, std::string_view subset, std::string_view material) {
+    std::string text = std::to_string(static_cast<std::int32_t>(group));
+    std::string m;
+    for (const char c : model) {
+        m += lowered(c);
+    }
+    constexpr std::string_view kCres = "_cres";
+    if (m.size() > kCres.size() && m.ends_with(kCres)) {
+        m.resize(m.size() - kCres.size());
+    }
+    text += m;
+    for (const std::string_view part : {subset, material}) {
+        for (const char c : part) {
+            text += lowered(c);
+        }
+    }
+    return hash::crc32(text);
+}
+
+std::optional<tga::Pixels> ObjectThumbnails::pictureAt(std::uint32_t group, std::uint32_t low, std::uint32_t maxSide) {
+    if (!package_) {
         return std::nullopt;
     }
     // Pictures the game cached earlier on were filed with high instance 0.
-    auto found = entries_.find({*low, group});
+    auto found = entries_.find({low, group});
     if (found == entries_.end()) {
-        found = entries_.find({*low, 0u});
+        found = entries_.find({low, 0u});
     }
     if (found == entries_.end()) {
         return std::nullopt;
@@ -65,6 +90,29 @@ std::optional<tga::Pixels> ObjectThumbnails::picture(std::uint32_t group, std::s
     } catch (const std::exception&) {
         return std::nullopt;
     }
+}
+
+bool ObjectThumbnails::store(std::uint32_t group, std::uint32_t low, const tga::Pixels& picture) {
+    std::error_code ec;
+    if (file_.empty() || !std::filesystem::is_regular_file(file_, ec)) {
+        return false;
+    }
+    const auto jpeg = image::encodeJpegWithAlpha(picture);
+    if (jpeg.empty()) {
+        return false;
+    }
+    const dbpf::StoredResource stored{{kObjectThumbnail, 0xFFFFFFFF, low, group}, jpeg, false, static_cast<std::uint32_t>(jpeg.size())};
+    if (package_) {
+        package_->close();
+    }
+    try {
+        dbpf::appendToPackage(file_, std::span(&stored, 1));
+    } catch (const std::exception& e) {
+        diag::warnOnce(std::string("thumbnails: a drawn picture can't be kept: ") + e.what());
+        return false;
+    }
+    *this = ObjectThumbnails(file_);
+    return true;
 }
 
 } // namespace ts2::content

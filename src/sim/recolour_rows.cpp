@@ -60,35 +60,42 @@ void applyChosenRecolours(const content::Lot& lot, CodeSource& code, World& worl
         if (object == nullptr) {
             continue;
         }
-        std::vector<std::string> rows;
-        for (std::size_t i = 0; i < kMaxRows; ++i) {
-            auto row = code.string(object->group, kMaterialNames, i);
-            if (!row) {
-                break;
-            }
-            rows.push_back(std::move(*row));
-        }
         for (const auto& chosen : tail->materials) {
-            const content::RecolourMaterial* picked = catalog.find(chosen.resource, chosen.subset, chosen.material);
-            if (picked == nullptr) {
-                continue;
-            }
-            for (const content::RecolourMaterial* m : catalog.family(picked->model, picked->family)) {
-                const auto row = recolourRow(rows, m->model, m->subset, m->name);
-                if (!row) {
-                    continue;
-                }
-                if (!object->savedMaterialNames) {
-                    object->savedMaterialNames = object->materialNames;
-                }
-                // Change Material reads row r of the names at r + 1.
-                if (object->materialNames.size() < *row + 2) {
-                    object->materialNames.resize(*row + 2);
-                }
-                object->materialNames[*row + 1] = m->name;
-            }
+            applyRecolour(code, *object, catalog, chosen.resource, chosen.subset, chosen.material);
+            object->recolours.push_back({chosen.resource, chosen.subset, chosen.material});
         }
     }
+}
+
+bool applyRecolour(CodeSource& code, SimObject& object, const content::RecolourCatalog& catalog, const std::string& model,
+                   const std::string& subset, const std::string& material) {
+    const content::RecolourMaterial* picked = catalog.find(model, subset, material);
+    if (picked == nullptr) {
+        return false;
+    }
+    std::vector<std::string> rows;
+    for (std::size_t i = 0; i < kMaxRows; ++i) {
+        auto row = code.string(object.group, kMaterialNames, i);
+        if (!row) {
+            break;
+        }
+        rows.push_back(std::move(*row));
+    }
+    for (const content::RecolourMaterial* m : catalog.family(picked->model, picked->family)) {
+        const auto row = recolourRow(rows, m->model, m->subset, m->name);
+        if (!row) {
+            continue;
+        }
+        if (!object.savedMaterialNames) {
+            object.savedMaterialNames = object.materialNames;
+        }
+        // Change Material reads row r of the names at r + 1.
+        if (object.materialNames.size() < *row + 2) {
+            object.materialNames.resize(*row + 2);
+        }
+        object.materialNames[*row + 1] = m->name;
+    }
+    return true;
 }
 
 } // namespace ts2::sim

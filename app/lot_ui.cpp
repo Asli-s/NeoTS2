@@ -1,5 +1,6 @@
 #include "lot_ui.hpp"
 
+#include "content/build_scripts.hpp"
 #include "content/ui_meters.hpp"
 #include "content/ui_queue.hpp"
 #include "content/ui_text.hpp"
@@ -12,6 +13,7 @@
 #include "sim/selection.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <climits>
 #include <cstdlib>
 #include <functional>
@@ -33,7 +35,8 @@ constexpr std::uint32_t kPuck = 0x4905F85B, kLivePanel = 0x49060005, kOptionsMen
 // The live panel for a selected pet.
 constexpr std::uint32_t kPetPanel = 0xFEED2000;
 // The puck's windows.
-constexpr std::uint32_t kLiveMode = 0x37D97B25, kOptions = 0x67D97B2F, kFunds = 0x00003000;
+constexpr std::uint32_t kLiveMode = 0x37D97B25, kBuyMode = 0x67D97B2A, kBuildMode = 0x77D97B28, kOptions = 0x67D97B2F, kFunds = 0x00003000;
+constexpr std::uint32_t kBuyPanel = 0x49060004, kBuildPanel = 0x49060003, kHeldPanel = 0x49060007;
 constexpr std::uint32_t kFloorUp = 0x00002001, kFloorDown = 0x00002000, kToggleCeiling = 0x00007000;
 // The camera buttons: rotate left and right, zoom in and out.
 constexpr std::uint32_t kCameraButtons[] = {0x00001001, 0x00001000, 0x00001002, 0x00001003};
@@ -139,6 +142,9 @@ int chemistryLevel(const LotLife::Relationship& r) {
     return r.familyTie && (r.flags & 0x08) == 0 ? 4 : 0;
 }
 
+// The covering catalog's buttons show pictures this many pixels on a side.
+constexpr std::uint32_t kCoveringPictureSide = 40;
+
 // A picture in a window as the thumbnail service puts it: at its own size centred when it fits,
 // else scaled to the window.
 ts2::tga::Pixels fitted(const ts2::tga::Pixels& image, std::uint32_t width, std::uint32_t height) {
@@ -208,6 +214,9 @@ void LotUi::load() {
         live_ = screen_.load(kScripts, kLivePanel, 0, 0);
         petLive_ = screen_.load(kScripts, kPetPanel, 0, 0);
         options_ = screen_.load(kScripts, kOptionsMenu, 0, 0);
+        buy_ = screen_.load(kScripts, kBuyPanel, 0, 0);
+        build_ = screen_.load(kScripts, kBuildPanel, 0, 0);
+        held_ = screen_.load(kScripts, kHeldPanel, 0, 0);
         hoodPanel_ = screen_.load(kScripts, kHoodOptions, 0, kHoodPanelY);
         hoodStrip_ = screen_.find(hoodPanel_, kHoodStrip);
         hoodButtonHolder_ = screen_.find(hoodPanel_, kHoodButtonHolder);
@@ -222,6 +231,11 @@ void LotUi::load() {
         anchor(live_);
         anchor(petLive_);
         anchor(options_);
+        anchor(buy_);
+        anchor(build_);
+        anchor(held_);
+        buyPanel_.attach(screen_, buy_);
+        buildPanel_.attach(screen_, build_);
         screen_.raise(puck_);
         // The clock and speed buttons, and the frame the live panel lays out. The rest (portrait,
         // influence and aspiration meters) isn't built yet.
@@ -277,7 +291,7 @@ void LotUi::setSize(int width, int height) {
     if (loaded_ < 2) {
         return;
     }
-    for (const int panel : {puck_, live_, petLive_, options_}) {
+    for (const int panel : {puck_, live_, petLive_, options_, buy_, build_, held_}) {
         if (panel >= 0) {
             screen_.move(panel, screen_.x(panel), screen_.y(panel) + down);
         }
@@ -331,7 +345,7 @@ void LotUi::close() {
     closeWallMenu();
     pauseFrame_.show(false);
     queue_.setVisible(false);
-    for (const int panel : {puck_, live_, petLive_, options_, version_}) {
+    for (const int panel : {puck_, live_, petLive_, options_, buy_, build_, held_, version_}) {
         if (panel >= 0) {
             screen_.setVisible(panel, false);
         }
@@ -397,10 +411,10 @@ void LotUi::hideForFreeCamera(bool hide) {
     hidden_ = hide;
     skewer_.setHidden(hide);
     if (hide) {
-        optionsWereShown_ = optionsShown();
+        modeBeforeHide_ = mode_;
         closeWallMenu();
         queue_.setVisible(false);
-        for (const int panel : {puck_, live_, petLive_, options_, version_}) {
+        for (const int panel : {puck_, live_, petLive_, options_, buy_, build_, held_, version_}) {
             if (panel >= 0) {
                 screen_.setVisible(panel, false);
             }
@@ -414,7 +428,7 @@ void LotUi::hideForFreeCamera(bool hide) {
         }
     }
     showLivePanel(true);
-    showOptions(optionsWereShown_);
+    setMode(modeBeforeHide_);
 }
 
 int LotUi::left(int window) const {
@@ -459,28 +473,53 @@ void LotUi::anchor(int panel) {
     screen_.move(panel, left(target) - (left(mark) - screen_.x(panel)), top(target) - (top(mark) - screen_.y(panel)));
 }
 
-void LotUi::showOptions(bool show) {
-    // The options menu is not live mode, so the queue goes with the live panel.
-    queue_.setVisible(!show);
+LotUi::Action LotUi::modeKey(Mode mode) {
+    // The Design dialog holds the mouse, and the mode keys with it.
+    if (designDialog_.isOpen()) {
+        return Action::None;
+    }
+    const std::uint32_t id = mode == Mode::Live ? kLiveMode : mode == Mode::Buy ? kBuyMode : mode == Mode::Build ? kBuildMode : 0;
+    const int button = id != 0 ? screen_.find(puck_, id) : -1;
+    return button >= 0 ? clicked(button) : Action::None;
+}
+
+void LotUi::setMode(Mode mode) {
+    const bool live = mode == Mode::Live;
+    mode_ = mode;
+    // The queue goes with the live panel.
+    queue_.setVisible(live);
     if (options_ < 0) {
         return;
     }
-    screen_.setVisible(options_, show);
-    if (!show) {
+    screen_.setVisible(options_, mode == Mode::Options);
+    if (mode != Mode::Options) {
         optionsMenu_.close();
     }
-    showHoodPanel(show && puck_ >= 0 && screen_.visible(puck_));
+    screen_.setVisible(buy_, mode == Mode::Buy);
+    if (mode != Mode::Buy) {
+        buyPanel_.grid().closeDescription();
+    }
+    if (mode != Mode::Build) {
+        buildPanel_.grid().closeDescription();
+    }
+    screen_.setVisible(build_, mode == Mode::Build);
+    if (mode == Mode::Buy) {
+        buyPanel_.open();
+    } else if (mode == Mode::Build) {
+        buildPanel_.open();
+    }
+    showHoodPanel(mode == Mode::Options && puck_ >= 0 && screen_.visible(puck_));
     // With nobody in the household, Live can't be used: its button is disabled and the live panel
     // stays hidden.
-    showLivePanel(!show && hasMembers_);
-    skewer_.setLiveMode(!show);
-    screen_.setChecked(screen_.find(puck_, kOptions), show);
-    const int live = screen_.find(puck_, kLiveMode);
-    screen_.setEnabled(live, hasMembers_);
-    screen_.setChecked(live, !show && hasMembers_);
+    showLivePanel(live && hasMembers_);
+    skewer_.setLiveMode(live);
+    screen_.setChecked(screen_.find(puck_, kOptions), mode == Mode::Options);
+    screen_.setChecked(child(screen_, puck_, kBuyMode), mode == Mode::Buy);
+    screen_.setChecked(child(screen_, puck_, kBuildMode), mode == Mode::Build);
+    const int liveButton = screen_.find(puck_, kLiveMode);
+    screen_.setEnabled(liveButton, hasMembers_);
+    screen_.setChecked(liveButton, live && hasMembers_);
 }
-
-bool LotUi::optionsShown() const { return options_ >= 0 && screen_.visible(options_); }
 
 // The Sims' live panel shows its background with the pets' branch while the skewer has one.
 void LotUi::showPetsBackground(bool pets) {
@@ -513,6 +552,8 @@ void LotUi::closeWallMenu() {
 
 void LotUi::mouseMoved(int x, int y) {
     panel_.mouseMoved(x, y);
+    buyPanel_.grid().mouseAt(x, y);
+    buildPanel_.grid().mouseAt(x, y);
     queue_.mouseAt(x, y);
     if (wallMenu_ < 0 || !screen_.visible(wallMenu_)) {
         return;
@@ -560,7 +601,12 @@ LotUi::CameraButton LotUi::heldCameraButton() const {
 }
 
 LotUi::Action LotUi::clicked(int window) {
+    constexpr std::uint32_t kSellButton = 2;
     const std::uint32_t id = screen_.id(window);
+    // The held object's panel is one button: a click sells the object, as Delete does.
+    if (id == kSellButton && held_ >= 0 && screen_.visible(held_) && screen_.parent(screen_.parent(window)) == held_) {
+        return Action::SellHeld;
+    }
     if (const auto click = notifications_.clicked(screen_, window)) {
         if (click->close) {
             closedNotification_ = click->close;
@@ -606,8 +652,40 @@ LotUi::Action LotUi::clicked(int window) {
         return id == kHoodReturn ? Action::Neighborhood : id == kHoodMainMenu ? Action::MainMenu : Action::None;
     }
     if (id == kOptions && screen_.parent(window) == puck_) {
+        const bool wasLive = liveMode();
         showOptions(!optionsShown());
-        return optionsShown() ? Action::OptionsOpened : Action::OptionsClosed;
+        return wasLive ? Action::LeftLiveMode : liveMode() ? Action::BackToLiveMode : Action::None;
+    }
+    // Buy and Build show their panels in the live panel's place.
+    if ((id == kBuyMode || id == kBuildMode) && screen_.parent(window) == puck_) {
+        const Mode mode = id == kBuyMode ? Mode::Buy : Mode::Build;
+        if (mode == mode_) {
+            return Action::None;
+        }
+        const bool wasLive = liveMode();
+        setMode(mode);
+        return wasLive ? Action::LeftLiveMode : Action::None;
+    }
+    // The hand button, while the hand holds a catalog item or another tool is in use, goes back to lifting.
+    if (const SharedButtons* b = sharedButtons(); b != nullptr && window == screen_.find(mode_ == Mode::Buy ? buy_ : build_, id)) {
+        if (id == b->hand && (buying_ || tool_ != Tool::Hand)) {
+            return Action::HandTool;
+        }
+        if (id == b->design || id == b->eyedropper || id == b->sledgehammer) {
+            return id == b->design ? Action::DesignTool : id == b->eyedropper ? Action::EyedropperTool : Action::SledgehammerTool;
+        }
+        if (id == b->dayNight) {
+            return Action::DayNight;
+        }
+        if (id == b->topDown || id == b->ceiling) {
+            return id == b->topDown ? Action::TopDownView : Action::CeilingView;
+        }
+        if (id == b->undo || id == b->redo) {
+            return id == b->undo ? Action::Undo : Action::Redo;
+        }
+    }
+    if (buyPanel_.clicked(window) || buildPanel_.clicked(window)) {
+        return Action::None;
     }
     if (graphicsOptions_.clicked(window)) {
         return graphicsOptions_.takeChanged() ? Action::GraphicsOptionChanged : Action::None;
@@ -618,9 +696,9 @@ LotUi::Action LotUi::clicked(int window) {
     if (gameOptions_.clicked(window)) {
         return gameOptions_.takeChanged() ? Action::GameOptionChanged : Action::None;
     }
-    if (id == kLiveMode && screen_.parent(window) == puck_ && optionsShown()) {
-        showOptions(false);
-        return Action::OptionsClosed;
+    if (id == kLiveMode && screen_.parent(window) == puck_ && !liveMode()) {
+        setMode(Mode::Live);
+        return Action::BackToLiveMode;
     }
     if (pauseFrame_.clicked(window)) {
         return Action::Resume;
@@ -670,7 +748,15 @@ void LotUi::showTracked(std::int16_t sim) {
     }
 }
 
-LotUi::Action LotUi::rightClicked(int window, LotLife& life) {
+LotUi::Action LotUi::rightClicked(int window, LotLife& life, bool ctrl) {
+    if (ctrl) {
+        for (const CatalogGrid* grid : {&buyPanel_.grid(), &buildPanel_.grid()}) {
+            if (const auto guid = grid->itemAt(window)) {
+                redrawPicture(*guid);
+                return Action::None;
+            }
+        }
+    }
     if (const auto want = panel_.wantAt(window)) {
         life.toggleHold(life.selected(), want->index, want->fear);
     }
@@ -703,9 +789,9 @@ void LotUi::show(const std::string& clock, ts2::sim::Speed speed, bool paused, s
         screen_.setChecked(buttons[3], speed == Speed::Ultra);
     }
     pauseFrame_.show(paused);
-    // The game enables the pause sign in live mode only: not in the options menu, nor while the
-    // inventory and rewards panel holds the game paused.
-    pauseFrame_.setEnabled(!optionsShown() && (petShown_ || panel_.sub() != LivePanel::Sub::Rewards));
+    // The game enables the pause sign in live mode only: not in the options menu, Buy or Build, nor
+    // while the inventory and rewards panel holds the game paused.
+    pauseFrame_.setEnabled(liveMode() && (petShown_ || panel_.sub() != LivePanel::Sub::Rewards));
     // Unpausing while the inventory and rewards panel has the game paused closes the panel.
     if (panel_.sub() == LivePanel::Sub::Rewards) {
         if (paused) {
@@ -909,9 +995,9 @@ void LotUi::wantPopupTexts(LotLife& life, const ts2::swaf::Want& w, const ts2::c
 
 std::optional<ts2::tga::Pixels> LotUi::objectImage(LotLife& life, std::uint32_t guid, std::uint32_t named) {
     // The game's thumbnail service: image (the one named, else OBJD field 0x32, else the model's
-    // index, else 1) of the object's group. Objects without that image are rendered in 3D. We only
-    // use the drawings the game cached, filed by the object's model name (list 0x85 entry at the
-    // named index, else at the model index, the 32-bit value in fields 0x48 and 0x49).
+    // index, else 1) of the object's group. Objects without that image are rendered in 3D and
+    // cached, filed by the object's model name (list 0x85 entry at the named index, else at the
+    // model index, the 32-bit value in fields 0x48 and 0x49). Those the cache lacks are drawn here.
     constexpr std::size_t kThumbnailField = 0x32, kModelIndexLow = 0x48, kModelIndexHigh = 0x49;
     constexpr std::uint16_t kModelNames = 0x85;
     constexpr std::uint32_t kMaxPictureSide = 512;
@@ -924,15 +1010,83 @@ std::optional<ts2::tga::Pixels> LotUi::objectImage(LotLife& life, std::uint32_t 
     const std::uint32_t model = d.field(kModelIndexLow) | static_cast<std::uint32_t>(d.field(kModelIndexHigh)) << 16;
     const std::uint32_t instance = named != 0 ? named : d.field(kThumbnailField) != 0 ? d.field(kThumbnailField) : model != 0 ? model : 1;
     auto image = code.image(type->group, instance, kMaxPictureSide);
+    if (image) {
+        return image;
+    }
+    if (!objectThumbnails_) {
+        objectThumbnails_.emplace(objectThumbnailsFile_);
+    }
+    if (named != 0) {
+        const auto name = code.string(type->group, kModelNames, named);
+        return name ? objectThumbnails_->picture(type->group, *name, kMaxPictureSide) : std::nullopt;
+    }
+    // A picture drawn this run is newer than the cache's, and one asked to be drawn again skips it.
+    if (const auto drawn = drawnPictures_.find(guid); drawn != drawnPictures_.end()) {
+        return drawn->second;
+    }
+    const auto name = code.string(type->group, kModelNames, model);
+    if (name && !redraw_.contains(guid)) {
+        image = objectThumbnails_->picture(type->group, *name, kMaxPictureSide);
+    }
+    // The game draws the picture of an object that has neither, and keeps it in the cache.
     if (!image) {
-        if (!objectThumbnails_) {
-            objectThumbnails_.emplace(objectThumbnailsFile_);
-        }
-        if (const auto name = code.string(type->group, kModelNames, named != 0 ? named : model)) {
-            image = objectThumbnails_->picture(type->group, *name, kMaxPictureSide);
-        }
+        const auto key = name ? ts2::content::ObjectThumbnails::key(type->group, *name) : std::nullopt;
+        picturesToDraw_.try_emplace(guid, PictureToDraw{guid, {}, {}, {}, type->group, key.value_or(0)});
     }
     return image;
+}
+
+void LotUi::redrawPicture(std::uint32_t guid) {
+    drawnPictures_.erase(guid);
+    std::erase_if(objectPictures_, [&](const auto& entry) { return std::get<0>(entry.first) == guid; });
+    redraw_.insert(guid);
+}
+
+std::optional<LotUi::PictureToDraw> LotUi::pictureToDraw() {
+    if (previewToDraw_) {
+        return std::exchange(previewToDraw_, std::nullopt);
+    }
+    if (!picturesToDraw_.empty()) {
+        auto asked = std::move(picturesToDraw_.begin()->second);
+        picturesToDraw_.erase(picturesToDraw_.begin());
+        return asked;
+    }
+    if (!coloursToDraw_.empty()) {
+        auto asked = std::move(coloursToDraw_.begin()->second);
+        coloursToDraw_.erase(coloursToDraw_.begin());
+        return asked;
+    }
+    return std::nullopt;
+}
+
+void LotUi::setDrawnPicture(const PictureToDraw& asked, std::optional<ts2::tga::Pixels> picture) {
+    constexpr std::uint32_t kDescriptionPictureSide = 117;
+    if (asked.preview) {
+        if (picture && previewGrid_ != nullptr) {
+            previewPicture_ = fitted(*picture, kDescriptionPictureSide, kDescriptionPictureSide);
+            previewGrid_->showDescriptionPicture(&*previewPicture_);
+        }
+        return;
+    }
+    // Its sizes made before it was drawn are made again.
+    if (asked.guid != 0) {
+        redraw_.erase(asked.guid);
+        if (picture && asked.key != 0 && objectThumbnails_) {
+            objectThumbnails_->store(asked.group, asked.key, *picture);
+        }
+        drawnPictures_[asked.guid] = std::move(picture);
+        std::erase_if(objectPictures_, [&](const auto& entry) { return std::get<0>(entry.first) == asked.guid; });
+        drawnNow_.insert(asked.guid);
+        return;
+    }
+    if (picture && colourThumbnails_) {
+        colourThumbnails_->store(asked.group, asked.key, *picture);
+    }
+    drawnColours_[{asked.group, asked.key}] = std::move(picture);
+    std::erase_if(colourPictures_, [&](const auto& entry) {
+        return std::get<0>(entry.first) == asked.group && std::get<1>(entry.first) == asked.key;
+    });
+    coloursDrawn_ = true;
 }
 
 const ts2::tga::Pixels* LotUi::objectPicture(LotLife& life, std::uint32_t guid, std::uint32_t width, std::uint32_t height,
@@ -1035,6 +1189,871 @@ const ts2::tga::Pixels* LotUi::careerIcon(LotLife& life, std::uint32_t guid) {
         it = careerIcons_.emplace(guid, std::move(picture)).first;
     }
     return it->second ? &*it->second : nullptr;
+}
+
+std::string LotUi::catalogRatings(const ts2::objd::ObjectDefinition& d) {
+    // A rating's text (UI text table 0xA0 or Live text table 0x82, by row) and where its value comes
+    // from: an object data field, or one bit of a field (the line shows when the bit is set).
+    struct Rating {
+        std::uint32_t text;
+        std::size_t field;
+        std::uint16_t bit;  // 0: the field's value itself
+    };
+    constexpr std::uint32_t kLiveText = 0x7F96C284;
+    constexpr std::uint32_t kRatings = 0xA0, kPets = 0x82, kPanelText = 0x91, kRewardNote = 0x23;
+    auto row = [](std::uint32_t table, std::uint32_t n) { return table << 16 | (n + 1); };
+    // In the game's order: the needs (hunger to fun, OBJD 0x52-0x57), the pets' scratch and chew
+    // (0x67, 0x68), environment (0x58), the skills and cleaning (OBJD 0x59 bits) and who can use it
+    // (OBJD 0x11 bits).
+    static constexpr Rating kList[] = {
+        {0, 0x52, 0},  {1, 0x53, 0},  {2, 0x54, 0},  {3, 0x55, 0},  {4, 0x56, 0},  {5, 0x57, 0},
+        {0x22, 0x67, 0}, {0x24, 0x68, 0}, {6, 0x58, 0},
+        {7, 0x59, 0x01},  {8, 0x59, 0x02},  {9, 0x59, 0x04},  {0xA, 0x59, 0x08}, {0xB, 0x59, 0x10}, {0xC, 0x59, 0x20}, {0xD, 0x59, 0x40},
+        {0x10, 0x11, 0x01}, {0xF, 0x11, 0x02}, {0xE, 0x11, 0x04}, {0x11, 0x11, 0x08}, {0x12, 0x11, 0x10}, {0x13, 0x11, 0x20},
+        {0x14, 0x59, 0x80},
+    };
+    std::string out;
+    for (const auto& r : kList) {
+        const auto raw = d.field(r.field);
+        const int value = r.bit != 0 ? ((raw & r.bit) != 0 ? 1 : 0) : static_cast<std::int16_t>(raw);
+        if (value == 0) {
+            continue;
+        }
+        // The pets' two lines are a label with the value after it. The others are a format with
+        // the value in place of %d, or none.
+        const bool pet = r.field == 0x67 || r.field == 0x68;
+        std::string line = screen_.data().text(pet ? kLiveText : kUiText, row(pet ? kPets : kRatings, r.text));
+        if (pet) {
+            line += ": " + std::to_string(value) + " ";
+        } else if (const auto at = line.find("%d"); at != std::string::npos) {
+            line.replace(at, 2, std::to_string(value));
+        }
+        out += line + "\n";
+    }
+    // Aspiration rewards (function sort 0x400) add a warning after a blank line.
+    if ((d.field(kRewardKind) & kAspirationReward) != 0) {
+        if (!out.empty()) {
+            out += "\n";
+        }
+        out += screen_.data().text(kLiveText, row(kPanelText, kRewardNote));
+    }
+    return out;
+}
+
+namespace {
+
+// A part of a multi-tile object, not its master.
+bool isPart(const ts2::sim::ObjectType& type) {
+    return type.definition.field(ts2::objd::field::kMultiTileMasterId) != 0 && type.definition.field(ts2::objd::field::kMultiTileSubIndex) != 0xFFFF;
+}
+
+} // namespace
+
+void LotUi::showCatalogs(LotLife& life) {
+    // Buy's sort fields: room sort flags (OBJD 0x27), function sort flags (0x28) and function subsort
+    // (0x5E). Build's: build type (0x45) and build subsort (0x4A). An item with field 0x10 set is
+    // listed only when its GUID is in a list not known yet.
+    constexpr std::size_t kRooms = 0x27, kFunctions = 0x28, kSubsort = 0x5E, kBuildType = 0x45, kBuildSubsort = 0x4A,
+                          kListedField = 0x10;
+    auto& code = life.simulation().code();
+    if (mode_ == Mode::Buy && !buyPanel_.hasCatalog()) {
+        // On a lived-in lot the function sort lists only items with a room sort. Parts of larger
+        // objects aren't listed, even those with sort fields of their own.
+        std::vector<BuyPanel::Entry> entries;
+        for (const std::uint32_t guid : code.objectTypeGuids()) {
+            const auto* type = code.objectType(guid);
+            if (type == nullptr || isPart(*type)) {
+                continue;
+            }
+            const auto& d = type->definition;
+            if (d.field(kRooms) != 0 && d.field(kFunctions) != 0 && d.field(kListedField) == 0) {
+                entries.push_back({guid, d.field(kFunctions), d.field(kSubsort), d.field(kRooms), d.field(ts2::objd::field::kPrice)});
+            }
+        }
+        // Cheapest first, as the game lists. Items of the same price may come in another order than the game's.
+        std::stable_sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) { return a.price < b.price; });
+        buyPanel_.setCatalog(std::move(entries));
+    }
+    if (mode_ == Mode::Build && !buildPanel_.hasCatalog()) {
+        std::vector<std::pair<int, BuildPanel::Entry>> priced;
+        for (const std::uint32_t guid : code.objectTypeGuids()) {
+            const auto* type = code.objectType(guid);
+            if (type == nullptr || isPart(*type)) {
+                continue;
+            }
+            const auto& d = type->definition;
+            if (d.field(kBuildType) != 0 && d.field(kListedField) == 0) {
+                priced.push_back({d.field(ts2::objd::field::kPrice), {guid, d.field(kBuildType), d.field(kBuildSubsort)}});
+            }
+        }
+        // Cheapest first, as the game lists.
+        std::stable_sort(priced.begin(), priced.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+        std::vector<BuildPanel::Entry> entries;
+        for (const auto& [price, entry] : priced) {
+            entries.push_back(entry);
+        }
+        buildPanel_.setCatalog(std::move(entries));
+    }
+    // Each is read once, so an install without them doesn't read every package again each frame.
+    // Fireplaces are read in either mode, as Buy mode's eyedropper opens Build mode on one.
+    if (!fireplacesLoaded_ && !products_.empty()) {
+        fireplacesLoaded_ = true;
+        loadFireplaces(code);
+    }
+    if (mode_ == Mode::Build && !wallToolsLoaded_ && !buildPanel_.hasTools() && !products_.empty()) {
+        wallToolsLoaded_ = true;
+        loadWallTools();
+    }
+    // Buy mode's eyedropper names floors and walls too.
+    const bool coveringsWanted = mode_ == Mode::Build || (mode_ == Mode::Buy && tool_ == Tool::Eyedropper);
+    if (coveringsWanted && !coveringsLoaded_ && !buildPanel_.hasCoverings() && !install_.empty()) {
+        coveringsLoaded_ = true;
+        if (coverings_.empty()) {
+            coverings_ = ts2::content::loadCoverings(products_);
+            for (std::size_t i = 0; i < coverings_.size(); ++i) {
+                const auto& c = coverings_[i];
+                const bool wall = c.kind == ts2::content::CoveringKind::Wall;
+                std::string file = c.filename;
+                std::transform(file.begin(), file.end(), file.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+                coveringByGuid_.try_emplace({wall, c.guid}, i);
+                coveringByFile_.try_emplace({wall, std::move(file)}, i);
+            }
+        }
+        if (!coveringsAhead_.valid()) {
+            std::vector<std::pair<std::uint32_t, ts2::content::CoveringKind>> wanted;
+            for (const auto& c : coverings_) {
+                wanted.emplace_back(c.guid, c.kind);
+            }
+            coveringsAhead_ = std::async(std::launch::async, [file = coveringThumbnailsFile_, wanted = std::move(wanted)] {
+                constexpr std::uint32_t kMaxPictureSide = 512;
+                std::map<std::uint32_t, ts2::tga::Pixels> out;
+                ts2::content::CoveringColors cache{file};
+                for (const auto& [guid, kind] : wanted) {
+                    if (const auto image = cache.picture(kind, ts2::content::coveringPictureName(guid), kMaxPictureSide)) {
+                        out.emplace(guid, fitted(*image, kCoveringPictureSide, kCoveringPictureSide));
+                    }
+                }
+                return out;
+            });
+        }
+        std::vector<BuildPanel::CoveringEntry> entries;
+        for (const auto& c : coverings_) {
+            entries.push_back({c.guid, c.kind == ts2::content::CoveringKind::Wall, c.subsort});
+        }
+        buildPanel_.setCoverings(std::move(entries));
+    }
+    if (mode_ == Mode::Build && !halfWallsLoaded_ && !install_.empty()) {
+        halfWallsLoaded_ = true;
+        halfWalls_ = ts2::content::loadHalfWalls(products_);
+        std::vector<std::uint32_t> guids;
+        for (const auto& h : halfWalls_) {
+            guids.push_back(h.guid);
+        }
+        buildPanel_.setHalfWalls(std::move(guids));
+    }
+    if (eyedropShown_ != 0 && !buyOrBuild()) {
+        eyedropShown_ = 0;
+    } else if (eyedropShown_ != 0 && (mode_ == Mode::Buy ? buyPanel_.hasCatalog() : buildPanel_.hasCatalog())) {
+        if (mode_ == Mode::Buy) {
+            buyPanel_.showItem(eyedropShown_);
+        } else {
+            buildPanel_.showItem(eyedropShown_);
+        }
+        eyedropShown_ = 0;
+    }
+    if (mode_ == Mode::Buy) {
+        showCatalog(life, buyPanel_.grid());
+    } else if (mode_ == Mode::Build && buildPanel_.listing() == BuildPanel::Listing::Tools) {
+        showWallToolCatalog(buildPanel_.grid());
+    } else if (mode_ == Mode::Build && buildPanel_.listing() == BuildPanel::Listing::HalfWalls) {
+        showHalfWallCatalog(buildPanel_.grid());
+    } else if (mode_ == Mode::Build && buildPanel_.listing() == BuildPanel::Listing::Objects) {
+        showCatalog(life, buildPanel_.grid());
+    } else if (mode_ == Mode::Build) {
+        showCoveringCatalog(buildPanel_.grid(), buildPanel_.listing() == BuildPanel::Listing::Walls);
+    }
+    // Colour pictures drawn since the Design dialog opened take the place of its empty swatches.
+    if (coloursDrawn_ && designDialog_.isOpen()) {
+        designDialog_.showPictures(designSwatches(life));
+    }
+    coloursDrawn_ = false;
+    drawnNow_.clear();
+}
+
+void LotUi::loadWallTools() {
+    // The game's building tips (Build text table 0x91): a clone's tip, counted from 1, ends its description.
+    constexpr std::uint32_t kBuildingTips = 0x91;
+    constexpr std::uint32_t kPictureSide = 40, kDescriptionPictureSide = 117;
+    const auto scripts = ts2::content::loadBuildScripts(products_);
+    auto& data = screen_.data();
+    if (!scripts.platformTextFile.empty()) {
+        const auto texts = data.texts(ts2::hash::groupId(scripts.platformTextFile), scripts.platformTextTable);
+        for (const auto& [product, platform] : scripts.platforms) {
+            const auto at = static_cast<std::size_t>(platform.textIndex) * 3;
+            if (platform.textIndex >= 0 && at < texts.size()) {
+                platformPrices_[product] = static_cast<std::int32_t>(std::strtol(texts[at].c_str(), nullptr, 10));
+            }
+        }
+    }
+    if (scripts.wallTextFile.empty()) {
+        return;
+    }
+    const std::uint32_t group = ts2::hash::groupId(scripts.wallTextFile);
+    const auto texts = data.texts(group, scripts.wallTextTable);
+    const auto tips = data.texts(group, kBuildingTips);
+    for (const auto& [id, style] : scripts.wallStyles) {
+        for (std::size_t c = 0; c < style.clones.size(); ++c) {
+            const auto& clone = style.clones[c];
+            const auto at = static_cast<std::size_t>(clone.textIndex) * 3;
+            if (clone.textIndex < 0 || at + 2 >= texts.size()) {
+                continue;
+            }
+            WallToolEntry entry;
+            entry.choice = {id, static_cast<int>(c), static_cast<std::int32_t>(std::strtol(texts[at].c_str(), nullptr, 10))};
+            entry.name = texts[at + 1];
+            entry.description = texts[at + 2];
+            if (clone.tip > 0 && static_cast<std::size_t>(clone.tip) <= tips.size()) {
+                entry.description += "\n\n" + tips[static_cast<std::size_t>(clone.tip) - 1];
+            }
+            if (const auto image = data.image(clone.thumbnailGroup, clone.thumbnailInstance)) {
+                entry.picture = fitted(*image, kPictureSide, kPictureSide);
+                entry.bigPicture = fitted(*image, kDescriptionPictureSide, kDescriptionPictureSide);
+            }
+            wallTools_.push_back(std::move(entry));
+        }
+    }
+    std::vector<std::uint32_t> ids;
+    for (std::size_t i = 0; i < wallTools_.size(); ++i) {
+        ids.push_back(static_cast<std::uint32_t>(i + 1));
+    }
+    buildPanel_.setTools(std::move(ids));
+}
+
+void LotUi::loadFireplaces(ts2::sim::CodeSource& code) {
+    // The game's building tips (Build text table 0x91), as loadWallTools.
+    constexpr std::uint32_t kBuildingTips = 0x91;
+    constexpr std::uint32_t kPictureSide = 40, kDescriptionPictureSide = 117, kMaxPictureSide = 512;
+    const auto scripts = ts2::content::loadBuildScripts(products_);
+    std::map<std::string, std::int32_t> wanted;  // lowercase mantle name: fireplace id
+    for (const auto& [id, fireplace] : scripts.fireplaces) {
+        if (!fireplace.mantle.empty()) {
+            wanted.emplace(ts2::scene::lower(fireplace.mantle), id);
+        }
+    }
+    std::map<std::int32_t, std::uint32_t> mantles;  // by fireplace id
+    for (const std::uint32_t guid : code.objectTypeGuids()) {
+        const auto* type = code.objectType(guid);
+        if (type == nullptr) {
+            continue;
+        }
+        if (const auto it = wanted.find(ts2::scene::lower(type->definition.name)); it != wanted.end()) {
+            mantles.try_emplace(it->second, guid);
+        }
+    }
+    auto& data = screen_.data();
+    ts2::content::CoveringColors pictures{coveringThumbnailsFile_};
+    std::vector<std::pair<std::int32_t, std::uint32_t>> priced;
+    for (const auto& [id, guid] : mantles) {
+        const auto& fireplace = scripts.fireplaces.at(id);
+        const std::uint32_t group = ts2::hash::groupId(fireplace.textFile);
+        const auto texts = data.texts(group, fireplace.textTable);
+        const auto at = static_cast<std::size_t>(fireplace.textIndex) * 3;
+        if (fireplace.textIndex < 0 || at + 2 >= texts.size()) {
+            continue;
+        }
+        // The catalog lists and charges the mantle's own price (OBJD 0x12). The text's price differs
+        // for some (the Shoddy Fireplace's text says 417, its mantle 100), and the game's red cells
+        // and order follow the mantle's.
+        FireplaceText text{texts[at + 1], texts[at + 2], code.objectType(guid)->definition.field(ts2::objd::field::kPrice)};
+        // The game's own picture of the whole fireplace, cached as it draws one. The mantle's
+        // picture stands in when none is cached, as drawing one isn't done yet.
+        if (const auto image = pictures.fireplacePicture(id, kMaxPictureSide)) {
+            text.picture = fitted(*image, kPictureSide, kPictureSide);
+            text.bigPicture = fitted(*image, kDescriptionPictureSide, kDescriptionPictureSide);
+        }
+        const auto tips = data.texts(group, kBuildingTips);
+        if (fireplace.tip > 0 && static_cast<std::size_t>(fireplace.tip) <= tips.size()) {
+            text.description += "\n\n" + tips[static_cast<std::size_t>(fireplace.tip) - 1];
+        }
+        priced.emplace_back(text.price, guid);
+        fireplaces_[guid] = std::move(text);
+    }
+    // Cheapest first, as the game lists. Fireplaces of the same price may come in another order than the game's.
+    std::stable_sort(priced.begin(), priced.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::vector<std::uint32_t> listed;
+    for (const auto& [price, guid] : priced) {
+        listed.push_back(guid);
+    }
+    buildPanel_.setFireplaces(std::move(listed));
+}
+
+std::optional<LotUi::WallToolChoice> LotUi::wallToolChoice() const {
+    if (mode_ == Mode::Build && buildPanel_.listing() == BuildPanel::Listing::HalfWalls) {
+        const auto it = std::find_if(halfWalls_.begin(), halfWalls_.end(), [&](const auto& h) { return h.guid == halfWallChosen_; });
+        if (it == halfWalls_.end()) {
+            return std::nullopt;
+        }
+        return WallToolChoice{it->guid, 0, it->price};
+    }
+    if (wallToolChosen_ >= wallTools_.size()) {
+        return std::nullopt;
+    }
+    return wallTools_[wallToolChosen_].choice;
+}
+
+std::int32_t LotUi::platformPrice(std::int32_t product) const {
+    const auto found = platformPrices_.find(product);
+    return found != platformPrices_.end() ? found->second : 0;
+}
+
+std::int32_t LotUi::wallStylePrice(std::uint32_t style) const {
+    for (const auto& h : halfWalls_) {
+        if (h.guid == style) {
+            return h.price;
+        }
+    }
+    for (const auto& e : wallTools_) {
+        if (e.choice.style == style) {
+            return e.choice.price;
+        }
+    }
+    return 0;
+}
+
+void LotUi::showWallToolCatalog(CatalogGrid& grid) {
+    if (const auto first = grid.takeFirstPicked(); first && *first >= 1 && *first <= wallTools_.size()) {
+        wallToolChosen_ = *first - 1;
+    }
+    if (const auto chosen = grid.takeChosen(); chosen && *chosen >= 1 && *chosen <= wallTools_.size()) {
+        wallToolChosen_ = *chosen - 1;
+        wallToolClicked_ = true;
+        const auto& e = wallTools_[wallToolChosen_];
+        grid.showDescription({e.name, fundsText(e.choice.price), e.description, "", e.bigPicture ? &*e.bigPicture : nullptr});
+    }
+    grid.choose(static_cast<std::uint32_t>(wallToolChosen_ + 1));
+    grid.showPictures([&](std::uint32_t id) -> const ts2::tga::Pixels* {
+        return id >= 1 && id <= wallTools_.size() && wallTools_[id - 1].picture ? &*wallTools_[id - 1].picture : nullptr;
+    });
+}
+
+void LotUi::showCoveringCatalog(CatalogGrid& grid, bool walls) {
+    constexpr std::uint32_t kPictureSide = kCoveringPictureSide, kDescriptionPictureSide = 117;
+    constexpr int kPicturesPerFrame = 4;
+    if (coveringsAhead_.valid() && coveringsAhead_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        for (auto& [guid, picture] : coveringsAhead_.get()) {
+            coveringImages_.try_emplace({guid, kPictureSide}, std::move(picture));
+        }
+    }
+    // A covering picked on opening the category starts the floor or wall paint tool with it.
+    if (const auto first = grid.takeFirstPicked()) {
+        (walls ? wallCoveringChosen_ : floorChosen_) = *first;
+        (walls ? wallCoveringPicked_ : floorPicked_) = true;
+    }
+    if (const auto chosen = grid.takeChosen()) {
+        const auto it = std::find_if(coverings_.begin(), coverings_.end(), [&](const auto& c) { return c.guid == *chosen; });
+        if (it != coverings_.end()) {
+            grid.showDescription({it->name, fundsText(it->cost), it->description, "", coveringPicture(it->guid, walls, kDescriptionPictureSide)});
+            (walls ? wallCoveringChosen_ : floorChosen_) = it->guid;
+            (walls ? wallCoveringPicked_ : floorPicked_) = true;
+        }
+    }
+    int budget = kPicturesPerFrame;
+    grid.showPictures([&](std::uint32_t guid) -> const ts2::tga::Pixels* {
+        if (!coveringImages_.contains({guid, kPictureSide}) && budget-- <= 0) {
+            return nullptr;
+        }
+        return coveringPicture(guid, walls, kPictureSide);
+    });
+}
+
+const ts2::tga::Pixels* LotUi::coveringPicture(std::uint32_t guid, bool wall, std::uint32_t side) {
+    constexpr std::uint32_t kMaxPictureSide = 512;
+    auto it = coveringImages_.find({guid, side});
+    if (it == coveringImages_.end()) {
+        if (!coveringPictures_) {
+            coveringPictures_.emplace(coveringThumbnailsFile_);
+        }
+        std::optional<ts2::tga::Pixels> picture;
+        const auto kind = wall ? ts2::content::CoveringKind::Wall : ts2::content::CoveringKind::Floor;
+        const std::string name = ts2::content::coveringPictureName(guid);
+        if (const auto image = coveringPictures_->picture(kind, name, kMaxPictureSide)) {
+            picture = fitted(*image, side, side);
+        } else if (const auto texture = coveringTextures_ ? coveringTextures_(guid, wall) : std::nullopt) {
+            // The game keeps a picture it draws in the cache, where the room light finds its colour.
+            const auto drawn = ts2::content::coveringThumbnail(*texture, kind);
+            coveringPictures_->store(kind, name, drawn);
+            picture = fitted(drawn, side, side);
+        }
+        it = coveringImages_.emplace(std::pair{guid, side}, std::move(picture)).first;
+    }
+    return it->second ? &*it->second : nullptr;
+}
+
+void LotUi::showHalfWallCatalog(CatalogGrid& grid) {
+    constexpr std::uint32_t kPictureSide = 40, kDescriptionPictureSide = 117;
+    constexpr int kPicturesPerFrame = 4;
+    if (const auto first = grid.takeFirstPicked()) {
+        halfWallChosen_ = *first;
+    }
+    if (const auto chosen = grid.takeChosen()) {
+        const auto it = std::find_if(halfWalls_.begin(), halfWalls_.end(), [&](const auto& h) { return h.guid == *chosen; });
+        if (it != halfWalls_.end()) {
+            halfWallChosen_ = it->guid;
+            wallToolClicked_ = true;
+            grid.showDescription({it->name, fundsText(it->price), it->description, "", halfWallPicture(it->guid, kDescriptionPictureSide)});
+        }
+    }
+    // Until one is picked the first is chosen.
+    if (halfWallChosen_ == 0 && !halfWalls_.empty()) {
+        halfWallChosen_ = halfWalls_.front().guid;
+    }
+    grid.choose(halfWallChosen_);
+    int budget = kPicturesPerFrame;
+    grid.showPictures([&](std::uint32_t guid) -> const ts2::tga::Pixels* {
+        if (!halfWallImages_.contains({guid, kPictureSide}) && budget-- <= 0) {
+            return nullptr;
+        }
+        return halfWallPicture(guid, kPictureSide);
+    });
+}
+
+const ts2::tga::Pixels* LotUi::halfWallPicture(std::uint32_t guid, std::uint32_t side) {
+    constexpr std::uint32_t kMaxPictureSide = 512;
+    auto it = halfWallImages_.find({guid, side});
+    if (it == halfWallImages_.end()) {
+        if (!coveringPictures_) {
+            coveringPictures_.emplace(coveringThumbnailsFile_);
+        }
+        std::optional<ts2::tga::Pixels> picture;
+        if (const auto image = coveringPictures_->fencePicture(guid, kMaxPictureSide)) {
+            picture = fitted(*image, side, side);
+        }
+        it = halfWallImages_.emplace(std::pair{guid, side}, std::move(picture)).first;
+    }
+    return it->second ? &*it->second : nullptr;
+}
+
+void LotUi::showCatalog(LotLife& life, CatalogGrid& grid) {
+    constexpr std::uint32_t kPictureSide = 40, kDescriptionPictureSide = 117;
+    // The shown cells' pictures are read within one frame where they can be, then time left reads ahead
+    // so other pages open ready.
+    constexpr auto kShownBudget = std::chrono::milliseconds(12), kAheadBudget = std::chrono::milliseconds(2);
+    auto& code = life.simulation().code();
+    // An item picked on opening a Build mode category goes into the hand without its description.
+    if (const auto first = grid.takeFirstPicked()) {
+        bought_ = *first;
+        boughtFrom_ = &grid;
+    }
+    // A clicked item's description: its catalog name and text (catalog strings 0 and 1) and price.
+    if (const auto chosen = grid.takeChosen()) {
+        // Build mode's catalog buys its doors, windows and other objects as Buy mode's does.
+        bought_ = *chosen;
+        boughtFrom_ = &grid;
+        if (const auto fireplace = fireplaces_.find(*chosen); fireplace != fireplaces_.end() && code.objectType(*chosen) != nullptr) {
+            // A fireplace shows the texts of its catalog script, not its mantle's own.
+            const auto& text = fireplace->second;
+            described_[&grid] = *chosen;
+            grid.showDescription({text.name, fundsText(text.price), text.description, catalogRatings(code.objectType(*chosen)->definition),
+                                  text.bigPicture ? &*text.bigPicture : objectPicture(life, *chosen, kDescriptionPictureSide),
+                                  colourStrips(life, *chosen, &grid == boughtFrom_)});
+        } else if (const auto* type = code.objectType(*chosen)) {
+            const auto set = static_cast<std::uint16_t>(type->definition.field(ts2::objd::field::kCatalogStringsId));
+            described_[&grid] = *chosen;
+            grid.showDescription({code.catalogString(type->group, set, 0).value_or(""), fundsText(type->definition.field(ts2::objd::field::kPrice)),
+                                  code.catalogString(type->group, set, 1).value_or(""), catalogRatings(type->definition),
+                                  objectPicture(life, *chosen, kDescriptionPictureSide), colourStrips(life, *chosen, &grid == boughtFrom_)});
+        }
+    }
+    // With two strips, the description picture shows the colours picked in both.
+    if (grid.takePreviewPicked()) {
+        const auto shown = described_.find(&grid);
+        const auto strips = shown != described_.end() ? shownStrips_.find(shown->second) : shownStrips_.end();
+        const auto chosen = grid.chosenColours();
+        if (strips != shownStrips_.end() && strips->second.strips.size() == 2 && chosen.size() == 2) {
+            PictureToDraw asked;
+            asked.preview = true;
+            for (std::size_t k = 0; k < 2; ++k) {
+                const auto& strip = strips->second.strips[k];
+                if (chosen[k] >= strip.choices.size()) {
+                    break;
+                }
+                const auto& choice = strip.choices[chosen[k]];
+                const auto own = strips->second.models.find(strip.subset);
+                const std::string model = own != strips->second.models.end() ? own->second : choice.model;
+                if (k == 0) {
+                    asked.model = model;
+                    asked.subset = choice.subset;
+                    asked.material = choice.material;
+                } else if (ts2::scene::lower(model) == ts2::scene::lower(asked.model)) {
+                    asked.also.emplace_back(choice.material, choice.subset);
+                }
+            }
+            if (!asked.model.empty()) {
+                previewToDraw_ = std::move(asked);
+                previewGrid_ = &grid;
+            }
+        }
+    }
+    // Colour pictures drawn since the description was shown take the place of the empty ones.
+    if (coloursDrawn_) {
+        if (const auto shown = described_.find(&grid); shown != described_.end()) {
+            grid.showStripPictures(colourStrips(life, shown->second, &grid == boughtFrom_));
+        }
+    }
+    // A drawn picture of the item described takes the place of the one it opened with.
+    if (const auto shown = described_.find(&grid); shown != described_.end() && drawnNow_.contains(shown->second) && !fireplaces_.contains(shown->second)) {
+        grid.showDescriptionPicture(objectPicture(life, shown->second, kDescriptionPictureSide));
+    }
+    for (const std::uint32_t guid : drawnNow_) {
+        grid.pictureChanged(guid);
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const auto read = [&](std::uint32_t guid) { return objectPictures_.contains({guid, kPictureSide << 16 | kPictureSide, 0}); };
+    grid.showPictures([&](std::uint32_t guid) -> const ts2::tga::Pixels* {
+        if (const auto fireplace = fireplaces_.find(guid); fireplace != fireplaces_.end() && fireplace->second.picture) {
+            return &*fireplace->second.picture;
+        }
+        if (!read(guid) && std::chrono::steady_clock::now() - start > kShownBudget) {
+            return nullptr;
+        }
+        return objectPicture(life, guid, kPictureSide);
+    });
+    const auto ahead = std::chrono::steady_clock::now();
+    for (const std::uint32_t guid : grid.items()) {
+        if (std::chrono::steady_clock::now() - ahead > kAheadBudget) {
+            break;
+        }
+        if (!read(guid)) {
+            objectPicture(life, guid, kPictureSide);
+        }
+    }
+    // An item is affordable when its price is nothing or within the household's funds, the test the
+    // hand makes as it puts a purchase down.
+    grid.showAffordable([&](std::uint32_t guid) { return life.handAffords(guid); });
+}
+
+const ts2::tga::Pixels* LotUi::colourPicture(std::uint32_t group, const std::string& model, const std::string& subset, const std::string& material,
+                                             std::uint32_t width, std::uint32_t height) {
+    constexpr std::uint32_t kMaxPictureSide = 128;
+    if (!colourThumbnails_) {
+        colourThumbnails_.emplace(objectThumbnailsFile_.empty() ? objectThumbnailsFile_ : objectThumbnailsFile_.parent_path() / "DesignModeThumbnails.package");
+    }
+    const std::uint32_t key = ts2::content::ObjectThumbnails::colourKey(group, model, subset, material);
+    auto it = colourPictures_.find({group, key, width << 16 | height});
+    if (it == colourPictures_.end()) {
+        std::optional<ts2::tga::Pixels> made;
+        if (const auto image = colourThumbnails_->pictureAt(group, key, kMaxPictureSide)) {
+            made = fitted(*image, width, height);
+        } else if (const auto drawn = drawnColours_.find({group, key}); drawn != drawnColours_.end()) {
+            // The game draws the picture of a colour it hasn't cached.
+            if (drawn->second) {
+                made = fitted(*drawn->second, width, height);
+            }
+        } else {
+            coloursToDraw_.try_emplace({group, key}, PictureToDraw{0, model, subset, material, group, key});
+        }
+        it = colourPictures_.emplace(std::tuple{group, key, width << 16 | height}, std::move(made)).first;
+    }
+    return it->second ? &*it->second : nullptr;
+}
+
+std::vector<SwatchStrip::Choices> LotUi::designSwatches(LotLife& life) {
+    constexpr std::uint32_t kSwatchSide = 44;
+    const auto lower = [](std::string m) {
+        std::transform(m.begin(), m.end(), m.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (m.ends_with("_cres")) {
+            m.resize(m.size() - 5);
+        }
+        return m;
+    };
+    // Each model's object group, which files its pictures. A choice filed under another model (a
+    // subset's materials mesh) takes the object's own.
+    std::map<std::string, std::uint32_t> groups;
+    std::uint32_t own = 0;
+    for (const auto& [model, group] : life.designModels(designObject_)) {
+        groups.emplace(lower(model), group);
+        own = own != 0 ? own : group;
+    }
+    // A swatch shows the object's own model in the colour, also when the colour is filed under another.
+    std::map<std::string, std::string> drawn;  // by lowercase subset
+    for (const auto& d : life.designSubsets(designObject_)) {
+        drawn.emplace(lower(d.subset), d.model);
+    }
+    std::vector<SwatchStrip::Choices> strips;
+    for (const auto& strip : designStrips_) {
+        SwatchStrip::Choices shown{{}, {}, strip.chosen};
+        for (const auto& choice : strip.choices) {
+            const auto mine = drawn.find(lower(choice.subset));
+            const std::string& model = mine != drawn.end() ? mine->second : choice.model;
+            const auto owner = groups.find(lower(model));
+            const std::uint32_t group = owner != groups.end() ? owner->second : own;
+            shown.pictures.push_back(colourPicture(group, model, choice.subset, choice.material, kSwatchSide, kSwatchSide));
+        }
+        strips.push_back(std::move(shown));
+    }
+    return strips;
+}
+
+bool LotUi::openDesign(LotLife& life, std::uint32_t object, int x, int y, std::int32_t cost) {
+    constexpr std::uint32_t kCostLine = 0x00930015;  // string id, leakcheck: ok
+    const auto sale = life.handSale(object);
+    designStrips_ = life.designStrips(object);
+    if (!sale || designStrips_.empty()) {
+        return false;
+    }
+    designObject_ = object;
+    const auto strips = designSwatches(life);
+    std::string line = screen_.data().text(kUiText, kCostLine);
+    if (const auto at = line.find("%s"); at != std::string::npos) {
+        line.replace(at, 2, fundsText(cost));
+    }
+    return designDialog_.open(screen_, x, y, life.objectName(sale->guid), line, strips);
+}
+
+std::vector<ts2::content::RecolourChoice> LotUi::designedColours(bool replaced) const {
+    std::vector<ts2::content::RecolourChoice> out;
+    const auto chosen = designDialog_.chosen();
+    for (std::size_t k = 0; k < designStrips_.size() && k < chosen.size(); ++k) {
+        const auto& strip = designStrips_[k];
+        if (chosen[k] != strip.chosen && chosen[k] < strip.choices.size() && strip.chosen < strip.choices.size()) {
+            out.push_back(strip.choices[replaced ? strip.chosen : chosen[k]]);
+        }
+    }
+    return out;
+}
+
+std::optional<LotUi::FloorChoice> LotUi::floorChoice() const {
+    const auto it = std::find_if(coverings_.begin(), coverings_.end(), [&](const auto& c) {
+        return c.guid == floorChosen_ && c.kind == ts2::content::CoveringKind::Floor;
+    });
+    if (floorChosen_ == 0 || it == coverings_.end()) {
+        return std::nullopt;
+    }
+    return FloorChoice{ts2::content::coveringPictureName(it->guid), it->cost};
+}
+
+std::optional<LotUi::FloorChoice> LotUi::wallCoveringChoice() const {
+    const auto it = std::find_if(coverings_.begin(), coverings_.end(), [&](const auto& c) {
+        return c.guid == wallCoveringChosen_ && c.kind == ts2::content::CoveringKind::Wall;
+    });
+    if (wallCoveringChosen_ == 0 || it == coverings_.end()) {
+        return std::nullopt;
+    }
+    return FloorChoice{ts2::content::coveringPictureName(it->guid), it->cost};
+}
+
+std::optional<int> LotUi::wallCoveringPrice(const std::string& pattern) const {
+    const auto* found = covering(pattern, ts2::content::CoveringKind::Wall);
+    return found != nullptr ? std::optional<int>(found->cost) : std::nullopt;
+}
+
+std::optional<int> LotUi::floorPrice(const std::string& pattern) const {
+    const auto* found = covering(pattern, ts2::content::CoveringKind::Floor);
+    return found != nullptr ? std::optional<int>(found->cost) : std::nullopt;
+}
+
+void LotUi::eyedropCovering(const ts2::content::Covering& covering) {
+    if (mode_ != Mode::Build) {
+        setMode(Mode::Build);
+    }
+    const bool wall = covering.kind == ts2::content::CoveringKind::Wall;
+    buildPanel_.showCovering(covering.guid, wall);
+    (wall ? wallCoveringChosen_ : floorChosen_) = covering.guid;
+    (wall ? wallCoveringPicked_ : floorPicked_) = true;
+}
+
+void LotUi::eyedropItem(std::uint32_t guid, bool build) {
+    // Fireplaces have no build type but are listed in Build mode.
+    const Mode mode = build || fireplaces_.contains(guid) ? Mode::Build : Mode::Buy;
+    if (mode_ != mode) {
+        setMode(mode);
+    }
+    eyedropShown_ = guid;
+}
+
+const ts2::content::Covering* LotUi::covering(const std::string& pattern, ts2::content::CoveringKind kind) const {
+    std::string name = pattern;
+    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const bool wall = kind == ts2::content::CoveringKind::Wall;
+    // A name of up to 8 hex digits is the covering's GUID, leading zeros or not.
+    if (!name.empty() && name.size() <= 8 && name.find_first_not_of("0123456789abcdef") == std::string::npos) {
+        if (const auto it = coveringByGuid_.find({wall, static_cast<std::uint32_t>(std::stoul(name, nullptr, 16))}); it != coveringByGuid_.end()) {
+            return &coverings_[it->second];
+        }
+    }
+    for (const std::string& file : {name, std::string(wall ? "wall_" : "floor_") + name}) {
+        if (const auto it = coveringByFile_.find({wall, file}); it != coveringByFile_.end()) {
+            return &coverings_[it->second];
+        }
+    }
+    return nullptr;
+}
+
+std::vector<ts2::content::RecolourChoice> LotUi::boughtColours() {
+    std::vector<ts2::content::RecolourChoice> out;
+    if (boughtFrom_ == nullptr) {
+        return out;
+    }
+    const auto chosen = boughtFrom_->chosenColours();
+    for (std::size_t k = 0; k < buyStrips_.size() && k < chosen.size(); ++k) {
+        if (chosen[k] != buyStrips_[k].chosen && chosen[k] < buyStrips_[k].choices.size()) {
+            out.push_back(buyStrips_[k].choices[chosen[k]]);
+        }
+    }
+    return out;
+}
+
+std::vector<CatalogGrid::Strip> LotUi::colourStrips(LotLife& life, std::uint32_t guid, bool forBuying) {
+    constexpr std::uint16_t kModelNames = 0x85;
+    constexpr std::size_t kModelIndexLow = 0x48, kModelIndexHigh = 0x49;
+    constexpr std::uint32_t kSwatchSide = 44, kDescriptionPictureSide = 117;
+    auto& code = life.simulation().code();
+    const auto* type = code.objectType(guid);
+    if (type == nullptr) {
+        return {};
+    }
+    // A multi-tile object's colours are its parts' models'.
+    std::vector<const ts2::sim::ObjectType*> types{type};
+    if (type->definition.isMultiTileMaster()) {
+        types = code.multiTileParts(*type);
+    }
+    // A model name as the recolours and the models' string tables may each write it.
+    const auto bare = [](std::string m) {
+        std::transform(m.begin(), m.end(), m.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (m.ends_with("_cres")) {
+            m.resize(m.size() - 5);
+        }
+        return m;
+    };
+    std::vector<std::string> models;
+    std::map<std::string, std::uint32_t> groups;  // each model's object group, which files its pictures
+    for (const auto* t : types) {
+        const auto& d = t->definition;
+        const std::uint32_t index = d.field(kModelIndexLow) | static_cast<std::uint32_t>(d.field(kModelIndexHigh)) << 16;
+        if (auto name = code.string(t->group, kModelNames, index); name && !name->empty()) {
+            groups.emplace(bare(*name), t->group);
+            models.push_back(std::move(*name));
+        }
+    }
+    std::vector<CatalogGrid::Strip> strips;
+    const auto subsets = life.designSubsetsOf(models, guid);
+    std::map<std::string, std::string> drawn;  // each subset's own model, which its swatches show
+    for (const auto& d : subsets) {
+        drawn.emplace(bare(d.subset), d.model);
+    }
+    auto found = ts2::content::recolourStrips(life.simulation().recolours(), subsets);
+    shownStrips_[guid] = {found, drawn};
+    if (forBuying) {
+        buyStrips_ = found;
+    }
+    for (const auto& strip : found) {
+        CatalogGrid::Strip shown{{}, {}, strip.chosen};
+        for (const auto& choice : strip.choices) {
+            const auto mine = drawn.find(bare(choice.subset));
+            const std::string& model = mine != drawn.end() ? mine->second : choice.model;
+            const auto owner = groups.find(bare(model));
+            const std::uint32_t group = owner != groups.end() ? owner->second : type->group;
+            shown.pictures.push_back(colourPicture(group, model, choice.subset, choice.material, kSwatchSide, kSwatchSide));
+            shown.large.push_back(colourPicture(group, model, choice.subset, choice.material, kDescriptionPictureSide, kDescriptionPictureSide));
+        }
+        strips.push_back(std::move(shown));
+    }
+    return strips;
+}
+
+// While the hand holds an object, the held object's panel takes the place of the Buy or Build
+// panel. Its Buy or Build half shows the object's picture, and its catalog name over the line telling
+// what it sells for (UI text 0x88 line 5). Not done yet: the names of objects with a name of their own.
+void LotUi::showHeld(LotLife& life) {
+    constexpr std::uint32_t kBuyHalf = 0xA, kBuildHalf = 0xB, kText = 1, kPicture = 3;
+    constexpr std::uint32_t kSellLine = 0x00880005;  // string id, leakcheck: ok
+    if (held_ < 0 || loaded_ < 2) {
+        return;
+    }
+    const bool shown = heldObject_ != 0 && (mode_ == Mode::Buy || mode_ == Mode::Build) && !hidden_;
+    const bool build = mode_ == Mode::Build;
+    const auto showPanel = [&](int panel, bool show) {
+        if (panel >= 0) {
+            screen_.setVisible(panel, show);
+        }
+    };
+    if (shown) {
+        showPanel(buy_, false);
+        showPanel(build_, false);
+    } else if (screen_.visible(held_)) {
+        showPanel(buy_, mode_ == Mode::Buy && !hidden_);
+        showPanel(build_, build && !hidden_);
+        heldFilled_ = 0;
+    }
+    screen_.setVisible(held_, shown);
+    if (!shown || (heldFilled_ == heldObject_ && heldInBuild_ == build)) {
+        return;
+    }
+    const auto sale = life.handSale(heldObject_);
+    if (!sale) {
+        return;
+    }
+    heldFilled_ = heldObject_;
+    heldInBuild_ = build;
+    const int buyHalf = child(screen_, held_, kBuyHalf), buildHalf = child(screen_, held_, kBuildHalf);
+    screen_.setVisible(buyHalf, !build);
+    screen_.setVisible(buildHalf, build);
+    const int half = build ? buildHalf : buyHalf;
+    std::string line = screen_.data().text(kUiText, kSellLine);
+    if (const auto at = line.find("%s"); at != std::string::npos) {
+        line.replace(at, 2, fundsText(sale->value));
+    }
+    // The line breaks before "(press ESC to cancel)" with a carriage return alone.
+    for (std::size_t at = line.find('\r'); at != std::string::npos; at = line.find('\r', at)) {
+        if (at + 1 < line.size() && line[at + 1] == '\n') {
+            line.erase(at, 1);
+        } else {
+            line[at] = '\n';
+        }
+    }
+    // A diagonal door or window isn't in the catalog and shows its straight version.
+    const std::uint32_t shownItem = life.eyedropGuid(heldObject_).value_or(sale->guid);
+    screen_.setText(child(screen_, half, kText), life.objectName(shownItem) +"\n\n" + line);
+    const int picture = child(screen_, half, kPicture);
+    if (picture >= 0) {
+        const auto w = static_cast<std::uint32_t>(screen_.width(picture)), h = static_cast<std::uint32_t>(screen_.height(picture));
+        // A recoloured object shows its colour's picture.
+        const ts2::tga::Pixels* pixels = nullptr;
+        if (const auto colour = shownItem == sale->guid ? life.handRecolourOf(heldObject_) : std::nullopt) {
+            pixels = colourPicture(colour->second, colour->first.model, colour->first.subset, colour->first.material, w, h);
+        }
+        if (pixels == nullptr) {
+            pixels = objectPicture(life, shownItem, w, h);
+        }
+        screen_.setImage(picture, pixels != nullptr ? *pixels : ts2::tga::Pixels{});
+    }
+}
+
+const LotUi::SharedButtons* LotUi::sharedButtons() const {
+    static constexpr SharedButtons kBuy{0xCC607031, 0xCC607030, 0xCC607032, 0xAE, 0xCC607035, 0xCC607036, 0xCC6070AF, 0xCC607033, 0xCC607034};
+    static constexpr SharedButtons kBuild{0xA5, 0xAB, 0xA4, 0xAE, 0xAA, 0xA3, 0xAF, 0xA1, 0xA2};
+    return mode_ == Mode::Buy ? &kBuy : mode_ == Mode::Build ? &kBuild : nullptr;
+}
+
+// The shown panel's tool buttons: the tool in use shows pressed (the hand only while it holds no
+// catalog item), and the undo and redo arrows can be pressed while the history has a change for them.
+void LotUi::showBuyTools() {
+    const SharedButtons* b = sharedButtons();
+    const int panel = mode_ == Mode::Buy ? buy_ : build_;
+    if (b == nullptr || panel < 0) {
+        return;
+    }
+    screen_.setChecked(screen_.find(panel, b->hand), !buying_ && tool_ == Tool::Hand);
+    screen_.setChecked(screen_.find(panel, b->design), tool_ == Tool::Design);
+    screen_.setChecked(screen_.find(panel, b->eyedropper), tool_ == Tool::Eyedropper);
+    screen_.setChecked(screen_.find(panel, b->sledgehammer), tool_ == Tool::Sledgehammer);
+    screen_.setChecked(screen_.find(panel, b->topDown), topDownView_);
+    screen_.setChecked(screen_.find(panel, b->ceiling), ceilingView_);
+    screen_.setEnabled(screen_.find(panel, b->undo), canUndo_);
+    screen_.setEnabled(screen_.find(panel, b->redo), canRedo_);
+    if (mode_ == Mode::Build) {
+        buildPanel_.setWallTool(tool_ == Tool::Wall);
+    }
 }
 
 RewardsPanel::Sim LotUi::rewardsOf(LotLife& life, std::int16_t sim) {
@@ -1276,7 +2295,7 @@ void LotUi::showHousehold(std::vector<Skewer::Member> members) {
     skewer_.setHousehold(std::move(members));
     showPetsBackground(skewer_.hasBranch());
     if (!hidden_) {
-        showOptions(optionsShown());
+        setMode(mode_);
     }
 }
 
@@ -1307,6 +2326,11 @@ void LotUi::showLife(LotLife& life) {
     show(life.clockText(), life.speed(), life.paused(), life.funds());
     const std::int16_t sim = life.selected();
     skewer_.select(sim);
+    buyPanel_.grid().tick();
+    buildPanel_.grid().tick();
+    showCatalogs(life);
+    showHeld(life);
+    showBuyTools();
     // A pet has its own live panel.
     constexpr std::size_t kSpecies = 0xBA;
     const auto selectedData = life.personData(sim);
@@ -1504,6 +2528,8 @@ void LotUi::showQueue(LotLife& life, std::int16_t sim) {
 }
 
 void LotUi::mouseButton(int x, int y, bool down, LotLife& life) {
+    buyPanel_.grid().mouseButton(x, y, down);
+    buildPanel_.grid().mouseButton(x, y, down);
     const auto at = queue_.itemAt(x, y);
     if (down) {
         queuePressed_ = at;

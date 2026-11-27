@@ -42,6 +42,16 @@ std::optional<PictureView> pictureView(const scenegraph::ResourceNode& cameraNod
 // The view a hair's picture is drawn with, from the game's files. Nullopt when they can't be read.
 std::optional<PictureView> hairPictureView(Assets& assets, PictureAge age);
 
+// The view for the catalog picture of an object with no picture of its own: lit by the "Thumbnails"
+// light rig's four brightest lights, from a camera turned 160 degrees about z and tilted 30 degrees
+// down that fits the model's box `low` to `high`. Nullopt when the rig can't be read or the box is empty.
+std::optional<PictureView> objectPictureView(Assets& assets, std::array<float, 3> low, std::array<float, 3> high);
+// The same for a model that names its own picture camera (its "thumbnailExtension" data list): the
+// camera model `camera` (a name ending "_cres"), which looks at the model as it stands at the origin.
+std::optional<PictureView> objectPictureView(Assets& assets, const std::string& camera);
+// The object picture is drawn this many pixels square.
+inline constexpr unsigned kObjectPictureSize = 128;
+
 // Where the household's family picture is taken (casNeighborhoodPose_cres): each slot's place by
 // its number (the simMark_<n> nodes), and the view from camera `camera` (a letter, see
 // sim::FamilyPicture) lit by the stage's lights. Nullopt when the game's files can't give them.

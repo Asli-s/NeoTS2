@@ -50,6 +50,27 @@ void pushThirds(std::vector<Quad>& out, int texture, float x0, float y0, float x
     }
 }
 
+// An iw x ih image repeated across a window from its top left, cut at the right and bottom edges.
+// A window holding more than kMaxTiles copies, as a tiny image would, gets the image stretched
+// instead so a broken script can't flood the quad list.
+void pushTiles(std::vector<Quad>& out, int texture, float x0, float y0, float x1, float y1, float iw, float ih) {
+    constexpr float kMaxTiles = 4096;
+    const float columns = std::ceil((x1 - x0) / iw), rows = std::ceil((y1 - y0) / ih);
+    if (columns * rows > kMaxTiles) {
+        out.push_back({x0, y0, x1, y1, 0, 0, 1, 1, texture});
+        return;
+    }
+    for (float y = y0; y < y1; y += ih) {
+        const float ty = std::min(y + ih, y1);
+        for (float x = x0; x < x1; x += iw) {
+            const float tx = std::min(x + iw, x1);
+            Quad q{x, y, tx, ty, 0, 0, (tx - x) / iw, (ty - y) / ih, texture};
+            q.joined = static_cast<std::uint8_t>((x > x0 ? 1 : 0) | (y > y0 ? 2 : 0) | (tx < x1 ? 4 : 0) | (ty < y1 ? 8 : 0));
+            out.push_back(q);
+        }
+    }
+}
+
 std::array<float, 4> color(const std::vector<std::int64_t>& rgb) {
     if (rgb.size() < 3) {
         return {1, 1, 1, 1};
@@ -414,6 +435,11 @@ std::vector<std::string> Screen::wrapAt(const std::string& text, const FontStyle
     while (std::getline(paragraphs, paragraph)) {
         std::istringstream words(paragraph);
         std::string line, word;
+        // Spaces that start a line stay, as the game's bulleted lists show.
+        const std::size_t lead = paragraph.find_first_not_of(' ');
+        if (lead != std::string::npos && lead > 0 && words >> word) {
+            line = paragraph.substr(0, lead) + word;
+        }
         while (words >> word) {
             std::string longer = line.empty() ? word : line + " " + word;
             if (!line.empty() && fonts_.width(style, longer) > room) {
@@ -504,6 +530,20 @@ void Screen::setChecked(int window, bool checked) {
 
 bool Screen::checked(int window) const {
     return window >= 0 && windows_[static_cast<std::size_t>(window)].checked;
+}
+
+void Screen::setButtonGroup(int window, int group) {
+    if (window >= 0 && static_cast<std::size_t>(window) < windows_.size()) {
+        windows_[static_cast<std::size_t>(window)].group = group;
+    }
+}
+
+bool Screen::sameButton(int window, int other) const {
+    if (window < 0 || other < 0 || static_cast<std::size_t>(window) >= windows_.size() || static_cast<std::size_t>(other) >= windows_.size()) {
+        return false;
+    }
+    const int group = windows_[static_cast<std::size_t>(window)].group;
+    return window == other || (group >= 0 && group == windows_[static_cast<std::size_t>(other)].group);
 }
 
 void Screen::remove(int window) {
@@ -710,6 +750,12 @@ void Screen::setImageMargin(int window, int margin) {
     Window& w = windows_[static_cast<std::size_t>(window)];
     w.edge = margin > 0;
     w.edgeMargin = std::max(0, margin);
+}
+
+void Screen::setTiled(int window, bool tiled) {
+    if (window >= 0 && static_cast<std::size_t>(window) < windows_.size()) {
+        windows_[static_cast<std::size_t>(window)].tiled = tiled;
+    }
 }
 
 void Screen::setImagePart(int window, const std::array<int, 4>& part) {
@@ -971,6 +1017,69 @@ void Screen::setSpotTip(const std::string& text) {
     spotTip_.image = texture(std::move(line.pixels));
 }
 
+void Screen::setWorldTip(const std::string& text) {
+    if (text == worldTip_.text) {
+        return;
+    }
+    release(worldTip_.textImage);
+    release(worldTip_.image);
+    worldTip_.textImage = worldTip_.image = -1;
+    worldTip_.text = text;
+    if (text.empty()) {
+        return;
+    }
+    if (!worldTipCells_) {
+        constexpr std::uint32_t kPictures = 0x499DB772, kCells = 0x14416191;
+        worldTipCells_ = data_.image(kPictures, kCells).value_or(tga::Pixels{});
+    }
+    // Each line's baseline is the font's ascent, as the game's font engine measures it, below the
+    // line's top, and the lines are a line height apart.
+    const FontStyle& style = fonts_.style("Default");
+    const std::vector<std::string> lines = tipLines(text, style, worldTip_.textWidth);
+    const auto game = fonts_.gameLine(style);
+    const int ascent = game ? game->ascent : fonts_.ascent(style), advance = fonts_.lineHeight(style);
+    std::vector<PlacedLine> placed;
+    for (std::size_t k = 0; k < lines.size(); ++k) {
+        placed.push_back({fonts_.draw(style, lines[k]), ascent + static_cast<int>(k) * advance});
+    }
+    worldTip_.textHeight = static_cast<int>(lines.size()) * advance;
+    worldTip_.textImage = texture(stackLines(placed, worldTip_.above));
+    worldTip_.layout = {};
+    layWorldTip();
+}
+
+void Screen::moveWorldTip(int x, int y) {
+    worldTip_.at = {x, y};
+    layWorldTip();
+}
+
+void Screen::layWorldTip() {
+    if (worldTip_.textImage < 0 || !worldTipCells_ || worldTipCells_->width < 5 || size_[0] <= 0 || size_[1] <= 0) {
+        return;
+    }
+    // The box stays 8 pixels inside the screen's top and left edges and 16 inside the others.
+    const std::array<int, 4> bounds{8, 8, size_[0] - 16, size_[1] - 16};
+    const WorldTipLayout next = layoutWorldTip(worldTip_.at[0], worldTip_.at[1], worldTip_.textWidth, worldTip_.textHeight, bounds,
+                                               static_cast<int>(worldTipCells_->width) / 5);
+    // The picture is drawn again only when the window's shape changes, not as it moves.
+    auto shape = [](const WorldTipLayout& l) {
+        const int x = l.window[0], y = l.window[1];
+        return std::array<int, 11>{l.side,         l.window[2] - x, l.window[3] - y, l.box[0] - x, l.box[1] - y, l.box[2] - x,
+                                   l.box[3] - y,   l.arrow[0] - x,  l.arrow[1] - y,  l.arrow[2] - x, l.arrow[3] - y};
+    };
+    const bool redraw = worldTip_.image < 0 || shape(next) != shape(worldTip_.layout);
+    worldTip_.layout = next;
+    if (!redraw) {
+        return;
+    }
+    tga::Pixels drawn = drawWorldTip(*worldTipCells_, next);
+    if (worldTip_.image >= 0) {
+        replaceTexture(worldTip_.image, std::move(drawn));
+    } else {
+        worldTip_.image = texture(std::move(drawn));
+    }
+}
+
 void Screen::emitTip(int x, int y, int w, int h, int image, int baseline, int baselineY, std::vector<Quad>& out) const {
     const auto& text = textures_[static_cast<std::size_t>(image)];
     const float l = static_cast<float>(x), t = static_cast<float>(y);
@@ -1051,22 +1160,28 @@ void Screen::drawTip(Window& b) {
     // its font's ascent is larger.
     constexpr int kTitleBaseline = 9;
     const int bodyBaseline = kTitleBaseline + fonts_.ascent(bodyStyle) - fonts_.ascent(titleStyle);
-    struct Placed {
-        TextImage text;
-        int baseline;  // below the text area's top
-    };
-    std::vector<Placed> placed;
+    std::vector<PlacedLine> placed;
     for (std::size_t k = 0; k < titleLines.size(); ++k) {
         placed.push_back({fonts_.draw(titleStyle, titleLines[k]), kTitleBaseline + static_cast<int>(k) * titleAdvance});
     }
     for (std::size_t k = 0; k < bodyLines.size(); ++k) {
         placed.push_back({fonts_.draw(bodyStyle, bodyLines[k]), bodyTop + bodyBaseline + static_cast<int>(k) * bodyAdvance});
     }
+    int above = 0;
+    tga::Pixels image = stackLines(placed, above);
+    b.tipTop = above;
+    b.tipWidth = std::max(titleLines.empty() ? 0 : titleWidth + 4, bodyWidth);
+    b.tipHeight = bodyTop + static_cast<int>(bodyLines.size()) * bodyAdvance;
+    b.tipImage = texture(std::move(image));
+}
+
+tga::Pixels Screen::stackLines(const std::vector<PlacedLine>& placed, int& above) {
     // One image holding every line. A glyph may reach above the text area, so the image starts
     // that much higher.
-    int above = 0, bottom = 0;
+    above = 0;
+    int bottom = 0;
     std::uint32_t width = 0;
-    for (const Placed& l : placed) {
+    for (const PlacedLine& l : placed) {
         above = std::max(above, l.text.baseline - l.baseline);
         bottom = std::max(bottom, l.baseline - l.text.baseline + static_cast<int>(l.text.pixels.height));
         width = std::max(width, l.text.pixels.width);
@@ -1076,7 +1191,7 @@ void Screen::drawTip(Window& b) {
     // A broken tip of thousands of lines is cut at the largest text image, so it can't take all memory.
     image.height = static_cast<std::uint32_t>(std::clamp(above + bottom, 0, kMaxTextImage));
     image.rgba.assign(static_cast<std::size_t>(image.width) * image.height * 4, 0);
-    for (const Placed& l : placed) {
+    for (const PlacedLine& l : placed) {
         const tga::Pixels& p = l.text.pixels;
         const int top = above + l.baseline - l.text.baseline;
         for (std::uint32_t y = 0; y < p.height; ++y) {
@@ -1094,10 +1209,7 @@ void Screen::drawTip(Window& b) {
             }
         }
     }
-    b.tipTop = above;
-    b.tipWidth = std::max(titleLines.empty() ? 0 : titleWidth + 4, bodyWidth);
-    b.tipHeight = bodyTop + static_cast<int>(bodyLines.size()) * bodyAdvance;
-    b.tipImage = texture(std::move(image));
+    return image;
 }
 
 int Screen::loadTipPopup(const TipText& tip) {
@@ -1318,7 +1430,7 @@ std::optional<int> Screen::mouse(int x, int y, bool down, double seconds) {
         showTip(hovered);
     }
     std::optional<int> clicked;
-    if (!down && pressed_ >= 0 && pressed_ == over) {
+    if (!down && pressed_ >= 0 && sameButton(pressed_, over)) {
         clicked = over;
     }
     if (down && pressed_ < 0) {
@@ -1332,7 +1444,8 @@ std::optional<int> Screen::mouse(int x, int y, bool down, double seconds) {
     for (int i = 0; i < static_cast<int>(windows_.size()); ++i) {
         Window& w = windows_[static_cast<std::size_t>(i)];
         if (w.kind == Kind::Button && w.state != ButtonState::Disabled) {
-            w.state = i == pressed_ && i == over ? ButtonState::Pressed : i == over && pressed_ < 0 ? ButtonState::Hover : ButtonState::Normal;
+            const bool isOver = sameButton(i, over);
+            w.state = sameButton(i, pressed_) && isOver ? ButtonState::Pressed : isOver && pressed_ < 0 ? ButtonState::Hover : ButtonState::Normal;
         }
     }
     return clicked;
@@ -1360,8 +1473,9 @@ void Screen::emit(int index, std::vector<Quad>& out) const {
             out.push_back({x0, y0, x0 + fw, y0 + ih, static_cast<float>(frame) / kRadioFrames, 0,
                            static_cast<float>(frame + 1) / kRadioFrames, 1, w.image});
         } else if (w.kind == Kind::Button) {
-            // Holding a toggle button down shows it hovered. It looks pressed only while checked.
-            ButtonState look = w.toggle && w.state == ButtonState::Pressed ? ButtonState::Hover : w.state;
+            // Holding a toggle button down shows it hovered. It looks pressed only while checked, or
+            // while held when it acts as one with other buttons, which then all look pressed.
+            ButtonState look = w.toggle && w.group < 0 && w.state == ButtonState::Pressed ? ButtonState::Hover : w.state;
             if (w.checked && look != ButtonState::Disabled) {
                 look = ButtonState::Pressed;
             }
@@ -1379,6 +1493,8 @@ void Screen::emit(int index, std::vector<Quad>& out) const {
                 const float dw = std::min(static_cast<float>(w.w), fw), dh = std::min(static_cast<float>(w.h), ih);
                 out.push_back({x0, y0, x0 + dw, y0 + dh, u0, 0, u0 + dw / iw, dh / ih, w.image});
             }
+        } else if (w.tiled && img.width != 0 && img.height != 0) {
+            pushTiles(out, w.image, x0, y0, x1, y1, iw, ih);
         } else if (w.edge) {
             pushThirds(out, w.image, x0, y0, x1, y1, 0, 1, iw, ih, w.edgeMargin);
         } else if (w.part[2] > w.part[0] && w.part[3] > w.part[1]) {
@@ -1615,6 +1731,19 @@ void Screen::quads(double seconds, std::vector<Quad>& out) const {
         const auto line = fonts_.gameLine(style);
         const int ascent = line ? line->ascent : fonts_.ascent(style);
         emitTip(box.x, box.y, box.w, box.h, spotTip_.image, spotTip_.baseline, box.y + 6 + ascent, out);
+    }
+    // The balloon over a spot of the lot: its picture, then its text in black with the first line's
+    // top at the layout's text spot.
+    if (worldTip_.image >= 0 && worldTip_.textImage >= 0) {
+        const WorldTipLayout& l = worldTip_.layout;
+        const auto& picture = textures_[static_cast<std::size_t>(worldTip_.image)];
+        if (picture.width > 0) {
+            out.push_back({static_cast<float>(l.window[0]), static_cast<float>(l.window[1]), static_cast<float>(l.window[2]),
+                           static_cast<float>(l.window[3]), 0, 0, 1, 1, worldTip_.image, {1, 1, 1, 1}});
+        }
+        const auto& text = textures_[static_cast<std::size_t>(worldTip_.textImage)];
+        const float px = static_cast<float>(l.window[0] + l.textX), py = static_cast<float>(l.window[1] + l.textY - worldTip_.above);
+        out.push_back({px, py, px + static_cast<float>(text.width), py + static_cast<float>(text.height), 0, 0, 1, 1, worldTip_.textImage, {0, 0, 0, 1}});
     }
     // The tooltip of the button the mouse rests on, as the game draws it: it shows 0.4 s after the
     // mouse came to the button and, unless the button keeps it (tipstimeout=no), hides 3 s after

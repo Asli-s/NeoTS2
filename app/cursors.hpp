@@ -28,6 +28,16 @@ public:
     static constexpr std::uint32_t kLiveNothing = 0x2B, kLivePerson = 0x2C, kLiveObjectAvailable = 0x2D, kLiveObjectUnavailable = 0x2E;
     // Over a view that turns the Sim in it when dragged (the appearance editor's).
     static constexpr std::uint32_t kSimsRotate = 0x1B;
+    // Buy mode's hand: open over an object it can lift, closed while it holds one.
+    static constexpr std::uint32_t kHandOpen = 0x19, kHandHolding = 0x1A;
+    // Buy mode's Design tool.
+    static constexpr std::uint32_t kDesignTool = 0x39;
+    // Buy mode's eyedropper and sledgehammer, the same over anything.
+    static constexpr std::uint32_t kEyedropper = 0x38, kSledgehammer = 0x3C;
+    // Over a door or window Ctrl would delete while the hand holds one from the catalog.
+    static constexpr std::uint32_t kDelete = 0x15;
+    // The drag turn's cursors, by the quarter dragged toward (BuyHand::DragTurn).
+    static constexpr std::uint32_t kRotateNorthWest = 0x1C, kRotateNorthEast = 0x1D, kRotateSouthWest = 0x1E, kRotateSouthEast = 0x1F;
 
     Cursors(const std::filesystem::path& install, ts2::content::UiData& ui);
     ~Cursors();

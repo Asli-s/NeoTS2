@@ -62,6 +62,47 @@ std::vector<Quat> worldTurns(const sg::ResourceNode& tree) {
     return out;
 }
 
+// Adds the lights of light rig `rig` (a model of light nodes) to `into`, with the light files'
+// settings over each light's own.
+void addRigLights(const sg::ResourceNode& rig, const std::vector<sg::LightResource>& rigLights, const content::Lighting& lighting,
+                  ObjectLighting& into) {
+    std::map<std::string, const sg::LightResource*> own;
+    for (const auto& l : rigLights) {
+        own.emplace(lowered(l.name), &l);
+    }
+    const auto turns = worldTurns(rig);
+    for (std::size_t i = 0; i < rig.nodes.size(); ++i) {
+        const auto& node = rig.nodes[i];
+        const std::string name = lowered(node.name);
+        const auto it = own.find(name);
+        if (node.kind != sg::SceneNode::Kind::LightRef || it == own.end()) {
+            continue;
+        }
+        // The game draws Create-A-Sim part pictures without their rig's light from below, for a reason not known yet.
+        if (name == "casthumb_z") {
+            continue;
+        }
+        const auto* attrs = lighting.light(node.name);
+        const float intensity = attrs && attrs->intensity ? *attrs->intensity : it->second->intensity;
+        const Vec color = attrs && attrs->color ? *attrs->color : it->second->color;
+        if (intensity <= 0) {
+            continue;
+        }
+        const Vec shine{color[0] * intensity, color[1] * intensity, color[2] * intensity};
+        if (it->second->kind == "cAmbientLight") {
+            for (int k = 0; k < 3; ++k) {
+                into.ambient[k] += shine[k];
+            }
+        } else if (it->second->kind == "cDirectionalLight") {
+            // A directional light shines along its node's -z, so toward it is +z.
+            ObjectLighting::Light light;
+            light.direction = turned(turns[i], {0, 0, 1});
+            light.color = shine;
+            into.lights.push_back(light);
+        }
+    }
+}
+
 } // namespace
 
 PictureAge pictureAge(std::uint32_t age) {
@@ -89,42 +130,7 @@ std::optional<PictureView> pictureView(const sg::ResourceNode& cameraNode, const
     v.nearPlane = camera->lens->nearPlane;
     v.farPlane = camera->lens->farPlane;
     v.lighting.thumbnailScale = kThumbnailScale;
-
-    std::map<std::string, const sg::LightResource*> own;
-    for (const auto& l : rigLights) {
-        own.emplace(lowered(l.name), &l);
-    }
-    const auto turns = worldTurns(rig);
-    for (std::size_t i = 0; i < rig.nodes.size(); ++i) {
-        const auto& node = rig.nodes[i];
-        const std::string name = lowered(node.name);
-        const auto it = own.find(name);
-        if (node.kind != sg::SceneNode::Kind::LightRef || it == own.end()) {
-            continue;
-        }
-        // The game draws the pictures without the rig's light from below, for a reason not known yet.
-        if (name == "casthumb_z") {
-            continue;
-        }
-        const auto* attrs = lighting.light(node.name);
-        const float intensity = attrs && attrs->intensity ? *attrs->intensity : it->second->intensity;
-        const Vec color = attrs && attrs->color ? *attrs->color : it->second->color;
-        if (intensity <= 0) {
-            continue;
-        }
-        const Vec shine{color[0] * intensity, color[1] * intensity, color[2] * intensity};
-        if (it->second->kind == "cAmbientLight") {
-            for (int k = 0; k < 3; ++k) {
-                v.lighting.ambient[k] += shine[k];
-            }
-        } else if (it->second->kind == "cDirectionalLight") {
-            // A directional light shines along its node's -z, so toward it is +z.
-            ObjectLighting::Light light;
-            light.direction = turned(turns[i], {0, 0, 1});
-            light.color = shine;
-            v.lighting.lights.push_back(light);
-        }
-    }
+    addRigLights(rig, rigLights, lighting, v.lighting);
     return v;
 }
 
@@ -199,6 +205,31 @@ Transform placeInModel(const sg::ResourceNode& tree, std::size_t node) {
     return place;
 }
 
+// Adds the lights an object picture gets to `into`: the "Thumbnails" light rig's four brightest, by the
+// length of their colour, brightest first. Its mirror glass shows the blue the game's mirror material
+// gives pictures. False when the rig can't be read.
+bool addObjectPictureLights(Assets& assets, ObjectLighting& into) {
+    constexpr std::size_t kPictureLights = 4;
+    constexpr std::array<float, 3> kPictureGlass{0.5f, 0.6f, 0.75f};
+    into.glassColor = kPictureGlass;
+    const auto rigData = assets.byName(kCres, "Thumbnails_cres");
+    if (!rigData) {
+        return false;
+    }
+    try {
+        const auto rig = sg::parseResourceNode(*rigData);
+        addRigLights(rig, rigLights(assets, rig), assets.lighting(), into);
+    } catch (const std::exception&) {
+        return false;
+    }
+    const auto strength = [](const ObjectLighting::Light& l) { return l.color[0] * l.color[0] + l.color[1] * l.color[1] + l.color[2] * l.color[2]; };
+    std::stable_sort(into.lights.begin(), into.lights.end(), [&](const auto& a, const auto& b) { return strength(a) > strength(b); });
+    if (into.lights.size() > kPictureLights) {
+        into.lights.resize(kPictureLights);
+    }
+    return true;
+}
+
 } // namespace
 
 std::optional<FamilyPictureStage> familyPictureStage(Assets& assets, const std::string& camera) {
@@ -228,6 +259,73 @@ std::optional<FamilyPictureStage> familyPictureStage(Assets& assets, const std::
             }
         }
         return out;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+std::optional<PictureView> objectPictureView(Assets& assets, std::array<float, 3> low, std::array<float, 3> high) {
+    // The game's thumbnail camera: 20 degrees from top to bottom.
+    constexpr float kFovY = 0.34906585f;
+    constexpr float kDegrees = 3.14159265f / 180;
+    constexpr float kYaw = -160 * kDegrees, kTilt = -30 * kDegrees;
+    // The camera never comes nearer than this, and its planes are this much in front of and beyond the box.
+    constexpr float kNearest = 0.01f, kNearShare = 0.8f, kFarShare = 1.2f;
+    if (!(low[0] <= high[0] && low[1] <= high[1] && low[2] <= high[2])) {
+        return std::nullopt;
+    }
+    PictureView v;
+    if (!addObjectPictureLights(assets, v.lighting)) {
+        return std::nullopt;
+    }
+    low[2] = std::max(low[2], 0.0f);
+    high[2] = std::max(high[2], low[2]);
+    const Vec size{high[0] - low[0], high[1] - low[1], high[2] - low[2]};
+    const Vec centre{low[0] + size[0] / 2, low[1] + size[1] / 2, low[2] + size[2] / 2};
+    // The width fits the picture, or the height when the object is taller than wide. The camera
+    // stands back that far plus half the box's depth.
+    const float fitted = size[0] / size[2] < 1 ? size[2] : size[0];
+    const float distance = std::max(fitted / (2 * std::tan(kFovY / 2)), kNearest);
+    const float back = size[1] / 2 + distance;
+    const Quat yaw{0, 0, std::sin(kYaw / 2), std::cos(kYaw / 2)};
+    const Quat tilt{std::sin(kTilt / 2), 0, 0, std::cos(kTilt / 2)};
+    // The camera looks along its own y, its z up.
+    const Quat turn = times(yaw, tilt);
+    const Vec ahead = turned(turn, {0, 1, 0});
+    v.target = centre;
+    v.eye = {centre[0] - ahead[0] * back, centre[1] - ahead[1] * back, centre[2] - ahead[2] * back};
+    v.up = turned(turn, {0, 0, 1});
+    v.fovY = kFovY;
+    v.nearPlane = distance * kNearShare;
+    v.farPlane = back * kFarShare;
+    return v;
+}
+
+std::optional<PictureView> objectPictureView(Assets& assets, const std::string& camera) {
+    const auto cameraData = assets.byName(kCres, camera);
+    if (!cameraData) {
+        return std::nullopt;
+    }
+    try {
+        const auto cameraNode = sg::parseResourceNode(*cameraData);
+        const auto lens = std::find_if(cameraNode.nodes.begin(), cameraNode.nodes.end(), [](const sg::SceneNode& n) { return n.lens.has_value(); });
+        if (lens == cameraNode.nodes.end()) {
+            return std::nullopt;
+        }
+        // The camera looks along its own y, its z up.
+        const Quat turn = worldTurns(cameraNode)[static_cast<std::size_t>(lens - cameraNode.nodes.begin())];
+        const Vec ahead = turned(turn, {0, 1, 0});
+        PictureView v;
+        v.eye = lens->translation;
+        v.target = {v.eye[0] + ahead[0], v.eye[1] + ahead[1], v.eye[2] + ahead[2]};
+        v.up = turned(turn, {0, 0, 1});
+        v.fovY = lens->lens->fovY;
+        v.nearPlane = lens->lens->nearPlane;
+        v.farPlane = lens->lens->farPlane;
+        if (!addObjectPictureLights(assets, v.lighting)) {
+            return std::nullopt;
+        }
+        return v;
     } catch (const std::exception&) {
         return std::nullopt;
     }

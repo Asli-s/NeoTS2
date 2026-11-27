@@ -25,4 +25,9 @@ std::optional<std::size_t> recolourRow(std::span<const std::string> rows, const 
 // object (a lamp's lit and unlit shades). A recolour the catalog lacks changes nothing.
 void applyChosenRecolours(const content::Lot& lot, CodeSource& code, World& world, const content::RecolourCatalog& catalog);
 
+// Puts every material of the recolour family of (`model`, `subset`, `material`) in `object`'s own
+// material names, as applyChosenRecolours does for a saved one. False when the catalog lacks it.
+bool applyRecolour(CodeSource& code, SimObject& object, const content::RecolourCatalog& catalog, const std::string& model,
+                   const std::string& subset, const std::string& material);
+
 } // namespace ts2::sim

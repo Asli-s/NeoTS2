@@ -3,6 +3,7 @@
 #include "content/ui_data.hpp"
 #include "ui/fonts.hpp"
 #include "ui/tip_layout.hpp"
+#include "ui/world_tip.hpp"
 
 #include <array>
 #include <cstdint>
@@ -53,6 +54,9 @@ public:
     void setEnabled(int window, bool enabled);  // a disabled button shows its disabled frame and can't be pressed
     void setChecked(int window, bool checked);  // a checked button shows its pressed frame
     bool checked(int window) const;
+    // Buttons in the same group (0 or more) act as one: the mouse over any of them lights them all,
+    // and a press on one let go over another clicks it. -1 takes the button out of its group.
+    void setButtonGroup(int window, int group);
     // Only the buttons of this window and the windows inside it respond to the mouse (-1: all).
     void setModal(int window) { modal_ = window; }
     int modal() const { return modal_; }
@@ -82,6 +86,8 @@ public:
     // Draws the window's image in nine pieces with corners `margin` pixels square, kept at their
     // size while the edges and middle stretch. 0 stretches the whole image again.
     void setImageMargin(int window, int margin);
+    // The window's image repeats across it from its top left, as a script's "blttype=tiled" asks.
+    void setTiled(int window, bool tiled);
     // Multiplies the window's image by a colour (its alpha fades it).
     void setImageColor(int window, const std::array<float, 4>& color);
     // Textures added or changed since the last call (a window's own picture or text keeps its
@@ -154,6 +160,11 @@ public:
     // away.
     void setSpotTip(const std::string& text);
     void moveSpotTip(int x, int y) { spotTip_.at = {x, y}; }
+    // The balloon the game shows over a spot of the lot for a short message (see WorldTipLayout):
+    // its text in the Default style, wrapped as a tooltip's, pointing at the spot set by
+    // moveWorldTip. Empty text takes it away.
+    void setWorldTip(const std::string& text);
+    void moveWorldTip(int x, int y);
     std::uint32_t id(int window) const;
     int parent(int window) const;
     // A window's top left on screen, in UI pixels.
@@ -188,6 +199,7 @@ private:
         std::array<int, 4> part{};       // part of the image stretched over the window (setImagePart), when set
         std::array<float, 4> imageColor{1, 1, 1, 1};
         bool edge = false;               // the image is stretched around its border (edgeimage)
+        bool tiled = false;              // the image repeats across the window from its top left (see setTiled)
         int edgeMargin = 0;              // the corners' size in pixels when set, a third of the image otherwise
         bool passive = false;            // shown only: the mouse goes through it to what is under it
         // How the window takes the mouse. A disabled window or one with winflag_ignoremouse lets it
@@ -206,6 +218,7 @@ private:
         bool autosize = false;           // a button sized to its caption (autosize)
         bool checkBox = false;           // a check box or radio button (style=checkbox, radiobtn or radiocheck)
         bool radioCheck = false;         // a radio button drawn from an 8-frame picture (style=radiocheck)
+        int group = -1;                  // see setButtonGroup
         std::string text, font;
         std::uint32_t clickSound = 0;  // btnclicksnd's track id
         HAlign hAlign = HAlign::Left;  // the text's place in the window (align)
@@ -269,6 +282,13 @@ private:
     // Lines of `text` wrapped in `style` as the game measures a tip's text: 240 pixels wide, wider
     // by 10 at a time while the lines are taller than 500. Gives the widest line as measured.
     std::vector<std::string> tipLines(const std::string& text, const FontStyle& style, int& widest);
+    // Drawn lines put in one image, each with its baseline below the text area's top. `above` is how
+    // far a glyph reaches above that top, where the image starts.
+    struct PlacedLine {
+        TextImage text;
+        int baseline = 0;
+    };
+    static tga::Pixels stackLines(const std::vector<PlacedLine>& placed, int& above);
     // A tip's frame, w by h at (x, y), and its text image with its baseline at `baselineY`. The frame
     // is a dark blue border and a see-through beige inside on all but its last 2 columns and 3 rows,
     // which hold a soft shadow.
@@ -292,6 +312,8 @@ private:
     std::array<int, 2> origin(int window) const;
     bool shown(int window) const;
     bool inside(int window, int root) const;
+    // Whether button `window` is `other` or in its group.
+    bool sameButton(int window, int other) const;
     void emit(int window, std::vector<Quad>& out) const;
     static void clip(std::vector<Quad>& quads, std::size_t start, float x0, float y0, float x1, float y1);
 
@@ -312,6 +334,14 @@ private:
         int image = -1, width = 0, baseline = 0;
         std::array<int, 2> at{0, 0};
     } spotTip_;
+    struct WorldTip {
+        std::string text;
+        int textImage = -1, textWidth = 0, textHeight = 0, above = 0, image = -1;
+        std::array<int, 2> at{0, 0};
+        WorldTipLayout layout;
+    } worldTip_;
+    std::optional<tga::Pixels> worldTipCells_;  // the balloon's cell picture, read on first use
+    void layWorldTip();
     double hoverSince_ = 0;
     int tipPopup_ = -1;  // the hovered window's tip popup, while one is loaded
     int white_ = -1;          // a white texture for plain colors

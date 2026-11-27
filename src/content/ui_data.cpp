@@ -93,19 +93,23 @@ UiData::UiData(const fs::path& install) {
             if (fs::exists(ui)) {
                 index_.addPackage(ui);
             }
-            const fs::path text = *res / "Text";
-            if (!fs::is_directory(text)) {
-                continue;
-            }
-            std::vector<fs::path> packages;
-            for (const auto& item : fs::directory_iterator(text)) {
-                if (item.is_regular_file() && lower(utf8(item.path().extension())) == ".package") {
-                    packages.push_back(item.path());
+            // A stuff pack keeps some text tables in StuffPack/Text, such as Kitchen & Bath's Build
+            // table 310. Which copy the game reads where both folders hold a table is not known yet,
+            // and the Text folder's is kept.
+            for (const fs::path& text : {*res / "StuffPack" / "Text", *res / "Text"}) {
+                if (!fs::is_directory(text)) {
+                    continue;
                 }
-            }
-            std::sort(packages.begin(), packages.end());
-            for (const auto& p : packages) {
-                index_.addPackage(p, hash::groupId(utf8(p.stem())));
+                std::vector<fs::path> packages;
+                for (const auto& item : fs::directory_iterator(text)) {
+                    if (item.is_regular_file() && lower(utf8(item.path().extension())) == ".package") {
+                        packages.push_back(item.path());
+                    }
+                }
+                std::sort(packages.begin(), packages.end());
+                for (const auto& p : packages) {
+                    index_.addPackage(p, hash::groupId(utf8(p.stem())));
+                }
             }
         }
     }

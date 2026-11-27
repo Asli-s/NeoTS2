@@ -351,6 +351,27 @@ void marginedImagesKeepTheirCorners() {
     CHECK(rig.screen.quads().size() == 1);
 }
 
+// A tiled picture repeats from the window's top left, the last copies cut at the right and bottom,
+// as the Buy panel's strip middle is drawn.
+void tiledImagesRepeat() {
+    Rig rig("Button = \"NeoTS2 Test\", \"20\", \"bold\"\n");
+    ts2::ui::Window window{{{"iid", "IGZWinGen"}, {"paint", "yes"}, {"winflag_visible", "yes"}, {"area", "(0,0,50,30)"}}, {}};
+    const int strip = rig.screen.addWindows({window}, 0, 0);
+    ts2::tga::Pixels tile;
+    tile.width = 21;
+    tile.height = 30;
+    tile.rgba.assign(21 * 30 * 4, 255);
+    rig.screen.setImage(strip, tile);
+    rig.screen.setTiled(strip, true);
+    const auto quads = rig.screen.quads();
+    CHECK(quads.size() == 3);
+    if (quads.size() != 3) {
+        return;
+    }
+    CHECK(quads[0].x0 == 0 && quads[0].x1 == 21 && quads[0].u1 == 1);
+    CHECK(quads[2].x0 == 42 && quads[2].x1 == 50 && std::abs(quads[2].u1 * 21 - 8) < 1e-4f && quads[2].v1 == 1);
+}
+
 } // namespace
 
 std::vector<Test> textLayoutTests() {
@@ -366,6 +387,7 @@ std::vector<Test> textLayoutTests() {
         {"the mouse goes to the window on top", theMouseGoesToTheWindowOnTop},
         {"detached windows keep their place", detachedWindowsKeepTheirPlace},
         {"margined images keep their corners", marginedImagesKeepTheirCorners},
+        {"tiled images repeat", tiledImagesRepeat},
         {"windows keep the mouse as in the game", windowsKeepTheMouseAsInTheGame},
         {"see-through windows let the mouse through", seeThroughWindowsLetTheMouseThrough},
     };

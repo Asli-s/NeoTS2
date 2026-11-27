@@ -11,6 +11,7 @@
 #include "formats/objd.hpp"
 #include "formats/propset.hpp"
 #include "formats/resource_types.hpp"
+#include "formats/scenegraph.hpp"
 #include "formats/slot.hpp"
 #include "formats/str.hpp"
 #include "scene/normal_map.hpp"
@@ -20,6 +21,7 @@
 #include <algorithm>
 #include <fstream>
 #include <cctype>
+#include <cstdlib>
 #include <stdexcept>
 
 namespace fs = std::filesystem;
@@ -30,6 +32,7 @@ namespace ts2::scene {
 namespace {
 constexpr std::uint32_t kTxmt = 0x49596978;
 constexpr std::uint32_t kTxtr = 0x1C4A276C;
+constexpr std::uint32_t kCres = 0xE519C933, kShpe = 0xFC6EB1F7, kGmnd = 0x7BA3838C;
 constexpr std::uint32_t kLifo = 0xED534136;
 constexpr std::uint32_t kPatternProperties = 0xCCA8E925;
 constexpr std::uint32_t kFenceProperties = 0x2CB230B8;
@@ -72,6 +75,11 @@ Assets::Assets(const fs::path& install) : scripts_(content::loadBuildScripts(con
         if (in.gcount() < kMostIniBytes) {
             text.resize(static_cast<std::size_t>(in.gcount()));
             waterAlphaCurve_ = terrainwater::readAlphaCurve(text);
+        }
+    }
+    for (const auto& product : products) {
+        for (const auto& bundle : product.objectBundles) {
+            readBundleMaterialNames(bundle);
         }
     }
     std::set<fs::path> catalogFolders;
@@ -248,8 +256,10 @@ std::optional<std::vector<std::uint8_t>> Assets::byKey(const sg::Link& link) {
         }
     }
     if (r == nullptr) {
-        // A character group's looks (an NPC's age data, outfit parts and models) are in the object packages.
-        if (const auto* own = characterGroup_ == key.group ? objects_.find(key) : nullptr) {
+        // The object packages hold the rest: a character group's looks (an NPC's age data, outfit
+        // parts and models), and the models of objects that keep their own, as the Holiday packs'
+        // catalog bundles do.
+        if (const auto* own = objects_.find(key)) {
             return objects_.read(*own);
         }
         return std::nullopt;
@@ -602,6 +612,108 @@ std::string Assets::patternMaterial(const std::string& name, bool wall) const {
     return (wall ? "wall_" : "floor_") + name;
 }
 
+std::optional<Image> Assets::patternTexture(const std::string& name, bool wall) {
+    const auto data = byName(kTxmt, patternMaterial(name, wall) + "_txmt");
+    if (!data) {
+        return std::nullopt;
+    }
+    try {
+        const auto m = sg::parseMaterial(*data);
+        const auto it = m.properties.find("stdMatBaseTextureName");
+        return it != m.properties.end() && !it->second.empty() ? texture(it->second) : std::nullopt;
+    } catch (const std::exception& ex) {
+        diag::warnOnce(std::string("catalog: a covering material that can't be read gets no picture: ") + ex.what());
+        return std::nullopt;
+    }
+}
+
+std::vector<Assets::DesignSubset> Assets::designSubsets(const std::string& model) {
+    constexpr std::size_t kMostSubsets = 2, kMostNodes = 256;
+    std::vector<DesignSubset> out;
+    const auto cres = byName(kCres, model + "_cres");
+    if (!cres) {
+        return out;
+    }
+    const auto same = [](const std::string& a, const std::string& b) { return lower(a) == lower(b); };
+    try {
+        const auto tree = sg::parseResourceNode(*cres);
+        // The shape references in the tree's order, from the root down.
+        std::vector<std::uint32_t> order;
+        std::vector<std::uint32_t> stack{0};
+        std::set<std::uint32_t> seen;
+        while (!stack.empty() && order.size() < kMostNodes) {
+            const std::uint32_t at = stack.back();
+            stack.pop_back();
+            if (at >= tree.nodes.size() || !seen.insert(at).second) {
+                continue;
+            }
+            order.push_back(at);
+            const auto& children = tree.nodes[at].children;
+            stack.insert(stack.end(), children.rbegin(), children.rend());
+        }
+        for (const std::uint32_t at : order) {
+            const auto& node = tree.nodes[at];
+            if (node.kind != sg::SceneNode::Kind::ShapeRef) {
+                continue;
+            }
+            for (const auto l : node.shapeLinks) {
+                if (l >= tree.container.links.size() || tree.container.links[l].type != kShpe) {
+                    continue;
+                }
+                const auto shpe = byKey(tree.container.links[l]);
+                if (!shpe) {
+                    continue;
+                }
+                const auto shape = sg::parseShape(*shpe);
+                for (std::size_t item = 0; item < shape.geometryNodes.size(); ++item) {
+                    const auto linked = item < shape.geometryLinks.size() ? shape.geometryLinks[item] : std::nullopt;
+                    const auto gmnd = !linked ? byName(kGmnd, shape.geometryNodes[item])
+                                              : *linked < shape.container.links.size() ? byKey(shape.container.links[*linked]) : std::nullopt;
+                    if (!gmnd) {
+                        continue;
+                    }
+                    const auto lists = sg::parseDataLists(*gmnd);
+                    const sg::DataValue* enabled = nullptr;
+                    const sg::DataValue* meshes = nullptr;
+                    for (const auto& list : lists) {
+                        if (list.name == "tsDesignModeEnabled") {
+                            enabled = &list;
+                        } else if (list.name == "tsMaterialsMeshName") {
+                            meshes = &list;
+                        }
+                    }
+                    if (enabled == nullptr) {
+                        continue;
+                    }
+                    for (const auto& item2 : enabled->items) {
+                        const std::string& subset = item2.name;
+                        if (subset.empty() || lower(subset).find("shadow") != std::string::npos ||
+                            std::any_of(out.begin(), out.end(), [&](const DesignSubset& d) { return same(d.subset, subset); })) {
+                            continue;
+                        }
+                        std::string mesh;
+                        if (meshes != nullptr) {
+                            for (const auto& m : meshes->items) {
+                                if (same(m.name, subset) && !m.text.empty()) {
+                                    mesh = lower(m.text).ends_with("_cres") ? m.text : m.text + "_cres";
+                                    break;
+                                }
+                            }
+                        }
+                        out.push_back({subset, std::move(mesh)});
+                        if (out.size() == kMostSubsets) {
+                            return out;
+                        }
+                    }
+                }
+            }
+        }
+    } catch (const std::exception& ex) {
+        diag::warnOnce(std::string("design: a model that can't be read has no recolourable parts: ") + ex.what());
+    }
+    return out;
+}
+
 const Assets::Fence* Assets::fence(std::uint32_t guid) const {
     const auto it = fences_.find(guid);
     return it != fences_.end() ? &it->second : nullptr;
@@ -627,6 +739,37 @@ void Assets::readMaterialNames(const fs::path& path) {
     }
 }
 
+void Assets::readBundleMaterialNames(const fs::path& path) {
+    // The Holiday bundles hold a few hundred small materials.
+    constexpr std::size_t kMostMaterialBytes = 1 << 20;
+    try {
+        dbpf::Package package{path};
+        for (const auto& e : package.entries()) {
+            if (e.key.type != kTxmt) {
+                continue;
+            }
+            try {
+                const auto data = package.read(e);
+                if (data.size() > kMostMaterialBytes) {
+                    continue;
+                }
+                std::string name = sg::parseMaterial(data).name;
+                // A name may start with its group, as "##0x1c0532fa!".
+                if (const auto bang = name.find('!'); name.starts_with("##") && bang != std::string::npos) {
+                    name.erase(0, bang + 1);
+                }
+                if (!name.empty()) {
+                    materialNames_.push_back(std::move(name));
+                }
+            } catch (const std::exception& ex) {
+                warnings.push_back("material in " + path.string() + ": " + ex.what());
+            }
+        }
+    } catch (const std::exception& ex) {
+        warnings.push_back("catalog bundle " + path.string() + ": " + ex.what());
+    }
+}
+
 void Assets::readCatalog() {
     for (const auto& [id, p] : scripts_.roofPatterns) {
         roofPatterns_[id] = {p.top, p.under, p.edges, p.trim};
@@ -645,7 +788,14 @@ void Assets::readCatalog() {
             }
             const auto id = *parsed;
             if (type == kFenceProperties) {
-                fences_[id] = {p["rail"], p["diagrail"], p["post"], p["maywalkover"] == "1", p["ishalfwall"] == "1"};
+                // A fence without the setting has a spacing of 1.
+                const auto key = p.find("posttilespacing");
+                const auto spacing = key == p.end() ? std::optional<std::uint32_t>(1) : number(key->second, 10);
+                // Set as a number, decimal or 0x hex, or as "true", as the fence lists read it.
+                const std::string& g = p["isgreenhouse"];
+                const bool greenhouse = g == "true" || std::strtoull(g.c_str(), nullptr, g.starts_with("0x") ? 16 : 10) != 0;
+                fences_[id] = {p["rail"], p["diagrail"], p["post"], p["maywalkover"] == "1", p["ishalfwall"] == "1", p["bearsload"] == "1",
+                               greenhouse, p["post"].empty() || !spacing ? 0 : static_cast<int>(*spacing)};
             } else if (type == kRoofProperties) {
                 roofPatterns_[id] = {p["texturetop"], p["textureunder"], p["textureedges"], p["texturetrim"]};
             } else if (const auto material = p.find("material"); material != p.end()) {

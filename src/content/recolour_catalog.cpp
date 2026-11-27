@@ -27,15 +27,39 @@ std::string value(const std::map<std::string, std::string>& set, const char* key
     return it != set.end() ? it->second : std::string{};
 }
 
+std::uint32_t number(const std::map<std::string, std::string>& set, const char* key) {
+    try {
+        return static_cast<std::uint32_t>(std::stoul(value(set, key), nullptr, 0));
+    } catch (const std::exception&) {
+        return 0;
+    }
+}
+
+// A true-or-false property, which the files keep as a bool or a number.
+bool flag(const std::map<std::string, std::string>& set, const char* key) {
+    return value(set, key) == "true" || number(set, key) != 0;
+}
+
+// A model name without its "_cres" ending, lowercase.
+std::string bareModel(const std::string& model) {
+    std::string m = lower(model);
+    constexpr std::string_view kCres = "_cres";
+    if (m.size() > kCres.size() && m.ends_with(kCres)) {
+        m.resize(m.size() - kCres.size());
+    }
+    return m;
+}
+
 } // namespace
 
 void RecolourCatalog::add(RecolourMaterial material) {
-    byModel_[lower(material.model)].push_back(materials_.size());
+    byModel_[bareModel(material.model)].push_back(materials_.size());
+    byGuid_[material.objectGuid].push_back(materials_.size());
     materials_.push_back(std::move(material));
 }
 
 const RecolourMaterial* RecolourCatalog::find(const std::string& model, const std::string& subset, const std::string& name) const {
-    const auto it = byModel_.find(lower(model));
+    const auto it = byModel_.find(bareModel(model));
     if (it == byModel_.end()) {
         return nullptr;
     }
@@ -50,7 +74,7 @@ const RecolourMaterial* RecolourCatalog::find(const std::string& model, const st
 
 std::vector<const RecolourMaterial*> RecolourCatalog::family(const std::string& model, const std::string& family) const {
     std::vector<const RecolourMaterial*> out;
-    const auto it = byModel_.find(lower(model));
+    const auto it = byModel_.find(bareModel(model));
     if (it == byModel_.end()) {
         return out;
     }
@@ -63,9 +87,65 @@ std::vector<const RecolourMaterial*> RecolourCatalog::family(const std::string& 
     return out;
 }
 
+std::vector<const RecolourMaterial*> RecolourCatalog::materials(const std::string& model) const {
+    std::vector<const RecolourMaterial*> out;
+    if (const auto it = byModel_.find(bareModel(model)); it != byModel_.end()) {
+        for (const std::size_t i : it->second) {
+            out.push_back(&materials_[i]);
+        }
+    }
+    return out;
+}
+
+std::vector<const RecolourMaterial*> RecolourCatalog::materialsOf(std::uint32_t guid) const {
+    std::vector<const RecolourMaterial*> out;
+    if (guid == 0) {
+        for (const auto& m : materials_) {
+            out.push_back(&m);
+        }
+    } else if (const auto it = byGuid_.find(guid); it != byGuid_.end()) {
+        for (const std::size_t i : it->second) {
+            out.push_back(&materials_[i]);
+        }
+    }
+    return out;
+}
+
+std::vector<RecolourStrip> recolourStrips(const RecolourCatalog& catalog, std::span<const DesignSubset> subsets) {
+    std::vector<RecolourStrip> strips;
+    for (const auto& s : subsets) {
+        const std::string subset = lower(s.subset);
+        auto all = s.mesh.empty() ? catalog.materialsOf(s.guid) : catalog.materials(s.mesh);
+        std::erase_if(all, [&](const RecolourMaterial* m) { return lower(m->subset) != subset; });
+        if (all.empty()) {
+            continue;
+        }
+        std::stable_sort(all.begin(), all.end(), [](const auto* a, const auto* b) { return a->instance < b->instance; });
+        RecolourStrip strip{subset, {}, 0};
+        for (const RecolourMaterial* m : all) {
+            auto choice = std::find_if(strip.choices.begin(), strip.choices.end(), [&](const auto& c) { return c.family == m->family; });
+            if (choice == strip.choices.end()) {
+                strip.choices.push_back({m->model, m->subset, m->name, m->family});
+                choice = strip.choices.end() - 1;
+            } else if (m->stateFlags == 0) {
+                // The family's material of the usual state stands for it.
+                const auto* first = catalog.find(choice->model, choice->subset, choice->material);
+                if (first == nullptr || first->stateFlags != 0) {
+                    *choice = {m->model, m->subset, m->name, m->family};
+                }
+            }
+            if (m->isDefault) {
+                strip.chosen = static_cast<std::size_t>(choice - strip.choices.begin());
+            }
+        }
+        strips.push_back(std::move(strip));
+    }
+    return strips;
+}
+
 RecolourCatalog loadRecolourCatalog(const std::vector<Product>& products) {
     RecolourCatalog catalog;
-    std::set<std::tuple<std::string, std::string, std::string, std::string>> seen;
+    std::set<std::tuple<std::string, std::string, std::string, std::string, std::uint32_t>> seen;
     std::set<fs::path> folders;
     for (const auto& objects : objectLoadOrder(products)) {
         const fs::path folder = objects.parent_path().parent_path() / "Catalog" / "Materials";
@@ -88,11 +168,13 @@ RecolourCatalog loadRecolourCatalog(const std::vector<Product>& products) {
                         continue;
                     }
                     const auto set = propset::parse(package.read(e));
-                    RecolourMaterial m{value(set, "modelName"), value(set, "subsetName"), value(set, "name"), lower(value(set, "family"))};
+                    RecolourMaterial m{value(set, "modelName"), value(set, "subsetName"), value(set, "name"), lower(value(set, "family")),
+                                       e.key.instance, number(set, "materialStateFlags"), flag(set, "defaultMaterial"),
+                                       number(set, "objectGUID")};
                     if (m.model.empty() || m.name.empty() || m.family.empty()) {
                         continue;
                     }
-                    if (seen.emplace(lower(m.model), lower(m.subset), lower(m.name), m.family).second) {
+                    if (seen.emplace(lower(m.model), lower(m.subset), lower(m.name), m.family, m.objectGuid).second) {
                         catalog.add(std::move(m));
                     }
                 }

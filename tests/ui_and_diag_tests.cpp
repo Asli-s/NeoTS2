@@ -2,11 +2,13 @@
 #include "test_support.hpp"
 
 #include "../app/click_gate.hpp"
+#include "../app/placement_errors.hpp"
 
 #include "ui/animated_bitmap.hpp"
 #include "ui/drag_arrow.hpp"
 #include "ui/scroll_bar.hpp"
 #include "ui/tip_layout.hpp"
+#include "ui/world_tip.hpp"
 
 namespace {
 
@@ -27,6 +29,52 @@ void tipsArePlacedAsTheGame() {
     CHECK(is(placeTip(1200, 500, 120, 23, world, 28), 1140, 449, 120, 23));
     CHECK(is(placeTip(30, 500, 120, 23, world, 28), 8, 449, 120, 23));
     CHECK(is(placeTip(1200, 40, 120, 23, world, 28), 1140, 68, 120, 23));  // near the top: below
+}
+
+// The balloon over a spot of the lot goes above its spot, below it near the top, left of it at the
+// right edge and right of it near the left edge. The text is 145 by 11 on a 1697 by 902 screen.
+void worldTipsAreLaidOutAsTheGame() {
+    using ts2::ui::layoutWorldTip;
+    const std::array<int, 4> bounds{8, 8, 1681, 886};
+    const auto above = layoutWorldTip(780, 468, 145, 11, bounds, 16);
+    CHECK(above.side == 1 && above.window == (std::array<int, 4>{698, 416, 863, 464}) && above.box == (std::array<int, 4>{698, 416, 863, 440}) &&
+          above.arrow == (std::array<int, 4>{772, 432, 788, 464}) && above.textX == 12 && above.textY == 6);
+    const auto edge = layoutWorldTip(1664, 80, 145, 11, bounds, 16);
+    CHECK(edge.side == 1 && edge.box == (std::array<int, 4>{1516, 28, 1681, 52}) && edge.arrow == (std::array<int, 4>{1649, 44, 1665, 76}));
+    const auto below = layoutWorldTip(0, 0, 145, 11, bounds, 16);
+    CHECK(below.side == 3 && below.window == (std::array<int, 4>{8, 4, 173, 52}) && below.box == (std::array<int, 4>{8, 28, 173, 52}) &&
+          below.arrow == (std::array<int, 4>{24, 4, 40, 36}) && below.textY == 30);
+    const auto left = layoutWorldTip(1669, 80, 145, 11, bounds, 16);
+    CHECK(left.side == 0 && left.window == (std::array<int, 4>{1476, 64, 1665, 96}) && left.box == (std::array<int, 4>{1476, 64, 1641, 96}) &&
+          left.arrow == (std::array<int, 4>{1633, 72, 1665, 88}) && left.textX == 12 && left.textY == 10);
+    const auto right = layoutWorldTip(15, 400, 145, 11, bounds, 16);
+    CHECK(right.side == 2 && right.box[0] == 43 && right.arrow == (std::array<int, 4>{19, 392, 51, 408}));
+    // The window's picture is its size, with the arrow's tip cell copied in.
+    ts2::ui::WorldTipLayout small = above;
+    ts2::tga::Pixels sheet{80, 80, std::vector<std::uint8_t>(80 * 80 * 4, 0)};
+    sheet.rgba[(static_cast<std::size_t>(63) * 80 + 72) * 4 + 3] = 200;  // in the down arrow's lower cell
+    const auto drawn = ts2::ui::drawWorldTip(sheet, small);
+    CHECK(drawn.width == 165 && drawn.height == 48);
+    CHECK(drawn.rgba[(static_cast<std::size_t>(16 + 31) * 165 + 74 + 8) * 4 + 3] == 200);
+}
+
+// Placement error codes give their line of the placement error strings, and the codes about where an
+// object may stand give its own list.
+void placementErrorsReadAsTheGame() {
+    const auto text = [](std::uint32_t table, std::uint32_t line) -> std::string {
+        if (table == 0x89 && line == 0x5B) return "Must place in one of these places:";
+        if (table == 0x89 && line == 0x5C) return "\r   * ";
+        if (table == 0xAD && line == 1) return "on terrain";
+        if (table == 0xAD && line == 2) return "on floor";
+        if (table == 0xAE && line == 0x0A) return "Must place on counter";
+        return std::to_string(table) + ":" + std::to_string(line);
+    };
+    CHECK(app::placementErrorText(text, 0x8F, 0x0001, 0x0003) == "Must place in one of these places:\r   * on floor\r   * on terrain");
+    CHECK(app::placementErrorText(text, 0x19, 0x0008, 0x0003) == "Must place on counter");  // data 4 without the floor bit: one surface
+    CHECK(app::placementErrorText(text, 0x0C, 0, 0) == "137:11");                           // Can't intersect other objects
+    CHECK(app::placementErrorText(text, 0x08, 0, 0) == "137:7");                            // Can't intersect wall
+    CHECK(app::placementErrorText(text, 0x7C, 0, 0).empty());
+    CHECK(app::placementErrorLine(0x05) == 1 && app::placementErrorLine(0x9A) == 0x69 && app::placementErrorLine(0x26) == 0x25);
 }
 
 // A tip's text is taken apart as the game takes it: the Fitness tip names its popup script, five
@@ -576,6 +624,8 @@ std::vector<Test> uiAndDiagTests() {
         {"clicks are dropped while loading", clicksAreDroppedWhileLoading},
         {"pie pages hold eleven and More", piePagesHoldElevenAndMore},
         {"tips are placed as the game", tipsArePlacedAsTheGame},
+        {"world tips are laid out as the game", worldTipsAreLaidOutAsTheGame},
+        {"placement errors read as the game", placementErrorsReadAsTheGame},
         {"tip texts split as the game", tipTextsSplitAsTheGame},
         {"type 1 lines as the game measures", typeOneLinesAsTheGameMeasures},
         {"ui scripts parse", uiScriptsParse},

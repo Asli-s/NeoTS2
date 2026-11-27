@@ -25,6 +25,16 @@ constexpr std::pair<std::uint32_t, const char*> kNames[] = {
     {Cursors::kLiveObjectAvailable, "liveobjectavail"},
     {Cursors::kLiveObjectUnavailable, "liveobjectunavail"},
     {Cursors::kSimsRotate, "simsrotate"},
+    {Cursors::kHandOpen, "simsmove"},
+    {Cursors::kHandHolding, "simsplace"},
+    {Cursors::kDesignTool, "designTool"},
+    {Cursors::kEyedropper, "eyedropperTool"},
+    {Cursors::kSledgehammer, "Sledgehammer"},
+    {Cursors::kDelete, "simsdelete"},
+    {Cursors::kRotateNorthWest, "simsrotatenw"},
+    {Cursors::kRotateNorthEast, "simsrotatene"},
+    {Cursors::kRotateSouthWest, "simsrotatesw"},
+    {Cursors::kRotateSouthEast, "simsrotatese"},
 };
 
 // The game's cursor setting picks the "_8" files (its default, on) or the "_1" ones. Each name is

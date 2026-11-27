@@ -133,6 +133,17 @@ public:
     // The material a lot's floor or wall pattern name shows: a built-in pattern from the catalog
     // scripts, or a catalog pattern by its GUID in hex.
     std::string patternMaterial(const std::string& name, bool wall) const;
+    // That material's base texture (stdMatBaseTextureName), largest level. Empty when it is missing.
+    [[nodiscard]] std::optional<Image> patternTexture(const std::string& name, bool wall);
+
+    // The subsets of model `model` (without "_cres") the Design tool recolours, at most two: in the
+    // order its shapes' geometry nodes list them in their "tsDesignModeEnabled" lists, each once, none
+    // with "shadow" in its name. Each comes with the model its recolours are filed under, the node's
+    // "tsMaterialsMeshName" for that subset with "_cres", empty when the node names none.
+    struct DesignSubset {
+        std::string subset, mesh;
+    };
+    [[nodiscard]] std::vector<DesignSubset> designSubsets(const std::string& model);
 
     // A fence's models: one tile of rail along +x, the same diagonally (1.41 long), and a post, and
     // whether Sims may walk over it (flowerbed edging). A half wall (XFNC ishalfwall) also has a
@@ -141,6 +152,11 @@ public:
         std::string rail, diagonalRail, post;
         bool mayWalkOver = false;
         bool halfWall = false;
+        bool bearsLoad = false;  // XFNC bearsload: its posts hold up a floor on the storey above
+        bool greenhouse = false;  // XFNC isgreenhouse: never built diagonally
+        // XFNC posttilespacing: a post at every so many corners along a run, 0 for none between its
+        // ends or with no post model. 1 when the fence lacks the setting.
+        int postSpacing = 0;
     };
     const Fence* fence(std::uint32_t guid) const;
 
@@ -158,6 +174,8 @@ public:
 private:
     std::atomic<bool> realisticSky_ = false;
     void readMaterialNames(const std::filesystem::path& path);
+    // The material names of a catalog bundle, which has no name map: each material's own name.
+    void readBundleMaterialNames(const std::filesystem::path& path);
     void readCatalog();
 
     content::ResourceIndex models_;    // Res/Sims3D and Res/3D packages
